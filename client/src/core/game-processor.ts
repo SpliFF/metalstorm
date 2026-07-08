@@ -16,13 +16,13 @@
  */
 
 import { Engine, Scene, FreeCamera, Vector3, Color3, Color4, Mesh, MeshBuilder, StandardMaterial } from '@babylonjs/core';
-import type { GpInitToWorker, GpMinimapBlips, GpMinimapLos } from './game-worker-protocol.js';
+import type { GpInitToWorker, GpMinimapBlips, GpMinimapLos, BuildMenuTile } from './game-worker-protocol.js';
 // GW4-c2: the WebTransport game connection now lives in the worker. Connection
 // is host-agnostic (runs on WebTransportAdapter, no DOM refs after the
 // onServerRestart callback was extracted) so it imports + runs here unchanged.
 import { Connection } from './connection.js';
 import type { CombatEventInfo, FeatureSpawnInfo,
-    SoundEventInfo, SoundRefInfo, ResourceUpdateInfo } from './connection.js';
+    SoundEventInfo, SoundRefInfo, ResourceUpdateInfo, UnitCmdDescsInfo } from './connection.js';
 import { AudioChannel } from './audio.js';
 import type { EntityStateSnapshot } from './entity-state.js';
 // GW4-c3: terrain + lighting + map parse move into the worker so terrain
@@ -92,6 +92,8 @@ import { attachDecalOverlay } from './decal-overlay-plugin.js';
 import { renderMapFeatures, DynamicFeatureRenderer } from './feature-renderer.js';
 import { RTSCamera } from './rts-camera.js';
 import { WorkerSelection } from './worker-selection.js';
+import { WorkerBuildPlacement } from './worker-build-placement.js';
+import { findMetalSpots, type MetalSpot } from './metal-spots.js';
 import { resolveSoundRef, pickUnitDefSound,
     type ResolvedSoundEvent } from './sound-events.js';
 import { CommandPathRenderer } from './command-path-renderer.js';
@@ -161,6 +163,27 @@ let gpDpr = 1;
 let gpCommandPathRenderer: CommandPathRenderer | null = null;
 let gpWaypointMarkerRenderer: WaypointMarkerRenderer | null = null;
 let gpStandingOrderRenderer: StandingOrderRenderer | null = null;
+/// PLAN-playable.md G3a: worker-side build placement (ghost + snap + order).
+/// Built in gpInit alongside WorkerSelection; armed by the native BuildMenu via
+/// gp:startBuildPlacement. Pointer handlers route left-clicks here before
+/// selection when it is active.
+let gpBuildPlacement: WorkerBuildPlacement | null = null;
+/// G3a: per-unit command descriptions (UnitCmdDescsUpdate, ~1 Hz, selection-
+/// scoped). Cached so the buildable-tile set can be recomputed on selection
+/// change without waiting for the next broadcast. Also mirrored into
+/// liveState.unitCmdDescs (the LuaUI consumer this connection event fed pre-GW4).
+const gpUnitCmdDescs = new Map<number, UnitCmdDescsInfo>();
+/// G3a: metal-spot centroids (in world elmos), computed once from the parsed
+/// map data in gpLoadMap and consumed by the mex build-ghost snap.
+let gpMetalSpots: MetalSpot[] = [];
+/// World elmos per metalmap cell (scales the mex snap search radius). Spring's
+/// metalmap is half the heightmap resolution → 2 × squareSize.
+let gpMetalCellSize = 16;
+/// G3a: resolved build-menu tiles for the current selection, posted to main's
+/// native BuildMenu via gp:sceneState.buildOptions. Dirty-gated so the tile
+/// array only ships when the buildable set actually changed.
+let gpBuildTiles: BuildMenuTile[] = [];
+let gpBuildTilesDirty = false;
 /// Latest command-queue snapshot (UnitCommandQueuesUpdate, ~1 Hz), cached so a
 /// selection change can re-render the path/waypoint overlays immediately rather
 /// than waiting for the next broadcast.
@@ -323,6 +346,15 @@ async function gpLoadMap(msg: GpInitToWorker): Promise<void> {
     if (!gpScene) return;  // shutdown raced the fetch
     gpMapData = map;
     postLog(1, `[gp] MapData received: ${map.mapx}x${map.mapy}, ${map.features.length} features`);
+
+    // PLAN-playable.md G3a: pre-compute metal-spot centroids for the build-ghost
+    // mex snap. Spring's metalmap is half the heightmap resolution: each cell
+    // covers 2 heightmap squares = 2 × squareSize elmos. Ports input-manager
+    // setMapData() verbatim.
+    gpMetalCellSize = (map.squareSize ?? 8) * 2;
+    gpMetalSpots = findMetalSpots(
+        map.metalmap, (map.mapx / 2) | 0, (map.mapy / 2) | 0, gpMetalCellSize);
+    postLog(1, `[gp] ${gpMetalSpots.length} metal spots discovered`);
 
     // `mapSourceUrl` is lobby-relative; lobbyUrl='' resolves it against the
     // worker (page) origin, same as fetchMapDataHttp's `/api/*` paths.
@@ -718,6 +750,36 @@ function gpConnect(msg: GpInitToWorker): void {
             const sel = gpCtx.selection?.selection ?? [];
             gpCommandPathRenderer?.update(queues, sel);
             gpWaypointMarkerRenderer?.update(queues, sel);
+        },
+        // PLAN-playable.md G3a: selection-scoped command descriptions (~1 Hz).
+        // GW4-regression fix (U3/onResourceUpdate-class): pre-GW4 the main-thread
+        // lua-widget-manager fed liveState.unitCmdDescs + the native build menu
+        // via a worker `unitCmdDescs` message; post-GW4 the connection moved INTO
+        // this worker and LuaWidgetManager isn't instantiated, so this connection
+        // event had NO consumer — the native build menu never populated and
+        // LuaUI's Spring.Get*CmdDesc* read empty. Restore both consumers: (1)
+        // cache for the native BuildMenu tile recompute; (2) mirror into
+        // liveState.unitCmdDescs (+ dispatchCommandsChanged) for LuaUI, exactly
+        // as the dead legacy `unitCmdDescs` handler in lua-widget-worker.ts did.
+        onUnitCmdDescs: (units) => {
+            gpUnitCmdDescs.clear();
+            liveState.unitCmdDescs.clear();
+            for (const u of units) {
+                gpUnitCmdDescs.set(u.unitId, u);
+                liveState.unitCmdDescs.set(u.unitId, u.cmds.map(c => ({
+                    cmdId:    c.cmdId,
+                    disabled: c.disabled,
+                    name:     c.name    ?? '',
+                    action:   c.action  ?? '',
+                    texture:  c.texture ?? '',
+                    tooltip:  c.tooltip ?? '',
+                    type:     c.type    ?? 0,
+                    params:   c.params  ?? [],
+                    hidden:   c.hidden  ?? false,
+                })));
+            }
+            dispatchCommandsChanged();
+            gpRecomputeBuildTiles();
         },
         // GW4-c5b-3: standing orders (always-on overlay; server scopes the
         // broadcast to own + allied teams).
@@ -1133,6 +1195,13 @@ export function gpInit(msg: GpInitToWorker): void {
     // DefCache accumulates the game's defs (fetched over HTTP on auth).
     const defCache = new DefCache();
     gpDefCache = defCache;
+    // PLAN-playable.md G3a: a build tile's name/cost/pic come from its unit def,
+    // which may stream in after the cmd-descs that reference it. Re-resolve the
+    // tiles whenever new defs land so the native menu fills in labels/costs
+    // (mirrors input-manager's BuildMenu defCache.onUnitDefs re-render hook).
+    defCache.onUnitDefs(() => {
+        if ((gpCtx.selection?.selection.length ?? 0) > 0) gpRecomputeBuildTiles();
+    });
 
     // GW4-c5: projectile renderer + CEG getRuntime() + build-beam (ports
     // main.ts@d6301137f7^ L511–537). The CEG getRuntime() drives muzzle flashes /
@@ -1347,6 +1416,21 @@ export function gpInit(msg: GpInitToWorker): void {
             // react to what the player picked.
             liveState.selectedUnitIds = ids.slice();
             dispatchSelectionChanged(ids);
+            // PLAN-playable.md G3a: mirror the selection to the server so it
+            // scopes UnitCmdDescsUpdate to these units (Recoil-faithful; also
+            // the PLAN-orders bandwidth control). GW4-regression: post-move the
+            // connection lives in this worker and nothing called
+            // sendSelectionState, so the server never learned the selection and
+            // fell back to streaming EVERY own-team unit's cmd descs. Same dead-
+            // stream class as onUnitCmdDescs/onResourceUpdate. Selection changes
+            // are discrete gestures, so no extra debounce is needed here.
+            gpCtx.connection?.sendSelectionState(ids);
+            // A new selection invalidates any in-progress build placement (the
+            // armed def may not be buildable by the new selection —
+            // input-manager.setSelection did the same) and changes the
+            // buildable-tile set for the native menu.
+            gpBuildPlacement?.cancelBuildPlacement();
+            gpRecomputeBuildTiles();
         },
         // GW4: unit-UI sounds (select / order-ack / multi-select). These are
         // unsynced in Recoil — the server emits no SoundEvent for them — so the
@@ -1382,8 +1466,27 @@ export function gpInit(msg: GpInitToWorker): void {
         },
     });
     gpCtx.selection = selection;
-    rtsCam.onRightClickCommit = (x, y, mods) =>
+
+    // PLAN-playable.md G3a: worker-side build placement (ghost + snap + order).
+    // Shares the selection set (owned by WorkerSelection), the def cache, and
+    // the pre-computed metal spots. The native BuildMenu on main arms it via
+    // gp:startBuildPlacement; the pointer dispatcher routes left-clicks here
+    // before selection while it is active.
+    gpBuildPlacement = new WorkerBuildPlacement(scene, entityRenderer, gpCtx.connection!, {
+        getCamera: (viewId) => (viewId === 0 ? camera : null),
+        getDpr: () => gpDpr,
+        getDefCache: () => gpDefCache,
+        getSelection: () => gpCtx.selection?.selection ?? [],
+        getMetalSpots: () => gpMetalSpots,
+        getMetalCellSize: () => gpMetalCellSize,
+    });
+
+    rtsCam.onRightClickCommit = (x, y, mods) => {
+        // Spring convention: a right-click while placing cancels the placement
+        // rather than issuing a move order (input-manager.issueOrderAtScreen).
+        if (gpBuildPlacement?.isActive) { gpBuildPlacement.cancelBuildPlacement(); return; }
         selection.issueOrderAtScreen(x, y, mods.shift, 0);
+    };
     // PLAN-latency L0: anchor the presentation clock to this connection's
     // ServerClock (created per game connection by Connection).
     gpPresentationClock.reset();
@@ -1391,6 +1494,60 @@ export function gpInit(msg: GpInitToWorker): void {
     // GW4-c3: fetch map data over HTTP + build the terrain (independent of the
     // connection auth handshake — map data is on the asset plane).
     void gpLoadMap(msg);
+}
+
+/// PLAN-playable.md G3a: recompute the buildable-tile set for the current
+/// selection (union of build cmds across own-team selected units) and resolve
+/// each defId into a render-ready tile via the def cache. Marks the tiles dirty
+/// so the next sceneState post ships them to the native BuildMenu on main.
+/// Called on selection change, cmd-desc arrival, and late def arrival.
+/// Mirrors the buildable-set computation in the pre-GW4 BuildMenu.render().
+function gpRecomputeBuildTiles(): void {
+    const sel = gpCtx.selection?.selection ?? [];
+    const er = gpCtx.entityRenderer;
+    const dc = gpDefCache;
+    const myTeam = gpCtx.connection?.myTeam ?? -1;
+
+    const buildable = new Set<number>();
+    if (er && dc) {
+        for (const unitId of sel) {
+            const meta = er.getEntityMeta(unitId);
+            if (!meta || meta.team !== myTeam) continue;
+            const descs = gpUnitCmdDescs.get(unitId);
+            if (!descs) continue;
+            for (const c of descs.cmds) {
+                if (c.disabled) continue;
+                if (c.cmdId >= 0) continue;   // negative cmdId = build command
+                buildable.add(-c.cmdId);
+            }
+        }
+    }
+
+    // Sort by metal cost (light → heavy) for a usable browsing order; fall back
+    // to defId when costs haven't loaded yet. Matches the pre-GW4 BuildMenu.
+    const sorted = [...buildable].sort((a, b) => {
+        const ca = dc?.getUnitDef(a)?.metalCost ?? Number.MAX_SAFE_INTEGER;
+        const cb = dc?.getUnitDef(b)?.metalCost ?? Number.MAX_SAFE_INTEGER;
+        if (ca !== cb) return ca - cb;
+        return a - b;
+    });
+
+    const tiles: BuildMenuTile[] = [];
+    for (const defId of sorted) {
+        const def = dc?.getUnitDef(defId);
+        tiles.push({
+            defId,
+            name:       def?.name ?? '',
+            humanName:  def?.humanName ?? '',
+            buildPic:   def?.buildPic ?? '',
+            metalCost:  def?.metalCost ?? 0,
+            energyCost: def?.energyCost ?? 0,
+            buildTime:  def?.buildTime ?? 0,
+            tooltip:    def?.tooltip ?? '',
+        });
+    }
+    gpBuildTiles = tiles;
+    gpBuildTilesDirty = true;
 }
 
 /// GW4-c5b-3: update the shift-held gate that shows/hides the command-path +
@@ -1415,6 +1572,11 @@ function gpPostSceneState(now: number): void {
     if (!cam) return;
     const sel = gpCtx.selection?.selection ?? [];
     const target = cam.getTarget();
+    // PLAN-playable.md G3a: ship the resolved build tiles only when the buildable
+    // set changed (dirty-gated), and the live build-ghost state (armed placement)
+    // every post so main's HUD/ESC readout tracks it.
+    const buildOptions = gpBuildTilesDirty ? gpBuildTiles.slice() : undefined;
+    gpBuildTilesDirty = false;
     postToMain({
         type: 'gp:sceneState',
         selectedUnitIds: sel.slice(),
@@ -1429,8 +1591,9 @@ function gpPostSceneState(now: number): void {
         gameFrame: gpGameFrame,
         paused: gpPaused,
         simSpeed: gpSimSpeed,
-        buildGhost: null,
+        buildGhost: gpBuildPlacement?.getGhostState() ?? null,
         entityCount: gpCtx.entityRenderer?.entityCount ?? 0,
+        ...(buildOptions ? { buildOptions } : {}),
     });
 }
 
@@ -1675,6 +1838,13 @@ export function gpShutdown(): void {
     gpViewCameras.clear();
     gpCtx.selection?.dispose();
     gpCtx.selection = null;
+    // PLAN-playable.md G3a: dispose the build-placement controller + reset caches.
+    gpBuildPlacement?.dispose();
+    gpBuildPlacement = null;
+    gpUnitCmdDescs.clear();
+    gpMetalSpots = [];
+    gpBuildTiles = [];
+    gpBuildTilesDirty = false;
     gpCommandPathRenderer?.dispose();
     gpCommandPathRenderer = null;
     gpWaypointMarkerRenderer?.dispose();
@@ -1897,7 +2067,10 @@ function gpSetCameraHeight(cam: RTSCamera | undefined, height: number): void {
 
 export function gpHandlePointerMove(x: number, y: number, buttons: number, mods: number, viewId: number): void {
     gpViewCameras.get(viewId)?.pointerMove(x, y, buttons);
-    gpCtx.selection?.pointerMove(x, y, buttons, mods, viewId);
+    // PLAN-playable.md G3a: while a build placement is armed, the pointer drives
+    // the terrain-following ghost, not the selection hover/drag-box.
+    if (gpBuildPlacement?.isActive) gpBuildPlacement.pointerMove(x, y, buttons, mods, viewId);
+    else gpCtx.selection?.pointerMove(x, y, buttons, mods, viewId);
     const sp = gpToSpringCoords(x, y);
     const dragBtn = (buttons & 1) ? 1 : (buttons & 4) ? 2 : (buttons & 2) ? 3 : 0;
     gpDispatchMouseMove(sp.x, sp.y, sp.x - gpLastMouseSpringX, sp.y - gpLastMouseSpringY, dragBtn);
@@ -1908,13 +2081,20 @@ export function gpHandlePointerDown(x: number, y: number, button: number, mods: 
     const sp = gpToSpringCoords(x, y);
     const consumed = gpDispatchMousePress(sp.x, sp.y, domButtonToSpring(button));
     gpViewCameras.get(viewId)?.pointerDown(x, y, button, mods);
-    if (!consumed) gpCtx.selection?.pointerDown(x, y, button, mods, viewId);
+    if (consumed) return;
+    // PLAN-playable.md G3a: a left-click during build placement captures the
+    // click for placement (Spring's "active build command → LMB to place"),
+    // before it can reach unit selection / drag-box (input-manager.onLeftDown).
+    if (gpBuildPlacement?.pointerDown(x, y, button, mods, viewId)) return;
+    gpCtx.selection?.pointerDown(x, y, button, mods, viewId);
 }
 
 export function gpHandlePointerUp(x: number, y: number, button: number, mods: number, viewId: number): void {
     const sp = gpToSpringCoords(x, y);
     gpDispatchMouseRelease(sp.x, sp.y, domButtonToSpring(button));
     gpViewCameras.get(viewId)?.pointerUp(x, y, button, mods);
+    // G3a: commit the build placement if one is armed (consumes the release).
+    if (gpBuildPlacement?.pointerUp(x, y, button, mods, viewId)) return;
     gpCtx.selection?.pointerUp(x, y, button, mods, viewId);
 }
 
@@ -1947,4 +2127,17 @@ export function gpHandleBlur(viewId: number): void {
 
 export function gpHandleFocusWorld(x: number, z: number, viewId: number): void {
     gpViewCameras.get(viewId)?.focusOn(x, z);
+}
+
+// ── Build placement (PLAN-playable.md G3a) ──────────────────────────────────
+
+/// Arm build placement from the native BuildMenu (gp:startBuildPlacement).
+/// Factories queue immediately; builders enter ghost-placement mode.
+export function gpHandleStartBuildPlacement(defId: number, mods: { shift?: boolean; ctrl?: boolean }): void {
+    gpBuildPlacement?.startBuildPlacement(defId, mods);
+}
+
+/// Cancel an armed build placement (gp:cancelBuildPlacement — ESC on main).
+export function gpHandleCancelBuildPlacement(): void {
+    gpBuildPlacement?.cancelBuildPlacement();
 }

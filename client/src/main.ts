@@ -84,6 +84,11 @@ let lastSceneState: {
     selectedUnitIds: number[];
     camera: { x: number; y: number; z: number; tx: number; ty: number; tz: number };
 } | null = null;
+/// PLAN-playable.md G3a: mirrors whether the worker has a build placement armed
+/// (from gp:sceneState.buildGhost). Read by the global ESC handler so ESC
+/// cancels placement instead of opening the quit dialog — `inputManager` (the
+/// old ESC-state owner) is never instantiated post-GW4.
+let buildPlacementArmed = false;
 /// Issue a client-bound request to the game-processor worker (GW8). Resolves
 /// with the worker's reply value or rejects with its error string.
 function workerCall(method: string, args: unknown[] = []): Promise<unknown> {
@@ -474,6 +479,11 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 lastSceneState = { selectedUnitIds: m.selectedUnitIds, camera: m.camera };
                 updateHUD(m.entityCount, m.gameFrame, m.selectedUnitIds);
                 updateSpeedHUD(m.simSpeed, m.paused);
+                // PLAN-playable.md G3a: feed the native build menu the worker-
+                // resolved tiles (only present when the buildable set changed),
+                // and track whether a build placement is armed for the ESC handler.
+                if (m.buildOptions !== undefined) buildMenu?.setBuildOptions(m.buildOptions);
+                buildPlacementArmed = m.buildGhost != null;
                 // GW4-c5c-3: keep the minimap selection rings in sync with the
                 // worker's selection set (the minimap matches ids against blips).
                 minimap?.setSelection(m.selectedUnitIds);
@@ -680,6 +690,22 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             ?.addEventListener('click', () => minimap?.detach());
     }
 
+    // PLAN-playable.md G3a: native build-menu HUD (DOM, on main). The worker owns
+    // selection + defs + placement now, so this panel is a pure renderer: it's
+    // fed the resolved buildable tiles via `gp:sceneState.buildOptions`, and a
+    // tile click posts `gp:startBuildPlacement` to the worker's
+    // WorkerBuildPlacement (ghost + snap + order emission). `myTeam` is
+    // informational only (the worker does the own-team filter); best-effort from
+    // the lobby room roster since auth's real team hasn't arrived yet.
+    const myUsername = localStorage.getItem('springrts-username') ?? '';
+    const myTeamGuess = lobbyUI?.room?.players?.find((p) => p.username === myUsername)?.team ?? -1;
+    buildMenu = new BuildMenu(myTeamGuess, { lobbyHttpUrl, gameId }, {
+        onPick: (defId, mods) => {
+            gameWorker?.postMessage({
+                type: 'gp:startBuildPlacement', defId, shift: mods.shift, ctrl: mods.ctrl });
+        },
+    });
+
     // GW4-c5c-2: audio playback chain on the main thread (AudioContext is
     // main-only). The worker resolves SoundEvent → SoundRef against its def
     // cache and posts the resolved pairs (`gp:audioSoundEvents`); music
@@ -797,19 +823,24 @@ document.addEventListener('DOMContentLoaded', async () => {
     canvas.style.display = 'none';
 
     // Global ESC handler: toggle the quit-to-lobby confirmation. Only
-    // active while a game is running (detected by a non-null `engine`),
-    // so ESC stays free for lobby UI dialogs.
+    // active while a game is running (gameWorker non-null), so ESC stays free
+    // for lobby UI dialogs.
     //
-    // InputManager has its own ESC handler that cancels build placement
-    // and pending modal commands. Both listeners are on `window`, and
-    // stopPropagation doesn't suppress sibling listeners on the same
-    // node, so we have to check InputManager's state up front and bail —
-    // otherwise pressing ESC mid-placement clears the ghost AND opens
-    // the quit dialog at the same time.
+    // PLAN-playable.md G3a: build placement now lives in the worker
+    // (WorkerBuildPlacement). When one is armed (tracked via
+    // gp:sceneState.buildGhost), ESC cancels it and swallows the event instead
+    // of opening the quit dialog — mirroring the pre-GW4 InputManager ESC
+    // behaviour. (`inputManager` itself is never instantiated post-GW4, so its
+    // old state check is inert; the worker-armed flag replaces it.)
     window.addEventListener('keydown', (e) => {
         if (e.key !== 'Escape') return;
         if (!gameWorker) return;
-        if (inputManager?.isPlacingBuild || inputManager?.hasPendingCommand()) return;
+        if (buildPlacementArmed) {
+            gameWorker.postMessage({ type: 'gp:cancelBuildPlacement' });
+            buildPlacementArmed = false;
+            e.preventDefault();
+            return;
+        }
         e.preventDefault();
         showQuitConfirm(gameTemplates, { onConfirm: quitToLobby });
     });

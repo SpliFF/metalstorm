@@ -128,11 +128,33 @@ export interface GpFocusWorldToWorker {
     viewId?: number;
 }
 
+/**
+ * Arm build placement from the native BuildMenu's click (PLAN-playable.md G3a).
+ * The build menu is DOM/on-main, but placement (ghost + snap + order emission)
+ * lives in the worker's WorkerBuildPlacement, so the intent crosses the
+ * boundary. `shift`/`ctrl` carry through to the Command options bitmask:
+ * factories → batch multiplier (×5/×20/×100); builders → shift queues + keeps
+ * placement armed for chain-building. Mirrors the GpFocusWorldToWorker pattern.
+ */
+export interface GpStartBuildPlacementToWorker {
+    type: 'gp:startBuildPlacement';
+    defId: number;
+    shift: boolean;
+    ctrl: boolean;
+}
+
+/** Cancel an armed build placement (ESC / selection change on main). */
+export interface GpCancelBuildPlacementToWorker {
+    type: 'gp:cancelBuildPlacement';
+}
+
 export type GpMessageToWorker =
     | GpInitToWorker
     | GpInputToWorker
     | GpConfigToWorker
     | GpFocusWorldToWorker
+    | GpStartBuildPlacementToWorker
+    | GpCancelBuildPlacementToWorker
     // PLAN-rml.md: DOM events + viewport changes routed back to the worker-side
     // RmlUi proxy (rml-bridge.ts) for Lua listener dispatch / dp-ratio recompute.
     | RmlEventToWorker
@@ -140,6 +162,24 @@ export type GpMessageToWorker =
     | { type: 'gp:shutdown' };
 
 // ─── worker → main ──────────────────────────────────────────────────────────
+
+/**
+ * A render-ready build-menu tile (PLAN-playable.md G3a). The worker resolves
+ * the buildable defId set for the current selection (union of build cmds across
+ * own-team selected units) against its def cache and posts these to the native
+ * BuildMenu on main via `gp:sceneState.buildOptions`. No Babylon objects cross;
+ * the DOM menu resolves `buildPic` to a URL against the game's `unitpics/`.
+ */
+export interface BuildMenuTile {
+    defId: number;
+    name: string;
+    humanName: string;
+    buildPic: string;
+    metalCost: number;
+    energyCost: number;
+    buildTime: number;
+    tooltip: string;
+}
 
 /** Per-selected-unit facts the HTML HUD needs (no Babylon objects cross the wire). */
 export interface GpSelectedUnit {
@@ -172,8 +212,11 @@ export interface GpSceneStateToMain {
     simSpeed: number;
     buildGhost: { pos: [number, number, number]; defId: number; valid: boolean } | null;
     entityCount: number;
-    /** Build-menu command descriptions; present only when changed. */
-    unitCmdDescs?: unknown;
+    /** Resolved build-menu tiles for the current selection (PLAN-playable.md
+     *  G3a); present only when the buildable set changed since the last feed.
+     *  (Was the never-populated `unitCmdDescs?: unknown` placeholder — renamed
+     *  since it now carries resolved tiles, not raw cmd-descs.) */
+    buildOptions?: BuildMenuTile[];
     /** Economy/resource snapshot for the economy bar; present only when changed. */
     economy?: unknown;
 }
