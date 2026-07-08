@@ -49,6 +49,12 @@ using HttpGetHandler = std::function<HttpResponse(const std::string& url)>;
 struct HttpRequestHeaders {
     std::string authorization;
     std::string contentType;
+    /// True when the TCP peer address is 127.0.0.0/8 or ::1 (including the
+    /// IPv4-mapped ::ffff:127.x form a dual-stack accept() can produce).
+    /// Used by endpoints that gate on "localhost origin" (e.g.
+    /// /api/rooms/direct) — this is a peer-address check, not anything
+    /// forgeable via a request header.
+    bool remoteIsLoopback = false;
 };
 
 /// Handler for an HTTP POST endpoint. Receives URL, body, and headers.

@@ -158,6 +158,52 @@ All room endpoints require authentication.
 
 Room states: 0=Configuring, 1=Filling, 2=ReadyCheck, 3=Loading, 4=Active, 5=Ended.
 
+### Direct start (dev/test only)
+
+**POST /api/rooms/direct** collapses the whole room dance (create → add AI → join → ready → start) into one call. It exists only when the lobby is launched with `--dev-direct-start` (default off; never set in a production config), and even then requires the caller to be on localhost *or* hold the **admin** role — two independent guardrails.
+
+| Precondition | Response |
+|---|---|
+| `--dev-direct-start` not passed | `404` |
+| Enabled, caller neither localhost nor admin | `403` |
+| Bad/missing `map`, empty `players[]` | `400` |
+
+Request — a manifest describing everything the three lobby screens collect:
+
+```json
+{
+  "name": "dev:metalstorm-bench",
+  "map": "green_flat_x34_v3",
+  "game": "metalstorm",
+  "modoptions": { "authority_cost_scale": "0" },
+  "aiSlots": [ { "aiId": "null", "team": 1, "startPos": 1 } ],
+  "players": [ { "username": "test1", "team": 0, "startPos": 0, "spectator": false } ],
+  "autoStart": true
+}
+```
+
+- `players[0]` becomes the room host. A declared username with no existing account is created on the fly and flagged `is_dev` — it gets an unusable random password (never logs in via `/api/auth/login`), only the session token minted here. A username already in a different room is force-left first.
+- Re-POSTing the same `name` (or restarting the lobby with `--direct <manifest.json>` pointing at an unchanged manifest) tears down the old room and recreates it — idempotent, not additive.
+- `autoStart` (default `true`) drives the room through the same path `/api/rooms/start` uses, including its solo-team Null AI safety net. Set `false` to stop at a bound-but-unstarted room.
+
+Response — the same room object `/api/rooms/start` already returns, plus a `sessions` map:
+
+```json
+{
+  "id": 7, "name": "dev:metalstorm-bench", "map": "green_flat_x34_v3", "game": "metalstorm",
+  "state": 3,
+  "players": [ {"player_id":42, "username":"test1", "team":0, "ready":true, "is_host":true, "start_pos":0} ],
+  "ai_slots": [ {"ai_id":"null", "name":"null", "team":1, "start_pos":1} ],
+  "modoptions": { "authority_cost_scale": "0" },
+  "game_server_port": 9103,
+  "sessions": { "test1": "a1b2c3…" }
+}
+```
+
+`game_server_port` is already valid in the response (`state` is `3`/Loading — the room flips to `4`/Active asynchronously once the spawned game server publishes ready, same as a normal `/api/rooms/start` call). There is deliberately no `wtInfo` field: the lobby process links neither a WebTransport server nor an outbound HTTP client, so it has no way to fetch the spawned game server's own `/api/wt/info` without either a new dependency or blocking this single-threaded HTTP loop for the game server's full cold-boot time (observed up to 90s+ for a heavy game). The caller does its own `/api/wt/info` discovery against `game_server_port` instead — exactly what the client already does after a normal lobby-walk start.
+
+`--direct <manifest.json>` (lobby CLI flag) creates one standing room from a manifest file at lobby startup, driven through the same code path as the endpoint above. It is **not** gated by `--dev-direct-start` — it's supplied by whoever launches the process, not reachable remotely.
+
 ### Command Execution
 
 **POST /api/exec** (requires admin)

@@ -788,6 +788,43 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
 
 // --- Boot ---
 
+/// Direct-start boot (`?direct=<manifest-name-or-url>`, PLAN-quickstart.md
+/// Part A): fetch the manifest (a bare relative path or an absolute URL —
+/// both work transparently via `fetch`), POST it to `/api/rooms/direct`,
+/// then feed the response into the lobby exactly like the scenario runner
+/// does with its own `/api/rooms` response (`attachSession` +
+/// `setCurrentRoomFromJson`). No separate `startGame()` call is needed: the
+/// direct-start response is already the room in Loading/Active with a
+/// `game_server_port`, so `updateCurrentRoomFromJson` (lobby-ui.ts) fires
+/// `onGameStart` on its own — the same state-driven path the normal lobby
+/// walk already relies on.
+async function bootDirect(manifestUrl: string, lobby: LobbyUI): Promise<void> {
+    const manifestResp = await fetch(manifestUrl);
+    if (!manifestResp.ok)
+        throw new Error(`?direct: failed to fetch manifest '${manifestUrl}': HTTP ${manifestResp.status}`);
+    const manifest = await manifestResp.json();
+
+    const roomResp = await fetch(`${CONFIG.httpUrl}/api/rooms/direct`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(manifest),
+    });
+    const room = await roomResp.json();
+    if (!roomResp.ok)
+        throw new Error(`?direct: /api/rooms/direct failed: ${room?.error ?? roomResp.status}`);
+
+    // The host is the manifest's first declared player — same convention
+    // the scenario runner uses (a single host player, test1).
+    const hostUsername = manifest.players?.[0]?.username;
+    const token = room.sessions?.[hostUsername];
+    const hostPlayer = (room.players ?? []).find((p: any) => p.username === hostUsername);
+    if (!token || !hostPlayer)
+        throw new Error('?direct: response missing host session/player');
+
+    lobby.attachSession(token, hostPlayer.player_id, hostUsername);
+    lobby.setCurrentRoomFromJson(room);
+}
+
 /// Resolve which game (if any) the lobby UI should style itself for at
 /// boot time. Order of precedence:
 ///   1. `?game=<id>` URL query parameter (browser link, dev override)
@@ -857,12 +894,35 @@ document.addEventListener('DOMContentLoaded', async () => {
         localStorage.removeItem('springrts-game-port');
     }
 
+    // Direct-start mode (`?direct=<manifest-name-or-url>`, PLAN-quickstart.md
+    // Part A) hijacks the boot flow the same way scenario mode does: clear
+    // any stale saved session first so the lobby's auto-login doesn't race
+    // bootDirect's own attachSession.
+    const directManifestUrl = new URLSearchParams(window.location.search).get('direct');
+    if (directManifestUrl) {
+        localStorage.removeItem('springrts-token');
+        localStorage.removeItem('springrts-username');
+        localStorage.removeItem('springrts-game-room');
+        localStorage.removeItem('springrts-game-port');
+    }
+
     // Show lobby with the engine-default templates immediately so the
     // login screen renders without waiting on a network round-trip.
     lobbyUI = new LobbyUI((gameServerPort: number, mapId: string, gameId: string) => {
         startGame(gameServerPort, mapId, gameId);
     }, getDefaultLobbyTemplates());
     (window as any).lobby = lobbyUI;
+
+    if (directManifestUrl) {
+        // Hide synchronously, before any `await` — the constructor above
+        // already flipped the container to display:flex (login screen or
+        // auto-login spinner) and the browser won't paint until this
+        // handler yields, so this never flashes visible DOM.
+        lobbyUI.hide();
+        bootDirect(directManifestUrl, lobbyUI).catch((err) => {
+            console.error('[direct] boot failed:', err);
+        });
+    }
 
     if (scenario) {
         // Fire and forget — the runner publishes progress and results
