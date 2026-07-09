@@ -304,6 +304,17 @@ export async function prefetchAllGameFiles(baseUrl: string): Promise<void> {
         // source that's already covered by the .lua descent, but
         // `lups/shaders/` (if any) needs the explicit root.
         'shaders', 'shaders/GLSL', 'lups', 'lups/shaders',
+        // Game-root cursor sets. BAR's gui_cursor.lua builds cursorSets from
+        // `VFS.SubDirs('anims')` at Initialize/ViewResize time (Recoil reads
+        // the same archive-mounted tree); without this descent the dir was
+        // never crawled, `_vfsSubDirs` returned [], and indexing the empty
+        // `cursorSets['icexuick']` crashed with "index a nil value" (PLAN-bar
+        // U5). The actual cursor images are fetched separately over HTTP by
+        // AnimatedCursor, not through this VFS cache — this descent only
+        // needs to register enough of the tree (the per-set `.txt` manifests
+        // match the existing text-file filter) to populate the subdir cache.
+        // Case-insensitive fetch resolves ZK's `Anims/` too (additive, safe).
+        'anims',
     ];
     const visited = new Set<string>();
 

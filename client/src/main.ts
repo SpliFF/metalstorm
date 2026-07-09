@@ -17,6 +17,7 @@ import { AnimatedCursor } from './core/animated-cursor.js';
 import { BuildMenu } from './core/build-menu.js';
 import { OrderPanel } from './core/order-panel.js';
 import { EconomyBar } from './core/economy-bar.js';
+import { FactoryQueuePanel } from './core/factory-queue-panel.js';
 import { buildTerrainMesh, loadTerrainTextures, TerrainFog, DeformableTerrain, type MapDimensions } from './core/terrain.js';
 import { DecalOverlay, buildTrackTypeNames } from './core/decal-overlay.js';
 import { attachDecalOverlay } from './core/decal-overlay-plugin.js';
@@ -187,6 +188,7 @@ let animatedCursor: AnimatedCursor | null = null;
 let buildMenu: BuildMenu | null = null;
 let orderPanel: OrderPanel | null = null;
 let economyBar: EconomyBar | null = null;
+let factoryQueuePanel: FactoryQueuePanel | null = null;
 let lobbyUI: LobbyUI | null = null;
 let minimap: Minimap | null = null;
 let commandPathRenderer: CommandPathRenderer | null = null;
@@ -287,6 +289,8 @@ function quitToLobby(): void {
     orderPanel = null;
     economyBar?.dispose();
     economyBar = null;
+    factoryQueuePanel?.dispose();
+    factoryQueuePanel = null;
     commandPathRenderer?.dispose();
     commandPathRenderer = null;
     waypointMarkerRenderer?.dispose();
@@ -397,6 +401,8 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     orderPanel = null;
     economyBar?.dispose();
     economyBar = null;
+    factoryQueuePanel?.dispose();
+    factoryQueuePanel = null;
 
     showHUD();
 
@@ -469,10 +475,14 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         switch (m?.type) {
             case 'gp:authenticated':
                 console.log(`[gameWorker] authenticated playerId=${m.playerId} team=${m.team}`);
+                // G4: the lobby-roster myTeamGuess used to construct economyBar
+                // can be stale/absent (spectator, late roster fetch); this is the
+                // authoritative value, so re-point the bar's team filter at it.
+                economyBar?.setTeam(m.team);
                 break;
-            // GW4-c5c: consolidated scene-state feed → the HTML HUD (the only
-            // main-thread world-fact consumer reconnected here; ZK economy /
-            // build-menu / order-panel are chili widgets in the worker, c6).
+            // GW4-c5c: consolidated scene-state feed → the HTML HUD + native
+            // build-menu (G3a) + native economy-bar + factory-queue panel (G4).
+            // The order-panel remains unbuilt (dead pre-G3b code, unrelated).
             case 'gp:sceneState':
                 // GW8: cache for the test harness's synchronous getters
                 // (window.test.selection / .cameraPose()).
@@ -484,6 +494,14 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 // and track whether a build placement is armed for the ESC handler.
                 if (m.buildOptions !== undefined) buildMenu?.setBuildOptions(m.buildOptions);
                 buildPlacementArmed = m.buildGhost != null;
+                // PLAN-playable.md G4: feed the native economy bar the worker's
+                // latest local-team ResourceUpdate (only present when a fresh one
+                // arrived since the last feed).
+                if (m.economy !== undefined) economyBar?.update(m.economy);
+                // PLAN-playable.md G4: feed the native factory-queue panel the
+                // worker-resolved queue rows for the selected factory (only
+                // present when the queue changed since the last feed).
+                if (m.factoryQueue !== undefined) factoryQueuePanel?.setRows(m.factoryQueue);
                 // GW4-c5c-3: keep the minimap selection rings in sync with the
                 // worker's selection set (the minimap matches ids against blips).
                 minimap?.setSelection(m.selectedUnitIds);
@@ -508,9 +526,52 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                     if (m.los) {
                         minimap.applyLosBitmap({ allyTeam: 0, frame: 0, ...m.los });
                     }
+                    // PLAN-playable.md G4: metal-spot markers, delivered once
+                    // (same one-shot pattern as `map` above).
+                    if (m.metalSpots) {
+                        minimap.applyMetalSpots(m.metalSpots);
+                    }
                     minimap.applyFeed(m.blips);
                     minimap.render();
                 }
+                break;
+            // PLAN-playable.md G4 (bonus fix): gl.ConfigMiniMap / gl.DrawMiniMapEvents
+            // from a chili widget (e.g. gui_chili_minimap.lua) reach lua-ui-host's
+            // minimapEmitter and post these unprefixed legacy message types, but
+            // post-GW4 main.ts never had a case for them — same dead-producer class
+            // as onUnitCmdDescs/sendSelectionState/onResourceUpdate (G3a/U3/G4
+            // session 1). Without this the native minimap stays parked in its
+            // hidden default container forever (ownership only flips to 'widget'
+            // inside setGeometry) — so no ZK/BAR game ever showed a sidebar
+            // minimap post-GW4. Coords are Spring screen-space (Y-up from
+            // bottom-left) in the *backing-store* pixel grid — Spring.GetViewSizes
+            // (what the widget lays out against) mirrors liveState.viewport =
+            // canvas.width/height, i.e. CSS px × effectiveDpr(), not CSS px — so
+            // this also divides by the same scale factor main.ts used to size the
+            // canvas before flipping to DOM (CSS-px, top-down) space. The legacy
+            // lua-widget-manager.applyMinimapGeometry this replaces skipped that
+            // conversion (pre-GW4 the canvas may have been unscaled 1:1); ported
+            // forward correctly rather than reproducing that gap.
+            case 'minimapGeometry': {
+                if (minimap) {
+                    const visible = m.visible !== false && m.w > 0 && m.h > 0;
+                    if (!visible) {
+                        minimap.setVisible(false);
+                    } else {
+                        const dpr = effectiveDpr();
+                        const cssX = m.x / dpr;
+                        const cssY = m.y / dpr;
+                        const cssW = m.w / dpr;
+                        const cssH = m.h / dpr;
+                        const domY = window.innerHeight - cssY - cssH;
+                        minimap.setGeometry(cssX, domY, cssW, cssH);
+                        minimap.setVisible(true);
+                    }
+                }
+                break;
+            }
+            case 'minimapEvents':
+                minimap?.markEventsRequested();
                 break;
             // GW4-c5c-2: resolved sound events / music transitions from the worker.
             case 'gp:audioSoundEvents':
@@ -703,6 +764,27 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         onPick: (defId, mods) => {
             gameWorker?.postMessage({
                 type: 'gp:startBuildPlacement', defId, shift: mods.shift, ctrl: mods.ctrl });
+        },
+    });
+
+    // PLAN-playable.md G4: native economy-bar HUD (DOM, on main). GW4-regression
+    // fix — the component was fully built (economy-bar.ts) but never instantiated
+    // post-GW4, so metal/energy income was invisible in every game (flagged as
+    // dead code in the G3a field notes). `myTeamGuess` is the same best-effort
+    // lobby-roster lookup buildMenu uses; corrected to the authoritative value
+    // once `gp:authenticated` reports the real team below.
+    economyBar = new EconomyBar({ myTeam: myTeamGuess });
+
+    // PLAN-playable.md G4: native factory-queue panel (DOM, on main). Pure
+    // renderer fed via `gp:sceneState.factoryQueue`; row clicks post
+    // `gp:removeFactoryOrder` to the worker's CMD.REMOVE path (same intent-
+    // crosses-the-boundary shape as BuildMenu's `gp:startBuildPlacement`).
+    factoryQueuePanel = new FactoryQueuePanel({ lobbyHttpUrl, gameId }, {
+        onRemoveOne: (unitId, tag) => {
+            gameWorker?.postMessage({ type: 'gp:removeFactoryOrder', unitId, tags: [tag] });
+        },
+        onRemoveAll: (unitId, tags) => {
+            gameWorker?.postMessage({ type: 'gp:removeFactoryOrder', unitId, tags });
         },
     });
 

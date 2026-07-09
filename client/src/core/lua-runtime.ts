@@ -134,6 +134,13 @@ export class LuaRuntime {
     /** User-readable name used in error messages. */
     readonly name: string;
 
+    /** Dedup cache for nested-function reads (see readValueFrom's
+     *  LUA_TFUNCTION case) — keyed by the closure's stable identity
+     *  (lua_topointer), so re-reading the same Lua function through a
+     *  table field reuses one registry ref instead of minting a new one
+     *  per read. */
+    private readonly nestedFnCache = new WeakMap<object, LuaFnRef>();
+
     constructor(name: string) {
         this.name = name;
         this.L = lauxlib.luaL_newstate();
@@ -364,7 +371,7 @@ export class LuaRuntime {
         return this.readValueFrom(this.L, idx);
     }
 
-    private readValueFrom(LS: unknown, idx: number, nested = false): LuaValue {
+    private readValueFrom(LS: unknown, idx: number): LuaValue {
         const t = lua.lua_type(LS, idx);
         switch (t) {
             case lua.LUA_TNIL:
@@ -389,21 +396,29 @@ export class LuaRuntime {
                 // Opaque handle round-tripped from pushValue.
                 return lua.lua_touserdata(LS, idx) as LuaValue;
             case lua.LUA_TFUNCTION: {
-                // Top-level function args (passed to JS callbacks via colon
-                // calls) are wrapped via a registry ref so JS code can call
-                // them. Function values *inside* a table arg are never called
-                // from JS in practice (the chili font object, widgetHandler,
-                // etc. all keep their methods in tables that are passed as
-                // `self` and forwarded right back into Lua). Creating a
-                // registry ref per nested function leaks ~N refs per call —
-                // the registry table is a fengari `new Map()` capped at 2^24
-                // entries, which a label re-layout 60Hz hits in a few hours
-                // and surfaces as `Map maximum size exceeded` deep in
-                // chili font.lua. Skip the ref entirely for nested reads.
-                if (nested) return null;
+                // Function values inside a table arg ARE genuinely callable
+                // in real Lua/Recoil (e.g. a font handle's `:Begin()` nested
+                // inside an atlas's task-list table, passed whole into
+                // gl.RenderToTexture's callback args) — dropping them broke
+                // BAR's AtlasOnDemand ("attempt to call a nil value (method
+                // 'Begin')", PLAN-bar U5). A naive per-read registry ref
+                // would leak (a 60Hz table re-read mints a fresh ref every
+                // time — the registry is a fengari `new Map()` capped at
+                // 2^24 entries, which a chili font re-layout hit in a few
+                // hours). Fix: dedup by the closure's stable identity
+                // (lua_topointer) so re-reading the SAME Lua function value
+                // reuses one ref/wrapper instead of minting a new one —
+                // bounded by distinct closures, not by read count.
+                const ptr = lua.lua_topointer(LS, idx);
+                if (ptr) {
+                    const cached = this.nestedFnCache.get(ptr);
+                    if (cached) return cached as unknown as LuaValue;
+                }
                 lua.lua_pushvalue(LS, idx);
                 const ref = lauxlib.luaL_ref(LS, lua.LUA_REGISTRYINDEX);
-                return this.makeFunctionRef(ref) as unknown as LuaValue;
+                const wrapper = this.makeFunctionRef(ref);
+                if (ptr) this.nestedFnCache.set(ptr, wrapper);
+                return wrapper as unknown as LuaValue;
             }
             case lua.LUA_TTABLE: {
                 // Prefer array form when the table is a pure sequence —
@@ -415,7 +430,7 @@ export class LuaRuntime {
                     const absIdx = idx < 0 ? lua.lua_gettop(LS) + idx + 1 : idx;
                     for (let i = 1; i <= len; i++) {
                         lua.lua_rawgeti(LS, absIdx, i);
-                        arr.push(this.readValueFrom(LS, -1, true));
+                        arr.push(this.readValueFrom(LS, -1));
                         lua.lua_pop(LS, 1);
                     }
                     return arr;
@@ -435,7 +450,7 @@ export class LuaRuntime {
                     } else {
                         key = `<k:${kt}>`;
                     }
-                    out[key] = this.readValueFrom(LS, -1, true);
+                    out[key] = this.readValueFrom(LS, -1);
                     lua.lua_pop(LS, 1);
                 }
                 return out;

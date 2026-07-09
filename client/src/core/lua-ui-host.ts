@@ -28,7 +28,8 @@ import {
     type LiveState,
     type UnitEntry,
 } from './lua-spring-api.js';
-import type { CombatEventInfo, FeatureSpawnInfo } from './connection.js';
+import type { CombatEventInfo, FeatureSpawnInfo, SoundRefInfo } from './connection.js';
+import { SoundCategory } from './sound-events.js';
 import type { EntityStateSnapshot } from './entity-state.js';
 import { applyMapLighting, type SceneLighting } from './scene-lighting.js';
 import {
@@ -326,6 +327,7 @@ export interface MinimalUnitDefWire {
     canSelfDestruct?: boolean;
     selfDCountdown?: number;
     categoryBits?: number;
+    sounds?: SoundRefInfo[];
 }
 export interface MinimalWeaponDefWire {
     defId: number; name: string; projectileType: number;
@@ -350,6 +352,55 @@ export interface MinimalWeaponDefWire {
 }
 export const unitDefMap = new Map<number, MinimalUnitDefWire>();
 export const weaponDefMap = new Map<number, MinimalWeaponDefWire>();
+
+/** Wire `SoundCategory` code (`sound-events.ts`) → the `UnitDef.sounds`
+ *  sub-table key Recoil authors (`LuaUnitDefs.cpp::SoundsTable`). The two
+ *  naming schemes diverge (`OrderAck`→`ok`, `Move`→`arrived`,
+ *  `BuildStart`→`build`, `Cancel`→`cant`) so this can't be derived by
+ *  lower-casing the enum name. */
+const SOUND_CATEGORY_LUA_KEY: Record<number, string> = {
+    [SoundCategory.Select]: 'select',
+    [SoundCategory.OrderAck]: 'ok',
+    [SoundCategory.Move]: 'arrived',
+    [SoundCategory.BuildStart]: 'build',
+    [SoundCategory.Working]: 'working',
+    [SoundCategory.UnderAttack]: 'underattack',
+    [SoundCategory.Cancel]: 'cant',
+    [SoundCategory.Activate]: 'activate',
+    [SoundCategory.Deactivate]: 'deactivate',
+};
+// Recoil always pushes all 10 keys (SoundsTable), incl. `repair` — which
+// has no wire category (neither our nor Recoil's own UnitDefHandler ever
+// populates UnitDef::SoundStruct::repair/working from unit Lua — verified
+// against ../RecoilEngine's UnitDefHandler.cpp — so `repair` faithfully
+// stays an always-empty table).
+const SOUND_CATEGORY_KEYS = [
+    'select', 'ok', 'arrived', 'build', 'repair', 'working',
+    'underattack', 'cant', 'activate', 'deactivate',
+];
+
+/** Build the Recoil-shaped `UnitDefs[id].sounds` sub-table: one key per
+ *  category, each a 1-indexed sequence of `{name, volume, id}` (matching
+ *  `LuaUnitDefs.cpp::PushGuiSoundSet` for an unsynced handle, which also
+ *  carries `id`). Must use `luaTable()` — a plain JS object with numeric
+ *  keys marshals as Lua *string* keys (`pushValue`'s generic object
+ *  branch uses `lua_setfield`), which would make `#sounds.underattack`
+ *  and `sounds.select[1]` fail even though the data is present. */
+function buildLuaUnitSounds(refs: SoundRefInfo[] | undefined): Record<string, LuaValue> {
+    const byKey = new Map<string, SoundRefInfo[]>();
+    for (const key of SOUND_CATEGORY_KEYS) byKey.set(key, []);
+    for (const ref of refs ?? []) {
+        const key = SOUND_CATEGORY_LUA_KEY[ref.category];
+        if (key) byKey.get(key)!.push(ref);
+    }
+    const sounds: Record<string, LuaValue> = {};
+    for (const [key, entries] of byKey) {
+        sounds[key] = luaTable(...entries.map((s): LuaValue => (
+            { name: s.name, volume: s.volume, id: s.id }
+        )));
+    }
+    return sounds;
+}
 
 /** Build the rich Lua-shaped UnitDef table from the wire form. The
  *  Tier 3 wire protocol carries real values for cost, health, sensor
@@ -454,6 +505,7 @@ function buildLuaUnitDef(d: MinimalUnitDefWire): Record<string, LuaValue> {
         buildSpeed: d.buildSpeed ?? 0,
         buildOptions: buildOptionsSeq,
         weapons,
+        sounds: buildLuaUnitSounds(d.sounds),
 
         // Tier 4 fields (custom params + rare attributes).
         customParams: (d.customParams ?? {}) as Record<string, LuaValue>,
@@ -1333,15 +1385,30 @@ export async function init(
             end
         end
     `, 'shutdown_guard_pre');
-    // Pre-install a nil-safe math.round. ZK's numberfunctions.lua
-    // defines one but it crashes on nil input, which happens during
-    // epicmenu's include chain. This version falls back to 0 for nil.
+    // Pre-install a nil-safe math.round. ZK's numberfunctions.lua defines
+    // one but it crashes on nil input, which happens during epicmenu's
+    // include chain — this version falls back to 0 for nil. BAR ships no
+    // numberfunctions.lua of its own, so BAR widgets get this baseline
+    // permanently (ZK's own file still overrides it once loaded, exactly
+    // as in real Spring). It must therefore match Recoil's engine-native
+    // math.round (rts/Lua/LuaMathExtra.cpp — arithmetic round-half-up to
+    // `idp` decimals via lua_pushnumber), NOT ZK's own Lua-authored version
+    // (`("%.Nf"):format(num)`, which returns a STRING). A previous version
+    // of this shim copied ZK's string-returning body verbatim, so every
+    // BAR call to math.round silently returned a string — crashing
+    // gui_info.lua's `math.min(speed, mathRoundResult)` with "attempt to
+    // compare string with number" (Lua's relational operators, unlike its
+    // arithmetic ones, never coerce strings; PLAN-bar.md U5).
     // Also install math.bit_inv — Spring engine adds it as part of its
     // bitops surface; ZK widgets call it at file scope.
     runtime.doString(`
         function math.round(num, idp)
             num = num or 0
-            return ("%." .. (((num==0) and 0) or idp or 0) .. "f"):format(num)
+            idp = idp or 0
+            local mult = 10 ^ idp
+            local xinteg = math.floor(num)
+            local xfract = num - xinteg
+            return xinteg + math.floor(xfract * mult + 0.5) / mult
         end
         if not math.bit_inv then
             math.bit_inv = function(x)
@@ -4015,6 +4082,23 @@ export function installEngineGlobals(
         glSupportRestartPrimitive: false,
         glSupportFragDepthLayout: false,
         numCompressedTexFormats: 0,
+        // FIDELITY-STANDIN: Recoil enumerates every OS-reported video mode per
+        // display (rts/Rendering/GL/myGL.cpp → globalRenderingInfo); a browser
+        // tab has no equivalent API (no display enumeration, no refresh-rate
+        // query). This was entirely absent, so `ipairs(Platform.availableVideoModes)`
+        // indexed nil and crashed BAR's cmd_resolution_switcher.lua on every boot
+        // (PLAN-bar.md U5). Report the one "mode" we actually have — the live
+        // canvas viewport — so the widget's resolution list is honest (one
+        // entry) instead of absent (crash). hz is a guess (60): no cross-browser
+        // API exposes display refresh rate.
+        availableVideoModes: [{
+            display: 1,
+            displayName: '',
+            w: liveState.viewport.width,
+            h: liveState.viewport.height,
+            bpp: 32,
+            hz: 60,
+        }],
     });
 
     // Publish whatever defs have already arrived (the def stream may
@@ -4641,9 +4725,16 @@ export function dispatchPlayerAdded(playerId: number): void {
 }
 
 /** widgetHandler:PlayerRemoved(playerId, reason) — fires when a player leaves
- *  (quit/kick/timeout). reason: 0=quit, 1=kicked, 2=timeout. */
+ *  (quit/kick/timeout). reason: 0=quit, 1=kicked, 2=timeout. Recoil's
+ *  `playerHandler` never deletes a departed player's entry (only marks it
+ *  inactive), so `Spring.GetPlayerInfo` still resolves a name inside this
+ *  callin — same invariant as PlayerChanged/PlayerAdded above. Missing this
+ *  guard crashed BAR's snd_notifications_addon_playerstatus.lua:29 ("table
+ *  index is nil") whenever PlayerRemoved fired for an id that raced ahead of
+ *  the roster seed (PLAN-bar.md U5). */
 export function dispatchPlayerRemoved(playerId: number, reason: number): void {
     if (!runtime) return;
+    ensureRosteredForCallin(playerId);
     runtime.doString(`
         if widgetHandler and widgetHandler.PlayerRemoved then
             pcall(widgetHandler.PlayerRemoved, widgetHandler, ${playerId | 0}, ${reason | 0})

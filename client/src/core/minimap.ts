@@ -26,7 +26,8 @@ import { Texture } from '@babylonjs/core';
 import { DynamicTexture } from '@babylonjs/core/Materials/Textures/dynamicTexture';
 import { EntityRenderer, type EntityMeta } from './entity-renderer.js';
 import type { LosBitmap } from './los-bitmap.js';
-import type { GpMinimapBlips } from './game-worker-protocol.js';
+import type { GpMinimapBlips, GpMinimapMetalSpots } from './game-worker-protocol.js';
+import { metalSpotMarkerRadius } from './metal-spots.js';
 import { CommandBuffer, CMD } from './command-buffer.js';
 import type { Connection } from './connection.js';
 import type { MapDimensions } from './terrain.js';
@@ -154,6 +155,16 @@ export class Minimap {
     private radarMeshes: Mesh[] = [];
     // Selection ring mesh (thin-instanced white ring).
     private selectionMesh: Mesh | null = null;
+    // PLAN-playable.md G4 (ZK Phase D item 5/7): metal-spot markers. Static
+    // per-map data fed once via applyMetalSpots (see gpMinimapMetalSpotsInfo
+    // in game-processor.ts) — built once, not touched by the per-tick
+    // updateEntityInstances rebuild. Two nested discs (dark outline + gold
+    // fill) mirror the border+fill look of ZK's own `cmd_mex_placement.lua`
+    // minimap draw, without its team-ownership colouring (that needs mex
+    // occupancy tracking we don't compute client-side — FIDELITY-STANDIN,
+    // unclaimed-gold for every spot regardless of who holds it).
+    private metalSpotOuterMesh: Mesh | null = null;
+    private metalSpotInnerMesh: Mesh | null = null;
     // Map id parsed out of the loadBackground URL. Used by detach() so
     // the popup viewport can fetch the same map's thumbnail as its
     // backdrop.
@@ -546,6 +557,63 @@ export class Minimap {
         this.fedBlips = blips;
     }
 
+    /** Apply the one-shot metal-spot feed (PLAN-playable.md G4, ZK Phase D
+     *  item 5/7). Static for the whole game session, so the marker buffers
+     *  are built once here rather than every render tick like the entity
+     *  dots. Safe to call again (e.g. a future rescan) — it just rebuilds
+     *  both instance buffers from scratch. */
+    applyMetalSpots(spots: GpMinimapMetalSpots): void {
+        const { count, x, z, metal } = spots;
+        const outer = this.ensureMetalSpotMesh('outer');
+        const inner = this.ensureMetalSpotMesh('inner');
+        if (count === 0) {
+            outer.thinInstanceCount = 0;
+            inner.thinInstanceCount = 0;
+            return;
+        }
+        const outerMatrices = new Float32Array(count * 16);
+        const innerMatrices = new Float32Array(count * 16);
+        const rot = Quaternion.Identity();
+        for (let i = 0; i < count; i++) {
+            // Perceptual size from richness — same signal ZK's own
+            // mex-placement widget scales its minimap circles by, just
+            // without an exact unit match (that widget also has
+            // team-ownership colour data we don't compute client-side;
+            // see the field comment above).
+            const r = metalSpotMarkerRadius(metal[i]);
+            const outerScale = new Vector3(r, r, r);
+            const innerScale = new Vector3(r * 0.65, r * 0.65, r * 0.65);
+            Matrix.Compose(outerScale, rot, new Vector3(x[i], 4, z[i]))
+                .copyToArray(outerMatrices, i * 16);
+            Matrix.Compose(innerScale, rot, new Vector3(x[i], 4.5, z[i]))
+                .copyToArray(innerMatrices, i * 16);
+        }
+        outer.thinInstanceSetBuffer('matrix', outerMatrices, 16, true);
+        inner.thinInstanceSetBuffer('matrix', innerMatrices, 16, true);
+    }
+
+    private ensureMetalSpotMesh(kind: 'outer' | 'inner'): Mesh {
+        const cached = kind === 'outer' ? this.metalSpotOuterMesh : this.metalSpotInnerMesh;
+        if (cached) return cached;
+        const disc = MeshBuilder.CreateDisc(`minimapMetalSpot-${kind}`,
+            { radius: 1, tessellation: 24 }, this.scene);
+        disc.rotation.x = Math.PI / 2; // lay flat, facing up — matches team/radar dots
+        disc.isPickable = false;
+        const mat = new StandardMaterial(`minimapMetalSpotMat-${kind}`, this.scene);
+        mat.disableLighting = true;
+        if (kind === 'outer') {
+            mat.emissiveColor = new Color3(0, 0, 0);
+            mat.alpha = 0.7;
+        } else {
+            mat.emissiveColor = new Color3(0.85, 0.68, 0.15); // gold, unclaimed
+            mat.alpha = 0.85;
+        }
+        disc.material = mat;
+        if (kind === 'outer') this.metalSpotOuterMesh = disc;
+        else this.metalSpotInnerMesh = disc;
+        return disc;
+    }
+
     /** Render the minimap. Call at ~10Hz. */
     render(): void {
         this.updateEntityInstances();
@@ -890,6 +958,10 @@ export class Minimap {
         for (const mesh of this.pingMeshes.values()) mesh.dispose();
         this.pingMeshes.clear();
         this.pings.length = 0;
+        this.metalSpotOuterMesh?.dispose();
+        this.metalSpotOuterMesh = null;
+        this.metalSpotInnerMesh?.dispose();
+        this.metalSpotInnerMesh = null;
         this.fogTexture?.dispose();
         this.fogTexture = null;
         this.fogQuad?.dispose();
