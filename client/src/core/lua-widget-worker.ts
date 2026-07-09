@@ -22,6 +22,7 @@ import {
     gpHandleWheel, gpHandleKeyDown, gpHandleKeyUp, gpHandleBlur, gpHandlePointerLeave,
     gpHandleFocusWorld, gpHandleStartBuildPlacement, gpHandleCancelBuildPlacement,
     gpHandleRemoveFactoryOrder,
+    gpHandleCancelCommandMode,
 } from './game-processor.js';
 // PLAN-rml.md: DOM events + viewport changes route straight into the RmlUi
 // bridge (no game-processor state needed).
@@ -150,6 +151,9 @@ self.onmessage = async (e: MessageEvent<WorkerInbound>) => {
             break;
         case 'gp:cancelBuildPlacement':
             gpHandleCancelBuildPlacement();
+            break;
+        case 'gp:cancelCommandMode':
+            gpHandleCancelCommandMode();
             break;
 
         // PLAN-playable.md G4: native FactoryQueuePanel (main) requests
