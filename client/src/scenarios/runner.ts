@@ -2,22 +2,43 @@
  * Scenario runner — drives a single named scenario end-to-end from a
  * cold browser session. Triggered by the `?scenario=<name>` URL param.
  *
- * Flow:
+ * Two pipelines get a scenario from a cold session to a booted game.
+ * Both converge on the same waitForHarness/waitForFirstFrame/setup/run
+ * tail (steps 3+ below) — only how the room gets created differs.
+ *
+ * **Direct (default, PLAN-quickstart.md Part A):** the scenario's
+ * map/gameId/aiSlots/playerTeam/playerStartPos already match the
+ * `/api/rooms/direct` manifest shape, so `startDirect()` serialises them
+ * into one manifest and POSTs it once — no lobby login, no stale-room
+ * cleanup (the server force-leaves busy players itself), no N-step
+ * AI/slot/ready dance. Every bench scenario gets this fast path for
+ * free with zero scenario-file changes.
+ *
+ * **Legacy (`?via=lobby`):** the original end-to-end lobby walk —
  *   1. Auto-login as `test1:test` (hard-coded test credential; the
  *      regular saved-session auto-login is suppressed when this runner
  *      is active to avoid race conditions).
  *   2. Inject the token into LobbyUI via `attachSession` so its SSE
  *      stream starts and `onGameStart` fires when the game boots.
- *   3. Create a fresh room on the scenario's `map` + `gameId` (via
+ *   3. Leave any stale rooms from a prior session (`leaveAllRooms` —
+ *      lives only in this pipeline; the direct endpoint owns that
+ *      cleanup atomically server-side).
+ *   4. Create a fresh room on the scenario's `map` + `gameId` (via
  *      LobbyUI.lobbyPost so the same auth path is used everywhere).
- *   4. POST `/api/rooms/ai/add` for every declared AI slot.
- *   5. Set the host's team / start-position if the scenario asks for
+ *   5. POST `/api/rooms/ai/add` for every declared AI slot.
+ *   6. Set the host's team / start-position if the scenario asks for
  *      something non-default.
- *   6. Mark host ready → `/api/rooms/start`. The lobby's existing
+ *   7. Mark host ready → `/api/rooms/start`. The lobby's existing
  *      onGameStart wiring then triggers `startGame()` in main.ts.
- *   7. After main.ts publishes `window.test`, call `scenario.setup(h)`,
- *      optionally `scenario.run(h)`, and stash results on
- *      `window.scenarioResults`.
+ * This is deliberately the *only* thing that still exercises the full
+ * lobby HTTP surface end-to-end — kept as a regression path, not the
+ * tax every scenario run pays. See the `lobby-flow` scenario.
+ *
+ * Then, on either pipeline:
+ *   - Wait for `window.test` to appear, then for the sim to tick.
+ *   - Enable cheats + revive every team (dead-team edge case).
+ *   - Call `scenario.setup(h)`, optionally `scenario.run(h)`, and stash
+ *     results on `window.scenarioResults`.
  *
  * Errors at any step are surfaced both via `console.error` and an entry
  * appended to `window.scenarioResults` so external drivers (MCP, manual
@@ -67,6 +88,16 @@ export class ScenarioRunner {
         return s;
     }
 
+    /** `?via=lobby` opts into the legacy end-to-end lobby walk (login →
+     *  leaveAll → create → addAI → slots → ready → start). Default is
+     *  the direct-start pipeline (one `/api/rooms/direct` call) — the
+     *  legacy path is kept only as a deliberate lobby-surface
+     *  regression path (see the `lobby-flow` scenario), never the tax
+     *  every scenario run pays. */
+    static useLegacyPipeline(): boolean {
+        return new URLSearchParams(location.search).get('via') === 'lobby';
+    }
+
     private scenario: Scenario;
     private lobby: LobbyUI;
     private playerId = 0;
@@ -97,20 +128,25 @@ export class ScenarioRunner {
             // Hide the login form — the runner is in charge of auth.
             this.lobby.hide();
 
-            await this.login();
-            console.log(`[scenario] logged in as ${TEST_USER} (id=${this.playerId})`);
-            const leftCount = await this.leaveAllRooms();
-            if (leftCount > 0) {
-                console.log(`[scenario] left ${leftCount} stale room(s) from prior session`);
+            if (ScenarioRunner.useLegacyPipeline()) {
+                await this.login();
+                console.log(`[scenario] logged in as ${TEST_USER} (id=${this.playerId})`);
+                const leftCount = await this.leaveAllRooms();
+                if (leftCount > 0) {
+                    console.log(`[scenario] left ${leftCount} stale room(s) from prior session`);
+                }
+                await this.createRoom();
+                console.log(`[scenario] created room ${this.roomId} on ${s.map} / ${s.gameId}`);
+                await this.addAISlots();
+                console.log(`[scenario] added ${s.aiSlots.length} AI slot(s)`);
+                await this.setPlayerSlot();
+                await this.ready();
+                await this.startGame();
+                console.log(`[scenario] /api/rooms/start sent — waiting for game to boot`);
+            } else {
+                await this.startDirect();
+                console.log(`[scenario] room ${this.roomId} created via /api/rooms/direct — waiting for game to boot`);
             }
-            await this.createRoom();
-            console.log(`[scenario] created room ${this.roomId} on ${s.map} / ${s.gameId}`);
-            await this.addAISlots();
-            console.log(`[scenario] added ${s.aiSlots.length} AI slot(s)`);
-            await this.setPlayerSlot();
-            await this.ready();
-            await this.startGame();
-            console.log(`[scenario] /api/rooms/start sent — waiting for game to boot`);
 
             // Wait for window.test to appear (startGame in main.ts wires
             // it after entityRenderer is constructed). 60s should be
@@ -178,6 +214,57 @@ export class ScenarioRunner {
     }
 
     // ── Pipeline steps ──────────────────────────────────────────────
+
+    /**
+     * Direct pipeline (default, PLAN-quickstart.md Part A). Serialises
+     * the scenario straight into a `/api/rooms/direct` manifest — one
+     * round trip replaces login + leaveAllRooms + createRoom +
+     * addAISlots + setPlayerSlot + ready + startGame. The response is
+     * the same room JSON `/api/rooms/start` already returns plus a
+     * `sessions` map; hand it to the lobby exactly like `createRoom()`
+     * does so the existing SSE → onGameStart wiring is untouched.
+     */
+    private async startDirect(): Promise<void> {
+        const s = this.scenario;
+        const manifest = {
+            name: `scenario:${s.name}`,
+            map: s.map,
+            game: s.gameId,
+            aiSlots: s.aiSlots.map((slot) => ({
+                aiId: slot.aiId,
+                team: slot.team,
+                ...(slot.startPos !== undefined ? { startPos: slot.startPos } : {}),
+            })),
+            players: [{
+                username: TEST_USER,
+                team: s.playerTeam ?? 0,
+                ...(s.playerStartPos !== undefined ? { startPos: s.playerStartPos } : {}),
+                spectator: false,
+            }],
+            autoStart: true,
+        };
+
+        const resp = await fetch(`${CONFIG.httpUrl}/api/rooms/direct`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(manifest),
+        });
+        const room = await resp.json();
+        if (!resp.ok) throw new Error(`startDirect: /api/rooms/direct failed: ${room?.error ?? resp.status}`);
+        if (!room?.id) throw new Error(`startDirect: missing id in response: ${JSON.stringify(room)}`);
+
+        const token = room.sessions?.[TEST_USER];
+        const hostPlayer = (room.players ?? []).find((p: any) => p.username === TEST_USER);
+        if (!token || !hostPlayer) throw new Error('startDirect: response missing host session/player');
+
+        this.playerId = hostPlayer.player_id;
+        this.roomId = room.id;
+        // Hand off to the lobby so SSE polling, lobbyPost, and the
+        // onGameStart wiring all share this session/room, same as the
+        // legacy pipeline's login()/createRoom() do.
+        this.lobby.attachSession(token, this.playerId, TEST_USER);
+        this.lobby.setCurrentRoomFromJson(room);
+    }
 
     private async login(): Promise<void> {
         // Raw fetch — LobbyUI.lobbyPost requires authToken which we don't

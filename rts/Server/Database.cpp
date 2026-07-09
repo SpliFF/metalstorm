@@ -70,12 +70,27 @@ void Database::CreateTables() {
         SLOG(SPRING_LOG_ERROR, "error creating tables: %s", errMsg);
         sqlite3_free(errMsg);
     }
+
+    // Non-destructive migration: `users` holds durable accounts (unlike
+    // `rooms`, which the lobby is free to drop+recreate on a schema bump),
+    // so a stale schema gets an ALTER TABLE instead of DROP+CREATE. Probe
+    // for the newest-added column first — ALTER TABLE ADD COLUMN fails if
+    // it's already there.
+    {
+        sqlite3_stmt* stmt = nullptr;
+        int probeRc = sqlite3_prepare_v2(db, "SELECT is_dev FROM users LIMIT 1", -1, &stmt, nullptr);
+        sqlite3_finalize(stmt);
+        if (probeRc != SQLITE_OK) {
+            sqlite3_exec(db, "ALTER TABLE users ADD COLUMN is_dev INTEGER NOT NULL DEFAULT 0",
+                nullptr, nullptr, nullptr);
+        }
+    }
 }
 
 int64_t Database::CreateUser(const std::string& username, const std::string& passwordHash,
-                             const std::string& role)
+                             const std::string& role, bool isDev)
 {
-    const char* sql = "INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)";
+    const char* sql = "INSERT INTO users (username, password_hash, role, is_dev) VALUES (?, ?, ?, ?)";
     sqlite3_stmt* stmt = nullptr;
 
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
@@ -84,6 +99,7 @@ int64_t Database::CreateUser(const std::string& username, const std::string& pas
     sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 2, passwordHash.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 3, role.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 4, isDev ? 1 : 0);
 
     int rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
@@ -95,7 +111,7 @@ int64_t Database::CreateUser(const std::string& username, const std::string& pas
 }
 
 std::optional<UserRecord> Database::FindUser(const std::string& username) {
-    const char* sql = "SELECT id, username, password_hash, role, is_banned FROM users WHERE username = ?";
+    const char* sql = "SELECT id, username, password_hash, role, is_banned, is_dev FROM users WHERE username = ?";
     sqlite3_stmt* stmt = nullptr;
 
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
@@ -114,13 +130,14 @@ std::optional<UserRecord> Database::FindUser(const std::string& username) {
     user.passwordHash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
     user.role = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
     user.isBanned = sqlite3_column_int(stmt, 4) != 0;
+    user.isDev = sqlite3_column_int(stmt, 5) != 0;
 
     sqlite3_finalize(stmt);
     return user;
 }
 
 std::optional<UserRecord> Database::FindUserById(int64_t userId) {
-    const char* sql = "SELECT id, username, password_hash, role, is_banned FROM users WHERE id = ?";
+    const char* sql = "SELECT id, username, password_hash, role, is_banned, is_dev FROM users WHERE id = ?";
     sqlite3_stmt* stmt = nullptr;
 
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
@@ -139,6 +156,7 @@ std::optional<UserRecord> Database::FindUserById(int64_t userId) {
     user.passwordHash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
     user.role = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
     user.isBanned = sqlite3_column_int(stmt, 4) != 0;
+    user.isDev = sqlite3_column_int(stmt, 5) != 0;
 
     sqlite3_finalize(stmt);
     return user;
