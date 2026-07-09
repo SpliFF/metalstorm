@@ -1,10 +1,10 @@
 procs:
   logserver:
-    shell: "./build/debug/spring-logserver --port 8010 --db data/debug.db"
+    shell: "./build/debug/spring-logserver --port 8010 --db data/debug.db --i-understand-this-is-a-dev-build"
     stop: SIGINT
 
   lobby:
-    shell: "./build/debug/spring-lobby --no-cache --port 8011 --game data/games/papertanks --maps data/maps --games-dir data/games --db data/spring-server.db --dev-direct-start"
+    shell: "./build/debug/spring-lobby --no-cache --port 8011 --game data/games/papertanks --maps data/maps --games-dir data/games --db data/spring-server.db --dev-direct-start --i-understand-this-is-a-dev-build"
     stop: SIGINT
 
   client:

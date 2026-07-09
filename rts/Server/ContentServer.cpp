@@ -44,13 +44,13 @@ void ContentServer::Init(NetworkServer& net, const std::vector<std::string>& con
         assets.size(), roots.size());
 
     // Manifest endpoint
-    net.AddHttpGet("/api/content/manifest", [this](const std::string&) -> HttpResponse {
+    net.AddHttpGet("/api/content/manifest", RouteAuth::Public, [this](const std::string&) -> HttpResponse {
         std::vector<uint8_t> body(cachedManifest.begin(), cachedManifest.end());
         return {.contentType = "application/json", .body = std::move(body), .status = 200};
     });
 
     // Asset file endpoint (pattern matches /api/content/assets/*)
-    net.AddHttpGet("/api/content/assets/*", [this](const std::string& url) -> HttpResponse {
+    net.AddHttpGet("/api/content/assets/*", RouteAuth::Public, [this](const std::string& url) -> HttpResponse {
         // Strip prefix to get the asset key
         const std::string prefix = "/api/content/assets/";
         if (url.size() <= prefix.size())

@@ -61,6 +61,48 @@ struct HttpRequestHeaders {
 using HttpPostHandler = std::function<HttpResponse(const std::string& url, const std::string& body,
                                                     const HttpRequestHeaders& headers)>;
 
+/// Required classification for every registered route (PLAN-security-hardening
+/// G20 — "every new route defaults to open" because auth lived per-lambda with
+/// no forcing function). `AddHttpGet`/`AddHttpPost` take this as a mandatory
+/// argument so a route literally cannot be registered without a conscious
+/// choice, and `GetRegisteredRoutes()` lets a CI/doctest snapshot test assert
+/// the full set + classification hasn't drifted.
+///
+/// Enforcement note: POST handlers receive `HttpRequestHeaders` so
+/// TokenRequired/AdminOnly/LocalhostOrAdmin are checked by NetworkServer
+/// itself in DispatchPost *before* the handler runs (belt-and-braces on top
+/// of whatever the handler does internally for its own business logic, e.g.
+/// resolving which user is acting). GET handlers (`HttpGetHandler`) never
+/// received headers/Authorization in this codebase and no currently-open GET
+/// route needs auth, so for GET the tag is classification/documentation only
+/// — not runtime-enforced. If a future GET route needs real auth, extend
+/// `HttpGetHandler` to carry headers first.
+enum class RouteAuth {
+    Public,           ///< No auth check.
+    TokenRequired,     ///< Any valid session token (Bearer or Basic).
+    AdminOnly,         ///< Valid token AND role=="admin".
+    LocalhostOrAdmin,  ///< remoteIsLoopback OR (valid token AND role=="admin").
+};
+
+/// Callbacks a server wires in once at startup so NetworkServer can enforce
+/// RouteAuth without depending on Database/HttpAuth directly (kept a
+/// transport-only class; not every process that links it has a Database —
+/// e.g. spring-logserver today only registers RouteAuth::Public routes and
+/// never calls SetRouteAuthCallbacks).
+struct RouteAuthCallbacks {
+    /// Validate an Authorization header value, return the user ID or 0.
+    std::function<int64_t(const std::string& authHeader)> validateToken;
+    /// Return true if the given (already-validated) user ID has the admin role.
+    std::function<bool(int64_t userId)> isAdmin;
+};
+
+/// One registered route's classification, for route-table snapshot tests.
+struct RouteInfo {
+    std::string method;  // "GET" or "POST"
+    std::string pattern;
+    RouteAuth auth;
+};
+
 class NetworkServer {
 public:
     NetworkServer();
@@ -73,10 +115,10 @@ public:
     void Stop();
 
     /// Register an HTTP GET endpoint. Must be called before Start().
-    void AddHttpGet(const std::string& pattern, HttpGetHandler handler);
+    void AddHttpGet(const std::string& pattern, RouteAuth auth, HttpGetHandler handler);
 
     /// Register an HTTP POST endpoint. Must be called before Start().
-    void AddHttpPost(const std::string& pattern, HttpPostHandler handler);
+    void AddHttpPost(const std::string& pattern, RouteAuth auth, HttpPostHandler handler);
 
     /// Register an SSE (Server-Sent Events) endpoint pattern.
     /// Returns a channel ID for pushing events via SendSSE().
@@ -88,6 +130,18 @@ public:
     void SendSSE(uint32_t channelId, const std::string& data,
                  const std::string& event = "");
 
+    /// Wire the callbacks DispatchPost uses to enforce TokenRequired/AdminOnly/
+    /// LocalhostOrAdmin. Must be called before Start() if any registered POST
+    /// route uses a non-Public RouteAuth. Processes with no Database (e.g.
+    /// spring-logserver today) can skip this as long as every route they
+    /// register is RouteAuth::Public.
+    void SetRouteAuthCallbacks(RouteAuthCallbacks callbacks);
+
+    /// Snapshot of every registered GET/POST route and its RouteAuth
+    /// classification. Feeds the route-table snapshot test (PLAN-security-
+    /// hardening task 6 / gap G20). Does not include SSE channels.
+    std::vector<RouteInfo> GetRegisteredRoutes() const;
+
     /// Raw query string (everything after '?', undecoded) of the request
     /// currently being dispatched on this thread, or "" if none. Handlers
     /// receive only the decoded path as their `url` argument; call this to
@@ -97,9 +151,13 @@ public:
 private:
     void NetworkThreadFunc(int port);
 
+    struct GetRoute { std::string pattern; RouteAuth auth; HttpGetHandler handler; };
+    struct PostRoute { std::string pattern; RouteAuth auth; HttpPostHandler handler; };
+
     // HTTP handlers registered before Start()
-    std::vector<std::pair<std::string, HttpGetHandler>> httpGetHandlers;
-    std::vector<std::pair<std::string, HttpPostHandler>> httpPostHandlers;
+    std::vector<GetRoute> httpGetHandlers;
+    std::vector<PostRoute> httpPostHandlers;
+    RouteAuthCallbacks routeAuthCallbacks;
 
     std::thread networkThread;
     std::atomic<bool> running{false};

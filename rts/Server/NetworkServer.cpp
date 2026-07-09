@@ -231,8 +231,9 @@ struct NetworkServer::Impl {
     std::vector<int> pendingClose;
 
     // Handler references (set before Start)
-    const std::vector<std::pair<std::string, HttpGetHandler>>* getHandlers = nullptr;
-    const std::vector<std::pair<std::string, HttpPostHandler>>* postHandlers = nullptr;
+    const std::vector<NetworkServer::GetRoute>* getHandlers = nullptr;
+    const std::vector<NetworkServer::PostRoute>* postHandlers = nullptr;
+    const RouteAuthCallbacks* authCallbacks = nullptr;
 
     // SSE channels
     struct SSEChannel { std::string pattern; };
@@ -255,16 +256,52 @@ struct NetworkServer::Impl {
         const std::string rawPath = (qpos != std::string::npos) ? url.substr(0, qpos) : url;
         const std::string path = UrlDecode(rawPath);
         SetCurrentQueryString(qpos != std::string::npos ? url.substr(qpos + 1) : "");
-        // Try exact matches first, then wildcards
-        for (auto& [pattern, handler] : *getHandlers) {
-            if (pattern.find('*') == std::string::npos && RouteMatch(pattern, path))
-                return handler(path);
+        // Try exact matches first, then wildcards. RouteAuth is not enforced
+        // here — see the RouteAuth comment in NetworkServer.h (GET handlers
+        // never receive headers/Authorization; no currently-open GET route
+        // needs auth, so the tag is classification-only for GET today).
+        for (auto& route : *getHandlers) {
+            if (route.pattern.find('*') == std::string::npos && RouteMatch(route.pattern, path))
+                return route.handler(path);
         }
-        for (auto& [pattern, handler] : *getHandlers) {
-            if (pattern.find('*') != std::string::npos && RouteMatch(pattern, path))
-                return handler(path);
+        for (auto& route : *getHandlers) {
+            if (route.pattern.find('*') != std::string::npos && RouteMatch(route.pattern, path))
+                return route.handler(path);
         }
         return {.contentType = "text/plain", .body = {'4','0','4'}, .status = 404};
+    }
+
+    /// Default-deny check for POST routes (PLAN-security-hardening G20). Runs
+    /// before the handler for any non-Public RouteAuth. Belt-and-braces: the
+    /// handler is free to do its own auth lookups on top of this for business
+    /// logic (e.g. which user is acting), this is just the gate.
+    static HttpResponse JsonError(int status, const char* msg) {
+        std::string json = std::string("{\"error\":\"") + msg + "\"}";
+        return {.contentType = "application/json", .body = {json.begin(), json.end()}, .status = status};
+    }
+
+    HttpResponse CheckAuthAndCall(const NetworkServer::PostRoute& route, const std::string& path,
+                                   const std::string& body, const HttpRequestHeaders& hdrs) {
+        if (route.auth != RouteAuth::Public) {
+            int64_t userId = 0;
+            if (authCallbacks && authCallbacks->validateToken)
+                userId = authCallbacks->validateToken(hdrs.authorization);
+            const bool tokenOk = userId > 0;
+            const bool adminOk = tokenOk && authCallbacks && authCallbacks->isAdmin && authCallbacks->isAdmin(userId);
+            switch (route.auth) {
+                case RouteAuth::TokenRequired:
+                    if (!tokenOk) return JsonError(401, "unauthorized");
+                    break;
+                case RouteAuth::AdminOnly:
+                    if (!adminOk) return JsonError(tokenOk ? 403 : 401, tokenOk ? "forbidden — admin role required" : "unauthorized");
+                    break;
+                case RouteAuth::LocalhostOrAdmin:
+                    if (!hdrs.remoteIsLoopback && !adminOk) return JsonError(tokenOk ? 403 : 401, tokenOk ? "forbidden" : "unauthorized");
+                    break;
+                default: break;
+            }
+        }
+        return route.handler(path, body, hdrs);
     }
 
     HttpResponse DispatchPost(const std::string& url, const std::string& body,
@@ -273,13 +310,13 @@ struct NetworkServer::Impl {
         const std::string rawPath = (qpos != std::string::npos) ? url.substr(0, qpos) : url;
         const std::string path = UrlDecode(rawPath);
         SetCurrentQueryString(qpos != std::string::npos ? url.substr(qpos + 1) : "");
-        for (auto& [pattern, handler] : *postHandlers) {
-            if (pattern.find('*') == std::string::npos && RouteMatch(pattern, path))
-                return handler(path, body, hdrs);
+        for (auto& route : *postHandlers) {
+            if (route.pattern.find('*') == std::string::npos && RouteMatch(route.pattern, path))
+                return CheckAuthAndCall(route, path, body, hdrs);
         }
-        for (auto& [pattern, handler] : *postHandlers) {
-            if (pattern.find('*') != std::string::npos && RouteMatch(pattern, path))
-                return handler(path, body, hdrs);
+        for (auto& route : *postHandlers) {
+            if (route.pattern.find('*') != std::string::npos && RouteMatch(route.pattern, path))
+                return CheckAuthAndCall(route, path, body, hdrs);
         }
         return {.contentType = "text/plain", .body = {'4','0','4'}, .status = 404};
     }
@@ -869,12 +906,24 @@ struct NetworkServer::Impl {
 NetworkServer::NetworkServer() : impl(std::make_unique<Impl>()) {}
 NetworkServer::~NetworkServer() { Stop(); }
 
-void NetworkServer::AddHttpGet(const std::string& pattern, HttpGetHandler handler) {
-    httpGetHandlers.emplace_back(pattern, std::move(handler));
+void NetworkServer::AddHttpGet(const std::string& pattern, RouteAuth auth, HttpGetHandler handler) {
+    httpGetHandlers.push_back({pattern, auth, std::move(handler)});
 }
 
-void NetworkServer::AddHttpPost(const std::string& pattern, HttpPostHandler handler) {
-    httpPostHandlers.emplace_back(pattern, std::move(handler));
+void NetworkServer::AddHttpPost(const std::string& pattern, RouteAuth auth, HttpPostHandler handler) {
+    httpPostHandlers.push_back({pattern, auth, std::move(handler)});
+}
+
+void NetworkServer::SetRouteAuthCallbacks(RouteAuthCallbacks callbacks) {
+    routeAuthCallbacks = std::move(callbacks);
+}
+
+std::vector<RouteInfo> NetworkServer::GetRegisteredRoutes() const {
+    std::vector<RouteInfo> out;
+    out.reserve(httpGetHandlers.size() + httpPostHandlers.size());
+    for (auto& r : httpGetHandlers) out.push_back({"GET", r.pattern, r.auth});
+    for (auto& r : httpPostHandlers) out.push_back({"POST", r.pattern, r.auth});
+    return out;
 }
 
 std::string NetworkServer::CurrentQueryString() {
@@ -902,6 +951,7 @@ bool NetworkServer::Start(int port) {
     // Set handler references for Impl
     impl->getHandlers = &httpGetHandlers;
     impl->postHandlers = &httpPostHandlers;
+    impl->authCallbacks = &routeAuthCallbacks;
 
     // Create wakeup pipe
     if (pipe(impl->wakePipe) < 0) {

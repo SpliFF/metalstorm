@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 struct sqlite3;
 
@@ -73,6 +74,33 @@ public:
     /// Delete all expired sessions (older than maxAgeSeconds).
     /// Returns the number of sessions deleted.
     int CleanExpiredSessions(int maxAgeSeconds = 86400);
+
+    /// Append an entry to the admin_audit log (PLAN-security-hardening task
+    /// 6). Every admin-role action — exec, restart, GM verbs (rollback/
+    /// grant), direct-start — goes through this. Append-only: there is no
+    /// update/delete verb. `userId` is 0 for actions with no session
+    /// (localhost-gated routes reached without a token, e.g.
+    /// /api/rooms/direct off loopback). `argsDigest` should be a short
+    /// summary/hash of the args, not the full payload verbatim (avoid
+    /// bloating the audit table with e.g. full exec Lua source — callers
+    /// decide what's worth keeping).
+    void LogAudit(int64_t userId, const std::string& username, const std::string& action,
+                  const std::string& target, const std::string& argsDigest);
+
+    struct AuditEntry {
+        int64_t id = 0;
+        int64_t userId = 0;
+        std::string username;
+        std::string action;
+        std::string target;
+        std::string argsDigest;
+        std::string createdAt;
+    };
+
+    /// Most recent audit entries, newest first. Read path for an operator
+    /// dashboard / gm-tools; the write path (LogAudit) has no matching
+    /// update/delete verb anywhere in this class — append-only by omission.
+    std::vector<AuditEntry> GetRecentAuditEntries(int limit = 100);
 
 private:
     void CreateTables();

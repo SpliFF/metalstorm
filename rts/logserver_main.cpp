@@ -5,6 +5,7 @@
 // log delivery. Uses NetworkServer (HTTP/2 h2c + HTTP/1.1).
 
 #include "Server/NetworkServer.h"
+#include "Server/DevBuildGate.h"
 #include "System/SpringLog/SpringLog.h"
 #include "System/SpringLog/SpringLogSqlite.h"
 
@@ -320,6 +321,7 @@ int main(int argc, char** argv) {
     std::signal(SIGHUP,  restartHandler);
 
     // Parse args
+    bool devBuildAcknowledged = false;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--port") == 0 && i + 1 < argc)
             g_port = atoi(argv[++i]);
@@ -331,8 +333,16 @@ int main(int argc, char** argv) {
             else if (strcmp(lvl, "info") == 0) springlog_set_min_level(SPRING_LOG_INFO);
             else if (strcmp(lvl, "warning") == 0) springlog_set_min_level(SPRING_LOG_WARNING);
             else if (strcmp(lvl, "error") == 0) springlog_set_min_level(SPRING_LOG_ERROR);
+        } else if (strcmp(argv[i], DevBuildGate::kFlag) == 0) {
+            devBuildAcknowledged = true;
         }
     }
+
+    // PLAN-security-hardening E1: the restart handler re-execs g_savedArgv
+    // (the original argv, including this flag), so the acknowledgment
+    // survives a POST /api/logs/restart / SIGHUP re-exec.
+    if (!DevBuildGate::CheckAndWarn("spring-logserver", devBuildAcknowledged))
+        return 1;
 
     // Init SQLite sink (writes log records to debug.db on a flush thread)
     springlog_sqlite_init(g_dbPath.c_str());
@@ -374,7 +384,7 @@ int main(int argc, char** argv) {
 
     // --- HTTP log query endpoints ---
 
-    net.AddHttpGet("/api/logs/*", [](const std::string& url) -> HttpResponse {
+    net.AddHttpGet("/api/logs/*", RouteAuth::Public, [](const std::string& url) -> HttpResponse {
         // Extract roomId from path: /api/logs/42?limit=... → "42"
         std::string roomStr = ExtractPathSegment(url, "/api/logs/");
         if (roomStr.empty() || roomStr == "search" || roomStr == "sources" || roomStr == "stream")
@@ -458,7 +468,7 @@ int main(int argc, char** argv) {
                 .body = {body.begin(), body.end()}, .status = 200};
     });
 
-    net.AddHttpGet("/api/logs/search", [](const std::string& url) -> HttpResponse {
+    net.AddHttpGet("/api/logs/search", RouteAuth::Public, [](const std::string& url) -> HttpResponse {
         std::string query = QueryParam(url, "q");
         int limit = 200;
         uint8_t minLevel = 0;
@@ -534,13 +544,13 @@ int main(int argc, char** argv) {
                 .body = {json.begin(), json.end()}, .status = 200};
     });
 
-    net.AddHttpGet("/api/logs/sources", [](const std::string&) -> HttpResponse {
+    net.AddHttpGet("/api/logs/sources", RouteAuth::Public, [](const std::string&) -> HttpResponse {
         std::string json = R"({"status":"ok"})";
         return {.contentType = "application/json",
                 .body = {json.begin(), json.end()}, .status = 200};
     });
 
-    net.AddHttpGet("/api/sessions", [](const std::string&) -> HttpResponse {
+    net.AddHttpGet("/api/sessions", RouteAuth::Public, [](const std::string&) -> HttpResponse {
         sqlite3* db = nullptr;
         std::string json = "[]";
         if (sqlite3_open(g_dbPath.c_str(), &db) == SQLITE_OK) {
@@ -581,7 +591,17 @@ int main(int argc, char** argv) {
     // We parse with our own minimal JSON helper to avoid pulling in a full
     // library — the schema is narrow and stable, and we already use a
     // similar approach for test-event.
-    net.AddHttpPost("/api/logs/ingest", [](const std::string&, const std::string& body,
+    //
+    // PLAN-security-hardening task 2 (G1): spring-logserver links neither
+    // Database nor HttpAuth, so these three write routes can't be RouteAuth-
+    // gated like the other servers' admin routes without pulling in that
+    // dependency (deferred to task 8's full logserver-auth fix). For now,
+    // compiled out entirely under SPRING_PROD: unauthenticated log forgery /
+    // synthetic-event injection / process re-exec have no place in a
+    // production binary. Dev builds keep them (MCP `restart_logserver` +
+    // browser log ingestion rely on this today).
+#ifndef SPRING_PROD
+    net.AddHttpPost("/api/logs/ingest", RouteAuth::Public, [](const std::string&, const std::string& body,
                                             const HttpRequestHeaders&) -> HttpResponse {
         // Locate either a top-level entry (no "entries" key) or each
         // element in the entries array. We slice the array string and walk
@@ -660,7 +680,7 @@ int main(int argc, char** argv) {
     });
 
     // POST endpoint for SSE testing — generates a synthetic log event
-    net.AddHttpPost("/api/logs/test-event", [](const std::string&, const std::string& body,
+    net.AddHttpPost("/api/logs/test-event", RouteAuth::Public, [](const std::string&, const std::string& body,
                                                 const HttpRequestHeaders&) -> HttpResponse {
         // Parse optional message from body
         std::string msg = "test event";
@@ -687,7 +707,7 @@ int main(int argc, char** argv) {
     // keeps mprocs authoritative over the pid (no kill + respawn). Sets the
     // restart flag + wakes the run loop; the actual execvp happens on the
     // main thread once the network server has stopped.
-    net.AddHttpPost("/api/logs/restart", [](const std::string&, const std::string&,
+    net.AddHttpPost("/api/logs/restart", RouteAuth::Public, [](const std::string&, const std::string&,
                                             const HttpRequestHeaders&) -> HttpResponse {
         g_restart.store(true);
         g_shutdown.store(true);
@@ -695,6 +715,7 @@ int main(int argc, char** argv) {
         return {.contentType = "application/json",
                 .body = {resp, resp + strlen(resp)}, .status = 200};
     });
+#endif // !SPRING_PROD
 
     net.Start(g_port);
 

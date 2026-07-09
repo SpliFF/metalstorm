@@ -29,8 +29,20 @@ void RegisterGameHttpRoutes(GameServerContext& ctx,
                             std::atomic<bool>& keepRunning) {
     auto& net = ctx.net;
 
+    // PLAN-security-hardening task 6 (G20): wire the default-deny dispatch
+    // gate for RouteAuth::TokenRequired/AdminOnly/LocalhostOrAdmin routes.
+    net.SetRouteAuthCallbacks({
+        .validateToken = [&ctx](const std::string& authHeader) -> int64_t {
+            return HttpAuth::ValidateAuth(ctx.db, authHeader);
+        },
+        .isAdmin = [&ctx](int64_t userId) -> bool {
+            auto user = ctx.db.FindUserById(userId);
+            return user && user->role == "admin";
+        },
+    });
+
     // HTTP endpoints for terrain data (handlers check readMap at request time)
-    net.AddHttpGet("/api/map/heightmap", [](const std::string&) -> HttpResponse {
+    net.AddHttpGet("/api/map/heightmap", RouteAuth::Public, [](const std::string&) -> HttpResponse {
         if (readMap == nullptr)
             return {.contentType = "text/plain", .body = {}, .status = 404};
 
@@ -52,7 +64,7 @@ void RegisterGameHttpRoutes(GameServerContext& ctx,
         return {.contentType = "application/octet-stream", .body = std::move(body), .status = 200};
     });
 
-    net.AddHttpGet("/api/map/info", [](const std::string&) -> HttpResponse {
+    net.AddHttpGet("/api/map/info", RouteAuth::Public, [](const std::string&) -> HttpResponse {
         if (readMap == nullptr)
             return {.contentType = "text/plain", .body = {}, .status = 404};
 
@@ -68,7 +80,7 @@ void RegisterGameHttpRoutes(GameServerContext& ctx,
     });
 
     // Available maps endpoint — scans mapsDir for SMF files
-    net.AddHttpGet("/api/maps", [&mapsDir](const std::string&) -> HttpResponse {
+    net.AddHttpGet("/api/maps", RouteAuth::Public, [&mapsDir](const std::string&) -> HttpResponse {
         namespace fs = std::filesystem;
         std::string json = "[";
         bool first = true;
@@ -137,7 +149,7 @@ void RegisterGameHttpRoutes(GameServerContext& ctx,
     });
 
     // Serve map thumbnail images
-    net.AddHttpGet("/api/maps/thumb/*", [&mapsDir](const std::string& url) -> HttpResponse {
+    net.AddHttpGet("/api/maps/thumb/*", RouteAuth::Public, [&mapsDir](const std::string& url) -> HttpResponse {
         std::string mapId = url.substr(std::string("/api/maps/thumb/").size());
         namespace fs = std::filesystem;
         fs::path mapDir = fs::path(mapsDir) / mapId;
@@ -163,7 +175,7 @@ void RegisterGameHttpRoutes(GameServerContext& ctx,
     });
 
     // Performance metrics endpoint
-    net.AddHttpGet("/api/metrics", [](const std::string&) -> HttpResponse {
+    net.AddHttpGet("/api/metrics", RouteAuth::Public, [](const std::string&) -> HttpResponse {
         std::string json = perfMetrics.ToJSON();
         std::vector<uint8_t> body(json.begin(), json.end());
         return {.contentType = "application/json", .body = std::move(body), .status = 200};
@@ -177,7 +189,7 @@ void RegisterGameHttpRoutes(GameServerContext& ctx,
 
     // Restart-in-place: re-exec this binary with the same argv.
     // Clients get a GameRestarting message before the connection drops.
-    net.AddHttpPost("/api/restart", [&ctx, &restartRequested, &keepRunning](const std::string&, const std::string&, const HttpRequestHeaders& headers) -> HttpResponse {
+    net.AddHttpPost("/api/restart", RouteAuth::AdminOnly, [&ctx, &restartRequested, &keepRunning](const std::string&, const std::string&, const HttpRequestHeaders& headers) -> HttpResponse {
         // S2-adjacent: restarting the game server is a privileged action —
         // admin only, same gate as /api/exec. Was previously unauthenticated.
         int64_t userId = HttpAuth::ValidateToken(ctx.db, headers.authorization);
@@ -187,6 +199,7 @@ void RegisterGameHttpRoutes(GameServerContext& ctx,
         if (!adminUser || adminUser->role != "admin")
             return HttpAuth::JsonResponse(403, R"({"error":"forbidden — admin role required"})");
 
+        ctx.db.LogAudit(userId, adminUser->username, "restart", "", "");
         SLOG(SPRING_LOG_NOTICE, "restart requested via /api/restart");
         restartRequested.store(true);
         keepRunning.store(false);
@@ -195,24 +208,34 @@ void RegisterGameHttpRoutes(GameServerContext& ctx,
                 .status = 200};
     });
 
-    net.AddHttpPost("/api/exec", [&ctx](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+    // PLAN-security-hardening task 2: compiled OUT entirely under
+    // SPRING_PROD — ExecSync runs arbitrary Lua in synced scopes, total game
+    // compromise if reachable at all. Belt-and-braces on top of the
+    // AdminOnly dispatch gate + the handler's own role check below.
+#ifndef SPRING_PROD
+    net.AddHttpPost("/api/exec", RouteAuth::AdminOnly, [&ctx](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
         // Validate auth token
         int64_t userId = HttpAuth::ValidateToken(ctx.db, headers.authorization);
         if (userId <= 0) {
             return HttpAuth::JsonResponse(401, R"({"error":"unauthorized — use POST /api/auth/login first"})");
         }
         // S2: ExecSync runs arbitrary Lua in synced scopes. Admin-only.
+        std::string execUsername;
         {
             auto execUser = ctx.db.FindUserById(userId);
             if (!execUser || execUser->role != "admin") {
                 return HttpAuth::JsonResponse(403, R"({"error":"forbidden — admin role required"})");
             }
+            execUsername = execUser->username;
         }
 
         nlohmann::json j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
         if (j.is_discarded()) return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
         std::string scope = j.value("scope", "");
         std::string code = j.value("code", "");
+
+        // Task 6: append-only admin audit trail.
+        ctx.db.LogAudit(userId, execUsername, "exec", scope, code.substr(0, 200));
 
         if (scope.empty() || code.empty()) {
             return HttpAuth::JsonResponse(400, R"({"success":false,"output":"missing scope or code"})");
@@ -224,11 +247,12 @@ void RegisterGameHttpRoutes(GameServerContext& ctx,
             + ",\"output\":\"" + HttpAuth::JsonEscape(result.output) + "\"}";
         return HttpAuth::JsonResponse(200, json);
     });
+#endif // !SPRING_PROD
 
     // Cert-hash discovery: the client pins the dev server's ephemeral
     // self-signed cert via serverCertificateHashes. It learns the hash (and the
     // WT port) from this endpoint over the already-trusted HTTP plane.
-    net.AddHttpGet("/api/wt/info", [&ctx](const std::string&) -> HttpResponse {
+    net.AddHttpGet("/api/wt/info", RouteAuth::Public, [&ctx](const std::string&) -> HttpResponse {
         std::string json = "{\"port\":" + std::to_string(ctx.rtcServer.Port())
             + ",\"certHash\":\"" + ctx.rtcServer.CertHash() + "\""
             + ",\"transport\":\"webtransport\"}";

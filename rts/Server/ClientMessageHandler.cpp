@@ -266,8 +266,12 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             // Look up or create user
             auto user = db.FindUser(username);
             if (!user) {
-                // Auto-register for now (Phase 1 MVP). S1: store a scrypt hash,
-                // never the raw password field.
+#ifndef SPRING_PROD
+                // Auto-register for now (Phase 1 MVP, dev builds only). S1:
+                // store a scrypt hash, never the raw password field.
+                // PLAN-security-hardening G5: an unauthenticated WebTransport
+                // handshake must not be able to silently mint accounts in
+                // production — register via POST /api/auth/register first.
                 std::string hashed = Crypto::HashPassword(passHash);
                 int64_t newId = hashed.empty()
                     ? 0 : db.CreateUser(username, hashed);
@@ -279,6 +283,13 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                     break;
                 }
                 user = db.FindUser(username);
+#else
+                auto resp = Protocol::BuildAuthResponse(
+                    SpringWeb::AuthStatus_InvalidCredentials, "", 0,
+                    "Unknown user — register via POST /api/auth/register first");
+                rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
+                break;
+#endif
             }
 
             // Check password (S1: scrypt verify; transparently upgrade legacy
@@ -702,6 +713,26 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                      "[server] LuaRulesMsg drop: empty data vector");
                 break;
             }
+            // PLAN-security-hardening task 4 (G6): the relay previously had
+            // no size cap and no rate limit at all, unlike PlayerCommand's
+            // token bucket. Checked before the payload is even copied out.
+            if (dataVec->size() > SessionManager::LUA_MSG_MAX_BYTES) {
+                SLOG(SPRING_LOG_WARNING,
+                     "[server] LuaRulesMsg drop: client=%u oversized payload (%zu bytes > %zu)",
+                     msg.clientId, static_cast<size_t>(dataVec->size()),
+                     static_cast<size_t>(SessionManager::LUA_MSG_MAX_BYTES));
+                auto err = Protocol::BuildServerError(413, "LuaRulesMsg payload too large");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                break;
+            }
+            if (!SessionManager::TryConsumeLuaMsgBudget(*session)) {
+                SLOG(SPRING_LOG_WARNING,
+                     "[server] LuaRulesMsg drop: client=%u rate-limited (drop #%u)",
+                     msg.clientId, session->luaMsgRateLimitDrops);
+                auto err = Protocol::BuildServerError(429, "LuaRulesMsg rate limit exceeded");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                break;
+            }
 
             std::string payload(reinterpret_cast<const char*>(dataVec->data()),
                                 dataVec->size());
@@ -739,6 +770,26 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             auto* dataVec = uim ? uim->data() : nullptr;
             if (dataVec == nullptr) break;
             const uint8_t mode = uim->mode();
+
+            // PLAN-security-hardening task 4 (G16): same cap as LuaRulesMsg
+            // — the relay previously had no size/rate limit at all.
+            if (dataVec->size() > SessionManager::LUA_MSG_MAX_BYTES) {
+                SLOG(SPRING_LOG_WARNING,
+                     "[server] LuaUIMsg drop: client=%u oversized payload (%zu bytes > %zu)",
+                     msg.clientId, static_cast<size_t>(dataVec->size()),
+                     static_cast<size_t>(SessionManager::LUA_MSG_MAX_BYTES));
+                auto err = Protocol::BuildServerError(413, "LuaUIMsg payload too large");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                break;
+            }
+            if (!SessionManager::TryConsumeLuaMsgBudget(*session)) {
+                SLOG(SPRING_LOG_WARNING,
+                     "[server] LuaUIMsg drop: client=%u rate-limited (drop #%u)",
+                     msg.clientId, session->luaMsgRateLimitDrops);
+                auto err = Protocol::BuildServerError(429, "LuaUIMsg rate limit exceeded");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                break;
+            }
 
             std::string payload(reinterpret_cast<const char*>(dataVec->data()),
                                 dataVec->size());
@@ -851,6 +902,21 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             const auto* startVec = req->start();
             const auto* endVec = req->end();
             if (!startVec || !endVec) {
+                auto resp = Protocol::BuildPathResponse(requestId, {}, 0.0f);
+                rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
+                break;
+            }
+            // PLAN-security-hardening task 4 (G13): unlike PlayerCommand,
+            // this had no rate limit at all — a flood of PathRequest ran
+            // unthrottled synchronous pathfinding on the sim thread, a
+            // direct DoS on tick time. Checked after parsing (so we can
+            // answer with a definitive empty path rather than leaving the
+            // client's request_id promise hanging) but before the actual
+            // pathfind runs.
+            if (!SessionManager::TryConsumePathRequestBudget(*session)) {
+                SLOG(SPRING_LOG_WARNING,
+                     "[server] PathRequest drop: client=%u rate-limited (drop #%u)",
+                     msg.clientId, session->pathReqRateLimitDrops);
                 auto resp = Protocol::BuildPathResponse(requestId, {}, 0.0f);
                 rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
                 break;

@@ -10,9 +10,80 @@
 #include "NetworkServer.h"
 #include "Crypto.h"
 
+#include <algorithm>
+#include <chrono>
+#include <mutex>
 #include <string>
+#include <unordered_map>
 
 namespace HttpAuth {
+
+/// PLAN-security-hardening task 3: per-username login lockout. In-memory
+/// (a restart clearing counters is acceptable — this defends against online
+/// credential stuffing, not offline analysis). Keyed on username rather than
+/// remote IP because NetworkServer only exposes a loopback boolean, not the
+/// peer address, to handlers.
+class LoginLimiter {
+public:
+    static constexpr int kMaxFailures = 5;
+    static constexpr int kLockoutSeconds = 60;
+
+    bool IsLocked(const std::string& username) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = byUsername_.find(username);
+        if (it == byUsername_.end()) return false;
+        return std::chrono::steady_clock::now() < it->second.lockedUntil;
+    }
+
+    void RecordFailure(const std::string& username) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto& e = byUsername_[username];
+        if (++e.failCount >= kMaxFailures)
+            e.lockedUntil = std::chrono::steady_clock::now() + std::chrono::seconds(kLockoutSeconds);
+    }
+
+    void RecordSuccess(const std::string& username) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        byUsername_.erase(username);
+    }
+
+private:
+    struct Entry {
+        int failCount = 0;
+        std::chrono::steady_clock::time_point lockedUntil{};
+    };
+    std::mutex mutex_;
+    std::unordered_map<std::string, Entry> byUsername_;
+};
+
+#ifdef SPRING_PROD
+/// PLAN-security-hardening G5: a global (not per-user — an attacker just
+/// picks a new username each time) token-bucket cap on account creation, so
+/// a script can't mass-mint accounts. Generous enough not to bother real
+/// signup traffic; dev builds skip this entirely (registration-heavy test
+/// flows — fresh-login/isolated-browser sessions — must stay unthrottled).
+class RegistrationLimiter {
+public:
+    static constexpr double kBurst = 20.0;
+    static constexpr double kPerSecond = 20.0 / 60.0;  // ~20/min sustained
+
+    bool TryConsume() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto now = std::chrono::steady_clock::now();
+        double elapsed = std::chrono::duration<double>(now - last_).count();
+        last_ = now;
+        tokens_ = std::min(kBurst, tokens_ + elapsed * kPerSecond);
+        if (tokens_ < 1.0) return false;
+        tokens_ -= 1.0;
+        return true;
+    }
+
+private:
+    std::mutex mutex_;
+    double tokens_ = kBurst;
+    std::chrono::steady_clock::time_point last_ = std::chrono::steady_clock::now();
+};
+#endif
 
 /// Generate a cryptographically-secure random hex session token (S3).
 /// 16 bytes of CSPRNG output → 32 hex chars (the previous token width).
@@ -171,8 +242,13 @@ inline int64_t ValidateToken(Database& db, const std::string& authHeader) {
 /// POST /api/auth/login  — login with username+password, returns token
 /// POST /api/auth/register — register a new account
 inline void RegisterEndpoints(NetworkServer& net, Database& db) {
+    static LoginLimiter loginLimiter;
+#ifdef SPRING_PROD
+    static RegistrationLimiter registrationLimiter;
+#endif
+
     // POST /api/auth/login
-    net.AddHttpPost("/api/auth/login", [&db](const std::string&, const std::string& body, const HttpRequestHeaders&) -> HttpResponse {
+    net.AddHttpPost("/api/auth/login", RouteAuth::Public, [&db](const std::string&, const std::string& body, const HttpRequestHeaders&) -> HttpResponse {
         std::string username = JsonField(body, "username");
         std::string password = JsonField(body, "password");
 
@@ -180,8 +256,15 @@ inline void RegisterEndpoints(NetworkServer& net, Database& db) {
             return JsonResponse(400, R"({"error":"missing username or password"})");
         }
 
+        // Task 3: per-username lockout ahead of the DB lookup so a flood
+        // against one username can't be used to time-probe existence either.
+        if (loginLimiter.IsLocked(username)) {
+            return JsonResponse(429, R"({"error":"too many failed attempts — try again shortly"})");
+        }
+
         auto user = db.FindUser(username);
         if (!user) {
+            loginLimiter.RecordFailure(username);
             return JsonResponse(401, R"({"error":"invalid credentials"})");
         }
         if (user->isBanned) {
@@ -189,8 +272,10 @@ inline void RegisterEndpoints(NetworkServer& net, Database& db) {
         }
         bool needsRehash = false;
         if (!Crypto::VerifyPassword(password, user->passwordHash, needsRehash)) {
+            loginLimiter.RecordFailure(username);
             return JsonResponse(401, R"({"error":"invalid credentials"})");
         }
+        loginLimiter.RecordSuccess(username);
         // Transparently upgrade legacy plaintext / weaker hashes on success.
         if (needsRehash)
             db.UpdatePasswordHash(user->id, Crypto::HashPassword(password));
@@ -206,7 +291,15 @@ inline void RegisterEndpoints(NetworkServer& net, Database& db) {
     });
 
     // POST /api/auth/register
-    net.AddHttpPost("/api/auth/register", [&db](const std::string&, const std::string& body, const HttpRequestHeaders&) -> HttpResponse {
+    net.AddHttpPost("/api/auth/register", RouteAuth::Public, [&db](const std::string&, const std::string& body, const HttpRequestHeaders&) -> HttpResponse {
+#ifdef SPRING_PROD
+        // G5: registration itself stays self-service (a public beta needs
+        // players to be able to sign up) but a script can no longer mass-mint
+        // accounts — see RegistrationLimiter above.
+        if (!registrationLimiter.TryConsume()) {
+            return JsonResponse(429, R"({"error":"too many registrations — try again shortly"})");
+        }
+#endif
         std::string username = JsonField(body, "username");
         std::string password = JsonField(body, "password");
 
@@ -245,7 +338,7 @@ inline void RegisterEndpoints(NetworkServer& net, Database& db) {
     });
 
     // POST /api/auth/validate — check if a token is still valid
-    net.AddHttpPost("/api/auth/validate", [&db](const std::string&, const std::string&, const HttpRequestHeaders& headers) -> HttpResponse {
+    net.AddHttpPost("/api/auth/validate", RouteAuth::Public, [&db](const std::string&, const std::string&, const HttpRequestHeaders& headers) -> HttpResponse {
         int64_t userId = ValidateAuth(db, headers.authorization);
         if (userId <= 0) {
             return JsonResponse(401, R"({"valid":false,"error":"invalid or expired token"})");

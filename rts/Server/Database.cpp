@@ -62,6 +62,16 @@ void Database::CreateTables() {
             user_id INTEGER NOT NULL REFERENCES users(id),
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
+
+        CREATE TABLE IF NOT EXISTS admin_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL DEFAULT 0,
+            username TEXT NOT NULL DEFAULT '',
+            action TEXT NOT NULL,
+            target TEXT NOT NULL DEFAULT '',
+            args_digest TEXT NOT NULL DEFAULT '',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
     )";
 
     char* errMsg = nullptr;
@@ -251,6 +261,60 @@ void Database::RevokeSession(const std::string& token) {
     sqlite3_bind_text(stmt, 1, token.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_step(stmt);
     sqlite3_finalize(stmt);
+}
+
+void Database::LogAudit(int64_t userId, const std::string& username, const std::string& action,
+                        const std::string& target, const std::string& argsDigest)
+{
+    const char* sql =
+        "INSERT INTO admin_audit (user_id, username, action, target, args_digest) "
+        "VALUES (?, ?, ?, ?, ?)";
+    sqlite3_stmt* stmt = nullptr;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        SLOG(SPRING_LOG_ERROR, "LogAudit: prepare failed: %s", sqlite3_errmsg(db));
+        return;
+    }
+
+    sqlite3_bind_int64(stmt, 1, userId);
+    sqlite3_bind_text(stmt, 2, username.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, action.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 4, target.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 5, argsDigest.c_str(), -1, SQLITE_TRANSIENT);
+
+    if (sqlite3_step(stmt) != SQLITE_DONE)
+        SLOG(SPRING_LOG_ERROR, "LogAudit: insert failed: %s", sqlite3_errmsg(db));
+
+    sqlite3_finalize(stmt);
+}
+
+std::vector<Database::AuditEntry> Database::GetRecentAuditEntries(int limit) {
+    std::vector<AuditEntry> out;
+    const char* sql =
+        "SELECT id, user_id, username, action, target, args_digest, created_at "
+        "FROM admin_audit ORDER BY id DESC LIMIT ?";
+    sqlite3_stmt* stmt = nullptr;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        return out;
+
+    sqlite3_bind_int(stmt, 1, limit);
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        AuditEntry e;
+        e.id = sqlite3_column_int64(stmt, 0);
+        e.userId = sqlite3_column_int64(stmt, 1);
+        e.username = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        e.action = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+        e.target = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
+        e.argsDigest = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 5));
+        const unsigned char* ts = sqlite3_column_text(stmt, 6);
+        e.createdAt = ts ? reinterpret_cast<const char*>(ts) : "";
+        out.push_back(std::move(e));
+    }
+
+    sqlite3_finalize(stmt);
+    return out;
 }
 
 int Database::CleanExpiredSessions(int maxAgeSeconds) {

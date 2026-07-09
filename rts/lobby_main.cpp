@@ -17,6 +17,7 @@
 #include "Server/GameDiscovery.h"
 #include "Server/ResourcesParser.h"
 #include "Server/HttpAuth.h"
+#include "Server/DevBuildGate.h"
 #include "Server/CacheControl.h"
 #include "System/SpringLog/SpringLog.h"
 #include "System/SpringLog/SpringLogSqlite.h"
@@ -154,7 +155,8 @@ static GameServerInstance spawnGameServer(
     const std::vector<RoomPlayer>& playerRoster,
     const std::vector<RoomAISlot>& aiSlots,
     const std::unordered_map<std::string, std::string>& modOptions = {},
-    const std::unordered_set<int>& excludedPorts = {})
+    const std::unordered_set<int>& excludedPorts = {},
+    bool devBuildAcknowledged = false)
 {
     GameServerInstance inst;
     inst.roomId = roomId;
@@ -257,6 +259,7 @@ static GameServerInstance spawnGameServer(
             argv.push_back("--modoption");
             argv.push_back(spec.c_str());
         }
+        if (devBuildAcknowledged) argv.push_back(DevBuildGate::kFlag);
         argv.push_back(nullptr);
 
         execvp(serverBin.c_str(), const_cast<char* const*>(argv.data()));
@@ -335,6 +338,7 @@ int main(int argc, char* argv[])
     // doesn't need the same gate; it creates one standing room at boot
     // (mprocs dev flow: stack comes up with the game already running).
     bool devDirectStart = false;
+    bool devBuildAcknowledged = false;
     std::string directManifestPath;
 
     for (int i = 1; i < argc; i++) {
@@ -348,6 +352,7 @@ int main(int argc, char* argv[])
         else if (arg == "--debug") { debugMode = true; logLevel = SPRING_LOG_DEBUG; }
         else if (arg == "--no-cache") { CacheControl::SetNoCache(true); }
         else if (arg == "--dev-direct-start") { devDirectStart = true; }
+        else if (arg == DevBuildGate::kFlag) { devBuildAcknowledged = true; }
         else if (arg == "--direct" && i + 1 < argc) { directManifestPath = argv[++i]; }
         else if (arg == "--game" && i + 1 < argc) {
             // Back-compat: `--game <path>` is translated into
@@ -362,6 +367,12 @@ int main(int argc, char* argv[])
                 gamesDir = p.parent_path().string();
         }
     }
+
+    // PLAN-security-hardening E1: checked before any DB open / listen /
+    // fork so a dev build can't spawn game-server children (--direct) or
+    // start listening at all without the operator's explicit acknowledgment.
+    if (!DevBuildGate::CheckAndWarn("spring-lobby", devBuildAcknowledged))
+        return 1;
 
     // --- Logging ---
     uint32_t logOutputs = SPRING_LOG_OUTPUT_CONSOLE;
@@ -682,11 +693,23 @@ int main(int argc, char* argv[])
     // --- Network ---
     NetworkServer net;
 
+    // PLAN-security-hardening task 6 (G20): wire the default-deny dispatch
+    // gate for RouteAuth::TokenRequired/AdminOnly/LocalhostOrAdmin routes.
+    net.SetRouteAuthCallbacks({
+        .validateToken = [&db](const std::string& authHeader) -> int64_t {
+            return HttpAuth::ValidateAuth(db, authHeader);
+        },
+        .isAdmin = [&db](int64_t userId) -> bool {
+            auto user = db.FindUserById(userId);
+            return user && user->role == "admin";
+        },
+    });
+
     // SSE channel for real-time room list pushes (replaces client polling)
     uint32_t roomStreamChannel = net.AddSSE("/api/rooms/stream");
 
     // Maps endpoint — full metadata from SQLite
-    net.AddHttpGet("/api/maps", [mapDb](const std::string&) -> HttpResponse {
+    net.AddHttpGet("/api/maps", RouteAuth::Public, [mapDb](const std::string&) -> HttpResponse {
         MapMetadataDb db;
         auto maps = db.GetAllMaps(mapDb);
         nlohmann::json arr = nlohmann::json::array();
@@ -737,7 +760,7 @@ int main(int argc, char* argv[])
     // is the dynamic `metadata.json` endpoint, because it pulls live
     // map data out of the MapMetadataDb (SQLite) and composes URLs
     // pointing at the static files.
-    net.AddHttpGet("/api/maps/data/*", [mapDb](const std::string& url) -> HttpResponse {
+    net.AddHttpGet("/api/maps/data/*", RouteAuth::Public, [mapDb](const std::string& url) -> HttpResponse {
         // URL: /api/maps/data/{mapId}/metadata.json
         std::string rest = url.substr(std::string("/api/maps/data/").size());
         if (rest.find("..") != std::string::npos)
@@ -889,7 +912,13 @@ int main(int argc, char* argv[])
     // production deployment notes).
 
     // --- Process management API ---
-    net.AddHttpGet("/api/processes", [&gameServers](const std::string&) -> HttpResponse {
+    // PLAN-security-hardening task 2 (G12): unauthenticated PID/port
+    // disclosure is fine for local dev tooling (spring-debug MCP) but has no
+    // place in a production binary — compiled out under SPRING_PROD rather
+    // than left reachable-but-role-gated, since dev tooling connects with no
+    // admin token at all.
+#ifndef SPRING_PROD
+    net.AddHttpGet("/api/processes", RouteAuth::Public, [&gameServers](const std::string&) -> HttpResponse {
         nlohmann::json arr = nlohmann::json::array();
         for (const auto& [roomId, inst] : gameServers) {
             const char* stateStr = "unknown";
@@ -912,12 +941,13 @@ int main(int argc, char* argv[])
         return {.contentType = "application/json", .body = {json.begin(), json.end()}, .status = 200,
                 .cacheControl = "no-cache"};
     });
+#endif // !SPRING_PROD
 
     // --- HTTP auth endpoints ---
     HttpAuth::RegisterEndpoints(net, db);
 
     // Version endpoint — clients use this to get the build stamp for cache-busting
-    net.AddHttpGet("/api/version", [](const std::string&) -> HttpResponse {
+    net.AddHttpGet("/api/version", RouteAuth::Public, [](const std::string&) -> HttpResponse {
         std::string json = std::string("{\"engine\":\"springweb\"")
             + ",\"stamp\":\"" + CacheControl::BuildStamp() + "\""
             + ",\"no_cache\":" + (CacheControl::IsNoCache() ? "true" : "false") + "}";
@@ -927,7 +957,12 @@ int main(int argc, char* argv[])
     });
 
     // --- HTTP exec endpoint (for CLI/curl access to lobby commands) ---
-    net.AddHttpPost("/api/exec", [&rooms, &gameServers, mapDb, &db](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+    // PLAN-security-hardening task 2: compiled OUT entirely under
+    // SPRING_PROD, not just role-gated — arbitrary SQLite exec on the map DB
+    // has no place in a production binary, belt-and-braces on top of the
+    // AdminOnly dispatch gate + the handler's own role check below.
+#ifndef SPRING_PROD
+    net.AddHttpPost("/api/exec", RouteAuth::AdminOnly, [&rooms, &gameServers, mapDb, &db](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
         // Validate auth token
         int64_t userId = HttpAuth::ValidateToken(db, headers.authorization);
         if (userId <= 0) {
@@ -935,11 +970,13 @@ int main(int argc, char* argv[])
         }
         // S2: /api/exec runs privileged SQL + lobby control commands. Gate on
         // the admin role — a plain authenticated player must not reach it.
+        std::string execUsername;
         {
             auto execUser = db.FindUserById(userId);
             if (!execUser || execUser->role != "admin") {
                 return HttpAuth::JsonResponse(403, R"({"error":"forbidden — admin role required"})");
             }
+            execUsername = execUser->username;
         }
 
         nlohmann::json j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
@@ -948,6 +985,10 @@ int main(int argc, char* argv[])
         std::string code = j.value("code", "");
         bool success = true;
         std::string output;
+
+        // Task 6: append-only admin audit trail — who ran what, when.
+        // args_digest is truncated so a huge SQL blob can't bloat the table.
+        db.LogAudit(userId, execUsername, "exec", scope, code.substr(0, 200));
 
         if (scope == "sql") {
             std::string upper = code;
@@ -1013,6 +1054,7 @@ int main(int argc, char* argv[])
             + ",\"output\":\"" + HttpAuth::JsonEscape(output) + "\"}";
         return HttpAuth::JsonResponse(200, json);
     });
+#endif // !SPRING_PROD
 
     // --- Room management HTTP endpoints ---
     // These mirror the WebSocket room commands for CLI/automation access.
@@ -1291,7 +1333,7 @@ int main(int argc, char* argv[])
             for (const auto& [rid, gi] : gameServers)
                 if (gi.pid > 0 && isProcessAlive(gi.pid)) busyPorts.insert(gi.port);
             auto inst = spawnGameServer(roomId, gameId, gameVer, mapId, dbPath,
-                room->players, room->aiSlots, room->modOptions, busyPorts);
+                room->players, room->aiSlots, room->modOptions, busyPorts, devBuildAcknowledged);
             gameServers[roomId] = inst;
             persistGameServer(inst);
             room->gameServerPort = inst.port;
@@ -1302,7 +1344,7 @@ int main(int argc, char* argv[])
     };
 
     // POST /api/rooms — create a room
-    net.AddHttpPost("/api/rooms", [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+    net.AddHttpPost("/api/rooms", RouteAuth::TokenRequired, [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
         HTTP_ROOM_AUTH();
         auto user = db.FindUserById(userId);
         if (!user) return HttpAuth::JsonResponse(500, R"({"error":"user not found"})");
@@ -1340,7 +1382,7 @@ int main(int argc, char* argv[])
     });
 
     // GET /api/rooms — list rooms
-    net.AddHttpGet("/api/rooms", [&](const std::string&) -> HttpResponse {
+    net.AddHttpGet("/api/rooms", RouteAuth::Public, [&](const std::string&) -> HttpResponse {
         auto allRooms = rooms.GetAllRooms();
         std::string json = "[";
         bool first = true;
@@ -1355,7 +1397,7 @@ int main(int argc, char* argv[])
     });
 
     // GET /api/games — list available games
-    net.AddHttpGet("/api/games", [&availableGames](const std::string&) -> HttpResponse {
+    net.AddHttpGet("/api/games", RouteAuth::Public, [&availableGames](const std::string&) -> HttpResponse {
         std::string json = "[";
         bool first = true;
         for (const auto& g : availableGames) {
@@ -1374,7 +1416,7 @@ int main(int argc, char* argv[])
     });
 
     // GET /api/ai/* — list AI plugins for a game
-    net.AddHttpGet("/api/ai/*", [&aisByGame](const std::string& url) -> HttpResponse {
+    net.AddHttpGet("/api/ai/*", RouteAuth::Public, [&aisByGame](const std::string& url) -> HttpResponse {
         std::string gameId = url.substr(std::string("/api/ai/").size());
         if (gameId.empty())
             return HttpAuth::JsonResponse(400, R"({"error":"missing game id"})");
@@ -1412,7 +1454,7 @@ int main(int argc, char* argv[])
     // (lobby restart re-parses).
     static std::mutex resourcesCacheMutex;
     static std::unordered_map<std::string, std::string> resourcesCache;
-    net.AddHttpGet("/api/games/*", [&gamesDir](const std::string& url) -> HttpResponse {
+    net.AddHttpGet("/api/games/*", RouteAuth::Public, [&gamesDir](const std::string& url) -> HttpResponse {
         // Match /api/games/<id>/resources.json and /api/games/<id>/ui-manifest.
         // /api/games/data/* and /api/games (no trailing path) are handled by
         // their own routes registered earlier — the wildcard here only sees
@@ -1519,7 +1561,7 @@ int main(int argc, char* argv[])
     //   - Persistent room → stays alive with 0 humans
 
     // POST /api/rooms/join — join a room
-    net.AddHttpPost("/api/rooms/join", [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+    net.AddHttpPost("/api/rooms/join", RouteAuth::TokenRequired, [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
         HTTP_ROOM_AUTH();
         auto user = db.FindUserById(userId);
         if (!user) return HttpAuth::JsonResponse(500, R"({"error":"user not found"})");
@@ -1542,7 +1584,7 @@ int main(int argc, char* argv[])
     // human in a non-persistent room, the room is abandoned and any
     // running game server is killed. If the host leaves with other
     // humans still present, host is transferred to a random player.
-    net.AddHttpPost("/api/rooms/leave", [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+    net.AddHttpPost("/api/rooms/leave", RouteAuth::TokenRequired, [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
         HTTP_ROOM_AUTH();
         auto* room = findPlayerRoom(static_cast<uint32_t>(userId));
         if (!room) return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
@@ -1576,7 +1618,7 @@ int main(int argc, char* argv[])
     });
 
     // POST /api/rooms/ready
-    net.AddHttpPost("/api/rooms/ready", [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+    net.AddHttpPost("/api/rooms/ready", RouteAuth::TokenRequired, [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
         HTTP_ROOM_AUTH();
         auto* room = findPlayerRoom(static_cast<uint32_t>(userId));
         if (!room) return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
@@ -1601,7 +1643,7 @@ int main(int argc, char* argv[])
     });
 
     // POST /api/rooms/team
-    net.AddHttpPost("/api/rooms/team", [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+    net.AddHttpPost("/api/rooms/team", RouteAuth::TokenRequired, [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
         HTTP_ROOM_AUTH();
         auto* room = findPlayerRoom(static_cast<uint32_t>(userId));
         if (!room) return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
@@ -1616,7 +1658,7 @@ int main(int argc, char* argv[])
     });
 
     // POST /api/rooms/startpos
-    net.AddHttpPost("/api/rooms/startpos", [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+    net.AddHttpPost("/api/rooms/startpos", RouteAuth::TokenRequired, [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
         HTTP_ROOM_AUTH();
         auto* room = findPlayerRoom(static_cast<uint32_t>(userId));
         if (!room) return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
@@ -1635,7 +1677,7 @@ int main(int argc, char* argv[])
     });
 
     // POST /api/rooms/kick
-    net.AddHttpPost("/api/rooms/kick", [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+    net.AddHttpPost("/api/rooms/kick", RouteAuth::TokenRequired, [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
         HTTP_ROOM_AUTH();
         auto* room = findPlayerRoom(static_cast<uint32_t>(userId));
         if (!room) return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
@@ -1651,7 +1693,7 @@ int main(int argc, char* argv[])
     });
 
     // POST /api/rooms/ai/add
-    net.AddHttpPost("/api/rooms/ai/add", [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+    net.AddHttpPost("/api/rooms/ai/add", RouteAuth::TokenRequired, [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
         HTTP_ROOM_AUTH();
         auto* room = findPlayerRoom(static_cast<uint32_t>(userId));
         if (!room) return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
@@ -1670,7 +1712,7 @@ int main(int argc, char* argv[])
     });
 
     // POST /api/rooms/ai/remove
-    net.AddHttpPost("/api/rooms/ai/remove", [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+    net.AddHttpPost("/api/rooms/ai/remove", RouteAuth::TokenRequired, [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
         HTTP_ROOM_AUTH();
         auto* room = findPlayerRoom(static_cast<uint32_t>(userId));
         if (!room) return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
@@ -1688,7 +1730,7 @@ int main(int argc, char* argv[])
     // POST /api/rooms/modoption — host sets/clears one room modoption.
     // Body: {"key":"...","value":"..."}. An empty/absent value clears it.
     // (PLAN-bar.md §5.)
-    net.AddHttpPost("/api/rooms/modoption", [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+    net.AddHttpPost("/api/rooms/modoption", RouteAuth::TokenRequired, [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
         HTTP_ROOM_AUTH();
         auto* room = findPlayerRoom(static_cast<uint32_t>(userId));
         if (!room) return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
@@ -1703,7 +1745,7 @@ int main(int argc, char* argv[])
     });
 
     // POST /api/rooms/ai/team — change an AI slot's team
-    net.AddHttpPost("/api/rooms/ai/team", [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+    net.AddHttpPost("/api/rooms/ai/team", RouteAuth::TokenRequired, [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
         HTTP_ROOM_AUTH();
         auto* room = findPlayerRoom(static_cast<uint32_t>(userId));
         if (!room) return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
@@ -1722,7 +1764,7 @@ int main(int argc, char* argv[])
     });
 
     // POST /api/rooms/start — start the game
-    net.AddHttpPost("/api/rooms/start", [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+    net.AddHttpPost("/api/rooms/start", RouteAuth::TokenRequired, [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
         HTTP_ROOM_AUTH();
         auto* room = findPlayerRoom(static_cast<uint32_t>(userId));
         if (!room) return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
@@ -1796,7 +1838,7 @@ int main(int argc, char* argv[])
             }
             auto inst = spawnGameServer(room->id, room->gameId, gameVer,
                 room->mapId, dbPath,
-                room->players, room->aiSlots, room->modOptions, busyPorts);
+                room->players, room->aiSlots, room->modOptions, busyPorts, devBuildAcknowledged);
             gameServers[room->id] = inst;
             persistGameServer(inst);
             room->gameServerPort = inst.port;
@@ -1823,15 +1865,18 @@ int main(int argc, char* argv[])
     // own /api/wt/info discovery with connect-retry once it has gamePort,
     // exactly as it does today after a normal /api/rooms/start — this
     // reuses that path instead of duplicating it server-side.
-    net.AddHttpPost("/api/rooms/direct", [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+    net.AddHttpPost("/api/rooms/direct", RouteAuth::LocalhostOrAdmin, [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
         if (!devDirectStart)
             return HttpAuth::JsonResponse(404, R"({"error":"not found"})");
+        int64_t callerId = 0;
+        std::string callerName = "(loopback)";
         if (!headers.remoteIsLoopback) {
-            int64_t callerId = HttpAuth::ValidateToken(db, headers.authorization);
+            callerId = HttpAuth::ValidateToken(db, headers.authorization);
             auto caller = callerId > 0 ? db.FindUserById(callerId) : std::nullopt;
             if (!caller || caller->role != "admin")
                 return HttpAuth::JsonResponse(403,
                     R"({"error":"forbidden — direct-start requires admin role or localhost"})");
+            callerName = caller->username;
         }
 
         nlohmann::json manifest = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
@@ -1840,6 +1885,11 @@ int main(int argc, char* argv[])
         auto result = runDirectStart(manifest);
         if (!result.ok)
             return HttpAuth::JsonResponse(400, "{\"error\":\"" + HttpAuth::JsonEscape(result.error) + "\"}");
+
+        // Task 6: direct-start spawns a game-server process off a
+        // client-supplied manifest — audit who triggered it.
+        db.LogAudit(callerId, callerName, "direct_start",
+            manifest.value("gameId", ""), "room=" + std::to_string(result.roomId));
 
         nlohmann::json resp = nlohmann::json::parse(roomToJson(rooms.GetRoom(result.roomId)));
         resp["sessions"] = nlohmann::json::object();

@@ -62,6 +62,21 @@ struct ClientSession {
     /// the wire today but logged on every drop.
     uint32_t rateLimitDrops = 0;
 
+    /// PLAN-security-hardening task 4 (G6/G16): LuaRulesMsg + LuaUIMsg
+    /// relay token bucket. One shared bucket for both — they're both
+    /// "arbitrary payload broadcast to N peers", not orders. Same
+    /// lazy-refill-on-use pattern as the command buckets above.
+    float luaMsgTokens = 0.0f;
+    std::chrono::steady_clock::time_point lastLuaMsgBucketUpdate{};
+    uint32_t luaMsgRateLimitDrops = 0;
+
+    /// PLAN-security-hardening task 4 (G13): PathRequest token bucket.
+    /// Each request is a synchronous sim-thread pathfind — a much heavier
+    /// per-token cost than a message, hence its own (lower) budget.
+    float pathReqTokens = 0.0f;
+    std::chrono::steady_clock::time_point lastPathReqBucketUpdate{};
+    uint32_t pathReqRateLimitDrops = 0;
+
     /// Per-client viewports (indexed by viewport_id).
     std::array<Viewport, MAX_VIEWPORTS> viewports{};
 
@@ -175,6 +190,64 @@ public:
         }
         session.cmdMessageTokens -= 1.0f;
         session.cmdOrderTokens   -= needOrders;
+        return true;
+    }
+
+    /// LuaRulesMsg/LuaUIMsg relay budget (G6/G16). Generous relative to the
+    /// command buckets — legitimate widgets (parley/chat/HUD sync) chat
+    /// fairly often — but bounded so a malicious/buggy client can't flood
+    /// the relay fan-out.
+    static constexpr float LUA_MSG_RATE_PER_SEC = 20.0f;
+    static constexpr float LUA_MSG_BURST_CAP    = 40.0f;
+    /// Per-message payload cap (G6/G16) — independent of the rate limiter,
+    /// checked once per message regardless of budget.
+    static constexpr size_t LUA_MSG_MAX_BYTES = 16 * 1024;
+
+    static bool TryConsumeLuaMsgBudget(ClientSession& session) {
+        const auto now = std::chrono::steady_clock::now();
+        if (session.lastLuaMsgBucketUpdate.time_since_epoch().count() == 0) {
+            session.luaMsgTokens = LUA_MSG_BURST_CAP;
+            session.lastLuaMsgBucketUpdate = now;
+        } else {
+            const auto elapsedSec = std::chrono::duration<float>(
+                now - session.lastLuaMsgBucketUpdate).count();
+            session.luaMsgTokens = std::min(
+                LUA_MSG_BURST_CAP,
+                session.luaMsgTokens + elapsedSec * LUA_MSG_RATE_PER_SEC);
+            session.lastLuaMsgBucketUpdate = now;
+        }
+        if (session.luaMsgTokens < 1.0f) {
+            session.luaMsgRateLimitDrops++;
+            return false;
+        }
+        session.luaMsgTokens -= 1.0f;
+        return true;
+    }
+
+    /// PathRequest budget (G13) — each token gates one synchronous
+    /// sim-thread pathfind, so the sustained rate is deliberately much
+    /// lower than the message buckets.
+    static constexpr float PATH_REQ_RATE_PER_SEC = 10.0f;
+    static constexpr float PATH_REQ_BURST_CAP    = 20.0f;
+
+    static bool TryConsumePathRequestBudget(ClientSession& session) {
+        const auto now = std::chrono::steady_clock::now();
+        if (session.lastPathReqBucketUpdate.time_since_epoch().count() == 0) {
+            session.pathReqTokens = PATH_REQ_BURST_CAP;
+            session.lastPathReqBucketUpdate = now;
+        } else {
+            const auto elapsedSec = std::chrono::duration<float>(
+                now - session.lastPathReqBucketUpdate).count();
+            session.pathReqTokens = std::min(
+                PATH_REQ_BURST_CAP,
+                session.pathReqTokens + elapsedSec * PATH_REQ_RATE_PER_SEC);
+            session.lastPathReqBucketUpdate = now;
+        }
+        if (session.pathReqTokens < 1.0f) {
+            session.pathReqRateLimitDrops++;
+            return false;
+        }
+        session.pathReqTokens -= 1.0f;
         return true;
     }
 

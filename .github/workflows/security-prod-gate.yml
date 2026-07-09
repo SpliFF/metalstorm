@@ -1,0 +1,87 @@
+name: Security — SPRING_PROD gate
+#
+# PLAN-security-hardening.md task 2: "an automated 'did the flag actually
+# gate it' test — belt and braces against a refactor quietly re-including a
+# file." Builds spring-server/spring-lobby/spring-logserver twice (dev and
+# -DSPRING_PROD=ON) and asserts the gated dev/debug/exec route strings are
+# present in the dev binaries (sanity check the grep pattern is meaningful)
+# and absent from the prod binaries (the actual gate).
+#
+# Platform note: this repo's QUIC stack (rts/CMakeLists.txt — ngtcp2/
+# ngtcp2_crypto_ossl/nghttp3) is currently wired to Homebrew pkg-config paths
+# only; there is no Linux FetchContent fallback implemented yet (the
+# CMakeLists.txt comment names SPRING_QUIC_FETCHCONTENT as the future
+# escape hatch, but it doesn't exist in code). `cmake` cannot configure this
+# project on a stock ubuntu-latest runner today for that reason alone — every
+# other GitHub Actions workflow in this repo that touches the C++ build
+# (engine-build.yml) is upstream RecoilEngine tooling gated to a different
+# repository and a Docker image this fork's CMakeLists.txt has drifted from
+# (its configure.sh passes -DAI_EXCLUDE_REGEX/-DUSERDOCS_PLAIN, options that
+# don't exist here). Runs on macos-14 instead, mirroring local dev exactly.
+
+on:
+  pull_request:
+    paths:
+      - 'rts/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/security-prod-gate.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'rts/**'
+      - 'CMakeLists.txt'
+  workflow_dispatch:
+
+jobs:
+  prod-gate:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          brew install cmake ninja ngtcp2 nghttp3 openssl@3
+
+      - name: Configure + build (dev — sanity control)
+        run: |
+          cmake --preset release -B build/dev-control -DSPRING_SKIP_AUDIOCONVERTER=ON
+          cmake --build build/dev-control --target spring-server spring-lobby spring-logserver -j 4
+
+      - name: Configure + build (SPRING_PROD=ON — the actual gate)
+        run: |
+          cmake --preset release -B build/prod -DSPRING_PROD=ON -DSPRING_SKIP_AUDIOCONVERTER=ON
+          cmake --build build/prod --target spring-server spring-lobby spring-logserver -j 4
+
+      - name: Verify gated routes are compiled out under SPRING_PROD
+        run: |
+          set -e
+
+          # (binary, [route strings that must be gone under SPRING_PROD])
+          check() {
+            local dev_bin="$1" prod_bin="$2"; shift 2
+            for route in "$@"; do
+              if ! strings "$dev_bin" | grep -qF -- "$route"; then
+                echo "SANITY FAIL: '$route' not found in dev build ($dev_bin) — grep pattern is vacuous, fix the test"
+                exit 1
+              fi
+              if strings "$prod_bin" | grep -qF -- "$route"; then
+                echo "GATE FAIL: '$route' is still present in the SPRING_PROD binary ($prod_bin)"
+                exit 1
+              fi
+              echo "OK: '$route' present in dev, absent from prod ($prod_bin)"
+            done
+          }
+
+          check build/dev-control/spring-server build/prod/spring-server \
+            "/api/exec"
+
+          check build/dev-control/spring-lobby build/prod/spring-lobby \
+            "/api/exec" "/api/processes"
+
+          check build/dev-control/spring-logserver build/prod/spring-logserver \
+            "/api/logs/ingest" "/api/logs/test-event" "/api/logs/restart"
+
+      - name: ctest (doctest suite — independent of SPRING_PROD)
+        run: |
+          cmake --build build/dev-control --target spring-tests -j 4
+          ctest --test-dir build/dev-control --output-on-failure

@@ -39,6 +39,18 @@ add_definitions(
     -DSPRING_BUILD_STAMP="${SPRING_BUILD_STAMP}"
 )
 
+# PLAN-security-hardening task 2: production-hardened builds. Compiles OUT
+# (not just runtime-403s) the exec/SQL-proxy/test-harness/logserver-write
+# surfaces — see `#ifndef SPRING_PROD` blocks at each call site — so a CI
+# symbol/string grep against the prod binaries can assert the gated surface
+# is genuinely absent, not just unreachable. Dev builds (default, OFF) are
+# unchanged: every debugging surface this project lives on stays intact.
+option(SPRING_PROD "Build a production-hardened binary (compiles out dev/exec/debug surfaces)" OFF)
+if(SPRING_PROD)
+    add_definitions(-DSPRING_PROD=1)
+    message(STATUS "SPRING_PROD: ON — dev/exec/debug surfaces compiled out")
+endif()
+
 # Suppress warnings from legacy code during cleanup
 add_compile_options(-Wno-unused-variable -Wno-unused-function -Wno-sign-compare)
 
@@ -464,6 +476,9 @@ if(TEST_SOURCES)
         ${CMAKE_SOURCE_DIR}/rts/Server/ProjectileEventCollector.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/SoundEventCollector.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/StandingOrders.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/NetworkServer.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/Database.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/GameOverState.cpp
     )
     target_include_directories(spring-tests PRIVATE
         ${CMAKE_SOURCE_DIR}/rts
@@ -473,7 +488,7 @@ if(TEST_SOURCES)
         ${CMAKE_SOURCE_DIR}/rts/lib/cereal/include
         ${GENERATED_DIR}
     )
-    target_link_libraries(spring-tests PRIVATE lua smmalloc ZLIB::ZLIB doctest::doctest springlog nlohmann_json::nlohmann_json openssl_crypto)
+    target_link_libraries(spring-tests PRIVATE lua smmalloc ZLIB::ZLIB doctest::doctest springlog nlohmann_json::nlohmann_json openssl_crypto nghttp2_static SQLite3::SQLite3)
     if(UNIX AND NOT APPLE)
         target_link_libraries(spring-tests PRIVATE pthread dl)
     elseif(APPLE)

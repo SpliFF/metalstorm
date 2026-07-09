@@ -145,6 +145,7 @@ cmd_start_bg() {
     if [[ -z "$(pids_for "$PAT_LOGSERVER")" ]]; then
         echo "  logserver: starting"
         nohup ./build/debug/spring-logserver --port 8010 --db data/debug.db \
+            --i-understand-this-is-a-dev-build \
             >data/logs/logserver.out 2>&1 &
     else
         echo "  logserver: already running"
@@ -159,6 +160,7 @@ cmd_start_bg() {
         # data/maps, so no content/ paths are passed here.
         nohup ./build/debug/spring-lobby --no-cache --port 8011 \
             --db data/spring-server.db \
+            --i-understand-this-is-a-dev-build \
             >data/logs/lobby.out 2>&1 &
     else
         echo "  lobby: already running"

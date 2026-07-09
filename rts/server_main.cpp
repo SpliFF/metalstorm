@@ -11,6 +11,7 @@
 #include "Server/NetworkServer.h"
 #include "Server/Protocol.h"
 #include "Server/Database.h"
+#include "Server/DevBuildGate.h"
 #include "Server/ClientSession.h"
 #include "Server/EntityStateSerializer.h"
 #include "Server/ProjectileStateSerializer.h"
@@ -263,6 +264,11 @@ int main(int argc, char* argv[])
             CacheControl::SetNoCache(true);
         } else if (arg == "--log-messages") {
             logMessages = true;
+        } else if (arg == DevBuildGate::kFlag) {
+            // Accepted for consistency with spring-lobby/spring-logserver
+            // (propagated automatically by spawnGameServer when the lobby
+            // itself was acknowledged) — spring-server only warns, it never
+            // hard-refuses to start. See DevBuildGate::WarnOnly.
         } else if (arg == "--player" && i + 1 < argc) {
             const std::string spec = argv[++i];
             const auto parts = splitSpec(spec);
@@ -315,6 +321,9 @@ int main(int argc, char* argv[])
             port = std::atoi(argv[i]);
         }
     }
+
+    // PLAN-security-hardening E1 (warn-only — see DevBuildGate::WarnOnly).
+    DevBuildGate::WarnOnly("spring-server");
 
     // Validate content ids — must be plain identifiers, no path traversal
     auto isValidContentId = [](const std::string& id) {
