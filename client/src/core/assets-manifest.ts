@@ -12,9 +12,25 @@
  * `buildings_*.lua` return literal def tables (no builder) and evaluate
  * the same way.
  */
-import * as fs from 'fs';
-import * as path from 'path';
 import { LuaRuntime, type LuaValue } from './lua-runtime.js';
+
+/**
+ * Filesystem access is injected (same purity rule as model-validate.ts:
+ * this module must typecheck under the browser client's tsconfig, which has
+ * no Node types — the vitest suite and any Node CLI construct a reader from
+ * `node:fs`). Paths are plain '/'-joined strings relative to what the
+ * caller passes in.
+ */
+export interface TreeReader {
+    /** Read a UTF-8 text file. Throws if it doesn't exist. */
+    readFile(filePath: string): string;
+    /** Immediate entry names of a directory; [] if the dir doesn't exist. */
+    listDir(dir: string): string[];
+}
+
+function joinPath(...parts: string[]): string {
+    return parts.join('/').replace(/\/{2,}/g, '/');
+}
 
 export interface DefModelRef {
     defName: string;
@@ -112,20 +128,18 @@ export function parseAssetsManifest(markdown: string): ManifestRow[] {
 /** Run one `units/*.lua` def file through Fengari and return its defs table
  * (def name -> def table) as a plain JS object. Returns null on parse/eval
  * failure (caller decides how to report). */
-function evalDefFile(unitsDir: string, filename: string): Record<string, LuaValue> | null {
-    const filePath = path.join(unitsDir, filename);
-    const source = fs.readFileSync(filePath, 'utf8');
+function evalDefFile(gameRoot: string, filename: string, reader: TreeReader): Record<string, LuaValue> | null {
+    const filePath = joinPath(gameRoot, 'units', filename);
+    const source = reader.readFile(filePath);
     const rt = new LuaRuntime(`units/${filename}`);
     try {
         // VFS.Include resolves relative to the game root (units/_builder.lua),
         // matching real Spring VFS semantics — not relative to the caller's
         // own directory. gamedata/units are siblings under the same root.
-        const gameRoot = path.resolve(unitsDir, '..');
         rt.setGlobal('VFS', {
             Include: (includePath: LuaValue): LuaValue => {
                 if (typeof includePath !== 'string') return null;
-                const resolved = path.join(gameRoot, includePath);
-                const includeSource = fs.readFileSync(resolved, 'utf8');
+                const includeSource = reader.readFile(joinPath(gameRoot, includePath));
                 return rt.evalString(includeSource, includePath);
             },
         });
@@ -143,13 +157,13 @@ function evalDefFile(unitsDir: string, filename: string): Record<string, LuaValu
  * Collect every def's `objectname` field across all `units/*.lua` files
  * (skips `_builder.lua` itself — it's a library, not a def file).
  */
-export function collectDefModelRefs(unitsDir: string): DefModelRef[] {
+export function collectDefModelRefs(gameRoot: string, reader: TreeReader): DefModelRef[] {
     const refs: DefModelRef[] = [];
-    const files = fs.readdirSync(unitsDir)
+    const files = reader.listDir(joinPath(gameRoot, 'units'))
         .filter((f) => f.endsWith('.lua') && f !== '_builder.lua')
         .sort();
     for (const file of files) {
-        const defs = evalDefFile(unitsDir, file);
+        const defs = evalDefFile(gameRoot, file, reader);
         if (!defs) continue;
         for (const [defName, def] of Object.entries(defs)) {
             if (!def || typeof def !== 'object' || Array.isArray(def)) continue;
@@ -162,14 +176,14 @@ export function collectDefModelRefs(unitsDir: string): DefModelRef[] {
     return refs;
 }
 
-function listFiles(dir: string, ext: string): string[] {
-    if (!fs.existsSync(dir)) return [];
-    return fs.readdirSync(dir).filter((f) => f.toLowerCase().endsWith(ext)).sort();
+function listFiles(dir: string, ext: string, reader: TreeReader): string[] {
+    return reader.listDir(dir).filter((f) => f.toLowerCase().endsWith(ext)).sort();
 }
 
 export interface ValidateAssetsOptions {
     /** `data/games/metalstorm/` */
     gameRoot: string;
+    reader: TreeReader;
 }
 
 /**
@@ -180,11 +194,10 @@ export interface ValidateAssetsOptions {
  * error; this only fires once an asset actually lands without paperwork.
  */
 export function validateAssets(opts: ValidateAssetsOptions): AssetViolation[] {
-    const { gameRoot } = opts;
+    const { gameRoot, reader } = opts;
     const violations: AssetViolation[] = [];
 
-    const manifestPath = path.join(gameRoot, 'ASSETS.md');
-    const manifestSrc = fs.readFileSync(manifestPath, 'utf8');
+    const manifestSrc = reader.readFile(joinPath(gameRoot, 'ASSETS.md'));
     const rows = parseAssetsManifest(manifestSrc);
 
     const byPath = new Map<string, ManifestRow>();
@@ -208,9 +221,9 @@ export function validateAssets(opts: ValidateAssetsOptions): AssetViolation[] {
     }
 
     // Every real file under objects3d/ and unittextures/ needs manifest coverage.
-    const objects3dDir = path.join(gameRoot, 'objects3d');
-    const unittexturesDir = path.join(gameRoot, 'unittextures');
-    const modelRefs = collectDefModelRefs(path.join(gameRoot, 'units'));
+    const objects3dDir = joinPath(gameRoot, 'objects3d');
+    const unittexturesDir = joinPath(gameRoot, 'unittextures');
+    const modelRefs = collectDefModelRefs(gameRoot, reader);
     const refsByObjectname = new Map<string, DefModelRef[]>();
     for (const ref of modelRefs) {
         const arr = refsByObjectname.get(ref.objectname) ?? [];
@@ -218,7 +231,7 @@ export function validateAssets(opts: ValidateAssetsOptions): AssetViolation[] {
         refsByObjectname.set(ref.objectname, arr);
     }
 
-    for (const file of listFiles(objects3dDir, '.glb')) {
+    for (const file of listFiles(objects3dDir, '.glb', reader)) {
         const assetPath = `objects3d/${file}`;
         const row = byPath.get(assetPath);
         const stem = file.replace(/\.glb$/i, '');
@@ -243,7 +256,7 @@ export function validateAssets(opts: ValidateAssetsOptions): AssetViolation[] {
         }
     }
 
-    for (const file of listFiles(unittexturesDir, '.ktx2')) {
+    for (const file of listFiles(unittexturesDir, '.ktx2', reader)) {
         const assetPath = `unittextures/${file}`;
         const row = byPath.get(assetPath);
         if (!row) {

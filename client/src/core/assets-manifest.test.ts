@@ -7,10 +7,18 @@ import {
     parseAssetsManifest,
     collectDefModelRefs,
     validateAssets,
+    type TreeReader,
 } from './assets-manifest';
 
 const REPO_ROOT = path.resolve(__dirname, '../../..');
 const METALSTORM_ROOT = path.join(REPO_ROOT, 'data/games/metalstorm');
+
+// The module is fs-free (browser tsconfig has no Node types); tests supply
+// the real filesystem through the TreeReader seam.
+const nodeReader: TreeReader = {
+    readFile: (p) => fs.readFileSync(p, 'utf8'),
+    listDir: (dir) => (fs.existsSync(dir) ? fs.readdirSync(dir) : []),
+};
 
 describe('isAllowedLicense', () => {
     it('allows the §1 preferred/usable classes', () => {
@@ -76,7 +84,7 @@ describe('parseAssetsManifest', () => {
 });
 
 describe('collectDefModelRefs (real Fengari execution against the real unit defs)', () => {
-    const refs = collectDefModelRefs(path.join(METALSTORM_ROOT, 'units'));
+    const refs = collectDefModelRefs(METALSTORM_ROOT, nodeReader);
 
     it('executes the _builder.lua-based classes and finds all 4 scales', () => {
         const tankNames = refs.filter((r) => r.defName.startsWith('ms_tanks_s')).map((r) => r.defName);
@@ -112,7 +120,7 @@ describe('collectDefModelRefs (real Fengari execution against the real unit defs
 
 describe('validateAssets — real repo tree (the CI-style check)', () => {
     it('the live data/games/metalstorm tree has no manifest violations', () => {
-        const violations = validateAssets({ gameRoot: METALSTORM_ROOT });
+        const violations = validateAssets({ gameRoot: METALSTORM_ROOT, reader: nodeReader });
         const errors = violations.filter((v) => v.severity === 'error');
         expect(errors, JSON.stringify(errors, null, 2)).toEqual([]);
     });
@@ -144,7 +152,7 @@ describe('validateAssets — synthetic fixtures (proves the check actually catch
             '|---|---|---|---|---|---|',
             '| _none yet_ | | | | | |',
         ].join('\n'));
-        const violations = validateAssets({ gameRoot: dir });
+        const violations = validateAssets({ gameRoot: dir, reader: nodeReader });
         expect(violations.some((v) =>
             v.severity === 'error' && v.path === 'objects3d/ms_test_s1.glb'
             && /no ASSETS\.md manifest row/.test(v.message))).toBe(true);
@@ -158,7 +166,7 @@ describe('validateAssets — synthetic fixtures (proves the check actually catch
             '|---|---|---|---|---|---|',
             '| objects3d/ms_test_s1.glb | ms_test_s1 | https://example.com | Someone | CC-BY-NC 4.0 | none |',
         ].join('\n'));
-        const violations = validateAssets({ gameRoot: dir });
+        const violations = validateAssets({ gameRoot: dir, reader: nodeReader });
         expect(violations.some((v) =>
             v.severity === 'error' && v.path === 'objects3d/ms_test_s1.glb'
             && /disallowed/.test(v.message))).toBe(true);
@@ -172,7 +180,7 @@ describe('validateAssets — synthetic fixtures (proves the check actually catch
             '|---|---|---|---|---|---|',
             '| objects3d/ms_test_s1.glb | ms_test_s1 | https://example.com | Someone | CC0 | rescaled |',
         ].join('\n'));
-        const violations = validateAssets({ gameRoot: dir });
+        const violations = validateAssets({ gameRoot: dir, reader: nodeReader });
         expect(violations.filter((v) => v.severity === 'error')).toEqual([]);
     });
 
@@ -185,7 +193,7 @@ describe('validateAssets — synthetic fixtures (proves the check actually catch
         ].join('\n'));
         // No actual file landed for this row, so no error — but the target def
         // name is bogus, which should still surface as a warning.
-        const violations = validateAssets({ gameRoot: dir });
+        const violations = validateAssets({ gameRoot: dir, reader: nodeReader });
         expect(violations.filter((v) => v.severity === 'error')).toEqual([]);
         expect(violations.some((v) => v.severity === 'warning' && /unknown def/.test(v.message))).toBe(true);
     });
