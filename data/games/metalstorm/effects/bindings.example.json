@@ -1,0 +1,43 @@
+{
+  "_doc": [
+    "EXAMPLE unit FX bindings — the PLAN-fx-offload.md §2 declarative binding ",
+    "format, shown for a line tank (ms_tanks_s2). Copy per unit to e.g. ",
+    "client/units/<def>/bindings.json (or export the same table from Lua). The ",
+    "binding interpreter (fx-offload X4, fx-bindings.ts) evaluates all bindings ",
+    "for all visible entities each frame in SoA batches — no per-entity script.",
+    "",
+    "`effect` / `sound` values are NAMES resolved through effects/library.json and ",
+    "gamedata/sounds.lua. `when` is the tiny condition vocabulary (anim state, ",
+    "health threshold, pieceRotating, velocity threshold) — NOT a language. Weapon ",
+    "muzzle/impact/fire-sound normally come from effects/weapon-fx.json keyed by the ",
+    "firing weapon; a per-unit `onEvent weapon_fired` binding here is only needed to ",
+    "add unit-specific choreography (recoil anim, shell-eject) on top."
+  ],
+  "version": 1,
+  "def": "ms_tanks_s2",
+
+  "bindings": {
+    "trackScroll":  { "type": "uvScroll",  "material": "tracks", "rate": "velocity" },
+
+    "engineLoop":   { "type": "loopSound", "sound": "engine_run", "when": "MOVING",
+                      "attach": "hull", "volume": 0.5 },
+    "turretServo":  { "type": "loopSound", "sound": "turret_servo",
+                      "when": "pieceRotating:turret", "volume": 0.3 },
+
+    "dustTrail":    { "type": "emitter",   "effect": "trail_shell", "when": "MOVING",
+                      "attach": "tracks", "rateScale": "velocity",
+                      "_doc": "reuses a light smoke style as a ground dust ribbon; swap for a dedicated dust_trail effect when authored" },
+    "damageSmoke":  { "type": "emitter",   "effect": "trail_missile", "when": "health<0.5",
+                      "attach": "hull", "rateScale": "1-health",
+                      "_doc": "black-smoke plume from a damaged hull; intensity rises as health falls" },
+
+    "gunFire":      { "type": "onEvent",   "event": "weapon_fired",
+                      "effect": "muzzle_ac", "attach": "muzzle",
+                      "sound": "ac_fire", "anim": "recoil",
+                      "_doc": "unit-specific recoil layered on top of the weapon-fx.json muzzle; effect/sound here override the table for THIS unit if desired" },
+
+    "onDeath":      { "type": "onEvent",   "event": "killed",
+                      "effect": "expl_medium", "attach": "hull", "sound": "blast_med",
+                      "_doc": "death choreography = an effect-library burst chosen at event rate (fx-offload §3)" }
+  }
+}

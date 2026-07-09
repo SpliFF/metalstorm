@@ -1,0 +1,415 @@
+{
+  "_doc": [
+    "Metalstorm named-effect library (PLAN-fx-offload.md §5 'effect library'; ",
+    "the X3 'name -> emitter configs -> GPU buffers' source of truth). Every ",
+    "authored effect is referenced BY NAME ONLY from effects/weapon-fx.json and ",
+    "from unit bindings.json (effects/bindings.example.json) — nothing authored ",
+    "ever touches a particle. The JS FX system compiles each emitter into ",
+    "per-instance attribute rows for the matching shader in shaders/fx/ and owns ",
+    "the lifecycle (spawn / retire / budget cull).",
+    "",
+    "These are the metalstorm KINETIC analogues of the BAR/ZK authored CEGs ",
+    "(PLAN-metalstorm.md §6: explosive/projectile weapons dominate, lasers rare). ",
+    "STUB TUNING: shapes are plausible, numbers are placeholders — tune against ",
+    "the render harness (PLAN-model-harness.md), not balance.",
+    "",
+    "Emitter kinds map 1:1 to shaders/fx/ programs:",
+    "  particle    -> particle.vert/frag.glsl      (billboard|ground|stretch)",
+    "  muzzleFlash -> muzzle-flash.vert/frag.glsl",
+    "  tracer      -> tracer.vert/frag.glsl        (projectile-attached)",
+    "  trail       -> trail.vert/frag.glsl         (projectile-attached)",
+    "  shockwave   -> shockwave.vert/frag.glsl     (screen-space warp)",
+    "Colours are linear HDR RGBA; values >1 are intended to bloom. See ",
+    "effects/README.md for the full field schema and units."
+  ],
+  "version": 1,
+
+  "atlas": {
+    "texture": "unittextures/fx_atlas.ktx2",
+    "cols": 8,
+    "rows": 8,
+    "_doc": "One sprite cell = (1/cols, 1/rows). Frame indices below are cell ids (row-major). Authored .ktx2 (UASTC+Zstd) per PLAN-metalstorm.md §9; registered in gamedata/resources.lua groundfx.",
+    "frames": {
+      "dot":      0,
+      "spark":    1,
+      "fireball": 2,
+      "smoke":    3,
+      "dust":     4,
+      "flash":    5,
+      "ring":     6,
+      "foam":     7,
+      "smoketrail": 16,
+      "bubbletrail": 17,
+      "scorch":   24
+    }
+  },
+
+  "effects": {
+
+    "muzzle_mg": {
+      "usage": "muzzle",
+      "_doc": "Small-arms flash — quick, warm, tiny. MS_MG_S1/S2.",
+      "emitters": [
+        { "shader": "muzzleFlash", "size": 6,  "life": 0.06,
+          "color": [5.0, 3.4, 1.2, 0.9], "spin": 6.0 },
+        { "shader": "particle", "count": 2, "sprite": "smoke", "orient": "billboard",
+          "life": [0.25, 0.4], "size": [3, 9], "speed": [8, 18], "spread": "cone:20",
+          "gravity": -2, "colorStart": [0.3,0.28,0.25,0.5], "colorEnd": [0.15,0.14,0.13,0] }
+      ]
+    },
+
+    "muzzle_ac": {
+      "usage": "muzzle",
+      "_doc": "Autocannon muzzle — medium flash, smoke puff, a few sparks. MS_AC_S1..S3.",
+      "emitters": [
+        { "shader": "muzzleFlash", "size": 12, "life": 0.08,
+          "color": [6.0, 3.6, 1.1, 1.0], "spin": 4.0 },
+        { "shader": "particle", "count": 5, "sprite": "spark", "orient": "stretch",
+          "life": [0.12, 0.3], "size": [2, 0.5], "stretch": 3.0, "speed": [40, 90],
+          "spread": "cone:16", "gravity": 6, "colorStart": [6,3.5,1.2,1], "colorEnd": [2,0.6,0.1,0] },
+        { "shader": "particle", "count": 3, "sprite": "smoke", "orient": "billboard",
+          "life": [0.4, 0.7], "size": [6, 18], "speed": [10, 25], "spread": "cone:26",
+          "gravity": -3, "colorStart": [0.35,0.32,0.3,0.6], "colorEnd": [0.15,0.14,0.13,0] }
+      ]
+    },
+
+    "muzzle_railgun": {
+      "usage": "muzzle",
+      "_doc": "Railgun charge-release — sharp white-blue flash + electric sparks. MS_RAILGUN_S1..S4.",
+      "emitters": [
+        { "shader": "muzzleFlash", "size": 16, "life": 0.10,
+          "color": [3.2, 4.2, 6.5, 1.0], "spin": 2.0 },
+        { "shader": "particle", "count": 10, "sprite": "spark", "orient": "stretch",
+          "life": [0.1, 0.28], "size": [2.5, 0.4], "stretch": 5.0, "speed": [120, 260],
+          "spread": "cone:8", "gravity": 0, "colorStart": [3.0,4.5,7.0,1], "colorEnd": [1.0,1.5,3.0,0] },
+        { "shader": "particle", "count": 2, "sprite": "smoke", "orient": "billboard",
+          "life": [0.5, 0.9], "size": [8, 22], "speed": [6, 16], "spread": "cone:20",
+          "gravity": -2, "colorStart": [0.3,0.32,0.36,0.5], "colorEnd": [0.14,0.15,0.17,0] }
+      ]
+    },
+
+    "muzzle_mortar": {
+      "usage": "muzzle",
+      "_doc": "Mortar — low-velocity soft cough of smoke, faint flash. MS_MORTAR_S1/S2.",
+      "emitters": [
+        { "shader": "muzzleFlash", "size": 8, "life": 0.07,
+          "color": [4.0, 2.6, 1.0, 0.7], "spin": 3.0 },
+        { "shader": "particle", "count": 6, "sprite": "smoke", "orient": "billboard",
+          "life": [0.6, 1.1], "size": [10, 30], "speed": [12, 30], "spread": "cone:35",
+          "gravity": -4, "colorStart": [0.4,0.38,0.35,0.6], "colorEnd": [0.16,0.15,0.14,0] }
+      ]
+    },
+
+    "muzzle_howitzer": {
+      "usage": "muzzle",
+      "_doc": "Howitzer / big gun — large flash + heavy recoil smoke cloud. MS_HOWITZER_S1..S4, MS_RAILGUN_S4 shares scale.",
+      "emitters": [
+        { "shader": "muzzleFlash", "size": 26, "life": 0.12,
+          "color": [6.5, 4.0, 1.4, 1.0], "spin": 2.0 },
+        { "shader": "particle", "count": 12, "sprite": "spark", "orient": "stretch",
+          "life": [0.15, 0.45], "size": [3, 0.6], "stretch": 4.0, "speed": [60, 160],
+          "spread": "cone:22", "gravity": 8, "colorStart": [6.5,4,1.4,1], "colorEnd": [2,0.7,0.1,0] },
+        { "shader": "particle", "count": 8, "sprite": "smoke", "orient": "billboard",
+          "life": [0.8, 1.6], "size": [16, 55], "speed": [14, 34], "spread": "cone:40",
+          "gravity": -5, "colorStart": [0.4,0.37,0.34,0.75], "colorEnd": [0.16,0.15,0.14,0] }
+      ]
+    },
+
+    "muzzle_flak": {
+      "usage": "muzzle",
+      "_doc": "Flak gun muzzle — medium flash + smoke. MS_FLAK_S1/S2.",
+      "emitters": [
+        { "shader": "muzzleFlash", "size": 11, "life": 0.07,
+          "color": [6.0, 3.8, 1.3, 0.95], "spin": 5.0 },
+        { "shader": "particle", "count": 3, "sprite": "smoke", "orient": "billboard",
+          "life": [0.35, 0.6], "size": [5, 16], "speed": [12, 28], "spread": "cone:24",
+          "gravity": -3, "colorStart": [0.34,0.31,0.29,0.55], "colorEnd": [0.15,0.14,0.13,0] }
+      ]
+    },
+
+    "launch_missile": {
+      "usage": "muzzle",
+      "_doc": "Guided-missile launch plume — rocket exhaust, no bright gun flash. MS_MISSILE_AA_*.",
+      "emitters": [
+        { "shader": "particle", "count": 8, "sprite": "smoke", "orient": "billboard",
+          "life": [0.5, 1.0], "size": [8, 26], "speed": [20, 55], "spread": "cone:30",
+          "gravity": -6, "colorStart": [0.55,0.52,0.5,0.7], "colorEnd": [0.2,0.19,0.18,0] },
+        { "shader": "particle", "count": 4, "sprite": "fireball", "orient": "billboard",
+          "life": [0.15, 0.3], "size": [6, 14], "speed": [10, 30], "spread": "cone:24",
+          "gravity": 0, "colorStart": [5,2.6,0.8,0.9], "colorEnd": [1.2,0.4,0.1,0] }
+      ]
+    },
+
+    "launch_cruise": {
+      "usage": "muzzle",
+      "_doc": "Cruise-missile launch — heavier boost plume. MS_MISSILE_CRUISE_*.",
+      "emitters": [
+        { "shader": "particle", "count": 16, "sprite": "smoke", "orient": "billboard",
+          "life": [0.8, 1.8], "size": [14, 44], "speed": [24, 64], "spread": "cone:38",
+          "gravity": -5, "colorStart": [0.6,0.57,0.54,0.8], "colorEnd": [0.22,0.21,0.2,0] },
+        { "shader": "particle", "count": 8, "sprite": "fireball", "orient": "stretch",
+          "life": [0.2, 0.4], "size": [8, 3], "stretch": 3.0, "speed": [30, 70], "spread": "cone:20",
+          "gravity": 0, "colorStart": [5,2.6,0.8,1], "colorEnd": [1.2,0.4,0.1,0] }
+      ]
+    },
+
+    "launch_torpedo": {
+      "usage": "muzzle",
+      "_doc": "Torpedo tube launch — underwater bubble burst + foam. MS_TORPEDO_*.",
+      "emitters": [
+        { "shader": "particle", "count": 12, "sprite": "foam", "orient": "billboard",
+          "life": [0.4, 0.9], "size": [5, 16], "speed": [14, 34], "spread": "sphere",
+          "gravity": -3, "colorStart": [0.7,0.8,0.95,0.7], "colorEnd": [0.5,0.6,0.75,0] }
+      ]
+    },
+
+    "tracer_mg": {
+      "usage": "projectile",
+      "_doc": "Short warm tracer for machine-gun rounds. Low core boost.",
+      "emitters": [
+        { "shader": "tracer", "length": 14, "width": 1.2, "coreBoost": 1.5, "taper": 1.6,
+          "color": [4.0, 2.6, 0.9, 1.0], "life": 2.0 }
+      ]
+    },
+
+    "tracer_ac": {
+      "usage": "projectile",
+      "_doc": "Medium orange autocannon tracer.",
+      "emitters": [
+        { "shader": "tracer", "length": 26, "width": 1.8, "coreBoost": 2.2, "taper": 1.4,
+          "color": [5.0, 2.8, 0.8, 1.0], "life": 3.0 }
+      ]
+    },
+
+    "tracer_railgun": {
+      "usage": "projectile",
+      "_doc": "Long thin white-blue rail streak; very high HDR core for a bloom lance.",
+      "emitters": [
+        { "shader": "tracer", "length": 90, "width": 1.1, "coreBoost": 5.0, "taper": 0.9,
+          "color": [2.6, 3.6, 6.5, 1.0], "life": 3.0 }
+      ]
+    },
+
+    "trail_shell": {
+      "usage": "trail",
+      "_doc": "Faint thin smoke behind arcing shells (mortar/howitzer). Optional.",
+      "emitters": [
+        { "shader": "trail", "sprite": "smoketrail", "width": [3, 9], "tileLength": 40,
+          "nodeInterval": 0.05, "life": 0.7, "tint": [0.5, 0.48, 0.45], "alpha": [0.5, 0.0] }
+      ]
+    },
+
+    "trail_missile": {
+      "usage": "trail",
+      "_doc": "Grey rocket-smoke plume for guided missiles.",
+      "emitters": [
+        { "shader": "trail", "sprite": "smoketrail", "width": [5, 18], "tileLength": 48,
+          "nodeInterval": 0.04, "life": 1.4, "tint": [0.6, 0.58, 0.55], "alpha": [0.85, 0.0] }
+      ]
+    },
+
+    "trail_cruise": {
+      "usage": "trail",
+      "_doc": "Heavy persistent smoke trail for cruise missiles.",
+      "emitters": [
+        { "shader": "trail", "sprite": "smoketrail", "width": [8, 30], "tileLength": 64,
+          "nodeInterval": 0.04, "life": 2.6, "tint": [0.62, 0.6, 0.57], "alpha": [0.9, 0.0] }
+      ]
+    },
+
+    "wake_torpedo": {
+      "usage": "trail",
+      "_doc": "Pale-blue bubble wake for torpedoes / depth charges (rises slightly).",
+      "emitters": [
+        { "shader": "trail", "sprite": "bubbletrail", "width": [4, 14], "tileLength": 40,
+          "nodeInterval": 0.05, "life": 1.8, "rise": 4, "tint": [0.7, 0.82, 0.95], "alpha": [0.7, 0.0] }
+      ]
+    },
+
+    "impact_mg": {
+      "usage": "impact",
+      "_doc": "MG hit — tiny sparks + a dust flick. Statistical volley cosmetic.",
+      "emitters": [
+        { "shader": "particle", "count": 5, "sprite": "spark", "orient": "stretch",
+          "life": [0.1, 0.25], "size": [1.6, 0.3], "stretch": 3.0, "speed": [30, 80],
+          "spread": "hemisphere", "gravity": 20, "colorStart": [5,3,1,1], "colorEnd": [1.5,0.4,0.1,0] },
+        { "shader": "particle", "count": 2, "sprite": "dust", "orient": "billboard",
+          "life": [0.25, 0.5], "size": [4, 12], "speed": [6, 16], "spread": "hemisphere",
+          "gravity": 4, "colorStart": [0.5,0.42,0.32,0.5], "colorEnd": [0.35,0.3,0.24,0] }
+      ]
+    },
+
+    "impact_ac": {
+      "usage": "impact",
+      "_doc": "Autocannon hit — spark burst, smoke, ground scorch flash. MS_AC_*.",
+      "emitters": [
+        { "shader": "particle", "count": 14, "sprite": "spark", "orient": "stretch",
+          "life": [0.12, 0.35], "size": [2.2, 0.4], "stretch": 3.5, "speed": [50, 140],
+          "spread": "hemisphere", "gravity": 22, "colorStart": [6,3.4,1.1,1], "colorEnd": [2,0.6,0.1,0] },
+        { "shader": "particle", "count": 3, "sprite": "fireball", "orient": "billboard",
+          "life": [0.15, 0.3], "size": [8, 20], "speed": [4, 12], "spread": "hemisphere",
+          "gravity": -2, "colorStart": [5,2.6,0.8,1], "colorEnd": [1.2,0.4,0.1,0] },
+        { "shader": "particle", "count": 4, "sprite": "smoke", "orient": "billboard",
+          "life": [0.5, 1.0], "size": [10, 30], "speed": [6, 18], "spread": "hemisphere",
+          "gravity": -3, "colorStart": [0.3,0.27,0.25,0.6], "colorEnd": [0.14,0.13,0.12,0] },
+        { "shader": "particle", "count": 1, "sprite": "scorch", "orient": "ground",
+          "life": [3.0, 3.0], "size": [24, 30], "speed": 0, "gravity": 0,
+          "colorStart": [0.1,0.09,0.08,0.7], "colorEnd": [0.1,0.09,0.08,0] }
+      ]
+    },
+
+    "impact_railgun": {
+      "usage": "impact",
+      "_doc": "Railgun hit — sharp white flash, fast thin sparks, small penetrating shockwave. Low AoE, armour-piercing look.",
+      "emitters": [
+        { "shader": "particle", "count": 1, "sprite": "flash", "orient": "billboard",
+          "life": [0.08, 0.12], "size": [18, 34], "speed": 0, "gravity": 0,
+          "colorStart": [4.0,5.0,7.0,1], "colorEnd": [1.0,1.4,2.5,0] },
+        { "shader": "particle", "count": 18, "sprite": "spark", "orient": "stretch",
+          "life": [0.1, 0.3], "size": [2.2, 0.3], "stretch": 5.0, "speed": [140, 320],
+          "spread": "hemisphere", "gravity": 10, "colorStart": [3,4.5,7,1], "colorEnd": [1,1.4,3,0] },
+        { "shader": "shockwave", "maxRadius": 40, "strength": 0.5, "life": 0.35 }
+      ]
+    },
+
+    "expl_small": {
+      "usage": "impact",
+      "_doc": "Small kinetic explosion — light mortar shells, small warheads.",
+      "emitters": [
+        { "shader": "particle", "count": 6, "sprite": "fireball", "orient": "billboard",
+          "life": [0.2, 0.45], "size": [14, 40], "speed": [10, 40], "spread": "hemisphere",
+          "gravity": -3, "colorStart": [4.5,2.4,0.7,1], "colorEnd": [1.2,0.4,0.1,0] },
+        { "shader": "particle", "count": 12, "sprite": "spark", "orient": "stretch",
+          "life": [0.15, 0.4], "size": [2.4, 0.4], "stretch": 3.5, "speed": [40, 120],
+          "spread": "hemisphere", "gravity": 20, "colorStart": [6,3.4,1.1,1], "colorEnd": [2,0.6,0.1,0] },
+        { "shader": "particle", "count": 6, "sprite": "smoke", "orient": "billboard",
+          "life": [0.7, 1.4], "size": [16, 46], "speed": [8, 24], "spread": "hemisphere",
+          "gravity": -4, "colorStart": [0.3,0.27,0.24,0.7], "colorEnd": [0.13,0.12,0.11,0] },
+        { "shader": "particle", "count": 5, "sprite": "dust", "orient": "billboard",
+          "life": [0.5, 1.0], "size": [12, 34], "speed": [10, 30], "spread": "disc",
+          "gravity": 6, "colorStart": [0.5,0.42,0.32,0.6], "colorEnd": [0.35,0.3,0.24,0] },
+        { "shader": "particle", "count": 1, "sprite": "scorch", "orient": "ground",
+          "life": [4.0, 4.0], "size": [40, 48], "speed": 0, "gravity": 0,
+          "colorStart": [0.1,0.09,0.08,0.7], "colorEnd": [0.1,0.09,0.08,0] }
+      ]
+    },
+
+    "expl_medium": {
+      "usage": "impact",
+      "_doc": "Medium explosion — field howitzer, heavy autocannon, AA-missile warhead.",
+      "emitters": [
+        { "shader": "particle", "count": 10, "sprite": "fireball", "orient": "billboard",
+          "life": [0.25, 0.6], "size": [22, 64], "speed": [16, 60], "spread": "hemisphere",
+          "gravity": -3, "colorStart": [4.5,2.4,0.7,1], "colorEnd": [1.2,0.4,0.1,0] },
+        { "shader": "particle", "count": 24, "sprite": "spark", "orient": "stretch",
+          "life": [0.2, 0.55], "size": [3, 0.5], "stretch": 4.0, "speed": [60, 200],
+          "spread": "hemisphere", "gravity": 24, "colorStart": [6,3.4,1.1,1], "colorEnd": [2,0.6,0.1,0] },
+        { "shader": "particle", "count": 10, "sprite": "smoke", "orient": "billboard",
+          "life": [1.0, 2.2], "size": [28, 80], "speed": [10, 30], "spread": "hemisphere",
+          "gravity": -5, "colorStart": [0.28,0.25,0.22,0.75], "colorEnd": [0.12,0.11,0.1,0] },
+        { "shader": "particle", "count": 8, "sprite": "dust", "orient": "billboard",
+          "life": [0.7, 1.4], "size": [20, 56], "speed": [16, 44], "spread": "disc",
+          "gravity": 8, "colorStart": [0.5,0.42,0.32,0.7], "colorEnd": [0.35,0.3,0.24,0] },
+        { "shader": "shockwave", "maxRadius": 90, "strength": 0.7, "life": 0.5 },
+        { "shader": "particle", "count": 1, "sprite": "scorch", "orient": "ground",
+          "life": [5.0, 5.0], "size": [70, 84], "speed": 0, "gravity": 0,
+          "colorStart": [0.09,0.08,0.07,0.75], "colorEnd": [0.09,0.08,0.07,0] }
+      ]
+    },
+
+    "expl_large": {
+      "usage": "impact",
+      "_doc": "Large explosion — siege howitzer, naval battery, cruise missile.",
+      "emitters": [
+        { "shader": "particle", "count": 16, "sprite": "fireball", "orient": "billboard",
+          "life": [0.3, 0.8], "size": [34, 110], "speed": [20, 80], "spread": "hemisphere",
+          "gravity": -2, "colorStart": [4.5,2.3,0.7,1], "colorEnd": [1.2,0.4,0.1,0] },
+        { "shader": "particle", "count": 40, "sprite": "spark", "orient": "stretch",
+          "life": [0.25, 0.7], "size": [3.4, 0.5], "stretch": 4.5, "speed": [80, 280],
+          "spread": "hemisphere", "gravity": 26, "colorStart": [6,3.4,1.1,1], "colorEnd": [2,0.6,0.1,0] },
+        { "shader": "particle", "count": 16, "sprite": "smoke", "orient": "billboard",
+          "life": [1.4, 3.0], "size": [44, 130], "speed": [12, 34], "spread": "hemisphere",
+          "gravity": -6, "colorStart": [0.26,0.23,0.2,0.8], "colorEnd": [0.11,0.1,0.09,0] },
+        { "shader": "particle", "count": 12, "sprite": "dust", "orient": "billboard",
+          "life": [1.0, 1.8], "size": [30, 90], "speed": [24, 60], "spread": "disc",
+          "gravity": 10, "colorStart": [0.5,0.42,0.32,0.75], "colorEnd": [0.35,0.3,0.24,0] },
+        { "shader": "shockwave", "maxRadius": 150, "strength": 0.9, "life": 0.6 },
+        { "shader": "particle", "count": 1, "sprite": "scorch", "orient": "ground",
+          "life": [6.0, 6.0], "size": [120, 140], "speed": 0, "gravity": 0,
+          "colorStart": [0.08,0.07,0.06,0.8], "colorEnd": [0.08,0.07,0.06,0] }
+      ]
+    },
+
+    "expl_huge": {
+      "usage": "impact",
+      "_doc": "Huge explosion — continental gun, dreadnought rail, heavy cruise. Fireball + smoke column + strong shockwave.",
+      "emitters": [
+        { "shader": "particle", "count": 24, "sprite": "fireball", "orient": "billboard",
+          "life": [0.4, 1.1], "size": [60, 200], "speed": [30, 110], "spread": "hemisphere",
+          "gravity": -1, "colorStart": [4.5,2.3,0.7,1], "colorEnd": [1.2,0.4,0.1,0] },
+        { "shader": "particle", "count": 60, "sprite": "spark", "orient": "stretch",
+          "life": [0.3, 0.9], "size": [4, 0.6], "stretch": 5.0, "speed": [120, 420],
+          "spread": "hemisphere", "gravity": 28, "colorStart": [6,3.4,1.1,1], "colorEnd": [2,0.6,0.1,0] },
+        { "shader": "particle", "count": 28, "sprite": "smoke", "orient": "billboard",
+          "life": [2.0, 4.5], "size": [80, 240], "speed": [16, 44], "spread": "hemisphere",
+          "gravity": -8, "colorStart": [0.24,0.21,0.18,0.85], "colorEnd": [0.1,0.09,0.08,0] },
+        { "shader": "particle", "count": 18, "sprite": "dust", "orient": "billboard",
+          "life": [1.4, 2.6], "size": [50, 160], "speed": [40, 100], "spread": "disc",
+          "gravity": 12, "colorStart": [0.5,0.42,0.32,0.8], "colorEnd": [0.35,0.3,0.24,0] },
+        { "shader": "shockwave", "maxRadius": 260, "strength": 1.2, "life": 0.8 },
+        { "shader": "particle", "count": 1, "sprite": "scorch", "orient": "ground",
+          "life": [8.0, 8.0], "size": [220, 260], "speed": 0, "gravity": 0,
+          "colorStart": [0.07,0.06,0.05,0.85], "colorEnd": [0.07,0.06,0.05,0] }
+      ]
+    },
+
+    "airburst_flak": {
+      "usage": "impact",
+      "_doc": "Flak proximity burst — puffy dark cloud + spark ring in the air, no ground scorch, hemispherical up.",
+      "emitters": [
+        { "shader": "particle", "count": 4, "sprite": "smoke", "orient": "billboard",
+          "life": [0.6, 1.2], "size": [16, 42], "speed": [4, 14], "spread": "sphere",
+          "gravity": -1, "colorStart": [0.18,0.17,0.16,0.85], "colorEnd": [0.1,0.09,0.09,0] },
+        { "shader": "particle", "count": 2, "sprite": "fireball", "orient": "billboard",
+          "life": [0.1, 0.22], "size": [10, 24], "speed": 0, "gravity": 0,
+          "colorStart": [5,2.8,0.9,1], "colorEnd": [1.2,0.4,0.1,0] },
+        { "shader": "particle", "count": 16, "sprite": "spark", "orient": "stretch",
+          "life": [0.15, 0.4], "size": [2, 0.3], "stretch": 3.5, "speed": [60, 160],
+          "spread": "sphere", "gravity": 8, "colorStart": [6,3.4,1.1,1], "colorEnd": [2,0.6,0.1,0] }
+      ]
+    },
+
+    "underwater_burst": {
+      "usage": "impact",
+      "_doc": "Torpedo / depth-charge detonation — bubble-foam dome + a rising water-spray column. Tinted; no fireball.",
+      "emitters": [
+        { "shader": "particle", "count": 16, "sprite": "foam", "orient": "billboard",
+          "life": [0.5, 1.1], "size": [14, 44], "speed": [10, 30], "spread": "hemisphere",
+          "gravity": -2, "colorStart": [0.75,0.85,0.98,0.85], "colorEnd": [0.5,0.6,0.75,0] },
+        { "shader": "particle", "count": 10, "sprite": "foam", "orient": "stretch",
+          "life": [0.6, 1.3], "size": [8, 3], "stretch": 6.0, "speed": [40, 90],
+          "spread": "cone:14", "gravity": 30, "colorStart": [0.85,0.92,1.0,0.9], "colorEnd": [0.6,0.7,0.85,0] },
+        { "shader": "shockwave", "maxRadius": 70, "strength": 0.6, "life": 0.5 }
+      ]
+    },
+
+    "impact_shield": {
+      "usage": "impact",
+      "_doc": "Point-defense / shield deflection sparkle (rare beam exception, PLAN-metalstorm.md §6). Small blue-white spark fan.",
+      "emitters": [
+        { "shader": "particle", "count": 10, "sprite": "spark", "orient": "stretch",
+          "life": [0.12, 0.3], "size": [1.8, 0.3], "stretch": 3.0, "speed": [40, 120],
+          "spread": "hemisphere", "gravity": 0, "colorStart": [2.4,3.4,6.0,1], "colorEnd": [0.8,1.2,2.4,0] },
+        { "shader": "particle", "count": 1, "sprite": "flash", "orient": "billboard",
+          "life": [0.08, 0.14], "size": [10, 20], "speed": 0, "gravity": 0,
+          "colorStart": [2.6,3.6,6.5,1], "colorEnd": [0.8,1.2,2.4,0] }
+      ]
+    },
+
+    "__default_explosion": {
+      "usage": "impact",
+      "_doc": "Fallback when a weapon def names no impact effect — always renders SOMETHING (mirrors combat-fx.ts DEFAULT_EXPLOSION_NAME). Aliases expl_small.",
+      "alias": "expl_small"
+    }
+  }
+}

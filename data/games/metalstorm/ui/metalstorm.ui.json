@@ -1,0 +1,37 @@
+{
+  "_comment": "Metalstorm native JS UI manifest (PLAN-native-ui.md §3 — the game JS-widget API is Stage 7A-4, not built yet). Widgets receive a ui-store read API, a DOM mount inside #ui-root, and the validated command/directive submission API. This manifest is the proposed shape; the loader contract is owned by PLAN-native-ui.md.",
+  "game": "metalstorm",
+  "uiVersion": 1,
+  "widgets": [
+    {
+      "id": "authority-bar",
+      "entry": "widgets/authority-bar.js",
+      "mount": "top-center",
+      "subscribes": ["teamRulesParams", "gameRulesParams", "playerRoster"]
+    },
+    {
+      "id": "objectives-panel",
+      "entry": "widgets/objectives-panel.js",
+      "mount": "right",
+      "subscribes": ["gameRulesParams"]
+    },
+    {
+      "id": "parley-panel",
+      "entry": "widgets/parley-panel.js",
+      "mount": "left",
+      "subscribes": ["gameRulesParams", "teamRulesParams"]
+    },
+    {
+      "id": "ai-command-panel",
+      "entry": "widgets/ai-command-panel.js",
+      "mount": "left",
+      "subscribes": ["teamRulesParams"]
+    },
+    {
+      "id": "command-composer",
+      "entry": "widgets/command-composer.js",
+      "mount": "bottom-center",
+      "subscribes": ["gameRulesParams", "teamRulesParams"]
+    }
+  ]
+}

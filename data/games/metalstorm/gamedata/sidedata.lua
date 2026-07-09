@@ -1,0 +1,31 @@
+-- gamedata/sidedata.lua — faction declarations (Spring convention). STUB, INERT.
+--
+-- RESOLVES AN UNOWNED GAP: PLAN-metalstorm-lobby.md §1b/§7.1 requires
+-- "available factions declared in game data" (faction is a permanent
+-- account-level allegiance — PLAN-metalstorm.md §2; wars seed sides from
+-- factions — PLAN-metalstorm-wars.md), but no plan named the file. The
+-- Spring-native home for side/faction declarations is gamedata/sidedata.lua
+-- (both BAR and ZK ship one) — decision recorded in
+-- PLAN-metalstorm-structure.md.
+--
+-- INERT ON PURPOSE: returns {} so lobby/engine behaviour is unchanged until
+-- factions are designed. When enabling:
+--   * each side needs a valid startunit def or the GameStart spawn path
+--     (game_start.lua) must own spawning instead — verify before flipping
+--   * sidepics/ icons follow the BAR/ZK convention when the lobby needs them
+--   * the lobby's faction registry (accounts.faction_id) must match these
+--     keys exactly (PLAN-metalstorm-lobby §7.1)
+--
+-- Proposed shape (Spring sidedata format):
+-- return {
+--     {
+--         name      = 'Meridian Compact',   -- faction key: 'compact'
+--         startunit = 'ms_engineers_s1',
+--     },
+--     {
+--         name      = 'The Foundry Union',  -- faction key: 'union'
+--         startunit = 'ms_engineers_s1',
+--     },
+-- }
+
+return {}

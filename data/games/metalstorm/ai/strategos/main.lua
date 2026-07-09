@@ -1,0 +1,212 @@
+-- main.lua — Metalstorm Strategos runtime entry.
+--
+-- PLAN-metalstorm-ai.md §3/§6/§10; PLAN-ai.md (the server AI runtime).
+--
+-- ROLE OF THIS FILE: the orchestrator. It owns nothing clever — it holds
+-- the AI's cross-tick memory, schedules the strategic tick, and wires the
+-- pipeline:
+--
+--     picture.refresh()  →  slate.build()  →  planner.plan()  →  actuators.apply()
+--       (read mirrors)      (goals, pure)     (allocate, pure)    (the only writer)
+--
+-- Everything that decides anything lives in the pure modules (slate,
+-- planner); everything that reads the world lives in picture; everything
+-- that writes lives in actuators. main.lua just turns the crank.
+--
+-- STATELESSNESS (plan §7): the AI holds NO authoritative state. Kill the
+-- VM mid-game and it rebuilds its Picture from rulesParams mirrors next
+-- tick. The only VM-held state is decay memory (intel) + soft commitments,
+-- both of which rebuild honestly from fresh input — acceptable amnesia.
+--
+-- RUNTIME SURFACE: the VM exposes a global `AI` table (AIScriptContext.cpp):
+--   AI.getOwnUnits() · AI.getVisibleEnemies() · AI.issueCommand(id,cmd,...)
+--   AI.getFrame() · AI.getMapSize().
+-- The richer surface this plan assumes (AI.getRulesParam, squad views, LOD,
+-- directive/posture verbs, chat, stake) does NOT exist yet — every module
+-- feature-detects and degrades. See README "Engine asks" (AI1/AI2/I1).
+
+--=============================================================================
+-- Module loading.  See README "Engine ask AI0-loader".
+-- The AI VM opens only base/table/string/math/utf8 and loads a single entry
+-- buffer — there is no `require`/`VFS.Include` yet. We use `require` (the
+-- idiomatic, busted-testable shape) and fail LOUD if the runtime hasn't
+-- registered a plugin-scoped loader, so the boot log names the gap.
+--=============================================================================
+local function need(name)
+    if type(require) ~= 'function' then
+        error("[strategos] no module loader in AI VM — cannot require '" .. name
+            .. "'. Runtime must register a plugin-scoped require (engine ask "
+            .. "AI0-loader). Pure modules still test headless with busted.", 0)
+    end
+    return require(name)
+end
+
+local Config    = need('config')
+local Picture   = need('picture')
+local Slate     = need('slate')
+local Planner   = need('planner')
+local Actuators = need('actuators')
+local Roles     = need('roles')
+
+--=============================================================================
+-- Instance state (persists across onUpdate calls — the VM is long-lived).
+--=============================================================================
+local self = {
+    booted        = false,
+    role          = nil,   -- resolved Roles entry (full_side | co_commander | npc)
+    profile       = nil,   -- personality weights table (profiles/*.lua)
+    rng           = nil,   -- seedable RNG (plan §6) — reproducible decisions
+    actuators     = nil,   -- Actuators instance (the write surface)
+    lastTickFrame = -1,    -- frame of the last strategic tick
+
+    -- Decay memory (plan §2 "enemy estimate"): per-region strength +
+    -- lastSeenFrame, decayed toward "unknown". Rebuilds from sightings.
+    memory        = { intel = {} },
+
+    -- Commitments (plan §3.3): goalId → { groupId, sinceFrame, score }.
+    -- Hysteresis lives here; decays over ~2 min. Soft state, not truth.
+    commitments   = {},
+}
+
+--=============================================================================
+-- Role / profile resolution.
+-- Difficulty = profile + LOD tier + optional handicap (plan §3.4/§6). The
+-- current runtime passes no per-slot config into the VM, so we resolve from
+-- (1) a rulesParam hint if AI1 has landed, else (2) the default profile.
+-- Engine integration note in README ("profile passing").
+--=============================================================================
+--- Resolve our own team id. The current runtime knows the team
+-- (AIScriptContext.teamId) but does not expose it to the VM yet; the plan
+-- assumes AIStateView.getTeamId() (engine ask, PLAN-ai.md). Feature-detect;
+-- fall back to 0 so scoring's "friendly vs enemy region" degrades safely
+-- (everything reads neutral) rather than crashing.
+local function resolveTeamId()
+    local AI = _G.AI
+    if type(AI) == 'table' and type(AI.getTeamId) == 'function' then
+        return AI.getTeamId()
+    end
+    return 0
+end
+
+local function resolveProfile()
+    -- STUB: once AI1 (AI.getRulesParam) lands, read e.g.
+    --   local key = Picture.readProfileHint()  -- 'default'|'aggressive'|...
+    -- set by a gadget from the per-slot modoption (plan §10.6). For now,
+    -- default. Profiles carry their own role binding.
+    local name = Config.DEFAULT_PROFILE
+    local ok, profile = pcall(need, 'profiles.' .. name)
+    if not ok or type(profile) ~= 'table' then
+        profile = need('profiles.default')
+    end
+    return profile
+end
+
+--=============================================================================
+-- Boot (first onUpdate — the runtime has no onInit callin yet, only onUpdate).
+--=============================================================================
+local function boot(frame)
+    self.profile      = resolveProfile()
+    self.role         = Roles.resolve(self.profile.role, Config)
+    self.role.teamId  = resolveTeamId()
+    -- A profile may attach a scripted slate (NPC scenarios) — install it onto
+    -- the role, which is where slate.build looks for it.
+    if self.profile.scriptedSlate then
+        self.role.scriptedSlate = self.profile.scriptedSlate
+    end
+    self.rng          = Config.makeRNG(Config.SEED)   -- seed is fixed for repro
+    self.actuators = Actuators.new({
+        role    = self.role,
+        profile = self.profile,
+        -- own-pool-only charging etc. are role policy (plan §5)
+    })
+    self.booted = true
+    -- Narrate boot so the game log shows which brain woke up (plan §5.1:
+    -- the AI's spend is socially visible; boot is the first line).
+    self.actuators:chat(string.format(
+        "[strategos] online — role=%s profile=%s", self.role.id, self.profile.id))
+end
+
+--=============================================================================
+-- The strategic tick (plan §3): the whole brain, at 0.2 Hz.
+-- LOD (plan §3 / PLAN-ai.md) stretches the period for dormant NPC factions.
+--=============================================================================
+local function strategicTick(frame)
+    -- 1. READ — refresh the Picture from mirrors + decay memory (picture.lua).
+    local picture = Picture.refresh({
+        frame  = frame,
+        memory = self.memory,
+        role   = self.role,
+        config = Config,
+    })
+
+    -- 2. GOALS — explicit (objective board) + implicit (standing needs). Pure.
+    local slate = Slate.build(picture, self.profile, self.role)
+
+    -- 3. ALLOCATE — score, assign under force floors, apply commitment
+    --    hysteresis + the budget governor. Pure; returns a directive list.
+    local plan = Planner.plan({
+        picture     = picture,
+        slate       = slate,
+        profile     = self.profile,
+        role        = self.role,
+        commitments = self.commitments,   -- read + updated in place
+        rng         = self.rng,
+        config      = Config,
+    })
+
+    -- 4. WRITE — the actuator is the ONLY module that emits commands. It maps
+    --    directives onto real verbs (or the standing-order fallback pre-AI2)
+    --    and announces intent (plan §5.1) + publishes the intent report
+    --    (PLAN-metalstorm-interaction.md §6.3).
+    self.actuators:apply(plan, picture)
+end
+
+--=============================================================================
+-- onUpdate — the one callin the current runtime dispatches (AIScriptContext
+-- ProcessSnapshot → global onUpdate(frame)). We self-throttle to the
+-- strategic cadence; the runtime's own tickInterval is a coarser gate.
+--=============================================================================
+function onUpdate(frame)
+    if not self.booted then
+        local ok, err = pcall(boot, frame)
+        if not ok then
+            -- Loud, once: a failed boot must be obvious in the log, not silent.
+            AI_STRATEGOS_BOOT_ERROR = tostring(err)
+            return
+        end
+    end
+
+    -- LOD gate (plan §3): dormant NPC factions think far less often. Until
+    -- AI.getLODLevel() exists, role.tickFrames is the static cadence.
+    local period = self.role and self.role.tickFrames or Config.STRATEGIC_TICK_FRAMES
+    if self.lastTickFrame >= 0 and (frame - self.lastTickFrame) < period then
+        return
+    end
+    self.lastTickFrame = frame
+
+    local ok, err = pcall(strategicTick, frame)
+    if not ok then
+        -- A crashing tick must not wedge the AI: log and try again next tick.
+        -- Statelessness (plan §7) means we lose nothing but this tick.
+        if self.actuators then self.actuators:noteError(frame, err) end
+    end
+end
+
+--=============================================================================
+-- Aspirational event callins (PLAN-ai.md AIEventHandler). The current
+-- runtime does not dispatch these yet, but defining them is harmless and
+-- documents the intended surface. They only feed memory hints — never
+-- decisions (decisions happen on the strategic tick from the Picture).
+--=============================================================================
+function onUnitCreated(unitID, unitDefID, teamID)   -- luacheck: ignore
+    -- No-op: force composition is re-derived from the Picture each tick.
+end
+
+function onUnitDestroyed(unitID, attackerID)         -- luacheck: ignore
+    -- No-op here; losses show up as reduced strength in the next Picture.
+    -- (A future optimisation could invalidate a commitment early.)
+end
+
+function onRelease(reason)                            -- luacheck: ignore
+    -- The VM is being torn down. Nothing to persist (statelessness, §7).
+end
