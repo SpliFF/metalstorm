@@ -17,6 +17,7 @@ import { AnimatedCursor } from './core/animated-cursor.js';
 import { BuildMenu } from './core/build-menu.js';
 import { OrderPanel } from './core/order-panel.js';
 import { EconomyBar } from './core/economy-bar.js';
+import { FactoryQueuePanel } from './core/factory-queue-panel.js';
 import { buildTerrainMesh, loadTerrainTextures, TerrainFog, DeformableTerrain, type MapDimensions } from './core/terrain.js';
 import { DecalOverlay, buildTrackTypeNames } from './core/decal-overlay.js';
 import { attachDecalOverlay } from './core/decal-overlay-plugin.js';
@@ -187,6 +188,7 @@ let animatedCursor: AnimatedCursor | null = null;
 let buildMenu: BuildMenu | null = null;
 let orderPanel: OrderPanel | null = null;
 let economyBar: EconomyBar | null = null;
+let factoryQueuePanel: FactoryQueuePanel | null = null;
 let lobbyUI: LobbyUI | null = null;
 let minimap: Minimap | null = null;
 let commandPathRenderer: CommandPathRenderer | null = null;
@@ -287,6 +289,8 @@ function quitToLobby(): void {
     orderPanel = null;
     economyBar?.dispose();
     economyBar = null;
+    factoryQueuePanel?.dispose();
+    factoryQueuePanel = null;
     commandPathRenderer?.dispose();
     commandPathRenderer = null;
     waypointMarkerRenderer?.dispose();
@@ -397,6 +401,8 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     orderPanel = null;
     economyBar?.dispose();
     economyBar = null;
+    factoryQueuePanel?.dispose();
+    factoryQueuePanel = null;
 
     showHUD();
 
@@ -475,8 +481,8 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 economyBar?.setTeam(m.team);
                 break;
             // GW4-c5c: consolidated scene-state feed → the HTML HUD + native
-            // build-menu (G3a) + native economy-bar (G4). The order-panel remains
-            // unbuilt (PLAN-playable.md G4 factory-queue note).
+            // build-menu (G3a) + native economy-bar + factory-queue panel (G4).
+            // The order-panel remains unbuilt (dead pre-G3b code, unrelated).
             case 'gp:sceneState':
                 // GW8: cache for the test harness's synchronous getters
                 // (window.test.selection / .cameraPose()).
@@ -492,6 +498,10 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 // latest local-team ResourceUpdate (only present when a fresh one
                 // arrived since the last feed).
                 if (m.economy !== undefined) economyBar?.update(m.economy);
+                // PLAN-playable.md G4: feed the native factory-queue panel the
+                // worker-resolved queue rows for the selected factory (only
+                // present when the queue changed since the last feed).
+                if (m.factoryQueue !== undefined) factoryQueuePanel?.setRows(m.factoryQueue);
                 // GW4-c5c-3: keep the minimap selection rings in sync with the
                 // worker's selection set (the minimap matches ids against blips).
                 minimap?.setSelection(m.selectedUnitIds);
@@ -764,6 +774,19 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // lobby-roster lookup buildMenu uses; corrected to the authoritative value
     // once `gp:authenticated` reports the real team below.
     economyBar = new EconomyBar({ myTeam: myTeamGuess });
+
+    // PLAN-playable.md G4: native factory-queue panel (DOM, on main). Pure
+    // renderer fed via `gp:sceneState.factoryQueue`; row clicks post
+    // `gp:removeFactoryOrder` to the worker's CMD.REMOVE path (same intent-
+    // crosses-the-boundary shape as BuildMenu's `gp:startBuildPlacement`).
+    factoryQueuePanel = new FactoryQueuePanel({ lobbyHttpUrl, gameId }, {
+        onRemoveOne: (unitId, tag) => {
+            gameWorker?.postMessage({ type: 'gp:removeFactoryOrder', unitId, tags: [tag] });
+        },
+        onRemoveAll: (unitId, tags) => {
+            gameWorker?.postMessage({ type: 'gp:removeFactoryOrder', unitId, tags });
+        },
+    });
 
     // GW4-c5c-2: audio playback chain on the main thread (AudioContext is
     // main-only). The worker resolves SoundEvent → SoundRef against its def

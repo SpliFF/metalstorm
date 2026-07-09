@@ -16,7 +16,7 @@
  */
 
 import { Engine, Scene, FreeCamera, Vector3, Color3, Color4, Mesh, MeshBuilder, StandardMaterial } from '@babylonjs/core';
-import type { GpInitToWorker, GpMinimapBlips, GpMinimapLos, GpMinimapMetalSpots, BuildMenuTile } from './game-worker-protocol.js';
+import type { GpInitToWorker, GpMinimapBlips, GpMinimapLos, GpMinimapMetalSpots, BuildMenuTile, FactoryQueueTile } from './game-worker-protocol.js';
 // GW4-c2: the WebTransport game connection now lives in the worker. Connection
 // is host-agnostic (runs on WebTransportAdapter, no DOM refs after the
 // onServerRestart callback was extracted) so it imports + runs here unchanged.
@@ -92,7 +92,9 @@ import { attachDecalOverlay } from './decal-overlay-plugin.js';
 import { renderMapFeatures, DynamicFeatureRenderer } from './feature-renderer.js';
 import { RTSCamera } from './rts-camera.js';
 import { WorkerSelection } from './worker-selection.js';
-import { WorkerBuildPlacement } from './worker-build-placement.js';
+import { WorkerBuildPlacement, UNITDEF_FLAG_IS_FACTORY } from './worker-build-placement.js';
+import { CMD, OPT } from './command-buffer.js';
+import { groupFactoryQueueRuns } from './factory-queue.js';
 import { findMetalSpots, type MetalSpot } from './metal-spots.js';
 import { resolveSoundRef, pickUnitDefSound,
     type ResolvedSoundEvent } from './sound-events.js';
@@ -184,6 +186,11 @@ let gpMetalCellSize = 16;
 /// array only ships when the buildable set actually changed.
 let gpBuildTiles: BuildMenuTile[] = [];
 let gpBuildTilesDirty = false;
+/// G4: resolved production-queue rows for the selected factory, posted to
+/// main's native FactoryQueuePanel via gp:sceneState.factoryQueue. Dirty-gated
+/// like gpBuildTiles.
+let gpFactoryQueueTiles: FactoryQueueTile[] = [];
+let gpFactoryQueueDirty = false;
 /// G4: latest ResourceUpdate for the local team, posted to main's native
 /// EconomyBar via gp:sceneState.economy. Dirty-gated like gpBuildTiles so a
 /// snapshot only ships when a fresh ResourceUpdate for our own team arrived.
@@ -776,6 +783,9 @@ function gpConnect(msg: GpInitToWorker): void {
             const sel = gpCtx.selection?.selection ?? [];
             gpCommandPathRenderer?.update(queues, sel);
             gpWaypointMarkerRenderer?.update(queues, sel);
+            // PLAN-playable.md G4: the selected factory's queue may have
+            // changed (unit completed, order added/removed) — re-resolve.
+            gpRecomputeFactoryQueue();
         },
         // PLAN-playable.md G3a: selection-scoped command descriptions (~1 Hz).
         // GW4-regression fix (U3/onResourceUpdate-class): pre-GW4 the main-thread
@@ -1236,7 +1246,10 @@ export function gpInit(msg: GpInitToWorker): void {
     // tiles whenever new defs land so the native menu fills in labels/costs
     // (mirrors input-manager's BuildMenu defCache.onUnitDefs re-render hook).
     defCache.onUnitDefs(() => {
-        if ((gpCtx.selection?.selection.length ?? 0) > 0) gpRecomputeBuildTiles();
+        if ((gpCtx.selection?.selection.length ?? 0) > 0) {
+            gpRecomputeBuildTiles();
+            gpRecomputeFactoryQueue();
+        }
     });
 
     // GW4-c5: projectile renderer + CEG getRuntime() + build-beam (ports
@@ -1467,6 +1480,11 @@ export function gpInit(msg: GpInitToWorker): void {
             // buildable-tile set for the native menu.
             gpBuildPlacement?.cancelBuildPlacement();
             gpRecomputeBuildTiles();
+            // PLAN-playable.md G4: the factory-queue panel tracks the
+            // selection too — re-resolve from the cached queue snapshot so
+            // it appears immediately, same reasoning as the path/waypoint
+            // overlays above.
+            gpRecomputeFactoryQueue();
         },
         // GW4: unit-UI sounds (select / order-ack / multi-select). These are
         // unsynced in Recoil — the server emits no SoundEvent for them — so the
@@ -1586,6 +1604,71 @@ function gpRecomputeBuildTiles(): void {
     gpBuildTilesDirty = true;
 }
 
+/// PLAN-playable.md G4: recompute the production-queue rows for the native
+/// FactoryQueuePanel. Picks the first own-team factory (UnitDef bit 11) in
+/// the current selection — multi-factory queue merging isn't implemented,
+/// matching the "selected factory" (singular) framing of the ZK Phase D
+/// item this closes. Groups gpLastCommandQueues' build entries (cmdId<0,
+/// same convention gpRecomputeBuildTiles decodes) into consecutive
+/// same-defId runs, mirroring how Spring's FactoryCAI stacks repeated
+/// identical build commands one slot each. Non-build orders (e.g. a WAIT
+/// a player inserted between batches) are skipped rather than splitting a
+/// run — an acceptable simplification for this native (non-Lua-port) panel.
+/// Called on selection change and on every UnitCommandQueuesUpdate.
+function gpRecomputeFactoryQueue(): void {
+    const sel = gpCtx.selection?.selection ?? [];
+    const er = gpCtx.entityRenderer;
+    const dc = gpDefCache;
+    const myTeam = gpCtx.connection?.myTeam ?? -1;
+
+    let factoryId = -1;
+    if (er && dc) {
+        for (const unitId of sel) {
+            const meta = er.getEntityMeta(unitId);
+            if (!meta || meta.team !== myTeam) continue;
+            const def = dc.getUnitDef(meta.defId);
+            if (!def || !(def.flags & UNITDEF_FLAG_IS_FACTORY)) continue;
+            factoryId = unitId;
+            break;
+        }
+    }
+
+    let tiles: FactoryQueueTile[] = [];
+    if (factoryId >= 0) {
+        const orders = gpLastCommandQueues.find(q => q.unitId === factoryId)?.orders ?? [];
+        const runs = groupFactoryQueueRuns(orders);
+        tiles = runs.map(r => {
+            const def = dc?.getUnitDef(r.defId);
+            return {
+                unitId: factoryId,
+                defId: r.defId,
+                name: def?.name ?? '',
+                humanName: def?.humanName ?? '',
+                buildPic: def?.buildPic ?? '',
+                count: r.tags.length,
+                tags: r.tags.slice(),
+            };
+        });
+    }
+    gpFactoryQueueTiles = tiles;
+    gpFactoryQueueDirty = true;
+}
+
+/// Cancel queued factory order(s) from the native FactoryQueuePanel
+/// (gp:removeFactoryOrder). CMD.REMOVE by tag (no OPT.ALT) against a factory
+/// needs OPT.CONTROL set — Recoil's CCommandAI::ExecuteRemove redirects a
+/// factory's plain (non-Ctrl) REMOVE to CFactoryCAI::newUnitCommands (orders
+/// queued for the *next produced unit*, not the build queue itself); only
+/// the Ctrl-held variant targets `commandQue`, the actual build queue this
+/// panel reads via UnitCommandQueuesUpdate. Mirrors ZK/BA's own Ctrl+
+/// right-click-to-cancel-a-build convention. Live-verified: omitting
+/// OPT.CONTROL silently no-ops (removal lands on the empty produced-unit
+/// queue) — confirmed via Spring.GetFactoryCommands before/after.
+export function gpHandleRemoveFactoryOrder(unitId: number, tags: number[]): void {
+    if (tags.length === 0) return;
+    gpCtx.connection?.sendPlayerCommand(CMD.REMOVE, [unitId], tags, OPT.CONTROL, 0);
+}
+
 /// GW4-c5b-3: update the shift-held gate that shows/hides the command-path +
 /// waypoint overlays (Spring's "hold Shift to see queued orders" gesture).
 /// Driven from the forwarded key/pointer `mods` bitmask (bit 0 = shift).
@@ -1617,6 +1700,9 @@ function gpPostSceneState(now: number): void {
     // arrived (dirty-gated, same pattern as buildOptions).
     const economy = gpEconomyDirty && gpLastEconomy ? gpLastEconomy : undefined;
     gpEconomyDirty = false;
+    // G4: ship the resolved factory-queue rows only when they changed.
+    const factoryQueue = gpFactoryQueueDirty ? gpFactoryQueueTiles.slice() : undefined;
+    gpFactoryQueueDirty = false;
     postToMain({
         type: 'gp:sceneState',
         selectedUnitIds: sel.slice(),
@@ -1635,6 +1721,7 @@ function gpPostSceneState(now: number): void {
         entityCount: gpCtx.entityRenderer?.entityCount ?? 0,
         ...(buildOptions ? { buildOptions } : {}),
         ...(economy ? { economy } : {}),
+        ...(factoryQueue ? { factoryQueue } : {}),
     });
 }
 
@@ -1890,6 +1977,8 @@ export function gpShutdown(): void {
     gpMinimapMetalSpotsInfo = null;
     gpBuildTiles = [];
     gpBuildTilesDirty = false;
+    gpFactoryQueueTiles = [];
+    gpFactoryQueueDirty = false;
     gpLastEconomy = null;
     gpEconomyDirty = false;
     gpCommandPathRenderer?.dispose();

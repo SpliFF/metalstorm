@@ -149,6 +149,20 @@ export interface GpCancelBuildPlacementToWorker {
     type: 'gp:cancelBuildPlacement';
 }
 
+/**
+ * Cancel queued build order(s) from the native FactoryQueuePanel
+ * (PLAN-playable.md G4). `tags` are the order tags to drop — a single tag
+ * pops one instance off the tail of a run; the panel's full-group button
+ * sends every tag in the run. Resolves to a plain `CMD.REMOVE` (by tag, no
+ * OPT.ALT) issued against `unitId` — the worker owns the connection, so the
+ * intent crosses the boundary the same way `gp:startBuildPlacement` does.
+ */
+export interface GpRemoveFactoryOrderToWorker {
+    type: 'gp:removeFactoryOrder';
+    unitId: number;
+    tags: number[];
+}
+
 export type GpMessageToWorker =
     | GpInitToWorker
     | GpInputToWorker
@@ -156,6 +170,7 @@ export type GpMessageToWorker =
     | GpFocusWorldToWorker
     | GpStartBuildPlacementToWorker
     | GpCancelBuildPlacementToWorker
+    | GpRemoveFactoryOrderToWorker
     // PLAN-rml.md: DOM events + viewport changes routed back to the worker-side
     // RmlUi proxy (rml-bridge.ts) for Lua listener dispatch / dp-ratio recompute.
     | RmlEventToWorker
@@ -180,6 +195,27 @@ export interface BuildMenuTile {
     energyCost: number;
     buildTime: number;
     tooltip: string;
+}
+
+/**
+ * A production-queue row for the native FactoryQueuePanel (PLAN-playable.md
+ * G4). The worker groups the selected factory's command queue into
+ * consecutive same-defId runs (Spring's FactoryCAI stacks repeated identical
+ * build commands one-per-slot) and posts these via
+ * `gp:sceneState.factoryQueue`. `tags` carries every order tag in the run,
+ * oldest→newest, so the panel can pop one (`tags.at(-1)`) or cancel the
+ * whole row (`tags`) via `gp:removeFactoryOrder`.
+ */
+export interface FactoryQueueTile {
+    /** The factory unit this row belongs to (first own-team factory in the
+     *  current selection — multi-factory queue merging isn't implemented). */
+    unitId: number;
+    defId: number;
+    name: string;
+    humanName: string;
+    buildPic: string;
+    count: number;
+    tags: number[];
 }
 
 /** Per-selected-unit facts the HTML HUD needs (no Babylon objects cross the wire). */
@@ -225,6 +261,11 @@ export interface GpSceneStateToMain {
      *  nothing forwarded it across the worker→main boundary, so the native
      *  EconomyBar was permanently dark despite being fully built. */
     economy?: ResourceUpdateInfo;
+    /** Resolved production-queue rows for the selected factory (PLAN-playable.md
+     *  G4); present only when the queue changed since the last feed. Empty
+     *  array (not absent) clears the panel when the factory's queue empties
+     *  or the selection no longer includes an own-team factory. */
+    factoryQueue?: FactoryQueueTile[];
 }
 
 /**

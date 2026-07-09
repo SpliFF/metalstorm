@@ -50,8 +50,10 @@ import type { DefCache } from './def-cache.js';
 import { CommandBuffer, OPT } from './command-buffer.js';
 import { nearestMetalSpot, type MetalSpot } from './metal-spots.js';
 
-/// Bit 11 of UnitDef.flags marks a factory (see protocol.fbs).
-const UNITDEF_FLAG_IS_FACTORY = 1 << 11;
+/// Bit 11 of UnitDef.flags marks a factory (see protocol.fbs). Exported —
+/// PLAN-playable.md G4 reuses it in game-processor.ts to find the selected
+/// factory for the native factory-queue panel.
+export const UNITDEF_FLAG_IS_FACTORY = 1 << 11;
 
 /**
  * Mirror of `CGameHelper::Pos2BuildPos` — snap a world position to Spring's
