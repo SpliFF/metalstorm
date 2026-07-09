@@ -18,6 +18,9 @@ struct UserRecord {
     std::string passwordHash;
     std::string role;           // "admin", "player", "spectator"
     bool isBanned = false;
+    /// True for accounts minted by `/api/rooms/direct` (no password ever
+    /// set — the account exists only to hold a pre-authorised session).
+    bool isDev = false;
 };
 
 class Database {
@@ -32,8 +35,10 @@ public:
     void Close();
 
     /// Create a user. Returns the new user ID, or 0 on failure (duplicate username).
+    /// `isDev` marks accounts minted by `/api/rooms/direct` for a manifest
+    /// username that doesn't exist yet — never set for normal registration.
     int64_t CreateUser(const std::string& username, const std::string& passwordHash,
-                       const std::string& role = "player");
+                       const std::string& role = "player", bool isDev = false);
 
     /// Look up a user by username. Returns nullopt if not found.
     std::optional<UserRecord> FindUser(const std::string& username);

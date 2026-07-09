@@ -108,6 +108,15 @@ export class LobbyUI {
     private currentScreen: LobbyScreen = 'login';
     private rooms: RoomInfo[] = [];
     private currentRoom: CurrentRoom | null = null;
+    /// Guards against firing onGameStart twice for the same game session.
+    /// `attachSession()` kicks off a background `lobbyGet('/api/rooms')`
+    /// (via `startPolling()`) that isn't cancelled by a subsequent direct
+    /// `setCurrentRoomFromJson()` call — when the room is already
+    /// Loading/Active at attach time (direct-start's whole point), both
+    /// resolve into `updateCurrentRoomFromJson` in quick succession and
+    /// would otherwise double-fire. Reset on the state>=5 (Ended) branch
+    /// below so a later restart of the *same* persistent room re-arms it.
+    private gameStartedForRoomId: number | null = null;
     private onGameStart?: (gameServerPort: number, mapId: string, gameId: string) => void;
     private myPlayerId = 0;
     private pendingRejoinRoomId = 0;
@@ -399,10 +408,14 @@ export class LobbyUI {
             localStorage.setItem('springrts-game-port', String(this.currentRoom.gameServerPort));
             this.stopPolling();
             this.hide();
-            this.onGameStart?.(this.currentRoom.gameServerPort, this.currentRoom.mapId, this.currentRoom.gameId);
+            if (this.gameStartedForRoomId !== this.currentRoom.id) {
+                this.gameStartedForRoomId = this.currentRoom.id;
+                this.onGameStart?.(this.currentRoom.gameServerPort, this.currentRoom.mapId, this.currentRoom.gameId);
+            }
             return;
         }
         if (this.currentRoom.state >= 5) {
+            this.gameStartedForRoomId = null;
             localStorage.removeItem('springrts-game-room');
             localStorage.removeItem('springrts-game-port');
         }

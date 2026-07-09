@@ -33,6 +33,7 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -326,6 +327,15 @@ int main(int argc, char* argv[])
     // admin role to an existing account and exits without starting the server
     // — an explicit, auditable op rather than auto-elevating on every boot.
     std::string promoteAdmin;
+    // PLAN-quickstart.md Part A: dev/test-only bypass of the whole lobby
+    // dance. `dev_direct_start` gates the /api/rooms/direct HTTP endpoint
+    // (E6: off by default, never set in a production config). `--direct
+    // <manifest.json>` is a separate, always-available CLI flag — it's
+    // operator-supplied at process launch, not reachable remotely, so it
+    // doesn't need the same gate; it creates one standing room at boot
+    // (mprocs dev flow: stack comes up with the game already running).
+    bool devDirectStart = false;
+    std::string directManifestPath;
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -337,6 +347,8 @@ int main(int argc, char* argv[])
         else if (arg == "--log-level" && i + 1 < argc) logLevel = std::atoi(argv[++i]);
         else if (arg == "--debug") { debugMode = true; logLevel = SPRING_LOG_DEBUG; }
         else if (arg == "--no-cache") { CacheControl::SetNoCache(true); }
+        else if (arg == "--dev-direct-start") { devDirectStart = true; }
+        else if (arg == "--direct" && i + 1 < argc) { directManifestPath = argv[++i]; }
         else if (arg == "--game" && i + 1 < argc) {
             // Back-compat: `--game <path>` is translated into
             // `--games-dir <parent>` so existing scripts that point
@@ -1079,6 +1091,216 @@ int main(int argc, char* argv[])
         net.SendSSE(roomStreamChannel, json, "rooms");
     };
 
+    // --- PLAN-quickstart.md Part A: direct-start composite ---
+    //
+    // Mint (or create) a session for a manifest-declared username without a
+    // password step. A missing account is created dev-flagged (is_dev=1)
+    // with an unusable random password hash — it can never log in via
+    // /api/auth/login, only via the token minted here.
+    auto ensureDevSession = [&](const std::string& username) -> std::pair<uint32_t, std::string> {
+        auto user = db.FindUser(username);
+        int64_t uid;
+        if (user) {
+            uid = user->id;
+        } else {
+            uid = db.CreateUser(username, Crypto::HashPassword(Crypto::GenerateToken(32)),
+                "player", /*isDev=*/true);
+        }
+        std::string token = HttpAuth::GenerateToken();
+        db.CreateSession(uid, token);
+        return {static_cast<uint32_t>(uid), token};
+    };
+
+    struct ResolvedPlayer {
+        uint32_t userId;
+        std::string username;
+        uint8_t team;
+        int8_t startPos;
+        bool spectator;
+    };
+
+    struct DirectStartResult {
+        bool ok = false;
+        std::string error;
+        uint32_t roomId = 0;
+        std::unordered_map<std::string, std::string> sessions;
+    };
+
+    // Composes CreateRoom -> modoptions -> AI slots -> player joins ->
+    // ready -> StartGame -> spawnGameServer: the same sequence
+    // /api/rooms/start already drives (§2.2 "reuse rooms/start's path so
+    // nothing forks"), gathered from one manifest instead of N round trips.
+    // Returns as soon as the game-server process is spawned and its port
+    // known (room state = Loading) — the same synchronous contract
+    // /api/rooms/start already has. The room flips Loading->Active
+    // asynchronously via the health-check loop below, same as today; the
+    // client's existing connect-retry logic already tolerates that gap.
+    auto runDirectStart = [&](const nlohmann::json& manifest) -> DirectStartResult {
+        DirectStartResult result;
+
+        std::string name = manifest.value("name", "");
+        if (name.empty()) name = "dev:direct";
+        std::string mapId = manifest.value("map", "");
+        std::string gameId = manifest.value("game", "");
+        if (gameId.empty() && !availableGames.empty()) gameId = availableGames[0].id;
+        if (mapId.empty()) { result.error = "map is required"; return result; }
+
+        if (!manifest.contains("players") || !manifest["players"].is_array() ||
+            manifest["players"].empty()) {
+            result.error = "players[] must declare at least one player (the host)";
+            return result;
+        }
+
+        // Idempotent restarts (§2.2): a standing room re-created under the
+        // same name replaces the old one rather than accumulating duplicates.
+        for (auto* existing : rooms.GetAllRooms()) {
+            if (existing && existing->name == name) {
+                auto gsIt = gameServers.find(existing->id);
+                if (gsIt != gameServers.end()) {
+                    kill(gsIt->second.pid, SIGTERM);
+                    removeGameServer(existing->id);
+                    gameServers.erase(gsIt);
+                }
+                rooms.DeleteRoom(existing->id);
+                break;
+            }
+        }
+
+        // E1: a declared player already in a (different) room is force-left
+        // — the direct endpoint owns the whole dance atomically now.
+        auto forceLeaveCurrentRoom = [&](uint32_t playerId) {
+            auto* prior = findPlayerRoom(playerId);
+            if (!prior) return;
+            uint32_t priorId = prior->id;
+            auto res = rooms.LeaveRoom(priorId, playerId);
+            if (res == LeaveResult::Abandoned) {
+                auto gsIt = gameServers.find(priorId);
+                if (gsIt != gameServers.end()) {
+                    kill(gsIt->second.pid, SIGTERM);
+                    removeGameServer(priorId);
+                    gameServers.erase(gsIt);
+                }
+                rooms.DeleteRoom(priorId);
+            }
+        };
+
+        std::vector<ResolvedPlayer> resolvedPlayers;
+        resolvedPlayers.reserve(manifest["players"].size());
+        for (const auto& pj : manifest["players"]) {
+            std::string username = pj.value("username", "");
+            if (username.empty()) { result.error = "player entry missing username"; return result; }
+            auto [uid, token] = ensureDevSession(username);
+            result.sessions[username] = token;
+            resolvedPlayers.push_back({
+                uid, username,
+                static_cast<uint8_t>(pj.value("team", 0)),
+                static_cast<int8_t>(pj.value("startPos", -1)),
+                pj.value("spectator", false),
+            });
+        }
+
+        const ResolvedPlayer& host = resolvedPlayers[0];
+        forceLeaveCurrentRoom(host.userId);
+
+        uint32_t roomId = rooms.CreateRoom(name, mapId, gameId, 8, "",
+            host.userId, 0, host.username, /*persistent=*/false);
+        result.roomId = roomId;
+
+        MapMetadataDb mdb;
+        const size_t spCount = mdb.GetMap(mapDb, mapId).startPositions.size();
+        const int8_t maxStartPos = static_cast<int8_t>(spCount > 127 ? 127 : spCount);
+
+        // Host was added by CreateRoom as team 0, non-spectator, unready —
+        // apply the manifest's team/startPos/ready on top.
+        rooms.SetTeam(roomId, host.userId, host.team);
+        if (host.startPos >= 0)
+            rooms.SetPlayerStartPos(roomId, host.userId, host.userId, host.startPos, maxStartPos);
+        rooms.SetReady(roomId, host.userId, true);
+
+        for (size_t i = 1; i < resolvedPlayers.size(); ++i) {
+            const ResolvedPlayer& p = resolvedPlayers[i];
+            forceLeaveCurrentRoom(p.userId);
+            if (!rooms.JoinRoom(roomId, p.userId, 0, p.username, "", p.spectator)) {
+                result.ok = false;
+                result.error = "failed to bind player '" + p.username + "'";
+                return result;
+            }
+            if (!p.spectator) {
+                rooms.SetTeam(roomId, p.userId, p.team);
+                if (p.startPos >= 0)
+                    rooms.SetPlayerStartPos(roomId, p.userId, p.userId, p.startPos, maxStartPos);
+                rooms.SetReady(roomId, p.userId, true);
+            }
+        }
+
+        if (manifest.contains("modoptions") && manifest["modoptions"].is_object()) {
+            for (auto& [key, value] : manifest["modoptions"].items()) {
+                std::string val = value.is_string() ? value.get<std::string>() : value.dump();
+                rooms.SetModOption(roomId, host.userId, key, val);
+            }
+        }
+
+        if (manifest.contains("aiSlots") && manifest["aiSlots"].is_array()) {
+            uint8_t slotIndex = 0;
+            for (const auto& aj : manifest["aiSlots"]) {
+                std::string aiId = aj.value("aiId", "");
+                if (aiId.empty()) continue;
+                uint8_t team = static_cast<uint8_t>(aj.value("team", 0));
+                if (!rooms.AddAISlot(roomId, host.userId, aiId, aiId, team)) continue;
+                int8_t sp = static_cast<int8_t>(aj.value("startPos", -1));
+                if (sp >= 0)
+                    rooms.SetAIStartPos(roomId, host.userId, slotIndex, sp, maxStartPos);
+                slotIndex++;
+            }
+        }
+
+        const bool autoStart = manifest.value("autoStart", true);
+        if (!autoStart) {
+            result.ok = true;
+            return result;
+        }
+
+        // Same solo-team Null AI safety net as /api/rooms/start (§2.2):
+        // a single-team room trips ZK's game_over.lua ~1.5s in.
+        {
+            GameRoom* room = rooms.GetRoom(roomId);
+            std::set<uint8_t> teams;
+            for (const auto& p : room->players)
+                if (!p.isSpectator) teams.insert(p.team);
+            for (const auto& a : room->aiSlots) teams.insert(a.team);
+            if (teams.size() <= 1) {
+                const uint8_t aiTeam = (host.team == 0) ? 1 : 0;
+                rooms.AddAISlot(roomId, host.userId, "null", "Null AI", aiTeam);
+            }
+        }
+
+        if (!rooms.StartGame(roomId, host.userId)) {
+            result.ok = false;
+            result.error = "cannot start game (internal — all declared players should already be ready)";
+            return result;
+        }
+
+        rooms.AutoAssignStartPositions(roomId, maxStartPos);
+
+        GameRoom* room = rooms.GetRoom(roomId);
+        auto gpIt = gamePathsById.find(gameId);
+        if (gpIt != gamePathsById.end()) {
+            const auto vit = gameVersionsById.find(gameId);
+            const std::string& gameVer = (vit != gameVersionsById.end()) ? vit->second : std::string();
+            std::unordered_set<int> busyPorts;
+            for (const auto& [rid, gi] : gameServers)
+                if (gi.pid > 0 && isProcessAlive(gi.pid)) busyPorts.insert(gi.port);
+            auto inst = spawnGameServer(roomId, gameId, gameVer, mapId, dbPath,
+                room->players, room->aiSlots, room->modOptions, busyPorts);
+            gameServers[roomId] = inst;
+            persistGameServer(inst);
+            room->gameServerPort = inst.port;
+        }
+
+        result.ok = true;
+        return result;
+    };
+
     // POST /api/rooms — create a room
     net.AddHttpPost("/api/rooms", [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
         HTTP_ROOM_AUTH();
@@ -1584,7 +1806,77 @@ int main(int argc, char* argv[])
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
     });
 
+    // POST /api/rooms/direct — PLAN-quickstart.md Part A. Dev/test-only:
+    // collapses the whole lobby dance (login, create, add AI, join, ready,
+    // start) into one manifest + one round trip. Gated by dev_direct_start
+    // (off by default, never set in prod) AND (admin role OR localhost
+    // origin) — two independent latches (E6).
+    //
+    // Response is the same room JSON /api/rooms/start already returns
+    // (state, players, ai_slots, modoptions, game_server_port) plus a
+    // `sessions` map of username -> token. Deliberately does NOT include a
+    // wtInfo field: the lobby process links neither WebTransportServer nor
+    // an outbound HTTP client, so it cannot fetch the spawned game server's
+    // own /api/wt/info without either a new dependency or blocking this
+    // single-threaded HTTP loop for the game server's full cold-boot time
+    // (observed up to 90s+ for a heavy game). The client already does its
+    // own /api/wt/info discovery with connect-retry once it has gamePort,
+    // exactly as it does today after a normal /api/rooms/start — this
+    // reuses that path instead of duplicating it server-side.
+    net.AddHttpPost("/api/rooms/direct", [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+        if (!devDirectStart)
+            return HttpAuth::JsonResponse(404, R"({"error":"not found"})");
+        if (!headers.remoteIsLoopback) {
+            int64_t callerId = HttpAuth::ValidateToken(db, headers.authorization);
+            auto caller = callerId > 0 ? db.FindUserById(callerId) : std::nullopt;
+            if (!caller || caller->role != "admin")
+                return HttpAuth::JsonResponse(403,
+                    R"({"error":"forbidden — direct-start requires admin role or localhost"})");
+        }
+
+        nlohmann::json manifest = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+        if (manifest.is_discarded()) return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+
+        auto result = runDirectStart(manifest);
+        if (!result.ok)
+            return HttpAuth::JsonResponse(400, "{\"error\":\"" + HttpAuth::JsonEscape(result.error) + "\"}");
+
+        nlohmann::json resp = nlohmann::json::parse(roomToJson(rooms.GetRoom(result.roomId)));
+        resp["sessions"] = nlohmann::json::object();
+        for (const auto& [username, token] : result.sessions) resp["sessions"][username] = token;
+        broadcastRooms();
+        return HttpAuth::JsonResponse(200, resp.dump());
+    });
+
     #undef HTTP_ROOM_AUTH
+
+    // --direct <manifest.json>: create one standing room at boot, driven
+    // through the same runDirectStart composite as the HTTP endpoint. Not
+    // gated by dev_direct_start — this is an operator-supplied CLI flag at
+    // process launch, not reachable remotely (mprocs dev flow: the stack
+    // comes up with the game already running).
+    if (!directManifestPath.empty()) {
+        std::ifstream mf(directManifestPath);
+        if (!mf) {
+            SLOG(SPRING_LOG_ERROR, "--direct: cannot open manifest '%s'", directManifestPath.c_str());
+        } else {
+            std::string content((std::istreambuf_iterator<char>(mf)), std::istreambuf_iterator<char>());
+            nlohmann::json manifest = nlohmann::json::parse(content, nullptr, /*allow_exceptions=*/false);
+            if (manifest.is_discarded()) {
+                SLOG(SPRING_LOG_ERROR, "--direct: bad JSON in '%s'", directManifestPath.c_str());
+            } else {
+                auto result = runDirectStart(manifest);
+                if (result.ok) {
+                    SLOG(SPRING_LOG_NOTICE, "--direct: standing room ready (room %u, '%s')",
+                        result.roomId, manifest.value("name", "dev:direct").c_str());
+                    broadcastRooms();
+                } else {
+                    SLOG(SPRING_LOG_ERROR, "--direct: failed to create standing room: %s",
+                        result.error.c_str());
+                }
+            }
+        }
+    }
 
     if (!net.Start(port)) {
         SLOG(SPRING_LOG_ERROR, "failed to start network");

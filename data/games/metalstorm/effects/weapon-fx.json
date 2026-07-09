@@ -1,0 +1,77 @@
+{
+  "_doc": [
+    "Metalstorm weapon -> FX/SFX resolution map. The native-game analogue of the ",
+    "BAR/ZK client dispatch (client/src/core/weapon-fx-dispatch.ts effectForFire / ",
+    "effectForImpact), but data instead of code: no cegTag/explosionGenerator ",
+    "strings on the defs — the client FX dispatch reads THIS table keyed by weapon ",
+    "def name (weapons/weapons.lua) and resolves each slot to a named effect in ",
+    "effects/library.json and a SoundItem in gamedata/sounds.lua.",
+    "",
+    "Slots per weapon:",
+    "  muzzle     -> library effect fired at the barrel on weapon_fired (or null)",
+    "  projectile -> library tracer style attached to the flying round (or null)",
+    "  trail      -> library trail style streamed behind the round (or null)",
+    "  impact     -> library effect at the detonation point",
+    "  fireSound  -> sounds.lua SoundItem key (matches weapons.lua soundstart)",
+    "  impactSound-> sounds.lua SoundItem key",
+    "",
+    "Resolution order (client dispatch): exact weapon-name entry -> `defaults` by ",
+    "weapontype -> `__fallback`. Keeps every weapon rendering SOMETHING even before ",
+    "per-weapon tuning (mirrors combat-fx.ts __default_explosion behaviour)."
+  ],
+  "version": 1,
+
+  "defaults": {
+    "_doc": "Fallback by Recoil weapontype when a weapon has no explicit entry.",
+    "Cannon":          { "muzzle": "muzzle_ac",      "projectile": "tracer_ac", "trail": null,           "impact": "expl_small", "fireSound": "ac_fire",         "impactSound": "blast_small" },
+    "MissileLauncher": { "muzzle": "launch_missile",  "projectile": null,        "trail": "trail_missile","impact": "expl_medium","fireSound": "missile_launch",  "impactSound": "blast_med" },
+    "TorpedoLauncher": { "muzzle": "launch_torpedo",  "projectile": null,        "trail": "wake_torpedo", "impact": "underwater_burst", "fireSound": "torpedo_launch", "impactSound": "blast_water" },
+    "AircraftBomb":    { "muzzle": null,              "projectile": null,        "trail": null,           "impact": "expl_large", "fireSound": "bomb_release",    "impactSound": "blast_large" }
+  },
+
+  "__fallback": { "muzzle": null, "projectile": null, "trail": null, "impact": "__default_explosion", "fireSound": null, "impactSound": "blast_small" },
+
+  "weapons": {
+    "NOWEAPON":            { "muzzle": null,             "projectile": null,            "trail": null,           "impact": null,             "fireSound": null,            "impactSound": null },
+
+    "MS_MG_S1":            { "muzzle": "muzzle_mg",      "projectile": "tracer_mg",     "trail": null,           "impact": "impact_mg",      "fireSound": "mg_volley",     "impactSound": "hit_metal_small" },
+    "MS_MG_S2":            { "muzzle": "muzzle_mg",      "projectile": "tracer_mg",     "trail": null,           "impact": "impact_mg",      "fireSound": "mg_volley",     "impactSound": "hit_metal_small" },
+
+    "MS_AC_S1":            { "muzzle": "muzzle_ac",      "projectile": "tracer_ac",     "trail": null,           "impact": "impact_ac",      "fireSound": "ac_fire",       "impactSound": "hit_metal_small" },
+    "MS_AC_S2":            { "muzzle": "muzzle_ac",      "projectile": "tracer_ac",     "trail": null,           "impact": "impact_ac",      "fireSound": "ac_fire",       "impactSound": "hit_metal_med" },
+    "MS_AC_S3":            { "muzzle": "muzzle_ac",      "projectile": "tracer_ac",     "trail": null,           "impact": "expl_small",     "fireSound": "ac_fire",       "impactSound": "blast_small" },
+
+    "MS_RAILGUN_S1":       { "muzzle": "muzzle_railgun", "projectile": "tracer_railgun","trail": null,           "impact": "impact_railgun", "fireSound": "railgun_fire",  "impactSound": "hit_rail" },
+    "MS_RAILGUN_S2":       { "muzzle": "muzzle_railgun", "projectile": "tracer_railgun","trail": null,           "impact": "impact_railgun", "fireSound": "railgun_fire",  "impactSound": "hit_rail" },
+    "MS_RAILGUN_S3":       { "muzzle": "muzzle_railgun", "projectile": "tracer_railgun","trail": null,           "impact": "expl_small",     "fireSound": "railgun_fire",  "impactSound": "blast_small" },
+    "MS_RAILGUN_S4":       { "muzzle": "muzzle_howitzer","projectile": "tracer_railgun","trail": null,           "impact": "expl_huge",      "fireSound": "railgun_fire",  "impactSound": "blast_huge" },
+
+    "MS_MORTAR_S1":        { "muzzle": "muzzle_mortar",  "projectile": null,            "trail": "trail_shell",  "impact": "expl_small",     "fireSound": "mortar_fire",   "impactSound": "blast_small" },
+    "MS_MORTAR_S2":        { "muzzle": "muzzle_mortar",  "projectile": null,            "trail": "trail_shell",  "impact": "expl_medium",    "fireSound": "mortar_fire",   "impactSound": "blast_med" },
+
+    "MS_HOWITZER_S1":      { "muzzle": "muzzle_howitzer","projectile": null,            "trail": "trail_shell",  "impact": "expl_medium",    "fireSound": "howitzer_fire", "impactSound": "blast_med" },
+    "MS_HOWITZER_S2":      { "muzzle": "muzzle_howitzer","projectile": null,            "trail": "trail_shell",  "impact": "expl_large",     "fireSound": "howitzer_fire", "impactSound": "blast_large" },
+    "MS_HOWITZER_S3":      { "muzzle": "muzzle_howitzer","projectile": null,            "trail": "trail_shell",  "impact": "expl_large",     "fireSound": "howitzer_fire", "impactSound": "blast_large" },
+    "MS_HOWITZER_S4":      { "muzzle": "muzzle_howitzer","projectile": null,            "trail": "trail_shell",  "impact": "expl_huge",      "fireSound": "howitzer_fire", "impactSound": "blast_huge" },
+
+    "MS_MISSILE_AA_S1":    { "muzzle": "launch_missile", "projectile": null,            "trail": "trail_missile","impact": "expl_small",     "fireSound": "missile_launch","impactSound": "blast_small" },
+    "MS_MISSILE_AA_S2":    { "muzzle": "launch_missile", "projectile": null,            "trail": "trail_missile","impact": "expl_medium",    "fireSound": "missile_launch","impactSound": "blast_med" },
+    "MS_MISSILE_AA_S3":    { "muzzle": "launch_missile", "projectile": null,            "trail": "trail_missile","impact": "expl_medium",    "fireSound": "missile_launch","impactSound": "blast_med" },
+
+    "MS_MISSILE_CRUISE_S1":{ "muzzle": "launch_cruise",  "projectile": null,            "trail": "trail_cruise", "impact": "expl_large",     "fireSound": "cruise_launch", "impactSound": "blast_large" },
+    "MS_MISSILE_CRUISE_S2":{ "muzzle": "launch_cruise",  "projectile": null,            "trail": "trail_cruise", "impact": "expl_huge",      "fireSound": "cruise_launch", "impactSound": "blast_huge" },
+
+    "MS_TORPEDO_S1":       { "muzzle": "launch_torpedo", "projectile": null,            "trail": "wake_torpedo", "impact": "underwater_burst","fireSound": "torpedo_launch","impactSound": "blast_water" },
+    "MS_TORPEDO_S2":       { "muzzle": "launch_torpedo", "projectile": null,            "trail": "wake_torpedo", "impact": "underwater_burst","fireSound": "torpedo_launch","impactSound": "blast_water" },
+    "MS_TORPEDO_S3":       { "muzzle": "launch_torpedo", "projectile": null,            "trail": "wake_torpedo", "impact": "underwater_burst","fireSound": "torpedo_launch","impactSound": "blast_water" },
+
+    "MS_FLAK_S1":          { "muzzle": "muzzle_flak",    "projectile": "tracer_ac",     "trail": null,           "impact": "airburst_flak",  "fireSound": "flak_fire",     "impactSound": "blast_air" },
+    "MS_FLAK_S2":          { "muzzle": "muzzle_flak",    "projectile": "tracer_ac",     "trail": null,           "impact": "airburst_flak",  "fireSound": "flak_fire",     "impactSound": "blast_air" },
+
+    "MS_BOMB_S1":          { "muzzle": null,             "projectile": null,            "trail": null,           "impact": "expl_medium",    "fireSound": "bomb_release",  "impactSound": "blast_med" },
+    "MS_BOMB_S2":          { "muzzle": null,             "projectile": null,            "trail": null,           "impact": "expl_large",     "fireSound": "bomb_release",  "impactSound": "blast_large" },
+    "MS_BOMB_S3":          { "muzzle": null,             "projectile": null,            "trail": null,           "impact": "expl_huge",      "fireSound": "bomb_release",  "impactSound": "blast_huge" },
+
+    "MS_DEPTHCHARGE_S1":   { "muzzle": null,             "projectile": null,            "trail": "wake_torpedo", "impact": "underwater_burst","fireSound": "depthcharge_drop","impactSound": "blast_water" }
+  }
+}

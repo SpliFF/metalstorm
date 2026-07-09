@@ -154,7 +154,7 @@ Building the new engine from the Spring RTS base has been greatly accelerated us
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** &mdash; File map, data flow, build commands, HTTP routes, scripting system
 - **[docs/api.md](docs/api.md)** &mdash; HTTP API reference (auth, rooms, exec, logs, WebRTC signaling)
 - **[docs/api-spec.yaml](docs/api-spec.yaml)** &mdash; OpenAPI 3.1 machine-readable spec
-- **[docs/debugging.md](docs/debugging.md)** &mdash; Logging, debug console, Lua debugger, network inspector
+- **[docs/debugging.md](docs/debugging.md)** &mdash; Logging, debug console, Lua debugger, network inspector, performance profiling (hub page, links to `docs/debugging-*.md`)
 - **[docs/caching.md](docs/caching.md)** &mdash; Build stamps, asset versioning, cache tiers
 
 ## License

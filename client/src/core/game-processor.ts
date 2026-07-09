@@ -16,13 +16,13 @@
  */
 
 import { Engine, Scene, FreeCamera, Vector3, Color3, Color4, Mesh, MeshBuilder, StandardMaterial } from '@babylonjs/core';
-import type { GpInitToWorker, GpMinimapBlips, GpMinimapLos } from './game-worker-protocol.js';
+import type { GpInitToWorker, GpMinimapBlips, GpMinimapLos, GpMinimapMetalSpots, BuildMenuTile, FactoryQueueTile } from './game-worker-protocol.js';
 // GW4-c2: the WebTransport game connection now lives in the worker. Connection
 // is host-agnostic (runs on WebTransportAdapter, no DOM refs after the
 // onServerRestart callback was extracted) so it imports + runs here unchanged.
 import { Connection } from './connection.js';
 import type { CombatEventInfo, FeatureSpawnInfo,
-    SoundEventInfo, SoundRefInfo, ResourceUpdateInfo } from './connection.js';
+    SoundEventInfo, SoundRefInfo, ResourceUpdateInfo, UnitCmdDescsInfo } from './connection.js';
 import { AudioChannel } from './audio.js';
 import type { EntityStateSnapshot } from './entity-state.js';
 // GW4-c3: terrain + lighting + map parse move into the worker so terrain
@@ -94,6 +94,11 @@ import { RTSCamera } from './rts-camera.js';
 import { OrbitRig, type OrbitTarget } from './orbit-rig.js';
 import { SunRig } from './sun-rig.js';
 import { WorkerSelection } from './worker-selection.js';
+import { WorkerBuildPlacement, UNITDEF_FLAG_IS_FACTORY } from './worker-build-placement.js';
+import { WorkerCommandModes } from './worker-command-modes.js';
+import { CMD, OPT } from './command-buffer.js';
+import { groupFactoryQueueRuns } from './factory-queue.js';
+import { findMetalSpots, type MetalSpot } from './metal-spots.js';
 import { resolveSoundRef, pickUnitDefSound,
     type ResolvedSoundEvent } from './sound-events.js';
 import { CommandPathRenderer } from './command-path-renderer.js';
@@ -128,7 +133,7 @@ import {
     dispatchVisibleUnitAdded, dispatchVisibleUnitRemoved,
     dispatchUnitCommand, dispatchUnitCmdDone,
     getWidgetList, toggleWidget, enableWidget, disableWidget, shutdown,
-    setMusicStreamTime, seedStorageCache,
+    setMusicStreamTime, seedStorageCache, setWorkerSetActiveCommandHandler,
     sameIdSet, escapeLuaStr, escapeLuaString, loadFromStorage, saveToStorage,
     luaBytesLiteral, paramsTableLiteral,
     describeMessage, describeInboundMessage,
@@ -163,6 +168,43 @@ let gpDpr = 1;
 let gpCommandPathRenderer: CommandPathRenderer | null = null;
 let gpWaypointMarkerRenderer: WaypointMarkerRenderer | null = null;
 let gpStandingOrderRenderer: StandingOrderRenderer | null = null;
+/// PLAN-playable.md G3a: worker-side build placement (ghost + snap + order).
+/// Built in gpInit alongside WorkerSelection; armed by the native BuildMenu via
+/// gp:startBuildPlacement. Pointer handlers route left-clicks here before
+/// selection when it is active.
+let gpBuildPlacement: WorkerBuildPlacement | null = null;
+/// PLAN-playable.md G3b: worker-side modal commands (arm-then-click), area-attack
+/// radius drag, waypoint reposition/revoke drag, and order hotkeys. Armed via the
+/// order menu (Spring.SetActiveCommand) or a hotkey; drives the main-thread cursor
+/// via gp:cursorMode. Pointer handlers route left-clicks here after build
+/// placement, before selection.
+let gpCommandModes: WorkerCommandModes | null = null;
+/// G3a: per-unit command descriptions (UnitCmdDescsUpdate, ~1 Hz, selection-
+/// scoped). Cached so the buildable-tile set can be recomputed on selection
+/// change without waiting for the next broadcast. Also mirrored into
+/// liveState.unitCmdDescs (the LuaUI consumer this connection event fed pre-GW4).
+const gpUnitCmdDescs = new Map<number, UnitCmdDescsInfo>();
+/// G3a: metal-spot centroids (in world elmos), computed once from the parsed
+/// map data in gpLoadMap and consumed by the mex build-ghost snap.
+let gpMetalSpots: MetalSpot[] = [];
+/// World elmos per metalmap cell (scales the mex snap search radius). Spring's
+/// metalmap is half the heightmap resolution → 2 × squareSize.
+let gpMetalCellSize = 16;
+/// G3a: resolved build-menu tiles for the current selection, posted to main's
+/// native BuildMenu via gp:sceneState.buildOptions. Dirty-gated so the tile
+/// array only ships when the buildable set actually changed.
+let gpBuildTiles: BuildMenuTile[] = [];
+let gpBuildTilesDirty = false;
+/// G4: resolved production-queue rows for the selected factory, posted to
+/// main's native FactoryQueuePanel via gp:sceneState.factoryQueue. Dirty-gated
+/// like gpBuildTiles.
+let gpFactoryQueueTiles: FactoryQueueTile[] = [];
+let gpFactoryQueueDirty = false;
+/// G4: latest ResourceUpdate for the local team, posted to main's native
+/// EconomyBar via gp:sceneState.economy. Dirty-gated like gpBuildTiles so a
+/// snapshot only ships when a fresh ResourceUpdate for our own team arrived.
+let gpLastEconomy: ResourceUpdateInfo | null = null;
+let gpEconomyDirty = false;
 /// Latest command-queue snapshot (UnitCommandQueuesUpdate, ~1 Hz), cached so a
 /// selection change can re-render the path/waypoint overlays immediately rather
 /// than waiting for the next broadcast.
@@ -171,9 +213,10 @@ let gpLastCommandQueues: import('./connection.js').UnitCommandQueueInfo[] = [];
 /// from the forwarded key/pointer `mods` bitmask (bit 0 = shift); cleared on blur.
 let gpShiftHeld = false;
 /// GW4-c5c: latest sim status (from onGameInfo) for the sceneState feed → main's
-/// HUD (entity count / frame / selection / speed-pause indicator). The HTML HUD
-/// is the only main-thread world-fact consumer reconnected here; ZK's economy /
-/// build-menu / order-panel are chili widgets (land with the c6 LuaUI world pass).
+/// HUD (entity count / frame / selection / speed-pause indicator). Stale note
+/// removed 2026-07-09 (G4): the native build-menu (G3a) and EconomyBar (G4) are
+/// both reconnected main-thread consumers now, not chili widgets — only the
+/// order-panel remains unbuilt (see PLAN-playable.md G4 factory-queue note).
 let gpGameFrame = 0;
 let gpPaused = false;
 let gpSimSpeed = 1;
@@ -197,6 +240,11 @@ let gpLastLosBitmap: LosBitmap | null = null;
 /// Sent on the first minimap feed after the terrain is built, then cleared
 /// (`gpMinimapMapInfo = null` ⇒ already delivered).
 let gpMinimapMapInfo: { width: number; height: number; baseUrl: string } | null = null;
+/// PLAN-playable.md G4: metal-spot markers for the minimap overlay, captured
+/// in gpLoadMap from the same gpMetalSpots the mex build-ghost snap uses.
+/// Static per-map data — one-shot delivery like gpMinimapMapInfo, not resent
+/// every feed (`gpMinimapMetalSpotsInfo = null` ⇒ already delivered).
+let gpMinimapMetalSpotsInfo: GpMinimapMetalSpots | null = null;
 let gpBuildingPlateRenderer: BuildingPlateRenderer | null = null;
 let gpDefCache: DefCache | null = null;
 /// GW4-c6-1b: resolves once the game's defs are ingested into the def cache (or
@@ -334,6 +382,30 @@ async function gpLoadMap(msg: GpInitToWorker): Promise<void> {
     if (!gpScene) return;  // shutdown raced the fetch
     gpMapData = map;
     postLog(1, `[gp] MapData received: ${map.mapx}x${map.mapy}, ${map.features.length} features`);
+
+    // PLAN-playable.md G3a: pre-compute metal-spot centroids for the build-ghost
+    // mex snap. Spring's metalmap is half the heightmap resolution: each cell
+    // covers 2 heightmap squares = 2 × squareSize elmos. Ports input-manager
+    // setMapData() verbatim.
+    gpMetalCellSize = (map.squareSize ?? 8) * 2;
+    gpMetalSpots = findMetalSpots(
+        map.metalmap, (map.mapx / 2) | 0, (map.mapy / 2) | 0, gpMetalCellSize);
+    postLog(1, `[gp] ${gpMetalSpots.length} metal spots discovered`);
+
+    // PLAN-playable.md G4: same centroids, packed struct-of-arrays for the
+    // minimap's one-shot metal-spot feed (see gpPostMinimapFeed).
+    {
+        const n = gpMetalSpots.length;
+        const x = new Float32Array(n);
+        const z = new Float32Array(n);
+        const metal = new Float32Array(n);
+        for (let i = 0; i < n; i++) {
+            x[i] = gpMetalSpots[i].x;
+            z[i] = gpMetalSpots[i].z;
+            metal[i] = gpMetalSpots[i].totalMetal;
+        }
+        gpMinimapMetalSpotsInfo = { count: n, x, z, metal };
+    }
 
     // `mapSourceUrl` is lobby-relative; lobbyUrl='' resolves it against the
     // worker (page) origin, same as fetchMapDataHttp's `/api/*` paths.
@@ -729,6 +801,42 @@ function gpConnect(msg: GpInitToWorker): void {
             const sel = gpCtx.selection?.selection ?? [];
             gpCommandPathRenderer?.update(queues, sel);
             gpWaypointMarkerRenderer?.update(queues, sel);
+            // PLAN-playable.md G4: the selected factory's queue may have
+            // changed (unit completed, order added/removed) — re-resolve.
+            gpRecomputeFactoryQueue();
+            // PLAN-playable.md G3b: reap pending build-ghosts whose order has
+            // left the queue (construction started / cancelled).
+            gpBuildPlacement?.onCommandQueuesUpdated(queues);
+        },
+        // PLAN-playable.md G3a: selection-scoped command descriptions (~1 Hz).
+        // GW4-regression fix (U3/onResourceUpdate-class): pre-GW4 the main-thread
+        // lua-widget-manager fed liveState.unitCmdDescs + the native build menu
+        // via a worker `unitCmdDescs` message; post-GW4 the connection moved INTO
+        // this worker and LuaWidgetManager isn't instantiated, so this connection
+        // event had NO consumer — the native build menu never populated and
+        // LuaUI's Spring.Get*CmdDesc* read empty. Restore both consumers: (1)
+        // cache for the native BuildMenu tile recompute; (2) mirror into
+        // liveState.unitCmdDescs (+ dispatchCommandsChanged) for LuaUI, exactly
+        // as the dead legacy `unitCmdDescs` handler in lua-widget-worker.ts did.
+        onUnitCmdDescs: (units) => {
+            gpUnitCmdDescs.clear();
+            liveState.unitCmdDescs.clear();
+            for (const u of units) {
+                gpUnitCmdDescs.set(u.unitId, u);
+                liveState.unitCmdDescs.set(u.unitId, u.cmds.map(c => ({
+                    cmdId:    c.cmdId,
+                    disabled: c.disabled,
+                    name:     c.name    ?? '',
+                    action:   c.action  ?? '',
+                    texture:  c.texture ?? '',
+                    tooltip:  c.tooltip ?? '',
+                    type:     c.type    ?? 0,
+                    params:   c.params  ?? [],
+                    hidden:   c.hidden  ?? false,
+                })));
+            }
+            dispatchCommandsChanged();
+            gpRecomputeBuildTiles();
         },
         // GW4-c5b-3: standing orders (always-on overlay; server scopes the
         // broadcast to own + allied teams).
@@ -777,6 +885,16 @@ function gpConnect(msg: GpInitToWorker): void {
                 metalReceived: info.metalReceived, energyReceived: info.energyReceived,
                 metalExcess: info.metalExcess, energyExcess: info.energyExcess,
             });
+            // G4: same GW4-regression class as above, but for the *native*
+            // EconomyBar on main (a DOM panel, not a LuaUI widget) — nothing
+            // ever forwarded ResourceUpdate across the worker→main boundary,
+            // so the fully-built EconomyBar component was never fed. Only
+            // the local team's updates are worth the postMessage; other
+            // teams' economies aren't shown (see economy-bar.ts).
+            if (info.team === gpCtx.connection?.myTeam) {
+                gpLastEconomy = info;
+                gpEconomyDirty = true;
+            }
         },
         // PLAN-latency L0: drive the presentation cursor at the true sim speed
         // (paused → 0 freezes P). GW4-c5: also drive the FX aging multiplier +
@@ -1144,6 +1262,16 @@ export function gpInit(msg: GpInitToWorker): void {
     // DefCache accumulates the game's defs (fetched over HTTP on auth).
     const defCache = new DefCache();
     gpDefCache = defCache;
+    // PLAN-playable.md G3a: a build tile's name/cost/pic come from its unit def,
+    // which may stream in after the cmd-descs that reference it. Re-resolve the
+    // tiles whenever new defs land so the native menu fills in labels/costs
+    // (mirrors input-manager's BuildMenu defCache.onUnitDefs re-render hook).
+    defCache.onUnitDefs(() => {
+        if ((gpCtx.selection?.selection.length ?? 0) > 0) {
+            gpRecomputeBuildTiles();
+            gpRecomputeFactoryQueue();
+        }
+    });
 
     // GW4-c5: projectile renderer + CEG getRuntime() + build-beam (ports
     // main.ts@d6301137f7^ L511–537). The CEG getRuntime() drives muzzle flashes /
@@ -1366,6 +1494,26 @@ export function gpInit(msg: GpInitToWorker): void {
             // react to what the player picked.
             liveState.selectedUnitIds = ids.slice();
             dispatchSelectionChanged(ids);
+            // PLAN-playable.md G3a: mirror the selection to the server so it
+            // scopes UnitCmdDescsUpdate to these units (Recoil-faithful; also
+            // the PLAN-orders bandwidth control). GW4-regression: post-move the
+            // connection lives in this worker and nothing called
+            // sendSelectionState, so the server never learned the selection and
+            // fell back to streaming EVERY own-team unit's cmd descs. Same dead-
+            // stream class as onUnitCmdDescs/onResourceUpdate. Selection changes
+            // are discrete gestures, so no extra debounce is needed here.
+            gpCtx.connection?.sendSelectionState(ids);
+            // A new selection invalidates any in-progress build placement (the
+            // armed def may not be buildable by the new selection —
+            // input-manager.setSelection did the same) and changes the
+            // buildable-tile set for the native menu.
+            gpBuildPlacement?.cancelBuildPlacement();
+            gpRecomputeBuildTiles();
+            // PLAN-playable.md G4: the factory-queue panel tracks the
+            // selection too — re-resolve from the cached queue snapshot so
+            // it appears immediately, same reasoning as the path/waypoint
+            // overlays above.
+            gpRecomputeFactoryQueue();
         },
         // GW4: unit-UI sounds (select / order-ack / multi-select). These are
         // unsynced in Recoil — the server emits no SoundEvent for them — so the
@@ -1401,8 +1549,55 @@ export function gpInit(msg: GpInitToWorker): void {
         },
     });
     gpCtx.selection = selection;
-    rtsCam.onRightClickCommit = (x, y, mods) =>
+
+    // PLAN-playable.md G3a: worker-side build placement (ghost + snap + order).
+    // Shares the selection set (owned by WorkerSelection), the def cache, and
+    // the pre-computed metal spots. The native BuildMenu on main arms it via
+    // gp:startBuildPlacement; the pointer dispatcher routes left-clicks here
+    // before selection while it is active.
+    gpBuildPlacement = new WorkerBuildPlacement(scene, entityRenderer, gpCtx.connection!, {
+        getCamera: (viewId) => (viewId === 0 ? camera : null),
+        getDpr: () => gpDpr,
+        getDefCache: () => gpDefCache,
+        getSelection: () => gpCtx.selection?.selection ?? [],
+        getMetalSpots: () => gpMetalSpots,
+        getMetalCellSize: () => gpMetalCellSize,
+        getBuildSpacing: () => liveState.buildSpacing,
+    });
+
+    // PLAN-playable.md G3b: worker-side modal commands + area/waypoint drags +
+    // order hotkeys. Shares the selection set + the ~1 Hz command-queue snapshot
+    // (for waypoint reposition). Emits cursor-mode changes to main.
+    gpCommandModes = new WorkerCommandModes(scene, entityRenderer, gpCtx.connection!, {
+        getCamera: (viewId) => (viewId === 0 ? camera : null),
+        getDpr: () => gpDpr,
+        getSelection: () => gpCtx.selection?.selection ?? [],
+        getLastCommandQueues: () => gpLastCommandQueues,
+        onCursorMode: (req) => postToMain({ type: 'gp:cursorMode', name: req.name, css: req.css }),
+    });
+
+    // G3b: route Spring.SetActiveCommand (order menu → widget worker shim) into
+    // the worker. Build commands (cmdId<0) arm ground placement (same as the
+    // native BuildMenu); world-target commands (cmdId>0) arm a modal. Instant /
+    // mode-cycle commands never arrive here (the shim issues those directly).
+    setWorkerSetActiveCommandHandler((cmdId, mods, cmdType) => {
+        if (cmdId < 0) {
+            gpBuildPlacement?.startBuildPlacement(-cmdId, { shift: mods.shift, ctrl: mods.ctrl });
+        } else if (cmdId > 0) {
+            gpCommandModes?.activateCommandFromMenu(cmdId, cmdType);
+        }
+    });
+
+    rtsCam.onRightClickCommit = (x, y, mods) => {
+        // Spring convention: a right-click while placing cancels the placement
+        // (input-manager.issueOrderAtScreen). RMB also cancels an armed modal
+        // command / in-flight area-attack drag (Recoil CGuiHandler: RMB clears
+        // the active command). Only when nothing is armed does RMB issue the
+        // default context order (move / attack / guard).
+        if (gpBuildPlacement?.isActive) { gpBuildPlacement.cancelBuildPlacement(); return; }
+        if (gpCommandModes?.tryHandleRightClick()) return;
         selection.issueOrderAtScreen(x, y, mods.shift, 0);
+    };
     // PLAN-latency L0: anchor the presentation clock to this connection's
     // ServerClock (created per game connection by Connection).
     gpPresentationClock.reset();
@@ -1410,6 +1605,125 @@ export function gpInit(msg: GpInitToWorker): void {
     // GW4-c3: fetch map data over HTTP + build the terrain (independent of the
     // connection auth handshake — map data is on the asset plane).
     void gpLoadMap(msg);
+}
+
+/// PLAN-playable.md G3a: recompute the buildable-tile set for the current
+/// selection (union of build cmds across own-team selected units) and resolve
+/// each defId into a render-ready tile via the def cache. Marks the tiles dirty
+/// so the next sceneState post ships them to the native BuildMenu on main.
+/// Called on selection change, cmd-desc arrival, and late def arrival.
+/// Mirrors the buildable-set computation in the pre-GW4 BuildMenu.render().
+function gpRecomputeBuildTiles(): void {
+    const sel = gpCtx.selection?.selection ?? [];
+    const er = gpCtx.entityRenderer;
+    const dc = gpDefCache;
+    const myTeam = gpCtx.connection?.myTeam ?? -1;
+
+    const buildable = new Set<number>();
+    if (er && dc) {
+        for (const unitId of sel) {
+            const meta = er.getEntityMeta(unitId);
+            if (!meta || meta.team !== myTeam) continue;
+            const descs = gpUnitCmdDescs.get(unitId);
+            if (!descs) continue;
+            for (const c of descs.cmds) {
+                if (c.disabled) continue;
+                if (c.cmdId >= 0) continue;   // negative cmdId = build command
+                buildable.add(-c.cmdId);
+            }
+        }
+    }
+
+    // Sort by metal cost (light → heavy) for a usable browsing order; fall back
+    // to defId when costs haven't loaded yet. Matches the pre-GW4 BuildMenu.
+    const sorted = [...buildable].sort((a, b) => {
+        const ca = dc?.getUnitDef(a)?.metalCost ?? Number.MAX_SAFE_INTEGER;
+        const cb = dc?.getUnitDef(b)?.metalCost ?? Number.MAX_SAFE_INTEGER;
+        if (ca !== cb) return ca - cb;
+        return a - b;
+    });
+
+    const tiles: BuildMenuTile[] = [];
+    for (const defId of sorted) {
+        const def = dc?.getUnitDef(defId);
+        tiles.push({
+            defId,
+            name:       def?.name ?? '',
+            humanName:  def?.humanName ?? '',
+            buildPic:   def?.buildPic ?? '',
+            metalCost:  def?.metalCost ?? 0,
+            energyCost: def?.energyCost ?? 0,
+            buildTime:  def?.buildTime ?? 0,
+            tooltip:    def?.tooltip ?? '',
+        });
+    }
+    gpBuildTiles = tiles;
+    gpBuildTilesDirty = true;
+}
+
+/// PLAN-playable.md G4: recompute the production-queue rows for the native
+/// FactoryQueuePanel. Picks the first own-team factory (UnitDef bit 11) in
+/// the current selection — multi-factory queue merging isn't implemented,
+/// matching the "selected factory" (singular) framing of the ZK Phase D
+/// item this closes. Groups gpLastCommandQueues' build entries (cmdId<0,
+/// same convention gpRecomputeBuildTiles decodes) into consecutive
+/// same-defId runs, mirroring how Spring's FactoryCAI stacks repeated
+/// identical build commands one slot each. Non-build orders (e.g. a WAIT
+/// a player inserted between batches) are skipped rather than splitting a
+/// run — an acceptable simplification for this native (non-Lua-port) panel.
+/// Called on selection change and on every UnitCommandQueuesUpdate.
+function gpRecomputeFactoryQueue(): void {
+    const sel = gpCtx.selection?.selection ?? [];
+    const er = gpCtx.entityRenderer;
+    const dc = gpDefCache;
+    const myTeam = gpCtx.connection?.myTeam ?? -1;
+
+    let factoryId = -1;
+    if (er && dc) {
+        for (const unitId of sel) {
+            const meta = er.getEntityMeta(unitId);
+            if (!meta || meta.team !== myTeam) continue;
+            const def = dc.getUnitDef(meta.defId);
+            if (!def || !(def.flags & UNITDEF_FLAG_IS_FACTORY)) continue;
+            factoryId = unitId;
+            break;
+        }
+    }
+
+    let tiles: FactoryQueueTile[] = [];
+    if (factoryId >= 0) {
+        const orders = gpLastCommandQueues.find(q => q.unitId === factoryId)?.orders ?? [];
+        const runs = groupFactoryQueueRuns(orders);
+        tiles = runs.map(r => {
+            const def = dc?.getUnitDef(r.defId);
+            return {
+                unitId: factoryId,
+                defId: r.defId,
+                name: def?.name ?? '',
+                humanName: def?.humanName ?? '',
+                buildPic: def?.buildPic ?? '',
+                count: r.tags.length,
+                tags: r.tags.slice(),
+            };
+        });
+    }
+    gpFactoryQueueTiles = tiles;
+    gpFactoryQueueDirty = true;
+}
+
+/// Cancel queued factory order(s) from the native FactoryQueuePanel
+/// (gp:removeFactoryOrder). CMD.REMOVE by tag (no OPT.ALT) against a factory
+/// needs OPT.CONTROL set — Recoil's CCommandAI::ExecuteRemove redirects a
+/// factory's plain (non-Ctrl) REMOVE to CFactoryCAI::newUnitCommands (orders
+/// queued for the *next produced unit*, not the build queue itself); only
+/// the Ctrl-held variant targets `commandQue`, the actual build queue this
+/// panel reads via UnitCommandQueuesUpdate. Mirrors ZK/BA's own Ctrl+
+/// right-click-to-cancel-a-build convention. Live-verified: omitting
+/// OPT.CONTROL silently no-ops (removal lands on the empty produced-unit
+/// queue) — confirmed via Spring.GetFactoryCommands before/after.
+export function gpHandleRemoveFactoryOrder(unitId: number, tags: number[]): void {
+    if (tags.length === 0) return;
+    gpCtx.connection?.sendPlayerCommand(CMD.REMOVE, [unitId], tags, OPT.CONTROL, 0);
 }
 
 /// GW4-c5b-3: update the shift-held gate that shows/hides the command-path +
@@ -1434,6 +1748,18 @@ function gpPostSceneState(now: number): void {
     if (!cam) return;
     const sel = gpCtx.selection?.selection ?? [];
     const target = cam.getTarget();
+    // PLAN-playable.md G3a: ship the resolved build tiles only when the buildable
+    // set changed (dirty-gated), and the live build-ghost state (armed placement)
+    // every post so main's HUD/ESC readout tracks it.
+    const buildOptions = gpBuildTilesDirty ? gpBuildTiles.slice() : undefined;
+    gpBuildTilesDirty = false;
+    // G4: ship the local team's latest ResourceUpdate only when a fresh one
+    // arrived (dirty-gated, same pattern as buildOptions).
+    const economy = gpEconomyDirty && gpLastEconomy ? gpLastEconomy : undefined;
+    gpEconomyDirty = false;
+    // G4: ship the resolved factory-queue rows only when they changed.
+    const factoryQueue = gpFactoryQueueDirty ? gpFactoryQueueTiles.slice() : undefined;
+    gpFactoryQueueDirty = false;
     postToMain({
         type: 'gp:sceneState',
         selectedUnitIds: sel.slice(),
@@ -1448,8 +1774,14 @@ function gpPostSceneState(now: number): void {
         gameFrame: gpGameFrame,
         paused: gpPaused,
         simSpeed: gpSimSpeed,
-        buildGhost: null,
+        buildGhost: gpBuildPlacement?.getGhostState() ?? null,
+        // G3b: a modal command / area-attack armed → main swallows ESC to cancel
+        // it (before the build-ghost check + the quit dialog).
+        commandModeArmed: gpCommandModes?.isArmed() ?? false,
         entityCount: gpCtx.entityRenderer?.entityCount ?? 0,
+        ...(buildOptions ? { buildOptions } : {}),
+        ...(economy ? { economy } : {}),
+        ...(factoryQueue ? { factoryQueue } : {}),
     });
 }
 
@@ -1506,7 +1838,10 @@ function gpPostMinimapFeed(now: number): void {
     // Deliver map dims + backdrop URL once (cleared after the first send).
     const mapInfo = gpMinimapMapInfo ?? undefined;
     if (gpMinimapMapInfo) gpMinimapMapInfo = null;
-    postToMain({ type: 'gp:minimapFeed', blips, los: losPayload, map: mapInfo });
+    // Deliver metal-spot markers once — same one-shot pattern as mapInfo.
+    const metalSpots = gpMinimapMetalSpotsInfo ?? undefined;
+    if (gpMinimapMetalSpotsInfo) gpMinimapMetalSpotsInfo = null;
+    postToMain({ type: 'gp:minimapFeed', blips, los: losPayload, map: mapInfo, metalSpots });
 }
 
 /// U1 (PLAN-bar §7): mirror the live worker render camera into the Spring-API
@@ -1694,6 +2029,24 @@ export function gpShutdown(): void {
     gpViewCameras.clear();
     gpCtx.selection?.dispose();
     gpCtx.selection = null;
+    // PLAN-playable.md G3a: dispose the build-placement controller + reset caches.
+    gpBuildPlacement?.dispose();
+    gpBuildPlacement = null;
+    // PLAN-playable.md G3b: dispose the command-modes controller + unregister the
+    // worker-side SetActiveCommand handler (the closure captured the now-dead
+    // controllers/connection).
+    gpCommandModes?.dispose();
+    gpCommandModes = null;
+    setWorkerSetActiveCommandHandler(null);
+    gpUnitCmdDescs.clear();
+    gpMetalSpots = [];
+    gpMinimapMetalSpotsInfo = null;
+    gpBuildTiles = [];
+    gpBuildTilesDirty = false;
+    gpFactoryQueueTiles = [];
+    gpFactoryQueueDirty = false;
+    gpLastEconomy = null;
+    gpEconomyDirty = false;
     gpCommandPathRenderer?.dispose();
     gpCommandPathRenderer = null;
     gpWaypointMarkerRenderer?.dispose();
@@ -2042,7 +2395,12 @@ export function gpHandlePointerMove(x: number, y: number, buttons: number, mods:
         gpOrbitRig!.pointerMove(x, y);
     } else {
         gpViewCameras.get(viewId)?.pointerMove(x, y, buttons);
-        gpCtx.selection?.pointerMove(x, y, buttons, mods, viewId);
+        // PLAN-playable.md G3a/G3b: an armed build placement drives its ghost; an
+        // in-flight area-attack / waypoint drag drives its overlay; otherwise the
+        // pointer feeds selection hover / drag-box.
+        if (gpBuildPlacement?.isActive) gpBuildPlacement.pointerMove(x, y, buttons, mods, viewId);
+        else if (gpCommandModes?.isDragging) gpCommandModes.pointerMove(x, y, buttons, mods, viewId);
+        else gpCtx.selection?.pointerMove(x, y, buttons, mods, viewId);
     }
     const sp = gpToSpringCoords(x, y);
     const dragBtn = (buttons & 1) ? 1 : (buttons & 4) ? 2 : (buttons & 2) ? 3 : 0;
@@ -2058,7 +2416,15 @@ export function gpHandlePointerDown(x: number, y: number, button: number, mods: 
         return;
     }
     gpViewCameras.get(viewId)?.pointerDown(x, y, button, mods);
-    if (!consumed) gpCtx.selection?.pointerDown(x, y, button, mods, viewId);
+    if (consumed) return;
+    // PLAN-playable.md G3a: a left-click during build placement captures the
+    // click for placement (Spring's "active build command → LMB to place"),
+    // before it can reach unit selection / drag-box (input-manager.onLeftDown).
+    if (gpBuildPlacement?.pointerDown(x, y, button, mods, viewId)) return;
+    // G3b: waypoint revoke/drag + area-attack drag start consume the press; a
+    // plain armed modal does NOT (selection may still drag-box), resolving on up.
+    if (gpCommandModes?.pointerDown(x, y, button, mods, viewId)) return;
+    gpCtx.selection?.pointerDown(x, y, button, mods, viewId);
 }
 
 export function gpHandlePointerUp(x: number, y: number, button: number, mods: number, viewId: number): void {
@@ -2069,6 +2435,12 @@ export function gpHandlePointerUp(x: number, y: number, button: number, mods: nu
         return;
     }
     gpViewCameras.get(viewId)?.pointerUp(x, y, button, mods);
+    // G3a: commit the build placement if one is armed (consumes the release).
+    if (gpBuildPlacement?.pointerUp(x, y, button, mods, viewId)) return;
+    // G3b: commit an area-attack / waypoint drag, or resolve an armed modal on a
+    // click. When it consumes, cancel any drag-box the selection started on the
+    // same press (a plain-modal press let selection.pointerDown run).
+    if (gpCommandModes?.pointerUp(x, y, button, mods, viewId)) { gpCtx.selection?.blur(); return; }
     gpCtx.selection?.pointerUp(x, y, button, mods, viewId);
 }
 
@@ -2084,6 +2456,11 @@ export function gpHandleWheel(x: number, y: number, delta: number, viewId: numbe
 export function gpHandleKeyDown(code: string, mods: number, viewId: number): void {
     if (!gpOrbitOwnsView(viewId)) gpViewCameras.get(viewId)?.keyDown(String(code).toLowerCase());
     gpSetShift((mods & 1) !== 0);
+    // PLAN-playable.md G3b: order hotkeys (modal arms m/a/f/p/g/r/e/c/x/d/l/u +
+    // instant s/w/h/q/i). A convenience layer over the faithful SetActiveCommand
+    // path (see worker-command-modes header); fires alongside the LuaUI KeyPress
+    // dispatch. No WASD binding, so no conflict with the camera's arrow movement.
+    gpCommandModes?.handleOrderKey(String(code), mods);
     gpDispatchKeyPress(codeToSpringKeysym(String(code)), mods);
 }
 
@@ -2107,4 +2484,24 @@ export function gpHandleBlur(viewId: number): void {
 
 export function gpHandleFocusWorld(x: number, z: number, viewId: number): void {
     gpViewCameras.get(viewId)?.focusOn(x, z);
+}
+
+// ── Build placement (PLAN-playable.md G3a) ──────────────────────────────────
+
+/// Arm build placement from the native BuildMenu (gp:startBuildPlacement).
+/// Factories queue immediately; builders enter ghost-placement mode.
+export function gpHandleStartBuildPlacement(defId: number, mods: { shift?: boolean; ctrl?: boolean }): void {
+    gpBuildPlacement?.startBuildPlacement(defId, mods);
+}
+
+/// Cancel an armed build placement (gp:cancelBuildPlacement — ESC on main).
+export function gpHandleCancelBuildPlacement(): void {
+    gpBuildPlacement?.cancelBuildPlacement();
+}
+
+/// PLAN-playable.md G3b: cancel an armed modal command / in-flight area-attack
+/// or waypoint drag (gp:cancelCommandMode — ESC on main, checked before the
+/// build-ghost cancel + the quit dialog).
+export function gpHandleCancelCommandMode(): void {
+    gpCommandModes?.cancelAll();
 }

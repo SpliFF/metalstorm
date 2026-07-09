@@ -1,0 +1,71 @@
+-- game_civilians.lua — civilian population (PLAN-metalstorm.md §7). STUB.
+--
+-- SYNCED Gaia-driven environment, NOT an unsynced AI plugin. Civilians are
+-- real synced sim units the (also-synced) objective system reasons about
+-- deterministically (a civilian dying fails a protect/escort/extract
+-- objective; civilians weigh on region presence). An unsynced server-side AI
+-- is limited to player-visible data + player actions — the wrong tool.
+--
+-- LuaRules (not LuaGaia) because LuaGaia/main.lua bootstraps from the MAP VFS
+-- layer (CLuaGaia::CanLoadHandler → SPRING_VFS_MAP_BASE), so a *game* feature
+-- can't rely on it; LuaRules is game-scoped, always loads, and may command any
+-- team incl. Gaia — the faithful Spring pattern for neutral units.
+--
+-- STRUCTURE: this gadget is intentionally THIN. The gadget handler scans
+-- LuaRules/Gadgets/*.lua NON-recursively (gadgets.lua:162 — no 4th DirList
+-- arg), so a gadget must be one file, but a SUBFOLDER is invisible to the
+-- scanner. As civilian logic grows it lives in the library folder
+-- `LuaRules/Gadgets/civilians/` — same convention BAR uses for its AI
+-- (luarules/gadgets/AILoader.lua + the library folder luarules/gadgets/ai/).
+-- This file just wires the engine callins to those modules.
+
+function gadget:GetInfo()
+    return {
+        name    = "Civilians",
+        desc    = "Synced civilian population on the Gaia team (ambient + objective payloads)",
+        author  = "metalstorm",
+        date    = "2026",
+        license = "GPL v2",
+        layer   = -40,             -- after objectives/regions register
+        enabled = true,
+    }
+end
+
+if not gadgetHandler:IsSyncedCode() then
+    return false
+end
+
+-- Library modules (plain Lua, not gadgets). VFS.Include resolves from the
+-- VFS root; each returns a table of functions taking the shared `civ` context.
+local spawn    = VFS.Include("LuaRules/Gadgets/civilians/spawn.lua")
+local routines = VFS.Include("LuaRules/Gadgets/civilians/routines.lua")
+local convoy   = VFS.Include("LuaRules/Gadgets/civilians/convoy.lua")
+
+-- Shared context handed to every module (gaia team id, registries, config).
+local civ = {
+    gaiaTeam   = Spring.GetGaiaTeamID(),
+    population = {},   -- unitID → { role = 'ambient'|'convoy'|'payload', ... }
+}
+
+-- Public surface other gadgets use (game_objectives.lua registers payloads).
+GG.Civilians = GG.Civilians or {}
+function GG.Civilians.Spawn(defName, x, z, facing)
+    return spawn.one(civ, defName, x, z, facing)
+end
+function GG.Civilians.Register(unitID, role)
+    civ.population[unitID] = { role = role or 'ambient' }
+end
+
+function gadget:GameStart()
+    spawn.seed(civ)          -- read map-authored placement, seed population
+end
+
+function gadget:GameFrame(frame)
+    -- Low cadence on purpose — civilians are ambience, not sim pressure.
+    if frame % 150 == 0 then routines.tick(civ, frame) end
+    if frame % 300 == 0 then convoy.tick(civ, frame)   end
+end
+
+function gadget:UnitDestroyed(unitID)
+    civ.population[unitID] = nil
+end

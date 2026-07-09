@@ -7,20 +7,16 @@
  * matching the visual feel of ZK's chili Integral Menu — dark slotted frame,
  * pixel-icon thumbs, hover highlight, M/E cost ribbon.
  *
- * Data sources:
- *   - selection      → list of unit IDs (from InputManager)
- *   - entity meta    → defId + team per entity (from EntityRenderer)
- *   - cmd-desc cache → per-unit available build commands (from server,
- *                      streamed via UnitCmdDescsUpdate at ~1Hz)
- *   - def cache      → unit-def metadata for labels, costs, build pics
- *
- * The available list is the union of buildoptions across all selected own-team
- * builders. Clicking an icon hands off to BuildPlacementController to enter
- * ghost-placement mode; the actual command emission lives there.
+ * Post-GW4 (PLAN-playable.md G3a): the selection set, entity meta, cmd-descs,
+ * and def cache all live in the game-processor worker now — main has no
+ * instances. The worker computes the buildable-tile set (union of build cmds
+ * across own-team selected units, resolved against its def cache) and pushes it
+ * over `gp:sceneState.buildOptions`; this panel is a pure renderer fed via
+ * `setBuildOptions`. Clicking a tile posts `gp:startBuildPlacement` to the
+ * worker (wired by main.ts's `onPick`), which owns ghost placement + the actual
+ * command emission (WorkerBuildPlacement).
  */
-import type { UnitCmdDescsInfo } from './connection.js';
-import type { DefCache } from './def-cache.js';
-import type { EntityRenderer } from './entity-renderer.js';
+import type { BuildMenuTile } from './game-worker-protocol.js';
 
 export interface BuildMenuCallbacks {
     /** Fired when the player picks a build button. The modifier flags carry
@@ -43,34 +39,23 @@ export interface BuildMenuOptions {
 export class BuildMenu {
     private root: HTMLDivElement;
     private grid: HTMLDivElement;
-    private defCache: DefCache;
-    private entityRenderer: EntityRenderer;
     private callbacks: BuildMenuCallbacks;
+    /// Player's team id. The worker now owns team-filtering of the buildable
+    /// set, so this is currently informational only (kept for API stability /
+    /// future per-team tile styling).
     private myTeam: number;
     private buildPicBase: string;
 
-    /// unitId → list of cmds (negative ids are build commands).
-    private cmdDescs = new Map<number, UnitCmdDescsInfo>();
-
-    /// Currently-selected unit IDs (passed in from InputManager). Stored so
-    /// we can re-render after a cmd-descs update arrives without waiting for
-    /// the next selection change.
-    private selection: readonly number[] = [];
-
-    /// The set currently rendered in the grid. We render def-id buttons
-    /// keyed on this so the BuildPlacementController can validate that a
-    /// pick is still available between the click and the actual command.
-    private currentBuildables = new Set<number>();
+    /// Resolved tiles for the current selection, pushed from the worker via
+    /// gp:sceneState.buildOptions. The worker already did the buildable-set
+    /// union + own-team filter + metal-cost sort; this panel just renders.
+    private buildTiles: BuildMenuTile[] = [];
 
     constructor(
-        defCache: DefCache,
-        entityRenderer: EntityRenderer,
         myTeam: number,
         opts: BuildMenuOptions,
         callbacks: BuildMenuCallbacks,
     ) {
-        this.defCache = defCache;
-        this.entityRenderer = entityRenderer;
         this.myTeam = myTeam;
         this.callbacks = callbacks;
         this.buildPicBase = opts.gameId
@@ -87,32 +72,15 @@ export class BuildMenu {
 
         document.body.appendChild(this.root);
         this.injectStyles();
-
-        // New defs may resolve names/labels for buttons we already rendered;
-        // re-render whenever the def cache picks up a new batch.
-        defCache.onUnitDefs(() => this.render());
     }
 
-    setSelection(ids: readonly number[]): void {
-        this.selection = ids;
+    /** Feed the worker-resolved build tiles (gp:sceneState.buildOptions). */
+    setBuildOptions(tiles: BuildMenuTile[]): void {
+        this.buildTiles = tiles;
         this.render();
     }
 
-    setCmdDescs(units: UnitCmdDescsInfo[]): void {
-        // Replace the cache: each snapshot is a complete view of own-team
-        // unit cmd descs at one tick. Units omitted from the snapshot are
-        // either gone or have no build cmds, so they should drop out.
-        this.cmdDescs.clear();
-        for (const u of units) this.cmdDescs.set(u.unitId, u);
-        this.render();
-    }
-
-    /** True if a defId button is currently in the menu. */
-    isBuildable(defId: number): boolean {
-        return this.currentBuildables.has(defId);
-    }
-
-    /** Probe used by InputManager to swallow clicks landing on the panel. */
+    /** Probe used to swallow clicks landing on the panel (cursor-over-UI). */
     isCursorOver(x: number, y: number): boolean {
         if (this.root.style.display === 'none') return false;
         const r = this.root.getBoundingClientRect();
@@ -120,46 +88,18 @@ export class BuildMenu {
     }
 
     private render(): void {
-        // Build the union of available build commands across all own-team
-        // selected units. Spring does the same — when multiple builders are
-        // selected, the panel shows what any of them can build, and the
-        // command goes out only to those that match.
-        const buildable = new Set<number>();
-        for (const unitId of this.selection) {
-            const meta = this.entityRenderer.getEntityMeta(unitId);
-            if (!meta || meta.team !== this.myTeam) continue;
-            const descs = this.cmdDescs.get(unitId);
-            if (!descs) continue;
-            for (const c of descs.cmds) {
-                if (c.disabled) continue;
-                if (c.cmdId >= 0) continue;
-                buildable.add(-c.cmdId);
-            }
-        }
-
-        this.currentBuildables = buildable;
-
-        // Hide the panel when nothing's buildable.
-        if (buildable.size === 0) {
+        // Hide the panel when nothing's buildable. The worker sends the tiles
+        // already own-team-filtered and metal-cost-sorted (see
+        // gpRecomputeBuildTiles), so this is a straight render.
+        if (this.buildTiles.length === 0) {
             this.root.style.display = 'none';
             this.grid.replaceChildren();
             return;
         }
 
-        // Sort by metal cost for a usable browsing order — light units first,
-        // T2/heavies later. Falls back to def id when costs aren't loaded yet.
-        const sorted = [...buildable].sort((a, b) => {
-            const da = this.defCache.getUnitDef(a);
-            const db = this.defCache.getUnitDef(b);
-            const ca = da?.metalCost ?? Number.MAX_SAFE_INTEGER;
-            const cb = db?.metalCost ?? Number.MAX_SAFE_INTEGER;
-            if (ca !== cb) return ca - cb;
-            return a - b;
-        });
-
         const tiles: HTMLButtonElement[] = [];
-        for (const defId of sorted) {
-            const def = this.defCache.getUnitDef(defId);
+        for (const bt of this.buildTiles) {
+            const defId = bt.defId;
             const tile = document.createElement('button');
             tile.className = 'build-menu-tile';
             tile.dataset.defId = String(defId);
@@ -173,8 +113,8 @@ export class BuildMenu {
             const img = document.createElement('img');
             img.className = 'build-menu-pic';
             img.draggable = false;
-            img.alt = def?.humanName ?? def?.name ?? `def ${defId}`;
-            const pic = def?.buildPic;
+            img.alt = bt.humanName || bt.name || `def ${defId}`;
+            const pic = bt.buildPic;
             if (pic && this.buildPicBase) {
                 img.src = `${this.buildPicBase}/${pic}`;
                 let triedLower = false;
@@ -194,10 +134,10 @@ export class BuildMenu {
             // Cost ribbon. Only show metal cost — energy is rarely the
             // limiting factor at unit-pick time, and showing both makes
             // the tile noisy. Hover tooltip carries the full breakdown.
-            if (def && def.metalCost > 0) {
+            if (bt.metalCost > 0) {
                 const cost = document.createElement('span');
                 cost.className = 'build-menu-cost';
-                cost.textContent = formatCost(def.metalCost);
+                cost.textContent = formatCost(bt.metalCost);
                 tile.appendChild(cost);
             }
 
@@ -206,11 +146,11 @@ export class BuildMenu {
             // arrived yet, so the player at least sees something.
             const cap = document.createElement('span');
             cap.className = 'build-menu-caption';
-            cap.textContent = def?.humanName || def?.name || `def ${defId}`;
+            cap.textContent = bt.humanName || bt.name || `def ${defId}`;
             tile.appendChild(cap);
 
-            tile.title = def
-                ? `${def.humanName || def.name}\nM ${Math.round(def.metalCost)}  E ${Math.round(def.energyCost)}  T ${Math.round(def.buildTime)}${def.tooltip ? '\n\n' + def.tooltip : ''}`
+            tile.title = (bt.humanName || bt.name)
+                ? `${bt.humanName || bt.name}\nM ${Math.round(bt.metalCost)}  E ${Math.round(bt.energyCost)}  T ${Math.round(bt.buildTime)}${bt.tooltip ? '\n\n' + bt.tooltip : ''}`
                 : `def ${defId}`;
             tile.addEventListener('click', (e) => {
                 e.stopPropagation();
@@ -339,7 +279,7 @@ export class BuildMenu {
     dispose(): void {
         this.root.remove();
         document.getElementById('build-menu-style')?.remove();
-        this.cmdDescs.clear();
+        this.buildTiles = [];
     }
 }
 

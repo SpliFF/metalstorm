@@ -626,6 +626,7 @@ substitution, not a behavioural change.
 - `Spring.Debug` / `Warn` / `Assert` / `DumpTable` / `Inspect` Lua API
 - SQL query proxy, process management API, game session tracking
 - MCP server for Claude integration (`tools/debug-mcp`)
+- Performance profiling: per-phase FrameProfiler (`window.test.perfDump()`), per-widget LuaUI cost profiler (`uiProfileStart/Dump/Stop`), network-condition simulator (`netSim*`/`netStats`) — see [docs/debugging-performance.md](docs/debugging-performance.md)
 - **Test framework** (`window.test` + `.claude/skills/spring-test`): instant game launch (`launch_game` MCP tool), scripted spawn/kill/damage/order verbs, camera focus on a unit, render-loop pause + screenshot, runtime debug-flag toggles for combat/sound/weapon emission. See `client/src/core/test-harness.ts` and `rts/Server/DebugFlags.h`.
 
 **Not yet wired:** server-side AI plugin runtime (skeleton in `Server/AI/` exists but plugins don't boot reliably), spectator mode, Glicko-2 ratings, persistent world layer. GameOver → `MusicStateTracker::ForceState(victory|defeat)` hook is the only audio gap — the rest of the pipeline (state machine, MusicEvent broadcast, client crossfader) is live.

@@ -18,6 +18,7 @@
  */
 
 import type { RmlOpsToMain, RmlEventToWorker, RmlResizeToWorker } from '../ui/rml/rml-protocol.js';
+import type { ResourceUpdateInfo } from './connection.js';
 
 // ─── main → worker ──────────────────────────────────────────────────────────
 
@@ -128,11 +129,55 @@ export interface GpFocusWorldToWorker {
     viewId?: number;
 }
 
+/**
+ * Arm build placement from the native BuildMenu's click (PLAN-playable.md G3a).
+ * The build menu is DOM/on-main, but placement (ghost + snap + order emission)
+ * lives in the worker's WorkerBuildPlacement, so the intent crosses the
+ * boundary. `shift`/`ctrl` carry through to the Command options bitmask:
+ * factories → batch multiplier (×5/×20/×100); builders → shift queues + keeps
+ * placement armed for chain-building. Mirrors the GpFocusWorldToWorker pattern.
+ */
+export interface GpStartBuildPlacementToWorker {
+    type: 'gp:startBuildPlacement';
+    defId: number;
+    shift: boolean;
+    ctrl: boolean;
+}
+
+/** Cancel an armed build placement (ESC / selection change on main). */
+export interface GpCancelBuildPlacementToWorker {
+    type: 'gp:cancelBuildPlacement';
+}
+
+/**
+ * Cancel queued build order(s) from the native FactoryQueuePanel
+ * (PLAN-playable.md G4). `tags` are the order tags to drop — a single tag
+ * pops one instance off the tail of a run; the panel's full-group button
+ * sends every tag in the run. Resolves to a plain `CMD.REMOVE` (by tag, no
+ * OPT.ALT) issued against `unitId` — the worker owns the connection, so the
+ * intent crosses the boundary the same way `gp:startBuildPlacement` does.
+ */
+export interface GpRemoveFactoryOrderToWorker {
+    type: 'gp:removeFactoryOrder';
+    unitId: number;
+    tags: number[];
+}
+
+/** Cancel an armed modal command / in-flight area-attack or waypoint drag
+ *  (ESC on main, PLAN-playable.md G3b). Mirrors GpCancelBuildPlacementToWorker. */
+export interface GpCancelCommandModeToWorker {
+    type: 'gp:cancelCommandMode';
+}
+
 export type GpMessageToWorker =
     | GpInitToWorker
     | GpInputToWorker
     | GpConfigToWorker
     | GpFocusWorldToWorker
+    | GpStartBuildPlacementToWorker
+    | GpCancelBuildPlacementToWorker
+    | GpRemoveFactoryOrderToWorker
+    | GpCancelCommandModeToWorker
     // PLAN-rml.md: DOM events + viewport changes routed back to the worker-side
     // RmlUi proxy (rml-bridge.ts) for Lua listener dispatch / dp-ratio recompute.
     | RmlEventToWorker
@@ -140,6 +185,45 @@ export type GpMessageToWorker =
     | { type: 'gp:shutdown' };
 
 // ─── worker → main ──────────────────────────────────────────────────────────
+
+/**
+ * A render-ready build-menu tile (PLAN-playable.md G3a). The worker resolves
+ * the buildable defId set for the current selection (union of build cmds across
+ * own-team selected units) against its def cache and posts these to the native
+ * BuildMenu on main via `gp:sceneState.buildOptions`. No Babylon objects cross;
+ * the DOM menu resolves `buildPic` to a URL against the game's `unitpics/`.
+ */
+export interface BuildMenuTile {
+    defId: number;
+    name: string;
+    humanName: string;
+    buildPic: string;
+    metalCost: number;
+    energyCost: number;
+    buildTime: number;
+    tooltip: string;
+}
+
+/**
+ * A production-queue row for the native FactoryQueuePanel (PLAN-playable.md
+ * G4). The worker groups the selected factory's command queue into
+ * consecutive same-defId runs (Spring's FactoryCAI stacks repeated identical
+ * build commands one-per-slot) and posts these via
+ * `gp:sceneState.factoryQueue`. `tags` carries every order tag in the run,
+ * oldest→newest, so the panel can pop one (`tags.at(-1)`) or cancel the
+ * whole row (`tags`) via `gp:removeFactoryOrder`.
+ */
+export interface FactoryQueueTile {
+    /** The factory unit this row belongs to (first own-team factory in the
+     *  current selection — multi-factory queue merging isn't implemented). */
+    unitId: number;
+    defId: number;
+    name: string;
+    humanName: string;
+    buildPic: string;
+    count: number;
+    tags: number[];
+}
 
 /** Per-selected-unit facts the HTML HUD needs (no Babylon objects cross the wire). */
 export interface GpSelectedUnit {
@@ -171,11 +255,27 @@ export interface GpSceneStateToMain {
     paused: boolean;
     simSpeed: number;
     buildGhost: { pos: [number, number, number]; defId: number; valid: boolean } | null;
+    /** PLAN-playable.md G3b: a modal command / area-attack is armed → main
+     *  swallows ESC to cancel it (before the build-ghost cancel + quit dialog). */
+    commandModeArmed?: boolean;
     entityCount: number;
-    /** Build-menu command descriptions; present only when changed. */
-    unitCmdDescs?: unknown;
-    /** Economy/resource snapshot for the economy bar; present only when changed. */
-    economy?: unknown;
+    /** Resolved build-menu tiles for the current selection (PLAN-playable.md
+     *  G3a); present only when the buildable set changed since the last feed.
+     *  (Was the never-populated `unitCmdDescs?: unknown` placeholder — renamed
+     *  since it now carries resolved tiles, not raw cmd-descs.) */
+    buildOptions?: BuildMenuTile[];
+    /** Local team's latest ResourceUpdate, for the native EconomyBar
+     *  (PLAN-playable.md G4); present only when a new snapshot arrived since
+     *  the last feed. GW4-regression fix: onResourceUpdate previously only
+     *  fed `liveState.resources` (the LuaUI Spring.GetTeamResources path) —
+     *  nothing forwarded it across the worker→main boundary, so the native
+     *  EconomyBar was permanently dark despite being fully built. */
+    economy?: ResourceUpdateInfo;
+    /** Resolved production-queue rows for the selected factory (PLAN-playable.md
+     *  G4); present only when the queue changed since the last feed. Empty
+     *  array (not absent) clears the panel when the factory's queue empties
+     *  or the selection no longer includes an own-team factory. */
+    factoryQueue?: FactoryQueueTile[];
 }
 
 /**
@@ -201,6 +301,22 @@ export interface GpMinimapLos {
     inLos: Uint8Array;
     inRadar: Uint8Array;
     explored: Uint8Array;
+}
+
+/**
+ * Metal-spot centroids for the minimap overlay (PLAN-playable.md G4, ZK Phase D
+ * item 5/7 — "unit type icons at zoom, metal spot markers" / "mex spot display").
+ * Static per-map data (the same `findMetalSpots` clustering G3a already computed
+ * for the mex build-ghost snap), so like `map` on {@link GpMessageToMain}'s
+ * `gp:minimapFeed` this ships once and the minimap caches it locally.
+ */
+export interface GpMinimapMetalSpots {
+    count: number;
+    x: Float32Array;
+    z: Float32Array;
+    /** Sum of metalmap density in the cluster — scales marker size by richness,
+     *  same signal ZK's own `cmd_mex_placement.lua` minimap draw uses. */
+    metal: Float32Array;
 }
 
 // ─── worker inbound union (typed dispatcher) ────────────────────────────────
@@ -252,6 +368,7 @@ export type GpMessageToMain =
           blips: GpMinimapBlips;
           los: GpMinimapLos | null;
           map?: { width: number; height: number; baseUrl: string };
+          metalSpots?: GpMinimapMetalSpots;
       }
     /** Worker asks main to persist a key/value to localStorage (WP3b: single
      *  persistence channel — replaces the former gp:config worker→main direction).
@@ -266,6 +383,10 @@ export type GpMessageToMain =
      * `box: null` hides the overlay. `viewId` absent ⇒ view 0.
      */
     | { type: 'gp:dragBox'; box: { x0: number; y0: number; x1: number; y1: number } | null; viewId?: number }
+    /** PLAN-playable.md G3b: armed-command cursor mode. `name` = canonical Spring
+     *  cursor name (null → native arrow); `css` = the CSS-cursor fallback. Main
+     *  drives the AnimatedCursor overlay + `#game-canvas` cursor style. */
+    | { type: 'gp:cursorMode'; name: string | null; css: string }
     /** Game-over → main shows the results overlay. `winningAllyTeams` is the
      *  server's winners list (empty = undecided); `won` is the local player's
      *  result (true/false), or null for a draw/undecided/spectator. */

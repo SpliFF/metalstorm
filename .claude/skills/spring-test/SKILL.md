@@ -67,6 +67,25 @@ Exposed after `startGame()` finishes. Removed by `quitToLobby()`.
 | `test.spawnAndFocus(def, x, z, team?, opts?)` | Spawn one unit and animate the camera onto it. Returns the new unit ID. |
 | `test.stageCombat(atkDef, tgtDef, x, z, atkTeam?, tgtTeam?, sep?)` | Spawn an attacker + target, issue an attack order. Returns `{attackerId, targetId}`. |
 | `test.lua(code)` | Drop down to the LuaRules synced state for anything the verbs don't cover. |
+| `test.perfDump()`, `test.uiProfileStart/Dump/Stop()`, `test.netSim*()`, `test.netStats()` | Performance profiling — see the [Performance Profiling](#performance-profiling) section below. |
+
+## Performance Profiling
+
+Three permanent, independent profiling tools also live on `window.test` — drive them the same way as any other method, via `browser_test`. Full reference (output shapes, methodology, budgets, pitfalls): **[docs/debugging-performance.md](../../../docs/debugging-performance.md)**.
+
+| Method | Purpose |
+|--------|---------|
+| `test.perfDump(windowMs?)` / `test.perfReset()` | Always-on per-phase (camera/entity/fx/decals/render/ui/total) frame-time distribution (mean/p50/p95/p99/max) from the permanent FrameProfiler. |
+| `test.uiProfileStart()` / `test.uiProfileDump(topN?)` / `test.uiProfileStop()` | Per-widget LuaUI (Fengari) cost breakdown — which widget/callin is expensive inside the `ui` phase. **Off by default**; brackets a measurement session. Call `uiProfileDump` before `uiProfileStop`, not after — stop clears the data first. |
+| `test.netSim({delayMs, jitterMs, lossProb})` / `test.netSimOff()` / `test.netSimPreset("lan"\|"wan"\|"intercont")` | Inject artificial latency/jitter/loss on the state channel — reproduce WAN conditions on localhost. |
+| `test.netStats()` | Cumulative inbound/outbound bandwidth tally, per decoded message type. |
+
+```
+browser_test({ method: "perfDump" })
+browser_test({ method: "uiProfileStart" })
+browser_test({ method: "uiProfileDump", args: [20] })
+browser_test({ method: "uiProfileStop" })
+```
 
 ## Recipes
 

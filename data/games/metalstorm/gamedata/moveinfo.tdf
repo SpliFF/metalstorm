@@ -1,0 +1,52 @@
+[CLASS0]
+{
+    name=INFANTRY;
+    footprintx=1;
+    footprintz=1;
+    maxwaterdepth=12;
+    maxslope=45;
+    crushstrength=5;
+    speedmodclass=2;
+}
+
+[CLASS1]
+{
+    name=VEH;
+    footprintx=2;
+    footprintz=2;
+    maxwaterdepth=20;
+    maxslope=32;
+    crushstrength=50;
+    speedmodclass=0;
+}
+
+[CLASS2]
+{
+    name=HEAVY;
+    footprintx=4;
+    footprintz=4;
+    maxwaterdepth=30;
+    maxslope=24;
+    crushstrength=500;
+    speedmodclass=0;
+}
+
+[CLASS3]
+{
+    name=SHIP;
+    footprintx=4;
+    footprintz=4;
+    minwaterdepth=12;
+    crushstrength=200;
+    speedmodclass=1;
+}
+
+[CLASS4]
+{
+    name=SUB;
+    footprintx=3;
+    footprintz=3;
+    minwaterdepth=20;
+    crushstrength=100;
+    speedmodclass=1;
+}

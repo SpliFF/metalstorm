@@ -4,7 +4,7 @@ procs:
     stop: SIGINT
 
   lobby:
-    shell: "./build/debug/spring-lobby --no-cache --port 8011 --game data/games/papertanks --maps data/maps --games-dir data/games --db data/spring-server.db"
+    shell: "./build/debug/spring-lobby --no-cache --port 8011 --game data/games/papertanks --maps data/maps --games-dir data/games --db data/spring-server.db --dev-direct-start"
     stop: SIGINT
 
   client:

@@ -93,6 +93,16 @@ void SetTcpNoDelay(int fd) {
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 }
 
+/// True if `addr` is a loopback peer — plain IPv6 ::1, or an IPv4-mapped
+/// ::ffff:127.x.x.x address (produced when a dual-stack listener accepts
+/// an IPv4 connection into a sockaddr_in6).
+bool IsLoopbackAddr(const sockaddr_in6& addr) {
+    if (IN6_IS_ADDR_LOOPBACK(&addr.sin6_addr)) return true;
+    if (IN6_IS_ADDR_V4MAPPED(&addr.sin6_addr))
+        return addr.sin6_addr.s6_addr[12] == 127;
+    return false;
+}
+
 /// Percent-decode a URL path. Decodes `%XX` triplets and `+` is left as-is
 /// (we only decode paths, not form-encoded query bodies). Malformed escapes
 /// are passed through verbatim. The `..` traversal check still runs after
@@ -179,6 +189,7 @@ static constexpr size_t MAX_CONNECTIONS  = 1024;
 struct ServerConn {
     int fd = -1;
     void* server = nullptr;  // back-pointer to NetworkServer::Impl (private type)
+    bool remoteIsLoopback = false;  // set once from the accept()'d peer address
 
     enum Protocol { DETECTING, HTTP1, HTTP2 } protocol = DETECTING;
 
@@ -434,6 +445,7 @@ struct NetworkServer::Impl {
                     }
                     pos = next + 2;
                 }
+                c.h1Headers.remoteIsLoopback = c.remoteIsLoopback;
                 c.h1HeadersDone = true;
 
                 // S5: reject an oversize declared body up front rather than
@@ -475,7 +487,9 @@ struct NetworkServer::Impl {
         if (frame->hd.type != NGHTTP2_HEADERS || frame->headers.cat != NGHTTP2_HCAT_REQUEST)
             return 0;
         auto* conn = static_cast<ServerConn*>(user_data);
-        conn->h2streams[frame->hd.stream_id] = H2StreamData{.streamId = frame->hd.stream_id};
+        H2StreamData stream{.streamId = frame->hd.stream_id};
+        stream.headers.remoteIsLoopback = conn->remoteIsLoopback;
+        conn->h2streams[frame->hd.stream_id] = std::move(stream);
         return 0;
     }
 
@@ -708,6 +722,7 @@ struct NetworkServer::Impl {
             auto conn = std::make_unique<ServerConn>();
             conn->fd = fd;
             conn->server = this;
+            conn->remoteIsLoopback = IsLoopbackAddr(addr);
             connections[fd] = std::move(conn);
         }
     }

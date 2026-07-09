@@ -46,6 +46,7 @@ declare module 'fengari-web' {
         lua_pushstring(L: any, s: Uint8Array | null): Uint8Array | null;
         lua_pushlightuserdata(L: any, p: any): void;
         lua_touserdata(L: any, idx: number): any;
+        lua_topointer(L: any, idx: number): object | null;
         lua_islightuserdata(L: any, idx: number): boolean;
         lua_pushjsfunction(L: any, fn: (L: any) => number): void;
         lua_createtable(L: any, narr: number, nrec: number): void;
