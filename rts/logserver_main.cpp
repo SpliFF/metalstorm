@@ -722,8 +722,16 @@ int main(int argc, char** argv) {
     // Run until a stop/restart is requested. Poll the atomics rather than
     // pause() so the HTTP restart endpoint (network thread) can wake us
     // without relying on cross-thread signal delivery.
+#ifndef SPRING_PROD
     SLOG(SPRING_LOG_NOTICE,
         "log server running (SIGINT=stop, SIGHUP/POST /api/logs/restart=re-exec)");
+#else
+    // The route name must not appear anywhere in a SPRING_PROD binary — the
+    // CI symbol grep-gate (security-prod-gate.yml) asserts absence via
+    // `strings`, and the dev banner above would trip it. SIGHUP re-exec
+    // stays available in prod (requires local process access).
+    SLOG(SPRING_LOG_NOTICE, "log server running (SIGINT=stop, SIGHUP=re-exec)");
+#endif
     while (!g_shutdown.load()) {
         struct timespec ts{0, 200L * 1000 * 1000};  // 200 ms
         nanosleep(&ts, nullptr);
