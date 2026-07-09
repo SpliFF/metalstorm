@@ -91,6 +91,9 @@ import { DecalOverlay, buildTrackTypeNames } from './decal-overlay.js';
 import { attachDecalOverlay } from './decal-overlay-plugin.js';
 import { renderMapFeatures, DynamicFeatureRenderer } from './feature-renderer.js';
 import { RTSCamera } from './rts-camera.js';
+import { OrbitRig, type OrbitTarget } from './orbit-rig.js';
+import { SunRig } from './sun-rig.js';
+import { ClipPlayer } from './clip-player.js';
 import { WorkerSelection } from './worker-selection.js';
 import { WorkerBuildPlacement, UNITDEF_FLAG_IS_FACTORY } from './worker-build-placement.js';
 import { WorkerCommandModes } from './worker-command-modes.js';
@@ -295,6 +298,19 @@ let gpDynamicFeatureRenderer: DynamicFeatureRenderer | null = null;
 /// lifetimes with the game speed (paused → 0). Driven by onGameInfo. The
 /// camera + entity ticks keep raw wall dt; only FX lifetimes use it.
 let gpFxSimSpeed = 1;
+/// PLAN-model-harness: dev/test orbit camera rig (window.test.orbit). While
+/// non-null it owns the view-0 Babylon camera — the RTSCamera's tick + input
+/// are suppressed for that view and its pre-orbit pose is restored on exit.
+let gpOrbitRig: OrbitRig | null = null;
+let gpOrbitSavedView: { pos: Vector3; lookAt: Vector3 } | null = null;
+/// PLAN-model-harness: dev/test sun override (window.test.sun / sunCycle).
+/// Ticked from the render loop; re-applies each frame while active so game
+/// Lua lighting re-applies can't clobber the test state.
+let gpSunRig: SunRig | null = null;
+/// PLAN-model-harness task 6: dev/test clip player (window.test.playClip).
+/// Samples one authored .glb clip per frame into EntityRenderer's per-piece
+/// clip-pose override; auto-stops when the target unit disappears.
+let gpClipPlayer: ClipPlayer | null = null;
 /// Long-frame profiler: the render loop stamps per-phase timings every frame
 /// into a permanent accumulator (`gpFrameProfiler`), which both (a) computes
 /// mean/p50/p95/p99 per phase over a rolling 30 s window on demand
@@ -1382,7 +1398,16 @@ export function gpInit(msg: GpInitToWorker): void {
         // GW4-c5b: advance the interactive camera(s) first so this frame's
         // render + pick + viewport use the updated pose. Raw wall dt (the camera
         // is not sim-scaled). tick() handles its own per-call timing internally.
-        for (const cam of gpViewCameras.values()) cam.tick();
+        // While the model-harness orbit rig is active it is the only writer of
+        // the view-0 camera — the RTSCamera tick would fight it (ground clamp,
+        // map-bounds rubber band), so it's skipped for that view.
+        for (const [viewId, cam] of gpViewCameras) {
+            if (viewId === 0 && gpOrbitRig) continue;
+            cam.tick();
+        }
+        gpOrbitRig?.tick();
+        gpSunRig?.tick(dt);
+        gpClipPlayer?.tick();
         gpMark(0);  // camera
 
         // entityRenderer.tick() advances the presentation clock (L0) and
@@ -2066,6 +2091,12 @@ export function gpShutdown(): void {
     gpDynamicFeatureRenderer?.dispose();
     gpDynamicFeatureRenderer = null;
     gpFxSimSpeed = 1;
+    // Model-harness rigs (PLAN-model-harness): the scene they drive is being
+    // disposed below, so just drop them — no restore needed.
+    gpOrbitRig = null;
+    gpOrbitSavedView = null;
+    gpSunRig = null;
+    gpClipPlayer = null;
     gpTerrainFog?.dispose();
     gpTerrainFog = null;
     gpTerrainMesh = null;
@@ -2208,6 +2239,110 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
             cam.fitPoints(pts, obj(1, {}));
             return true;
         }
+        // — PLAN-model-harness: orbit camera rig (window.test.orbit) —
+        //   arg 0 = unitId | {x, z, radius?}; arg 1 = OrbitOpts. Starting the
+        //   rig saves the RTS view; orbitStop restores it. Re-invoking while
+        //   active retargets in place (def switch / wreck focus).
+        case 'orbitStart': {
+            if (!cam || !gpCamera) return false;
+            const target = gpMakeOrbitTarget(args[0]);
+            if (!target) return false;
+            if (!gpOrbitRig) {
+                gpOrbitSavedView = cam.saveView();
+                gpOrbitRig = new OrbitRig(gpCamera, target, obj(1, {}));
+            } else {
+                gpOrbitRig.retarget(target);
+                gpOrbitRig.set(obj(1, {}));
+            }
+            gpOrbitRig.frame(gpCamera.fov, gpAspect());
+            return gpOrbitRig.state();
+        }
+        case 'orbitStop': {
+            if (gpOrbitRig) {
+                gpOrbitRig = null;
+                if (gpOrbitSavedView && cam) cam.restoreView(gpOrbitSavedView, 0);
+                gpOrbitSavedView = null;
+            }
+            return null;
+        }
+        case 'orbitSet':
+            gpOrbitRig?.set(obj(0, {}));
+            return gpOrbitRig?.state() ?? null;
+        case 'orbitFrame':
+            if (gpOrbitRig && gpCamera) {
+                gpOrbitRig.frame(gpCamera.fov, gpAspect(), num(0, 0.7));
+            }
+            return gpOrbitRig?.state() ?? null;
+        case 'orbitState':
+            return gpOrbitRig?.state() ?? null;
+        // — PLAN-model-harness: sun override + day–night cycle (test.sun) —
+        case 'setSun': {
+            const rig = gpEnsureSunRig();
+            if (!rig) return null;
+            if (args[0] == null) rig.restore();
+            else rig.setSun(obj(0, {}));
+            return rig.state();
+        }
+        case 'sunCycle': {
+            const rig = gpEnsureSunRig();
+            if (!rig) return null;
+            const secondsPerDay = num(0, 0);
+            if (secondsPerDay > 0) rig.startCycle(secondsPerDay, num(1, 60));
+            else rig.stopCycle();
+            return rig.state();
+        }
+        case 'getSun':
+            return gpSunRig?.state()
+                ?? { active: false, azimuthDeg: null, elevationDeg: null,
+                     cycleSecondsPerDay: 0, cyclePhase: 0 };
+        // — PLAN-model-harness: def-cache reads for the F8 panel's picker +
+        //   capability probe (the DefCache lives worker-side post-GW8) —
+        case 'listUnitDefs':
+            return (gpDefCache?.getAllUnitDefs() ?? []).map((d) => ({
+                defId: d.defId, name: d.name, humanName: d.humanName,
+                flags: d.flags, mass: d.mass, xsize: d.xsize,
+                metalCost: d.metalCost,
+            }));
+        case 'unitDefByName': {
+            const name = String(args[0] ?? '');
+            const d = (gpDefCache?.getAllUnitDefs() ?? []).find((x) => x.name === name);
+            return d ? gpCloneSafe(d) : null;
+        }
+        // — PLAN-model-harness: world bounding sphere + E1 fallback probe —
+        case 'entityBounds':
+            return gpCtx.entityRenderer?.getEntityBounds(num(0)) ?? null;
+        // — PLAN-model-harness: render-group toggles for the F8 panel —
+        case 'setWireframe':
+            if (gpScene) gpScene.forceWireframe = Boolean(args[0]);
+            return null;
+        // — PLAN-model-harness task 6: generic clip player. Clips are
+        //   authored .glb AnimationGroups captured at model load; playback
+        //   samples channels each render frame into the per-piece clip-pose
+        //   override (see clip-player.ts for the fx-offload migration note). —
+        case 'listClips':
+            return gpCtx.entityRenderer?.getClipNames(num(0)) ?? null;
+        case 'playClip': {
+            const r = gpCtx.entityRenderer;
+            if (!r) return { error: 'entity renderer not ready' };
+            const unitId = num(0);
+            const clipName = String(args[1] ?? '');
+            const resolved = r.getClip(unitId, clipName);
+            if (!resolved) {
+                const known = r.getClipNames(unitId);
+                return {
+                    error: `no clip "${clipName}" on unit ${unitId} — `
+                        + (known === null ? 'model still loading / unknown unit'
+                            : known.length ? `has: ${known.join(', ')}` : 'model has no clips'),
+                };
+            }
+            if (!gpClipPlayer) gpClipPlayer = new ClipPlayer(r);
+            return gpClipPlayer.play(unitId, resolved.clip, resolved.restLocals, obj(2, {}));
+        }
+        case 'stopClip':
+            gpClipPlayer?.stop();
+            return null;
+        case 'clipState':
+            return gpClipPlayer?.state() ?? null;
         // — screenshot: OffscreenCanvas → PNG data URL (no FileReader in workers) —
         case 'screenshot': {
             const canvas = gpEngine?.getRenderingCanvas() as OffscreenCanvas | null;
@@ -2236,6 +2371,41 @@ function gpCloneSafe(v: unknown): unknown {
     catch { return `[unserializable ${t}: ${String(v).slice(0, 120)}]`; }
 }
 
+/// Render aspect ratio for orbit auto-framing.
+function gpAspect(): number {
+    if (!gpEngine) return 16 / 9;
+    return gpEngine.getRenderWidth() / Math.max(1, gpEngine.getRenderHeight());
+}
+
+/// Lazily build the sun rig once scene lighting exists (PLAN-model-harness §6).
+function gpEnsureSunRig(): SunRig | null {
+    if (!gpSunRig && gpCtx.sceneLighting) gpSunRig = new SunRig(gpCtx.sceneLighting);
+    return gpSunRig;
+}
+
+/// Resolve a test-harness orbit target: a unit id tracks that entity's live
+/// bounding sphere; an {x, z, radius?} point is a static ground anchor
+/// (wreck inspection etc.).
+function gpMakeOrbitTarget(spec: unknown): OrbitTarget | null {
+    if (typeof spec === 'number') {
+        const unitId = spec;
+        return { getSphere: () => gpCtx.entityRenderer?.getEntityBounds(unitId) ?? null };
+    }
+    if (spec && typeof spec === 'object') {
+        const p = spec as { x?: number; y?: number; z?: number; radius?: number };
+        if (typeof p.x === 'number' && typeof p.z === 'number') {
+            const sphere = {
+                x: p.x,
+                y: p.y ?? (gpCtx.entityRenderer?.getGroundHeight(p.x, p.z) ?? 0),
+                z: p.z,
+                radius: p.radius ?? 40,
+            };
+            return { getSphere: () => sphere };
+        }
+    }
+    return null;
+}
+
 /// Force the worker camera to a fixed height above its look-at target (ports the
 /// old TestHarness.setCameraHeight; RTSCamera has no direct height setter).
 function gpSetCameraHeight(cam: RTSCamera | undefined, height: number): void {
@@ -2248,14 +2418,25 @@ function gpSetCameraHeight(cam: RTSCamera | undefined, height: number): void {
 
 // ── Input dispatch (exported for the dispatcher in lua-widget-worker.ts) ────
 
+/// True when the model-harness orbit rig owns this view's pointer/key input —
+/// the RTS camera AND drag-selection are suppressed while orbiting (drag is
+/// the orbit gesture); LuaUI mouse dispatch still runs.
+function gpOrbitOwnsView(viewId: number): boolean {
+    return viewId === 0 && gpOrbitRig !== null;
+}
+
 export function gpHandlePointerMove(x: number, y: number, buttons: number, mods: number, viewId: number): void {
-    gpViewCameras.get(viewId)?.pointerMove(x, y, buttons);
-    // PLAN-playable.md G3a/G3b: an armed build placement drives its ghost; an
-    // in-flight area-attack / waypoint drag drives its overlay; otherwise the
-    // pointer feeds selection hover / drag-box.
-    if (gpBuildPlacement?.isActive) gpBuildPlacement.pointerMove(x, y, buttons, mods, viewId);
-    else if (gpCommandModes?.isDragging) gpCommandModes.pointerMove(x, y, buttons, mods, viewId);
-    else gpCtx.selection?.pointerMove(x, y, buttons, mods, viewId);
+    if (gpOrbitOwnsView(viewId)) {
+        gpOrbitRig!.pointerMove(x, y);
+    } else {
+        gpViewCameras.get(viewId)?.pointerMove(x, y, buttons);
+        // PLAN-playable.md G3a/G3b: an armed build placement drives its ghost; an
+        // in-flight area-attack / waypoint drag drives its overlay; otherwise the
+        // pointer feeds selection hover / drag-box.
+        if (gpBuildPlacement?.isActive) gpBuildPlacement.pointerMove(x, y, buttons, mods, viewId);
+        else if (gpCommandModes?.isDragging) gpCommandModes.pointerMove(x, y, buttons, mods, viewId);
+        else gpCtx.selection?.pointerMove(x, y, buttons, mods, viewId);
+    }
     const sp = gpToSpringCoords(x, y);
     const dragBtn = (buttons & 1) ? 1 : (buttons & 4) ? 2 : (buttons & 2) ? 3 : 0;
     gpDispatchMouseMove(sp.x, sp.y, sp.x - gpLastMouseSpringX, sp.y - gpLastMouseSpringY, dragBtn);
@@ -2265,6 +2446,10 @@ export function gpHandlePointerMove(x: number, y: number, buttons: number, mods:
 export function gpHandlePointerDown(x: number, y: number, button: number, mods: number, viewId: number): void {
     const sp = gpToSpringCoords(x, y);
     const consumed = gpDispatchMousePress(sp.x, sp.y, domButtonToSpring(button));
+    if (gpOrbitOwnsView(viewId)) {
+        if (!consumed) gpOrbitRig!.pointerDown(x, y, button);
+        return;
+    }
     gpViewCameras.get(viewId)?.pointerDown(x, y, button, mods);
     if (consumed) return;
     // PLAN-playable.md G3a: a left-click during build placement captures the
@@ -2280,6 +2465,10 @@ export function gpHandlePointerDown(x: number, y: number, button: number, mods: 
 export function gpHandlePointerUp(x: number, y: number, button: number, mods: number, viewId: number): void {
     const sp = gpToSpringCoords(x, y);
     gpDispatchMouseRelease(sp.x, sp.y, domButtonToSpring(button));
+    if (gpOrbitOwnsView(viewId)) {
+        gpOrbitRig!.pointerUp();
+        return;
+    }
     gpViewCameras.get(viewId)?.pointerUp(x, y, button, mods);
     // G3a: commit the build placement if one is armed (consumes the release).
     if (gpBuildPlacement?.pointerUp(x, y, button, mods, viewId)) return;
@@ -2291,12 +2480,16 @@ export function gpHandlePointerUp(x: number, y: number, button: number, mods: nu
 }
 
 export function gpHandleWheel(x: number, y: number, delta: number, viewId: number): void {
-    gpViewCameras.get(viewId)?.wheel(x, y, delta);
+    if (gpOrbitOwnsView(viewId)) {
+        gpOrbitRig!.wheel(delta);
+    } else {
+        gpViewCameras.get(viewId)?.wheel(x, y, delta);
+    }
     gpDispatchMouseWheel(delta < 0, -delta);
 }
 
 export function gpHandleKeyDown(code: string, mods: number, viewId: number): void {
-    gpViewCameras.get(viewId)?.keyDown(String(code).toLowerCase());
+    if (!gpOrbitOwnsView(viewId)) gpViewCameras.get(viewId)?.keyDown(String(code).toLowerCase());
     gpSetShift((mods & 1) !== 0);
     // PLAN-playable.md G3b: order hotkeys (modal arms m/a/f/p/g/r/e/c/x/d/l/u +
     // instant s/w/h/q/i). A convenience layer over the faithful SetActiveCommand
@@ -2313,10 +2506,12 @@ export function gpHandleKeyUp(code: string, mods: number, viewId: number): void 
 }
 
 export function gpHandlePointerLeave(viewId: number): void {
+    if (viewId === 0) gpOrbitRig?.pointerUp();
     gpViewCameras.get(viewId)?.pointerLeave();
 }
 
 export function gpHandleBlur(viewId: number): void {
+    if (viewId === 0) gpOrbitRig?.pointerUp();
     gpViewCameras.get(viewId)?.blur();
     gpCtx.selection?.blur();
     gpSetShift(false);

@@ -47,6 +47,7 @@ import type { PresentationClock } from './presentation-clock.js';
 import type { UnitDefInfo } from './connection.js';
 import type { PieceStateSnapshot } from './piece-state.js';
 import type { LosBitmap } from './los-bitmap.js';
+import { extractClips, type ModelClip } from './clip-player.js';
 import { loadDirManifest, dirOfUrl } from './dir-manifest.js';
 import {
     createZKMaterial, setActiveZKShadowGenerator, zkOptionsFromCustomParams,
@@ -1010,6 +1011,12 @@ interface ModelTemplate {
     /** Single shared ghost material referenced by every prototype.
      *  Disposed alongside the template. */
     ghostMaterial: StandardMaterial | null;
+    /** Authored .glb animation clips, retargeted onto piece indices at
+     *  load (PLAN-model-harness task 6). Empty for converted S3O/DAE
+     *  models — only native glTF assets carry clips. Played by the dev
+     *  ClipPlayer via `setClipPose`; fx-offload later consumes the same
+     *  clips as baked animation textures. */
+    clips: ModelClip[];
 }
 
 /** Per-piece thin-instance render mesh, keyed by (defId, team, pieceIdx). */
@@ -1062,6 +1069,13 @@ export class EntityRenderer {
      *  rendering; mobile units in PREVLOS just disappear once they leave
      *  radar (mirrors Recoil). */
     private defIsBuilding = new Set<number>();
+    /** Per-defId model-space bounding sphere (centre relative to the model
+     *  origin, radius = rest-pose AABB half-diagonal — midpos-relative,
+     *  mirroring Recoil's RadiusFromAabb). Lazily computed for the orbit
+     *  rig's auto-frame (PLAN-model-harness §5). */
+    private defBoundsCache = new Map<number, {
+        cx: number; cy: number; cz: number; radius: number;
+    }>();
 
     // --- Render meshes ---
     // Per-piece thin-instance meshes, keyed by "model:{defId}:{team}:{pieceIdx}"
@@ -1072,6 +1086,13 @@ export class EntityRenderer {
     // Populated by applyPieceState() from server-streamed piece transforms.
     // Pieces missing from a unit's override map render at rest pose.
     private pieceOverrides = new Map<number, PieceOverrides>();
+
+    // --- Dev clip-player poses (PLAN-model-harness task 6) ---
+    // Raw Babylon parent-relative local matrices per piece, pushed by the
+    // ClipPlayer each frame while a clip plays. Takes precedence over the
+    // server piece-state override for that unit (it's a dev inspection
+    // tool — the authored clip is exactly what's being judged).
+    private clipPoses = new Map<number, ReadonlyMap<number, Matrix>>();
 
     // --- Ghost pose freeze for PREVLOS-only buildings ---
     // The server stops sending updates for buildings that have left LOS
@@ -1303,6 +1324,10 @@ export class EntityRenderer {
             // Build piece infos
             const pieces: PieceInfo[] = [];
             const nodeTopiece = new Map<TransformNode, number>();
+            // Source glb node per piece — clip retargeting needs to map
+            // animation-channel targets to FINAL piece indices after the
+            // config reorder below (PLAN-model-harness task 6).
+            const pieceNode = new Map<PieceInfo, TransformNode>();
 
             // Babylon's GLB loader splits multi-primitive meshes into a
             // parent TransformNode and child Mesh nodes named
@@ -1390,23 +1415,27 @@ export class EntityRenderer {
                     mesh.alwaysSelectAsActiveMesh = true;
                     mesh.renderingGroupId = 2;
 
-                    pieces.push({
+                    const info: PieceInfo = {
                         mesh,
                         name: node.name,
                         parentIndex,
                         localMatrix,
                         restWorldMatrix,
-                    });
+                    };
+                    pieces.push(info);
+                    pieceNode.set(info, node);
                 } else {
                     // Structural node (no geometry) — still needed for
                     // hierarchy chain. Use a dummy mesh reference.
-                    pieces.push({
+                    const info: PieceInfo = {
                         mesh: null!,
                         name: node.name,
                         parentIndex,
                         localMatrix,
                         restWorldMatrix,
-                    });
+                    };
+                    pieces.push(info);
+                    pieceNode.set(info, node);
                     // Hide the node
                     node.setEnabled(false);
                 }
@@ -1425,6 +1454,7 @@ export class EntityRenderer {
             // sometimes get optimised out) get null-mesh placeholders
             // so descendants can still chain their parents correctly.
             let orderedPieces = pieces;
+            let orderedNodes: (TransformNode | null)[] | null = null;
             if (config?.pieceNames && config.pieceParents) {
                 // The converter emits two parallel views of the piece
                 // tree: glTF nodes use unique names (the converter
@@ -1467,6 +1497,7 @@ export class EntityRenderer {
                 }
                 const nameUsage = new Map<string, number>();
                 const ordered: PieceInfo[] = [];
+                const orderedSrcNodes: (TransformNode | null)[] = [];
                 for (let i = 0; i < config.pieceNames.length; i++) {
                     const name = config.pieceNames[i];
                     const parentIdx = config.pieceParents[i];
@@ -1482,6 +1513,7 @@ export class EntityRenderer {
                             localMatrix: found.localMatrix,
                             restWorldMatrix: found.restWorldMatrix,
                         });
+                        orderedSrcNodes.push(pieceNode.get(found) ?? null);
                     } else {
                         ordered.push({
                             mesh: null!,
@@ -1490,8 +1522,10 @@ export class EntityRenderer {
                             localMatrix: Matrix.Identity(),
                             restWorldMatrix: Matrix.Identity(),
                         });
+                        orderedSrcNodes.push(null);
                     }
                 }
+                orderedNodes = orderedSrcNodes;
 
                 // The GLB hierarchy may not match the JSON config (Assimp
                 // can flatten or re-parent during import), so the imported
@@ -1512,6 +1546,26 @@ export class EntityRenderer {
                 }
 
                 orderedPieces = ordered;
+            }
+
+            // PLAN-model-harness task 6: retarget authored clips from glb
+            // nodes onto the FINAL piece order, then dispose the imported
+            // AnimationGroups — Babylon's glTF loader autoplays the first
+            // group by default, which would otherwise tick forever against
+            // the detached template nodes.
+            const finalNodes: (TransformNode | null)[] = orderedNodes
+                ?? pieces.map((p) => pieceNode.get(p) ?? null);
+            const clips = extractClips(result.animationGroups ?? [], (target) => {
+                const idx = finalNodes.indexOf(target as TransformNode);
+                return idx >= 0 ? idx : undefined;
+            });
+            for (const g of result.animationGroups ?? []) {
+                g.stop();
+                g.dispose();
+            }
+            if (clips.length > 0) {
+                console.log(`[entity-renderer] ${def.name}: ${clips.length} authored clip(s): `
+                    + clips.map((c) => c.name).join(', '));
             }
 
             // Filter to only pieces with geometry for rendering
@@ -1585,6 +1639,7 @@ export class EntityRenderer {
                 ghostPrototypes: [],
                 ghostLocalTransforms: [],
                 ghostMaterial: null,
+                clips,
             };
         } catch (err) {
             // Babylon raises "Scene has been disposed" when ImportMeshAsync
@@ -1831,15 +1886,19 @@ export class EntityRenderer {
      */
     private computePieceWorldMatrices(
         tmpl: ModelTemplate,
-        overrides: PieceOverrides,
+        overrides: PieceOverrides | null,
+        clipPose?: ReadonlyMap<number, Matrix> | null,
     ): Matrix[] {
         const out = new Array<Matrix>(tmpl.pieces.length);
         for (let i = 0; i < tmpl.pieces.length; i++) {
             const piece = tmpl.pieces[i];
-            const ov = overrides.get(i);
-            const local = ov
-                ? this.springToBabylonLocal(ov)
-                : piece.localMatrix;
+            // Dev clip-player pose (already a Babylon parent-relative
+            // local matrix) wins over the server's Spring-space override.
+            let local = clipPose?.get(i);
+            if (!local) {
+                const ov = overrides?.get(i);
+                local = ov ? this.springToBabylonLocal(ov) : piece.localMatrix;
+            }
             out[i] = piece.parentIndex >= 0
                 ? local.multiply(out[piece.parentIndex])
                 : local.clone();
@@ -2149,13 +2208,14 @@ export class EntityRenderer {
                 );
 
                 // Compute per-piece world-in-model matrices. Animated
-                // pieces (those with a server override) replace their
-                // rest local matrix with T(pos) * R(rot); all others
+                // pieces (those with a server override or a dev clip-
+                // player pose) replace their rest local matrix; all others
                 // reuse the precomputed rest world matrix to avoid the
                 // chain walk in the static case.
-                const overrides = this.pieceOverrides.get(id);
-                const pieceWorld = overrides
-                    ? this.computePieceWorldMatrices(tmpl, overrides)
+                const overrides = this.pieceOverrides.get(id) ?? null;
+                const clipPose = this.clipPoses.get(id) ?? null;
+                const pieceWorld = (overrides || clipPose)
+                    ? this.computePieceWorldMatrices(tmpl, overrides, clipPose)
                     : null;
 
                 // Push one instance matrix per piece with geometry
@@ -2259,6 +2319,81 @@ export class EntityRenderer {
     }
 
     /**
+     * World-space bounding sphere for one entity — the orbit rig's framing
+     * input (PLAN-model-harness §5). `hasModel` doubles as the E1
+     * fallback-shape probe: false = def pinned to a procedural shape
+     * (model missing), null = model still loading, true = real template.
+     *
+     * NOTE: the sphere comes from the BIND-pose AABB, which some models
+     * pollute with parked decorative pieces (see the yOffset comment in
+     * loadModelTemplate) — good enough for framing, not for physics.
+     */
+    getEntityBounds(id: number): {
+        x: number; y: number; z: number; radius: number; hasModel: boolean | null;
+    } | null {
+        const meta = this.entityMeta.get(id);
+        if (!meta) return null;
+        const lerped = this.interpolator.getInterpolated(id, this.cursorFrame);
+        if (!lerped) return null;
+        const tmpl = this.modelTemplates.get(meta.defId);
+        const hasModel = tmpl === undefined ? null : tmpl !== null;
+        let local = tmpl ? this.modelBoundsFor(meta.defId, tmpl) : null;
+        if (!local) {
+            // Fallback shape / still loading: def radius around the origin.
+            const defR = this.defInfos.get(meta.defId)?.radius ?? 0;
+            const r = Math.max(10, defR);
+            local = { cx: 0, cy: r * 0.5, cz: 0, radius: r };
+        }
+        // Rotate the model-space centre offset by the unit heading (yaw
+        // only — pitch/roll wobble is negligible for framing).
+        const yaw = (lerped.heading / 65535) * Math.PI * 2;
+        const cos = Math.cos(yaw), sin = Math.sin(yaw);
+        return {
+            x: lerped.x + local.cx * cos + local.cz * sin,
+            y: lerped.y + (tmpl?.yOffset ?? 0) + local.cy,
+            z: lerped.z - local.cx * sin + local.cz * cos,
+            radius: local.radius,
+            hasModel,
+        };
+    }
+
+    /** Rest-pose AABB of every geometry piece (all 8 corners through
+     *  restWorldMatrix — rest matrices can rotate pieces) → centre +
+     *  half-diagonal radius. Cached per defId. */
+    private modelBoundsFor(defId: number, tmpl: ModelTemplate):
+        { cx: number; cy: number; cz: number; radius: number } | null {
+        const cached = this.defBoundsCache.get(defId);
+        if (cached) return cached;
+        let minX = Infinity, minY = Infinity, minZ = Infinity;
+        let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+        const corner = new Vector3();
+        for (const p of tmpl.pieces) {
+            if (!p.mesh) continue;
+            const bb = p.mesh.getBoundingInfo().boundingBox;
+            const mn = bb.minimum, mx = bb.maximum;
+            for (let i = 0; i < 8; i++) {
+                corner.set(
+                    (i & 1) ? mx.x : mn.x,
+                    (i & 2) ? mx.y : mn.y,
+                    (i & 4) ? mx.z : mn.z);
+                const w = Vector3.TransformCoordinates(corner, p.restWorldMatrix);
+                if (w.x < minX) minX = w.x; if (w.x > maxX) maxX = w.x;
+                if (w.y < minY) minY = w.y; if (w.y > maxY) maxY = w.y;
+                if (w.z < minZ) minZ = w.z; if (w.z > maxZ) maxZ = w.z;
+            }
+        }
+        if (!Number.isFinite(minX)) return null;
+        const bounds = {
+            cx: (minX + maxX) / 2,
+            cy: (minY + maxY) / 2,
+            cz: (minZ + maxZ) / 2,
+            radius: Math.hypot(maxX - minX, maxY - minY, maxZ - minZ) / 2,
+        };
+        this.defBoundsCache.set(defId, bounds);
+        return bounds;
+    }
+
+    /**
      * Resolve the live world-space position of one piece on a unit.
      * Honours both the entity's interpolated position/heading and any
      * server-streamed piece-pose override; pieces missing from the
@@ -2282,9 +2417,10 @@ export class EntityRenderer {
         const lerped = this.interpolator.getInterpolated(id, this.cursorFrame);
         if (!lerped) return null;
 
-        const overrides = this.pieceOverrides.get(id);
-        const modelWorld = overrides
-            ? this.computePieceWorldMatrices(tmpl, overrides)[pieceIdx]
+        const overrides = this.pieceOverrides.get(id) ?? null;
+        const clipPose = this.clipPoses.get(id) ?? null;
+        const modelWorld = (overrides || clipPose)
+            ? this.computePieceWorldMatrices(tmpl, overrides, clipPose)[pieceIdx]
             : tmpl.pieces[pieceIdx].restWorldMatrix;
 
         const rotation = (lerped.heading / 65535) * Math.PI * 2;
@@ -2298,10 +2434,52 @@ export class EntityRenderer {
         return { x: piece.m[12], y: piece.m[13], z: piece.m[14] };
     }
 
+    // ── Dev clip player (PLAN-model-harness §2 clip row / task 6) ────────
+
+    /** Authored .glb clip names for a unit's model. null = unknown unit
+     *  or template still loading (poll, like entityBounds); [] = model
+     *  loaded with no clips (every converted S3O/DAE model today). */
+    getClipNames(id: number): string[] | null {
+        const meta = this.entityMeta.get(id);
+        if (!meta) return null;
+        const tmpl = this.modelTemplates.get(meta.defId);
+        if (tmpl === undefined) return null; // still loading
+        return tmpl ? tmpl.clips.map((c) => c.name) : [];
+    }
+
+    /** Resolve one authored clip plus the rest-pose local matrices the
+     *  ClipPlayer composes unanimated channels from. */
+    getClip(id: number, name: string): { clip: ModelClip; restLocals: Matrix[] } | null {
+        const meta = this.entityMeta.get(id);
+        if (!meta) return null;
+        const tmpl = this.modelTemplates.get(meta.defId);
+        const clip = tmpl?.clips.find((c) => c.name === name);
+        if (!tmpl || !clip) return null;
+        return { clip, restLocals: tmpl.pieces.map((p) => p.localMatrix) };
+    }
+
+    /** Clip-player pose override: raw Babylon parent-relative local
+     *  matrices per piece index, taking precedence over server piece-state
+     *  overrides for that unit. Pass null to clear. Returns false when the
+     *  unit is unknown (lets the ClipPlayer auto-stop on death/respawn). */
+    setClipPose(id: number, pose: ReadonlyMap<number, Matrix> | null): boolean {
+        if (pose === null) {
+            this.clipPoses.delete(id);
+            return true;
+        }
+        if (!this.entityMeta.has(id)) {
+            this.clipPoses.delete(id);
+            return false;
+        }
+        this.clipPoses.set(id, pose);
+        return true;
+    }
+
     removeEntity(id: number): void {
         this.entityMeta.delete(id);
         this.interpolator.remove(id);
         this.pieceOverrides.delete(id);
+        this.clipPoses.delete(id);
     }
 
     /**
@@ -2347,6 +2525,7 @@ export class EntityRenderer {
             this.entityMeta.delete(id);
             this.interpolator.remove(id);
             this.pieceOverrides.delete(id);
+            this.clipPoses.delete(id);
         }
     }
 
@@ -2519,6 +2698,8 @@ export class EntityRenderer {
         this.selectedIds = [];
         this.entityMeta.clear();
         this.ghostPoses.clear();
+        this.pieceOverrides.clear();
+        this.clipPoses.clear();
         this.radarBlipMeshes.clear();
         this.defIsBuilding.clear();
         this.interpolator.clear();

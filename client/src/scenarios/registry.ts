@@ -14,6 +14,7 @@ import movePathing from './bench/move-pathing.js';
 import unitTestLoop from './bench/unit-test-loop.js';
 import weaponFx from './bench/weapon-fx.js';
 import weaponShowcase from './bench/weapon-showcase.js';
+import modelViewer from './model-viewer/index.js';
 import lobbyFlow from './bench/lobby-flow.js';
 
 const SCENARIOS: Scenario[] = [
@@ -23,6 +24,7 @@ const SCENARIOS: Scenario[] = [
     unitTestLoop,
     weaponFx,
     weaponShowcase,
+    modelViewer,
     lobbyFlow,
 ];
 

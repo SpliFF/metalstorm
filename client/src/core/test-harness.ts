@@ -409,6 +409,138 @@ export class TestHarness {
         return ok;
     }
 
+    // ─── Model harness: orbit rig + sun control (PLAN-model-harness) ──
+    //
+    // The orbit rig and sun override live in the worker (camera + lighting
+    // moved there in GW4/GW8); these are thin dispatch wrappers. While the
+    // rig is active the RTS camera input path is suppressed for the view —
+    // drag orbits, wheel zooms; `orbitStop()` restores the saved RTS pose.
+
+    /** Start (or retarget) the orbit camera rig. `target` is a unit id
+     *  (tracked live — follow mode) or a static `{x, z, radius?}` ground
+     *  anchor. Auto-frames on start. Returns the rig state, or false when
+     *  the target/camera isn't available yet. */
+    async orbit(
+        target: number | { x: number; z: number; y?: number; radius?: number },
+        opts: { yawDeg?: number; pitchDeg?: number; distance?: number; follow?: boolean } = {},
+    ): Promise<unknown> {
+        return this.deps.workerCall('orbitStart', [target, opts]);
+    }
+
+    /** Exit the orbit rig and restore the pre-orbit RTS camera view. */
+    async orbitStop(): Promise<void> {
+        await this.deps.workerCall('orbitStop');
+    }
+
+    /** Adjust the live rig (yaw/pitch/distance/follow). Returns rig state. */
+    async orbitSet(opts: {
+        yawDeg?: number; pitchDeg?: number; distance?: number; follow?: boolean;
+    }): Promise<unknown> {
+        return this.deps.workerCall('orbitSet', [opts]);
+    }
+
+    /** Re-frame: sphere fills `fill` (default 0.7) of the shorter viewport
+     *  axis. */
+    async orbitFrame(fill?: number): Promise<unknown> {
+        return this.deps.workerCall('orbitFrame', fill == null ? [] : [fill]);
+    }
+
+    async orbitState(): Promise<unknown> {
+        return this.deps.workerCall('orbitState');
+    }
+
+    /** Override the sun: `{azimuthDeg, elevationDeg}` (missing fields keep
+     *  their current value). Pass `null` to restore the map's authored
+     *  lighting. Elevation below the horizon applies the night preset
+     *  (sun off + ambient floor). Purely client-side render state. */
+    async sun(angles: { azimuthDeg?: number; elevationDeg?: number } | null): Promise<unknown> {
+        return this.deps.workerCall('setSun', [angles]);
+    }
+
+    /** Animate a full day–night cycle every `secondsPerDay` wall seconds
+     *  (azimuth 360° + dawn→noon→dusk elevation arc; below-horizon =
+     *  night). Pass 0 to freeze at the current pose; `sun(null)` restores. */
+    async sunCycle(secondsPerDay: number, peakElevationDeg?: number): Promise<unknown> {
+        return this.deps.workerCall('sunCycle',
+            peakElevationDeg == null ? [secondsPerDay] : [secondsPerDay, peakElevationDeg]);
+    }
+
+    async getSun(): Promise<unknown> {
+        return this.deps.workerCall('getSun');
+    }
+
+    /** Streamed unit defs known to the worker DefCache (minimal picker /
+     *  probe fields). Defs stream on-demand — spawn first, then poll. */
+    async listUnitDefs(): Promise<{
+        defId: number; name: string; humanName: string;
+        flags: number; mass: number; xsize: number; metalCost: number;
+    }[]> {
+        return await this.deps.workerCall('listUnitDefs') as {
+            defId: number; name: string; humanName: string;
+            flags: number; mass: number; xsize: number; metalCost: number;
+        }[];
+    }
+
+    /** Full streamed UnitDefInfo by def name, or null if not streamed yet. */
+    async unitDefByName(name: string): Promise<Record<string, unknown> | null> {
+        return await this.deps.workerCall('unitDefByName', [name]) as
+            Record<string, unknown> | null;
+    }
+
+    /** World bounding sphere + model status for a unit. `hasModel`:
+     *  true = real model, false = procedural fallback shape (E1 badge),
+     *  null = still loading. */
+    async entityBounds(unitId: number): Promise<{
+        x: number; y: number; z: number; radius: number; hasModel: boolean | null;
+    } | null> {
+        return await this.deps.workerCall('entityBounds', [unitId]) as
+            { x: number; y: number; z: number; radius: number; hasModel: boolean | null } | null;
+    }
+
+    /** Scene-wide wireframe toggle (F8 panel render group). */
+    setWireframe(on: boolean): void {
+        void this.deps.workerCall('setWireframe', [on]);
+    }
+
+    // ─── Model harness: generic clip player (PLAN-model-harness task 6) ──
+    //
+    // Plays authored .glb animation clips through the client animator
+    // wrapper (clip-player.ts) — clips the sim never triggers. The wrapper
+    // API is stable across the PLAN-fx-offload animator migration.
+
+    /** Authored clip names on a unit's model. null = template still
+     *  loading / unknown unit (poll, like entityBounds); [] = model loaded
+     *  with no clips (all converted S3O/DAE models). */
+    async listClips(unitId: number): Promise<string[] | null> {
+        return await this.deps.workerCall('listClips', [unitId]) as string[] | null;
+    }
+
+    /** Play one authored clip on the unit (loops by default; one playback
+     *  at a time). Returns the playback state. Throws when the clip is
+     *  unknown or the model hasn't loaded. */
+    async playClip(
+        unitId: number, clip: string,
+        opts: { loop?: boolean; speed?: number } = {},
+    ): Promise<unknown> {
+        const r = await this.deps.workerCall('playClip', [unitId, clip, opts]) as
+            { error?: string } | null;
+        if (r && typeof r === 'object' && 'error' in r && r.error) {
+            throw new Error(`[test] playClip: ${r.error}`);
+        }
+        return r;
+    }
+
+    /** Stop the current clip playback; the unit returns to rest pose /
+     *  server-streamed piece state. */
+    async stopClip(): Promise<void> {
+        await this.deps.workerCall('stopClip');
+    }
+
+    /** Current playback state, or null when nothing is playing. */
+    async clipState(): Promise<unknown> {
+        return this.deps.workerCall('clipState');
+    }
+
     // ─── Render-loop pause + screenshots ────────────────────────────
 
     /** Stop the worker render loop. Sim continues on the server unless you
