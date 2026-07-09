@@ -93,6 +93,7 @@ import { renderMapFeatures, DynamicFeatureRenderer } from './feature-renderer.js
 import { RTSCamera } from './rts-camera.js';
 import { OrbitRig, type OrbitTarget } from './orbit-rig.js';
 import { SunRig } from './sun-rig.js';
+import { ClipPlayer } from './clip-player.js';
 import { WorkerSelection } from './worker-selection.js';
 import { WorkerBuildPlacement, UNITDEF_FLAG_IS_FACTORY } from './worker-build-placement.js';
 import { WorkerCommandModes } from './worker-command-modes.js';
@@ -306,6 +307,10 @@ let gpOrbitSavedView: { pos: Vector3; lookAt: Vector3 } | null = null;
 /// Ticked from the render loop; re-applies each frame while active so game
 /// Lua lighting re-applies can't clobber the test state.
 let gpSunRig: SunRig | null = null;
+/// PLAN-model-harness task 6: dev/test clip player (window.test.playClip).
+/// Samples one authored .glb clip per frame into EntityRenderer's per-piece
+/// clip-pose override; auto-stops when the target unit disappears.
+let gpClipPlayer: ClipPlayer | null = null;
 /// Long-frame profiler: the render loop stamps per-phase timings every frame
 /// into a permanent accumulator (`gpFrameProfiler`), which both (a) computes
 /// mean/p50/p95/p99 per phase over a rolling 30 s window on demand
@@ -1402,6 +1407,7 @@ export function gpInit(msg: GpInitToWorker): void {
         }
         gpOrbitRig?.tick();
         gpSunRig?.tick(dt);
+        gpClipPlayer?.tick();
         gpMark(0);  // camera
 
         // entityRenderer.tick() advances the presentation clock (L0) and
@@ -2090,6 +2096,7 @@ export function gpShutdown(): void {
     gpOrbitRig = null;
     gpOrbitSavedView = null;
     gpSunRig = null;
+    gpClipPlayer = null;
     gpTerrainFog?.dispose();
     gpTerrainFog = null;
     gpTerrainMesh = null;
@@ -2308,6 +2315,34 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
         case 'setWireframe':
             if (gpScene) gpScene.forceWireframe = Boolean(args[0]);
             return null;
+        // — PLAN-model-harness task 6: generic clip player. Clips are
+        //   authored .glb AnimationGroups captured at model load; playback
+        //   samples channels each render frame into the per-piece clip-pose
+        //   override (see clip-player.ts for the fx-offload migration note). —
+        case 'listClips':
+            return gpCtx.entityRenderer?.getClipNames(num(0)) ?? null;
+        case 'playClip': {
+            const r = gpCtx.entityRenderer;
+            if (!r) return { error: 'entity renderer not ready' };
+            const unitId = num(0);
+            const clipName = String(args[1] ?? '');
+            const resolved = r.getClip(unitId, clipName);
+            if (!resolved) {
+                const known = r.getClipNames(unitId);
+                return {
+                    error: `no clip "${clipName}" on unit ${unitId} — `
+                        + (known === null ? 'model still loading / unknown unit'
+                            : known.length ? `has: ${known.join(', ')}` : 'model has no clips'),
+                };
+            }
+            if (!gpClipPlayer) gpClipPlayer = new ClipPlayer(r);
+            return gpClipPlayer.play(unitId, resolved.clip, resolved.restLocals, obj(2, {}));
+        }
+        case 'stopClip':
+            gpClipPlayer?.stop();
+            return null;
+        case 'clipState':
+            return gpClipPlayer?.state() ?? null;
         // — screenshot: OffscreenCanvas → PNG data URL (no FileReader in workers) —
         case 'screenshot': {
             const canvas = gpEngine?.getRenderingCanvas() as OffscreenCanvas | null;

@@ -122,9 +122,13 @@ export function deriveShowcases(p: CapabilityProbe): ShowcaseSpec[] {
     const out: ShowcaseSpec[] = [];
     out.push({ id: 'idle', label: 'Idle', hint: 'hold still 5 s — idle anim / stance' });
 
-    if (p.canMove && p.canFly) {
+    // canMove alone is not enough: ZK factories carry canMove=true with
+    // speed=0 (live-found) — a def that can't attain speed can't run a
+    // movement showcase.
+    const mobile = p.canMove && p.speed > 0;
+    if (mobile && p.canFly) {
         out.push({ id: 'fly-circuit', label: 'Take-off + fly circuit', hint: 'climb, square circuit, land' });
-    } else if (p.canMove && (p.floatOnWater || p.canSubmerge) && !p.isBuilding) {
+    } else if (mobile && (p.floatOnWater || p.canSubmerge) && !p.isBuilding) {
         out.push({
             id: 'sail-circuit',
             label: p.canSubmerge ? 'Sail circuit (sub)' : 'Sail circuit',
@@ -132,7 +136,7 @@ export function deriveShowcases(p: CapabilityProbe): ShowcaseSpec[] {
                 ? 'square circuit; dive/surface needs a water map'
                 : 'square circuit; needs a water map',
         });
-    } else if (p.canMove) {
+    } else if (mobile) {
         out.push({ id: 'circuit', label: 'Walk/Drive circuit', hint: '±300 elmo square, ends at centre' });
         out.push({ id: 'turn-in-place', label: 'Turn in place', hint: 'reverse heading twice' });
     }
@@ -175,6 +179,21 @@ export function deriveShowcases(p: CapabilityProbe): ShowcaseSpec[] {
     return out;
 }
 
+// ── Generic clip buttons (PLAN-model-harness §2 last row / task 6) ───────
+
+/** One "Play clip: X" button per authored .glb clip. The §2 rule is
+ *  "model has clip X *not covered above*" — but the sim never triggers
+ *  .glb clips at all today (the fx-offload animator will map sim states
+ *  to clips later), so EVERY authored clip counts as not-covered. Names
+ *  are deduped + sorted so the panel is deterministic. */
+export function deriveClipButtons(
+    clipNames: readonly string[],
+): { clip: string; label: string }[] {
+    return [...new Set(clipNames)]
+        .sort()
+        .map((c) => ({ clip: c, label: `Play clip: ${c}` }));
+}
+
 // ── Transportee selection (PLAN-model-harness §3 load/unload) ────────────
 
 /**
@@ -204,9 +223,18 @@ end
 return best or ""`.trim();
 }
 
+/** Strip the literal double quotes the LuaRules exec scope wraps around
+ *  string return values (live-found: `return "x"` arrives as `"x"` with
+ *  the quote characters included). */
+export function unquoteExec(output: string): string {
+    const s = output.trim();
+    return s.length >= 2 && s.startsWith('"') && s.endsWith('"')
+        ? s.slice(1, -1) : s;
+}
+
 /** Validate the sim probe's reply (exec output is free text on errors). */
 export function parseTransporteeProbe(output: string): string | null {
-    const s = output.trim();
+    const s = unquoteExec(output);
     if (!s || /\s/.test(s)) return null;
     return s;
 }

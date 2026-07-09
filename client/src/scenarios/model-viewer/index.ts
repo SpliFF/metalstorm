@@ -7,7 +7,7 @@
  * loop.
  *
  *   ?scenario=model-viewer&game=zk&def=cormaw
- *   ?scenario=model-viewer&game=papertanks&def=lighttank
+ *   ?scenario=model-viewer&game=papertanks&def=pt_lighttank
  *   ?scenario=model-viewer&game=zk&def=cormaw&capture=turntable&views=16
  *
  * Params: `game` (default: sticky dev game id, else zk), `def` (initial
@@ -28,6 +28,7 @@ import {
     pickTransporteeFallback,
     probeFromDef,
     transporteeProbeLua,
+    unquoteExec,
     type CapabilityProbe,
     type DefWireLike,
     type ShowcaseId,
@@ -69,6 +70,9 @@ declare global {
                 run(id: ShowcaseId): void;
                 stopReset(): Promise<void>;
                 capture(preset: CapturePreset): void;
+                /** Toggle an authored clip (task 6): play if stopped,
+                 *  stop if it is the one playing. */
+                playClip(name: string): void;
             };
         };
     }
@@ -86,6 +90,8 @@ class ModelViewerStage implements StageContext {
         stageUnitId: null,
         showcases: [],
         running: null,
+        clips: [],
+        playingClip: null,
         badge: null,
         lastError: null,
         slowMo: false,
@@ -119,11 +125,24 @@ class ModelViewerStage implements StageContext {
                         download: param('download') !== '0',
                     }).then((entries) => this.captures.push(...entries));
                 },
+                playClip: (name: string) => {
+                    void this.toggleClip(name).catch(() => { /* surfaced via state.lastError */ });
+                },
             },
         };
 
         await this.h.simSpeed(1).catch(() => { /* best-effort */ });
-        if (initialDef) await this.respawn(initialDef);
+        if (initialDef) {
+            try {
+                await this.respawn(initialDef);
+            } catch (err) {
+                // A bad &def= must not kill the panel — it's the only
+                // interactive recovery path (live-found: stale def names).
+                // Capture mode still fails its capture-def assertion.
+                this.state.badge = `spawn failed: ${(err as Error).message}`;
+                this.state.lastError = (err as Error).message;
+            }
+        }
 
         if (!this.capturePreset) {
             this.panel = createModelViewerPanel({
@@ -134,6 +153,7 @@ class ModelViewerStage implements StageContext {
                 run: (id: ShowcaseId) => window.modelViewer!.api.run(id),
                 stopReset: () => resetStage(this),
                 capture: (preset: CapturePreset) => window.modelViewer!.api.capture(preset),
+                playClip: (name: string) => window.modelViewer!.api.playClip(name),
                 reorbit: async () => {
                     const id = this.state.stageUnitId;
                     if (id) await this.h.orbit(id, { follow: true });
@@ -150,6 +170,12 @@ class ModelViewerStage implements StageContext {
     async respawn(def?: string): Promise<number> {
         const name = (def ?? this.state.def)?.trim();
         if (!name) throw new Error('no def selected — pass &def= or pick one in the panel');
+        // Task 6: a looping clip must not survive the respawn (the old
+        // unit id dies with the clear; the player would auto-stop anyway,
+        // but the panel state has to agree).
+        await this.h.stopClip().catch(() => { /* clip player may be idle */ });
+        this.state.playingClip = null;
+        this.state.clips = [];
         await this.h.clear().catch(() => { /* empty board is fine */ });
         await sleep(150);
         this.state.badge = null;
@@ -168,6 +194,19 @@ class ModelViewerStage implements StageContext {
         if (!this.probe) this.state.badge = 'def not streamed — probe unavailable';
         await this.probeTransportee(name);
 
+        // The server filters entity state by viewport. If the camera (and
+        // so the viewport) isn't over the pedestal — first spawn, or a rig
+        // stuck on its origin fallback after a failed spawn — the fresh
+        // stage unit never streams, and orbiting it would anchor at the
+        // fallback forever (a deadlock: the anchored-away camera keeps the
+        // unit out of the viewport). Snap the camera to the pedestal and
+        // wait for the first entity tick before entering the rig.
+        if (!(await this.h.entityBounds(id).catch(() => null))) {
+            await this.h.orbitStop().catch(() => { /* rig may be off */ });
+            await this.h.focusOn(this.center.x, this.center.z, 0)
+                .catch(() => { /* camera may not be ready */ });
+            await this.waitStreamed(id, 4000);
+        }
         await this.h.orbit(id, { follow: true }).catch(() => { /* camera may lag the spawn */ });
 
         // E1: fallback-shape badge. Capture mode must wait for the verdict
@@ -189,7 +228,7 @@ class ModelViewerStage implements StageContext {
                 const out = await this.h.lua(
                     'local t = {} for id, d in pairs(UnitDefs) do t[#t+1] = d.name end '
                     + 'table.sort(t) return table.concat(t, ",")');
-                this.luaDefNames = out.trim().split(',').filter(Boolean);
+                this.luaDefNames = unquoteExec(out).split(',').filter(Boolean);
             } catch {
                 this.luaDefNames = [];
             }
@@ -198,6 +237,17 @@ class ModelViewerStage implements StageContext {
         for (const n of this.luaDefNames) byName.set(n, { name: n });
         for (const d of streamed) byName.set(d.name, { name: d.name, humanName: d.humanName });
         return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+    }
+
+    /** Wait until the worker has entity state for `id` (the server only
+     *  streams entities inside the viewport). */
+    private async waitStreamed(id: number, timeoutMs: number): Promise<boolean> {
+        const deadline = performance.now() + timeoutMs;
+        while (performance.now() < deadline) {
+            if (await this.h.entityBounds(id).catch(() => null)) return true;
+            await sleep(300);
+        }
+        return false;
     }
 
     private async pollDefWire(name: string, timeoutMs: number): Promise<DefWireLike | null> {
@@ -232,7 +282,10 @@ class ModelViewerStage implements StageContext {
         while (performance.now() < deadline) {
             if (this.state.stageUnitId !== unitId) return; // stage moved on
             const b = await this.h.entityBounds(unitId).catch(() => null);
-            if (b?.hasModel === true) return;
+            if (b?.hasModel === true) {
+                await this.loadClips(unitId);
+                return;
+            }
             if (b?.hasModel === false) {
                 this.state.badge = 'fallback-model';
                 this.notify();
@@ -242,6 +295,38 @@ class ModelViewerStage implements StageContext {
         }
         this.state.badge = 'model-load-timeout (still loading after 12 s)';
         this.notify();
+    }
+
+    /** Task 6: once the model is in, surface its authored clip list
+     *  (empty for every converted S3O/DAE model — buttons only appear
+     *  for native glTF assets that ship clips). */
+    private async loadClips(unitId: number): Promise<void> {
+        const clips = await this.h.listClips(unitId).catch(() => null);
+        if (this.state.stageUnitId !== unitId) return; // stage moved on
+        this.state.clips = clips ?? [];
+        this.notify();
+    }
+
+    /** Task 6 panel/API entry: toggle an authored clip on the stage unit. */
+    async toggleClip(name: string): Promise<void> {
+        const id = this.state.stageUnitId;
+        if (!id) throw new Error('no stage unit — pick a def / respawn first');
+        try {
+            if (this.state.playingClip === name) {
+                await this.h.stopClip();
+                this.state.playingClip = null;
+            } else {
+                await this.h.playClip(id, name, { loop: true });
+                this.state.playingClip = name;
+            }
+            this.state.lastError = null;
+        } catch (err) {
+            this.state.playingClip = null;
+            this.state.lastError = (err as Error).message;
+            throw err;
+        } finally {
+            this.notify();
+        }
     }
 }
 

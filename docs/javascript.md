@@ -174,6 +174,16 @@ await test.listUnitDefs()                    // streamed defs (worker DefCache)
 await test.unitDefByName('cormaw')           // full wire UnitDefInfo or null
 await test.entityBounds(unitId)              // { x,y,z,radius, hasModel } — false = fallback shape
 test.setWireframe(true)
+
+// Generic clip player (task 6) — authored .glb animation clips, played
+// through the client-animator wrapper (core/clip-player.ts). Converted
+// S3O/DAE models have no clips; native glTF assets (Metalstorm /
+// beta-units) do. Rigid node clips render; skinned clips only move joint
+// nodes until fx-offload's animation textures land.
+await test.listClips(unitId)                 // null = model loading; [] = no clips
+await test.playClip(unitId, 'walk', { loop: true, speed: 1 })
+await test.clipState()                       // { unitId, clip, frame, playing } | null
+await test.stopClip()                        // back to rest / server piece pose
 ```
 
 The sun override is purely client-side render state (the sim has no
@@ -259,7 +269,7 @@ One unit centre-stage on the bench map, with derived showcase buttons, the
 orbit rig, the sun control, and headless capture presets:
 
 ```
-?scenario=model-viewer&game=papertanks&def=lighttank        interactive (F8 panel)
+?scenario=model-viewer&game=papertanks&def=pt_lighttank      interactive (F8 panel)
 ?scenario=model-viewer&game=zk&def=cormaw&capture=turntable  headless capture
 ```
 
@@ -277,10 +287,15 @@ downloads).
   stage respawned if destroyed, camera re-framed).
 - A def that spawns as a procedural fallback shape gets a loud
   `fallback-model` badge — that *is* a test outcome (E1).
+- Models that ship authored .glb clips get one **Play clip: X** toggle per
+  clip (task 6) — looping playback via `test.playClip`, highlighted while
+  active, stopped by re-click / respawn / stage reset. Converted S3O/DAE
+  models list none, so the row is empty on ZK/BAR.
 - Progress + results: `window.modelViewer.state` (phase / running /
-  showcases / badge), `window.modelViewer.captures` (data-URL manifest for
-  MCP/CI pulls), `window.modelViewer.api` (`respawn(def)`, `run(id)`,
-  `stopReset()`, `capture(preset)`).
+  showcases / clips / playingClip / badge), `window.modelViewer.captures`
+  (data-URL manifest for MCP/CI pulls), `window.modelViewer.api`
+  (`respawn(def)`, `run(id)`, `stopReset()`, `capture(preset)`,
+  `playClip(name)`).
 
 Capture presets (`&capture=`): `turntable` = N headings at noon light (the
 beta-units golden / PoC judgment set), `clips` = 4-frame strip per

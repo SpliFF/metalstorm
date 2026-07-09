@@ -6,6 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+    deriveClipButtons,
     deriveShowcases,
     parseTransporteeProbe,
     pickTransporteeFallback,
@@ -34,7 +35,7 @@ describe('deriveShowcases', () => {
 
     it('aircraft gets the fly circuit, not the ground one', () => {
         const got = ids({
-            name: 'fighter', flags: UDF.CAN_MOVE | UDF.CAN_FLY,
+            name: 'fighter', flags: UDF.CAN_MOVE | UDF.CAN_FLY, speed: 240,
             weaponDefIds: [1, 2],
         });
         expect(got).toContain('fly-circuit');
@@ -43,12 +44,24 @@ describe('deriveShowcases', () => {
     });
 
     it('ship/sub gets the sail circuit', () => {
-        expect(ids({ name: 'boat', flags: UDF.CAN_MOVE | UDF.FLOAT_ON_WATER }))
+        expect(ids({ name: 'boat', flags: UDF.CAN_MOVE | UDF.FLOAT_ON_WATER, speed: 80 }))
             .toContain('sail-circuit');
         const sub = deriveShowcases(probeFromDef(
-            { name: 'sub', flags: UDF.CAN_MOVE | UDF.CAN_SUBMERGE }));
+            { name: 'sub', flags: UDF.CAN_MOVE | UDF.CAN_SUBMERGE, speed: 70 }));
         const sail = sub.find((s) => s.id === 'sail-circuit')!;
         expect(sail.label).toContain('sub');
+    });
+
+    it('canMove with speed 0 (ZK factories) gets NO movement rows', () => {
+        const got = ids({
+            name: 'factorycloak',
+            flags: UDF.CAN_MOVE | UDF.IS_BUILDER | UDF.IS_FACTORY | UDF.IS_BUILDING,
+            speed: 0, buildOptions: [10],
+        });
+        expect(got).not.toContain('circuit');
+        expect(got).not.toContain('turn-in-place');
+        expect(got).not.toContain('fly-circuit');
+        expect(got).toContain('produce');
     });
 
     it('static turret: weapons but no movement showcases', () => {
@@ -118,6 +131,11 @@ describe('transportee selection', () => {
         expect(parseTransporteeProbe('lighttank\n')).toBe('lighttank');
     });
 
+    it('strips the exec scope’s literal string quoting (live-found)', () => {
+        expect(parseTransporteeProbe('"cloakraid"')).toBe('cloakraid');
+        expect(parseTransporteeProbe('""')).toBeNull();
+    });
+
     it('rejects empty / error-shaped replies', () => {
         expect(parseTransporteeProbe('')).toBeNull();
         expect(parseTransporteeProbe('   ')).toBeNull();
@@ -140,5 +158,19 @@ describe('transportee selection', () => {
             [{ name: 'heavy', flags: UDF.CAN_MOVE, mass: 9000, xsize: 4 }],
             { transportMass: 100, transportSize: 2 },
         )).toBeNull();
+    });
+});
+
+describe('deriveClipButtons (task 6)', () => {
+    it('one labelled button per authored clip, deduped + sorted', () => {
+        expect(deriveClipButtons(['walk', 'idle', 'walk', 'death'])).toEqual([
+            { clip: 'death', label: 'Play clip: death' },
+            { clip: 'idle', label: 'Play clip: idle' },
+            { clip: 'walk', label: 'Play clip: walk' },
+        ]);
+    });
+
+    it('clipless model (every converted S3O/DAE today) yields no buttons', () => {
+        expect(deriveClipButtons([])).toEqual([]);
     });
 });

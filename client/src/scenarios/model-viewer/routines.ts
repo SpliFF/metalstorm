@@ -35,6 +35,11 @@ export interface ModelViewerState {
     stageUnitId: number | null;
     showcases: ShowcaseSpec[];
     running: ShowcaseId | null;
+    /** Authored .glb clip names once the model loads (task 6); [] until
+     *  then and for clipless models. */
+    clips: string[];
+    /** Clip currently looping via the clip player, or null. */
+    playingClip: string | null;
     /** E1: 'fallback-model' when the def spawned as a procedural shape. */
     badge: string | null;
     lastError: string | null;
@@ -222,8 +227,10 @@ for i, bid in ipairs(t.buildOptions or {}) do
   end
 end
 if not best then return "" end
-return best .. "|" .. bestId`.trim());
-    const m = out.trim().match(/^([^|]+)\|(\d+)$/);
+return best .. "|" .. string.format("%d", bestId)`.trim());
+    // %d above: the exec engine prints integral Lua numbers as "406.0",
+    // which the strict-integer match here would reject (live-found).
+    const m = out.trim().match(/^"?([^|"]+)\|(\d+)"?$/);
     return m ? { name: m[1], defId: Number(m[2]) } : null;
 }
 
@@ -354,6 +361,9 @@ export async function runShowcase(ctx: StageContext, id: ShowcaseId): Promise<vo
  */
 export async function resetStage(ctx: StageContext): Promise<void> {
     await ctx.h.simSpeed(1).catch(() => { /* best-effort */ });
+    // Task 6: stop any looping clip so the stage returns to rest pose.
+    await ctx.h.stopClip().catch(() => { /* clip player may be idle */ });
+    ctx.state.playingClip = null;
     await ctx.h.clear(1).catch(() => { /* team-1 dummy sweep */ });
     const stageId = ctx.state.stageUnitId ?? 0;
     await ctx.h.lua(`

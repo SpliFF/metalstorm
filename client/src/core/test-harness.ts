@@ -502,6 +502,45 @@ export class TestHarness {
         void this.deps.workerCall('setWireframe', [on]);
     }
 
+    // ─── Model harness: generic clip player (PLAN-model-harness task 6) ──
+    //
+    // Plays authored .glb animation clips through the client animator
+    // wrapper (clip-player.ts) — clips the sim never triggers. The wrapper
+    // API is stable across the PLAN-fx-offload animator migration.
+
+    /** Authored clip names on a unit's model. null = template still
+     *  loading / unknown unit (poll, like entityBounds); [] = model loaded
+     *  with no clips (all converted S3O/DAE models). */
+    async listClips(unitId: number): Promise<string[] | null> {
+        return await this.deps.workerCall('listClips', [unitId]) as string[] | null;
+    }
+
+    /** Play one authored clip on the unit (loops by default; one playback
+     *  at a time). Returns the playback state. Throws when the clip is
+     *  unknown or the model hasn't loaded. */
+    async playClip(
+        unitId: number, clip: string,
+        opts: { loop?: boolean; speed?: number } = {},
+    ): Promise<unknown> {
+        const r = await this.deps.workerCall('playClip', [unitId, clip, opts]) as
+            { error?: string } | null;
+        if (r && typeof r === 'object' && 'error' in r && r.error) {
+            throw new Error(`[test] playClip: ${r.error}`);
+        }
+        return r;
+    }
+
+    /** Stop the current clip playback; the unit returns to rest pose /
+     *  server-streamed piece state. */
+    async stopClip(): Promise<void> {
+        await this.deps.workerCall('stopClip');
+    }
+
+    /** Current playback state, or null when nothing is playing. */
+    async clipState(): Promise<unknown> {
+        return this.deps.workerCall('clipState');
+    }
+
     // ─── Render-loop pause + screenshots ────────────────────────────
 
     /** Stop the worker render loop. Sim continues on the server unless you

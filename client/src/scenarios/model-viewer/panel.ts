@@ -13,7 +13,7 @@
 
 import type { TestHarness } from '../../core/test-harness.js';
 import type { CapturePreset } from './capture.js';
-import type { ShowcaseId } from './capability-probe.js';
+import { deriveClipButtons, type ShowcaseId } from './capability-probe.js';
 import type { ModelViewerState } from './routines.js';
 
 export interface PanelApi {
@@ -25,6 +25,8 @@ export interface PanelApi {
     run(id: ShowcaseId): void;
     stopReset(): Promise<void>;
     capture(preset: CapturePreset): void;
+    /** Toggle an authored .glb clip on the stage unit (task 6). */
+    playClip(name: string): void;
     /** Re-enter orbit on the stage unit (after "RTS cam"). */
     reorbit(): Promise<void>;
 }
@@ -145,11 +147,15 @@ export function createModelViewerPanel(api: PanelApi): ModelViewerPanel {
     // ── 2. Showcases ─────────────────────────────────────────────────────
     const showcases = group('Showcases');
     const showcaseBtns = el('div');
+    // Task 6: one "Play clip: X" toggle per authored .glb clip — present
+    // only for native glTF models that ship clips (converted S3O/DAE
+    // models have none, so the row stays empty on ZK/BAR).
+    const clipBtns = el('div');
     const slow = checkbox('slow-mo (0.25×)', 'run routines at quarter sim speed (gait inspection)',
         (on) => { api.state.slowMo = on; });
     const status = el('div', 'color:#fa6; min-height:14px; margin-top:2px; white-space:pre-wrap;');
     function setStatus(msg: string): void { status.textContent = msg; }
-    showcases.body.append(showcaseBtns, slow.root,
+    showcases.body.append(showcaseBtns, clipBtns, slow.root,
         btn('Stop / reset stage', 'clear orders + dummies, respawn if needed, re-frame',
             () => { void api.stopReset().catch((err) => setStatus((err as Error).message)); }),
         status);
@@ -274,6 +280,15 @@ export function createModelViewerPanel(api: PanelApi): ModelViewerPanel {
                 b.title = `busy: "${s.running}" is running`;
                 b.style.opacity = '0.5';
             }
+            return b;
+        }));
+        // Clip toggles (task 6) — playing one is highlighted and relabelled
+        clipBtns.replaceChildren(...deriveClipButtons(s.clips).map(({ clip, label }) => {
+            const playing = s.playingClip === clip;
+            const b = btn(playing ? `Stop clip: ${clip}` : label,
+                'authored .glb clip via the client animator (loops until stopped)',
+                () => api.playClip(clip));
+            if (playing) b.style.background = '#274';
             return b;
         }));
         slow.input.checked = s.slowMo;
