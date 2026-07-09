@@ -96,3 +96,7 @@ tools/debug-mcp/node_modules/
 
 # chrome-devtools MCP screenshot output
 /.playwright-mcp/
+
+# Python bytecode cache (tools/scripts/*.py)
+__pycache__/
+*.pyc

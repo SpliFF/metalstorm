@@ -12,6 +12,7 @@
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.0.0",
+    "gltf-validator": "^2.0.0-dev.3.10",
     "typescript": "~6.0.2",
     "vite": "^8.0.4",
     "vitest": "^4.1.2"
