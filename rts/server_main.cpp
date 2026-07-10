@@ -165,6 +165,13 @@ int main(int argc, char* argv[])
     std::string mapId;
     std::string mapsDir = "data/maps";
     std::string dbPath = "data/spring-server.db";
+    // PLAN-security-hardening.md task 5 (G3): prod cert for the QUIC/WebTransport
+    // endpoint. Both paths must be given together, or neither — see
+    // WebTransportServer::Start(). Empty (the default) runs the endpoint in
+    // Hashes mode (self-signed, serverCertificateHashes pinning) — fine for dev,
+    // not for a public deployment (see docs/deployment.md).
+    std::string wtCertPath;
+    std::string wtKeyPath;
     // Idle self-termination tuning (non-persistent rooms only). A non-persistent
     // server exits after idleExitSeconds with zero connected clients, but not
     // before idleStartupGraceSeconds have passed (so it waits for the first
@@ -230,6 +237,7 @@ int main(int argc, char* argv[])
     // --idle-exit-seconds N (0 = never), --idle-startup-grace-seconds N,
     // --log-file PATH, --log-level LEVEL, --log-server URL,
     // --log-sqlite PATH, --debug, --log-messages,
+    // --wt-cert PATH, --wt-key PATH,
     // --player username:team:pos (repeatable),
     // --ai id:team:pos (repeatable)
     for (int i = 1; i < argc; i++) {
@@ -246,6 +254,10 @@ int main(int argc, char* argv[])
             mapId = argv[++i];
         } else if (arg == "--db" && i + 1 < argc) {
             dbPath = argv[++i];
+        } else if (arg == "--wt-cert" && i + 1 < argc) {
+            wtCertPath = argv[++i];
+        } else if (arg == "--wt-key" && i + 1 < argc) {
+            wtKeyPath = argv[++i];
         } else if (arg == "--idle-exit-seconds" && i + 1 < argc) {
             idleExitSeconds = std::atoi(argv[++i]);
         } else if (arg == "--idle-startup-grace-seconds" && i + 1 < argc) {
@@ -337,6 +349,11 @@ int main(int argc, char* argv[])
     }
     if (!mapId.empty() && !isValidContentId(mapId)) {
         SLOG(SPRING_LOG_ERROR, "invalid --map id '%s' (must be alphanumeric)", mapId.c_str());
+        return 1;
+    }
+    if (wtCertPath.empty() != wtKeyPath.empty()) {
+        SLOG(SPRING_LOG_ERROR, "--wt-cert and --wt-key must be given together (got only %s)",
+             wtCertPath.empty() ? "--wt-key" : "--wt-cert");
         return 1;
     }
 
@@ -553,12 +570,13 @@ int main(int argc, char* argv[])
     }
 
     // QUIC is a hard dependency (no WebRTC fallback) — fail fast if it can't bind.
-    if (!rtcServer.Start(port)) {
+    if (!rtcServer.Start(port, wtCertPath, wtKeyPath)) {
         SLOG(SPRING_LOG_ERROR, "failed to start WebTransport (QUIC) server on udp/:%d", port);
         springlog_shutdown();
         return 1;
     }
-    SLOG(SPRING_LOG_NOTICE, "WebTransport (QUIC) listening on udp/:%d", port);
+    SLOG(SPRING_LOG_NOTICE, "WebTransport (QUIC) listening on udp/:%d (mode=%s)", port,
+         rtcServer.CertMode() == WtCertMode::Webpki ? "webpki" : "hashes");
 
     // --- Simulation ---
     // Find .smf file in the map directory

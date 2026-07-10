@@ -50,19 +50,56 @@ enum class StreamClass : uint8_t {
     Datagram = 4, // unreliable datagram (<~1200 B)
 };
 
+/// PLAN-security-hardening.md task 5: which cert-provisioning mode the
+/// endpoint is running in, mirroring the accepted dual-mode design.
+enum class WtCertMode : uint8_t {
+    Hashes = 0, // no --wt-cert/--wt-key given: self-signed rolling pair, hashes published
+    Webpki = 1, // --wt-cert/--wt-key given: CA cert, browsers validate via WebPKI, no hashes published
+};
+
 class WebTransportServer {
 public:
     WebTransportServer();
     ~WebTransportServer();
 
     /// Bind the QUIC UDP socket on `port` and start the network thread.
-    /// `certPem`/`keyPem` are PEM strings; if empty an ephemeral self-signed
-    /// ECDSA cert is generated (dev) and its SHA-256 exposed via CertHash()
-    /// for the client's serverCertificateHashes pin.
-    bool Start(int port, const std::string& certPem = "", const std::string& keyPem = "");
+    /// `certPath`/`keyPath` are filesystem paths to PEM files (e.g. a Let's
+    /// Encrypt fullchain + privkey); if either is empty the endpoint runs in
+    /// `Hashes` mode: it self-generates a rolling pair of ECDSA certs
+    /// (<=14 day validity, the WebTransport spec cap for
+    /// serverCertificateHashes) and rotates at half-life. If both are given
+    /// it runs in `Webpki` mode: the cert is loaded directly and reloaded
+    /// whenever its mtime changes (hourly poll) or ReloadCert() is called
+    /// explicitly (e.g. a certbot deploy-hook) — see CertMode()/CertHashes().
+    bool Start(int port, const std::string& certPath = "", const std::string& keyPath = "");
 
-    /// SHA-256 of the DER cert (lower-case hex), for serverCertificateHashes.
+    /// SHA-256 of the currently *active* DER cert (lower-case hex).
     std::string CertHash() const;
+
+    /// Which mode the endpoint is running in.
+    WtCertMode CertMode() const;
+
+    /// Hashes to publish via /api/wt/info for serverCertificateHashes pinning.
+    /// Empty in Webpki mode (browsers validate via the CA chain instead — a
+    /// rotating CA cert can't be pinned without breaking clients on renewal).
+    /// In Hashes mode: 1 or 2 hex SHA-256 hashes — the active cert plus the
+    /// already-generated "next" cert, so a client holding a stale
+    /// /api/wt/info answer can still connect across a rotation.
+    std::vector<std::string> CertHashes() const;
+
+    /// Force an immediate reload/rotation check outside the hourly poll —
+    /// Webpki mode re-stats and reloads the cert/key files unconditionally;
+    /// Hashes mode promotes the pending cert immediately instead of waiting
+    /// for half-life. Just sets an atomic flag the network thread's own loop
+    /// consumes (safe to call from any thread) — but do NOT wire this to an
+    /// OS signal handler: in testing, delivering a signal to this process
+    /// while a Webpki-mode cert is loaded reproducibly corrupted OpenSSL's
+    /// heap state (crash at process-exit cleanup) regardless of whether this
+    /// method was ever actually invoked — a signal-delivery/OpenSSL
+    /// interaction, not a bug in this reload logic itself (the hourly poll
+    /// exercises the identical reload code with no signal involved and is
+    /// safe). See PLAN-security-hardening.md task 5 and docs/deployment.md.
+    void ReloadCert();
 
     /// Send a payload to one client on a given tier.
     ///

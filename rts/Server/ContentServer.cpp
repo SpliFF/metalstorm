@@ -2,6 +2,7 @@
 
 #include "ContentServer.h"
 #include "NetworkServer.h"
+#include "PathTraversal.h"
 #include "System/SpringLog/SpringLog.h"
 
 #define LOG_SECTION "content"
@@ -11,25 +12,6 @@
 #include <fstream>
 
 namespace fs = std::filesystem;
-
-namespace {
-// True if an asset key contains a path-traversal attempt: a ".." path segment,
-// an absolute path, or a Windows drive/backslash escape. Checks segments so a
-// legitimate filename merely *containing* ".." (e.g. "a..b.glb") is allowed.
-bool HasTraversal(const std::string& key) {
-    if (key.empty()) return true;
-    if (key.front() == '/' || key.front() == '\\') return true;   // absolute
-    size_t start = 0;
-    for (size_t i = 0; i <= key.size(); ++i) {
-        if (i == key.size() || key[i] == '/' || key[i] == '\\') {
-            const std::string seg = key.substr(start, i - start);
-            if (seg == "..") return true;
-            start = i + 1;
-        }
-    }
-    return false;
-}
-} // namespace
 
 void ContentServer::Init(NetworkServer& net, const std::vector<std::string>& contentRoots) {
     roots = contentRoots;
@@ -64,7 +46,7 @@ void ContentServer::Init(NetworkServer& net, const std::vector<std::string>& con
         // a `..` segment or absolute/leading-slash key must never be served.
         // (Percent-decoding happens upstream in NetworkServer, so by here a
         // traversal attempt appears as literal ".." segments.)
-        if (HasTraversal(key))
+        if (HasPathTraversal(key))
             return {.contentType = "text/plain", .body = {}, .status = 403};
 
         auto it = assets.find(key);

@@ -44,7 +44,7 @@ Game servers are spawned by the lobby with dynamically assigned ports. To discov
 ```
 
 Full CLI flag list (from `rts/server_main.cpp`):
-`--port`, `--game`, `--game-version`, `--map`, `--db`, `--log-file`, `--log-level`, `--log-server`, `--log-sqlite`, `--debug`, `--no-cache`, `--log-messages`, `--player username:team:pos` (repeatable), `--ai id:team:pos` (repeatable). The IPC pipe and `--event-fd` are gone; a game→lobby backchannel (PLAN-lobby-game-connection.md) is **not yet implemented** (TODO — targets WebTransport when built).
+`--port`, `--game`, `--game-version`, `--map`, `--db`, `--log-file`, `--log-level`, `--log-server`, `--log-sqlite`, `--debug`, `--no-cache`, `--log-messages`, `--wt-cert <path>`, `--wt-key <path>` (WebTransport prod cert — see below), `--player username:team:pos` (repeatable), `--ai id:team:pos` (repeatable). The IPC pipe and `--event-fd` are gone; a game→lobby backchannel (PLAN-lobby-game-connection.md) is **not yet implemented** (TODO — targets WebTransport when built).
 
 ## Directory Map
 
@@ -61,7 +61,7 @@ Full CLI flag list (from `rts/server_main.cpp`):
 | `lobby_main.cpp` | Lobby entry. Room management, game/map preprocessing, child process spawning, HTTP routes. |
 | `Server/Simulation.h/.cpp` | Initialises Spring subsystems, ticks physics/units/weapons/features each frame. |
 | `Server/NetworkServer.h/.cpp` | HTTP/2 (h2c via nghttp2) + HTTP/1.1 server (REST/SSE/assets only). Realtime game traffic now runs over WebTransport (`WebTransportServer`), not WebRTC. Send/broadcast helpers. |
-| `Server/WebTransport/WebTransportServer.h/.cpp` | **WebTransport (QUIC/HTTP-3) game transport** — Stage 0 replacement for WebRTC (PLAN-game-worker.md). ngtcp2 + nghttp3 + OpenSSL 3.5 QUIC TLS. Full stack landed + Chrome-verified (GW1-H3): QUIC handshake (ephemeral ECDSA-P256 self-signed cert, `CertHash()` for `serverCertificateHashes`), hand-rolled HTTP/3 framing + nghttp3 standalone QPACK, WebTransport draft-02 extended-CONNECT + stream/datagram demux (`0x54` uni / `0x41` bidi / quarter-stream-id). Mirrors the WebRTCServer seam + adds `StreamClass` priority tiers. QUIC stack is a **hard build dependency** (no WebRTC fallback). Echo-test it with `spring-quic-derisk serve <port>`. |
+| `Server/WebTransport/WebTransportServer.h/.cpp` | **WebTransport (QUIC/HTTP-3) game transport** — Stage 0 replacement for WebRTC (PLAN-game-worker.md). ngtcp2 + nghttp3 + OpenSSL 3.5 QUIC TLS. Full stack landed + Chrome-verified (GW1-H3): QUIC handshake, hand-rolled HTTP/3 framing + nghttp3 standalone QPACK, WebTransport draft-02 extended-CONNECT + stream/datagram demux (`0x54` uni / `0x41` bidi / quarter-stream-id). Mirrors the WebRTCServer seam + adds `StreamClass` priority tiers. QUIC stack is a **hard build dependency** (no WebRTC fallback). Echo-test it with `spring-quic-derisk serve <port>`. **Dual-mode cert provisioning** (PLAN-security-hardening.md task 5): no `--wt-cert`/`--wt-key` → `Hashes` mode (self-generated ECDSA-P256, ≤14-day rolling pair, `CertHashes()` publishes active+next for `serverCertificateHashes`); `--wt-cert <pem> --wt-key <pem>` → `Webpki` mode (CA cert, browsers validate normally, no hash published). Hourly mtime poll reloads a changed on-disk cert without dropping connections (TLS 1.3 doesn't renegotiate mid-session). `ReloadCert()` exists for a forced immediate check but is deliberately **not** wired to an OS signal — signal delivery to this process while a Webpki-mode cert is loaded was found to corrupt OpenSSL's heap state at exit, reproducibly, regardless of whether the reload logic itself ran; `SIGHUP`/`POST /api/restart` (full restart, which re-reads the cert fresh) remains the manual-immediate fallback — see `docs/deployment.md`. |
 | `Server/Protocol.h` | FlatBuffers message builders (BuildAuthResponse, BuildMapData, BuildGameUnitDefs, etc.). |
 | `Server/EntityStateSerializer.h/.cpp` | Serialises unit state to Tier 2 binary (struct-of-arrays, field-masked). |
 | `Server/ProjectileStateSerializer.h/.cpp` | Serialises synced weapon projectiles to envelope 0x04 binary. |
@@ -478,7 +478,7 @@ data/
 | `/api/metrics` | JSON performance stats |
 | `/api/content/manifest` | JSON index of all servable assets |
 | `/api/content/assets/*` | Individual asset files from content roots |
-| `/api/wt/info` | JSON `{port, certHash, transport}` — WebTransport (QUIC) endpoint discovery; the client pins the dev cert via `serverCertificateHashes`. Replaces the removed `/api/rtc/offer` + `/api/rtc/candidate` WebRTC signaling. |
+| `/api/wt/info` | JSON `{port, transport, certMode}` — WebTransport (QUIC) endpoint discovery. `certMode:"hashes"` (dev/self-hosted default) adds `certHashes:[current,next]` (+ back-compat `certHash`) for `serverCertificateHashes` pinning; `certMode:"webpki"` (`--wt-cert`/`--wt-key` configured) publishes no hash — the browser validates the CA cert normally. Replaces the removed `/api/rtc/offer` + `/api/rtc/candidate` WebRTC signaling. |
 
 ### Log server (`spring-logserver`)
 

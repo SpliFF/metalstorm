@@ -156,7 +156,12 @@ static GameServerInstance spawnGameServer(
     const std::vector<RoomAISlot>& aiSlots,
     const std::unordered_map<std::string, std::string>& modOptions = {},
     const std::unordered_set<int>& excludedPorts = {},
-    bool devBuildAcknowledged = false)
+    bool devBuildAcknowledged = false,
+    // PLAN-security-hardening.md task 5 (G3): forwarded from the lobby's own
+    // --wt-cert/--wt-key to every spawned spring-server, so an operator
+    // configures the prod cert once at the lobby instead of per room.
+    const std::string& wtCertPath = "",
+    const std::string& wtKeyPath = "")
 {
     GameServerInstance inst;
     inst.roomId = roomId;
@@ -247,6 +252,10 @@ static GameServerInstance spawnGameServer(
         }
         argv.push_back("--map");  argv.push_back(mapId.c_str());
         argv.push_back("--db");   argv.push_back(dbPath.c_str());
+        if (!wtCertPath.empty() && !wtKeyPath.empty()) {
+            argv.push_back("--wt-cert"); argv.push_back(wtCertPath.c_str());
+            argv.push_back("--wt-key");  argv.push_back(wtKeyPath.c_str());
+        }
         for (const auto& spec : playerArgStorage) {
             argv.push_back("--player");
             argv.push_back(spec.c_str());
@@ -340,6 +349,10 @@ int main(int argc, char* argv[])
     bool devDirectStart = false;
     bool devBuildAcknowledged = false;
     std::string directManifestPath;
+    // PLAN-security-hardening.md task 5 (G3): prod cert for every spawned
+    // spring-server's QUIC/WebTransport endpoint. See spawnGameServer.
+    std::string wtCertPath;
+    std::string wtKeyPath;
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -354,6 +367,8 @@ int main(int argc, char* argv[])
         else if (arg == "--dev-direct-start") { devDirectStart = true; }
         else if (arg == DevBuildGate::kFlag) { devBuildAcknowledged = true; }
         else if (arg == "--direct" && i + 1 < argc) { directManifestPath = argv[++i]; }
+        else if (arg == "--wt-cert" && i + 1 < argc) { wtCertPath = argv[++i]; }
+        else if (arg == "--wt-key" && i + 1 < argc) { wtKeyPath = argv[++i]; }
         else if (arg == "--game" && i + 1 < argc) {
             // Back-compat: `--game <path>` is translated into
             // `--games-dir <parent>` so existing scripts that point
@@ -373,6 +388,12 @@ int main(int argc, char* argv[])
     // start listening at all without the operator's explicit acknowledgment.
     if (!DevBuildGate::CheckAndWarn("spring-lobby", devBuildAcknowledged))
         return 1;
+
+    if (wtCertPath.empty() != wtKeyPath.empty()) {
+        SLOG(SPRING_LOG_ERROR, "--wt-cert and --wt-key must be given together (got only %s)",
+             wtCertPath.empty() ? "--wt-key" : "--wt-cert");
+        return 1;
+    }
 
     // --- Logging ---
     uint32_t logOutputs = SPRING_LOG_OUTPUT_CONSOLE;
@@ -1333,7 +1354,8 @@ int main(int argc, char* argv[])
             for (const auto& [rid, gi] : gameServers)
                 if (gi.pid > 0 && isProcessAlive(gi.pid)) busyPorts.insert(gi.port);
             auto inst = spawnGameServer(roomId, gameId, gameVer, mapId, dbPath,
-                room->players, room->aiSlots, room->modOptions, busyPorts, devBuildAcknowledged);
+                room->players, room->aiSlots, room->modOptions, busyPorts, devBuildAcknowledged,
+                wtCertPath, wtKeyPath);
             gameServers[roomId] = inst;
             persistGameServer(inst);
             room->gameServerPort = inst.port;
@@ -1838,7 +1860,8 @@ int main(int argc, char* argv[])
             }
             auto inst = spawnGameServer(room->id, room->gameId, gameVer,
                 room->mapId, dbPath,
-                room->players, room->aiSlots, room->modOptions, busyPorts, devBuildAcknowledged);
+                room->players, room->aiSlots, room->modOptions, busyPorts, devBuildAcknowledged,
+                wtCertPath, wtKeyPath);
             gameServers[room->id] = inst;
             persistGameServer(inst);
             room->gameServerPort = inst.port;

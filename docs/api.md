@@ -310,14 +310,29 @@ endpoint, then opens a WebTransport session straight to it.
 
 **GET /api/wt/info** (no auth)
 
+Dual cert-provisioning mode (PLAN-security-hardening.md task 5), selected by
+whether the game server was launched with `--wt-cert`/`--wt-key`:
+
 ```json
-// Response: {"port":9100,"certHash":"<base64 SHA-256 of the dev cert>","transport":"webtransport"}
+// hashes mode (default — no --wt-cert/--wt-key): self-signed rolling cert pair
+{"port":9100,"transport":"webtransport","certMode":"hashes",
+ "certHashes":["<hex SHA-256, active cert>","<hex SHA-256, next cert>"],
+ "certHash":"<hex SHA-256, active cert — back-compat single-hash field>"}
+
+// webpki mode (--wt-cert/--wt-key given): CA cert, no hash published
+{"port":9100,"transport":"webtransport","certMode":"webpki"}
 ```
 
 The client opens `https://<host>:<port>/` via `new WebTransport(url, {
-serverCertificateHashes:[{algorithm:"sha-256", value:<certHash>}] })` (dev pins
-the ephemeral self-signed cert; prod uses a CA cert and omits the hash), then
-authenticates with an `AuthRequest` FlatBuffer over the control stream.
+serverCertificateHashes:[{algorithm:"sha-256", value:<hash>}, ...] })` in
+`hashes` mode (pinning both the active and the already-generated "next" hash
+so a client holding a stale `/api/wt/info` answer still connects across a
+rotation), or with no `serverCertificateHashes` option at all in `webpki`
+mode (the browser validates the CA cert normally). It then authenticates with
+an `AuthRequest` FlatBuffer over the control stream.
+
+Production cert provisioning (loading, hourly auto-reload, certbot
+integration) is documented in [docs/deployment.md](deployment.md).
 
 Transport classes / priority tiers (PLAN-game-worker.md GW2):
 - `control` — reliable, ordered bidi stream (FlatBuffer messages, commands, ACKs)

@@ -1091,11 +1091,22 @@ export class Connection {
     // ─── WebTransport (QUIC) ───
 
     private async connectWebTransport(): Promise<void> {
-        // Discover the QUIC endpoint + dev cert hash over the trusted HTTP plane.
+        // Discover the QUIC endpoint (+ cert pinning info in `hashes` mode)
+        // over the trusted HTTP plane. See PLAN-security-hardening.md task 5.
         const infoResp = await fetch(`${this.httpBase}/api/wt/info`);
         if (!infoResp.ok) throw new Error(`wt/info failed: HTTP ${infoResp.status}`);
         const info = await infoResp.json();
-        if (!info.port || !info.certHash) throw new Error('wt/info missing port/certHash');
+        if (!info.port) throw new Error('wt/info missing port');
+
+        // `webpki` mode (CA cert): no hashes to pin, the browser validates
+        // normally. `hashes` mode (self-signed): pin via certHashes, falling
+        // back to the singular certHash for servers built before this change.
+        const certHashes: string[] | undefined =
+            info.certMode === 'webpki' ? undefined
+                : info.certHashes ?? (info.certHash ? [info.certHash] : undefined);
+        if (info.certMode !== 'webpki' && !certHashes?.length) {
+            throw new Error('wt/info missing certHashes for hashes cert mode');
+        }
 
         // QUIC runs on the same host as the HTTP server, UDP on info.port.
         const host = new URL(this.httpBase).hostname;
@@ -1109,7 +1120,7 @@ export class Connection {
             onError: (e) => console.warn(`[connection] WebTransport error: ${e}`),
         });
         this.transport = adapter;
-        await adapter.connect(wtUrl, { certHash: info.certHash });
+        await adapter.connect(wtUrl, { certHashes });
 
         // Connected — send auth over the control stream so the game server
         // creates a ClientSession. Don't fire onAuthenticated yet — wait for the

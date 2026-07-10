@@ -6,6 +6,7 @@
 #include "Database.h"
 #include "LuaExecEngine.h"
 #include "HttpAuth.h"
+#include "PathTraversal.h"
 #include "PerfMetrics.h"
 #include "WebTransport/WebTransportServer.h"
 #include "Map/ReadMap.h"
@@ -151,6 +152,11 @@ void RegisterGameHttpRoutes(GameServerContext& ctx,
     // Serve map thumbnail images
     net.AddHttpGet("/api/maps/thumb/*", RouteAuth::Public, [&mapsDir](const std::string& url) -> HttpResponse {
         std::string mapId = url.substr(std::string("/api/maps/thumb/").size());
+        // G11 (PLAN-security-hardening.md): every sibling content route
+        // guards against `..` traversal in the client-supplied id; this one
+        // didn't, letting `mapId` walk `mapsDir` to an arbitrary file read.
+        if (HasPathTraversal(mapId))
+            return {.contentType = "text/plain", .body = {}, .status = 403};
         namespace fs = std::filesystem;
         fs::path mapDir = fs::path(mapsDir) / mapId;
         if (!fs::is_directory(mapDir))
@@ -249,13 +255,25 @@ void RegisterGameHttpRoutes(GameServerContext& ctx,
     });
 #endif // !SPRING_PROD
 
-    // Cert-hash discovery: the client pins the dev server's ephemeral
-    // self-signed cert via serverCertificateHashes. It learns the hash (and the
-    // WT port) from this endpoint over the already-trusted HTTP plane.
+    // WebTransport endpoint discovery (PLAN-security-hardening.md task 5, G3).
+    // Dual mode: `webpki` (--wt-cert/--wt-key given — a CA cert, browsers
+    // validate normally, no hash published since a rotating CA cert can't be
+    // pinned without breaking clients on renewal) vs `hashes` (self-signed
+    // rolling pair — the client pins via serverCertificateHashes; both the
+    // active and the already-generated "next" hash are published so a client
+    // holding a stale answer can still connect across a rotation).
     net.AddHttpGet("/api/wt/info", RouteAuth::Public, [&ctx](const std::string&) -> HttpResponse {
-        std::string json = "{\"port\":" + std::to_string(ctx.rtcServer.Port())
-            + ",\"certHash\":\"" + ctx.rtcServer.CertHash() + "\""
-            + ",\"transport\":\"webtransport\"}";
-        return HttpAuth::JsonResponse(200, json);
+        const bool webpki = ctx.rtcServer.CertMode() == WtCertMode::Webpki;
+        nlohmann::json j;
+        j["port"] = ctx.rtcServer.Port();
+        j["transport"] = "webtransport";
+        j["certMode"] = webpki ? "webpki" : "hashes";
+        if (!webpki) {
+            j["certHashes"] = ctx.rtcServer.CertHashes();
+            // Back-compat single-hash field for clients built before the
+            // dual-mode change.
+            j["certHash"] = ctx.rtcServer.CertHash();
+        }
+        return HttpAuth::JsonResponse(200, j.dump());
     });
 }

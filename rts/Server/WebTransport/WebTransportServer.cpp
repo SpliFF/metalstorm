@@ -58,7 +58,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <filesystem>
+#include <fstream>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -85,6 +88,11 @@ constexpr uint32_t kMaxControlMsg = 4u * 1024 * 1024; // 4 MB
 // this is dropped (ngtcp2 will retransmit / the client retries); bounds the
 // per-connection TLS + stream-buffer memory a flood can pin.
 constexpr size_t kMaxWtConnections = 512;
+
+// PLAN-security-hardening.md task 5 (G3): cert lifecycle timing.
+constexpr int64_t kCertValiditySeconds = 60LL * 60 * 24 * 13;      // 13 days (<14d serverCertificateHashes cap)
+constexpr int64_t kCertHalfLifeSeconds = kCertValiditySeconds / 2;  // Hashes-mode rotation cadence
+constexpr int64_t kCertCheckIntervalNs = 60LL * 60 * 1'000'000'000LL; // hourly poll (Webpki mtime + Hashes rotation)
 
 // HTTP/3 unidirectional stream types (RFC 9114 / 9204).
 constexpr uint64_t kH3StreamControl = 0x00;
@@ -306,6 +314,28 @@ struct WebTransportServerImpl {
     SSL_CTX* sslCtx = nullptr;
     std::string certHashHex;
 
+    // PLAN-security-hardening.md task 5 (G3): dual-mode cert provisioning.
+    WtCertMode certMode = WtCertMode::Hashes;
+
+    // Webpki mode: the on-disk PEM paths + the mtimes we last loaded, so the
+    // hourly poll only reloads when the files actually changed.
+    std::string certPathOnDisk;
+    std::string keyPathOnDisk;
+    std::filesystem::file_time_type certMtime{};
+    std::filesystem::file_time_type keyMtime{};
+
+    // Hashes mode: the pre-generated "next" cert, kept pending (not loaded
+    // into sslCtx) until the half-life rotation promotes it. Published
+    // alongside the active hash so a client holding a stale /api/wt/info
+    // answer can still connect across the rotation.
+    X509* pendingCert = nullptr;
+    EVP_PKEY* pendingKey = nullptr;
+    std::string pendingCertHashHex;
+    ngtcp2_tstamp activeCertLoadedAtNs = 0; // steady-clock timestamp of the last (re)load/rotation
+
+    ngtcp2_tstamp lastCertCheckNs = 0;
+    std::atomic<bool> forceReload{false};
+
     uint32_t nextClientId = 1;
 
     std::unordered_map<ClientID, WtConn*> conns;
@@ -320,8 +350,16 @@ struct WebTransportServerImpl {
     struct PendingTx { ClientID clientId; bool broadcast; StreamClass cls; uint32_t lane; std::vector<uint8_t> data; };
     std::vector<PendingTx> pendingTx;
 
-    bool GenerateSelfSigned();
-    bool SetupTls(const std::string& certPem, const std::string& keyPem);
+    ~WebTransportServerImpl();
+
+    // TLS / cert lifecycle (PLAN-security-hardening.md task 5, G3).
+    bool GenerateCert(X509** outX509, EVP_PKEY** outPkey, std::string& outHashHex);
+    bool LoadActiveCert(X509* x509, EVP_PKEY* pkey); // installs into sslCtx, sets certHashHex
+    bool GenerateSelfSigned();  // Hashes mode: generate active + pending pair
+    bool LoadFromDisk(const std::string& certPath, const std::string& keyPath); // Webpki mode
+    bool SetupTls(const std::string& certPath, const std::string& keyPath);
+    void CheckCertReload(ngtcp2_tstamp now); // called once per Run() iteration
+
     void Run();
     WtConn* AcceptConn(const ngtcp2_pkt_hd& hd, const sockaddr* sa, socklen_t salen,
                        const ngtcp2_path& path);
@@ -406,7 +444,16 @@ static int RecvDatagramCb(ngtcp2_conn* /*conn*/, uint32_t /*flags*/, const uint8
 
 // ────────────────────────────── TLS / certs ─────────────────────────────────
 
-bool WebTransportServerImpl::GenerateSelfSigned() {
+WebTransportServerImpl::~WebTransportServerImpl() {
+    if (pendingCert) X509_free(pendingCert);
+    if (pendingKey) EVP_PKEY_free(pendingKey);
+}
+
+// Generates one ECDSA P-256 self-signed cert, valid [now, now+13d] (<14d, the
+// serverCertificateHashes cap). Used for both the active and the pending cert
+// in Hashes mode — the pending one just isn't installed into sslCtx yet.
+bool WebTransportServerImpl::GenerateCert(X509** outX509, EVP_PKEY** outPkey,
+                                          std::string& outHashHex) {
     EVP_PKEY* pkey = EVP_EC_gen("P-256");
     if (!pkey) return false;
     X509* x509 = X509_new();
@@ -414,7 +461,7 @@ bool WebTransportServerImpl::GenerateSelfSigned() {
     X509_set_version(x509, 2); // X.509 v3 (Chrome serverCertificateHashes requires v3)
     ASN1_INTEGER_set(X509_get_serialNumber(x509), 1);
     X509_gmtime_adj(X509_getm_notBefore(x509), 0);
-    X509_gmtime_adj(X509_getm_notAfter(x509), 60L * 60 * 24 * 13); // 13 days (<14d cap)
+    X509_gmtime_adj(X509_getm_notAfter(x509), (long)kCertValiditySeconds);
     X509_set_pubkey(x509, pkey);
     X509_NAME* name = X509_get_subject_name(x509);
     X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
@@ -436,14 +483,85 @@ bool WebTransportServerImpl::GenerateSelfSigned() {
         unsigned char md[EVP_MAX_MD_SIZE];
         unsigned int mdLen = 0;
         EVP_Digest(der, derLen, md, &mdLen, EVP_sha256(), nullptr);
+        outHashHex = ToHex(md, mdLen);
+        OPENSSL_free(der);
+    }
+    *outX509 = x509;
+    *outPkey = pkey;
+    return true;
+}
+
+// Installs `x509`/`pkey` as the live cert (SSL_CTX_use_* up-refs its own
+// copy — the caller still owns and must free its reference) and refreshes
+// certHashHex + the rotation clock. TLS 1.3 doesn't renegotiate the server
+// cert mid-session, so this is safe to call on a live sslCtx: already
+// handshaked connections keep whatever cert they got; only new SSL_new(sslCtx)
+// accepts see the change.
+bool WebTransportServerImpl::LoadActiveCert(X509* x509, EVP_PKEY* pkey) {
+    if (!x509 || !pkey) return false;
+    if (SSL_CTX_use_certificate(sslCtx, x509) != 1) return false;
+    if (SSL_CTX_use_PrivateKey(sslCtx, pkey) != 1) return false;
+    unsigned char* der = nullptr;
+    int derLen = i2d_X509(x509, &der);
+    if (derLen > 0 && der) {
+        unsigned char md[EVP_MAX_MD_SIZE];
+        unsigned int mdLen = 0;
+        EVP_Digest(der, derLen, md, &mdLen, EVP_sha256(), nullptr);
         certHashHex = ToHex(md, mdLen);
         OPENSSL_free(der);
     }
-    bool ok = SSL_CTX_use_certificate(sslCtx, x509) == 1 &&
-              SSL_CTX_use_PrivateKey(sslCtx, pkey) == 1;
-    X509_free(x509);
-    EVP_PKEY_free(pkey);
-    return ok;
+    activeCertLoadedAtNs = NowNs();
+    return true;
+}
+
+// Hashes mode (no --wt-cert/--wt-key): generate the active cert and load it,
+// then pre-generate the "next" cert and keep it pending (not installed) so
+// its hash can be published now — see CertHashes().
+bool WebTransportServerImpl::GenerateSelfSigned() {
+    certMode = WtCertMode::Hashes;
+    X509* activeX509 = nullptr; EVP_PKEY* activeKey = nullptr; std::string activeHash;
+    if (!GenerateCert(&activeX509, &activeKey, activeHash)) return false;
+    bool ok = LoadActiveCert(activeX509, activeKey);
+    X509_free(activeX509);
+    EVP_PKEY_free(activeKey);
+    if (!ok) return false;
+
+    if (pendingCert) { X509_free(pendingCert); pendingCert = nullptr; }
+    if (pendingKey) { EVP_PKEY_free(pendingKey); pendingKey = nullptr; }
+    return GenerateCert(&pendingCert, &pendingKey, pendingCertHashHex);
+}
+
+// Webpki mode (--wt-cert/--wt-key given): read PEM files from disk, install
+// them, and remember their mtimes so CheckCertReload() only reloads on an
+// actual change (e.g. a certbot renewal).
+bool WebTransportServerImpl::LoadFromDisk(const std::string& certPath, const std::string& keyPath) {
+    std::ifstream cf(certPath, std::ios::binary);
+    std::ifstream kf(keyPath, std::ios::binary);
+    if (!cf.is_open() || !kf.is_open()) return false;
+    std::ostringstream cbuf, kbuf;
+    cbuf << cf.rdbuf();
+    kbuf << kf.rdbuf();
+    const std::string certPem = cbuf.str();
+    const std::string keyPem = kbuf.str();
+
+    BIO* cbio = BIO_new_mem_buf(certPem.data(), (int)certPem.size());
+    X509* cert = PEM_read_bio_X509(cbio, nullptr, nullptr, nullptr);
+    BIO_free(cbio);
+    BIO* kbio = BIO_new_mem_buf(keyPem.data(), (int)keyPem.size());
+    EVP_PKEY* key = PEM_read_bio_PrivateKey(kbio, nullptr, nullptr, nullptr);
+    BIO_free(kbio);
+
+    bool ok = cert && key && LoadActiveCert(cert, key);
+    if (cert) X509_free(cert);
+    if (key) EVP_PKEY_free(key);
+    if (!ok) return false;
+
+    certPathOnDisk = certPath;
+    keyPathOnDisk = keyPath;
+    std::error_code ec;
+    certMtime = std::filesystem::last_write_time(certPath, ec);
+    keyMtime = std::filesystem::last_write_time(keyPath, ec);
+    return true;
 }
 
 static int AlpnSelectCb(SSL*, const unsigned char** out, unsigned char* outlen,
@@ -456,38 +574,78 @@ static int AlpnSelectCb(SSL*, const unsigned char** out, unsigned char* outlen,
     return SSL_TLSEXT_ERR_OK;
 }
 
-bool WebTransportServerImpl::SetupTls(const std::string& certPem, const std::string& keyPem) {
+bool WebTransportServerImpl::SetupTls(const std::string& certPath, const std::string& keyPath) {
     if (ngtcp2_crypto_ossl_init() != 0) return false;
     sslCtx = SSL_CTX_new(TLS_server_method());
     if (!sslCtx) return false;
     SSL_CTX_set_min_proto_version(sslCtx, TLS1_3_VERSION);
     SSL_CTX_set_max_proto_version(sslCtx, TLS1_3_VERSION);
     SSL_CTX_set_alpn_select_cb(sslCtx, AlpnSelectCb, nullptr);
-    if (!certPem.empty() && !keyPem.empty()) {
-        BIO* cbio = BIO_new_mem_buf(certPem.data(), (int)certPem.size());
-        X509* cert = PEM_read_bio_X509(cbio, nullptr, nullptr, nullptr);
-        BIO_free(cbio);
-        BIO* kbio = BIO_new_mem_buf(keyPem.data(), (int)keyPem.size());
-        EVP_PKEY* key = PEM_read_bio_PrivateKey(kbio, nullptr, nullptr, nullptr);
-        BIO_free(kbio);
-        bool ok = cert && key && SSL_CTX_use_certificate(sslCtx, cert) == 1 &&
-                  SSL_CTX_use_PrivateKey(sslCtx, key) == 1;
-        if (cert) {
-            unsigned char* der = nullptr;
-            int derLen = i2d_X509(cert, &der);
-            if (derLen > 0 && der) {
-                unsigned char md[EVP_MAX_MD_SIZE];
-                unsigned int mdLen = 0;
-                EVP_Digest(der, derLen, md, &mdLen, EVP_sha256(), nullptr);
-                certHashHex = ToHex(md, mdLen);
-                OPENSSL_free(der);
-            }
-            X509_free(cert);
+    if (!certPath.empty() && !keyPath.empty()) {
+        if (!LoadFromDisk(certPath, keyPath)) {
+            std::fprintf(stderr, "[webtransport] failed to load --wt-cert '%s' / --wt-key '%s'\n",
+                         certPath.c_str(), keyPath.c_str());
+            return false;
         }
-        if (key) EVP_PKEY_free(key);
-        return ok;
+        certMode = WtCertMode::Webpki;
+        return true;
     }
     return GenerateSelfSigned();
+}
+
+// Called once per Run() loop iteration (~every <=50ms). Cheap unless the
+// hourly interval elapsed or a caller forced it via WebTransportServer::
+// ReloadCert() — see WebTransportServer.h. ReloadCert() is deliberately NOT
+// wired to an OS signal (see the note above ReloadCert() in the header):
+// signal delivery while a webpki-mode cert is loaded was found to corrupt
+// OpenSSL's heap state (crash at process-exit cleanup), reproducibly,
+// independent of whether this function's body ever actually ran. The hourly
+// poll below is signal-free and was verified safe under the same conditions.
+void WebTransportServerImpl::CheckCertReload(ngtcp2_tstamp now) {
+    const bool forced = forceReload.exchange(false);
+    if (!forced && (now - lastCertCheckNs) < (ngtcp2_tstamp)kCertCheckIntervalNs) return;
+    lastCertCheckNs = now;
+
+    if (certMode == WtCertMode::Webpki) {
+        std::error_code ec;
+        auto cm = std::filesystem::last_write_time(certPathOnDisk, ec);
+        const bool certChanged = !ec && cm != certMtime;
+        auto km = std::filesystem::last_write_time(keyPathOnDisk, ec);
+        const bool keyChanged = !ec && km != keyMtime;
+        if (forced || certChanged || keyChanged) {
+            if (LoadFromDisk(certPathOnDisk, keyPathOnDisk)) {
+                std::fprintf(stderr, "[webtransport] reloaded cert from disk (certhash=%s)\n",
+                             certHashHex.c_str());
+            } else {
+                std::fprintf(stderr,
+                    "[webtransport] cert reload FAILED (%s / %s) — keeping the prior cert active\n",
+                    certPathOnDisk.c_str(), keyPathOnDisk.c_str());
+            }
+        }
+        return;
+    }
+
+    // Hashes mode: rotate at half-life (or immediately if forced) by
+    // promoting the pre-generated pending cert, then generate its replacement
+    // so a pending cert is always ready.
+    const bool halfLifeElapsed =
+        (now - activeCertLoadedAtNs) >= (ngtcp2_tstamp)(kCertHalfLifeSeconds * 1'000'000'000LL);
+    if (forced || halfLifeElapsed) {
+        if (pendingCert && pendingKey) {
+            X509* newActive = pendingCert;
+            EVP_PKEY* newActiveKey = pendingKey;
+            pendingCert = nullptr;
+            pendingKey = nullptr;
+            const bool ok = LoadActiveCert(newActive, newActiveKey);
+            X509_free(newActive);
+            EVP_PKEY_free(newActiveKey);
+            if (ok) {
+                std::fprintf(stderr, "[webtransport] rotated self-signed cert (certhash=%s)\n",
+                             certHashHex.c_str());
+            }
+        }
+        if (!pendingCert) GenerateCert(&pendingCert, &pendingKey, pendingCertHashHex);
+    }
 }
 
 // ─────────────────────────── connection accept ──────────────────────────────
@@ -1100,6 +1258,7 @@ void WebTransportServerImpl::Run() {
     uint8_t buf[2048];
     while (running.load()) {
         ngtcp2_tstamp now = NowNs();
+        CheckCertReload(now);
         ngtcp2_tstamp earliest = UINT64_MAX;
         for (auto& [id, c] : conns) {
             ngtcp2_tstamp e = ngtcp2_conn_get_expiry(c->conn);
@@ -1204,8 +1363,8 @@ void WebTransportServerImpl::Run() {
 WebTransportServer::WebTransportServer() : impl_(std::make_unique<WebTransportServerImpl>()) {}
 WebTransportServer::~WebTransportServer() { Shutdown(); }
 
-bool WebTransportServer::Start(int port, const std::string& certPem, const std::string& keyPem) {
-    if (!impl_->SetupTls(certPem, keyPem)) {
+bool WebTransportServer::Start(int port, const std::string& certPath, const std::string& keyPath) {
+    if (!impl_->SetupTls(certPath, keyPath)) {
         std::fprintf(stderr, "[webtransport] TLS setup failed\n");
         return false;
     }
@@ -1244,12 +1403,27 @@ bool WebTransportServer::Start(int port, const std::string& certPem, const std::
     impl_->port = port;
     impl_->running.store(true);
     impl_->thread = std::thread([this] { impl_->Run(); });
-    std::fprintf(stderr, "[webtransport] QUIC listening on udp/:%d (certhash=%s)\n",
-                 port, impl_->certHashHex.c_str());
+    std::fprintf(stderr, "[webtransport] QUIC listening on udp/:%d (mode=%s certhash=%s)\n",
+                 port, impl_->certMode == WtCertMode::Webpki ? "webpki" : "hashes",
+                 impl_->certHashHex.c_str());
     return true;
 }
 
 std::string WebTransportServer::CertHash() const { return impl_->certHashHex; }
+
+WtCertMode WebTransportServer::CertMode() const { return impl_->certMode; }
+
+std::vector<std::string> WebTransportServer::CertHashes() const {
+    // Webpki mode: browsers validate via the CA chain — pinning a rotating
+    // CA cert would break clients on every renewal, so publish nothing.
+    if (impl_->certMode == WtCertMode::Webpki) return {};
+    std::vector<std::string> out;
+    if (!impl_->certHashHex.empty()) out.push_back(impl_->certHashHex);
+    if (!impl_->pendingCertHashHex.empty()) out.push_back(impl_->pendingCertHashHex);
+    return out;
+}
+
+void WebTransportServer::ReloadCert() { impl_->forceReload.store(true); }
 
 void WebTransportServer::SendStream(ClientID clientId, StreamClass cls,
                                     const uint8_t* data, size_t len, uint32_t lane) {

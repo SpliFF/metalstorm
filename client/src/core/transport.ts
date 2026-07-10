@@ -36,8 +36,16 @@ export interface TransportEvents {
 }
 
 export interface TransportConnectOptions {
-    /** Lower-case hex SHA-256 of the server's DER cert, for serverCertificateHashes (dev). */
-    certHash?: string;
+    /**
+     * Lower-case hex SHA-256 hashes of the server's DER cert(s), for
+     * serverCertificateHashes pinning. Only set in `hashes` cert mode
+     * (self-signed dev/self-hosted cert) — 1 or 2 entries (active + the
+     * already-generated "next" cert, so a stale /api/wt/info answer still
+     * connects across a rotation). Omit entirely in `webpki` mode (a CA
+     * cert): the browser validates it normally, and pinning a rotating CA
+     * cert would break clients on every renewal.
+     */
+    certHashes?: string[];
 }
 
 export interface GameTransport {
@@ -146,11 +154,11 @@ export class WebTransportAdapter implements GameTransport {
             throw new Error(msg);
         }
         const wtOpts: WebTransportOptions = {};
-        if (opts?.certHash) {
-            wtOpts.serverCertificateHashes = [{
-                algorithm: 'sha-256',
-                value: hexToBytes(opts.certHash).buffer as ArrayBuffer,
-            }];
+        if (opts?.certHashes?.length) {
+            wtOpts.serverCertificateHashes = opts.certHashes.map((hash) => ({
+                algorithm: 'sha-256' as const,
+                value: hexToBytes(hash).buffer as ArrayBuffer,
+            }));
         }
         const wt = new WebTransport(url, wtOpts);
         this.wt = wt;
