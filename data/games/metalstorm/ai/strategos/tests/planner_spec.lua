@@ -15,12 +15,19 @@ local Slate   = require('slate')
 local Planner = require('planner')
 local Roles   = require('roles')
 local profile = require('profiles.default')
+local caretakerProfile = require('profiles.caretaker')
 
 --=============================================================================
 -- Fixture helpers
 --=============================================================================
 local function fullSideRole()
     local role = Roles.resolve('full_side', Config)
+    role.teamId = 0
+    return role
+end
+
+local function coCommanderRole()
+    local role = Roles.resolve('co_commander', Config)
     role.teamId = 0
     return role
 end
@@ -42,11 +49,12 @@ local function makePicture(over)
     return p
 end
 
-local function plan(picture, commitments)
+local function plan(picture, commitments, prof)
+    prof = prof or profile
     return Planner.plan({
         picture     = picture,
-        slate       = Slate.build(picture, profile, picture._role),
-        profile     = profile,
+        slate       = Slate.build(picture, prof, picture._role),
+        profile     = prof,
         role        = picture._role,
         commitments = commitments or {},
         rng         = Config.makeRNG(42),
@@ -202,6 +210,133 @@ describe("force floor (mass or skip, §3.3)", function()
     it("commits once the package is massed", function()
         local out = plan(assaultFixture(20000))   -- pSuccess ≈ 0.94 ≥ 0.6
         assert.is_true(hasObjectiveDirective(out))
+    end)
+end)
+
+--=============================================================================
+describe("EXPAND (rich AI takes open ground, §11)", function()
+    it("issues a TAKE_AND_HOLD directive into open neutral ground when rich", function()
+        local role = fullSideRole()
+        local p = makePicture({
+            _role = role,
+            regions = {
+                home   = { owner = 0, value = 1.5, neighbors = { 'plains' } },
+                plains = { owner = nil, value = 2.0, neighbors = { 'home' } },
+            },
+            ledger  = { home = { strength = 1000 } },
+            economy = { ownPool = 100000, teamPool = 0, costScale = 1.0 },
+        })
+        local out = plan(p)
+        local expand
+        for _, d in ipairs(out.directives) do
+            if d.goalId == 'exp:plains' then expand = d end
+        end
+        assert.is_truthy(expand)
+        assert.are.equal('directive', expand.type)
+        assert.are.equal('TAKE_AND_HOLD', expand.directive)
+    end)
+end)
+
+--=============================================================================
+describe("DEFEND outranks EXPAND on a threatened high-value region (§11)", function()
+    it("the one available package defends home, not the open ground next door", function()
+        local role = fullSideRole()
+        local p = makePicture({
+            _role = role,
+            regions = {
+                home   = { owner = 0, value = 3.0, neighbors = { 'front', 'plains' } },
+                front  = { owner = 1, value = 1.0, neighbors = { 'home' } },
+                plains = { owner = nil, value = 2.0, neighbors = { 'home' } },
+            },
+            intel   = { front = { strength = 500, confidence = 1.0, lastSeenFrame = 1000 } },
+            ledger  = { home = { strength = 1000 } },
+            economy = { ownPool = 100000, teamPool = 0, costScale = 1.0 },
+        })
+        local out = plan(p)
+        local defendGroup, expandSeen
+        for _, d in ipairs(out.directives) do
+            if d.goalId == 'def:home' then defendGroup = d.groupId end
+            if d.goalId == 'exp:plains' then expandSeen = true end
+        end
+        assert.are.equal('pkg:home', defendGroup)
+        assert.is_falsy(expandSeen)
+    end)
+end)
+
+--=============================================================================
+describe("bounty ×3 weighting flips a marginal choice (co-commander, §11)", function()
+    -- One package, two claimants: open ground (EXPAND) scores higher raw than
+    -- a modest staked bounty. A full-side AI (no delegation weighting) takes
+    -- the ground; a co-commander's delegation-first ×3 (plus opportunism)
+    -- flips the same fixture toward the bounty a teammate tasked it with.
+    local function biddingFixture(role)
+        return {
+            _role = role,
+            regions = {
+                home   = { owner = 0, value = 1.0, neighbors = { 'plains' } },
+                plains = { owner = nil, value = 2.0, neighbors = { 'home' } },
+            },
+            board = {
+                ['1'] = { type = 'kill', scope = 'strategic', state = 'active',
+                          team = nil, source = 'bounty', reward = 150 },
+            },
+            ledger  = { home = { strength = 1000 } },
+            economy = { ownPool = 100000, teamPool = 0, costScale = 1.0 },
+        }
+    end
+
+    local function winners(out)
+        local expandWon, bountyWon = false, false
+        for _, d in ipairs(out.directives) do
+            if d.goalId == 'exp:plains' then expandWon = true end
+            if d.goalId == 'obj:1' then bountyWon = true end
+        end
+        return expandWon, bountyWon
+    end
+
+    it("a full-side AI prefers the open ground over the modest bounty", function()
+        local role = fullSideRole()
+        local out = plan(makePicture(biddingFixture(role)))
+        local expandWon, bountyWon = winners(out)
+        assert.is_true(expandWon)
+        assert.is_false(bountyWon)
+    end)
+
+    it("a co-commander's ×3 bounty weighting flips it to the bounty", function()
+        local role = coCommanderRole()
+        local out = plan(makePicture(biddingFixture(role)), nil, caretakerProfile)
+        local expandWon, bountyWon = winners(out)
+        assert.is_true(bountyWon)
+        assert.is_false(expandWon)
+    end)
+end)
+
+--=============================================================================
+describe("dead-goal cleanup (E1, §11)", function()
+    it("drops a commitment whose goal vanished from the slate and frees its package", function()
+        local role = fullSideRole()
+        local p = makePicture({
+            _role = role,
+            regions = {
+                home   = { owner = 0, value = 1.5, neighbors = { 'plains' } },
+                plains = { owner = nil, value = 2.0, neighbors = { 'home' } },
+            },
+            ledger  = { home = { strength = 1000 } },
+            economy = { ownPool = 100000, teamPool = 0, costScale = 1.0 },
+        })
+        -- A stale commitment to an objective that no longer exists on the
+        -- board this tick (completed/expired between ticks — §8 E1).
+        local commitments = {
+            ['obj:999'] = { packageId = 'pkg:home', sinceFrame = 100, score = 999 },
+        }
+        local out = plan(p, commitments)
+        assert.is_nil(commitments['obj:999'])
+        local expand
+        for _, d in ipairs(out.directives) do
+            if d.goalId == 'exp:plains' then expand = d end
+        end
+        assert.is_truthy(expand)
+        assert.are.equal('pkg:home', expand.groupId)
     end)
 end)
 
