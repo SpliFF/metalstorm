@@ -30,6 +30,19 @@ struct S3DModelPiece {
 	/// Translation from this piece's parent origin, in model space.
 	float3 offset;
 
+	/// Rest rotation of this piece relative to its parent — the linear
+	/// 3×3 of the source node's local transform, in the same glTF-native
+	/// RH frame as `offset`. Identity for the common static-axis-aligned
+	/// piece; non-identity for the up-axis conversion node (Z-up→Y-up on
+	/// Collada sources) and rotated intermediate turret pieces. Applied
+	/// between the translation and the script rotation in
+	/// `LocalModelPiece::GetModelSpaceMatrix` so muzzle/attachment
+	/// pieces under a rotated parent resolve to the frame the client
+	/// renders. Populated from the optional SPRINGRTS_geometry
+	/// `pieces[].rot` field; absent on models predating it → stays identity.
+	CMatrix44f bakedRotMatrix;
+	bool hasBakedRot = false;
+
 	/// Axis-aligned bounds of the piece's own geometry in its local
 	/// coordinate frame (does not include descendant pieces).
 	float3 mins;
@@ -136,6 +149,18 @@ struct LocalModelPiece {
 	CMatrix44f GetModelSpaceMatrix() const {
 		CMatrix44f local;
 		local.Translate(pos);
+		// Rest rotation (optional SPRINGRTS_geometry field), if the source node
+		// carried one — the piece's bind-pose orientation relative to
+		// its parent. Composed as T(pos) * bakedRot * R(scriptRot),
+		// mirroring Recoil's `S3DModelPiece::ComposeTransform` (baked
+		// rest transform, then the script's Move/Turn on top). Without
+		// this the sim drops the model's up-axis conversion and any
+		// rotated turret joint, so pieces under a rotated parent land in
+		// the wrong frame — barrels resolve to the unit centre instead of
+		// the elevated tip. The client already applies it (glTF node
+		// matrices); this brings the sim into agreement.
+		if (original != nullptr && original->hasBakedRot)
+			local *= original->bakedRotMatrix;
 		// Skip the no-op work when the piece hasn't been rotated.
 		// Almost every static decorative piece on a unit stays at
 		// rest, so this saves three trig calls per piece per frame.

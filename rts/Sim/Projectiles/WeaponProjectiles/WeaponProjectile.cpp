@@ -159,13 +159,24 @@ CWeaponProjectile::CWeaponProjectile(const ProjectileParams& params)
 		float3 evPos = pos;
 		float3 evTargetPos = targetPos;
 
-		// On the headless server, unit_script.lua animations don't always
-		// run (gadgets that touch piece transforms can fail), which leaves
-		// the firing unit's muzzle piece at the unit centre. The
-		// BeamLaser TraceRay then immediately hits the firing unit's own
-		// collision sphere and returns beamLength=0, producing a
-		// zero-length beam (pos == end). Fall back to (owner, target)
-		// world positions so the client renders something sensible.
+		// FIDELITY-STANDIN (safety net): substitute owner+target world
+		// positions when a hitscan beam comes out zero-length (muzzle
+		// piece resolved to the unit centre, so BeamLaser's TraceRay
+		// immediately hits the firing unit's own collision sphere).
+		// Recoil never does this substitution — it's ours, for the
+		// degenerate headless case.
+		//
+		// G5b (2026-07-10) fixed ONE of the two causes of a centre-
+		// resolved muzzle: SPRINGRTS_geometry now carries per-piece rest
+		// rotation, so barrels under a rotated parent (up-axis conversion
+		// / turret joints) resolve to the elevated tip instead of the
+		// unit centre. This standin is now dormant for those units (e.g.
+		// ZK's turretheavylaser). It is NOT retired because the OTHER
+		// cause remains: weapons with an unbound muzzle/aim piece (e.g.
+		// spiderskirm — "weapon N has unbound muzzle/aim piece") default
+		// to the unit centre regardless of rotation, which the rest-
+		// rotation fix does not address. Retire only once every beam
+		// weapon binds a real muzzle piece.
 		if (hitscan && (evTargetPos - evPos).SqLength() < 1.0f) {
 			const CUnit* ownerUnit = (ownerID != -1u) ? unitHandler.GetUnit(ownerID) : nullptr;
 			if (ownerUnit != nullptr)

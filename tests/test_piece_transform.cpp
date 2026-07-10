@@ -148,6 +148,51 @@ TEST_SUITE("LocalModelPiece transform") {
         CHECK(fwd.z == doctest::Approx(0.0f).epsilon(kAimEps));
     }
 
+    TEST_CASE("baked rest rotation rotates a static piece's forward") {
+        // The up-axis conversion node on a Z-up Collada source carries a
+        // baked Rx(+90) rest rotation (model-local -Z → world +Y). A piece
+        // wired to a template with hasBakedRot should apply it even with no
+        // script rotation. Rx(+90) built the way ModelConfigLoader does
+        // (X/Y/Z columns of R): R = [[1,0,0],[0,0,-1],[0,1,0]].
+        S3DModelPiece tpl;
+        tpl.bakedRotMatrix.SetX(float3(1.0f, 0.0f,  0.0f));  // R col 0
+        tpl.bakedRotMatrix.SetY(float3(0.0f, 0.0f,  1.0f));  // R col 1
+        tpl.bakedRotMatrix.SetZ(float3(0.0f, -1.0f, 0.0f));  // R col 2
+        tpl.hasBakedRot = true;
+
+        LocalModelPiece p;
+        p.original = &tpl;
+        const float3 fwd = RotatedNegZ(p);
+        CHECK(fwd.x == doctest::Approx(0.0f).epsilon(kAimEps));
+        CHECK(fwd.y == doctest::Approx(1.0f).epsilon(kAimEps));   // -Z → +Y (up)
+        CHECK(fwd.z == doctest::Approx(0.0f).epsilon(kAimEps));
+    }
+
+    TEST_CASE("baked parent rotation lifts a child offset (up-axis muzzle case)") {
+        // Reproduces the G5b muzzle fix in miniature: a Scene node with a
+        // baked Rx(+90) up-axis rotation, and a child sitting at local
+        // (0,0,-26) (barrel extending -Z in the exported glTF frame).
+        // Without the baked rotation the child stays at world -Z (near the
+        // ground); with it the child lifts to world +Y (the elevated tip).
+        S3DModelPiece sceneTpl;
+        sceneTpl.bakedRotMatrix.SetX(float3(1.0f, 0.0f,  0.0f));
+        sceneTpl.bakedRotMatrix.SetY(float3(0.0f, 0.0f,  1.0f));
+        sceneTpl.bakedRotMatrix.SetZ(float3(0.0f, -1.0f, 0.0f));
+        sceneTpl.hasBakedRot = true;
+
+        LocalModelPiece scene;
+        scene.original = &sceneTpl;
+
+        LocalModelPiece child;
+        child.SetPosition(float3(0.0f, 0.0f, -26.0f));
+        child.parent = &scene;
+
+        const float3 origin = child.GetModelSpaceMatrix().GetPos();
+        CHECK(origin.x == doctest::Approx(0.0f).epsilon(kAimEps));
+        CHECK(origin.y == doctest::Approx(26.0f).epsilon(kAimEps));  // lifted up
+        CHECK(origin.z == doctest::Approx(0.0f).epsilon(kAimEps));
+    }
+
     TEST_CASE("GetEmitDirPos yields piece origin and rotated -Z") {
         LocalModelPiece turret;
         const float yaw = static_cast<float>(M_PI) * 0.5f; // +90deg, turn right in RH

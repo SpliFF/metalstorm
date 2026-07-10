@@ -131,6 +131,24 @@ bool ModelConfigLoader::LoadInto(S3DModel& out, const std::string& basePath) {
             piece.offset = ReadFloat3FromJson(p, "offset", float3(0, 0, 0));
             piece.mins   = ReadFloat3FromJson(p, "mins",   float3(0, 0, 0));
             piece.maxs   = ReadFloat3FromJson(p, "maxs",   float3(0, 0, 0));
+            // Rest rotation (optional additive field). A row-major 3×3 in the same RH
+            // frame as `offset`. Load it into the piece's baked rotation
+            // matrix (column-major CMatrix44f: X/Y/Z columns are the R
+            // columns) so GetModelSpaceMatrix applies it between the
+            // translation and any script Move/Turn. Absent → identity.
+            if (p.contains("rot") && p["rot"].is_array() && p["rot"].size() >= 9) {
+                const auto& r = p["rot"];
+                auto num = [](const nlohmann::json& v, float fb) -> float {
+                    return v.is_number() ? v.get<float>() : fb;
+                };
+                const float r00 = num(r[0], 1), r01 = num(r[1], 0), r02 = num(r[2], 0);
+                const float r10 = num(r[3], 0), r11 = num(r[4], 1), r12 = num(r[5], 0);
+                const float r20 = num(r[6], 0), r21 = num(r[7], 0), r22 = num(r[8], 1);
+                piece.bakedRotMatrix.SetX(float3(r00, r10, r20));  // R column 0
+                piece.bakedRotMatrix.SetY(float3(r01, r11, r21));  // R column 1
+                piece.bakedRotMatrix.SetZ(float3(r02, r12, r22));  // R column 2
+                piece.hasBakedRot = true;
+            }
             parentIndices.push_back(p.value("parent", -1));
             out.pieces.push_back(std::move(piece));
         }

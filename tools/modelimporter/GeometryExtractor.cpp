@@ -95,6 +95,11 @@ struct PieceRecord {
     std::string name;
     int parentIndex = -1;
     float offsetX = 0, offsetY = 0, offsetZ = 0;
+    /// Raw linear 3×3 of the source node's local transform, row-major
+    /// (`rot[0..2]` = row 0, etc.). Stored pre-mirror; the RH Z-mirror
+    /// that matches `aiProcess_MakeLeftHanded`'s export flip is applied
+    /// at emit time, exactly like `offset`'s Z-flip. Identity by default.
+    float rot[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
     Aabb localBounds;
 };
 
@@ -109,6 +114,11 @@ void FlattenPieces(const aiScene* scene,
     rec.offsetX = m.a4;
     rec.offsetY = m.b4;
     rec.offsetZ = m.c4;
+    // Linear part (rotation, possibly with scale). aiMatrix4x4 is
+    // row-major: a1..a3 = row 0, b1..b3 = row 1, c1..c3 = row 2.
+    rec.rot[0] = m.a1; rec.rot[1] = m.a2; rec.rot[2] = m.a3;
+    rec.rot[3] = m.b1; rec.rot[4] = m.b2; rec.rot[5] = m.b3;
+    rec.rot[6] = m.c1; rec.rot[7] = m.c2; rec.rot[8] = m.c3;
 
     for (unsigned int i = 0; i < node->mNumMeshes; ++i) {
         const aiMesh* mesh = scene->mMeshes[node->mMeshes[i]];
@@ -740,6 +750,31 @@ nlohmann::json GeometryExtractor::BuildExtensionJson(const aiScene* scene,
         pj["maxs"]   = JsonVec3(p.localBounds.maxX,
                                 p.localBounds.maxY,
                                 -p.localBounds.minZ);
+
+        // Rest rotation (optional additive field). Apply the same Z-mirror that
+        // `aiProcess_MakeLeftHanded` applies at export — negate the Z
+        // off-diagonal terms (row 2 cols 0/1, and row 0/1 col 2), leaving
+        // the XY block and the (2,2) term — so the emitted matrix lands in
+        // the same glTF-native RH frame the exporter writes to the node.
+        // (Mirror is its own inverse, hence the pre-export raw stored above
+        // becomes the exported-node rotation after this step.) Only emit
+        // when it deviates from identity: keeps files/diffs tidy and lets
+        // the server default to identity for the common static-piece case.
+        const float r[9] = {
+            p.rot[0],  p.rot[1], -p.rot[2],
+            p.rot[3],  p.rot[4], -p.rot[5],
+           -p.rot[6], -p.rot[7],  p.rot[8],
+        };
+        static const float kIdentity3x3[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+        bool isIdentity = true;
+        for (int k = 0; k < 9; ++k) {
+            if (std::fabs(r[k] - kIdentity3x3[k]) > 1e-4f) { isIdentity = false; break; }
+        }
+        if (!isIdentity) {
+            json rj = json::array();
+            for (int k = 0; k < 9; ++k) rj.push_back(JsonFloat(r[k]));
+            pj["rot"] = std::move(rj);
+        }
         piecesArray.push_back(std::move(pj));
     }
     doc["pieces"] = std::move(piecesArray);

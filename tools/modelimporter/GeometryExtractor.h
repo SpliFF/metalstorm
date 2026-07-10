@@ -15,6 +15,7 @@
 //       "tex2": "armcom_color2.ktx2",   // transitional; removed in Phase 1d
 //       "pieces": [
 //         { "name": "base",   "parent": -1, "offset": [...], "mins": [...], "maxs": [...] },
+//         { "name": "holder", "parent":  3, "offset": [...], "rot": [r00..r22], ... },
 //         ...
 //       ],
 //       "attachments": [
@@ -57,6 +58,23 @@ namespace GeometryExtractor {
 ///     bumps used `length(maxs)` from the local origin, inflating the
 ///     radius for ground-anchored / tall models (e.g. zenith went
 ///     160 → 112).
+///
+/// Additive since 8 (no version bump — older readers ignore it):
+///     pieces carry an optional `rot` field, the piece's rest rotation
+///     (the linear 3×3 of the source node's local transform), row-major,
+///     in the same glTF-native RH frame as `offset`. Only emitted for
+///     pieces whose rest rotation deviates from identity — notably the
+///     up-axis conversion node (Z-up→Y-up on Collada sources) and any
+///     rotated intermediate turret piece. A reader that predates the
+///     field drops these rotations and accumulates translations only, so
+///     muzzle/attachment pieces under a rotated parent land in the wrong
+///     frame (barrels resolve to the unit centre instead of the elevated
+///     tip). The client always had this data (it reads the glTF node
+///     matrices directly); the field brings the sim into agreement.
+///     Unlike the 7→8 radius change (a *semantic* change to an existing
+///     field, which forced a bump), this is purely additive, so the
+///     version stays 8 — S3O games (BAR: axis-aligned, all-identity rot)
+///     don't need regenerating, and a mixed v8 fleet stays loadable.
 constexpr int kCurrentSchemaVersion = 8;
 
 /// Build the SPRINGRTS_geometry payload from `scene`. Returns a JSON
