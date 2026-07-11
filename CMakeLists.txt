@@ -479,6 +479,8 @@ if(TEST_SOURCES)
         ${CMAKE_SOURCE_DIR}/rts/Server/NetworkServer.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/Database.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GameOverState.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/GameMetrics.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/GmRollback.cpp
     )
     target_include_directories(spring-tests PRIVATE
         ${CMAKE_SOURCE_DIR}/rts

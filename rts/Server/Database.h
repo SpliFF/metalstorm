@@ -71,6 +71,30 @@ public:
     /// Revoke a session token.
     void RevokeSession(const std::string& token);
 
+    /// Ban / unban an account (PLAN-gm-tools task 4). Sets `users.is_banned`.
+    /// Login (`/api/auth/login`) and Basic-auth already refuse `is_banned`
+    /// accounts (HttpAuth.h), so a ban blocks *future* auth immediately — but
+    /// an already-issued Bearer token is validated against the `sessions`
+    /// table only (no per-request ban recheck), so a GM ban of a logged-in
+    /// user must be paired with RevokeUserSessions() to take effect now.
+    /// Returns true if a row was updated (false if the user doesn't exist).
+    bool SetBanned(int64_t userId, bool banned);
+
+    /// Ban / unban by username — the shape the GM `ban <player>` verb uses
+    /// (operators name people, not row ids). Returns true if a row was
+    /// updated. Out-param `userId` receives the affected id (0 if not found)
+    /// so the caller can revoke sessions + audit with the id.
+    bool SetBannedByUsername(const std::string& username, bool banned, int64_t& userId);
+
+    /// Delete every session belonging to a user (immediate logout). Paired
+    /// with SetBanned() so a ban ejects a currently-connected player from the
+    /// lobby auth path. Returns the number of sessions deleted.
+    int RevokeUserSessions(int64_t userId);
+
+    /// All currently-banned accounts, newest-id first — the dashboard ban list
+    /// (PLAN-gm-tools §2). Read-only.
+    std::vector<UserRecord> GetBannedUsers(int limit = 200);
+
     /// Delete all expired sessions (older than maxAgeSeconds).
     /// Returns the number of sessions deleted.
     int CleanExpiredSessions(int maxAgeSeconds = 86400);

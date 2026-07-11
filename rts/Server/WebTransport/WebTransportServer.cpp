@@ -349,6 +349,9 @@ struct WebTransportServerImpl {
     std::mutex txMutex;
     struct PendingTx { ClientID clientId; bool broadcast; StreamClass cls; uint32_t lane; std::vector<uint8_t> data; };
     std::vector<PendingTx> pendingTx;
+    // GM kick (PLAN-gm-tools): client IDs to force-close, queued from the sim
+    // thread, applied on the network thread in DrainPendingTx. Guarded by txMutex.
+    std::vector<ClientID> pendingKicks;
 
     ~WebTransportServerImpl();
 
@@ -1147,6 +1150,21 @@ void WebTransportServerImpl::DrainPendingTx() {
             if (it != conns.end()) dispatch(it->second);
         }
     }
+
+    // GM kicks: force-close the named connections. CloseConn queues the id into
+    // `disconnects`, so the sim loop's DrainDisconnects() teardown (PlayerLeft
+    // broadcast, session removal, PlayerRemoved callin) runs exactly as for any
+    // organic disconnect — no special-casing downstream.
+    std::vector<ClientID> kicks;
+    {
+        std::lock_guard<std::mutex> lk(txMutex);
+        kicks.swap(pendingKicks);
+    }
+    for (ClientID id : kicks) {
+        auto it = conns.find(id);
+        if (it != conns.end())
+            CloseConn(it->second);
+    }
 }
 
 void WebTransportServerImpl::FlushConn(WtConn* c) {
@@ -1449,6 +1467,11 @@ std::vector<ClientID> WebTransportServer::DrainDisconnects() {
     std::vector<ClientID> out;
     out.swap(impl_->disconnects);
     return out;
+}
+
+void WebTransportServer::KickClient(ClientID clientId) {
+    std::lock_guard<std::mutex> lk(impl_->txMutex);
+    impl_->pendingKicks.push_back(clientId);
 }
 
 int WebTransportServer::GetClientCount() const {

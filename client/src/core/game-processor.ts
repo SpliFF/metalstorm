@@ -1031,7 +1031,20 @@ function gpConnect(msg: GpInitToWorker): void {
         // server already applied the audience filter, so dispatch
         // unconditionally to widget:RecvLuaMsg(msg, playerID). 107 BAR + 52 ZK
         // widgets register RecvLuaMsg.
-        onLuaUIMsg: (data, playerId) => dispatchRecvLuaUIMsg(data, playerId),
+        onLuaUIMsg: (data, playerId) => {
+            // PLAN-gm-tools: a GM broadcast arrives as a LuaUIMsgRelay whose
+            // payload begins with the sentinel bytes [0x01,'G','M',0x01]
+            // (kGmBroadcastSentinel) and playerId -1. Intercept it BEFORE widget
+            // dispatch — it never reaches a widget (can't crash one) and instead
+            // surfaces a system toast on the main thread.
+            if (data.length >= 4 && data[0] === 0x01 && data[1] === 0x47 &&
+                data[2] === 0x4d && data[3] === 0x01) {
+                const message = new TextDecoder().decode(data.subarray(4));
+                postToMain({ type: 'gp:gmBroadcast', message });
+                return;
+            }
+            dispatchRecvLuaUIMsg(data, playerId);
+        },
         // GW4-c3: live terrain deformation (envelope 0x09) → DeformableTerrain.
         onHeightmapPatch: (patch) => gpDeformTerrain?.applyPatch(patch),
         // GW4-c3: per-allyteam LOS bitmap (envelope 0x07) → fog-of-war overlay.

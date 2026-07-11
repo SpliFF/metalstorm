@@ -67,7 +67,10 @@ Full CLI flag list (from `rts/server_main.cpp`):
 | `Server/ProjectileStateSerializer.h/.cpp` | Serialises synced weapon projectiles to envelope 0x04 binary. |
 | `Server/EntityDeltaCache.h/.cpp` | Per-client delta tracking to reduce bandwidth. |
 | `Server/ContentServer.h/.cpp` | Scans content roots, serves assets at `/api/content/assets/*`. |
-| `Server/Database.h/.cpp` | SQLite wrapper (accounts, sessions). |
+| `Server/Database.h/.cpp` | SQLite wrapper (accounts, sessions, `admin_audit`). Ban primitives (`SetBanned`/`SetBannedByUsername`/`RevokeUserSessions`/`GetBannedUsers`, PLAN-gm-tools task 4). |
+| `Server/GameMetrics.h/.cpp` | **PLAN-gm-tools task 1**: `GameMetricsWriter` — per-game sim-health rows (tick p95, frames-behind, entity count, uptime, db size) into the shared `game_metrics` table on a wall-clock cadence; 7-day-raw / hourly-tail downsampling (E5). Driven from `server_main.cpp`'s loop. |
+| `Server/GmVerbs.h/.cpp` + `GmRollback.cpp` | **PLAN-gm-tools task 2**: the GM verb set — `RegisterGmVerbs` installs `POST /api/gm/{pause,resume,grant,broadcast,inspect,kick,rollback,checkpoint,hibernate,snapshots}` (all `RouteAuth::AdminOnly` + in-handler role recheck + `LogAudit`; compiled into prod, unlike `/api/exec`). Rollback rides the `ISnapshotStore` seam (`NullSnapshotStore` until PLAN-persistence's `GameStateStore` lands → refuses cleanly, audited). The pure `DoRollback` sequence lives in `GmRollback.cpp` (dependency-light, unit-tested). |
+| `Server/GmDashboardPage.h` | **PLAN-gm-tools task 3**: the self-contained GM ops dashboard HTML/JS, served by the lobby at `GET /admin`. |
 | `Server/RoomManager.h/.cpp` | Room lifecycle (create/join/leave/start/end), player rosters. |
 | `Server/MapProcessor.h/.cpp` | SMF parsing, heightmap/minimap/feature extraction, model conversion. Only linked by `tools/mapconverter`. |
 | `Server/MapMetadataDb.cpp` | Read-only SQLite access for map metadata. Used by lobby and game server. |
@@ -446,7 +449,9 @@ data/
   spring-server.db          SQLite: accounts, sessions, maps; rooms/room_members/
                             room_ai_slots (lobby-written); game_servers (lobby-written
                             pid/port); game_status (spring-server-written ready/clients
-                            heartbeat — the lobby↔game readiness rendezvous)
+                            heartbeat — the lobby↔game readiness rendezvous);
+                            game_metrics (spring-server-written sim-health rows for the
+                            GM dashboard, PLAN-gm-tools); admin_audit (append-only)
   maps/<mapId>/             Preprocessed: heightmap.bin, minimap.dxt1, tiles.dxt1, features/*.glb
   games/<gameId>/models/    Preprocessed: <unit>.glb, <unit>.config.json, <texture>.png
   games/<gameId>/sounds/    Preprocessed: *.webm (Opus, audioconverter output)
@@ -466,6 +471,10 @@ data/
 | `/api/vfs/game/<gameId>/*` | Game source files (Lua scripts, images) |
 | `/api/games/data/<gameId>/*` | Preprocessed game assets (unit models, textures) |
 | `/api/processes` | JSON list of game server instances (pid, port, state, map, game) |
+| `GET /admin` | GM operations dashboard (server-rendered HTML; own admin login). PLAN-gm-tools §2. |
+| `POST /api/admin/fleet` | AdminOnly. Every game server + latest `game_metrics` (join `game_servers`⟕`game_status`⟕`game_metrics`) + alarm badges. |
+| `POST /api/admin/game` | AdminOnly. Per-game metric timeline + audit tail (`{roomId}`). |
+| `POST /api/admin/ban` / `unban` / `banned` | AdminOnly. Account ban (+ immediate session revoke) / unban / ban list. PLAN-gm-tools task 4. |
 
 ### Game server (`spring-server`)
 
@@ -478,6 +487,7 @@ data/
 | `/api/metrics` | JSON performance stats |
 | `/api/content/manifest` | JSON index of all servable assets |
 | `/api/content/assets/*` | Individual asset files from content roots |
+| `POST /api/gm/*` | GM verbs (`pause`/`resume`/`grant`/`broadcast`/`inspect`/`kick`/`rollback`/`checkpoint`/`hibernate`/`snapshots`). AdminOnly + audited; the dashboard POSTs here directly (browser→game port). PLAN-gm-tools task 2 (`GmVerbs.cpp`). |
 | `/api/wt/info` | JSON `{port, transport, certMode}` — WebTransport (QUIC) endpoint discovery. `certMode:"hashes"` (dev/self-hosted default) adds `certHashes:[current,next]` (+ back-compat `certHash`) for `serverCertificateHashes` pinning; `certMode:"webpki"` (`--wt-cert`/`--wt-key` configured) publishes no hash — the browser validates the CA cert normally. Replaces the removed `/api/rtc/offer` + `/api/rtc/candidate` WebRTC signaling. |
 
 ### Log server (`spring-logserver`)

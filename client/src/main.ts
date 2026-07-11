@@ -161,6 +161,33 @@ let dragOverlay: HTMLDivElement | null = null;
 /// PLAN-rml.md: main-thread RmlUi DOM overlay (BAR RML widgets). Non-null while
 /// a game is active; replays `rml:ops` from the worker into real DOM nodes.
 let rmlOverlay: RmlOverlayManager | null = null;
+/**
+ * PLAN-gm-tools §3: render a GM broadcast as a transient system toast. Stacks
+ * bottom-centre, auto-dismisses. Deliberately independent of the LuaUI widget
+ * layer (the worker already filtered these out of widget dispatch) so a GM
+ * message always shows even when the HUD widgets are broken.
+ */
+function showGmBroadcast(message: string): void {
+    if (!message) return;
+    let host = document.getElementById('gm-broadcasts');
+    if (!host) {
+        host = document.createElement('div');
+        host.id = 'gm-broadcasts';
+        host.style.cssText =
+            'position:fixed;left:50%;bottom:12%;transform:translateX(-50%);z-index:60;' +
+            'display:flex;flex-direction:column;gap:6px;align-items:center;pointer-events:none;';
+        document.body.appendChild(host);
+    }
+    const el = document.createElement('div');
+    el.textContent = '⚔ ' + message;
+    el.style.cssText =
+        'font:600 15px/1.4 system-ui,sans-serif;color:#eaf3ff;background:rgba(20,32,52,0.92);' +
+        'border:1px solid #4a8ac0;border-radius:8px;padding:10px 18px;max-width:60vw;text-align:center;' +
+        'box-shadow:0 4px 18px rgba(0,0,0,0.5);transition:opacity .4s;';
+    host.appendChild(el);
+    setTimeout(() => { el.style.opacity = '0'; setTimeout(() => el.remove(), 400); }, 8000);
+}
+
 function updateDragOverlay(box: { x0: number; y0: number; x1: number; y1: number } | null): void {
     if (!box) { if (dragOverlay) dragOverlay.style.display = 'none'; return; }
     if (!dragOverlay) {
@@ -610,6 +637,11 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                     won: m.won,
                     onReturnToLobby: quitToLobby,
                 });
+                break;
+            // PLAN-gm-tools: a GM broadcast (already intercepted in the worker
+            // before widget dispatch) → a system toast, no widget dependency.
+            case 'gp:gmBroadcast':
+                showGmBroadcast(String(m.message ?? ''));
                 break;
             // GW8: reply to a window.test client-bound request.
             case 'gp:testResult': {

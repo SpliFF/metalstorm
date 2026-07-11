@@ -251,6 +251,73 @@ bool Database::EnsureAdminRole(const std::string& username) {
     return rc == SQLITE_DONE && sqlite3_changes(db) > 0;
 }
 
+bool Database::SetBanned(int64_t userId, bool banned) {
+    const char* sql = "UPDATE users SET is_banned = ? WHERE id = ?";
+    sqlite3_stmt* stmt = nullptr;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        return false;
+
+    sqlite3_bind_int(stmt, 1, banned ? 1 : 0);
+    sqlite3_bind_int64(stmt, 2, userId);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    return rc == SQLITE_DONE && sqlite3_changes(db) > 0;
+}
+
+bool Database::SetBannedByUsername(const std::string& username, bool banned, int64_t& userId) {
+    userId = 0;
+    // Resolve the id first so the caller can revoke sessions + audit even
+    // though the UPDATE is keyed on username.
+    auto user = FindUser(username);
+    if (!user)
+        return false;
+    userId = user->id;
+    return SetBanned(user->id, banned);
+}
+
+int Database::RevokeUserSessions(int64_t userId) {
+    const char* sql = "DELETE FROM sessions WHERE user_id = ?";
+    sqlite3_stmt* stmt = nullptr;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        return 0;
+
+    sqlite3_bind_int64(stmt, 1, userId);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    return sqlite3_changes(db);
+}
+
+std::vector<UserRecord> Database::GetBannedUsers(int limit) {
+    std::vector<UserRecord> out;
+    const char* sql =
+        "SELECT id, username, password_hash, role, is_banned, is_dev "
+        "FROM users WHERE is_banned = 1 ORDER BY id DESC LIMIT ?";
+    sqlite3_stmt* stmt = nullptr;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        return out;
+
+    sqlite3_bind_int(stmt, 1, limit);
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        UserRecord u;
+        u.id = sqlite3_column_int64(stmt, 0);
+        u.username = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        u.passwordHash = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        u.role = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+        u.isBanned = sqlite3_column_int(stmt, 4) != 0;
+        u.isDev = sqlite3_column_int(stmt, 5) != 0;
+        out.push_back(std::move(u));
+    }
+
+    sqlite3_finalize(stmt);
+    return out;
+}
+
 void Database::RevokeSession(const std::string& token) {
     const char* sql = "DELETE FROM sessions WHERE token = ?";
     sqlite3_stmt* stmt = nullptr;

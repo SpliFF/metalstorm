@@ -137,6 +137,13 @@ public:
     /// Drain client IDs whose session closed since the last call.
     std::vector<ClientID> DrainDisconnects();
 
+    /// Force-disconnect one client (PLAN-gm-tools GM `kick`). Thread-safe:
+    /// queues the id; the network thread closes the QUIC connection, which
+    /// funnels into the same DrainDisconnects() teardown as an organic drop
+    /// (PlayerLeft broadcast + session removal). No-op if the id isn't
+    /// connected. Callable from the sim thread.
+    void KickClient(ClientID clientId);
+
     /// Number of established WebTransport sessions.
     int GetClientCount() const;
 

@@ -11,6 +11,8 @@
 #include "Server/NetworkServer.h"
 #include "Server/Protocol.h"
 #include "Server/Database.h"
+#include "Server/GameMetrics.h"
+#include "Server/GmVerbs.h"
 #include "Server/DevBuildGate.h"
 #include "Server/ClientSession.h"
 #include "Server/EntityStateSerializer.h"
@@ -563,6 +565,12 @@ int main(int argc, char* argv[])
     RegisterGameHttpRoutes(ctx, content, contentRoots, mapsDir,
                            restartRequested, keepRunning);
 
+    // PLAN-gm-tools task 2: the GM verb set (POST /api/gm/*). rollback/
+    // checkpoint ride a snapshot store — NullSnapshotStore until PLAN-persistence
+    // lands (they refuse cleanly, audited). Must outlive the server loop.
+    NullSnapshotStore gmSnapshotStore;
+    RegisterGmVerbs(ctx, gmSnapshotStore);
+
     if (!net.Start(port)) {
         SLOG(SPRING_LOG_ERROR, "failed to start network server");
         springlog_shutdown();
@@ -892,6 +900,13 @@ int main(int argc, char* argv[])
     // The QUIC endpoint has been accepting since rtcServer.Start above and the sim
     // is initialised — publish ready=1 so the lobby can mark the room Active.
     writeGameStatus(true, 0);
+
+    // PLAN-gm-tools task 1: per-game sim-health metrics for the GM dashboard.
+    // Shares the game_status DB handle; writes on a wall-clock cadence with
+    // 7-day-raw / hourly-tail downsampling (E5). No-op if statusDb failed open.
+    GameMetricsWriter metricsWriter;
+    metricsWriter.Init(statusDb, roomId, /*cadenceSec=*/60);
+
     const auto serverStartTime = std::chrono::steady_clock::now();
     auto lastClientTime = serverStartTime;   // last instant clientCount > 0 (or launch)
     auto lastStatusWrite = serverStartTime;
@@ -1045,10 +1060,25 @@ int main(int argc, char* argv[])
         // the exact prior source order; see StateStreamer::Tick.
         streamer.Tick(sim.GetFrameNum());
 
+        const int entityCount = static_cast<int>(unitHandler.GetActiveUnits().size());
         perfMetrics.SetFrame(sim.GetFrameNum());
         perfMetrics.SetClientCount(rtcServer.GetClientCount());
+        perfMetrics.SetEntityCount(entityCount);   // was never wired → /api/metrics read 0
         perfMetrics.SetAICount(static_cast<int>(aiPool.GetAICount()));
         perfMetrics.EndTick();
+
+        // PLAN-gm-tools task 1: feed the metric writer. SampleTick every frame
+        // (p95 window); MaybeWrite gates itself to the cadence. `simRunning`
+        // mirrors the SimFrame gate above so a paused/empty game reports no
+        // false frames-behind lag.
+        {
+            const auto snap = perfMetrics.GetSnapshot();
+            metricsWriter.SampleTick(snap.tickTimeUs);
+            const bool simRunning = sim.HasGameStarted() && !g_luaDebugger.IsPaused() &&
+                                    !gs->paused && rtcServer.GetClientCount() > 0;
+            metricsWriter.MaybeWrite(snap.frame, snap.clientCount, entityCount,
+                                     snap.simFps, gs->speedFactor, simRunning);
+        }
 
         // Periodic status
         int frame = sim.GetFrameNum();
@@ -1056,6 +1086,15 @@ int main(int argc, char* argv[])
             SLOG(SPRING_LOG_INFO, "frame %d (%.1fs) clients=%d",
                 frame, frame / (float)GAME_SPEED, rtcServer.GetClientCount());
         }
+    }
+
+    // Final metric row (graceful shutdown / game-over / idle-exit) so the
+    // dashboard timeline ends at the true last frame, not the last cadence tick.
+    {
+        const auto snap = perfMetrics.GetSnapshot();
+        metricsWriter.WriteNow(snap.frame, snap.clientCount,
+                               static_cast<int>(unitHandler.GetActiveUnits().size()),
+                               snap.simFps, gs->speedFactor, /*simRunning=*/false);
     }
 
     // Clear our liveness row so the lobby/launch_game stop treating us as a

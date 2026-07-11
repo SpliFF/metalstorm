@@ -17,11 +17,13 @@
 #include "Server/GameDiscovery.h"
 #include "Server/ResourcesParser.h"
 #include "Server/HttpAuth.h"
+#include "Server/GmDashboardPage.h"
 #include "Server/DevBuildGate.h"
 #include "Server/CacheControl.h"
 #include "System/SpringLog/SpringLog.h"
 #include "System/SpringLog/SpringLogSqlite.h"
 #include <cctype>
+#include <optional>
 #include <set>
 #include <unordered_set>
 
@@ -976,6 +978,212 @@ int main(int argc, char* argv[])
                 .body = {json.begin(), json.end()}, .status = 200,
                 .cacheControl = CacheControl::DynamicHeader()};
     });
+
+    // ─────── PLAN-gm-tools: GM dashboard + admin verbs (lobby side) ───────
+    // The GM per-game verbs (pause/rollback/grant/broadcast/inspect/kick) live
+    // on each game server's own /api/gm/<verb> plane (browser→game port, same
+    // admin token — the proven admin path; there is no lobby→game HTTP client).
+    // The lobby owns: the fleet/timeline data (shared SQLite), account-level
+    // ban, and the server-rendered dashboard page. These are the *production*
+    // GM surface, so unlike /api/exec they are NOT compiled out under SPRING_PROD.
+    auto requireLobbyAdmin = [&db](const HttpRequestHeaders& headers, int64_t& userId,
+                                   std::string& username) -> std::optional<HttpResponse> {
+        userId = HttpAuth::ValidateToken(db, headers.authorization);
+        if (userId <= 0)
+            return HttpAuth::JsonResponse(401, R"({"ok":false,"error":"unauthorized"})");
+        auto user = db.FindUserById(userId);
+        if (!user || user->role != "admin")
+            return HttpAuth::JsonResponse(403, R"({"ok":false,"error":"forbidden — admin role required"})");
+        username = user->username;
+        return std::nullopt;
+    };
+
+    // GET /admin — the server-rendered dashboard shell. Public (it's just HTML/JS
+    // with its own login); every data route it calls is POST + AdminOnly.
+    net.AddHttpGet("/admin", RouteAuth::Public, [](const std::string&) -> HttpResponse {
+        std::string html = kGmDashboardHtml;
+        return {.contentType = "text/html; charset=utf-8",
+                .body = {html.begin(), html.end()}, .status = 200,
+                .cacheControl = "no-cache"};
+    });
+
+    // POST /api/admin/fleet — every game server + its latest sim-health metrics.
+    // GET can't carry a token (dispatch gate only sees POST headers), so admin
+    // data endpoints are POST.
+    net.AddHttpPost("/api/admin/fleet", RouteAuth::AdminOnly,
+        [mapDb, requireLobbyAdmin](const std::string&, const std::string&,
+                                   const HttpRequestHeaders& headers) -> HttpResponse {
+            int64_t uid; std::string uname;
+            if (auto e = requireLobbyAdmin(headers, uid, uname)) return *e;
+            nlohmann::json games = nlohmann::json::array();
+            if (mapDb) {
+                // game_servers ⟕ game_status ⟕ latest game_metrics row per room.
+                const char* sql =
+                    "SELECT gs.room_id, gs.port, gs.pid, gs.map_id, gs.game_id, gs.state, "
+                    "       st.ready, st.client_count, "
+                    "       m.frame, m.tick_p95_us, m.frames_behind, m.entity_count, "
+                    "       m.sim_fps, m.uptime_sec, m.db_size_bytes, m.snapshot_age_sec "
+                    "FROM game_servers gs "
+                    "LEFT JOIN game_status st ON st.room_id = gs.room_id "
+                    "LEFT JOIN (SELECT room_id, MAX(id) AS mid FROM game_metrics GROUP BY room_id) lm "
+                    "       ON lm.room_id = gs.room_id "
+                    "LEFT JOIN game_metrics m ON m.id = lm.mid "
+                    "ORDER BY gs.room_id";
+                sqlite3_stmt* s = nullptr;
+                if (sqlite3_prepare_v2(mapDb, sql, -1, &s, nullptr) == SQLITE_OK) {
+                    auto colInt = [&](int c) -> nlohmann::json {
+                        return sqlite3_column_type(s, c) == SQLITE_NULL
+                            ? nlohmann::json(nullptr) : nlohmann::json(sqlite3_column_int64(s, c));
+                    };
+                    auto colTxt = [&](int c) -> std::string {
+                        auto* t = sqlite3_column_text(s, c);
+                        return t ? reinterpret_cast<const char*>(t) : "";
+                    };
+                    while (sqlite3_step(s) == SQLITE_ROW) {
+                        nlohmann::json g;
+                        g["room_id"] = sqlite3_column_int(s, 0);
+                        g["port"] = sqlite3_column_int(s, 1);
+                        g["game_id"] = colTxt(4);
+                        g["map_id"] = colTxt(3);
+                        g["state"] = colTxt(5);
+                        g["client_count"] = colInt(7);
+                        g["frame"] = colInt(8);
+                        g["tick_p95_us"] = colInt(9);
+                        g["frames_behind"] = colInt(10);
+                        g["entity_count"] = colInt(11);
+                        g["sim_fps"] = sqlite3_column_type(s, 12) == SQLITE_NULL
+                            ? nlohmann::json(nullptr) : nlohmann::json(sqlite3_column_double(s, 12));
+                        g["uptime_sec"] = colInt(13);
+                        g["db_size_bytes"] = colInt(14);
+                        g["snapshot_age_sec"] = colInt(15);
+                        // Engine-sourced alarm badges (economy/long-uptime Lua
+                        // counters land here once that Stage-7 Lua exists).
+                        nlohmann::json alarms = nlohmann::json::array();
+                        const std::string state = colTxt(5);
+                        if (sqlite3_column_type(s, 10) != SQLITE_NULL && sqlite3_column_int(s, 10) > 60)
+                            alarms.push_back({{"label", "lag"}, {"crit", true}});
+                        if (sqlite3_column_type(s, 14) != SQLITE_NULL &&
+                            sqlite3_column_int64(s, 14) > 1024LL * 1024 * 1024)
+                            alarms.push_back({{"label", "db"}, {"crit", false}});
+                        if (state == "crashed")
+                            alarms.push_back({{"label", "crashed"}, {"crit", true}});
+                        g["alarms"] = alarms;
+                        games.push_back(std::move(g));
+                    }
+                }
+                if (s) sqlite3_finalize(s);
+            }
+            nlohmann::json out;
+            out["ok"] = true;
+            out["games"] = games;
+            return HttpAuth::JsonResponse(200, out.dump());
+        });
+
+    // POST /api/admin/game {roomId} — metric timeline + audit tail for one game.
+    net.AddHttpPost("/api/admin/game", RouteAuth::AdminOnly,
+        [mapDb, &db, requireLobbyAdmin](const std::string&, const std::string& body,
+                                        const HttpRequestHeaders& headers) -> HttpResponse {
+            int64_t uid; std::string uname;
+            if (auto e = requireLobbyAdmin(headers, uid, uname)) return *e;
+            nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+            if (j.is_discarded()) return HttpAuth::JsonResponse(400, R"({"ok":false,"error":"bad json"})");
+            const int roomId = j.value("roomId", -1);
+            if (roomId < 0) return HttpAuth::JsonResponse(400, R"({"ok":false,"error":"roomId required"})");
+
+            nlohmann::json timeline = nlohmann::json::array();
+            if (mapDb) {
+                sqlite3_stmt* s = nullptr;
+                const char* sql =
+                    "SELECT frame, taken_at, resolution, tick_p95_us, frames_behind, "
+                    "entity_count, client_count, sim_fps, uptime_sec, db_size_bytes "
+                    "FROM game_metrics WHERE room_id=? ORDER BY id DESC LIMIT 200";
+                if (sqlite3_prepare_v2(mapDb, sql, -1, &s, nullptr) == SQLITE_OK) {
+                    sqlite3_bind_int(s, 1, roomId);
+                    while (sqlite3_step(s) == SQLITE_ROW) {
+                        timeline.push_back({
+                            {"frame", sqlite3_column_int(s, 0)},
+                            {"taken_at", sqlite3_column_int64(s, 1)},
+                            {"resolution", reinterpret_cast<const char*>(sqlite3_column_text(s, 2))},
+                            {"tick_p95_us", sqlite3_column_int64(s, 3)},
+                            {"frames_behind", sqlite3_column_int64(s, 4)},
+                            {"entity_count", sqlite3_column_int(s, 5)},
+                            {"client_count", sqlite3_column_int(s, 6)},
+                            {"sim_fps", sqlite3_column_double(s, 7)},
+                            {"uptime_sec", sqlite3_column_int64(s, 8)},
+                            {"db_size_bytes", sqlite3_column_int64(s, 9)},
+                        });
+                    }
+                }
+                if (s) sqlite3_finalize(s);
+            }
+            // Audit tail for this game: GM verbs audit with roomTag "room=<id>"
+            // or target "frame=…"; match on the room tag. (admin_audit has no
+            // room column — the LIKE is a pragmatic per-game filter.)
+            nlohmann::json audit = nlohmann::json::array();
+            {
+                const std::string tag = "room=" + std::to_string(roomId);
+                for (const auto& e : db.GetRecentAuditEntries(400)) {
+                    if (e.argsDigest.find(tag) == std::string::npos &&
+                        e.target.find(tag) == std::string::npos) continue;
+                    audit.push_back({{"createdAt", e.createdAt}, {"username", e.username},
+                                     {"action", e.action}, {"target", e.target},
+                                     {"argsDigest", e.argsDigest}});
+                    if (audit.size() >= 60) break;
+                }
+            }
+            nlohmann::json out;
+            out["ok"] = true;
+            out["timeline"] = timeline;
+            out["audit"] = audit;
+            return HttpAuth::JsonResponse(200, out.dump());
+        });
+
+    // POST /api/admin/ban {username} — account ban + immediate session revoke.
+    net.AddHttpPost("/api/admin/ban", RouteAuth::AdminOnly,
+        [&db, requireLobbyAdmin](const std::string&, const std::string& body,
+                                 const HttpRequestHeaders& headers) -> HttpResponse {
+            int64_t uid; std::string uname;
+            if (auto e = requireLobbyAdmin(headers, uid, uname)) return *e;
+            nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+            const std::string target = j.is_discarded() ? "" : j.value("username", std::string(""));
+            if (target.empty()) return HttpAuth::JsonResponse(400, R"({"ok":false,"error":"username required"})");
+            int64_t targetId = 0;
+            if (!db.SetBannedByUsername(target, true, targetId))
+                return HttpAuth::JsonResponse(404, R"({"ok":false,"error":"no such user"})");
+            const int revoked = db.RevokeUserSessions(targetId);
+            db.LogAudit(uid, uname, "ban", target, "sessions_revoked=" + std::to_string(revoked));
+            return HttpAuth::JsonResponse(200,
+                std::string(R"({"ok":true,"revoked":)") + std::to_string(revoked) + "}");
+        });
+
+    // POST /api/admin/unban {username}
+    net.AddHttpPost("/api/admin/unban", RouteAuth::AdminOnly,
+        [&db, requireLobbyAdmin](const std::string&, const std::string& body,
+                                 const HttpRequestHeaders& headers) -> HttpResponse {
+            int64_t uid; std::string uname;
+            if (auto e = requireLobbyAdmin(headers, uid, uname)) return *e;
+            nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+            const std::string target = j.is_discarded() ? "" : j.value("username", std::string(""));
+            if (target.empty()) return HttpAuth::JsonResponse(400, R"({"ok":false,"error":"username required"})");
+            int64_t targetId = 0;
+            if (!db.SetBannedByUsername(target, false, targetId))
+                return HttpAuth::JsonResponse(404, R"({"ok":false,"error":"no such user"})");
+            db.LogAudit(uid, uname, "unban", target, "");
+            return HttpAuth::JsonResponse(200, R"({"ok":true})");
+        });
+
+    // POST /api/admin/banned — the current ban list.
+    net.AddHttpPost("/api/admin/banned", RouteAuth::AdminOnly,
+        [&db, requireLobbyAdmin](const std::string&, const std::string&,
+                                 const HttpRequestHeaders& headers) -> HttpResponse {
+            int64_t uid; std::string uname;
+            if (auto e = requireLobbyAdmin(headers, uid, uname)) return *e;
+            nlohmann::json banned = nlohmann::json::array();
+            for (const auto& u : db.GetBannedUsers(200))
+                banned.push_back({{"id", u.id}, {"username", u.username}, {"role", u.role}});
+            nlohmann::json out; out["ok"] = true; out["banned"] = banned;
+            return HttpAuth::JsonResponse(200, out.dump());
+        });
 
     // --- HTTP exec endpoint (for CLI/curl access to lobby commands) ---
     // PLAN-security-hardening task 2: compiled OUT entirely under
