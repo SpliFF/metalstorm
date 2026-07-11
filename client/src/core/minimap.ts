@@ -302,10 +302,11 @@ export class Minimap {
     /**
      * Hand control of the minimap's on-screen geometry to a LuaUI widget.
      * Reparents the canvas onto `document.body` with absolute positioning
-     * and a z-index that sits above the main 3D canvas but below the
-     * LuaUI overlay canvas (z-index 100) so chili widgets can frame it.
-     * Once set, geometry comes from setGeometry / setVisible until the
-     * minimap is disposed.
+     * and a z-index above the main game canvas so chili widgets can frame
+     * it. (There is no separate LuaUI overlay canvas — post-GW4 the LuaUI
+     * pass renders into the same worker-owned game canvas; confirmed in
+     * the U7 sweep, 2026-07-10.) Once set, geometry comes from
+     * setGeometry / setVisible until the minimap is disposed.
      */
     setOwnership(mode: 'default' | 'widget'): void {
         if (this.ownership === mode) return;
