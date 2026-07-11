@@ -1895,9 +1895,12 @@ function gpSyncCameraToLiveState(): void {
 /// null`, `_unbindVertexArrayObject()`, `_viewportCached` zeroed) marks every
 /// one of those caches dirty/sentinel, so Babylon reissues the real GL call
 /// the moment it next sets any of them — regardless of what raw state we
-/// leave behind. (The VAO restore was actively pointless: wipeCaches's own
-/// `_unbindVertexArrayObject()` unconditionally rebinds null right after,
-/// undoing it.) The ONE value wipeCaches does NOT track is the framebuffer
+/// leave behind. (CORRECTION, U8 2026-07-11: dropping the VAO restore was NOT
+/// harmless — see the `gl.bindVertexArray(null)` below and its comment. The
+/// old restore incidentally left the DEFAULT VAO bound before wipeCaches, which
+/// is why wipeCaches's `unbindAllAttributes()` never touched the bridge VAO.
+/// That behaviour is now restored explicitly, not by a save/restore round
+/// trip.) The ONE getParameter value wipeCaches does NOT track is the framebuffer
 /// binding (`_currentFramebuffer`) — that still needs a real save/restore,
 /// now read from Babylon's own cache instead of a `gl.getParameter` round
 /// trip. Kept `wipeCaches(true)` (not `false`): the weaker form skips exactly
@@ -1943,6 +1946,21 @@ function gpRunUiPass(): void {
     // `wipeCaches(true)` call below.
     const tRestore = performance.now();
     gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, savedFBO);
+    // U8 (PLAN-bar §7, 2026-07-11): unbind the LuaUI immediate-mode VAO BEFORE
+    // wipeCaches(). Babylon's `wipeCaches(true)` calls `unbindAllAttributes()`,
+    // which runs `disableVertexAttribArray()` on the CURRENTLY-BOUND VAO and
+    // only rebinds the default VAO afterwards. The last immediate flush leaves
+    // the gl-bridge's private VAO bound, so wipeCaches was disabling ITS three
+    // attributes every frame; the next frame's draws then read generic-constant
+    // vertices (all collapsed to the origin → degenerate, zero-area) and the
+    // ENTIRE LuaUI HUD renders nothing — healthy program, no GL error, correct
+    // buffers, just an all-disabled VAO. P5 removed the old explicit VAO
+    // save/restore believing wipeCaches's own `_unbindVertexArrayObject()` made
+    // it redundant; it does not, because `unbindAllAttributes()` runs first, on
+    // whatever VAO we left bound. Binding the default VAO here sends that
+    // disable at the throwaway default VAO instead, leaving the bridge VAO's
+    // attribute enables intact for the next pass.
+    gl.bindVertexArray(null);
     const tWipe = performance.now();
     (gpEngine as unknown as { wipeCaches: (b?: boolean) => void }).wipeCaches(true);
 
