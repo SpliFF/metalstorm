@@ -14,6 +14,7 @@
 //     .glb   -> "glb2"  exporter (single binary file)
 
 #include "S3OImporter.h"
+#include "PIEImporter.h"
 #include "GeometryExtractor.h"
 #include "SpringLog.h"
 #include "SpringLogNet.h"
@@ -686,6 +687,76 @@ bool FixGlbBasisuTextures(const std::string& path,
         }
     }
 
+    // ---- Step 3b': relocate a `*_tcmask` texture into the
+    // SPRINGRTS_team_color extension (plain-diffuse team-colour path).
+    //
+    // For Warzone `.pie` sources the S3O channel-split above never runs
+    // (no packed tex1/tex2). Instead the PIE importer carried the PIE4
+    // `TCMASK` page on a spare standard texture slot (LIGHTMAP →
+    // occlusionTexture) so it survives Assimp export as an ordinary
+    // texture. Assimp can't emit our custom material extension, so — like
+    // the S3O team mask — we inject it here: find any material whose
+    // referenced texture image URI matches `*_tcmask.*`, move that texture
+    // reference into `material.extensions.SPRINGRTS_team_color.maskTexture`,
+    // and erase the carrier PBR slot. The mask is greyscale (`.r` = team
+    // blend amount, white = team region), so no `invertMask`. The renderer
+    // reads it per-material (entity-renderer's fetchModelConfig), composing
+    // with per-piece materials automatically.
+    {
+        auto imageUriForTexture = [&](int texIdx) -> std::string {
+            if (!doc.contains("textures") || !doc["textures"].is_array()) return {};
+            if (texIdx < 0 || texIdx >= static_cast<int>(doc["textures"].size())) return {};
+            const json& tx = doc["textures"][texIdx];
+            int imgIdx = -1;
+            if (tx.contains("extensions") && tx["extensions"].is_object()
+                && tx["extensions"].contains("KHR_texture_basisu")
+                && tx["extensions"]["KHR_texture_basisu"].contains("source")
+                && tx["extensions"]["KHR_texture_basisu"]["source"].is_number_integer()) {
+                imgIdx = tx["extensions"]["KHR_texture_basisu"]["source"].get<int>();
+            } else if (tx.contains("source") && tx["source"].is_number_integer()) {
+                imgIdx = tx["source"].get<int>();
+            }
+            if (imgIdx < 0 || !doc.contains("images") || !doc["images"].is_array()
+                || imgIdx >= static_cast<int>(doc["images"].size())) return {};
+            const json& img = doc["images"][imgIdx];
+            return (img.contains("uri") && img["uri"].is_string())
+                ? img["uri"].get<std::string>() : std::string{};
+        };
+        auto isTcmask = [](std::string uri) {
+            for (char& c : uri) c = static_cast<char>(std::tolower((unsigned char)c));
+            return uri.find("_tcmask") != std::string::npos;
+        };
+        auto tryRelocate = [&](json& holder, const char* key, json& mat) -> bool {
+            if (!holder.contains(key) || !holder[key].is_object()) return false;
+            const json& slot = holder[key];
+            if (!slot.contains("index") || !slot["index"].is_number_integer()) return false;
+            const int texIdx = slot["index"].get<int>();
+            if (!isTcmask(imageUriForTexture(texIdx))) return false;
+            mat["extensions"]["SPRINGRTS_team_color"]["maskTexture"] =
+                json::object({ {"index", texIdx} });
+            holder.erase(key);
+            return true;
+        };
+        bool anyTeam = false;
+        if (doc.contains("materials") && doc["materials"].is_array()) {
+            for (auto& mat : doc["materials"]) {
+                if (!mat.is_object()) continue;
+                bool moved = tryRelocate(mat, "occlusionTexture", mat)
+                           | tryRelocate(mat, "emissiveTexture",  mat)
+                           | tryRelocate(mat, "normalTexture",    mat);
+                if (mat.contains("pbrMetallicRoughness") && mat["pbrMetallicRoughness"].is_object())
+                    moved = tryRelocate(mat["pbrMetallicRoughness"], "metallicRoughnessTexture", mat) || moved;
+                if (moved) {
+                    // A stolen emissiveTexture would leave a stray white
+                    // emissiveFactor; drop it so the piece isn't self-lit.
+                    mat.erase("emissiveFactor");
+                    anyTeam = true;
+                }
+            }
+        }
+        if (anyTeam) ensureExtListContains("extensionsUsed", "SPRINGRTS_team_color");
+    }
+
     // ---- Step 3c: strip `alphaMode` from every material. Assimp emits
     // MASK whenever the source diffuse texture has an alpha channel,
     // but in Spring S3O tex1.A encodes team-color blend amount and
@@ -962,8 +1033,9 @@ int main(int argc, char** argv) {
 
     Assimp::Importer importer;
 
-    // Register the S3O plugin. Assimp takes ownership.
+    // Register the S3O + PIE plugins. Assimp takes ownership.
     importer.RegisterLoader(new Assimp::S3OImporter());
+    importer.RegisterLoader(new Assimp::PIEImporter());
 
     // Common post-processing flags. Triangulate is critical (we already
     // emit triangles for S3O but other importers may not). The rest are

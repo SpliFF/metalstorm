@@ -594,13 +594,29 @@ nlohmann::json GeometryExtractor::BuildExtensionJson(const aiScene* scene,
 
     // ---- Texture references (transitional; removed in Phase 1d) ----
     //
-    // For S3O the importer fills aiTextureType_DIFFUSE (tex1) and
-    // aiTextureType_SPECULAR (tex2) on the first material; for `.dae`
-    // and similar formats neither slot is populated and the only
-    // source of texture filenames is a Spring author-config sibling
-    // `<sourceModelPath>.lua`.
+    // The `tex1`/`tex2` fields drive the S3O 8-channel PBR split in
+    // FixGlbBasisuTextures (diffuse RGB + team-mask alpha in tex1, glow/
+    // spec/reflectivity across tex2). That packing is an S3O-format
+    // concept: S3O fills aiTextureType_DIFFUSE/SPECULAR here, and `.dae`
+    // etc. resolve tex1/tex2 through the Spring `unittextures/` convention.
+    //
+    // Plain-diffuse sources (Warzone `.pie`/`.wzasm`) reference each page
+    // directly as a per-material base-colour texture and carry NO packed
+    // channels, so we must NOT emit tex1/tex2 for them — otherwise the
+    // channel-split would clobber the multi-material `images/textures/
+    // materials` layout the exporter wrote. Their material texture refs are
+    // lifted verbatim into KHR_texture_basisu by FixGlbBasisuTextures'
+    // step-1/2 pass instead.
+    const bool plainDiffuseSource = [&] {
+        namespace fs = std::filesystem;
+        std::string ext = fs::path(sourceModelPath).extension().string();
+        for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return ext == ".pie" || ext == ".wzasm";
+    }();
+
     std::string tex1, tex2;
-    if (scene != nullptr && scene->mNumMaterials > 0 && scene->mMaterials != nullptr) {
+    if (!plainDiffuseSource &&
+        scene != nullptr && scene->mNumMaterials > 0 && scene->mMaterials != nullptr) {
         const aiMaterial* mat = scene->mMaterials[0];
         aiString s;
         if (mat->GetTexture(aiTextureType_DIFFUSE, 0, &s) == AI_SUCCESS) {

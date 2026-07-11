@@ -3,30 +3,64 @@
 # models and place them where the engine serves them
 # (PLAN-metalstorm-beta-units.md §1/§6).
 #
-# Pipeline (all pure-Python, no Blender — see pie_to_glb.py's header for why):
-#   pie/*.pie  --pie_to_glb.py-->  models/<name>.gltf (+ .bin)  [engine-served]
-#                                  objects3d/<name>.glb          [authored artifact]
-#   unittextures/atlas_palette.ktx2 --copy--> models/wz_palette.ktx2  [diffuse]
+# Pipeline (via the modelimporter Assimp plugin — see tools/modelimporter/
+# PIEImporter.{h,cpp}; the old pure-Python pie_to_glb.py is retired):
+#   <unit>.wzasm  --modelimporter-->  models/<unit>.gltf (+ .bin)  [engine-served]
+#                                       real per-vertex UVs + per-page materials
+#                                       + SPRINGRTS_geometry piece tree
+#   texpages/page-*.png  --toktx-->   models/page-*.ktx2            [diffuse + tcmask]
+#
+# The .gltf references its pages by bare filename (`page-*.ktx2`), resolved by
+# the renderer relative to the model dir, so the KTX2 pages live in models/
+# alongside the .gltf. A page shared by several units is a single file.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 HERE="$ROOT/tools/wz2100-baseline"
 GAME="$ROOT/data/games/metalstorm"
+MODELS="$GAME/models"
 
-# The shared palette atlas is the diffuse texture every baseline model samples
-# (per-piece swatch via UVs). Copy it beside the .gltf so the relative texture
-# URI (wz_palette.ktx2) resolves; keeping the copy fresh from the canonical
-# source means it never goes stale.
-mkdir -p "$GAME/models"
-cp "$GAME/unittextures/atlas_palette.ktx2" "$GAME/models/wz_palette.ktx2"
+# Locate the modelimporter binary (release preferred, then debug).
+BIN=""
+for cand in "$ROOT/build/release/tools/modelimporter/modelimporter" \
+            "$ROOT/build/debug/tools/modelimporter/modelimporter"; do
+  if [ -x "$cand" ]; then BIN="$cand"; break; fi
+done
+if [ -z "$BIN" ]; then
+  echo "error: modelimporter not built. Run:" >&2
+  echo "  cmake --build build/debug --target modelimporter" >&2
+  exit 1
+fi
+command -v toktx >/dev/null 2>&1 || { echo "error: toktx (KTX-Software) not on PATH" >&2; exit 1; }
 
-python3 "$ROOT/tools/scripts/pie_to_glb.py" \
-  --spec "$HERE/assemblies.json" \
-  --pie-dir "$HERE/pie" \
-  --models-dir "$GAME/models" \
-  --objects3d-dir "$GAME/objects3d"
+mkdir -p "$MODELS"
+
+# 1) Convert every referenced texture page (diffuse + tcmask) to KTX2 once.
+#    UASTC + zstd + mipmaps — matches the runtime's KTX2 loader (and the
+#    shared palette atlas encode in make_palette_atlas.py). `--assign_oetf`
+#    is required because some WZ pages ship an ICC profile toktx won't read;
+#    diffuse pages are sRGB colour, the `_tcmask` mask is a linear blend
+#    amount (the shader samples its raw `.r`).
+echo "converting texture pages -> $MODELS"
+for png in "$HERE"/texpages/*.png; do
+  [ -e "$png" ] || continue
+  stem="$(basename "$png" .png)"
+  oetf="srgb"
+  case "$stem" in *_tcmask) oetf="linear";; esac
+  toktx --encode uastc --zcmp 19 --genmipmap --assign_oetf "$oetf" "$MODELS/$stem.ktx2" "$png"
+  echo "  $stem.ktx2 ($oetf)"
+done
+
+# 2) Convert each assembly manifest to an engine-served .gltf.
+echo "converting models -> $MODELS"
+for wzasm in "$HERE"/*.wzasm; do
+  [ -e "$wzasm" ] || continue
+  name="$(basename "$wzasm" .wzasm)"
+  "$BIN" "$wzasm" "$MODELS/$name.gltf"
+  echo "  $name.gltf (+ .bin)"
+done
 
 echo
 echo "baseline models built. Showcase in the harness:"
 echo "  ?scenario=model-viewer&game=metalstorm&def=wz_tank&capture=turntable"
-echo "  (also: wz_wheeled, wz_cyborg, wz_building)"
+echo "  (also: wz_wheeled, wz_cyborg, wz_building — the HQ carries a team-colour mask)"

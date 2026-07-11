@@ -1,11 +1,17 @@
 # WZ2100 conversion baseline
 
-The first `.pie` → native `.gltf` conversion wave (PLAN-metalstorm-beta-units.md
-§1/§5, the `model-poc` lane's Opus step). Four representative Warzone 2100 models
-converted to engine-ready native models, wired as spawnable Metalstorm defs so
-the model-viewer harness can showcase them. They double as the **PoC comparison
-baseline** — Fable's generated tank/mech get judged against these side by side —
-and remain shippable if kept.
+Four representative Warzone 2100 models converted to engine-ready native `.gltf`,
+wired as spawnable Metalstorm defs so the model-viewer harness can showcase them
+(PLAN-metalstorm-beta-units.md §1/§5). They double as the **PoC comparison
+baseline** — Fable's generated tank/mech get judged against these side by side.
+
+Conversion goes through the **`.pie` Assimp importer plugin** in
+`tools/modelimporter/` (`PIEImporter.{h,cpp}`), the same custom-plugin approach as
+the S3O importer — so `.pie` files flow through the standard `modelimporter →
+glTF/KTX2/SPRINGRTS_geometry` pipeline as everything else. This keeps the real WZ
+per-vertex UVs and the real WZ texture pages (the old `pie_to_glb.py` discarded
+both and flat-coloured every piece with a grey palette swatch, which is why the
+baseline used to render "untextured").
 
 ## Licensing
 
@@ -18,60 +24,59 @@ stay GPL, and every one carries a row in `data/games/metalstorm/ASSETS.md`.
 
 | File | Role |
 |---|---|
-| `pie/*.pie` | the GPL source parts, checked in (tiny; GPL wants the source available) |
-| `assemblies.json` | the assembly spec — which parts compose each model, piece names, scale, colour roles |
-| `fetch_pie.sh` | re-download the parts from a pinned upstream ref (provenance) |
-| `build.sh` | run the full pipeline → `data/games/metalstorm/models/` + `objects3d/` |
-| `../scripts/pie_to_glb.py` | the converter/normaliser (parser + RH orient + scale + piece naming + budget check + palette texture) |
+| `pie/*.pie` | GPL source component parts, checked in (tiny; GPL wants the source available) |
+| `texpages/*.png` | GPL source texture pages (diffuse + `_tcmask`), fetched from the `data-texpages` submodule repo |
+| `*.wzasm` | one assembly manifest per unit — component `.pie` files, mount points, scale, dominant axis (replaces the old `assemblies.json`; read directly by the `.pie` importer) |
+| `fetch_pie.sh` | re-download the `.pie` parts + texture pages from pinned upstream refs (provenance) |
+| `build.sh` | run the full pipeline → `data/games/metalstorm/models/` (`.gltf`+`.bin` + `page-*.ktx2`) |
 
 ## The four models
 
-| Def | WZ parts | Pieces |
-|---|---|---|
-| `wz_tank` | `drhbod09` hull + `prhltrk3`/`prhrtrk3` tracks + `trhcan` cannon | body, tracks_l, tracks_r, turret, muzzle |
-| `wz_wheeled` | `drlbod01` Viper hull + `prllwhl1`/`prlrwhl1` wheels + `trlcan` cannon | body, wheels_l, wheels_r, turret, muzzle |
-| `wz_cyborg` | `cybd_std` body + `cy_can` cannon | body, gun, muzzle |
-| `wz_building` | `blhq` command HQ | body |
+| Def | WZ parts | Pieces | Pages |
+|---|---|---|---|
+| `wz_tank` | `drhbod09` hull + `prhltrk3`/`prhrtrk3` tracks + `trhcan` cannon | body, tracks_l, tracks_r, turret, muzzle | 14, 16, 17 |
+| `wz_wheeled` | `drlbod01` Viper hull + `prllwhl1`/`prlrwhl1` wheels + `trlcan` cannon | body, wheels_l, wheels_r, turret, muzzle | 14, 16, 17 |
+| `wz_cyborg` | `cybd_std` body + `cy_can` cannon | body, gun, muzzle | 33, 17 |
+| `wz_building` | `blhq` command HQ (PIE4, has `TCMASK`) | body | 34 (+ `page-34_tcmask`) |
+
+`wz_building` is PIE4 with a `TCMASK` directive → the importer carries the mask
+page through Assimp and modelimporter's post-fix injects it as the
+`SPRINGRTS_team_color` material extension, so the HQ team-tints (verified: team-0
+blue on the mid-tier bands).
 
 ## Reproduce
 
 ```sh
-./tools/wz2100-baseline/fetch_pie.sh          # optional: re-pull sources (they're committed)
-./tools/wz2100-baseline/build.sh              # convert → models/ + objects3d/
+cmake --build build/release --target modelimporter   # needs the .pie plugin built
+./tools/wz2100-baseline/fetch_pie.sh                 # optional: re-pull sources (committed)
+./tools/wz2100-baseline/build.sh                     # convert → models/
 ```
 
 Then in the browser:
 
 ```
-http://localhost:8012/?scenario=model-viewer&game=metalstorm&def=wz_tank&capture=turntable
+http://localhost:8012/?scenario=model-viewer&game=metalstorm&def=wz_tank
 ```
 
-(`wz_wheeled`, `wz_cyborg`, `wz_building` too). Exit gate: each passes the
-turntable capture (`window.modelViewer.state.badge !== 'fallback-model'` — renders
-as a real mesh, not the procedural fallback). All four verified 2026-07-10.
+(`wz_wheeled`, `wz_cyborg`, `wz_building` too). Each renders as a real, WZ-textured
+mesh (not the procedural fallback, and not the old flat-grey palette).
 
-## Pipeline notes / deliberate divergences
+## Pipeline notes
 
-See `../scripts/pie_to_glb.py`'s module docstring for the full rationale. In short:
-
-- **Pure-Python, not Blender.** `.pie` isn't a format Blender imports, so a parser
-  is needed regardless; Blender isn't installed here, and direct glTF authoring
-  from the stdlib is the least-fragile path (the task's "whichever proves less
-  fragile" call). The Blender `normalize_model.py` remains the path for
-  glTF/FBX/OBJ sources (Option A/B assets).
-- **Flat palette colour, no WZ textures.** WZ's atlas pages live in a separate
-  upstream submodule, and the house style is flat-shaded low-poly anyway. Each
-  piece UVs onto a swatch of the shared `atlas_palette.ktx2`. This makes the
-  baseline apples-to-apples with the generated PoC models (same render style,
-  differ only in geometry — the thing being judged).
-- **No `SPRINGRTS_geometry` / sim piece tree (follow-up).** The direct `.gltf`
-  renders + animates client-side (pieces from node names) and passes the harness,
-  but has no server-side piece tree. `tools/modelimporter` *can* embed
-  `SPRINGRTS_geometry` v8 (smoke-tested: all 5 pieces preserved) — but it also
-  re-applies LH→RH + an S3O-oriented texture channel split that conflicts with the
-  already-RH, palette-textured input. Wiring it in for full sim integration
-  (feed it raw-WZ-orientation geometry, reconcile the texture path) is a
-  documented follow-up; not needed for the showcase/baseline purpose.
-- **No team-colour mask.** Baseline ships no `SPRINGRTS_team_color` mask, so it
-  doesn't team-tint. Fine for a comparison baseline; add a mask if kept as a
-  shipping unit.
+- **Assimp plugin, not a one-off script.** `.pie` (and `.wzasm`) parsing lives in
+  `tools/modelimporter/PIEImporter.{h,cpp}`, mirroring `S3OImporter`. Any `.pie`
+  is now convertible through `modelimporter`, and the assembled scene gets
+  `SPRINGRTS_geometry` (piece tree, bounds, radius) for free from the shared
+  `GeometryExtractor`.
+- **Coordinates** pass through verbatim (WZ Y-up/+Z-forward); modelimporter's
+  export `aiProcess_MakeLeftHanded | aiProcess_FlipWindingOrder` lands them in
+  glTF RH. UVs are PIE2-pixel-normalised (÷ declared page dims) and V-flipped for
+  our KTX2 + Babylon `invertY` sampling (`kFlipV` in the importer).
+- **Per-page materials.** A WZ unit spans several texture pages (body/tracks/
+  turret differ), so the importer emits one material per page; the renderer binds
+  each piece's own material (`entity-renderer.ts`, per-piece materials). This also
+  fixed multi-material `.dae` ZK units that previously only got `materials[0]`.
+- **Plain-diffuse, not S3O channel-split.** WZ pages are ordinary sRGB diffuse
+  (no packed team-mask/glow), so `GeometryExtractor` skips the S3O `tex1`/`tex2`
+  split for `.pie`/`.wzasm` sources; each page is referenced directly as a
+  KTX2 `baseColorTexture` via `KHR_texture_basisu`.

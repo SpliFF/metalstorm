@@ -54,12 +54,31 @@ import {
     type ZKUnitTextures,
 } from './zk-model-material.js';
 
+/** Per-material texture URIs, keyed by material name in the .gltf.
+ *  Single-material models (all S3O/DAE content) use just the `materials[0]`
+ *  fields on `ModelConfig` directly; multi-material models (Warzone `.pie`
+ *  units whose pieces each reference a different texture page) additionally
+ *  carry this map so each piece binds its own material's textures. */
+interface MaterialTextureUris {
+    diffuseUri?: string;
+    emissiveUri?: string;
+    ormUri?: string;
+    teamMaskUri?: string;
+    normalUri?: string;
+    invertteamcolor?: boolean;
+}
+
 /** Parsed model config — sourced from the .gltf's
  *  `extensions.SPRINGRTS_geometry` block plus the PBR material slots
  *  (PLAN-pbr-mapping.md). A hand-authored `<stem>.config.lua` sidecar
  *  can override `invertteamcolor`; the rest is fully machine-
  *  generated and authoritative from the .gltf. */
 interface ModelConfig {
+    /** Per-material texture URIs keyed by glTF material name. Present for
+     *  every model (single entry for single-material models); the loader
+     *  binds each piece by its `mesh.material.name`. The top-level
+     *  `diffuseUri`/… below mirror `materials[0]` for back-compat. */
+    materials?: Map<string, MaterialTextureUris>;
     /** Base color URI — `<tex1stem>_diffuse.ktx2` with cutout in alpha. */
     diffuseUri?: string;
     /** Self-illumination URI — `<tex2stem>_emissive.ktx2`, RGB grayscale glow. */
@@ -163,12 +182,34 @@ async function fetchModelConfig(modelUrl: string): Promise<ModelConfig | null> {
         return typeof uri === 'string' ? uri : undefined;
     };
 
+    // Pull the PBR + SPRINGRTS_team_color texture URIs out of one glTF
+    // material. Shared by the materials[0] back-compat fields and the
+    // per-material map below.
+    const parseMaterial = (m: any): MaterialTextureUris => ({
+        diffuseUri:  resolveTextureUri(m?.pbrMetallicRoughness?.baseColorTexture?.index),
+        emissiveUri: resolveTextureUri(m?.emissiveTexture?.index),
+        ormUri:      resolveTextureUri(m?.pbrMetallicRoughness?.metallicRoughnessTexture?.index),
+        teamMaskUri: resolveTextureUri(m?.extensions?.SPRINGRTS_team_color?.maskTexture?.index),
+        normalUri:   resolveTextureUri(m?.normalTexture?.index),
+        invertteamcolor: m?.extensions?.SPRINGRTS_team_color?.invertMask,
+    });
+
+    // Per-material map, keyed by glTF material name (Babylon names each
+    // loaded material after its glTF name, so the loader correlates a
+    // piece's `mesh.material.name` to its texture set). Multi-material
+    // models — e.g. Warzone `.pie` units whose pieces reference different
+    // texture pages — need this; single-material models fall back to the
+    // top-level fields via `materials[0]`.
+    const materials = new Map<string, MaterialTextureUris>();
+    if (Array.isArray(gltf?.materials)) {
+        gltf.materials.forEach((m: any, i: number) => {
+            const key = (typeof m?.name === 'string' && m.name) ? m.name : `material${i}`;
+            if (!materials.has(key)) materials.set(key, parseMaterial(m));
+        });
+    }
+
     const mat = gltf?.materials?.[0];
-    const diffuseUri  = resolveTextureUri(mat?.pbrMetallicRoughness?.baseColorTexture?.index);
-    const emissiveUri = resolveTextureUri(mat?.emissiveTexture?.index);
-    const ormUri      = resolveTextureUri(mat?.pbrMetallicRoughness?.metallicRoughnessTexture?.index);
-    const teamMaskUri = resolveTextureUri(mat?.extensions?.SPRINGRTS_team_color?.maskTexture?.index);
-    const normalUri   = resolveTextureUri(mat?.normalTexture?.index);
+    const { diffuseUri, emissiveUri, ormUri, teamMaskUri, normalUri } = parseMaterial(mat);
     let invertteamcolor: boolean | undefined =
         mat?.extensions?.SPRINGRTS_team_color?.invertMask;
 
@@ -202,6 +243,7 @@ async function fetchModelConfig(modelUrl: string): Promise<ModelConfig | null> {
     }
 
     return {
+        materials,
         diffuseUri, emissiveUri, ormUri, teamMaskUri, normalUri, invertteamcolor,
         pieceNames, pieceParents, minY, maxY, midY,
     };
@@ -869,7 +911,7 @@ function createTeamColorMaterial(
  * `null` when the unit def doesn't ship that channel.
  */
 function loadUnitTextures(
-    config: ModelConfig,
+    config: MaterialTextureUris,
     modelUrl: string,
     scene: Scene,
 ): UnitTextures | null {
@@ -986,11 +1028,20 @@ interface PieceInfo {
     /** Pre-computed rest-pose world matrix (product of all ancestors'
      *  localMatrix values). Used directly when no animation override. */
     restWorldMatrix: Matrix;
+    /** glTF material name of this piece's mesh, used to bind the piece's
+     *  own texture set on multi-material models (Warzone `.pie` units).
+     *  Undefined for structural (meshless) nodes; falls back to the
+     *  model-wide default texture set when absent or unmatched. */
+    materialKey?: string;
 }
 
 /** Loaded model template for a unit def. */
 interface ModelTemplate {
     pieces: PieceInfo[];
+    /** Per-material texture sets keyed by glTF material name. Pieces bind
+     *  their own set via `PieceInfo.materialKey`; empty/absent for
+     *  single-material models (they use `textures`). */
+    materialTextures: Map<string, UnitTextures>;
     /** Vertical offset so the model's base sits at Y=0. */
     yOffset: number;
     /** Y-extent of the model from foot to top, in elmos. Used by the
@@ -1404,6 +1455,10 @@ export class EntityRenderer {
 
                 if (isMesh) {
                     const mesh = (primitiveMesh ?? node) as Mesh;
+                    // glTF material name of this piece, for per-piece texture
+                    // binding on multi-material models (captured before the
+                    // material is replaced by our team-color shader).
+                    const materialKey = mesh.material?.name;
                     // Detach from hierarchy, keep vertices in piece-local space
                     mesh.parent = null;
                     mesh.position.set(0, 0, 0);
@@ -1421,6 +1476,7 @@ export class EntityRenderer {
                         parentIndex,
                         localMatrix,
                         restWorldMatrix,
+                        materialKey,
                     };
                     pieces.push(info);
                     pieceNode.set(info, node);
@@ -1618,13 +1674,37 @@ export class EntityRenderer {
             const yOffset = 0;
 
             // Load textures (sharing across all teams; team color is
-            // applied per-team via the shader uniform).
-            const textures = config ? loadUnitTextures(config, def.modelUrl, this.scene) : null;
+            // applied per-team via the shader uniform). One UnitTextures per
+            // glTF material, deduped by diffuse URI so pieces that share a
+            // page (or a single-material model) share GPU textures. `textures`
+            // stays the model-wide default (materials[0]) used by pieces whose
+            // material isn't in the map.
+            const texByUri = new Map<string, UnitTextures>();
+            const loadCached = (uris: MaterialTextureUris | undefined): UnitTextures | null => {
+                if (!uris?.diffuseUri) return null;
+                let t = texByUri.get(uris.diffuseUri);
+                if (!t) {
+                    const nt = loadUnitTextures(uris, def.modelUrl, this.scene);
+                    if (!nt) return null;
+                    t = nt;
+                    texByUri.set(uris.diffuseUri, nt);
+                }
+                return t;
+            };
+            const materialTextures = new Map<string, UnitTextures>();
+            if (config?.materials) {
+                for (const [name, uris] of config.materials) {
+                    const t = loadCached(uris);
+                    if (t) materialTextures.set(name, t);
+                }
+            }
+            const textures = config ? loadCached(config) : null;
 
             console.log(
                 `[entity-renderer] ${def.name}: model loaded, ` +
                 `${geometryPieces.length} piece(s) with geometry, ` +
                 `${orderedPieces.length} total nodes, yOffset=${yOffset.toFixed(1)}` +
+                (materialTextures.size > 1 ? `, ${materialTextures.size} materials` : '') +
                 (config?.diffuseUri  ? `, diffuse=${config.diffuseUri}`   : '') +
                 (config?.emissiveUri ? `, emissive=${config.emissiveUri}` : '') +
                 (config?.ormUri      ? `, orm=${config.ormUri}`           : '') +
@@ -1633,7 +1713,7 @@ export class EntityRenderer {
             );
 
             return {
-                pieces: orderedPieces, yOffset, modelHeight, textures,
+                pieces: orderedPieces, yOffset, modelHeight, textures, materialTextures,
                 // Ghost prototypes are built lazily on first request to
                 // keep model load lean for defs the player never builds.
                 ghostPrototypes: [],
@@ -1752,9 +1832,25 @@ export class EntityRenderer {
             // `factoryveh` — keeping the PBR material from the glTF
             // import and rendering broken.
             const customParams = this.defInfos.get(defId)?.customParams;
-            if (tmpl?.textures) {
+            // Bind this piece's own material on multi-material models
+            // (Warzone .pie units, whose pieces reference different texture
+            // pages); fall back to the model-wide default for single-
+            // material content and structural pieces.
+            //
+            // Read the piece's glTF material name LIVE from the template
+            // mesh: Babylon's glTF loader hasn't reliably assigned
+            // `mesh.material` yet at load-time capture (materialKey is often
+            // undefined there), but it's always set by the time a piece
+            // first renders here. `piece.mesh` keeps its imported material —
+            // getOrCreatePieceMesh clones the mesh and only reassigns the
+            // clone — so this stays the glTF material name across frames.
+            const materialKey = piece.mesh?.material?.name ?? piece.materialKey;
+            const pieceTextures = (materialKey
+                ? tmpl?.materialTextures.get(materialKey) : undefined)
+                ?? tmpl?.textures;
+            if (pieceTextures) {
                 mesh.material = createUnitMaterial(
-                    matName, tmpl.textures, teamColor, tmpl.modelHeight,
+                    matName, pieceTextures, teamColor, tmpl?.modelHeight ?? 1,
                     this.scene, customParams);
             } else {
                 // No texture sidecar — synthesise a white diffuse with

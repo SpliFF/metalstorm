@@ -27,13 +27,30 @@ plus extra importer plugins registered at runtime by this tool.
 
 ## Plugins
 
-This tool currently registers one extra importer at runtime via
+This tool registers extra importers at runtime via
 `Assimp::Importer::RegisterLoader()`:
 
 - **S3O** (`*.s3o`) — Spring RTS unit/feature model format. Implemented
   in [`S3OImporter.cpp`](S3OImporter.cpp). The plugin is written against
   upstream Assimp's `BaseImporter` API and is structured to be droppable
   into `assimp/code/AssetLib/S3O/` for upstreaming.
+
+- **PIE** (`*.pie`, `*.wzasm`) — Warzone 2100 model format (GPL-2.0+
+  models/artwork). Implemented in [`PIEImporter.cpp`](PIEImporter.cpp),
+  mirroring the S3O plugin's structure. Parses the real per-vertex UVs +
+  texture-page references (PIE2 pixel-space / PIE3+ normalised) and the
+  PIE4 `TCMASK` team-colour mask. A `.wzasm` file is a small JSON
+  **assembly manifest** the importer reads to compose several component
+  `.pie` files (body + tracks + turret …) into one unit, mounting parts
+  at their connectors and baking the scale into vertices; a bare `.pie`
+  is the one-part case. Because a WZ unit spans multiple texture pages,
+  the importer emits **one material per page** (the renderer binds each
+  piece's own material — `client/src/core/entity-renderer.ts`), and the
+  PIE4 team mask rides a spare texture slot that the post-fix
+  (`FixGlbBasisuTextures`) relocates into the `SPRINGRTS_team_color`
+  material extension. Full end-to-end workflow (fetch GPL sources →
+  build → showcase) is in
+  [`../wz2100-baseline/README.md`](../wz2100-baseline/README.md).
 
 ## Usage
 

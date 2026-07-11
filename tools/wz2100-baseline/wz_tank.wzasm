@@ -1,0 +1,15 @@
+{
+  "wzassembly": 1,
+  "name": "wz_tank",
+  "label": "WZ2100 baseline — tracked tank",
+  "target_metres": 8.5,
+  "dominant_axis": "z",
+  "pie_dir": "pie",
+  "parts": [
+    { "pie": "drhbod09.pie", "node": "body" },
+    { "pie": "prhltrk3.pie", "node": "tracks_l", "parent": "body" },
+    { "pie": "prhrtrk3.pie", "node": "tracks_r", "parent": "body" },
+    { "pie": "trhcan.pie", "node": "turret", "parent": "body",
+      "mount": { "pie": "drhbod09.pie", "connector": 0 }, "add_muzzle": true }
+  ]
+}

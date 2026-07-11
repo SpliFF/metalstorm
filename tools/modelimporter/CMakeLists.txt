@@ -80,6 +80,7 @@ endif()
 add_executable(modelimporter
     main.cpp
     S3OImporter.cpp
+    PIEImporter.cpp
     GeometryExtractor.cpp
 )
 target_include_directories(modelimporter PRIVATE

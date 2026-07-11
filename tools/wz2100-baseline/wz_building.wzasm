@@ -1,0 +1,11 @@
+{
+  "wzassembly": 1,
+  "name": "wz_building",
+  "label": "WZ2100 baseline — command HQ",
+  "target_metres": 20.0,
+  "dominant_axis": "x",
+  "pie_dir": "pie",
+  "parts": [
+    { "pie": "blhq.pie", "node": "body" }
+  ]
+}

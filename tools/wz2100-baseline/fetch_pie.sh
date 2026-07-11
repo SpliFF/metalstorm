@@ -1,17 +1,26 @@
 #!/usr/bin/env bash
-# fetch_pie.sh — download the exact Warzone 2100 .pie source parts used by the
-# Metalstorm conversion baseline (PLAN-metalstorm-beta-units.md §1).
+# fetch_pie.sh — download the exact Warzone 2100 .pie source parts (and the
+# texture pages they reference) used by the Metalstorm conversion baseline
+# (PLAN-metalstorm-beta-units.md §1).
 #
 # WZ2100 source + artwork are GPL-2.0-or-later (project relicensing, 2008). The
 # .pie parts are checked into tools/wz2100-baseline/pie/ already (they are tiny
 # and GPL requires the source stay available); this script just re-fetches them
 # from a pinned upstream ref so the provenance is reproducible.
+#
+# The texture pages the .pie parts reference live in a *separate* upstream
+# submodule repo (Warzone2100/data-texpages), so they get their own base URL.
+# Both the diffuse pages and the PIE4 team-colour (`_tcmask`) pages are pulled
+# into tools/wz2100-baseline/texpages/ for the importer + toktx step.
 set -euo pipefail
 
-REF="${1:-master}"   # pin a tag/commit for reproducibility; default master
+REF="${1:-master}"      # pin a tag/commit for the engine repo (.pie parts)
+TEXREF="${2:-master}"   # pin a tag/commit for the data-texpages submodule repo
 BASE="https://raw.githubusercontent.com/Warzone2100/warzone2100/${REF}/data/base"
+TEXBASE="https://raw.githubusercontent.com/Warzone2100/data-texpages/${TEXREF}"
 DEST="$(cd "$(dirname "$0")" && pwd)/pie"
-mkdir -p "$DEST"
+TEXDEST="$(cd "$(dirname "$0")" && pwd)/texpages"
+mkdir -p "$DEST" "$TEXDEST"
 
 # part path (under data/base) — grouped by the model that uses it
 PARTS=(
@@ -36,5 +45,25 @@ echo "fetching ${#PARTS[@]} .pie parts from Warzone2100@${REF} -> $DEST"
 for p in "${PARTS[@]}"; do
   curl -fsSL --max-time 30 "$BASE/$p" -o "$DEST/$(basename "$p")"
   echo "  $(basename "$p")"
+done
+
+# Texture pages the parts reference (TEXTURE / TCMASK directives). Diffuse pages
+# are hi-res redraws of the 256-space the .pie UVs are authored in; `_tcmask`
+# pages are the greyscale team-colour masks (PIE4 TCMASK). Both are plain RGBA.
+TEXPAGES=(
+  # diffuse pages
+  "page-14-droid-hubs.png"      # tank/wheeled bodies
+  "page-16-droid-drives.png"    # tracks/wheels
+  "page-17-droid-weapons.png"   # cannons
+  "page-33-cyborgs.png"         # cyborg body
+  "page-34-buildings.png"       # command HQ
+  # team-colour masks (PIE4 TCMASK)
+  "page-34_tcmask.png"          # blhq (command HQ) team regions
+)
+
+echo "fetching ${#TEXPAGES[@]} texture pages from data-texpages@${TEXREF} -> $TEXDEST"
+for t in "${TEXPAGES[@]}"; do
+  curl -fsSL --max-time 60 "$TEXBASE/$t" -o "$TEXDEST/$t"
+  echo "  $t"
 done
 echo "done."

@@ -3,7 +3,8 @@
 -- These are NOT part of the Metalstorm roster. They are the model-harness
 -- showcase + PoC comparison baseline (PLAN-metalstorm-beta-units.md §1/§5):
 -- real WZ2100 `.pie` models (GPL-2.0-or-later, see ../ASSETS.md) converted to
--- native `.gltf` by tools/scripts/pie_to_glb.py, wired as spawnable defs so
+-- native `.gltf` by the modelimporter `.pie` Assimp plugin (real WZ per-vertex
+-- UVs + texture pages; tools/wz2100-baseline/build.sh), wired as spawnable defs so
 -- the model-viewer harness (?scenario=model-viewer&game=metalstorm&def=wz_tank
 -- &capture=turntable) can showcase them and Fable's generated tank/mech can be
 -- judged against them side by side. Kept intentionally minimal: single-unit

@@ -1,0 +1,15 @@
+{
+  "wzassembly": 1,
+  "name": "wz_wheeled",
+  "label": "WZ2100 baseline — wheeled vehicle (Viper hull)",
+  "target_metres": 6.0,
+  "dominant_axis": "z",
+  "pie_dir": "pie",
+  "parts": [
+    { "pie": "drlbod01.pie", "node": "body" },
+    { "pie": "prllwhl1.pie", "node": "wheels_l", "parent": "body" },
+    { "pie": "prlrwhl1.pie", "node": "wheels_r", "parent": "body" },
+    { "pie": "trlcan.pie", "node": "turret", "parent": "body",
+      "mount": { "pie": "drlbod01.pie", "connector": 0 }, "add_muzzle": true }
+  ]
+}

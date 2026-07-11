@@ -1,0 +1,13 @@
+{
+  "wzassembly": 1,
+  "name": "wz_cyborg",
+  "label": "WZ2100 baseline — cyborg walker",
+  "target_metres": 2.4,
+  "dominant_axis": "y",
+  "pie_dir": "pie",
+  "parts": [
+    { "pie": "cybd_std.pie", "node": "body" },
+    { "pie": "cy_can.pie", "node": "gun", "parent": "body",
+      "mount": { "pie": "cybd_std.pie", "connector": 0 }, "add_muzzle": true }
+  ]
+}
