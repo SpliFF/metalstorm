@@ -97,6 +97,8 @@ await window.__gp(`(()=>{const er=self.__entityRenderer; return er.scene.meshes.
 
 `window.__gp(expr)` evaluates JS **inside the render worker** (where the Babylon
 scene / `__entityRenderer` / materials live) — the main introspection handle.
+Other worker hooks: `__frameProfiler.dump()`, `__uiTextures.dump()` (enumerates
+the LuaUI HUD texture cache — resolvedUrl/loadedUrl/loaded/lastError per entry).
 Example screenshot of a working drive: `.claude/skills/run-springrts-web/example-cuspbr-corcom.jpg`.
 
 ## Run (human path)
@@ -147,6 +149,16 @@ cd client && npx vitest run                        # client unit tests
 - **defs cache** lives at `data/games/<id>/cache/defs/<hash>/`, keyed on game
   content (not the server binary). After changing the C++ defs serializer, clear
   it (`spring-debug` `clear_defs_cache`, or `rm -rf`) before a fresh room.
+- **Zombie `spring-server` on `:9100` blocks auth.** A leftover game server from
+  a crashed/killed earlier session holds the port; new rooms route to it and
+  login/auth fails or hangs mysteriously (this burned most of the U8 session).
+  Check `list_processes` / `lsof -i :9100` and kill leftovers before launching.
+- **A rebuilt server binary does not affect a live process.** After
+  `cmake --build`, kill + relaunch any running game server (and restart the
+  lobby proc if lobby code changed) — otherwise you're testing the old binary.
+- **CMake globs are stale for NEW server `.cpp` files.** Adding a file under
+  `rts/Server|Sim|Map|Lua` needs a `cmake build/debug` re-configure before the
+  incremental build, else the link fails with undefined symbols.
 
 ## Troubleshooting
 
@@ -158,3 +170,5 @@ cd client && npx vitest run                        # client unit tests
 | Worker code edit not taking after reload | Restart the `client` (Vite) proc; the `?worker` bundle is stale. |
 | Two lobbies / logservers, port races | `tools/scripts/spring-services.sh stop`, then restart mprocs. |
 | `403 forbidden — admin role required` | Browser user isn't admin — use the `spring-debug` MCP for server actions. |
+| Login/auth hangs or fails after a crashed session | Zombie `spring-server` holding `:9100` — kill it (`lsof -i :9100`), relaunch. |
+| Undefined-symbol link error after adding a server `.cpp` | Stale CMake glob — re-configure (`cmake build/debug`), then rebuild. |

@@ -104,6 +104,17 @@ Key tools for game testing:
 | `performance_start_trace` / `performance_stop_trace` | Profile render performance during gameplay |
 | `lighthouse_audit` | Run Lighthouse for performance/accessibility checks |
 
+**`take_screenshot` caveat — WebGL canvases capture BLACK.** CDP screenshots
+cannot see a WebGL2 canvas created with `preserveDrawingBuffer:false` (ours).
+A black/empty game area in a screenshot does NOT mean nothing rendered. Use
+`window.test.highResScreenshot()` (renders with the buffer preserved), a real
+human-viewed browser, or data-level checks (`window.__gp` mesh/texture counts)
+instead of trusting the pixel capture.
+
+**Game choice for UI testing: use `zk`, not `papertanks`.** PaperTanks ships no
+configured LuaUI/minimap/sounds, so UI/HUD tests against it prove nothing —
+widgets simply don't exist there. ZK (and BAR) have full HUDs.
+
 ## Lobby JS API (`window.lobby`)
 
 The `LobbyUI` instance is exposed on `window.lobby`. All lobby actions can be called directly from JS (via `evaluate_script` or browser console):

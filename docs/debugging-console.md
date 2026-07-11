@@ -138,6 +138,13 @@ const r3 = await debugConsole.exec('LuaRules', 'bad syntax');
 
 The `exec()` method sends a `ConsoleCommand` FlatBuffer to the game server and returns a Promise that resolves when the `ConsoleResponse` arrives (10s timeout).
 
+**Output-format gotchas (parsing exec results in scripts):** LuaRules exec output is a *pretty-printed* Lua representation, not raw values. Two traps for automated parsers:
+
+- **Strings arrive quote-wrapped** — `return "abc"` yields the 5-character output `"abc"`. Strip the quotes (an `unquoteExec`-style helper) before comparing.
+- **Integral floats print with a trailing `.0`** — `return 406` from Lua arithmetic can arrive as `406.0`. Format server-side with `string.format("%d", v)` when you need a clean integer.
+
+Regex-based parsers that don't account for these **fail silently** (no match → falsy result that looks like a legitimate negative).
+
 ### Execution Scopes
 
 | Scope | Target | What it runs |

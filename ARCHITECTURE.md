@@ -168,6 +168,15 @@ Full CLI flag list (from `rts/server_main.cpp`):
 | `ui/quit-confirm/` | Quit confirmation overlay. |
 | `ui/game-over/` | Game over results overlay. |
 
+#### Client porting gotchas (hard-won — check before writing new client code)
+
+- **Dead-producer trap (post-GW4, recurring):** the old main-thread `stateUpdate` path is DEAD — every `liveState` field a widget reads needs its own **worker-side producer**. This class of bug has recurred at least four times (camera pose/`viewMatrix` → `gpSyncCameraToLiveState` U1; `onResourceUpdate` → team resources U3; `onUnitCmdDescs`/`sendSelectionState` G3a; `minimapGeometry`/`minimapEvents` G4). When a widget sees stale/zero data that "used to work", suspect a main-thread producer that no longer feeds the worker before suspecting the widget. Similarly, the worker roster is **seeded once at init** (players via `gp:init`, teams via `TeamStartInfo`) — the `setRoster` path is dead; empty-roster crashes are fixed at the seed, not the widget.
+- **Babylon is right-handed — porting Recoil math:** form a third basis axis as `right × up` (RH). `RotationQuaternionFromAxisToRef` collapses to a reflection if handed an LH basis.
+- **`ShaderMaterial` alpha:** `alphaMode` is IGNORED unless `needAlphaBlending: true` is passed in the constructor options — without it, transparent materials draw opaque black.
+- **GLSL-in-template-literal comment rules:** no backticks in `//` comments (closes the JS template literal → Vite PARSE_ERROR) and no semicolons in `//` comments in raw `ShaderMaterial` source (splits the GLSL → material silently draws nothing).
+- **Lua bridge array marshalling:** a plain JS array returned to Lua spreads as N return values, NOT a table — `ipairs()` on the "return" sees nil. Wrap in `luaTable()` **even when the array is empty** (an empty array marshals as zero return values). Known still-unwrapped: `ordersToLuaArray` (`GetUnitCommands`/`GetFactoryCommands`/`GetCommandQueue`) — see PLAN-bar.md.
+- **Model radius is midpos-relative:** `(maxs − midpos).Length()` (AABB half-diagonal, Recoil-faithful) — origin-relative over-estimates tall models.
+
 ### Protocol (`schemas/protocol.fbs`)
 
 **Wire format:** Every binary frame (over WebTransport — PLAN-game-worker.md) starts with `u8 envelope`:
@@ -458,6 +467,10 @@ data/
 ```
 
 ## HTTP Routes
+
+> **Handler gotcha:** `NetworkServer` strips query strings before matching/handing
+> the path to handlers — a handler that parses params out of its `path` argument
+> silently gets none. Use `CurrentQueryString()` to read query parameters.
 
 ### Lobby (`spring-lobby`)
 
