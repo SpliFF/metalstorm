@@ -177,20 +177,33 @@ export class LobbyUI {
     get games(): AvailableGameInfo[] { return this.availableGames; }
     get ais(): AvailableAIInfo[] { return this.availableAIs; }
 
+    /// When true, the lobby UI never puts itself on screen: the initial
+    /// login/auto-login is skipped and every show*()/setTemplates() path
+    /// stays a no-op. Set by scenario (`?scenario=`) and direct-boot
+    /// (`?direct=`) modes, which own the screen and drive the game
+    /// themselves — otherwise the async game-template load resolving into
+    /// setTemplates() re-renders (and un-hides) the login form the runner
+    /// had already hidden. See main.ts scenario/direct dispatch.
+    private suppressed = false;
+
     constructor(
         onGameStart?: (gameServerPort: number, mapId: string, gameId: string) => void,
         templates?: LobbyTemplates,
+        suppressed = false,
     ) {
         this.onGameStart = onGameStart;
         this.templates = templates ?? getDefaultLobbyTemplates();
         this.container = document.getElementById('lobby') as HTMLDivElement;
+        this.suppressed = suppressed;
         this.injectStyles();
 
         // Try auto-login with saved session
         const savedUser = localStorage.getItem('springrts-username');
         const savedToken = localStorage.getItem('springrts-token');
-        console.log(`[lobby] init: savedUser=${savedUser ?? 'null'} savedToken=${savedToken ? savedToken.substring(0,8) + '...' : 'null'}`);
-        if (savedUser && savedToken) {
+        console.log(`[lobby] init: savedUser=${savedUser ?? 'null'} savedToken=${savedToken ? savedToken.substring(0,8) + '...' : 'null'} suppressed=${suppressed}`);
+        if (this.suppressed) {
+            this.hide();
+        } else if (savedUser && savedToken) {
             this.tryAutoLogin(savedUser, savedToken);
         } else {
             this.showLogin();
@@ -205,6 +218,10 @@ export class LobbyUI {
     setTemplates(templates: LobbyTemplates): void {
         this.templates = templates;
         this.injectStyles();
+        // Suppressed (scenario/direct boot): keep the swapped-in templates
+        // for a possible later un-suppress, but never re-render — a
+        // re-render here would un-hide the login form the runner hid.
+        if (this.suppressed) return;
         if (this.currentScreen === 'login') this.showLogin();
         else if (this.currentScreen === 'browser') this.showBrowser();
         else if (this.currentScreen === 'room') this.showRoom();
@@ -213,6 +230,7 @@ export class LobbyUI {
     private autoLoginAttempts = 0;
 
     private async tryAutoLogin(username: string, token: string): Promise<void> {
+        if (this.suppressed) return;
         this.container.style.display = 'flex';
         this.container.innerHTML = renderTemplate(this.templates.reconnecting, {
             attempt_suffix: this.autoLoginAttempts > 0
@@ -271,7 +289,7 @@ export class LobbyUI {
             onEntityDestroy: () => {},
         });
     }
-    show(): void { this.container.style.display = 'flex'; }
+    show(): void { if (this.suppressed) return; this.container.style.display = 'flex'; }
     hide(): void { this.container.style.display = 'none'; }
 
     /**
@@ -434,6 +452,7 @@ export class LobbyUI {
 
     showLogin(): void {
         this.currentScreen = 'login';
+        if (this.suppressed) return;
         this.container.style.display = 'flex';
         this.container.innerHTML = this.templates.login;
         document.getElementById('login-form')!.onsubmit = (e) => {
@@ -505,6 +524,10 @@ export class LobbyUI {
     }
 
     showBrowser(): void {
+        // Suppressed (scenario/direct boot): stay off screen and, crucially,
+        // do not null currentRoom — the runner's setCurrentRoomFromJson wiring
+        // depends on it to fire onGameStart when the room goes Active.
+        if (this.suppressed) return;
         this.currentScreen = 'browser';
         this.currentRoom = null;
 
@@ -705,6 +728,7 @@ export class LobbyUI {
     }
 
     private showRoom(): void {
+        if (this.suppressed) return;
         if (!this.currentRoom) return;
         this.currentScreen = 'room';
         this.lastRenderedRoomState = this.currentRoom.state;

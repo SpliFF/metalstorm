@@ -1059,9 +1059,16 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Show lobby with the engine-default templates immediately so the
     // login screen renders without waiting on a network round-trip.
+    //
+    // Scenario (`?scenario=`) and direct-boot (`?direct=`) modes own the
+    // screen and drive the game themselves — construct the lobby
+    // *suppressed* so it never puts login/room UI on screen (the async
+    // game-template load would otherwise re-render and un-hide the login
+    // form the runner had already hidden).
+    const lobbySuppressed = !!scenario || !!directManifestUrl;
     lobbyUI = new LobbyUI((gameServerPort: number, mapId: string, gameId: string) => {
         startGame(gameServerPort, mapId, gameId);
-    }, getDefaultLobbyTemplates());
+    }, getDefaultLobbyTemplates(), lobbySuppressed);
     (window as any).lobby = lobbyUI;
 
     if (directManifestUrl) {
