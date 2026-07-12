@@ -700,12 +700,27 @@ function gpDispatchKeyRelease(keysym: number, mods: number): void {
 /// entityState count=N with no main-thread network code" (PLAN-game-worker.md
 /// GW4-c2). The full callback object (porting main.ts@32cf513619 L1070–1326)
 /// fills in as the renderers + LuaUI getRuntime() come online in c3–c6.
+/// Worker game-connection readiness, surfaced to the test harness /
+/// scenario runner via `gp:test 'gameConnected'`. The WebTransport game
+/// connection comes up asynchronously after gp:init, so a scenario that
+/// spawns a unit before it is authenticated loses its first viewport update
+/// and the entity never streams — the "entity never streams on cold boot"
+/// race that reads as a model-load failure. Exposing the real state lets the
+/// runner gate on it and the model-viewer report the actual cause instead of
+/// a blind timeout. `gpAuthFailed` holds the server's rejection message (a
+/// real failure, not a slow start); `gpFirstStateReceived` flips once the
+/// stream delivers its first entity snapshot.
+let gpAuthFailed: string | null = null;
+let gpFirstStateReceived = false;
+
 function gpConnect(msg: GpInitToWorker): void {
     // GW8: reset the per-envelope bandwidth tally for the new game session. The
     // tally lives in THIS (worker) bundle's net-inspector instance, fed by the
     // worker connection's routeIncoming/sendOnControl; surfaced to main via the
     // gp:test 'netStats' pull (PLAN-performance PC-2).
     resetNetStats();
+    gpAuthFailed = null;
+    gpFirstStateReceived = false;
     const conn = new Connection({
         onStateChange: (state) => postLog(1, `[gp] connection state: ${state}`),
         onAuthenticated: (playerId, _token, team, defsCacheKey) => {
@@ -740,9 +755,10 @@ function gpConnect(msg: GpInitToWorker): void {
             // Register a viewport so the server starts streaming entity state.
             void gpRegisterViewport(msg.lobbyUrl, msg.mapId);
         },
-        onAuthFailed: (m) => postLog(4, `[gp] auth failed: ${m}`),
+        onAuthFailed: (m) => { gpAuthFailed = m; postLog(4, `[gp] auth failed: ${m}`); },
         onServerError: (code, m) => postLog(4, `[gp] server error ${code}: ${m}`),
         onEntityState: (snapshot, isDelta) => {
+            gpFirstStateReceived = true;
             gpCtx.entityRenderer?.update(snapshot, isDelta);
             gpBuildingPlateRenderer?.update(snapshot);
             // GW4-c6-1b: also merge into liveState.units + synth the
@@ -2339,6 +2355,15 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
             const d = (gpDefCache?.getAllUnitDefs() ?? []).find((x) => x.name === name);
             return d ? gpCloneSafe(d) : null;
         }
+        // — Worker game-connection readiness (see gpAuthFailed / gpFirstStateReceived).
+        //   Lets the scenario runner gate spawns on a live connection and the
+        //   model-viewer report the real cause of a non-streaming entity. —
+        case 'gameConnected':
+            return {
+                authenticated: gpCtx.connection?.authenticated ?? false,
+                authFailed: gpAuthFailed,
+                receivedState: gpFirstStateReceived,
+            };
         // — PLAN-model-harness: world bounding sphere + E1 fallback probe —
         case 'entityBounds':
             return gpCtx.entityRenderer?.getEntityBounds(num(0)) ?? null;

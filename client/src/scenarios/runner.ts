@@ -170,6 +170,15 @@ export class ScenarioRunner {
             // still error after 4 wall minutes rather than hang.
             const h = await this.waitForFirstFrame(240000);
 
+            // The sim ticks now, but the *worker's* WebTransport game connection
+            // (which receives entity state and sends viewport updates) comes up
+            // independently of the server and may still be authenticating.
+            // Spawning a unit before it is ready loses the first viewport update
+            // and the entity never streams — a cold-boot race that reads as a
+            // phantom model-load failure. Gate on the connection being
+            // authenticated before setup() spawns anything.
+            await this.waitForGameConnection(h, 30000);
+
             // Pre-setup: enable cheats + revive every team. Without this,
             // ZK's game_over.lua (game_over.lua ProcessLastAlly) flags
             // teams with no units as dead, and Spring.CreateUnit raises
@@ -395,6 +404,35 @@ export class ScenarioRunner {
             await sleep(250);
         }
         throw new Error(`waitForFirstFrame: sim did not tick within ${timeoutMs}ms`);
+    }
+
+    /**
+     * Wait for the worker's WebTransport game connection to authenticate, so
+     * spawns actually stream (see the cold-boot race note at the call site).
+     * Throws on an explicit auth failure (a real connection problem, surfaced
+     * loudly rather than as a downstream model timeout). On timeout it warns
+     * and returns — a genuinely stuck connection then shows up as an honest
+     * "not authenticated" warning plus whatever the scenario reports, instead
+     * of hanging the whole run.
+     */
+    private async waitForGameConnection(h: TestHarness, timeoutMs: number): Promise<void> {
+        const deadline = performance.now() + timeoutMs;
+        let last: { authenticated: boolean; authFailed: string | null; receivedState: boolean } | null = null;
+        while (performance.now() < deadline) {
+            last = await h.gameConnected().catch(() => null);
+            if (last?.authFailed) {
+                throw new Error(`worker game connection auth failed: ${last.authFailed}`);
+            }
+            if (last?.authenticated) {
+                console.log('[scenario] worker game connection authenticated — safe to spawn');
+                return;
+            }
+            await sleep(200);
+        }
+        console.warn(
+            `[scenario] worker game connection not authenticated after ${timeoutMs}ms ` +
+            `(last=${JSON.stringify(last)}) — proceeding anyway; spawned entities may not stream. ` +
+            `Usually means the worker never connected (check the gp:init game port / /api/wt/info).`);
     }
 }
 

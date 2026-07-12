@@ -497,6 +497,17 @@ export class TestHarness {
             { x: number; y: number; z: number; radius: number; hasModel: boolean | null } | null;
     }
 
+    /** Worker game-connection readiness. The WebTransport game connection comes
+     *  up asynchronously after startGame; a scenario that spawns before it is
+     *  authenticated loses its first viewport update and the entity never
+     *  streams (reads as a phantom model-load failure). Gate spawns on
+     *  `authenticated`, and use `authFailed` (server rejection message) vs
+     *  `receivedState` (first snapshot seen) to report the real cause. */
+    async gameConnected(): Promise<{ authenticated: boolean; authFailed: string | null; receivedState: boolean }> {
+        return await this.deps.workerCall('gameConnected') as
+            { authenticated: boolean; authFailed: string | null; receivedState: boolean };
+    }
+
     /** Scene-wide wireframe toggle (F8 panel render group). */
     setWireframe(on: boolean): void {
         void this.deps.workerCall('setWireframe', [on]);

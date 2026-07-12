@@ -101,6 +101,9 @@ class ModelViewerStage implements StageContext {
     private panel: ModelViewerPanel | null = null;
     private luaDefNames: string[] | null = null;
     private capturePreset: CapturePreset | null;
+    /** Current staged def's model URL (from the streamed def wire), used to
+     *  launch the standalone Babylon inspectors. Null = no model / fallback. */
+    private currentModelUrl: string | null = null;
 
     constructor(h: TestHarness, capturePreset: CapturePreset | null) {
         this.h = h;
@@ -158,6 +161,7 @@ class ModelViewerStage implements StageContext {
                     const id = this.state.stageUnitId;
                     if (id) await this.h.orbit(id, { follow: true });
                 },
+                inspectModel: (mode) => this.openInspector(mode),
             });
         }
         this.state.phase = 'ready';
@@ -190,6 +194,7 @@ class ModelViewerStage implements StageContext {
 
         const wire = await this.pollDefWire(name, 10000);
         this.probe = wire ? probeFromDef(wire) : null;
+        this.currentModelUrl = (wire as unknown as { modelUrl?: string } | null)?.modelUrl || null;
         this.state.showcases = this.probe ? deriveShowcases(this.probe) : [];
         if (!this.probe) this.state.badge = 'def not streamed — probe unavailable';
         await this.probeTransportee(name);
@@ -201,11 +206,29 @@ class ModelViewerStage implements StageContext {
         // fallback forever (a deadlock: the anchored-away camera keeps the
         // unit out of the viewport). Snap the camera to the pedestal and
         // wait for the first entity tick before entering the rig.
+        //
+        // Retry loop (cold-boot race guard): even with the runner's
+        // connection gate, a viewport update can be dropped if it races the
+        // first authenticated frame. Re-snap the camera + wait a few times —
+        // this is exactly what a manual "Respawn" click does, automated and
+        // bounded. Each pass re-sends the viewport once the stream is live.
         if (!(await this.h.entityBounds(id).catch(() => null))) {
-            await this.h.orbitStop().catch(() => { /* rig may be off */ });
-            await this.h.focusOn(this.center.x, this.center.z, 0)
-                .catch(() => { /* camera may not be ready */ });
-            await this.waitStreamed(id, 4000);
+            let streamed = false;
+            for (let attempt = 0; attempt < 4 && !streamed; attempt++) {
+                await this.h.orbitStop().catch(() => { /* rig may be off */ });
+                await this.h.focusOn(this.center.x, this.center.z, 0)
+                    .catch(() => { /* camera may not be ready */ });
+                streamed = await this.waitStreamed(id, 3000);
+            }
+            if (!streamed) {
+                // Accurate diagnosis: the unit exists server-side (spawn
+                // returned an id) but never streamed to the worker. Ask the
+                // connection what actually went wrong rather than letting it
+                // masquerade as a model-load timeout downstream.
+                this.state.badge = await this.diagnoseNoStream(id);
+                this.state.lastError = this.state.badge;
+                this.notify();
+            }
         }
         await this.h.orbit(id, { follow: true }).catch(() => { /* camera may lag the spawn */ });
 
@@ -216,6 +239,22 @@ class ModelViewerStage implements StageContext {
         if (this.capturePreset) await badgePoll;
         this.notify();
         return id;
+    }
+
+    /**
+     * Open a standalone Babylon model inspector on the staged def's model in
+     * a popup — the DOM Inspector the game's worker/OffscreenCanvas scene
+     * can't host. `cdn` = unpkg UMD 9.1.0 (isolated); `bundled` = the app's
+     * own Vite route (same module graph as the game). The window is opened
+     * synchronously from the click so popup blockers allow it.
+     */
+    openInspector(mode: 'cdn' | 'bundled'): void {
+        const page = mode === 'cdn' ? '/model-inspector.html' : '/babylon-inspector.html';
+        const url = this.currentModelUrl
+            ? `${page}?model=${encodeURIComponent(this.currentModelUrl)}`
+            : page;
+        window.open(url, `model-inspector-${mode}`,
+            'width=1400,height=1000,noopener,noreferrer');
     }
 
     /** Streamed defs + sim-side UnitDefs name dump, merged for the picker
@@ -278,10 +317,12 @@ class ModelViewerStage implements StageContext {
     }
 
     private async pollModelBadge(unitId: number): Promise<void> {
-        const deadline = performance.now() + 12000;
+        const deadline = performance.now() + 60000;
+        let everStreamed = false;
         while (performance.now() < deadline) {
             if (this.state.stageUnitId !== unitId) return; // stage moved on
             const b = await this.h.entityBounds(unitId).catch(() => null);
+            if (b) everStreamed = true;
             if (b?.hasModel === true) {
                 await this.loadClips(unitId);
                 return;
@@ -293,8 +334,27 @@ class ModelViewerStage implements StageContext {
             }
             await sleep(500);
         }
-        this.state.badge = 'model-load-timeout (still loading after 12 s)';
+        // Accurate timeout: only call it a "model" timeout if the entity
+        // actually streamed and its model just never finished loading (a real
+        // texture/geometry stall). If the entity never streamed at all, it's a
+        // connection/viewport problem — name that, so it stops masquerading as
+        // a model failure (the trap that cost a whole colossus debug session).
+        this.state.badge = everStreamed
+            ? 'model-load-timeout — entity streamed but its model never loaded (stuck KTX2/geometry?)'
+            : await this.diagnoseNoStream(unitId);
         this.notify();
+    }
+
+    /** Explain why unit `id` never streamed to the worker — a connection /
+     *  viewport problem, not a model failure. Reads the worker game-connection
+     *  state so the badge names the real cause instead of "model timeout". */
+    private async diagnoseNoStream(id: number): Promise<string> {
+        const c = await this.h.gameConnected().catch(() => null);
+        if (!c) return `unit ${id} never streamed — worker connection state unavailable`;
+        if (c.authFailed) return `unit ${id} never streamed — worker game connection auth FAILED: ${c.authFailed}`;
+        if (!c.authenticated) return `unit ${id} never streamed — worker game connection not authenticated (never connected?)`;
+        if (!c.receivedState) return `unit ${id} never streamed — connection authenticated but NO entity state received (viewport/stream issue)`;
+        return `unit ${id} never streamed — connection is live + streaming other state; the unit may be outside the viewport`;
     }
 
     /** Task 6: once the model is in, surface its authored clip list
