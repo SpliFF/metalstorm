@@ -216,23 +216,34 @@ void RegisterGameHttpRoutes(GameServerContext& ctx,
 
     // PLAN-security-hardening task 2: compiled OUT entirely under
     // SPRING_PROD — ExecSync runs arbitrary Lua in synced scopes, total game
-    // compromise if reachable at all. Belt-and-braces on top of the
-    // AdminOnly dispatch gate + the handler's own role check below.
+    // compromise if reachable at all. In a non-prod build the route is
+    // LocalhostOrAdmin, NOT AdminOnly: the browser model-viewer / scenario
+    // harness POSTs /api/exec to the game server from the same machine
+    // (loopback), but its dev session (lobby ensureDevSession) is a plain
+    // "player", never an admin — the G20 AdminOnly gate 403'd (or 401'd on a
+    // stale token) every harness exec: spawn, probes, showcases. Trusting a
+    // loopback caller is safe because the whole route is compiled out under
+    // SPRING_PROD, so it is unreachable in any production binary regardless of
+    // origin. A NON-loopback caller (remote admin console) still needs a valid
+    // admin token — re-checked below, mirroring the LocalhostOrAdmin gate.
 #ifndef SPRING_PROD
-    net.AddHttpPost("/api/exec", RouteAuth::AdminOnly, [&ctx](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
-        // Validate auth token
+    net.AddHttpPost("/api/exec", RouteAuth::LocalhostOrAdmin, [&ctx](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+        // Resolve the acting user for the audit trail + the non-loopback
+        // admin re-check. Loopback (dev/test harness) is allowed even with an
+        // empty/expired token; the dispatch gate already enforced
+        // remoteIsLoopback || (valid token && admin) before we get here.
         int64_t userId = HttpAuth::ValidateToken(ctx.db, headers.authorization);
-        if (userId <= 0) {
-            return HttpAuth::JsonResponse(401, R"({"error":"unauthorized — use POST /api/auth/login first"})");
-        }
-        // S2: ExecSync runs arbitrary Lua in synced scopes. Admin-only.
-        std::string execUsername;
-        {
+        std::string execUsername = headers.remoteIsLoopback ? "localhost" : "";
+        if (userId > 0) {
             auto execUser = ctx.db.FindUserById(userId);
-            if (!execUser || execUser->role != "admin") {
+            // S2: ExecSync runs arbitrary Lua in synced scopes. A remote
+            // caller must be an admin; a loopback caller is trusted.
+            if (!headers.remoteIsLoopback && (!execUser || execUser->role != "admin")) {
                 return HttpAuth::JsonResponse(403, R"({"error":"forbidden — admin role required"})");
             }
-            execUsername = execUser->username;
+            if (execUser) execUsername = execUser->username;
+        } else if (!headers.remoteIsLoopback) {
+            return HttpAuth::JsonResponse(401, R"({"error":"unauthorized — use POST /api/auth/login first"})");
         }
 
         nlohmann::json j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
