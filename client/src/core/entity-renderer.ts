@@ -27,6 +27,8 @@ import {
     Quaternion,
     StandardMaterial,
     ShaderMaterial,
+    PBRMaterial,
+    Material,
     Effect,
     Color3,
     BoundingInfo,
@@ -38,6 +40,7 @@ import {
     type CascadedShadowGenerator,
     type DirectionalLight,
 } from '@babylonjs/core';
+import { TeamColorPlugin } from './team-color-plugin.js';
 import '@babylonjs/loaders/glTF/index.js';
 // KTX2 loader is registered in main.ts (the app entry). All unit
 // textures resolve to `.ktx2` URIs after the texture pipeline migration.
@@ -360,6 +363,22 @@ const TEAMCOLOR_FRAGMENT = `#version 300 es
     uniform float hasOrm;
     uniform float hasTeamMask;
     uniform float hasNormal;
+    // Sun colour premultiplied by intensity (scene DirectionalLight.diffuse ×
+    // intensity), refreshed every bind. Units respond to the actual sun
+    // brightness/colour and day-night: previously the shader had only lightDir
+    // (direction), so a dimmed, tinted, or below-horizon sun never moved the
+    // model — it stayed a constant grey while the terrain darkened. Applies to
+    // both branches; a white sun (the common case) is a no-op vs the old look.
+    uniform vec3 sunColor;
+#ifndef USE_HALF_LAMBERT
+    // Realistic-branch ambient fill floor, sky-weighted (see below). Lower =>
+    // deeper unlit faces AND visible cast self-shadows, since the CSM term only
+    // scales the sun half — a high floor floods shadows and decouples the model
+    // from the sun. Live-tunable via setAmbientLevel(). The gameplay
+    // (half-Lambert) branch keeps its own fixed floor so BAR/papertanks don't
+    // shift.
+    uniform float ambientLevel;
+#endif
 
     // PLAN-lighting L3 / L4 — directional sun shadow sampling.
     //   csmShadowMap     — plain depth array (sampler2DArray). Babylon
@@ -513,7 +532,11 @@ const TEAMCOLOR_FRAGMENT = `#version 300 es
         // visible against a black backdrop without flattening the look.
         float lambert     = max(0.0, dot(N, lightDir));
         float skyTint     = max(0.0, N.y);
-        float ambientTerm = 0.0 + 0.08 * skyTint;
+        // Sky-weighted ambient: shadowed/lateral faces keep only a small
+        // fraction of ambientLevel (deep shadow), upward faces get the full
+        // floor. Keeps the front/back contrast realistic without crushing
+        // every dark face to pure black.
+        float ambientTerm = ambientLevel * (0.35 + 0.65 * skyTint);
         float sunTerm     = 1.00 * lambert;
     #endif
 
@@ -555,7 +578,13 @@ const TEAMCOLOR_FRAGMENT = `#version 300 es
         float rawShadow = clamp(sampleCsmShadow(), 0.0, 1.0);
         float sunVis = mix(shadowDarkness, 1.0, rawShadow);
 
-        vec3 lit = color * (ambientTerm + sunTerm * sunVis) + spec * sunVis;
+        // The sun contribution (diffuse + specular) is tinted/scaled by the
+        // real sun colour × intensity, so the model tracks day-night, sun
+        // colour, and a below-horizon sun (sunColor→dark ⇒ only ambient
+        // remains). The ambient floor is NOT sun-scaled — it's the sky/bounce
+        // fill that keeps shadowed faces from going pure black.
+        vec3 sunLit = sunColor * (sunTerm * sunVis);
+        vec3 lit = color * (ambientTerm + sunLit) + spec * sunVis * sunColor;
 
     #ifdef USE_CUS_PBR
         // Recoil cus_gl4 metallic look. BAR draws units through cus_gl4,
@@ -649,6 +678,27 @@ export function setLightingStyle(style: string): void {
     currentLightingStyle = (style === 'realistic') ? 'realistic' : 'gameplay';
 }
 
+// Ambient fill floor for the teamColor REALISTIC branch (sky-weighted in the
+// shader). Lower values deepen unlit faces and let the CSM cast shadow read on
+// the model itself — a high floor floods self-shadows and decouples the model
+// from the sun. New realistic materials pick this up at creation;
+// setAmbientLevel() live-updates existing ones (docs/lighting.md live-tuning).
+// 0.10 = the cinematic/harsh look chosen for Metalstorm. The gameplay
+// half-Lambert branch keeps its own fixed 0.45 floor (BAR/papertanks).
+let currentAmbientLevel = 0.10;
+
+export function setAmbientLevel(value: number, scene?: Scene): number {
+    currentAmbientLevel = value;
+    if (scene) {
+        for (const m of scene.materials) {
+            // No-op on ShaderMaterials without the uniform (FX materials, or
+            // gameplay half-Lambert team materials that compile it out).
+            if (m instanceof ShaderMaterial) m.setFloat('ambientLevel', value);
+        }
+    }
+    return currentAmbientLevel;
+}
+
 /**
  * PLAN-weapon-fx.md Phase Z2: route unit material creation through the
  * ported ZK `defaultMaterialTemplate` instead of the built-in team-color
@@ -682,14 +732,13 @@ function createUnitMaterial(
     modelHeight: number,
     scene: Scene,
     customParams: Record<string, string> | undefined,
-): ShaderMaterial {
+): Material {
     if (modelMaterialPort === 'zk-939') {
         const opts = zkOptionsFromCustomParams(customParams, textures.normal !== null);
         return createZKMaterial(name, textures as ZKUnitTextures, teamColor, scene, opts);
     }
-    return createTeamColorMaterial(
-        name, textures, teamColor, modelHeight, scene,
-        modelMaterialPort === 'cus-pbr');
+    return createUnitPBRMaterial(
+        name, textures, teamColor, scene, modelMaterialPort === 'cus-pbr');
 }
 
 // ── Sun + CSM material bind plumbing ───────────────────────────────────
@@ -759,6 +808,13 @@ function bindShadowUniforms(mat: ShaderMaterial): void {
     const len = Math.hypot(lx, ly, lz) || 1;
     mat.setVector3('lightDir', new Vector3(lx / len, ly / len, lz / len));
 
+    // Sun colour × intensity → the model's directional light term. This is
+    // what makes units track the actual sun (day-night, map sun tint, a
+    // below-horizon sun). Without it the shader only had lightDir (direction)
+    // and stayed a constant grey regardless of how bright the sun was.
+    const si = sun.intensity;
+    mat.setColor3('sunColor', new Color3(sun.diffuse.r * si, sun.diffuse.g * si, sun.diffuse.b * si));
+
     // Copy each cascade VP matrix into our scratch array (reused per
     // bind so we don't allocate during the hot path).
     for (let i = 0; i < 4; i++) {
@@ -811,94 +867,83 @@ function getWhiteFallbackDiffuse(scene: Scene): RawTexture {
 }
 
 /**
- * Create a team-color material for a unit piece. Samples team mask from
- * a dedicated `teamMaskTex.R` channel (PLAN-pbr-mapping.md split layout).
- * Emissive / ORM / normal bindings are optional and default to "no
- * contribution" via the `has*` boolean uniforms. Sun + CSM uniforms are
- * refreshed every bind via `onBindObservable` → `bindShadowUniforms`;
- * see docs/lighting.md "teamColor ShaderMaterial" for the wiring.
+ * Create a unit-piece material: Babylon's stock `PBRMaterial` (glTF
+ * metallic-roughness) + a team-colour MaterialPlugin. This replaced the
+ * hand-rolled `teamColor` ShaderMaterial — the custom shader only existed to do
+ * team colour, but then had to re-implement sun + ambient + CSM shadows itself
+ * (badly: no sun colour/intensity, flat ambient, weak self-shadow). PBRMaterial
+ * consumes the scene sun + hemispheric ambient + CSM shadow automatically (like
+ * feature-renderer.ts already does for map features) and reads the authored
+ * glTF PBR textures natively, so units match the authored look with correct
+ * self-shadowing. See docs/lighting.md "unit PBR material".
+ *
+ * Shadow casting/receiving is set at the MESH level by the caller
+ * (`csm.addShadowCaster(mesh)` + `mesh.receiveShadows = true`), same as features.
  */
-function createTeamColorMaterial(
+function createUnitPBRMaterial(
     name: string,
     textures: UnitTextures,
     teamColor: Color3,
-    modelHeight: number,
     scene: Scene,
     cusPbr: boolean = false,
-): ShaderMaterial {
-    // `defines` are prepended verbatim to both shader sources at
-    // compile time, so `#define USE_HALF_LAMBERT` gates the matching
-    // `#ifdef` block in the fragment shader's lighting formula. The
-    // game-level lighting style was set by main.ts at startup; emitted
-    // here per-material so it lands on every program produced by this
-    // factory regardless of when each unit's first material is built.
-    const defines = ['#define INSTANCES', '#define THIN_INSTANCES'];
-    if (currentLightingStyle === 'gameplay') {
-        defines.push('#define USE_HALF_LAMBERT');
+): PBRMaterial {
+    const mat = new PBRMaterial(name, scene);
+    mat.albedoTexture = textures.diffuse;
+
+    if (textures.orm) {
+        // ORM = R:occlusion, G:roughness, B:metallic — exactly glTF's packed
+        // metallicRoughness (G/B) + occlusion (R) convention, so one texture
+        // drives all three PBR channels with no re-derivation.
+        mat.metallicTexture = textures.orm;
+        mat.useRoughnessFromMetallicTextureGreen = true;
+        mat.useMetallnessFromMetallicTextureBlue = true;
+        mat.useAmbientOcclusionFromMetallicTextureRed = true;
+        mat.metallic = 1.0;
+        mat.roughness = 1.0;
+    } else {
+        // No ORM sidecar → matte dielectric (the old flat-fallback look).
+        mat.metallic = 0.0;
+        mat.roughness = 1.0;
     }
-    // Recoil cus_gl4 metallic sheen variant (BAR & other cus_gl4 mods,
-    // selected by modelMaterialPort === 'cus-pbr'). Adds an env-reflection
-    // approximation + boosted specular in the fragment shader.
-    if (cusPbr) {
-        defines.push('#define USE_CUS_PBR');
+
+    if (textures.normal) {
+        // Tangent-space normal map. The thin-instanced meshes carry no vertex
+        // tangents, so Babylon derives the TBN from screen-space derivatives
+        // (same basis the old shader's perturbNormal used).
+        mat.bumpTexture = textures.normal;
     }
 
-    const mat = new ShaderMaterial(name, scene, 'teamColor', {
-        attributes: ['position', 'normal', 'uv'],
-        uniforms: ['world', 'viewProjection', 'view', 'teamColor',
-                   'invertMask', 'lightDir', 'modelHeight',
-                   'hasEmissive', 'hasOrm', 'hasTeamMask', 'hasNormal',
-                   'csmMatrices', 'csmSplits', 'shadowDarkness'],
-        samplers: ['diffuseTex', 'emissiveTex', 'ormTex', 'teamMaskTex',
-                   'normalTex', 'csmShadowMap'],
-        defines,
-    });
+    if (textures.emissive) {
+        // Grayscale self-illumination (thruster/glow), added over the lit result.
+        mat.emissiveTexture = textures.emissive;
+        mat.emissiveColor = Color3.White();
+    }
 
-    mat.setTexture('diffuseTex',  textures.diffuse);
-    // Bind every sampler slot even when the actual texture is absent
-    // — WebGL doesn't allow unbound samplers in a draw call. Reuse the
-    // diffuse as a harmless placeholder; the `hasEmissive`/`hasOrm`/
-    // `hasTeamMask`/`hasNormal` flags gate sampling on the shader side.
-    mat.setTexture('emissiveTex', textures.emissive ?? textures.diffuse);
-    mat.setTexture('ormTex',      textures.orm      ?? textures.diffuse);
-    mat.setTexture('teamMaskTex', textures.teamMask ?? textures.diffuse);
-    mat.setTexture('normalTex',   textures.normal   ?? textures.diffuse);
-    mat.setColor3('teamColor', teamColor);
-    mat.setFloat('modelHeight', modelHeight);
-    mat.setFloat('invertMask', textures.invertTeamColor ? 1.0 : 0.0);
-    mat.setFloat('hasEmissive', textures.emissive ? 1.0 : 0.0);
-    mat.setFloat('hasOrm',      textures.orm      ? 1.0 : 0.0);
-    mat.setFloat('hasTeamMask', textures.teamMask ? 1.0 : 0.0);
-    mat.setFloat('hasNormal',   textures.normal   ? 1.0 : 0.0);
-    // Initial values overwritten every frame by onBindObservable; set
-    // here so the first frame before the observable fires renders sane.
-    mat.setVector3('lightDir', DEFAULT_LIGHT_DIR);
-    mat.setMatrices('csmMatrices', IDENTITY_CSM_MATRICES);
-    mat.setVector4('csmSplits', new Vector4(1e30, 1e30, 1e30, 1e30));
-    mat.setFloat('shadowDarkness', 1.0);
-    // Bind the diffuse as a placeholder for the shadow sampler so the
-    // material survives the first frame before any CSM exists. The
-    // observable below swaps in the real depth array once available.
-    mat.setTexture('csmShadowMap', textures.diffuse);
+    // BAR / cus_gl4 mods asked for a metallic env sheen. WebGL2 has no cubemap
+    // env probe here, so we lean on the scene image-processing + the model's own
+    // metallic channel; environmentIntensity gives a mild lift when a scene
+    // env texture is present. Approximate — revisit with a real reflection probe.
+    if (cusPbr) mat.environmentIntensity = 1.2;
 
-    mat.onBindObservable.add(() => bindShadowUniforms(mat));
+    // Team colour — the one thing stock PBR can't do — via the plugin, which
+    // rewrites surfaceAlbedo before the light loop (mix(albedo, teamColor, mask)).
+    const plugin = new TeamColorPlugin(mat);
+    plugin.teamColor = teamColor;
+    plugin.teamMask = textures.teamMask;
+    plugin.invertMask = textures.invertTeamColor;
 
-    // Keep the material fully opaque. The build-progress effect uses
-    // discard-based stipple in the fragment shader instead of alpha
-    // blending — alpha < 1 would push the material into Babylon's
-    // transparent pass, sort pieces back-to-front per camera, and
-    // skip depth writes, which produces the per-orbit "texture shift"
-    // artefacts we hit when this was set to 0.999.
+    // Fully opaque. (The old discard-stipple build-progress effect is dropped —
+    // it was already dead: the vertex shader hardcoded vBuildProgress = 1.0
+    // pending a per-instance attribute. Re-add on the plugin when build progress
+    // is actually streamed per thin-instance.)
     mat.alpha = 1.0;
-    mat.needAlphaBlending = () => false;
-    mat.needAlphaTesting  = () => true;
+    mat.transparencyMode = PBRMaterial.PBRMATERIAL_OPAQUE;
 
-    // Disable backface culling: modelimporter (Assimp + S3O) emits
-    // glTF with CCW winding but Babylon's default is CW, so culling
-    // strips the visible surfaces and we end up rendering the inside
-    // of each piece. Two-sided is cheap on these low-poly meshes and
-    // matches the original Spring renderer's behaviour.
+    // Two-sided: modelimporter (Assimp + S3O/PIE) emits glTF with CCW winding
+    // vs Babylon's default CW, so culling would strip the visible surfaces and
+    // render piece interiors. Cheap on these low-poly meshes.
     mat.backFaceCulling = false;
+    mat.twoSidedLighting = true;
     return mat;
 }
 

@@ -21,6 +21,23 @@ const SHADOW_FILTERING_QUALITY = [
     ShadowGenerator.QUALITY_HIGH,
 ] as const;
 
+/** How far to pull the hemispheric ambient toward neutral grey (0 = the map's
+ *  raw colour, 1 = fully grey). Keeps a hint of the map's sky/bounce cue while
+ *  stopping a saturated map ambient from staining PBR-lit units. */
+const AMBIENT_DESATURATION = 0.8;
+
+/** Blend an [r,g,b] toward its own average (perceptually neutral grey). Green
+ *  carries the most luminance, so averaging (not luminance-weighting) is what
+ *  actually removes a green cast rather than preserving it. */
+function desaturateToGrey(rgb: readonly number[], amount: number): Color3 {
+    const avg = (rgb[0] + rgb[1] + rgb[2]) / 3;
+    return new Color3(
+        rgb[0] + (avg - rgb[0]) * amount,
+        rgb[1] + (avg - rgb[1]) * amount,
+        rgb[2] + (avg - rgb[2]) * amount,
+    );
+}
+
 export interface SceneLighting {
     ambient: HemisphericLight;
     sun: DirectionalLight;
@@ -154,12 +171,15 @@ export function applyMapLighting(lighting: MapLighting, scene: SceneLighting): v
     );
     sun.intensity = 1.0;
 
-    ambient.diffuse = new Color3(
-        lighting.groundAmbient[0], lighting.groundAmbient[1], lighting.groundAmbient[2],
-    );
-    ambient.groundColor = new Color3(
-        lighting.unitAmbient[0], lighting.unitAmbient[1], lighting.unitAmbient[2],
-    );
+    // Pull the ambient toward neutral grey. Units now read the scene
+    // hemispheric ambient DIRECTLY through their PBRMaterial (the old custom
+    // unit shader used a hardcoded neutral floor and never saw this), so a
+    // vividly-coloured map ambient — e.g. this map's saturated green
+    // [0.6,0.9,0.2] — would drench every unit in that tint. Desaturating keeps
+    // the sky/bounce colour cue without staining the models; terrain stays
+    // coloured from its own diffuse texture, so it barely shifts.
+    ambient.diffuse = desaturateToGrey(lighting.groundAmbient, AMBIENT_DESATURATION);
+    ambient.groundColor = desaturateToGrey(lighting.unitAmbient, AMBIENT_DESATURATION);
     ambient.intensity = 1.0;
 
     // Average ground + unit density and invert Recoil's "1.0 = fully

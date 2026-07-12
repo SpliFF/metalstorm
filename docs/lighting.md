@@ -175,7 +175,25 @@ the standard pipeline uses `sampler2DShadow` and the
 `SHADOWCSM_RIGHTHANDED` define handles cascade selection in our RH
 scene.
 
-### teamColor ShaderMaterial (units)
+### Unit material — PBRMaterial + TeamColorPlugin
+
+> **SUPERSEDED (unit rendering).** Units no longer use the hand-rolled
+> `teamColor` `ShaderMaterial` described below. `createUnitPBRMaterial`
+> (entity-renderer.ts) now builds a stock Babylon **`PBRMaterial`** (glTF
+> metallic-roughness: albedo + ORM + normal + emissive bound natively) plus a
+> **`TeamColorPlugin`** (`MaterialPluginBase`, `team-color-plugin.ts`) that
+> rewrites `surfaceAlbedo` with `mix(albedo, teamColor, mask)` before the light
+> loop. PBR consumes the scene sun + hemispheric ambient + CSM shadow
+> automatically (identical to feature-renderer.ts), with `csm.addShadowCaster` +
+> `receiveShadows = true` set at the mesh level — so units get correct PBR and
+> real self-shadowing for free, matching the authored glTF look. The custom
+> shader (and its manual sun/CSM binding) existed only to do team colour and had
+> to re-implement lighting badly; the plugin does team colour on top of correct
+> engine lighting instead. A saturated map ambient is desaturated toward grey
+> (`AMBIENT_DESATURATION` in scene-lighting.ts) so units don't drink the
+> terrain's colour. The ZK (`zk-939`) material port is unchanged. *(The custom
+> `teamColor` ShaderMaterial code is retired but not yet deleted — a follow-up
+> cleanup; the description below is historical.)*
 
 The unit shader is a plain `ShaderMaterial` so Babylon's automatic
 light binding doesn't fire. We bind the sun + CSM uniforms ourselves:
@@ -199,6 +217,16 @@ The sun-visibility result attenuates ONLY the directional + specular
 terms — the ambient floor stays put, so shadows go darker but not
 black, matching how Spring / ZK shaders darken shadowed surfaces.
 
+`bindShadowUniforms` also uploads **`sunColor` = `sun.diffuse × sun.intensity`**
+every frame, and the directional + specular terms are multiplied by it
+(`lit = albedo·(ambient + sunColor·sunTerm·sunVis) + spec·sunVis·sunColor`).
+This is what makes units track the actual sun — day/night, a tinted sun,
+or a below-horizon sun (`sunColor → 0` ⇒ ambient-only, so the model darkens
+with the terrain instead of staying a constant grey). A white full-intensity
+sun (the common case) is a no-op versus the old geometry-only shading. The
+ambient floor is deliberately NOT sun-scaled — it's the sky/bounce fill that
+keeps a fully unlit face from going pure black.
+
 ### Per-game lighting style (`modinfo.lua` `lighting` field)
 
 The team-color fragment shader compiles two variants behind a
@@ -213,10 +241,19 @@ return {
 }
 ```
 
-| Value | Define set? | Formula | Best for |
+| Value | Define set? | Formula (sun terms ×`sunColor`) | Best for |
 |---|---|---|---|
-| `'gameplay'` (default, omit = same) | yes | `halfLambert = N·L*0.5+0.5`; `ambient = 0.45`; `sun = 0.55*halfLambert + 0.05*skyTint` | RTS camera at 200–400 elmos — silhouettes stay readable when units are a few pixels tall |
-| `'realistic'` | no | `lambert = max(0, N·L)`; `ambient = 0.25 + 0.10*skyTint`; `sun = 0.70*lambert` | Close-up / cinematic — strong front/back contrast, side faces darken cleanly |
+| `'gameplay'` (default, omit = same) | yes | `halfLambert = N·L*0.5+0.5`; `ambient = 0.45` (fixed); `sun = 0.55*halfLambert + 0.05*skyTint` | RTS camera at 200–400 elmos — silhouettes stay readable when units are a few pixels tall. BAR/papertanks. |
+| `'realistic'` | no | `lambert = max(0, N·L)`; `ambient = ambientLevel*(0.35 + 0.65*skyTint)`; `sun = lambert` | Close-up / cinematic — strong front/back contrast, side faces darken cleanly. **Metalstorm** uses this. |
+
+The realistic branch's ambient floor is a live-tunable uniform: **`ambientLevel`**
+(default `0.10` — the cinematic look chosen for Metalstorm; lower = deeper
+shadows + darker at night). Change it in-engine via `setAmbientLevel(value,
+scene)` (entity-renderer), which updates every existing material immediately —
+the model-viewer's Sun & light panel and the `__gp` worker hook drive it. The
+gameplay half-Lambert branch keeps its own **fixed** `0.45` floor so
+BAR/papertanks are unaffected by the knob. `ambientLevel` is compiled out of the
+gameplay build (declared + bound only for realistic materials).
 
 Flow: `modinfo.lua → game.config.lua wrapper → GameDiscovery::GameInfo
 (C++) → LobbyGameInfo FlatBuffer + /api/games JSON → lobby-ui's
