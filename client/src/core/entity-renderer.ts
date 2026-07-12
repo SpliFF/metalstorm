@@ -1178,6 +1178,15 @@ export class EntityRenderer {
     // or "shape:{shape}:{team}" for fallbacks.
     private renderMeshes = new Map<string, Mesh>();
 
+    // Unit materials, SHARED across all pieces that use the same texture set,
+    // keyed by "{defId}:{team}:{materialKey}". A unit's pieces almost always
+    // share one glTF material, so this collapses e.g. the 18-piece colossus
+    // from 18 identical PBRMaterials to one — heavy PBR materials are far more
+    // expensive to compile/hold than the old custom shader, and one-per-piece
+    // was needless GPU + memory pressure (and a leak: mesh.dispose() doesn't
+    // free the material). Disposed in the model-template cleanup.
+    private unitMaterials = new Map<string, Material>();
+
     // --- Per-entity piece pose overrides ---
     // Populated by applyPieceState() from server-streamed piece transforms.
     // Pieces missing from a unit's override map render at rest pose.
@@ -1388,9 +1397,85 @@ export class EntityRenderer {
             // and a `?v=` on the parent breaks that resolution. Cache
             // validation comes from Last-Modified / ETag served by the
             // Vite static-data plugin (see client/vite.config.ts).
-            const result = await SceneLoader.ImportMeshAsync(
-                '', baseUrl, fileName, this.scene,
-            );
+            //
+            // --- Model-load diagnostics ---------------------------------
+            // The render scene lives in the game-processor worker
+            // (OffscreenCanvas), so Babylon's DOM Inspector can't reach it.
+            // These are the worker-safe equivalents. Toggle verbose mode
+            // from the main devtools console BEFORE spawning:
+            //     window.__gp('globalThis.__MODEL_DEBUG = true')
+            // then dump any already-loaded model's geometry with:
+            //     window.__gp('__entityRenderer.dumpGeometry()')
+            const debug = !!(globalThis as Record<string, unknown>).__MODEL_DEBUG;
+            // Always-on loader tweak: DISABLE glTF animation autoplay. Babylon's
+            // glTF loader plays the first animation group (our `walk` clip, which
+            // drives the leg nodes) the instant the model parses — BEFORE the
+            // piece walk below captures each piece's `restWorldMatrix` via
+            // node.getWorldMatrix(). Animated pieces then capture a mid-animation
+            // pose as their "rest" transform, which comes out as garbage
+            // thin-instance bounds and the pieces (legs) fail to render — the
+            // "few pieces / extra foot" bug. The clips are extracted and disposed
+            // right after load anyway (they were never meant to run at load time),
+            // so suppress the autoplay at the source. animationStartMode = NONE (0)
+            // — GLTFLoaderAnimationStartMode.NONE; the groups are still parsed and
+            // returned in result.animationGroups for extractClips().
+            const pluginObserver = SceneLoader.OnPluginActivatedObservable.add((loader) => {
+                const g = loader as unknown as {
+                    name?: string; animationStartMode?: number;
+                    loggingEnabled?: boolean; validate?: boolean;
+                    onValidatedObservable?: { add(cb: (r: unknown) => void): void };
+                };
+                if (g.name !== 'gltf') return;
+                g.animationStartMode = 0;
+                if (debug) {
+                    // Per-load glTF diagnostics: log every parse step and run the
+                    // bundled Khronos glTF-Validator, reporting issues to console.
+                    g.loggingEnabled = true;
+                    g.validate = true;
+                    g.onValidatedObservable?.add((r) =>
+                        console.log(`[model-debug] ${def.name}: glTF-validate`, r));
+                }
+            });
+            // Stall watchdog (always on, cheap). ImportMeshAsync awaits
+            // geometry AND every material texture, so a KTX2 transcode that
+            // never completes leaves this promise pending forever — the model
+            // then "times out" downstream (hasModel stays null) with no root
+            // cause. Report the stall and how far the load got.
+            const t0 = performance.now();
+            const meshesAtStart = this.scene.meshes.length;
+            const texAtStart = this.scene.textures.length;
+            const watchdog = setInterval(() => {
+                console.warn(
+                    `[model-debug] ${def.name}: ImportMeshAsync still pending after ` +
+                    `${((performance.now() - t0) / 1000).toFixed(0)}s — ` +
+                    `+${this.scene.meshes.length - meshesAtStart} meshes, ` +
+                    `+${this.scene.textures.length - texAtStart} textures parsed so far. ` +
+                    `Likely a stalled KTX2 transcode or oversized texture upload.`);
+            }, 8000);
+
+            let result;
+            try {
+                result = await SceneLoader.ImportMeshAsync(
+                    '', baseUrl, fileName, this.scene,
+                );
+            } finally {
+                clearInterval(watchdog);
+                if (pluginObserver) SceneLoader.OnPluginActivatedObservable.remove(pluginObserver as never);
+            }
+
+            if (debug) {
+                const rows = result.meshes.map((m) => ({
+                    name: m.name,
+                    verts: (m as Mesh).getTotalVertices?.() ?? 0,
+                    faces: (m as Mesh).getTotalIndices?.() ? (m as Mesh).getTotalIndices() / 3 : 0,
+                    mat: m.material?.name ?? null,
+                }));
+                console.log(
+                    `[model-debug] ${def.name}: ImportMeshAsync resolved in ` +
+                    `${((performance.now() - t0) / 1000).toFixed(1)}s — ` +
+                    `${result.meshes.length} meshes, ${result.transformNodes?.length ?? 0} transform nodes, ` +
+                    `${result.animationGroups?.length ?? 0} clips`, rows);
+            }
 
             // Phase 2d (PLAN-coordinate-system): with scene RH and the
             // glTF already spec-RH on disk, Babylon's glTF loader
@@ -1867,7 +1952,6 @@ export class EntityRenderer {
 
             const tmpl = this.modelTemplates.get(defId);
             const teamColor = TEAM_COLORS[team % TEAM_COLORS.length];
-            const matName = `unit_${defId}_t${team}_p${pieceIdx}_mat`;
 
             // Always use the team-color shader so every unit gets team
             // tinting + the same lighting/shadow pipeline regardless of
@@ -1893,25 +1977,34 @@ export class EntityRenderer {
             const pieceTextures = (materialKey
                 ? tmpl?.materialTextures.get(materialKey) : undefined)
                 ?? tmpl?.textures;
-            if (pieceTextures) {
-                mesh.material = createUnitMaterial(
-                    matName, pieceTextures, teamColor, tmpl?.modelHeight ?? 1,
-                    this.scene, customParams);
-            } else {
-                // No texture sidecar — synthesise a white diffuse with
-                // alpha=1 so the unit renders as a flat team-coloured
-                // shape through the same shader as textured units.
-                const fallbackDiffuse = getWhiteFallbackDiffuse(this.scene);
-                mesh.material = createUnitMaterial(
-                    matName,
-                    { diffuse: fallbackDiffuse, emissive: null, orm: null,
-                      teamMask: null, normal: null, invertTeamColor: false },
-                    teamColor,
-                    tmpl?.modelHeight ?? 1,
-                    this.scene,
-                    customParams,
-                );
+
+            // Share ONE material across every piece that resolves to the same
+            // texture set (keyed by def/team/materialKey). Pieces of one unit
+            // overwhelmingly share a single glTF material, so this reuses one
+            // PBRMaterial instead of building an identical one per piece.
+            const matCacheKey = `${defId}:${team}:${materialKey ?? (pieceTextures ? '_default' : '_fallback')}`;
+            let mat = this.unitMaterials.get(matCacheKey);
+            if (!mat) {
+                const matName = `unit_${defId}_t${team}_${materialKey ?? 'mat'}`;
+                if (pieceTextures) {
+                    mat = createUnitMaterial(
+                        matName, pieceTextures, teamColor, tmpl?.modelHeight ?? 1,
+                        this.scene, customParams);
+                } else {
+                    // No texture sidecar — synthesise a white diffuse with
+                    // alpha=1 so the unit renders as a flat team-coloured
+                    // shape through the same shader as textured units.
+                    const fallbackDiffuse = getWhiteFallbackDiffuse(this.scene);
+                    mat = createUnitMaterial(
+                        matName,
+                        { diffuse: fallbackDiffuse, emissive: null, orm: null,
+                          teamMask: null, normal: null, invertTeamColor: false },
+                        teamColor, tmpl?.modelHeight ?? 1, this.scene, customParams,
+                    );
+                }
+                this.unitMaterials.set(matCacheKey, mat);
             }
+            mesh.material = mat;
 
             mesh.isPickable = false;
             mesh.isVisible = false;
@@ -2498,6 +2591,58 @@ export class EntityRenderer {
         };
     }
 
+    /**
+     * Worker-safe geometry dump — the debug facility the DOM Inspector
+     * can't give us for the OffscreenCanvas scene. Lists every loaded
+     * model template (or fallback/loading status) with per-piece vertex
+     * counts and local-space bounding boxes, so "what geometry does this
+     * model actually have" is answerable from the main devtools console:
+     *     window.__gp('__entityRenderer.dumpGeometry("fable_colossus")')
+     * Omit the name to dump every loaded def. Also console.tables it.
+     */
+    dumpGeometry(defName?: string): unknown {
+        const out: Array<Record<string, unknown>> = [];
+        for (const [defId, tmpl] of this.modelTemplates) {
+            const info = this.defInfos.get(defId);
+            if (defName && info?.name !== defName) continue;
+            const status = tmpl === null ? 'FALLBACK (no model)' : 'loaded';
+            const pieces = (tmpl?.pieces ?? []).map((p) => {
+                const mesh = p.mesh as Mesh | null;
+                let bbox: string | null = null;
+                let verts = 0;
+                if (mesh && mesh.getTotalVertices?.() > 0) {
+                    verts = mesh.getTotalVertices();
+                    mesh.refreshBoundingInfo();
+                    const e = mesh.getBoundingInfo().boundingBox.extendSize;
+                    bbox = `${(e.x * 2).toFixed(1)}×${(e.y * 2).toFixed(1)}×${(e.z * 2).toFixed(1)}`;
+                }
+                return { name: p.name, parent: p.parentIndex, verts, bbox, mat: p.materialKey ?? null };
+            });
+            const row = {
+                def: info?.name ?? `#${defId}`, defId, status,
+                pieces: pieces.length,
+                geomPieces: pieces.filter((p) => p.verts > 0).length,
+                totalVerts: pieces.reduce((s, p) => s + p.verts, 0),
+                clips: tmpl?.clips?.map((c) => c.name) ?? [],
+                detail: pieces,
+            };
+            out.push(row);
+        }
+        for (const defId of this.loadingModels.keys()) {
+            const info = this.defInfos.get(defId);
+            if (defName && info?.name !== defName) continue;
+            if (!this.modelTemplates.has(defId)) {
+                out.push({ def: info?.name ?? `#${defId}`, defId, status: 'STILL LOADING', pieces: 0 });
+            }
+        }
+        for (const r of out) {
+            console.log(`[model-debug] ${r.def}: ${r.status}, ${r.pieces} pieces `
+                + `(${r.geomPieces ?? 0} with geometry), ${r.totalVerts ?? 0} verts`);
+            if (Array.isArray(r.detail) && (r.detail as unknown[]).length) console.table(r.detail);
+        }
+        return out;
+    }
+
     /** Rest-pose AABB of every geometry piece (all 8 corners through
      *  restWorldMatrix — rest matrices can rotate pieces) → centre +
      *  half-diagonal radius. Cached per defId. */
@@ -2812,6 +2957,11 @@ export class EntityRenderer {
     dispose(): void {
         for (const mesh of this.renderMeshes.values()) mesh.dispose();
         this.renderMeshes.clear();
+        // Shared unit materials are owned here (mesh.dispose() doesn't free
+        // them), so dispose them explicitly. NOT their textures — those are
+        // the shared template textures, disposed by the template loop below.
+        for (const mat of this.unitMaterials.values()) mat.dispose();
+        this.unitMaterials.clear();
         for (const tmpl of this.modelTemplates.values()) {
             if (tmpl) {
                 for (const p of tmpl.pieces) {
