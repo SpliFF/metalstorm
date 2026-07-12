@@ -93,6 +93,13 @@ std::string CacheDir(const std::string& gameId, const std::string& cacheKey);
 /// modOptions is a no-op. Returns true on success (or if the cache
 /// was already warm).
 ///
+/// Pass `overwrite=true` to rewrite the files even when present. The
+/// cache key is content-blind (only gameId/version/modOptions —
+/// adding or editing a `units/*.lua` file does NOT rotate it), so
+/// without an overwrite the on-disk payload the client fetches stays
+/// frozen at its first bake. `--no-cache` (dev) sets overwrite so
+/// edited defs actually reach the browser on the next launch.
+///
 /// Each vector is the brotli-compressed bytes of a Lua source string
 /// produced by LuaDefsSerializer::SerializeUnitDefs etc. and run
 /// through CompressBrotli. They land on disk as `unitdefs.lua.br`,
@@ -105,6 +112,7 @@ bool WriteIfMissing(
     const std::vector<uint8_t>& unitDefBytes,
     const std::vector<uint8_t>& weaponDefBytes,
     const std::vector<uint8_t>& cegDefBytes,
-    const std::vector<uint8_t>& featureDefBytes);
+    const std::vector<uint8_t>& featureDefBytes,
+    bool overwrite = false);
 
 } // namespace DefsCache

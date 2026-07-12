@@ -1393,8 +1393,15 @@ bool WebTransportServer::Start(int port, const std::string& certPath, const std:
     // treats transparently.
     int fd = socket(AF_INET6, SOCK_DGRAM, 0);
     if (fd < 0) return false;
-    int one = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    // No SO_REUSEADDR: on macOS/BSD it lets a second process bind this
+    // same UDP port, and the kernel then splits datagrams across both
+    // sockets — the game equivalent of the TCP SO_REUSEPORT hazard (a
+    // client's QUIC packets reaching a stale/zombie server). UDP has no
+    // TIME_WAIT, so a dead server frees the port immediately and a fresh
+    // bind needs no reuse flag. FD_CLOEXEC closes this fd on the restart
+    // re-exec (execvp) so the new image rebinds cleanly (the restart path
+    // does not otherwise stop this server before exec).
+    fcntl(fd, F_SETFD, fcntl(fd, F_GETFD) | FD_CLOEXEC);
     int v6only = 0;
     setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only));
     // Non-blocking: the recv loop must return to the flush/timer step once the

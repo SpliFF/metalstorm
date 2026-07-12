@@ -103,26 +103,30 @@ struct GameServerInstance {
 /// here is purely a "does anyone hold this?" probe.
 ///
 /// `excluded` is the set of ports already held by live game-server
-/// processes in the lobby's `gameServers` map. spring-server's
-/// listen socket sets SO_REUSEPORT (NetworkServer.cpp:873), which
-/// would otherwise allow the probe bind to succeed against a port
-/// another spring-server is actively listening on — the kernel
-/// then load-balances incoming connections across both, and clients
-/// auth'd for one room land on another room's roster ("Not in this
-/// room's roster"). Skipping known-busy ports avoids that collision.
+/// processes in the lobby's `gameServers` map — a belt-and-suspenders
+/// skip. The probe below is the real guard: it binds the port with the
+/// *same* socket shape spring-server uses (dual-stack IPv6 wildcard,
+/// SO_REUSEADDR, no SO_REUSEPORT — see NetworkServer.cpp), so a port a
+/// live server holds fails to bind and is correctly reported busy. This
+/// catches even a zombie server that outlived its DB row and so never
+/// made it into `excluded`. (Previously the probe bound an IPv4
+/// loopback socket, which did not collide with the server's `::`
+/// wildcard the same way, so a busy port could read as free.)
 static int findFreePort(int base = 9100, int floor = 0,
                         const std::unordered_set<int>& excluded = {}) {
     int start = (floor > base) ? floor : base;
     for (int port = start; port < start + 1000; ++port) {
         if (excluded.count(port)) continue;
-        int s = ::socket(AF_INET, SOCK_STREAM, 0);
+        int s = ::socket(AF_INET6, SOCK_STREAM, 0);
         if (s < 0) continue;
         int one = 1;
+        int zero = 0;
         setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-        sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        addr.sin_port = htons(static_cast<uint16_t>(port));
+        setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, &zero, sizeof(zero));
+        sockaddr_in6 addr{};
+        addr.sin6_family = AF_INET6;
+        addr.sin6_addr = in6addr_any;
+        addr.sin6_port = htons(static_cast<uint16_t>(port));
         if (::bind(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
             ::close(s);
             return port;
@@ -271,6 +275,12 @@ static GameServerInstance spawnGameServer(
             argv.push_back(spec.c_str());
         }
         if (devBuildAcknowledged) argv.push_back(DevBuildGate::kFlag);
+        // Propagate --no-cache so a dev lobby's game servers also refresh
+        // their on-disk defs cache each launch (the cache key is
+        // content-blind — see DefsCache.h — so without this an edited
+        // unit def never reaches the browser). Harmless in prod, where
+        // the lobby is never launched with --no-cache.
+        if (CacheControl::IsNoCache()) argv.push_back("--no-cache");
         argv.push_back(nullptr);
 
         execvp(serverBin.c_str(), const_cast<char* const*>(argv.data()));

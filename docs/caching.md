@@ -99,8 +99,28 @@ When active:
 - All responses get `Cache-Control: no-store` regardless of tier
 - `/api/version` returns `"no_cache": true`
 - The `mprocs.yaml` dev config includes `--no-cache` by default
+- The lobby **propagates `--no-cache` to every game server it spawns**, so a dev stack's game servers behave consistently with the lobby
+- The **on-disk def cache is refreshed** on each game-server launch (see below)
 
 This eliminates stale asset issues during development. No more "clear your cache" or hard-refresh.
+
+### The def cache and `--no-cache`
+
+The game server bakes each game's unit/weapon/CEG/feature defs to
+`data/games/<game>/cache/defs/<key>/*.lua.br` (brotli Lua source) and the
+browser fetches them by `<key>`. **That key is content-blind** — it hashes
+only `schema + gameId + gameVersion + modOptions` (`DefsCache::ComputeCacheKey`),
+*not* the `units/*.lua` / `weapons/*.lua` source — so adding or editing a def
+does **not** rotate the key, and `WriteIfMissing` never overwrites an existing
+payload. Without intervention the browser keeps fetching the def set frozen at
+the first bake even though the server sim re-parses the defs fresh every launch.
+
+`--no-cache` closes that gap: it forces the game server to re-serialise and
+**overwrite** the on-disk def payloads on every launch, so an edited/added def
+reaches the browser on the next game start. In production (no `--no-cache`) the
+cache is written once per key and stays immutable — **bump `modinfo.lua`'s
+`version` when shipping def changes** so the key rotates. (Deleting
+`data/games/<game>/cache/defs/` also forces a one-off rebake.)
 
 ## Response Headers
 

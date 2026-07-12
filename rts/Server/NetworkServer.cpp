@@ -995,10 +995,17 @@ void NetworkServer::NetworkThreadFunc(int port) {
 
     int one = 1;
     int zero = 0;
+    // SO_REUSEADDR lets a fresh server rebind this port while a prior
+    // server's *connections* linger in TIME_WAIT. We deliberately do
+    // NOT set SO_REUSEPORT: it let two *live* game servers bind the same
+    // port, and the kernel then round-robined client connections across
+    // both — a client auth'd for one room silently landed on another
+    // (or on a stale/zombie server) with the wrong roster and defs. With
+    // it gone a colliding bind() fails loudly instead of sharing. The
+    // in-place restart (execvp) still rebinds cleanly: Stop() closes this
+    // fd first, and FD_CLOEXEC below closes it on exec as a backstop.
     setsockopt(impl->listenFd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-    #ifdef SO_REUSEPORT
-    setsockopt(impl->listenFd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one));
-    #endif
+    fcntl(impl->listenFd, F_SETFD, fcntl(impl->listenFd, F_GETFD) | FD_CLOEXEC);
     // Dual-stack: accept both IPv4 and IPv6 on the same socket
     setsockopt(impl->listenFd, IPPROTO_IPV6, IPV6_V6ONLY, &zero, sizeof(zero));
     SetNonBlocking(impl->listenFd);

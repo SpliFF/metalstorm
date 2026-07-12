@@ -659,12 +659,22 @@ int main(int argc, char* argv[])
 
         // Skip re-baking if the cache files already exist for this key.
         // This is the warm path: same modOptions in repeat sessions.
+        //
+        // The filenames must match what DefsCache actually writes
+        // (`.lua.br` since the v14-lua migration — the stale `.bin`
+        // probe here never matched, so every launch re-serialised the
+        // defs needlessly). Under --no-cache we deliberately force the
+        // cold path AND overwrite below: the cache key is content-blind
+        // (see DefsCache.h), so an edited/added `units/*.lua` would
+        // otherwise never reach the browser, which fetches this on-disk
+        // payload by key.
         namespace fs = std::filesystem;
         const fs::path dir = DefsCache::CacheDir(gameId, defsCacheKey);
-        const bool warm = fs::exists(dir / "unitdefs.bin")
-                       && fs::exists(dir / "weapondefs.bin")
-                       && fs::exists(dir / "cegdefs.bin")
-                       && fs::exists(dir / "featuredefs.bin");
+        const bool warm = !CacheControl::IsNoCache()
+                       && fs::exists(dir / "unitdefs.lua.br")
+                       && fs::exists(dir / "weapondefs.lua.br")
+                       && fs::exists(dir / "cegdefs.lua.br")
+                       && fs::exists(dir / "featuredefs.lua.br");
 
         if (warm) {
             SLOG(SPRING_LOG_NOTICE, "defs cache warm: gameId=%s key=%s",
@@ -716,7 +726,8 @@ int main(int argc, char* argv[])
 
             if (DefsCache::WriteIfMissing(gameId, defsCacheKey,
                                           udBytes, wdBytes, cdBytes,
-                                          fdBytes)) {
+                                          fdBytes,
+                                          /*overwrite=*/CacheControl::IsNoCache())) {
                 SLOG(SPRING_LOG_NOTICE,
                      "defs cache baked: gameId=%s key=%s "
                      "(unitdefs=%zu B src/%zu B brotli, "

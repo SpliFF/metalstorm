@@ -95,7 +95,8 @@ bool WriteIfMissing(
     const std::vector<uint8_t>& unitDefBytes,
     const std::vector<uint8_t>& weaponDefBytes,
     const std::vector<uint8_t>& cegDefBytes,
-    const std::vector<uint8_t>& featureDefBytes)
+    const std::vector<uint8_t>& featureDefBytes,
+    bool overwrite)
 {
     namespace fs = std::filesystem;
     const fs::path dir = CacheDir(gameId, cacheKey);
@@ -104,10 +105,11 @@ bool WriteIfMissing(
     const fs::path cdPath = dir / "cegdefs.lua.br";
     const fs::path fdPath = dir / "featuredefs.lua.br";
 
-    const bool udExists = fs::exists(udPath);
-    const bool wdExists = fs::exists(wdPath);
-    const bool cdExists = fs::exists(cdPath);
-    const bool fdExists = fs::exists(fdPath);
+    // Treat every file as absent under overwrite so each one is (re)written.
+    const bool udExists = !overwrite && fs::exists(udPath);
+    const bool wdExists = !overwrite && fs::exists(wdPath);
+    const bool cdExists = !overwrite && fs::exists(cdPath);
+    const bool fdExists = !overwrite && fs::exists(fdPath);
     if (udExists && wdExists && cdExists && fdExists) return true;
 
     std::error_code ec;
