@@ -19,6 +19,10 @@ import {
 import Database from 'better-sqlite3';
 import { resolve, join } from 'path';
 import { readFileSync, existsSync, readdirSync, unlinkSync, statSync } from 'fs';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+
+const execFileAsync = promisify(execFile);
 
 const LOG_SERVER_URL = process.env.LOG_SERVER_URL || 'http://localhost:8010';
 const LOBBY_URL = process.env.LOBBY_URL || 'http://localhost:8011';
@@ -555,6 +559,16 @@ const TOOLS = [
         },
     },
     {
+        name: 'restart_client',
+        description: 'Restart the Vite client dev server (:8012) via the mprocs control channel (select-proc + restart-proc — the pane stays authoritative, no dead pane / duplicate listener). Use after editing a worker-imported client file (entity-renderer.ts, game-processor.ts, …): Vite serves a stale `?worker` bundle until the pane is restarted. Unlike the C++ servers, Vite has no in-place re-exec. Requires mprocs started with the `server:` key (mprocs.yaml); otherwise it falls back to kill+relaunch.',
+        inputSchema: {
+            type: 'object',
+            properties: {
+                clearCache: { type: 'boolean', description: 'Also clear client/node_modules/.vite before restarting (use if a plain restart still serves stale worker code). Default false.' },
+            },
+        },
+    },
+    {
         name: 'get_unit_def',
         description: 'Read a single UnitDef from the on-disk defs cache without needing a running game. Decodes the FlatBuffer baked by spring-server. Returns full Tier 4 fields including customParams, transportSize, repairSpeed, yardmap, etc.',
         inputSchema: {
@@ -994,6 +1008,33 @@ async function executeTool(name, args) {
                 return `Log server restart failed: HTTP ${resp.status}`;
             const body = await resp.json().catch(() => ({}));
             return body.message || 'Log server restart command sent (re-exec in place).';
+        }
+
+        case 'restart_client': {
+            // Vite is a node process with no in-place re-exec, so we restart
+            // its mprocs pane through the control channel. spring-services.sh
+            // owns all the logic (ctl availability probe, name->index mapping,
+            // kill+relaunch fallback) — shell out to it rather than duplicate.
+            const repoRoot = process.env.PROJECT_ROOT || resolve('.');
+            const script = resolve(repoRoot, 'tools/scripts/spring-services.sh');
+            if (!existsSync(script))
+                return `spring-services.sh not found at ${script} (set PROJECT_ROOT for the MCP).`;
+            try {
+                if (args.clearCache) {
+                    const viteCache = resolve(repoRoot, 'client/node_modules/.vite');
+                    await execFileAsync('rm', ['-rf', viteCache]);
+                }
+                const { stdout, stderr } = await execFileAsync(
+                    script, ['restart', 'client'], { cwd: repoRoot });
+                const out = `${stdout || ''}${stderr || ''}`.trim();
+                // The script prints a "not reachable — using kill+relaunch
+                // fallback" notice on stderr when mprocs lacks the server key;
+                // surface it so the caller knows to restart mprocs once.
+                return out || 'Client (Vite) pane restart command sent via mprocs.';
+            } catch (e) {
+                return `Client restart failed: ${e.message}. ` +
+                    `Is mprocs running with the 'server:' key? Check \`spring-services.sh status\`.`;
+            }
         }
 
         case 'restart_game': {

@@ -5,13 +5,25 @@
 # mprocs as usual.
 #
 # Usage:
-#   spring-services.sh status        # list running services
-#   spring-services.sh stop [name]   # graceful stop (SIGTERM, then SIGKILL)
-#   spring-services.sh start         # start via mprocs (foreground)
-#   spring-services.sh start-bg      # start each service detached in background
-#   spring-services.sh restart       # stop + start-bg
+#   spring-services.sh status         # list running services + mprocs-ctl reachability
+#   spring-services.sh stop [name]    # graceful stop (SIGTERM, then SIGKILL)
+#   spring-services.sh start          # start via mprocs (foreground)
+#   spring-services.sh start-bg       # start each service detached in background
+#   spring-services.sh restart [name] # restart a pane via mprocs control (clean,
+#                                     #   keeps the pane alive); falls back to
+#                                     #   kill+start-bg if the control server is down
+#   spring-services.sh ctl '<yaml>'   # send a raw command to the running mprocs,
+#                                     #   e.g. ctl '{c: restart-all}'
 #
 # `name` filters by service: lobby | server | logserver | client | all (default).
+# For `restart`, `name` may also be an mprocs-only pane: game-logs | lua-errors.
+#
+# Per-pane restart drives the mprocs remote-control server (mprocs.yaml `server:`
+# key). The C++ servers can ALSO self-re-exec in place (restart_lobby /
+# restart_logserver / restart_game MCP tools, or SIGHUP) — prefer those when you
+# only need to bounce a rebuilt C++ binary. Use `restart client` for the Vite dev
+# server, which has no in-place re-exec and otherwise serves a stale `?worker`
+# bundle after a worker-file edit.
 
 set -euo pipefail
 
@@ -34,6 +46,72 @@ PAT_CLIENT="client/node_modules/.bin/vite"
 # string that might start with a dash.
 pids_for() {
     pgrep -f -- "$1" 2>/dev/null || true
+}
+
+# --- mprocs remote control -------------------------------------------------
+# The mprocs.yaml `server:` key makes the running mprocs listen for ctl
+# commands (`mprocs --ctl '{c: ...}'`). Restarting a pane THROUGH mprocs —
+# rather than pattern-killing it — keeps mprocs authoritative: no dead pane,
+# no duplicate listener racing the port. This is the clean way to bounce the
+# Vite `client` (no in-place re-exec) and the log-tail panes. Falls back to
+# kill+start-bg when the control server is unreachable (e.g. mprocs was
+# started before `server:` was configured, or isn't running at all).
+MPROCS_CONFIG="$REPO_ROOT/mprocs.yaml"
+
+# Control server address: env override > mprocs.yaml `server:` > default.
+mprocs_server_addr() {
+    local addr=""
+    [[ -f "$MPROCS_CONFIG" ]] && addr=$(awk '/^server:[[:space:]]/{print $2; exit}' "$MPROCS_CONFIG")
+    echo "${MPROCS_SERVER:-${addr:-127.0.0.1:4050}}"
+}
+
+# Proc names in mprocs.yaml declaration order (index 0 = first). mprocs
+# `select-proc` addresses panes by index, so we translate name -> index from
+# the config to stay correct if panes are reordered.
+mprocs_proc_names() {
+    [[ -f "$MPROCS_CONFIG" ]] || return 0
+    awk '
+        /^procs:[[:space:]]*$/            { inprocs=1; next }
+        inprocs && /^[^[:space:]#]/       { inprocs=0 }
+        inprocs && /^  [A-Za-z0-9_.-]+:[[:space:]]*$/ {
+            name=$1; sub(/:.*/, "", name); print name
+        }
+    ' "$MPROCS_CONFIG"
+}
+
+mprocs_proc_index() {
+    local want="$1" i=0 name
+    while IFS= read -r name; do
+        [[ "$name" == "$want" ]] && { echo "$i"; return 0; }
+        i=$((i + 1))
+    done < <(mprocs_proc_names)
+    return 1
+}
+
+# True when the mprocs remote-control server is listening on its port.
+#
+# IMPORTANT: this is a NON-connecting check (lsof LISTEN). Do NOT probe by
+# opening a raw socket: mprocs' control server tries to deserialize whatever
+# arrives on an accepted connection, so an empty connect+close makes it fail
+# with `invalid type: … expected internally tagged enum AppEvent` — which can
+# take mprocs down. Only ever hand the server complete `--ctl` commands
+# (mprocs_ctl below); never a bare connection. `mprocs --ctl`'s own exit code
+# is useless here too (it prints "Connection refused" but still exits 0), so
+# a listen check is both safer and more reliable. Requires lsof; if absent we
+# report "not reachable" and callers take the kill+relaunch fallback.
+mprocs_ctl_available() {
+    command -v mprocs >/dev/null 2>&1 || return 1
+    command -v lsof   >/dev/null 2>&1 || return 1
+    local addr port
+    addr=$(mprocs_server_addr); port=${addr##*:}
+    [[ -n "$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null)" ]]
+}
+
+# Send a raw ctl command to the running mprocs. Runs from REPO_ROOT so mprocs
+# reads this repo's mprocs.yaml (and thus the right `server:` address).
+mprocs_ctl() {
+    command -v mprocs >/dev/null 2>&1 || { echo "mprocs not on PATH" >&2; return 1; }
+    ( cd "$REPO_ROOT" && mprocs --ctl "$1" )
 }
 
 list_service() {
@@ -59,6 +137,13 @@ cmd_status() {
     list_service server    "$PAT_SERVER"
     list_service logserver "$PAT_LOGSERVER"
     list_service client    "$PAT_CLIENT"
+    if mprocs_ctl_available; then
+        printf '  %-10s  reachable at %s (per-pane restart available)\n' \
+            "mprocs-ctl" "$(mprocs_server_addr)"
+    else
+        printf '  %-10s  not reachable at %s (restart mprocs to enable per-pane control)\n' \
+            "mprocs-ctl" "$(mprocs_server_addr)"
+    fi
 }
 
 # Send SIGTERM to all PIDs matching the pattern, wait up to 5 seconds
@@ -179,9 +264,67 @@ cmd_start_bg() {
     cmd_status
 }
 
+# Restart one pane (or all) through mprocs when the control server is up,
+# else fall back to kill+start-bg. Going through mprocs keeps the pane alive
+# and authoritative — the only clean way to bounce the Vite `client` after a
+# worker-file edit (its `?worker` bundle is otherwise served stale) without
+# leaving a dead pane behind.
 cmd_restart() {
-    cmd_stop all
-    cmd_start_bg
+    local target="${1:-all}"
+
+    if mprocs_ctl_available; then
+        if [[ "$target" == "all" ]]; then
+            echo "  mprocs: restart-all"
+            mprocs_ctl '{c: restart-all}'
+        else
+            local idx
+            if ! idx=$(mprocs_proc_index "$target"); then
+                echo "unknown mprocs pane: $target (known: $(mprocs_proc_names | tr '\n' ' '))" >&2
+                exit 2
+            fi
+            echo "  mprocs: restart pane '$target' (index $idx)"
+            # select the pane, then soft-kill+restart it. batch runs in order.
+            mprocs_ctl "{c: batch, cmds: [{c: select-proc, index: $idx}, {c: restart-proc}]}"
+        fi
+        return
+    fi
+
+    # Fallback: no control server. kill+start-bg only knows the long-running
+    # services (not the mprocs-only log-tail panes).
+    echo "  mprocs control server not reachable ($(mprocs_server_addr)) — using kill+relaunch fallback." >&2
+    echo "  (restart mprocs with the updated mprocs.yaml to enable clean per-pane restarts.)" >&2
+    case "$target" in
+        all)
+            cmd_stop all
+            cmd_start_bg
+            ;;
+        lobby|server|logserver|client)
+            cmd_stop "$target"
+            cmd_start_bg
+            ;;
+        game-logs|lua-errors)
+            echo "  '$target' is an mprocs-only pane — needs the control server (no kill+relaunch fallback)." >&2
+            exit 1
+            ;;
+        *)
+            echo "unknown service for restart: $target (expected: all|lobby|server|logserver|client|game-logs|lua-errors)" >&2
+            exit 2
+            ;;
+    esac
+}
+
+# Pass a raw ctl command straight through to the running mprocs.
+cmd_ctl() {
+    if [[ $# -eq 0 || -z "${1:-}" ]]; then
+        echo "usage: $0 ctl '<yaml command>'   e.g. ctl '{c: restart-all}'" >&2
+        exit 2
+    fi
+    if ! mprocs_ctl_available; then
+        echo "mprocs control server not reachable ($(mprocs_server_addr))." >&2
+        echo "Is mprocs running with the 'server:' key in mprocs.yaml? (restart mprocs to pick it up)" >&2
+        exit 1
+    fi
+    mprocs_ctl "$1"
 }
 
 main() {
@@ -192,9 +335,10 @@ main() {
         stop)     cmd_stop "${1:-all}" ;;
         start)    cmd_start ;;
         start-bg) cmd_start_bg ;;
-        restart)  cmd_restart ;;
+        restart)  cmd_restart "${1:-all}" ;;
+        ctl)      cmd_ctl "$@" ;;
         -h|--help|help)
-            sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+            sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
             ;;
         *)
             echo "unknown command: $cmd" >&2

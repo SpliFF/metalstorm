@@ -1,3 +1,13 @@
+# Remote-control server. With this set, the running mprocs listens for
+# ctl commands (`mprocs --ctl '{c: ...}'`), so scripts/MCP can restart an
+# individual pane WITHOUT killing it out from under mprocs (which would
+# leave a dead pane + risk duplicate listeners). `tools/scripts/spring-services.sh
+# restart <proc>` drives this. The C++ servers also self-re-exec in place
+# (restart_lobby / restart_logserver / restart_game, SIGHUP); the control
+# channel is the clean path for the panes that can't — the Vite `client`
+# and the log tails. See docs/debugging-tools.md "mprocs Development Environment".
+server: 127.0.0.1:4050
+
 procs:
   logserver:
     shell: "./build/debug/spring-logserver --port 8010 --db data/debug.db --i-understand-this-is-a-dev-build"

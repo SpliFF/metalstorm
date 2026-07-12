@@ -26,6 +26,7 @@ The `spring-debug` MCP server (declared in `.mcp.json`) connects to the running 
 | `restart_lobby` | Restart the lobby server in-place (re-exec, same PID, preserves game servers) | After rebuilding spring-lobby binary |
 | `restart_logserver` | Restart the log server (:8010) in-place (re-exec, same PID) | After rebuilding spring-logserver, or if the log pipeline stops responding |
 | `restart_game` | Restart a game server in-place (re-exec with same args, same PID) | After rebuilding spring-server binary |
+| `restart_client` | Restart the Vite client pane (:8012) via the mprocs control channel | After editing a worker-imported client file (`entity-renderer.ts`, `game-processor.ts`) that Vite serves stale |
 | `api_request` | Authenticated HTTP request to lobby/log/game server (auto-manages token) | Hitting endpoints without curl + manual token plumbing |
 
 This server also exposes browser-bridging tools (`browser_test`, `evaluate_widget_lua`) and the server-side test verbs (`spawn_unit`, `give_order`, etc.) — those, plus the performance-profiling tools (`perfDump`, `uiProfileStart/Dump/Stop`, `netSim*`), are documented in the **`spring-test`** skill and [docs/debugging-performance.md](../../../docs/debugging-performance.md), since they're really one `window.test` API surface rather than server-log/DB tooling.
@@ -77,7 +78,9 @@ Prefer `exec_lua` for Lua snippets and `query_db` for SQL — `api_request` is t
 
 After rebuilding binaries, restart servers without disrupting the lobby room lifecycle.
 
-All three restart tools **re-exec the process in place — the PID is preserved**, so an external process manager (mprocs) stays authoritative and never sees a crash + respawn. **Prefer these over `kill` + relaunch**: hand-launching outside mprocs leaves the mprocs-managed pane dead and can spawn duplicate listeners on the same port (SO_REUSEPORT round-robin), so requests hit a stale pre-rebuild binary. If you ever do end up with duplicate `spring-lobby`/`spring-logserver` processes, kill the extras and restart the surviving one via these tools (or the mprocs pane).
+The three **C++** restart tools (`restart_lobby`/`restart_logserver`/`restart_game`) **re-exec the process in place — the PID is preserved**, so an external process manager (mprocs) stays authoritative and never sees a crash + respawn. **Prefer these over `kill` + relaunch**: hand-launching outside mprocs leaves the mprocs-managed pane dead and can spawn duplicate listeners on the same port (SO_REUSEPORT round-robin), so requests hit a stale pre-rebuild binary. If you ever do end up with duplicate `spring-lobby`/`spring-logserver` processes, kill the extras and restart the surviving one via these tools (or the mprocs pane).
+
+`restart_client` is the equivalent for the **Vite** dev server, which is a node process with no in-place re-exec: it restarts the `client` pane through the mprocs remote-control channel (`mprocs.yaml` `server:` key → `select-proc` + `restart-proc`), which is likewise authoritative and pane-preserving. Use it after editing a worker-imported client file (`entity-renderer.ts`, `game-processor.ts`, …) — Vite serves a stale `?worker` bundle otherwise. It requires mprocs to have been started with the `server:` key; if not, it falls back to kill+relaunch and says so (restart mprocs once to enable the clean path). See [docs/debugging-tools.md](../../docs/debugging-tools.md) "mprocs Development Environment → Remote control".
 
 **Lobby** (`restart_lobby`):
 - Re-execs the process with the same CLI arguments (PID is preserved)

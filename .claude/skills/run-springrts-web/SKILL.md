@@ -128,14 +128,28 @@ cd client && npx vitest run                        # client unit tests
 - **Vite dev `?worker` serves stale worker code.** Page reloads (even
   cache-bypassing) keep running the *old* worker module after you edit a
   worker-imported file (`entity-renderer.ts`, `game-processor.ts`, …).
-  Byte-identical behaviour after an edit = stale bundle → **restart the `client`
-  proc in mprocs** (the running Vite picks up later edits on reload only after a
-  fresh start; clear `client/node_modules/.vite` if needed).
+  Byte-identical behaviour after an edit = stale bundle → **`tools/scripts/spring-services.sh
+  restart client`** (restarts just the Vite pane through the mprocs control
+  channel — pane stays authoritative, no dead pane / duplicate listener). The
+  running Vite picks up later edits on reload only after a fresh start; clear
+  `client/node_modules/.vite` first if a restart alone doesn't take.
+- **Per-pane restart via the mprocs control channel.** mprocs runs a remote-control
+  server (`mprocs.yaml` `server: 127.0.0.1:4050`); `spring-services.sh restart <pane>`
+  (`client` | `lobby` | `server` | `logserver` | `game-logs` | `lua-errors` | `all`)
+  drives it, and `spring-services.sh ctl '{c: …}'` sends a raw command. `status`
+  reports whether the control server is reachable. **This requires mprocs to have
+  been started with the `server:` key** — if you started mprocs before it was
+  configured, restart mprocs once so it opens the port (else `restart` falls back
+  to kill+relaunch, which can't touch the mprocs-only log-tail panes). For a
+  rebuilt **C++** binary prefer the in-place re-exec instead (spring-debug MCP
+  `restart_lobby`/`restart_logserver`/`restart_game`, or `SIGHUP`) — same PID,
+  mprocs stays authoritative; `restart client` is for the Vite pane, which has no
+  re-exec.
 - **Don't hand-launch services.** They're mprocs-managed; the lobby caches state
   and duplicate processes cause port races (you can end up with two lobbies on
-  8011 / two logservers on 8010). Restart via mprocs. `spring-services.sh stop`
-  pattern-kills all repo `spring-*` + the client Vite (graceful TERM→KILL,
-  handles duplicates) when you need a clean slate.
+  8011 / two logservers on 8010). Restart via the control channel above (or the
+  mprocs TUI). `spring-services.sh stop` pattern-kills all repo `spring-*` + the
+  client Vite (graceful TERM→KILL, handles duplicates) when you need a clean slate.
 - **RTS camera ignores free `setCameraPose`** (the rig overrides it). Use
   `test.cameraSnapToGround(x, z±offset, {height, pitchDeg})` for an angled,
   HUD-clear 3/4 view; `test.cameraSnapToUnit(id)` defaults to top-down.
@@ -167,7 +181,8 @@ cd client && npx vitest run                        # client unit tests
 | `smoke.sh` FAIL: lobby `/api/version` not responding | Lobby down — start the `lobby` proc in mprocs (or `smoke.sh --start`). |
 | Game stuck `frame=-1`, `list_units` empty | No connected registered player — create+start your own room as the logged-in browser user (don't just `joinRoom` an MCP room). |
 | `modinfo.lua` edit not reflected in `/api/games` | Restart the `lobby` proc (games list is startup-cached). |
-| Worker code edit not taking after reload | Restart the `client` (Vite) proc; the `?worker` bundle is stale. |
+| Worker code edit not taking after reload | `spring-services.sh restart client` (mprocs control channel); the `?worker` bundle is stale. |
+| `restart` says "control server not reachable" | mprocs was started before the `server:` key existed — restart mprocs once so it opens `:4050` (check with `spring-services.sh status`). |
 | Two lobbies / logservers, port races | `tools/scripts/spring-services.sh stop`, then restart mprocs. |
 | `403 forbidden — admin role required` | Browser user isn't admin — use the `spring-debug` MCP for server actions. |
 | Login/auth hangs or fails after a crashed session | Zombie `spring-server` holding `:9100` — kill it (`lsof -i :9100`), relaunch. |

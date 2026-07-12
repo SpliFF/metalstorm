@@ -119,7 +119,7 @@ Configure in `.claude/settings.local.json`:
 | `list_gadgets` | `roomId` | List loaded Lua gadgets |
 | `query_db` | `query`, `db` | SQL query against game or debug database |
 | `list_sessions` | | List recent game sessions |
-| `launch_game`, `kill_game`, `restart_lobby`, `restart_logserver`, `restart_game` | see `.claude/skills/spring-debug` | Game-server lifecycle management |
+| `launch_game`, `kill_game`, `restart_lobby`, `restart_logserver`, `restart_game`, `restart_client` | see `.claude/skills/spring-debug` | Service lifecycle management (`restart_client` = Vite pane via mprocs control channel) |
 | `spawn_unit`, `kill_unit`, `damage_unit`, `give_order`, `clear_units`, `get_unit_state`, `set_debug_logging`, `get_combat_summary`, `pause_sim`, `set_sim_speed` | see `.claude/skills/spring-test` | Scripted test verbs (server-side) |
 | `browser_test`, `evaluate_widget_lua` | see `.claude/skills/spring-test` | Bridges to browser-side `window.test`/`window.widgets` — includes the [performance-profiling tools](debugging-performance.md) |
 
@@ -329,3 +329,41 @@ The `mprocs.yaml` file defines the development process group:
 | `lua-errors` | `tail ... \| grep -iE '(error\|warning\|FATAL)'` | Filtered error view |
 
 Start with `mprocs` from the project root. Each process runs in its own pane.
+
+### Remote control (restart a single pane)
+
+`mprocs.yaml` sets `server: 127.0.0.1:4050`, which makes the running mprocs
+listen for control commands. This lets scripts/MCP restart **one** pane without
+killing it out from under mprocs (a bare `kill` leaves a dead pane and risks a
+duplicate listener that round-robins the port via `SO_REUSEPORT`, so requests
+hit a stale binary).
+
+`tools/scripts/spring-services.sh` drives it:
+
+```bash
+spring-services.sh status          # lists services + whether mprocs-ctl is reachable
+spring-services.sh restart client  # restart just the Vite pane (select-proc + restart-proc)
+spring-services.sh restart all     # restart-all
+spring-services.sh ctl '{c: restart-all}'   # send a raw mprocs command
+```
+
+Panes: `logserver | lobby | server | client | game-logs | lua-errors | all`.
+The script maps a pane **name** to the index mprocs `select-proc` expects by
+parsing `mprocs.yaml`, so it stays correct if panes are reordered.
+
+**The control server only exists if mprocs was started with the `server:` key.**
+If you started mprocs before this was configured, `status` shows `mprocs-ctl not
+reachable` and `restart` falls back to kill+relaunch (which can't touch the
+mprocs-only `game-logs`/`lua-errors` tails) — restart mprocs once to open the
+port.
+
+**When to use which restart.** The C++ servers self-re-exec in place — prefer
+`restart_lobby` / `restart_logserver` / `restart_game` (spring-debug MCP) or
+`SIGHUP` after rebuilding a C++ binary: same PID, mprocs stays authoritative, and
+running game servers are preserved (see the [spring-debug](../.claude/skills/spring-debug/SKILL.md)
+skill). Use `spring-services.sh restart client` for the **Vite** pane
+specifically — it's a node process with no in-place re-exec, and Vite otherwise
+serves a stale `?worker` bundle after you edit a worker-imported file
+(`entity-renderer.ts`, `game-processor.ts`, …). The raw `mprocs --ctl '{c: …}'`
+vocabulary (`restart-proc`, `restart-all`, `select-proc`, `add-proc`, `start-proc`,
+`term-proc`, `send-key`, `batch`, …) is documented in the mprocs README.
