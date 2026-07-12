@@ -1,0 +1,10 @@
+# Local Python virtualenv (numpy etc.) — machine-specific, recreate with
+#   python3 -m venv .venv && .venv/bin/pip install numpy
+.venv/
+
+# Generated model outputs — regenerable from the gen_*.py scripts.
+# The shipped copies live in data/games/metalstorm/models/ (also gitignored).
+out/
+
+# Ad-hoc model backups made while debugging (e.g. strip_model.py sources).
+backup/

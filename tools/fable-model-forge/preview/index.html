@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>body{margin:0;background:#181c20}canvas{display:block}</style>
+<script type="importmap">
+{"imports":{"three":"/node_modules/three/build/three.module.js","three/addons/":"/node_modules/three/examples/jsm/"}}
+</script>
+</head>
+<body>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
+
+const P = new URLSearchParams(location.search);
+const model = P.get('model') || '/out/fable_tank_png.gltf';
+const az = parseFloat(P.get('az') ?? '35') * Math.PI / 180;   // azimuth deg
+const el = parseFloat(P.get('el') ?? '18') * Math.PI / 180;   // elevation deg
+const dist = parseFloat(P.get('dist') ?? '14');
+const yaw = parseFloat(P.get('yaw') ?? '0') * Math.PI / 180;   // turret yaw
+const pitch = parseFloat(P.get('pitch') ?? '0') * Math.PI / 180; // barrel pitch
+const W = 1280, H = 960;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setSize(W, H);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x23282e);
+
+const hemi = new THREE.HemisphereLight(0xcfd8e3, 0x3a352c, 1.15);
+scene.add(hemi);
+const key = new THREE.DirectionalLight(0xfff2df, 2.6);
+key.position.set(6, 10, 5);
+key.castShadow = true;
+key.shadow.mapSize.set(2048, 2048);
+key.shadow.camera.left = -8; key.shadow.camera.right = 8;
+key.shadow.camera.top = 8; key.shadow.camera.bottom = -8;
+scene.add(key);
+const rim = new THREE.DirectionalLight(0x9fc4ff, 1.0);
+rim.position.set(-7, 6, -9);
+scene.add(rim);
+
+const ground = new THREE.Mesh(
+  new THREE.CircleGeometry(30, 48),
+  new THREE.MeshStandardMaterial({ color: 0x2c3138, roughness: 0.95 }));
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+scene.add(ground);
+const grid = new THREE.GridHelper(30, 30, 0x3d444d, 0x343a42);
+grid.position.y = 0.002;
+scene.add(grid);
+
+const camera = new THREE.PerspectiveCamera(35, W / H, 0.1, 200);
+
+const ktx2 = new KTX2Loader()
+  .setTranscoderPath('/node_modules/three/examples/jsm/libs/basis/')
+  .detectSupport(renderer);
+const loader = new GLTFLoader().setKTX2Loader(ktx2);
+
+loader.load(model, (gltf) => {
+  const root = gltf.scene;
+  root.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+  const clipName = P.get('clip');
+  const clipT = parseFloat(P.get('t') ?? '0');
+  if (clipName && gltf.animations && gltf.animations.length) {
+    const c = gltf.animations.find((a) => a.name === clipName);
+    if (c) {
+      const mixer = new THREE.AnimationMixer(root);
+      const action = mixer.clipAction(c);
+      action.setLoop(THREE.LoopRepeat, Infinity);
+      action.play();
+      mixer.setTime(Math.min(clipT, c.duration - 1e-3));
+    } else { window.__error = `clip not found: ${clipName}`; }
+  }
+  const turret = root.getObjectByName('turret');
+  const barrel = root.getObjectByName('barrel');
+  if (!clipName && turret) turret.rotation.y = yaw;
+  if (!clipName && barrel) barrel.rotation.x = pitch;
+  scene.add(root);
+
+  const box = new THREE.Box3().setFromObject(root);
+  const c = box.getCenter(new THREE.Vector3());
+  camera.position.set(
+    c.x + dist * Math.cos(el) * Math.sin(az),
+    c.y + dist * Math.sin(el),
+    c.z + dist * Math.cos(el) * Math.cos(az));
+  camera.lookAt(c.x, c.y * 0.9, c.z);
+  renderer.render(scene, camera);
+  window.__stats = { tris: renderer.info.render.triangles, calls: renderer.info.render.calls,
+                     size: box.getSize(new THREE.Vector3()).toArray().map(v => +v.toFixed(2)) };
+  window.__root = root; window.__done = true;
+}, undefined, (err) => { window.__error = String(err); window.__done = true; });
+</script>
+</body>
+</html>
