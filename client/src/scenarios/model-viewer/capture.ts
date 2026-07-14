@@ -44,7 +44,7 @@ const CLIP_FRAME_TIMES_MS = [1500, 4000, 8000, 12000];
 
 /** Movement/action showcases worth a clip strip, in preference order. */
 const CLIP_CANDIDATES: ShowcaseId[] = [
-    'circuit', 'fly-circuit', 'sail-circuit', 'volley', 'build', 'produce', 'load-unload',
+    'construction', 'circuit', 'fly-circuit', 'sail-circuit', 'volley', 'build', 'produce', 'load-unload',
 ];
 
 async function grab(

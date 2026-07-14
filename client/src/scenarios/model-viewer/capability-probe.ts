@@ -93,6 +93,7 @@ export function probeFromDef(d: DefWireLike): CapabilityProbe {
 
 export type ShowcaseId =
     | 'idle'
+    | 'construction'     // buildings only: nanoframe → complete, real build-anim
     | 'circuit'          // ground walk/drive square
     | 'turn-in-place'
     | 'fly-circuit'      // take-off, fly square, land
@@ -120,7 +121,22 @@ export interface ShowcaseSpec {
  */
 export function deriveShowcases(p: CapabilityProbe): ShowcaseSpec[] {
     const out: ShowcaseSpec[] = [];
-    out.push({ id: 'idle', label: 'Idle', hint: 'hold still 5 s — idle anim / stance' });
+    out.push({
+        id: 'idle', label: 'Idle',
+        hint: 'hold still 5 s — idle anim / stance (plays an authored "idle" clip if the model ships one)',
+    });
+
+    // Buildings have no move/turn showcase of their own — this is the
+    // building-equivalent flagship row: a real nanoframe (Spring.CreateUnit
+    // build=true) ramped to completion via the same buildProgress field
+    // real construction drives, exercising the actual client build-anim
+    // renderer rather than a bespoke building-only visual.
+    if (p.isBuilding) {
+        out.push({
+            id: 'construction', label: 'Construction',
+            hint: 'nanoframe → complete (buildProgress ramp; real client build-animation)',
+        });
+    }
 
     // canMove alone is not enough: ZK factories carry canMove=true with
     // speed=0 (live-found) — a def that can't attain speed can't run a
