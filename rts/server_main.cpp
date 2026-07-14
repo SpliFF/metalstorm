@@ -45,6 +45,8 @@
 #include "Server/ClientMessageHandler.h"
 #include "Server/StateStreamer.h"
 #include "Server/GameHttpRoutes.h"
+#include "Server/HeadlessRun.h"
+#include "Server/GameOverState.h"
 #include "Lua/LuaRules.h"
 #include "Server/HttpAuth.h"
 #include "Server/CacheControl.h"
@@ -190,6 +192,17 @@ int main(int argc, char* argv[])
     int idleExitSeconds = envInt("SPRING_IDLE_EXIT_SECONDS", 300);          // 5 min
     int idleStartupGraceSeconds = envInt("SPRING_IDLE_STARTUP_GRACE_SECONDS", 120);  // 2 min
 
+    // --- Headless run mode (PLAN-headless task 1) ---
+    // `--headless-run <config.json>` runs the sim to completion with no browser
+    // client: no clients, no idle-exit, run-config-driven pacing (uncapped /
+    // realtime / xN) and stop conditions (frame / gameOver / luaCondition), all
+    // under a hard wall-clock ceiling (`--max-wall-min`, default 60, E4). When
+    // no config is given the mode stays disabled and the loop behaves exactly
+    // as a normal game (the tick-gate-off regression bar, PLAN-headless §6).
+    std::string headlessConfigPath;
+    int maxWallMin = 60;
+    headless::Config headlessCfg;
+
     // Human player roster from the lobby. Each `--player <username>:<team>:<pos>`
     // entry gets one slot here. The sim uses this for two things:
     //   1. At AuthRequest time, look up the authenticating username
@@ -240,6 +253,8 @@ int main(int argc, char* argv[])
     // --log-file PATH, --log-level LEVEL, --log-server URL,
     // --log-sqlite PATH, --debug, --log-messages,
     // --wt-cert PATH, --wt-key PATH,
+    // --headless-run config.json (PLAN-headless: no-client batch/soak run),
+    // --max-wall-min N (headless hard wall-clock ceiling, default 60),
     // --player username:team:pos (repeatable),
     // --ai id:team:pos (repeatable)
     for (int i = 1; i < argc; i++) {
@@ -264,6 +279,10 @@ int main(int argc, char* argv[])
             idleExitSeconds = std::atoi(argv[++i]);
         } else if (arg == "--idle-startup-grace-seconds" && i + 1 < argc) {
             idleStartupGraceSeconds = std::atoi(argv[++i]);
+        } else if (arg == "--headless-run" && i + 1 < argc) {
+            headlessConfigPath = argv[++i];
+        } else if (arg == "--max-wall-min" && i + 1 < argc) {
+            maxWallMin = std::atoi(argv[++i]);
         } else if (arg == "--log-file" && i + 1 < argc) {
             logFile = argv[++i];
         } else if (arg == "--log-level" && i + 1 < argc) {
@@ -334,6 +353,48 @@ int main(int argc, char* argv[])
             // Legacy: bare number = port
             port = std::atoi(argv[i]);
         }
+    }
+
+    // --- Headless run config (PLAN-headless task 1) ---
+    // Parse the run manifest and fold its self-contained map/game/aiSlots into
+    // the same structures the CLI flags fill, but only where a flag was absent
+    // (explicit --map/--game/--ai win over the manifest). The `headless` block
+    // (tickMode / stopAt / statsDump / stateHashEvery) drives the sim loop below.
+    if (!headlessConfigPath.empty()) {
+        std::string cfgErr;
+        if (!headless::ParseConfigFile(headlessConfigPath, headlessCfg, cfgErr)) {
+            SLOG(SPRING_LOG_ERROR, "--headless-run: %s", cfgErr.c_str());
+            return 1;
+        }
+        headlessCfg.enabled = true;
+        headlessCfg.maxWallSec = static_cast<int64_t>(std::max(1, maxWallMin)) * 60;
+
+        if (mapId.empty() && !headlessCfg.map.empty())
+            mapId = headlessCfg.map;
+        if (gameId.empty() && !headlessCfg.game.empty())
+            gameId = headlessCfg.game;
+        if (requestedAIs.empty() && !headlessCfg.aiSlots.empty()) {
+            for (const auto& s : headlessCfg.aiSlots) {
+                RequestedAI rq;
+                rq.id = s.aiId;
+                rq.team = s.team;
+                rq.startPos = s.startPos;
+                requestedAIs.push_back(std::move(rq));
+            }
+        }
+
+        std::string modeStr =
+            headlessCfg.tickMode == headless::TickMode::Uncapped ? "uncapped"
+          : headlessCfg.tickMode == headless::TickMode::Multiple
+                ? ("x" + std::to_string(headlessCfg.tickMultiple))
+          :                                                          "realtime";
+        SLOG(SPRING_LOG_NOTICE,
+            "headless run: tickMode=%s maxWall=%dmin stopAt{frame=%lld gameOver=%d lua=%s}",
+            modeStr.c_str(),
+            maxWallMin,
+            headlessCfg.stopAt.frame ? (long long)*headlessCfg.stopAt.frame : -1LL,
+            headlessCfg.stopAt.gameOver ? 1 : 0,
+            headlessCfg.stopAt.luaCondition ? headlessCfg.stopAt.luaCondition->c_str() : "-");
     }
 
     // PLAN-security-hardening E1 (warn-only — see DevBuildGate::WarnOnly).
@@ -892,7 +953,10 @@ int main(int argc, char* argv[])
             nullptr, nullptr, nullptr);
     }
     // idleExitSeconds <= 0 → never idle-exit (treat like a persistent room).
-    const bool idleExitEnabled = idleExitSeconds > 0;
+    // Headless runs have no clients by construction — idle-exit would kill them
+    // right after the startup grace, so it is force-disabled; the run instead
+    // ends on its own stop conditions + the --max-wall-min ceiling.
+    const bool idleExitEnabled = idleExitSeconds > 0 && !headlessCfg.enabled;
     const int kStartupGraceSec = idleStartupGraceSeconds;  // wait for first client
     const int kIdleExitSec = idleExitSeconds;              // then exit after no clients
     if (!roomPersistent && idleExitEnabled)
@@ -925,28 +989,52 @@ int main(int argc, char* argv[])
     // (The team-stats-history send cursor + win-check latch + State-tier lane
     // constants now live as StateStreamer members.)
 
+    // Headless-run stop-condition latches (PLAN-headless task 1). Once the
+    // synced-Lua predicate has been observed true / errored it stays latched so
+    // the run stops even if a later poll would read differently. Unused unless
+    // headlessCfg.enabled.
+    bool headlessLuaMet = false;
+    bool headlessLuaErrored = false;
+    headless::StopReason headlessStopReason = headless::StopReason::None;
+
     while (keepRunning.load()) {
-        // Re-read wantedSpeedFactor every tick so live speed changes
-        // (via the `speed` exec verb) apply immediately.
-        tickInterval = computeTickInterval();
+        // --- Pacing ---
+        // Normal games (and headless realtime / xN) sleep to hit the target tick
+        // interval; headless "uncapped" skips wall-clock pacing entirely and
+        // ticks as fast as the sim computes (the sim thread is decoupled from
+        // any render). The `headlessUncapped` guard is the ONLY divergence on
+        // the normal path — with headless off it is always false, so behaviour
+        // is byte-identical (the tick-gate-off regression bar, PLAN-headless §6).
+        const bool headlessUncapped =
+            headlessCfg.enabled && headlessCfg.tickMode == headless::TickMode::Uncapped;
+        if (!headlessUncapped) {
+            // Re-read wantedSpeedFactor every tick so live speed changes (via the
+            // `speed` exec verb) apply immediately. A headless realtime/xN run
+            // paces from its run config instead — there is no client to send
+            // speed verbs.
+            tickInterval = headlessCfg.enabled
+                ? std::chrono::microseconds(headless::TickIntervalMicros(
+                      headlessCfg.tickMode, headlessCfg.tickMultiple, GAME_SPEED))
+                : computeTickInterval();
 
-        // Wait for next tick
-        auto now = std::chrono::steady_clock::now();
-        if (now < nextTick) {
-            std::this_thread::sleep_until(nextTick);
-        }
-        nextTick += tickInterval;
-
-        // If we fell behind, skip ticks rather than accumulating
-        now = std::chrono::steady_clock::now();
-        if (now > nextTick + tickInterval) {
-            int skipped = 0;
-            while (nextTick + tickInterval < now) {
-                nextTick += tickInterval;
-                skipped++;
+            // Wait for next tick
+            auto now = std::chrono::steady_clock::now();
+            if (now < nextTick) {
+                std::this_thread::sleep_until(nextTick);
             }
-            if (skipped > 0) {
-                SLOG(SPRING_LOG_WARNING, "sim fell behind, skipped %d ticks", skipped);
+            nextTick += tickInterval;
+
+            // If we fell behind, skip ticks rather than accumulating
+            now = std::chrono::steady_clock::now();
+            if (now > nextTick + tickInterval) {
+                int skipped = 0;
+                while (nextTick + tickInterval < now) {
+                    nextTick += tickInterval;
+                    skipped++;
+                }
+                if (skipped > 0) {
+                    SLOG(SPRING_LOG_WARNING, "sim fell behind, skipped %d ticks", skipped);
+                }
             }
         }
 
@@ -1096,6 +1184,46 @@ int main(int argc, char* argv[])
         if (frame > 0 && (frame % (GAME_SPEED * 10)) == 0) {
             SLOG(SPRING_LOG_INFO, "frame %d (%.1fs) clients=%d",
                 frame, frame / (float)GAME_SPEED, rtcServer.GetClientCount());
+        }
+
+        // --- Headless run: stop-condition evaluation (PLAN-headless task 1) ---
+        // Only reached under --headless-run, so a normal game never enters this
+        // block (regression bar). Evaluated after the tick + streamer, so the
+        // game-over relay and frame count reflect this frame. The synced-Lua
+        // predicate is polled every 30 game-seconds (§1) and its result latched.
+        if (headlessCfg.enabled) {
+            if (headlessCfg.stopAt.luaCondition && !headlessLuaMet &&
+                !headlessLuaErrored && frame > 0 &&
+                (frame % (GAME_SPEED * 30)) == 0) {
+                std::string perr;
+                const auto pr = EvalSyncedPredicate(
+                    *headlessCfg.stopAt.luaCondition, perr);
+                if (pr == SyncedPredicateResult::Error) {
+                    headlessLuaErrored = true;   // E3: treat as stop, never a hang
+                    SLOG(SPRING_LOG_ERROR, "headless luaCondition '%s' errored: %s",
+                        headlessCfg.stopAt.luaCondition->c_str(), perr.c_str());
+                } else if (pr == SyncedPredicateResult::True) {
+                    headlessLuaMet = true;
+                }
+            }
+
+            headless::RunState rs;
+            rs.frame = frame;
+            rs.gameOverDeclared = gameOverRelay.IsDeclared();
+            rs.luaConditionMet = headlessLuaMet;
+            rs.luaConditionErrored = headlessLuaErrored;
+            rs.wallElapsedSec = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - serverStartTime).count();
+
+            headlessStopReason = headless::EvaluateStop(
+                headlessCfg.stopAt, headlessCfg.maxWallSec, rs);
+            if (headlessStopReason != headless::StopReason::None) {
+                SLOG(SPRING_LOG_NOTICE,
+                    "headless run complete: stop=%s frame=%d (%.1fs) wall=%llds",
+                    headless::StopReasonName(headlessStopReason), frame,
+                    frame / (float)GAME_SPEED, (long long)rs.wallElapsedSec);
+                keepRunning.store(false);
+            }
         }
     }
 

@@ -110,3 +110,14 @@ private:
 /// Execute a request in the appropriate Lua/server scope.
 /// Called from the sim thread.
 LuaExecResult ExecuteLuaExecRequest(const LuaExecRequest& req);
+
+/// Tri-state result of a synced-Lua predicate poll (headless-run stop condition).
+enum class SyncedPredicateResult { False, True, Error };
+
+/// Evaluate `expr` as a boolean predicate in the LuaRules synced Lua state
+/// (e.g. "GG.Balance.Done"). Returns Error — and fills `errOut` — when LuaRules
+/// is not loaded, the chunk fails to compile, or it raises at runtime. The
+/// first returned value is coerced with Lua truthiness. Must run on the sim
+/// thread. Used by the --headless-run stop-condition poller (PLAN-headless §1).
+SyncedPredicateResult EvalSyncedPredicate(const std::string& expr,
+                                          std::string& errOut);
