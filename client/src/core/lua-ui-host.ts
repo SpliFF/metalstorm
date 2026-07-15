@@ -27,6 +27,7 @@ import {
     type SpringAPIContext,
     type LiveState,
     type UnitEntry,
+    type ProjectileEntry,
 } from './lua-spring-api.js';
 import type { CombatEventInfo, FeatureSpawnInfo, SoundRefInfo } from './connection.js';
 import { SoundCategory } from './sound-events.js';
@@ -5793,6 +5794,47 @@ export function setMusicStreamTime(played: number, duration: number): void {
  *  stops spamming on failure. */
 export function setLuaUiActiveFalse(): void {
     gpCtx.luaUiActive = false;
+}
+
+/// Scratch id-set for updateLiveProjectiles' sweep; module-level so the
+/// per-frame mirror allocates nothing.
+const projectileSeen = new Set<number>();
+
+/** Mirror the ProjectileRenderer's live projectiles + beams into
+ *  `liveState.projectiles`, backing the Spring.GetProjectile* read family
+ *  (the A3 seam — PLAN-latency-impl.md L-pre.1). Called once per render frame
+ *  from the game-processor loop; entries are updated in place (not rebuilt) so
+ *  a busy field costs field writes rather than Map/object churn. Ids absent
+ *  from the snapshot are swept — a projectile that impacted is gone from Lua's
+ *  view on the same frame it leaves the renderer. */
+export function updateLiveProjectiles(snapshot: ReadonlyArray<ProjectileEntry & { id: number }>): void {
+    const map = liveState.projectiles;
+    projectileSeen.clear();
+    for (const p of snapshot) {
+        projectileSeen.add(p.id);
+        const e = map.get(p.id);
+        if (e) {
+            e.defId = p.defId;
+            e.x = p.x; e.y = p.y; e.z = p.z;
+            e.vx = p.vx; e.vy = p.vy; e.vz = p.vz;
+            e.ttl = p.ttl;
+            e.isBeam = p.isBeam;
+        } else {
+            map.set(p.id, {
+                defId: p.defId,
+                x: p.x, y: p.y, z: p.z,
+                vx: p.vx, vy: p.vy, vz: p.vz,
+                ttl: p.ttl, isBeam: p.isBeam,
+            });
+        }
+    }
+    // Every snapshot id is now in the map, so map ⊇ seen: equal sizes ⇒ equal
+    // sets ⇒ nothing to sweep. Only walk the keys when something died.
+    if (map.size !== projectileSeen.size) {
+        for (const id of map.keys()) {
+            if (!projectileSeen.has(id)) map.delete(id);
+        }
+    }
 }
 
 // ── GP-seam state that lives here because it's only used in installEngineGlobals ──

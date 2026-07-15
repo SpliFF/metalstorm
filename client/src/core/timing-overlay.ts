@@ -18,23 +18,24 @@
  * (frame-time distribution + per-stream net breakdown), so keeping the L0
  * telemetry self-contained avoids a merge collision. The two panels can be
  * folded together once both land.
+ *
+ * Post-GW4 the clock itself lives in the game-processor worker, so this panel
+ * reads a `GpTimingState` snapshot delivered over `gp:sceneState` (~10 Hz)
+ * rather than holding a PresentationClock instance — hence the provider
+ * function in the constructor (PLAN-latency-impl.md L-pre.3).
  */
 
-import type { PresentationClock } from './presentation-clock.js';
-
-interface NetSimProvider {
-    getNetSim(): Readonly<{ enabled: boolean; delayMs: number; jitterMs: number; lossProb: number }>;
-}
+import type { GpTimingState } from './game-worker-protocol.js';
 
 export class TimingOverlay {
     private element: HTMLDivElement;
     private visible = false;
-    private clock: PresentationClock;
-    private connProvider: (() => NetSimProvider | null) | null = null;
+    /** Returns the latest worker timing snapshot, or null before one arrives. */
+    private provider: () => GpTimingState | null;
     private lastRender = 0;
 
-    constructor(clock: PresentationClock) {
-        this.clock = clock;
+    constructor(provider: () => GpTimingState | null) {
+        this.provider = provider;
         this.element = document.createElement('div');
         this.element.id = 'timing-overlay';
         this.element.style.cssText = `
@@ -56,11 +57,6 @@ export class TimingOverlay {
         });
     }
 
-    /** Provide a way to read the connection's netSim config (optional). */
-    setConnectionProvider(fn: () => NetSimProvider | null): void {
-        this.connProvider = fn;
-    }
-
     toggle(): void {
         this.visible = !this.visible;
         this.element.style.display = this.visible ? 'block' : 'none';
@@ -79,16 +75,16 @@ export class TimingOverlay {
     }
 
     private render(): void {
-        const s = this.clock.getStats();
+        const s = this.provider();
         const f = (n: number) => n.toFixed(1);
 
-        if (!s.anchored) {
+        if (!s || !s.anchored) {
             this.element.textContent =
                 'PRESENTATION CLOCK (F10)\n  waiting for first frame-stamped snapshot…';
             return;
         }
 
-        const net = this.connProvider?.()?.getNetSim();
+        const net = s.netSim;
         const netLine = net && net.enabled
             ? `\nnetSim:   ON  delay=${net.delayMs}±${net.jitterMs}ms loss=${(net.lossProb * 100).toFixed(1)}%`
             : '\nnetSim:   off';
@@ -104,7 +100,7 @@ export class TimingOverlay {
             `newest rcvd: ${s.newestFrame}   speed ${f(s.speedFactor)}×\n` +
             `RTT: ${Math.round(s.rttMs)}ms  offset: ${Math.round(s.offsetMs)}ms  (${s.clockSamples} samp)\n` +
             `arrival jitter: ${f(s.arrivalJitterMs)}ms\n` +
-            this.histogram() + '\n' +
+            this.histogram(s.arrivalDeviations) + '\n' +
             `reorder: ${s.reorderCount}  loss: ${s.lossCount}\n` +
             `corrections: ${s.correctionCount}  last: ${f(s.lastCorrectionFrames)} fr` +
             netLine;
@@ -112,8 +108,7 @@ export class TimingOverlay {
 
     /** Compact ASCII histogram of recent signed arrival deviations (ms),
      *  bucketed across [−50, +50] ms (outliers clamp to the end buckets). */
-    private histogram(): string {
-        const devs = this.clock.getArrivalDeviations();
+    private histogram(devs: readonly number[]): string {
         if (devs.length === 0) return '  [no arrival samples]';
         const BUCKETS = 11;            // centre bucket = on-time
         const RANGE = 50;              // ±50 ms span

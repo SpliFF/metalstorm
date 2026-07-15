@@ -19,6 +19,7 @@
 
 import type { RmlOpsToMain, RmlEventToWorker, RmlResizeToWorker } from '../ui/rml/rml-protocol.js';
 import type { ResourceUpdateInfo } from './connection.js';
+import type { PresentationClockStats } from './presentation-clock.js';
 
 // ─── main → worker ──────────────────────────────────────────────────────────
 
@@ -242,6 +243,22 @@ export interface GpSelectedUnit {
  * the *only* channel the DOM layer reads world facts from — freeze the payload.
  * Camera pose drives the main-thread audio listener + minimap.
  */
+/**
+ * L0 timing telemetry for the main-thread TimingOverlay (F10). The
+ * PresentationClock lives in the worker (it is fed by the in-worker
+ * connection and ticked by the render loop), so main can only observe it
+ * through a snapshot — this is that snapshot: the clock's own stats plus the
+ * arrival-deviation samples the overlay's histogram bins and the active
+ * netSim condition. Absent until the worker's clock exists.
+ * PLAN-latency-impl.md L-pre.3.
+ */
+export interface GpTimingState extends PresentationClockStats {
+    /** Recent signed snapshot-arrival deviations, ms (histogram input). */
+    arrivalDeviations: number[];
+    /** Active artificial-latency injection (window.test.netSim*). */
+    netSim: { enabled: boolean; delayMs: number; jitterMs: number; lossProb: number };
+}
+
 export interface GpSceneStateToMain {
     type: 'gp:sceneState';
     /** Source view (multi-view, PLAN-game-worker.md). Absent ⇒ view 0. */
@@ -276,6 +293,9 @@ export interface GpSceneStateToMain {
      *  array (not absent) clears the panel when the factory's queue empties
      *  or the selection no longer includes an own-team factory. */
     factoryQueue?: FactoryQueueTile[];
+    /** L0 presentation-clock telemetry for the F10 overlay (PLAN-latency-impl.md
+     *  L-pre.3); absent before the worker's clock is created. */
+    timing?: GpTimingState;
 }
 
 /**

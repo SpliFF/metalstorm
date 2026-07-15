@@ -27,11 +27,10 @@ import { WaypointMarkerRenderer } from './core/waypoint-marker-renderer.js';
 import { StandingOrderRenderer } from './core/standing-order-renderer.js';
 import { DebugTerrainGrid } from './core/debug-terrain-grid.js';
 import { Connection } from './core/connection.js';
-import { PresentationClock } from './core/presentation-clock.js';
 import { TimingOverlay } from './core/timing-overlay.js';
 import { fetchBuildStamp, CONFIG } from './config.js';
 import GameWorker from './core/lua-widget-worker.ts?worker';
-import type { GpInitToWorker } from './core/game-worker-protocol.js';
+import type { GpInitToWorker, GpTimingState } from './core/game-worker-protocol.js';
 import { fetchMapDataHttp, type ParsedMapData } from './core/map-data.js';
 import { loadMapLighting, type MapLighting } from './core/map-lighting.js';
 import { applyMapLighting, createSceneLighting, type SceneLighting } from './core/scene-lighting.js';
@@ -104,16 +103,18 @@ function workerCall(method: string, args: unknown[] = []): Promise<unknown> {
     });
 }
 let perfOverlay: PerfOverlay | null = null;
-/// Presentation clock — the L0 timing spine (PLAN-latency.md). Converts the
-/// frame-stamped snapshot stream into a smooth presentation cursor P that the
-/// entity renderer interpolates to. Created once; the per-game ServerClock is
-/// attached when the game connection opens. Exposed on window.__presClock for
-/// the perf overlay + the latency-injection test tool.
-const presentationClock = new PresentationClock();
-(window as unknown as { __presClock: PresentationClock }).__presClock = presentationClock;
 /// Timing telemetry panel for the presentation clock (F10). Separate from the
-/// perf overlay (F11). Created lazily in the bootstrap once the DOM exists.
+/// perf overlay (F11). The clock itself is worker-resident (created in gpInit,
+/// fed by the in-worker connection), so this panel reads the `timing` snapshot
+/// that rides gp:sceneState at ~10 Hz — see lastTimingState below.
+/// (L-pre.2: main used to hold a second, never-connected PresentationClock
+/// exposed as window.__presClock. It was a ghost — never ticked, never fed —
+/// so any tooling reading it saw a dead clock. Removed; __gpTiming is the
+/// live equivalent.)
 let timingOverlay: TimingOverlay | null = null;
+/// Latest worker timing snapshot (gp:sceneState.timing); null before the first
+/// post / after teardown. Read by timingOverlay + window.__gpTiming.
+let lastTimingState: GpTimingState | null = null;
 let dynamicFeatureRenderer: DynamicFeatureRenderer | null = null;
 let decalOverlay: DecalOverlay | null = null;
 let audioManager: AudioManager | null = null;
@@ -359,6 +360,9 @@ function quitToLobby(): void {
     gpPending.clear();
     evalReqResolve = null;
     lastSceneState = null;
+    // The worker (and its presentation clock) is gone — drop the snapshot so the
+    // F10 overlay falls back to "waiting…" instead of freezing on the last frame.
+    lastTimingState = null;
     musicDirector = null;
     soundEventPlayer = null;
     musicArmed = false;
@@ -518,6 +522,12 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 lastSceneState = { selectedUnitIds: m.selectedUnitIds, camera: m.camera };
                 updateHUD(m.entityCount, m.gameFrame, m.selectedUnitIds);
                 updateSpeedHUD(m.simSpeed, m.paused);
+                // L-pre.3: cache the worker's presentation-clock snapshot and
+                // let the F10 overlay redraw from it (it self-throttles to ~3 Hz).
+                if (m.timing !== undefined) {
+                    lastTimingState = m.timing;
+                    timingOverlay?.tick();
+                }
                 // PLAN-playable.md G3a: feed the native build menu the worker-
                 // resolved tiles (only present when the buildable set changed),
                 // and track whether a build placement is armed for the ESC handler.
@@ -993,6 +1003,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     await fetchBuildStamp();
     createHUD(gameTemplates, { onQuit: () => showQuitConfirm(gameTemplates, { onConfirm: quitToLobby }) });
     debugConsole.init();
+    // L-pre.3: the F10 presentation-clock overlay. Built here (DOM exists, and
+    // its ctor appends its panel + installs the F10 key listener) rather than
+    // per-game, so F10 works before/after a game too — it just reports "waiting
+    // for first frame-stamped snapshot…" until the worker's clock anchors.
+    timingOverlay = new TimingOverlay(() => lastTimingState);
+    // Debug hook for the L0 exit gate: read the live worker clock from the
+    // devtools console (`__gpTiming()`). Replaces the removed window.__presClock,
+    // which pointed at a ghost clock that was never fed (L-pre.2).
+    (window as unknown as { __gpTiming: () => GpTimingState | null }).__gpTiming =
+        () => lastTimingState;
     // Capture window.onerror, unhandledrejection, console.error/warn and
     // batch-POST them to the log server so every browser-side error is
     // discoverable via spring-debug + the in-game console SSE stream.

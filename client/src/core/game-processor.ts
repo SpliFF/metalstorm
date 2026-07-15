@@ -16,7 +16,7 @@
  */
 
 import { Engine, Scene, FreeCamera, Vector3, Color3, Color4, Mesh, MeshBuilder, StandardMaterial } from '@babylonjs/core';
-import type { GpInitToWorker, GpMinimapBlips, GpMinimapLos, GpMinimapMetalSpots, BuildMenuTile, FactoryQueueTile } from './game-worker-protocol.js';
+import type { GpInitToWorker, GpMinimapBlips, GpMinimapLos, GpMinimapMetalSpots, BuildMenuTile, FactoryQueueTile, GpTimingState } from './game-worker-protocol.js';
 // GW4-c2: the WebTransport game connection now lives in the worker. Connection
 // is host-agnostic (runs on WebTransportAdapter, no DOM refs after the
 // onServerRestart callback was extracted) so it imports + runs here unchanged.
@@ -135,6 +135,7 @@ import {
     dispatchUnitCommand, dispatchUnitCmdDone,
     getWidgetList, toggleWidget, enableWidget, disableWidget, shutdown,
     setMusicStreamTime, seedStorageCache, setWorkerSetActiveCommandHandler,
+    updateLiveProjectiles,
     sameIdSet, escapeLuaStr, escapeLuaString, loadFromStorage, saveToStorage,
     luaBytesLiteral, paramsTableLiteral,
     describeMessage, describeInboundMessage,
@@ -1445,6 +1446,15 @@ export function gpInit(msg: GpInitToWorker): void {
         gpMark(1);  // entity
         gpBuildBeamRenderer?.tick();
         gpCtx.projectileRenderer?.tick();
+        // A3 read-seam (PLAN-latency-impl.md L-pre.1): mirror the renderer's
+        // live projectiles + beams into liveState so Spring.GetVisibleProjectiles
+        // / GetProjectilePosition see this frame's positions. Must run AFTER
+        // projectileRenderer.tick() integrated them, and before runFrame() hands
+        // the widgets their Update callin. Skipped when no Lua runtime is booted
+        // (native-UI games) — nothing can read the mirror then.
+        if (gpCtx.projectileRenderer && getRuntime()) {
+            updateLiveProjectiles(gpCtx.projectileRenderer.snapshotForWorker());
+        }
         gpCegRuntime?.tick(fxDt);
         gpCombatFX?.tick(fxDt);
         gpMark(2);  // fx
@@ -1795,6 +1805,18 @@ function gpPostSceneState(now: number): void {
     // G4: ship the resolved factory-queue rows only when they changed.
     const factoryQueue = gpFactoryQueueDirty ? gpFactoryQueueTiles.slice() : undefined;
     gpFactoryQueueDirty = false;
+    // L-pre.3: sample the presentation clock for main's F10 timing overlay.
+    // The clock + connection are worker-resident, so this snapshot is the only
+    // way main can see them. Sent unconditionally (not dirty-gated): E/P move
+    // every frame, and this post is already throttled to ~10 Hz — 3× the rate
+    // the overlay redraws at.
+    const timing: GpTimingState | undefined = gpPresentationClock
+        ? {
+            ...gpPresentationClock.getStats(),
+            arrivalDeviations: [...gpPresentationClock.getArrivalDeviations()],
+            netSim: { ...(gpCtx.connection?.getNetSim() ?? { enabled: false, delayMs: 0, jitterMs: 0, lossProb: 0 }) },
+        }
+        : undefined;
     postToMain({
         type: 'gp:sceneState',
         selectedUnitIds: sel.slice(),
@@ -1817,6 +1839,7 @@ function gpPostSceneState(now: number): void {
         ...(buildOptions ? { buildOptions } : {}),
         ...(economy ? { economy } : {}),
         ...(factoryQueue ? { factoryQueue } : {}),
+        ...(timing ? { timing } : {}),
     });
 }
 
