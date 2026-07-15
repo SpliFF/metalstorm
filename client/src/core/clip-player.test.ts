@@ -210,6 +210,14 @@ describe('ClipPlayer', () => {
         expect(p.state()).toBeNull();
     });
 
+    it('reports the playing clip name per unit', () => {
+        const { sink } = makeSink();
+        const p = new ClipPlayer(sink, () => 0);
+        p.play(42, clip, [Matrix.Identity()]);
+        expect(p.playingClip(42)).toBe('walk');
+        expect(p.playingClip(99)).toBeNull();
+    });
+
     it('auto-stops when the unit disappears (death / respawn)', () => {
         const { sink, known } = makeSink();
         let t = 0;
@@ -235,14 +243,109 @@ describe('ClipPlayer', () => {
         expect(calls.filter((c) => c.pose !== null).length).toBe(applied);
     });
 
-    it('replacing playback clears the previous unit pose first', () => {
+    // ── Multi-unit playback (§16b task 1) ────────────────────────────────
+    // Pre-§16b there was a single active slot and play() stopped whatever
+    // was running. The auto policy walks many units at once, so playback is
+    // now per-unit and play() only replaces its OWN unit's entry.
+
+    it('plays several units concurrently; play() does not disturb the others', () => {
         const { sink, calls, known } = makeSink();
         known.add(7);
         const p = new ClipPlayer(sink, () => 0);
         p.play(42, clip, [Matrix.Identity()]);
         p.play(7, clip, [Matrix.Identity()]);
-        const clearIdx = calls.findIndex((c) => c.id === 42 && c.pose === null);
-        expect(clearIdx).toBeGreaterThan(-1);
+        // The old single-slot player cleared 42 here.
+        expect(calls.some((c) => c.id === 42 && c.pose === null)).toBe(false);
+        expect(p.count).toBe(2);
+        expect(p.state(42)).toMatchObject({ unitId: 42, playing: true });
+        expect(p.state(7)).toMatchObject({ unitId: 7, playing: true });
+    });
+
+    it('replaying the same unit replaces that unit entry, not the population', () => {
+        const { sink, known } = makeSink();
+        known.add(7);
+        const other: ModelClip = { ...clip, name: 'idle' };
+        const p = new ClipPlayer(sink, () => 0);
+        p.play(42, clip, [Matrix.Identity()]);
+        p.play(7, clip, [Matrix.Identity()]);
+        p.play(42, other, [Matrix.Identity()]);
+        expect(p.count).toBe(2);
+        expect(p.playingClip(42)).toBe('idle');
+        expect(p.playingClip(7)).toBe('walk');
+    });
+
+    it('stop(unitId) stops one unit; no-arg stop clears all (harness verb)', () => {
+        const { sink, calls, known } = makeSink();
+        known.add(7);
+        const p = new ClipPlayer(sink, () => 0);
+        p.play(42, clip, [Matrix.Identity()]);
+        p.play(7, clip, [Matrix.Identity()]);
+
+        p.stop(42);
+        expect(p.count).toBe(1);
+        expect(p.state(42)).toBeNull();
+        expect(p.state(7)).not.toBeNull();
+
+        calls.length = 0;
+        p.stop();
+        expect(p.count).toBe(0);
+        expect(calls).toEqual([{ id: 7, pose: null }]);
+    });
+
+    it('tick advances every playback, and auto-stop only drops the dead unit', () => {
+        const { sink, known } = makeSink();
+        known.add(7);
+        let t = 0;
+        const p = new ClipPlayer(sink, () => t);
+        p.play(42, clip, [Matrix.Identity()]);
+        p.play(7, clip, [Matrix.Identity()]);
+        known.delete(42);            // 42 dies
+        t += 250;
+        p.tick();
+        expect(p.state(42)).toBeNull();
+        expect(p.state(7)).toMatchObject({ frame: 15 });
+    });
+
+    it('no-arg state() reports the most recently started playback', () => {
+        const { sink, known } = makeSink();
+        known.add(7);
+        const p = new ClipPlayer(sink, () => 0);
+        p.play(42, clip, [Matrix.Identity()]);
+        p.play(7, clip, [Matrix.Identity()]);
         expect(p.state()?.unitId).toBe(7);
+        p.play(42, clip, [Matrix.Identity()]);   // re-insert moves 42 to the end
+        expect(p.state()?.unitId).toBe(42);
+        expect(p.states().map((s) => s.unitId)).toEqual([7, 42]);
+    });
+
+    // ── setSpeed (§16b: the policy re-scales to unit speed ~10 Hz) ────────
+
+    it('setSpeed preserves the current phase instead of restarting the cycle', () => {
+        const { sink } = makeSink();
+        let t = 0;
+        const p = new ClipPlayer(sink, () => t);
+        p.play(42, clip, [Matrix.Identity()], { speed: 1 });
+        t += 250;                    // quarter second at 1x → frame 15
+        p.tick();
+        expect(p.state(42)!.frame).toBeCloseTo(15);
+
+        p.setSpeed(42, 2);
+        p.tick();                    // same instant: phase must be unchanged
+        expect(p.state(42)!.frame).toBeCloseTo(15);
+        expect(p.state(42)!.speed).toBe(2);
+
+        t += 125;                    // 0.125 s at 2x → +15 frames
+        p.tick();
+        expect(p.state(42)!.frame).toBeCloseTo(30 % 30, 4);  // wrapped to 0
+    });
+
+    it('setSpeed on an unknown unit is a no-op, and rejects a zero rate', () => {
+        const { sink } = makeSink();
+        const p = new ClipPlayer(sink, () => 0);
+        expect(() => p.setSpeed(999, 2)).not.toThrow();
+        p.play(42, clip, [Matrix.Identity()]);
+        p.setSpeed(42, 0);
+        expect(p.state(42)!.speed).toBe(1);
+        expect(Number.isFinite(p.state(42)!.frame)).toBe(true);
     });
 });

@@ -2733,6 +2733,13 @@ export class EntityRenderer {
         return tmpl ? tmpl.clips.map((c) => c.name) : [];
     }
 
+    /** Def id of a live entity, or undefined once it's unknown (never
+     *  streamed, died, evicted). Lets the clip auto-policy reach the def's
+     *  speed / customParams without a second entity table. */
+    getEntityDefId(id: number): number | undefined {
+        return this.entityMeta.get(id)?.defId;
+    }
+
     /** Resolve one authored clip plus the rest-pose local matrices the
      *  ClipPlayer composes unanimated channels from. */
     getClip(id: number, name: string): { clip: ModelClip; restLocals: Matrix[] } | null {
