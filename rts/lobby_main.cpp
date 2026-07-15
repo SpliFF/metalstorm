@@ -12,6 +12,7 @@
 #include "Server/Database.h"
 #include "Server/RoomManager.h"
 #include "Server/MapMetadata.h"
+#include "Server/GameServersDb.h"
 
 #include "Server/AI/AIDiscovery.h"
 #include "Server/GameDiscovery.h"
@@ -475,33 +476,11 @@ int main(int argc, char* argv[])
         rooms.LoadFromDatabase();
     }
 
-    // Create game_servers table — maintained in real-time so external tools
+    // game_servers/game_status — maintained in real-time so external tools
     // (MCP debug server, springcli) can discover running game server ports
-    // without querying the lobby HTTP API.
-    if (mapDb) {
-        sqlite3_exec(mapDb,
-            "CREATE TABLE IF NOT EXISTS game_servers ("
-            "  room_id INTEGER PRIMARY KEY,"
-            "  port INTEGER NOT NULL,"
-            "  pid INTEGER NOT NULL,"
-            "  map_id TEXT,"
-            "  game_id TEXT,"
-            "  started_at INTEGER DEFAULT (strftime('%s','now')),"
-            "  state TEXT DEFAULT 'starting'"
-            ")", nullptr, nullptr, nullptr);
-        // game_status — liveness/readiness published by each running game server
-        // (spring-server is the only writer; the lobby + tooling only read it).
-        // Created here too so reads work before the first game ever launches.
-        sqlite3_exec(mapDb,
-            "CREATE TABLE IF NOT EXISTS game_status ("
-            "  room_id INTEGER PRIMARY KEY,"
-            "  ready INTEGER NOT NULL DEFAULT 0,"
-            "  client_count INTEGER NOT NULL DEFAULT 0,"
-            "  pid INTEGER NOT NULL DEFAULT 0,"
-            "  port INTEGER NOT NULL DEFAULT 0,"
-            "  updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))"
-            ")", nullptr, nullptr, nullptr);
-    }
+    // without querying the lobby HTTP API. Schema-probed same as
+    // RoomManager::EnsureTables / MapMetadataDb::EnsureTable.
+    GameServersDb::EnsureTables(mapDb);
 
     // Helper: persist a game server entry to SQLite
     auto persistGameServer = [&](const GameServerInstance& inst) {

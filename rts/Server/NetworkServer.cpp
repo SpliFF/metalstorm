@@ -27,6 +27,7 @@
 #include <cassert>
 #include <cerrno>
 #include <cstring>
+#include <exception>
 #include <map>
 #include <mutex>
 #include <string>
@@ -91,6 +92,34 @@ void SetNonBlocking(int fd) {
 void SetTcpNoDelay(int fd) {
     int one = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+}
+
+HttpResponse JsonError(int status, const char* msg) {
+    std::string json = std::string("{\"error\":\"") + msg + "\"}";
+    return {.contentType = "application/json", .body = {json.begin(), json.end()}, .status = status};
+}
+
+/// Route handlers parse client-supplied JSON with nlohmann and reach into it
+/// with `.value()`/`.get<T>()` — a body that's well-formed JSON but has the
+/// wrong shape (e.g. a string field sent as an object) throws
+/// nlohmann::json::type_error, which is a std::exception. Handlers don't
+/// guard every field access, so this is the last line of defence: an
+/// uncaught exception used to propagate out of DispatchGet/DispatchPost and
+/// take down the whole lobby process (see the room-abandon
+/// json.exception.type_error.302 crash). One bad request should return 500,
+/// not kill every other player's connection. Shared by DispatchGet,
+/// CheckAuthAndCall, and NetworkServer::SafeInvokeForTest so the unit test
+/// exercises the exact same code path production traffic runs through.
+HttpResponse SafeInvoke(const std::string& path, const std::function<HttpResponse()>& fn) {
+    try {
+        return fn();
+    } catch (const std::exception& e) {
+        SLOG(SPRING_LOG_ERROR, "handler for '%s' threw: %s", path.c_str(), e.what());
+        return JsonError(500, "internal error");
+    } catch (...) {
+        SLOG(SPRING_LOG_ERROR, "handler for '%s' threw a non-standard exception", path.c_str());
+        return JsonError(500, "internal error");
+    }
 }
 
 /// True if `addr` is a loopback peer — plain IPv6 ::1, or an IPv4-mapped
@@ -245,6 +274,9 @@ struct NetworkServer::Impl {
     std::vector<SSEEvent> sseQueue;
 
     // ── Route dispatch ──
+    // JsonError/SafeInvoke live in the anonymous namespace above so
+    // NetworkServer::SafeInvokeForTest can exercise the identical exception-
+    // handling path without a live socket.
 
     HttpResponse DispatchGet(const std::string& url) {
         // Strip query string and percent-decode — handlers receive the
@@ -262,11 +294,11 @@ struct NetworkServer::Impl {
         // needs auth, so the tag is classification-only for GET today).
         for (auto& route : *getHandlers) {
             if (route.pattern.find('*') == std::string::npos && RouteMatch(route.pattern, path))
-                return route.handler(path);
+                return SafeInvoke(path, [&] { return route.handler(path); });
         }
         for (auto& route : *getHandlers) {
             if (route.pattern.find('*') != std::string::npos && RouteMatch(route.pattern, path))
-                return route.handler(path);
+                return SafeInvoke(path, [&] { return route.handler(path); });
         }
         return {.contentType = "text/plain", .body = {'4','0','4'}, .status = 404};
     }
@@ -275,11 +307,6 @@ struct NetworkServer::Impl {
     /// before the handler for any non-Public RouteAuth. Belt-and-braces: the
     /// handler is free to do its own auth lookups on top of this for business
     /// logic (e.g. which user is acting), this is just the gate.
-    static HttpResponse JsonError(int status, const char* msg) {
-        std::string json = std::string("{\"error\":\"") + msg + "\"}";
-        return {.contentType = "application/json", .body = {json.begin(), json.end()}, .status = status};
-    }
-
     HttpResponse CheckAuthAndCall(const NetworkServer::PostRoute& route, const std::string& path,
                                    const std::string& body, const HttpRequestHeaders& hdrs) {
         if (route.auth != RouteAuth::Public) {
@@ -301,7 +328,7 @@ struct NetworkServer::Impl {
                 default: break;
             }
         }
-        return route.handler(path, body, hdrs);
+        return SafeInvoke(path, [&] { return route.handler(path, body, hdrs); });
     }
 
     HttpResponse DispatchPost(const std::string& url, const std::string& body,
@@ -928,6 +955,11 @@ std::vector<RouteInfo> NetworkServer::GetRegisteredRoutes() const {
 
 std::string NetworkServer::CurrentQueryString() {
     return tl_queryString;
+}
+
+HttpResponse NetworkServer::SafeInvokeForTest(const std::string& path,
+                                               const std::function<HttpResponse()>& fn) {
+    return SafeInvoke(path, fn);
 }
 
 uint32_t NetworkServer::AddSSE(const std::string& pattern) {

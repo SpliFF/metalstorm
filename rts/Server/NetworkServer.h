@@ -148,6 +148,17 @@ public:
     /// read query parameters. Valid only for the duration of the handler.
     static std::string CurrentQueryString();
 
+    /// Test hook: invokes `fn` through the exact exception-safety wrapper
+    /// DispatchGet/DispatchPost/CheckAuthAndCall use for every route handler
+    /// — any exception `fn` throws becomes a 500 HttpResponse instead of
+    /// propagating. Lets a unit test prove a handler that throws can't take
+    /// down the process without standing up a live socket. Not used by
+    /// production dispatch directly (that calls the same underlying helper
+    /// with the real route handler); exposed here purely for testing, same
+    /// as GetRegisteredRoutes().
+    static HttpResponse SafeInvokeForTest(const std::string& path,
+                                           const std::function<HttpResponse()>& fn);
+
 private:
     void NetworkThreadFunc(int port);
 

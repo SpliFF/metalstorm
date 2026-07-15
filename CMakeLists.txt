@@ -402,6 +402,7 @@ set(LOBBY_SERVER_SOURCES
     rts/Server/RatingSystem.cpp
     rts/Server/RoomManager.cpp
     rts/Server/MapMetadataDb.cpp
+    rts/Server/GameServersDb.cpp
     rts/Server/AI/AIDiscovery.cpp
     rts/Server/GameDiscovery.cpp
     rts/Server/ConfigReader.cpp
@@ -481,6 +482,7 @@ if(TEST_SOURCES)
         ${CMAKE_SOURCE_DIR}/rts/Server/GameOverState.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GameMetrics.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GmRollback.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/GameServersDb.cpp
     )
     target_include_directories(spring-tests PRIVATE
         ${CMAKE_SOURCE_DIR}/rts
