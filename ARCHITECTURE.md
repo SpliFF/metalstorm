@@ -501,7 +501,7 @@ data/
 | `/api/map/info` | JSON map dimensions |
 | `/api/map/heightmap` | Binary heightmap |
 | `/api/maps` | JSON available maps |
-| `/api/metrics` | JSON performance stats |
+| `/api/metrics` | JSON performance stats — `simFrame` field adds the PLAN-server-cpp-optimisation.md P0 SimFrame-profiler phase breakdown (native-sim/unit-script/lua-gameframe) once `server sim profile on` has samples; see [docs/debugging-performance.md](docs/debugging-performance.md#server-side-simframe-profiler--lua-call-in-profiler) |
 | `/api/content/manifest` | JSON index of all servable assets |
 | `/api/content/assets/*` | Individual asset files from content roots |
 | `POST /api/gm/*` | GM verbs (`pause`/`resume`/`grant`/`broadcast`/`inspect`/`kick`/`rollback`/`checkpoint`/`hibernate`/`snapshots`). AdminOnly + audited; the dashboard POSTs here directly (browser→game port). PLAN-gm-tools task 2 (`GmVerbs.cpp`). |
@@ -653,7 +653,7 @@ substitution, not a behavioural change.
 - `Spring.Debug` / `Warn` / `Assert` / `DumpTable` / `Inspect` Lua API
 - SQL query proxy, process management API, game session tracking
 - MCP server for Claude integration (`tools/debug-mcp`)
-- Performance profiling: per-phase FrameProfiler (`window.test.perfDump()`), per-widget LuaUI cost profiler (`uiProfileStart/Dump/Stop`), network-condition simulator (`netSim*`/`netStats`) — see [docs/debugging-performance.md](docs/debugging-performance.md)
+- Performance profiling: per-phase FrameProfiler (`window.test.perfDump()`), per-widget LuaUI cost profiler (`uiProfileStart/Dump/Stop`), network-condition simulator (`netSim*`/`netStats`), and server-side sim-thread profiling (`server sim profile`/`server lua profile` console verbs, `rts/Server/SimFrameProfiler.h` + `rts/Lua/LuaCallInProfiler.h`) — see [docs/debugging-performance.md](docs/debugging-performance.md)
 - **Test framework** (`window.test` + `.claude/skills/spring-test`): instant game launch (`launch_game` MCP tool), scripted spawn/kill/damage/order verbs, camera focus on a unit, render-loop pause + screenshot, runtime debug-flag toggles for combat/sound/weapon emission. See `client/src/core/test-harness.ts` and `rts/Server/DebugFlags.h`.
 
 **Not yet wired:** server-side AI plugin runtime (skeleton in `Server/AI/` exists but plugins don't boot reliably), spectator mode, Glicko-2 ratings, persistent world layer. GameOver → `MusicStateTracker::ForceState(victory|defeat)` hook is the only audio gap — the rest of the pipeline (state machine, MusicEvent broadcast, client crossfader) is live.

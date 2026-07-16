@@ -10,6 +10,7 @@
 
 const std::unordered_map<int, std::string>* gAITeams = nullptr;
 
+#include "Server/SimFrameProfiler.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/TeamHandler.h"
 #include "Sim/Misc/Wind.h"
@@ -615,14 +616,32 @@ void CSimulation::SimFrame()
     // --- Synced simulation tick ---
     // Order preserved from CGame::SimFrame().
 
+    // PLAN-server-cpp-optimisation.md P0: per-phase wall-time split (native
+    // sim / unit-script tick / synced Lua call-ins), gated behind a bool so
+    // the cost is a skipped spring_now() pair when disabled. Phases are
+    // accumulated into locals and recorded once per frame — see
+    // SimFrameProfiler.h for what each bucket covers.
+    const bool simProf = SimFrameProfiler::IsEnabled();
+    const spring_time frameT0 = simProf ? spring_now() : spring_time();
+    double luaGameFrameUs = 0.0;
+    double unitScriptUs = 0.0;
+    double nativeSimUs = 0.0;
+    spring_time phaseT0;
+
     // Lua game-frame call-in + garbage collection
+    phaseT0 = simProf ? spring_now() : spring_time();
     eventHandler.CollectGarbage(false);
     eventHandler.GameFrame(gs->frameNum);
+    if (simProf)
+        luaGameFrameUs += (spring_now() - phaseT0).toMicroSecsf();
 
     // Core sim updates
+    phaseT0 = simProf ? spring_now() : spring_time();
     helper->Update();
     mapDamage->Update();
     pathManager->Update();
+    if (simProf)
+        nativeSimUs += (spring_now() - phaseT0).toMicroSecsf();
 
     // Unit script animations (COB/Lua piece turns, spins, moves).
     // Tick BEFORE unitHandler.Update() so the piece transforms read by
@@ -631,9 +650,13 @@ void CSimulation::SimFrame()
     // rather than lagging one tick behind. Symptom this fixes: turrets
     // that appear to aim one tick late and projectiles that spawn from
     // last-frame's barrel pose. See PLAN-combat-vfx.md F1.
+    phaseT0 = simProf ? spring_now() : spring_time();
     if (unitScriptEngine != nullptr)
         unitScriptEngine->Tick(33); // 33ms ≈ 1 tick at 30Hz
+    if (simProf)
+        unitScriptUs += (spring_now() - phaseT0).toMicroSecsf();
 
+    phaseT0 = simProf ? spring_now() : spring_time();
     unitHandler.Update();
     projectileHandler.Update();
     featureHandler.Update();
@@ -654,6 +677,15 @@ void CSimulation::SimFrame()
 
     // Wait-command AI (squad-wait, death-wait, etc.)
     waitCommandsAI.Update();
+    if (simProf)
+        nativeSimUs += (spring_now() - phaseT0).toMicroSecsf();
+
+    if (simProf) {
+        SimFrameProfiler::RecordPhase(SimFrameProfiler::Phase_LuaGameFrame, luaGameFrameUs);
+        SimFrameProfiler::RecordPhase(SimFrameProfiler::Phase_UnitScript, unitScriptUs);
+        SimFrameProfiler::RecordPhase(SimFrameProfiler::Phase_NativeSim, nativeSimUs);
+        SimFrameProfiler::RecordFrame((spring_now() - frameT0).toMicroSecsf());
+    }
 }
 
 int CSimulation::GetFrameNum() const

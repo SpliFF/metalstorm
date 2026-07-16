@@ -7,6 +7,7 @@
 #include "Lua/LuaGaia.h"
 #include "Lua/LuaHandle.h"
 #include "Lua/LuaCallInProfiler.h"
+#include "Server/SimFrameProfiler.h"
 
 #include "Sim/Units/UnitHandler.h"
 #include "Sim/Units/Unit.h"
@@ -600,6 +601,35 @@ std::string ExecuteServerCommand(const std::string& cmd) {
             if (parsed > 0) topN = parsed;
         }
         return LuaCallInProfiler::Report(topN);
+    }
+
+    // sim profile [on|off|reset|status|<topN>]  — CSimulation::SimFrame()
+    // per-phase wall-time profiler (PLAN-server-cpp-optimisation.md P0):
+    // native sim vs unit-script tick vs synced Lua call-ins. Complements
+    // `lua profile` (per handle+callin detail) with the coarse phase split.
+    //   on     enable accumulation     off    disable (keeps samples)
+    //   reset  clear samples           status  one-line state
+    //   <none>  full phase-breakdown report
+    if (cmd == "sim profile" || cmd.rfind("sim profile ", 0) == 0) {
+        std::string arg = (cmd.size() > 12) ? cmd.substr(12) : "";
+        while (!arg.empty() && arg.front() == ' ') arg.erase(arg.begin());
+
+        if (arg == "on" || arg == "1" || arg == "true") {
+            SimFrameProfiler::SetEnabled(true);
+            return "sim profile: on";
+        }
+        if (arg == "off" || arg == "0" || arg == "false") {
+            SimFrameProfiler::SetEnabled(false);
+            return "sim profile: off (samples retained; `sim profile reset` to clear)";
+        }
+        if (arg == "reset" || arg == "clear") {
+            SimFrameProfiler::Reset();
+            return "sim profile: samples cleared";
+        }
+        if (arg == "status") {
+            return std::string("sim profile: ") + (SimFrameProfiler::IsEnabled() ? "on" : "off");
+        }
+        return SimFrameProfiler::Report();
     }
 
     // combat_summary  — recent combat / sound / death queue depths.
