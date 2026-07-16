@@ -3,6 +3,8 @@
 
 import { Squad } from './squad.js';
 import { DEFAULT_CONFIG, linearCount } from './config.js';
+import { BigUnitRepulsor } from './big-unit-repulsor.js';
+import { createPatchSet } from './patches.js';
 
 export class SquadManager {
   constructor(backend, config = {}) {
@@ -14,6 +16,12 @@ export class SquadManager {
     // Spatial hash for inter-squad/member separation (§7). Rebuilt each frame.
     this._cell = this.cfg.separationRadius * 1.5;
     this._grid = new Map();         // cellKey → Member[]
+
+    // Big units to thread around/under (PLAN-metalstorm-flow.md §4, task 3).
+    // Rare (scale-4 super-heavies + footprint-profile buildings only) —
+    // queried by plain iteration, no spatial index needed.
+    this._bigUnits = new Map();     // sim unit id → BigUnitRepulsor
+    this._bigUnitList = [];         // cached array view, rebuilt on mutation
   }
 
   // --- ingest from the worker adapter ------------------------------------
@@ -53,14 +61,39 @@ export class SquadManager {
     }
   }
 
+  // --- big units (PLAN-metalstorm-flow.md §4, task 3) ---------------------
+
+  /** A big unit (scale-4 / footprint-profile building) appeared. `footprintProfile`
+   *  matches patches.js's header shape (mocked until flow F1 lands). */
+  registerBigUnit(id, footprintProfile) {
+    if (this._bigUnits.has(id)) return;
+    this._bigUnits.set(id, new BigUnitRepulsor(id, footprintProfile, createPatchSet(footprintProfile)));
+    this._bigUnitList = [...this._bigUnits.values()];
+  }
+
+  /** Mirror a big unit's interpolated pose + velocity. `lod` is optional
+   *  (camera-range hint computed by the adapter, flow.md §4 "LOD"). */
+  syncBigUnit(id, x, z, heading, vx, vz, lod) {
+    this._bigUnits.get(id)?.setPose(x, z, heading, vx, vz, lod);
+  }
+
+  removeBigUnit(id) {
+    if (this._bigUnits.delete(id)) this._bigUnitList = [...this._bigUnits.values()];
+  }
+
+  /** The BigUnitRepulsor for `id`, or undefined. Read-only access for FX/decal
+   *  consumers that key off the same patch set (flow.md §1) and for tests. */
+  getBigUnit(id) { return this._bigUnits.get(id); }
+
   // --- per-frame ----------------------------------------------------------
 
   /** Drive all squads one render step. `dt` seconds. */
   update(dt) {
     this._now += dt;
     this._rebuildGrid();
+    for (const bu of this._bigUnitList) bu.update(dt);
     const query = (m) => this._neighbours(m);
-    for (const sq of this.squads.values()) sq.update(dt, this._now, query);
+    for (const sq of this.squads.values()) sq.update(dt, this._now, query, this._bigUnitList);
   }
 
   // --- spatial hash (stub-grade; §7 "capped neighbour checks") ------------
