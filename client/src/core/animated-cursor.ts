@@ -266,7 +266,7 @@ export class AnimatedCursor {
         // ("anims/cursormove_0.png"). The base for the PNGs is the same
         // game-data root we used for the .txt — strip the trailing
         // `Anims/<file>.txt` to get back to it.
-        const gameRoot = manifestUrl.replace(/\/[Aa]nims\/[^/]+\.txt$/, '');
+        const gameRoot = stripAnimsManifestSuffix(manifestUrl);
         const frames: CursorFrame[] = [];
         for (const f of parsed.frames) {
             // The manifest path can be either "anims/foo.png" (game-root
@@ -352,6 +352,14 @@ export class AnimatedCursor {
         // even when the cursor isn't moving.
         if (cursor.frames.length > 1) this.scheduleDraw();
     }
+}
+
+/** Strips a trailing `Anims/<...>.txt` (any case, any nesting depth under
+ *  Anims/) off a manifest URL to recover the game-data root. Exported for
+ *  unit testing — some cursor packs nest the manifest a level deeper
+ *  (`Anims/<pack>/<file>.txt`) rather than directly under `Anims/`. */
+export function stripAnimsManifestSuffix(manifestUrl: string): string {
+    return manifestUrl.replace(/\/[Aa]nims\/.+\.txt$/, '');
 }
 
 interface ParsedManifest {
