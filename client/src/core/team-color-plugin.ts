@@ -25,8 +25,11 @@ type AnyDefines = any;
 export class TeamColorPlugin extends MaterialPluginBase {
     /** The owning team's colour (per (defId, team) material bucket). */
     teamColor: Color3 = new Color3(1, 1, 1);
-    /** R8 mask: R = team-colour blend amount. Null → whole piece team-tinted
-     *  (matches the flat-team-coloured fallback for textureless units). */
+    /** R8 mask: R = team-colour blend amount. Null → no tint: every material
+     *  this plugin attaches to has a real albedo texture (textureless units
+     *  render via the procedural path instead), so a missing mask must keep
+     *  the texture rather than flood the piece with team colour (that
+     *  regression turned the maskless wz_* baseline solid lavender). */
     teamMask: Texture | null = null;
     /** Flip the mask interpretation (modinfo `invertteamcolor`). */
     invertMask = false;
@@ -82,7 +85,7 @@ export class TeamColorPlugin extends MaterialPluginBase {
                 #ifdef TEAM_MASK
                     float _tcMask = texture2D(teamMaskTex, vMainUV1).r;
                 #else
-                    float _tcMask = 1.0;
+                    float _tcMask = 0.0;
                 #endif
                 if (uInvertMask > 0.5) _tcMask = 1.0 - _tcMask;
                 surfaceAlbedo = mix(surfaceAlbedo, uTeamColor, _tcMask);
