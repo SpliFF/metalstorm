@@ -2447,6 +2447,34 @@ export class EntityRenderer {
         return tmpl ? tmpl.clips.map((c) => c.name) : [];
     }
 
+    /** Resolve a piece's index by name (glb node name, e.g. "Turret") for
+     *  an entity's model — the lookup a `pieceSpin` FX binding
+     *  (fx-bindings.ts, PLAN-fx-offload X4) needs before it can call
+     *  setClipPose(). Null when the entity/template is unknown or no piece
+     *  with that name exists. */
+    getPieceIndex(id: number, pieceName: string): number | null {
+        const meta = this.entityMeta.get(id);
+        if (!meta) return null;
+        const tmpl = this.modelTemplates.get(meta.defId);
+        if (!tmpl) return null;
+        const idx = tmpl.pieces.findIndex((p) => p.name === pieceName);
+        return idx >= 0 ? idx : null;
+    }
+
+    /** Rest-pose parent-relative local matrix for every piece in an
+     *  entity's model, indexed like setClipPose()'s pose map expects. A
+     *  `pieceSpin` binding composes its own spin rotation on top of the
+     *  relevant entry rather than starting from identity, so a spinning
+     *  wheel keeps its authored offset from the hull instead of snapping
+     *  to the origin. Null when the entity/template is unknown. */
+    getRestLocalMatrices(id: number): Matrix[] | null {
+        const meta = this.entityMeta.get(id);
+        if (!meta) return null;
+        const tmpl = this.modelTemplates.get(meta.defId);
+        if (!tmpl) return null;
+        return tmpl.pieces.map((p) => p.localMatrix);
+    }
+
     /** Resolve one authored clip plus the rest-pose local matrices the
      *  ClipPlayer composes unanimated channels from. */
     getClip(id: number, name: string): { clip: ModelClip; restLocals: Matrix[] } | null {

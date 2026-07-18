@@ -290,6 +290,20 @@ export class TestHarness {
         return this.deps.workerCall('uiProfileStop');
     }
 
+    /** PLAN-fx-offload X5 — per-def cost/skip counts for the legacy
+     *  per-frame entity-FX compatibility path (entity-fx-fence.ts), ranked
+     *  most-expensive-first like uiProfileDump(). Always-on (no start/stop
+     *  needed) — reports zero defs until some caller actually runs a
+     *  legacy per-def script through the fence. */
+    async entityFxFenceDump(): Promise<unknown> {
+        return this.deps.workerCall('entityFxFenceDump');
+    }
+
+    /** Clear the fence's per-def stats + frame count. */
+    entityFxFenceReset(): void {
+        void this.deps.workerCall('entityFxFenceReset');
+    }
+
     /** Named WAN presets. `lan` ≈ localhost; `wan` ≈ regional; `intercont`
      *  ≈ the L0 exit-gate condition (200 ms ± 40 ms jitter, 2 % loss). */
     netSimPreset(name: 'lan' | 'wan' | 'intercont'): void {

@@ -1,12 +1,13 @@
 # Performance Testing & Profiling
 
-Part of the [Debugging & Logging Guide](debugging.md) family. This page covers the three permanent, client-side performance-measurement tools: the per-phase **FrameProfiler**, the per-widget **LuaUI cost profiler**, and the **network simulator**. All three live on `window.test` (see [debugging-console.md](debugging-console.md) for the harness generally, [`.claude/skills/spring-test`](../.claude/skills/spring-test/SKILL.md) for the paired MCP tools) and are permanent instrumentation — cheap enough to leave running, not scaffolding to rip out after a session.
+Part of the [Debugging & Logging Guide](debugging.md) family. This page covers the permanent, client-side performance-measurement tools: the per-phase **FrameProfiler**, the per-widget **LuaUI cost profiler**, the **entity-FX compatibility fence**, and the **network simulator**. All four live on `window.test` (see [debugging-console.md](debugging-console.md) for the harness generally, [`.claude/skills/spring-test`](../.claude/skills/spring-test/SKILL.md) for the paired MCP tools) and are permanent instrumentation — cheap enough to leave running, not scaffolding to rip out after a session.
 
 ## Table of Contents
 
 - [Overview: which tool for which question](#overview-which-tool-for-which-question)
 - [FrameProfiler — per-phase frame time](#frameprofiler--per-phase-frame-time)
 - [LuaUI widget profiler — per-widget Fengari cost](#luaui-widget-profiler--per-widget-fengari-cost)
+- [Entity-FX compatibility fence — per-def legacy script cost](#entity-fx-compatibility-fence--per-def-legacy-script-cost)
 - [Network simulator — WAN conditions on localhost](#network-simulator--wan-conditions-on-localhost)
 - [Driving these from Claude (MCP)](#driving-these-from-claude-mcp)
 - [Recipes](#recipes)
@@ -20,10 +21,11 @@ Part of the [Debugging & Logging Guide](debugging.md) family. This page covers t
 |---|---|
 | "Is the frame budget being blown, and in which phase (camera/entity/fx/decals/render/ui)?" | `perfDump()` — [FrameProfiler](#frameprofiler--per-phase-frame-time) |
 | "Which specific widget/callin inside the `ui` phase is expensive?" | `uiProfileStart()`/`uiProfileDump()` — [LuaUI widget profiler](#luaui-widget-profiler--per-widget-fengari-cost) |
+| "Which unit def's legacy per-frame FX script is costing the most, and is the LOD/budget fence actually catching it?" | `entityFxFenceDump()` — [Entity-FX compatibility fence](#entity-fx-compatibility-fence--per-def-legacy-script-cost) |
 | "Does this latency-mitigation feature still look right at 200ms ping + loss?" | `netSim()`/`netSimPreset()` — [Network simulator](#network-simulator--wan-conditions-on-localhost) |
 | "How much bandwidth is this scenario using, per message type?" | `netStats()` — [Network simulator](#network-simulator--wan-conditions-on-localhost) |
 
-All three are independent — profiling the UI pass doesn't touch net-sim state and vice versa. Run them together freely.
+All four are independent — profiling the UI pass doesn't touch net-sim state and vice versa. Run them together freely.
 
 ---
 
@@ -147,6 +149,27 @@ If `blocks`/`widgets`/`attribution` are `null` even with the correct order, chec
 
 ---
 
+## Entity-FX compatibility fence — per-def legacy script cost
+
+**Source:** `client/src/core/entity-fx-fence.ts` (PLAN-fx-offload X5). **Always on** — unlike the LuaUI profiler above, this isn't a start/stop measurement session; `EntityFxFence.beginFrame()` runs every frame from `game-processor.ts`'s render loop, so `entityFxFenceDump()` is safe to call any time.
+
+PLAN-fx-offload's declarative bindings (`core/fx-bindings.ts`, X4) replace per-frame entity `onUpdate` scripts with data. A def that still ships an actual per-frame script FX callback goes through this fence instead of running unbounded: LOD-gated (full <500 elmos from camera, half-rate 500–2000, none ≥2000 — the same tiers PLAN-client-entity.md's design specifies), budget-capped (a shared per-frame ms budget across all legacy calls — PLAN-scripting.md's combined Lua+JS 3-5ms/frame budget), and console-warned once per def.
+
+### Usage
+
+```js
+// mcp__chrome-devtools__evaluate_script
+const r = await window.test.entityFxFenceDump();
+console.log(r);
+// { frames: 1204, perDef: [ { def, ms, calls, avgMs, skippedLod, skippedBudget }, ... ] }  — ranked most-expensive-first
+
+await window.test.entityFxFenceReset();   // clear stats before a fresh measurement window
+```
+
+**As of this writing `perDef` is always `[]`.** No shipped game currently routes a per-def script through `EntityFxFence.run()` — the fence is wired into the live render loop (so `frames` is real) ahead of having a caller, because PLAN-fx-offload sequences the fence (X5) before the JS animation system (task 3) that's expected to become that caller. An empty dump here means "nothing has called `run()` yet," not "the fence is broken."
+
+---
+
 ## Network simulator — WAN conditions on localhost
 
 **Source:** `Connection.setNetSim()` (`client/src/core/connection.ts`) + `client/src/core/net-inspector.ts`'s bandwidth tally. Built for PLAN-latency's L0 validation ("does the latency mitigation still look right at 200ms ± jitter, 2% loss?") but generally useful any time you need to reproduce WAN conditions without an actual WAN. Applies to the unreliable state channel only (entity state, etc.) — reliable/control traffic is unaffected.
@@ -200,6 +223,7 @@ browser_test({ method: "perfDump" })
 browser_test({ method: "uiProfileStart" })
 browser_test({ method: "uiProfileDump", args: [40] })
 browser_test({ method: "uiProfileStop" })
+browser_test({ method: "entityFxFenceDump" })
 browser_test({ method: "netSimPreset", args: ["wan"] })
 browser_test({ method: "netStats" })
 ```

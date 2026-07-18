@@ -81,6 +81,7 @@ import { clientSettings } from './client-settings.js';
 import { CONFIG } from '../config.js';
 import { resetNetStats, snapshotNetStats } from './net-inspector.js';
 import { FrameProfiler } from './frame-profiler.js';
+import { EntityFxFence } from './entity-fx-fence.js';
 import { BuildBeamRenderer } from './build-beam-renderer.js';
 import { CombatFX } from './combat-fx.js';
 import { FxLightPool } from './fx-light-pool.js';
@@ -329,6 +330,19 @@ const gpFrameProfiler = new FrameProfiler(30000);
 /// 3 decals+lights, 4 render, 5 ui.
 function gpMark(idx: number): void {
     if (gpFrameProfile) gpFrameProfiler.mark(idx, performance.now());
+}
+/// PLAN-fx-offload X5 — the Fengari fence for legacy per-frame entity FX
+/// scripts (entity-fx-fence.ts). One instance, ticked every frame like
+/// gpFrameProfiler above; nothing calls `.run()` yet (no game currently
+/// ships per-frame entity `onUpdate` content through a dispatch this
+/// engine drives — see PLAN-fx-offload field notes), so `dump()` reports
+/// zero defs today. This is the wiring point for whichever module ends up
+/// running legacy per-def callbacks (task 3, the JS animation system, is
+/// next in line) — exposed via getEntityFxFence() and the
+/// entityFxFenceDump/-Reset test-dispatch verbs below.
+const gpEntityFxFence = new EntityFxFence();
+export function getEntityFxFence(): EntityFxFence {
+    return gpEntityFxFence;
 }
 /// PLAN-perf P0 isolation toggle (hazard #5): when false the LuaUI screen pass
 /// is skipped, isolating its render-thread tax (12 gl.getParameter round-trips
@@ -1407,6 +1421,7 @@ export function gpInit(msg: GpInitToWorker): void {
         // write into the permanent accumulator (gpFrameProfiler) with no
         // per-frame allocation; percentiles are computed only at dump time.
         if (gpFrameProfile) gpFrameProfiler.beginFrame(now);
+        gpEntityFxFence.beginFrame();
 
         // GW4-c5b: advance the interactive camera(s) first so this frame's
         // render + pick + viewport use the updated pose. Raw wall dt (the camera
@@ -2188,6 +2203,13 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
             return gpFrameProfiler.dump(num(0, gpFrameProfiler.windowMs));
         case 'perfReset':
             gpFrameProfiler.reset();
+            return null;
+        // — per-def legacy entity-FX script cost (PLAN-fx-offload X5). Ranked
+        //   most-expensive-first, same shape/convention as uiProfileDump. —
+        case 'entityFxFenceDump':
+            return gpEntityFxFence.dump();
+        case 'entityFxFenceReset':
+            gpEntityFxFence.reset();
             return null;
         // — per-widget LuaUI cost profile (PLAN-perf N1). start installs the
         //   Lua-side timing wrappers (widget-profiler.ts) and zeroes the JS
