@@ -101,6 +101,9 @@ public:
 
 protected:
 	virtual void FireImpl(const bool scriptCall) {}
+	// Emit the weapon's fire SoundEvent (shared by the projectile path and the
+	// statistical-resolution path, which spawns no projectile but still fires).
+	void EmitFireSound();
 	virtual void UpdateWantedDir();
 	virtual float GetPredictedImpactTime(float3 p) const; //< how long time we predict it take for a projectile to reach target
 

@@ -4,6 +4,7 @@
 #include "Weapon.h"
 #include "WeaponDefHandler.h"
 #include "WeaponMemPool.h"
+#include "StatisticalCombat.h"
 #include "Game/GameHelper.h"
 #include "Game/Players/Player.h"
 #include "Lua/LuaConfig.h"
@@ -556,6 +557,18 @@ void CWeapon::UpdateFire()
 	}
 
 	reloadStatus = gs->frameNum + int(reloadTime / owner->reloadSpeed);
+
+	// Statistical resolution (PLAN-metalstorm-combat-resolution §2.1): resolve
+	// the whole volley here — one synced roll, damage scheduled for fire+flight
+	// — and skip the salvo/script/projectile machinery entirely. Reload cadence
+	// above is preserved so fire rate is faithful. This is the called-out,
+	// opt-in divergence from the Recoil projectile path (CLAUDE.md).
+	if (weaponDef->resolution == WEAPON_RESOLUTION_STATISTICAL) {
+		EmitFireSound();
+		statisticalCombatManager.EnqueueVolley(this, currentTarget, currentTargetPos,
+		                                        std::max(1, salvoSize * projectilesPerShot));
+		return;
+	}
 
 	salvoLeft = salvoSize;
 	nextSalvo = gs->frameNum;
@@ -1238,22 +1251,8 @@ void CWeapon::Init()
 }
 
 
-void CWeapon::Fire(bool scriptCall)
+void CWeapon::EmitFireSound()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
-	owner->lastFireWeapon = gs->frameNum;
-
-	if (g_debugFlags.weapon.load(std::memory_order_relaxed)) {
-		const float3& tp = currentTargetPos;
-		springlog_log(SPRING_LOG_INFO, "weapon", "", springlog_get_frame(),
-		     "fire frame=%d unit=%d def=%s w=%u type=%s "
-		     "muzzle=(%.0f,%.0f,%.0f) target=(%.0f,%.0f,%.0f) script=%d",
-		     gs->frameNum, owner->id, owner->unitDef->name.c_str(),
-		     (unsigned)weaponDef->id, weaponDef->type.c_str(),
-		     weaponMuzzlePos.x, weaponMuzzlePos.y, weaponMuzzlePos.z,
-		     tp.x, tp.y, tp.z, (int)scriptCall);
-	}
-
 	// Emit a fire sound event. Skipped silently when the weaponDef has
 	// no soundStart entries — the def's SoundRef array is empty in that
 	// case and the client wouldn't have anything to play anyway. Synced
@@ -1275,6 +1274,32 @@ void CWeapon::Fire(bool scriptCall)
 			soundEvents.Push(se);
 		}
 	}
+}
+
+void CWeapon::Fire(bool scriptCall)
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+
+	// Statistical weapons never spawn a projectile (E1 invariant): the volley
+	// was already rolled + scheduled in UpdateFire. Guard here too so no stray
+	// caller can ever route a statistical def into FireImpl.
+	if (weaponDef->resolution == WEAPON_RESOLUTION_STATISTICAL)
+		return;
+
+	owner->lastFireWeapon = gs->frameNum;
+
+	if (g_debugFlags.weapon.load(std::memory_order_relaxed)) {
+		const float3& tp = currentTargetPos;
+		springlog_log(SPRING_LOG_INFO, "weapon", "", springlog_get_frame(),
+		     "fire frame=%d unit=%d def=%s w=%u type=%s "
+		     "muzzle=(%.0f,%.0f,%.0f) target=(%.0f,%.0f,%.0f) script=%d",
+		     gs->frameNum, owner->id, owner->unitDef->name.c_str(),
+		     (unsigned)weaponDef->id, weaponDef->type.c_str(),
+		     weaponMuzzlePos.x, weaponMuzzlePos.y, weaponMuzzlePos.z,
+		     tp.x, tp.y, tp.z, (int)scriptCall);
+	}
+
+	EmitFireSound();
 
 	// target-leading can nudge currentTargetPos into an adjacent quadfield cell
 	// such that tracing a ray to it does not touch the cell in which our target
