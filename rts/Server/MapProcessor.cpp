@@ -12,11 +12,16 @@
 #include "System/FileSystem/LuaVFSSimple.h"
 #include "System/FileSystem/FileHandler.h"
 
+#include <nlohmann/json.hpp>
+
 #include <sqlite3.h>
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <unordered_map>
 
 // Absolute path to the textureconverter binary, injected at build time
 // via target_compile_definitions. Falls back to a bare name.
@@ -31,6 +36,72 @@ namespace fs = std::filesystem;
 constexpr int SQUARE_SIZE = 8;
 constexpr int TILE_MIP0_SIZE = 512;
 constexpr int SMALL_TILE_SIZE = 680;
+
+// ============================================================
+// Region graph geometry — mirrors LuaRules/Gadgets/regions/partition.lua's
+// pointInPolygon/isSelfIntersecting exactly (PLAN-metalstorm-regions.md §5:
+// this export is a static re-serialisation of the same data the sim
+// validates, and the two validators must agree on which provider — grid or
+// graph — ends up active, or the client mirror would lie about ownership
+// costs relative to what the sim actually charges).
+// ============================================================
+
+struct RegionPoint { float x = 0, z = 0; };
+
+struct RegionRecord {
+    std::string key;
+    std::string name;
+    std::vector<RegionPoint> polygon;
+    float value = 0;
+    std::vector<std::string> tags;
+    std::vector<std::string> neighbors;
+};
+
+static float RegionCross(float ox, float oz, float ax, float az, float bx, float bz) {
+    return (ax - ox) * (bz - oz) - (az - oz) * (bx - ox);
+}
+
+static bool RegionSegmentsIntersect(const RegionPoint& p1, const RegionPoint& p2,
+                                     const RegionPoint& p3, const RegionPoint& p4) {
+    const float d1 = RegionCross(p3.x, p3.z, p4.x, p4.z, p1.x, p1.z);
+    const float d2 = RegionCross(p3.x, p3.z, p4.x, p4.z, p2.x, p2.z);
+    const float d3 = RegionCross(p1.x, p1.z, p2.x, p2.z, p3.x, p3.z);
+    const float d4 = RegionCross(p1.x, p1.z, p2.x, p2.z, p4.x, p4.z);
+    const bool cross1 = (d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0);
+    const bool cross2 = (d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0);
+    return cross1 && cross2;
+}
+
+/// True if non-adjacent edges of `poly` cross. Degenerate (<3 vertices)
+/// counts as self-intersecting. Same adjacency-skip logic as the Lua
+/// validator: edge i and edge i+1 (mod n) always share a vertex and are
+/// skipped; the wrap pair (edge 0, edge n-1) is skipped explicitly.
+static bool RegionIsSelfIntersecting(const std::vector<RegionPoint>& poly) {
+    const size_t n = poly.size();
+    if (n < 3) return true;
+    for (size_t i = 0; i < n; i++) {
+        const RegionPoint& a1 = poly[i];
+        const RegionPoint& a2 = poly[(i + 1) % n];
+        for (size_t j = i + 2; j < n; j++) {
+            if (i == 0 && j == n - 1) continue;
+            const RegionPoint& b1 = poly[j];
+            const RegionPoint& b2 = poly[(j + 1) % n];
+            if (RegionSegmentsIntersect(a1, a2, b1, b2)) return true;
+        }
+    }
+    return false;
+}
+
+constexpr int REGION_MIN_PER_AXIS = 2;               // E5: degenerate-grid clamp
+constexpr float REGION_DEFAULT_GRID_SIZE = 2048.0f;
+
+/// Same clamp as partition.lua's `gridRegionSize` — kept in sync so the
+/// grid-fallback descriptor exported here matches what the sim itself
+/// computes at runtime from the same map dimensions.
+static float RegionGridSize(float mapWidth, float mapHeight) {
+    const float maxSize = std::min(mapWidth, mapHeight) / REGION_MIN_PER_AXIS;
+    return std::min(REGION_DEFAULT_GRID_SIZE, maxSize);
+}
 
 // ============================================================
 // Lua helpers for reading table fields
@@ -691,6 +762,189 @@ bool MapProcessor::ExtractFeatures(MapMetadata& meta) {
 }
 
 // ============================================================
+// Region graph — mapdata/regions.lua → regions.json (engine ask R1,
+// PLAN-metalstorm-regions.md §5/§8/§9 task 5)
+// ============================================================
+//
+// Trivial Lua→JSON re-serialisation of the map-authored region graph, or a
+// grid-fallback descriptor when the map has no graph (or it fails
+// validation — E2, loud log + fallback). Written as a static sibling of
+// heightmap.bin etc.; the client mirror (ui/lib/regions.js) fetches it once
+// and builds the same lookup grid the sim uses internally.
+void MapProcessor::ExtractRegions(const MapMetadata& meta) {
+    const float mapWidth = static_cast<float>(meta.widthElmos);
+    const float mapHeight = static_cast<float>(meta.heightElmos);
+
+    std::vector<RegionRecord> regions;
+    bool haveGraph = false;
+
+    const fs::path regionsLuaPath = fs::path(meta.sourcePath) / "mapdata" / "regions.lua";
+    if (fs::exists(regionsLuaPath)) {
+        auto savedRoots = CFileHandler::GetCategorizedRoots();
+        CFileHandler::AddContentRoot(meta.sourcePath, RootCategory::Map);
+
+        lua_State* L = luaL_newstate();
+        luaL_openlibs(L);
+        luaL_dostring(L,
+            "unpack = unpack or table.unpack\n"
+            "loadstring = loadstring or load\n"
+            "if not setfenv then\n"
+            "  setfenv = function(f, t) return f end\n"
+            "  getfenv = function(f) return _G end\n"
+            "end\n"
+        );
+        LuaVFSSimple::Register(L);
+
+        if (luaL_dofile(L, regionsLuaPath.string().c_str()) != LUA_OK) {
+            SLOG(SPRING_LOG_ERROR, "%s: mapdata/regions.lua error: %s",
+                meta.id.c_str(), lua_tostring(L, -1));
+            lua_pop(L, 1);
+        } else if (lua_istable(L, -1)) {
+            lua_getfield(L, -1, "regions");
+            if (lua_istable(L, -1)) {
+                const int n = static_cast<int>(lua_rawlen(L, -1));
+                for (int i = 1; i <= n; i++) {
+                    lua_rawgeti(L, -1, i);
+                    if (lua_istable(L, -1)) {
+                        RegionRecord r;
+                        r.key = luaGetString(L, "key");
+                        r.name = luaGetString(L, "name");
+                        r.value = luaGetFloat(L, "value", 0);
+
+                        lua_getfield(L, -1, "polygon");
+                        if (lua_istable(L, -1)) {
+                            const int pn = static_cast<int>(lua_rawlen(L, -1));
+                            for (int p = 1; p <= pn; p++) {
+                                lua_rawgeti(L, -1, p);
+                                if (lua_istable(L, -1)) {
+                                    RegionPoint pt;
+                                    pt.x = luaGetFloat(L, "x", 0);
+                                    pt.z = luaGetFloat(L, "z", 0);
+                                    r.polygon.push_back(pt);
+                                }
+                                lua_pop(L, 1);
+                            }
+                        }
+                        lua_pop(L, 1); // polygon
+
+                        lua_getfield(L, -1, "tags");
+                        if (lua_istable(L, -1)) {
+                            const int tn = static_cast<int>(lua_rawlen(L, -1));
+                            for (int t = 1; t <= tn; t++) {
+                                lua_rawgeti(L, -1, t);
+                                if (lua_isstring(L, -1)) r.tags.push_back(lua_tostring(L, -1));
+                                lua_pop(L, 1);
+                            }
+                        }
+                        lua_pop(L, 1); // tags
+
+                        lua_getfield(L, -1, "neighbors");
+                        if (lua_istable(L, -1)) {
+                            const int nn = static_cast<int>(lua_rawlen(L, -1));
+                            for (int nb = 1; nb <= nn; nb++) {
+                                lua_rawgeti(L, -1, nb);
+                                if (lua_isstring(L, -1)) r.neighbors.push_back(lua_tostring(L, -1));
+                                lua_pop(L, 1);
+                            }
+                        }
+                        lua_pop(L, 1); // neighbors
+
+                        regions.push_back(std::move(r));
+                    }
+                    lua_pop(L, 1); // region entry
+                }
+                haveGraph = !regions.empty();
+            }
+            lua_pop(L, 1); // regions field
+        }
+        lua_close(L);
+
+        CFileHandler::ClearContentRoots();
+        for (const auto& r0 : savedRoots) CFileHandler::AddContentRoot(r0.path, r0.category);
+    }
+
+    std::string provider = "grid";
+
+    if (haveGraph) {
+        // Validate — mirrors regions/partition.lua's validateGraph exactly.
+        std::unordered_map<std::string, const RegionRecord*> byKey;
+        for (const auto& r : regions) byKey[r.key] = &r;
+
+        std::unordered_map<std::string, int> seen;
+        std::vector<std::string> errors;
+        for (const auto& r : regions) {
+            if (r.key.empty()) {
+                errors.push_back("region with empty/missing key");
+            } else if (seen[r.key]++ > 0) {
+                errors.push_back("duplicate key: " + r.key);
+            }
+
+            for (const auto& pt : r.polygon) {
+                if (pt.x < 0 || pt.x > mapWidth || pt.z < 0 || pt.z > mapHeight) {
+                    errors.push_back(r.key + ": vertex out of map bounds");
+                    break;
+                }
+            }
+            if (RegionIsSelfIntersecting(r.polygon)) {
+                errors.push_back(r.key + ": self-intersecting polygon");
+            }
+            for (const auto& nb : r.neighbors) {
+                auto it = byKey.find(nb);
+                if (it == byKey.end()) {
+                    errors.push_back(r.key + ": neighbor '" + nb + "' does not exist");
+                } else {
+                    bool found = false;
+                    for (const auto& back : it->second->neighbors) {
+                        if (back == r.key) { found = true; break; }
+                    }
+                    if (!found) errors.push_back(r.key + ": asymmetric neighbor '" + nb + "'");
+                }
+            }
+        }
+
+        if (errors.empty()) {
+            provider = "graph";
+        } else {
+            SLOG(SPRING_LOG_WARNING, "%s: mapdata/regions.lua failed validation, falling back to grid:", meta.id.c_str());
+            for (const auto& e : errors) SLOG(SPRING_LOG_WARNING, "%s:   %s", meta.id.c_str(), e.c_str());
+        }
+    }
+
+    nlohmann::json j;
+    j["provider"] = provider;
+    j["mapWidth"] = mapWidth;
+    j["mapHeight"] = mapHeight;
+
+    if (provider == "graph") {
+        j["regions"] = nlohmann::json::array();
+        for (const auto& r : regions) {
+            nlohmann::json rj;
+            rj["key"] = r.key;
+            rj["name"] = r.name;
+            rj["value"] = r.value;
+            rj["tags"] = r.tags;
+            rj["neighbors"] = r.neighbors;
+            rj["polygon"] = nlohmann::json::array();
+            for (const auto& pt : r.polygon) rj["polygon"].push_back({{"x", pt.x}, {"z", pt.z}});
+            j["regions"].push_back(std::move(rj));
+        }
+        SLOG(SPRING_LOG_INFO, "%s: exported regions.json (graph, %zu regions)", meta.id.c_str(), regions.size());
+    } else {
+        const float regionSize = RegionGridSize(mapWidth, mapHeight);
+        const int gridW = std::max(REGION_MIN_PER_AXIS, static_cast<int>(std::ceil(mapWidth / regionSize)));
+        const int gridH = std::max(REGION_MIN_PER_AXIS, static_cast<int>(std::ceil(mapHeight / regionSize)));
+        j["regionSize"] = regionSize;
+        j["gridW"] = gridW;
+        j["gridH"] = gridH;
+        SLOG(SPRING_LOG_INFO, "%s: exported regions.json (grid %dx%d @ %.0f elmos)",
+            meta.id.c_str(), gridW, gridH, regionSize);
+    }
+
+    std::ofstream out(meta.processedDir + "/regions.json");
+    out << j.dump();
+}
+
+// ============================================================
 // Top-level
 // ============================================================
 
@@ -712,6 +966,7 @@ bool MapProcessor::ProcessMap(MapMetadata& meta) {
     ExtractMinimapWebP(meta);          // 1024² thumbnail for the lobby browser
     ExtractDecalTextures(meta);
     EnumerateWidgets(meta);
+    ExtractRegions(meta);              // mapdata/regions.lua → regions.json (R1)
 
     // RH content-preprocessing: legacy LH map source files (mapinfo.lua,
     // featureplacer/*.lua, SMF-embedded features) author position Z in

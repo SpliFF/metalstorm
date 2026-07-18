@@ -20,5 +20,6 @@ private:
     bool ExtractFeatures(MapMetadata& meta);
     bool ExtractDecalTextures(MapMetadata& meta);
     void EnumerateWidgets(MapMetadata& meta);
+    void ExtractRegions(const MapMetadata& meta);
     bool ProcessMap(MapMetadata& meta);
 };

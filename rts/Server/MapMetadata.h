@@ -10,14 +10,19 @@
 
 struct sqlite3;
 
-/// Increment to reprocess all maps. v15 changes legacy-Z conversion
-/// in MapProcessor::ProcessMap from negation (`z → -z`, putting values
-/// in `[-mapZ, 0]`) to reflection through mapZ/2 (`z → mapZ - z`,
-/// keeping values in `[0, mapZ]`) — same logical purpose (convert
-/// legacy LH author intent to engine RH convention) but the engine's
-/// world bounds are now positive-quadrant per PLAN-coordinate-system-
-/// option-a.md, so persisted MapMetadata records must follow suit.
-constexpr int MAP_FORMAT_VERSION = 15;
+/// Increment to reprocess all maps.
+/// v15 changed legacy-Z conversion in MapProcessor::ProcessMap from negation
+/// (`z → -z`, putting values in `[-mapZ, 0]`) to reflection through mapZ/2
+/// (`z → mapZ - z`, keeping values in `[0, mapZ]`) — same logical purpose
+/// (convert legacy LH author intent to engine RH convention) but the
+/// engine's world bounds are now positive-quadrant per PLAN-coordinate-
+/// system-option-a.md, so persisted MapMetadata records must follow suit.
+/// v16 adds the `regions.json` export (PLAN-metalstorm-regions.md §5/§8
+/// R1) — a static re-serialisation of the map's authored region graph
+/// (`mapdata/regions.lua`), or a grid fallback descriptor when no graph is
+/// authored / it fails validation. Sibling of heightmap.bin etc. in the
+/// processed map directory.
+constexpr int MAP_FORMAT_VERSION = 16;
 
 struct MapStartPosition {
     float x = 0, z = 0;
