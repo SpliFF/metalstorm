@@ -121,3 +121,8 @@ enum class SyncedPredicateResult { False, True, Error };
 /// thread. Used by the --headless-run stop-condition poller (PLAN-headless §1).
 SyncedPredicateResult EvalSyncedPredicate(const std::string& expr,
                                           std::string& errOut);
+
+/// Current LuaRules synced-Lua heap size in KB (0 if LuaRules isn't loaded).
+/// Read-only (LUA_GCCOUNT), no GC side effect. Feeds the headless stats-dump
+/// Lua-heap watermark field (PLAN-headless task 2, PLAN-long-uptime §S4).
+int64_t GetSyncedLuaHeapKb();

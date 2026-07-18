@@ -464,6 +464,7 @@ void StateStreamer::BroadcastCombatEvents(int) {
     auto& sessions = ctx.sessions;
     auto& sim = ctx.sim;
     auto events = combatEvents.Drain();
+    combatStats.Accumulate(events);  // PLAN-headless task 2: per-weapon totals
     auto projDrain = projectileEvents.Drain();
     auto soundDrain = soundEvents.Drain();
     auto seismicDrain = intelEvents != nullptr

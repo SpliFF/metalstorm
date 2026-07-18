@@ -482,6 +482,7 @@ if(TEST_SOURCES)
         ${CMAKE_SOURCE_DIR}/rts/Server/GameMetrics.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GmRollback.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/HeadlessRun.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/StatsDump.cpp
     )
     target_include_directories(spring-tests PRIVATE
         ${CMAKE_SOURCE_DIR}/rts

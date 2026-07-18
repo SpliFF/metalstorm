@@ -699,3 +699,13 @@ SyncedPredicateResult EvalSyncedPredicate(const std::string& expr,
     lua_settop(L, top);
     return truthy ? SyncedPredicateResult::True : SyncedPredicateResult::False;
 }
+
+int64_t GetSyncedLuaHeapKb() {
+    if (!luaRules)
+        return 0;
+    lua_State* L = luaRules->syncedLuaHandle.GetLuaState();
+    if (!L)
+        return 0;
+    // LUA_GCCOUNT returns the heap size in Kbytes (read-only, no GC side effect).
+    return static_cast<int64_t>(lua_gc(L, LUA_GCCOUNT, 0));
+}

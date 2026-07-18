@@ -46,7 +46,9 @@
 #include "Server/StateStreamer.h"
 #include "Server/GameHttpRoutes.h"
 #include "Server/HeadlessRun.h"
+#include "Server/StatsDump.h"
 #include "Server/GameOverState.h"
+#include "Sim/Misc/GlobalSynced.h"
 #include "Lua/LuaRules.h"
 #include "Server/HttpAuth.h"
 #include "Server/CacheControl.h"
@@ -997,6 +999,67 @@ int main(int argc, char* argv[])
     bool headlessLuaErrored = false;
     headless::StopReason headlessStopReason = headless::StopReason::None;
 
+    // Stats-dump snapshots (PLAN-headless task 2), taken every
+    // headlessCfg.stateHashEvery sim frames plus once more at termination.
+    // Unused unless headlessCfg.enabled && headlessCfg.stateHashEvery > 0.
+    std::vector<statsdump::Snapshot> headlessSnapshots;
+    auto captureHeadlessSnapshot = [&](int64_t wallSec) {
+        statsdump::Snapshot snap;
+        snap.frame = sim.GetFrameNum();
+        snap.gameSeconds = snap.frame / (double)GAME_SPEED;
+        snap.wallSeconds = wallSec;
+        snap.simFps = perfMetrics.GetSnapshot().simFps;
+        snap.rssKb = statsdump::GetRssKb();
+        snap.luaHeapKb = GetSyncedLuaHeapKb();
+
+        // Determinism digest: xor-fold every active unit's id/team/pos/health
+        // (stable engine-defined iteration order) plus the synced RNG state.
+        std::vector<statsdump::UnitDigest> digest;
+        digest.reserve(unitHandler.GetActiveUnits().size());
+        for (const CUnit* u : unitHandler.GetActiveUnits()) {
+            statsdump::UnitDigest d;
+            d.id = u->id;
+            d.team = static_cast<int16_t>(u->team);
+            d.x = u->pos.x; d.y = u->pos.y; d.z = u->pos.z;
+            d.health = u->health;
+            digest.push_back(d);
+        }
+        snap.stateHash = statsdump::ComputeStateHash(digest, gsRNG.GetGenState());
+
+        for (int t = 0; t < teamHandler.ActiveTeams(); ++t) {
+            const CTeam* team = teamHandler.Team(t);
+            const TeamStatistics& ts = team->GetCurrentStats();
+            statsdump::TeamSnapshot row;
+            row.teamId = t;
+            row.allyTeam = team->teamAllyteam;
+            row.dead = team->isDead;
+            row.numUnits = static_cast<int>(team->numUnits);
+            row.metal = team->res.metal;
+            row.energy = team->res.energy;
+            row.metalIncome = team->resIncome.metal;
+            row.energyIncome = team->resIncome.energy;
+            row.metalExpense = team->resExpense.metal;
+            row.energyExpense = team->resExpense.energy;
+            row.damageDealt = ts.damageDealt;
+            row.damageReceived = ts.damageReceived;
+            row.unitsProduced = ts.unitsProduced;
+            row.unitsDied = ts.unitsDied;
+            row.unitsKilled = ts.unitsKilled;
+            snap.teams.push_back(row);
+        }
+
+        for (const auto& [weaponDefId, totals] : combatStats.Snapshot()) {
+            statsdump::WeaponStats row;
+            row.weaponDefId = weaponDefId;
+            row.volleys = totals.volleys;
+            row.kills = totals.kills;
+            row.damage = totals.damage;
+            snap.weapons.push_back(row);
+        }
+
+        headlessSnapshots.push_back(std::move(snap));
+    };
+
     while (keepRunning.load()) {
         // --- Pacing ---
         // Normal games (and headless realtime / xN) sleep to hit the target tick
@@ -1215,6 +1278,13 @@ int main(int argc, char* argv[])
             rs.wallElapsedSec = std::chrono::duration_cast<std::chrono::seconds>(
                 std::chrono::steady_clock::now() - serverStartTime).count();
 
+            // Stats-dump snapshot cadence (task 2 §1 "stateHashEvery"). Frame 0
+            // is skipped — before GameStart there is nothing meaningful to hash.
+            if (headlessCfg.stateHashEvery > 0 && frame > 0 &&
+                (frame % headlessCfg.stateHashEvery) == 0) {
+                captureHeadlessSnapshot(rs.wallElapsedSec);
+            }
+
             headlessStopReason = headless::EvaluateStop(
                 headlessCfg.stopAt, headlessCfg.maxWallSec, rs);
             if (headlessStopReason != headless::StopReason::None) {
@@ -1223,6 +1293,30 @@ int main(int argc, char* argv[])
                     headless::StopReasonName(headlessStopReason), frame,
                     frame / (float)GAME_SPEED, (long long)rs.wallElapsedSec);
                 keepRunning.store(false);
+
+                // Final stats dump (task 2 §1 "JSON at termination"). Always
+                // takes one last snapshot regardless of stateHashEvery cadence,
+                // so the dump's terminal row matches the reported stop frame.
+                if (!headlessCfg.statsDump.empty()) {
+                    if (headlessCfg.stateHashEvery <= 0 ||
+                        (frame % headlessCfg.stateHashEvery) != 0) {
+                        captureHeadlessSnapshot(rs.wallElapsedSec);
+                    }
+                    statsdump::FinalDump dump;
+                    dump.status = headless::StopReasonName(headlessStopReason);
+                    dump.frame = frame;
+                    dump.gameSeconds = frame / (double)GAME_SPEED;
+                    dump.wallSeconds = rs.wallElapsedSec;
+                    dump.snapshots = headlessSnapshots;
+                    std::string dumpErr;
+                    if (!statsdump::WriteDumpFile(headlessCfg.statsDump, dump, dumpErr)) {
+                        SLOG(SPRING_LOG_ERROR, "headless stats dump write failed: %s",
+                            dumpErr.c_str());
+                    } else {
+                        SLOG(SPRING_LOG_NOTICE, "headless stats dump written: %s (%zu snapshots)",
+                            headlessCfg.statsDump.c_str(), headlessSnapshots.size());
+                    }
+                }
             }
         }
     }
