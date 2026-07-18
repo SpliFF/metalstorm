@@ -769,7 +769,12 @@ export interface ConnectionEvents {
     onProjectileFired?: (events: ProjectileFiredInfo[], frame: number) => void;
     onProjectileImpacts?: (events: ProjectileImpactInfo[], frame: number) => void;
     onProjectileTrajectories?: (events: ProjectileTrajectoryInfo[], frame: number) => void;
-    onEntityDestroy?: (entityId: number, x: number, y: number, z: number) => void;
+    /** `frame` is the sim frame of the most recent GameEventBatch — the death's
+     *  own frame in practice, since the server broadcasts combat events (which
+     *  carry the kill) immediately before the EntityDestroy for the same tick on
+     *  the same reliable, in-order lane (StateStreamer::Tick). Lets L1 schedule
+     *  the death to land on the same presentation frame as its explosion. */
+    onEntityDestroy?: (entityId: number, x: number, y: number, z: number, frame: number) => void;
     /** Per-unit sensor radius override. Emitted by
      *  Spring.SetUnitSensorRadius on the server. `sensorType` matches
      *  the SpringWeb::SensorType enum (0=los, 1=airLos, 2=radar,
@@ -877,6 +882,11 @@ export class Connection {
     public playerId: number = 0;
     public myTeam: number = -1;
     private clock = new ServerClock();
+    /** Sim frame of the most recent GameEventBatch. Fed to onEntityDestroy so
+     *  L1 can present a death on the same frame as its (batched) explosion —
+     *  the batch is delivered immediately before the destroy on the same
+     *  reliable, in-order lane (StateStreamer::Tick). */
+    private lastEventFrame = 0;
     private pingInterval: ReturnType<typeof setInterval> | null = null;
     private httpBase = '';  // e.g. "http://localhost:9100"
 
@@ -2014,6 +2024,7 @@ export class Connection {
     private handleGameEventBatch(msg: ServerMessage): void {
         const batch = msg.payload(new GameEventBatch()) as GameEventBatch;
         const frame = batch.frame();
+        this.lastEventFrame = frame;
 
         const combatCount = batch.combatEventsLength();
         if (combatCount > 0 && this.events.onCombatEvents) {
@@ -2164,6 +2175,7 @@ export class Connection {
             pos ? pos.x() : 0,
             pos ? pos.y() : 0,
             pos ? pos.z() : 0,
+            this.lastEventFrame,
         );
     }
 

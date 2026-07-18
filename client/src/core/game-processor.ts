@@ -70,6 +70,7 @@ import { BuildingPlateRenderer } from './building-plate-renderer.js';
 import { DefCache } from './def-cache.js';
 import { fetchAndIngestDefs } from './defs-fetch.js';
 import { PresentationClock } from './presentation-clock.js';
+import { EventScheduler, type ScheduledKind } from './event-scheduler.js';
 // GW4-c5: weapon-FX / projectile / decal / build render modules fold into the
 // worker (audited worker-safe — no DOM/audio; the `window.__*` dev hooks they
 // set are switched to `globalThis`). Ported from main.ts@d6301137f7^.
@@ -261,6 +262,20 @@ const gpDefsReady: Promise<void> = new Promise((resolve) => { gpDefsReadyResolve
 /// frame keyed) instead of arrival wall-time. Reset + anchored to the
 /// connection's ServerClock once `gpConnect` builds it.
 let gpPresentationClock: PresentationClock | null = null;
+/// PLAN-latency L1: presentation-timeline for discrete events (explosions,
+/// deaths, impact CEGs, sounds). Server events carry the sim frame they
+/// occurred on; instead of firing on arrival (~D frames ahead of the cursor)
+/// they're queued here and drained when the cursor reaches their frame, so a
+/// death burst lands on the same frame the dying unit is interpolated to.
+/// Created in gpInit, drained in the render loop, cleared in gpShutdown.
+let gpEventScheduler: EventScheduler | null = null;
+
+/// Schedule a discrete event onto the presentation timeline, or fire it now if
+/// the scheduler isn't up yet (pre-gpInit safety — never silently dropped).
+function gpSchedule(frame: number, kind: ScheduledKind, fire: () => void): void {
+    if (gpEventScheduler) gpEventScheduler.schedule(frame, kind, fire);
+    else fire();
+}
 /// GW4-c3 terrain state, populated once the map data HTTP fetch resolves.
 /// Mirrors the pre-move main.ts `onMapData` terrain build.
 let gpTerrainMesh: Mesh | null = null;
@@ -772,15 +787,22 @@ function gpConnect(msg: GpInitToWorker): void {
         // GW4-c4/c5: a unit/feature left view or died → drop its meshes + plate
         // and (c5) fire a combatFX death burst at its last position. (LuaUI
         // forward to widgets wires up in c6.)
-        onEntityDestroy: (entityId, x, y, z) => {
-            gpCtx.entityRenderer?.removeEntity(entityId);
-            gpBuildingPlateRenderer?.remove(entityId);
-            gpCombatFX?.onCombatEvents([{
-                attackerId: 0, targetId: entityId, weaponDefId: 0,
-                result: 3, damage: 500, x, y, z,
-            }]);
-            // GW4-c6-1b: LuaUI UnitDestroyed + liveState cleanup.
-            removeUnitFromLiveState(entityId);
+        // PLAN-latency L1: present the death — mesh removal, death burst,
+        // liveState cleanup — on the batch frame (the kill's own frame; the
+        // combat batch precedes this destroy on the same reliable lane), so the
+        // unit vanishes with its explosion instead of ~D frames before the
+        // interpolated body arrives. Past-due (no batch yet) → next drain.
+        onEntityDestroy: (entityId, x, y, z, frame) => {
+            gpSchedule(frame, 'destroy', () => {
+                gpCtx.entityRenderer?.removeEntity(entityId);
+                gpBuildingPlateRenderer?.remove(entityId);
+                gpCombatFX?.onCombatEvents([{
+                    attackerId: 0, targetId: entityId, weaponDefId: 0,
+                    result: 3, damage: 500, x, y, z,
+                }]);
+                // GW4-c6-1b: LuaUI UnitDestroyed + liveState cleanup.
+                removeUnitFromLiveState(entityId);
+            });
         },
         // GW4-c5: getRuntime() feature spawns (wrecks/debris/reclaim) → dynamic
         // feature renderer. Map-placed features load via renderMapFeatures.
@@ -798,9 +820,16 @@ function gpConnect(msg: GpInitToWorker): void {
             if (!gpCtx.projectileRenderer) return;
             for (const e of events) gpCtx.projectileRenderer.onFired(e);
         },
-        onProjectileImpacts: (events) => {
-            for (const e of events) gpCtx.projectileRenderer?.onImpact(e);
-            gpCombatFX?.onProjectileImpacts(events);
+        // PLAN-latency L1: present the impact (renderer detonation + shield /
+        // airburst FX) on its sim frame. The bolt's flight is still integrated
+        // locally (Tier-C convergence is L2) — L1 only aligns the *impact*.
+        onProjectileImpacts: (events, frame) => {
+            for (const e of events) {
+                gpSchedule(frame, 'impact', () => {
+                    gpCtx.projectileRenderer?.onImpact(e);
+                    gpCombatFX?.onProjectileImpacts([e]);
+                });
+            }
         },
         onProjectileTrajectories: (events) => {
             if (!gpCtx.projectileRenderer) return;
@@ -810,9 +839,16 @@ function gpConnect(msg: GpInitToWorker): void {
         // Also fan out widget:UnitDamaged so intel/health/FX widgets in ZK
         // and BAR react to damage (faithful weapon-combat subset; see
         // dispatchUnitDamaged for the documented wire gaps).
-        onCombatEvents: (events) => {
-            gpCombatFX?.onCombatEvents(events);
-            dispatchUnitDamaged(events);
+        // PLAN-latency L1: present each combat hit/kill (explosion CEG +
+        // widget UnitDamaged) on its own sim frame, so the burst lands as the
+        // interpolated unit reaches the spot rather than ~D frames early.
+        onCombatEvents: (events, frame) => {
+            for (const ev of events) {
+                gpSchedule(frame, 'combatFx', () => {
+                    gpCombatFX?.onCombatEvents([ev]);
+                    dispatchUnitDamaged([ev]);
+                });
+            }
         },
         // GW4-c5b-3: per-unit command queues (~1 Hz) → command-path + waypoint
         // overlays for the current selection (shift-gated). Cached so a
@@ -869,15 +905,24 @@ function gpConnect(msg: GpInitToWorker): void {
         // post the resolved pairs to main, where SoundEventPlayer does the
         // SoundItem/URL resolution + AudioManager.play. Music events forward
         // straight to main's MusicDirector.
-        onSoundEvents: (events) => {
+        // PLAN-latency L1: resolve the SoundRef now (needs the def cache, which
+        // lives here) but present the sound on its own sim frame, so weapon /
+        // impact / death audio fires in lockstep with the visual it belongs to
+        // rather than ~D frames early. Sub-frame audio precision (an
+        // AudioContext-scheduled offset within the frame) is deliberately left
+        // out: the drain granularity makes it a no-op, and the paired visual is
+        // itself locked to the render frame — see PLAN-latency-impl L1 notes.
+        onSoundEvents: (events, frame) => {
             if (!gpDefCache) return;
-            const resolved: ResolvedSoundEvent[] = [];
             for (const e of events) {
                 const ref = resolveSoundRef(gpDefCache, e.sourceKind as 0 | 1 | 2 | 3,
                     e.sourceDefId, e.soundId);
-                if (ref) resolved.push({ e, ref });
+                if (!ref) continue;
+                const resolved: ResolvedSoundEvent = { e, ref };
+                gpSchedule(frame, 'sound', () => {
+                    postToMain({ type: 'gp:audioSoundEvents', events: [resolved] });
+                });
             }
-            if (resolved.length) postToMain({ type: 'gp:audioSoundEvents', events: resolved });
         },
         onMusicEvent: (state, fadeMs) => postToMain({ type: 'gp:audioMusic', state, fadeMs }),
         // GW4-c5: build/repair/reclaim progress (envelope 0x06) → build beams.
@@ -1236,6 +1281,7 @@ export function gpInit(msg: GpInitToWorker): void {
     setModelMaterialPort(port);
 
     gpPresentationClock = new PresentationClock();
+    gpEventScheduler = new EventScheduler();
 
     const entityRenderer = new EntityRenderer(scene);
     entityRenderer.setPresentationClock(gpPresentationClock);
@@ -1443,6 +1489,15 @@ export function gpInit(msg: GpInitToWorker): void {
         // entityRenderer.tick() advances the presentation clock (L0) and
         // interpolates every unit to the presentation cursor before render.
         gpCtx.entityRenderer?.tick();
+        // PLAN-latency L1: fire discrete events (explosions, deaths, impact
+        // CEGs, sounds) whose sim frame the cursor has now reached — so they
+        // present in lockstep with the units interpolated to the same P, rather
+        // than early on arrival. Drained after the cursor advanced (tick above)
+        // and before projectileRenderer.tick() / the A3 mirror so a scheduled
+        // impact removes its projectile from this frame's live snapshot.
+        if (gpPresentationClock && gpEventScheduler) {
+            gpEventScheduler.drain(gpPresentationClock.P);
+        }
         gpMark(1);  // entity
         gpBuildBeamRenderer?.tick();
         gpCtx.projectileRenderer?.tick();
@@ -2140,6 +2195,11 @@ export function gpShutdown(): void {
     gpDefCache?.clear();
     gpDefCache = null;
     gpPresentationClock = null;
+    // PLAN-latency L1: drop any events still queued on the presentation
+    // timeline (quit-to-lobby mid-explosion) — their closures capture the
+    // now-dead renderers/connection.
+    gpEventScheduler?.clear();
+    gpEventScheduler = null;
     // GW4-c5: weapon-FX / projectile / decal / build / feature modules.
     gpCtx.projectileRenderer?.dispose();
     gpCtx.projectileRenderer = null;
