@@ -157,6 +157,19 @@ PIEImporter::Component PIEImporter::ParsePie(const std::string& text,
     int level = 0;          // 0 = no LEVEL directive yet (single-level file)
     auto ingesting = [&]() { return level <= 1; };
 
+    // Row-count directives come from untrusted text: a negative or garbage
+    // count must fail the import here, not wrap through int→size_t into
+    // reserve()/line-skips and escape as std::length_error/bad_alloc.
+    constexpr long kMaxRows = 1000000;
+    auto rowCount = [&](const std::vector<std::string>& t, const char* what) -> int {
+        const long n = (t.size() >= 2) ? ToL(t[1]) : 0;
+        if (n < 0 || n > kMaxRows) {
+            throw DeadlyImportError("PIE: bad ", what, " count ", std::to_string(n),
+                                    " in ", nodeName);
+        }
+        return static_cast<int>(n);
+    };
+
     for (size_t i = 0; i < lines.size(); ++i) {
         const std::vector<std::string> t = Tokenize(lines[i]);
         if (t.empty()) continue;
@@ -182,7 +195,7 @@ PIEImporter::Component PIEImporter::ParsePie(const std::string& text,
         } else if (kw == "LEVELS") {
             // declares the count only; ignore
         } else if (kw == "POINTS") {
-            const int count = (t.size() >= 2) ? static_cast<int>(ToL(t[1])) : 0;
+            const int count = rowCount(t, "POINTS");
             if (!ingesting()) { i += count; continue; }
             points.clear();
             points.reserve(count);
@@ -193,10 +206,10 @@ PIEImporter::Component PIEImporter::ParsePie(const std::string& text,
             }
         } else if (kw == "NORMALS") {
             // Skip its rows — we recompute flat normals for the low-poly look.
-            const int count = (t.size() >= 2) ? static_cast<int>(ToL(t[1])) : 0;
+            const int count = rowCount(t, "NORMALS");
             i += count;
         } else if (kw == "POLYGONS") {
-            const int count = (t.size() >= 2) ? static_cast<int>(ToL(t[1])) : 0;
+            const int count = rowCount(t, "POLYGONS");
             if (!ingesting()) { i += count; continue; }
             for (int j = 0; j < count && i + 1 < lines.size(); ++j) {
                 const std::vector<std::string> p = Tokenize(lines[++i]);
@@ -229,7 +242,7 @@ PIEImporter::Component PIEImporter::ParsePie(const std::string& text,
                 }
             }
         } else if (kw == "CONNECTORS") {
-            const int count = (t.size() >= 2) ? static_cast<int>(ToL(t[1])) : 0;
+            const int count = rowCount(t, "CONNECTORS");
             const bool take = ingesting() && comp.connectors.empty();
             for (int j = 0; j < count && i + 1 < lines.size(); ++j) {
                 const std::vector<std::string> p = Tokenize(lines[++i]);
@@ -306,6 +319,10 @@ void PIEImporter::BuildScene(const AssemblySpec& spec,
     std::map<std::string, Component> byNode;   // node name -> component
     std::map<std::string, Component> byPie;    // pie filename -> component (for mounts)
     for (const auto& part : spec.parts) {
+        if (byNode.count(part.node)) {
+            throw DeadlyImportError("PIE: duplicate part node \"", part.node,
+                                    "\" in ", spec.name);
+        }
         std::string piePath = part.pie;
         if (!spec.pieDir.empty()) piePath = baseDir + "/" + spec.pieDir + "/" + part.pie;
         else if (!baseDir.empty()) piePath = baseDir + "/" + part.pie;
@@ -317,6 +334,29 @@ void PIEImporter::BuildScene(const AssemblySpec& spec,
     // ---- WZ-space world offset for each part (accumulated mount chain) ----
     std::map<std::string, PartSpec> partByNode;
     for (const auto& part : spec.parts) partByNode[part.node] = part;
+
+    // Validate the parent graph before any offset walks or wiring: a
+    // `parent` naming an undeclared node, or a chain that never reaches a
+    // root (cycle), must fail the import — silently dropping the child
+    // would export e.g. a tank without its turret at exit 0. The 16-hop
+    // bound matches the offset walk's guard below.
+    for (const auto& part : spec.parts) {
+        std::string parent = part.parent;
+        int hops = 0;
+        while (!parent.empty()) {
+            auto pit = partByNode.find(parent);
+            if (pit == partByNode.end()) {
+                throw DeadlyImportError("PIE: part \"", part.node,
+                                        "\" references unknown parent node \"", parent,
+                                        "\" in ", spec.name);
+            }
+            if (++hops > 16) {
+                throw DeadlyImportError("PIE: parent chain for part \"", part.node,
+                                        "\" exceeds 16 hops (cycle?) in ", spec.name);
+            }
+            parent = pit->second.parent;
+        }
+    }
 
     auto mountOffset = [&](const PartSpec& part) -> aiVector3D {
         if (part.hasMount) {

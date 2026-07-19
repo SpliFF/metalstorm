@@ -741,9 +741,13 @@ bool FixGlbBasisuTextures(const std::string& path,
         if (doc.contains("materials") && doc["materials"].is_array()) {
             for (auto& mat : doc["materials"]) {
                 if (!mat.is_object()) continue;
-                bool moved = tryRelocate(mat, "occlusionTexture", mat)
-                           | tryRelocate(mat, "emissiveTexture",  mat)
-                           | tryRelocate(mat, "normalTexture",    mat);
+                // Sequenced (no bitwise |): every slot must be tried, and
+                // when two carrier slots hold a *_tcmask the LAST one tried
+                // must win deterministically — `|` leaves the evaluation
+                // order (and thus the maskTexture winner) compiler-defined.
+                bool moved = tryRelocate(mat, "occlusionTexture", mat);
+                moved = tryRelocate(mat, "emissiveTexture", mat) || moved;
+                moved = tryRelocate(mat, "normalTexture", mat) || moved;
                 if (mat.contains("pbrMetallicRoughness") && mat["pbrMetallicRoughness"].is_object())
                     moved = tryRelocate(mat["pbrMetallicRoughness"], "metallicRoughnessTexture", mat) || moved;
                 if (moved) {
