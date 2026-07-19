@@ -229,6 +229,7 @@ class CEventClient
 		/// allows everything; PassesConditions has already enforced
 		/// the spatial / strength / squadTypes filters at this point.
 		virtual bool AllowStandingOrderAssign(unsigned int orderID, const CUnit* unit) { return true; }
+		virtual bool AllowDirectiveAssign(unsigned int directiveID, const CUnit* unit) { return true; }
 
 		virtual bool TerraformComplete(const CUnit* unit, const CUnit* build) { return false; }
 		virtual bool MoveCtrlNotify(const CUnit* unit, int data) { return false; }

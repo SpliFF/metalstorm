@@ -52,6 +52,7 @@
 #include "Server/CombatEventCollector.h"
 #include "Server/GameOverState.h"
 #include "Server/StandingOrders.h"
+#include "Server/OrgGroups.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitDef.h"
@@ -149,6 +150,17 @@ bool LuaSyncedCtrl::PushEntries(lua_State* L)
 	REGISTER_LUA_CFUNC(UpdateStandingOrder);
 	REGISTER_LUA_CFUNC(RemoveStandingOrder);
 	REGISTER_LUA_CFUNC(GetStandingOrders);
+
+	REGISTER_LUA_CFUNC(CreateOrgGroup);
+	REGISTER_LUA_CFUNC(UpdateOrgGroup);
+	REGISTER_LUA_CFUNC(DisbandOrgGroup);
+	REGISTER_LUA_CFUNC(SetGroupPosture);
+	REGISTER_LUA_CFUNC(GetOrgGroups);
+	REGISTER_LUA_CFUNC(GetGroupOfUnit);
+	REGISTER_LUA_CFUNC(CreateDirective);
+	REGISTER_LUA_CFUNC(UpdateDirective);
+	REGISTER_LUA_CFUNC(RemoveDirective);
+	REGISTER_LUA_CFUNC(GetDirectives);
 
 	REGISTER_LUA_CFUNC(AddTeamResource);
 	REGISTER_LUA_CFUNC(UseTeamResource);
@@ -7655,6 +7667,10 @@ StandingOrderConditions ParseConditionsTable(lua_State* L, int idx)
 	}
 	lua_pop(L, 1);
 
+	lua_getfield(L, idx, "orgGroup");
+	if (lua_isnumber(L, -1)) out.orgGroup = static_cast<uint32_t>(lua_tointeger(L, -1));
+	lua_pop(L, 1);
+
 	return out;
 }
 
@@ -7700,6 +7716,10 @@ void PushConditions(lua_State* L, const StandingOrderConditions& c)
 			lua_rawseti(L, -2, static_cast<int>(i + 1));
 		}
 		lua_setfield(L, -2, "hasCapabilities");
+	}
+	if (c.orgGroup != 0) {
+		lua_pushnumber(L, c.orgGroup);
+		lua_setfield(L, -2, "orgGroup");
 	}
 }
 
@@ -7880,6 +7900,522 @@ int LuaSyncedCtrl::GetStandingOrders(lua_State* L)
 		}
 
 		PushConditions(L, o->conditions);
+		lua_setfield(L, -2, "conditions");
+
+		lua_rawseti(L, -2, n);
+	}
+	return 1;
+}
+
+
+/******************************************************************************/
+// Macro command & control (PLAN-macro-orders / PLAN-macro-directives)
+//
+// Org groups (Model A server-side entities) + macro directives — the same
+// C++ managers (OrgGroupManager / DirectiveManager) back both this Lua
+// surface and the client-issued OrgGroup*/GroupDirective FlatBuffer
+// messages. Server-side AI (PLAN-metalstorm-ai) issues exactly this API:
+// an NPC faction commander is a gadget creating groups + directives.
+// v0 = squad + platoon/group only; echelon = "army" / non-zero parents are
+// rejected (the reserved army tier is schema-present but not surfaced).
+/******************************************************************************/
+
+namespace {
+
+/// Map a Lua echelon arg (string or int) to the enum. Defaults to Platoon.
+/// "army"/2 parse (so code written against the reserved tier loads) but the
+/// manager rejects them at create time — fail loud, per macro-directives §2.
+bool ParseEchelon(lua_State* L, int idx, Echelon& out)
+{
+	if (lua_isnumber(L, idx)) {
+		const int n = lua_toint(L, idx);
+		if (n < 0 || n > static_cast<int>(Echelon::Army)) return false;
+		out = static_cast<Echelon>(n);
+		return true;
+	}
+	if (lua_isstring(L, idx)) {
+		const std::string s = lua_tostring(L, idx);
+		if (s == "squad")   { out = Echelon::Squad;   return true; }
+		if (s == "platoon" || s == "group") { out = Echelon::Platoon; return true; }
+		if (s == "army")    { out = Echelon::Army;    return true; }
+	}
+	return false;
+}
+
+const char* EchelonName(Echelon e)
+{
+	switch (e) {
+		case Echelon::Squad:   return "squad";
+		case Echelon::Platoon: return "platoon";
+		case Echelon::Army:    return "army";
+	}
+	return "platoon";
+}
+
+bool ParseDirectiveType(lua_State* L, int idx, DirectiveType& out)
+{
+	if (lua_isnumber(L, idx)) {
+		const int n = lua_toint(L, idx);
+		if (n < 0 || n > static_cast<int>(DirectiveType::DefendFront)) return false;
+		out = static_cast<DirectiveType>(n);
+		return true;
+	}
+	if (lua_isstring(L, idx)) {
+		const std::string s = lua_tostring(L, idx);
+		if (s == "DefendArea")    { out = DirectiveType::DefendArea;    return true; }
+		if (s == "PatrolRoute")   { out = DirectiveType::PatrolRoute;   return true; }
+		if (s == "RallyPoint")    { out = DirectiveType::RallyPoint;    return true; }
+		if (s == "Fallback")      { out = DirectiveType::Fallback;      return true; }
+		if (s == "Reinforce")     { out = DirectiveType::Reinforce;     return true; }
+		if (s == "Screen")        { out = DirectiveType::Screen;        return true; }
+		if (s == "SupplyRoute")   { out = DirectiveType::SupplyRoute;   return true; }
+		if (s == "BuildBase")     { out = DirectiveType::BuildBase;     return true; }
+		if (s == "MoveFormation") { out = DirectiveType::MoveFormation; return true; }
+		if (s == "Assault")       { out = DirectiveType::Assault;       return true; }
+		if (s == "Defend")        { out = DirectiveType::Defend;        return true; }
+		if (s == "Overwatch")     { out = DirectiveType::Overwatch;     return true; }
+		if (s == "Withdraw")      { out = DirectiveType::Withdraw;      return true; }
+		if (s == "Escort")        { out = DirectiveType::Escort;        return true; }
+		if (s == "DefendFront")   { out = DirectiveType::DefendFront;   return true; }
+	}
+	return false;
+}
+
+const char* DirectiveTypeName(DirectiveType t)
+{
+	switch (t) {
+		case DirectiveType::DefendArea:    return "DefendArea";
+		case DirectiveType::PatrolRoute:   return "PatrolRoute";
+		case DirectiveType::RallyPoint:    return "RallyPoint";
+		case DirectiveType::Fallback:      return "Fallback";
+		case DirectiveType::Reinforce:     return "Reinforce";
+		case DirectiveType::Screen:        return "Screen";
+		case DirectiveType::SupplyRoute:   return "SupplyRoute";
+		case DirectiveType::BuildBase:     return "BuildBase";
+		case DirectiveType::MoveFormation: return "MoveFormation";
+		case DirectiveType::Assault:       return "Assault";
+		case DirectiveType::Defend:        return "Defend";
+		case DirectiveType::Overwatch:     return "Overwatch";
+		case DirectiveType::Withdraw:      return "Withdraw";
+		case DirectiveType::Escort:        return "Escort";
+		case DirectiveType::DefendFront:   return "DefendFront";
+	}
+	return "Defend";
+}
+
+OrderShape ParseOrderShape(lua_State* L, int idx)
+{
+	if (lua_isnumber(L, idx)) {
+		const int n = lua_toint(L, idx);
+		if (n >= 0 && n <= static_cast<int>(OrderShape::Polyline))
+			return static_cast<OrderShape>(n);
+	} else if (lua_isstring(L, idx)) {
+		const std::string s = lua_tostring(L, idx);
+		if (s == "point")    return OrderShape::Point;
+		if (s == "circle")   return OrderShape::Circle;
+		if (s == "polygon")  return OrderShape::Polygon;
+		if (s == "polyline") return OrderShape::Polyline;
+	}
+	return OrderShape::Point;
+}
+
+const char* OrderShapeName(OrderShape s)
+{
+	switch (s) {
+		case OrderShape::Point:    return "point";
+		case OrderShape::Circle:   return "circle";
+		case OrderShape::Polygon:  return "polygon";
+		case OrderShape::Polyline: return "polyline";
+	}
+	return "point";
+}
+
+/// Read an integer array field (`add`/`remove`/`members`) into a u32 vector.
+void ReadU32Array(lua_State* L, int tableIdx, const char* field,
+                  std::vector<uint32_t>& out)
+{
+	lua_getfield(L, tableIdx, field);
+	if (lua_istable(L, -1)) {
+		const int t = lua_gettop(L);
+		const int len = lua_objlen(L, t);
+		out.reserve(len);
+		for (int i = 1; i <= len; ++i) {
+			lua_rawgeti(L, t, i);
+			if (lua_isnumber(L, -1)) out.push_back(static_cast<uint32_t>(lua_tointeger(L, -1)));
+			lua_pop(L, 1);
+		}
+	}
+	lua_pop(L, 1);
+}
+
+} // anonymous
+
+
+/*** Create a server-side org group (Model A) owned by `teamId`.
+ *
+ * @function Spring.CreateOrgGroup
+ * @number teamId
+ * @tparam table desc { echelon = "platoon"|int, name = string,
+ *                      members = {unitIds...}, parentId = 0 }
+ * @treturn number|nil groupId, or nil if rejected (army echelon / non-zero
+ *                     parent are reserved-not-surfaced in v0)
+ */
+int LuaSyncedCtrl::CreateOrgGroup(lua_State* L)
+{
+	const int teamId = luaL_checkint(L, 1);
+	if (!teamHandler.IsValidTeam(teamId)) {
+		luaL_error(L, "CreateOrgGroup: invalid teamId %d", teamId);
+		return 0;
+	}
+	if (!lua_istable(L, 2)) {
+		luaL_error(L, "CreateOrgGroup: second arg must be a description table");
+		return 0;
+	}
+
+	Echelon echelon = Echelon::Platoon;
+	lua_getfield(L, 2, "echelon");
+	if (!lua_isnil(L, -1) && !ParseEchelon(L, -1, echelon)) {
+		lua_pop(L, 1);
+		luaL_error(L, "CreateOrgGroup: unknown 'echelon'");
+		return 0;
+	}
+	lua_pop(L, 1);
+
+	lua_getfield(L, 2, "name");
+	const std::string name = lua_isstring(L, -1) ? lua_tostring(L, -1) : std::string();
+	lua_pop(L, 1);
+
+	std::vector<uint32_t> members;
+	ReadU32Array(L, 2, "members", members);
+
+	lua_getfield(L, 2, "parentId");
+	const uint32_t parentId = static_cast<uint32_t>(std::max(0, luaL_optint(L, -1, 0)));
+	lua_pop(L, 1);
+
+	const uint32_t id = orgGroups.Create(
+		teamId, echelon, name, members, parentId,
+		static_cast<uint32_t>(gs->frameNum));
+	if (id == 0) { lua_pushnil(L); return 1; }
+	lua_pushnumber(L, id);
+	return 1;
+}
+
+/*** Mutate an org group's roster / name.
+ *
+ * @function Spring.UpdateOrgGroup
+ * @number groupId
+ * @tparam table desc { add = {unitIds...}, remove = {unitIds...}, name = string }
+ * @treturn boolean success
+ */
+int LuaSyncedCtrl::UpdateOrgGroup(lua_State* L)
+{
+	const uint32_t groupId = static_cast<uint32_t>(luaL_checkint(L, 1));
+	if (!lua_istable(L, 2)) {
+		luaL_error(L, "UpdateOrgGroup: second arg must be a description table");
+		return 0;
+	}
+	const OrgGroup* g = orgGroups.Get(groupId);
+	if (g == nullptr) { lua_pushboolean(L, false); return 1; }
+
+	std::vector<uint32_t> addIds, removeIds;
+	ReadU32Array(L, 2, "add", addIds);
+	ReadU32Array(L, 2, "remove", removeIds);
+	lua_getfield(L, 2, "name");
+	const std::string name = lua_isstring(L, -1) ? lua_tostring(L, -1) : std::string();
+	lua_pop(L, 1);
+
+	const bool ok = orgGroups.Update(groupId, g->team, addIds, removeIds, name);
+	lua_pushboolean(L, ok);
+	return 1;
+}
+
+/*** Disband an org group (members become unassigned; its directives removed).
+ *
+ * @function Spring.DisbandOrgGroup
+ * @number groupId
+ * @treturn boolean success
+ */
+int LuaSyncedCtrl::DisbandOrgGroup(lua_State* L)
+{
+	const uint32_t groupId = static_cast<uint32_t>(luaL_checkint(L, 1));
+	const OrgGroup* g = orgGroups.Get(groupId);
+	if (g == nullptr) { lua_pushboolean(L, false); return 1; }
+	const int team = g->team;
+	directiveManager.RemoveForGroup(groupId);
+	const bool ok = orgGroups.Disband(groupId, team);
+	lua_pushboolean(L, ok);
+	return 1;
+}
+
+/*** Set an org group's posture bundle (engagement / casualty / reinforce /
+ * ROE — macro-orders §3). Stored + streamed; inheritance is post-v0.
+ *
+ * @function Spring.SetGroupPosture
+ * @number groupId
+ * @string postureJson
+ * @treturn boolean success
+ */
+int LuaSyncedCtrl::SetGroupPosture(lua_State* L)
+{
+	const uint32_t groupId = static_cast<uint32_t>(luaL_checkint(L, 1));
+	const char* posture = luaL_optstring(L, 2, "");
+	const OrgGroup* g = orgGroups.Get(groupId);
+	if (g == nullptr) { lua_pushboolean(L, false); return 1; }
+	const bool ok = orgGroups.SetPosture(groupId, g->team, posture);
+	lua_pushboolean(L, ok);
+	return 1;
+}
+
+/*** List org groups for `teamId`.
+ *
+ * @function Spring.GetOrgGroups
+ * @number teamId
+ * @treturn table[] { id, echelon, parentId, name, members, currentDirectiveId,
+ *                    posture, createdAtFrame }
+ */
+int LuaSyncedCtrl::GetOrgGroups(lua_State* L)
+{
+	const int teamId = luaL_checkint(L, 1);
+	auto list = orgGroups.GetTeamGroups(teamId);
+
+	lua_newtable(L);
+	int n = 0;
+	for (const OrgGroup* g : list) {
+		++n;
+		lua_newtable(L);
+		lua_pushnumber(L, g->id);                 lua_setfield(L, -2, "id");
+		lua_pushstring(L, EchelonName(g->echelon)); lua_setfield(L, -2, "echelon");
+		lua_pushnumber(L, g->parentId);           lua_setfield(L, -2, "parentId");
+		lua_pushstring(L, g->name.c_str());       lua_setfield(L, -2, "name");
+		lua_pushnumber(L, g->currentDirectiveId); lua_setfield(L, -2, "currentDirectiveId");
+		lua_pushnumber(L, g->createdAtFrame);     lua_setfield(L, -2, "createdAtFrame");
+		if (!g->postureJson.empty()) {
+			lua_pushstring(L, g->postureJson.c_str());
+			lua_setfield(L, -2, "posture");
+		}
+		lua_newtable(L);
+		for (size_t i = 0; i < g->members.size(); ++i) {
+			lua_pushnumber(L, g->members[i]);
+			lua_rawseti(L, -2, static_cast<int>(i + 1));
+		}
+		lua_setfield(L, -2, "members");
+		lua_rawseti(L, -2, n);
+	}
+	return 1;
+}
+
+/*** The org group a unit belongs to, or nil if unassigned.
+ *
+ * @function Spring.GetGroupOfUnit
+ * @number unitId
+ * @treturn number|nil groupId
+ */
+int LuaSyncedCtrl::GetGroupOfUnit(lua_State* L)
+{
+	const uint32_t unitId = static_cast<uint32_t>(luaL_checkint(L, 1));
+	const uint32_t gid = orgGroups.GroupOfUnit(unitId);
+	if (gid == 0) { lua_pushnil(L); return 1; }
+	lua_pushnumber(L, gid);
+	return 1;
+}
+
+/*** Create a macro directive owned by `teamId`.
+ *
+ * @function Spring.CreateDirective
+ * @number teamId
+ * @tparam table desc { type = "Defend"|int, group = 0, priority = 0..255,
+ *                      shape = "point"|"circle"|"polygon"|"polyline"|int,
+ *                      params = {floats...}, conditions = {...},
+ *                      requestedStrength = 0, phases = string,
+ *                      expiresInFrames = 0 }
+ * @treturn number|nil directiveId
+ */
+int LuaSyncedCtrl::CreateDirective(lua_State* L)
+{
+	const int teamId = luaL_checkint(L, 1);
+	if (!teamHandler.IsValidTeam(teamId)) {
+		luaL_error(L, "CreateDirective: invalid teamId %d", teamId);
+		return 0;
+	}
+	if (!lua_istable(L, 2)) {
+		luaL_error(L, "CreateDirective: second arg must be a description table");
+		return 0;
+	}
+
+	lua_getfield(L, 2, "type");
+	DirectiveType type = DirectiveType::Defend;
+	if (!ParseDirectiveType(L, -1, type)) {
+		lua_pop(L, 1);
+		luaL_error(L, "CreateDirective: missing or unknown 'type'");
+		return 0;
+	}
+	lua_pop(L, 1);
+
+	lua_getfield(L, 2, "group");
+	const uint32_t groupId = static_cast<uint32_t>(std::max(0, luaL_optint(L, -1, 0)));
+	lua_pop(L, 1);
+
+	lua_getfield(L, 2, "priority");
+	const int priority = std::clamp(luaL_optint(L, -1, 0), 0, 255);
+	lua_pop(L, 1);
+
+	lua_getfield(L, 2, "shape");
+	const OrderShape shape = ParseOrderShape(L, lua_gettop(L));
+	lua_pop(L, 1);
+
+	std::vector<float> params;
+	lua_getfield(L, 2, "params");
+	ReadNumericArray(L, lua_gettop(L), params);
+	lua_pop(L, 1);
+
+	lua_getfield(L, 2, "conditions");
+	StandingOrderConditions conds = ParseConditionsTable(L, lua_gettop(L));
+	lua_pop(L, 1);
+
+	lua_getfield(L, 2, "requestedStrength");
+	const uint32_t reqStrength = static_cast<uint32_t>(std::max(0, luaL_optint(L, -1, 0)));
+	lua_pop(L, 1);
+
+	lua_getfield(L, 2, "phases");
+	const std::string phases = lua_isstring(L, -1) ? lua_tostring(L, -1) : std::string();
+	lua_pop(L, 1);
+
+	lua_getfield(L, 2, "expiresInFrames");
+	const uint32_t expires = static_cast<uint32_t>(std::max(0, luaL_optint(L, -1, 0)));
+	lua_pop(L, 1);
+
+	const uint32_t id = directiveManager.Create(
+		teamId, type, static_cast<uint8_t>(priority), shape,
+		std::move(params), std::move(conds), groupId, reqStrength,
+		phases, expires, static_cast<uint32_t>(gs->frameNum));
+	lua_pushnumber(L, id);
+	return 1;
+}
+
+/*** Update a macro directive in place (scope group is immutable).
+ *
+ * @function Spring.UpdateDirective
+ * @number directiveId
+ * @tparam table desc same fields as CreateDirective (+ active = bool)
+ * @treturn boolean success
+ */
+int LuaSyncedCtrl::UpdateDirective(lua_State* L)
+{
+	const uint32_t id = static_cast<uint32_t>(luaL_checkint(L, 1));
+	if (!lua_istable(L, 2)) {
+		luaL_error(L, "UpdateDirective: second arg must be a description table");
+		return 0;
+	}
+	const Directive* existing = nullptr;
+	for (const auto& d : directiveManager.GetAllDirectives()) {
+		if (d.id == id) { existing = &d; break; }
+	}
+	if (existing == nullptr) { lua_pushboolean(L, false); return 1; }
+
+	DirectiveType type = existing->type;
+	uint8_t priority = existing->priority;
+	OrderShape shape = existing->shape;
+	std::vector<float> params = existing->params;
+	StandingOrderConditions conds = existing->conditions;
+	uint32_t reqStrength = existing->requestedStrength;
+	std::string phases = existing->phasesJson;
+	bool active = existing->active;
+
+	lua_getfield(L, 2, "type");
+	if (!lua_isnil(L, -1)) ParseDirectiveType(L, -1, type);
+	lua_pop(L, 1);
+	lua_getfield(L, 2, "priority");
+	if (lua_isnumber(L, -1)) priority = static_cast<uint8_t>(std::clamp(lua_toint(L, -1), 0, 255));
+	lua_pop(L, 1);
+	lua_getfield(L, 2, "shape");
+	if (!lua_isnil(L, -1)) shape = ParseOrderShape(L, lua_gettop(L));
+	lua_pop(L, 1);
+	lua_getfield(L, 2, "params");
+	if (lua_istable(L, -1)) { params.clear(); ReadNumericArray(L, lua_gettop(L), params); }
+	lua_pop(L, 1);
+	lua_getfield(L, 2, "conditions");
+	if (lua_istable(L, -1)) conds = ParseConditionsTable(L, lua_gettop(L));
+	lua_pop(L, 1);
+	lua_getfield(L, 2, "requestedStrength");
+	if (lua_isnumber(L, -1)) reqStrength = static_cast<uint32_t>(std::max(0, lua_toint(L, -1)));
+	lua_pop(L, 1);
+	lua_getfield(L, 2, "phases");
+	if (lua_isstring(L, -1)) phases = lua_tostring(L, -1);
+	lua_pop(L, 1);
+	lua_getfield(L, 2, "active");
+	if (lua_isboolean(L, -1)) active = lua_toboolean(L, -1);
+	lua_pop(L, 1);
+
+	const bool ok = directiveManager.Update(
+		id, existing->team, type, priority, shape,
+		std::move(params), std::move(conds), reqStrength, phases, active);
+	lua_pushboolean(L, ok);
+	return 1;
+}
+
+/*** Remove a macro directive.
+ *
+ * @function Spring.RemoveDirective
+ * @number directiveId
+ * @treturn boolean success
+ */
+int LuaSyncedCtrl::RemoveDirective(lua_State* L)
+{
+	const uint32_t id = static_cast<uint32_t>(luaL_checkint(L, 1));
+	const Directive* existing = nullptr;
+	for (const auto& d : directiveManager.GetAllDirectives()) {
+		if (d.id == id) { existing = &d; break; }
+	}
+	if (existing == nullptr) { lua_pushboolean(L, false); return 1; }
+	const bool ok = directiveManager.Remove(id, existing->team);
+	lua_pushboolean(L, ok);
+	return 1;
+}
+
+/*** List macro directives for `teamId`, priority desc.
+ *
+ * @function Spring.GetDirectives
+ * @number teamId
+ * @treturn table[] { id, type, group, priority, shape, params, conditions,
+ *                    requestedStrength, assignedStrength, assigned, active,
+ *                    createdAtFrame, expiresAtFrame }
+ */
+int LuaSyncedCtrl::GetDirectives(lua_State* L)
+{
+	const int teamId = luaL_checkint(L, 1);
+	auto list = directiveManager.GetTeamDirectives(teamId);
+
+	lua_newtable(L);
+	int n = 0;
+	for (const Directive* d : list) {
+		++n;
+		lua_newtable(L);
+		lua_pushnumber(L, d->id);                lua_setfield(L, -2, "id");
+		lua_pushstring(L, DirectiveTypeName(d->type)); lua_setfield(L, -2, "type");
+		lua_pushnumber(L, d->groupId);           lua_setfield(L, -2, "group");
+		lua_pushnumber(L, d->priority);          lua_setfield(L, -2, "priority");
+		lua_pushstring(L, OrderShapeName(d->shape)); lua_setfield(L, -2, "shape");
+		lua_pushnumber(L, d->requestedStrength); lua_setfield(L, -2, "requestedStrength");
+		lua_pushnumber(L, d->assignedStrength);  lua_setfield(L, -2, "assignedStrength");
+		lua_pushnumber(L, static_cast<lua_Number>(d->assigned.size()));
+		lua_setfield(L, -2, "assigned");
+		lua_pushboolean(L, d->active);           lua_setfield(L, -2, "active");
+		lua_pushnumber(L, d->createdAtFrame);    lua_setfield(L, -2, "createdAtFrame");
+		lua_pushnumber(L, d->expiresAtFrame);    lua_setfield(L, -2, "expiresAtFrame");
+
+		if (!d->params.empty()) {
+			lua_newtable(L);
+			for (size_t i = 0; i < d->params.size(); ++i) {
+				lua_pushnumber(L, d->params[i]);
+				lua_rawseti(L, -2, static_cast<int>(i + 1));
+			}
+			lua_setfield(L, -2, "params");
+		}
+		if (!d->phasesJson.empty()) {
+			lua_pushstring(L, d->phasesJson.c_str());
+			lua_setfield(L, -2, "phases");
+		}
+		PushConditions(L, d->conditions);
 		lua_setfield(L, -2, "conditions");
 
 		lua_rawseti(L, -2, n);

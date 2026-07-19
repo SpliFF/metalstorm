@@ -282,6 +282,18 @@ class LuaSyncedCtrl
 		static int UpdateStandingOrder(lua_State* L);
 		static int RemoveStandingOrder(lua_State* L);
 		static int GetStandingOrders(lua_State* L);
+
+		// Macro command & control (PLAN-macro-orders / PLAN-macro-directives)
+		static int CreateOrgGroup(lua_State* L);
+		static int UpdateOrgGroup(lua_State* L);
+		static int DisbandOrgGroup(lua_State* L);
+		static int SetGroupPosture(lua_State* L);
+		static int GetOrgGroups(lua_State* L);
+		static int GetGroupOfUnit(lua_State* L);
+		static int CreateDirective(lua_State* L);
+		static int UpdateDirective(lua_State* L);
+		static int RemoveDirective(lua_State* L);
+		static int GetDirectives(lua_State* L);
 };
 
 

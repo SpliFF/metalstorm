@@ -16,6 +16,8 @@ public:
 
     // Push a current StandingOrderState snapshot to one client.
     void PushStandingOrdersTo(ClientID clientId, int team);
+    void PushOrgGroupsTo(ClientID clientId, int team);
+    void PushDirectivesTo(ClientID clientId, int team);
 
     // Build a TeamStartInfo message from the live TeamHandler/AllyTeam state.
     std::vector<uint8_t> BuildTeamStartInfoMsg();

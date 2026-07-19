@@ -23,6 +23,7 @@
 #include "RoomManager.h"
 #include "MapMetadata.h"
 #include "StandingOrders.h"
+#include "OrgGroups.h"
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitDef.h"
 #include "Sim/Weapons/Weapon.h"
@@ -811,6 +812,7 @@ inline std::vector<uint8_t> BuildStandingOrderState(
         cb.add_outside_radius_radius(o.conditions.outsideRadius);
         cb.add_min_strength(o.conditions.minStrength);
         if (!capStrs.empty()) cb.add_has_capabilities(capsVec);
+        cb.add_org_group(o.conditions.orgGroup);
         auto condsOff = cb.Finish();
 
         auto paramsVec = o.params.empty()
@@ -860,7 +862,140 @@ inline StandingOrderConditions ReadStandingOrderConditions(
             if (auto* s = caps->Get(i)) out.hasCapabilities.emplace_back(s->str());
         }
     }
+    out.orgGroup = fb->org_group();
     return out;
+}
+
+/// Serialise a StandingOrderConditions struct into a FlatBuffer table on
+/// `fbb`. Shared by the standing-order, org-group and directive state
+/// builders so the on-wire conditions shape stays identical everywhere.
+inline flatbuffers::Offset<SpringWeb::StandingOrderConditions>
+WriteStandingOrderConditions(flatbuffers::FlatBufferBuilder& fbb,
+                             const StandingOrderConditions& c)
+{
+    auto squadTypesVec = c.squadTypes.empty()
+        ? flatbuffers::Offset<flatbuffers::Vector<uint16_t>>()
+        : fbb.CreateVector(c.squadTypes);
+    std::vector<flatbuffers::Offset<flatbuffers::String>> capStrs;
+    capStrs.reserve(c.hasCapabilities.size());
+    for (const std::string& s : c.hasCapabilities) capStrs.push_back(fbb.CreateString(s));
+    auto capsVec = capStrs.empty()
+        ? flatbuffers::Offset<flatbuffers::Vector<flatbuffers::Offset<flatbuffers::String>>>()
+        : fbb.CreateVector(capStrs);
+
+    SpringWeb::Vec3 within(c.withinCenter.x, c.withinCenter.y, c.withinCenter.z);
+    SpringWeb::Vec3 outside(c.outsideCenter.x, c.outsideCenter.y, c.outsideCenter.z);
+
+    SpringWeb::StandingOrderConditionsBuilder cb(fbb);
+    cb.add_idle_only(c.idleOnly);
+    if (!c.squadTypes.empty()) cb.add_squad_types(squadTypesVec);
+    cb.add_within_radius_center(&within);
+    cb.add_within_radius_radius(c.withinRadius);
+    cb.add_outside_radius_center(&outside);
+    cb.add_outside_radius_radius(c.outsideRadius);
+    cb.add_min_strength(c.minStrength);
+    if (!capStrs.empty()) cb.add_has_capabilities(capsVec);
+    cb.add_org_group(c.orgGroup);
+    return cb.Finish();
+}
+
+/// Build an OrgGroupState snapshot for `viewerTeam` (own groups + allies,
+/// never enemy — same visibility model as StandingOrderState). Streamed on
+/// change and on auth (PLAN-macro-directives §1).
+inline std::vector<uint8_t> BuildOrgGroupState(
+    int viewerTeam,
+    const std::vector<int>& alliedTeams,
+    const std::vector<OrgGroup>& allGroups)
+{
+    flatbuffers::FlatBufferBuilder fbb(256 + allGroups.size() * 48);
+
+    auto allowed = [&](int team) {
+        if (team == viewerTeam) return true;
+        for (int a : alliedTeams) if (a == team) return true;
+        return false;
+    };
+
+    std::vector<flatbuffers::Offset<SpringWeb::OrgGroupInfo>> infos;
+    infos.reserve(allGroups.size());
+    for (const OrgGroup& g : allGroups) {
+        if (!allowed(g.team)) continue;
+        auto nameOff = fbb.CreateString(g.name);
+        auto membersOff = g.members.empty()
+            ? flatbuffers::Offset<flatbuffers::Vector<uint32_t>>()
+            : fbb.CreateVector(g.members);
+        auto postureOff = g.postureJson.empty()
+            ? flatbuffers::Offset<flatbuffers::String>()
+            : fbb.CreateString(g.postureJson);
+
+        SpringWeb::OrgGroupInfoBuilder ib(fbb);
+        ib.add_group_id(g.id);
+        ib.add_echelon(static_cast<SpringWeb::Echelon>(g.echelon));
+        ib.add_owner_team(static_cast<uint8_t>(g.team));
+        ib.add_parent_id(g.parentId);
+        ib.add_name(nameOff);
+        if (!g.members.empty()) ib.add_member_ids(membersOff);
+        ib.add_current_directive_id(g.currentDirectiveId);
+        if (!g.postureJson.empty()) ib.add_posture_json(postureOff);
+        ib.add_created_at_frame(g.createdAtFrame);
+        infos.push_back(ib.Finish());
+    }
+
+    auto groupsVec = fbb.CreateVector(infos);
+    auto stateOff = SpringWeb::CreateOrgGroupState(fbb, groupsVec);
+    return BuildServerMessage(fbb,
+        SpringWeb::ServerPayload_OrgGroupState, stateOff.Union());
+}
+
+/// Build a DirectiveState snapshot for `viewerTeam` (own + allies). Carries
+/// the demand-model fulfillment (assigned_strength / requested_strength).
+inline std::vector<uint8_t> BuildDirectiveState(
+    int viewerTeam,
+    const std::vector<int>& alliedTeams,
+    const std::vector<Directive>& allDirectives)
+{
+    flatbuffers::FlatBufferBuilder fbb(256 + allDirectives.size() * 96);
+
+    auto allowed = [&](int team) {
+        if (team == viewerTeam) return true;
+        for (int a : alliedTeams) if (a == team) return true;
+        return false;
+    };
+
+    std::vector<flatbuffers::Offset<SpringWeb::DirectiveInfo>> infos;
+    infos.reserve(allDirectives.size());
+    for (const Directive& d : allDirectives) {
+        if (!allowed(d.team)) continue;
+        auto condsOff = WriteStandingOrderConditions(fbb, d.conditions);
+        auto paramsVec = d.params.empty()
+            ? flatbuffers::Offset<flatbuffers::Vector<float>>()
+            : fbb.CreateVector(d.params);
+        auto phasesOff = d.phasesJson.empty()
+            ? flatbuffers::Offset<flatbuffers::String>()
+            : fbb.CreateString(d.phasesJson);
+
+        SpringWeb::DirectiveInfoBuilder ib(fbb);
+        ib.add_directive_id(d.id);
+        ib.add_owner_team(static_cast<uint8_t>(d.team));
+        ib.add_group_id(d.groupId);
+        ib.add_type(static_cast<SpringWeb::DirectiveType>(d.type));
+        ib.add_priority(d.priority);
+        ib.add_shape(static_cast<SpringWeb::OrderShape>(d.shape));
+        if (!d.params.empty()) ib.add_params(paramsVec);
+        ib.add_conditions(condsOff);
+        ib.add_requested_strength(d.requestedStrength);
+        ib.add_assigned_strength(static_cast<uint32_t>(d.assignedStrength));
+        ib.add_assigned_squad_count(static_cast<uint16_t>(d.assigned.size()));
+        if (!d.phasesJson.empty()) ib.add_phases_json(phasesOff);
+        ib.add_active(d.active);
+        ib.add_expires_at_frame(d.expiresAtFrame);
+        ib.add_created_at_frame(d.createdAtFrame);
+        infos.push_back(ib.Finish());
+    }
+
+    auto dirVec = fbb.CreateVector(infos);
+    auto stateOff = SpringWeb::CreateDirectiveState(fbb, dirVec);
+    return BuildServerMessage(fbb,
+        SpringWeb::ServerPayload_DirectiveState, stateOff.Union());
 }
 
 /// Build a GameInfo message (map, game, speed, frame, paused, env state).

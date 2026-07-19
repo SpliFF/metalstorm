@@ -28,6 +28,34 @@ void GameStartCoordinator::PushStandingOrdersTo(ClientID clientId, int team) {
     ctx.rtcServer.SendReliable(clientId, msg.data(), msg.size());
 }
 
+// Allied-team list for `team` (own team excluded — added by the builders).
+static std::vector<int> AlliedTeamsOf(int team) {
+    std::vector<int> allied;
+    const int activeTeams = teamHandler.ActiveTeams();
+    for (int t = 0; t < activeTeams; ++t) {
+        if (t == team) continue;
+        if (teamHandler.AlliedTeams(team, t)) allied.push_back(t);
+    }
+    return allied;
+}
+
+// Push a current OrgGroupState snapshot to one client (macro-directives §1).
+// Same use as PushStandingOrdersTo — live-change broadcast + auth snapshot.
+void GameStartCoordinator::PushOrgGroupsTo(ClientID clientId, int team) {
+    if (team < 0) return;
+    auto msg = Protocol::BuildOrgGroupState(
+        team, AlliedTeamsOf(team), orgGroups.GetAllGroups());
+    ctx.rtcServer.SendReliable(clientId, msg.data(), msg.size());
+}
+
+// Push a current DirectiveState snapshot (incl. fulfillment %) to one client.
+void GameStartCoordinator::PushDirectivesTo(ClientID clientId, int team) {
+    if (team < 0) return;
+    auto msg = Protocol::BuildDirectiveState(
+        team, AlliedTeamsOf(team), directiveManager.GetAllDirectives());
+    ctx.rtcServer.SendReliable(clientId, msg.data(), msg.size());
+}
+
 // Team start positions + ally start boxes (PLAN-bar.md §3b read shims:
 // Spring.GetTeamStartPosition / GetAllyTeamStartBox). Built from the live
 // TeamHandler/AllyTeam state. Positions are RH-canonical elmos (the engine's
