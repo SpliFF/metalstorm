@@ -29,6 +29,8 @@ export interface PanelApi {
     playClip(name: string): void;
     /** Re-enter orbit on the stage unit (after "RTS cam"). */
     reorbit(): Promise<void>;
+    /** Open the glTF inspector on the current model (CDN or bundled build). */
+    inspectModel(mode: 'cdn' | 'bundled'): void;
 }
 
 export interface ModelViewerPanel {
