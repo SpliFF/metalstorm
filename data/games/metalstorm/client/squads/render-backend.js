@@ -26,7 +26,11 @@
  * @property {(handle:number, x:number, y:number, z:number, headingY:number, gait:number)=>void} updateMember
  *   Per-frame transform + animation phase (gait 0..1). Must be allocation-free.
  * @property {(handle:number, death:DeathInfo)=>void} destroyMember
- *   Play the death animation and release the instance.
+ *   Play the death animation and release the instance. Permanent (member is
+ *   dead, not just LOD-hidden — see releaseMember).
+ * @property {(handle:number)=>void} releaseMember
+ *   Free the instance for LOD (full→icon) with NO death FX/wreck — the member
+ *   is still alive, just not rendered. Rebuildable via createMember.
  * @property {(x:number, y:number, z:number, headingY:number, v:MemberVisual)=>void} spawnWreck
  *   Drop cosmetic, fading debris (no game effect; TTL/cap owned by caller).
  * @property {(x:number, y:number, z:number, scale:number)=>void} [spawnImpactFx]
@@ -40,6 +44,7 @@ export class NullRenderBackend {
   createMember() { return -1; }
   updateMember() {}
   destroyMember() {}
+  releaseMember() {}
   spawnWreck() {}
   spawnImpactFx() {}
   groundHeight() { return 0; }

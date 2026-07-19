@@ -3,13 +3,24 @@
 // One sim unit → many cosmetic on-screen members. Pure logic; the worker
 // adapter supplies a RenderBackend. See PLAN-metalstorm-squads.md.
 //
-// Wiring (engine ask, Stage 7 — PLAN-metalstorm-squads.md §6):
-//   import { createSquadSystem } from '.../client/squads/index.js';
+// Wiring (engine ask, Stage 7 — PLAN-metalstorm-squads.md §6). Only entities
+// routed by isSquadDef(def) (squad_size > 1, squad-sync §4 H3) go through
+// this system at all — everything else (buildings, scale-4 super-heavies)
+// renders via entity-renderer.ts instead.
+//   import { createSquadSystem, isSquadDef } from '.../client/squads/index.js';
 //   const squads = createSquadSystem(workerRenderBackend);
-//   // on entity-stream squad update:  squads.syncSquad(id, state, defOnce);
-//   // on entity destroy (squad unit): squads.removeSquad(id);
-//   // on impact/combat FX event:      squads.reportImpact({x,z,radius,squadId?});
-//   // each render frame:              squads.update(dtSeconds);
+//   // on entity-create with a known def: squads.syncSquad(id, state, def);
+//   // on entity-create with an unknown def (H1 — def-before-state is NOT
+//   //   guaranteed): squads.syncSquad(id, state) [buffers], then once
+//   //   DefCache resolves it: squads.noteDef(id, def) [flushes];
+//   // each interpolator frame (pose only, render rate):
+//   //                                    squads.syncPose(id, {x,y,z,heading});
+//   // on entity-stream snapshot apply (strength only, ~10 Hz):
+//   //                                    squads.syncStrength(id, health, maxHealth);
+//   // on entity destroy (squad unit):    squads.removeSquad(id); // H2: also
+//   //   clears any buffered pending state so a reused id can't resurrect
+//   // on impact/combat FX event:         squads.reportImpact({x,z,radius,squadId?});
+//   // each render frame:                 squads.update(dtSeconds);
 
 import { SquadManager } from './squad-manager.js';
 import { NullRenderBackend } from './render-backend.js';
@@ -18,7 +29,7 @@ export { SquadManager } from './squad-manager.js';
 export { Squad } from './squad.js';
 export { Member } from './member.js';
 export { NullRenderBackend } from './render-backend.js';
-export { DEFAULT_CONFIG, linearCount, collapseCount } from './config.js';
+export { DEFAULT_CONFIG, linearCount, collapseCount, isSquadDef } from './config.js';
 export { buildSlots, slotToWorld } from './formation.js';
 
 /**

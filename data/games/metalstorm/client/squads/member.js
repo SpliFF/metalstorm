@@ -5,8 +5,11 @@ export class Member {
   constructor(id, visual) {
     this.id = id;
     this.visual = visual;     // MemberVisual
-    this.handle = -1;         // render-backend handle
+    this.handle = -1;         // render-backend handle (-1 while released/unspawned)
     this.alive = true;
+    // Released for LOD (icon tier): instance freed, no wreck, still alive —
+    // distinct from `alive=false` (permanently killed). See squad.js §5.
+    this.released = false;
 
     // Kinematic state (world space).
     this.x = 0; this.y = 0; this.z = 0;
