@@ -62,15 +62,17 @@ local function readBoard(c)
     return {}
 end
 
---- Economy: own player pool + team pool (authority plan §1 — both public).
+--- Economy: own player pool + team pool (authority plan §1 — both
+-- team-scoped, allied-visibility rulesParams, NOT public/game-scoped: see
+-- game_authority.lua's ALLIED_LOS note).
 -- STUB until AI1: zeros (governor then behaves as "broke" → turtles, safe).
 local function readEconomy(c, role)
     if not c.rulesParam then
         return { ownPool = 0, teamPool = 0, costScale = 1.0, reserveHonoured = true }
     end
     -- TODO(AI1):
-    --   ownPool  = AI.getRulesParam('game','authority_player_'..playerID)
-    --   teamPool = AI.getRulesParam('team','authority_pool')
+    --   ownPool  = AI.getRulesParam('team', teamID, 'authority_player_'..playerID)
+    --   teamPool = AI.getRulesParam('team', teamID, 'authority_pool')
     --   costScale= AI.getRulesParam('game','... modoption mirror ...') or 1.0
     -- Co-commander role NEVER draws the team fallback (plan §5) — that policy
     -- lives in the actuator's charge call, but the planner reads the flag here.

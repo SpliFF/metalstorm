@@ -36,9 +36,11 @@ return {
         proposal   = 0.5,    -- parley proposal fee (interaction)
     },
 
-    -- Region modifier bounds (actual per-cell value from GG.Regions):
-    region_mod_min = 0.5,    -- deep friendly territory
-    region_mod_max = 3.0,    -- deep enemy territory
+    -- Region modifier bounds (actual per-cell value from GG.Regions —
+    -- regions/cost.lua MOD_FRIENDLY/MOD_NEUTRAL/MOD_ENEMY; kept here purely
+    -- as documentation for the client formula mirror, not a runtime input):
+    region_mod_min = 0.5,    -- friendly territory (owner allied to the orderer)
+    region_mod_max = 2.0,    -- enemy territory (owner present, not allied)
 
     -- economy (PLAN-metalstorm-economy.md §3 — defaults UNPINNED, "~" in
     -- plan; review §C requires pinning before hand-off):

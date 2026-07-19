@@ -26,6 +26,22 @@ return {
         section = 'authority',
     },
     {
+        key     = 'authority_join_grant',
+        name    = 'Join grant',
+        desc    = 'Starter authority minted fresh for a new player identity (once per game; re-join grants nothing, PLAN-metalstorm-authority §6)',
+        type    = 'number',
+        def     = 100, min = 0, max = 1000, step = 10,
+        section = 'authority',
+    },
+    {
+        key     = 'authority_team_stipend',
+        name    = 'Team stipend',
+        desc    = 'Authority/minute minted to each team pool regardless of objectives (0 = off; playtest lever only, PLAN-metalstorm-authority §2)',
+        type    = 'number',
+        def     = 0, min = 0, max = 100, step = 5,
+        section = 'authority',
+    },
+    {
         key     = 'objective_density',
         name    = 'Objective density',
         desc    = 'How aggressively systemic objectives are generated',
