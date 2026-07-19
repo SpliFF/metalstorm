@@ -39,6 +39,14 @@ const SQUARES_PER_TILE = 4; // each tile covers 4x4 squares
 // DXT1 block size
 const DXT1_BLOCK_BYTES = 8;
 
+// Per-tile mip chain: 32x32 mip0, 16x16 mip1, 8x8 mip2, 4x4 mip3 texels —
+// matches the SMT tile record layout mapconverter reads (rts/Server/
+// MapProcessor.cpp TILE_MIP_SIZE). WebGL2 cannot runtime-generate mipmaps
+// for a compressed-format texture (gl.generateMipmap() only supports
+// uncompressed formats), so all shipped levels get uploaded explicitly.
+const TILE_MIP_TEXELS = [32, 16, 8, 4];
+const TILE_MIP_BYTES = [512, 128, 32, 8];
+
 export interface MapDimensions {
     mapx: number;
     mapy: number;
@@ -269,11 +277,14 @@ export class DeformableTerrain {
 }
 
 /**
- * Pull the raw DXT1 block stream out of a `tiles.ktx2` file.
+ * Pull the raw DXT1 block stream for every mip level out of a `tiles.ktx2`
+ * file, level 0 (largest) first.
  *
  * `tiles.ktx2` is produced by mapconverter via `textureconverter
- * --raw-dxt1 ... --no-zstd`, so it's a KTX2 wrapper around a single
- * uncompressed BC1_RGB level. We only need the level-0 byte range.
+ * --raw-dxt1 ... --mip-levels N --no-zstd`, so it's a KTX2 wrapper around
+ * N uncompressed BC1_RGB levels (N=1 for older map packages built before
+ * the mip-chain fix — those are handled by the caller falling back to
+ * single-level, unfiltered sampling).
  *
  * KTX2 layout we walk:
  *   bytes  0..11   identifier
@@ -286,12 +297,12 @@ export class DeformableTerrain {
  *   bytes 36..39   faceCount
  *   bytes 40..43   levelCount
  *   bytes 44..47   supercompressionScheme
- *   bytes 48..71   index entries (DFD/KVD/SGD offsets+lengths)
- *   bytes 72..     levelIndex[levelCount]: each is 24 bytes
+ *   bytes 48..79   index entries (DFD/KVD/SGD offsets+lengths)
+ *   bytes 80..     levelIndex[levelCount]: each is 24 bytes
  *                  (uint64 byteOffset, uint64 byteLength,
  *                   uint64 uncompressedByteLength)
  */
-function extractKtx2Level0(buf: ArrayBuffer): Uint8Array {
+export function extractKtx2Levels(buf: ArrayBuffer): Uint8Array[] {
     const dv = new DataView(buf);
     // Magic bytes: «KTX 20»\r\n\x1a\n
     const magic = [0xab, 0x4b, 0x54, 0x58, 0x20, 0x32, 0x30, 0xbb,
@@ -301,6 +312,7 @@ function extractKtx2Level0(buf: ArrayBuffer): Uint8Array {
             throw new Error('not a KTX2 file');
         }
     }
+    const levelCount = dv.getUint32(40, true);
     const supercompression = dv.getUint32(44, true);
     if (supercompression !== 0) {
         throw new Error(
@@ -308,17 +320,19 @@ function extractKtx2Level0(buf: ArrayBuffer): Uint8Array {
             `mapconverter must emit it with --no-zstd`,
         );
     }
-    // levelIndex starts at byte 80 (after the 12-byte identifier + 64-byte
-    // header + 4-byte alignment? — actually 0..71 + 72 starts at the
-    // level index). KTX2 is precise: the 4 trailing index pointers occupy
-    // bytes 48..79 (4 x { uint32 + uint32 } = 32 bytes for DFD/KVD, plus
-    // uint64 + uint64 for SGD = 16 bytes; sum 48). Pull that as variable.
-    // For our specific file (no DFD/KVD/SGD blocks of interest), the level
-    // index always starts at offset 80.
+    // levelIndex starts at offset 80 — the 4 trailing index pointers
+    // (DFD/KVD offset+length pairs, then the SGD offset+length uint64s)
+    // occupy bytes 48..79 for every file this tool produces (no DFD/KVD/
+    // SGD blocks of interest).
     const lvlIdxBase = 80;
-    const byteOffset = Number(dv.getBigUint64(lvlIdxBase + 0, true));
-    const byteLength = Number(dv.getBigUint64(lvlIdxBase + 8, true));
-    return new Uint8Array(buf, byteOffset, byteLength);
+    const levels: Uint8Array[] = [];
+    for (let lvl = 0; lvl < levelCount; lvl++) {
+        const entryBase = lvlIdxBase + lvl * 24;
+        const byteOffset = Number(dv.getBigUint64(entryBase + 0, true));
+        const byteLength = Number(dv.getBigUint64(entryBase + 8, true));
+        levels.push(new Uint8Array(buf, byteOffset, byteLength));
+    }
+    return levels;
 }
 
 /**
@@ -327,12 +341,12 @@ function extractKtx2Level0(buf: ArrayBuffer): Uint8Array {
  */
 const tileDataCache = new Map<string, Promise<{
     tileIndex: Int32Array;
-    tilesData: Uint8Array;
+    tilesLevels: Uint8Array[];
 }>>();
 
 async function fetchTileData(mapBaseUrl: string): Promise<{
     tileIndex: Int32Array;
-    tilesData: Uint8Array;
+    tilesLevels: Uint8Array[];
 }> {
     let entry = tileDataCache.get(mapBaseUrl);
     if (!entry) {
@@ -345,10 +359,12 @@ async function fetchTileData(mapBaseUrl: string): Promise<{
                 throw new Error('failed to fetch tile data');
             }
             const tileIndex = new Int32Array(await tileIndexResp.arrayBuffer());
-            const tilesData = extractKtx2Level0(await tilesResp.arrayBuffer());
+            const tilesLevels = extractKtx2Levels(await tilesResp.arrayBuffer());
             console.log(`[terrain] tile index: ${tileIndex.length} entries, ` +
-                `tiles: ${tilesData.length} bytes (${tilesData.length / TILE_DXT1_SIZE} tiles)`);
-            return { tileIndex, tilesData };
+                `tiles: ${tilesLevels[0].length} bytes mip0 ` +
+                `(${tilesLevels[0].length / TILE_DXT1_SIZE} tiles), ` +
+                `${tilesLevels.length} mip level(s)`);
+            return { tileIndex, tilesLevels };
         })();
         tileDataCache.set(mapBaseUrl, entry);
     }
@@ -371,6 +387,8 @@ export interface MapAtlasTexture {
     /** Tile-space extent of this page. */
     tileCountX: number;
     tileCountZ: number;
+    /** Mip levels uploaded to `webglTex` (1 for pre-mip-chain-fix map packages). */
+    mipLevels: number;
 }
 
 /** A paged DXT1 atlas: a `pagesX × pagesZ` grid of `MapAtlasTexture` pages. */
@@ -436,13 +454,57 @@ export function planAtlasPages(
  *
  * Each Spring tile is 32×32 px, so the page is `tileCountX*32 × tileCountZ*32`.
  */
+/**
+ * Composite one mip level's worth of tiles into a page-sized DXT1 buffer.
+ * Same block-copy approach as level 0: each tile's block-rows land
+ * contiguously in the destination, so placing a tile is `tileBlocks` row
+ * copies (down to a single 8-byte copy at the 4x4 mip3 level).
+ */
+export function compositeAtlasLevel(
+    dims: MapDimensions,
+    tileIndex: Int32Array,
+    levelData: Uint8Array,
+    tileTexels: number, tileBytes: number,
+    tileX0: number, tileZ0: number,
+    tileCountX: number, tileCountZ: number,
+): { page: Uint8Array; pageW: number; pageH: number; placed: number; skipped: number } {
+    const pageW = tileCountX * tileTexels;
+    const pageH = tileCountZ * tileTexels;
+    const atlasBlocksPerRow = pageW / 4;
+    const tileBlocks = tileTexels / 4;
+    const tileRowBytes = tileBlocks * DXT1_BLOCK_BYTES;
+    const pageDxt1Size = atlasBlocksPerRow * (pageH / 4) * DXT1_BLOCK_BYTES;
+    const page = new Uint8Array(pageDxt1Size); // zero-filled = blank blocks
+
+    let placed = 0, skipped = 0;
+    for (let tz = 0; tz < tileCountZ; tz++) {
+        const blockZ = tz * tileBlocks;
+        for (let tx = 0; tx < tileCountX; tx++) {
+            const tileIdx = tileIndex[(tileZ0 + tz) * dims.tilesX + (tileX0 + tx)];
+            if (tileIdx < 0) { skipped++; continue; }
+
+            const tileOffset = tileIdx * tileBytes;
+            if (tileOffset + tileBytes > levelData.length) { skipped++; continue; }
+
+            const blockX = tx * tileBlocks;
+            for (let r = 0; r < tileBlocks; r++) {
+                const srcOff = tileOffset + r * tileRowBytes;
+                const dstOff = ((blockZ + r) * atlasBlocksPerRow + blockX) * DXT1_BLOCK_BYTES;
+                page.set(levelData.subarray(srcOff, srcOff + tileRowBytes), dstOff);
+            }
+            placed++;
+        }
+    }
+    return { page, pageW, pageH, placed, skipped };
+}
+
 function buildAtlasPage(
     gl: WebGL2RenderingContext,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     ext: any,
     dims: MapDimensions,
     tileIndex: Int32Array,
-    tilesData: Uint8Array,
+    tilesLevels: Uint8Array[],
     tileX0: number, tileZ0: number,
     tileCountX: number, tileCountZ: number,
 ): MapAtlasTexture {
@@ -452,46 +514,29 @@ function buildAtlasPage(
     const atlasTex = gl.createTexture()!;
     gl.bindTexture(gl.TEXTURE_2D, atlasTex);
 
-    // Assemble the whole DXT1 page in a CPU buffer (cheap block memcpy), then
-    // upload it in ONE compressedTexImage2D. The previous approach issued one
-    // gl.compressedTexSubImage2D per tile — 20k+ synchronous GPU calls for a
-    // large map (160×128 tiles), which stalled the worker render thread for
-    // seconds at load. A single upload of the same bytes is ~100× cheaper.
-    //
-    // DXT1 is 4×4-pixel block-compressed (8 bytes/block), stored block-row-major.
-    // A 32-px tile is 8×8 blocks; each of its 8 block-rows is 64 bytes and lands
-    // contiguously in the destination, so placing a tile is 8 row copies.
-    const atlasBlocksPerRow = pageW / 4;            // blocks across the page
-    const tileBlocks = TILE_PIXELS / 4;             // 8 blocks per tile side
-    const tileRowBytes = tileBlocks * DXT1_BLOCK_BYTES; // 64 bytes per block-row
-    const pageDxt1Size = atlasBlocksPerRow * (pageH / 4) * DXT1_BLOCK_BYTES;
-    const page = new Uint8Array(pageDxt1Size);      // zero-filled = blank blocks
-
+    // Upload every mip level the KTX2 shipped (level 0 always; levels 1-3
+    // only present for map packages rebuilt after the mip-chain fix — see
+    // rts/Server/MapProcessor.cpp). Each level is composited from that
+    // level's own per-tile blocks (precomputed independently by Spring's
+    // SMT format), NOT by downsampling the level-0 atlas as one image —
+    // that would bleed unrelated adjacent tiles into each other.
+    const numLevels = Math.min(tilesLevels.length, TILE_MIP_TEXELS.length);
     let placed = 0, skipped = 0;
-    for (let tz = 0; tz < tileCountZ; tz++) {
-        const blockZ = tz * tileBlocks;
-        for (let tx = 0; tx < tileCountX; tx++) {
-            const tileIdx = tileIndex[(tileZ0 + tz) * dims.tilesX + (tileX0 + tx)];
-            if (tileIdx < 0) { skipped++; continue; }
-
-            const tileOffset = tileIdx * TILE_DXT1_SIZE;
-            if (tileOffset + TILE_DXT1_SIZE > tilesData.length) { skipped++; continue; }
-
-            const blockX = tx * tileBlocks;
-            for (let r = 0; r < tileBlocks; r++) {
-                const srcOff = tileOffset + r * tileRowBytes;
-                const dstOff = ((blockZ + r) * atlasBlocksPerRow + blockX) * DXT1_BLOCK_BYTES;
-                page.set(tilesData.subarray(srcOff, srcOff + tileRowBytes), dstOff);
-            }
-            placed++;
-        }
+    for (let lvl = 0; lvl < numLevels; lvl++) {
+        const r = compositeAtlasLevel(
+            dims, tileIndex, tilesLevels[lvl],
+            TILE_MIP_TEXELS[lvl], TILE_MIP_BYTES[lvl],
+            tileX0, tileZ0, tileCountX, tileCountZ);
+        gl.compressedTexImage2D(
+            gl.TEXTURE_2D, lvl, ext.COMPRESSED_RGB_S3TC_DXT1_EXT,
+            r.pageW, r.pageH, 0, r.page);
+        if (lvl === 0) { placed = r.placed; skipped = r.skipped; }
     }
 
-    gl.compressedTexImage2D(
-        gl.TEXTURE_2D, 0, ext.COMPRESSED_RGB_S3TC_DXT1_EXT,
-        pageW, pageH, 0, page);
-
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_BASE_LEVEL, 0);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL, numLevels - 1);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER,
+        numLevels > 1 ? gl.LINEAR_MIPMAP_LINEAR : gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
@@ -502,9 +547,12 @@ function buildAtlasPage(
     }
     gl.bindTexture(gl.TEXTURE_2D, null);
 
-    console.log(`[terrain] page @(${tileX0},${tileZ0}) ${pageW}x${pageH}: ` +
-        `${placed} tiles placed, ${skipped} skipped`);
-    return { webglTex: atlasTex, width: pageW, height: pageH, tileX0, tileZ0, tileCountX, tileCountZ };
+    console.log(`[terrain] page @(${tileX0},${tileZ0}) ${pageW}x${pageH}, ` +
+        `${numLevels} mip level(s): ${placed} tiles placed, ${skipped} skipped`);
+    return {
+        webglTex: atlasTex, width: pageW, height: pageH,
+        tileX0, tileZ0, tileCountX, tileCountZ, mipLevels: numLevels,
+    };
 }
 
 /**
@@ -526,7 +574,7 @@ async function buildMapAtlasPages(
     const ext = gl.getExtension('WEBGL_compressed_texture_s3tc') as any;
     if (!ext) { console.warn('[terrain] S3TC not supported'); return null; }
 
-    const { tileIndex, tilesData } = await fetchTileData(mapBaseUrl);
+    const { tileIndex, tilesLevels } = await fetchTileData(mapBaseUrl);
 
     const maxTex = gl.getParameter(gl.MAX_TEXTURE_SIZE) as number;
     const plan = planAtlasPages(dims.tilesX, dims.tilesZ, maxTex);
@@ -541,7 +589,7 @@ async function buildMapAtlasPages(
     }
 
     const pages: MapAtlasTexture[] = plan.rects.map((r) => buildAtlasPage(
-        gl, ext, dims, tileIndex, tilesData,
+        gl, ext, dims, tileIndex, tilesLevels,
         r.tileX0, r.tileZ0, r.tileCountX, r.tileCountZ));
 
     return {
@@ -569,7 +617,7 @@ export async function loadTerrainTextures(
 
     if (atlas.pages.length === 1) {
         const p = atlas.pages[0];
-        applyWebGLTexture(scene, terrainMesh, p.webglTex, p.width, p.height);
+        applyWebGLTexture(scene, terrainMesh, p.webglTex, p.width, p.height, p.mipLevels);
     } else {
         applyPagedTextures(scene, terrainMesh, atlas, dims);
     }
@@ -583,10 +631,19 @@ export async function loadTerrainTextures(
 export function applyWebGLTexture(
     scene: Scene, mesh: Mesh,
     webglTex: WebGLTexture, width: number, height: number,
+    mipLevels = 1,
 ): void {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const engine = scene.getEngine() as any;
-    const internalTex = engine.wrapWebGLTexture(webglTex, false, 2 /* bilinear */, width, height);
+    // hasMipMaps=true + TRILINEAR routes Babylon's updateTextureSamplingMode
+    // to LINEAR_MIPMAP_LINEAR (matching the MIN_FILTER buildAtlasPage already
+    // set on the raw GL texture) instead of clobbering it back to plain
+    // LINEAR — wrapWebGLTexture always re-applies TEXTURE_MIN_FILTER from
+    // (samplingMode, hasMipMaps), it doesn't just trust what's already bound.
+    const hasMips = mipLevels > 1;
+    const internalTex = engine.wrapWebGLTexture(
+        webglTex, hasMips, hasMips ? 3 /* trilinear */ : 2 /* bilinear */,
+        width, height);
 
     const texture = new Texture(null, scene);
     texture._texture = internalTex;
@@ -757,8 +814,10 @@ function applyPagedTextures(
     const multi = new MultiMaterial('terrainMulti', scene);
     for (let p = 0; p < numPages; p++) {
         const page = atlas.pages[p];
+        const hasMips = page.mipLevels > 1;
         const internalTex = engine.wrapWebGLTexture(
-            page.webglTex, false, 2 /* bilinear */, page.width, page.height);
+            page.webglTex, hasMips, hasMips ? 3 /* trilinear */ : 2 /* bilinear */,
+            page.width, page.height);
         const texture = new Texture(null, scene);
         texture._texture = internalTex;
         // Global UV u maps to page coord u*uScale + uOffset, landing in [0,1]

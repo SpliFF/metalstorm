@@ -31,6 +31,11 @@ namespace fs = std::filesystem;
 constexpr int SQUARE_SIZE = 8;
 constexpr int TILE_MIP0_SIZE = 512;
 constexpr int SMALL_TILE_SIZE = 680;
+// Spring SMT tile records carry 4 mip levels per 32x32-texel tile:
+// mip0 32x32 (8x8 DXT1 blocks = 512B), mip1 16x16 (128B), mip2 8x8 (32B),
+// mip3 4x4 (8B) = 680B total, matching SMALL_TILE_SIZE.
+constexpr int TILE_NUM_MIPS = 4;
+constexpr int TILE_MIP_SIZE[TILE_NUM_MIPS] = { 512, 128, 32, 8 };
 
 // ============================================================
 // Lua helpers for reading table fields
@@ -443,11 +448,17 @@ bool MapProcessor::ExtractBinaryData(const MapMetadata& meta) {
         ok &= out.good();
     }
 
-    // Tile mip0 data from SMT — concatenated DXT1 blocks, then
-    // wrapped as a single KTX2 (BC1_RGB, no transcode) via the
-    // textureconverter --raw-dxt1 path. Each Spring tile is 32x32
-    // texels = 64 DXT1 blocks = 512 bytes; concatenated they form
-    // a (32 * smtNumTiles)x32 strip the client unpacks at load time.
+    // Tile mip chain data from SMT — each tile carries 4 independently
+    // precomputed mip levels (32/16/8/4 texels), which avoids the
+    // atlas-bleeding that would result from downsampling the whole strip
+    // as one image (adjacent, unrelated tiles would blend at low mips).
+    // Per level, tiles are concatenated into a `(levelTexels *
+    // smtNumTiles) x levelTexels` strip; levels are concatenated in
+    // level order (mip0 first) and wrapped as a single multi-level KTX2
+    // (BC1_RGB, no transcode) via textureconverter --raw-dxt1
+    // --mip-levels. WebGL2 cannot runtime-generate mipmaps for a
+    // compressed-format texture (gl.generateMipmap() only supports
+    // uncompressed formats), so the full chain must ship pre-baked.
     if (!meta.smtPath.empty()) {
         std::ifstream smt(meta.smtPath, std::ios::binary);
         smt.seekg(16); // skip magic
@@ -456,32 +467,47 @@ bool MapProcessor::ExtractBinaryData(const MapMetadata& meta) {
         smt.read(reinterpret_cast<char*>(&smtNumTiles), 4);
         smt.seekg(32); // tile data starts after 32-byte header
 
+        // Read tile-major (as stored in the SMT) into per-level buffers,
+        // then write level-major (as textureconverter's --mip-levels
+        // input expects: level 0 for all tiles, then level 1, ...).
+        std::vector<std::vector<char>> levelBuf(TILE_NUM_MIPS);
+        for (int lvl = 0; lvl < TILE_NUM_MIPS; lvl++)
+            levelBuf[lvl].resize((size_t)TILE_MIP_SIZE[lvl] * smtNumTiles);
+
+        std::vector<char> tileBuf(SMALL_TILE_SIZE);
+        for (int i = 0; i < smtNumTiles; i++) {
+            smt.read(tileBuf.data(), SMALL_TILE_SIZE);
+            int off = 0;
+            for (int lvl = 0; lvl < TILE_NUM_MIPS; lvl++) {
+                std::memcpy(levelBuf[lvl].data() + (size_t)i * TILE_MIP_SIZE[lvl],
+                    tileBuf.data() + off, TILE_MIP_SIZE[lvl]);
+                off += TILE_MIP_SIZE[lvl];
+            }
+        }
+
         const std::string rawPath = meta.processedDir + "/tiles.raw";
         std::ofstream out(rawPath, std::ios::binary);
-        std::vector<char> tileBuf(TILE_MIP0_SIZE);
-        for (int i = 0; i < smtNumTiles; i++) {
-            smt.read(tileBuf.data(), TILE_MIP0_SIZE);
-            out.write(tileBuf.data(), TILE_MIP0_SIZE);
-            smt.seekg(SMALL_TILE_SIZE - TILE_MIP0_SIZE, std::ios::cur);
-        }
+        for (int lvl = 0; lvl < TILE_NUM_MIPS; lvl++)
+            out.write(levelBuf[lvl].data(), levelBuf[lvl].size());
         ok &= out.good();
         out.close();
 
-        // The KTX2 holds one logical 32-row-tall image; width is
+        // The KTX2 holds one logical 32-row-tall level-0 image; width is
         // `32 * smtNumTiles`. Both dims are multiples of 4 by
-        // construction so no padding is needed.
+        // construction (down to the 4x4 mip3) so no padding is needed.
         const int ktxW = 32 * smtNumTiles;
         const int ktxH = 32;
         const std::string ktxPath = meta.processedDir + "/tiles.ktx2";
         char dimsBuf[32];
         snprintf(dimsBuf, sizeof(dimsBuf), "%dx%d", ktxW, ktxH);
-        // --no-zstd keeps level 0 as a flat DXT1 block stream so the
+        // --no-zstd keeps every level as a flat DXT1 block stream so the
         // client can pull the raw blocks out of the KTX2 with a tiny
         // header parser (no Zstd dep in the browser). Atlas
         // compositing still happens client-side via compressedTexSubImage2D.
         const std::string cmd =
             std::string("\"") + TEXTURECONVERTER_BINARY_PATH + "\""
             " --raw-dxt1 " + dimsBuf
+            + " --mip-levels " + std::to_string(TILE_NUM_MIPS)
             + " --no-zstd"
             + " \"" + rawPath + "\""
             + " \"" + ktxPath + "\" 2>&1";
@@ -505,8 +531,8 @@ bool MapProcessor::ExtractBinaryData(const MapMetadata& meta) {
         std::error_code rmEc;
         std::filesystem::remove(rawPath, rmEc);
 
-        SLOG(SPRING_LOG_INFO, "extracted %d tile mip0s as %s",
-            smtNumTiles, ktxPath.c_str());
+        SLOG(SPRING_LOG_INFO, "extracted %d tiles (%d mip levels) as %s",
+            smtNumTiles, TILE_NUM_MIPS, ktxPath.c_str());
     }
 
     return ok;
