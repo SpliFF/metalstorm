@@ -304,6 +304,26 @@ export class TestHarness {
         void this.deps.workerCall('entityFxFenceReset');
     }
 
+    /** PLAN-client-resilience.md task 5 — trigger one of task 1's detection
+     *  paths on demand, so the recovery ladder (task 2) and the telemetry
+     *  channel (task 3) have something reliable to exercise:
+     *    - `'throw'`      — an uncaught worker-global error (self.onerror)
+     *    - `'rejection'`  — an unhandled promise rejection
+     *    - `'wedge-loop'` — blocks the worker's event loop synchronously for
+     *      `opts.ms` (default 8000ms) — the heartbeat-watchdog's target;
+     *      nothing else in the worker runs until it clears on its own.
+     *    - `'context-loss'` — forces `WEBGL_lose_context`, optionally
+     *      restoring after `opts.restoreAfterMs` (default 500ms; 0 = stay lost)
+     *  Resolves once the worker has *triggered* the fault, not once any
+     *  ladder rung has run (there is no ladder yet — see the PLAN.md task 2
+     *  note). `wedge-loop` resolves only after the spin ends, by construction. */
+    async injectWorkerError(
+        kind: 'throw' | 'rejection' | 'wedge-loop' | 'context-loss',
+        opts: { ms?: number; restoreAfterMs?: number } = {},
+    ): Promise<unknown> {
+        return this.deps.workerCall('injectWorkerError', [kind, opts]);
+    }
+
     /** Named WAN presets. `lan` ≈ localhost; `wan` ≈ regional; `intercont`
      *  ≈ the L0 exit-gate condition (200 ms ± 40 ms jitter, 2 % loss). */
     netSimPreset(name: 'lan' | 'wan' | 'intercont'): void {

@@ -243,10 +243,35 @@ States: `starting`, `running`, `ended`, `crashed`.
 **GET /api/version**
 
 ```json
-{"engine":"springweb","stamp":"5ca1489766-20260414143333","no_cache":false}
+{"engine":"springweb","stamp":"5ca1489766-20260414143333","no_cache":false,"errorReportingEnabled":true}
 ```
 
 The `stamp` field is the build stamp for cache-busting asset URLs. See [caching.md](caching.md).
+`errorReportingEnabled` is the operator opt-out for [client error reports](#client-error-reports)
+below (`--disable-client-error-reports`).
+
+### Client Error Reports
+
+**POST /api/client-errors** (requires auth — any valid session token)
+
+See [PLAN-client-resilience.md](../PLAN-client-resilience.md) — the client-side watchdog/context-
+loss/fatal-error detection hooks POST a crash report here for later triage (a grouped dashboard
+view is a follow-up; today this is ingestion-only). Size-capped at 40KB, rate-limited to 20/hour
+per user (the client's own advisory cap is 5/hour per session), 400 on malformed JSON.
+
+```bash
+curl -X POST http://localhost:8011/api/client-errors \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"reason":"fatal","error_class":"TypeError","message":"boom","stack":"...","stack_hash":"...",
+       "recovery_rung":"none","phase":"fx","frame":12345,"entity_count":200,
+       "game_id":"zk","map_id":"green_flat","build_stamp":"...","gpu_renderer":"...",
+       "log_ring":["[INFO] ...","[WARN] ..."],"count":1}'
+```
+
+**Response:** `{"ok":true,"id":42}`
+
+Disable server-side with `--disable-client-error-reports` (self-hosted deployments only —
+default is enabled).
 
 ---
 

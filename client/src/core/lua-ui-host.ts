@@ -83,7 +83,24 @@ let logDropCount = 0;
 // Track repeated messages to suppress spamming widgets.
 const recentMsgs = new Map<string, number>();
 
+// PLAN-client-resilience.md task 3: the last ~50 log lines, kept independent
+// of the rate-limit/dedup below (a report needs "what just happened" even
+// during a log storm that's being suppressed downstream). Every postLog()
+// call pushes here first, before any rate-limit check.
+const LOG_RING_CAP = 64;
+const logRing: string[] = [];
+const LEVEL_TAGS = ['DEBUG', 'INFO', 'NOTICE', 'WARN', 'ERROR', 'FATAL'];
+
+/** Last `n` log lines (oldest first), formatted `[LEVEL] message`. Feeds the
+ *  client-error-telemetry payload's `logRing` field. */
+export function getRecentLogLines(n = 50): string[] {
+    return logRing.slice(-n);
+}
+
 export function postLog(level: number, msg: string): void {
+    logRing.push(`[${LEVEL_TAGS[level] ?? level}] ${msg}`);
+    if (logRing.length > LOG_RING_CAP) logRing.shift();
+
     // Suppress exact-duplicate messages (e.g. Key Unbinder spam).
     // Allow the first occurrence and then once every 100 repeats.
     const count = (recentMsgs.get(msg) ?? 0) + 1;

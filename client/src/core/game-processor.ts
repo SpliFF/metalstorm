@@ -123,7 +123,7 @@ import { rmlFlush, rmlReset } from '../ui/rml/rml-bridge.js';
 // WP2b: LuaUI half exports — getRuntime() host + all widget callins + liveState + defs.
 import {
     liveState, unitDefMap, weaponDefMap,
-    postToMain, postLog, republishDefGlobals,
+    postToMain, postLog, republishDefGlobals, getRecentLogLines,
     init, runFrame, getRuntime, getBridge, setLuaUiActiveFalse,
     applyEntityStateToLiveState, removeUnitFromLiveState,
     dispatchSelectionChanged, dispatchCommandsChanged,
@@ -146,12 +146,20 @@ import {
     widgetProfileStart, widgetProfileStop, widgetProfileDump,
     buildUiProfileReport, type UiTaxAccumulator,
 } from './widget-profiler.js';
+// PLAN-client-resilience.md tasks 1/3: error telemetry assembly + the
+// context-loss/fatal detection hooks wired into gpInit/the render loop below.
+import { configureErrorTelemetry, reportClientError, type ClientErrorReason } from './client-error-telemetry.js';
 
 // ── GP module-level state ───────────────────────────────────────────────────
 
 let gpEngine: Engine | null = null;
 let gpScene: Scene | null = null;
 let gpCamera: FreeCamera | null = null;
+/// PLAN-client-resilience.md task 3: session facts a telemetry report needs
+/// but that aren't otherwise threaded through the worker's module state.
+/// Set once in gpInit from the gp:init payload; read by gpReportFatal.
+let gpGameId = '';
+let gpMapId = '';
 /// GW4-c5b: interactive RTS cameras, keyed by viewId (multi-view, one Scene /
 /// N camera→canvas views — PLAN-game-worker.md). Each owns one Babylon camera +
 /// the pan/zoom/orbit state machine + scene.pick + viewport send, driven by the
@@ -1113,6 +1121,41 @@ function gpConnect(msg: GpInitToWorker): void {
     conn.connect(msg.gameHttpUrl, msg.username, '', msg.token);
 }
 
+/**
+ * PLAN-client-resilience.md task 3: assemble + send a fatal-error report
+ * with the richest context this worker has — the frame profiler's last
+ * completed frame (as a `phase` label, best-effort), live entity count, the
+ * session's game/map ids, and the last ~50 log-ring lines. This is the one
+ * place the worker's self.onerror/onunhandledrejection hooks and the
+ * context-loss/fault-injection paths funnel through.
+ *
+ * EXTENSION POINT for task 2 (the R1/R2/R3 recovery ladder): this function
+ * only reports today — it never resets or respawns anything. The ladder
+ * should call into its rung logic from the same call sites that call this
+ * (worker self.onerror/onunhandledrejection below, gpHandleContextLost/
+ * Restored, and the injectWorkerError fault-injection verbs), stamping the
+ * rung it took onto the report via the `recoveryRung` param before/instead
+ * of just logging.
+ */
+export function gpReportFatal(
+    reason: ClientErrorReason, errorClass: string, message: string, stack?: string,
+    recoveryRung?: string,
+): void {
+    reportClientError({
+        reason,
+        errorClass,
+        message,
+        stack,
+        recoveryRung,
+        phase: gpFrameProfile ? gpFrameProfiler.formatLastFrame() : undefined,
+        frame: liveState.gameFrame,
+        entityCount: gpCtx.entityRenderer?.entityCount ?? 0,
+        gameId: gpGameId,
+        mapId: gpMapId,
+        logRing: getRecentLogLines(50),
+    });
+}
+
 export function gpInit(msg: GpInitToWorker): void {
     if (gpEngine) {
         postLog(2, '[gp] gp:init received but engine already up — ignoring');
@@ -1189,6 +1232,40 @@ export function gpInit(msg: GpInitToWorker): void {
     gpEngine = engine;
     gpScene = scene;
     gpCamera = camera;
+
+    // PLAN-client-resilience.md task 3: seed the error-telemetry channel with
+    // this session's context. The endpoint lives on the lobby (same host as
+    // the auth token); errorReportingEnabled reflects the server-operator
+    // opt-out surfaced via /api/version → CONFIG (PLAN-security-hardening §1
+    // "junk floods" row — size cap + rate + dedup live in client-error-
+    // telemetry.ts itself).
+    gpGameId = msg.gameId;
+    gpMapId = msg.mapId;
+    configureErrorTelemetry({
+        endpoint: msg.lobbyUrl,
+        token: msg.token,
+        enabled: msg.errorReportingEnabled !== false,
+        buildStamp: msg.buildStamp,
+        gpuRenderer: engine.getGlInfo().renderer ?? '',
+    });
+
+    // PLAN-client-resilience.md task 1: WebGL context loss is the most common
+    // real-world "crash" — without this the frame loop just spins rendering
+    // nothing forever. Babylon already no-ops draw calls on a lost context;
+    // this hook is purely detection + reporting today.
+    // EXTENSION POINT (task 2): `onContextLostObservable` is R1's trigger —
+    // the ladder's in-place subsystem reset (wipeCaches / FX pool flush /
+    // gpResync) belongs here, gated on `onContextRestoredObservable` actually
+    // firing (a lost context that never restores needs R2, not R1).
+    engine.onContextLostObservable.add(() => {
+        postLog(4, '[gp] WebGL context lost');
+        postToMain({ type: 'gp:contextLost' });
+        gpReportFatal('contextLost', 'WebGLContextLost', 'WebGL context lost on the game-processor worker\'s OffscreenCanvas');
+    });
+    engine.onContextRestoredObservable.add(() => {
+        postLog(2, '[gp] WebGL context restored');
+        postToMain({ type: 'gp:contextRestored' });
+    });
 
     // GW4-c3: install sun + ambient + HDR pipeline + CSM (deferred from c1 —
     // it was invisible on an empty scene and drags in the HDR pipeline).
@@ -2211,6 +2288,58 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
         case 'entityFxFenceReset':
             gpEntityFxFence.reset();
             return null;
+        // — PLAN-client-resilience.md task 5: fault-injection verbs
+        //   (window.test.injectWorkerError(kind, opts)). The recovery ladder
+        //   (task 2) is untestable without a reliable way to trigger each of
+        //   task 1's detection paths on demand — this is that. Every kind
+        //   exercises a real detection hook rather than faking the report
+        //   directly, so a regression in the hook itself shows up too. —
+        case 'injectWorkerError': {
+            const kind = String(args[0] ?? '');
+            const opts = obj<Record<string, unknown>>(1, {});
+            switch (kind) {
+                case 'throw':
+                    // Escape this call's stack on a macrotask — throwing
+                    // synchronously here would just be caught by
+                    // lua-widget-worker.ts's gp:test try/catch and reported
+                    // as an ordinary test failure, never reaching
+                    // self.onerror (the hook under test). The
+                    // '[test.injectWorkerError]' message prefix is how the
+                    // onerror handler tells this apart from a real fatal.
+                    setTimeout(() => { throw new Error('[test.injectWorkerError] synthetic uncaught throw'); }, 0);
+                    return { ok: true };
+                case 'rejection':
+                    // A standalone rejected promise, deliberately not chained
+                    // off this gp:test call's own promise — a genuine
+                    // unhandledrejection.
+                    Promise.reject(new Error('[test.injectWorkerError] synthetic unhandled rejection'));
+                    return { ok: true };
+                case 'wedge-loop': {
+                    // Synchronously block the event loop for `opts.ms`
+                    // (default 8000 — past the watchdog's 2s×3 threshold,
+                    // then it self-clears) so postMessage/heartbeat pings
+                    // genuinely go unanswered: the one failure class
+                    // self.onerror structurally cannot catch (nothing throws;
+                    // the loop just never returns).
+                    const ms = typeof opts.ms === 'number' ? opts.ms : 8000;
+                    const until = performance.now() + ms;
+                    while (performance.now() < until) { /* intentional spin — do not optimise away */ }
+                    return { ok: true, spunMs: ms };
+                }
+                case 'context-loss': {
+                    if (!gpEngine) return { ok: false, error: 'engine not up' };
+                    const gl = getEngineGl(gpEngine);
+                    const ext = gl.getExtension('WEBGL_lose_context');
+                    if (!ext) return { ok: false, error: 'WEBGL_lose_context unavailable in this browser' };
+                    ext.loseContext();
+                    const restoreAfterMs = typeof opts.restoreAfterMs === 'number' ? opts.restoreAfterMs : 500;
+                    if (restoreAfterMs > 0) setTimeout(() => ext.restoreContext(), restoreAfterMs);
+                    return { ok: true };
+                }
+                default:
+                    return { ok: false, error: `unknown injectWorkerError kind '${kind}'` };
+            }
+        }
         // — per-widget LuaUI cost profile (PLAN-perf N1). start installs the
         //   Lua-side timing wrappers (widget-profiler.ts) and zeroes the JS
         //   fixed-tax accumulator; dump merges both into the P5-vs-Fengari

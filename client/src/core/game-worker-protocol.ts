@@ -83,6 +83,14 @@ export interface GpInitToWorker {
      * the documented P1 "richer roster restream". See PLAN-bar.md UI-2.
      */
     players?: { id: number; name: string; team: number; spectator: boolean }[];
+    /**
+     * PLAN-client-resilience.md task 3: server-operator opt-out for the
+     * `/api/client-errors` report channel (spring-lobby `--disable-client-
+     * error-reports`, surfaced via `/api/version`). Absent/true ⇒ enabled —
+     * the courtesy default is off only in a self-hosted "sample config"
+     * deployment that explicitly disables it.
+     */
+    errorReportingEnabled?: boolean;
 }
 
 /**
@@ -169,6 +177,20 @@ export interface GpCancelCommandModeToWorker {
     type: 'gp:cancelCommandMode';
 }
 
+/**
+ * PLAN-client-resilience.md task 1: heartbeat watchdog probe. Main posts one
+ * every 2s (HeartbeatWatchdog, main.ts); the worker replies `gp:pong` with the
+ * same `id` from the very top of its message dispatcher (game-processor.ts is
+ * not on the fast path — a wedged Fengari loop or a stalled render loop must
+ * not stop the pong). A blocked worker event loop simply never processes this
+ * message at all, which is exactly the "wedged" signal the watchdog looks for
+ * — no payload beyond the id is needed.
+ */
+export interface GpPingToWorker {
+    type: 'gp:ping';
+    id: number;
+}
+
 export type GpMessageToWorker =
     | GpInitToWorker
     | GpInputToWorker
@@ -178,6 +200,7 @@ export type GpMessageToWorker =
     | GpCancelBuildPlacementToWorker
     | GpRemoveFactoryOrderToWorker
     | GpCancelCommandModeToWorker
+    | GpPingToWorker
     // PLAN-rml.md: DOM events + viewport changes routed back to the worker-side
     // RmlUi proxy (rml-bridge.ts) for Lua listener dispatch / dp-ratio recompute.
     | RmlEventToWorker
@@ -397,5 +420,20 @@ export type GpMessageToMain =
     | { type: 'gp:reload' }
     /** Reply to a gp:test request from the main test harness. */
     | { type: 'gp:testResult'; id: number; ok: boolean; value?: unknown; error?: string }
+    /** Reply to a `gp:ping` heartbeat probe (PLAN-client-resilience.md task 1). */
+    | { type: 'gp:pong'; id: number }
+    /**
+     * WebGL context loss / restore on the worker's OffscreenCanvas
+     * (PLAN-client-resilience.md task 1 detection). Babylon's render loop
+     * already no-ops while the context is lost; this is purely a visibility
+     * signal for the main-thread console/telemetry today — no recovery is
+     * wired to it yet.
+     * EXTENSION POINT (task 2, the R1/R2/R3 recovery ladder): `lost` is R1's
+     * trigger ("context-restored, single recoverable fatal in a subsystem
+     * with a reset path") — the ladder should listen here instead of adding
+     * a second Babylon observable.
+     */
+    | { type: 'gp:contextLost' }
+    | { type: 'gp:contextRestored' }
     /** PLAN-rml.md: a batch of RML DOM ops for the main-thread overlay manager. */
     | RmlOpsToMain;

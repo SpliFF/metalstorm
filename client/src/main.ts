@@ -53,6 +53,8 @@ import { showQuitConfirm } from './ui/quit-confirm/quit-confirm.js';
 import { showGameOver } from './ui/game-over/game-over.js';
 import { debugConsole } from './core/debug-console.js';
 import { logIngest } from './core/log-ingest.js';
+import { configureErrorTelemetry, reportClientError } from './core/client-error-telemetry.js';
+import { HeartbeatWatchdog } from './core/heartbeat-watchdog.js';
 import {
     getDefaultLobbyTemplates,
     loadGameLobbyTemplates,
@@ -103,6 +105,40 @@ function workerCall(method: string, args: unknown[] = []): Promise<unknown> {
         w.postMessage({ type: 'gp:test', id, method, args });
     });
 }
+/// PLAN-client-resilience.md task 1: heartbeat watchdog probe channel — a
+/// dedicated `gp:ping`/`gp:pong` round-trip, deliberately NOT routed through
+/// workerCall()/gp:test (gpTestDispatch has its own business logic to run
+/// through; the watchdog needs a probe the worker answers from the very top
+/// of its dispatcher, before anything that could itself be wedged).
+let gpPingId = 0;
+const gpPingPending = new Map<number, () => void>();
+function sendHeartbeatPing(): Promise<void> {
+    return new Promise((resolve, reject) => {
+        const w = gameWorker;
+        if (!w) { reject(new Error('[watchdog] no game worker')); return; }
+        const id = ++gpPingId;
+        gpPingPending.set(id, resolve);
+        w.postMessage({ type: 'gp:ping', id });
+    });
+}
+/// Detects a wedged worker (blocked event loop — the one failure class
+/// self.onerror structurally can't catch). Started once gp:init is posted,
+/// stopped on teardown. EXTENSION POINT (task 2): onWedged only reports
+/// today; the R2 rung (terminate + respawn + reconnect) belongs here once
+/// quickstart part B's boot/resync path lands.
+const heartbeatWatchdog = new HeartbeatWatchdog({
+    ping: sendHeartbeatPing,
+    isSuppressed: () => document.hidden || testHarness?.paused === true,
+    onWedged: () => {
+        console.error('[gameWorker] watchdog: worker unresponsive after 3 missed 2s heartbeats — wedged');
+        reportClientError({
+            reason: 'wedged',
+            errorClass: 'WatchdogWedged',
+            message: 'game-processor worker unresponsive after 3 missed 2s heartbeats',
+        });
+    },
+    onRecovered: () => console.log('[gameWorker] watchdog: heartbeat recovered'),
+});
 let perfOverlay: PerfOverlay | null = null;
 /// Presentation clock — the L0 timing spine (PLAN-latency.md). Converts the
 /// frame-stamped snapshot stream into a smooth presentation cursor P that the
@@ -349,6 +385,9 @@ function quitToLobby(): void {
     // canvas itself is replaced with a fresh clone on the next startGame().
     gameWorker?.terminate();
     gameWorker = null;
+    // PLAN-client-resilience.md task 1: no worker left to ping.
+    heartbeatWatchdog.stop();
+    gpPingPending.clear();
     uninstallCameraWindowApi();
     delete (window as any).test;
     delete (window as any).widgets;
@@ -408,6 +447,8 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     if (gameWorker) {
         gameWorker.terminate();
         gameWorker = null;
+        heartbeatWatchdog.stop();
+        gpPingPending.clear();
     }
     if (gameConn) {
         gameConn.disconnect();
@@ -489,13 +530,51 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
 
     const dpr = effectiveDpr();
     const offscreen = canvas.transferControlToOffscreen();
+    // PLAN-client-resilience.md task 3: main-thread reports (worker onerror /
+    // onmessageerror / watchdog-wedged below) need their own configured
+    // channel — the worker configures its own copy from gp:init (each realm
+    // has its own module instance; see client-error-telemetry.ts's header).
+    configureErrorTelemetry({
+        endpoint: CONFIG.httpUrl,
+        token: localStorage.getItem('springrts-token') ?? '',
+        enabled: CONFIG.errorReportingEnabled,
+        buildStamp: CONFIG.buildStamp,
+    });
     gameWorker = new GameWorker();
     gameWorker.onerror = (e) => {
         console.error('[gameWorker] error:',
             e.message || '(no detail)',
             e.filename ? `${e.filename}:${e.lineno}:${e.colno}` : '',
             e.error?.stack ?? '');
+        // PLAN-client-resilience.md task 1: this is the main-thread half of
+        // worker fatal detection — it fires for failures the worker-side
+        // self.onerror hook (lua-widget-worker.ts) can't report itself (e.g.
+        // a syntax/parse-level failure that never got far enough to install
+        // its own hooks). Reported with whatever ErrorEvent gives us; less
+        // context than the worker-side report (no phase/log-ring/entity
+        // count — the worker may already be gone).
+        reportClientError({
+            reason: 'fatal',
+            errorClass: e.error?.name ?? 'Error',
+            message: e.message || '(no detail)',
+            stack: e.error?.stack ?? `${e.message} (${e.filename}:${e.lineno}:${e.colno})`,
+        });
     };
+    // PLAN-client-resilience.md task 1: fires when a posted message can't be
+    // structured-cloned (e.g. an unsupported value crossing the worker
+    // boundary) — distinct from onerror (a thrown exception). No stack is
+    // available (the spec gives no Error object here).
+    gameWorker.onmessageerror = (e: MessageEvent) => {
+        console.error('[gameWorker] onmessageerror:', e);
+        reportClientError({
+            reason: 'messageError',
+            errorClass: 'DataCloneError',
+            message: 'postMessage structured-clone failure across the game-processor worker boundary',
+        });
+    };
+    // PLAN-client-resilience.md task 1: watchdog runs for the life of the
+    // worker; stopped in quitToLobby()/the defensive re-entry teardown above.
+    heartbeatWatchdog.start();
     // Worker → main bridge (PLAN-game-worker.md GW4). The full sceneState /
     // audio / minimap feeds land in GW5; at c2 only the connection-lifecycle
     // signals the worker raises (auth, game-over, server-restart) are handled.
@@ -653,6 +732,21 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 }
                 break;
             }
+            // PLAN-client-resilience.md task 1: heartbeat watchdog reply.
+            case 'gp:pong': {
+                const resolve = gpPingPending.get(m.id);
+                if (resolve) { gpPingPending.delete(m.id); resolve(); }
+                break;
+            }
+            // PLAN-client-resilience.md task 1: WebGL context loss/restore
+            // visibility (detection only today — no reset is wired to it;
+            // see the EXTENSION POINT note in gpInit, game-processor.ts).
+            case 'gp:contextLost':
+                console.error('[gameWorker] WebGL context lost');
+                break;
+            case 'gp:contextRestored':
+                console.log('[gameWorker] WebGL context restored');
+                break;
             // GW8: reply to a window.widgets.eval() Lua eval (worker evalLua).
             case 'evalResult':
                 evalReqResolve?.(String(m.result ?? 'nil'));
@@ -732,6 +826,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         modelMaterialPort: gameModelMaterialPort,
         defsCacheKey: '',
         buildStamp: CONFIG.buildStamp,
+        errorReportingEnabled: CONFIG.errorReportingEnabled,
         width: window.innerWidth,
         height: window.innerHeight,
         dpr,

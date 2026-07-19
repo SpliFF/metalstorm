@@ -47,11 +47,56 @@ import {
 } from './lua-ui-host.js';
 import type { ProjectileEntry } from './lua-spring-api.js';
 import { clientSettings } from './client-settings.js';
+import { gpReportFatal } from './game-processor.js';
+
+// ── PLAN-client-resilience.md task 1: worker-global fatal detection ─────
+//
+// self.onerror never fires for a blocked event loop (nothing throws — see
+// heartbeat-watchdog.ts for that case) but it IS the only thing that catches
+// an exception thrown outside any try/catch in the render loop, an input
+// handler, or a bare setTimeout callback — richer than the main-thread
+// `gameWorker.onerror` mirror (main only gets ErrorEvent's flattened
+// message/filename/lineno; this hook runs where the full Error + stack still
+// exist). The `[test.injectWorkerError]` message prefix is how task 5's
+// fault-injection verbs are told apart from a real fatal on the dashboard —
+// see game-processor.ts's `injectWorkerError` gp:test case.
+const INJECTED_PREFIX = '[test.injectWorkerError]';
+
+self.addEventListener('error', (e: ErrorEvent) => {
+    const message = e.error?.message ?? e.message ?? 'unknown worker error';
+    const stack = e.error?.stack ?? `${e.message} (${e.filename}:${e.lineno}:${e.colno})`;
+    const injected = message.startsWith(INJECTED_PREFIX) || stack.startsWith(INJECTED_PREFIX);
+    postLog(4, `[gp] uncaught worker error: ${message}`);
+    gpReportFatal(injected ? 'injected' : 'fatal', e.error?.name ?? 'Error', message, stack);
+});
+
+self.addEventListener('unhandledrejection', (e: PromiseRejectionEvent) => {
+    const reason = e.reason;
+    const message = reason instanceof Error ? reason.message : String(reason);
+    const stack = reason instanceof Error ? (reason.stack ?? message) : message;
+    const injected = message.startsWith(INJECTED_PREFIX) || stack.startsWith(INJECTED_PREFIX);
+    postLog(4, `[gp] unhandled worker rejection: ${message}`);
+    gpReportFatal(
+        injected ? 'injected' : 'fatal',
+        reason instanceof Error ? reason.name : 'UnhandledRejection',
+        message, stack,
+    );
+});
 
 // ── Message handler ────────────────────────────────────────────────────
 
 self.onmessage = async (e: MessageEvent<WorkerInbound>) => {
     const msg = e.data as Record<string, unknown>;
+
+    // PLAN-client-resilience.md task 1: heartbeat watchdog probe. Answered
+    // from the very top of the dispatcher, before the log-trace below and
+    // before any other case — a slow LuaUI/render state must never delay a
+    // pong; only a genuinely blocked event loop (which never reaches this
+    // line at all) counts as a miss on the main-thread HeartbeatWatchdog.
+    if (msg.type === 'gp:ping') {
+        postToMain({ type: 'gp:pong', id: msg.id as number });
+        return;
+    }
     // Debug-level trace of inbound messages (skip high-frequency
     // channels to avoid drowning real log entries: pointer movement,
     // per-frame stateUpdate from the main thread's mouseState/camera
