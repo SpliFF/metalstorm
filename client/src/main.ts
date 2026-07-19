@@ -30,7 +30,7 @@ import { Connection } from './core/connection.js';
 import { TimingOverlay } from './core/timing-overlay.js';
 import { fetchBuildStamp, CONFIG } from './config.js';
 import GameWorker from './core/lua-widget-worker.ts?worker';
-import type { GpInitToWorker, GpTimingState } from './core/game-worker-protocol.js';
+import type { GpInitToWorker, GpMinimapMetalSpots, GpTimingState } from './core/game-worker-protocol.js';
 import { fetchMapDataHttp, type ParsedMapData } from './core/map-data.js';
 import { loadMapLighting, type MapLighting } from './core/map-lighting.js';
 import { applyMapLighting, createSceneLighting, type SceneLighting } from './core/scene-lighting.js';
@@ -228,6 +228,14 @@ let economyBar: EconomyBar | null = null;
 let factoryQueuePanel: FactoryQueuePanel | null = null;
 let lobbyUI: LobbyUI | null = null;
 let minimap: Minimap | null = null;
+/// One-shot `gp:minimapFeed` payloads (map dims/backdrop + metal spots) held
+/// until the Minimap can take them. The worker clears its copy after the FIRST
+/// feed post regardless of delivery, so a feed that races minimap construction
+/// must be buffered here — else the dims + metal spots are lost all session.
+/// Applied (and cleared) on the next feed once `minimap` exists; reset on
+/// session teardown.
+let pendingMinimapMap: { width: number; height: number; baseUrl: string } | null = null;
+let pendingMinimapMetalSpots: GpMinimapMetalSpots | null = null;
 let commandPathRenderer: CommandPathRenderer | null = null;
 let waypointMarkerRenderer: WaypointMarkerRenderer | null = null;
 let standingOrderRenderer: StandingOrderRenderer | null = null;
@@ -320,6 +328,8 @@ function quitToLobby(): void {
     // canvas to the container.
     minimap?.dispose();
     minimap = null;
+    pendingMinimapMap = null;
+    pendingMinimapMetalSpots = null;
     buildMenu?.dispose();
     buildMenu = null;
     economyBar?.dispose();
@@ -360,9 +370,12 @@ function quitToLobby(): void {
     gpPending.clear();
     evalReqResolve = null;
     lastSceneState = null;
-    // The worker (and its presentation clock) is gone — drop the snapshot so the
-    // F10 overlay falls back to "waiting…" instead of freezing on the last frame.
+    // The worker (and its presentation clock) is gone — drop the snapshot and
+    // repaint the F10 overlay so it actually shows "waiting…" instead of
+    // freezing on the last frame (its render is normally only reachable via
+    // tick() ← gp:sceneState, which just stopped).
     lastTimingState = null;
+    timingOverlay?.refresh();
     musicDirector = null;
     soundEventPlayer = null;
     musicArmed = false;
@@ -382,6 +395,12 @@ function quitToLobby(): void {
     // time. If the player is still a member of their room (the normal
     // case after a mid-game quit) land on the room view; otherwise
     // fall through to the room browser.
+    //
+    // Scenario/direct-boot sessions construct the lobby *suppressed*
+    // (every show*() a no-op) — lift that first, or an ESC-quit out of a
+    // `?scenario=`/`?direct=` game leaves a permanently blank page. The
+    // lobby templates were deliberately kept while suppressed for this.
+    lobbyUI?.unsuppress();
     lobbyUI?.showAfterGame();
     lobbyUI?.show();
 }
@@ -409,6 +428,10 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         minimap.dispose();
         minimap = null;
     }
+    // Stale one-shot minimap payloads from the previous session must not
+    // apply to the new session's minimap (the fresh worker resends its own).
+    pendingMinimapMap = null;
+    pendingMinimapMetalSpots = null;
     if (gameWorker) {
         gameWorker.terminate();
         gameWorker = null;
@@ -436,6 +459,11 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     economyBar = null;
     factoryQueuePanel?.dispose();
     factoryQueuePanel = null;
+    // The previous session's cursor overlay owns a DOM node + a live rAF
+    // loop — without this, a back-to-back startGame() (room-state re-entry
+    // that skips quitToLobby) leaks both and stacks a second overlay.
+    animatedCursor?.dispose();
+    animatedCursor = null;
 
     showHUD();
 
@@ -560,18 +588,28 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             // snapshot shipped; blips every feed. Render is driven here (~6 Hz)
             // since main has no game render loop post-GW4.
             case 'gp:minimapFeed':
+                // The `map` + `metalSpots` payloads ship exactly once (the
+                // worker clears them after its first post, delivered or not),
+                // so stage them in the pending buffer and drain it when the
+                // minimap is up — a feed that races minimap construction
+                // would otherwise lose dims + metal spots for the session.
+                if (m.map) pendingMinimapMap = m.map;
+                if (m.metalSpots) pendingMinimapMetalSpots = m.metalSpots;
                 if (minimap) {
-                    if (m.map) {
-                        minimap.setMapDimensions(m.map.width, m.map.height);
-                        void minimap.loadBackground(m.map.baseUrl);
+                    if (pendingMinimapMap) {
+                        minimap.setMapDimensions(
+                            pendingMinimapMap.width, pendingMinimapMap.height);
+                        void minimap.loadBackground(pendingMinimapMap.baseUrl);
+                        pendingMinimapMap = null;
                     }
                     if (m.los) {
                         minimap.applyLosBitmap({ allyTeam: 0, frame: 0, ...m.los });
                     }
                     // PLAN-playable.md G4: metal-spot markers, delivered once
                     // (same one-shot pattern as `map` above).
-                    if (m.metalSpots) {
-                        minimap.applyMetalSpots(m.metalSpots);
+                    if (pendingMinimapMetalSpots) {
+                        minimap.applyMetalSpots(pendingMinimapMetalSpots);
+                        pendingMinimapMetalSpots = null;
                     }
                     minimap.applyFeed(m.blips);
                     minimap.render();

@@ -60,10 +60,29 @@ export class TimingOverlay {
     toggle(): void {
         this.visible = !this.visible;
         this.element.style.display = this.visible ? 'block' : 'none';
+        // Paint immediately on open — tick() only runs while gp:sceneState
+        // flows, so without this the panel would show stale (or no) content
+        // when toggled outside a game.
+        if (this.visible) this.render();
     }
 
-    show(): void { this.visible = true; this.element.style.display = 'block'; }
+    show(): void {
+        this.visible = true;
+        this.element.style.display = 'block';
+        this.render();
+    }
     hide(): void { this.visible = false; this.element.style.display = 'none'; }
+
+    /** Re-render now (if visible) from the provider's current value. Called
+     *  when the snapshot source changes outside the tick() flow — e.g.
+     *  quit-to-lobby nulls the worker snapshot and the gp:sceneState ticks
+     *  stop, so this is what actually flips the panel back to its
+     *  "waiting…" state. */
+    refresh(): void {
+        if (!this.visible) return;
+        this.lastRender = performance.now();
+        this.render();
+    }
 
     /** Call every render frame; throttles its own DOM update to ~3 Hz. */
     tick(): void {

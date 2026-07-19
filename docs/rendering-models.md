@@ -26,7 +26,7 @@ Source textures (.dds/.png/...)      Game content: unittextures/
         +---> SceneLoader.ImportMeshAsync()     loads glb
         +---> fetch(<stem>.config.lua)          texture refs (.ktx2), metadata
         +---> Texture(<url>)                    loads KTX2 via Babylon's KTX2 loader
-        +---> thin-instance render per piece    team-colored shader
+        +---> thin-instance render per piece    PBRMaterial + team-colour plugin
 ```
 
 ## Model Formats
@@ -173,15 +173,16 @@ The `invertteamcolor` flag in the model config flips the mask: `mask = 1.0 - tex
 
 ### Team Color Blending
 
+At runtime the mask no longer rides in the diffuse alpha — the texture pipeline splits it into a dedicated R8 KTX2 (`<tex1stem>_team.ktx2`), and `TeamColorPlugin` ([client/src/core/team-color-plugin.ts](../client/src/core/team-color-plugin.ts)) rewrites the PBR albedo before the light loop:
+
 ```glsl
-// In the fragment shader (mirrors upstream ModelFragProg.glsl):
-vec4 base = texture2D(diffuseTex, vUV);
-float mask = base.a;
-if (invertMask > 0.5) mask = 1.0 - mask;
-vec3 color = mix(base.rgb, teamColor * base.rgb, mask);
+// CUSTOM_FRAGMENT_UPDATE_ALBEDO (mirrors upstream ModelFragProg.glsl):
+float mask = texture2D(teamMaskTex, vMainUV1).r;
+if (invertMask) mask = 1.0 - mask;
+surfaceAlbedo = mix(surfaceAlbedo, teamColor, mask);
 ```
 
-Team color is multiplicative: `teamColor * base.rgb`. This preserves the diffuse texture's shading detail while tinting the color. Areas with mask = 0 keep the original diffuse color.
+Team color is a straight **replace** where the mask is full (`mix(albedo, teamColor, mask)`, matching Recoil's ModelFragProg.glsl — not a multiply, which dimmed the tint on dark decal areas). Areas with mask = 0 keep the original diffuse color. Models without a mask texture keep their albedo untinted (a deliberate Recoil deviation — see the FIDELITY note in team-color-plugin.ts), except the synthesized-white fallback for models with no texture config, which renders fully team-tinted.
 
 ### Modern Models
 
@@ -223,12 +224,12 @@ Each `tick()`:
 
 ### Team Color Material
 
-A custom GLSL `ShaderMaterial` handles team coloring:
+Units render through a stock Babylon `PBRMaterial` (albedo / ORM / normal / emissive bound with native glTF channel semantics) plus `TeamColorPlugin`, which injects the team-colour albedo rewrite above (see docs/lighting.md "Unit material — PBRMaterial + TeamColorPlugin"):
 
-- Vertex shader includes `#include<instancesDeclaration>` and `#include<instancesVertex>` for thin-instance compatibility
-- Fragment shader samples tex1 (diffuse) and tex2 (team mask), blends team color
-- Per-team material clones share the same textures but differ in the `teamColor` uniform
+- PBR consumes the scene sun + hemispheric ambient + CSM shadows through Babylon's stock light loop — no hand-rolled lighting
+- Materials are shared per `(defId, team, materialKey)`; per-team instances share textures and differ in the plugin's `teamColor`
 - 10 default team colors from Spring's `TeamBase::teamDefaultColor`
+- Games declaring modinfo `modelMaterialPort = 'zk-939'` use the hand-ported ZK custom-unit-shader (`zk-model-material.ts`, a `ShaderMaterial` with its own sun/CSM binds) instead
 
 ### Y-Offset
 

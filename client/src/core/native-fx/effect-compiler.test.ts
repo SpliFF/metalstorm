@@ -8,6 +8,8 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import * as fs from 'fs';
+import * as path from 'path';
 import {
     MUZZLE_FLOATS,
     PARTICLE_FLOATS,
@@ -15,6 +17,7 @@ import {
     TRACER_FLOATS,
     TRAIL_FLOATS,
     compileEffect,
+    compileEmitter,
     defaultModeForUsage,
     effectsUsingShader,
     packTracer,
@@ -205,6 +208,43 @@ describe('sampleSpread', () => {
             expect(h[1]).toBeGreaterThanOrEqual(0);
             const d = sampleSpread('disc', [0, 1, 0], rng);
             expect(Math.abs(d[1])).toBeLessThan(1e-6);
+        }
+    });
+});
+
+describe('shipped library.json (data/games/metalstorm/effects)', () => {
+    // The real authored library, not a fixture — this is what makes the
+    // "dangling aliases are surfaced by tests" claim in effect-compiler.ts's
+    // effectsUsingShader true: every alias must resolve and every effect
+    // (including its delayed emitters) must compile.
+    const libPath = path.resolve(__dirname, '../../../../data/games/metalstorm/effects/library.json');
+    const shipped = JSON.parse(fs.readFileSync(libPath, 'utf8')) as FxLibrary;
+
+    it('every effect resolves (no dangling or circular aliases)', () => {
+        for (const name of Object.keys(shipped.effects)) {
+            expect(() => resolveEffect(shipped, name), name).not.toThrow();
+        }
+    });
+
+    it('every effect compiles, including its delayed emitters', () => {
+        for (const name of Object.keys(shipped.effects)) {
+            const b = compileEffect(shipped, name, ctx());
+            for (const d of b.delayed) {
+                expect(() => compileEmitter(shipped, d.emitter, ctx()), `${name} delayed emitter`)
+                    .not.toThrow();
+            }
+        }
+    });
+
+    it('every particle emitter sprite names a real atlas frame', () => {
+        for (const name of Object.keys(shipped.effects)) {
+            const { def } = resolveEffect(shipped, name);
+            for (const e of def.emitters ?? []) {
+                if (e.sprite != null) {
+                    expect(shipped.atlas.frames, `${name}: sprite "${e.sprite}"`)
+                        .toHaveProperty(e.sprite);
+                }
+            }
         }
     });
 });

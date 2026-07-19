@@ -1,8 +1,8 @@
 /**
- * model-validate — pure glTF/.glb checks shared by the normalisation
- * validation harness (tools/scripts/validate_model.mjs, PLAN-metalstorm-
- * beta-units.md §7 task 4 / §8 Tests): tri budget, required piece names,
- * team-colour mask presence, animation clip naming.
+ * model-validate — pure glTF/.glb checks for model normalisation
+ * (PLAN-metalstorm-beta-units.md §7 task 4 / §8 Tests): tri budget,
+ * required piece names, team-colour mask presence, animation clip naming.
+ * This is the canonical model validator.
  *
  * Kept dependency-free and pure (no fs/child_process) so it's usable both
  * from the Node CLI harness and from vitest with synthetic fixtures.

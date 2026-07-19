@@ -4,7 +4,7 @@ How content authors bring 3D models (units, features, props) into Spring RTS Web
 
 All asset processing happens **offline at conversion time** (during `make build-content` / `gameconverter`). The browser client and the headless game server only consume the pre-baked outputs — `.gltf`, `.bin`, `.ktx2`. Nothing in this document changes runtime behaviour or requires the game to be restarted to take effect; rebuild content, restart the lobby, done.
 
-The companion document [`docs/rendering-models.md`](rendering-models.md) describes how the *runtime* loads and renders these outputs. Read that one if you want to know about thin instances, the team-color shader, or KTX2 transcoding on the GPU.
+The companion document [`docs/rendering-models.md`](rendering-models.md) describes how the *runtime* loads and renders these outputs. Read that one if you want to know about thin instances, the team-colour material plugin, or KTX2 transcoding on the GPU.
 
 ## Directory layout (per game)
 
@@ -199,7 +199,7 @@ data/games/<gameId>/models/<stem>.gltf + .bin + KTX2 siblings
 
 ## Related references
 
-- [`docs/rendering-models.md`](rendering-models.md) — runtime side: thin instances, team-color shader, KTX2 transcoder
+- [`docs/rendering-models.md`](rendering-models.md) — runtime side: thin instances, PBR + team-colour plugin, KTX2 transcoder
 - [`docs/coordinate-system.md`](coordinate-system.md) — LH↔RH spec-compliance work
 - `PLAN-pbr-mapping.md` (repo root) — design history of the four-output PBR channel split
 - `RecoilEngine/rts/Rendering/Textures/S3OTextureHandler.cpp` — Recoil's reference implementation (where `invertAxis` and `invertAlpha` originate)

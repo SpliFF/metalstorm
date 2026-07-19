@@ -47,6 +47,11 @@ export default defineConfig({
     },
     preview: {
         port: parseInt(process.env.WEB_SERVER_PORT || '8012'),
+        // Fail hard if the port is taken (usually a running dev server on the
+        // same default 8012) instead of silently auto-incrementing — a perf
+        // capture pointed at the "preview" URL would otherwise measure the
+        // unminified dev bundle. Dev keeps Vite's auto-increment behaviour.
+        strictPort: true,
         proxy: {
             '/api': {
                 target: `http://localhost:${GAME_SERVER_PORT}`,

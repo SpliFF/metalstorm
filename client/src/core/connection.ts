@@ -769,11 +769,16 @@ export interface ConnectionEvents {
     onProjectileFired?: (events: ProjectileFiredInfo[], frame: number) => void;
     onProjectileImpacts?: (events: ProjectileImpactInfo[], frame: number) => void;
     onProjectileTrajectories?: (events: ProjectileTrajectoryInfo[], frame: number) => void;
-    /** `frame` is the sim frame of the most recent GameEventBatch — the death's
-     *  own frame in practice, since the server broadcasts combat events (which
-     *  carry the kill) immediately before the EntityDestroy for the same tick on
-     *  the same reliable, in-order lane (StateStreamer::Tick). Lets L1 schedule
-     *  the death to land on the same presentation frame as its explosion. */
+    /** `frame` is the client's best lower bound on the death's sim frame:
+     *  max(last GameEventBatch frame, newest entity-state base_frame). When a
+     *  same-tick combat batch preceded the destroy (kill visible to this
+     *  viewer) that batch's frame wins and the death lands on the same
+     *  presentation frame as its explosion; otherwise (Lua DestroyUnit /
+     *  self-d, or the kill event LOS-filtered away — the server sends no
+     *  batch on event-less ticks and filters batches per viewer) the newest
+     *  observed state frame keeps the stamp fresh so the mesh isn't removed
+     *  up to ~D early. Proper L2 fix: a real frame field on the EntityDestroy
+     *  wire message. */
     onEntityDestroy?: (entityId: number, x: number, y: number, z: number, frame: number) => void;
     /** Per-unit sensor radius override. Emitted by
      *  Spring.SetUnitSensorRadius on the server. `sensorType` matches
@@ -882,11 +887,16 @@ export class Connection {
     public playerId: number = 0;
     public myTeam: number = -1;
     private clock = new ServerClock();
-    /** Sim frame of the most recent GameEventBatch. Fed to onEntityDestroy so
-     *  L1 can present a death on the same frame as its (batched) explosion —
-     *  the batch is delivered immediately before the destroy on the same
-     *  reliable, in-order lane (StateStreamer::Tick). */
+    /** Sim frame of the most recent GameEventBatch. When a combat batch for
+     *  the same tick precedes an EntityDestroy (same reliable, in-order lane,
+     *  StateStreamer::Tick) this is the death's own frame, letting L1 present
+     *  the death with its explosion. NOT guaranteed per destroy — see
+     *  handleEntityDestroy. */
     private lastEventFrame = 0;
+    /** Newest entity-state base_frame delivered (post-netsim) — the same
+     *  leading edge PresentationClock.newestObservedFrame tracks, kept here so
+     *  the destroy stamp needs no reach into the worker's clock. */
+    private newestStateFrame = 0;
     private pingInterval: ReturnType<typeof setInterval> | null = null;
     private httpBase = '';  // e.g. "http://localhost:9100"
 
@@ -1502,6 +1512,9 @@ export class Connection {
         if (envelope === ENVELOPE_ENTITY_STATE_FULL || envelope === ENVELOPE_ENTITY_STATE_DELTA) {
             const snapshot = parseEntityState(data.subarray(1));
             if (snapshot) {
+                if (snapshot.baseFrame > this.newestStateFrame) {
+                    this.newestStateFrame = snapshot.baseFrame;
+                }
                 this.events.onEntityState?.(snapshot, envelope === ENVELOPE_ENTITY_STATE_DELTA);
             }
             return;
@@ -2170,12 +2183,21 @@ export class Connection {
     private handleEntityDestroy(msg: ServerMessage): void {
         const destroy = msg.payload(new EntityDestroy()) as EntityDestroy;
         const pos = destroy.position();
+        // The destroy message carries no frame of its own (proper L2 fix: a
+        // real frame field on the EntityDestroy wire message). lastEventFrame
+        // is only the death's frame when a same-tick combat batch preceded it;
+        // the server sends no batch on event-less ticks and LOS-filters batch
+        // contents per viewer while destroys use a different losMask — so a
+        // Lua DestroyUnit / self-d / filtered kill would otherwise inherit an
+        // unrelated, possibly stale batch frame and present the removal up to
+        // ~D (0.13–1 s) early. Fall back to the newest observed entity-state
+        // frame: both are lower bounds on the true death frame, so take the max.
         this.events.onEntityDestroy?.(
             destroy.entityId(),
             pos ? pos.x() : 0,
             pos ? pos.y() : 0,
             pos ? pos.z() : 0,
-            this.lastEventFrame,
+            Math.max(this.lastEventFrame, this.newestStateFrame),
         );
     }
 

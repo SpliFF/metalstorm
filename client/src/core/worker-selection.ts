@@ -18,13 +18,13 @@
  * work in backing-store pixels (= CSS × dpr), so screen coords are scaled by
  * `dpr` before picking / projecting.
  *
- * NOT ported (deliberately, per the c5b-2 scope — "the selection/pick/order
- * core, NOT the full build-placement / pending-command / animated-cursor
- * richness"): build placement + ghosts, build-drag rows, waypoint drag,
- * area-attack drag, modal hotkey commands, animated cursors, widget
- * default-command overrides. Those land in c5b-3 / a richer port. Keyboard
- * order hotkeys also stay out for now (the camera owns key input from c5b-1;
- * routing order hotkeys through here is follow-up work).
+ * NOT ported here (they live in the sibling modules): build placement +
+ * ghosts and build-drag rows (worker-build-placement.ts, G3a), waypoint
+ * drag, area-attack drag, modal hotkey commands and order hotkeys
+ * (worker-command-modes.ts, G3b), animated cursors (main-thread overlay,
+ * driven via gp:cursorMode). Widget default-command overrides ARE handled
+ * here: `updateHover` → onHoverTarget → widget:DefaultCommand (gpInit
+ * wiring) → `setDefaultCommandOverride` → `issueOrderAtScreen`.
  */
 
 import {
@@ -36,12 +36,33 @@ import {
 } from '@babylonjs/core';
 import type { EntityRenderer } from './entity-renderer.js';
 import type { Connection } from './connection.js';
-import { CommandBuffer, CMD, OPT } from './command-buffer.js';
+import { CommandBuffer, CMD, OPT, type CommandNotifier } from './command-buffer.js';
 import { SELECT_PIXEL_RADIUS, SELECT_RADIUS, DRAG_THRESHOLD_PX } from './selection-core.js';
 import { SoundCategory } from './sound-events.js';
 
 /** Canvas-relative CSS-pixel rectangle for the main-thread drag overlay. */
 export interface DragBox { x0: number; y0: number; x1: number; y1: number; }
+
+/** Hover-target transition for the widget DefaultCommand dispatch. `engineCmd`
+ *  is what Spring would issue on right-click absent a widget override
+ *  (friendly → GUARD, enemy → ATTACK, none → MOVE) — the client-side
+ *  equivalent of CGuiHandler::GetDefaultCommand's engine baseline. Feature
+ *  hovering isn't wired yet; targetType is 'unit' or null today. */
+export interface HoverTargetInfo {
+    targetType: 'unit' | 'feature' | null;
+    targetId: number;
+    engineCmd: number;
+}
+
+/** A widget DefaultCommand override for the hovered target, resolved by
+ *  lua-ui-host's dispatchDefaultCommand and pushed back here (gpInit wiring).
+ *  Consulted by `issueOrderAtScreen` so widgets like unit_default_commands /
+ *  cmd_mex_placement steer the right-click order, not just the cursor. */
+export interface DefaultCommandOverride {
+    cmdId: number;
+    targetType: 'unit' | 'feature' | null;
+    targetId: number;
+}
 
 /** A unit-UI sound the selection/order code wants played. The worker selection
  *  layer knows *when* (a click selected a unit, an order was issued) but not
@@ -67,6 +88,13 @@ export interface WorkerSelectionOpts {
      *  from real player gestures — not programmatic `setSelectionExternal`
      *  (Recoil plays no select sound for widget-driven selection). */
     onUiSound?: (req: UiSoundReq) => void;
+    /** Notified when the cursor's hover target changes (a different unit, or
+     *  none). gpInit routes this into lua-ui-host's dispatchDefaultCommand
+     *  (widget:DefaultCommand) and pushes the resolved override back via
+     *  `setDefaultCommandOverride` — Recoil: CGuiHandler::GetDefaultCommand
+     *  walks luaUI->DefaultCommand on every hover change. Fires only on
+     *  transitions so a stationary cursor doesn't flood the Lua runtime. */
+    onHoverTarget?: (info: HoverTargetInfo) => void;
 }
 
 export class WorkerSelection {
@@ -78,6 +106,7 @@ export class WorkerSelection {
     private readonly onDragBox: (box: DragBox | null) => void;
     private readonly onSelectionChange?: (ids: readonly number[]) => void;
     private readonly onUiSound?: (req: UiSoundReq) => void;
+    private readonly onHoverTarget?: (info: HoverTargetInfo) => void;
     private dpr: number;
 
     private selectedIds: number[] = [];
@@ -95,8 +124,17 @@ export class WorkerSelection {
     private dragMoved = false;
 
     /// Latest hovered entity under the cursor (-1 = none). Tracked for the c5c
-    /// sceneState feed + c6 widget DefaultCommand dispatch; no highlight yet.
+    /// sceneState feed + the widget DefaultCommand dispatch; no highlight yet.
     private hoveredId = -1;
+    /// Engine default command for the hovered target (friendly → GUARD,
+    /// enemy → ATTACK, none → MOVE). Paired with hoveredId so onHoverTarget
+    /// fires only on real transitions (old input-manager `hoveredEngineCmd`).
+    private hoveredEngineCmd: number = CMD.MOVE;
+    /// Resolved widget DefaultCommand override for the current hover target,
+    /// pushed by gpInit after dispatchDefaultCommand ran. Cleared/replaced on
+    /// every hover transition, so a stale override never applies to a fresh
+    /// click target (the target-id match in issueOrderAtScreen guards too).
+    private defaultCommandOverride: DefaultCommandOverride | null = null;
 
     constructor(
         scene: Scene,
@@ -112,12 +150,26 @@ export class WorkerSelection {
         this.onDragBox = opts.onDragBox;
         this.onSelectionChange = opts.onSelectionChange;
         this.onUiSound = opts.onUiSound;
+        this.onHoverTarget = opts.onHoverTarget;
         this.dpr = opts.dpr > 0 ? opts.dpr : 1;
     }
 
     /** Keep the device-pixel-ratio current (called from gpResize). */
     setDpr(dpr: number): void {
         if (dpr > 0) this.dpr = dpr;
+    }
+
+    /** Install (or clear) the CommandNotify gate on this owner's
+     *  CommandBuffer (see command-buffer.ts). Wired from gpInit. */
+    setCommandNotifier(fn: CommandNotifier | null): void {
+        this.commandBuffer.setNotifier(fn);
+    }
+
+    /** Store the widget DefaultCommand override resolved for the current
+     *  hover target (null = no override / no widget claimed it). Pushed by
+     *  gpInit's onHoverTarget wiring after dispatchDefaultCommand ran. */
+    setDefaultCommandOverride(info: DefaultCommandOverride | null): void {
+        this.defaultCommandOverride = info;
     }
 
     get selection(): readonly number[] { return this.selectedIds; }
@@ -317,14 +369,27 @@ export class WorkerSelection {
 
         const opts = shift ? OPT.SHIFT : 0;
         const nearest = this.pickNearestEntityAt(groundPos);
+        // Widget DefaultCommand override: when the click lands on the same
+        // target the hover dispatch resolved (unit id match, or ground with a
+        // null-target override), the widget's cmdId replaces the hardcoded
+        // engine default — so unit_default_commands / cmd_mex_placement
+        // actually steer the right-click order (Recoil:
+        // CGuiHandler::GetDefaultCommand → luaUI->DefaultCommand).
+        const override = this.defaultCommandOverride;
+        const overrideAppliesToUnit = override !== null &&
+            override.targetType === 'unit' && nearest.id >= 0 && override.targetId === nearest.id;
+        const overrideAppliesToGround = override !== null &&
+            override.targetType === null && nearest.id < 0;
         if (nearest.id >= 0) {
             const myTeam = this.connection.myTeam;
             const isFriendly = myTeam >= 0 && nearest.team === myTeam;
-            const cmd = isFriendly ? CMD.GUARD : CMD.ATTACK;
+            const engineCmd = isFriendly ? CMD.GUARD : CMD.ATTACK;
+            const cmd = overrideAppliesToUnit ? override.cmdId : engineCmd;
             this.commandBuffer.issueImmediate(cmd, this.selectedIds.slice(), [nearest.id], opts);
         } else {
+            const cmd = overrideAppliesToGround ? override.cmdId : CMD.MOVE;
             this.commandBuffer.issueImmediate(
-                CMD.MOVE, this.selectedIds.slice(),
+                cmd, this.selectedIds.slice(),
                 [groundPos.x, groundPos.y, groundPos.z], opts);
         }
         // Recoil acks an issued order with the first selected unit's `ok`
@@ -355,20 +420,39 @@ export class WorkerSelection {
         if (!camera) return;
         const groundPos = this.pickGroundAt(cssX, cssY, camera);
         if (!groundPos) {
-            if (this.hoveredId !== -1) this.hoveredId = -1;
+            // Cursor off the terrain → no hover target. Emit the null
+            // transition so a stale widget override is cleared.
+            this.setHoverTarget(-1, -1);
             return;
         }
         let id = -1;
+        let team = -1;
         let bestSq = SELECT_RADIUS * SELECT_RADIUS;
-        for (const [eid] of this.entityRenderer.getEntities()) {
+        for (const [eid, meta] of this.entityRenderer.getEntities()) {
             const pos = this.entityRenderer.getEntityPosition(eid);
             if (!pos) continue;
             const dx = pos.x - groundPos.x;
             const dz = pos.z - groundPos.z;
             const distSq = dx * dx + dz * dz;
-            if (distSq < bestSq) { bestSq = distSq; id = eid; }
+            if (distSq < bestSq) { bestSq = distSq; id = eid; team = meta.team; }
         }
+        this.setHoverTarget(id, team);
+    }
+
+    /** Record the hovered entity and, on a transition (different target or a
+     *  different engine default), fire onHoverTarget for the widget
+     *  DefaultCommand dispatch. Ports input-manager's updateHoverTarget. */
+    private setHoverTarget(id: number, team: number): void {
+        const myTeam = this.connection.myTeam;
+        const engineCmd: number = id >= 0
+            ? (myTeam >= 0 && team === myTeam ? CMD.GUARD : CMD.ATTACK)
+            : CMD.MOVE;
+        if (id === this.hoveredId && engineCmd === this.hoveredEngineCmd) return;
         this.hoveredId = id;
+        this.hoveredEngineCmd = engineCmd;
+        this.onHoverTarget?.(id >= 0
+            ? { targetType: 'unit', targetId: id, engineCmd }
+            : { targetType: null, targetId: 0, engineCmd });
     }
 
     // ---- Picking helpers ----

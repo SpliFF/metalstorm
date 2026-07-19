@@ -40,13 +40,13 @@ import {
     loadMapLighting, defaultMapLighting, loadMapWaterAbsorption,
     type MapLighting,
 } from './map-lighting.js';
-import { createSceneLighting, applyMapLighting, type SceneLighting } from './scene-lighting.js';
+import { createSceneLighting, applyMapLighting, setLightingStyle, type SceneLighting } from './scene-lighting.js';
 import { LosBitmapStore, type LosBitmap } from './los-bitmap.js';
 // GW4-c4: world entity rendering moves into the worker. Side-effect import
 // registers Babylon's KTX2 loader + pins the transcoder URLs (previously only
 // done in main.ts) so unit `.ktx2` textures transcode here.
 import './ktx2-config.js';
-import { EntityRenderer, setLightingStyle, setModelMaterialPort } from './entity-renderer.js';
+import { EntityRenderer, setModelMaterialPort } from './entity-renderer.js';
 
 /**
  * The model-material port id that `zk-model-material.ts` reproduces
@@ -223,6 +223,12 @@ let gpShiftHeld = false;
 let gpGameFrame = 0;
 let gpPaused = false;
 let gpSimSpeed = 1;
+/// Tracking-camera toggle (`T` hotkey / window.test.setTrackingCamera). While
+/// on, the view-0 camera refits to the live selection every render frame —
+/// ports the deleted main-thread input-manager's trackingActive /
+/// refitTrackingNow to the worker camera owner. Suppressed while the
+/// model-harness orbit rig owns view 0; reset in gpShutdown.
+let gpTrackingCamera = false;
 /// GW8 (test harness): client-side render-loop freeze, distinct from `gpPaused`
 /// (which mirrors the *server* sim-pause from onGameInfo). `window.test.pause()`
 /// sets this so a screenshot captures a deterministic frame while the sim may
@@ -276,6 +282,10 @@ function gpSchedule(frame: number, kind: ScheduledKind, fire: () => void): void 
     if (gpEventScheduler) gpEventScheduler.schedule(frame, kind, fire);
     else fire();
 }
+/// Sounds fired by the timeline drain this render frame. Accumulated so a
+/// heavy drain posts ONE gp:audioSoundEvents batch (the message already
+/// carries an array) instead of one structured clone per sound.
+let gpDrainedSoundEvents: ResolvedSoundEvent[] = [];
 /// GW4-c3 terrain state, populated once the map data HTTP fetch resolves.
 /// Mirrors the pre-move main.ts `onMapData` terrain build.
 let gpTerrainMesh: Mesh | null = null;
@@ -788,12 +798,20 @@ function gpConnect(msg: GpInitToWorker): void {
         // and (c5) fire a combatFX death burst at its last position. (LuaUI
         // forward to widgets wires up in c6.)
         // PLAN-latency L1: present the death — mesh removal, death burst,
-        // liveState cleanup — on the batch frame (the kill's own frame; the
-        // combat batch precedes this destroy on the same reliable lane), so the
-        // unit vanishes with its explosion instead of ~D frames before the
-        // interpolated body arrives. Past-due (no batch yet) → next drain.
+        // liveState cleanup — on `frame` (the connection's best lower bound on
+        // the death frame: same-tick combat-batch frame when the kill was
+        // visible, else the newest entity-state frame — see handleEntityDestroy),
+        // so the unit vanishes with its explosion instead of ~D frames before
+        // the interpolated body arrives. Past-due (no batch yet) → next drain.
         onEntityDestroy: (entityId, x, y, z, frame) => {
             gpSchedule(frame, 'destroy', () => {
+                // Server unit-IDs are recycled: by the time this scheduled
+                // destroy fires, the ID may already belong to a newly visible
+                // unit — removing it would wipe the new unit's mesh and emit a
+                // spurious UnitDestroyed. State newer than the destroy frame
+                // means exactly that; skip.
+                const meta = gpCtx.entityRenderer?.getEntityMeta(entityId);
+                if (meta && meta.lastStateFrame > frame) return;
                 gpCtx.entityRenderer?.removeEntity(entityId);
                 gpBuildingPlateRenderer?.remove(entityId);
                 gpCombatFX?.onCombatEvents([{
@@ -919,8 +937,10 @@ function gpConnect(msg: GpInitToWorker): void {
                     e.sourceDefId, e.soundId);
                 if (!ref) continue;
                 const resolved: ResolvedSoundEvent = { e, ref };
+                // Collected into gpDrainedSoundEvents; the render loop posts
+                // one batch to main after the drain (fire order preserved).
                 gpSchedule(frame, 'sound', () => {
-                    postToMain({ type: 'gp:audioSoundEvents', events: [resolved] });
+                    gpDrainedSoundEvents.push(resolved);
                 });
             }
         },
@@ -1481,6 +1501,10 @@ export function gpInit(msg: GpInitToWorker): void {
             if (viewId === 0 && gpOrbitRig) continue;
             cam.tick();
         }
+        // Tracking camera (`T` / window.test.setTrackingCamera): refit view 0
+        // to the live selection each frame, after the camera tick so the refit
+        // pose wins. Suppressed while the orbit rig owns the view-0 camera.
+        if (gpTrackingCamera && !gpOrbitRig) gpRefitTrackingCamera();
         gpOrbitRig?.tick();
         gpSunRig?.tick(dt);
         gpClipPlayer?.tick();
@@ -1497,6 +1521,13 @@ export function gpInit(msg: GpInitToWorker): void {
         // impact removes its projectile from this frame's live snapshot.
         if (gpPresentationClock && gpEventScheduler) {
             gpEventScheduler.drain(gpPresentationClock.P);
+            // Flush the drain's fired sounds as ONE post — a heavy drain
+            // (mass kill, refocus) would otherwise structured-clone dozens
+            // of per-sound messages. Order within the batch is drain order.
+            if (gpDrainedSoundEvents.length > 0) {
+                postToMain({ type: 'gp:audioSoundEvents', events: gpDrainedSoundEvents });
+                gpDrainedSoundEvents = [];
+            }
         }
         gpMark(1);  // entity
         gpBuildBeamRenderer?.tick();
@@ -1647,6 +1678,25 @@ export function gpInit(msg: GpInitToWorker): void {
             }
             postToMain({ type: 'gp:audioSoundEvents', events: [ev] });
         },
+        // PLAN-playable G3: hover-target changes drive widget:DefaultCommand
+        // (Recoil: CGuiHandler::GetDefaultCommand walks luaUI->DefaultCommand).
+        // Same worker as the LuaUI runtime — direct dispatch, no boundary hop.
+        // The resolved cmd feeds Spring.GetDefaultCommand (liveState) and the
+        // right-click override in issueOrderAtScreen, so widgets like ZK's
+        // unit_default_commands / cmd_mex_placement steer the RMB order.
+        onHoverTarget: (info) => {
+            const resolved = dispatchDefaultCommand(
+                info.targetType, info.targetId, info.engineCmd);
+            liveState.defaultCommand = {
+                targetType: info.targetType,
+                targetId: info.targetId,
+                engineCmd: info.engineCmd,
+                cmdId: resolved,
+            };
+            gpCtx.selection?.setDefaultCommandOverride({
+                cmdId: resolved, targetType: info.targetType, targetId: info.targetId,
+            });
+        },
     });
     gpCtx.selection = selection;
 
@@ -1675,6 +1725,23 @@ export function gpInit(msg: GpInitToWorker): void {
         getLastCommandQueues: () => gpLastCommandQueues,
         onCursorMode: (req) => postToMain({ type: 'gp:cursorMode', name: req.name, css: req.css }),
     });
+
+    // Route every natively-issued order (RMB move/attack/guard, order hotkeys,
+    // modal resolves, area attack, build placement) through
+    // widgetHandler:CommandNotify before it reaches the server — Recoil passes
+    // every GUI command through luaUI->CommandNotify first, so veto widgets
+    // (cmd_no_duplicate_orders, cmd_raw_move_issue, ...) must see these too. A
+    // truthy widget return consumes (vetoes) the send. Synchronous: the LuaUI
+    // runtime lives in this worker (dispatchCommandNotify is a direct Fengari
+    // call; it fails open — returns false — before the runtime boots).
+    {
+        const commandNotifier = (
+            cmdId: number, params: readonly number[], options: number,
+        ): boolean => dispatchCommandNotify(cmdId, params, options);
+        selection.setCommandNotifier(commandNotifier);
+        gpBuildPlacement.setCommandNotifier(commandNotifier);
+        gpCommandModes.setCommandNotifier(commandNotifier);
+    }
 
     // G3b: route Spring.SetActiveCommand (order menu → widget worker shim) into
     // the worker. Build commands (cmdId<0) arm ground placement (same as the
@@ -2186,6 +2253,7 @@ export function gpShutdown(): void {
     gpStandingOrderRenderer = null;
     gpLastCommandQueues = [];
     gpShiftHeld = false;
+    gpTrackingCamera = false;
     gpCtx.connection?.disconnect();
     gpCtx.connection = null;
     gpCtx.entityRenderer?.dispose();
@@ -2200,6 +2268,7 @@ export function gpShutdown(): void {
     // now-dead renderers/connection.
     gpEventScheduler?.clear();
     gpEventScheduler = null;
+    gpDrainedSoundEvents = [];
     // GW4-c5: weapon-FX / projectile / decal / build / feature modules.
     gpCtx.projectileRenderer?.dispose();
     gpCtx.projectileRenderer = null;
@@ -2340,9 +2409,10 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
         case 'cameraSaveSlot': cam?.saveSlot(num(0)); return null;
         case 'cameraLoadSlot': return cam?.loadSlot(num(0), num(1)) ?? false;
         case 'setTrackingCamera':
-            // DEFERRED (GW8): the tracking-camera state machine lived on the
-            // main-thread InputManager; not yet ported to the worker camera.
-            postLog(2, '[gp:test] setTrackingCamera not yet wired in the worker — ignoring');
+            // Programmatic tracking toggle (scenarios: weapon-fx /
+            // weapon-showcase). Same state machine as the `T` hotkey — the
+            // view-0 camera refits to the live selection every render frame.
+            gpSetTrackingCamera(Boolean(args[0]));
             return null;
         // — composite: resolve unit position(s) worker-side, then frame —
         case 'focusUnit': {
@@ -2627,14 +2697,98 @@ export function gpHandleWheel(x: number, y: number, delta: number, viewId: numbe
     gpDispatchMouseWheel(delta < 0, -delta);
 }
 
+/// Spring's classic `+`/`-` sim-speed ladder (ports the deleted input-manager's
+/// bumpSimSpeed). Steps from the last server-reported speed (gpSimSpeed) and
+/// sends the new value via the same ConsoleCommand channel the debug console
+/// uses; the server broadcasts the applied state back through GameInfo.
+const GP_SPEED_LADDER = [0.1, 0.2, 0.5, 1, 2, 3, 5, 8, 10, 20, 50, 100];
+function gpBumpSimSpeed(dir: 1 | -1): void {
+    const cur = gpSimSpeed;
+    let next = cur;
+    if (dir > 0) {
+        for (const v of GP_SPEED_LADDER) { if (v > cur + 1e-3) { next = v; break; } }
+    } else {
+        for (let i = GP_SPEED_LADDER.length - 1; i >= 0; i--) {
+            if (GP_SPEED_LADDER[i] < cur - 1e-3) { next = GP_SPEED_LADDER[i]; break; }
+        }
+    }
+    if (Math.abs(next - cur) < 1e-3) return;
+    gpCtx.connection?.sendConsoleCommand('server', `speed ${next}`);
+}
+
+/// Toggle the tracking camera (`T` / window.test.setTrackingCamera). While on,
+/// gpRefitTrackingCamera runs every render frame; switching it on snaps once
+/// immediately so the toggle has visible effect even when nothing moves.
+function gpSetTrackingCamera(on: boolean): void {
+    gpTrackingCamera = on;
+    if (on) gpRefitTrackingCamera();
+}
+
+/// Refit the view-0 camera to the live selection (tracking camera). Reads the
+/// interpolated positions from EntityRenderer and asks the RTS camera to frame
+/// them — the same padding/pitch the deleted input-manager's refitTrackingNow
+/// used. No-ops when nothing is selected or no position is known yet.
+function gpRefitTrackingCamera(): void {
+    const cam = gpViewCameras.get(0);
+    const er = gpCtx.entityRenderer;
+    const sel = gpCtx.selection?.selection ?? [];
+    if (!cam || !er || sel.length === 0) return;
+    const pts: { x: number; y: number; z: number }[] = [];
+    for (const id of sel) {
+        const p = er.getEntityPosition(id);
+        if (p) pts.push(p);
+    }
+    if (pts.length === 0) return;
+    cam.fitPoints(pts, { padding: 1.6, pitchDeg: 55, durationMs: 0 });
+}
+
+/// Global sim-control hotkeys, ported from the deleted main-thread
+/// input-manager (setupKeyboardHandler's "global hotkeys" block): `+`/`-` step
+/// the sim-speed ladder, `\` resets to 1× (an old Spring binding), Pause
+/// toggles the server pause, `T` toggles the tracking camera (Spring binds
+/// Backspace; `T` because Backspace is browser back-nav). Guarded on no
+/// ctrl/alt/meta — shift is allowed since `+` is shift-`=` on US layouts (the
+/// physical-key codes make the layout point moot, but the guard semantics
+/// match the original). The old "ignore while typing in an input" guard lives
+/// on main: CameraInput skips key events targeted at INPUT/TEXTAREA, so they
+/// never reach this worker. Returns true when the key was consumed.
+function gpHandleGlobalHotkey(code: string, mods: number): boolean {
+    if ((mods & (2 | 4 | 8)) !== 0) return false;
+    switch (code) {
+        case 'Equal':          // '+' (shift-'=') and '='
+        case 'NumpadAdd':
+            gpBumpSimSpeed(+1);
+            return true;
+        case 'Minus':          // '-' and '_'
+        case 'NumpadSubtract':
+            gpBumpSimSpeed(-1);
+            return true;
+        case 'Backslash':
+            gpCtx.connection?.sendConsoleCommand('server', 'speed 1');
+            return true;
+        case 'Pause':
+            gpCtx.connection?.sendConsoleCommand('server', gpPaused ? 'unpause' : 'pause');
+            return true;
+        case 'KeyT':
+            gpSetTrackingCamera(!gpTrackingCamera);
+            return true;
+    }
+    return false;
+}
+
 export function gpHandleKeyDown(code: string, mods: number, viewId: number): void {
     if (!gpOrbitOwnsView(viewId)) gpViewCameras.get(viewId)?.keyDown(String(code).toLowerCase());
     gpSetShift((mods & 1) !== 0);
-    // PLAN-playable.md G3b: order hotkeys (modal arms m/a/f/p/g/r/e/c/x/d/l/u +
-    // instant s/w/h/q/i). A convenience layer over the faithful SetActiveCommand
-    // path (see worker-command-modes header); fires alongside the LuaUI KeyPress
-    // dispatch. No WASD binding, so no conflict with the camera's arrow movement.
-    gpCommandModes?.handleOrderKey(String(code), mods);
+    // Global sim-control hotkeys (+/-/\ sim speed, Pause, T tracking camera)
+    // run first and consume the key when they fire; they must work without a
+    // selection, unlike the order hotkeys below.
+    if (!gpHandleGlobalHotkey(String(code), mods)) {
+        // PLAN-playable.md G3b: order hotkeys (modal arms m/a/f/p/g/r/e/c/x/d/l/u +
+        // instant s/w/h/q/i). A convenience layer over the faithful SetActiveCommand
+        // path (see worker-command-modes header); fires alongside the LuaUI KeyPress
+        // dispatch. No WASD binding, so no conflict with the camera's arrow movement.
+        gpCommandModes?.handleOrderKey(String(code), mods);
+    }
     gpDispatchKeyPress(codeToSpringKeysym(String(code)), mods);
 }
 

@@ -5,9 +5,9 @@ and the gotchas you need to know before changing anything.
 
 The implementation is split across three modules:
 
-- [client/src/core/scene-lighting.ts](../client/src/core/scene-lighting.ts) — builds the sun + ambient + HDR pipeline + CSM
+- [client/src/core/scene-lighting.ts](../client/src/core/scene-lighting.ts) — builds the sun + ambient + HDR pipeline + CSM; owns the lighting-style / ambient-level knobs
 - [client/src/core/map-lighting.ts](../client/src/core/map-lighting.ts) — fetches and parses `mapinfo.lua → lighting`
-- [client/src/core/entity-renderer.ts](../client/src/core/entity-renderer.ts) — team-color shader with custom CSM sampling
+- [client/src/core/entity-renderer.ts](../client/src/core/entity-renderer.ts) + [team-color-plugin.ts](../client/src/core/team-color-plugin.ts) — unit `PBRMaterial` + team-colour material plugin
 
 See [PLAN-lighting.md](../PLAN-lighting.md) for the rollout phases. This
 doc describes the live state plus the non-obvious traps.
@@ -32,7 +32,9 @@ DefaultRenderingPipeline (HDR + ACES)
     v
 Per-material shadow sampling:
     - StandardMaterial / PBRMaterial   → Babylon's stock CSM integration (PCF mode)
-    - teamColor ShaderMaterial         → manual sample of sampler2DArray depth layers
+      (units included — PBRMaterial + TeamColorPlugin)
+    - ZK material port (zk-939)        → manual sample of sampler2DArray depth layers
+                                         (zk-model-material.ts, hand-ported ZK CUS)
 ```
 
 Lighting (and all render-only map data) is **client-only** — the server
@@ -66,6 +68,17 @@ separate these per-material, so we approximate by hemisphere
 orientation: `diffuse = groundAmbient` (up-facing terrain), `groundColor
 = unitAmbient` (down-facing unit underbellies). Faithful per-material
 split is L3+ work.
+
+**FIDELITY-STANDIN — ambient desaturation.** Both hemisphere colours are
+pulled 80% toward neutral grey (`AMBIENT_DESATURATION` in
+scene-lighting.ts) before being applied. Recoil applies the map's
+ambient verbatim; the desaturation exists because a saturated map
+ambient (green_flat_x34_v3's `groundAmbientColor = {0.6, 0.9, 0.2}`)
+drenched every PBR-lit unit in green. Because the one hemispheric light
+also lights terrain and map features, this neutralises a deliberately
+tinted ambient (e.g. lava-red) **scene-wide**, not just on units.
+Revisit when the per-material ambient split above is built — the
+desaturation should then apply only to the unit half.
 
 ### Read/write round-trip (`gl.GetSun` ↔ `Spring.SetSunLighting`)
 
@@ -177,61 +190,36 @@ scene.
 
 ### Unit material — PBRMaterial + TeamColorPlugin
 
-> **SUPERSEDED (unit rendering).** Units no longer use the hand-rolled
-> `teamColor` `ShaderMaterial` described below. `createUnitPBRMaterial`
-> (entity-renderer.ts) now builds a stock Babylon **`PBRMaterial`** (glTF
-> metallic-roughness: albedo + ORM + normal + emissive bound natively) plus a
-> **`TeamColorPlugin`** (`MaterialPluginBase`, `team-color-plugin.ts`) that
-> rewrites `surfaceAlbedo` with `mix(albedo, teamColor, mask)` before the light
-> loop. PBR consumes the scene sun + hemispheric ambient + CSM shadow
-> automatically (identical to feature-renderer.ts), with `csm.addShadowCaster` +
-> `receiveShadows = true` set at the mesh level — so units get correct PBR and
-> real self-shadowing for free, matching the authored glTF look. The custom
-> shader (and its manual sun/CSM binding) existed only to do team colour and had
-> to re-implement lighting badly; the plugin does team colour on top of correct
-> engine lighting instead. A saturated map ambient is desaturated toward grey
-> (`AMBIENT_DESATURATION` in scene-lighting.ts) so units don't drink the
-> terrain's colour. The ZK (`zk-939`) material port is unchanged. *(The custom
-> `teamColor` ShaderMaterial code is retired but not yet deleted — a follow-up
-> cleanup; the description below is historical.)*
+`createUnitPBRMaterial` (entity-renderer.ts) builds a stock Babylon
+**`PBRMaterial`** (glTF metallic-roughness: albedo + ORM + normal + emissive
+bound natively) plus a **`TeamColorPlugin`** (`MaterialPluginBase`,
+`team-color-plugin.ts`) that rewrites `surfaceAlbedo` with
+`mix(albedo, teamColor, mask)` before the light loop. PBR consumes the scene
+sun + hemispheric ambient + CSM shadow automatically (identical to
+feature-renderer.ts), with `csm.addShadowCaster` + `receiveShadows = true` set
+at the mesh level — so units get correct PBR and real self-shadowing for free,
+matching the authored glTF look. The previous hand-rolled `teamColor`
+`ShaderMaterial` (which re-implemented sun + ambient + CSM manually, badly) is
+**deleted**. The ZK (`zk-939`) material port is unchanged — it still binds its
+own sun/CSM uniforms manually (zk-model-material.ts).
 
-The unit shader is a plain `ShaderMaterial` so Babylon's automatic
-light binding doesn't fire. We bind the sun + CSM uniforms ourselves:
+Team-mask semantics in the plugin:
 
-- `setActiveShadowGenerator(csm, sun)` registers the module-local CSM
-  reference.
-- `createTeamColorMaterial()` adds an `onBindObservable` callback that
-  calls `bindShadowUniforms(mat)` every frame, copying the current
-  cascade matrices, splits, depth array, and sun direction onto the
-  material.
-
-The fragment shader samples the depth array via `sampler2DArray`
-(plain depth, not PCF-compare), picks the smallest cascade whose
-`csmSplits[i]` still contains the fragment's `vViewZ`, projects the
-world-space position through `csmMatrices[cascade]`, and does a manual
-depth compare with a `0.0015` bias. Out-of-cascade / out-of-UV
-fragments return 1.0 (unshadowed) so they fall through to the next
-cascade or the ambient lighting.
-
-The sun-visibility result attenuates ONLY the directional + specular
-terms — the ambient floor stays put, so shadows go darker but not
-black, matching how Spring / ZK shaders darken shadowed surfaces.
-
-`bindShadowUniforms` also uploads **`sunColor` = `sun.diffuse × sun.intensity`**
-every frame, and the directional + specular terms are multiplied by it
-(`lit = albedo·(ambient + sunColor·sunTerm·sunVis) + spec·sunVis·sunColor`).
-This is what makes units track the actual sun — day/night, a tinted sun,
-or a below-horizon sun (`sunColor → 0` ⇒ ambient-only, so the model darkens
-with the terrain instead of staying a constant grey). A white full-intensity
-sun (the common case) is a no-op versus the old geometry-only shading. The
-ambient floor is deliberately NOT sun-scaled — it's the sky/bounce fill that
-keeps a fully unlit face from going pure black.
+- **Mask present** (`<tex1stem>_team.ktx2`, R channel) — blend amount per
+  texel; modinfo `invertteamcolor` flips the sample (the invert applies
+  only when a mask exists).
+- **No mask, real albedo** — no tint. **FIDELITY:** deliberate deviation
+  from Recoil, whose S3O convention is tex1-alpha = 1 ⇒ full team tint; a
+  full-tint default here flooded maskless models (the wz_* baseline went
+  solid lavender).
+- **No mask, synthesized albedo** (`syntheticAlbedo` flag — model has
+  geometry but no texture config, e.g. ZK's `factoryveh`) — full team
+  tint, so untextured models render as flat team-coloured shapes instead
+  of flat white.
 
 ### Per-game lighting style (`modinfo.lua` `lighting` field)
 
-The team-color fragment shader compiles two variants behind a
-`#define USE_HALF_LAMBERT` toggle. The choice is set per-game in
-`modinfo.lua`:
+The choice is set per-game in `modinfo.lua`:
 
 ```lua
 return {
@@ -241,30 +229,36 @@ return {
 }
 ```
 
-| Value | Define set? | Formula (sun terms ×`sunColor`) | Best for |
-|---|---|---|---|
-| `'gameplay'` (default, omit = same) | yes | `halfLambert = N·L*0.5+0.5`; `ambient = 0.45` (fixed); `sun = 0.55*halfLambert + 0.05*skyTint` | RTS camera at 200–400 elmos — silhouettes stay readable when units are a few pixels tall. BAR/papertanks. |
-| `'realistic'` | no | `lambert = max(0, N·L)`; `ambient = ambientLevel*(0.35 + 0.65*skyTint)`; `sun = lambert` | Close-up / cinematic — strong front/back contrast, side faces darken cleanly. **Metalstorm** uses this. |
+On the PBR path the style is expressed in **scene-lighting.ts** as the
+hemispheric ambient-fill weight relative to the sun (the old custom
+shader's `USE_HALF_LAMBERT` / `ambientLevel` mechanism died with the
+shader):
 
-The realistic branch's ambient floor is a live-tunable uniform: **`ambientLevel`**
-(default `0.10` — the cinematic look chosen for Metalstorm; lower = deeper
-shadows + darker at night). Change it in-engine via `setAmbientLevel(value,
-scene)` (entity-renderer), which updates every existing material immediately —
-the model-viewer's Sun & light panel and the `__gp` worker hook drive it. The
-gameplay half-Lambert branch keeps its own **fixed** `0.45` floor so
-BAR/papertanks are unaffected by the knob. `ambientLevel` is compiled out of the
-gameplay build (declared + bound only for realistic materials).
+| Value | Ambient intensity | Best for |
+|---|---|---|
+| `'gameplay'` (default, omit = same) | map-authored level × **1.0** (unchanged look) | RTS camera at 200–400 elmos — strong fill keeps silhouettes readable when units are a few pixels tall. BAR/papertanks. |
+| `'realistic'` | map-authored level × **0.2** | Close-up / cinematic — deep unlit faces, strong front/back contrast. **Metalstorm** uses this. The 0.2 factor carries over the old shader's 0.10-vs-0.45 ambient-floor ratio. |
+
+Because the hemispheric light is scene-wide, `'realistic'` darkens the
+ambient fill on terrain and features too — consistent with the cinematic
+intent, but broader than the old per-unit uniform. The switch is live (no
+shader recompile): `setLightingStyle(style)` (scene-lighting.ts) applies
+to the active rig immediately and every later `applyMapLighting` respects
+it. Unknown values fall back to `'gameplay'` so an unrecognised string
+from a future protocol revision doesn't darken the scene.
 
 Flow: `modinfo.lua → game.config.lua wrapper → GameDiscovery::GameInfo
-(C++) → LobbyGameInfo FlatBuffer + /api/games JSON → lobby-ui's
-AvailableGameInfo → setLightingStyle() in main.ts before
-EntityRenderer constructor`. The setter is **per-game-session**, not
-per-frame — picked once at game-start. Mid-game switching would require
-recompiling every existing ShaderMaterial program; not currently
-implemented.
+(C++) → LobbyGameInfo FlatBuffer + /api/games JSON → gp:init →
+setLightingStyle() in game-processor.ts` right after
+`createSceneLighting`.
 
-Unknown values fall back to `'gameplay'` so an unrecognised string
-from a future protocol revision doesn't render units flat-coloured.
+The ambient fill is also directly live-tunable: **`setAmbientLevel(value)`**
+(scene-lighting.ts, exposed to the worker console as
+`window.__gp('__setAmbientLevel(0.25)')`) overrides the style-derived
+hemispheric intensity outright — lower = deeper unlit faces and darker
+shadow floors. The override resets at the next game session. While a
+`SunRig` day-night cycle runs it owns `ambient.intensity` and will
+overwrite live retunes until disabled.
 
 ## ⚠️ Gotcha: thin-instance matrix packing breaks shadow casting
 
@@ -294,9 +288,9 @@ For a unit at `groundY = 100` with a vertex at `position.y = 10`, that
 gives `wp.w = 1001`. After the perspective divide, caster vertices
 collapse toward the world origin in light-space NDC. Result: unit
 silhouettes in the shadow map are wrong-shape, bidirectional, or
-streaky — and the bug only shows up on **shadows**, not the main pass,
-because the main pass uses our custom team-color shader which DOES
-rebuild `gl_Position` from `wp.xyz`.
+streaky — and (at the time, under the since-deleted custom team-color
+shader) the bug only showed up on **shadows**, not the main pass,
+because that shader rebuilt `gl_Position` from `wp.xyz`.
 
 This bug burned us once already (mid-May 2026). The previous comment
 that justified the packing — "affine transforms always have m30=m31=
@@ -310,8 +304,11 @@ separate per-instance vertex attribute via
 than packing into the matrix. The world matrix then stays a clean
 affine transform and both passes project correctly.
 
-The build animation in [entity-renderer.ts TEAMCOLOR_VERTEX](../client/src/core/entity-renderer.ts) is currently disabled (the shader holds `vBuildProgress = 1.0`
-and `groundY = 0.0`) pending the per-instance attribute plumbing.
+The build-progress nanoframe effect was dropped along with the custom
+unit shader (it was already dead — the vertex stage hardcoded
+`vBuildProgress = 1.0`). Re-adding it means a material-plugin hook on
+the unit `PBRMaterial` fed by a per-instance attribute, per the rule
+above.
 
 ## Live tuning hooks
 
@@ -322,3 +319,9 @@ Available in DevTools:
 | `window.__renderPipeline` | `DefaultRenderingPipeline` — exposure, contrast, tonemap, FXAA |
 | `window.__csm` | `CascadedShadowGenerator` — bias, normalBias, lambda, darkness |
 | `window.__mapLighting` | Last `MapLighting` applied (parsed `mapinfo.lua`) |
+| `__setAmbientLevel(v)` | Override the hemispheric ambient intensity (see "Per-game lighting style") |
+| `__setLightingStyle(s)` | Switch `'gameplay'`/`'realistic'` live |
+
+The render scene lives in the game-processor worker, so reach these via
+`window.__gp('...')` from the main DevTools console (e.g.
+`window.__gp('__setAmbientLevel(0.25)')`).

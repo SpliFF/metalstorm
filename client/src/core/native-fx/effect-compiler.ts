@@ -467,16 +467,19 @@ function concat(a: Float32Array | null, b: Float32Array): Float32Array {
 }
 
 /** Pack one trail segment row (iP1 iP2 iUVAlpha) — helper shared by the
- *  stage's trail streamer and any future worker adapter. */
+ *  stage's trail streamer and any future worker adapter. Per-end pairing:
+ *  u1/a1 belong to p1 and u2/a2 to p2 (trail.vert.glsl mixes iUVAlpha.x at
+ *  the p1 end and .y at the p2 end) — the caller decides which endpoint
+ *  carries the smaller U. */
 export function packTrailSegment(
     out: Float32Array, offset: number,
     p1: [number, number, number], w1: number,
     p2: [number, number, number], w2: number,
-    uMin: number, uMax: number, a1: number, a2: number,
+    u1: number, u2: number, a1: number, a2: number,
 ): void {
     out[offset + 0] = p1[0]; out[offset + 1] = p1[1]; out[offset + 2] = p1[2]; out[offset + 3] = w1;
     out[offset + 4] = p2[0]; out[offset + 5] = p2[1]; out[offset + 6] = p2[2]; out[offset + 7] = w2;
-    out[offset + 8] = uMin;  out[offset + 9] = uMax;  out[offset + 10] = a1;   out[offset + 11] = a2;
+    out[offset + 8] = u1;    out[offset + 9] = u2;    out[offset + 10] = a1;   out[offset + 11] = a2;
 }
 
 /** Pack one tracer row (iHeadLife iVelTime iShape iColor). */

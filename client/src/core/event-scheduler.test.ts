@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { EventScheduler } from './event-scheduler.js';
+import { EventScheduler, COSMETIC_STALE_FRAMES } from './event-scheduler.js';
 
 describe('EventScheduler', () => {
     it('fires nothing before the cursor reaches the scheduled frame', () => {
@@ -35,7 +35,7 @@ describe('EventScheduler', () => {
         expect(fired).toEqual(['a', 'b', 'c', 'd']);
     });
 
-    it('fires past-due events immediately on the next drain (never drops)', () => {
+    it('fires past-due events immediately on the next drain', () => {
         const s = new EventScheduler();
         const fired: number[] = [];
         // Cursor is already at 100 when a frame-40 event arrives (e.g. after a
@@ -44,6 +44,39 @@ describe('EventScheduler', () => {
         s.drain(100);
         expect(fired).toEqual([40]);
         expect(s.size).toBe(0);
+    });
+
+    it('drops cosmetic events staler than the staleness horizon', () => {
+        const s = new EventScheduler();
+        const fired: number[] = [];
+        // Hidden-tab scenario: FX queued at frame 10, next drain happens
+        // only after refocus with the cursor far past the horizon.
+        s.schedule(10, 'combatFx', () => fired.push(10));
+        s.schedule(12, 'sound', () => fired.push(12));
+        s.schedule(14, 'impact', () => fired.push(14));
+        s.drain(14 + COSMETIC_STALE_FRAMES + 1); // past the horizon of all three
+        expect(fired).toEqual([]);   // dropped without firing
+        expect(s.size).toBe(0);      // …but removed from the queue
+    });
+
+    it('always fires state-critical events no matter how stale', () => {
+        const s = new EventScheduler();
+        const fired: string[] = [];
+        s.schedule(10, 'destroy', () => fired.push('destroy'));
+        s.schedule(10, 'losReveal', () => fired.push('losReveal'));
+        s.schedule(10, 'combatFx', () => fired.push('combatFx'));
+        s.drain(10_000); // hours past the horizon
+        expect(fired).toEqual(['destroy', 'losReveal']);
+        expect(s.size).toBe(0);
+    });
+
+    it('fires fresh cosmetic events at or within the staleness horizon', () => {
+        const s = new EventScheduler();
+        const fired: number[] = [];
+        s.schedule(10, 'combatFx', () => fired.push(10));
+        // Exactly at the horizon boundary — still fires (drop is strictly >).
+        s.drain(10 + COSMETIC_STALE_FRAMES);
+        expect(fired).toEqual([10]);
     });
 
     it('interleaves late-arriving earlier frames correctly across drains', () => {
@@ -127,7 +160,7 @@ describe('EventScheduler', () => {
         const frames = [7, 3, 9, 1, 4, 1, 8, 2, 6, 5, 3, 0];
         const fired: number[] = [];
         for (const f of frames) s.schedule(f, 'impact', () => fired.push(f));
-        s.drain(1000);
+        s.drain(50); // within the cosmetic staleness horizon of every frame
         expect(fired).toEqual([...frames].sort((a, b) => a - b));
     });
 });

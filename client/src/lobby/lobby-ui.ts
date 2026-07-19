@@ -183,7 +183,9 @@ export class LobbyUI {
     /// (`?direct=`) modes, which own the screen and drive the game
     /// themselves — otherwise the async game-template load resolving into
     /// setTemplates() re-renders (and un-hides) the login form the runner
-    /// had already hidden. See main.ts scenario/direct dispatch.
+    /// had already hidden. See main.ts scenario/direct dispatch. Not
+    /// permanent: quitToLobby lifts it via unsuppress() so quitting a
+    /// scenario/direct game still lands on a usable lobby.
     private suppressed = false;
 
     constructor(
@@ -291,6 +293,17 @@ export class LobbyUI {
     }
     show(): void { if (this.suppressed) return; this.container.style.display = 'flex'; }
     hide(): void { this.container.style.display = 'none'; }
+
+    /**
+     * Lift the scenario/direct-boot suppression so the lobby can render
+     * again. Called by main.ts's quitToLobby: in suppressed mode every
+     * show*() path is a no-op, so an ESC-quit out of a `?scenario=` /
+     * `?direct=` game would otherwise land on a permanently blank page.
+     * The template bundle swapped in via setTemplates() while suppressed
+     * was deliberately retained for exactly this un-suppress. No-op when
+     * not suppressed (the normal lobby flow).
+     */
+    unsuppress(): void { this.suppressed = false; }
 
     /**
      * Inject an already-acquired session token into the lobby. Used by

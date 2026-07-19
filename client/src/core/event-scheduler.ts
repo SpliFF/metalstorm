@@ -20,7 +20,15 @@
  * order events were scheduled (a monotonic sequence tiebreaker on the heap, so
  * same-frame effects stay deterministic). Past-due events (frame ≤ P at
  * schedule time — e.g. an event that arrives after a stall, or before the
- * cursor has anchored) fire on the very next drain; nothing is ever dropped.
+ * cursor has anchored) fire on the very next drain.
+ *
+ * State vs cosmetic: `drain` only runs from the worker render loop, but the
+ * transport keeps delivering while rAF is throttled (hidden tab) — so the
+ * queue can accumulate minutes of off-screen combat and refocus would fire it
+ * all in one burst. Kinds whose `fire` mutates client state (entity removal,
+ * liveState sweeps, reveals) always run, however late; cosmetic kinds (FX,
+ * sounds, impact visuals) are silently dropped once they lag the cursor by
+ * more than COSMETIC_STALE_FRAMES, collapsing hidden-tab backlogs safely.
  */
 
 /** Event families the timeline carries. `projSpawn`/`projDetonate` are wired by
@@ -33,6 +41,25 @@ export type ScheduledKind =
     | 'losReveal'
     | 'projSpawn'
     | 'projDetonate';
+
+/** Kinds whose `fire` mutates client state — mesh/liveState removal
+ *  ('destroy'), renderer adds ('losReveal'). Skipping one leaks meshes or
+ *  desyncs liveState, so they always fire, however late. Every other kind is
+ *  cosmetic (presentation-only FX/audio; even a dropped 'impact' is safe —
+ *  the projectile renderer self-sweeps via TTL / MAX_ORPHAN_LIFE_MS). */
+const STATE_CRITICAL: ReadonlySet<ScheduledKind> = new Set<ScheduledKind>([
+    'destroy',
+    'losReveal',
+]);
+
+/** Staleness horizon for cosmetic fires, in sim frames: 90 ≈ 3 s at
+ *  GAME_SPEED 30 — 3× the display-delay ceiling (DELAY_CEIL_FRAMES = 30 in
+ *  presentation-clock.ts, the largest lag a *legitimately* late event can
+ *  carry, since events arrive ~D ahead of the cursor). The 3× slack covers
+ *  hard-snap stalls and drain hiccups without ever dropping an on-screen
+ *  effect, while a hidden-tab backlog (minutes of frames) collapses to
+ *  silence on refocus instead of firing as one burst. */
+export const COSMETIC_STALE_FRAMES = 90;
 
 export interface Scheduled {
     /** Sim frame the event should be presented on. */
@@ -57,12 +84,18 @@ export class EventScheduler {
     /**
      * Fire every queued event with `frame <= P`, in ascending (frame, seq)
      * order. Call once per render frame with the current presentation cursor.
-     * A throwing `fire` callback is caught and logged so one bad consumer can't
-     * abort the drain (or the render loop).
+     * Cosmetic events staler than COSMETIC_STALE_FRAMES are dropped without
+     * firing (hidden-tab refocus burst collapse); state-critical kinds always
+     * fire. A throwing `fire` callback is caught and logged so one bad
+     * consumer can't abort the drain (or the render loop).
      */
     drain(P: number): void {
         while (this.heap.length > 0 && this.heap[0].frame <= P) {
             const ev = this.heapPop()!;
+            if (!STATE_CRITICAL.has(ev.kind) &&
+                P - ev.frame > COSMETIC_STALE_FRAMES) {
+                continue;
+            }
             try {
                 ev.fire();
             } catch (err) {

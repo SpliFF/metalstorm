@@ -178,6 +178,17 @@ export class LuaRuntime {
      * or null on error.
      */
     evalString(source: string, chunkName: string = this.name): LuaValue {
+        return this.evalStringEx(source, chunkName).value;
+    }
+
+    /**
+     * Error-surfacing variant of evalString: returns `{ value, error: null }`
+     * on success, or `{ value: null, error }` with the Lua load/runtime error
+     * message on failure. Callers that must distinguish "returned nil" from
+     * "failed" (e.g. the assets-manifest def reader) use this; evalString
+     * keeps its null-on-error convenience semantics on top.
+     */
+    evalStringEx(source: string, chunkName: string = this.name): { value: LuaValue; error: string | null } {
         const L = this.L;
         const top = lua.lua_gettop(L);
         const sourceBytes = to_luastring(source);
@@ -186,20 +197,22 @@ export class LuaRuntime {
             L, sourceBytes, sourceBytes.length, nameBytes,
         );
         if (status !== lua.LUA_OK) {
+            const err = to_jsstring(lua.lua_tostring(L, -1) ?? to_luastring('<unknown>'));
             lua.lua_settop(L, top);
-            return null;
+            return { value: null, error: `load error: ${err}` };
         }
         status = lua.lua_pcall(L, 0, 1, 0);
         if (status !== lua.LUA_OK) {
+            const err = to_jsstring(lua.lua_tostring(L, -1) ?? to_luastring('<unknown>'));
             lua.lua_settop(L, top);
-            return null;
+            return { value: null, error: `runtime error: ${err}` };
         }
         if (lua.lua_gettop(L) > top) {
             const val = this.readValue(-1);
             lua.lua_settop(L, top);
-            return val;
+            return { value: val, error: null };
         }
-        return null;
+        return { value: null, error: null };
     }
 
     /**
