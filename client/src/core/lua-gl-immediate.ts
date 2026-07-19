@@ -444,6 +444,24 @@ export class ImmediateModeRenderer {
     private shMvpGen = -1;
     private mvpGen = 0;
 
+    // ── N4: per-pass unit-0 texture-bind shadow ─────────────────────────
+    // The residual after N3 was dominated by texture binds — the font atlas
+    // re-bound once per string and the callList texBind replay re-binding the
+    // same icon every frame (~370 bindTexture + ~509 activeTexture/frame). N3
+    // deliberately left these unshadowed because font + callList bind unit-0
+    // outside flush(); N4 closes that by making the immediate renderer the
+    // single choke point for unit-0 binds (bindTex0) and having the bridge's
+    // own direct binds keep the shadow honest via notePassTexBind /
+    // invalidateTextures. Only unit 0 is shadowed — the immediate sampler and
+    // every 2D HUD draw use unit 0; non-zero units fall back to unconditional
+    // binds. Reset by beginPass() every frame; async texture loads settle
+    // between frames (microtask/promise, never mid-pass — runFrame is one
+    // synchronous Fengari re-entry) so a stale entry can never survive a reset.
+    //   shActiveUnit: GL enum last set by activeTexture (-1 = unknown).
+    //   shBoundTex0:  texture bound to TEXTURE_2D on unit 0 (undefined = unknown).
+    private shActiveUnit = -1;
+    private shBoundTex0: WebGLTexture | null | undefined = undefined;
+
     constructor(gl: WebGL2RenderingContext) {
         this.gl = gl;
 
@@ -651,16 +669,63 @@ export class ImmediateModeRenderer {
         this.shColB = Number.NaN;
         this.shColA = Number.NaN;
         this.shMvpGen = -1;
+        // N4: texture shadow is per-pass too (Babylon rebinds textures during
+        // its world render between passes).
+        this.shActiveUnit = -1;
+        this.shBoundTex0 = undefined;
     }
 
     /** Invalidate the program/VAO/ARRAY_BUFFER shadow after external code binds
      *  its own VAO/buffer/program mid-pass (the bridge's GL4 getVAO path). The
      *  next flush re-binds. Uniform shadows stay valid (per-program persistent,
-     *  only flush touches the built-in program). */
+     *  only flush touches the built-in program). Texture shadow is NOT touched
+     *  here — the GL4 VAO/instanced-draw path binds no textures itself; the
+     *  widget's texture binds go through gl.Texture (notePassTexBind). */
     invalidateBindings(): void {
         this.shProgram = null;
         this.shVao = false;
         this.shArrayBuf = false;
+    }
+
+    // ── N4: unit-0 texture-bind choke point + external-bind reconciliation ──
+
+    /** Bind `tex` to TEXTURE_2D on unit 0, skipping the activeTexture /
+     *  bindTexture calls already in effect per the per-pass shadow. The single
+     *  path flush() and the display-list replay use for unit-0 textures. Self-
+     *  correcting: it always re-issues whatever the shadow says is stale, so a
+     *  truthful shadow (kept so by notePassTexBind / invalidateTextures) is the
+     *  only precondition. */
+    private bindTex0(tex: WebGLTexture | null): void {
+        const gl = this.gl;
+        if (this.shActiveUnit !== gl.TEXTURE0) {
+            gl.activeTexture(gl.TEXTURE0);
+            this.shActiveUnit = gl.TEXTURE0;
+        }
+        if (this.shBoundTex0 !== tex) {
+            gl.bindTexture(gl.TEXTURE_2D, tex);
+            this.shBoundTex0 = tex;
+        }
+    }
+
+    /** Record that external bridge code just bound `tex` to `unit` directly
+     *  (the gl.Texture live path), leaving the active unit at TEXTURE0+unit.
+     *  Keeps the shadow truthful so a following flush of the same texture skips
+     *  the redundant re-bind (gl.Texture(icon) + gl.TexRect used to bind icon
+     *  twice — once here, once in flush). Only unit 0's binding is tracked;
+     *  a non-zero bind still updates the active-unit shadow so the next
+     *  bindTex0 re-selects unit 0. */
+    notePassTexBind(unit: number, tex: WebGLTexture | null): void {
+        this.shActiveUnit = this.gl.TEXTURE0 + unit;
+        if (unit === 0) this.shBoundTex0 = tex;
+    }
+
+    /** Forget the unit-0 texture shadow after external code bound an unknown
+     *  texture or changed the active unit in a way we don't track
+     *  (gl.CreateTexture / gl.CopyToTexture bind to the current active unit).
+     *  The next bindTex0 re-issues activeTexture + bindTexture. */
+    invalidateTextures(): void {
+        this.shActiveUnit = -1;
+        this.shBoundTex0 = undefined;
     }
 
     // ── Vertex attribute state ──────────────────────────────────────────
@@ -954,17 +1019,22 @@ export class ImmediateModeRenderer {
             if (entry.type === 'texBind') {
                 const gl = this.gl;
                 if (this.texBindObserver) this.texBindObserver(entry.texture);
-                gl.activeTexture(gl.TEXTURE0 + entry.unit);
-                if (entry.texture) {
-                    gl.bindTexture(gl.TEXTURE_2D, entry.texture);
-                } else {
-                    gl.bindTexture(gl.TEXTURE_2D, null);
-                }
                 if (entry.unit === 0) {
+                    // N4: unit-0 through the shadow — a texBind immediately
+                    // followed by a same-texture draw (the common recorded
+                    // pattern) now binds once, not twice.
+                    this.bindTex0(entry.texture);
                     this.isTextured = entry.texture !== null;
                     this.currentBoundTexture = entry.texture;
+                } else {
+                    // Non-zero unit: bind unconditionally and restore active
+                    // to unit 0. Unit-0's binding is untouched, so shBoundTex0
+                    // stays valid; only shActiveUnit changes.
+                    gl.activeTexture(gl.TEXTURE0 + entry.unit);
+                    gl.bindTexture(gl.TEXTURE_2D, entry.texture);
+                    gl.activeTexture(gl.TEXTURE0);
+                    this.shActiveUnit = gl.TEXTURE0;
                 }
-                gl.activeTexture(gl.TEXTURE0);
             } else if (entry.type === 'matrix') {
                 this.replayMatrixOp(entry);
             } else if (entry.type === 'color') {
@@ -1204,12 +1274,13 @@ export class ImmediateModeRenderer {
         // override program samples it via `tex0` (set in applyOverrideUniforms),
         // the built-in program via uTex. The built-in-only uniforms (uTextured,
         // uAlphaThreshold, uColor) don't exist on a custom program, so skip them.
-        // Texture binds are NOT shadow-elided (font + callList bind unit-0
-        // textures outside flush) — text batching already removes the redundant
-        // per-glyph binds.
+        // N4: bind through the per-pass unit-0 shadow (bindTex0). Font +
+        // callList + the bridge's gl.Texture now all funnel their unit-0 binds
+        // through / into the same shadow, so consecutive draws that reuse a
+        // texture (runs of same-font text, repeated icons, callList replays)
+        // skip the redundant activeTexture/bindTexture pair.
         if (this.isTextured && this.currentBoundTexture) {
-            gl.activeTexture(gl.TEXTURE0);
-            gl.bindTexture(gl.TEXTURE_2D, this.currentBoundTexture);
+            this.bindTex0(this.currentBoundTexture);
         }
         if (!override) {
             // N3: skip built-in uniform uploads that repeat unchanged. These
