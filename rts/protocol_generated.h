@@ -483,6 +483,14 @@ struct LuaUIMsgRelay;
 struct LuaUIMsgRelayBuilder;
 struct LuaUIMsgRelayT;
 
+struct RulesParamEntry;
+struct RulesParamEntryBuilder;
+struct RulesParamEntryT;
+
+struct RulesParamUpdate;
+struct RulesParamUpdateBuilder;
+struct RulesParamUpdateT;
+
 struct ServerMessage;
 struct ServerMessageBuilder;
 struct ServerMessageT;
@@ -1797,6 +1805,83 @@ inline const char *EnumNameSendToUnsyncedArgKind(SendToUnsyncedArgKind e) {
   return EnumNamesSendToUnsyncedArgKind()[index];
 }
 
+/// The concrete type of a RulesParamEntry value. `Nil` means "delete this
+/// key from the client mirror" (matches the client consumer's `null →
+/// delete` path and Spring's rules-param clearing). Spring can also store a
+/// *boolean* rules param; the server encodes booleans as `Number` (0.0/1.0)
+/// because the client rules-param mirror type is `number | string` and has
+/// never carried booleans. **CALLED-OUT divergence from Recoil:** a `false`
+/// bool param reads back as `0` (truthy in Lua) rather than `false`. No
+/// current Metalstorm/ZK/BAR consumer sets a boolean rules param; the
+/// faithful fix (add a `Bool` kind + widen `RulesParamValue`) is deferred
+/// until one does. See StateStreamer::BroadcastRulesParams.
+enum RulesParamValueKind : uint8_t {
+  RulesParamValueKind_Nil = 0,
+  RulesParamValueKind_Number = 1,
+  RulesParamValueKind_String = 2,
+  RulesParamValueKind_MIN = RulesParamValueKind_Nil,
+  RulesParamValueKind_MAX = RulesParamValueKind_String
+};
+
+inline const RulesParamValueKind (&EnumValuesRulesParamValueKind())[3] {
+  static const RulesParamValueKind values[] = {
+    RulesParamValueKind_Nil,
+    RulesParamValueKind_Number,
+    RulesParamValueKind_String
+  };
+  return values;
+}
+
+inline const char * const *EnumNamesRulesParamValueKind() {
+  static const char * const names[4] = {
+    "Nil",
+    "Number",
+    "String",
+    nullptr
+  };
+  return names;
+}
+
+inline const char *EnumNameRulesParamValueKind(RulesParamValueKind e) {
+  if (::flatbuffers::IsOutRange(e, RulesParamValueKind_Nil, RulesParamValueKind_String)) return "";
+  const size_t index = static_cast<size_t>(e);
+  return EnumNamesRulesParamValueKind()[index];
+}
+
+/// Which rules-param scope a RulesParamUpdate carries. `Game` params are the
+/// global `Spring.SetGameRulesParam` map (broadcast unfiltered — matching
+/// `Spring.GetGameRulesParams`, which is unconditionally public). `Team`
+/// params are `Spring.SetTeamRulesParam`, LOS-filtered per receiving session.
+enum RulesParamScope : uint8_t {
+  RulesParamScope_Game = 0,
+  RulesParamScope_Team = 1,
+  RulesParamScope_MIN = RulesParamScope_Game,
+  RulesParamScope_MAX = RulesParamScope_Team
+};
+
+inline const RulesParamScope (&EnumValuesRulesParamScope())[2] {
+  static const RulesParamScope values[] = {
+    RulesParamScope_Game,
+    RulesParamScope_Team
+  };
+  return values;
+}
+
+inline const char * const *EnumNamesRulesParamScope() {
+  static const char * const names[3] = {
+    "Game",
+    "Team",
+    nullptr
+  };
+  return names;
+}
+
+inline const char *EnumNameRulesParamScope(RulesParamScope e) {
+  if (::flatbuffers::IsOutRange(e, RulesParamScope_Game, RulesParamScope_Team)) return "";
+  const size_t index = static_cast<size_t>(e);
+  return EnumNamesRulesParamScope()[index];
+}
+
 enum ServerPayload : uint8_t {
   ServerPayload_NONE = 0,
   ServerPayload_AuthResponse = 1,
@@ -1840,11 +1925,12 @@ enum ServerPayload : uint8_t {
   ServerPayload_LuaUIMsgRelay = 39,
   ServerPayload_TeamStatsHistoryBatch = 40,
   ServerPayload_GameModOptions = 41,
+  ServerPayload_RulesParamUpdate = 42,
   ServerPayload_MIN = ServerPayload_NONE,
-  ServerPayload_MAX = ServerPayload_GameModOptions
+  ServerPayload_MAX = ServerPayload_RulesParamUpdate
 };
 
-inline const ServerPayload (&EnumValuesServerPayload())[42] {
+inline const ServerPayload (&EnumValuesServerPayload())[43] {
   static const ServerPayload values[] = {
     ServerPayload_NONE,
     ServerPayload_AuthResponse,
@@ -1887,13 +1973,14 @@ inline const ServerPayload (&EnumValuesServerPayload())[42] {
     ServerPayload_PlayerTeamEventBatch,
     ServerPayload_LuaUIMsgRelay,
     ServerPayload_TeamStatsHistoryBatch,
-    ServerPayload_GameModOptions
+    ServerPayload_GameModOptions,
+    ServerPayload_RulesParamUpdate
   };
   return values;
 }
 
 inline const char * const *EnumNamesServerPayload() {
-  static const char * const names[43] = {
+  static const char * const names[44] = {
     "NONE",
     "AuthResponse",
     "EntityCreate",
@@ -1936,13 +2023,14 @@ inline const char * const *EnumNamesServerPayload() {
     "LuaUIMsgRelay",
     "TeamStatsHistoryBatch",
     "GameModOptions",
+    "RulesParamUpdate",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNameServerPayload(ServerPayload e) {
-  if (::flatbuffers::IsOutRange(e, ServerPayload_NONE, ServerPayload_GameModOptions)) return "";
+  if (::flatbuffers::IsOutRange(e, ServerPayload_NONE, ServerPayload_RulesParamUpdate)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesServerPayload()[index];
 }
@@ -2115,6 +2203,10 @@ template<> struct ServerPayloadTraits<SpringWeb::GameModOptions> {
   static const ServerPayload enum_value = ServerPayload_GameModOptions;
 };
 
+template<> struct ServerPayloadTraits<SpringWeb::RulesParamUpdate> {
+  static const ServerPayload enum_value = ServerPayload_RulesParamUpdate;
+};
+
 template<typename T> struct ServerPayloadUnionTraits {
   static const ServerPayload enum_value = ServerPayload_NONE;
 };
@@ -2281,6 +2373,10 @@ template<> struct ServerPayloadUnionTraits<SpringWeb::TeamStatsHistoryBatchT> {
 
 template<> struct ServerPayloadUnionTraits<SpringWeb::GameModOptionsT> {
   static const ServerPayload enum_value = ServerPayload_GameModOptions;
+};
+
+template<> struct ServerPayloadUnionTraits<SpringWeb::RulesParamUpdateT> {
+  static const ServerPayload enum_value = ServerPayload_RulesParamUpdate;
 };
 
 struct ServerPayloadUnion {
@@ -2640,6 +2736,14 @@ struct ServerPayloadUnion {
   const SpringWeb::GameModOptionsT *AsGameModOptions() const {
     return type == ServerPayload_GameModOptions ?
       reinterpret_cast<const SpringWeb::GameModOptionsT *>(value) : nullptr;
+  }
+  SpringWeb::RulesParamUpdateT *AsRulesParamUpdate() {
+    return type == ServerPayload_RulesParamUpdate ?
+      reinterpret_cast<SpringWeb::RulesParamUpdateT *>(value) : nullptr;
+  }
+  const SpringWeb::RulesParamUpdateT *AsRulesParamUpdate() const {
+    return type == ServerPayload_RulesParamUpdate ?
+      reinterpret_cast<const SpringWeb::RulesParamUpdateT *>(value) : nullptr;
   }
 };
 
@@ -15136,6 +15240,232 @@ inline ::flatbuffers::Offset<LuaUIMsgRelay> CreateLuaUIMsgRelayDirect(
 
 ::flatbuffers::Offset<LuaUIMsgRelay> CreateLuaUIMsgRelay(::flatbuffers::FlatBufferBuilder &_fbb, const LuaUIMsgRelayT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 
+struct RulesParamEntryT : public ::flatbuffers::NativeTable {
+  typedef RulesParamEntry TableType;
+  std::string key{};
+  SpringWeb::RulesParamValueKind value_kind = SpringWeb::RulesParamValueKind_Nil;
+  double num_val = 0.0;
+  std::string str_val{};
+};
+
+/// One rules-param key→value change. `value_kind` selects which value field
+/// is live (`num_val` for Number, `str_val` for String, neither for Nil).
+struct RulesParamEntry FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef RulesParamEntryT NativeTableType;
+  typedef RulesParamEntryBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_KEY = 4,
+    VT_VALUE_KIND = 6,
+    VT_NUM_VAL = 8,
+    VT_STR_VAL = 10
+  };
+  const ::flatbuffers::String *key() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_KEY);
+  }
+  SpringWeb::RulesParamValueKind value_kind() const {
+    return static_cast<SpringWeb::RulesParamValueKind>(GetField<uint8_t>(VT_VALUE_KIND, 0));
+  }
+  double num_val() const {
+    return GetField<double>(VT_NUM_VAL, 0.0);
+  }
+  const ::flatbuffers::String *str_val() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_STR_VAL);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyOffset(verifier, VT_KEY) &&
+           verifier.VerifyString(key()) &&
+           VerifyField<uint8_t>(verifier, VT_VALUE_KIND, 1) &&
+           VerifyField<double>(verifier, VT_NUM_VAL, 8) &&
+           VerifyOffset(verifier, VT_STR_VAL) &&
+           verifier.VerifyString(str_val()) &&
+           verifier.EndTable();
+  }
+  RulesParamEntryT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(RulesParamEntryT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<RulesParamEntry> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RulesParamEntryT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct RulesParamEntryBuilder {
+  typedef RulesParamEntry Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_key(::flatbuffers::Offset<::flatbuffers::String> key) {
+    fbb_.AddOffset(RulesParamEntry::VT_KEY, key);
+  }
+  void add_value_kind(SpringWeb::RulesParamValueKind value_kind) {
+    fbb_.AddElement<uint8_t>(RulesParamEntry::VT_VALUE_KIND, static_cast<uint8_t>(value_kind), 0);
+  }
+  void add_num_val(double num_val) {
+    fbb_.AddElement<double>(RulesParamEntry::VT_NUM_VAL, num_val, 0.0);
+  }
+  void add_str_val(::flatbuffers::Offset<::flatbuffers::String> str_val) {
+    fbb_.AddOffset(RulesParamEntry::VT_STR_VAL, str_val);
+  }
+  explicit RulesParamEntryBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<RulesParamEntry> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<RulesParamEntry>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<RulesParamEntry> CreateRulesParamEntry(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    ::flatbuffers::Offset<::flatbuffers::String> key = 0,
+    SpringWeb::RulesParamValueKind value_kind = SpringWeb::RulesParamValueKind_Nil,
+    double num_val = 0.0,
+    ::flatbuffers::Offset<::flatbuffers::String> str_val = 0) {
+  RulesParamEntryBuilder builder_(_fbb);
+  builder_.add_num_val(num_val);
+  builder_.add_str_val(str_val);
+  builder_.add_key(key);
+  builder_.add_value_kind(value_kind);
+  return builder_.Finish();
+}
+
+inline ::flatbuffers::Offset<RulesParamEntry> CreateRulesParamEntryDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    const char *key = nullptr,
+    SpringWeb::RulesParamValueKind value_kind = SpringWeb::RulesParamValueKind_Nil,
+    double num_val = 0.0,
+    const char *str_val = nullptr) {
+  auto key__ = key ? _fbb.CreateString(key) : 0;
+  auto str_val__ = str_val ? _fbb.CreateString(str_val) : 0;
+  return SpringWeb::CreateRulesParamEntry(
+      _fbb,
+      key__,
+      value_kind,
+      num_val,
+      str_val__);
+}
+
+::flatbuffers::Offset<RulesParamEntry> CreateRulesParamEntry(::flatbuffers::FlatBufferBuilder &_fbb, const RulesParamEntryT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
+struct RulesParamUpdateT : public ::flatbuffers::NativeTable {
+  typedef RulesParamUpdate TableType;
+  SpringWeb::RulesParamScope scope = SpringWeb::RulesParamScope_Game;
+  uint32_t id = 0;
+  bool replace = false;
+  std::vector<std::unique_ptr<SpringWeb::RulesParamEntryT>> params{};
+  RulesParamUpdateT() = default;
+  RulesParamUpdateT(const RulesParamUpdateT &o);
+  RulesParamUpdateT(RulesParamUpdateT&&) FLATBUFFERS_NOEXCEPT = default;
+  RulesParamUpdateT &operator=(RulesParamUpdateT o) FLATBUFFERS_NOEXCEPT;
+};
+
+/// Server → Client: a per-sim-tick batch of rules-param changes for ONE
+/// scope (+ id for Team scope). Consumed by the LuaUI worker's
+/// `handleRulesParamUpdate`, feeding `Spring.GetGameRulesParam(s)` /
+/// `Spring.GetTeamRulesParam(s)` in widgets/gadgets.
+///
+/// `id` is the teamID for Team scope (ignored for Game). `replace = true`
+/// asks the client to clear the target map before applying — used only for
+/// the join/rejoin snapshot so a late joiner converges exactly to current
+/// state; per-tick deltas use `replace = false`.
+///
+/// **Visibility** (replicates `LuaSyncedRead::GetTeamRulesParam(s)`): Team
+/// batches are filtered server-side per connection against each param's
+/// `los` bitmask — same-ally sessions see PRIVATE-and-below, allied-team
+/// sessions see ALLIED-and-below, everyone sees PUBLIC; spectators (team < 0)
+/// see all. Game batches are broadcast to every client.
+struct RulesParamUpdate FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef RulesParamUpdateT NativeTableType;
+  typedef RulesParamUpdateBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_SCOPE = 4,
+    VT_ID = 6,
+    VT_REPLACE = 8,
+    VT_PARAMS = 10
+  };
+  SpringWeb::RulesParamScope scope() const {
+    return static_cast<SpringWeb::RulesParamScope>(GetField<uint8_t>(VT_SCOPE, 0));
+  }
+  uint32_t id() const {
+    return GetField<uint32_t>(VT_ID, 0);
+  }
+  bool replace() const {
+    return GetField<uint8_t>(VT_REPLACE, 0) != 0;
+  }
+  const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::RulesParamEntry>> *params() const {
+    return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::RulesParamEntry>> *>(VT_PARAMS);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<uint8_t>(verifier, VT_SCOPE, 1) &&
+           VerifyField<uint32_t>(verifier, VT_ID, 4) &&
+           VerifyField<uint8_t>(verifier, VT_REPLACE, 1) &&
+           VerifyOffset(verifier, VT_PARAMS) &&
+           verifier.VerifyVector(params()) &&
+           verifier.VerifyVectorOfTables(params()) &&
+           verifier.EndTable();
+  }
+  RulesParamUpdateT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(RulesParamUpdateT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<RulesParamUpdate> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RulesParamUpdateT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct RulesParamUpdateBuilder {
+  typedef RulesParamUpdate Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_scope(SpringWeb::RulesParamScope scope) {
+    fbb_.AddElement<uint8_t>(RulesParamUpdate::VT_SCOPE, static_cast<uint8_t>(scope), 0);
+  }
+  void add_id(uint32_t id) {
+    fbb_.AddElement<uint32_t>(RulesParamUpdate::VT_ID, id, 0);
+  }
+  void add_replace(bool replace) {
+    fbb_.AddElement<uint8_t>(RulesParamUpdate::VT_REPLACE, static_cast<uint8_t>(replace), 0);
+  }
+  void add_params(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::RulesParamEntry>>> params) {
+    fbb_.AddOffset(RulesParamUpdate::VT_PARAMS, params);
+  }
+  explicit RulesParamUpdateBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<RulesParamUpdate> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<RulesParamUpdate>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<RulesParamUpdate> CreateRulesParamUpdate(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    SpringWeb::RulesParamScope scope = SpringWeb::RulesParamScope_Game,
+    uint32_t id = 0,
+    bool replace = false,
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::RulesParamEntry>>> params = 0) {
+  RulesParamUpdateBuilder builder_(_fbb);
+  builder_.add_params(params);
+  builder_.add_id(id);
+  builder_.add_replace(replace);
+  builder_.add_scope(scope);
+  return builder_.Finish();
+}
+
+inline ::flatbuffers::Offset<RulesParamUpdate> CreateRulesParamUpdateDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    SpringWeb::RulesParamScope scope = SpringWeb::RulesParamScope_Game,
+    uint32_t id = 0,
+    bool replace = false,
+    const std::vector<::flatbuffers::Offset<SpringWeb::RulesParamEntry>> *params = nullptr) {
+  auto params__ = params ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::RulesParamEntry>>(*params) : 0;
+  return SpringWeb::CreateRulesParamUpdate(
+      _fbb,
+      scope,
+      id,
+      replace,
+      params__);
+}
+
+::flatbuffers::Offset<RulesParamUpdate> CreateRulesParamUpdate(::flatbuffers::FlatBufferBuilder &_fbb, const RulesParamUpdateT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
 struct ServerMessageT : public ::flatbuffers::NativeTable {
   typedef ServerMessage TableType;
   SpringWeb::ServerPayloadUnion payload{};
@@ -15277,6 +15607,9 @@ struct ServerMessage FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   }
   const SpringWeb::GameModOptions *payload_as_GameModOptions() const {
     return payload_type() == SpringWeb::ServerPayload_GameModOptions ? static_cast<const SpringWeb::GameModOptions *>(payload()) : nullptr;
+  }
+  const SpringWeb::RulesParamUpdate *payload_as_RulesParamUpdate() const {
+    return payload_type() == SpringWeb::ServerPayload_RulesParamUpdate ? static_cast<const SpringWeb::RulesParamUpdate *>(payload()) : nullptr;
   }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
@@ -15452,6 +15785,10 @@ template<> inline const SpringWeb::TeamStatsHistoryBatch *ServerMessage::payload
 
 template<> inline const SpringWeb::GameModOptions *ServerMessage::payload_as<SpringWeb::GameModOptions>() const {
   return payload_as_GameModOptions();
+}
+
+template<> inline const SpringWeb::RulesParamUpdate *ServerMessage::payload_as<SpringWeb::RulesParamUpdate>() const {
+  return payload_as_RulesParamUpdate();
 }
 
 struct ServerMessageBuilder {
@@ -20178,6 +20515,92 @@ inline ::flatbuffers::Offset<LuaUIMsgRelay> CreateLuaUIMsgRelay(::flatbuffers::F
       _player_id);
 }
 
+inline RulesParamEntryT *RulesParamEntry::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<RulesParamEntryT>(new RulesParamEntryT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void RulesParamEntry::UnPackTo(RulesParamEntryT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = key(); if (_e) _o->key = _e->str(); }
+  { auto _e = value_kind(); _o->value_kind = _e; }
+  { auto _e = num_val(); _o->num_val = _e; }
+  { auto _e = str_val(); if (_e) _o->str_val = _e->str(); }
+}
+
+inline ::flatbuffers::Offset<RulesParamEntry> RulesParamEntry::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RulesParamEntryT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return CreateRulesParamEntry(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<RulesParamEntry> CreateRulesParamEntry(::flatbuffers::FlatBufferBuilder &_fbb, const RulesParamEntryT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const RulesParamEntryT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _key = _o->key.empty() ? 0 : _fbb.CreateString(_o->key);
+  auto _value_kind = _o->value_kind;
+  auto _num_val = _o->num_val;
+  auto _str_val = _o->str_val.empty() ? 0 : _fbb.CreateString(_o->str_val);
+  return SpringWeb::CreateRulesParamEntry(
+      _fbb,
+      _key,
+      _value_kind,
+      _num_val,
+      _str_val);
+}
+
+inline RulesParamUpdateT::RulesParamUpdateT(const RulesParamUpdateT &o)
+      : scope(o.scope),
+        id(o.id),
+        replace(o.replace) {
+  params.reserve(o.params.size());
+  for (const auto &params_ : o.params) { params.emplace_back((params_) ? new SpringWeb::RulesParamEntryT(*params_) : nullptr); }
+}
+
+inline RulesParamUpdateT &RulesParamUpdateT::operator=(RulesParamUpdateT o) FLATBUFFERS_NOEXCEPT {
+  std::swap(scope, o.scope);
+  std::swap(id, o.id);
+  std::swap(replace, o.replace);
+  std::swap(params, o.params);
+  return *this;
+}
+
+inline RulesParamUpdateT *RulesParamUpdate::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<RulesParamUpdateT>(new RulesParamUpdateT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void RulesParamUpdate::UnPackTo(RulesParamUpdateT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = scope(); _o->scope = _e; }
+  { auto _e = id(); _o->id = _e; }
+  { auto _e = replace(); _o->replace = _e; }
+  { auto _e = params(); if (_e) { _o->params.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->params[_i]) { _e->Get(_i)->UnPackTo(_o->params[_i].get(), _resolver); } else { _o->params[_i] = std::unique_ptr<SpringWeb::RulesParamEntryT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->params.resize(0); } }
+}
+
+inline ::flatbuffers::Offset<RulesParamUpdate> RulesParamUpdate::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RulesParamUpdateT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return CreateRulesParamUpdate(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<RulesParamUpdate> CreateRulesParamUpdate(::flatbuffers::FlatBufferBuilder &_fbb, const RulesParamUpdateT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const RulesParamUpdateT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _scope = _o->scope;
+  auto _id = _o->id;
+  auto _replace = _o->replace;
+  auto _params = _o->params.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::RulesParamEntry>> (_o->params.size(), [](size_t i, _VectorArgs *__va) { return CreateRulesParamEntry(*__va->__fbb, __va->__o->params[i].get(), __va->__rehasher); }, &_va ) : 0;
+  return SpringWeb::CreateRulesParamUpdate(
+      _fbb,
+      _scope,
+      _id,
+      _replace,
+      _params);
+}
+
 inline ServerMessageT *ServerMessage::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
   auto _o = std::unique_ptr<ServerMessageT>(new ServerMessageT());
   UnPackTo(_o.get(), _resolver);
@@ -21182,6 +21605,10 @@ inline bool VerifyServerPayload(::flatbuffers::Verifier &verifier, const void *o
       auto ptr = reinterpret_cast<const SpringWeb::GameModOptions *>(obj);
       return verifier.VerifyTable(ptr);
     }
+    case ServerPayload_RulesParamUpdate: {
+      auto ptr = reinterpret_cast<const SpringWeb::RulesParamUpdate *>(obj);
+      return verifier.VerifyTable(ptr);
+    }
     default: return true;
   }
 }
@@ -21365,6 +21792,10 @@ inline void *ServerPayloadUnion::UnPack(const void *obj, ServerPayload type, con
       auto ptr = reinterpret_cast<const SpringWeb::GameModOptions *>(obj);
       return ptr->UnPack(resolver);
     }
+    case ServerPayload_RulesParamUpdate: {
+      auto ptr = reinterpret_cast<const SpringWeb::RulesParamUpdate *>(obj);
+      return ptr->UnPack(resolver);
+    }
     default: return nullptr;
   }
 }
@@ -21536,6 +21967,10 @@ inline ::flatbuffers::Offset<void> ServerPayloadUnion::Pack(::flatbuffers::FlatB
       auto ptr = reinterpret_cast<const SpringWeb::GameModOptionsT *>(value);
       return CreateGameModOptions(_fbb, ptr, _rehasher).Union();
     }
+    case ServerPayload_RulesParamUpdate: {
+      auto ptr = reinterpret_cast<const SpringWeb::RulesParamUpdateT *>(value);
+      return CreateRulesParamUpdate(_fbb, ptr, _rehasher).Union();
+    }
     default: return 0;
   }
 }
@@ -21704,6 +22139,10 @@ inline ServerPayloadUnion::ServerPayloadUnion(const ServerPayloadUnion &u) : typ
     }
     case ServerPayload_GameModOptions: {
       value = new SpringWeb::GameModOptionsT(*reinterpret_cast<SpringWeb::GameModOptionsT *>(u.value));
+      break;
+    }
+    case ServerPayload_RulesParamUpdate: {
+      value = new SpringWeb::RulesParamUpdateT(*reinterpret_cast<SpringWeb::RulesParamUpdateT *>(u.value));
       break;
     }
     default:
@@ -21915,6 +22354,11 @@ inline void ServerPayloadUnion::Reset() {
     }
     case ServerPayload_GameModOptions: {
       auto ptr = reinterpret_cast<SpringWeb::GameModOptionsT *>(value);
+      delete ptr;
+      break;
+    }
+    case ServerPayload_RulesParamUpdate: {
+      auto ptr = reinterpret_cast<SpringWeb::RulesParamUpdateT *>(value);
       delete ptr;
       break;
     }

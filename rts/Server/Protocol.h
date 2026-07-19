@@ -393,6 +393,55 @@ inline std::vector<uint8_t> BuildSendToUnsyncedEvent(
                               evOff.Union());
 }
 
+/// One rules-param key→value change, ready to serialise into a
+/// RulesParamUpdate. `kind` picks which value is live; `Nil` means delete.
+struct RulesParamEntryData {
+    std::string key;
+    SpringWeb::RulesParamValueKind kind = SpringWeb::RulesParamValueKind_Nil;
+    double numVal = 0.0;
+    std::string strVal;
+};
+
+/// A per-scope batch of rules-param changes (see schema RulesParamUpdate).
+struct RulesParamUpdateData {
+    SpringWeb::RulesParamScope scope = SpringWeb::RulesParamScope_Game;
+    uint32_t id = 0;          // teamID for Team scope; ignored for Game
+    bool replace = false;     // true = join snapshot (clear then apply)
+    std::vector<RulesParamEntryData> params;
+};
+
+/// Build a RulesParamUpdate — a per-tick (or join-snapshot) batch of
+/// `Spring.Set{Game,Team}RulesParam` changes for one scope. The caller has
+/// already applied per-session LOS filtering for Team scope (game scope is
+/// unfiltered); this only frames the entries.
+inline std::vector<uint8_t> BuildRulesParamUpdate(const RulesParamUpdateData& upd)
+{
+    flatbuffers::FlatBufferBuilder fbb(256);
+    std::vector<flatbuffers::Offset<SpringWeb::RulesParamEntry>> entryOffs;
+    entryOffs.reserve(upd.params.size());
+    for (const auto& e : upd.params) {
+        auto keyOff = fbb.CreateString(e.key);
+        flatbuffers::Offset<flatbuffers::String> strOff = 0;
+        if (e.kind == SpringWeb::RulesParamValueKind_String)
+            strOff = fbb.CreateString(e.strVal);
+        SpringWeb::RulesParamEntryBuilder eb(fbb);
+        eb.add_key(keyOff);
+        eb.add_value_kind(e.kind);
+        eb.add_num_val(e.numVal);
+        if (strOff.o != 0) eb.add_str_val(strOff);
+        entryOffs.push_back(eb.Finish());
+    }
+    auto paramsVec = fbb.CreateVector(entryOffs);
+    SpringWeb::RulesParamUpdateBuilder ub(fbb);
+    ub.add_scope(upd.scope);
+    ub.add_id(upd.id);
+    ub.add_replace(upd.replace);
+    ub.add_params(paramsVec);
+    auto updOff = ub.Finish();
+    return BuildServerMessage(fbb, SpringWeb::ServerPayload_RulesParamUpdate,
+                              updOff.Union());
+}
+
 /// Build a LuaUIMsgRelay (relayed `Spring.SendLuaUIMsg` → receiver's
 /// `widget:RecvLuaMsg(data, playerID)`). The audience filter has already
 /// been applied by the caller; this only frames the payload + sender id.

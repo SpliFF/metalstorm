@@ -129,6 +129,7 @@ import {
     dispatchUnitCreated, dispatchUnitFromFactory, dispatchUnitTaken, dispatchUnitGiven,
     dispatchDefaultCommand, dispatchCommandNotify,
     dispatchPlayerChanged, dispatchPlayerAdded, dispatchPlayerRemoved, dispatchTeamDied,
+    handleRulesParamUpdate,
     dispatchRecvLuaUIMsg, dispatchUnitDestroyed, dispatchUnitFinished,
     dispatchUnitDamaged, dispatchFeatureLifecycle,
     dispatchVisibleUnitAdded, dispatchVisibleUnitRemoved,
@@ -1040,6 +1041,16 @@ function gpConnect(msg: GpInitToWorker): void {
                     default: postLog(2, `[player-team] unknown event kind ${e.kind}`);
                 }
             }
+        },
+        // Rules-param updates (RulesParamUpdate) — game/team params from
+        // Spring.Set{Game,Team}RulesParam in any synced gadget. Pre-this-wire
+        // handleRulesParamUpdate was a dead consumer (no server producer), so
+        // region control, objectives and the authority economy were invisible
+        // to the browser. The server LOS-filtered team params and sent a
+        // replace-snapshot on join; here we just apply into liveState so
+        // Spring.GetGameRulesParam(s)/GetTeamRulesParam(s) return live values.
+        onRulesParamUpdate: (update) => {
+            handleRulesParamUpdate(update as unknown as Record<string, unknown>);
         },
         // PLAN-bar Spring.GetTeamStatsHistory: per-second incremental team
         // stats-history deltas. Splice each team's entries into its history

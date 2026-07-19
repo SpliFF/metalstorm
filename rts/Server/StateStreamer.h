@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "Lua/LuaRulesParams.h"
+
 struct GameServerContext;
 
 // StateStreamer — owns the per-tick broadcast pipeline that used to be a long
@@ -41,8 +43,17 @@ private:
     void BroadcastFeatureLifecycle(int frameNum);
     void BroadcastUnitCommands(int frameNum);
     void StreamLosBitmaps(int frameNum);
+    void BroadcastRulesParams(int frameNum);
 
     GameServerContext& ctx;
+
+    // Rules-param wire producer baselines (BroadcastRulesParams). We diff the
+    // live synced param maps against these last-sent copies each tick to
+    // detect changes; deltas go to already-snapshotted sessions, a full
+    // snapshot to fresh joiners. Copied by value so we retain the *old* `los`
+    // of a key when it's deleted (needed to decide who to tell to drop it).
+    LuaRulesParams::Params lastGameParams;
+    std::vector<LuaRulesParams::Params> lastTeamParams;  // indexed by teamID
 
     // Last-team-standing fallback latch (was a function-static int in the loop):
     // the team the alive-unit count declared the winner, or -1 while undecided.

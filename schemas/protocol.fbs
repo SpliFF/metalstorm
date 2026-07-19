@@ -1699,6 +1699,62 @@ table LuaUIMsgRelay {
     player_id: int32;
 }
 
+/// The concrete type of a RulesParamEntry value. `Nil` means "delete this
+/// key from the client mirror" (matches the client consumer's `null →
+/// delete` path and Spring's rules-param clearing). Spring can also store a
+/// *boolean* rules param; the server encodes booleans as `Number` (0.0/1.0)
+/// because the client rules-param mirror type is `number | string` and has
+/// never carried booleans. **CALLED-OUT divergence from Recoil:** a `false`
+/// bool param reads back as `0` (truthy in Lua) rather than `false`. No
+/// current Metalstorm/ZK/BAR consumer sets a boolean rules param; the
+/// faithful fix (add a `Bool` kind + widen `RulesParamValue`) is deferred
+/// until one does. See StateStreamer::BroadcastRulesParams.
+enum RulesParamValueKind : uint8 {
+    Nil = 0,
+    Number = 1,
+    String = 2,
+}
+
+/// One rules-param key→value change. `value_kind` selects which value field
+/// is live (`num_val` for Number, `str_val` for String, neither for Nil).
+table RulesParamEntry {
+    key: string;
+    value_kind: RulesParamValueKind;
+    num_val: double;
+    str_val: string;
+}
+
+/// Which rules-param scope a RulesParamUpdate carries. `Game` params are the
+/// global `Spring.SetGameRulesParam` map (broadcast unfiltered — matching
+/// `Spring.GetGameRulesParams`, which is unconditionally public). `Team`
+/// params are `Spring.SetTeamRulesParam`, LOS-filtered per receiving session.
+enum RulesParamScope : uint8 {
+    Game = 0,
+    Team = 1,
+}
+
+/// Server → Client: a per-sim-tick batch of rules-param changes for ONE
+/// scope (+ id for Team scope). Consumed by the LuaUI worker's
+/// `handleRulesParamUpdate`, feeding `Spring.GetGameRulesParam(s)` /
+/// `Spring.GetTeamRulesParam(s)` in widgets/gadgets.
+///
+/// `id` is the teamID for Team scope (ignored for Game). `replace = true`
+/// asks the client to clear the target map before applying — used only for
+/// the join/rejoin snapshot so a late joiner converges exactly to current
+/// state; per-tick deltas use `replace = false`.
+///
+/// **Visibility** (replicates `LuaSyncedRead::GetTeamRulesParam(s)`): Team
+/// batches are filtered server-side per connection against each param's
+/// `los` bitmask — same-ally sessions see PRIVATE-and-below, allied-team
+/// sessions see ALLIED-and-below, everyone sees PUBLIC; spectators (team < 0)
+/// see all. Game batches are broadcast to every client.
+table RulesParamUpdate {
+    scope: RulesParamScope;
+    id: uint32;
+    replace: bool;
+    params: [RulesParamEntry];
+}
+
 // Union of all server→client message types
 union ServerPayload {
     AuthResponse,
@@ -1742,6 +1798,7 @@ union ServerPayload {
     LuaUIMsgRelay,
     TeamStatsHistoryBatch,
     GameModOptions,
+    RulesParamUpdate,
 }
 
 table ServerMessage {

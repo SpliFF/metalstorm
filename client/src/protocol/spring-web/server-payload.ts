@@ -30,6 +30,7 @@ import { RoomListUpdate, RoomListUpdateT } from '../spring-web/room-list-update.
 import { RoomPlayerJoined, RoomPlayerJoinedT } from '../spring-web/room-player-joined.js';
 import { RoomPlayerLeft, RoomPlayerLeftT } from '../spring-web/room-player-left.js';
 import { RoomStateUpdate, RoomStateUpdateT } from '../spring-web/room-state-update.js';
+import { RulesParamUpdate, RulesParamUpdateT } from '../spring-web/rules-param-update.js';
 import { SendToUnsyncedEvent, SendToUnsyncedEventT } from '../spring-web/send-to-unsynced-event.js';
 import { ServerError, ServerErrorT } from '../spring-web/server-error.js';
 import { StandingOrderState, StandingOrderStateT } from '../spring-web/standing-order-state.js';
@@ -87,13 +88,14 @@ export enum ServerPayload {
   PlayerTeamEventBatch = 38,
   LuaUIMsgRelay = 39,
   TeamStatsHistoryBatch = 40,
-  GameModOptions = 41
+  GameModOptions = 41,
+  RulesParamUpdate = 42
 }
 
 export function unionToServerPayload(
   type: ServerPayload,
-  accessor: (obj:AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|EntitySensorUpdate|FeatureLifecycleBatch|GameEventBatch|GameInfo|GameListUpdate|GameModOptions|GameRestarting|GameStarted|LogBatch|LuaUIMsgRelay|MapData|MapListUpdate|PathResponse|PlayerLeft|PlayerTeamEventBatch|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|SendToUnsyncedEvent|ServerError|StandingOrderState|TeamStartInfo|TeamStatsHistoryBatch|UnitArmoredUpdate|UnitCmdDescsUpdate|UnitCommandBatch|UnitCommandQueuesUpdate|UnitLifecycleBatch|UnitSelfDUpdate|UnitStockpileUpdate|UnitTransportUpdate) => AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|EntitySensorUpdate|FeatureLifecycleBatch|GameEventBatch|GameInfo|GameListUpdate|GameModOptions|GameRestarting|GameStarted|LogBatch|LuaUIMsgRelay|MapData|MapListUpdate|PathResponse|PlayerLeft|PlayerTeamEventBatch|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|SendToUnsyncedEvent|ServerError|StandingOrderState|TeamStartInfo|TeamStatsHistoryBatch|UnitArmoredUpdate|UnitCmdDescsUpdate|UnitCommandBatch|UnitCommandQueuesUpdate|UnitLifecycleBatch|UnitSelfDUpdate|UnitStockpileUpdate|UnitTransportUpdate|null
-): AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|EntitySensorUpdate|FeatureLifecycleBatch|GameEventBatch|GameInfo|GameListUpdate|GameModOptions|GameRestarting|GameStarted|LogBatch|LuaUIMsgRelay|MapData|MapListUpdate|PathResponse|PlayerLeft|PlayerTeamEventBatch|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|SendToUnsyncedEvent|ServerError|StandingOrderState|TeamStartInfo|TeamStatsHistoryBatch|UnitArmoredUpdate|UnitCmdDescsUpdate|UnitCommandBatch|UnitCommandQueuesUpdate|UnitLifecycleBatch|UnitSelfDUpdate|UnitStockpileUpdate|UnitTransportUpdate|null {
+  accessor: (obj:AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|EntitySensorUpdate|FeatureLifecycleBatch|GameEventBatch|GameInfo|GameListUpdate|GameModOptions|GameRestarting|GameStarted|LogBatch|LuaUIMsgRelay|MapData|MapListUpdate|PathResponse|PlayerLeft|PlayerTeamEventBatch|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|RulesParamUpdate|SendToUnsyncedEvent|ServerError|StandingOrderState|TeamStartInfo|TeamStatsHistoryBatch|UnitArmoredUpdate|UnitCmdDescsUpdate|UnitCommandBatch|UnitCommandQueuesUpdate|UnitLifecycleBatch|UnitSelfDUpdate|UnitStockpileUpdate|UnitTransportUpdate) => AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|EntitySensorUpdate|FeatureLifecycleBatch|GameEventBatch|GameInfo|GameListUpdate|GameModOptions|GameRestarting|GameStarted|LogBatch|LuaUIMsgRelay|MapData|MapListUpdate|PathResponse|PlayerLeft|PlayerTeamEventBatch|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|RulesParamUpdate|SendToUnsyncedEvent|ServerError|StandingOrderState|TeamStartInfo|TeamStatsHistoryBatch|UnitArmoredUpdate|UnitCmdDescsUpdate|UnitCommandBatch|UnitCommandQueuesUpdate|UnitLifecycleBatch|UnitSelfDUpdate|UnitStockpileUpdate|UnitTransportUpdate|null
+): AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|EntitySensorUpdate|FeatureLifecycleBatch|GameEventBatch|GameInfo|GameListUpdate|GameModOptions|GameRestarting|GameStarted|LogBatch|LuaUIMsgRelay|MapData|MapListUpdate|PathResponse|PlayerLeft|PlayerTeamEventBatch|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|RulesParamUpdate|SendToUnsyncedEvent|ServerError|StandingOrderState|TeamStartInfo|TeamStatsHistoryBatch|UnitArmoredUpdate|UnitCmdDescsUpdate|UnitCommandBatch|UnitCommandQueuesUpdate|UnitLifecycleBatch|UnitSelfDUpdate|UnitStockpileUpdate|UnitTransportUpdate|null {
   switch(ServerPayload[type]) {
     case 'NONE': return null; 
     case 'AuthResponse': return accessor(new AuthResponse())! as AuthResponse;
@@ -137,15 +139,16 @@ export function unionToServerPayload(
     case 'LuaUIMsgRelay': return accessor(new LuaUIMsgRelay())! as LuaUIMsgRelay;
     case 'TeamStatsHistoryBatch': return accessor(new TeamStatsHistoryBatch())! as TeamStatsHistoryBatch;
     case 'GameModOptions': return accessor(new GameModOptions())! as GameModOptions;
+    case 'RulesParamUpdate': return accessor(new RulesParamUpdate())! as RulesParamUpdate;
     default: return null;
   }
 }
 
 export function unionListToServerPayload(
   type: ServerPayload, 
-  accessor: (index: number, obj:AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|EntitySensorUpdate|FeatureLifecycleBatch|GameEventBatch|GameInfo|GameListUpdate|GameModOptions|GameRestarting|GameStarted|LogBatch|LuaUIMsgRelay|MapData|MapListUpdate|PathResponse|PlayerLeft|PlayerTeamEventBatch|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|SendToUnsyncedEvent|ServerError|StandingOrderState|TeamStartInfo|TeamStatsHistoryBatch|UnitArmoredUpdate|UnitCmdDescsUpdate|UnitCommandBatch|UnitCommandQueuesUpdate|UnitLifecycleBatch|UnitSelfDUpdate|UnitStockpileUpdate|UnitTransportUpdate) => AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|EntitySensorUpdate|FeatureLifecycleBatch|GameEventBatch|GameInfo|GameListUpdate|GameModOptions|GameRestarting|GameStarted|LogBatch|LuaUIMsgRelay|MapData|MapListUpdate|PathResponse|PlayerLeft|PlayerTeamEventBatch|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|SendToUnsyncedEvent|ServerError|StandingOrderState|TeamStartInfo|TeamStatsHistoryBatch|UnitArmoredUpdate|UnitCmdDescsUpdate|UnitCommandBatch|UnitCommandQueuesUpdate|UnitLifecycleBatch|UnitSelfDUpdate|UnitStockpileUpdate|UnitTransportUpdate|null, 
+  accessor: (index: number, obj:AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|EntitySensorUpdate|FeatureLifecycleBatch|GameEventBatch|GameInfo|GameListUpdate|GameModOptions|GameRestarting|GameStarted|LogBatch|LuaUIMsgRelay|MapData|MapListUpdate|PathResponse|PlayerLeft|PlayerTeamEventBatch|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|RulesParamUpdate|SendToUnsyncedEvent|ServerError|StandingOrderState|TeamStartInfo|TeamStatsHistoryBatch|UnitArmoredUpdate|UnitCmdDescsUpdate|UnitCommandBatch|UnitCommandQueuesUpdate|UnitLifecycleBatch|UnitSelfDUpdate|UnitStockpileUpdate|UnitTransportUpdate) => AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|EntitySensorUpdate|FeatureLifecycleBatch|GameEventBatch|GameInfo|GameListUpdate|GameModOptions|GameRestarting|GameStarted|LogBatch|LuaUIMsgRelay|MapData|MapListUpdate|PathResponse|PlayerLeft|PlayerTeamEventBatch|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|RulesParamUpdate|SendToUnsyncedEvent|ServerError|StandingOrderState|TeamStartInfo|TeamStatsHistoryBatch|UnitArmoredUpdate|UnitCmdDescsUpdate|UnitCommandBatch|UnitCommandQueuesUpdate|UnitLifecycleBatch|UnitSelfDUpdate|UnitStockpileUpdate|UnitTransportUpdate|null, 
   index: number
-): AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|EntitySensorUpdate|FeatureLifecycleBatch|GameEventBatch|GameInfo|GameListUpdate|GameModOptions|GameRestarting|GameStarted|LogBatch|LuaUIMsgRelay|MapData|MapListUpdate|PathResponse|PlayerLeft|PlayerTeamEventBatch|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|SendToUnsyncedEvent|ServerError|StandingOrderState|TeamStartInfo|TeamStatsHistoryBatch|UnitArmoredUpdate|UnitCmdDescsUpdate|UnitCommandBatch|UnitCommandQueuesUpdate|UnitLifecycleBatch|UnitSelfDUpdate|UnitStockpileUpdate|UnitTransportUpdate|null {
+): AIListUpdate|AuthResponse|ChatReceive|ConsoleResponse|EntityCreate|EntityDestroy|EntitySensorUpdate|FeatureLifecycleBatch|GameEventBatch|GameInfo|GameListUpdate|GameModOptions|GameRestarting|GameStarted|LogBatch|LuaUIMsgRelay|MapData|MapListUpdate|PathResponse|PlayerLeft|PlayerTeamEventBatch|Pong|ReconnectResponse|ResourceUpdate|RoomListUpdate|RoomPlayerJoined|RoomPlayerLeft|RoomStateUpdate|RulesParamUpdate|SendToUnsyncedEvent|ServerError|StandingOrderState|TeamStartInfo|TeamStatsHistoryBatch|UnitArmoredUpdate|UnitCmdDescsUpdate|UnitCommandBatch|UnitCommandQueuesUpdate|UnitLifecycleBatch|UnitSelfDUpdate|UnitStockpileUpdate|UnitTransportUpdate|null {
   switch(ServerPayload[type]) {
     case 'NONE': return null; 
     case 'AuthResponse': return accessor(index, new AuthResponse())! as AuthResponse;
@@ -189,6 +192,7 @@ export function unionListToServerPayload(
     case 'LuaUIMsgRelay': return accessor(index, new LuaUIMsgRelay())! as LuaUIMsgRelay;
     case 'TeamStatsHistoryBatch': return accessor(index, new TeamStatsHistoryBatch())! as TeamStatsHistoryBatch;
     case 'GameModOptions': return accessor(index, new GameModOptions())! as GameModOptions;
+    case 'RulesParamUpdate': return accessor(index, new RulesParamUpdate())! as RulesParamUpdate;
     default: return null;
   }
 }

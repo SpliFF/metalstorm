@@ -39,6 +39,9 @@ import { TeamStartInfo } from '../protocol/spring-web/team-start-info.js';
 import { PlayerTeamEventBatch } from '../protocol/spring-web/player-team-event-batch.js';
 import { TeamStatsHistoryBatch } from '../protocol/spring-web/team-stats-history-batch.js';
 import { GameModOptions } from '../protocol/spring-web/game-mod-options.js';
+import { RulesParamUpdate } from '../protocol/spring-web/rules-param-update.js';
+import { RulesParamScope } from '../protocol/spring-web/rules-param-scope.js';
+import { RulesParamValueKind } from '../protocol/spring-web/rules-param-value-kind.js';
 import { ResourceUpdate } from '../protocol/spring-web/resource-update.js';
 import { MapData } from '../protocol/spring-web/map-data.js';
 import { PlayerLeft } from '../protocol/spring-web/player-left.js';
@@ -252,6 +255,18 @@ export interface TeamStatsHistoryInfo {
     teamId: number;
     baseIndex: number;
     entries: TeamStatsEntryInfo[];
+}
+
+/// A decoded RulesParamUpdate — a batch of rules-param changes for one scope.
+/// `scope` is 'game' or 'team' (the wire only carries those two today).
+/// `id` is the teamID for team scope (0 / ignored for game). `replace` = true
+/// means clear the target map before applying (join snapshot). `params` maps
+/// key → value, where `null` deletes the key.
+export interface RulesParamUpdateInfo {
+    scope: 'game' | 'team';
+    id: number;
+    replace: boolean;
+    params: Record<string, number | string | null>;
 }
 
 /// Projectile lifecycle event info — decoded from the FlatBuffer batch and
@@ -893,6 +908,13 @@ export interface ConnectionEvents {
     /// Feeds the worker's liveState.modOptions so Spring.GetModOptions()
     /// matches the synced set. Values arrive as strings (engine convention).
     onGameModOptions?: (options: Record<string, string>) => void;
+    /// A batch of game/team rules-param changes (RulesParamUpdate) from
+    /// `Spring.Set{Game,Team}RulesParam` in any synced gadget. The server has
+    /// already applied per-team LOS filtering (team scope) and sends a
+    /// `replace`-snapshot on join. Feeds `handleRulesParamUpdate` →
+    /// `Spring.GetGameRulesParam(s)` / `GetTeamRulesParam(s)`. A `null` value
+    /// deletes the key from the client mirror.
+    onRulesParamUpdate?: (update: RulesParamUpdateInfo) => void;
     /// A relayed `Spring.SendLuaUIMsg` (LuaUIMsgRelay). The server already
     /// applied the audience filter; deliver unconditionally to
     /// `widget:RecvLuaMsg(data, playerId)`. `data` preserves embedded NULs.
@@ -1685,6 +1707,30 @@ export class Connection {
                     if (key) options[key] = o.value() ?? '';
                 }
                 this.events.onGameModOptions?.(options);
+                break;
+            }
+            case ServerPayload.RulesParamUpdate: {
+                const upd = msg.payload(new RulesParamUpdate()) as RulesParamUpdate;
+                const params: Record<string, number | string | null> = {};
+                for (let i = 0; i < upd.paramsLength(); i++) {
+                    const e = upd.params(i);
+                    if (!e) continue;
+                    const key = e.key();
+                    if (!key) continue;
+                    switch (e.valueKind()) {
+                        case RulesParamValueKind.Number: params[key] = e.numVal(); break;
+                        case RulesParamValueKind.String: params[key] = e.strVal() ?? ''; break;
+                        // Nil → delete on the client mirror.
+                        case RulesParamValueKind.Nil:
+                        default:                          params[key] = null; break;
+                    }
+                }
+                this.events.onRulesParamUpdate?.({
+                    scope: upd.scope() === RulesParamScope.Team ? 'team' : 'game',
+                    id: upd.id(),
+                    replace: upd.replace(),
+                    params,
+                });
                 break;
             }
             case ServerPayload.TeamStatsHistoryBatch: {

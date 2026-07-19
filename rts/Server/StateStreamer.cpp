@@ -24,10 +24,12 @@
 #include "AI/AIRuntimePool.h"
 #include "WebTransport/WebTransportServer.h"
 #include "Lua/LuaRules.h"
+#include "Lua/LuaHandleSynced.h"
 #include "Sim/Units/UnitHandler.h"
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/CommandAI/CommandAI.h"
 #include "Sim/Units/CommandAI/Command.h"
+#include "Sim/Misc/Team.h"
 #include "Sim/Misc/TeamHandler.h"
 #include "Sim/Misc/LosHandler.h"
 #include "Sim/Misc/Wind.h"
@@ -38,8 +40,76 @@
 
 #include <algorithm>
 #include <vector>
+#include <variant>
+#include <type_traits>
+#include <utility>
 
 #define LOG_SECTION "server"
+
+namespace {
+
+// Convert a synced Param value into wire kind + value fields. Spring stores
+// bool/float/string; the client rules-param mirror is number|string, so a
+// bool is encoded as Number(0/1). CALLED-OUT divergence (see protocol.fbs
+// RulesParamValueKind): a `false` reads back as 0 (truthy in Lua), not false.
+void ParamToWire(const LuaRulesParams::Param& p,
+                 SpringWeb::RulesParamValueKind& kind,
+                 double& numVal, std::string& strVal) {
+    kind = SpringWeb::RulesParamValueKind_Nil;
+    numVal = 0.0;
+    std::visit([&](auto&& v) {
+        using T = std::decay_t<decltype(v)>;
+        if constexpr (std::is_same_v<T, bool>) {
+            kind = SpringWeb::RulesParamValueKind_Number; numVal = v ? 1.0 : 0.0;
+        } else if constexpr (std::is_same_v<T, float>) {
+            kind = SpringWeb::RulesParamValueKind_Number; numVal = static_cast<double>(v);
+        } else if constexpr (std::is_same_v<T, std::string>) {
+            kind = SpringWeb::RulesParamValueKind_String; strVal = v;
+        }
+    }, p.value);
+}
+
+// A changed key, carrying the LOS bitmask to filter it against per session.
+// For adds/changes that's the NEW param's los; for deletions the OLD param's
+// los (so exactly the sessions that could have had the key are told to drop it).
+struct ChangedParam {
+    std::string key;
+    SpringWeb::RulesParamValueKind kind = SpringWeb::RulesParamValueKind_Nil;
+    double numVal = 0.0;
+    std::string strVal;
+    int los = LuaRulesParams::RULESPARAMLOS_PRIVATE;
+};
+
+// Diff old→now: emit adds/changes (value OR los differs) and deletions.
+void ComputeParamDelta(const LuaRulesParams::Params& oldParams,
+                       const LuaRulesParams::Params& nowParams,
+                       std::vector<ChangedParam>& out) {
+    for (const auto& kv : nowParams) {
+        const auto it = oldParams.find(kv.first);
+        // A los change matters too: it can newly reveal/hide the key to a
+        // scope, so treat it as a change and re-filter per session.
+        if (it != oldParams.end() &&
+            it->second.los == kv.second.los &&
+            it->second.value == kv.second.value)
+            continue;
+        ChangedParam c;
+        c.key = kv.first;
+        c.los = kv.second.los;
+        ParamToWire(kv.second, c.kind, c.numVal, c.strVal);
+        out.push_back(std::move(c));
+    }
+    for (const auto& kv : oldParams) {
+        if (nowParams.find(kv.first) != nowParams.end())
+            continue;
+        ChangedParam c;
+        c.key = kv.first;
+        c.los = kv.second.los;            // old los: who could have seen it
+        c.kind = SpringWeb::RulesParamValueKind_Nil;  // delete on the client
+        out.push_back(std::move(c));
+    }
+}
+
+} // namespace
 
 void StateStreamer::Tick(int /*frameNum*/) {
     CheckWinCondition(0);
@@ -59,6 +129,7 @@ void StateStreamer::Tick(int /*frameNum*/) {
     BroadcastSendToUnsynced(0);
     BroadcastPlayerTeamEvents(0);
     BroadcastTeamStats(0);
+    BroadcastRulesParams(0);
     PumpLuaRulesMsgLoopback(0);
     BroadcastUnitLifecycle(0);
     BroadcastFeatureLifecycle(0);
@@ -874,6 +945,133 @@ void StateStreamer::BroadcastTeamStats(int) {
             rtcServer.BroadcastReliable(msg.data(), msg.size());
         }
     }
+}
+
+// Rules-param wire producer (Spring.Set{Game,Team}RulesParam → client).
+// The backbone routes all strategic state through rules params — region
+// control (game `region_*`/`regions_rev`), objectives (`objective_*`),
+// authority pools/event-ring (team params). None of it reached the browser
+// before this: `handleRulesParamUpdate` on the client was a dead consumer.
+//
+// Each tick we diff the live synced param maps (game + every team) against
+// last-sent baselines. Game params are broadcast unfiltered (matching
+// Spring.GetGameRulesParams, unconditionally public). Team params are
+// LOS-filtered per receiving session, replicating
+// LuaSyncedRead::GetTeamRulesParam(s): same-ally → PRIVATE-and-below,
+// allied-team → ALLIED-and-below, others → PUBLIC only, spectators → all.
+// A fresh session first gets a `replace=true` snapshot of current state
+// (so late joiners converge); thereafter only per-tick deltas.
+void StateStreamer::BroadcastRulesParams(int) {
+    auto& rtcServer = ctx.rtcServer;
+    auto& sessions  = ctx.sessions;
+
+    const int activeTeams = teamHandler.ActiveTeams();
+    if (static_cast<int>(lastTeamParams.size()) < activeTeams)
+        lastTeamParams.resize(activeTeams);
+
+    // Diff against baselines (session-independent) and refresh baselines. We
+    // do this even with nobody connected so a joiner's snapshot starts from a
+    // correct baseline and we never emit a spurious "everything changed" delta.
+    const LuaRulesParams::Params& gameNow = CSplitLuaHandle::GetGameParams();
+    std::vector<ChangedParam> gameChanged;
+    ComputeParamDelta(lastGameParams, gameNow, gameChanged);
+    lastGameParams = gameNow;
+
+    std::vector<std::vector<ChangedParam>> teamChanged(activeTeams);
+    for (int t = 0; t < activeTeams; ++t) {
+        const CTeam* team = teamHandler.Team(t);
+        if (team == nullptr) continue;
+        ComputeParamDelta(lastTeamParams[t], team->modParams, teamChanged[t]);
+        lastTeamParams[t] = team->modParams;
+    }
+
+    if (rtcServer.GetClientCount() == 0)
+        return;  // baselines updated; nothing to send
+
+    // Returns the losStatus mask a session viewing team `ownerTeam`'s params
+    // should use (LuaSyncedRead::GetTeamRulesParams). Spectators / unassigned
+    // (team < 0) are all-seeing readers.
+    auto teamLosMask = [&](const ClientSession& session, int ownerTeam) -> int {
+        using namespace LuaRulesParams;
+        int mask = RULESPARAMLOS_PUBLIC;
+        const bool allSeeing = !(session.team >= 0 && teamHandler.IsValidTeam(session.team));
+        if (allSeeing || teamHandler.AllyTeam(session.team) == teamHandler.AllyTeam(ownerTeam))
+            mask |= RULESPARAMLOS_PRIVATE_MASK;
+        else if (teamHandler.AlliedTeams(ownerTeam, session.team))
+            mask |= RULESPARAMLOS_ALLIED_MASK;
+        return mask;
+    };
+
+    // Game-scope delta is the same for every already-snapshotted session
+    // (unfiltered) — build the entry list once.
+    std::vector<Protocol::RulesParamEntryData> gameDeltaEntries;
+    gameDeltaEntries.reserve(gameChanged.size());
+    for (const auto& c : gameChanged)
+        gameDeltaEntries.push_back({c.key, c.kind, c.numVal, c.strVal});
+
+    sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
+        if (!session.rulesParamsSnapshotSent) {
+            // Join snapshot: full current state, replace=true per scope.
+            {
+                Protocol::RulesParamUpdateData snap;
+                snap.scope = SpringWeb::RulesParamScope_Game;
+                snap.replace = true;
+                snap.params.reserve(gameNow.size());
+                for (const auto& kv : gameNow) {
+                    Protocol::RulesParamEntryData e;
+                    e.key = kv.first;
+                    ParamToWire(kv.second, e.kind, e.numVal, e.strVal);
+                    snap.params.push_back(std::move(e));
+                }
+                auto msg = Protocol::BuildRulesParamUpdate(snap);
+                rtcServer.SendReliable(clientId, msg.data(), msg.size());
+            }
+            for (int t = 0; t < activeTeams; ++t) {
+                const CTeam* team = teamHandler.Team(t);
+                if (team == nullptr || team->modParams.empty()) continue;
+                const int losMask = teamLosMask(session, t);
+                Protocol::RulesParamUpdateData snap;
+                snap.scope = SpringWeb::RulesParamScope_Team;
+                snap.id = static_cast<uint32_t>(t);
+                snap.replace = true;
+                for (const auto& kv : team->modParams) {
+                    if (!(kv.second.los & losMask)) continue;
+                    Protocol::RulesParamEntryData e;
+                    e.key = kv.first;
+                    ParamToWire(kv.second, e.kind, e.numVal, e.strVal);
+                    snap.params.push_back(std::move(e));
+                }
+                if (snap.params.empty()) continue;
+                auto msg = Protocol::BuildRulesParamUpdate(snap);
+                rtcServer.SendReliable(clientId, msg.data(), msg.size());
+            }
+            session.rulesParamsSnapshotSent = true;
+            return;
+        }
+
+        // Established session: deltas only.
+        if (!gameDeltaEntries.empty()) {
+            Protocol::RulesParamUpdateData upd;
+            upd.scope = SpringWeb::RulesParamScope_Game;
+            upd.params = gameDeltaEntries;
+            auto msg = Protocol::BuildRulesParamUpdate(upd);
+            rtcServer.SendReliable(clientId, msg.data(), msg.size());
+        }
+        for (int t = 0; t < activeTeams; ++t) {
+            if (teamChanged[t].empty()) continue;
+            const int losMask = teamLosMask(session, t);
+            Protocol::RulesParamUpdateData upd;
+            upd.scope = SpringWeb::RulesParamScope_Team;
+            upd.id = static_cast<uint32_t>(t);
+            for (const auto& c : teamChanged[t]) {
+                if (!(c.los & losMask)) continue;
+                upd.params.push_back({c.key, c.kind, c.numVal, c.strVal});
+            }
+            if (upd.params.empty()) continue;
+            auto msg = Protocol::BuildRulesParamUpdate(upd);
+            rtcServer.SendReliable(clientId, msg.data(), msg.size());
+        }
+    });
 }
 
 // SendLuaRulesMsg loopback — synced gadgets call
