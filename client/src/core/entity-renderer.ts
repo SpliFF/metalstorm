@@ -1199,6 +1199,17 @@ export class EntityRenderer {
     // tool — the authored clip is exactly what's being judged).
     private clipPoses = new Map<number, ReadonlyMap<number, Matrix>>();
 
+    // --- Cosmetic turret-aim poses (DESIGN-MODEL-BUILDING §16c) ---
+    // Spring-euler per-piece poses pushed by TurretAimController for a
+    // native's turret/barrel. Same shape as `pieceOverrides` so both run
+    // through springToBabylonLocal identically. Merge precedence (see
+    // computePieceWorldMatrices): streamed 0x05 > aim > clip > rest.
+    private aimPoses = new Map<number, PieceOverrides>();
+    // Units ever seen in a 0x05 piece-state snapshot — the sim owns their
+    // pieces, so the cosmetic aim controller declines them (ZK/BAR/future
+    // s4 sim aim). Read by game-processor's TurretAimDeps.simDrivesPieces.
+    private pieceStreamed = new Set<number>();
+
     // --- Ghost pose freeze for PREVLOS-only buildings ---
     // The server stops sending updates for buildings that have left LOS
     // but have PREVLOS set. We freeze the last known pose so they keep
@@ -2122,17 +2133,24 @@ export class EntityRenderer {
         tmpl: ModelTemplate,
         overrides: PieceOverrides | null,
         clipPose?: ReadonlyMap<number, Matrix> | null,
+        aimPose?: PieceOverrides | null,
     ): Matrix[] {
         const out = new Array<Matrix>(tmpl.pieces.length);
         for (let i = 0; i < tmpl.pieces.length; i++) {
             const piece = tmpl.pieces[i];
-            // Dev clip-player pose (already a Babylon parent-relative
-            // local matrix) wins over the server's Spring-space override.
-            let local = clipPose?.get(i);
-            if (!local) {
-                const ov = overrides?.get(i);
-                local = ov ? this.springToBabylonLocal(ov) : piece.localMatrix;
-            }
+            // §16c merge policy, highest precedence first:
+            //   streamed 0x05 (overrides) > aim controller > authored clip
+            //   > rest pose.
+            // 0x05 and aim are Spring-euler (springToBabylonLocal); the clip
+            // pose is already a Babylon parent-relative local matrix.
+            let local: Matrix;
+            const serverOv = overrides?.get(i);
+            const aimOv = aimPose?.get(i);
+            const clip = clipPose?.get(i);
+            if (serverOv) local = this.springToBabylonLocal(serverOv);
+            else if (aimOv) local = this.springToBabylonLocal(aimOv);
+            else if (clip) local = clip;
+            else local = piece.localMatrix;
             out[i] = piece.parentIndex >= 0
                 ? local.multiply(out[piece.parentIndex])
                 : local.clone();
@@ -2180,6 +2198,11 @@ export class EntityRenderer {
         const seen = new Set<number>();
         for (const u of snapshot.units) {
             seen.add(u.unitId);
+            // The sim owns this unit's pieces — latch it out of cosmetic aim
+            // (§16c) for the rest of its life. Latched, not per-snapshot,
+            // because a sim turret slewing back to rest drops out of the
+            // stream and must not hand control back to the aim controller.
+            this.pieceStreamed.add(u.unitId);
             let map = this.pieceOverrides.get(u.unitId);
             if (!map) {
                 map = new Map();
@@ -2448,8 +2471,9 @@ export class EntityRenderer {
                 // chain walk in the static case.
                 const overrides = this.pieceOverrides.get(id) ?? null;
                 const clipPose = this.clipPoses.get(id) ?? null;
-                const pieceWorld = (overrides || clipPose)
-                    ? this.computePieceWorldMatrices(tmpl, overrides, clipPose)
+                const aimPose = this.aimPoses.get(id) ?? null;
+                const pieceWorld = (overrides || clipPose || aimPose)
+                    ? this.computePieceWorldMatrices(tmpl, overrides, clipPose, aimPose)
                     : null;
 
                 // Push one instance matrix per piece with geometry
@@ -2705,8 +2729,9 @@ export class EntityRenderer {
 
         const overrides = this.pieceOverrides.get(id) ?? null;
         const clipPose = this.clipPoses.get(id) ?? null;
-        const modelWorld = (overrides || clipPose)
-            ? this.computePieceWorldMatrices(tmpl, overrides, clipPose)[pieceIdx]
+        const aimPose = this.aimPoses.get(id) ?? null;
+        const modelWorld = (overrides || clipPose || aimPose)
+            ? this.computePieceWorldMatrices(tmpl, overrides, clipPose, aimPose)[pieceIdx]
             : tmpl.pieces[pieceIdx].restWorldMatrix;
 
         const rotation = (lerped.heading / 65535) * Math.PI * 2;
@@ -2768,11 +2793,96 @@ export class EntityRenderer {
         return true;
     }
 
+    /** Cosmetic turret-aim pose override (DESIGN-MODEL-BUILDING §16c): a
+     *  Spring-euler per-piece pose for the unit's turret/barrel, sitting
+     *  below the server's 0x05 stream and above the authored clip in the
+     *  per-piece merge. Pass null to clear. Returns false for an unknown
+     *  unit so TurretAimController can drop it. */
+    setAimPose(id: number, pose: ReadonlyMap<number, {
+        px: number; py: number; pz: number;
+        rx: number; ry: number; rz: number;
+    }> | null): boolean {
+        if (pose === null) {
+            this.aimPoses.delete(id);
+            return true;
+        }
+        if (!this.entityMeta.has(id)) {
+            this.aimPoses.delete(id);
+            return false;
+        }
+        this.aimPoses.set(id, pose as PieceOverrides);
+        return true;
+    }
+
+    /** Live interpolated pose (world position + wire heading u16) for a
+     *  unit, or null if it has no held position. Backs TurretAimController's
+     *  unit-pose + target-pose sampling. */
+    getEntityPose(id: number): { x: number; y: number; z: number; heading: number } | null {
+        const p = this.interpolator.getInterpolated(id, this.cursorFrame);
+        return p ? { x: p.x, y: p.y, z: p.z, heading: p.heading } : null;
+    }
+
+    /** True once the sim has streamed a 0x05 piece-state snapshot for this
+     *  unit — the sim owns its pieces, so the cosmetic aim controller
+     *  declines it (ZK/BAR turrets, future s4 sim aim). */
+    hasPieceStream(id: number): boolean {
+        return this.pieceStreamed.has(id);
+    }
+
+    /**
+     * Resolve the turret (+ optional barrel) pieces of a unit's model for the
+     * cosmetic aim controller. Returns null unless the model has a piece
+     * named `turret` (case-insensitive). The barrel is the first descendant
+     * of the turret whose name reads as a barrel/sleeve/gun. Offsets are the
+     * pieces' rest translations in Spring space (localMatrix m[12..14]).
+     */
+    getAimPieces(id: number): {
+        turret: { idx: number; px: number; py: number; pz: number };
+        barrel?: { idx: number; px: number; py: number; pz: number };
+    } | null {
+        const meta = this.entityMeta.get(id);
+        if (!meta) return null;
+        const tmpl = this.modelTemplates.get(meta.defId);
+        if (!tmpl) return null;
+        const pieces = tmpl.pieces;
+        let turretIdx = -1;
+        for (let i = 0; i < pieces.length; i++) {
+            if (pieces[i].name.toLowerCase() === 'turret') { turretIdx = i; break; }
+        }
+        if (turretIdx < 0) return null;
+        const offOf = (i: number) => {
+            const m = pieces[i].localMatrix.m;
+            return { idx: i, px: m[12], py: m[13], pz: m[14] };
+        };
+        // First descendant of the turret whose name reads as a barrel.
+        let barrelIdx = -1;
+        for (let i = 0; i < pieces.length; i++) {
+            if (i === turretIdx) continue;
+            // Walk the parent chain to check the piece hangs under the turret.
+            let anc = pieces[i].parentIndex;
+            let underTurret = false;
+            while (anc >= 0) {
+                if (anc === turretIdx) { underTurret = true; break; }
+                anc = pieces[anc].parentIndex;
+            }
+            if (!underTurret) continue;
+            const n = pieces[i].name.toLowerCase();
+            if (n.includes('barrel') || n.includes('sleeve') || n === 'gun') {
+                barrelIdx = i; break;
+            }
+        }
+        return barrelIdx >= 0
+            ? { turret: offOf(turretIdx), barrel: offOf(barrelIdx) }
+            : { turret: offOf(turretIdx) };
+    }
+
     removeEntity(id: number): void {
         this.entityMeta.delete(id);
         this.interpolator.remove(id);
         this.pieceOverrides.delete(id);
         this.clipPoses.delete(id);
+        this.aimPoses.delete(id);
+        this.pieceStreamed.delete(id);
     }
 
     /**
@@ -2998,6 +3108,8 @@ export class EntityRenderer {
         this.ghostPoses.clear();
         this.pieceOverrides.clear();
         this.clipPoses.clear();
+        this.aimPoses.clear();
+        this.pieceStreamed.clear();
         this.radarBlipMeshes.clear();
         this.defIsBuilding.clear();
         this.interpolator.clear();

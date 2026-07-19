@@ -95,6 +95,7 @@ import { OrbitRig, type OrbitTarget } from './orbit-rig.js';
 import { SunRig } from './sun-rig.js';
 import { ClipPlayer } from './clip-player.js';
 import { ClipAutoPolicy, nominalSpeedFor } from './clip-auto-policy.js';
+import { TurretAimController } from './turret-aim-controller.js';
 import { WorkerSelection } from './worker-selection.js';
 import { WorkerBuildPlacement, UNITDEF_FLAG_IS_FACTORY } from './worker-build-placement.js';
 import { WorkerCommandModes } from './worker-command-modes.js';
@@ -318,6 +319,10 @@ let gpClipPlayer: ClipPlayer | null = null;
 /// gpClipPlayer for every native whose model ships a `walk` clip. Harness
 /// playClip marks a unit manual so the F8 buttons still win.
 let gpClipPolicy: ClipAutoPolicy | null = null;
+/// DESIGN-MODEL-BUILDING §16c: cosmetic turret aim. Engaged off projectile
+/// Fired events (native models with a `turret` piece that the sim isn't
+/// already piece-driving) and ticked from the render loop for smooth slew.
+let gpAimController: TurretAimController | null = null;
 
 /// Both are created together on first use: each needs the EntityRenderer (as
 /// pose sink and as clip/def source), which doesn't exist until gpInit runs.
@@ -325,6 +330,25 @@ function gpEnsureClipPlayer(r: EntityRenderer): ClipPlayer {
     if (gpClipPlayer) return gpClipPlayer;
     const player = new ClipPlayer(r);
     gpClipPlayer = player;
+    gpAimController = new TurretAimController({
+        unitPose: (id) => {
+            const p = r.getEntityPose(id);
+            return p ? { x: p.x, y: p.y, z: p.z, heading: p.heading } : null;
+        },
+        // Live target pose while the client holds a position for it; the
+        // controller falls back to the Fired event's frozen targetPos.
+        targetPos: (id) => (id > 0 ? r.getEntityPosition(id) : null),
+        aimPieces: (id) => r.getAimPieces(id),
+        // The sim owns ZK/BAR (and future s4) turrets over 0x05 — decline them.
+        simDrivesPieces: (id) => r.hasPieceStream(id),
+        slewRateDegPerSec: (id) => {
+            const defId = r.getEntityDefId(id);
+            const cp = defId === undefined
+                ? undefined : gpDefCache?.getUnitDef(defId)?.customParams;
+            const v = Number(cp?.turret_slew_deg_per_sec);
+            return Number.isFinite(v) && v > 0 ? v : undefined;
+        },
+    }, r);
     gpClipPolicy = new ClipAutoPolicy({
         getClip: (id, name) => r.getClip(id, name),
         // getClipNames returns null while the template is still loading and
@@ -817,6 +841,7 @@ function gpConnect(msg: GpInitToWorker): void {
             // Drop clip bookkeeping. The player self-stops via setClipPose's
             // unknown-unit return, but the policy's motion entry would leak.
             gpClipPolicy?.remove(entityId);
+            gpAimController?.remove(entityId);
             gpCombatFX?.onCombatEvents([{
                 attackerId: 0, targetId: entityId, weaponDefId: 0,
                 result: 3, damage: 500, x, y, z,
@@ -837,6 +862,14 @@ function gpConnect(msg: GpInitToWorker): void {
         // 0x04 per-tick projectile-state envelope is gone — the renderer
         // integrates motion locally off these events.
         onProjectileFired: (events) => {
+            // §16c: engage cosmetic turret aim toward each shot's target.
+            // Runs even without a projectile renderer so aim is independent
+            // of projectile visuals.
+            if (gpCtx.entityRenderer && events.length) {
+                gpEnsureClipPlayer(gpCtx.entityRenderer);
+                const now = performance.now();
+                for (const e of events) gpAimController?.onFired(e, now);
+            }
             if (!gpCtx.projectileRenderer) return;
             for (const e of events) gpCtx.projectileRenderer.onFired(e);
         },
@@ -1480,6 +1513,7 @@ export function gpInit(msg: GpInitToWorker): void {
         gpOrbitRig?.tick();
         gpSunRig?.tick(dt);
         gpClipPlayer?.tick();
+        gpAimController?.tick(performance.now());
         gpMark(0);  // camera
 
         // entityRenderer.tick() advances the presentation clock (L0) and
@@ -2188,6 +2222,7 @@ export function gpShutdown(): void {
     gpSunRig = null;
     gpClipPlayer = null;
     gpClipPolicy = null;
+    gpAimController = null;
     gpTerrainFog?.dispose();
     gpTerrainFog = null;
     gpTerrainMesh = null;
