@@ -11,6 +11,7 @@
 
 #include "Game/Players/Player.h"
 #include "Game/Players/PlayerHandler.h"
+#include "Lua/GadgetPolicy.h"
 #include "Lua/LuaGaia.h"
 #include "Lua/LuaRules.h"
 #include "Sim/Misc/GlobalSynced.h"
@@ -42,6 +43,17 @@ public:
 	}
 
 	bool Execute(const SyncedAction& action) const final override{
+		// PLAN-security-hardening task 9: a strict deployment keeps cheats off
+		// so the G18/G19 cheat-gated debug gadgets stay inert. Refuse to enable
+		// (still allow a disable, which only ever tightens posture).
+		if (!GadgetPolicy::AllowCheats()) {
+			bool want = gs->cheatEnabled;
+			InverseOrSetBool(want, action.GetArgs());
+			if (want) {
+				LOG_L(L_WARNING, "Cheating refused: blocked by deployment gadget policy (SPRING_PROD / SPRING_GADGET_POLICY=strict)");
+				return true;
+			}
+		}
 		InverseOrSetBool(gs->cheatEnabled, action.GetArgs());
 		LogSystemStatus("Cheating", gs->cheatEnabled);
 		return true;

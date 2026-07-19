@@ -37,6 +37,7 @@ const std::unordered_map<int, std::string>* gAITeams = nullptr;
 #include "Game/Players/PlayerHandler.h"
 #include "Game/WaitCommandsAI.h"
 #include "Game/GlobalUnsynced.h"
+#include "Lua/GadgetPolicy.h"
 #include "Lua/LuaParser.h"
 #include "Lua/LuaSyncedRead.h"
 #include "Map/MapDamage.h"
@@ -415,6 +416,20 @@ void CSimulation::InitScripting()
     // dispatched into an empty _G. (Symptom: ZK commander selection
     // bounced off a no-op luaRules->RecvLuaMsg and no commander spawned
     // even though the message reached the server.)
+    // PLAN-security-hardening task 9: log the deployment gadget posture right
+    // before the synced gadget handler enumerates + loads gadgets, and assert
+    // cheats are off under a strict policy (the SyncedGameCommands "cheat"
+    // action refuses to enable them; this catches any other path). The
+    // per-gadget exclusions themselves are enforced at the VFS layer
+    // (LuaVFS::DirList / LoadFileWithModes), invisible to game Lua.
+    if (GadgetPolicy::IsStrict()) {
+        SLOG(SPRING_LOG_NOTICE, "gadget-policy: STRICT — dev/debug/loadstring/AI-relay gadgets excluded, cheats forced off");
+        if (gs->cheatEnabled) {
+            SLOG(SPRING_LOG_WARNING, "gadget-policy: cheats were enabled under a strict policy — forcing off");
+            gs->cheatEnabled = false;
+        }
+    }
+
     if (CLuaRules::LoadHandler(false)) {
         auto* ctx = new LuaScriptContext(&luaRules->syncedLuaHandle);
         scriptDispatcher->AddContext(ctx);

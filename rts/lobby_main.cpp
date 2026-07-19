@@ -21,6 +21,7 @@
 #include "Server/GmDashboardPage.h"
 #include "Server/DevBuildGate.h"
 #include "Server/CacheControl.h"
+#include "Server/TokenBucket.h"
 #include "System/SpringLog/SpringLog.h"
 #include "System/SpringLog/SpringLogSqlite.h"
 #include <cctype>
@@ -924,13 +925,14 @@ int main(int argc, char* argv[])
     // production deployment notes).
 
     // --- Process management API ---
-    // PLAN-security-hardening task 2 (G12): unauthenticated PID/port
-    // disclosure is fine for local dev tooling (spring-debug MCP) but has no
-    // place in a production binary — compiled out under SPRING_PROD rather
-    // than left reachable-but-role-gated, since dev tooling connects with no
-    // admin token at all.
+    // PLAN-security-hardening G12: PID/port disclosure is compiled out entirely
+    // under SPRING_PROD (task 2). In dev builds it now also refuses non-loopback
+    // callers (task 11): the LocalhostOrAdmin tag on a GET route degrades to a
+    // forgery-proof loopback-only check in DispatchGet — the local spring-debug
+    // MCP keeps working, a remote peer on a dev box bound public can no longer
+    // enumerate game-server PIDs/ports for recon.
 #ifndef SPRING_PROD
-    net.AddHttpGet("/api/processes", RouteAuth::Public, [&gameServers](const std::string&) -> HttpResponse {
+    net.AddHttpGet("/api/processes", RouteAuth::LocalhostOrAdmin, [&gameServers](const std::string&) -> HttpResponse {
         nlohmann::json arr = nlohmann::json::array();
         for (const auto& [roomId, inst] : gameServers) {
             const char* stateStr = "unknown";
@@ -2000,11 +2002,38 @@ int main(int argc, char* argv[])
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
     });
 
+    // PLAN-security-hardening task 11 (G10): /api/rooms/start forks+execs a
+    // spring-server. The host-only check (delegated to RoomManager::StartGame)
+    // already scopes *who* may start *which* room, but nothing bounded the
+    // fork/exec rate or the total live process count — an authenticated user
+    // could loop create→start and fork-bomb the host. Two bounds:
+    //   - a global token bucket (burst 10, ~10/min sustained) on spawns, and
+    //   - a hard ceiling on concurrent live game servers.
+    // Both apply in dev and prod (a spawn is expensive regardless of build).
+    static TokenBucket roomSpawnLimiter(/*burst=*/10.0, /*perSecond=*/10.0 / 60.0);
+    constexpr size_t kMaxConcurrentGameServers = 64;
+
     // POST /api/rooms/start — start the game
     net.AddHttpPost("/api/rooms/start", RouteAuth::TokenRequired, [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
         HTTP_ROOM_AUTH();
         auto* room = findPlayerRoom(static_cast<uint32_t>(userId));
         if (!room) return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
+
+        // Fork-bomb brakes (G10), evaluated before any state mutation. Count
+        // only genuinely-alive servers so ended/crashed rooms don't wedge the
+        // cap.
+        {
+            size_t aliveServers = 0;
+            for (const auto& [rid, gi] : gameServers)
+                if (gi.pid > 0 && isProcessAlive(gi.pid)) ++aliveServers;
+            if (aliveServers >= kMaxConcurrentGameServers) {
+                SLOG(SPRING_LOG_WARNING, "room %u start refused: %zu/%zu game servers already live",
+                    room->id, aliveServers, kMaxConcurrentGameServers);
+                return HttpAuth::JsonResponse(503, R"({"error":"server capacity reached — try again shortly"})");
+            }
+        }
+        if (!roomSpawnLimiter.TryConsume())
+            return HttpAuth::JsonResponse(429, R"({"error":"game-start rate limit exceeded"})");
 
         // Auto-add a Null AI if every participant ends up on the same
         // team. Without an opposing ally, ZK's game_over.lua trips its
@@ -2080,6 +2109,15 @@ int main(int argc, char* argv[])
             gameServers[room->id] = inst;
             persistGameServer(inst);
             room->gameServerPort = inst.port;
+            // Audit the process spawn (G10 / §3): who started which game/map on
+            // what port. Append-only admin_audit row.
+            {
+                auto starter = db.FindUserById(userId);
+                db.LogAudit(userId, starter ? starter->username : std::string("?"),
+                    "room_start", room->gameId,
+                    "room=" + std::to_string(room->id) + " map=" + room->mapId +
+                    " port=" + std::to_string(inst.port) + " pid=" + std::to_string(inst.pid));
+            }
         }
 
         broadcastRooms();
