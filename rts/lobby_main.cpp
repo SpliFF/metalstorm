@@ -1107,13 +1107,31 @@ int main(int argc, char* argv[])
             }
             // Audit tail for this game: GM verbs audit with roomTag "room=<id>"
             // or target "frame=…"; match on the room tag. (admin_audit has no
-            // room column — the LIKE is a pragmatic per-game filter.)
+            // room column — the tag match is a pragmatic per-game filter.)
             nlohmann::json audit = nlohmann::json::array();
             {
                 const std::string tag = "room=" + std::to_string(roomId);
+                // Anchored match, not a bare substring: the tag must sit on a
+                // token boundary and be followed by a non-digit (or end of
+                // string), otherwise roomId=1 also matches "room=10"/"room=199"
+                // and leaks other rooms' audit rows. Writers (GmVerbs roomTag,
+                // direct_start) compose the tag as exactly "room=<id>", but
+                // keep the boundary check so a future "room=<id> …" digest
+                // still matches.
+                const auto hasRoomTag = [&tag](const std::string& s) {
+                    for (size_t pos = s.find(tag); pos != std::string::npos;
+                         pos = s.find(tag, pos + 1)) {
+                        if (pos > 0 && std::isalnum(static_cast<unsigned char>(s[pos - 1])))
+                            continue;
+                        const size_t end = pos + tag.size();
+                        if (end < s.size() && std::isdigit(static_cast<unsigned char>(s[end])))
+                            continue;
+                        return true;
+                    }
+                    return false;
+                };
                 for (const auto& e : db.GetRecentAuditEntries(400)) {
-                    if (e.argsDigest.find(tag) == std::string::npos &&
-                        e.target.find(tag) == std::string::npos) continue;
+                    if (!hasRoomTag(e.argsDigest) && !hasRoomTag(e.target)) continue;
                     audit.push_back({{"createdAt", e.createdAt}, {"username", e.username},
                                      {"action", e.action}, {"target", e.target},
                                      {"argsDigest", e.argsDigest}});

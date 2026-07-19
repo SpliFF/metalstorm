@@ -307,28 +307,36 @@ struct NetworkServer::Impl {
     /// before the handler for any non-Public RouteAuth. Belt-and-braces: the
     /// handler is free to do its own auth lookups on top of this for business
     /// logic (e.g. which user is acting), this is just the gate.
+    ///
+    /// The gate itself runs INSIDE SafeInvoke, not just the handler: the auth
+    /// callbacks (validateToken/isAdmin) are SQLite-backed and can throw
+    /// exactly like a handler can — invoking them outside the wrapper meant a
+    /// throwing callback still crashed dispatch, the class of failure
+    /// SafeInvoke exists to eliminate.
     HttpResponse CheckAuthAndCall(const NetworkServer::PostRoute& route, const std::string& path,
                                    const std::string& body, const HttpRequestHeaders& hdrs) {
-        if (route.auth != RouteAuth::Public) {
-            int64_t userId = 0;
-            if (authCallbacks && authCallbacks->validateToken)
-                userId = authCallbacks->validateToken(hdrs.authorization);
-            const bool tokenOk = userId > 0;
-            const bool adminOk = tokenOk && authCallbacks && authCallbacks->isAdmin && authCallbacks->isAdmin(userId);
-            switch (route.auth) {
-                case RouteAuth::TokenRequired:
-                    if (!tokenOk) return JsonError(401, "unauthorized");
-                    break;
-                case RouteAuth::AdminOnly:
-                    if (!adminOk) return JsonError(tokenOk ? 403 : 401, tokenOk ? "forbidden — admin role required" : "unauthorized");
-                    break;
-                case RouteAuth::LocalhostOrAdmin:
-                    if (!hdrs.remoteIsLoopback && !adminOk) return JsonError(tokenOk ? 403 : 401, tokenOk ? "forbidden" : "unauthorized");
-                    break;
-                default: break;
+        return SafeInvoke(path, [&]() -> HttpResponse {
+            if (route.auth != RouteAuth::Public) {
+                int64_t userId = 0;
+                if (authCallbacks && authCallbacks->validateToken)
+                    userId = authCallbacks->validateToken(hdrs.authorization);
+                const bool tokenOk = userId > 0;
+                const bool adminOk = tokenOk && authCallbacks && authCallbacks->isAdmin && authCallbacks->isAdmin(userId);
+                switch (route.auth) {
+                    case RouteAuth::TokenRequired:
+                        if (!tokenOk) return JsonError(401, "unauthorized");
+                        break;
+                    case RouteAuth::AdminOnly:
+                        if (!adminOk) return JsonError(tokenOk ? 403 : 401, tokenOk ? "forbidden — admin role required" : "unauthorized");
+                        break;
+                    case RouteAuth::LocalhostOrAdmin:
+                        if (!hdrs.remoteIsLoopback && !adminOk) return JsonError(tokenOk ? 403 : 401, tokenOk ? "forbidden" : "unauthorized");
+                        break;
+                    default: break;
+                }
             }
-        }
-        return SafeInvoke(path, [&] { return route.handler(path, body, hdrs); });
+            return route.handler(path, body, hdrs);
+        });
     }
 
     HttpResponse DispatchPost(const std::string& url, const std::string& body,

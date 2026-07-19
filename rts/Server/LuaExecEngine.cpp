@@ -603,7 +603,7 @@ std::string ExecuteServerCommand(const std::string& cmd) {
         return LuaCallInProfiler::Report(topN);
     }
 
-    // sim profile [on|off|reset|status|<topN>]  — CSimulation::SimFrame()
+    // sim profile [on|off|reset|status]  — CSimulation::SimFrame()
     // per-phase wall-time profiler (PLAN-server-cpp-optimisation.md P0):
     // native sim vs unit-script tick vs synced Lua call-ins. Complements
     // `lua profile` (per handle+callin detail) with the coarse phase split.
