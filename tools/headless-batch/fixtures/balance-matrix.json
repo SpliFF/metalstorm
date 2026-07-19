@@ -1,0 +1,7 @@
+{
+  "axes": [
+    { "path": "aiSlots.0.profile", "values": ["aggressive", "default"] },
+    { "path": "map", "values": ["green_flat_x34_v3", "pools_of_ilys_1.0.0"] },
+    { "path": "seed", "values": [1, 2] }
+  ]
+}

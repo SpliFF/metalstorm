@@ -9,6 +9,7 @@
 #include "Server/DebugFlags.h"
 #include "System/SpringLog/SpringLog.h"
 #include <cstdint>
+#include <map>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -59,6 +60,46 @@ private:
 
 /// Global combat event collector, accessible from weapon code.
 extern CombatEventCollector combatEvents;
+
+/// Per-weapon-def combat totals for a single weapon def, accumulated across
+/// every event the collector has seen (PLAN-headless task 2 "combat totals
+/// (volleys, damage by def)").
+struct CombatWeaponTotals {
+    uint32_t volleys = 0;   // one per hit/miss/blocked/kill event resolved
+    uint32_t kills = 0;
+    float damage = 0.0f;
+};
+
+/// Running per-weapon-def combat totals, fed alongside the existing
+/// per-tick `combatEvents.Drain()` (StateStreamer::BroadcastCombatEvents) so
+/// a headless run keeps aggregate stats even with zero connected clients to
+/// broadcast to. Cheap (one map lookup + 2 adds per event) so it stays live
+/// unconditionally rather than threading a headless-only flag through
+/// StateStreamer.
+class CombatStatsAccumulator {
+public:
+    void Accumulate(const std::vector<CombatEventData>& events) {
+        std::lock_guard<std::mutex> lock(mutex);
+        for (const auto& e : events) {
+            auto& t = byWeapon[e.weaponDefId];
+            t.volleys++;
+            t.damage += e.damage;
+            if (e.result == 3)
+                t.kills++;
+        }
+    }
+
+    std::map<uint16_t, CombatWeaponTotals> Snapshot() const {
+        std::lock_guard<std::mutex> lock(mutex);
+        return byWeapon;
+    }
+
+private:
+    mutable std::mutex mutex;
+    std::map<uint16_t, CombatWeaponTotals> byWeapon;
+};
+
+extern CombatStatsAccumulator combatStats;
 
 /// Tracks unit deaths for EntityDestroy broadcast.
 ///

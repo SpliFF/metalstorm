@@ -10,6 +10,11 @@ Part of the [Debugging & Logging Guide](debugging.md) family. This page covers t
   - [MCP Server Setup](#mcp-server-setup)
   - [Available Tools](#available-tools)
   - [Reliable live game-drive verification](#reliable-live-game-drive-verification)
+- [Headless Run Mode](#headless-run-mode)
+  - [`--headless-run` config](#--headless-run-config)
+  - [Stats dump + determinism hash](#stats-dump--determinism-hash)
+  - [Batch driver (`tools/headless-batch`)](#batch-driver-toolsheadless-batch)
+  - [Determinism CI hook](#determinism-ci-hook)
 - [springcli — Command-Line Tool](#springcli--command-line-tool)
   - [Building](#building)
   - [Commands](#commands)
@@ -189,6 +194,171 @@ client-side LuaUI worker (the `Spring.*`/`gl.*` API the player sees) with
 > process restarts. If you still see `401 … use POST /api/auth/login first` from a
 > long-running MCP, restart the MCP server, or drive exec via a fresh
 > `curl`-obtained token directly against `:9100/api/exec`.
+
+---
+
+## Headless Run Mode
+
+`--headless-run <config.json>` runs `spring-server` to completion **with no browser
+client attached at all** — no rendering, no LuaUI, no WebTransport clients. It
+unblocks AI-vs-AI soak testing, balance-sweep batches, and sim-determinism CI (the
+"does the synced simulation actually reproduce" question that was previously
+untestable). Full design: [PLAN-headless.md](../PLAN-headless.md).
+
+Everything else in the server is headless by construction (rendering was deleted in
+Phase 0) — the only engine change is the tick-gate: idle-exit and the roster-wait are
+force-disabled under `--headless-run`, so the sim starts and ticks with zero clients.
+
+### `--headless-run` config
+
+```jsonc
+// A self-contained manifest — same shape as the quickstart --direct manifest
+// (PLAN-quickstart.md), plus a `headless` block.
+{
+  "map": "green_flat_x34_v3",
+  "game": "papertanks",
+  "aiSlots": [
+    { "aiId": "basic_ai", "team": 0, "startPos": 0, "profile": "aggressive" },
+    { "aiId": "basic_ai", "team": 1, "startPos": 1, "profile": "default" }
+  ],
+  "headless": {
+    "tickMode": "uncapped",           // "uncapped" | "realtime" | "xN" (e.g. "x5")
+    "stopAt": { "frame": 9000 },      // and/or "gameOver": true, "luaCondition": "GG.Some.Predicate"
+    "statsDump": "out/run.json",      // written at termination
+    "stateHashEvery": 300             // determinism-hash cadence, 0 = off
+  }
+}
+```
+
+Launch directly (no lobby needed — this bypasses the room state machine entirely):
+
+```bash
+build/debug/spring-server \
+  --headless-run path/to/config.json \
+  --port 19100 --db /tmp/run.sqlite \
+  --max-wall-min 5   # hard wall-clock ceiling (E4), default 60
+```
+
+Run from the **repo root** — the server resolves `map`/`game` against
+`data/maps/<id>` / `data/games/<id>` relative to its cwd. Each concurrent instance
+needs a **distinct `--port`** (binds both TCP and the QUIC/UDP WebTransport listener —
+no port-0 auto-assign) and a **distinct `--db`** (SQLite; a shared file races two
+writers). The process self-terminates with exit code `0` once a stop condition fires
+— no separate "wait for the dump to appear" polling is needed, just wait for the
+child process to exit.
+
+`stopAt` precedence: `luaCondition`-errored > `gameOver` > `frame` > `luaCondition` >
+`--max-wall-min` (always active as the outermost runaway guard).
+
+### Stats dump + determinism hash
+
+The JSON written to `headless.statsDump` at termination (`rts/Server/StatsDump.{h,cpp}`):
+
+```jsonc
+{
+  "status": "frame-limit",           // headless::StopReasonName() value
+  "frame": 9000, "gameSeconds": 300.0, "wallSeconds": 4,
+  "snapshots": [
+    {
+      "frame": 300, "gameSeconds": 10.0, "wallSeconds": 0,
+      "stateHash": "a1b2c3d4e5f60708",  // fixed-width hex string, NOT a JSON number
+      "simFps": 0.0, "rssKb": 41232, "luaHeapKb": 128,
+      "teams": [ { "teamId": 0, "numUnits": 3, "metal": 940.0, "damageDealt": 0.0, "unitsKilled": 0, /* ... */ } ],
+      "weapons": [ { "weaponDefId": 4, "volleys": 12, "kills": 1, "damage": 340.5 } ]
+    }
+    // ... one row per `stateHashEvery` frames, plus a final row at the stop frame
+  ]
+}
+```
+
+**`stateHash` is a hex string, not a number** — a real hash exceeds 2^53 and would
+lose precision through a double-based JSON parser (Node/Python). Parse it as an
+opaque string; compare with plain `===`/`==`, never cast to a number.
+
+`stateHash` is an FNV-1a xor-fold over every active unit's id/team/pos/health plus the
+synced RNG's generator state, folded in engine iteration order (order-sensitive by
+design — reproducing the same order every run *is* the sync claim). Two runs of the
+same config must produce byte-identical `stateHash` sequences; any divergence is a
+real synced-state bug, not test flake.
+
+**Known gap:** the engine has no `seed` config field yet — `gsRNG` is hard-seeded to a
+fixed constant (`CGlobalSynced::ResetState()`), so there is currently no way to make
+two headless runs diverge on purpose via a seed. The batch driver (below) still
+carries a `seed` matrix axis through to each generated config for bookkeeping/
+reproducibility labelling, but the engine does not yet consume it — noted here per
+the no-silent-deviation rule rather than left to be discovered later.
+
+### Batch driver (`tools/headless-batch`)
+
+`tools/headless-batch/batch.mjs` — a dependency-free Node ESM CLI — expands a
+parameter matrix (profiles × maps × seeds, or any other axes) against a config
+template, spawns one `spring-server --headless-run` per combination (concurrently —
+they're cheap; task 2's field notes measured an uncapped 3-simulated-hour run
+completing in 8 wall-seconds), and collates every run's stats dump into one JSONL
+file (one line per run) for downstream analysis: balance sweeps, economy tuning
+grids, AI profile round-robins, long-uptime soak ladders.
+
+```bash
+node tools/headless-batch/batch.mjs \
+  --template tools/headless-batch/fixtures/balance-template.json \
+  --matrix   tools/headless-batch/fixtures/balance-matrix.json \
+  --out-dir  out/balance-01 \
+  --server-bin build/debug/spring-server \
+  --concurrency 4 --max-wall-min 5
+```
+
+The matrix spec is a list of dot-path axes (`aiSlots.0.profile`, `map`, `seed`, or any
+other field in the template) cross-producted into one config per combination:
+
+```jsonc
+// tools/headless-batch/fixtures/balance-matrix.json
+{
+  "axes": [
+    { "path": "aiSlots.0.profile", "values": ["aggressive", "default"] },
+    { "path": "map", "values": ["green_flat_x34_v3", "pools_of_ilys_1.0.0"] },
+    { "path": "seed", "values": [1, 2] }
+  ]
+}
+```
+
+2×2×2 axes → 8 runs. Each JSONL line is
+`{ index, params, port, configPath, dumpPath, exitCode, ok, dump, stderrTail? }` —
+`params` is the flat `{axisPath: value}` combination for that row, `dump` is the
+parsed `FinalDump` JSON (or `null` if the run failed before writing one — never
+faked with zeros). Per-run configs/dumps/db files land under `--out-dir` so nothing
+overwrites between rows.
+
+The matrix-expansion core (`lib/matrix.mjs`) is pure — no `child_process`/`fs` — and
+covered by `node tools/headless-batch/test/matrix.test.mjs` / `make
+test-headless-batch`, which asserts the PLAN-headless.md §6 "meta" requirement
+directly: a 2×2×2 spec produces 8 rows with distinct seed values and no duplicate
+combinations.
+
+### Determinism CI hook
+
+`tools/headless-batch/determinism-pair-run.mjs` runs one config **twice, back to
+back**, and diffs the two dumps' `stateHash` sequences frame-for-frame — the actual
+regression test for the "synced" claim. Wired into
+[`.github/workflows/headless-determinism.yml`](../.github/workflows/headless-determinism.yml)
+(macOS runner — same QUIC/Homebrew constraint as `security-prod-gate.yml`, see that
+workflow's platform note) and `make test-headless-determinism`:
+
+```bash
+make test-headless-determinism
+# builds spring-server, then:
+node tools/headless-batch/determinism-pair-run.mjs \
+  --server-bin build/debug/spring-server \
+  --out-dir build/headless-determinism
+```
+
+The CI fixture (`tools/headless-batch/fixtures/papertanks-determinism.json`) is
+PaperTanks-scale — a 2-AI, 5-game-minute (`stopAt.frame: 9000`) uncapped run against
+`green_flat_x34_v3` with `stateHashEvery: 300` (30 snapshots) — chosen small enough
+that the actual sim run costs single-digit wall-seconds; the workflow's ~2-minute
+wall time is almost entirely the `cmake`/`ninja` build, not the run itself. A
+mismatch prints every diverging snapshot (frame + both hashes) and exits non-zero;
+a run that fails to reach its stop condition (bad exit code) fails loudly rather
+than silently comparing two empty dumps.
 
 ---
 

@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Babylon model inspector (bundled)</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { height: 100%; background: #181c20; color: #cde;
+        font: 13px/1.5 system-ui, sans-serif; overflow: hidden; }
+      #c { width: 100vw; height: 100vh; display: block; outline: none; }
+      #hud { position: fixed; top: 0; left: 0; width: min(46vw, 560px); max-height: 56vh;
+        overflow: auto; padding: 6px 10px; background: rgba(10,12,16,.86); z-index: 5;
+        font: 11px/1.45 monospace; white-space: pre-wrap; }
+      #hud .h { color: #8cf; font-weight: bold; }
+      .err { color: #f77; } .ok { color: #7d7; } .warn { color: #fb6; } .dim { color: #789; }
+      #bar { position: fixed; bottom: 0; left: 0; right: 0; padding: 6px 10px;
+        background: rgba(10,12,16,.86); z-index: 5; display: flex; gap: 6px; align-items: center; }
+      #bar input { flex: 1; background: #123; color: #cde; border: 1px solid #456;
+        padding: 3px 6px; font: 12px monospace; }
+      #bar button { background: #234; color: #cde; border: 1px solid #456; border-radius: 3px;
+        padding: 3px 9px; cursor: pointer; font: 12px monospace; }
+    </style>
+  </head>
+  <body>
+    <!-- Approach 2: the SAME module graph and Babylon 9.1.0 build the game
+         bundles (via Vite), plus the game's own ktx2-config. Behaves exactly
+         like the in-game loader, minus the worker + entity-renderer layer. -->
+    <div id="hud"><span class="h">Babylon model inspector (bundled 9.1.0)</span> — booting…</div>
+    <canvas id="c"></canvas>
+    <div id="bar">
+      <input id="url" placeholder="/api/games/data/metalstorm/models/fable_colossus.gltf" />
+      <button id="go">Load</button>
+      <button id="insp">Inspector</button>
+      <button id="wire">Wireframe</button>
+    </div>
+    <script type="module" src="/src/babylon-inspector.ts"></script>
+  </body>
+</html>

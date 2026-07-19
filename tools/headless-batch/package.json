@@ -1,0 +1,10 @@
+{
+  "name": "headless-batch",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Batch driver + determinism pair-run for spring-server --headless-run (PLAN-headless.md)",
+  "scripts": {
+    "test": "node test/matrix.test.mjs"
+  }
+}

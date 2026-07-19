@@ -11,6 +11,12 @@
     "test:watch": "vitest"
   },
   "devDependencies": {
+    "@babylonjs/addons": "^9.1.0",
+    "@babylonjs/gui": "^9.1.0",
+    "@babylonjs/gui-editor": "^9.1.0",
+    "@babylonjs/inspector": "^9.1.0",
+    "@babylonjs/materials": "^9.1.0",
+    "@babylonjs/serializers": "^9.1.0",
     "@sveltejs/vite-plugin-svelte": "^7.0.0",
     "gltf-validator": "^2.0.0-dev.3.10",
     "typescript": "~6.0.2",

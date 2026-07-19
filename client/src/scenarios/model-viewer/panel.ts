@@ -29,6 +29,9 @@ export interface PanelApi {
     playClip(name: string): void;
     /** Re-enter orbit on the stage unit (after "RTS cam"). */
     reorbit(): Promise<void>;
+    /** Open a standalone Babylon inspector popup on the staged def's model.
+     *  'cdn' = unpkg UMD build; 'bundled' = the app's own Vite route. */
+    inspectModel(mode: 'cdn' | 'bundled'): void;
 }
 
 export interface ModelViewerPanel {
@@ -251,6 +254,23 @@ export function createModelViewerPanel(api: PanelApi): ModelViewerPanel {
         btn('sun sweep', 'capture preset: fixed pose × 5 elevations', () => api.capture('sun')),
     );
     root.append(render.root);
+
+    // ── 6. Inspect (Babylon) ─────────────────────────────────────────────
+    // Debugging models is the whole point of this scenario, and the game's
+    // render scene lives in the worker (OffscreenCanvas) where the DOM
+    // Inspector can't reach. These pop a standalone Babylon scene that loads
+    // the SAME model URL with the glTF loader's logging + Khronos validator
+    // and the debugLayer open — a faithful reproduction of the load path.
+    const inspect = group('Inspect (Babylon)');
+    inspect.body.append(
+        btn('Inspector ▸ CDN', 'popup: unpkg UMD Babylon 9.1.0 (isolated) — Inspector + glTF validation on the staged model',
+            () => api.inspectModel('cdn')),
+        btn('Inspector ▸ bundled', 'popup: the app’s own Babylon build (same module graph as the game)',
+            () => api.inspectModel('bundled')),
+        el('div', 'color:#678; margin-top:2px;',
+            'loads the staged model in a DOM scene · console shows validator + geometry dump'),
+    );
+    root.append(inspect.root);
 
     document.body.appendChild(root);
 
