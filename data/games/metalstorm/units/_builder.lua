@@ -35,7 +35,11 @@ local function mk(spec)
             maxdamage   = o.maxdamage or round((spec.baseHp or 400) * growth),
             mass        = o.mass or round((spec.baseMass or 100) * growth),
 
-            maxvelocity  = o.maxvelocity or (spec.baseSpeed or 2.0) * (1 - 0.15 * (s - 1)),
+            -- Immobile units (radar, buildings; canmove=false) MUST have speed 0.
+            -- A nonzero maxvelocity with no moveDef trips MoveTypeFactory::GetMoveType's
+            -- IsImmobileUnit() assertion → hard SIGSEGV at GameStart.
+            maxvelocity  = (spec.canmove == false) and 0
+                or o.maxvelocity or (spec.baseSpeed or 2.0) * (1 - 0.15 * (s - 1)),
             acceleration = o.acceleration or 0.25,
             brakerate    = o.brakerate or 0.2,
             turnrate     = o.turnrate or round((spec.baseTurn or 900) / growth ^ 0.5),
