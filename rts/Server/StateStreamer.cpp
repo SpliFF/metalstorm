@@ -466,6 +466,7 @@ void StateStreamer::BroadcastCombatEvents(int) {
     auto events = combatEvents.Drain();
     auto projDrain = projectileEvents.Drain();
     auto soundDrain = soundEvents.Drain();
+    auto volleyDrain = volleyOutcomes.Drain();
     auto seismicDrain = intelEvents != nullptr
         ? intelEvents->DrainSeismicPings()
         : std::vector<SeismicPingData>{};
@@ -474,6 +475,7 @@ void StateStreamer::BroadcastCombatEvents(int) {
         || !projDrain.impacts.empty()
         || !projDrain.trajectories.empty()
         || !soundDrain.empty()
+        || !volleyDrain.empty()
         || !seismicDrain.empty();
     if (hasAny && rtcServer.GetClientCount() > 0) {
         const uint32_t frameNo = static_cast<uint32_t>(sim.GetFrameNum());
@@ -556,14 +558,66 @@ void StateStreamer::BroadcastCombatEvents(int) {
                     visiblePings.push_back(p);
             }
 
+            // Statistical-combat volley outcomes — the PLAN-weapons.md
+            // filtering matrix, finally implemented (PLAN §2.3, Q-D-c).
+            //   * viewer sees the attacker (LOS/radar on the firing position,
+            //     or the attacker is friendly)   -> FULL outcome (Hit/Miss,
+            //     damage, attacker id + posture, team tint).
+            //   * viewer OWNS the target but can't see the attacker -> UNKNOWN
+            //     (no attacker id, no damage) PLUS a counterbattery radar-blip
+            //     reveal at the firing position so statistical artillery is
+            //     counterable (Q-D-c overrides the plan's v0 no-reveal default).
+            //   * viewer sees only the target area -> UNKNOWN, no reveal.
+            //   * viewer sees neither -> dropped.
+            std::vector<VolleyOutcomeData> visibleVolleys;
+            visibleVolleys.reserve(volleyDrain.size());
+            for (const auto& v : volleyDrain) {
+                const bool attackerVisible =
+                    (viewerAllyTeam < 0) || teamFriendly(v.attackerTeam)
+                    || posVisible(v.attackerPos);
+                const bool viewerOwnsTarget =
+                    (v.targetTeam != 255) && teamFriendly(v.targetTeam);
+                const bool targetVisible =
+                    (viewerAllyTeam < 0) || viewerOwnsTarget
+                    || posVisible(v.targetPos);
+
+                if (attackerVisible) {
+                    // Full ground-truth outcome (spectators land here too).
+                    visibleVolleys.push_back(v);
+                    continue;
+                }
+                if (!targetVisible)
+                    continue; // sees neither attacker nor impact — no leak.
+
+                // Attacker hidden: strip the outcome to UNKNOWN, hide the
+                // attacker id/team/posture/damage. Keep target_pos for impact FX
+                // and the squad casualty hint; keep target_id only if the viewer
+                // can legitimately resolve that unit.
+                VolleyOutcomeData masked = v;
+                masked.result       = 2; // CombatResult::Unknown
+                masked.damage       = 0.0f;
+                masked.attackerId   = 0;
+                masked.attackerTeam = 255;
+                masked.posture      = 0;
+                if (!viewerOwnsTarget && !posVisible(v.targetPos))
+                    masked.targetId = 0;
+                // Counterbattery reveal only for the target's own team.
+                if (viewerOwnsTarget) {
+                    masked.revealAttacker = true;
+                    masked.revealPos      = v.attackerPos;
+                }
+                visibleVolleys.push_back(masked);
+            }
+
             if (visibleCombat.empty() && fired.empty()
                 && impacts.empty() && trajectories.empty()
-                && visibleSounds.empty() && visiblePings.empty())
+                && visibleSounds.empty() && visiblePings.empty()
+                && visibleVolleys.empty())
                 return;
 
             auto batch = Protocol::BuildCombatEventBatch(
                 frameNo, visibleCombat, fired, impacts, trajectories,
-                visibleSounds, visiblePings);
+                visibleSounds, visiblePings, visibleVolleys);
             rtcServer.SendReliable(clientId, batch.data(), batch.size());
         });
     }

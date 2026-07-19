@@ -73,6 +73,22 @@ namespace StatCombat {
 	// Aggregate volley damage: def damage scaled by the firing squad's strength
 	// fraction, floored at minVolleyDamage on a hit (E6). A miss deals 0.
 	float VolleyDamage(float defDamage, float strengthFraction, bool hit, float minVolleyDamage);
+
+	// Metalstorm morale (Q-D-c, ANSWERED 2026-07-19). v0 morale is a DERIVED
+	// PROXY: no independent stat, morale = clamp(hp% - 10, 0, 100). Only
+	// consulted for statistical weapons (opt-in) so the faithful Recoil path
+	// is untouched.
+	enum MoralePosture : uint8_t {
+		MORALE_NORMAL  = 0, // hp >= 20% — fights normally
+		MORALE_RETREAT = 1, // morale < 10 (hp < 20%) — retreats WHILE firing
+		MORALE_PANIC   = 2, // morale == 0 (hp <= 10%) — flees, does not fire
+	};
+
+	// Derived-proxy morale value in [0,100]. Pure; unit-testable.
+	float DerivedMorale(float health, float maxHealth);
+
+	// Posture from derived morale (the two Q-D-c thresholds). Pure.
+	MoralePosture PostureFrom(float health, float maxHealth);
 }
 
 // A rolled-but-not-yet-applied volley outcome. Rolled at fire time, applied at
@@ -88,9 +104,12 @@ struct PendingVolley {
 	uint16_t targetGen    = 0;   // target spawn generation at fire time
 	int      weaponDefId  = 0;
 	int      team         = 0;   // attacker team (for FX/visibility)
+	int      targetTeam   = 255; // victim team (counterbattery reveal targeting); 255 = none
 	float3   targetPos;          // fire-time target position (FX + squad impact hint)
+	float3   attackerPos;        // fire-time firing position (counterbattery reveal source)
 	float    damage       = 0.0f;// aggregate damage to apply (0 on a miss)
 	uint8_t  rounds       = 1;   // cosmetic shot count for client tracer fan-out
+	uint8_t  posture      = 0;   // attacker morale posture at fire time (StatCombat::MoralePosture)
 	bool     hit          = false;
 };
 
@@ -113,8 +132,18 @@ public:
 	                   const float3& targetPos, int rounds);
 
 	// Per-frame drain: apply damage for every entry due at <= frame, emit its
-	// (future) VolleyOutcome event, and remove it.
+	// VolleyOutcome event (into volleyOutcomes, visibility-filtered later in
+	// StateStreamer), and remove it.
 	void Update(int frame);
+
+	// Metalstorm morale retreat/flee (Q-D-c). Issue a throttled CMD_MOVE that
+	// pulls `unit` away from its nearest enemy. Called for statistical units in
+	// MORALE_RETREAT or MORALE_PANIC posture. Throttled per-unit so it does not
+	// spam the pathfinder; `retreatFrame` is transient (derived state, not
+	// creg — rebuilds naturally after save/load). CALLED-OUT DIVERGENCE: this
+	// auto-move overrides the unit's current order for panicking/retreating
+	// statistical squads (opt-in, Metalstorm-only; faithful path never sees it).
+	void RequestRetreat(class CUnit* unit, int frame);
 
 	// Pure scheduling half of Update(), exposed for tests. Moves every entry
 	// due at <= frame into `out` (removing it from the ring); leaves the rest.
@@ -126,6 +155,11 @@ public:
 
 private:
 	std::vector<PendingVolley> pending;
+
+	// Per-unit last-retreat frame, keyed by unit id. Transient throttle state
+	// (NOT creg-registered): after save/load a retreating unit just re-issues
+	// its retreat on the next fire tick — one move order of warm-up, invisible.
+	spring::unordered_map<int, int> retreatFrame;
 };
 
 extern StatisticalCombatManager statisticalCombatManager;

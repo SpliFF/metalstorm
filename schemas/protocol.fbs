@@ -565,6 +565,7 @@ enum CombatResult : uint8 {
     Miss,
     Blocked,       // shield/armour absorbed
     Kill,          // target destroyed
+    Unknown,       // visibility-filtered: viewer sees the shots but not the outcome
 }
 
 table CombatEvent {
@@ -574,6 +575,41 @@ table CombatEvent {
     result: CombatResult;
     damage: float;
     position: Vec3;            // Impact point
+}
+
+/// Metalstorm statistical combat (Model 1) per-volley outcome
+/// (PLAN-metalstorm-combat-resolution.md §2.3 / PLAN-macro-combat.md §3).
+/// One per squad-volley, NOT per round — the client invents `rounds`
+/// cosmetic tracers/impacts from a single event. Visibility-filtered
+/// per session in StateStreamer::BroadcastCombatEvents:
+///   - viewer sees the attacker  -> full outcome (Hit/Miss, damage, attacker_id)
+///   - viewer owns the target but can't see the attacker -> result Unknown,
+///     damage 0, attacker_id 0, plus a counterbattery radar-blip reveal
+///     (reveal_attacker + reveal_pos, Q-D-c ANSWERED 2026-07-19)
+///   - viewer sees only the target (neither owner nor attacker-LOS) -> Unknown,
+///     no reveal
+///   - viewer sees neither -> not sent
+table VolleyOutcome {
+    attacker_id: uint32;          // firing unit; 0 if hidden from this viewer
+    weapon_def_id: uint16;
+    target_id: uint32;            // victim unit; 0 if hidden from this viewer
+    target_pos: Vec3;             // impact position (FX + squad casualty hint)
+    resolve_frame: uint32;        // fire_frame + flight time (foreknown outcome)
+    result: CombatResult = Hit;   // Hit / Miss / Unknown (visibility-filtered)
+    damage: uint16;               // aggregate; 0 for Unknown / miss
+    rounds: uint8 = 1;            // cosmetic shot count for client tracer fan-out
+    team: uint8 = 255;            // attacker team (FX tint / ally audio); 255 = hidden
+    /// Counterbattery reveal (Q-D-c). True only for the victim's team when
+    /// they cannot see the attacker: the client drops a radar blip at
+    /// `reveal_pos` (the attacker's firing position) so statistical artillery
+    /// is counterable. Never set for viewers who can already see the attacker.
+    reveal_attacker: bool = false;
+    reveal_pos: Vec3;             // attacker firing position (only when reveal_attacker)
+    /// Attacker morale posture, a derived proxy (morale = clamp(hp% - 10, 0, 100)):
+    /// 0 = normal, 1 = retreating-while-firing (morale < 10), 2 = panicking
+    /// (morale == 0). Lets the client show a retreat/panic indicator. Only
+    /// meaningful when attacker_id != 0 (attacker visible).
+    attacker_posture: uint8 = 0;
 }
 
 table GameEvent {
@@ -766,6 +802,11 @@ table GameEventBatch {
     /// so spectators stay in sync. Usually empty; only populated on
     /// the tick when a state change fires.
     music_events: [MusicEvent];
+    /// Metalstorm statistical-combat per-volley outcomes (Model 1). Already
+    /// visibility-filtered for this session. Empty for ported games (ZK/BAR
+    /// use the projectile path); populated only when statistical weapons fire.
+    /// See VolleyOutcome. Appended last for FlatBuffers field-id stability.
+    volley_outcomes: [VolleyOutcome];
 }
 
 table ResourceUpdate {

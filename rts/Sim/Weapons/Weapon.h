@@ -178,6 +178,7 @@ public:
 
 	int lastAimedFrame;                     // when the last AimWeapon script callin was performed
 	int lastTargetRetry;                    // when we last recalculated target selection
+	int lastTargetSwitchFrame = -100000;    // frame the current target was last (re)selected (Metalstorm targetingCadence, statistical weapons)
 
 	float maxForwardAngleDif;               // for onlyForward/!turret weapons, max. angle between owner->frontdir and (targetPos - owner->pos) (derived from UnitDefWeapon::maxAngleDif)
 	float maxMainDirAngleDif;               // for !onlyForward/turret weapons, max. angle from <mainDir> the weapon can aim (derived from WeaponDef::tolerance)

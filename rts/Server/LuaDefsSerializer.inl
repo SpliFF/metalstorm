@@ -464,6 +464,15 @@ inline std::string SerializeOneWeaponDef(
     b.add_float("reload_time", wd.reload);
     b.add_int("salvo_size", wd.salvosize);
     b.add_int("salvo_delay", wd.salvodelay);
+    // Tuning-honesty (PLAN-macro-combat §4 / combat-resolution §2.3): expose the
+    // computed expected damage-per-second so the UI can show real numbers rather
+    // than letting players reverse-engineer statistical combat's hidden math.
+    // DPS = default_damage * salvo_size / reload_time (reload is in seconds).
+    {
+        const float reloadSec = (wd.reload > 0.0f) ? wd.reload : 1.0f;
+        const float salvo = static_cast<float>(std::max(1, wd.salvosize));
+        b.add_float("expected_dps", (defDmg * salvo) / reloadSec);
+    }
     b.add_float("accuracy", wd.accuracy);
     b.add_float("spray_angle", wd.sprayAngle);
     b.add_float("moving_accuracy", wd.movingAccuracy);

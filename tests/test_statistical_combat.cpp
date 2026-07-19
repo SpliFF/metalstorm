@@ -172,6 +172,32 @@ TEST_SUITE("statistical-combat/ring") {
 	}
 }
 
+TEST_SUITE("statistical-combat/morale") {
+	// Q-D-c derived-proxy morale: morale = clamp(hp% - 10, 0, 100). Thresholds:
+	// hp < 20% (morale < 10) => retreat-while-firing; hp <= 10% (morale 0) => panic.
+	TEST_CASE("derived morale is hp% minus 10, clamped") {
+		CHECK(StatCombat::DerivedMorale(100.0f, 100.0f) == doctest::Approx(90.0f));
+		CHECK(StatCombat::DerivedMorale( 50.0f, 100.0f) == doctest::Approx(40.0f));
+		CHECK(StatCombat::DerivedMorale( 20.0f, 100.0f) == doctest::Approx(10.0f));
+		CHECK(StatCombat::DerivedMorale( 10.0f, 100.0f) == doctest::Approx( 0.0f));
+		CHECK(StatCombat::DerivedMorale(  5.0f, 100.0f) == doctest::Approx( 0.0f));
+		// full health of a zero-max unit is treated as fully-moraled (no div-by-0)
+		CHECK(StatCombat::DerivedMorale(  0.0f,   0.0f) == doctest::Approx(100.0f));
+	}
+
+	TEST_CASE("posture crosses the two thresholds at hp 20% and hp 10%") {
+		// >= 20% hp -> normal
+		CHECK(StatCombat::PostureFrom(100.0f, 100.0f) == StatCombat::MORALE_NORMAL);
+		CHECK(StatCombat::PostureFrom( 20.0f, 100.0f) == StatCombat::MORALE_NORMAL);
+		// (10%, 20%) hp -> retreat while firing
+		CHECK(StatCombat::PostureFrom( 19.0f, 100.0f) == StatCombat::MORALE_RETREAT);
+		CHECK(StatCombat::PostureFrom( 11.0f, 100.0f) == StatCombat::MORALE_RETREAT);
+		// <= 10% hp -> panic (flee without firing)
+		CHECK(StatCombat::PostureFrom( 10.0f, 100.0f) == StatCombat::MORALE_PANIC);
+		CHECK(StatCombat::PostureFrom(  1.0f, 100.0f) == StatCombat::MORALE_PANIC);
+	}
+}
+
 TEST_SUITE("statistical-combat/determinism") {
 	TEST_CASE("synced RNG replays identically from the same seed") {
 		// The volley hit-roll draws from gsRNG; a fixed seed must reproduce the

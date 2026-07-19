@@ -19,7 +19,7 @@ import {
     Color3,
     Vector3,
 } from '@babylonjs/core';
-import type { CombatEventInfo, ProjectileImpactInfo } from './connection.js';
+import type { CombatEventInfo, ProjectileImpactInfo, VolleyOutcomeInfo } from './connection.js';
 import { AudioManager } from './audio.js';
 import type { CegRuntime } from './ceg-runtime.js';
 import type { DefCache } from './def-cache.js';
@@ -35,7 +35,13 @@ interface ActiveEffect {
     mesh: Mesh;
     lifetime: number;    // seconds remaining
     velocity?: Vector3;  // for moving effects (tracers)
+    noFade?: boolean;    // skip the uniform scale-fade (stretched tracers, markers)
 }
+
+/// Optional attacker-position resolver passed to onVolleyOutcome so the
+/// client can invent tracers from the (visible) firing unit. Returns null
+/// when the attacker id is unknown/hidden.
+export type PositionResolver = (entityId: number) => { x: number; y: number; z: number } | null;
 
 export class CombatFX {
     private scene: Scene;
@@ -52,6 +58,7 @@ export class CombatFX {
     private killMat: StandardMaterial;
     private shieldMat: StandardMaterial;
     private dirtMat: StandardMaterial;
+    private tracerMat: StandardMaterial;
 
     /// One-shot warning state per weapon def so a single missing CEG
     /// doesn't flood the console every frame the weapon fires.
@@ -84,6 +91,12 @@ export class CombatFX {
         this.dirtMat = new StandardMaterial('dirtFxMat', scene);
         this.dirtMat.diffuseColor = new Color3(0.45, 0.35, 0.25);
         this.dirtMat.emissiveColor = new Color3(0.0, 0.0, 0.0);
+
+        // Statistical-combat invented tracer (no projectile exists to render).
+        this.tracerMat = new StandardMaterial('tracerFxMat', scene);
+        this.tracerMat.diffuseColor = new Color3(1.0, 0.85, 0.3);
+        this.tracerMat.emissiveColor = new Color3(1.0, 0.8, 0.2);
+        this.tracerMat.disableLighting = true;
     }
 
     /// Set / replace the CEG runtime reference. Used when the runtime
@@ -175,6 +188,75 @@ export class CombatFX {
         }
     }
 
+    /**
+     * Process statistical-combat per-volley outcomes (Metalstorm Model 1).
+     * These carry NO projectile — the client invents everything: `rounds`
+     * cosmetic tracers from the (visible) attacker toward the impact, plus an
+     * impact burst at `target_pos`. Result is visibility-filtered server-side:
+     *   0 = Hit     -> full impact CEG scaled by damage + distortion shockwave
+     *   1 = Miss    -> a light dirt puff (a shot landed nearby, no damage)
+     *   2 = Unknown -> a light dirt puff only (no hit/miss result is leaked)
+     * `getPos` resolves the attacker's world position for tracer origins; when
+     * it returns null (attacker hidden), only the impact FX is shown.
+     */
+    onVolleyOutcome(events: VolleyOutcomeInfo[], getPos?: PositionResolver): void {
+        for (const e of events) {
+            const isHit = e.result === 0;
+
+            // Invent tracers from the firing unit (only if it's visible to us).
+            const src = (e.attackerId && getPos) ? getPos(e.attackerId) : null;
+            if (src) {
+                const n = Math.min(Math.max(e.rounds, 1), 8);
+                for (let k = 0; k < n; k++)
+                    this.spawnTracer(src, e.x, e.y, e.z);
+            }
+
+            if (isHit) {
+                if (!this.spawnCegImpact(ImpactKind.Unit, e.weaponDefId,
+                    e.x, e.y, e.z, true, e.damage)) {
+                    this.spawnFallbackImpact(e.x, e.y, e.z, e.damage);
+                }
+                const r = Math.min(40 + e.damage * 0.3, 120);
+                this.distortion?.emitShockwave(e.x, e.y, e.z, r);
+            } else {
+                // Miss or Unknown — no result leak, just a dirt puff at impact.
+                this.spawnFallbackDust(e.x, e.y, e.z);
+            }
+        }
+    }
+
+    /// One invented tracer streak: a thin emissive box from the firer's
+    /// muzzle to a lightly-scattered point near the impact. Uses noFade so
+    /// the stretched geometry isn't shrunk by the uniform scale-fade in tick.
+    private spawnTracer(
+        src: { x: number; y: number; z: number },
+        tx: number, ty: number, tz: number,
+    ): void {
+        const from = new Vector3(src.x, src.y + 8, src.z);
+        const jitter = 6;
+        const to = new Vector3(
+            tx + (Math.random() * 2 - 1) * jitter, ty + 6,
+            tz + (Math.random() * 2 - 1) * jitter);
+        const len = Vector3.Distance(from, to);
+        if (len < 1) return;
+        const mesh = MeshBuilder.CreateBox(
+            'volleyTracer', { width: 0.7, height: 0.7, depth: len }, this.scene);
+        mesh.position.copyFrom(from).addInPlace(to).scaleInPlace(0.5);
+        mesh.lookAt(to);
+        mesh.material = this.tracerMat;
+        this.effects.push({ mesh, lifetime: 0.12, noFade: true });
+    }
+
+    /// Small dirt puff for a statistical miss / unknown outcome — visible
+    /// feedback that a volley landed here without revealing the result.
+    private spawnFallbackDust(x: number, y: number, z: number): void {
+        const mesh = MeshBuilder.CreateSphere(
+            'volleyDust', { diameter: 5, segments: 4 }, this.scene);
+        mesh.position.set(x, y + 1.5, z);
+        mesh.material = this.dirtMat;
+        this.effects.push({ mesh, lifetime: 0.2 });
+    }
+
     /// Resolve the weapon-def CEG and spawn through the runtime.
     /// Returns true if a CEG was dispatched, false if the caller
     /// should fall back to a procedural mesh.
@@ -253,10 +335,12 @@ export class CombatFX {
                 continue;
             }
 
-            // Fade out by scaling down
-            const t = Math.max(fx.lifetime * 4, 0); // 0.25s → scale 0..1
-            const scale = Math.min(t, 1);
-            fx.mesh.scaling.setAll(scale);
+            // Fade out by scaling down (skipped for stretched tracers/markers).
+            if (!fx.noFade) {
+                const t = Math.max(fx.lifetime * 4, 0); // 0.25s → scale 0..1
+                const scale = Math.min(t, 1);
+                fx.mesh.scaling.setAll(scale);
+            }
 
             // Move if it has velocity
             if (fx.velocity) {
@@ -278,5 +362,6 @@ export class CombatFX {
         this.killMat.dispose();
         this.shieldMat.dispose();
         this.dirtMat.dispose();
+        this.tracerMat.dispose();
     }
 }

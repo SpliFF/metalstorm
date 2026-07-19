@@ -11,9 +11,13 @@
 #include "Sim/Weapons/WeaponTarget.h"
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitHandler.h"
+#include "Sim/Units/CommandAI/Command.h"
+#include "Sim/Units/CommandAI/CommandAI.h"
 #include "Sim/Misc/DamageArray.h"
 #include "Sim/Misc/GlobalSynced.h"
+#include "Game/GameHelper.h"
 #include "Map/Ground.h"
+#include "Server/CombatEventCollector.h"
 #include "System/creg/creg_cond.h"
 
 StatisticalCombatManager statisticalCombatManager;
@@ -27,9 +31,12 @@ CR_REG_METADATA(PendingVolley, (
 	CR_MEMBER(targetGen),
 	CR_MEMBER(weaponDefId),
 	CR_MEMBER(team),
+	CR_MEMBER(targetTeam),
 	CR_MEMBER(targetPos),
+	CR_MEMBER(attackerPos),
 	CR_MEMBER(damage),
 	CR_MEMBER(rounds),
+	CR_MEMBER(posture),
 	CR_MEMBER(hit)
 ))
 
@@ -47,6 +54,13 @@ static constexpr float HEIGHT_REF_SPAN = 200.0f;
 // Statistical volleys never model >2s of flight (PLAN E3): clamp the scheduled
 // travel time so a teleported/dead target still resolves promptly.
 static constexpr int MAX_FLIGHT_FRAMES = 2 * GAME_SPEED;
+
+// Morale retreat (Q-D-c). How far a retreating/panicking squad pulls back per
+// re-issued move order, how often the order may re-issue (throttle), and how
+// far to scan for the threat to flee away from.
+static constexpr float RETREAT_DISTANCE     = 400.0f; // elmos pulled back per order
+static constexpr int   RETREAT_REISSUE_FRAMES = GAME_SPEED; // >=1 order/sec/unit
+static constexpr float RETREAT_SCAN_RADIUS  = 1200.0f; // elmos to look for the threat
 
 namespace {
 	float ReadFloat(const spring::unordered_map<std::string, std::string>& cp,
@@ -127,6 +141,24 @@ float StatCombat::VolleyDamage(float defDamage, float strengthFraction,
 	return std::max(scaled, minVolleyDamage);
 }
 
+float StatCombat::DerivedMorale(float health, float maxHealth)
+{
+	// v0 derived proxy (Q-D-c): morale = clamp(hp% - 10, 0, 100). No stored
+	// stat, no decay — a pure function of current health fraction.
+	if (maxHealth <= 0.0f)
+		return 100.0f;
+	const float hpPct = 100.0f * std::clamp(health / maxHealth, 0.0f, 1.0f);
+	return std::clamp(hpPct - 10.0f, 0.0f, 100.0f);
+}
+
+StatCombat::MoralePosture StatCombat::PostureFrom(float health, float maxHealth)
+{
+	const float m = DerivedMorale(health, maxHealth);
+	if (m <= 0.0f)   return MORALE_PANIC;   // hp <= 10% — flee without fighting
+	if (m <  10.0f)  return MORALE_RETREAT; // hp <  20% — retreat while firing
+	return MORALE_NORMAL;
+}
+
 void StatisticalCombatManager::EnqueueVolley(const CWeapon* weapon,
 	const SWeaponTarget& target, const float3& targetPos, int rounds)
 {
@@ -176,15 +208,22 @@ void StatisticalCombatManager::EnqueueVolley(const CWeapon* weapon,
 	v.weaponDefId  = wd->id;
 	v.team         = attacker->team;
 	v.targetPos    = targetPos;
+	v.attackerPos  = firePos;
 	v.damage       = damage;
 	v.rounds       = static_cast<uint8_t>(std::clamp(rounds, 1, 255));
+	// Attacker morale posture at fire time (foreknown-outcome: the whole volley
+	// is decided now). Carried to the client so it can show a retreat/panic hint.
+	v.posture      = static_cast<uint8_t>(
+		StatCombat::PostureFrom(attacker->health, attacker->maxHealth));
 	v.hit          = hit;
 
 	if (target.type == Target_Unit && target.unit != nullptr) {
-		v.targetId  = target.unit->id;
-		v.targetGen = unitHandler.GetUnitSpawnGen(target.unit->id);
+		v.targetId   = target.unit->id;
+		v.targetGen  = unitHandler.GetUnitSpawnGen(target.unit->id);
+		v.targetTeam = target.unit->team;
 	} else {
-		v.targetId  = -1; // position-only volley (no unit to damage)
+		v.targetId   = -1;  // position-only volley (no unit to damage)
+		v.targetTeam = 255; // no victim team
 	}
 
 	pending.push_back(v);
@@ -217,7 +256,7 @@ void StatisticalCombatManager::Update(int frame)
 			CUnit* tgt = unitHandler.GetUnit(v.targetId);
 			// id-reuse generation guard (E2/§2.1): a destroyed-and-reused slot
 			// must not receive misattributed damage. Mismatch => drop damage,
-			// FX still emit (task 4) at the stored target_pos.
+			// FX still emit below at the stored target_pos.
 			if (tgt != nullptr && unitHandler.GetUnitSpawnGen(v.targetId) == v.targetGen) {
 				CUnit* atk = nullptr;
 				if (v.attackerId >= 0 &&
@@ -230,8 +269,57 @@ void StatisticalCombatManager::Update(int frame)
 			}
 		}
 
-		// TODO(task 4): emit the VolleyOutcome event here (visibility-filtered),
-		// regardless of hit/miss/dead-target, so the client can invent tracers
-		// and feed the squad casualty impact hint.
+		// Emit the VolleyOutcome regardless of hit/miss/dead-target (E2: the
+		// shots were already in the air). Ground truth only — the per-session
+		// visibility matrix (Hit/Miss vs Unknown, counterbattery reveal) is
+		// applied later in StateStreamer::BroadcastCombatEvents. §2.3.
+		VolleyOutcomeData ev{};
+		ev.attackerId   = (v.attackerId >= 0) ? static_cast<uint32_t>(v.attackerId) : 0u;
+		ev.attackerTeam = static_cast<uint8_t>(v.team);
+		ev.weaponDefId  = static_cast<uint16_t>(v.weaponDefId);
+		ev.targetId     = (v.targetId >= 0) ? static_cast<uint32_t>(v.targetId) : 0u;
+		ev.targetTeam   = static_cast<uint8_t>(v.targetTeam);
+		ev.targetPos    = v.targetPos;
+		ev.attackerPos  = v.attackerPos;
+		ev.resolveFrame = static_cast<uint32_t>(v.resolveFrame);
+		ev.result       = v.hit ? 0 : 1; // 0=hit, 1=miss (pre-visibility)
+		ev.damage       = v.damage;
+		ev.rounds       = v.rounds;
+		ev.posture      = v.posture;
+		volleyOutcomes.Push(ev);
 	}
+}
+
+void StatisticalCombatManager::RequestRetreat(CUnit* unit, int frame)
+{
+	if (unit == nullptr)
+		return;
+
+	// Per-unit throttle so a low-HP squad with several weapons (each calling
+	// this every fire tick) issues at most one move order per second.
+	int& last = retreatFrame[unit->id];
+	if (last != 0 && (frame - last) < RETREAT_REISSUE_FRAMES)
+		return;
+	last = frame;
+
+	// Flee away from the nearest enemy (LOS-tested). With no enemy in scan
+	// range, back straight up along -front so a unit under artillery it can't
+	// see still pulls back.
+	const CUnit* enemy = CGameHelper::GetClosestEnemyUnit(
+		unit, unit->pos, RETREAT_SCAN_RADIUS, unit->allyteam);
+
+	float3 away = (enemy != nullptr) ? (unit->pos - enemy->pos)
+	                                 : (float3(unit->frontdir) * -1.0f);
+	away.y = 0.0f;
+	if (away.SqLength() < 1.0f)
+		away = float3(unit->frontdir) * -1.0f;
+	away.SafeNormalize();
+
+	float3 fleePos = unit->pos + away * RETREAT_DISTANCE;
+	fleePos.ClampInBounds();
+
+	// fromSynced move order — replaces the current command for the fleeing
+	// squad (the CALLED-OUT divergence documented on the header declaration).
+	Command c(CMD_MOVE, fleePos);
+	unit->commandAI->GiveCommand(c);
 }

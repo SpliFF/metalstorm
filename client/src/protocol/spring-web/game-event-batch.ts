@@ -12,6 +12,7 @@ import { ProjectileImpactEvent, ProjectileImpactEventT } from '../spring-web/pro
 import { ProjectileTrajectoryEvent, ProjectileTrajectoryEventT } from '../spring-web/projectile-trajectory-event.js';
 import { SeismicPing, SeismicPingT } from '../spring-web/seismic-ping.js';
 import { SoundEvent, SoundEventT } from '../spring-web/sound-event.js';
+import { VolleyOutcome, VolleyOutcomeT } from '../spring-web/volley-outcome.js';
 
 
 export class GameEventBatch implements flatbuffers.IUnpackableObject<GameEventBatchT> {
@@ -135,8 +136,24 @@ musicEventsLength():number {
   return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
 }
 
+/**
+ * Metalstorm statistical-combat per-volley outcomes (Model 1). Already
+ * visibility-filtered for this session. Empty for ported games (ZK/BAR
+ * use the projectile path); populated only when statistical weapons fire.
+ * See VolleyOutcome. Appended last for FlatBuffers field-id stability.
+ */
+volleyOutcomes(index: number, obj?:VolleyOutcome):VolleyOutcome|null {
+  const offset = this.bb!.__offset(this.bb_pos, 22);
+  return offset ? (obj || new VolleyOutcome()).__init(this.bb!.__indirect(this.bb!.__vector(this.bb_pos + offset) + index * 4), this.bb!) : null;
+}
+
+volleyOutcomesLength():number {
+  const offset = this.bb!.__offset(this.bb_pos, 22);
+  return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
+}
+
 static startGameEventBatch(builder:flatbuffers.Builder) {
-  builder.startObject(9);
+  builder.startObject(10);
 }
 
 static addFrame(builder:flatbuffers.Builder, frame:number) {
@@ -271,12 +288,28 @@ static startMusicEventsVector(builder:flatbuffers.Builder, numElems:number) {
   builder.startVector(4, numElems, 4);
 }
 
+static addVolleyOutcomes(builder:flatbuffers.Builder, volleyOutcomesOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(9, volleyOutcomesOffset, 0);
+}
+
+static createVolleyOutcomesVector(builder:flatbuffers.Builder, data:flatbuffers.Offset[]):flatbuffers.Offset {
+  builder.startVector(4, data.length, 4);
+  for (let i = data.length - 1; i >= 0; i--) {
+    builder.addOffset(data[i]!);
+  }
+  return builder.endVector();
+}
+
+static startVolleyOutcomesVector(builder:flatbuffers.Builder, numElems:number) {
+  builder.startVector(4, numElems, 4);
+}
+
 static endGameEventBatch(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
 }
 
-static createGameEventBatch(builder:flatbuffers.Builder, frame:number, eventsOffset:flatbuffers.Offset, combatEventsOffset:flatbuffers.Offset, projectileFiredOffset:flatbuffers.Offset, projectileImpactsOffset:flatbuffers.Offset, projectileTrajectoriesOffset:flatbuffers.Offset, soundsOffset:flatbuffers.Offset, seismicPingsOffset:flatbuffers.Offset, musicEventsOffset:flatbuffers.Offset):flatbuffers.Offset {
+static createGameEventBatch(builder:flatbuffers.Builder, frame:number, eventsOffset:flatbuffers.Offset, combatEventsOffset:flatbuffers.Offset, projectileFiredOffset:flatbuffers.Offset, projectileImpactsOffset:flatbuffers.Offset, projectileTrajectoriesOffset:flatbuffers.Offset, soundsOffset:flatbuffers.Offset, seismicPingsOffset:flatbuffers.Offset, musicEventsOffset:flatbuffers.Offset, volleyOutcomesOffset:flatbuffers.Offset):flatbuffers.Offset {
   GameEventBatch.startGameEventBatch(builder);
   GameEventBatch.addFrame(builder, frame);
   GameEventBatch.addEvents(builder, eventsOffset);
@@ -287,6 +320,7 @@ static createGameEventBatch(builder:flatbuffers.Builder, frame:number, eventsOff
   GameEventBatch.addSounds(builder, soundsOffset);
   GameEventBatch.addSeismicPings(builder, seismicPingsOffset);
   GameEventBatch.addMusicEvents(builder, musicEventsOffset);
+  GameEventBatch.addVolleyOutcomes(builder, volleyOutcomesOffset);
   return GameEventBatch.endGameEventBatch(builder);
 }
 
@@ -300,7 +334,8 @@ unpack(): GameEventBatchT {
     this.bb!.createObjList<ProjectileTrajectoryEvent, ProjectileTrajectoryEventT>(this.projectileTrajectories.bind(this), this.projectileTrajectoriesLength()),
     this.bb!.createObjList<SoundEvent, SoundEventT>(this.sounds.bind(this), this.soundsLength()),
     this.bb!.createObjList<SeismicPing, SeismicPingT>(this.seismicPings.bind(this), this.seismicPingsLength()),
-    this.bb!.createObjList<MusicEvent, MusicEventT>(this.musicEvents.bind(this), this.musicEventsLength())
+    this.bb!.createObjList<MusicEvent, MusicEventT>(this.musicEvents.bind(this), this.musicEventsLength()),
+    this.bb!.createObjList<VolleyOutcome, VolleyOutcomeT>(this.volleyOutcomes.bind(this), this.volleyOutcomesLength())
   );
 }
 
@@ -315,6 +350,7 @@ unpackTo(_o: GameEventBatchT): void {
   _o.sounds = this.bb!.createObjList<SoundEvent, SoundEventT>(this.sounds.bind(this), this.soundsLength());
   _o.seismicPings = this.bb!.createObjList<SeismicPing, SeismicPingT>(this.seismicPings.bind(this), this.seismicPingsLength());
   _o.musicEvents = this.bb!.createObjList<MusicEvent, MusicEventT>(this.musicEvents.bind(this), this.musicEventsLength());
+  _o.volleyOutcomes = this.bb!.createObjList<VolleyOutcome, VolleyOutcomeT>(this.volleyOutcomes.bind(this), this.volleyOutcomesLength());
 }
 }
 
@@ -328,7 +364,8 @@ constructor(
   public projectileTrajectories: (ProjectileTrajectoryEventT)[] = [],
   public sounds: (SoundEventT)[] = [],
   public seismicPings: (SeismicPingT)[] = [],
-  public musicEvents: (MusicEventT)[] = []
+  public musicEvents: (MusicEventT)[] = [],
+  public volleyOutcomes: (VolleyOutcomeT)[] = []
 ){}
 
 
@@ -341,6 +378,7 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
   const sounds = GameEventBatch.createSoundsVector(builder, builder.createObjectOffsetList(this.sounds));
   const seismicPings = GameEventBatch.createSeismicPingsVector(builder, builder.createObjectOffsetList(this.seismicPings));
   const musicEvents = GameEventBatch.createMusicEventsVector(builder, builder.createObjectOffsetList(this.musicEvents));
+  const volleyOutcomes = GameEventBatch.createVolleyOutcomesVector(builder, builder.createObjectOffsetList(this.volleyOutcomes));
 
   return GameEventBatch.createGameEventBatch(builder,
     this.frame,
@@ -351,7 +389,8 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
     projectileTrajectories,
     sounds,
     seismicPings,
-    musicEvents
+    musicEvents,
+    volleyOutcomes
   );
 }
 }

@@ -85,6 +85,7 @@ CR_REG_METADATA(CWeapon, (
 
 	CR_MEMBER(lastAimedFrame),
 	CR_MEMBER(lastTargetRetry),
+	CR_MEMBER(lastTargetSwitchFrame),
 
 	CR_MEMBER(maxForwardAngleDif),
 	CR_MEMBER(maxMainDirAngleDif),
@@ -523,6 +524,20 @@ void CWeapon::UpdateFire()
 	if (!CanFire(false, false, false))
 		return;
 
+	// Metalstorm morale (Q-D-c, statistical weapons only — opt-in, faithful
+	// path untouched). Derived proxy: morale = clamp(hp% - 10, 0, 100).
+	//   hp < 20% (morale < 10)  -> retreat WHILE firing (pull back, keep shooting)
+	//   hp <= 10% (morale == 0) -> panic: flee without firing
+	// Placed before resource/reload spend so a panicking squad wastes nothing.
+	if (weaponDef->resolution == WEAPON_RESOLUTION_STATISTICAL) {
+		const StatCombat::MoralePosture posture =
+			StatCombat::PostureFrom(owner->health, owner->maxHealth);
+		if (posture != StatCombat::MORALE_NORMAL)
+			statisticalCombatManager.RequestRetreat(owner, gs->frameNum);
+		if (posture == StatCombat::MORALE_PANIC)
+			return; // hold fire; retreat order already issued above
+	}
+
 	if (fastQueryPointUpdate) {
 		UpdateWeaponPieces(false);
 		UpdateWeaponVectors();
@@ -712,6 +727,7 @@ void CWeapon::SetAttackTarget(const SWeaponTarget& newTarget)
 
 	DropCurrentTarget();
 	currentTarget = newTarget;
+	lastTargetSwitchFrame = gs->frameNum; // Metalstorm targetingCadence bookkeeping
 
 	if (newTarget.type == Target_Unit)
 		AddDeathDependence(newTarget.unit, DEPENDENCE_TARGETUNIT);
@@ -790,6 +806,22 @@ bool CWeapon::AutoTarget()
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (!AllowWeaponAutoTarget())
 		return false;
+
+	// Metalstorm targeting cadence (statistical weapons, opt-in; PLAN §2.2 /
+	// C4). Once locked onto a live target, a squad must hold it for
+	// `targetingCadence` frames (default: one reload cycle) before an
+	// auto-switch — prevents the free target-fanning per-volley resolution
+	// would otherwise allow. Player-issued Attack orders bypass this (they go
+	// straight through Attack()/SetAttackTarget). Faithful path untouched.
+	if (weaponDef->resolution == WEAPON_RESOLUTION_STATISTICAL
+	    && HaveUnitTarget() && currentTarget.unit != nullptr
+	    && !currentTarget.unit->isDead) {
+		const int cadence = (weaponDef->statTuning.targetingCadence > 0)
+			? weaponDef->statTuning.targetingCadence
+			: std::max(1, int(reloadTime / owner->reloadSpeed));
+		if ((gs->frameNum - lastTargetSwitchFrame) < cadence)
+			return false; // hold the current target through the cadence window
+	}
 
 	// search for other in-range targets
 	lastTargetRetry = gs->frameNum;

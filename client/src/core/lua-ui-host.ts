@@ -359,6 +359,7 @@ export interface MinimalWeaponDefWire {
     typeName?: string; description?: string;
     defaultDamage?: number; damages?: number[];
     reloadTime?: number; salvoSize?: number; salvoDelay?: number;
+    expectedDps?: number;
     accuracy?: number; sprayAngle?: number; movingAccuracy?: number;
     targetMoveError?: number; leadLimit?: number;
     edgeEffectiveness?: number;
@@ -630,6 +631,7 @@ function buildLuaWeaponDef(d: MinimalWeaponDefWire): Record<string, LuaValue> {
         reloadTime: d.reloadTime ?? 0,
         salvoSize: d.salvoSize ?? 0,
         salvoDelay: d.salvoDelay ?? 0,
+        expectedDps: d.expectedDps ?? 0,
         accuracy: d.accuracy ?? 0,
         sprayAngle: d.sprayAngle ?? 0,
         movingAccuracy: d.movingAccuracy ?? 0,
@@ -1112,6 +1114,8 @@ export async function init(
                 // `flight_time` (seconds) ≈ projectile ttl; 0 when the def has no
                 // fixed lifetime. Faithful enough for the display widgets.
                 ttl: w.flightTime ?? 0,
+                // Computed expected DPS (tuning-honesty; PLAN-macro-combat §4).
+                expectedDps: w.expectedDps ?? 0,
             };
         },
         getUnitDefFootprint: (defId) => {

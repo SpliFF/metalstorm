@@ -25,6 +25,7 @@ import { Pong } from '../protocol/spring-web/pong.js';
 import { ServerError } from '../protocol/spring-web/server-error.js';
 import { GameEventBatch } from '../protocol/spring-web/game-event-batch.js';
 import { CombatEvent } from '../protocol/spring-web/combat-event.js';
+import { VolleyOutcome } from '../protocol/spring-web/volley-outcome.js';
 import { ProjectileFiredEvent } from '../protocol/spring-web/projectile-fired-event.js';
 import { ProjectileImpactEvent } from '../protocol/spring-web/projectile-impact-event.js';
 import { ProjectileTrajectoryEvent } from '../protocol/spring-web/projectile-trajectory-event.js';
@@ -121,6 +122,36 @@ export interface CombatEventInfo {
     x: number;
     y: number;
     z: number;
+}
+
+/// Per-volley outcome decoded from a `GameEventBatch.volley_outcomes` entry —
+/// Metalstorm statistical combat (Model 1). One event per squad-volley; the
+/// client invents `rounds` cosmetic tracers/impacts from it. Already
+/// visibility-filtered server-side (result may be Unknown=2 with attackerId 0
+/// when the firer is hidden). See VolleyOutcome in protocol.fbs.
+export interface VolleyOutcomeInfo {
+    attackerId: number;
+    weaponDefId: number;
+    targetId: number;
+    /// impact position (FX origin + squad casualty hint)
+    x: number;
+    y: number;
+    z: number;
+    resolveFrame: number;
+    /// CombatResult: 0=Hit, 1=Miss, 2=Unknown (visibility-filtered)
+    result: number;
+    damage: number;
+    rounds: number;
+    /// attacker team (255 = hidden)
+    team: number;
+    /// counterbattery reveal — when true, drop a radar blip at (revealX,_,revealZ)
+    revealAttacker: boolean;
+    revealX: number;
+    revealY: number;
+    revealZ: number;
+    /// derived-morale posture: 0=normal, 1=retreating, 2=panicking (only
+    /// meaningful when the attacker is visible, attackerId != 0)
+    attackerPosture: number;
 }
 
 /// Per-tick sound emission decoded from a `GameEventBatch.sounds` entry.
@@ -551,6 +582,10 @@ export interface WeaponDefInfo {
     reloadTime: number;
     salvoSize: number;
     salvoDelay: number;
+    /** Computed expected damage-per-second (default_damage * salvo_size /
+     *  reload_time). Exposed for tuning-honesty UI so statistical combat's
+     *  math isn't hidden (PLAN-macro-combat §4). */
+    expectedDps: number;
     accuracy: number;
     sprayAngle: number;
     movingAccuracy: number;
@@ -759,6 +794,11 @@ export interface ConnectionEvents {
     onServerError?: (code: number, message: string) => void;
     onEntityState?: (snapshot: EntityStateSnapshot, isDelta: boolean) => void;
     onCombatEvents?: (events: CombatEventInfo[], frame: number) => void;
+    /** Per-volley statistical-combat outcomes (Metalstorm Model 1). The
+     *  client invents cosmetic tracers/impacts, feeds the squad casualty
+     *  impact hint, and drops a counterbattery radar blip when
+     *  `revealAttacker` is set. Empty for ported games. */
+    onVolleyOutcomes?: (events: VolleyOutcomeInfo[], frame: number) => void;
     onSoundEvents?: (events: SoundEventInfo[], frame: number) => void;
     onSeismicPings?: (events: SeismicPingInfo[], frame: number) => void;
     /** Music-state transition broadcast — fires once per state change.
@@ -2034,6 +2074,39 @@ export class Connection {
                 });
             }
             this.events.onCombatEvents(events, frame);
+        }
+
+        // Statistical-combat per-volley outcomes (Metalstorm Model 1). Already
+        // visibility-filtered server-side. Drives cosmetic tracers/impacts, the
+        // squad casualty impact hint, and counterbattery radar blips.
+        const volleyCount = batch.volleyOutcomesLength();
+        if (volleyCount > 0 && this.events.onVolleyOutcomes) {
+            const out: VolleyOutcomeInfo[] = [];
+            for (let i = 0; i < volleyCount; i++) {
+                const e = batch.volleyOutcomes(i, new VolleyOutcome());
+                if (!e) continue;
+                const tp = e.targetPos();
+                const rp = e.revealPos();
+                out.push({
+                    attackerId: e.attackerId(),
+                    weaponDefId: e.weaponDefId(),
+                    targetId: e.targetId(),
+                    x: tp ? tp.x() : 0,
+                    y: tp ? tp.y() : 0,
+                    z: tp ? tp.z() : 0,
+                    resolveFrame: e.resolveFrame(),
+                    result: e.result(),
+                    damage: e.damage(),
+                    rounds: e.rounds(),
+                    team: e.team(),
+                    revealAttacker: e.revealAttacker(),
+                    revealX: rp ? rp.x() : 0,
+                    revealY: rp ? rp.y() : 0,
+                    revealZ: rp ? rp.z() : 0,
+                    attackerPosture: e.attackerPosture(),
+                });
+            }
+            this.events.onVolleyOutcomes(out, frame);
         }
 
         // Projectile lifecycle events. The renderer integrates motion

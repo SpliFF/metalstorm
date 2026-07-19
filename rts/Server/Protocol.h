@@ -184,7 +184,8 @@ inline std::vector<uint8_t> BuildCombatEventBatch(
     const std::vector<ProjectileImpactEventData>& projImpacts = {},
     const std::vector<ProjectileTrajectoryEventData>& projTrajectories = {},
     const std::vector<SoundEventData>& sounds = {},
-    const std::vector<SeismicPingData>& seismicPings = {})
+    const std::vector<SeismicPingData>& seismicPings = {},
+    const std::vector<VolleyOutcomeData>& volleyOutcomes = {})
 {
     flatbuffers::FlatBufferBuilder fbb(
         256 + events.size() * 32
@@ -192,7 +193,8 @@ inline std::vector<uint8_t> BuildCombatEventBatch(
             + projImpacts.size() * 32
             + projTrajectories.size() * 40
             + sounds.size() * 32
-            + seismicPings.size() * 24);
+            + seismicPings.size() * 24
+            + volleyOutcomes.size() * 56);
 
     std::vector<flatbuffers::Offset<SpringWeb::CombatEvent>> combatOffsets;
     combatOffsets.reserve(events.size());
@@ -302,6 +304,27 @@ inline std::vector<uint8_t> BuildCombatEventBatch(
         }
     }
 
+    std::vector<flatbuffers::Offset<SpringWeb::VolleyOutcome>> volleyOffsets;
+    volleyOffsets.reserve(volleyOutcomes.size());
+    for (const auto& v : volleyOutcomes) {
+        auto tgtPos = SpringWeb::Vec3(v.targetPos.x, v.targetPos.y, v.targetPos.z);
+        auto revPos = SpringWeb::Vec3(v.revealPos.x, v.revealPos.y, v.revealPos.z);
+        SpringWeb::VolleyOutcomeBuilder vob(fbb);
+        vob.add_attacker_id(v.attackerId);
+        vob.add_weapon_def_id(v.weaponDefId);
+        vob.add_target_id(v.targetId);
+        vob.add_target_pos(&tgtPos);
+        vob.add_resolve_frame(v.resolveFrame);
+        vob.add_result(static_cast<SpringWeb::CombatResult>(v.result));
+        vob.add_damage(static_cast<uint16_t>(std::min(v.damage, 65535.0f)));
+        vob.add_rounds(v.rounds);
+        vob.add_team(v.attackerTeam);
+        vob.add_reveal_attacker(v.revealAttacker);
+        vob.add_reveal_pos(&revPos);
+        vob.add_attacker_posture(v.posture);
+        volleyOffsets.push_back(vob.Finish());
+    }
+
     auto combatVec  = fbb.CreateVector(combatOffsets);
     auto firedVec   = fbb.CreateVector(firedOffsets);
     auto impactVec  = fbb.CreateVector(impactOffsets);
@@ -309,8 +332,10 @@ inline std::vector<uint8_t> BuildCombatEventBatch(
     auto soundVec   = fbb.CreateVector(soundOffsets);
     auto seismicVec = fbb.CreateVector(seismicOffsets);
     auto musicVec   = fbb.CreateVector(musicOffsets);
+    auto volleyVec  = fbb.CreateVector(volleyOffsets);
     auto batch = SpringWeb::CreateGameEventBatch(
-        fbb, frame, /*events=*/0, combatVec, firedVec, impactVec, trajVec, soundVec, seismicVec, musicVec);
+        fbb, frame, /*events=*/0, combatVec, firedVec, impactVec, trajVec, soundVec, seismicVec, musicVec,
+        volleyVec);
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_GameEventBatch, batch.Union());
 }
 

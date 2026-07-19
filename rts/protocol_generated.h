@@ -209,6 +209,10 @@ struct CombatEvent;
 struct CombatEventBuilder;
 struct CombatEventT;
 
+struct VolleyOutcome;
+struct VolleyOutcomeBuilder;
+struct VolleyOutcomeT;
+
 struct GameEvent;
 struct GameEventBuilder;
 struct GameEventT;
@@ -1387,33 +1391,36 @@ enum CombatResult : uint8_t {
   CombatResult_Miss = 1,
   CombatResult_Blocked = 2,
   CombatResult_Kill = 3,
+  CombatResult_Unknown = 4,
   CombatResult_MIN = CombatResult_Hit,
-  CombatResult_MAX = CombatResult_Kill
+  CombatResult_MAX = CombatResult_Unknown
 };
 
-inline const CombatResult (&EnumValuesCombatResult())[4] {
+inline const CombatResult (&EnumValuesCombatResult())[5] {
   static const CombatResult values[] = {
     CombatResult_Hit,
     CombatResult_Miss,
     CombatResult_Blocked,
-    CombatResult_Kill
+    CombatResult_Kill,
+    CombatResult_Unknown
   };
   return values;
 }
 
 inline const char * const *EnumNamesCombatResult() {
-  static const char * const names[5] = {
+  static const char * const names[6] = {
     "Hit",
     "Miss",
     "Blocked",
     "Kill",
+    "Unknown",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNameCombatResult(CombatResult e) {
-  if (::flatbuffers::IsOutRange(e, CombatResult_Hit, CombatResult_Kill)) return "";
+  if (::flatbuffers::IsOutRange(e, CombatResult_Hit, CombatResult_Unknown)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesCombatResult()[index];
 }
@@ -7173,6 +7180,203 @@ inline ::flatbuffers::Offset<CombatEvent> CreateCombatEvent(
 
 ::flatbuffers::Offset<CombatEvent> CreateCombatEvent(::flatbuffers::FlatBufferBuilder &_fbb, const CombatEventT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 
+struct VolleyOutcomeT : public ::flatbuffers::NativeTable {
+  typedef VolleyOutcome TableType;
+  uint32_t attacker_id = 0;
+  uint16_t weapon_def_id = 0;
+  uint32_t target_id = 0;
+  std::unique_ptr<SpringWeb::Vec3> target_pos{};
+  uint32_t resolve_frame = 0;
+  SpringWeb::CombatResult result = SpringWeb::CombatResult_Hit;
+  uint16_t damage = 0;
+  uint8_t rounds = 1;
+  uint8_t team = 255;
+  bool reveal_attacker = false;
+  std::unique_ptr<SpringWeb::Vec3> reveal_pos{};
+  uint8_t attacker_posture = 0;
+  VolleyOutcomeT() = default;
+  VolleyOutcomeT(const VolleyOutcomeT &o);
+  VolleyOutcomeT(VolleyOutcomeT&&) FLATBUFFERS_NOEXCEPT = default;
+  VolleyOutcomeT &operator=(VolleyOutcomeT o) FLATBUFFERS_NOEXCEPT;
+};
+
+/// Metalstorm statistical combat (Model 1) per-volley outcome
+/// (PLAN-metalstorm-combat-resolution.md §2.3 / PLAN-macro-combat.md §3).
+/// One per squad-volley, NOT per round — the client invents `rounds`
+/// cosmetic tracers/impacts from a single event. Visibility-filtered
+/// per session in StateStreamer::BroadcastCombatEvents:
+///   - viewer sees the attacker  -> full outcome (Hit/Miss, damage, attacker_id)
+///   - viewer owns the target but can't see the attacker -> result Unknown,
+///     damage 0, attacker_id 0, plus a counterbattery radar-blip reveal
+///     (reveal_attacker + reveal_pos, Q-D-c ANSWERED 2026-07-19)
+///   - viewer sees only the target (neither owner nor attacker-LOS) -> Unknown,
+///     no reveal
+///   - viewer sees neither -> not sent
+struct VolleyOutcome FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef VolleyOutcomeT NativeTableType;
+  typedef VolleyOutcomeBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_ATTACKER_ID = 4,
+    VT_WEAPON_DEF_ID = 6,
+    VT_TARGET_ID = 8,
+    VT_TARGET_POS = 10,
+    VT_RESOLVE_FRAME = 12,
+    VT_RESULT = 14,
+    VT_DAMAGE = 16,
+    VT_ROUNDS = 18,
+    VT_TEAM = 20,
+    VT_REVEAL_ATTACKER = 22,
+    VT_REVEAL_POS = 24,
+    VT_ATTACKER_POSTURE = 26
+  };
+  uint32_t attacker_id() const {
+    return GetField<uint32_t>(VT_ATTACKER_ID, 0);
+  }
+  uint16_t weapon_def_id() const {
+    return GetField<uint16_t>(VT_WEAPON_DEF_ID, 0);
+  }
+  uint32_t target_id() const {
+    return GetField<uint32_t>(VT_TARGET_ID, 0);
+  }
+  const SpringWeb::Vec3 *target_pos() const {
+    return GetStruct<const SpringWeb::Vec3 *>(VT_TARGET_POS);
+  }
+  uint32_t resolve_frame() const {
+    return GetField<uint32_t>(VT_RESOLVE_FRAME, 0);
+  }
+  SpringWeb::CombatResult result() const {
+    return static_cast<SpringWeb::CombatResult>(GetField<uint8_t>(VT_RESULT, 0));
+  }
+  uint16_t damage() const {
+    return GetField<uint16_t>(VT_DAMAGE, 0);
+  }
+  uint8_t rounds() const {
+    return GetField<uint8_t>(VT_ROUNDS, 1);
+  }
+  uint8_t team() const {
+    return GetField<uint8_t>(VT_TEAM, 255);
+  }
+  /// Counterbattery reveal (Q-D-c). True only for the victim's team when
+  /// they cannot see the attacker: the client drops a radar blip at
+  /// `reveal_pos` (the attacker's firing position) so statistical artillery
+  /// is counterable. Never set for viewers who can already see the attacker.
+  bool reveal_attacker() const {
+    return GetField<uint8_t>(VT_REVEAL_ATTACKER, 0) != 0;
+  }
+  const SpringWeb::Vec3 *reveal_pos() const {
+    return GetStruct<const SpringWeb::Vec3 *>(VT_REVEAL_POS);
+  }
+  /// Attacker morale posture, a derived proxy (morale = clamp(hp% - 10, 0, 100)):
+  /// 0 = normal, 1 = retreating-while-firing (morale < 10), 2 = panicking
+  /// (morale == 0). Lets the client show a retreat/panic indicator. Only
+  /// meaningful when attacker_id != 0 (attacker visible).
+  uint8_t attacker_posture() const {
+    return GetField<uint8_t>(VT_ATTACKER_POSTURE, 0);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<uint32_t>(verifier, VT_ATTACKER_ID, 4) &&
+           VerifyField<uint16_t>(verifier, VT_WEAPON_DEF_ID, 2) &&
+           VerifyField<uint32_t>(verifier, VT_TARGET_ID, 4) &&
+           VerifyField<SpringWeb::Vec3>(verifier, VT_TARGET_POS, 4) &&
+           VerifyField<uint32_t>(verifier, VT_RESOLVE_FRAME, 4) &&
+           VerifyField<uint8_t>(verifier, VT_RESULT, 1) &&
+           VerifyField<uint16_t>(verifier, VT_DAMAGE, 2) &&
+           VerifyField<uint8_t>(verifier, VT_ROUNDS, 1) &&
+           VerifyField<uint8_t>(verifier, VT_TEAM, 1) &&
+           VerifyField<uint8_t>(verifier, VT_REVEAL_ATTACKER, 1) &&
+           VerifyField<SpringWeb::Vec3>(verifier, VT_REVEAL_POS, 4) &&
+           VerifyField<uint8_t>(verifier, VT_ATTACKER_POSTURE, 1) &&
+           verifier.EndTable();
+  }
+  VolleyOutcomeT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(VolleyOutcomeT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<VolleyOutcome> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const VolleyOutcomeT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct VolleyOutcomeBuilder {
+  typedef VolleyOutcome Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_attacker_id(uint32_t attacker_id) {
+    fbb_.AddElement<uint32_t>(VolleyOutcome::VT_ATTACKER_ID, attacker_id, 0);
+  }
+  void add_weapon_def_id(uint16_t weapon_def_id) {
+    fbb_.AddElement<uint16_t>(VolleyOutcome::VT_WEAPON_DEF_ID, weapon_def_id, 0);
+  }
+  void add_target_id(uint32_t target_id) {
+    fbb_.AddElement<uint32_t>(VolleyOutcome::VT_TARGET_ID, target_id, 0);
+  }
+  void add_target_pos(const SpringWeb::Vec3 *target_pos) {
+    fbb_.AddStruct(VolleyOutcome::VT_TARGET_POS, target_pos);
+  }
+  void add_resolve_frame(uint32_t resolve_frame) {
+    fbb_.AddElement<uint32_t>(VolleyOutcome::VT_RESOLVE_FRAME, resolve_frame, 0);
+  }
+  void add_result(SpringWeb::CombatResult result) {
+    fbb_.AddElement<uint8_t>(VolleyOutcome::VT_RESULT, static_cast<uint8_t>(result), 0);
+  }
+  void add_damage(uint16_t damage) {
+    fbb_.AddElement<uint16_t>(VolleyOutcome::VT_DAMAGE, damage, 0);
+  }
+  void add_rounds(uint8_t rounds) {
+    fbb_.AddElement<uint8_t>(VolleyOutcome::VT_ROUNDS, rounds, 1);
+  }
+  void add_team(uint8_t team) {
+    fbb_.AddElement<uint8_t>(VolleyOutcome::VT_TEAM, team, 255);
+  }
+  void add_reveal_attacker(bool reveal_attacker) {
+    fbb_.AddElement<uint8_t>(VolleyOutcome::VT_REVEAL_ATTACKER, static_cast<uint8_t>(reveal_attacker), 0);
+  }
+  void add_reveal_pos(const SpringWeb::Vec3 *reveal_pos) {
+    fbb_.AddStruct(VolleyOutcome::VT_REVEAL_POS, reveal_pos);
+  }
+  void add_attacker_posture(uint8_t attacker_posture) {
+    fbb_.AddElement<uint8_t>(VolleyOutcome::VT_ATTACKER_POSTURE, attacker_posture, 0);
+  }
+  explicit VolleyOutcomeBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<VolleyOutcome> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<VolleyOutcome>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<VolleyOutcome> CreateVolleyOutcome(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint32_t attacker_id = 0,
+    uint16_t weapon_def_id = 0,
+    uint32_t target_id = 0,
+    const SpringWeb::Vec3 *target_pos = nullptr,
+    uint32_t resolve_frame = 0,
+    SpringWeb::CombatResult result = SpringWeb::CombatResult_Hit,
+    uint16_t damage = 0,
+    uint8_t rounds = 1,
+    uint8_t team = 255,
+    bool reveal_attacker = false,
+    const SpringWeb::Vec3 *reveal_pos = nullptr,
+    uint8_t attacker_posture = 0) {
+  VolleyOutcomeBuilder builder_(_fbb);
+  builder_.add_reveal_pos(reveal_pos);
+  builder_.add_resolve_frame(resolve_frame);
+  builder_.add_target_pos(target_pos);
+  builder_.add_target_id(target_id);
+  builder_.add_attacker_id(attacker_id);
+  builder_.add_damage(damage);
+  builder_.add_weapon_def_id(weapon_def_id);
+  builder_.add_attacker_posture(attacker_posture);
+  builder_.add_reveal_attacker(reveal_attacker);
+  builder_.add_team(team);
+  builder_.add_rounds(rounds);
+  builder_.add_result(result);
+  return builder_.Finish();
+}
+
+::flatbuffers::Offset<VolleyOutcome> CreateVolleyOutcome(::flatbuffers::FlatBufferBuilder &_fbb, const VolleyOutcomeT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
 struct GameEventT : public ::flatbuffers::NativeTable {
   typedef GameEvent TableType;
   std::string topic{};
@@ -8017,6 +8221,7 @@ struct GameEventBatchT : public ::flatbuffers::NativeTable {
   std::vector<std::unique_ptr<SpringWeb::SoundEventT>> sounds{};
   std::vector<std::unique_ptr<SpringWeb::SeismicPingT>> seismic_pings{};
   std::vector<std::unique_ptr<SpringWeb::MusicEventT>> music_events{};
+  std::vector<std::unique_ptr<SpringWeb::VolleyOutcomeT>> volley_outcomes{};
   GameEventBatchT() = default;
   GameEventBatchT(const GameEventBatchT &o);
   GameEventBatchT(GameEventBatchT&&) FLATBUFFERS_NOEXCEPT = default;
@@ -8035,7 +8240,8 @@ struct GameEventBatch FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_PROJECTILE_TRAJECTORIES = 14,
     VT_SOUNDS = 16,
     VT_SEISMIC_PINGS = 18,
-    VT_MUSIC_EVENTS = 20
+    VT_MUSIC_EVENTS = 20,
+    VT_VOLLEY_OUTCOMES = 22
   };
   uint32_t frame() const {
     return GetField<uint32_t>(VT_FRAME, 0);
@@ -8074,6 +8280,13 @@ struct GameEventBatch FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::MusicEvent>> *music_events() const {
     return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::MusicEvent>> *>(VT_MUSIC_EVENTS);
   }
+  /// Metalstorm statistical-combat per-volley outcomes (Model 1). Already
+  /// visibility-filtered for this session. Empty for ported games (ZK/BAR
+  /// use the projectile path); populated only when statistical weapons fire.
+  /// See VolleyOutcome. Appended last for FlatBuffers field-id stability.
+  const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::VolleyOutcome>> *volley_outcomes() const {
+    return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::VolleyOutcome>> *>(VT_VOLLEY_OUTCOMES);
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<uint32_t>(verifier, VT_FRAME, 4) &&
@@ -8101,6 +8314,9 @@ struct GameEventBatch FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyOffset(verifier, VT_MUSIC_EVENTS) &&
            verifier.VerifyVector(music_events()) &&
            verifier.VerifyVectorOfTables(music_events()) &&
+           VerifyOffset(verifier, VT_VOLLEY_OUTCOMES) &&
+           verifier.VerifyVector(volley_outcomes()) &&
+           verifier.VerifyVectorOfTables(volley_outcomes()) &&
            verifier.EndTable();
   }
   GameEventBatchT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -8139,6 +8355,9 @@ struct GameEventBatchBuilder {
   void add_music_events(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::MusicEvent>>> music_events) {
     fbb_.AddOffset(GameEventBatch::VT_MUSIC_EVENTS, music_events);
   }
+  void add_volley_outcomes(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::VolleyOutcome>>> volley_outcomes) {
+    fbb_.AddOffset(GameEventBatch::VT_VOLLEY_OUTCOMES, volley_outcomes);
+  }
   explicit GameEventBatchBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -8160,8 +8379,10 @@ inline ::flatbuffers::Offset<GameEventBatch> CreateGameEventBatch(
     ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::ProjectileTrajectoryEvent>>> projectile_trajectories = 0,
     ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::SoundEvent>>> sounds = 0,
     ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::SeismicPing>>> seismic_pings = 0,
-    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::MusicEvent>>> music_events = 0) {
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::MusicEvent>>> music_events = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::VolleyOutcome>>> volley_outcomes = 0) {
   GameEventBatchBuilder builder_(_fbb);
+  builder_.add_volley_outcomes(volley_outcomes);
   builder_.add_music_events(music_events);
   builder_.add_seismic_pings(seismic_pings);
   builder_.add_sounds(sounds);
@@ -8184,7 +8405,8 @@ inline ::flatbuffers::Offset<GameEventBatch> CreateGameEventBatchDirect(
     const std::vector<::flatbuffers::Offset<SpringWeb::ProjectileTrajectoryEvent>> *projectile_trajectories = nullptr,
     const std::vector<::flatbuffers::Offset<SpringWeb::SoundEvent>> *sounds = nullptr,
     const std::vector<::flatbuffers::Offset<SpringWeb::SeismicPing>> *seismic_pings = nullptr,
-    const std::vector<::flatbuffers::Offset<SpringWeb::MusicEvent>> *music_events = nullptr) {
+    const std::vector<::flatbuffers::Offset<SpringWeb::MusicEvent>> *music_events = nullptr,
+    const std::vector<::flatbuffers::Offset<SpringWeb::VolleyOutcome>> *volley_outcomes = nullptr) {
   auto events__ = events ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::GameEvent>>(*events) : 0;
   auto combat_events__ = combat_events ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::CombatEvent>>(*combat_events) : 0;
   auto projectile_fired__ = projectile_fired ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::ProjectileFiredEvent>>(*projectile_fired) : 0;
@@ -8193,6 +8415,7 @@ inline ::flatbuffers::Offset<GameEventBatch> CreateGameEventBatchDirect(
   auto sounds__ = sounds ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::SoundEvent>>(*sounds) : 0;
   auto seismic_pings__ = seismic_pings ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::SeismicPing>>(*seismic_pings) : 0;
   auto music_events__ = music_events ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::MusicEvent>>(*music_events) : 0;
+  auto volley_outcomes__ = volley_outcomes ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::VolleyOutcome>>(*volley_outcomes) : 0;
   return SpringWeb::CreateGameEventBatch(
       _fbb,
       frame,
@@ -8203,7 +8426,8 @@ inline ::flatbuffers::Offset<GameEventBatch> CreateGameEventBatchDirect(
       projectile_trajectories__,
       sounds__,
       seismic_pings__,
-      music_events__);
+      music_events__,
+      volley_outcomes__);
 }
 
 ::flatbuffers::Offset<GameEventBatch> CreateGameEventBatch(::flatbuffers::FlatBufferBuilder &_fbb, const GameEventBatchT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
@@ -16916,6 +17140,96 @@ inline ::flatbuffers::Offset<CombatEvent> CreateCombatEvent(::flatbuffers::FlatB
       _position);
 }
 
+inline VolleyOutcomeT::VolleyOutcomeT(const VolleyOutcomeT &o)
+      : attacker_id(o.attacker_id),
+        weapon_def_id(o.weapon_def_id),
+        target_id(o.target_id),
+        target_pos((o.target_pos) ? new SpringWeb::Vec3(*o.target_pos) : nullptr),
+        resolve_frame(o.resolve_frame),
+        result(o.result),
+        damage(o.damage),
+        rounds(o.rounds),
+        team(o.team),
+        reveal_attacker(o.reveal_attacker),
+        reveal_pos((o.reveal_pos) ? new SpringWeb::Vec3(*o.reveal_pos) : nullptr),
+        attacker_posture(o.attacker_posture) {
+}
+
+inline VolleyOutcomeT &VolleyOutcomeT::operator=(VolleyOutcomeT o) FLATBUFFERS_NOEXCEPT {
+  std::swap(attacker_id, o.attacker_id);
+  std::swap(weapon_def_id, o.weapon_def_id);
+  std::swap(target_id, o.target_id);
+  std::swap(target_pos, o.target_pos);
+  std::swap(resolve_frame, o.resolve_frame);
+  std::swap(result, o.result);
+  std::swap(damage, o.damage);
+  std::swap(rounds, o.rounds);
+  std::swap(team, o.team);
+  std::swap(reveal_attacker, o.reveal_attacker);
+  std::swap(reveal_pos, o.reveal_pos);
+  std::swap(attacker_posture, o.attacker_posture);
+  return *this;
+}
+
+inline VolleyOutcomeT *VolleyOutcome::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<VolleyOutcomeT>(new VolleyOutcomeT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void VolleyOutcome::UnPackTo(VolleyOutcomeT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = attacker_id(); _o->attacker_id = _e; }
+  { auto _e = weapon_def_id(); _o->weapon_def_id = _e; }
+  { auto _e = target_id(); _o->target_id = _e; }
+  { auto _e = target_pos(); if (_e) _o->target_pos = std::unique_ptr<SpringWeb::Vec3>(new SpringWeb::Vec3(*_e)); }
+  { auto _e = resolve_frame(); _o->resolve_frame = _e; }
+  { auto _e = result(); _o->result = _e; }
+  { auto _e = damage(); _o->damage = _e; }
+  { auto _e = rounds(); _o->rounds = _e; }
+  { auto _e = team(); _o->team = _e; }
+  { auto _e = reveal_attacker(); _o->reveal_attacker = _e; }
+  { auto _e = reveal_pos(); if (_e) _o->reveal_pos = std::unique_ptr<SpringWeb::Vec3>(new SpringWeb::Vec3(*_e)); }
+  { auto _e = attacker_posture(); _o->attacker_posture = _e; }
+}
+
+inline ::flatbuffers::Offset<VolleyOutcome> VolleyOutcome::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const VolleyOutcomeT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return CreateVolleyOutcome(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<VolleyOutcome> CreateVolleyOutcome(::flatbuffers::FlatBufferBuilder &_fbb, const VolleyOutcomeT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const VolleyOutcomeT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _attacker_id = _o->attacker_id;
+  auto _weapon_def_id = _o->weapon_def_id;
+  auto _target_id = _o->target_id;
+  auto _target_pos = _o->target_pos ? _o->target_pos.get() : nullptr;
+  auto _resolve_frame = _o->resolve_frame;
+  auto _result = _o->result;
+  auto _damage = _o->damage;
+  auto _rounds = _o->rounds;
+  auto _team = _o->team;
+  auto _reveal_attacker = _o->reveal_attacker;
+  auto _reveal_pos = _o->reveal_pos ? _o->reveal_pos.get() : nullptr;
+  auto _attacker_posture = _o->attacker_posture;
+  return SpringWeb::CreateVolleyOutcome(
+      _fbb,
+      _attacker_id,
+      _weapon_def_id,
+      _target_id,
+      _target_pos,
+      _resolve_frame,
+      _result,
+      _damage,
+      _rounds,
+      _team,
+      _reveal_attacker,
+      _reveal_pos,
+      _attacker_posture);
+}
+
 inline GameEventT::GameEventT(const GameEventT &o)
       : topic(o.topic),
         frame(o.frame),
@@ -17338,6 +17652,8 @@ inline GameEventBatchT::GameEventBatchT(const GameEventBatchT &o)
   for (const auto &seismic_pings_ : o.seismic_pings) { seismic_pings.emplace_back((seismic_pings_) ? new SpringWeb::SeismicPingT(*seismic_pings_) : nullptr); }
   music_events.reserve(o.music_events.size());
   for (const auto &music_events_ : o.music_events) { music_events.emplace_back((music_events_) ? new SpringWeb::MusicEventT(*music_events_) : nullptr); }
+  volley_outcomes.reserve(o.volley_outcomes.size());
+  for (const auto &volley_outcomes_ : o.volley_outcomes) { volley_outcomes.emplace_back((volley_outcomes_) ? new SpringWeb::VolleyOutcomeT(*volley_outcomes_) : nullptr); }
 }
 
 inline GameEventBatchT &GameEventBatchT::operator=(GameEventBatchT o) FLATBUFFERS_NOEXCEPT {
@@ -17350,6 +17666,7 @@ inline GameEventBatchT &GameEventBatchT::operator=(GameEventBatchT o) FLATBUFFER
   std::swap(sounds, o.sounds);
   std::swap(seismic_pings, o.seismic_pings);
   std::swap(music_events, o.music_events);
+  std::swap(volley_outcomes, o.volley_outcomes);
   return *this;
 }
 
@@ -17371,6 +17688,7 @@ inline void GameEventBatch::UnPackTo(GameEventBatchT *_o, const ::flatbuffers::r
   { auto _e = sounds(); if (_e) { _o->sounds.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->sounds[_i]) { _e->Get(_i)->UnPackTo(_o->sounds[_i].get(), _resolver); } else { _o->sounds[_i] = std::unique_ptr<SpringWeb::SoundEventT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->sounds.resize(0); } }
   { auto _e = seismic_pings(); if (_e) { _o->seismic_pings.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->seismic_pings[_i]) { _e->Get(_i)->UnPackTo(_o->seismic_pings[_i].get(), _resolver); } else { _o->seismic_pings[_i] = std::unique_ptr<SpringWeb::SeismicPingT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->seismic_pings.resize(0); } }
   { auto _e = music_events(); if (_e) { _o->music_events.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->music_events[_i]) { _e->Get(_i)->UnPackTo(_o->music_events[_i].get(), _resolver); } else { _o->music_events[_i] = std::unique_ptr<SpringWeb::MusicEventT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->music_events.resize(0); } }
+  { auto _e = volley_outcomes(); if (_e) { _o->volley_outcomes.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->volley_outcomes[_i]) { _e->Get(_i)->UnPackTo(_o->volley_outcomes[_i].get(), _resolver); } else { _o->volley_outcomes[_i] = std::unique_ptr<SpringWeb::VolleyOutcomeT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->volley_outcomes.resize(0); } }
 }
 
 inline ::flatbuffers::Offset<GameEventBatch> GameEventBatch::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GameEventBatchT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
@@ -17390,6 +17708,7 @@ inline ::flatbuffers::Offset<GameEventBatch> CreateGameEventBatch(::flatbuffers:
   auto _sounds = _o->sounds.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::SoundEvent>> (_o->sounds.size(), [](size_t i, _VectorArgs *__va) { return CreateSoundEvent(*__va->__fbb, __va->__o->sounds[i].get(), __va->__rehasher); }, &_va ) : 0;
   auto _seismic_pings = _o->seismic_pings.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::SeismicPing>> (_o->seismic_pings.size(), [](size_t i, _VectorArgs *__va) { return CreateSeismicPing(*__va->__fbb, __va->__o->seismic_pings[i].get(), __va->__rehasher); }, &_va ) : 0;
   auto _music_events = _o->music_events.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::MusicEvent>> (_o->music_events.size(), [](size_t i, _VectorArgs *__va) { return CreateMusicEvent(*__va->__fbb, __va->__o->music_events[i].get(), __va->__rehasher); }, &_va ) : 0;
+  auto _volley_outcomes = _o->volley_outcomes.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::VolleyOutcome>> (_o->volley_outcomes.size(), [](size_t i, _VectorArgs *__va) { return CreateVolleyOutcome(*__va->__fbb, __va->__o->volley_outcomes[i].get(), __va->__rehasher); }, &_va ) : 0;
   return SpringWeb::CreateGameEventBatch(
       _fbb,
       _frame,
@@ -17400,7 +17719,8 @@ inline ::flatbuffers::Offset<GameEventBatch> CreateGameEventBatch(::flatbuffers:
       _projectile_trajectories,
       _sounds,
       _seismic_pings,
-      _music_events);
+      _music_events,
+      _volley_outcomes);
 }
 
 inline ResourceUpdateT *ResourceUpdate::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {

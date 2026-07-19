@@ -813,6 +813,20 @@ function gpConnect(msg: GpInitToWorker): void {
             gpCombatFX?.onCombatEvents(events);
             dispatchUnitDamaged(events);
         },
+        // Metalstorm statistical combat (Model 1) per-volley outcomes. No
+        // projectile exists — combatFX invents tracers (from the visible
+        // attacker's position) + impact bursts. Counterbattery reveals become
+        // a red minimap "attack" blip on the main thread (Q-D-c). The volley's
+        // target_pos is the squad-casualty impact hint (PLAN-metalstorm-squad-
+        // casualties consumes onVolleyOutcomes when that layer lands).
+        onVolleyOutcomes: (events) => {
+            gpCombatFX?.onVolleyOutcome(events,
+                (id) => gpCtx.entityRenderer?.getEntityPosition(id) ?? null);
+            for (const e of events) {
+                if (e.revealAttacker)
+                    postToMain({ type: 'gp:counterbatteryPing', x: e.revealX, z: e.revealZ });
+            }
+        },
         // GW4-c5b-3: per-unit command queues (~1 Hz) → command-path + waypoint
         // overlays for the current selection (shift-gated). Cached so a
         // selection change re-renders without waiting for the next broadcast.

@@ -2,6 +2,7 @@
 #include "CombatEventCollector.h"
 
 CombatEventCollector combatEvents;
+VolleyOutcomeCollector volleyOutcomes;
 UnitDeathCollector unitDeaths;
 SensorUpdateCollector sensorUpdates;
 SendToUnsyncedEventCollector sendToUnsyncedEvents;

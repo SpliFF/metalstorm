@@ -137,3 +137,4 @@ export { UnitTransportInfo, UnitTransportInfoT } from './spring-web/unit-transpo
 export { UnitTransportUpdate, UnitTransportUpdateT } from './spring-web/unit-transport-update.js';
 export { Vec3, Vec3T } from './spring-web/vec3.js';
 export { ViewportUpdate, ViewportUpdateT } from './spring-web/viewport-update.js';
+export { VolleyOutcome, VolleyOutcomeT } from './spring-web/volley-outcome.js';
