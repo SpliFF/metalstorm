@@ -22,6 +22,13 @@ import { staticDataPlugin } from './vite-static-data-plugin.js';
 //     spring-lobby for the REST API + SSE.
 //   - spring-lobby itself no longer serves static assets — those four
 //     paths return 404 if hit directly.
+//   - `npm run build && npm run preview` is a **local stand-in** for that
+//     production shape (PLAN-perf P0b): `vite preview` serves the built
+//     bundle, `staticDataPlugin`'s `configurePreviewServer` hook serves the
+//     four data routes, and `preview.proxy` below forwards the rest of
+//     `/api/*` to spring-lobby — same routing as dev, just against the
+//     built, minified bundle. It is not a substitute for a real external
+//     static server in an actual deployment.
 const GAME_SERVER_PORT = process.env.GAME_SERVER_PORT || '8011';
 const REPO_ROOT = resolve(__dirname, '..');
 
@@ -30,6 +37,15 @@ export default defineConfig({
         staticDataPlugin({ repoRoot: REPO_ROOT }),
     ],
     server: {
+        port: parseInt(process.env.WEB_SERVER_PORT || '8012'),
+        proxy: {
+            '/api': {
+                target: `http://localhost:${GAME_SERVER_PORT}`,
+                changeOrigin: true,
+            },
+        },
+    },
+    preview: {
         port: parseInt(process.env.WEB_SERVER_PORT || '8012'),
         proxy: {
             '/api': {

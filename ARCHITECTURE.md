@@ -9,6 +9,7 @@ make setup              # cmake --preset debug + npm install + generate protocol
 make build              # cmake --build build/debug (spring-server + spring-lobby)
 make dev-client         # npm run dev (Vite dev server on :5173)
 npx vite build          # production client bundle → client/dist/
+npx vite preview        # serve the built bundle (local prod-shape stand-in — see below)
 npx tsc --noEmit        # TypeScript type-check (no emit)
 ```
 

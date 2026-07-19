@@ -34,7 +34,7 @@
 import { promises as fs, statSync, existsSync, readdirSync } from 'node:fs';
 import * as path from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { Plugin, ViteDevServer } from 'vite';
+import type { Plugin, ViteDevServer, PreviewServer } from 'vite';
 
 interface StaticDataPluginOptions {
     /** Path to the repository root (where the `data/` directory lives). */
@@ -74,6 +74,87 @@ const CONTENT_TYPES: Record<string, string> = {
 
 const THUMB_PREFIX = '/api/maps/thumb/';
 
+/// Shared request handler behind both the dev (`configureServer`) and
+/// preview/production (`configurePreviewServer`) hooks — same data-serving
+/// logic either way, only the host Vite server type differs.
+function makeMiddleware(
+    dataRoot: string,
+    mapsDir: string,
+    warn: (msg: string) => void,
+) {
+    return async (req: IncomingMessage, res: ServerResponse, next: () => void) => {
+        const url = req.url ?? '';
+        const qpos = url.indexOf('?');
+        const cleanUrl = qpos >= 0 ? url.substring(0, qpos) : url;
+
+        try {
+            // ── Thumb route (multi-fallback) ──
+            if (cleanUrl.startsWith(THUMB_PREFIX)) {
+                const mapId = decodeURIComponent(cleanUrl.substring(THUMB_PREFIX.length));
+                if (mapId.includes('..') || !mapId) {
+                    res.statusCode = 403;
+                    res.end('forbidden');
+                    return;
+                }
+                const resolved = resolveThumb(mapsDir, mapId);
+                if (!resolved) {
+                    res.statusCode = 404;
+                    res.end();
+                    return;
+                }
+                await serveFile(resolved, req, res);
+                return;
+            }
+
+            // ── Prefix-based routes ──
+            let subDir: string | null = null;
+            let rest: string | null = null;
+            for (const [prefix, dir] of Object.entries(PREFIX_ROUTES)) {
+                if (cleanUrl.startsWith(prefix)) {
+                    subDir = dir;
+                    rest = decodeURIComponent(cleanUrl.substring(prefix.length));
+                    break;
+                }
+            }
+            if (subDir === null || rest === null) {
+                return next();
+            }
+            if (rest.includes('..')) {
+                res.statusCode = 403;
+                res.end('forbidden');
+                return;
+            }
+
+            const resolved = await resolvePath(
+                path.join(dataRoot, subDir),
+                rest,
+            );
+            if (!resolved) {
+                return next();   // fall through (lobby will 404 cleanly)
+            }
+
+            const stat = statSync(resolved);
+            if (stat.isDirectory()) {
+                // The LuaUI Web Worker walks the game tree by
+                // fetching directory paths (e.g. `LuaUI`,
+                // `LuaRules/Configs`) and expects JSON
+                // `[{name, type, size?}, ...]` back — the same
+                // shape the lobby's deleted handler emitted.
+                await serveDirectoryListing(resolved, res);
+                return;
+            }
+            if (!stat.isFile()) {
+                return next();
+            }
+
+            await serveFile(resolved, req, res);
+        } catch (err) {
+            warn(`[static-data] ${cleanUrl}: ${(err as Error).message}`);
+            next();
+        }
+    };
+}
+
 export function staticDataPlugin(opts: StaticDataPluginOptions): Plugin {
     const dataRoot = path.resolve(opts.repoRoot, 'data');
     const mapsDir = path.join(dataRoot, 'maps');
@@ -81,79 +162,21 @@ export function staticDataPlugin(opts: StaticDataPluginOptions): Plugin {
     return {
         name: 'static-data',
         configureServer(server: ViteDevServer) {
-            server.middlewares.use(async (req, res, next) => {
-                const url = req.url ?? '';
-                const qpos = url.indexOf('?');
-                const cleanUrl = qpos >= 0 ? url.substring(0, qpos) : url;
-
-                try {
-                    // ── Thumb route (multi-fallback) ──
-                    if (cleanUrl.startsWith(THUMB_PREFIX)) {
-                        const mapId = decodeURIComponent(cleanUrl.substring(THUMB_PREFIX.length));
-                        if (mapId.includes('..') || !mapId) {
-                            res.statusCode = 403;
-                            res.end('forbidden');
-                            return;
-                        }
-                        const resolved = resolveThumb(mapsDir, mapId);
-                        if (!resolved) {
-                            res.statusCode = 404;
-                            res.end();
-                            return;
-                        }
-                        await serveFile(resolved, req, res);
-                        return;
-                    }
-
-                    // ── Prefix-based routes ──
-                    let subDir: string | null = null;
-                    let rest: string | null = null;
-                    for (const [prefix, dir] of Object.entries(PREFIX_ROUTES)) {
-                        if (cleanUrl.startsWith(prefix)) {
-                            subDir = dir;
-                            rest = decodeURIComponent(cleanUrl.substring(prefix.length));
-                            break;
-                        }
-                    }
-                    if (subDir === null || rest === null) {
-                        return next();
-                    }
-                    if (rest.includes('..')) {
-                        res.statusCode = 403;
-                        res.end('forbidden');
-                        return;
-                    }
-
-                    const resolved = await resolvePath(
-                        path.join(dataRoot, subDir),
-                        rest,
-                    );
-                    if (!resolved) {
-                        return next();   // fall through (lobby will 404 cleanly)
-                    }
-
-                    const stat = statSync(resolved);
-                    if (stat.isDirectory()) {
-                        // The LuaUI Web Worker walks the game tree by
-                        // fetching directory paths (e.g. `LuaUI`,
-                        // `LuaRules/Configs`) and expects JSON
-                        // `[{name, type, size?}, ...]` back — the same
-                        // shape the lobby's deleted handler emitted.
-                        await serveDirectoryListing(resolved, res);
-                        return;
-                    }
-                    if (!stat.isFile()) {
-                        return next();
-                    }
-
-                    await serveFile(resolved, req, res);
-                } catch (err) {
-                    server.config.logger.warn(
-                        `[static-data] ${cleanUrl}: ${(err as Error).message}`,
-                    );
-                    next();
-                }
-            });
+            server.middlewares.use(
+                makeMiddleware(dataRoot, mapsDir, msg => server.config.logger.warn(msg)),
+            );
+        },
+        // Production-shaped local verification: `vite preview` serves the
+        // built `client/dist/` bundle and this hook serves the same four
+        // data routes `configureServer` does in dev, so a prod-bundle perf
+        // capture (PLAN-perf P0b) doesn't need a real external static
+        // server. A real deployment still fronts spring-lobby with
+        // nginx/apache/CDN per PLAN-static-serving.md — this hook is a
+        // measurement/local-verification convenience, not a deployment path.
+        configurePreviewServer(server: PreviewServer) {
+            server.middlewares.use(
+                makeMiddleware(dataRoot, mapsDir, msg => server.config.logger.warn(msg)),
+            );
         },
     };
 }
