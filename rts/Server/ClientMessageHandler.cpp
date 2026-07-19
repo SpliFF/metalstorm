@@ -1074,6 +1074,44 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             }
             break;
         }
+        // PLAN-security-hardening task 11 (G14): these 14 ClientPayload verbs
+        // are declared in the schema but have no handler. Previously they fell
+        // through `default: break` and were silently discarded — which reads,
+        // to anyone auditing the switch, as "handled". Enumerate them here with
+        // an explicit reject so (a) an operator sees a client probing an
+        // unimplemented verb, and (b) nobody can re-enable one by dropping code
+        // into `default` without deliberately removing it from this block and
+        // giving it a real gate. We drop rather than reply (no amplification)
+        // and rate-limit the log to a DEBUG line.
+        //
+        // Rationale for reject-not-wire: the room-management verbs
+        // (RoomEndGame/RoomAddAI/RoomRemoveAI/RoomSetStartPos/RoomCloseRoom/
+        // RoomSetAITeam) all have working, host-checked HTTP counterparts, so
+        // the WT copies are redundant; the log verbs (LogIngest/LogSubscribe/
+        // LogUnsubscribe) are served by the logserver's own (now
+        // LocalhostOrAdmin-gated) HTTP routes; Ack/ReconnectRequest/ChatSend/
+        // AIListRequest/GameListRequest are protocol niceties with no server
+        // side today. They stay in the union for wire/protocol-version
+        // stability (removing a union member renumbers tags); this block is the
+        // gate. Wire one individually — with its own session+role check — if it
+        // is ever actually needed.
+        case SpringWeb::ClientPayload_ChatSend:
+        case SpringWeb::ClientPayload_Ack:
+        case SpringWeb::ClientPayload_ReconnectRequest:
+        case SpringWeb::ClientPayload_RoomEndGame:
+        case SpringWeb::ClientPayload_RoomAddAI:
+        case SpringWeb::ClientPayload_RoomRemoveAI:
+        case SpringWeb::ClientPayload_AIListRequest:
+        case SpringWeb::ClientPayload_GameListRequest:
+        case SpringWeb::ClientPayload_RoomSetStartPos:
+        case SpringWeb::ClientPayload_RoomCloseRoom:
+        case SpringWeb::ClientPayload_RoomSetAITeam:
+        case SpringWeb::ClientPayload_LogIngest:
+        case SpringWeb::ClientPayload_LogSubscribe:
+        case SpringWeb::ClientPayload_LogUnsubscribe:
+            SLOG(SPRING_LOG_DEBUG, "rejecting unimplemented/ungated verb type=%d from client=%u",
+                (int)clientMsg->payload_type(), msg.clientId);
+            break;
         default:
             break;
     }
