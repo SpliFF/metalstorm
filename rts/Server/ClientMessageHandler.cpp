@@ -438,13 +438,11 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                         simCmd.PushParam(cmd->params()->Get(i));
                 }
 
-                // Route command to each target unit, dropping
-                // any that don't belong to this session's
-                // team. session->team == -1 means "no roster
-                // restriction" (dev smoketest or spectator)
-                // and lets the command through unchanged,
-                // which preserves the old behaviour when the
-                // lobby isn't in the loop.
+                // Route command to each target unit, dropping any the
+                // session isn't allowed to command. Ownership is enforced
+                // by SessionManager::CanCommandTeam (G4): rostered sessions
+                // reach only their own team, spectators reach nothing, and
+                // the lobby-less team==-1 escape hatch is dev-only.
                 int routed = 0;
                 int rejectedTeam = 0;
                 if (cmd->squad_ids()) {
@@ -453,7 +451,7 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                         CUnit* unit = unitHandler.GetUnit(unitId);
                         if (unit == nullptr || unit->isDead)
                             continue;
-                        if (session->team >= 0 && unit->team != session->team) {
+                        if (!SessionManager::CanCommandTeam(*session, unit->team)) {
                             rejectedTeam++;
                             continue;
                         }
@@ -543,7 +541,7 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                     uint32_t unitId = cmd->squad_ids()->Get(i);
                     CUnit* unit = unitHandler.GetUnit(unitId);
                     if (unit == nullptr || unit->isDead) continue;
-                    if (session->team >= 0 && unit->team != session->team) {
+                    if (!SessionManager::CanCommandTeam(*session, unit->team)) {
                         totalRejectedTeam++;
                         continue;
                     }

@@ -137,6 +137,36 @@ public:
         return sessions.count(clientId) > 0;
     }
 
+    /// PLAN-security-hardening task 10 (G4): may this session command a unit
+    /// belonging to `unitTeam`? The ownership rule is simply "the unit is on
+    /// the session's team". The previous PlayerCommand/Batch checks phrased it
+    /// as `session.team >= 0 && unit->team != session.team`, which SKIPPED the
+    /// team check entirely when `session.team == -1` — so any un-rostered
+    /// session (dev smoketest, but also a spectator or an anomalous no-roster
+    /// connection) could command every unit on every team. This centralises
+    /// the decision so both command paths share one rule and it is unit-tested:
+    ///
+    ///   * A spectator commands nothing, in every build.
+    ///   * A rostered session (team >= 0) commands only its own team's units.
+    ///   * team == -1 (lobby-less launch) keeps the "command anything" escape
+    ///     hatch ONLY in dev builds and ONLY for non-spectators — the
+    ///     spring-test harness and manual dev runs launch without a lobby
+    ///     roster and rely on it. Under SPRING_PROD it is compiled out, so a
+    ///     team == -1 session in a production binary commands nothing (every
+    ///     legitimate commander is rostered with team >= 0 by the lobby).
+    static bool CanCommandTeam(const ClientSession& session, int unitTeam) {
+        if (session.role == "spectator")
+            return false;
+        if (session.team >= 0)
+            return unitTeam == session.team;
+#ifndef SPRING_PROD
+        // team == -1, non-spectator, dev build → lobby-less smoketest bypass.
+        return true;
+#else
+        return false;
+#endif
+    }
+
     /// Iterate all sessions under lock. Callback receives (ClientID, ClientSession&).
     template<typename Fn>
     void ForEachSession(Fn&& fn) {
