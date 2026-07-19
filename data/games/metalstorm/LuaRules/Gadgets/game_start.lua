@@ -1,8 +1,13 @@
--- game_start.lua — initial team spawn. STUB (scenario/persistent-world entry
--- replaces this; PLAN-metalstorm.md §12).
+-- game_start.lua — initial team spawn. STUB default force (PLAN-metalstorm.md
+-- §12); yields to a scenario when the room manifest names one.
 --
 -- TEAM model: one Spring team per side; all of a side's players share it
 -- (PLAN-metalstorm.md §2). Spawns one command nexus + a small mixed force.
+--
+-- Scenario handoff (PLAN-persistence.md §5): a direct-start manifest's
+-- "scenario" field reaches Lua as the modoption `scenario`. When set,
+-- game_scenario.lua (layer -90, runs first) stages the whole world instead —
+-- this gadget's default force would double-spawn on top of it, so it no-ops.
 
 function gadget:GetInfo()
     return {
@@ -30,6 +35,11 @@ local START_FORCE = {
 }
 
 function gadget:GameStart()
+    local scenario = Spring.GetModOptions().scenario
+    if scenario ~= nil and scenario ~= '' then
+        return  -- game_scenario.lua stages the world instead
+    end
+
     local gaia = Spring.GetGaiaTeamID()
     for _, teamID in ipairs(Spring.GetTeamList()) do
         if teamID ~= gaia then

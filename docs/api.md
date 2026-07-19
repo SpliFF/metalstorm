@@ -176,6 +176,7 @@ Request — a manifest describing everything the three lobby screens collect:
   "map": "green_flat_x34_v3",
   "game": "metalstorm",
   "modoptions": { "authority_cost_scale": "0" },
+  "scenario": "scenario_smoke_test",
   "aiSlots": [ { "aiId": "null", "team": 1, "startPos": 1 } ],
   "players": [ { "username": "test1", "team": 0, "startPos": 0, "spectator": false } ],
   "autoStart": true
@@ -185,6 +186,7 @@ Request — a manifest describing everything the three lobby screens collect:
 - `players[0]` becomes the room host. A declared username with no existing account is created on the fly and flagged `is_dev` — it gets an unusable random password (never logs in via `/api/auth/login`), only the session token minted here. A username already in a different room is force-left first.
 - Re-POSTing the same `name` (or restarting the lobby with `--direct <manifest.json>` pointing at an unchanged manifest) tears down the old room and recreates it — idempotent, not additive.
 - `autoStart` (default `true`) drives the room through the same path `/api/rooms/start` uses, including its solo-team Null AI safety net. Set `false` to stop at a bound-but-unstarted room.
+- `scenario` (optional) names a `scenarios/<name>.lua` world file (PLAN-persistence.md §5) for the game's `game_scenario.lua` gadget to stage at `GameStart` — pre-set units, region ownership, civilians, and objectives instead of the game's default start force. Threaded through as an ordinary modoption (`scenario`), so it's equally settable via `"modoptions": {"scenario": "..."}` directly.
 
 Response — the same room object `/api/rooms/start` already returns, plus a `sessions` map:
 

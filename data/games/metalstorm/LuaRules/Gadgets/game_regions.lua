@@ -55,6 +55,23 @@ function GG.Regions.CostModifierAt(unitID)
     return MOD_ENEMY
 end
 
+--- The grid key for a world position — the same addressing scheme every
+--- other GG.Regions entry point uses. Exported so callers that need to
+--- preset/query ownership from a position (scenario loader, GM tools) don't
+--- have to reimplement the grid math.
+function GG.Regions.KeyAt(x, z)
+    return keyAt(x, z)
+end
+
+--- Explicit ownership override (scenario preset at GameStart, GM tools).
+--- teamID = nil clears to uncontrolled; the periodic evaluator (GameFrame)
+--- may still flip a key on its next EVAL_PERIOD tick once units are present
+--- — this only seeds the starting state, it doesn't freeze it.
+function GG.Regions.SetControllingTeam(key, teamID)
+    control[key] = teamID
+    Spring.SetGameRulesParam('region_' .. key .. '_team', teamID or -1)
+end
+
 function gadget:GameFrame(frame)
     if frame % EVAL_PERIOD ~= 0 then return end
     -- STUB control evaluation: region goes to the team with the most

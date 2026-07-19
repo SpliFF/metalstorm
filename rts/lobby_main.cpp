@@ -1511,6 +1511,16 @@ int main(int argc, char* argv[])
             }
         }
 
+        // Top-level "scenario" (PLAN-persistence.md §5): names a
+        // scenarios/<name>.lua world file for game_scenario.lua to stage at
+        // GameStart. Threaded as an ordinary modoption — Spring.GetModOptions()
+        // is the existing, faithful path server Lua already reads config
+        // through, so no new plumbing is needed beyond this one field.
+        std::string scenarioName = manifest.value("scenario", "");
+        if (!scenarioName.empty()) {
+            rooms.SetModOption(roomId, host.userId, "scenario", scenarioName);
+        }
+
         if (manifest.contains("aiSlots") && manifest["aiSlots"].is_array()) {
             uint8_t slotIndex = 0;
             for (const auto& aj : manifest["aiSlots"]) {
