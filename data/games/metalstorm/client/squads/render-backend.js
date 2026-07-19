@@ -37,9 +37,18 @@
  *   Optional: nudge an explosion onto a killed member for alignment.
  * @property {(x:number, z:number)=>number} groundHeight
  *   Terrain height sample (client heightmap) for member Y.
+ * @property {(x:number, y:number, z:number)=>boolean} [isOnScreen]
+ *   Optional: is this world position currently in the camera's on-screen
+ *   frustum? Drives the stuck-recovery teleport gate
+ *   (PLAN-metalstorm-squad-pathfinding.md §8) — never teleport a member the
+ *   player can see. Backends that omit this are treated as "never on
+ *   screen" (Squad._trackStuck), which is the safe default for a backend
+ *   that isn't actually rendering anything.
  */
 
-/** No-op backend for headless logic/tests. */
+/** No-op backend for headless logic/tests. Reports nothing as on-screen
+ *  (nothing is rendered), which makes the teleport-recovery path exercisable
+ *  in headless tests. */
 export class NullRenderBackend {
   createMember() { return -1; }
   updateMember() {}
@@ -48,4 +57,5 @@ export class NullRenderBackend {
   spawnWreck() {}
   spawnImpactFx() {}
   groundHeight() { return 0; }
+  isOnScreen() { return false; }
 }

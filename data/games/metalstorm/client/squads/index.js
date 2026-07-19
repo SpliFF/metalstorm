@@ -7,8 +7,13 @@
 // routed by isSquadDef(def) (squad_size > 1, squad-sync §4 H3) go through
 // this system at all — everything else (buildings, scale-4 super-heavies)
 // renders via entity-renderer.ts instead.
-//   import { createSquadSystem, isSquadDef } from '.../client/squads/index.js';
+//   import { createSquadSystem, isSquadDef, createPassability } from '.../client/squads/index.js';
 //   const squads = createSquadSystem(workerRenderBackend);
+//   // once a heightmap sampler is available (PLAN-metalstorm-squad-pathfinding.md
+//   // §2): squads.setPassability(createPassability(heightmapSampler, squads.cfg));
+//   // on building create/destroy:    squads.stampBuildingFootprint(...) /
+//   //                                 squads.clearBuildingFootprint(...);
+//   // on heightmap deform (0x09):    squads.invalidateTerrain(x0,z0,x1,z1);
 //   // on entity-create with a known def: squads.syncSquad(id, state, def);
 //   // on entity-create with an unknown def (H1 — def-before-state is NOT
 //   //   guaranteed): squads.syncSquad(id, state) [buffers], then once
@@ -31,6 +36,8 @@ export { Member } from './member.js';
 export { NullRenderBackend } from './render-backend.js';
 export { DEFAULT_CONFIG, linearCount, collapseCount, isSquadDef } from './config.js';
 export { buildSlots, slotToWorld } from './formation.js';
+export { createPassability } from './passability.js';
+export { MOVEMENT_PROFILES, profileFor } from './movement-profiles.js';
 
 /**
  * Create a squad system.

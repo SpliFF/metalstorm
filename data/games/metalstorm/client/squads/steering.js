@@ -42,3 +42,42 @@ export function clampLen(v, max) {
   if (m > max && m > 1e-6) { const s = max / m; v.x *= s; v.z *= s; }
   return v;
 }
+
+const TWO_PI = Math.PI * 2;
+
+/** Wrap an angle (radians) into (-PI, PI]. */
+export function wrapAngle(a) {
+  a = (a + Math.PI) % TWO_PI;
+  if (a < 0) a += TWO_PI;
+  return a - Math.PI;
+}
+
+/**
+ * Turn `currentHeading` toward `desiredHeading` by at most `maxRate` rad/s,
+ * over `dt` seconds (PLAN-metalstorm-squad-cohesion.md §6/§7 — aircraft and
+ * ships steer heading under a turn-rate cap rather than snapping velocity).
+ * Returns the new heading (radians, atan2(x,z) convention — +Z forward).
+ */
+export function capTurnRate(currentHeading, desiredHeading, maxRate, dt) {
+  const delta = wrapAngle(desiredHeading - currentHeading);
+  const maxDelta = maxRate * dt;
+  if (delta > maxDelta) return currentHeading + maxDelta;
+  if (delta < -maxDelta) return currentHeading - maxDelta;
+  return currentHeading + delta;
+}
+
+/**
+ * Soft-leash centripetal term (cohesion §1 layer 2): zero within `softRadius`
+ * of the centroid, ramping linearly beyond it. Composes additively with
+ * arrival/separation in `_desired`; the hard clamp in `Squad.update` remains
+ * the last-resort guarantee.
+ */
+export function softLeashPull(px, pz, cx, cz, softRadius, gain, out) {
+  const dx = cx - px, dz = cz - pz;
+  const dist = Math.hypot(dx, dz);
+  const over = dist - softRadius;
+  if (over <= 0 || dist < 1e-4) { out.x = 0; out.z = 0; return out; }
+  const s = (over * gain) / dist;
+  out.x = dx * s; out.z = dz * s;
+  return out;
+}

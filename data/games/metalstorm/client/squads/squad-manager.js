@@ -19,6 +19,36 @@ export class SquadManager {
     // Spatial hash for inter-squad/member separation (§7). Rebuilt each frame.
     this._cell = this.cfg.separationRadius * 1.5;
     this._grid = new Map();         // cellKey → Member[]
+
+    // Shared passability grid (PLAN-metalstorm-squad-pathfinding.md §2) — one
+    // per map, injected once the worker adapter has a heightmap sampler
+    // (Stage 7). Optional: squads steer fine without it (ground behaviour
+    // falls back to plain slot arrival, matching pre-pathfinding behaviour).
+    this.passability = null;
+  }
+
+  /** Install the shared passability grid once the map's heightmap sampler is
+   *  available (worker adapter, Stage 7 — see passability.js's createPassability). */
+  setPassability(passability) { this.passability = passability; }
+
+  // --- building footprints / heightmap deform (pathfinding §7) -----------
+
+  /** A building finished construction / was placed: stamp its footprint
+   *  impassable. No-op if no passability grid is installed yet. */
+  stampBuildingFootprint(cx, cz, footprintXElmos, footprintZElmos) {
+    this.passability?.stampBuildingFootprint(cx, cz, footprintXElmos, footprintZElmos);
+  }
+
+  /** A building was destroyed: clear its footprint stamp. */
+  clearBuildingFootprint(cx, cz, footprintXElmos, footprintZElmos) {
+    this.passability?.clearBuildingFootprint(cx, cz, footprintXElmos, footprintZElmos);
+  }
+
+  /** Heightmap deformation broadcast (envelope 0x09) touched a world-space
+   *  rect: invalidate the passability grid there (recompute is lazy, on the
+   *  next query that touches it). */
+  invalidateTerrain(x0, z0, x1, z1) {
+    this.passability?.invalidate(x0, z0, x1, z1);
   }
 
   // --- ingest from the worker adapter ------------------------------------
@@ -133,7 +163,7 @@ export class SquadManager {
     this._now += dt;
     this._rebuildGrid();
     const query = (m) => this._neighbours(m);
-    for (const sq of this.squads.values()) sq.update(dt, this._now, query);
+    for (const sq of this.squads.values()) sq.update(dt, this._now, query, this.passability);
   }
 
   // --- spatial hash (stub-grade; §7 "capped neighbour checks") ------------
