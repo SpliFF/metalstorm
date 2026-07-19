@@ -526,9 +526,11 @@ export class TestHarness {
         return await this.deps.workerCall('listClips', [unitId]) as string[] | null;
     }
 
-    /** Play one authored clip on the unit (loops by default; one playback
-     *  at a time). Returns the playback state. Throws when the clip is
-     *  unknown or the model hasn't loaded. */
+    /** Play one authored clip on the unit (loops by default). Playback is
+     *  per-unit, so this replaces only this unit's clip. Also pins the unit
+     *  to manual control — the movement-driven walk/idle policy leaves it
+     *  alone until stopClip. Throws when the clip is unknown or the model
+     *  hasn't loaded. */
     async playClip(
         unitId: number, clip: string,
         opts: { loop?: boolean; speed?: number } = {},
@@ -541,15 +543,17 @@ export class TestHarness {
         return r;
     }
 
-    /** Stop the current clip playback; the unit returns to rest pose /
-     *  server-streamed piece state. */
-    async stopClip(): Promise<void> {
-        await this.deps.workerCall('stopClip');
+    /** Stop clip playback and hand the unit back to the movement policy (so
+     *  a driving native resumes walking; a stationary one returns to rest
+     *  pose / server-streamed piece state). No unitId = every unit. */
+    async stopClip(unitId?: number): Promise<void> {
+        await this.deps.workerCall('stopClip', unitId === undefined ? [] : [unitId]);
     }
 
-    /** Current playback state, or null when nothing is playing. */
-    async clipState(): Promise<unknown> {
-        return this.deps.workerCall('clipState');
+    /** Playback state for a unit, or — with no unitId — for the most
+     *  recently started playback. null when nothing is playing. */
+    async clipState(unitId?: number): Promise<unknown> {
+        return this.deps.workerCall('clipState', unitId === undefined ? [] : [unitId]);
     }
 
     // ─── Render-loop pause + screenshots ────────────────────────────

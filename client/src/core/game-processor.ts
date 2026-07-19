@@ -95,6 +95,8 @@ import { RTSCamera } from './rts-camera.js';
 import { OrbitRig, type OrbitTarget } from './orbit-rig.js';
 import { SunRig } from './sun-rig.js';
 import { ClipPlayer } from './clip-player.js';
+import { ClipAutoPolicy, nominalSpeedFor } from './clip-auto-policy.js';
+import { TurretAimController } from './turret-aim-controller.js';
 import { WorkerSelection } from './worker-selection.js';
 import { WorkerBuildPlacement, UNITDEF_FLAG_IS_FACTORY } from './worker-build-placement.js';
 import { WorkerCommandModes } from './worker-command-modes.js';
@@ -333,10 +335,64 @@ let gpOrbitSavedView: { pos: Vector3; lookAt: Vector3 } | null = null;
 /// Ticked from the render loop; re-applies each frame while active so game
 /// Lua lighting re-applies can't clobber the test state.
 let gpSunRig: SunRig | null = null;
-/// PLAN-model-harness task 6: dev/test clip player (window.test.playClip).
-/// Samples one authored .glb clip per frame into EntityRenderer's per-piece
-/// clip-pose override; auto-stops when the target unit disappears.
+/// PLAN-model-harness task 6: the clip player (window.test.playClip) samples
+/// authored .glb clips per frame into EntityRenderer's per-piece clip-pose
+/// override; auto-stops when a target unit disappears.
 let gpClipPlayer: ClipPlayer | null = null;
+/// DESIGN-MODEL-BUILDING §16b: movement-driven walk/idle playback. Fed from
+/// the wire entity-state callback (NOT the render loop — it judges speed from
+/// raw streamed positions, never the camera-lerped render pose) and drives
+/// gpClipPlayer for every native whose model ships a `walk` clip. Harness
+/// playClip marks a unit manual so the F8 buttons still win.
+let gpClipPolicy: ClipAutoPolicy | null = null;
+/// DESIGN-MODEL-BUILDING §16c: cosmetic turret aim. Engaged off projectile
+/// Fired events (native models with a `turret` piece that the sim isn't
+/// already piece-driving) and ticked from the render loop for smooth slew.
+let gpAimController: TurretAimController | null = null;
+
+/// Both are created together on first use: each needs the EntityRenderer (as
+/// pose sink and as clip/def source), which doesn't exist until gpInit runs.
+function gpEnsureClipPlayer(r: EntityRenderer): ClipPlayer {
+    if (gpClipPlayer) return gpClipPlayer;
+    const player = new ClipPlayer(r);
+    gpClipPlayer = player;
+    gpAimController = new TurretAimController({
+        unitPose: (id) => {
+            const p = r.getEntityPose(id);
+            return p ? { x: p.x, y: p.y, z: p.z, heading: p.heading } : null;
+        },
+        // Live target pose while the client holds a position for it; the
+        // controller falls back to the Fired event's frozen targetPos.
+        targetPos: (id) => (id > 0 ? r.getEntityPosition(id) : null),
+        aimPieces: (id) => r.getAimPieces(id),
+        // The sim owns ZK/BAR (and future s4) turrets over 0x05 — decline them.
+        simDrivesPieces: (id) => r.hasPieceStream(id),
+        slewRateDegPerSec: (id) => {
+            const defId = r.getEntityDefId(id);
+            const cp = defId === undefined
+                ? undefined : gpDefCache?.getUnitDef(defId)?.customParams;
+            const v = Number(cp?.turret_slew_deg_per_sec);
+            return Number.isFinite(v) && v > 0 ? v : undefined;
+        },
+    }, r);
+    gpClipPolicy = new ClipAutoPolicy({
+        getClip: (id, name) => r.getClip(id, name),
+        // getClipNames returns null while the template is still loading and
+        // [] once it has resolved with no clips — exactly the distinction the
+        // policy needs to retire a unit for good rather than re-probe it.
+        clipsLoaded: (id) => r.getClipNames(id) !== null,
+        nominalSpeed: (id) => {
+            const defId = r.getEntityDefId(id);
+            return defId === undefined ? 0 : nominalSpeedFor(gpDefCache?.getUnitDef(defId));
+        },
+        // Focus point of the interactive view, for the nearest-first cap.
+        cameraXZ: () => {
+            const lookAt = gpViewCameras.get(0)?.saveView().lookAt;
+            return lookAt ? { x: lookAt.x, z: lookAt.z } : null;
+        },
+    }, player);
+    return player;
+}
 /// Long-frame profiler: the render loop stamps per-phase timings every frame
 /// into a permanent accumulator (`gpFrameProfiler`), which both (a) computes
 /// mean/p50/p95/p99 per phase over a rolling 30 s window on demand
@@ -787,6 +843,14 @@ function gpConnect(msg: GpInitToWorker): void {
             gpFirstStateReceived = true;
             gpCtx.entityRenderer?.update(snapshot, isDelta);
             gpBuildingPlateRenderer?.update(snapshot);
+            // §16b: drive walk/idle clips off the WIRE positions, at the wire
+            // cadence — after the renderer's update so newly-streamed units
+            // already have their defId + model resolved. Idles out to per-unit
+            // arithmetic in games whose models ship no clips (ZK, BAR, wz_*).
+            if (gpCtx.entityRenderer) {
+                gpEnsureClipPlayer(gpCtx.entityRenderer);
+                gpClipPolicy!.observe(snapshot, isDelta);
+            }
             // GW4-c6-1b: also merge into liveState.units + synth the
             // UnitCreated/UnitFinished callins so LuaUI widgets see the world.
             applyEntityStateToLiveState(snapshot, isDelta);
@@ -814,6 +878,12 @@ function gpConnect(msg: GpInitToWorker): void {
                 if (meta && meta.lastStateFrame > frame) return;
                 gpCtx.entityRenderer?.removeEntity(entityId);
                 gpBuildingPlateRenderer?.remove(entityId);
+                // §16b/§16c: drop clip + aim bookkeeping so the policy's motion
+                // entry and the aim controller's per-unit state don't leak (the
+                // players self-stop on unknown-unit, the tables would linger).
+                // After the recycling guard so a reused ID keeps the new unit's.
+                gpClipPolicy?.remove(entityId);
+                gpAimController?.remove(entityId);
                 gpCombatFX?.onCombatEvents([{
                     attackerId: 0, targetId: entityId, weaponDefId: 0,
                     result: 3, damage: 500, x, y, z,
@@ -835,6 +905,14 @@ function gpConnect(msg: GpInitToWorker): void {
         // 0x04 per-tick projectile-state envelope is gone — the renderer
         // integrates motion locally off these events.
         onProjectileFired: (events) => {
+            // §16c: engage cosmetic turret aim toward each shot's target.
+            // Runs even without a projectile renderer so aim is independent
+            // of projectile visuals.
+            if (gpCtx.entityRenderer && events.length) {
+                gpEnsureClipPlayer(gpCtx.entityRenderer);
+                const now = performance.now();
+                for (const e of events) gpAimController?.onFired(e, now);
+            }
             if (!gpCtx.projectileRenderer) return;
             for (const e of events) gpCtx.projectileRenderer.onFired(e);
         },
@@ -1508,6 +1586,7 @@ export function gpInit(msg: GpInitToWorker): void {
         gpOrbitRig?.tick();
         gpSunRig?.tick(dt);
         gpClipPlayer?.tick();
+        gpAimController?.tick(performance.now());
         gpMark(0);  // camera
 
         // entityRenderer.tick() advances the presentation clock (L0) and
@@ -2296,6 +2375,8 @@ export function gpShutdown(): void {
     gpOrbitSavedView = null;
     gpSunRig = null;
     gpClipPlayer = null;
+    gpClipPolicy = null;
+    gpAimController = null;
     gpTerrainFog?.dispose();
     gpTerrainFog = null;
     gpTerrainMesh = null;
@@ -2544,14 +2625,24 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
                             : known.length ? `has: ${known.join(', ')}` : 'model has no clips'),
                 };
             }
-            if (!gpClipPlayer) gpClipPlayer = new ClipPlayer(r);
-            return gpClipPlayer.play(unitId, resolved.clip, resolved.restLocals, obj(2, {}));
+            const player = gpEnsureClipPlayer(r);
+            // The harness owns this unit until stopClip — the movement policy
+            // must not fight the F8 buttons on a unit that is also driving.
+            gpClipPolicy?.markManual(unitId);
+            return player.play(unitId, resolved.clip, resolved.restLocals, obj(2, {}));
         }
-        case 'stopClip':
-            gpClipPlayer?.stop();
+        // No unitId → release every unit back to the movement policy (the
+        // long-standing no-arg semantics the model-viewer scenarios rely on).
+        case 'stopClip': {
+            const unitId = args[0] === undefined ? undefined : num(0);
+            gpClipPolicy?.clearManual(unitId);
+            gpClipPlayer?.stop(unitId);
             return null;
+        }
         case 'clipState':
-            return gpClipPlayer?.state() ?? null;
+            return (args[0] === undefined
+                ? gpClipPlayer?.state()
+                : gpClipPlayer?.state(num(0))) ?? null;
         // — screenshot: OffscreenCanvas → PNG data URL (no FileReader in workers) —
         case 'screenshot': {
             const canvas = gpEngine?.getRenderingCanvas() as OffscreenCanvas | null;

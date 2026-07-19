@@ -1,11 +1,15 @@
 /**
  * ClipPlayer — the generic clip-player wrapper (PLAN-model-harness §2 last
- * row / §10 task 6): plays an authored .glb animation clip on one unit by
- * sampling the clip's Babylon `Animation` channels every render frame and
+ * row / §10 task 6): plays authored .glb animation clips on units by
+ * sampling each clip's Babylon `Animation` channels every render frame and
  * pushing parent-relative local matrices into EntityRenderer's per-piece
  * clip-pose override — the same per-piece pose path the server's
  * piece-state stream (`applyPieceState`) drives, so playback composes with
  * thin-instance rendering for free.
+ *
+ * Playback is per-unit and concurrent (DESIGN-MODEL-BUILDING.md §16b): the
+ * dev harness drives one staged unit while `clip-auto-policy.ts` walks
+ * every visible native off the entity-state stream.
  *
  * This is the STABLE WRAPPER over "the client animator". Today the backend
  * is direct channel sampling on the render loop; PLAN-fx-offload replaces
@@ -175,35 +179,51 @@ export interface ClipPlayerState {
     playing: boolean;
 }
 
-/** One playback at a time — the harness stages a single unit. */
+interface Playback {
+    unitId: number;
+    clip: ModelClip;
+    restLocals: readonly Matrix[];
+    loop: boolean;
+    speed: number;
+    startMs: number;
+    lastFrame: number;
+    done: boolean;
+}
+
+/**
+ * Concurrent per-unit clip playback (§16b task 1).
+ *
+ * One entry per unit: the harness drives a single staged unit, while the
+ * movement-driven auto policy (`clip-auto-policy.ts`) walks every visible
+ * native at once. `play()` replaces only *that* unit's entry, so the two
+ * coexist — arbitration between them is the policy's job (manual override),
+ * not the player's.
+ */
 export class ClipPlayer {
     private sink: ClipPoseSink;
     private now: () => number;
-    private active: {
-        unitId: number;
-        clip: ModelClip;
-        restLocals: readonly Matrix[];
-        loop: boolean;
-        speed: number;
-        startMs: number;
-        lastFrame: number;
-        done: boolean;
-    } | null = null;
+    /** Insertion-ordered, and `play` re-inserts — so the last entry is
+     *  always the most recently started playback (what no-arg `state()`
+     *  reports, preserving the old single-slot debug semantics). */
+    private active = new Map<number, Playback>();
 
     constructor(sink: ClipPoseSink, now: () => number = () => performance.now()) {
         this.sink = sink;
         this.now = now;
     }
 
-    /** Start (replacing any current playback) and apply the first pose. */
+    /** Start (replacing this unit's current playback) and apply the first
+     *  pose. Other units' playbacks are untouched. */
     play(
         unitId: number,
         clip: ModelClip,
         restLocals: readonly Matrix[],
         opts: ClipPlayOpts = {},
     ): ClipPlayerState | null {
-        this.stop();
-        this.active = {
+        // Delete rather than overwrite so the re-insert moves this unit to
+        // the end of the iteration order (see `active`).
+        this.active.delete(unitId);
+        this.active.set(unitId, {
             unitId,
             clip,
             restLocals,
@@ -212,36 +232,70 @@ export class ClipPlayer {
             startMs: this.now(),
             lastFrame: clip.from,
             done: false,
-        };
-        this.tick();
-        return this.state();
+        });
+        this.tickUnit(unitId);
+        return this.state(unitId);
     }
 
-    /** Clear the pose override; the unit returns to rest / server pose. */
-    stop(): void {
-        if (this.active) this.sink.setClipPose(this.active.unitId, null);
-        this.active = null;
+    /** Clear the pose override; the unit returns to rest / server pose.
+     *  No argument clears every playback (the harness `stopClip` verb). */
+    stop(unitId?: number): void {
+        if (unitId === undefined) {
+            for (const id of this.active.keys()) this.sink.setClipPose(id, null);
+            this.active.clear();
+            return;
+        }
+        if (this.active.delete(unitId)) this.sink.setClipPose(unitId, null);
     }
 
-    /** Render-loop hook. Auto-stops when the target unit disappears
+    /**
+     * Re-scale playback without restarting the cycle. The auto policy
+     * re-scales to unit speed on every wire snapshot (~10 Hz), so the start
+     * stamp is rebased to hold the CURRENT frame — plain `play()` would
+     * snap the cycle back to frame 0 several times a second.
+     */
+    setSpeed(unitId: number, speed: number): void {
+        const a = this.active.get(unitId);
+        if (!a) return;
+        const s = speed > 0 ? speed : 1;
+        if (s === a.speed) return;
+        const now = this.now();
+        const { frame } = clipFrameAt(a.clip, (now - a.startMs) / 1000, a.speed, a.loop);
+        a.startMs = now - ((frame - a.clip.from) / (s * a.clip.fps)) * 1000;
+        a.speed = s;
+    }
+
+    /** Render-loop hook. Auto-stops playbacks whose unit disappeared
      *  (death, respawn, LOS eviction); holds the final frame of a
      *  finished non-looping clip. */
     tick(): void {
-        const a = this.active;
+        // Safe to delete the current key mid-iteration (tickUnit auto-stops).
+        for (const id of this.active.keys()) this.tickUnit(id);
+    }
+
+    private tickUnit(unitId: number): void {
+        const a = this.active.get(unitId);
         if (!a || a.done) return;
         const { frame, done } = clipFrameAt(
             a.clip, (this.now() - a.startMs) / 1000, a.speed, a.loop);
         a.lastFrame = frame;
         const pose = sampleClipPose(a.clip, a.restLocals, frame);
         if (!this.sink.setClipPose(a.unitId, pose)) {
-            this.active = null;
+            this.active.delete(unitId);
             return;
         }
         a.done = done;
     }
 
-    state(): ClipPlayerState | null {
-        const a = this.active;
+    /** State of one unit's playback, or — with no argument — of the most
+     *  recently started playback (null when nothing is playing). */
+    state(unitId?: number): ClipPlayerState | null {
+        let a: Playback | undefined;
+        if (unitId === undefined) {
+            for (const v of this.active.values()) a = v;
+        } else {
+            a = this.active.get(unitId);
+        }
         if (!a) return null;
         return {
             unitId: a.unitId,
@@ -251,5 +305,21 @@ export class ClipPlayer {
             frame: a.lastFrame,
             playing: !a.done,
         };
+    }
+
+    /** Every active playback (debug / perf-cap accounting). */
+    states(): ClipPlayerState[] {
+        return [...this.active.keys()].map((id) => this.state(id)!);
+    }
+
+    /** Number of active playbacks — the policy's concurrency accounting. */
+    get count(): number {
+        return this.active.size;
+    }
+
+    /** Which clip a unit is currently playing (null = none). Lets the
+     *  policy avoid restarting a clip that is already running. */
+    playingClip(unitId: number): string | null {
+        return this.active.get(unitId)?.clip.name ?? null;
     }
 }
