@@ -133,6 +133,18 @@ export function createRegionIndex(geometryJson) {
       return contestedFlags.get(key) ?? false;
     },
 
+    /** Every region key the provider knows (grid cells, or authored keys + 'wilds'). */
+    keys() {
+      if (provider === 'grid') {
+        const out = [];
+        for (let ix = 0; ix < gridW; ix++) {
+          for (let iz = 0; iz < gridH; iz++) out.push(`${ix}:${iz}`);
+        }
+        return out;
+      }
+      return ['wilds', ...byKey.keys()];
+    },
+
     value(key) {
       return byKey.get(key)?.value ?? 0;
     },
@@ -166,14 +178,15 @@ export function createRegionIndex(geometryJson) {
 
     /**
      * Ingest a rulesParams batch: `region_<key>_team`, `region_<key>_contested`,
-     * `regions_rev`. regions_rev-guarded (§5) — a batch whose rev matches the
-     * last-applied one is a no-op, so the overlay only rebuilds on change.
-     * Returns true if anything actually changed.
+     * `regions_rev`. regions_rev-guarded (§5) — a batch whose rev is not newer
+     * than the last-applied one (rev <= regionsRev) is a no-op, so the overlay
+     * only rebuilds on change and a stale/reordered batch can never move the rev
+     * backwards. Returns true if anything actually changed.
      */
     applyParams(params) {
       if (!params) return false;
       const rev = params.regions_rev;
-      if (rev !== undefined && rev === regionsRev) return false;
+      if (rev !== undefined && rev <= regionsRev) return false;
 
       let changed = false;
       for (const k of Object.keys(params)) {

@@ -135,45 +135,78 @@ end
 -- ============================================================
 
 --- Validate a map-authored region graph. Returns `true, nil` on success or
---- `false, errors` (a list of strings) on failure. Checks: vertices within
---- map bounds, non-self-intersecting polygons, unique keys, symmetric
---- neighbor references. Full coverage is NOT required (gaps become "wilds").
+--- `false, errors` (a list of strings) on failure. Checks: non-empty list,
+--- well-formed entries, vertices within map bounds, non-self-intersecting
+--- polygons, unique keys, `"wilds"` reserved, symmetric neighbor references.
+--- Full coverage is NOT required (gaps become "wilds").
+---
+--- Defensive by contract (E2): malformed authored data — a non-table entry,
+--- a missing/empty key, a bad vertex — must yield a loud error string and let
+--- the caller fall back to grid, NEVER a raw Lua error that would take the
+--- gadget down. Empty list = INVALID → grid (mirrors C++ ExtractRegions
+--- `haveGraph = !empty`); an empty graph is not "everything is wilds".
 function M.validateGraph(regionsData, mapWidth, mapHeight)
+    if type(regionsData) ~= "table" then
+        return false, { "regions is not a list" }
+    end
+    if #regionsData == 0 then
+        return false, { "empty region list" }
+    end
+
     local errors = {}
     local seenKeys = {}
     local byKey = {}
-    for _, r in ipairs(regionsData) do byKey[r.key] = r end
-
+    -- Key index, built defensively — a malformed entry must not raise here.
     for _, r in ipairs(regionsData) do
-        if not r.key or r.key == "" then
-            errors[#errors + 1] = "region with empty/missing key"
-        elseif seenKeys[r.key] then
-            errors[#errors + 1] = "duplicate key: " .. r.key
+        if type(r) == "table" and type(r.key) == "string" and r.key ~= "" then
+            byKey[r.key] = r
         end
-        seenKeys[r.key] = true
+    end
 
-        local poly = r.polygon or {}
-        for _, pt in ipairs(poly) do
-            if pt.x < 0 or pt.x > mapWidth or pt.z < 0 or pt.z > mapHeight then
-                errors[#errors + 1] = (r.key or "?") .. ": vertex out of map bounds"
-                break
+    for i, r in ipairs(regionsData) do
+        if type(r) ~= "table" then
+            errors[#errors + 1] = "region #" .. i .. " is not a table"
+        else
+            local key = r.key
+            local label = (type(key) == "string" and key ~= "") and key or ("#" .. i)
+            if type(key) ~= "string" or key == "" then
+                errors[#errors + 1] = "region #" .. i .. " with empty/missing key"
+            elseif key == "wilds" then
+                errors[#errors + 1] = "region uses reserved key 'wilds'"
+            elseif seenKeys[key] then
+                errors[#errors + 1] = "duplicate key: " .. key
             end
-        end
-        if M.isSelfIntersecting(poly) then
-            errors[#errors + 1] = (r.key or "?") .. ": self-intersecting polygon"
-        end
+            if type(key) == "string" then seenKeys[key] = true end
 
-        for _, nb in ipairs(r.neighbors or {}) do
-            local other = byKey[nb]
-            if not other then
-                errors[#errors + 1] = r.key .. ": neighbor '" .. nb .. "' does not exist"
-            else
-                local found = false
-                for _, back in ipairs(other.neighbors or {}) do
-                    if back == r.key then found = true break end
+            local poly = r.polygon
+            if type(poly) ~= "table" then poly = {} end
+            local vertsOk = true
+            for _, pt in ipairs(poly) do
+                if type(pt) ~= "table" or type(pt.x) ~= "number" or type(pt.z) ~= "number" then
+                    errors[#errors + 1] = label .. ": malformed vertex"
+                    vertsOk = false
+                    break
+                elseif pt.x < 0 or pt.x > mapWidth or pt.z < 0 or pt.z > mapHeight then
+                    errors[#errors + 1] = label .. ": vertex out of map bounds"
+                    break
                 end
-                if not found then
-                    errors[#errors + 1] = r.key .. ": asymmetric neighbor '" .. nb .. "'"
+            end
+            if vertsOk and M.isSelfIntersecting(poly) then
+                errors[#errors + 1] = label .. ": self-intersecting polygon"
+            end
+
+            for _, nb in ipairs(r.neighbors or {}) do
+                local other = byKey[nb]
+                if not other then
+                    errors[#errors + 1] = label .. ": neighbor '" .. tostring(nb) .. "' does not exist"
+                else
+                    local found = false
+                    for _, back in ipairs(other.neighbors or {}) do
+                        if back == key then found = true break end
+                    end
+                    if not found then
+                        errors[#errors + 1] = label .. ": asymmetric neighbor '" .. tostring(nb) .. "'"
+                    end
                 end
             end
         end

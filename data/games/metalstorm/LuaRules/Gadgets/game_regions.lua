@@ -33,15 +33,11 @@ end
 local Partition = VFS.Include("LuaRules/Gadgets/regions/partition.lua")
 local Control   = VFS.Include("LuaRules/Gadgets/regions/control.lua")
 local Ownership = VFS.Include("LuaRules/Gadgets/regions/ownership.lua")
+local Cost      = VFS.Include("LuaRules/Gadgets/regions/cost.lua")
 
 GG.Regions = GG.Regions or {}
 
 local EVAL_PERIOD = 150            -- frames (5 s)
-
--- Cost modifiers (PLAN-metalstorm.md §4): friendly cheap, enemy expensive.
-local MOD_FRIENDLY = 0.5
-local MOD_NEUTRAL  = 1.0
-local MOD_ENEMY    = 2.0
 
 local provider              -- partition provider in use (grid or graph)
 local providerKind          -- "grid" | "graph" — mirrors client's regions.json provider field
@@ -73,16 +69,26 @@ local function setupPartition()
     local mapWidth, mapHeight = Game.mapSizeX, Game.mapSizeZ
     local graphRegions = loadMapRegions()
 
-    if graphRegions then
-        local graphProvider, errors = Partition.newGraphProvider(graphRegions, mapWidth, mapHeight)
-        if graphProvider then
+    -- Empty list = INVALID → grid (align to C++ ExtractRegions `haveGraph =
+    -- !empty`; an empty graph is not "everything is wilds").
+    if graphRegions and #graphRegions > 0 then
+        -- pcall the whole provider build (not just VFS.Include): even with the
+        -- defensive validateGraph, pathological authored data must fall back to
+        -- grid rather than remove this gadget (and, downstream, game_authority)
+        -- under SAFEWRAP — the E2 contract.
+        local ok, graphProvider, errors = pcall(Partition.newGraphProvider, graphRegions, mapWidth, mapHeight)
+        if ok and graphProvider then
             Spring.Echo(string.format("[RegionControl] loaded map graph (%d regions)", #graphRegions))
             provider, providerKind = graphProvider, "graph"
             return
         end
         Spring.Echo("[RegionControl] mapdata/regions.lua failed validation, falling back to grid:")
-        for _, e in ipairs(errors or {}) do
-            Spring.Echo("[RegionControl]   " .. e)
+        if not ok then
+            Spring.Echo("[RegionControl]   error building graph: " .. tostring(graphProvider))
+        else
+            for _, e in ipairs(errors or {}) do
+                Spring.Echo("[RegionControl]   " .. e)
+            end
         end
     end
 
@@ -92,14 +98,41 @@ end
 -- ============================================================
 -- GG.Regions API (§4 — the consumer contract)
 -- ============================================================
+--
+-- Change notification is POLL, not callback (ratified 2026-07-19): there is no
+-- listener registry. Consumers re-read ControllingTeam/GetContested/OwnerAt as
+-- needed; the `regions_rev` rulesParam (bumped on any owner/contested change,
+-- see publish() below) is the cheap "did anything change since I last looked?"
+-- signal for consumers that want to skip redundant work.
 
 local function regionMeta(key)
     return provider.byKey and provider.byKey[key]
 end
 
+--- Shallow copy of an array — GG.Regions accessors that expose authored
+--- metadata (Tags/Neighbors) hand back copies so a consumer mutating the
+--- result can't corrupt the shared region graph.
+local function copyList(t)
+    local out = {}
+    for i = 1, #t do out[i] = t[i] end
+    return out
+end
+
 function GG.Regions.ControllingTeam(key)
     local rs = ownershipState[key]
     return rs and rs.owner or nil
+end
+
+--- Region key at a world position (position→key). The public entry point for
+--- "which region is this unit in" — Value/Tags/Neighbors are keyed off it.
+function GG.Regions.KeyAt(x, z)
+    return provider.at(x, z)
+end
+
+--- Enumerate every region key the active provider knows (incl. the synthetic
+--- "wilds" for the graph provider). Returns a fresh list — safe to mutate.
+function GG.Regions.Keys()
+    return provider.keys and copyList(provider.keys()) or {}
 end
 
 function GG.Regions.OwnerAt(x, z)
@@ -121,24 +154,25 @@ end
 
 function GG.Regions.Tags(key)
     local meta = regionMeta(key)
-    return (meta and meta.tags) or {}
+    return (meta and meta.tags) and copyList(meta.tags) or {}
 end
 
 function GG.Regions.Neighbors(key)
     local meta = regionMeta(key)
-    return (meta and meta.neighbors) or {}
+    return (meta and meta.neighbors) and copyList(meta.neighbors) or {}
 end
 
---- Order-cost modifier for the region a unit stands in.
+--- Order-cost modifier for the region a unit stands in (§4). Alliance-aware:
+--- friendly territory (owner allied to the unit's team) is cheap — the
+--- decision itself lives in the pure regions/cost.lua so it's busted-testable.
 function GG.Regions.CostModifierAt(unitID)
     local x, _, z = Spring.GetUnitPosition(unitID)
-    if not x then return MOD_NEUTRAL end
+    if not x then return Cost.MOD_NEUTRAL end
     local team = GG.Regions.OwnerAt(x, z)
-    if team == nil then return MOD_NEUTRAL end
+    if team == nil then return Cost.MOD_NEUTRAL end
     local unitTeam = Spring.GetUnitTeam(unitID)
-    if not unitTeam then return MOD_NEUTRAL end
-    if Spring.AreTeamsAllied(team, unitTeam) then return MOD_FRIENDLY end
-    return MOD_ENEMY
+    if not unitTeam then return Cost.MOD_NEUTRAL end
+    return Cost.orderModifier(team, Spring.AreTeamsAllied(team, unitTeam))
 end
 
 -- ============================================================
@@ -177,7 +211,12 @@ local function publish(changedKeys)
     Spring.SetGameRulesParam('regions_rev', regionsRev)
 end
 
-function gadget:GameStart()
+-- Set up the partition in Initialize, not GameStart: this closes the window
+-- where GG.Regions.* closures are registered but `provider` is still nil (a
+-- pre-GameStart caller would otherwise index nil), and covers a mid-game
+-- gadget reload — Initialize runs on both cold start and reload, GameStart
+-- only on cold start.
+function gadget:Initialize()
     gaiaTeam = Spring.GetGaiaTeamID()
     setupPartition()
 end

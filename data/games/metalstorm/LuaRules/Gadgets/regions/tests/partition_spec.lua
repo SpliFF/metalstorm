@@ -102,6 +102,73 @@ describe("graph validator", function()
         local ok = Partition.validateGraph(regions, 1000, 1000)
         assert.is_false(ok)
     end)
+
+    it("rejects an empty region list (empty = grid, not everything-wilds)", function()
+        local ok, errors = Partition.validateGraph({}, 1000, 1000)
+        assert.is_false(ok)
+        assert.is_truthy(errors)
+    end)
+
+    it("rejects the reserved 'wilds' key", function()
+        local regions = {
+            { key = 'wilds', polygon = square(0, 0, 100, 100), neighbors = {} },
+        }
+        local ok, errors = Partition.validateGraph(regions, 1000, 1000)
+        assert.is_false(ok)
+        assert.is_truthy(errors)
+    end)
+
+    -- E2: malformed authored data must produce a loud error + grid fallback,
+    -- NEVER a raw Lua error that would take the gadget (and downstream
+    -- game_authority) down.
+    it("returns errors instead of raising on a non-table region entry", function()
+        local ok, errors
+        assert.has_no.errors(function()
+            ok, errors = Partition.validateGraph({ 42 }, 1000, 1000)
+        end)
+        assert.is_false(ok)
+        assert.is_truthy(errors)
+    end)
+
+    it("returns errors instead of raising on a region with a missing key", function()
+        local ok, errors
+        assert.has_no.errors(function()
+            ok, errors = Partition.validateGraph({ { name = 'x', polygon = square(0, 0, 100, 100) } }, 1000, 1000)
+        end)
+        assert.is_false(ok)
+        assert.is_truthy(errors)
+    end)
+
+    it("returns errors instead of raising on a malformed vertex", function()
+        local ok, errors
+        assert.has_no.errors(function()
+            ok, errors = Partition.validateGraph(
+                { { key = 'a', polygon = { {x=0,z=0}, {x='bad'}, {x=100,z=100} }, neighbors = {} } },
+                1000, 1000)
+        end)
+        assert.is_false(ok)
+        assert.is_truthy(errors)
+    end)
+end)
+
+describe("graph provider — malformed input (E2 grid fallback)", function()
+    it("newGraphProvider returns nil + errors (never raises) on an empty list", function()
+        local provider, errors
+        assert.has_no.errors(function()
+            provider, errors = Partition.newGraphProvider({}, 1000, 1000)
+        end)
+        assert.is_nil(provider)
+        assert.is_truthy(errors)
+    end)
+
+    it("newGraphProvider returns nil + errors (never raises) on a non-table entry", function()
+        local provider, errors
+        assert.has_no.errors(function()
+            provider, errors = Partition.newGraphProvider({ 42 }, 1000, 1000)
+        end)
+        assert.is_nil(provider)
+        assert.is_truthy(errors)
+    end)
 end)
 
 describe("graph provider (point lookup)", function()

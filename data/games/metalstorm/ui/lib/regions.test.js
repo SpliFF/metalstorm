@@ -86,6 +86,31 @@ describe('ownership mirror (applyParams)', () => {
     expect(changed).toBe(false);
     expect(idx.owner('0:0')).toBe(3); // unchanged — stale batch ignored
   });
+
+  it('rejects an OLDER rev (rev <= regionsRev) — never moves the rev backwards', () => {
+    const idx = createRegionIndex(json);
+    idx.applyParams({ 'region_0:0_team': 3, regions_rev: 5 });
+    const changed = idx.applyParams({ 'region_0:0_team': 99, regions_rev: 2 });
+    expect(changed).toBe(false);
+    expect(idx.owner('0:0')).toBe(3);   // stale, out-of-order batch ignored
+    expect(idx.regionsRev).toBe(5);     // rev did not regress
+  });
+});
+
+describe('region enumeration (keys)', () => {
+  it('enumerates grid cells', () => {
+    const idx = createRegionIndex({ provider: 'grid', mapWidth: 4096, mapHeight: 4096, regionSize: 2048, gridW: 2, gridH: 2 });
+    expect(new Set(idx.keys())).toEqual(new Set(['0:0', '1:0', '0:1', '1:1']));
+  });
+
+  it('enumerates authored keys plus the synthetic wilds', () => {
+    const regions = [
+      { key: 'north', polygon: square(0, 0, 1000, 1000), neighbors: [] },
+      { key: 'south', polygon: square(0, 2000, 1000, 3000), neighbors: [] },
+    ];
+    const idx = createRegionIndex({ provider: 'graph', mapWidth: 4096, mapHeight: 4096, regions });
+    expect(new Set(idx.keys())).toEqual(new Set(['wilds', 'north', 'south']));
+  });
 });
 
 describe('order-cost prediction (costModifierAt, authority §4)', () => {

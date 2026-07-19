@@ -21,6 +21,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <system_error>
 #include <unordered_map>
 
 // Absolute path to the textureconverter binary, injected at build time
@@ -771,6 +772,16 @@ bool MapProcessor::ExtractFeatures(MapMetadata& meta) {
 // validation — E2, loud log + fallback). Written as a static sibling of
 // heightmap.bin etc.; the client mirror (ui/lib/regions.js) fetches it once
 // and builds the same lookup grid the sim uses internally.
+//
+// COORDINATE-FRAME CAVEAT (legacy maps): ExtractRegions runs BEFORE the
+// legacyCoordSystem Z-reflection in ProcessMap (which flips only start
+// positions and features, LH→RH), and region polygons are NOT reflected. On a
+// map with `legacyCoordSystem = true`, mapdata/regions.lua polygon vertices
+// must therefore be authored in the engine's RH frame (visual north = low Z),
+// even though sibling legacy files (mapinfo.lua, featureplacer/*) are LH. The
+// sim reads the same regions.lua directly, so both sides agree — but a legacy
+// author porting a map must hand-convert region Z. (Matters for the Meridian
+// Basin generator; native RH maps are unaffected.)
 void MapProcessor::ExtractRegions(const MapMetadata& meta) {
     const float mapWidth = static_cast<float>(meta.widthElmos);
     const float mapHeight = static_cast<float>(meta.heightElmos);
@@ -875,6 +886,10 @@ void MapProcessor::ExtractRegions(const MapMetadata& meta) {
         for (const auto& r : regions) {
             if (r.key.empty()) {
                 errors.push_back("region with empty/missing key");
+            } else if (r.key == "wilds") {
+                // "wilds" is the synthetic catch-all region; an authored region
+                // may not claim it (mirrors regions/partition.lua validateGraph).
+                errors.push_back("region uses reserved key 'wilds'");
             } else if (seen[r.key]++ > 0) {
                 errors.push_back("duplicate key: " + r.key);
             }
@@ -1020,6 +1035,25 @@ void MapProcessor::EnumerateWidgets(MapMetadata& meta) {
         meta.id.c_str(), meta.widgets.size());
 }
 
+// True when the regions.json export is up to date with its mapdata/regions.lua
+// source. The general freshness gate (formatVersion + heightmap.bin) does not
+// notice an edit to regions.lua — the sim reads regions.lua live each game
+// start, so a stale export would silently desync client geometry from the sim.
+// If the map has no regions.lua there is nothing to stale; if it has one but no
+// export (or the source is newer than the export), reprocess.
+static bool RegionsExportFresh(const std::string& sourcePath, const std::string& processedDir) {
+    const fs::path src = fs::path(sourcePath) / "mapdata" / "regions.lua";
+    if (!fs::exists(src)) return true;
+    const fs::path out = fs::path(processedDir) / "regions.json";
+    if (!fs::exists(out)) return false;
+    std::error_code ec;
+    const auto srcTime = fs::last_write_time(src, ec);
+    if (ec) return true;   // can't stat source → don't force a reprocess loop
+    const auto outTime = fs::last_write_time(out, ec);
+    if (ec) return true;
+    return outTime >= srcTime;
+}
+
 void MapProcessor::ScanAndProcess(const std::string& mapsDir, const std::string& dataDir, sqlite3* db) {
     EnsureTable(db);
     if (!fs::is_directory(mapsDir)) {
@@ -1034,10 +1068,14 @@ void MapProcessor::ScanAndProcess(const std::string& mapsDir, const std::string&
         MapMetadata existing = GetMap(db, mapId);
         std::string processedDir = dataDir + "/maps/" + mapId;
         bool filesExist = fs::exists(processedDir + "/heightmap.bin");
+        bool regionsFresh = RegionsExportFresh(mapDir.path().string(), processedDir);
 
-        if (existing.formatVersion >= MAP_FORMAT_VERSION && filesExist) {
+        if (existing.formatVersion >= MAP_FORMAT_VERSION && filesExist && regionsFresh) {
             SLOG(SPRING_LOG_DEBUG, "%s: up to date (v%d)", mapId.c_str(), existing.formatVersion);
             continue;
+        }
+        if (existing.formatVersion >= MAP_FORMAT_VERSION && filesExist && !regionsFresh) {
+            SLOG(SPRING_LOG_INFO, "%s: mapdata/regions.lua changed — reprocessing", mapId.c_str());
         }
 
         MapMetadata meta;
