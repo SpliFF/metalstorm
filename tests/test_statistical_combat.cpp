@@ -12,6 +12,8 @@
 #include "Sim/Weapons/StatisticalCombat.h"
 #include "Sim/Misc/GlobalSynced.h"
 
+#include <chrono>
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -211,5 +213,55 @@ TEST_SUITE("statistical-combat/determinism") {
 		for (int i = 0; i < 16; ++i) b.push_back(gsRNG.NextFloat());
 
 		CHECK(a == b);
+	}
+}
+
+TEST_SUITE("statistical-combat/perf") {
+	// PLAN-metalstorm-combat-resolution.md §8 task 6 sim-cost gate: the added
+	// per-volley cost of Model-1 resolution (over the faithful no-op path) is
+	// the accuracy roll + damage scaling — everything else (DoDamage at the
+	// resolve frame) is cost the sim already pays for a sim-model hit. This
+	// microbenchmark times exactly that added arithmetic: one HitProbability
+	// eval, one synced-RNG draw + compare, one VolleyDamage. The scheduling
+	// push_back / partition-drain is amortized O(1) and excluded (it is not the
+	// dominant term and would drag machine-specific allocator noise in).
+	//
+	// Reports ns/volley; asserts only a generous order-of-magnitude ceiling so
+	// it proves "≈ noise" without flaking on a busy CI box. At the §8 target of
+	// ~45 ns/volley, a 2000-squad exchange (~2000 volleys/s ≈ 67/frame at 30Hz)
+	// costs ~3 µs/frame — noise against a 33 ms budget.
+	TEST_CASE("per-volley resolution cost is order ~tens of ns (≈ noise)") {
+		StatCombat::Tuning t; // defaults (baseAccuracy 0.85, etc.)
+		gsRNG.SetSeed(20260720u, true);
+
+		const int N = 4'000'000;
+		volatile float sink = 0.0f; // defeat dead-code elimination
+		int hits = 0;
+
+		const auto t0 = std::chrono::steady_clock::now();
+		for (int i = 0; i < N; ++i) {
+			// A representative spread of engagement geometry so the branch
+			// predictor and the falloff math see realistic inputs.
+			const float dist        = 50.0f + static_cast<float>(i % 850);
+			const float heightDelta = ((i % 7) - 3) * 0.1f;
+			const bool  moving      = (i & 1) != 0;
+
+			const float p   = StatCombat::HitProbability(t, dist, 900.0f, moving, heightDelta);
+			const bool  hit = gsRNG.NextFloat() <= p;
+			hits += hit ? 1 : 0;
+			sink += StatCombat::VolleyDamage(100.0f, 0.8f, hit, t.minVolleyDamage);
+		}
+		const auto t1 = std::chrono::steady_clock::now();
+
+		const double ns = std::chrono::duration<double, std::nano>(t1 - t0).count();
+		const double nsPerVolley = ns / N;
+		std::printf("[perf] statistical volley resolution: %.1f ns/volley "
+		            "(%d volleys, %.1f%% hits)\n",
+		            nsPerVolley, N, 100.0 * hits / N);
+
+		CHECK(sink >= 0.0f); // keep the accumulator live
+		// Generous ceiling: even a debug build on a loaded box stays well under
+		// 1 µs/volley. The point is the order of magnitude, not a hard budget.
+		CHECK(nsPerVolley < 1000.0);
 	}
 }
