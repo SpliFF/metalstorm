@@ -1,0 +1,54 @@
+name: Headless — determinism pair-run
+#
+# PLAN-headless.md task 4: the CI regression that finally tests the "synced"
+# claim. Builds spring-server, then runs the PaperTanks-scale fixture
+# (tools/headless-batch/fixtures/papertanks-determinism.json — a 5-game-minute
+# uncapped run) twice back to back and diffs the two stats dumps' stateHash
+# sequences frame-for-frame (tools/headless-batch/determinism-pair-run.mjs).
+# Any divergence between two runs of identical config+seed is a genuine
+# synced-state regression, not flake.
+#
+# Runs on macos-14, same platform note as security-prod-gate.yml: this repo's
+# QUIC stack (ngtcp2/nghttp3) is wired to Homebrew pkg-config paths only, so
+# a stock ubuntu-latest runner can't configure the C++ build.
+
+on:
+  pull_request:
+    paths:
+      - 'rts/**'
+      - 'CMakeLists.txt'
+      - 'tools/headless-batch/**'
+      - 'data/games/papertanks/**'
+      - 'data/maps/green_flat_x34_v3/**'
+      - '.github/workflows/headless-determinism.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'rts/**'
+      - 'CMakeLists.txt'
+      - 'tools/headless-batch/**'
+  workflow_dispatch:
+
+jobs:
+  determinism:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          brew install cmake ninja ngtcp2 nghttp3 openssl@3
+
+      - name: Matrix-expansion unit test (pure, no build needed)
+        run: node tools/headless-batch/test/matrix.test.mjs
+
+      - name: Configure + build spring-server
+        run: |
+          cmake --preset debug -DSPRING_SKIP_AUDIOCONVERTER=ON
+          cmake --build build/debug --target spring-server -j 4
+
+      - name: Determinism pair-run (PaperTanks fixture)
+        run: |
+          node tools/headless-batch/determinism-pair-run.mjs \
+            --server-bin build/debug/spring-server \
+            --out-dir build/headless-determinism
