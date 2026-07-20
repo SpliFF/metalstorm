@@ -37,6 +37,7 @@ function Actuators.new(cfg)
     self.profile = cfg.profile
     self.caps    = Actuators._detect()
     self.lastIntent = nil
+    self.lastSuggestFrame = nil  -- rate limiter for suggest-only mode (mentor)
     return self
 end
 
@@ -141,16 +142,28 @@ end
 -- apply — consume the planner's plan.  One entry point main.lua calls.
 --=============================================================================
 function Actuators:apply(plan, picture)
+    -- Mentor/suggest-only mode (PLAN-metalstorm-onboarding.md §3): the planner
+    -- runs normally but output routes to SUGGESTIONS via chat + suggested_for
+    -- hints, rather than spending authority on real orders. The profile carries
+    -- the flag; the actuator enforces it here (structural gate).
+    local suggestOnly = self.profile and self.profile.suggest_only
+
     for _, d in ipairs(plan.directives or {}) do
-        if d.type == 'posture' then
-            self:setPosture(d.groupId, d.directive)
-        elseif d.type == 'directive' then
-            self:issueDirective(d.groupId, d.directive, d.region)
-        elseif d.type == 'build' then
-            self:initiateBuild(d.factoryId, d.defName)
+        if suggestOnly then
+            -- Suggest mode: narrate what WOULD be done, never issue the real order.
+            self:_suggestDirective(d, picture)
+        else
+            -- Normal mode: execute the directive.
+            if d.type == 'posture' then
+                self:setPosture(d.groupId, d.directive)
+            elseif d.type == 'directive' then
+                self:issueDirective(d.groupId, d.directive, d.region)
+            elseif d.type == 'build' then
+                self:initiateBuild(d.factoryId, d.defName)
+            end
+            -- Announce intent per directive (plan §5.1): "Taking N Basin ...".
+            self:_announce(d)
         end
-        -- Announce intent per directive (plan §5.1): "Taking N Basin ...".
-        self:_announce(d)
     end
 
     -- Intent report (interaction §6.3): publish the assignment table so the
@@ -191,6 +204,44 @@ function Actuators:_directiveToStandingCmd(directive)
     if directive == 'WITHDRAW'then return CMD.MOVE   end
     if directive == 'DEFEND' or directive == 'DEFEND_FRONT' then return CMD.GUARD end
     return CMD.FIGHT   -- assault / take-and-hold advance as an area order
+end
+
+--=============================================================================
+-- Suggest-only output (mentor mode, onboarding §3).
+--=============================================================================
+function Actuators:_suggestDirective(d, picture)
+    -- Mentor/suggest-only mode emits ADVICE instead of orders: narrate what the
+    -- AI would do if it were commanding the force, with the reasoning visible.
+    -- The actual vehicles for suggestions are:
+    --   1. Chat (private, player-channel) — "North Basin is contested and
+    --      undefended — a control objective worth 120 authority."
+    --   2. suggested_for hint (onboarding §3, integration plan) — lights up the
+    --      objective card in the UI so the player can see WHERE.
+    --   3. Map marker (visual ping) — reinforces the location.
+    -- The profile may carry a suggest_period_sec rate limiter; tracked in self
+    -- (self.lastSuggestFrame). Until the wire/gadget verbs exist, chat only.
+
+    local period = (self.profile.suggest_period_sec or 45) * 30  -- sec → frames
+    local now = picture.frame or 0
+    if self.lastSuggestFrame and (now - self.lastSuggestFrame) < period then
+        return  -- Rate-limited: don't flood a learner.
+    end
+    self.lastSuggestFrame = now
+
+    local where = d.region and tostring(d.region) or "unknown region"
+    local cost = d.predictedCost and tostring(math.floor(d.predictedCost)) or "?"
+    local suggestion = string.format(
+        "[mentor] Suggest: %s at %s (authority cost ~%s). This would advance our position.",
+        tostring(d.directive), where, cost)
+    self:chat(suggestion)
+
+    -- TODO(onboarding §3 / integration I1): when the suggested_for hint verb
+    -- exists (game_ai_guidance.lua writing a suggestion rulesParam that the
+    -- native-UI objective card reads), emit it here:
+    --   AI.setSuggestedObjective(goalId, groupId)  -- lights the card
+    -- And when the map marker verb exists:
+    --   local pos = picture.regions[d.region] and picture.regions[d.region].pos
+    --   if pos then self:marker(pos, "Mentor: " .. d.directive) end
 end
 
 --=============================================================================
