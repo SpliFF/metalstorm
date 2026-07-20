@@ -944,6 +944,7 @@ export class Connection {
     private sessionToken: string | null = null;
     public playerId: number = 0;
     public myTeam: number = -1;
+    public myRole: string = '';  // "admin", "player", or "spectator"
     private clock = new ServerClock();
     /** Sim frame of the most recent GameEventBatch. When a combat batch for
      *  the same tick precedes an EntityDestroy (same reliable, in-order lane,
@@ -1739,9 +1740,10 @@ export class Connection {
                 if (ar.status() === AuthStatus.OK) {
                     this.playerId = ar.playerId();
                     this.myTeam = ar.team();
+                    this.myRole = ar.role() ?? '';
                     if (ar.token()) this.sessionToken = ar.token();
                     const defsCacheKey = ar.defsCacheKey() ?? '';
-                    console.log(`[connection] AuthResponse OK: playerId=${this.playerId}, team=${this.myTeam}, defsKey=${defsCacheKey || '(none)'}`);
+                    console.log(`[connection] AuthResponse OK: playerId=${this.playerId}, team=${this.myTeam}, role=${this.myRole}, defsKey=${defsCacheKey || '(none)'}`);
                     this.setState('connected');
                     this.events.onAuthenticated?.(this.playerId, this.sessionToken ?? '', this.myTeam, defsCacheKey);
                 } else {

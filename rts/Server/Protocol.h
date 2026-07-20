@@ -128,6 +128,7 @@ inline std::vector<uint8_t> BuildAuthResponse(
     uint32_t playerId,
     const std::string& message = "",
     int8_t team = -1,
+    const std::string& role = "",
     const std::string& defsCacheKey = "")
 {
     flatbuffers::FlatBufferBuilder fbb(256);
@@ -136,6 +137,7 @@ inline std::vector<uint8_t> BuildAuthResponse(
         playerId,
         message.empty() ? nullptr : message.c_str(),
         team,
+        role.empty() ? nullptr : role.c_str(),
         defsCacheKey.empty() ? nullptr : defsCacheKey.c_str());
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_AuthResponse, resp.Union());
 }
