@@ -1,44 +1,193 @@
-// objectives-panel.js — Metalstorm native JS widget. STUB.
+// objectives-panel.js — Metalstorm native JS widget.
 //
-// Lists active objectives (strategic + tactical) with type, reward, state
-// (PLAN-metalstorm.md §3). Reads the rulesParams mirror published by
-// game_objectives.lua (objective_<id>_*) until a proper objective stream
-// exists. Click → camera focus (via sendPrompt-style command API, TBD).
+// Lists active objectives (strategic + tactical) with type/reward/progress/
+// phase, a bounty-post flow, and map markers via the strategic-map hook
+// (PLAN-metalstorm-objectives.md §6, task 8). Reads the rulesParams mirror
+// game_objectives.lua publishes (objective_<id>_*) through ui/lib/
+// objectives.js's poll-style pull() — same contract as authority-bar.js
+// (init(ctx)/dispose(), ctx.store.gameRulesParam(key) singular getter; there
+// is no bulk batch read, see that file's header for the full contract).
 //
-// Same contract as authority-bar.js (PLAN-native-ui.md §3).
+// NOT wired here (blocked on infrastructure this widget doesn't own — same
+// pre-loader state as every other native-ui widget, see authority-bar.js):
+//   - live rulesParams data at all: the server->client wire producer for
+//     Set{Game,Team,Player,Unit}RulesParam doesn't exist yet (dead consumer
+//     in client/src/core/lua-ui-host.ts) — this widget is correct against
+//     the documented rulesParams contract but unverifiable live until that
+//     lands (PLAN-metalstorm-authority.md field notes has the full writeup).
+//   - bounty target picking: "target pick -> type inferred -> stake slider"
+//     (§3.3) needs a map-click/selection API this widget doesn't have
+//     access to yet (no native-ui loader, no shared picking hook) — the
+//     bounty form takes a unit ID directly instead of a map pick, and lets
+//     the player choose the type explicitly rather than inferring it from a
+//     picked target's allegiance/role.
+//   - posting the bounty command: there is no validated command-send API
+//     for native-ui widgets yet (ai-command-panel.js and command-composer.js
+//     are in the same state) — postBounty() calls the documented
+//     `ctx.sendCommand` stand-in and warns once (not silently) if it's
+//     absent, per CLAUDE.md's no-silent-stand-ins contract.
+//   - map markers: PLAN-macro-map.md's strategic-map overlay doesn't exist
+//     yet either — publishMarkers() calls the documented `ctx.strategicMap`
+//     stand-in and warns once if it's absent. Region-hinted objectives
+//     (control/liveness) additionally need ui/lib/regions.js to expose a
+//     region centroid, which it doesn't yet (see objectives.js
+//     markerPosition() doc) — those markers stay unavailable even once the
+//     hook lands, until that follow-up ships.
+
+import { createObjectiveIndex } from '../lib/objectives.js';
 
 const TYPE_ICONS = {
   control: '⬢', kill: '✕', escort: '➜', protect: '🛡', extract: '⤴', infra: '⚙',
 };
 
+const STAGE_LABEL = { secure: 'SECURING', evac: 'EVACUATING' };
+
+const BOUNTY_TYPES = ['kill', 'protect', 'escort', 'extract', 'infra'];
+const BOUNTY_STAKE_MIN = 10;
+const BOUNTY_STAKE_MAX = 500;
+const BOUNTY_STAKE_STEP = 10;
+const BOUNTY_STAKE_DEFAULT = 50;
+
+let warnedNoSendCommand = false;
+let warnedNoStrategicMap = false;
+
+function renderItem(o) {
+  const icon = TYPE_ICONS[o.type] ?? '•';
+  const pct = Math.max(0, Math.min(100, Math.round((o.progress ?? 0) * 100)));
+  const bits = [];
+  if (o.phase) bits.push(`phase ${o.phase}`);
+  if (o.stage) bits.push(STAGE_LABEL[o.stage] ?? o.stage);
+  const subLabel = bits.length ? ` <span class="ms-obj-sub">(${bits.join(' · ')})</span>` : '';
+  return (
+    `<li class="ms-obj ms-obj-${o.scope ?? 'tactical'}" data-id="${o.id}">` +
+    `<span class="ms-obj-icon">${icon}</span>` +
+    `<span class="ms-obj-type">${o.type}${subLabel}</span>` +
+    `<span class="ms-obj-reward">⬡ ${o.reward ?? 0}</span>` +
+    `<div class="ms-obj-progress"><div class="ms-obj-progress-fill" style="width:${pct}%"></div></div>` +
+    `</li>`
+  );
+}
+
 export default {
   id: 'objectives-panel',
 
   init(ctx) {
+    this.ctx = ctx;
+    this.index = createObjectiveIndex();
+
     this.el = document.createElement('div');
     this.el.className = 'ms-objectives-panel';
-    this.el.innerHTML = '<h3>Objectives</h3><ul class="ms-obj-list"></ul>';
+    this.el.innerHTML =
+      '<h3>Objectives</h3>' +
+      '<ul class="ms-obj-list"></ul>' +
+      '<div class="ms-obj-bounty">' +
+      '<button class="ms-obj-bounty-toggle" type="button">+ Post bounty</button>' +
+      '<form class="ms-obj-bounty-form" hidden>' +
+      '<label>Target unit ID<input class="ms-obj-bounty-target" type="number" min="0" required></label>' +
+      '<label>Type<select class="ms-obj-bounty-type">' +
+      BOUNTY_TYPES.map((t) => `<option value="${t}">${t}</option>`).join('') +
+      '</select></label>' +
+      '<label>Stake' +
+      `<input class="ms-obj-bounty-stake" type="range" min="${BOUNTY_STAKE_MIN}" max="${BOUNTY_STAKE_MAX}" ` +
+      `step="${BOUNTY_STAKE_STEP}" value="${BOUNTY_STAKE_DEFAULT}">` +
+      `<span class="ms-obj-bounty-stake-value">${BOUNTY_STAKE_DEFAULT}</span></label>` +
+      '<button type="submit">Post bounty</button>' +
+      '</form>' +
+      '</div>';
     ctx.mount.appendChild(this.el);
 
+    this._wireBountyForm();
+
+    const pull = () => this.index.pull((key) => ctx.store.gameRulesParam(key));
     this.unsub = ctx.store.subscribe(['gameRulesParams'], () => {
-      const count = ctx.store.gameRulesParam('objective_count') || 0;
-      const list = this.el.querySelector('.ms-obj-list');
-      const items = [];
-      for (let id = 1; id <= count; id++) {
-        const p = (k) => ctx.store.gameRulesParam(`objective_${id}_${k}`);
-        const state = p('state');
-        if (state !== 'active') continue;        // v0: active only
-        const team = p('team');
-        if (team !== -1 && team !== ctx.identity.teamId) continue;
-        items.push(
-          `<li class="ms-obj ms-obj-${p('scope')}">` +
-          `<span class="ms-obj-icon">${TYPE_ICONS[p('type')] ?? '•'}</span>` +
-          `<span class="ms-obj-type">${p('type')}</span>` +
-          `<span class="ms-obj-reward">⬡ ${p('reward') ?? 0}</span></li>`
+      if (pull()) this._render();
+    });
+    pull();
+    this._render();
+  },
+
+  _wireBountyForm() {
+    const toggle = this.el.querySelector('.ms-obj-bounty-toggle');
+    const form = this.el.querySelector('.ms-obj-bounty-form');
+    const stakeInput = this.el.querySelector('.ms-obj-bounty-stake');
+    const stakeValue = this.el.querySelector('.ms-obj-bounty-stake-value');
+
+    toggle.addEventListener('click', () => {
+      form.hidden = !form.hidden;
+    });
+    stakeInput.addEventListener('input', () => {
+      stakeValue.textContent = stakeInput.value;
+    });
+    form.addEventListener('submit', (ev) => {
+      ev.preventDefault();
+      const targetUnitID = Number(this.el.querySelector('.ms-obj-bounty-target').value);
+      const type = this.el.querySelector('.ms-obj-bounty-type').value;
+      const stake = Number(stakeInput.value);
+      if (!Number.isFinite(targetUnitID)) return;
+      this._postBounty(type, targetUnitID, stake);
+      form.hidden = true;
+      form.reset();
+      stakeValue.textContent = String(BOUNTY_STAKE_DEFAULT);
+    });
+  },
+
+  /**
+   * Shape a bounty def for GG.Objectives.CreateBounty and hand it to the
+   * (not-yet-existing) command-send API. See the header note — this is a
+   * documented stand-in, not a working submit path yet.
+   */
+  _postBounty(type, targetUnitID, stake) {
+    const params = type === 'kill' || type === 'protect'
+      ? { targetUnitID }
+      : { targetUnitIDs: [targetUnitID] };
+    const def = { type, params };
+
+    if (typeof this.ctx.sendCommand !== 'function') {
+      if (!warnedNoSendCommand) {
+        warnedNoSendCommand = true;
+        console.warn(
+          '[objectives-panel] ctx.sendCommand is not wired yet — bounty post is a no-op ' +
+          '(FIDELITY-STANDIN: no validated command-send API for native-ui widgets, see file header).'
         );
       }
-      list.innerHTML = items.join('') || '<li class="ms-obj-none">No active objectives</li>';
-    });
+      return;
+    }
+    this.ctx.sendCommand('objectives.createBounty', { def, stake });
+  },
+
+  _render() {
+    const identity = this.ctx.identity ?? {};
+    const list = this.el.querySelector('.ms-obj-list');
+    const items = this.index.forTeam(identity.teamId, 'active').map(renderItem);
+    list.innerHTML = items.join('') || '<li class="ms-obj-none">No active objectives</li>';
+    this._publishMarkers();
+  },
+
+  /**
+   * Push map markers through the (not-yet-existing) strategic-map hook —
+   * see the header note. Region-hinted objectives resolve to null today
+   * (ui/lib/regions.js has no centroid lookup) and are silently skipped,
+   * same as any objective with neither an x/z nor a resolvable region hint.
+   */
+  _publishMarkers() {
+    if (!this.ctx.strategicMap || typeof this.ctx.strategicMap.setMarkers !== 'function') {
+      if (!warnedNoStrategicMap) {
+        warnedNoStrategicMap = true;
+        console.warn(
+          '[objectives-panel] ctx.strategicMap is not wired yet — objective map markers are a no-op ' +
+          '(FIDELITY-STANDIN: PLAN-macro-map.md overlay doesn\'t exist yet, see file header).'
+        );
+      }
+      return;
+    }
+    const markers = [];
+    for (const o of this.index.list()) {
+      if (o.state !== 'active') continue;
+      const pos = this.index.markerPosition(o, this.ctx.regionIndex);
+      if (!pos) continue;
+      markers.push({ id: o.id, kind: 'objective', type: o.type, ...pos });
+    }
+    this.ctx.strategicMap.setMarkers('objectives', markers);
   },
 
   dispose() {

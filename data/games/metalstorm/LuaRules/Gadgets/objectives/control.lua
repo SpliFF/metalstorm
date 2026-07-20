@@ -1,11 +1,79 @@
--- objectives/control.lua — area-control objective type (PLAN-metalstorm-objectives.md). STUB.
--- Library module included by game_objectives.lua. State machine for
--- hold-region-N-minutes / deny-region / secure-corridor objectives.
--- Progress source: GG.Regions.ControllingTeam + hysteresis (regions §1).
+-- objectives/control.lua — area-control objective type (PLAN-metalstorm-objectives.md §4.1).
+-- Library module included by game_objectives.lua. Hold a region continuously
+-- for `holdFrames`; open race when forTeam is nil — whichever team currently
+-- owns the region accumulates, first to reach the threshold wins.
+--
+-- Pure: takes a `ctx` facade (regionOwner/unitsInRegion/unitTeam) instead of
+-- calling Spring/GG directly, so this is busted-testable with a fake ctx
+-- (§9 "the type-module split exists precisely so these need no engine").
 local control = {}
 
-function control.init(obj, o)   end   -- TODO validate params (region key, hold time)
-function control.tick(obj, o)   end   -- TODO progress + completion/failure
-function control.describe(o)    return 'Control' end
+function control.validateParams(params)
+    if type(params) ~= 'table' then return false, 'params required' end
+    if type(params.regionKey) ~= 'string' or params.regionKey == '' then
+        return false, 'regionKey required'
+    end
+    if type(params.holdFrames) ~= 'number' or params.holdFrames <= 0 then
+        return false, 'holdFrames must be a positive number'
+    end
+    return true
+end
+
+--- Create-time setup. A bogus regionKey (unknown to the region graph) fails
+--- Create (E1) — checked via ctx.regionExists, not just regionOwner (an
+--- unowned-but-real region also returns nil from regionOwner).
+function control.init(o, ctx)
+    if not ctx.regionExists(o.params.regionKey) then
+        return false, 'unknown region ' .. tostring(o.params.regionKey)
+    end
+    o.data = { heldSince = {} }   -- team -> frame it became the current owner
+    return true
+end
+
+--- Region flip resets the losing team's clock (hysteresis lives in
+--- regions/ownership.lua — control just reacts to the published owner).
+local function pruneFlippedTeams(held, owner)
+    for team in pairs(held) do
+        if team ~= owner then held[team] = nil end
+    end
+end
+
+function control.check(o, ctx)
+    local owner = ctx.regionOwner(o.params.regionKey)
+    local held = o.data.heldSince
+    pruneFlippedTeams(held, owner)
+    if not owner then return nil end
+    if o.forTeam and owner ~= o.forTeam then return nil end   -- not the eligible team
+
+    if not held[owner] then held[owner] = ctx.frame end
+    if (ctx.frame - held[owner]) >= o.params.holdFrames then
+        return 'complete', owner
+    end
+    return nil
+end
+
+function control.progress(o, ctx)
+    local owner = ctx.regionOwner(o.params.regionKey)
+    if not owner or (o.forTeam and owner ~= o.forTeam) then return 0 end
+    local since = o.data.heldSince[owner]
+    if not since then return 0 end
+    return math.min(1, (ctx.frame - since) / o.params.holdFrames)
+end
+
+--- Participation credit: the currently-accumulating team's units inside the
+--- region (§5 "ordering units that act near the objective").
+function control.participants(o, ctx)
+    local owner = ctx.regionOwner(o.params.regionKey)
+    if not owner or (o.forTeam and owner ~= o.forTeam) then return {} end
+    local out = {}
+    for _, unitID in ipairs(ctx.unitsInRegion(o.params.regionKey)) do
+        if ctx.unitTeam(unitID) == owner then out[#out + 1] = unitID end
+    end
+    return out
+end
+
+function control.describe(o)
+    return 'Control ' .. tostring(o.params.regionKey)
+end
 
 return control
