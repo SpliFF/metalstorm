@@ -441,6 +441,16 @@ table RoomJoin {
 
 table RoomLeave {}
 
+/// Convert from spectator to active player. Spectators can send this
+/// to request joining the game as a rostered player (assigned to a team).
+/// If the room is full (non-spectator player count >= maxPlayers), the
+/// request is rejected. If accepted, the spectator transitions to a
+/// player with team assignment (auto-assigned or specified by team field),
+/// and the room broadcasts the state change via RoomStateUpdate.
+table RoomEnlist {
+    team: uint8 = 255;      // 255 = auto-assign next available team
+}
+
 table RoomTeamSelect {
     team: uint8;
 }
@@ -607,6 +617,7 @@ union ClientPayload {
     RoomCreate,
     RoomJoin,
     RoomLeave,
+    RoomEnlist,
     RoomTeamSelect,
     RoomReady,
     RoomKick,

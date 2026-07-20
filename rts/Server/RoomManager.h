@@ -195,6 +195,12 @@ public:
     /// Set a player's ready state.
     bool SetReady(uint32_t roomId, uint32_t playerId, bool ready);
 
+    /// Convert a spectator to an active player ("Enlist"). Returns true on
+    /// success. Fails if the requester is not a spectator, the room is full
+    /// of non-spectator players, or the specified team is invalid. If team
+    /// is 255, auto-assigns the next available team.
+    bool EnlistSpectator(uint32_t roomId, uint32_t playerId, uint8_t team);
+
     /// Kick a player (host only).
     bool KickPlayer(uint32_t roomId, uint32_t requesterId, uint32_t targetId);
 
