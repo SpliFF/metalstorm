@@ -88,6 +88,8 @@ public:
 	bool IsReversing() const override { return reversing; }
 	bool IsPushResistant() const override { return pushResistant; }
 	bool IsPushResitanceBlockActive() const override { return pushResistanceBlockActive; }
+	// PLAN-metalstorm-flow §3 (F2): rotating without translating.
+	bool IsTurningInPlace() const override;
 	bool WantToStop() const { return (pathID == 0 && (!useRawMovement || atEndOfPath)); }
 
 	void TriggerSkipWayPoint() {
