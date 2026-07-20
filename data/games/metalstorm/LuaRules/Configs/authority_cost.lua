@@ -42,11 +42,16 @@ return {
     region_mod_min = 0.5,    -- friendly territory (owner allied to the orderer)
     region_mod_max = 2.0,    -- enemy territory (owner present, not allied)
 
-    -- economy (PLAN-metalstorm-economy.md §3 — defaults UNPINNED, "~" in
-    -- plan; review §C requires pinning before hand-off):
+    -- economy (PLAN-metalstorm-economy.md §3 — pinned 2026-07-20, unpinned by taskherd):
     economy = {
-        soft_ceiling_C_base   = nil,  -- TODO pin (per-player pool soft cap)
-        overflow_decay_pct    = nil,  -- TODO pin (decay % above ceiling)
-        overflow_decay_period = nil,  -- TODO pin (frames between decay ticks)
+        -- Lever 1: soft ceiling with overflow decay (§3.1, default-on)
+        soft_ceiling_C_base   = 2000,  -- per-player pool soft cap (team ceiling = C_base × teamPlayerCount)
+        overflow_decay_pct    = 2,     -- decay % per minute above ceiling
+        overflow_decay_period = 900,   -- frames between decay ticks (30 s at GAME_SPEED 30 = 1800 s/60 min × 2% = 0.6%/tick)
+
+        -- Lever 2: reward normalisation (§3.2, default-off until validated)
+        reward_normalisation_enabled = false,  -- toggle for systemic objective reward scaling by 1/velocity
+        reward_scale_min = 0.5,                -- clamp min (prevents over-deflation)
+        reward_scale_max = 2.0,                -- clamp max (prevents oscillation)
     },
 }

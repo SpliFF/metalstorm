@@ -1,0 +1,57 @@
+{
+  "description": "Economy validation grid (PLAN-metalstorm-economy.md §4): batch matrix for tuning ceiling/decay and reward normalisation constants. Runs over {2,4,8} players/side × {sparse,normal,dense} objective density × {aggressive,default,turtle} AI profiles × 4 seeds, simulated 2 weeks each.",
+
+  "comment": "This is a config TEMPLATE — the batch driver (tools/headless-batch/) expands it into N individual configs by iterating the matrix variables. Each cell is one headless run.",
+
+  "matrix": {
+    "playersPerSide": [2, 4, 8],
+    "objectiveDensity": ["sparse", "normal", "dense"],
+    "aiProfile": ["aggressive", "default", "turtle"],
+    "seed": [1001, 1002, 1003, 1004]
+  },
+
+  "baseConfig": {
+    "map": "meridian_basin_beta",
+    "game": "metalstorm",
+    "scenario": "balance_arena_standard",
+
+    "comment_slots": "Slots are generated from matrix variables — see batch driver",
+    "aiSlots_template": [
+      {"aiId": "strategic", "team": 0, "profile": "{aiProfile}"},
+      {"aiId": "strategic", "team": 1, "profile": "{aiProfile}"}
+    ],
+
+    "modoptions": {
+      "authority_cost_scale": 1.0,
+      "authority_join_grant": 100,
+      "authority_team_stipend": 0
+    },
+
+    "headless": {
+      "tickMode": "uncapped",
+      "stopAt": {
+        "comment": "2 weeks simulated time = 14 days × 24 h/day × 60 min/h × 60 s/min × 30 frames/s",
+        "frame": 36288000
+      },
+      "statsDump": "economy_grid/{playersPerSide}p_{objectiveDensity}_{aiProfile}_s{seed}.json",
+      "stateHashEvery": 54000,
+      "comment_hash": "Every 30 minutes sim time for determinism checks"
+    }
+  },
+
+  "acceptance": {
+    "comment": "Criteria from PLAN-metalstorm-economy.md §4. A run passes if ALL conditions hold. The grid passes if ≥90% of runs pass.",
+    "velocity_range": [0.6, 1.5],
+    "velocity_after_frame": 2592000,
+    "comment_velocity": "Velocity ∈ [0.6, 1.5] after day 1 (= 86400 s × 30 Hz)",
+
+    "pool_ratio_max": 8,
+    "comment_pool_ratio": "Pool ratio < 8 sustained (checked at end)",
+
+    "dead_team_time_pct_max": 1,
+    "comment_dead_time": "Dead-team time < 1% of runtime (excluding end-game — defined as final 10% of frames)",
+
+    "join_grant_mint_pct_max": 10,
+    "comment_join_grant": "Churn-amplified runs: join grants < 10% of total mint (the grant-inflation check)"
+  }
+}

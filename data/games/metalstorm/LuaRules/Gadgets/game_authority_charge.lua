@@ -56,7 +56,7 @@ function gadget:AllowCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdO
     if not Classify.isChargeable(fromSynced, fromLua) then return true end
 
     local cost = GG.Authority.OrderCost(unitID, cmdID)
-    local allowed = GG.Authority.ChargeOrder(unitID, unitTeam, playerID, cost)
+    local allowed = GG.Authority.ChargeOrder(unitID, unitTeam, playerID, cost, cmdID)
     if allowed and cost > 0 and playerID then
         -- Attribution hook for objectives (PLAN-metalstorm-objectives.md §5):
         -- last_commander stamps who most recently paid to move this unit,

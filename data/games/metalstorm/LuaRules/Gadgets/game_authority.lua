@@ -43,17 +43,109 @@ local Formula   = VFS.Include("LuaRules/Gadgets/authority/formula.lua")
 local Attribute = VFS.Include("LuaRules/Gadgets/authority/attribute.lua")
 local Classify  = VFS.Include("LuaRules/Gadgets/authority/classify.lua")
 local Escrow    = VFS.Include("LuaRules/Gadgets/authority/escrow.lua")
+local Ledger    = VFS.Include("LuaRules/Gadgets/authority/ledger.lua")
+local Metrics   = VFS.Include("LuaRules/Gadgets/authority/metrics.lua")
 local CostSpec  = VFS.Include("LuaRules/Configs/authority_cost.lua")
 
 local STARTING_TEAM_AUTHORITY = 500
 local EVENT_RING_SIZE = 8
 local STIPEND_PERIOD_FRAMES = 1800     -- 1 minute at GAME_SPEED 30
+local LEDGER_PUBLISH_PERIOD_FRAMES = 900  -- 30 s at GAME_SPEED 30 (§1)
 
 local costScale  = 1.0
 local joinGrant  = 100
 local teamStipend = 0
 
+-- Ledger state (PLAN-metalstorm-economy.md §1): reason-tagged accumulators
+-- for long-horizon economy monitoring (gm-tools dashboard, headless validation).
+local ledgerState = Ledger.newState()
+
+-- Metrics state (§2): health metrics computed from ledger counters (velocity
+-- EMA, dead-team time) — feeds gm-tools dashboard.
+local metricsState = Metrics.newState()
+
+-- Previous ledger snapshot (for delta computation in GameFrame)
+local prevLedger = {}
+
 GG.Authority = GG.Authority or {}
+
+--- Export ledger counters (PLAN-metalstorm-economy.md §1: for stats-dump
+--- and game_events hooks). Returns { [teamID] = {mint=N, burn=M, move=K, unmapped=U}, ... }
+function GG.Authority.ExportLedger()
+    return Ledger.exportAll(ledgerState)
+end
+
+--- Export health metrics (§2: for gm-tools dashboard). Returns per-team metrics:
+--- { [teamID] = {velocity=V, poolRatio=R, gini=G, deadTimeMin=D}, ... }
+--- `typicalArmyCost` is an optional estimate of a mid-size army command cost
+--- (defaults to 1000 if not provided); `cheapestOrderCost` is the lowest posture
+--- order cost (defaults to 10).
+function GG.Authority.ExportMetrics(typicalArmyCost, cheapestOrderCost)
+    typicalArmyCost = typicalArmyCost or 1000
+    cheapestOrderCost = cheapestOrderCost or 10
+    local out = {}
+    local gaia = Spring.GetGaiaTeamID()
+    for _, teamID in ipairs(Spring.GetTeamList()) do
+        if teamID ~= gaia then
+            local teamPool = getTeamPool(teamID)
+            local playerPools = {}
+            local totalPools = teamPool
+            for _, playerID in ipairs(Spring.GetPlayerList(teamID)) do
+                local pool = getPlayerPool(playerID)
+                playerPools[#playerPools + 1] = pool
+                totalPools = totalPools + pool
+            end
+            out[teamID] = {
+                velocity = Metrics.velocity(metricsState, teamID),
+                poolRatio = Metrics.poolRatio(totalPools, typicalArmyCost),
+                gini = Metrics.gini(playerPools),
+                deadTimeMin = Metrics.deadTimeMinutes(metricsState, teamID),
+            }
+        end
+    end
+    return out
+end
+
+--- Check if a player or team pool is overflowing (§2: authority-bar overflow
+--- indicator). Returns (isOverflowing, ceiling, excess). `ceiling` and `excess`
+--- are nil if overflow decay isn't enabled (constants not yet tuned, §3).
+function GG.Authority.IsOverflowing(playerID_or_nil, teamID)
+    local econ = CostSpec.economy
+    if not econ or not econ.soft_ceiling_C_base then
+        return false, nil, nil
+    end
+    local ceiling
+    if playerID_or_nil then
+        ceiling = econ.soft_ceiling_C_base  -- per-player ceiling (§3: C_base × teamPlayerCount for team, C_base for player)
+        local pool = getPlayerPool(playerID_or_nil)
+        local excess = pool - ceiling
+        return excess > 0, ceiling, excess
+    else
+        local playerCount = #Spring.GetPlayerList(teamID)
+        ceiling = econ.soft_ceiling_C_base * math.max(1, playerCount)
+        local pool = getTeamPool(teamID)
+        local excess = pool - ceiling
+        return excess > 0, ceiling, excess
+    end
+end
+
+--- Apply reward normalisation (§3.2, Lever 2): scale systemic objective rewards
+--- by 1/velocity, clamped to [0.5, 2.0]. Returns the scaled amount. If reward
+--- normalisation is disabled, returns the original amount unchanged.
+--- `teamID` is the team earning the reward (whose velocity is consulted).
+--- NOTE: player-staked bounties must NOT call this — normalisation applies to
+--- systemic rewards only (§5 E2).
+function GG.Authority.NormaliseReward(teamID, amount)
+    local econ = CostSpec.economy
+    if not econ or not econ.reward_normalisation_enabled then
+        return amount
+    end
+    local velocity = Metrics.velocity(metricsState, teamID)
+    if velocity == 0 then velocity = 1.0 end
+    local scale = 1 / velocity
+    scale = math.max(econ.reward_scale_min, math.min(econ.reward_scale_max, scale))
+    return amount * scale
+end
 
 -- ============================================================
 -- Optional observer hooks (PLAN-metalstorm-teams.md task 4: the per-player
@@ -169,9 +261,11 @@ function GG.Authority.Award(target, amount, reason)
     if amount == nil or amount <= 0 then return end
 
     if target.player then
+        local teamID = playerTeam(target.player)
         setPlayerPool(target.player, getPlayerPool(target.player) + amount)
-        emitEvent('award', amount, reason, target.player, playerTeam(target.player))
-        fireAward(target.player, playerTeam(target.player), amount)
+        emitEvent('award', amount, reason, target.player, teamID)
+        fireAward(target.player, teamID, amount)
+        Ledger.tagAward(ledgerState, teamID, amount, reason)
         return
     end
 
@@ -179,6 +273,7 @@ function GG.Authority.Award(target, amount, reason)
         setTeamPool(target.team, getTeamPool(target.team) + amount)
         emitEvent('award', amount, reason, nil, target.team)
         fireAward(nil, target.team, amount)
+        Ledger.tagAward(ledgerState, target.team, amount, reason)
         return
     end
 
@@ -192,15 +287,18 @@ function GG.Authority.Award(target, amount, reason)
         for playerID, w in pairs(weights) do
             if w and w > 0 then
                 local share = amount * w / totalWeight
+                local teamID = playerTeam(playerID)
                 setPlayerPool(playerID, getPlayerPool(playerID) + share)
-                emitEvent('award', share, reason, playerID, playerTeam(playerID))
-                fireAward(playerID, playerTeam(playerID), share)
+                emitEvent('award', share, reason, playerID, teamID)
+                fireAward(playerID, teamID, share)
+                Ledger.tagAward(ledgerState, teamID, share, reason)
             end
         end
         local teamShare = amount * (spec.teamWeight or 0) / totalWeight
         if teamShare > 0 then
             setTeamPool(spec.team, getTeamPool(spec.team) + teamShare)
             emitEvent('award', teamShare, reason, nil, spec.team)
+            Ledger.tagAward(ledgerState, spec.team, teamShare, reason)
         end
     end
 end
@@ -216,8 +314,10 @@ function GG.Authority.Stake(playerID, objectiveID, amount)
     if not amount or amount <= 0 then return false end
     local pool = getPlayerPool(playerID)
     if pool < amount then return false end
+    local teamID = playerTeam(playerID)
     setPlayerPool(playerID, pool - amount)
-    Escrow.add(escrowState, objectiveID, playerID, playerTeam(playerID), amount)
+    Escrow.add(escrowState, objectiveID, playerID, teamID, amount)
+    Ledger.tagCharge(ledgerState, teamID, amount, 'stake_escrow')
     return true
 end
 
@@ -240,11 +340,17 @@ function GG.Authority.SettleEscrow(objectiveID, outcome)
     end)
     for _, r in ipairs(refunds) do
         if r.player then
+            local teamID = playerTeam(r.player)
             setPlayerPool(r.player, getPlayerPool(r.player) + r.amount)
-            emitEvent('refund', r.amount, 'stake_' .. outcome, r.player, playerTeam(r.player))
+            emitEvent('refund', r.amount, 'stake_' .. outcome, r.player, teamID)
+            -- Refunds from expired/failed objectives count as 'stake_refund' mint
+            -- (return of the player's own staked money — not a new award, but flows
+            -- back into the pools so velocity math needs to see it)
+            Ledger.tagAward(ledgerState, teamID, r.amount, 'stake_refund')
         elseif r.team then
             setTeamPool(r.team, getTeamPool(r.team) + r.amount)
             emitEvent('refund', r.amount, 'stake_' .. outcome, nil, r.team)
+            Ledger.tagAward(ledgerState, r.team, r.amount, 'stake_refund')
         end
     end
 end
@@ -273,7 +379,8 @@ end
 --- records a 'refusal' event so the player sees why. The ONLY writer of
 --- pool state during normal play — game_authority_charge.lua (+100) is the
 --- sole caller, after every other gadget's AllowCommand veto has run.
-function GG.Authority.ChargeOrder(unitID, unitTeam, playerID, cost)
+--- `cmdID` is used to classify the charge reason for ledger tagging.
+function GG.Authority.ChargeOrder(unitID, unitTeam, playerID, cost, cmdID)
     if cost <= 0 then return true end
     local playerPool = playerID and getPlayerPool(playerID) or 0
     local teamPool = getTeamPool(unitTeam)
@@ -282,12 +389,23 @@ function GG.Authority.ChargeOrder(unitID, unitTeam, playerID, cost)
         emitEvent('refusal', cost, 'insufficient_authority', playerID, unitTeam)
         return false
     end
+    -- Tag ledger (PLAN-metalstorm-economy.md §1): the full order cost is a burn,
+    -- and any team-pool contribution is ALSO a 'player_fallback' move (tracks
+    -- team subsidies, net-zero but velocity math needs to see the flow)
+    local class = Classify.orderClass(cmdID or 0)
+    local totalCharged = spentFromPlayer + spentFromTeam
     if spentFromPlayer > 0 and playerID then
         setPlayerPool(playerID, playerPool - spentFromPlayer)
         fireCharge(playerID, unitTeam, spentFromPlayer)
     end
     if spentFromTeam > 0 then
         setTeamPool(unitTeam, teamPool - spentFromTeam)
+        -- Tag the team→player subsidy as a 'move' (§1: player_fallback)
+        Ledger.tagCharge(ledgerState, unitTeam, spentFromTeam, 'player_fallback')
+    end
+    -- Tag the full charge as a burn
+    if totalCharged > 0 then
+        Ledger.tagCharge(ledgerState, unitTeam, totalCharged, class)
     end
     return true
 end
@@ -305,6 +423,21 @@ function gadget:Initialize()
     costScale   = tonumber(mo.authority_cost_scale) or 1.0
     joinGrant   = tonumber(mo.authority_join_grant) or 100
     teamStipend = tonumber(mo.authority_team_stipend) or 0
+
+    -- E1 load-time assert (§5): ceiling must be ≥ 2× the priciest single decision
+    local econ = CostSpec.economy
+    if econ and econ.soft_ceiling_C_base then
+        -- The priciest order = build (orderMod 3.0) × largest unit base × enemy region (regionMod 2.0)
+        -- Conservatively estimate largest unit base as ~500 (scale-4 units; real values from defs)
+        local maxOrderCost = CostSpec.base_k * 500 * 2.0 * (CostSpec.order_class.build or 3.0) * costScale
+        if econ.soft_ceiling_C_base < 2 * maxOrderCost then
+            Spring.Log('authority', LOG.ERROR, string.format(
+                "E1 ceiling assert FAILED: C_base %d < 2×maxOrderCost %d. "
+                .. "A team saving for a scale-4 build will hit the ceiling. Increase C_base.",
+                econ.soft_ceiling_C_base, 2 * maxOrderCost
+            ))
+        end
+    end
 end
 
 function gadget:GameStart()
@@ -325,13 +458,80 @@ function gadget:GameStart()
 end
 
 function gadget:GameFrame(frame)
-    if teamStipend <= 0 then return end
-    if frame % STIPEND_PERIOD_FRAMES ~= 0 then return end
+    -- Stipend distribution (§2)
+    if teamStipend > 0 and frame % STIPEND_PERIOD_FRAMES == 0 then
+        local gaia = Spring.GetGaiaTeamID()
+        for _, teamID in ipairs(Spring.GetTeamList()) do
+            if teamID ~= gaia then
+                setTeamPool(teamID, getTeamPool(teamID) + teamStipend)
+                Ledger.tagAward(ledgerState, teamID, teamStipend, 'stipend')
+            end
+        end
+    end
+
+    -- Metrics update (§2): velocity EMA and dead-team time, computed every frame
     local gaia = Spring.GetGaiaTeamID()
     for _, teamID in ipairs(Spring.GetTeamList()) do
         if teamID ~= gaia then
-            setTeamPool(teamID, getTeamPool(teamID) + teamStipend)
+            -- Velocity: compute ledger deltas since last frame
+            local curr = Ledger.counters(ledgerState, teamID)
+            local prev = prevLedger[teamID] or {mint=0, burn=0, move=0, unmapped=0}
+            local mintDelta = curr.mint - prev.mint
+            local burnDelta = curr.burn - prev.burn
+            Metrics.updateVelocity(metricsState, teamID, mintDelta, burnDelta)
+            prevLedger[teamID] = curr
+
+            -- Dead-team time: record if team can't afford the cheapest order
+            local teamPool = getTeamPool(teamID)
+            local totalPools = teamPool
+            for _, playerID in ipairs(Spring.GetPlayerList(teamID)) do
+                totalPools = totalPools + getPlayerPool(playerID)
+            end
+            -- Cheapest order = smallest posture cost (orderMod 0.25 × base_k × smallest unit base)
+            -- For now, use a conservative estimate (10) — task 3 will pin the real constants
+            local cheapestCost = 10
+            Metrics.recordDeadFrame(metricsState, teamID, totalPools, cheapestCost)
         end
+    end
+
+    -- Overflow decay (§3.1, Lever 1): pools above ceiling decay toward it
+    local econ = CostSpec.economy
+    if econ and econ.soft_ceiling_C_base and econ.overflow_decay_period then
+        if frame % econ.overflow_decay_period == 0 then
+            local decayFactor = 1 - (econ.overflow_decay_pct / 100)
+            for _, teamID in ipairs(Spring.GetTeamList()) do
+                if teamID ~= gaia then
+                    -- Player pools: decay to team pool first (§3.1: "use it or share it")
+                    for _, playerID in ipairs(Spring.GetPlayerList(teamID)) do
+                        local pool = getPlayerPool(playerID)
+                        local ceiling = econ.soft_ceiling_C_base
+                        if pool > ceiling then
+                            local excess = pool - ceiling
+                            local decayed = ceiling + excess * decayFactor
+                            local overflowed = excess - (excess * decayFactor)
+                            setPlayerPool(playerID, decayed)
+                            setTeamPool(teamID, getTeamPool(teamID) + overflowed)
+                        end
+                    end
+                    -- Team pool: decay to nothing (§3.1)
+                    local playerCount = #Spring.GetPlayerList(teamID)
+                    local teamCeiling = econ.soft_ceiling_C_base * math.max(1, playerCount)
+                    local teamPool = getTeamPool(teamID)
+                    if teamPool > teamCeiling then
+                        local excess = teamPool - teamCeiling
+                        local decayed = teamCeiling + excess * decayFactor
+                        setTeamPool(teamID, decayed)
+                    end
+                end
+            end
+        end
+    end
+
+    -- Ledger publish (§1): every LEDGER_PUBLISH_PERIOD_FRAMES, publish all
+    -- counters as teamRulesParam econ_<class> (30 s cadence, same as the
+    -- planned scoreboard refresh)
+    if frame % LEDGER_PUBLISH_PERIOD_FRAMES == 0 then
+        Ledger.publish(ledgerState)
     end
 end
 
@@ -346,8 +546,10 @@ function gadget:PlayerAdded(playerID)
     local key = 'authority_granted_' .. playerID
     if Spring.GetGameRulesParam(key) then return end
     Spring.SetGameRulesParam(key, 1)
+    local teamID = playerTeam(playerID)
     setPlayerPool(playerID, getPlayerPool(playerID) + joinGrant)
-    emitEvent('award', joinGrant, 'join_grant', playerID, playerTeam(playerID))
+    emitEvent('award', joinGrant, 'join_grant', playerID, teamID)
+    Ledger.tagAward(ledgerState, teamID, joinGrant, 'join_grant')
 end
 
 -- Departing players (§6, every leave reason incl. timeouts — no pool
@@ -362,6 +564,8 @@ function gadget:PlayerRemoved(playerID, reason)
         local pool = getPlayerPool(playerID)
         if pool > 0 then
             setTeamPool(teamID, getTeamPool(teamID) + pool)
+            -- Leaver merge is a 'move' (pool-to-pool, net zero — §1)
+            Ledger.tagCharge(ledgerState, teamID, pool, 'leaver_merge')
         end
         setPlayerPool(playerID, 0)
     end
