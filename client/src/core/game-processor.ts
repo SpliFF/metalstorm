@@ -82,6 +82,7 @@ import { clientSettings } from './client-settings.js';
 import { CONFIG } from '../config.js';
 import { resetNetStats, snapshotNetStats } from './net-inspector.js';
 import { FrameProfiler } from './frame-profiler.js';
+import { EntityFxFence } from './entity-fx-fence.js';
 import { BuildBeamRenderer } from './build-beam-renderer.js';
 import { CombatFX } from './combat-fx.js';
 import { FxLightPool } from './fx-light-pool.js';
@@ -125,7 +126,7 @@ import { rmlFlush, rmlReset } from '../ui/rml/rml-bridge.js';
 // WP2b: LuaUI half exports — getRuntime() host + all widget callins + liveState + defs.
 import {
     liveState, unitDefMap, weaponDefMap,
-    postToMain, postLog, republishDefGlobals,
+    postToMain, postLog, republishDefGlobals, getRecentLogLines,
     init, runFrame, getRuntime, getBridge, setLuaUiActiveFalse,
     applyEntityStateToLiveState, removeUnitFromLiveState,
     dispatchSelectionChanged, dispatchCommandsChanged,
@@ -149,12 +150,20 @@ import {
     widgetProfileStart, widgetProfileStop, widgetProfileDump,
     buildUiProfileReport, type UiTaxAccumulator,
 } from './widget-profiler.js';
+// PLAN-client-resilience.md tasks 1/3: error telemetry assembly + the
+// context-loss/fatal detection hooks wired into gpInit/the render loop below.
+import { configureErrorTelemetry, reportClientError, type ClientErrorReason } from './client-error-telemetry.js';
 
 // ── GP module-level state ───────────────────────────────────────────────────
 
 let gpEngine: Engine | null = null;
 let gpScene: Scene | null = null;
 let gpCamera: FreeCamera | null = null;
+/// PLAN-client-resilience.md task 3: session facts a telemetry report needs
+/// but that aren't otherwise threaded through the worker's module state.
+/// Set once in gpInit from the gp:init payload; read by gpReportFatal.
+let gpGameId = '';
+let gpMapId = '';
 /// GW4-c5b: interactive RTS cameras, keyed by viewId (multi-view, one Scene /
 /// N camera→canvas views — PLAN-game-worker.md). Each owns one Babylon camera +
 /// the pan/zoom/orbit state machine + scene.pick + viewport send, driven by the
@@ -236,6 +245,13 @@ let gpTrackingCamera = false;
 /// sets this so a screenshot captures a deterministic frame while the sim may
 /// still tick server-side. preserveDrawingBuffer keeps the last frame visible.
 let gpRenderPaused = false;
+/// PLAN-quickstart.md §3 (Part B): the `gp:init` message, captured so a
+/// `gp:resync` can re-open the game connection with the same creds/map without
+/// a fresh boot. Null until gpConnect runs.
+let gpInitMsg: GpInitToWorker | null = null;
+/// PLAN-quickstart.md §3.1: true while the session is parked (detached). Guards
+/// against a double detach and lets diagnostics see the parked state.
+let gpParked = false;
 /// Wall-clock of the last sceneState post (throttled to ~10 Hz).
 let gpLastSceneStatePost = 0;
 /// GW4-c5c-3: minimap feed throttle (~6 Hz — unit dots only need to be roughly
@@ -411,6 +427,19 @@ const gpFrameProfiler = new FrameProfiler(30000);
 /// 3 decals+lights, 4 render, 5 ui.
 function gpMark(idx: number): void {
     if (gpFrameProfile) gpFrameProfiler.mark(idx, performance.now());
+}
+/// PLAN-fx-offload X5 — the Fengari fence for legacy per-frame entity FX
+/// scripts (entity-fx-fence.ts). One instance, ticked every frame like
+/// gpFrameProfiler above; nothing calls `.run()` yet (no game currently
+/// ships per-frame entity `onUpdate` content through a dispatch this
+/// engine drives — see PLAN-fx-offload field notes), so `dump()` reports
+/// zero defs today. This is the wiring point for whichever module ends up
+/// running legacy per-def callbacks (task 3, the JS animation system, is
+/// next in line) — exposed via getEntityFxFence() and the
+/// entityFxFenceDump/-Reset test-dispatch verbs below.
+const gpEntityFxFence = new EntityFxFence();
+export function getEntityFxFence(): EntityFxFence {
+    return gpEntityFxFence;
 }
 /// PLAN-perf P0 isolation toggle (hazard #5): when false the LuaUI screen pass
 /// is skipped, isolating its render-thread tax (12 gl.getParameter round-trips
@@ -796,6 +825,9 @@ let gpAuthFailed: string | null = null;
 let gpFirstStateReceived = false;
 
 function gpConnect(msg: GpInitToWorker): void {
+    // PLAN-quickstart.md §3.2: keep the init message so a later gp:resync can
+    // rebuild the connection (same map/creds) without a fresh gp:init boot.
+    gpInitMsg = msg;
     // GW8: reset the per-envelope bandwidth tally for the new game session. The
     // tally lives in THIS (worker) bundle's net-inspector instance, fed by the
     // worker connection's routeIncoming/sendOnControl; surfaced to main via the
@@ -1259,6 +1291,91 @@ function gpConnect(msg: GpInitToWorker): void {
     conn.connect(msg.gameHttpUrl, msg.username, '', msg.token);
 }
 
+/**
+ * PLAN-client-resilience.md task 3: assemble + send a fatal-error report
+ * with the richest context this worker has — the frame profiler's last
+ * completed frame (as a `phase` label, best-effort), live entity count, the
+ * session's game/map ids, and the last ~50 log-ring lines. This is the one
+ * place the worker's self.onerror/onunhandledrejection hooks and the
+ * context-loss/fault-injection paths funnel through.
+ *
+ * EXTENSION POINT for task 2 (the R1/R2/R3 recovery ladder): this function
+ * only reports today — it never resets or respawns anything. The ladder
+ * should call into its rung logic from the same call sites that call this
+ * (worker self.onerror/onunhandledrejection below, gpHandleContextLost/
+ * Restored, and the injectWorkerError fault-injection verbs), stamping the
+ * rung it took onto the report via the `recoveryRung` param before/instead
+ * of just logging.
+ */
+export function gpReportFatal(
+    reason: ClientErrorReason, errorClass: string, message: string, stack?: string,
+    recoveryRung?: string,
+): void {
+    reportClientError({
+        reason,
+        errorClass,
+        message,
+        stack,
+        recoveryRung,
+        phase: gpFrameProfile ? gpFrameProfiler.formatLastFrame() : undefined,
+        frame: liveState.gameFrame,
+        entityCount: gpCtx.entityRenderer?.entityCount ?? 0,
+        gameId: gpGameId,
+        mapId: gpMapId,
+        logRing: getRecentLogLines(50),
+    });
+    // PLAN-client-resilience.md task 2: hand the fatal to the main-thread
+    // RecoveryLadder (R2 respawn). This is the RELIABLE cross-boundary signal:
+    // an uncaught throw does propagate to `gameWorker.onerror`, but a fatal from
+    // an async loader/renderer path (`unhandledrejection`) does NOT — so E2 (a
+    // bad def/model crashing the loader) would otherwise never reach the ladder.
+    // Context-loss keeps its own `gp:contextLost` channel (R1/grace), so it is
+    // excluded here; `messageError`/`wedged` originate main-side already.
+    if (reason === 'fatal' || reason === 'injected') {
+        postToMain({ type: 'gp:workerFatal', reason, injected: reason === 'injected' });
+    }
+}
+
+/**
+ * PLAN-client-resilience.md task 2 (R1 soft rung): an in-place subsystem reset,
+ * driven by the main-thread RecoveryLadder via `gp:recover` when a lost WebGL
+ * context restores. Cheaper than an R2 respawn: keep the worker, engine, scene,
+ * loaded models, DefCache and UI; just (1) force Babylon to drop its cached GL
+ * state (`wipeCaches` — the lost context invalidated every GPU object, and the
+ * gl-bridge's private immediate-mode VAO in particular is not Babylon-tracked),
+ * (2) flush the transient FX stores whose GPU buffers the loss killed, and (3)
+ * resync — reconnect for a fresh full server snapshot so entity/projectile
+ * instances repack from a clean base (server-authoritative → lossless).
+ *
+ * Returns true if the reset was applied (engine live + a reconnectable session
+ * present); false if a precondition is missing, which the ladder treats as an
+ * R1 failure and escalates to R2. NOT gated on `gpParked` (unlike gpResync):
+ * a context restore happens on a LIVE session, not a parked one.
+ */
+export function gpSoftRecover(): boolean {
+    if (!gpEngine || !gpInitMsg || !gpCtx.connection) {
+        postLog(2, '[gp] gpSoftRecover: engine/session not ready — cannot soft-reset');
+        return false;
+    }
+    // (1) Drop Babylon's cached GL state + the bridge VAO the lost context left
+    // dangling. Same brute-force wipe the UI pass uses (game-processor.ts:2080).
+    (gpEngine as unknown as { wipeCaches: (b?: boolean) => void }).wipeCaches(true);
+    // (2) Flush transient FX whose GPU-side buffers the context loss invalidated
+    // (keep static: terrain, models, DefCache, lighting, decals).
+    gpCtx.entityRenderer?.resetForResync();
+    gpCtx.projectileRenderer?.resetForResync();
+    gpCombatFX?.reset();
+    // (3) Reconnect the SAME Connection for a fresh full snapshot (its
+    // onAuthenticated re-seeds identity + re-registers the viewport pump). The
+    // fresh ClientSession re-pushes defs (DefCache no-ops the dups) and the
+    // first snapshot repacks entities from a clean base.
+    gpLastFrameTime = performance.now();
+    const t = gpInitMsg.token;
+    gpCtx.connection.connect(gpInitMsg.gameHttpUrl, gpInitMsg.username, '', t);
+    postLog(1, '[gp] soft-recovered (R1) — wipeCaches + FX flush + resync');
+    return true;
+}
+
 export function gpInit(msg: GpInitToWorker): void {
     if (gpEngine) {
         postLog(2, '[gp] gp:init received but engine already up — ignoring');
@@ -1335,6 +1452,39 @@ export function gpInit(msg: GpInitToWorker): void {
     gpEngine = engine;
     gpScene = scene;
     gpCamera = camera;
+
+    // PLAN-client-resilience.md task 3: seed the error-telemetry channel with
+    // this session's context. The endpoint lives on the lobby (same host as
+    // the auth token); errorReportingEnabled reflects the server-operator
+    // opt-out surfaced via /api/version → CONFIG (PLAN-security-hardening §1
+    // "junk floods" row — size cap + rate + dedup live in client-error-
+    // telemetry.ts itself).
+    gpGameId = msg.gameId;
+    gpMapId = msg.mapId;
+    configureErrorTelemetry({
+        endpoint: msg.lobbyUrl,
+        token: msg.token,
+        enabled: msg.errorReportingEnabled !== false,
+        buildStamp: msg.buildStamp,
+        gpuRenderer: engine.getGlInfo().renderer ?? '',
+    });
+
+    // PLAN-client-resilience.md task 1: WebGL context loss is the most common
+    // real-world "crash" — without this the frame loop just spins rendering
+    // nothing forever. Babylon already no-ops draw calls on a lost context.
+    // task 2: these two observables now feed the main-thread RecoveryLadder via
+    // gp:contextLost/gp:contextRestored — a lost context arms R1's restore
+    // grace, a restore inside it drives the soft R1 reset (gpSoftRecover, called
+    // back via gp:recover), and a restore that never comes times out to R2.
+    engine.onContextLostObservable.add(() => {
+        postLog(4, '[gp] WebGL context lost');
+        postToMain({ type: 'gp:contextLost' });
+        gpReportFatal('contextLost', 'WebGLContextLost', 'WebGL context lost on the game-processor worker\'s OffscreenCanvas');
+    });
+    engine.onContextRestoredObservable.add(() => {
+        postLog(2, '[gp] WebGL context restored');
+        postToMain({ type: 'gp:contextRestored' });
+    });
 
     // GW4-c3: install sun + ambient + HDR pipeline + CSM (deferred from c1 —
     // it was invisible on an empty scene and drags in the HDR pipeline).
@@ -1568,6 +1718,7 @@ export function gpInit(msg: GpInitToWorker): void {
         // write into the permanent accumulator (gpFrameProfiler) with no
         // per-frame allocation; percentiles are computed only at dump time.
         if (gpFrameProfile) gpFrameProfiler.beginFrame(now);
+        gpEntityFxFence.beginFrame();
 
         // GW4-c5b: advance the interactive camera(s) first so this frame's
         // render + pick + viewport use the updated pose. Raw wall dt (the camera
@@ -2299,6 +2450,71 @@ export function gpResize(width: number, height: number, dpr: number): void {
     if (dpr > 0) { gpDpr = dpr; gpCtx.selection?.setDpr(dpr); }
 }
 
+/**
+ * PLAN-quickstart.md §3.1 (Part B — detach). Park the session without tearing
+ * the worker down: close the game connection cleanly, stop the viewport pump,
+ * and pause the render loop via the existing `gpRenderPaused` gate (the same
+ * mechanism `window.test.pause()` uses — the rAF keeps firing but early-returns,
+ * so no scene/FX/interp work runs while parked). Everything else — engine,
+ * scene, loaded models, DefCache, renderers, LuaUI/JS UI state — stays alive so
+ * `gpResync` can return in well under a fresh boot. Idempotent: a second detach
+ * on an already-parked worker is a no-op.
+ */
+/** PlayerLeaveIntent / PlayerLeft / PlayerTeamEventItem reason value for a
+ *  detach (parked worker, may reconnect) — see protocol.fbs. */
+const LEAVE_REASON_DETACH = 3;
+
+export function gpDetach(): void {
+    if (gpParked) { postToMain({ type: 'gp:detached' }); return; }
+    gpParked = true;
+    if (gpViewportTimer) { clearInterval(gpViewportTimer); gpViewportTimer = null; }
+    // Tell the server why, THEN close cleanly. The reason lets PlayerRemoved
+    // distinguish detach from quit (PLAN-metalstorm-teams.md's consumer).
+    // Keep the Connection OBJECT (don't null it): gpResync re-`connect()`s the
+    // same instance so the selection/build/command controllers + CommandBuffer +
+    // ServerClock they captured at gpInit stay valid across the park.
+    gpCtx.connection?.sendPlayerLeaveIntent(LEAVE_REASON_DETACH);
+    gpCtx.connection?.disconnect();
+    gpRenderPaused = true;
+    postLog(1, '[gp] detached — session parked (worker alive, render + net paused)');
+    postToMain({ type: 'gp:detached' });
+}
+
+/**
+ * PLAN-quickstart.md §3.2 (Part B — resync). Re-enter a parked session: flush
+ * every *dynamic* renderer store (entities + interpolator, projectiles, combat
+ * FX) while keeping all *static* state (terrain, models, DefCache, lighting,
+ * UI), then re-open the game connection with the captured init creds. The fresh
+ * server-side ClientSession re-streams a full snapshot + re-pushes defs, which
+ * DefCache no-ops for already-known ids (idempotent by construction). The first
+ * full snapshot repacks entity instances from a clean base — no ghosts, no
+ * interpolation jump. `gpConnect` re-runs its onAuthenticated seeding (identity,
+ * viewport pump, LuaUI identity), so nothing else needs re-arming here.
+ */
+export function gpResync(token?: string): void {
+    if (!gpParked || !gpInitMsg || !gpCtx.connection) {
+        postLog(2, '[gp] gpResync called with no parked session — ignoring');
+        postToMain({ type: 'gp:resynced' });
+        return;
+    }
+    // Flush dynamic state (keep static: models, DefCache, terrain, lighting).
+    gpCtx.entityRenderer?.resetForResync();
+    gpCtx.projectileRenderer?.resetForResync();
+    gpCombatFX?.reset();
+    gpParked = false;
+    gpRenderPaused = false;
+    gpLastFrameTime = performance.now();
+    // Reconnect the SAME Connection object (its onAuthenticated is still wired,
+    // so it re-seeds identity + re-registers the viewport pump). A refreshed
+    // token overrides the parked one, which may have aged past the TTL. The
+    // fresh ClientSession re-streams a full snapshot + re-pushes defs; DefCache
+    // no-ops the dups and the first snapshot repacks entities from a clean base.
+    const t = token || gpInitMsg.token;
+    gpCtx.connection.connect(gpInitMsg.gameHttpUrl, gpInitMsg.username, '', t);
+    postLog(1, '[gp] resynced — reconnecting; full snapshot will repopulate the world');
+    postToMain({ type: 'gp:resynced' });
+}
+
 export function gpShutdown(): void {
     if (gpViewportTimer) { clearInterval(gpViewportTimer); gpViewportTimer = null; }
     rmlReset();  // PLAN-rml.md: drop the bridge op queue + runtime ref.
@@ -2391,6 +2607,11 @@ export function gpShutdown(): void {
     gpEngine = null;
     gpScene = null;
     gpCamera = null;
+    // PLAN-quickstart.md §3: drop the parked-session bookkeeping so a fresh
+    // gp:init after a real teardown never looks like a resync target.
+    gpParked = false;
+    gpInitMsg = null;
+    gpRenderPaused = false;
 }
 
 // ── GW8: window.test client-bound getBridge() ───────────────────────────────
@@ -2438,6 +2659,65 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
         case 'perfReset':
             gpFrameProfiler.reset();
             return null;
+        // — per-def legacy entity-FX script cost (PLAN-fx-offload X5). Ranked
+        //   most-expensive-first, same shape/convention as uiProfileDump. —
+        case 'entityFxFenceDump':
+            return gpEntityFxFence.dump();
+        case 'entityFxFenceReset':
+            gpEntityFxFence.reset();
+            return null;
+        // — PLAN-client-resilience.md task 5: fault-injection verbs
+        //   (window.test.injectWorkerError(kind, opts)). The recovery ladder
+        //   (task 2) is untestable without a reliable way to trigger each of
+        //   task 1's detection paths on demand — this is that. Every kind
+        //   exercises a real detection hook rather than faking the report
+        //   directly, so a regression in the hook itself shows up too. —
+        case 'injectWorkerError': {
+            const kind = String(args[0] ?? '');
+            const opts = obj<Record<string, unknown>>(1, {});
+            switch (kind) {
+                case 'throw':
+                    // Escape this call's stack on a macrotask — throwing
+                    // synchronously here would just be caught by
+                    // lua-widget-worker.ts's gp:test try/catch and reported
+                    // as an ordinary test failure, never reaching
+                    // self.onerror (the hook under test). The
+                    // '[test.injectWorkerError]' message prefix is how the
+                    // onerror handler tells this apart from a real fatal.
+                    setTimeout(() => { throw new Error('[test.injectWorkerError] synthetic uncaught throw'); }, 0);
+                    return { ok: true };
+                case 'rejection':
+                    // A standalone rejected promise, deliberately not chained
+                    // off this gp:test call's own promise — a genuine
+                    // unhandledrejection.
+                    Promise.reject(new Error('[test.injectWorkerError] synthetic unhandled rejection'));
+                    return { ok: true };
+                case 'wedge-loop': {
+                    // Synchronously block the event loop for `opts.ms`
+                    // (default 8000 — past the watchdog's 2s×3 threshold,
+                    // then it self-clears) so postMessage/heartbeat pings
+                    // genuinely go unanswered: the one failure class
+                    // self.onerror structurally cannot catch (nothing throws;
+                    // the loop just never returns).
+                    const ms = typeof opts.ms === 'number' ? opts.ms : 8000;
+                    const until = performance.now() + ms;
+                    while (performance.now() < until) { /* intentional spin — do not optimise away */ }
+                    return { ok: true, spunMs: ms };
+                }
+                case 'context-loss': {
+                    if (!gpEngine) return { ok: false, error: 'engine not up' };
+                    const gl = getEngineGl(gpEngine);
+                    const ext = gl.getExtension('WEBGL_lose_context');
+                    if (!ext) return { ok: false, error: 'WEBGL_lose_context unavailable in this browser' };
+                    ext.loseContext();
+                    const restoreAfterMs = typeof opts.restoreAfterMs === 'number' ? opts.restoreAfterMs : 500;
+                    if (restoreAfterMs > 0) setTimeout(() => ext.restoreContext(), restoreAfterMs);
+                    return { ok: true };
+                }
+                default:
+                    return { ok: false, error: `unknown injectWorkerError kind '${kind}'` };
+            }
+        }
         // — per-widget LuaUI cost profile (PLAN-perf N1). start installs the
         //   Lua-side timing wrappers (widget-profiler.ts) and zeroes the JS
         //   fixed-tax accumulator; dump merges both into the P5-vs-Fengari

@@ -10,6 +10,12 @@
 //   // on entity destroy (squad unit): squads.removeSquad(id);
 //   // on impact/combat FX event:      squads.reportImpact({x,z,radius,squadId?});
 //   // each render frame:              squads.update(dtSeconds);
+//
+// Big-unit threading (PLAN-metalstorm-flow.md §4, task 3 — client-only,
+// cosmetic; footprintProfile is mocked until flow F1 lands):
+//   // on a footprint-profile unit appearing: squads.registerBigUnit(id, footprintProfile);
+//   // each render frame (interpolated pose): squads.syncBigUnit(id, x, z, heading, vx, vz, lod?);
+//   // on entity destroy:                     squads.removeBigUnit(id);
 
 import { SquadManager } from './squad-manager.js';
 import { NullRenderBackend } from './render-backend.js';
@@ -20,6 +26,8 @@ export { Member } from './member.js';
 export { NullRenderBackend } from './render-backend.js';
 export { DEFAULT_CONFIG, linearCount, collapseCount } from './config.js';
 export { buildSlots, slotToWorld } from './formation.js';
+export { createPatchSet, patchToWorld } from './patches.js';
+export { BigUnitRepulsor, isUnderHull, hullPush, patchPush, panicClamp } from './big-unit-repulsor.js';
 
 /**
  * Create a squad system.

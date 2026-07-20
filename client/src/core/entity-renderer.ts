@@ -2233,6 +2233,34 @@ export class EntityRenderer {
         return this.entityMeta.get(id)?.defId;
     }
 
+    /** Resolve a piece's index by name (glb node name, e.g. "Turret") for
+     *  an entity's model — the lookup a `pieceSpin` FX binding
+     *  (fx-bindings.ts, PLAN-fx-offload X4) needs before it can call
+     *  setClipPose(). Null when the entity/template is unknown or no piece
+     *  with that name exists. */
+    getPieceIndex(id: number, pieceName: string): number | null {
+        const meta = this.entityMeta.get(id);
+        if (!meta) return null;
+        const tmpl = this.modelTemplates.get(meta.defId);
+        if (!tmpl) return null;
+        const idx = tmpl.pieces.findIndex((p) => p.name === pieceName);
+        return idx >= 0 ? idx : null;
+    }
+
+    /** Rest-pose parent-relative local matrix for every piece in an
+     *  entity's model, indexed like setClipPose()'s pose map expects. A
+     *  `pieceSpin` binding composes its own spin rotation on top of the
+     *  relevant entry rather than starting from identity, so a spinning
+     *  wheel keeps its authored offset from the hull instead of snapping
+     *  to the origin. Null when the entity/template is unknown. */
+    getRestLocalMatrices(id: number): Matrix[] | null {
+        const meta = this.entityMeta.get(id);
+        if (!meta) return null;
+        const tmpl = this.modelTemplates.get(meta.defId);
+        if (!tmpl) return null;
+        return tmpl.pieces.map((p) => p.localMatrix);
+    }
+
     /** Resolve one authored clip plus the rest-pose local matrices the
      *  ClipPlayer composes unanimated channels from. */
     getClip(id: number, name: string): { clip: ModelClip; restLocals: Matrix[] } | null {
@@ -2351,6 +2379,36 @@ export class EntityRenderer {
         this.clipPoses.delete(id);
         this.aimPoses.delete(id);
         this.pieceStreamed.delete(id);
+    }
+
+    /**
+     * PLAN-quickstart.md §3.2 (Part B — resync): flush all *dynamic* per-entity
+     * state while keeping every *static* asset the re-entry would otherwise pay
+     * to reload — loaded models (`modelTemplates`), their textures, `defInfos`,
+     * team materials and the thin-instance meshes themselves.
+     *
+     * After a detach the game connection is re-opened against a fresh
+     * server-side ClientSession, which delivers a full (non-delta) snapshot.
+     * That snapshot reconciles the entity set on its own via `update()`, but the
+     * interpolator carries a stale timestamp history across the detach gap and
+     * the thin-instance buffers still hold the pre-detach unit poses. Zeroing
+     * the derived per-entity state here means the first post-reconnect snapshot
+     * repacks instances cleanly from an empty base — no ghosts, no interpolation
+     * jump — the documented-correct behaviour for a late/re-join.
+     */
+    resetForResync(): void {
+        this.entityMeta.clear();
+        this.interpolator.clear();
+        this.ghostPoses.clear();
+        this.pieceOverrides.clear();
+        this.clipPoses.clear();
+        for (const mesh of this.radarBlipMeshes.values()) mesh.thinInstanceCount = 0;
+        this.selectedIds = [];
+        // Thin-instance buffers are derived from entityMeta and repacked every
+        // update(); zero their live counts so nothing renders from the parked
+        // session before the first post-reconnect snapshot rebuilds them.
+        for (const mesh of this.renderMeshes.values()) mesh.thinInstanceCount = 0;
+        if (this.selectionMesh) this.selectionMesh.thinInstanceCount = 0;
     }
 
     /**

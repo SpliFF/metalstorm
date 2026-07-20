@@ -176,6 +176,7 @@ Request — a manifest describing everything the three lobby screens collect:
   "map": "green_flat_x34_v3",
   "game": "metalstorm",
   "modoptions": { "authority_cost_scale": "0" },
+  "scenario": "scenario_smoke_test",
   "aiSlots": [ { "aiId": "null", "team": 1, "startPos": 1 } ],
   "players": [ { "username": "test1", "team": 0, "startPos": 0, "spectator": false } ],
   "autoStart": true
@@ -185,6 +186,7 @@ Request — a manifest describing everything the three lobby screens collect:
 - `players[0]` becomes the room host. A declared username with no existing account is created on the fly and flagged `is_dev` — it gets an unusable random password (never logs in via `/api/auth/login`), only the session token minted here. A username already in a different room is force-left first.
 - Re-POSTing the same `name` (or restarting the lobby with `--direct <manifest.json>` pointing at an unchanged manifest) tears down the old room and recreates it — idempotent, not additive.
 - `autoStart` (default `true`) drives the room through the same path `/api/rooms/start` uses, including its solo-team Null AI safety net. Set `false` to stop at a bound-but-unstarted room.
+- `scenario` (optional) names a `scenarios/<name>.lua` world file (PLAN-persistence.md §5) for the game's `game_scenario.lua` gadget to stage at `GameStart` — pre-set units, region ownership, civilians, and objectives instead of the game's default start force. Threaded through as an ordinary modoption (`scenario`), so it's equally settable via `"modoptions": {"scenario": "..."}` directly.
 
 Response — the same room object `/api/rooms/start` already returns, plus a `sessions` map:
 
@@ -241,10 +243,35 @@ States: `starting`, `running`, `ended`, `crashed`.
 **GET /api/version**
 
 ```json
-{"engine":"springweb","stamp":"5ca1489766-20260414143333","no_cache":false}
+{"engine":"springweb","stamp":"5ca1489766-20260414143333","no_cache":false,"errorReportingEnabled":true}
 ```
 
 The `stamp` field is the build stamp for cache-busting asset URLs. See [caching.md](caching.md).
+`errorReportingEnabled` is the operator opt-out for [client error reports](#client-error-reports)
+below (`--disable-client-error-reports`).
+
+### Client Error Reports
+
+**POST /api/client-errors** (requires auth — any valid session token)
+
+See [PLAN-client-resilience.md](../PLAN-client-resilience.md) — the client-side watchdog/context-
+loss/fatal-error detection hooks POST a crash report here for later triage (a grouped dashboard
+view is a follow-up; today this is ingestion-only). Size-capped at 40KB, rate-limited to 20/hour
+per user (the client's own advisory cap is 5/hour per session), 400 on malformed JSON.
+
+```bash
+curl -X POST http://localhost:8011/api/client-errors \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"reason":"fatal","error_class":"TypeError","message":"boom","stack":"...","stack_hash":"...",
+       "recovery_rung":"none","phase":"fx","frame":12345,"entity_count":200,
+       "game_id":"zk","map_id":"green_flat","build_stamp":"...","gpu_renderer":"...",
+       "log_ring":["[INFO] ...","[WARN] ..."],"count":1}'
+```
+
+**Response:** `{"ok":true,"id":42}`
+
+Disable server-side with `--disable-client-error-reports` (self-hosted deployments only —
+default is enabled).
 
 ---
 

@@ -269,6 +269,19 @@ export class CombatFX {
         return this.effects.length;
     }
 
+    /// PLAN-quickstart.md §3.2 (Part B — resync): drop every in-flight combat
+    /// effect so the parked session's explosions/tracers don't hang on screen
+    /// after re-entry, while KEEPING the procedural fallback materials (they are
+    /// session-agnostic and expensive to recreate). Distinct from `dispose()`,
+    /// which also tears down those materials.
+    reset(): void {
+        for (const fx of this.effects) {
+            fx.mesh.dispose();
+        }
+        this.effects = [];
+        this.warnedFallback.clear();
+    }
+
     dispose(): void {
         for (const fx of this.effects) {
             fx.mesh.dispose();

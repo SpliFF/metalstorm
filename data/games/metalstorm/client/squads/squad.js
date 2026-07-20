@@ -4,17 +4,24 @@
 import { Member } from './member.js';
 import { buildSlots, slotToWorld } from './formation.js';
 import { arrive, separate, clampLen } from './steering.js';
+import { isUnderHull, hullPush, patchPush, panicClamp } from './big-unit-repulsor.js';
 
 // Reused scratch objects — the per-frame loops must not allocate (§7 perf).
 const _slotW = { x: 0, z: 0 };
 const _arr = { x: 0, z: 0 };
 const _sep = { x: 0, z: 0 };
+const _big = { x: 0, z: 0 };
 const _desired = { x: 0, z: 0 };
+const NO_BIG_UNITS = [];
 
 export class Squad {
   /**
    * @param {number} id             sim unit id (authoritative)
-   * @param {object} def            { defId, squadSize, formationType, formationRadius, maxSpeed }
+   * @param {object} def            { defId, squadSize, formationType, formationRadius, maxSpeed,
+   *                                   moveClass? }  moveClass is a moveinfo.tdf name (e.g.
+   *                                   'INFANTRY'), used only to check a footprint profile's
+   *                                   `underpass` list (PLAN-metalstorm-flow.md §3/§4); mocked by
+   *                                   callers until the real moveinfo integration lands.
    * @param {RenderBackend} backend
    * @param {object} cfg            DEFAULT_CONFIG (merged)
    */
@@ -119,12 +126,16 @@ export class Squad {
   // --- per-frame update ---------------------------------------------------
 
   /** Steer + integrate living members. `neighbourQuery` yields nearby members
-   *  (this squad + others) for separation; supplied by the manager. */
-  update(dt, nowSec, neighbourQuery) {
+   *  (this squad + others) for separation; supplied by the manager.
+   *  `bigUnits` (PLAN-metalstorm-flow.md §4, task 3/4) is an array of
+   *  BigUnitRepulsor instances (scale-4 super-heavies / footprint-profile
+   *  buildings) to thread around/under; supplied by the manager. */
+  update(dt, nowSec, neighbourQuery, bigUnits = NO_BIG_UNITS) {
     if (this.lod !== 'full') return this._updateCentroid();
 
     const maxSpeed = this.def.maxSpeed * this.cfg.memberSpeedMultiplier;
     const leash = this.def.formationRadius * this.cfg.maxMemberDistance;
+    const moveClass = this.def.moveClass; // moveinfo.tdf name; undefined = never underpass-eligible
 
     for (const m of this.members) {
       if (!m.alive) continue;
@@ -133,9 +144,25 @@ export class Squad {
       arrive(m.x, m.z, _slotW.x, _slotW.z, maxSpeed, this.cfg.arrivalRadius, _arr);
       separate(m.x, m.z, neighbourQuery(m), this.cfg.separationRadius, _sep);
 
-      _desired.x = _arr.x * this.cfg.arrivalWeight + _sep.x * this.cfg.separationWeight * maxSpeed;
-      _desired.z = _arr.z * this.cfg.arrivalWeight + _sep.z * this.cfg.separationWeight * maxSpeed;
-      clampLen(_desired, maxSpeed);
+      // Big-unit threading: hull bow-wave by default; swap to the animated
+      // contact-patch repulsor set while legitimately threading under a hull.
+      _big.x = 0; _big.z = 0;
+      let underHull = false;
+      for (const bu of bigUnits) {
+        if (isUnderHull(m, bu, moveClass)) {
+          underHull = true;
+          patchPush(m, bu, this.cfg, _big);
+        } else {
+          hullPush(m, bu, this.cfg, _big);
+        }
+      }
+
+      _desired.x = _arr.x * this.cfg.arrivalWeight + _sep.x * this.cfg.separationWeight * maxSpeed
+        + _big.x * this.cfg.bigUnitWeight * maxSpeed;
+      _desired.z = _arr.z * this.cfg.arrivalWeight + _sep.z * this.cfg.separationWeight * maxSpeed
+        + _big.z * this.cfg.bigUnitWeight * maxSpeed;
+      const speedCap = underHull ? maxSpeed * this.cfg.underHullSpeedPenalty : maxSpeed;
+      clampLen(_desired, speedCap);
 
       m.integrate(_desired.x, _desired.z, dt, this.backend);
 
@@ -145,8 +172,20 @@ export class Squad {
       if (d > leash) {
         const s = leash / d;
         m.x = this.cx + dx * s; m.z = this.cz + dz * s;
-        m.y = this.backend.groundHeight(m.x, m.z);
       }
+
+      // Panic clause (§4): a foot about to plant on a member hard-pushes it
+      // clear — final authority over position this frame, so cohesion can
+      // never drag a member back under a planted foot. Re-checks isUnderHull
+      // per big unit rather than trusting the pre-integration flag above: the
+      // leash clamp can change a member's hull status by moving it.
+      for (const bu of bigUnits) {
+        if (isUnderHull(m, bu, moveClass)) panicClamp(m, bu);
+      }
+
+      // Y-clamp (§4): no climbing the hull — always the ground sample, never
+      // a stale value from before the leash/panic clamps moved the member.
+      m.y = this.backend.groundHeight(m.x, m.z);
 
       this.backend.updateMember(m.handle, m.x, m.y, m.z, m.headingY, m.gait);
     }

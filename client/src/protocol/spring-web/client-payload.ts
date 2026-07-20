@@ -19,6 +19,7 @@ import { PathRequestCancel, PathRequestCancelT } from '../spring-web/path-reques
 import { Ping, PingT } from '../spring-web/ping.js';
 import { PlayerCommand, PlayerCommandT } from '../spring-web/player-command.js';
 import { PlayerCommandBatch, PlayerCommandBatchT } from '../spring-web/player-command-batch.js';
+import { PlayerLeaveIntent, PlayerLeaveIntentT } from '../spring-web/player-leave-intent.js';
 import { ReconnectRequest, ReconnectRequestT } from '../spring-web/reconnect-request.js';
 import { RoomAddAI, RoomAddAIT } from '../spring-web/room-add-ai.js';
 import { RoomCloseRoom, RoomCloseRoomT } from '../spring-web/room-close-room.js';
@@ -77,13 +78,14 @@ export enum ClientPayload {
   StandingOrderCreate = 33,
   StandingOrderUpdate = 34,
   StandingOrderRemove = 35,
-  LuaUIMsg = 36
+  LuaUIMsg = 36,
+  PlayerLeaveIntent = 37
 }
 
 export function unionToClientPayload(
   type: ClientPayload,
-  accessor: (obj:AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|LuaRulesMsg|LuaUIMsg|PathRequest|PathRequestCancel|Ping|PlayerCommand|PlayerCommandBatch|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|SelectionState|StandingOrderCreate|StandingOrderRemove|StandingOrderUpdate|ViewportUpdate) => AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|LuaRulesMsg|LuaUIMsg|PathRequest|PathRequestCancel|Ping|PlayerCommand|PlayerCommandBatch|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|SelectionState|StandingOrderCreate|StandingOrderRemove|StandingOrderUpdate|ViewportUpdate|null
-): AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|LuaRulesMsg|LuaUIMsg|PathRequest|PathRequestCancel|Ping|PlayerCommand|PlayerCommandBatch|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|SelectionState|StandingOrderCreate|StandingOrderRemove|StandingOrderUpdate|ViewportUpdate|null {
+  accessor: (obj:AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|LuaRulesMsg|LuaUIMsg|PathRequest|PathRequestCancel|Ping|PlayerCommand|PlayerCommandBatch|PlayerLeaveIntent|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|SelectionState|StandingOrderCreate|StandingOrderRemove|StandingOrderUpdate|ViewportUpdate) => AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|LuaRulesMsg|LuaUIMsg|PathRequest|PathRequestCancel|Ping|PlayerCommand|PlayerCommandBatch|PlayerLeaveIntent|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|SelectionState|StandingOrderCreate|StandingOrderRemove|StandingOrderUpdate|ViewportUpdate|null
+): AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|LuaRulesMsg|LuaUIMsg|PathRequest|PathRequestCancel|Ping|PlayerCommand|PlayerCommandBatch|PlayerLeaveIntent|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|SelectionState|StandingOrderCreate|StandingOrderRemove|StandingOrderUpdate|ViewportUpdate|null {
   switch(ClientPayload[type]) {
     case 'NONE': return null; 
     case 'Handshake': return accessor(new Handshake())! as Handshake;
@@ -122,15 +124,16 @@ export function unionToClientPayload(
     case 'StandingOrderUpdate': return accessor(new StandingOrderUpdate())! as StandingOrderUpdate;
     case 'StandingOrderRemove': return accessor(new StandingOrderRemove())! as StandingOrderRemove;
     case 'LuaUIMsg': return accessor(new LuaUIMsg())! as LuaUIMsg;
+    case 'PlayerLeaveIntent': return accessor(new PlayerLeaveIntent())! as PlayerLeaveIntent;
     default: return null;
   }
 }
 
 export function unionListToClientPayload(
   type: ClientPayload, 
-  accessor: (index: number, obj:AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|LuaRulesMsg|LuaUIMsg|PathRequest|PathRequestCancel|Ping|PlayerCommand|PlayerCommandBatch|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|SelectionState|StandingOrderCreate|StandingOrderRemove|StandingOrderUpdate|ViewportUpdate) => AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|LuaRulesMsg|LuaUIMsg|PathRequest|PathRequestCancel|Ping|PlayerCommand|PlayerCommandBatch|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|SelectionState|StandingOrderCreate|StandingOrderRemove|StandingOrderUpdate|ViewportUpdate|null, 
+  accessor: (index: number, obj:AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|LuaRulesMsg|LuaUIMsg|PathRequest|PathRequestCancel|Ping|PlayerCommand|PlayerCommandBatch|PlayerLeaveIntent|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|SelectionState|StandingOrderCreate|StandingOrderRemove|StandingOrderUpdate|ViewportUpdate) => AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|LuaRulesMsg|LuaUIMsg|PathRequest|PathRequestCancel|Ping|PlayerCommand|PlayerCommandBatch|PlayerLeaveIntent|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|SelectionState|StandingOrderCreate|StandingOrderRemove|StandingOrderUpdate|ViewportUpdate|null, 
   index: number
-): AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|LuaRulesMsg|LuaUIMsg|PathRequest|PathRequestCancel|Ping|PlayerCommand|PlayerCommandBatch|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|SelectionState|StandingOrderCreate|StandingOrderRemove|StandingOrderUpdate|ViewportUpdate|null {
+): AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|LuaRulesMsg|LuaUIMsg|PathRequest|PathRequestCancel|Ping|PlayerCommand|PlayerCommandBatch|PlayerLeaveIntent|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|SelectionState|StandingOrderCreate|StandingOrderRemove|StandingOrderUpdate|ViewportUpdate|null {
   switch(ClientPayload[type]) {
     case 'NONE': return null; 
     case 'Handshake': return accessor(index, new Handshake())! as Handshake;
@@ -169,6 +172,7 @@ export function unionListToClientPayload(
     case 'StandingOrderUpdate': return accessor(index, new StandingOrderUpdate())! as StandingOrderUpdate;
     case 'StandingOrderRemove': return accessor(index, new StandingOrderRemove())! as StandingOrderRemove;
     case 'LuaUIMsg': return accessor(index, new LuaUIMsg())! as LuaUIMsg;
+    case 'PlayerLeaveIntent': return accessor(index, new PlayerLeaveIntent())! as PlayerLeaveIntent;
     default: return null;
   }
 }

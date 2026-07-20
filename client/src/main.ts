@@ -31,6 +31,7 @@ import { TimingOverlay } from './core/timing-overlay.js';
 import { fetchBuildStamp, CONFIG } from './config.js';
 import GameWorker from './core/lua-widget-worker.ts?worker';
 import type { GpInitToWorker, GpMinimapMetalSpots, GpTimingState } from './core/game-worker-protocol.js';
+import { DetachSessionManager, DEFAULT_PARK_TTL_MS } from './core/detach-session.js';
 import { fetchMapDataHttp, type ParsedMapData } from './core/map-data.js';
 import { loadMapLighting, type MapLighting } from './core/map-lighting.js';
 import { applyMapLighting, createSceneLighting, type SceneLighting } from './core/scene-lighting.js';
@@ -52,6 +53,10 @@ import { showQuitConfirm } from './ui/quit-confirm/quit-confirm.js';
 import { showGameOver } from './ui/game-over/game-over.js';
 import { debugConsole } from './core/debug-console.js';
 import { logIngest } from './core/log-ingest.js';
+import { configureErrorTelemetry, reportClientError } from './core/client-error-telemetry.js';
+import type { ClientErrorReason } from './core/client-error-telemetry.js';
+import { HeartbeatWatchdog } from './core/heartbeat-watchdog.js';
+import { RecoveryLadder, type RecoveryTrigger } from './core/recovery-ladder.js';
 import {
     getDefaultLobbyTemplates,
     loadGameLobbyTemplates,
@@ -102,6 +107,128 @@ function workerCall(method: string, args: unknown[] = []): Promise<unknown> {
         w.postMessage({ type: 'gp:test', id, method, args });
     });
 }
+/// PLAN-client-resilience.md task 1: heartbeat watchdog probe channel — a
+/// dedicated `gp:ping`/`gp:pong` round-trip, deliberately NOT routed through
+/// workerCall()/gp:test (gpTestDispatch has its own business logic to run
+/// through; the watchdog needs a probe the worker answers from the very top
+/// of its dispatcher, before anything that could itself be wedged).
+let gpPingId = 0;
+const gpPingPending = new Map<number, () => void>();
+function sendHeartbeatPing(): Promise<void> {
+    return new Promise((resolve, reject) => {
+        const w = gameWorker;
+        if (!w) { reject(new Error('[watchdog] no game worker')); return; }
+        const id = ++gpPingId;
+        gpPingPending.set(id, resolve);
+        w.postMessage({ type: 'gp:ping', id });
+    });
+}
+/// PLAN-client-resilience.md task 2 (R1 soft rung): `gp:recover`/`gp:recovered`
+/// round-trip. Resolves true on the worker's ack, false on a non-ack within the
+/// timeout (a worker too wedged to soft-reset), so the RecoveryLadder escalates
+/// to R2. Its own timeout means the ladder never hangs waiting on a dead worker.
+const GP_RECOVER_TIMEOUT_MS = 3000;
+let gpRecoverId = 0;
+const gpRecoverPending = new Map<number, (ok: boolean) => void>();
+/// True only during an R2 respawn's re-entry into startGame(). The ladder must
+/// SURVIVE an R2 respawn (its loop-guard counts are what eventually reach R3);
+/// startGame()'s defensive teardown resets the ladder on every OTHER path (cold
+/// boot, user re-entry) but skips it while this is set.
+let r2RespawnInFlight = false;
+function sendRecoverRequest(): Promise<boolean> {
+    return new Promise((resolve) => {
+        const w = gameWorker;
+        if (!w) { resolve(false); return; }
+        const id = ++gpRecoverId;
+        let done = false;
+        const settle = (ok: boolean) => {
+            if (done) return;
+            done = true;
+            gpRecoverPending.delete(id);
+            resolve(ok);
+        };
+        gpRecoverPending.set(id, settle);
+        setTimeout(() => settle(false), GP_RECOVER_TIMEOUT_MS);
+        w.postMessage({ type: 'gp:recover', id });
+    });
+}
+/// PLAN-client-resilience.md task 2: the R1/R2/R3 recovery ladder + loop guard.
+/// The single decision authority for worker failure. Persists across R2
+/// respawns (it lives on main; the worker is what gets replaced). Every rung
+/// fires ONE telemetry event stamped with the rung + trigger chain; the loop
+/// guard bounds recoveries to r1Max+r2Max+1 per 5-min window (provable
+/// termination — see recovery-ladder.ts). Reset on teardown so a fresh game
+/// starts from a clean ladder.
+const recoveryLadder = new RecoveryLadder({
+    softReset: sendRecoverRequest,
+    respawn: () => {
+        // R2: terminate + respawn on the boot path. startGame() does its own
+        // defensive worker teardown + watchdog restart; the fresh ClientSession
+        // reconnects and the server re-streams a full snapshot (server-
+        // authoritative → lossless). E2 (crash during initial load) lands here
+        // too — respawn IS the initial boot path.
+        if (lastGameArgs) {
+            console.warn('[recovery] R2 — respawning game-processor worker + reconnecting');
+            r2RespawnInFlight = true;
+            enterGame(lastGameArgs.port, lastGameArgs.mapId, lastGameArgs.gameId);
+        } else {
+            console.error('[recovery] R2 requested but no lastGameArgs — falling back to lobby');
+            quitToLobby();
+        }
+    },
+    showErrorScreen: (reportId) => {
+        console.error(`[recovery] R3 — giving up; report id ${reportId}`);
+        showRecoveryErrorScreen(reportId);
+    },
+    emitRungEvent: ({ rung, reason, chain, reportId }) => {
+        // The rung telemetry event: distinct from the raw per-error reports the
+        // detection hooks already fire (rung 'none', rich per-crash context) —
+        // this records what the LADDER decided, with the full trigger chain, so
+        // the dashboard can see the recovery path taken. Low-volume by
+        // construction (the loop guard caps it), so no dedup storm.
+        const reasonToClass: Record<RecoveryTrigger, ClientErrorReason> = {
+            'context-restored': 'contextLost',
+            'context-lost-timeout': 'contextLost',
+            'wedged': 'wedged',
+            'fatal': 'fatal',
+            'worker-error': 'fatal',
+        };
+        reportClientError({
+            reason: reasonToClass[reason] ?? 'fatal',
+            errorClass: 'RecoveryLadder',
+            message: `${rung} recovery (${reportId}); triggers: ${chain.join(' → ')}`,
+            recoveryRung: rung,
+        });
+    },
+    now: () => Date.now(),
+});
+/// Route a failure signal into the recovery ladder. Central helper so every
+/// call site (watchdog, worker onerror, worker fatal message) reads the same.
+function ladderTrigger(t: RecoveryTrigger): void {
+    recoveryLadder.trigger(t);
+}
+/// Detects a wedged worker (blocked event loop — the one failure class
+/// self.onerror structurally can't catch). Started once gp:init is posted,
+/// stopped on teardown. EXTENSION POINT (task 2): onWedged only reports
+/// today; the R2 rung (terminate + respawn + reconnect) belongs here once
+/// quickstart part B's boot/resync path lands.
+const heartbeatWatchdog = new HeartbeatWatchdog({
+    ping: sendHeartbeatPing,
+    isSuppressed: () => document.hidden || testHarness?.paused === true,
+    onWedged: () => {
+        console.error('[gameWorker] watchdog: worker unresponsive after 3 missed 2s heartbeats — wedged');
+        reportClientError({
+            reason: 'wedged',
+            errorClass: 'WatchdogWedged',
+            message: 'game-processor worker unresponsive after 3 missed 2s heartbeats',
+        });
+        // PLAN-client-resilience.md task 2: a wedged worker is R2's trigger —
+        // hand it to the ladder (terminate + respawn + reconnect). The loop
+        // guard bounds repeated wedges to R3.
+        ladderTrigger('wedged');
+    },
+    onRecovered: () => console.log('[gameWorker] watchdog: heartbeat recovered'),
+});
 let perfOverlay: PerfOverlay | null = null;
 /// Timing telemetry panel for the presentation clock (F10). Separate from the
 /// perf overlay (F11). The clock itself is worker-resident (created in gpInit,
@@ -296,6 +423,24 @@ let gameConn: Connection | null = null;
 /// canvas) for a game that no longer exists.
 let activeSession = 0;
 
+// --- Detach / re-enter (PLAN-quickstart.md Part B) ---
+//
+// The "detach vs quit" split: detach parks the game-processor worker (engine,
+// scene, models, DefCache all alive) and shows the lobby; re-entry is a fast
+// `gpResync` reconnect instead of a full boot. `detachSession` owns the pure
+// keying/TTL/generation bookkeeping (core/detach-session.ts); the functions
+// below drive the DOM/audio/worker handles it deliberately does not touch.
+const detachSession = new DetachSessionManager();
+/// TTL sweep: a parked worker the player never returns to is torn down after
+/// DEFAULT_PARK_TTL_MS. Null when no session is parked.
+let parkTtlTimer: number | null = null;
+/// E3 guard: detach is only offered after the first rendered frame — before
+/// that the worker is half-booted and quit (full teardown) is the only exit.
+/// Latched by the first `gp:sceneState` from the worker, reset on each boot.
+let firstFrameSeen = false;
+/// Last startGame() target, so a full-boot re-entry fallback knows what to boot.
+let lastGameArgs: { port: number; mapId: string; gameId: string } | null = null;
+
 // --- Game Scene ---
 
 let currentFrame = 0;
@@ -360,11 +505,25 @@ function quitToLobby(): void {
     // canvas itself is replaced with a fresh clone on the next startGame().
     gameWorker?.terminate();
     gameWorker = null;
+    // PLAN-client-resilience.md task 1: no worker left to ping.
+    heartbeatWatchdog.stop();
+    gpPingPending.clear();
+    // PLAN-client-resilience.md task 2: a full quit ends any recovery episode —
+    // reset the ladder + drop in-flight soft-reset requests + the respawn flag.
+    recoveryLadder.reset();
+    gpRecoverPending.clear();
+    r2RespawnInFlight = false;
     uninstallCameraWindowApi();
     delete (window as any).test;
     delete (window as any).widgets;
     delete (window as any).__gp;
+    delete (window as any).springrts;
     testHarness = null;
+    // PLAN-quickstart.md Part B: a full quit ends any parked session too.
+    clearParkTtl();
+    detachSession.clear();
+    lobbyUI?.clearParked();
+    firstFrameSeen = false;
     // GW8: drop any in-flight worker-bridge requests + cached feed.
     for (const p of gpPending.values()) p.reject(new Error('[test] game ended'));
     gpPending.clear();
@@ -390,6 +549,7 @@ function quitToLobby(): void {
     if (hud) hud.style.display = 'none';
     document.getElementById('quit-confirm-overlay')?.remove();
     document.getElementById('game-over-overlay')?.remove();
+    document.getElementById('recovery-error-overlay')?.remove();
 
     // Show the lobby. The lobby connection stayed open the whole
     // time. If the player is still a member of their room (the normal
@@ -405,6 +565,157 @@ function quitToLobby(): void {
     lobbyUI?.show();
 }
 
+/**
+ * PLAN-client-resilience.md task 2 (R3 — give up). The recovery ladder
+ * exhausted its rungs (R2 failed twice in the window); show an honest failure
+ * with a citable report id and a single way out (return to lobby). Terminate
+ * the (crash-looping) worker + stop the watchdog immediately so no further
+ * telemetry or recovery storm continues while the screen is up; the button
+ * routes through `quitToLobby` for the full teardown (which resets the ladder).
+ */
+function showRecoveryErrorScreen(reportId: string): void {
+    gameWorker?.terminate();
+    gameWorker = null;
+    heartbeatWatchdog.stop();
+    gpPingPending.clear();
+    gpRecoverPending.clear();
+    document.getElementById('recovery-error-overlay')?.remove();
+    const overlay = document.createElement('div');
+    overlay.id = 'recovery-error-overlay';
+    overlay.style.cssText =
+        'position:fixed;inset:0;z-index:200;display:flex;align-items:center;' +
+        'justify-content:center;background:rgba(8,10,14,0.94);color:#e6e8ec;' +
+        'font-family:system-ui,sans-serif;';
+    const card = document.createElement('div');
+    card.style.cssText =
+        'max-width:32rem;padding:2rem 2.25rem;background:#161a22;border:1px solid #2a3140;' +
+        'border-radius:10px;text-align:center;box-shadow:0 8px 40px rgba(0,0,0,0.5);';
+    const h = document.createElement('h2');
+    h.textContent = 'The game renderer stopped responding';
+    h.style.cssText = 'margin:0 0 0.75rem;font-size:1.25rem;';
+    const p = document.createElement('p');
+    p.textContent =
+        'We tried to recover automatically but the problem persisted. Your game ' +
+        'is safe on the server — you can rejoin from the lobby.';
+    p.style.cssText = 'margin:0 0 1rem;line-height:1.5;color:#aab2c0;';
+    const idEl = document.createElement('p');
+    idEl.textContent = `Report id: ${reportId}`;
+    idEl.style.cssText =
+        'margin:0 0 1.5rem;font-family:ui-monospace,monospace;font-size:0.85rem;' +
+        'color:#6f7a8c;user-select:all;';
+    const btn = document.createElement('button');
+    btn.textContent = 'Return to lobby';
+    btn.style.cssText =
+        'padding:0.6rem 1.4rem;font-size:1rem;border:0;border-radius:6px;' +
+        'background:#3b6fe0;color:#fff;cursor:pointer;';
+    btn.addEventListener('click', () => {
+        overlay.remove();
+        quitToLobby();
+    });
+    card.append(h, p, idEl, btn);
+    overlay.append(card);
+    document.body.appendChild(overlay);
+}
+
+/// Clear the parked-worker TTL sweep timer (§3.1).
+function clearParkTtl(): void {
+    if (parkTtlTimer !== null) { clearTimeout(parkTtlTimer); parkTtlTimer = null; }
+}
+
+/**
+ * PLAN-quickstart.md §3.1 (Part B — detach). Park the running game and show the
+ * lobby WITHOUT tearing the worker down. The worker keeps its engine, scene,
+ * models, DefCache and JS UI state alive (a `gp:detach` closes its connection
+ * and pauses its render loop); main suspends audio and hides the game surface,
+ * keeping every per-session helper (HUD, minimap, economy bar) alive-but-hidden
+ * so re-entry rebuilds nothing. Unlike `quitToLobby`, the saved room/port keys
+ * are kept — they are the reconnect creds.
+ *
+ * Guards: no-op unless a worker exists, the first frame has rendered (E3), and
+ * no session is already parked. Metalstorm is the intended caller; the
+ * mechanism is game-agnostic (BAR/ZK keep `quitToLobby` — §3.3).
+ */
+function detachToLobby(): void {
+    if (!gameWorker || !firstFrameSeen || detachSession.isParked) return;
+    const roomId = localStorage.getItem('springrts-game-room') ?? '';
+    const port = Number(localStorage.getItem('springrts-game-port') ?? '0');
+    detachSession.park(roomId, port, Date.now());
+    gameWorker.postMessage({ type: 'gp:detach' });
+    // Suspend (not dispose) the AudioContext — it resumes on the re-entry click.
+    void audioManager?.suspend();
+    // Hide the game surface; DO NOT dispose helpers (resync reuses them) and DO
+    // NOT clear the saved room/port keys (they drive the reconnect).
+    const canvas = document.getElementById('game-canvas') as HTMLCanvasElement | null;
+    if (canvas) canvas.style.display = 'none';
+    const hud = document.getElementById('game-hud');
+    if (hud) hud.style.display = 'none';
+    document.getElementById('quit-confirm-overlay')?.remove();
+    // TTL sweep: dispose the parked worker if the player never returns (§3.1).
+    clearParkTtl();
+    parkTtlTimer = window.setTimeout(disposeParkedWorker, DEFAULT_PARK_TTL_MS);
+    lobbyUI?.showAfterGame();
+    lobbyUI?.show();
+    // Re-enter UX (Part B task 6): a persistent "return to game" card, plus
+    // E4 — dispose the parked worker immediately if the game ends while
+    // parked, rather than relying solely on the TTL sweep.
+    lobbyUI?.markParked(resyncReenter, disposeParkedWorker);
+    console.log('[detach] session parked — worker alive; re-enter to resync');
+}
+
+/**
+ * PLAN-quickstart.md §3.2 (Part B — resync). Re-enter a parked session: tell the
+ * worker to flush dynamic renderer state + reconnect (`gp:resync`), resume audio
+ * and re-show the game surface. Bumps the detach sub-generation so any lingering
+ * pre-detach async bails. The worker's fresh ClientSession re-streams a full
+ * snapshot; the world repopulates within a few ticks.
+ */
+function resyncReenter(): void {
+    clearParkTtl();
+    detachSession.bumpGeneration();
+    detachSession.clear();
+    lobbyUI?.clearParked();
+    // Refresh the token in case the original aged past the park TTL.
+    const token = localStorage.getItem('springrts-token') ?? undefined;
+    gameWorker?.postMessage({ type: 'gp:resync', token });
+    void audioManager?.resume();
+    const canvas = document.getElementById('game-canvas') as HTMLCanvasElement | null;
+    if (canvas) canvas.style.display = 'block';
+    showHUD();
+    lobbyUI?.hide();
+    console.log('[detach] re-entering parked session (resync)');
+}
+
+/**
+ * Tear down a parked worker that will never be re-entered — the TTL sweep fired
+ * (§3.1) or the room ended while parked (E4). Falls through to the full
+ * `quitToLobby` teardown, which terminates the worker and disposes every helper.
+ */
+function disposeParkedWorker(): void {
+    if (!detachSession.isParked) return;
+    clearParkTtl();
+    detachSession.clear();
+    console.log('[detach] parked session disposed (TTL / room ended)');
+    quitToLobby();
+}
+
+/**
+ * Enter (or re-enter) a game the lobby has driven to Active. Routes through the
+ * detach manager: when a parked worker matches this exact room+port it is a fast
+ * `gpResync`; otherwise (cold start, different room, restarted room ⇒ new port
+ * per E5, or an expired TTL) it is a clean full boot. A stale parked worker, if
+ * any, is terminated by startGame's own defensive teardown.
+ */
+function enterGame(gameServerPort: number, mapId: string, gameId: string): void {
+    const roomId = localStorage.getItem('springrts-game-room') ?? '';
+    if (detachSession.planReentry(roomId, gameServerPort, Date.now()) === 'resync') {
+        resyncReenter();
+        return;
+    }
+    clearParkTtl();
+    detachSession.clear();
+    startGame(gameServerPort, mapId, gameId);
+}
+
 async function startGame(gameServerPort: number, mapId: string, gameId: string = ''): Promise<void> {
     // Capture this call's session id. Late-arriving promise callbacks
     // (mapPromise, defsPromise, onMapData) compare against this and
@@ -415,6 +726,14 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // NOTE (GW4-c1): the per-call `session` snapshot + its stale-session
     // guards lived in the gutted body; they return in c2 when the connection
     // callbacks (which compare against activeSession) move into the worker.
+
+    // PLAN-quickstart.md Part B: a full boot supersedes any parked session.
+    // The defensive teardown below terminates the stale parked worker, so drop
+    // the detach bookkeeping and re-arm the first-frame (E3) latch.
+    clearParkTtl();
+    detachSession.clear();
+    firstFrameSeen = false;
+    lastGameArgs = { port: gameServerPort, mapId, gameId };
 
     // Defensive teardown of any leftover session state. `quitToLobby`
     // normally runs this on explicit quit, but a player can re-enter
@@ -435,7 +754,16 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     if (gameWorker) {
         gameWorker.terminate();
         gameWorker = null;
+        heartbeatWatchdog.stop();
+        gpPingPending.clear();
     }
+    gpRecoverPending.clear();
+    // PLAN-client-resilience.md task 2: a cold boot / user re-entry starts a
+    // clean ladder; but an R2 respawn re-enters here too and MUST preserve the
+    // loop-guard counts (they are what escalates a crash loop to R3). Only the
+    // R2 path leaves this flag set.
+    if (r2RespawnInFlight) r2RespawnInFlight = false;
+    else recoveryLadder.reset();
     if (gameConn) {
         gameConn.disconnect();
         gameConn = null;
@@ -521,13 +849,56 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
 
     const dpr = effectiveDpr();
     const offscreen = canvas.transferControlToOffscreen();
+    // PLAN-client-resilience.md task 3: main-thread reports (worker onerror /
+    // onmessageerror / watchdog-wedged below) need their own configured
+    // channel — the worker configures its own copy from gp:init (each realm
+    // has its own module instance; see client-error-telemetry.ts's header).
+    configureErrorTelemetry({
+        endpoint: CONFIG.httpUrl,
+        token: localStorage.getItem('springrts-token') ?? '',
+        enabled: CONFIG.errorReportingEnabled,
+        buildStamp: CONFIG.buildStamp,
+    });
     gameWorker = new GameWorker();
     gameWorker.onerror = (e) => {
         console.error('[gameWorker] error:',
             e.message || '(no detail)',
             e.filename ? `${e.filename}:${e.lineno}:${e.colno}` : '',
             e.error?.stack ?? '');
+        // PLAN-client-resilience.md task 1: this is the main-thread half of
+        // worker fatal detection — it fires for failures the worker-side
+        // self.onerror hook (lua-widget-worker.ts) can't report itself (e.g.
+        // a syntax/parse-level failure that never got far enough to install
+        // its own hooks). Reported with whatever ErrorEvent gives us; less
+        // context than the worker-side report (no phase/log-ring/entity
+        // count — the worker may already be gone).
+        reportClientError({
+            reason: 'fatal',
+            errorClass: e.error?.name ?? 'Error',
+            message: e.message || '(no detail)',
+            stack: e.error?.stack ?? `${e.message} (${e.filename}:${e.lineno}:${e.colno})`,
+        });
+        // PLAN-client-resilience.md task 2: an uncaught worker error is R2's
+        // trigger. This propagated-error path double-covers the worker's own
+        // `gp:workerFatal` message (both fire for an uncaught throw) — the
+        // ladder's `recovering` latch absorbs the second, so it counts once.
+        ladderTrigger('worker-error');
     };
+    // PLAN-client-resilience.md task 1: fires when a posted message can't be
+    // structured-cloned (e.g. an unsupported value crossing the worker
+    // boundary) — distinct from onerror (a thrown exception). No stack is
+    // available (the spec gives no Error object here).
+    gameWorker.onmessageerror = (e: MessageEvent) => {
+        console.error('[gameWorker] onmessageerror:', e);
+        reportClientError({
+            reason: 'messageError',
+            errorClass: 'DataCloneError',
+            message: 'postMessage structured-clone failure across the game-processor worker boundary',
+        });
+    };
+    // PLAN-client-resilience.md task 1: watchdog runs for the life of the
+    // worker; stopped in quitToLobby()/the defensive re-entry teardown above.
+    heartbeatWatchdog.start();
     // Worker → main bridge (PLAN-game-worker.md GW4). The full sceneState /
     // audio / minimap feeds land in GW5; at c2 only the connection-lifecycle
     // signals the worker raises (auth, game-over, server-restart) are handled.
@@ -545,6 +916,10 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             // build-menu (G3a) + native economy-bar + factory-queue panel (G4).
             // The order-panel remains unbuilt (dead pre-G3b code, unrelated).
             case 'gp:sceneState':
+                // PLAN-quickstart.md §3.1 (E3): the worker only feeds scene
+                // state once it is rendering, so the first one marks the point
+                // detach becomes available.
+                firstFrameSeen = true;
                 // GW8: cache for the test harness's synchronous getters
                 // (window.test.selection / .cameraPose()).
                 lastSceneState = { selectedUnitIds: m.selectedUnitIds, camera: m.camera };
@@ -701,6 +1076,47 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 }
                 break;
             }
+            // PLAN-client-resilience.md task 1: heartbeat watchdog reply.
+            case 'gp:pong': {
+                const resolve = gpPingPending.get(m.id);
+                if (resolve) { gpPingPending.delete(m.id); resolve(); }
+                break;
+            }
+            // PLAN-client-resilience.md task 2 (R1): the worker acked a soft
+            // reset. Resolve the ladder's `sendRecoverRequest` round-trip.
+            case 'gp:recovered': {
+                const settle = gpRecoverPending.get(m.id);
+                if (settle) settle(m.ok === true);
+                break;
+            }
+            // PLAN-client-resilience.md task 2: a genuinely-uncaught worker
+            // fatal (self.onerror / unhandledrejection) → R2. The reliable
+            // cross-boundary signal for E2 (an async loader crash raises
+            // `unhandledrejection`, which never reaches gameWorker.onerror).
+            case 'gp:workerFatal':
+                console.error(`[gameWorker] worker fatal (${m.reason}${m.injected ? ', injected' : ''}) — escalating to recovery ladder`);
+                ladderTrigger('fatal');
+                break;
+            // PLAN-client-resilience.md task 2: WebGL context loss/restore feed
+            // the ladder. A lost context arms R1's grace (notifyContextLost); a
+            // restore within it is the soft R1 rung; a restore that never comes
+            // times out to R2 (a dead GL context needs a fresh worker).
+            case 'gp:contextLost':
+                console.error('[gameWorker] WebGL context lost');
+                recoveryLadder.notifyContextLost();
+                break;
+            case 'gp:contextRestored':
+                console.log('[gameWorker] WebGL context restored');
+                recoveryLadder.notifyContextRestored();
+                break;
+            // PLAN-quickstart.md §3.1/§3.2: detach / resync acks (visibility;
+            // the DOM/audio swap already happened synchronously main-side).
+            case 'gp:detached':
+                console.log('[gameWorker] detached — session parked');
+                break;
+            case 'gp:resynced':
+                console.log('[gameWorker] resynced — reconnecting for a fresh snapshot');
+                break;
             // GW8: reply to a window.widgets.eval() Lua eval (worker evalLua).
             case 'evalResult':
                 evalReqResolve?.(String(m.result ?? 'nil'));
@@ -780,6 +1196,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         modelMaterialPort: gameModelMaterialPort,
         defsCacheKey: '',
         buildStamp: CONFIG.buildStamp,
+        errorReportingEnabled: CONFIG.errorReportingEnabled,
         width: window.innerWidth,
         height: window.innerHeight,
         dpr,
@@ -951,6 +1368,25 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         },
     });
     (window as any).test = testHarness;
+
+    // PLAN-quickstart.md Part B: the drivable detach/re-enter surface (this
+    // whole plan is side-lane-M test tooling). The polished lobby "return to
+    // game" card + Metalstorm PlayerRemoved(reason) wiring is Part B task 6;
+    // these globals make the mechanism functional + scenario-testable now.
+    (window as any).springrts = {
+        /** Park the running game, keeping the worker warm (§3.1). No-op before
+         *  the first frame (E3) or when already parked. */
+        detach: () => detachToLobby(),
+        /** Re-enter the parked game via a fast resync, or full-boot if the
+         *  parked session no longer matches (§3.2 / E5 / TTL). */
+        reenter: () => {
+            if (detachSession.isParked && lastGameArgs) {
+                enterGame(lastGameArgs.port, lastGameArgs.mapId, lastGameArgs.gameId);
+            }
+        },
+        /** True while a session is parked (detached, worker alive). */
+        get parked() { return detachSession.isParked; },
+    };
 
     // GW8: reach the worker-resident JS debug hooks (globalThis.__entityRenderer
     // / __fxLightPool / __renderPipeline / __csm / …) from the main devtools
@@ -1125,7 +1561,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     // form the runner had already hidden).
     const lobbySuppressed = !!scenario || !!directManifestUrl;
     lobbyUI = new LobbyUI((gameServerPort: number, mapId: string, gameId: string) => {
-        startGame(gameServerPort, mapId, gameId);
+        // PLAN-quickstart.md Part B: route through enterGame so a room the
+        // player detached from resyncs instead of full-booting (§3.2).
+        enterGame(gameServerPort, mapId, gameId);
     }, getDefaultLobbyTemplates(), lobbySuppressed);
     (window as any).lobby = lobbyUI;
 

@@ -469,6 +469,18 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             }
             break;
         }
+        // PLAN-quickstart.md §3.3: a client sends this immediately before a
+        // deliberate disconnect() so the imminent PlayerLeft/PlayerRemoved
+        // carries the real reason (e.g. 3=detach) instead of the default 0.
+        // Stored, not acted on immediately — consumed once by the disconnect
+        // drain loop in server_main.cpp, which also clears the entry.
+        case SpringWeb::ClientPayload_PlayerLeaveIntent: {
+            auto* session = sessions.GetSession(msg.clientId);
+            if (!session) break;
+            auto* pli = clientMsg->payload_as_PlayerLeaveIntent();
+            ctx.pendingLeaveReason[msg.clientId] = pli ? pli->reason() : 0;
+            break;
+        }
         case SpringWeb::ClientPayload_PlayerCommandBatch: {
             // Atomic execution of a sequence of PlayerCommand
             // entries on the same sim tick. Used by:

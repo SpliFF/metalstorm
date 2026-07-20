@@ -367,6 +367,12 @@ int main(int argc, char* argv[])
     // spring-server's QUIC/WebTransport endpoint. See spawnGameServer.
     std::string wtCertPath;
     std::string wtKeyPath;
+    // PLAN-client-resilience.md task 3: server-operator opt-out for the
+    // `/api/client-errors` report channel — the "lobby setting" the plan
+    // describes (open-source courtesy: default on for the official beta,
+    // off in a self-hosted sample config that explicitly passes this flag).
+    // Surfaced to the client via /api/version.
+    bool clientErrorReportsEnabled = true;
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -383,6 +389,7 @@ int main(int argc, char* argv[])
         else if (arg == "--direct" && i + 1 < argc) { directManifestPath = argv[++i]; }
         else if (arg == "--wt-cert" && i + 1 < argc) { wtCertPath = argv[++i]; }
         else if (arg == "--wt-key" && i + 1 < argc) { wtKeyPath = argv[++i]; }
+        else if (arg == "--disable-client-error-reports") { clientErrorReportsEnabled = false; }
         else if (arg == "--game" && i + 1 < argc) {
             // Back-compat: `--game <path>` is translated into
             // `--games-dir <parent>` so existing scripts that point
@@ -961,13 +968,75 @@ int main(int argc, char* argv[])
     HttpAuth::RegisterEndpoints(net, db);
 
     // Version endpoint — clients use this to get the build stamp for cache-busting
-    net.AddHttpGet("/api/version", RouteAuth::Public, [](const std::string&) -> HttpResponse {
+    net.AddHttpGet("/api/version", RouteAuth::Public, [clientErrorReportsEnabled](const std::string&) -> HttpResponse {
         std::string json = std::string("{\"engine\":\"springweb\"")
             + ",\"stamp\":\"" + CacheControl::BuildStamp() + "\""
-            + ",\"no_cache\":" + (CacheControl::IsNoCache() ? "true" : "false") + "}";
+            + ",\"no_cache\":" + (CacheControl::IsNoCache() ? "true" : "false")
+            + ",\"errorReportingEnabled\":" + (clientErrorReportsEnabled ? "true" : "false") + "}";
         return {.contentType = "application/json",
                 .body = {json.begin(), json.end()}, .status = 200,
                 .cacheControl = CacheControl::DynamicHeader()};
+    });
+
+    // PLAN-client-resilience.md task 3: client crash/fatal report ingestion.
+    // TokenRequired (not AdminOnly) — this is a "players" surface per
+    // PLAN-security-hardening.md §1's row ("junk floods" risk, mitigated by
+    // size cap + per-session rate + dedup — the client enforces its own
+    // 5/hour advisory cap; CountRecentClientErrors below is the server-side
+    // backstop for a client that ignores it). No SafeInvoke wrapper exists on
+    // this branch yet (see DECISIONS.md Part 6 hygiene note) — every
+    // exception-capable call is inside the try/catch so a malformed report
+    // can't take the whole lobby down with it.
+    net.AddHttpPost("/api/client-errors", RouteAuth::TokenRequired,
+        [&db](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+        int64_t userId = HttpAuth::ValidateToken(db, headers.authorization);
+        if (userId <= 0) return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
+
+        // Client caps its own payload at 32KB; 40KB gives headroom for JSON
+        // overhead without trusting the client to actually enforce its cap.
+        if (body.size() > 40 * 1024)
+            return HttpAuth::JsonResponse(413, R"({"error":"report too large"})");
+
+        if (db.CountRecentClientErrors(userId, 3600) >= 20)
+            return HttpAuth::JsonResponse(429, R"({"error":"rate limited"})");
+
+        try {
+            nlohmann::json j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/true);
+            if (!j.is_object())
+                return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+
+            Database::ClientErrorRecord rec;
+            rec.userId = userId;
+            rec.reason = j.value("reason", "");
+            rec.errorClass = j.value("error_class", "");
+            rec.message = j.value("message", "");
+            rec.stack = j.value("stack", "");
+            rec.stackHash = j.value("stack_hash", "");
+            rec.recoveryRung = j.value("recovery_rung", "");
+            rec.phase = j.value("phase", "");
+            rec.frame = j.value("frame", 0);
+            rec.entityCount = j.value("entity_count", 0);
+            rec.gameId = j.value("game_id", "");
+            rec.mapId = j.value("map_id", "");
+            rec.buildStamp = j.value("build_stamp", "");
+            rec.gpuRenderer = j.value("gpu_renderer", "");
+            rec.count = j.value("count", 1);
+            if (j.contains("log_ring") && j["log_ring"].is_array()) {
+                std::string joined;
+                for (const auto& line : j["log_ring"]) {
+                    if (!line.is_string()) continue;
+                    if (!joined.empty()) joined += "\n";
+                    joined += line.get<std::string>();
+                }
+                rec.logRing = joined;
+            }
+
+            int64_t id = db.InsertClientError(rec);
+            std::string resp = "{\"ok\":true,\"id\":" + std::to_string(id) + "}";
+            return {.contentType = "application/json", .body = {resp.begin(), resp.end()}, .status = 200};
+        } catch (const std::exception&) {
+            return HttpAuth::JsonResponse(400, R"({"error":"malformed report"})");
+        }
     });
 
     // ─────── PLAN-gm-tools: GM dashboard + admin verbs (lobby side) ───────
@@ -1518,6 +1587,16 @@ int main(int argc, char* argv[])
                 std::string val = value.is_string() ? value.get<std::string>() : value.dump();
                 rooms.SetModOption(roomId, host.userId, key, val);
             }
+        }
+
+        // Top-level "scenario" (PLAN-persistence.md §5): names a
+        // scenarios/<name>.lua world file for game_scenario.lua to stage at
+        // GameStart. Threaded as an ordinary modoption — Spring.GetModOptions()
+        // is the existing, faithful path server Lua already reads config
+        // through, so no new plumbing is needed beyond this one field.
+        std::string scenarioName = manifest.value("scenario", "");
+        if (!scenarioName.empty()) {
+            rooms.SetModOption(roomId, host.userId, "scenario", scenarioName);
         }
 
         if (manifest.contains("aiSlots") && manifest["aiSlots"].is_array()) {

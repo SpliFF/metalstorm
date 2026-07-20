@@ -338,6 +338,54 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Room" }
 
+  /api/client-errors:
+    post:
+      summary: Submit a client-side crash/fatal report
+      description: >
+        PLAN-client-resilience.md task 3. The client's watchdog/context-loss/
+        fatal-error hooks POST here; size-capped at 40KB, rate-limited to
+        20/hour/user server-side (the client's own advisory cap is 5/hour per
+        session). Disabled server-wide with the lobby's
+        `--disable-client-error-reports` flag (surfaced via `errorReportingEnabled`
+        on `/api/version`).
+      tags: [Client]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string, enum: [fatal, wedged, contextLost, messageError, injected] }
+                error_class: { type: string }
+                message: { type: string }
+                stack: { type: string }
+                stack_hash: { type: string }
+                recovery_rung: { type: string }
+                phase: { type: string }
+                frame: { type: integer }
+                entity_count: { type: integer }
+                game_id: { type: string }
+                map_id: { type: string }
+                build_stamp: { type: string }
+                gpu_renderer: { type: string }
+                log_ring: { type: array, items: { type: string } }
+                count: { type: integer }
+      responses:
+        "200":
+          description: Report stored
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  id: { type: integer }
+        "413":
+          description: Report exceeds the size cap
+        "429":
+          description: Rate limited (20/hour/user)
+
   /api/wt/info:
     get:
       summary: WebTransport (QUIC) endpoint discovery

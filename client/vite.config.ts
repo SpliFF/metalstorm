@@ -93,6 +93,18 @@ export default defineConfig({
         },
     },
     build: {
+        // PLAN-client-resilience.md task 3: generate sourcemaps so a crash
+        // report's minified stack can be resolved later, but 'hidden' omits
+        // the `//# sourceMappingURL` comment — the map exists as a build
+        // artifact without being served to (or fetchable by) the browser.
+        // "ship the map to the server, not the client" (the plan's phrasing)
+        // still needs a deploy step to actually copy `dist/**/*.map`
+        // somewhere the server can read it — PLAN-static-serving.md's
+        // production client build/deploy pipeline doesn't exist yet (this
+        // repo has no `vite build` step wired into anything today), so that
+        // half is a documented gap, not built here; wire it when that
+        // pipeline lands.
+        sourcemap: 'hidden',
         rolldownOptions: {
             input: {
                 main: resolve(__dirname, 'index.html'),

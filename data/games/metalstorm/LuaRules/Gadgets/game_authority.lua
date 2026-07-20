@@ -80,7 +80,14 @@ end
 --- The spend gate. Direct player commands route through AllowCommand.
 -- STUB: charges the team pool (per-player attribution needs the
 -- order→player identity, an engine ask tracked in PLAN-metalstorm.md §10.5).
-function gadget:AllowCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOptions)
+--
+-- fromLua orders are UNCHARGED (PLAN-persistence.md §5 "orders-as-intent"):
+-- Spring.GiveOrderToUnit always sets fromLua=true, and that Lua function is
+-- synced-only — only trusted server-side gadgets (the scenario loader,
+-- future macro-directive decomposition) can trigger it, never a player
+-- directly, so this isn't a player-reachable free-order exploit.
+function gadget:AllowCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOptions, cmdTag, synced, fromLua)
+    if fromLua then return true end
     if costScale <= 0 then return true end
     local cost = GG.Authority.OrderCost(unitID, cmdID)
     local pool = getTeamPool(unitTeam)

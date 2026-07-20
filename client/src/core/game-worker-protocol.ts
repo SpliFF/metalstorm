@@ -84,6 +84,14 @@ export interface GpInitToWorker {
      * the documented P1 "richer roster restream". See PLAN-bar.md UI-2.
      */
     players?: { id: number; name: string; team: number; spectator: boolean }[];
+    /**
+     * PLAN-client-resilience.md task 3: server-operator opt-out for the
+     * `/api/client-errors` report channel (spring-lobby `--disable-client-
+     * error-reports`, surfaced via `/api/version`). Absent/true ⇒ enabled —
+     * the courtesy default is off only in a self-hosted "sample config"
+     * deployment that explicitly disables it.
+     */
+    errorReportingEnabled?: boolean;
 }
 
 /**
@@ -170,6 +178,60 @@ export interface GpCancelCommandModeToWorker {
     type: 'gp:cancelCommandMode';
 }
 
+/**
+ * PLAN-client-resilience.md task 1: heartbeat watchdog probe. Main posts one
+ * every 2s (HeartbeatWatchdog, main.ts); the worker replies `gp:pong` with the
+ * same `id` from the very top of its message dispatcher (game-processor.ts is
+ * not on the fast path — a wedged Fengari loop or a stalled render loop must
+ * not stop the pong). A blocked worker event loop simply never processes this
+ * message at all, which is exactly the "wedged" signal the watchdog looks for
+ * — no payload beyond the id is needed.
+ */
+export interface GpPingToWorker {
+    type: 'gp:ping';
+    id: number;
+}
+
+/**
+ * PLAN-quickstart.md §3.1 (Part B — detach): park the game session without
+ * tearing the worker down. The worker closes its game connection (a clean
+ * PlayerRemoved with a `detach` reason), pauses the render loop and stops the
+ * viewport pump — engine, scene, models, DefCache and JS UI state all stay
+ * alive. Re-entry is a `gp:resync`, not a fresh `gp:init`. No payload: the
+ * worker already holds the connect creds captured at `gp:init`.
+ */
+export interface GpDetachToWorker {
+    type: 'gp:detach';
+}
+
+/**
+ * PLAN-quickstart.md §3.2 (Part B — resync): re-enter a parked session. The
+ * worker flushes *dynamic* renderer state (entity/projectile/combat-FX/
+ * interpolator), keeps *static* state (terrain, models, DefCache, lighting, UI),
+ * re-opens the game connection with its captured creds (a fresh server-side
+ * ClientSession re-streams a full snapshot + defs; DefCache no-ops the dups) and
+ * un-pauses the render loop. Optionally carries a refreshed token in case the
+ * original has aged past the parked TTL.
+ */
+export interface GpResyncToWorker {
+    type: 'gp:resync';
+    /** Refreshed game-server auth token; falls back to the gp:init token. */
+    token?: string;
+}
+
+/**
+ * PLAN-client-resilience.md task 2 (R1 soft rung): main asks the worker for an
+ * in-place soft reset — Babylon `wipeCaches` + transient FX-pool flush + a
+ * fresh-snapshot resync — instead of a full respawn. The worker replies
+ * `gp:recovered` with the same `id`. Driven by the RecoveryLadder's `softReset`
+ * dep when a lost WebGL context restores; a non-ack (worker too wedged to
+ * answer within the round-trip timeout) escalates the ladder to R2.
+ */
+export interface GpRecoverToWorker {
+    type: 'gp:recover';
+    id: number;
+}
+
 export type GpMessageToWorker =
     | GpInitToWorker
     | GpInputToWorker
@@ -179,6 +241,10 @@ export type GpMessageToWorker =
     | GpCancelBuildPlacementToWorker
     | GpRemoveFactoryOrderToWorker
     | GpCancelCommandModeToWorker
+    | GpPingToWorker
+    | GpDetachToWorker
+    | GpResyncToWorker
+    | GpRecoverToWorker
     // PLAN-rml.md: DOM events + viewport changes routed back to the worker-side
     // RmlUi proxy (rml-bridge.ts) for Lua listener dispatch / dp-ratio recompute.
     | RmlEventToWorker
@@ -417,5 +483,42 @@ export type GpMessageToMain =
     | { type: 'gp:reload' }
     /** Reply to a gp:test request from the main test harness. */
     | { type: 'gp:testResult'; id: number; ok: boolean; value?: unknown; error?: string }
+    /** Reply to a `gp:ping` heartbeat probe (PLAN-client-resilience.md task 1). */
+    | { type: 'gp:pong'; id: number }
+    /**
+     * WebGL context loss / restore on the worker's OffscreenCanvas
+     * (PLAN-client-resilience.md task 1 detection). Babylon's render loop
+     * already no-ops while the context is lost; this is purely a visibility
+     * signal for the main-thread console/telemetry today — no recovery is
+     * wired to it yet.
+     * EXTENSION POINT (task 2, the R1/R2/R3 recovery ladder): `lost` is R1's
+     * trigger ("context-restored, single recoverable fatal in a subsystem
+     * with a reset path") — the ladder should listen here instead of adding
+     * a second Babylon observable.
+     */
+    | { type: 'gp:contextLost' }
+    | { type: 'gp:contextRestored' }
+    /**
+     * PLAN-client-resilience.md task 2: the worker's self.onerror /
+     * unhandledrejection hook fired (a genuinely-uncaught worker error — the
+     * render loop or a bare async, NOT a pcall-contained widget callin). Main's
+     * RecoveryLadder takes R2 (respawn) on this; `injected` tags task 5's
+     * fault-injection verbs so a synthetic failure doesn't drive a real
+     * recovery in a way that's indistinguishable on the dashboard. This is the
+     * reliable cross-boundary signal for E2 (an async loader crash raises
+     * `unhandledrejection`, which — unlike an uncaught throw — never propagates
+     * to the main-thread `gameWorker.onerror`). */
+    | { type: 'gp:workerFatal'; reason: string; injected: boolean }
+    /** PLAN-client-resilience.md task 2: reply to a `gp:recover` (R1 soft
+     *  reset). `ok:false` (or no reply within the ladder's round-trip timeout)
+     *  escalates to R2. */
+    | { type: 'gp:recovered'; id: number; ok: boolean }
+    /** PLAN-quickstart.md §3.1: the worker acks a `gp:detach` — the game
+     *  connection is closed, render + viewport pump paused, worker parked. */
+    | { type: 'gp:detached' }
+    /** PLAN-quickstart.md §3.2: the worker acks a `gp:resync` — dynamic state
+     *  flushed and reconnect started (a `gp:authenticated` follows once the
+     *  fresh ClientSession completes its handshake). */
+    | { type: 'gp:resynced' }
     /** PLAN-rml.md: a batch of RML DOM ops for the main-thread overlay manager. */
     | RmlOpsToMain;

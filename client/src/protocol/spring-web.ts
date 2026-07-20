@@ -57,6 +57,7 @@ export { PathResponse, PathResponseT } from './spring-web/path-response.js';
 export { Ping, PingT } from './spring-web/ping.js';
 export { PlayerCommand, PlayerCommandT } from './spring-web/player-command.js';
 export { PlayerCommandBatch, PlayerCommandBatchT } from './spring-web/player-command-batch.js';
+export { PlayerLeaveIntent, PlayerLeaveIntentT } from './spring-web/player-leave-intent.js';
 export { PlayerLeft, PlayerLeftT } from './spring-web/player-left.js';
 export { PlayerTeamEventBatch, PlayerTeamEventBatchT } from './spring-web/player-team-event-batch.js';
 export { PlayerTeamEventItem, PlayerTeamEventItemT } from './spring-web/player-team-event-item.js';
