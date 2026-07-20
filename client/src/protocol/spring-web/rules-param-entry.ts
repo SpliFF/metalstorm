@@ -10,6 +10,7 @@ import { RulesParamValueKind } from '../spring-web/rules-param-value-kind.js';
 /**
  * One rules-param key→value change. `value_kind` selects which value field
  * is live (`num_val` for Number, `str_val` for String, neither for Nil).
+ * W3 optimization: prefer key_id over key when both present.
  */
 export class RulesParamEntry implements flatbuffers.IUnpackableObject<RulesParamEntryT> {
   bb: flatbuffers.ByteBuffer|null = null;
@@ -36,41 +37,50 @@ key(optionalEncoding?:any):string|Uint8Array|null {
   return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
 }
 
-valueKind():RulesParamValueKind {
+keyId():number {
   const offset = this.bb!.__offset(this.bb_pos, 6);
+  return offset ? this.bb!.readUint16(this.bb_pos + offset) : 0;
+}
+
+valueKind():RulesParamValueKind {
+  const offset = this.bb!.__offset(this.bb_pos, 8);
   return offset ? this.bb!.readUint8(this.bb_pos + offset) : RulesParamValueKind.Nil;
 }
 
 numVal():number {
-  const offset = this.bb!.__offset(this.bb_pos, 8);
+  const offset = this.bb!.__offset(this.bb_pos, 10);
   return offset ? this.bb!.readFloat64(this.bb_pos + offset) : 0.0;
 }
 
 strVal():string|null
 strVal(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
 strVal(optionalEncoding?:any):string|Uint8Array|null {
-  const offset = this.bb!.__offset(this.bb_pos, 10);
+  const offset = this.bb!.__offset(this.bb_pos, 12);
   return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
 }
 
 static startRulesParamEntry(builder:flatbuffers.Builder) {
-  builder.startObject(4);
+  builder.startObject(5);
 }
 
 static addKey(builder:flatbuffers.Builder, keyOffset:flatbuffers.Offset) {
   builder.addFieldOffset(0, keyOffset, 0);
 }
 
+static addKeyId(builder:flatbuffers.Builder, keyId:number) {
+  builder.addFieldInt16(1, keyId, 0);
+}
+
 static addValueKind(builder:flatbuffers.Builder, valueKind:RulesParamValueKind) {
-  builder.addFieldInt8(1, valueKind, RulesParamValueKind.Nil);
+  builder.addFieldInt8(2, valueKind, RulesParamValueKind.Nil);
 }
 
 static addNumVal(builder:flatbuffers.Builder, numVal:number) {
-  builder.addFieldFloat64(2, numVal, 0.0);
+  builder.addFieldFloat64(3, numVal, 0.0);
 }
 
 static addStrVal(builder:flatbuffers.Builder, strValOffset:flatbuffers.Offset) {
-  builder.addFieldOffset(3, strValOffset, 0);
+  builder.addFieldOffset(4, strValOffset, 0);
 }
 
 static endRulesParamEntry(builder:flatbuffers.Builder):flatbuffers.Offset {
@@ -78,9 +88,10 @@ static endRulesParamEntry(builder:flatbuffers.Builder):flatbuffers.Offset {
   return offset;
 }
 
-static createRulesParamEntry(builder:flatbuffers.Builder, keyOffset:flatbuffers.Offset, valueKind:RulesParamValueKind, numVal:number, strValOffset:flatbuffers.Offset):flatbuffers.Offset {
+static createRulesParamEntry(builder:flatbuffers.Builder, keyOffset:flatbuffers.Offset, keyId:number, valueKind:RulesParamValueKind, numVal:number, strValOffset:flatbuffers.Offset):flatbuffers.Offset {
   RulesParamEntry.startRulesParamEntry(builder);
   RulesParamEntry.addKey(builder, keyOffset);
+  RulesParamEntry.addKeyId(builder, keyId);
   RulesParamEntry.addValueKind(builder, valueKind);
   RulesParamEntry.addNumVal(builder, numVal);
   RulesParamEntry.addStrVal(builder, strValOffset);
@@ -90,6 +101,7 @@ static createRulesParamEntry(builder:flatbuffers.Builder, keyOffset:flatbuffers.
 unpack(): RulesParamEntryT {
   return new RulesParamEntryT(
     this.key(),
+    this.keyId(),
     this.valueKind(),
     this.numVal(),
     this.strVal()
@@ -99,6 +111,7 @@ unpack(): RulesParamEntryT {
 
 unpackTo(_o: RulesParamEntryT): void {
   _o.key = this.key();
+  _o.keyId = this.keyId();
   _o.valueKind = this.valueKind();
   _o.numVal = this.numVal();
   _o.strVal = this.strVal();
@@ -108,6 +121,7 @@ unpackTo(_o: RulesParamEntryT): void {
 export class RulesParamEntryT implements flatbuffers.IGeneratedObject {
 constructor(
   public key: string|Uint8Array|null = null,
+  public keyId: number = 0,
   public valueKind: RulesParamValueKind = RulesParamValueKind.Nil,
   public numVal: number = 0.0,
   public strVal: string|Uint8Array|null = null
@@ -120,6 +134,7 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
 
   return RulesParamEntry.createRulesParamEntry(builder,
     key,
+    this.keyId,
     this.valueKind,
     this.numVal,
     strVal

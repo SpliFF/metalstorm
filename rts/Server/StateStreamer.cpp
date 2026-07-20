@@ -1022,20 +1022,36 @@ void StateStreamer::BroadcastRulesParams(int) {
     // (unfiltered) — build the entry list once.
     std::vector<Protocol::RulesParamEntryData> gameDeltaEntries;
     gameDeltaEntries.reserve(gameChanged.size());
-    for (const auto& c : gameChanged)
-        gameDeltaEntries.push_back({c.key, c.kind, c.numVal, c.strVal});
+    for (const auto& c : gameChanged) {
+        Protocol::RulesParamEntryData e;
+        e.keyId = InternKey(c.key);  // W3: use interned key
+        if (e.keyId == 0) e.key = c.key;
+        e.kind = c.kind;
+        e.numVal = c.numVal;
+        e.strVal = c.strVal;
+        gameDeltaEntries.push_back(std::move(e));
+    }
+    // W3: Increment game params rev when there are changes
+    if (!gameChanged.empty()) {
+        gameParamsRev++;
+    }
 
     sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
         if (!session.rulesParamsSnapshotSent) {
+            // W3: Send key dictionary first on join
+            SendKeyDictionary(clientId);
+
             // Join snapshot: full current state, replace=true per scope.
             {
                 Protocol::RulesParamUpdateData snap;
                 snap.scope = SpringWeb::RulesParamScope_Game;
                 snap.replace = true;
+                snap.paramsRev = ++gameParamsRev;  // W3: increment generation counter
                 snap.params.reserve(gameNow.size());
                 for (const auto& kv : gameNow) {
                     Protocol::RulesParamEntryData e;
-                    e.key = kv.first;
+                    e.keyId = InternKey(kv.first);  // W3: use interned key
+                    if (e.keyId == 0) e.key = kv.first;  // fallback to string if interning fails
                     ParamToWire(kv.second, e.kind, e.numVal, e.strVal);
                     snap.params.push_back(std::move(e));
                 }
@@ -1050,10 +1066,15 @@ void StateStreamer::BroadcastRulesParams(int) {
                 snap.scope = SpringWeb::RulesParamScope_Team;
                 snap.id = static_cast<uint32_t>(t);
                 snap.replace = true;
+                // W3: ensure we have enough team param revs
+                if (teamParamsRev.size() <= static_cast<size_t>(t))
+                    teamParamsRev.resize(t + 1, 0);
+                snap.paramsRev = ++teamParamsRev[t];
                 for (const auto& kv : team->modParams) {
                     if (!(kv.second.los & losMask)) continue;
                     Protocol::RulesParamEntryData e;
-                    e.key = kv.first;
+                    e.keyId = InternKey(kv.first);  // W3: use interned key
+                    if (e.keyId == 0) e.key = kv.first;
                     ParamToWire(kv.second, e.kind, e.numVal, e.strVal);
                     snap.params.push_back(std::move(e));
                 }
@@ -1069,6 +1090,7 @@ void StateStreamer::BroadcastRulesParams(int) {
         if (!gameDeltaEntries.empty()) {
             Protocol::RulesParamUpdateData upd;
             upd.scope = SpringWeb::RulesParamScope_Game;
+            upd.paramsRev = gameParamsRev;  // W3: include generation counter
             upd.params = gameDeltaEntries;
             auto msg = Protocol::BuildRulesParamUpdate(upd);
             rtcServer.SendStream(clientId, StreamClass::Control, msg.data(), msg.size(), kEventLaneParams);
@@ -1079,9 +1101,21 @@ void StateStreamer::BroadcastRulesParams(int) {
             Protocol::RulesParamUpdateData upd;
             upd.scope = SpringWeb::RulesParamScope_Team;
             upd.id = static_cast<uint32_t>(t);
+            // W3: ensure we have enough team param revs
+            if (teamParamsRev.size() <= static_cast<size_t>(t))
+                teamParamsRev.resize(t + 1, 0);
+            if (!teamChanged[t].empty())
+                teamParamsRev[t]++;
+            upd.paramsRev = teamParamsRev[t];
             for (const auto& c : teamChanged[t]) {
                 if (!(c.los & losMask)) continue;
-                upd.params.push_back({c.key, c.kind, c.numVal, c.strVal});
+                Protocol::RulesParamEntryData e;
+                e.keyId = InternKey(c.key);  // W3: use interned key
+                if (e.keyId == 0) e.key = c.key;
+                e.kind = c.kind;
+                e.numVal = c.numVal;
+                e.strVal = c.strVal;
+                upd.params.push_back(std::move(e));
             }
             if (upd.params.empty()) continue;
             auto msg = Protocol::BuildRulesParamUpdate(upd);
@@ -1280,4 +1314,56 @@ void StateStreamer::StreamLosBitmaps(int) {
             }
         });
     }
+}
+
+
+// W3: Intern a key string and return its ID. Creates a new ID if not already interned.
+uint16_t StateStreamer::InternKey(const std::string& key) {
+    auto it = keyToId.find(key);
+    if (it != keyToId.end()) {
+        return it->second;
+    }
+
+    // Reserve 0 for "not interned"
+    if (idToKey.empty()) {
+        idToKey.push_back("");  // index 0 reserved
+    }
+
+    // Check if we have exhausted the ID space (16-bit)
+    if (idToKey.size() >= 65535) {
+        return 0;  // fall back to string key
+    }
+
+    uint16_t newId = static_cast<uint16_t>(idToKey.size());
+    keyToId[key] = newId;
+    idToKey.push_back(key);
+    keyDictionaryRev++;  // increment revision when dictionary changes
+    return newId;
+}
+
+// W3: Send the key dictionary to a client
+void StateStreamer::SendKeyDictionary(int clientId) {
+    auto& rtcServer = ctx.rtcServer;
+
+    flatbuffers::FlatBufferBuilder fbb(1024);
+    std::vector<flatbuffers::Offset<flatbuffers::String>> keyOffsets;
+
+    // Skip index 0 (reserved)
+    for (size_t i = 1; i < idToKey.size(); ++i) {
+        keyOffsets.push_back(fbb.CreateString(idToKey[i]));
+    }
+
+    auto keysVec = fbb.CreateVector(keyOffsets);
+
+    SpringWeb::RulesParamKeyDictionaryBuilder db(fbb);
+    db.add_keys(keysVec);
+    db.add_dictionary_rev(keyDictionaryRev);
+    auto dictOff = db.Finish();
+
+    auto msg = Protocol::BuildServerMessage(fbb,
+        SpringWeb::ServerPayload_RulesParamKeyDictionary,
+        dictOff.Union());
+
+    rtcServer.SendStream(clientId, StreamClass::Control,
+        msg.data(), msg.size(), kEventLaneParams);
 }

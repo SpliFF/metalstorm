@@ -2,6 +2,8 @@
 
 #include <cstdint>
 #include <vector>
+#include <unordered_map>
+#include <string>
 
 #include "Lua/LuaRulesParams.h"
 
@@ -45,6 +47,10 @@ private:
     void StreamLosBitmaps(int frameNum);
     void BroadcastRulesParams(int frameNum);
 
+    // W3 helpers
+    uint16_t InternKey(const std::string& key);
+    void SendKeyDictionary(int clientId);
+
     GameServerContext& ctx;
 
     // Rules-param wire producer baselines (BroadcastRulesParams). We diff the
@@ -54,6 +60,13 @@ private:
     // of a key when it's deleted (needed to decide who to tell to drop it).
     LuaRulesParams::Params lastGameParams;
     std::vector<LuaRulesParams::Params> lastTeamParams;  // indexed by teamID
+
+    // W3: Key interning for rulesParams optimization
+    std::unordered_map<std::string, uint16_t> keyToId;  // string key → interned ID
+    std::vector<std::string> idToKey;                   // ID → string (0 reserved)
+    uint32_t keyDictionaryRev = 1;                      // incremented on dictionary change
+    uint32_t gameParamsRev = 0;                         // generation counter for game params
+    std::vector<uint32_t> teamParamsRev;                // per-team generation counters
 
     // Last-team-standing fallback latch (was a function-static int in the loop):
     // the team the alive-unit count declared the winner, or -1 while undecided.

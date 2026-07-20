@@ -95,6 +95,7 @@ export { RoomState } from './spring-web/room-state.js';
 export { RoomStateUpdate, RoomStateUpdateT } from './spring-web/room-state-update.js';
 export { RoomTeamSelect, RoomTeamSelectT } from './spring-web/room-team-select.js';
 export { RulesParamEntry, RulesParamEntryT } from './spring-web/rules-param-entry.js';
+export { RulesParamKeyDictionary, RulesParamKeyDictionaryT } from './spring-web/rules-param-key-dictionary.js';
 export { RulesParamScope } from './spring-web/rules-param-scope.js';
 export { RulesParamUpdate, RulesParamUpdateT } from './spring-web/rules-param-update.js';
 export { RulesParamValueKind } from './spring-web/rules-param-value-kind.js';

@@ -54,6 +54,7 @@ table AuthRequest {
     username: string;
     password_hash: string;      // bcrypt hash, not plaintext
     token: string;              // JWT for reconnection (alternative to user/pass)
+    cached_defs_hash: string;   // W4: Hash of cached defs for skip on match
 }
 
 table PlayerCommand {
@@ -925,6 +926,9 @@ table GameInfo {
     /// on `paused` — a normal in-game pause must not end the game. Defaults false
     /// for every ordinary GameInfo (auth snapshot, periodic refresh).
     game_over: bool = false;
+    /// W4: Content hash of all game defs (units + weapons). Client can skip
+    /// re-downloading defs on reconnect if this matches cached hash.
+    defs_hash: string;
     /// Winning allyteam IDs, as passed to `Spring.GameOver(allyTeamID1, …)`.
     /// Empty when the result is undecided (e.g. host drop) or on a fallback win
     /// with no ally mapping. Only meaningful when `game_over = true`. Mirrors
@@ -1755,8 +1759,10 @@ enum RulesParamValueKind : uint8 {
 
 /// One rules-param key→value change. `value_kind` selects which value field
 /// is live (`num_val` for Number, `str_val` for String, neither for Nil).
+/// W3 optimization: prefer key_id over key when both present.
 table RulesParamEntry {
-    key: string;
+    key: string;         // legacy: full string key (for backward compat)
+    key_id: uint16;      // W3: interned key ID (0 = not interned, use key)
     value_kind: RulesParamValueKind;
     num_val: double;
     str_val: string;
@@ -1791,6 +1797,14 @@ table RulesParamUpdate {
     id: uint32;
     replace: bool;
     params: [RulesParamEntry];
+    params_rev: uint32;  // W3: generation counter for snapshot validation
+}
+
+/// W3: Key interning dictionary for RulesParamEntry key_id references.
+/// Sent once on join (or on dictionary resync if rev mismatch).
+table RulesParamKeyDictionary {
+    keys: [string];         // indexed by key_id (0 reserved for "not interned")
+    dictionary_rev: uint32; // dictionary version for mismatch detection
 }
 
 // Union of all server→client message types
@@ -1837,6 +1851,7 @@ union ServerPayload {
     TeamStatsHistoryBatch,
     GameModOptions,
     RulesParamUpdate,
+    RulesParamKeyDictionary,
 }
 
 table ServerMessage {

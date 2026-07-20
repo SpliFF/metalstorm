@@ -41,6 +41,7 @@ import { PlayerTeamEventBatch } from '../protocol/spring-web/player-team-event-b
 import { TeamStatsHistoryBatch } from '../protocol/spring-web/team-stats-history-batch.js';
 import { GameModOptions } from '../protocol/spring-web/game-mod-options.js';
 import { RulesParamUpdate } from '../protocol/spring-web/rules-param-update.js';
+import { RulesParamKeyDictionary } from '../protocol/spring-web/rules-param-key-dictionary.js';
 import { RulesParamScope } from '../protocol/spring-web/rules-param-scope.js';
 import { RulesParamValueKind } from '../protocol/spring-web/rules-param-value-kind.js';
 import { ResourceUpdate } from '../protocol/spring-web/resource-update.js';
@@ -982,6 +983,10 @@ export class Connection {
     get gameHttpUrl(): string { return this.httpBase; }
     private commandSequence = 0;
 
+    // W3: Key interning dictionary for RulesParamUpdate
+    private keyDictionary: string[] = [];
+    private keyDictionaryRev = 0;
+
     /** Whether the control channel is currently usable. */
     get controlOpen(): boolean { return this.transport?.connected ?? false; }
 
@@ -1742,13 +1747,31 @@ export class Connection {
                 this.events.onGameModOptions?.(options);
                 break;
             }
+            case ServerPayload.RulesParamKeyDictionary: {
+                // W3: Receive and store the key dictionary
+                const dict = msg.payload(new RulesParamKeyDictionary()) as RulesParamKeyDictionary;
+                this.keyDictionary = [''];  // index 0 reserved
+                for (let i = 0; i < dict.keysLength(); i++) {
+                    this.keyDictionary.push(dict.keys(i) ?? '');
+                }
+                this.keyDictionaryRev = dict.dictionaryRev();
+                console.log(`[connection] Received key dictionary rev ${this.keyDictionaryRev} with ${this.keyDictionary.length - 1} keys`);
+                break;
+            }
             case ServerPayload.RulesParamUpdate: {
                 const upd = msg.payload(new RulesParamUpdate()) as RulesParamUpdate;
                 const params: Record<string, number | string | null> = {};
                 for (let i = 0; i < upd.paramsLength(); i++) {
                     const e = upd.params(i);
                     if (!e) continue;
-                    const key = e.key();
+                    // W3: Try key_id first, fall back to string key
+                    let key: string | null = null;
+                    const keyId = e.keyId();
+                    if (keyId > 0 && keyId < this.keyDictionary.length) {
+                        key = this.keyDictionary[keyId];
+                    } else {
+                        key = e.key();
+                    }
                     if (!key) continue;
                     switch (e.valueKind()) {
                         case RulesParamValueKind.Number: params[key] = e.numVal(); break;

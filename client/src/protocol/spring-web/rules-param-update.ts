@@ -68,8 +68,13 @@ paramsLength():number {
   return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
 }
 
+paramsRev():number {
+  const offset = this.bb!.__offset(this.bb_pos, 12);
+  return offset ? this.bb!.readUint32(this.bb_pos + offset) : 0;
+}
+
 static startRulesParamUpdate(builder:flatbuffers.Builder) {
-  builder.startObject(4);
+  builder.startObject(5);
 }
 
 static addScope(builder:flatbuffers.Builder, scope:RulesParamScope) {
@@ -100,17 +105,22 @@ static startParamsVector(builder:flatbuffers.Builder, numElems:number) {
   builder.startVector(4, numElems, 4);
 }
 
+static addParamsRev(builder:flatbuffers.Builder, paramsRev:number) {
+  builder.addFieldInt32(4, paramsRev, 0);
+}
+
 static endRulesParamUpdate(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
 }
 
-static createRulesParamUpdate(builder:flatbuffers.Builder, scope:RulesParamScope, id:number, replace:boolean, paramsOffset:flatbuffers.Offset):flatbuffers.Offset {
+static createRulesParamUpdate(builder:flatbuffers.Builder, scope:RulesParamScope, id:number, replace:boolean, paramsOffset:flatbuffers.Offset, paramsRev:number):flatbuffers.Offset {
   RulesParamUpdate.startRulesParamUpdate(builder);
   RulesParamUpdate.addScope(builder, scope);
   RulesParamUpdate.addId(builder, id);
   RulesParamUpdate.addReplace(builder, replace);
   RulesParamUpdate.addParams(builder, paramsOffset);
+  RulesParamUpdate.addParamsRev(builder, paramsRev);
   return RulesParamUpdate.endRulesParamUpdate(builder);
 }
 
@@ -119,7 +129,8 @@ unpack(): RulesParamUpdateT {
     this.scope(),
     this.id(),
     this.replace(),
-    this.bb!.createObjList<RulesParamEntry, RulesParamEntryT>(this.params.bind(this), this.paramsLength())
+    this.bb!.createObjList<RulesParamEntry, RulesParamEntryT>(this.params.bind(this), this.paramsLength()),
+    this.paramsRev()
   );
 }
 
@@ -129,6 +140,7 @@ unpackTo(_o: RulesParamUpdateT): void {
   _o.id = this.id();
   _o.replace = this.replace();
   _o.params = this.bb!.createObjList<RulesParamEntry, RulesParamEntryT>(this.params.bind(this), this.paramsLength());
+  _o.paramsRev = this.paramsRev();
 }
 }
 
@@ -137,7 +149,8 @@ constructor(
   public scope: RulesParamScope = RulesParamScope.Game,
   public id: number = 0,
   public replace: boolean = false,
-  public params: (RulesParamEntryT)[] = []
+  public params: (RulesParamEntryT)[] = [],
+  public paramsRev: number = 0
 ){}
 
 
@@ -148,7 +161,8 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
     this.scope,
     this.id,
     this.replace,
-    params
+    params,
+    this.paramsRev
   );
 }
 }

@@ -418,18 +418,22 @@ inline std::vector<uint8_t> BuildSendToUnsyncedEvent(
 
 /// One rules-param key→value change, ready to serialise into a
 /// RulesParamUpdate. `kind` picks which value is live; `Nil` means delete.
+/// W3: added keyId for interned keys (0 = use string key).
 struct RulesParamEntryData {
     std::string key;
+    uint16_t keyId = 0;  // W3: interned key ID (0 = not interned)
     SpringWeb::RulesParamValueKind kind = SpringWeb::RulesParamValueKind_Nil;
     double numVal = 0.0;
     std::string strVal;
 };
 
 /// A per-scope batch of rules-param changes (see schema RulesParamUpdate).
+/// W3: added paramsRev generation counter.
 struct RulesParamUpdateData {
     SpringWeb::RulesParamScope scope = SpringWeb::RulesParamScope_Game;
     uint32_t id = 0;          // teamID for Team scope; ignored for Game
     bool replace = false;     // true = join snapshot (clear then apply)
+    uint32_t paramsRev = 0;  // W3: generation counter for snapshot validation
     std::vector<RulesParamEntryData> params;
 };
 
@@ -443,12 +447,17 @@ inline std::vector<uint8_t> BuildRulesParamUpdate(const RulesParamUpdateData& up
     std::vector<flatbuffers::Offset<SpringWeb::RulesParamEntry>> entryOffs;
     entryOffs.reserve(upd.params.size());
     for (const auto& e : upd.params) {
-        auto keyOff = fbb.CreateString(e.key);
+        // W3: prefer key_id when available, fall back to string key
+        flatbuffers::Offset<flatbuffers::String> keyOff = 0;
+        if (e.keyId == 0 || e.key.length() > 0) {
+            keyOff = fbb.CreateString(e.key);
+        }
         flatbuffers::Offset<flatbuffers::String> strOff = 0;
         if (e.kind == SpringWeb::RulesParamValueKind_String)
             strOff = fbb.CreateString(e.strVal);
         SpringWeb::RulesParamEntryBuilder eb(fbb);
-        eb.add_key(keyOff);
+        if (keyOff.o != 0) eb.add_key(keyOff);
+        if (e.keyId > 0) eb.add_key_id(e.keyId);  // W3: add interned key ID
         eb.add_value_kind(e.kind);
         eb.add_num_val(e.numVal);
         if (strOff.o != 0) eb.add_str_val(strOff);
@@ -460,6 +469,7 @@ inline std::vector<uint8_t> BuildRulesParamUpdate(const RulesParamUpdateData& up
     ub.add_id(upd.id);
     ub.add_replace(upd.replace);
     ub.add_params(paramsVec);
+    if (upd.paramsRev > 0) ub.add_params_rev(upd.paramsRev);  // W3: add generation counter
     auto updOff = ub.Finish();
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_RulesParamUpdate,
                               updOff.Union());
@@ -968,17 +978,19 @@ inline std::vector<uint8_t> BuildGameInfo(
     float windStrength = 0, float tidalStrength = 0,
     bool legacyCoordSystem = false, uint32_t maxUnits = 0,
     bool gameOver = false,
-    const std::vector<uint8_t>& winningAllyTeams = {})
+    const std::vector<uint8_t>& winningAllyTeams = {},
+    const std::string& defsHash = "")
 {
     flatbuffers::FlatBufferBuilder fbb(256);
     auto mapOff = fbb.CreateString(mapId);
     auto gameOff = fbb.CreateString(gameId);
+    auto defsHashOff = fbb.CreateString(defsHash);  // W4: defs hash
     // Nested vectors must be serialised before the table that references them.
     auto winnersOff = fbb.CreateVector(winningAllyTeams);
     auto info = SpringWeb::CreateGameInfo(
         fbb, mapOff, gameOff, speed, frame, paused,
         windX, windY, windZ, windStrength, tidalStrength,
-        legacyCoordSystem, maxUnits, gameOver, winnersOff);
+        legacyCoordSystem, maxUnits, gameOver, defsHashOff, winnersOff);
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_GameInfo, info.Union());
 }
 
