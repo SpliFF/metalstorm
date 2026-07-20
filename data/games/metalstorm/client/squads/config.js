@@ -54,14 +54,36 @@ export const DEFAULT_CONFIG = {
   // for this many seconds after it lands.
   impactHintWindowSec: 0.6,
 
+  // Impact hint ring size (squad-casualties §4): keep the last N reported
+  // impacts, not just one, so overlapping blasts within the hint window
+  // both stay selectable instead of the newest silently evicting the last.
+  impactHintRingSize: 4,
+
+  // Attrition death stagger (squad-casualties §2): a batch of casualties
+  // with no impact hint drips out over this per-death interval instead of
+  // popping together, so it reads as a firefight rather than a bomb.
+  staggerIntervalMinSec: 0.05,
+  staggerIntervalMaxSec: 0.12,
+
+  // Threat-bearing smoothing (squad-casualties §5): blend factor per
+  // damage-bearing event toward the new source direction (0 = never move,
+  // 1 = snap instantly) — keeps simultaneous multi-attacker fire from
+  // whipping the bearing frame to frame.
+  threatDirSmoothing: 0.5,
+
   // Re-pack surviving members toward central slots after losses (§9). Off by
   // default — gaps are acceptable and cheaper.
   repackOnCasualty: false,
   repackRatePerSec: 0.5,
 
-  // Wreck budget (§11.5). Cosmetic debris only.
+  // Wreck budget (§11.5, squad-casualties §9). Cosmetic debris only: TTL +
+  // fade window before despawn, capped per-squad and globally (a manager-
+  // level pool, not per-squad state) so a long persistent game's memory
+  // doesn't grow unbounded.
   wreckTtlSec: 25,
+  wreckFadeSec: 3,
   maxWrecksPerSquad: 24,
+  maxWrecksGlobal: 400,
 
   // LOD: below this on-screen size (px, supplied by adapter) skip steering and
   // render members at the centroid; far beyond, the adapter drops to an icon

@@ -138,9 +138,13 @@ describe('LOD release/rebuild preserves aliveCount (Pitfalls #2, #3)', () => {
     const sq = mgr.squads.get(11);
     expect(backend.created.length).toBe(6);
 
-    // Take one casualty before going to icon LOD, so aliveCount < size.
+    // Take one casualty before going to icon LOD, so aliveCount < size. No
+    // impact hint was reported, so this is an attrition (stagger) kill
+    // (squad-casualties §2) — aliveCount drops synchronously, but the FX is
+    // drained on the next update() tick, not played inline.
     mgr.syncStrength(11, 80, 100); // curve(0.8, 6) = round(4.8) = 5
     expect(sq.aliveCount).toBe(5);
+    mgr.update(0.2); // > staggerIntervalMaxSec — drains the one queued death
     expect(backend.destroyed.length).toBe(1);
 
     // full → icon: release the 5 living instances, no death FX, count unchanged.

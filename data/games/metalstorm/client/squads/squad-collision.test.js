@@ -250,6 +250,9 @@ describe('wreck collision-grace then permanently non-colliding (§5)', () => {
     mgr.syncSquad(1, { x: 0, y: 0, z: 0, heading: 0, health: 100, maxHealth: 100 }, def);
     expect(mgr._wrecks.length).toBe(0);
     mgr.syncSquad(1, { health: 10, maxHealth: 100 }); // sharp strength drop -> casualties
+    // No impact hint was reported, so these are attrition (stagger) kills
+    // (squad-casualties §2) — FX drains on the next update() tick.
+    mgr.update(0.2); // > staggerIntervalMaxSec
     expect(mgr._wrecks.length).toBeGreaterThan(0);
   });
 });

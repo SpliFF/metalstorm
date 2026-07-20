@@ -49,9 +49,22 @@ export class Squad {
     this.members = [];
     this.aliveCount = this.size;        // monotonic non-increasing (§4)
 
-    // Casualty-alignment hint: a recent impact near this squad (§8).
-    this._impact = null;                // { x, z, t } or null
+    // Casualty-alignment hints (squad-casualties §4): ring of recent impacts
+    // (most-recent last), not a single slot — overlapping blasts within the
+    // same hint window must both stay selectable.
+    this._impacts = [];                 // { x, z, t }[]
     this._lastThreatDir = { x: 0, z: 1 };
+    // True once a real damage-bearing event has told us a bearing (§5).
+    // Distinct from _lastThreatDir's default value so the fog-of-war case
+    // (§6) can tell "never learned a bearing" from "bearing is due north".
+    this._threatDirKnown = false;
+
+    // Attrition death queue (squad-casualties §2): victims already resolved
+    // (aliveCount already reflects their death) but whose destroy-FX/wreck
+    // is deferred and drip-fed via update() so simultaneous losses don't
+    // pop as one synchronized bomb.
+    this._deathQueue = [];              // { member, dirX, dirZ }[]
+    this._nextStaggerAt = 0;
 
     this._lod = 'full';                 // 'full' | 'centroid' | 'icon' (see setter below)
     this._spawned = false;
@@ -117,10 +130,13 @@ export class Squad {
   }
 
   /** Strength on snapshot change only — runs casualty reconciliation.
-   *  `applyAtFrame` is a stub for scheduling on the presentation timeline
-   *  once PLAN-latency L1 (foreknown resolve_frame) lands (§7); until then
-   *  it is accepted but ignored and the reconcile always applies immediately. */
+   *  LATENCY-STANDIN: `applyAtFrame` is a stub for scheduling the reconcile
+   *  on the presentation timeline once PLAN-latency L1 (foreknown
+   *  resolve_frame) lands (§8) — accepted but ignored, applied immediately,
+   *  same stub shape as PLAN-metalstorm-squad-sync.md task 6's
+   *  `syncStrength`/`setPose` split. Revisit both together when L1 lands. */
   setStrength(health, maxHealth, nowSec, applyAtFrame) {
+    if (applyAtFrame != null) warnLatencyStandin();
     this.health = health; this.maxHealth = maxHealth || 1;
     // Reconciling before the roster exists would read an empty `members`
     // array and incorrectly zero aliveCount; `_spawnInitial` itself sizes
@@ -128,8 +144,39 @@ export class Squad {
     if (this._spawned) this._reconcileCount(nowSec);
   }
 
-  /** Record an impact as a casualty-alignment hint (§8). */
-  reportImpact(x, z, nowSec) { this._impact = { x, z, t: nowSec }; }
+  /** Record an impact as a casualty-alignment hint (§4): a small ring, not a
+   *  single slot, so overlapping blasts inside the same window both stay
+   *  selectable — `_validImpact` resolves which one to use at kill time. */
+  reportImpact(x, z, nowSec) {
+    this._impacts.push({ x, z, t: nowSec });
+    if (this._impacts.length > this.cfg.impactHintRingSize) this._impacts.shift();
+  }
+
+  /** Update the flank-selection bearing (§5) from the best available source
+   *  for a damage-bearing event: a visible attacker's position, or (weaker)
+   *  a visible projectile's origin — the caller resolves which and passes
+   *  its world position. Callers must simply NOT call this for a fully-fog
+   *  event (no visible attacker/projectile): §6 forbids inferring a bearing
+   *  from bare damage, so leaving `_lastThreatDir` alone and letting the
+   *  fallback ladder (§3.3) handle it is the correct behaviour, not a gap.
+   *  Smoothed (blend + renormalise) so simultaneous multi-attacker fire
+   *  doesn't snap the bearing frame to frame. */
+  reportThreat(x, z) {
+    const dx = x - this.cx, dz = z - this.cz;
+    const len = Math.hypot(dx, dz);
+    if (len < 1e-6) return; // attacker reported on top of the centroid — no usable bearing
+    const nx = dx / len, nz = dz / len;
+    if (!this._threatDirKnown) {
+      this._lastThreatDir.x = nx; this._lastThreatDir.z = nz;
+      this._threatDirKnown = true;
+      return;
+    }
+    const g = this.cfg.threatDirSmoothing;
+    const bx = this._lastThreatDir.x + (nx - this._lastThreatDir.x) * g;
+    const bz = this._lastThreatDir.z + (nz - this._lastThreatDir.z) * g;
+    const blen = Math.hypot(bx, bz) || 1;
+    this._lastThreatDir.x = bx / blen; this._lastThreatDir.z = bz / blen;
+  }
 
   // --- breadcrumb trail (pathfinding §4) ----------------------------------
 
@@ -232,54 +279,144 @@ export class Squad {
     this._spawned = true;
   }
 
-  /** Strength → target alive count, clamped monotonic-down (no resurrection). */
+  /** Strength → target alive count, clamped monotonic-down (no resurrection).
+   *  Two presentation regimes (§2): a valid impact hint means an AoE just
+   *  landed here → kill the whole batch together, clustered at the blast
+   *  (burst). No hint means attrition (statistical fire, damage fields) →
+   *  spread the same batch out over a short window instead (stagger) so it
+   *  reads as a firefight, not a synchronized pop. */
   _reconcileCount(nowSec) {
     const f = this.health / this.maxHealth;
     const computed = this.cfg.countCurve(f, this.size);
     const target = Math.min(this.aliveCount, computed);   // never increases
-    while (this.aliveCount > target) this._killOne(nowSec);
-  }
+    const killCount = this.aliveCount - target;
+    if (killCount <= 0) return;
 
-  /** Select and kill one member, aligned to the blast/threat where possible. */
-  _killOne(nowSec) {
-    const living = this.members.filter((m) => m.alive);
-    if (living.length === 0) { this.aliveCount = 0; return; }
-
-    let victim, dirX, dirZ;
     const hint = this._validImpact(nowSec);
-    if (hint) {
-      // (a) nearest living member to the impact point.
-      victim = nearest(living, hint.x, hint.z);
-      dirX = victim.x - hint.x; dirZ = victim.z - hint.z;
-    } else {
-      // (b) members on the last threat bearing, else (c) arbitrary.
-      const d = this._lastThreatDir;
-      victim = extreme(living, d.x, d.z);
-      dirX = d.x; dirZ = d.z;
-    }
+    const victims = this._selectVictims(killCount, hint);
+    this.aliveCount = target;   // bookkeeping is authoritative now; FX may lag (stagger)
 
-    victim.alive = false;
-    this.aliveCount--;
-    // A released (LOD-icon) member has no live instance — nothing to play
-    // death FX on or drop a wreck from; the count still drops silently.
-    if (!victim.released) {
-      const len = Math.hypot(dirX, dirZ) || 1;
-      this.backend.destroyMember(victim.handle, {
-        x: victim.x, y: victim.y, z: victim.z,
-        dirX: dirX / len, dirZ: dirZ / len,
-      });
-      this.backend.spawnWreck(victim.x, victim.y, victim.z, victim.headingY, victim.visual);
-      this.onWreck?.(victim.x, victim.z);
+    if (hint) {
+      for (const v of victims) {
+        const d = this._deathDirFor(v, hint);
+        this._killMember(v, d.x, d.z);
+      }
+    } else {
+      this._enqueueStaggeredDeaths(victims, nowSec);
     }
     this._repackIfEnabled();
   }
 
-  _validImpact(nowSec) {
-    if (!this._impact) return null;
-    if (nowSec != null && nowSec - this._impact.t > this.cfg.impactHintWindowSec) {
-      this._impact = null; return null;
+  /** Scored victim selection (§3), living && non-released members only.
+   *  Priority ladder: impact-aligned (nearest to a valid hint) → threat-
+   *  directional (furthest along the known bearing — the exposed flank
+   *  takes it) → fallback (no hint, no bearing — §6 fog of war: never
+   *  back-infer the attacker from bare damage; stable pseudo-random over
+   *  member id, preferring outermost members so the formation core
+   *  persists). Partial-select (`selectTopN`) rather than a full sort —
+   *  `count` is small in the common case. */
+  _selectVictims(count, hint) {
+    const living = this.members.filter((m) => m.alive);
+    if (living.length === 0) return [];
+    const n = Math.min(count, living.length);
+
+    if (hint) {
+      return selectTopN(living, n, (m) => (m.x - hint.x) ** 2 + (m.z - hint.z) ** 2);
     }
-    return this._impact;
+    if (this._threatDirKnown) {
+      const d = this._lastThreatDir;
+      return selectTopN(living, n, (m) => -(m.x * d.x + m.z * d.z));
+    }
+    return selectTopN(living, n, (m) => this._fallbackScore(m));
+  }
+
+  _fallbackScore(m) {
+    const slot = this.slots[m.slot];
+    return -slotDist2(slot) * 1e6 + pseudoRandom(m.id);
+  }
+
+  /** Death-FX direction for a victim under the same priority ladder as
+   *  selection (§3): radiating from the impact point, along the known
+   *  threat bearing, or (fallback/fog, §6) radiating outward from the
+   *  squad centroid — never derived from a hidden attacker's position. */
+  _deathDirFor(victim, hint) {
+    if (hint) return { x: victim.x - hint.x, z: victim.z - hint.z };
+    if (this._threatDirKnown) return this._lastThreatDir;
+    return { x: victim.x - this.cx, z: victim.z - this.cz };
+  }
+
+  /** Kill one member right now: bookkeeping + destroy-FX/wreck together
+   *  (burst mode, or the final undeferred cascade in `destroy`). */
+  _killMember(victim, dirX, dirZ) {
+    victim.alive = false;
+    this._playDeathFx(victim, dirX, dirZ);
+  }
+
+  /** Play a victim's destroy-FX + wreck. A released (LOD-icon) member has
+   *  no live instance — nothing to play death FX on or drop a wreck from;
+   *  the count still drops silently. Split out from `_killMember` so the
+   *  stagger queue can defer *only* this part while `alive`/`aliveCount`
+   *  update immediately (§2). */
+  _playDeathFx(victim, dirX, dirZ) {
+    if (victim.released) return;
+    const len = Math.hypot(dirX, dirZ) || 1;
+    this.backend.destroyMember(victim.handle, {
+      x: victim.x, y: victim.y, z: victim.z,
+      dirX: dirX / len, dirZ: dirZ / len,
+    });
+    const handle = this.backend.spawnWreck(victim.x, victim.y, victim.z, victim.headingY, victim.visual);
+    // Manager-level wreck pool (§9): TTL/fade/global cap live there, keyed
+    // off the handle spawnWreck returns.
+    this.onWreck?.(victim.x, victim.z, {
+      y: victim.y, headingY: victim.headingY, visual: victim.visual,
+      handle, squadId: this.id,
+    });
+  }
+
+  /** Queue victims for staggered death (§2): resolved now (bookkeeping-wise)
+   *  but their FX drips out via `_drainDeathQueue` over ≈50-120ms/each so
+   *  attrition doesn't read as a single synchronized bomb. */
+  _enqueueStaggeredDeaths(victims, nowSec) {
+    if (victims.length === 0) return;
+    if (this._deathQueue.length === 0) this._nextStaggerAt = nowSec + this._staggerInterval();
+    for (const v of victims) {
+      const d = this._deathDirFor(v, null);
+      v.alive = false;
+      this._deathQueue.push({ member: v, dirX: d.x, dirZ: d.z });
+    }
+  }
+
+  _staggerInterval() {
+    const { staggerIntervalMinSec: lo, staggerIntervalMaxSec: hi } = this.cfg;
+    return lo + Math.random() * (hi - lo);
+  }
+
+  /** Drain the stagger queue at its own pace, independent of reconcile
+   *  timing — called once per render frame from `update`. */
+  _drainDeathQueue(nowSec) {
+    while (this._deathQueue.length && nowSec >= this._nextStaggerAt) {
+      const { member, dirX, dirZ } = this._deathQueue.shift();
+      this._playDeathFx(member, dirX, dirZ);
+      if (this._deathQueue.length) this._nextStaggerAt = nowSec + this._staggerInterval();
+    }
+  }
+
+  /** Multiple impacts can be valid at once (§4 — overlapping blasts must
+   *  both register, not just the most recent). Prunes expired entries off
+   *  the front of the ring (chronological order), then picks the one
+   *  nearest this squad's centroid; a tie favours the more recent entry. */
+  _validImpact(nowSec) {
+    const ring = this._impacts;
+    if (nowSec != null) {
+      while (ring.length && nowSec - ring[0].t > this.cfg.impactHintWindowSec) ring.shift();
+    }
+    if (ring.length === 0) return null;
+    let best = ring[0], bd = Infinity;
+    for (const imp of ring) {
+      const d = (imp.x - this.cx) ** 2 + (imp.z - this.cz) ** 2;
+      if (d <= bd) { bd = d; best = imp; }   // <= : later (more recent) wins ties
+    }
+    return best;
   }
 
   // --- re-pack on casualty (cohesion §4, off by default) -------------------
@@ -324,6 +461,7 @@ export class Squad {
    *  the shared grid from passability.js; ground/naval steerers query it,
    *  air ignores it entirely (pathfinding §6). */
   update(dt, nowSec, neighbourQuery, passability) {
+    this._drainDeathQueue(nowSec);
     if (this.lod !== 'full') return this._updateCentroid();
 
     if (this._prevUpdateCx != null && dt > 1e-6) {
@@ -551,17 +689,23 @@ export class Squad {
     }
   }
 
-  /** Squad destroyed: cascade-kill remaining members (§8.5). */
+  /** Squad destroyed: cascade-kill remaining members (§7). Aligns to the
+   *  killing blast if a recent impact hint exists, else the known threat
+   *  bearing, else blows outward from the centroid (never reveals a hidden
+   *  attacker — §6). Any still-queued staggered deaths are folded into the
+   *  cascade immediately (played now, not at their scheduled pace) — a wipe
+   *  must not leave those instances' FX/wreck never played. */
   destroy(nowSec) {
+    const hint = this._validImpact(nowSec);
+
+    for (const { member, dirX, dirZ } of this._deathQueue) this._playDeathFx(member, dirX, dirZ);
+    this._deathQueue.length = 0;
+
     for (const m of this.members) {
       if (!m.alive) continue;
       m.alive = false;
-      if (!m.released) {
-        const d = this._lastThreatDir;
-        this.backend.destroyMember(m.handle, { x: m.x, y: m.y, z: m.z, dirX: d.x, dirZ: d.z });
-        this.backend.spawnWreck(m.x, m.y, m.z, m.headingY, m.visual);
-        this.onWreck?.(m.x, m.z);
-      }
+      const d = this._deathDirFor(m, hint);
+      this._playDeathFx(m, d.x, d.z);
     }
     this.aliveCount = 0;
   }
@@ -569,25 +713,41 @@ export class Squad {
   *memberPositions() { for (const m of this.members) if (m.alive && !m.released) yield m; }
 }
 
-// --- helpers (no allocation in the hot path) ------------------------------
-
-function nearest(list, x, z) {
-  let best = list[0], bd = Infinity;
-  for (const m of list) {
-    const d = (m.x - x) ** 2 + (m.z - z) ** 2;
-    if (d < bd) { bd = d; best = m; }
-  }
-  return best;
-}
-
-// Member furthest along direction (dx,dz) — i.e. on that flank.
-function extreme(list, dx, dz) {
-  let best = list[0], bp = -Infinity;
-  for (const m of list) {
-    const p = m.x * dx + m.z * dz;
-    if (p > bp) { bp = p; best = m; }
-  }
-  return best;
-}
+// --- helpers ---------------------------------------------------------------
 
 function slotDist2(slot) { return slot.x * slot.x + slot.z * slot.z; }
+
+// Deterministic per-id pseudo-random in [0,1) (squad-casualties §3.3):
+// stable across repeated calls (no reshuffling frame-to-frame) but not
+// synced across clients/spectators — cosmetic tie-break only.
+function pseudoRandom(id) {
+  const x = Math.sin(id * 12.9898) * 43758.5453;
+  return x - Math.floor(x);
+}
+
+// Partial top-N selection via repeated min-scan (§3 pitfall: "partial-select
+// for small counts beats a full sort"). O(n*k); killCount is small in the
+// common case, so this beats an O(n log n) sort of the whole living roster.
+function selectTopN(list, n, scoreFn) {
+  const pool = list.slice();
+  const out = [];
+  for (let k = 0; k < n; k++) {
+    let bestI = 0, bestScore = Infinity;
+    for (let i = 0; i < pool.length; i++) {
+      const s = scoreFn(pool[i]);
+      if (s < bestScore) { bestScore = s; bestI = i; }
+    }
+    out.push(pool[bestI]);
+    pool.splice(bestI, 1);
+  }
+  return out;
+}
+
+// One-time LATENCY-STANDIN warn for the applyAtFrame stub (setStrength).
+let _warnedLatencyStandin = false;
+function warnLatencyStandin() {
+  if (_warnedLatencyStandin) return;
+  _warnedLatencyStandin = true;
+  console.warn('[LATENCY-STANDIN] Squad.setStrength: applyAtFrame is accepted but ignored ' +
+    '(reconcile applies immediately) until PLAN-latency.md L1 lands.');
+}

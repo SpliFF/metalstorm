@@ -25,6 +25,9 @@
 //   // on entity destroy (squad unit):    squads.removeSquad(id); // H2: also
 //   //   clears any buffered pending state so a reused id can't resurrect
 //   // on impact/combat FX event:         squads.reportImpact({x,z,radius,squadId?});
+//   // on the same event, IF the attacker/projectile is visible (omit
+//   //   entirely for a fog event — squad-casualties §6):
+//   //                                    squads.reportThreat({x,z,radius,squadId?});
 //   // each render frame:                 squads.update(dtSeconds);
 
 import { SquadManager } from './squad-manager.js';

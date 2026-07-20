@@ -31,7 +31,14 @@ export class SquadManager {
     // wrecks get a brief post-spawn collision grace via Squad.onWreck, then
     // are pruned from the array in _rebuildGrid and never re-inserted.
     this._repulsors = new Map();    // id → { x, z, radius }
-    this._wrecks = [];              // { x, z, radius, until }
+    this._wrecks = [];              // { x, z, radius, until } — brief collision-grace presence (§5)
+
+    // Manager-level wreck pool (squad-casualties §9): TTL + fade + a
+    // per-squad AND global cap, independent of the (much shorter) collision-
+    // grace list above — this one lives for wreckTtlSec (~25s), that one for
+    // wreckCollisionGraceSec (~2s). Oldest-first eviction (array is append-
+    // ordered, so index 0 / first match is always the oldest).
+    this._wreckPool = [];           // { x, y, z, headingY, visual, handle, squadId, until }
 
     // Shared passability grid (PLAN-metalstorm-squad-pathfinding.md §2) — one
     // per map, injected once the worker adapter has a heightmap sampler
@@ -139,30 +146,100 @@ export class SquadManager {
     this.squads.delete(id);
   }
 
-  /** An impact/combat event landed; route to nearby squads as a casualty hint.
-   *  If `squadId` is known, target it directly; else spatial-match by radius. */
+  /** An impact/combat event landed; route to nearby squads as a casualty hint
+   *  (squad-casualties §4). If `squadId` is known, target it directly; else
+   *  spatial-match by radius (one AoE fanning to every squad in range, each
+   *  independently choosing its own victims — no cross-squad coordination
+   *  needed, §4). `hint = { x, z, radius?, squadId? }` — matches the
+   *  `CombatEvent`/damage-field impact position on the wire (protocol.fbs). */
   reportImpact(hint) {
+    this._forSquadsNear(hint, (sq) => sq.reportImpact(hint.x, hint.z, this._now));
+  }
+
+  /** A damage-bearing event revealed a threat bearing — a visible attacker's
+   *  position, or (weaker) a visible projectile's origin (squad-casualties
+   *  §5). Same routing as `reportImpact`. Callers must simply not call this
+   *  for a fully-fog event (attacker hidden, no projectile seen) — §6's
+   *  fallback ladder is what handles that, not this method inventing one. */
+  reportThreat(hint) {
+    this._forSquadsNear(hint, (sq) => sq.reportThreat(hint.x, hint.z));
+  }
+
+  /** Shared routing for reportImpact/reportThreat: direct squadId match, or
+   *  a spatial radius match against every squad's centroid. */
+  _forSquadsNear(hint, fn) {
     if (hint.squadId != null) {
-      this.squads.get(hint.squadId)?.reportImpact(hint.x, hint.z, this._now);
+      const sq = this.squads.get(hint.squadId);
+      if (sq) fn(sq);
       return;
     }
     const r2 = (hint.radius || 64) ** 2;
     for (const sq of this.squads.values()) {
       const d = (sq.cx - hint.x) ** 2 + (sq.cz - hint.z) ** 2;
-      if (d <= r2) sq.reportImpact(hint.x, hint.z, this._now);
+      if (d <= r2) fn(sq);
     }
   }
 
-  /** Squad.onWreck hook: a member died and dropped cosmetic wreckage
-   *  (collision §5). Brief collision presence so a wreck isn't walked
-   *  straight through the instant it lands; _rebuildGrid prunes it once its
-   *  grace window ends, after which it is never re-inserted. */
-  _registerWreck(x, z) {
+  /** Squad.onWreck hook: a member died and dropped cosmetic wreckage.
+   *  Two independent lifetimes share this one call (§5 collision / §9 pool):
+   *  brief collision presence so a wreck isn't walked straight through the
+   *  instant it lands (`_rebuildGrid` prunes it once its grace window ends,
+   *  after which it is never re-inserted), and — when `extra` is supplied —
+   *  the longer-lived TTL/fade/cap-managed pool entry. `extra` is omitted
+   *  by direct test calls that only care about collision-grace. */
+  _registerWreck(x, z, extra) {
     this._wrecks.push({
       x, z,
       radius: this.cfg.wreckCollisionRadius,
       until: this._now + this.cfg.wreckCollisionGraceSec,
     });
+    if (extra) this._poolWreck(x, z, extra);
+  }
+
+  /** Add a wreck to the manager-level pool (squad-casualties §9) and evict
+   *  overflow — per-squad cap first, then the global cap — oldest first. */
+  _poolWreck(x, z, { y, headingY, visual, handle, squadId }) {
+    this._wreckPool.push({
+      x, y, z, headingY, visual, handle, squadId,
+      until: this._now + this.cfg.wreckTtlSec,
+    });
+    this._evictWreckOverflow(squadId);
+  }
+
+  _evictWreckOverflow(squadId) {
+    if (squadId != null) {
+      let count = 0;
+      for (const w of this._wreckPool) if (w.squadId === squadId) count++;
+      while (count > this.cfg.maxWrecksPerSquad) {
+        this._despawnWreckAt(this._wreckPool.findIndex((w) => w.squadId === squadId));
+        count--;
+      }
+    }
+    while (this._wreckPool.length > this.cfg.maxWrecksGlobal) this._despawnWreckAt(0);
+  }
+
+  _despawnWreckAt(idx) {
+    const [w] = this._wreckPool.splice(idx, 1);
+    this.backend.despawnWreck(w.handle);
+  }
+
+  /** Per-frame TTL/fade tick for the wreck pool (§9): despawn anything past
+   *  its TTL, fade anything inside its trailing `wreckFadeSec` window. */
+  _tickWreckPool() {
+    let i = 0;
+    while (i < this._wreckPool.length) {
+      const w = this._wreckPool[i];
+      const remaining = w.until - this._now;
+      if (remaining <= 0) {
+        this._wreckPool.splice(i, 1);
+        this.backend.despawnWreck(w.handle);
+        continue;
+      }
+      if (remaining <= this.cfg.wreckFadeSec) {
+        this.backend.fadeWreck?.(w.handle, Math.max(0, remaining / this.cfg.wreckFadeSec));
+      }
+      i++;
+    }
   }
 
   // --- def-before-state buffering (H1) ------------------------------------
@@ -192,7 +269,7 @@ export class SquadManager {
     // id were later destroyed and reused (H2), so clear it here too.
     this._pendingById.delete(id);
     const sq = new Squad(id, def, this.backend, this.cfg);
-    sq.onWreck = (x, z) => this._registerWreck(x, z);
+    sq.onWreck = (x, z, extra) => this._registerWreck(x, z, extra);
     this.squads.set(id, sq);
     const strength = state.strength || state;
     const pose = state.pose || state;
@@ -207,6 +284,7 @@ export class SquadManager {
   /** Drive all squads one render step. `dt` seconds. */
   update(dt) {
     this._now += dt;
+    this._tickWreckPool();
     this._rebuildGrid();
     const query = (m) => this._neighbours(m);
     for (const sq of this.squads.values()) sq.update(dt, this._now, query, this.passability);
