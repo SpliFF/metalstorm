@@ -159,6 +159,15 @@ local function strategicTick(frame)
     --    and announces intent (plan §5.1) + publishes the intent report
     --    (PLAN-metalstorm-interaction.md §6.3).
     self.actuators:apply(plan, picture)
+
+    -- 5. PARLEY — evaluate proposals addressed to us and respond
+    -- (interaction §6.2). The decision is computed unconditionally (pure,
+    -- testable now); only the actual respond CALL is gated on engine ask I1
+    -- (Actuators:respondProposal degrades to a no-op false until then, same
+    -- as every other AI2-class verb in actuators.lua).
+    for _, r in ipairs(Planner.evaluateProposals(picture, self.profile, self.role)) do
+        self.actuators:respondProposal(r.id, r.decision)
+    end
 end
 
 --=============================================================================

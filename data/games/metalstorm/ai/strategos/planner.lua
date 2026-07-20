@@ -331,4 +331,89 @@ function Planner.plan(ctx)
     return emit(assignments, packages, usedPkg, ctx)
 end
 
+--=============================================================================
+-- Proposal/demand evaluation (PLAN-metalstorm-interaction.md §6.2 "AI
+-- proposal evaluation: expected value of terms vs alternatives ... weighted
+-- by the trust ledger and, for demands, by credibility"). PURE — takes the
+-- Picture + profile/role, returns a plain decision list; the caller
+-- (main.lua) applies it via Actuators:respondProposal (engine ask I1). No
+-- Spring/GG/AI access here, same discipline as Planner.plan.
+--=============================================================================
+local TRUST_VALUE_WEIGHT       = 5    -- authority-equivalent value per trust point
+local CEASEFIRE_BASE_VALUE     = 30   -- ceasefires save future order-cost/losses
+local DEMAND_CREDIBILITY_FLOOR = 0.55 -- comply when we'd likely lose the fight anyway
+
+local function regionStrength(picture, region, mine)
+    if not region then return 0 end
+    if mine then
+        local bucket = (picture.ledger or {})[region]
+        return bucket and bucket.strength or 0
+    end
+    local mem = (picture.intel or {})[region]
+    return mem and (mem.strength or 0) * (mem.confidence or 1) or 0
+end
+
+--- Lanchester-square credibility proxy — the SAME shape as pSuccess above
+-- (§6.2 "reuses the pSuccess machinery unchanged"), applied to a demand's
+-- named region instead of a goal/package pair. No visible enemy presence
+-- there at all reads as "not credible" (0), same honest-blindness stance as
+-- pSuccess's own "no known defender" branch.
+local function credibility(picture, region)
+    local theirs = regionStrength(picture, region, false)
+    local ours = regionStrength(picture, region, true)
+    if theirs <= 0 then return 0 end
+    local denom = theirs * theirs + ours * ours
+    if denom <= 0 then return 0 end
+    return (theirs * theirs) / denom
+end
+
+local function evaluateOne(p, picture, profile)
+    local trust = (picture.parley.trust or {})[p.fromTeam] or 0
+
+    if p.kind == 'intel' then
+        return 'accept'   -- free information, no downside (§1 table)
+    end
+
+    if p.kind == 'ceasefire' or p.kind == 'safe_passage' then
+        local value = CEASEFIRE_BASE_VALUE + trust * TRUST_VALUE_WEIGHT
+                     - (profile.aggression or 1.0) * 20   -- aggressive profiles discount standing down
+        return (value >= 0) and 'accept' or 'reject'
+    end
+
+    if p.kind == 'tribute' then
+        local t = p.terms or {}
+        if (t.payer or 'from') == 'from' then return 'accept' end   -- they pay us — pure upside
+        -- We'd be the payer: only worth it with healthy trust (buying real
+        -- peace) relative to the amount asked.
+        local worth = (trust * TRUST_VALUE_WEIGHT) - (t.amount or 0)
+        return (worth >= 0) and 'accept' or 'reject'
+    end
+
+    if p.kind == 'joint_objective' then
+        return (trust >= 0) and 'accept' or 'reject'
+    end
+
+    if p.kind == 'demand' then
+        local t = p.terms or {}
+        local region = t.regionKey or (t.innerTerms and t.innerTerms.regionKey)
+        return (credibility(picture, region) >= DEMAND_CREDIBILITY_FLOOR) and 'accept' or 'reject'
+    end
+
+    return 'reject'   -- unrecognised kind: never silently accept an unknown pact
+end
+
+--- Evaluate every pending (offered/countered) proposal addressed to our own
+-- team. Returns { {id=, decision='accept'|'reject'}, ... } — main.lua feeds
+-- each straight into Actuators:respondProposal(id, decision).
+function Planner.evaluateProposals(picture, profile, role)
+    local teamId = role and role.teamId
+    local out = {}
+    for _, p in ipairs((picture.parley or {}).proposals or {}) do
+        if p.toTeam == teamId and (p.state == 'offered' or p.state == 'countered') then
+            out[#out + 1] = { id = p.id, decision = evaluateOne(p, picture, profile) }
+        end
+    end
+    return out
+end
+
 return Planner

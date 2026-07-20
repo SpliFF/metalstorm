@@ -38,12 +38,19 @@ local function pruneFlippedTeams(held, owner)
     end
 end
 
+-- Eligibility gate: forTeam (if set) OR forTeam2 (PLAN-metalstorm-interaction.md
+-- §1 joint_objective — GG.Objectives.WidenEligibility widens a scoped
+-- control objective to a second team). nil forTeam = open race, always true.
+local function eligible(o, team)
+    return (not o.forTeam) or team == o.forTeam or (o.forTeam2 and team == o.forTeam2)
+end
+
 function control.check(o, ctx)
     local owner = ctx.regionOwner(o.params.regionKey)
     local held = o.data.heldSince
     pruneFlippedTeams(held, owner)
     if not owner then return nil end
-    if o.forTeam and owner ~= o.forTeam then return nil end   -- not the eligible team
+    if not eligible(o, owner) then return nil end   -- not an eligible team
 
     if not held[owner] then held[owner] = ctx.frame end
     if (ctx.frame - held[owner]) >= o.params.holdFrames then
@@ -54,7 +61,7 @@ end
 
 function control.progress(o, ctx)
     local owner = ctx.regionOwner(o.params.regionKey)
-    if not owner or (o.forTeam and owner ~= o.forTeam) then return 0 end
+    if not owner or not eligible(o, owner) then return 0 end
     local since = o.data.heldSince[owner]
     if not since then return 0 end
     return math.min(1, (ctx.frame - since) / o.params.holdFrames)
@@ -64,7 +71,7 @@ end
 --- region (§5 "ordering units that act near the objective").
 function control.participants(o, ctx)
     local owner = ctx.regionOwner(o.params.regionKey)
-    if not owner or (o.forTeam and owner ~= o.forTeam) then return {} end
+    if not owner or not eligible(o, owner) then return {} end
     local out = {}
     for _, unitID in ipairs(ctx.unitsInRegion(o.params.regionKey)) do
         if ctx.unitTeam(unitID) == owner then out[#out + 1] = unitID end

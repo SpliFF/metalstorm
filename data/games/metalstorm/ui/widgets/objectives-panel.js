@@ -51,7 +51,7 @@ const BOUNTY_STAKE_DEFAULT = 50;
 let warnedNoSendCommand = false;
 let warnedNoStrategicMap = false;
 
-function renderItem(o, playerId) {
+function renderItem(o, playerId, delegated) {
   const icon = TYPE_ICONS[o.type] ?? '•';
   const pct = Math.max(0, Math.min(100, Math.round((o.progress ?? 0) * 100)));
   const bits = [];
@@ -63,12 +63,18 @@ function renderItem(o, playerId) {
   // rather than silently relying on the player to notice the reward number.
   const suggested = playerId !== undefined && o.suggested === playerId;
   const suggestedBadge = suggested ? ' <span class="ms-obj-suggested">yours to take</span>' : '';
+  // PLAN-metalstorm-interaction.md §6.2 "Assign to AI" — writes
+  // guidance_<team>_delegated_keys via game_ai_guidance.lua; the planner
+  // scores a delegated goal ×5 (ai/strategos/planner.lua sourceWeight()).
+  const delegatedBadge = delegated ? ' <span class="ms-obj-delegated">assigned to AI</span>' : '';
+  const assignLabel = delegated ? 'Unassign from AI' : 'Assign to AI';
   return (
     `<li class="ms-obj ms-obj-${o.scope ?? 'tactical'}${suggested ? ' ms-obj-is-suggested' : ''}" data-id="${o.id}">` +
     `<span class="ms-obj-icon">${icon}</span>` +
-    `<span class="ms-obj-type">${o.type}${subLabel}${suggestedBadge}</span>` +
+    `<span class="ms-obj-type">${o.type}${subLabel}${suggestedBadge}${delegatedBadge}</span>` +
     `<span class="ms-obj-reward">⬡ ${o.reward ?? 0}</span>` +
     `<div class="ms-obj-progress"><div class="ms-obj-progress-fill" style="width:${pct}%"></div></div>` +
+    `<button type="button" class="ms-obj-assign-ai" data-id="${o.id}" data-delegated="${delegated ? '1' : '0'}">${assignLabel}</button>` +
     `</li>`
   );
 }
@@ -102,13 +108,47 @@ export default {
     ctx.mount.appendChild(this.el);
 
     this._wireBountyForm();
+    this._wireAssignAi();
 
     const pull = () => this.index.pull((key) => ctx.store.gameRulesParam(key));
     this.unsub = ctx.store.subscribe(['gameRulesParams'], () => {
       if (pull()) this._render();
     });
+    // PLAN-metalstorm-interaction.md §6.2 delegated set — team-scoped, so a
+    // separate subscription (gameRulesParams alone won't fire on it).
+    this.unsubTeam = ctx.store.subscribe(['teamRulesParams'], () => this._render());
     pull();
     this._render();
+  },
+
+  /** Current `delegated` objectiveId set for our own team, read from
+   * game_ai_guidance.lua's guidance_<team>_delegated_keys. */
+  _delegatedSet() {
+    const teamId = this.ctx.identity?.teamId;
+    const raw = this.ctx.store.teamRulesParam(teamId, `guidance_${teamId}_delegated_keys`);
+    const set = new Set();
+    if (raw) for (const id of String(raw).split(',')) if (id) set.add(Number(id));
+    return set;
+  },
+
+  _wireAssignAi() {
+    this.el.addEventListener('click', (ev) => {
+      const btn = ev.target.closest('.ms-obj-assign-ai');
+      if (!btn) return;
+      const objectiveId = Number(btn.dataset.id);
+      const delegated = btn.dataset.delegated === '1';
+      if (typeof this.ctx.sendCommand !== 'function') {
+        if (!warnedNoSendCommand) {
+          warnedNoSendCommand = true;
+          console.warn(
+            '[objectives-panel] ctx.sendCommand is not wired yet — Assign to AI is a no-op ' +
+            '(FIDELITY-STANDIN: no validated command-send API for native-ui widgets, see file header).'
+          );
+        }
+        return;
+      }
+      this.ctx.sendCommand('guidance.delegate', { objectiveId, delegated: delegated ? '0' : '1' });
+    });
   },
 
   _wireBountyForm() {
@@ -162,8 +202,10 @@ export default {
 
   _render() {
     const identity = this.ctx.identity ?? {};
+    const delegated = this._delegatedSet();
     const list = this.el.querySelector('.ms-obj-list');
-    const items = this.index.forTeam(identity.teamId, 'active').map((o) => renderItem(o, identity.playerId));
+    const items = this.index.forTeam(identity.teamId, 'active')
+      .map((o) => renderItem(o, identity.playerId, delegated.has(o.id)));
     list.innerHTML = items.join('') || '<li class="ms-obj-none">No active objectives</li>';
     this._publishMarkers();
   },
@@ -197,6 +239,7 @@ export default {
 
   dispose() {
     this.unsub?.();
+    this.unsubTeam?.();
     this.el?.remove();
   },
 };

@@ -80,27 +80,112 @@ local function readEconomy(c, role)
              teamFallback = role and role.teamAuthorityFallback or false }
 end
 
---- Guidance store (PLAN-metalstorm-interaction.md §6.2) — team-private,
--- BINDING on the planner. Only meaningful for co-commander/caretaker roles.
--- STUB until AI1 + I2 (private rulesParam visibility).
+--- Comma-list rulesParam value -> array of raw string entries (empty array
+--- for nil/''). Mirrors game_ai_guidance.lua's/game_parley.lua's flattened
+--- comma-list publishing convention (see those files' publish() headers).
+local function splitList(v)
+    local out = {}
+    if not v or v == '' then return out end
+    for item in tostring(v):gmatch('[^,]+') do out[#out + 1] = item end
+    return out
+end
+
+--- Guidance store (PLAN-metalstorm-interaction.md §6.2) — team-private
+-- (engine ask I2: verified sim-side LOS is correct — see
+-- game_ai_guidance.lua's header — the streaming wire is the pre-existing,
+-- separately-tracked gap, not a blocker for reading via AI.getRulesParam
+-- once AI1 lands), BINDING on the planner. Only meaningful for
+-- co-commander/caretaker roles (role.readsGuidance).
+--
+-- STUB until AI1 (AI.getRulesParam): the read SHAPE and rulesParam names
+-- below are real (they match game_ai_guidance.lua's publish() exactly) —
+-- only the actual AI.getRulesParam plumbing is missing. Degrades to `empty`
+-- (the planner already treats an all-empty guidance as "no override", never
+-- an error) until that capability exists.
 local function readGuidance(c, role)
     local empty = {
         stance = nil, regionPaint = {}, assetLocks = {},
         delegated = {}, funding = nil, roe = nil, veto = {},
     }
     if not (role and role.readsGuidance) or not c.rulesParam then return empty end
-    -- TODO(AI1/I2): read guidance_* team-private params written by
-    -- game_ai_guidance.lua. Every field is BINDING (interaction §6.2), not a
-    -- suggestion: forbidden regions excluded, locks beat idle, delegated ×5.
-    return empty
+
+    local AI = _G.AI
+    local teamID = role.teamId
+    local prefix = 'guidance_' .. teamID .. '_'
+    local function get(key) return AI.getRulesParam('team', teamID, prefix .. key) end
+
+    local regionPaint = {}
+    for _, key in ipairs(splitList(get('paint_keys'))) do
+        regionPaint[key] = get('paint_' .. key)
+    end
+    local assetLocks = {}
+    for _, key in ipairs(splitList(get('lock_keys'))) do assetLocks[key] = true end
+    local delegated = {}
+    for _, key in ipairs(splitList(get('delegated_keys'))) do delegated[tonumber(key) or key] = true end
+    local veto = {}
+    for _, key in ipairs(splitList(get('veto_keys'))) do veto[tonumber(key) or key] = true end
+
+    local rateCap = tonumber(get('funding_rateCap'))
+    return {
+        stance = get('stance'),
+        regionPaint = regionPaint,
+        assetLocks = assetLocks,
+        delegated = delegated,
+        funding = (rateCap and rateCap >= 0) and { rateCap = rateCap } or nil,
+        roe = get('roe'),
+        veto = veto,
+    }
 end
 
 --- Parley board + trust ledger (interaction §1/§2). Read-only here; the
--- planner scores proposals, the actuator responds. STUB until AI1.
-local function readParley(c)
+-- planner scores proposals (ai/strategos/planner.lua Planner.evaluateProposals),
+-- the actuator responds (Actuators:respondProposal, engine ask I1).
+--
+-- STUB until AI1: rulesParam names match game_parley.lua's publish() exactly
+-- (parley_count high-water + parley_<id>_* fields, GAME-scoped/public — a
+-- negotiation record is visible to both parties and spectators, unlike
+-- guidance). trust is necessarily PARTIAL: there is no "list every team"
+-- capability to probe every pair proactively, so it only ever contains
+-- entries for teams that have appeared on our own proposal board (same
+-- "honest amnesia" shape as the intel decay memory) — callers that need a
+-- specific counterparty's trust with no live proposal on record simply see
+-- no entry (treat missing as neutral, matching GG.Parley.Trust's own
+-- default), never a synthesized guess.
+local function readParley(c, role)
     if not c.rulesParam then return { proposals = {}, trust = {} } end
-    -- TODO(AI1): parley_<id>_* + trust_<a>_<b> params.
-    return { proposals = {}, trust = {} }
+
+    local AI = _G.AI
+    local function get(key) return AI.getRulesParam('game', key) end
+    local count = tonumber(get('parley_count')) or 0
+
+    local proposals = {}
+    local counterparties = {}   -- other teamID -> true, seen on our own board
+    local teamID = role and role.teamId
+    for id = 1, count do
+        local p = 'parley_' .. id .. '_'
+        local state = get(p .. 'state')
+        if state then
+            local fromTeam, toTeam = tonumber(get(p .. 'from')), tonumber(get(p .. 'to'))
+            proposals[#proposals + 1] = {
+                id = id, kind = get(p .. 'kind'), fromTeam = fromTeam, toTeam = toTeam,
+                state = state, deadline = tonumber(get(p .. 'deadline')),
+            }
+            if teamID and (fromTeam == teamID or toTeam == teamID) then
+                local other = (fromTeam == teamID) and toTeam or fromTeam
+                if other then counterparties[other] = true end
+            end
+        end
+    end
+
+    -- trust_<lo>_<hi> is itself a top-level rulesParam key (no 'parley_'
+    -- prefix — set directly by game_parley.lua's Trust module via
+    -- parley/trust.lua's canonical ordering), not nested under parley_<id>_*.
+    local trust = {}
+    for other in pairs(counterparties) do
+        local lo, hi = math.min(teamID, other), math.max(teamID, other)
+        trust[other] = tonumber(get('trust_' .. lo .. '_' .. hi)) or 0
+    end
+    return { proposals = proposals, trust = trust }
 end
 
 --=============================================================================
@@ -222,12 +307,18 @@ function Picture.refresh(ctx)
         board     = readBoard(c),
         economy   = readEconomy(c, role),
         guidance  = readGuidance(c, role),
-        parley    = readParley(c),
+        parley    = readParley(c, role),
         power     = loadPowerTable(c),
 
         ledger    = buildLedger(c, regions),
         intel     = updateIntel(c, regions, memory, frame, config),
     }
+    -- Guidance funding rate cap (interaction §6.2) clamps the governor's
+    -- spend/min — planner.lua's governor() already reads
+    -- picture.economy.fundingRateCap; guidance is the source of truth for it.
+    if picture.guidance.funding then
+        picture.economy.fundingRateCap = picture.guidance.funding.rateCap
+    end
     return picture
 end
 

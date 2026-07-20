@@ -257,7 +257,7 @@ local function positionHint(o, ctx)
 end
 
 local PUBLISHED_FIELDS = {
-    'type', 'scope', 'state', 'reward', 'team', 'progress',
+    'type', 'scope', 'state', 'reward', 'team', 'team2', 'progress',
     'phase', 'stage', 'expire', 'region', 'x', 'z', 'r', 'suggested',
 }
 
@@ -275,6 +275,9 @@ local function publish(o, ctx)
     Spring.SetGameRulesParam(p .. 'state', o.state)
     Spring.SetGameRulesParam(p .. 'reward', o.reward + (GG.Authority.EscrowTotal(o.id) or 0))
     Spring.SetGameRulesParam(p .. 'team', o.forTeam or -1)
+    -- PLAN-metalstorm-interaction.md §1 joint_objective: the widened
+    -- co-eligible team, if any (GG.Objectives.WidenEligibility).
+    if o.forTeam2 then Spring.SetGameRulesParam(p .. 'team2', o.forTeam2) end
     Spring.SetGameRulesParam(p .. 'progress', o.progress or 0)
     -- PLAN-metalstorm-teams.md §3.3: joiner onboarding hint, set via
     -- GG.Objectives.SuggestFor. The panel renders this as "yours to take".
@@ -444,7 +447,7 @@ function GG.Objectives.Create(def)
 
     local o = {
         id = id, type = def.type, scope = def.scope or 'tactical',
-        forTeam = def.forTeam,
+        forTeam = def.forTeam, forTeam2 = def.forTeam2,
         reward = (def.reward or 0) * rewardScale,
         bounty = def.bounty or 0,
         params = def.params or {},
@@ -593,6 +596,24 @@ function GG.Objectives.SuggestFor(id, playerID)
     publish(o, buildCtx(Spring.GetGameFrame()))
 end
 
+--- Widen a scoped (forTeam-gated) objective to a second eligible team
+--- (PLAN-metalstorm-interaction.md §1 joint_objective — game_parley.lua
+--- calls this on accept). No-op on an unknown/non-active/unscoped
+--- (forTeam == nil, already-open-race) objective, or on a type that has no
+--- eligibility gate to widen in the first place (only `control` currently
+--- gates completion by forTeam — kill/escort/protect/extract/infra either
+--- have no gate at all (kill: whoever lands the kill) or are inherently
+--- single-team missions where "eligibility" isn't a meaningful concept, so
+--- forTeam2 is harmless bookkeeping there, not a silent gap).
+function GG.Objectives.WidenEligibility(id, teamID)
+    local o = objectives[id]
+    if not o or o.state ~= 'active' or not o.forTeam or not teamID then return false end
+    if teamID == o.forTeam then return false end
+    o.forTeam2 = teamID
+    publish(o, buildCtx(Spring.GetGameFrame()))
+    return true
+end
+
 --- Manual scripted abort (mission scripts cancelling a no-longer-relevant
 --- objective). There is deliberately no public Complete() — completion
 --- must come from the type's own predicate so completingTeam/participation
@@ -627,12 +648,16 @@ local function buildWorld(frame, tick, ctx)
         regionValue = function(key)
             return GG.Regions and GG.Regions.Value(key) or 0
         end,
-        -- Civilian population/district data doesn't exist yet
-        -- (civilians/spawn.lua seeding + civilians/convoy.lua scheduling are
-        -- both still stubs, PLAN-metalstorm.md §7) — these three facades are
-        -- fully wired and will start producing objectives the moment that
-        -- data exists; nothing here needs to change when it lands.
-        civilianDistrictsUnderThreat = function() return {} end,
+        -- Civilian district threat detection is real
+        -- (civilians/estate.lua's threatenedDistricts(), PLAN-metalstorm-
+        -- interaction.md §3/§10 task 5) but civilians/spawn.lua's placement
+        -- seeding is still a stub (no map-authored district data) — so this
+        -- yields nothing until that separate, pre-existing civilians
+        -- backlog item lands; nothing here needs to change when it does.
+        -- convoy scheduling (civilians/convoy.lua) is likewise still a stub.
+        civilianDistrictsUnderThreat = function()
+            return GG.Civilians and GG.Civilians.ThreatenedDistricts and GG.Civilians.ThreatenedDistricts() or {}
+        end,
         newConvoys = function() return {} end,
         -- No unit def currently sets the `objective_infra` customParams tag
         -- (mirrors game_authority.lua's `authority_cost_base` convention) —

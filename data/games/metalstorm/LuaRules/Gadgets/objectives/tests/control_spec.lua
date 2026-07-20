@@ -85,6 +85,20 @@ describe("control.check", function()
         local state = control.check(o, fakeCtx(500, nil, true))
         assert.is_nil(state)
     end)
+
+    it("completes for a widened forTeam2 (PLAN-metalstorm-interaction.md §1 joint_objective)", function()
+        local o = { params = { regionKey = 'r1', holdFrames = 100 }, forTeam = 7, forTeam2 = 8 }
+        control.init(o, fakeCtx(0, nil, true))
+        for f = 0, 200, 20 do
+            local state = control.check(o, fakeCtx(f, 5, true))   -- team 5: still ineligible
+            assert.is_nil(state)
+        end
+        control.init(o, fakeCtx(0, nil, true))   -- fresh heldSince for the widened-team run
+        control.check(o, fakeCtx(0, 8, true))
+        local state, team = control.check(o, fakeCtx(100, 8, true))
+        assert.are.equal('complete', state)
+        assert.are.equal(8, team)   -- the WIDENED team, not the original forTeam
+    end)
 end)
 
 describe("control.progress", function()

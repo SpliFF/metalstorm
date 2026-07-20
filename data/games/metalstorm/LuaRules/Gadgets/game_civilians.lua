@@ -40,6 +40,7 @@ end
 local spawn    = VFS.Include("LuaRules/Gadgets/civilians/spawn.lua")
 local routines = VFS.Include("LuaRules/Gadgets/civilians/routines.lua")
 local convoy   = VFS.Include("LuaRules/Gadgets/civilians/convoy.lua")
+local estate   = VFS.Include("LuaRules/Gadgets/civilians/estate.lua")
 
 -- Shared context handed to every module (gaia team id, registries, config).
 local civ = {
@@ -56,8 +57,15 @@ function GG.Civilians.Register(unitID, role)
     civ.population[unitID] = { role = role or 'ambient' }
 end
 
+-- PLAN-metalstorm-interaction.md §3/§10 task 5: the real implementation of
+-- game_objectives.lua's civilianDistrictsUnderThreat() world facade.
+function GG.Civilians.ThreatenedDistricts()
+    return estate.threatenedDistricts(civ)
+end
+
 function gadget:GameStart()
     spawn.seed(civ)          -- read map-authored placement, seed population
+    estate.register(civ)     -- wire into the parley board (game_parley loads first, layer -45)
 end
 
 function gadget:GameFrame(frame)
