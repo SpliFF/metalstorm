@@ -169,7 +169,7 @@ void StateStreamer::CheckWinCondition(int) {
                 static_cast<uint32_t>(frame), gs->paused,
                 0, 0, 0, 0, 0, modInfo.legacyCoordSystem, unitHandler.MaxUnits(),
                 /*gameOver*/ true, winners);
-            rtcServer.BroadcastReliable(gameOver.data(), gameOver.size());
+            rtcServer.BroadcastStream(StreamClass::Control, gameOver.data(), gameOver.size(), kEventLaneControl);
             return;
         }
     }
@@ -204,7 +204,7 @@ void StateStreamer::CheckWinCondition(int) {
                 static_cast<uint32_t>(frame), gs->paused,
                 0, 0, 0, 0, 0, modInfo.legacyCoordSystem, unitHandler.MaxUnits(),
                 /*gameOver*/ true, winners);
-            rtcServer.BroadcastReliable(gameOver.data(), gameOver.size());
+            rtcServer.BroadcastStream(StreamClass::Control, gameOver.data(), gameOver.size(), kEventLaneControl);
         }
     }
 }
@@ -334,7 +334,7 @@ void StateStreamer::BroadcastGameInfo(int) {
             envResHandler.GetCurrentWindStrength(),
             envResHandler.GetCurrentTidalStrength(),
             modInfo.legacyCoordSystem, unitHandler.MaxUnits());
-        rtcServer.BroadcastReliable(msg.data(), msg.size());
+        rtcServer.BroadcastStream(StreamClass::Control, msg.data(), msg.size(), kEventLaneControl);
     }
 }
 
@@ -705,7 +705,7 @@ void StateStreamer::BroadcastCombatEvents(int) {
             auto batch = Protocol::BuildCombatEventBatch(
                 frameNo, visibleCombat, fired, impacts, trajectories,
                 visibleSounds, visiblePings, visibleVolleys, visibleFields);
-            rtcServer.SendReliable(clientId, batch.data(), batch.size());
+            rtcServer.SendStream(clientId, StreamClass::Control, batch.data(), batch.size(), kEventLaneCombat);
         });
     }
 }
@@ -822,7 +822,7 @@ void StateStreamer::BroadcastDecals(int) {
 
             const auto decalBatch = Protocol::BuildDecalBatch(
                 decalFrame, visScars, visTracks);
-            rtcServer.SendReliable(clientId, decalBatch.data(), decalBatch.size());
+            rtcServer.SendStream(clientId, StreamClass::Bulk, decalBatch.data(), decalBatch.size(), kEventLaneDecals);
         });
     }
 }
@@ -857,7 +857,7 @@ void StateStreamer::BroadcastHeightmapUpdates(int) {
                     static_cast<uint32_t>(sim.GetFrameNum()),
                     x1, z1, x2, z2,
                     readMap->GetCornerHeightMapSynced(), mapDims.mapxp1);
-                rtcServer.BroadcastReliable(hmBatch.data(), hmBatch.size());
+                rtcServer.BroadcastStream(StreamClass::Bulk, hmBatch.data(), hmBatch.size());
             }
         }
     }
@@ -895,7 +895,7 @@ void StateStreamer::BroadcastPlayerTeamEvents(int) {
     auto ptEvents = playerTeamEvents.Drain();
     if (!ptEvents.empty() && rtcServer.GetClientCount() > 0) {
         auto msg = Protocol::BuildPlayerTeamEventBatch(ptEvents);
-        rtcServer.BroadcastReliable(msg.data(), msg.size());
+        rtcServer.BroadcastStream(StreamClass::Control, msg.data(), msg.size(), kEventLaneControl);
     }
 }
 
@@ -1040,7 +1040,7 @@ void StateStreamer::BroadcastRulesParams(int) {
                     snap.params.push_back(std::move(e));
                 }
                 auto msg = Protocol::BuildRulesParamUpdate(snap);
-                rtcServer.SendReliable(clientId, msg.data(), msg.size());
+                rtcServer.SendStream(clientId, StreamClass::Control, msg.data(), msg.size(), kEventLaneParams);
             }
             for (int t = 0; t < activeTeams; ++t) {
                 const CTeam* team = teamHandler.Team(t);
@@ -1059,7 +1059,7 @@ void StateStreamer::BroadcastRulesParams(int) {
                 }
                 if (snap.params.empty()) continue;
                 auto msg = Protocol::BuildRulesParamUpdate(snap);
-                rtcServer.SendReliable(clientId, msg.data(), msg.size());
+                rtcServer.SendStream(clientId, StreamClass::Control, msg.data(), msg.size(), kEventLaneParams);
             }
             session.rulesParamsSnapshotSent = true;
             return;
@@ -1071,7 +1071,7 @@ void StateStreamer::BroadcastRulesParams(int) {
             upd.scope = SpringWeb::RulesParamScope_Game;
             upd.params = gameDeltaEntries;
             auto msg = Protocol::BuildRulesParamUpdate(upd);
-            rtcServer.SendReliable(clientId, msg.data(), msg.size());
+            rtcServer.SendStream(clientId, StreamClass::Control, msg.data(), msg.size(), kEventLaneParams);
         }
         for (int t = 0; t < activeTeams; ++t) {
             if (teamChanged[t].empty()) continue;
@@ -1085,7 +1085,7 @@ void StateStreamer::BroadcastRulesParams(int) {
             }
             if (upd.params.empty()) continue;
             auto msg = Protocol::BuildRulesParamUpdate(upd);
-            rtcServer.SendReliable(clientId, msg.data(), msg.size());
+            rtcServer.SendStream(clientId, StreamClass::Control, msg.data(), msg.size(), kEventLaneParams);
         }
     });
 }

@@ -74,4 +74,15 @@ private:
     // prior send of the *same* stream.
     static constexpr uint32_t kStateLaneEntity = 0;
     static constexpr uint32_t kStateLanePiece  = 1;
+
+    // Per-topic EVENT lanes (PLAN-metalstorm-wire.md W1). Reliable streams on
+    // distinct lanes prevent QUIC head-of-line blocking — a lost/retransmitted
+    // bulk packet (defs, decals) can't delay a combat event. Lane values are
+    // logical separators; the StreamClass (Control/Vision/Bulk) + lane pair
+    // maps to an independent QUIC stream.
+    static constexpr uint32_t kEventLaneCombat  = 0; // combat events, volleys, projectiles, sounds
+    static constexpr uint32_t kEventLaneParams  = 1; // rulesParams (game/team)
+    static constexpr uint32_t kEventLaneOrders  = 2; // directives, commands (future)
+    static constexpr uint32_t kEventLaneDecals  = 3; // decals, track segments
+    static constexpr uint32_t kEventLaneControl = 4; // GameInfo, game-over, player join/leave, chat
 };
