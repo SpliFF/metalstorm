@@ -18,7 +18,7 @@
  */
 
 import type { RmlOpsToMain, RmlEventToWorker, RmlResizeToWorker } from '../ui/rml/rml-protocol.js';
-import type { ResourceUpdateInfo } from './connection.js';
+import type { ResourceUpdateInfo, OrgGroupInfoMsg, DirectiveInfoMsg } from './connection.js';
 
 // ─── main → worker ──────────────────────────────────────────────────────────
 
@@ -169,6 +169,99 @@ export interface GpCancelCommandModeToWorker {
     type: 'gp:cancelCommandMode';
 }
 
+// ─── Macro command & control (PLAN-macro-orders / PLAN-macro-directives) ──
+//
+// The Connection (and therefore the wire) lives in the worker; the org
+// panel (PLAN-macro-ui.md §3) is DOM/main. These cross the boundary the same
+// way gp:startBuildPlacement/gp:removeFactoryOrder do for the build menu.
+
+/** Org panel "New Platoon" — create a group from a set of squad ids
+ *  (typically the current world selection). */
+export interface GpOrgGroupCreateToWorker {
+    type: 'gp:orgGroupCreate';
+    name: string;
+    memberIds: number[];
+}
+
+/** Org panel roster/name edit (rename, add/remove members). */
+export interface GpOrgGroupUpdateToWorker {
+    type: 'gp:orgGroupUpdate';
+    groupId: number;
+    addIds: number[];
+    removeIds: number[];
+    name?: string;
+}
+
+/** Org panel disband button. */
+export interface GpOrgGroupDisbandToWorker {
+    type: 'gp:orgGroupDisband';
+    groupId: number;
+}
+
+/** Org panel posture-chip edit. */
+export interface GpGroupPostureToWorker {
+    type: 'gp:groupPosture';
+    groupId: number;
+    postureJson: string;
+}
+
+/** Org panel directive pause/resume/priority-bump (resend with the same
+ *  `directiveId`) or cancel (`gp:groupDirectiveRemove`). Pause/resume reuses
+ *  the full landed `GroupDirective` shape (the panel echoes the `DirectiveInfo`
+ *  it already has, flipping only `active`). */
+export interface GpGroupDirectiveUpdateToWorker {
+    type: 'gp:groupDirectiveUpdate';
+    directiveId: number;
+    groupId: number;
+    directiveType: number;
+    shape: number;
+    params: number[];
+    priority: number;
+    requestedStrength: number;
+    active: boolean;
+}
+
+export interface GpGroupDirectiveRemoveToWorker {
+    type: 'gp:groupDirectiveRemove';
+    directiveId: number;
+}
+
+/** Select an org group's roster (org panel row click → world selection, so
+ *  the group highlights and its cmd-descs stream — PLAN-macro-ui.md §1). */
+export interface GpSelectOrgGroupToWorker {
+    type: 'gp:selectOrgGroup';
+    groupId: number;
+}
+
+/**
+ * Arm the shared `ShapeGestureCapture`/`DirectiveShapeCapture` for a
+ * click/paint gesture (PLAN-macro-ui.md §2). This is the cross-thread arm
+ * surface metalstorm-scripting task 4 (map-arm integration) reuses — a
+ * native JS widget (org panel's "paint directive" button, or a scripting
+ * command-composer target-slot) arms the SAME worker-side capture instance
+ * a directive hotkey would, rather than reimplementing gesture capture.
+ */
+export interface GpArmDirectiveShapeToWorker {
+    type: 'gp:armDirectiveShape';
+    directiveType: number;
+    groupId: number;
+    shape: 'Point' | 'Circle' | 'Polygon' | 'Polyline';
+    priority?: number;
+    requestedStrength?: number;
+    /** Polyline only: freehand-drag capture instead of click-chained
+     *  vertices (PLAN-macro-ui.md §7 — both are supported). */
+    freehand?: boolean;
+    /** Polyline only: the 2-vertex "arrow" convenience (drag start→end,
+     *  wheel sets frontage) instead of a general click-chained front line. */
+    arrow?: boolean;
+}
+
+/** Cancel an in-progress `gp:armDirectiveShape` capture (ESC on main, or the
+ *  arming widget itself backing out). Safe when nothing is armed. */
+export interface GpCancelDirectiveShapeToWorker {
+    type: 'gp:cancelDirectiveShape';
+}
+
 export type GpMessageToWorker =
     | GpInitToWorker
     | GpInputToWorker
@@ -178,6 +271,15 @@ export type GpMessageToWorker =
     | GpCancelBuildPlacementToWorker
     | GpRemoveFactoryOrderToWorker
     | GpCancelCommandModeToWorker
+    | GpOrgGroupCreateToWorker
+    | GpOrgGroupUpdateToWorker
+    | GpOrgGroupDisbandToWorker
+    | GpGroupPostureToWorker
+    | GpGroupDirectiveUpdateToWorker
+    | GpGroupDirectiveRemoveToWorker
+    | GpSelectOrgGroupToWorker
+    | GpArmDirectiveShapeToWorker
+    | GpCancelDirectiveShapeToWorker
     // PLAN-rml.md: DOM events + viewport changes routed back to the worker-side
     // RmlUi proxy (rml-bridge.ts) for Lua listener dispatch / dp-ratio recompute.
     | RmlEventToWorker
@@ -397,5 +499,22 @@ export type GpMessageToMain =
     | { type: 'gp:reload' }
     /** Reply to a gp:test request from the main test harness. */
     | { type: 'gp:testResult'; id: number; ok: boolean; value?: unknown; error?: string }
+    /**
+     * Org-group snapshot for the native org-panel widget (PLAN-macro-ui.md
+     * §3). Forwarded verbatim on every `Connection.onOrgGroupState` push
+     * (own team only — same forwarding pattern as `gp:sceneState.economy`,
+     * change-driven not per-tick).
+     */
+    | { type: 'gp:orgGroups'; groups: OrgGroupInfoMsg[] }
+    /** Directive snapshot for the org panel (fulfillment %, directive
+     *  icons) — own team + allies, mirrors `onDirectiveState`. */
+    | { type: 'gp:directives'; directives: DirectiveInfoMsg[] }
+    /** A `gp:armDirectiveShape` request armed (or failed to arm) — lets the
+     *  requesting main-thread widget show an "drawing…" affordance and know
+     *  when to re-enable its own UI. */
+    | { type: 'gp:directiveShapeArmed'; armed: boolean }
+    /** The armed capture finished — committed (a `GroupDirective` was sent;
+     *  the real id arrives via the next `gp:directives` push) or cancelled. */
+    | { type: 'gp:directiveShapeResult'; committed: boolean }
     /** PLAN-rml.md: a batch of RML DOM ops for the main-thread overlay manager. */
     | RmlOpsToMain;
