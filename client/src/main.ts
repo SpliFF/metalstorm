@@ -32,6 +32,7 @@ import { TimingOverlay } from './core/timing-overlay.js';
 import { fetchBuildStamp, CONFIG } from './config.js';
 import GameWorker from './core/lua-widget-worker.ts?worker';
 import type { GpInitToWorker } from './core/game-worker-protocol.js';
+import { DetachSessionManager, DEFAULT_PARK_TTL_MS } from './core/detach-session.js';
 import { fetchMapDataHttp, type ParsedMapData } from './core/map-data.js';
 import { loadMapLighting, type MapLighting } from './core/map-lighting.js';
 import { applyMapLighting, createSceneLighting, type SceneLighting } from './core/scene-lighting.js';
@@ -323,6 +324,24 @@ let gameConn: Connection | null = null;
 /// canvas) for a game that no longer exists.
 let activeSession = 0;
 
+// --- Detach / re-enter (PLAN-quickstart.md Part B) ---
+//
+// The "detach vs quit" split: detach parks the game-processor worker (engine,
+// scene, models, DefCache all alive) and shows the lobby; re-entry is a fast
+// `gpResync` reconnect instead of a full boot. `detachSession` owns the pure
+// keying/TTL/generation bookkeeping (core/detach-session.ts); the functions
+// below drive the DOM/audio/worker handles it deliberately does not touch.
+const detachSession = new DetachSessionManager();
+/// TTL sweep: a parked worker the player never returns to is torn down after
+/// DEFAULT_PARK_TTL_MS. Null when no session is parked.
+let parkTtlTimer: number | null = null;
+/// E3 guard: detach is only offered after the first rendered frame — before
+/// that the worker is half-booted and quit (full teardown) is the only exit.
+/// Latched by the first `gp:sceneState` from the worker, reset on each boot.
+let firstFrameSeen = false;
+/// Last startGame() target, so a full-boot re-entry fallback knows what to boot.
+let lastGameArgs: { port: number; mapId: string; gameId: string } | null = null;
+
 // --- Game Scene ---
 
 let currentFrame = 0;
@@ -392,7 +411,12 @@ function quitToLobby(): void {
     delete (window as any).test;
     delete (window as any).widgets;
     delete (window as any).__gp;
+    delete (window as any).springrts;
     testHarness = null;
+    // PLAN-quickstart.md Part B: a full quit ends any parked session too.
+    clearParkTtl();
+    detachSession.clear();
+    firstFrameSeen = false;
     // GW8: drop any in-flight worker-bridge requests + cached feed.
     for (const p of gpPending.values()) p.reject(new Error('[test] game ended'));
     gpPending.clear();
@@ -421,6 +445,100 @@ function quitToLobby(): void {
     lobbyUI?.show();
 }
 
+/// Clear the parked-worker TTL sweep timer (§3.1).
+function clearParkTtl(): void {
+    if (parkTtlTimer !== null) { clearTimeout(parkTtlTimer); parkTtlTimer = null; }
+}
+
+/**
+ * PLAN-quickstart.md §3.1 (Part B — detach). Park the running game and show the
+ * lobby WITHOUT tearing the worker down. The worker keeps its engine, scene,
+ * models, DefCache and JS UI state alive (a `gp:detach` closes its connection
+ * and pauses its render loop); main suspends audio and hides the game surface,
+ * keeping every per-session helper (HUD, minimap, economy bar) alive-but-hidden
+ * so re-entry rebuilds nothing. Unlike `quitToLobby`, the saved room/port keys
+ * are kept — they are the reconnect creds.
+ *
+ * Guards: no-op unless a worker exists, the first frame has rendered (E3), and
+ * no session is already parked. Metalstorm is the intended caller; the
+ * mechanism is game-agnostic (BAR/ZK keep `quitToLobby` — §3.3).
+ */
+function detachToLobby(): void {
+    if (!gameWorker || !firstFrameSeen || detachSession.isParked) return;
+    const roomId = localStorage.getItem('springrts-game-room') ?? '';
+    const port = Number(localStorage.getItem('springrts-game-port') ?? '0');
+    detachSession.park(roomId, port, Date.now());
+    gameWorker.postMessage({ type: 'gp:detach' });
+    // Suspend (not dispose) the AudioContext — it resumes on the re-entry click.
+    void audioManager?.suspend();
+    // Hide the game surface; DO NOT dispose helpers (resync reuses them) and DO
+    // NOT clear the saved room/port keys (they drive the reconnect).
+    const canvas = document.getElementById('game-canvas') as HTMLCanvasElement | null;
+    if (canvas) canvas.style.display = 'none';
+    const hud = document.getElementById('game-hud');
+    if (hud) hud.style.display = 'none';
+    document.getElementById('quit-confirm-overlay')?.remove();
+    // TTL sweep: dispose the parked worker if the player never returns (§3.1).
+    clearParkTtl();
+    parkTtlTimer = window.setTimeout(disposeParkedWorker, DEFAULT_PARK_TTL_MS);
+    lobbyUI?.showAfterGame();
+    lobbyUI?.show();
+    console.log('[detach] session parked — worker alive; re-enter to resync');
+}
+
+/**
+ * PLAN-quickstart.md §3.2 (Part B — resync). Re-enter a parked session: tell the
+ * worker to flush dynamic renderer state + reconnect (`gp:resync`), resume audio
+ * and re-show the game surface. Bumps the detach sub-generation so any lingering
+ * pre-detach async bails. The worker's fresh ClientSession re-streams a full
+ * snapshot; the world repopulates within a few ticks.
+ */
+function resyncReenter(): void {
+    clearParkTtl();
+    detachSession.bumpGeneration();
+    detachSession.clear();
+    // Refresh the token in case the original aged past the park TTL.
+    const token = localStorage.getItem('springrts-token') ?? undefined;
+    gameWorker?.postMessage({ type: 'gp:resync', token });
+    void audioManager?.resume();
+    const canvas = document.getElementById('game-canvas') as HTMLCanvasElement | null;
+    if (canvas) canvas.style.display = 'block';
+    showHUD();
+    lobbyUI?.hide();
+    console.log('[detach] re-entering parked session (resync)');
+}
+
+/**
+ * Tear down a parked worker that will never be re-entered — the TTL sweep fired
+ * (§3.1) or the room ended while parked (E4). Falls through to the full
+ * `quitToLobby` teardown, which terminates the worker and disposes every helper.
+ */
+function disposeParkedWorker(): void {
+    if (!detachSession.isParked) return;
+    clearParkTtl();
+    detachSession.clear();
+    console.log('[detach] parked session disposed (TTL / room ended)');
+    quitToLobby();
+}
+
+/**
+ * Enter (or re-enter) a game the lobby has driven to Active. Routes through the
+ * detach manager: when a parked worker matches this exact room+port it is a fast
+ * `gpResync`; otherwise (cold start, different room, restarted room ⇒ new port
+ * per E5, or an expired TTL) it is a clean full boot. A stale parked worker, if
+ * any, is terminated by startGame's own defensive teardown.
+ */
+function enterGame(gameServerPort: number, mapId: string, gameId: string): void {
+    const roomId = localStorage.getItem('springrts-game-room') ?? '';
+    if (detachSession.planReentry(roomId, gameServerPort, Date.now()) === 'resync') {
+        resyncReenter();
+        return;
+    }
+    clearParkTtl();
+    detachSession.clear();
+    startGame(gameServerPort, mapId, gameId);
+}
+
 async function startGame(gameServerPort: number, mapId: string, gameId: string = ''): Promise<void> {
     // Capture this call's session id. Late-arriving promise callbacks
     // (mapPromise, defsPromise, onMapData) compare against this and
@@ -431,6 +549,14 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // NOTE (GW4-c1): the per-call `session` snapshot + its stale-session
     // guards lived in the gutted body; they return in c2 when the connection
     // callbacks (which compare against activeSession) move into the worker.
+
+    // PLAN-quickstart.md Part B: a full boot supersedes any parked session.
+    // The defensive teardown below terminates the stale parked worker, so drop
+    // the detach bookkeeping and re-arm the first-frame (E3) latch.
+    clearParkTtl();
+    detachSession.clear();
+    firstFrameSeen = false;
+    lastGameArgs = { port: gameServerPort, mapId, gameId };
 
     // Defensive teardown of any leftover session state. `quitToLobby`
     // normally runs this on explicit quit, but a player can re-enter
@@ -592,6 +718,10 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             // build-menu (G3a) + native economy-bar + factory-queue panel (G4).
             // The order-panel remains unbuilt (dead pre-G3b code, unrelated).
             case 'gp:sceneState':
+                // PLAN-quickstart.md §3.1 (E3): the worker only feeds scene
+                // state once it is rendering, so the first one marks the point
+                // detach becomes available.
+                firstFrameSeen = true;
                 // GW8: cache for the test harness's synchronous getters
                 // (window.test.selection / .cameraPose()).
                 lastSceneState = { selectedUnitIds: m.selectedUnitIds, camera: m.camera };
@@ -746,6 +876,14 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 break;
             case 'gp:contextRestored':
                 console.log('[gameWorker] WebGL context restored');
+                break;
+            // PLAN-quickstart.md §3.1/§3.2: detach / resync acks (visibility;
+            // the DOM/audio swap already happened synchronously main-side).
+            case 'gp:detached':
+                console.log('[gameWorker] detached — session parked');
+                break;
+            case 'gp:resynced':
+                console.log('[gameWorker] resynced — reconnecting for a fresh snapshot');
                 break;
             // GW8: reply to a window.widgets.eval() Lua eval (worker evalLua).
             case 'evalResult':
@@ -999,6 +1137,25 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     });
     (window as any).test = testHarness;
 
+    // PLAN-quickstart.md Part B: the drivable detach/re-enter surface (this
+    // whole plan is side-lane-M test tooling). The polished lobby "return to
+    // game" card + Metalstorm PlayerRemoved(reason) wiring is Part B task 6;
+    // these globals make the mechanism functional + scenario-testable now.
+    (window as any).springrts = {
+        /** Park the running game, keeping the worker warm (§3.1). No-op before
+         *  the first frame (E3) or when already parked. */
+        detach: () => detachToLobby(),
+        /** Re-enter the parked game via a fast resync, or full-boot if the
+         *  parked session no longer matches (§3.2 / E5 / TTL). */
+        reenter: () => {
+            if (detachSession.isParked && lastGameArgs) {
+                enterGame(lastGameArgs.port, lastGameArgs.mapId, lastGameArgs.gameId);
+            }
+        },
+        /** True while a session is parked (detached, worker alive). */
+        get parked() { return detachSession.isParked; },
+    };
+
     // GW8: reach the worker-resident JS debug hooks (globalThis.__entityRenderer
     // / __fxLightPool / __renderPipeline / __csm / …) from the main devtools
     // console — e.g. `await window.__gp('__entityRenderer.getUnitCount()')`.
@@ -1155,7 +1312,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Show lobby with the engine-default templates immediately so the
     // login screen renders without waiting on a network round-trip.
     lobbyUI = new LobbyUI((gameServerPort: number, mapId: string, gameId: string) => {
-        startGame(gameServerPort, mapId, gameId);
+        // PLAN-quickstart.md Part B: route through enterGame so a room the
+        // player detached from resyncs instead of full-booting (§3.2).
+        enterGame(gameServerPort, mapId, gameId);
     }, getDefaultLobbyTemplates());
     (window as any).lobby = lobbyUI;
 

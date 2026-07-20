@@ -2511,6 +2511,36 @@ export class EntityRenderer {
     }
 
     /**
+     * PLAN-quickstart.md §3.2 (Part B — resync): flush all *dynamic* per-entity
+     * state while keeping every *static* asset the re-entry would otherwise pay
+     * to reload — loaded models (`modelTemplates`), their textures, `defInfos`,
+     * team materials and the thin-instance meshes themselves.
+     *
+     * After a detach the game connection is re-opened against a fresh
+     * server-side ClientSession, which delivers a full (non-delta) snapshot.
+     * That snapshot reconciles the entity set on its own via `update()`, but the
+     * interpolator carries a stale timestamp history across the detach gap and
+     * the thin-instance buffers still hold the pre-detach unit poses. Zeroing
+     * the derived per-entity state here means the first post-reconnect snapshot
+     * repacks instances cleanly from an empty base — no ghosts, no interpolation
+     * jump — the documented-correct behaviour for a late/re-join.
+     */
+    resetForResync(): void {
+        this.entityMeta.clear();
+        this.interpolator.clear();
+        this.ghostPoses.clear();
+        this.pieceOverrides.clear();
+        this.clipPoses.clear();
+        for (const mesh of this.radarBlipMeshes.values()) mesh.thinInstanceCount = 0;
+        this.selectedIds = [];
+        // Thin-instance buffers are derived from entityMeta and repacked every
+        // update(); zero their live counts so nothing renders from the parked
+        // session before the first post-reconnect snapshot rebuilds them.
+        for (const mesh of this.renderMeshes.values()) mesh.thinInstanceCount = 0;
+        if (this.selectionMesh) this.selectionMesh.thinInstanceCount = 0;
+    }
+
+    /**
      * Clear PREVLOS ghosts whose tile has come back into LOS.
      *
      * Recoil's ghost-preservation contract: the server only sends an

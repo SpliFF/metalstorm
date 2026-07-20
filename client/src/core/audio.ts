@@ -373,6 +373,18 @@ export class AudioManager {
         this.resumed = true;
     }
 
+    /// PLAN-quickstart.md §3.4 (Part B — detach): suspend the AudioContext
+    /// without tearing it down, so a parked session stops emitting sound while
+    /// the worker + decoded-buffer cache stay alive. Clears `resumed` so the
+    /// re-entry click's `resume()` re-arms the context (the autoplay-policy
+    /// gesture is satisfied by that click). Distinct from `dispose()`, which
+    /// closes the context permanently. Best-effort: a context already closed or
+    /// interrupted throws, which we swallow.
+    async suspend(): Promise<void> {
+        this.resumed = false;
+        try { await this.ctx.suspend(); } catch { /* already closed/interrupted */ }
+    }
+
     dispose(): void {
         this.stopMusic();
         for (const voice of this.voices) {

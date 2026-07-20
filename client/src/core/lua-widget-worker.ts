@@ -18,6 +18,7 @@
 import type { WorkerInbound } from './game-worker-protocol.js';
 import {
     gpInit, gpResize, gpShutdown, gpSetShift, gpTestDispatch,
+    gpDetach, gpResync,
     gpHandlePointerMove, gpHandlePointerDown, gpHandlePointerUp,
     gpHandleWheel, gpHandleKeyDown, gpHandleKeyUp, gpHandleBlur, gpHandlePointerLeave,
     gpHandleFocusWorld, gpHandleStartBuildPlacement, gpHandleCancelBuildPlacement,
@@ -219,6 +220,14 @@ self.onmessage = async (e: MessageEvent<WorkerInbound>) => {
 
         case 'gp:shutdown':
             gpShutdown();
+            break;
+
+        // PLAN-quickstart.md §3.1/§3.2 (Part B): park / re-enter without a boot.
+        case 'gp:detach':
+            gpDetach();
+            break;
+        case 'gp:resync':
+            gpResync((msg as { token?: string }).token);
             break;
 
         // GW8: window.test client-bound request → resolve against the

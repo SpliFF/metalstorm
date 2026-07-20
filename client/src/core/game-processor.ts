@@ -235,6 +235,13 @@ let gpSimSpeed = 1;
 /// sets this so a screenshot captures a deterministic frame while the sim may
 /// still tick server-side. preserveDrawingBuffer keeps the last frame visible.
 let gpRenderPaused = false;
+/// PLAN-quickstart.md §3 (Part B): the `gp:init` message, captured so a
+/// `gp:resync` can re-open the game connection with the same creds/map without
+/// a fresh boot. Null until gpConnect runs.
+let gpInitMsg: GpInitToWorker | null = null;
+/// PLAN-quickstart.md §3.1: true while the session is parked (detached). Guards
+/// against a double detach and lets diagnostics see the parked state.
+let gpParked = false;
 /// Wall-clock of the last sceneState post (throttled to ~10 Hz).
 let gpLastSceneStatePost = 0;
 /// GW4-c5c-3: minimap feed throttle (~6 Hz — unit dots only need to be roughly
@@ -723,6 +730,9 @@ function gpDispatchKeyRelease(keysym: number, mods: number): void {
 /// GW4-c2). The full callback object (porting main.ts@32cf513619 L1070–1326)
 /// fills in as the renderers + LuaUI getRuntime() come online in c3–c6.
 function gpConnect(msg: GpInitToWorker): void {
+    // PLAN-quickstart.md §3.2: keep the init message so a later gp:resync can
+    // rebuild the connection (same map/creds) without a fresh gp:init boot.
+    gpInitMsg = msg;
     // GW8: reset the per-envelope bandwidth tally for the new game session. The
     // tally lives in THIS (worker) bundle's net-inspector instance, fed by the
     // worker connection's routeIncoming/sendOnControl; surfaced to main via the
@@ -2151,6 +2161,66 @@ export function gpResize(width: number, height: number, dpr: number): void {
     if (dpr > 0) { gpDpr = dpr; gpCtx.selection?.setDpr(dpr); }
 }
 
+/**
+ * PLAN-quickstart.md §3.1 (Part B — detach). Park the session without tearing
+ * the worker down: close the game connection cleanly, stop the viewport pump,
+ * and pause the render loop via the existing `gpRenderPaused` gate (the same
+ * mechanism `window.test.pause()` uses — the rAF keeps firing but early-returns,
+ * so no scene/FX/interp work runs while parked). Everything else — engine,
+ * scene, loaded models, DefCache, renderers, LuaUI/JS UI state — stays alive so
+ * `gpResync` can return in well under a fresh boot. Idempotent: a second detach
+ * on an already-parked worker is a no-op.
+ */
+export function gpDetach(): void {
+    if (gpParked) { postToMain({ type: 'gp:detached' }); return; }
+    gpParked = true;
+    if (gpViewportTimer) { clearInterval(gpViewportTimer); gpViewportTimer = null; }
+    // Clean close → server emits PlayerRemoved. The leave-reason=detach plumbing
+    // (so PlayerRemoved can distinguish detach from quit) is Part B task 6.
+    // Keep the Connection OBJECT (don't null it): gpResync re-`connect()`s the
+    // same instance so the selection/build/command controllers + CommandBuffer +
+    // ServerClock they captured at gpInit stay valid across the park.
+    gpCtx.connection?.disconnect();
+    gpRenderPaused = true;
+    postLog(1, '[gp] detached — session parked (worker alive, render + net paused)');
+    postToMain({ type: 'gp:detached' });
+}
+
+/**
+ * PLAN-quickstart.md §3.2 (Part B — resync). Re-enter a parked session: flush
+ * every *dynamic* renderer store (entities + interpolator, projectiles, combat
+ * FX) while keeping all *static* state (terrain, models, DefCache, lighting,
+ * UI), then re-open the game connection with the captured init creds. The fresh
+ * server-side ClientSession re-streams a full snapshot + re-pushes defs, which
+ * DefCache no-ops for already-known ids (idempotent by construction). The first
+ * full snapshot repacks entity instances from a clean base — no ghosts, no
+ * interpolation jump. `gpConnect` re-runs its onAuthenticated seeding (identity,
+ * viewport pump, LuaUI identity), so nothing else needs re-arming here.
+ */
+export function gpResync(token?: string): void {
+    if (!gpParked || !gpInitMsg || !gpCtx.connection) {
+        postLog(2, '[gp] gpResync called with no parked session — ignoring');
+        postToMain({ type: 'gp:resynced' });
+        return;
+    }
+    // Flush dynamic state (keep static: models, DefCache, terrain, lighting).
+    gpCtx.entityRenderer?.resetForResync();
+    gpCtx.projectileRenderer?.resetForResync();
+    gpCombatFX?.reset();
+    gpParked = false;
+    gpRenderPaused = false;
+    gpLastFrameTime = performance.now();
+    // Reconnect the SAME Connection object (its onAuthenticated is still wired,
+    // so it re-seeds identity + re-registers the viewport pump). A refreshed
+    // token overrides the parked one, which may have aged past the TTL. The
+    // fresh ClientSession re-streams a full snapshot + re-pushes defs; DefCache
+    // no-ops the dups and the first snapshot repacks entities from a clean base.
+    const t = token || gpInitMsg.token;
+    gpCtx.connection.connect(gpInitMsg.gameHttpUrl, gpInitMsg.username, '', t);
+    postLog(1, '[gp] resynced — reconnecting; full snapshot will repopulate the world');
+    postToMain({ type: 'gp:resynced' });
+}
+
 export function gpShutdown(): void {
     if (gpViewportTimer) { clearInterval(gpViewportTimer); gpViewportTimer = null; }
     rmlReset();  // PLAN-rml.md: drop the bridge op queue + runtime ref.
@@ -2234,6 +2304,11 @@ export function gpShutdown(): void {
     gpEngine = null;
     gpScene = null;
     gpCamera = null;
+    // PLAN-quickstart.md §3: drop the parked-session bookkeeping so a fresh
+    // gp:init after a real teardown never looks like a resync target.
+    gpParked = false;
+    gpInitMsg = null;
+    gpRenderPaused = false;
 }
 
 // ── GW8: window.test client-bound getBridge() ───────────────────────────────

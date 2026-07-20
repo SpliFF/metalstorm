@@ -191,6 +191,33 @@ export interface GpPingToWorker {
     id: number;
 }
 
+/**
+ * PLAN-quickstart.md §3.1 (Part B — detach): park the game session without
+ * tearing the worker down. The worker closes its game connection (a clean
+ * PlayerRemoved with a `detach` reason), pauses the render loop and stops the
+ * viewport pump — engine, scene, models, DefCache and JS UI state all stay
+ * alive. Re-entry is a `gp:resync`, not a fresh `gp:init`. No payload: the
+ * worker already holds the connect creds captured at `gp:init`.
+ */
+export interface GpDetachToWorker {
+    type: 'gp:detach';
+}
+
+/**
+ * PLAN-quickstart.md §3.2 (Part B — resync): re-enter a parked session. The
+ * worker flushes *dynamic* renderer state (entity/projectile/combat-FX/
+ * interpolator), keeps *static* state (terrain, models, DefCache, lighting, UI),
+ * re-opens the game connection with its captured creds (a fresh server-side
+ * ClientSession re-streams a full snapshot + defs; DefCache no-ops the dups) and
+ * un-pauses the render loop. Optionally carries a refreshed token in case the
+ * original has aged past the parked TTL.
+ */
+export interface GpResyncToWorker {
+    type: 'gp:resync';
+    /** Refreshed game-server auth token; falls back to the gp:init token. */
+    token?: string;
+}
+
 export type GpMessageToWorker =
     | GpInitToWorker
     | GpInputToWorker
@@ -201,6 +228,8 @@ export type GpMessageToWorker =
     | GpRemoveFactoryOrderToWorker
     | GpCancelCommandModeToWorker
     | GpPingToWorker
+    | GpDetachToWorker
+    | GpResyncToWorker
     // PLAN-rml.md: DOM events + viewport changes routed back to the worker-side
     // RmlUi proxy (rml-bridge.ts) for Lua listener dispatch / dp-ratio recompute.
     | RmlEventToWorker
@@ -435,5 +464,12 @@ export type GpMessageToMain =
      */
     | { type: 'gp:contextLost' }
     | { type: 'gp:contextRestored' }
+    /** PLAN-quickstart.md §3.1: the worker acks a `gp:detach` — the game
+     *  connection is closed, render + viewport pump paused, worker parked. */
+    | { type: 'gp:detached' }
+    /** PLAN-quickstart.md §3.2: the worker acks a `gp:resync` — dynamic state
+     *  flushed and reconnect started (a `gp:authenticated` follows once the
+     *  fresh ClientSession completes its handshake). */
+    | { type: 'gp:resynced' }
     /** PLAN-rml.md: a batch of RML DOM ops for the main-thread overlay manager. */
     | RmlOpsToMain;
