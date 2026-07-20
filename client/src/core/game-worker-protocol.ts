@@ -218,6 +218,19 @@ export interface GpResyncToWorker {
     token?: string;
 }
 
+/**
+ * PLAN-client-resilience.md task 2 (R1 soft rung): main asks the worker for an
+ * in-place soft reset — Babylon `wipeCaches` + transient FX-pool flush + a
+ * fresh-snapshot resync — instead of a full respawn. The worker replies
+ * `gp:recovered` with the same `id`. Driven by the RecoveryLadder's `softReset`
+ * dep when a lost WebGL context restores; a non-ack (worker too wedged to
+ * answer within the round-trip timeout) escalates the ladder to R2.
+ */
+export interface GpRecoverToWorker {
+    type: 'gp:recover';
+    id: number;
+}
+
 export type GpMessageToWorker =
     | GpInitToWorker
     | GpInputToWorker
@@ -230,6 +243,7 @@ export type GpMessageToWorker =
     | GpPingToWorker
     | GpDetachToWorker
     | GpResyncToWorker
+    | GpRecoverToWorker
     // PLAN-rml.md: DOM events + viewport changes routed back to the worker-side
     // RmlUi proxy (rml-bridge.ts) for Lua listener dispatch / dp-ratio recompute.
     | RmlEventToWorker
@@ -464,6 +478,21 @@ export type GpMessageToMain =
      */
     | { type: 'gp:contextLost' }
     | { type: 'gp:contextRestored' }
+    /**
+     * PLAN-client-resilience.md task 2: the worker's self.onerror /
+     * unhandledrejection hook fired (a genuinely-uncaught worker error — the
+     * render loop or a bare async, NOT a pcall-contained widget callin). Main's
+     * RecoveryLadder takes R2 (respawn) on this; `injected` tags task 5's
+     * fault-injection verbs so a synthetic failure doesn't drive a real
+     * recovery in a way that's indistinguishable on the dashboard. This is the
+     * reliable cross-boundary signal for E2 (an async loader crash raises
+     * `unhandledrejection`, which — unlike an uncaught throw — never propagates
+     * to the main-thread `gameWorker.onerror`). */
+    | { type: 'gp:workerFatal'; reason: string; injected: boolean }
+    /** PLAN-client-resilience.md task 2: reply to a `gp:recover` (R1 soft
+     *  reset). `ok:false` (or no reply within the ladder's round-trip timeout)
+     *  escalates to R2. */
+    | { type: 'gp:recovered'; id: number; ok: boolean }
     /** PLAN-quickstart.md §3.1: the worker acks a `gp:detach` — the game
      *  connection is closed, render + viewport pump paused, worker parked. */
     | { type: 'gp:detached' }

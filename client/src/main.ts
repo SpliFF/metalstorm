@@ -55,7 +55,9 @@ import { showGameOver } from './ui/game-over/game-over.js';
 import { debugConsole } from './core/debug-console.js';
 import { logIngest } from './core/log-ingest.js';
 import { configureErrorTelemetry, reportClientError } from './core/client-error-telemetry.js';
+import type { ClientErrorReason } from './core/client-error-telemetry.js';
 import { HeartbeatWatchdog } from './core/heartbeat-watchdog.js';
+import { RecoveryLadder, type RecoveryTrigger } from './core/recovery-ladder.js';
 import {
     getDefaultLobbyTemplates,
     loadGameLobbyTemplates,
@@ -122,6 +124,90 @@ function sendHeartbeatPing(): Promise<void> {
         w.postMessage({ type: 'gp:ping', id });
     });
 }
+/// PLAN-client-resilience.md task 2 (R1 soft rung): `gp:recover`/`gp:recovered`
+/// round-trip. Resolves true on the worker's ack, false on a non-ack within the
+/// timeout (a worker too wedged to soft-reset), so the RecoveryLadder escalates
+/// to R2. Its own timeout means the ladder never hangs waiting on a dead worker.
+const GP_RECOVER_TIMEOUT_MS = 3000;
+let gpRecoverId = 0;
+const gpRecoverPending = new Map<number, (ok: boolean) => void>();
+/// True only during an R2 respawn's re-entry into startGame(). The ladder must
+/// SURVIVE an R2 respawn (its loop-guard counts are what eventually reach R3);
+/// startGame()'s defensive teardown resets the ladder on every OTHER path (cold
+/// boot, user re-entry) but skips it while this is set.
+let r2RespawnInFlight = false;
+function sendRecoverRequest(): Promise<boolean> {
+    return new Promise((resolve) => {
+        const w = gameWorker;
+        if (!w) { resolve(false); return; }
+        const id = ++gpRecoverId;
+        let done = false;
+        const settle = (ok: boolean) => {
+            if (done) return;
+            done = true;
+            gpRecoverPending.delete(id);
+            resolve(ok);
+        };
+        gpRecoverPending.set(id, settle);
+        setTimeout(() => settle(false), GP_RECOVER_TIMEOUT_MS);
+        w.postMessage({ type: 'gp:recover', id });
+    });
+}
+/// PLAN-client-resilience.md task 2: the R1/R2/R3 recovery ladder + loop guard.
+/// The single decision authority for worker failure. Persists across R2
+/// respawns (it lives on main; the worker is what gets replaced). Every rung
+/// fires ONE telemetry event stamped with the rung + trigger chain; the loop
+/// guard bounds recoveries to r1Max+r2Max+1 per 5-min window (provable
+/// termination — see recovery-ladder.ts). Reset on teardown so a fresh game
+/// starts from a clean ladder.
+const recoveryLadder = new RecoveryLadder({
+    softReset: sendRecoverRequest,
+    respawn: () => {
+        // R2: terminate + respawn on the boot path. startGame() does its own
+        // defensive worker teardown + watchdog restart; the fresh ClientSession
+        // reconnects and the server re-streams a full snapshot (server-
+        // authoritative → lossless). E2 (crash during initial load) lands here
+        // too — respawn IS the initial boot path.
+        if (lastGameArgs) {
+            console.warn('[recovery] R2 — respawning game-processor worker + reconnecting');
+            r2RespawnInFlight = true;
+            enterGame(lastGameArgs.port, lastGameArgs.mapId, lastGameArgs.gameId);
+        } else {
+            console.error('[recovery] R2 requested but no lastGameArgs — falling back to lobby');
+            quitToLobby();
+        }
+    },
+    showErrorScreen: (reportId) => {
+        console.error(`[recovery] R3 — giving up; report id ${reportId}`);
+        showRecoveryErrorScreen(reportId);
+    },
+    emitRungEvent: ({ rung, reason, chain, reportId }) => {
+        // The rung telemetry event: distinct from the raw per-error reports the
+        // detection hooks already fire (rung 'none', rich per-crash context) —
+        // this records what the LADDER decided, with the full trigger chain, so
+        // the dashboard can see the recovery path taken. Low-volume by
+        // construction (the loop guard caps it), so no dedup storm.
+        const reasonToClass: Record<RecoveryTrigger, ClientErrorReason> = {
+            'context-restored': 'contextLost',
+            'context-lost-timeout': 'contextLost',
+            'wedged': 'wedged',
+            'fatal': 'fatal',
+            'worker-error': 'fatal',
+        };
+        reportClientError({
+            reason: reasonToClass[reason] ?? 'fatal',
+            errorClass: 'RecoveryLadder',
+            message: `${rung} recovery (${reportId}); triggers: ${chain.join(' → ')}`,
+            recoveryRung: rung,
+        });
+    },
+    now: () => Date.now(),
+});
+/// Route a failure signal into the recovery ladder. Central helper so every
+/// call site (watchdog, worker onerror, worker fatal message) reads the same.
+function ladderTrigger(t: RecoveryTrigger): void {
+    recoveryLadder.trigger(t);
+}
 /// Detects a wedged worker (blocked event loop — the one failure class
 /// self.onerror structurally can't catch). Started once gp:init is posted,
 /// stopped on teardown. EXTENSION POINT (task 2): onWedged only reports
@@ -137,6 +223,10 @@ const heartbeatWatchdog = new HeartbeatWatchdog({
             errorClass: 'WatchdogWedged',
             message: 'game-processor worker unresponsive after 3 missed 2s heartbeats',
         });
+        // PLAN-client-resilience.md task 2: a wedged worker is R2's trigger —
+        // hand it to the ladder (terminate + respawn + reconnect). The loop
+        // guard bounds repeated wedges to R3.
+        ladderTrigger('wedged');
     },
     onRecovered: () => console.log('[gameWorker] watchdog: heartbeat recovered'),
 });
@@ -407,6 +497,11 @@ function quitToLobby(): void {
     // PLAN-client-resilience.md task 1: no worker left to ping.
     heartbeatWatchdog.stop();
     gpPingPending.clear();
+    // PLAN-client-resilience.md task 2: a full quit ends any recovery episode —
+    // reset the ladder + drop in-flight soft-reset requests + the respawn flag.
+    recoveryLadder.reset();
+    gpRecoverPending.clear();
+    r2RespawnInFlight = false;
     uninstallCameraWindowApi();
     delete (window as any).test;
     delete (window as any).widgets;
@@ -436,6 +531,7 @@ function quitToLobby(): void {
     if (hud) hud.style.display = 'none';
     document.getElementById('quit-confirm-overlay')?.remove();
     document.getElementById('game-over-overlay')?.remove();
+    document.getElementById('recovery-error-overlay')?.remove();
 
     // Show the lobby. The lobby connection stayed open the whole
     // time. If the player is still a member of their room (the normal
@@ -443,6 +539,58 @@ function quitToLobby(): void {
     // fall through to the room browser.
     lobbyUI?.showAfterGame();
     lobbyUI?.show();
+}
+
+/**
+ * PLAN-client-resilience.md task 2 (R3 — give up). The recovery ladder
+ * exhausted its rungs (R2 failed twice in the window); show an honest failure
+ * with a citable report id and a single way out (return to lobby). Terminate
+ * the (crash-looping) worker + stop the watchdog immediately so no further
+ * telemetry or recovery storm continues while the screen is up; the button
+ * routes through `quitToLobby` for the full teardown (which resets the ladder).
+ */
+function showRecoveryErrorScreen(reportId: string): void {
+    gameWorker?.terminate();
+    gameWorker = null;
+    heartbeatWatchdog.stop();
+    gpPingPending.clear();
+    gpRecoverPending.clear();
+    document.getElementById('recovery-error-overlay')?.remove();
+    const overlay = document.createElement('div');
+    overlay.id = 'recovery-error-overlay';
+    overlay.style.cssText =
+        'position:fixed;inset:0;z-index:200;display:flex;align-items:center;' +
+        'justify-content:center;background:rgba(8,10,14,0.94);color:#e6e8ec;' +
+        'font-family:system-ui,sans-serif;';
+    const card = document.createElement('div');
+    card.style.cssText =
+        'max-width:32rem;padding:2rem 2.25rem;background:#161a22;border:1px solid #2a3140;' +
+        'border-radius:10px;text-align:center;box-shadow:0 8px 40px rgba(0,0,0,0.5);';
+    const h = document.createElement('h2');
+    h.textContent = 'The game renderer stopped responding';
+    h.style.cssText = 'margin:0 0 0.75rem;font-size:1.25rem;';
+    const p = document.createElement('p');
+    p.textContent =
+        'We tried to recover automatically but the problem persisted. Your game ' +
+        'is safe on the server — you can rejoin from the lobby.';
+    p.style.cssText = 'margin:0 0 1rem;line-height:1.5;color:#aab2c0;';
+    const idEl = document.createElement('p');
+    idEl.textContent = `Report id: ${reportId}`;
+    idEl.style.cssText =
+        'margin:0 0 1.5rem;font-family:ui-monospace,monospace;font-size:0.85rem;' +
+        'color:#6f7a8c;user-select:all;';
+    const btn = document.createElement('button');
+    btn.textContent = 'Return to lobby';
+    btn.style.cssText =
+        'padding:0.6rem 1.4rem;font-size:1rem;border:0;border-radius:6px;' +
+        'background:#3b6fe0;color:#fff;cursor:pointer;';
+    btn.addEventListener('click', () => {
+        overlay.remove();
+        quitToLobby();
+    });
+    card.append(h, p, idEl, btn);
+    overlay.append(card);
+    document.body.appendChild(overlay);
 }
 
 /// Clear the parked-worker TTL sweep timer (§3.1).
@@ -576,6 +724,13 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         heartbeatWatchdog.stop();
         gpPingPending.clear();
     }
+    gpRecoverPending.clear();
+    // PLAN-client-resilience.md task 2: a cold boot / user re-entry starts a
+    // clean ladder; but an R2 respawn re-enters here too and MUST preserve the
+    // loop-guard counts (they are what escalates a crash loop to R3). Only the
+    // R2 path leaves this flag set.
+    if (r2RespawnInFlight) r2RespawnInFlight = false;
+    else recoveryLadder.reset();
     if (gameConn) {
         gameConn.disconnect();
         gameConn = null;
@@ -685,6 +840,11 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             message: e.message || '(no detail)',
             stack: e.error?.stack ?? `${e.message} (${e.filename}:${e.lineno}:${e.colno})`,
         });
+        // PLAN-client-resilience.md task 2: an uncaught worker error is R2's
+        // trigger. This propagated-error path double-covers the worker's own
+        // `gp:workerFatal` message (both fire for an uncaught throw) — the
+        // ladder's `recovering` latch absorbs the second, so it counts once.
+        ladderTrigger('worker-error');
     };
     // PLAN-client-resilience.md task 1: fires when a posted message can't be
     // structured-cloned (e.g. an unsupported value crossing the worker
@@ -868,14 +1028,32 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 if (resolve) { gpPingPending.delete(m.id); resolve(); }
                 break;
             }
-            // PLAN-client-resilience.md task 1: WebGL context loss/restore
-            // visibility (detection only today — no reset is wired to it;
-            // see the EXTENSION POINT note in gpInit, game-processor.ts).
+            // PLAN-client-resilience.md task 2 (R1): the worker acked a soft
+            // reset. Resolve the ladder's `sendRecoverRequest` round-trip.
+            case 'gp:recovered': {
+                const settle = gpRecoverPending.get(m.id);
+                if (settle) settle(m.ok === true);
+                break;
+            }
+            // PLAN-client-resilience.md task 2: a genuinely-uncaught worker
+            // fatal (self.onerror / unhandledrejection) → R2. The reliable
+            // cross-boundary signal for E2 (an async loader crash raises
+            // `unhandledrejection`, which never reaches gameWorker.onerror).
+            case 'gp:workerFatal':
+                console.error(`[gameWorker] worker fatal (${m.reason}${m.injected ? ', injected' : ''}) — escalating to recovery ladder`);
+                ladderTrigger('fatal');
+                break;
+            // PLAN-client-resilience.md task 2: WebGL context loss/restore feed
+            // the ladder. A lost context arms R1's grace (notifyContextLost); a
+            // restore within it is the soft R1 rung; a restore that never comes
+            // times out to R2 (a dead GL context needs a fresh worker).
             case 'gp:contextLost':
                 console.error('[gameWorker] WebGL context lost');
+                recoveryLadder.notifyContextLost();
                 break;
             case 'gp:contextRestored':
                 console.log('[gameWorker] WebGL context restored');
+                recoveryLadder.notifyContextRestored();
                 break;
             // PLAN-quickstart.md §3.1/§3.2: detach / resync acks (visibility;
             // the DOM/audio swap already happened synchronously main-side).

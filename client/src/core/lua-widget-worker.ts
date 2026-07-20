@@ -18,7 +18,7 @@
 import type { WorkerInbound } from './game-worker-protocol.js';
 import {
     gpInit, gpResize, gpShutdown, gpSetShift, gpTestDispatch,
-    gpDetach, gpResync,
+    gpDetach, gpResync, gpSoftRecover,
     gpHandlePointerMove, gpHandlePointerDown, gpHandlePointerUp,
     gpHandleWheel, gpHandleKeyDown, gpHandleKeyUp, gpHandleBlur, gpHandlePointerLeave,
     gpHandleFocusWorld, gpHandleStartBuildPlacement, gpHandleCancelBuildPlacement,
@@ -229,6 +229,21 @@ self.onmessage = async (e: MessageEvent<WorkerInbound>) => {
         case 'gp:resync':
             gpResync((msg as { token?: string }).token);
             break;
+
+        // PLAN-client-resilience.md task 2 (R1 soft rung): the RecoveryLadder
+        // asks for an in-place soft reset (wipeCaches + FX flush + resync)
+        // instead of a respawn. Reply with the same id so the ladder's
+        // `softReset` round-trip resolves; a non-ack (worker wedged) times out
+        // main-side and escalates to R2. Any throw here reports ok:false rather
+        // than leaving the ladder hanging on its timeout.
+        case 'gp:recover': {
+            const id = msg.id as number;
+            let ok = false;
+            try { ok = gpSoftRecover(); }
+            catch (err) { postLog(4, `[gp] gp:recover failed: ${err}`); ok = false; }
+            postToMain({ type: 'gp:recovered', id, ok });
+            break;
+        }
 
         // GW8: window.test client-bound request → resolve against the
         // worker-resident camera/selection/renderer/connection, reply by id.

@@ -1164,6 +1164,56 @@ export function gpReportFatal(
         mapId: gpMapId,
         logRing: getRecentLogLines(50),
     });
+    // PLAN-client-resilience.md task 2: hand the fatal to the main-thread
+    // RecoveryLadder (R2 respawn). This is the RELIABLE cross-boundary signal:
+    // an uncaught throw does propagate to `gameWorker.onerror`, but a fatal from
+    // an async loader/renderer path (`unhandledrejection`) does NOT — so E2 (a
+    // bad def/model crashing the loader) would otherwise never reach the ladder.
+    // Context-loss keeps its own `gp:contextLost` channel (R1/grace), so it is
+    // excluded here; `messageError`/`wedged` originate main-side already.
+    if (reason === 'fatal' || reason === 'injected') {
+        postToMain({ type: 'gp:workerFatal', reason, injected: reason === 'injected' });
+    }
+}
+
+/**
+ * PLAN-client-resilience.md task 2 (R1 soft rung): an in-place subsystem reset,
+ * driven by the main-thread RecoveryLadder via `gp:recover` when a lost WebGL
+ * context restores. Cheaper than an R2 respawn: keep the worker, engine, scene,
+ * loaded models, DefCache and UI; just (1) force Babylon to drop its cached GL
+ * state (`wipeCaches` — the lost context invalidated every GPU object, and the
+ * gl-bridge's private immediate-mode VAO in particular is not Babylon-tracked),
+ * (2) flush the transient FX stores whose GPU buffers the loss killed, and (3)
+ * resync — reconnect for a fresh full server snapshot so entity/projectile
+ * instances repack from a clean base (server-authoritative → lossless).
+ *
+ * Returns true if the reset was applied (engine live + a reconnectable session
+ * present); false if a precondition is missing, which the ladder treats as an
+ * R1 failure and escalates to R2. NOT gated on `gpParked` (unlike gpResync):
+ * a context restore happens on a LIVE session, not a parked one.
+ */
+export function gpSoftRecover(): boolean {
+    if (!gpEngine || !gpInitMsg || !gpCtx.connection) {
+        postLog(2, '[gp] gpSoftRecover: engine/session not ready — cannot soft-reset');
+        return false;
+    }
+    // (1) Drop Babylon's cached GL state + the bridge VAO the lost context left
+    // dangling. Same brute-force wipe the UI pass uses (game-processor.ts:2080).
+    (gpEngine as unknown as { wipeCaches: (b?: boolean) => void }).wipeCaches(true);
+    // (2) Flush transient FX whose GPU-side buffers the context loss invalidated
+    // (keep static: terrain, models, DefCache, lighting, decals).
+    gpCtx.entityRenderer?.resetForResync();
+    gpCtx.projectileRenderer?.resetForResync();
+    gpCombatFX?.reset();
+    // (3) Reconnect the SAME Connection for a fresh full snapshot (its
+    // onAuthenticated re-seeds identity + re-registers the viewport pump). The
+    // fresh ClientSession re-pushes defs (DefCache no-ops the dups) and the
+    // first snapshot repacks entities from a clean base.
+    gpLastFrameTime = performance.now();
+    const t = gpInitMsg.token;
+    gpCtx.connection.connect(gpInitMsg.gameHttpUrl, gpInitMsg.username, '', t);
+    postLog(1, '[gp] soft-recovered (R1) — wipeCaches + FX flush + resync');
+    return true;
 }
 
 export function gpInit(msg: GpInitToWorker): void {
@@ -1261,12 +1311,11 @@ export function gpInit(msg: GpInitToWorker): void {
 
     // PLAN-client-resilience.md task 1: WebGL context loss is the most common
     // real-world "crash" — without this the frame loop just spins rendering
-    // nothing forever. Babylon already no-ops draw calls on a lost context;
-    // this hook is purely detection + reporting today.
-    // EXTENSION POINT (task 2): `onContextLostObservable` is R1's trigger —
-    // the ladder's in-place subsystem reset (wipeCaches / FX pool flush /
-    // gpResync) belongs here, gated on `onContextRestoredObservable` actually
-    // firing (a lost context that never restores needs R2, not R1).
+    // nothing forever. Babylon already no-ops draw calls on a lost context.
+    // task 2: these two observables now feed the main-thread RecoveryLadder via
+    // gp:contextLost/gp:contextRestored — a lost context arms R1's restore
+    // grace, a restore inside it drives the soft R1 reset (gpSoftRecover, called
+    // back via gp:recover), and a restore that never comes times out to R2.
     engine.onContextLostObservable.add(() => {
         postLog(4, '[gp] WebGL context lost');
         postToMain({ type: 'gp:contextLost' });
