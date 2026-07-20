@@ -62,6 +62,20 @@ local TYPES = {
 
 GG.Objectives = GG.Objectives or {}
 
+-- Optional observer hooks (PLAN-metalstorm-teams.md task 4: the per-player
+-- "objectives completed" scoreboard counter needs a resolve-time signal
+-- without duplicating the participation scan in game_teams.lua). Empty by
+-- default — this file's own logic never reads it back.
+local completeHooks = {}
+
+--- Register fn(o, completingTeam), called once after an objective resolves
+--- 'complete' — never for 'failed'/'expired' (a scoreboard counts real wins
+--- only). Fires with the SAME o.participation table used for the reward
+--- split, so a listener can apply its own threshold without re-scanning.
+function GG.Objectives.OnComplete(fn)
+    completeHooks[#completeHooks + 1] = fn
+end
+
 local EVAL_PERIOD = 90                  -- frames (3s) — strategic-tempo objects, no per-frame checks (§2)
 local RESOLVE_RETENTION_FRAMES = 900    -- 30s: resolved objectives keep params for the UI's resolve animation (§1)
 local BOUNTY_CAP_PER_PLAYER = 4         -- spam guard (§3.3)
@@ -244,7 +258,7 @@ end
 
 local PUBLISHED_FIELDS = {
     'type', 'scope', 'state', 'reward', 'team', 'progress',
-    'phase', 'stage', 'expire', 'region', 'x', 'z', 'r',
+    'phase', 'stage', 'expire', 'region', 'x', 'z', 'r', 'suggested',
 }
 
 local function clearPublished(o)
@@ -262,6 +276,9 @@ local function publish(o, ctx)
     Spring.SetGameRulesParam(p .. 'reward', o.reward + (GG.Authority.EscrowTotal(o.id) or 0))
     Spring.SetGameRulesParam(p .. 'team', o.forTeam or -1)
     Spring.SetGameRulesParam(p .. 'progress', o.progress or 0)
+    -- PLAN-metalstorm-teams.md §3.3: joiner onboarding hint, set via
+    -- GG.Objectives.SuggestFor. The panel renders this as "yours to take".
+    if o.suggestedFor then Spring.SetGameRulesParam(p .. 'suggested', o.suggestedFor) end
     if o.phase then Spring.SetGameRulesParam(p .. 'phase', o.phase) end
     if o.type == 'extract' and o.data and o.data.phase then
         Spring.SetGameRulesParam(p .. 'stage', o.data.phase)
@@ -379,6 +396,7 @@ function resolveObjective(o, state, completingTeam, ctx)
 
     if state == 'complete' then
         awardObjective(o, completingTeam)
+        for _, fn in ipairs(completeHooks) do fn(o, completingTeam) end
     else
         GG.Authority.SettleEscrow(o.id, state)   -- 'failed' | 'expired' -> refund stakers
     end
@@ -539,6 +557,40 @@ end
 --- Read-only accessor for scenario scripts/tests. Do not mutate the result.
 function GG.Objectives.Get(id)
     return objectives[id]
+end
+
+--- `teamID`'s lowest-participation active tactical objective
+--- (PLAN-metalstorm-teams.md §3.3 joiner onboarding hint — "point the
+--- joiner at real team work"). "Lowest participation" = smallest sum of
+--- credited weight (untouched work first); ties broken by lowest id
+--- (deterministic, oldest first). Only considers objectives scoped
+--- specifically to `teamID` (forTeam == teamID) — an open-race objective
+--- (forTeam == nil) isn't "the team's" to suggest. Returns nil if none are
+--- eligible.
+function GG.Objectives.LowestParticipationTactical(teamID)
+    local bestId, bestWeight
+    for _, id in ipairs(activeList) do
+        local o = objectives[id]
+        if o and o.scope == 'tactical' and o.forTeam == teamID then
+            local w = 0
+            for _, pw in pairs(o.participation) do w = w + (pw or 0) end
+            if not bestWeight or w < bestWeight or (w == bestWeight and id < bestId) then
+                bestId, bestWeight = id, w
+            end
+        end
+    end
+    return bestId
+end
+
+--- Mark an objective as "suggested for" a joining player — a rulesParam
+--- hint (§3.3) the panel renders as "yours to take". No-op on an
+--- unknown/non-active id (E1: a joiner might land in the same eval window
+--- as the objective resolving).
+function GG.Objectives.SuggestFor(id, playerID)
+    local o = objectives[id]
+    if not o or o.state ~= 'active' then return end
+    o.suggestedFor = playerID
+    publish(o, buildCtx(Spring.GetGameFrame()))
 end
 
 --- Manual scripted abort (mission scripts cancelling a no-longer-relevant

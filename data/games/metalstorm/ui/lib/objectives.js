@@ -18,13 +18,16 @@
 //     `x`/`z`(/`r`) (world coordinates). Never both.
 const FIELD_KEY = /^objective_(\d+)_(\w+)$/;
 
-const NUMERIC_FIELDS = new Set(['reward', 'team', 'progress', 'phase', 'expire', 'x', 'z', 'r']);
+const NUMERIC_FIELDS = new Set(['reward', 'team', 'progress', 'phase', 'expire', 'x', 'z', 'r', 'suggested']);
 
 // Mirrors game_objectives.lua's PUBLISHED_FIELDS exactly — pull() polls this
 // fixed field list per id rather than reacting to a batch (see pull() doc).
+// `suggested` (a playerID) is PLAN-metalstorm-teams.md §3.3's joiner-onboarding
+// hint, set via GG.Objectives.SuggestFor — objectives-panel.js renders it as
+// "yours to take" for the matching identity.playerId.
 const PUBLISHED_FIELDS = [
   'type', 'scope', 'state', 'reward', 'team', 'progress',
-  'phase', 'stage', 'expire', 'region', 'x', 'z', 'r',
+  'phase', 'stage', 'expire', 'region', 'x', 'z', 'r', 'suggested',
 ];
 
 function coerce(field, rawValue) {

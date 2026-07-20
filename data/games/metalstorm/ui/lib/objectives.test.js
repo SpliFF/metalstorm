@@ -23,6 +23,12 @@ describe('applyParams ingestion', () => {
     });
   });
 
+  it('parses the suggested-for hint (PLAN-metalstorm-teams.md §3.3)', () => {
+    const idx = createObjectiveIndex();
+    idx.applyParams({ objective_count: 1, objective_1_type: 'kill', objective_1_suggested: 7 });
+    expect(idx.get(1).suggested).toBe(7);
+  });
+
   it('coerces numeric fields even when the batch carries them as strings', () => {
     const idx = createObjectiveIndex();
     idx.applyParams({ objective_count: 1, objective_1_reward: '75', objective_1_team: '-1' });

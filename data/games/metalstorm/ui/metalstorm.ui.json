@@ -32,6 +32,12 @@
       "entry": "widgets/command-composer.js",
       "mount": "bottom-center",
       "subscribes": ["gameRulesParams", "teamRulesParams"]
+    },
+    {
+      "id": "scoreboard-panel",
+      "entry": "widgets/scoreboard-panel.js",
+      "mount": "right",
+      "subscribes": ["gameRulesParams", "playerRoster"]
     }
   ]
 }

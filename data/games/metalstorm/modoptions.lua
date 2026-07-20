@@ -55,6 +55,14 @@ return {
         section = 'objectives',
     },
     {
+        key     = 'ai_caretaker',
+        name    = 'Caretaker AI',
+        desc    = 'When a side empties (its last human leaves), hand it to a caretaker AI so the world keeps ticking (PLAN-metalstorm-teams §4.5, PLAN-metalstorm-ai §5). Off = the side just idles, no AI takes over.',
+        type    = 'bool',
+        def     = false,
+        section = 'world',
+    },
+    {
         key     = 'build_time_scale',
         name    = 'Construction time scale',
         desc    = 'Multiplier on building construction time (1.0 = real-time hours; lower for testing)',

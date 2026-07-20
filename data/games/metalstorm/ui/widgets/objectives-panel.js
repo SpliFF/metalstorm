@@ -51,17 +51,22 @@ const BOUNTY_STAKE_DEFAULT = 50;
 let warnedNoSendCommand = false;
 let warnedNoStrategicMap = false;
 
-function renderItem(o) {
+function renderItem(o, playerId) {
   const icon = TYPE_ICONS[o.type] ?? '•';
   const pct = Math.max(0, Math.min(100, Math.round((o.progress ?? 0) * 100)));
   const bits = [];
   if (o.phase) bits.push(`phase ${o.phase}`);
   if (o.stage) bits.push(STAGE_LABEL[o.stage] ?? o.stage);
   const subLabel = bits.length ? ` <span class="ms-obj-sub">(${bits.join(' · ')})</span>` : '';
+  // PLAN-metalstorm-teams.md §3.3: game_teams.lua's joiner-onboarding hint
+  // ("point the joiner at real team work") — badge it "yours to take"
+  // rather than silently relying on the player to notice the reward number.
+  const suggested = playerId !== undefined && o.suggested === playerId;
+  const suggestedBadge = suggested ? ' <span class="ms-obj-suggested">yours to take</span>' : '';
   return (
-    `<li class="ms-obj ms-obj-${o.scope ?? 'tactical'}" data-id="${o.id}">` +
+    `<li class="ms-obj ms-obj-${o.scope ?? 'tactical'}${suggested ? ' ms-obj-is-suggested' : ''}" data-id="${o.id}">` +
     `<span class="ms-obj-icon">${icon}</span>` +
-    `<span class="ms-obj-type">${o.type}${subLabel}</span>` +
+    `<span class="ms-obj-type">${o.type}${subLabel}${suggestedBadge}</span>` +
     `<span class="ms-obj-reward">⬡ ${o.reward ?? 0}</span>` +
     `<div class="ms-obj-progress"><div class="ms-obj-progress-fill" style="width:${pct}%"></div></div>` +
     `</li>`
@@ -158,7 +163,7 @@ export default {
   _render() {
     const identity = this.ctx.identity ?? {};
     const list = this.el.querySelector('.ms-obj-list');
-    const items = this.index.forTeam(identity.teamId, 'active').map(renderItem);
+    const items = this.index.forTeam(identity.teamId, 'active').map((o) => renderItem(o, identity.playerId));
     list.innerHTML = items.join('') || '<li class="ms-obj-none">No active objectives</li>';
     this._publishMarkers();
   },

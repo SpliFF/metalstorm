@@ -56,6 +56,39 @@ local teamStipend = 0
 GG.Authority = GG.Authority or {}
 
 -- ============================================================
+-- Optional observer hooks (PLAN-metalstorm-teams.md task 4: the per-player
+-- scoreboard needs earned/spent deltas without duplicating pool bookkeeping
+-- in game_teams.lua). Empty lists by default — zero overhead when nobody's
+-- listening, and this file's own logic never reads them back.
+-- ============================================================
+local awardHooks = {}
+local chargeHooks = {}
+
+--- Register fn(playerID_or_nil, teamID, amount), called once per concrete
+--- disbursement after a successful Award — for the split form that's once
+--- per weighted player, never for the team-share remainder (no single
+--- player to attribute that portion to).
+function GG.Authority.OnAward(fn)
+    awardHooks[#awardHooks + 1] = fn
+end
+
+--- Register fn(playerID, teamID, amount), called after a successful
+--- ChargeOrder with `amount` = the portion actually drawn from that
+--- player's OWN pool. Never fires for the team-pool portion of a mixed
+--- charge (again, no single player to attribute team spend to).
+function GG.Authority.OnCharge(fn)
+    chargeHooks[#chargeHooks + 1] = fn
+end
+
+local function fireAward(playerID, teamID, amount)
+    for _, fn in ipairs(awardHooks) do fn(playerID, teamID, amount) end
+end
+
+local function fireCharge(playerID, teamID, amount)
+    for _, fn in ipairs(chargeHooks) do fn(playerID, teamID, amount) end
+end
+
+-- ============================================================
 -- Pools (§1). Team pool: teamRulesParam authority_pool. Player pool:
 -- teamRulesParam authority_player_<playerID> — NOT gameRulesParam (that
 -- streams to enemies too, per Spring.GetGameRulesParams "always readable
@@ -138,12 +171,14 @@ function GG.Authority.Award(target, amount, reason)
     if target.player then
         setPlayerPool(target.player, getPlayerPool(target.player) + amount)
         emitEvent('award', amount, reason, target.player, playerTeam(target.player))
+        fireAward(target.player, playerTeam(target.player), amount)
         return
     end
 
     if target.team then
         setTeamPool(target.team, getTeamPool(target.team) + amount)
         emitEvent('award', amount, reason, nil, target.team)
+        fireAward(nil, target.team, amount)
         return
     end
 
@@ -159,6 +194,7 @@ function GG.Authority.Award(target, amount, reason)
                 local share = amount * w / totalWeight
                 setPlayerPool(playerID, getPlayerPool(playerID) + share)
                 emitEvent('award', share, reason, playerID, playerTeam(playerID))
+                fireAward(playerID, playerTeam(playerID), share)
             end
         end
         local teamShare = amount * (spec.teamWeight or 0) / totalWeight
@@ -248,6 +284,7 @@ function GG.Authority.ChargeOrder(unitID, unitTeam, playerID, cost)
     end
     if spentFromPlayer > 0 and playerID then
         setPlayerPool(playerID, playerPool - spentFromPlayer)
+        fireCharge(playerID, unitTeam, spentFromPlayer)
     end
     if spentFromTeam > 0 then
         setTeamPool(unitTeam, teamPool - spentFromTeam)
