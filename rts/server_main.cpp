@@ -817,7 +817,10 @@ int main(int argc, char* argv[])
             // allyTeam defaults to the team id until we grow a real
             // alliance concept — teams are their own ally for now.
             const int allyTeam = rq.team;
-            if (aiPool.AddAI(match->id, rq.team, allyTeam, code)) {
+            // Pass the plugin folder so the AI VM's plugin-scoped `require`
+            // (AI0-loader) can resolve sibling modules (a multi-file AI like
+            // strategos wires config/picture/slate/planner/... via require).
+            if (aiPool.AddAI(match->id, rq.team, allyTeam, code, match->folderPath)) {
                 SLOG(SPRING_LOG_NOTICE,
                     "loaded AI '%s' (%s) on team %d",
                     match->displayName.c_str(), match->id.c_str(), rq.team);

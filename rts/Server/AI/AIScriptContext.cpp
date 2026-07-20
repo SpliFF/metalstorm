@@ -8,6 +8,11 @@
 #define LOG_SECTION "ai"
 
 #include <cstdio>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <string>
 
 // Store the AIScriptContext pointer in the Lua extra space
 static AIScriptContext* GetAIContext(lua_State* L) {
@@ -15,8 +20,9 @@ static AIScriptContext* GetAIContext(lua_State* L) {
     return reinterpret_cast<AIScriptContext*>(*extra);
 }
 
-AIScriptContext::AIScriptContext(const std::string& name, int teamId, int allyTeamId)
-    : name(name), teamId(teamId), allyTeamId(allyTeamId)
+AIScriptContext::AIScriptContext(const std::string& name, int teamId, int allyTeamId,
+                                 const std::string& pluginDir)
+    : name(name), teamId(teamId), allyTeamId(allyTeamId), pluginDir(pluginDir)
 {
     permissions.synced = false; // AI doesn't directly modify sim state
     permissions.fullRead = false;
@@ -44,6 +50,19 @@ bool AIScriptContext::Init(const std::string& code, const std::string& source) {
     luaL_requiref(L, "string", luaopen_string, 1); lua_pop(L, 1);
     luaL_requiref(L, "math", luaopen_math, 1); lua_pop(L, 1);
     luaL_requiref(L, "utf8", luaopen_utf8, 1); lua_pop(L, 1);
+
+    // AI0-loader: a plugin-scoped `require`. The VM opens no `package`/`io`
+    // lib (kept sandboxed), so multi-file AIs get a minimal module system:
+    // `require(name)` reads `<pluginDir>/<name-with-dots-as-slashes>.lua`,
+    // runs it once, and caches the result. This is what lets strategos'
+    // main.lua wire its sibling modules (config/picture/slate/planner/...).
+    // Disabled when pluginDir is empty (single-buffer AIs need no loader).
+    if (!pluginDir.empty()) {
+        lua_newtable(L);
+        lua_setfield(L, LUA_REGISTRYINDEX, "ai_module_cache");
+        lua_pushcfunction(L, l_require);
+        lua_setglobal(L, "require");
+    }
 
     RegisterAPI();
 
@@ -155,7 +174,97 @@ void AIScriptContext::RegisterAPI() {
     lua_pushcfunction(L, l_getMapSize);
     lua_setfield(L, -2, "getMapSize");
 
+    lua_pushcfunction(L, l_getTeamId);
+    lua_setfield(L, -2, "getTeamId");
+
+    lua_pushcfunction(L, l_getRulesParam);
+    lua_setfield(L, -2, "getRulesParam");
+
     lua_setglobal(L, "AI");
+}
+
+// AI0-loader: plugin-scoped require. Resolves `name` (dotted → path) against
+// pluginDir, loads+runs the file once, caches by name in the registry.
+// Sandboxed: rejects absolute paths and any `..` traversal, and only ever
+// touches files under the plugin folder.
+int AIScriptContext::l_require(lua_State* L) {
+    namespace fs = std::filesystem;
+    auto* ctx = GetAIContext(L);
+    const char* rawName = luaL_checkstring(L, 1);
+    std::string name = rawName;
+
+    // Cache hit? (cache table lives in the registry)
+    lua_getfield(L, LUA_REGISTRYINDEX, "ai_module_cache"); // [cache]
+    lua_getfield(L, -1, name.c_str());                     // [cache][mod]
+    if (!lua_isnil(L, -1))
+        return 1;                                          // returns [mod]
+    lua_pop(L, 1);                                         // [cache]
+
+    // Reject anything that could escape the plugin folder.
+    if (name.find("..") != std::string::npos ||
+        (!name.empty() && (name[0] == '/' || name[0] == '\\'))) {
+        return luaL_error(L, "require: illegal module name '%s'", rawName);
+    }
+
+    // Dotted module path → relative file path.
+    std::string rel = name;
+    for (char& ch : rel) if (ch == '.') ch = '/';
+    const fs::path path = fs::path(ctx->pluginDir) / (rel + ".lua");
+
+    std::ifstream file(path, std::ios::binary);
+    if (!file.is_open())
+        return luaL_error(L, "require: module '%s' not found (%s)",
+            rawName, path.string().c_str());
+    const std::string src((std::istreambuf_iterator<char>(file)),
+                           std::istreambuf_iterator<char>());
+
+    const std::string chunkName = "@" + path.string();
+    if (luaL_loadbuffer(L, src.c_str(), src.size(), chunkName.c_str()) != LUA_OK)
+        return lua_error(L);                               // propagate load error
+    if (lua_pcall(L, 0, 1, 0) != LUA_OK)
+        return lua_error(L);                               // propagate run error
+
+    // require convention: a module returning nil is recorded as `true`.
+    if (lua_isnil(L, -1)) {
+        lua_pop(L, 1);
+        lua_pushboolean(L, 1);
+    }
+    // Cache: cache[name] = result. Stack: [cache][result]
+    lua_pushvalue(L, -1);
+    lua_setfield(L, -3, name.c_str());
+    return 1;                                              // returns [result]
+}
+
+int AIScriptContext::l_getTeamId(lua_State* L) {
+    auto* ctx = GetAIContext(L);
+    lua_pushinteger(L, ctx->teamId);
+    return 1;
+}
+
+// AI1: read a game- or team-scoped rulesParam mirror from the snapshot.
+// getRulesParam(scope, key) → number | string | nil. Scope is 'game'
+// (public strategic mirror: objectives, regions, pools) or 'team' (own
+// team's params). Only player-visible data — no cheating channel: the
+// snapshot builder filters to what this AI's team may read.
+int AIScriptContext::l_getRulesParam(lua_State* L) {
+    auto* ctx = GetAIContext(L);
+    const char* scope = luaL_checkstring(L, 1);
+    const char* key = luaL_checkstring(L, 2);
+
+    const auto& params = (std::strcmp(scope, "team") == 0)
+        ? ctx->currentSnapshot.teamParams
+        : ctx->currentSnapshot.gameParams;
+
+    auto it = params.find(key);
+    if (it == params.end()) {
+        lua_pushnil(L);
+        return 1;
+    }
+    if (it->second.isString)
+        lua_pushstring(L, it->second.str.c_str());
+    else
+        lua_pushnumber(L, it->second.num);
+    return 1;
 }
 
 int AIScriptContext::l_getOwnUnits(lua_State* L) {

@@ -24,7 +24,12 @@ struct lua_State;
 
 class AIScriptContext : public IScriptContext {
 public:
-    AIScriptContext(const std::string& name, int teamId, int allyTeamId);
+    /// `pluginDir` is the AI plugin's folder on disk (where main.lua and its
+    /// sibling modules live). It anchors the plugin-scoped `require` loader
+    /// (engine ask AI0-loader) so a multi-file AI (e.g. strategos) can boot.
+    /// Empty disables the loader (single-buffer AIs still work).
+    AIScriptContext(const std::string& name, int teamId, int allyTeamId,
+                    const std::string& pluginDir = "");
     ~AIScriptContext() override;
 
     // --- IScriptContext ---
@@ -65,10 +70,14 @@ private:
     static int l_issueCommand(lua_State* L);
     static int l_getFrame(lua_State* L);
     static int l_getMapSize(lua_State* L);
+    static int l_getTeamId(lua_State* L);      // AI-team down payment
+    static int l_getRulesParam(lua_State* L);  // AI1
+    static int l_require(lua_State* L);         // AI0-loader
 
     std::string name;
     int teamId;
     int allyTeamId;
+    std::string pluginDir;   // AI0-loader: module resolution root
     ScriptPermissions permissions;
     lua_State* L = nullptr;
 
