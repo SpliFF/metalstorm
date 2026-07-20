@@ -828,6 +828,13 @@ function gpConnect(msg: GpInitToWorker): void {
                     postToMain({ type: 'gp:counterbatteryPing', x: e.revealX, z: e.revealZ });
             }
         },
+        // Metalstorm damage-field lifecycle (Model 3 area bombardment, C6).
+        // The sim owns all damage; combatFX invents the barrage FX (procedural
+        // shell arcs + impacts scattered in the area at the field's cadence)
+        // from these Created/Removed events — no per-shell wire traffic.
+        onDamageFields: (events) => {
+            gpCombatFX?.onDamageFields(events);
+        },
         // GW4-c5b-3: per-unit command queues (~1 Hz) → command-path + waypoint
         // overlays for the current selection (shift-gated). Cached so a
         // selection change re-renders without waiting for the next broadcast.

@@ -213,6 +213,10 @@ struct VolleyOutcome;
 struct VolleyOutcomeBuilder;
 struct VolleyOutcomeT;
 
+struct DamageFieldEvent;
+struct DamageFieldEventBuilder;
+struct DamageFieldEventT;
+
 struct GameEvent;
 struct GameEventBuilder;
 struct GameEventT;
@@ -1431,6 +1435,75 @@ inline const char *EnumNameCombatResult(CombatResult e) {
   if (::flatbuffers::IsOutRange(e, CombatResult_Hit, CombatResult_Unknown)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesCombatResult()[index];
+}
+
+/// Metalstorm damage-field lifecycle (Model 3 — area bombardment, C6,
+/// PLAN-metalstorm-combat-resolution.md §4). A field is an area that applies
+/// `intensity` damage/sec on a fixed cadence for `duration` frames. The SIM
+/// owns all damage (units inside take it via DoDamage). The client receives
+/// only these Created/Removed lifecycle events and INVENTS the barrage FX
+/// (procedural shell arcs + impacts scattered in the area at the given
+/// cadence) — no per-shell wire traffic. Visibility-filtered per session in
+/// StateStreamer::BroadcastCombatEvents by area overlap with the viewer's
+/// known space (own-team fields always shown).
+enum DamageFieldEventKind : uint8_t {
+  DamageFieldEventKind_Created = 0,
+  DamageFieldEventKind_Removed = 1,
+  DamageFieldEventKind_MIN = DamageFieldEventKind_Created,
+  DamageFieldEventKind_MAX = DamageFieldEventKind_Removed
+};
+
+inline const DamageFieldEventKind (&EnumValuesDamageFieldEventKind())[2] {
+  static const DamageFieldEventKind values[] = {
+    DamageFieldEventKind_Created,
+    DamageFieldEventKind_Removed
+  };
+  return values;
+}
+
+inline const char * const *EnumNamesDamageFieldEventKind() {
+  static const char * const names[3] = {
+    "Created",
+    "Removed",
+    nullptr
+  };
+  return names;
+}
+
+inline const char *EnumNameDamageFieldEventKind(DamageFieldEventKind e) {
+  if (::flatbuffers::IsOutRange(e, DamageFieldEventKind_Created, DamageFieldEventKind_Removed)) return "";
+  const size_t index = static_cast<size_t>(e);
+  return EnumNamesDamageFieldEventKind()[index];
+}
+
+enum DamageFieldShape : uint8_t {
+  DamageFieldShape_Circle = 0,
+  DamageFieldShape_Rect = 1,
+  DamageFieldShape_MIN = DamageFieldShape_Circle,
+  DamageFieldShape_MAX = DamageFieldShape_Rect
+};
+
+inline const DamageFieldShape (&EnumValuesDamageFieldShape())[2] {
+  static const DamageFieldShape values[] = {
+    DamageFieldShape_Circle,
+    DamageFieldShape_Rect
+  };
+  return values;
+}
+
+inline const char * const *EnumNamesDamageFieldShape() {
+  static const char * const names[3] = {
+    "Circle",
+    "Rect",
+    nullptr
+  };
+  return names;
+}
+
+inline const char *EnumNameDamageFieldShape(DamageFieldShape e) {
+  if (::flatbuffers::IsOutRange(e, DamageFieldShape_Circle, DamageFieldShape_Rect)) return "";
+  const size_t index = static_cast<size_t>(e);
+  return EnumNamesDamageFieldShape()[index];
 }
 
 /// Why a projectile died — drives the impact VFX the client plays.
@@ -7481,6 +7554,172 @@ inline ::flatbuffers::Offset<VolleyOutcome> CreateVolleyOutcome(
 
 ::flatbuffers::Offset<VolleyOutcome> CreateVolleyOutcome(::flatbuffers::FlatBufferBuilder &_fbb, const VolleyOutcomeT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 
+struct DamageFieldEventT : public ::flatbuffers::NativeTable {
+  typedef DamageFieldEvent TableType;
+  uint32_t field_id = 0;
+  SpringWeb::DamageFieldEventKind kind = SpringWeb::DamageFieldEventKind_Created;
+  SpringWeb::DamageFieldShape shape = SpringWeb::DamageFieldShape_Circle;
+  std::unique_ptr<SpringWeb::Vec3> center{};
+  float radius = 0.0f;
+  float half_z = 0.0f;
+  uint16_t weapon_def_id = 0;
+  float intensity = 0.0f;
+  uint16_t cadence = 15;
+  uint32_t duration = 0;
+  uint8_t team = 255;
+  DamageFieldEventT() = default;
+  DamageFieldEventT(const DamageFieldEventT &o);
+  DamageFieldEventT(DamageFieldEventT&&) FLATBUFFERS_NOEXCEPT = default;
+  DamageFieldEventT &operator=(DamageFieldEventT o) FLATBUFFERS_NOEXCEPT;
+};
+
+struct DamageFieldEvent FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef DamageFieldEventT NativeTableType;
+  typedef DamageFieldEventBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_FIELD_ID = 4,
+    VT_KIND = 6,
+    VT_SHAPE = 8,
+    VT_CENTER = 10,
+    VT_RADIUS = 12,
+    VT_HALF_Z = 14,
+    VT_WEAPON_DEF_ID = 16,
+    VT_INTENSITY = 18,
+    VT_CADENCE = 20,
+    VT_DURATION = 22,
+    VT_TEAM = 24
+  };
+  uint32_t field_id() const {
+    return GetField<uint32_t>(VT_FIELD_ID, 0);
+  }
+  SpringWeb::DamageFieldEventKind kind() const {
+    return static_cast<SpringWeb::DamageFieldEventKind>(GetField<uint8_t>(VT_KIND, 0));
+  }
+  SpringWeb::DamageFieldShape shape() const {
+    return static_cast<SpringWeb::DamageFieldShape>(GetField<uint8_t>(VT_SHAPE, 0));
+  }
+  const SpringWeb::Vec3 *center() const {
+    return GetStruct<const SpringWeb::Vec3 *>(VT_CENTER);
+  }
+  float radius() const {
+    return GetField<float>(VT_RADIUS, 0.0f);
+  }
+  float half_z() const {
+    return GetField<float>(VT_HALF_Z, 0.0f);
+  }
+  uint16_t weapon_def_id() const {
+    return GetField<uint16_t>(VT_WEAPON_DEF_ID, 0);
+  }
+  float intensity() const {
+    return GetField<float>(VT_INTENSITY, 0.0f);
+  }
+  uint16_t cadence() const {
+    return GetField<uint16_t>(VT_CADENCE, 15);
+  }
+  uint32_t duration() const {
+    return GetField<uint32_t>(VT_DURATION, 0);
+  }
+  uint8_t team() const {
+    return GetField<uint8_t>(VT_TEAM, 255);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<uint32_t>(verifier, VT_FIELD_ID, 4) &&
+           VerifyField<uint8_t>(verifier, VT_KIND, 1) &&
+           VerifyField<uint8_t>(verifier, VT_SHAPE, 1) &&
+           VerifyField<SpringWeb::Vec3>(verifier, VT_CENTER, 4) &&
+           VerifyField<float>(verifier, VT_RADIUS, 4) &&
+           VerifyField<float>(verifier, VT_HALF_Z, 4) &&
+           VerifyField<uint16_t>(verifier, VT_WEAPON_DEF_ID, 2) &&
+           VerifyField<float>(verifier, VT_INTENSITY, 4) &&
+           VerifyField<uint16_t>(verifier, VT_CADENCE, 2) &&
+           VerifyField<uint32_t>(verifier, VT_DURATION, 4) &&
+           VerifyField<uint8_t>(verifier, VT_TEAM, 1) &&
+           verifier.EndTable();
+  }
+  DamageFieldEventT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(DamageFieldEventT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<DamageFieldEvent> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const DamageFieldEventT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct DamageFieldEventBuilder {
+  typedef DamageFieldEvent Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_field_id(uint32_t field_id) {
+    fbb_.AddElement<uint32_t>(DamageFieldEvent::VT_FIELD_ID, field_id, 0);
+  }
+  void add_kind(SpringWeb::DamageFieldEventKind kind) {
+    fbb_.AddElement<uint8_t>(DamageFieldEvent::VT_KIND, static_cast<uint8_t>(kind), 0);
+  }
+  void add_shape(SpringWeb::DamageFieldShape shape) {
+    fbb_.AddElement<uint8_t>(DamageFieldEvent::VT_SHAPE, static_cast<uint8_t>(shape), 0);
+  }
+  void add_center(const SpringWeb::Vec3 *center) {
+    fbb_.AddStruct(DamageFieldEvent::VT_CENTER, center);
+  }
+  void add_radius(float radius) {
+    fbb_.AddElement<float>(DamageFieldEvent::VT_RADIUS, radius, 0.0f);
+  }
+  void add_half_z(float half_z) {
+    fbb_.AddElement<float>(DamageFieldEvent::VT_HALF_Z, half_z, 0.0f);
+  }
+  void add_weapon_def_id(uint16_t weapon_def_id) {
+    fbb_.AddElement<uint16_t>(DamageFieldEvent::VT_WEAPON_DEF_ID, weapon_def_id, 0);
+  }
+  void add_intensity(float intensity) {
+    fbb_.AddElement<float>(DamageFieldEvent::VT_INTENSITY, intensity, 0.0f);
+  }
+  void add_cadence(uint16_t cadence) {
+    fbb_.AddElement<uint16_t>(DamageFieldEvent::VT_CADENCE, cadence, 15);
+  }
+  void add_duration(uint32_t duration) {
+    fbb_.AddElement<uint32_t>(DamageFieldEvent::VT_DURATION, duration, 0);
+  }
+  void add_team(uint8_t team) {
+    fbb_.AddElement<uint8_t>(DamageFieldEvent::VT_TEAM, team, 255);
+  }
+  explicit DamageFieldEventBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<DamageFieldEvent> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<DamageFieldEvent>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<DamageFieldEvent> CreateDamageFieldEvent(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint32_t field_id = 0,
+    SpringWeb::DamageFieldEventKind kind = SpringWeb::DamageFieldEventKind_Created,
+    SpringWeb::DamageFieldShape shape = SpringWeb::DamageFieldShape_Circle,
+    const SpringWeb::Vec3 *center = nullptr,
+    float radius = 0.0f,
+    float half_z = 0.0f,
+    uint16_t weapon_def_id = 0,
+    float intensity = 0.0f,
+    uint16_t cadence = 15,
+    uint32_t duration = 0,
+    uint8_t team = 255) {
+  DamageFieldEventBuilder builder_(_fbb);
+  builder_.add_duration(duration);
+  builder_.add_intensity(intensity);
+  builder_.add_half_z(half_z);
+  builder_.add_radius(radius);
+  builder_.add_center(center);
+  builder_.add_field_id(field_id);
+  builder_.add_cadence(cadence);
+  builder_.add_weapon_def_id(weapon_def_id);
+  builder_.add_team(team);
+  builder_.add_shape(shape);
+  builder_.add_kind(kind);
+  return builder_.Finish();
+}
+
+::flatbuffers::Offset<DamageFieldEvent> CreateDamageFieldEvent(::flatbuffers::FlatBufferBuilder &_fbb, const DamageFieldEventT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
 struct GameEventT : public ::flatbuffers::NativeTable {
   typedef GameEvent TableType;
   std::string topic{};
@@ -8326,6 +8565,7 @@ struct GameEventBatchT : public ::flatbuffers::NativeTable {
   std::vector<std::unique_ptr<SpringWeb::SeismicPingT>> seismic_pings{};
   std::vector<std::unique_ptr<SpringWeb::MusicEventT>> music_events{};
   std::vector<std::unique_ptr<SpringWeb::VolleyOutcomeT>> volley_outcomes{};
+  std::vector<std::unique_ptr<SpringWeb::DamageFieldEventT>> damage_fields{};
   GameEventBatchT() = default;
   GameEventBatchT(const GameEventBatchT &o);
   GameEventBatchT(GameEventBatchT&&) FLATBUFFERS_NOEXCEPT = default;
@@ -8345,7 +8585,8 @@ struct GameEventBatch FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_SOUNDS = 16,
     VT_SEISMIC_PINGS = 18,
     VT_MUSIC_EVENTS = 20,
-    VT_VOLLEY_OUTCOMES = 22
+    VT_VOLLEY_OUTCOMES = 22,
+    VT_DAMAGE_FIELDS = 24
   };
   uint32_t frame() const {
     return GetField<uint32_t>(VT_FRAME, 0);
@@ -8391,6 +8632,13 @@ struct GameEventBatch FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::VolleyOutcome>> *volley_outcomes() const {
     return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::VolleyOutcome>> *>(VT_VOLLEY_OUTCOMES);
   }
+  /// Metalstorm damage-field lifecycle events (Model 3, C6). Empty for
+  /// ported games; populated only when a game creates/expires a barrage
+  /// field. Appended last for FlatBuffers field-id stability. See
+  /// DamageFieldEvent.
+  const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::DamageFieldEvent>> *damage_fields() const {
+    return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::DamageFieldEvent>> *>(VT_DAMAGE_FIELDS);
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<uint32_t>(verifier, VT_FRAME, 4) &&
@@ -8421,6 +8669,9 @@ struct GameEventBatch FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyOffset(verifier, VT_VOLLEY_OUTCOMES) &&
            verifier.VerifyVector(volley_outcomes()) &&
            verifier.VerifyVectorOfTables(volley_outcomes()) &&
+           VerifyOffset(verifier, VT_DAMAGE_FIELDS) &&
+           verifier.VerifyVector(damage_fields()) &&
+           verifier.VerifyVectorOfTables(damage_fields()) &&
            verifier.EndTable();
   }
   GameEventBatchT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -8462,6 +8713,9 @@ struct GameEventBatchBuilder {
   void add_volley_outcomes(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::VolleyOutcome>>> volley_outcomes) {
     fbb_.AddOffset(GameEventBatch::VT_VOLLEY_OUTCOMES, volley_outcomes);
   }
+  void add_damage_fields(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::DamageFieldEvent>>> damage_fields) {
+    fbb_.AddOffset(GameEventBatch::VT_DAMAGE_FIELDS, damage_fields);
+  }
   explicit GameEventBatchBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -8484,8 +8738,10 @@ inline ::flatbuffers::Offset<GameEventBatch> CreateGameEventBatch(
     ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::SoundEvent>>> sounds = 0,
     ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::SeismicPing>>> seismic_pings = 0,
     ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::MusicEvent>>> music_events = 0,
-    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::VolleyOutcome>>> volley_outcomes = 0) {
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::VolleyOutcome>>> volley_outcomes = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::DamageFieldEvent>>> damage_fields = 0) {
   GameEventBatchBuilder builder_(_fbb);
+  builder_.add_damage_fields(damage_fields);
   builder_.add_volley_outcomes(volley_outcomes);
   builder_.add_music_events(music_events);
   builder_.add_seismic_pings(seismic_pings);
@@ -8510,7 +8766,8 @@ inline ::flatbuffers::Offset<GameEventBatch> CreateGameEventBatchDirect(
     const std::vector<::flatbuffers::Offset<SpringWeb::SoundEvent>> *sounds = nullptr,
     const std::vector<::flatbuffers::Offset<SpringWeb::SeismicPing>> *seismic_pings = nullptr,
     const std::vector<::flatbuffers::Offset<SpringWeb::MusicEvent>> *music_events = nullptr,
-    const std::vector<::flatbuffers::Offset<SpringWeb::VolleyOutcome>> *volley_outcomes = nullptr) {
+    const std::vector<::flatbuffers::Offset<SpringWeb::VolleyOutcome>> *volley_outcomes = nullptr,
+    const std::vector<::flatbuffers::Offset<SpringWeb::DamageFieldEvent>> *damage_fields = nullptr) {
   auto events__ = events ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::GameEvent>>(*events) : 0;
   auto combat_events__ = combat_events ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::CombatEvent>>(*combat_events) : 0;
   auto projectile_fired__ = projectile_fired ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::ProjectileFiredEvent>>(*projectile_fired) : 0;
@@ -8520,6 +8777,7 @@ inline ::flatbuffers::Offset<GameEventBatch> CreateGameEventBatchDirect(
   auto seismic_pings__ = seismic_pings ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::SeismicPing>>(*seismic_pings) : 0;
   auto music_events__ = music_events ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::MusicEvent>>(*music_events) : 0;
   auto volley_outcomes__ = volley_outcomes ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::VolleyOutcome>>(*volley_outcomes) : 0;
+  auto damage_fields__ = damage_fields ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::DamageFieldEvent>>(*damage_fields) : 0;
   return SpringWeb::CreateGameEventBatch(
       _fbb,
       frame,
@@ -8531,7 +8789,8 @@ inline ::flatbuffers::Offset<GameEventBatch> CreateGameEventBatchDirect(
       sounds__,
       seismic_pings__,
       music_events__,
-      volley_outcomes__);
+      volley_outcomes__,
+      damage_fields__);
 }
 
 ::flatbuffers::Offset<GameEventBatch> CreateGameEventBatch(::flatbuffers::FlatBufferBuilder &_fbb, const GameEventBatchT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
@@ -17567,6 +17826,91 @@ inline ::flatbuffers::Offset<VolleyOutcome> CreateVolleyOutcome(::flatbuffers::F
       _attacker_posture);
 }
 
+inline DamageFieldEventT::DamageFieldEventT(const DamageFieldEventT &o)
+      : field_id(o.field_id),
+        kind(o.kind),
+        shape(o.shape),
+        center((o.center) ? new SpringWeb::Vec3(*o.center) : nullptr),
+        radius(o.radius),
+        half_z(o.half_z),
+        weapon_def_id(o.weapon_def_id),
+        intensity(o.intensity),
+        cadence(o.cadence),
+        duration(o.duration),
+        team(o.team) {
+}
+
+inline DamageFieldEventT &DamageFieldEventT::operator=(DamageFieldEventT o) FLATBUFFERS_NOEXCEPT {
+  std::swap(field_id, o.field_id);
+  std::swap(kind, o.kind);
+  std::swap(shape, o.shape);
+  std::swap(center, o.center);
+  std::swap(radius, o.radius);
+  std::swap(half_z, o.half_z);
+  std::swap(weapon_def_id, o.weapon_def_id);
+  std::swap(intensity, o.intensity);
+  std::swap(cadence, o.cadence);
+  std::swap(duration, o.duration);
+  std::swap(team, o.team);
+  return *this;
+}
+
+inline DamageFieldEventT *DamageFieldEvent::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<DamageFieldEventT>(new DamageFieldEventT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void DamageFieldEvent::UnPackTo(DamageFieldEventT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = field_id(); _o->field_id = _e; }
+  { auto _e = kind(); _o->kind = _e; }
+  { auto _e = shape(); _o->shape = _e; }
+  { auto _e = center(); if (_e) _o->center = std::unique_ptr<SpringWeb::Vec3>(new SpringWeb::Vec3(*_e)); }
+  { auto _e = radius(); _o->radius = _e; }
+  { auto _e = half_z(); _o->half_z = _e; }
+  { auto _e = weapon_def_id(); _o->weapon_def_id = _e; }
+  { auto _e = intensity(); _o->intensity = _e; }
+  { auto _e = cadence(); _o->cadence = _e; }
+  { auto _e = duration(); _o->duration = _e; }
+  { auto _e = team(); _o->team = _e; }
+}
+
+inline ::flatbuffers::Offset<DamageFieldEvent> DamageFieldEvent::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const DamageFieldEventT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return CreateDamageFieldEvent(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<DamageFieldEvent> CreateDamageFieldEvent(::flatbuffers::FlatBufferBuilder &_fbb, const DamageFieldEventT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const DamageFieldEventT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _field_id = _o->field_id;
+  auto _kind = _o->kind;
+  auto _shape = _o->shape;
+  auto _center = _o->center ? _o->center.get() : nullptr;
+  auto _radius = _o->radius;
+  auto _half_z = _o->half_z;
+  auto _weapon_def_id = _o->weapon_def_id;
+  auto _intensity = _o->intensity;
+  auto _cadence = _o->cadence;
+  auto _duration = _o->duration;
+  auto _team = _o->team;
+  return SpringWeb::CreateDamageFieldEvent(
+      _fbb,
+      _field_id,
+      _kind,
+      _shape,
+      _center,
+      _radius,
+      _half_z,
+      _weapon_def_id,
+      _intensity,
+      _cadence,
+      _duration,
+      _team);
+}
+
 inline GameEventT::GameEventT(const GameEventT &o)
       : topic(o.topic),
         frame(o.frame),
@@ -17991,6 +18335,8 @@ inline GameEventBatchT::GameEventBatchT(const GameEventBatchT &o)
   for (const auto &music_events_ : o.music_events) { music_events.emplace_back((music_events_) ? new SpringWeb::MusicEventT(*music_events_) : nullptr); }
   volley_outcomes.reserve(o.volley_outcomes.size());
   for (const auto &volley_outcomes_ : o.volley_outcomes) { volley_outcomes.emplace_back((volley_outcomes_) ? new SpringWeb::VolleyOutcomeT(*volley_outcomes_) : nullptr); }
+  damage_fields.reserve(o.damage_fields.size());
+  for (const auto &damage_fields_ : o.damage_fields) { damage_fields.emplace_back((damage_fields_) ? new SpringWeb::DamageFieldEventT(*damage_fields_) : nullptr); }
 }
 
 inline GameEventBatchT &GameEventBatchT::operator=(GameEventBatchT o) FLATBUFFERS_NOEXCEPT {
@@ -18004,6 +18350,7 @@ inline GameEventBatchT &GameEventBatchT::operator=(GameEventBatchT o) FLATBUFFER
   std::swap(seismic_pings, o.seismic_pings);
   std::swap(music_events, o.music_events);
   std::swap(volley_outcomes, o.volley_outcomes);
+  std::swap(damage_fields, o.damage_fields);
   return *this;
 }
 
@@ -18026,6 +18373,7 @@ inline void GameEventBatch::UnPackTo(GameEventBatchT *_o, const ::flatbuffers::r
   { auto _e = seismic_pings(); if (_e) { _o->seismic_pings.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->seismic_pings[_i]) { _e->Get(_i)->UnPackTo(_o->seismic_pings[_i].get(), _resolver); } else { _o->seismic_pings[_i] = std::unique_ptr<SpringWeb::SeismicPingT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->seismic_pings.resize(0); } }
   { auto _e = music_events(); if (_e) { _o->music_events.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->music_events[_i]) { _e->Get(_i)->UnPackTo(_o->music_events[_i].get(), _resolver); } else { _o->music_events[_i] = std::unique_ptr<SpringWeb::MusicEventT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->music_events.resize(0); } }
   { auto _e = volley_outcomes(); if (_e) { _o->volley_outcomes.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->volley_outcomes[_i]) { _e->Get(_i)->UnPackTo(_o->volley_outcomes[_i].get(), _resolver); } else { _o->volley_outcomes[_i] = std::unique_ptr<SpringWeb::VolleyOutcomeT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->volley_outcomes.resize(0); } }
+  { auto _e = damage_fields(); if (_e) { _o->damage_fields.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->damage_fields[_i]) { _e->Get(_i)->UnPackTo(_o->damage_fields[_i].get(), _resolver); } else { _o->damage_fields[_i] = std::unique_ptr<SpringWeb::DamageFieldEventT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->damage_fields.resize(0); } }
 }
 
 inline ::flatbuffers::Offset<GameEventBatch> GameEventBatch::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GameEventBatchT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
@@ -18046,6 +18394,7 @@ inline ::flatbuffers::Offset<GameEventBatch> CreateGameEventBatch(::flatbuffers:
   auto _seismic_pings = _o->seismic_pings.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::SeismicPing>> (_o->seismic_pings.size(), [](size_t i, _VectorArgs *__va) { return CreateSeismicPing(*__va->__fbb, __va->__o->seismic_pings[i].get(), __va->__rehasher); }, &_va ) : 0;
   auto _music_events = _o->music_events.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::MusicEvent>> (_o->music_events.size(), [](size_t i, _VectorArgs *__va) { return CreateMusicEvent(*__va->__fbb, __va->__o->music_events[i].get(), __va->__rehasher); }, &_va ) : 0;
   auto _volley_outcomes = _o->volley_outcomes.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::VolleyOutcome>> (_o->volley_outcomes.size(), [](size_t i, _VectorArgs *__va) { return CreateVolleyOutcome(*__va->__fbb, __va->__o->volley_outcomes[i].get(), __va->__rehasher); }, &_va ) : 0;
+  auto _damage_fields = _o->damage_fields.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::DamageFieldEvent>> (_o->damage_fields.size(), [](size_t i, _VectorArgs *__va) { return CreateDamageFieldEvent(*__va->__fbb, __va->__o->damage_fields[i].get(), __va->__rehasher); }, &_va ) : 0;
   return SpringWeb::CreateGameEventBatch(
       _fbb,
       _frame,
@@ -18057,7 +18406,8 @@ inline ::flatbuffers::Offset<GameEventBatch> CreateGameEventBatch(::flatbuffers:
       _sounds,
       _seismic_pings,
       _music_events,
-      _volley_outcomes);
+      _volley_outcomes,
+      _damage_fields);
 }
 
 inline ResourceUpdateT *ResourceUpdate::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {

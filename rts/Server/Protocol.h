@@ -26,6 +26,7 @@
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitDef.h"
 #include "Sim/Weapons/Weapon.h"
+#include "Sim/Weapons/DamageField.h"
 #include "Sim/Units/CommandAI/CommandAI.h"
 #include "Sim/Units/CommandAI/Command.h"
 #include "Sim/Units/CommandAI/CommandDescription.h"
@@ -185,7 +186,8 @@ inline std::vector<uint8_t> BuildCombatEventBatch(
     const std::vector<ProjectileTrajectoryEventData>& projTrajectories = {},
     const std::vector<SoundEventData>& sounds = {},
     const std::vector<SeismicPingData>& seismicPings = {},
-    const std::vector<VolleyOutcomeData>& volleyOutcomes = {})
+    const std::vector<VolleyOutcomeData>& volleyOutcomes = {},
+    const std::vector<DamageFieldEventData>& damageFields = {})
 {
     flatbuffers::FlatBufferBuilder fbb(
         256 + events.size() * 32
@@ -194,7 +196,8 @@ inline std::vector<uint8_t> BuildCombatEventBatch(
             + projTrajectories.size() * 40
             + sounds.size() * 32
             + seismicPings.size() * 24
-            + volleyOutcomes.size() * 56);
+            + volleyOutcomes.size() * 56
+            + damageFields.size() * 48);
 
     std::vector<flatbuffers::Offset<SpringWeb::CombatEvent>> combatOffsets;
     combatOffsets.reserve(events.size());
@@ -325,6 +328,25 @@ inline std::vector<uint8_t> BuildCombatEventBatch(
         volleyOffsets.push_back(vob.Finish());
     }
 
+    std::vector<flatbuffers::Offset<SpringWeb::DamageFieldEvent>> fieldOffsets;
+    fieldOffsets.reserve(damageFields.size());
+    for (const auto& f : damageFields) {
+        auto ctr = SpringWeb::Vec3(f.center.x, f.center.y, f.center.z);
+        SpringWeb::DamageFieldEventBuilder dfb(fbb);
+        dfb.add_field_id(f.fieldId);
+        dfb.add_kind(static_cast<SpringWeb::DamageFieldEventKind>(f.kind));
+        dfb.add_shape(static_cast<SpringWeb::DamageFieldShape>(f.shape));
+        dfb.add_center(&ctr);
+        dfb.add_radius(f.radius);
+        dfb.add_half_z(f.halfZ);
+        dfb.add_weapon_def_id(f.weaponDefId);
+        dfb.add_intensity(f.intensity);
+        dfb.add_cadence(f.cadence);
+        dfb.add_duration(f.duration);
+        dfb.add_team(f.team);
+        fieldOffsets.push_back(dfb.Finish());
+    }
+
     auto combatVec  = fbb.CreateVector(combatOffsets);
     auto firedVec   = fbb.CreateVector(firedOffsets);
     auto impactVec  = fbb.CreateVector(impactOffsets);
@@ -333,9 +355,10 @@ inline std::vector<uint8_t> BuildCombatEventBatch(
     auto seismicVec = fbb.CreateVector(seismicOffsets);
     auto musicVec   = fbb.CreateVector(musicOffsets);
     auto volleyVec  = fbb.CreateVector(volleyOffsets);
+    auto fieldVec   = fbb.CreateVector(fieldOffsets);
     auto batch = SpringWeb::CreateGameEventBatch(
         fbb, frame, /*events=*/0, combatVec, firedVec, impactVec, trajVec, soundVec, seismicVec, musicVec,
-        volleyVec);
+        volleyVec, fieldVec);
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_GameEventBatch, batch.Union());
 }
 

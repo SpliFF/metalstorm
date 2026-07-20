@@ -52,6 +52,7 @@
 #include "Server/CombatEventCollector.h"
 #include "Server/GameOverState.h"
 #include "Server/StandingOrders.h"
+#include "Sim/Weapons/DamageField.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitDef.h"
@@ -149,6 +150,9 @@ bool LuaSyncedCtrl::PushEntries(lua_State* L)
 	REGISTER_LUA_CFUNC(UpdateStandingOrder);
 	REGISTER_LUA_CFUNC(RemoveStandingOrder);
 	REGISTER_LUA_CFUNC(GetStandingOrders);
+
+	REGISTER_LUA_CFUNC(CreateDamageField);
+	REGISTER_LUA_CFUNC(RemoveDamageField);
 
 	REGISTER_LUA_CFUNC(AddTeamResource);
 	REGISTER_LUA_CFUNC(UseTeamResource);
@@ -7884,6 +7888,112 @@ int LuaSyncedCtrl::GetStandingOrders(lua_State* L)
 
 		lua_rawseti(L, -2, n);
 	}
+	return 1;
+}
+
+
+/*** Create a Metalstorm damage field (Model 3 area bombardment, C6).
+ *
+ * A damage field applies `intensity` damage/second on a fixed frame cadence
+ * over an area for `duration` frames. Units inside take damage through the
+ * normal DoDamage path (attacker = `ownerUnitID` while it lives, else the
+ * team). The client invents the barrage FX from the field's lifecycle.
+ *
+ * @function Spring.CreateDamageField
+ * @tparam table shape { type = "circle"|"rect", x, z, radius[, sizeZ],
+ *                       [y = ground] }  -- radius is the circle radius or the
+ *                       rect half-extent along x; sizeZ the rect half-extent
+ *                       along z.
+ * @number weaponDefID  damage type / FX flavour (-1 = generic)
+ * @number intensity    damage per game-second
+ * @number cadence      frames between damage ticks (default 15)
+ * @number duration     lifetime in frames (must be > 0)
+ * @tparam[opt] table opts { ownerUnitID = -1, ownerTeam = 255,
+ *                           friendlyFire = false }
+ * @treturn number|nil fieldId on success, nil on bad arguments
+ */
+int LuaSyncedCtrl::CreateDamageField(lua_State* L)
+{
+	if (!lua_istable(L, 1)) {
+		luaL_error(L, "CreateDamageField: first arg must be a shape table");
+		return 0;
+	}
+
+	uint8_t shape = DAMAGE_FIELD_CIRCLE;
+	lua_getfield(L, 1, "type");
+	if (lua_isstring(L, -1)) {
+		const std::string t = lua_tostring(L, -1);
+		if (t == "rect" || t == "box")
+			shape = DAMAGE_FIELD_RECT;
+	}
+	lua_pop(L, 1);
+
+	auto field = [&](const char* key, float fallback) -> float {
+		lua_getfield(L, 1, key);
+		const float v = luaL_optnumber(L, -1, fallback);
+		lua_pop(L, 1);
+		return v;
+	};
+
+	const float cx     = field("x", 0.0f);
+	const float cz     = field("z", 0.0f);
+	const float radius = field("radius", 0.0f);
+	const float halfZ  = field("sizeZ", radius);
+	// y defaults to the ground sample so the client barrage lands on terrain.
+	const float cy     = field("y", CGround::GetHeightReal(cx, cz));
+
+	const int weaponDefID = luaL_optint(L, 2, -1);
+	const float intensity = luaL_optnumber(L, 3, 0.0f);
+	const int cadence     = luaL_optint(L, 4, 15);
+	const int duration    = luaL_optint(L, 5, 0);
+
+	int  ownerUnitID = -1;
+	int  ownerTeam   = 255;
+	bool friendlyFire = false;
+	if (lua_istable(L, 6)) {
+		lua_getfield(L, 6, "ownerUnitID");
+		ownerUnitID = luaL_optint(L, -1, -1);
+		lua_pop(L, 1);
+		lua_getfield(L, 6, "ownerTeam");
+		ownerTeam = luaL_optint(L, -1, 255);
+		lua_pop(L, 1);
+		lua_getfield(L, 6, "friendlyFire");
+		friendlyFire = lua_toboolean(L, -1);
+		lua_pop(L, 1);
+	}
+
+	// If an owner unit was given but no explicit team, inherit its team.
+	if (ownerUnitID >= 0 && ownerTeam == 255) {
+		const CUnit* ou = unitHandler.GetUnit(ownerUnitID);
+		if (ou != nullptr)
+			ownerTeam = ou->team;
+	}
+
+	const uint32_t id = damageFieldManager.Create(
+		shape, float3(cx, cy, cz), radius, halfZ,
+		weaponDefID, intensity, cadence, duration,
+		ownerUnitID, ownerTeam, friendlyFire, gs->frameNum);
+
+	if (id == 0) {
+		lua_pushnil(L);
+		return 1;
+	}
+	lua_pushnumber(L, id);
+	return 1;
+}
+
+/*** Remove a damage field early.
+ *
+ * @function Spring.RemoveDamageField
+ * @number fieldId
+ * @number[opt] team  owner team (defaults to any / engine bypass)
+ * @treturn boolean true on success, false on id mismatch / cross-team attempt
+ */
+int LuaSyncedCtrl::RemoveDamageField(lua_State* L)
+{
+	const uint32_t fieldId = static_cast<uint32_t>(luaL_checkint(L, 1));
+	const int team = luaL_optint(L, 2, -1);
+	lua_pushboolean(L, damageFieldManager.Remove(fieldId, team));
 	return 1;
 }
 

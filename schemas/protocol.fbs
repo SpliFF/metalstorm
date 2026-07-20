@@ -612,6 +612,39 @@ table VolleyOutcome {
     attacker_posture: uint8 = 0;
 }
 
+/// Metalstorm damage-field lifecycle (Model 3 — area bombardment, C6,
+/// PLAN-metalstorm-combat-resolution.md §4). A field is an area that applies
+/// `intensity` damage/sec on a fixed cadence for `duration` frames. The SIM
+/// owns all damage (units inside take it via DoDamage). The client receives
+/// only these Created/Removed lifecycle events and INVENTS the barrage FX
+/// (procedural shell arcs + impacts scattered in the area at the given
+/// cadence) — no per-shell wire traffic. Visibility-filtered per session in
+/// StateStreamer::BroadcastCombatEvents by area overlap with the viewer's
+/// known space (own-team fields always shown).
+enum DamageFieldEventKind : uint8 {
+    Created = 0,   // a field appeared — start inventing barrage FX
+    Removed = 1,   // field expired or was cancelled — stop the FX
+}
+
+enum DamageFieldShape : uint8 {
+    Circle = 0,    // center + radius
+    Rect = 1,      // center + (half_x, half_z) axis-aligned box
+}
+
+table DamageFieldEvent {
+    field_id: uint32;
+    kind: DamageFieldEventKind;
+    shape: DamageFieldShape;
+    center: Vec3;               // field center (y = ground sample at create)
+    radius: float;             // circle radius, or rect half-extent along x
+    half_z: float = 0;         // rect half-extent along z (0 for a circle)
+    weapon_def_id: uint16;     // for FX flavour (CEG lookup); 0 = generic
+    intensity: float;          // damage/sec — client scales impact density
+    cadence: uint16 = 15;      // frames between damage ticks (FX pulse rate)
+    duration: uint32;          // remaining frames at creation (0 on Removed)
+    team: uint8 = 255;         // owner team (FX tint); 255 = neutral/none
+}
+
 table GameEvent {
     topic: string;
     frame: uint32;
@@ -807,6 +840,11 @@ table GameEventBatch {
     /// use the projectile path); populated only when statistical weapons fire.
     /// See VolleyOutcome. Appended last for FlatBuffers field-id stability.
     volley_outcomes: [VolleyOutcome];
+    /// Metalstorm damage-field lifecycle events (Model 3, C6). Empty for
+    /// ported games; populated only when a game creates/expires a barrage
+    /// field. Appended last for FlatBuffers field-id stability. See
+    /// DamageFieldEvent.
+    damage_fields: [DamageFieldEvent];
 }
 
 table ResourceUpdate {

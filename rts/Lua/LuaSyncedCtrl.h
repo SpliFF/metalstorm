@@ -281,6 +281,8 @@ class LuaSyncedCtrl
 		static int CreateStandingOrder(lua_State* L);
 		static int UpdateStandingOrder(lua_State* L);
 		static int RemoveStandingOrder(lua_State* L);
+		static int CreateDamageField(lua_State* L);
+		static int RemoveDamageField(lua_State* L);
 		static int GetStandingOrders(lua_State* L);
 };
 

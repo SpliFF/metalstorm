@@ -8,6 +8,7 @@
 #include "PieceStateSerializer.h"
 #include "BuildActivitySerializer.h"
 #include "CombatEventCollector.h"
+#include "Sim/Weapons/DamageField.h"
 #include "GameOverState.h"
 #include "DecalEventCollector.h"
 #include "ServerDecalHandler.h"
@@ -538,6 +539,7 @@ void StateStreamer::BroadcastCombatEvents(int) {
     auto projDrain = projectileEvents.Drain();
     auto soundDrain = soundEvents.Drain();
     auto volleyDrain = volleyOutcomes.Drain();
+    auto fieldDrain = damageFieldManager.DrainEvents();
     auto seismicDrain = intelEvents != nullptr
         ? intelEvents->DrainSeismicPings()
         : std::vector<SeismicPingData>{};
@@ -547,6 +549,7 @@ void StateStreamer::BroadcastCombatEvents(int) {
         || !projDrain.trajectories.empty()
         || !soundDrain.empty()
         || !volleyDrain.empty()
+        || !fieldDrain.empty()
         || !seismicDrain.empty();
     if (hasAny && rtcServer.GetClientCount() > 0) {
         const uint32_t frameNo = static_cast<uint32_t>(sim.GetFrameNum());
@@ -680,15 +683,28 @@ void StateStreamer::BroadcastCombatEvents(int) {
                 visibleVolleys.push_back(masked);
             }
 
+            // Damage-field lifecycle (Model 3, C6). Sent when the field area
+            // overlaps the viewer's known space (center in LOS/radar), or the
+            // field is the viewer's own — so a player always sees their own
+            // barrage FX. Spectators see all. Removed events are forwarded to
+            // any session that could have seen the Created (same predicate)
+            // so stale barrage FX always gets torn down.
+            std::vector<DamageFieldEventData> visibleFields;
+            visibleFields.reserve(fieldDrain.size());
+            for (const auto& f : fieldDrain) {
+                if (viewerAllyTeam < 0 || teamFriendly(f.team) || posVisible(f.center))
+                    visibleFields.push_back(f);
+            }
+
             if (visibleCombat.empty() && fired.empty()
                 && impacts.empty() && trajectories.empty()
                 && visibleSounds.empty() && visiblePings.empty()
-                && visibleVolleys.empty())
+                && visibleVolleys.empty() && visibleFields.empty())
                 return;
 
             auto batch = Protocol::BuildCombatEventBatch(
                 frameNo, visibleCombat, fired, impacts, trajectories,
-                visibleSounds, visiblePings, visibleVolleys);
+                visibleSounds, visiblePings, visibleVolleys, visibleFields);
             rtcServer.SendReliable(clientId, batch.data(), batch.size());
         });
     }

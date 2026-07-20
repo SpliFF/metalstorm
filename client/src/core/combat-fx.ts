@@ -19,7 +19,7 @@ import {
     Color3,
     Vector3,
 } from '@babylonjs/core';
-import type { CombatEventInfo, ProjectileImpactInfo, VolleyOutcomeInfo } from './connection.js';
+import type { CombatEventInfo, ProjectileImpactInfo, VolleyOutcomeInfo, DamageFieldEventInfo } from './connection.js';
 import { AudioManager } from './audio.js';
 import type { CegRuntime } from './ceg-runtime.js';
 import type { DefCache } from './def-cache.js';
@@ -43,6 +43,16 @@ interface ActiveEffect {
 /// when the attacker id is unknown/hidden.
 export type PositionResolver = (entityId: number) => { x: number; y: number; z: number } | null;
 
+/// A live damage-field barrage the client is rendering procedurally (Model 3,
+/// C6). The server streams only Created/Removed lifecycle events; this holds
+/// the between-pulse timer + remaining lifetime so tick() can invent shell
+/// impacts at the field's cadence without any per-shell wire traffic.
+interface ActiveBarrage {
+    field: DamageFieldEventInfo;
+    pulseTimer: number;   // seconds until the next barrage pulse
+    remaining: number;    // seconds of lifetime left (from duration)
+}
+
 export class CombatFX {
     private scene: Scene;
     private audio: AudioManager | null;
@@ -50,6 +60,8 @@ export class CombatFX {
     private defCache: DefCache | null;
     private distortion: DistortionRenderer | null = null;
     private effects: ActiveEffect[] = [];
+    /// Active damage-field barrages keyed by server field id.
+    private barrages = new Map<number, ActiveBarrage>();
 
     // Procedural fallback materials. Used only when CEG dispatch
     // can't resolve a name for the weapon def — keeps something on
@@ -225,6 +237,94 @@ export class CombatFX {
         }
     }
 
+    /**
+     * Damage-field lifecycle events (Metalstorm Model 3 area bombardment, C6).
+     * The server owns all damage and streams only Created/Removed events; the
+     * client invents the barrage entirely — periodic shell impacts scattered
+     * across the field area at the field's cadence, for its duration. A
+     * `Created` starts a barrage; `Removed` (or the duration running out)
+     * stops it. No per-shell wire traffic exists (§5 sim/client split).
+     */
+    onDamageFields(events: DamageFieldEventInfo[]): void {
+        for (const e of events) {
+            if (e.kind === 1) {              // Removed
+                this.barrages.delete(e.fieldId);
+                continue;
+            }
+            // Created (or a refresh) — (re)start the barrage. First pulse fires
+            // one cadence in, matching the sim's first damage tick.
+            const cadenceSec = Math.max(e.cadence, 1) / 30;
+            this.barrages.set(e.fieldId, {
+                field: e,
+                pulseTimer: cadenceSec,
+                remaining: Math.max(e.duration, 0) / 30,
+            });
+        }
+    }
+
+    /// Advance every active barrage: fire a pulse each cadence, expire when
+    /// the duration runs out. Called from tick() each frame.
+    private tickBarrages(dt: number): void {
+        if (this.barrages.size === 0) return;
+        for (const [id, b] of this.barrages) {
+            b.remaining -= dt;
+            if (b.remaining <= 0) {
+                this.barrages.delete(id);
+                continue;
+            }
+            b.pulseTimer -= dt;
+            if (b.pulseTimer <= 0) {
+                const cadenceSec = Math.max(b.field.cadence, 1) / 30;
+                b.pulseTimer += cadenceSec;
+                this.spawnBarragePulse(b.field);
+            }
+        }
+    }
+
+    /// One barrage pulse: a handful of shell impacts scattered across the
+    /// field area, each preceded by a short descending streak for the arc.
+    /// Impact count scales weakly with intensity so a heavier field looks
+    /// busier, capped so a large field can't flood the FX pool.
+    private spawnBarragePulse(f: DamageFieldEventInfo): void {
+        const shells = Math.min(Math.max(1, Math.round(f.intensity / 40)), 5);
+        for (let s = 0; s < shells; s++) {
+            // Random point inside the shape (circle: rejection-free polar;
+            // rect: uniform in each half-extent).
+            let ox: number, oz: number;
+            if (f.shape === 1) {
+                ox = (Math.random() * 2 - 1) * f.radius;
+                oz = (Math.random() * 2 - 1) * f.halfZ;
+            } else {
+                const ang = Math.random() * Math.PI * 2;
+                const r = Math.sqrt(Math.random()) * f.radius;
+                ox = Math.cos(ang) * r;
+                oz = Math.sin(ang) * r;
+            }
+            const x = f.x + ox, y = f.y, z = f.z + oz;
+            // Descending shell streak (the "arc"): a thin box falling into the
+            // impact point. Cheap; disposed by the lifetime sweep in tick.
+            this.spawnBarrageShell(x, y, z);
+            // Impact: weapon CEG if the field has a weapon def, else dust.
+            if (!f.weaponDefId || !this.spawnCegImpact(
+                ImpactKind.Terrain, f.weaponDefId, x, y, z, true, f.intensity)) {
+                this.spawnFallbackDust(x, y, z);
+            }
+        }
+    }
+
+    /// A short emissive box descending toward (x,y,z) — the incoming shell
+    /// for a barrage impact. noFade so the stretched geometry isn't shrunk.
+    private spawnBarrageShell(x: number, y: number, z: number): void {
+        const mesh = MeshBuilder.CreateBox(
+            'barrageShell', { width: 0.9, height: 14, depth: 0.9 }, this.scene);
+        mesh.position.set(x, y + 40, z);
+        mesh.material = this.tracerMat;
+        this.effects.push({
+            mesh, lifetime: 0.18, noFade: true,
+            velocity: new Vector3(0, -220, 0),
+        });
+    }
+
     /// One invented tracer streak: a thin emissive box from the firer's
     /// muzzle to a lightly-scattered point near the impact. Uses noFade so
     /// the stretched geometry isn't shrunk by the uniform scale-fade in tick.
@@ -325,6 +425,8 @@ export class CombatFX {
      * @param dt Delta time in seconds
      */
     tick(dt: number): void {
+        // Advance procedural damage-field barrages (spawns their impacts).
+        this.tickBarrages(dt);
         for (let i = this.effects.length - 1; i >= 0; i--) {
             const fx = this.effects[i];
             fx.lifetime -= dt;

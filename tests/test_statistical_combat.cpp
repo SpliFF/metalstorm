@@ -265,3 +265,149 @@ TEST_SUITE("statistical-combat/perf") {
 		CHECK(nsPerVolley < 1000.0);
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Model 3 — damage fields (C6, PLAN-metalstorm-combat-resolution.md §4/§9).
+// Covers the PURE, world-decoupled halves: field geometry (Contains /
+// PerTickDamage), Create argument validation + Created/Removed wire events,
+// and the cadence/expiry scheduling of CollectDamageTicks. The DoDamage
+// application (quadfield query + friendly-fire filter) needs a live world and
+// is exercised by the integration harness, not here.
+// ---------------------------------------------------------------------------
+
+#include "Sim/Weapons/DamageField.h"
+#include "Sim/Misc/GlobalConstants.h" // GAME_SPEED
+
+TEST_SUITE("damage-field/geometry") {
+	TEST_CASE("circle Contains is a radius test on xz") {
+		DamageField f;
+		f.shape = DAMAGE_FIELD_CIRCLE;
+		f.center = float3(100.0f, 500.0f, 200.0f); // y ignored
+		f.radius = 50.0f;
+		CHECK(f.Contains(float3(100.0f, 0.0f, 200.0f)));      // center
+		CHECK(f.Contains(float3(140.0f, 999.0f, 200.0f)));    // inside, any y
+		CHECK(f.Contains(float3(150.0f, 0.0f, 200.0f)));      // on the edge
+		CHECK_FALSE(f.Contains(float3(151.0f, 0.0f, 200.0f))); // just outside
+		CHECK_FALSE(f.Contains(float3(100.0f, 0.0f, 260.0f))); // outside on z
+	}
+
+	TEST_CASE("rect Contains is an axis-aligned box on xz") {
+		DamageField f;
+		f.shape = DAMAGE_FIELD_RECT;
+		f.center = float3(0.0f, 0.0f, 0.0f);
+		f.radius = 30.0f; // half-extent x
+		f.halfZ  = 10.0f; // half-extent z
+		CHECK(f.Contains(float3(30.0f, 0.0f, 10.0f)));    // corner
+		CHECK(f.Contains(float3(-29.0f, 0.0f, -9.0f)));   // inside
+		CHECK_FALSE(f.Contains(float3(31.0f, 0.0f, 0.0f))); // past x
+		CHECK_FALSE(f.Contains(float3(0.0f, 0.0f, 11.0f))); // past z
+	}
+
+	TEST_CASE("PerTickDamage scales intensity by the cadence time slice") {
+		DamageField f;
+		f.intensity = 60.0f;         // damage/second
+		f.cadence   = GAME_SPEED;    // one full game-second per tick
+		CHECK(f.PerTickDamage() == doctest::Approx(60.0f));
+		f.cadence = GAME_SPEED / 2;  // half a second per tick
+		CHECK(f.PerTickDamage() == doctest::Approx(30.0f));
+	}
+}
+
+TEST_SUITE("damage-field/manager") {
+	TEST_CASE("Create validates arguments and emits a Created event") {
+		DamageFieldManager m;
+		m.Init();
+		// Rejections (return 0, no field, no event).
+		CHECK(m.Create(DAMAGE_FIELD_CIRCLE, float3(0,0,0), 50.0f, 0.0f, -1, 10.0f, 15, /*dur*/0, -1, 0, false, 0) == 0);
+		CHECK(m.Create(DAMAGE_FIELD_CIRCLE, float3(0,0,0), 0.0f,  0.0f, -1, 10.0f, 15, 100, -1, 0, false, 0) == 0);
+		CHECK(m.Create(DAMAGE_FIELD_CIRCLE, float3(0,0,0), 50.0f, 0.0f, -1, 0.0f,  15, 100, -1, 0, false, 0) == 0);
+		CHECK(m.FieldCount() == 0);
+		CHECK(m.DrainEvents().empty());
+
+		const uint32_t id = m.Create(DAMAGE_FIELD_CIRCLE, float3(10,20,30), 50.0f, 0.0f,
+		                             7, 40.0f, 15, /*dur*/300, -1, 2, false, /*frame*/1000);
+		CHECK(id != 0);
+		CHECK(m.FieldCount() == 1);
+		auto evs = m.DrainEvents();
+		REQUIRE(evs.size() == 1);
+		CHECK(evs[0].kind == 0);            // Created
+		CHECK(evs[0].fieldId == id);
+		CHECK(evs[0].weaponDefId == 7);
+		CHECK(evs[0].duration == 300u);     // remaining frames at create
+		CHECK(evs[0].team == 2);
+		CHECK(m.DrainEvents().empty());     // drained
+	}
+
+	TEST_CASE("ids increase monotonically") {
+		DamageFieldManager m; m.Init();
+		const uint32_t a = m.Create(DAMAGE_FIELD_CIRCLE, float3(0,0,0), 10.0f, 0.0f, -1, 5.0f, 15, 100, -1, 0, false, 0);
+		const uint32_t b = m.Create(DAMAGE_FIELD_CIRCLE, float3(0,0,0), 10.0f, 0.0f, -1, 5.0f, 15, 100, -1, 0, false, 0);
+		CHECK(b == a + 1);
+	}
+
+	TEST_CASE("CollectDamageTicks fires on cadence and stops at expiry") {
+		DamageFieldManager m; m.Init();
+		// created at frame 0, cadence 15, duration 45 → ticks at 15, 30; expires at 45.
+		const uint32_t id = m.Create(DAMAGE_FIELD_CIRCLE, float3(0,0,0), 20.0f, 0.0f,
+		                             -1, 30.0f, 15, /*dur*/45, -1, 0, false, /*frame*/0);
+		m.DrainEvents(); // discard the Created event
+
+		std::vector<uint32_t> expired;
+		CHECK(m.CollectDamageTicks(14, expired).empty());   // before first tick
+		CHECK(expired.empty());
+
+		auto t15 = m.CollectDamageTicks(15, expired);        // first tick
+		REQUIRE(t15.size() == 1);
+		CHECK(t15[0].id == id);
+		CHECK(expired.empty());
+
+		CHECK(m.CollectDamageTicks(20, expired).empty());   // between ticks
+		auto t30 = m.CollectDamageTicks(30, expired);        // second tick
+		CHECK(t30.size() == 1);
+
+		// At frame 45 the field expires: no damage tick, one expiry, a Removed
+		// event, and the field is gone.
+		auto t45 = m.CollectDamageTicks(45, expired);
+		CHECK(t45.empty());
+		REQUIRE(expired.size() == 1);
+		CHECK(expired[0] == id);
+		CHECK(m.FieldCount() == 0);
+		auto evs = m.DrainEvents();
+		REQUIRE(evs.size() == 1);
+		CHECK(evs[0].kind == 1);            // Removed
+		CHECK(evs[0].fieldId == id);
+		CHECK(evs[0].duration == 0u);
+	}
+
+	TEST_CASE("a big frame jump advances past missed ticks, applying one") {
+		DamageFieldManager m; m.Init();
+		// cadence 15, long duration; jump straight to frame 100 (missed 15..90).
+		const uint32_t id = m.Create(DAMAGE_FIELD_CIRCLE, float3(0,0,0), 20.0f, 0.0f,
+		                             -1, 30.0f, 15, /*dur*/6000, -1, 0, false, /*frame*/0);
+		m.DrainEvents();
+		std::vector<uint32_t> expired;
+		auto due = m.CollectDamageTicks(100, expired);
+		CHECK(due.size() == 1);            // one catch-up tick, not seven
+		CHECK(id == due[0].id);
+		// Next tick must be strictly after frame 100 (advanced past the jump).
+		auto again = m.CollectDamageTicks(100, expired);
+		CHECK(again.empty());
+		CHECK_FALSE(m.CollectDamageTicks(104, expired).size() > 0); // still before 105
+		CHECK(m.CollectDamageTicks(105, expired).size() == 1);      // resumes on cadence
+	}
+
+	TEST_CASE("Remove enforces owner-team and pushes a Removed event") {
+		DamageFieldManager m; m.Init();
+		const uint32_t id = m.Create(DAMAGE_FIELD_CIRCLE, float3(0,0,0), 20.0f, 0.0f,
+		                             -1, 30.0f, 15, 300, -1, /*ownerTeam*/3, false, 0);
+		m.DrainEvents();
+		CHECK_FALSE(m.Remove(id, /*team*/4)); // cross-team attempt fails
+		CHECK(m.FieldCount() == 1);
+		CHECK(m.Remove(id, /*team*/3));       // owner removes it
+		CHECK(m.FieldCount() == 0);
+		auto evs = m.DrainEvents();
+		REQUIRE(evs.size() == 1);
+		CHECK(evs[0].kind == 1);
+		CHECK(evs[0].fieldId == id);
+	}
+}

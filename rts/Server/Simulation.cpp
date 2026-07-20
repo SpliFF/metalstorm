@@ -32,6 +32,7 @@ const std::unordered_map<int, std::string>* gAITeams = nullptr;
 #include "Sim/Projectiles/ProjectileHandler.h"
 #include "Sim/Projectiles/ExplosionGenerator.h"
 #include "Sim/Weapons/StatisticalCombat.h"
+#include "Sim/Weapons/DamageField.h"
 #include "Sim/Path/IPathManager.h"
 #include "Game/GameHelper.h"
 #include "Game/Players/PlayerHandler.h"
@@ -254,6 +255,7 @@ void CSimulation::InitSubsystems(bool hasMap)
     featureHandler.Init();
     projectileHandler.Init();
     statisticalCombatManager.Init();
+    damageFieldManager.Init();
 
     // --- Map-dependent subsystems ---
     if (hasMap) {
@@ -641,6 +643,9 @@ void CSimulation::SimFrame()
     // (damage applied via DoDamage). Runs right after unitHandler.Update(),
     // where this frame's volleys were rolled + queued during weapon fire.
     statisticalCombatManager.Update(gs->frameNum);
+    // Metalstorm damage fields (Model 3, C6): expire finished fields and apply
+    // area damage for any reaching a cadence tick this frame (via DoDamage).
+    damageFieldManager.Update(gs->frameNum);
     projectileHandler.Update();
     featureHandler.Update();
 

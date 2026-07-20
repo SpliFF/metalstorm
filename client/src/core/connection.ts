@@ -26,6 +26,7 @@ import { ServerError } from '../protocol/spring-web/server-error.js';
 import { GameEventBatch } from '../protocol/spring-web/game-event-batch.js';
 import { CombatEvent } from '../protocol/spring-web/combat-event.js';
 import { VolleyOutcome } from '../protocol/spring-web/volley-outcome.js';
+import { DamageFieldEvent } from '../protocol/spring-web/damage-field-event.js';
 import { ProjectileFiredEvent } from '../protocol/spring-web/projectile-fired-event.js';
 import { ProjectileImpactEvent } from '../protocol/spring-web/projectile-impact-event.js';
 import { ProjectileTrajectoryEvent } from '../protocol/spring-web/projectile-trajectory-event.js';
@@ -155,6 +156,34 @@ export interface VolleyOutcomeInfo {
     /// derived-morale posture: 0=normal, 1=retreating, 2=panicking (only
     /// meaningful when the attacker is visible, attackerId != 0)
     attackerPosture: number;
+}
+
+/// Damage-field lifecycle event decoded from a `GameEventBatch.damage_fields`
+/// entry — Metalstorm Model 3 area bombardment (C6). The sim owns all damage;
+/// the client invents the barrage FX (procedural shell arcs + impacts
+/// scattered in the area at `cadence`) from a Created event and tears it down
+/// on Removed / duration expiry. Already visibility-filtered server-side.
+/// See DamageFieldEvent in protocol.fbs.
+export interface DamageFieldEventInfo {
+    fieldId: number;
+    /// 0 = Created (start FX), 1 = Removed (stop FX)
+    kind: number;
+    /// 0 = circle (center + radius), 1 = rect (center + radius(halfX) + halfZ)
+    shape: number;
+    x: number;
+    y: number;
+    z: number;
+    radius: number;
+    halfZ: number;
+    weaponDefId: number;
+    /// damage/sec — client scales impact density
+    intensity: number;
+    /// frames between damage ticks (FX pulse rate)
+    cadence: number;
+    /// remaining frames at creation (0 on Removed)
+    duration: number;
+    /// owner team (255 = neutral)
+    team: number;
 }
 
 /// Per-tick sound emission decoded from a `GameEventBatch.sounds` entry.
@@ -814,6 +843,10 @@ export interface ConnectionEvents {
      *  impact hint, and drops a counterbattery radar blip when
      *  `revealAttacker` is set. Empty for ported games. */
     onVolleyOutcomes?: (events: VolleyOutcomeInfo[], frame: number) => void;
+    /** Damage-field lifecycle events (Metalstorm Model 3 area bombardment,
+     *  C6). Created starts a procedural barrage; Removed / duration expiry
+     *  stops it. Empty for ported games. */
+    onDamageFields?: (events: DamageFieldEventInfo[], frame: number) => void;
     onSoundEvents?: (events: SoundEventInfo[], frame: number) => void;
     onSeismicPings?: (events: SeismicPingInfo[], frame: number) => void;
     /** Music-state transition broadcast — fires once per state change.
@@ -2153,6 +2186,35 @@ export class Connection {
                 });
             }
             this.events.onVolleyOutcomes(out, frame);
+        }
+
+        // Damage-field lifecycle (Metalstorm Model 3, C6). Created/Removed
+        // events; the client invents the barrage FX from them. Already
+        // visibility-filtered server-side (area overlap with known space).
+        const fieldCount = batch.damageFieldsLength();
+        if (fieldCount > 0 && this.events.onDamageFields) {
+            const out: DamageFieldEventInfo[] = [];
+            for (let i = 0; i < fieldCount; i++) {
+                const e = batch.damageFields(i, new DamageFieldEvent());
+                if (!e) continue;
+                const c = e.center();
+                out.push({
+                    fieldId: e.fieldId(),
+                    kind: e.kind(),
+                    shape: e.shape(),
+                    x: c ? c.x() : 0,
+                    y: c ? c.y() : 0,
+                    z: c ? c.z() : 0,
+                    radius: e.radius(),
+                    halfZ: e.halfZ(),
+                    weaponDefId: e.weaponDefId(),
+                    intensity: e.intensity(),
+                    cadence: e.cadence(),
+                    duration: e.duration(),
+                    team: e.team(),
+                });
+            }
+            this.events.onDamageFields(out, frame);
         }
 
         // Projectile lifecycle events. The renderer integrates motion
