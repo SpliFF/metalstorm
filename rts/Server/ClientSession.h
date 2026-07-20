@@ -18,6 +18,12 @@
 
 using ClientID = uint32_t;
 
+/// Spectator visibility modes (PLAN-lobby.md spectator section).
+enum class SpectatorVisibilityMode : uint8_t {
+    Global = 0,  // See everything (default for spectators)
+    Team = 1     // See one team's fog-of-war
+};
+
 /// A rectangular viewport in world space (XZ plane).
 struct Viewport {
     float centerX = 0.0f;
@@ -39,6 +45,14 @@ struct ClientSession {
     std::string role;           // "admin", "player", "spectator"
     int team = -1;              // -1 = unassigned
     uint32_t lastCommandSeq = 0;
+
+    /// Spectator visibility mode. Only meaningful when role == "spectator".
+    /// Global (default): see everything, no fog-of-war.
+    /// Team: see one team's LOS (spectatorVisibilityTeam).
+    SpectatorVisibilityMode spectatorVisibilityMode = SpectatorVisibilityMode::Global;
+    /// When spectatorVisibilityMode == Team, which team's LOS to use.
+    /// Ignored when mode == Global.
+    int spectatorVisibilityTeam = -1;
 
     /// Token-bucket rate limiting. Two buckets gate inbound commands:
     ///   - cmdMessageTokens: each PlayerCommand / PlayerCommandBatch
@@ -122,7 +136,15 @@ public:
     void AddSession(ClientID clientId, int64_t userId,
                     const std::string& username, const std::string& role) {
         std::lock_guard<std::mutex> lock(mutex);
-        sessions[clientId] = {clientId, userId, username, role, -1, 0, 0};
+        ClientSession session;
+        session.clientId = clientId;
+        session.userId = userId;
+        session.username = username;
+        session.role = role;
+        session.team = -1;
+        session.lastCommandSeq = 0;
+        // spectatorVisibilityMode and spectatorVisibilityTeam use default initializers
+        sessions[clientId] = session;
     }
 
     /// Remove a client session (on disconnect).

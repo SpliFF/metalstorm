@@ -202,7 +202,8 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                     auto resp = Protocol::BuildAuthResponse(
                         SpringWeb::AuthStatus_OK, auth->token()->str(),
                         static_cast<uint32_t>(userId), "",
-                        static_cast<int8_t>(team), defsCacheKey);
+                        static_cast<int8_t>(team), reconnectUser->role,
+                        defsCacheKey);
                     rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
                     // Register the session — previously the
                     // token path skipped this, which meant a
@@ -341,7 +342,7 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             auto resp = Protocol::BuildAuthResponse(
                 SpringWeb::AuthStatus_OK, token,
                 static_cast<uint32_t>(user->id), "",
-                static_cast<int8_t>(team), defsCacheKey);
+                static_cast<int8_t>(team), user->role, defsCacheKey);
             rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
             sessions.AddSession(msg.clientId, user->id, user->username, user->role);
             if (auto* s = sessions.GetSession(msg.clientId))

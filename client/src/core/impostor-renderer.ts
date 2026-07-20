@@ -145,7 +145,7 @@ export class ImpostorRenderer {
     }
 
     /** Add one impostor instance to the pending batch (called per visible entity). */
-    addInstance(defId: number, team: number, snapshot: EntityStateSnapshot, heading: number): void {
+    addInstance(defId: number, team: number, x: number, y: number, z: number, heading: number): void {
         const key = `impostor:${defId}:${team}`;
         let batch = this.pendingInstances.get(key);
         if (!batch) {
@@ -160,9 +160,9 @@ export class ImpostorRenderer {
         const animFrame = 0;
 
         batch.push({
-            x: snapshot.x,
-            y: snapshot.y,
-            z: snapshot.z,
+            x,
+            y,
+            z,
             heading,
             animFrame,
             team,

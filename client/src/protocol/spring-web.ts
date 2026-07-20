@@ -92,6 +92,7 @@ export { RoomAddAI, RoomAddAIT } from './spring-web/room-add-ai.js';
 export { RoomCloseRoom, RoomCloseRoomT } from './spring-web/room-close-room.js';
 export { RoomCreate, RoomCreateT } from './spring-web/room-create.js';
 export { RoomEndGame, RoomEndGameT } from './spring-web/room-end-game.js';
+export { RoomEnlist, RoomEnlistT } from './spring-web/room-enlist.js';
 export { RoomJoin, RoomJoinT } from './spring-web/room-join.js';
 export { RoomKick, RoomKickT } from './spring-web/room-kick.js';
 export { RoomLeave, RoomLeaveT } from './spring-web/room-leave.js';

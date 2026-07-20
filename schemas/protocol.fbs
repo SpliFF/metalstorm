@@ -442,6 +442,16 @@ table RoomJoin {
 
 table RoomLeave {}
 
+/// Convert from spectator to active player. Spectators can send this
+/// to request joining the game as a rostered player (assigned to a team).
+/// If the room is full (non-spectator player count >= maxPlayers), the
+/// request is rejected. If accepted, the spectator transitions to a
+/// player with team assignment (auto-assigned or specified by team field),
+/// and the room broadcasts the state change via RoomStateUpdate.
+table RoomEnlist {
+    team: uint8 = 255;      // 255 = auto-assign next available team
+}
+
 table RoomTeamSelect {
     team: uint8;
 }
@@ -608,6 +618,7 @@ union ClientPayload {
     RoomCreate,
     RoomJoin,
     RoomLeave,
+    RoomEnlist,
     RoomTeamSelect,
     RoomReady,
     RoomKick,
@@ -660,6 +671,9 @@ table AuthResponse {
     /// spectator. The client stores this so it can scope unit
     /// rendering, command validation, and UI chrome to "my team".
     team: int8 = -1;
+    /// Role: "admin", "player", or "spectator". Used by the client to
+    /// show/hide command UI and display the Enlist button for spectators.
+    role: string;
     /// Cache key for this game's UnitDefs/WeaponDefs FlatBuffer
     /// payloads. Hash of (gameId, version, modOptions). Client uses
     /// it to construct the fetch URL:

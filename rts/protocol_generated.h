@@ -129,6 +129,10 @@ struct RoomLeave;
 struct RoomLeaveBuilder;
 struct RoomLeaveT;
 
+struct RoomEnlist;
+struct RoomEnlistBuilder;
+struct RoomEnlistT;
+
 struct RoomTeamSelect;
 struct RoomTeamSelectBuilder;
 struct RoomTeamSelectT;
@@ -808,43 +812,44 @@ enum ClientPayload : uint8_t {
   ClientPayload_RoomCreate = 9,
   ClientPayload_RoomJoin = 10,
   ClientPayload_RoomLeave = 11,
-  ClientPayload_RoomTeamSelect = 12,
-  ClientPayload_RoomReady = 13,
-  ClientPayload_RoomKick = 14,
-  ClientPayload_RoomStartGame = 15,
-  ClientPayload_RoomEndGame = 16,
-  ClientPayload_RoomAddAI = 17,
-  ClientPayload_RoomRemoveAI = 18,
-  ClientPayload_AIListRequest = 19,
-  ClientPayload_GameListRequest = 20,
-  ClientPayload_RoomSetStartPos = 21,
-  ClientPayload_RoomCloseRoom = 22,
-  ClientPayload_RoomSetAITeam = 23,
-  ClientPayload_LogIngest = 24,
-  ClientPayload_LogSubscribe = 25,
-  ClientPayload_LogUnsubscribe = 26,
-  ClientPayload_ConsoleCommand = 27,
-  ClientPayload_LuaRulesMsg = 28,
-  ClientPayload_PlayerCommandBatch = 29,
-  ClientPayload_SelectionState = 30,
-  ClientPayload_PathRequest = 31,
-  ClientPayload_PathRequestCancel = 32,
-  ClientPayload_StandingOrderCreate = 33,
-  ClientPayload_StandingOrderUpdate = 34,
-  ClientPayload_StandingOrderRemove = 35,
-  ClientPayload_LuaUIMsg = 36,
-  ClientPayload_PlayerLeaveIntent = 37,
-  ClientPayload_OrgGroupCreate = 38,
-  ClientPayload_OrgGroupUpdate = 39,
-  ClientPayload_OrgGroupDisband = 40,
-  ClientPayload_GroupDirective = 41,
-  ClientPayload_GroupDirectiveRemove = 42,
-  ClientPayload_GroupPosture = 43,
+  ClientPayload_RoomEnlist = 12,
+  ClientPayload_RoomTeamSelect = 13,
+  ClientPayload_RoomReady = 14,
+  ClientPayload_RoomKick = 15,
+  ClientPayload_RoomStartGame = 16,
+  ClientPayload_RoomEndGame = 17,
+  ClientPayload_RoomAddAI = 18,
+  ClientPayload_RoomRemoveAI = 19,
+  ClientPayload_AIListRequest = 20,
+  ClientPayload_GameListRequest = 21,
+  ClientPayload_RoomSetStartPos = 22,
+  ClientPayload_RoomCloseRoom = 23,
+  ClientPayload_RoomSetAITeam = 24,
+  ClientPayload_LogIngest = 25,
+  ClientPayload_LogSubscribe = 26,
+  ClientPayload_LogUnsubscribe = 27,
+  ClientPayload_ConsoleCommand = 28,
+  ClientPayload_LuaRulesMsg = 29,
+  ClientPayload_PlayerCommandBatch = 30,
+  ClientPayload_SelectionState = 31,
+  ClientPayload_PathRequest = 32,
+  ClientPayload_PathRequestCancel = 33,
+  ClientPayload_StandingOrderCreate = 34,
+  ClientPayload_StandingOrderUpdate = 35,
+  ClientPayload_StandingOrderRemove = 36,
+  ClientPayload_LuaUIMsg = 37,
+  ClientPayload_PlayerLeaveIntent = 38,
+  ClientPayload_OrgGroupCreate = 39,
+  ClientPayload_OrgGroupUpdate = 40,
+  ClientPayload_OrgGroupDisband = 41,
+  ClientPayload_GroupDirective = 42,
+  ClientPayload_GroupDirectiveRemove = 43,
+  ClientPayload_GroupPosture = 44,
   ClientPayload_MIN = ClientPayload_NONE,
   ClientPayload_MAX = ClientPayload_GroupPosture
 };
 
-inline const ClientPayload (&EnumValuesClientPayload())[44] {
+inline const ClientPayload (&EnumValuesClientPayload())[45] {
   static const ClientPayload values[] = {
     ClientPayload_NONE,
     ClientPayload_Handshake,
@@ -858,6 +863,7 @@ inline const ClientPayload (&EnumValuesClientPayload())[44] {
     ClientPayload_RoomCreate,
     ClientPayload_RoomJoin,
     ClientPayload_RoomLeave,
+    ClientPayload_RoomEnlist,
     ClientPayload_RoomTeamSelect,
     ClientPayload_RoomReady,
     ClientPayload_RoomKick,
@@ -895,7 +901,7 @@ inline const ClientPayload (&EnumValuesClientPayload())[44] {
 }
 
 inline const char * const *EnumNamesClientPayload() {
-  static const char * const names[45] = {
+  static const char * const names[46] = {
     "NONE",
     "Handshake",
     "AuthRequest",
@@ -908,6 +914,7 @@ inline const char * const *EnumNamesClientPayload() {
     "RoomCreate",
     "RoomJoin",
     "RoomLeave",
+    "RoomEnlist",
     "RoomTeamSelect",
     "RoomReady",
     "RoomKick",
@@ -997,6 +1004,10 @@ template<> struct ClientPayloadTraits<SpringWeb::RoomJoin> {
 
 template<> struct ClientPayloadTraits<SpringWeb::RoomLeave> {
   static const ClientPayload enum_value = ClientPayload_RoomLeave;
+};
+
+template<> struct ClientPayloadTraits<SpringWeb::RoomEnlist> {
+  static const ClientPayload enum_value = ClientPayload_RoomEnlist;
 };
 
 template<> struct ClientPayloadTraits<SpringWeb::RoomTeamSelect> {
@@ -1173,6 +1184,10 @@ template<> struct ClientPayloadUnionTraits<SpringWeb::RoomJoinT> {
 
 template<> struct ClientPayloadUnionTraits<SpringWeb::RoomLeaveT> {
   static const ClientPayload enum_value = ClientPayload_RoomLeave;
+};
+
+template<> struct ClientPayloadUnionTraits<SpringWeb::RoomEnlistT> {
+  static const ClientPayload enum_value = ClientPayload_RoomEnlist;
 };
 
 template<> struct ClientPayloadUnionTraits<SpringWeb::RoomTeamSelectT> {
@@ -1420,6 +1435,14 @@ struct ClientPayloadUnion {
   const SpringWeb::RoomLeaveT *AsRoomLeave() const {
     return type == ClientPayload_RoomLeave ?
       reinterpret_cast<const SpringWeb::RoomLeaveT *>(value) : nullptr;
+  }
+  SpringWeb::RoomEnlistT *AsRoomEnlist() {
+    return type == ClientPayload_RoomEnlist ?
+      reinterpret_cast<SpringWeb::RoomEnlistT *>(value) : nullptr;
+  }
+  const SpringWeb::RoomEnlistT *AsRoomEnlist() const {
+    return type == ClientPayload_RoomEnlist ?
+      reinterpret_cast<const SpringWeb::RoomEnlistT *>(value) : nullptr;
   }
   SpringWeb::RoomTeamSelectT *AsRoomTeamSelect() {
     return type == ClientPayload_RoomTeamSelect ?
@@ -6254,6 +6277,64 @@ inline ::flatbuffers::Offset<RoomLeave> CreateRoomLeave(
 
 ::flatbuffers::Offset<RoomLeave> CreateRoomLeave(::flatbuffers::FlatBufferBuilder &_fbb, const RoomLeaveT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 
+struct RoomEnlistT : public ::flatbuffers::NativeTable {
+  typedef RoomEnlist TableType;
+  uint8_t team = 255;
+};
+
+/// Convert from spectator to active player. Spectators can send this
+/// to request joining the game as a rostered player (assigned to a team).
+/// If the room is full (non-spectator player count >= maxPlayers), the
+/// request is rejected. If accepted, the spectator transitions to a
+/// player with team assignment (auto-assigned or specified by team field),
+/// and the room broadcasts the state change via RoomStateUpdate.
+struct RoomEnlist FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef RoomEnlistT NativeTableType;
+  typedef RoomEnlistBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_TEAM = 4
+  };
+  uint8_t team() const {
+    return GetField<uint8_t>(VT_TEAM, 255);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<uint8_t>(verifier, VT_TEAM, 1) &&
+           verifier.EndTable();
+  }
+  RoomEnlistT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(RoomEnlistT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<RoomEnlist> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomEnlistT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct RoomEnlistBuilder {
+  typedef RoomEnlist Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_team(uint8_t team) {
+    fbb_.AddElement<uint8_t>(RoomEnlist::VT_TEAM, team, 255);
+  }
+  explicit RoomEnlistBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<RoomEnlist> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<RoomEnlist>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<RoomEnlist> CreateRoomEnlist(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint8_t team = 255) {
+  RoomEnlistBuilder builder_(_fbb);
+  builder_.add_team(team);
+  return builder_.Finish();
+}
+
+::flatbuffers::Offset<RoomEnlist> CreateRoomEnlist(::flatbuffers::FlatBufferBuilder &_fbb, const RoomEnlistT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
 struct RoomTeamSelectT : public ::flatbuffers::NativeTable {
   typedef RoomTeamSelect TableType;
   uint8_t team = 0;
@@ -7735,6 +7816,9 @@ struct ClientMessage FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const SpringWeb::RoomLeave *payload_as_RoomLeave() const {
     return payload_type() == SpringWeb::ClientPayload_RoomLeave ? static_cast<const SpringWeb::RoomLeave *>(payload()) : nullptr;
   }
+  const SpringWeb::RoomEnlist *payload_as_RoomEnlist() const {
+    return payload_type() == SpringWeb::ClientPayload_RoomEnlist ? static_cast<const SpringWeb::RoomEnlist *>(payload()) : nullptr;
+  }
   const SpringWeb::RoomTeamSelect *payload_as_RoomTeamSelect() const {
     return payload_type() == SpringWeb::ClientPayload_RoomTeamSelect ? static_cast<const SpringWeb::RoomTeamSelect *>(payload()) : nullptr;
   }
@@ -7885,6 +7969,10 @@ template<> inline const SpringWeb::RoomJoin *ClientMessage::payload_as<SpringWeb
 
 template<> inline const SpringWeb::RoomLeave *ClientMessage::payload_as<SpringWeb::RoomLeave>() const {
   return payload_as_RoomLeave();
+}
+
+template<> inline const SpringWeb::RoomEnlist *ClientMessage::payload_as<SpringWeb::RoomEnlist>() const {
+  return payload_as_RoomEnlist();
 }
 
 template<> inline const SpringWeb::RoomTeamSelect *ClientMessage::payload_as<SpringWeb::RoomTeamSelect>() const {
@@ -8055,6 +8143,7 @@ struct AuthResponseT : public ::flatbuffers::NativeTable {
   uint32_t player_id = 0;
   std::string message{};
   int8_t team = -1;
+  std::string role{};
   std::string defs_cache_key{};
 };
 
@@ -8067,7 +8156,8 @@ struct AuthResponse FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_PLAYER_ID = 8,
     VT_MESSAGE = 10,
     VT_TEAM = 12,
-    VT_DEFS_CACHE_KEY = 14
+    VT_ROLE = 14,
+    VT_DEFS_CACHE_KEY = 16
   };
   SpringWeb::AuthStatus status() const {
     return static_cast<SpringWeb::AuthStatus>(GetField<uint8_t>(VT_STATUS, 0));
@@ -8087,6 +8177,11 @@ struct AuthResponse FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   /// rendering, command validation, and UI chrome to "my team".
   int8_t team() const {
     return GetField<int8_t>(VT_TEAM, -1);
+  }
+  /// Role: "admin", "player", or "spectator". Used by the client to
+  /// show/hide command UI and display the Enlist button for spectators.
+  const ::flatbuffers::String *role() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_ROLE);
   }
   /// Cache key for this game's UnitDefs/WeaponDefs FlatBuffer
   /// payloads. Hash of (gameId, version, modOptions). Client uses
@@ -8108,6 +8203,8 @@ struct AuthResponse FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyOffset(verifier, VT_MESSAGE) &&
            verifier.VerifyString(message()) &&
            VerifyField<int8_t>(verifier, VT_TEAM, 1) &&
+           VerifyOffset(verifier, VT_ROLE) &&
+           verifier.VerifyString(role()) &&
            VerifyOffset(verifier, VT_DEFS_CACHE_KEY) &&
            verifier.VerifyString(defs_cache_key()) &&
            verifier.EndTable();
@@ -8136,6 +8233,9 @@ struct AuthResponseBuilder {
   void add_team(int8_t team) {
     fbb_.AddElement<int8_t>(AuthResponse::VT_TEAM, team, -1);
   }
+  void add_role(::flatbuffers::Offset<::flatbuffers::String> role) {
+    fbb_.AddOffset(AuthResponse::VT_ROLE, role);
+  }
   void add_defs_cache_key(::flatbuffers::Offset<::flatbuffers::String> defs_cache_key) {
     fbb_.AddOffset(AuthResponse::VT_DEFS_CACHE_KEY, defs_cache_key);
   }
@@ -8157,9 +8257,11 @@ inline ::flatbuffers::Offset<AuthResponse> CreateAuthResponse(
     uint32_t player_id = 0,
     ::flatbuffers::Offset<::flatbuffers::String> message = 0,
     int8_t team = -1,
+    ::flatbuffers::Offset<::flatbuffers::String> role = 0,
     ::flatbuffers::Offset<::flatbuffers::String> defs_cache_key = 0) {
   AuthResponseBuilder builder_(_fbb);
   builder_.add_defs_cache_key(defs_cache_key);
+  builder_.add_role(role);
   builder_.add_message(message);
   builder_.add_player_id(player_id);
   builder_.add_token(token);
@@ -8175,9 +8277,11 @@ inline ::flatbuffers::Offset<AuthResponse> CreateAuthResponseDirect(
     uint32_t player_id = 0,
     const char *message = nullptr,
     int8_t team = -1,
+    const char *role = nullptr,
     const char *defs_cache_key = nullptr) {
   auto token__ = token ? _fbb.CreateString(token) : 0;
   auto message__ = message ? _fbb.CreateString(message) : 0;
+  auto role__ = role ? _fbb.CreateString(role) : 0;
   auto defs_cache_key__ = defs_cache_key ? _fbb.CreateString(defs_cache_key) : 0;
   return SpringWeb::CreateAuthResponse(
       _fbb,
@@ -8186,6 +8290,7 @@ inline ::flatbuffers::Offset<AuthResponse> CreateAuthResponseDirect(
       player_id,
       message__,
       team,
+      role__,
       defs_cache_key__);
 }
 
@@ -19063,6 +19168,32 @@ inline ::flatbuffers::Offset<RoomLeave> CreateRoomLeave(::flatbuffers::FlatBuffe
       _fbb);
 }
 
+inline RoomEnlistT *RoomEnlist::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<RoomEnlistT>(new RoomEnlistT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void RoomEnlist::UnPackTo(RoomEnlistT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = team(); _o->team = _e; }
+}
+
+inline ::flatbuffers::Offset<RoomEnlist> RoomEnlist::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomEnlistT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return CreateRoomEnlist(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<RoomEnlist> CreateRoomEnlist(::flatbuffers::FlatBufferBuilder &_fbb, const RoomEnlistT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const RoomEnlistT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _team = _o->team;
+  return SpringWeb::CreateRoomEnlist(
+      _fbb,
+      _team);
+}
+
 inline RoomTeamSelectT *RoomTeamSelect::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
   auto _o = std::unique_ptr<RoomTeamSelectT>(new RoomTeamSelectT());
   UnPackTo(_o.get(), _resolver);
@@ -19721,6 +19852,7 @@ inline void AuthResponse::UnPackTo(AuthResponseT *_o, const ::flatbuffers::resol
   { auto _e = player_id(); _o->player_id = _e; }
   { auto _e = message(); if (_e) _o->message = _e->str(); }
   { auto _e = team(); _o->team = _e; }
+  { auto _e = role(); if (_e) _o->role = _e->str(); }
   { auto _e = defs_cache_key(); if (_e) _o->defs_cache_key = _e->str(); }
 }
 
@@ -19737,6 +19869,7 @@ inline ::flatbuffers::Offset<AuthResponse> CreateAuthResponse(::flatbuffers::Fla
   auto _player_id = _o->player_id;
   auto _message = _o->message.empty() ? 0 : _fbb.CreateString(_o->message);
   auto _team = _o->team;
+  auto _role = _o->role.empty() ? 0 : _fbb.CreateString(_o->role);
   auto _defs_cache_key = _o->defs_cache_key.empty() ? 0 : _fbb.CreateString(_o->defs_cache_key);
   return SpringWeb::CreateAuthResponse(
       _fbb,
@@ -19745,6 +19878,7 @@ inline ::flatbuffers::Offset<AuthResponse> CreateAuthResponse(::flatbuffers::Fla
       _player_id,
       _message,
       _team,
+      _role,
       _defs_cache_key);
 }
 
@@ -23505,6 +23639,10 @@ inline bool VerifyClientPayload(::flatbuffers::Verifier &verifier, const void *o
       auto ptr = reinterpret_cast<const SpringWeb::RoomLeave *>(obj);
       return verifier.VerifyTable(ptr);
     }
+    case ClientPayload_RoomEnlist: {
+      auto ptr = reinterpret_cast<const SpringWeb::RoomEnlist *>(obj);
+      return verifier.VerifyTable(ptr);
+    }
     case ClientPayload_RoomTeamSelect: {
       auto ptr = reinterpret_cast<const SpringWeb::RoomTeamSelect *>(obj);
       return verifier.VerifyTable(ptr);
@@ -23696,6 +23834,10 @@ inline void *ClientPayloadUnion::UnPack(const void *obj, ClientPayload type, con
       auto ptr = reinterpret_cast<const SpringWeb::RoomLeave *>(obj);
       return ptr->UnPack(resolver);
     }
+    case ClientPayload_RoomEnlist: {
+      auto ptr = reinterpret_cast<const SpringWeb::RoomEnlist *>(obj);
+      return ptr->UnPack(resolver);
+    }
     case ClientPayload_RoomTeamSelect: {
       auto ptr = reinterpret_cast<const SpringWeb::RoomTeamSelect *>(obj);
       return ptr->UnPack(resolver);
@@ -23875,6 +24017,10 @@ inline ::flatbuffers::Offset<void> ClientPayloadUnion::Pack(::flatbuffers::FlatB
       auto ptr = reinterpret_cast<const SpringWeb::RoomLeaveT *>(value);
       return CreateRoomLeave(_fbb, ptr, _rehasher).Union();
     }
+    case ClientPayload_RoomEnlist: {
+      auto ptr = reinterpret_cast<const SpringWeb::RoomEnlistT *>(value);
+      return CreateRoomEnlist(_fbb, ptr, _rehasher).Union();
+    }
     case ClientPayload_RoomTeamSelect: {
       auto ptr = reinterpret_cast<const SpringWeb::RoomTeamSelectT *>(value);
       return CreateRoomTeamSelect(_fbb, ptr, _rehasher).Union();
@@ -24051,6 +24197,10 @@ inline ClientPayloadUnion::ClientPayloadUnion(const ClientPayloadUnion &u) : typ
     }
     case ClientPayload_RoomLeave: {
       value = new SpringWeb::RoomLeaveT(*reinterpret_cast<SpringWeb::RoomLeaveT *>(u.value));
+      break;
+    }
+    case ClientPayload_RoomEnlist: {
+      value = new SpringWeb::RoomEnlistT(*reinterpret_cast<SpringWeb::RoomEnlistT *>(u.value));
       break;
     }
     case ClientPayload_RoomTeamSelect: {
@@ -24240,6 +24390,11 @@ inline void ClientPayloadUnion::Reset() {
     }
     case ClientPayload_RoomLeave: {
       auto ptr = reinterpret_cast<SpringWeb::RoomLeaveT *>(value);
+      delete ptr;
+      break;
+    }
+    case ClientPayload_RoomEnlist: {
+      auto ptr = reinterpret_cast<SpringWeb::RoomEnlistT *>(value);
       delete ptr;
       break;
     }

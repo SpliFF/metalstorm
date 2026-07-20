@@ -1890,8 +1890,9 @@ int main(int argc, char* argv[])
             ? (uint32_t)std::atoi(j["room_id"].get<std::string>().c_str())
             : (uint32_t)j.value("room_id", 0);
         std::string password = j.value("password", "");
+        bool asSpectator = j.value("as_spectator", false);
 
-        if (!rooms.JoinRoom(roomId, static_cast<uint32_t>(userId), 0, user->username, password))
+        if (!rooms.JoinRoom(roomId, static_cast<uint32_t>(userId), 0, user->username, password, asSpectator))
             return HttpAuth::JsonResponse(403, R"({"error":"cannot join room"})");
 
         broadcastRooms();

@@ -354,9 +354,19 @@ void StateStreamer::StreamEntityState(int) {
             // Map session->team to its ally team so the
             // visibility filter can skip enemy units that
             // aren't in this ally team's LOS.
+            // Spectators: Global mode sees everything (-1),
+            // Team mode sees spectatorVisibilityTeam's LOS.
             int viewerAllyTeam = -1;
-            if (session.team >= 0 && teamHandler.IsValidTeam(session.team))
+            if (session.role == "spectator") {
+                if (session.spectatorVisibilityMode == SpectatorVisibilityMode::Team
+                    && session.spectatorVisibilityTeam >= 0
+                    && teamHandler.IsValidTeam(session.spectatorVisibilityTeam)) {
+                    viewerAllyTeam = teamHandler.AllyTeam(session.spectatorVisibilityTeam);
+                }
+                // else: Global mode or invalid team → viewerAllyTeam = -1 (see all)
+            } else if (session.team >= 0 && teamHandler.IsValidTeam(session.team)) {
                 viewerAllyTeam = teamHandler.AllyTeam(session.team);
+            }
 
             // Collect candidate units (viewport-filtered or all)
             std::vector<CUnit*> candidates;
@@ -426,8 +436,15 @@ void StateStreamer::StreamPieceState(int) {
     if (curFrame >= 0 && (curFrame % 3) == 0 && rtcServer.GetClientCount() > 0) {
         sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
             int viewerAllyTeam = -1;
-            if (session.team >= 0 && teamHandler.IsValidTeam(session.team))
+            if (session.role == "spectator") {
+                if (session.spectatorVisibilityMode == SpectatorVisibilityMode::Team
+                    && session.spectatorVisibilityTeam >= 0
+                    && teamHandler.IsValidTeam(session.spectatorVisibilityTeam)) {
+                    viewerAllyTeam = teamHandler.AllyTeam(session.spectatorVisibilityTeam);
+                }
+            } else if (session.team >= 0 && teamHandler.IsValidTeam(session.team)) {
                 viewerAllyTeam = teamHandler.AllyTeam(session.team);
+            }
 
             std::vector<CUnit*> candidates;
             if (session.HasViewport() && sim.HasMap()) {
@@ -471,8 +488,15 @@ void StateStreamer::StreamBuildActivity(int) {
     if (curFrame >= 0 && (curFrame % 3) == 0 && rtcServer.GetClientCount() > 0) {
         sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
             int viewerAllyTeam = -1;
-            if (session.team >= 0 && teamHandler.IsValidTeam(session.team))
+            if (session.role == "spectator") {
+                if (session.spectatorVisibilityMode == SpectatorVisibilityMode::Team
+                    && session.spectatorVisibilityTeam >= 0
+                    && teamHandler.IsValidTeam(session.spectatorVisibilityTeam)) {
+                    viewerAllyTeam = teamHandler.AllyTeam(session.spectatorVisibilityTeam);
+                }
+            } else if (session.team >= 0 && teamHandler.IsValidTeam(session.team)) {
                 viewerAllyTeam = teamHandler.AllyTeam(session.team);
+            }
 
             auto baData = BuildActivity::SerializeAll(
                 static_cast<uint32_t>(curFrame), viewerAllyTeam);
@@ -565,8 +589,15 @@ void StateStreamer::BroadcastCombatEvents(int) {
 
         sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
             int viewerAllyTeam = -1;
-            if (session.team >= 0 && teamHandler.IsValidTeam(session.team))
+            if (session.role == "spectator") {
+                if (session.spectatorVisibilityMode == SpectatorVisibilityMode::Team
+                    && session.spectatorVisibilityTeam >= 0
+                    && teamHandler.IsValidTeam(session.spectatorVisibilityTeam)) {
+                    viewerAllyTeam = teamHandler.AllyTeam(session.spectatorVisibilityTeam);
+                }
+            } else if (session.team >= 0 && teamHandler.IsValidTeam(session.team)) {
                 viewerAllyTeam = teamHandler.AllyTeam(session.team);
+            }
 
             // Predicate: is event-position visible to the viewer?
             // Spectator (viewerAllyTeam < 0) sees everything.
@@ -738,8 +769,15 @@ void StateStreamer::BroadcastEntityDeaths(int) {
         const bool broadcastAll = (death.losMask & (1u << 31)) != 0;
         sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
             int viewerAllyTeam = -1;
-            if (session.team >= 0 && teamHandler.IsValidTeam(session.team))
+            if (session.role == "spectator") {
+                if (session.spectatorVisibilityMode == SpectatorVisibilityMode::Team
+                    && session.spectatorVisibilityTeam >= 0
+                    && teamHandler.IsValidTeam(session.spectatorVisibilityTeam)) {
+                    viewerAllyTeam = teamHandler.AllyTeam(session.spectatorVisibilityTeam);
+                }
+            } else if (session.team >= 0 && teamHandler.IsValidTeam(session.team)) {
                 viewerAllyTeam = teamHandler.AllyTeam(session.team);
+            }
             if (viewerAllyTeam < 0) {
                 // Spectator — always notify.
                 rtcServer.SendReliable(clientId, msg.data(), msg.size());
@@ -804,7 +842,13 @@ void StateStreamer::BroadcastDecals(int) {
         const uint32_t decalFrame = static_cast<uint32_t>(sim.GetFrameNum());
         sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
             int viewerAllyTeam = -1;
-            if (session.team >= 0 && teamHandler.IsValidTeam(session.team))
+            if (session.role == "spectator") {
+                if (session.spectatorVisibilityMode == SpectatorVisibilityMode::Team
+                    && session.spectatorVisibilityTeam >= 0
+                    && teamHandler.IsValidTeam(session.spectatorVisibilityTeam)) {
+                    viewerAllyTeam = teamHandler.AllyTeam(session.spectatorVisibilityTeam);
+                }
+            } else if (session.team >= 0 && teamHandler.IsValidTeam(session.team))
                 viewerAllyTeam = teamHandler.AllyTeam(session.team);
 
             // Spectators (no team) and global-LOS viewers see every
@@ -1296,8 +1340,15 @@ void StateStreamer::StreamLosBitmaps(int) {
 
         sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
             int viewerAllyTeam = -1;
-            if (session.team >= 0 && teamHandler.IsValidTeam(session.team))
+            if (session.role == "spectator") {
+                if (session.spectatorVisibilityMode == SpectatorVisibilityMode::Team
+                    && session.spectatorVisibilityTeam >= 0
+                    && teamHandler.IsValidTeam(session.spectatorVisibilityTeam)) {
+                    viewerAllyTeam = teamHandler.AllyTeam(session.spectatorVisibilityTeam);
+                }
+            } else if (session.team >= 0 && teamHandler.IsValidTeam(session.team)) {
                 viewerAllyTeam = teamHandler.AllyTeam(session.team);
+            }
 
             if (viewerAllyTeam >= 0) {
                 auto bitmap = intelEvents->BuildLosBitmap(viewerAllyTeam, frameNo);
@@ -1310,7 +1361,7 @@ void StateStreamer::StreamLosBitmaps(int) {
                 return;
             }
 
-            // Spectator: stream up to `specStride` ally teams per
+            // Spectator (Global mode): stream up to `specStride` ally teams per
             // second, round-robin so all teams cycle every
             // (activeAllyTeams / specStride) seconds.
             if (activeAllyTeams <= 0) return;

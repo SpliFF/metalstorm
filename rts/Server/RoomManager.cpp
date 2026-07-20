@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <set>
 #include <sqlite3.h>
 
 // ============================================================
@@ -557,6 +558,52 @@ bool RoomManager::SetReady(uint32_t roomId, uint32_t playerId, bool ready) {
     auto* player = it->second.FindPlayer(playerId);
     if (!player) return false;
     player->ready = ready;
+    PersistMembersLocked(it->second);
+    return true;
+}
+
+bool RoomManager::EnlistSpectator(uint32_t roomId, uint32_t playerId, uint8_t team) {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
+    auto it = rooms.find(roomId);
+    if (it == rooms.end()) return false;
+
+    auto* player = it->second.FindPlayer(playerId);
+    if (!player) return false;
+
+    // Can only enlist if currently a spectator
+    if (!player->isSpectator) return false;
+
+    // Check if room is full (excluding spectators)
+    if (it->second.IsFull()) return false;
+
+    // Auto-assign team if 255
+    if (team == 255) {
+        // Find the next available team (simple round-robin)
+        std::set<uint8_t> usedTeams;
+        for (const auto& p : it->second.players) {
+            if (!p.isSpectator) {
+                usedTeams.insert(p.team);
+            }
+        }
+        for (const auto& ai : it->second.aiSlots) {
+            usedTeams.insert(ai.team);
+        }
+
+        // Assign to the first unused team, or team 0 if all are used
+        team = 0;
+        for (uint8_t t = 0; t < it->second.maxPlayers; ++t) {
+            if (usedTeams.find(t) == usedTeams.end()) {
+                team = t;
+                break;
+            }
+        }
+    }
+
+    // Convert spectator to player
+    player->isSpectator = false;
+    player->team = team;
+    player->ready = false;  // Reset ready state on enlist
+
     PersistMembersLocked(it->second);
     return true;
 }
