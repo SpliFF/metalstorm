@@ -2,6 +2,10 @@
 
 #include <cstdint>
 #include <vector>
+#include <unordered_map>
+#include <string>
+
+#include "Lua/LuaRulesParams.h"
 
 struct GameServerContext;
 
@@ -41,8 +45,28 @@ private:
     void BroadcastFeatureLifecycle(int frameNum);
     void BroadcastUnitCommands(int frameNum);
     void StreamLosBitmaps(int frameNum);
+    void BroadcastRulesParams(int frameNum);
+
+    // W3 helpers
+    uint16_t InternKey(const std::string& key);
+    void SendKeyDictionary(int clientId);
 
     GameServerContext& ctx;
+
+    // Rules-param wire producer baselines (BroadcastRulesParams). We diff the
+    // live synced param maps against these last-sent copies each tick to
+    // detect changes; deltas go to already-snapshotted sessions, a full
+    // snapshot to fresh joiners. Copied by value so we retain the *old* `los`
+    // of a key when it's deleted (needed to decide who to tell to drop it).
+    LuaRulesParams::Params lastGameParams;
+    std::vector<LuaRulesParams::Params> lastTeamParams;  // indexed by teamID
+
+    // W3: Key interning for rulesParams optimization
+    std::unordered_map<std::string, uint16_t> keyToId;  // string key → interned ID
+    std::vector<std::string> idToKey;                   // ID → string (0 reserved)
+    uint32_t keyDictionaryRev = 1;                      // incremented on dictionary change
+    uint32_t gameParamsRev = 0;                         // generation counter for game params
+    std::vector<uint32_t> teamParamsRev;                // per-team generation counters
 
     // Last-team-standing fallback latch (was a function-static int in the loop):
     // the team the alive-unit count declared the winner, or -1 while undecided.
@@ -63,4 +87,15 @@ private:
     // prior send of the *same* stream.
     static constexpr uint32_t kStateLaneEntity = 0;
     static constexpr uint32_t kStateLanePiece  = 1;
+
+    // Per-topic EVENT lanes (PLAN-metalstorm-wire.md W1). Reliable streams on
+    // distinct lanes prevent QUIC head-of-line blocking — a lost/retransmitted
+    // bulk packet (defs, decals) can't delay a combat event. Lane values are
+    // logical separators; the StreamClass (Control/Vision/Bulk) + lane pair
+    // maps to an independent QUIC stream.
+    static constexpr uint32_t kEventLaneCombat  = 0; // combat events, volleys, projectiles, sounds
+    static constexpr uint32_t kEventLaneParams  = 1; // rulesParams (game/team)
+    static constexpr uint32_t kEventLaneOrders  = 2; // directives, commands (future)
+    static constexpr uint32_t kEventLaneDecals  = 3; // decals, track segments
+    static constexpr uint32_t kEventLaneControl = 4; // GameInfo, game-over, player join/leave, chat
 };

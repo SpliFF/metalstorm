@@ -583,6 +583,10 @@ export type GpMessageToMain =
     | { type: 'gp:authenticated'; playerId: number; team: number }
     /** Server restart detected — main reloads. */
     | { type: 'gp:reload' }
+    /** Metalstorm counterbattery reveal (Q-D-c): a statistical volley from an
+     *  attacker the local team can't see → a red "attack" radar blip at the
+     *  firing position (x,z world elmos) on the main-thread minimap. */
+    | { type: 'gp:counterbatteryPing'; x: number; z: number }
     /** Reply to a gp:test request from the main test harness. */
     | { type: 'gp:testResult'; id: number; ok: boolean; value?: unknown; error?: string }
     /** Reply to a `gp:ping` heartbeat probe (PLAN-client-resilience.md task 1). */

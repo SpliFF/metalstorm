@@ -92,6 +92,13 @@ struct ClientSession {
     /// Delta compression cache — tracks last-sent entity state.
     EntityDeltaCache deltaCache;
 
+    /// Rules-param join snapshot latch. False until StateStreamer has sent
+    /// this session the full current game+team rules-param state (a
+    /// `replace=true` RulesParamUpdate per scope); thereafter it receives
+    /// only per-tick deltas. New sessions (and reconnects that re-auth into a
+    /// fresh ClientID) start false so late joiners converge to current state.
+    bool rulesParamsSnapshotSent = false;
+
     /// Last known frame for reconnection state recovery.
     int lastKnownFrame = -1;
 

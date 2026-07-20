@@ -137,6 +137,7 @@ import {
     dispatchUnitCreated, dispatchUnitFromFactory, dispatchUnitTaken, dispatchUnitGiven,
     dispatchDefaultCommand, dispatchCommandNotify,
     dispatchPlayerChanged, dispatchPlayerAdded, dispatchPlayerRemoved, dispatchTeamDied,
+    handleRulesParamUpdate,
     dispatchRecvLuaUIMsg, dispatchUnitDestroyed, dispatchUnitFinished,
     dispatchUnitDamaged, dispatchFeatureLifecycle,
     dispatchVisibleUnitAdded, dispatchVisibleUnitRemoved,
@@ -994,6 +995,27 @@ function gpConnect(msg: GpInitToWorker): void {
                 });
             }
         },
+        // Metalstorm statistical combat (Model 1) per-volley outcomes. No
+        // projectile exists — combatFX invents tracers (from the visible
+        // attacker's position) + impact bursts. Counterbattery reveals become
+        // a red minimap "attack" blip on the main thread (Q-D-c). The volley's
+        // target_pos is the squad-casualty impact hint (PLAN-metalstorm-squad-
+        // casualties consumes onVolleyOutcomes when that layer lands).
+        onVolleyOutcomes: (events) => {
+            gpCombatFX?.onVolleyOutcome(events,
+                (id) => gpCtx.entityRenderer?.getEntityPosition(id) ?? null);
+            for (const e of events) {
+                if (e.revealAttacker)
+                    postToMain({ type: 'gp:counterbatteryPing', x: e.revealX, z: e.revealZ });
+            }
+        },
+        // Metalstorm damage-field lifecycle (Model 3 area bombardment, C6).
+        // The sim owns all damage; combatFX invents the barrage FX (procedural
+        // shell arcs + impacts scattered in the area at the field's cadence)
+        // from these Created/Removed events — no per-shell wire traffic.
+        onDamageFields: (events) => {
+            gpCombatFX?.onDamageFields(events);
+        },
         // GW4-c5b-3: per-unit command queues (~1 Hz) → command-path + waypoint
         // overlays for the current selection (shift-gated). Cached so a
         // selection change re-renders without waiting for the next broadcast.
@@ -1231,6 +1253,16 @@ function gpConnect(msg: GpInitToWorker): void {
                     default: postLog(2, `[player-team] unknown event kind ${e.kind}`);
                 }
             }
+        },
+        // Rules-param updates (RulesParamUpdate) — game/team params from
+        // Spring.Set{Game,Team}RulesParam in any synced gadget. Pre-this-wire
+        // handleRulesParamUpdate was a dead consumer (no server producer), so
+        // region control, objectives and the authority economy were invisible
+        // to the browser. The server LOS-filtered team params and sent a
+        // replace-snapshot on join; here we just apply into liveState so
+        // Spring.GetGameRulesParam(s)/GetTeamRulesParam(s) return live values.
+        onRulesParamUpdate: (update) => {
+            handleRulesParamUpdate(update as unknown as Record<string, unknown>);
         },
         // PLAN-bar Spring.GetTeamStatsHistory: per-second incremental team
         // stats-history deltas. Splice each team's entries into its history

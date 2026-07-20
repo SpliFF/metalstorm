@@ -42,6 +42,7 @@ CONFIG(bool, UpdateBoundingVolumeMT).defaultValue(true).safemodeValue(false).min
 CR_BIND(CUnitHandler, )
 CR_REG_METADATA(CUnitHandler, (
 	CR_MEMBER(idPool),
+	CR_MEMBER(spawnGens),
 
 	CR_MEMBER(units),
 	CR_MEMBER(unitsByDefs),
@@ -122,6 +123,7 @@ void CUnitHandler::Init() {
 	}
 	{
 		units.resize(maxUnits, nullptr);
+		spawnGens.resize(maxUnits, 0);
 		activeUnits.reserve(maxUnits);
 
 		unitMemPool.reserve(128);
@@ -151,6 +153,7 @@ void CUnitHandler::Kill()
 		unitMemPool.clear();
 
 		units.clear();
+		spawnGens.clear();
 
 		for (int teamNum = 0; teamNum < MAX_TEAMS; teamNum++) {
 			// reuse inner vectors when reloading
@@ -217,6 +220,10 @@ void CUnitHandler::InsertActiveUnit(CUnit* unit)
 	#endif
 
 	units[unit->id] = unit;
+	// Bump the slot's spawn generation so deferred consumers can tell this
+	// unit apart from a previous occupant of the same id (id-reuse guard).
+	if (unit->id < spawnGens.size())
+		spawnGens[unit->id]++;
 }
 
 

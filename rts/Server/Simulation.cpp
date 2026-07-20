@@ -30,8 +30,11 @@ const std::unordered_map<int, std::string>* gAITeams = nullptr;
 #include "Sim/Features/FeatureDefHandler.h"
 #include "Sim/MoveTypes/MoveDefHandler.h"
 #include "Sim/MoveTypes/MoveTypeFactory.h"
+#include "Sim/MoveTypes/FootprintProfile.h"
 #include "Sim/Projectiles/ProjectileHandler.h"
 #include "Sim/Projectiles/ExplosionGenerator.h"
+#include "Sim/Weapons/StatisticalCombat.h"
+#include "Sim/Weapons/DamageField.h"
 #include "Sim/Path/IPathManager.h"
 #include "Game/GameHelper.h"
 #include "Game/Players/PlayerHandler.h"
@@ -241,6 +244,20 @@ void CSimulation::InitSubsystems(bool hasMap)
     unitDefHandler->Init(defsParser.get());
     SLOG(SPRING_LOG_INFO, "loaded %u unit defs, %u weapon defs",
         unitDefHandler->NumUnitDefs(), weaponDefHandler->NumWeaponDefs());
+
+    // Metalstorm mixed-size group flow (PLAN-metalstorm-flow §1, engine ask F1):
+    // parse gamedata/footprints.lua, resolve underpass move-class names → MoveDef
+    // pathTypes (needs the move defs, hence the hasMap guard), and attach the
+    // resolved profile to every opting UnitDef. Silent no-op for games without
+    // the file (BAR/ZK). The resolved profiles feed the F2 permeability query
+    // (CMoveMath::ObjectBlockType) and the client footprint export.
+    if (footprintProfileHandler.Load()) {
+        if (hasMap)
+            footprintProfileHandler.ResolveMoveClasses(moveDefHandler);
+        footprintProfileHandler.AttachToUnitDefs(*unitDefHandler);
+        SLOG(SPRING_LOG_INFO, "loaded %zu footprint profiles", footprintProfileHandler.Size());
+    }
+
     featureDefHandler->Init(defsParser.get());
 
     CUnit::InitStatic();
@@ -254,6 +271,8 @@ void CSimulation::InitSubsystems(bool hasMap)
     unitHandler.Init();
     featureHandler.Init();
     projectileHandler.Init();
+    statisticalCombatManager.Init();
+    damageFieldManager.Init();
 
     // --- Map-dependent subsystems ---
     if (hasMap) {
@@ -673,6 +692,13 @@ void CSimulation::SimFrame()
 
     phaseT0 = simProf ? spring_now() : spring_time();
     unitHandler.Update();
+    // Drain statistical volleys whose scheduled resolve frame has arrived
+    // (damage applied via DoDamage). Runs right after unitHandler.Update(),
+    // where this frame's volleys were rolled + queued during weapon fire.
+    statisticalCombatManager.Update(gs->frameNum);
+    // Metalstorm damage fields (Model 3, C6): expire finished fields and apply
+    // area damage for any reaching a cadence tick this frame (via DoDamage).
+    damageFieldManager.Update(gs->frameNum);
     projectileHandler.Update();
     featureHandler.Update();
 

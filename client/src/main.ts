@@ -1033,6 +1033,12 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             case 'minimapEvents':
                 minimap?.markEventsRequested();
                 break;
+            // Metalstorm counterbattery reveal (Q-D-c): a statistical volley
+            // from an attacker the local team can't see drops a red "attack"
+            // radar blip at the firing position so artillery is counterable.
+            case 'gp:counterbatteryPing':
+                minimap?.pushAttackPing({ x: m.x, z: m.z });
+                break;
             // GW4-c5c-2: resolved sound events / music transitions from the worker.
             case 'gp:audioSoundEvents':
                 soundEventPlayer?.handleResolvedBatch(m.events);

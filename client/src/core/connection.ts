@@ -25,6 +25,8 @@ import { Pong } from '../protocol/spring-web/pong.js';
 import { ServerError } from '../protocol/spring-web/server-error.js';
 import { GameEventBatch } from '../protocol/spring-web/game-event-batch.js';
 import { CombatEvent } from '../protocol/spring-web/combat-event.js';
+import { VolleyOutcome } from '../protocol/spring-web/volley-outcome.js';
+import { DamageFieldEvent } from '../protocol/spring-web/damage-field-event.js';
 import { ProjectileFiredEvent } from '../protocol/spring-web/projectile-fired-event.js';
 import { ProjectileImpactEvent } from '../protocol/spring-web/projectile-impact-event.js';
 import { ProjectileTrajectoryEvent } from '../protocol/spring-web/projectile-trajectory-event.js';
@@ -38,6 +40,10 @@ import { TeamStartInfo } from '../protocol/spring-web/team-start-info.js';
 import { PlayerTeamEventBatch } from '../protocol/spring-web/player-team-event-batch.js';
 import { TeamStatsHistoryBatch } from '../protocol/spring-web/team-stats-history-batch.js';
 import { GameModOptions } from '../protocol/spring-web/game-mod-options.js';
+import { RulesParamUpdate } from '../protocol/spring-web/rules-param-update.js';
+import { RulesParamKeyDictionary } from '../protocol/spring-web/rules-param-key-dictionary.js';
+import { RulesParamScope } from '../protocol/spring-web/rules-param-scope.js';
+import { RulesParamValueKind } from '../protocol/spring-web/rules-param-value-kind.js';
 import { ResourceUpdate } from '../protocol/spring-web/resource-update.js';
 import { MapData } from '../protocol/spring-web/map-data.js';
 import { PlayerLeft } from '../protocol/spring-web/player-left.js';
@@ -135,6 +141,64 @@ export interface CombatEventInfo {
     x: number;
     y: number;
     z: number;
+}
+
+/// Per-volley outcome decoded from a `GameEventBatch.volley_outcomes` entry —
+/// Metalstorm statistical combat (Model 1). One event per squad-volley; the
+/// client invents `rounds` cosmetic tracers/impacts from it. Already
+/// visibility-filtered server-side (result may be Unknown=2 with attackerId 0
+/// when the firer is hidden). See VolleyOutcome in protocol.fbs.
+export interface VolleyOutcomeInfo {
+    attackerId: number;
+    weaponDefId: number;
+    targetId: number;
+    /// impact position (FX origin + squad casualty hint)
+    x: number;
+    y: number;
+    z: number;
+    resolveFrame: number;
+    /// CombatResult: 0=Hit, 1=Miss, 2=Unknown (visibility-filtered)
+    result: number;
+    damage: number;
+    rounds: number;
+    /// attacker team (255 = hidden)
+    team: number;
+    /// counterbattery reveal — when true, drop a radar blip at (revealX,_,revealZ)
+    revealAttacker: boolean;
+    revealX: number;
+    revealY: number;
+    revealZ: number;
+    /// derived-morale posture: 0=normal, 1=retreating, 2=panicking (only
+    /// meaningful when the attacker is visible, attackerId != 0)
+    attackerPosture: number;
+}
+
+/// Damage-field lifecycle event decoded from a `GameEventBatch.damage_fields`
+/// entry — Metalstorm Model 3 area bombardment (C6). The sim owns all damage;
+/// the client invents the barrage FX (procedural shell arcs + impacts
+/// scattered in the area at `cadence`) from a Created event and tears it down
+/// on Removed / duration expiry. Already visibility-filtered server-side.
+/// See DamageFieldEvent in protocol.fbs.
+export interface DamageFieldEventInfo {
+    fieldId: number;
+    /// 0 = Created (start FX), 1 = Removed (stop FX)
+    kind: number;
+    /// 0 = circle (center + radius), 1 = rect (center + radius(halfX) + halfZ)
+    shape: number;
+    x: number;
+    y: number;
+    z: number;
+    radius: number;
+    halfZ: number;
+    weaponDefId: number;
+    /// damage/sec — client scales impact density
+    intensity: number;
+    /// frames between damage ticks (FX pulse rate)
+    cadence: number;
+    /// remaining frames at creation (0 on Removed)
+    duration: number;
+    /// owner team (255 = neutral)
+    team: number;
 }
 
 /// Per-tick sound emission decoded from a `GameEventBatch.sounds` entry.
@@ -235,6 +299,18 @@ export interface TeamStatsHistoryInfo {
     teamId: number;
     baseIndex: number;
     entries: TeamStatsEntryInfo[];
+}
+
+/// A decoded RulesParamUpdate — a batch of rules-param changes for one scope.
+/// `scope` is 'game' or 'team' (the wire only carries those two today).
+/// `id` is the teamID for team scope (0 / ignored for game). `replace` = true
+/// means clear the target map before applying (join snapshot). `params` maps
+/// key → value, where `null` deletes the key.
+export interface RulesParamUpdateInfo {
+    scope: 'game' | 'team';
+    id: number;
+    replace: boolean;
+    params: Record<string, number | string | null>;
 }
 
 /// Projectile lifecycle event info — decoded from the FlatBuffer batch and
@@ -600,6 +676,10 @@ export interface WeaponDefInfo {
     reloadTime: number;
     salvoSize: number;
     salvoDelay: number;
+    /** Computed expected damage-per-second (default_damage * salvo_size /
+     *  reload_time). Exposed for tuning-honesty UI so statistical combat's
+     *  math isn't hidden (PLAN-macro-combat §4). */
+    expectedDps: number;
     accuracy: number;
     sprayAngle: number;
     movingAccuracy: number;
@@ -808,6 +888,15 @@ export interface ConnectionEvents {
     onServerError?: (code: number, message: string) => void;
     onEntityState?: (snapshot: EntityStateSnapshot, isDelta: boolean) => void;
     onCombatEvents?: (events: CombatEventInfo[], frame: number) => void;
+    /** Per-volley statistical-combat outcomes (Metalstorm Model 1). The
+     *  client invents cosmetic tracers/impacts, feeds the squad casualty
+     *  impact hint, and drops a counterbattery radar blip when
+     *  `revealAttacker` is set. Empty for ported games. */
+    onVolleyOutcomes?: (events: VolleyOutcomeInfo[], frame: number) => void;
+    /** Damage-field lifecycle events (Metalstorm Model 3 area bombardment,
+     *  C6). Created starts a procedural barrage; Removed / duration expiry
+     *  stops it. Empty for ported games. */
+    onDamageFields?: (events: DamageFieldEventInfo[], frame: number) => void;
     onSoundEvents?: (events: SoundEventInfo[], frame: number) => void;
     onSeismicPings?: (events: SeismicPingInfo[], frame: number) => void;
     /** Music-state transition broadcast — fires once per state change.
@@ -921,6 +1010,13 @@ export interface ConnectionEvents {
     /// Feeds the worker's liveState.modOptions so Spring.GetModOptions()
     /// matches the synced set. Values arrive as strings (engine convention).
     onGameModOptions?: (options: Record<string, string>) => void;
+    /// A batch of game/team rules-param changes (RulesParamUpdate) from
+    /// `Spring.Set{Game,Team}RulesParam` in any synced gadget. The server has
+    /// already applied per-team LOS filtering (team scope) and sends a
+    /// `replace`-snapshot on join. Feeds `handleRulesParamUpdate` →
+    /// `Spring.GetGameRulesParam(s)` / `GetTeamRulesParam(s)`. A `null` value
+    /// deletes the key from the client mirror.
+    onRulesParamUpdate?: (update: RulesParamUpdateInfo) => void;
     /// A relayed `Spring.SendLuaUIMsg` (LuaUIMsgRelay). The server already
     /// applied the audience filter; deliver unconditionally to
     /// `widget:RecvLuaMsg(data, playerId)`. `data` preserves embedded NULs.
@@ -964,6 +1060,10 @@ export class Connection {
      *  server / LuaRules / LuaGaia / LuaAI:* live on the game server). */
     get gameHttpUrl(): string { return this.httpBase; }
     private commandSequence = 0;
+
+    // W3: Key interning dictionary for RulesParamUpdate
+    private keyDictionary: string[] = [];
+    private keyDictionaryRev = 0;
 
     /** Whether the control channel is currently usable. */
     get controlOpen(): boolean { return this.transport?.connected ?? false; }
@@ -1837,6 +1937,48 @@ export class Connection {
                 this.events.onGameModOptions?.(options);
                 break;
             }
+            case ServerPayload.RulesParamKeyDictionary: {
+                // W3: Receive and store the key dictionary
+                const dict = msg.payload(new RulesParamKeyDictionary()) as RulesParamKeyDictionary;
+                this.keyDictionary = [''];  // index 0 reserved
+                for (let i = 0; i < dict.keysLength(); i++) {
+                    this.keyDictionary.push(dict.keys(i) ?? '');
+                }
+                this.keyDictionaryRev = dict.dictionaryRev();
+                console.log(`[connection] Received key dictionary rev ${this.keyDictionaryRev} with ${this.keyDictionary.length - 1} keys`);
+                break;
+            }
+            case ServerPayload.RulesParamUpdate: {
+                const upd = msg.payload(new RulesParamUpdate()) as RulesParamUpdate;
+                const params: Record<string, number | string | null> = {};
+                for (let i = 0; i < upd.paramsLength(); i++) {
+                    const e = upd.params(i);
+                    if (!e) continue;
+                    // W3: Try key_id first, fall back to string key
+                    let key: string | null = null;
+                    const keyId = e.keyId();
+                    if (keyId > 0 && keyId < this.keyDictionary.length) {
+                        key = this.keyDictionary[keyId];
+                    } else {
+                        key = e.key();
+                    }
+                    if (!key) continue;
+                    switch (e.valueKind()) {
+                        case RulesParamValueKind.Number: params[key] = e.numVal(); break;
+                        case RulesParamValueKind.String: params[key] = e.strVal() ?? ''; break;
+                        // Nil → delete on the client mirror.
+                        case RulesParamValueKind.Nil:
+                        default:                          params[key] = null; break;
+                    }
+                }
+                this.events.onRulesParamUpdate?.({
+                    scope: upd.scope() === RulesParamScope.Team ? 'team' : 'game',
+                    id: upd.id(),
+                    replace: upd.replace(),
+                    params,
+                });
+                break;
+            }
             case ServerPayload.TeamStatsHistoryBatch: {
                 const batch = msg.payload(new TeamStatsHistoryBatch()) as TeamStatsHistoryBatch;
                 const teams: TeamStatsHistoryInfo[] = [];
@@ -2279,6 +2421,68 @@ export class Connection {
                 });
             }
             this.events.onCombatEvents(events, frame);
+        }
+
+        // Statistical-combat per-volley outcomes (Metalstorm Model 1). Already
+        // visibility-filtered server-side. Drives cosmetic tracers/impacts, the
+        // squad casualty impact hint, and counterbattery radar blips.
+        const volleyCount = batch.volleyOutcomesLength();
+        if (volleyCount > 0 && this.events.onVolleyOutcomes) {
+            const out: VolleyOutcomeInfo[] = [];
+            for (let i = 0; i < volleyCount; i++) {
+                const e = batch.volleyOutcomes(i, new VolleyOutcome());
+                if (!e) continue;
+                const tp = e.targetPos();
+                const rp = e.revealPos();
+                out.push({
+                    attackerId: e.attackerId(),
+                    weaponDefId: e.weaponDefId(),
+                    targetId: e.targetId(),
+                    x: tp ? tp.x() : 0,
+                    y: tp ? tp.y() : 0,
+                    z: tp ? tp.z() : 0,
+                    resolveFrame: e.resolveFrame(),
+                    result: e.result(),
+                    damage: e.damage(),
+                    rounds: e.rounds(),
+                    team: e.team(),
+                    revealAttacker: e.revealAttacker(),
+                    revealX: rp ? rp.x() : 0,
+                    revealY: rp ? rp.y() : 0,
+                    revealZ: rp ? rp.z() : 0,
+                    attackerPosture: e.attackerPosture(),
+                });
+            }
+            this.events.onVolleyOutcomes(out, frame);
+        }
+
+        // Damage-field lifecycle (Metalstorm Model 3, C6). Created/Removed
+        // events; the client invents the barrage FX from them. Already
+        // visibility-filtered server-side (area overlap with known space).
+        const fieldCount = batch.damageFieldsLength();
+        if (fieldCount > 0 && this.events.onDamageFields) {
+            const out: DamageFieldEventInfo[] = [];
+            for (let i = 0; i < fieldCount; i++) {
+                const e = batch.damageFields(i, new DamageFieldEvent());
+                if (!e) continue;
+                const c = e.center();
+                out.push({
+                    fieldId: e.fieldId(),
+                    kind: e.kind(),
+                    shape: e.shape(),
+                    x: c ? c.x() : 0,
+                    y: c ? c.y() : 0,
+                    z: c ? c.z() : 0,
+                    radius: e.radius(),
+                    halfZ: e.halfZ(),
+                    weaponDefId: e.weaponDefId(),
+                    intensity: e.intensity(),
+                    cadence: e.cadence(),
+                    duration: e.duration(),
+                    team: e.team(),
+                });
+            }
+            this.events.onDamageFields(out, frame);
         }
 
         // Projectile lifecycle events. The renderer integrates motion

@@ -54,6 +54,7 @@ table AuthRequest {
     username: string;
     password_hash: string;      // bcrypt hash, not plaintext
     token: string;              // JWT for reconnection (alternative to user/pass)
+    cached_defs_hash: string;   // W4: Hash of cached defs for skip on match
 }
 
 table PlayerCommand {
@@ -717,6 +718,7 @@ enum CombatResult : uint8 {
     Miss,
     Blocked,       // shield/armour absorbed
     Kill,          // target destroyed
+    Unknown,       // visibility-filtered: viewer sees the shots but not the outcome
 }
 
 table CombatEvent {
@@ -726,6 +728,74 @@ table CombatEvent {
     result: CombatResult;
     damage: float;
     position: Vec3;            // Impact point
+}
+
+/// Metalstorm statistical combat (Model 1) per-volley outcome
+/// (PLAN-metalstorm-combat-resolution.md §2.3 / PLAN-macro-combat.md §3).
+/// One per squad-volley, NOT per round — the client invents `rounds`
+/// cosmetic tracers/impacts from a single event. Visibility-filtered
+/// per session in StateStreamer::BroadcastCombatEvents:
+///   - viewer sees the attacker  -> full outcome (Hit/Miss, damage, attacker_id)
+///   - viewer owns the target but can't see the attacker -> result Unknown,
+///     damage 0, attacker_id 0, plus a counterbattery radar-blip reveal
+///     (reveal_attacker + reveal_pos, Q-D-c ANSWERED 2026-07-19)
+///   - viewer sees only the target (neither owner nor attacker-LOS) -> Unknown,
+///     no reveal
+///   - viewer sees neither -> not sent
+table VolleyOutcome {
+    attacker_id: uint32;          // firing unit; 0 if hidden from this viewer
+    weapon_def_id: uint16;
+    target_id: uint32;            // victim unit; 0 if hidden from this viewer
+    target_pos: Vec3;             // impact position (FX + squad casualty hint)
+    resolve_frame: uint32;        // fire_frame + flight time (foreknown outcome)
+    result: CombatResult = Hit;   // Hit / Miss / Unknown (visibility-filtered)
+    damage: uint16;               // aggregate; 0 for Unknown / miss
+    rounds: uint8 = 1;            // cosmetic shot count for client tracer fan-out
+    team: uint8 = 255;            // attacker team (FX tint / ally audio); 255 = hidden
+    /// Counterbattery reveal (Q-D-c). True only for the victim's team when
+    /// they cannot see the attacker: the client drops a radar blip at
+    /// `reveal_pos` (the attacker's firing position) so statistical artillery
+    /// is counterable. Never set for viewers who can already see the attacker.
+    reveal_attacker: bool = false;
+    reveal_pos: Vec3;             // attacker firing position (only when reveal_attacker)
+    /// Attacker morale posture, a derived proxy (morale = clamp(hp% - 10, 0, 100)):
+    /// 0 = normal, 1 = retreating-while-firing (morale < 10), 2 = panicking
+    /// (morale == 0). Lets the client show a retreat/panic indicator. Only
+    /// meaningful when attacker_id != 0 (attacker visible).
+    attacker_posture: uint8 = 0;
+}
+
+/// Metalstorm damage-field lifecycle (Model 3 — area bombardment, C6,
+/// PLAN-metalstorm-combat-resolution.md §4). A field is an area that applies
+/// `intensity` damage/sec on a fixed cadence for `duration` frames. The SIM
+/// owns all damage (units inside take it via DoDamage). The client receives
+/// only these Created/Removed lifecycle events and INVENTS the barrage FX
+/// (procedural shell arcs + impacts scattered in the area at the given
+/// cadence) — no per-shell wire traffic. Visibility-filtered per session in
+/// StateStreamer::BroadcastCombatEvents by area overlap with the viewer's
+/// known space (own-team fields always shown).
+enum DamageFieldEventKind : uint8 {
+    Created = 0,   // a field appeared — start inventing barrage FX
+    Removed = 1,   // field expired or was cancelled — stop the FX
+}
+
+enum DamageFieldShape : uint8 {
+    Circle = 0,    // center + radius
+    Rect = 1,      // center + (half_x, half_z) axis-aligned box
+}
+
+table DamageFieldEvent {
+    field_id: uint32;
+    kind: DamageFieldEventKind;
+    shape: DamageFieldShape;
+    center: Vec3;               // field center (y = ground sample at create)
+    radius: float;             // circle radius, or rect half-extent along x
+    half_z: float = 0;         // rect half-extent along z (0 for a circle)
+    weapon_def_id: uint16;     // for FX flavour (CEG lookup); 0 = generic
+    intensity: float;          // damage/sec — client scales impact density
+    cadence: uint16 = 15;      // frames between damage ticks (FX pulse rate)
+    duration: uint32;          // remaining frames at creation (0 on Removed)
+    team: uint8 = 255;         // owner team (FX tint); 255 = neutral/none
 }
 
 table GameEvent {
@@ -918,6 +988,16 @@ table GameEventBatch {
     /// so spectators stay in sync. Usually empty; only populated on
     /// the tick when a state change fires.
     music_events: [MusicEvent];
+    /// Metalstorm statistical-combat per-volley outcomes (Model 1). Already
+    /// visibility-filtered for this session. Empty for ported games (ZK/BAR
+    /// use the projectile path); populated only when statistical weapons fire.
+    /// See VolleyOutcome. Appended last for FlatBuffers field-id stability.
+    volley_outcomes: [VolleyOutcome];
+    /// Metalstorm damage-field lifecycle events (Model 3, C6). Empty for
+    /// ported games; populated only when a game creates/expires a barrage
+    /// field. Appended last for FlatBuffers field-id stability. See
+    /// DamageFieldEvent.
+    damage_fields: [DamageFieldEvent];
 }
 
 table ResourceUpdate {
@@ -998,6 +1078,9 @@ table GameInfo {
     /// on `paused` — a normal in-game pause must not end the game. Defaults false
     /// for every ordinary GameInfo (auth snapshot, periodic refresh).
     game_over: bool = false;
+    /// W4: Content hash of all game defs (units + weapons). Client can skip
+    /// re-downloading defs on reconnect if this matches cached hash.
+    defs_hash: string;
     /// Winning allyteam IDs, as passed to `Spring.GameOver(allyTeamID1, …)`.
     /// Empty when the result is undecided (e.g. host drop) or on a fallback win
     /// with no ally mapping. Only meaningful when `game_over = true`. Mirrors
@@ -1862,6 +1945,72 @@ table LuaUIMsgRelay {
     player_id: int32;
 }
 
+/// The concrete type of a RulesParamEntry value. `Nil` means "delete this
+/// key from the client mirror" (matches the client consumer's `null →
+/// delete` path and Spring's rules-param clearing). Spring can also store a
+/// *boolean* rules param; the server encodes booleans as `Number` (0.0/1.0)
+/// because the client rules-param mirror type is `number | string` and has
+/// never carried booleans. **CALLED-OUT divergence from Recoil:** a `false`
+/// bool param reads back as `0` (truthy in Lua) rather than `false`. No
+/// current Metalstorm/ZK/BAR consumer sets a boolean rules param; the
+/// faithful fix (add a `Bool` kind + widen `RulesParamValue`) is deferred
+/// until one does. See StateStreamer::BroadcastRulesParams.
+enum RulesParamValueKind : uint8 {
+    Nil = 0,
+    Number = 1,
+    String = 2,
+}
+
+/// One rules-param key→value change. `value_kind` selects which value field
+/// is live (`num_val` for Number, `str_val` for String, neither for Nil).
+/// W3 optimization: prefer key_id over key when both present.
+table RulesParamEntry {
+    key: string;         // legacy: full string key (for backward compat)
+    key_id: uint16;      // W3: interned key ID (0 = not interned, use key)
+    value_kind: RulesParamValueKind;
+    num_val: double;
+    str_val: string;
+}
+
+/// Which rules-param scope a RulesParamUpdate carries. `Game` params are the
+/// global `Spring.SetGameRulesParam` map (broadcast unfiltered — matching
+/// `Spring.GetGameRulesParams`, which is unconditionally public). `Team`
+/// params are `Spring.SetTeamRulesParam`, LOS-filtered per receiving session.
+enum RulesParamScope : uint8 {
+    Game = 0,
+    Team = 1,
+}
+
+/// Server → Client: a per-sim-tick batch of rules-param changes for ONE
+/// scope (+ id for Team scope). Consumed by the LuaUI worker's
+/// `handleRulesParamUpdate`, feeding `Spring.GetGameRulesParam(s)` /
+/// `Spring.GetTeamRulesParam(s)` in widgets/gadgets.
+///
+/// `id` is the teamID for Team scope (ignored for Game). `replace = true`
+/// asks the client to clear the target map before applying — used only for
+/// the join/rejoin snapshot so a late joiner converges exactly to current
+/// state; per-tick deltas use `replace = false`.
+///
+/// **Visibility** (replicates `LuaSyncedRead::GetTeamRulesParam(s)`): Team
+/// batches are filtered server-side per connection against each param's
+/// `los` bitmask — same-ally sessions see PRIVATE-and-below, allied-team
+/// sessions see ALLIED-and-below, everyone sees PUBLIC; spectators (team < 0)
+/// see all. Game batches are broadcast to every client.
+table RulesParamUpdate {
+    scope: RulesParamScope;
+    id: uint32;
+    replace: bool;
+    params: [RulesParamEntry];
+    params_rev: uint32;  // W3: generation counter for snapshot validation
+}
+
+/// W3: Key interning dictionary for RulesParamEntry key_id references.
+/// Sent once on join (or on dictionary resync if rev mismatch).
+table RulesParamKeyDictionary {
+    keys: [string];         // indexed by key_id (0 reserved for "not interned")
+    dictionary_rev: uint32; // dictionary version for mismatch detection
+}
+
 // Union of all server→client message types
 union ServerPayload {
     AuthResponse,
@@ -1907,6 +2056,8 @@ union ServerPayload {
     GameModOptions,
     OrgGroupState,
     DirectiveState,
+    RulesParamUpdate,
+    RulesParamKeyDictionary,
 }
 
 table ServerMessage {

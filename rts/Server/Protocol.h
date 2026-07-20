@@ -27,6 +27,7 @@
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitDef.h"
 #include "Sim/Weapons/Weapon.h"
+#include "Sim/Weapons/DamageField.h"
 #include "Sim/Units/CommandAI/CommandAI.h"
 #include "Sim/Units/CommandAI/Command.h"
 #include "Sim/Units/CommandAI/CommandDescription.h"
@@ -185,7 +186,9 @@ inline std::vector<uint8_t> BuildCombatEventBatch(
     const std::vector<ProjectileImpactEventData>& projImpacts = {},
     const std::vector<ProjectileTrajectoryEventData>& projTrajectories = {},
     const std::vector<SoundEventData>& sounds = {},
-    const std::vector<SeismicPingData>& seismicPings = {})
+    const std::vector<SeismicPingData>& seismicPings = {},
+    const std::vector<VolleyOutcomeData>& volleyOutcomes = {},
+    const std::vector<DamageFieldEventData>& damageFields = {})
 {
     flatbuffers::FlatBufferBuilder fbb(
         256 + events.size() * 32
@@ -193,7 +196,9 @@ inline std::vector<uint8_t> BuildCombatEventBatch(
             + projImpacts.size() * 32
             + projTrajectories.size() * 40
             + sounds.size() * 32
-            + seismicPings.size() * 24);
+            + seismicPings.size() * 24
+            + volleyOutcomes.size() * 56
+            + damageFields.size() * 48);
 
     std::vector<flatbuffers::Offset<SpringWeb::CombatEvent>> combatOffsets;
     combatOffsets.reserve(events.size());
@@ -303,6 +308,46 @@ inline std::vector<uint8_t> BuildCombatEventBatch(
         }
     }
 
+    std::vector<flatbuffers::Offset<SpringWeb::VolleyOutcome>> volleyOffsets;
+    volleyOffsets.reserve(volleyOutcomes.size());
+    for (const auto& v : volleyOutcomes) {
+        auto tgtPos = SpringWeb::Vec3(v.targetPos.x, v.targetPos.y, v.targetPos.z);
+        auto revPos = SpringWeb::Vec3(v.revealPos.x, v.revealPos.y, v.revealPos.z);
+        SpringWeb::VolleyOutcomeBuilder vob(fbb);
+        vob.add_attacker_id(v.attackerId);
+        vob.add_weapon_def_id(v.weaponDefId);
+        vob.add_target_id(v.targetId);
+        vob.add_target_pos(&tgtPos);
+        vob.add_resolve_frame(v.resolveFrame);
+        vob.add_result(static_cast<SpringWeb::CombatResult>(v.result));
+        vob.add_damage(static_cast<uint16_t>(std::min(v.damage, 65535.0f)));
+        vob.add_rounds(v.rounds);
+        vob.add_team(v.attackerTeam);
+        vob.add_reveal_attacker(v.revealAttacker);
+        vob.add_reveal_pos(&revPos);
+        vob.add_attacker_posture(v.posture);
+        volleyOffsets.push_back(vob.Finish());
+    }
+
+    std::vector<flatbuffers::Offset<SpringWeb::DamageFieldEvent>> fieldOffsets;
+    fieldOffsets.reserve(damageFields.size());
+    for (const auto& f : damageFields) {
+        auto ctr = SpringWeb::Vec3(f.center.x, f.center.y, f.center.z);
+        SpringWeb::DamageFieldEventBuilder dfb(fbb);
+        dfb.add_field_id(f.fieldId);
+        dfb.add_kind(static_cast<SpringWeb::DamageFieldEventKind>(f.kind));
+        dfb.add_shape(static_cast<SpringWeb::DamageFieldShape>(f.shape));
+        dfb.add_center(&ctr);
+        dfb.add_radius(f.radius);
+        dfb.add_half_z(f.halfZ);
+        dfb.add_weapon_def_id(f.weaponDefId);
+        dfb.add_intensity(f.intensity);
+        dfb.add_cadence(f.cadence);
+        dfb.add_duration(f.duration);
+        dfb.add_team(f.team);
+        fieldOffsets.push_back(dfb.Finish());
+    }
+
     auto combatVec  = fbb.CreateVector(combatOffsets);
     auto firedVec   = fbb.CreateVector(firedOffsets);
     auto impactVec  = fbb.CreateVector(impactOffsets);
@@ -310,8 +355,11 @@ inline std::vector<uint8_t> BuildCombatEventBatch(
     auto soundVec   = fbb.CreateVector(soundOffsets);
     auto seismicVec = fbb.CreateVector(seismicOffsets);
     auto musicVec   = fbb.CreateVector(musicOffsets);
+    auto volleyVec  = fbb.CreateVector(volleyOffsets);
+    auto fieldVec   = fbb.CreateVector(fieldOffsets);
     auto batch = SpringWeb::CreateGameEventBatch(
-        fbb, frame, /*events=*/0, combatVec, firedVec, impactVec, trajVec, soundVec, seismicVec, musicVec);
+        fbb, frame, /*events=*/0, combatVec, firedVec, impactVec, trajVec, soundVec, seismicVec, musicVec,
+        volleyVec, fieldVec);
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_GameEventBatch, batch.Union());
 }
 
@@ -367,6 +415,65 @@ inline std::vector<uint8_t> BuildSendToUnsyncedEvent(
     auto evOff = eb.Finish();
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_SendToUnsyncedEvent,
                               evOff.Union());
+}
+
+/// One rules-param key→value change, ready to serialise into a
+/// RulesParamUpdate. `kind` picks which value is live; `Nil` means delete.
+/// W3: added keyId for interned keys (0 = use string key).
+struct RulesParamEntryData {
+    std::string key;
+    uint16_t keyId = 0;  // W3: interned key ID (0 = not interned)
+    SpringWeb::RulesParamValueKind kind = SpringWeb::RulesParamValueKind_Nil;
+    double numVal = 0.0;
+    std::string strVal;
+};
+
+/// A per-scope batch of rules-param changes (see schema RulesParamUpdate).
+/// W3: added paramsRev generation counter.
+struct RulesParamUpdateData {
+    SpringWeb::RulesParamScope scope = SpringWeb::RulesParamScope_Game;
+    uint32_t id = 0;          // teamID for Team scope; ignored for Game
+    bool replace = false;     // true = join snapshot (clear then apply)
+    uint32_t paramsRev = 0;  // W3: generation counter for snapshot validation
+    std::vector<RulesParamEntryData> params;
+};
+
+/// Build a RulesParamUpdate — a per-tick (or join-snapshot) batch of
+/// `Spring.Set{Game,Team}RulesParam` changes for one scope. The caller has
+/// already applied per-session LOS filtering for Team scope (game scope is
+/// unfiltered); this only frames the entries.
+inline std::vector<uint8_t> BuildRulesParamUpdate(const RulesParamUpdateData& upd)
+{
+    flatbuffers::FlatBufferBuilder fbb(256);
+    std::vector<flatbuffers::Offset<SpringWeb::RulesParamEntry>> entryOffs;
+    entryOffs.reserve(upd.params.size());
+    for (const auto& e : upd.params) {
+        // W3: prefer key_id when available, fall back to string key
+        flatbuffers::Offset<flatbuffers::String> keyOff = 0;
+        if (e.keyId == 0 || e.key.length() > 0) {
+            keyOff = fbb.CreateString(e.key);
+        }
+        flatbuffers::Offset<flatbuffers::String> strOff = 0;
+        if (e.kind == SpringWeb::RulesParamValueKind_String)
+            strOff = fbb.CreateString(e.strVal);
+        SpringWeb::RulesParamEntryBuilder eb(fbb);
+        if (keyOff.o != 0) eb.add_key(keyOff);
+        if (e.keyId > 0) eb.add_key_id(e.keyId);  // W3: add interned key ID
+        eb.add_value_kind(e.kind);
+        eb.add_num_val(e.numVal);
+        if (strOff.o != 0) eb.add_str_val(strOff);
+        entryOffs.push_back(eb.Finish());
+    }
+    auto paramsVec = fbb.CreateVector(entryOffs);
+    SpringWeb::RulesParamUpdateBuilder ub(fbb);
+    ub.add_scope(upd.scope);
+    ub.add_id(upd.id);
+    ub.add_replace(upd.replace);
+    ub.add_params(paramsVec);
+    if (upd.paramsRev > 0) ub.add_params_rev(upd.paramsRev);  // W3: add generation counter
+    auto updOff = ub.Finish();
+    return BuildServerMessage(fbb, SpringWeb::ServerPayload_RulesParamUpdate,
+                              updOff.Union());
 }
 
 /// Build a LuaUIMsgRelay (relayed `Spring.SendLuaUIMsg` → receiver's
@@ -1006,17 +1113,19 @@ inline std::vector<uint8_t> BuildGameInfo(
     float windStrength = 0, float tidalStrength = 0,
     bool legacyCoordSystem = false, uint32_t maxUnits = 0,
     bool gameOver = false,
-    const std::vector<uint8_t>& winningAllyTeams = {})
+    const std::vector<uint8_t>& winningAllyTeams = {},
+    const std::string& defsHash = "")
 {
     flatbuffers::FlatBufferBuilder fbb(256);
     auto mapOff = fbb.CreateString(mapId);
     auto gameOff = fbb.CreateString(gameId);
+    auto defsHashOff = fbb.CreateString(defsHash);  // W4: defs hash
     // Nested vectors must be serialised before the table that references them.
     auto winnersOff = fbb.CreateVector(winningAllyTeams);
     auto info = SpringWeb::CreateGameInfo(
         fbb, mapOff, gameOff, speed, frame, paused,
         windX, windY, windZ, windStrength, tidalStrength,
-        legacyCoordSystem, maxUnits, gameOver, winnersOff);
+        legacyCoordSystem, maxUnits, gameOver, defsHashOff, winnersOff);
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_GameInfo, info.Union());
 }
 

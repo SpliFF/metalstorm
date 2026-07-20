@@ -365,6 +365,7 @@ function toWeaponDefInfos(parsed: any): WeaponDefInfo[] {
         reloadTime: num(d.reload_time),
         salvoSize: num(d.salvo_size),
         salvoDelay: num(d.salvo_delay),
+        expectedDps: num(d.expected_dps),
         accuracy: num(d.accuracy),
         sprayAngle: num(d.spray_angle),
         movingAccuracy: num(d.moving_accuracy),

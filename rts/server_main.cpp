@@ -743,21 +743,62 @@ int main(int argc, char* argv[])
     // re-serialize, browser cache hit.
     std::string& defsCacheKey = ctx.defsCacheKey;
     if (unitDefHandler && weaponDefHandler && !gameId.empty()) {
-        defsCacheKey = DefsCache::ComputeCacheKey(
-            gameId, gameVersion, CGameSetup::GetModOptions());
-
-        // Skip re-baking if the cache files already exist for this key.
-        // This is the warm path: same modOptions in repeat sessions.
-        //
-        // The filenames must match what DefsCache actually writes
-        // (`.lua.br` since the v14-lua migration — the stale `.bin`
-        // probe here never matched, so every launch re-serialised the
-        // defs needlessly). Under --no-cache we deliberately force the
-        // cold path AND overwrite below: the cache key is content-blind
-        // (see DefsCache.h), so an edited/added `units/*.lua` would
-        // otherwise never reach the browser, which fetches this on-disk
-        // payload by key.
+        // Serialize the full def set to Lua source FIRST, then derive the
+        // cache key from the emitted payload (DefsCache::ComputeContentKey).
+        // Serialization is cheap (once per game-server process) and this is
+        // what makes the key content-aware: the old ComputeCacheKey hashed
+        // only gameId/version/modOptions, so any def edit left the key —
+        // and thus the URL the client fetches — frozen at its first bake.
+        // The client then received stale def_ids that disagreed with the
+        // live server def_ids and every native model rendered as a fallback
+        // shape. See DefsCache.h.
         namespace fs = std::filesystem;
+
+        // Probe the game's gamedata/resources.lua for the set of
+        // projectile-texture names. The weapon-def baker uses this to
+        // choose between the primary and fallback name when applying
+        // Spring's per-weaponType defaults (e.g. `missileflaretexture` is
+        // preferred when defined, otherwise `flare`). With an empty set the
+        // baker still writes the primary; the client's resolver chases any
+        // remaining alias.
+        const std::string gameDir = "data/games/" + gameId;
+        const std::string engineBaseDir = "cont/base/springcontent";
+        const auto projTextureNames =
+            ResourcesParser::GetProjectileTextureNames(
+                gameId, gameDir, engineBaseDir);
+
+        // Serialize each def category to Lua source. Output files end in
+        // `.lua.br` and are served with `Content-Encoding: br` so the
+        // browser decompresses transparently. See PLAN-defs.md.
+        namespace L = LuaDefsSerializer;
+        std::string udSrc = L::SerializeUnitDefs(
+            unitDefHandler->GetUnitDefsVec(), gameId);
+        std::string wdSrc = L::SerializeWeaponDefs(
+            weaponDefHandler->GetWeaponDefsVec(), gameId,
+            &projTextureNames);
+        auto cegDefs = CegLoader::LoadAllCegDefs();
+        std::string cdSrc = L::SerializeCegDefs(cegDefs);
+
+        std::string fdSrc;
+        size_t fdDefCount = 0;
+        if (featureDefHandler != nullptr) {
+            const fs::path modelsDir = fs::path("data/games") / gameId / "models";
+            const auto& fdVec = featureDefHandler->GetFeatureDefsVec();
+            fdSrc = L::SerializeFeatureDefs(fdVec, gameId, modelsDir);
+            fdDefCount = fdVec.empty() ? 0 : fdVec.size() - 1;
+        } else {
+            fdSrc = "return{base_url=[[]],defs={}}";
+        }
+
+        defsCacheKey = DefsCache::ComputeContentKey(
+            gameId, gameVersion, CGameSetup::GetModOptions(),
+            udSrc, wdSrc, cdSrc, fdSrc);
+
+        // Skip re-baking (brotli + disk write) if the cache files already
+        // exist for this key. With a content-derived key the warm path is
+        // reached only when the emitted defs are byte-identical to a prior
+        // bake, so it can never serve stale def_ids. Under --no-cache we
+        // still force the cold path AND overwrite below.
         const fs::path dir = DefsCache::CacheDir(gameId, defsCacheKey);
         const bool warm = !CacheControl::IsNoCache()
                        && fs::exists(dir / "unitdefs.lua.br")
@@ -769,45 +810,6 @@ int main(int argc, char* argv[])
             SLOG(SPRING_LOG_NOTICE, "defs cache warm: gameId=%s key=%s",
                  gameId.c_str(), defsCacheKey.c_str());
         } else {
-            // Probe the game's gamedata/resources.lua for the set of
-            // projectile-texture names. The weapon-def baker uses this
-            // to choose between the primary and fallback name when
-            // applying Spring's per-weaponType defaults (e.g.
-            // `missileflaretexture` is preferred when defined,
-            // otherwise `flare`). With an empty set the baker still
-            // writes the primary; the client's resolver chases any
-            // remaining alias.
-            const std::string gameDir = "data/games/" + gameId;
-            const std::string engineBaseDir = "cont/base/springcontent";
-            const auto projTextureNames =
-                ResourcesParser::GetProjectileTextureNames(
-                    gameId, gameDir, engineBaseDir);
-
-            // Serialize each def category to Lua source, then brotli-
-            // compress. Output files end in `.lua.br` and are served
-            // with `Content-Encoding: br` so the browser decompresses
-            // transparently. See PLAN-defs.md for the rationale on
-            // Lua source vs FlatBuffer.
-            namespace L = LuaDefsSerializer;
-            std::string udSrc = L::SerializeUnitDefs(
-                unitDefHandler->GetUnitDefsVec(), gameId);
-            std::string wdSrc = L::SerializeWeaponDefs(
-                weaponDefHandler->GetWeaponDefsVec(), gameId,
-                &projTextureNames);
-            auto cegDefs = CegLoader::LoadAllCegDefs();
-            std::string cdSrc = L::SerializeCegDefs(cegDefs);
-
-            std::string fdSrc;
-            size_t fdDefCount = 0;
-            if (featureDefHandler != nullptr) {
-                const fs::path modelsDir = fs::path("data/games") / gameId / "models";
-                const auto& fdVec = featureDefHandler->GetFeatureDefsVec();
-                fdSrc = L::SerializeFeatureDefs(fdVec, gameId, modelsDir);
-                fdDefCount = fdVec.empty() ? 0 : fdVec.size() - 1;
-            } else {
-                fdSrc = "return{base_url=[[]],defs={}}";
-            }
-
             auto udBytes = L::CompressBrotli(udSrc);
             auto wdBytes = L::CompressBrotli(wdSrc);
             auto cdBytes = L::CompressBrotli(cdSrc);
@@ -904,7 +906,10 @@ int main(int argc, char* argv[])
             // allyTeam defaults to the team id until we grow a real
             // alliance concept — teams are their own ally for now.
             const int allyTeam = rq.team;
-            if (aiPool.AddAI(match->id, rq.team, allyTeam, code)) {
+            // Pass the plugin folder so the AI VM's plugin-scoped `require`
+            // (AI0-loader) can resolve sibling modules (a multi-file AI like
+            // strategos wires config/picture/slate/planner/... via require).
+            if (aiPool.AddAI(match->id, rq.team, allyTeam, code, match->folderPath)) {
                 SLOG(SPRING_LOG_NOTICE,
                     "loaded AI '%s' (%s) on team %d",
                     match->displayName.c_str(), match->id.c_str(), rq.team);
