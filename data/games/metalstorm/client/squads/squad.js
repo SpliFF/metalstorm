@@ -8,6 +8,7 @@ import { arrive, separate, clampLen, wrapAngle, softLeashPull } from './steering
 import { profileFor } from './movement-profiles.js';
 import { steerMember as airSteer } from './air-cohesion.js';
 import { steerMember as navalSteer } from './naval-cohesion.js';
+import { projectDropPoint, descendStep, scatterSlot } from './squad-transport.js';
 
 // Reused scratch objects — the per-frame loops must not allocate (§7 perf).
 // New passability-aware terms (projection/potential-field results, air/naval
@@ -69,6 +70,20 @@ export class Squad {
     this._lod = 'full';                 // 'full' | 'centroid' | 'icon' (see setter below)
     this._spawned = false;
 
+    // Transport (PLAN-metalstorm-squad-transport.md §2): a client-only
+    // visual state machine layered on the sim-authoritative cargo unit — the
+    // sim carries ONE unit per squad (§1); this only controls whether/where
+    // the COSMETIC members are drawn. FREE -> BOARDING -> LOADED ->
+    // UNLOADING -> FREE, driven by onUnitLoaded/onUnitUnloaded (§6, the real
+    // event path once streamed, and the manager-level heuristic fallback).
+    this.transportState = 'FREE';
+    this._transportTargetX = 0; this._transportTargetY = 0; this._transportTargetZ = 0;
+    this._transportElapsed = 0;
+    this._transportParadrop = false;
+    // Heuristic-fallback bookkeeping only (squad-manager.js inferTransportState,
+    // §6) — untouched by the explicit event path.
+    this._transportHeuristic = false;
+
     // Collision (PLAN-metalstorm-squad-collision.md §5): optional hook the
     // manager installs to register a dropped wreck for brief avoidance-hash
     // presence. No-op if unset (e.g. a bare Squad in a test).
@@ -103,6 +118,18 @@ export class Squad {
       this.cx = x; this.cy = y; this.cz = z; this.heading = heading;
       this._spawnInitial();
       this._trail.push({ x: this.cx, z: this.cz });
+      return;
+    }
+
+    // Transport §6: while LOADED the sim may keep streaming the carrier's
+    // pose, stop streaming entirely, or resume after an arbitrary gap — none
+    // of that is a teleport (there are no visible members to shift anyway,
+    // every member is released) and running the teleport-guard here would
+    // reseed the trail right before the unload un-hide reads it. Track the
+    // raw pose and stop; onUnitUnloaded (or the UNLOADING transition) resets
+    // cx/cz to the drop point directly, deliberately bypassing this path.
+    if (this.transportState === 'LOADED') {
+      this.cx = x; this.cy = y; this.cz = z; this.heading = heading;
       return;
     }
 
@@ -453,6 +480,111 @@ export class Squad {
     }
   }
 
+  // --- transport (squad-transport.md §2, §5, §6) --------------------------
+
+  /** Sim `UnitLoaded(squadUnit, transportUnit)` callin (§6 — the real event
+   *  path once streamed, or the manager-level heuristic fallback). Begins
+   *  BOARDING: members path to the transport, then release (§2) once
+   *  arrived or the board-time cap expires (§7 pitfall — never chase a
+   *  moving transport forever). No-op if already boarding/loaded so a
+   *  duplicate/replayed event can't restart the timer. */
+  onUnitLoaded(carrierId, tx, ty, tz) {
+    if (this.transportState === 'BOARDING' || this.transportState === 'LOADED') return;
+    this.transportState = 'BOARDING';
+    this._transportTargetX = tx; this._transportTargetY = ty; this._transportTargetZ = tz;
+    this._transportElapsed = 0;
+  }
+
+  /** Sim `UnitUnloaded(squadUnit, pos)` callin (§6). Drops at `(x,y,z)`
+   *  (sim-authoritative), projected onto the nearest passable cell for this
+   *  squad's move class if a passability grid is available (§5 pitfall —
+   *  paradrop onto impassable terrain). `airborne` (§5) spawns members at
+   *  the carrier's altitude and lets them parachute down instead of landing
+   *  immediately. Re-forms exactly `aliveCount` members (§4) — dead members
+   *  stay dead. No-op if the squad wasn't boarding/loaded (stray/duplicate
+   *  event). */
+  onUnitUnloaded(x, y, z, airborne = false, passability = null) {
+    if (this.transportState !== 'BOARDING' && this.transportState !== 'LOADED') return;
+    const drop = projectDropPoint(x, z, passability, this.profile.moveClass, this.cfg.slotProjectionCap);
+    this.cx = drop.x; this.cz = drop.z; this.cy = y;
+    this.transportState = 'UNLOADING';
+    this._transportElapsed = 0;
+    this._transportParadrop = airborne;
+    // Fresh corridor from the drop point — the old trail belongs to wherever
+    // the squad was before boarding and would bias re-form steering toward a
+    // stale path across the map (pathfinding §9 "trail starvation").
+    this._trail.length = 0;
+    this._trail.push({ x: this.cx, z: this.cz });
+    this._spawnAtDropPoint(airborne);
+  }
+
+  /** UNLOADING re-spawn (§2, §4): rebuild every still-alive member at the
+   *  drop point, scattered (§2 "spill") rather than snapped straight to
+   *  formation — the normal steering path (update()) then re-forms them
+   *  exactly like any other slot arrival. Dead members are never recreated
+   *  (Pitfall #3, the monotonic aliveCount invariant — no resurrection).
+   *  Releases any instance a member still holds first (idempotent even if
+   *  called from mid-BOARDING, not just from LOADED). */
+  _spawnAtDropPoint(airborne) {
+    for (const m of this.members) {
+      if (!m.alive) continue;
+      if (!m.released && m.handle !== -1) this.backend.releaseMember(m.handle);
+      const local = scatterSlot(this.slots[m.slot], this.cfg.transportSpillMul, m.id);
+      slotToWorld(local, this.cx, this.cz, this.heading, _slotW);
+      m.x = _slotW.x; m.z = _slotW.z;
+      m.y = airborne ? this.cy : this.backend.groundHeight(m.x, m.z);
+      m.handle = this.backend.createMember(this.id, m.slot, m.visual);
+      m.released = false;
+    }
+  }
+
+  /** Per-frame transport driver, called from update() before the normal
+   *  steering branch. Returns true if the squad is fully under transport
+   *  control this frame (caller must skip normal FREE steering — §2
+   *  "suppress steering while LOADED"); UNLOADING returns false once its
+   *  paradrop (if any) has landed so the normal ground/naval/air stepper
+   *  re-forms the spill via ordinary slot arrival. */
+  _updateTransport(dt) {
+    if (this.transportState === 'FREE') return false;
+    this._transportElapsed += dt;
+
+    if (this.transportState === 'BOARDING') {
+      const maxSpeed = this.def.maxSpeed * this.cfg.memberSpeedMultiplier;
+      let allArrived = true;
+      for (const m of this.members) {
+        if (!m.alive || m.released) continue;
+        const d2 = (this._transportTargetX - m.x) ** 2 + (this._transportTargetZ - m.z) ** 2;
+        if (d2 > this.cfg.arrivalRadius ** 2) allArrived = false;
+        arrive(m.x, m.z, this._transportTargetX, this._transportTargetZ, maxSpeed, this.cfg.arrivalRadius, _arr);
+        m.integrate(_arr.x, _arr.z, dt, this.backend);
+        this.backend.updateMember(m.handle, m.x, m.y, m.z, m.headingY, m.gait);
+      }
+      if (allArrived || this._transportElapsed >= this.cfg.transportBoardTimeSec) {
+        this._releaseInstances();
+        this.transportState = 'LOADED';
+      }
+      return true;
+    }
+
+    if (this.transportState === 'LOADED') return true; // members released — nothing to steer
+
+    // UNLOADING: a paradrop falls straight down first (no horizontal drift
+    // while airborne — a deliberate cosmetic simplification); once landed
+    // (or immediately, for a ground/naval unload) fall through to normal
+    // steering so the spill re-forms via ordinary slot arrival.
+    if (this._transportParadrop) {
+      let allLanded = true;
+      for (const m of this.members) {
+        if (!m.alive || m.released) continue;
+        const groundY = this.backend.groundHeight(m.x, m.z);
+        if (!descendStep(m, groundY, this.cfg.paradropDescentRatePerSec, dt)) allLanded = false;
+      }
+      if (!allLanded) return true;
+    }
+    if (this._transportElapsed >= this.cfg.transportUnloadSettleSec) this.transportState = 'FREE';
+    return false;
+  }
+
   // --- per-frame update ---------------------------------------------------
 
   /** Steer + integrate living members. `neighbourQuery` yields nearby members
@@ -462,6 +594,7 @@ export class Squad {
    *  air ignores it entirely (pathfinding §6). */
   update(dt, nowSec, neighbourQuery, passability) {
     this._drainDeathQueue(nowSec);
+    if (this._updateTransport(dt)) return; // BOARDING/LOADED: transport owns the frame
     if (this.lod !== 'full') return this._updateCentroid();
 
     if (this._prevUpdateCx != null && dt > 1e-6) {

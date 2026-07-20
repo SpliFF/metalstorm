@@ -242,6 +242,54 @@ export class SquadManager {
     }
   }
 
+  // --- transport (squad-transport.md §2, §6) ------------------------------
+
+  /** Sim `UnitLoaded(squadUnit, transportUnit)` callin — the real event path,
+   *  once streamed to the client worker (§6 wire dependency). No-op for an
+   *  untracked id (destroyed/unknown). */
+  unitLoaded(id, carrierId, tx, ty, tz) {
+    this.squads.get(id)?.onUnitLoaded(carrierId, tx, ty, tz);
+  }
+
+  /** Sim `UnitUnloaded(squadUnit, pos)` callin — the real event path (§6). */
+  unitUnloaded(id, x, y, z, airborne = false) {
+    this.squads.get(id)?.onUnitUnloaded(x, y, z, airborne, this.passability);
+  }
+
+  /** Heuristic fallback (§6): UnitLoaded/UnitUnloaded aren't streamed yet, so
+   *  until they are, infer LOADED from "squad went hidden while co-located
+   *  with a known transport-capable unit" and infer UNLOADING from "a
+   *  heuristically-loaded squad became visible again" — fragile by design
+   *  (no real drop-point precision; the squad's last-known centroid is the
+   *  best available position), replaced outright by `unitLoaded`/
+   *  `unitUnloaded` the moment the wire event lands. Call once per frame per
+   *  candidate id; `hidden` and `carriers` (`{id,x,y,z}[]`, transport-
+   *  capable units currently known) are the caller's (worker adapter's) job
+   *  to compute — this module has no entity-visibility knowledge of its own. */
+  inferTransportState(id, hidden, carriers) {
+    const sq = this.squads.get(id);
+    if (!sq) return;
+
+    if (hidden) {
+      if (sq._transportHeuristic) return; // already inferred-loaded this stretch
+      const r2 = this.cfg.transportHeuristicRadius ** 2;
+      for (const c of carriers) {
+        const d2 = (c.x - sq.cx) ** 2 + (c.z - sq.cz) ** 2;
+        if (d2 <= r2) {
+          sq.onUnitLoaded(c.id, c.x, c.y, c.z);
+          sq._transportHeuristic = true;
+          return;
+        }
+      }
+      return;
+    }
+
+    if (sq._transportHeuristic) {
+      sq._transportHeuristic = false;
+      sq.onUnitUnloaded(sq.cx, sq.cy, sq.cz, false, this.passability);
+    }
+  }
+
   // --- def-before-state buffering (H1) ------------------------------------
 
   /** Merge a partial pose/strength update into the id's pending entry. Keeps

@@ -136,6 +136,30 @@ export const DEFAULT_CONFIG = {
   stuckFramesTrailBoost: 30,      // level 1: bias harder toward the trail
   stuckFramesIgnoreSeparation: 60,// level 2: also drop separation this member
   stuckFramesTeleport: 120,       // level 3: teleport-snap IF off-screen
+
+  // --- Transport (PLAN-metalstorm-squad-transport.md) ---------------------
+
+  // Boarding: cap how long members chase a (possibly moving) transport
+  // before hard-hiding regardless of remaining distance (§7 pitfall — never
+  // chase forever).
+  transportBoardTimeSec: 4,
+
+  // Unload settle window (§2): how long UNLOADING holds before flipping back
+  // to FREE. Normal steering re-forms the spill during this window.
+  transportUnloadSettleSec: 3,
+
+  // Unload spill (§2): local-slot offset multiplier for the initial scatter
+  // around the drop point; normal steering tightens it back to formation.
+  transportSpillMul: 2.2,
+
+  // Paradrop descent rate (§5), elmos/sec.
+  paradropDescentRatePerSec: 40,
+
+  // Heuristic fallback (§6, wire dependency): a hidden squad within this
+  // radius of a known transport-capable unit is inferred LOADED. Replace
+  // with explicit UnitLoaded/UnitUnloaded callins once streamed — fragile by
+  // design.
+  transportHeuristicRadius: 40,
 };
 
 // THE routing predicate — canonical single home (PLAN-metalstorm-structure.md
