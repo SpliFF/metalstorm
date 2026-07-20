@@ -243,6 +243,19 @@ table ChatSend {
     destination: uint8;         // 0=all, 1=allies, 2=spectators
 }
 
+/// Client → Server (game connection only): sent immediately before a
+/// deliberate `disconnect()` so the server can distinguish *why* the client
+/// is leaving. Optional — a client that disconnects without sending this
+/// (crash, network drop, timeout) still produces a `PlayerRemoved` with the
+/// server's own default reason (0). See `PlayerLeft.reason` /
+/// `PlayerTeamEventItem.reason` for the shared reason enum.
+/// PLAN-quickstart.md §3.3: the detach path (`gpDetach`) sends this with
+/// reason=3 so PLAN-metalstorm-teams.md's `PlayerRemoved` consumer can tell
+/// a parked/reconnecting player apart from one who actually quit.
+table PlayerLeaveIntent {
+    reason: uint8;
+}
+
 /// Forwarded `Spring.SendLuaRulesMsg` call from a client widget to the
 /// server's synced LuaRules state. The data payload is delivered verbatim
 /// to `gadget:RecvLuaMsg(msg, playerID)`. Bytes (not string) so embedded
@@ -487,6 +500,7 @@ union ClientPayload {
     StandingOrderUpdate,
     StandingOrderRemove,
     LuaUIMsg,
+    PlayerLeaveIntent,
 }
 
 table ClientMessage {
@@ -899,7 +913,8 @@ table TeamStartInfo {
 struct PlayerTeamEventItem {
     /// 0 = PlayerChanged, 1 = PlayerAdded, 2 = PlayerRemoved, 3 = TeamDied.
     kind: uint8;
-    /// PlayerRemoved reason (0=quit, 1=kicked, 2=timeout); 0 for other kinds.
+    /// PlayerRemoved reason (0=quit, 1=kicked, 2=timeout, 3=detach — parked,
+    /// may reconnect); 0 for other kinds.
     reason: uint8;
     /// playerID for kinds 0-2, teamID for kind 3.
     id: uint32;
@@ -1002,7 +1017,8 @@ table PlayerLeft {
     player_id: uint32;
     username: string;
     team: int8;
-    /// 0 = voluntary quit, 1 = kicked, 2 = connection timeout
+    /// 0 = voluntary quit, 1 = kicked, 2 = connection timeout, 3 = detach
+    /// (worker parked client-side; may reconnect — PLAN-quickstart.md §3.3)
     reason: uint8;
 }
 

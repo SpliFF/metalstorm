@@ -2220,15 +2220,20 @@ export function gpResize(width: number, height: number, dpr: number): void {
  * `gpResync` can return in well under a fresh boot. Idempotent: a second detach
  * on an already-parked worker is a no-op.
  */
+/** PlayerLeaveIntent / PlayerLeft / PlayerTeamEventItem reason value for a
+ *  detach (parked worker, may reconnect) — see protocol.fbs. */
+const LEAVE_REASON_DETACH = 3;
+
 export function gpDetach(): void {
     if (gpParked) { postToMain({ type: 'gp:detached' }); return; }
     gpParked = true;
     if (gpViewportTimer) { clearInterval(gpViewportTimer); gpViewportTimer = null; }
-    // Clean close → server emits PlayerRemoved. The leave-reason=detach plumbing
-    // (so PlayerRemoved can distinguish detach from quit) is Part B task 6.
+    // Tell the server why, THEN close cleanly. The reason lets PlayerRemoved
+    // distinguish detach from quit (PLAN-metalstorm-teams.md's consumer).
     // Keep the Connection OBJECT (don't null it): gpResync re-`connect()`s the
     // same instance so the selection/build/command controllers + CommandBuffer +
     // ServerClock they captured at gpInit stay valid across the park.
+    gpCtx.connection?.sendPlayerLeaveIntent(LEAVE_REASON_DETACH);
     gpCtx.connection?.disconnect();
     gpRenderPaused = true;
     postLog(1, '[gp] detached — session parked (worker alive, render + net paused)');

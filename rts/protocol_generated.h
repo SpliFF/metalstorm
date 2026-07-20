@@ -73,6 +73,10 @@ struct ChatSend;
 struct ChatSendBuilder;
 struct ChatSendT;
 
+struct PlayerLeaveIntent;
+struct PlayerLeaveIntentBuilder;
+struct PlayerLeaveIntentT;
+
 struct LuaRulesMsg;
 struct LuaRulesMsgBuilder;
 struct LuaRulesMsgT;
@@ -618,11 +622,12 @@ enum ClientPayload : uint8_t {
   ClientPayload_StandingOrderUpdate = 34,
   ClientPayload_StandingOrderRemove = 35,
   ClientPayload_LuaUIMsg = 36,
+  ClientPayload_PlayerLeaveIntent = 37,
   ClientPayload_MIN = ClientPayload_NONE,
-  ClientPayload_MAX = ClientPayload_LuaUIMsg
+  ClientPayload_MAX = ClientPayload_PlayerLeaveIntent
 };
 
-inline const ClientPayload (&EnumValuesClientPayload())[37] {
+inline const ClientPayload (&EnumValuesClientPayload())[38] {
   static const ClientPayload values[] = {
     ClientPayload_NONE,
     ClientPayload_Handshake,
@@ -660,13 +665,14 @@ inline const ClientPayload (&EnumValuesClientPayload())[37] {
     ClientPayload_StandingOrderCreate,
     ClientPayload_StandingOrderUpdate,
     ClientPayload_StandingOrderRemove,
-    ClientPayload_LuaUIMsg
+    ClientPayload_LuaUIMsg,
+    ClientPayload_PlayerLeaveIntent
   };
   return values;
 }
 
 inline const char * const *EnumNamesClientPayload() {
-  static const char * const names[38] = {
+  static const char * const names[39] = {
     "NONE",
     "Handshake",
     "AuthRequest",
@@ -704,13 +710,14 @@ inline const char * const *EnumNamesClientPayload() {
     "StandingOrderUpdate",
     "StandingOrderRemove",
     "LuaUIMsg",
+    "PlayerLeaveIntent",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNameClientPayload(ClientPayload e) {
-  if (::flatbuffers::IsOutRange(e, ClientPayload_NONE, ClientPayload_LuaUIMsg)) return "";
+  if (::flatbuffers::IsOutRange(e, ClientPayload_NONE, ClientPayload_PlayerLeaveIntent)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesClientPayload()[index];
 }
@@ -863,6 +870,10 @@ template<> struct ClientPayloadTraits<SpringWeb::LuaUIMsg> {
   static const ClientPayload enum_value = ClientPayload_LuaUIMsg;
 };
 
+template<> struct ClientPayloadTraits<SpringWeb::PlayerLeaveIntent> {
+  static const ClientPayload enum_value = ClientPayload_PlayerLeaveIntent;
+};
+
 template<typename T> struct ClientPayloadUnionTraits {
   static const ClientPayload enum_value = ClientPayload_NONE;
 };
@@ -1009,6 +1020,10 @@ template<> struct ClientPayloadUnionTraits<SpringWeb::StandingOrderRemoveT> {
 
 template<> struct ClientPayloadUnionTraits<SpringWeb::LuaUIMsgT> {
   static const ClientPayload enum_value = ClientPayload_LuaUIMsg;
+};
+
+template<> struct ClientPayloadUnionTraits<SpringWeb::PlayerLeaveIntentT> {
+  static const ClientPayload enum_value = ClientPayload_PlayerLeaveIntent;
 };
 
 struct ClientPayloadUnion {
@@ -1328,6 +1343,14 @@ struct ClientPayloadUnion {
   const SpringWeb::LuaUIMsgT *AsLuaUIMsg() const {
     return type == ClientPayload_LuaUIMsg ?
       reinterpret_cast<const SpringWeb::LuaUIMsgT *>(value) : nullptr;
+  }
+  SpringWeb::PlayerLeaveIntentT *AsPlayerLeaveIntent() {
+    return type == ClientPayload_PlayerLeaveIntent ?
+      reinterpret_cast<SpringWeb::PlayerLeaveIntentT *>(value) : nullptr;
+  }
+  const SpringWeb::PlayerLeaveIntentT *AsPlayerLeaveIntent() const {
+    return type == ClientPayload_PlayerLeaveIntent ?
+      reinterpret_cast<const SpringWeb::PlayerLeaveIntentT *>(value) : nullptr;
   }
 };
 
@@ -2811,7 +2834,8 @@ FLATBUFFERS_MANUALLY_ALIGNED_STRUCT(4) PlayerTeamEventItem FLATBUFFERS_FINAL_CLA
   uint8_t kind() const {
     return ::flatbuffers::EndianScalar(kind_);
   }
-  /// PlayerRemoved reason (0=quit, 1=kicked, 2=timeout); 0 for other kinds.
+  /// PlayerRemoved reason (0=quit, 1=kicked, 2=timeout, 3=detach — parked,
+  /// may reconnect); 0 for other kinds.
   uint8_t reason() const {
     return ::flatbuffers::EndianScalar(reason_);
   }
@@ -4389,6 +4413,67 @@ inline ::flatbuffers::Offset<ChatSend> CreateChatSendDirect(
 }
 
 ::flatbuffers::Offset<ChatSend> CreateChatSend(::flatbuffers::FlatBufferBuilder &_fbb, const ChatSendT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
+struct PlayerLeaveIntentT : public ::flatbuffers::NativeTable {
+  typedef PlayerLeaveIntent TableType;
+  uint8_t reason = 0;
+};
+
+/// Client → Server (game connection only): sent immediately before a
+/// deliberate `disconnect()` so the server can distinguish *why* the client
+/// is leaving. Optional — a client that disconnects without sending this
+/// (crash, network drop, timeout) still produces a `PlayerRemoved` with the
+/// server's own default reason (0). See `PlayerLeft.reason` /
+/// `PlayerTeamEventItem.reason` for the shared reason enum.
+/// PLAN-quickstart.md §3.3: the detach path (`gpDetach`) sends this with
+/// reason=3 so PLAN-metalstorm-teams.md's `PlayerRemoved` consumer can tell
+/// a parked/reconnecting player apart from one who actually quit.
+struct PlayerLeaveIntent FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef PlayerLeaveIntentT NativeTableType;
+  typedef PlayerLeaveIntentBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_REASON = 4
+  };
+  uint8_t reason() const {
+    return GetField<uint8_t>(VT_REASON, 0);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<uint8_t>(verifier, VT_REASON, 1) &&
+           verifier.EndTable();
+  }
+  PlayerLeaveIntentT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(PlayerLeaveIntentT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<PlayerLeaveIntent> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const PlayerLeaveIntentT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct PlayerLeaveIntentBuilder {
+  typedef PlayerLeaveIntent Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_reason(uint8_t reason) {
+    fbb_.AddElement<uint8_t>(PlayerLeaveIntent::VT_REASON, reason, 0);
+  }
+  explicit PlayerLeaveIntentBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<PlayerLeaveIntent> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<PlayerLeaveIntent>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<PlayerLeaveIntent> CreatePlayerLeaveIntent(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint8_t reason = 0) {
+  PlayerLeaveIntentBuilder builder_(_fbb);
+  builder_.add_reason(reason);
+  return builder_.Finish();
+}
+
+::flatbuffers::Offset<PlayerLeaveIntent> CreatePlayerLeaveIntent(::flatbuffers::FlatBufferBuilder &_fbb, const PlayerLeaveIntentT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 
 struct LuaRulesMsgT : public ::flatbuffers::NativeTable {
   typedef LuaRulesMsg TableType;
@@ -6460,6 +6545,9 @@ struct ClientMessage FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const SpringWeb::LuaUIMsg *payload_as_LuaUIMsg() const {
     return payload_type() == SpringWeb::ClientPayload_LuaUIMsg ? static_cast<const SpringWeb::LuaUIMsg *>(payload()) : nullptr;
   }
+  const SpringWeb::PlayerLeaveIntent *payload_as_PlayerLeaveIntent() const {
+    return payload_type() == SpringWeb::ClientPayload_PlayerLeaveIntent ? static_cast<const SpringWeb::PlayerLeaveIntent *>(payload()) : nullptr;
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<uint8_t>(verifier, VT_PAYLOAD_TYPE, 1) &&
@@ -6614,6 +6702,10 @@ template<> inline const SpringWeb::StandingOrderRemove *ClientMessage::payload_a
 
 template<> inline const SpringWeb::LuaUIMsg *ClientMessage::payload_as<SpringWeb::LuaUIMsg>() const {
   return payload_as_LuaUIMsg();
+}
+
+template<> inline const SpringWeb::PlayerLeaveIntent *ClientMessage::payload_as<SpringWeb::PlayerLeaveIntent>() const {
+  return payload_as_PlayerLeaveIntent();
 }
 
 struct ClientMessageBuilder {
@@ -9515,7 +9607,8 @@ struct PlayerLeft FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   int8_t team() const {
     return GetField<int8_t>(VT_TEAM, 0);
   }
-  /// 0 = voluntary quit, 1 = kicked, 2 = connection timeout
+  /// 0 = voluntary quit, 1 = kicked, 2 = connection timeout, 3 = detach
+  /// (worker parked client-side; may reconnect — PLAN-quickstart.md §3.3)
   uint8_t reason() const {
     return GetField<uint8_t>(VT_REASON, 0);
   }
@@ -15834,6 +15927,32 @@ inline ::flatbuffers::Offset<ChatSend> CreateChatSend(::flatbuffers::FlatBufferB
       _destination);
 }
 
+inline PlayerLeaveIntentT *PlayerLeaveIntent::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<PlayerLeaveIntentT>(new PlayerLeaveIntentT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void PlayerLeaveIntent::UnPackTo(PlayerLeaveIntentT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = reason(); _o->reason = _e; }
+}
+
+inline ::flatbuffers::Offset<PlayerLeaveIntent> PlayerLeaveIntent::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const PlayerLeaveIntentT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return CreatePlayerLeaveIntent(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<PlayerLeaveIntent> CreatePlayerLeaveIntent(::flatbuffers::FlatBufferBuilder &_fbb, const PlayerLeaveIntentT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const PlayerLeaveIntentT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _reason = _o->reason;
+  return SpringWeb::CreatePlayerLeaveIntent(
+      _fbb,
+      _reason);
+}
+
 inline LuaRulesMsgT *LuaRulesMsg::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
   auto _o = std::unique_ptr<LuaRulesMsgT>(new LuaRulesMsgT());
   UnPackTo(_o.get(), _resolver);
@@ -20036,6 +20155,10 @@ inline bool VerifyClientPayload(::flatbuffers::Verifier &verifier, const void *o
       auto ptr = reinterpret_cast<const SpringWeb::LuaUIMsg *>(obj);
       return verifier.VerifyTable(ptr);
     }
+    case ClientPayload_PlayerLeaveIntent: {
+      auto ptr = reinterpret_cast<const SpringWeb::PlayerLeaveIntent *>(obj);
+      return verifier.VerifyTable(ptr);
+    }
     default: return true;
   }
 }
@@ -20199,6 +20322,10 @@ inline void *ClientPayloadUnion::UnPack(const void *obj, ClientPayload type, con
       auto ptr = reinterpret_cast<const SpringWeb::LuaUIMsg *>(obj);
       return ptr->UnPack(resolver);
     }
+    case ClientPayload_PlayerLeaveIntent: {
+      auto ptr = reinterpret_cast<const SpringWeb::PlayerLeaveIntent *>(obj);
+      return ptr->UnPack(resolver);
+    }
     default: return nullptr;
   }
 }
@@ -20350,6 +20477,10 @@ inline ::flatbuffers::Offset<void> ClientPayloadUnion::Pack(::flatbuffers::FlatB
       auto ptr = reinterpret_cast<const SpringWeb::LuaUIMsgT *>(value);
       return CreateLuaUIMsg(_fbb, ptr, _rehasher).Union();
     }
+    case ClientPayload_PlayerLeaveIntent: {
+      auto ptr = reinterpret_cast<const SpringWeb::PlayerLeaveIntentT *>(value);
+      return CreatePlayerLeaveIntent(_fbb, ptr, _rehasher).Union();
+    }
     default: return 0;
   }
 }
@@ -20498,6 +20629,10 @@ inline ClientPayloadUnion::ClientPayloadUnion(const ClientPayloadUnion &u) : typ
     }
     case ClientPayload_LuaUIMsg: {
       value = new SpringWeb::LuaUIMsgT(*reinterpret_cast<SpringWeb::LuaUIMsgT *>(u.value));
+      break;
+    }
+    case ClientPayload_PlayerLeaveIntent: {
+      value = new SpringWeb::PlayerLeaveIntentT(*reinterpret_cast<SpringWeb::PlayerLeaveIntentT *>(u.value));
       break;
     }
     default:
@@ -20684,6 +20819,11 @@ inline void ClientPayloadUnion::Reset() {
     }
     case ClientPayload_LuaUIMsg: {
       auto ptr = reinterpret_cast<SpringWeb::LuaUIMsgT *>(value);
+      delete ptr;
+      break;
+    }
+    case ClientPayload_PlayerLeaveIntent: {
+      auto ptr = reinterpret_cast<SpringWeb::PlayerLeaveIntentT *>(value);
       delete ptr;
       break;
     }

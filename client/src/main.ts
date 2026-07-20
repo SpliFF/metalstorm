@@ -511,6 +511,7 @@ function quitToLobby(): void {
     // PLAN-quickstart.md Part B: a full quit ends any parked session too.
     clearParkTtl();
     detachSession.clear();
+    lobbyUI?.clearParked();
     firstFrameSeen = false;
     // GW8: drop any in-flight worker-bridge requests + cached feed.
     for (const p of gpPending.values()) p.reject(new Error('[test] game ended'));
@@ -631,6 +632,10 @@ function detachToLobby(): void {
     parkTtlTimer = window.setTimeout(disposeParkedWorker, DEFAULT_PARK_TTL_MS);
     lobbyUI?.showAfterGame();
     lobbyUI?.show();
+    // Re-enter UX (Part B task 6): a persistent "return to game" card, plus
+    // E4 — dispose the parked worker immediately if the game ends while
+    // parked, rather than relying solely on the TTL sweep.
+    lobbyUI?.markParked(resyncReenter, disposeParkedWorker);
     console.log('[detach] session parked — worker alive; re-enter to resync');
 }
 
@@ -645,6 +650,7 @@ function resyncReenter(): void {
     clearParkTtl();
     detachSession.bumpGeneration();
     detachSession.clear();
+    lobbyUI?.clearParked();
     // Refresh the token in case the original aged past the park TTL.
     const token = localStorage.getItem('springrts-token') ?? undefined;
     gameWorker?.postMessage({ type: 'gp:resync', token });

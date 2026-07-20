@@ -48,7 +48,8 @@ team():number {
 }
 
 /**
- * 0 = voluntary quit, 1 = kicked, 2 = connection timeout
+ * 0 = voluntary quit, 1 = kicked, 2 = connection timeout, 3 = detach
+ * (worker parked client-side; may reconnect — PLAN-quickstart.md §3.3)
  */
 reason():number {
   const offset = this.bb!.__offset(this.bb_pos, 10);

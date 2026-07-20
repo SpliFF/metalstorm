@@ -535,6 +535,10 @@ int main(int argc, char* argv[])
     std::unordered_map<ClientID, int> clientPlayerNum;
     int nextPlayerNum = 0;
 
+    // PLAN-quickstart.md §3.3: reason carried by a client's PlayerLeaveIntent
+    // (sent just before disconnect), consumed once when the disconnect drains.
+    std::unordered_map<ClientID, uint8_t> pendingLeaveReason;
+
     // GameStart is deferred until all roster players have connected and
     // registered CPlayers (matches real Spring's "all clients loaded" gate).
     std::unordered_set<std::string> connectedRosterPlayers;
@@ -552,7 +556,7 @@ int main(int argc, char* argv[])
         net, rtcServer, sim, db, sessions, rooms, aiPool, luaExecEngine,
         roomId, gameId, mapId, port, logMessages, /*defsCacheKey=*/std::string{},
         requestedPlayers, requestedAIs, playerTeamByUsername,
-        clientPlayerNum, nextPlayerNum, connectedRosterPlayers,
+        clientPlayerNum, pendingLeaveReason, nextPlayerNum, connectedRosterPlayers,
         rosterPlayersNeeded, handshakedClients,
     };
 
@@ -993,16 +997,27 @@ int main(int argc, char* argv[])
                 auto* session = sessions.GetSession(dcId);
                 if (!session) continue;
 
+                // PLAN-quickstart.md §3.3: a PlayerLeaveIntent sent just before
+                // this disconnect (e.g. gpDetach) overrides the default reason
+                // 0 (voluntary quit) — lets PlayerRemoved distinguish a parked/
+                // reconnecting player from one who actually quit.
+                uint8_t leaveReason = 0;
+                auto lrIt = pendingLeaveReason.find(dcId);
+                if (lrIt != pendingLeaveReason.end()) {
+                    leaveReason = lrIt->second;
+                    pendingLeaveReason.erase(lrIt);
+                }
+
                 SLOG(SPRING_LOG_NOTICE,
-                    "player '%s' (client %u, team %d) disconnected",
-                    session->username.c_str(), dcId, session->team);
+                    "player '%s' (client %u, team %d) disconnected (reason=%d)",
+                    session->username.c_str(), dcId, session->team, leaveReason);
 
                 // Broadcast PlayerLeft to remaining clients
                 auto plMsg = Protocol::BuildPlayerLeft(
                     static_cast<uint32_t>(session->userId),
                     session->username,
                     static_cast<int8_t>(session->team),
-                    0 /* reason: voluntary quit */);
+                    leaveReason);
                 rtcServer.BroadcastReliable(plMsg.data(), plMsg.size());
 
                 // Fire the Spring PlayerRemoved callin into Lua so
@@ -1011,10 +1026,10 @@ int main(int argc, char* argv[])
                 auto pIt = clientPlayerNum.find(dcId);
                 if (pIt != clientPlayerNum.end()) {
                     int pNum = pIt->second;
-                    playerHandler.PlayerLeft(pNum, 0);
-                    eventHandler.PlayerRemoved(pNum, 0);
+                    playerHandler.PlayerLeft(pNum, leaveReason);
+                    eventHandler.PlayerRemoved(pNum, leaveReason);
                     // Forward to the client LuaUI worker (widget:PlayerRemoved).
-                    playerTeamEvents.Push({PlayerTeamEventData::PlayerRemoved, 0,
+                    playerTeamEvents.Push({PlayerTeamEventData::PlayerRemoved, leaveReason,
                                            static_cast<uint32_t>(pNum)});
                     clientPlayerNum.erase(pIt);
                 }

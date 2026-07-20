@@ -77,6 +77,7 @@ import { ConsoleCommand } from '../protocol/spring-web/console-command.js';
 import { SelectionState } from '../protocol/spring-web/selection-state.js';
 import { PathRequest } from '../protocol/spring-web/path-request.js';
 import { PathRequestCancel } from '../protocol/spring-web/path-request-cancel.js';
+import { PlayerLeaveIntent } from '../protocol/spring-web/player-leave-intent.js';
 import { PathResponse } from '../protocol/spring-web/path-response.js';
 import { StandingOrderState } from '../protocol/spring-web/standing-order-state.js';
 import { StandingOrderType } from '../protocol/spring-web/standing-order-type.js';
@@ -1298,6 +1299,19 @@ export class Connection {
         PathRequestCancel.addRequestId(builder, requestId);
         const off = PathRequestCancel.endPathRequestCancel(builder);
         this.sendClientMessage(builder, ClientPayload.PathRequestCancel, off);
+    }
+
+    /** PLAN-quickstart.md §3.3: tell the server *why* a disconnect that is
+     *  about to happen is happening — e.g. reason=3 (detach) so the resulting
+     *  PlayerRemoved lets sim gadgets tell a parked/reconnecting player apart
+     *  from one who actually quit. Send this before `disconnect()`, not
+     *  after — `close()` on the underlying writer flushes queued writes
+     *  before the stream actually closes, so ordering is preserved. */
+    sendPlayerLeaveIntent(reason: number): void {
+        if (!this.authenticated) return;
+        const builder = new flatbuffers.Builder(16);
+        const off = PlayerLeaveIntent.createPlayerLeaveIntent(builder, reason);
+        this.sendClientMessage(builder, ClientPayload.PlayerLeaveIntent, off);
     }
 
     /** Send a PlayerCommand (unit order) to the server. */
