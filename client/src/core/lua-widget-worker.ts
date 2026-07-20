@@ -24,6 +24,9 @@ import {
     gpHandleFocusWorld, gpHandleStartBuildPlacement, gpHandleCancelBuildPlacement,
     gpHandleRemoveFactoryOrder,
     gpHandleCancelCommandMode,
+    gpHandleOrgGroupCreate, gpHandleOrgGroupUpdate, gpHandleOrgGroupDisband,
+    gpHandleGroupPosture, gpHandleGroupDirectiveUpdate, gpHandleGroupDirectiveRemove,
+    gpHandleSelectOrgGroup, gpHandleArmDirectiveShape, gpHandleCancelDirectiveShape,
 } from './game-processor.js';
 // PLAN-rml.md: DOM events + viewport changes route straight into the RmlUi
 // bridge (no game-processor state needed).
@@ -206,6 +209,39 @@ self.onmessage = async (e: MessageEvent<WorkerInbound>) => {
         // cancelling queued build order(s) on the selected factory.
         case 'gp:removeFactoryOrder':
             gpHandleRemoveFactoryOrder(msg.unitId as number, msg.tags as number[]);
+            break;
+
+        // PLAN-macro-ui.md §1/§3: org panel (main) requests → Connection.
+        case 'gp:orgGroupCreate':
+            gpHandleOrgGroupCreate(msg.name as string, msg.memberIds as number[]);
+            break;
+        case 'gp:orgGroupUpdate':
+            gpHandleOrgGroupUpdate(msg.groupId as number, msg.addIds as number[], msg.removeIds as number[], msg.name as string | undefined);
+            break;
+        case 'gp:orgGroupDisband':
+            gpHandleOrgGroupDisband(msg.groupId as number);
+            break;
+        case 'gp:groupPosture':
+            gpHandleGroupPosture(msg.groupId as number, msg.postureJson as string);
+            break;
+        case 'gp:groupDirectiveUpdate':
+            gpHandleGroupDirectiveUpdate(msg as unknown as import('./game-worker-protocol.js').GpGroupDirectiveUpdateToWorker);
+            break;
+        case 'gp:groupDirectiveRemove':
+            gpHandleGroupDirectiveRemove(msg.directiveId as number);
+            break;
+        case 'gp:selectOrgGroup':
+            gpHandleSelectOrgGroup(msg.groupId as number);
+            break;
+
+        // PLAN-macro-ui.md §2/§5: cross-thread arm/cancel for the shared
+        // directive-shape gesture capture (org panel button, or
+        // metalstorm-scripting task 4's map-arm integration).
+        case 'gp:armDirectiveShape':
+            gpHandleArmDirectiveShape(msg as unknown as import('./game-worker-protocol.js').GpArmDirectiveShapeToWorker);
+            break;
+        case 'gp:cancelDirectiveShape':
+            gpHandleCancelDirectiveShape();
             break;
 
         // PLAN-rml.md: native DOM events + viewport changes from the main-thread

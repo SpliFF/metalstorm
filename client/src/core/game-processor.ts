@@ -16,13 +16,15 @@
  */
 
 import { Engine, Scene, FreeCamera, Vector3, Color3, Color4, Mesh, MeshBuilder, StandardMaterial } from '@babylonjs/core';
-import type { GpInitToWorker, GpMinimapBlips, GpMinimapLos, GpMinimapMetalSpots, BuildMenuTile, FactoryQueueTile, GpTimingState } from './game-worker-protocol.js';
+import type { GpInitToWorker, GpMinimapBlips, GpMinimapLos, GpMinimapMetalSpots, BuildMenuTile, FactoryQueueTile,
+    GpTimingState, GpArmDirectiveShapeToWorker, GpGroupDirectiveUpdateToWorker } from './game-worker-protocol.js';
 // GW4-c2: the WebTransport game connection now lives in the worker. Connection
 // is host-agnostic (runs on WebTransportAdapter, no DOM refs after the
 // onServerRestart callback was extracted) so it imports + runs here unchanged.
 import { Connection } from './connection.js';
 import type { CombatEventInfo, FeatureSpawnInfo,
-    SoundEventInfo, SoundRefInfo, ResourceUpdateInfo, UnitCmdDescsInfo } from './connection.js';
+    SoundEventInfo, SoundRefInfo, ResourceUpdateInfo, UnitCmdDescsInfo,
+    OrgGroupInfoMsg, DirectiveInfoMsg } from './connection.js';
 import { AudioChannel } from './audio.js';
 import type { EntityStateSnapshot } from './entity-state.js';
 // GW4-c3: terrain + lighting + map parse move into the worker so terrain
@@ -101,6 +103,8 @@ import { TurretAimController } from './turret-aim-controller.js';
 import { WorkerSelection } from './worker-selection.js';
 import { WorkerBuildPlacement, UNITDEF_FLAG_IS_FACTORY } from './worker-build-placement.js';
 import { WorkerCommandModes } from './worker-command-modes.js';
+import { DirectiveShapeCapture, type ArmedDirective } from './directive-shape-capture.js';
+import type { ShapeKind } from './shape-gesture-capture.js';
 import { CMD, OPT } from './command-buffer.js';
 import { groupFactoryQueueRuns } from './factory-queue.js';
 import { findMetalSpots, type MetalSpot } from './metal-spots.js';
@@ -193,6 +197,18 @@ let gpBuildPlacement: WorkerBuildPlacement | null = null;
 /// via gp:cursorMode. Pointer handlers route left-clicks here after build
 /// placement, before selection.
 let gpCommandModes: WorkerCommandModes | null = null;
+/// PLAN-macro-ui.md §2/§5: worker-side click/paint gesture capture for macro
+/// directive shapes (Point/Circle/Polygon/Polyline), armed by an org-group
+/// hotkey or cross-thread via gp:armDirectiveShape (org panel / scripting
+/// task 4). Consumes pointer/wheel input exclusively while armed, ahead of
+/// gpCommandModes — same "an armed capture owns the mouse" convention as
+/// gpCommandModes' own area-attack drag.
+let gpDirectiveCapture: DirectiveShapeCapture | null = null;
+/// Latest org-group / directive snapshots (own team; own+allies respectively
+/// — same visibility rule as standing orders). Cached so gp:selectOrgGroup
+/// can resolve a group id to its member roster without a round trip.
+let gpLastOrgGroups: OrgGroupInfoMsg[] = [];
+let gpLastDirectives: DirectiveInfoMsg[] = [];
 /// G3a: per-unit command descriptions (UnitCmdDescsUpdate, ~1 Hz, selection-
 /// scoped). Cached so the buildable-tile set can be recomputed on selection
 /// change without waiting for the next broadcast. Also mirrored into
@@ -1027,6 +1043,19 @@ function gpConnect(msg: GpInitToWorker): void {
         // GW4-c5b-3: standing orders (always-on overlay; server scopes the
         // broadcast to own + allied teams).
         onStandingOrders: (orders) => gpStandingOrderRenderer?.update(orders),
+        // PLAN-macro-ui.md §3/§4: macro directives extend the standing-order
+        // renderer in place (shape-carrying overlay) and forward to main for
+        // the org panel / directive inspector (own team + allies, own team
+        // only for org groups — same visibility rule as onStandingOrders).
+        onOrgGroupState: (groups) => {
+            gpLastOrgGroups = groups;
+            postToMain({ type: 'gp:orgGroups', groups });
+        },
+        onDirectiveState: (directives) => {
+            gpLastDirectives = directives;
+            gpStandingOrderRenderer?.updateDirectives(directives);
+            postToMain({ type: 'gp:directives', directives });
+        },
         // GW4-c5c-2: audio getBridge(). The connection decodes SoundEvents here, but
         // playback needs the main-thread AudioContext. Resolve each event's
         // SoundRef against the in-worker def cache (the def-dependent step) and
@@ -1972,6 +2001,22 @@ export function gpInit(msg: GpInitToWorker): void {
         gpBuildPlacement.setCommandNotifier(commandNotifier);
         gpCommandModes.setCommandNotifier(commandNotifier);
     }
+    // PLAN-macro-ui.md §2/§5: shared shape-gesture capture for macro
+    // directives. Ground-picks off the same terrain mesh as WorkerCommandModes'
+    // pickGroundAt (duplicated here rather than exported private — cheap pure
+    // pick, no shared mutable state to entangle).
+    gpDirectiveCapture = new DirectiveShapeCapture(scene, gpCtx.connection!, {
+        getCamera: (viewId) => (viewId === 0 ? camera : null),
+        getDpr: () => gpDpr,
+        pickGround: (cssX, cssY, viewId) => {
+            if (viewId !== 0) return null;
+            const dpr = gpDpr;
+            const pick = scene.pick(cssX * dpr, cssY * dpr, (m) => m.name === 'terrain', false, camera);
+            return (pick?.hit && pick.pickedPoint) ? pick.pickedPoint : null;
+        },
+        onArmedChanged: (armed) => postToMain({ type: 'gp:directiveShapeArmed', armed }),
+        onResult: (result) => postToMain({ type: 'gp:directiveShapeResult', committed: result.committed }),
+    });
 
     // G3b: route Spring.SetActiveCommand (order menu → widget worker shim) into
     // the worker. Build commands (cmdId<0) arm ground placement (same as the
@@ -1991,6 +2036,7 @@ export function gpInit(msg: GpInitToWorker): void {
         // command / in-flight area-attack drag (Recoil CGuiHandler: RMB clears
         // the active command). Only when nothing is armed does RMB issue the
         // default context order (move / attack / guard).
+        if (gpDirectiveCapture?.isArmed) { gpDirectiveCapture.cancel(); return; }
         if (gpBuildPlacement?.isActive) { gpBuildPlacement.cancelBuildPlacement(); return; }
         if (gpCommandModes?.tryHandleRightClick()) return;
         selection.issueOrderAtScreen(x, y, mods.shift, 0);
@@ -2648,6 +2694,28 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
         // — entity position (interpolated, client-side) —
         case 'getEntityPosition':
             return gpCtx.entityRenderer?.getEntityPosition(num(0)) ?? null;
+        // — macro directive-shape capture (PLAN-macro-ui.md §2/§5) — same
+        //   cross-thread surface the org panel / scripting task 4 drive, minus
+        //   the postMessage hop; args: [directiveType, groupId, shape, opts] —
+        case 'armDirectiveShape':
+            gpDirectiveCapture?.arm(
+                { directiveType: num(0, 0), groupId: num(1, 0) },
+                obj<ShapeKind>(2, 'Point'),
+                obj(3, {}),
+            );
+            return null;
+        case 'cancelDirectiveShape':
+            gpDirectiveCapture?.cancel();
+            return null;
+        case 'directiveShapeState':
+            return { armed: gpDirectiveCapture?.isArmed ?? false, shape: gpDirectiveCapture?.armedShape ?? null };
+        case 'orgGroupCreate':
+            gpCtx.connection?.sendOrgGroupCreate(String(args[0] ?? ''), obj<number[]>(1, []));
+            return null;
+        case 'orgGroups':
+            return gpLastOrgGroups;
+        case 'directives':
+            return gpLastDirectives;
         // — per-envelope bandwidth tally (GW8 / PLAN-performance PC-2) —
         case 'netStats':
             return snapshotNetStats();
@@ -3010,10 +3078,14 @@ export function gpHandlePointerMove(x: number, y: number, buttons: number, mods:
         gpOrbitRig!.pointerMove(x, y);
     } else {
         gpViewCameras.get(viewId)?.pointerMove(x, y, buttons);
+        // PLAN-macro-ui.md §2/§5: an armed directive-shape capture owns the
+        // pointer exclusively (no build ghost, no selection drag-box
+        // underneath), same convention as an in-flight area-attack drag.
         // PLAN-playable.md G3a/G3b: an armed build placement drives its ghost; an
         // in-flight area-attack / waypoint drag drives its overlay; otherwise the
         // pointer feeds selection hover / drag-box.
-        if (gpBuildPlacement?.isActive) gpBuildPlacement.pointerMove(x, y, buttons, mods, viewId);
+        if (gpDirectiveCapture?.isArmed) gpDirectiveCapture.pointerMove(x, y, viewId);
+        else if (gpBuildPlacement?.isActive) gpBuildPlacement.pointerMove(x, y, buttons, mods, viewId);
         else if (gpCommandModes?.isDragging) gpCommandModes.pointerMove(x, y, buttons, mods, viewId);
         else gpCtx.selection?.pointerMove(x, y, buttons, mods, viewId);
     }
@@ -3032,6 +3104,10 @@ export function gpHandlePointerDown(x: number, y: number, button: number, mods: 
     }
     gpViewCameras.get(viewId)?.pointerDown(x, y, button, mods);
     if (consumed) return;
+    // PLAN-macro-ui.md §2/§5: an armed directive-shape capture consumes every
+    // left click while armed (vertex placement / circle-drag start), ahead of
+    // build placement and selection.
+    if (button === 0 && gpDirectiveCapture?.pointerDown(x, y, viewId)) return;
     // PLAN-playable.md G3a: a left-click during build placement captures the
     // click for placement (Spring's "active build command → LMB to place"),
     // before it can reach unit selection / drag-box (input-manager.onLeftDown).
@@ -3050,6 +3126,9 @@ export function gpHandlePointerUp(x: number, y: number, button: number, mods: nu
         return;
     }
     gpViewCameras.get(viewId)?.pointerUp(x, y, button, mods);
+    // PLAN-macro-ui.md §2/§5: release completes a Circle drag / freehand
+    // Polyline / arrow while a directive-shape capture is armed.
+    if (button === 0 && gpDirectiveCapture?.pointerUp()) return;
     // G3a: commit the build placement if one is armed (consumes the release).
     if (gpBuildPlacement?.pointerUp(x, y, button, mods, viewId)) return;
     // G3b: commit an area-attack / waypoint drag, or resolve an armed modal on a
@@ -3060,6 +3139,9 @@ export function gpHandlePointerUp(x: number, y: number, button: number, mods: nu
 }
 
 export function gpHandleWheel(x: number, y: number, delta: number, viewId: number): void {
+    // PLAN-macro-ui.md §2 arrow row: wheel adjusts Polyline/Arrow frontage
+    // instead of camera zoom while a shape capture is armed.
+    if (gpDirectiveCapture?.wheel(delta)) return;
     if (gpOrbitOwnsView(viewId)) {
         gpOrbitRig!.wheel(delta);
     } else {
@@ -3150,6 +3232,9 @@ function gpHandleGlobalHotkey(code: string, mods: number): boolean {
 export function gpHandleKeyDown(code: string, mods: number, viewId: number): void {
     if (!gpOrbitOwnsView(viewId)) gpViewCameras.get(viewId)?.keyDown(String(code).toLowerCase());
     gpSetShift((mods & 1) !== 0);
+    // PLAN-macro-ui.md §2: Enter finishes a click-chained Polyline/Polygon
+    // directive-shape capture early (without closing a polygon on vertex 0).
+    if (code === 'Enter' || code === 'NumpadEnter') gpDirectiveCapture?.finish();
     // Global sim-control hotkeys (+/-/\ sim speed, Pause, T tracking camera)
     // run first and consume the key when they fire; they must work without a
     // selection, unlike the order hotkeys below.
@@ -3203,4 +3288,59 @@ export function gpHandleCancelBuildPlacement(): void {
 /// build-ghost cancel + the quit dialog).
 export function gpHandleCancelCommandMode(): void {
     gpCommandModes?.cancelAll();
+}
+
+// ── Macro command & control (PLAN-macro-orders / PLAN-macro-directives / ──
+// PLAN-macro-ui.md §1-§2) — org-panel / hotkey requests cross the worker
+// boundary the same way build placement does; each handler just forwards
+// the validated request onto the Connection (server is the source of truth,
+// no client-side optimistic org-group/directive state).
+
+export function gpHandleOrgGroupCreate(name: string, memberIds: number[]): void {
+    gpCtx.connection?.sendOrgGroupCreate(name, memberIds);
+}
+
+export function gpHandleOrgGroupUpdate(groupId: number, addIds: number[], removeIds: number[], name?: string): void {
+    gpCtx.connection?.sendOrgGroupUpdate(groupId, addIds, removeIds, name ?? '');
+}
+
+export function gpHandleOrgGroupDisband(groupId: number): void {
+    gpCtx.connection?.sendOrgGroupDisband(groupId);
+}
+
+export function gpHandleGroupPosture(groupId: number, postureJson: string): void {
+    gpCtx.connection?.sendGroupPosture(groupId, postureJson);
+}
+
+export function gpHandleGroupDirectiveUpdate(msg: GpGroupDirectiveUpdateToWorker): void {
+    gpCtx.connection?.sendGroupDirective(msg.directiveId, msg.groupId, msg.directiveType, msg.shape, msg.params,
+        { priority: msg.priority, requestedStrength: msg.requestedStrength, active: msg.active });
+}
+
+export function gpHandleGroupDirectiveRemove(directiveId: number): void {
+    gpCtx.connection?.sendGroupDirectiveRemove(directiveId);
+}
+
+/// Org panel row click → world selection (PLAN-macro-ui.md §1: selecting a
+/// group resolves to its roster for highlight purposes). Reads the cached
+/// snapshot from the last OrgGroupState push rather than round-tripping.
+export function gpHandleSelectOrgGroup(groupId: number): void {
+    const group = gpLastOrgGroups.find((g) => g.groupId === groupId);
+    if (group) gpCtx.selection?.setSelectionExternal(group.memberIds);
+}
+
+/// Cross-thread arm surface for the shared gesture-capture library
+/// (PLAN-macro-ui.md §2/§5) — an org-panel "paint directive" button or
+/// metalstorm-scripting task 4's map-arm integration drives this instead of
+/// a worker-internal hotkey, without duplicating gesture logic.
+export function gpHandleArmDirectiveShape(msg: GpArmDirectiveShapeToWorker): void {
+    gpDirectiveCapture?.arm(
+        { directiveType: msg.directiveType, groupId: msg.groupId, priority: msg.priority, requestedStrength: msg.requestedStrength },
+        msg.shape,
+        { freehand: msg.freehand, arrow: msg.arrow },
+    );
+}
+
+export function gpHandleCancelDirectiveShape(): void {
+    gpDirectiveCapture?.cancel();
 }

@@ -351,6 +351,13 @@ bool CEventHandler::AllowStandingOrderAssign(unsigned int orderID, const CUnit* 
 }
 
 
+bool CEventHandler::AllowDirectiveAssign(unsigned int directiveID, const CUnit* unit)
+{
+	ZoneScoped;
+	return ControlIterateDefTrue(listAllowDirectiveAssign, &CEventClient::AllowDirectiveAssign, directiveID, unit);
+}
+
+
 bool CEventHandler::AllowResourceLevel(int teamID, const std::string& type, float level)
 {
 	ZoneScoped;

@@ -65,6 +65,30 @@ struct StandingOrderRemove;
 struct StandingOrderRemoveBuilder;
 struct StandingOrderRemoveT;
 
+struct OrgGroupCreate;
+struct OrgGroupCreateBuilder;
+struct OrgGroupCreateT;
+
+struct OrgGroupUpdate;
+struct OrgGroupUpdateBuilder;
+struct OrgGroupUpdateT;
+
+struct OrgGroupDisband;
+struct OrgGroupDisbandBuilder;
+struct OrgGroupDisbandT;
+
+struct GroupDirective;
+struct GroupDirectiveBuilder;
+struct GroupDirectiveT;
+
+struct GroupDirectiveRemove;
+struct GroupDirectiveRemoveBuilder;
+struct GroupDirectiveRemoveT;
+
+struct GroupPosture;
+struct GroupPostureBuilder;
+struct GroupPostureT;
+
 struct Ping;
 struct PingBuilder;
 struct PingT;
@@ -471,6 +495,22 @@ struct StandingOrderState;
 struct StandingOrderStateBuilder;
 struct StandingOrderStateT;
 
+struct OrgGroupInfo;
+struct OrgGroupInfoBuilder;
+struct OrgGroupInfoT;
+
+struct OrgGroupState;
+struct OrgGroupStateBuilder;
+struct OrgGroupStateT;
+
+struct DirectiveInfo;
+struct DirectiveInfoBuilder;
+struct DirectiveInfoT;
+
+struct DirectiveState;
+struct DirectiveStateBuilder;
+struct DirectiveStateT;
+
 struct SendToUnsyncedArg;
 struct SendToUnsyncedArgBuilder;
 struct SendToUnsyncedArgT;
@@ -584,6 +624,157 @@ inline const char *EnumNameStandingOrderType(StandingOrderType e) {
   return EnumNamesStandingOrderType()[index];
 }
 
+/// Command echelon. v0 emits/accepts only `Platoon`; `Army` is reserved
+/// (schema-present, rejected on create until the tier ships).
+enum Echelon : uint8_t {
+  Echelon_Squad = 0,
+  Echelon_Platoon = 1,
+  Echelon_Army = 2,
+  Echelon_MIN = Echelon_Squad,
+  Echelon_MAX = Echelon_Army
+};
+
+inline const Echelon (&EnumValuesEchelon())[3] {
+  static const Echelon values[] = {
+    Echelon_Squad,
+    Echelon_Platoon,
+    Echelon_Army
+  };
+  return values;
+}
+
+inline const char * const *EnumNamesEchelon() {
+  static const char * const names[4] = {
+    "Squad",
+    "Platoon",
+    "Army",
+    nullptr
+  };
+  return names;
+}
+
+inline const char *EnumNameEchelon(Echelon e) {
+  if (::flatbuffers::IsOutRange(e, Echelon_Squad, Echelon_Army)) return "";
+  const size_t index = static_cast<size_t>(e);
+  return EnumNamesEchelon()[index];
+}
+
+/// Macro-directive type — a superset of StandingOrderType. Values 0..7
+/// alias StandingOrderType 1:1 so a group-scoped classic order maps with
+/// no translation; 8+ are the new platoon-level macro directives
+/// (PLAN-macro-orders §2). DefendFront carries the polyline "front line"
+/// shape — the first genuinely new order shape.
+enum DirectiveType : uint8_t {
+  DirectiveType_DefendArea = 0,
+  DirectiveType_PatrolRoute = 1,
+  DirectiveType_RallyPoint = 2,
+  DirectiveType_Fallback = 3,
+  DirectiveType_Reinforce = 4,
+  DirectiveType_Screen = 5,
+  DirectiveType_SupplyRoute = 6,
+  DirectiveType_BuildBase = 7,
+  DirectiveType_MoveFormation = 8,
+  DirectiveType_Assault = 9,
+  DirectiveType_Defend = 10,
+  DirectiveType_Overwatch = 11,
+  DirectiveType_Withdraw = 12,
+  DirectiveType_Escort = 13,
+  DirectiveType_DefendFront = 14,
+  DirectiveType_MIN = DirectiveType_DefendArea,
+  DirectiveType_MAX = DirectiveType_DefendFront
+};
+
+inline const DirectiveType (&EnumValuesDirectiveType())[15] {
+  static const DirectiveType values[] = {
+    DirectiveType_DefendArea,
+    DirectiveType_PatrolRoute,
+    DirectiveType_RallyPoint,
+    DirectiveType_Fallback,
+    DirectiveType_Reinforce,
+    DirectiveType_Screen,
+    DirectiveType_SupplyRoute,
+    DirectiveType_BuildBase,
+    DirectiveType_MoveFormation,
+    DirectiveType_Assault,
+    DirectiveType_Defend,
+    DirectiveType_Overwatch,
+    DirectiveType_Withdraw,
+    DirectiveType_Escort,
+    DirectiveType_DefendFront
+  };
+  return values;
+}
+
+inline const char * const *EnumNamesDirectiveType() {
+  static const char * const names[16] = {
+    "DefendArea",
+    "PatrolRoute",
+    "RallyPoint",
+    "Fallback",
+    "Reinforce",
+    "Screen",
+    "SupplyRoute",
+    "BuildBase",
+    "MoveFormation",
+    "Assault",
+    "Defend",
+    "Overwatch",
+    "Withdraw",
+    "Escort",
+    "DefendFront",
+    nullptr
+  };
+  return names;
+}
+
+inline const char *EnumNameDirectiveType(DirectiveType e) {
+  if (::flatbuffers::IsOutRange(e, DirectiveType_DefendArea, DirectiveType_DefendFront)) return "";
+  const size_t index = static_cast<size_t>(e);
+  return EnumNamesDirectiveType()[index];
+}
+
+/// Geometry of a directive's target. `params` on the directive is
+/// interpreted per this shape (see the server-side decomposition docs):
+///   Point    → [x, y, z]
+///   Circle   → [x, y, z, radius]
+///   Polygon  → [x1,y1,z1, x2,y2,z2, ...]         (ring, implicitly closed)
+///   Polyline → [frontage/depth, x1,y1,z1, ...]   (the front line)
+enum OrderShape : uint8_t {
+  OrderShape_Point = 0,
+  OrderShape_Circle = 1,
+  OrderShape_Polygon = 2,
+  OrderShape_Polyline = 3,
+  OrderShape_MIN = OrderShape_Point,
+  OrderShape_MAX = OrderShape_Polyline
+};
+
+inline const OrderShape (&EnumValuesOrderShape())[4] {
+  static const OrderShape values[] = {
+    OrderShape_Point,
+    OrderShape_Circle,
+    OrderShape_Polygon,
+    OrderShape_Polyline
+  };
+  return values;
+}
+
+inline const char * const *EnumNamesOrderShape() {
+  static const char * const names[5] = {
+    "Point",
+    "Circle",
+    "Polygon",
+    "Polyline",
+    nullptr
+  };
+  return names;
+}
+
+inline const char *EnumNameOrderShape(OrderShape e) {
+  if (::flatbuffers::IsOutRange(e, OrderShape_Point, OrderShape_Polyline)) return "";
+  const size_t index = static_cast<size_t>(e);
+  return EnumNamesOrderShape()[index];
+}
+
 enum ClientPayload : uint8_t {
   ClientPayload_NONE = 0,
   ClientPayload_Handshake = 1,
@@ -623,11 +814,17 @@ enum ClientPayload : uint8_t {
   ClientPayload_StandingOrderRemove = 35,
   ClientPayload_LuaUIMsg = 36,
   ClientPayload_PlayerLeaveIntent = 37,
+  ClientPayload_OrgGroupCreate = 38,
+  ClientPayload_OrgGroupUpdate = 39,
+  ClientPayload_OrgGroupDisband = 40,
+  ClientPayload_GroupDirective = 41,
+  ClientPayload_GroupDirectiveRemove = 42,
+  ClientPayload_GroupPosture = 43,
   ClientPayload_MIN = ClientPayload_NONE,
-  ClientPayload_MAX = ClientPayload_PlayerLeaveIntent
+  ClientPayload_MAX = ClientPayload_GroupPosture
 };
 
-inline const ClientPayload (&EnumValuesClientPayload())[38] {
+inline const ClientPayload (&EnumValuesClientPayload())[44] {
   static const ClientPayload values[] = {
     ClientPayload_NONE,
     ClientPayload_Handshake,
@@ -666,13 +863,19 @@ inline const ClientPayload (&EnumValuesClientPayload())[38] {
     ClientPayload_StandingOrderUpdate,
     ClientPayload_StandingOrderRemove,
     ClientPayload_LuaUIMsg,
-    ClientPayload_PlayerLeaveIntent
+    ClientPayload_PlayerLeaveIntent,
+    ClientPayload_OrgGroupCreate,
+    ClientPayload_OrgGroupUpdate,
+    ClientPayload_OrgGroupDisband,
+    ClientPayload_GroupDirective,
+    ClientPayload_GroupDirectiveRemove,
+    ClientPayload_GroupPosture
   };
   return values;
 }
 
 inline const char * const *EnumNamesClientPayload() {
-  static const char * const names[39] = {
+  static const char * const names[45] = {
     "NONE",
     "Handshake",
     "AuthRequest",
@@ -711,13 +914,19 @@ inline const char * const *EnumNamesClientPayload() {
     "StandingOrderRemove",
     "LuaUIMsg",
     "PlayerLeaveIntent",
+    "OrgGroupCreate",
+    "OrgGroupUpdate",
+    "OrgGroupDisband",
+    "GroupDirective",
+    "GroupDirectiveRemove",
+    "GroupPosture",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNameClientPayload(ClientPayload e) {
-  if (::flatbuffers::IsOutRange(e, ClientPayload_NONE, ClientPayload_PlayerLeaveIntent)) return "";
+  if (::flatbuffers::IsOutRange(e, ClientPayload_NONE, ClientPayload_GroupPosture)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesClientPayload()[index];
 }
@@ -874,6 +1083,30 @@ template<> struct ClientPayloadTraits<SpringWeb::PlayerLeaveIntent> {
   static const ClientPayload enum_value = ClientPayload_PlayerLeaveIntent;
 };
 
+template<> struct ClientPayloadTraits<SpringWeb::OrgGroupCreate> {
+  static const ClientPayload enum_value = ClientPayload_OrgGroupCreate;
+};
+
+template<> struct ClientPayloadTraits<SpringWeb::OrgGroupUpdate> {
+  static const ClientPayload enum_value = ClientPayload_OrgGroupUpdate;
+};
+
+template<> struct ClientPayloadTraits<SpringWeb::OrgGroupDisband> {
+  static const ClientPayload enum_value = ClientPayload_OrgGroupDisband;
+};
+
+template<> struct ClientPayloadTraits<SpringWeb::GroupDirective> {
+  static const ClientPayload enum_value = ClientPayload_GroupDirective;
+};
+
+template<> struct ClientPayloadTraits<SpringWeb::GroupDirectiveRemove> {
+  static const ClientPayload enum_value = ClientPayload_GroupDirectiveRemove;
+};
+
+template<> struct ClientPayloadTraits<SpringWeb::GroupPosture> {
+  static const ClientPayload enum_value = ClientPayload_GroupPosture;
+};
+
 template<typename T> struct ClientPayloadUnionTraits {
   static const ClientPayload enum_value = ClientPayload_NONE;
 };
@@ -1024,6 +1257,30 @@ template<> struct ClientPayloadUnionTraits<SpringWeb::LuaUIMsgT> {
 
 template<> struct ClientPayloadUnionTraits<SpringWeb::PlayerLeaveIntentT> {
   static const ClientPayload enum_value = ClientPayload_PlayerLeaveIntent;
+};
+
+template<> struct ClientPayloadUnionTraits<SpringWeb::OrgGroupCreateT> {
+  static const ClientPayload enum_value = ClientPayload_OrgGroupCreate;
+};
+
+template<> struct ClientPayloadUnionTraits<SpringWeb::OrgGroupUpdateT> {
+  static const ClientPayload enum_value = ClientPayload_OrgGroupUpdate;
+};
+
+template<> struct ClientPayloadUnionTraits<SpringWeb::OrgGroupDisbandT> {
+  static const ClientPayload enum_value = ClientPayload_OrgGroupDisband;
+};
+
+template<> struct ClientPayloadUnionTraits<SpringWeb::GroupDirectiveT> {
+  static const ClientPayload enum_value = ClientPayload_GroupDirective;
+};
+
+template<> struct ClientPayloadUnionTraits<SpringWeb::GroupDirectiveRemoveT> {
+  static const ClientPayload enum_value = ClientPayload_GroupDirectiveRemove;
+};
+
+template<> struct ClientPayloadUnionTraits<SpringWeb::GroupPostureT> {
+  static const ClientPayload enum_value = ClientPayload_GroupPosture;
 };
 
 struct ClientPayloadUnion {
@@ -1351,6 +1608,54 @@ struct ClientPayloadUnion {
   const SpringWeb::PlayerLeaveIntentT *AsPlayerLeaveIntent() const {
     return type == ClientPayload_PlayerLeaveIntent ?
       reinterpret_cast<const SpringWeb::PlayerLeaveIntentT *>(value) : nullptr;
+  }
+  SpringWeb::OrgGroupCreateT *AsOrgGroupCreate() {
+    return type == ClientPayload_OrgGroupCreate ?
+      reinterpret_cast<SpringWeb::OrgGroupCreateT *>(value) : nullptr;
+  }
+  const SpringWeb::OrgGroupCreateT *AsOrgGroupCreate() const {
+    return type == ClientPayload_OrgGroupCreate ?
+      reinterpret_cast<const SpringWeb::OrgGroupCreateT *>(value) : nullptr;
+  }
+  SpringWeb::OrgGroupUpdateT *AsOrgGroupUpdate() {
+    return type == ClientPayload_OrgGroupUpdate ?
+      reinterpret_cast<SpringWeb::OrgGroupUpdateT *>(value) : nullptr;
+  }
+  const SpringWeb::OrgGroupUpdateT *AsOrgGroupUpdate() const {
+    return type == ClientPayload_OrgGroupUpdate ?
+      reinterpret_cast<const SpringWeb::OrgGroupUpdateT *>(value) : nullptr;
+  }
+  SpringWeb::OrgGroupDisbandT *AsOrgGroupDisband() {
+    return type == ClientPayload_OrgGroupDisband ?
+      reinterpret_cast<SpringWeb::OrgGroupDisbandT *>(value) : nullptr;
+  }
+  const SpringWeb::OrgGroupDisbandT *AsOrgGroupDisband() const {
+    return type == ClientPayload_OrgGroupDisband ?
+      reinterpret_cast<const SpringWeb::OrgGroupDisbandT *>(value) : nullptr;
+  }
+  SpringWeb::GroupDirectiveT *AsGroupDirective() {
+    return type == ClientPayload_GroupDirective ?
+      reinterpret_cast<SpringWeb::GroupDirectiveT *>(value) : nullptr;
+  }
+  const SpringWeb::GroupDirectiveT *AsGroupDirective() const {
+    return type == ClientPayload_GroupDirective ?
+      reinterpret_cast<const SpringWeb::GroupDirectiveT *>(value) : nullptr;
+  }
+  SpringWeb::GroupDirectiveRemoveT *AsGroupDirectiveRemove() {
+    return type == ClientPayload_GroupDirectiveRemove ?
+      reinterpret_cast<SpringWeb::GroupDirectiveRemoveT *>(value) : nullptr;
+  }
+  const SpringWeb::GroupDirectiveRemoveT *AsGroupDirectiveRemove() const {
+    return type == ClientPayload_GroupDirectiveRemove ?
+      reinterpret_cast<const SpringWeb::GroupDirectiveRemoveT *>(value) : nullptr;
+  }
+  SpringWeb::GroupPostureT *AsGroupPosture() {
+    return type == ClientPayload_GroupPosture ?
+      reinterpret_cast<SpringWeb::GroupPostureT *>(value) : nullptr;
+  }
+  const SpringWeb::GroupPostureT *AsGroupPosture() const {
+    return type == ClientPayload_GroupPosture ?
+      reinterpret_cast<const SpringWeb::GroupPostureT *>(value) : nullptr;
   }
 };
 
@@ -1856,11 +2161,13 @@ enum ServerPayload : uint8_t {
   ServerPayload_LuaUIMsgRelay = 39,
   ServerPayload_TeamStatsHistoryBatch = 40,
   ServerPayload_GameModOptions = 41,
+  ServerPayload_OrgGroupState = 42,
+  ServerPayload_DirectiveState = 43,
   ServerPayload_MIN = ServerPayload_NONE,
-  ServerPayload_MAX = ServerPayload_GameModOptions
+  ServerPayload_MAX = ServerPayload_DirectiveState
 };
 
-inline const ServerPayload (&EnumValuesServerPayload())[42] {
+inline const ServerPayload (&EnumValuesServerPayload())[44] {
   static const ServerPayload values[] = {
     ServerPayload_NONE,
     ServerPayload_AuthResponse,
@@ -1903,13 +2210,15 @@ inline const ServerPayload (&EnumValuesServerPayload())[42] {
     ServerPayload_PlayerTeamEventBatch,
     ServerPayload_LuaUIMsgRelay,
     ServerPayload_TeamStatsHistoryBatch,
-    ServerPayload_GameModOptions
+    ServerPayload_GameModOptions,
+    ServerPayload_OrgGroupState,
+    ServerPayload_DirectiveState
   };
   return values;
 }
 
 inline const char * const *EnumNamesServerPayload() {
-  static const char * const names[43] = {
+  static const char * const names[45] = {
     "NONE",
     "AuthResponse",
     "EntityCreate",
@@ -1952,13 +2261,15 @@ inline const char * const *EnumNamesServerPayload() {
     "LuaUIMsgRelay",
     "TeamStatsHistoryBatch",
     "GameModOptions",
+    "OrgGroupState",
+    "DirectiveState",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNameServerPayload(ServerPayload e) {
-  if (::flatbuffers::IsOutRange(e, ServerPayload_NONE, ServerPayload_GameModOptions)) return "";
+  if (::flatbuffers::IsOutRange(e, ServerPayload_NONE, ServerPayload_DirectiveState)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesServerPayload()[index];
 }
@@ -2131,6 +2442,14 @@ template<> struct ServerPayloadTraits<SpringWeb::GameModOptions> {
   static const ServerPayload enum_value = ServerPayload_GameModOptions;
 };
 
+template<> struct ServerPayloadTraits<SpringWeb::OrgGroupState> {
+  static const ServerPayload enum_value = ServerPayload_OrgGroupState;
+};
+
+template<> struct ServerPayloadTraits<SpringWeb::DirectiveState> {
+  static const ServerPayload enum_value = ServerPayload_DirectiveState;
+};
+
 template<typename T> struct ServerPayloadUnionTraits {
   static const ServerPayload enum_value = ServerPayload_NONE;
 };
@@ -2297,6 +2616,14 @@ template<> struct ServerPayloadUnionTraits<SpringWeb::TeamStatsHistoryBatchT> {
 
 template<> struct ServerPayloadUnionTraits<SpringWeb::GameModOptionsT> {
   static const ServerPayload enum_value = ServerPayload_GameModOptions;
+};
+
+template<> struct ServerPayloadUnionTraits<SpringWeb::OrgGroupStateT> {
+  static const ServerPayload enum_value = ServerPayload_OrgGroupState;
+};
+
+template<> struct ServerPayloadUnionTraits<SpringWeb::DirectiveStateT> {
+  static const ServerPayload enum_value = ServerPayload_DirectiveState;
 };
 
 struct ServerPayloadUnion {
@@ -2656,6 +2983,22 @@ struct ServerPayloadUnion {
   const SpringWeb::GameModOptionsT *AsGameModOptions() const {
     return type == ServerPayload_GameModOptions ?
       reinterpret_cast<const SpringWeb::GameModOptionsT *>(value) : nullptr;
+  }
+  SpringWeb::OrgGroupStateT *AsOrgGroupState() {
+    return type == ServerPayload_OrgGroupState ?
+      reinterpret_cast<SpringWeb::OrgGroupStateT *>(value) : nullptr;
+  }
+  const SpringWeb::OrgGroupStateT *AsOrgGroupState() const {
+    return type == ServerPayload_OrgGroupState ?
+      reinterpret_cast<const SpringWeb::OrgGroupStateT *>(value) : nullptr;
+  }
+  SpringWeb::DirectiveStateT *AsDirectiveState() {
+    return type == ServerPayload_DirectiveState ?
+      reinterpret_cast<SpringWeb::DirectiveStateT *>(value) : nullptr;
+  }
+  const SpringWeb::DirectiveStateT *AsDirectiveState() const {
+    return type == ServerPayload_DirectiveState ?
+      reinterpret_cast<const SpringWeb::DirectiveStateT *>(value) : nullptr;
   }
 };
 
@@ -3778,6 +4121,7 @@ struct StandingOrderConditionsT : public ::flatbuffers::NativeTable {
   float outside_radius_radius = 0.0f;
   float min_strength = 0.0f;
   std::vector<std::string> has_capabilities{};
+  uint32_t org_group = 0;
   StandingOrderConditionsT() = default;
   StandingOrderConditionsT(const StandingOrderConditionsT &o);
   StandingOrderConditionsT(StandingOrderConditionsT&&) FLATBUFFERS_NOEXCEPT = default;
@@ -3798,7 +4142,8 @@ struct StandingOrderConditions FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::
     VT_OUTSIDE_RADIUS_CENTER = 12,
     VT_OUTSIDE_RADIUS_RADIUS = 14,
     VT_MIN_STRENGTH = 16,
-    VT_HAS_CAPABILITIES = 18
+    VT_HAS_CAPABILITIES = 18,
+    VT_ORG_GROUP = 20
   };
   /// Only consider squads with an empty command queue. Default true —
   /// directly commanded squads are off-limits for standing orders
@@ -3834,6 +4179,14 @@ struct StandingOrderConditions FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::
   const ::flatbuffers::Vector<::flatbuffers::Offset<::flatbuffers::String>> *has_capabilities() const {
     return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<::flatbuffers::String>> *>(VT_HAS_CAPABILITIES);
   }
+  /// Org-group scope (macro-orders §4.2 — the A+C fusion). When non-zero,
+  /// only squads that are members of this org group qualify; this is the
+  /// field that draws a group-scoped directive from its own roster rather
+  /// than the whole idle pool. 0 = any squad (classic condition/area
+  /// scope). For a GroupDirective the server sets this from `group_id`.
+  uint32_t org_group() const {
+    return GetField<uint32_t>(VT_ORG_GROUP, 0);
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<uint8_t>(verifier, VT_IDLE_ONLY, 1) &&
@@ -3847,6 +4200,7 @@ struct StandingOrderConditions FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::
            VerifyOffset(verifier, VT_HAS_CAPABILITIES) &&
            verifier.VerifyVector(has_capabilities()) &&
            verifier.VerifyVectorOfStrings(has_capabilities()) &&
+           VerifyField<uint32_t>(verifier, VT_ORG_GROUP, 4) &&
            verifier.EndTable();
   }
   StandingOrderConditionsT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -3882,6 +4236,9 @@ struct StandingOrderConditionsBuilder {
   void add_has_capabilities(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<::flatbuffers::String>>> has_capabilities) {
     fbb_.AddOffset(StandingOrderConditions::VT_HAS_CAPABILITIES, has_capabilities);
   }
+  void add_org_group(uint32_t org_group) {
+    fbb_.AddElement<uint32_t>(StandingOrderConditions::VT_ORG_GROUP, org_group, 0);
+  }
   explicit StandingOrderConditionsBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -3902,8 +4259,10 @@ inline ::flatbuffers::Offset<StandingOrderConditions> CreateStandingOrderConditi
     const SpringWeb::Vec3 *outside_radius_center = nullptr,
     float outside_radius_radius = 0.0f,
     float min_strength = 0.0f,
-    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<::flatbuffers::String>>> has_capabilities = 0) {
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<::flatbuffers::String>>> has_capabilities = 0,
+    uint32_t org_group = 0) {
   StandingOrderConditionsBuilder builder_(_fbb);
+  builder_.add_org_group(org_group);
   builder_.add_has_capabilities(has_capabilities);
   builder_.add_min_strength(min_strength);
   builder_.add_outside_radius_radius(outside_radius_radius);
@@ -3924,7 +4283,8 @@ inline ::flatbuffers::Offset<StandingOrderConditions> CreateStandingOrderConditi
     const SpringWeb::Vec3 *outside_radius_center = nullptr,
     float outside_radius_radius = 0.0f,
     float min_strength = 0.0f,
-    const std::vector<::flatbuffers::Offset<::flatbuffers::String>> *has_capabilities = nullptr) {
+    const std::vector<::flatbuffers::Offset<::flatbuffers::String>> *has_capabilities = nullptr,
+    uint32_t org_group = 0) {
   auto squad_types__ = squad_types ? _fbb.CreateVector<uint16_t>(*squad_types) : 0;
   auto has_capabilities__ = has_capabilities ? _fbb.CreateVector<::flatbuffers::Offset<::flatbuffers::String>>(*has_capabilities) : 0;
   return SpringWeb::CreateStandingOrderConditions(
@@ -3936,7 +4296,8 @@ inline ::flatbuffers::Offset<StandingOrderConditions> CreateStandingOrderConditi
       outside_radius_center,
       outside_radius_radius,
       min_strength,
-      has_capabilities__);
+      has_capabilities__,
+      org_group);
 }
 
 ::flatbuffers::Offset<StandingOrderConditions> CreateStandingOrderConditions(::flatbuffers::FlatBufferBuilder &_fbb, const StandingOrderConditionsT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
@@ -4286,6 +4647,688 @@ inline ::flatbuffers::Offset<StandingOrderRemove> CreateStandingOrderRemove(
 }
 
 ::flatbuffers::Offset<StandingOrderRemove> CreateStandingOrderRemove(::flatbuffers::FlatBufferBuilder &_fbb, const StandingOrderRemoveT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
+struct OrgGroupCreateT : public ::flatbuffers::NativeTable {
+  typedef OrgGroupCreate TableType;
+  uint32_t sequence = 0;
+  SpringWeb::Echelon echelon = SpringWeb::Echelon_Platoon;
+  std::string name{};
+  std::vector<uint32_t> member_ids{};
+  uint32_t parent_id = 0;
+};
+
+/// Client → Server: create a server-side org group (Model A). Owned by
+/// the authenticated session's team (team objects with player attribution,
+/// not player ownership — macro-orders 2026-06-13 update). v0 rejects
+/// `echelon = Army` and any non-zero `parent_id`.
+struct OrgGroupCreate FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef OrgGroupCreateT NativeTableType;
+  typedef OrgGroupCreateBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_SEQUENCE = 4,
+    VT_ECHELON = 6,
+    VT_NAME = 8,
+    VT_MEMBER_IDS = 10,
+    VT_PARENT_ID = 12
+  };
+  uint32_t sequence() const {
+    return GetField<uint32_t>(VT_SEQUENCE, 0);
+  }
+  SpringWeb::Echelon echelon() const {
+    return static_cast<SpringWeb::Echelon>(GetField<uint8_t>(VT_ECHELON, 1));
+  }
+  const ::flatbuffers::String *name() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_NAME);
+  }
+  const ::flatbuffers::Vector<uint32_t> *member_ids() const {
+    return GetPointer<const ::flatbuffers::Vector<uint32_t> *>(VT_MEMBER_IDS);
+  }
+  uint32_t parent_id() const {
+    return GetField<uint32_t>(VT_PARENT_ID, 0);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<uint32_t>(verifier, VT_SEQUENCE, 4) &&
+           VerifyField<uint8_t>(verifier, VT_ECHELON, 1) &&
+           VerifyOffset(verifier, VT_NAME) &&
+           verifier.VerifyString(name()) &&
+           VerifyOffset(verifier, VT_MEMBER_IDS) &&
+           verifier.VerifyVector(member_ids()) &&
+           VerifyField<uint32_t>(verifier, VT_PARENT_ID, 4) &&
+           verifier.EndTable();
+  }
+  OrgGroupCreateT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(OrgGroupCreateT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<OrgGroupCreate> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const OrgGroupCreateT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct OrgGroupCreateBuilder {
+  typedef OrgGroupCreate Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_sequence(uint32_t sequence) {
+    fbb_.AddElement<uint32_t>(OrgGroupCreate::VT_SEQUENCE, sequence, 0);
+  }
+  void add_echelon(SpringWeb::Echelon echelon) {
+    fbb_.AddElement<uint8_t>(OrgGroupCreate::VT_ECHELON, static_cast<uint8_t>(echelon), 1);
+  }
+  void add_name(::flatbuffers::Offset<::flatbuffers::String> name) {
+    fbb_.AddOffset(OrgGroupCreate::VT_NAME, name);
+  }
+  void add_member_ids(::flatbuffers::Offset<::flatbuffers::Vector<uint32_t>> member_ids) {
+    fbb_.AddOffset(OrgGroupCreate::VT_MEMBER_IDS, member_ids);
+  }
+  void add_parent_id(uint32_t parent_id) {
+    fbb_.AddElement<uint32_t>(OrgGroupCreate::VT_PARENT_ID, parent_id, 0);
+  }
+  explicit OrgGroupCreateBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<OrgGroupCreate> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<OrgGroupCreate>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<OrgGroupCreate> CreateOrgGroupCreate(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint32_t sequence = 0,
+    SpringWeb::Echelon echelon = SpringWeb::Echelon_Platoon,
+    ::flatbuffers::Offset<::flatbuffers::String> name = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<uint32_t>> member_ids = 0,
+    uint32_t parent_id = 0) {
+  OrgGroupCreateBuilder builder_(_fbb);
+  builder_.add_parent_id(parent_id);
+  builder_.add_member_ids(member_ids);
+  builder_.add_name(name);
+  builder_.add_sequence(sequence);
+  builder_.add_echelon(echelon);
+  return builder_.Finish();
+}
+
+inline ::flatbuffers::Offset<OrgGroupCreate> CreateOrgGroupCreateDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint32_t sequence = 0,
+    SpringWeb::Echelon echelon = SpringWeb::Echelon_Platoon,
+    const char *name = nullptr,
+    const std::vector<uint32_t> *member_ids = nullptr,
+    uint32_t parent_id = 0) {
+  auto name__ = name ? _fbb.CreateString(name) : 0;
+  auto member_ids__ = member_ids ? _fbb.CreateVector<uint32_t>(*member_ids) : 0;
+  return SpringWeb::CreateOrgGroupCreate(
+      _fbb,
+      sequence,
+      echelon,
+      name__,
+      member_ids__,
+      parent_id);
+}
+
+::flatbuffers::Offset<OrgGroupCreate> CreateOrgGroupCreate(::flatbuffers::FlatBufferBuilder &_fbb, const OrgGroupCreateT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
+struct OrgGroupUpdateT : public ::flatbuffers::NativeTable {
+  typedef OrgGroupUpdate TableType;
+  uint32_t sequence = 0;
+  uint32_t group_id = 0;
+  std::vector<uint32_t> add_ids{};
+  std::vector<uint32_t> remove_ids{};
+  std::string name{};
+};
+
+/// Client → Server: mutate a group's roster / name. `add_ids` are pulled
+/// out of any prior group first (a squad belongs to at most one platoon —
+/// v0 rule). Empty `name` = leave name unchanged.
+struct OrgGroupUpdate FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef OrgGroupUpdateT NativeTableType;
+  typedef OrgGroupUpdateBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_SEQUENCE = 4,
+    VT_GROUP_ID = 6,
+    VT_ADD_IDS = 8,
+    VT_REMOVE_IDS = 10,
+    VT_NAME = 12
+  };
+  uint32_t sequence() const {
+    return GetField<uint32_t>(VT_SEQUENCE, 0);
+  }
+  uint32_t group_id() const {
+    return GetField<uint32_t>(VT_GROUP_ID, 0);
+  }
+  const ::flatbuffers::Vector<uint32_t> *add_ids() const {
+    return GetPointer<const ::flatbuffers::Vector<uint32_t> *>(VT_ADD_IDS);
+  }
+  const ::flatbuffers::Vector<uint32_t> *remove_ids() const {
+    return GetPointer<const ::flatbuffers::Vector<uint32_t> *>(VT_REMOVE_IDS);
+  }
+  const ::flatbuffers::String *name() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_NAME);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<uint32_t>(verifier, VT_SEQUENCE, 4) &&
+           VerifyField<uint32_t>(verifier, VT_GROUP_ID, 4) &&
+           VerifyOffset(verifier, VT_ADD_IDS) &&
+           verifier.VerifyVector(add_ids()) &&
+           VerifyOffset(verifier, VT_REMOVE_IDS) &&
+           verifier.VerifyVector(remove_ids()) &&
+           VerifyOffset(verifier, VT_NAME) &&
+           verifier.VerifyString(name()) &&
+           verifier.EndTable();
+  }
+  OrgGroupUpdateT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(OrgGroupUpdateT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<OrgGroupUpdate> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const OrgGroupUpdateT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct OrgGroupUpdateBuilder {
+  typedef OrgGroupUpdate Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_sequence(uint32_t sequence) {
+    fbb_.AddElement<uint32_t>(OrgGroupUpdate::VT_SEQUENCE, sequence, 0);
+  }
+  void add_group_id(uint32_t group_id) {
+    fbb_.AddElement<uint32_t>(OrgGroupUpdate::VT_GROUP_ID, group_id, 0);
+  }
+  void add_add_ids(::flatbuffers::Offset<::flatbuffers::Vector<uint32_t>> add_ids) {
+    fbb_.AddOffset(OrgGroupUpdate::VT_ADD_IDS, add_ids);
+  }
+  void add_remove_ids(::flatbuffers::Offset<::flatbuffers::Vector<uint32_t>> remove_ids) {
+    fbb_.AddOffset(OrgGroupUpdate::VT_REMOVE_IDS, remove_ids);
+  }
+  void add_name(::flatbuffers::Offset<::flatbuffers::String> name) {
+    fbb_.AddOffset(OrgGroupUpdate::VT_NAME, name);
+  }
+  explicit OrgGroupUpdateBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<OrgGroupUpdate> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<OrgGroupUpdate>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<OrgGroupUpdate> CreateOrgGroupUpdate(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint32_t sequence = 0,
+    uint32_t group_id = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<uint32_t>> add_ids = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<uint32_t>> remove_ids = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> name = 0) {
+  OrgGroupUpdateBuilder builder_(_fbb);
+  builder_.add_name(name);
+  builder_.add_remove_ids(remove_ids);
+  builder_.add_add_ids(add_ids);
+  builder_.add_group_id(group_id);
+  builder_.add_sequence(sequence);
+  return builder_.Finish();
+}
+
+inline ::flatbuffers::Offset<OrgGroupUpdate> CreateOrgGroupUpdateDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint32_t sequence = 0,
+    uint32_t group_id = 0,
+    const std::vector<uint32_t> *add_ids = nullptr,
+    const std::vector<uint32_t> *remove_ids = nullptr,
+    const char *name = nullptr) {
+  auto add_ids__ = add_ids ? _fbb.CreateVector<uint32_t>(*add_ids) : 0;
+  auto remove_ids__ = remove_ids ? _fbb.CreateVector<uint32_t>(*remove_ids) : 0;
+  auto name__ = name ? _fbb.CreateString(name) : 0;
+  return SpringWeb::CreateOrgGroupUpdate(
+      _fbb,
+      sequence,
+      group_id,
+      add_ids__,
+      remove_ids__,
+      name__);
+}
+
+::flatbuffers::Offset<OrgGroupUpdate> CreateOrgGroupUpdate(::flatbuffers::FlatBufferBuilder &_fbb, const OrgGroupUpdateT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
+struct OrgGroupDisbandT : public ::flatbuffers::NativeTable {
+  typedef OrgGroupDisband TableType;
+  uint32_t sequence = 0;
+  uint32_t group_id = 0;
+};
+
+/// Client → Server: disband a group. Members become unassigned (and its
+/// active directive, if any, is removed). Same team-ownership rule as the
+/// standing-order edits.
+struct OrgGroupDisband FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef OrgGroupDisbandT NativeTableType;
+  typedef OrgGroupDisbandBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_SEQUENCE = 4,
+    VT_GROUP_ID = 6
+  };
+  uint32_t sequence() const {
+    return GetField<uint32_t>(VT_SEQUENCE, 0);
+  }
+  uint32_t group_id() const {
+    return GetField<uint32_t>(VT_GROUP_ID, 0);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<uint32_t>(verifier, VT_SEQUENCE, 4) &&
+           VerifyField<uint32_t>(verifier, VT_GROUP_ID, 4) &&
+           verifier.EndTable();
+  }
+  OrgGroupDisbandT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(OrgGroupDisbandT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<OrgGroupDisband> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const OrgGroupDisbandT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct OrgGroupDisbandBuilder {
+  typedef OrgGroupDisband Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_sequence(uint32_t sequence) {
+    fbb_.AddElement<uint32_t>(OrgGroupDisband::VT_SEQUENCE, sequence, 0);
+  }
+  void add_group_id(uint32_t group_id) {
+    fbb_.AddElement<uint32_t>(OrgGroupDisband::VT_GROUP_ID, group_id, 0);
+  }
+  explicit OrgGroupDisbandBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<OrgGroupDisband> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<OrgGroupDisband>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<OrgGroupDisband> CreateOrgGroupDisband(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint32_t sequence = 0,
+    uint32_t group_id = 0) {
+  OrgGroupDisbandBuilder builder_(_fbb);
+  builder_.add_group_id(group_id);
+  builder_.add_sequence(sequence);
+  return builder_.Finish();
+}
+
+::flatbuffers::Offset<OrgGroupDisband> CreateOrgGroupDisband(::flatbuffers::FlatBufferBuilder &_fbb, const OrgGroupDisbandT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
+struct GroupDirectiveT : public ::flatbuffers::NativeTable {
+  typedef GroupDirective TableType;
+  uint32_t sequence = 0;
+  uint32_t directive_id = 0;
+  uint32_t group_id = 0;
+  SpringWeb::DirectiveType type = SpringWeb::DirectiveType_DefendArea;
+  uint8_t priority = 0;
+  SpringWeb::OrderShape shape = SpringWeb::OrderShape_Point;
+  std::vector<float> params{};
+  std::unique_ptr<SpringWeb::StandingOrderConditionsT> conditions{};
+  uint32_t requested_strength = 0;
+  std::string phases_json{};
+  bool active = true;
+  uint32_t expires_in_frames = 0;
+  GroupDirectiveT() = default;
+  GroupDirectiveT(const GroupDirectiveT &o);
+  GroupDirectiveT(GroupDirectiveT&&) FLATBUFFERS_NOEXCEPT = default;
+  GroupDirectiveT &operator=(GroupDirectiveT o) FLATBUFFERS_NOEXCEPT;
+};
+
+/// Client → Server: create or update a macro directive. `directive_id == 0`
+/// creates; non-zero updates in place. `group_id == 0` = condition-scoped
+/// (classic area/standing directive); non-zero scopes the directive to that
+/// group's roster (the A+C fusion). `conditions.org_group` is set
+/// server-side from `group_id`. `params` is interpreted per `shape`.
+/// The create path is the authority charge site for directive play
+/// (PLAN-metalstorm-authority §A2) — hooked separately, not here.
+struct GroupDirective FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef GroupDirectiveT NativeTableType;
+  typedef GroupDirectiveBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_SEQUENCE = 4,
+    VT_DIRECTIVE_ID = 6,
+    VT_GROUP_ID = 8,
+    VT_TYPE = 10,
+    VT_PRIORITY = 12,
+    VT_SHAPE = 14,
+    VT_PARAMS = 16,
+    VT_CONDITIONS = 18,
+    VT_REQUESTED_STRENGTH = 20,
+    VT_PHASES_JSON = 22,
+    VT_ACTIVE = 24,
+    VT_EXPIRES_IN_FRAMES = 26
+  };
+  uint32_t sequence() const {
+    return GetField<uint32_t>(VT_SEQUENCE, 0);
+  }
+  uint32_t directive_id() const {
+    return GetField<uint32_t>(VT_DIRECTIVE_ID, 0);
+  }
+  uint32_t group_id() const {
+    return GetField<uint32_t>(VT_GROUP_ID, 0);
+  }
+  SpringWeb::DirectiveType type() const {
+    return static_cast<SpringWeb::DirectiveType>(GetField<uint8_t>(VT_TYPE, 0));
+  }
+  uint8_t priority() const {
+    return GetField<uint8_t>(VT_PRIORITY, 0);
+  }
+  SpringWeb::OrderShape shape() const {
+    return static_cast<SpringWeb::OrderShape>(GetField<uint8_t>(VT_SHAPE, 0));
+  }
+  const ::flatbuffers::Vector<float> *params() const {
+    return GetPointer<const ::flatbuffers::Vector<float> *>(VT_PARAMS);
+  }
+  const SpringWeb::StandingOrderConditions *conditions() const {
+    return GetPointer<const SpringWeb::StandingOrderConditions *>(VT_CONDITIONS);
+  }
+  uint32_t requested_strength() const {
+    return GetField<uint32_t>(VT_REQUESTED_STRENGTH, 0);
+  }
+  const ::flatbuffers::String *phases_json() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_PHASES_JSON);
+  }
+  bool active() const {
+    return GetField<uint8_t>(VT_ACTIVE, 1) != 0;
+  }
+  uint32_t expires_in_frames() const {
+    return GetField<uint32_t>(VT_EXPIRES_IN_FRAMES, 0);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<uint32_t>(verifier, VT_SEQUENCE, 4) &&
+           VerifyField<uint32_t>(verifier, VT_DIRECTIVE_ID, 4) &&
+           VerifyField<uint32_t>(verifier, VT_GROUP_ID, 4) &&
+           VerifyField<uint8_t>(verifier, VT_TYPE, 1) &&
+           VerifyField<uint8_t>(verifier, VT_PRIORITY, 1) &&
+           VerifyField<uint8_t>(verifier, VT_SHAPE, 1) &&
+           VerifyOffset(verifier, VT_PARAMS) &&
+           verifier.VerifyVector(params()) &&
+           VerifyOffset(verifier, VT_CONDITIONS) &&
+           verifier.VerifyTable(conditions()) &&
+           VerifyField<uint32_t>(verifier, VT_REQUESTED_STRENGTH, 4) &&
+           VerifyOffset(verifier, VT_PHASES_JSON) &&
+           verifier.VerifyString(phases_json()) &&
+           VerifyField<uint8_t>(verifier, VT_ACTIVE, 1) &&
+           VerifyField<uint32_t>(verifier, VT_EXPIRES_IN_FRAMES, 4) &&
+           verifier.EndTable();
+  }
+  GroupDirectiveT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(GroupDirectiveT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<GroupDirective> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GroupDirectiveT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct GroupDirectiveBuilder {
+  typedef GroupDirective Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_sequence(uint32_t sequence) {
+    fbb_.AddElement<uint32_t>(GroupDirective::VT_SEQUENCE, sequence, 0);
+  }
+  void add_directive_id(uint32_t directive_id) {
+    fbb_.AddElement<uint32_t>(GroupDirective::VT_DIRECTIVE_ID, directive_id, 0);
+  }
+  void add_group_id(uint32_t group_id) {
+    fbb_.AddElement<uint32_t>(GroupDirective::VT_GROUP_ID, group_id, 0);
+  }
+  void add_type(SpringWeb::DirectiveType type) {
+    fbb_.AddElement<uint8_t>(GroupDirective::VT_TYPE, static_cast<uint8_t>(type), 0);
+  }
+  void add_priority(uint8_t priority) {
+    fbb_.AddElement<uint8_t>(GroupDirective::VT_PRIORITY, priority, 0);
+  }
+  void add_shape(SpringWeb::OrderShape shape) {
+    fbb_.AddElement<uint8_t>(GroupDirective::VT_SHAPE, static_cast<uint8_t>(shape), 0);
+  }
+  void add_params(::flatbuffers::Offset<::flatbuffers::Vector<float>> params) {
+    fbb_.AddOffset(GroupDirective::VT_PARAMS, params);
+  }
+  void add_conditions(::flatbuffers::Offset<SpringWeb::StandingOrderConditions> conditions) {
+    fbb_.AddOffset(GroupDirective::VT_CONDITIONS, conditions);
+  }
+  void add_requested_strength(uint32_t requested_strength) {
+    fbb_.AddElement<uint32_t>(GroupDirective::VT_REQUESTED_STRENGTH, requested_strength, 0);
+  }
+  void add_phases_json(::flatbuffers::Offset<::flatbuffers::String> phases_json) {
+    fbb_.AddOffset(GroupDirective::VT_PHASES_JSON, phases_json);
+  }
+  void add_active(bool active) {
+    fbb_.AddElement<uint8_t>(GroupDirective::VT_ACTIVE, static_cast<uint8_t>(active), 1);
+  }
+  void add_expires_in_frames(uint32_t expires_in_frames) {
+    fbb_.AddElement<uint32_t>(GroupDirective::VT_EXPIRES_IN_FRAMES, expires_in_frames, 0);
+  }
+  explicit GroupDirectiveBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<GroupDirective> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<GroupDirective>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<GroupDirective> CreateGroupDirective(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint32_t sequence = 0,
+    uint32_t directive_id = 0,
+    uint32_t group_id = 0,
+    SpringWeb::DirectiveType type = SpringWeb::DirectiveType_DefendArea,
+    uint8_t priority = 0,
+    SpringWeb::OrderShape shape = SpringWeb::OrderShape_Point,
+    ::flatbuffers::Offset<::flatbuffers::Vector<float>> params = 0,
+    ::flatbuffers::Offset<SpringWeb::StandingOrderConditions> conditions = 0,
+    uint32_t requested_strength = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> phases_json = 0,
+    bool active = true,
+    uint32_t expires_in_frames = 0) {
+  GroupDirectiveBuilder builder_(_fbb);
+  builder_.add_expires_in_frames(expires_in_frames);
+  builder_.add_phases_json(phases_json);
+  builder_.add_requested_strength(requested_strength);
+  builder_.add_conditions(conditions);
+  builder_.add_params(params);
+  builder_.add_group_id(group_id);
+  builder_.add_directive_id(directive_id);
+  builder_.add_sequence(sequence);
+  builder_.add_active(active);
+  builder_.add_shape(shape);
+  builder_.add_priority(priority);
+  builder_.add_type(type);
+  return builder_.Finish();
+}
+
+inline ::flatbuffers::Offset<GroupDirective> CreateGroupDirectiveDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint32_t sequence = 0,
+    uint32_t directive_id = 0,
+    uint32_t group_id = 0,
+    SpringWeb::DirectiveType type = SpringWeb::DirectiveType_DefendArea,
+    uint8_t priority = 0,
+    SpringWeb::OrderShape shape = SpringWeb::OrderShape_Point,
+    const std::vector<float> *params = nullptr,
+    ::flatbuffers::Offset<SpringWeb::StandingOrderConditions> conditions = 0,
+    uint32_t requested_strength = 0,
+    const char *phases_json = nullptr,
+    bool active = true,
+    uint32_t expires_in_frames = 0) {
+  auto params__ = params ? _fbb.CreateVector<float>(*params) : 0;
+  auto phases_json__ = phases_json ? _fbb.CreateString(phases_json) : 0;
+  return SpringWeb::CreateGroupDirective(
+      _fbb,
+      sequence,
+      directive_id,
+      group_id,
+      type,
+      priority,
+      shape,
+      params__,
+      conditions,
+      requested_strength,
+      phases_json__,
+      active,
+      expires_in_frames);
+}
+
+::flatbuffers::Offset<GroupDirective> CreateGroupDirective(::flatbuffers::FlatBufferBuilder &_fbb, const GroupDirectiveT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
+struct GroupDirectiveRemoveT : public ::flatbuffers::NativeTable {
+  typedef GroupDirectiveRemove TableType;
+  uint32_t sequence = 0;
+  uint32_t directive_id = 0;
+};
+
+/// Client → Server: remove a macro directive. Releases its assigned squads.
+struct GroupDirectiveRemove FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef GroupDirectiveRemoveT NativeTableType;
+  typedef GroupDirectiveRemoveBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_SEQUENCE = 4,
+    VT_DIRECTIVE_ID = 6
+  };
+  uint32_t sequence() const {
+    return GetField<uint32_t>(VT_SEQUENCE, 0);
+  }
+  uint32_t directive_id() const {
+    return GetField<uint32_t>(VT_DIRECTIVE_ID, 0);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<uint32_t>(verifier, VT_SEQUENCE, 4) &&
+           VerifyField<uint32_t>(verifier, VT_DIRECTIVE_ID, 4) &&
+           verifier.EndTable();
+  }
+  GroupDirectiveRemoveT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(GroupDirectiveRemoveT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<GroupDirectiveRemove> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GroupDirectiveRemoveT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct GroupDirectiveRemoveBuilder {
+  typedef GroupDirectiveRemove Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_sequence(uint32_t sequence) {
+    fbb_.AddElement<uint32_t>(GroupDirectiveRemove::VT_SEQUENCE, sequence, 0);
+  }
+  void add_directive_id(uint32_t directive_id) {
+    fbb_.AddElement<uint32_t>(GroupDirectiveRemove::VT_DIRECTIVE_ID, directive_id, 0);
+  }
+  explicit GroupDirectiveRemoveBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<GroupDirectiveRemove> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<GroupDirectiveRemove>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<GroupDirectiveRemove> CreateGroupDirectiveRemove(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint32_t sequence = 0,
+    uint32_t directive_id = 0) {
+  GroupDirectiveRemoveBuilder builder_(_fbb);
+  builder_.add_directive_id(directive_id);
+  builder_.add_sequence(sequence);
+  return builder_.Finish();
+}
+
+::flatbuffers::Offset<GroupDirectiveRemove> CreateGroupDirectiveRemove(::flatbuffers::FlatBufferBuilder &_fbb, const GroupDirectiveRemoveT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
+struct GroupPostureT : public ::flatbuffers::NativeTable {
+  typedef GroupPosture TableType;
+  uint32_t sequence = 0;
+  uint32_t group_id = 0;
+  std::string posture_json{};
+};
+
+/// Client → Server: set a group's posture bundle (engagement / casualty
+/// tolerance / reinforcement policy / area-weapon ROE — macro-orders §3).
+/// Stored per group and streamed back in OrgGroupInfo. Posture *inheritance*
+/// down the tree is post-v0; v0 stores + echoes the per-group setting.
+struct GroupPosture FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef GroupPostureT NativeTableType;
+  typedef GroupPostureBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_SEQUENCE = 4,
+    VT_GROUP_ID = 6,
+    VT_POSTURE_JSON = 8
+  };
+  uint32_t sequence() const {
+    return GetField<uint32_t>(VT_SEQUENCE, 0);
+  }
+  uint32_t group_id() const {
+    return GetField<uint32_t>(VT_GROUP_ID, 0);
+  }
+  const ::flatbuffers::String *posture_json() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_POSTURE_JSON);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<uint32_t>(verifier, VT_SEQUENCE, 4) &&
+           VerifyField<uint32_t>(verifier, VT_GROUP_ID, 4) &&
+           VerifyOffset(verifier, VT_POSTURE_JSON) &&
+           verifier.VerifyString(posture_json()) &&
+           verifier.EndTable();
+  }
+  GroupPostureT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(GroupPostureT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<GroupPosture> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GroupPostureT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct GroupPostureBuilder {
+  typedef GroupPosture Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_sequence(uint32_t sequence) {
+    fbb_.AddElement<uint32_t>(GroupPosture::VT_SEQUENCE, sequence, 0);
+  }
+  void add_group_id(uint32_t group_id) {
+    fbb_.AddElement<uint32_t>(GroupPosture::VT_GROUP_ID, group_id, 0);
+  }
+  void add_posture_json(::flatbuffers::Offset<::flatbuffers::String> posture_json) {
+    fbb_.AddOffset(GroupPosture::VT_POSTURE_JSON, posture_json);
+  }
+  explicit GroupPostureBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<GroupPosture> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<GroupPosture>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<GroupPosture> CreateGroupPosture(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint32_t sequence = 0,
+    uint32_t group_id = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> posture_json = 0) {
+  GroupPostureBuilder builder_(_fbb);
+  builder_.add_posture_json(posture_json);
+  builder_.add_group_id(group_id);
+  builder_.add_sequence(sequence);
+  return builder_.Finish();
+}
+
+inline ::flatbuffers::Offset<GroupPosture> CreateGroupPostureDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint32_t sequence = 0,
+    uint32_t group_id = 0,
+    const char *posture_json = nullptr) {
+  auto posture_json__ = posture_json ? _fbb.CreateString(posture_json) : 0;
+  return SpringWeb::CreateGroupPosture(
+      _fbb,
+      sequence,
+      group_id,
+      posture_json__);
+}
+
+::flatbuffers::Offset<GroupPosture> CreateGroupPosture(::flatbuffers::FlatBufferBuilder &_fbb, const GroupPostureT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 
 struct PingT : public ::flatbuffers::NativeTable {
   typedef Ping TableType;
@@ -6548,6 +7591,24 @@ struct ClientMessage FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const SpringWeb::PlayerLeaveIntent *payload_as_PlayerLeaveIntent() const {
     return payload_type() == SpringWeb::ClientPayload_PlayerLeaveIntent ? static_cast<const SpringWeb::PlayerLeaveIntent *>(payload()) : nullptr;
   }
+  const SpringWeb::OrgGroupCreate *payload_as_OrgGroupCreate() const {
+    return payload_type() == SpringWeb::ClientPayload_OrgGroupCreate ? static_cast<const SpringWeb::OrgGroupCreate *>(payload()) : nullptr;
+  }
+  const SpringWeb::OrgGroupUpdate *payload_as_OrgGroupUpdate() const {
+    return payload_type() == SpringWeb::ClientPayload_OrgGroupUpdate ? static_cast<const SpringWeb::OrgGroupUpdate *>(payload()) : nullptr;
+  }
+  const SpringWeb::OrgGroupDisband *payload_as_OrgGroupDisband() const {
+    return payload_type() == SpringWeb::ClientPayload_OrgGroupDisband ? static_cast<const SpringWeb::OrgGroupDisband *>(payload()) : nullptr;
+  }
+  const SpringWeb::GroupDirective *payload_as_GroupDirective() const {
+    return payload_type() == SpringWeb::ClientPayload_GroupDirective ? static_cast<const SpringWeb::GroupDirective *>(payload()) : nullptr;
+  }
+  const SpringWeb::GroupDirectiveRemove *payload_as_GroupDirectiveRemove() const {
+    return payload_type() == SpringWeb::ClientPayload_GroupDirectiveRemove ? static_cast<const SpringWeb::GroupDirectiveRemove *>(payload()) : nullptr;
+  }
+  const SpringWeb::GroupPosture *payload_as_GroupPosture() const {
+    return payload_type() == SpringWeb::ClientPayload_GroupPosture ? static_cast<const SpringWeb::GroupPosture *>(payload()) : nullptr;
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<uint8_t>(verifier, VT_PAYLOAD_TYPE, 1) &&
@@ -6706,6 +7767,30 @@ template<> inline const SpringWeb::LuaUIMsg *ClientMessage::payload_as<SpringWeb
 
 template<> inline const SpringWeb::PlayerLeaveIntent *ClientMessage::payload_as<SpringWeb::PlayerLeaveIntent>() const {
   return payload_as_PlayerLeaveIntent();
+}
+
+template<> inline const SpringWeb::OrgGroupCreate *ClientMessage::payload_as<SpringWeb::OrgGroupCreate>() const {
+  return payload_as_OrgGroupCreate();
+}
+
+template<> inline const SpringWeb::OrgGroupUpdate *ClientMessage::payload_as<SpringWeb::OrgGroupUpdate>() const {
+  return payload_as_OrgGroupUpdate();
+}
+
+template<> inline const SpringWeb::OrgGroupDisband *ClientMessage::payload_as<SpringWeb::OrgGroupDisband>() const {
+  return payload_as_OrgGroupDisband();
+}
+
+template<> inline const SpringWeb::GroupDirective *ClientMessage::payload_as<SpringWeb::GroupDirective>() const {
+  return payload_as_GroupDirective();
+}
+
+template<> inline const SpringWeb::GroupDirectiveRemove *ClientMessage::payload_as<SpringWeb::GroupDirectiveRemove>() const {
+  return payload_as_GroupDirectiveRemove();
+}
+
+template<> inline const SpringWeb::GroupPosture *ClientMessage::payload_as<SpringWeb::GroupPosture>() const {
+  return payload_as_GroupPosture();
 }
 
 struct ClientMessageBuilder {
@@ -14735,6 +15820,566 @@ inline ::flatbuffers::Offset<StandingOrderState> CreateStandingOrderStateDirect(
 
 ::flatbuffers::Offset<StandingOrderState> CreateStandingOrderState(::flatbuffers::FlatBufferBuilder &_fbb, const StandingOrderStateT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 
+struct OrgGroupInfoT : public ::flatbuffers::NativeTable {
+  typedef OrgGroupInfo TableType;
+  uint32_t group_id = 0;
+  SpringWeb::Echelon echelon = SpringWeb::Echelon_Squad;
+  uint8_t owner_team = 0;
+  uint32_t parent_id = 0;
+  std::string name{};
+  std::vector<uint32_t> member_ids{};
+  uint32_t current_directive_id = 0;
+  std::string posture_json{};
+  uint32_t created_at_frame = 0;
+};
+
+/// One org group in the team's org tree. `echelon`/`parent_id` are streamed
+/// regardless of the v0 platoon-only surface so the client OOB tree is
+/// already tier-shaped (PLAN-macro-directives §1 field discipline).
+struct OrgGroupInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef OrgGroupInfoT NativeTableType;
+  typedef OrgGroupInfoBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_GROUP_ID = 4,
+    VT_ECHELON = 6,
+    VT_OWNER_TEAM = 8,
+    VT_PARENT_ID = 10,
+    VT_NAME = 12,
+    VT_MEMBER_IDS = 14,
+    VT_CURRENT_DIRECTIVE_ID = 16,
+    VT_POSTURE_JSON = 18,
+    VT_CREATED_AT_FRAME = 20
+  };
+  uint32_t group_id() const {
+    return GetField<uint32_t>(VT_GROUP_ID, 0);
+  }
+  SpringWeb::Echelon echelon() const {
+    return static_cast<SpringWeb::Echelon>(GetField<uint8_t>(VT_ECHELON, 0));
+  }
+  uint8_t owner_team() const {
+    return GetField<uint8_t>(VT_OWNER_TEAM, 0);
+  }
+  uint32_t parent_id() const {
+    return GetField<uint32_t>(VT_PARENT_ID, 0);
+  }
+  const ::flatbuffers::String *name() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_NAME);
+  }
+  const ::flatbuffers::Vector<uint32_t> *member_ids() const {
+    return GetPointer<const ::flatbuffers::Vector<uint32_t> *>(VT_MEMBER_IDS);
+  }
+  uint32_t current_directive_id() const {
+    return GetField<uint32_t>(VT_CURRENT_DIRECTIVE_ID, 0);
+  }
+  const ::flatbuffers::String *posture_json() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_POSTURE_JSON);
+  }
+  uint32_t created_at_frame() const {
+    return GetField<uint32_t>(VT_CREATED_AT_FRAME, 0);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<uint32_t>(verifier, VT_GROUP_ID, 4) &&
+           VerifyField<uint8_t>(verifier, VT_ECHELON, 1) &&
+           VerifyField<uint8_t>(verifier, VT_OWNER_TEAM, 1) &&
+           VerifyField<uint32_t>(verifier, VT_PARENT_ID, 4) &&
+           VerifyOffset(verifier, VT_NAME) &&
+           verifier.VerifyString(name()) &&
+           VerifyOffset(verifier, VT_MEMBER_IDS) &&
+           verifier.VerifyVector(member_ids()) &&
+           VerifyField<uint32_t>(verifier, VT_CURRENT_DIRECTIVE_ID, 4) &&
+           VerifyOffset(verifier, VT_POSTURE_JSON) &&
+           verifier.VerifyString(posture_json()) &&
+           VerifyField<uint32_t>(verifier, VT_CREATED_AT_FRAME, 4) &&
+           verifier.EndTable();
+  }
+  OrgGroupInfoT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(OrgGroupInfoT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<OrgGroupInfo> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const OrgGroupInfoT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct OrgGroupInfoBuilder {
+  typedef OrgGroupInfo Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_group_id(uint32_t group_id) {
+    fbb_.AddElement<uint32_t>(OrgGroupInfo::VT_GROUP_ID, group_id, 0);
+  }
+  void add_echelon(SpringWeb::Echelon echelon) {
+    fbb_.AddElement<uint8_t>(OrgGroupInfo::VT_ECHELON, static_cast<uint8_t>(echelon), 0);
+  }
+  void add_owner_team(uint8_t owner_team) {
+    fbb_.AddElement<uint8_t>(OrgGroupInfo::VT_OWNER_TEAM, owner_team, 0);
+  }
+  void add_parent_id(uint32_t parent_id) {
+    fbb_.AddElement<uint32_t>(OrgGroupInfo::VT_PARENT_ID, parent_id, 0);
+  }
+  void add_name(::flatbuffers::Offset<::flatbuffers::String> name) {
+    fbb_.AddOffset(OrgGroupInfo::VT_NAME, name);
+  }
+  void add_member_ids(::flatbuffers::Offset<::flatbuffers::Vector<uint32_t>> member_ids) {
+    fbb_.AddOffset(OrgGroupInfo::VT_MEMBER_IDS, member_ids);
+  }
+  void add_current_directive_id(uint32_t current_directive_id) {
+    fbb_.AddElement<uint32_t>(OrgGroupInfo::VT_CURRENT_DIRECTIVE_ID, current_directive_id, 0);
+  }
+  void add_posture_json(::flatbuffers::Offset<::flatbuffers::String> posture_json) {
+    fbb_.AddOffset(OrgGroupInfo::VT_POSTURE_JSON, posture_json);
+  }
+  void add_created_at_frame(uint32_t created_at_frame) {
+    fbb_.AddElement<uint32_t>(OrgGroupInfo::VT_CREATED_AT_FRAME, created_at_frame, 0);
+  }
+  explicit OrgGroupInfoBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<OrgGroupInfo> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<OrgGroupInfo>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<OrgGroupInfo> CreateOrgGroupInfo(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint32_t group_id = 0,
+    SpringWeb::Echelon echelon = SpringWeb::Echelon_Squad,
+    uint8_t owner_team = 0,
+    uint32_t parent_id = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> name = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<uint32_t>> member_ids = 0,
+    uint32_t current_directive_id = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> posture_json = 0,
+    uint32_t created_at_frame = 0) {
+  OrgGroupInfoBuilder builder_(_fbb);
+  builder_.add_created_at_frame(created_at_frame);
+  builder_.add_posture_json(posture_json);
+  builder_.add_current_directive_id(current_directive_id);
+  builder_.add_member_ids(member_ids);
+  builder_.add_name(name);
+  builder_.add_parent_id(parent_id);
+  builder_.add_group_id(group_id);
+  builder_.add_owner_team(owner_team);
+  builder_.add_echelon(echelon);
+  return builder_.Finish();
+}
+
+inline ::flatbuffers::Offset<OrgGroupInfo> CreateOrgGroupInfoDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint32_t group_id = 0,
+    SpringWeb::Echelon echelon = SpringWeb::Echelon_Squad,
+    uint8_t owner_team = 0,
+    uint32_t parent_id = 0,
+    const char *name = nullptr,
+    const std::vector<uint32_t> *member_ids = nullptr,
+    uint32_t current_directive_id = 0,
+    const char *posture_json = nullptr,
+    uint32_t created_at_frame = 0) {
+  auto name__ = name ? _fbb.CreateString(name) : 0;
+  auto member_ids__ = member_ids ? _fbb.CreateVector<uint32_t>(*member_ids) : 0;
+  auto posture_json__ = posture_json ? _fbb.CreateString(posture_json) : 0;
+  return SpringWeb::CreateOrgGroupInfo(
+      _fbb,
+      group_id,
+      echelon,
+      owner_team,
+      parent_id,
+      name__,
+      member_ids__,
+      current_directive_id,
+      posture_json__,
+      created_at_frame);
+}
+
+::flatbuffers::Offset<OrgGroupInfo> CreateOrgGroupInfo(::flatbuffers::FlatBufferBuilder &_fbb, const OrgGroupInfoT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
+struct OrgGroupStateT : public ::flatbuffers::NativeTable {
+  typedef OrgGroupState TableType;
+  std::vector<std::unique_ptr<SpringWeb::OrgGroupInfoT>> groups{};
+  OrgGroupStateT() = default;
+  OrgGroupStateT(const OrgGroupStateT &o);
+  OrgGroupStateT(OrgGroupStateT&&) FLATBUFFERS_NOEXCEPT = default;
+  OrgGroupStateT &operator=(OrgGroupStateT o) FLATBUFFERS_NOEXCEPT;
+};
+
+struct OrgGroupState FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef OrgGroupStateT NativeTableType;
+  typedef OrgGroupStateBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_GROUPS = 4
+  };
+  const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::OrgGroupInfo>> *groups() const {
+    return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::OrgGroupInfo>> *>(VT_GROUPS);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyOffset(verifier, VT_GROUPS) &&
+           verifier.VerifyVector(groups()) &&
+           verifier.VerifyVectorOfTables(groups()) &&
+           verifier.EndTable();
+  }
+  OrgGroupStateT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(OrgGroupStateT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<OrgGroupState> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const OrgGroupStateT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct OrgGroupStateBuilder {
+  typedef OrgGroupState Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_groups(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::OrgGroupInfo>>> groups) {
+    fbb_.AddOffset(OrgGroupState::VT_GROUPS, groups);
+  }
+  explicit OrgGroupStateBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<OrgGroupState> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<OrgGroupState>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<OrgGroupState> CreateOrgGroupState(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::OrgGroupInfo>>> groups = 0) {
+  OrgGroupStateBuilder builder_(_fbb);
+  builder_.add_groups(groups);
+  return builder_.Finish();
+}
+
+inline ::flatbuffers::Offset<OrgGroupState> CreateOrgGroupStateDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    const std::vector<::flatbuffers::Offset<SpringWeb::OrgGroupInfo>> *groups = nullptr) {
+  auto groups__ = groups ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::OrgGroupInfo>>(*groups) : 0;
+  return SpringWeb::CreateOrgGroupState(
+      _fbb,
+      groups__);
+}
+
+::flatbuffers::Offset<OrgGroupState> CreateOrgGroupState(::flatbuffers::FlatBufferBuilder &_fbb, const OrgGroupStateT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
+struct DirectiveInfoT : public ::flatbuffers::NativeTable {
+  typedef DirectiveInfo TableType;
+  uint32_t directive_id = 0;
+  uint8_t owner_team = 0;
+  uint32_t group_id = 0;
+  SpringWeb::DirectiveType type = SpringWeb::DirectiveType_DefendArea;
+  uint8_t priority = 0;
+  SpringWeb::OrderShape shape = SpringWeb::OrderShape_Point;
+  std::vector<float> params{};
+  std::unique_ptr<SpringWeb::StandingOrderConditionsT> conditions{};
+  uint32_t requested_strength = 0;
+  uint32_t assigned_strength = 0;
+  uint16_t assigned_squad_count = 0;
+  std::string phases_json{};
+  bool active = true;
+  uint32_t expires_at_frame = 0;
+  uint32_t created_at_frame = 0;
+  DirectiveInfoT() = default;
+  DirectiveInfoT(const DirectiveInfoT &o);
+  DirectiveInfoT(DirectiveInfoT&&) FLATBUFFERS_NOEXCEPT = default;
+  DirectiveInfoT &operator=(DirectiveInfoT o) FLATBUFFERS_NOEXCEPT;
+};
+
+/// One macro directive, incl. fulfillment (macro-orders §4.3 demand model):
+/// `assigned_strength / requested_strength` reports understrength/fulfilled.
+struct DirectiveInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef DirectiveInfoT NativeTableType;
+  typedef DirectiveInfoBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_DIRECTIVE_ID = 4,
+    VT_OWNER_TEAM = 6,
+    VT_GROUP_ID = 8,
+    VT_TYPE = 10,
+    VT_PRIORITY = 12,
+    VT_SHAPE = 14,
+    VT_PARAMS = 16,
+    VT_CONDITIONS = 18,
+    VT_REQUESTED_STRENGTH = 20,
+    VT_ASSIGNED_STRENGTH = 22,
+    VT_ASSIGNED_SQUAD_COUNT = 24,
+    VT_PHASES_JSON = 26,
+    VT_ACTIVE = 28,
+    VT_EXPIRES_AT_FRAME = 30,
+    VT_CREATED_AT_FRAME = 32
+  };
+  uint32_t directive_id() const {
+    return GetField<uint32_t>(VT_DIRECTIVE_ID, 0);
+  }
+  uint8_t owner_team() const {
+    return GetField<uint8_t>(VT_OWNER_TEAM, 0);
+  }
+  uint32_t group_id() const {
+    return GetField<uint32_t>(VT_GROUP_ID, 0);
+  }
+  SpringWeb::DirectiveType type() const {
+    return static_cast<SpringWeb::DirectiveType>(GetField<uint8_t>(VT_TYPE, 0));
+  }
+  uint8_t priority() const {
+    return GetField<uint8_t>(VT_PRIORITY, 0);
+  }
+  SpringWeb::OrderShape shape() const {
+    return static_cast<SpringWeb::OrderShape>(GetField<uint8_t>(VT_SHAPE, 0));
+  }
+  const ::flatbuffers::Vector<float> *params() const {
+    return GetPointer<const ::flatbuffers::Vector<float> *>(VT_PARAMS);
+  }
+  const SpringWeb::StandingOrderConditions *conditions() const {
+    return GetPointer<const SpringWeb::StandingOrderConditions *>(VT_CONDITIONS);
+  }
+  uint32_t requested_strength() const {
+    return GetField<uint32_t>(VT_REQUESTED_STRENGTH, 0);
+  }
+  uint32_t assigned_strength() const {
+    return GetField<uint32_t>(VT_ASSIGNED_STRENGTH, 0);
+  }
+  uint16_t assigned_squad_count() const {
+    return GetField<uint16_t>(VT_ASSIGNED_SQUAD_COUNT, 0);
+  }
+  const ::flatbuffers::String *phases_json() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_PHASES_JSON);
+  }
+  bool active() const {
+    return GetField<uint8_t>(VT_ACTIVE, 1) != 0;
+  }
+  uint32_t expires_at_frame() const {
+    return GetField<uint32_t>(VT_EXPIRES_AT_FRAME, 0);
+  }
+  uint32_t created_at_frame() const {
+    return GetField<uint32_t>(VT_CREATED_AT_FRAME, 0);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<uint32_t>(verifier, VT_DIRECTIVE_ID, 4) &&
+           VerifyField<uint8_t>(verifier, VT_OWNER_TEAM, 1) &&
+           VerifyField<uint32_t>(verifier, VT_GROUP_ID, 4) &&
+           VerifyField<uint8_t>(verifier, VT_TYPE, 1) &&
+           VerifyField<uint8_t>(verifier, VT_PRIORITY, 1) &&
+           VerifyField<uint8_t>(verifier, VT_SHAPE, 1) &&
+           VerifyOffset(verifier, VT_PARAMS) &&
+           verifier.VerifyVector(params()) &&
+           VerifyOffset(verifier, VT_CONDITIONS) &&
+           verifier.VerifyTable(conditions()) &&
+           VerifyField<uint32_t>(verifier, VT_REQUESTED_STRENGTH, 4) &&
+           VerifyField<uint32_t>(verifier, VT_ASSIGNED_STRENGTH, 4) &&
+           VerifyField<uint16_t>(verifier, VT_ASSIGNED_SQUAD_COUNT, 2) &&
+           VerifyOffset(verifier, VT_PHASES_JSON) &&
+           verifier.VerifyString(phases_json()) &&
+           VerifyField<uint8_t>(verifier, VT_ACTIVE, 1) &&
+           VerifyField<uint32_t>(verifier, VT_EXPIRES_AT_FRAME, 4) &&
+           VerifyField<uint32_t>(verifier, VT_CREATED_AT_FRAME, 4) &&
+           verifier.EndTable();
+  }
+  DirectiveInfoT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(DirectiveInfoT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<DirectiveInfo> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const DirectiveInfoT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct DirectiveInfoBuilder {
+  typedef DirectiveInfo Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_directive_id(uint32_t directive_id) {
+    fbb_.AddElement<uint32_t>(DirectiveInfo::VT_DIRECTIVE_ID, directive_id, 0);
+  }
+  void add_owner_team(uint8_t owner_team) {
+    fbb_.AddElement<uint8_t>(DirectiveInfo::VT_OWNER_TEAM, owner_team, 0);
+  }
+  void add_group_id(uint32_t group_id) {
+    fbb_.AddElement<uint32_t>(DirectiveInfo::VT_GROUP_ID, group_id, 0);
+  }
+  void add_type(SpringWeb::DirectiveType type) {
+    fbb_.AddElement<uint8_t>(DirectiveInfo::VT_TYPE, static_cast<uint8_t>(type), 0);
+  }
+  void add_priority(uint8_t priority) {
+    fbb_.AddElement<uint8_t>(DirectiveInfo::VT_PRIORITY, priority, 0);
+  }
+  void add_shape(SpringWeb::OrderShape shape) {
+    fbb_.AddElement<uint8_t>(DirectiveInfo::VT_SHAPE, static_cast<uint8_t>(shape), 0);
+  }
+  void add_params(::flatbuffers::Offset<::flatbuffers::Vector<float>> params) {
+    fbb_.AddOffset(DirectiveInfo::VT_PARAMS, params);
+  }
+  void add_conditions(::flatbuffers::Offset<SpringWeb::StandingOrderConditions> conditions) {
+    fbb_.AddOffset(DirectiveInfo::VT_CONDITIONS, conditions);
+  }
+  void add_requested_strength(uint32_t requested_strength) {
+    fbb_.AddElement<uint32_t>(DirectiveInfo::VT_REQUESTED_STRENGTH, requested_strength, 0);
+  }
+  void add_assigned_strength(uint32_t assigned_strength) {
+    fbb_.AddElement<uint32_t>(DirectiveInfo::VT_ASSIGNED_STRENGTH, assigned_strength, 0);
+  }
+  void add_assigned_squad_count(uint16_t assigned_squad_count) {
+    fbb_.AddElement<uint16_t>(DirectiveInfo::VT_ASSIGNED_SQUAD_COUNT, assigned_squad_count, 0);
+  }
+  void add_phases_json(::flatbuffers::Offset<::flatbuffers::String> phases_json) {
+    fbb_.AddOffset(DirectiveInfo::VT_PHASES_JSON, phases_json);
+  }
+  void add_active(bool active) {
+    fbb_.AddElement<uint8_t>(DirectiveInfo::VT_ACTIVE, static_cast<uint8_t>(active), 1);
+  }
+  void add_expires_at_frame(uint32_t expires_at_frame) {
+    fbb_.AddElement<uint32_t>(DirectiveInfo::VT_EXPIRES_AT_FRAME, expires_at_frame, 0);
+  }
+  void add_created_at_frame(uint32_t created_at_frame) {
+    fbb_.AddElement<uint32_t>(DirectiveInfo::VT_CREATED_AT_FRAME, created_at_frame, 0);
+  }
+  explicit DirectiveInfoBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<DirectiveInfo> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<DirectiveInfo>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<DirectiveInfo> CreateDirectiveInfo(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint32_t directive_id = 0,
+    uint8_t owner_team = 0,
+    uint32_t group_id = 0,
+    SpringWeb::DirectiveType type = SpringWeb::DirectiveType_DefendArea,
+    uint8_t priority = 0,
+    SpringWeb::OrderShape shape = SpringWeb::OrderShape_Point,
+    ::flatbuffers::Offset<::flatbuffers::Vector<float>> params = 0,
+    ::flatbuffers::Offset<SpringWeb::StandingOrderConditions> conditions = 0,
+    uint32_t requested_strength = 0,
+    uint32_t assigned_strength = 0,
+    uint16_t assigned_squad_count = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> phases_json = 0,
+    bool active = true,
+    uint32_t expires_at_frame = 0,
+    uint32_t created_at_frame = 0) {
+  DirectiveInfoBuilder builder_(_fbb);
+  builder_.add_created_at_frame(created_at_frame);
+  builder_.add_expires_at_frame(expires_at_frame);
+  builder_.add_phases_json(phases_json);
+  builder_.add_assigned_strength(assigned_strength);
+  builder_.add_requested_strength(requested_strength);
+  builder_.add_conditions(conditions);
+  builder_.add_params(params);
+  builder_.add_group_id(group_id);
+  builder_.add_directive_id(directive_id);
+  builder_.add_assigned_squad_count(assigned_squad_count);
+  builder_.add_active(active);
+  builder_.add_shape(shape);
+  builder_.add_priority(priority);
+  builder_.add_type(type);
+  builder_.add_owner_team(owner_team);
+  return builder_.Finish();
+}
+
+inline ::flatbuffers::Offset<DirectiveInfo> CreateDirectiveInfoDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint32_t directive_id = 0,
+    uint8_t owner_team = 0,
+    uint32_t group_id = 0,
+    SpringWeb::DirectiveType type = SpringWeb::DirectiveType_DefendArea,
+    uint8_t priority = 0,
+    SpringWeb::OrderShape shape = SpringWeb::OrderShape_Point,
+    const std::vector<float> *params = nullptr,
+    ::flatbuffers::Offset<SpringWeb::StandingOrderConditions> conditions = 0,
+    uint32_t requested_strength = 0,
+    uint32_t assigned_strength = 0,
+    uint16_t assigned_squad_count = 0,
+    const char *phases_json = nullptr,
+    bool active = true,
+    uint32_t expires_at_frame = 0,
+    uint32_t created_at_frame = 0) {
+  auto params__ = params ? _fbb.CreateVector<float>(*params) : 0;
+  auto phases_json__ = phases_json ? _fbb.CreateString(phases_json) : 0;
+  return SpringWeb::CreateDirectiveInfo(
+      _fbb,
+      directive_id,
+      owner_team,
+      group_id,
+      type,
+      priority,
+      shape,
+      params__,
+      conditions,
+      requested_strength,
+      assigned_strength,
+      assigned_squad_count,
+      phases_json__,
+      active,
+      expires_at_frame,
+      created_at_frame);
+}
+
+::flatbuffers::Offset<DirectiveInfo> CreateDirectiveInfo(::flatbuffers::FlatBufferBuilder &_fbb, const DirectiveInfoT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
+struct DirectiveStateT : public ::flatbuffers::NativeTable {
+  typedef DirectiveState TableType;
+  std::vector<std::unique_ptr<SpringWeb::DirectiveInfoT>> directives{};
+  DirectiveStateT() = default;
+  DirectiveStateT(const DirectiveStateT &o);
+  DirectiveStateT(DirectiveStateT&&) FLATBUFFERS_NOEXCEPT = default;
+  DirectiveStateT &operator=(DirectiveStateT o) FLATBUFFERS_NOEXCEPT;
+};
+
+struct DirectiveState FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef DirectiveStateT NativeTableType;
+  typedef DirectiveStateBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_DIRECTIVES = 4
+  };
+  const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::DirectiveInfo>> *directives() const {
+    return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::DirectiveInfo>> *>(VT_DIRECTIVES);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyOffset(verifier, VT_DIRECTIVES) &&
+           verifier.VerifyVector(directives()) &&
+           verifier.VerifyVectorOfTables(directives()) &&
+           verifier.EndTable();
+  }
+  DirectiveStateT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(DirectiveStateT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<DirectiveState> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const DirectiveStateT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct DirectiveStateBuilder {
+  typedef DirectiveState Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_directives(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::DirectiveInfo>>> directives) {
+    fbb_.AddOffset(DirectiveState::VT_DIRECTIVES, directives);
+  }
+  explicit DirectiveStateBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<DirectiveState> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<DirectiveState>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<DirectiveState> CreateDirectiveState(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::DirectiveInfo>>> directives = 0) {
+  DirectiveStateBuilder builder_(_fbb);
+  builder_.add_directives(directives);
+  return builder_.Finish();
+}
+
+inline ::flatbuffers::Offset<DirectiveState> CreateDirectiveStateDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    const std::vector<::flatbuffers::Offset<SpringWeb::DirectiveInfo>> *directives = nullptr) {
+  auto directives__ = directives ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::DirectiveInfo>>(*directives) : 0;
+  return SpringWeb::CreateDirectiveState(
+      _fbb,
+      directives__);
+}
+
+::flatbuffers::Offset<DirectiveState> CreateDirectiveState(::flatbuffers::FlatBufferBuilder &_fbb, const DirectiveStateT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
 struct SendToUnsyncedArgT : public ::flatbuffers::NativeTable {
   typedef SendToUnsyncedArg TableType;
   SpringWeb::SendToUnsyncedArgKind kind = SpringWeb::SendToUnsyncedArgKind_Nil;
@@ -15147,6 +16792,12 @@ struct ServerMessage FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const SpringWeb::GameModOptions *payload_as_GameModOptions() const {
     return payload_type() == SpringWeb::ServerPayload_GameModOptions ? static_cast<const SpringWeb::GameModOptions *>(payload()) : nullptr;
   }
+  const SpringWeb::OrgGroupState *payload_as_OrgGroupState() const {
+    return payload_type() == SpringWeb::ServerPayload_OrgGroupState ? static_cast<const SpringWeb::OrgGroupState *>(payload()) : nullptr;
+  }
+  const SpringWeb::DirectiveState *payload_as_DirectiveState() const {
+    return payload_type() == SpringWeb::ServerPayload_DirectiveState ? static_cast<const SpringWeb::DirectiveState *>(payload()) : nullptr;
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<uint8_t>(verifier, VT_PAYLOAD_TYPE, 1) &&
@@ -15321,6 +16972,14 @@ template<> inline const SpringWeb::TeamStatsHistoryBatch *ServerMessage::payload
 
 template<> inline const SpringWeb::GameModOptions *ServerMessage::payload_as<SpringWeb::GameModOptions>() const {
   return payload_as_GameModOptions();
+}
+
+template<> inline const SpringWeb::OrgGroupState *ServerMessage::payload_as<SpringWeb::OrgGroupState>() const {
+  return payload_as_OrgGroupState();
+}
+
+template<> inline const SpringWeb::DirectiveState *ServerMessage::payload_as<SpringWeb::DirectiveState>() const {
+  return payload_as_DirectiveState();
 }
 
 struct ServerMessageBuilder {
@@ -15661,7 +17320,8 @@ inline StandingOrderConditionsT::StandingOrderConditionsT(const StandingOrderCon
         outside_radius_center((o.outside_radius_center) ? new SpringWeb::Vec3(*o.outside_radius_center) : nullptr),
         outside_radius_radius(o.outside_radius_radius),
         min_strength(o.min_strength),
-        has_capabilities(o.has_capabilities) {
+        has_capabilities(o.has_capabilities),
+        org_group(o.org_group) {
 }
 
 inline StandingOrderConditionsT &StandingOrderConditionsT::operator=(StandingOrderConditionsT o) FLATBUFFERS_NOEXCEPT {
@@ -15673,6 +17333,7 @@ inline StandingOrderConditionsT &StandingOrderConditionsT::operator=(StandingOrd
   std::swap(outside_radius_radius, o.outside_radius_radius);
   std::swap(min_strength, o.min_strength);
   std::swap(has_capabilities, o.has_capabilities);
+  std::swap(org_group, o.org_group);
   return *this;
 }
 
@@ -15693,6 +17354,7 @@ inline void StandingOrderConditions::UnPackTo(StandingOrderConditionsT *_o, cons
   { auto _e = outside_radius_radius(); _o->outside_radius_radius = _e; }
   { auto _e = min_strength(); _o->min_strength = _e; }
   { auto _e = has_capabilities(); if (_e) { _o->has_capabilities.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->has_capabilities[_i] = _e->Get(_i)->str(); } } else { _o->has_capabilities.resize(0); } }
+  { auto _e = org_group(); _o->org_group = _e; }
 }
 
 inline ::flatbuffers::Offset<StandingOrderConditions> StandingOrderConditions::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const StandingOrderConditionsT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
@@ -15711,6 +17373,7 @@ inline ::flatbuffers::Offset<StandingOrderConditions> CreateStandingOrderConditi
   auto _outside_radius_radius = _o->outside_radius_radius;
   auto _min_strength = _o->min_strength;
   auto _has_capabilities = _o->has_capabilities.size() ? _fbb.CreateVectorOfStrings(_o->has_capabilities) : 0;
+  auto _org_group = _o->org_group;
   return SpringWeb::CreateStandingOrderConditions(
       _fbb,
       _idle_only,
@@ -15720,7 +17383,8 @@ inline ::flatbuffers::Offset<StandingOrderConditions> CreateStandingOrderConditi
       _outside_radius_center,
       _outside_radius_radius,
       _min_strength,
-      _has_capabilities);
+      _has_capabilities,
+      _org_group);
 }
 
 inline StandingOrderCreateT::StandingOrderCreateT(const StandingOrderCreateT &o)
@@ -15870,6 +17534,262 @@ inline ::flatbuffers::Offset<StandingOrderRemove> CreateStandingOrderRemove(::fl
       _fbb,
       _sequence,
       _order_id);
+}
+
+inline OrgGroupCreateT *OrgGroupCreate::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<OrgGroupCreateT>(new OrgGroupCreateT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void OrgGroupCreate::UnPackTo(OrgGroupCreateT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = sequence(); _o->sequence = _e; }
+  { auto _e = echelon(); _o->echelon = _e; }
+  { auto _e = name(); if (_e) _o->name = _e->str(); }
+  { auto _e = member_ids(); if (_e) { _o->member_ids.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->member_ids[_i] = _e->Get(_i); } } else { _o->member_ids.resize(0); } }
+  { auto _e = parent_id(); _o->parent_id = _e; }
+}
+
+inline ::flatbuffers::Offset<OrgGroupCreate> OrgGroupCreate::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const OrgGroupCreateT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return CreateOrgGroupCreate(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<OrgGroupCreate> CreateOrgGroupCreate(::flatbuffers::FlatBufferBuilder &_fbb, const OrgGroupCreateT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const OrgGroupCreateT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _sequence = _o->sequence;
+  auto _echelon = _o->echelon;
+  auto _name = _o->name.empty() ? 0 : _fbb.CreateString(_o->name);
+  auto _member_ids = _o->member_ids.size() ? _fbb.CreateVector(_o->member_ids) : 0;
+  auto _parent_id = _o->parent_id;
+  return SpringWeb::CreateOrgGroupCreate(
+      _fbb,
+      _sequence,
+      _echelon,
+      _name,
+      _member_ids,
+      _parent_id);
+}
+
+inline OrgGroupUpdateT *OrgGroupUpdate::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<OrgGroupUpdateT>(new OrgGroupUpdateT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void OrgGroupUpdate::UnPackTo(OrgGroupUpdateT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = sequence(); _o->sequence = _e; }
+  { auto _e = group_id(); _o->group_id = _e; }
+  { auto _e = add_ids(); if (_e) { _o->add_ids.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->add_ids[_i] = _e->Get(_i); } } else { _o->add_ids.resize(0); } }
+  { auto _e = remove_ids(); if (_e) { _o->remove_ids.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->remove_ids[_i] = _e->Get(_i); } } else { _o->remove_ids.resize(0); } }
+  { auto _e = name(); if (_e) _o->name = _e->str(); }
+}
+
+inline ::flatbuffers::Offset<OrgGroupUpdate> OrgGroupUpdate::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const OrgGroupUpdateT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return CreateOrgGroupUpdate(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<OrgGroupUpdate> CreateOrgGroupUpdate(::flatbuffers::FlatBufferBuilder &_fbb, const OrgGroupUpdateT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const OrgGroupUpdateT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _sequence = _o->sequence;
+  auto _group_id = _o->group_id;
+  auto _add_ids = _o->add_ids.size() ? _fbb.CreateVector(_o->add_ids) : 0;
+  auto _remove_ids = _o->remove_ids.size() ? _fbb.CreateVector(_o->remove_ids) : 0;
+  auto _name = _o->name.empty() ? 0 : _fbb.CreateString(_o->name);
+  return SpringWeb::CreateOrgGroupUpdate(
+      _fbb,
+      _sequence,
+      _group_id,
+      _add_ids,
+      _remove_ids,
+      _name);
+}
+
+inline OrgGroupDisbandT *OrgGroupDisband::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<OrgGroupDisbandT>(new OrgGroupDisbandT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void OrgGroupDisband::UnPackTo(OrgGroupDisbandT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = sequence(); _o->sequence = _e; }
+  { auto _e = group_id(); _o->group_id = _e; }
+}
+
+inline ::flatbuffers::Offset<OrgGroupDisband> OrgGroupDisband::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const OrgGroupDisbandT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return CreateOrgGroupDisband(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<OrgGroupDisband> CreateOrgGroupDisband(::flatbuffers::FlatBufferBuilder &_fbb, const OrgGroupDisbandT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const OrgGroupDisbandT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _sequence = _o->sequence;
+  auto _group_id = _o->group_id;
+  return SpringWeb::CreateOrgGroupDisband(
+      _fbb,
+      _sequence,
+      _group_id);
+}
+
+inline GroupDirectiveT::GroupDirectiveT(const GroupDirectiveT &o)
+      : sequence(o.sequence),
+        directive_id(o.directive_id),
+        group_id(o.group_id),
+        type(o.type),
+        priority(o.priority),
+        shape(o.shape),
+        params(o.params),
+        conditions((o.conditions) ? new SpringWeb::StandingOrderConditionsT(*o.conditions) : nullptr),
+        requested_strength(o.requested_strength),
+        phases_json(o.phases_json),
+        active(o.active),
+        expires_in_frames(o.expires_in_frames) {
+}
+
+inline GroupDirectiveT &GroupDirectiveT::operator=(GroupDirectiveT o) FLATBUFFERS_NOEXCEPT {
+  std::swap(sequence, o.sequence);
+  std::swap(directive_id, o.directive_id);
+  std::swap(group_id, o.group_id);
+  std::swap(type, o.type);
+  std::swap(priority, o.priority);
+  std::swap(shape, o.shape);
+  std::swap(params, o.params);
+  std::swap(conditions, o.conditions);
+  std::swap(requested_strength, o.requested_strength);
+  std::swap(phases_json, o.phases_json);
+  std::swap(active, o.active);
+  std::swap(expires_in_frames, o.expires_in_frames);
+  return *this;
+}
+
+inline GroupDirectiveT *GroupDirective::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<GroupDirectiveT>(new GroupDirectiveT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void GroupDirective::UnPackTo(GroupDirectiveT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = sequence(); _o->sequence = _e; }
+  { auto _e = directive_id(); _o->directive_id = _e; }
+  { auto _e = group_id(); _o->group_id = _e; }
+  { auto _e = type(); _o->type = _e; }
+  { auto _e = priority(); _o->priority = _e; }
+  { auto _e = shape(); _o->shape = _e; }
+  { auto _e = params(); if (_e) { _o->params.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->params[_i] = _e->Get(_i); } } else { _o->params.resize(0); } }
+  { auto _e = conditions(); if (_e) { if(_o->conditions) { _e->UnPackTo(_o->conditions.get(), _resolver); } else { _o->conditions = std::unique_ptr<SpringWeb::StandingOrderConditionsT>(_e->UnPack(_resolver)); } } else if (_o->conditions) { _o->conditions.reset(); } }
+  { auto _e = requested_strength(); _o->requested_strength = _e; }
+  { auto _e = phases_json(); if (_e) _o->phases_json = _e->str(); }
+  { auto _e = active(); _o->active = _e; }
+  { auto _e = expires_in_frames(); _o->expires_in_frames = _e; }
+}
+
+inline ::flatbuffers::Offset<GroupDirective> GroupDirective::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GroupDirectiveT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return CreateGroupDirective(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<GroupDirective> CreateGroupDirective(::flatbuffers::FlatBufferBuilder &_fbb, const GroupDirectiveT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const GroupDirectiveT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _sequence = _o->sequence;
+  auto _directive_id = _o->directive_id;
+  auto _group_id = _o->group_id;
+  auto _type = _o->type;
+  auto _priority = _o->priority;
+  auto _shape = _o->shape;
+  auto _params = _o->params.size() ? _fbb.CreateVector(_o->params) : 0;
+  auto _conditions = _o->conditions ? CreateStandingOrderConditions(_fbb, _o->conditions.get(), _rehasher) : 0;
+  auto _requested_strength = _o->requested_strength;
+  auto _phases_json = _o->phases_json.empty() ? 0 : _fbb.CreateString(_o->phases_json);
+  auto _active = _o->active;
+  auto _expires_in_frames = _o->expires_in_frames;
+  return SpringWeb::CreateGroupDirective(
+      _fbb,
+      _sequence,
+      _directive_id,
+      _group_id,
+      _type,
+      _priority,
+      _shape,
+      _params,
+      _conditions,
+      _requested_strength,
+      _phases_json,
+      _active,
+      _expires_in_frames);
+}
+
+inline GroupDirectiveRemoveT *GroupDirectiveRemove::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<GroupDirectiveRemoveT>(new GroupDirectiveRemoveT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void GroupDirectiveRemove::UnPackTo(GroupDirectiveRemoveT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = sequence(); _o->sequence = _e; }
+  { auto _e = directive_id(); _o->directive_id = _e; }
+}
+
+inline ::flatbuffers::Offset<GroupDirectiveRemove> GroupDirectiveRemove::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GroupDirectiveRemoveT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return CreateGroupDirectiveRemove(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<GroupDirectiveRemove> CreateGroupDirectiveRemove(::flatbuffers::FlatBufferBuilder &_fbb, const GroupDirectiveRemoveT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const GroupDirectiveRemoveT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _sequence = _o->sequence;
+  auto _directive_id = _o->directive_id;
+  return SpringWeb::CreateGroupDirectiveRemove(
+      _fbb,
+      _sequence,
+      _directive_id);
+}
+
+inline GroupPostureT *GroupPosture::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<GroupPostureT>(new GroupPostureT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void GroupPosture::UnPackTo(GroupPostureT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = sequence(); _o->sequence = _e; }
+  { auto _e = group_id(); _o->group_id = _e; }
+  { auto _e = posture_json(); if (_e) _o->posture_json = _e->str(); }
+}
+
+inline ::flatbuffers::Offset<GroupPosture> GroupPosture::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GroupPostureT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return CreateGroupPosture(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<GroupPosture> CreateGroupPosture(::flatbuffers::FlatBufferBuilder &_fbb, const GroupPostureT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const GroupPostureT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _sequence = _o->sequence;
+  auto _group_id = _o->group_id;
+  auto _posture_json = _o->posture_json.empty() ? 0 : _fbb.CreateString(_o->posture_json);
+  return SpringWeb::CreateGroupPosture(
+      _fbb,
+      _sequence,
+      _group_id,
+      _posture_json);
 }
 
 inline PingT *Ping::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
@@ -19872,6 +21792,233 @@ inline ::flatbuffers::Offset<StandingOrderState> CreateStandingOrderState(::flat
       _orders);
 }
 
+inline OrgGroupInfoT *OrgGroupInfo::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<OrgGroupInfoT>(new OrgGroupInfoT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void OrgGroupInfo::UnPackTo(OrgGroupInfoT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = group_id(); _o->group_id = _e; }
+  { auto _e = echelon(); _o->echelon = _e; }
+  { auto _e = owner_team(); _o->owner_team = _e; }
+  { auto _e = parent_id(); _o->parent_id = _e; }
+  { auto _e = name(); if (_e) _o->name = _e->str(); }
+  { auto _e = member_ids(); if (_e) { _o->member_ids.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->member_ids[_i] = _e->Get(_i); } } else { _o->member_ids.resize(0); } }
+  { auto _e = current_directive_id(); _o->current_directive_id = _e; }
+  { auto _e = posture_json(); if (_e) _o->posture_json = _e->str(); }
+  { auto _e = created_at_frame(); _o->created_at_frame = _e; }
+}
+
+inline ::flatbuffers::Offset<OrgGroupInfo> OrgGroupInfo::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const OrgGroupInfoT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return CreateOrgGroupInfo(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<OrgGroupInfo> CreateOrgGroupInfo(::flatbuffers::FlatBufferBuilder &_fbb, const OrgGroupInfoT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const OrgGroupInfoT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _group_id = _o->group_id;
+  auto _echelon = _o->echelon;
+  auto _owner_team = _o->owner_team;
+  auto _parent_id = _o->parent_id;
+  auto _name = _o->name.empty() ? 0 : _fbb.CreateString(_o->name);
+  auto _member_ids = _o->member_ids.size() ? _fbb.CreateVector(_o->member_ids) : 0;
+  auto _current_directive_id = _o->current_directive_id;
+  auto _posture_json = _o->posture_json.empty() ? 0 : _fbb.CreateString(_o->posture_json);
+  auto _created_at_frame = _o->created_at_frame;
+  return SpringWeb::CreateOrgGroupInfo(
+      _fbb,
+      _group_id,
+      _echelon,
+      _owner_team,
+      _parent_id,
+      _name,
+      _member_ids,
+      _current_directive_id,
+      _posture_json,
+      _created_at_frame);
+}
+
+inline OrgGroupStateT::OrgGroupStateT(const OrgGroupStateT &o) {
+  groups.reserve(o.groups.size());
+  for (const auto &groups_ : o.groups) { groups.emplace_back((groups_) ? new SpringWeb::OrgGroupInfoT(*groups_) : nullptr); }
+}
+
+inline OrgGroupStateT &OrgGroupStateT::operator=(OrgGroupStateT o) FLATBUFFERS_NOEXCEPT {
+  std::swap(groups, o.groups);
+  return *this;
+}
+
+inline OrgGroupStateT *OrgGroupState::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<OrgGroupStateT>(new OrgGroupStateT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void OrgGroupState::UnPackTo(OrgGroupStateT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = groups(); if (_e) { _o->groups.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->groups[_i]) { _e->Get(_i)->UnPackTo(_o->groups[_i].get(), _resolver); } else { _o->groups[_i] = std::unique_ptr<SpringWeb::OrgGroupInfoT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->groups.resize(0); } }
+}
+
+inline ::flatbuffers::Offset<OrgGroupState> OrgGroupState::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const OrgGroupStateT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return CreateOrgGroupState(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<OrgGroupState> CreateOrgGroupState(::flatbuffers::FlatBufferBuilder &_fbb, const OrgGroupStateT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const OrgGroupStateT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _groups = _o->groups.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::OrgGroupInfo>> (_o->groups.size(), [](size_t i, _VectorArgs *__va) { return CreateOrgGroupInfo(*__va->__fbb, __va->__o->groups[i].get(), __va->__rehasher); }, &_va ) : 0;
+  return SpringWeb::CreateOrgGroupState(
+      _fbb,
+      _groups);
+}
+
+inline DirectiveInfoT::DirectiveInfoT(const DirectiveInfoT &o)
+      : directive_id(o.directive_id),
+        owner_team(o.owner_team),
+        group_id(o.group_id),
+        type(o.type),
+        priority(o.priority),
+        shape(o.shape),
+        params(o.params),
+        conditions((o.conditions) ? new SpringWeb::StandingOrderConditionsT(*o.conditions) : nullptr),
+        requested_strength(o.requested_strength),
+        assigned_strength(o.assigned_strength),
+        assigned_squad_count(o.assigned_squad_count),
+        phases_json(o.phases_json),
+        active(o.active),
+        expires_at_frame(o.expires_at_frame),
+        created_at_frame(o.created_at_frame) {
+}
+
+inline DirectiveInfoT &DirectiveInfoT::operator=(DirectiveInfoT o) FLATBUFFERS_NOEXCEPT {
+  std::swap(directive_id, o.directive_id);
+  std::swap(owner_team, o.owner_team);
+  std::swap(group_id, o.group_id);
+  std::swap(type, o.type);
+  std::swap(priority, o.priority);
+  std::swap(shape, o.shape);
+  std::swap(params, o.params);
+  std::swap(conditions, o.conditions);
+  std::swap(requested_strength, o.requested_strength);
+  std::swap(assigned_strength, o.assigned_strength);
+  std::swap(assigned_squad_count, o.assigned_squad_count);
+  std::swap(phases_json, o.phases_json);
+  std::swap(active, o.active);
+  std::swap(expires_at_frame, o.expires_at_frame);
+  std::swap(created_at_frame, o.created_at_frame);
+  return *this;
+}
+
+inline DirectiveInfoT *DirectiveInfo::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<DirectiveInfoT>(new DirectiveInfoT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void DirectiveInfo::UnPackTo(DirectiveInfoT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = directive_id(); _o->directive_id = _e; }
+  { auto _e = owner_team(); _o->owner_team = _e; }
+  { auto _e = group_id(); _o->group_id = _e; }
+  { auto _e = type(); _o->type = _e; }
+  { auto _e = priority(); _o->priority = _e; }
+  { auto _e = shape(); _o->shape = _e; }
+  { auto _e = params(); if (_e) { _o->params.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->params[_i] = _e->Get(_i); } } else { _o->params.resize(0); } }
+  { auto _e = conditions(); if (_e) { if(_o->conditions) { _e->UnPackTo(_o->conditions.get(), _resolver); } else { _o->conditions = std::unique_ptr<SpringWeb::StandingOrderConditionsT>(_e->UnPack(_resolver)); } } else if (_o->conditions) { _o->conditions.reset(); } }
+  { auto _e = requested_strength(); _o->requested_strength = _e; }
+  { auto _e = assigned_strength(); _o->assigned_strength = _e; }
+  { auto _e = assigned_squad_count(); _o->assigned_squad_count = _e; }
+  { auto _e = phases_json(); if (_e) _o->phases_json = _e->str(); }
+  { auto _e = active(); _o->active = _e; }
+  { auto _e = expires_at_frame(); _o->expires_at_frame = _e; }
+  { auto _e = created_at_frame(); _o->created_at_frame = _e; }
+}
+
+inline ::flatbuffers::Offset<DirectiveInfo> DirectiveInfo::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const DirectiveInfoT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return CreateDirectiveInfo(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<DirectiveInfo> CreateDirectiveInfo(::flatbuffers::FlatBufferBuilder &_fbb, const DirectiveInfoT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const DirectiveInfoT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _directive_id = _o->directive_id;
+  auto _owner_team = _o->owner_team;
+  auto _group_id = _o->group_id;
+  auto _type = _o->type;
+  auto _priority = _o->priority;
+  auto _shape = _o->shape;
+  auto _params = _o->params.size() ? _fbb.CreateVector(_o->params) : 0;
+  auto _conditions = _o->conditions ? CreateStandingOrderConditions(_fbb, _o->conditions.get(), _rehasher) : 0;
+  auto _requested_strength = _o->requested_strength;
+  auto _assigned_strength = _o->assigned_strength;
+  auto _assigned_squad_count = _o->assigned_squad_count;
+  auto _phases_json = _o->phases_json.empty() ? 0 : _fbb.CreateString(_o->phases_json);
+  auto _active = _o->active;
+  auto _expires_at_frame = _o->expires_at_frame;
+  auto _created_at_frame = _o->created_at_frame;
+  return SpringWeb::CreateDirectiveInfo(
+      _fbb,
+      _directive_id,
+      _owner_team,
+      _group_id,
+      _type,
+      _priority,
+      _shape,
+      _params,
+      _conditions,
+      _requested_strength,
+      _assigned_strength,
+      _assigned_squad_count,
+      _phases_json,
+      _active,
+      _expires_at_frame,
+      _created_at_frame);
+}
+
+inline DirectiveStateT::DirectiveStateT(const DirectiveStateT &o) {
+  directives.reserve(o.directives.size());
+  for (const auto &directives_ : o.directives) { directives.emplace_back((directives_) ? new SpringWeb::DirectiveInfoT(*directives_) : nullptr); }
+}
+
+inline DirectiveStateT &DirectiveStateT::operator=(DirectiveStateT o) FLATBUFFERS_NOEXCEPT {
+  std::swap(directives, o.directives);
+  return *this;
+}
+
+inline DirectiveStateT *DirectiveState::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<DirectiveStateT>(new DirectiveStateT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void DirectiveState::UnPackTo(DirectiveStateT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = directives(); if (_e) { _o->directives.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->directives[_i]) { _e->Get(_i)->UnPackTo(_o->directives[_i].get(), _resolver); } else { _o->directives[_i] = std::unique_ptr<SpringWeb::DirectiveInfoT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->directives.resize(0); } }
+}
+
+inline ::flatbuffers::Offset<DirectiveState> DirectiveState::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const DirectiveStateT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return CreateDirectiveState(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<DirectiveState> CreateDirectiveState(::flatbuffers::FlatBufferBuilder &_fbb, const DirectiveStateT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const DirectiveStateT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _directives = _o->directives.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::DirectiveInfo>> (_o->directives.size(), [](size_t i, _VectorArgs *__va) { return CreateDirectiveInfo(*__va->__fbb, __va->__o->directives[i].get(), __va->__rehasher); }, &_va ) : 0;
+  return SpringWeb::CreateDirectiveState(
+      _fbb,
+      _directives);
+}
+
 inline SendToUnsyncedArgT *SendToUnsyncedArg::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
   auto _o = std::unique_ptr<SendToUnsyncedArgT>(new SendToUnsyncedArgT());
   UnPackTo(_o.get(), _resolver);
@@ -20159,6 +22306,30 @@ inline bool VerifyClientPayload(::flatbuffers::Verifier &verifier, const void *o
       auto ptr = reinterpret_cast<const SpringWeb::PlayerLeaveIntent *>(obj);
       return verifier.VerifyTable(ptr);
     }
+    case ClientPayload_OrgGroupCreate: {
+      auto ptr = reinterpret_cast<const SpringWeb::OrgGroupCreate *>(obj);
+      return verifier.VerifyTable(ptr);
+    }
+    case ClientPayload_OrgGroupUpdate: {
+      auto ptr = reinterpret_cast<const SpringWeb::OrgGroupUpdate *>(obj);
+      return verifier.VerifyTable(ptr);
+    }
+    case ClientPayload_OrgGroupDisband: {
+      auto ptr = reinterpret_cast<const SpringWeb::OrgGroupDisband *>(obj);
+      return verifier.VerifyTable(ptr);
+    }
+    case ClientPayload_GroupDirective: {
+      auto ptr = reinterpret_cast<const SpringWeb::GroupDirective *>(obj);
+      return verifier.VerifyTable(ptr);
+    }
+    case ClientPayload_GroupDirectiveRemove: {
+      auto ptr = reinterpret_cast<const SpringWeb::GroupDirectiveRemove *>(obj);
+      return verifier.VerifyTable(ptr);
+    }
+    case ClientPayload_GroupPosture: {
+      auto ptr = reinterpret_cast<const SpringWeb::GroupPosture *>(obj);
+      return verifier.VerifyTable(ptr);
+    }
     default: return true;
   }
 }
@@ -20326,6 +22497,30 @@ inline void *ClientPayloadUnion::UnPack(const void *obj, ClientPayload type, con
       auto ptr = reinterpret_cast<const SpringWeb::PlayerLeaveIntent *>(obj);
       return ptr->UnPack(resolver);
     }
+    case ClientPayload_OrgGroupCreate: {
+      auto ptr = reinterpret_cast<const SpringWeb::OrgGroupCreate *>(obj);
+      return ptr->UnPack(resolver);
+    }
+    case ClientPayload_OrgGroupUpdate: {
+      auto ptr = reinterpret_cast<const SpringWeb::OrgGroupUpdate *>(obj);
+      return ptr->UnPack(resolver);
+    }
+    case ClientPayload_OrgGroupDisband: {
+      auto ptr = reinterpret_cast<const SpringWeb::OrgGroupDisband *>(obj);
+      return ptr->UnPack(resolver);
+    }
+    case ClientPayload_GroupDirective: {
+      auto ptr = reinterpret_cast<const SpringWeb::GroupDirective *>(obj);
+      return ptr->UnPack(resolver);
+    }
+    case ClientPayload_GroupDirectiveRemove: {
+      auto ptr = reinterpret_cast<const SpringWeb::GroupDirectiveRemove *>(obj);
+      return ptr->UnPack(resolver);
+    }
+    case ClientPayload_GroupPosture: {
+      auto ptr = reinterpret_cast<const SpringWeb::GroupPosture *>(obj);
+      return ptr->UnPack(resolver);
+    }
     default: return nullptr;
   }
 }
@@ -20481,6 +22676,30 @@ inline ::flatbuffers::Offset<void> ClientPayloadUnion::Pack(::flatbuffers::FlatB
       auto ptr = reinterpret_cast<const SpringWeb::PlayerLeaveIntentT *>(value);
       return CreatePlayerLeaveIntent(_fbb, ptr, _rehasher).Union();
     }
+    case ClientPayload_OrgGroupCreate: {
+      auto ptr = reinterpret_cast<const SpringWeb::OrgGroupCreateT *>(value);
+      return CreateOrgGroupCreate(_fbb, ptr, _rehasher).Union();
+    }
+    case ClientPayload_OrgGroupUpdate: {
+      auto ptr = reinterpret_cast<const SpringWeb::OrgGroupUpdateT *>(value);
+      return CreateOrgGroupUpdate(_fbb, ptr, _rehasher).Union();
+    }
+    case ClientPayload_OrgGroupDisband: {
+      auto ptr = reinterpret_cast<const SpringWeb::OrgGroupDisbandT *>(value);
+      return CreateOrgGroupDisband(_fbb, ptr, _rehasher).Union();
+    }
+    case ClientPayload_GroupDirective: {
+      auto ptr = reinterpret_cast<const SpringWeb::GroupDirectiveT *>(value);
+      return CreateGroupDirective(_fbb, ptr, _rehasher).Union();
+    }
+    case ClientPayload_GroupDirectiveRemove: {
+      auto ptr = reinterpret_cast<const SpringWeb::GroupDirectiveRemoveT *>(value);
+      return CreateGroupDirectiveRemove(_fbb, ptr, _rehasher).Union();
+    }
+    case ClientPayload_GroupPosture: {
+      auto ptr = reinterpret_cast<const SpringWeb::GroupPostureT *>(value);
+      return CreateGroupPosture(_fbb, ptr, _rehasher).Union();
+    }
     default: return 0;
   }
 }
@@ -20633,6 +22852,30 @@ inline ClientPayloadUnion::ClientPayloadUnion(const ClientPayloadUnion &u) : typ
     }
     case ClientPayload_PlayerLeaveIntent: {
       value = new SpringWeb::PlayerLeaveIntentT(*reinterpret_cast<SpringWeb::PlayerLeaveIntentT *>(u.value));
+      break;
+    }
+    case ClientPayload_OrgGroupCreate: {
+      value = new SpringWeb::OrgGroupCreateT(*reinterpret_cast<SpringWeb::OrgGroupCreateT *>(u.value));
+      break;
+    }
+    case ClientPayload_OrgGroupUpdate: {
+      value = new SpringWeb::OrgGroupUpdateT(*reinterpret_cast<SpringWeb::OrgGroupUpdateT *>(u.value));
+      break;
+    }
+    case ClientPayload_OrgGroupDisband: {
+      value = new SpringWeb::OrgGroupDisbandT(*reinterpret_cast<SpringWeb::OrgGroupDisbandT *>(u.value));
+      break;
+    }
+    case ClientPayload_GroupDirective: {
+      value = new SpringWeb::GroupDirectiveT(*reinterpret_cast<SpringWeb::GroupDirectiveT *>(u.value));
+      break;
+    }
+    case ClientPayload_GroupDirectiveRemove: {
+      value = new SpringWeb::GroupDirectiveRemoveT(*reinterpret_cast<SpringWeb::GroupDirectiveRemoveT *>(u.value));
+      break;
+    }
+    case ClientPayload_GroupPosture: {
+      value = new SpringWeb::GroupPostureT(*reinterpret_cast<SpringWeb::GroupPostureT *>(u.value));
       break;
     }
     default:
@@ -20827,6 +23070,36 @@ inline void ClientPayloadUnion::Reset() {
       delete ptr;
       break;
     }
+    case ClientPayload_OrgGroupCreate: {
+      auto ptr = reinterpret_cast<SpringWeb::OrgGroupCreateT *>(value);
+      delete ptr;
+      break;
+    }
+    case ClientPayload_OrgGroupUpdate: {
+      auto ptr = reinterpret_cast<SpringWeb::OrgGroupUpdateT *>(value);
+      delete ptr;
+      break;
+    }
+    case ClientPayload_OrgGroupDisband: {
+      auto ptr = reinterpret_cast<SpringWeb::OrgGroupDisbandT *>(value);
+      delete ptr;
+      break;
+    }
+    case ClientPayload_GroupDirective: {
+      auto ptr = reinterpret_cast<SpringWeb::GroupDirectiveT *>(value);
+      delete ptr;
+      break;
+    }
+    case ClientPayload_GroupDirectiveRemove: {
+      auto ptr = reinterpret_cast<SpringWeb::GroupDirectiveRemoveT *>(value);
+      delete ptr;
+      break;
+    }
+    case ClientPayload_GroupPosture: {
+      auto ptr = reinterpret_cast<SpringWeb::GroupPostureT *>(value);
+      delete ptr;
+      break;
+    }
     default: break;
   }
   value = nullptr;
@@ -21000,6 +23273,14 @@ inline bool VerifyServerPayload(::flatbuffers::Verifier &verifier, const void *o
     }
     case ServerPayload_GameModOptions: {
       auto ptr = reinterpret_cast<const SpringWeb::GameModOptions *>(obj);
+      return verifier.VerifyTable(ptr);
+    }
+    case ServerPayload_OrgGroupState: {
+      auto ptr = reinterpret_cast<const SpringWeb::OrgGroupState *>(obj);
+      return verifier.VerifyTable(ptr);
+    }
+    case ServerPayload_DirectiveState: {
+      auto ptr = reinterpret_cast<const SpringWeb::DirectiveState *>(obj);
       return verifier.VerifyTable(ptr);
     }
     default: return true;
@@ -21185,6 +23466,14 @@ inline void *ServerPayloadUnion::UnPack(const void *obj, ServerPayload type, con
       auto ptr = reinterpret_cast<const SpringWeb::GameModOptions *>(obj);
       return ptr->UnPack(resolver);
     }
+    case ServerPayload_OrgGroupState: {
+      auto ptr = reinterpret_cast<const SpringWeb::OrgGroupState *>(obj);
+      return ptr->UnPack(resolver);
+    }
+    case ServerPayload_DirectiveState: {
+      auto ptr = reinterpret_cast<const SpringWeb::DirectiveState *>(obj);
+      return ptr->UnPack(resolver);
+    }
     default: return nullptr;
   }
 }
@@ -21356,6 +23645,14 @@ inline ::flatbuffers::Offset<void> ServerPayloadUnion::Pack(::flatbuffers::FlatB
       auto ptr = reinterpret_cast<const SpringWeb::GameModOptionsT *>(value);
       return CreateGameModOptions(_fbb, ptr, _rehasher).Union();
     }
+    case ServerPayload_OrgGroupState: {
+      auto ptr = reinterpret_cast<const SpringWeb::OrgGroupStateT *>(value);
+      return CreateOrgGroupState(_fbb, ptr, _rehasher).Union();
+    }
+    case ServerPayload_DirectiveState: {
+      auto ptr = reinterpret_cast<const SpringWeb::DirectiveStateT *>(value);
+      return CreateDirectiveState(_fbb, ptr, _rehasher).Union();
+    }
     default: return 0;
   }
 }
@@ -21524,6 +23821,14 @@ inline ServerPayloadUnion::ServerPayloadUnion(const ServerPayloadUnion &u) : typ
     }
     case ServerPayload_GameModOptions: {
       value = new SpringWeb::GameModOptionsT(*reinterpret_cast<SpringWeb::GameModOptionsT *>(u.value));
+      break;
+    }
+    case ServerPayload_OrgGroupState: {
+      value = new SpringWeb::OrgGroupStateT(*reinterpret_cast<SpringWeb::OrgGroupStateT *>(u.value));
+      break;
+    }
+    case ServerPayload_DirectiveState: {
+      value = new SpringWeb::DirectiveStateT(*reinterpret_cast<SpringWeb::DirectiveStateT *>(u.value));
       break;
     }
     default:
@@ -21735,6 +24040,16 @@ inline void ServerPayloadUnion::Reset() {
     }
     case ServerPayload_GameModOptions: {
       auto ptr = reinterpret_cast<SpringWeb::GameModOptionsT *>(value);
+      delete ptr;
+      break;
+    }
+    case ServerPayload_OrgGroupState: {
+      auto ptr = reinterpret_cast<SpringWeb::OrgGroupStateT *>(value);
+      delete ptr;
+      break;
+    }
+    case ServerPayload_DirectiveState: {
+      auto ptr = reinterpret_cast<SpringWeb::DirectiveStateT *>(value);
       delete ptr;
       break;
     }

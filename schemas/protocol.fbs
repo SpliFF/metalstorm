@@ -190,6 +190,12 @@ table StandingOrderConditions {
     /// "scout". Resolution against unit defs is server-side and may be
     /// game-specific (Lua callback or unit-def category lookup).
     has_capabilities: [string];
+    /// Org-group scope (macro-orders §4.2 — the A+C fusion). When non-zero,
+    /// only squads that are members of this org group qualify; this is the
+    /// field that draws a group-scoped directive from its own roster rather
+    /// than the whole idle pool. 0 = any squad (classic condition/area
+    /// scope). For a GroupDirective the server sets this from `group_id`.
+    org_group: uint32 = 0;
 }
 
 /// Client → Server: create a new standing order owned by the
@@ -232,6 +238,132 @@ table StandingOrderUpdate {
 table StandingOrderRemove {
     sequence: uint32;
     order_id: uint32;
+}
+
+// ============================================================
+// Macro command & control (PLAN-macro-orders / PLAN-macro-directives)
+//
+// Ratified group model (Q-D-d, 2026-07-11): A+C hybrid — server-side org
+// groups (Model A) + condition/area directives (Model C). v0 ships two
+// echelons: squad + platoon/group. The army tier is *reserved in the
+// schema but not surfaced*: the `echelon`/`parent_id` fields exist and are
+// army-capable, but v0 emitters send only `echelon = Platoon` /
+// `parent_id = 0`, and a v0 server REJECTS an army create or a non-zero
+// parent (fail loud). Org-group ids come from their own counter + own
+// table (Q-D-d §5.4), never the entity id stream.
+// ============================================================
+
+/// Command echelon. v0 emits/accepts only `Platoon`; `Army` is reserved
+/// (schema-present, rejected on create until the tier ships).
+enum Echelon : uint8 {
+    Squad = 0,
+    Platoon = 1,        // a.k.a. "group" — the only tier v0 surfaces
+    Army = 2,           // reserved (post-v0)
+}
+
+/// Macro-directive type — a superset of StandingOrderType. Values 0..7
+/// alias StandingOrderType 1:1 so a group-scoped classic order maps with
+/// no translation; 8+ are the new platoon-level macro directives
+/// (PLAN-macro-orders §2). DefendFront carries the polyline "front line"
+/// shape — the first genuinely new order shape.
+enum DirectiveType : uint8 {
+    DefendArea = 0,
+    PatrolRoute = 1,
+    RallyPoint = 2,
+    Fallback = 3,
+    Reinforce = 4,
+    Screen = 5,
+    SupplyRoute = 6,
+    BuildBase = 7,
+    MoveFormation = 8,
+    Assault = 9,
+    Defend = 10,
+    Overwatch = 11,
+    Withdraw = 12,
+    Escort = 13,
+    DefendFront = 14,
+}
+
+/// Geometry of a directive's target. `params` on the directive is
+/// interpreted per this shape (see the server-side decomposition docs):
+///   Point    → [x, y, z]
+///   Circle   → [x, y, z, radius]
+///   Polygon  → [x1,y1,z1, x2,y2,z2, ...]         (ring, implicitly closed)
+///   Polyline → [frontage/depth, x1,y1,z1, ...]   (the front line)
+enum OrderShape : uint8 {
+    Point = 0,
+    Circle = 1,
+    Polygon = 2,
+    Polyline = 3,
+}
+
+/// Client → Server: create a server-side org group (Model A). Owned by
+/// the authenticated session's team (team objects with player attribution,
+/// not player ownership — macro-orders 2026-06-13 update). v0 rejects
+/// `echelon = Army` and any non-zero `parent_id`.
+table OrgGroupCreate {
+    sequence: uint32;
+    echelon: Echelon = Platoon;
+    name: string;
+    member_ids: [uint32];       // squad entity IDs to seed the roster
+    parent_id: uint32;          // reserved: v0 rejects non-zero
+}
+
+/// Client → Server: mutate a group's roster / name. `add_ids` are pulled
+/// out of any prior group first (a squad belongs to at most one platoon —
+/// v0 rule). Empty `name` = leave name unchanged.
+table OrgGroupUpdate {
+    sequence: uint32;
+    group_id: uint32;
+    add_ids: [uint32];
+    remove_ids: [uint32];
+    name: string;
+}
+
+/// Client → Server: disband a group. Members become unassigned (and its
+/// active directive, if any, is removed). Same team-ownership rule as the
+/// standing-order edits.
+table OrgGroupDisband {
+    sequence: uint32;
+    group_id: uint32;
+}
+
+/// Client → Server: create or update a macro directive. `directive_id == 0`
+/// creates; non-zero updates in place. `group_id == 0` = condition-scoped
+/// (classic area/standing directive); non-zero scopes the directive to that
+/// group's roster (the A+C fusion). `conditions.org_group` is set
+/// server-side from `group_id`. `params` is interpreted per `shape`.
+/// The create path is the authority charge site for directive play
+/// (PLAN-metalstorm-authority §A2) — hooked separately, not here.
+table GroupDirective {
+    sequence: uint32;
+    directive_id: uint32;
+    group_id: uint32;
+    type: DirectiveType;
+    priority: uint8;
+    shape: OrderShape;
+    params: [float];
+    conditions: StandingOrderConditions;
+    requested_strength: uint32;     // demand model; 0 = take what idles
+    phases_json: string;            // optional chain (macro-orders §4.4); reserved in v0
+    active: bool = true;
+    expires_in_frames: uint32;
+}
+
+/// Client → Server: remove a macro directive. Releases its assigned squads.
+table GroupDirectiveRemove {
+    sequence: uint32;
+    directive_id: uint32;
+}
+
+/// Client → Server: set a group's posture bundle (engagement / casualty
+/// tolerance / reinforcement policy / area-weapon ROE — macro-orders §3).
+/// Stored per group and streamed back in OrgGroupInfo. Posture *inheritance*
+/// down the tree is post-v0; v0 stores + echoes the per-group setting.
+table GroupPosture {
+    sequence: uint32;
+    group_id: uint32;
+    posture_json: string;
 }
 
 table Ping {
@@ -501,6 +633,12 @@ union ClientPayload {
     StandingOrderRemove,
     LuaUIMsg,
     PlayerLeaveIntent,
+    OrgGroupCreate,
+    OrgGroupUpdate,
+    OrgGroupDisband,
+    GroupDirective,
+    GroupDirectiveRemove,
+    GroupPosture,
 }
 
 table ClientMessage {
@@ -1631,6 +1769,56 @@ table StandingOrderState {
     orders: [StandingOrderInfo];
 }
 
+// ============================================================
+// Macro C&C — server → client state (PLAN-macro-directives §1)
+// Broadcast on change, snapshot on auth — same visibility model as
+// StandingOrderState (own team + allies, never enemy). Low rate, high
+// debounce; never per-tick.
+// ============================================================
+
+/// One org group in the team's org tree. `echelon`/`parent_id` are streamed
+/// regardless of the v0 platoon-only surface so the client OOB tree is
+/// already tier-shaped (PLAN-macro-directives §1 field discipline).
+table OrgGroupInfo {
+    group_id: uint32;
+    echelon: Echelon;
+    owner_team: uint8;
+    parent_id: uint32;
+    name: string;
+    member_ids: [uint32];
+    current_directive_id: uint32;   // active macro order, 0 = none
+    posture_json: string;
+    created_at_frame: uint32;
+}
+
+table OrgGroupState {
+    groups: [OrgGroupInfo];
+}
+
+/// One macro directive, incl. fulfillment (macro-orders §4.3 demand model):
+/// `assigned_strength / requested_strength` reports understrength/fulfilled.
+table DirectiveInfo {
+    directive_id: uint32;
+    owner_team: uint8;
+    group_id: uint32;               // 0 = condition-scoped
+    type: DirectiveType;
+    priority: uint8;
+    shape: OrderShape;
+    params: [float];
+    conditions: StandingOrderConditions;
+    requested_strength: uint32;
+    assigned_strength: uint32;      // fulfillment numerator (aggregate HP assigned)
+    assigned_squad_count: uint16;
+    phases_json: string;
+    active: bool = true;
+    expires_at_frame: uint32;
+    created_at_frame: uint32;
+}
+
+table DirectiveState {
+    directives: [DirectiveInfo];
+}
+
 /// One variadic argument from `Spring.SendToUnsynced(...)`. The server
 /// validates synced-side that args are one of nil/bool/number/string
 /// (see CSyncedLuaHandle::SendToUnsynced) so the wire mirrors exactly
@@ -1717,6 +1905,8 @@ union ServerPayload {
     LuaUIMsgRelay,
     TeamStatsHistoryBatch,
     GameModOptions,
+    OrgGroupState,
+    DirectiveState,
 }
 
 table ServerMessage {

@@ -20,6 +20,7 @@
 #include "FeatureLifecycleCollector.h"
 #include "UnitCommandCollector.h"
 #include "StandingOrders.h"
+#include "OrgGroups.h"
 #include "PerfMetrics.h"
 #include "AI/AIRuntimePool.h"
 #include "WebTransport/WebTransportServer.h"
@@ -426,6 +427,13 @@ void StateStreamer::EvaluateStandingOrders(int) {
     auto& sim = ctx.sim;
     if (sim.GetFrameNum() > 0 && (sim.GetFrameNum() % 30) == 0) {
         standingOrders.Evaluate(static_cast<uint32_t>(sim.GetFrameNum()));
+        // Self-heal org rosters (dead squads leave; empty groups linger for
+        // reinforcement — macro-orders §1) before the directive pass reads them.
+        orgGroups.PruneDeadMembers();
+        // Macro directives evaluate on the same ~1s cadence (strategic tempo,
+        // change-driven broadcast — PLAN-macro-directives §1). Group-scoped
+        // standing orders share the standingOrders pass above.
+        directiveManager.Evaluate(static_cast<uint32_t>(sim.GetFrameNum()));
     }
 }
 

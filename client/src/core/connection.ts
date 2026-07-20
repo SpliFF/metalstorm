@@ -81,6 +81,19 @@ import { PlayerLeaveIntent } from '../protocol/spring-web/player-leave-intent.js
 import { PathResponse } from '../protocol/spring-web/path-response.js';
 import { StandingOrderState } from '../protocol/spring-web/standing-order-state.js';
 import { StandingOrderType } from '../protocol/spring-web/standing-order-type.js';
+import { OrgGroupState } from '../protocol/spring-web/org-group-state.js';
+import { OrgGroupInfo } from '../protocol/spring-web/org-group-info.js';
+import { OrgGroupCreate } from '../protocol/spring-web/org-group-create.js';
+import { OrgGroupUpdate } from '../protocol/spring-web/org-group-update.js';
+import { OrgGroupDisband } from '../protocol/spring-web/org-group-disband.js';
+import { Echelon } from '../protocol/spring-web/echelon.js';
+import { DirectiveState } from '../protocol/spring-web/directive-state.js';
+import { DirectiveInfo } from '../protocol/spring-web/directive-info.js';
+import { DirectiveType } from '../protocol/spring-web/directive-type.js';
+import { OrderShape } from '../protocol/spring-web/order-shape.js';
+import { GroupDirective } from '../protocol/spring-web/group-directive.js';
+import { GroupDirectiveRemove } from '../protocol/spring-web/group-directive-remove.js';
+import { GroupPosture } from '../protocol/spring-web/group-posture.js';
 import { Vec3 } from '../protocol/spring-web/vec3.js';
 import { AuthResponse } from '../protocol/spring-web/auth-response.js';
 import { AuthStatus } from '../protocol/spring-web/auth-status.js';
@@ -450,6 +463,41 @@ export interface StandingOrderInfoMsg {
     active: boolean;
     createdAtFrame: number;
     /** Absolute sim frame the order auto-removes at. 0 = no expiry. */
+    expiresAtFrame: number;
+}
+
+/** One org group (PLAN-macro-orders v0: `echelon` is always `'Platoon'` in
+ *  practice — `'Army'` is schema-reserved but rejected server-side). Same
+ *  data shape `Spring.GetOrgGroups` returns. */
+export interface OrgGroupInfoMsg {
+    groupId: number;
+    echelon: 'Squad' | 'Platoon' | 'Army';
+    ownerTeam: number;
+    parentId: number;
+    name: string;
+    memberIds: number[];
+    currentDirectiveId: number;
+    postureJson: string;
+    createdAtFrame: number;
+}
+
+/** One macro directive (PLAN-macro-directives §1). `fulfillment =
+ *  assignedStrength / requestedStrength` — callers should guard
+ *  `requestedStrength === 0` (demand model: 0 = "take what idles",
+ *  fulfillment is meaningless). */
+export interface DirectiveInfoMsg {
+    directiveId: number;
+    ownerTeam: number;
+    groupId: number;
+    type: string;
+    priority: number;
+    shape: 'Point' | 'Circle' | 'Polygon' | 'Polyline';
+    params: number[];
+    requestedStrength: number;
+    assignedStrength: number;
+    assignedSquadCount: number;
+    active: boolean;
+    createdAtFrame: number;
     expiresAtFrame: number;
 }
 
@@ -828,6 +876,15 @@ export interface ConnectionEvents {
      *  authoritative. Reading `Spring.GetStandingOrders` walks the
      *  same data. */
     onStandingOrders?: (orders: StandingOrderInfoMsg[]) => void;
+    /** Snapshot of all org groups visible to this client (own team only —
+     *  org groups, unlike standing orders, aren't shared with allies).
+     *  Pushed on any create/update/disband, never per-tick. PLAN-macro-ui.md
+     *  org panel + `Spring.GetOrgGroups` read the same data. */
+    onOrgGroupState?: (groups: OrgGroupInfoMsg[]) => void;
+    /** Snapshot of all macro directives visible to this client (own team +
+     *  allies, same visibility rule as standing orders). Pushed on any
+     *  create/update/remove/fulfillment change, never per-tick. */
+    onDirectiveState?: (directives: DirectiveInfoMsg[]) => void;
     onProjectileState?: (snapshot: ProjectileStateSnapshot) => void;
     onPieceState?: (snapshot: PieceStateSnapshot) => void;
     onBuildActivity?: (snapshot: BuildActivitySnapshot) => void;
@@ -1414,6 +1471,102 @@ export class Connection {
             cmdsVec,
         );
         this.sendClientMessage(builder, ClientPayload.PlayerCommandBatch, batch);
+    }
+
+    // ---- Macro command & control (PLAN-macro-orders / PLAN-macro-directives) ----
+
+    /** Create a server-side org group (v0: always `echelon = Platoon`, the
+     *  only tier the server accepts — `parentId` stays 0, the army tier is
+     *  schema-reserved but rejected). Seeds the roster from `memberIds`
+     *  (squad entity ids); a squad already in another group is pulled out
+     *  of it first (server-side, single-membership rule). */
+    sendOrgGroupCreate(name: string, memberIds: number[]): void {
+        if (!this.authenticated) return;
+        const builder = new flatbuffers.Builder(128 + memberIds.length * 4);
+        const nameOff = builder.createString(name);
+        const memberIdsOff = OrgGroupCreate.createMemberIdsVector(builder, memberIds);
+        this.commandSequence++;
+        const off = OrgGroupCreate.createOrgGroupCreate(
+            builder, this.commandSequence, Echelon.Platoon, nameOff, memberIdsOff, 0);
+        this.sendClientMessage(builder, ClientPayload.OrgGroupCreate, off);
+    }
+
+    /** Mutate a group's roster / name. Empty `name` leaves it unchanged. */
+    sendOrgGroupUpdate(groupId: number, addIds: number[], removeIds: number[], name: string = ''): void {
+        if (!this.authenticated) return;
+        const builder = new flatbuffers.Builder(128 + (addIds.length + removeIds.length) * 4);
+        const addOff = OrgGroupUpdate.createAddIdsVector(builder, addIds);
+        const removeOff = OrgGroupUpdate.createRemoveIdsVector(builder, removeIds);
+        const nameOff = builder.createString(name);
+        this.commandSequence++;
+        const off = OrgGroupUpdate.createOrgGroupUpdate(
+            builder, this.commandSequence, groupId, addOff, removeOff, nameOff);
+        this.sendClientMessage(builder, ClientPayload.OrgGroupUpdate, off);
+    }
+
+    /** Disband a group. Members become unassigned; its active directive
+     *  (if any) is removed server-side. */
+    sendOrgGroupDisband(groupId: number): void {
+        if (!this.authenticated) return;
+        const builder = new flatbuffers.Builder(32);
+        this.commandSequence++;
+        const off = OrgGroupDisband.createOrgGroupDisband(builder, this.commandSequence, groupId);
+        this.sendClientMessage(builder, ClientPayload.OrgGroupDisband, off);
+    }
+
+    /** Create (`directiveId = 0`) or update (non-zero) a macro directive.
+     *  `groupId = 0` = condition-scoped (classic area/standing directive);
+     *  non-zero scopes it to that group's roster (the A+C fusion — the
+     *  server derives `conditions.orgGroup` from `groupId`, so the client
+     *  never fills `conditions` itself for a group-scoped directive).
+     *  `shape`/`params` follow the `OrderShape` layout (macro-directives §1):
+     *  Point [x,y,z] · Circle [x,y,z,radius] · Polygon [x1,y1,z1,...] (ring) ·
+     *  Polyline [frontage,x1,y1,z1,...] (the front line). */
+    sendGroupDirective(
+        directiveId: number,
+        groupId: number,
+        type: number,
+        shape: number,
+        params: number[],
+        opts: { priority?: number; requestedStrength?: number; active?: boolean } = {},
+    ): void {
+        if (!this.authenticated) return;
+        const builder = new flatbuffers.Builder(128 + params.length * 4);
+        const paramsOff = GroupDirective.createParamsVector(builder, params);
+        this.commandSequence++;
+        GroupDirective.startGroupDirective(builder);
+        GroupDirective.addSequence(builder, this.commandSequence);
+        GroupDirective.addDirectiveId(builder, directiveId);
+        GroupDirective.addGroupId(builder, groupId);
+        GroupDirective.addType(builder, type);
+        GroupDirective.addPriority(builder, opts.priority ?? 0);
+        GroupDirective.addShape(builder, shape);
+        GroupDirective.addParams(builder, paramsOff);
+        GroupDirective.addRequestedStrength(builder, opts.requestedStrength ?? 0);
+        GroupDirective.addActive(builder, opts.active ?? true);
+        const off = GroupDirective.endGroupDirective(builder);
+        this.sendClientMessage(builder, ClientPayload.GroupDirective, off);
+    }
+
+    /** Remove a macro directive. Releases its assigned squads back to idle. */
+    sendGroupDirectiveRemove(directiveId: number): void {
+        if (!this.authenticated) return;
+        const builder = new flatbuffers.Builder(32);
+        this.commandSequence++;
+        const off = GroupDirectiveRemove.createGroupDirectiveRemove(builder, this.commandSequence, directiveId);
+        this.sendClientMessage(builder, ClientPayload.GroupDirectiveRemove, off);
+    }
+
+    /** Set a group's posture bundle (engagement / casualty tolerance /
+     *  reinforcement policy / area-weapon ROE — macro-orders §3). Stored
+     *  verbatim and echoed back in `OrgGroupInfo.postureJson`. */
+    sendGroupPosture(groupId: number, postureJson: string): void {
+        if (!this.authenticated) return;
+        const builder = new flatbuffers.Builder(64 + postureJson.length * 2);
+        const jsonOff = builder.createString(postureJson);
+        this.commandSequence++;
+        const off = GroupPosture.createGroupPosture(builder, this.commandSequence, groupId, jsonOff);
+        this.sendClientMessage(builder, ClientPayload.GroupPosture, off);
     }
 
     sendClientMessage(builder: flatbuffers.Builder, payloadType: ClientPayload, payloadOffset: number): void {
@@ -2021,6 +2174,60 @@ export class Connection {
                     });
                 }
                 this.events.onStandingOrders?.(out);
+                break;
+            }
+            case ServerPayload.OrgGroupState: {
+                const fbState = msg.payload(new OrgGroupState()) as OrgGroupState;
+                const out: OrgGroupInfoMsg[] = [];
+                for (let i = 0; i < fbState.groupsLength(); i++) {
+                    const g = fbState.groups(i);
+                    if (!g) continue;
+                    const memberIds: number[] = [];
+                    for (let j = 0; j < g.memberIdsLength(); j++) {
+                        memberIds.push(g.memberIds(j) ?? 0);
+                    }
+                    out.push({
+                        groupId: g.groupId(),
+                        echelon: Echelon[g.echelon()] as OrgGroupInfoMsg['echelon'] ?? 'Platoon',
+                        ownerTeam: g.ownerTeam(),
+                        parentId: g.parentId(),
+                        name: g.name() ?? '',
+                        memberIds,
+                        currentDirectiveId: g.currentDirectiveId(),
+                        postureJson: g.postureJson() ?? '',
+                        createdAtFrame: g.createdAtFrame(),
+                    });
+                }
+                this.events.onOrgGroupState?.(out);
+                break;
+            }
+            case ServerPayload.DirectiveState: {
+                const fbState = msg.payload(new DirectiveState()) as DirectiveState;
+                const out: DirectiveInfoMsg[] = [];
+                for (let i = 0; i < fbState.directivesLength(); i++) {
+                    const d = fbState.directives(i);
+                    if (!d) continue;
+                    const params: number[] = [];
+                    for (let j = 0; j < d.paramsLength(); j++) {
+                        params.push(d.params(j) ?? 0);
+                    }
+                    out.push({
+                        directiveId: d.directiveId(),
+                        ownerTeam: d.ownerTeam(),
+                        groupId: d.groupId(),
+                        type: DirectiveType[d.type()] ?? 'DefendArea',
+                        priority: d.priority(),
+                        shape: OrderShape[d.shape()] as DirectiveInfoMsg['shape'] ?? 'Point',
+                        params,
+                        requestedStrength: d.requestedStrength(),
+                        assignedStrength: d.assignedStrength(),
+                        assignedSquadCount: d.assignedSquadCount(),
+                        active: d.active(),
+                        createdAtFrame: d.createdAtFrame(),
+                        expiresAtFrame: d.expiresAtFrame(),
+                    });
+                }
+                this.events.onDirectiveState?.(out);
                 break;
             }
             case ServerPayload.GameRestarting:

@@ -8,12 +8,18 @@ import { AuthRequest, AuthRequestT } from '../spring-web/auth-request.js';
 import { ChatSend, ChatSendT } from '../spring-web/chat-send.js';
 import { ConsoleCommand, ConsoleCommandT } from '../spring-web/console-command.js';
 import { GameListRequest, GameListRequestT } from '../spring-web/game-list-request.js';
+import { GroupDirective, GroupDirectiveT } from '../spring-web/group-directive.js';
+import { GroupDirectiveRemove, GroupDirectiveRemoveT } from '../spring-web/group-directive-remove.js';
+import { GroupPosture, GroupPostureT } from '../spring-web/group-posture.js';
 import { Handshake, HandshakeT } from '../spring-web/handshake.js';
 import { LogIngest, LogIngestT } from '../spring-web/log-ingest.js';
 import { LogSubscribe, LogSubscribeT } from '../spring-web/log-subscribe.js';
 import { LogUnsubscribe, LogUnsubscribeT } from '../spring-web/log-unsubscribe.js';
 import { LuaRulesMsg, LuaRulesMsgT } from '../spring-web/lua-rules-msg.js';
 import { LuaUIMsg, LuaUIMsgT } from '../spring-web/lua-uimsg.js';
+import { OrgGroupCreate, OrgGroupCreateT } from '../spring-web/org-group-create.js';
+import { OrgGroupDisband, OrgGroupDisbandT } from '../spring-web/org-group-disband.js';
+import { OrgGroupUpdate, OrgGroupUpdateT } from '../spring-web/org-group-update.js';
 import { PathRequest, PathRequestT } from '../spring-web/path-request.js';
 import { PathRequestCancel, PathRequestCancelT } from '../spring-web/path-request-cancel.js';
 import { Ping, PingT } from '../spring-web/ping.js';
@@ -79,13 +85,19 @@ export enum ClientPayload {
   StandingOrderUpdate = 34,
   StandingOrderRemove = 35,
   LuaUIMsg = 36,
-  PlayerLeaveIntent = 37
+  PlayerLeaveIntent = 37,
+  OrgGroupCreate = 38,
+  OrgGroupUpdate = 39,
+  OrgGroupDisband = 40,
+  GroupDirective = 41,
+  GroupDirectiveRemove = 42,
+  GroupPosture = 43
 }
 
 export function unionToClientPayload(
   type: ClientPayload,
-  accessor: (obj:AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|LuaRulesMsg|LuaUIMsg|PathRequest|PathRequestCancel|Ping|PlayerCommand|PlayerCommandBatch|PlayerLeaveIntent|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|SelectionState|StandingOrderCreate|StandingOrderRemove|StandingOrderUpdate|ViewportUpdate) => AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|LuaRulesMsg|LuaUIMsg|PathRequest|PathRequestCancel|Ping|PlayerCommand|PlayerCommandBatch|PlayerLeaveIntent|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|SelectionState|StandingOrderCreate|StandingOrderRemove|StandingOrderUpdate|ViewportUpdate|null
-): AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|LuaRulesMsg|LuaUIMsg|PathRequest|PathRequestCancel|Ping|PlayerCommand|PlayerCommandBatch|PlayerLeaveIntent|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|SelectionState|StandingOrderCreate|StandingOrderRemove|StandingOrderUpdate|ViewportUpdate|null {
+  accessor: (obj:AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|GroupDirective|GroupDirectiveRemove|GroupPosture|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|LuaRulesMsg|LuaUIMsg|OrgGroupCreate|OrgGroupDisband|OrgGroupUpdate|PathRequest|PathRequestCancel|Ping|PlayerCommand|PlayerCommandBatch|PlayerLeaveIntent|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|SelectionState|StandingOrderCreate|StandingOrderRemove|StandingOrderUpdate|ViewportUpdate) => AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|GroupDirective|GroupDirectiveRemove|GroupPosture|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|LuaRulesMsg|LuaUIMsg|OrgGroupCreate|OrgGroupDisband|OrgGroupUpdate|PathRequest|PathRequestCancel|Ping|PlayerCommand|PlayerCommandBatch|PlayerLeaveIntent|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|SelectionState|StandingOrderCreate|StandingOrderRemove|StandingOrderUpdate|ViewportUpdate|null
+): AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|GroupDirective|GroupDirectiveRemove|GroupPosture|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|LuaRulesMsg|LuaUIMsg|OrgGroupCreate|OrgGroupDisband|OrgGroupUpdate|PathRequest|PathRequestCancel|Ping|PlayerCommand|PlayerCommandBatch|PlayerLeaveIntent|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|SelectionState|StandingOrderCreate|StandingOrderRemove|StandingOrderUpdate|ViewportUpdate|null {
   switch(ClientPayload[type]) {
     case 'NONE': return null; 
     case 'Handshake': return accessor(new Handshake())! as Handshake;
@@ -125,15 +137,21 @@ export function unionToClientPayload(
     case 'StandingOrderRemove': return accessor(new StandingOrderRemove())! as StandingOrderRemove;
     case 'LuaUIMsg': return accessor(new LuaUIMsg())! as LuaUIMsg;
     case 'PlayerLeaveIntent': return accessor(new PlayerLeaveIntent())! as PlayerLeaveIntent;
+    case 'OrgGroupCreate': return accessor(new OrgGroupCreate())! as OrgGroupCreate;
+    case 'OrgGroupUpdate': return accessor(new OrgGroupUpdate())! as OrgGroupUpdate;
+    case 'OrgGroupDisband': return accessor(new OrgGroupDisband())! as OrgGroupDisband;
+    case 'GroupDirective': return accessor(new GroupDirective())! as GroupDirective;
+    case 'GroupDirectiveRemove': return accessor(new GroupDirectiveRemove())! as GroupDirectiveRemove;
+    case 'GroupPosture': return accessor(new GroupPosture())! as GroupPosture;
     default: return null;
   }
 }
 
 export function unionListToClientPayload(
   type: ClientPayload, 
-  accessor: (index: number, obj:AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|LuaRulesMsg|LuaUIMsg|PathRequest|PathRequestCancel|Ping|PlayerCommand|PlayerCommandBatch|PlayerLeaveIntent|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|SelectionState|StandingOrderCreate|StandingOrderRemove|StandingOrderUpdate|ViewportUpdate) => AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|LuaRulesMsg|LuaUIMsg|PathRequest|PathRequestCancel|Ping|PlayerCommand|PlayerCommandBatch|PlayerLeaveIntent|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|SelectionState|StandingOrderCreate|StandingOrderRemove|StandingOrderUpdate|ViewportUpdate|null, 
+  accessor: (index: number, obj:AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|GroupDirective|GroupDirectiveRemove|GroupPosture|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|LuaRulesMsg|LuaUIMsg|OrgGroupCreate|OrgGroupDisband|OrgGroupUpdate|PathRequest|PathRequestCancel|Ping|PlayerCommand|PlayerCommandBatch|PlayerLeaveIntent|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|SelectionState|StandingOrderCreate|StandingOrderRemove|StandingOrderUpdate|ViewportUpdate) => AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|GroupDirective|GroupDirectiveRemove|GroupPosture|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|LuaRulesMsg|LuaUIMsg|OrgGroupCreate|OrgGroupDisband|OrgGroupUpdate|PathRequest|PathRequestCancel|Ping|PlayerCommand|PlayerCommandBatch|PlayerLeaveIntent|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|SelectionState|StandingOrderCreate|StandingOrderRemove|StandingOrderUpdate|ViewportUpdate|null, 
   index: number
-): AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|LuaRulesMsg|LuaUIMsg|PathRequest|PathRequestCancel|Ping|PlayerCommand|PlayerCommandBatch|PlayerLeaveIntent|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|SelectionState|StandingOrderCreate|StandingOrderRemove|StandingOrderUpdate|ViewportUpdate|null {
+): AIListRequest|Ack|AuthRequest|ChatSend|ConsoleCommand|GameListRequest|GroupDirective|GroupDirectiveRemove|GroupPosture|Handshake|LogIngest|LogSubscribe|LogUnsubscribe|LuaRulesMsg|LuaUIMsg|OrgGroupCreate|OrgGroupDisband|OrgGroupUpdate|PathRequest|PathRequestCancel|Ping|PlayerCommand|PlayerCommandBatch|PlayerLeaveIntent|ReconnectRequest|RoomAddAI|RoomCloseRoom|RoomCreate|RoomEndGame|RoomJoin|RoomKick|RoomLeave|RoomReady|RoomRemoveAI|RoomSetAITeam|RoomSetStartPos|RoomStartGame|RoomTeamSelect|SelectionState|StandingOrderCreate|StandingOrderRemove|StandingOrderUpdate|ViewportUpdate|null {
   switch(ClientPayload[type]) {
     case 'NONE': return null; 
     case 'Handshake': return accessor(index, new Handshake())! as Handshake;
@@ -173,6 +191,12 @@ export function unionListToClientPayload(
     case 'StandingOrderRemove': return accessor(index, new StandingOrderRemove())! as StandingOrderRemove;
     case 'LuaUIMsg': return accessor(index, new LuaUIMsg())! as LuaUIMsg;
     case 'PlayerLeaveIntent': return accessor(index, new PlayerLeaveIntent())! as PlayerLeaveIntent;
+    case 'OrgGroupCreate': return accessor(index, new OrgGroupCreate())! as OrgGroupCreate;
+    case 'OrgGroupUpdate': return accessor(index, new OrgGroupUpdate())! as OrgGroupUpdate;
+    case 'OrgGroupDisband': return accessor(index, new OrgGroupDisband())! as OrgGroupDisband;
+    case 'GroupDirective': return accessor(index, new GroupDirective())! as GroupDirective;
+    case 'GroupDirectiveRemove': return accessor(index, new GroupDirectiveRemove())! as GroupDirectiveRemove;
+    case 'GroupPosture': return accessor(index, new GroupPosture())! as GroupPosture;
     default: return null;
   }
 }

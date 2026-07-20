@@ -96,6 +96,11 @@ let buildPlacementArmed = false;
 /// area-attack armed (from gp:sceneState.commandModeArmed). ESC cancels it
 /// before the build-placement cancel + the quit dialog.
 let commandModeArmed = false;
+/// PLAN-macro-ui.md §2/§5: mirrors whether the worker has a directive-shape
+/// gesture capture armed (from gp:directiveShapeArmed). ESC cancels it before
+/// the modal-command / build-placement cancels + the quit dialog — a shape
+/// capture owns the pointer as exclusively as an area-attack drag.
+let directiveShapeArmed = false;
 /// Issue a client-bound request to the game-processor worker (GW8). Resolves
 /// with the worker's reply value or rejects with its error string.
 function workerCall(method: string, args: unknown[] = []): Promise<unknown> {
@@ -1141,6 +1146,12 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             case 'gp:cursorMode':
                 applyCursorMode(m.name, m.css);
                 break;
+            // PLAN-macro-ui.md §2/§5: directive-shape capture armed/disarmed —
+            // tracked for the ESC handler; a future org-panel affordance can
+            // also use this to show a "drawing…" state.
+            case 'gp:directiveShapeArmed':
+                directiveShapeArmed = m.armed;
+                break;
             // Spring.AssignMouseCursor / ReplaceMouseCursor (widgets, worker) →
             // register a cursor pack under a logical name (ZK/BAR swap in their
             // own animated PNGs over the engine defaults).
@@ -1508,6 +1519,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     window.addEventListener('keydown', (e) => {
         if (e.key !== 'Escape') return;
         if (!gameWorker) return;
+        // PLAN-macro-ui.md §2/§5: ESC cancels an armed directive-shape capture
+        // before the modal-command / build-placement cancels — it owns the
+        // pointer as exclusively as an area-attack drag.
+        if (directiveShapeArmed) {
+            gameWorker.postMessage({ type: 'gp:cancelDirectiveShape' });
+            directiveShapeArmed = false;
+            e.preventDefault();
+            return;
+        }
         // PLAN-playable.md G3b: ESC cancels an armed modal command / area-attack
         // drag first (worker owns the state), then a build placement, then opens
         // the quit dialog.

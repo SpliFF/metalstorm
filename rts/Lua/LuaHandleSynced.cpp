@@ -1185,6 +1185,43 @@ bool CSyncedLuaHandle::AllowStandingOrderAssign(unsigned int orderID, const CUni
 }
 
 
+/*** Veto a macro-directive assignment before the evaluator issues its
+ * decomposed command. Extends AllowStandingOrderAssign to the group /
+ * directive layer (PLAN-macro-directives §2). Return false to block the
+ * (directive, unit) pairing — used for game-specific doctrine gating the
+ * C++ evaluator can't see.
+ *
+ * @function AllowDirectiveAssign
+ * @number directiveID
+ * @number unitID
+ * @number unitDefID
+ * @number unitTeam
+ * @treturn bool whether the assignment is allowed (default true)
+ */
+bool CSyncedLuaHandle::AllowDirectiveAssign(unsigned int directiveID, const CUnit* unit)
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	LUA_CALL_IN_CHECK(L, true);
+	luaL_checkstack(L, 6, __func__);
+
+	static const LuaHashString cmdStr(__func__);
+	if (!cmdStr.GetGlobalFunc(L))
+		return true; // call is not defined → allow
+
+	lua_pushnumber(L, directiveID);
+	lua_pushnumber(L, unit->id);
+	lua_pushnumber(L, unit->unitDef ? unit->unitDef->id : 0);
+	lua_pushnumber(L, unit->team);
+
+	if (!RunCallIn(L, cmdStr, 4, 1))
+		return true;
+
+	const bool allow = luaL_optboolean(L, -1, true);
+	lua_pop(L, 1);
+	return allow;
+}
+
+
 /*** Called when a team sets the sharing level of a resource.
  *
  * @function AllowResourceLevel

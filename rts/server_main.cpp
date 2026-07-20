@@ -33,6 +33,7 @@
 #include "Server/LuaDefsSerializer.h"
 #include "Server/ResourcesParser.h"
 #include "Server/StandingOrders.h"
+#include "Server/OrgGroups.h"
 #include "Server/AI/AIRuntimePool.h"
 #include "Server/AI/AIDiscovery.h"
 #include "Server/PerfMetrics.h"
@@ -702,6 +703,27 @@ int main(int argc, char* argv[])
             if (changedTeam != session.team &&
                 !teamHandler.AlliedTeams(session.team, changedTeam)) return;
             gameStart.PushStandingOrdersTo(clientId, session.team);
+        });
+    });
+
+    // Macro C&C broadcast hooks (PLAN-macro-directives §1). Same visibility
+    // discipline as standing orders — org-group + directive state stream on
+    // change to the owner team and its allies. Both fire from the sim-tick
+    // path on the main thread, so reading live values is safe.
+    orgGroups.SetChangeNotifier([&gameStart, &sessions](int changedTeam) {
+        sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
+            if (session.team < 0) return;
+            if (changedTeam != session.team &&
+                !teamHandler.AlliedTeams(session.team, changedTeam)) return;
+            gameStart.PushOrgGroupsTo(clientId, session.team);
+        });
+    });
+    directiveManager.SetChangeNotifier([&gameStart, &sessions](int changedTeam) {
+        sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
+            if (session.team < 0) return;
+            if (changedTeam != session.team &&
+                !teamHandler.AlliedTeams(session.team, changedTeam)) return;
+            gameStart.PushDirectivesTo(clientId, session.team);
         });
     });
 

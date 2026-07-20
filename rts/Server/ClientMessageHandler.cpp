@@ -9,6 +9,7 @@
 #include "ClientSession.h"
 #include "RoomManager.h"
 #include "StandingOrders.h"
+#include "OrgGroups.h"
 #include "LuaExecEngine.h"
 #include "Crypto.h"
 #include "WebTransport/WebTransportServer.h"
@@ -230,6 +231,8 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                     // next mutation to trigger the broadcast
                     // hook.
                     start.PushStandingOrdersTo(msg.clientId, team);
+                    start.PushOrgGroupsTo(msg.clientId, team);
+                    start.PushDirectivesTo(msg.clientId, team);
                     sendPostAuthOneShots();
                     SLOG(SPRING_LOG_NOTICE,
                         "client %u reconnected as '%s' (id=%lld) team=%d",
@@ -362,6 +365,8 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             // create / update / remove fired the broadcast
             // hook.
             start.PushStandingOrdersTo(msg.clientId, team);
+            start.PushOrgGroupsTo(msg.clientId, team);
+            start.PushDirectivesTo(msg.clientId, team);
 
             // Team start positions + ally start boxes (re-broadcast after
             // GameStart for the final post-spawn values) and the game's
@@ -1124,6 +1129,241 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             SLOG(SPRING_LOG_DEBUG, "rejecting unimplemented/ungated verb type=%d from client=%u",
                 (int)clientMsg->payload_type(), msg.clientId);
             break;
+        // -------- Macro command & control (PLAN-macro-orders / -directives) --------
+        // All six share the standing-order gate discipline: authed team,
+        // one message token (no per-squad order-token — the evaluator fans
+        // out), monotonic sequence. Team scoping = team objects with player
+        // attribution (macro-orders 2026-06-13 update).
+        case SpringWeb::ClientPayload_OrgGroupCreate: {
+            auto* session = sessions.GetSession(msg.clientId);
+            if (!session || session->team < 0) {
+                auto err = Protocol::BuildServerError(401, "Not authenticated");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                break;
+            }
+            auto* req = clientMsg->payload_as_OrgGroupCreate();
+            if (!req) break;
+            if (!SessionManager::TryConsumeCommandBudget(*session, 0)) {
+                auto err = Protocol::BuildServerError(429, "Command rate limit exceeded");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                break;
+            }
+            if (req->sequence() <= session->lastCommandSeq && session->lastCommandSeq > 0) {
+                auto err = Protocol::BuildServerError(400, "Stale command sequence");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                break;
+            }
+            session->lastCommandSeq = req->sequence();
+
+            std::vector<uint32_t> members;
+            if (auto* m = req->member_ids()) {
+                members.reserve(m->size());
+                for (unsigned i = 0; i < m->size(); ++i) members.push_back(m->Get(i));
+            }
+            const uint32_t id = orgGroups.Create(
+                session->team, static_cast<Echelon>(req->echelon()),
+                req->name() ? req->name()->str() : std::string(),
+                members, req->parent_id(),
+                static_cast<uint32_t>(sim.GetFrameNum()));
+            if (id == 0) {
+                // v0 rejects the reserved army tier (echelon/parent) — fail loud.
+                auto err = Protocol::BuildServerError(400,
+                    "Org-group echelon/parent not supported in v0 (army tier reserved)");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+            }
+            break;
+        }
+        case SpringWeb::ClientPayload_OrgGroupUpdate: {
+            auto* session = sessions.GetSession(msg.clientId);
+            if (!session || session->team < 0) {
+                auto err = Protocol::BuildServerError(401, "Not authenticated");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                break;
+            }
+            auto* req = clientMsg->payload_as_OrgGroupUpdate();
+            if (!req) break;
+            if (!SessionManager::TryConsumeCommandBudget(*session, 0)) {
+                auto err = Protocol::BuildServerError(429, "Command rate limit exceeded");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                break;
+            }
+            if (req->sequence() <= session->lastCommandSeq && session->lastCommandSeq > 0) {
+                auto err = Protocol::BuildServerError(400, "Stale command sequence");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                break;
+            }
+            session->lastCommandSeq = req->sequence();
+
+            std::vector<uint32_t> addIds, removeIds;
+            if (auto* a = req->add_ids()) {
+                addIds.reserve(a->size());
+                for (unsigned i = 0; i < a->size(); ++i) addIds.push_back(a->Get(i));
+            }
+            if (auto* r = req->remove_ids()) {
+                removeIds.reserve(r->size());
+                for (unsigned i = 0; i < r->size(); ++i) removeIds.push_back(r->Get(i));
+            }
+            const bool ok = orgGroups.Update(
+                req->group_id(), session->team, addIds, removeIds,
+                req->name() ? req->name()->str() : std::string());
+            if (!ok) {
+                auto err = Protocol::BuildServerError(403, "Not owner of org group");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+            }
+            break;
+        }
+        case SpringWeb::ClientPayload_OrgGroupDisband: {
+            auto* session = sessions.GetSession(msg.clientId);
+            if (!session || session->team < 0) {
+                auto err = Protocol::BuildServerError(401, "Not authenticated");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                break;
+            }
+            auto* req = clientMsg->payload_as_OrgGroupDisband();
+            if (!req) break;
+            if (!SessionManager::TryConsumeCommandBudget(*session, 0)) {
+                auto err = Protocol::BuildServerError(429, "Command rate limit exceeded");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                break;
+            }
+            if (req->sequence() <= session->lastCommandSeq && session->lastCommandSeq > 0) {
+                auto err = Protocol::BuildServerError(400, "Stale command sequence");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                break;
+            }
+            session->lastCommandSeq = req->sequence();
+            // Directives scoped to the group go with it (keeps the manager
+            // dependency one-directional: handler drives both).
+            directiveManager.RemoveForGroup(req->group_id());
+            const bool ok = orgGroups.Disband(req->group_id(), session->team);
+            if (!ok) {
+                auto err = Protocol::BuildServerError(403, "Not owner of org group");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+            }
+            break;
+        }
+        case SpringWeb::ClientPayload_GroupPosture: {
+            auto* session = sessions.GetSession(msg.clientId);
+            if (!session || session->team < 0) {
+                auto err = Protocol::BuildServerError(401, "Not authenticated");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                break;
+            }
+            auto* req = clientMsg->payload_as_GroupPosture();
+            if (!req) break;
+            if (!SessionManager::TryConsumeCommandBudget(*session, 0)) {
+                auto err = Protocol::BuildServerError(429, "Command rate limit exceeded");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                break;
+            }
+            if (req->sequence() <= session->lastCommandSeq && session->lastCommandSeq > 0) {
+                auto err = Protocol::BuildServerError(400, "Stale command sequence");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                break;
+            }
+            session->lastCommandSeq = req->sequence();
+            const bool ok = orgGroups.SetPosture(
+                req->group_id(), session->team,
+                req->posture_json() ? req->posture_json()->str() : std::string());
+            if (!ok) {
+                auto err = Protocol::BuildServerError(403, "Not owner of org group");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+            }
+            break;
+        }
+        case SpringWeb::ClientPayload_GroupDirective: {
+            auto* session = sessions.GetSession(msg.clientId);
+            if (!session || session->team < 0) {
+                auto err = Protocol::BuildServerError(401, "Not authenticated");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                break;
+            }
+            auto* req = clientMsg->payload_as_GroupDirective();
+            if (!req) break;
+            if (!SessionManager::TryConsumeCommandBudget(*session, 0)) {
+                auto err = Protocol::BuildServerError(429, "Command rate limit exceeded");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                break;
+            }
+            if (req->sequence() <= session->lastCommandSeq && session->lastCommandSeq > 0) {
+                auto err = Protocol::BuildServerError(400, "Stale command sequence");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                break;
+            }
+            session->lastCommandSeq = req->sequence();
+
+            // Reject directives scoped to a group the caller doesn't own.
+            const uint32_t groupId = req->group_id();
+            if (groupId != 0) {
+                const OrgGroup* g = orgGroups.Get(groupId);
+                if (g == nullptr || g->team != session->team) {
+                    auto err = Protocol::BuildServerError(403, "Not owner of org group");
+                    rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                    break;
+                }
+            }
+
+            std::vector<float> params;
+            if (auto* p = req->params()) {
+                params.reserve(p->size());
+                for (unsigned i = 0; i < p->size(); ++i) params.push_back(p->Get(i));
+            }
+            auto conds = Protocol::ReadStandingOrderConditions(req->conditions());
+            const std::string phases = req->phases_json() ? req->phases_json()->str() : std::string();
+
+            if (req->directive_id() == 0) {
+                const uint32_t id = directiveManager.Create(
+                    session->team, static_cast<DirectiveType>(req->type()),
+                    req->priority(), static_cast<OrderShape>(req->shape()),
+                    std::move(params), std::move(conds), groupId,
+                    req->requested_strength(), phases,
+                    req->expires_in_frames(),
+                    static_cast<uint32_t>(sim.GetFrameNum()));
+                SLOG(SPRING_LOG_DEBUG,
+                    "directive: client %u (team=%d) created directive %u type=%u group=%u",
+                    msg.clientId, session->team, id,
+                    static_cast<unsigned>(req->type()), groupId);
+            } else {
+                const bool ok = directiveManager.Update(
+                    req->directive_id(), session->team,
+                    static_cast<DirectiveType>(req->type()), req->priority(),
+                    static_cast<OrderShape>(req->shape()), std::move(params),
+                    std::move(conds), req->requested_strength(), phases,
+                    req->active());
+                if (!ok) {
+                    auto err = Protocol::BuildServerError(403, "Not owner of directive");
+                    rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                }
+            }
+            break;
+        }
+        case SpringWeb::ClientPayload_GroupDirectiveRemove: {
+            auto* session = sessions.GetSession(msg.clientId);
+            if (!session || session->team < 0) {
+                auto err = Protocol::BuildServerError(401, "Not authenticated");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                break;
+            }
+            auto* req = clientMsg->payload_as_GroupDirectiveRemove();
+            if (!req) break;
+            if (!SessionManager::TryConsumeCommandBudget(*session, 0)) {
+                auto err = Protocol::BuildServerError(429, "Command rate limit exceeded");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                break;
+            }
+            if (req->sequence() <= session->lastCommandSeq && session->lastCommandSeq > 0) {
+                auto err = Protocol::BuildServerError(400, "Stale command sequence");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                break;
+            }
+            session->lastCommandSeq = req->sequence();
+            const bool ok = directiveManager.Remove(req->directive_id(), session->team);
+            if (!ok) {
+                auto err = Protocol::BuildServerError(403, "Not owner of directive");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+            }
+            break;
+        }
         default:
             break;
     }
