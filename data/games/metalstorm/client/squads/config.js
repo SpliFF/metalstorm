@@ -11,8 +11,44 @@ export const DEFAULT_CONFIG = {
   memberSpeedMultiplier: 1.25,
   arrivalRadius: 12,             // elmos: ease-in distance to a slot
   separationRadius: 14,          // elmos: push apart below this member spacing
-  separationWeight: 1.4,
+  separationWeight: 1.4,         // overall separation gain vs arrival/leash
   arrivalWeight: 1.0,
+
+  // --- Collision (PLAN-metalstorm-squad-collision.md) ---------------------
+
+  // Two separation regimes (§2): same-squad members pack moderately tight
+  // (over-strong separation fights slot arrival and makes the squad "boil");
+  // other-squad/obstacle (repulsor, wreck, dense-cell aggregate) separation
+  // is strong so crossing squads visibly part instead of interpenetrating.
+  separationWeightSameSquad: 0.6,
+  separationWeightOtherSquad: 1.6,
+
+  // Deadband (§7): ignore a neighbour's separation contribution when its
+  // overlap (radius - distance) is below this — ungates the boundary case
+  // that otherwise causes boiling/jitter right at separationRadius.
+  separationDeadband: 1.5,        // elmos
+
+  // Spatial-hash cell size (§1): max(separationRadius, maxMemberFootprint) *
+  // 1.5. maxMemberFootprint is the largest pseudo-member repulsor radius
+  // expected to be registered (single units / scale-4 super-heavies, §5) —
+  // keep it comfortably >= the biggest footprint an adapter will pass to
+  // SquadManager.setRepulsor so the 3x3 neighbour query reliably reaches it.
+  maxMemberFootprint: 48,         // elmos
+
+  // Neighbour cap + dense-cell handling (§4) — the broad-phase performance
+  // lever. K neighbours max per member; a bucket denser than
+  // denseCellOccupancy collapses into one enlarged-radius aggregate repulsor
+  // instead of N individual checks ("crowd -> fluid").
+  neighbourCap: 8,
+  denseCellOccupancy: 16,
+  denseCellRadiusMul: 1.5,        // aggregate radius = cellSize * this
+
+  // Wrecks (§5): brief post-spawn presence in the avoidance hash so members
+  // don't visibly clip through debris the instant it lands, then
+  // permanently non-colliding (members may walk over old wreckage) — keeps
+  // battlefields from becoming impassable client-only debris mazes.
+  wreckCollisionRadius: 16,       // elmos
+  wreckCollisionGraceSec: 2,
 
   // Casualty alignment (§8). A reported impact is a valid victim-selection hint
   // for this many seconds after it lands.

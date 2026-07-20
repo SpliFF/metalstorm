@@ -56,6 +56,11 @@ export class Squad {
     this._lod = 'full';                 // 'full' | 'centroid' | 'icon' (see setter below)
     this._spawned = false;
 
+    // Collision (PLAN-metalstorm-squad-collision.md §5): optional hook the
+    // manager installs to register a dropped wreck for brief avoidance-hash
+    // presence. No-op if unset (e.g. a bare Squad in a test).
+    this.onWreck = null;
+
     // Breadcrumb trail (pathfinding §4): ring buffer of recent centroid
     // positions, distance-sampled. Reseeded on a centroid teleport (§3).
     this._trail = [];
@@ -199,6 +204,11 @@ export class Squad {
     const initialAlive = this.cfg.countCurve(f, this.size);
     for (let i = 0; i < this.size; i++) {
       const m = new Member(i, { defId: this.def.defId, variant: i % 4 });
+      // Owning squad id (collision §2): compared against a neighbour's
+      // squadId to pick the same-/other-squad separation weight. Real ids
+      // are always defined, so a pseudo-member (repulsor/wreck/dense-cell
+      // aggregate, which carries no squadId) can never false-match.
+      m.squadId = this.id;
       // Seed at its slot so the squad doesn't fan out from a point on spawn.
       slotToWorld(this.slots[i], this.cx, this.cz, this.heading, _slotW);
       m.x = _slotW.x; m.z = _slotW.z;
@@ -259,6 +269,7 @@ export class Squad {
         dirX: dirX / len, dirZ: dirZ / len,
       });
       this.backend.spawnWreck(victim.x, victim.y, victim.z, victim.headingY, victim.visual);
+      this.onWreck?.(victim.x, victim.z);
     }
     this._repackIfEnabled();
   }
@@ -379,7 +390,11 @@ export class Squad {
     arrive(m.x, m.z, target.x, target.z, maxSpeed, this.cfg.arrivalRadius, _arr);
 
     if (m.recoveryLevel >= 2) { _sep.x = 0; _sep.z = 0; }
-    else separate(m.x, m.z, neighbourQuery(m), this.cfg.separationRadius, _sep);
+    else {
+      separate(m.x, m.z, m.squadId, neighbourQuery(m), this.cfg.separationRadius,
+        this.cfg.separationWeightSameSquad, this.cfg.separationWeightOtherSquad,
+        this.cfg.separationDeadband, _sep);
+    }
 
     softLeashPull(m.x, m.z, this.cx, this.cz, softLeashDist, this.cfg.softLeashGain, _leash);
 
@@ -407,7 +422,11 @@ export class Squad {
     });
 
     if (m.recoveryLevel >= 2) { _sep.x = 0; _sep.z = 0; }
-    else separate(m.x, m.z, neighbourQuery(m), this.cfg.separationRadius, _sep);
+    else {
+      separate(m.x, m.z, m.squadId, neighbourQuery(m), this.cfg.separationRadius,
+        this.cfg.separationWeightSameSquad, this.cfg.separationWeightOtherSquad,
+        this.cfg.separationDeadband, _sep);
+    }
     softLeashPull(m.x, m.z, this.cx, this.cz, softLeashDist, this.cfg.softLeashGain, _leash);
 
     _desired.x = desired.x + _sep.x * this.cfg.separationWeight * maxSpeed + _leash.x;
@@ -541,6 +560,7 @@ export class Squad {
         const d = this._lastThreatDir;
         this.backend.destroyMember(m.handle, { x: m.x, y: m.y, z: m.z, dirX: d.x, dirZ: d.z });
         this.backend.spawnWreck(m.x, m.y, m.z, m.headingY, m.visual);
+        this.onWreck?.(m.x, m.z);
       }
     }
     this.aliveCount = 0;

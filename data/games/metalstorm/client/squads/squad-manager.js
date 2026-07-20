@@ -16,9 +16,22 @@ export class SquadManager {
     this._pendingById = new Map();  // id → { pose?, strength? }
     this._now = 0;
 
-    // Spatial hash for inter-squad/member separation (§7). Rebuilt each frame.
-    this._cell = this.cfg.separationRadius * 1.5;
-    this._grid = new Map();         // cellKey → Member[]
+    // Spatial hash for inter-squad/member separation (PLAN-metalstorm-squad-
+    // collision.md §1). Rebuilt each frame. Cell size accounts for the
+    // largest pseudo-member repulsor an adapter is expected to register
+    // (§1/§5), not just member separationRadius, so the 3x3 neighbour query
+    // reliably reaches a big single-unit/scale-4 repulsor's footprint.
+    this._cell = Math.max(this.cfg.separationRadius, this.cfg.maxMemberFootprint) * 1.5;
+    this._grid = new Map();         // cellKey → (Member | pseudo-member)[]
+    this._denseAgg = new Map();     // cellKey → cached aggregate repulsor, rebuilt each frame (§4)
+
+    // Dynamic obstacles that aren't squad members (collision §5): single
+    // units / super-heavies / scale-4 register as repulsors (upserted by id,
+    // shared insertion point with PLAN-metalstorm-squad-scale4.md task 4);
+    // wrecks get a brief post-spawn collision grace via Squad.onWreck, then
+    // are pruned from the array in _rebuildGrid and never re-inserted.
+    this._repulsors = new Map();    // id → { x, z, radius }
+    this._wrecks = [];              // { x, z, radius, until }
 
     // Shared passability grid (PLAN-metalstorm-squad-pathfinding.md §2) — one
     // per map, injected once the worker adapter has a heightmap sampler
@@ -49,6 +62,26 @@ export class SquadManager {
    *  next query that touches it). */
   invalidateTerrain(x0, z0, x1, z1) {
     this.passability?.invalidate(x0, z0, x1, z1);
+  }
+
+  // --- dynamic obstacles: pseudo-member repulsors (collision §5) ---------
+
+  /** Register/update a single unit, super-heavy, or scale-4 as a pseudo-
+   *  member repulsor so nearby squad members separate around it. `radius`
+   *  is caller-supplied (footprint-derived) — this module has no unit-def
+   *  knowledge of its own. Upsert: safe to call every frame with a fresh
+   *  position; this is the single shared insertion point for both this
+   *  plan's task 4 and PLAN-metalstorm-squad-scale4.md task 4 — do not
+   *  duplicate it in the scale-4 adapter. */
+  setRepulsor(id, x, z, radius) {
+    let r = this._repulsors.get(id);
+    if (!r) this._repulsors.set(id, (r = {}));
+    r.x = x; r.z = z; r.radius = radius;
+  }
+
+  /** The repulsor's sim unit left range, died, or is no longer tracked. */
+  removeRepulsor(id) {
+    this._repulsors.delete(id);
   }
 
   // --- ingest from the worker adapter ------------------------------------
@@ -120,6 +153,18 @@ export class SquadManager {
     }
   }
 
+  /** Squad.onWreck hook: a member died and dropped cosmetic wreckage
+   *  (collision §5). Brief collision presence so a wreck isn't walked
+   *  straight through the instant it lands; _rebuildGrid prunes it once its
+   *  grace window ends, after which it is never re-inserted. */
+  _registerWreck(x, z) {
+    this._wrecks.push({
+      x, z,
+      radius: this.cfg.wreckCollisionRadius,
+      until: this._now + this.cfg.wreckCollisionGraceSec,
+    });
+  }
+
   // --- def-before-state buffering (H1) ------------------------------------
 
   /** Merge a partial pose/strength update into the id's pending entry. Keeps
@@ -147,6 +192,7 @@ export class SquadManager {
     // id were later destroyed and reused (H2), so clear it here too.
     this._pendingById.delete(id);
     const sq = new Squad(id, def, this.backend, this.cfg);
+    sq.onWreck = (x, z) => this._registerWreck(x, z);
     this.squads.set(id, sq);
     const strength = state.strength || state;
     const pose = state.pose || state;
@@ -166,35 +212,114 @@ export class SquadManager {
     for (const sq of this.squads.values()) sq.update(dt, this._now, query, this.passability);
   }
 
-  // --- spatial hash (stub-grade; §7 "capped neighbour checks") ------------
+  // --- spatial hash (PLAN-metalstorm-squad-collision.md §1) ---------------
+  // Single broad-phase shared by member↔member separation (this file),
+  // pathfinding's own passability grid, and the perf dense-grid work — cell
+  // indexing here MUST use Math.floor, not `(x / cell) | 0`: `| 0` truncates
+  // toward zero, so x=-5 and x=+5 collapse into the same cell and the cell
+  // straddling the origin is double-width. See squad-collision.test.js's
+  // negative-coordinate case.
 
   _rebuildGrid() {
     this._grid.clear();
+    this._denseAgg.clear();
     for (const sq of this.squads.values()) {
       if (sq.lod !== 'full') continue;
-      for (const m of sq.memberPositions()) {
-        const k = this._key(m.x, m.z);
-        let bucket = this._grid.get(k);
-        if (!bucket) this._grid.set(k, (bucket = []));
-        bucket.push(m);
-      }
+      for (const m of sq.memberPositions()) this._insert(m.x, m.z, m);
     }
+    for (const r of this._repulsors.values()) this._insert(r.x, r.z, r);
+
+    // Wrecks: collision-active only within their post-spawn grace window
+    // (§5). Compact the array in place as we go, so an expired wreck is
+    // dropped — not merely skipped — and can never be re-inserted later.
+    let keep = 0;
+    for (let i = 0; i < this._wrecks.length; i++) {
+      const w = this._wrecks[i];
+      if (w.until <= this._now) continue;
+      this._wrecks[keep++] = w;
+      this._insert(w.x, w.z, w);
+    }
+    this._wrecks.length = keep;
+  }
+
+  _insert(x, z, obj) {
+    const k = this._key(x, z);
+    let bucket = this._grid.get(k);
+    if (!bucket) this._grid.set(k, (bucket = []));
+    bucket.push(obj);
   }
 
   _key(x, z) {
-    return ((x / this._cell) | 0) + ':' + ((z / this._cell) | 0);
+    return Math.floor(x / this._cell) + ':' + Math.floor(z / this._cell);
   }
 
-  // Yields members in the 3×3 cell neighbourhood (excludes self). Generator so
+  // Yields up to `neighbourCap` members/pseudo-members from the 3×3 cell
+  // neighbourhood (excludes self), tagged implicitly via `.squadId` (real
+  // members carry their owning squad's id; repulsors/wrecks/dense-cell
+  // aggregates carry none, so steering.separate's same-/other-squad compare
+  // always falls to "other" for them — collision §2). Generator so
   // separate() can iterate without the manager building an array.
+  //
+  // Performance lever (§4): a bucket denser than `denseCellOccupancy`
+  // collapses into a single enlarged-radius aggregate repulsor instead of
+  // yielding every member in it ("crowd -> fluid", cost-bounded regardless
+  // of local density); a bucket under that threshold but still bigger than
+  // the remaining cap budget is stride-sampled rather than just taking
+  // whichever members happen to be first in the array.
+  //
+  // ORCA seam (§3 — decision recorded, NOT implemented): a future ORCA
+  // avoidance term would query neighbours through this exact generator and
+  // replace only steering.separate's body; ORCA needs velocities too, which
+  // this can add to the yielded objects later without changing the query
+  // shape callers see.
   *_neighbours(self) {
-    const cx = (self.x / this._cell) | 0, cz = (self.z / this._cell) | 0;
+    const cap = this.cfg.neighbourCap;
+    if (cap <= 0) return;
+    const cx = Math.floor(self.x / this._cell), cz = Math.floor(self.z / this._cell);
+    let yielded = 0;
     for (let gx = cx - 1; gx <= cx + 1; gx++) {
       for (let gz = cz - 1; gz <= cz + 1; gz++) {
+        if (yielded >= cap) return;
         const bucket = this._grid.get(gx + ':' + gz);
-        if (!bucket) continue;
-        for (const m of bucket) if (m !== self) yield m;
+        if (!bucket || bucket.length === 0) continue;
+
+        if (bucket.length > this.cfg.denseCellOccupancy) {
+          const agg = this._denseAggregate(gx, gz, bucket);
+          yield agg; yielded++;
+          continue;
+        }
+
+        const remaining = cap - yielded;
+        if (bucket.length <= remaining) {
+          for (const m of bucket) {
+            if (m === self) continue;
+            yield m; yielded++;
+          }
+        } else {
+          const stride = bucket.length / remaining;
+          for (let i = 0, idx = 0; i < remaining; i++, idx += stride) {
+            const m = bucket[Math.floor(idx)];
+            if (m === self) continue;
+            yield m; yielded++;
+          }
+        }
       }
     }
+  }
+
+  // One aggregate per dense cell per frame (cached — computed at most once
+  // per cell regardless of how many members query it, not once per query).
+  _denseAggregate(gx, gz, bucket) {
+    const key = gx + ':' + gz;
+    let agg = this._denseAgg.get(key);
+    if (agg) return agg;
+    let sx = 0, sz = 0;
+    for (const m of bucket) { sx += m.x; sz += m.z; }
+    agg = {
+      x: sx / bucket.length, z: sz / bucket.length,
+      radius: this._cell * this.cfg.denseCellRadiusMul,
+    };
+    this._denseAgg.set(key, agg);
+    return agg;
   }
 }
