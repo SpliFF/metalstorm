@@ -686,6 +686,29 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             }
             break;
         }
+        case SpringWeb::ClientPayload_RoomEnlist: {
+            auto* session = sessions.GetSession(msg.clientId);
+            if (!session) {
+                auto e = Protocol::BuildServerError(401, "Auth required");
+                rtcServer.SendReliable(msg.clientId, e.data(), e.size());
+                break;
+            }
+            auto* room = rooms.FindRoomByClient(msg.clientId);
+            if (!room) {
+                auto e = Protocol::BuildServerError(400, "Not in a room");
+                rtcServer.SendReliable(msg.clientId, e.data(), e.size());
+                break;
+            }
+            auto* re = clientMsg->payload_as_RoomEnlist();
+            const uint8_t team = re ? re->team() : 255;
+            if (!rooms.EnlistSpectator(room->id, static_cast<uint32_t>(session->userId), team)) {
+                auto e = Protocol::BuildServerError(403, "Cannot enlist");
+                rtcServer.SendReliable(msg.clientId, e.data(), e.size());
+                break;
+            }
+            BROADCAST_ROOM_UPDATE(room);
+            break;
+        }
         case SpringWeb::ClientPayload_RoomKick: {
             auto* session = sessions.GetSession(msg.clientId);
             if (!session) break;
