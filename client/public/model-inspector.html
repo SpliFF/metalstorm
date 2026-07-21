@@ -1,0 +1,180 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Babylon model inspector (CDN)</title>
+<style>
+  html,body{margin:0;height:100%;background:#181c20;color:#cde;font:13px/1.5 system-ui,sans-serif;overflow:hidden}
+  #c{width:100vw;height:100vh;display:block;outline:none}
+  #hud{position:fixed;top:0;left:0;width:min(46vw,560px);max-height:56vh;overflow:auto;
+       padding:6px 10px;background:rgba(10,12,16,.86);z-index:5;font:11px/1.45 monospace;white-space:pre-wrap}
+  #hud .h{color:#8cf;font-weight:bold}
+  .err{color:#f77}.ok{color:#7d7}.warn{color:#fb6}.dim{color:#789}
+  #bar{position:fixed;bottom:0;left:0;right:0;padding:6px 10px;background:rgba(10,12,16,.86);z-index:5;
+       display:flex;gap:6px;align-items:center}
+  #bar input{flex:1;background:#123;color:#cde;border:1px solid #456;padding:3px 6px;font:12px monospace}
+  #bar button{background:#234;color:#cde;border:1px solid #456;border-radius:3px;padding:3px 9px;cursor:pointer;font:12px monospace}
+</style>
+<!-- Approach 1: standalone UMD, pinned to the same Babylon version the game
+     runs (9.1.0). Isolated from the app's module graph — reproduces the
+     glTF+KTX2 load path minus our worker + entity-renderer instancing, so a
+     break here vs. in-game bisects "model/loader/KTX2" vs. "our code". -->
+<script src="https://unpkg.com/babylonjs@9.1.0/babylon.js"></script>
+<script src="https://unpkg.com/babylonjs-loaders@9.1.0/babylonjs.loaders.min.js"></script>
+<script src="https://unpkg.com/babylonjs-inspector@9.1.0/babylon.inspector.bundle.js"></script>
+</head>
+<body>
+<div id="hud"><span class="h">Babylon model inspector (CDN 9.1.0)</span> — booting…</div>
+<canvas id="c"></canvas>
+<div id="bar">
+  <input id="url" placeholder="/api/games/data/metalstorm/models/fable_colossus.gltf">
+  <button id="go">Load</button>
+  <button id="insp">Inspector</button>
+  <button id="wire">Wireframe</button>
+</div>
+<script>
+const B = window.BABYLON;
+const hud = document.getElementById('hud');
+const log = (m, cls) => {
+  const d = document.createElement('div');
+  if (cls) d.className = cls;
+  d.textContent = m;
+  hud.appendChild(d);
+  hud.scrollTop = hud.scrollHeight;
+  console.log('[model-inspector]', m);
+};
+
+if (!B) { log('Babylon UMD failed to load from unpkg — check network/CSP.', 'err'); }
+
+// Match the game's KTX2 transcoder config exactly
+// (client/src/core/ktx2-config.ts) so transcoding behaves identically.
+const CDN = 'https://cdn.babylonjs.com';
+B.KhronosTextureContainer2.URLConfig = {
+  jsDecoderModule:       `${CDN}/babylon.ktx2Decoder.js`,
+  wasmUASTCToASTC:       `${CDN}/ktx2Transcoders/1/uastc_astc.wasm`,
+  wasmUASTCToBC7:        `${CDN}/ktx2Transcoders/1/uastc_bc7.wasm`,
+  wasmUASTCToRGBA_UNORM: `${CDN}/ktx2Transcoders/1/uastc_rgba8_unorm_v2.wasm`,
+  wasmUASTCToRGBA_SRGB:  `${CDN}/ktx2Transcoders/1/uastc_rgba8_srgb_v2.wasm`,
+  wasmUASTCToR8_UNORM:   `${CDN}/ktx2Transcoders/1/uastc_r8_unorm.wasm`,
+  wasmUASTCToRG8_UNORM:  `${CDN}/ktx2Transcoders/1/uastc_rg8_unorm.wasm`,
+  jsMSCTranscoder:       `${CDN}/ktx2Transcoders/1/msc_basis_transcoder.js`,
+  wasmMSCTranscoder:     `${CDN}/ktx2Transcoders/1/msc_basis_transcoder.wasm`,
+  wasmZSTDDecoder:       `${CDN}/zstddec.wasm`,
+};
+
+const canvas = document.getElementById('c');
+const engine = new B.Engine(canvas, true, { preserveDrawingBuffer: true });
+const scene = new B.Scene(engine);
+scene.clearColor = new B.Color4(0.14, 0.16, 0.19, 1);
+const cam = new B.ArcRotateCamera('cam', Math.PI * 1.15, 1.05, 20, B.Vector3.Zero(), scene);
+cam.wheelPrecision = 15;
+cam.attachControl(canvas, true);
+new B.HemisphericLight('hemi', new B.Vector3(0.3, 1, 0.2), scene).intensity = 1.05;
+const dir = new B.DirectionalLight('dir', new B.Vector3(-0.5, -1, -0.35), scene);
+dir.intensity = 2.0;
+const ground = B.MeshBuilder.CreateGround('ground', { width: 80, height: 80 }, scene);
+const gm = new B.StandardMaterial('gm', scene);
+gm.diffuseColor = new B.Color3(0.16, 0.18, 0.21);
+gm.specularColor = new B.Color3(0, 0, 0);
+ground.material = gm;
+engine.runRenderLoop(() => scene.render());
+addEventListener('resize', () => engine.resize());
+
+let loaded = null;      // meshes of the current model
+let wire = false;
+
+function frame(meshes) {
+  const geo = meshes.filter((m) => m.getTotalVertices && m.getTotalVertices() > 0);
+  if (!geo.length) return;
+  let min = new B.Vector3(1e9, 1e9, 1e9), max = new B.Vector3(-1e9, -1e9, -1e9);
+  for (const m of geo) {
+    m.computeWorldMatrix(true);
+    const bb = m.getBoundingInfo().boundingBox;
+    min = B.Vector3.Minimize(min, bb.minimumWorld);
+    max = B.Vector3.Maximize(max, bb.maximumWorld);
+  }
+  const c = min.add(max).scale(0.5);
+  const r = max.subtract(min).length() / 2 || 10;
+  cam.setTarget(c);
+  cam.radius = r * 2.6;
+}
+
+async function load(url) {
+  if (loaded) { loaded.forEach((m) => m.dispose()); loaded = null; }
+  hud.replaceChildren();
+  log(`Babylon ${B.Engine.Version} · loading ${url}`, 'h');
+
+  // glTF loader diagnostics: verbose parse logging + Khronos glTF-Validator.
+  const obs = B.SceneLoader.OnPluginActivatedObservable.add((loader) => {
+    if (loader.name !== 'gltf') return;
+    loader.loggingEnabled = true;
+    loader.validate = true;
+    loader.onValidatedObservable.add((r) => {
+      const i = r.issues || {};
+      log(`glTF-validate: ${i.numErrors || 0} errors, ${i.numWarnings || 0} warnings, `
+        + `${i.numHints || 0} hints, ${i.numInfos || 0} infos`, i.numErrors ? 'err' : 'ok');
+      for (const msg of (i.messages || []).slice(0, 60)) {
+        const s = (msg && typeof msg === 'object')
+          ? `${msg.severity === 0 ? 'ERROR' : 'warn'}: ${msg.message} @ ${msg.pointer || ''}`
+          : String(msg);
+        log('  ' + s, (msg && msg.severity === 0) ? 'err' : 'warn');
+      }
+    });
+  });
+
+  const t0 = performance.now();
+  const wd = setInterval(() => log(
+    `…still loading after ${((performance.now() - t0) / 1000) | 0}s — `
+    + `${scene.meshes.length} meshes, ${scene.textures.length} textures parsed so far`, 'warn'), 4000);
+  const slash = url.lastIndexOf('/');
+  try {
+    const res = await B.SceneLoader.ImportMeshAsync('', url.slice(0, slash + 1), url.slice(slash + 1), scene);
+    clearInterval(wd);
+    B.SceneLoader.OnPluginActivatedObservable.remove(obs);
+    loaded = res.meshes;
+    let verts = 0;
+    const rows = res.meshes.map((m) => {
+      const v = m.getTotalVertices ? m.getTotalVertices() : 0;
+      verts += v;
+      let size = '';
+      if (v > 0) { m.refreshBoundingInfo(); const e = m.getBoundingInfo().boundingBox.extendSize;
+        size = `${(e.x * 2).toFixed(1)}×${(e.y * 2).toFixed(1)}×${(e.z * 2).toFixed(1)}`; }
+      return { name: m.name, verts: v, size, mat: m.material ? m.material.name : null };
+    });
+    log(`✔ loaded in ${((performance.now() - t0) / 1000).toFixed(1)}s — ${res.meshes.length} meshes, `
+      + `${verts} verts, ${(res.transformNodes || []).length} transform nodes, `
+      + `${(res.animationGroups || []).length} clips`, 'ok');
+    console.table(rows);
+    for (const r of rows) log(`  ${r.name}: ${r.verts} v  ${r.size}  mat=${r.mat}`, r.verts ? 'dim' : 'warn');
+    frame(res.meshes);
+    if (wire) res.meshes.forEach((m) => { if (m.material) m.material.wireframe = true; });
+    // autoplay one clip so animated models aren't frozen at bind pose
+    (res.animationGroups || []).forEach((g, i) => (i === 0 ? g.play(true) : g.stop()));
+  } catch (e) {
+    clearInterval(wd);
+    B.SceneLoader.OnPluginActivatedObservable.remove(obs);
+    log('✘ LOAD FAILED: ' + (e && e.message || e), 'err');
+    console.error(e);
+  }
+}
+
+document.getElementById('go').onclick = () => { const u = document.getElementById('url').value.trim(); if (u) load(u); };
+document.getElementById('insp').onclick = () => {
+  scene.debugLayer.isVisible() ? scene.debugLayer.hide() : scene.debugLayer.show({ embedMode: false, overlay: true });
+};
+document.getElementById('wire').onclick = () => {
+  wire = !wire;
+  scene.meshes.forEach((m) => { if (m.material && m !== ground) m.material.wireframe = wire; });
+};
+
+const params = new URLSearchParams(location.search);
+const model = params.get('model');
+if (model) {
+  document.getElementById('url').value = model;
+  load(model).then(() => { if (params.get('inspector') !== '0') scene.debugLayer.show({ embedMode: false, overlay: true }); });
+} else {
+  log('paste a model URL below and press Load — e.g. /api/games/data/metalstorm/models/fable_colossus.gltf', 'dim');
+}
+</script>
+</body>
+</html>

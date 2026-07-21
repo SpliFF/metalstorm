@@ -8,6 +8,7 @@
 #include "System/float3.h"
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 /// Per-squad data visible to the AI.
@@ -22,11 +23,26 @@ struct AISquadInfo {
     bool hasCommands = false;
 };
 
+/// One rulesParam value visible to the AI (AI1). Mirrors the wire producer's
+/// bool→number coercion (StateStreamer::ParamToWire): a param is either a
+/// number or a string.
+struct AIRulesParamValue {
+    bool isString = false;
+    double num = 0.0;
+    std::string str;
+};
+
 /// Serialized game state snapshot for one AI player.
 struct AIStateSnapshot {
     int frame = 0;
     int teamId = -1;
     int allyTeamId = -1;
+
+    // rulesParams mirrors (AI1). `game` scope is the public strategic mirror
+    // (objectives, regions, pools); `team` scope is this AI's own team params.
+    // Populated from CSplitLuaHandle::GetGameParams() + Team::modParams.
+    std::unordered_map<std::string, AIRulesParamValue> gameParams;
+    std::unordered_map<std::string, AIRulesParamValue> teamParams;
 
     // Own units (full detail)
     std::vector<AISquadInfo> ownUnits;

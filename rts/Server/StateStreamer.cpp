@@ -8,6 +8,7 @@
 #include "PieceStateSerializer.h"
 #include "BuildActivitySerializer.h"
 #include "CombatEventCollector.h"
+#include "Sim/Weapons/DamageField.h"
 #include "GameOverState.h"
 #include "DecalEventCollector.h"
 #include "ServerDecalHandler.h"
@@ -20,14 +21,17 @@
 #include "FeatureLifecycleCollector.h"
 #include "UnitCommandCollector.h"
 #include "StandingOrders.h"
+#include "OrgGroups.h"
 #include "PerfMetrics.h"
 #include "AI/AIRuntimePool.h"
 #include "WebTransport/WebTransportServer.h"
 #include "Lua/LuaRules.h"
+#include "Lua/LuaHandleSynced.h"
 #include "Sim/Units/UnitHandler.h"
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/CommandAI/CommandAI.h"
 #include "Sim/Units/CommandAI/Command.h"
+#include "Sim/Misc/Team.h"
 #include "Sim/Misc/TeamHandler.h"
 #include "Sim/Misc/LosHandler.h"
 #include "Sim/Misc/Wind.h"
@@ -38,8 +42,76 @@
 
 #include <algorithm>
 #include <vector>
+#include <variant>
+#include <type_traits>
+#include <utility>
 
 #define LOG_SECTION "server"
+
+namespace {
+
+// Convert a synced Param value into wire kind + value fields. Spring stores
+// bool/float/string; the client rules-param mirror is number|string, so a
+// bool is encoded as Number(0/1). CALLED-OUT divergence (see protocol.fbs
+// RulesParamValueKind): a `false` reads back as 0 (truthy in Lua), not false.
+void ParamToWire(const LuaRulesParams::Param& p,
+                 SpringWeb::RulesParamValueKind& kind,
+                 double& numVal, std::string& strVal) {
+    kind = SpringWeb::RulesParamValueKind_Nil;
+    numVal = 0.0;
+    std::visit([&](auto&& v) {
+        using T = std::decay_t<decltype(v)>;
+        if constexpr (std::is_same_v<T, bool>) {
+            kind = SpringWeb::RulesParamValueKind_Number; numVal = v ? 1.0 : 0.0;
+        } else if constexpr (std::is_same_v<T, float>) {
+            kind = SpringWeb::RulesParamValueKind_Number; numVal = static_cast<double>(v);
+        } else if constexpr (std::is_same_v<T, std::string>) {
+            kind = SpringWeb::RulesParamValueKind_String; strVal = v;
+        }
+    }, p.value);
+}
+
+// A changed key, carrying the LOS bitmask to filter it against per session.
+// For adds/changes that's the NEW param's los; for deletions the OLD param's
+// los (so exactly the sessions that could have had the key are told to drop it).
+struct ChangedParam {
+    std::string key;
+    SpringWeb::RulesParamValueKind kind = SpringWeb::RulesParamValueKind_Nil;
+    double numVal = 0.0;
+    std::string strVal;
+    int los = LuaRulesParams::RULESPARAMLOS_PRIVATE;
+};
+
+// Diff old→now: emit adds/changes (value OR los differs) and deletions.
+void ComputeParamDelta(const LuaRulesParams::Params& oldParams,
+                       const LuaRulesParams::Params& nowParams,
+                       std::vector<ChangedParam>& out) {
+    for (const auto& kv : nowParams) {
+        const auto it = oldParams.find(kv.first);
+        // A los change matters too: it can newly reveal/hide the key to a
+        // scope, so treat it as a change and re-filter per session.
+        if (it != oldParams.end() &&
+            it->second.los == kv.second.los &&
+            it->second.value == kv.second.value)
+            continue;
+        ChangedParam c;
+        c.key = kv.first;
+        c.los = kv.second.los;
+        ParamToWire(kv.second, c.kind, c.numVal, c.strVal);
+        out.push_back(std::move(c));
+    }
+    for (const auto& kv : oldParams) {
+        if (nowParams.find(kv.first) != nowParams.end())
+            continue;
+        ChangedParam c;
+        c.key = kv.first;
+        c.los = kv.second.los;            // old los: who could have seen it
+        c.kind = SpringWeb::RulesParamValueKind_Nil;  // delete on the client
+        out.push_back(std::move(c));
+    }
+}
+
+} // namespace
 
 void StateStreamer::Tick(int /*frameNum*/) {
     CheckWinCondition(0);
@@ -59,6 +131,7 @@ void StateStreamer::Tick(int /*frameNum*/) {
     BroadcastSendToUnsynced(0);
     BroadcastPlayerTeamEvents(0);
     BroadcastTeamStats(0);
+    BroadcastRulesParams(0);
     PumpLuaRulesMsgLoopback(0);
     BroadcastUnitLifecycle(0);
     BroadcastFeatureLifecycle(0);
@@ -97,7 +170,7 @@ void StateStreamer::CheckWinCondition(int) {
                 static_cast<uint32_t>(frame), gs->paused,
                 0, 0, 0, 0, 0, modInfo.legacyCoordSystem, unitHandler.MaxUnits(),
                 /*gameOver*/ true, winners);
-            rtcServer.BroadcastReliable(gameOver.data(), gameOver.size());
+            rtcServer.BroadcastStream(StreamClass::Control, gameOver.data(), gameOver.size(), kEventLaneControl);
             return;
         }
     }
@@ -132,7 +205,7 @@ void StateStreamer::CheckWinCondition(int) {
                 static_cast<uint32_t>(frame), gs->paused,
                 0, 0, 0, 0, 0, modInfo.legacyCoordSystem, unitHandler.MaxUnits(),
                 /*gameOver*/ true, winners);
-            rtcServer.BroadcastReliable(gameOver.data(), gameOver.size());
+            rtcServer.BroadcastStream(StreamClass::Control, gameOver.data(), gameOver.size(), kEventLaneControl);
         }
     }
 }
@@ -262,7 +335,7 @@ void StateStreamer::BroadcastGameInfo(int) {
             envResHandler.GetCurrentWindStrength(),
             envResHandler.GetCurrentTidalStrength(),
             modInfo.legacyCoordSystem, unitHandler.MaxUnits());
-        rtcServer.BroadcastReliable(msg.data(), msg.size());
+        rtcServer.BroadcastStream(StreamClass::Control, msg.data(), msg.size(), kEventLaneControl);
     }
 }
 
@@ -281,9 +354,19 @@ void StateStreamer::StreamEntityState(int) {
             // Map session->team to its ally team so the
             // visibility filter can skip enemy units that
             // aren't in this ally team's LOS.
+            // Spectators: Global mode sees everything (-1),
+            // Team mode sees spectatorVisibilityTeam's LOS.
             int viewerAllyTeam = -1;
-            if (session.team >= 0 && teamHandler.IsValidTeam(session.team))
+            if (session.role == "spectator") {
+                if (session.spectatorVisibilityMode == SpectatorVisibilityMode::Team
+                    && session.spectatorVisibilityTeam >= 0
+                    && teamHandler.IsValidTeam(session.spectatorVisibilityTeam)) {
+                    viewerAllyTeam = teamHandler.AllyTeam(session.spectatorVisibilityTeam);
+                }
+                // else: Global mode or invalid team → viewerAllyTeam = -1 (see all)
+            } else if (session.team >= 0 && teamHandler.IsValidTeam(session.team)) {
                 viewerAllyTeam = teamHandler.AllyTeam(session.team);
+            }
 
             // Collect candidate units (viewport-filtered or all)
             std::vector<CUnit*> candidates;
@@ -353,8 +436,15 @@ void StateStreamer::StreamPieceState(int) {
     if (curFrame >= 0 && (curFrame % 3) == 0 && rtcServer.GetClientCount() > 0) {
         sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
             int viewerAllyTeam = -1;
-            if (session.team >= 0 && teamHandler.IsValidTeam(session.team))
+            if (session.role == "spectator") {
+                if (session.spectatorVisibilityMode == SpectatorVisibilityMode::Team
+                    && session.spectatorVisibilityTeam >= 0
+                    && teamHandler.IsValidTeam(session.spectatorVisibilityTeam)) {
+                    viewerAllyTeam = teamHandler.AllyTeam(session.spectatorVisibilityTeam);
+                }
+            } else if (session.team >= 0 && teamHandler.IsValidTeam(session.team)) {
                 viewerAllyTeam = teamHandler.AllyTeam(session.team);
+            }
 
             std::vector<CUnit*> candidates;
             if (session.HasViewport() && sim.HasMap()) {
@@ -398,8 +488,15 @@ void StateStreamer::StreamBuildActivity(int) {
     if (curFrame >= 0 && (curFrame % 3) == 0 && rtcServer.GetClientCount() > 0) {
         sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
             int viewerAllyTeam = -1;
-            if (session.team >= 0 && teamHandler.IsValidTeam(session.team))
+            if (session.role == "spectator") {
+                if (session.spectatorVisibilityMode == SpectatorVisibilityMode::Team
+                    && session.spectatorVisibilityTeam >= 0
+                    && teamHandler.IsValidTeam(session.spectatorVisibilityTeam)) {
+                    viewerAllyTeam = teamHandler.AllyTeam(session.spectatorVisibilityTeam);
+                }
+            } else if (session.team >= 0 && teamHandler.IsValidTeam(session.team)) {
                 viewerAllyTeam = teamHandler.AllyTeam(session.team);
+            }
 
             auto baData = BuildActivity::SerializeAll(
                 static_cast<uint32_t>(curFrame), viewerAllyTeam);
@@ -426,6 +523,13 @@ void StateStreamer::EvaluateStandingOrders(int) {
     auto& sim = ctx.sim;
     if (sim.GetFrameNum() > 0 && (sim.GetFrameNum() % 30) == 0) {
         standingOrders.Evaluate(static_cast<uint32_t>(sim.GetFrameNum()));
+        // Self-heal org rosters (dead squads leave; empty groups linger for
+        // reinforcement — macro-orders §1) before the directive pass reads them.
+        orgGroups.PruneDeadMembers();
+        // Macro directives evaluate on the same ~1s cadence (strategic tempo,
+        // change-driven broadcast — PLAN-macro-directives §1). Group-scoped
+        // standing orders share the standingOrders pass above.
+        directiveManager.Evaluate(static_cast<uint32_t>(sim.GetFrameNum()));
     }
 }
 
@@ -464,8 +568,11 @@ void StateStreamer::BroadcastCombatEvents(int) {
     auto& sessions = ctx.sessions;
     auto& sim = ctx.sim;
     auto events = combatEvents.Drain();
+    combatStats.Accumulate(events);  // PLAN-headless task 2: per-weapon totals
     auto projDrain = projectileEvents.Drain();
     auto soundDrain = soundEvents.Drain();
+    auto volleyDrain = volleyOutcomes.Drain();
+    auto fieldDrain = damageFieldManager.DrainEvents();
     auto seismicDrain = intelEvents != nullptr
         ? intelEvents->DrainSeismicPings()
         : std::vector<SeismicPingData>{};
@@ -474,14 +581,23 @@ void StateStreamer::BroadcastCombatEvents(int) {
         || !projDrain.impacts.empty()
         || !projDrain.trajectories.empty()
         || !soundDrain.empty()
+        || !volleyDrain.empty()
+        || !fieldDrain.empty()
         || !seismicDrain.empty();
     if (hasAny && rtcServer.GetClientCount() > 0) {
         const uint32_t frameNo = static_cast<uint32_t>(sim.GetFrameNum());
 
         sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
             int viewerAllyTeam = -1;
-            if (session.team >= 0 && teamHandler.IsValidTeam(session.team))
+            if (session.role == "spectator") {
+                if (session.spectatorVisibilityMode == SpectatorVisibilityMode::Team
+                    && session.spectatorVisibilityTeam >= 0
+                    && teamHandler.IsValidTeam(session.spectatorVisibilityTeam)) {
+                    viewerAllyTeam = teamHandler.AllyTeam(session.spectatorVisibilityTeam);
+                }
+            } else if (session.team >= 0 && teamHandler.IsValidTeam(session.team)) {
                 viewerAllyTeam = teamHandler.AllyTeam(session.team);
+            }
 
             // Predicate: is event-position visible to the viewer?
             // Spectator (viewerAllyTeam < 0) sees everything.
@@ -556,15 +672,80 @@ void StateStreamer::BroadcastCombatEvents(int) {
                     visiblePings.push_back(p);
             }
 
+            // Statistical-combat volley outcomes — the PLAN-weapons.md
+            // filtering matrix, finally implemented (PLAN §2.3, Q-D-c).
+            //   * viewer sees the attacker (LOS/radar on the firing position,
+            //     or the attacker is friendly)   -> FULL outcome (Hit/Miss,
+            //     damage, attacker id + posture, team tint).
+            //   * viewer OWNS the target but can't see the attacker -> UNKNOWN
+            //     (no attacker id, no damage) PLUS a counterbattery radar-blip
+            //     reveal at the firing position so statistical artillery is
+            //     counterable (Q-D-c overrides the plan's v0 no-reveal default).
+            //   * viewer sees only the target area -> UNKNOWN, no reveal.
+            //   * viewer sees neither -> dropped.
+            std::vector<VolleyOutcomeData> visibleVolleys;
+            visibleVolleys.reserve(volleyDrain.size());
+            for (const auto& v : volleyDrain) {
+                const bool attackerVisible =
+                    (viewerAllyTeam < 0) || teamFriendly(v.attackerTeam)
+                    || posVisible(v.attackerPos);
+                const bool viewerOwnsTarget =
+                    (v.targetTeam != 255) && teamFriendly(v.targetTeam);
+                const bool targetVisible =
+                    (viewerAllyTeam < 0) || viewerOwnsTarget
+                    || posVisible(v.targetPos);
+
+                if (attackerVisible) {
+                    // Full ground-truth outcome (spectators land here too).
+                    visibleVolleys.push_back(v);
+                    continue;
+                }
+                if (!targetVisible)
+                    continue; // sees neither attacker nor impact — no leak.
+
+                // Attacker hidden: strip the outcome to UNKNOWN, hide the
+                // attacker id/team/posture/damage. Keep target_pos for impact FX
+                // and the squad casualty hint; keep target_id only if the viewer
+                // can legitimately resolve that unit.
+                VolleyOutcomeData masked = v;
+                masked.result       = 2; // CombatResult::Unknown
+                masked.damage       = 0.0f;
+                masked.attackerId   = 0;
+                masked.attackerTeam = 255;
+                masked.posture      = 0;
+                if (!viewerOwnsTarget && !posVisible(v.targetPos))
+                    masked.targetId = 0;
+                // Counterbattery reveal only for the target's own team.
+                if (viewerOwnsTarget) {
+                    masked.revealAttacker = true;
+                    masked.revealPos      = v.attackerPos;
+                }
+                visibleVolleys.push_back(masked);
+            }
+
+            // Damage-field lifecycle (Model 3, C6). Sent when the field area
+            // overlaps the viewer's known space (center in LOS/radar), or the
+            // field is the viewer's own — so a player always sees their own
+            // barrage FX. Spectators see all. Removed events are forwarded to
+            // any session that could have seen the Created (same predicate)
+            // so stale barrage FX always gets torn down.
+            std::vector<DamageFieldEventData> visibleFields;
+            visibleFields.reserve(fieldDrain.size());
+            for (const auto& f : fieldDrain) {
+                if (viewerAllyTeam < 0 || teamFriendly(f.team) || posVisible(f.center))
+                    visibleFields.push_back(f);
+            }
+
             if (visibleCombat.empty() && fired.empty()
                 && impacts.empty() && trajectories.empty()
-                && visibleSounds.empty() && visiblePings.empty())
+                && visibleSounds.empty() && visiblePings.empty()
+                && visibleVolleys.empty() && visibleFields.empty())
                 return;
 
             auto batch = Protocol::BuildCombatEventBatch(
                 frameNo, visibleCombat, fired, impacts, trajectories,
-                visibleSounds, visiblePings);
-            rtcServer.SendReliable(clientId, batch.data(), batch.size());
+                visibleSounds, visiblePings, visibleVolleys, visibleFields);
+            rtcServer.SendStream(clientId, StreamClass::Control, batch.data(), batch.size(), kEventLaneCombat);
         });
     }
 }
@@ -588,8 +769,15 @@ void StateStreamer::BroadcastEntityDeaths(int) {
         const bool broadcastAll = (death.losMask & (1u << 31)) != 0;
         sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
             int viewerAllyTeam = -1;
-            if (session.team >= 0 && teamHandler.IsValidTeam(session.team))
+            if (session.role == "spectator") {
+                if (session.spectatorVisibilityMode == SpectatorVisibilityMode::Team
+                    && session.spectatorVisibilityTeam >= 0
+                    && teamHandler.IsValidTeam(session.spectatorVisibilityTeam)) {
+                    viewerAllyTeam = teamHandler.AllyTeam(session.spectatorVisibilityTeam);
+                }
+            } else if (session.team >= 0 && teamHandler.IsValidTeam(session.team)) {
                 viewerAllyTeam = teamHandler.AllyTeam(session.team);
+            }
             if (viewerAllyTeam < 0) {
                 // Spectator — always notify.
                 rtcServer.SendReliable(clientId, msg.data(), msg.size());
@@ -654,7 +842,13 @@ void StateStreamer::BroadcastDecals(int) {
         const uint32_t decalFrame = static_cast<uint32_t>(sim.GetFrameNum());
         sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
             int viewerAllyTeam = -1;
-            if (session.team >= 0 && teamHandler.IsValidTeam(session.team))
+            if (session.role == "spectator") {
+                if (session.spectatorVisibilityMode == SpectatorVisibilityMode::Team
+                    && session.spectatorVisibilityTeam >= 0
+                    && teamHandler.IsValidTeam(session.spectatorVisibilityTeam)) {
+                    viewerAllyTeam = teamHandler.AllyTeam(session.spectatorVisibilityTeam);
+                }
+            } else if (session.team >= 0 && teamHandler.IsValidTeam(session.team))
                 viewerAllyTeam = teamHandler.AllyTeam(session.team);
 
             // Spectators (no team) and global-LOS viewers see every
@@ -681,7 +875,7 @@ void StateStreamer::BroadcastDecals(int) {
 
             const auto decalBatch = Protocol::BuildDecalBatch(
                 decalFrame, visScars, visTracks);
-            rtcServer.SendReliable(clientId, decalBatch.data(), decalBatch.size());
+            rtcServer.SendStream(clientId, StreamClass::Bulk, decalBatch.data(), decalBatch.size(), kEventLaneDecals);
         });
     }
 }
@@ -716,7 +910,7 @@ void StateStreamer::BroadcastHeightmapUpdates(int) {
                     static_cast<uint32_t>(sim.GetFrameNum()),
                     x1, z1, x2, z2,
                     readMap->GetCornerHeightMapSynced(), mapDims.mapxp1);
-                rtcServer.BroadcastReliable(hmBatch.data(), hmBatch.size());
+                rtcServer.BroadcastStream(StreamClass::Bulk, hmBatch.data(), hmBatch.size());
             }
         }
     }
@@ -754,7 +948,7 @@ void StateStreamer::BroadcastPlayerTeamEvents(int) {
     auto ptEvents = playerTeamEvents.Drain();
     if (!ptEvents.empty() && rtcServer.GetClientCount() > 0) {
         auto msg = Protocol::BuildPlayerTeamEventBatch(ptEvents);
-        rtcServer.BroadcastReliable(msg.data(), msg.size());
+        rtcServer.BroadcastStream(StreamClass::Control, msg.data(), msg.size(), kEventLaneControl);
     }
 }
 
@@ -820,6 +1014,167 @@ void StateStreamer::BroadcastTeamStats(int) {
             rtcServer.BroadcastReliable(msg.data(), msg.size());
         }
     }
+}
+
+// Rules-param wire producer (Spring.Set{Game,Team}RulesParam → client).
+// The backbone routes all strategic state through rules params — region
+// control (game `region_*`/`regions_rev`), objectives (`objective_*`),
+// authority pools/event-ring (team params). None of it reached the browser
+// before this: `handleRulesParamUpdate` on the client was a dead consumer.
+//
+// Each tick we diff the live synced param maps (game + every team) against
+// last-sent baselines. Game params are broadcast unfiltered (matching
+// Spring.GetGameRulesParams, unconditionally public). Team params are
+// LOS-filtered per receiving session, replicating
+// LuaSyncedRead::GetTeamRulesParam(s): same-ally → PRIVATE-and-below,
+// allied-team → ALLIED-and-below, others → PUBLIC only, spectators → all.
+// A fresh session first gets a `replace=true` snapshot of current state
+// (so late joiners converge); thereafter only per-tick deltas.
+void StateStreamer::BroadcastRulesParams(int) {
+    auto& rtcServer = ctx.rtcServer;
+    auto& sessions  = ctx.sessions;
+
+    const int activeTeams = teamHandler.ActiveTeams();
+    if (static_cast<int>(lastTeamParams.size()) < activeTeams)
+        lastTeamParams.resize(activeTeams);
+
+    // Diff against baselines (session-independent) and refresh baselines. We
+    // do this even with nobody connected so a joiner's snapshot starts from a
+    // correct baseline and we never emit a spurious "everything changed" delta.
+    const LuaRulesParams::Params& gameNow = CSplitLuaHandle::GetGameParams();
+    std::vector<ChangedParam> gameChanged;
+    ComputeParamDelta(lastGameParams, gameNow, gameChanged);
+    lastGameParams = gameNow;
+
+    std::vector<std::vector<ChangedParam>> teamChanged(activeTeams);
+    for (int t = 0; t < activeTeams; ++t) {
+        const CTeam* team = teamHandler.Team(t);
+        if (team == nullptr) continue;
+        ComputeParamDelta(lastTeamParams[t], team->modParams, teamChanged[t]);
+        lastTeamParams[t] = team->modParams;
+    }
+
+    if (rtcServer.GetClientCount() == 0)
+        return;  // baselines updated; nothing to send
+
+    // Returns the losStatus mask a session viewing team `ownerTeam`'s params
+    // should use (LuaSyncedRead::GetTeamRulesParams). Spectators / unassigned
+    // (team < 0) are all-seeing readers.
+    auto teamLosMask = [&](const ClientSession& session, int ownerTeam) -> int {
+        using namespace LuaRulesParams;
+        int mask = RULESPARAMLOS_PUBLIC;
+        const bool allSeeing = !(session.team >= 0 && teamHandler.IsValidTeam(session.team));
+        if (allSeeing || teamHandler.AllyTeam(session.team) == teamHandler.AllyTeam(ownerTeam))
+            mask |= RULESPARAMLOS_PRIVATE_MASK;
+        else if (teamHandler.AlliedTeams(ownerTeam, session.team))
+            mask |= RULESPARAMLOS_ALLIED_MASK;
+        return mask;
+    };
+
+    // Game-scope delta is the same for every already-snapshotted session
+    // (unfiltered) — build the entry list once.
+    std::vector<Protocol::RulesParamEntryData> gameDeltaEntries;
+    gameDeltaEntries.reserve(gameChanged.size());
+    for (const auto& c : gameChanged) {
+        Protocol::RulesParamEntryData e;
+        e.keyId = InternKey(c.key);  // W3: use interned key
+        if (e.keyId == 0) e.key = c.key;
+        e.kind = c.kind;
+        e.numVal = c.numVal;
+        e.strVal = c.strVal;
+        gameDeltaEntries.push_back(std::move(e));
+    }
+    // W3: Increment game params rev when there are changes
+    if (!gameChanged.empty()) {
+        gameParamsRev++;
+    }
+
+    sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
+        if (!session.rulesParamsSnapshotSent) {
+            // W3: Send key dictionary first on join
+            SendKeyDictionary(clientId);
+
+            // Join snapshot: full current state, replace=true per scope.
+            {
+                Protocol::RulesParamUpdateData snap;
+                snap.scope = SpringWeb::RulesParamScope_Game;
+                snap.replace = true;
+                snap.paramsRev = ++gameParamsRev;  // W3: increment generation counter
+                snap.params.reserve(gameNow.size());
+                for (const auto& kv : gameNow) {
+                    Protocol::RulesParamEntryData e;
+                    e.keyId = InternKey(kv.first);  // W3: use interned key
+                    if (e.keyId == 0) e.key = kv.first;  // fallback to string if interning fails
+                    ParamToWire(kv.second, e.kind, e.numVal, e.strVal);
+                    snap.params.push_back(std::move(e));
+                }
+                auto msg = Protocol::BuildRulesParamUpdate(snap);
+                rtcServer.SendStream(clientId, StreamClass::Control, msg.data(), msg.size(), kEventLaneParams);
+            }
+            for (int t = 0; t < activeTeams; ++t) {
+                const CTeam* team = teamHandler.Team(t);
+                if (team == nullptr || team->modParams.empty()) continue;
+                const int losMask = teamLosMask(session, t);
+                Protocol::RulesParamUpdateData snap;
+                snap.scope = SpringWeb::RulesParamScope_Team;
+                snap.id = static_cast<uint32_t>(t);
+                snap.replace = true;
+                // W3: ensure we have enough team param revs
+                if (teamParamsRev.size() <= static_cast<size_t>(t))
+                    teamParamsRev.resize(t + 1, 0);
+                snap.paramsRev = ++teamParamsRev[t];
+                for (const auto& kv : team->modParams) {
+                    if (!(kv.second.los & losMask)) continue;
+                    Protocol::RulesParamEntryData e;
+                    e.keyId = InternKey(kv.first);  // W3: use interned key
+                    if (e.keyId == 0) e.key = kv.first;
+                    ParamToWire(kv.second, e.kind, e.numVal, e.strVal);
+                    snap.params.push_back(std::move(e));
+                }
+                if (snap.params.empty()) continue;
+                auto msg = Protocol::BuildRulesParamUpdate(snap);
+                rtcServer.SendStream(clientId, StreamClass::Control, msg.data(), msg.size(), kEventLaneParams);
+            }
+            session.rulesParamsSnapshotSent = true;
+            return;
+        }
+
+        // Established session: deltas only.
+        if (!gameDeltaEntries.empty()) {
+            Protocol::RulesParamUpdateData upd;
+            upd.scope = SpringWeb::RulesParamScope_Game;
+            upd.paramsRev = gameParamsRev;  // W3: include generation counter
+            upd.params = gameDeltaEntries;
+            auto msg = Protocol::BuildRulesParamUpdate(upd);
+            rtcServer.SendStream(clientId, StreamClass::Control, msg.data(), msg.size(), kEventLaneParams);
+        }
+        for (int t = 0; t < activeTeams; ++t) {
+            if (teamChanged[t].empty()) continue;
+            const int losMask = teamLosMask(session, t);
+            Protocol::RulesParamUpdateData upd;
+            upd.scope = SpringWeb::RulesParamScope_Team;
+            upd.id = static_cast<uint32_t>(t);
+            // W3: ensure we have enough team param revs
+            if (teamParamsRev.size() <= static_cast<size_t>(t))
+                teamParamsRev.resize(t + 1, 0);
+            if (!teamChanged[t].empty())
+                teamParamsRev[t]++;
+            upd.paramsRev = teamParamsRev[t];
+            for (const auto& c : teamChanged[t]) {
+                if (!(c.los & losMask)) continue;
+                Protocol::RulesParamEntryData e;
+                e.keyId = InternKey(c.key);  // W3: use interned key
+                if (e.keyId == 0) e.key = c.key;
+                e.kind = c.kind;
+                e.numVal = c.numVal;
+                e.strVal = c.strVal;
+                upd.params.push_back(std::move(e));
+            }
+            if (upd.params.empty()) continue;
+            auto msg = Protocol::BuildRulesParamUpdate(upd);
+            rtcServer.SendStream(clientId, StreamClass::Control, msg.data(), msg.size(), kEventLaneParams);
+        }
+    });
 }
 
 // SendLuaRulesMsg loopback — synced gadgets call
@@ -985,8 +1340,15 @@ void StateStreamer::StreamLosBitmaps(int) {
 
         sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
             int viewerAllyTeam = -1;
-            if (session.team >= 0 && teamHandler.IsValidTeam(session.team))
+            if (session.role == "spectator") {
+                if (session.spectatorVisibilityMode == SpectatorVisibilityMode::Team
+                    && session.spectatorVisibilityTeam >= 0
+                    && teamHandler.IsValidTeam(session.spectatorVisibilityTeam)) {
+                    viewerAllyTeam = teamHandler.AllyTeam(session.spectatorVisibilityTeam);
+                }
+            } else if (session.team >= 0 && teamHandler.IsValidTeam(session.team)) {
                 viewerAllyTeam = teamHandler.AllyTeam(session.team);
+            }
 
             if (viewerAllyTeam >= 0) {
                 auto bitmap = intelEvents->BuildLosBitmap(viewerAllyTeam, frameNo);
@@ -999,7 +1361,7 @@ void StateStreamer::StreamLosBitmaps(int) {
                 return;
             }
 
-            // Spectator: stream up to `specStride` ally teams per
+            // Spectator (Global mode): stream up to `specStride` ally teams per
             // second, round-robin so all teams cycle every
             // (activeAllyTeams / specStride) seconds.
             if (activeAllyTeams <= 0) return;
@@ -1012,4 +1374,56 @@ void StateStreamer::StreamLosBitmaps(int) {
             }
         });
     }
+}
+
+
+// W3: Intern a key string and return its ID. Creates a new ID if not already interned.
+uint16_t StateStreamer::InternKey(const std::string& key) {
+    auto it = keyToId.find(key);
+    if (it != keyToId.end()) {
+        return it->second;
+    }
+
+    // Reserve 0 for "not interned"
+    if (idToKey.empty()) {
+        idToKey.push_back("");  // index 0 reserved
+    }
+
+    // Check if we have exhausted the ID space (16-bit)
+    if (idToKey.size() >= 65535) {
+        return 0;  // fall back to string key
+    }
+
+    uint16_t newId = static_cast<uint16_t>(idToKey.size());
+    keyToId[key] = newId;
+    idToKey.push_back(key);
+    keyDictionaryRev++;  // increment revision when dictionary changes
+    return newId;
+}
+
+// W3: Send the key dictionary to a client
+void StateStreamer::SendKeyDictionary(int clientId) {
+    auto& rtcServer = ctx.rtcServer;
+
+    flatbuffers::FlatBufferBuilder fbb(1024);
+    std::vector<flatbuffers::Offset<flatbuffers::String>> keyOffsets;
+
+    // Skip index 0 (reserved)
+    for (size_t i = 1; i < idToKey.size(); ++i) {
+        keyOffsets.push_back(fbb.CreateString(idToKey[i]));
+    }
+
+    auto keysVec = fbb.CreateVector(keyOffsets);
+
+    SpringWeb::RulesParamKeyDictionaryBuilder db(fbb);
+    db.add_keys(keysVec);
+    db.add_dictionary_rev(keyDictionaryRev);
+    auto dictOff = db.Finish();
+
+    auto msg = Protocol::BuildServerMessage(fbb,
+        SpringWeb::ServerPayload_RulesParamKeyDictionary,
+        dictOff.Union());
+
+    rtcServer.SendStream(clientId, StreamClass::Control,
+        msg.data(), msg.size(), kEventLaneParams);
 }

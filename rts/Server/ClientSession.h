@@ -18,6 +18,12 @@
 
 using ClientID = uint32_t;
 
+/// Spectator visibility modes (PLAN-lobby.md spectator section).
+enum class SpectatorVisibilityMode : uint8_t {
+    Global = 0,  // See everything (default for spectators)
+    Team = 1     // See one team's fog-of-war
+};
+
 /// A rectangular viewport in world space (XZ plane).
 struct Viewport {
     float centerX = 0.0f;
@@ -39,6 +45,14 @@ struct ClientSession {
     std::string role;           // "admin", "player", "spectator"
     int team = -1;              // -1 = unassigned
     uint32_t lastCommandSeq = 0;
+
+    /// Spectator visibility mode. Only meaningful when role == "spectator".
+    /// Global (default): see everything, no fog-of-war.
+    /// Team: see one team's LOS (spectatorVisibilityTeam).
+    SpectatorVisibilityMode spectatorVisibilityMode = SpectatorVisibilityMode::Global;
+    /// When spectatorVisibilityMode == Team, which team's LOS to use.
+    /// Ignored when mode == Global.
+    int spectatorVisibilityTeam = -1;
 
     /// Token-bucket rate limiting. Two buckets gate inbound commands:
     ///   - cmdMessageTokens: each PlayerCommand / PlayerCommandBatch
@@ -92,6 +106,13 @@ struct ClientSession {
     /// Delta compression cache — tracks last-sent entity state.
     EntityDeltaCache deltaCache;
 
+    /// Rules-param join snapshot latch. False until StateStreamer has sent
+    /// this session the full current game+team rules-param state (a
+    /// `replace=true` RulesParamUpdate per scope); thereafter it receives
+    /// only per-tick deltas. New sessions (and reconnects that re-auth into a
+    /// fresh ClientID) start false so late joiners converge to current state.
+    bool rulesParamsSnapshotSent = false;
+
     /// Last known frame for reconnection state recovery.
     int lastKnownFrame = -1;
 
@@ -115,7 +136,15 @@ public:
     void AddSession(ClientID clientId, int64_t userId,
                     const std::string& username, const std::string& role) {
         std::lock_guard<std::mutex> lock(mutex);
-        sessions[clientId] = {clientId, userId, username, role, -1, 0, 0};
+        ClientSession session;
+        session.clientId = clientId;
+        session.userId = userId;
+        session.username = username;
+        session.role = role;
+        session.team = -1;
+        session.lastCommandSeq = 0;
+        // spectatorVisibilityMode and spectatorVisibilityTeam use default initializers
+        sessions[clientId] = session;
     }
 
     /// Remove a client session (on disconnect).
@@ -135,6 +164,36 @@ public:
     bool IsAuthenticated(ClientID clientId) {
         std::lock_guard<std::mutex> lock(mutex);
         return sessions.count(clientId) > 0;
+    }
+
+    /// PLAN-security-hardening task 10 (G4): may this session command a unit
+    /// belonging to `unitTeam`? The ownership rule is simply "the unit is on
+    /// the session's team". The previous PlayerCommand/Batch checks phrased it
+    /// as `session.team >= 0 && unit->team != session.team`, which SKIPPED the
+    /// team check entirely when `session.team == -1` — so any un-rostered
+    /// session (dev smoketest, but also a spectator or an anomalous no-roster
+    /// connection) could command every unit on every team. This centralises
+    /// the decision so both command paths share one rule and it is unit-tested:
+    ///
+    ///   * A spectator commands nothing, in every build.
+    ///   * A rostered session (team >= 0) commands only its own team's units.
+    ///   * team == -1 (lobby-less launch) keeps the "command anything" escape
+    ///     hatch ONLY in dev builds and ONLY for non-spectators — the
+    ///     spring-test harness and manual dev runs launch without a lobby
+    ///     roster and rely on it. Under SPRING_PROD it is compiled out, so a
+    ///     team == -1 session in a production binary commands nothing (every
+    ///     legitimate commander is rostered with team >= 0 by the lobby).
+    static bool CanCommandTeam(const ClientSession& session, int unitTeam) {
+        if (session.role == "spectator")
+            return false;
+        if (session.team >= 0)
+            return unitTeam == session.team;
+#ifndef SPRING_PROD
+        // team == -1, non-spectator, dev build → lobby-less smoketest bypass.
+        return true;
+#else
+        return false;
+#endif
     }
 
     /// Iterate all sessions under lock. Callback receives (ClientID, ClientSession&).

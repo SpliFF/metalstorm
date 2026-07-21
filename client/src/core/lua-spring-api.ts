@@ -326,6 +326,9 @@ export interface WeaponDefStats {
     targetMoveError: number;
     /** `ttl` — projectile time-to-live in seconds (Recoil `flighttime`/GAME_SPEED). 0 if none. */
     ttl: number;
+    /** `expectedDps` — computed expected damage-per-second (tuning-honesty;
+     *  PLAN-macro-combat §4). default_damage * salvo_size / reload_time. */
+    expectedDps: number;
 }
 
 /** Per-unit entry in the worker's unit store. */

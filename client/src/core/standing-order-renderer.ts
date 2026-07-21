@@ -44,7 +44,7 @@ import {
     GreasedLineMeshMaterialType,
 } from '@babylonjs/core';
 import type { ParsedMapData } from './map-data.js';
-import type { StandingOrderInfoMsg } from './connection.js';
+import type { StandingOrderInfoMsg, DirectiveInfoMsg } from './connection.js';
 
 /// gl.ALWAYS — keep overlays visible behind terrain. Mirrors the
 /// `glDisable(GL_DEPTH_TEST)` Recoil uses for the command path X-ray.
@@ -125,6 +125,14 @@ export class StandingOrderRenderer {
     private iconMats = new Map<string, StandardMaterial>();
 
     private lastOrders: ReadonlyArray<StandingOrderInfoMsg> = [];
+    /** Macro directives (PLAN-macro-directives §1) — the shape-carrying
+     *  superset standing orders don't have. Rendered by explicit `shape`
+     *  (Point/Circle/Polygon/Polyline) rather than the per-`type` switch
+     *  standing orders use, since a directive's shape is data, not implied
+     *  by its type. PLAN-macro-ui.md §5: this class is the rendering seed
+     *  for directive shapes — extended in place rather than a parallel
+     *  renderer. */
+    private lastDirectives: ReadonlyArray<DirectiveInfoMsg> = [];
     private lastFingerprint = '';
 
     constructor(scene: Scene, opts?: {
@@ -179,6 +187,13 @@ export class StandingOrderRenderer {
         this.render();
     }
 
+    /** Called from Connection.onDirectiveState. Same wholesale-replacement
+     *  snapshot semantics as `update()`. */
+    updateDirectives(directives: ReadonlyArray<DirectiveInfoMsg>): void {
+        this.lastDirectives = directives;
+        this.render();
+    }
+
     private isOwnTeam(team: number): boolean {
         return this.myTeam >= 0 && team === this.myTeam;
     }
@@ -197,6 +212,9 @@ export class StandingOrderRenderer {
         const parts: string[] = [`${this.showAllies ? 'A' : 'O'}/${this.myTeam}`];
         for (const o of this.lastOrders) {
             parts.push(`${o.orderId}:${o.type}:${o.ownerTeam}:${o.active ? 1 : 0}:${o.assignedSquadCount}:${o.params.join(',')}`);
+        }
+        for (const d of this.lastDirectives) {
+            parts.push(`d${d.directiveId}:${d.type}:${d.shape}:${d.ownerTeam}:${d.active ? 1 : 0}:${d.assignedStrength}/${d.requestedStrength}:${d.params.join(',')}`);
         }
         return parts.join('|');
     }
@@ -249,7 +267,96 @@ export class StandingOrderRenderer {
             this.renderOne(order);
         }
 
+        for (const directive of this.lastDirectives) {
+            if (!directive.active) continue;
+            const ownTeam = this.isOwnTeam(directive.ownerTeam);
+            const allied = this.isAlly(directive.ownerTeam);
+            if (!ownTeam && allied && !this.showAllies) continue;
+            if (!ownTeam && !allied) continue;
+
+            this.renderOneDirective(directive);
+        }
+
         this.lastFingerprint = fp;
+    }
+
+    /** Directive glyph for a Point-shaped directive's centre icon. Only
+     *  DirectiveType 8-14 (the new platoon directives) need entries here —
+     *  0-7 alias StandingOrderType and reuse `renderPointIcon`'s glyphs via
+     *  the same lookup style, kept local since directives dispatch on
+     *  `shape`, not `type`. */
+    private static readonly DIRECTIVE_GLYPHS: Record<string, string> = {
+        RallyPoint: '🚩', BuildBase: '🏗', MoveFormation: '➡', Assault: '⚔',
+        Defend: '🛡', Overwatch: '👁', Withdraw: '↩', Escort: '🤝', DefendFront: '〰',
+    };
+
+    /** Directive shapes dispatch on `shape` (explicit, wire-carried) rather
+     *  than `type` (which standing orders imply their shape from) — a
+     *  directive's geometry is data, not a function of its doctrine type. */
+    private renderOneDirective(d: DirectiveInfoMsg): void {
+        const color = teamColor(d.ownerTeam);
+        const p = d.params;
+        const fulfillment = d.requestedStrength > 0
+            ? `${d.assignedSquadCount} (${Math.round(100 * d.assignedStrength / d.requestedStrength)}%)`
+            : `${d.assignedSquadCount}`;
+        switch (d.shape) {
+            case 'Point': {
+                if (p.length < 3) return;
+                const glyph = StandingOrderRenderer.DIRECTIVE_GLYPHS[d.type] ?? '📍';
+                this.overlays.push(this.makePointIcon(`directive-icon-${d.directiveId}`, p[0], p[1], p[2], glyph, color));
+                this.overlays.push(this.makeLabelIcon(`directive-label-${d.directiveId}`, p[0], p[1], p[2], fulfillment, color));
+                break;
+            }
+            case 'Circle': {
+                if (p.length < 4) return;
+                const [x, y, z, radius] = [p[0], p[1], p[2], p[3]];
+                if (radius <= 0) return;
+                const ring = this.makeRing(`directive-ring-${d.directiveId}`, radius, color);
+                ring.position.set(x, this.groundY(x, y, z, 2), z);
+                this.overlays.push(ring);
+                this.overlays.push(this.makeLabelIcon(`directive-label-${d.directiveId}`, x, y, z, fulfillment, color));
+                break;
+            }
+            case 'Polygon': {
+                const n = Math.floor(p.length / 3);
+                if (n < 3) return;
+                const points: Vector3[] = [];
+                for (let i = 0; i < n; i++) {
+                    const x = p[i * 3 + 0], y = p[i * 3 + 1], z = p[i * 3 + 2];
+                    points.push(new Vector3(x, this.groundY(x, y, z), z));
+                }
+                points.push(points[0]); // implicitly-closed ring (macro-directives §1)
+                let totalLen = 0;
+                for (let i = 1; i < points.length; i++) totalLen += Vector3.Distance(points[i - 1], points[i]);
+                const line = this.makeGreasedLine(`directive-polygon-${d.directiveId}`, points, color, false, totalLen);
+                if (line) this.overlays.push(line);
+                const cx = points.slice(0, n).reduce((s, v) => s + v.x, 0) / n;
+                const cz = points.slice(0, n).reduce((s, v) => s + v.z, 0) / n;
+                this.overlays.push(this.makeLabelIcon(`directive-label-${d.directiveId}`, cx, points[0].y, cz, fulfillment, color));
+                break;
+            }
+            case 'Polyline': {
+                // [frontage, x1,y1,z1, x2,y2,z2, ...] — frontage (params[0])
+                // is a width annotation, not a rendered dimension yet (a
+                // ribbon/quad-strip along the line is a follow-up polish
+                // item; the line itself is the load-bearing visual).
+                const rest = p.slice(1);
+                const n = Math.floor(rest.length / 3);
+                if (n < 2) return;
+                const points: Vector3[] = [];
+                for (let i = 0; i < n; i++) {
+                    const x = rest[i * 3 + 0], y = rest[i * 3 + 1], z = rest[i * 3 + 2];
+                    points.push(new Vector3(x, this.groundY(x, y, z), z));
+                }
+                let totalLen = 0;
+                for (let i = 1; i < points.length; i++) totalLen += Vector3.Distance(points[i - 1], points[i]);
+                const line = this.makeGreasedLine(`directive-polyline-${d.directiveId}`, points, color, true, totalLen);
+                if (line) this.overlays.push(line);
+                const mid = points[Math.floor((points.length - 1) / 2)];
+                this.overlays.push(this.makeLabelIcon(`directive-label-${d.directiveId}`, mid.x, mid.y, mid.z, fulfillment, color));
+                break;
+            }
+        }
     }
 
     private renderOne(o: StandingOrderInfoMsg): void {
@@ -556,5 +663,6 @@ export class StandingOrderRenderer {
         this.iconMats.clear();
         this.ringMats.clear();
         this.lastOrders = [];
+        this.lastDirectives = [];
     }
 }

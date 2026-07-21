@@ -1,4 +1,4 @@
-.PHONY: setup build build-release test test-cpp test-client test-all dev-client generate-protocol export-metalstorm-specs clean
+.PHONY: setup build build-release test test-cpp test-client test-all dev-client generate-protocol export-metalstorm-specs clean test-headless-batch test-headless-determinism
 
 # First-time setup
 setup:
@@ -46,6 +46,19 @@ test-client:
 	cd client && npx vitest run
 
 test-all: test-cpp test-client
+
+# headless-batch matrix-expansion unit test (pure, no server build needed —
+# PLAN-headless.md task 3 §6 "meta" requirement).
+test-headless-batch:
+	node tools/headless-batch/test/matrix.test.mjs
+
+# Determinism pair-run CI hook (PLAN-headless.md task 4): builds spring-server,
+# runs the PaperTanks-scale fixture twice, diffs the two stateHash sequences.
+test-headless-determinism:
+	cmake --build build/debug --target spring-server
+	node tools/headless-batch/determinism-pair-run.mjs \
+		--server-bin build/debug/spring-server \
+		--out-dir build/headless-determinism
 
 # Development
 dev-client:

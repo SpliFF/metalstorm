@@ -7,6 +7,7 @@
 #include "Lua/LuaGaia.h"
 #include "Lua/LuaHandle.h"
 #include "Lua/LuaCallInProfiler.h"
+#include "Server/SimFrameProfiler.h"
 
 #include "Sim/Units/UnitHandler.h"
 #include "Sim/Units/Unit.h"
@@ -602,6 +603,35 @@ std::string ExecuteServerCommand(const std::string& cmd) {
         return LuaCallInProfiler::Report(topN);
     }
 
+    // sim profile [on|off|reset|status]  — CSimulation::SimFrame()
+    // per-phase wall-time profiler (PLAN-server-cpp-optimisation.md P0):
+    // native sim vs unit-script tick vs synced Lua call-ins. Complements
+    // `lua profile` (per handle+callin detail) with the coarse phase split.
+    //   on     enable accumulation     off    disable (keeps samples)
+    //   reset  clear samples           status  one-line state
+    //   <none>  full phase-breakdown report
+    if (cmd == "sim profile" || cmd.rfind("sim profile ", 0) == 0) {
+        std::string arg = (cmd.size() > 12) ? cmd.substr(12) : "";
+        while (!arg.empty() && arg.front() == ' ') arg.erase(arg.begin());
+
+        if (arg == "on" || arg == "1" || arg == "true") {
+            SimFrameProfiler::SetEnabled(true);
+            return "sim profile: on";
+        }
+        if (arg == "off" || arg == "0" || arg == "false") {
+            SimFrameProfiler::SetEnabled(false);
+            return "sim profile: off (samples retained; `sim profile reset` to clear)";
+        }
+        if (arg == "reset" || arg == "clear") {
+            SimFrameProfiler::Reset();
+            return "sim profile: samples cleared";
+        }
+        if (arg == "status") {
+            return std::string("sim profile: ") + (SimFrameProfiler::IsEnabled() ? "on" : "off");
+        }
+        return SimFrameProfiler::Report();
+    }
+
     // combat_summary  — recent combat / sound / death queue depths.
     if (cmd == "combat_summary") {
         std::ostringstream ss;
@@ -664,4 +694,48 @@ LuaExecResult ExecuteLuaExecRequest(const LuaExecRequest& req) {
          req.scope.c_str(), req.code.c_str(), result.output.c_str());
 
     return result;
+}
+
+SyncedPredicateResult EvalSyncedPredicate(const std::string& expr,
+                                          std::string& errOut) {
+    if (!luaRules) {
+        errOut = "LuaRules not loaded";
+        return SyncedPredicateResult::Error;
+    }
+    lua_State* L = luaRules->syncedLuaHandle.GetLuaState();
+    if (!L) {
+        errOut = "synced Lua state is null";
+        return SyncedPredicateResult::Error;
+    }
+
+    const int top = lua_gettop(L);
+    // Wrap in `return (...)` so a bare expression like "GG.Balance.Done" yields
+    // a value we can test. Restore the stack on every path so a per-30s poll
+    // can't leak stack slots over a multi-hour run.
+    const std::string chunk = "return (" + expr + ")";
+    if (luaL_loadstring(L, chunk.c_str()) != LUA_OK) {
+        const char* msg = lua_tostring(L, -1);
+        errOut = msg ? msg : "syntax error";
+        lua_settop(L, top);
+        return SyncedPredicateResult::Error;
+    }
+    if (lua_pcall(L, 0, 1, 0) != LUA_OK) {
+        const char* msg = lua_tostring(L, -1);
+        errOut = msg ? msg : "runtime error";
+        lua_settop(L, top);
+        return SyncedPredicateResult::Error;
+    }
+    const bool truthy = lua_toboolean(L, -1) != 0;
+    lua_settop(L, top);
+    return truthy ? SyncedPredicateResult::True : SyncedPredicateResult::False;
+}
+
+int64_t GetSyncedLuaHeapKb() {
+    if (!luaRules)
+        return 0;
+    lua_State* L = luaRules->syncedLuaHandle.GetLuaState();
+    if (!L)
+        return 0;
+    // LUA_GCCOUNT returns the heap size in Kbytes (read-only, no GC side effect).
+    return static_cast<int64_t>(lua_gc(L, LUA_GCCOUNT, 0));
 }

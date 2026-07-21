@@ -67,19 +67,21 @@ issueCommand / getFrame / getMapSize`, opens only `base/table/string/math/utf8`,
 and loads a single entry buffer. Each ask below flips a feature-detect from
 stub to live with no rewrite:
 
-| Ask | What | Unblocks |
-|---|---|---|
-| **AI0-boot** | AI plugins boot reliably (existing Phase-4 repair) | everything |
-| **AI0-loader** | a plugin-scoped `require`/module loader in the AI VM (or bundle-at-discovery) | `main.lua` wiring the multi-file layout (pure modules already test headless) |
-| **AI1** | `AI.getRulesParam(scope, key)` | the whole Picture: regions, board, pools, guidance, parley |
-| **AI2** | org-group / directive / posture verbs on the command interface | the real actuator; standing-order fallback until then |
-| **AI3** | AI slots get playerIDs + pools + `PlayerAdded` flow | authority integration (likely already true via virtual-player design — verify) |
-| **AI-team** | `AI.getTeamId()` / squad views / `AI.getLODLevel()` | friendly-vs-enemy scoring, squad-accurate ledger, LOD cadence |
-| **I1** | AI-side `SendLuaRulesMsg`-equivalent (`AI.sendGameMessage`) | parley responses + the intent-report blob (interaction §6) |
-| **I2** | team-private rulesParam visibility survives streaming | guidance-store privacy (co-commander orders hidden from enemies) |
+| Ask | What | Unblocks | Status |
+|---|---|---|---|
+| **AI0-boot** | AI plugins boot reliably (existing Phase-4 repair) | everything | ✅ 2026-07-20 — fixed by AI0-loader (missing `require` was the boot failure) |
+| **AI0-loader** | a plugin-scoped `require`/module loader in the AI VM (or bundle-at-discovery) | `main.lua` wiring the multi-file layout (pure modules already test headless) | ✅ 2026-07-20 — `AIScriptContext::l_require`, sandboxed; `tests/test_ai_runtime.cpp` boots this plugin |
+| **AI1** | `AI.getRulesParam(scope, key)` | the whole Picture: regions, board, pools, guidance, parley | ✅ 2026-07-20 — snapshot carries game+team params; `caps().rulesParam` now true |
+| **AI2** | org-group / directive / posture verbs on the command interface | the real actuator; standing-order fallback until then | ⏸ deferred — waits on macro-orders `directive-protocol` |
+| **AI3** | AI slots get playerIDs + pools + `PlayerAdded` flow | authority integration (likely already true via virtual-player design — verify) | ⚠ verified FALSE — AI = team only, no playerID; leader is the host player. Authority-lane decision (see PLAN-metalstorm-ai §9.1) |
+| **AI-team** | `AI.getTeamId()` / squad views / `AI.getLODLevel()` | friendly-vs-enemy scoring, squad-accurate ledger, LOD cadence | ◑ partial — `AI.getTeamId()` landed 2026-07-20; squad views + `getLODLevel` still pending |
+| **I1** | AI-side `SendLuaRulesMsg`-equivalent (`AI.sendGameMessage`) | parley responses + the intent-report blob (interaction §6) | pending |
+| **I2** | team-private rulesParam visibility survives streaming | guidance-store privacy (co-commander orders hidden from enemies) | pending |
 
-Until AI1, the Picture is mostly empty and the planner correctly does almost
-nothing (a blind AI holds position) — safe by construction.
+AI0-loader + AI1 landed: the plugin **boots in the engine VM** and can read
+rulesParams. The Picture population from those params (regions/board/economy)
+is still Lua-side stub work (plan task 3, now unblocked). Until that fills in,
+the planner correctly does almost nothing (a blind AI holds position) — safe.
 
 ## Integration risks worth a human decision
 

@@ -31,6 +31,23 @@ export const DEFAULT_CONFIG = {
   // render members at the centroid; far beyond, the adapter drops to an icon
   // (PLAN-macro-map.md tiers).
   steerMinScreenPx: 8,
+
+  // Big-unit threading (PLAN-metalstorm-flow.md §4, task 3/4). Weight applied
+  // to the accumulated big-unit push term alongside arrival/separation.
+  bigUnitWeight: 1.6,
+  // Hull repulsor influence zone as a multiple of the hull's circumscribed
+  // radius (squad-collision.md §5's "one large repulsor circle").
+  hullRepulseRadiusMul: 2.0,
+  // Extra push strength directly ahead of a moving big unit's heading (the
+  // bow-wave bias, flow.md §4).
+  bowWaveBias: 1.5,
+  // Contact-patch influence zone as a multiple of the patch's own radius,
+  // for the soft steer-away while threading under a hull.
+  patchRepulseRadiusMul: 2.5,
+  // Speed multiplier applied to members while under a permeable hull —
+  // mirrors the sim's ×2 traversal cost for underpass classes (flow.md §3)
+  // so visuals and sim agree on how reluctant under-threading is.
+  underHullSpeedPenalty: 0.5,
 };
 
 // THE routing predicate — canonical single home (PLAN-metalstorm-structure.md

@@ -45,8 +45,15 @@ token(optionalEncoding?:any):string|Uint8Array|null {
   return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
 }
 
+cachedDefsHash():string|null
+cachedDefsHash(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
+cachedDefsHash(optionalEncoding?:any):string|Uint8Array|null {
+  const offset = this.bb!.__offset(this.bb_pos, 10);
+  return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
+}
+
 static startAuthRequest(builder:flatbuffers.Builder) {
-  builder.startObject(3);
+  builder.startObject(4);
 }
 
 static addUsername(builder:flatbuffers.Builder, usernameOffset:flatbuffers.Offset) {
@@ -61,16 +68,21 @@ static addToken(builder:flatbuffers.Builder, tokenOffset:flatbuffers.Offset) {
   builder.addFieldOffset(2, tokenOffset, 0);
 }
 
+static addCachedDefsHash(builder:flatbuffers.Builder, cachedDefsHashOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(3, cachedDefsHashOffset, 0);
+}
+
 static endAuthRequest(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
 }
 
-static createAuthRequest(builder:flatbuffers.Builder, usernameOffset:flatbuffers.Offset, passwordHashOffset:flatbuffers.Offset, tokenOffset:flatbuffers.Offset):flatbuffers.Offset {
+static createAuthRequest(builder:flatbuffers.Builder, usernameOffset:flatbuffers.Offset, passwordHashOffset:flatbuffers.Offset, tokenOffset:flatbuffers.Offset, cachedDefsHashOffset:flatbuffers.Offset):flatbuffers.Offset {
   AuthRequest.startAuthRequest(builder);
   AuthRequest.addUsername(builder, usernameOffset);
   AuthRequest.addPasswordHash(builder, passwordHashOffset);
   AuthRequest.addToken(builder, tokenOffset);
+  AuthRequest.addCachedDefsHash(builder, cachedDefsHashOffset);
   return AuthRequest.endAuthRequest(builder);
 }
 
@@ -78,7 +90,8 @@ unpack(): AuthRequestT {
   return new AuthRequestT(
     this.username(),
     this.passwordHash(),
-    this.token()
+    this.token(),
+    this.cachedDefsHash()
   );
 }
 
@@ -87,6 +100,7 @@ unpackTo(_o: AuthRequestT): void {
   _o.username = this.username();
   _o.passwordHash = this.passwordHash();
   _o.token = this.token();
+  _o.cachedDefsHash = this.cachedDefsHash();
 }
 }
 
@@ -94,7 +108,8 @@ export class AuthRequestT implements flatbuffers.IGeneratedObject {
 constructor(
   public username: string|Uint8Array|null = null,
   public passwordHash: string|Uint8Array|null = null,
-  public token: string|Uint8Array|null = null
+  public token: string|Uint8Array|null = null,
+  public cachedDefsHash: string|Uint8Array|null = null
 ){}
 
 
@@ -102,11 +117,13 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
   const username = (this.username !== null ? builder.createString(this.username!) : 0);
   const passwordHash = (this.passwordHash !== null ? builder.createString(this.passwordHash!) : 0);
   const token = (this.token !== null ? builder.createString(this.token!) : 0);
+  const cachedDefsHash = (this.cachedDefsHash !== null ? builder.createString(this.cachedDefsHash!) : 0);
 
   return AuthRequest.createAuthRequest(builder,
     username,
     passwordHash,
-    token
+    token,
+    cachedDefsHash
   );
 }
 }

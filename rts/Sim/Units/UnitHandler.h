@@ -4,6 +4,7 @@
 #define UNITHANDLER_H
 
 #include <array>
+#include <cstdint>
 #include <vector>
 
 #include "Sim/Misc/GlobalConstants.h"
@@ -60,6 +61,13 @@ public:
 	CUnit* GetUnitUnsafe(unsigned int id) const { return units[id]; }
 	CUnit* GetUnit(unsigned int id) const { return ((id < MaxUnits())? units[id]: nullptr); }
 
+	// Spawn generation for id `id`: bumped every time the slot is (re)assigned
+	// to a unit. Lets deferred consumers (statistical combat's pending-outcome
+	// ring) detect a destroyed-and-reused id and drop misattributed work.
+	uint16_t GetUnitSpawnGen(unsigned int id) const {
+		return ((id < spawnGens.size())? spawnGens[id]: uint16_t(0));
+	}
+
 	static CUnit* NewUnit(const UnitDef* ud);
 
 	const std::vector<CUnit*>& GetUnitsToBeRemoved() const { return unitsToBeRemoved; }
@@ -95,6 +103,7 @@ private:
 	SimObjectIDPool idPool;
 
 	std::vector<CUnit*> units;                                           ///< used to get units from IDs (0 if not created)
+	std::vector<uint16_t> spawnGens;                                     ///< per-id spawn generation, bumped on slot (re)assignment
 	std::array<std::vector<std::vector<CUnit*>>, MAX_TEAMS> unitsByDefs; ///< units sorted by team and unitDef
 
 	std::vector<CUnit*> activeUnits;                                     ///< used to get all active units

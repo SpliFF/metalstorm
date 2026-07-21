@@ -30,12 +30,15 @@ interface PendingCommand {
 /** Standard Spring command IDs. Mirrors rts/Sim/Units/CommandAI/Command.h. */
 export const CMD = {
     STOP: 0,
-    /** Insert an order before an existing queue slot. Params:
-     *    [insertPos, newCmdId, newOpts, ...newParams]
-     *  When OPT.ALT is set on the INSERT itself, `insertPos` is
-     *  interpreted as a TAG (look up the order with that tag, insert
-     *  before it) rather than a slot index. This is what waypoint-drag
-     *  uses to reorder atomically. See CommandAI::ExecuteInsert. */
+    /** Insert an order into an existing queue. Params:
+     *    [param0, newCmdId, newOpts, ...newParams]
+     *  By default (no OPT.ALT on the INSERT itself) `param0` is a TAG:
+     *  the engine looks up the queued order with that tag and inserts
+     *  before it (after it with OPT.RIGHT). This tag-anchored form is
+     *  what waypoint-drag uses to reorder atomically. With OPT.ALT set,
+     *  `param0` is instead a queue POSITION index (negatives count from
+     *  the end; clamped to the queue length). See
+     *  CommandAI::ExecuteInsert. */
     INSERT: 1,
     /** Remove queued orders by tag (default) or by cmdId (with OPT.ALT).
      *  Params are the list of tags / cmdIds to drop. Per-waypoint
@@ -94,16 +97,21 @@ function isPositionalCommand(cmdId: number): boolean {
            cmdId === CMD.AREA_ATTACK;
 }
 
-/** Async hook invoked before a command is sent to the server. Returns
- *  true if any widget consumed the order — caller must drop the command.
- *  Wired in main.ts to LuaWidgetManager.notifyCommand so widget-side
- *  CommandNotify handlers (cmd_no_duplicate_orders, cmd_raw_move_issue,
- *  cmd_keep_target, ...) can veto or rewrite mouse-issued orders. */
+/** Hook invoked before a command is sent to the server. Returns true if
+ *  any widget consumed the order — the command is then dropped. Post-GW4
+ *  the CommandBuffer lives in the game-processor worker alongside the
+ *  LuaUI runtime, so gpInit wires this synchronously to lua-ui-host's
+ *  dispatchCommandNotify (widgetHandler:CommandNotify) so widget-side
+ *  handlers (cmd_no_duplicate_orders, cmd_raw_move_issue,
+ *  cmd_keep_target, ...) can veto natively-issued orders — matching
+ *  Recoil, where every GUI command runs luaUI->CommandNotify first. A
+ *  Promise return is still accepted for async gates (fail-open on
+ *  rejection). */
 export type CommandNotifier = (
     cmdId: number,
     params: readonly number[],
     options: number,
-) => Promise<boolean>;
+) => boolean | Promise<boolean>;
 
 export class CommandBuffer {
     private connection: Connection;
@@ -115,8 +123,9 @@ export class CommandBuffer {
         this.connection = connection;
     }
 
-    /** Install (or clear) the CommandNotify gate. Wired from main.ts once
-     *  both InputManager and LuaWidgetManager exist. */
+    /** Install (or clear) the CommandNotify gate. Wired from gpInit
+     *  (game-processor.ts) on every CommandBuffer owner (worker-selection /
+     *  worker-command-modes / worker-build-placement). */
     setNotifier(fn: CommandNotifier | null): void {
         this.notifier = fn;
     }
@@ -205,38 +214,44 @@ export class CommandBuffer {
         options: number,
         timeoutFrames: number,
     ): void {
-        // If a CommandNotify gate is wired, run it before sending. The
-        // gate round-trips through the worker so widgets that register
-        // widgetHandler.CommandNotify (cmd_no_duplicate_orders,
-        // cmd_raw_move_issue, cmd_keep_target, ...) can veto or rewrite
-        // the order. Returning true from any widget consumes the command
-        // — we drop it silently to match Spring's contract.
-        //
-        // Fire-and-forget: the InputManager call site doesn't (and can't)
-        // await, so we don't propagate the Promise. The notifier itself
-        // caps wait time at 50ms so a stalled worker never wedges
-        // commands — fail open.
+        // If a CommandNotify gate is wired, run it before sending so
+        // widgets that register widgetHandler.CommandNotify
+        // (cmd_no_duplicate_orders, cmd_raw_move_issue, cmd_keep_target,
+        // ...) can veto the order. Returning true from any widget
+        // consumes the command — we drop it silently to match Spring's
+        // contract. Post-GW4 the LuaUI runtime shares this worker, so
+        // the gpInit-wired notifier (dispatchCommandNotify) is
+        // synchronous and the send keeps its ordering; a Promise return
+        // (async gate) defers the send and fails open on rejection.
         if (this.notifier) {
-            const notify = this.notifier;
-            void (async () => {
-                let consumed = false;
-                try {
-                    consumed = await notify(commandId, params, options);
-                } catch {
-                    consumed = false;
-                }
-                if (consumed) return;
-                this.connection.sendPlayerCommand(
-                    commandId, squadIds, params, options, timeoutFrames);
-            })();
-            return;
+            let result: boolean | Promise<boolean>;
+            try {
+                result = this.notifier(commandId, params, options);
+            } catch {
+                result = false;
+            }
+            if (typeof result !== 'boolean') {
+                void (async () => {
+                    let consumed = false;
+                    try {
+                        consumed = await result;
+                    } catch {
+                        consumed = false;
+                    }
+                    if (consumed) return;
+                    this.connection.sendPlayerCommand(
+                        commandId, squadIds, params, options, timeoutFrames);
+                })();
+                return;
+            }
+            if (result) return;  // vetoed — drop the command
         }
 
         // Delegate to Connection.sendPlayerCommand so all client-issued
         // commands share a single monotonic sequence counter
         // (`Connection.commandSequence`). Without this, widget-issued
-        // commands (lua-widget-manager → connection.sendPlayerCommand)
-        // and InputManager-issued commands had independent counters; once
+        // commands (lua-ui-host giveOrder → connection.sendPlayerCommand)
+        // and natively-issued commands had independent counters; once
         // the widget counter outran ours, the server rejected our
         // commands as "stale sequence" and silently dropped them. That's
         // the symptom that made factory build clicks do nothing.

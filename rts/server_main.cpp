@@ -33,6 +33,7 @@
 #include "Server/LuaDefsSerializer.h"
 #include "Server/ResourcesParser.h"
 #include "Server/StandingOrders.h"
+#include "Server/OrgGroups.h"
 #include "Server/AI/AIRuntimePool.h"
 #include "Server/AI/AIDiscovery.h"
 #include "Server/PerfMetrics.h"
@@ -45,6 +46,10 @@
 #include "Server/ClientMessageHandler.h"
 #include "Server/StateStreamer.h"
 #include "Server/GameHttpRoutes.h"
+#include "Server/HeadlessRun.h"
+#include "Server/StatsDump.h"
+#include "Server/GameOverState.h"
+#include "Sim/Misc/GlobalSynced.h"
 #include "Lua/LuaRules.h"
 #include "Server/HttpAuth.h"
 #include "Server/CacheControl.h"
@@ -190,6 +195,17 @@ int main(int argc, char* argv[])
     int idleExitSeconds = envInt("SPRING_IDLE_EXIT_SECONDS", 300);          // 5 min
     int idleStartupGraceSeconds = envInt("SPRING_IDLE_STARTUP_GRACE_SECONDS", 120);  // 2 min
 
+    // --- Headless run mode (PLAN-headless task 1) ---
+    // `--headless-run <config.json>` runs the sim to completion with no browser
+    // client: no clients, no idle-exit, run-config-driven pacing (uncapped /
+    // realtime / xN) and stop conditions (frame / gameOver / luaCondition), all
+    // under a hard wall-clock ceiling (`--max-wall-min`, default 60, E4). When
+    // no config is given the mode stays disabled and the loop behaves exactly
+    // as a normal game (the tick-gate-off regression bar, PLAN-headless §6).
+    std::string headlessConfigPath;
+    int maxWallMin = 60;
+    headless::Config headlessCfg;
+
     // Human player roster from the lobby. Each `--player <username>:<team>:<pos>`
     // entry gets one slot here. The sim uses this for two things:
     //   1. At AuthRequest time, look up the authenticating username
@@ -240,6 +256,8 @@ int main(int argc, char* argv[])
     // --log-file PATH, --log-level LEVEL, --log-server URL,
     // --log-sqlite PATH, --debug, --log-messages,
     // --wt-cert PATH, --wt-key PATH,
+    // --headless-run config.json (PLAN-headless: no-client batch/soak run),
+    // --max-wall-min N (headless hard wall-clock ceiling, default 60),
     // --player username:team:pos (repeatable),
     // --ai id:team:pos (repeatable)
     for (int i = 1; i < argc; i++) {
@@ -264,6 +282,10 @@ int main(int argc, char* argv[])
             idleExitSeconds = std::atoi(argv[++i]);
         } else if (arg == "--idle-startup-grace-seconds" && i + 1 < argc) {
             idleStartupGraceSeconds = std::atoi(argv[++i]);
+        } else if (arg == "--headless-run" && i + 1 < argc) {
+            headlessConfigPath = argv[++i];
+        } else if (arg == "--max-wall-min" && i + 1 < argc) {
+            maxWallMin = std::atoi(argv[++i]);
         } else if (arg == "--log-file" && i + 1 < argc) {
             logFile = argv[++i];
         } else if (arg == "--log-level" && i + 1 < argc) {
@@ -334,6 +356,48 @@ int main(int argc, char* argv[])
             // Legacy: bare number = port
             port = std::atoi(argv[i]);
         }
+    }
+
+    // --- Headless run config (PLAN-headless task 1) ---
+    // Parse the run manifest and fold its self-contained map/game/aiSlots into
+    // the same structures the CLI flags fill, but only where a flag was absent
+    // (explicit --map/--game/--ai win over the manifest). The `headless` block
+    // (tickMode / stopAt / statsDump / stateHashEvery) drives the sim loop below.
+    if (!headlessConfigPath.empty()) {
+        std::string cfgErr;
+        if (!headless::ParseConfigFile(headlessConfigPath, headlessCfg, cfgErr)) {
+            SLOG(SPRING_LOG_ERROR, "--headless-run: %s", cfgErr.c_str());
+            return 1;
+        }
+        headlessCfg.enabled = true;
+        headlessCfg.maxWallSec = static_cast<int64_t>(std::max(1, maxWallMin)) * 60;
+
+        if (mapId.empty() && !headlessCfg.map.empty())
+            mapId = headlessCfg.map;
+        if (gameId.empty() && !headlessCfg.game.empty())
+            gameId = headlessCfg.game;
+        if (requestedAIs.empty() && !headlessCfg.aiSlots.empty()) {
+            for (const auto& s : headlessCfg.aiSlots) {
+                RequestedAI rq;
+                rq.id = s.aiId;
+                rq.team = s.team;
+                rq.startPos = s.startPos;
+                requestedAIs.push_back(std::move(rq));
+            }
+        }
+
+        std::string modeStr =
+            headlessCfg.tickMode == headless::TickMode::Uncapped ? "uncapped"
+          : headlessCfg.tickMode == headless::TickMode::Multiple
+                ? ("x" + std::to_string(headlessCfg.tickMultiple))
+          :                                                          "realtime";
+        SLOG(SPRING_LOG_NOTICE,
+            "headless run: tickMode=%s maxWall=%dmin stopAt{frame=%lld gameOver=%d lua=%s}",
+            modeStr.c_str(),
+            maxWallMin,
+            headlessCfg.stopAt.frame ? (long long)*headlessCfg.stopAt.frame : -1LL,
+            headlessCfg.stopAt.gameOver ? 1 : 0,
+            headlessCfg.stopAt.luaCondition ? headlessCfg.stopAt.luaCondition->c_str() : "-");
     }
 
     // PLAN-security-hardening E1 (warn-only — see DevBuildGate::WarnOnly).
@@ -535,6 +599,10 @@ int main(int argc, char* argv[])
     std::unordered_map<ClientID, int> clientPlayerNum;
     int nextPlayerNum = 0;
 
+    // PLAN-quickstart.md §3.3: reason carried by a client's PlayerLeaveIntent
+    // (sent just before disconnect), consumed once when the disconnect drains.
+    std::unordered_map<ClientID, uint8_t> pendingLeaveReason;
+
     // GameStart is deferred until all roster players have connected and
     // registered CPlayers (matches real Spring's "all clients loaded" gate).
     std::unordered_set<std::string> connectedRosterPlayers;
@@ -552,7 +620,7 @@ int main(int argc, char* argv[])
         net, rtcServer, sim, db, sessions, rooms, aiPool, luaExecEngine,
         roomId, gameId, mapId, port, logMessages, /*defsCacheKey=*/std::string{},
         requestedPlayers, requestedAIs, playerTeamByUsername,
-        clientPlayerNum, nextPlayerNum, connectedRosterPlayers,
+        clientPlayerNum, pendingLeaveReason, nextPlayerNum, connectedRosterPlayers,
         rosterPlayersNeeded, handshakedClients,
     };
 
@@ -638,6 +706,27 @@ int main(int argc, char* argv[])
         });
     });
 
+    // Macro C&C broadcast hooks (PLAN-macro-directives §1). Same visibility
+    // discipline as standing orders — org-group + directive state stream on
+    // change to the owner team and its allies. Both fire from the sim-tick
+    // path on the main thread, so reading live values is safe.
+    orgGroups.SetChangeNotifier([&gameStart, &sessions](int changedTeam) {
+        sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
+            if (session.team < 0) return;
+            if (changedTeam != session.team &&
+                !teamHandler.AlliedTeams(session.team, changedTeam)) return;
+            gameStart.PushOrgGroupsTo(clientId, session.team);
+        });
+    });
+    directiveManager.SetChangeNotifier([&gameStart, &sessions](int changedTeam) {
+        sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
+            if (session.team < 0) return;
+            if (changedTeam != session.team &&
+                !teamHandler.AlliedTeams(session.team, changedTeam)) return;
+            gameStart.PushDirectivesTo(clientId, session.team);
+        });
+    });
+
     // --- Bake def cache for HTTP delivery ---
     //
     // After sim.Init the engine has parsed gamedata/defs.lua (with the
@@ -654,21 +743,62 @@ int main(int argc, char* argv[])
     // re-serialize, browser cache hit.
     std::string& defsCacheKey = ctx.defsCacheKey;
     if (unitDefHandler && weaponDefHandler && !gameId.empty()) {
-        defsCacheKey = DefsCache::ComputeCacheKey(
-            gameId, gameVersion, CGameSetup::GetModOptions());
-
-        // Skip re-baking if the cache files already exist for this key.
-        // This is the warm path: same modOptions in repeat sessions.
-        //
-        // The filenames must match what DefsCache actually writes
-        // (`.lua.br` since the v14-lua migration — the stale `.bin`
-        // probe here never matched, so every launch re-serialised the
-        // defs needlessly). Under --no-cache we deliberately force the
-        // cold path AND overwrite below: the cache key is content-blind
-        // (see DefsCache.h), so an edited/added `units/*.lua` would
-        // otherwise never reach the browser, which fetches this on-disk
-        // payload by key.
+        // Serialize the full def set to Lua source FIRST, then derive the
+        // cache key from the emitted payload (DefsCache::ComputeContentKey).
+        // Serialization is cheap (once per game-server process) and this is
+        // what makes the key content-aware: the old ComputeCacheKey hashed
+        // only gameId/version/modOptions, so any def edit left the key —
+        // and thus the URL the client fetches — frozen at its first bake.
+        // The client then received stale def_ids that disagreed with the
+        // live server def_ids and every native model rendered as a fallback
+        // shape. See DefsCache.h.
         namespace fs = std::filesystem;
+
+        // Probe the game's gamedata/resources.lua for the set of
+        // projectile-texture names. The weapon-def baker uses this to
+        // choose between the primary and fallback name when applying
+        // Spring's per-weaponType defaults (e.g. `missileflaretexture` is
+        // preferred when defined, otherwise `flare`). With an empty set the
+        // baker still writes the primary; the client's resolver chases any
+        // remaining alias.
+        const std::string gameDir = "data/games/" + gameId;
+        const std::string engineBaseDir = "cont/base/springcontent";
+        const auto projTextureNames =
+            ResourcesParser::GetProjectileTextureNames(
+                gameId, gameDir, engineBaseDir);
+
+        // Serialize each def category to Lua source. Output files end in
+        // `.lua.br` and are served with `Content-Encoding: br` so the
+        // browser decompresses transparently. See PLAN-defs.md.
+        namespace L = LuaDefsSerializer;
+        std::string udSrc = L::SerializeUnitDefs(
+            unitDefHandler->GetUnitDefsVec(), gameId);
+        std::string wdSrc = L::SerializeWeaponDefs(
+            weaponDefHandler->GetWeaponDefsVec(), gameId,
+            &projTextureNames);
+        auto cegDefs = CegLoader::LoadAllCegDefs();
+        std::string cdSrc = L::SerializeCegDefs(cegDefs);
+
+        std::string fdSrc;
+        size_t fdDefCount = 0;
+        if (featureDefHandler != nullptr) {
+            const fs::path modelsDir = fs::path("data/games") / gameId / "models";
+            const auto& fdVec = featureDefHandler->GetFeatureDefsVec();
+            fdSrc = L::SerializeFeatureDefs(fdVec, gameId, modelsDir);
+            fdDefCount = fdVec.empty() ? 0 : fdVec.size() - 1;
+        } else {
+            fdSrc = "return{base_url=[[]],defs={}}";
+        }
+
+        defsCacheKey = DefsCache::ComputeContentKey(
+            gameId, gameVersion, CGameSetup::GetModOptions(),
+            udSrc, wdSrc, cdSrc, fdSrc);
+
+        // Skip re-baking (brotli + disk write) if the cache files already
+        // exist for this key. With a content-derived key the warm path is
+        // reached only when the emitted defs are byte-identical to a prior
+        // bake, so it can never serve stale def_ids. Under --no-cache we
+        // still force the cold path AND overwrite below.
         const fs::path dir = DefsCache::CacheDir(gameId, defsCacheKey);
         const bool warm = !CacheControl::IsNoCache()
                        && fs::exists(dir / "unitdefs.lua.br")
@@ -680,45 +810,6 @@ int main(int argc, char* argv[])
             SLOG(SPRING_LOG_NOTICE, "defs cache warm: gameId=%s key=%s",
                  gameId.c_str(), defsCacheKey.c_str());
         } else {
-            // Probe the game's gamedata/resources.lua for the set of
-            // projectile-texture names. The weapon-def baker uses this
-            // to choose between the primary and fallback name when
-            // applying Spring's per-weaponType defaults (e.g.
-            // `missileflaretexture` is preferred when defined,
-            // otherwise `flare`). With an empty set the baker still
-            // writes the primary; the client's resolver chases any
-            // remaining alias.
-            const std::string gameDir = "data/games/" + gameId;
-            const std::string engineBaseDir = "cont/base/springcontent";
-            const auto projTextureNames =
-                ResourcesParser::GetProjectileTextureNames(
-                    gameId, gameDir, engineBaseDir);
-
-            // Serialize each def category to Lua source, then brotli-
-            // compress. Output files end in `.lua.br` and are served
-            // with `Content-Encoding: br` so the browser decompresses
-            // transparently. See PLAN-defs.md for the rationale on
-            // Lua source vs FlatBuffer.
-            namespace L = LuaDefsSerializer;
-            std::string udSrc = L::SerializeUnitDefs(
-                unitDefHandler->GetUnitDefsVec(), gameId);
-            std::string wdSrc = L::SerializeWeaponDefs(
-                weaponDefHandler->GetWeaponDefsVec(), gameId,
-                &projTextureNames);
-            auto cegDefs = CegLoader::LoadAllCegDefs();
-            std::string cdSrc = L::SerializeCegDefs(cegDefs);
-
-            std::string fdSrc;
-            size_t fdDefCount = 0;
-            if (featureDefHandler != nullptr) {
-                const fs::path modelsDir = fs::path("data/games") / gameId / "models";
-                const auto& fdVec = featureDefHandler->GetFeatureDefsVec();
-                fdSrc = L::SerializeFeatureDefs(fdVec, gameId, modelsDir);
-                fdDefCount = fdVec.empty() ? 0 : fdVec.size() - 1;
-            } else {
-                fdSrc = "return{base_url=[[]],defs={}}";
-            }
-
             auto udBytes = L::CompressBrotli(udSrc);
             auto wdBytes = L::CompressBrotli(wdSrc);
             auto cdBytes = L::CompressBrotli(cdSrc);
@@ -815,7 +906,10 @@ int main(int argc, char* argv[])
             // allyTeam defaults to the team id until we grow a real
             // alliance concept — teams are their own ally for now.
             const int allyTeam = rq.team;
-            if (aiPool.AddAI(match->id, rq.team, allyTeam, code)) {
+            // Pass the plugin folder so the AI VM's plugin-scoped `require`
+            // (AI0-loader) can resolve sibling modules (a multi-file AI like
+            // strategos wires config/picture/slate/planner/... via require).
+            if (aiPool.AddAI(match->id, rq.team, allyTeam, code, match->folderPath)) {
                 SLOG(SPRING_LOG_NOTICE,
                     "loaded AI '%s' (%s) on team %d",
                     match->displayName.c_str(), match->id.c_str(), rq.team);
@@ -892,7 +986,10 @@ int main(int argc, char* argv[])
             nullptr, nullptr, nullptr);
     }
     // idleExitSeconds <= 0 → never idle-exit (treat like a persistent room).
-    const bool idleExitEnabled = idleExitSeconds > 0;
+    // Headless runs have no clients by construction — idle-exit would kill them
+    // right after the startup grace, so it is force-disabled; the run instead
+    // ends on its own stop conditions + the --max-wall-min ceiling.
+    const bool idleExitEnabled = idleExitSeconds > 0 && !headlessCfg.enabled;
     const int kStartupGraceSec = idleStartupGraceSeconds;  // wait for first client
     const int kIdleExitSec = idleExitSeconds;              // then exit after no clients
     if (!roomPersistent && idleExitEnabled)
@@ -925,28 +1022,113 @@ int main(int argc, char* argv[])
     // (The team-stats-history send cursor + win-check latch + State-tier lane
     // constants now live as StateStreamer members.)
 
-    while (keepRunning.load()) {
-        // Re-read wantedSpeedFactor every tick so live speed changes
-        // (via the `speed` exec verb) apply immediately.
-        tickInterval = computeTickInterval();
+    // Headless-run stop-condition latches (PLAN-headless task 1). Once the
+    // synced-Lua predicate has been observed true / errored it stays latched so
+    // the run stops even if a later poll would read differently. Unused unless
+    // headlessCfg.enabled.
+    bool headlessLuaMet = false;
+    bool headlessLuaErrored = false;
+    headless::StopReason headlessStopReason = headless::StopReason::None;
 
-        // Wait for next tick
-        auto now = std::chrono::steady_clock::now();
-        if (now < nextTick) {
-            std::this_thread::sleep_until(nextTick);
+    // Stats-dump snapshots (PLAN-headless task 2), taken every
+    // headlessCfg.stateHashEvery sim frames plus once more at termination.
+    // Unused unless headlessCfg.enabled && headlessCfg.stateHashEvery > 0.
+    std::vector<statsdump::Snapshot> headlessSnapshots;
+    auto captureHeadlessSnapshot = [&](int64_t wallSec) {
+        statsdump::Snapshot snap;
+        snap.frame = sim.GetFrameNum();
+        snap.gameSeconds = snap.frame / (double)GAME_SPEED;
+        snap.wallSeconds = wallSec;
+        snap.simFps = perfMetrics.GetSnapshot().simFps;
+        snap.rssKb = statsdump::GetRssKb();
+        snap.luaHeapKb = GetSyncedLuaHeapKb();
+
+        // Determinism digest: xor-fold every active unit's id/team/pos/health
+        // (stable engine-defined iteration order) plus the synced RNG state.
+        std::vector<statsdump::UnitDigest> digest;
+        digest.reserve(unitHandler.GetActiveUnits().size());
+        for (const CUnit* u : unitHandler.GetActiveUnits()) {
+            statsdump::UnitDigest d;
+            d.id = u->id;
+            d.team = static_cast<int16_t>(u->team);
+            d.x = u->pos.x; d.y = u->pos.y; d.z = u->pos.z;
+            d.health = u->health;
+            digest.push_back(d);
         }
-        nextTick += tickInterval;
+        snap.stateHash = statsdump::ComputeStateHash(digest, gsRNG.GetGenState());
 
-        // If we fell behind, skip ticks rather than accumulating
-        now = std::chrono::steady_clock::now();
-        if (now > nextTick + tickInterval) {
-            int skipped = 0;
-            while (nextTick + tickInterval < now) {
-                nextTick += tickInterval;
-                skipped++;
+        for (int t = 0; t < teamHandler.ActiveTeams(); ++t) {
+            const CTeam* team = teamHandler.Team(t);
+            const TeamStatistics& ts = team->GetCurrentStats();
+            statsdump::TeamSnapshot row;
+            row.teamId = t;
+            row.allyTeam = team->teamAllyteam;
+            row.dead = team->isDead;
+            row.numUnits = static_cast<int>(team->numUnits);
+            row.metal = team->res.metal;
+            row.energy = team->res.energy;
+            row.metalIncome = team->resIncome.metal;
+            row.energyIncome = team->resIncome.energy;
+            row.metalExpense = team->resExpense.metal;
+            row.energyExpense = team->resExpense.energy;
+            row.damageDealt = ts.damageDealt;
+            row.damageReceived = ts.damageReceived;
+            row.unitsProduced = ts.unitsProduced;
+            row.unitsDied = ts.unitsDied;
+            row.unitsKilled = ts.unitsKilled;
+            snap.teams.push_back(row);
+        }
+
+        for (const auto& [weaponDefId, totals] : combatStats.Snapshot()) {
+            statsdump::WeaponStats row;
+            row.weaponDefId = weaponDefId;
+            row.volleys = totals.volleys;
+            row.kills = totals.kills;
+            row.damage = totals.damage;
+            snap.weapons.push_back(row);
+        }
+
+        headlessSnapshots.push_back(std::move(snap));
+    };
+
+    while (keepRunning.load()) {
+        // --- Pacing ---
+        // Normal games (and headless realtime / xN) sleep to hit the target tick
+        // interval; headless "uncapped" skips wall-clock pacing entirely and
+        // ticks as fast as the sim computes (the sim thread is decoupled from
+        // any render). The `headlessUncapped` guard is the ONLY divergence on
+        // the normal path — with headless off it is always false, so behaviour
+        // is byte-identical (the tick-gate-off regression bar, PLAN-headless §6).
+        const bool headlessUncapped =
+            headlessCfg.enabled && headlessCfg.tickMode == headless::TickMode::Uncapped;
+        if (!headlessUncapped) {
+            // Re-read wantedSpeedFactor every tick so live speed changes (via the
+            // `speed` exec verb) apply immediately. A headless realtime/xN run
+            // paces from its run config instead — there is no client to send
+            // speed verbs.
+            tickInterval = headlessCfg.enabled
+                ? std::chrono::microseconds(headless::TickIntervalMicros(
+                      headlessCfg.tickMode, headlessCfg.tickMultiple, GAME_SPEED))
+                : computeTickInterval();
+
+            // Wait for next tick
+            auto now = std::chrono::steady_clock::now();
+            if (now < nextTick) {
+                std::this_thread::sleep_until(nextTick);
             }
-            if (skipped > 0) {
-                SLOG(SPRING_LOG_WARNING, "sim fell behind, skipped %d ticks", skipped);
+            nextTick += tickInterval;
+
+            // If we fell behind, skip ticks rather than accumulating
+            now = std::chrono::steady_clock::now();
+            if (now > nextTick + tickInterval) {
+                int skipped = 0;
+                while (nextTick + tickInterval < now) {
+                    nextTick += tickInterval;
+                    skipped++;
+                }
+                if (skipped > 0) {
+                    SLOG(SPRING_LOG_WARNING, "sim fell behind, skipped %d ticks", skipped);
+                }
             }
         }
 
@@ -1004,16 +1186,27 @@ int main(int argc, char* argv[])
                 auto* session = sessions.GetSession(dcId);
                 if (!session) continue;
 
+                // PLAN-quickstart.md §3.3: a PlayerLeaveIntent sent just before
+                // this disconnect (e.g. gpDetach) overrides the default reason
+                // 0 (voluntary quit) — lets PlayerRemoved distinguish a parked/
+                // reconnecting player from one who actually quit.
+                uint8_t leaveReason = 0;
+                auto lrIt = pendingLeaveReason.find(dcId);
+                if (lrIt != pendingLeaveReason.end()) {
+                    leaveReason = lrIt->second;
+                    pendingLeaveReason.erase(lrIt);
+                }
+
                 SLOG(SPRING_LOG_NOTICE,
-                    "player '%s' (client %u, team %d) disconnected",
-                    session->username.c_str(), dcId, session->team);
+                    "player '%s' (client %u, team %d) disconnected (reason=%d)",
+                    session->username.c_str(), dcId, session->team, leaveReason);
 
                 // Broadcast PlayerLeft to remaining clients
                 auto plMsg = Protocol::BuildPlayerLeft(
                     static_cast<uint32_t>(session->userId),
                     session->username,
                     static_cast<int8_t>(session->team),
-                    0 /* reason: voluntary quit */);
+                    leaveReason);
                 rtcServer.BroadcastReliable(plMsg.data(), plMsg.size());
 
                 // Fire the Spring PlayerRemoved callin into Lua so
@@ -1022,10 +1215,10 @@ int main(int argc, char* argv[])
                 auto pIt = clientPlayerNum.find(dcId);
                 if (pIt != clientPlayerNum.end()) {
                     int pNum = pIt->second;
-                    playerHandler.PlayerLeft(pNum, 0);
-                    eventHandler.PlayerRemoved(pNum, 0);
+                    playerHandler.PlayerLeft(pNum, leaveReason);
+                    eventHandler.PlayerRemoved(pNum, leaveReason);
                     // Forward to the client LuaUI worker (widget:PlayerRemoved).
-                    playerTeamEvents.Push({PlayerTeamEventData::PlayerRemoved, 0,
+                    playerTeamEvents.Push({PlayerTeamEventData::PlayerRemoved, leaveReason,
                                            static_cast<uint32_t>(pNum)});
                     clientPlayerNum.erase(pIt);
                 }
@@ -1096,6 +1289,77 @@ int main(int argc, char* argv[])
         if (frame > 0 && (frame % (GAME_SPEED * 10)) == 0) {
             SLOG(SPRING_LOG_INFO, "frame %d (%.1fs) clients=%d",
                 frame, frame / (float)GAME_SPEED, rtcServer.GetClientCount());
+        }
+
+        // --- Headless run: stop-condition evaluation (PLAN-headless task 1) ---
+        // Only reached under --headless-run, so a normal game never enters this
+        // block (regression bar). Evaluated after the tick + streamer, so the
+        // game-over relay and frame count reflect this frame. The synced-Lua
+        // predicate is polled every 30 game-seconds (§1) and its result latched.
+        if (headlessCfg.enabled) {
+            if (headlessCfg.stopAt.luaCondition && !headlessLuaMet &&
+                !headlessLuaErrored && frame > 0 &&
+                (frame % (GAME_SPEED * 30)) == 0) {
+                std::string perr;
+                const auto pr = EvalSyncedPredicate(
+                    *headlessCfg.stopAt.luaCondition, perr);
+                if (pr == SyncedPredicateResult::Error) {
+                    headlessLuaErrored = true;   // E3: treat as stop, never a hang
+                    SLOG(SPRING_LOG_ERROR, "headless luaCondition '%s' errored: %s",
+                        headlessCfg.stopAt.luaCondition->c_str(), perr.c_str());
+                } else if (pr == SyncedPredicateResult::True) {
+                    headlessLuaMet = true;
+                }
+            }
+
+            headless::RunState rs;
+            rs.frame = frame;
+            rs.gameOverDeclared = gameOverRelay.IsDeclared();
+            rs.luaConditionMet = headlessLuaMet;
+            rs.luaConditionErrored = headlessLuaErrored;
+            rs.wallElapsedSec = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - serverStartTime).count();
+
+            // Stats-dump snapshot cadence (task 2 §1 "stateHashEvery"). Frame 0
+            // is skipped — before GameStart there is nothing meaningful to hash.
+            if (headlessCfg.stateHashEvery > 0 && frame > 0 &&
+                (frame % headlessCfg.stateHashEvery) == 0) {
+                captureHeadlessSnapshot(rs.wallElapsedSec);
+            }
+
+            headlessStopReason = headless::EvaluateStop(
+                headlessCfg.stopAt, headlessCfg.maxWallSec, rs);
+            if (headlessStopReason != headless::StopReason::None) {
+                SLOG(SPRING_LOG_NOTICE,
+                    "headless run complete: stop=%s frame=%d (%.1fs) wall=%llds",
+                    headless::StopReasonName(headlessStopReason), frame,
+                    frame / (float)GAME_SPEED, (long long)rs.wallElapsedSec);
+                keepRunning.store(false);
+
+                // Final stats dump (task 2 §1 "JSON at termination"). Always
+                // takes one last snapshot regardless of stateHashEvery cadence,
+                // so the dump's terminal row matches the reported stop frame.
+                if (!headlessCfg.statsDump.empty()) {
+                    if (headlessCfg.stateHashEvery <= 0 ||
+                        (frame % headlessCfg.stateHashEvery) != 0) {
+                        captureHeadlessSnapshot(rs.wallElapsedSec);
+                    }
+                    statsdump::FinalDump dump;
+                    dump.status = headless::StopReasonName(headlessStopReason);
+                    dump.frame = frame;
+                    dump.gameSeconds = frame / (double)GAME_SPEED;
+                    dump.wallSeconds = rs.wallElapsedSec;
+                    dump.snapshots = headlessSnapshots;
+                    std::string dumpErr;
+                    if (!statsdump::WriteDumpFile(headlessCfg.statsDump, dump, dumpErr)) {
+                        SLOG(SPRING_LOG_ERROR, "headless stats dump write failed: %s",
+                            dumpErr.c_str());
+                    } else {
+                        SLOG(SPRING_LOG_NOTICE, "headless stats dump written: %s (%zu snapshots)",
+                            headlessCfg.statsDump.c_str(), headlessSnapshots.size());
+                    }
+                }
+            }
         }
     }
 

@@ -290,6 +290,40 @@ export class TestHarness {
         return this.deps.workerCall('uiProfileStop');
     }
 
+    /** PLAN-fx-offload X5 — per-def cost/skip counts for the legacy
+     *  per-frame entity-FX compatibility path (entity-fx-fence.ts), ranked
+     *  most-expensive-first like uiProfileDump(). Always-on (no start/stop
+     *  needed) — reports zero defs until some caller actually runs a
+     *  legacy per-def script through the fence. */
+    async entityFxFenceDump(): Promise<unknown> {
+        return this.deps.workerCall('entityFxFenceDump');
+    }
+
+    /** Clear the fence's per-def stats + frame count. */
+    entityFxFenceReset(): void {
+        void this.deps.workerCall('entityFxFenceReset');
+    }
+
+    /** PLAN-client-resilience.md task 5 — trigger one of task 1's detection
+     *  paths on demand, so the recovery ladder (task 2) and the telemetry
+     *  channel (task 3) have something reliable to exercise:
+     *    - `'throw'`      — an uncaught worker-global error (self.onerror)
+     *    - `'rejection'`  — an unhandled promise rejection
+     *    - `'wedge-loop'` — blocks the worker's event loop synchronously for
+     *      `opts.ms` (default 8000ms) — the heartbeat-watchdog's target;
+     *      nothing else in the worker runs until it clears on its own.
+     *    - `'context-loss'` — forces `WEBGL_lose_context`, optionally
+     *      restoring after `opts.restoreAfterMs` (default 500ms; 0 = stay lost)
+     *  Resolves once the worker has *triggered* the fault, not once any
+     *  ladder rung has run (there is no ladder yet — see the PLAN.md task 2
+     *  note). `wedge-loop` resolves only after the spin ends, by construction. */
+    async injectWorkerError(
+        kind: 'throw' | 'rejection' | 'wedge-loop' | 'context-loss',
+        opts: { ms?: number; restoreAfterMs?: number } = {},
+    ): Promise<unknown> {
+        return this.deps.workerCall('injectWorkerError', [kind, opts]);
+    }
+
     /** Named WAN presets. `lan` ≈ localhost; `wan` ≈ regional; `intercont`
      *  ≈ the L0 exit-gate condition (200 ms ± 40 ms jitter, 2 % loss). */
     netSimPreset(name: 'lan' | 'wan' | 'intercont'): void {
@@ -526,9 +560,11 @@ export class TestHarness {
         return await this.deps.workerCall('listClips', [unitId]) as string[] | null;
     }
 
-    /** Play one authored clip on the unit (loops by default; one playback
-     *  at a time). Returns the playback state. Throws when the clip is
-     *  unknown or the model hasn't loaded. */
+    /** Play one authored clip on the unit (loops by default). Playback is
+     *  per-unit, so this replaces only this unit's clip. Also pins the unit
+     *  to manual control — the movement-driven walk/idle policy leaves it
+     *  alone until stopClip. Throws when the clip is unknown or the model
+     *  hasn't loaded. */
     async playClip(
         unitId: number, clip: string,
         opts: { loop?: boolean; speed?: number } = {},
@@ -541,15 +577,17 @@ export class TestHarness {
         return r;
     }
 
-    /** Stop the current clip playback; the unit returns to rest pose /
-     *  server-streamed piece state. */
-    async stopClip(): Promise<void> {
-        await this.deps.workerCall('stopClip');
+    /** Stop clip playback and hand the unit back to the movement policy (so
+     *  a driving native resumes walking; a stationary one returns to rest
+     *  pose / server-streamed piece state). No unitId = every unit. */
+    async stopClip(unitId?: number): Promise<void> {
+        await this.deps.workerCall('stopClip', unitId === undefined ? [] : [unitId]);
     }
 
-    /** Current playback state, or null when nothing is playing. */
-    async clipState(): Promise<unknown> {
-        return this.deps.workerCall('clipState');
+    /** Playback state for a unit, or — with no unitId — for the most
+     *  recently started playback. null when nothing is playing. */
+    async clipState(unitId?: number): Promise<unknown> {
+        return this.deps.workerCall('clipState', unitId === undefined ? [] : [unitId]);
     }
 
     // ─── Render-loop pause + screenshots ────────────────────────────

@@ -84,6 +84,65 @@ inline std::string ComputeCacheKey(
     return std::string(buf, 16);
 }
 
+/// Content-aware cache key: XXH3 of the schema version + gameId + version +
+/// sorted modOptions + the ACTUAL serialized def payloads.
+///
+/// This supersedes ComputeCacheKey for the on-disk bake path. The old key
+/// hashed only gameId/version/modOptions, so it was content-blind: editing
+/// or adding a `units/*.lua` file (or dropping a `.gltf` into models/ so a
+/// def's model_url flips from "" to a URL) did NOT rotate the key. The
+/// client then kept fetching a frozen `unitdefs.lua.br` whose def_ids no
+/// longer matched the live server def_ids — every native model rendered as a
+/// fallback shape and, worse, the wrong def could resolve for a given id.
+///
+/// By hashing the emitted payloads themselves, ANY change to the defs the
+/// client will receive rotates the key and forces a fresh bake at a new URL,
+/// while identical defs reuse the same key (warm cache + browser cache hit).
+/// Post-processing (modOptions-driven) is captured automatically because it
+/// is already baked into the payload bytes.
+template<typename ModOptionsMap>
+inline std::string ComputeContentKey(
+    const std::string& gameId,
+    const std::string& gameVersion,
+    const ModOptionsMap& modOptions,
+    std::string_view unitDefSrc,
+    std::string_view weaponDefSrc,
+    std::string_view cegDefSrc,
+    std::string_view featureDefSrc)
+{
+    std::vector<std::pair<std::string, std::string>> sorted;
+    sorted.reserve(modOptions.size());
+    for (const auto& kv : modOptions)
+        sorted.emplace_back(kv.first, kv.second);
+    std::sort(sorted.begin(), sorted.end(),
+        [](const auto& a, const auto& b) { return a.first < b.first; });
+
+    XXH3_state_t* state = XXH3_createState();
+    XXH3_64bits_reset(state);
+    // Keep this schema tag byte-for-byte in sync with ComputeCacheKey's.
+    auto mix = [&](std::string_view s) {
+        XXH3_64bits_update(state, s.data(), s.size());
+        XXH3_64bits_update(state, "\n", 1);
+    };
+    mix("schemaV14-lua");
+    mix(gameId);
+    mix(gameVersion);
+    for (const auto& kv : sorted) { mix(kv.first); mix(kv.second); }
+    // The payloads. Length-tagless concatenation is safe here because each
+    // is a self-delimiting Lua table literal and we mix a separator between.
+    mix(unitDefSrc);
+    mix(weaponDefSrc);
+    mix(cegDefSrc);
+    mix(featureDefSrc);
+
+    const XXH64_hash_t h = XXH3_64bits_digest(state);
+    XXH3_freeState(state);
+    char buf[17];
+    std::snprintf(buf, sizeof(buf), "%016llx",
+                  static_cast<unsigned long long>(h));
+    return std::string(buf, 16);
+}
+
 /// Absolute (relative-to-cwd) path to the directory holding the bin files.
 std::string CacheDir(const std::string& gameId, const std::string& cacheKey);
 

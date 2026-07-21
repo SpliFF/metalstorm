@@ -1,0 +1,13 @@
+{
+  "map": "green_flat_x34_v3",
+  "game": "papertanks",
+  "aiSlots": [
+    { "aiId": "basic_ai", "team": 0, "startPos": 0 },
+    { "aiId": "basic_ai", "team": 1, "startPos": 1 }
+  ],
+  "headless": {
+    "tickMode": "uncapped",
+    "stopAt": { "frame": 9000 },
+    "stateHashEvery": 300
+  }
+}

@@ -9,9 +9,10 @@ JS-managed lifecycles, effects referenced by name).
 
 | File | Role |
 |---|---|
-| `library.json` | Named effect definitions → emitter configs (fx-offload **X3** source of truth). 27 effects covering every weapon family. |
+| `library.json` | Named effect definitions → emitter configs (fx-offload **X3** source of truth). 46 effects: every weapon family, plus unit deaths per class/scale, damage states, movement/ambient emitters, ricochet, and the Model-3 suppression field. |
 | `weapon-fx.json` | Weapon def → `{muzzle, projectile, trail, impact, fireSound, impactSound}`. The data analogue of `client/src/core/weapon-fx-dispatch.ts`. 30 weapons + type defaults + fallback. |
-| `bindings.example.json` | Per-unit binding template (fx-offload **§2** format) for `weapon_fired`/`killed`/loop-sound choreography. |
+| `unit-fx.json` | Unit def → `{death, damageSmoke, damageSmokeHeavy, burning, moveDust, contactPlant, wake, thruster, buildFx}` — the unit-side sibling of weapon-fx for effects no weapon owns. Resolution: exact `units[def]` → `scaleOverrides[class][scale]` → `byClass[class]` (class/scale from the `ms_<class>_s<n>` def convention). Bindings reference these as `slot:` names. |
+| `bindings.example.json` | Per-unit binding template (fx-offload **§2** format) for `weapon_fired`/`killed`/damage-state/loop-sound choreography, resolving unit slots via `slot:` refs. |
 
 Everything is validated: JSON parses, and every effect/sound name referenced in
 `weapon-fx.json` and `bindings.example.json` resolves to a real entry in
@@ -21,9 +22,15 @@ Everything is validated: JSON parses, and every effect/sound name referenced in
 
 Top level: `atlas` (one shared FX sprite sheet — `cols`/`rows`/named `frames`;
 registered in `gamedata/resources.lua`) and `effects` (the name → definition map).
-Each effect has a `usage` hint (`muzzle`/`projectile`/`trail`/`impact`) and either
-an `alias` (→ another effect) or an `emitters` list. Each emitter's `shader` picks
-one program in `../shaders/fx/`, and its fields become per-instance rows.
+Each effect has a `usage` hint and either an `alias` (→ another effect) or an
+`emitters` list. Each emitter's `shader` picks one program in `../shaders/fx/`,
+and its fields become per-instance rows.
+
+`usage` values: `muzzle`/`projectile`/`trail`/`impact` are the weapon-fx slots;
+`death` marks unit-death effects (unit-fx `death` slot; fx-viewer shows them in
+impact mode); `attached` marks binding-driven continuous emitters — damage
+smoke, dust trails, wakes, thruster/burning loops — retriggered by the binding
+interpreter rather than fired by a weapon (fx-viewer shows them in loop mode).
 
 **particle emitter fields** (→ `particle.vert/frag.glsl`):
 
@@ -36,7 +43,8 @@ one program in `../shaders/fx/`, and its fields become per-instance rows.
 | `life` | `[min,max]` seconds → `lifetime` |
 | `size` | `[start,end]` elmos → `iSize.xy` |
 | `speed` | `[min,max]` initial radial speed; `0` = static |
-| `spread` | emission shape: `"sphere"`, `"hemisphere"`, `"disc"`, `"cone:<deg>"` |
+| `spread` | emission shape: `"sphere"`, `"hemisphere"`, `"disc"`, `"cone:<deg>"` — scatters velocity DIRECTION |
+| `posSpread` | spawn-POSITION scatter (elmos): number = sphere radius, `[rx,ry,rz]` = box half-extents. Area effects (building collapse, dreadnought hull ripple, suppression fields); free — `iPosLife` is already per-instance |
 | `gravity` | elmo/s² → `iSize.z` (negative = buoyant smoke rise) |
 | `stretch` | length/width for `stretch` orient → `iSize.w` |
 | `rot` | `[base,speed]` → `iRot.xy` (optional) |

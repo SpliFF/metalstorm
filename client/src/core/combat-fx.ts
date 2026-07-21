@@ -19,7 +19,7 @@ import {
     Color3,
     Vector3,
 } from '@babylonjs/core';
-import type { CombatEventInfo, ProjectileImpactInfo } from './connection.js';
+import type { CombatEventInfo, ProjectileImpactInfo, VolleyOutcomeInfo, DamageFieldEventInfo } from './connection.js';
 import { AudioManager } from './audio.js';
 import type { CegRuntime } from './ceg-runtime.js';
 import type { DefCache } from './def-cache.js';
@@ -35,6 +35,22 @@ interface ActiveEffect {
     mesh: Mesh;
     lifetime: number;    // seconds remaining
     velocity?: Vector3;  // for moving effects (tracers)
+    noFade?: boolean;    // skip the uniform scale-fade (stretched tracers, markers)
+}
+
+/// Optional attacker-position resolver passed to onVolleyOutcome so the
+/// client can invent tracers from the (visible) firing unit. Returns null
+/// when the attacker id is unknown/hidden.
+export type PositionResolver = (entityId: number) => { x: number; y: number; z: number } | null;
+
+/// A live damage-field barrage the client is rendering procedurally (Model 3,
+/// C6). The server streams only Created/Removed lifecycle events; this holds
+/// the between-pulse timer + remaining lifetime so tick() can invent shell
+/// impacts at the field's cadence without any per-shell wire traffic.
+interface ActiveBarrage {
+    field: DamageFieldEventInfo;
+    pulseTimer: number;   // seconds until the next barrage pulse
+    remaining: number;    // seconds of lifetime left (from duration)
 }
 
 export class CombatFX {
@@ -44,6 +60,8 @@ export class CombatFX {
     private defCache: DefCache | null;
     private distortion: DistortionRenderer | null = null;
     private effects: ActiveEffect[] = [];
+    /// Active damage-field barrages keyed by server field id.
+    private barrages = new Map<number, ActiveBarrage>();
 
     // Procedural fallback materials. Used only when CEG dispatch
     // can't resolve a name for the weapon def — keeps something on
@@ -52,6 +70,7 @@ export class CombatFX {
     private killMat: StandardMaterial;
     private shieldMat: StandardMaterial;
     private dirtMat: StandardMaterial;
+    private tracerMat: StandardMaterial;
 
     /// One-shot warning state per weapon def so a single missing CEG
     /// doesn't flood the console every frame the weapon fires.
@@ -84,6 +103,12 @@ export class CombatFX {
         this.dirtMat = new StandardMaterial('dirtFxMat', scene);
         this.dirtMat.diffuseColor = new Color3(0.45, 0.35, 0.25);
         this.dirtMat.emissiveColor = new Color3(0.0, 0.0, 0.0);
+
+        // Statistical-combat invented tracer (no projectile exists to render).
+        this.tracerMat = new StandardMaterial('tracerFxMat', scene);
+        this.tracerMat.diffuseColor = new Color3(1.0, 0.85, 0.3);
+        this.tracerMat.emissiveColor = new Color3(1.0, 0.8, 0.2);
+        this.tracerMat.disableLighting = true;
     }
 
     /// Set / replace the CEG runtime reference. Used when the runtime
@@ -175,6 +200,163 @@ export class CombatFX {
         }
     }
 
+    /**
+     * Process statistical-combat per-volley outcomes (Metalstorm Model 1).
+     * These carry NO projectile — the client invents everything: `rounds`
+     * cosmetic tracers from the (visible) attacker toward the impact, plus an
+     * impact burst at `target_pos`. Result is visibility-filtered server-side:
+     *   0 = Hit     -> full impact CEG scaled by damage + distortion shockwave
+     *   1 = Miss    -> a light dirt puff (a shot landed nearby, no damage)
+     *   2 = Unknown -> a light dirt puff only (no hit/miss result is leaked)
+     * `getPos` resolves the attacker's world position for tracer origins; when
+     * it returns null (attacker hidden), only the impact FX is shown.
+     */
+    onVolleyOutcome(events: VolleyOutcomeInfo[], getPos?: PositionResolver): void {
+        for (const e of events) {
+            const isHit = e.result === 0;
+
+            // Invent tracers from the firing unit (only if it's visible to us).
+            const src = (e.attackerId && getPos) ? getPos(e.attackerId) : null;
+            if (src) {
+                const n = Math.min(Math.max(e.rounds, 1), 8);
+                for (let k = 0; k < n; k++)
+                    this.spawnTracer(src, e.x, e.y, e.z);
+            }
+
+            if (isHit) {
+                if (!this.spawnCegImpact(ImpactKind.Unit, e.weaponDefId,
+                    e.x, e.y, e.z, true, e.damage)) {
+                    this.spawnFallbackImpact(e.x, e.y, e.z, e.damage);
+                }
+                const r = Math.min(40 + e.damage * 0.3, 120);
+                this.distortion?.emitShockwave(e.x, e.y, e.z, r);
+            } else {
+                // Miss or Unknown — no result leak, just a dirt puff at impact.
+                this.spawnFallbackDust(e.x, e.y, e.z);
+            }
+        }
+    }
+
+    /**
+     * Damage-field lifecycle events (Metalstorm Model 3 area bombardment, C6).
+     * The server owns all damage and streams only Created/Removed events; the
+     * client invents the barrage entirely — periodic shell impacts scattered
+     * across the field area at the field's cadence, for its duration. A
+     * `Created` starts a barrage; `Removed` (or the duration running out)
+     * stops it. No per-shell wire traffic exists (§5 sim/client split).
+     */
+    onDamageFields(events: DamageFieldEventInfo[]): void {
+        for (const e of events) {
+            if (e.kind === 1) {              // Removed
+                this.barrages.delete(e.fieldId);
+                continue;
+            }
+            // Created (or a refresh) — (re)start the barrage. First pulse fires
+            // one cadence in, matching the sim's first damage tick.
+            const cadenceSec = Math.max(e.cadence, 1) / 30;
+            this.barrages.set(e.fieldId, {
+                field: e,
+                pulseTimer: cadenceSec,
+                remaining: Math.max(e.duration, 0) / 30,
+            });
+        }
+    }
+
+    /// Advance every active barrage: fire a pulse each cadence, expire when
+    /// the duration runs out. Called from tick() each frame.
+    private tickBarrages(dt: number): void {
+        if (this.barrages.size === 0) return;
+        for (const [id, b] of this.barrages) {
+            b.remaining -= dt;
+            if (b.remaining <= 0) {
+                this.barrages.delete(id);
+                continue;
+            }
+            b.pulseTimer -= dt;
+            if (b.pulseTimer <= 0) {
+                const cadenceSec = Math.max(b.field.cadence, 1) / 30;
+                b.pulseTimer += cadenceSec;
+                this.spawnBarragePulse(b.field);
+            }
+        }
+    }
+
+    /// One barrage pulse: a handful of shell impacts scattered across the
+    /// field area, each preceded by a short descending streak for the arc.
+    /// Impact count scales weakly with intensity so a heavier field looks
+    /// busier, capped so a large field can't flood the FX pool.
+    private spawnBarragePulse(f: DamageFieldEventInfo): void {
+        const shells = Math.min(Math.max(1, Math.round(f.intensity / 40)), 5);
+        for (let s = 0; s < shells; s++) {
+            // Random point inside the shape (circle: rejection-free polar;
+            // rect: uniform in each half-extent).
+            let ox: number, oz: number;
+            if (f.shape === 1) {
+                ox = (Math.random() * 2 - 1) * f.radius;
+                oz = (Math.random() * 2 - 1) * f.halfZ;
+            } else {
+                const ang = Math.random() * Math.PI * 2;
+                const r = Math.sqrt(Math.random()) * f.radius;
+                ox = Math.cos(ang) * r;
+                oz = Math.sin(ang) * r;
+            }
+            const x = f.x + ox, y = f.y, z = f.z + oz;
+            // Descending shell streak (the "arc"): a thin box falling into the
+            // impact point. Cheap; disposed by the lifetime sweep in tick.
+            this.spawnBarrageShell(x, y, z);
+            // Impact: weapon CEG if the field has a weapon def, else dust.
+            if (!f.weaponDefId || !this.spawnCegImpact(
+                ImpactKind.Terrain, f.weaponDefId, x, y, z, true, f.intensity)) {
+                this.spawnFallbackDust(x, y, z);
+            }
+        }
+    }
+
+    /// A short emissive box descending toward (x,y,z) — the incoming shell
+    /// for a barrage impact. noFade so the stretched geometry isn't shrunk.
+    private spawnBarrageShell(x: number, y: number, z: number): void {
+        const mesh = MeshBuilder.CreateBox(
+            'barrageShell', { width: 0.9, height: 14, depth: 0.9 }, this.scene);
+        mesh.position.set(x, y + 40, z);
+        mesh.material = this.tracerMat;
+        this.effects.push({
+            mesh, lifetime: 0.18, noFade: true,
+            velocity: new Vector3(0, -220, 0),
+        });
+    }
+
+    /// One invented tracer streak: a thin emissive box from the firer's
+    /// muzzle to a lightly-scattered point near the impact. Uses noFade so
+    /// the stretched geometry isn't shrunk by the uniform scale-fade in tick.
+    private spawnTracer(
+        src: { x: number; y: number; z: number },
+        tx: number, ty: number, tz: number,
+    ): void {
+        const from = new Vector3(src.x, src.y + 8, src.z);
+        const jitter = 6;
+        const to = new Vector3(
+            tx + (Math.random() * 2 - 1) * jitter, ty + 6,
+            tz + (Math.random() * 2 - 1) * jitter);
+        const len = Vector3.Distance(from, to);
+        if (len < 1) return;
+        const mesh = MeshBuilder.CreateBox(
+            'volleyTracer', { width: 0.7, height: 0.7, depth: len }, this.scene);
+        mesh.position.copyFrom(from).addInPlace(to).scaleInPlace(0.5);
+        mesh.lookAt(to);
+        mesh.material = this.tracerMat;
+        this.effects.push({ mesh, lifetime: 0.12, noFade: true });
+    }
+
+    /// Small dirt puff for a statistical miss / unknown outcome — visible
+    /// feedback that a volley landed here without revealing the result.
+    private spawnFallbackDust(x: number, y: number, z: number): void {
+        const mesh = MeshBuilder.CreateSphere(
+            'volleyDust', { diameter: 5, segments: 4 }, this.scene);
+        mesh.position.set(x, y + 1.5, z);
+        mesh.material = this.dirtMat;
+        this.effects.push({ mesh, lifetime: 0.2 });
+    }
+
     /// Resolve the weapon-def CEG and spawn through the runtime.
     /// Returns true if a CEG was dispatched, false if the caller
     /// should fall back to a procedural mesh.
@@ -243,6 +425,8 @@ export class CombatFX {
      * @param dt Delta time in seconds
      */
     tick(dt: number): void {
+        // Advance procedural damage-field barrages (spawns their impacts).
+        this.tickBarrages(dt);
         for (let i = this.effects.length - 1; i >= 0; i--) {
             const fx = this.effects[i];
             fx.lifetime -= dt;
@@ -253,10 +437,12 @@ export class CombatFX {
                 continue;
             }
 
-            // Fade out by scaling down
-            const t = Math.max(fx.lifetime * 4, 0); // 0.25s → scale 0..1
-            const scale = Math.min(t, 1);
-            fx.mesh.scaling.setAll(scale);
+            // Fade out by scaling down (skipped for stretched tracers/markers).
+            if (!fx.noFade) {
+                const t = Math.max(fx.lifetime * 4, 0); // 0.25s → scale 0..1
+                const scale = Math.min(t, 1);
+                fx.mesh.scaling.setAll(scale);
+            }
 
             // Move if it has velocity
             if (fx.velocity) {
@@ -269,6 +455,19 @@ export class CombatFX {
         return this.effects.length;
     }
 
+    /// PLAN-quickstart.md §3.2 (Part B — resync): drop every in-flight combat
+    /// effect so the parked session's explosions/tracers don't hang on screen
+    /// after re-entry, while KEEPING the procedural fallback materials (they are
+    /// session-agnostic and expensive to recreate). Distinct from `dispose()`,
+    /// which also tears down those materials.
+    reset(): void {
+        for (const fx of this.effects) {
+            fx.mesh.dispose();
+        }
+        this.effects = [];
+        this.warnedFallback.clear();
+    }
+
     dispose(): void {
         for (const fx of this.effects) {
             fx.mesh.dispose();
@@ -278,5 +477,6 @@ export class CombatFX {
         this.killMat.dispose();
         this.shieldMat.dispose();
         this.dirtMat.dispose();
+        this.tracerMat.dispose();
     }
 }

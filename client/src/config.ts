@@ -18,6 +18,15 @@ export const CONFIG = {
     httpUrl: `http://${host}:${gamePort}`,
     /** Build stamp from the server — used for cache-busting asset URLs. */
     buildStamp: 'dev',
+    /**
+     * PLAN-client-resilience.md task 3: server-operator opt-out for the
+     * `/api/client-errors` report channel (spring-lobby
+     * `--disable-client-error-reports`). Defaults true (fail-open) until
+     * /api/version answers — matches the courtesy default ("default on for
+     * the official beta, off in the sample config" is a server-side choice,
+     * surfaced here, not a client default).
+     */
+    errorReportingEnabled: true,
 };
 
 /**
@@ -31,6 +40,7 @@ export async function fetchBuildStamp(): Promise<void> {
         if (resp.ok) {
             const data = await resp.json();
             if (data.stamp) CONFIG.buildStamp = data.stamp;
+            if (data.errorReportingEnabled === false) CONFIG.errorReportingEnabled = false;
         }
     } catch {
         // Server may not support /api/version yet — keep default

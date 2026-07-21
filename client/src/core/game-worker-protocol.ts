@@ -18,7 +18,8 @@
  */
 
 import type { RmlOpsToMain, RmlEventToWorker, RmlResizeToWorker } from '../ui/rml/rml-protocol.js';
-import type { ResourceUpdateInfo } from './connection.js';
+import type { ResourceUpdateInfo, OrgGroupInfoMsg, DirectiveInfoMsg } from './connection.js';
+import type { PresentationClockStats } from './presentation-clock.js';
 
 // ─── main → worker ──────────────────────────────────────────────────────────
 
@@ -83,6 +84,14 @@ export interface GpInitToWorker {
      * the documented P1 "richer roster restream". See PLAN-bar.md UI-2.
      */
     players?: { id: number; name: string; team: number; spectator: boolean }[];
+    /**
+     * PLAN-client-resilience.md task 3: server-operator opt-out for the
+     * `/api/client-errors` report channel (spring-lobby `--disable-client-
+     * error-reports`, surfaced via `/api/version`). Absent/true ⇒ enabled —
+     * the courtesy default is off only in a self-hosted "sample config"
+     * deployment that explicitly disables it.
+     */
+    errorReportingEnabled?: boolean;
 }
 
 /**
@@ -169,6 +178,153 @@ export interface GpCancelCommandModeToWorker {
     type: 'gp:cancelCommandMode';
 }
 
+/**
+ * PLAN-client-resilience.md task 1: heartbeat watchdog probe. Main posts one
+ * every 2s (HeartbeatWatchdog, main.ts); the worker replies `gp:pong` with the
+ * same `id` from the very top of its message dispatcher (game-processor.ts is
+ * not on the fast path — a wedged Fengari loop or a stalled render loop must
+ * not stop the pong). A blocked worker event loop simply never processes this
+ * message at all, which is exactly the "wedged" signal the watchdog looks for
+ * — no payload beyond the id is needed.
+ */
+export interface GpPingToWorker {
+    type: 'gp:ping';
+    id: number;
+}
+
+/**
+ * PLAN-quickstart.md §3.1 (Part B — detach): park the game session without
+ * tearing the worker down. The worker closes its game connection (a clean
+ * PlayerRemoved with a `detach` reason), pauses the render loop and stops the
+ * viewport pump — engine, scene, models, DefCache and JS UI state all stay
+ * alive. Re-entry is a `gp:resync`, not a fresh `gp:init`. No payload: the
+ * worker already holds the connect creds captured at `gp:init`.
+ */
+export interface GpDetachToWorker {
+    type: 'gp:detach';
+}
+
+/**
+ * PLAN-quickstart.md §3.2 (Part B — resync): re-enter a parked session. The
+ * worker flushes *dynamic* renderer state (entity/projectile/combat-FX/
+ * interpolator), keeps *static* state (terrain, models, DefCache, lighting, UI),
+ * re-opens the game connection with its captured creds (a fresh server-side
+ * ClientSession re-streams a full snapshot + defs; DefCache no-ops the dups) and
+ * un-pauses the render loop. Optionally carries a refreshed token in case the
+ * original has aged past the parked TTL.
+ */
+export interface GpResyncToWorker {
+    type: 'gp:resync';
+    /** Refreshed game-server auth token; falls back to the gp:init token. */
+    token?: string;
+}
+
+/**
+ * PLAN-client-resilience.md task 2 (R1 soft rung): main asks the worker for an
+ * in-place soft reset — Babylon `wipeCaches` + transient FX-pool flush + a
+ * fresh-snapshot resync — instead of a full respawn. The worker replies
+ * `gp:recovered` with the same `id`. Driven by the RecoveryLadder's `softReset`
+ * dep when a lost WebGL context restores; a non-ack (worker too wedged to
+ * answer within the round-trip timeout) escalates the ladder to R2.
+ */
+export interface GpRecoverToWorker {
+    type: 'gp:recover';
+    id: number;
+}
+
+// ─── Macro command & control (PLAN-macro-orders / PLAN-macro-directives) ──
+//
+// The Connection (and therefore the wire) lives in the worker; the org
+// panel (PLAN-macro-ui.md §3) is DOM/main. These cross the boundary the same
+// way gp:startBuildPlacement/gp:removeFactoryOrder do for the build menu.
+
+/** Org panel "New Platoon" — create a group from a set of squad ids
+ *  (typically the current world selection). */
+export interface GpOrgGroupCreateToWorker {
+    type: 'gp:orgGroupCreate';
+    name: string;
+    memberIds: number[];
+}
+
+/** Org panel roster/name edit (rename, add/remove members). */
+export interface GpOrgGroupUpdateToWorker {
+    type: 'gp:orgGroupUpdate';
+    groupId: number;
+    addIds: number[];
+    removeIds: number[];
+    name?: string;
+}
+
+/** Org panel disband button. */
+export interface GpOrgGroupDisbandToWorker {
+    type: 'gp:orgGroupDisband';
+    groupId: number;
+}
+
+/** Org panel posture-chip edit. */
+export interface GpGroupPostureToWorker {
+    type: 'gp:groupPosture';
+    groupId: number;
+    postureJson: string;
+}
+
+/** Org panel directive pause/resume/priority-bump (resend with the same
+ *  `directiveId`) or cancel (`gp:groupDirectiveRemove`). Pause/resume reuses
+ *  the full landed `GroupDirective` shape (the panel echoes the `DirectiveInfo`
+ *  it already has, flipping only `active`). */
+export interface GpGroupDirectiveUpdateToWorker {
+    type: 'gp:groupDirectiveUpdate';
+    directiveId: number;
+    groupId: number;
+    directiveType: number;
+    shape: number;
+    params: number[];
+    priority: number;
+    requestedStrength: number;
+    active: boolean;
+}
+
+export interface GpGroupDirectiveRemoveToWorker {
+    type: 'gp:groupDirectiveRemove';
+    directiveId: number;
+}
+
+/** Select an org group's roster (org panel row click → world selection, so
+ *  the group highlights and its cmd-descs stream — PLAN-macro-ui.md §1). */
+export interface GpSelectOrgGroupToWorker {
+    type: 'gp:selectOrgGroup';
+    groupId: number;
+}
+
+/**
+ * Arm the shared `ShapeGestureCapture`/`DirectiveShapeCapture` for a
+ * click/paint gesture (PLAN-macro-ui.md §2). This is the cross-thread arm
+ * surface metalstorm-scripting task 4 (map-arm integration) reuses — a
+ * native JS widget (org panel's "paint directive" button, or a scripting
+ * command-composer target-slot) arms the SAME worker-side capture instance
+ * a directive hotkey would, rather than reimplementing gesture capture.
+ */
+export interface GpArmDirectiveShapeToWorker {
+    type: 'gp:armDirectiveShape';
+    directiveType: number;
+    groupId: number;
+    shape: 'Point' | 'Circle' | 'Polygon' | 'Polyline';
+    priority?: number;
+    requestedStrength?: number;
+    /** Polyline only: freehand-drag capture instead of click-chained
+     *  vertices (PLAN-macro-ui.md §7 — both are supported). */
+    freehand?: boolean;
+    /** Polyline only: the 2-vertex "arrow" convenience (drag start→end,
+     *  wheel sets frontage) instead of a general click-chained front line. */
+    arrow?: boolean;
+}
+
+/** Cancel an in-progress `gp:armDirectiveShape` capture (ESC on main, or the
+ *  arming widget itself backing out). Safe when nothing is armed. */
+export interface GpCancelDirectiveShapeToWorker {
+    type: 'gp:cancelDirectiveShape';
+}
+
 export type GpMessageToWorker =
     | GpInitToWorker
     | GpInputToWorker
@@ -178,6 +334,19 @@ export type GpMessageToWorker =
     | GpCancelBuildPlacementToWorker
     | GpRemoveFactoryOrderToWorker
     | GpCancelCommandModeToWorker
+    | GpPingToWorker
+    | GpDetachToWorker
+    | GpResyncToWorker
+    | GpRecoverToWorker
+    | GpOrgGroupCreateToWorker
+    | GpOrgGroupUpdateToWorker
+    | GpOrgGroupDisbandToWorker
+    | GpGroupPostureToWorker
+    | GpGroupDirectiveUpdateToWorker
+    | GpGroupDirectiveRemoveToWorker
+    | GpSelectOrgGroupToWorker
+    | GpArmDirectiveShapeToWorker
+    | GpCancelDirectiveShapeToWorker
     // PLAN-rml.md: DOM events + viewport changes routed back to the worker-side
     // RmlUi proxy (rml-bridge.ts) for Lua listener dispatch / dp-ratio recompute.
     | RmlEventToWorker
@@ -242,6 +411,22 @@ export interface GpSelectedUnit {
  * the *only* channel the DOM layer reads world facts from — freeze the payload.
  * Camera pose drives the main-thread audio listener + minimap.
  */
+/**
+ * L0 timing telemetry for the main-thread TimingOverlay (F10). The
+ * PresentationClock lives in the worker (it is fed by the in-worker
+ * connection and ticked by the render loop), so main can only observe it
+ * through a snapshot — this is that snapshot: the clock's own stats plus the
+ * arrival-deviation samples the overlay's histogram bins and the active
+ * netSim condition. Absent until the worker's clock exists.
+ * PLAN-latency-impl.md L-pre.3.
+ */
+export interface GpTimingState extends PresentationClockStats {
+    /** Recent signed snapshot-arrival deviations, ms (histogram input). */
+    arrivalDeviations: number[];
+    /** Active artificial-latency injection (window.test.netSim*). */
+    netSim: { enabled: boolean; delayMs: number; jitterMs: number; lossProb: number };
+}
+
 export interface GpSceneStateToMain {
     type: 'gp:sceneState';
     /** Source view (multi-view, PLAN-game-worker.md). Absent ⇒ view 0. */
@@ -276,6 +461,9 @@ export interface GpSceneStateToMain {
      *  array (not absent) clears the panel when the factory's queue empties
      *  or the selection no longer includes an own-team factory. */
     factoryQueue?: FactoryQueueTile[];
+    /** L0 presentation-clock telemetry for the F10 overlay (PLAN-latency-impl.md
+     *  L-pre.3); absent before the worker's clock is created. */
+    timing?: GpTimingState;
 }
 
 /**
@@ -395,7 +583,65 @@ export type GpMessageToMain =
     | { type: 'gp:authenticated'; playerId: number; team: number }
     /** Server restart detected — main reloads. */
     | { type: 'gp:reload' }
+    /** Metalstorm counterbattery reveal (Q-D-c): a statistical volley from an
+     *  attacker the local team can't see → a red "attack" radar blip at the
+     *  firing position (x,z world elmos) on the main-thread minimap. */
+    | { type: 'gp:counterbatteryPing'; x: number; z: number }
     /** Reply to a gp:test request from the main test harness. */
     | { type: 'gp:testResult'; id: number; ok: boolean; value?: unknown; error?: string }
+    /** Reply to a `gp:ping` heartbeat probe (PLAN-client-resilience.md task 1). */
+    | { type: 'gp:pong'; id: number }
+    /**
+     * WebGL context loss / restore on the worker's OffscreenCanvas
+     * (PLAN-client-resilience.md task 1 detection). Babylon's render loop
+     * already no-ops while the context is lost; this is purely a visibility
+     * signal for the main-thread console/telemetry today — no recovery is
+     * wired to it yet.
+     * EXTENSION POINT (task 2, the R1/R2/R3 recovery ladder): `lost` is R1's
+     * trigger ("context-restored, single recoverable fatal in a subsystem
+     * with a reset path") — the ladder should listen here instead of adding
+     * a second Babylon observable.
+     */
+    | { type: 'gp:contextLost' }
+    | { type: 'gp:contextRestored' }
+    /**
+     * PLAN-client-resilience.md task 2: the worker's self.onerror /
+     * unhandledrejection hook fired (a genuinely-uncaught worker error — the
+     * render loop or a bare async, NOT a pcall-contained widget callin). Main's
+     * RecoveryLadder takes R2 (respawn) on this; `injected` tags task 5's
+     * fault-injection verbs so a synthetic failure doesn't drive a real
+     * recovery in a way that's indistinguishable on the dashboard. This is the
+     * reliable cross-boundary signal for E2 (an async loader crash raises
+     * `unhandledrejection`, which — unlike an uncaught throw — never propagates
+     * to the main-thread `gameWorker.onerror`). */
+    | { type: 'gp:workerFatal'; reason: string; injected: boolean }
+    /** PLAN-client-resilience.md task 2: reply to a `gp:recover` (R1 soft
+     *  reset). `ok:false` (or no reply within the ladder's round-trip timeout)
+     *  escalates to R2. */
+    | { type: 'gp:recovered'; id: number; ok: boolean }
+    /** PLAN-quickstart.md §3.1: the worker acks a `gp:detach` — the game
+     *  connection is closed, render + viewport pump paused, worker parked. */
+    | { type: 'gp:detached' }
+    /** PLAN-quickstart.md §3.2: the worker acks a `gp:resync` — dynamic state
+     *  flushed and reconnect started (a `gp:authenticated` follows once the
+     *  fresh ClientSession completes its handshake). */
+    | { type: 'gp:resynced' }
+    /**
+     * Org-group snapshot for the native org-panel widget (PLAN-macro-ui.md
+     * §3). Forwarded verbatim on every `Connection.onOrgGroupState` push
+     * (own team only — same forwarding pattern as `gp:sceneState.economy`,
+     * change-driven not per-tick).
+     */
+    | { type: 'gp:orgGroups'; groups: OrgGroupInfoMsg[] }
+    /** Directive snapshot for the org panel (fulfillment %, directive
+     *  icons) — own team + allies, mirrors `onDirectiveState`. */
+    | { type: 'gp:directives'; directives: DirectiveInfoMsg[] }
+    /** A `gp:armDirectiveShape` request armed (or failed to arm) — lets the
+     *  requesting main-thread widget show an "drawing…" affordance and know
+     *  when to re-enable its own UI. */
+    | { type: 'gp:directiveShapeArmed'; armed: boolean }
+    /** The armed capture finished — committed (a `GroupDirective` was sent;
+     *  the real id arrives via the next `gp:directives` push) or cancelled. */
+    | { type: 'gp:directiveShapeResult'; committed: boolean }
     /** PLAN-rml.md: a batch of RML DOM ops for the main-thread overlay manager. */
     | RmlOpsToMain;

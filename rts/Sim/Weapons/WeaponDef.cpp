@@ -549,6 +549,11 @@ WeaponDef::WeaponDef(const LuaTable& wdTable, const std::string& name_, int id_)
 	// custom parameters table
 	wdTable.SubTable("customParams").GetMap(customParams);
 
+	// Statistical combat resolution (opt-in; PLAN-metalstorm-combat-resolution).
+	// Parsed once here so the fire path reads cached fields, never string maps.
+	resolution = StatCombat::ParseResolution(customParams);
+	statTuning = StatCombat::ParseTuning(customParams);
+
 	// internal only
 	isNulled = (STRCASECMP(name.c_str(), "noweapon") == 0);
 	isShield = (type == "Shield");

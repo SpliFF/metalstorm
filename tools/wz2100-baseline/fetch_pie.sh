@@ -5,8 +5,10 @@
 #
 # WZ2100 source + artwork are GPL-2.0-or-later (project relicensing, 2008). The
 # .pie parts are checked into tools/wz2100-baseline/pie/ already (they are tiny
-# and GPL requires the source stay available); this script just re-fetches them
-# from a pinned upstream ref so the provenance is reproducible.
+# and GPL requires the source stay available); this script re-fetches them from
+# upstream. Pass a tag/commit for BOTH repos to make the fetch reproducible —
+# with no arguments it tracks `master`, which is NOT pinned and may drift from
+# the checked-in copies (a loud warning is printed in that case).
 #
 # The texture pages the .pie parts reference live in a *separate* upstream
 # submodule repo (Warzone2100/data-texpages), so they get their own base URL.
@@ -14,8 +16,14 @@
 # into tools/wz2100-baseline/texpages/ for the importer + toktx step.
 set -euo pipefail
 
-REF="${1:-master}"      # pin a tag/commit for the engine repo (.pie parts)
-TEXREF="${2:-master}"   # pin a tag/commit for the data-texpages submodule repo
+REF="${1:-master}"      # engine repo ref (.pie parts) — pass a tag/commit to pin
+TEXREF="${2:-master}"   # data-texpages repo ref — pass a tag/commit to pin
+if [[ "$REF" == "master" || "$TEXREF" == "master" ]]; then
+  echo "WARNING: fetching from an unpinned ref (REF=${REF} TEXREF=${TEXREF})." >&2
+  echo "         upstream 'master' moves — this run is NOT reproducible and may" >&2
+  echo "         not match the checked-in pie/ + texpages/ copies." >&2
+  echo "         Pin both: $0 <engine-tag-or-commit> <texpages-tag-or-commit>" >&2
+fi
 BASE="https://raw.githubusercontent.com/Warzone2100/warzone2100/${REF}/data/base"
 TEXBASE="https://raw.githubusercontent.com/Warzone2100/data-texpages/${TEXREF}"
 DEST="$(cd "$(dirname "$0")" && pwd)/pie"

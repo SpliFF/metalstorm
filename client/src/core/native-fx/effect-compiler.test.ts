@@ -8,6 +8,8 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import * as fs from 'fs';
+import * as path from 'path';
 import {
     MUZZLE_FLOATS,
     PARTICLE_FLOATS,
@@ -15,12 +17,14 @@ import {
     TRACER_FLOATS,
     TRAIL_FLOATS,
     compileEffect,
+    compileEmitter,
     defaultModeForUsage,
     effectsUsingShader,
     packTracer,
     packTrailSegment,
     resolveEffect,
     resolveWeaponFx,
+    samplePosSpread,
     sampleSpread,
     type FxLibrary,
     type SpawnContext,
@@ -63,6 +67,14 @@ const LIB: FxLibrary = {
             emitters: [
                 { shader: 'trail', sprite: 'smoketrail', width: [5, 18], tileLength: 48,
                   nodeInterval: 0.04, life: 1.4, tint: [0.6, 0.58, 0.55], alpha: [0.85, 0] },
+            ],
+        },
+        scattered: {
+            usage: 'death',
+            emitters: [
+                { shader: 'particle', count: 16, sprite: 'smoke', orient: 'billboard',
+                  life: 1, size: [10, 30], speed: 0, posSpread: 40,
+                  colorStart: [0.4, 0.4, 0.4, 0.7], colorEnd: [0.2, 0.2, 0.2, 0] },
             ],
         },
         __default_explosion: { usage: 'impact', alias: 'boom' },
@@ -209,6 +221,76 @@ describe('sampleSpread', () => {
     });
 });
 
+describe('shipped library.json (data/games/metalstorm/effects)', () => {
+    // The real authored library, not a fixture — this is what makes the
+    // "dangling aliases are surfaced by tests" claim in effect-compiler.ts's
+    // effectsUsingShader true: every alias must resolve and every effect
+    // (including its delayed emitters) must compile.
+    const libPath = path.resolve(__dirname, '../../../../data/games/metalstorm/effects/library.json');
+    const shipped = JSON.parse(fs.readFileSync(libPath, 'utf8')) as FxLibrary;
+
+    it('every effect resolves (no dangling or circular aliases)', () => {
+        for (const name of Object.keys(shipped.effects)) {
+            expect(() => resolveEffect(shipped, name), name).not.toThrow();
+        }
+    });
+
+    it('every effect compiles, including its delayed emitters', () => {
+        for (const name of Object.keys(shipped.effects)) {
+            const b = compileEffect(shipped, name, ctx());
+            for (const d of b.delayed) {
+                expect(() => compileEmitter(shipped, d.emitter, ctx()), `${name} delayed emitter`)
+                    .not.toThrow();
+            }
+        }
+    });
+
+    it('every particle emitter sprite names a real atlas frame', () => {
+        for (const name of Object.keys(shipped.effects)) {
+            const { def } = resolveEffect(shipped, name);
+            for (const e of def.emitters ?? []) {
+                if (e.sprite != null) {
+                    expect(shipped.atlas.frames, `${name}: sprite "${e.sprite}"`)
+                        .toHaveProperty(e.sprite);
+                }
+            }
+        }
+    });
+});
+
+describe('posSpread', () => {
+    const rng = lcg(11);
+
+    it('scalar posSpread scatters spawn positions within the sphere radius', () => {
+        const b = compileEffect(LIB, 'scattered', ctx({ rng: lcg(11) }));
+        expect(b.particleCount).toBe(16);
+        let maxR = 0;
+        let anyOffset = false;
+        for (let i = 0; i < 16; i++) {
+            const o = i * PARTICLE_FLOATS;
+            const dx = b.particles![o + 0] - 10;
+            const dy = b.particles![o + 1] - 5;
+            const dz = b.particles![o + 2] - (-20);
+            const r = Math.hypot(dx, dy, dz);
+            maxR = Math.max(maxR, r);
+            if (r > 1) anyOffset = true;
+        }
+        expect(maxR).toBeLessThanOrEqual(40 + 1e-4);
+        expect(anyOffset).toBe(true);
+    });
+
+    it('triple posSpread stays inside the box half-extents; zero/absent means no offset', () => {
+        for (let i = 0; i < 100; i++) {
+            const [x, y, z] = samplePosSpread([30, 5, 10], rng);
+            expect(Math.abs(x)).toBeLessThanOrEqual(30);
+            expect(Math.abs(y)).toBeLessThanOrEqual(5);
+            expect(Math.abs(z)).toBeLessThanOrEqual(10);
+        }
+        expect(samplePosSpread(undefined, rng)).toEqual([0, 0, 0]);
+        expect(samplePosSpread(0, rng)).toEqual([0, 0, 0]);
+    });
+});
+
 describe('menus & weapon-fx resolution', () => {
     it('effectsUsingShader filters by (alias-resolved) emitter shader and skips dangling aliases', () => {
         expect(effectsUsingShader(LIB, 'shockwave')).toEqual(['__default_explosion', 'boom']);
@@ -221,6 +303,8 @@ describe('menus & weapon-fx resolution', () => {
         expect(defaultModeForUsage('projectile')).toBe('projectile');
         expect(defaultModeForUsage('trail')).toBe('projectile');
         expect(defaultModeForUsage('impact')).toBe('impact');
+        expect(defaultModeForUsage('death')).toBe('impact');
+        expect(defaultModeForUsage('attached')).toBe('loop');
         expect(defaultModeForUsage(undefined)).toBe('impact');
     });
 

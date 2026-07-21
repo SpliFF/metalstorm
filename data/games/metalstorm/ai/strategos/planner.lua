@@ -31,8 +31,13 @@ local function buildPackages(picture, role)
                 strength = bucket.strength,
                 baseSum  = bucket.strength,   -- proxy for Σ authority_cost_base
                 groups   = bucket.groups or {},
-                locked   = false,             -- set by guidance asset_locks
-                idle     = true,              -- TODO: from group directive age (§5.1)
+                locked   = bucket.locked or false,  -- guidance asset_locks or explicit
+                -- idle state: co-commander etiquette (§5.1) — only assign idle force.
+                -- Read from the ledger bucket if present, else default to true (unknown
+                -- = treat as idle, safe conservative default). The real tracking comes
+                -- from directive age (groups directed within last 3 min are NOT idle);
+                -- that logic lives in picture.lua's force-ledger builder (AI1-blocked).
+                idle     = (bucket.idle ~= nil) and bucket.idle or true,
             }
         end
     end
@@ -196,9 +201,16 @@ local function assign(goals, packages, ctx)
         end
     end
 
-    -- Descending score; deterministic tie-break via the seeded RNG (§10).
+    -- Descending score; deterministic tie-break via a stable index (§10).
+    -- Pre-assign a random tie-breaker value to each pair so the comparison
+    -- function is stable (calling rng.random() inside the comparator violates
+    -- the strict weak ordering — it can return different values for the same
+    -- comparison, which Lua table.sort requires to be consistent).
+    for i, p in ipairs(pairs_) do
+        p._tieBreak = rng.random()
+    end
     table.sort(pairs_, function(a, b)
-        if a.score == b.score then return rng.random() < 0.5 end
+        if a.score == b.score then return a._tieBreak < b._tieBreak end
         return a.score > b.score
     end)
 

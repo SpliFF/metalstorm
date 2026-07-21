@@ -53,7 +53,7 @@ import {
 import type { EntityRenderer } from './entity-renderer.js';
 import type { Connection, UnitCommandQueueInfo } from './connection.js';
 import type { DefCache } from './def-cache.js';
-import { CommandBuffer, OPT } from './command-buffer.js';
+import { CommandBuffer, OPT, type CommandNotifier } from './command-buffer.js';
 import { nearestMetalSpot, type MetalSpot } from './metal-spots.js';
 import { DRAG_THRESHOLD_PX } from './selection-core.js';
 
@@ -246,6 +246,12 @@ export class WorkerBuildPlacement {
         this.connection = connection;
         this.commandBuffer = new CommandBuffer(connection);
         this.opts = opts;
+    }
+
+    /** Install (or clear) the CommandNotify gate on this owner's
+     *  CommandBuffer (see command-buffer.ts). Wired from gpInit. */
+    setCommandNotifier(fn: CommandNotifier | null): void {
+        this.commandBuffer.setNotifier(fn);
     }
 
     /** True while a builder placement is armed (drives pointer interception +

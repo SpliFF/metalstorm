@@ -16,13 +16,15 @@
  */
 
 import { Engine, Scene, FreeCamera, Vector3, Color3, Color4, Mesh, MeshBuilder, StandardMaterial } from '@babylonjs/core';
-import type { GpInitToWorker, GpMinimapBlips, GpMinimapLos, GpMinimapMetalSpots, BuildMenuTile, FactoryQueueTile } from './game-worker-protocol.js';
+import type { GpInitToWorker, GpMinimapBlips, GpMinimapLos, GpMinimapMetalSpots, BuildMenuTile, FactoryQueueTile,
+    GpTimingState, GpArmDirectiveShapeToWorker, GpGroupDirectiveUpdateToWorker } from './game-worker-protocol.js';
 // GW4-c2: the WebTransport game connection now lives in the worker. Connection
 // is host-agnostic (runs on WebTransportAdapter, no DOM refs after the
 // onServerRestart callback was extracted) so it imports + runs here unchanged.
 import { Connection } from './connection.js';
 import type { CombatEventInfo, FeatureSpawnInfo,
-    SoundEventInfo, SoundRefInfo, ResourceUpdateInfo, UnitCmdDescsInfo } from './connection.js';
+    SoundEventInfo, SoundRefInfo, ResourceUpdateInfo, UnitCmdDescsInfo,
+    OrgGroupInfoMsg, DirectiveInfoMsg } from './connection.js';
 import { AudioChannel } from './audio.js';
 import type { EntityStateSnapshot } from './entity-state.js';
 // GW4-c3: terrain + lighting + map parse move into the worker so terrain
@@ -40,13 +42,13 @@ import {
     loadMapLighting, defaultMapLighting, loadMapWaterAbsorption,
     type MapLighting,
 } from './map-lighting.js';
-import { createSceneLighting, applyMapLighting, type SceneLighting } from './scene-lighting.js';
+import { createSceneLighting, applyMapLighting, setLightingStyle, type SceneLighting } from './scene-lighting.js';
 import { LosBitmapStore, type LosBitmap } from './los-bitmap.js';
 // GW4-c4: world entity rendering moves into the worker. Side-effect import
 // registers Babylon's KTX2 loader + pins the transcoder URLs (previously only
 // done in main.ts) so unit `.ktx2` textures transcode here.
 import './ktx2-config.js';
-import { EntityRenderer, setLightingStyle, setModelMaterialPort } from './entity-renderer.js';
+import { EntityRenderer, setModelMaterialPort } from './entity-renderer.js';
 
 /**
  * The model-material port id that `zk-model-material.ts` reproduces
@@ -70,6 +72,7 @@ import { BuildingPlateRenderer } from './building-plate-renderer.js';
 import { DefCache } from './def-cache.js';
 import { fetchAndIngestDefs } from './defs-fetch.js';
 import { PresentationClock } from './presentation-clock.js';
+import { EventScheduler, type ScheduledKind } from './event-scheduler.js';
 // GW4-c5: weapon-FX / projectile / decal / build render modules fold into the
 // worker (audited worker-safe — no DOM/audio; the `window.__*` dev hooks they
 // set are switched to `globalThis`). Ported from main.ts@d6301137f7^.
@@ -81,6 +84,7 @@ import { clientSettings } from './client-settings.js';
 import { CONFIG } from '../config.js';
 import { resetNetStats, snapshotNetStats } from './net-inspector.js';
 import { FrameProfiler } from './frame-profiler.js';
+import { EntityFxFence } from './entity-fx-fence.js';
 import { BuildBeamRenderer } from './build-beam-renderer.js';
 import { CombatFX } from './combat-fx.js';
 import { FxLightPool } from './fx-light-pool.js';
@@ -94,9 +98,13 @@ import { RTSCamera } from './rts-camera.js';
 import { OrbitRig, type OrbitTarget } from './orbit-rig.js';
 import { SunRig } from './sun-rig.js';
 import { ClipPlayer } from './clip-player.js';
+import { ClipAutoPolicy, nominalSpeedFor } from './clip-auto-policy.js';
+import { TurretAimController } from './turret-aim-controller.js';
 import { WorkerSelection } from './worker-selection.js';
 import { WorkerBuildPlacement, UNITDEF_FLAG_IS_FACTORY } from './worker-build-placement.js';
 import { WorkerCommandModes } from './worker-command-modes.js';
+import { DirectiveShapeCapture, type ArmedDirective } from './directive-shape-capture.js';
+import type { ShapeKind } from './shape-gesture-capture.js';
 import { CMD, OPT } from './command-buffer.js';
 import { groupFactoryQueueRuns } from './factory-queue.js';
 import { findMetalSpots, type MetalSpot } from './metal-spots.js';
@@ -122,19 +130,21 @@ import { rmlFlush, rmlReset } from '../ui/rml/rml-bridge.js';
 // WP2b: LuaUI half exports — getRuntime() host + all widget callins + liveState + defs.
 import {
     liveState, unitDefMap, weaponDefMap,
-    postToMain, postLog, republishDefGlobals,
+    postToMain, postLog, republishDefGlobals, getRecentLogLines,
     init, runFrame, getRuntime, getBridge, setLuaUiActiveFalse,
     applyEntityStateToLiveState, removeUnitFromLiveState,
     dispatchSelectionChanged, dispatchCommandsChanged,
     dispatchUnitCreated, dispatchUnitFromFactory, dispatchUnitTaken, dispatchUnitGiven,
     dispatchDefaultCommand, dispatchCommandNotify,
     dispatchPlayerChanged, dispatchPlayerAdded, dispatchPlayerRemoved, dispatchTeamDied,
+    handleRulesParamUpdate,
     dispatchRecvLuaUIMsg, dispatchUnitDestroyed, dispatchUnitFinished,
     dispatchUnitDamaged, dispatchFeatureLifecycle,
     dispatchVisibleUnitAdded, dispatchVisibleUnitRemoved,
     dispatchUnitCommand, dispatchUnitCmdDone,
     getWidgetList, toggleWidget, enableWidget, disableWidget, shutdown,
     setMusicStreamTime, seedStorageCache, setWorkerSetActiveCommandHandler,
+    updateLiveProjectiles,
     sameIdSet, escapeLuaStr, escapeLuaString, loadFromStorage, saveToStorage,
     luaBytesLiteral, paramsTableLiteral,
     describeMessage, describeInboundMessage,
@@ -145,12 +155,20 @@ import {
     widgetProfileStart, widgetProfileStop, widgetProfileDump,
     buildUiProfileReport, type UiTaxAccumulator,
 } from './widget-profiler.js';
+// PLAN-client-resilience.md tasks 1/3: error telemetry assembly + the
+// context-loss/fatal detection hooks wired into gpInit/the render loop below.
+import { configureErrorTelemetry, reportClientError, type ClientErrorReason } from './client-error-telemetry.js';
 
 // ── GP module-level state ───────────────────────────────────────────────────
 
 let gpEngine: Engine | null = null;
 let gpScene: Scene | null = null;
 let gpCamera: FreeCamera | null = null;
+/// PLAN-client-resilience.md task 3: session facts a telemetry report needs
+/// but that aren't otherwise threaded through the worker's module state.
+/// Set once in gpInit from the gp:init payload; read by gpReportFatal.
+let gpGameId = '';
+let gpMapId = '';
 /// GW4-c5b: interactive RTS cameras, keyed by viewId (multi-view, one Scene /
 /// N camera→canvas views — PLAN-game-worker.md). Each owns one Babylon camera +
 /// the pan/zoom/orbit state machine + scene.pick + viewport send, driven by the
@@ -180,6 +198,18 @@ let gpBuildPlacement: WorkerBuildPlacement | null = null;
 /// via gp:cursorMode. Pointer handlers route left-clicks here after build
 /// placement, before selection.
 let gpCommandModes: WorkerCommandModes | null = null;
+/// PLAN-macro-ui.md §2/§5: worker-side click/paint gesture capture for macro
+/// directive shapes (Point/Circle/Polygon/Polyline), armed by an org-group
+/// hotkey or cross-thread via gp:armDirectiveShape (org panel / scripting
+/// task 4). Consumes pointer/wheel input exclusively while armed, ahead of
+/// gpCommandModes — same "an armed capture owns the mouse" convention as
+/// gpCommandModes' own area-attack drag.
+let gpDirectiveCapture: DirectiveShapeCapture | null = null;
+/// Latest org-group / directive snapshots (own team; own+allies respectively
+/// — same visibility rule as standing orders). Cached so gp:selectOrgGroup
+/// can resolve a group id to its member roster without a round trip.
+let gpLastOrgGroups: OrgGroupInfoMsg[] = [];
+let gpLastDirectives: DirectiveInfoMsg[] = [];
 /// G3a: per-unit command descriptions (UnitCmdDescsUpdate, ~1 Hz, selection-
 /// scoped). Cached so the buildable-tile set can be recomputed on selection
 /// change without waiting for the next broadcast. Also mirrored into
@@ -221,11 +251,24 @@ let gpShiftHeld = false;
 let gpGameFrame = 0;
 let gpPaused = false;
 let gpSimSpeed = 1;
+/// Tracking-camera toggle (`T` hotkey / window.test.setTrackingCamera). While
+/// on, the view-0 camera refits to the live selection every render frame —
+/// ports the deleted main-thread input-manager's trackingActive /
+/// refitTrackingNow to the worker camera owner. Suppressed while the
+/// model-harness orbit rig owns view 0; reset in gpShutdown.
+let gpTrackingCamera = false;
 /// GW8 (test harness): client-side render-loop freeze, distinct from `gpPaused`
 /// (which mirrors the *server* sim-pause from onGameInfo). `window.test.pause()`
 /// sets this so a screenshot captures a deterministic frame while the sim may
 /// still tick server-side. preserveDrawingBuffer keeps the last frame visible.
 let gpRenderPaused = false;
+/// PLAN-quickstart.md §3 (Part B): the `gp:init` message, captured so a
+/// `gp:resync` can re-open the game connection with the same creds/map without
+/// a fresh boot. Null until gpConnect runs.
+let gpInitMsg: GpInitToWorker | null = null;
+/// PLAN-quickstart.md §3.1: true while the session is parked (detached). Guards
+/// against a double detach and lets diagnostics see the parked state.
+let gpParked = false;
 /// Wall-clock of the last sceneState post (throttled to ~10 Hz).
 let gpLastSceneStatePost = 0;
 /// GW4-c5c-3: minimap feed throttle (~6 Hz — unit dots only need to be roughly
@@ -260,6 +303,24 @@ const gpDefsReady: Promise<void> = new Promise((resolve) => { gpDefsReadyResolve
 /// frame keyed) instead of arrival wall-time. Reset + anchored to the
 /// connection's ServerClock once `gpConnect` builds it.
 let gpPresentationClock: PresentationClock | null = null;
+/// PLAN-latency L1: presentation-timeline for discrete events (explosions,
+/// deaths, impact CEGs, sounds). Server events carry the sim frame they
+/// occurred on; instead of firing on arrival (~D frames ahead of the cursor)
+/// they're queued here and drained when the cursor reaches their frame, so a
+/// death burst lands on the same frame the dying unit is interpolated to.
+/// Created in gpInit, drained in the render loop, cleared in gpShutdown.
+let gpEventScheduler: EventScheduler | null = null;
+
+/// Schedule a discrete event onto the presentation timeline, or fire it now if
+/// the scheduler isn't up yet (pre-gpInit safety — never silently dropped).
+function gpSchedule(frame: number, kind: ScheduledKind, fire: () => void): void {
+    if (gpEventScheduler) gpEventScheduler.schedule(frame, kind, fire);
+    else fire();
+}
+/// Sounds fired by the timeline drain this render frame. Accumulated so a
+/// heavy drain posts ONE gp:audioSoundEvents batch (the message already
+/// carries an array) instead of one structured clone per sound.
+let gpDrainedSoundEvents: ResolvedSoundEvent[] = [];
 /// GW4-c3 terrain state, populated once the map data HTTP fetch resolves.
 /// Mirrors the pre-move main.ts `onMapData` terrain build.
 let gpTerrainMesh: Mesh | null = null;
@@ -307,10 +368,64 @@ let gpOrbitSavedView: { pos: Vector3; lookAt: Vector3 } | null = null;
 /// Ticked from the render loop; re-applies each frame while active so game
 /// Lua lighting re-applies can't clobber the test state.
 let gpSunRig: SunRig | null = null;
-/// PLAN-model-harness task 6: dev/test clip player (window.test.playClip).
-/// Samples one authored .glb clip per frame into EntityRenderer's per-piece
-/// clip-pose override; auto-stops when the target unit disappears.
+/// PLAN-model-harness task 6: the clip player (window.test.playClip) samples
+/// authored .glb clips per frame into EntityRenderer's per-piece clip-pose
+/// override; auto-stops when a target unit disappears.
 let gpClipPlayer: ClipPlayer | null = null;
+/// DESIGN-MODEL-BUILDING §16b: movement-driven walk/idle playback. Fed from
+/// the wire entity-state callback (NOT the render loop — it judges speed from
+/// raw streamed positions, never the camera-lerped render pose) and drives
+/// gpClipPlayer for every native whose model ships a `walk` clip. Harness
+/// playClip marks a unit manual so the F8 buttons still win.
+let gpClipPolicy: ClipAutoPolicy | null = null;
+/// DESIGN-MODEL-BUILDING §16c: cosmetic turret aim. Engaged off projectile
+/// Fired events (native models with a `turret` piece that the sim isn't
+/// already piece-driving) and ticked from the render loop for smooth slew.
+let gpAimController: TurretAimController | null = null;
+
+/// Both are created together on first use: each needs the EntityRenderer (as
+/// pose sink and as clip/def source), which doesn't exist until gpInit runs.
+function gpEnsureClipPlayer(r: EntityRenderer): ClipPlayer {
+    if (gpClipPlayer) return gpClipPlayer;
+    const player = new ClipPlayer(r);
+    gpClipPlayer = player;
+    gpAimController = new TurretAimController({
+        unitPose: (id) => {
+            const p = r.getEntityPose(id);
+            return p ? { x: p.x, y: p.y, z: p.z, heading: p.heading } : null;
+        },
+        // Live target pose while the client holds a position for it; the
+        // controller falls back to the Fired event's frozen targetPos.
+        targetPos: (id) => (id > 0 ? r.getEntityPosition(id) : null),
+        aimPieces: (id) => r.getAimPieces(id),
+        // The sim owns ZK/BAR (and future s4) turrets over 0x05 — decline them.
+        simDrivesPieces: (id) => r.hasPieceStream(id),
+        slewRateDegPerSec: (id) => {
+            const defId = r.getEntityDefId(id);
+            const cp = defId === undefined
+                ? undefined : gpDefCache?.getUnitDef(defId)?.customParams;
+            const v = Number(cp?.turret_slew_deg_per_sec);
+            return Number.isFinite(v) && v > 0 ? v : undefined;
+        },
+    }, r);
+    gpClipPolicy = new ClipAutoPolicy({
+        getClip: (id, name) => r.getClip(id, name),
+        // getClipNames returns null while the template is still loading and
+        // [] once it has resolved with no clips — exactly the distinction the
+        // policy needs to retire a unit for good rather than re-probe it.
+        clipsLoaded: (id) => r.getClipNames(id) !== null,
+        nominalSpeed: (id) => {
+            const defId = r.getEntityDefId(id);
+            return defId === undefined ? 0 : nominalSpeedFor(gpDefCache?.getUnitDef(defId));
+        },
+        // Focus point of the interactive view, for the nearest-first cap.
+        cameraXZ: () => {
+            const lookAt = gpViewCameras.get(0)?.saveView().lookAt;
+            return lookAt ? { x: lookAt.x, z: lookAt.z } : null;
+        },
+    }, player);
+    return player;
+}
 /// Long-frame profiler: the render loop stamps per-phase timings every frame
 /// into a permanent accumulator (`gpFrameProfiler`), which both (a) computes
 /// mean/p50/p95/p99 per phase over a rolling 30 s window on demand
@@ -329,6 +444,19 @@ const gpFrameProfiler = new FrameProfiler(30000);
 /// 3 decals+lights, 4 render, 5 ui.
 function gpMark(idx: number): void {
     if (gpFrameProfile) gpFrameProfiler.mark(idx, performance.now());
+}
+/// PLAN-fx-offload X5 — the Fengari fence for legacy per-frame entity FX
+/// scripts (entity-fx-fence.ts). One instance, ticked every frame like
+/// gpFrameProfiler above; nothing calls `.run()` yet (no game currently
+/// ships per-frame entity `onUpdate` content through a dispatch this
+/// engine drives — see PLAN-fx-offload field notes), so `dump()` reports
+/// zero defs today. This is the wiring point for whichever module ends up
+/// running legacy per-def callbacks (task 3, the JS animation system, is
+/// next in line) — exposed via getEntityFxFence() and the
+/// entityFxFenceDump/-Reset test-dispatch verbs below.
+const gpEntityFxFence = new EntityFxFence();
+export function getEntityFxFence(): EntityFxFence {
+    return gpEntityFxFence;
 }
 /// PLAN-perf P0 isolation toggle (hazard #5): when false the LuaUI screen pass
 /// is skipped, isolating its render-thread tax (12 gl.getParameter round-trips
@@ -714,6 +842,9 @@ let gpAuthFailed: string | null = null;
 let gpFirstStateReceived = false;
 
 function gpConnect(msg: GpInitToWorker): void {
+    // PLAN-quickstart.md §3.2: keep the init message so a later gp:resync can
+    // rebuild the connection (same map/creds) without a fresh gp:init boot.
+    gpInitMsg = msg;
     // GW8: reset the per-envelope bandwidth tally for the new game session. The
     // tally lives in THIS (worker) bundle's net-inspector instance, fed by the
     // worker connection's routeIncoming/sendOnControl; surfaced to main via the
@@ -761,6 +892,14 @@ function gpConnect(msg: GpInitToWorker): void {
             gpFirstStateReceived = true;
             gpCtx.entityRenderer?.update(snapshot, isDelta);
             gpBuildingPlateRenderer?.update(snapshot);
+            // §16b: drive walk/idle clips off the WIRE positions, at the wire
+            // cadence — after the renderer's update so newly-streamed units
+            // already have their defId + model resolved. Idles out to per-unit
+            // arithmetic in games whose models ship no clips (ZK, BAR, wz_*).
+            if (gpCtx.entityRenderer) {
+                gpEnsureClipPlayer(gpCtx.entityRenderer);
+                gpClipPolicy!.observe(snapshot, isDelta);
+            }
             // GW4-c6-1b: also merge into liveState.units + synth the
             // UnitCreated/UnitFinished callins so LuaUI widgets see the world.
             applyEntityStateToLiveState(snapshot, isDelta);
@@ -771,15 +910,36 @@ function gpConnect(msg: GpInitToWorker): void {
         // GW4-c4/c5: a unit/feature left view or died → drop its meshes + plate
         // and (c5) fire a combatFX death burst at its last position. (LuaUI
         // forward to widgets wires up in c6.)
-        onEntityDestroy: (entityId, x, y, z) => {
-            gpCtx.entityRenderer?.removeEntity(entityId);
-            gpBuildingPlateRenderer?.remove(entityId);
-            gpCombatFX?.onCombatEvents([{
-                attackerId: 0, targetId: entityId, weaponDefId: 0,
-                result: 3, damage: 500, x, y, z,
-            }]);
-            // GW4-c6-1b: LuaUI UnitDestroyed + liveState cleanup.
-            removeUnitFromLiveState(entityId);
+        // PLAN-latency L1: present the death — mesh removal, death burst,
+        // liveState cleanup — on `frame` (the connection's best lower bound on
+        // the death frame: same-tick combat-batch frame when the kill was
+        // visible, else the newest entity-state frame — see handleEntityDestroy),
+        // so the unit vanishes with its explosion instead of ~D frames before
+        // the interpolated body arrives. Past-due (no batch yet) → next drain.
+        onEntityDestroy: (entityId, x, y, z, frame) => {
+            gpSchedule(frame, 'destroy', () => {
+                // Server unit-IDs are recycled: by the time this scheduled
+                // destroy fires, the ID may already belong to a newly visible
+                // unit — removing it would wipe the new unit's mesh and emit a
+                // spurious UnitDestroyed. State newer than the destroy frame
+                // means exactly that; skip.
+                const meta = gpCtx.entityRenderer?.getEntityMeta(entityId);
+                if (meta && meta.lastStateFrame > frame) return;
+                gpCtx.entityRenderer?.removeEntity(entityId);
+                gpBuildingPlateRenderer?.remove(entityId);
+                // §16b/§16c: drop clip + aim bookkeeping so the policy's motion
+                // entry and the aim controller's per-unit state don't leak (the
+                // players self-stop on unknown-unit, the tables would linger).
+                // After the recycling guard so a reused ID keeps the new unit's.
+                gpClipPolicy?.remove(entityId);
+                gpAimController?.remove(entityId);
+                gpCombatFX?.onCombatEvents([{
+                    attackerId: 0, targetId: entityId, weaponDefId: 0,
+                    result: 3, damage: 500, x, y, z,
+                }]);
+                // GW4-c6-1b: LuaUI UnitDestroyed + liveState cleanup.
+                removeUnitFromLiveState(entityId);
+            });
         },
         // GW4-c5: getRuntime() feature spawns (wrecks/debris/reclaim) → dynamic
         // feature renderer. Map-placed features load via renderMapFeatures.
@@ -794,12 +954,27 @@ function gpConnect(msg: GpInitToWorker): void {
         // 0x04 per-tick projectile-state envelope is gone — the renderer
         // integrates motion locally off these events.
         onProjectileFired: (events) => {
+            // §16c: engage cosmetic turret aim toward each shot's target.
+            // Runs even without a projectile renderer so aim is independent
+            // of projectile visuals.
+            if (gpCtx.entityRenderer && events.length) {
+                gpEnsureClipPlayer(gpCtx.entityRenderer);
+                const now = performance.now();
+                for (const e of events) gpAimController?.onFired(e, now);
+            }
             if (!gpCtx.projectileRenderer) return;
             for (const e of events) gpCtx.projectileRenderer.onFired(e);
         },
-        onProjectileImpacts: (events) => {
-            for (const e of events) gpCtx.projectileRenderer?.onImpact(e);
-            gpCombatFX?.onProjectileImpacts(events);
+        // PLAN-latency L1: present the impact (renderer detonation + shield /
+        // airburst FX) on its sim frame. The bolt's flight is still integrated
+        // locally (Tier-C convergence is L2) — L1 only aligns the *impact*.
+        onProjectileImpacts: (events, frame) => {
+            for (const e of events) {
+                gpSchedule(frame, 'impact', () => {
+                    gpCtx.projectileRenderer?.onImpact(e);
+                    gpCombatFX?.onProjectileImpacts([e]);
+                });
+            }
         },
         onProjectileTrajectories: (events) => {
             if (!gpCtx.projectileRenderer) return;
@@ -809,9 +984,37 @@ function gpConnect(msg: GpInitToWorker): void {
         // Also fan out widget:UnitDamaged so intel/health/FX widgets in ZK
         // and BAR react to damage (faithful weapon-combat subset; see
         // dispatchUnitDamaged for the documented wire gaps).
-        onCombatEvents: (events) => {
-            gpCombatFX?.onCombatEvents(events);
-            dispatchUnitDamaged(events);
+        // PLAN-latency L1: present each combat hit/kill (explosion CEG +
+        // widget UnitDamaged) on its own sim frame, so the burst lands as the
+        // interpolated unit reaches the spot rather than ~D frames early.
+        onCombatEvents: (events, frame) => {
+            for (const ev of events) {
+                gpSchedule(frame, 'combatFx', () => {
+                    gpCombatFX?.onCombatEvents([ev]);
+                    dispatchUnitDamaged([ev]);
+                });
+            }
+        },
+        // Metalstorm statistical combat (Model 1) per-volley outcomes. No
+        // projectile exists — combatFX invents tracers (from the visible
+        // attacker's position) + impact bursts. Counterbattery reveals become
+        // a red minimap "attack" blip on the main thread (Q-D-c). The volley's
+        // target_pos is the squad-casualty impact hint (PLAN-metalstorm-squad-
+        // casualties consumes onVolleyOutcomes when that layer lands).
+        onVolleyOutcomes: (events) => {
+            gpCombatFX?.onVolleyOutcome(events,
+                (id) => gpCtx.entityRenderer?.getEntityPosition(id) ?? null);
+            for (const e of events) {
+                if (e.revealAttacker)
+                    postToMain({ type: 'gp:counterbatteryPing', x: e.revealX, z: e.revealZ });
+            }
+        },
+        // Metalstorm damage-field lifecycle (Model 3 area bombardment, C6).
+        // The sim owns all damage; combatFX invents the barrage FX (procedural
+        // shell arcs + impacts scattered in the area at the field's cadence)
+        // from these Created/Removed events — no per-shell wire traffic.
+        onDamageFields: (events) => {
+            gpCombatFX?.onDamageFields(events);
         },
         // GW4-c5b-3: per-unit command queues (~1 Hz) → command-path + waypoint
         // overlays for the current selection (shift-gated). Cached so a
@@ -862,21 +1065,45 @@ function gpConnect(msg: GpInitToWorker): void {
         // GW4-c5b-3: standing orders (always-on overlay; server scopes the
         // broadcast to own + allied teams).
         onStandingOrders: (orders) => gpStandingOrderRenderer?.update(orders),
+        // PLAN-macro-ui.md §3/§4: macro directives extend the standing-order
+        // renderer in place (shape-carrying overlay) and forward to main for
+        // the org panel / directive inspector (own team + allies, own team
+        // only for org groups — same visibility rule as onStandingOrders).
+        onOrgGroupState: (groups) => {
+            gpLastOrgGroups = groups;
+            postToMain({ type: 'gp:orgGroups', groups });
+        },
+        onDirectiveState: (directives) => {
+            gpLastDirectives = directives;
+            gpStandingOrderRenderer?.updateDirectives(directives);
+            postToMain({ type: 'gp:directives', directives });
+        },
         // GW4-c5c-2: audio getBridge(). The connection decodes SoundEvents here, but
         // playback needs the main-thread AudioContext. Resolve each event's
         // SoundRef against the in-worker def cache (the def-dependent step) and
         // post the resolved pairs to main, where SoundEventPlayer does the
         // SoundItem/URL resolution + AudioManager.play. Music events forward
         // straight to main's MusicDirector.
-        onSoundEvents: (events) => {
+        // PLAN-latency L1: resolve the SoundRef now (needs the def cache, which
+        // lives here) but present the sound on its own sim frame, so weapon /
+        // impact / death audio fires in lockstep with the visual it belongs to
+        // rather than ~D frames early. Sub-frame audio precision (an
+        // AudioContext-scheduled offset within the frame) is deliberately left
+        // out: the drain granularity makes it a no-op, and the paired visual is
+        // itself locked to the render frame — see PLAN-latency-impl L1 notes.
+        onSoundEvents: (events, frame) => {
             if (!gpDefCache) return;
-            const resolved: ResolvedSoundEvent[] = [];
             for (const e of events) {
                 const ref = resolveSoundRef(gpDefCache, e.sourceKind as 0 | 1 | 2 | 3,
                     e.sourceDefId, e.soundId);
-                if (ref) resolved.push({ e, ref });
+                if (!ref) continue;
+                const resolved: ResolvedSoundEvent = { e, ref };
+                // Collected into gpDrainedSoundEvents; the render loop posts
+                // one batch to main after the drain (fire order preserved).
+                gpSchedule(frame, 'sound', () => {
+                    gpDrainedSoundEvents.push(resolved);
+                });
             }
-            if (resolved.length) postToMain({ type: 'gp:audioSoundEvents', events: resolved });
         },
         onMusicEvent: (state, fadeMs) => postToMain({ type: 'gp:audioMusic', state, fadeMs }),
         // GW4-c5: build/repair/reclaim progress (envelope 0x06) → build beams.
@@ -1027,6 +1254,16 @@ function gpConnect(msg: GpInitToWorker): void {
                 }
             }
         },
+        // Rules-param updates (RulesParamUpdate) — game/team params from
+        // Spring.Set{Game,Team}RulesParam in any synced gadget. Pre-this-wire
+        // handleRulesParamUpdate was a dead consumer (no server producer), so
+        // region control, objectives and the authority economy were invisible
+        // to the browser. The server LOS-filtered team params and sent a
+        // replace-snapshot on join; here we just apply into liveState so
+        // Spring.GetGameRulesParam(s)/GetTeamRulesParam(s) return live values.
+        onRulesParamUpdate: (update) => {
+            handleRulesParamUpdate(update as unknown as Record<string, unknown>);
+        },
         // PLAN-bar Spring.GetTeamStatsHistory: per-second incremental team
         // stats-history deltas. Splice each team's entries into its history
         // array starting at baseIndex (the previously-live tail is re-sent once
@@ -1115,6 +1352,91 @@ function gpConnect(msg: GpInitToWorker): void {
     conn.connect(msg.gameHttpUrl, msg.username, '', msg.token);
 }
 
+/**
+ * PLAN-client-resilience.md task 3: assemble + send a fatal-error report
+ * with the richest context this worker has — the frame profiler's last
+ * completed frame (as a `phase` label, best-effort), live entity count, the
+ * session's game/map ids, and the last ~50 log-ring lines. This is the one
+ * place the worker's self.onerror/onunhandledrejection hooks and the
+ * context-loss/fault-injection paths funnel through.
+ *
+ * EXTENSION POINT for task 2 (the R1/R2/R3 recovery ladder): this function
+ * only reports today — it never resets or respawns anything. The ladder
+ * should call into its rung logic from the same call sites that call this
+ * (worker self.onerror/onunhandledrejection below, gpHandleContextLost/
+ * Restored, and the injectWorkerError fault-injection verbs), stamping the
+ * rung it took onto the report via the `recoveryRung` param before/instead
+ * of just logging.
+ */
+export function gpReportFatal(
+    reason: ClientErrorReason, errorClass: string, message: string, stack?: string,
+    recoveryRung?: string,
+): void {
+    reportClientError({
+        reason,
+        errorClass,
+        message,
+        stack,
+        recoveryRung,
+        phase: gpFrameProfile ? gpFrameProfiler.formatLastFrame() : undefined,
+        frame: liveState.gameFrame,
+        entityCount: gpCtx.entityRenderer?.entityCount ?? 0,
+        gameId: gpGameId,
+        mapId: gpMapId,
+        logRing: getRecentLogLines(50),
+    });
+    // PLAN-client-resilience.md task 2: hand the fatal to the main-thread
+    // RecoveryLadder (R2 respawn). This is the RELIABLE cross-boundary signal:
+    // an uncaught throw does propagate to `gameWorker.onerror`, but a fatal from
+    // an async loader/renderer path (`unhandledrejection`) does NOT — so E2 (a
+    // bad def/model crashing the loader) would otherwise never reach the ladder.
+    // Context-loss keeps its own `gp:contextLost` channel (R1/grace), so it is
+    // excluded here; `messageError`/`wedged` originate main-side already.
+    if (reason === 'fatal' || reason === 'injected') {
+        postToMain({ type: 'gp:workerFatal', reason, injected: reason === 'injected' });
+    }
+}
+
+/**
+ * PLAN-client-resilience.md task 2 (R1 soft rung): an in-place subsystem reset,
+ * driven by the main-thread RecoveryLadder via `gp:recover` when a lost WebGL
+ * context restores. Cheaper than an R2 respawn: keep the worker, engine, scene,
+ * loaded models, DefCache and UI; just (1) force Babylon to drop its cached GL
+ * state (`wipeCaches` — the lost context invalidated every GPU object, and the
+ * gl-bridge's private immediate-mode VAO in particular is not Babylon-tracked),
+ * (2) flush the transient FX stores whose GPU buffers the loss killed, and (3)
+ * resync — reconnect for a fresh full server snapshot so entity/projectile
+ * instances repack from a clean base (server-authoritative → lossless).
+ *
+ * Returns true if the reset was applied (engine live + a reconnectable session
+ * present); false if a precondition is missing, which the ladder treats as an
+ * R1 failure and escalates to R2. NOT gated on `gpParked` (unlike gpResync):
+ * a context restore happens on a LIVE session, not a parked one.
+ */
+export function gpSoftRecover(): boolean {
+    if (!gpEngine || !gpInitMsg || !gpCtx.connection) {
+        postLog(2, '[gp] gpSoftRecover: engine/session not ready — cannot soft-reset');
+        return false;
+    }
+    // (1) Drop Babylon's cached GL state + the bridge VAO the lost context left
+    // dangling. Same brute-force wipe the UI pass uses (game-processor.ts:2080).
+    (gpEngine as unknown as { wipeCaches: (b?: boolean) => void }).wipeCaches(true);
+    // (2) Flush transient FX whose GPU-side buffers the context loss invalidated
+    // (keep static: terrain, models, DefCache, lighting, decals).
+    gpCtx.entityRenderer?.resetForResync();
+    gpCtx.projectileRenderer?.resetForResync();
+    gpCombatFX?.reset();
+    // (3) Reconnect the SAME Connection for a fresh full snapshot (its
+    // onAuthenticated re-seeds identity + re-registers the viewport pump). The
+    // fresh ClientSession re-pushes defs (DefCache no-ops the dups) and the
+    // first snapshot repacks entities from a clean base.
+    gpLastFrameTime = performance.now();
+    const t = gpInitMsg.token;
+    gpCtx.connection.connect(gpInitMsg.gameHttpUrl, gpInitMsg.username, '', t);
+    postLog(1, '[gp] soft-recovered (R1) — wipeCaches + FX flush + resync');
+    return true;
+}
+
 export function gpInit(msg: GpInitToWorker): void {
     if (gpEngine) {
         postLog(2, '[gp] gp:init received but engine already up — ignoring');
@@ -1192,6 +1514,39 @@ export function gpInit(msg: GpInitToWorker): void {
     gpScene = scene;
     gpCamera = camera;
 
+    // PLAN-client-resilience.md task 3: seed the error-telemetry channel with
+    // this session's context. The endpoint lives on the lobby (same host as
+    // the auth token); errorReportingEnabled reflects the server-operator
+    // opt-out surfaced via /api/version → CONFIG (PLAN-security-hardening §1
+    // "junk floods" row — size cap + rate + dedup live in client-error-
+    // telemetry.ts itself).
+    gpGameId = msg.gameId;
+    gpMapId = msg.mapId;
+    configureErrorTelemetry({
+        endpoint: msg.lobbyUrl,
+        token: msg.token,
+        enabled: msg.errorReportingEnabled !== false,
+        buildStamp: msg.buildStamp,
+        gpuRenderer: engine.getGlInfo().renderer ?? '',
+    });
+
+    // PLAN-client-resilience.md task 1: WebGL context loss is the most common
+    // real-world "crash" — without this the frame loop just spins rendering
+    // nothing forever. Babylon already no-ops draw calls on a lost context.
+    // task 2: these two observables now feed the main-thread RecoveryLadder via
+    // gp:contextLost/gp:contextRestored — a lost context arms R1's restore
+    // grace, a restore inside it drives the soft R1 reset (gpSoftRecover, called
+    // back via gp:recover), and a restore that never comes times out to R2.
+    engine.onContextLostObservable.add(() => {
+        postLog(4, '[gp] WebGL context lost');
+        postToMain({ type: 'gp:contextLost' });
+        gpReportFatal('contextLost', 'WebGLContextLost', 'WebGL context lost on the game-processor worker\'s OffscreenCanvas');
+    });
+    engine.onContextRestoredObservable.add(() => {
+        postLog(2, '[gp] WebGL context restored');
+        postToMain({ type: 'gp:contextRestored' });
+    });
+
     // GW4-c3: install sun + ambient + HDR pipeline + CSM (deferred from c1 —
     // it was invisible on an empty scene and drags in the HDR pipeline).
     // applyMapLighting retunes it once mapinfo.lua lighting is fetched.
@@ -1235,6 +1590,7 @@ export function gpInit(msg: GpInitToWorker): void {
     setModelMaterialPort(port);
 
     gpPresentationClock = new PresentationClock();
+    gpEventScheduler = new EventScheduler();
 
     const entityRenderer = new EntityRenderer(scene);
     entityRenderer.setPresentationClock(gpPresentationClock);
@@ -1423,6 +1779,7 @@ export function gpInit(msg: GpInitToWorker): void {
         // write into the permanent accumulator (gpFrameProfiler) with no
         // per-frame allocation; percentiles are computed only at dump time.
         if (gpFrameProfile) gpFrameProfiler.beginFrame(now);
+        gpEntityFxFence.beginFrame();
 
         // GW4-c5b: advance the interactive camera(s) first so this frame's
         // render + pick + viewport use the updated pose. Raw wall dt (the camera
@@ -1434,17 +1791,47 @@ export function gpInit(msg: GpInitToWorker): void {
             if (viewId === 0 && gpOrbitRig) continue;
             cam.tick();
         }
+        // Tracking camera (`T` / window.test.setTrackingCamera): refit view 0
+        // to the live selection each frame, after the camera tick so the refit
+        // pose wins. Suppressed while the orbit rig owns the view-0 camera.
+        if (gpTrackingCamera && !gpOrbitRig) gpRefitTrackingCamera();
         gpOrbitRig?.tick();
         gpSunRig?.tick(dt);
         gpClipPlayer?.tick();
+        gpAimController?.tick(performance.now());
         gpMark(0);  // camera
 
         // entityRenderer.tick() advances the presentation clock (L0) and
         // interpolates every unit to the presentation cursor before render.
         gpCtx.entityRenderer?.tick();
+        // PLAN-latency L1: fire discrete events (explosions, deaths, impact
+        // CEGs, sounds) whose sim frame the cursor has now reached — so they
+        // present in lockstep with the units interpolated to the same P, rather
+        // than early on arrival. Drained after the cursor advanced (tick above)
+        // and before projectileRenderer.tick() / the A3 mirror so a scheduled
+        // impact removes its projectile from this frame's live snapshot.
+        if (gpPresentationClock && gpEventScheduler) {
+            gpEventScheduler.drain(gpPresentationClock.P);
+            // Flush the drain's fired sounds as ONE post — a heavy drain
+            // (mass kill, refocus) would otherwise structured-clone dozens
+            // of per-sound messages. Order within the batch is drain order.
+            if (gpDrainedSoundEvents.length > 0) {
+                postToMain({ type: 'gp:audioSoundEvents', events: gpDrainedSoundEvents });
+                gpDrainedSoundEvents = [];
+            }
+        }
         gpMark(1);  // entity
         gpBuildBeamRenderer?.tick();
         gpCtx.projectileRenderer?.tick();
+        // A3 read-seam (PLAN-latency-impl.md L-pre.1): mirror the renderer's
+        // live projectiles + beams into liveState so Spring.GetVisibleProjectiles
+        // / GetProjectilePosition see this frame's positions. Must run AFTER
+        // projectileRenderer.tick() integrated them, and before runFrame() hands
+        // the widgets their Update callin. Skipped when no Lua runtime is booted
+        // (native-UI games) — nothing can read the mirror then.
+        if (gpCtx.projectileRenderer && getRuntime()) {
+            updateLiveProjectiles(gpCtx.projectileRenderer.snapshotForWorker());
+        }
         gpCegRuntime?.tick(fxDt);
         gpCombatFX?.tick(fxDt);
         gpMark(2);  // fx
@@ -1582,6 +1969,25 @@ export function gpInit(msg: GpInitToWorker): void {
             }
             postToMain({ type: 'gp:audioSoundEvents', events: [ev] });
         },
+        // PLAN-playable G3: hover-target changes drive widget:DefaultCommand
+        // (Recoil: CGuiHandler::GetDefaultCommand walks luaUI->DefaultCommand).
+        // Same worker as the LuaUI runtime — direct dispatch, no boundary hop.
+        // The resolved cmd feeds Spring.GetDefaultCommand (liveState) and the
+        // right-click override in issueOrderAtScreen, so widgets like ZK's
+        // unit_default_commands / cmd_mex_placement steer the RMB order.
+        onHoverTarget: (info) => {
+            const resolved = dispatchDefaultCommand(
+                info.targetType, info.targetId, info.engineCmd);
+            liveState.defaultCommand = {
+                targetType: info.targetType,
+                targetId: info.targetId,
+                engineCmd: info.engineCmd,
+                cmdId: resolved,
+            };
+            gpCtx.selection?.setDefaultCommandOverride({
+                cmdId: resolved, targetType: info.targetType, targetId: info.targetId,
+            });
+        },
     });
     gpCtx.selection = selection;
 
@@ -1611,6 +2017,39 @@ export function gpInit(msg: GpInitToWorker): void {
         onCursorMode: (req) => postToMain({ type: 'gp:cursorMode', name: req.name, css: req.css }),
     });
 
+    // Route every natively-issued order (RMB move/attack/guard, order hotkeys,
+    // modal resolves, area attack, build placement) through
+    // widgetHandler:CommandNotify before it reaches the server — Recoil passes
+    // every GUI command through luaUI->CommandNotify first, so veto widgets
+    // (cmd_no_duplicate_orders, cmd_raw_move_issue, ...) must see these too. A
+    // truthy widget return consumes (vetoes) the send. Synchronous: the LuaUI
+    // runtime lives in this worker (dispatchCommandNotify is a direct Fengari
+    // call; it fails open — returns false — before the runtime boots).
+    {
+        const commandNotifier = (
+            cmdId: number, params: readonly number[], options: number,
+        ): boolean => dispatchCommandNotify(cmdId, params, options);
+        selection.setCommandNotifier(commandNotifier);
+        gpBuildPlacement.setCommandNotifier(commandNotifier);
+        gpCommandModes.setCommandNotifier(commandNotifier);
+    }
+    // PLAN-macro-ui.md §2/§5: shared shape-gesture capture for macro
+    // directives. Ground-picks off the same terrain mesh as WorkerCommandModes'
+    // pickGroundAt (duplicated here rather than exported private — cheap pure
+    // pick, no shared mutable state to entangle).
+    gpDirectiveCapture = new DirectiveShapeCapture(scene, gpCtx.connection!, {
+        getCamera: (viewId) => (viewId === 0 ? camera : null),
+        getDpr: () => gpDpr,
+        pickGround: (cssX, cssY, viewId) => {
+            if (viewId !== 0) return null;
+            const dpr = gpDpr;
+            const pick = scene.pick(cssX * dpr, cssY * dpr, (m) => m.name === 'terrain', false, camera);
+            return (pick?.hit && pick.pickedPoint) ? pick.pickedPoint : null;
+        },
+        onArmedChanged: (armed) => postToMain({ type: 'gp:directiveShapeArmed', armed }),
+        onResult: (result) => postToMain({ type: 'gp:directiveShapeResult', committed: result.committed }),
+    });
+
     // G3b: route Spring.SetActiveCommand (order menu → widget worker shim) into
     // the worker. Build commands (cmdId<0) arm ground placement (same as the
     // native BuildMenu); world-target commands (cmdId>0) arm a modal. Instant /
@@ -1629,6 +2068,7 @@ export function gpInit(msg: GpInitToWorker): void {
         // command / in-flight area-attack drag (Recoil CGuiHandler: RMB clears
         // the active command). Only when nothing is armed does RMB issue the
         // default context order (move / attack / guard).
+        if (gpDirectiveCapture?.isArmed) { gpDirectiveCapture.cancel(); return; }
         if (gpBuildPlacement?.isActive) { gpBuildPlacement.cancelBuildPlacement(); return; }
         if (gpCommandModes?.tryHandleRightClick()) return;
         selection.issueOrderAtScreen(x, y, mods.shift, 0);
@@ -1795,6 +2235,18 @@ function gpPostSceneState(now: number): void {
     // G4: ship the resolved factory-queue rows only when they changed.
     const factoryQueue = gpFactoryQueueDirty ? gpFactoryQueueTiles.slice() : undefined;
     gpFactoryQueueDirty = false;
+    // L-pre.3: sample the presentation clock for main's F10 timing overlay.
+    // The clock + connection are worker-resident, so this snapshot is the only
+    // way main can see them. Sent unconditionally (not dirty-gated): E/P move
+    // every frame, and this post is already throttled to ~10 Hz — 3× the rate
+    // the overlay redraws at.
+    const timing: GpTimingState | undefined = gpPresentationClock
+        ? {
+            ...gpPresentationClock.getStats(),
+            arrivalDeviations: [...gpPresentationClock.getArrivalDeviations()],
+            netSim: { ...(gpCtx.connection?.getNetSim() ?? { enabled: false, delayMs: 0, jitterMs: 0, lossProb: 0 }) },
+        }
+        : undefined;
     postToMain({
         type: 'gp:sceneState',
         selectedUnitIds: sel.slice(),
@@ -1817,6 +2269,7 @@ function gpPostSceneState(now: number): void {
         ...(buildOptions ? { buildOptions } : {}),
         ...(economy ? { economy } : {}),
         ...(factoryQueue ? { factoryQueue } : {}),
+        ...(timing ? { timing } : {}),
     });
 }
 
@@ -2075,6 +2528,71 @@ export function gpResize(width: number, height: number, dpr: number): void {
     if (dpr > 0) { gpDpr = dpr; gpCtx.selection?.setDpr(dpr); }
 }
 
+/**
+ * PLAN-quickstart.md §3.1 (Part B — detach). Park the session without tearing
+ * the worker down: close the game connection cleanly, stop the viewport pump,
+ * and pause the render loop via the existing `gpRenderPaused` gate (the same
+ * mechanism `window.test.pause()` uses — the rAF keeps firing but early-returns,
+ * so no scene/FX/interp work runs while parked). Everything else — engine,
+ * scene, loaded models, DefCache, renderers, LuaUI/JS UI state — stays alive so
+ * `gpResync` can return in well under a fresh boot. Idempotent: a second detach
+ * on an already-parked worker is a no-op.
+ */
+/** PlayerLeaveIntent / PlayerLeft / PlayerTeamEventItem reason value for a
+ *  detach (parked worker, may reconnect) — see protocol.fbs. */
+const LEAVE_REASON_DETACH = 3;
+
+export function gpDetach(): void {
+    if (gpParked) { postToMain({ type: 'gp:detached' }); return; }
+    gpParked = true;
+    if (gpViewportTimer) { clearInterval(gpViewportTimer); gpViewportTimer = null; }
+    // Tell the server why, THEN close cleanly. The reason lets PlayerRemoved
+    // distinguish detach from quit (PLAN-metalstorm-teams.md's consumer).
+    // Keep the Connection OBJECT (don't null it): gpResync re-`connect()`s the
+    // same instance so the selection/build/command controllers + CommandBuffer +
+    // ServerClock they captured at gpInit stay valid across the park.
+    gpCtx.connection?.sendPlayerLeaveIntent(LEAVE_REASON_DETACH);
+    gpCtx.connection?.disconnect();
+    gpRenderPaused = true;
+    postLog(1, '[gp] detached — session parked (worker alive, render + net paused)');
+    postToMain({ type: 'gp:detached' });
+}
+
+/**
+ * PLAN-quickstart.md §3.2 (Part B — resync). Re-enter a parked session: flush
+ * every *dynamic* renderer store (entities + interpolator, projectiles, combat
+ * FX) while keeping all *static* state (terrain, models, DefCache, lighting,
+ * UI), then re-open the game connection with the captured init creds. The fresh
+ * server-side ClientSession re-streams a full snapshot + re-pushes defs, which
+ * DefCache no-ops for already-known ids (idempotent by construction). The first
+ * full snapshot repacks entity instances from a clean base — no ghosts, no
+ * interpolation jump. `gpConnect` re-runs its onAuthenticated seeding (identity,
+ * viewport pump, LuaUI identity), so nothing else needs re-arming here.
+ */
+export function gpResync(token?: string): void {
+    if (!gpParked || !gpInitMsg || !gpCtx.connection) {
+        postLog(2, '[gp] gpResync called with no parked session — ignoring');
+        postToMain({ type: 'gp:resynced' });
+        return;
+    }
+    // Flush dynamic state (keep static: models, DefCache, terrain, lighting).
+    gpCtx.entityRenderer?.resetForResync();
+    gpCtx.projectileRenderer?.resetForResync();
+    gpCombatFX?.reset();
+    gpParked = false;
+    gpRenderPaused = false;
+    gpLastFrameTime = performance.now();
+    // Reconnect the SAME Connection object (its onAuthenticated is still wired,
+    // so it re-seeds identity + re-registers the viewport pump). A refreshed
+    // token overrides the parked one, which may have aged past the TTL. The
+    // fresh ClientSession re-streams a full snapshot + re-pushes defs; DefCache
+    // no-ops the dups and the first snapshot repacks entities from a clean base.
+    const t = token || gpInitMsg.token;
+    gpCtx.connection.connect(gpInitMsg.gameHttpUrl, gpInitMsg.username, '', t);
+    postLog(1, '[gp] resynced — reconnecting; full snapshot will repopulate the world');
+    postToMain({ type: 'gp:resynced' });
+}
+
 export function gpShutdown(): void {
     if (gpViewportTimer) { clearInterval(gpViewportTimer); gpViewportTimer = null; }
     rmlReset();  // PLAN-rml.md: drop the bridge op queue + runtime ref.
@@ -2108,6 +2626,7 @@ export function gpShutdown(): void {
     gpStandingOrderRenderer = null;
     gpLastCommandQueues = [];
     gpShiftHeld = false;
+    gpTrackingCamera = false;
     gpCtx.connection?.disconnect();
     gpCtx.connection = null;
     gpCtx.entityRenderer?.dispose();
@@ -2117,6 +2636,12 @@ export function gpShutdown(): void {
     gpDefCache?.clear();
     gpDefCache = null;
     gpPresentationClock = null;
+    // PLAN-latency L1: drop any events still queued on the presentation
+    // timeline (quit-to-lobby mid-explosion) — their closures capture the
+    // now-dead renderers/connection.
+    gpEventScheduler?.clear();
+    gpEventScheduler = null;
+    gpDrainedSoundEvents = [];
     // GW4-c5: weapon-FX / projectile / decal / build / feature modules.
     gpCtx.projectileRenderer?.dispose();
     gpCtx.projectileRenderer = null;
@@ -2144,6 +2669,8 @@ export function gpShutdown(): void {
     gpOrbitSavedView = null;
     gpSunRig = null;
     gpClipPlayer = null;
+    gpClipPolicy = null;
+    gpAimController = null;
     gpTerrainFog?.dispose();
     gpTerrainFog = null;
     gpTerrainMesh = null;
@@ -2158,6 +2685,11 @@ export function gpShutdown(): void {
     gpEngine = null;
     gpScene = null;
     gpCamera = null;
+    // PLAN-quickstart.md §3: drop the parked-session bookkeeping so a fresh
+    // gp:init after a real teardown never looks like a resync target.
+    gpParked = false;
+    gpInitMsg = null;
+    gpRenderPaused = false;
 }
 
 // ── GW8: window.test client-bound getBridge() ───────────────────────────────
@@ -2194,6 +2726,28 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
         // — entity position (interpolated, client-side) —
         case 'getEntityPosition':
             return gpCtx.entityRenderer?.getEntityPosition(num(0)) ?? null;
+        // — macro directive-shape capture (PLAN-macro-ui.md §2/§5) — same
+        //   cross-thread surface the org panel / scripting task 4 drive, minus
+        //   the postMessage hop; args: [directiveType, groupId, shape, opts] —
+        case 'armDirectiveShape':
+            gpDirectiveCapture?.arm(
+                { directiveType: num(0, 0), groupId: num(1, 0) },
+                obj<ShapeKind>(2, 'Point'),
+                obj(3, {}),
+            );
+            return null;
+        case 'cancelDirectiveShape':
+            gpDirectiveCapture?.cancel();
+            return null;
+        case 'directiveShapeState':
+            return { armed: gpDirectiveCapture?.isArmed ?? false, shape: gpDirectiveCapture?.armedShape ?? null };
+        case 'orgGroupCreate':
+            gpCtx.connection?.sendOrgGroupCreate(String(args[0] ?? ''), obj<number[]>(1, []));
+            return null;
+        case 'orgGroups':
+            return gpLastOrgGroups;
+        case 'directives':
+            return gpLastDirectives;
         // — per-envelope bandwidth tally (GW8 / PLAN-performance PC-2) —
         case 'netStats':
             return snapshotNetStats();
@@ -2205,6 +2759,65 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
         case 'perfReset':
             gpFrameProfiler.reset();
             return null;
+        // — per-def legacy entity-FX script cost (PLAN-fx-offload X5). Ranked
+        //   most-expensive-first, same shape/convention as uiProfileDump. —
+        case 'entityFxFenceDump':
+            return gpEntityFxFence.dump();
+        case 'entityFxFenceReset':
+            gpEntityFxFence.reset();
+            return null;
+        // — PLAN-client-resilience.md task 5: fault-injection verbs
+        //   (window.test.injectWorkerError(kind, opts)). The recovery ladder
+        //   (task 2) is untestable without a reliable way to trigger each of
+        //   task 1's detection paths on demand — this is that. Every kind
+        //   exercises a real detection hook rather than faking the report
+        //   directly, so a regression in the hook itself shows up too. —
+        case 'injectWorkerError': {
+            const kind = String(args[0] ?? '');
+            const opts = obj<Record<string, unknown>>(1, {});
+            switch (kind) {
+                case 'throw':
+                    // Escape this call's stack on a macrotask — throwing
+                    // synchronously here would just be caught by
+                    // lua-widget-worker.ts's gp:test try/catch and reported
+                    // as an ordinary test failure, never reaching
+                    // self.onerror (the hook under test). The
+                    // '[test.injectWorkerError]' message prefix is how the
+                    // onerror handler tells this apart from a real fatal.
+                    setTimeout(() => { throw new Error('[test.injectWorkerError] synthetic uncaught throw'); }, 0);
+                    return { ok: true };
+                case 'rejection':
+                    // A standalone rejected promise, deliberately not chained
+                    // off this gp:test call's own promise — a genuine
+                    // unhandledrejection.
+                    Promise.reject(new Error('[test.injectWorkerError] synthetic unhandled rejection'));
+                    return { ok: true };
+                case 'wedge-loop': {
+                    // Synchronously block the event loop for `opts.ms`
+                    // (default 8000 — past the watchdog's 2s×3 threshold,
+                    // then it self-clears) so postMessage/heartbeat pings
+                    // genuinely go unanswered: the one failure class
+                    // self.onerror structurally cannot catch (nothing throws;
+                    // the loop just never returns).
+                    const ms = typeof opts.ms === 'number' ? opts.ms : 8000;
+                    const until = performance.now() + ms;
+                    while (performance.now() < until) { /* intentional spin — do not optimise away */ }
+                    return { ok: true, spunMs: ms };
+                }
+                case 'context-loss': {
+                    if (!gpEngine) return { ok: false, error: 'engine not up' };
+                    const gl = getEngineGl(gpEngine);
+                    const ext = gl.getExtension('WEBGL_lose_context');
+                    if (!ext) return { ok: false, error: 'WEBGL_lose_context unavailable in this browser' };
+                    ext.loseContext();
+                    const restoreAfterMs = typeof opts.restoreAfterMs === 'number' ? opts.restoreAfterMs : 500;
+                    if (restoreAfterMs > 0) setTimeout(() => ext.restoreContext(), restoreAfterMs);
+                    return { ok: true };
+                }
+                default:
+                    return { ok: false, error: `unknown injectWorkerError kind '${kind}'` };
+            }
+        }
         // — per-widget LuaUI cost profile (PLAN-perf N1). start installs the
         //   Lua-side timing wrappers (widget-profiler.ts) and zeroes the JS
         //   fixed-tax accumulator; dump merges both into the P5-vs-Fengari
@@ -2257,9 +2870,10 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
         case 'cameraSaveSlot': cam?.saveSlot(num(0)); return null;
         case 'cameraLoadSlot': return cam?.loadSlot(num(0), num(1)) ?? false;
         case 'setTrackingCamera':
-            // DEFERRED (GW8): the tracking-camera state machine lived on the
-            // main-thread InputManager; not yet ported to the worker camera.
-            postLog(2, '[gp:test] setTrackingCamera not yet wired in the worker — ignoring');
+            // Programmatic tracking toggle (scenarios: weapon-fx /
+            // weapon-showcase). Same state machine as the `T` hotkey — the
+            // view-0 camera refits to the live selection every render frame.
+            gpSetTrackingCamera(Boolean(args[0]));
             return null;
         // — composite: resolve unit position(s) worker-side, then frame —
         case 'focusUnit': {
@@ -2391,14 +3005,24 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
                             : known.length ? `has: ${known.join(', ')}` : 'model has no clips'),
                 };
             }
-            if (!gpClipPlayer) gpClipPlayer = new ClipPlayer(r);
-            return gpClipPlayer.play(unitId, resolved.clip, resolved.restLocals, obj(2, {}));
+            const player = gpEnsureClipPlayer(r);
+            // The harness owns this unit until stopClip — the movement policy
+            // must not fight the F8 buttons on a unit that is also driving.
+            gpClipPolicy?.markManual(unitId);
+            return player.play(unitId, resolved.clip, resolved.restLocals, obj(2, {}));
         }
-        case 'stopClip':
-            gpClipPlayer?.stop();
+        // No unitId → release every unit back to the movement policy (the
+        // long-standing no-arg semantics the model-viewer scenarios rely on).
+        case 'stopClip': {
+            const unitId = args[0] === undefined ? undefined : num(0);
+            gpClipPolicy?.clearManual(unitId);
+            gpClipPlayer?.stop(unitId);
             return null;
+        }
         case 'clipState':
-            return gpClipPlayer?.state() ?? null;
+            return (args[0] === undefined
+                ? gpClipPlayer?.state()
+                : gpClipPlayer?.state(num(0))) ?? null;
         // — screenshot: OffscreenCanvas → PNG data URL (no FileReader in workers) —
         case 'screenshot': {
             const canvas = gpEngine?.getRenderingCanvas() as OffscreenCanvas | null;
@@ -2486,10 +3110,14 @@ export function gpHandlePointerMove(x: number, y: number, buttons: number, mods:
         gpOrbitRig!.pointerMove(x, y);
     } else {
         gpViewCameras.get(viewId)?.pointerMove(x, y, buttons);
+        // PLAN-macro-ui.md §2/§5: an armed directive-shape capture owns the
+        // pointer exclusively (no build ghost, no selection drag-box
+        // underneath), same convention as an in-flight area-attack drag.
         // PLAN-playable.md G3a/G3b: an armed build placement drives its ghost; an
         // in-flight area-attack / waypoint drag drives its overlay; otherwise the
         // pointer feeds selection hover / drag-box.
-        if (gpBuildPlacement?.isActive) gpBuildPlacement.pointerMove(x, y, buttons, mods, viewId);
+        if (gpDirectiveCapture?.isArmed) gpDirectiveCapture.pointerMove(x, y, viewId);
+        else if (gpBuildPlacement?.isActive) gpBuildPlacement.pointerMove(x, y, buttons, mods, viewId);
         else if (gpCommandModes?.isDragging) gpCommandModes.pointerMove(x, y, buttons, mods, viewId);
         else gpCtx.selection?.pointerMove(x, y, buttons, mods, viewId);
     }
@@ -2508,6 +3136,10 @@ export function gpHandlePointerDown(x: number, y: number, button: number, mods: 
     }
     gpViewCameras.get(viewId)?.pointerDown(x, y, button, mods);
     if (consumed) return;
+    // PLAN-macro-ui.md §2/§5: an armed directive-shape capture consumes every
+    // left click while armed (vertex placement / circle-drag start), ahead of
+    // build placement and selection.
+    if (button === 0 && gpDirectiveCapture?.pointerDown(x, y, viewId)) return;
     // PLAN-playable.md G3a: a left-click during build placement captures the
     // click for placement (Spring's "active build command → LMB to place"),
     // before it can reach unit selection / drag-box (input-manager.onLeftDown).
@@ -2526,6 +3158,9 @@ export function gpHandlePointerUp(x: number, y: number, button: number, mods: nu
         return;
     }
     gpViewCameras.get(viewId)?.pointerUp(x, y, button, mods);
+    // PLAN-macro-ui.md §2/§5: release completes a Circle drag / freehand
+    // Polyline / arrow while a directive-shape capture is armed.
+    if (button === 0 && gpDirectiveCapture?.pointerUp()) return;
     // G3a: commit the build placement if one is armed (consumes the release).
     if (gpBuildPlacement?.pointerUp(x, y, button, mods, viewId)) return;
     // G3b: commit an area-attack / waypoint drag, or resolve an armed modal on a
@@ -2536,6 +3171,9 @@ export function gpHandlePointerUp(x: number, y: number, button: number, mods: nu
 }
 
 export function gpHandleWheel(x: number, y: number, delta: number, viewId: number): void {
+    // PLAN-macro-ui.md §2 arrow row: wheel adjusts Polyline/Arrow frontage
+    // instead of camera zoom while a shape capture is armed.
+    if (gpDirectiveCapture?.wheel(delta)) return;
     if (gpOrbitOwnsView(viewId)) {
         gpOrbitRig!.wheel(delta);
     } else {
@@ -2544,14 +3182,101 @@ export function gpHandleWheel(x: number, y: number, delta: number, viewId: numbe
     gpDispatchMouseWheel(delta < 0, -delta);
 }
 
+/// Spring's classic `+`/`-` sim-speed ladder (ports the deleted input-manager's
+/// bumpSimSpeed). Steps from the last server-reported speed (gpSimSpeed) and
+/// sends the new value via the same ConsoleCommand channel the debug console
+/// uses; the server broadcasts the applied state back through GameInfo.
+const GP_SPEED_LADDER = [0.1, 0.2, 0.5, 1, 2, 3, 5, 8, 10, 20, 50, 100];
+function gpBumpSimSpeed(dir: 1 | -1): void {
+    const cur = gpSimSpeed;
+    let next = cur;
+    if (dir > 0) {
+        for (const v of GP_SPEED_LADDER) { if (v > cur + 1e-3) { next = v; break; } }
+    } else {
+        for (let i = GP_SPEED_LADDER.length - 1; i >= 0; i--) {
+            if (GP_SPEED_LADDER[i] < cur - 1e-3) { next = GP_SPEED_LADDER[i]; break; }
+        }
+    }
+    if (Math.abs(next - cur) < 1e-3) return;
+    gpCtx.connection?.sendConsoleCommand('server', `speed ${next}`);
+}
+
+/// Toggle the tracking camera (`T` / window.test.setTrackingCamera). While on,
+/// gpRefitTrackingCamera runs every render frame; switching it on snaps once
+/// immediately so the toggle has visible effect even when nothing moves.
+function gpSetTrackingCamera(on: boolean): void {
+    gpTrackingCamera = on;
+    if (on) gpRefitTrackingCamera();
+}
+
+/// Refit the view-0 camera to the live selection (tracking camera). Reads the
+/// interpolated positions from EntityRenderer and asks the RTS camera to frame
+/// them — the same padding/pitch the deleted input-manager's refitTrackingNow
+/// used. No-ops when nothing is selected or no position is known yet.
+function gpRefitTrackingCamera(): void {
+    const cam = gpViewCameras.get(0);
+    const er = gpCtx.entityRenderer;
+    const sel = gpCtx.selection?.selection ?? [];
+    if (!cam || !er || sel.length === 0) return;
+    const pts: { x: number; y: number; z: number }[] = [];
+    for (const id of sel) {
+        const p = er.getEntityPosition(id);
+        if (p) pts.push(p);
+    }
+    if (pts.length === 0) return;
+    cam.fitPoints(pts, { padding: 1.6, pitchDeg: 55, durationMs: 0 });
+}
+
+/// Global sim-control hotkeys, ported from the deleted main-thread
+/// input-manager (setupKeyboardHandler's "global hotkeys" block): `+`/`-` step
+/// the sim-speed ladder, `\` resets to 1× (an old Spring binding), Pause
+/// toggles the server pause, `T` toggles the tracking camera (Spring binds
+/// Backspace; `T` because Backspace is browser back-nav). Guarded on no
+/// ctrl/alt/meta — shift is allowed since `+` is shift-`=` on US layouts (the
+/// physical-key codes make the layout point moot, but the guard semantics
+/// match the original). The old "ignore while typing in an input" guard lives
+/// on main: CameraInput skips key events targeted at INPUT/TEXTAREA, so they
+/// never reach this worker. Returns true when the key was consumed.
+function gpHandleGlobalHotkey(code: string, mods: number): boolean {
+    if ((mods & (2 | 4 | 8)) !== 0) return false;
+    switch (code) {
+        case 'Equal':          // '+' (shift-'=') and '='
+        case 'NumpadAdd':
+            gpBumpSimSpeed(+1);
+            return true;
+        case 'Minus':          // '-' and '_'
+        case 'NumpadSubtract':
+            gpBumpSimSpeed(-1);
+            return true;
+        case 'Backslash':
+            gpCtx.connection?.sendConsoleCommand('server', 'speed 1');
+            return true;
+        case 'Pause':
+            gpCtx.connection?.sendConsoleCommand('server', gpPaused ? 'unpause' : 'pause');
+            return true;
+        case 'KeyT':
+            gpSetTrackingCamera(!gpTrackingCamera);
+            return true;
+    }
+    return false;
+}
+
 export function gpHandleKeyDown(code: string, mods: number, viewId: number): void {
     if (!gpOrbitOwnsView(viewId)) gpViewCameras.get(viewId)?.keyDown(String(code).toLowerCase());
     gpSetShift((mods & 1) !== 0);
-    // PLAN-playable.md G3b: order hotkeys (modal arms m/a/f/p/g/r/e/c/x/d/l/u +
-    // instant s/w/h/q/i). A convenience layer over the faithful SetActiveCommand
-    // path (see worker-command-modes header); fires alongside the LuaUI KeyPress
-    // dispatch. No WASD binding, so no conflict with the camera's arrow movement.
-    gpCommandModes?.handleOrderKey(String(code), mods);
+    // PLAN-macro-ui.md §2: Enter finishes a click-chained Polyline/Polygon
+    // directive-shape capture early (without closing a polygon on vertex 0).
+    if (code === 'Enter' || code === 'NumpadEnter') gpDirectiveCapture?.finish();
+    // Global sim-control hotkeys (+/-/\ sim speed, Pause, T tracking camera)
+    // run first and consume the key when they fire; they must work without a
+    // selection, unlike the order hotkeys below.
+    if (!gpHandleGlobalHotkey(String(code), mods)) {
+        // PLAN-playable.md G3b: order hotkeys (modal arms m/a/f/p/g/r/e/c/x/d/l/u +
+        // instant s/w/h/q/i). A convenience layer over the faithful SetActiveCommand
+        // path (see worker-command-modes header); fires alongside the LuaUI KeyPress
+        // dispatch. No WASD binding, so no conflict with the camera's arrow movement.
+        gpCommandModes?.handleOrderKey(String(code), mods);
+    }
     gpDispatchKeyPress(codeToSpringKeysym(String(code)), mods);
 }
 
@@ -2595,4 +3320,59 @@ export function gpHandleCancelBuildPlacement(): void {
 /// build-ghost cancel + the quit dialog).
 export function gpHandleCancelCommandMode(): void {
     gpCommandModes?.cancelAll();
+}
+
+// ── Macro command & control (PLAN-macro-orders / PLAN-macro-directives / ──
+// PLAN-macro-ui.md §1-§2) — org-panel / hotkey requests cross the worker
+// boundary the same way build placement does; each handler just forwards
+// the validated request onto the Connection (server is the source of truth,
+// no client-side optimistic org-group/directive state).
+
+export function gpHandleOrgGroupCreate(name: string, memberIds: number[]): void {
+    gpCtx.connection?.sendOrgGroupCreate(name, memberIds);
+}
+
+export function gpHandleOrgGroupUpdate(groupId: number, addIds: number[], removeIds: number[], name?: string): void {
+    gpCtx.connection?.sendOrgGroupUpdate(groupId, addIds, removeIds, name ?? '');
+}
+
+export function gpHandleOrgGroupDisband(groupId: number): void {
+    gpCtx.connection?.sendOrgGroupDisband(groupId);
+}
+
+export function gpHandleGroupPosture(groupId: number, postureJson: string): void {
+    gpCtx.connection?.sendGroupPosture(groupId, postureJson);
+}
+
+export function gpHandleGroupDirectiveUpdate(msg: GpGroupDirectiveUpdateToWorker): void {
+    gpCtx.connection?.sendGroupDirective(msg.directiveId, msg.groupId, msg.directiveType, msg.shape, msg.params,
+        { priority: msg.priority, requestedStrength: msg.requestedStrength, active: msg.active });
+}
+
+export function gpHandleGroupDirectiveRemove(directiveId: number): void {
+    gpCtx.connection?.sendGroupDirectiveRemove(directiveId);
+}
+
+/// Org panel row click → world selection (PLAN-macro-ui.md §1: selecting a
+/// group resolves to its roster for highlight purposes). Reads the cached
+/// snapshot from the last OrgGroupState push rather than round-tripping.
+export function gpHandleSelectOrgGroup(groupId: number): void {
+    const group = gpLastOrgGroups.find((g) => g.groupId === groupId);
+    if (group) gpCtx.selection?.setSelectionExternal(group.memberIds);
+}
+
+/// Cross-thread arm surface for the shared gesture-capture library
+/// (PLAN-macro-ui.md §2/§5) — an org-panel "paint directive" button or
+/// metalstorm-scripting task 4's map-arm integration drives this instead of
+/// a worker-internal hotkey, without duplicating gesture logic.
+export function gpHandleArmDirectiveShape(msg: GpArmDirectiveShapeToWorker): void {
+    gpDirectiveCapture?.arm(
+        { directiveType: msg.directiveType, groupId: msg.groupId, priority: msg.priority, requestedStrength: msg.requestedStrength },
+        msg.shape,
+        { freehand: msg.freehand, arrow: msg.arrow },
+    );
+}
+
+export function gpHandleCancelDirectiveShape(): void {
+    gpDirectiveCapture?.cancel();
 }

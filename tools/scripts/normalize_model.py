@@ -23,8 +23,9 @@ and omit --input:
     blender source.blend --background --python tools/scripts/normalize_model.py -- \\
         --output data/games/metalstorm/objects3d/ms_tanks_s2.glb ...
 
-Pipeline steps (§6), each a function below so the validation harness
-(tools/scripts/validate_model.mjs) can be pointed at intermediate output:
+Pipeline steps (§6), each a function below so a validation harness
+(client/src/core/model-validate.ts via vitest) can be pointed at
+intermediate output:
 
   1. import (or use the already-open .blend scene)
   2. RH orient        — delegated to Blender's own glTF exporter (Y-up,
@@ -55,7 +56,8 @@ Pipeline steps (§6), each a function below so the validation harness
 The engine-metadata step (piece tree / AABB / bounding sphere, embedded via
 the `SPRINGRTS_geometry` glTF extension) is NOT done here — it's
 `tools/modelimporter`'s job, run as a separate pass on this script's output
-(see validate_model.mjs's engine-load-smoke step, which does exactly that).
+(see the modelimporter round-trip test in model-validate.test.ts, which
+does exactly that).
 `ModelConfigLoader` (rts/Sim/Objects/ModelConfigLoader.h) reads geometry
 metadata straight off the `.glb`; there is no separate per-model sidecar
 file to hand-author (some older docs call this a `.meta.lua` sidecar — that
@@ -344,7 +346,7 @@ def decimate_to_budget(tri_budget):
     print(f'[normalize] decimated {current} -> {after} tris (target {tri_budget}, ratio {ratio:.3f})')
     if after > tri_budget:
         print(f'[normalize] WARNING: still over budget after one decimate pass '
-              f'({after} > {tri_budget}) — validate_model.mjs will flag this; '
+              f'({after} > {tri_budget}) — the model validator will flag this; '
               f'consider a lower --tri-budget input or manual retopology')
 
 

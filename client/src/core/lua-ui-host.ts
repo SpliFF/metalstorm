@@ -27,6 +27,7 @@ import {
     type SpringAPIContext,
     type LiveState,
     type UnitEntry,
+    type ProjectileEntry,
 } from './lua-spring-api.js';
 import type { CombatEventInfo, FeatureSpawnInfo, SoundRefInfo } from './connection.js';
 import { SoundCategory } from './sound-events.js';
@@ -83,7 +84,24 @@ let logDropCount = 0;
 // Track repeated messages to suppress spamming widgets.
 const recentMsgs = new Map<string, number>();
 
+// PLAN-client-resilience.md task 3: the last ~50 log lines, kept independent
+// of the rate-limit/dedup below (a report needs "what just happened" even
+// during a log storm that's being suppressed downstream). Every postLog()
+// call pushes here first, before any rate-limit check.
+const LOG_RING_CAP = 64;
+const logRing: string[] = [];
+const LEVEL_TAGS = ['DEBUG', 'INFO', 'NOTICE', 'WARN', 'ERROR', 'FATAL'];
+
+/** Last `n` log lines (oldest first), formatted `[LEVEL] message`. Feeds the
+ *  client-error-telemetry payload's `logRing` field. */
+export function getRecentLogLines(n = 50): string[] {
+    return logRing.slice(-n);
+}
+
 export function postLog(level: number, msg: string): void {
+    logRing.push(`[${LEVEL_TAGS[level] ?? level}] ${msg}`);
+    if (logRing.length > LOG_RING_CAP) logRing.shift();
+
     // Suppress exact-duplicate messages (e.g. Key Unbinder spam).
     // Allow the first occurrence and then once every 100 repeats.
     const count = (recentMsgs.get(msg) ?? 0) + 1;
@@ -359,6 +377,7 @@ export interface MinimalWeaponDefWire {
     typeName?: string; description?: string;
     defaultDamage?: number; damages?: number[];
     reloadTime?: number; salvoSize?: number; salvoDelay?: number;
+    expectedDps?: number;
     accuracy?: number; sprayAngle?: number; movingAccuracy?: number;
     targetMoveError?: number; leadLimit?: number;
     edgeEffectiveness?: number;
@@ -630,6 +649,7 @@ function buildLuaWeaponDef(d: MinimalWeaponDefWire): Record<string, LuaValue> {
         reloadTime: d.reloadTime ?? 0,
         salvoSize: d.salvoSize ?? 0,
         salvoDelay: d.salvoDelay ?? 0,
+        expectedDps: d.expectedDps ?? 0,
         accuracy: d.accuracy ?? 0,
         sprayAngle: d.sprayAngle ?? 0,
         movingAccuracy: d.movingAccuracy ?? 0,
@@ -1112,6 +1132,8 @@ export async function init(
                 // `flight_time` (seconds) ≈ projectile ttl; 0 when the def has no
                 // fixed lifetime. Faithful enough for the display widgets.
                 ttl: w.flightTime ?? 0,
+                // Computed expected DPS (tuning-honesty; PLAN-macro-combat §4).
+                expectedDps: w.expectedDps ?? 0,
             };
         },
         getUnitDefFootprint: (defId) => {
@@ -5793,6 +5815,47 @@ export function setMusicStreamTime(played: number, duration: number): void {
  *  stops spamming on failure. */
 export function setLuaUiActiveFalse(): void {
     gpCtx.luaUiActive = false;
+}
+
+/// Scratch id-set for updateLiveProjectiles' sweep; module-level so the
+/// per-frame mirror allocates nothing.
+const projectileSeen = new Set<number>();
+
+/** Mirror the ProjectileRenderer's live projectiles + beams into
+ *  `liveState.projectiles`, backing the Spring.GetProjectile* read family
+ *  (the A3 seam — PLAN-latency-impl.md L-pre.1). Called once per render frame
+ *  from the game-processor loop; entries are updated in place (not rebuilt) so
+ *  a busy field costs field writes rather than Map/object churn. Ids absent
+ *  from the snapshot are swept — a projectile that impacted is gone from Lua's
+ *  view on the same frame it leaves the renderer. */
+export function updateLiveProjectiles(snapshot: ReadonlyArray<ProjectileEntry & { id: number }>): void {
+    const map = liveState.projectiles;
+    projectileSeen.clear();
+    for (const p of snapshot) {
+        projectileSeen.add(p.id);
+        const e = map.get(p.id);
+        if (e) {
+            e.defId = p.defId;
+            e.x = p.x; e.y = p.y; e.z = p.z;
+            e.vx = p.vx; e.vy = p.vy; e.vz = p.vz;
+            e.ttl = p.ttl;
+            e.isBeam = p.isBeam;
+        } else {
+            map.set(p.id, {
+                defId: p.defId,
+                x: p.x, y: p.y, z: p.z,
+                vx: p.vx, vy: p.vy, vz: p.vz,
+                ttl: p.ttl, isBeam: p.isBeam,
+            });
+        }
+    }
+    // Every snapshot id is now in the map, so map ⊇ seen: equal sizes ⇒ equal
+    // sets ⇒ nothing to sweep. Only walk the keys when something died.
+    if (map.size !== projectileSeen.size) {
+        for (const id of map.keys()) {
+            if (!projectileSeen.has(id)) map.delete(id);
+        }
+    }
 }
 
 // ── GP-seam state that lives here because it's only used in installEngineGlobals ──

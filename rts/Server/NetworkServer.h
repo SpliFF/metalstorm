@@ -72,11 +72,15 @@ using HttpPostHandler = std::function<HttpResponse(const std::string& url, const
 /// TokenRequired/AdminOnly/LocalhostOrAdmin are checked by NetworkServer
 /// itself in DispatchPost *before* the handler runs (belt-and-braces on top
 /// of whatever the handler does internally for its own business logic, e.g.
-/// resolving which user is acting). GET handlers (`HttpGetHandler`) never
-/// received headers/Authorization in this codebase and no currently-open GET
-/// route needs auth, so for GET the tag is classification/documentation only
-/// — not runtime-enforced. If a future GET route needs real auth, extend
-/// `HttpGetHandler` to carry headers first.
+/// resolving which user is acting). GET handlers (`HttpGetHandler`) still never
+/// receive headers/Authorization, so a non-Public GET route is enforced as
+/// **loopback-only** in DispatchGet (PLAN-security-hardening G12): the token
+/// half of TokenRequired/AdminOnly/LocalhostOrAdmin can't be checked without a
+/// header, so the tag degrades to the strongest forgery-proof check available —
+/// `remoteIsLoopback`. That is exactly what `/api/processes` (LocalhostOrAdmin)
+/// needs. A GET route that requires real token/role auth must be converted to
+/// POST (or `HttpGetHandler` extended to carry headers) — loopback-only is the
+/// ceiling for GET today.
 enum class RouteAuth {
     Public,           ///< No auth check.
     TokenRequired,     ///< Any valid session token (Bearer or Basic).

@@ -9,8 +9,10 @@
 #include "Sim/Misc/GroundBlockingObjectMap.h"
 #include "Sim/MoveTypes/MoveDefHandler.h"
 #include "Sim/MoveTypes/MoveType.h"
+#include "Sim/MoveTypes/FootprintProfile.h"
 #include "Sim/Objects/SolidObject.h"
 #include "Sim/Units/Unit.h"
+#include "Sim/Units/UnitDef.h"
 #include "System/Platform/Threading.h"
 
 #include "System/Misc/TracyDefs.h"
@@ -304,6 +306,28 @@ CMoveMath::BlockType CMoveMath::ObjectBlockType(const CSolidObject* collidee, co
 	// mobile obstacle, must be a unit
 	const CUnit* u = static_cast<const CUnit*>(collidee);
 	const AMoveType* mt = u->moveType;
+
+	// Metalstorm footprint permeability (PLAN-metalstorm-flow §3, engine ask F2):
+	// a large unit with an authored footprint profile lets permitted small move
+	// classes thread UNDER its hull (non-blocking) while it is moving or stopped,
+	// and hard-blocks them only during its turn-in-place. The profile pointer is
+	// null for every unit that declares no customparams.footprint_profile — i.e.
+	// all BAR/ZK units — so this branch is inert there and classification stays
+	// byte-identical. NB: the graded ×2 movement COST the plan pairs with this
+	// (kUnderpassCostMult) is deferred to F2b — the pathing cost layer still
+	// treats the pass as free for now (a called-out interim divergence).
+	if (u->unitDef->footprintProfile != nullptr && collider->moveDef != nullptr) {
+		using footprint::HullMotion;
+		const HullMotion motion =
+			mt->IsTurningInPlace() ? HullMotion::TurningInPlace :
+			u->IsMoving()          ? HullMotion::Moving :
+			                         HullMotion::Stopped;
+
+		if (u->unitDef->footprintProfile->PassabilityFor(collider->moveDef->pathType, motion)
+				== footprint::Passability::PassableWithCost)
+			return BLOCK_NONE;
+		// otherwise Solid → fall through to the normal classification below
+	}
 
 	// if moving, unit is probably following a path
 	if (u->IsMoving())

@@ -9,6 +9,7 @@
 #include "Sim/Units/CommandAI/Command.h"
 #include "Sim/Misc/TeamHandler.h"
 #include "System/EventHandler.h"
+#include "OrgGroups.h"
 
 #include <algorithm>
 
@@ -114,6 +115,10 @@ static bool UnitIsIdle(const CUnit* unit)
 static bool PassesConditions(const CUnit* unit, const StandingOrderConditions& c)
 {
     if (c.idleOnly && !UnitIsIdle(unit)) return false;
+
+    // Org-group scope (macro-orders §4.2, the A+C fusion): a group-scoped
+    // standing order draws only from that group's roster.
+    if (c.orgGroup != 0 && !orgGroups.IsMember(c.orgGroup, unit->id)) return false;
 
     if (!c.squadTypes.empty()) {
         const uint16_t def = unit->unitDef ? static_cast<uint16_t>(unit->unitDef->id) : 0;

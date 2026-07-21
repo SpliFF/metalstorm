@@ -477,12 +477,17 @@ if(TEST_SOURCES)
         ${CMAKE_SOURCE_DIR}/rts/Server/ProjectileEventCollector.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/SoundEventCollector.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/StandingOrders.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/OrgGroups.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/NetworkServer.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/Database.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GameOverState.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GameMetrics.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GmRollback.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GameServersDb.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/HeadlessRun.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/StatsDump.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/AI/AIScriptContext.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/AI/AICommandQueue.cpp
     )
     target_include_directories(spring-tests PRIVATE
         ${CMAKE_SOURCE_DIR}/rts
@@ -493,6 +498,9 @@ if(TEST_SOURCES)
         ${GENERATED_DIR}
     )
     target_link_libraries(spring-tests PRIVATE lua smmalloc ZLIB::ZLIB doctest::doctest springlog nlohmann_json::nlohmann_json openssl_crypto nghttp2_static SQLite3::SQLite3)
+    # Absolute path to the source tree so tests can open checked-in fixtures
+    # (e.g. the strategos AI plugin) regardless of the ctest working dir.
+    target_compile_definitions(spring-tests PRIVATE SPRING_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
     if(UNIX AND NOT APPLE)
         target_link_libraries(spring-tests PRIVATE pthread dl)
     elseif(APPLE)

@@ -81,6 +81,39 @@ return {
         soundstart = "mg_burst",
     },
 
+    -- Metalstorm Model-1 statistical-combat test vector
+    -- (PLAN-metalstorm-combat-resolution.md §8 task 6). Spawns NO projectile:
+    -- the volley is rolled server-side at fire time, damage applied at
+    -- resolve frame, and a VolleyOutcome event streamed to the client (which
+    -- invents tracers + impacts). Long range (> the stat tank's 500 sight)
+    -- so a firer outside the target team's LOS trips the counterbattery
+    -- red-blip reveal. The `resolution = "statistical"` customParam is the
+    -- opt-in flag; the rest of customParams are StatCombat::Tuning knobs.
+    PT_STATCANNON = {
+        name = "Statistical Cannon",
+        weapontype = "Cannon",
+        range = 900,
+        -- weaponVelocity still required for the ballistic RANGE calc even
+        -- though no projectile is spawned; also sets the resolve-frame flight
+        -- time (dist / velocity, clamped to 2s).
+        weaponvelocity = 400,
+        reloadtime = 2.0,
+        accuracy = 100,
+        areaofeffect = 48,
+        turret = true,
+        damage = {
+            default = 100,
+        },
+        soundstart = "cannon_arty",
+        customparams = {
+            resolution            = "statistical",
+            stat_base_accuracy    = "0.7",  -- ~70% hits point-blank -> visible hit/miss mix
+            stat_accuracy_falloff = "1.0",
+            stat_move_penalty     = "0.5",
+            stat_height_bonus     = "0.15",
+        },
+    },
+
     PT_FLAK = {
         name = "Flak Gun",
         weapontype = "Cannon",

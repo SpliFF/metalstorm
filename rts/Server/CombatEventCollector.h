@@ -9,6 +9,7 @@
 #include "Server/DebugFlags.h"
 #include "System/SpringLog/SpringLog.h"
 #include <cstdint>
+#include <map>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -59,6 +60,101 @@ private:
 
 /// Global combat event collector, accessible from weapon code.
 extern CombatEventCollector combatEvents;
+
+/// Per-weapon-def combat totals for a single weapon def, accumulated across
+/// every event the collector has seen (PLAN-headless task 2 "combat totals
+/// (volleys, damage by def)").
+struct CombatWeaponTotals {
+    uint32_t volleys = 0;   // one per hit/miss/blocked/kill event resolved
+    uint32_t kills = 0;
+    float damage = 0.0f;
+};
+
+/// Running per-weapon-def combat totals, fed alongside the existing
+/// per-tick `combatEvents.Drain()` (StateStreamer::BroadcastCombatEvents) so
+/// a headless run keeps aggregate stats even with zero connected clients to
+/// broadcast to. Cheap (one map lookup + 2 adds per event) so it stays live
+/// unconditionally rather than threading a headless-only flag through
+/// StateStreamer.
+class CombatStatsAccumulator {
+public:
+    void Accumulate(const std::vector<CombatEventData>& events) {
+        std::lock_guard<std::mutex> lock(mutex);
+        for (const auto& e : events) {
+            auto& t = byWeapon[e.weaponDefId];
+            t.volleys++;
+            t.damage += e.damage;
+            if (e.result == 3)
+                t.kills++;
+        }
+    }
+
+    std::map<uint16_t, CombatWeaponTotals> Snapshot() const {
+        std::lock_guard<std::mutex> lock(mutex);
+        return byWeapon;
+    }
+
+private:
+    mutable std::mutex mutex;
+    std::map<uint16_t, CombatWeaponTotals> byWeapon;
+};
+
+extern CombatStatsAccumulator combatStats;
+
+/// Metalstorm statistical-combat (Model 1) per-volley outcome, collected
+/// as each pending volley resolves (StatisticalCombatManager::Update) and
+/// drained per tick by StateStreamer::BroadcastCombatEvents. The visibility
+/// matrix (Hit/Miss vs Unknown, counterbattery reveal) is applied per-session
+/// there, not here — this carries the un-filtered ground truth.
+/// `result` is 0=hit, 1=miss (pre-filter). `posture` is the attacker's
+/// derived-morale posture: 0=normal, 1=retreat, 2=panic. `targetTeam` is 255
+/// when the volley had no unit target (position-only).
+struct VolleyOutcomeData {
+    uint32_t attackerId;   // 0 if the volley had no live attacker id
+    uint8_t  attackerTeam;
+    uint16_t weaponDefId;
+    uint32_t targetId;     // 0 if position-only / target gone
+    uint8_t  targetTeam;   // 255 if no unit target
+    float3   targetPos;    // impact position (FX + squad casualty hint)
+    float3   attackerPos;  // firing position (counterbattery radar-blip source)
+    uint32_t resolveFrame;
+    uint8_t  result;       // 0=hit, 1=miss, 2=unknown (2 only after per-session filtering)
+    float    damage;
+    uint8_t  rounds;
+    uint8_t  posture;      // 0=normal, 1=retreat-while-firing, 2=panic
+    // Counterbattery reveal — set only on the per-session copy in StateStreamer
+    // for the victim's team when it cannot see the attacker (Q-D-c). Ground
+    // truth pushed by the sim always leaves these default.
+    bool     revealAttacker = false;
+    float3   revealPos;    // attacker firing position for the radar blip
+};
+
+class VolleyOutcomeCollector {
+public:
+    void Push(const VolleyOutcomeData& event) {
+        std::lock_guard<std::mutex> lock(mutex);
+        events.push_back(event);
+    }
+
+    std::vector<VolleyOutcomeData> Drain() {
+        std::lock_guard<std::mutex> lock(mutex);
+        std::vector<VolleyOutcomeData> drained;
+        drained.swap(events);
+        return drained;
+    }
+
+    size_t Size() const {
+        std::lock_guard<std::mutex> lock(mutex);
+        return events.size();
+    }
+
+private:
+    mutable std::mutex mutex;
+    std::vector<VolleyOutcomeData> events;
+};
+
+/// Global statistical-combat volley-outcome collector.
+extern VolleyOutcomeCollector volleyOutcomes;
 
 /// Tracks unit deaths for EntityDestroy broadcast.
 ///

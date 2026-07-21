@@ -59,6 +59,12 @@ export interface FxEmitter {
     size?: number | [number, number];
     speed?: number | [number, number];
     spread?: string;             // sphere | hemisphere | disc | cone:<deg>
+    /** Spawn-POSITION scatter (elmos): number = sphere radius, triple =
+     *  half-extents of an axis-aligned box. Distinct from `spread`, which
+     *  scatters velocity DIRECTION. Needed for area effects — building
+     *  collapse dust, dreadnought hull explosions, suppression fields —
+     *  and costs no shader change (iPosLife is already per-instance). */
+    posSpread?: number | [number, number, number];
     gravity?: number;
     stretch?: number;
     rot?: [number, number];
@@ -87,7 +93,13 @@ export interface FxEmitter {
 }
 
 export interface FxEffectDef {
-    usage?: 'muzzle' | 'projectile' | 'trail' | 'impact';
+    /** Authoring hint for consumers + the fx-viewer default mode:
+     *  muzzle/projectile/trail/impact are weapon-slot usages (weapon-fx.json);
+     *  'death' marks unit-death effects (unit-fx.json `death` slot);
+     *  'attached' marks binding-driven continuous emitters (damage smoke,
+     *  dust trails, wakes, thruster/burning loops — retriggered by the
+     *  binding interpreter, not fired by a weapon). */
+    usage?: 'muzzle' | 'projectile' | 'trail' | 'impact' | 'death' | 'attached';
     alias?: string;
     emitters?: FxEmitter[];
     _doc?: string | string[];
@@ -213,11 +225,16 @@ export function effectsUsingShader(lib: FxLibrary, shader: ShaderKind | null): s
     return names.sort();
 }
 
-/** Default harness mode for an effect (fx-viewer `?mode=` fallback). */
-export function defaultModeForUsage(usage: FxEffectDef['usage']): 'muzzle' | 'projectile' | 'impact' {
+/** Default harness mode for an effect (fx-viewer `?mode=` fallback).
+ *  'attached' emitters map to loop mode — continuous retrigger at a point
+ *  is exactly how the binding interpreter drives them in-game. */
+export function defaultModeForUsage(
+    usage: FxEffectDef['usage'],
+): 'muzzle' | 'projectile' | 'impact' | 'loop' {
     if (usage === 'muzzle') return 'muzzle';
     if (usage === 'projectile' || usage === 'trail') return 'projectile';
-    return 'impact';
+    if (usage === 'attached') return 'loop';
+    return 'impact';   // impact, death, and anything unhinted
 }
 
 /** Weapon → slots via the documented resolution order: exact weapon entry →
@@ -273,6 +290,27 @@ export function sampleSpread(
     }
 
     return [dx, dy, dz];
+}
+
+/** Spawn-position offset for `posSpread` — uniform in a sphere (scalar
+ *  radius) or an axis-aligned box (half-extent triple). Exported for tests. */
+export function samplePosSpread(
+    posSpread: number | [number, number, number] | undefined,
+    rng: () => number,
+): [number, number, number] {
+    if (posSpread == null) return [0, 0, 0];
+    if (typeof posSpread === 'number') {
+        if (posSpread <= 0) return [0, 0, 0];
+        // Uniform in the ball: direction × cbrt-weighted radius.
+        const dir = randomUnit(rng);
+        const r = posSpread * Math.cbrt(rng());
+        return [dir[0] * r, dir[1] * r, dir[2] * r];
+    }
+    return [
+        (rng() * 2 - 1) * posSpread[0],
+        (rng() * 2 - 1) * posSpread[1],
+        (rng() * 2 - 1) * posSpread[2],
+    ];
 }
 
 function normalise(v: [number, number, number]): [number, number, number] {
@@ -380,9 +418,13 @@ function appendParticles(
         const speed = range(e.speed, 0, rng);
         const d = sampleSpread(e.spread, dir, rng);
         const rot = e.rot ?? [0, 0];
+        const po = samplePosSpread(e.posSpread, rng);
 
-        // iPosLife
-        rows[o + 0] = ctx.x; rows[o + 1] = ctx.y; rows[o + 2] = ctx.z; rows[o + 3] = life;
+        // iPosLife (spawn position scattered by posSpread)
+        rows[o + 0] = ctx.x + po[0];
+        rows[o + 1] = ctx.y + po[1];
+        rows[o + 2] = ctx.z + po[2];
+        rows[o + 3] = life;
         // iVelTime
         rows[o + 4] = d[0] * speed; rows[o + 5] = d[1] * speed; rows[o + 6] = d[2] * speed;
         rows[o + 7] = ctx.now;
@@ -467,16 +509,19 @@ function concat(a: Float32Array | null, b: Float32Array): Float32Array {
 }
 
 /** Pack one trail segment row (iP1 iP2 iUVAlpha) — helper shared by the
- *  stage's trail streamer and any future worker adapter. */
+ *  stage's trail streamer and any future worker adapter. Per-end pairing:
+ *  u1/a1 belong to p1 and u2/a2 to p2 (trail.vert.glsl mixes iUVAlpha.x at
+ *  the p1 end and .y at the p2 end) — the caller decides which endpoint
+ *  carries the smaller U. */
 export function packTrailSegment(
     out: Float32Array, offset: number,
     p1: [number, number, number], w1: number,
     p2: [number, number, number], w2: number,
-    uMin: number, uMax: number, a1: number, a2: number,
+    u1: number, u2: number, a1: number, a2: number,
 ): void {
     out[offset + 0] = p1[0]; out[offset + 1] = p1[1]; out[offset + 2] = p1[2]; out[offset + 3] = w1;
     out[offset + 4] = p2[0]; out[offset + 5] = p2[1]; out[offset + 6] = p2[2]; out[offset + 7] = w2;
-    out[offset + 8] = uMin;  out[offset + 9] = uMax;  out[offset + 10] = a1;   out[offset + 11] = a2;
+    out[offset + 8] = u1;    out[offset + 9] = u2;    out[offset + 10] = a1;   out[offset + 11] = a2;
 }
 
 /** Pack one tracer row (iHeadLife iVelTime iShape iColor). */

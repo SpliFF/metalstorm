@@ -1881,6 +1881,27 @@ export class ProjectileRenderer {
         return this.live.size;
     }
 
+    /**
+     * PLAN-quickstart.md §3.2 (Part B — resync): drop every *live* projectile,
+     * beam and trail from the parked session while keeping the per-weapon
+     * *visual templates* (`weaponVisuals` / `trailVisuals` / requested assets) so
+     * re-entry pays no per-type asset re-fetch. Projectiles are short-lived and
+     * broadcast as full snapshots, so the post-reconnect stream re-populates the
+     * live set within a few ticks; carrying pre-detach bodies across the gap
+     * would just leave a burst of ghost projectiles frozen mid-flight.
+     */
+    resetForResync(): void {
+        // Clearing live bodies orphans their per-projectile trail refs; null
+        // them first so the per-tick flush doesn't chase dropped puff chains.
+        for (const p of this.live.values()) {
+            if (p.trail) resetMissileTrailState(p.trail);
+            p.trail = null;
+        }
+        this.orphanedTrails = [];
+        this.live.clear();
+        this.liveBeams = [];
+    }
+
     dispose(): void {
         for (const v of this.weaponVisuals.values()) {
             disposeVisual(v);

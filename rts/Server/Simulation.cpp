@@ -10,6 +10,7 @@
 
 const std::unordered_map<int, std::string>* gAITeams = nullptr;
 
+#include "Server/SimFrameProfiler.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/TeamHandler.h"
 #include "Sim/Misc/Wind.h"
@@ -29,13 +30,17 @@ const std::unordered_map<int, std::string>* gAITeams = nullptr;
 #include "Sim/Features/FeatureDefHandler.h"
 #include "Sim/MoveTypes/MoveDefHandler.h"
 #include "Sim/MoveTypes/MoveTypeFactory.h"
+#include "Sim/MoveTypes/FootprintProfile.h"
 #include "Sim/Projectiles/ProjectileHandler.h"
 #include "Sim/Projectiles/ExplosionGenerator.h"
+#include "Sim/Weapons/StatisticalCombat.h"
+#include "Sim/Weapons/DamageField.h"
 #include "Sim/Path/IPathManager.h"
 #include "Game/GameHelper.h"
 #include "Game/Players/PlayerHandler.h"
 #include "Game/WaitCommandsAI.h"
 #include "Game/GlobalUnsynced.h"
+#include "Lua/GadgetPolicy.h"
 #include "Lua/LuaParser.h"
 #include "Lua/LuaSyncedRead.h"
 #include "Map/MapDamage.h"
@@ -239,6 +244,20 @@ void CSimulation::InitSubsystems(bool hasMap)
     unitDefHandler->Init(defsParser.get());
     SLOG(SPRING_LOG_INFO, "loaded %u unit defs, %u weapon defs",
         unitDefHandler->NumUnitDefs(), weaponDefHandler->NumWeaponDefs());
+
+    // Metalstorm mixed-size group flow (PLAN-metalstorm-flow §1, engine ask F1):
+    // parse gamedata/footprints.lua, resolve underpass move-class names → MoveDef
+    // pathTypes (needs the move defs, hence the hasMap guard), and attach the
+    // resolved profile to every opting UnitDef. Silent no-op for games without
+    // the file (BAR/ZK). The resolved profiles feed the F2 permeability query
+    // (CMoveMath::ObjectBlockType) and the client footprint export.
+    if (footprintProfileHandler.Load()) {
+        if (hasMap)
+            footprintProfileHandler.ResolveMoveClasses(moveDefHandler);
+        footprintProfileHandler.AttachToUnitDefs(*unitDefHandler);
+        SLOG(SPRING_LOG_INFO, "loaded %zu footprint profiles", footprintProfileHandler.Size());
+    }
+
     featureDefHandler->Init(defsParser.get());
 
     CUnit::InitStatic();
@@ -252,6 +271,8 @@ void CSimulation::InitSubsystems(bool hasMap)
     unitHandler.Init();
     featureHandler.Init();
     projectileHandler.Init();
+    statisticalCombatManager.Init();
+    damageFieldManager.Init();
 
     // --- Map-dependent subsystems ---
     if (hasMap) {
@@ -414,6 +435,20 @@ void CSimulation::InitScripting()
     // dispatched into an empty _G. (Symptom: ZK commander selection
     // bounced off a no-op luaRules->RecvLuaMsg and no commander spawned
     // even though the message reached the server.)
+    // PLAN-security-hardening task 9: log the deployment gadget posture right
+    // before the synced gadget handler enumerates + loads gadgets, and assert
+    // cheats are off under a strict policy (the SyncedGameCommands "cheat"
+    // action refuses to enable them; this catches any other path). The
+    // per-gadget exclusions themselves are enforced at the VFS layer
+    // (LuaVFS::DirList / LoadFileWithModes), invisible to game Lua.
+    if (GadgetPolicy::IsStrict()) {
+        SLOG(SPRING_LOG_NOTICE, "gadget-policy: STRICT — dev/debug/loadstring/AI-relay gadgets excluded, cheats forced off");
+        if (gs->cheatEnabled) {
+            SLOG(SPRING_LOG_WARNING, "gadget-policy: cheats were enabled under a strict policy — forcing off");
+            gs->cheatEnabled = false;
+        }
+    }
+
     if (CLuaRules::LoadHandler(false)) {
         auto* ctx = new LuaScriptContext(&luaRules->syncedLuaHandle);
         scriptDispatcher->AddContext(ctx);
@@ -615,14 +650,32 @@ void CSimulation::SimFrame()
     // --- Synced simulation tick ---
     // Order preserved from CGame::SimFrame().
 
+    // PLAN-server-cpp-optimisation.md P0: per-phase wall-time split (native
+    // sim / unit-script tick / synced Lua call-ins), gated behind a bool so
+    // the cost is a skipped spring_now() pair when disabled. Phases are
+    // accumulated into locals and recorded once per frame — see
+    // SimFrameProfiler.h for what each bucket covers.
+    const bool simProf = SimFrameProfiler::IsEnabled();
+    const spring_time frameT0 = simProf ? spring_now() : spring_time();
+    double luaGameFrameUs = 0.0;
+    double unitScriptUs = 0.0;
+    double nativeSimUs = 0.0;
+    spring_time phaseT0;
+
     // Lua game-frame call-in + garbage collection
+    phaseT0 = simProf ? spring_now() : spring_time();
     eventHandler.CollectGarbage(false);
     eventHandler.GameFrame(gs->frameNum);
+    if (simProf)
+        luaGameFrameUs += (spring_now() - phaseT0).toMicroSecsf();
 
     // Core sim updates
+    phaseT0 = simProf ? spring_now() : spring_time();
     helper->Update();
     mapDamage->Update();
     pathManager->Update();
+    if (simProf)
+        nativeSimUs += (spring_now() - phaseT0).toMicroSecsf();
 
     // Unit script animations (COB/Lua piece turns, spins, moves).
     // Tick BEFORE unitHandler.Update() so the piece transforms read by
@@ -631,10 +684,21 @@ void CSimulation::SimFrame()
     // rather than lagging one tick behind. Symptom this fixes: turrets
     // that appear to aim one tick late and projectiles that spawn from
     // last-frame's barrel pose. See PLAN-combat-vfx.md F1.
+    phaseT0 = simProf ? spring_now() : spring_time();
     if (unitScriptEngine != nullptr)
         unitScriptEngine->Tick(33); // 33ms ≈ 1 tick at 30Hz
+    if (simProf)
+        unitScriptUs += (spring_now() - phaseT0).toMicroSecsf();
 
+    phaseT0 = simProf ? spring_now() : spring_time();
     unitHandler.Update();
+    // Drain statistical volleys whose scheduled resolve frame has arrived
+    // (damage applied via DoDamage). Runs right after unitHandler.Update(),
+    // where this frame's volleys were rolled + queued during weapon fire.
+    statisticalCombatManager.Update(gs->frameNum);
+    // Metalstorm damage fields (Model 3, C6): expire finished fields and apply
+    // area damage for any reaching a cadence tick this frame (via DoDamage).
+    damageFieldManager.Update(gs->frameNum);
     projectileHandler.Update();
     featureHandler.Update();
 
@@ -654,6 +718,15 @@ void CSimulation::SimFrame()
 
     // Wait-command AI (squad-wait, death-wait, etc.)
     waitCommandsAI.Update();
+    if (simProf)
+        nativeSimUs += (spring_now() - phaseT0).toMicroSecsf();
+
+    if (simProf) {
+        SimFrameProfiler::RecordPhase(SimFrameProfiler::Phase_LuaGameFrame, luaGameFrameUs);
+        SimFrameProfiler::RecordPhase(SimFrameProfiler::Phase_UnitScript, unitScriptUs);
+        SimFrameProfiler::RecordPhase(SimFrameProfiler::Phase_NativeSim, nativeSimUs);
+        SimFrameProfiler::RecordFrame((spring_now() - frameT0).toMicroSecsf());
+    }
 }
 
 int CSimulation::GetFrameNum() const

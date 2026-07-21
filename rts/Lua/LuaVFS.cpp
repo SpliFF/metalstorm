@@ -5,9 +5,13 @@
 #include "LuaInclude.h"
 #include "LuaHashString.h"
 #include "LuaUtils.h"
+#include "GadgetPolicy.h"
 #include "System/FileSystem/FileHandler.h"
 #include "System/FileSystem/VFSModes.h"
+#include "System/SpringLog/SpringLog.h"
 #include "System/StringUtil.h"
+
+#define LOG_SECTION "gadget-policy"
 
 
 /******************************************************************************/
@@ -96,6 +100,16 @@ const string LuaVFS::GetModes(lua_State* L, int index, bool /*synced*/)
 
 static int LoadFileWithModes(const std::string& fileName, std::string& data, const std::string& vfsModes)
 {
+	// PLAN-security-hardening task 9 (G7/G8/G9/G18/G19): under a strict
+	// deployment policy an excluded gadget is treated as if the file does not
+	// exist — the belt behind the DirList filter, so a denied gadget can't be
+	// pulled in by an explicit VFS.LoadFile/VFS.Include name either. Scoped to
+	// gadget paths (see GadgetPolicy::IsGadgetDenied) so nothing else changes.
+	if (GadgetPolicy::IsGadgetDenied(fileName)) {
+		SLOG(SPRING_LOG_NOTICE, "gadget-policy: refused excluded gadget load '%s'", fileName.c_str());
+		return 0;
+	}
+
 	CFileHandler fh(fileName, vfsModes);
 
 	if (!fh.FileExists())
@@ -249,7 +263,17 @@ int LuaVFS::DirList(lua_State* L, bool synced)
 	const std::string& modes = GetModes(L, 3, synced);
 	const bool recursive = luaL_optboolean(L, 4, false);
 
-	LuaUtils::PushStringVector(L, CFileHandler::DirList(dir, pattern, modes, recursive));
+	std::vector<std::string> entries = CFileHandler::DirList(dir, pattern, modes, recursive);
+
+	// PLAN-security-hardening task 9 (G7/G8/G9/G18/G19): the synced gadget
+	// handler enumerates its gadgets via VFS.DirList(LuaRules/Gadgets/, ...).
+	// A strict deployment drops the excluded (dev/debug/loadstring/AI-relay)
+	// gadgets here, so the game's own gadgets.lua never sees them — the
+	// faithful control, no game Lua edited.
+	for (const std::string& removed : GadgetPolicy::FilterDirList(entries))
+		SLOG(SPRING_LOG_NOTICE, "gadget-policy: excluded gadget '%s' from '%s'", removed.c_str(), dir.c_str());
+
+	LuaUtils::PushStringVector(L, entries);
 	return 1;
 }
 

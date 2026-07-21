@@ -21,6 +21,7 @@ struct WeaponDef;
 struct MoveDef;
 struct UnitDefImage;
 class LuaTable;
+namespace footprint { struct Profile; }
 
 
 struct UnitDefWeapon {
@@ -260,6 +261,12 @@ public:
 
 	const WeaponDef* deathExpWeaponDef;
 	const WeaponDef* selfdExpWeaponDef;
+
+	// Metalstorm mixed-size group flow (PLAN-metalstorm-flow §1, engine ask F1):
+	// resolved authored footprint/permeability profile, or null when this def
+	// declares no customparams.footprint_profile. Points into
+	// FootprintProfileHandler storage (stable for the game's lifetime).
+	const footprint::Profile* footprintProfile = nullptr;
 
 	mutable UnitDefImage* buildPic;
 	std::string iconType; ///< icon name, sent to clients for minimap rendering

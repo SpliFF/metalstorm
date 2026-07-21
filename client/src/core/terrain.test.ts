@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { planAtlasPages, type AtlasPagePlan } from './terrain.js';
+import {
+    planAtlasPages, extractKtx2Levels, compositeAtlasLevel,
+    type AtlasPagePlan, type MapDimensions,
+} from './terrain.js';
 
 const TILE_PIXELS = 32;
 const MAX = 16384; // typical WebGL2 MAX_TEXTURE_SIZE
@@ -88,5 +91,126 @@ describe('planAtlasPages', () => {
         expect(plan.pagesX).toBe(3); // ceil(1500/512)
         expect(plan.pagesZ).toBe(1);
         checkPlanCoversMap(plan, 1500, 300);
+    });
+});
+
+/**
+ * Build a minimal KTX2 buffer matching the layout WrapRawDxt1AsKtx2
+ * produces (--no-zstd, VK_FORMAT_BC1_RGB, one or more levels), with
+ * synthetic level payloads so the parser's offsets/lengths can be checked
+ * against known content.
+ */
+function buildSyntheticKtx2(levelPayloads: Uint8Array[]): ArrayBuffer {
+    const lvlIdxBase = 80;
+    const headerSize = lvlIdxBase + levelPayloads.length * 24;
+    const totalLevelBytes = levelPayloads.reduce((s, p) => s + p.length, 0);
+    const buf = new ArrayBuffer(headerSize + totalLevelBytes);
+    const dv = new DataView(buf);
+    const bytes = new Uint8Array(buf);
+
+    const magic = [0xab, 0x4b, 0x54, 0x58, 0x20, 0x32, 0x30, 0xbb,
+                   0x0d, 0x0a, 0x1a, 0x0a];
+    magic.forEach((b, i) => dv.setUint8(i, b));
+    dv.setUint32(40, levelPayloads.length, true); // levelCount
+    dv.setUint32(44, 0, true);                    // supercompressionScheme = none
+
+    let cursor = headerSize;
+    levelPayloads.forEach((payload, lvl) => {
+        const entryBase = lvlIdxBase + lvl * 24;
+        dv.setBigUint64(entryBase + 0, BigInt(cursor), true);
+        dv.setBigUint64(entryBase + 8, BigInt(payload.length), true);
+        dv.setBigUint64(entryBase + 16, BigInt(payload.length), true);
+        bytes.set(payload, cursor);
+        cursor += payload.length;
+    });
+    return buf;
+}
+
+describe('extractKtx2Levels', () => {
+    it('extracts a single level (pre-mip-chain-fix map packages)', () => {
+        const level0 = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]);
+        const levels = extractKtx2Levels(buildSyntheticKtx2([level0]));
+        expect(levels).toHaveLength(1);
+        expect(Array.from(levels[0])).toEqual(Array.from(level0));
+    });
+
+    it('extracts all 4 levels in order with correct byte ranges', () => {
+        const level0 = new Uint8Array(512).fill(0);
+        const level1 = new Uint8Array(128).fill(1);
+        const level2 = new Uint8Array(32).fill(2);
+        const level3 = new Uint8Array(8).fill(3);
+        const levels = extractKtx2Levels(buildSyntheticKtx2([level0, level1, level2, level3]));
+        expect(levels).toHaveLength(4);
+        expect(levels[0].length).toBe(512);
+        expect(levels[1].length).toBe(128);
+        expect(levels[2].length).toBe(32);
+        expect(levels[3].length).toBe(8);
+        expect(levels[1].every((b) => b === 1)).toBe(true);
+        expect(levels[3].every((b) => b === 3)).toBe(true);
+    });
+
+    it('rejects a non-KTX2 buffer', () => {
+        expect(() => extractKtx2Levels(new ArrayBuffer(100))).toThrow('not a KTX2 file');
+    });
+
+    it('rejects a supercompressed file (mapconverter must emit --no-zstd)', () => {
+        const buf = buildSyntheticKtx2([new Uint8Array(8)]);
+        new DataView(buf).setUint32(44, 2, true); // pretend Zstd
+        expect(() => extractKtx2Levels(buf)).toThrow(/supercompression/);
+    });
+});
+
+describe('compositeAtlasLevel', () => {
+    // 2x1 tiles, tile index maps (0,0)->tile 1, (1,0)->tile 0.
+    const dims: MapDimensions = { mapx: 8, mapy: 4, minHeight: 0, maxHeight: 0, tilesX: 2, tilesZ: 1 };
+    const tileIndex = new Int32Array([1, 0]);
+
+    it('places each tile\'s blocks contiguously at the right atlas offset (mip0, 32x32)', () => {
+        // tile bytes distinguishable per-tile: tile0 filled with 0xAA, tile1 with 0xBB.
+        const tileBytes = 512;
+        const levelData = new Uint8Array(tileBytes * 2);
+        levelData.fill(0xaa, 0, tileBytes);
+        levelData.fill(0xbb, tileBytes, tileBytes * 2);
+
+        const { page, pageW, pageH, placed, skipped } = compositeAtlasLevel(
+            dims, tileIndex, levelData, 32, tileBytes, 0, 0, 2, 1);
+
+        expect(pageW).toBe(64);
+        expect(pageH).toBe(32);
+        expect(placed).toBe(2);
+        expect(skipped).toBe(0);
+        // Left half of the page (tile x=0, maps to tileIndex 1 -> 0xbb).
+        expect(page[0]).toBe(0xbb);
+        // Right half (tile x=1, maps to tileIndex 0 -> 0xaa) starts at block-row
+        // byte offset (tileBlocks=8 blocks/row * 8 bytes/block = 64 bytes in).
+        expect(page[64]).toBe(0xaa);
+    });
+
+    it('scales correctly to the 4x4-texel mip3 level (1 block, 8 bytes/tile)', () => {
+        const tileBytes = 8;
+        const levelData = new Uint8Array(tileBytes * 2);
+        levelData.fill(0xaa, 0, tileBytes);
+        levelData.fill(0xbb, tileBytes, tileBytes * 2);
+
+        const { page, pageW, pageH, placed } = compositeAtlasLevel(
+            dims, tileIndex, levelData, 4, tileBytes, 0, 0, 2, 1);
+
+        expect(pageW).toBe(8);
+        expect(pageH).toBe(4);
+        expect(placed).toBe(2);
+        expect(page.length).toBe(16); // 2 blocks * 8 bytes
+        expect(page[0]).toBe(0xbb);
+        expect(page[8]).toBe(0xaa);
+    });
+
+    it('skips tiles with a negative index and out-of-range offsets, zero-filling', () => {
+        const emptyIndex = new Int32Array([-1, 0]);
+        const levelData = new Uint8Array(512); // only 1 tile's worth of data
+        const { page, placed, skipped } = compositeAtlasLevel(
+            dims, emptyIndex, levelData, 32, 512, 0, 0, 2, 1);
+        expect(placed).toBe(1);
+        expect(skipped).toBe(1);
+        // Skipped tile's blocks stay zero.
+        expect(page.slice(0, 64).every((b) => b === 0)).toBe(true);
     });
 });

@@ -68,8 +68,23 @@ describe('deriveShowcases', () => {
         const got = ids({
             name: 'turret', flags: UDF.IS_BUILDING, weaponDefIds: [3],
         });
-        expect(got).toEqual(['idle', 'aim', 'volley', 'sustained',
+        expect(got).toEqual(['idle', 'construction', 'aim', 'volley', 'sustained',
             'damage', 'explode', 'respawn']);
+    });
+
+    it('building gets the construction showcase; a plain unit does not', () => {
+        expect(ids({ name: 'depot', flags: UDF.IS_BUILDING })).toContain('construction');
+        expect(ids({ name: 'solo', flags: UDF.CAN_MOVE })).not.toContain('construction');
+    });
+
+    it('a factory building gets construction AND produce', () => {
+        const got = ids({
+            name: 'foundry',
+            flags: UDF.IS_BUILDER | UDF.IS_FACTORY | UDF.IS_BUILDING,
+            buildOptions: [10],
+        });
+        expect(got).toContain('construction');
+        expect(got).toContain('produce');
     });
 
     it('unarmed mobile builder gets build, factory gets produce instead', () => {

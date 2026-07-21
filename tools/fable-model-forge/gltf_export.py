@@ -103,11 +103,19 @@ def export(pieces, stem, texmode='ktx2', outdir='out', clips=None,
             indices=ai, material=0, mode=4)]))
 
     # ── nodes (TRS, never `matrix` — animated nodes forbid matrix) ──
-    nodes = [dict(name=f'MS_{stem}', children=[1])]
+    # The scene root adopts every parentless piece (parent == -1): a
+    # hardcoded children=[1] would silently drop extra roots in a
+    # multi-root assembly.
+    root_node = dict(name=f'MS_{stem}')
+    nodes = [root_node]
     node_of_piece = {}
     for pi in range(len(pieces)):
         node_of_piece[pi] = len(nodes)
         nodes.append(dict(name=pieces[pi]['name']))
+    root_kids = [node_of_piece[pi] for pi, pc in enumerate(pieces)
+                 if pc['parent'] < 0]
+    if root_kids:
+        root_node['children'] = root_kids
     for pi, pc in enumerate(pieces):
         nd = nodes[node_of_piece[pi]]
         kids = [node_of_piece[ci] for ci, c in enumerate(pieces)

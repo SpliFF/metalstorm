@@ -8,6 +8,7 @@
 #include "HttpAuth.h"
 #include "PathTraversal.h"
 #include "PerfMetrics.h"
+#include "SimFrameProfiler.h"
 #include "WebTransport/WebTransportServer.h"
 #include "Map/ReadMap.h"
 #include "Sim/Misc/GlobalConstants.h"
@@ -180,9 +181,42 @@ void RegisterGameHttpRoutes(GameServerContext& ctx,
         return {.contentType = "text/plain", .body = {}, .status = 404};
     });
 
-    // Performance metrics endpoint
+    // Performance metrics endpoint. Base fields come from PerfMetrics
+    // (whole-tick timing, entity/client counts); `simFrame` adds the
+    // PLAN-server-cpp-optimisation.md P0 phase breakdown of
+    // CSimulation::SimFrame() (native sim / unit-script tick / synced Lua
+    // call-ins) when that profiler has been enabled via the `server sim
+    // profile on` console verb — empty/zeroed otherwise, so this route is
+    // cheap to poll even when nobody has turned the profiler on.
     net.AddHttpGet("/api/metrics", RouteAuth::Public, [](const std::string&) -> HttpResponse {
-        std::string json = perfMetrics.ToJSON();
+        nlohmann::json j = nlohmann::json::parse(perfMetrics.ToJSON(), nullptr, /*allow_exceptions=*/false);
+        if (j.is_discarded())
+            j = nlohmann::json::object();
+
+        nlohmann::json simFrame = nlohmann::json::object();
+        simFrame["enabled"] = SimFrameProfiler::IsEnabled();
+        const auto& frame = SimFrameProfiler::GetFrame();
+        simFrame["frameSamples"] = frame.samples;
+        if (frame.samples > 0) {
+            const double avgFrameUs = frame.totalUs / static_cast<double>(frame.samples);
+            simFrame["avgFrameUs"] = avgFrameUs;
+            simFrame["maxFrameUs"] = frame.maxUs;
+
+            nlohmann::json phases = nlohmann::json::object();
+            for (int i = 0; i < SimFrameProfiler::Phase_Count; ++i) {
+                const auto phase = static_cast<SimFrameProfiler::Phase>(i);
+                const auto& e = SimFrameProfiler::GetPhase(phase);
+                const double avgUs = e.samples != 0 ? e.totalUs / static_cast<double>(e.samples) : 0.0;
+                const double share = frame.totalUs > 0.0 ? (100.0 * e.totalUs / frame.totalUs) : 0.0;
+                phases[SimFrameProfiler::PhaseName(phase)] = {
+                    {"avgUs", avgUs}, {"maxUs", e.maxUs}, {"sharePct", share}
+                };
+            }
+            simFrame["phases"] = phases;
+        }
+        j["simFrame"] = simFrame;
+
+        std::string json = j.dump();
         std::vector<uint8_t> body(json.begin(), json.end());
         return {.contentType = "application/json", .body = std::move(body), .status = 200};
     });

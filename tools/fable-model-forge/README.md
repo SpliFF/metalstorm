@@ -43,12 +43,22 @@ client/src/core/model-validate.ts — run
 
 npm deps: `three`, `playwright`, `pngjs`, `babylonpress-ktx2-encoder`.
 
-## Final state (v6, shipped 2026-07-11)
+## Current state
 
-1212 tris, all repo validator checks green, KTX2 render path verified.
-Shipped: `data/games/metalstorm/models/fable_tank.{gltf,bin}` + 4 `.ktx2`,
-`units/fable_tank.lua`, ASSETS.md rows. Iteration history in `shots/`
-(v1 blockout → v6 final; `*_aim` shots prove turret/barrel pivots).
+The forge pipeline itself is what has landed here: mesh kit, layouts,
+generators, painters, glTF/bin writer, KTX2 encoder, preview rig, and
+`validate.py`. Generated artifacts stay local under `out/` and `shots/`
+(fable_tank reached v6 — 1212 tris, validator-green, KTX2 render path
+verified; `*_aim` shots prove the turret/barrel pivots).
+
+**Not yet landed at this revision**: the shipped game assets
+(`data/games/metalstorm/models/fable_tank.{gltf,bin}` + 4 `.ktx2`),
+`units/fable_tank.lua`, the matching ASSETS.md licence rows, and the
+`DESIGN-MODEL-BUILDING.md` design doc referenced above — those exist only
+on an unmerged branch. When they merge, models land in
+`data/games/metalstorm/models/`, the def in `data/games/metalstorm/units/`,
+and the licence rows in `data/games/metalstorm/ASSETS.md` (the
+assets-manifest gate requires them before any model merges).
+
 `out/*.png` are the texture sources — re-encode with `node encode.mjs`
-after editing `paint.py`. Full conventions + lessons:
-`DESIGN-MODEL-BUILDING.md` at the repo root.
+after editing `paint.py`.

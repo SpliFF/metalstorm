@@ -126,6 +126,39 @@ public:
     /// update/delete verb anywhere in this class — append-only by omission.
     std::vector<AuditEntry> GetRecentAuditEntries(int limit = 100);
 
+    /// A client-side crash/fatal report (PLAN-client-resilience.md task 3).
+    /// `count` is the dedup tally the client accumulated for this stack hash
+    /// before sending (1 for a fresh report; >1 for a debounced recount of a
+    /// crash-looping subsystem — see client-error-telemetry.ts).
+    struct ClientErrorRecord {
+        int64_t userId = 0;
+        std::string reason;
+        std::string errorClass;
+        std::string message;
+        std::string stack;
+        std::string stackHash;
+        std::string recoveryRung;
+        std::string phase;
+        int frame = 0;
+        int entityCount = 0;
+        std::string gameId;
+        std::string mapId;
+        std::string buildStamp;
+        std::string gpuRenderer;
+        /// Newline-joined log-ring lines (client sends an array; joined here
+        /// to keep the table flat like every other text column).
+        std::string logRing;
+        int count = 1;
+    };
+
+    /// Insert a client-error report. Returns the new row id, or 0 on failure.
+    int64_t InsertClientError(const ClientErrorRecord& rec);
+
+    /// Count of reports from this user within the last `windowSeconds` —
+    /// server-side rate-limit backstop (the client's own per-session cap of
+    /// 5/hour is advisory only; PLAN-security-hardening.md §1 "junk floods" row).
+    int CountRecentClientErrors(int64_t userId, int windowSeconds);
+
 private:
     void CreateTables();
 

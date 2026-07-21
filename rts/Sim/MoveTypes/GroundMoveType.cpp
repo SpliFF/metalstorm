@@ -1263,6 +1263,14 @@ void CGroundMoveType::ChangeSpeed(float newWantedSpeed, bool wantReverse, bool f
  * Also updates world position of aim points, and orientation if walking over terrain slopes.
  * FIXME near-duplicate of HoverAirMoveType::UpdateHeading
  */
+bool CGroundMoveType::IsTurningInPlace() const {
+	// PLAN-metalstorm-flow §3 (F2): rotating without translating — the one state
+	// in which a large unit's hull hard-blocks even underpass-permitted classes,
+	// because the contacts sweep unpredictably. Derived (no dedicated flag):
+	// stationary yet still heading toward a different wantedHeading.
+	return (owner != nullptr && !owner->IsMoving() && owner->heading != wantedHeading);
+}
+
 void CGroundMoveType::ChangeHeading(short newHeading) {
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (owner->IsFlying())

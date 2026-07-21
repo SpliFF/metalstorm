@@ -55,6 +55,9 @@ public:
 	int PushNewUnitDef(const std::string& unitName, const LuaTable& udTable);
 
 	const std::vector<UnitDef>& GetUnitDefsVec() const { return unitDefsVector; }
+	// Mutable access for post-Init def enrichment (e.g. footprint-profile
+	// attach, FootprintProfileHandler::AttachToUnitDefs). Not for gameplay use.
+	std::vector<UnitDef>& GetUnitDefsVecMut() { return unitDefsVector; }
 	const spring::unordered_map<std::string, int>& GetUnitDefIDs() const { return unitDefIDs; }
 	const spring::unordered_map<int, std::vector<int> >& GetDecoyDefIDs() const { return decoyMap; }
 

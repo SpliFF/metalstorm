@@ -118,6 +118,15 @@ export class LobbyUI {
     /// below so a later restart of the *same* persistent room re-arms it.
     private gameStartedForRoomId: number | null = null;
     private onGameStart?: (gameServerPort: number, mapId: string, gameId: string) => void;
+    /// PLAN-quickstart.md Part B: true while a detached game session is
+    /// parked (worker alive, `currentRoom` still points at that game). Guards
+    /// `updateCurrentRoomFromJson`'s gameRunning branch — while detached, a
+    /// live room update must NOT re-hide the lobby or re-fire `onGameStart`
+    /// (the player deliberately backed out to browse); it only needs to
+    /// notice the room ending (E4, below).
+    private detached = false;
+    private onParkedRoomEnded?: () => void;
+    private parkedBanner: HTMLElement | null = null;
     private myPlayerId = 0;
     private pendingRejoinRoomId = 0;
     private authToken = '';
@@ -183,7 +192,9 @@ export class LobbyUI {
     /// (`?direct=`) modes, which own the screen and drive the game
     /// themselves — otherwise the async game-template load resolving into
     /// setTemplates() re-renders (and un-hides) the login form the runner
-    /// had already hidden. See main.ts scenario/direct dispatch.
+    /// had already hidden. See main.ts scenario/direct dispatch. Not
+    /// permanent: quitToLobby lifts it via unsuppress() so quitting a
+    /// scenario/direct game still lands on a usable lobby.
     private suppressed = false;
 
     constructor(
@@ -293,6 +304,17 @@ export class LobbyUI {
     hide(): void { this.container.style.display = 'none'; }
 
     /**
+     * Lift the scenario/direct-boot suppression so the lobby can render
+     * again. Called by main.ts's quitToLobby: in suppressed mode every
+     * show*() path is a no-op, so an ESC-quit out of a `?scenario=` /
+     * `?direct=` game would otherwise land on a permanently blank page.
+     * The template bundle swapped in via setTemplates() while suppressed
+     * was deliberately retained for exactly this un-suppress. No-op when
+     * not suppressed (the normal lobby flow).
+     */
+    unsuppress(): void { this.suppressed = false; }
+
+    /**
      * Inject an already-acquired session token into the lobby. Used by
      * the scenario runner, which performs its own /api/auth/login via
      * fetch (the runner bypasses the saved-session auto-login path) but
@@ -384,6 +406,8 @@ export class LobbyUI {
             const myRoom = rooms.find((r: any) => r.id === this.currentRoom!.id);
             if (!myRoom) {
                 console.log(`[lobby] current room ${this.currentRoom.id} no longer exists`);
+                // E4: the room vanished outright (not just state>=5) while parked.
+                if (this.detached) this.onParkedRoomEnded?.();
                 this.currentRoom = null;
                 localStorage.removeItem('springrts-game-room');
                 localStorage.removeItem('springrts-game-port');
@@ -424,6 +448,15 @@ export class LobbyUI {
         if (gameRunning && this.currentRoom.gameServerPort > 0) {
             localStorage.setItem('springrts-game-room', String(this.currentRoom.id));
             localStorage.setItem('springrts-game-port', String(this.currentRoom.gameServerPort));
+            // Detached: the player deliberately backed out to the lobby while
+            // the worker stays parked. Don't re-hide the lobby or re-fire
+            // onGameStart for a room that's still running — just keep
+            // currentRoom fresh (used by the room view + the parked banner)
+            // and fall through to E4's ended check below.
+            if (this.detached) {
+                if (this.currentScreen === 'room') { if (!this.patchRoom()) this.showRoom(); }
+                return;
+            }
             this.stopPolling();
             this.hide();
             if (this.gameStartedForRoomId !== this.currentRoom.id) {
@@ -431,6 +464,11 @@ export class LobbyUI {
                 this.onGameStart?.(this.currentRoom.gameServerPort, this.currentRoom.mapId, this.currentRoom.gameId);
             }
             return;
+        }
+        if (this.detached && this.currentRoom.state >= 5) {
+            // E4: the game ended while parked — dispose the parked worker via
+            // the caller's callback instead of waiting on the park TTL.
+            this.onParkedRoomEnded?.();
         }
         if (this.currentRoom.state >= 5) {
             this.gameStartedForRoomId = null;
@@ -521,6 +559,55 @@ export class LobbyUI {
         } else {
             this.showBrowser();
         }
+    }
+
+    /**
+     * PLAN-quickstart.md Part B: the game-processor worker for `currentRoom`
+     * is parked (detached, not quit) — show a persistent "return to game"
+     * card and start watching this room for state changes so a game-over
+     * while parked disposes the worker immediately (E4) instead of waiting
+     * on the ~10 min TTL. `onReenter` drives the fast `gpResync` path;
+     * `onEnded` is the TTL-independent dispose hook. Idempotent — calling
+     * again (e.g. a second detach guard miss) just refreshes the callbacks.
+     */
+    markParked(onReenter: () => void, onEnded: () => void): void {
+        this.detached = true;
+        this.onParkedRoomEnded = onEnded;
+        this.startPolling();
+        this.renderParkedBanner(onReenter);
+    }
+
+    /// Clear parked state — called on resync (re-entered), TTL dispose, or
+    /// E4 dispose. Safe to call when nothing is parked (no-op banner-wise).
+    clearParked(): void {
+        this.detached = false;
+        this.onParkedRoomEnded = undefined;
+        this.parkedBanner?.remove();
+        this.parkedBanner = null;
+    }
+
+    private renderParkedBanner(onReenter: () => void): void {
+        this.parkedBanner?.remove();
+        const roomName = this.currentRoom?.name || 'your game';
+        const el = document.createElement('div');
+        el.id = 'parked-session-banner';
+        el.style.cssText =
+            'position:fixed;left:50%;bottom:1.5rem;transform:translateX(-50%);z-index:150;' +
+            'display:flex;align-items:center;gap:0.9rem;padding:0.75rem 1rem;' +
+            'background:#161a22;border:1px solid #2a3140;border-radius:10px;' +
+            'box-shadow:0 8px 30px rgba(0,0,0,0.45);color:#e6e8ec;' +
+            'font-family:system-ui,sans-serif;font-size:0.9rem;';
+        const label = document.createElement('span');
+        label.textContent = `Parked: ${roomName}`;
+        const btn = document.createElement('button');
+        btn.textContent = 'Return to game';
+        btn.style.cssText =
+            'padding:0.45rem 1rem;font-size:0.9rem;border:0;border-radius:6px;' +
+            'background:#3b6fe0;color:#fff;cursor:pointer;';
+        btn.onclick = () => onReenter();
+        el.append(label, btn);
+        document.body.appendChild(el);
+        this.parkedBanner = el;
     }
 
     showBrowser(): void {

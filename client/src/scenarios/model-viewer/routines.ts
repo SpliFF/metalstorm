@@ -118,8 +118,58 @@ export async function unitAlive(h: TestHarness, unitId: number): Promise<boolean
 // ── The routines ─────────────────────────────────────────────────────────
 
 async function idle(ctx: StageContext): Promise<void> {
-    requireStage(ctx);
+    const id = requireStage(ctx);
+    // Ambient garnish (rotating dish/fan on a building, breathing bob on a
+    // mech, …) is an authored "idle" clip, not sim-driven — show it off
+    // for the duration of the showcase instead of just holding still.
+    const hasIdleClip = ctx.state.clips.includes('idle');
+    if (hasIdleClip) {
+        await ctx.h.playClip(id, 'idle', { loop: true }).catch(() => { /* clip player best-effort */ });
+        ctx.state.playingClip = 'idle';
+        ctx.notify();
+    }
     await sleep(5000);
+    if (hasIdleClip) {
+        await ctx.h.stopClip().catch(() => { /* stage reset also stops it */ });
+        ctx.state.playingClip = null;
+        ctx.notify();
+    }
+}
+
+/**
+ * Buildings only: replace the (already fully-built) stage unit with a
+ * genuine nanoframe — `Spring.CreateUnit(def, …, build=true)` — then ramp
+ * `buildProgress` 0→1 via the same `Spring.SetUnitHealth(id, {build=…})`
+ * field the real construction lifecycle drives. This exercises the actual
+ * client build-animation renderer (PLAN-build-anim.md) instead of waiting
+ * out a def's real buildtime (routinely hours for Metalstorm structures).
+ */
+async function construction(ctx: StageContext): Promise<void> {
+    const id = requireStage(ctx);
+    const def = ctx.state.def!;
+    const team = ctx.state.team;
+    const { x: cx, z: cz } = ctx.center;
+
+    await ctx.h.lua(`Spring.DestroyUnit(${id}, false, true)`).catch(() => { /* already gone */ });
+    ctx.state.stageUnitId = null;
+    ctx.notify();
+
+    const out = await ctx.h.lua(`
+local y = Spring.GetGroundHeight(${cx}, ${cz})
+local id = Spring.CreateUnit(${JSON.stringify(def)}, ${cx}, y, ${cz}, 0, ${team}, true)
+return tostring(id)`.trim());
+    const newId = Number(out.match(/\d+/)?.[0] ?? 0);
+    if (!newId) throw new Error(`nanoframe spawn failed for ${def}: ${out}`);
+    ctx.state.stageUnitId = newId;
+    ctx.notify();
+    await ctx.h.orbit(newId, { follow: true }).catch(() => { /* camera may lag the spawn */ });
+
+    const steps = 20;
+    for (let i = 1; i <= steps; i++) {
+        await ctx.h.lua(`Spring.SetUnitHealth(${newId}, {build = ${i / steps}})`);
+        await sleep(300);
+    }
+    await sleep(1500); // hold on the completed structure
 }
 
 /** Shared square circuit (walk/drive/fly/sail). Ends with a stop at the
@@ -310,6 +360,7 @@ return ""`.trim());
 
 const ROUTINES: Record<ShowcaseId, (ctx: StageContext) => Promise<void>> = {
     'idle': idle,
+    'construction': construction,
     'circuit': (c) => circuit(c, 300, 60),
     'turn-in-place': turnInPlace,
     'fly-circuit': (c) => circuit(c, 500, 180),

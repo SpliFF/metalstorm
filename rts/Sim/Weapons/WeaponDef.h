@@ -10,6 +10,7 @@
 #include "System/UnorderedMap.hpp"
 #include "Sim/Misc/GlobalConstants.h"
 #include "Sim/Misc/Resource.h"
+#include "Sim/Weapons/StatisticalCombat.h"
 
 // Stub — full texture atlas removed with rendering. The headless server
 // never populates these (no GL atlas loader runs) but laser/beam/missile
@@ -235,6 +236,12 @@ public:
 	float cameraShake;
 
 	spring::unordered_map<std::string, std::string> customParams;
+
+	// Metalstorm statistical combat (PLAN-metalstorm-combat-resolution.md §1-2).
+	// Opt-in per def via the `resolution` / legacy `combat_model` customParam.
+	// Absent => Sim (the faithful Recoil projectile path is untouched).
+	WeaponResolution resolution = WEAPON_RESOLUTION_SIM;
+	StatCombat::Tuning statTuning; // only consulted when resolution == statistical
 
 	struct Visuals {
 		float3 color;

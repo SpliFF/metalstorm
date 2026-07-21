@@ -1,0 +1,56 @@
+{
+  "_doc": [
+    "Metalstorm unit -> FX resolution map — the UNIT-side sibling of ",
+    "weapon-fx.json. Weapon-fx keys effects off the firing weapon; this file ",
+    "keys the effects no weapon owns: unit deaths (squads render-backend ",
+    "destroyMember / entity death events), damage-state smoke and fire, and ",
+    "movement/ambient emitters consumed by per-unit bindings (fx-offload §2 — ",
+    "a unit's bindings.json references these SLOT names via this map instead ",
+    "of hardcoding effect names, so class-wide retunes are one edit here).",
+    "",
+    "Every value is an effect name in effects/library.json (validated by the ",
+    "cross-ref check). Slots: death, damageSmoke (health<0.5), ",
+    "damageSmokeHeavy (health<0.25), burning (health<0.1 / wreck), moveDust ",
+    "(MOVING, rateScale velocity), contactPlant (onContactPlant — gait-phase ",
+    "foot plants, PLAN-metalstorm-flow §4), wake (ships MOVING), thruster ",
+    "(aircraft engine), buildFx (engineer constructing). null = none.",
+    "",
+    "Resolution order (mirrors weapon-fx.json): exact `units[<def>]` entry -> ",
+    "`scaleOverrides[<class>][<scale>]` -> `byClass[<class>]`. Class and scale ",
+    "parse from the def-name convention ms_<class>_s<n> (units/_builder.lua); ",
+    "buildings and other non-conforming defs get exact `units` entries when ",
+    "their final def names land (buildings_* class keys below cover the ",
+    "builder-generated ones)."
+  ],
+  "version": 1,
+
+  "byClass": {
+    "soldiers":           { "death": "death_infantry",   "damageSmoke": null,                 "damageSmokeHeavy": null,                "burning": null,           "moveDust": null,         "contactPlant": "footstep_dust", "wake": null,        "thruster": null,               "buildFx": null },
+    "engineers":          { "death": "death_infantry",   "damageSmoke": null,                 "damageSmokeHeavy": null,                "burning": null,           "moveDust": null,         "contactPlant": "footstep_dust", "wake": null,        "thruster": null,               "buildFx": "build_sparks" },
+    "mechs":              { "death": "death_vehicle_s2", "damageSmoke": "smoke_damage_light", "damageSmokeHeavy": "smoke_damage_heavy","burning": "fire_burning", "moveDust": null,         "contactPlant": "footstep_dust", "wake": null,        "thruster": null,               "buildFx": null },
+    "tanks":              { "death": "death_vehicle_s2", "damageSmoke": "smoke_damage_light", "damageSmokeHeavy": "smoke_damage_heavy","burning": "fire_burning", "moveDust": "dust_trail", "contactPlant": null,            "wake": null,        "thruster": null,               "buildFx": null },
+    "artillery":          { "death": "death_vehicle_s2", "damageSmoke": "smoke_damage_light", "damageSmokeHeavy": "smoke_damage_heavy","burning": "fire_burning", "moveDust": "dust_trail", "contactPlant": null,            "wake": null,        "thruster": null,               "buildFx": null },
+    "fighters":           { "death": "death_aircraft",   "damageSmoke": "smoke_damage_heavy", "damageSmokeHeavy": "smoke_damage_heavy","burning": null,           "moveDust": null,         "contactPlant": null,            "wake": null,        "thruster": "thruster_exhaust", "buildFx": null },
+    "bombers":            { "death": "death_aircraft",   "damageSmoke": "smoke_damage_heavy", "damageSmokeHeavy": "smoke_damage_heavy","burning": null,           "moveDust": null,         "contactPlant": null,            "wake": null,        "thruster": "thruster_exhaust", "buildFx": null },
+    "ships":              { "death": "death_ship",       "damageSmoke": "smoke_damage_light", "damageSmokeHeavy": "smoke_damage_heavy","burning": "fire_burning", "moveDust": null,         "contactPlant": null,            "wake": "ship_wake", "thruster": null,               "buildFx": null },
+    "subs":               { "death": "death_sub",        "damageSmoke": null,                 "damageSmokeHeavy": null,                "burning": null,           "moveDust": null,         "contactPlant": null,            "wake": null,        "thruster": null,               "buildFx": null },
+    "staticdefense":      { "death": "death_building",   "damageSmoke": "smoke_damage_light", "damageSmokeHeavy": "smoke_damage_heavy","burning": "fire_burning", "moveDust": null,         "contactPlant": null,            "wake": null,        "thruster": null,               "buildFx": null },
+    "radar":              { "death": "death_building",   "damageSmoke": "smoke_damage_light", "damageSmokeHeavy": "smoke_damage_heavy","burning": "fire_burning", "moveDust": null,         "contactPlant": null,            "wake": null,        "thruster": null,               "buildFx": null },
+    "civilians":          { "death": "death_infantry",   "damageSmoke": null,                 "damageSmokeHeavy": null,                "burning": null,           "moveDust": null,         "contactPlant": "footstep_dust", "wake": null,        "thruster": null,               "buildFx": null },
+    "civvehicles":        { "death": "death_vehicle_s1", "damageSmoke": "smoke_damage_light", "damageSmokeHeavy": "smoke_damage_heavy","burning": "fire_burning", "moveDust": "dust_trail", "contactPlant": null,            "wake": null,        "thruster": null,               "buildFx": null },
+    "buildings_military": { "death": "death_building",   "damageSmoke": "smoke_damage_light", "damageSmokeHeavy": "smoke_damage_heavy","burning": "fire_burning", "moveDust": null,         "contactPlant": null,            "wake": null,        "thruster": null,               "buildFx": null },
+    "buildings_civilian": { "death": "death_building",   "damageSmoke": "smoke_damage_light", "damageSmokeHeavy": "smoke_damage_heavy","burning": "fire_burning", "moveDust": null,         "contactPlant": null,            "wake": null,        "thruster": null,               "buildFx": null }
+  },
+
+  "scaleOverrides": {
+    "_doc": "Per-class per-scale death escalation. Scale 4 = super-heavy: the staged dreadnought death for land armour; buildings/ships keep their class death at every scale for now (STUB tuning).",
+    "tanks":     { "1": { "death": "death_vehicle_s1" }, "3": { "death": "death_vehicle_s3" }, "4": { "death": "death_dreadnought" } },
+    "mechs":     { "1": { "death": "death_vehicle_s1" }, "3": { "death": "death_vehicle_s3" }, "4": { "death": "death_dreadnought" } },
+    "artillery": { "1": { "death": "death_vehicle_s1" }, "3": { "death": "death_vehicle_s3" }, "4": { "death": "death_dreadnought" } },
+    "staticdefense": { "4": { "death": "death_building" } }
+  },
+
+  "units": {
+    "_doc": "Exact def-name overrides — highest precedence. Empty until specific defs demand bespoke deaths (e.g. a named scenario hero)."
+  }
+}

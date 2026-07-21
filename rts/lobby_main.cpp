@@ -21,6 +21,7 @@
 #include "Server/GmDashboardPage.h"
 #include "Server/DevBuildGate.h"
 #include "Server/CacheControl.h"
+#include "Server/TokenBucket.h"
 #include "System/SpringLog/SpringLog.h"
 #include "System/SpringLog/SpringLogSqlite.h"
 #include <cctype>
@@ -366,6 +367,12 @@ int main(int argc, char* argv[])
     // spring-server's QUIC/WebTransport endpoint. See spawnGameServer.
     std::string wtCertPath;
     std::string wtKeyPath;
+    // PLAN-client-resilience.md task 3: server-operator opt-out for the
+    // `/api/client-errors` report channel — the "lobby setting" the plan
+    // describes (open-source courtesy: default on for the official beta,
+    // off in a self-hosted sample config that explicitly passes this flag).
+    // Surfaced to the client via /api/version.
+    bool clientErrorReportsEnabled = true;
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -382,6 +389,7 @@ int main(int argc, char* argv[])
         else if (arg == "--direct" && i + 1 < argc) { directManifestPath = argv[++i]; }
         else if (arg == "--wt-cert" && i + 1 < argc) { wtCertPath = argv[++i]; }
         else if (arg == "--wt-key" && i + 1 < argc) { wtKeyPath = argv[++i]; }
+        else if (arg == "--disable-client-error-reports") { clientErrorReportsEnabled = false; }
         else if (arg == "--game" && i + 1 < argc) {
             // Back-compat: `--game <path>` is translated into
             // `--games-dir <parent>` so existing scripts that point
@@ -924,13 +932,14 @@ int main(int argc, char* argv[])
     // production deployment notes).
 
     // --- Process management API ---
-    // PLAN-security-hardening task 2 (G12): unauthenticated PID/port
-    // disclosure is fine for local dev tooling (spring-debug MCP) but has no
-    // place in a production binary — compiled out under SPRING_PROD rather
-    // than left reachable-but-role-gated, since dev tooling connects with no
-    // admin token at all.
+    // PLAN-security-hardening G12: PID/port disclosure is compiled out entirely
+    // under SPRING_PROD (task 2). In dev builds it now also refuses non-loopback
+    // callers (task 11): the LocalhostOrAdmin tag on a GET route degrades to a
+    // forgery-proof loopback-only check in DispatchGet — the local spring-debug
+    // MCP keeps working, a remote peer on a dev box bound public can no longer
+    // enumerate game-server PIDs/ports for recon.
 #ifndef SPRING_PROD
-    net.AddHttpGet("/api/processes", RouteAuth::Public, [&gameServers](const std::string&) -> HttpResponse {
+    net.AddHttpGet("/api/processes", RouteAuth::LocalhostOrAdmin, [&gameServers](const std::string&) -> HttpResponse {
         nlohmann::json arr = nlohmann::json::array();
         for (const auto& [roomId, inst] : gameServers) {
             const char* stateStr = "unknown";
@@ -959,13 +968,75 @@ int main(int argc, char* argv[])
     HttpAuth::RegisterEndpoints(net, db);
 
     // Version endpoint — clients use this to get the build stamp for cache-busting
-    net.AddHttpGet("/api/version", RouteAuth::Public, [](const std::string&) -> HttpResponse {
+    net.AddHttpGet("/api/version", RouteAuth::Public, [clientErrorReportsEnabled](const std::string&) -> HttpResponse {
         std::string json = std::string("{\"engine\":\"springweb\"")
             + ",\"stamp\":\"" + CacheControl::BuildStamp() + "\""
-            + ",\"no_cache\":" + (CacheControl::IsNoCache() ? "true" : "false") + "}";
+            + ",\"no_cache\":" + (CacheControl::IsNoCache() ? "true" : "false")
+            + ",\"errorReportingEnabled\":" + (clientErrorReportsEnabled ? "true" : "false") + "}";
         return {.contentType = "application/json",
                 .body = {json.begin(), json.end()}, .status = 200,
                 .cacheControl = CacheControl::DynamicHeader()};
+    });
+
+    // PLAN-client-resilience.md task 3: client crash/fatal report ingestion.
+    // TokenRequired (not AdminOnly) — this is a "players" surface per
+    // PLAN-security-hardening.md §1's row ("junk floods" risk, mitigated by
+    // size cap + per-session rate + dedup — the client enforces its own
+    // 5/hour advisory cap; CountRecentClientErrors below is the server-side
+    // backstop for a client that ignores it). No SafeInvoke wrapper exists on
+    // this branch yet (see DECISIONS.md Part 6 hygiene note) — every
+    // exception-capable call is inside the try/catch so a malformed report
+    // can't take the whole lobby down with it.
+    net.AddHttpPost("/api/client-errors", RouteAuth::TokenRequired,
+        [&db](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+        int64_t userId = HttpAuth::ValidateToken(db, headers.authorization);
+        if (userId <= 0) return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
+
+        // Client caps its own payload at 32KB; 40KB gives headroom for JSON
+        // overhead without trusting the client to actually enforce its cap.
+        if (body.size() > 40 * 1024)
+            return HttpAuth::JsonResponse(413, R"({"error":"report too large"})");
+
+        if (db.CountRecentClientErrors(userId, 3600) >= 20)
+            return HttpAuth::JsonResponse(429, R"({"error":"rate limited"})");
+
+        try {
+            nlohmann::json j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/true);
+            if (!j.is_object())
+                return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+
+            Database::ClientErrorRecord rec;
+            rec.userId = userId;
+            rec.reason = j.value("reason", "");
+            rec.errorClass = j.value("error_class", "");
+            rec.message = j.value("message", "");
+            rec.stack = j.value("stack", "");
+            rec.stackHash = j.value("stack_hash", "");
+            rec.recoveryRung = j.value("recovery_rung", "");
+            rec.phase = j.value("phase", "");
+            rec.frame = j.value("frame", 0);
+            rec.entityCount = j.value("entity_count", 0);
+            rec.gameId = j.value("game_id", "");
+            rec.mapId = j.value("map_id", "");
+            rec.buildStamp = j.value("build_stamp", "");
+            rec.gpuRenderer = j.value("gpu_renderer", "");
+            rec.count = j.value("count", 1);
+            if (j.contains("log_ring") && j["log_ring"].is_array()) {
+                std::string joined;
+                for (const auto& line : j["log_ring"]) {
+                    if (!line.is_string()) continue;
+                    if (!joined.empty()) joined += "\n";
+                    joined += line.get<std::string>();
+                }
+                rec.logRing = joined;
+            }
+
+            int64_t id = db.InsertClientError(rec);
+            std::string resp = "{\"ok\":true,\"id\":" + std::to_string(id) + "}";
+            return {.contentType = "application/json", .body = {resp.begin(), resp.end()}, .status = 200};
+        } catch (const std::exception&) {
+            return HttpAuth::JsonResponse(400, R"({"error":"malformed report"})");
+        }
     });
 
     // ─────── PLAN-gm-tools: GM dashboard + admin verbs (lobby side) ───────
@@ -1107,13 +1178,31 @@ int main(int argc, char* argv[])
             }
             // Audit tail for this game: GM verbs audit with roomTag "room=<id>"
             // or target "frame=…"; match on the room tag. (admin_audit has no
-            // room column — the LIKE is a pragmatic per-game filter.)
+            // room column — the tag match is a pragmatic per-game filter.)
             nlohmann::json audit = nlohmann::json::array();
             {
                 const std::string tag = "room=" + std::to_string(roomId);
+                // Anchored match, not a bare substring: the tag must sit on a
+                // token boundary and be followed by a non-digit (or end of
+                // string), otherwise roomId=1 also matches "room=10"/"room=199"
+                // and leaks other rooms' audit rows. Writers (GmVerbs roomTag,
+                // direct_start) compose the tag as exactly "room=<id>", but
+                // keep the boundary check so a future "room=<id> …" digest
+                // still matches.
+                const auto hasRoomTag = [&tag](const std::string& s) {
+                    for (size_t pos = s.find(tag); pos != std::string::npos;
+                         pos = s.find(tag, pos + 1)) {
+                        if (pos > 0 && std::isalnum(static_cast<unsigned char>(s[pos - 1])))
+                            continue;
+                        const size_t end = pos + tag.size();
+                        if (end < s.size() && std::isdigit(static_cast<unsigned char>(s[end])))
+                            continue;
+                        return true;
+                    }
+                    return false;
+                };
                 for (const auto& e : db.GetRecentAuditEntries(400)) {
-                    if (e.argsDigest.find(tag) == std::string::npos &&
-                        e.target.find(tag) == std::string::npos) continue;
+                    if (!hasRoomTag(e.argsDigest) && !hasRoomTag(e.target)) continue;
                     audit.push_back({{"createdAt", e.createdAt}, {"username", e.username},
                                      {"action", e.action}, {"target", e.target},
                                      {"argsDigest", e.argsDigest}});
@@ -1500,6 +1589,16 @@ int main(int argc, char* argv[])
             }
         }
 
+        // Top-level "scenario" (PLAN-persistence.md §5): names a
+        // scenarios/<name>.lua world file for game_scenario.lua to stage at
+        // GameStart. Threaded as an ordinary modoption — Spring.GetModOptions()
+        // is the existing, faithful path server Lua already reads config
+        // through, so no new plumbing is needed beyond this one field.
+        std::string scenarioName = manifest.value("scenario", "");
+        if (!scenarioName.empty()) {
+            rooms.SetModOption(roomId, host.userId, "scenario", scenarioName);
+        }
+
         if (manifest.contains("aiSlots") && manifest["aiSlots"].is_array()) {
             uint8_t slotIndex = 0;
             for (const auto& aj : manifest["aiSlots"]) {
@@ -1791,8 +1890,9 @@ int main(int argc, char* argv[])
             ? (uint32_t)std::atoi(j["room_id"].get<std::string>().c_str())
             : (uint32_t)j.value("room_id", 0);
         std::string password = j.value("password", "");
+        bool asSpectator = j.value("as_spectator", false);
 
-        if (!rooms.JoinRoom(roomId, static_cast<uint32_t>(userId), 0, user->username, password))
+        if (!rooms.JoinRoom(roomId, static_cast<uint32_t>(userId), 0, user->username, password, asSpectator))
             return HttpAuth::JsonResponse(403, R"({"error":"cannot join room"})");
 
         broadcastRooms();
@@ -1982,11 +2082,38 @@ int main(int argc, char* argv[])
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
     });
 
+    // PLAN-security-hardening task 11 (G10): /api/rooms/start forks+execs a
+    // spring-server. The host-only check (delegated to RoomManager::StartGame)
+    // already scopes *who* may start *which* room, but nothing bounded the
+    // fork/exec rate or the total live process count — an authenticated user
+    // could loop create→start and fork-bomb the host. Two bounds:
+    //   - a global token bucket (burst 10, ~10/min sustained) on spawns, and
+    //   - a hard ceiling on concurrent live game servers.
+    // Both apply in dev and prod (a spawn is expensive regardless of build).
+    static TokenBucket roomSpawnLimiter(/*burst=*/10.0, /*perSecond=*/10.0 / 60.0);
+    constexpr size_t kMaxConcurrentGameServers = 64;
+
     // POST /api/rooms/start — start the game
     net.AddHttpPost("/api/rooms/start", RouteAuth::TokenRequired, [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
         HTTP_ROOM_AUTH();
         auto* room = findPlayerRoom(static_cast<uint32_t>(userId));
         if (!room) return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
+
+        // Fork-bomb brakes (G10), evaluated before any state mutation. Count
+        // only genuinely-alive servers so ended/crashed rooms don't wedge the
+        // cap.
+        {
+            size_t aliveServers = 0;
+            for (const auto& [rid, gi] : gameServers)
+                if (gi.pid > 0 && isProcessAlive(gi.pid)) ++aliveServers;
+            if (aliveServers >= kMaxConcurrentGameServers) {
+                SLOG(SPRING_LOG_WARNING, "room %u start refused: %zu/%zu game servers already live",
+                    room->id, aliveServers, kMaxConcurrentGameServers);
+                return HttpAuth::JsonResponse(503, R"({"error":"server capacity reached — try again shortly"})");
+            }
+        }
+        if (!roomSpawnLimiter.TryConsume())
+            return HttpAuth::JsonResponse(429, R"({"error":"game-start rate limit exceeded"})");
 
         // Auto-add a Null AI if every participant ends up on the same
         // team. Without an opposing ally, ZK's game_over.lua trips its
@@ -2062,6 +2189,15 @@ int main(int argc, char* argv[])
             gameServers[room->id] = inst;
             persistGameServer(inst);
             room->gameServerPort = inst.port;
+            // Audit the process spawn (G10 / §3): who started which game/map on
+            // what port. Append-only admin_audit row.
+            {
+                auto starter = db.FindUserById(userId);
+                db.LogAudit(userId, starter ? starter->username : std::string("?"),
+                    "room_start", room->gameId,
+                    "room=" + std::to_string(room->id) + " map=" + room->mapId +
+                    " port=" + std::to_string(inst.port) + " pid=" + std::to_string(inst.pid));
+            }
         }
 
         broadcastRooms();

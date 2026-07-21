@@ -11,22 +11,30 @@ import { ChatSend, ChatSendT } from '../spring-web/chat-send.js';
 import { ClientPayload, unionToClientPayload, unionListToClientPayload } from '../spring-web/client-payload.js';
 import { ConsoleCommand, ConsoleCommandT } from '../spring-web/console-command.js';
 import { GameListRequest, GameListRequestT } from '../spring-web/game-list-request.js';
+import { GroupDirective, GroupDirectiveT } from '../spring-web/group-directive.js';
+import { GroupDirectiveRemove, GroupDirectiveRemoveT } from '../spring-web/group-directive-remove.js';
+import { GroupPosture, GroupPostureT } from '../spring-web/group-posture.js';
 import { Handshake, HandshakeT } from '../spring-web/handshake.js';
 import { LogIngest, LogIngestT } from '../spring-web/log-ingest.js';
 import { LogSubscribe, LogSubscribeT } from '../spring-web/log-subscribe.js';
 import { LogUnsubscribe, LogUnsubscribeT } from '../spring-web/log-unsubscribe.js';
 import { LuaRulesMsg, LuaRulesMsgT } from '../spring-web/lua-rules-msg.js';
 import { LuaUIMsg, LuaUIMsgT } from '../spring-web/lua-uimsg.js';
+import { OrgGroupCreate, OrgGroupCreateT } from '../spring-web/org-group-create.js';
+import { OrgGroupDisband, OrgGroupDisbandT } from '../spring-web/org-group-disband.js';
+import { OrgGroupUpdate, OrgGroupUpdateT } from '../spring-web/org-group-update.js';
 import { PathRequest, PathRequestT } from '../spring-web/path-request.js';
 import { PathRequestCancel, PathRequestCancelT } from '../spring-web/path-request-cancel.js';
 import { Ping, PingT } from '../spring-web/ping.js';
 import { PlayerCommand, PlayerCommandT } from '../spring-web/player-command.js';
 import { PlayerCommandBatch, PlayerCommandBatchT } from '../spring-web/player-command-batch.js';
+import { PlayerLeaveIntent, PlayerLeaveIntentT } from '../spring-web/player-leave-intent.js';
 import { ReconnectRequest, ReconnectRequestT } from '../spring-web/reconnect-request.js';
 import { RoomAddAI, RoomAddAIT } from '../spring-web/room-add-ai.js';
 import { RoomCloseRoom, RoomCloseRoomT } from '../spring-web/room-close-room.js';
 import { RoomCreate, RoomCreateT } from '../spring-web/room-create.js';
 import { RoomEndGame, RoomEndGameT } from '../spring-web/room-end-game.js';
+import { RoomEnlist, RoomEnlistT } from '../spring-web/room-enlist.js';
 import { RoomJoin, RoomJoinT } from '../spring-web/room-join.js';
 import { RoomKick, RoomKickT } from '../spring-web/room-kick.js';
 import { RoomLeave, RoomLeaveT } from '../spring-web/room-leave.js';
@@ -128,7 +136,7 @@ unpackTo(_o: ClientMessageT): void {
 export class ClientMessageT implements flatbuffers.IGeneratedObject {
 constructor(
   public payloadType: ClientPayload = ClientPayload.NONE,
-  public payload: AIListRequestT|AckT|AuthRequestT|ChatSendT|ConsoleCommandT|GameListRequestT|HandshakeT|LogIngestT|LogSubscribeT|LogUnsubscribeT|LuaRulesMsgT|LuaUIMsgT|PathRequestCancelT|PathRequestT|PingT|PlayerCommandBatchT|PlayerCommandT|ReconnectRequestT|RoomAddAIT|RoomCloseRoomT|RoomCreateT|RoomEndGameT|RoomJoinT|RoomKickT|RoomLeaveT|RoomReadyT|RoomRemoveAIT|RoomSetAITeamT|RoomSetStartPosT|RoomStartGameT|RoomTeamSelectT|SelectionStateT|StandingOrderCreateT|StandingOrderRemoveT|StandingOrderUpdateT|ViewportUpdateT|null = null
+  public payload: AIListRequestT|AckT|AuthRequestT|ChatSendT|ConsoleCommandT|GameListRequestT|GroupDirectiveRemoveT|GroupDirectiveT|GroupPostureT|HandshakeT|LogIngestT|LogSubscribeT|LogUnsubscribeT|LuaRulesMsgT|LuaUIMsgT|OrgGroupCreateT|OrgGroupDisbandT|OrgGroupUpdateT|PathRequestCancelT|PathRequestT|PingT|PlayerCommandBatchT|PlayerCommandT|PlayerLeaveIntentT|ReconnectRequestT|RoomAddAIT|RoomCloseRoomT|RoomCreateT|RoomEndGameT|RoomEnlistT|RoomJoinT|RoomKickT|RoomLeaveT|RoomReadyT|RoomRemoveAIT|RoomSetAITeamT|RoomSetStartPosT|RoomStartGameT|RoomTeamSelectT|SelectionStateT|StandingOrderCreateT|StandingOrderRemoveT|StandingOrderUpdateT|ViewportUpdateT|null = null
 ){}
 
 

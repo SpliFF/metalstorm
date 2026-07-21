@@ -146,7 +146,6 @@ export class FxStage {
         this.canvas.style.cssText =
             `position:fixed; inset:0; width:100vw; height:100vh; z-index:${opts.zIndex ?? 9000};`
             + 'background:#000; cursor:grab;';
-        document.body.appendChild(this.canvas);
 
         const gl = this.canvas.getContext('webgl2', {
             antialias: false, alpha: false, premultipliedAlpha: true,
@@ -163,6 +162,11 @@ export class FxStage {
 
         [this.groundProg, this.groundVao] = buildGround(gl);
         [this.markerProg, this.markerVao, this.markerVerts] = buildMarkers(gl);
+
+        // Attach only once construction can no longer throw — a shader
+        // compile failure above must not strand an unremovable opaque-black
+        // full-window overlay on document.body.
+        document.body.appendChild(this.canvas);
 
         this.bindInput();
         this.resize();
@@ -330,7 +334,10 @@ export class FxStage {
         //   muzzle     → this effect fires at launch; default tracer rides
         let tracers: TracerSpec[] = [];
         let trails: TrailSpec[] = [];
-        let impact: string | null = this.linkedImpact ? 'expl_small' : null;
+        // The library's stable alias for "some default explosion" — resolves
+        // through resolveEffect, so renames of the concrete effect don't
+        // dangle here.
+        let impact: string | null = this.linkedImpact ? '__default_explosion' : null;
 
         const batch = compileEffect(this.lib, effectName, {
             x: GUN.x, y: GUN.y, z: GUN.z,
@@ -401,6 +408,15 @@ export class FxStage {
 
     // ── per-frame ────────────────────────────────────────────────────────────
 
+    /** One-shot warning per key — a bad effect name (compileEffect throws)
+     *  must neither kill the rAF loop nor spam the console at 60 Hz. */
+    private warned = new Set<string>();
+    private warnOnce(key: string, e: unknown): void {
+        if (this.warned.has(key)) return;
+        this.warned.add(key);
+        console.warn(`[fx-stage] ${key}:`, e);
+    }
+
     private tick = (): void => {
         if (this.disposed) return;
         const nowMs = performance.now();
@@ -408,18 +424,29 @@ export class FxStage {
         this.last = nowMs;
         const now = this.now();
 
-        // Delayed emitters (composite stages).
-        for (let i = this.delayed.length - 1; i >= 0; i--) {
-            if (this.delayed[i].at <= now) {
-                const d = this.delayed[i];
-                this.delayed.splice(i, 1);
-                d.run();
+        try {
+            // Delayed emitters (composite stages).
+            for (let i = this.delayed.length - 1; i >= 0; i--) {
+                if (this.delayed[i].at <= now) {
+                    const d = this.delayed[i];
+                    this.delayed.splice(i, 1);
+                    try {
+                        d.run();
+                    } catch (e) {
+                        this.warnOnce('delayed emitter failed', e);
+                    }
+                }
             }
+
+            this.stepProjectiles(dt, now);
+
+            if (this.visible) this.draw(now);
+        } catch (e) {
+            // Never let one bad frame kill the stage — the rAF chain below
+            // must survive (rescheduling used to sit after stepProjectiles,
+            // so a single unknown-effect throw froze the harness for good).
+            this.warnOnce(`tick error: ${String(e)}`, e);
         }
-
-        this.stepProjectiles(dt, now);
-
-        if (this.visible) this.draw(now);
         this.raf = requestAnimationFrame(this.tick);
     };
 
@@ -439,12 +466,18 @@ export class FxStage {
             }
 
             if (p.y <= 0) {
-                // Landed: kill riders, fire the payload, retire.
+                // Landed: kill riders, fire the payload, retire. An unknown
+                // impact-effect name logs once and skips the payload — the
+                // projectile still retires and the loop lives on.
                 for (const t of p.tracers) this.renderer.killTracer(t.h);
                 if (p.impactEffect) {
-                    this.spawnBatch(compileEffect(this.lib, p.impactEffect, {
-                        x: p.x, y: 2, z: p.z, dirX: 0, dirY: 1, dirZ: 0, now,
-                    }), null);
+                    try {
+                        this.spawnBatch(compileEffect(this.lib, p.impactEffect, {
+                            x: p.x, y: 2, z: p.z, dirX: 0, dirY: 1, dirZ: 0, now,
+                        }), null);
+                    } catch (e) {
+                        this.warnOnce(`impact effect "${p.impactEffect}" failed`, e);
+                    }
                 }
                 // Orphan the trail (it keeps fading via the orphan sweep below).
                 this.orphanTrails.push(...p.trails);
@@ -472,14 +505,17 @@ export class FxStage {
             const uMax = (tr.distAlong + segLen) / tr.spec.tileLength;
             tr.distAlong += segLen;
             const row = new Float32Array(12);
-            // p1 = younger (current head), p2 = older node. Width is baked at
-            // spawn (head width both ends); ageing is expressed through the
-            // per-end alpha fade only — width growth is a possible later
+            // p1 = younger (current head), p2 = older node. U runs with
+            // distance flown, so the OLDER endpoint carries uMin and the
+            // younger uMax — this keeps U continuous across consecutive
+            // segments (sharing a node means sharing its U). Width is baked
+            // at spawn (head width both ends); ageing is expressed through
+            // the per-end alpha fade only — width growth is a possible later
             // refinement (would ride the same updateTrailSegment* path).
             packTrailSegment(row, 0,
                 node, tr.spec.widthHead,
                 tr.lastNode, tr.spec.widthHead,
-                uMin, uMax, tr.spec.alphaHead, tr.spec.alphaHead);
+                uMax, uMin, tr.spec.alphaHead, tr.spec.alphaHead);
             tr.segments.push({
                 h: this.renderer.allocTrailSegment(row),
                 born: now, a1: tr.spec.alphaHead, a2: tr.spec.alphaHead,

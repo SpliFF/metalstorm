@@ -15,6 +15,7 @@
 #define LUA_DEFS_SERIALIZER_INL
 
 #include "Server/ProjectileTextureDefaults.h"
+#include "Sim/MoveTypes/FootprintProfile.h"
 
 #include <algorithm>
 #include <array>
@@ -175,6 +176,52 @@ inline std::string SerializeOneUnitDef(
     }
     if (!cps.empty()) {
         b.add_raw("custom_params", detail::StringMap(cps));
+    }
+    // Metalstorm footprint profile (PLAN-metalstorm-flow §1, engine ask F1):
+    // emit the resolved authored profile so the client derives the same
+    // ground-contact patches (patches.js) + big-unit repulsor semantics
+    // (big-unit-repulsor.js) the sim uses for permeability. underpass carries
+    // the move-class NAMES (the client resolves them the same way the sim
+    // resolved them to pathTypes). Omitted for units with no profile.
+    if (ud.footprintProfile != nullptr) {
+        const footprint::Profile& fp = *ud.footprintProfile;
+        detail::LuaBuilder fb;
+        fb.add_int("hull_x", fp.hullX);
+        fb.add_int("hull_z", fp.hullZ);
+        fb.add_int("clearance", fp.clearance);
+        if (!fp.underpass.empty()) {
+            std::string arr = "{";
+            for (size_t i = 0; i < fp.underpass.size(); ++i) {
+                if (i) arr += ',';
+                arr += LuaQuote(fp.underpass[i]);
+            }
+            arr += '}';
+            fb.add_raw("underpass", std::move(arr));
+        }
+        if (!fp.contacts.empty()) {
+            std::string carr = "{";
+            for (size_t i = 0; i < fp.contacts.size(); ++i) {
+                if (i) carr += ',';
+                const footprint::Contact& c = fp.contacts[i];
+                detail::LuaBuilder cb;
+                const bool isTrack = (c.kind == footprint::Contact::Kind::Track);
+                cb.add_str("kind", isTrack ? "track" : "foot");
+                cb.add_float("x", c.x);
+                cb.add_float("z", c.z);
+                if (isTrack) {
+                    cb.add_float("half_width", c.halfWidth);
+                    cb.add_float("half_length", c.halfLength);
+                } else {
+                    cb.add_float("r", c.r);
+                    cb.add_float("gait_phase", c.gaitPhase);
+                    cb.add_float("gait_duty", c.gaitDuty);
+                }
+                carr += cb.finish();
+            }
+            carr += '}';
+            fb.add_raw("contacts", std::move(carr));
+        }
+        b.add_raw("footprint", fb.finish());
     }
     b.add_float("repair_speed", ud.repairSpeed);
     b.add_int("transport_size", ud.transportSize);
@@ -464,6 +511,15 @@ inline std::string SerializeOneWeaponDef(
     b.add_float("reload_time", wd.reload);
     b.add_int("salvo_size", wd.salvosize);
     b.add_int("salvo_delay", wd.salvodelay);
+    // Tuning-honesty (PLAN-macro-combat §4 / combat-resolution §2.3): expose the
+    // computed expected damage-per-second so the UI can show real numbers rather
+    // than letting players reverse-engineer statistical combat's hidden math.
+    // DPS = default_damage * salvo_size / reload_time (reload is in seconds).
+    {
+        const float reloadSec = (wd.reload > 0.0f) ? wd.reload : 1.0f;
+        const float salvo = static_cast<float>(std::max(1, wd.salvosize));
+        b.add_float("expected_dps", (defDmg * salvo) / reloadSec);
+    }
     b.add_float("accuracy", wd.accuracy);
     b.add_float("spray_angle", wd.sprayAngle);
     b.add_float("moving_accuracy", wd.movingAccuracy);

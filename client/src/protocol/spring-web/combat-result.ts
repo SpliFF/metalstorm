@@ -6,5 +6,6 @@ export enum CombatResult {
   Hit = 0,
   Miss = 1,
   Blocked = 2,
-  Kill = 3
+  Kill = 3,
+  Unknown = 4
 }

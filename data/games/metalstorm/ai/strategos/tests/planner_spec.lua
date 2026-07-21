@@ -363,3 +363,112 @@ describe("reproducibility (§10)", function()
         end
     end)
 end)
+
+--=============================================================================
+describe("co-commander etiquette (§5.1/§11)", function()
+    local Actuators = require('actuators')
+
+    it("idle-only filtering: busy packages are untouchable", function()
+        -- Co-commander role with idleOnly=true should only assign idle force.
+        -- Test with ONE package idle and ONE busy, and ONE objective that both
+        -- could contest — the busy one should be excluded and go to RESERVE.
+        local role = coCommanderRole()
+        local p = makePicture({
+            _role = role,
+            regions = {
+                home   = { owner = 0, value = 1.0, neighbors = { 'front' } },
+                front  = { owner = 1, value = 2.0, neighbors = { 'home' } },  -- enemy region
+            },
+            board   = {
+                -- One objective: assault the front. Both packages could do it, but
+                -- only the idle one should be assigned. Note: board is a MAP not array!
+                assault_front = {
+                    type = 'kill', scope = 'platoon',
+                    state = 'active', reward = 500, team = nil, progress = 0,
+                    region = 'front', pos = {x = 1000, z = 1000},
+                },
+            },
+            ledger  = {
+                home   = { strength = 500, idle = true, groups = {} },   -- idle package
+                front  = { strength = 600, idle = false, groups = {} },  -- busy package at the front
+            },
+            economy = { ownPool = 10000, teamPool = 0, costScale = 1.0 },
+        })
+
+        local out = plan(p)
+        -- Assert: the objective should be assigned to the idle package ONLY.
+        -- The busy package should be filtered out during scoring (touchable=false).
+        local assigned = {}
+        for _, d in ipairs(out.directives) do
+            if d.goalId == 'obj:assault_front' then
+                assigned[#assigned + 1] = d.groupId
+            end
+        end
+        assert.are.equal(1, #assigned, "objective should be assigned to exactly one package")
+        assert.are.equal('pkg:home', assigned[1], "idle package should win the objective")
+
+        -- Verify the busy package did NOT get the objective (core etiquette test).
+        for _, d in ipairs(out.directives) do
+            if d.goalId == 'obj:assault_front' then
+                assert.are_not.equal('pkg:front', d.groupId, "busy package must not be assigned")
+            end
+        end
+    end)
+
+    it("suggest-only mode (mentor profile): no real commands issued", function()
+        -- Mentor profile has suggest_only=true; actuator should route to
+        -- suggestions rather than issuing real directives.
+        local mentorProfile = require('profiles.mentor')
+        local role = coCommanderRole()
+        local chatLog = {}  -- mock chat sink
+
+        local actuators = Actuators.new({ role = role, profile = mentorProfile })
+        -- Override chat to capture output.
+        function actuators:chat(msg) table.insert(chatLog, msg) end
+
+        local testPlan = {
+            directives = {
+                { type = 'directive', directive = 'TAKE_AND_HOLD', groupId = 'pkg:home',
+                  region = 'plains', goalId = 'exp:plains', predictedCost = 50 },
+            },
+            intent = {},
+        }
+        local picture = { frame = 1000 }
+        actuators:apply(testPlan, picture)
+
+        -- Assert: no real directive was issued (issueDirective was NOT called),
+        -- but a suggestion was emitted via chat.
+        assert.are.equal(1, #chatLog)
+        assert.is_truthy(chatLog[1]:match('%[mentor%]'))
+        assert.is_truthy(chatLog[1]:match('Suggest'))
+    end)
+
+    it("suggest-only rate limiting: respects suggest_period_sec", function()
+        local mentorProfile = require('profiles.mentor')
+        local role = coCommanderRole()
+        local chatLog = {}
+        local actuators = Actuators.new({ role = role, profile = mentorProfile })
+        function actuators:chat(msg) table.insert(chatLog, msg) end
+
+        local testPlan = {
+            directives = {
+                { type = 'directive', directive = 'DEFEND', groupId = 'pkg:home',
+                  region = 'home', goalId = 'def:home', predictedCost = 10 },
+            },
+            intent = {},
+        }
+
+        -- First tick: suggestion emitted.
+        actuators:apply(testPlan, { frame = 1000 })
+        assert.are.equal(1, #chatLog)
+
+        -- Second tick 10 seconds later (300 frames): should be rate-limited.
+        -- mentor.lua has suggest_period_sec=45, so 45*30=1350 frames.
+        actuators:apply(testPlan, { frame = 1300 })
+        assert.are.equal(1, #chatLog)  -- still just one (rate-limited)
+
+        -- Third tick 46 seconds later: now allowed.
+        actuators:apply(testPlan, { frame = 2400 })
+        assert.are.equal(2, #chatLog)  -- second suggestion emitted
+    end)
+end)

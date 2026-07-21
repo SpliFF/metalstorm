@@ -25,6 +25,8 @@ import { Pong } from '../protocol/spring-web/pong.js';
 import { ServerError } from '../protocol/spring-web/server-error.js';
 import { GameEventBatch } from '../protocol/spring-web/game-event-batch.js';
 import { CombatEvent } from '../protocol/spring-web/combat-event.js';
+import { VolleyOutcome } from '../protocol/spring-web/volley-outcome.js';
+import { DamageFieldEvent } from '../protocol/spring-web/damage-field-event.js';
 import { ProjectileFiredEvent } from '../protocol/spring-web/projectile-fired-event.js';
 import { ProjectileImpactEvent } from '../protocol/spring-web/projectile-impact-event.js';
 import { ProjectileTrajectoryEvent } from '../protocol/spring-web/projectile-trajectory-event.js';
@@ -38,6 +40,10 @@ import { TeamStartInfo } from '../protocol/spring-web/team-start-info.js';
 import { PlayerTeamEventBatch } from '../protocol/spring-web/player-team-event-batch.js';
 import { TeamStatsHistoryBatch } from '../protocol/spring-web/team-stats-history-batch.js';
 import { GameModOptions } from '../protocol/spring-web/game-mod-options.js';
+import { RulesParamUpdate } from '../protocol/spring-web/rules-param-update.js';
+import { RulesParamKeyDictionary } from '../protocol/spring-web/rules-param-key-dictionary.js';
+import { RulesParamScope } from '../protocol/spring-web/rules-param-scope.js';
+import { RulesParamValueKind } from '../protocol/spring-web/rules-param-value-kind.js';
 import { ResourceUpdate } from '../protocol/spring-web/resource-update.js';
 import { MapData } from '../protocol/spring-web/map-data.js';
 import { PlayerLeft } from '../protocol/spring-web/player-left.js';
@@ -77,9 +83,23 @@ import { ConsoleCommand } from '../protocol/spring-web/console-command.js';
 import { SelectionState } from '../protocol/spring-web/selection-state.js';
 import { PathRequest } from '../protocol/spring-web/path-request.js';
 import { PathRequestCancel } from '../protocol/spring-web/path-request-cancel.js';
+import { PlayerLeaveIntent } from '../protocol/spring-web/player-leave-intent.js';
 import { PathResponse } from '../protocol/spring-web/path-response.js';
 import { StandingOrderState } from '../protocol/spring-web/standing-order-state.js';
 import { StandingOrderType } from '../protocol/spring-web/standing-order-type.js';
+import { OrgGroupState } from '../protocol/spring-web/org-group-state.js';
+import { OrgGroupInfo } from '../protocol/spring-web/org-group-info.js';
+import { OrgGroupCreate } from '../protocol/spring-web/org-group-create.js';
+import { OrgGroupUpdate } from '../protocol/spring-web/org-group-update.js';
+import { OrgGroupDisband } from '../protocol/spring-web/org-group-disband.js';
+import { Echelon } from '../protocol/spring-web/echelon.js';
+import { DirectiveState } from '../protocol/spring-web/directive-state.js';
+import { DirectiveInfo } from '../protocol/spring-web/directive-info.js';
+import { DirectiveType } from '../protocol/spring-web/directive-type.js';
+import { OrderShape } from '../protocol/spring-web/order-shape.js';
+import { GroupDirective } from '../protocol/spring-web/group-directive.js';
+import { GroupDirectiveRemove } from '../protocol/spring-web/group-directive-remove.js';
+import { GroupPosture } from '../protocol/spring-web/group-posture.js';
 import { Vec3 } from '../protocol/spring-web/vec3.js';
 import { AuthResponse } from '../protocol/spring-web/auth-response.js';
 import { AuthStatus } from '../protocol/spring-web/auth-status.js';
@@ -121,6 +141,64 @@ export interface CombatEventInfo {
     x: number;
     y: number;
     z: number;
+}
+
+/// Per-volley outcome decoded from a `GameEventBatch.volley_outcomes` entry —
+/// Metalstorm statistical combat (Model 1). One event per squad-volley; the
+/// client invents `rounds` cosmetic tracers/impacts from it. Already
+/// visibility-filtered server-side (result may be Unknown=2 with attackerId 0
+/// when the firer is hidden). See VolleyOutcome in protocol.fbs.
+export interface VolleyOutcomeInfo {
+    attackerId: number;
+    weaponDefId: number;
+    targetId: number;
+    /// impact position (FX origin + squad casualty hint)
+    x: number;
+    y: number;
+    z: number;
+    resolveFrame: number;
+    /// CombatResult: 0=Hit, 1=Miss, 2=Unknown (visibility-filtered)
+    result: number;
+    damage: number;
+    rounds: number;
+    /// attacker team (255 = hidden)
+    team: number;
+    /// counterbattery reveal — when true, drop a radar blip at (revealX,_,revealZ)
+    revealAttacker: boolean;
+    revealX: number;
+    revealY: number;
+    revealZ: number;
+    /// derived-morale posture: 0=normal, 1=retreating, 2=panicking (only
+    /// meaningful when the attacker is visible, attackerId != 0)
+    attackerPosture: number;
+}
+
+/// Damage-field lifecycle event decoded from a `GameEventBatch.damage_fields`
+/// entry — Metalstorm Model 3 area bombardment (C6). The sim owns all damage;
+/// the client invents the barrage FX (procedural shell arcs + impacts
+/// scattered in the area at `cadence`) from a Created event and tears it down
+/// on Removed / duration expiry. Already visibility-filtered server-side.
+/// See DamageFieldEvent in protocol.fbs.
+export interface DamageFieldEventInfo {
+    fieldId: number;
+    /// 0 = Created (start FX), 1 = Removed (stop FX)
+    kind: number;
+    /// 0 = circle (center + radius), 1 = rect (center + radius(halfX) + halfZ)
+    shape: number;
+    x: number;
+    y: number;
+    z: number;
+    radius: number;
+    halfZ: number;
+    weaponDefId: number;
+    /// damage/sec — client scales impact density
+    intensity: number;
+    /// frames between damage ticks (FX pulse rate)
+    cadence: number;
+    /// remaining frames at creation (0 on Removed)
+    duration: number;
+    /// owner team (255 = neutral)
+    team: number;
 }
 
 /// Per-tick sound emission decoded from a `GameEventBatch.sounds` entry.
@@ -221,6 +299,18 @@ export interface TeamStatsHistoryInfo {
     teamId: number;
     baseIndex: number;
     entries: TeamStatsEntryInfo[];
+}
+
+/// A decoded RulesParamUpdate — a batch of rules-param changes for one scope.
+/// `scope` is 'game' or 'team' (the wire only carries those two today).
+/// `id` is the teamID for team scope (0 / ignored for game). `replace` = true
+/// means clear the target map before applying (join snapshot). `params` maps
+/// key → value, where `null` deletes the key.
+export interface RulesParamUpdateInfo {
+    scope: 'game' | 'team';
+    id: number;
+    replace: boolean;
+    params: Record<string, number | string | null>;
 }
 
 /// Projectile lifecycle event info — decoded from the FlatBuffer batch and
@@ -452,6 +542,41 @@ export interface StandingOrderInfoMsg {
     expiresAtFrame: number;
 }
 
+/** One org group (PLAN-macro-orders v0: `echelon` is always `'Platoon'` in
+ *  practice — `'Army'` is schema-reserved but rejected server-side). Same
+ *  data shape `Spring.GetOrgGroups` returns. */
+export interface OrgGroupInfoMsg {
+    groupId: number;
+    echelon: 'Squad' | 'Platoon' | 'Army';
+    ownerTeam: number;
+    parentId: number;
+    name: string;
+    memberIds: number[];
+    currentDirectiveId: number;
+    postureJson: string;
+    createdAtFrame: number;
+}
+
+/** One macro directive (PLAN-macro-directives §1). `fulfillment =
+ *  assignedStrength / requestedStrength` — callers should guard
+ *  `requestedStrength === 0` (demand model: 0 = "take what idles",
+ *  fulfillment is meaningless). */
+export interface DirectiveInfoMsg {
+    directiveId: number;
+    ownerTeam: number;
+    groupId: number;
+    type: string;
+    priority: number;
+    shape: 'Point' | 'Circle' | 'Polygon' | 'Polyline';
+    params: number[];
+    requestedStrength: number;
+    assignedStrength: number;
+    assignedSquadCount: number;
+    active: boolean;
+    createdAtFrame: number;
+    expiresAtFrame: number;
+}
+
 /** Decoded server reply to a `Spring.PathRequest`. `waypoints` is the
  *  full path as `[x, y, z]` triples in elmo coordinates; empty array
  *  means the path manager couldn't find a route. */
@@ -551,6 +676,10 @@ export interface WeaponDefInfo {
     reloadTime: number;
     salvoSize: number;
     salvoDelay: number;
+    /** Computed expected damage-per-second (default_damage * salvo_size /
+     *  reload_time). Exposed for tuning-honesty UI so statistical combat's
+     *  math isn't hidden (PLAN-macro-combat §4). */
+    expectedDps: number;
     accuracy: number;
     sprayAngle: number;
     movingAccuracy: number;
@@ -759,6 +888,15 @@ export interface ConnectionEvents {
     onServerError?: (code: number, message: string) => void;
     onEntityState?: (snapshot: EntityStateSnapshot, isDelta: boolean) => void;
     onCombatEvents?: (events: CombatEventInfo[], frame: number) => void;
+    /** Per-volley statistical-combat outcomes (Metalstorm Model 1). The
+     *  client invents cosmetic tracers/impacts, feeds the squad casualty
+     *  impact hint, and drops a counterbattery radar blip when
+     *  `revealAttacker` is set. Empty for ported games. */
+    onVolleyOutcomes?: (events: VolleyOutcomeInfo[], frame: number) => void;
+    /** Damage-field lifecycle events (Metalstorm Model 3 area bombardment,
+     *  C6). Created starts a procedural barrage; Removed / duration expiry
+     *  stops it. Empty for ported games. */
+    onDamageFields?: (events: DamageFieldEventInfo[], frame: number) => void;
     onSoundEvents?: (events: SoundEventInfo[], frame: number) => void;
     onSeismicPings?: (events: SeismicPingInfo[], frame: number) => void;
     /** Music-state transition broadcast — fires once per state change.
@@ -769,7 +907,17 @@ export interface ConnectionEvents {
     onProjectileFired?: (events: ProjectileFiredInfo[], frame: number) => void;
     onProjectileImpacts?: (events: ProjectileImpactInfo[], frame: number) => void;
     onProjectileTrajectories?: (events: ProjectileTrajectoryInfo[], frame: number) => void;
-    onEntityDestroy?: (entityId: number, x: number, y: number, z: number) => void;
+    /** `frame` is the client's best lower bound on the death's sim frame:
+     *  max(last GameEventBatch frame, newest entity-state base_frame). When a
+     *  same-tick combat batch preceded the destroy (kill visible to this
+     *  viewer) that batch's frame wins and the death lands on the same
+     *  presentation frame as its explosion; otherwise (Lua DestroyUnit /
+     *  self-d, or the kill event LOS-filtered away — the server sends no
+     *  batch on event-less ticks and filters batches per viewer) the newest
+     *  observed state frame keeps the stamp fresh so the mesh isn't removed
+     *  up to ~D early. Proper L2 fix: a real frame field on the EntityDestroy
+     *  wire message. */
+    onEntityDestroy?: (entityId: number, x: number, y: number, z: number, frame: number) => void;
     /** Per-unit sensor radius override. Emitted by
      *  Spring.SetUnitSensorRadius on the server. `sensorType` matches
      *  the SpringWeb::SensorType enum (0=los, 1=airLos, 2=radar,
@@ -817,6 +965,15 @@ export interface ConnectionEvents {
      *  authoritative. Reading `Spring.GetStandingOrders` walks the
      *  same data. */
     onStandingOrders?: (orders: StandingOrderInfoMsg[]) => void;
+    /** Snapshot of all org groups visible to this client (own team only —
+     *  org groups, unlike standing orders, aren't shared with allies).
+     *  Pushed on any create/update/disband, never per-tick. PLAN-macro-ui.md
+     *  org panel + `Spring.GetOrgGroups` read the same data. */
+    onOrgGroupState?: (groups: OrgGroupInfoMsg[]) => void;
+    /** Snapshot of all macro directives visible to this client (own team +
+     *  allies, same visibility rule as standing orders). Pushed on any
+     *  create/update/remove/fulfillment change, never per-tick. */
+    onDirectiveState?: (directives: DirectiveInfoMsg[]) => void;
     onProjectileState?: (snapshot: ProjectileStateSnapshot) => void;
     onPieceState?: (snapshot: PieceStateSnapshot) => void;
     onBuildActivity?: (snapshot: BuildActivitySnapshot) => void;
@@ -853,6 +1010,13 @@ export interface ConnectionEvents {
     /// Feeds the worker's liveState.modOptions so Spring.GetModOptions()
     /// matches the synced set. Values arrive as strings (engine convention).
     onGameModOptions?: (options: Record<string, string>) => void;
+    /// A batch of game/team rules-param changes (RulesParamUpdate) from
+    /// `Spring.Set{Game,Team}RulesParam` in any synced gadget. The server has
+    /// already applied per-team LOS filtering (team scope) and sends a
+    /// `replace`-snapshot on join. Feeds `handleRulesParamUpdate` →
+    /// `Spring.GetGameRulesParam(s)` / `GetTeamRulesParam(s)`. A `null` value
+    /// deletes the key from the client mirror.
+    onRulesParamUpdate?: (update: RulesParamUpdateInfo) => void;
     /// A relayed `Spring.SendLuaUIMsg` (LuaUIMsgRelay). The server already
     /// applied the audience filter; deliver unconditionally to
     /// `widget:RecvLuaMsg(data, playerId)`. `data` preserves embedded NULs.
@@ -876,7 +1040,18 @@ export class Connection {
     private sessionToken: string | null = null;
     public playerId: number = 0;
     public myTeam: number = -1;
+    public myRole: string = '';  // "admin", "player", or "spectator"
     private clock = new ServerClock();
+    /** Sim frame of the most recent GameEventBatch. When a combat batch for
+     *  the same tick precedes an EntityDestroy (same reliable, in-order lane,
+     *  StateStreamer::Tick) this is the death's own frame, letting L1 present
+     *  the death with its explosion. NOT guaranteed per destroy — see
+     *  handleEntityDestroy. */
+    private lastEventFrame = 0;
+    /** Newest entity-state base_frame delivered (post-netsim) — the same
+     *  leading edge PresentationClock.newestObservedFrame tracks, kept here so
+     *  the destroy stamp needs no reach into the worker's clock. */
+    private newestStateFrame = 0;
     private pingInterval: ReturnType<typeof setInterval> | null = null;
     private httpBase = '';  // e.g. "http://localhost:9100"
 
@@ -886,6 +1061,10 @@ export class Connection {
      *  server / LuaRules / LuaGaia / LuaAI:* live on the game server). */
     get gameHttpUrl(): string { return this.httpBase; }
     private commandSequence = 0;
+
+    // W3: Key interning dictionary for RulesParamUpdate
+    private keyDictionary: string[] = [];
+    private keyDictionaryRev = 0;
 
     /** Whether the control channel is currently usable. */
     get controlOpen(): boolean { return this.transport?.connected ?? false; }
@@ -1179,7 +1358,11 @@ export class Connection {
         const passwordOff = this.pendingPassword
             ? builder.createString(this.pendingPassword) : 0;
         const auth = AuthRequest.createAuthRequest(
-            builder, usernameOff, passwordOff, tokenOff);
+            builder, usernameOff, passwordOff, tokenOff,
+            // W4 cached_defs_hash: engine added the field for the defs-skip
+            // optimization but the client-side population is unwired; send
+            // empty (no cached hash advertised → server sends full defs).
+            0);
         this.sendClientMessage(builder, ClientPayload.AuthRequest, auth);
         console.log(`[connection] sent AuthRequest for '${this.pendingUsername}'`);
     }
@@ -1300,6 +1483,19 @@ export class Connection {
         this.sendClientMessage(builder, ClientPayload.PathRequestCancel, off);
     }
 
+    /** PLAN-quickstart.md §3.3: tell the server *why* a disconnect that is
+     *  about to happen is happening — e.g. reason=3 (detach) so the resulting
+     *  PlayerRemoved lets sim gadgets tell a parked/reconnecting player apart
+     *  from one who actually quit. Send this before `disconnect()`, not
+     *  after — `close()` on the underlying writer flushes queued writes
+     *  before the stream actually closes, so ordering is preserved. */
+    sendPlayerLeaveIntent(reason: number): void {
+        if (!this.authenticated) return;
+        const builder = new flatbuffers.Builder(16);
+        const off = PlayerLeaveIntent.createPlayerLeaveIntent(builder, reason);
+        this.sendClientMessage(builder, ClientPayload.PlayerLeaveIntent, off);
+    }
+
     /** Send a PlayerCommand (unit order) to the server. */
     sendPlayerCommand(
         commandId: number,
@@ -1380,6 +1576,102 @@ export class Connection {
             cmdsVec,
         );
         this.sendClientMessage(builder, ClientPayload.PlayerCommandBatch, batch);
+    }
+
+    // ---- Macro command & control (PLAN-macro-orders / PLAN-macro-directives) ----
+
+    /** Create a server-side org group (v0: always `echelon = Platoon`, the
+     *  only tier the server accepts — `parentId` stays 0, the army tier is
+     *  schema-reserved but rejected). Seeds the roster from `memberIds`
+     *  (squad entity ids); a squad already in another group is pulled out
+     *  of it first (server-side, single-membership rule). */
+    sendOrgGroupCreate(name: string, memberIds: number[]): void {
+        if (!this.authenticated) return;
+        const builder = new flatbuffers.Builder(128 + memberIds.length * 4);
+        const nameOff = builder.createString(name);
+        const memberIdsOff = OrgGroupCreate.createMemberIdsVector(builder, memberIds);
+        this.commandSequence++;
+        const off = OrgGroupCreate.createOrgGroupCreate(
+            builder, this.commandSequence, Echelon.Platoon, nameOff, memberIdsOff, 0);
+        this.sendClientMessage(builder, ClientPayload.OrgGroupCreate, off);
+    }
+
+    /** Mutate a group's roster / name. Empty `name` leaves it unchanged. */
+    sendOrgGroupUpdate(groupId: number, addIds: number[], removeIds: number[], name: string = ''): void {
+        if (!this.authenticated) return;
+        const builder = new flatbuffers.Builder(128 + (addIds.length + removeIds.length) * 4);
+        const addOff = OrgGroupUpdate.createAddIdsVector(builder, addIds);
+        const removeOff = OrgGroupUpdate.createRemoveIdsVector(builder, removeIds);
+        const nameOff = builder.createString(name);
+        this.commandSequence++;
+        const off = OrgGroupUpdate.createOrgGroupUpdate(
+            builder, this.commandSequence, groupId, addOff, removeOff, nameOff);
+        this.sendClientMessage(builder, ClientPayload.OrgGroupUpdate, off);
+    }
+
+    /** Disband a group. Members become unassigned; its active directive
+     *  (if any) is removed server-side. */
+    sendOrgGroupDisband(groupId: number): void {
+        if (!this.authenticated) return;
+        const builder = new flatbuffers.Builder(32);
+        this.commandSequence++;
+        const off = OrgGroupDisband.createOrgGroupDisband(builder, this.commandSequence, groupId);
+        this.sendClientMessage(builder, ClientPayload.OrgGroupDisband, off);
+    }
+
+    /** Create (`directiveId = 0`) or update (non-zero) a macro directive.
+     *  `groupId = 0` = condition-scoped (classic area/standing directive);
+     *  non-zero scopes it to that group's roster (the A+C fusion — the
+     *  server derives `conditions.orgGroup` from `groupId`, so the client
+     *  never fills `conditions` itself for a group-scoped directive).
+     *  `shape`/`params` follow the `OrderShape` layout (macro-directives §1):
+     *  Point [x,y,z] · Circle [x,y,z,radius] · Polygon [x1,y1,z1,...] (ring) ·
+     *  Polyline [frontage,x1,y1,z1,...] (the front line). */
+    sendGroupDirective(
+        directiveId: number,
+        groupId: number,
+        type: number,
+        shape: number,
+        params: number[],
+        opts: { priority?: number; requestedStrength?: number; active?: boolean } = {},
+    ): void {
+        if (!this.authenticated) return;
+        const builder = new flatbuffers.Builder(128 + params.length * 4);
+        const paramsOff = GroupDirective.createParamsVector(builder, params);
+        this.commandSequence++;
+        GroupDirective.startGroupDirective(builder);
+        GroupDirective.addSequence(builder, this.commandSequence);
+        GroupDirective.addDirectiveId(builder, directiveId);
+        GroupDirective.addGroupId(builder, groupId);
+        GroupDirective.addType(builder, type);
+        GroupDirective.addPriority(builder, opts.priority ?? 0);
+        GroupDirective.addShape(builder, shape);
+        GroupDirective.addParams(builder, paramsOff);
+        GroupDirective.addRequestedStrength(builder, opts.requestedStrength ?? 0);
+        GroupDirective.addActive(builder, opts.active ?? true);
+        const off = GroupDirective.endGroupDirective(builder);
+        this.sendClientMessage(builder, ClientPayload.GroupDirective, off);
+    }
+
+    /** Remove a macro directive. Releases its assigned squads back to idle. */
+    sendGroupDirectiveRemove(directiveId: number): void {
+        if (!this.authenticated) return;
+        const builder = new flatbuffers.Builder(32);
+        this.commandSequence++;
+        const off = GroupDirectiveRemove.createGroupDirectiveRemove(builder, this.commandSequence, directiveId);
+        this.sendClientMessage(builder, ClientPayload.GroupDirectiveRemove, off);
+    }
+
+    /** Set a group's posture bundle (engagement / casualty tolerance /
+     *  reinforcement policy / area-weapon ROE — macro-orders §3). Stored
+     *  verbatim and echoed back in `OrgGroupInfo.postureJson`. */
+    sendGroupPosture(groupId: number, postureJson: string): void {
+        if (!this.authenticated) return;
+        const builder = new flatbuffers.Builder(64 + postureJson.length * 2);
+        const jsonOff = builder.createString(postureJson);
+        this.commandSequence++;
+        const off = GroupPosture.createGroupPosture(builder, this.commandSequence, groupId, jsonOff);
+        this.sendClientMessage(builder, ClientPayload.GroupPosture, off);
     }
 
     sendClientMessage(builder: flatbuffers.Builder, payloadType: ClientPayload, payloadOffset: number): void {
@@ -1492,6 +1784,9 @@ export class Connection {
         if (envelope === ENVELOPE_ENTITY_STATE_FULL || envelope === ENVELOPE_ENTITY_STATE_DELTA) {
             const snapshot = parseEntityState(data.subarray(1));
             if (snapshot) {
+                if (snapshot.baseFrame > this.newestStateFrame) {
+                    this.newestStateFrame = snapshot.baseFrame;
+                }
                 this.events.onEntityState?.(snapshot, envelope === ENVELOPE_ENTITY_STATE_DELTA);
             }
             return;
@@ -1549,9 +1844,10 @@ export class Connection {
                 if (ar.status() === AuthStatus.OK) {
                     this.playerId = ar.playerId();
                     this.myTeam = ar.team();
+                    this.myRole = ar.role() ?? '';
                     if (ar.token()) this.sessionToken = ar.token();
                     const defsCacheKey = ar.defsCacheKey() ?? '';
-                    console.log(`[connection] AuthResponse OK: playerId=${this.playerId}, team=${this.myTeam}, defsKey=${defsCacheKey || '(none)'}`);
+                    console.log(`[connection] AuthResponse OK: playerId=${this.playerId}, team=${this.myTeam}, role=${this.myRole}, defsKey=${defsCacheKey || '(none)'}`);
                     this.setState('connected');
                     this.events.onAuthenticated?.(this.playerId, this.sessionToken ?? '', this.myTeam, defsCacheKey);
                 } else {
@@ -1645,6 +1941,48 @@ export class Connection {
                     if (key) options[key] = o.value() ?? '';
                 }
                 this.events.onGameModOptions?.(options);
+                break;
+            }
+            case ServerPayload.RulesParamKeyDictionary: {
+                // W3: Receive and store the key dictionary
+                const dict = msg.payload(new RulesParamKeyDictionary()) as RulesParamKeyDictionary;
+                this.keyDictionary = [''];  // index 0 reserved
+                for (let i = 0; i < dict.keysLength(); i++) {
+                    this.keyDictionary.push(dict.keys(i) ?? '');
+                }
+                this.keyDictionaryRev = dict.dictionaryRev();
+                console.log(`[connection] Received key dictionary rev ${this.keyDictionaryRev} with ${this.keyDictionary.length - 1} keys`);
+                break;
+            }
+            case ServerPayload.RulesParamUpdate: {
+                const upd = msg.payload(new RulesParamUpdate()) as RulesParamUpdate;
+                const params: Record<string, number | string | null> = {};
+                for (let i = 0; i < upd.paramsLength(); i++) {
+                    const e = upd.params(i);
+                    if (!e) continue;
+                    // W3: Try key_id first, fall back to string key
+                    let key: string | null = null;
+                    const keyId = e.keyId();
+                    if (keyId > 0 && keyId < this.keyDictionary.length) {
+                        key = this.keyDictionary[keyId];
+                    } else {
+                        key = e.key();
+                    }
+                    if (!key) continue;
+                    switch (e.valueKind()) {
+                        case RulesParamValueKind.Number: params[key] = e.numVal(); break;
+                        case RulesParamValueKind.String: params[key] = e.strVal() ?? ''; break;
+                        // Nil → delete on the client mirror.
+                        case RulesParamValueKind.Nil:
+                        default:                          params[key] = null; break;
+                    }
+                }
+                this.events.onRulesParamUpdate?.({
+                    scope: upd.scope() === RulesParamScope.Team ? 'team' : 'game',
+                    id: upd.id(),
+                    replace: upd.replace(),
+                    params,
+                });
                 break;
             }
             case ServerPayload.TeamStatsHistoryBatch: {
@@ -1986,6 +2324,60 @@ export class Connection {
                 this.events.onStandingOrders?.(out);
                 break;
             }
+            case ServerPayload.OrgGroupState: {
+                const fbState = msg.payload(new OrgGroupState()) as OrgGroupState;
+                const out: OrgGroupInfoMsg[] = [];
+                for (let i = 0; i < fbState.groupsLength(); i++) {
+                    const g = fbState.groups(i);
+                    if (!g) continue;
+                    const memberIds: number[] = [];
+                    for (let j = 0; j < g.memberIdsLength(); j++) {
+                        memberIds.push(g.memberIds(j) ?? 0);
+                    }
+                    out.push({
+                        groupId: g.groupId(),
+                        echelon: Echelon[g.echelon()] as OrgGroupInfoMsg['echelon'] ?? 'Platoon',
+                        ownerTeam: g.ownerTeam(),
+                        parentId: g.parentId(),
+                        name: g.name() ?? '',
+                        memberIds,
+                        currentDirectiveId: g.currentDirectiveId(),
+                        postureJson: g.postureJson() ?? '',
+                        createdAtFrame: g.createdAtFrame(),
+                    });
+                }
+                this.events.onOrgGroupState?.(out);
+                break;
+            }
+            case ServerPayload.DirectiveState: {
+                const fbState = msg.payload(new DirectiveState()) as DirectiveState;
+                const out: DirectiveInfoMsg[] = [];
+                for (let i = 0; i < fbState.directivesLength(); i++) {
+                    const d = fbState.directives(i);
+                    if (!d) continue;
+                    const params: number[] = [];
+                    for (let j = 0; j < d.paramsLength(); j++) {
+                        params.push(d.params(j) ?? 0);
+                    }
+                    out.push({
+                        directiveId: d.directiveId(),
+                        ownerTeam: d.ownerTeam(),
+                        groupId: d.groupId(),
+                        type: DirectiveType[d.type()] ?? 'DefendArea',
+                        priority: d.priority(),
+                        shape: OrderShape[d.shape()] as DirectiveInfoMsg['shape'] ?? 'Point',
+                        params,
+                        requestedStrength: d.requestedStrength(),
+                        assignedStrength: d.assignedStrength(),
+                        assignedSquadCount: d.assignedSquadCount(),
+                        active: d.active(),
+                        createdAtFrame: d.createdAtFrame(),
+                        expiresAtFrame: d.expiresAtFrame(),
+                    });
+                }
+                this.events.onDirectiveState?.(out);
+                break;
+            }
             case ServerPayload.GameRestarting:
                 console.log('[connection] server restarting — host will reload');
                 this.events.onServerRestart?.();
@@ -2014,6 +2406,7 @@ export class Connection {
     private handleGameEventBatch(msg: ServerMessage): void {
         const batch = msg.payload(new GameEventBatch()) as GameEventBatch;
         const frame = batch.frame();
+        this.lastEventFrame = frame;
 
         const combatCount = batch.combatEventsLength();
         if (combatCount > 0 && this.events.onCombatEvents) {
@@ -2034,6 +2427,68 @@ export class Connection {
                 });
             }
             this.events.onCombatEvents(events, frame);
+        }
+
+        // Statistical-combat per-volley outcomes (Metalstorm Model 1). Already
+        // visibility-filtered server-side. Drives cosmetic tracers/impacts, the
+        // squad casualty impact hint, and counterbattery radar blips.
+        const volleyCount = batch.volleyOutcomesLength();
+        if (volleyCount > 0 && this.events.onVolleyOutcomes) {
+            const out: VolleyOutcomeInfo[] = [];
+            for (let i = 0; i < volleyCount; i++) {
+                const e = batch.volleyOutcomes(i, new VolleyOutcome());
+                if (!e) continue;
+                const tp = e.targetPos();
+                const rp = e.revealPos();
+                out.push({
+                    attackerId: e.attackerId(),
+                    weaponDefId: e.weaponDefId(),
+                    targetId: e.targetId(),
+                    x: tp ? tp.x() : 0,
+                    y: tp ? tp.y() : 0,
+                    z: tp ? tp.z() : 0,
+                    resolveFrame: e.resolveFrame(),
+                    result: e.result(),
+                    damage: e.damage(),
+                    rounds: e.rounds(),
+                    team: e.team(),
+                    revealAttacker: e.revealAttacker(),
+                    revealX: rp ? rp.x() : 0,
+                    revealY: rp ? rp.y() : 0,
+                    revealZ: rp ? rp.z() : 0,
+                    attackerPosture: e.attackerPosture(),
+                });
+            }
+            this.events.onVolleyOutcomes(out, frame);
+        }
+
+        // Damage-field lifecycle (Metalstorm Model 3, C6). Created/Removed
+        // events; the client invents the barrage FX from them. Already
+        // visibility-filtered server-side (area overlap with known space).
+        const fieldCount = batch.damageFieldsLength();
+        if (fieldCount > 0 && this.events.onDamageFields) {
+            const out: DamageFieldEventInfo[] = [];
+            for (let i = 0; i < fieldCount; i++) {
+                const e = batch.damageFields(i, new DamageFieldEvent());
+                if (!e) continue;
+                const c = e.center();
+                out.push({
+                    fieldId: e.fieldId(),
+                    kind: e.kind(),
+                    shape: e.shape(),
+                    x: c ? c.x() : 0,
+                    y: c ? c.y() : 0,
+                    z: c ? c.z() : 0,
+                    radius: e.radius(),
+                    halfZ: e.halfZ(),
+                    weaponDefId: e.weaponDefId(),
+                    intensity: e.intensity(),
+                    cadence: e.cadence(),
+                    duration: e.duration(),
+                    team: e.team(),
+                });
+            }
+            this.events.onDamageFields(out, frame);
         }
 
         // Projectile lifecycle events. The renderer integrates motion
@@ -2159,11 +2614,21 @@ export class Connection {
     private handleEntityDestroy(msg: ServerMessage): void {
         const destroy = msg.payload(new EntityDestroy()) as EntityDestroy;
         const pos = destroy.position();
+        // The destroy message carries no frame of its own (proper L2 fix: a
+        // real frame field on the EntityDestroy wire message). lastEventFrame
+        // is only the death's frame when a same-tick combat batch preceded it;
+        // the server sends no batch on event-less ticks and LOS-filters batch
+        // contents per viewer while destroys use a different losMask — so a
+        // Lua DestroyUnit / self-d / filtered kill would otherwise inherit an
+        // unrelated, possibly stale batch frame and present the removal up to
+        // ~D (0.13–1 s) early. Fall back to the newest observed entity-state
+        // frame: both are lower bounds on the true death frame, so take the max.
         this.events.onEntityDestroy?.(
             destroy.entityId(),
             pos ? pos.x() : 0,
             pos ? pos.y() : 0,
             pos ? pos.z() : 0,
+            Math.max(this.lastEventFrame, this.newestStateFrame),
         );
     }
 

@@ -4,6 +4,7 @@
 #include "Weapon.h"
 #include "WeaponDefHandler.h"
 #include "WeaponMemPool.h"
+#include "StatisticalCombat.h"
 #include "Game/GameHelper.h"
 #include "Game/Players/Player.h"
 #include "Lua/LuaConfig.h"
@@ -84,6 +85,7 @@ CR_REG_METADATA(CWeapon, (
 
 	CR_MEMBER(lastAimedFrame),
 	CR_MEMBER(lastTargetRetry),
+	CR_MEMBER(lastTargetSwitchFrame),
 
 	CR_MEMBER(maxForwardAngleDif),
 	CR_MEMBER(maxMainDirAngleDif),
@@ -522,6 +524,20 @@ void CWeapon::UpdateFire()
 	if (!CanFire(false, false, false))
 		return;
 
+	// Metalstorm morale (Q-D-c, statistical weapons only — opt-in, faithful
+	// path untouched). Derived proxy: morale = clamp(hp% - 10, 0, 100).
+	//   hp < 20% (morale < 10)  -> retreat WHILE firing (pull back, keep shooting)
+	//   hp <= 10% (morale == 0) -> panic: flee without firing
+	// Placed before resource/reload spend so a panicking squad wastes nothing.
+	if (weaponDef->resolution == WEAPON_RESOLUTION_STATISTICAL) {
+		const StatCombat::MoralePosture posture =
+			StatCombat::PostureFrom(owner->health, owner->maxHealth);
+		if (posture != StatCombat::MORALE_NORMAL)
+			statisticalCombatManager.RequestRetreat(owner, gs->frameNum);
+		if (posture == StatCombat::MORALE_PANIC)
+			return; // hold fire; retreat order already issued above
+	}
+
 	if (fastQueryPointUpdate) {
 		UpdateWeaponPieces(false);
 		UpdateWeaponVectors();
@@ -556,6 +572,18 @@ void CWeapon::UpdateFire()
 	}
 
 	reloadStatus = gs->frameNum + int(reloadTime / owner->reloadSpeed);
+
+	// Statistical resolution (PLAN-metalstorm-combat-resolution §2.1): resolve
+	// the whole volley here — one synced roll, damage scheduled for fire+flight
+	// — and skip the salvo/script/projectile machinery entirely. Reload cadence
+	// above is preserved so fire rate is faithful. This is the called-out,
+	// opt-in divergence from the Recoil projectile path (CLAUDE.md).
+	if (weaponDef->resolution == WEAPON_RESOLUTION_STATISTICAL) {
+		EmitFireSound();
+		statisticalCombatManager.EnqueueVolley(this, currentTarget, currentTargetPos,
+		                                        std::max(1, salvoSize * projectilesPerShot));
+		return;
+	}
 
 	salvoLeft = salvoSize;
 	nextSalvo = gs->frameNum;
@@ -699,6 +727,7 @@ void CWeapon::SetAttackTarget(const SWeaponTarget& newTarget)
 
 	DropCurrentTarget();
 	currentTarget = newTarget;
+	lastTargetSwitchFrame = gs->frameNum; // Metalstorm targetingCadence bookkeeping
 
 	if (newTarget.type == Target_Unit)
 		AddDeathDependence(newTarget.unit, DEPENDENCE_TARGETUNIT);
@@ -777,6 +806,22 @@ bool CWeapon::AutoTarget()
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (!AllowWeaponAutoTarget())
 		return false;
+
+	// Metalstorm targeting cadence (statistical weapons, opt-in; PLAN §2.2 /
+	// C4). Once locked onto a live target, a squad must hold it for
+	// `targetingCadence` frames (default: one reload cycle) before an
+	// auto-switch — prevents the free target-fanning per-volley resolution
+	// would otherwise allow. Player-issued Attack orders bypass this (they go
+	// straight through Attack()/SetAttackTarget). Faithful path untouched.
+	if (weaponDef->resolution == WEAPON_RESOLUTION_STATISTICAL
+	    && HaveUnitTarget() && currentTarget.unit != nullptr
+	    && !currentTarget.unit->isDead) {
+		const int cadence = (weaponDef->statTuning.targetingCadence > 0)
+			? weaponDef->statTuning.targetingCadence
+			: std::max(1, int(reloadTime / owner->reloadSpeed));
+		if ((gs->frameNum - lastTargetSwitchFrame) < cadence)
+			return false; // hold the current target through the cadence window
+	}
 
 	// search for other in-range targets
 	lastTargetRetry = gs->frameNum;
@@ -1238,22 +1283,8 @@ void CWeapon::Init()
 }
 
 
-void CWeapon::Fire(bool scriptCall)
+void CWeapon::EmitFireSound()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
-	owner->lastFireWeapon = gs->frameNum;
-
-	if (g_debugFlags.weapon.load(std::memory_order_relaxed)) {
-		const float3& tp = currentTargetPos;
-		springlog_log(SPRING_LOG_INFO, "weapon", "", springlog_get_frame(),
-		     "fire frame=%d unit=%d def=%s w=%u type=%s "
-		     "muzzle=(%.0f,%.0f,%.0f) target=(%.0f,%.0f,%.0f) script=%d",
-		     gs->frameNum, owner->id, owner->unitDef->name.c_str(),
-		     (unsigned)weaponDef->id, weaponDef->type.c_str(),
-		     weaponMuzzlePos.x, weaponMuzzlePos.y, weaponMuzzlePos.z,
-		     tp.x, tp.y, tp.z, (int)scriptCall);
-	}
-
 	// Emit a fire sound event. Skipped silently when the weaponDef has
 	// no soundStart entries — the def's SoundRef array is empty in that
 	// case and the client wouldn't have anything to play anyway. Synced
@@ -1275,6 +1306,32 @@ void CWeapon::Fire(bool scriptCall)
 			soundEvents.Push(se);
 		}
 	}
+}
+
+void CWeapon::Fire(bool scriptCall)
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+
+	// Statistical weapons never spawn a projectile (E1 invariant): the volley
+	// was already rolled + scheduled in UpdateFire. Guard here too so no stray
+	// caller can ever route a statistical def into FireImpl.
+	if (weaponDef->resolution == WEAPON_RESOLUTION_STATISTICAL)
+		return;
+
+	owner->lastFireWeapon = gs->frameNum;
+
+	if (g_debugFlags.weapon.load(std::memory_order_relaxed)) {
+		const float3& tp = currentTargetPos;
+		springlog_log(SPRING_LOG_INFO, "weapon", "", springlog_get_frame(),
+		     "fire frame=%d unit=%d def=%s w=%u type=%s "
+		     "muzzle=(%.0f,%.0f,%.0f) target=(%.0f,%.0f,%.0f) script=%d",
+		     gs->frameNum, owner->id, owner->unitDef->name.c_str(),
+		     (unsigned)weaponDef->id, weaponDef->type.c_str(),
+		     weaponMuzzlePos.x, weaponMuzzlePos.y, weaponMuzzlePos.z,
+		     tp.x, tp.y, tp.z, (int)scriptCall);
+	}
+
+	EmitFireSound();
 
 	// target-leading can nudge currentTargetPos into an adjacent quadfield cell
 	// such that tracing a ray to it does not touch the cell in which our target

@@ -1,6 +1,9 @@
 #include <doctest/doctest.h>
 
 #include "Server/ClientSession.h"
+#include "Server/HttpAuth.h"
+
+#include <chrono>
 
 // PLAN-security-hardening task 4 (G6/G13/G16): LuaRulesMsg/LuaUIMsg and
 // PathRequest previously had no rate limit at all, unlike PlayerCommand's
@@ -82,4 +85,55 @@ TEST_CASE("SessionManager.TryConsumeCommandBudget drains the order bucket by squ
     // Message-token bucket must be untouched by the rejected order — still
     // usable for a legitimately-sized command right after.
     CHECK(SessionManager::TryConsumeCommandBudget(session, 1));
+}
+
+// HttpAuth::LoginLimiter (PLAN-security-hardening task 3): the fail counter
+// must get a fresh threshold once a lockout has elapsed. Before the
+// sliding-window reset, failCount only ever grew, so after the first
+// 5-failure lockout every single further failure re-tripped a full 60s lock
+// — one bad login per minute was a permanent lockout DoS on the account.
+// Time is injected via the optional `now` parameter; the wall clock is never
+// consulted here.
+
+TEST_CASE("HttpAuth.LoginLimiter locks after kMaxFailures and unlocks once the lockout elapses") {
+    using Clock = HttpAuth::LoginLimiter::Clock;
+    HttpAuth::LoginLimiter limiter;
+    const auto t0 = Clock::now();
+
+    for (int i = 0; i < HttpAuth::LoginLimiter::kMaxFailures; i++) {
+        CHECK_FALSE(limiter.IsLocked("alice", t0));
+        limiter.RecordFailure("alice", t0);
+    }
+    CHECK(limiter.IsLocked("alice", t0));
+
+    // Lock expired → IsLocked is false again, so a correct password reaches
+    // the verify step and succeeds (the login handler only 429s on IsLocked).
+    const auto expired = t0 + std::chrono::seconds(HttpAuth::LoginLimiter::kLockoutSeconds + 1);
+    CHECK_FALSE(limiter.IsLocked("alice", expired));
+
+    // A success clears the entry entirely.
+    limiter.RecordSuccess("alice");
+    CHECK_FALSE(limiter.IsLocked("alice", expired));
+}
+
+TEST_CASE("HttpAuth.LoginLimiter requires kMaxFailures fresh failures to re-lock after expiry") {
+    using Clock = HttpAuth::LoginLimiter::Clock;
+    HttpAuth::LoginLimiter limiter;
+    const auto t0 = Clock::now();
+
+    for (int i = 0; i < HttpAuth::LoginLimiter::kMaxFailures; i++)
+        limiter.RecordFailure("bob", t0);
+    CHECK(limiter.IsLocked("bob", t0));
+
+    const auto expired = t0 + std::chrono::seconds(HttpAuth::LoginLimiter::kLockoutSeconds + 1);
+
+    // Post-expiry failures start from a fresh threshold: the first
+    // kMaxFailures-1 must NOT re-trip the lock...
+    for (int i = 0; i < HttpAuth::LoginLimiter::kMaxFailures - 1; i++) {
+        limiter.RecordFailure("bob", expired);
+        CHECK_FALSE(limiter.IsLocked("bob", expired));
+    }
+    // ...and the kMaxFailures-th does (burst semantics preserved).
+    limiter.RecordFailure("bob", expired);
+    CHECK(limiter.IsLocked("bob", expired));
 }

@@ -54,6 +54,7 @@ table AuthRequest {
     username: string;
     password_hash: string;      // bcrypt hash, not plaintext
     token: string;              // JWT for reconnection (alternative to user/pass)
+    cached_defs_hash: string;   // W4: Hash of cached defs for skip on match
 }
 
 table PlayerCommand {
@@ -190,6 +191,12 @@ table StandingOrderConditions {
     /// "scout". Resolution against unit defs is server-side and may be
     /// game-specific (Lua callback or unit-def category lookup).
     has_capabilities: [string];
+    /// Org-group scope (macro-orders §4.2 — the A+C fusion). When non-zero,
+    /// only squads that are members of this org group qualify; this is the
+    /// field that draws a group-scoped directive from its own roster rather
+    /// than the whole idle pool. 0 = any squad (classic condition/area
+    /// scope). For a GroupDirective the server sets this from `group_id`.
+    org_group: uint32 = 0;
 }
 
 /// Client → Server: create a new standing order owned by the
@@ -234,6 +241,132 @@ table StandingOrderRemove {
     order_id: uint32;
 }
 
+// ============================================================
+// Macro command & control (PLAN-macro-orders / PLAN-macro-directives)
+//
+// Ratified group model (Q-D-d, 2026-07-11): A+C hybrid — server-side org
+// groups (Model A) + condition/area directives (Model C). v0 ships two
+// echelons: squad + platoon/group. The army tier is *reserved in the
+// schema but not surfaced*: the `echelon`/`parent_id` fields exist and are
+// army-capable, but v0 emitters send only `echelon = Platoon` /
+// `parent_id = 0`, and a v0 server REJECTS an army create or a non-zero
+// parent (fail loud). Org-group ids come from their own counter + own
+// table (Q-D-d §5.4), never the entity id stream.
+// ============================================================
+
+/// Command echelon. v0 emits/accepts only `Platoon`; `Army` is reserved
+/// (schema-present, rejected on create until the tier ships).
+enum Echelon : uint8 {
+    Squad = 0,
+    Platoon = 1,        // a.k.a. "group" — the only tier v0 surfaces
+    Army = 2,           // reserved (post-v0)
+}
+
+/// Macro-directive type — a superset of StandingOrderType. Values 0..7
+/// alias StandingOrderType 1:1 so a group-scoped classic order maps with
+/// no translation; 8+ are the new platoon-level macro directives
+/// (PLAN-macro-orders §2). DefendFront carries the polyline "front line"
+/// shape — the first genuinely new order shape.
+enum DirectiveType : uint8 {
+    DefendArea = 0,
+    PatrolRoute = 1,
+    RallyPoint = 2,
+    Fallback = 3,
+    Reinforce = 4,
+    Screen = 5,
+    SupplyRoute = 6,
+    BuildBase = 7,
+    MoveFormation = 8,
+    Assault = 9,
+    Defend = 10,
+    Overwatch = 11,
+    Withdraw = 12,
+    Escort = 13,
+    DefendFront = 14,
+}
+
+/// Geometry of a directive's target. `params` on the directive is
+/// interpreted per this shape (see the server-side decomposition docs):
+///   Point    → [x, y, z]
+///   Circle   → [x, y, z, radius]
+///   Polygon  → [x1,y1,z1, x2,y2,z2, ...]         (ring, implicitly closed)
+///   Polyline → [frontage/depth, x1,y1,z1, ...]   (the front line)
+enum OrderShape : uint8 {
+    Point = 0,
+    Circle = 1,
+    Polygon = 2,
+    Polyline = 3,
+}
+
+/// Client → Server: create a server-side org group (Model A). Owned by
+/// the authenticated session's team (team objects with player attribution,
+/// not player ownership — macro-orders 2026-06-13 update). v0 rejects
+/// `echelon = Army` and any non-zero `parent_id`.
+table OrgGroupCreate {
+    sequence: uint32;
+    echelon: Echelon = Platoon;
+    name: string;
+    member_ids: [uint32];       // squad entity IDs to seed the roster
+    parent_id: uint32;          // reserved: v0 rejects non-zero
+}
+
+/// Client → Server: mutate a group's roster / name. `add_ids` are pulled
+/// out of any prior group first (a squad belongs to at most one platoon —
+/// v0 rule). Empty `name` = leave name unchanged.
+table OrgGroupUpdate {
+    sequence: uint32;
+    group_id: uint32;
+    add_ids: [uint32];
+    remove_ids: [uint32];
+    name: string;
+}
+
+/// Client → Server: disband a group. Members become unassigned (and its
+/// active directive, if any, is removed). Same team-ownership rule as the
+/// standing-order edits.
+table OrgGroupDisband {
+    sequence: uint32;
+    group_id: uint32;
+}
+
+/// Client → Server: create or update a macro directive. `directive_id == 0`
+/// creates; non-zero updates in place. `group_id == 0` = condition-scoped
+/// (classic area/standing directive); non-zero scopes the directive to that
+/// group's roster (the A+C fusion). `conditions.org_group` is set
+/// server-side from `group_id`. `params` is interpreted per `shape`.
+/// The create path is the authority charge site for directive play
+/// (PLAN-metalstorm-authority §A2) — hooked separately, not here.
+table GroupDirective {
+    sequence: uint32;
+    directive_id: uint32;
+    group_id: uint32;
+    type: DirectiveType;
+    priority: uint8;
+    shape: OrderShape;
+    params: [float];
+    conditions: StandingOrderConditions;
+    requested_strength: uint32;     // demand model; 0 = take what idles
+    phases_json: string;            // optional chain (macro-orders §4.4); reserved in v0
+    active: bool = true;
+    expires_in_frames: uint32;
+}
+
+/// Client → Server: remove a macro directive. Releases its assigned squads.
+table GroupDirectiveRemove {
+    sequence: uint32;
+    directive_id: uint32;
+}
+
+/// Client → Server: set a group's posture bundle (engagement / casualty
+/// tolerance / reinforcement policy / area-weapon ROE — macro-orders §3).
+/// Stored per group and streamed back in OrgGroupInfo. Posture *inheritance*
+/// down the tree is post-v0; v0 stores + echoes the per-group setting.
+table GroupPosture {
+    sequence: uint32;
+    group_id: uint32;
+    posture_json: string;
+}
+
 table Ping {
     client_time: uint64;
 }
@@ -241,6 +374,19 @@ table Ping {
 table ChatSend {
     text: string;
     destination: uint8;         // 0=all, 1=allies, 2=spectators
+}
+
+/// Client → Server (game connection only): sent immediately before a
+/// deliberate `disconnect()` so the server can distinguish *why* the client
+/// is leaving. Optional — a client that disconnects without sending this
+/// (crash, network drop, timeout) still produces a `PlayerRemoved` with the
+/// server's own default reason (0). See `PlayerLeft.reason` /
+/// `PlayerTeamEventItem.reason` for the shared reason enum.
+/// PLAN-quickstart.md §3.3: the detach path (`gpDetach`) sends this with
+/// reason=3 so PLAN-metalstorm-teams.md's `PlayerRemoved` consumer can tell
+/// a parked/reconnecting player apart from one who actually quit.
+table PlayerLeaveIntent {
+    reason: uint8;
 }
 
 /// Forwarded `Spring.SendLuaRulesMsg` call from a client widget to the
@@ -295,6 +441,16 @@ table RoomJoin {
 }
 
 table RoomLeave {}
+
+/// Convert from spectator to active player. Spectators can send this
+/// to request joining the game as a rostered player (assigned to a team).
+/// If the room is full (non-spectator player count >= maxPlayers), the
+/// request is rejected. If accepted, the spectator transitions to a
+/// player with team assignment (auto-assigned or specified by team field),
+/// and the room broadcasts the state change via RoomStateUpdate.
+table RoomEnlist {
+    team: uint8 = 255;      // 255 = auto-assign next available team
+}
 
 table RoomTeamSelect {
     team: uint8;
@@ -462,6 +618,7 @@ union ClientPayload {
     RoomCreate,
     RoomJoin,
     RoomLeave,
+    RoomEnlist,
     RoomTeamSelect,
     RoomReady,
     RoomKick,
@@ -487,6 +644,13 @@ union ClientPayload {
     StandingOrderUpdate,
     StandingOrderRemove,
     LuaUIMsg,
+    PlayerLeaveIntent,
+    OrgGroupCreate,
+    OrgGroupUpdate,
+    OrgGroupDisband,
+    GroupDirective,
+    GroupDirectiveRemove,
+    GroupPosture,
 }
 
 table ClientMessage {
@@ -507,6 +671,9 @@ table AuthResponse {
     /// spectator. The client stores this so it can scope unit
     /// rendering, command validation, and UI chrome to "my team".
     team: int8 = -1;
+    /// Role: "admin", "player", or "spectator". Used by the client to
+    /// show/hide command UI and display the Enlist button for spectators.
+    role: string;
     /// Cache key for this game's UnitDefs/WeaponDefs FlatBuffer
     /// payloads. Hash of (gameId, version, modOptions). Client uses
     /// it to construct the fetch URL:
@@ -565,6 +732,7 @@ enum CombatResult : uint8 {
     Miss,
     Blocked,       // shield/armour absorbed
     Kill,          // target destroyed
+    Unknown,       // visibility-filtered: viewer sees the shots but not the outcome
 }
 
 table CombatEvent {
@@ -574,6 +742,74 @@ table CombatEvent {
     result: CombatResult;
     damage: float;
     position: Vec3;            // Impact point
+}
+
+/// Metalstorm statistical combat (Model 1) per-volley outcome
+/// (PLAN-metalstorm-combat-resolution.md §2.3 / PLAN-macro-combat.md §3).
+/// One per squad-volley, NOT per round — the client invents `rounds`
+/// cosmetic tracers/impacts from a single event. Visibility-filtered
+/// per session in StateStreamer::BroadcastCombatEvents:
+///   - viewer sees the attacker  -> full outcome (Hit/Miss, damage, attacker_id)
+///   - viewer owns the target but can't see the attacker -> result Unknown,
+///     damage 0, attacker_id 0, plus a counterbattery radar-blip reveal
+///     (reveal_attacker + reveal_pos, Q-D-c ANSWERED 2026-07-19)
+///   - viewer sees only the target (neither owner nor attacker-LOS) -> Unknown,
+///     no reveal
+///   - viewer sees neither -> not sent
+table VolleyOutcome {
+    attacker_id: uint32;          // firing unit; 0 if hidden from this viewer
+    weapon_def_id: uint16;
+    target_id: uint32;            // victim unit; 0 if hidden from this viewer
+    target_pos: Vec3;             // impact position (FX + squad casualty hint)
+    resolve_frame: uint32;        // fire_frame + flight time (foreknown outcome)
+    result: CombatResult = Hit;   // Hit / Miss / Unknown (visibility-filtered)
+    damage: uint16;               // aggregate; 0 for Unknown / miss
+    rounds: uint8 = 1;            // cosmetic shot count for client tracer fan-out
+    team: uint8 = 255;            // attacker team (FX tint / ally audio); 255 = hidden
+    /// Counterbattery reveal (Q-D-c). True only for the victim's team when
+    /// they cannot see the attacker: the client drops a radar blip at
+    /// `reveal_pos` (the attacker's firing position) so statistical artillery
+    /// is counterable. Never set for viewers who can already see the attacker.
+    reveal_attacker: bool = false;
+    reveal_pos: Vec3;             // attacker firing position (only when reveal_attacker)
+    /// Attacker morale posture, a derived proxy (morale = clamp(hp% - 10, 0, 100)):
+    /// 0 = normal, 1 = retreating-while-firing (morale < 10), 2 = panicking
+    /// (morale == 0). Lets the client show a retreat/panic indicator. Only
+    /// meaningful when attacker_id != 0 (attacker visible).
+    attacker_posture: uint8 = 0;
+}
+
+/// Metalstorm damage-field lifecycle (Model 3 — area bombardment, C6,
+/// PLAN-metalstorm-combat-resolution.md §4). A field is an area that applies
+/// `intensity` damage/sec on a fixed cadence for `duration` frames. The SIM
+/// owns all damage (units inside take it via DoDamage). The client receives
+/// only these Created/Removed lifecycle events and INVENTS the barrage FX
+/// (procedural shell arcs + impacts scattered in the area at the given
+/// cadence) — no per-shell wire traffic. Visibility-filtered per session in
+/// StateStreamer::BroadcastCombatEvents by area overlap with the viewer's
+/// known space (own-team fields always shown).
+enum DamageFieldEventKind : uint8 {
+    Created = 0,   // a field appeared — start inventing barrage FX
+    Removed = 1,   // field expired or was cancelled — stop the FX
+}
+
+enum DamageFieldShape : uint8 {
+    Circle = 0,    // center + radius
+    Rect = 1,      // center + (half_x, half_z) axis-aligned box
+}
+
+table DamageFieldEvent {
+    field_id: uint32;
+    kind: DamageFieldEventKind;
+    shape: DamageFieldShape;
+    center: Vec3;               // field center (y = ground sample at create)
+    radius: float;             // circle radius, or rect half-extent along x
+    half_z: float = 0;         // rect half-extent along z (0 for a circle)
+    weapon_def_id: uint16;     // for FX flavour (CEG lookup); 0 = generic
+    intensity: float;          // damage/sec — client scales impact density
+    cadence: uint16 = 15;      // frames between damage ticks (FX pulse rate)
+    duration: uint32;          // remaining frames at creation (0 on Removed)
+    team: uint8 = 255;         // owner team (FX tint); 255 = neutral/none
 }
 
 table GameEvent {
@@ -766,6 +1002,16 @@ table GameEventBatch {
     /// so spectators stay in sync. Usually empty; only populated on
     /// the tick when a state change fires.
     music_events: [MusicEvent];
+    /// Metalstorm statistical-combat per-volley outcomes (Model 1). Already
+    /// visibility-filtered for this session. Empty for ported games (ZK/BAR
+    /// use the projectile path); populated only when statistical weapons fire.
+    /// See VolleyOutcome. Appended last for FlatBuffers field-id stability.
+    volley_outcomes: [VolleyOutcome];
+    /// Metalstorm damage-field lifecycle events (Model 3, C6). Empty for
+    /// ported games; populated only when a game creates/expires a barrage
+    /// field. Appended last for FlatBuffers field-id stability. See
+    /// DamageFieldEvent.
+    damage_fields: [DamageFieldEvent];
 }
 
 table ResourceUpdate {
@@ -846,6 +1092,9 @@ table GameInfo {
     /// on `paused` — a normal in-game pause must not end the game. Defaults false
     /// for every ordinary GameInfo (auth snapshot, periodic refresh).
     game_over: bool = false;
+    /// W4: Content hash of all game defs (units + weapons). Client can skip
+    /// re-downloading defs on reconnect if this matches cached hash.
+    defs_hash: string;
     /// Winning allyteam IDs, as passed to `Spring.GameOver(allyTeamID1, …)`.
     /// Empty when the result is undecided (e.g. host drop) or on a fallback win
     /// with no ally mapping. Only meaningful when `game_over = true`. Mirrors
@@ -899,7 +1148,8 @@ table TeamStartInfo {
 struct PlayerTeamEventItem {
     /// 0 = PlayerChanged, 1 = PlayerAdded, 2 = PlayerRemoved, 3 = TeamDied.
     kind: uint8;
-    /// PlayerRemoved reason (0=quit, 1=kicked, 2=timeout); 0 for other kinds.
+    /// PlayerRemoved reason (0=quit, 1=kicked, 2=timeout, 3=detach — parked,
+    /// may reconnect); 0 for other kinds.
     reason: uint8;
     /// playerID for kinds 0-2, teamID for kind 3.
     id: uint32;
@@ -1002,7 +1252,8 @@ table PlayerLeft {
     player_id: uint32;
     username: string;
     team: int8;
-    /// 0 = voluntary quit, 1 = kicked, 2 = connection timeout
+    /// 0 = voluntary quit, 1 = kicked, 2 = connection timeout, 3 = detach
+    /// (worker parked client-side; may reconnect — PLAN-quickstart.md §3.3)
     reason: uint8;
 }
 
@@ -1615,6 +1866,56 @@ table StandingOrderState {
     orders: [StandingOrderInfo];
 }
 
+// ============================================================
+// Macro C&C — server → client state (PLAN-macro-directives §1)
+// Broadcast on change, snapshot on auth — same visibility model as
+// StandingOrderState (own team + allies, never enemy). Low rate, high
+// debounce; never per-tick.
+// ============================================================
+
+/// One org group in the team's org tree. `echelon`/`parent_id` are streamed
+/// regardless of the v0 platoon-only surface so the client OOB tree is
+/// already tier-shaped (PLAN-macro-directives §1 field discipline).
+table OrgGroupInfo {
+    group_id: uint32;
+    echelon: Echelon;
+    owner_team: uint8;
+    parent_id: uint32;
+    name: string;
+    member_ids: [uint32];
+    current_directive_id: uint32;   // active macro order, 0 = none
+    posture_json: string;
+    created_at_frame: uint32;
+}
+
+table OrgGroupState {
+    groups: [OrgGroupInfo];
+}
+
+/// One macro directive, incl. fulfillment (macro-orders §4.3 demand model):
+/// `assigned_strength / requested_strength` reports understrength/fulfilled.
+table DirectiveInfo {
+    directive_id: uint32;
+    owner_team: uint8;
+    group_id: uint32;               // 0 = condition-scoped
+    type: DirectiveType;
+    priority: uint8;
+    shape: OrderShape;
+    params: [float];
+    conditions: StandingOrderConditions;
+    requested_strength: uint32;
+    assigned_strength: uint32;      // fulfillment numerator (aggregate HP assigned)
+    assigned_squad_count: uint16;
+    phases_json: string;
+    active: bool = true;
+    expires_at_frame: uint32;
+    created_at_frame: uint32;
+}
+
+table DirectiveState {
+    directives: [DirectiveInfo];
+}
+
 /// One variadic argument from `Spring.SendToUnsynced(...)`. The server
 /// validates synced-side that args are one of nil/bool/number/string
 /// (see CSyncedLuaHandle::SendToUnsynced) so the wire mirrors exactly
@@ -1656,6 +1957,72 @@ table SendToUnsyncedEvent {
 table LuaUIMsgRelay {
     data: [uint8];
     player_id: int32;
+}
+
+/// The concrete type of a RulesParamEntry value. `Nil` means "delete this
+/// key from the client mirror" (matches the client consumer's `null →
+/// delete` path and Spring's rules-param clearing). Spring can also store a
+/// *boolean* rules param; the server encodes booleans as `Number` (0.0/1.0)
+/// because the client rules-param mirror type is `number | string` and has
+/// never carried booleans. **CALLED-OUT divergence from Recoil:** a `false`
+/// bool param reads back as `0` (truthy in Lua) rather than `false`. No
+/// current Metalstorm/ZK/BAR consumer sets a boolean rules param; the
+/// faithful fix (add a `Bool` kind + widen `RulesParamValue`) is deferred
+/// until one does. See StateStreamer::BroadcastRulesParams.
+enum RulesParamValueKind : uint8 {
+    Nil = 0,
+    Number = 1,
+    String = 2,
+}
+
+/// One rules-param key→value change. `value_kind` selects which value field
+/// is live (`num_val` for Number, `str_val` for String, neither for Nil).
+/// W3 optimization: prefer key_id over key when both present.
+table RulesParamEntry {
+    key: string;         // legacy: full string key (for backward compat)
+    key_id: uint16;      // W3: interned key ID (0 = not interned, use key)
+    value_kind: RulesParamValueKind;
+    num_val: double;
+    str_val: string;
+}
+
+/// Which rules-param scope a RulesParamUpdate carries. `Game` params are the
+/// global `Spring.SetGameRulesParam` map (broadcast unfiltered — matching
+/// `Spring.GetGameRulesParams`, which is unconditionally public). `Team`
+/// params are `Spring.SetTeamRulesParam`, LOS-filtered per receiving session.
+enum RulesParamScope : uint8 {
+    Game = 0,
+    Team = 1,
+}
+
+/// Server → Client: a per-sim-tick batch of rules-param changes for ONE
+/// scope (+ id for Team scope). Consumed by the LuaUI worker's
+/// `handleRulesParamUpdate`, feeding `Spring.GetGameRulesParam(s)` /
+/// `Spring.GetTeamRulesParam(s)` in widgets/gadgets.
+///
+/// `id` is the teamID for Team scope (ignored for Game). `replace = true`
+/// asks the client to clear the target map before applying — used only for
+/// the join/rejoin snapshot so a late joiner converges exactly to current
+/// state; per-tick deltas use `replace = false`.
+///
+/// **Visibility** (replicates `LuaSyncedRead::GetTeamRulesParam(s)`): Team
+/// batches are filtered server-side per connection against each param's
+/// `los` bitmask — same-ally sessions see PRIVATE-and-below, allied-team
+/// sessions see ALLIED-and-below, everyone sees PUBLIC; spectators (team < 0)
+/// see all. Game batches are broadcast to every client.
+table RulesParamUpdate {
+    scope: RulesParamScope;
+    id: uint32;
+    replace: bool;
+    params: [RulesParamEntry];
+    params_rev: uint32;  // W3: generation counter for snapshot validation
+}
+
+/// W3: Key interning dictionary for RulesParamEntry key_id references.
+/// Sent once on join (or on dictionary resync if rev mismatch).
+table RulesParamKeyDictionary {
+    keys: [string];         // indexed by key_id (0 reserved for "not interned")
+    dictionary_rev: uint32; // dictionary version for mismatch detection
 }
 
 // Union of all server→client message types
@@ -1701,6 +2068,10 @@ union ServerPayload {
     LuaUIMsgRelay,
     TeamStatsHistoryBatch,
     GameModOptions,
+    OrgGroupState,
+    DirectiveState,
+    RulesParamUpdate,
+    RulesParamKeyDictionary,
 }
 
 table ServerMessage {

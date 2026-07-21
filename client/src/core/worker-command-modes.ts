@@ -62,7 +62,7 @@ import {
 } from '@babylonjs/core';
 import type { EntityRenderer } from './entity-renderer.js';
 import type { Connection, UnitCommandQueueInfo } from './connection.js';
-import { CommandBuffer, CMD, OPT } from './command-buffer.js';
+import { CommandBuffer, CMD, OPT, type CommandNotifier } from './command-buffer.js';
 import { SELECT_RADIUS, DRAG_THRESHOLD_PX } from './selection-core.js';
 
 /// Spring `CMDTYPE_*` (rts/Sim/Units/CommandAI/Command.h) → modal target class.
@@ -131,6 +131,10 @@ export class WorkerCommandModes {
         centerX: number; centerY: number; centerZ: number;
         radius: number; shift: boolean; downX: number; downY: number;
         isAreaOnly: boolean; previewRing: Mesh | null;
+        /// One material per drag, shared by every rebuilt preview torus.
+        /// (Rebuilding a material per pointermove stranded ~60 materials/sec —
+        /// Mesh.dispose() defaults to disposeMaterialAndTextures=false.)
+        ringMat: StandardMaterial | null;
     } | null = null;
 
     /// Active waypoint reposition drag (null = none).
@@ -152,6 +156,12 @@ export class WorkerCommandModes {
         this.connection = connection;
         this.commandBuffer = new CommandBuffer(connection);
         this.opts = opts;
+    }
+
+    /** Install (or clear) the CommandNotify gate on this owner's
+     *  CommandBuffer (see command-buffer.ts). Wired from gpInit. */
+    setCommandNotifier(fn: CommandNotifier | null): void {
+        this.commandBuffer.setNotifier(fn);
     }
 
     /** True while an area/waypoint drag is in flight (pointerMove routes here,
@@ -188,6 +198,7 @@ export class WorkerCommandModes {
     cancelAll(): void {
         if (this.areaAttackDrag) {
             this.areaAttackDrag.previewRing?.dispose();
+            this.areaAttackDrag.ringMat?.dispose();
             this.areaAttackDrag = null;
         }
         if (this.waypointDrag) {
@@ -335,7 +346,8 @@ export class WorkerCommandModes {
     ): void {
         this.areaAttackDrag = {
             centerX: groundPos.x, centerY: groundPos.y, centerZ: groundPos.z,
-            radius: AREA_ATTACK_MIN_RADIUS, shift, downX, downY, isAreaOnly, previewRing: null,
+            radius: AREA_ATTACK_MIN_RADIUS, shift, downX, downY, isAreaOnly,
+            previewRing: null, ringMat: null,
         };
         this.renderAreaAttackRing();
     }
@@ -354,6 +366,7 @@ export class WorkerCommandModes {
         const drag = this.areaAttackDrag;
         if (!drag) return;
         drag.previewRing?.dispose();
+        drag.ringMat?.dispose();
         this.areaAttackDrag = null;
 
         const sel = this.opts.getSelection().slice();
@@ -384,6 +397,11 @@ export class WorkerCommandModes {
     private renderAreaAttackRing(): void {
         const drag = this.areaAttackDrag;
         if (!drag) return;
+        // The torus geometry is rebuilt per move (diameter/thickness/tess are
+        // baked into it), but the material is created ONCE per drag and shared
+        // across rebuilds — a per-move StandardMaterial was never disposed
+        // (previewRing.dispose() keeps materials by default) and leaked ~60
+        // materials/sec during a drag.
         drag.previewRing?.dispose();
         const tess = Math.max(24, Math.min(96, Math.floor(drag.radius / 24)));
         const thickness = Math.max(2, drag.radius * 0.012);
@@ -391,13 +409,16 @@ export class WorkerCommandModes {
             { diameter: drag.radius * 2, thickness, tessellation: tess }, this.scene);
         ring.scaling.y = 0.15;
         ring.position.set(drag.centerX, drag.centerY + 2, drag.centerZ);
-        const mat = new StandardMaterial('area-attack-ring-mat', this.scene);
-        mat.diffuseColor = new Color3(0, 0, 0);
-        mat.emissiveColor = new Color3(1.0, 0.25, 0.25);
-        mat.specularColor = new Color3(0, 0, 0);
-        mat.disableLighting = true;
-        mat.alpha = 0.7;
-        ring.material = mat;
+        if (!drag.ringMat) {
+            const mat = new StandardMaterial('area-attack-ring-mat', this.scene);
+            mat.diffuseColor = new Color3(0, 0, 0);
+            mat.emissiveColor = new Color3(1.0, 0.25, 0.25);
+            mat.specularColor = new Color3(0, 0, 0);
+            mat.disableLighting = true;
+            mat.alpha = 0.7;
+            drag.ringMat = mat;
+        }
+        ring.material = drag.ringMat;
         ring.isPickable = false;
         ring.renderingGroupId = 3; // depth-always, like the path/waypoint overlays
         drag.previewRing = ring;
@@ -453,9 +474,9 @@ export class WorkerCommandModes {
         drag.ghostLine = line;
     }
 
-    /** Commit the waypoint reposition — atomic INSERT (new pos, tag-anchored via
-     *  OPT.ALT) + REMOVE (drop the original tag), batched so the unit never sees
-     *  an intermediate double-queued state. */
+    /** Commit the waypoint reposition — atomic INSERT (new pos, tag-anchored)
+     *  + REMOVE (drop the original tag), batched so the unit never sees an
+     *  intermediate double-queued state. */
     private commitWaypointDrag(x: number, y: number, viewId: number): void {
         const drag = this.waypointDrag;
         if (!drag) return;
@@ -473,9 +494,13 @@ export class WorkerCommandModes {
         newParams[1] = groundPos.y;
         newParams[2] = groundPos.z;
         // INSERT layout (CommandAI::ExecuteInsert): [tag, newCmdId, newOpts, ...newParams].
+        // options MUST be 0: tag-anchored insert is the *no-ALT* path. With
+        // OPT.ALT set, ExecuteInsert instead treats param0 as a queue POSITION
+        // (clamped to queue length) — and since tags outgrow the queue length,
+        // the drag silently moved the waypoint to the end of the queue.
         const insertParams = [drag.tag, drag.cmdId, drag.originalOptions, ...newParams];
         this.connection.sendPlayerCommandBatch([
-            { commandId: CMD.INSERT, unitIds: [drag.unitId], params: insertParams, options: OPT.ALT },
+            { commandId: CMD.INSERT, unitIds: [drag.unitId], params: insertParams, options: 0 },
             { commandId: CMD.REMOVE, unitIds: [drag.unitId], params: [drag.tag], options: 0 },
         ]);
     }

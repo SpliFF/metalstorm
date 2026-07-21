@@ -23,7 +23,21 @@ const SHADOW_FILTERING_QUALITY = [
 
 /** How far to pull the hemispheric ambient toward neutral grey (0 = the map's
  *  raw colour, 1 = fully grey). Keeps a hint of the map's sky/bounce cue while
- *  stopping a saturated map ambient from staining PBR-lit units. */
+ *  stopping a saturated map ambient from staining PBR-lit units.
+ *
+ *  FIDELITY-STANDIN: Recoil applies groundAmbient/unitAmbient VERBATIM — a
+ *  deliberately tinted map ambient (e.g. lava-red) is the author's intent.
+ *  This desaturation was motivated by one map (green_flat_x34_v3, saturated
+ *  green groundAmbient [0.6, 0.9, 0.2] drenching every PBR-lit unit), but
+ *  because the single scene HemisphericLight also lights terrain and map
+ *  features, the rewrite neutralises the author's ambient tint SCENE-WIDE, not
+ *  just on units. Scoping it to units would need a second hemispheric light
+ *  with includedOnlyMeshes/excludedMeshes bookkeeping across every unit/feature
+ *  mesh (Babylon can't desaturate one light's contribution per-material).
+ *  Revisit when (a) a map whose authored ambient tint visibly matters lands, or
+ *  (b) the per-material ambient split (docs/lighting.md "Sun + ambient", the
+ *  L3+ groundAmbient/unitAmbient work) is built — fold this into the
+ *  unit-scoped half then. */
 const AMBIENT_DESATURATION = 0.8;
 
 /** Blend an [r,g,b] toward its own average (perceptually neutral grey). Green
@@ -37,6 +51,82 @@ function desaturateToGrey(rgb: readonly number[], amount: number): Color3 {
         rgb[2] + (avg - rgb[2]) * amount,
     );
 }
+
+// ── Per-game lighting style + ambient-level tuning ─────────────────────
+// Successor to the retired custom unit shader's USE_HALF_LAMBERT toggle
+// and `ambientLevel` uniform (deleted with the shader — units render
+// through PBRMaterial now). On the PBR path the style is expressed as the
+// hemispheric ambient-fill weight relative to the sun: the old 'gameplay'
+// branch kept a high flat floor (0.45 vs a 0.55·halfLambert sun term) so
+// silhouettes stayed readable at RTS distance; the old 'realistic' branch
+// ran a low floor (ambientLevel 0.10 · (0.35..1.0) vs a full 1.0 Lambert
+// sun term) for deep unlit faces and strong front/back contrast. The
+// 0.10/0.45 floor ratio (≈0.2) is carried over as the realistic style's
+// ambient-intensity factor. Unlike the old per-material uniform this
+// scales the scene hemispheric light, so terrain/features darken with the
+// units — consistent with the cinematic intent, and it makes the switch
+// live (no shader recompile), but note it is scene-wide.
+
+export type LightingStyle = 'gameplay' | 'realistic';
+
+/** Ambient-intensity factor per style, applied to the base intensity the
+ *  rig would otherwise use ('gameplay' ≡ the unmodified look). */
+const STYLE_AMBIENT_FACTOR: Record<LightingStyle, number> = {
+    gameplay: 1.0,
+    realistic: 0.2,
+};
+
+let currentLightingStyle: LightingStyle = 'gameplay';
+/** Base hemispheric intensity before the style factor: the
+ *  createSceneLighting placeholder until mapinfo lighting lands, then
+ *  applyMapLighting's map-authored level. */
+let baseAmbientIntensity = 0.7;
+/** Live-tuning override (setAmbientLevel / `__setAmbientLevel`); when set
+ *  it replaces the base×style product entirely. Reset per game session. */
+let ambientLevelOverride: number | null = null;
+/** The rig the setters retune; registered by createSceneLighting. */
+let activeLighting: SceneLighting | null = null;
+
+function effectiveAmbientIntensity(): number {
+    return ambientLevelOverride
+        ?? baseAmbientIntensity * STYLE_AMBIENT_FACTOR[currentLightingStyle];
+}
+
+/**
+ * Select the per-game lighting style (modinfo.lua `lighting` field,
+ * plumbed via /api/games → gp:init). 'gameplay' (default) keeps the full
+ * hemispheric ambient fill; 'realistic' drops it to ~20% for deep unlit
+ * faces (Metalstorm's cinematic look). Applies immediately to the live
+ * rig and to every later applyMapLighting. Unknown values fall back to
+ * 'gameplay' so a future protocol value doesn't darken the scene.
+ * NOTE: while a SunRig day-night cycle runs it owns ambient.intensity and
+ * will overwrite live retunes until disabled (same as every other knob
+ * the rig drives).
+ */
+export function setLightingStyle(style: string): LightingStyle {
+    currentLightingStyle = (style === 'realistic') ? 'realistic' : 'gameplay';
+    if (activeLighting) {
+        activeLighting.ambient.intensity = effectiveAmbientIntensity();
+    }
+    return currentLightingStyle;
+}
+
+/**
+ * Live-tune the hemispheric ambient fill (docs/lighting.md "live tuning";
+ * exposed to the worker console as `__setAmbientLevel`). Overrides the
+ * style-derived intensity outright — lower = deeper unlit faces + darker
+ * shadow floors. Cleared at the next game session (createSceneLighting).
+ */
+export function setAmbientLevel(value: number): number {
+    ambientLevelOverride = value;
+    if (activeLighting) {
+        activeLighting.ambient.intensity = effectiveAmbientIntensity();
+    }
+    return value;
+}
+
+(globalThis as Record<string, unknown>).__setLightingStyle = setLightingStyle;
+(globalThis as Record<string, unknown>).__setAmbientLevel = setAmbientLevel;
 
 export interface SceneLighting {
     ambient: HemisphericLight;
@@ -93,7 +183,15 @@ export function createSceneLighting(scene: Scene, camera: Camera): SceneLighting
 
     const csm = createCsm(sun);
 
-    return { ambient, sun, renderPipeline, csm };
+    const lighting: SceneLighting = { ambient, sun, renderPipeline, csm };
+    // Register as the rig setLightingStyle/setAmbientLevel retune, and
+    // reset the per-session tuning state (a DevTools ambient override or a
+    // previous game's style must not leak into a new session — gp:init
+    // re-applies the style right after this).
+    activeLighting = lighting;
+    ambientLevelOverride = null;
+    baseAmbientIntensity = ambient.intensity;
+    return lighting;
 }
 
 /**
@@ -180,7 +278,11 @@ export function applyMapLighting(lighting: MapLighting, scene: SceneLighting): v
     // coloured from its own diffuse texture, so it barely shifts.
     ambient.diffuse = desaturateToGrey(lighting.groundAmbient, AMBIENT_DESATURATION);
     ambient.groundColor = desaturateToGrey(lighting.unitAmbient, AMBIENT_DESATURATION);
-    ambient.intensity = 1.0;
+    // Map-authored ambient level, weighted by the per-game lighting style
+    // ('gameplay' factor is 1.0 ⇒ identical to the old fixed 1.0 here);
+    // a live setAmbientLevel override wins outright.
+    baseAmbientIntensity = 1.0;
+    ambient.intensity = effectiveAmbientIntensity();
 
     // Average ground + unit density and invert Recoil's "1.0 = fully
     // black" convention into Babylon's "0 = fully black". One knob

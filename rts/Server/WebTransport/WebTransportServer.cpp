@@ -312,6 +312,11 @@ struct WebTransportServerImpl {
     bool echoMode = false;
 
     SSL_CTX* sslCtx = nullptr;
+    // Guards certHashHex + pendingCertHashHex: written on the Run() thread by
+    // cert reload/rotation (LoadActiveCert / CheckCertReload), read from the
+    // HTTP thread via CertHash()/CertHashes() for /api/wt/info — an unguarded
+    // std::string rewrite there is a torn read.
+    mutable std::mutex certHashMutex;
     std::string certHashHex;
 
     // PLAN-security-hardening.md task 5 (G3): dual-mode cert provisioning.
@@ -510,8 +515,10 @@ bool WebTransportServerImpl::LoadActiveCert(X509* x509, EVP_PKEY* pkey) {
         unsigned char md[EVP_MAX_MD_SIZE];
         unsigned int mdLen = 0;
         EVP_Digest(der, derLen, md, &mdLen, EVP_sha256(), nullptr);
-        certHashHex = ToHex(md, mdLen);
+        std::string hashHex = ToHex(md, mdLen);
         OPENSSL_free(der);
+        std::lock_guard<std::mutex> lk(certHashMutex);
+        certHashHex = std::move(hashHex);
     }
     activeCertLoadedAtNs = NowNs();
     return true;
@@ -531,7 +538,11 @@ bool WebTransportServerImpl::GenerateSelfSigned() {
 
     if (pendingCert) { X509_free(pendingCert); pendingCert = nullptr; }
     if (pendingKey) { EVP_PKEY_free(pendingKey); pendingKey = nullptr; }
-    return GenerateCert(&pendingCert, &pendingKey, pendingCertHashHex);
+    std::string pendingHash;
+    const bool pendingOk = GenerateCert(&pendingCert, &pendingKey, pendingHash);
+    std::lock_guard<std::mutex> lk(certHashMutex);
+    pendingCertHashHex = std::move(pendingHash);
+    return pendingOk;
 }
 
 // Webpki mode (--wt-cert/--wt-key given): read PEM files from disk, install
@@ -647,7 +658,13 @@ void WebTransportServerImpl::CheckCertReload(ngtcp2_tstamp now) {
                              certHashHex.c_str());
             }
         }
-        if (!pendingCert) GenerateCert(&pendingCert, &pendingKey, pendingCertHashHex);
+        if (!pendingCert) {
+            std::string pendingHash;
+            if (GenerateCert(&pendingCert, &pendingKey, pendingHash)) {
+                std::lock_guard<std::mutex> lk(certHashMutex);
+                pendingCertHashHex = std::move(pendingHash);
+            }
+        }
     }
 }
 
@@ -1430,19 +1447,25 @@ bool WebTransportServer::Start(int port, const std::string& certPath, const std:
     impl_->thread = std::thread([this] { impl_->Run(); });
     std::fprintf(stderr, "[webtransport] QUIC listening on udp/:%d (mode=%s certhash=%s)\n",
                  port, impl_->certMode == WtCertMode::Webpki ? "webpki" : "hashes",
-                 impl_->certHashHex.c_str());
+                 CertHash().c_str());
     return true;
 }
 
-std::string WebTransportServer::CertHash() const { return impl_->certHashHex; }
+std::string WebTransportServer::CertHash() const {
+    std::lock_guard<std::mutex> lk(impl_->certHashMutex);
+    return impl_->certHashHex;
+}
 
 WtCertMode WebTransportServer::CertMode() const { return impl_->certMode; }
 
 std::vector<std::string> WebTransportServer::CertHashes() const {
     // Webpki mode: browsers validate via the CA chain — pinning a rotating
     // CA cert would break clients on every renewal, so publish nothing.
+    // (certMode is set once in SetupTls before the Run() thread starts and
+    // never changes after, so it needs no guard — unlike the hash strings.)
     if (impl_->certMode == WtCertMode::Webpki) return {};
     std::vector<std::string> out;
+    std::lock_guard<std::mutex> lk(impl_->certHashMutex);
     if (!impl_->certHashHex.empty()) out.push_back(impl_->certHashHex);
     if (!impl_->pendingCertHashHex.empty()) out.push_back(impl_->pendingCertHashHex);
     return out;

@@ -77,8 +77,8 @@ export function loadDirManifest(baseUrl: string): Promise<DirManifest> {
             // "AMetalExtractorLvl1.glb"). A case-sensitive Set.has() check
             // here returns false for those queries, the .config.json fetch
             // gets skipped, tex1/tex2 are never read, and the unit
-            // renders with the all-white textureless fallback (which is
-            // alpha=1 → fully team-coloured by the team-color shader).
+            // renders with the synthesized-white textureless fallback
+            // (fully team-coloured via TeamColorPlugin.syntheticAlbedo).
             const set = new Set(data.files.map(f => f.toLowerCase()));
             return {
                 has: (name) => set.has(name.toLowerCase()),
