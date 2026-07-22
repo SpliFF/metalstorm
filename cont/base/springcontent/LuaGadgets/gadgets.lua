@@ -160,6 +160,29 @@ function gadgetHandler:Initialize()
   local unsortedGadgets = {}
   -- get the gadget names
   local gadgetFiles = VFS.DirList(GADGETS_DIR, "*.lua", VFSMODE)
+
+  -- CUSTOM (springrts-web, 2026-07-22): opt-in per-game gadget allow-list.
+  -- The VFS layers engine-base content (and, currently, leaked other-game
+  -- content) under each game, so DirList returns far more gadgets than a
+  -- lean native game wants. For Metalstorm that pulled in springcontent-base
+  -- game_end.lua (which fatally crashed the synced init) plus a pile of
+  -- ZK/BAR-shaped gadgets. When a game sets `_G.GADGET_ALLOWLIST` (a set
+  -- keyed by gadget file basename) the handler loads ONLY those gadgets and
+  -- skips the rest. Absent => stock Recoil behaviour (load every discovered
+  -- gadget), so zk / bar / papertanks are unaffected.
+  if _G.GADGET_ALLOWLIST then
+    local allowed = {}
+    for _, gf in ipairs(gadgetFiles) do
+      local base = string.match(gf, "([^/\\]+)$") or gf
+      if _G.GADGET_ALLOWLIST[base] then
+        allowed[#allowed + 1] = gf
+      else
+        Spring.Log(LOG_SECTION, LOG.INFO,
+          "gadget allow-list: skipping " .. tostring(base))
+      end
+    end
+    gadgetFiles = allowed
+  end
 --  table.sort(gadgetFiles)
 
 --  for k,gf in ipairs(gadgetFiles) do
