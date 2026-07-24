@@ -29,7 +29,10 @@ return {
     ms_foundry = building{
         name = 'Foundry',
         description = 'Ground forces factory — mechs, tanks, artillery',
-        objectname = 'ms_foundry',
+        -- fable_factory (DESIGN-MODEL-BUILDING.md §21): shipped generated
+        -- model, authored explicitly as a 'military' building_family
+        -- factory (see units/fable_factory.lua customparams).
+        objectname = 'fable_factory',
         maxdamage = 18000, mass = 30000,
         footprintx = 16, footprintz = 20,    -- dwarfs the scale-3 tanks it builds
         sightdistance = 500,

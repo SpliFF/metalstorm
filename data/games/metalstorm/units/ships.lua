@@ -20,6 +20,10 @@ return mk{
                             [2] = { name = 'MS_HOWITZER_S3' },
                             [3] = { name = 'MS_FLAK_S2' },
                             [4] = { name = 'MS_MISSILE_CRUISE_S2' } },
+                -- fable_battleship (DESIGN-MODEL-BUILDING.md §22): shipped
+                -- generated model, 4 turret chains matching the 4 weapons
+                -- here (fore/aft/superfiring/PDC).
+                override = { objectname = 'fable_battleship' },
                 description = 'Battleship — single capital hull, many turrets' },
     },
 }
