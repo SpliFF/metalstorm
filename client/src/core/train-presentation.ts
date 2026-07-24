@@ -81,7 +81,7 @@ export class TrainPresentation {
         // This avoids needing explicit addCar() hooks in the connection callbacks.
         // Build a set of all live entity IDs first.
         const liveIds = new Set<number>();
-        for (const [id, meta] of this.renderer.entityMetaEntries()) {
+        for (const [id, meta] of this.renderer.getEntities()) {
             liveIds.add(id);
             if (this.trainDefIds.has(meta.defId) && !this.cars.has(id)) {
                 // New train car — initialize tracking.
