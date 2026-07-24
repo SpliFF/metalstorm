@@ -57,6 +57,7 @@ export class WidgetLoader {
     private widgets = new Map<string, { widget: Widget; context: WidgetContext }>();
     private mountPoints = new Map<string, HTMLElement>();
     private uiRoot: HTMLElement | null = null;
+    private sendCommandProvider: ((cmd: any) => void) | null = null;
 
     /**
      * Load and mount all widgets for the given game.
@@ -239,13 +240,39 @@ export class WidgetLoader {
     }
 
     /**
-     * Create the sendCommand stub (PLAN-native-ui.md §3 notes this is not wired yet).
+     * Set the sendCommand provider for widgets.
+     * This should be called after the Connection is established.
+     */
+    setSendCommandProvider(provider: (cmd: any) => void): void {
+        this.sendCommandProvider = provider;
+
+        // Update existing widgets with the new provider
+        for (const { context } of this.widgets.values()) {
+            context.sendCommand = provider;
+        }
+    }
+
+    /**
+     * Check if sendCommand has been wired.
+     */
+    hasSendCommand(): boolean {
+        return this.sendCommandProvider !== null;
+    }
+
+    /**
+     * Create the sendCommand function.
+     * Uses the provider if set, otherwise returns a stub.
      */
     private createSendCommand(): (cmd: any) => void {
+        if (this.sendCommandProvider) {
+            return this.sendCommandProvider;
+        }
+
+        // Return stub if not wired yet
         let warned = false;
         return (cmd: any) => {
             if (!warned) {
-                console.warn('[widget-loader] sendCommand not yet wired (native-ui infrastructure gap)');
+                console.warn('[widget-loader] sendCommand not yet wired - waiting for connection');
                 warned = true;
             }
             console.log('[widget-loader] sendCommand (stub):', cmd);

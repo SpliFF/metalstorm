@@ -66,6 +66,11 @@ import {
     loadGameTemplates,
     type GameTemplates,
 } from './ui/game/loader.js';
+import {
+    initializeNativeUI,
+    handleRulesParamUpdate,
+    disposeNativeUI,
+} from './ui/native-ui/index.js';
 
 // Active in-game templates. Starts with engine defaults; overwritten when
 // a game id is resolved (URL param, localStorage, or room selection).
@@ -486,6 +491,9 @@ function quitToLobby(): void {
     economyBar = null;
     factoryQueuePanel?.dispose();
     factoryQueuePanel = null;
+
+    // Dispose native UI
+    disposeNativeUI();
     commandPathRenderer?.dispose();
     commandPathRenderer = null;
     waypointMarkerRenderer?.dispose();
@@ -910,13 +918,24 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     gameWorker.onmessage = (ev: MessageEvent) => {
         const m = ev.data;
         switch (m?.type) {
-            case 'gp:authenticated':
+            case 'gp:authenticated': {
                 console.log(`[gameWorker] authenticated playerId=${m.playerId} team=${m.team}`);
                 // G4: the lobby-roster myTeamGuess used to construct economyBar
                 // can be stale/absent (spectator, late roster fetch); this is the
                 // authoritative value, so re-point the bar's team filter at it.
                 economyBar?.setTeam(m.team);
+
+                // Initialize native UI for Metalstorm
+                // Get gameId from URL params or localStorage
+                const gameId = new URLSearchParams(window.location.search).get('game') ||
+                               localStorage.getItem('springrts-game-id') || '';
+                if (gameId === 'metalstorm') {
+                    // Initialize with empty httpBase for local/dev environment
+                    // In production, this would be the lobby HTTP URL
+                    void initializeNativeUI(gameId, '', m.playerId, m.team);
+                }
                 break;
+            }
             // GW4-c5c: consolidated scene-state feed → the HTML HUD + native
             // build-menu (G3a) + native economy-bar + factory-queue panel (G4).
             // The order-panel remains unbuilt (dead pre-G3b code, unrelated).
@@ -1070,6 +1089,15 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                     winningAllyTeams: m.winningAllyTeams,
                     won: m.won,
                     onReturnToLobby: quitToLobby,
+                });
+                break;
+            // Forward rules param updates to native UI store
+            case 'gp:rulesParamUpdate':
+                handleRulesParamUpdate({
+                    scope: m.scope,
+                    id: m.id,
+                    replace: m.replace,
+                    params: m.params
                 });
                 break;
             // PLAN-gm-tools: a GM broadcast (already intercepted in the worker

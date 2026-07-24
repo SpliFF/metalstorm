@@ -6043,6 +6043,18 @@ export function handleRulesParamUpdate(msg: Record<string, unknown>): void {
         if (v === null) targetMap.delete(k);
         else targetMap.set(k, v);
     }
+
+    // Forward rules param updates to main thread for native UI
+    // Only forward game and team rules params (not unit/player for now)
+    if (scope === 'game' || scope === 'team') {
+        postToMain({
+            type: 'gp:rulesParamUpdate',
+            scope,
+            id,
+            params,
+            replace
+        });
+    }
 }
 
 /** Handle the 'sendToUnsynced' message (Spring.SendToUnsynced from LuaRules). */

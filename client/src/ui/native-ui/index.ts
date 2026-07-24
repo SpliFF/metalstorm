@@ -12,3 +12,10 @@ export type {
     WidgetContext,
     Widget,
 } from './widget-loader.js';
+
+export {
+    initializeNativeUI,
+    wireRulesParamsToStore,
+    handleRulesParamUpdate,
+    disposeNativeUI,
+} from './integration.js';
