@@ -1,0 +1,99 @@
+/*
+ * command-composer.css — layout for the engine-bundled command composer.
+ *
+ * Everything visual here comes from the native-UI design system tokens
+ * (client/src/ui/native-ui/native-ui.css): the frame, header, chips, buttons and
+ * range input are all .nui-* primitives. This file only arranges them.
+ *
+ * The composer docks bottom-centre, directly over the play area, so its
+ * layout brief is "as short as possible": two rows — the command sentence
+ * with its priority slider, then the plain-language echo with the commit
+ * controls. It used to be a ~340px-tall stack of full-width blocks, which
+ * buried the lower-centre of the viewport where unit orders are issued.
+ */
+
+.command-composer {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    width: 560px;
+    max-width: calc(100vw - 32px);
+}
+
+.composer-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+
+/* ── Row 1: the sentence + priority ─────────────────────────────────── */
+
+.composer-sentence {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex-wrap: wrap;
+    min-width: 0;
+}
+
+.composer-priority {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: auto;
+    padding-left: 8px;
+    border-left: 1px solid var(--nui-border);
+}
+
+.composer-priority-label {
+    color: var(--nui-text-faint);
+    font-size: 10px;
+    white-space: nowrap;
+}
+.composer-priority-label b {
+    color: var(--nui-text);
+    font-weight: 600;
+    text-transform: capitalize;
+}
+
+.composer-priority input[type="range"] { width: 96px; }
+
+.composer-priority-value {
+    min-width: 2.2em;
+    color: var(--nui-text-dim);
+    font: var(--nui-font-mono);
+    text-align: right;
+}
+
+/* ── Row 2: echo + controls ─────────────────────────────────────────── */
+
+.composer-echo {
+    flex: 1;
+    min-width: 0;
+    padding: 4px 8px;
+    background: var(--nui-bg-sunken);
+    border: 1px solid var(--nui-border-sunken);
+    border-radius: 2px;
+    color: var(--nui-text-dim);
+    font: italic var(--nui-font-mono);
+    /* One line, ellipsised — a growing preview would push the panel back up
+       into the play area, which is exactly what this redesign removes. */
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.composer-echo.is-ready { color: var(--nui-text); font-style: normal; }
+
+/* ── Slot-picker menus ──────────────────────────────────────────────── */
+
+/* Viewport-positioned, NOT anchored to the composer: the widget lives inside
+   the loader's panel frame, which clips (`.nui-panel { overflow: hidden }` +
+   the body's `overflow-y: auto`). A menu positioned relative to the composer
+   opens above the panel body and is clipped to a 2px sliver — which silently
+   makes the verb slot, and therefore the whole composer, unusable. `fixed`
+   escapes every clipping ancestor; openMenu() in command-composer.js sets the
+   coordinates from the chip's rect. */
+.command-composer .nui-menu { position: fixed; }
+.command-composer .nui-menu[hidden] { display: none; }

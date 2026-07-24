@@ -6,6 +6,22 @@
  * in so their buttons and hover targets stay interactive.
  */
 
+/*
+ * Bottom-edge geometry, published for overlays that must stay clear of this
+ * HUD (the native-UI rails — client/src/ui/native-ui/native-ui.css reads both
+ * as --hud-bottom-reserve / --hud-help-reserve). They live here because this
+ * is the file that positions #hud-selection / #hud-minimap / #hud-help; an
+ * overlay hand-copying the numbers would silently drift the moment any of
+ * those move. Keep them in sync with the rules below.
+ */
+:root {
+    /* #hud-selection + #hud-minimap sit at bottom: 48px and are sized at
+       runtime; this is the clearance their tallest realistic form needs. */
+    --hud-bottom-reserve: 112px;
+    /* Just above #hud-help (bottom: 8px, one line). */
+    --hud-help-reserve: 30px;
+}
+
 #game-hud {
     position: fixed;
     inset: 0;

@@ -1,0 +1,588 @@
+/*
+ * native-ui.css — the native-UI design system (PLAN-native-ui.md §2/§3).
+ *
+ * ONE stylesheet, injected once by widget-loader.ts, that owns:
+ *
+ *   1. design tokens          (--nui-*: colour, type, spacing, rail metrics)
+ *   2. the dock/rail layout   (.ui-mount-*)
+ *   3. the panel chrome       (.nui-panel + head/body/collapse — built by the
+ *                              loader, not by widgets)
+ *   4. control primitives     (.nui-btn, .nui-field, .nui-list, .nui-table,
+ *                              .nui-meter, .nui-badge, .nui-chip, ...)
+ *
+ * Widgets — engine-bundled (client/src/native-widgets/) and game-authored
+ * (data/games/<id>/ui/widgets/) alike — compose these classes. They MUST NOT
+ * carry ad-hoc inline styles: a widget that styles itself is a widget that
+ * drifts from every other panel. Game-specific accents that genuinely can't
+ * be expressed here go in the game's own stylesheet (declared via the
+ * manifest's `styles` array), layered on top of these tokens.
+ *
+ * Visual language deliberately matches the engine's existing chrome (the
+ * economy bar / build menu): dark gradient frames, sunken near-black inputs,
+ * 1px bevelled borders, system-ui 12px.
+ *
+ * Occlusion budget (PLAN-native-ui.md "modest compositing" + the HUD's own
+ * job of staying out of the way): panels dock to the screen EDGES in fixed
+ * -width rails. The centre and lower-centre of the viewport belong to unit
+ * selection and orders — nothing docks there but the command bar, which is
+ * collapsible. Rails scroll internally rather than growing to full height.
+ */
+
+#ui-root {
+    /* ── palette ───────────────────────────────────────────────────── */
+    --nui-bg: linear-gradient(180deg, #1a1d22 0%, #12151a 100%);
+    --nui-bg-head: #0f1216;
+    --nui-bg-sunken: #0a0c10;
+    --nui-bg-raised: #21262e;
+    --nui-bg-hover: #2b323c;
+
+    --nui-border: #2a2f38;
+    --nui-border-hi: #3a4150;
+    --nui-border-sunken: #05070a;
+
+    --nui-text: #d8dee6;
+    --nui-text-dim: #96a2b0;
+    --nui-text-faint: #6b7684;
+
+    --nui-accent: #4a9eff;
+    --nui-accent-dim: #2f6ba8;
+    --nui-gold: #d4a93a;
+    --nui-good: #6fca7a;
+    --nui-bad: #e06767;
+
+    /* ── type ──────────────────────────────────────────────────────── */
+    --nui-font: 12px/1.4 system-ui, sans-serif;
+    --nui-font-mono: 11px/1.4 ui-monospace, Menlo, monospace;
+
+    /* ── metrics ───────────────────────────────────────────────────── */
+    --nui-radius: 4px;
+    --nui-gap: 6px;
+    --nui-pad: 8px;
+    --nui-rail-w: 236px;
+    /* Screen-edge inset every dock uses. */
+    --nui-inset: 8px;
+    /* Rail top: the engine default is the plain inset. widget-loader.ts
+       overrides it per-rail from the MEASURED height of the top-left dock, so
+       a game's own top-left widget (whatever height it is) is never overlapped
+       and a game with nothing there gets no dead band. Never hardcode a
+       particular game's widget height here. */
+    --nui-rail-top: var(--nui-inset);
+    /* Bottom clearance for the engine HUD (selection readout, minimap, help
+       strip). Published by ui/hud/hud.css, which OWNS that geometry — the
+       fallbacks apply only when the HUD stylesheet isn't loaded. */
+    --nui-rail-bottom: var(--hud-bottom-reserve, 112px);
+
+    font: var(--nui-font);
+    color: var(--nui-text);
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   Dock points
+   ══════════════════════════════════════════════════════════════════════
+   A mount is a positioning frame, NOT a click target: it stays
+   pointer-events:none so an empty (or short) rail never eats camera drags
+   over the game view. Only the panels inside it opt back in.
+   ────────────────────────────────────────────────────────────────────── */
+
+.ui-mount {
+    position: absolute;
+    display: flex;
+    flex-direction: column;
+    gap: var(--nui-gap);
+    pointer-events: none;
+}
+
+.ui-mount > * {
+    pointer-events: auto;
+}
+
+/* Side rails: fixed width, top-anchored, scroll internally instead of
+   sprawling to full viewport height.
+
+   Rails are the exception to the pointer-events:none rule above — they own a
+   scrollbar, and a scrollbar on a pointer-events:none box cannot be grabbed.
+   They shrink-wrap their panel stack, so the only click area this costs the
+   game view is the few-pixel gaps between panels. */
+.ui-mount-left,
+.ui-mount-right {
+    top: var(--nui-rail-top);
+    width: var(--nui-rail-w);
+    max-height: calc(100vh - var(--nui-rail-top) - var(--nui-rail-bottom));
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    pointer-events: auto;
+}
+.ui-mount-left { left: var(--nui-inset); align-items: stretch; }
+.ui-mount-right { right: var(--nui-inset); align-items: stretch; }
+
+/* The centred docks span the viewport and centre with flexbox rather than
+   `left: 50%; transform: translateX(-50%)`.
+   A transform makes the element a containing block for `position: fixed`
+   DESCENDANTS, so any popover a widget opens with `position: fixed` (the
+   command composer's slot pickers) would silently resolve its viewport
+   coordinates against the mount instead — landing off-screen. The mounts are
+   pointer-events:none, so spanning the width costs the game view nothing. */
+.ui-mount-top-left { top: var(--nui-inset); left: var(--nui-inset); align-items: flex-start; }
+.ui-mount-top-center { top: var(--nui-inset); left: 0; right: 0; align-items: center; }
+.ui-mount-top-right { top: var(--nui-inset); right: var(--nui-inset); align-items: flex-end; }
+.ui-mount-center { inset: 0; justify-content: center; align-items: center; }
+.ui-mount-bottom-left { bottom: var(--nui-inset); left: var(--nui-inset); align-items: flex-start; }
+/* Clears the engine help strip — see --hud-help-reserve in ui/hud/hud.css. */
+.ui-mount-bottom-center {
+    bottom: var(--hud-help-reserve, 30px);
+    left: 0;
+    right: 0;
+    align-items: center;
+}
+.ui-mount-bottom-right { bottom: var(--nui-inset); right: var(--nui-inset); align-items: flex-end; }
+
+/* One scrollbar treatment for every scrolling surface in the HUD. */
+.ui-mount-left,
+.ui-mount-right,
+.nui-panel__body,
+.nui-menu {
+    scrollbar-width: thin;
+    scrollbar-color: var(--nui-border-hi) transparent;
+}
+.ui-mount-left::-webkit-scrollbar,
+.ui-mount-right::-webkit-scrollbar,
+.nui-panel__body::-webkit-scrollbar,
+.nui-menu::-webkit-scrollbar { width: 6px; }
+.ui-mount-left::-webkit-scrollbar-thumb,
+.ui-mount-right::-webkit-scrollbar-thumb,
+.nui-panel__body::-webkit-scrollbar-thumb,
+.nui-menu::-webkit-scrollbar-thumb {
+    background: var(--nui-border-hi);
+    border-radius: 3px;
+}
+.ui-mount-left::-webkit-scrollbar-track,
+.ui-mount-right::-webkit-scrollbar-track,
+.nui-panel__body::-webkit-scrollbar-track,
+.nui-menu::-webkit-scrollbar-track { background: transparent; }
+
+/* ══════════════════════════════════════════════════════════════════════
+   Panel chrome — built by widget-loader.ts around every titled widget
+   ══════════════════════════════════════════════════════════════════════ */
+
+.nui-panel {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    background: var(--nui-bg);
+    border: 1px solid var(--nui-border);
+    border-top-color: var(--nui-border-hi);
+    border-radius: var(--nui-radius);
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.55), 0 4px 14px rgba(0, 0, 0, 0.45);
+    color: var(--nui-text);
+    font: var(--nui-font);
+    overflow: hidden;
+}
+
+/* Collapsible headers are real <button>s (widget-loader.ts) so the panels can
+   be opened from the keyboard — hence the button reset here. */
+.nui-panel__head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    height: 22px;
+    padding: 0 6px;
+    margin: 0;
+    box-sizing: border-box;
+    background: var(--nui-bg-head);
+    border: none;
+    border-bottom: 1px solid var(--nui-border);
+    border-radius: 0;
+    color: var(--nui-text-dim);
+    font: 600 10px/1 system-ui, sans-serif;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    text-align: left;
+    user-select: none;
+    flex: none;
+}
+
+/* Only collapsible panels advertise the affordance. */
+.nui-panel--collapsible > .nui-panel__head { cursor: pointer; }
+.nui-panel--collapsible > .nui-panel__head:hover { background: #141920; color: var(--nui-text); }
+.nui-panel--collapsible > .nui-panel__head:focus-visible {
+    outline: 1px solid var(--nui-accent);
+    outline-offset: -2px;
+    color: var(--nui-text);
+}
+
+.nui-panel__caret {
+    width: 8px;
+    color: var(--nui-text-faint);
+    transition: transform 0.12s ease;
+}
+.nui-panel.is-collapsed .nui-panel__caret { transform: rotate(-90deg); }
+
+.nui-panel__title {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Count/status pill in the header — survives collapse, so a collapsed panel
+   still reports "3 pending" without being expanded. */
+.nui-panel__badge {
+    flex: none;
+    min-width: 14px;
+    padding: 1px 5px;
+    background: var(--nui-accent-dim);
+    border-radius: 7px;
+    color: #eaf3ff;
+    font: 600 9px/1.3 system-ui, sans-serif;
+    letter-spacing: 0;
+    text-align: center;
+}
+.nui-panel__badge:empty { display: none; }
+
+.nui-panel__body {
+    padding: var(--nui-pad);
+    max-height: 46vh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+    scrollbar-color: var(--nui-border-hi) transparent;
+}
+.nui-panel__body::-webkit-scrollbar { width: 6px; }
+.nui-panel__body::-webkit-scrollbar-thumb {
+    background: var(--nui-border-hi);
+    border-radius: 3px;
+}
+.nui-panel__body::-webkit-scrollbar-track { background: transparent; }
+
+.nui-panel.is-collapsed > .nui-panel__body { display: none; }
+/* Collapsed, the head IS the panel — its divider would read as a second
+   bottom edge stacked on the frame border. */
+.nui-panel.is-collapsed > .nui-panel__head { border-bottom: none; }
+
+/* ══════════════════════════════════════════════════════════════════════
+   Content primitives
+   ══════════════════════════════════════════════════════════════════════ */
+
+/* A labelled sub-section inside a panel body (replaces <fieldset>). */
+.nui-group {
+    margin-top: var(--nui-gap);
+    padding-top: var(--nui-gap);
+    border-top: 1px solid var(--nui-border);
+}
+.nui-group:first-child { margin-top: 0; padding-top: 0; border-top: none; }
+
+.nui-group__title {
+    margin: 0 0 4px;
+    color: var(--nui-text-faint);
+    font: 600 9px/1 system-ui, sans-serif;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.nui-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+.nui-row + .nui-row { margin-top: 4px; }
+
+/* In a row, controls share the slack evenly instead of each claiming 100%
+   (which makes the first one collapse to nothing). Buttons keep their
+   intrinsic width via .nui-btn's own flex: none. Zero-specificity scope, so a
+   widget that wants one control sized differently can just say so by class. */
+:where(#ui-root .nui-row) > input,
+:where(#ui-root .nui-row) > select,
+:where(#ui-root .nui-row) > textarea {
+    flex: 1 1 0;
+    width: auto;
+}
+
+/* label + control, stacked; the label is a caption, not a heading. */
+.nui-field {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+    flex: 1;
+}
+.nui-field > span {
+    color: var(--nui-text-faint);
+    font-size: 10px;
+}
+.nui-field--inline {
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+}
+.nui-field--inline > span { flex: none; }
+
+/* ── form controls ─────────────────────────────────────────────────── */
+
+/* Controls are matched on the bare element so widget markup gets the HUD look
+   without a class on every input. The `#ui-root` scope is wrapped in :where()
+   so it contributes ZERO specificity — otherwise an ID would outrank every
+   class and each widget needing a different width would have to be granted an
+   engine-side escape-hatch class. As written, a plain `.my-select { width:
+   auto }` in a game stylesheet just works. */
+:where(#ui-root) input[type="text"],
+:where(#ui-root) input[type="number"],
+:where(#ui-root) input[type="search"],
+:where(#ui-root) select,
+:where(#ui-root) textarea {
+    min-width: 0;
+    width: 100%;
+    box-sizing: border-box;
+    padding: 3px 6px;
+    background: var(--nui-bg-sunken);
+    border: 1px solid var(--nui-border-sunken);
+    border-top-color: #1c2028;
+    border-radius: 2px;
+    color: var(--nui-text);
+    font: var(--nui-font-mono);
+    outline: none;
+}
+:where(#ui-root) input:focus,
+:where(#ui-root) select:focus,
+:where(#ui-root) textarea:focus {
+    border-color: var(--nui-accent-dim);
+    box-shadow: 0 0 0 1px var(--nui-accent-dim);
+}
+:where(#ui-root) input::placeholder { color: var(--nui-text-faint); }
+:where(#ui-root) select { cursor: pointer; }
+
+:where(#ui-root) input[type="range"] {
+    width: 100%;
+    height: 14px;
+    padding: 0;
+    background: transparent;
+    border: none;
+    accent-color: var(--nui-accent);
+    cursor: pointer;
+}
+
+.nui-btn {
+    flex: none;
+    padding: 4px 10px;
+    background: var(--nui-bg-raised);
+    border: 1px solid var(--nui-border-hi);
+    border-radius: 2px;
+    color: var(--nui-text);
+    font: 600 11px/1.2 system-ui, sans-serif;
+    white-space: nowrap;
+    cursor: pointer;
+}
+.nui-btn:hover:not(:disabled) { background: var(--nui-bg-hover); color: #fff; }
+.nui-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.nui-btn--primary {
+    background: linear-gradient(180deg, #3f8fe0 0%, #2f6ba8 100%);
+    border-color: #58a6f0;
+    color: #fff;
+}
+.nui-btn--primary:hover:not(:disabled) {
+    background: linear-gradient(180deg, #4fa3f5 0%, #3679b8 100%);
+}
+.nui-btn--danger {
+    background: #4a2222;
+    border-color: #7a3131;
+    color: #f0c0c0;
+}
+.nui-btn--danger:hover:not(:disabled) { background: #5f2a2a; color: #fff; }
+
+/* Full-width disclosure button that opens an inline form. */
+.nui-btn--block { width: 100%; }
+.nui-btn--sm { padding: 2px 6px; font-size: 10px; }
+
+/* ── lists ─────────────────────────────────────────────────────────── */
+
+.nui-list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.nui-list > li {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 5px;
+    background: rgba(255, 255, 255, 0.03);
+    border-radius: 2px;
+    min-width: 0;
+}
+.nui-list > li.nui-empty {
+    background: none;
+    padding: 2px 0;
+    color: var(--nui-text-faint);
+    font-style: italic;
+}
+.nui-empty {
+    color: var(--nui-text-faint);
+    font-style: italic;
+}
+
+/* ── table ─────────────────────────────────────────────────────────── */
+
+.nui-table {
+    width: 100%;
+    border-collapse: collapse;
+    font: var(--nui-font-mono);
+}
+.nui-table th {
+    padding: 2px 4px;
+    border-bottom: 1px solid var(--nui-border);
+    color: var(--nui-text-faint);
+    font: 600 9px/1.2 system-ui, sans-serif;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    text-align: right;
+}
+.nui-table th:first-child,
+.nui-table td:first-child { text-align: left; }
+.nui-table td {
+    padding: 2px 4px;
+    text-align: right;
+    white-space: nowrap;
+}
+.nui-table tr.is-self td { color: var(--nui-gold); }
+
+/* ── meter / badge / chip ──────────────────────────────────────────── */
+
+.nui-meter {
+    /* `flex: 1` here would set flex-basis on the HEIGHT inside a column
+       container (objective rows are columns) and collapse the bar to 0px.
+       Basis stays auto so `height` is honoured on both axes. */
+    flex: 1 1 auto;
+    height: 3px;
+    min-height: 3px;
+    width: 100%;
+    min-width: 24px;
+    background: var(--nui-bg-sunken);
+    border-radius: 2px;
+    overflow: hidden;
+}
+.nui-meter__fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--nui-accent-dim), var(--nui-accent));
+}
+
+.nui-badge {
+    flex: none;
+    padding: 1px 5px;
+    background: var(--nui-bg-raised);
+    border-radius: 7px;
+    color: var(--nui-text-dim);
+    font: 600 9px/1.4 system-ui, sans-serif;
+    white-space: nowrap;
+}
+.nui-badge--good { background: rgba(111, 202, 122, 0.16); color: var(--nui-good); }
+.nui-badge--bad { background: rgba(224, 103, 103, 0.16); color: var(--nui-bad); }
+.nui-badge--accent { background: var(--nui-accent-dim); color: #eaf3ff; }
+.nui-badge--gold { background: rgba(212, 169, 58, 0.16); color: var(--nui-gold); }
+
+/* Clickable token in a composed sentence (command composer slots). */
+.nui-chip {
+    flex: none;
+    padding: 3px 9px;
+    background: var(--nui-bg-raised);
+    border: 1px solid var(--nui-border-hi);
+    border-radius: 10px;
+    color: var(--nui-text);
+    font: 600 11px/1.3 system-ui, sans-serif;
+    white-space: nowrap;
+    cursor: pointer;
+}
+.nui-chip:hover { background: var(--nui-bg-hover); border-color: var(--nui-accent-dim); }
+.nui-chip--filled {
+    background: rgba(74, 158, 255, 0.18);
+    border-color: var(--nui-accent-dim);
+    color: #cfe4ff;
+}
+.nui-chip--required {
+    background: rgba(224, 103, 103, 0.14);
+    border-color: #6d3535;
+    color: #efbdbd;
+}
+.nui-chip--optional {
+    border-style: dashed;
+    color: var(--nui-text-dim);
+}
+
+/* Numeric readout (authority pools, costs). */
+.nui-stat {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 4px;
+    font: var(--nui-font-mono);
+    white-space: nowrap;
+}
+.nui-stat__label { color: var(--nui-text-faint); font-size: 10px; }
+.nui-stat__value { color: var(--nui-gold); font-weight: 700; font-size: 13px; }
+
+/* ── dropdown menu (composer slot pickers) ─────────────────────────── */
+
+.nui-menu {
+    position: absolute;
+    z-index: 20;
+    min-width: 160px;
+    max-height: 220px;
+    overflow-y: auto;
+    padding: 3px;
+    background: #161a20;
+    border: 1px solid var(--nui-border-hi);
+    border-radius: var(--nui-radius);
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.6);
+}
+.nui-menu__item {
+    padding: 4px 8px;
+    border-radius: 2px;
+    color: var(--nui-text);
+    font-size: 11px;
+    cursor: pointer;
+}
+.nui-menu__item:hover { background: var(--nui-accent-dim); color: #fff; }
+
+/* ── toasts ────────────────────────────────────────────────────────── */
+
+.nui-toasts {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    /* Toasts hang outside their own panel and can therefore overlap a
+       neighbouring dock (the top-left pill's toasts fall across the top of the
+       left rail). Panels are statically positioned, so any positive z-index
+       here paints the toast above them within #ui-root's stacking context. */
+    z-index: 30;
+    margin-top: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    pointer-events: none;
+}
+.nui-toast {
+    padding: 4px 10px;
+    background: rgba(16, 19, 24, 0.94);
+    border: 1px solid var(--nui-border-hi);
+    border-left-width: 3px;
+    border-radius: 2px;
+    font-size: 11px;
+    white-space: nowrap;
+    animation: nui-toast-in 0.15s ease;
+}
+.nui-toast--award,
+.nui-toast--refund { border-left-color: var(--nui-good); color: var(--nui-good); }
+.nui-toast--refusal { border-left-color: var(--nui-bad); color: var(--nui-bad); }
+
+@keyframes nui-toast-in {
+    from { opacity: 0; transform: translateY(-3px); }
+    to { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .nui-toast { animation: none; }
+    .nui-panel__caret { transition: none; }
+}

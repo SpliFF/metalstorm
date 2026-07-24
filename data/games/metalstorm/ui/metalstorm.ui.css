@@ -1,0 +1,176 @@
+/*
+ * metalstorm.ui.css — Metalstorm's HUD skin.
+ *
+ * Declared by metalstorm.ui.json's `styles` array and injected by the
+ * widget-loader AFTER the engine design system (client/src/ui/native-ui/
+ * native-ui.css), so everything here may reference and override the --nui-* tokens.
+ *
+ * SCOPE RULE: this file holds only what is genuinely Metalstorm-specific —
+ * the authority pill, objective rows, parley cards, and the shape of the
+ * game's inline forms. Anything reusable (panels, buttons, inputs, lists,
+ * tables, meters, badges, chips, toasts) belongs in the design system, not
+ * here. If you find yourself restyling a .nui-* primitive, the primitive is
+ * probably wrong — fix it upstream so every game and widget benefits.
+ */
+
+/* ── Authority pill (top-left, mounted bare — no panel header) ───────── */
+
+.ms-authority-bar {
+    position: relative;
+    flex-direction: row;
+    align-items: center;
+    gap: 10px;
+    padding: 4px 10px;
+    /* Award/refusal toasts hang BELOW the pill (.nui-toasts is absolutely
+       positioned at top:100%), so this one panel must opt out of the frame's
+       overflow clipping or they never appear. */
+    overflow: visible;
+}
+
+.ms-authority-bar .nui-stat {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0;
+}
+
+.ms-authority-bar .nui-stat__label {
+    letter-spacing: 0.06em;
+}
+
+/* Hairline between the personal and team pools. */
+.ms-auth-sep {
+    width: 1px;
+    align-self: stretch;
+    background: var(--nui-border);
+}
+
+/* ── Objectives ─────────────────────────────────────────────────────── */
+
+/* Objective rows stack (icon+type+reward / progress / actions) rather than
+   using the design system's single-line list-item layout. */
+.ms-obj-list > li.ms-obj {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 3px;
+    padding: 5px 6px;
+}
+
+.ms-obj__line {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    min-width: 0;
+}
+
+.ms-obj__actions {
+    justify-content: flex-end;
+}
+
+.ms-obj__icon {
+    flex: none;
+    width: 12px;
+    color: var(--nui-accent);
+    text-align: center;
+}
+
+.ms-obj__type {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-transform: capitalize;
+}
+
+.ms-obj-sub {
+    color: var(--nui-text-faint);
+    font-size: 10px;
+    text-transform: none;
+}
+
+/* Strategic objectives read a shade louder than tactical ones. */
+.ms-obj--strategic .ms-obj__icon { color: var(--nui-gold); }
+
+/* "Yours to take" (PLAN-metalstorm-teams.md §3.3 joiner onboarding) — the
+   row itself is marked, not just the badge, so it's findable at a glance. */
+.ms-obj.is-suggested {
+    background: rgba(74, 158, 255, 0.1);
+    box-shadow: inset 2px 0 0 var(--nui-accent);
+}
+
+/* ── Parley ─────────────────────────────────────────────────────────── */
+
+/* Selector must out-specify the design system's `.nui-list > li` (0,1,1) —
+   a bare `.ms-parley-card` (0,1,0) loses and only flex-direction survives. */
+.nui-list > li.ms-parley-card {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 3px;
+    padding: 5px 6px;
+}
+
+.ms-parley-card__line {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    min-width: 0;
+}
+
+.ms-parley-kind {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 600;
+}
+
+.ms-parley-party {
+    flex: 1;
+    min-width: 0;
+    color: var(--nui-text-dim);
+    font-size: 10px;
+    white-space: nowrap;
+}
+
+/* An unanswered proposal is the only card that needs to pull the eye. */
+.ms-parley-card--incoming { box-shadow: inset 2px 0 0 var(--nui-accent); }
+.ms-parley-card--active { box-shadow: inset 2px 0 0 var(--nui-good); }
+
+/* ── AI command ─────────────────────────────────────────────────────── */
+
+/* Region paint is a text field + a three-value enum + a button; only the free
+   text field should absorb the row's slack. (Plain class specificity is enough
+   now that the design system's control rules are :where()-scoped.) */
+.ms-ai-paint-value { flex: 0 1 auto; width: auto; }
+
+/* Key/label cell in the paint, lock, intent and change lists. */
+.ms-ai-key {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font: var(--nui-font-mono);
+}
+
+/* ── Inline disclosure forms (bounty, proposal) ─────────────────────── */
+
+.ms-obj-bounty-form,
+.ms-parley-form {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    margin-top: 5px;
+    padding-top: 5px;
+    border-top: 1px dashed var(--nui-border);
+}
+
+.ms-obj-bounty-form[hidden],
+.ms-parley-form[hidden] { display: none; }
+
+.ms-obj-bounty-stake-value { color: var(--nui-gold); }
+
+/* ── Scoreboard ─────────────────────────────────────────────────────── */
+
+.ms-score-player { color: var(--nui-text-dim); }

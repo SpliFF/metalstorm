@@ -42,10 +42,15 @@ export default {
     this.ctx = ctx;
     this.el = document.createElement('div');
     this.el.className = 'ms-scoreboard-panel';
+    // No <h3> — the loader's panel chrome supplies the "Scoreboard" header.
+    // Column heads abbreviated to fit the 236px rail without wrapping; the
+    // title attributes carry the full names.
     this.el.innerHTML =
-      '<h3>Scoreboard</h3>' +
-      '<table class="ms-score-table">' +
-      '<thead><tr><th>Player</th><th>Earned</th><th>Spent</th><th>Objectives</th></tr></thead>' +
+      '<table class="nui-table ms-score-table">' +
+      '<thead><tr><th>Player</th>' +
+      '<th title="Authority earned">Earn</th>' +
+      '<th title="Authority spent">Spend</th>' +
+      '<th title="Objectives completed">Obj</th></tr></thead>' +
       '<tbody></tbody>' +
       '</table>';
     ctx.mount.appendChild(this.el);
@@ -82,14 +87,15 @@ export default {
     const rows = readScoreboard((key) => this.ctx.store.gameRulesParam(key), this._rosterIds());
     const body = this.el.querySelector('tbody');
     const items = rows.map((r) => (
-      `<tr class="ms-score-row${r.playerId === identity.playerId ? ' ms-score-row-self' : ''}">` +
-      `<td class="ms-score-player">${r.playerId === identity.playerId ? 'You' : 'Player ' + r.playerId}</td>` +
-      `<td class="ms-score-earned">⬡ ${r.earned}</td>` +
-      `<td class="ms-score-spent">⬡ ${r.spent}</td>` +
+      `<tr class="ms-score-row${r.playerId === identity.playerId ? ' is-self' : ''}">` +
+      `<td class="ms-score-player">${r.playerId === identity.playerId ? 'You' : 'P' + r.playerId}</td>` +
+      `<td class="ms-score-earned">${r.earned}</td>` +
+      `<td class="ms-score-spent">${r.spent}</td>` +
       `<td class="ms-score-objectives">${r.objectives}</td>` +
       `</tr>`
     ));
-    body.innerHTML = items.join('') || '<tr class="ms-score-none"><td colspan="4">No scoreboard data yet</td></tr>';
+    body.innerHTML = items.join('') ||
+      '<tr><td colspan="4" class="nui-empty">No scoreboard data yet</td></tr>';
   },
 
   dispose() {

@@ -40,12 +40,20 @@ export default {
   id: 'authority-bar',
 
   init(ctx) {
+    // Mounted bare (no loader panel chrome — see metalstorm.ui.json): a
+    // two-number readout doesn't earn a title bar, so it wears the panel
+    // frame directly and stays one row tall.
     this.el = document.createElement('div');
-    this.el.className = 'ms-authority-bar';
+    this.el.className = 'nui-panel ms-authority-bar';
     this.el.innerHTML =
-      '<span class="ms-auth-player" title="Your authority">⬡ —</span>' +
-      '<span class="ms-auth-team" title="Team authority pool">⬡⬡ —</span>' +
-      '<div class="ms-auth-toasts"></div>';
+      '<span class="nui-stat" title="Your authority">' +
+      '<span class="nui-stat__label">⬡ YOU</span>' +
+      '<span class="nui-stat__value ms-auth-player">—</span></span>' +
+      '<span class="ms-auth-sep"></span>' +
+      '<span class="nui-stat" title="Team authority pool">' +
+      '<span class="nui-stat__label">⬡⬡ TEAM</span>' +
+      '<span class="nui-stat__value ms-auth-team">—</span></span>' +
+      '<div class="nui-toasts ms-auth-toasts"></div>';
     ctx.mount.appendChild(this.el);
 
     this.lastSeenEventSeq = null;
@@ -60,8 +68,8 @@ export default {
     this.unsub = ctx.store.subscribe(['teamRulesParams', 'gameRulesParams'], () => {
       const team = ctx.store.teamRulesParam(ctx.identity.teamId, 'authority_pool');
       const mine = ctx.store.teamRulesParam(ctx.identity.teamId, 'authority_player_' + ctx.identity.playerId);
-      this.el.querySelector('.ms-auth-player').textContent = '⬡ ' + (mine ?? 0);
-      this.el.querySelector('.ms-auth-team').textContent = '⬡⬡ ' + (team ?? 0);
+      this.el.querySelector('.ms-auth-player').textContent = String(mine ?? 0);
+      this.el.querySelector('.ms-auth-team').textContent = String(team ?? 0);
 
       this._consumeEventRing(ctx);
     });
@@ -122,7 +130,7 @@ export default {
     const list = this.el?.querySelector('.ms-auth-toasts');
     if (!list) return;
     const toast = document.createElement('div');
-    toast.className = 'ms-auth-toast ms-auth-toast-' + kind;
+    toast.className = 'nui-toast nui-toast--' + kind;
     toast.textContent = text;
     list.appendChild(toast);
     setTimeout(() => toast.remove(), TOAST_TTL_MS);
