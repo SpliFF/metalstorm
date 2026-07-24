@@ -735,8 +735,15 @@ export class LuaGLBridge {
             this.setUniformArray(name, arr);
 
         // ── Texture management ──────────────────────────────────────
-        gl['CreateTexture'] = (a: LuaValue, b: LuaValue, c: LuaValue) =>
-            this.createTexture(a, b, c);
+        gl['CreateTexture'] = (a: LuaValue, b: LuaValue, c: LuaValue) => {
+            const h = this.createTexture(a, b, c);
+            // N4: createTexture binds the new texture to the current active unit
+            // to configure it, outside the immediate renderer's shadow. Forget
+            // the unit-0 shadow so the next flush re-binds. (Rare mid-pass, but
+            // correctness beats the elision here.)
+            this.imm.invalidateTextures();
+            return h;
+        };
         gl['DeleteTexture'] = (h: LuaValue) => this.deleteTexture(h);
         // gl.DeleteTextureFBO — Spring API to delete a texture associated
         // with an FBO. We don't track that association explicitly, so just
@@ -801,7 +808,12 @@ export class LuaGLBridge {
             this.renderToTexture(tex, fn, args);
         // gl.CopyToTexture(tex, xoff, yoff, x, y, w, h [, target, level]) —
         // copyTexSubImage2D from the current framebuffer into `tex`.
-        gl['CopyToTexture'] = (...a: LuaValue[]) => this.copyToTexture(a);
+        gl['CopyToTexture'] = (...a: LuaValue[]) => {
+            this.copyToTexture(a);
+            // N4: copyToTexture binds its target to the current active unit
+            // outside the shadow — invalidate so the next flush re-binds.
+            this.imm.invalidateTextures();
+        };
         gl['CreateRBO'] = (w: LuaValue, h: LuaValue, opts: LuaValue) =>
             this.createRBO(w, h, opts);
         gl['DeleteRBO'] = (h: LuaValue) => this.deleteRBO(h);
@@ -2614,6 +2626,10 @@ export class LuaGLBridge {
         gl.activeTexture(gl.TEXTURE0 + unit);
         if (handleOrPath === false || handleOrPath === null || handleOrPath === undefined) {
             gl.bindTexture(gl.TEXTURE_2D, null);
+            // N4: keep the immediate renderer's per-pass unit-0 texture shadow
+            // truthful — this direct bind + the activeTexture above happened
+            // outside flush(), so a following flush must know the real state.
+            this.imm.notePassTexBind(unit, null);
             if (unit === 0) {
                 this.hasTextureUnit0 = false;
                 this.boundTextureUnit0 = null;
@@ -2624,6 +2640,9 @@ export class LuaGLBridge {
             return;
         }
         const trackAndRecord = (tex: WebGLTexture | null) => {
+            // N4: reconcile the immediate renderer's unit-0 texture shadow with
+            // this live bind (see the unbind branch above).
+            this.imm.notePassTexBind(unit, tex);
             if (unit === 0) {
                 this.hasTextureUnit0 = tex !== null;
                 this.boundTextureUnit0 = tex;
