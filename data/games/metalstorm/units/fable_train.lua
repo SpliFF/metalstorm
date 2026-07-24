@@ -54,7 +54,8 @@ return {
         objectname = 'fable_train_engine',
         maxdamage = 9500, mass = 2400,
         maxvelocity = 2.4, acceleration = 0.06, brakerate = 0.10,
-        turnrate = 220, footprintz = 9,
+        turnrate = 50, turninplace = false,
+        turninplacespeedlimit = 0.5, footprintz = 9,
         weapons = {
             [1] = { name = 'MS_RAILGUN_S2' },     -- forward turret chain
             [2] = { name = 'MS_FLAK_S1' },        -- AA chain (turret2)
@@ -67,7 +68,8 @@ return {
         objectname = 'fable_train_gun',
         maxdamage = 7000, mass = 1800,
         maxvelocity = 1.8, acceleration = 0.05, brakerate = 0.09,
-        turnrate = 200, footprintz = 7,
+        turnrate = 40, turninplace = false,
+        turninplacespeedlimit = 0.5, footprintz = 7,
         weapons = {
             [1] = { name = 'MS_HOWITZER_S2' },    -- fore turret
             [2] = { name = 'MS_HOWITZER_S2' },    -- aft turret (baked +Z)
@@ -81,7 +83,8 @@ return {
         objectname = 'fable_train_troop',
         maxdamage = 7500, mass = 1700,
         maxvelocity = 1.8, acceleration = 0.05, brakerate = 0.09,
-        turnrate = 200, footprintz = 7,
+        turnrate = 40, turninplace = false,
+        turninplacespeedlimit = 0.5, footprintz = 7,
         canload = 1,
         transportcapacity = 8, transportsize = 1,   -- a rifle squad
         loadingradius = 120, releaseheld = true,
@@ -97,7 +100,8 @@ return {
         objectname = 'fable_train_cargo',
         maxdamage = 7000, mass = 1900,
         maxvelocity = 1.8, acceleration = 0.05, brakerate = 0.09,
-        turnrate = 200, footprintz = 7,
+        turnrate = 40, turninplace = false,
+        turninplacespeedlimit = 0.5, footprintz = 7,
         canload = 1,
         transportcapacity = 2, transportsize = 2,   -- light vehicles
         loadingradius = 120, releaseheld = true,

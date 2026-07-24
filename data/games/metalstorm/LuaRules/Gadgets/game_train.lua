@@ -5,11 +5,14 @@
 -- Recoil-native Lua primitives with zero new C++ engine code. See
 -- PLAN-metalstorm-train.md for design rationale.
 --
--- T1 SCOPE: Coupling foundation only (no movement yet).
--- - Consist data model: ordered unit list, leader id, per-gap coupling length
--- - Couple/Decouple custom commands with composition rules
--- - Leader election (engine in current direction of travel)
--- - Rebuild consist state on couple/decouple/UnitDestroyed
+-- T1 SCOPE: Coupling foundation (COMPLETE)
+-- T2 SCOPE: Follow-the-leader kinematics
+-- - Leader keeps stock CGroundMoveType, followers use Spring.MoveCtrl
+-- - Breadcrumb ring buffer tracks leader's path by cumulative arc-length
+-- - Each follower placed at its coupling-length offset behind, heading = tangent
+-- - Reverse: two-engine consists swap leader, one-engine backs slowly
+-- - Coupler-connected turning: no pivot, large turning circle
+-- - Direction-of-travel heuristic: prefer reverse over >180° U-turn
 
 function gadget:GetInfo()
     return {
@@ -47,6 +50,13 @@ local MAX_CARS_PER_ENGINE = 3  -- max 3 cars per engine
 -- Default gap between couplers when coupled (meters)
 local DEFAULT_COUPLING_GAP = 1.0
 
+-- Movement constants
+local BREADCRUMB_BUFFER_SIZE = 512  -- ring buffer size for path history
+local BREADCRUMB_SAMPLE_DIST = 2.0  -- minimum distance between breadcrumb samples
+local MIN_TURNING_RADIUS = 30.0     -- minimum turning radius for trains (meters)
+local REVERSE_SPEED_FACTOR = 0.3    -- speed multiplier when backing single-engine
+local UTURN_ANGLE_THRESHOLD = 150   -- degrees - prefer reverse if turn > this
+
 --------------------------------------------------------------------------------
 -- State
 --------------------------------------------------------------------------------
@@ -74,6 +84,17 @@ local trainDefs = {}  -- defID -> {role, linkF, linkR, halfLength}
         couplingLengths = {number...}, -- gap i = distance between units[i] and units[i+1]
         aggregateHP = number,          -- sum of current HP of all units
         aggregateMaxHP = number,       -- sum of max HP of all units
+
+        -- T2: Movement state
+        breadcrumbs = {               -- ring buffer of leader path
+            buffer = {{x,y,z,heading,arcLength}...},
+            writeIdx = number,        -- next write position
+            readIdx = number,         -- oldest valid position
+            totalArcLength = number,  -- total arc length traveled
+        },
+        reversing = boolean,          -- true when consist is in reverse
+        lastLeaderPos = {x,y,z},     -- for arc-length calculation
+        lastLeaderHeading = number,
     }
 ]]
 
@@ -132,7 +153,23 @@ local function IsEngine(unitID)
     return def and def.role == ROLE_ENGINE
 end
 
+local function InitBreadcrumbs()
+    local buffer = {}
+    for i = 1, BREADCRUMB_BUFFER_SIZE do
+        buffer[i] = {x = 0, y = 0, z = 0, heading = 0, arcLength = 0}
+    end
+    return {
+        buffer = buffer,
+        writeIdx = 1,
+        readIdx = 1,
+        totalArcLength = 0
+    }
+end
+
 local function CreateConsist(unitID)
+    local x, y, z = Spring.GetUnitPosition(unitID)
+    local heading = Spring.GetUnitHeading(unitID) or 0
+
     local consist = {
         id = nextConsistID,
         units = {unitID},
@@ -141,7 +178,13 @@ local function CreateConsist(unitID)
         carCount = IsEngine(unitID) and 0 or 1,
         couplingLengths = {},
         aggregateHP = 0,
-        aggregateMaxHP = 0
+        aggregateMaxHP = 0,
+
+        -- T2: Movement state
+        breadcrumbs = InitBreadcrumbs(),
+        reversing = false,
+        lastLeaderPos = {x = x, y = y, z = z},
+        lastLeaderHeading = heading * math.pi / 32768  -- Spring heading to radians
     }
     nextConsistID = nextConsistID + 1
 
@@ -323,6 +366,9 @@ local function CoupleUnits(unitA, unitB)
         ElectLeader(consistA)
         UpdateConsistHP(consistA)
         UpdateConsistParams(consistA)
+
+        -- T2: Setup movement control after coupling
+        SetupConsistMovement(consistA)
 
         Spring.Echo(string.format("Coupled: consist now has %d units (%d engines, %d cars)",
             #consistA.units, consistA.engineCount, consistA.carCount))
@@ -509,4 +555,318 @@ function gadget:CommandFallback(unitID, unitDefID, unitTeam, cmdID, cmdParams, c
     end
 
     return false
+end
+
+--------------------------------------------------------------------------------
+-- T2: Movement functions
+--------------------------------------------------------------------------------
+
+local function AddBreadcrumb(consist, x, y, z, heading)
+    local bc = consist.breadcrumbs
+    local lastPos = consist.lastLeaderPos
+
+    -- Calculate distance from last position
+    local dx = x - lastPos.x
+    local dy = y - lastPos.y
+    local dz = z - lastPos.z
+    local dist = math.sqrt(dx*dx + dy*dy + dz*dz)
+
+    -- Only add breadcrumb if moved enough
+    if dist < BREADCRUMB_SAMPLE_DIST then
+        return
+    end
+
+    -- Add to arc length
+    bc.totalArcLength = bc.totalArcLength + dist
+
+    -- Store in ring buffer
+    local crumb = bc.buffer[bc.writeIdx]
+    crumb.x = x
+    crumb.y = y
+    crumb.z = z
+    crumb.heading = heading
+    crumb.arcLength = bc.totalArcLength
+
+    -- Advance write index
+    bc.writeIdx = bc.writeIdx % BREADCRUMB_BUFFER_SIZE + 1
+
+    -- If we wrapped around, advance read index
+    if bc.writeIdx == bc.readIdx then
+        bc.readIdx = bc.readIdx % BREADCRUMB_BUFFER_SIZE + 1
+    end
+
+    -- Update last position
+    consist.lastLeaderPos.x = x
+    consist.lastLeaderPos.y = y
+    consist.lastLeaderPos.z = z
+    consist.lastLeaderHeading = heading
+end
+
+local function GetBreadcrumbAtArcLength(consist, targetArcLength)
+    local bc = consist.breadcrumbs
+
+    -- Find two breadcrumbs that bracket the target arc length
+    local idx = bc.readIdx
+    local prevCrumb = nil
+    local nextCrumb = nil
+
+    while idx ~= bc.writeIdx do
+        local crumb = bc.buffer[idx]
+
+        if crumb.arcLength >= targetArcLength then
+            nextCrumb = crumb
+            if prevCrumb then
+                -- Interpolate between prevCrumb and nextCrumb
+                local t = 0
+                if nextCrumb.arcLength > prevCrumb.arcLength then
+                    t = (targetArcLength - prevCrumb.arcLength) /
+                        (nextCrumb.arcLength - prevCrumb.arcLength)
+                end
+
+                return {
+                    x = prevCrumb.x + t * (nextCrumb.x - prevCrumb.x),
+                    y = prevCrumb.y + t * (nextCrumb.y - prevCrumb.y),
+                    z = prevCrumb.z + t * (nextCrumb.z - prevCrumb.z),
+                    heading = prevCrumb.heading + t * (nextCrumb.heading - prevCrumb.heading)
+                }
+            else
+                -- Use first available crumb
+                return {x = crumb.x, y = crumb.y, z = crumb.z, heading = crumb.heading}
+            end
+        end
+
+        prevCrumb = crumb
+        idx = idx % BREADCRUMB_BUFFER_SIZE + 1
+    end
+
+    -- If we get here, use the last leader position
+    return {
+        x = consist.lastLeaderPos.x,
+        y = consist.lastLeaderPos.y,
+        z = consist.lastLeaderPos.z,
+        heading = consist.lastLeaderHeading
+    }
+end
+
+local function EnableFollowerMoveCtrl(unitID)
+    -- Enable script control for this follower
+    Spring.MoveCtrl.Enable(unitID)
+    Spring.MoveCtrl.SetNoBlocking(unitID, true) -- Cars don't block each other
+end
+
+local function DisableFollowerMoveCtrl(unitID)
+    Spring.MoveCtrl.Disable(unitID)
+end
+
+local function UpdateFollowerPosition(consist, followerIdx, leaderSpeed)
+    local unitID = consist.units[followerIdx]
+    if not unitID or Spring.GetUnitIsDead(unitID) then
+        return
+    end
+
+    -- Calculate cumulative coupling distance to this follower
+    local couplingDist = 0
+    for i = 1, followerIdx - 1 do
+        couplingDist = couplingDist + (consist.couplingLengths[i] or 0)
+    end
+
+    -- Get position from breadcrumb at this arc length
+    local targetArcLength = consist.breadcrumbs.totalArcLength - couplingDist
+
+    if consist.reversing then
+        -- When reversing, followers are ahead of the leader in arc terms
+        targetArcLength = consist.breadcrumbs.totalArcLength + couplingDist
+    end
+
+    local pos = GetBreadcrumbAtArcLength(consist, targetArcLength)
+
+    -- Set follower position and heading via MoveCtrl
+    Spring.MoveCtrl.SetPosition(unitID, pos.x, pos.y, pos.z)
+    Spring.MoveCtrl.SetHeading(unitID, pos.heading * 32768 / math.pi) -- radians to Spring heading
+    Spring.MoveCtrl.SetVelocity(unitID, 0, 0, leaderSpeed) -- match leader speed
+end
+
+local function CheckForUTurn(consist, targetX, targetZ)
+    -- Check if reaching the target would require a U-turn
+    if not consist.leader then
+        return false
+    end
+
+    local x, _, z = Spring.GetUnitPosition(consist.leader)
+    local heading = Spring.GetUnitHeading(consist.leader) or 0
+    heading = heading * math.pi / 32768
+
+    -- Calculate bearing to target
+    local dx = targetX - x
+    local dz = targetZ - z
+    local targetBearing = math.atan2(dx, dz)
+
+    -- Calculate angle difference
+    local angleDiff = math.abs(targetBearing - heading)
+    if angleDiff > math.pi then
+        angleDiff = 2 * math.pi - angleDiff
+    end
+
+    -- Convert to degrees
+    angleDiff = angleDiff * 180 / math.pi
+
+    return angleDiff > UTURN_ANGLE_THRESHOLD
+end
+
+local function SwapLeader(consist)
+    -- Find the other engine for two-engine consists
+    local engines = {}
+    for _, unitID in ipairs(consist.units) do
+        if IsEngine(unitID) and not Spring.GetUnitIsDead(unitID) then
+            table.insert(engines, unitID)
+        end
+    end
+
+    if #engines < 2 then
+        return false -- Can't swap with only one engine
+    end
+
+    -- Find the engine that's not currently the leader
+    local newLeader = nil
+    for _, engineID in ipairs(engines) do
+        if engineID ~= consist.leader then
+            newLeader = engineID
+            break
+        end
+    end
+
+    if not newLeader then
+        return false
+    end
+
+    -- Disable MoveCtrl on old leader, enable on new leader
+    if consist.leader then
+        EnableFollowerMoveCtrl(consist.leader)
+    end
+    DisableFollowerMoveCtrl(newLeader)
+
+    consist.leader = newLeader
+    consist.reversing = not consist.reversing
+
+    -- Reset breadcrumbs for new direction
+    consist.breadcrumbs = InitBreadcrumbs()
+    local x, y, z = Spring.GetUnitPosition(newLeader)
+    local heading = Spring.GetUnitHeading(newLeader) or 0
+    consist.lastLeaderPos = {x = x, y = y, z = z}
+    consist.lastLeaderHeading = heading * math.pi / 32768
+
+    return true
+end
+
+local function SetupConsistMovement(consist)
+    -- Setup movement control for all units in consist
+    if not consist.leader then
+        return
+    end
+
+    -- Leader keeps normal movement
+    DisableFollowerMoveCtrl(consist.leader)
+
+    -- All other units become followers
+    for i, unitID in ipairs(consist.units) do
+        if unitID ~= consist.leader and not Spring.GetUnitIsDead(unitID) then
+            EnableFollowerMoveCtrl(unitID)
+        end
+    end
+
+    -- Initialize breadcrumbs from leader position
+    local x, y, z = Spring.GetUnitPosition(consist.leader)
+    local heading = Spring.GetUnitHeading(consist.leader) or 0
+    consist.lastLeaderPos = {x = x, y = y, z = z}
+    consist.lastLeaderHeading = heading * math.pi / 32768
+
+    -- Add initial breadcrumb
+    AddBreadcrumb(consist, x, y, z, consist.lastLeaderHeading)
+end
+
+--------------------------------------------------------------------------------
+-- Game frame update
+--------------------------------------------------------------------------------
+
+function gadget:GameFrame(frame)
+    -- Update all consists every frame
+    for consistID, consist in pairs(consists) do
+        if consist.leader and not Spring.GetUnitIsDead(consist.leader) then
+            -- Update leader breadcrumb
+            local x, y, z = Spring.GetUnitPosition(consist.leader)
+            local heading = Spring.GetUnitHeading(consist.leader) or 0
+            heading = heading * math.pi / 32768
+
+            -- Enforce no-pivot turning constraint
+            local vx, vy, vz, speed = Spring.GetUnitVelocity(consist.leader)
+            speed = math.sqrt(vx*vx + vz*vz)
+
+            if speed < 0.1 then
+                -- When stopped, prevent any rotation
+                local headingDiff = math.abs(heading - consist.lastLeaderHeading)
+                if headingDiff > 0.01 then
+                    -- Force heading back to last known
+                    Spring.SetUnitRotation(consist.leader, 0, consist.lastLeaderHeading, 0)
+                    heading = consist.lastLeaderHeading
+                end
+            else
+                -- While moving, cap turn rate based on speed
+                local maxTurnPerFrame = speed / MIN_TURNING_RADIUS
+                local headingDiff = heading - consist.lastLeaderHeading
+
+                -- Normalize angle difference
+                while headingDiff > math.pi do headingDiff = headingDiff - 2*math.pi end
+                while headingDiff < -math.pi do headingDiff = headingDiff + 2*math.pi end
+
+                if math.abs(headingDiff) > maxTurnPerFrame then
+                    -- Cap the turn rate
+                    heading = consist.lastLeaderHeading +
+                        maxTurnPerFrame * (headingDiff > 0 and 1 or -1)
+                    Spring.SetUnitRotation(consist.leader, 0, heading, 0)
+                end
+            end
+
+            AddBreadcrumb(consist, x, y, z, heading)
+
+            -- Update all followers
+            for i = 2, #consist.units do
+                UpdateFollowerPosition(consist, i, speed)
+            end
+        end
+    end
+end
+
+-- Override move commands to check for U-turns
+function gadget:AllowUnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOptions, cmdTag, synced)
+    local consistID = consistsByUnit[unitID]
+    if not consistID then
+        return true -- Not a train unit
+    end
+
+    local consist = consists[consistID]
+    if not consist or unitID ~= consist.leader then
+        return true -- Not the leader
+    end
+
+    -- Check move commands
+    if cmdID == CMD.MOVE or cmdID == CMD.ATTACK_MOVE or cmdID == CMD.PATROL then
+        if #cmdParams >= 3 then
+            local targetX, targetZ = cmdParams[1], cmdParams[3]
+
+            -- Check if this would require a U-turn
+            if CheckForUTurn(consist, targetX, targetZ) then
+                -- Try to swap leaders for two-engine consists
+                if SwapLeader(consist) then
+                    Spring.Echo("Reversing consist to avoid U-turn")
+                    UpdateConsistParams(consist)
+                elseif consist.engineCount == 1 then
+                    -- Single engine - will have to back up slowly
+                    Spring.Echo("Single-engine consist will reverse slowly")
+                    consist.reversing = true
+                end
+            end
+        end
+    end
+
+    return true
 end
