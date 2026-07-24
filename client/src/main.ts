@@ -925,10 +925,15 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 // authoritative value, so re-point the bar's team filter at it.
                 economyBar?.setTeam(m.team);
 
-                // Initialize native UI for Metalstorm
-                // Get gameId from URL params or localStorage
+                // Initialize native UI for Metalstorm. Resolve the gameId from
+                // (in priority) the ?game= URL param, localStorage, then the
+                // lobby's current room — the last is essential when the player
+                // joins a game via the lobby browser (no ?game= param and no
+                // localStorage hint), which is the normal path. Without the
+                // room fallback the loader silently no-ops and no widget mounts.
                 const gameId = new URLSearchParams(window.location.search).get('game') ||
-                               localStorage.getItem('springrts-game-id') || '';
+                               localStorage.getItem('springrts-game-id') ||
+                               lobbyUI?.room?.gameId || '';
                 if (gameId === 'metalstorm') {
                     // Initialize with empty httpBase for local/dev environment
                     // In production, this would be the lobby HTTP URL
