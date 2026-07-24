@@ -129,19 +129,110 @@ return {
         },
     },
 
-    -- Opening objective set (PLAN-metalstorm-beta-map.md §1 "the basin as
-    -- the primary control objective", flanked by the two ridge-corridor
-    -- passes). Escort/protect/extract objectives for the convoy routes are
-    -- NOT authored here — game_objectives.lua's 'protect'/'escort'/'extract'
-    -- types need a live targetUnitID, which only a runtime convoy-spawn
-    -- gadget (still a spawn.seed TODO, see mapdata/civilians.lua) can
-    -- supply; a static scenario entry can't reference a not-yet-spawned
-    -- unit. Once that gadget exists it should generate these dynamically
-    -- from mapdata/civilians.lua's convoys list, not from this file.
+    -- Opening objective set: a real story with escort/protect/extract
+    -- objectives tied to civilian populations and convoys.
+    --
+    -- STORY: "The Meridian Evacuation"
+    -- Both civilian habitats (ash_habitat and shale_habitat) are under
+    -- threat as forces close in on the strategic Meridian Basin. The
+    -- civilian populations need protection while supply convoys attempt
+    -- emergency runs to the market districts. Intelligence suggests enemy
+    -- forces will push through the ridge passes — securing these corridors
+    -- is crucial for evacuation routes.
+    --
+    -- Phase 1: Initial protection and convoy escort
+    -- Phase 2: Strategic control of the basin
+    -- Phase 3: Final evacuation extraction
     objectives = {
-        { type = 'control', scope = 'strategic', forTeam = nil, region = '4:4', reward = 220 }, -- meridian_basin
-        { type = 'control', scope = 'tactical',  forTeam = nil, region = '2:4', reward = 90 },  -- west_pass
-        { type = 'control', scope = 'tactical',  forTeam = nil, region = '5:4', reward = 90 },  -- east_pass
+        -- STRATEGIC: Control the basin (the endgame objective)
+        { type = 'control', scope = 'strategic', forTeam = nil, region = '4:4', reward = 300,
+          expiresAtFrame = nil }, -- meridian_basin — open-ended, the war's focal point
+
+        -- TACTICAL Phase 1: Protect the civilian districts
+        -- North habitat protection (ash_habitat grid cells)
+        { type = 'protect', scope = 'tactical', forTeam = 0,
+          params = {
+              targetUnitIDs = {},  -- Populated at runtime via _populateTargetsFrom
+              quorum = 1,          -- At least one civilian must survive
+          },
+          _populateTargetsFrom = { x = 2700, z = 3900, r = 600, role = 'ambient' },
+          reward = 120,
+          expiresAtFrame = 9000 },  -- 5 minutes (30 Hz * 60 * 5)
+
+        -- South habitat protection (shale_habitat)
+        { type = 'protect', scope = 'tactical', forTeam = 4,
+          params = {
+              targetUnitIDs = {},  -- Populated at runtime via _populateTargetsFrom
+              quorum = 1,
+          },
+          _populateTargetsFrom = { x = 2700, z = 12484, r = 600, role = 'ambient' },
+          reward = 120,
+          expiresAtFrame = 9000 },
+
+        -- TACTICAL Phase 1: Convoy escort missions
+        -- NOTE: These placeholder objectives have empty payloadUnitIDs arrays
+        -- because the actual convoy units don't exist at scenario load time.
+        -- The civilians/convoy.lua gadget (when implemented) should:
+        --   1. Spawn the convoy units
+        --   2. Update these objective params.payloadUnitIDs with the spawned unit IDs
+        --   3. Or create new escort objectives dynamically
+        -- For now, these serve as story documentation and will validate but
+        -- fail at init-time (no payload) — they demonstrate the intended design.
+
+        -- North convoy: ash_habitat → north_market via granary_vale
+        { type = 'escort', scope = 'tactical', forTeam = 0,
+          params = {
+              payloadUnitIDs = {},  -- TODO: populated by convoy spawner
+              destArea = { x = 13800, z = 2500, r = 400 },  -- north_market approx center
+              quorum = 1,
+          },
+          reward = 100,
+          expiresAtFrame = 18000 },  -- 10 minutes
+
+        -- South convoy: shale_habitat → south_market via sorghum_vale
+        { type = 'escort', scope = 'tactical', forTeam = 4,
+          params = {
+              payloadUnitIDs = {},  -- TODO: populated by convoy spawner
+              destArea = { x = 13800, z = 13900, r = 400 },  -- south_market approx center
+              quorum = 1,
+          },
+          reward = 100,
+          expiresAtFrame = 18000 },
+
+        -- TACTICAL Phase 2: Secure the ridge passes
+        { type = 'control', scope = 'tactical', forTeam = nil, region = '2:4', reward = 110,
+          expiresAtFrame = nil },  -- west_pass
+        { type = 'control', scope = 'tactical', forTeam = nil, region = '5:4', reward = 110,
+          expiresAtFrame = nil },  -- east_pass
+
+        -- TACTICAL Phase 3: Emergency extraction from threatened habitats
+        -- North extraction: secure ash_habitat, evacuate to northgate
+        { type = 'extract', scope = 'tactical', forTeam = 0,
+          params = {
+              payloadUnitIDs = {},  -- Populated at runtime via _populatePayloadFrom
+              pickupArea = { x = 2700, z = 3900, r = 500 },    -- ash_habitat center
+              extractArea = { x = 6600, z = 1200, r = 400 },    -- northgate garrison
+              holdFrames = 300,     -- 10 seconds of security required
+              threshold = 5000,     -- Minimum friendly strength to secure
+              quorum = 1,
+          },
+          _populatePayloadFrom = { x = 2700, z = 3900, r = 600, role = 'ambient' },
+          reward = 150,
+          expiresAtFrame = 27000 },  -- 15 minutes
+
+        -- South extraction: secure shale_habitat, evacuate to southgate
+        { type = 'extract', scope = 'tactical', forTeam = 4,
+          params = {
+              payloadUnitIDs = {},  -- Populated at runtime via _populatePayloadFrom
+              pickupArea = { x = 2700, z = 12484, r = 500 },   -- shale_habitat center
+              extractArea = { x = 6600, z = 15184, r = 400 },   -- southgate garrison
+              holdFrames = 300,
+              threshold = 5000,
+              quorum = 1,
+          },
+          _populatePayloadFrom = { x = 2700, z = 12484, r = 600, role = 'ambient' },
+          reward = 150,
+          expiresAtFrame = 27000 },
     },
 
     orders = {},

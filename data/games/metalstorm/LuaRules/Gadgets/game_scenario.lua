@@ -170,6 +170,75 @@ local function stageCivilians(civilians)
     end
 end
 
+-- ============================================================
+-- Deferred objective population for runtime-spawned units (civilians/convoys)
+-- ============================================================
+local deferredObjectives = {}
+
+local function populateCiviliansInArea(x, z, r, role)
+    -- Find all civilian units in the specified area with the given role
+    local result = {}
+    local units = Spring.GetUnitsInCylinder(x, z, r)
+    for _, unitID in ipairs(units) do
+        local udid = Spring.GetUnitDefID(unitID)
+        local ud = udid and UnitDefs[udid]
+        if ud and ud.customParams and ud.customParams.is_civilian then
+            -- Check role if specified
+            if not role or (GG.Civilians.GetRole and GG.Civilians.GetRole(unitID) == role) then
+                result[#result + 1] = unitID
+            end
+        end
+    end
+    return result
+end
+
+local function resolveDeferredObjectives()
+    for _, o in ipairs(deferredObjectives) do
+        local params = o.params or {}
+
+        -- Populate targetUnitIDs from area query if specified
+        if o._populateTargetsFrom then
+            local area = o._populateTargetsFrom
+            params.targetUnitIDs = populateCiviliansInArea(area.x, area.z, area.r, area.role)
+            Spring.Echo('[game_scenario] populated ' .. #params.targetUnitIDs ..
+                       ' civilian targets for ' .. (o.type or 'unknown') .. ' objective')
+        end
+
+        -- Populate payloadUnitIDs from area query if specified
+        if o._populatePayloadFrom then
+            local area = o._populatePayloadFrom
+            params.payloadUnitIDs = populateCiviliansInArea(area.x, area.z, area.r, area.role)
+            Spring.Echo('[game_scenario] populated ' .. #params.payloadUnitIDs ..
+                       ' civilian payload for ' .. (o.type or 'unknown') .. ' objective')
+        end
+
+        -- Only create if we have units (empty arrays fail init validation)
+        if (not params.targetUnitIDs or #params.targetUnitIDs > 0) and
+           (not params.payloadUnitIDs or #params.payloadUnitIDs > 0) then
+            local def = {
+                type = o.type,
+                scope = o.scope,
+                forTeam = o.forTeam,
+                reward = o.reward,
+                expiresAtFrame = o.expiresAtFrame,
+                params = params,
+            }
+            local id = GG.Objectives.Create(def)
+            if id then
+                Spring.Echo('[game_scenario] created deferred objective ' .. id ..
+                           ' (' .. o.type .. ')')
+            else
+                Spring.Echo('[game_scenario] WARNING: failed to create deferred ' ..
+                           o.type .. ' objective')
+            end
+        else
+            Spring.Echo('[game_scenario] skipped ' .. o.type ..
+                       ' objective (no units found or empty payload)')
+        end
+    end
+    deferredObjectives = {}
+end
+
 local function stageObjectives(objectives)
     for _, o in ipairs(objectives or {}) do
         -- Authoring convenience: flat type-specific fields (region,
@@ -180,11 +249,24 @@ local function stageObjectives(objectives)
         if o.targetUnitID and params.targetUnitID == nil then params.targetUnitID = o.targetUnitID end
         if o.duration and params.duration == nil then params.duration = o.duration end
 
-        GG.Objectives.Create({
-            type = o.type, scope = o.scope, forTeam = o.forTeam,
-            reward = o.reward, bounty = o.bounty, params = params,
-            expiresAtFrame = o.expiresAtFrame,
-        })
+        -- Check if this objective needs runtime unit population
+        -- (empty targetUnitIDs/payloadUnitIDs + a _populateFrom marker)
+        local needsTargets = o._populateTargetsFrom ~= nil
+        local needsPayload = o._populatePayloadFrom ~= nil
+
+        if needsTargets or needsPayload then
+            -- Defer creation until after civilians spawn
+            deferredObjectives[#deferredObjectives + 1] = o
+            Spring.Echo('[game_scenario] deferred ' .. (o.type or 'unknown') ..
+                       ' objective (will populate units at frame 30)')
+        else
+            -- Create immediately
+            GG.Objectives.Create({
+                type = o.type, scope = o.scope, forTeam = o.forTeam,
+                reward = o.reward, bounty = o.bounty, params = params,
+                expiresAtFrame = o.expiresAtFrame,
+            })
+        end
     end
 end
 
@@ -231,4 +313,15 @@ function gadget:GameStart()
     Spring.SetGameRulesParam('scenario_name', name)
 
     Spring.Echo('[game_scenario] staged "' .. (scn.name or name) .. '"')
+end
+
+function gadget:GameFrame(frame)
+    -- Resolve deferred objectives after civilians have had a chance to spawn
+    -- (civilians spawn at GameStart via stageCivilians, so frame 30 = 1 second
+    -- after game start gives them time to settle)
+    if frame == 30 and #deferredObjectives > 0 then
+        Spring.Echo('[game_scenario] resolving ' .. #deferredObjectives ..
+                   ' deferred objectives at frame 30')
+        resolveDeferredObjectives()
+    end
 end
