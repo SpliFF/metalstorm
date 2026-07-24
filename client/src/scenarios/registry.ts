@@ -17,6 +17,7 @@ import weaponShowcase from './bench/weapon-showcase.js';
 import modelViewer from './model-viewer/index.js';
 import fxViewer from './fx-viewer/index.js';
 import lobbyFlow from './bench/lobby-flow.js';
+import trainVerification from './bench/train-verification.js';
 
 const SCENARIOS: Scenario[] = [
     duelAttack,
@@ -28,6 +29,7 @@ const SCENARIOS: Scenario[] = [
     modelViewer,
     fxViewer,
     lobbyFlow,
+    trainVerification,
 ];
 
 const BY_NAME = new Map<string, Scenario>(SCENARIOS.map((s) => [s.name, s]));
