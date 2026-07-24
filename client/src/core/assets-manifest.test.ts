@@ -117,9 +117,19 @@ describe('collectDefModelRefs (real Fengari execution against the real unit defs
         expect(tankNames.sort()).toEqual(['ms_tanks_s1', 'ms_tanks_s2', 'ms_tanks_s3', 'ms_tanks_s4']);
     });
 
-    it('objectname matches the def name (per _builder.lua)', () => {
+    it('objectname defaults to the def name (per _builder.lua)', () => {
+        // Sample a scale with NO model override — _builder.lua derives
+        // objectname = ms_<class>_s<scale> for every un-overridden slot.
+        const tankS1 = refs.find((r) => r.defName === 'ms_tanks_s1');
+        expect(tankS1?.objectname).toBe('ms_tanks_s1');
+    });
+
+    it('a scale with an explicit override points at the generated model', () => {
+        // The 8 roster slots that have real art wire it via
+        // `override = { objectname = 'fable_*' }` — deliberately breaking the
+        // name-matches-def default above (PLAN-metalstorm-beta-units.md §7).
         const tankS2 = refs.find((r) => r.defName === 'ms_tanks_s2');
-        expect(tankS2?.objectname).toBe('ms_tanks_s2');
+        expect(tankS2?.objectname).toBe('fable_tank');
     });
 
     it('executes the literal-table files (civilians, buildings) with no builder', () => {
