@@ -95,8 +95,9 @@ return {
         turnrate = 40, turninplace = false,
         turninplacespeedlimit = 0.5, footprintz = 7,
         canload = 1,
-        transportcapacity = 8, transportsize = 1,   -- a rifle squad
+        transportcapacity = 4, transportsize = 1,   -- T5: 4 squad-units (squad is ONE sim unit)
         loadingradius = 120, releaseheld = true,
+        isfireplatform = true,  -- T5: loaded squads keep firing
         weapons = {
             -- T4: Cupolas 360° coverage
             [1] = { name = 'MS_MG_S1', maxangledif = 180 },
@@ -120,10 +121,15 @@ return {
         canload = 1,
         transportcapacity = 2, transportsize = 2,   -- light vehicles
         loadingradius = 120, releaseheld = true,
+        isfireplatform = true,  -- T5: loaded vehicles keep firing
         weapons = {
             -- T4: Pulpit cupola 360° coverage
             [1] = { name = 'MS_MG_S1', maxangledif = 180 },
         },
-        customparams = { train_role = 'cargo' },
+        customparams = {
+            train_role = 'cargo',
+            -- T5: Loaded vehicles fire from sides (bowtie pattern via AllowWeaponTargetCheck)
+            fire_platform_bowtie = 'true',
+        },
     },
 }

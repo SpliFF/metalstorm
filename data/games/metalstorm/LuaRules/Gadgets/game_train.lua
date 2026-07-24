@@ -22,6 +22,12 @@
 -- - Symmetric cones (engine 270° fwd, AA 360°, cupolas 360°) via maxAngleDif/mainDir in defs
 -- - Bowtie arcs (roof turrets, loaded squads) via AllowWeaponTarget callin
 -- - Bowtie: 120° each side, reject fore/aft (keep |sideBearing| within 60° of ±X)
+-- T5 SCOPE: Squad transport
+-- - Troop car retuned to 4 squad-units (transportcapacity=4, transportsize=1)
+-- - Cargo car holds 2 light vehicles (transportcapacity=2, transportsize=2)
+-- - isFirePlatform=true on both → loaded units keep firing
+-- - Loaded units use bowtie side-fire (AllowWeaponTargetCheck already implemented in T4)
+-- - Load/unload gating: unload only at low/zero consist speed (< 0.5 elmo/frame)
 
 function gadget:GetInfo()
     return {
@@ -70,6 +76,9 @@ local UTURN_ANGLE_THRESHOLD = 150   -- degrees - prefer reverse if turn > this
 local DAMAGE_SPEED_FLOOR = 0.2      -- minimum speed factor from damage
 local SLOW_PER_DEAD_CAR = 0.05      -- speed penalty per dead car
 local SLOW_PER_DEAD_ENGINE = 0.3    -- speed penalty per dead engine
+
+-- T5: Transport constants
+local MAX_UNLOAD_SPEED = 0.5        -- max speed (elmo/frame) to allow unload
 
 --------------------------------------------------------------------------------
 -- State
@@ -170,6 +179,18 @@ local function IsEngine(unitID)
     if not unitDefID then return false end
     local def = GetTrainDef(unitDefID)
     return def and def.role == ROLE_ENGINE
+end
+
+-- T5: Get consist's current speed
+local function GetConsistSpeed(consist)
+    if not consist.leader or Spring.GetUnitIsDead(consist.leader) then
+        return 0
+    end
+
+    local vx, vy, vz = Spring.GetUnitVelocity(consist.leader)
+    if not vx then return 0 end
+
+    return math.sqrt(vx*vx + vz*vz)
 end
 
 local function InitBreadcrumbs()
@@ -644,6 +665,21 @@ function gadget:AllowCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdO
 
     elseif cmdID == CMD_DECOUPLE then
         return consistsByUnit[unitID] ~= nil
+
+    elseif cmdID == CMD.UNLOAD_UNITS or cmdID == CMD.UNLOAD_UNIT then
+        -- T5: Gate unload by consist speed (only allow at low/zero speed)
+        local consistID = consistsByUnit[unitID]
+        if consistID then
+            local consist = consists[consistID]
+            if consist then
+                local speed = GetConsistSpeed(consist)
+                if speed > MAX_UNLOAD_SPEED then
+                    -- Refuse unload while moving fast
+                    return false
+                end
+            end
+        end
+        return true
     end
 
     return true
