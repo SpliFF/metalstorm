@@ -70,6 +70,8 @@ import {
     initializeNativeUI,
     handleRulesParamUpdate,
     disposeNativeUI,
+    uiStore,
+    mapGestureBridge,
 } from './ui/native-ui/index.js';
 
 // Active in-game templates. Starts with engine defaults; overwritten when
@@ -873,6 +875,10 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         buildStamp: CONFIG.buildStamp,
     });
     gameWorker = new GameWorker();
+    // PLAN-metalstorm-scripting.md task 4: the map-arm gesture bridge posts
+    // straight to whatever worker instance is currently live (respawned on
+    // R2 recovery, same as every other gp:* postMessage call in this file).
+    mapGestureBridge.setWorkerPost((msg) => gameWorker?.postMessage(msg));
     gameWorker.onerror = (e) => {
         console.error('[gameWorker] error:',
             e.message || '(no detail)',
@@ -979,6 +985,12 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 // GW4-c5c-3: keep the minimap selection rings in sync with the
                 // worker's selection set (the minimap matches ids against blips).
                 minimap?.setSelection(m.selectedUnitIds);
+                // PLAN-metalstorm-scripting.md task 4: mirror the world
+                // selection into the native-UI store so widgets (the command
+                // composer's Subject two-way sync) can react to it — this
+                // was previously cached only in lastSceneState (test-harness
+                // reads), never reaching the widget layer.
+                uiStore.updateSelection(m.selectedUnitIds);
                 // GW4-c5c-2: keep the audio listener glued to the camera so 3D
                 // panning matches the view. Forward = (target - position).
                 if (audioManager) {
@@ -1186,10 +1198,25 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 applyCursorMode(m.name, m.css);
                 break;
             // PLAN-macro-ui.md §2/§5: directive-shape capture armed/disarmed —
-            // tracked for the ESC handler; a future org-panel affordance can
-            // also use this to show a "drawing…" state.
+            // tracked for the ESC handler; also forwarded to the map-arm
+            // bridge so a widget-armed capture (metalstorm-scripting task 4)
+            // can show its own "drawing…" affordance.
             case 'gp:directiveShapeArmed':
                 directiveShapeArmed = m.armed;
+                mapGestureBridge.handleWorkerMessage(m);
+                break;
+            // PLAN-metalstorm-scripting.md task 4: a capture-only gesture
+            // (armed via the map-arm bridge, not the org-panel direct-send
+            // path) finished — forward the raw shape/params to whichever
+            // widget armed it.
+            case 'gp:directiveShapeResult':
+                mapGestureBridge.handleWorkerMessage(m);
+                break;
+            // PLAN-macro-ui.md §3: org-group snapshot (own team) → native-UI
+            // store, for the org panel (not yet built) and the command
+            // composer's Subject two-way sync (metalstorm-scripting task 4).
+            case 'gp:orgGroups':
+                uiStore.updateOrgGroups(m.groups);
                 break;
             // Spring.AssignMouseCursor / ReplaceMouseCursor (widgets, worker) →
             // register a cursor pack under a logical name (ZK/BAR swap in their

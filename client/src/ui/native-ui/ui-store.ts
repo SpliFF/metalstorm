@@ -43,6 +43,19 @@ export interface TeamEconomy {
     energyUsage: number;
 }
 
+/** Org-group summary for widget consumption (PLAN-macro-ui.md §3, fed by
+ *  `gp:orgGroups` — main.ts). `baseCostSum` is the worker-computed Σ
+ *  `authority_cost_base` over current members (PLAN-metalstorm-authority.md
+ *  §3.3), used by the command composer's cost preview (task 5). */
+export interface OrgGroupSummary {
+    groupId: number;
+    echelon: 'Squad' | 'Platoon' | 'Army';
+    ownerTeam: number;
+    name: string;
+    memberIds: number[];
+    baseCostSum: number;
+}
+
 export class UIStore {
     // State mirrors
     private gameRulesParams = new Map<string, number | string>();
@@ -53,6 +66,7 @@ export class UIStore {
     private unitQueues = new Map<number, any[]>(); // unitId -> command queue
     private directives = new Map<number, any>(); // directive/standing order state
     private gameEvents: any[] = []; // recent events
+    private orgGroups: OrgGroupSummary[] = [];
 
     // Subscription management
     private subscribers = new Map<string[], Set<Subscriber>>();
@@ -131,6 +145,11 @@ export class UIStore {
     /** Get all players */
     getPlayers(): PlayerInfo[] {
         return Array.from(this.playerRoster.values());
+    }
+
+    /** Get the current org-group snapshot (own team, PLAN-macro-ui.md §3). */
+    getOrgGroups(): readonly OrgGroupSummary[] {
+        return this.orgGroups;
     }
 
     // ─── Update methods (called by native UI loader / connection) ───
@@ -226,6 +245,13 @@ export class UIStore {
         this.notifySubscribers(['unitQueues']);
     }
 
+    /** Replace the org-group snapshot (`gp:orgGroups` forwarding — own team
+     *  only, change-driven). */
+    updateOrgGroups(groups: OrgGroupSummary[]): void {
+        this.orgGroups = groups;
+        this.notifySubscribers(['orgGroups']);
+    }
+
     /** Add game event */
     addGameEvent(event: any): void {
         this.gameEvents.push(event);
@@ -287,6 +313,7 @@ export class UIStore {
         this.unitQueues.clear();
         this.directives.clear();
         this.gameEvents = [];
+        this.orgGroups = [];
         // Don't notify - this is for teardown
     }
 

@@ -317,6 +317,14 @@ export interface GpArmDirectiveShapeToWorker {
     /** Polyline only: the 2-vertex "arrow" convenience (drag start→end,
      *  wheel sets frontage) instead of a general click-chained front line. */
     arrow?: boolean;
+    /** When true, a completed gesture does NOT auto-send a `GroupDirective` —
+     *  `DirectiveShapeCapture.commit()` returns the raw shape/params via
+     *  `gp:directiveShapeResult` instead (metalstorm-scripting task 4: the
+     *  command composer's Target slot wants the drawn shape to fill the slot
+     *  for review/commit through its own Commit button, not an immediate
+     *  direct send — the org-panel "paint directive" button is the only
+     *  caller that wants the auto-send behaviour). */
+    captureOnly?: boolean;
 }
 
 /** Cancel an in-progress `gp:armDirectiveShape` capture (ESC on main, or the
@@ -628,11 +636,18 @@ export type GpMessageToMain =
     | { type: 'gp:resynced' }
     /**
      * Org-group snapshot for the native org-panel widget (PLAN-macro-ui.md
-     * §3). Forwarded verbatim on every `Connection.onOrgGroupState` push
-     * (own team only — same forwarding pattern as `gp:sceneState.economy`,
-     * change-driven not per-tick).
+     * §3). Forwarded on every `Connection.onOrgGroupState` push (own team
+     * only — same forwarding pattern as `gp:sceneState.economy`, change-
+     * driven not per-tick). `baseCostSum` is the worker's own addition (not
+     * on the wire message): Σ `authority_cost_base` customparam over the
+     * group's current member defIds (EntityRenderer.getEntityMeta + DefCache
+     * — real per-unit data, not an estimate), for the command composer's
+     * directive cost preview (metalstorm-scripting task 5 / PLAN-metalstorm-
+     * authority.md §3.3). Members not currently resolved client-side (out of
+     * LOS/unknown def) are skipped — best-effort, same staleness class as
+     * every other client-side cost prediction input (§4).
      */
-    | { type: 'gp:orgGroups'; groups: OrgGroupInfoMsg[] }
+    | { type: 'gp:orgGroups'; groups: (OrgGroupInfoMsg & { baseCostSum: number })[] }
     /** Directive snapshot for the org panel (fulfillment %, directive
      *  icons) — own team + allies, mirrors `onDirectiveState`. */
     | { type: 'gp:directives'; directives: DirectiveInfoMsg[] }
@@ -640,8 +655,10 @@ export type GpMessageToMain =
      *  requesting main-thread widget show an "drawing…" affordance and know
      *  when to re-enable its own UI. */
     | { type: 'gp:directiveShapeArmed'; armed: boolean }
-    /** The armed capture finished — committed (a `GroupDirective` was sent;
-     *  the real id arrives via the next `gp:directives` push) or cancelled. */
-    | { type: 'gp:directiveShapeResult'; committed: boolean }
+    /** The armed capture finished — committed (a `GroupDirective` was sent,
+     *  UNLESS the arming request set `captureOnly`, in which case nothing
+     *  was sent and `shape`/`params` carry the raw drawn geometry for the
+     *  caller to use itself — metalstorm-scripting task 4) or cancelled. */
+    | { type: 'gp:directiveShapeResult'; committed: boolean; shape?: 'Point' | 'Circle' | 'Polygon' | 'Polyline'; params?: number[] }
     /** PLAN-rml.md: a batch of RML DOM ops for the main-thread overlay manager. */
     | RmlOpsToMain;

@@ -3,7 +3,15 @@
  */
 
 export { UIStore, uiStore } from './ui-store.js';
-export type { PlayerInfo, UnitSelection, TeamEconomy } from './ui-store.js';
+export type { PlayerInfo, UnitSelection, TeamEconomy, OrgGroupSummary } from './ui-store.js';
+
+// Map-arm gesture bridge (PLAN-metalstorm-scripting.md task 4)
+export { mapGestureBridge } from './map-gesture.js';
+export type { MapGestureShape, MapGestureArmOpts, MapGestureResult } from './map-gesture.js';
+
+// Cost preview + Subject two-way sync (PLAN-metalstorm-scripting.md task 5 / task 4)
+export { orderClassForEchelon, previewDirectiveCost, matchSelectionToGroup } from './cost-preview.js';
+export type { Echelon, CostModelLike, OrgGroupLike, CostPreview } from './cost-preview.js';
 
 export { WidgetLoader } from './widget-loader.js';
 export type {
@@ -35,7 +43,9 @@ export {
     compileIntent,
     validateIntent,
     getPriorityBand,
+    getAcceptedTargetShapes,
     PRIORITY_BANDS,
+    TARGET_SHAPES_BY_VERB,
     DirectiveType,
     StandingOrderType,
     OrderShape,

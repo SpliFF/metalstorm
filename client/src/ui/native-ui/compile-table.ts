@@ -35,6 +35,38 @@ export type CommandVerb =
 export type TargetShape = 'point' | 'area' | 'route' | 'entity';
 
 /**
+ * Target shapes each verb accepts (the closed verb:shape vocabulary — §1).
+ * Single source of truth for both `validateIntent` and the map-arm target
+ * picker (metalstorm-scripting task 4: only offer "paint on map" options
+ * for shapes the current verb actually compiles).
+ */
+export const TARGET_SHAPES_BY_VERB: Record<CommandVerb, TargetShape[]> = {
+    attack: ['entity', 'area', 'point'],
+    secure: ['entity', 'area', 'point'],
+    defend: ['area', 'entity'],
+    hold: ['area', 'entity'],
+    patrol: ['route'],
+    screen: ['route'],
+    scout: ['area', 'point'],
+    escort: ['entity'],
+    withdraw: ['point'],
+    reinforce: ['area', 'entity'],
+    build: ['point'],
+};
+
+/** Target shapes `verb` can compile against (§5 compile table). */
+export function getAcceptedTargetShapes(verb: CommandVerb): TargetShape[] {
+    return TARGET_SHAPES_BY_VERB[verb] ?? [];
+}
+
+/** Flattened `"verb:shape"` lookup, derived from `TARGET_SHAPES_BY_VERB` —
+ *  `validateIntent`'s single source of truth for the vocabulary check. */
+const VALID_VERB_SHAPE_COMBINATIONS = new Set(
+    (Object.entries(TARGET_SHAPES_BY_VERB) as [CommandVerb, TargetShape[]][])
+        .flatMap(([verb, shapes]) => shapes.map((shape) => `${verb}:${shape}`)),
+);
+
+/**
  * Command subject - who executes
  */
 export interface CommandSubject {
@@ -518,24 +550,12 @@ function formatWhenCondition(condition: WhenCondition): string {
  * Returns an error message if invalid, null if valid.
  */
 export function validateIntent(intent: CommandIntent): string | null {
-    // Check verb:shape compatibility
+    // Check verb:shape compatibility (derived from TARGET_SHAPES_BY_VERB —
+    // the same table the map-arm target picker reads, so the two can never
+    // drift apart).
     const key = `${intent.verb}:${intent.target.shape}`;
 
-    const validCombinations = new Set([
-        'attack:entity', 'attack:area', 'attack:point',
-        'secure:entity', 'secure:area', 'secure:point',
-        'defend:area', 'defend:entity',
-        'hold:area', 'hold:entity',
-        'patrol:route',
-        'screen:route',
-        'scout:area', 'scout:point',
-        'escort:entity',
-        'withdraw:point',
-        'reinforce:area', 'reinforce:entity',
-        'build:point',
-    ]);
-
-    if (!validCombinations.has(key)) {
+    if (!VALID_VERB_SHAPE_COMBINATIONS.has(key)) {
         return `Invalid combination: ${intent.verb} cannot target ${intent.target.shape}`;
     }
 

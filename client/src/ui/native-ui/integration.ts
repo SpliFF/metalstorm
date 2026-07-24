@@ -95,16 +95,57 @@ function createSendCommand(connection: Connection): (cmd: any) => void {
                 case 'GroupDirective':
                     if (cmd.action === 'remove' && cmd.directiveId != null) {
                         connection.sendGroupDirectiveRemove(cmd.directiveId);
-                    } else if (cmd.groupId != null) {
+                    } else if (cmd.payload) {
+                        // The compile-table's `CompiledMessage` shape
+                        // (compile-table.ts GroupDirectivePayload) — the
+                        // command composer's commit path (metalstorm-
+                        // scripting §5/task 5). `phasesJson` has no wire
+                        // slot on `sendGroupDirective` yet (macro-directives
+                        // phase gates are stored-but-not-evaluated server-
+                        // side — PLAN-metalstorm-scripting field notes); it
+                        // is intentionally dropped here rather than silently
+                        // padded onto a param the server would misread.
+                        const p = cmd.payload;
                         connection.sendGroupDirective(
+                            p.directiveId ?? 0,
+                            p.groupId ?? 0,
+                            p.directiveType ?? 0,
+                            p.shape ?? 0,
+                            p.params ?? [],
+                            { priority: p.priority, requestedStrength: p.requestedStrength },
+                        );
+                    } else if (cmd.groupId != null) {
+                        // Legacy flat shape for any caller that isn't the
+                        // compile-table (none currently, kept for callers
+                        // that predate the payload wrapper).
+                        connection.sendGroupDirective(
+                            cmd.directiveId ?? 0,
                             cmd.groupId,
-                            cmd.x ?? 0,
-                            cmd.y ?? 0,
-                            cmd.z ?? 0,
                             cmd.directiveType ?? 0,
-                            cmd.params ?? {}
+                            cmd.shape ?? 0,
+                            cmd.params ?? [],
+                            { priority: cmd.priority, requestedStrength: cmd.requestedStrength },
                         );
                     }
+                    break;
+
+                case 'StandingOrder':
+                    if (cmd.payload) {
+                        const p = cmd.payload;
+                        connection.sendStandingOrderCreate(
+                            p.orderType ?? 0, p.priority ?? 0, p.params ?? [], p.expiresInFrames ?? 0,
+                        );
+                    }
+                    break;
+
+                case 'AIGuidance':
+                    // PLAN-metalstorm-interaction.md §6's guidance store
+                    // doesn't exist yet — a subject="the AI" commit compiles
+                    // correctly (compile-table.ts) but has no sim/store
+                    // target to reach. Logged rather than silently dropped
+                    // so this gap stays visible instead of masquerading as
+                    // a successful send.
+                    console.warn('[native-ui] AIGuidance has no guidance-store target yet (interaction §6 not implemented):', cmd.payload);
                     break;
 
                 case 'OrgGroup':

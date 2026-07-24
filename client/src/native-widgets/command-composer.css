@@ -86,7 +86,25 @@
 }
 .composer-echo.is-ready { color: var(--nui-text); font-style: normal; }
 
+/* Cost preview (task 5) — sits between the echo and the commit button.
+   Empty (no text) until all required slots are filled, so it never reads
+   as a stray "Cost: n/a" before the player has composed anything. */
+.composer-cost {
+    flex: none;
+    white-space: nowrap;
+    font: var(--nui-font-mono);
+    font-size: 11px;
+    color: var(--nui-text-dim);
+}
+.composer-cost.is-refused { color: var(--nui-bad); font-weight: 600; }
+
 /* ── Slot-picker menus ──────────────────────────────────────────────── */
+
+.command-composer .nui-menu__item--disabled {
+    color: var(--nui-text-faint);
+    cursor: default;
+}
+.command-composer .nui-menu__item--disabled:hover { background: none; color: var(--nui-text-faint); }
 
 /* Viewport-positioned, NOT anchored to the composer: the widget lives inside
    the loader's panel frame, which clips (`.nui-panel { overflow: hidden }` +

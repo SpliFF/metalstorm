@@ -19,10 +19,27 @@ import {
     compileIntent,
     validateIntent,
     getPriorityBand,
+    getAcceptedTargetShapes,
     PRIORITY_BANDS,
 } from '../ui/native-ui/compile-table.js';
+import { mapGestureBridge } from '../ui/native-ui/map-gesture.js';
+import { previewDirectiveCost, matchSelectionToGroup } from '../ui/native-ui/cost-preview.js';
 import { injectStyle } from '../ui/ui.js';
 import composerCss from './command-composer.css?raw';
+
+/**
+ * The cost-mirror + region-index modules (PLAN-metalstorm-authority.md §4/§5)
+ * are game-authored files served over HTTP from the game's own `ui/lib/`
+ * directory — same as every other game-dir widget the loader fetches — not
+ * part of the client bundle. This widget is registered `builtin: true`
+ * (it needs the bundled compile-table/named-entity-index), so it reaches
+ * them the same way the loader reaches a game-dir widget: a runtime
+ * `import()` of their HTTP URL. The path is hardcoded to Metalstorm because
+ * this widget already is — compile-table.ts's DirectiveType/StandingOrderType
+ * enums mirror Metalstorm's protocol.fbs, not a generic game contract.
+ */
+const AUTHORITY_COST_LIB_URL = '/api/games/data/metalstorm/ui/lib/authority-cost.js';
+const AUTHORITY_COST_SPEC_URL = '/api/games/data/metalstorm/authority_cost.json';
 
 /**
  * Widget state
@@ -38,7 +55,11 @@ const state = {
     // UI state
     activeSlot: null,       // Which slot is being edited
     searchQuery: '',        // Autocomplete search query
-    mapArmActive: false,    // Whether map-click is armed
+    mapArmActive: false,    // Whether a map-arm gesture is in flight (task 4)
+    subjectAutoFilled: false, // True while Subject came from selection sync, not a manual pick
+
+    // Cost preview (task 5)
+    costModel: null,        // authority-cost.js cost model, once loaded (null = not ready/unavailable)
 
     // Context (set on init)
     ctx: null,
@@ -69,12 +90,36 @@ function init(ctx) {
     ctx.mount.appendChild(container);
 
     // Subscribe to index changes for autocomplete updates
-    const unsub = namedEntityIndex.onChange(() => {
+    const unsubIndex = namedEntityIndex.onChange(() => {
         if (state.activeSlot === 'target') {
-            renderAutocomplete();
+            renderTargetMenu();
         }
     });
-    state.unsubs.push(unsub);
+    state.unsubs.push(unsubIndex);
+
+    // PLAN-metalstorm-scripting.md task 4: "selecting a group on the map
+    // pre-fills the Subject" — driven by the world selection + org-group
+    // roster, both mirrored into the store by main.ts (gp:sceneState /
+    // gp:orgGroups). Also recomputes the cost preview since it depends on
+    // the resolved Subject's group.
+    const unsubSelection = ctx.store.subscribe(['selection', 'orgGroups'], onSelectionOrGroupsChanged);
+    state.unsubs.push(unsubSelection);
+
+    // Pool balance changes (award/charge) shift the cost preview's
+    // affordability verdict even with the same target armed.
+    const unsubPools = ctx.store.subscribe(['teamRulesParams'], () => {
+        if (state.verb && state.subject && state.target) updateCommitButton();
+    });
+    state.unsubs.push(unsubPools);
+
+    // Map-arm gesture result (task 4).
+    const unsubGesture = mapGestureBridge.onResult(handleMapGestureResult);
+    state.unsubs.push(unsubGesture);
+
+    // Cost model loads asynchronously; the preview/commit gate degrades to
+    // "unpredictable" (never blocks) until it's ready — never a hard
+    // dependency for the composer to be usable.
+    loadCostModel();
 
     console.log('[command-composer] Initialized');
 }
@@ -89,6 +134,11 @@ function dispose() {
     }
     state.unsubs = [];
 
+    if (state.mapArmActive) {
+        mapGestureBridge.cancel();
+        state.mapArmActive = false;
+    }
+
     // Remove DOM
     if (state.container) {
         state.container.remove();
@@ -97,6 +147,26 @@ function dispose() {
     document.getElementById('command-composer-style')?.remove();
 
     console.log('[command-composer] Disposed');
+}
+
+/**
+ * Lazily load the authority cost-mirror module + spec (task 5). Failure is
+ * logged, not fatal — the preview simply stays unavailable (predict()-null
+ * behaviour, same as a missing/unversioned spec — see authority-cost.js).
+ */
+async function loadCostModel() {
+    try {
+        const [{ createCostModel }, specRes] = await Promise.all([
+            import(/* @vite-ignore */ AUTHORITY_COST_LIB_URL),
+            fetch(AUTHORITY_COST_SPEC_URL),
+        ]);
+        if (!specRes.ok) throw new Error(`authority_cost.json: ${specRes.status}`);
+        const spec = await specRes.json();
+        state.costModel = createCostModel(spec);
+        if (state.verb && state.subject && state.target) updateCommitButton();
+    } catch (e) {
+        console.warn('[command-composer] cost model unavailable — preview disabled:', e);
+    }
 }
 
 /**
@@ -114,7 +184,7 @@ function render() {
         <div class="composer-row composer-sentence">
             ${renderSlotChip('verb', state.verb, '[VERB]')}
             ${renderSlotChip('subject', state.subject ? formatSubject(state.subject) : null, '[SUBJECT]')}
-            ${renderSlotChip('target', state.target ? formatTarget(state.target) : null, '[TARGET]')}
+            ${renderSlotChip('target', targetChipLabel(), '[TARGET]')}
             ${renderSlotChip('when', state.when ? formatWhen(state.when) : null, '[WHEN]?', true)}
             <div class="composer-priority">
                 <span class="composer-priority-label">
@@ -127,6 +197,7 @@ function render() {
 
         <div class="composer-row composer-controls">
             <div class="composer-echo${state.verb && state.subject && state.target ? ' is-ready' : ''}">${renderEcho()}</div>
+            <div class="composer-cost" id="composer-cost"></div>
             <button id="commit-btn" class="nui-btn nui-btn--primary">Commit</button>
             <button id="clear-btn" class="nui-btn nui-btn--danger">Clear</button>
         </div>
@@ -140,6 +211,7 @@ function render() {
 
     // Wire up event handlers
     wireEventHandlers();
+    updateCostPreviewDisplay();
 }
 
 /**
@@ -157,6 +229,13 @@ function renderSlotChip(slotName, value, placeholder, optional = false) {
         : 'nui-chip--required';
 
     return `<button type="button" class="nui-chip slot-chip ${modifier}" data-slot="${slotName}">${value || placeholder}</button>`;
+}
+
+/** Target chip label — shows the drawing-in-progress state while a map-arm
+ *  gesture (task 4) is armed, otherwise the resolved target (or nothing). */
+function targetChipLabel() {
+    if (state.mapArmActive) return 'Drawing… (click to cancel)';
+    return state.target ? formatTarget(state.target) : null;
 }
 
 /**
@@ -196,6 +275,12 @@ function wireEventHandlers() {
     for (const chip of chips) {
         chip.addEventListener('click', () => {
             const slotName = chip.getAttribute('data-slot');
+            // Clicking the Target chip while a gesture is armed cancels it —
+            // there is no separate "map mode" to step out of otherwise.
+            if (slotName === 'target' && state.mapArmActive) {
+                mapGestureBridge.cancel();
+                return;
+            }
             openSlotEditor(slotName);
         });
     }
@@ -247,9 +332,11 @@ function openSlotEditor(slotName) {
             state.subject = { type: 'ai' };
         }
 
+        // A manual pick overrides whatever selection sync had set.
+        state.subjectAutoFilled = false;
         render();
     } else if (slotName === 'target') {
-        renderAutocomplete();
+        renderTargetMenu();
     } else if (slotName === 'when') {
         renderWhenMenu();
     }
@@ -278,6 +365,11 @@ function renderVerbMenu() {
     for (const option of options) {
         option.addEventListener('click', () => {
             state.verb = option.getAttribute('data-verb');
+            // The target shapes a verb accepts can change (or a previously
+            // valid map-drawn target can become invalid for the new verb) —
+            // clearing keeps the composer valid-by-construction rather than
+            // holding a stale verb:shape pair the compile table would reject.
+            state.target = null;
             menu.hidden = true;
             render();
         });
@@ -285,13 +377,97 @@ function renderVerbMenu() {
 }
 
 /**
- * Render autocomplete for target
+ * Render the target slot's menu (task 4): map-arm options for whichever
+ * shapes the current verb accepts, plus the existing name search. No
+ * separate "map mode" — this is the same inline menu the target chip
+ * always opens.
  */
-function renderAutocomplete() {
-    const panel = state.container.querySelector('#autocomplete-panel');
-    if (!panel) return;
+function renderTargetMenu() {
+    const menu = state.container.querySelector('#autocomplete-panel');
+    if (!menu) return;
 
-    // Simple search for now
+    if (!state.verb) {
+        menu.innerHTML = `<div class="nui-menu__item nui-menu__item--disabled">Choose a verb first</div>`;
+        openMenu(menu, 'target');
+        return;
+    }
+
+    const mapShapes = getAcceptedTargetShapes(state.verb).filter((s) => s !== 'entity');
+    const mapItems = mapShapes
+        .map((s) => `<div class="nui-menu__item target-map-option" data-shape="${s}">${mapShapeLabel(s)}</div>`)
+        .join('');
+
+    menu.innerHTML = `
+        ${mapItems}
+        <div class="nui-menu__item target-search-option">🔍 Search by name…</div>
+    `;
+    openMenu(menu, 'target');
+
+    for (const el of menu.querySelectorAll('.target-map-option')) {
+        el.addEventListener('click', () => {
+            menu.hidden = true;
+            armMapTarget(el.getAttribute('data-shape'));
+        });
+    }
+    const searchOpt = menu.querySelector('.target-search-option');
+    if (searchOpt) {
+        searchOpt.addEventListener('click', () => {
+            menu.hidden = true;
+            runEntitySearch();
+        });
+    }
+}
+
+function mapShapeLabel(targetShape) {
+    if (targetShape === 'point') return '📍 Point on map';
+    if (targetShape === 'area') return '⭕ Paint area on map';
+    if (targetShape === 'route') return '➰ Draw route on map';
+    return targetShape;
+}
+
+/** Arm the shared gesture capture for `targetShape` (task 4). The result
+ *  lands in `handleMapGestureResult` via the mapGestureBridge subscription. */
+function armMapTarget(targetShape) {
+    const gestureShape = targetShape === 'point' ? 'Point' : targetShape === 'area' ? 'Circle' : 'Polyline';
+    state.mapArmActive = true;
+    render();
+    mapGestureBridge.arm({ shape: gestureShape });
+}
+
+/** Map-arm gesture finished (committed or cancelled) — task 4. */
+function handleMapGestureResult(result) {
+    state.mapArmActive = false;
+    if (result.committed && result.shape && result.params) {
+        state.target = shapeResultToTarget(result.shape, result.params);
+    }
+    render();
+}
+
+/** Convert a `ShapeGestureCapture` result (shape-gesture-capture.ts params
+ *  layout) into a `CommandTarget` (compile-table.ts). */
+function shapeResultToTarget(shape, params) {
+    if (shape === 'Point') {
+        return { shape: 'point', point: { x: params[0], z: params[2] } };
+    }
+    if (shape === 'Circle') {
+        return { shape: 'area', area: { x: params[0], z: params[2], radius: params[3] } };
+    }
+    if (shape === 'Polyline') {
+        // params = [frontage, x1,y1,z1, x2,y2,z2, ...]
+        const route = [];
+        for (let i = 1; i < params.length; i += 3) {
+            route.push({ x: params[i], z: params[i + 2] });
+        }
+        return { shape: 'route', route };
+    }
+    return null;
+}
+
+/**
+ * Search for target by name (existing entity autocomplete, unchanged from
+ * task 3 other than being extracted out of the old renderAutocomplete()).
+ */
+function runEntitySearch() {
     const query = prompt('Search for target (region, objective, landmark, etc.)?', '');
     if (!query) return;
 
@@ -351,7 +527,8 @@ function renderWhenMenu() {
  */
 function formatSubject(subject) {
     if (subject.type === 'group') {
-        return `Group ${subject.groupId}`;
+        const label = `Group ${subject.groupId}`;
+        return state.subjectAutoFilled ? `${label} (from selection)` : label;
     } else if (subject.type === 'idle-filter') {
         return `Idle ${subject.filterClass}`;
     } else if (subject.type === 'ai') {
@@ -370,6 +547,8 @@ function formatTarget(target) {
         return `(${Math.round(target.point.x)}, ${Math.round(target.point.z)})`;
     } else if (target.area) {
         return `Area at (${Math.round(target.area.x)}, ${Math.round(target.area.z)})`;
+    } else if (target.route) {
+        return `Route (${target.route.length} pts)`;
     }
     return 'Unknown';
 }
@@ -423,6 +602,7 @@ function updateEcho() {
         // and italic so the difference is visible at a glance.
         echoDiv.classList.toggle('is-ready', Boolean(state.verb && state.subject && state.target));
     }
+    updateCostPreviewDisplay();
 }
 
 /**
@@ -444,6 +624,64 @@ function updatePriorityLabel() {
 }
 
 /**
+ * Resolve the org group backing the current Subject (group-typed only),
+ * from the store's org-group snapshot (`gp:orgGroups` — task 4/5).
+ */
+function resolveSubjectGroup() {
+    if (!state.subject || state.subject.type !== 'group' || !state.subject.groupId) return null;
+    const groups = state.ctx?.store.getOrgGroups() ?? [];
+    return groups.find((g) => g.groupId === state.subject.groupId) ?? null;
+}
+
+/**
+ * Compute the current cost preview (task 5), or null if unpredictable
+ * (no cost model yet, subject isn't a fixed group, or not a GroupDirective
+ * compile target — see cost-preview.ts for the full breakdown).
+ */
+function computeCostPreview() {
+    if (!state.costModel || !state.ctx) return null;
+    const intent = buildIntent();
+    if (!intent || validateIntent(intent)) return null;
+    const compiled = compileIntent(intent);
+    if (!compiled) return null;
+
+    const group = resolveSubjectGroup();
+    const teamId = state.ctx.identity.teamId;
+    const playerId = state.ctx.identity.playerId;
+    const playerPool = Number(state.ctx.store.teamRulesParam(teamId, `authority_player_${playerId}`) ?? 0);
+    const teamPool = Number(state.ctx.store.teamRulesParam(teamId, 'authority_pool') ?? 0);
+
+    return previewDirectiveCost(compiled.type, group, state.costModel, playerPool, teamPool);
+}
+
+/** Render the cost-preview readout next to the commit button (task 5). */
+function updateCostPreviewDisplay() {
+    const el = state.container?.querySelector('#composer-cost');
+    if (!el) return;
+
+    if (!state.verb || !state.subject || !state.target) {
+        el.textContent = '';
+        el.classList.remove('is-refused');
+        return;
+    }
+
+    const preview = computeCostPreview();
+    if (!preview) {
+        // Unpredictable (idle-filter/AI subject, StandingOrder/AIGuidance
+        // target, or no cost model yet) — shown as neutral, not an error;
+        // the sim has no charge site for these paths today either (§3.2).
+        el.textContent = 'Cost: n/a';
+        el.classList.remove('is-refused');
+        return;
+    }
+
+    el.classList.toggle('is-refused', !preview.affordable);
+    el.textContent = preview.affordable
+        ? `Cost: ${preview.cost} authority`
+        : `Cost: ${preview.cost} authority — short by ${preview.shortfall}`;
+}
+
+/**
  * Update commit button state.
  *
  * Disabled styling is the design system's :disabled rule — the button keeps
@@ -455,10 +693,21 @@ function updateCommitButton() {
     if (!btn) return;
 
     const intent = buildIntent();
-    const error = intent ? validateIntent(intent) : 'Missing required slots';
+    let error = intent ? validateIntent(intent) : 'Missing required slots';
+
+    // Predicted-refusal: insufficient authority blocks the send, same as an
+    // invalid intent (§4 UI contract — never a silent failure; the shortfall
+    // is spelled out in the cost readout above the button).
+    if (!error) {
+        const preview = computeCostPreview();
+        if (preview && !preview.affordable) {
+            error = `Insufficient authority (short ${preview.shortfall})`;
+        }
+    }
 
     btn.disabled = Boolean(error);
     btn.title = error || 'Click to commit this command';
+    updateCostPreviewDisplay();
 }
 
 /**
@@ -494,6 +743,16 @@ function handleCommit() {
         return;
     }
 
+    // Predicted-refusal gate (task 5): never send an order the player can
+    // already see they can't afford — re-checked here (not just in
+    // updateCommitButton's disabled state) so a stale pool snapshot never
+    // lets a click through the disabled button's own title tooltip.
+    const preview = computeCostPreview();
+    if (preview && !preview.affordable) {
+        alert(`Insufficient authority: needs ${preview.cost}, short by ${preview.shortfall}. Order not sent.`);
+        return;
+    }
+
     const compiled = compileIntent(intent);
     if (!compiled) {
         alert('Failed to compile command');
@@ -502,10 +761,9 @@ function handleCommit() {
 
     console.log('[command-composer] Compiled command:', compiled);
 
-    // TODO: Send via ctx.sendCommand()
     if (state.ctx && state.ctx.sendCommand) {
         state.ctx.sendCommand(compiled);
-        alert('Command sent! (Check console for payload)');
+        alert('Command sent!');
     } else {
         alert('sendCommand not wired yet (see console for compiled payload)');
     }
@@ -518,6 +776,9 @@ function handleCommit() {
  * Handle clear button click
  */
 function handleClear() {
+    if (state.mapArmActive) {
+        mapGestureBridge.cancel();
+    }
     state.verb = null;
     state.subject = null;
     state.target = null;
@@ -526,8 +787,44 @@ function handleClear() {
     state.activeSlot = null;
     state.searchQuery = '';
     state.mapArmActive = false;
+    state.subjectAutoFilled = false;
 
     render();
+}
+
+/**
+ * Selection/org-group sync (task 4): "selecting a group on the map
+ * pre-fills the Subject" — and if the Subject was auto-filled this way, a
+ * further selection change keeps it in sync (true two-way: map selection
+ * drives the composer, the composer's own manual Subject pick — a plain
+ * click on the chip — breaks the auto-follow until Clear).
+ */
+function onSelectionOrGroupsChanged() {
+    if (!state.ctx) return;
+    const selection = state.ctx.store.getSelection();
+    const groups = state.ctx.store.getOrgGroups();
+    const groupId = matchSelectionToGroup(selection.unitIds, groups);
+
+    if (groupId !== null) {
+        const alreadySet = state.subject?.type === 'group' && state.subject.groupId === groupId;
+        if (!alreadySet && (state.subjectAutoFilled || !state.subject)) {
+            state.subject = { type: 'group', groupId };
+            state.subjectAutoFilled = true;
+            render();
+            return;
+        }
+    } else if (state.subjectAutoFilled) {
+        // Selection no longer resolves to any group — drop the auto-fill
+        // rather than leaving a stale binding the player never chose.
+        state.subject = null;
+        state.subjectAutoFilled = false;
+        render();
+        return;
+    }
+
+    // Group roster/base-cost data may have changed even without a Subject
+    // change (e.g. a member died) — refresh the cost readout either way.
+    updateCostPreviewDisplay();
 }
 
 /**

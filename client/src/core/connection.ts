@@ -87,6 +87,7 @@ import { PlayerLeaveIntent } from '../protocol/spring-web/player-leave-intent.js
 import { PathResponse } from '../protocol/spring-web/path-response.js';
 import { StandingOrderState } from '../protocol/spring-web/standing-order-state.js';
 import { StandingOrderType } from '../protocol/spring-web/standing-order-type.js';
+import { StandingOrderCreate } from '../protocol/spring-web/standing-order-create.js';
 import { OrgGroupState } from '../protocol/spring-web/org-group-state.js';
 import { OrgGroupInfo } from '../protocol/spring-web/org-group-info.js';
 import { OrgGroupCreate } from '../protocol/spring-web/org-group-create.js';
@@ -1651,6 +1652,32 @@ export class Connection {
         GroupDirective.addActive(builder, opts.active ?? true);
         const off = GroupDirective.endGroupDirective(builder);
         this.sendClientMessage(builder, ClientPayload.GroupDirective, off);
+    }
+
+    /** Create a standing order (condition-scoped, not group-scoped —
+     *  `StandingOrderConditions.idle_only` defaults true / `org_group`
+     *  defaults 0 on the wire, exactly the "pulls from the idle pool"
+     *  semantics the compile-table's ungrouped defend/hold/patrol/screen/
+     *  reinforce branches want; a per-order conditions override isn't
+     *  exposed here because no caller needs one yet). `params` follow the
+     *  same `OrderShape`-implied layout as `sendGroupDirective`; the order's
+     *  own type ⇒ shape mapping is fixed (macro-orders §4), so there is no
+     *  separate shape argument. */
+    sendStandingOrderCreate(
+        type: number, priority: number, params: number[], expiresInFrames = 0,
+    ): void {
+        if (!this.authenticated) return;
+        const builder = new flatbuffers.Builder(128 + params.length * 4);
+        const paramsOff = StandingOrderCreate.createParamsVector(builder, params);
+        this.commandSequence++;
+        StandingOrderCreate.startStandingOrderCreate(builder);
+        StandingOrderCreate.addSequence(builder, this.commandSequence);
+        StandingOrderCreate.addType(builder, type);
+        StandingOrderCreate.addPriority(builder, priority);
+        StandingOrderCreate.addParams(builder, paramsOff);
+        StandingOrderCreate.addExpiresInFrames(builder, expiresInFrames);
+        const off = StandingOrderCreate.endStandingOrderCreate(builder);
+        this.sendClientMessage(builder, ClientPayload.StandingOrderCreate, off);
     }
 
     /** Remove a macro directive. Releases its assigned squads back to idle. */

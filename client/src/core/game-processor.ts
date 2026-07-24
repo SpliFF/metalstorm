@@ -1120,7 +1120,10 @@ function gpConnect(msg: GpInitToWorker): void {
         // only for org groups — same visibility rule as onStandingOrders).
         onOrgGroupState: (groups) => {
             gpLastOrgGroups = groups;
-            postToMain({ type: 'gp:orgGroups', groups });
+            postToMain({
+                type: 'gp:orgGroups',
+                groups: groups.map((g) => ({ ...g, baseCostSum: gpComputeGroupBaseCost(g.memberIds) })),
+            });
         },
         onDirectiveState: (directives) => {
             gpLastDirectives = directives;
@@ -2108,7 +2111,10 @@ export function gpInit(msg: GpInitToWorker): void {
             return (pick?.hit && pick.pickedPoint) ? pick.pickedPoint : null;
         },
         onArmedChanged: (armed) => postToMain({ type: 'gp:directiveShapeArmed', armed }),
-        onResult: (result) => postToMain({ type: 'gp:directiveShapeResult', committed: result.committed }),
+        onResult: (result) => postToMain({
+            type: 'gp:directiveShapeResult', committed: result.committed,
+            shape: result.shape, params: result.params,
+        }),
     });
 
     // G3b: route Spring.SetActiveCommand (order menu → widget worker shim) into
@@ -3429,7 +3435,11 @@ export function gpHandleSelectOrgGroup(groupId: number): void {
 /// a worker-internal hotkey, without duplicating gesture logic.
 export function gpHandleArmDirectiveShape(msg: GpArmDirectiveShapeToWorker): void {
     gpDirectiveCapture?.arm(
-        { directiveType: msg.directiveType, groupId: msg.groupId, priority: msg.priority, requestedStrength: msg.requestedStrength },
+        {
+            directiveType: msg.directiveType, groupId: msg.groupId,
+            priority: msg.priority, requestedStrength: msg.requestedStrength,
+            captureOnly: msg.captureOnly,
+        },
         msg.shape,
         { freehand: msg.freehand, arrow: msg.arrow },
     );
@@ -3437,4 +3447,26 @@ export function gpHandleArmDirectiveShape(msg: GpArmDirectiveShapeToWorker): voi
 
 export function gpHandleCancelDirectiveShape(): void {
     gpDirectiveCapture?.cancel();
+}
+
+/// Σ `authority_cost_base` customparam over an org group's current member
+/// unitIds (PLAN-metalstorm-authority.md §3.3 directive-charge formula,
+/// consumed by the command composer's cost preview — metalstorm-scripting
+/// task 5). Real per-unit data (EntityRenderer.getEntityMeta → defId →
+/// DefCache.getUnitDef → customParams), not an estimate — mirrors
+/// game_authority.lua's `GG.Authority.OrderCost` base resolution, including
+/// its "unknown def → base 1" fallback. Members not currently resolved
+/// client-side (out of LOS, def not yet streamed) are skipped rather than
+/// guessed — the same best-effort staleness already accepted for every
+/// other client-side cost-prediction input (authority §4).
+function gpComputeGroupBaseCost(memberIds: readonly number[]): number {
+    if (!gpDefCache) return 0;
+    let sum = 0;
+    for (const unitId of memberIds) {
+        const meta = gpCtx.entityRenderer?.getEntityMeta(unitId);
+        if (!meta) continue;
+        const raw = gpDefCache.getUnitDef(meta.defId)?.customParams?.authority_cost_base;
+        sum += raw !== undefined ? (Number(raw) || 1) : 1;
+    }
+    return sum;
 }

@@ -59,6 +59,11 @@ export interface ArmedDirective {
     groupId: number;
     priority?: number;
     requestedStrength?: number;
+    /** Skip the auto-send on commit — return the raw shape/params instead
+     *  (metalstorm-scripting task 4's map-arm integration: the command
+     *  composer wants the drawn shape to fill its Target slot for review,
+     *  not an immediate directive). */
+    captureOnly?: boolean;
 }
 
 export interface DirectiveShapeCaptureOpts {
@@ -72,8 +77,9 @@ export interface DirectiveShapeCaptureOpts {
      *  `gp:cursorMode` / `gp:sceneState.commandModeArmed`-style feeds. */
     onArmedChanged?: (armed: boolean) => void;
     /** Fires once per capture lifecycle end (commit or cancel) — the caller
-     *  forwards it as `gp:directiveShapeResult` for a cross-thread `arm()`er. */
-    onResult?: (result: { committed: boolean; directiveId: number }) => void;
+     *  forwards it as `gp:directiveShapeResult` for a cross-thread `arm()`er.
+     *  `shape`/`params` are only populated on a `captureOnly` commit. */
+    onResult?: (result: { committed: boolean; directiveId: number; shape?: ShapeKind; params?: number[] }) => void;
 }
 
 export class DirectiveShapeCapture {
@@ -175,6 +181,12 @@ export class DirectiveShapeCapture {
         this.opts.onArmedChanged?.(false);
         if (!result || !directive) {
             this.opts.onResult?.({ committed: false, directiveId: 0 });
+            return;
+        }
+        if (directive.captureOnly) {
+            // The caller (e.g. the command composer's map-arm target slot)
+            // wants the drawn geometry, not a directive — nothing is sent.
+            this.opts.onResult?.({ committed: true, directiveId: 0, shape: result.shape, params: result.params });
             return;
         }
         this.connection.sendGroupDirective(
