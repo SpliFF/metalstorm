@@ -13,11 +13,15 @@
 -- - Reverse: two-engine consists swap leader, one-engine backs slowly
 -- - Coupler-connected turning: no pivot, large turning circle
 -- - Direction-of-travel heuristic: prefer reverse over >180° U-turn
--- T3 SCOPE: Damage-speed model
+-- T3 SCOPE: Damage-speed model (COMPLETE)
 -- - Speed factor based on aggregate HP fraction with floor
 -- - Dead cars stay in consist as dead segments, drop passengers/cargo, add small slow
 -- - Dead engines add large slow, trigger leader re-election
 -- - Zero live engines make consist immobile (but still fires)
+-- T4 SCOPE: Firing arcs
+-- - Symmetric cones (engine 270° fwd, AA 360°, cupolas 360°) via maxAngleDif/mainDir in defs
+-- - Bowtie arcs (roof turrets, loaded squads) via AllowWeaponTarget callin
+-- - Bowtie: 120° each side, reject fore/aft (keep |sideBearing| within 60° of ±X)
 
 function gadget:GetInfo()
     return {
@@ -999,6 +1003,115 @@ function gadget:AllowUnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, 
                     consist.reversing = true
                 end
             end
+        end
+    end
+
+    return true
+end
+
+--------------------------------------------------------------------------------
+-- T4: Firing arc constraints
+--------------------------------------------------------------------------------
+
+-- Helper to check if a target bearing falls within the bowtie arc
+-- (120° each side, no fore/aft = keep only |sideBearing| within 60° of ±X)
+local function IsInBowtieArc(unitID, targetX, targetY, targetZ)
+    -- Get unit position and heading
+    local ux, uy, uz = Spring.GetUnitPosition(unitID)
+    if not ux then return false end
+
+    local heading = Spring.GetUnitHeading(unitID)
+    if not heading then return false end
+
+    -- Convert Spring heading (0 = south, increases clockwise) to radians
+    heading = heading * math.pi / 32768
+
+    -- Calculate bearing to target in world space
+    local dx = targetX - ux
+    local dz = targetZ - uz
+    local worldBearing = math.atan2(dx, dz)
+
+    -- Calculate relative bearing in unit's local frame
+    -- heading points along -Z in unit space, so unit's +X is heading + π/2
+    local relativeBearing = worldBearing - heading
+
+    -- Normalize to [-π, π]
+    while relativeBearing > math.pi do relativeBearing = relativeBearing - 2*math.pi end
+    while relativeBearing < -math.pi do relativeBearing = relativeBearing + 2*math.pi end
+
+    -- Bowtie: reject fore/aft (±30° around forward/back), keep sides
+    -- Forward is 0°, back is ±180°, sides are ±90°
+    -- We want |sideBearing| within 60° of ±90°, which means:
+    -- Accept if bearing in [30°, 150°] or [-150°, -30°]
+    local bearingDeg = relativeBearing * 180 / math.pi
+
+    -- Fore/aft rejection zones: [-30°, 30°] and [150°, 180°] ∪ [-180°, -150°]
+    if (bearingDeg >= -30 and bearingDeg <= 30) then
+        return false  -- Forward dead zone
+    end
+    if (bearingDeg >= 150 or bearingDeg <= -150) then
+        return false  -- Rear dead zone
+    end
+
+    return true  -- In side arcs
+end
+
+function gadget:AllowWeaponTarget(unitID, targetID, weaponNum, weaponDefID, defaultPriority)
+    -- Check if this is a roof turret on a gun car
+    local unitDefID = Spring.GetUnitDefID(unitID)
+    if not unitDefID then return true end
+
+    local def = UnitDefs[unitDefID]
+    if not def or not def.customParams then return true end
+
+    local cp = def.customParams
+    local roofTurrets = cp.roof_turrets
+
+    if roofTurrets then
+        -- Check if this weapon is in the roof turret list
+        local isRoofTurret = false
+        for turretNum in string.gmatch(roofTurrets, "[^,]+") do
+            turretNum = tonumber(turretNum:match("^%s*(.-)%s*$"))  -- trim and convert
+            if turretNum == weaponNum then
+                isRoofTurret = true
+                break
+            end
+        end
+
+        if isRoofTurret then
+            -- Apply bowtie arc constraint
+            local tx, ty, tz = Spring.GetUnitPosition(targetID)
+            if not tx then return true end  -- No position, let engine decide
+
+            if not IsInBowtieArc(unitID, tx, ty, tz) then
+                return false  -- Target in fore/aft dead zone
+            end
+        end
+    end
+
+    return true
+end
+
+function gadget:AllowWeaponTargetCheck(unitID, targetID, weaponNum, weaponDefID)
+    -- This is for loaded squads firing from fire platforms
+    -- Check if the unit is loaded in a transport with fire_platform_bowtie
+    local transportID = Spring.GetUnitTransporter(unitID)
+    if not transportID then return true end
+
+    local transportDefID = Spring.GetUnitDefID(transportID)
+    if not transportDefID then return true end
+
+    local transportDef = UnitDefs[transportDefID]
+    if not transportDef or not transportDef.customParams then return true end
+
+    local cp = transportDef.customParams
+    if cp.fire_platform_bowtie == 'true' then
+        -- Apply bowtie arc constraint using the TRANSPORT's position/heading
+        local tx, ty, tz = Spring.GetUnitPosition(targetID)
+        if not tx then return true end
+
+        if not IsInBowtieArc(transportID, tx, ty, tz) then
+            return false  -- Target in fore/aft dead zone
         end
     end
 
