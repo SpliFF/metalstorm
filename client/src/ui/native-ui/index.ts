@@ -19,3 +19,36 @@ export {
     handleRulesParamUpdate,
     disposeNativeUI,
 } from './integration.js';
+
+// Named-entity index (PLAN-metalstorm-scripting.md §4)
+export { NamedEntityIndex, namedEntityIndex } from './named-entity-index.js';
+export type { EntityType, NamedEntity } from './named-entity-index.js';
+export {
+    parseRegionsFromRulesParams,
+    parseObjectivesFromRulesParams,
+    parseLandmarksFromRulesParams,
+    parseOrgGroupsFromTeamRulesParams,
+} from './named-entity-index.js';
+
+// Compile table (PLAN-metalstorm-scripting.md §5)
+export {
+    compileIntent,
+    validateIntent,
+    getPriorityBand,
+    PRIORITY_BANDS,
+    DirectiveType,
+    StandingOrderType,
+    OrderShape,
+} from './compile-table.js';
+export type {
+    CommandVerb,
+    TargetShape,
+    CommandSubject,
+    CommandTarget,
+    WhenCondition,
+    CommandIntent,
+    CompiledMessage,
+    GroupDirectivePayload,
+    StandingOrderPayload,
+    AIGuidancePayload,
+} from './compile-table.js';
