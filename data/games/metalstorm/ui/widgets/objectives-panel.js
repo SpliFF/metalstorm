@@ -62,19 +62,26 @@ function renderItem(o, playerId, delegated) {
   // ("point the joiner at real team work") — badge it "yours to take"
   // rather than silently relying on the player to notice the reward number.
   const suggested = playerId !== undefined && o.suggested === playerId;
-  const suggestedBadge = suggested ? ' <span class="ms-obj-suggested">yours to take</span>' : '';
+  const suggestedBadge = suggested ? '<span class="nui-badge nui-badge--accent">yours to take</span>' : '';
   // PLAN-metalstorm-interaction.md §6.2 "Assign to AI" — writes
   // guidance_<team>_delegated_keys via game_ai_guidance.lua; the planner
   // scores a delegated goal ×5 (ai/strategos/planner.lua sourceWeight()).
-  const delegatedBadge = delegated ? ' <span class="ms-obj-delegated">assigned to AI</span>' : '';
-  const assignLabel = delegated ? 'Unassign from AI' : 'Assign to AI';
+  const delegatedBadge = delegated ? '<span class="nui-badge">AI</span>' : '';
+  // Toggle verb only — the panel is 236px wide, so "Unassign from AI" would
+  // wrap; the badge above already says which state we're in.
+  const assignLabel = delegated ? 'Unassign' : 'Assign AI';
   return (
-    `<li class="ms-obj ms-obj-${o.scope ?? 'tactical'}${suggested ? ' ms-obj-is-suggested' : ''}" data-id="${o.id}">` +
-    `<span class="ms-obj-icon">${icon}</span>` +
-    `<span class="ms-obj-type">${o.type}${subLabel}${suggestedBadge}${delegatedBadge}</span>` +
-    `<span class="ms-obj-reward">⬡ ${o.reward ?? 0}</span>` +
-    `<div class="ms-obj-progress"><div class="ms-obj-progress-fill" style="width:${pct}%"></div></div>` +
-    `<button type="button" class="ms-obj-assign-ai" data-id="${o.id}" data-delegated="${delegated ? '1' : '0'}">${assignLabel}</button>` +
+    `<li class="ms-obj ms-obj--${o.scope ?? 'tactical'}${suggested ? ' is-suggested' : ''}" data-id="${o.id}">` +
+    `<div class="ms-obj__line">` +
+    `<span class="ms-obj__icon">${icon}</span>` +
+    `<span class="ms-obj__type">${o.type}${subLabel}</span>` +
+    `<span class="nui-badge nui-badge--gold ms-obj__reward">⬡ ${o.reward ?? 0}</span>` +
+    `</div>` +
+    `<div class="nui-meter"><div class="nui-meter__fill" style="width:${pct}%"></div></div>` +
+    `<div class="ms-obj__line ms-obj__actions">` +
+    suggestedBadge + delegatedBadge +
+    `<button type="button" class="nui-btn nui-btn--sm ms-obj-assign-ai" data-id="${o.id}" data-delegated="${delegated ? '1' : '0'}">${assignLabel}</button>` +
+    `</div>` +
     `</li>`
   );
 }
@@ -86,23 +93,25 @@ export default {
     this.ctx = ctx;
     this.index = createObjectiveIndex();
 
+    // No <h3> — the loader's panel chrome supplies the header (see
+    // metalstorm.ui.json); a widget-drawn heading would double it up.
     this.el = document.createElement('div');
     this.el.className = 'ms-objectives-panel';
     this.el.innerHTML =
-      '<h3>Objectives</h3>' +
-      '<ul class="ms-obj-list"></ul>' +
-      '<div class="ms-obj-bounty">' +
-      '<button class="ms-obj-bounty-toggle" type="button">+ Post bounty</button>' +
+      '<ul class="nui-list ms-obj-list"></ul>' +
+      '<div class="nui-group ms-obj-bounty">' +
+      '<button class="nui-btn nui-btn--block ms-obj-bounty-toggle" type="button">+ Post bounty</button>' +
       '<form class="ms-obj-bounty-form" hidden>' +
-      '<label>Target unit ID<input class="ms-obj-bounty-target" type="number" min="0" required></label>' +
-      '<label>Type<select class="ms-obj-bounty-type">' +
+      '<label class="nui-field"><span>Target unit ID</span>' +
+      '<input class="ms-obj-bounty-target" type="number" min="0" required></label>' +
+      '<label class="nui-field"><span>Type</span><select class="ms-obj-bounty-type">' +
       BOUNTY_TYPES.map((t) => `<option value="${t}">${t}</option>`).join('') +
       '</select></label>' +
-      '<label>Stake' +
+      '<label class="nui-field"><span>Stake ' +
+      `<b class="ms-obj-bounty-stake-value">${BOUNTY_STAKE_DEFAULT}</b></span>` +
       `<input class="ms-obj-bounty-stake" type="range" min="${BOUNTY_STAKE_MIN}" max="${BOUNTY_STAKE_MAX}" ` +
-      `step="${BOUNTY_STAKE_STEP}" value="${BOUNTY_STAKE_DEFAULT}">` +
-      `<span class="ms-obj-bounty-stake-value">${BOUNTY_STAKE_DEFAULT}</span></label>` +
-      '<button type="submit">Post bounty</button>' +
+      `step="${BOUNTY_STAKE_STEP}" value="${BOUNTY_STAKE_DEFAULT}"></label>` +
+      '<button type="submit" class="nui-btn nui-btn--primary nui-btn--block">Post bounty</button>' +
       '</form>' +
       '</div>';
     ctx.mount.appendChild(this.el);
@@ -204,9 +213,11 @@ export default {
     const identity = this.ctx.identity ?? {};
     const delegated = this._delegatedSet();
     const list = this.el.querySelector('.ms-obj-list');
-    const items = this.index.forTeam(identity.teamId, 'active')
-      .map((o) => renderItem(o, identity.playerId, delegated.has(o.id)));
-    list.innerHTML = items.join('') || '<li class="ms-obj-none">No active objectives</li>';
+    const active = this.index.forTeam(identity.teamId, 'active');
+    const items = active.map((o) => renderItem(o, identity.playerId, delegated.has(o.id)));
+    list.innerHTML = items.join('') || '<li class="nui-empty">No active objectives</li>';
+    // Header count stays readable while the panel is collapsed.
+    this.ctx.setBadge?.(active.length || null);
     this._publishMarkers();
   },
 

@@ -49,44 +49,58 @@ export default {
 
   init(ctx) {
     this.ctx = ctx;
+    // No <h3> — the loader's panel chrome supplies the "AI Command" header.
+    // <fieldset>/<legend> replaced by .nui-group: fieldsets carry a browser
+    // default border/legend notch that can't be styled consistently, and the
+    // grouping here is visual, not form semantics (these controls belong to
+    // no single form).
     this.el = document.createElement('div');
     this.el.className = 'ms-ai-command-panel';
     this.el.innerHTML =
-      '<h3>AI Command</h3>' +
-      '<label>Stance<select class="ms-ai-stance">' +
+      '<div class="nui-group">' +
+      '<label class="nui-field nui-field--inline"><span>Stance</span><select class="ms-ai-stance">' +
       STANCES.map((s) => `<option value="${s}">${s}</option>`).join('') +
       '</select></label>' +
-      '<label>ROE<select class="ms-ai-roe">' +
+      '<label class="nui-field nui-field--inline"><span>ROE</span><select class="ms-ai-roe">' +
       ROES.map((r) => `<option value="${r}">${r}</option>`).join('') +
       '</select></label>' +
-      '<fieldset class="ms-ai-paint">' +
-      '<legend>Region paint</legend>' +
+      '</div>' +
+      '<div class="nui-group ms-ai-paint">' +
+      '<h4 class="nui-group__title">Region paint</h4>' +
+      '<div class="nui-row">' +
       '<input class="ms-ai-paint-region" type="text" placeholder="region key">' +
       '<select class="ms-ai-paint-value">' + PAINTS.map((p) => `<option value="${p}">${p}</option>`).join('') + '</select>' +
-      '<button type="button" class="ms-ai-paint-apply">Apply</button>' +
-      '<ul class="ms-ai-paint-list"></ul>' +
-      '</fieldset>' +
-      '<fieldset class="ms-ai-locks">' +
-      '<legend>Asset locks (AI hands off)</legend>' +
+      '<button type="button" class="nui-btn nui-btn--sm ms-ai-paint-apply">Apply</button>' +
+      '</div>' +
+      '<ul class="nui-list ms-ai-paint-list"></ul>' +
+      '</div>' +
+      '<div class="nui-group ms-ai-locks">' +
+      '<h4 class="nui-group__title">Asset locks (AI hands off)</h4>' +
+      '<div class="nui-row">' +
       '<input class="ms-ai-lock-group" type="text" placeholder="group id">' +
-      '<button type="button" class="ms-ai-lock-apply">Lock</button>' +
-      '<button type="button" class="ms-ai-lock-clear">Unlock</button>' +
-      '<ul class="ms-ai-lock-list"></ul>' +
-      '</fieldset>' +
-      '<fieldset class="ms-ai-funding">' +
-      '<legend>Funding</legend>' +
-      '<label>One-shot amount<input class="ms-ai-fund-amount" type="number" min="0"></label>' +
-      '<label>Rate cap (per min)<input class="ms-ai-fund-ratecap" type="number" min="0"></label>' +
-      '<button type="button" class="ms-ai-fund-apply">Send</button>' +
-      '</fieldset>' +
-      '<fieldset class="ms-ai-intent">' +
-      '<legend>Intent report</legend>' +
-      '<ul class="ms-ai-intent-list"></ul>' +
-      '</fieldset>' +
-      '<fieldset class="ms-ai-changes">' +
-      '<legend>Recent changes</legend>' +
-      '<ul class="ms-ai-change-list"></ul>' +
-      '</fieldset>';
+      '<button type="button" class="nui-btn nui-btn--sm ms-ai-lock-apply">Lock</button>' +
+      '<button type="button" class="nui-btn nui-btn--sm ms-ai-lock-clear">Unlock</button>' +
+      '</div>' +
+      '<ul class="nui-list ms-ai-lock-list"></ul>' +
+      '</div>' +
+      '<div class="nui-group ms-ai-funding">' +
+      '<h4 class="nui-group__title">Funding</h4>' +
+      '<div class="nui-row">' +
+      '<label class="nui-field"><span>One-shot</span>' +
+      '<input class="ms-ai-fund-amount" type="number" min="0"></label>' +
+      '<label class="nui-field"><span>Rate cap /min</span>' +
+      '<input class="ms-ai-fund-ratecap" type="number" min="0"></label>' +
+      '</div>' +
+      '<button type="button" class="nui-btn nui-btn--block ms-ai-fund-apply">Send</button>' +
+      '</div>' +
+      '<div class="nui-group ms-ai-intent">' +
+      '<h4 class="nui-group__title">Intent report</h4>' +
+      '<ul class="nui-list ms-ai-intent-list"></ul>' +
+      '</div>' +
+      '<div class="nui-group ms-ai-changes">' +
+      '<h4 class="nui-group__title">Recent changes</h4>' +
+      '<ul class="nui-list ms-ai-change-list"></ul>' +
+      '</div>';
     ctx.mount.appendChild(this.el);
 
     this.lastSeenChangeSeq = null;
@@ -149,11 +163,13 @@ export default {
 
     const paintKeys = splitList(get('paint_keys'));
     this.el.querySelector('.ms-ai-paint-list').innerHTML =
-      paintKeys.map((k) => `<li>${k}: ${get('paint_' + k)}</li>`).join('') || '<li class="ms-ai-none">No painted regions</li>';
+      paintKeys.map((k) => `<li><span class="ms-ai-key">${k}</span><span class="nui-badge">${get('paint_' + k)}</span></li>`).join('') ||
+      '<li class="nui-empty">No painted regions</li>';
 
     const lockKeys = splitList(get('lock_keys'));
     this.el.querySelector('.ms-ai-lock-list').innerHTML =
-      lockKeys.map((k) => `<li>group ${k}</li>`).join('') || '<li class="ms-ai-none">No locked groups</li>';
+      lockKeys.map((k) => `<li><span class="ms-ai-key">group ${k}</span></li>`).join('') ||
+      '<li class="nui-empty">No locked groups</li>';
 
     // §6.3: the intent-report WRITER is gated on engine ask I1 (see file
     // header) — this list is honestly empty until that lands, never faked.
@@ -164,12 +180,15 @@ export default {
       const group = get(`intent_${i}_group`);
       const spend = get(`intent_${i}_spend`);
       intentItems.push(
-        `<li>${goal} -&gt; ${group} (~${spend} auth) ` +
-        `<button type="button" class="ms-ai-intent-veto" data-goal="${goal}">Veto</button></li>`
+        `<li><span class="ms-ai-key">${goal} → ${group}</span>` +
+        `<span class="nui-badge nui-badge--gold">⬡ ${spend}</span>` +
+        `<button type="button" class="nui-btn nui-btn--sm nui-btn--danger ms-ai-intent-veto" data-goal="${goal}">Veto</button></li>`
       );
     }
     this.el.querySelector('.ms-ai-intent-list').innerHTML =
-      intentItems.join('') || '<li class="ms-ai-none">No intent data yet (requires engine ask I1)</li>';
+      intentItems.join('') || '<li class="nui-empty">No intent data yet (requires engine ask I1)</li>';
+    // Stance is the one thing worth reading off a collapsed header.
+    this.ctx.setBadge?.(stance || null);
 
     this._renderChanges(get);
   },
@@ -191,9 +210,12 @@ export default {
       const value = get(`change_${slot}_value`);
       const player = get(`change_${slot}_player`);
       if (Number(get(`change_${slot}_seq`)) !== s) continue;
-      items.push(`<li>player ${player} set ${field} = ${value}</li>`);
+      items.push(
+        `<li><span class="ms-ai-key">P${player} · ${field}</span>` +
+        `<span class="nui-badge">${value}</span></li>`
+      );
     }
-    list.innerHTML = items.reverse().join('') || '<li class="ms-ai-none">No changes yet</li>';
+    list.innerHTML = items.reverse().join('') || '<li class="nui-empty">No changes yet</li>';
     this.lastSeenChangeSeq = seq;
   },
 

@@ -50,39 +50,45 @@ function warnNoSendCommand(action) {
 }
 
 function trustBadge(trust) {
-  const cls = trust > 0 ? 'ms-parley-trust-good' : trust < 0 ? 'ms-parley-trust-bad' : 'ms-parley-trust-neutral';
-  return `<span class="ms-parley-trust ${cls}">trust ${trust > 0 ? '+' : ''}${trust}</span>`;
+  const tone = trust > 0 ? ' nui-badge--good' : trust < 0 ? ' nui-badge--bad' : '';
+  return `<span class="nui-badge${tone}">trust ${trust > 0 ? '+' : ''}${trust}</span>`;
 }
 
 function renderIncoming(p, ctx) {
   const trust = trustBetween((k) => ctx.store.gameRulesParam(k), p.from, ctx.identity.teamId ?? p.to);
   return (
-    `<li class="ms-parley-card ms-parley-incoming" data-id="${p.id}">` +
+    `<li class="ms-parley-card ms-parley-card--incoming" data-id="${p.id}">` +
+    `<div class="ms-parley-card__line">` +
     `<span class="ms-parley-kind">${KIND_LABEL[p.kind] ?? p.kind}</span>` +
-    `<span class="ms-parley-from">from team ${p.from}</span>` +
     trustBadge(trust) +
-    `<div class="ms-parley-actions">` +
-    `<button type="button" class="ms-parley-accept" data-id="${p.id}">Accept</button>` +
-    `<button type="button" class="ms-parley-reject" data-id="${p.id}">Reject</button>` +
+    `</div>` +
+    `<div class="ms-parley-card__line">` +
+    `<span class="ms-parley-party">from team ${p.from}</span>` +
+    `<button type="button" class="nui-btn nui-btn--sm nui-btn--primary ms-parley-accept" data-id="${p.id}">Accept</button>` +
+    `<button type="button" class="nui-btn nui-btn--sm nui-btn--danger ms-parley-reject" data-id="${p.id}">Reject</button>` +
     `</div></li>`
   );
 }
 
 function renderOutgoing(p) {
   return (
-    `<li class="ms-parley-card ms-parley-outgoing" data-id="${p.id}">` +
+    `<li class="ms-parley-card ms-parley-card--outgoing" data-id="${p.id}">` +
+    `<div class="ms-parley-card__line">` +
     `<span class="ms-parley-kind">${KIND_LABEL[p.kind] ?? p.kind}</span>` +
-    `<span class="ms-parley-to">to team ${p.to}</span>` +
-    `<span class="ms-parley-state">${p.state}</span></li>`
+    `<span class="nui-badge">${p.state}</span></div>` +
+    `<div class="ms-parley-card__line"><span class="ms-parley-party">to team ${p.to}</span></div></li>`
   );
 }
 
 function renderActive(p) {
   return (
-    `<li class="ms-parley-card ms-parley-active" data-id="${p.id}">` +
-    `<span class="ms-parley-kind">${KIND_LABEL[p.kind] ?? p.kind}</span>` +
-    `<span class="ms-parley-parties">${p.from} &lt;-&gt; ${p.to}</span>` +
-    `<button type="button" class="ms-parley-withdraw" data-id="${p.id}">Withdraw</button></li>`
+    `<li class="ms-parley-card ms-parley-card--active" data-id="${p.id}">` +
+    `<div class="ms-parley-card__line">` +
+    `<span class="ms-parley-kind">${KIND_LABEL[p.kind] ?? p.kind}</span></div>` +
+    `<div class="ms-parley-card__line">` +
+    `<span class="ms-parley-party">${p.from} ↔ ${p.to}</span>` +
+    `<button type="button" class="nui-btn nui-btn--sm ms-parley-withdraw" data-id="${p.id}">Withdraw</button>` +
+    `</div></li>`
   );
 }
 
@@ -93,27 +99,33 @@ export default {
     this.ctx = ctx;
     this.index = createParleyIndex();
 
+    // No <h3> — the loader's panel chrome supplies the "Parley" header.
     this.el = document.createElement('div');
     this.el.className = 'ms-parley-panel';
     this.el.innerHTML =
-      '<h3>Parley</h3>' +
-      '<div class="ms-parley-board">' +
-      '<div><h4>Incoming</h4><ul class="ms-parley-incoming-list"></ul></div>' +
-      '<div><h4>Outgoing</h4><ul class="ms-parley-outgoing-list"></ul></div>' +
-      '<div><h4>Active pacts</h4><ul class="ms-parley-active-list"></ul></div>' +
-      '</div>' +
-      '<div class="ms-parley-composer">' +
-      '<button type="button" class="ms-parley-toggle">+ Propose</button>' +
+      '<div class="nui-group"><h4 class="nui-group__title">Incoming</h4>' +
+      '<ul class="nui-list ms-parley-incoming-list"></ul></div>' +
+      '<div class="nui-group"><h4 class="nui-group__title">Outgoing</h4>' +
+      '<ul class="nui-list ms-parley-outgoing-list"></ul></div>' +
+      '<div class="nui-group"><h4 class="nui-group__title">Active pacts</h4>' +
+      '<ul class="nui-list ms-parley-active-list"></ul></div>' +
+      '<div class="nui-group ms-parley-composer">' +
+      '<button type="button" class="nui-btn nui-btn--block ms-parley-toggle">+ Propose</button>' +
       '<form class="ms-parley-form" hidden>' +
-      '<label>To team<input class="ms-parley-toTeam" type="number" required></label>' +
-      '<label>Kind<select class="ms-parley-kindSelect">' +
+      '<label class="nui-field"><span>To team</span>' +
+      '<input class="ms-parley-toTeam" type="number" required></label>' +
+      '<label class="nui-field"><span>Kind</span><select class="ms-parley-kindSelect">' +
       KINDS.map((k) => `<option value="${k}">${KIND_LABEL[k]}</option>`).join('') +
       '</select></label>' +
-      '<label>Duration (frames)<input class="ms-parley-duration" type="number" min="0"></label>' +
-      '<label>Amount<input class="ms-parley-amount" type="number" min="0"></label>' +
-      '<label>Region key(s), comma-separated<input class="ms-parley-regions" type="text"></label>' +
-      '<label>Objective ID<input class="ms-parley-objectiveId" type="number" min="0"></label>' +
-      '<button type="submit">Send proposal</button>' +
+      '<label class="nui-field"><span>Duration (frames)</span>' +
+      '<input class="ms-parley-duration" type="number" min="0"></label>' +
+      '<label class="nui-field"><span>Amount</span>' +
+      '<input class="ms-parley-amount" type="number" min="0"></label>' +
+      '<label class="nui-field"><span>Region key(s), comma-separated</span>' +
+      '<input class="ms-parley-regions" type="text"></label>' +
+      '<label class="nui-field"><span>Objective ID</span>' +
+      '<input class="ms-parley-objectiveId" type="number" min="0"></label>' +
+      '<button type="submit" class="nui-btn nui-btn--primary nui-btn--block">Send proposal</button>' +
       '</form></div>';
     ctx.mount.appendChild(this.el);
 
@@ -177,12 +189,16 @@ export default {
 
   _render() {
     const teamId = this.ctx.identity?.teamId;
+    const incoming = this.index.incoming(teamId);
     this.el.querySelector('.ms-parley-incoming-list').innerHTML =
-      this.index.incoming(teamId).map((p) => renderIncoming(p, this.ctx)).join('') || '<li class="ms-parley-none">Nothing pending</li>';
+      incoming.map((p) => renderIncoming(p, this.ctx)).join('') || '<li class="nui-empty">Nothing pending</li>';
     this.el.querySelector('.ms-parley-outgoing-list').innerHTML =
-      this.index.outgoing(teamId).map(renderOutgoing).join('') || '<li class="ms-parley-none">Nothing pending</li>';
+      this.index.outgoing(teamId).map(renderOutgoing).join('') || '<li class="nui-empty">Nothing pending</li>';
     this.el.querySelector('.ms-parley-active-list').innerHTML =
-      this.index.active(teamId).map(renderActive).join('') || '<li class="ms-parley-none">No active pacts</li>';
+      this.index.active(teamId).map(renderActive).join('') || '<li class="nui-empty">No active pacts</li>';
+    // The panel starts collapsed, so the incoming count is the only signal
+    // that someone is waiting on an answer — surface it in the header.
+    this.ctx.setBadge?.(incoming.length || null);
   },
 
   dispose() {
