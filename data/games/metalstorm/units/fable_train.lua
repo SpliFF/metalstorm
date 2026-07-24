@@ -54,10 +54,13 @@ return {
         objectname = 'fable_train_engine',
         maxdamage = 9500, mass = 2400,
         maxvelocity = 2.4, acceleration = 0.06, brakerate = 0.10,
-        turnrate = 220, footprintz = 9,
+        turnrate = 50, turninplace = false,
+        turninplacespeedlimit = 0.5, footprintz = 9,
         weapons = {
-            [1] = { name = 'MS_RAILGUN_S2' },     -- forward turret chain
-            [2] = { name = 'MS_FLAK_S1' },        -- AA chain (turret2)
+            -- T4: 270° forward arc (mainDir -Z, maxAngleDif 135° = half of 270°)
+            [1] = { name = 'MS_RAILGUN_S2', maindir = '0 0 -1', maxangledif = 135 },
+            -- T4: 360° AA (air-only via toairweapon in weapon def)
+            [2] = { name = 'MS_FLAK_S1', maxangledif = 180 },
         },
         customparams = { train_role = 'engine' },
     },
@@ -67,13 +70,21 @@ return {
         objectname = 'fable_train_gun',
         maxdamage = 7000, mass = 1800,
         maxvelocity = 1.8, acceleration = 0.05, brakerate = 0.09,
-        turnrate = 200, footprintz = 7,
+        turnrate = 40, turninplace = false,
+        turninplacespeedlimit = 0.5, footprintz = 7,
         weapons = {
+            -- T4: Roof turrets use bowtie arc (120° each side, no fore/aft)
+            -- Implemented via AllowWeaponTarget callin in game_train.lua
             [1] = { name = 'MS_HOWITZER_S2' },    -- fore turret
             [2] = { name = 'MS_HOWITZER_S2' },    -- aft turret (baked +Z)
-            [3] = { name = 'MS_MG_S1' },          -- cupola (turret3)
+            -- T4: Cupola 360° coverage
+            [3] = { name = 'MS_MG_S1', maxangledif = 180 },
         },
-        customparams = { train_role = 'gun' },
+        customparams = {
+            train_role = 'gun',
+            -- T4: Mark roof turrets for bowtie arc filtering
+            roof_turrets = '1,2',
+        },
     },
     fable_train_troop = unit{
         name = 'Colubris Troop Car',
@@ -81,15 +92,23 @@ return {
         objectname = 'fable_train_troop',
         maxdamage = 7500, mass = 1700,
         maxvelocity = 1.8, acceleration = 0.05, brakerate = 0.09,
-        turnrate = 200, footprintz = 7,
+        turnrate = 40, turninplace = false,
+        turninplacespeedlimit = 0.5, footprintz = 7,
         canload = 1,
-        transportcapacity = 8, transportsize = 1,   -- a rifle squad
+        transportcapacity = 4, transportsize = 1,   -- T5: 4 squad-units (squad is ONE sim unit)
         loadingradius = 120, releaseheld = true,
+        isfireplatform = true,  -- T5: loaded squads keep firing
         weapons = {
-            [1] = { name = 'MS_MG_S1' },          -- fore cupola
-            [2] = { name = 'MS_MG_S1' },          -- aft cupola (flame visual)
+            -- T4: Cupolas 360° coverage
+            [1] = { name = 'MS_MG_S1', maxangledif = 180 },
+            [2] = { name = 'MS_MG_S1', maxangledif = 180 },
         },
-        customparams = { train_role = 'troop', flame_visual = 'weapon2' },
+        customparams = {
+            train_role = 'troop',
+            flame_visual = 'weapon2',
+            -- T4: Loaded squads fire from sides (bowtie pattern via AllowWeaponTargetCheck)
+            fire_platform_bowtie = 'true',
+        },
     },
     fable_train_cargo = unit{
         name = 'Colubris Cargo Car',
@@ -97,13 +116,20 @@ return {
         objectname = 'fable_train_cargo',
         maxdamage = 7000, mass = 1900,
         maxvelocity = 1.8, acceleration = 0.05, brakerate = 0.09,
-        turnrate = 200, footprintz = 7,
+        turnrate = 40, turninplace = false,
+        turninplacespeedlimit = 0.5, footprintz = 7,
         canload = 1,
         transportcapacity = 2, transportsize = 2,   -- light vehicles
         loadingradius = 120, releaseheld = true,
+        isfireplatform = true,  -- T5: loaded vehicles keep firing
         weapons = {
-            [1] = { name = 'MS_MG_S1' },          -- pulpit cupola
+            -- T4: Pulpit cupola 360° coverage
+            [1] = { name = 'MS_MG_S1', maxangledif = 180 },
         },
-        customparams = { train_role = 'cargo' },
+        customparams = {
+            train_role = 'cargo',
+            -- T5: Loaded vehicles fire from sides (bowtie pattern via AllowWeaponTargetCheck)
+            fire_platform_bowtie = 'true',
+        },
     },
 }

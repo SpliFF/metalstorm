@@ -21,6 +21,7 @@ GADGET_ALLOWLIST = {
 	['game_scenario.lua']         = true,
 	['game_start.lua']            = true,
 	['game_teams.lua']            = true,
+	['game_train.lua']            = true,
 	['game_tutorial.lua']         = true,
 	['squad.lua']                 = true,
 }
