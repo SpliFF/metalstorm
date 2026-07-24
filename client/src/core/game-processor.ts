@@ -95,6 +95,7 @@ import { DecalOverlay, buildTrackTypeNames } from './decal-overlay.js';
 import { attachDecalOverlay } from './decal-overlay-plugin.js';
 import { renderMapFeatures, DynamicFeatureRenderer } from './feature-renderer.js';
 import { RTSCamera } from './rts-camera.js';
+import { TrainPresentation } from './train-presentation.js';
 import { OrbitRig, type OrbitTarget } from './orbit-rig.js';
 import { SunRig } from './sun-rig.js';
 import { ClipPlayer } from './clip-player.js';
@@ -355,6 +356,7 @@ let gpBuildBeamRenderer: BuildBeamRenderer | null = null;
 let gpCombatFX: CombatFX | null = null;
 let gpDecalOverlay: DecalOverlay | null = null;
 let gpDynamicFeatureRenderer: DynamicFeatureRenderer | null = null;
+let gpTrainPresentation: TrainPresentation | null = null;
 /// Sim-scaled delta multiplier for VISUAL FX aging — slows / freezes effect
 /// lifetimes with the game speed (paused → 0). Driven by onGameInfo. The
 /// camera + entity ticks keep raw wall dt; only FX lifetimes use it.
@@ -1711,6 +1713,10 @@ export function gpInit(msg: GpInitToWorker): void {
     dynamicFeatureRenderer.setShadowGenerator(gpCtx.sceneLighting.csm);
     gpDynamicFeatureRenderer = dynamicFeatureRenderer;
 
+    // PLAN-metalstorm-train T6: client-side train presentation (wheel spin, VFX).
+    const trainPresentation = new TrainPresentation(scene, entityRenderer);
+    gpTrainPresentation = trainPresentation;
+
     // Phase G: gate the expensive FX through the graphics-quality presets
     // (ports main.ts@d6301137f7^ L434–451 — dropped in the c5a FX move, restored
     // here now that the gfx snapshot + live `gp:config` push exist). `fireNow`
@@ -1747,6 +1753,7 @@ export function gpInit(msg: GpInitToWorker): void {
     defCache.onUnitDefs((newDefs) => {
         gpCtx.entityRenderer?.setUnitDefs(newDefs);
         gpBuildingPlateRenderer?.setUnitDefs(newDefs);
+        gpTrainPresentation?.setUnitDefs(newDefs);
         for (const d of newDefs) unitDefMap.set(d.defId, d);
         const rt0 = getRuntime(); if (rt0) republishDefGlobals(rt0);
     });
@@ -1804,6 +1811,9 @@ export function gpInit(msg: GpInitToWorker): void {
         // entityRenderer.tick() advances the presentation clock (L0) and
         // interpolates every unit to the presentation cursor before render.
         gpCtx.entityRenderer?.tick();
+        // PLAN-metalstorm-train T6: wheel-spin for train cars (updates piece
+        // poses via setAimPose based on ground speed derived from position delta).
+        gpTrainPresentation?.tick(dt * 1000); // tick() expects deltaMs
         // PLAN-latency L1: fire discrete events (explosions, deaths, impact
         // CEGs, sounds) whose sim frame the cursor has now reached — so they
         // present in lockstep with the units interpolated to the same P, rather
