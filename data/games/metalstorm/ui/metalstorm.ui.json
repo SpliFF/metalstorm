@@ -30,6 +30,8 @@
     {
       "id": "command-composer",
       "entry": "widgets/command-composer.js",
+      "builtin": true,
+      "_builtin_note": "Mounted from the client bundle (client/src/native-widgets/command-composer.js) via BUILTIN_WIDGETS, not fetched from this dir — it depends on bundled compile-table + named-entity-index modules. The game-dir command-composer.js is a stub kept for reference.",
       "mount": "bottom-center",
       "subscribes": ["gameRulesParams", "teamRulesParams"]
     },

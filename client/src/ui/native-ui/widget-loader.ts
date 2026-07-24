@@ -25,6 +25,11 @@ export interface WidgetDescriptor {
     mount: string;           // Mount point: "top-center", "right", "left", etc.
     subscribes?: string[];   // Store paths this widget subscribes to
     revealOn?: string;       // Progressive disclosure predicate (not impl yet)
+    builtin?: boolean;       // Mount the client-bundled module from BUILTIN_WIDGETS
+                             // instead of fetching entry from the game dir. Used for
+                             // engine-provided UI that depends on bundled modules
+                             // (e.g. the command composer needs compile-table +
+                             // named-entity-index).
 }
 
 export interface WidgetContext {
@@ -46,6 +51,22 @@ export interface Widget {
     dispose(): void;
     showRefusalToast?: (cost: number) => void;  // authority-bar specific method
 }
+
+/**
+ * Client-bundled ("built-in") widgets, keyed by manifest widget id.
+ *
+ * A manifest entry with `builtin: true` is mounted from here instead of being
+ * fetched from the game dir. This exists for engine-provided UI that depends on
+ * bundled modules which can't be resolved when a widget is fetched as a
+ * standalone ES module (e.g. the command composer statically imports
+ * compile-table + named-entity-index). The dynamic import() keeps the module
+ * out of the initial bundle until a game that uses it loads.
+ */
+const BUILTIN_WIDGETS: Record<string, () => Promise<{ default: Widget }>> = {
+    // @ts-ignore — command-composer.js is untyped JS (same as the game-dir
+    // widgets); it exports a default { id, init, dispose } matching Widget.
+    'command-composer': () => import('../../native-widgets/command-composer.js'),
+};
 
 /**
  * WidgetLoader manages the lifecycle of native JS widgets for a game.
@@ -210,9 +231,21 @@ export class WidgetLoader {
             return;
         }
 
-        // Dynamic import of the widget module
-        const widgetUrl = stampUrl(`${baseUrl}/${descriptor.entry}`);
-        const module = await import(/* @vite-ignore */ widgetUrl);
+        // Resolve the widget module: client-bundled built-ins come from the
+        // BUILTIN_WIDGETS registry; game-authored widgets are fetched from the
+        // game dir as standalone ES modules.
+        let module: { default: Widget };
+        if (descriptor.builtin) {
+            const builtin = BUILTIN_WIDGETS[descriptor.id];
+            if (!builtin) {
+                console.error(`[widget-loader] Widget ${descriptor.id} is marked builtin but not registered in BUILTIN_WIDGETS`);
+                return;
+            }
+            module = await builtin();
+        } else {
+            const widgetUrl = stampUrl(`${baseUrl}/${descriptor.entry}`);
+            module = await import(/* @vite-ignore */ widgetUrl);
+        }
         const widget = module.default as Widget;
 
         if (!widget || typeof widget.init !== 'function') {
