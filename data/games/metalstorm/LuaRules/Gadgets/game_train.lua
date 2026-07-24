@@ -6,13 +6,18 @@
 -- PLAN-metalstorm-train.md for design rationale.
 --
 -- T1 SCOPE: Coupling foundation (COMPLETE)
--- T2 SCOPE: Follow-the-leader kinematics
+-- T2 SCOPE: Follow-the-leader kinematics (COMPLETE)
 -- - Leader keeps stock CGroundMoveType, followers use Spring.MoveCtrl
 -- - Breadcrumb ring buffer tracks leader's path by cumulative arc-length
 -- - Each follower placed at its coupling-length offset behind, heading = tangent
 -- - Reverse: two-engine consists swap leader, one-engine backs slowly
 -- - Coupler-connected turning: no pivot, large turning circle
 -- - Direction-of-travel heuristic: prefer reverse over >180° U-turn
+-- T3 SCOPE: Damage-speed model
+-- - Speed factor based on aggregate HP fraction with floor
+-- - Dead cars stay in consist as dead segments, drop passengers/cargo, add small slow
+-- - Dead engines add large slow, trigger leader re-election
+-- - Zero live engines make consist immobile (but still fires)
 
 function gadget:GetInfo()
     return {
@@ -57,6 +62,11 @@ local MIN_TURNING_RADIUS = 30.0     -- minimum turning radius for trains (meters
 local REVERSE_SPEED_FACTOR = 0.3    -- speed multiplier when backing single-engine
 local UTURN_ANGLE_THRESHOLD = 150   -- degrees - prefer reverse if turn > this
 
+-- Damage-speed constants (T3)
+local DAMAGE_SPEED_FLOOR = 0.2      -- minimum speed factor from damage
+local SLOW_PER_DEAD_CAR = 0.05      -- speed penalty per dead car
+local SLOW_PER_DEAD_ENGINE = 0.3    -- speed penalty per dead engine
+
 --------------------------------------------------------------------------------
 -- State
 --------------------------------------------------------------------------------
@@ -95,6 +105,11 @@ local trainDefs = {}  -- defID -> {role, linkF, linkR, halfLength}
         reversing = boolean,          -- true when consist is in reverse
         lastLeaderPos = {x,y,z},     -- for arc-length calculation
         lastLeaderHeading = number,
+
+        -- T3: Damage state
+        deadCars = {unitID...},      -- list of dead car IDs still in consist
+        deadEngines = {unitID...},   -- list of dead engine IDs
+        speedFactor = number,         -- aggregate speed multiplier from damage
     }
 ]]
 
@@ -184,7 +199,12 @@ local function CreateConsist(unitID)
         breadcrumbs = InitBreadcrumbs(),
         reversing = false,
         lastLeaderPos = {x = x, y = y, z = z},
-        lastLeaderHeading = heading * math.pi / 32768  -- Spring heading to radians
+        lastLeaderHeading = heading * math.pi / 32768,  -- Spring heading to radians
+
+        -- T3: Damage state
+        deadCars = {},
+        deadEngines = {},
+        speedFactor = 1.0
     }
     nextConsistID = nextConsistID + 1
 
@@ -200,17 +220,72 @@ end
 local function UpdateConsistHP(consist)
     local totalHP = 0
     local totalMaxHP = 0
+    local liveHP = 0
+    local liveMaxHP = 0
 
     for _, unitID in ipairs(consist.units) do
         local hp, maxHP = Spring.GetUnitHealth(unitID)
         if hp then  -- unit still alive
             totalHP = totalHP + hp
             totalMaxHP = totalMaxHP + maxHP
+            if not Spring.GetUnitIsDead(unitID) then
+                liveHP = liveHP + hp
+                liveMaxHP = liveMaxHP + maxHP
+            end
         end
     end
 
     consist.aggregateHP = totalHP
     consist.aggregateMaxHP = totalMaxHP
+
+    -- T3: Calculate speed factor from damage
+    UpdateSpeedFactor(consist, liveHP, liveMaxHP)
+end
+
+local function UpdateSpeedFactor(consist, liveHP, liveMaxHP)
+    -- Calculate base speed factor from aggregate HP fraction
+    local speedFactor = 1.0
+
+    if liveMaxHP > 0 then
+        local hpFraction = liveHP / liveMaxHP
+        speedFactor = math.max(hpFraction, DAMAGE_SPEED_FLOOR)
+    end
+
+    -- Apply penalties for dead segments
+    local deadCarCount = 0
+    local deadEngineCount = 0
+
+    for _, unitID in ipairs(consist.deadCars or {}) do
+        if Spring.ValidUnitID(unitID) then
+            deadCarCount = deadCarCount + 1
+        end
+    end
+
+    for _, unitID in ipairs(consist.deadEngines or {}) do
+        if Spring.ValidUnitID(unitID) then
+            deadEngineCount = deadEngineCount + 1
+        end
+    end
+
+    -- Apply additive slows for dead segments
+    speedFactor = speedFactor - (deadCarCount * SLOW_PER_DEAD_CAR)
+    speedFactor = speedFactor - (deadEngineCount * SLOW_PER_DEAD_ENGINE)
+
+    -- Check for zero live engines (immobile)
+    local hasLiveEngine = false
+    for _, unitID in ipairs(consist.units) do
+        if IsEngine(unitID) and not Spring.GetUnitIsDead(unitID) then
+            hasLiveEngine = true
+            break
+        end
+    end
+
+    if not hasLiveEngine then
+        speedFactor = 0  -- Zero live engines = immobile
+    end
+
+    -- Clamp final speed factor
+    consist.speedFactor = math.max(speedFactor, 0)
 end
 
 local function ElectLeader(consist)
@@ -260,6 +335,7 @@ local function UpdateConsistParams(consist)
         Spring.SetUnitRulesParam(unitID, "train_is_leader", unitID == consist.leader and 1 or 0)
         Spring.SetUnitRulesParam(unitID, "train_aggregate_hp", consist.aggregateHP)
         Spring.SetUnitRulesParam(unitID, "train_aggregate_max_hp", consist.aggregateMaxHP)
+        Spring.SetUnitRulesParam(unitID, "train_speed_factor", consist.speedFactor or 1.0)  -- T3
     end
 end
 
@@ -511,16 +587,42 @@ function gadget:UnitDestroyed(unitID, unitDefID)
     local consist = consists[consistID]
     if not consist then return end
 
-    -- Unit stays in consist as dead segment (per spec)
-    -- Just update HP and re-elect leader if needed
-    if unitID == consist.leader then
-        ElectLeader(consist)
+    -- T3: Unit stays in consist as dead segment (per spec)
+    -- Track dead cars and engines for speed penalties
+    if IsEngine(unitID) then
+        table.insert(consist.deadEngines, unitID)
+        -- If it was the leader, elect a new one
+        if unitID == consist.leader then
+            ElectLeader(consist)
+            -- If we found a new leader, re-setup movement control
+            if consist.leader then
+                SetupConsistMovement(consist)
+            end
+        end
+    else
+        table.insert(consist.deadCars, unitID)
+    end
+
+    -- Drop passengers/cargo from destroyed unit
+    local passengers = Spring.GetUnitIsTransporting(unitID)
+    if passengers then
+        for _, passengerID in ipairs(passengers) do
+            -- Unload the passenger
+            Spring.UnitDetach(passengerID)
+            local x, y, z = Spring.GetUnitPosition(unitID)
+            if x then
+                -- Place passenger nearby
+                Spring.SetUnitPosition(passengerID, x + math.random(-5, 5), z + math.random(-5, 5))
+            end
+        end
     end
 
     UpdateConsistHP(consist)
     UpdateConsistParams(consist)
 
-    Spring.Echo(string.format("Train unit destroyed, consist still has %d units", #consist.units))
+    local engineStatus = consist.leader and "has leader" or "no live engines"
+    Spring.Echo(string.format("Train unit destroyed (speedFactor=%.2f, %s), consist still has %d units",
+        consist.speedFactor, engineStatus, #consist.units))
 end
 
 function gadget:AllowCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOptions)
@@ -658,10 +760,10 @@ local function DisableFollowerMoveCtrl(unitID)
     Spring.MoveCtrl.Disable(unitID)
 end
 
-local function UpdateFollowerPosition(consist, followerIdx, leaderSpeed)
+local function UpdateFollowerPosition(consist, followerIdx, leaderSpeed, effectiveSpeed)
     local unitID = consist.units[followerIdx]
-    if not unitID or Spring.GetUnitIsDead(unitID) then
-        return
+    if not unitID then
+        return  -- Unit might be dead but still in consist (T3)
     end
 
     -- Calculate cumulative coupling distance to this follower
@@ -680,10 +782,13 @@ local function UpdateFollowerPosition(consist, followerIdx, leaderSpeed)
 
     local pos = GetBreadcrumbAtArcLength(consist, targetArcLength)
 
-    -- Set follower position and heading via MoveCtrl
-    Spring.MoveCtrl.SetPosition(unitID, pos.x, pos.y, pos.z)
-    Spring.MoveCtrl.SetHeading(unitID, pos.heading * 32768 / math.pi) -- radians to Spring heading
-    Spring.MoveCtrl.SetVelocity(unitID, 0, 0, leaderSpeed) -- match leader speed
+    -- Only move live followers (dead ones stay in place)
+    if not Spring.GetUnitIsDead(unitID) then
+        -- Set follower position and heading via MoveCtrl
+        Spring.MoveCtrl.SetPosition(unitID, pos.x, pos.y, pos.z)
+        Spring.MoveCtrl.SetHeading(unitID, pos.heading * 32768 / math.pi) -- radians to Spring heading
+        Spring.MoveCtrl.SetVelocity(unitID, 0, 0, effectiveSpeed) -- use effective speed (with damage factor)
+    end
 end
 
 local function CheckForUTurn(consist, targetX, targetZ)
@@ -797,11 +902,31 @@ function gadget:GameFrame(frame)
             local heading = Spring.GetUnitHeading(consist.leader) or 0
             heading = heading * math.pi / 32768
 
-            -- Enforce no-pivot turning constraint
+            -- Get current leader speed
             local vx, vy, vz, speed = Spring.GetUnitVelocity(consist.leader)
             speed = math.sqrt(vx*vx + vz*vz)
 
-            if speed < 0.1 then
+            -- T3: Apply speed factor to effective speed
+            local effectiveSpeed = speed
+            if consist.speedFactor and consist.speedFactor < 1.0 then
+                effectiveSpeed = speed * consist.speedFactor
+
+                -- Cap the leader's actual movement speed
+                if consist.speedFactor == 0 then
+                    -- Immobile - stop the leader
+                    Spring.GiveOrderToUnit(consist.leader, CMD.STOP, {}, {})
+                else
+                    -- Use SetUnitCOBValue to cap speed (works on non-MoveCtrl units)
+                    local percentSpeed = consist.speedFactor * 100
+                    Spring.SetUnitCOBValue(consist.leader, COB.MAX_SPEED, percentSpeed)
+                end
+            elseif consist.speedFactor and consist.speedFactor >= 1.0 then
+                -- Reset to full speed if recovered
+                Spring.SetUnitCOBValue(consist.leader, COB.MAX_SPEED, 100)
+            end
+
+            -- Enforce no-pivot turning constraint
+            if effectiveSpeed < 0.1 then
                 -- When stopped, prevent any rotation
                 local headingDiff = math.abs(heading - consist.lastLeaderHeading)
                 if headingDiff > 0.01 then
@@ -811,7 +936,7 @@ function gadget:GameFrame(frame)
                 end
             else
                 -- While moving, cap turn rate based on speed
-                local maxTurnPerFrame = speed / MIN_TURNING_RADIUS
+                local maxTurnPerFrame = effectiveSpeed / MIN_TURNING_RADIUS
                 local headingDiff = heading - consist.lastLeaderHeading
 
                 -- Normalize angle difference
@@ -830,7 +955,16 @@ function gadget:GameFrame(frame)
 
             -- Update all followers
             for i = 2, #consist.units do
-                UpdateFollowerPosition(consist, i, speed)
+                UpdateFollowerPosition(consist, i, speed, effectiveSpeed)
+            end
+        elseif consist.speedFactor == 0 then
+            -- T3: Zero live engines - consist is immobile but units can still fire
+            -- Just ensure followers stay in position
+            for i = 2, #consist.units do
+                local unitID = consist.units[i]
+                if unitID and not Spring.GetUnitIsDead(unitID) then
+                    Spring.MoveCtrl.SetVelocity(unitID, 0, 0, 0)
+                end
             end
         end
     end
