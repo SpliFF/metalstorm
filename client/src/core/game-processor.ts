@@ -501,6 +501,48 @@ let gpLastMouseSpringY = 0;
 /// per the plan's c5 bullet. c3 only needs a *static framed* camera so
 /// terrain is visible ("first light"); the FreeCamera is positioned at map
 /// centre here. No ground-clamp / pan / zoom yet.
+/// One-shot: frame view-0's interactive camera behind-and-above the local
+/// player's start position, so a fresh game opens looking at the player's own
+/// units instead of an empty map centre (PLAN-playable — starting-camera fix).
+/// Prefers the local team's start; a spectator (myTeam < 0) or not-yet-known
+/// team falls back to the centroid of all valid start positions. Returns false
+/// (leaving the caller's fallback framing in place) until BOTH the map is built
+/// and at least one valid start position is known — gpLoadMap and
+/// onTeamStartInfo both call it, so whichever learns the start last completes
+/// the framing exactly once. Direct pose (no ground sampler needed), matching
+/// the "behind + above, ~35° down" 3/4 view.
+let gpStartCameraFramed = false;
+function gpTryFrameStartCamera(): boolean {
+    if (gpStartCameraFramed) return true;
+    if (!gpMapData) return false;
+    const rtsCam = gpViewCameras.get(0);
+    if (!rtsCam) return false;
+
+    // Resolve the framing target: my start, else centroid of all valid starts.
+    const myTeam = liveState.identity.myTeam;
+    const mine = myTeam >= 0 ? liveState.teamStartPositions.get(myTeam) : undefined;
+    let tx: number, tz: number, ty: number;
+    if (mine?.valid) {
+        tx = mine.x; ty = mine.y; tz = mine.z;
+    } else {
+        let sx = 0, sy = 0, sz = 0, n = 0;
+        liveState.teamStartPositions.forEach((p) => {
+            if (p.valid) { sx += p.x; sy += p.y; sz += p.z; n++; }
+        });
+        if (n === 0) return false;   // no start info yet — retry on next call
+        tx = sx / n; ty = sy / n; tz = sz / n;
+    }
+
+    // Behind (−Z) and above, ~35° downtilt, framing roughly a 1.1 km start area.
+    // Drive the rig's own setPose (NOT a raw gpCamera.setTarget): setPose sets the
+    // RTSCamera's internal lookAt so tick() maintains the pose. A raw camera poke
+    // leaves this.lookAt stale, and the next tick() snaps orientation back to it.
+    const BACK = 1150, HEIGHT = 800;
+    rtsCam.setPose({ pos: { x: tx, y: ty + HEIGHT, z: tz - BACK }, lookAt: { x: tx, y: ty, z: tz } });
+    gpStartCameraFramed = true;
+    return true;
+}
+
 async function gpLoadMap(msg: GpInitToWorker): Promise<void> {
     if (!gpScene || !gpEngine || !gpCamera || !gpCtx.sceneLighting) return;
     if (gpMapData) { postLog(2, '[gp] gpLoadMap: map already built — ignoring'); return; }
@@ -591,18 +633,23 @@ async function gpLoadMap(msg: GpInitToWorker): Promise<void> {
     gpWaypointMarkerRenderer?.setMapData(map);
     gpStandingOrderRenderer?.setMapData(map);
 
-    // GW4-c5b: frame the interactive camera over map centre and hand it the map
-    // bounds (for fitMap / future edge clamping). recomputeAxes() re-seeds the
-    // RTSCamera's look-at + pan/right axes from the new pose so the first pan
-    // moves in the right direction. Keeps the same starting framing as c3–c5a;
-    // now pan/zoom/orbit are live off the forwarded input.
-    const cx = map.widthElmos / 2;
-    const cz = map.heightElmos / 2;
-    gpCamera.position.set(cx, 1200, cz - 1500);
-    gpCamera.setTarget(new Vector3(cx, 0, cz));
+    // GW4-c5b: hand the interactive camera the map bounds (for fitMap / future
+    // edge clamping) and frame it behind-and-above the local player's start.
+    // recomputeAxes() re-seeds the RTSCamera's look-at + pan/right axes from the
+    // new pose so the first pan moves in the right direction. The start-position
+    // framing is one-shot (gpTryFrameStartCamera); if the start info hasn't
+    // arrived yet we fall back to map centre and let onTeamStartInfo snap the
+    // camera the moment it does. now pan/zoom/orbit are live off the forwarded
+    // input.
     const rtsCam = gpViewCameras.get(0);
     rtsCam?.setMapBounds(map.widthElmos, map.heightElmos);
-    rtsCam?.recomputeAxes();
+    if (!gpTryFrameStartCamera()) {
+        const cx = map.widthElmos / 2;
+        const cz = map.heightElmos / 2;
+        gpCamera.position.set(cx, 1200, cz - 1500);
+        gpCamera.setTarget(new Vector3(cx, 0, cz));
+        rtsCam?.recomputeAxes();
+    }
 
     // Fog-of-war overlay (envelope 0x07). Sits just above terrain in
     // renderingGroupId=1; never a shadow caster (map-sized blob).
@@ -1220,6 +1267,10 @@ function gpConnect(msg: GpInitToWorker): void {
                     xmin: b.xmin, zmin: b.zmin, xmax: b.xmax, zmax: b.zmax,
                 });
             }
+            // Starting-camera fix: if the map was built before the start
+            // positions arrived (the common race), gpLoadMap's framing fell back
+            // to map centre — snap it onto the player's start now that we know it.
+            gpTryFrameStartCamera();
         },
         // PLAN-bar.md §5 (5c): the game's modoptions → liveState.modOptions, read
         // by the unsynced LuaUI Spring.GetModOptions(). Sent once on auth (they're
@@ -2686,6 +2737,7 @@ export function gpShutdown(): void {
     gpTerrainMesh = null;
     gpDeformTerrain = null;
     gpMapData = null;
+    gpStartCameraFramed = false;   // re-frame the next game's start on load
     gpCtx.sceneLighting = null;
     gpEngine?.stopRenderLoop();
     // scene.dispose() tears down the terrain mesh, fog, water, lights, CSM,
