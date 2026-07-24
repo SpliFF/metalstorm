@@ -16,8 +16,8 @@ local mapinfo = {
 	extractorRadius = 0,
 	autoShowMetal = false,
 	smf = {
-		minheight = -50, -- Deep channel/lake bottoms
-		maxheight = 150, -- Ridge crests
+		minheight = -80, -- Deep channel/lake bottoms
+		maxheight = 1400, -- Ridge crests
 		smtFileName0 = "maps/meridian_basin.smt",
 	},
 	resources = {
