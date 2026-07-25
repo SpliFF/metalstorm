@@ -35,8 +35,14 @@ export {
     parseRegionsFromRulesParams,
     parseObjectivesFromRulesParams,
     parseLandmarksFromRulesParams,
-    parseOrgGroupsFromTeamRulesParams,
 } from './named-entity-index.js';
+
+// Named-entity index live producer (rulesParams / org-groups → index)
+export {
+    startEntityIndexProducer,
+    rebuildEntityIndex,
+    orgGroupsToEntities,
+} from './entity-index-producer.js';
 
 // Compile table (PLAN-metalstorm-scripting.md §5)
 export {

@@ -17,9 +17,14 @@ if (typeof window !== 'undefined') {
     (window as unknown as { __msUiStore?: unknown }).__msUiStore = uiStore;
 }
 import { WidgetLoader } from './widget-loader.js';
+import { startEntityIndexProducer } from './entity-index-producer.js';
 
 let widgetLoader: WidgetLoader | null = null;
 let activeConnection: Connection | null = null;
+// The named-entity-index producer (regions/objectives/groups → index). Kept at
+// module scope so the same session teardown that disposes the widget loader
+// also stops the producer and clears the index.
+let stopEntityIndexProducer: (() => void) | null = null;
 
 /**
  * Initialize native UI for a game session.
@@ -40,6 +45,16 @@ export async function initializeNativeUI(
 
     // Store connection reference
     activeConnection = connection;
+
+    // Start the named-entity-index producer (regions/objectives/org-groups →
+    // namedEntityIndex) so the command composer's Target picker and free-text
+    // accelerator have live data instead of an empty index. Idempotent across
+    // re-init: stop any prior instance first.
+    if (stopEntityIndexProducer) {
+        stopEntityIndexProducer();
+        stopEntityIndexProducer = null;
+    }
+    stopEntityIndexProducer = startEntityIndexProducer();
 
     // Create new loader and load widgets
     widgetLoader = new WidgetLoader();
@@ -224,6 +239,10 @@ export function disposeNativeUI(): void {
     if (widgetLoader) {
         widgetLoader.dispose();
         widgetLoader = null;
+    }
+    if (stopEntityIndexProducer) {
+        stopEntityIndexProducer();
+        stopEntityIndexProducer = null;
     }
     activeConnection = null;
     // Note: We don't clear the ui-store here as it may be used across sessions

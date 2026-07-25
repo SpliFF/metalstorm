@@ -43,6 +43,17 @@ import composerCss from './command-composer.css?raw';
 const AUTHORITY_COST_LIB_URL = '/api/games/data/metalstorm/ui/lib/authority-cost.js';
 const AUTHORITY_COST_SPEC_URL = '/api/games/data/metalstorm/authority_cost.json';
 
+/** Idle-filter subject classes offered by the Subject picker. A closed
+ *  vocabulary (mirrors free-text-accelerator.ts's IDLE_FILTER_CLASSES) — the
+ *  composer builds valid-by-construction intents, so it only offers filter
+ *  classes the sim understands rather than a free-text box. */
+const IDLE_FILTER_CLASSES = ['armour', 'infantry', 'air', 'artillery'];
+
+/** Entity types the Target picker searches — the "where to act" vocabulary
+ *  (regions/objectives/landmarks), never Subjects (groups). Mirrors
+ *  free-text-accelerator.ts's TARGET_ENTITY_TYPES. */
+const TARGET_ENTITY_TYPES = ['region', 'district', 'city', 'objective', 'landmark', 'enemy-force'];
+
 /**
  * Widget state
  */
@@ -57,6 +68,7 @@ const state = {
     // UI state
     activeSlot: null,       // Which slot is being edited
     searchQuery: '',        // Autocomplete search query
+    targetSearchRefresh: null, // () => void while the Target name-search menu is open; re-runs its result list on a live index change
     mapArmActive: false,    // Whether a map-arm gesture is in flight (task 4)
     subjectAutoFilled: false, // True while Subject came from selection sync, not a manual pick
 
@@ -110,11 +122,12 @@ function init(ctx) {
     // Mount to context.mount
     ctx.mount.appendChild(container);
 
-    // Subscribe to index changes for autocomplete updates
+    // Subscribe to index changes so an open Target name-search refreshes its
+    // result list live as the producer streams in regions/objectives. The
+    // shape-option target menu doesn't depend on the index, so there's nothing
+    // to refresh unless the search sub-view is open.
     const unsubIndex = namedEntityIndex.onChange(() => {
-        if (state.activeSlot === 'target') {
-            renderTargetMenu();
-        }
+        if (state.targetSearchRefresh) state.targetSearchRefresh();
     });
     state.unsubs.push(unsubIndex);
 
@@ -200,6 +213,11 @@ async function loadCostModel() {
 function render() {
     if (!state.container) return;
 
+    // A full re-render discards every open menu (they live inside the
+    // container's innerHTML), so any live Target-search refresh hook is now
+    // dangling — drop it before it fires against detached DOM.
+    state.targetSearchRefresh = null;
+
     // Two rows: the command sentence (with the priority slider tucked to its
     // right) and the echo + commit controls. The [WHEN] chip sits inline with
     // the other slots rather than on its own row — it's part of the same
@@ -246,6 +264,7 @@ function render() {
 
         <div id="autocomplete-panel" class="nui-menu" hidden></div>
         <div id="verb-menu" class="nui-menu" hidden></div>
+        <div id="subject-menu" class="nui-menu" hidden></div>
         <div id="when-menu" class="nui-menu" hidden></div>
         <div id="presets-menu" class="nui-menu" hidden></div>
     `;
@@ -401,28 +420,67 @@ function openSlotEditor(slotName) {
     if (slotName === 'verb') {
         renderVerbMenu();
     } else if (slotName === 'subject') {
-        // For now, simple prompt (TODO: autocomplete org groups)
-        const type = prompt('Subject type: group, idle-filter, or ai?', 'group');
-        if (!type) return;
-
-        if (type === 'group') {
-            const groupId = parseInt(prompt('Group ID?', '1'), 10);
-            state.subject = { type: 'group', groupId };
-        } else if (type === 'idle-filter') {
-            const filterClass = prompt('Filter class (e.g., armour, infantry)?', 'armour');
-            state.subject = { type: 'idle-filter', filterClass };
-        } else if (type === 'ai') {
-            state.subject = { type: 'ai' };
-        }
-
-        // A manual pick overrides whatever selection sync had set.
-        state.subjectAutoFilled = false;
-        render();
+        renderSubjectMenu();
     } else if (slotName === 'target') {
         renderTargetMenu();
     } else if (slotName === 'when') {
         renderWhenMenu();
     }
+}
+
+/**
+ * Render the Subject picker (task 4): the live org-group roster from the store
+ * (`gp:orgGroups`, own team), plus the closed-vocabulary idle-filter classes
+ * and the AI. Replaces the old `prompt('Subject type…')` / `prompt('Group ID?')`
+ * chain — a player picks a real group by name, never types a raw id.
+ *
+ * The menu is a `.nui-menu` positioned by `openMenu` (viewport-space,
+ * position:fixed) so it escapes the composer panel's clip and the
+ * transformed-mount containing-block trap (native-ui.css §mounts).
+ */
+function renderSubjectMenu() {
+    const menu = state.container.querySelector('#subject-menu');
+    if (!menu) return;
+
+    const groups = state.ctx?.store.getOrgGroups() ?? [];
+    const groupItems = groups
+        .map((g) => `<div class="nui-menu__item subject-group-option" data-group-id="${g.groupId}">${escapeHtml(g.name || `Group ${g.groupId}`)} <span class="composer-menu-hint">${g.echelon}</span></div>`)
+        .join('');
+
+    const idleItems = IDLE_FILTER_CLASSES
+        .map((c) => `<div class="nui-menu__item subject-idle-option" data-class="${c}">Idle ${c}</div>`)
+        .join('');
+
+    menu.innerHTML = `
+        ${groups.length
+            ? groupItems
+            : `<div class="nui-menu__item nui-menu__item--disabled">No groups yet — select units on the map</div>`}
+        <div class="nui-menu__sep"></div>
+        ${idleItems}
+        <div class="nui-menu__sep"></div>
+        <div class="nui-menu__item subject-ai-option">the AI</div>
+    `;
+
+    openMenu(menu, 'subject');
+
+    const setSubject = (subject) => {
+        state.subject = subject;
+        // A manual pick overrides whatever selection sync had set (task 4).
+        state.subjectAutoFilled = false;
+        menu.hidden = true;
+        render();
+    };
+
+    for (const el of menu.querySelectorAll('.subject-group-option')) {
+        el.addEventListener('click', () =>
+            setSubject({ type: 'group', groupId: parseInt(el.getAttribute('data-group-id'), 10) }));
+    }
+    for (const el of menu.querySelectorAll('.subject-idle-option')) {
+        el.addEventListener('click', () =>
+            setSubject({ type: 'idle-filter', filterClass: el.getAttribute('data-class') }));
+    }
+    const aiOption = menu.querySelector('.subject-ai-option');
+    if (aiOption) aiOption.addEventListener('click', () => setSubject({ type: 'ai' }));
 }
 
 /**
@@ -468,6 +526,10 @@ function renderVerbMenu() {
 function renderTargetMenu() {
     const menu = state.container.querySelector('#autocomplete-panel');
     if (!menu) return;
+
+    // Showing the shape-option view — the name-search sub-view (and its
+    // live-refresh hook) is not active here.
+    state.targetSearchRefresh = null;
 
     if (!state.verb) {
         menu.innerHTML = `<div class="nui-menu__item nui-menu__item--disabled">Choose a verb first</div>`;
@@ -547,29 +609,64 @@ function shapeResultToTarget(shape, params) {
 }
 
 /**
- * Search for target by name (existing entity autocomplete, unchanged from
- * task 3 other than being extracted out of the old renderAutocomplete()).
+ * Search for a named-entity target (task 3): an inline search field + live
+ * result list rendered into the target menu, fed by the live namedEntityIndex
+ * (regions / objectives / landmarks — the producer's output). Replaces the old
+ * `prompt()` + silent "take results[0]" with a real picker: the player types,
+ * sees matching places, and clicks the one they mean.
+ *
+ * Reuses the `#autocomplete-panel` menu the map-shape target options open into,
+ * so it inherits the same position:fixed / clip-escaping placement.
  */
 function runEntitySearch() {
-    const query = prompt('Search for target (region, objective, landmark, etc.)?', '');
-    if (!query) return;
+    const menu = state.container.querySelector('#autocomplete-panel');
+    if (!menu) return;
 
-    const results = namedEntityIndex.search(query, undefined, 10);
+    menu.innerHTML = `
+        <div class="composer-target-search">
+            <input type="text" id="target-search-input" class="composer-accel-input"
+                placeholder="Search regions, objectives…" autocomplete="off" />
+        </div>
+        <div id="target-search-results"></div>
+    `;
+    openMenu(menu, 'target');
 
-    if (results.length === 0) {
-        alert('No results found');
-        return;
-    }
+    const input = menu.querySelector('#target-search-input');
+    const resultsEl = menu.querySelector('#target-search-results');
 
-    // For simplicity, take first result
-    // TODO: Show list and let user pick
-    const entity = results[0];
-    state.target = {
-        shape: 'entity',
-        entity,
+    const renderResults = () => {
+        const query = input.value.trim();
+        // Empty query: offer the full set (capped) so the picker is browsable,
+        // not just searchable — a player who doesn't know an exact name can
+        // still see what's on the board.
+        const results = query
+            ? namedEntityIndex.search(query, TARGET_ENTITY_TYPES, 12)
+            : namedEntityIndex.getAll().filter((e) => TARGET_ENTITY_TYPES.includes(e.type)).slice(0, 12);
+
+        if (results.length === 0) {
+            resultsEl.innerHTML = `<div class="nui-menu__item nui-menu__item--disabled">${query ? 'No matches' : 'No named places on the board yet'}</div>`;
+            return;
+        }
+
+        resultsEl.innerHTML = results
+            .map((e, i) => `<div class="nui-menu__item target-result-option" data-index="${i}">${escapeHtml(e.name)} <span class="composer-menu-hint">${e.type}</span></div>`)
+            .join('');
+
+        for (const el of resultsEl.querySelectorAll('.target-result-option')) {
+            el.addEventListener('click', () => {
+                const entity = results[parseInt(el.getAttribute('data-index'), 10)];
+                menu.hidden = true;
+                state.target = { shape: 'entity', entity };
+                render();
+            });
+        }
     };
 
-    render();
+    input.addEventListener('input', renderResults);
+    // Keep the result list live while the producer streams entities in.
+    state.targetSearchRefresh = renderResults;
+    renderResults();
+    input.focus();
 }
 
 /**
@@ -892,8 +989,9 @@ async function refreshPresetsCache() {
 }
 
 /** Save button: prompts for a name and stores the current filled intent.
- *  Disabled-by-content, not disabled-by-attribute — same "click it and find
- *  out" as the rest of this widget's prompt()-based inputs (task 1-3). */
+ *  `prompt()` is intentional here — naming a preset is genuine free text, not a
+ *  pick from a closed vocabulary (unlike the Subject/Target slots, which are
+ *  now index-fed .nui menus). Disabled-by-content, not disabled-by-attribute. */
 async function handleSavePreset() {
     const intent = buildIntent();
     if (!intent || validateIntent(intent)) {

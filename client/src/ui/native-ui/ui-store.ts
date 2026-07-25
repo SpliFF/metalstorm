@@ -127,6 +127,15 @@ export class UIStore {
         return this.teamRulesParams.get(teamId)?.get(key);
     }
 
+    /** The full accumulated game rules-params map (read-only snapshot handle).
+     *  The named-entity-index producer needs the whole batch to parse regions
+     *  / objectives out of it — the per-key `gameRulesParam` getter can't
+     *  enumerate. Returned as the live Map (not a copy): callers must not
+     *  mutate it. */
+    getGameRulesParams(): ReadonlyMap<string, number | string> {
+        return this.gameRulesParams;
+    }
+
     /** Get player info */
     getPlayer(playerId: number): PlayerInfo | undefined {
         return this.playerRoster.get(playerId);
