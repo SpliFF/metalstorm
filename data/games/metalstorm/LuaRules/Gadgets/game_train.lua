@@ -33,6 +33,29 @@
 -- matches physical car length. Also adds GG.Train.Couple(a, b) as a
 -- programmatic seam alongside the CMD_COUPLE order flow. See
 -- PLAN-metalstorm-train.md §2/§7.
+-- LIVE-CALLIN FIX (2026-07-25, demo-verify fire 3 findings):
+-- - The U-turn/prefer-reverse check used to live in gadget:AllowUnitCommand,
+--   which is NOT a callin — neither this engine nor upstream Recoil ever
+--   dispatches that name (Recoil's only order gate is AllowCommand, see
+--   rts/Sim/Units/CommandAI/CommandAI.cpp -> eventHandler.AllowCommand). The
+--   logic now lives in gadget:AllowCommand, the faithful Recoil callin, which
+--   fires for every queued order including CMD.MOVE/FIGHT/PATROL.
+-- - train_speed_factor now recomputes periodically in GameFrame (covers
+--   non-lethal damage AND repair), not only on consist-membership changes.
+-- - The leader's physical speed cap now uses
+--   MoveCtrl.SetGroundMoveTypeData("maxSpeed") instead of
+--   SetUnitCOBValue(COB.MAX_SPEED): the COB path needs a unit script the
+--   scriptless fable_train units don't have, so it errored every frame
+--   (null-script log spam) and never actually slowed the train.
+-- - Failed CMD_COUPLE orders are removed from the queue instead of retrying
+--   (and re-echoing) every ~15 frames forever.
+-- - CheckForUTurn now compares against GetUnitDirection (real front vector);
+--   the old (sin, cos) GetUnitHeading math is 180° inverted on this engine's
+--   RH-native coordinate frame.
+-- - The Lua-side no-pivot turn cap (per-frame SetUnitRotation snap) is
+--   removed: it livelocked consist leaders at turninplacespeedlimit. The
+--   unit def (turninplace=false, turnrate) already enforces train-like
+--   turning natively.
 
 function gadget:GetInfo()
     return {
@@ -77,7 +100,6 @@ local SQUARE_SIZE = 8
 -- Movement constants
 local BREADCRUMB_BUFFER_SIZE = 512  -- ring buffer size for path history
 local BREADCRUMB_SAMPLE_DIST = 2.0  -- minimum distance between breadcrumb samples
-local MIN_TURNING_RADIUS = 30.0     -- minimum turning radius for trains (meters)
 local REVERSE_SPEED_FACTOR = 0.3    -- speed multiplier when backing single-engine
 local UTURN_ANGLE_THRESHOLD = 150   -- degrees - prefer reverse if turn > this
 
@@ -88,6 +110,12 @@ local SLOW_PER_DEAD_ENGINE = 0.3    -- speed penalty per dead engine
 
 -- T5: Transport constants
 local MAX_UNLOAD_SPEED = 0.5        -- max speed (elmo/frame) to allow unload
+
+-- Damage→speed recompute cadence. UnitDamaged alone can't drive this (repair
+-- raises HP without any damage event), so consist HP/speed-factor state is
+-- recomputed on a fixed cadence instead. 15 frames = 0.5 s at GAME_SPEED 30 —
+-- fast enough that a shelled train visibly slows while still alive.
+local HP_RECOMPUTE_INTERVAL = 15
 
 --------------------------------------------------------------------------------
 -- State
@@ -145,8 +173,10 @@ local trainDefs = {}  -- defID -> {role, linkF, linkR, halfLength}
 -- control via SetupConsistMovement — all defined later in the file (Lua's
 -- `local function` isn't visible to code above it, so calling these without
 -- a forward declaration is a nil-global call the first time any of those
--- code paths actually run).
+-- code paths actually run). CheckForUTurn/SwapLeader are needed by
+-- gadget:AllowCommand, which is also defined above them.
 local UpdateConsistHP, UpdateSpeedFactor, UpdateConsistParams, SetupConsistMovement
+local CheckForUTurn, SwapLeader
 
 local function GetTrainDef(unitDefID)
     if trainDefs[unitDefID] then
@@ -706,6 +736,34 @@ function gadget:AllowCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdO
             end
         end
         return true
+
+    elseif cmdID == CMD.MOVE or cmdID == CMD.FIGHT or cmdID == CMD.PATROL then
+        -- T2 prefer-reverse: a goal >UTURN_ANGLE_THRESHOLD degrees behind the
+        -- leader swaps leadership (two-engine consists) or flags a slow
+        -- reverse (single-engine) instead of pivoting the whole consist.
+        -- This used to sit in gadget:AllowUnitCommand — a callin name no
+        -- engine (ours or Recoil) ever dispatches, so the feature was dead
+        -- code until the 2026-07-25 demo re-verify caught it. AllowCommand is
+        -- the real Recoil order gate and fires for these commands too.
+        -- (Attack-move is CMD.FIGHT; there is no CMD.ATTACK_MOVE constant.)
+        local consistID = consistsByUnit[unitID]
+        if consistID then
+            local consist = consists[consistID]
+            if consist and unitID == consist.leader and #cmdParams >= 3 then
+                local targetX, targetZ = cmdParams[1], cmdParams[3]
+                if CheckForUTurn(consist, targetX, targetZ) then
+                    if SwapLeader(consist) then
+                        Spring.Echo("Reversing consist to avoid U-turn")
+                        UpdateConsistParams(consist)
+                    elseif consist.engineCount == 1 then
+                        -- Single engine - will have to back up slowly
+                        Spring.Echo("Single-engine consist will reverse slowly")
+                        consist.reversing = true
+                    end
+                end
+            end
+        end
+        return true
     end
 
     return true
@@ -713,13 +771,22 @@ end
 
 function gadget:CommandFallback(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOptions)
     if cmdID == CMD_COUPLE then
+        -- Attempt once and always remove the order. Keeping a failed couple
+        -- order queued (the old `return true, success`) made CommandFallback
+        -- retry it every ~15 frames forever — nothing in the order drives the
+        -- units closer together, so it could never start succeeding on its
+        -- own and just spammed "Cannot couple: ..." echoes (2026-07-25 demo
+        -- re-verify finding). The player re-issues after closing the gap.
         local targetID = cmdParams[1]
-        local success = CoupleUnits(unitID, targetID)
-        return true, success  -- command handled, remove from queue if successful
+        CoupleUnits(unitID, targetID)
+        return true, true
 
     elseif cmdID == CMD_DECOUPLE then
-        local success = DecoupleAt(unitID)
-        return true, success
+        -- Same one-shot semantics: DecoupleAt failures (not in a consist,
+        -- front unit) are permanent for the queued order, so retrying is
+        -- pure spam.
+        DecoupleAt(unitID)
+        return true, true
     end
 
     return false
@@ -857,34 +924,43 @@ local function UpdateFollowerPosition(consist, followerIdx, leaderSpeed, effecti
     end
 end
 
-local function CheckForUTurn(consist, targetX, targetZ)
-    -- Check if reaching the target would require a U-turn
+function CheckForUTurn(consist, targetX, targetZ)
+    -- Check if reaching the target would require a U-turn.
+    --
+    -- Facing comes from GetUnitDirection (the unit's real front vector,
+    -- always frame-consistent with GetUnitPosition), NOT from
+    -- (sin, cos) of GetUnitHeading: this engine's RH-native coordinate flip
+    -- changed the heading↔vector mapping (GetHeadingFromFacing in
+    -- SpringMath.inl — FACING_NORTH→0 now, was FACING_SOUTH→0), so the
+    -- classic Spring (sin h, cos h) formula points 180° from the unit's
+    -- actual front for RH games like Metalstorm. Live-caught 2026-07-25: a
+    -- dead-ahead goal read as a U-turn and vice versa.
     if not consist.leader then
         return false
     end
 
     local x, _, z = Spring.GetUnitPosition(consist.leader)
-    local heading = Spring.GetUnitHeading(consist.leader) or 0
-    heading = heading * math.pi / 32768
-
-    -- Calculate bearing to target
-    local dx = targetX - x
-    local dz = targetZ - z
-    local targetBearing = math.atan2(dx, dz)
-
-    -- Calculate angle difference
-    local angleDiff = math.abs(targetBearing - heading)
-    if angleDiff > math.pi then
-        angleDiff = 2 * math.pi - angleDiff
+    local fx, _, fz = Spring.GetUnitDirection(consist.leader)
+    if not x or not fx then
+        return false
     end
 
-    -- Convert to degrees
-    angleDiff = angleDiff * 180 / math.pi
+    local dx = targetX - x
+    local dz = targetZ - z
+    local dLen = math.sqrt(dx*dx + dz*dz)
+    local fLen = math.sqrt(fx*fx + fz*fz)
+    if dLen < 1.0 or fLen < 1e-6 then
+        return false  -- standing on the goal / degenerate facing
+    end
+
+    local cosAngle = (dx*fx + dz*fz) / (dLen * fLen)
+    if cosAngle > 1.0 then cosAngle = 1.0 elseif cosAngle < -1.0 then cosAngle = -1.0 end
+    local angleDiff = math.acos(cosAngle) * 180 / math.pi
 
     return angleDiff > UTURN_ANGLE_THRESHOLD
 end
 
-local function SwapLeader(consist)
+function SwapLeader(consist)
     -- Find the other engine for two-engine consists
     local engines = {}
     for _, unitID in ipairs(consist.units) do
@@ -960,6 +1036,19 @@ end
 --------------------------------------------------------------------------------
 
 function gadget:GameFrame(frame)
+    -- T3: Periodic damage→speed recompute. Membership-change events alone
+    -- (couple/decouple/UnitDestroyed) left train_speed_factor stale while a
+    -- car was damaged-but-alive — a 72%-shelled engine kept factor 1.0 until
+    -- something actually died (2026-07-25 demo re-verify finding). A fixed
+    -- cadence also picks up HP *recovery* from repairs, which fires no
+    -- damage event at all.
+    if frame % HP_RECOMPUTE_INTERVAL == 0 then
+        for _, consist in pairs(consists) do
+            UpdateConsistHP(consist)
+            UpdateConsistParams(consist)
+        end
+    end
+
     -- Update all consists every frame
     for consistID, consist in pairs(consists) do
         if consist.leader and not Spring.GetUnitIsDead(consist.leader) then
@@ -976,46 +1065,46 @@ function gadget:GameFrame(frame)
             local effectiveSpeed = speed
             if consist.speedFactor and consist.speedFactor < 1.0 then
                 effectiveSpeed = speed * consist.speedFactor
-
-                -- Cap the leader's actual movement speed
                 if consist.speedFactor == 0 then
                     -- Immobile - stop the leader
                     Spring.GiveOrderToUnit(consist.leader, CMD.STOP, {}, {})
-                else
-                    -- Use SetUnitCOBValue to cap speed (works on non-MoveCtrl units)
-                    local percentSpeed = consist.speedFactor * 100
-                    Spring.SetUnitCOBValue(consist.leader, COB.MAX_SPEED, percentSpeed)
-                end
-            elseif consist.speedFactor and consist.speedFactor >= 1.0 then
-                -- Reset to full speed if recovered
-                Spring.SetUnitCOBValue(consist.leader, COB.MAX_SPEED, 100)
-            end
-
-            -- Enforce no-pivot turning constraint
-            if effectiveSpeed < 0.1 then
-                -- When stopped, prevent any rotation
-                local headingDiff = math.abs(heading - consist.lastLeaderHeading)
-                if headingDiff > 0.01 then
-                    -- Force heading back to last known
-                    Spring.SetUnitRotation(consist.leader, 0, consist.lastLeaderHeading, 0)
-                    heading = consist.lastLeaderHeading
-                end
-            else
-                -- While moving, cap turn rate based on speed
-                local maxTurnPerFrame = effectiveSpeed / MIN_TURNING_RADIUS
-                local headingDiff = heading - consist.lastLeaderHeading
-
-                -- Normalize angle difference
-                while headingDiff > math.pi do headingDiff = headingDiff - 2*math.pi end
-                while headingDiff < -math.pi do headingDiff = headingDiff + 2*math.pi end
-
-                if math.abs(headingDiff) > maxTurnPerFrame then
-                    -- Cap the turn rate
-                    heading = consist.lastLeaderHeading +
-                        maxTurnPerFrame * (headingDiff > 0 and 1 or -1)
-                    Spring.SetUnitRotation(consist.leader, 0, heading, 0)
                 end
             end
+
+            -- Cap the leader's real move-type speed when the factor (or the
+            -- leader) changes. This used to call SetUnitCOBValue(COB.MAX_SPEED)
+            -- every frame, but that path needs a COB unit script and the
+            -- fable_train units are scriptless — the null script errored
+            -- ("[US::SetUnitVal] invoked for null-scripted unit" log spam) and
+            -- the cap silently never applied, so damaged trains never
+            -- physically slowed. MoveCtrl.SetGroundMoveTypeData("maxSpeed") is
+            -- the Recoil-native Lua control for scriptless ground movers. The
+            -- value is in elmos/sec, same unit as UnitDefs[id].speed — the
+            -- engine divides by GAME_SPEED itself (AMoveType::SetMemberValue).
+            local factor = consist.speedFactor or 1.0
+            if consist.appliedSpeedFactor ~= factor
+                    or consist.appliedSpeedLeader ~= consist.leader then
+                local defID = Spring.GetUnitDefID(consist.leader)
+                local def = defID and UnitDefs[defID]
+                if def and def.speed and def.speed > 0 then
+                    Spring.MoveCtrl.SetGroundMoveTypeData(consist.leader, "maxSpeed",
+                        def.speed * factor)
+                end
+                consist.appliedSpeedFactor = factor
+                consist.appliedSpeedLeader = consist.leader
+            end
+
+            -- No-pivot / turning-circle constraints are the unit def's job,
+            -- not Lua's: fable_train sets turninplace=false + turnrate 50,
+            -- which CGroundMoveType enforces as a ~500-elmo turning circle —
+            -- far wider than the old MIN_TURNING_RADIUS=30 Lua cap here. The
+            -- removed per-frame SetUnitRotation heading-snap also fought the
+            -- move type: it compared against lastLeaderHeading (only updated
+            -- per 2-elmo breadcrumb, so always slightly stale) and rotated
+            -- the unit back every frame, which kept the move type permanently
+            -- in its turn-limited state — consist leaders never exceeded
+            -- turninplacespeedlimit (0.5 elmo/frame) no matter their health
+            -- (live-caught 2026-07-25 while verifying the damage-speed cap).
 
             AddBreadcrumb(consist, x, y, z, heading)
 
@@ -1034,41 +1123,6 @@ function gadget:GameFrame(frame)
             end
         end
     end
-end
-
--- Override move commands to check for U-turns
-function gadget:AllowUnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOptions, cmdTag, synced)
-    local consistID = consistsByUnit[unitID]
-    if not consistID then
-        return true -- Not a train unit
-    end
-
-    local consist = consists[consistID]
-    if not consist or unitID ~= consist.leader then
-        return true -- Not the leader
-    end
-
-    -- Check move commands
-    if cmdID == CMD.MOVE or cmdID == CMD.ATTACK_MOVE or cmdID == CMD.PATROL then
-        if #cmdParams >= 3 then
-            local targetX, targetZ = cmdParams[1], cmdParams[3]
-
-            -- Check if this would require a U-turn
-            if CheckForUTurn(consist, targetX, targetZ) then
-                -- Try to swap leaders for two-engine consists
-                if SwapLeader(consist) then
-                    Spring.Echo("Reversing consist to avoid U-turn")
-                    UpdateConsistParams(consist)
-                elseif consist.engineCount == 1 then
-                    -- Single engine - will have to back up slowly
-                    Spring.Echo("Single-engine consist will reverse slowly")
-                    consist.reversing = true
-                end
-            end
-        end
-    end
-
-    return true
 end
 
 --------------------------------------------------------------------------------
