@@ -98,6 +98,15 @@ CALLIN_LIST = {
 
 	-- misc synced LuaRules callins
 	"AllowCommand",
+	-- Metalstorm authority charge points (PLAN-metalstorm-authority.md §3.2/A2,
+	-- PLAN-macro-directives.md §1). Engine callins added in C++
+	-- (Events.def / EventHandler / CSyncedLuaHandle); without these framework
+	-- entries + the gadgetHandler:Allow* dispatchers in gadgets.lua no global
+	-- function is registered, so the engine's GetGlobalFunc defaults to `true`
+	-- and game_authority_charge.lua's gadget:Allow* is never consulted (the
+	-- order/directive is created but never debited).
+	"AllowStandingOrderCreate",
+	"AllowDirectiveCreate",
 	"AllowStartPosition",
 	"AllowUnitCreation",
 	"AllowUnitTransfer",

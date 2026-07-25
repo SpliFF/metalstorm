@@ -1164,6 +1164,30 @@ function gadgetHandler:AllowCommand(
   return true
 end
 
+-- Metalstorm authority charge dispatchers (PLAN-metalstorm-authority.md §3.2/A2,
+-- PLAN-macro-directives.md §1). The engine's CSyncedLuaHandle looks up a GLOBAL
+-- function of this name; gadgetHandler:UpdateCallIn only registers that global
+-- when both the CALLIN_LIST entry (callins.lua) and this dispatcher exist. A
+-- false return vetoes the create (server answers 402); the charge itself is a
+-- side effect of game_authority_charge.lua's gadget:Allow* returning true.
+function gadgetHandler:AllowStandingOrderCreate(team, playerID, orderType)
+  for _,g in r_ipairs(self.AllowStandingOrderCreateList) do
+    if (not g:AllowStandingOrderCreate(team, playerID, orderType)) then
+      return false
+    end
+  end
+  return true
+end
+
+function gadgetHandler:AllowDirectiveCreate(team, playerID, groupID, directiveType, requestedStrength)
+  for _,g in r_ipairs(self.AllowDirectiveCreateList) do
+    if (not g:AllowDirectiveCreate(team, playerID, groupID, directiveType, requestedStrength)) then
+      return false
+    end
+  end
+  return true
+end
+
 function gadgetHandler:AllowStartPosition(playerID, teamID, readyState, cx, cy, cz, rx, ry, rz)
   for _,g in r_ipairs(self.AllowStartPositionList) do
     if (not g:AllowStartPosition(playerID, teamID, readyState, cx, cy, cz, rx, ry, rz)) then
