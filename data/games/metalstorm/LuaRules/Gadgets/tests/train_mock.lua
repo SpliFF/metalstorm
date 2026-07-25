@@ -156,6 +156,17 @@ function M.new()
         end,
         GiveOrderToUnit = function(unitID, cmdID, params, options)
             world.orders[#world.orders + 1] = { unitID = unitID, cmdID = cmdID, params = params }
+            -- The real engine's CommandAI.GiveCommand dispatches
+            -- eventHandler.AllowCommand synchronously for every order,
+            -- including ones issued from synced Lua (Spring.GiveOrderToUnit
+            -- goes through the same path as a player-issued order) — mirror
+            -- that here so specs can exercise the game_train.lua
+            -- re-entrancy guard for real instead of just asserting the
+            -- order got recorded.
+            local u = world.units[unitID]
+            if u and _G.gadget and _G.gadget.AllowCommand then
+                _G.gadget:AllowCommand(unitID, u.defID, 1, cmdID, params, options or {}, 0, 1, false, false)
+            end
             return true
         end,
         UnitDetach = function() end,
@@ -171,6 +182,9 @@ function M.new()
             end,
             SetNoBlocking = function(unitID, v)
                 world.moveCtrl[unitID].noBlocking = v
+            end,
+            SetExtrapolate = function(unitID, v)
+                world.moveCtrl[unitID].extrapolate = v
             end,
             SetPosition = function(unitID, x, y, z)
                 local mc = world.moveCtrl[unitID]
