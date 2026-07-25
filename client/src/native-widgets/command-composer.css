@@ -194,3 +194,25 @@
    coordinates from the chip's rect. */
 .command-composer .nui-menu { position: fixed; }
 .command-composer .nui-menu[hidden] { display: none; }
+
+/* Thin rule between menu sections (Subject picker: groups | idle | AI). */
+.command-composer .nui-menu__sep {
+    height: 1px;
+    margin: 3px 4px;
+    background: var(--nui-border);
+}
+
+/* Dim trailing tag on a menu row — the echelon on a group, the entity type
+   on a target result. Right-aligned so the primary label reads first. */
+.command-composer .composer-menu-hint {
+    float: right;
+    margin-left: 8px;
+    color: var(--nui-text-faint);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+/* Target search field sits at the top of its result menu. */
+.command-composer .composer-target-search { padding: 2px 2px 4px; }
+.command-composer .composer-target-search .composer-accel-input { width: 100%; }

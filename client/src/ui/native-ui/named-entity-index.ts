@@ -202,6 +202,35 @@ export class NamedEntityIndex {
     }
 
     /**
+     * Atomically replace the entire index contents with `entities`, firing a
+     * single change notification.
+     *
+     * This is the producer's write path (entity-index-producer.ts): each
+     * rulesParams / org-group change rebuilds the whole entity set from the
+     * store snapshot, and a per-`add()` notify would re-render the composer's
+     * open Target menu once per entity. `replaceAll` collapses that to one
+     * rebuild → one notify. Entity *identity* is still keyed on `(type, id)`,
+     * so a rename between rebuilds is picked up (the display name changes)
+     * without the id-keyed references in a saved preset going stale.
+     */
+    replaceAll(entities: NamedEntity[]): void {
+        this.entities.clear();
+        this.nameIndex.clear();
+        for (const entity of entities) {
+            const key = this.makeKey(entity.type, entity.id);
+            this.entities.set(key, entity);
+            const lowerName = entity.name.toLowerCase();
+            let nameSet = this.nameIndex.get(lowerName);
+            if (!nameSet) {
+                nameSet = new Set();
+                this.nameIndex.set(lowerName, nameSet);
+            }
+            nameSet.add(key);
+        }
+        this.notifyChange();
+    }
+
+    /**
      * Subscribe to index changes.
      * Returns an unsubscribe function.
      */
@@ -237,19 +266,36 @@ export class NamedEntityIndex {
 }
 
 /**
- * Helper to parse a region from gameRulesParams.
- * Regions are stored as:
- *   region:${id}:name = string
- *   region:${id}:x = number
- *   region:${id}:z = number
+ * The wire shapes below are the ACTUAL rulesParams the Metalstorm gadgets
+ * publish (flat, underscore-delimited keys — the Spring rulesParam
+ * convention), NOT a synthetic colon-delimited contract. See:
+ *   - regions:    game_regions.lua      → `region_<key>_name/_x/_z`
+ *   - objectives: game_objectives.lua   → `objective_<id>_type/_state/_region/_x/_z` + `objective_count`
+ *   - landmarks:  (no publisher yet)    → `landmark_<name>_x/_z` (reserved shape)
+ * Region keys and landmark names can themselves contain underscores
+ * (`west_scarp_n`), so every parser anchors the field suffix at end-of-string
+ * and lets the greedy `(.+)` capture the full id — never split on the first
+ * underscore.
+ */
+
+/**
+ * Parse regions from gameRulesParams into named entities.
+ *
+ * `region_<key>_name` (display string) + `region_<key>_x` / `_z` (polygon
+ * centroid, elmos) — published once at setup by game_regions.lua. A region is
+ * only emitted once all three are present (grid-provider maps publish none of
+ * them, so they contribute no named places). The dynamic `region_<key>_team` /
+ * `_contested` control state is intentionally NOT part of the entity — it
+ * changes far more often than the composer needs and belongs to the strategic
+ * overlay, not the name index.
  */
 export function parseRegionsFromRulesParams(
-    params: Map<string, number | string>
+    params: ReadonlyMap<string, number | string>
 ): NamedEntity[] {
     const regions = new Map<string, Partial<NamedEntity>>();
 
     for (const [key, value] of params.entries()) {
-        const match = key.match(/^region:([^:]+):(.+)$/);
+        const match = key.match(/^region_(.+)_(name|x|z)$/);
         if (!match) continue;
 
         const [, id, field] = match;
@@ -268,7 +314,6 @@ export function parseRegionsFromRulesParams(
         }
     }
 
-    // Filter complete regions
     const result: NamedEntity[] = [];
     for (const region of regions.values()) {
         if (region.name && typeof region.x === 'number' && typeof region.z === 'number') {
@@ -279,71 +324,102 @@ export function parseRegionsFromRulesParams(
     return result;
 }
 
+/** Human-readable label for an objective's compile-side `type` string
+ *  (objectives/*.lua). Falls back to a capitalised raw type for any newer type
+ *  not enumerated here, so an unknown objective still gets a sensible name. */
+const OBJECTIVE_TYPE_LABELS: Record<string, string> = {
+    control: 'Secure',
+    secure: 'Secure',
+    kill: 'Destroy',
+    escort: 'Escort',
+    protect: 'Protect',
+    infra: 'Hold',
+    extract: 'Extract',
+};
+
+function objectiveTypeLabel(type: string): string {
+    return OBJECTIVE_TYPE_LABELS[type] ?? (type ? type.charAt(0).toUpperCase() + type.slice(1) : 'Objective');
+}
+
 /**
- * Helper to parse objectives from gameRulesParams.
- * Objectives are stored as:
- *   objective:${id}:name = string
- *   objective:${id}:x = number
- *   objective:${id}:z = number
- *   objective:${id}:active = 1 (only include if active)
+ * Parse ACTIVE objectives from gameRulesParams into named entities.
+ *
+ * Objectives publish `objective_count` + a per-id field block
+ * (`objective_<id>_type/_state/_region/_x/_z`). Only `state === 'active'`
+ * objectives are indexed — completed/failed ones drop out of the Target
+ * picker. An objective carries EITHER an explicit `_x/_z` OR a `_region`
+ * key (never both — game_objectives.lua positionHint), so region-hinted
+ * objectives borrow their location (and region name) from `resolveRegion`,
+ * the region lookup the producer builds from the regions parsed above. An
+ * objective with no resolvable position is skipped: the composer can't offer
+ * a locate-ping or a coordinate target for it.
  */
 export function parseObjectivesFromRulesParams(
-    params: Map<string, number | string>
+    params: ReadonlyMap<string, number | string>,
+    resolveRegion?: (key: string) => { name: string; x: number; z: number } | undefined
 ): NamedEntity[] {
-    const objectives = new Map<number, Partial<NamedEntity>>();
+    const count = Number(params.get('objective_count') ?? 0);
+    if (!Number.isFinite(count) || count <= 0) return [];
 
-    for (const [key, value] of params.entries()) {
-        const match = key.match(/^objective:(\d+):(.+)$/);
-        if (!match) continue;
-
-        const [, idStr, field] = match;
-        const id = parseInt(idStr, 10);
-        let objective = objectives.get(id);
-        if (!objective) {
-            objective = { id, type: 'objective' };
-            objectives.set(id, objective);
-        }
-
-        if (field === 'name' && typeof value === 'string') {
-            objective.name = value;
-        } else if (field === 'x' && typeof value === 'number') {
-            objective.x = value;
-        } else if (field === 'z' && typeof value === 'number') {
-            objective.z = value;
-        } else if (field === 'active') {
-            objective.metadata = { ...objective.metadata, active: value === 1 };
-        }
-    }
-
-    // Filter complete and active objectives
     const result: NamedEntity[] = [];
-    for (const objective of objectives.values()) {
-        if (
-            objective.name &&
-            typeof objective.x === 'number' &&
-            typeof objective.z === 'number' &&
-            objective.metadata?.active
-        ) {
-            result.push(objective as NamedEntity);
+    for (let id = 1; id <= count; id++) {
+        const p = `objective_${id}_`;
+        const state = params.get(`${p}state`);
+        if (state !== 'active') continue;
+
+        const type = String(params.get(`${p}type`) ?? '');
+        const rawX = params.get(`${p}x`);
+        const rawZ = params.get(`${p}z`);
+        const regionKey = params.get(`${p}region`);
+
+        let x: number | undefined;
+        let z: number | undefined;
+        let place: string | undefined;
+
+        if (typeof rawX === 'number' && typeof rawZ === 'number') {
+            x = rawX;
+            z = rawZ;
+        } else if (typeof regionKey === 'string' && resolveRegion) {
+            const region = resolveRegion(regionKey);
+            if (region) {
+                x = region.x;
+                z = region.z;
+                place = region.name;
+            }
         }
+
+        if (typeof x !== 'number' || typeof z !== 'number') continue; // unlocatable → not a pickable target
+
+        const label = objectiveTypeLabel(type);
+        const name = place ? `${label}: ${place}` : `${label} #${id}`;
+        result.push({
+            id,
+            type: 'objective',
+            name,
+            x,
+            z,
+            metadata: { objType: type, state, region: regionKey },
+        });
     }
 
     return result;
 }
 
 /**
- * Helper to parse landmarks from gameRulesParams.
- * Landmarks are stored as:
- *   landmark:${name}:x = number
- *   landmark:${name}:z = number
+ * Parse landmarks from gameRulesParams (`landmark_<name>_x/_z`).
+ *
+ * No gadget publishes landmarks yet (scenario/map-authored places are a
+ * future producer — PLAN-persistence §5); this parser exists so that path is
+ * a data change, not a code change, and to keep the free-text accelerator's
+ * `landmark` target type meaningful the moment they land.
  */
 export function parseLandmarksFromRulesParams(
-    params: Map<string, number | string>
+    params: ReadonlyMap<string, number | string>
 ): NamedEntity[] {
     const landmarks = new Map<string, Partial<NamedEntity>>();
 
     for (const [key, value] of params.entries()) {
-        const match = key.match(/^landmark:([^:]+):(.+)$/);
+        const match = key.match(/^landmark_(.+)_(x|z)$/);
         if (!match) continue;
 
         const [, name, field] = match;
@@ -360,56 +436,10 @@ export function parseLandmarksFromRulesParams(
         }
     }
 
-    // Filter complete landmarks
     const result: NamedEntity[] = [];
     for (const landmark of landmarks.values()) {
         if (typeof landmark.x === 'number' && typeof landmark.z === 'number') {
             result.push(landmark as NamedEntity);
-        }
-    }
-
-    return result;
-}
-
-/**
- * Helper to parse org groups from teamRulesParams.
- * Groups are stored as:
- *   org:group:${id}:name = string
- *   org:group:${id}:x = number (centroid)
- *   org:group:${id}:z = number (centroid)
- */
-export function parseOrgGroupsFromTeamRulesParams(
-    params: Map<string, number | string>,
-    defaultType: Extract<EntityType, 'group' | 'platoon' | 'army'> = 'group'
-): NamedEntity[] {
-    const groups = new Map<number, Partial<NamedEntity>>();
-
-    for (const [key, value] of params.entries()) {
-        const match = key.match(/^org:(?:group|platoon|army):(\d+):(.+)$/);
-        if (!match) continue;
-
-        const [, idStr, field] = match;
-        const id = parseInt(idStr, 10);
-        let group = groups.get(id);
-        if (!group) {
-            group = { id, type: defaultType };
-            groups.set(id, group);
-        }
-
-        if (field === 'name' && typeof value === 'string') {
-            group.name = value;
-        } else if (field === 'x' && typeof value === 'number') {
-            group.x = value;
-        } else if (field === 'z' && typeof value === 'number') {
-            group.z = value;
-        }
-    }
-
-    // Filter complete groups
-    const result: NamedEntity[] = [];
-    for (const group of groups.values()) {
-        if (group.name && typeof group.x === 'number' && typeof group.z === 'number') {
-            result.push(group as NamedEntity);
         }
     }
 

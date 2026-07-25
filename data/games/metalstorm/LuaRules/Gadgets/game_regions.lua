@@ -200,15 +200,49 @@ local function gatherUnits()
     return units
 end
 
+-- Region control + geometry is the shared strategic board (same as
+-- objectives): published PUBLIC so it streams to browser clients. Game rules
+-- params default to RULESPARAMLOS_PRIVATE (synced-only) — that is why
+-- game_objectives.lua publishes PUBLIC too. The command composer's Target
+-- picker (named-entity-index) and the strategic-map overlay both read these
+-- client-side; without PUBLIC the client's rulesParams mirror never sees them.
+local PUBLIC = { public = true }
+
+--- Publish each region's static descriptor — display name + polygon centroid —
+--- ONCE at setup. Names and geometry don't change during a game, so this is a
+--- one-shot write, not part of the per-change publish() path. Only the graph
+--- provider carries authored metadata; grid regions are synthetic and nameless
+--- (byKey empty), so a grid map contributes no named *places* to the composer —
+--- objectives (which publish their own x/z) still populate the Target picker.
+--- The centroid is the vertex average: enough for a locate-ping and an
+--- "attack <region>" target, never a point-in-region fill test (regions.js
+--- owns the exact partition geometry from the map export).
+local function publishRegionStatics()
+    if not provider.byKey then return end
+    for _, key in ipairs(provider.keys and provider.keys() or {}) do
+        if key ~= "wilds" then
+            local meta = provider.byKey[key]
+            if meta and type(meta.polygon) == "table" and #meta.polygon > 0 then
+                local sx, sz = 0, 0
+                for _, v in ipairs(meta.polygon) do sx = sx + v.x; sz = sz + v.z end
+                local n = #meta.polygon
+                Spring.SetGameRulesParam('region_' .. key .. '_name', meta.name or key, PUBLIC)
+                Spring.SetGameRulesParam('region_' .. key .. '_x', sx / n, PUBLIC)
+                Spring.SetGameRulesParam('region_' .. key .. '_z', sz / n, PUBLIC)
+            end
+        end
+    end
+end
+
 local function publish(changedKeys)
     if #changedKeys == 0 then return end
     for _, key in ipairs(changedKeys) do
         local rs = ownershipState[key]
-        Spring.SetGameRulesParam('region_' .. key .. '_team', rs.owner or -1)
-        Spring.SetGameRulesParam('region_' .. key .. '_contested', rs.contested and 1 or 0)
+        Spring.SetGameRulesParam('region_' .. key .. '_team', rs.owner or -1, PUBLIC)
+        Spring.SetGameRulesParam('region_' .. key .. '_contested', rs.contested and 1 or 0, PUBLIC)
     end
     regionsRev = regionsRev + 1
-    Spring.SetGameRulesParam('regions_rev', regionsRev)
+    Spring.SetGameRulesParam('regions_rev', regionsRev, PUBLIC)
 end
 
 -- Set up the partition in Initialize, not GameStart: this closes the window
@@ -219,6 +253,7 @@ end
 function gadget:Initialize()
     gaiaTeam = Spring.GetGaiaTeamID()
     setupPartition()
+    publishRegionStatics()
 end
 
 --- Explicit ownership override (scenario preset at GameStart, GM tools).
@@ -227,7 +262,7 @@ end
 --- — this only seeds the starting state, it doesn't freeze it.
 function GG.Regions.SetControllingTeam(key, teamID)
     Ownership.setOwner(ownershipState, key, teamID)
-    Spring.SetGameRulesParam('region_' .. key .. '_team', teamID or -1)
+    Spring.SetGameRulesParam('region_' .. key .. '_team', teamID or -1, PUBLIC)
 end
 
 function gadget:GameFrame(frame)
