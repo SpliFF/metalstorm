@@ -1222,6 +1222,87 @@ bool CSyncedLuaHandle::AllowDirectiveAssign(unsigned int directiveID, const CUni
 }
 
 
+/*** The authority charge site for a classic standing-order create
+ * (PLAN-metalstorm-authority.md §3.2/A2). Fired once by
+ * rts/Server/ClientMessageHandler.cpp before the C++ StandingOrderManager
+ * creates the order, for player-issued (network) creates only. Game Lua
+ * (game_authority_charge.lua) is expected to debit pools as a side effect
+ * before returning true; returning false blocks the create (e.g.
+ * insufficient authority).
+ *
+ * @function AllowStandingOrderCreate
+ * @number team
+ * @number playerID
+ * @number orderType
+ * @treturn bool whether the create is allowed (default true)
+ */
+bool CSyncedLuaHandle::AllowStandingOrderCreate(int team, int playerID, unsigned int orderType)
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	LUA_CALL_IN_CHECK(L, true);
+	luaL_checkstack(L, 5, __func__);
+
+	static const LuaHashString cmdStr(__func__);
+	if (!cmdStr.GetGlobalFunc(L))
+		return true; // call is not defined → allow
+
+	lua_pushnumber(L, team);
+	lua_pushnumber(L, playerID);
+	lua_pushnumber(L, orderType);
+
+	if (!RunCallIn(L, cmdStr, 3, 1))
+		return true;
+
+	const bool allow = luaL_optboolean(L, -1, true);
+	lua_pop(L, 1);
+	return allow;
+}
+
+
+/*** The authority charge site for a macro-directive create
+ * (PLAN-metalstorm-authority.md §3.2/A2, PLAN-macro-directives.md §1
+ * "Charge point"). Fired once by rts/Server/ClientMessageHandler.cpp
+ * before the C++ DirectiveManager creates the directive, for
+ * player-issued (network) creates only — Lua/AI callers of
+ * Spring.CreateDirective are exempt by construction (they never go
+ * through ClientMessageHandler; their own spend governance lives in
+ * ai/strategos, PLAN-metalstorm-ai.md §3.2). `groupID` is 0 for a
+ * condition/area-scoped directive (the "classic standing order" shape
+ * sent over the unified GroupDirective wire).
+ *
+ * @function AllowDirectiveCreate
+ * @number team
+ * @number playerID
+ * @number groupID
+ * @number directiveType
+ * @number requestedStrength
+ * @treturn bool whether the create is allowed (default true)
+ */
+bool CSyncedLuaHandle::AllowDirectiveCreate(int team, int playerID, unsigned int groupID, unsigned int directiveType, unsigned int requestedStrength)
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	LUA_CALL_IN_CHECK(L, true);
+	luaL_checkstack(L, 7, __func__);
+
+	static const LuaHashString cmdStr(__func__);
+	if (!cmdStr.GetGlobalFunc(L))
+		return true; // call is not defined → allow
+
+	lua_pushnumber(L, team);
+	lua_pushnumber(L, playerID);
+	lua_pushnumber(L, groupID);
+	lua_pushnumber(L, directiveType);
+	lua_pushnumber(L, requestedStrength);
+
+	if (!RunCallIn(L, cmdStr, 5, 1))
+		return true;
+
+	const bool allow = luaL_optboolean(L, -1, true);
+	lua_pop(L, 1);
+	return allow;
+}
+
+
 /*** Called when a team sets the sharing level of a resource.
  *
  * @function AllowResourceLevel

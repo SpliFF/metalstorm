@@ -374,40 +374,129 @@ function GG.Authority.OrderCost(unitID, cmdID)
 end
 
 --- The pool-debit primitive (§3.2 "Attribution & fallback"): charges
---- `playerID`'s pool first, then `unitTeam`'s pool for the remainder.
+--- `playerID`'s pool first, then `teamID`'s pool for the remainder.
 --- Refuses (no debit at all) if neither combination covers `cost`, and
 --- records a 'refusal' event so the player sees why. The ONLY writer of
---- pool state during normal play — game_authority_charge.lua (+100) is the
---- sole caller, after every other gadget's AllowCommand veto has run.
---- `cmdID` is used to classify the charge reason for ledger tagging.
-function GG.Authority.ChargeOrder(unitID, unitTeam, playerID, cost, cmdID)
+--- pool state during normal play — shared by every charge site
+--- (ChargeOrder for AllowCommand, ChargeDirective/ChargeStandingOrder for
+--- directive/standing-order create) so pool debit + ledger tagging + hooks
+--- never diverge between call sites. `class` tags the ledger entry
+--- (authority_cost.lua order_class key — a bookkeeping label; `cost` is
+--- already computed by the caller).
+local function debitPools(teamID, playerID, cost, class)
     if cost <= 0 then return true end
     local playerPool = playerID and getPlayerPool(playerID) or 0
-    local teamPool = getTeamPool(unitTeam)
+    local teamPool = getTeamPool(teamID)
     local allowed, spentFromPlayer, spentFromTeam = Attribute.attribute(playerPool, teamPool, cost)
     if not allowed then
-        emitEvent('refusal', cost, 'insufficient_authority', playerID, unitTeam)
+        emitEvent('refusal', cost, 'insufficient_authority', playerID, teamID)
         return false
     end
-    -- Tag ledger (PLAN-metalstorm-economy.md §1): the full order cost is a burn,
-    -- and any team-pool contribution is ALSO a 'player_fallback' move (tracks
-    -- team subsidies, net-zero but velocity math needs to see the flow)
-    local class = Classify.orderClass(cmdID or 0)
     local totalCharged = spentFromPlayer + spentFromTeam
     if spentFromPlayer > 0 and playerID then
         setPlayerPool(playerID, playerPool - spentFromPlayer)
-        fireCharge(playerID, unitTeam, spentFromPlayer)
+        fireCharge(playerID, teamID, spentFromPlayer)
     end
     if spentFromTeam > 0 then
-        setTeamPool(unitTeam, teamPool - spentFromTeam)
+        setTeamPool(teamID, teamPool - spentFromTeam)
         -- Tag the team→player subsidy as a 'move' (§1: player_fallback)
-        Ledger.tagCharge(ledgerState, unitTeam, spentFromTeam, 'player_fallback')
+        Ledger.tagCharge(ledgerState, teamID, spentFromTeam, 'player_fallback')
     end
     -- Tag the full charge as a burn
     if totalCharged > 0 then
-        Ledger.tagCharge(ledgerState, unitTeam, totalCharged, class)
+        Ledger.tagCharge(ledgerState, teamID, totalCharged, class)
     end
     return true
+end
+
+--- `cmdID` is used to classify the charge reason for ledger tagging.
+function GG.Authority.ChargeOrder(unitID, unitTeam, playerID, cost, cmdID)
+    return debitPools(unitTeam, playerID, cost, Classify.orderClass(cmdID or 0))
+end
+
+--- Σ authority_cost_base over an org group's current roster (mirrors the
+--- client's cost-preview.ts/game-processor.ts `gpComputeGroupBaseCost`
+--- exactly, incl. its "missing/unresolved → base 1" fallback) — the charge
+--- basis for a group-scoped directive create. Reads the LIVE roster via
+--- Spring.GetOrgGroups rather than trusting requestedStrength (a demand
+--- target, not the actual committed membership).
+local function sumGroupBaseCost(teamID, groupID)
+    local groups = Spring.GetOrgGroups(teamID)
+    if not groups then return 0 end
+    for _, g in ipairs(groups) do
+        if g.id == groupID then
+            local sum = 0
+            for _, unitID in ipairs(g.members) do
+                local udid = Spring.GetUnitDefID(unitID)
+                local ud = udid and UnitDefs[udid]
+                local base = 1
+                if ud and ud.customParams and ud.customParams.authority_cost_base then
+                    base = tonumber(ud.customParams.authority_cost_base) or 1
+                end
+                sum = sum + base
+            end
+            return sum
+        end
+    end
+    return 0
+end
+
+--- Charge for creating a macro directive (PLAN-metalstorm-authority.md
+--- §3.2/§3.3, A2; PLAN-macro-directives.md §1 "Charge point"). This is the
+--- directive-CREATE charge site — distinct from AllowCommand's per-order
+--- charge, and charged exactly once (never on Update or on the decomposed
+--- per-squad commands, which are fromLua and free by §3.2's table). Called
+--- from game_authority_charge.lua's AllowDirectiveCreate, itself hooked to
+--- the new engine callin fired by rts/Server/ClientMessageHandler.cpp's
+--- GroupDirective-create path.
+---
+--- Group-scoped (groupID ~= 0): cost basis is Σ authority_cost_base over
+--- the org group's CURRENT roster, under the 'directive' order class.
+---
+--- Condition/area-scoped (groupID == 0 — the "classic standing order" shape
+--- sent over the unified GroupDirective wire, macro-directives.md §1):
+--- there is no fixed roster at create time (draws from whichever
+--- unassigned squads match later, as they idle), so this charges a flat
+--- administrative fee (base=1) under the 'standing' class instead of
+--- scaling with committed strength.
+---
+--- SCOPED SIMPLIFICATION (CLAUDE.md "never deviate from Recoil silently" —
+--- called out explicitly, not silent): regionMod is pinned to 1.0. A
+--- per-unit order's regionMod reads the ISSUING UNIT's position
+--- (GG.Regions.CostModifierAt(unitID)); a directive has no single
+--- position — a group's roster can span regions, and an area-scoped
+--- directive's shape (point/circle/polyline) isn't threaded through this
+--- callin today. The client cost-preview (cost-preview.ts) makes the exact
+--- same simplification for the exact same reason (its own doc comment:
+--- "no client-side region-index load wired in this pass") — so server
+--- charge and client preview stay in lockstep, which is the actual
+--- requirement here; both can gain a real regionMod together later (e.g.
+--- from the directive's shape anchor).
+function GG.Authority.ChargeDirective(playerID, teamID, groupID, directiveType, requestedStrength)
+    local base, class
+    if groupID and groupID ~= 0 then
+        base = sumGroupBaseCost(teamID, groupID)
+        class = 'directive'
+    else
+        base = 1
+        class = 'standing'
+    end
+    local classMod = CostSpec.order_class[class] or 1.0
+    local cost = Formula.cost(CostSpec.base_k, base, 1.0, classMod, costScale)
+    return debitPools(teamID, playerID, cost, class)
+end
+
+--- Charge for creating a classic (non-directive-wire) standing order
+--- (PLAN-metalstorm-authority.md §3.2/A2). Flat administrative fee under
+--- the 'standing' class — see GG.Authority.ChargeDirective's condition/
+--- area-scoped branch above for why (no fixed roster at create time).
+--- Kept as a distinct entry point (rather than routing through
+--- ChargeDirective) because the legacy StandingOrderCreate wire message
+--- has no groupID/requestedStrength fields to normalise into that call.
+function GG.Authority.ChargeStandingOrder(playerID, teamID, orderType)
+    local classMod = CostSpec.order_class.standing or 1.0
+    local cost = Formula.cost(CostSpec.base_k, 1, 1.0, classMod, costScale)
+    return debitPools(teamID, playerID, cost, 'standing')
 end
 
 -- ============================================================

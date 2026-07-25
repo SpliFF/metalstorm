@@ -21,6 +21,13 @@
 -- game_authority.lua (-100) owns pools/API/Initialize so GG.Authority
 -- exists before every other gadget's Initialize; this gadget owns nothing
 -- but the charging decision itself.
+--
+-- Also owns the directive/standing-order CREATE charge sites
+-- (AllowDirectiveCreate/AllowStandingOrderCreate, an engine callin added
+-- alongside AllowDirectiveAssign — see rts/System/EventClient.h). These
+-- have no veto-ordering concern (there is no other gadget that vetoes a
+-- directive/standing-order create today) so the layer choice is purely
+-- "lives next to AllowCommand", not load-bearing the way it is above.
 
 function gadget:GetInfo()
     return {
@@ -67,4 +74,27 @@ function gadget:AllowCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdO
         Spring.SetUnitRulesParam(unitID, 'last_commander', playerID)
     end
     return allowed
+end
+
+-- ============================================================
+-- Directive/standing-order CREATE charging (PLAN-metalstorm-authority.md
+-- §3.2/A2, PLAN-macro-directives.md §1 "Charge point"). Distinct from
+-- AllowCommand above: these fire once, at creation, before the C++
+-- DirectiveManager/StandingOrderManager stores the object — not per
+-- decomposed squad command (those are fromLua and free, unaffected by
+-- this gadget). playerID of -1 (no session->clientPlayerNum entry yet)
+-- is passed through as nil so GG.Authority falls back to team-pool-only
+-- charging, same convention as AllowCommand's already-nil-safe playerID.
+-- ============================================================
+
+function gadget:AllowDirectiveCreate(team, playerID, groupID, directiveType, requestedStrength)
+    if not GG.Authority then return true end
+    if playerID and playerID < 0 then playerID = nil end
+    return GG.Authority.ChargeDirective(playerID, team, groupID, directiveType, requestedStrength)
+end
+
+function gadget:AllowStandingOrderCreate(team, playerID, orderType)
+    if not GG.Authority then return true end
+    if playerID and playerID < 0 then playerID = nil end
+    return GG.Authority.ChargeStandingOrder(playerID, team, orderType)
 end

@@ -5,26 +5,11 @@
 
 import { describe, it, expect } from 'vitest';
 import {
-    orderClassForEchelon,
     previewDirectiveCost,
     matchSelectionToGroup,
     type CostModelLike,
     type OrgGroupLike,
 } from './cost-preview.js';
-
-describe('orderClassForEchelon', () => {
-    it('maps Army to the directive rate', () => {
-        expect(orderClassForEchelon('Army')).toBe('directive');
-    });
-
-    it('maps Platoon to the group_op rate', () => {
-        expect(orderClassForEchelon('Platoon')).toBe('group_op');
-    });
-
-    it('falls back Squad to group_op (v0 has no dedicated squad-directive rate)', () => {
-        expect(orderClassForEchelon('Squad')).toBe('group_op');
-    });
-});
 
 describe('previewDirectiveCost', () => {
     const group: OrgGroupLike = { groupId: 1, echelon: 'Platoon', memberIds: [10, 11], baseCostSum: 40 };
@@ -43,15 +28,9 @@ describe('previewDirectiveCost', () => {
         };
     }
 
-    it('returns null for non-GroupDirective compiled messages', () => {
-        const model = fakeModel({ group_op: 0.5 });
-        expect(previewDirectiveCost('StandingOrder', group, model, 100, 100)).toBeNull();
+    it('returns null for AIGuidance (advisory, never a spend)', () => {
+        const model = fakeModel({ directive: 1.0, standing: 1.2 });
         expect(previewDirectiveCost('AIGuidance', group, model, 100, 100)).toBeNull();
-    });
-
-    it('returns null when there is no matching org group (idle-filter/unresolved subject)', () => {
-        const model = fakeModel({ group_op: 0.5 });
-        expect(previewDirectiveCost('GroupDirective', null, model, 100, 100)).toBeNull();
     });
 
     it('returns null when the cost model has no spec loaded for the order class', () => {
@@ -59,19 +38,32 @@ describe('previewDirectiveCost', () => {
         expect(previewDirectiveCost('GroupDirective', group, model, 100, 100)).toBeNull();
     });
 
-    it('computes cost using the group echelon order class and reports affordable', () => {
-        const model = fakeModel({ group_op: 0.5 });
+    it('computes cost from the group roster under the directive class and reports affordable', () => {
+        const model = fakeModel({ directive: 1.0 });
         const preview = previewDirectiveCost('GroupDirective', group, model, 30, 50);
-        // ceil(40 * 1.0 * 0.5 * 1.0) = 20
-        expect(preview).toEqual({ cost: 20, affordable: true, shortfall: 0 });
+        // ceil(40 * 1.0 * 1.0 * 1.0) = 40
+        expect(preview).toEqual({ cost: 40, affordable: true, shortfall: 0 });
     });
 
     it('reports the exact shortfall when pools cannot cover the cost', () => {
-        const armyGroup: OrgGroupLike = { ...group, echelon: 'Army' };
         const model = fakeModel({ directive: 1.0 });
-        const preview = previewDirectiveCost('GroupDirective', armyGroup, model, 5, 10);
+        const preview = previewDirectiveCost('GroupDirective', group, model, 5, 10);
         // ceil(40 * 1.0 * 1.0 * 1.0) = 40; have 15; short by 25
         expect(preview).toEqual({ cost: 40, affordable: false, shortfall: 25 });
+    });
+
+    it('charges a flat base=1 standing fee for a condition-scoped GroupDirective (no group)', () => {
+        const model = fakeModel({ standing: 1.2 });
+        const preview = previewDirectiveCost('GroupDirective', null, model, 100, 100);
+        // ceil(1 * 1.0 * 1.2 * 1.0) = 2
+        expect(preview).toEqual({ cost: 2, affordable: true, shortfall: 0 });
+    });
+
+    it('charges the same flat base=1 standing fee for a StandingOrder message', () => {
+        const model = fakeModel({ standing: 1.2 });
+        const preview = previewDirectiveCost('StandingOrder', null, model, 1, 0);
+        // ceil(1 * 1.0 * 1.2 * 1.0) = 2; have 1; short by 1
+        expect(preview).toEqual({ cost: 2, affordable: false, shortfall: 1 });
     });
 });
 

@@ -161,6 +161,8 @@ class CEventHandler
 		bool AllowStartPosition(int playerID, int teamID, unsigned char readyState, const float3& clampedPos, const float3& rawPickPos);
 		bool AllowStandingOrderAssign(unsigned int orderID, const CUnit* unit);
 		bool AllowDirectiveAssign(unsigned int directiveID, const CUnit* unit);
+		bool AllowStandingOrderCreate(int team, int playerID, unsigned int orderType);
+		bool AllowDirectiveCreate(int team, int playerID, unsigned int groupID, unsigned int directiveType, unsigned int requestedStrength);
 
 		bool TerraformComplete(const CUnit* unit, const CUnit* build);
 		bool MoveCtrlNotify(const CUnit* unit, int data);
