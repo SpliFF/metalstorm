@@ -38,9 +38,14 @@ local function family(prefix, base, scales)
 end
 
 -- Machine guns — squad small arms. Statistical volleys.
+-- FIDELITY-STANDIN: soundstart silenced (was 'mg_volley'). No mg_volley.webm exists
+-- anywhere in the repo (metalstorm/papertanks sounds are unauthored placeholders;
+-- cont/LuaUI/Sounds/*.wav are legacy UI notification sounds, not a kinetic-weapon
+-- fit) — silence beats a mismatched sound. Restore once sounds/weapons/mg_volley.webm
+-- is authored (PLAN-metalstorm.md §9/§11; gap filed 2026-07-26, see ASSETS.md).
 family('MS_MG', {
     weapontype = 'Cannon', weaponvelocity = 800, turret = true,
-    accuracy = 150, areaofeffect = 8, soundstart = 'mg_volley',
+    accuracy = 150, areaofeffect = 8, soundstart = '',
     customparams = { resolution = 'statistical', min_volley_damage = 5, skip_fire_strength = 0 },
 }, {
     { name = 'Light MG',  range = 300, reloadtime = 0.8, dmg = 40  },
@@ -59,9 +64,13 @@ family('MS_AC', {
 })
 
 -- Railguns — kinetic sci-fi flagship guns. Flat, fast, armour-piercing.
+-- FIDELITY-STANDIN: soundstart silenced (was 'railgun_fire'). No railgun_fire.webm
+-- exists anywhere in the repo — silence beats a mismatched sound. Restore once
+-- sounds/weapons/railgun_fire.webm is authored (PLAN-metalstorm.md §9/§11; gap
+-- filed 2026-07-26, see ASSETS.md).
 family('MS_RAILGUN', {
     weapontype = 'Cannon', weaponvelocity = 1800, turret = true,
-    accuracy = 40, areaofeffect = 16, soundstart = 'railgun_fire',
+    accuracy = 40, areaofeffect = 16, soundstart = '',
     customparams = { resolution = 'ballistic' },
 }, {
     { name = 'Light Railgun',     range = 600,  reloadtime = 3.0, dmg = 500  },
@@ -82,10 +91,14 @@ family('MS_MORTAR', {
 })
 
 -- Howitzers — long arcing artillery. Always real ballistics (arcs matter).
+-- FIDELITY-STANDIN: soundstart silenced (was 'howitzer_fire'). No howitzer_fire.webm
+-- exists anywhere in the repo — silence beats a mismatched sound. Restore once
+-- sounds/weapons/howitzer_fire.webm is authored (PLAN-metalstorm.md §9/§11; gap
+-- filed 2026-07-26, see ASSETS.md).
 family('MS_HOWITZER', {
     weapontype = 'Cannon', weaponvelocity = 420, turret = true,
     highTrajectory = 1, accuracy = 260, areaofeffect = 110,
-    soundstart = 'howitzer_fire',
+    soundstart = '',
     customparams = { resolution = 'ballistic' },
 }, {
     { name = 'Field Howitzer',   range = 1100, reloadtime = 6.0,  dmg = 420  },
@@ -130,9 +143,13 @@ family('MS_TORPEDO', {
 })
 
 -- Flak — proximity-burst AA screens.
+-- FIDELITY-STANDIN: soundstart silenced (was 'flak_fire'). No flak_fire.webm exists
+-- anywhere in the repo — silence beats a mismatched sound. Restore once
+-- sounds/weapons/flak_fire.webm is authored (PLAN-metalstorm.md §9/§11; gap filed
+-- 2026-07-26, see ASSETS.md).
 family('MS_FLAK', {
     weapontype = 'Cannon', weaponvelocity = 1000, turret = true,
-    accuracy = 200, areaofeffect = 96, soundstart = 'flak_fire',
+    accuracy = 200, areaofeffect = 96, soundstart = '',
     toairweapon = true, burnblow = true,
     customparams = { resolution = 'statistical', min_volley_damage = 10, skip_fire_strength = 0 },
 }, {
