@@ -113,6 +113,19 @@ struct ClientSession {
     /// fresh ClientID) start false so late joiners converge to current state.
     bool rulesParamsSnapshotSent = false;
 
+    /// Highest key-dictionary revision this session has been sent. The
+    /// rules-param wire interns string keys to u16 ids (RulesParamKeyDictionary);
+    /// a client can only resolve a keyId it holds in its dictionary. New keys
+    /// can be interned at any time (the join snapshot itself, or a gadget
+    /// setting a brand-new rules-param key mid-game), so before sending any
+    /// RulesParamUpdate that references interned ids we re-send the dictionary
+    /// whenever it has grown past this rev. Starts 0 (< the rev=1 empty dict)
+    /// so every fresh session receives the current dictionary before its
+    /// snapshot. Was previously sent exactly once, before the snapshot interned
+    /// its own keys — leaving the client's dictionary missing precisely the keys
+    /// its snapshot/deltas used, so the whole stream decoded to unresolved ids.
+    uint32_t rulesParamsKeyDictRev = 0;
+
     /// Last known frame for reconnection state recovery.
     int lastKnownFrame = -1;
 

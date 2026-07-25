@@ -1094,11 +1094,38 @@ void StateStreamer::BroadcastRulesParams(int) {
         gameParamsRev++;
     }
 
-    sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
-        if (!session.rulesParamsSnapshotSent) {
-            // W3: Send key dictionary first on join
-            SendKeyDictionary(clientId);
+    // Intern EVERY key any message this tick can reference *before* the
+    // per-session send loop, so the key dictionary a session is handed (below)
+    // already covers the keyIds in the snapshot/deltas that follow it on the
+    // same ordered Control stream. The snapshot loops intern lazily as they
+    // build; doing it here first is what lets the dictionary-sync check see the
+    // final keyDictionaryRev. (Previously the dictionary was sent before the
+    // snapshot interned its keys, so a client's dictionary was missing exactly
+    // the keys its snapshot used → every keyId decoded to "unknown" → the whole
+    // rules-param stream went dark for that client.)
+    for (const auto& kv : gameNow) InternKey(kv.first);
+    for (int t = 0; t < activeTeams; ++t) {
+        const CTeam* team = teamHandler.Team(t);
+        if (team == nullptr) continue;
+        for (const auto& kv : team->modParams) InternKey(kv.first);
+    }
+    // Delta keys too (a Nil/removed-key delta references a key no longer in the
+    // live maps above).
+    for (const auto& c : gameChanged) InternKey(c.key);
+    for (int t = 0; t < activeTeams; ++t)
+        for (const auto& c : teamChanged[t]) InternKey(c.key);
 
+    sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
+        // Keep the client's key dictionary current before any update that
+        // references interned ids. Covers both the join snapshot and any keys
+        // interned mid-game after this session already joined; a stale
+        // dictionary silently drops every param whose keyId it can't resolve.
+        if (session.rulesParamsKeyDictRev < keyDictionaryRev) {
+            SendKeyDictionary(clientId);
+            session.rulesParamsKeyDictRev = keyDictionaryRev;
+        }
+
+        if (!session.rulesParamsSnapshotSent) {
             // Join snapshot: full current state, replace=true per scope.
             {
                 Protocol::RulesParamUpdateData snap;
