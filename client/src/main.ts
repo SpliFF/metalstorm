@@ -74,6 +74,7 @@ import {
     uiStore,
     mapGestureBridge,
     configureCommandPresets,
+    type CommandConnection,
 } from './ui/native-ui/index.js';
 
 // Active in-game templates. Starts with engine defaults; overwritten when
@@ -84,6 +85,41 @@ let gameTemplates: GameTemplates = getDefaultGameTemplates();
 /// Game-processor worker (PLAN-game-worker.md GW4). Owns the Babylon Engine on
 /// the transferred #game-canvas.
 let gameWorker: Worker | null = null;
+/// Native-widget command bridge: the widgets' DOM lives on this thread but the
+/// live Connection lives in the game-processor worker, so integration.ts's
+/// sendCommand gets this proxy instead of a Connection. Each method posts to
+/// whatever worker instance is currently live (respawned on R2 recovery, same
+/// as every other gp:* postMessage in this file). Org-group/directive verbs
+/// reuse the org-panel's existing gp:* messages; the rest have their own
+/// carriers (game-worker-protocol.ts "sendCommand bridge" section).
+const workerCommandConnection: CommandConnection = {
+    sendGroupDirective: (directiveId, groupId, type, shape, params, opts = {}) =>
+        gameWorker?.postMessage({
+            type: 'gp:groupDirectiveUpdate', directiveId, groupId, directiveType: type, shape, params,
+            priority: opts.priority ?? 0, requestedStrength: opts.requestedStrength ?? 0,
+            active: opts.active ?? true,
+        }),
+    sendGroupDirectiveRemove: (directiveId) =>
+        gameWorker?.postMessage({ type: 'gp:groupDirectiveRemove', directiveId }),
+    sendStandingOrderCreate: (type, priority, params, expiresInFrames = 0) =>
+        gameWorker?.postMessage({ type: 'gp:standingOrderCreate', orderType: type, priority, params, expiresInFrames }),
+    sendOrgGroupCreate: (name, memberIds) =>
+        gameWorker?.postMessage({ type: 'gp:orgGroupCreate', name, memberIds }),
+    sendOrgGroupUpdate: (groupId, addIds, removeIds, name) =>
+        gameWorker?.postMessage({ type: 'gp:orgGroupUpdate', groupId, addIds, removeIds, name }),
+    sendOrgGroupDisband: (groupId) =>
+        gameWorker?.postMessage({ type: 'gp:orgGroupDisband', groupId }),
+    sendGroupPosture: (groupId, postureJson) =>
+        gameWorker?.postMessage({ type: 'gp:groupPosture', groupId, postureJson }),
+    sendLuaRulesMsg: (data) =>
+        gameWorker?.postMessage({ type: 'gp:luaRulesMsg', data }),
+    sendConsoleCommand: (scope, command) =>
+        gameWorker?.postMessage({ type: 'gp:consoleCommand', scope, command }),
+    sendPlayerCommand: (commandId, unitIds, params, options = 0) =>
+        gameWorker?.postMessage({ type: 'gp:playerCommand', commandId, unitIds, params, options }),
+    sendSelectionState: (unitIds) =>
+        gameWorker?.postMessage({ type: 'gp:selectionState', unitIds }),
+};
 /// GW8 tooling bridge. The test harness (window.test) + widget eval
 /// (window.widgets.eval) live on main but their state lives in the worker;
 /// `workerCall()` issues a `gp:test`/`evalLua` request and resolves the
@@ -967,7 +1003,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 if (gameId === 'metalstorm') {
                     // Initialize with empty httpBase for local/dev environment
                     // In production, this would be the lobby HTTP URL
-                    void initializeNativeUI(gameId, '', m.playerId, m.team, null, m.role);
+                    void initializeNativeUI(gameId, '', m.playerId, m.team, workerCommandConnection, m.role);
                 }
                 break;
             }

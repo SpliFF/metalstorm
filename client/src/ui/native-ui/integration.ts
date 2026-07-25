@@ -8,6 +8,30 @@
 import type { Connection } from '../../core/connection.js';
 import { uiStore } from './ui-store.js';
 
+/**
+ * The slice of `Connection` the widget sendCommand bridge needs. The real
+ * Connection lives inside the game-processor worker (GW4), so on the main
+ * thread main.ts passes a proxy implementing this interface that forwards
+ * each call over the gp message channel; a real `Connection` satisfies it
+ * structurally for any same-thread caller (e.g. wireRulesParamsToStore).
+ */
+export interface CommandConnection {
+    sendGroupDirective(
+        directiveId: number, groupId: number, type: number, shape: number, params: number[],
+        opts?: { priority?: number; requestedStrength?: number; active?: boolean },
+    ): void;
+    sendGroupDirectiveRemove(directiveId: number): void;
+    sendStandingOrderCreate(type: number, priority: number, params: number[], expiresInFrames?: number): void;
+    sendOrgGroupCreate(name: string, memberIds: number[]): void;
+    sendOrgGroupUpdate(groupId: number, addIds: number[], removeIds: number[], name: string): void;
+    sendOrgGroupDisband(groupId: number): void;
+    sendGroupPosture(groupId: number, postureJson: string): void;
+    sendLuaRulesMsg(data: Uint8Array | string): void;
+    sendConsoleCommand(scope: string, command: string): void;
+    sendPlayerCommand(commandId: number, unitIds: number[], params: number[], options?: number): void;
+    sendSelectionState(unitIds: number[]): void;
+}
+
 // Debug hook: expose the native-ui store so live boot-verification
 // (chrome-devtools / the metalstorm-demo live-verify workflow) can inspect the
 // gameRulesParams/teamRulesParams the widgets read — e.g.
@@ -20,7 +44,7 @@ import { WidgetLoader } from './widget-loader.js';
 import { startEntityIndexProducer } from './entity-index-producer.js';
 
 let widgetLoader: WidgetLoader | null = null;
-let activeConnection: Connection | null = null;
+let activeConnection: CommandConnection | null = null;
 // The named-entity-index producer (regions/objectives/groups → index). Kept at
 // module scope so the same session teardown that disposes the widget loader
 // also stops the producer and clears the index.
@@ -35,7 +59,7 @@ export async function initializeNativeUI(
     httpBase: string,
     playerId: number,
     teamId: number,
-    connection: Connection | null = null,
+    connection: CommandConnection | null = null,
     role: string = ''
 ): Promise<void> {
     // Clean up any existing loader
@@ -111,7 +135,7 @@ export function handleRulesParamUpdate(update: {
  * - LuaRulesMsg: messages to synced Lua
  * - ConsoleCommand: server console commands
  */
-export function createSendCommand(connection: Connection, role: string = ''): (cmd: any) => void {
+export function createSendCommand(connection: CommandConnection, role: string = ''): (cmd: any) => void {
     return (cmd: any) => {
         // PLAN-metalstorm-onboarding.md §4: spectators render the HUD but
         // issue nothing — this is the single choke-point every widget
@@ -222,8 +246,8 @@ export function createSendCommand(connection: Connection, role: string = ''): (c
                     // For unit commands (move, attack, build, etc.)
                     if (cmd.unitIds && cmd.cmdId != null) {
                         connection.sendPlayerCommand(
-                            cmd.unitIds,
                             cmd.cmdId,
+                            cmd.unitIds,
                             cmd.params ?? [],
                             cmd.options ?? 0
                         );

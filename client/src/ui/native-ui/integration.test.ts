@@ -68,7 +68,9 @@ describe('createSendCommand — spectator gate', () => {
         const conn = makeMockConnection();
         const send = createSendCommand(conn, 'player');
         send({ type: 'PlayerCommand', unitIds: [1], cmdId: 1 });
-        expect(conn.sendPlayerCommand).toHaveBeenCalledWith([1], 1, [], 0);
+        // commandId first, then unitIds — Connection.sendPlayerCommand's real
+        // signature (the pre-fix bridge passed them swapped).
+        expect(conn.sendPlayerCommand).toHaveBeenCalledWith(1, [1], [], 0);
     });
 
     it('still forwards commands when no role is supplied (default player HUD)', () => {
