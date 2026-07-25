@@ -27,6 +27,8 @@ import {
     gpHandleOrgGroupCreate, gpHandleOrgGroupUpdate, gpHandleOrgGroupDisband,
     gpHandleGroupPosture, gpHandleGroupDirectiveUpdate, gpHandleGroupDirectiveRemove,
     gpHandleSelectOrgGroup, gpHandleArmDirectiveShape, gpHandleCancelDirectiveShape,
+    gpHandleStandingOrderCreate, gpHandleLuaRulesMsg, gpHandleConsoleCommand,
+    gpHandlePlayerCommand, gpHandleSelectionState,
 } from './game-processor.js';
 // PLAN-rml.md: DOM events + viewport changes route straight into the RmlUi
 // bridge (no game-processor state needed).
@@ -237,6 +239,24 @@ self.onmessage = async (e: MessageEvent<WorkerInbound>) => {
         // PLAN-macro-ui.md §2/§5: cross-thread arm/cancel for the shared
         // directive-shape gesture capture (org panel button, or
         // metalstorm-scripting task 4's map-arm integration).
+        // Native-widget sendCommand bridge (integration.ts CommandConnection
+        // proxy on main → Connection here): verbs with no gp:* carrier above.
+        case 'gp:standingOrderCreate':
+            gpHandleStandingOrderCreate(msg.orderType as number, msg.priority as number, msg.params as number[], msg.expiresInFrames as number);
+            break;
+        case 'gp:luaRulesMsg':
+            gpHandleLuaRulesMsg(msg.data as Uint8Array | string);
+            break;
+        case 'gp:consoleCommand':
+            gpHandleConsoleCommand(msg.scope as string, msg.command as string);
+            break;
+        case 'gp:playerCommand':
+            gpHandlePlayerCommand(msg.commandId as number, msg.unitIds as number[], msg.params as number[], msg.options as number);
+            break;
+        case 'gp:selectionState':
+            gpHandleSelectionState(msg.unitIds as number[]);
+            break;
+
         case 'gp:armDirectiveShape':
             gpHandleArmDirectiveShape(msg as unknown as import('./game-worker-protocol.js').GpArmDirectiveShapeToWorker);
             break;

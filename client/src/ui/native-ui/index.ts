@@ -27,6 +27,7 @@ export {
     handleRulesParamUpdate,
     disposeNativeUI,
 } from './integration.js';
+export type { CommandConnection } from './integration.js';
 
 // Named-entity index (PLAN-metalstorm-scripting.md §4)
 export { NamedEntityIndex, namedEntityIndex } from './named-entity-index.js';

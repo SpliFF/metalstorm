@@ -3438,6 +3438,32 @@ export function gpHandleGroupDirectiveRemove(directiveId: number): void {
     gpCtx.connection?.sendGroupDirectiveRemove(directiveId);
 }
 
+// ── Native-widget sendCommand bridge (game-worker-protocol.ts, same forward-
+// onto-Connection pattern as the org-group/directive handlers above) ──
+
+export function gpHandleStandingOrderCreate(orderType: number, priority: number, params: number[], expiresInFrames: number): void {
+    gpCtx.connection?.sendStandingOrderCreate(orderType, priority, params, expiresInFrames);
+}
+
+export function gpHandleLuaRulesMsg(data: Uint8Array | string): void {
+    gpCtx.connection?.sendLuaRulesMsg(data);
+}
+
+export function gpHandleConsoleCommand(scope: string, command: string): void {
+    gpCtx.connection?.sendConsoleCommand(scope, command);
+}
+
+export function gpHandlePlayerCommand(commandId: number, unitIds: number[], params: number[], options: number): void {
+    gpCtx.connection?.sendPlayerCommand(commandId, unitIds, params, options);
+}
+
+/// Selection goes through the worker's selection manager (which owns the
+/// debounced SelectionState wire send), not straight to the Connection —
+/// same routing as gpHandleSelectOrgGroup above.
+export function gpHandleSelectionState(unitIds: number[]): void {
+    gpCtx.selection?.setSelectionExternal(unitIds);
+}
+
 /// Org panel row click → world selection (PLAN-macro-ui.md §1: selecting a
 /// group resolves to its roster for highlight purposes). Reads the cached
 /// snapshot from the last OrgGroupState push rather than round-tripping.

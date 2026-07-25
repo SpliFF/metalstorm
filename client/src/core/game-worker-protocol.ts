@@ -333,6 +333,52 @@ export interface GpCancelDirectiveShapeToWorker {
     type: 'gp:cancelDirectiveShape';
 }
 
+// ─── native-widget sendCommand bridge (integration.ts → Connection) ─────────
+// The native-UI widgets (command composer et al.) run on the main thread but
+// the live Connection lives inside the game-processor worker, so main.ts's
+// CommandConnection proxy forwards each send over this channel. Org-group /
+// directive verbs reuse the gp:orgGroup* / gp:groupDirective* messages above;
+// the messages below cover the verbs that had no gp:* carrier yet.
+
+/** Command composer commit: condition-scoped standing order (groupId==0). */
+export interface GpStandingOrderCreateToWorker {
+    type: 'gp:standingOrderCreate';
+    orderType: number;
+    priority: number;
+    params: number[];
+    expiresInFrames: number;
+}
+
+/** Widget → synced LuaRules message (gadget:RecvLuaMsg). */
+export interface GpLuaRulesMsgToWorker {
+    type: 'gp:luaRulesMsg';
+    data: Uint8Array | string;
+}
+
+/** Widget-issued console command (scope: 'game' | 'server'). */
+export interface GpConsoleCommandToWorker {
+    type: 'gp:consoleCommand';
+    scope: string;
+    command: string;
+}
+
+/** Widget-issued unit order (none send this yet; carried for completeness of
+ *  the CommandConnection surface). */
+export interface GpPlayerCommandToWorker {
+    type: 'gp:playerCommand';
+    commandId: number;
+    unitIds: number[];
+    params: number[];
+    options: number;
+}
+
+/** Widget-driven selection replacement (routed to the worker's selection
+ *  manager, which owns the debounced SelectionState wire send). */
+export interface GpSelectionStateToWorker {
+    type: 'gp:selectionState';
+    unitIds: number[];
+}
+
 export type GpMessageToWorker =
     | GpInitToWorker
     | GpInputToWorker
@@ -355,6 +401,11 @@ export type GpMessageToWorker =
     | GpSelectOrgGroupToWorker
     | GpArmDirectiveShapeToWorker
     | GpCancelDirectiveShapeToWorker
+    | GpStandingOrderCreateToWorker
+    | GpLuaRulesMsgToWorker
+    | GpConsoleCommandToWorker
+    | GpPlayerCommandToWorker
+    | GpSelectionStateToWorker
     // PLAN-rml.md: DOM events + viewport changes routed back to the worker-side
     // RmlUi proxy (rml-bridge.ts) for Lua listener dispatch / dp-ratio recompute.
     | RmlEventToWorker
