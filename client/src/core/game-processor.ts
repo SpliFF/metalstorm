@@ -910,9 +910,9 @@ function gpConnect(msg: GpInitToWorker): void {
     gpFirstStateReceived = false;
     const conn = new Connection({
         onStateChange: (state) => postLog(1, `[gp] connection state: ${state}`),
-        onAuthenticated: (playerId, _token, team, defsCacheKey) => {
-            postLog(1, `[gp] authenticated playerId=${playerId} team=${team} defsKey=${defsCacheKey || '(none)'}`);
-            postToMain({ type: 'gp:authenticated', playerId, team });
+        onAuthenticated: (playerId, _token, team, defsCacheKey, role) => {
+            postLog(1, `[gp] authenticated playerId=${playerId} team=${team} role=${role} defsKey=${defsCacheKey || '(none)'}`);
+            postToMain({ type: 'gp:authenticated', playerId, team, role });
             // GW4-c6-1b: seed LuaUI identity so Spring.GetMyTeamID /
             // GetLocalPlayerID / GetMyAllyTeamID resolve. AuthResponse carries
             // no allyTeam, so default myAllyTeam to the team until the team

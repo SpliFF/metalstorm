@@ -43,7 +43,8 @@
       "title": "AI Command",
       "collapsed": true,
       "_chrome": "The tallest panel in the HUD (stance, ROE, region paint, asset locks, funding, intent, change feed) — set-and-forget, so it starts collapsed.",
-      "subscribes": ["teamRulesParams"]
+      "subscribes": ["teamRulesParams"],
+      "hideForSpectator": true
     },
     {
       "id": "command-composer",
@@ -52,7 +53,8 @@
       "_builtin_note": "Mounted from the client bundle (client/src/native-widgets/command-composer.js) via BUILTIN_WIDGETS, not fetched from this dir — it depends on bundled compile-table + named-entity-index modules. The game-dir command-composer.js is a stub kept for reference.",
       "mount": "bottom-center",
       "title": "Compose Command",
-      "subscribes": ["gameRulesParams", "teamRulesParams"]
+      "subscribes": ["gameRulesParams", "teamRulesParams"],
+      "hideForSpectator": true
     }
   ]
 }

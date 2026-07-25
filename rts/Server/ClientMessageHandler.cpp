@@ -42,6 +42,10 @@ namespace {
 std::string generateToken() {
     return Crypto::GenerateToken(16);
 }
+
+/// ClientSession::role / CanCommandTeam / StateStreamer all key off this
+/// exact string — see PLAN-metalstorm-onboarding.md §4.
+const std::string kSpectatorRole = "spectator";
 } // namespace
 
 void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
@@ -192,17 +196,19 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                         break;
                     }
                     const int team = resolveTeam(reconnectUser->username);
-                    if (rosterRequired && team < 0) {
-                        auto resp = Protocol::BuildAuthResponse(
-                            SpringWeb::AuthStatus_InvalidCredentials,
-                            "", 0, "Not in this room's roster");
-                        rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
-                        break;
-                    }
+                    // An authenticated user who isn't in the roster the lobby
+                    // handed us is a spectator, not a rejected connection —
+                    // PLAN-metalstorm-onboarding.md §4's "spectate a running
+                    // game" flow depends on this: spawnGameServer never puts
+                    // spectators in --player, so every spectator (pre-game or
+                    // mid-game) lands here with team < 0.
+                    const bool isSpectator = rosterRequired && team < 0;
+                    const std::string& effectiveRole =
+                        isSpectator ? kSpectatorRole : reconnectUser->role;
                     auto resp = Protocol::BuildAuthResponse(
                         SpringWeb::AuthStatus_OK, auth->token()->str(),
                         static_cast<uint32_t>(userId), "",
-                        static_cast<int8_t>(team), reconnectUser->role,
+                        static_cast<int8_t>(team), effectiveRole,
                         defsCacheKey);
                     rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
                     // Register the session — previously the
@@ -211,11 +217,13 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                     // every PlayerCommand bounced at the
                     // REQUIRE_SESSION guard.
                     sessions.AddSession(msg.clientId, userId,
-                        reconnectUser->username, reconnectUser->role);
+                        reconnectUser->username, effectiveRole);
                     if (auto* s = sessions.GetSession(msg.clientId))
                         s->team = team;
                     // Register a Spring CPlayer so Lua can
                     // query player info and receive callins.
+                    // Spectators ARE players in Spring's playerHandler
+                    // (PlayerBase::spectator), just non-commanding ones.
                     {
                         int pNum = nextPlayerNum++;
                         CPlayer p;
@@ -223,6 +231,7 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                         p.team = team;
                         p.active = true;
                         p.playerNum = pNum;
+                        p.spectator = isSpectator;
                         playerHandler.AddPlayer(p);
                         clientPlayerNum[msg.clientId] = pNum;
                     }
@@ -236,9 +245,9 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                     start.PushDirectivesTo(msg.clientId, team);
                     sendPostAuthOneShots();
                     SLOG(SPRING_LOG_NOTICE,
-                        "client %u reconnected as '%s' (id=%lld) team=%d",
+                        "client %u reconnected as '%s' (id=%lld) team=%d role=%s",
                         msg.clientId, reconnectUser->username.c_str(),
-                        userId, team);
+                        userId, team, effectiveRole.c_str());
                     // Track roster connection for GameStart
                     if (playerTeamByUsername.count(reconnectUser->username)) {
                         connectedRosterPlayers.insert(reconnectUser->username);
@@ -320,20 +329,14 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                 break;
             }
 
-            // Roster membership: reject anyone the lobby
-            // didn't pre-authorise for this game. Dev-mode
-            // (empty roster) skips this check.
+            // Roster membership: an authenticated user not in the lobby's
+            // --player roster is a spectator, not a rejected connection —
+            // see the matching comment on the reconnect path above. Dev-mode
+            // (empty roster) skips this and keeps the "command anything"
+            // smoketest escape hatch for team == -1.
             const int team = resolveTeam(user->username);
-            if (rosterRequired && team < 0) {
-                auto resp = Protocol::BuildAuthResponse(
-                    SpringWeb::AuthStatus_InvalidCredentials,
-                    "", 0, "Not in this room's roster");
-                rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
-                SLOG(SPRING_LOG_WARNING,
-                    "client %u rejected: '%s' not in roster",
-                    msg.clientId, user->username.c_str());
-                break;
-            }
+            const bool isSpectator = rosterRequired && team < 0;
+            const std::string& effectiveRole = isSpectator ? kSpectatorRole : user->role;
 
             // Create session
             std::string token = generateToken();
@@ -342,13 +345,15 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             auto resp = Protocol::BuildAuthResponse(
                 SpringWeb::AuthStatus_OK, token,
                 static_cast<uint32_t>(user->id), "",
-                static_cast<int8_t>(team), user->role, defsCacheKey);
+                static_cast<int8_t>(team), effectiveRole, defsCacheKey);
             rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
-            sessions.AddSession(msg.clientId, user->id, user->username, user->role);
+            sessions.AddSession(msg.clientId, user->id, user->username, effectiveRole);
             if (auto* s = sessions.GetSession(msg.clientId))
                 s->team = team;
             // Register a Spring CPlayer so Lua can query
-            // player info and receive callins.
+            // player info and receive callins. Spectators ARE players in
+            // Spring's playerHandler (PlayerBase::spectator), just
+            // non-commanding ones.
             {
                 int pNum = nextPlayerNum++;
                 CPlayer p;
@@ -356,6 +361,7 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                 p.team = team;
                 p.active = true;
                 p.playerNum = pNum;
+                p.spectator = isSpectator;
                 playerHandler.AddPlayer(p);
                 clientPlayerNum[msg.clientId] = pNum;
             }
@@ -374,8 +380,8 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             // modoptions. Shared with the reconnect path above.
             sendPostAuthOneShots();
 
-            SLOG(SPRING_LOG_NOTICE, "client %u authenticated as '%s' (id=%lld) team=%d",
-                msg.clientId, username, user->id, team);
+            SLOG(SPRING_LOG_NOTICE, "client %u authenticated as '%s' (id=%lld) team=%d role=%s",
+                msg.clientId, username, user->id, team, effectiveRole.c_str());
 
             // Track roster connection for GameStart
             if (playerTeamByUsername.count(user->username)) {

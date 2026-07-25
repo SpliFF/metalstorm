@@ -43,6 +43,11 @@ export interface WidgetDescriptor {
                              // engine-provided UI that depends on bundled modules
                              // (e.g. the command composer needs compile-table +
                              // named-entity-index).
+    /** Never mount this widget for a spectator session (PLAN-metalstorm-
+     *  onboarding.md §4). Set on every order-issuing panel — the command
+     *  composer, AI guidance — so a spectator's HUD has zero command paths
+     *  by construction rather than by every widget self-checking a role. */
+    hideForSpectator?: boolean;
 
     // ── panel chrome (owned by the loader, not the widget) ──
     /** Header text. Present ⇒ the widget is wrapped in a titled .nui-panel
@@ -113,6 +118,8 @@ export class WidgetLoader {
     private uiRoot: HTMLElement | null = null;
     private sendCommandProvider: ((cmd: any) => void) | null = null;
     private gameId = '';
+    /** PLAN-metalstorm-onboarding.md §4 — gates `hideForSpectator` widgets. */
+    private isSpectator = false;
     /** Keeps the left rail docked below whatever occupies the top-left mount. */
     private topLeftObserver: ResizeObserver | null = null;
     /**
@@ -131,14 +138,18 @@ export class WidgetLoader {
      * @param httpBase - HTTP base URL for fetching game data
      * @param playerId - Local player ID
      * @param teamId - Local player's team ID
+     * @param role - Session role ("player" / "spectator" / "admin"); gates
+     *   `hideForSpectator` manifest entries (PLAN-metalstorm-onboarding §4).
      */
     async load(
         gameId: string,
         httpBase: string,
         playerId: number,
         teamId: number,
+        role: string = '',
     ): Promise<void> {
         this.gameId = gameId;
+        this.isSpectator = role === 'spectator';
         const generation = this.generation;
         const stale = () => this.generation !== generation;
 
@@ -171,6 +182,10 @@ export class WidgetLoader {
         // Load and mount each widget
         for (const descriptor of manifest.widgets) {
             if (stale()) return;
+            if (this.isSpectator && descriptor.hideForSpectator) {
+                console.log(`[widget-loader] Skipping ${descriptor.id} (spectator session)`);
+                continue;
+            }
             try {
                 await this.loadWidget(descriptor, baseUrl, playerId, teamId);
             } catch (e) {
