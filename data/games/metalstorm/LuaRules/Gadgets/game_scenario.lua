@@ -176,15 +176,26 @@ end
 local deferredObjectives = {}
 
 local function populateCiviliansInArea(x, z, r, role)
-    -- Find all civilian units in the specified area with the given role
+    -- Find all civilian units in the specified area with the given role.
+    -- Civilian identity + role come from the GG.Civilians registry (the source
+    -- of truth — roles like 'ambient'/'convoy'/'payload' live only there, not
+    -- on unitdefs). A def-level fallback (customParams.civilian, which the real
+    -- civilian defs carry) covers any civilian not routed through the registry.
     local result = {}
     local units = Spring.GetUnitsInCylinder(x, z, r)
+    local Civ = GG.Civilians
     for _, unitID in ipairs(units) do
-        local udid = Spring.GetUnitDefID(unitID)
-        local ud = udid and UnitDefs[udid]
-        if ud and ud.customParams and ud.customParams.is_civilian then
-            -- Check role if specified
-            if not role or (GG.Civilians.GetRole and GG.Civilians.GetRole(unitID) == role) then
+        local isCiv = Civ and Civ.IsCivilian and Civ.IsCivilian(unitID)
+        if not isCiv then
+            local udid = Spring.GetUnitDefID(unitID)
+            local ud = udid and UnitDefs[udid]
+            local cp = ud and ud.customParams
+            isCiv = cp and (cp.civilian or cp.is_civilian) ~= nil
+        end
+        if isCiv then
+            -- Check role if specified (role is registry-only).
+            local unitRole = Civ and Civ.GetRole and Civ.GetRole(unitID)
+            if not role or unitRole == role then
                 result[#result + 1] = unitID
             end
         end

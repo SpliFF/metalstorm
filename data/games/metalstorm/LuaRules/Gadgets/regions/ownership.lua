@@ -28,6 +28,17 @@ local function newRegionState()
     return { owner = nil, leadTicks = {}, contested = false, emptyTicks = 0 }
 end
 
+--- Seed/override a region's owner directly (scenario preset at GameStart, GM
+--- tools). Creates the region entry if absent; leaves lead/contested/decay
+--- state intact so the periodic evaluator can still flip it once units arrive.
+--- teamID = nil clears the region to uncontrolled.
+function M.setOwner(state, key, teamID)
+    local rs = state[key] or newRegionState()
+    rs.owner = teamID
+    state[key] = rs
+    return rs
+end
+
 --- Leader (highest score) and runner-up score among present teams.
 local function leaderAndRunnerUp(byTeam)
     local leader, leaderScore, runnerUpScore = nil, 0, 0

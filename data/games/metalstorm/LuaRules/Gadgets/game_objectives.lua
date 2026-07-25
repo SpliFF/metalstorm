@@ -261,6 +261,13 @@ local PUBLISHED_FIELDS = {
     'phase', 'stage', 'expire', 'region', 'x', 'z', 'r', 'suggested',
 }
 
+-- Objectives are the shared strategic board (PLAN-metalstorm §"Objectives are
+-- the game"): every player sees the full set and the panel filters/labels by
+-- `objective_<id>_team`. Published PUBLIC so the params stream to browser
+-- clients — game rules params default to RULESPARAMLOS_PRIVATE (synced-only),
+-- which is why the objectives panel showed "No active objectives" until now.
+local PUBLIC = { public = true }
+
 local function clearPublished(o)
     local p = 'objective_' .. o.id .. '_'
     for _, field in ipairs(PUBLISHED_FIELDS) do
@@ -270,33 +277,33 @@ end
 
 local function publish(o, ctx)
     local p = 'objective_' .. o.id .. '_'
-    Spring.SetGameRulesParam(p .. 'type', o.type)
-    Spring.SetGameRulesParam(p .. 'scope', o.scope)
-    Spring.SetGameRulesParam(p .. 'state', o.state)
-    Spring.SetGameRulesParam(p .. 'reward', o.reward + (GG.Authority.EscrowTotal(o.id) or 0))
-    Spring.SetGameRulesParam(p .. 'team', o.forTeam or -1)
+    Spring.SetGameRulesParam(p .. 'type', o.type, PUBLIC)
+    Spring.SetGameRulesParam(p .. 'scope', o.scope, PUBLIC)
+    Spring.SetGameRulesParam(p .. 'state', o.state, PUBLIC)
+    Spring.SetGameRulesParam(p .. 'reward', o.reward + (GG.Authority.EscrowTotal(o.id) or 0), PUBLIC)
+    Spring.SetGameRulesParam(p .. 'team', o.forTeam or -1, PUBLIC)
     -- PLAN-metalstorm-interaction.md §1 joint_objective: the widened
     -- co-eligible team, if any (GG.Objectives.WidenEligibility).
-    if o.forTeam2 then Spring.SetGameRulesParam(p .. 'team2', o.forTeam2) end
-    Spring.SetGameRulesParam(p .. 'progress', o.progress or 0)
+    if o.forTeam2 then Spring.SetGameRulesParam(p .. 'team2', o.forTeam2, PUBLIC) end
+    Spring.SetGameRulesParam(p .. 'progress', o.progress or 0, PUBLIC)
     -- PLAN-metalstorm-teams.md §3.3: joiner onboarding hint, set via
     -- GG.Objectives.SuggestFor. The panel renders this as "yours to take".
-    if o.suggestedFor then Spring.SetGameRulesParam(p .. 'suggested', o.suggestedFor) end
-    if o.phase then Spring.SetGameRulesParam(p .. 'phase', o.phase) end
+    if o.suggestedFor then Spring.SetGameRulesParam(p .. 'suggested', o.suggestedFor, PUBLIC) end
+    if o.phase then Spring.SetGameRulesParam(p .. 'phase', o.phase, PUBLIC) end
     if o.type == 'extract' and o.data and o.data.phase then
-        Spring.SetGameRulesParam(p .. 'stage', o.data.phase)
+        Spring.SetGameRulesParam(p .. 'stage', o.data.phase, PUBLIC)
     end
-    if o.expiresAtFrame then Spring.SetGameRulesParam(p .. 'expire', o.expiresAtFrame) end
+    if o.expiresAtFrame then Spring.SetGameRulesParam(p .. 'expire', o.expiresAtFrame, PUBLIC) end
 
     local x, z, r, region = positionHint(o, ctx)
     if region then
-        Spring.SetGameRulesParam(p .. 'region', region)
+        Spring.SetGameRulesParam(p .. 'region', region, PUBLIC)
     elseif x then
-        Spring.SetGameRulesParam(p .. 'x', x)
-        Spring.SetGameRulesParam(p .. 'z', z)
-        if r then Spring.SetGameRulesParam(p .. 'r', r) end
+        Spring.SetGameRulesParam(p .. 'x', x, PUBLIC)
+        Spring.SetGameRulesParam(p .. 'z', z, PUBLIC)
+        if r then Spring.SetGameRulesParam(p .. 'r', r, PUBLIC) end
     end
-    Spring.SetGameRulesParam('objective_count', nextId - 1)
+    Spring.SetGameRulesParam('objective_count', nextId - 1, PUBLIC)
 end
 
 -- ============================================================

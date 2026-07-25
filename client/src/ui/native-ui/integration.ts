@@ -7,6 +7,15 @@
 
 import type { Connection } from '../../core/connection.js';
 import { uiStore } from './ui-store.js';
+
+// Debug hook: expose the native-ui store so live boot-verification
+// (chrome-devtools / the metalstorm-demo live-verify workflow) can inspect the
+// gameRulesParams/teamRulesParams the widgets read — e.g.
+// `window.__msUiStore.gameRulesParam('objective_count')`. Read-only handle to
+// the singleton; harmless in prod.
+if (typeof window !== 'undefined') {
+    (window as unknown as { __msUiStore?: unknown }).__msUiStore = uiStore;
+}
 import { WidgetLoader } from './widget-loader.js';
 
 let widgetLoader: WidgetLoader | null = null;
