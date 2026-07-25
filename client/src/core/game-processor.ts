@@ -782,29 +782,47 @@ async function gpLoadMap(msg: GpInitToWorker): Promise<void> {
 /// connection is authenticated, then resend periodically. c3 replaces this
 /// with real camera-frustum updates from the in-worker camera state machine.
 async function gpRegisterViewport(lobbyUrl: string, mapId: string): Promise<void> {
-    let centerX = 4096, centerZ = 4096;
+    const VP_SIZE = 16384;      // viewport box edge (elmos)
+    const VP_HALF = VP_SIZE / 2;
+    let mapW = 8192, mapH = 8192;
     try {
         const resp = await fetch(`${lobbyUrl}/api/maps/data/${mapId}/metadata.json`);
         if (resp.ok) {
             const meta = await resp.json();
             const sq = meta.squareSize ?? 8;
-            centerX = ((meta.mapx ?? 1024) * sq) / 2;
-            centerZ = ((meta.mapy ?? 1024) * sq) / 2;
+            mapW = (meta.mapx ?? 1024) * sq;
+            mapH = (meta.mapy ?? 1024) * sq;
         }
     } catch (err) {
-        postLog(2, `[gp] map metadata fetch failed (${err}); using default viewport center`);
+        postLog(2, `[gp] map metadata fetch failed (${err}); using default viewport extents`);
     }
-    // GW4-c5b: track the interactive camera — centre the viewport on the camera
-    // look-at so the server filters around where the player is looking. The size
-    // stays a generous 16384² ("cover any current map", viewport.ts) so entities
-    // never pop on these test maps; a tighter frustum-derived box is a later
-    // optimisation that matters for large MMORTS maps, not c5b. Rotation 0 / zoom
-    // 1 are placeholders until the LOD path lands.
+    const centerX = mapW / 2, centerZ = mapH / 2;
+
+    // Clamp the viewport centre so the box always maximally covers the map.
+    // Without this, an off-centre camera on a map no larger than VP_SIZE (the
+    // common case on current test maps — meridian_basin is exactly 16384²) slides
+    // the box off a map edge and the server *correctly* filters out every entity
+    // now outside it — which reads as the entity stream "capping" at ~100–300
+    // units when the camera sits at a corner start-position (the real cause of
+    // the PLAN-metalstorm-squad-performance §0a "blocking finding" — the wire
+    // itself carries 1300+ entities / 37 KB snapshots fine). When the box is
+    // wider than the map along an axis it can't be positioned to cover the whole
+    // map from off-centre, so pin that axis to the map centre; otherwise clamp
+    // the centre to [half, mapDim-half] exactly like an RTS camera clamps at a
+    // map edge. On maps larger than VP_SIZE the box still tracks the camera
+    // (a tighter frustum-derived box + zoom LOD is the later optimisation noted
+    // at GW4-c5b). Rotation 0 / zoom 1 remain placeholders until the LOD path lands.
+    const clampCenter = (c: number, mapDim: number): number =>
+        VP_SIZE >= mapDim ? mapDim / 2 : Math.min(Math.max(c, VP_HALF), mapDim - VP_HALF);
+
     const send = () => {
         const cam = gpViewCameras.get(0);
         const t = cam?.target;
         gpCtx.connection?.sendViewportUpdate(
-            0, t ? t.x : centerX, t ? t.z : centerZ, 16384, 16384, 0, 1);
+            0,
+            clampCenter(t ? t.x : centerX, mapW),
+            clampCenter(t ? t.z : centerZ, mapH),
+            VP_SIZE, VP_SIZE, 0, 1);
     };
     send();
     if (gpViewportTimer) clearInterval(gpViewportTimer);
