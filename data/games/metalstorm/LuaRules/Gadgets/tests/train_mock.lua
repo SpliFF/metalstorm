@@ -13,6 +13,12 @@
 
 local M = {}
 
+-- The server's vendored Lua 5.4 builds with LUA_COMPAT_MATHLIB
+-- (rts/lib/lua/include/luaconf.h), so math.atan2 exists in the live gadget
+-- environment. Busted runs whatever Lua is installed locally (5.3+ removed
+-- atan2), so mirror the server's compat surface here.
+math.atan2 = math.atan2 or function(y, x) return math.atan(y, x) end
+
 local SQUARE_SIZE = 8
 
 -- Real fable_train.lua footprintz values (units/fable_train.lua): engine 9,
@@ -45,6 +51,7 @@ function M.new()
         moveCtrl = {},         -- unitID -> { enabled, noBlocking, positions = {{x,y,z}...}, headings = {...}, velocities = {...} }
         cmdDescs = {},         -- unitID -> {cmdDesc...}
         cobValues = {},        -- unitID -> cobID -> value
+        groundMoveData = {},   -- unitID -> key -> value (MoveCtrl.SetGroundMoveTypeData)
         orders = {},           -- recorded Spring.GiveOrderToUnit calls
         echoes = {},           -- recorded Spring.Echo messages
     }
@@ -100,6 +107,15 @@ function M.new()
         GetUnitHeading = function(unitID)
             local u = world.units[unitID]
             return u and u.heading
+        end,
+        -- Real front vector. In this mock heading 0 faces +Z; note the real
+        -- engine's heading↔vector mapping differs (RH flip), which is exactly
+        -- why the gadget uses GetUnitDirection instead of heading math.
+        GetUnitDirection = function(unitID)
+            local u = world.units[unitID]
+            if not u then return nil end
+            local h = (u.heading or 0) * math.pi / 32768
+            return math.sin(h), 0, math.cos(h)
         end,
         GetUnitVelocity = function(unitID)
             local u = world.units[unitID]
@@ -171,17 +187,29 @@ function M.new()
                 local mc = world.moveCtrl[unitID]
                 table.insert(mc.velocities, { vx = vx, vy = vy, vz = vz })
             end,
+            SetGroundMoveTypeData = function(unitID, key, value)
+                world.groundMoveData[unitID] = world.groundMoveData[unitID] or {}
+                world.groundMoveData[unitID][key] = value
+            end,
         },
     }
 
-    _G.CMD = { MOVE = 10, ATTACK_MOVE = 20, PATROL = 30, STOP = 0, UNLOAD_UNITS = 40, UNLOAD_UNIT = 41 }
+    -- Mirror the REAL engine's CMD table (rts/Lua/LuaConstCMD.cpp values).
+    -- Deliberately no ATTACK_MOVE entry: attack-move is CMD.FIGHT in
+    -- Spring/Recoil, and a mocked-in ATTACK_MOVE constant previously hid the
+    -- gadget comparing cmdID against a nil constant.
+    _G.CMD = { STOP = 0, MOVE = 10, PATROL = 15, FIGHT = 16, UNLOAD_UNITS = 105, UNLOAD_UNIT = 106 }
     _G.CMDTYPE = { ICON_UNIT = 1, ICON = 2 }
-    _G.COB = { MAX_SPEED = 1 }
+    _G.Game = { gameSpeed = 30 }
 
+    -- speed is elmos/sec (UnitDefs convention: maxvelocity * gameSpeed);
+    -- fable_train engine maxvelocity=2.4 → 72 (cars are 1.8 but only the
+    -- leader's — an engine's — speed cap matters to the gadget).
     _G.UnitDefs = {}
     for defID, footprintz in pairs(FOOTPRINTZ) do
         _G.UnitDefs[defID] = {
             zsize = footprintz * 2,
+            speed = 72,
             customParams = { couple_links = 'link_f,link_r', train_role = ROLE[defID] },
         }
     end
