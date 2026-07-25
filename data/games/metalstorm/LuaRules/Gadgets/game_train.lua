@@ -28,6 +28,11 @@
 -- - isFirePlatform=true on both → loaded units keep firing
 -- - Loaded units use bowtie side-fire (AllowWeaponTargetCheck already implemented in T4)
 -- - Load/unload gating: unload only at low/zero consist speed (< 0.5 elmo/frame)
+-- COUPLER-DISTANCE FIX (2026-07-25): halfLength now derives from the real unit
+-- footprint (zsize) instead of hardcoded placeholders, so CanCouple's range
+-- matches physical car length. Also adds GG.Train.Couple(a, b) as a
+-- programmatic seam alongside the CMD_COUPLE order flow. See
+-- PLAN-metalstorm-train.md §2/§7.
 
 function gadget:GetInfo()
     return {
@@ -64,6 +69,10 @@ local MAX_CARS_PER_ENGINE = 3  -- max 3 cars per engine
 
 -- Default gap between couplers when coupled (meters)
 local DEFAULT_COUPLING_GAP = 1.0
+
+-- Elmos per map square (rts/Server/MapProcessor.cpp SQUARE_SIZE); zsize is
+-- expressed in map squares, so this converts it to world-space elmos.
+local SQUARE_SIZE = 8
 
 -- Movement constants
 local BREADCRUMB_BUFFER_SIZE = 512  -- ring buffer size for path history
@@ -130,6 +139,15 @@ local trainDefs = {}  -- defID -> {role, linkF, linkR, halfLength}
 -- Helper functions
 --------------------------------------------------------------------------------
 
+-- Forward declarations: CreateConsist seeds a new consist's derived state via
+-- UpdateConsistHP (which itself calls UpdateSpeedFactor) and
+-- UpdateConsistParams, and CoupleUnits/UnitDestroyed (re)apply movement
+-- control via SetupConsistMovement — all defined later in the file (Lua's
+-- `local function` isn't visible to code above it, so calling these without
+-- a forward declaration is a nil-global call the first time any of those
+-- code paths actually run).
+local UpdateConsistHP, UpdateSpeedFactor, UpdateConsistParams, SetupConsistMovement
+
 local function GetTrainDef(unitDefID)
     if trainDefs[unitDefID] then
         return trainDefs[unitDefID]
@@ -146,23 +164,22 @@ local function GetTrainDef(unitDefID)
     -- Parse couple_links to find link pieces
     local linkF, linkR
     for link in string.gmatch(cp.couple_links, "[^,]+") do
-        link = link:match("^%s*(.-)%s*$")  -- trim
-        if link == "link_f" then
+        local trimmed = link:match("^%s*(.-)%s*$")  -- trim
+        if trimmed == "link_f" then
             linkF = true
-        elseif link == "link_r" then
+        elseif trimmed == "link_r" then
             linkR = true
         end
     end
 
-    -- Calculate half-length from piece positions (placeholder for now)
-    -- TODO: Get actual piece z-offsets once piece API is available
-    -- For now, use approximations based on unit footprints
-    local halfLength
-    if cp.train_role == ROLE_ENGINE then
-        halfLength = 11.2  -- from plan: engine link_f/link_r at z ±11.2
-    else
-        halfLength = 8.7   -- from plan: carriages at z ±8.7
-    end
+    -- Half-length derived from the unit's actual footprint (zsize, in map
+    -- squares) rather than the coupler model's piece z-offsets, which we
+    -- don't have a runtime API to read. The footprint is what collision
+    -- actually keeps units apart by, so coupling range has to match it or
+    -- footprint-adjacent cars can never get within CanCouple range (see
+    -- the 2026-07-25 demo-verify note in .tasks/notes/metalstorm-train.md —
+    -- the old 11.2/8.7 placeholders were ~6x too small).
+    local halfLength = def.zsize * SQUARE_SIZE / 2
 
     trainDefs[unitDefID] = {
         role = cp.train_role,
@@ -242,7 +259,7 @@ local function CreateConsist(unitID)
     return consist
 end
 
-local function UpdateConsistHP(consist)
+function UpdateConsistHP(consist)
     local totalHP = 0
     local totalMaxHP = 0
     local liveHP = 0
@@ -267,7 +284,7 @@ local function UpdateConsistHP(consist)
     UpdateSpeedFactor(consist, liveHP, liveMaxHP)
 end
 
-local function UpdateSpeedFactor(consist, liveHP, liveMaxHP)
+function UpdateSpeedFactor(consist, liveHP, liveMaxHP)
     -- Calculate base speed factor from aggregate HP fraction
     local speedFactor = 1.0
 
@@ -351,7 +368,7 @@ local function RebuildCouplingLengths(consist)
     end
 end
 
-local function UpdateConsistParams(consist)
+function UpdateConsistParams(consist)
     -- Expose consist structure to client via unit rules params
     for i, unitID in ipairs(consist.units) do
         Spring.SetUnitRulesParam(unitID, "train_consist_id", consist.id)
@@ -476,6 +493,15 @@ local function CoupleUnits(unitA, unitB)
     end
 
     return true
+end
+
+-- Programmatic coupling seam for scenario/GM consist spawning. CMD_COUPLE
+-- (the order-flow path via CommandFallback below) requires a player-issued
+-- ICON_UNIT command and is awkward to drive from scenario setup code, so
+-- expose the same CoupleUnits() logic directly.
+GG.Train = GG.Train or {}
+function GG.Train.Couple(unitA, unitB)
+    return CoupleUnits(unitA, unitB)
 end
 
 local function DecoupleAt(unitID)
@@ -903,7 +929,7 @@ local function SwapLeader(consist)
     return true
 end
 
-local function SetupConsistMovement(consist)
+function SetupConsistMovement(consist)
     -- Setup movement control for all units in consist
     if not consist.leader then
         return
@@ -1107,8 +1133,8 @@ function gadget:AllowWeaponTarget(unitID, targetID, weaponNum, weaponDefID, defa
         -- Check if this weapon is in the roof turret list
         local isRoofTurret = false
         for turretNum in string.gmatch(roofTurrets, "[^,]+") do
-            turretNum = tonumber(turretNum:match("^%s*(.-)%s*$"))  -- trim and convert
-            if turretNum == weaponNum then
+            local trimmed = tonumber(turretNum:match("^%s*(.-)%s*$"))  -- trim and convert
+            if trimmed == weaponNum then
                 isRoofTurret = true
                 break
             end
