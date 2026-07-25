@@ -15,18 +15,12 @@
 -- (tools/mapgen/meridian_layout.json) — region keys named in comments
 -- below match that graph's canonical keys.
 --
--- REGION ADDRESSING (see the FILE-SCOPE NOTE in game_scenario.lua): the
--- region-control gadget (game_regions.lua) still runs the ORIGINAL fixed
--- 2048-elmo grid, not mapdata/regions.lua's named graph — the named-graph
--- rewrite (commit 0838b8066b, "implement region control") is not yet
--- merged into this branch. So world.regions below is expressed as grid
--- keys ("gridX:gridZ", REGION_SIZE=2048), one entry per grid cell a named
--- home/valley region's footprint overlaps (computed from the layout
--- graph's bboxes) — each entry's trailing comment names which
--- mapdata/regions.lua region it belongs to, so this file can be
--- mechanically re-keyed to named graph keys once that rewrite lands. This
--- is the same provisional pattern scenarios/scenario_smoke_test.lua
--- already uses for green_flat.
+-- REGION ADDRESSING (see the FILE-SCOPE NOTE in game_scenario.lua): meridian_
+-- basin ships content/maps/meridian_basin/mapdata/regions.lua, so
+-- game_regions.lua auto-selects the named 24-region graph provider (not the
+-- fixed 2048-elmo grid). world.regions/objectives region keys below are the
+-- graph's named keys (e.g. "cinder_forge") straight from that file — one
+-- entry per named region, not per grid cell.
 
 return {
     version   = 1,
@@ -43,40 +37,20 @@ return {
         -- 3 region-hops from the basin" design invariant.
         regions = {
             -- north (team 0)
-            { key = "0:0", team = 0 }, -- cinder_forge
-            { key = "1:0", team = 0 }, -- cinder_forge
-            { key = "2:0", team = 0 }, -- cinder_forge
-            { key = "0:1", team = 0 }, -- ash_habitat
-            { key = "1:1", team = 0 }, -- ash_habitat
-            { key = "2:1", team = 0 }, -- ash_habitat
-            { key = "3:0", team = 0 }, -- northgate
-            { key = "4:0", team = 0 }, -- northgate
-            { key = "3:1", team = 0 }, -- granary_vale
-            { key = "4:1", team = 0 }, -- granary_vale
-            { key = "5:1", team = 0 }, -- granary_vale
-            { key = "5:0", team = 0 }, -- northwatch
-            { key = "6:0", team = 0 }, -- northwatch
-            { key = "7:0", team = 0 }, -- northwatch
-            { key = "6:1", team = 0 }, -- north_market
-            { key = "7:1", team = 0 }, -- north_market
+            { key = "cinder_forge",  team = 0 },
+            { key = "ash_habitat",   team = 0 },
+            { key = "northgate",     team = 0 },
+            { key = "granary_vale",  team = 0 },
+            { key = "northwatch",    team = 0 },
+            { key = "north_market",  team = 0 },
 
             -- south (team 4)
-            { key = "0:7", team = 4 }, -- slag_forge
-            { key = "1:7", team = 4 }, -- slag_forge
-            { key = "2:7", team = 4 }, -- slag_forge
-            { key = "0:5", team = 4 }, -- shale_habitat
-            { key = "1:5", team = 4 }, -- shale_habitat
-            { key = "2:5", team = 4 }, -- shale_habitat
-            { key = "3:7", team = 4 }, -- southgate
-            { key = "4:7", team = 4 }, -- southgate
-            { key = "3:5", team = 4 }, -- sorghum_vale
-            { key = "4:5", team = 4 }, -- sorghum_vale
-            { key = "5:5", team = 4 }, -- sorghum_vale
-            { key = "5:7", team = 4 }, -- southwatch
-            { key = "6:7", team = 4 }, -- southwatch
-            { key = "7:7", team = 4 }, -- southwatch
-            { key = "6:5", team = 4 }, -- south_market
-            { key = "7:5", team = 4 }, -- south_market
+            { key = "slag_forge",    team = 4 },
+            { key = "shale_habitat", team = 4 },
+            { key = "southgate",     team = 4 },
+            { key = "sorghum_vale",  team = 4 },
+            { key = "southwatch",    team = 4 },
+            { key = "south_market",  team = 4 },
 
             -- Deliberately absent (neutral at kickoff): ridge rows
             -- (west_scarp_n/s, hollow_overlook_n, gulch_overlook_s,
@@ -145,8 +119,8 @@ return {
     -- Phase 3: Final evacuation extraction
     objectives = {
         -- STRATEGIC: Control the basin (the endgame objective)
-        { type = 'control', scope = 'strategic', forTeam = nil, region = '4:4', reward = 300,
-          expiresAtFrame = nil }, -- meridian_basin — open-ended, the war's focal point
+        { type = 'control', scope = 'strategic', forTeam = nil, region = 'meridian_basin', reward = 300,
+          expiresAtFrame = nil }, -- open-ended, the war's focal point
 
         -- TACTICAL Phase 1: Protect the civilian districts
         -- North habitat protection (ash_habitat grid cells)
@@ -170,40 +144,41 @@ return {
           expiresAtFrame = 9000 },
 
         -- TACTICAL Phase 1: Convoy escort missions
-        -- NOTE: These placeholder objectives have empty payloadUnitIDs arrays
-        -- because the actual convoy units don't exist at scenario load time.
-        -- The civilians/convoy.lua gadget (when implemented) should:
-        --   1. Spawn the convoy units
-        --   2. Update these objective params.payloadUnitIDs with the spawned unit IDs
-        --   3. Or create new escort objectives dynamically
-        -- For now, these serve as story documentation and will validate but
-        -- fail at init-time (no payload) — they demonstrate the intended design.
+        -- payloadUnitIDs starts empty — the convoy vehicle doesn't exist at
+        -- scenario-load time (civilians/convoy.lua staggers its first spawn
+        -- 0-60s past GameStart). _populatePayloadFrom.route names the
+        -- mapdata/civilians.lua convoy route; game_scenario.lua queues this
+        -- objective and civilians/convoy.lua's spawn path
+        -- (GG.Scenario.NotifyConvoySpawn) fires it — with the spawned
+        -- vehicle as payload — the first time that route's convoy spawns.
 
         -- North convoy: ash_habitat → north_market via granary_vale
         { type = 'escort', scope = 'tactical', forTeam = 0,
           params = {
-              payloadUnitIDs = {},  -- TODO: populated by convoy spawner
+              payloadUnitIDs = {},
               destArea = { x = 13800, z = 2500, r = 400 },  -- north_market approx center
               quorum = 1,
           },
+          _populatePayloadFrom = { route = 'convoy_north' },
           reward = 100,
           expiresAtFrame = 18000 },  -- 10 minutes
 
         -- South convoy: shale_habitat → south_market via sorghum_vale
         { type = 'escort', scope = 'tactical', forTeam = 4,
           params = {
-              payloadUnitIDs = {},  -- TODO: populated by convoy spawner
+              payloadUnitIDs = {},
               destArea = { x = 13800, z = 13900, r = 400 },  -- south_market approx center
               quorum = 1,
           },
+          _populatePayloadFrom = { route = 'convoy_south' },
           reward = 100,
           expiresAtFrame = 18000 },
 
         -- TACTICAL Phase 2: Secure the ridge passes
-        { type = 'control', scope = 'tactical', forTeam = nil, region = '2:4', reward = 110,
-          expiresAtFrame = nil },  -- west_pass
-        { type = 'control', scope = 'tactical', forTeam = nil, region = '5:4', reward = 110,
-          expiresAtFrame = nil },  -- east_pass
+        { type = 'control', scope = 'tactical', forTeam = nil, region = 'west_pass', reward = 110,
+          expiresAtFrame = nil },
+        { type = 'control', scope = 'tactical', forTeam = nil, region = 'east_pass', reward = 110,
+          expiresAtFrame = nil },
 
         -- TACTICAL Phase 3: Emergency extraction from threatened habitats
         -- North extraction: secure ash_habitat, evacuate to northgate

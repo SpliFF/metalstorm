@@ -18,15 +18,18 @@
 -- LOAD ORDER CONTRACT: layer -90 — after authority/teams (pools exist),
 -- before objectives/regions consumers seed from scenario state.
 --
--- FILE-SCOPE NOTE (2026-07-19): game_regions.lua is being rewritten in the
--- concurrent `metalstorm-backbone` lane (commit 0838b8066b, unmerged as of
--- this writing) to a named map-authored region graph (PLAN-metalstorm-
--- regions.md) — but that rewrite is *also* read-only (ControllingTeam/
--- OwnerAt/CostModifierAt, no setter). world.regions below addresses by the
--- CURRENT grid model's key format ("gridX:gridZ", via GG.Regions.KeyAt) —
--- the only one this loader can act on today. Once the backbone rewrite
--- lands, both GG.Regions' setter and this loader's region addressing need
--- to move to named graph keys together; do not let one drift ahead alone.
+-- FILE-SCOPE NOTE (2026-07-25, updated): game_regions.lua's named
+-- map-authored region graph rewrite (PLAN-metalstorm-regions.md, commit
+-- 0838b8066b) has LANDED, with a setter (GG.Regions.SetControllingTeam) that
+-- world.regions below calls directly by key — no format assumption baked in
+-- here. A map auto-selects the graph provider when it ships mapdata/
+-- regions.lua (named keys, e.g. "cinder_forge"); otherwise game_regions.lua
+-- falls back to the original fixed 2048-elmo grid ("gridX:gridZ", via
+-- GG.Regions.KeyAt). Each scenario's world.regions/objectives region keys
+-- must match whichever provider its map actually uses — see
+-- scenarios/meridian_basin.lua (named graph) vs scenarios/
+-- scenario_smoke_test.lua (green_flat_x34_v3 ships no mapdata/regions.lua,
+-- so it still addresses the grid).
 
 function gadget:GetInfo()
     return {
@@ -46,6 +49,10 @@ end
 
 local SUPPORTED_VERSION = 1
 local DEFAULT_SPACING = 150        -- elmos between grid-spread squad instances
+local DEFAULT_CONTROL_HOLD_FRAMES = 900   -- 30s hold to complete — mirrors
+                                            -- objectives/generator.lua's
+                                            -- CONTROL_HOLD_FRAMES; scenario
+                                            -- authors override via o.holdFrames
 
 -- ============================================================
 -- Helpers
@@ -175,6 +182,14 @@ end
 -- ============================================================
 local deferredObjectives = {}
 
+-- Escort objectives whose _populatePayloadFrom names a convoy `route` (not
+-- an area) can't resolve at the frame-30 sweep below — the payload vehicle
+-- doesn't exist until civilians/convoy.lua's spawn timer fires, which is
+-- staggered 0-60s past GameStart by design. These wait, keyed by route id,
+-- for GG.Scenario.NotifyConvoySpawn (called from the convoy spawn path)
+-- instead of a fixed frame.
+local pendingConvoyObjectives = {}   -- route id -> list of scenario objective defs
+
 local function populateCiviliansInArea(x, z, r, role)
     -- Find all civilian units in the specified area with the given role.
     -- Civilian identity + role come from the GG.Civilians registry (the source
@@ -203,6 +218,28 @@ local function populateCiviliansInArea(x, z, r, role)
     return result
 end
 
+--- Build the GG.Objectives.Create def + fire it, echoing the outcome. Shared
+--- by the frame-30 civilian sweep and the convoy-spawn event path below.
+local function createPopulatedObjective(o, params, label)
+    local def = {
+        type = o.type,
+        scope = o.scope,
+        forTeam = o.forTeam,
+        reward = o.reward,
+        expiresAtFrame = o.expiresAtFrame,
+        params = params,
+    }
+    local id = GG.Objectives.Create(def)
+    if id then
+        Spring.Echo('[game_scenario] created ' .. label .. ' objective ' .. id ..
+                   ' (' .. o.type .. ')')
+    else
+        Spring.Echo('[game_scenario] WARNING: failed to create ' .. label ..
+                   ' ' .. o.type .. ' objective')
+    end
+    return id
+end
+
 local function resolveDeferredObjectives()
     for _, o in ipairs(deferredObjectives) do
         local params = o.params or {}
@@ -226,22 +263,7 @@ local function resolveDeferredObjectives()
         -- Only create if we have units (empty arrays fail init validation)
         if (not params.targetUnitIDs or #params.targetUnitIDs > 0) and
            (not params.payloadUnitIDs or #params.payloadUnitIDs > 0) then
-            local def = {
-                type = o.type,
-                scope = o.scope,
-                forTeam = o.forTeam,
-                reward = o.reward,
-                expiresAtFrame = o.expiresAtFrame,
-                params = params,
-            }
-            local id = GG.Objectives.Create(def)
-            if id then
-                Spring.Echo('[game_scenario] created deferred objective ' .. id ..
-                           ' (' .. o.type .. ')')
-            else
-                Spring.Echo('[game_scenario] WARNING: failed to create deferred ' ..
-                           o.type .. ' objective')
-            end
+            createPopulatedObjective(o, params, 'deferred')
         else
             Spring.Echo('[game_scenario] skipped ' .. o.type ..
                        ' objective (no units found or empty payload)')
@@ -250,22 +272,53 @@ local function resolveDeferredObjectives()
     deferredObjectives = {}
 end
 
+--- Called from civilians/convoy.lua's spawn path (via GG.Scenario, checked
+--- defensively since load order between gadgets isn't guaranteed) whenever
+--- a convoy vehicle is created. Fires the first still-pending escort
+--- objective queued for this route with payloadUnitIDs = {unitID} — one-shot
+--- per route, matching "the opening convoy run is the escort mission", not
+--- every respawn of a recurring route.
+local function notifyConvoySpawn(routeId, unitID)
+    local pending = pendingConvoyObjectives[routeId]
+    if not pending or #pending == 0 then return end
+
+    local o = table.remove(pending, 1)
+    local params = o.params or {}
+    params.payloadUnitIDs = { unitID }
+    createPopulatedObjective(o, params, 'convoy-spawned')
+end
+
 local function stageObjectives(objectives)
     for _, o in ipairs(objectives or {}) do
         -- Authoring convenience: flat type-specific fields (region,
         -- targetUnitID, duration) fold into GG.Objectives.Create's `params`
         -- sub-table — the shape game_objectives.lua's evaluators read.
+        -- NOTE: 'region' folds into params.regionKey — that's the field name
+        -- objectives/control.lua's validateParams/init/positionHint actually
+        -- read (params.region was a dead alias nothing consumed).
         local params = o.params or {}
-        if o.region and params.region == nil then params.region = o.region end
+        if o.region and params.regionKey == nil then params.regionKey = o.region end
         if o.targetUnitID and params.targetUnitID == nil then params.targetUnitID = o.targetUnitID end
         if o.duration and params.duration == nil then params.duration = o.duration end
+        if o.type == 'control' and params.holdFrames == nil then
+            params.holdFrames = o.holdFrames or DEFAULT_CONTROL_HOLD_FRAMES
+        end
 
         -- Check if this objective needs runtime unit population
         -- (empty targetUnitIDs/payloadUnitIDs + a _populateFrom marker)
         local needsTargets = o._populateTargetsFrom ~= nil
-        local needsPayload = o._populatePayloadFrom ~= nil
+        local payloadFrom = o._populatePayloadFrom
 
-        if needsTargets or needsPayload then
+        if payloadFrom and payloadFrom.route then
+            -- Convoy-linked payload: wait for the route's spawn event, not
+            -- the frame-30 sweep (no vehicle exists that early).
+            local route = payloadFrom.route
+            pendingConvoyObjectives[route] = pendingConvoyObjectives[route] or {}
+            table.insert(pendingConvoyObjectives[route], o)
+            Spring.Echo('[game_scenario] queued ' .. (o.type or 'unknown') ..
+                       ' objective (will populate payload when convoy route "' ..
+                       route .. '" next spawns)')
+        elseif needsTargets or payloadFrom then
             -- Defer creation until after civilians spawn
             deferredObjectives[#deferredObjectives + 1] = o
             Spring.Echo('[game_scenario] deferred ' .. (o.type or 'unknown') ..
@@ -284,6 +337,13 @@ end
 -- ============================================================
 
 GG.Scenario = GG.Scenario or {}
+
+--- civilians/convoy.lua calls this after creating a convoy vehicle so any
+--- escort objective staged with `_populatePayloadFrom = { route = <id> }`
+--- can populate its payload and go live (see notifyConvoySpawn above).
+function GG.Scenario.NotifyConvoySpawn(routeId, unitID)
+    notifyConvoySpawn(routeId, unitID)
+end
 
 function gadget:GameStart()
     local name = Spring.GetModOptions().scenario

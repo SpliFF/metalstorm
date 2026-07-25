@@ -1,0 +1,22 @@
+{
+  "name": "dev:meridian-verify-solo",
+  "map": "meridian_basin",
+  "game": "metalstorm",
+  "modoptions": {
+    "objective_density": "1"
+  },
+  "scenario": "meridian_basin",
+  "aiSlots": [
+    { "aiId": "null", "team": 1, "startPos": 1 },
+    { "aiId": "null", "team": 2, "startPos": 2 },
+    { "aiId": "null", "team": 3, "startPos": 3 },
+    { "aiId": "null", "team": 4, "startPos": 4 },
+    { "aiId": "null", "team": 5, "startPos": 5 },
+    { "aiId": "null", "team": 6, "startPos": 6 },
+    { "aiId": "null", "team": 7, "startPos": 7 }
+  ],
+  "players": [
+    { "username": "dev-verify", "team": 0, "startPos": 0, "spectator": false }
+  ],
+  "autoStart": true
+}
