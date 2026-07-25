@@ -49,6 +49,7 @@ import { LosBitmapStore, type LosBitmap } from './los-bitmap.js';
 // done in main.ts) so unit `.ktx2` textures transcode here.
 import './ktx2-config.js';
 import { EntityRenderer, setModelMaterialPort } from './entity-renderer.js';
+import { SquadRenderBackend } from './squad-render-backend.js';
 
 /**
  * The model-material port id that `zk-model-material.ts` reproduces
@@ -357,6 +358,32 @@ let gpCombatFX: CombatFX | null = null;
 let gpDecalOverlay: DecalOverlay | null = null;
 let gpDynamicFeatureRenderer: DynamicFeatureRenderer | null = null;
 let gpTrainPresentation: TrainPresentation | null = null;
+/// Metalstorm squad fan-out (PLAN-metalstorm-squads.md §6). The pure-logic
+/// squad system is a NATIVE game module loaded over HTTP from
+/// /api/games/data/<gameId>/client/squads/index.js (kept out of the generic
+/// client bundle — same served-content path as models). gpSquadBackend is the
+/// Babylon RenderBackend it draws through; gpSquadIds is the live set of routed
+/// squad-unit ids; gpIsSquadDef mirrors config.js isSquadDef (squad_size > 1).
+let gpSquadSystem: SquadSystemHandle | null = null;
+let gpSquadBackend: SquadRenderBackend | null = null;
+let gpIsSquadDef: ((def: unknown) => boolean) | null = null;
+let gpSquadCreatePassability: ((sampler: unknown, cfg: unknown) => unknown) | null = null;
+const gpSquadIds = new Set<number>();
+let gpSquadPassabilityInstalled = false;
+/// Structural view of the native SquadManager's public surface (index.js). Kept
+/// local (the module is dynamically imported, untyped) so call sites typecheck.
+interface SquadSystemHandle {
+    cfg: Record<string, number>;
+    syncSquad(id: number, state: object, def?: object): void;
+    syncPose(id: number, pose: { x: number; y: number; z: number; heading: number }): void;
+    syncStrength(id: number, health: number, maxHealth: number): void;
+    noteDef(id: number, def: object): void;
+    removeSquad(id: number): void;
+    reportImpact(hint: { x: number; z: number; radius?: number; squadId?: number }): void;
+    reportThreat(hint: { x: number; z: number; radius?: number; squadId?: number }): void;
+    setPassability(p: unknown): void;
+    update(dt: number): void;
+}
 /// Sim-scaled delta multiplier for VISUAL FX aging — slows / freezes effect
 /// lifetimes with the game speed (paused → 0). Driven by onGameInfo. The
 /// camera + entity ticks keep raw wall dt; only FX lifetimes use it.
@@ -947,6 +974,10 @@ function gpConnect(msg: GpInitToWorker): void {
         onEntityState: (snapshot, isDelta) => {
             gpFirstStateReceived = true;
             gpCtx.entityRenderer?.update(snapshot, isDelta);
+            // PLAN-metalstorm-squads.md §6: route squad-def units (squad_size > 1)
+            // into the fan-out. Runs after the renderer's update so entityMeta +
+            // the interpolator already hold this snapshot's pose.
+            gpRouteSquads(snapshot);
             gpBuildingPlateRenderer?.update(snapshot);
             // §16b: drive walk/idle clips off the WIRE positions, at the wire
             // cadence — after the renderer's update so newly-streamed units
@@ -982,6 +1013,14 @@ function gpConnect(msg: GpInitToWorker): void {
                 const meta = gpCtx.entityRenderer?.getEntityMeta(entityId);
                 if (meta && meta.lastStateFrame > frame) return;
                 gpCtx.entityRenderer?.removeEntity(entityId);
+                // PLAN-metalstorm-squads.md §6 (H2): cascade the squad's members
+                // + clear buffered state so a recycled id can't resurrect it.
+                // After the lastStateFrame recycle guard above, so a reused id
+                // that already streamed newer state keeps its new squad.
+                if (gpSquadIds.delete(entityId)) {
+                    gpSquadSystem?.removeSquad(entityId);
+                    gpSquadBackend?.forgetSquad(entityId);
+                }
                 gpBuildingPlateRenderer?.remove(entityId);
                 // §16b/§16c: drop clip + aim bookkeeping so the policy's motion
                 // entry and the aim controller's per-unit state don't leak (the
@@ -1049,6 +1088,16 @@ function gpConnect(msg: GpInitToWorker): void {
                     gpCombatFX?.onCombatEvents([ev]);
                     dispatchUnitDamaged([ev]);
                 });
+                // PLAN-metalstorm-squad-casualties §4/§5: a hit on a squad unit
+                // is a victim-selection hint (impact position) and — if the
+                // attacker is visible — a threat bearing, so members fall toward
+                // the blast / away from the shooter. Reconciliation itself is
+                // driven by the strength drop; this only aligns which members die.
+                if (gpSquadSystem && gpSquadIds.has(ev.targetId)) {
+                    gpSquadSystem.reportImpact({ x: ev.x, z: ev.z, squadId: ev.targetId });
+                    const atk = ev.attackerId ? gpCtx.entityRenderer?.getEntityPosition(ev.attackerId) : null;
+                    if (atk) gpSquadSystem.reportThreat({ x: atk.x, z: atk.z, squadId: ev.targetId });
+                }
             }
         },
         // Metalstorm statistical combat (Model 1) per-volley outcomes. No
@@ -1489,6 +1538,7 @@ export function gpSoftRecover(): boolean {
     gpCtx.entityRenderer?.resetForResync();
     gpCtx.projectileRenderer?.resetForResync();
     gpCombatFX?.reset();
+    gpResetSquads();
     // (3) Reconnect the SAME Connection for a fresh full snapshot (its
     // onAuthenticated re-seeds identity + re-registers the viewport pump). The
     // fresh ClientSession re-pushes defs (DefCache no-ops the dups) and the
@@ -1498,6 +1548,158 @@ export function gpSoftRecover(): boolean {
     gpCtx.connection.connect(gpInitMsg.gameHttpUrl, gpInitMsg.username, '', t);
     postLog(1, '[gp] soft-recovered (R1) — wipeCaches + FX flush + resync');
     return true;
+}
+
+/// Normalise a streamed UnitDefInfo into the shape the native Squad expects
+/// ({ defId, squadSize, formationType, formationRadius, maxSpeed, customParams }).
+/// customParams is passed through — Squad reads ms_class from it to pick the
+/// movement profile (movement-profiles.js).
+function gpNormalizeSquadDef(def: import('./connection.js').UnitDefInfo): object {
+    const cp = def.customParams ?? {};
+    return {
+        defId: def.defId,
+        squadSize: Number(cp.squad_size) || 1,
+        formationType: cp.formation_type || 'line',
+        formationRadius: Number(cp.formation_radius) || 24,
+        // Streamed speed is elmos/s; steering scales it by memberSpeedMultiplier.
+        // A hard-leash keeps members cohesive even if this is off, so a sane
+        // fallback is enough.
+        maxSpeed: def.speed > 0 ? def.speed : 30,
+        customParams: cp,
+    };
+}
+
+/// Load the native squad system for this game over HTTP (served content, not
+/// bundled) and wire its def listener. Idempotent-ish: only called once per
+/// gpInit. Failure is non-fatal — the game still runs, squads just don't fan
+/// out (a loud warn is logged).
+async function gpLoadSquadSystem(gameId: string, scene: Scene, er: EntityRenderer): Promise<void> {
+    if (!gameId) return;
+    gpSquadBackend = new SquadRenderBackend(scene, {
+        getGroundHeight: (x, z) => er.getGroundHeight(x, z),
+        getTeamColor: (t) => er.getTeamColor(t),
+    });
+    const url = `/api/games/data/${gameId}/client/squads/index.js`;
+    try {
+        const mod = await import(/* @vite-ignore */ url) as {
+            createSquadSystem: (backend: unknown) => SquadSystemHandle;
+            isSquadDef: (def: unknown) => boolean;
+            createPassability: (sampler: unknown, cfg: unknown) => unknown;
+        };
+        gpIsSquadDef = mod.isSquadDef;
+        gpSquadCreatePassability = mod.createPassability;
+        gpSquadSystem = mod.createSquadSystem(gpSquadBackend);
+        // Devtools inspection (mirrors the __entityRenderer hook): reach the
+        // live squad state from the main console via window.__gp('__squadSystem…').
+        (globalThis as Record<string, unknown>).__squadSystem = gpSquadSystem;
+        (globalThis as Record<string, unknown>).__squadBackend = gpSquadBackend;
+        (globalThis as Record<string, unknown>).__squadIds = gpSquadIds;
+        // Any defs already cached before the module finished loading: register
+        // the squad ones now (the onUnitDefs listener only fires for future
+        // batches). First snapshot then routes their entities on first sight.
+        for (const def of gpDefCache?.getAllUnitDefs() ?? []) {
+            if (gpIsSquadDef(def)) er.markSquadDef(def.defId);
+        }
+        postLog(1, `[gp] squad system loaded (${url})`);
+    } catch (e) {
+        postLog(4, `[gp] squad system load failed (${url}): ${e} — squads will render as single units`);
+    }
+}
+
+/// Route the entity-state snapshot to the squad system: first-sight squad units
+/// spawn a fan-out; subsequent snapshots feed strength (pose comes per-frame
+/// from the interpolator in the render tick). Non-squad defs are ignored here
+/// (they render normally via EntityRenderer).
+function gpRouteSquads(snapshot: import('./entity-state.js').EntityStateSnapshot): void {
+    if (!gpSquadSystem || !gpIsSquadDef) return;
+    const { count, entityIds, positionsX, positionsY, positionsZ, headings, health, defIds, teams } = snapshot;
+    if (!entityIds || !defIds) return;
+    const H = Math.PI * 2 / 65535;
+    for (let i = 0; i < count; i++) {
+        const defId = defIds[i];
+        const er = gpCtx.entityRenderer;
+        // Fast path: only entities of a known squad def are routed. Until the
+        // def resolves (H1: state can precede the on-demand def) the entity
+        // renders as a single unit; the next snapshot after the def lands
+        // routes it on first sight.
+        if (!er?.isSquadDef(defId)) {
+            const def = gpDefCache?.getUnitDef(defId);
+            if (!def || !gpIsSquadDef(def)) continue;
+            er?.markSquadDef(defId);
+        }
+        const id = entityIds[i];
+        const health16 = health ? health[i] : 65535;
+        if (gpSquadIds.has(id)) {
+            gpSquadSystem.syncStrength(id, health16, 65535);
+            continue;
+        }
+        // First sight: spawn the fan-out from the raw snapshot pose + strength.
+        const def = gpDefCache!.getUnitDef(defId)!;
+        gpSquadBackend?.setSquadTeam(id, teams ? teams[i] : 0);
+        gpSquadSystem.syncSquad(id, {
+            x: positionsX ? positionsX[i] : 0,
+            y: positionsY ? positionsY[i] : 0,
+            z: positionsZ ? positionsZ[i] : 0,
+            heading: (headings ? headings[i] : 0) * H,
+            health: health16,
+            maxHealth: 65535,
+        }, gpNormalizeSquadDef(def));
+        gpSquadIds.add(id);
+    }
+}
+
+/// Per-frame squad drive: feed each live squad its interpolated centroid pose,
+/// step the system, then flush the member/wreck thin-instance buffers. Also
+/// lazily installs the passability grid once the map heightmap is available
+/// (pathfinding steers fine without it, so this is best-effort).
+function gpTickSquads(dt: number): void {
+    if (!gpSquadSystem) return;
+    const er = gpCtx.entityRenderer;
+    if (!gpSquadPassabilityInstalled && er && gpIsSquadDef) {
+        const size = er.getMapSizeElmos();
+        if (size) {
+            gpInstallSquadPassability(er, size.width, size.height);
+        }
+    }
+    const H = Math.PI * 2 / 65535;
+    for (const id of gpSquadIds) {
+        const pose = er?.getEntityPose(id);
+        if (pose) gpSquadSystem.syncPose(id, { x: pose.x, y: pose.y, z: pose.z, heading: pose.heading * H });
+    }
+    gpSquadSystem.update(dt);
+    gpSquadBackend?.flush();
+}
+
+/// Build the passability sampler from the client heightmap and install it, so
+/// squad pathfinding (slope/water avoidance, building footprints) is live. The
+/// createPassability factory ships inside the same native module.
+function gpInstallSquadPassability(er: EntityRenderer, width: number, height: number): void {
+    if (gpSquadPassabilityInstalled || !gpSquadSystem || !gpSquadCreatePassability) return;
+    gpSquadPassabilityInstalled = true;
+    try {
+        const sampler = {
+            bounds: { minX: 0, minZ: 0, maxX: width, maxZ: height },
+            heightAt: (x: number, z: number) => er.getGroundHeight(x, z),
+            waterLevel: 0,
+        };
+        gpSquadSystem.setPassability(gpSquadCreatePassability(sampler, gpSquadSystem.cfg));
+        postLog(1, '[gp] squad passability installed');
+    } catch (e) {
+        gpSquadPassabilityInstalled = false;
+        postLog(3, `[gp] squad passability install failed: ${e}`);
+    }
+}
+
+/// Drop every routed squad (resync / teardown): the fresh full snapshot
+/// re-spawns them from first sight. Keeps the loaded module + backend meshes.
+function gpResetSquads(): void {
+    if (gpSquadSystem) {
+        for (const id of gpSquadIds) {
+            gpSquadSystem.removeSquad(id);
+            gpSquadBackend?.forgetSquad(id);
+        }
+    }
+    gpSquadIds.clear();
 }
 
 export function gpInit(msg: GpInitToWorker): void {
@@ -1662,6 +1864,9 @@ export function gpInit(msg: GpInitToWorker): void {
     // pass the sun so the team-color material can sample the live CSM.
     entityRenderer.setShadowGenerator(gpCtx.sceneLighting.csm, gpCtx.sceneLighting.sun);
     gpCtx.entityRenderer = entityRenderer;
+    // PLAN-metalstorm-squads.md §6: load the native squad fan-out module (served
+    // content) and hook it into the entity path. Async + non-fatal.
+    void gpLoadSquadSystem(msg.gameId, scene, entityRenderer);
     // GW8: expose the scene-debug hooks on the worker globalThis so the main
     // devtools console can reach them via window.__gp('__entityRenderer…')
     // (the render-core move stranded these here). Mirrors the __fxLightPool /
@@ -1882,6 +2087,9 @@ export function gpInit(msg: GpInitToWorker): void {
         // entityRenderer.tick() advances the presentation clock (L0) and
         // interpolates every unit to the presentation cursor before render.
         gpCtx.entityRenderer?.tick();
+        // PLAN-metalstorm-squads.md §6: drive the squad fan-out off the freshly
+        // interpolated centroid poses, then flush member/wreck instances.
+        gpTickSquads(dt);
         // PLAN-metalstorm-train T6: wheel-spin for train cars (updates piece
         // poses via setAimPose based on ground speed derived from position delta).
         gpTrainPresentation?.tick(dt * 1000); // tick() expects deltaMs
@@ -2663,6 +2871,7 @@ export function gpResync(token?: string): void {
     gpCtx.entityRenderer?.resetForResync();
     gpCtx.projectileRenderer?.resetForResync();
     gpCombatFX?.reset();
+    gpResetSquads();
     gpParked = false;
     gpRenderPaused = false;
     gpLastFrameTime = performance.now();
@@ -2715,6 +2924,13 @@ export function gpShutdown(): void {
     gpCtx.connection = null;
     gpCtx.entityRenderer?.dispose();
     gpCtx.entityRenderer = null;
+    gpResetSquads();
+    gpSquadBackend?.dispose();
+    gpSquadBackend = null;
+    gpSquadSystem = null;
+    gpIsSquadDef = null;
+    gpSquadCreatePassability = null;
+    gpSquadPassabilityInstalled = false;
     gpBuildingPlateRenderer?.dispose();
     gpBuildingPlateRenderer = null;
     gpDefCache?.clear();
