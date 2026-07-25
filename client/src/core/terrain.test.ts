@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
     planAtlasPages, extractKtx2Levels, compositeAtlasLevel,
+    fogTierAlpha255, DEFAULT_FOG_DARKENING,
     type AtlasPagePlan, type MapDimensions,
 } from './terrain.js';
 
@@ -212,5 +213,49 @@ describe('compositeAtlasLevel', () => {
         expect(skipped).toBe(1);
         // Skipped tile's blocks stay zero.
         expect(page.slice(0, 64).every((b) => b === 0)).toBe(true);
+    });
+});
+
+describe('fogTierAlpha255 (FOW terrain darkening)', () => {
+    const D = DEFAULT_FOG_DARKENING;
+
+    it('in-LOS squares get no overlay (fully visible)', () => {
+        // inLos wins regardless of the other bits.
+        expect(fogTierAlpha255(true, true, true, D)).toBe(0);
+        expect(fogTierAlpha255(true, false, false, D)).toBe(0);
+    });
+
+    it('radar-only is the lightest dim', () => {
+        expect(fogTierAlpha255(false, true, true, D)).toBe(Math.round(D.radar * 255));
+    });
+
+    it('explored-but-not-radar is the medium dim', () => {
+        expect(fogTierAlpha255(false, false, true, D)).toBe(Math.round(D.explored * 255));
+    });
+
+    it('unscouted is a strong dim but NEVER fully opaque (readable terrain)', () => {
+        const a = fogTierAlpha255(false, false, false, D);
+        expect(a).toBe(Math.round(D.unscouted * 255));
+        // The whole point of the rework: unseen ground must stay recognisable.
+        expect(a).toBeLessThan(255);
+        // ...but still clearly darker than the visible tiers.
+        expect(a).toBeGreaterThan(fogTierAlpha255(false, false, true, D));
+    });
+
+    it('darkening tiers are monotonic: visible < radar < explored < unscouted', () => {
+        const vis = fogTierAlpha255(true, false, false, D);
+        const rad = fogTierAlpha255(false, true, false, D);
+        const exp = fogTierAlpha255(false, false, true, D);
+        const uns = fogTierAlpha255(false, false, false, D);
+        expect(vis).toBeLessThan(rad);
+        expect(rad).toBeLessThan(exp);
+        expect(exp).toBeLessThan(uns);
+    });
+
+    it('clamps out-of-range levels into [0,255]', () => {
+        const bad = { radar: -1, explored: 5, unscouted: 2 };
+        expect(fogTierAlpha255(false, true, false, bad)).toBe(0);
+        expect(fogTierAlpha255(false, false, true, bad)).toBe(255);
+        expect(fogTierAlpha255(false, false, false, bad)).toBe(255);
     });
 });

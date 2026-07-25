@@ -35,7 +35,7 @@ import type { EntityStateSnapshot } from './entity-state.js';
 import {
     buildTerrainMesh, loadTerrainTextures, TerrainFog, DeformableTerrain,
     setTerrainDecalPluginEnabled, attachTerrainWaterAbsorption,
-    type MapDimensions,
+    type MapDimensions, type FogDarkening,
 } from './terrain.js';
 import { fetchMapDataHttp, type ParsedMapData } from './map-data.js';
 import {
@@ -1690,6 +1690,16 @@ export function gpInit(msg: GpInitToWorker): void {
         },
         /** Hazard #5: skip the LuaUI render-thread pass. */
         luaUi: (on: boolean): boolean => { gpUiPassEnabled = on; return on; },
+    };
+    // Fog-of-war terrain-darkening live-tuning hook (docs/lighting.md). The
+    // out-of-vision terrain is dimmed, never blacked out; tune the per-tier
+    // levels from the main DevTools console, e.g.
+    //   window.__gp('__fowDarkening.set({unscouted:0.8})')
+    //   window.__gp('__fowDarkening.get()')
+    (globalThis as Record<string, unknown>).__fowDarkening = {
+        get: (): FogDarkening | null => gpTerrainFog?.getDarkening() ?? null,
+        set: (levels: Partial<FogDarkening>): FogDarkening | null =>
+            gpTerrainFog?.setDarkening(levels) ?? null,
     };
 
     // GW4-c5b: interactive RTS camera for view 0 (DOM-free; driven by the

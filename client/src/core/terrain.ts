@@ -898,13 +898,23 @@ export async function fetchHeightmap(url: string): Promise<{
  * Re-uses the terrain's heightmap to build a mesh that hugs the surface
  * a few elmos above it, then paints it with a tiny RGBA dynamic texture
  * (≤64×64) sampled from the per-allyteam LOS bitmap stream (envelope
- * 0x07, ~1 Hz). The same three-plane fog tint used on the minimap
- * (PLAN-intel.md Phase 5) carries over to the main view:
+ * 0x07, ~1 Hz). The three-plane fog tint (PLAN-intel.md Phase 5) is a
+ * *darkening* of the (static, client-side) terrain — never a full black-
+ * out, so unseen ground stays recognisable while units/features stay
+ * hidden (their visibility is filtered server-side and unaffected here):
  *
- *   inLos                → no overlay
- *   inRadar && !inLos    → 35% black
- *   explored & !inRadar  → 60% black
- *   !explored            → 100% black
+ *   inLos                → no overlay             (0%)
+ *   inRadar && !inLos    → light dim   (DARKEN.radar,     ~30%)
+ *   explored & !inRadar  → medium dim  (DARKEN.explored,  ~50%)
+ *   !explored            → strong dim  (DARKEN.unscouted, ~72%)
+ *
+ * The unscouted tier is deliberately < 100%: pure black hides the map
+ * shape and reads as a rendering bug (see metalstorm-demo-verify lane
+ * notes, 2026-07-25). Levels are live-tunable via
+ * `window.__gp('__fowDarkening.set({unscouted:0.8})')` — see
+ * docs/lighting.md. Before the first LOS bitmap arrives the overlay
+ * falls back to a uniform DARKEN.unscouted dim (material alpha), so a
+ * not-yet-scouted / pre-frame-0 map is dark-but-readable, not opaque.
  *
  * The overlay renders in renderingGroupId 1 with a high alphaIndex so
  * it composites after the opaque terrain and before unit meshes (which
@@ -915,11 +925,53 @@ export async function fetchHeightmap(url: string): Promise<{
  * surface so the tint follows cliffs and craters correctly — a flat
  * quad at Y=0 would only darken the lowest parts of the map.
  */
+/** Per-visibility-tier terrain darkening (0 = fully lit, 1 = opaque black).
+ *  The unscouted tier is capped well below 1 so out-of-vision ground reads
+ *  as a dimmed version of the real (static, client-side) terrain rather than
+ *  a black hole — see the TerrainFog class doc. Live-tunable at runtime. */
+export interface FogDarkening {
+    /** In radar / air-LOS but not ground LOS — the lightest dim. */
+    radar: number;
+    /** Explored earlier, not currently in radar or LOS. */
+    explored: number;
+    /** Never scouted (also the pre-first-bitmap fallback). Kept < 1. */
+    unscouted: number;
+}
+
+export const DEFAULT_FOG_DARKENING: FogDarkening = {
+    radar: 0.30,
+    explored: 0.50,
+    unscouted: 0.72,
+};
+
+/** Clamp a darkening factor into the renderable [0,1] alpha range. */
+function clamp01(v: number): number {
+    return v < 0 ? 0 : v > 1 ? 1 : v;
+}
+
+/** Overlay alpha byte (0..255) for one map square given its LOS bits and the
+ *  darkening levels. Visible (inLos) → 0 (no overlay); otherwise the tier
+ *  darkening, clamped. Pure — shared by `TerrainFog.apply` and its tests. */
+export function fogTierAlpha255(
+    losBit: boolean, radarBit: boolean, expBit: boolean,
+    darken: FogDarkening,
+): number {
+    if (losBit)   return 0;
+    if (radarBit) return Math.round(clamp01(darken.radar) * 255);
+    if (expBit)   return Math.round(clamp01(darken.explored) * 255);
+    return Math.round(clamp01(darken.unscouted) * 255);
+}
+
 export class TerrainFog {
     private mesh: Mesh | null = null;
     private texture: DynamicTexture | null = null;
     private bitmapSize: { w: number; h: number } = { w: 0, h: 0 };
     private mat: StandardMaterial | null = null;
+    /** Live-tunable darkening levels (see FogDarkening). */
+    private darken: FogDarkening = { ...DEFAULT_FOG_DARKENING };
+    /** Last painted bitmap, kept so a live darkening change can repaint
+     *  without waiting for the next ~1 Hz LOS snapshot. */
+    private lastBitmap: LosBitmap | null = null;
 
     /** Build the overlay mesh + material. Idempotent — calling again
      *  disposes the previous mesh first so the caller can rebuild when
@@ -1012,7 +1064,16 @@ export class TerrainFog {
         mat.emissiveColor = new Color3(0, 0, 0);
         mat.specularColor = new Color3(0, 0, 0);
         mat.backFaceCulling = false;
-        mat.alpha = 1;
+        // Pre-bitmap fallback: a uniform "unscouted" dim (not opaque black).
+        // Until the first LOS snapshot arrives there is no opacityTexture, so
+        // the material's flat alpha is the whole overlay — cap it at the
+        // unscouted darkening so a not-yet-scouted / pre-frame-0 map is dark-
+        // but-readable. `apply()` sets alpha back to 1 once the per-square
+        // opacity texture (which bakes the darkening in) takes over.
+        mat.alpha = this.darken.unscouted;
+        // Force alpha-blended even before an opacity texture exists (a
+        // StandardMaterial with no alpha source would otherwise render opaque).
+        mat.transparencyMode = StandardMaterial.MATERIAL_ALPHABLEND;
         // Don't write to depth — units behind fog still need to read
         // the terrain's depth value, not the fog's slightly-raised one.
         mat.disableDepthWrite = true;
@@ -1031,6 +1092,7 @@ export class TerrainFog {
         if (!this.mesh || !this.mat) return;
         const { width, height, inLos, inRadar, explored } = bitmap;
         if (width === 0 || height === 0) return;
+        this.lastBitmap = bitmap;
 
         if (!this.texture
             || this.bitmapSize.w !== width
@@ -1053,6 +1115,10 @@ export class TerrainFog {
             this.texture.updateSamplingMode(Texture.BILINEAR_SAMPLINGMODE);
             this.bitmapSize = { w: width, h: height };
             this.mat.opacityTexture = this.texture;
+            // The per-square texture now carries the darkening in its alpha;
+            // the flat material alpha (the pre-bitmap fallback) would double-
+            // attenuate it, so hand authority to the texture.
+            this.mat.alpha = 1;
         }
 
         // getContext() can transiently return null if the underlying
@@ -1072,10 +1138,7 @@ export class TerrainFog {
                 const losBit   = (inLos[byte]    & mask) !== 0;
                 const radarBit = (inRadar[byte]  & mask) !== 0;
                 const expBit   = (explored[byte] & mask) !== 0;
-                let alpha255 = 255;
-                if (losBit)        alpha255 = 0;
-                else if (radarBit) alpha255 = Math.round(0.35 * 255);
-                else if (expBit)   alpha255 = Math.round(0.60 * 255);
+                const alpha255 = fogTierAlpha255(losBit, radarBit, expBit, this.darken);
                 const o = idx * 4;
                 data[o    ] = 0;
                 data[o + 1] = 0;
@@ -1085,6 +1148,25 @@ export class TerrainFog {
         }
         ctx.putImageData(img, 0, 0);
         this.texture.update(false);
+    }
+
+    /** Current darkening levels (a copy — mutate via `setDarkening`). */
+    getDarkening(): FogDarkening {
+        return { ...this.darken };
+    }
+
+    /** Live-tune the per-tier darkening. Merges a partial update, clamps to
+     *  [0,1], and repaints immediately (from the last LOS bitmap, or the
+     *  material-alpha fallback if none has arrived). Reached from DevTools
+     *  via `window.__gp('__fowDarkening.set({unscouted:0.8})')`. */
+    setDarkening(levels: Partial<FogDarkening>): FogDarkening {
+        if (levels.radar     !== undefined) this.darken.radar     = clamp01(levels.radar);
+        if (levels.explored  !== undefined) this.darken.explored  = clamp01(levels.explored);
+        if (levels.unscouted !== undefined) this.darken.unscouted = clamp01(levels.unscouted);
+        // Keep the pre-bitmap fallback alpha in sync when no texture is live.
+        if (this.mat && !this.texture) this.mat.alpha = this.darken.unscouted;
+        if (this.lastBitmap) this.apply(this.lastBitmap);
+        return { ...this.darken };
     }
 
     /** Toggle visibility — `window.__toggleTerrain` reaches in via the
@@ -1109,5 +1191,6 @@ export class TerrainFog {
         this.mat = null;
         this.mesh = null;
         this.bitmapSize = { w: 0, h: 0 };
+        this.lastBitmap = null;
     }
 }

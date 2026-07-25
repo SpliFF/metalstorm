@@ -321,6 +321,7 @@ Available in DevTools:
 | `window.__mapLighting` | Last `MapLighting` applied (parsed `mapinfo.lua`) |
 | `__setAmbientLevel(v)` | Override the hemispheric ambient intensity (see "Per-game lighting style") |
 | `__setLightingStyle(s)` | Switch `'gameplay'`/`'realistic'` live |
+| `__fowDarkening.get()` / `.set({radar,explored,unscouted})` | Fog-of-war terrain **darkening** per visibility tier (0 = fully lit, 1 = opaque black). Out-of-vision ground is *dimmed*, never blacked out, so the (static, client-side) terrain stays recognisable while units/features remain hidden (their visibility is filtered server-side). Defaults: `radar 0.30`, `explored 0.50`, `unscouted 0.72`. Levels < 1 are the fix for the "black terrain" that was really unrendered FOW — see `TerrainFog` in `client/src/core/terrain.ts`. |
 
 The render scene lives in the game-processor worker, so reach these via
 `window.__gp('...')` from the main DevTools console (e.g.
