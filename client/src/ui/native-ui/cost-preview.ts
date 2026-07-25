@@ -8,21 +8,32 @@
  * `import()` by the widget itself — see command-composer.js). `CostModelLike`
  * duck-types their shape so this module stays testable without a fetch.
  *
+ * Mirrors the SERVER charge formula exactly (game_authority.lua
+ * GG.Authority.ChargeDirective/ChargeStandingOrder, wired to the engine's
+ * AllowDirectiveCreate/AllowStandingOrderCreate callins —
+ * PLAN-metalstorm-authority.md §3.2/A2, PLAN-macro-directives.md §1):
+ *   - GroupDirective with a resolved org group → Σ member
+ *     authority_cost_base (real data: a real Σ computed worker-side, see
+ *     game-processor.ts `gpComputeGroupBaseCost`) under the 'directive'
+ *     order class, regardless of echelon (v0 only ever creates
+ *     platoon-echelon groups — PLAN-macro-directives.md §1 field
+ *     discipline — so there is no echelon-differentiated rate today).
+ *   - GroupDirective with no group (condition/area-scoped — the "classic
+ *     standing order" shape sent over the unified GroupDirective wire) and
+ *     StandingOrder messages both charge a flat base=1 fee under the
+ *     'standing' order class — there is no fixed roster at create time to
+ *     sum a base cost over.
+ *   - AIGuidance has no charge site (advisory, never a spend — AI's own
+ *     budget governance lives in ai/strategos, PLAN-metalstorm-ai.md §3.2).
+ *
  * SCOPED SIMPLIFICATION (documented per CLAUDE.md "never deviate from Recoil
- * silently"): the sim has **no directive-create charge site at all yet** —
- * verified against `rts/Server/ClientMessageHandler.cpp`'s GroupDirective
- * handler and `game_authority_charge.lua` (only per-unit `AllowCommand`
- * orders are charged; `GG.Authority.ChargeDirective` doesn't exist —
- * PLAN-metalstorm-authority.md task 8, Stage-7-gated). This preview predicts
- * what that charge *would* be using the shipped formula/spec (real data:
- * `authority_cost.json`, live pool rulesParams, and a real Σ member
- * `authority_cost_base` computed worker-side — see game-processor.ts
- * `gpComputeGroupBaseCost`), with two inputs pinned to their neutral default
- * rather than invented: `regionMod = 1.0` (no client-side region-index load
- * wired in this pass — the plan's own §4 "accepted divergence" already
- * tolerates a stale regionMod) and `costScale = 1.0` (modoptions aren't
- * streamed to the client yet). Both are real formula inputs, not fabricated
- * data — they're just not live-tracked here yet.
+ * silently"): two inputs are pinned to their neutral default, matching the
+ * exact same simplification the server-side charge makes (so client preview
+ * and server charge stay in lockstep — the actual requirement, not perfect
+ * prediction): `regionMod = 1.0` (a directive has no single position to look
+ * up a region modifier from — see game_authority.lua's ChargeDirective doc
+ * comment) and `costScale = 1.0` (modoptions aren't streamed to the client
+ * yet).
  */
 
 export type Echelon = 'Squad' | 'Platoon' | 'Army';
@@ -46,27 +57,12 @@ export interface CostPreview {
     shortfall: number;
 }
 
-/** Order-class key for a group-scoped directive create, by echelon
- *  (PLAN-metalstorm-authority.md §3.3: platoon directives amortise more
- *  than army ones). Metalstorm v0 only ships two echelons (squad +
- *  platoon/group — PLAN-macro-orders.md); 'Squad' groups fall back to the
- *  same 'group_op' rate as 'Platoon' since a squad-echelon directive is the
- *  same shape of spend, just smaller. */
-export function orderClassForEchelon(echelon: Echelon): 'directive' | 'group_op' {
-    return echelon === 'Army' ? 'directive' : 'group_op';
-}
-
 /**
  * Preview the authority cost of committing `compiled` (a compile-table.ts
  * `CompiledMessage`). Returns null when there is nothing to predict:
- *   - not a GroupDirective (StandingOrder/AIGuidance have no charge site at
- *     all today — §3.2's table only charges direct player commands, and
- *     AIGuidance is advisory, never a spend);
- *   - no matching org group (subject wasn't a fixed roster — idle-filter
- *     subjects have no roster until the sim assigns squads, so there's
- *     nothing to sum a base cost over);
- *   - the cost model has no spec loaded (network hasn't fetched
- *     authority_cost.json yet).
+ *   - AIGuidance (never a spend, see module doc);
+ *   - the cost model has no spec loaded for the resolved order class
+ *     (network hasn't fetched authority_cost.json yet).
  */
 export function previewDirectiveCost(
     compiledType: string,
@@ -75,10 +71,12 @@ export function previewDirectiveCost(
     playerPool: number,
     teamPool: number,
 ): CostPreview | null {
-    if (compiledType !== 'GroupDirective' || !group) return null;
-    const orderClassKey = orderClassForEchelon(group.echelon);
+    if (compiledType !== 'GroupDirective' && compiledType !== 'StandingOrder') return null;
+    const hasGroup = compiledType === 'GroupDirective' && group !== null;
+    const orderClassKey = hasGroup ? 'directive' : 'standing';
+    const baseCost = hasGroup ? (group as OrgGroupLike).baseCostSum : 1;
     const cost = costModel.predict({
-        baseCost: group.baseCostSum,
+        baseCost,
         orderClassKey,
         regionMod: 1.0,
         costScale: 1.0,

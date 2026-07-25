@@ -815,8 +815,11 @@ function resolveSubjectGroup() {
 
 /**
  * Compute the current cost preview (task 5), or null if unpredictable
- * (no cost model yet, subject isn't a fixed group, or not a GroupDirective
- * compile target — see cost-preview.ts for the full breakdown).
+ * (no cost model yet, an AIGuidance target, or the cost spec has no entry
+ * for the resolved order class — see cost-preview.ts for the full
+ * breakdown). GroupDirective and StandingOrder targets both preview now —
+ * the sim charges both at create time (game_authority.lua
+ * ChargeDirective/ChargeStandingOrder).
  */
 function computeCostPreview() {
     if (!state.costModel || !state.ctx) return null;
@@ -847,9 +850,8 @@ function updateCostPreviewDisplay() {
 
     const preview = computeCostPreview();
     if (!preview) {
-        // Unpredictable (idle-filter/AI subject, StandingOrder/AIGuidance
-        // target, or no cost model yet) — shown as neutral, not an error;
-        // the sim has no charge site for these paths today either (§3.2).
+        // Unpredictable (AIGuidance target, or no cost model yet) — shown
+        // as neutral, not an error.
         el.textContent = 'Cost: n/a';
         el.classList.remove('is-refused');
         return;

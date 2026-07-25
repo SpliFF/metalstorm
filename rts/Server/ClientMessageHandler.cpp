@@ -27,6 +27,7 @@
 #include "Game/Players/PlayerHandler.h"
 #include "Game/GameSetup.h"
 #include "System/SpringLog/SpringLog.h"
+#include "System/EventHandler.h"
 
 #include <algorithm>
 #include <cstring>
@@ -1043,6 +1044,22 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                 for (unsigned i = 0; i < p->size(); ++i) params.push_back(p->Get(i));
             }
             auto conds = Protocol::ReadStandingOrderConditions(req->conditions());
+
+            // Authority charge site (PLAN-metalstorm-authority.md §3.2/A2):
+            // game_authority_charge.lua debits the issuing player's pool
+            // (falling back to the team pool) as a side effect of allowing
+            // this callin; a false veto means insufficient authority.
+            {
+                int playerID = -1;
+                auto pIt = clientPlayerNum.find(msg.clientId);
+                if (pIt != clientPlayerNum.end()) playerID = pIt->second;
+                if (!eventHandler.AllowStandingOrderCreate(session->team, playerID, req->type())) {
+                    auto err = Protocol::BuildServerError(402, "Insufficient authority");
+                    rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                    break;
+                }
+            }
+
             const uint32_t id = standingOrders.Create(
                 session->team,
                 static_cast<StandingOrderType>(req->type()),
@@ -1342,6 +1359,24 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             const std::string phases = req->phases_json() ? req->phases_json()->str() : std::string();
 
             if (req->directive_id() == 0) {
+                // Authority charge site (PLAN-metalstorm-authority.md
+                // §3.2/A2, PLAN-macro-directives.md §1 "Charge point"):
+                // charged ONCE at directive create, never on Update — the
+                // directive's decomposed per-squad commands are fromLua
+                // and free (§3.2 charging-rules table), so this is the
+                // only spend a directive ever incurs.
+                {
+                    int playerID = -1;
+                    auto pIt = clientPlayerNum.find(msg.clientId);
+                    if (pIt != clientPlayerNum.end()) playerID = pIt->second;
+                    if (!eventHandler.AllowDirectiveCreate(session->team, playerID, groupId,
+                            req->type(), req->requested_strength())) {
+                        auto err = Protocol::BuildServerError(402, "Insufficient authority");
+                        rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                        break;
+                    }
+                }
+
                 const uint32_t id = directiveManager.Create(
                     session->team, static_cast<DirectiveType>(req->type()),
                     req->priority(), static_cast<OrderShape>(req->shape()),

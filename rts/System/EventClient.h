@@ -231,6 +231,23 @@ class CEventClient
 		virtual bool AllowStandingOrderAssign(unsigned int orderID, const CUnit* unit) { return true; }
 		virtual bool AllowDirectiveAssign(unsigned int directiveID, const CUnit* unit) { return true; }
 
+		/// The authority charge site for a classic standing-order CREATE
+		/// (PLAN-metalstorm-authority.md §3.2/A2). Fired once, before the
+		/// C++ StandingOrderManager creates the order, for player-issued
+		/// (network) creates only — Lua/AI callers of the engine API are
+		/// exempt by construction (they never go through
+		/// ClientMessageHandler). Return false to refuse the create (e.g.
+		/// insufficient authority); game Lua is expected to debit pools as
+		/// a side effect of returning true.
+		virtual bool AllowStandingOrderCreate(int team, int playerID, unsigned int orderType) { return true; }
+		/// The authority charge site for a macro-directive CREATE
+		/// (PLAN-metalstorm-authority.md §3.2/A2, PLAN-macro-directives.md
+		/// §1 "Charge point"). Same contract as AllowStandingOrderCreate;
+		/// `groupID` is 0 for a condition/area-scoped directive (the
+		/// "classic standing order" shape sent over the unified
+		/// GroupDirective wire — macro-directives.md §1).
+		virtual bool AllowDirectiveCreate(int team, int playerID, unsigned int groupID, unsigned int directiveType, unsigned int requestedStrength) { return true; }
+
 		virtual bool TerraformComplete(const CUnit* unit, const CUnit* build) { return false; }
 		virtual bool MoveCtrlNotify(const CUnit* unit, int data) { return false; }
 
