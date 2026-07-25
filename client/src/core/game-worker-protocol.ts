@@ -588,7 +588,7 @@ export type GpMessageToMain =
      *  result (true/false), or null for a draw/undecided/spectator. */
     | { type: 'gp:gameOver'; frame: number; winningAllyTeams: number[]; won: boolean | null }
     /** Worker reached the game server + authed (mirrors connection onAuthenticated). */
-    | { type: 'gp:authenticated'; playerId: number; team: number }
+    | { type: 'gp:authenticated'; playerId: number; team: number; role: string }
     /** Server restart detected — main reloads. */
     | { type: 'gp:reload' }
     /** Metalstorm counterbattery reveal (Q-D-c): a statistical volley from an

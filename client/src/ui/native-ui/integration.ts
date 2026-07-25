@@ -35,7 +35,8 @@ export async function initializeNativeUI(
     httpBase: string,
     playerId: number,
     teamId: number,
-    connection: Connection | null = null
+    connection: Connection | null = null,
+    role: string = ''
 ): Promise<void> {
     // Clean up any existing loader
     if (widgetLoader) {
@@ -61,11 +62,14 @@ export async function initializeNativeUI(
 
     // Wire up sendCommand if we have a connection
     if (connection) {
-        widgetLoader.setSendCommandProvider(createSendCommand(connection));
+        widgetLoader.setSendCommandProvider(createSendCommand(connection, role));
     }
 
-    // Load the widgets
-    await widgetLoader.load(gameId, httpBase, playerId, teamId);
+    // PLAN-metalstorm-onboarding.md §4: role gates which widgets mount
+    // (command-composer / ai-command-panel carry `hideForSpectator` in the
+    // manifest) — spectators get the same HUD minus every order-issuing
+    // panel, no separate spectator build.
+    await widgetLoader.load(gameId, httpBase, playerId, teamId, role);
 }
 
 /**
@@ -78,7 +82,7 @@ export function wireRulesParamsToStore(connection: Connection): void {
 
     // Wire up existing widgets if loader exists
     if (widgetLoader && !widgetLoader.hasSendCommand()) {
-        widgetLoader.setSendCommandProvider(createSendCommand(connection));
+        widgetLoader.setSendCommandProvider(createSendCommand(connection, connection.myRole));
     }
 }
 
@@ -107,8 +111,17 @@ export function handleRulesParamUpdate(update: {
  * - LuaRulesMsg: messages to synced Lua
  * - ConsoleCommand: server console commands
  */
-function createSendCommand(connection: Connection): (cmd: any) => void {
+export function createSendCommand(connection: Connection, role: string = ''): (cmd: any) => void {
     return (cmd: any) => {
+        // PLAN-metalstorm-onboarding.md §4: spectators render the HUD but
+        // issue nothing — this is the single choke-point every widget
+        // command funnels through (GroupDirective, OrgGroup, StandingOrder,
+        // LuaRulesMsg, ConsoleCommand, …), so gating here is sufficient even
+        // though the server (CanCommandTeam) would refuse it anyway.
+        if (role === 'spectator') {
+            console.warn('[native-ui] command dropped — spectators cannot issue orders:', cmd?.type);
+            return;
+        }
         if (!cmd || !cmd.type) {
             console.warn('[native-ui] Invalid command - missing type:', cmd);
             return;

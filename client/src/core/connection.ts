@@ -884,7 +884,7 @@ export interface ConnectionEvents {
      *  bake them. Construct URLs as
      *    /api/games/data/{gameId}/cache/defs/{key}/unitdefs.bin
      *    /api/games/data/{gameId}/cache/defs/{key}/weapondefs.bin */
-    onAuthenticated?: (playerId: number, token: string, team: number, defsCacheKey: string) => void;
+    onAuthenticated?: (playerId: number, token: string, team: number, defsCacheKey: string, role: string) => void;
     onAuthFailed?: (message: string) => void;
     onServerError?: (code: number, message: string) => void;
     onEntityState?: (snapshot: EntityStateSnapshot, isDelta: boolean) => void;
@@ -1876,7 +1876,7 @@ export class Connection {
                     const defsCacheKey = ar.defsCacheKey() ?? '';
                     console.log(`[connection] AuthResponse OK: playerId=${this.playerId}, team=${this.myTeam}, role=${this.myRole}, defsKey=${defsCacheKey || '(none)'}`);
                     this.setState('connected');
-                    this.events.onAuthenticated?.(this.playerId, this.sessionToken ?? '', this.myTeam, defsCacheKey);
+                    this.events.onAuthenticated?.(this.playerId, this.sessionToken ?? '', this.myTeam, defsCacheKey, this.myRole);
                 } else {
                     const errMsg = ar.message() ?? 'auth failed';
                     console.error(`[connection] AuthResponse rejected: ${errMsg}`);

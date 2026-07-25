@@ -51,6 +51,7 @@ import { ScenarioRunner } from './scenarios/runner.js';
 import { createHUD, showHUD, updateHUD, updateSpeedHUD } from './ui/hud/hud.js';
 import { showQuitConfirm } from './ui/quit-confirm/quit-confirm.js';
 import { showGameOver } from './ui/game-over/game-over.js';
+import { showSpectatorBanner, hideSpectatorBanner } from './ui/spectator-banner.js';
 import { debugConsole } from './core/debug-console.js';
 import { logIngest } from './core/log-ingest.js';
 import { configureErrorTelemetry, reportClientError } from './core/client-error-telemetry.js';
@@ -494,6 +495,7 @@ function quitToLobby(): void {
     economyBar = null;
     factoryQueuePanel?.dispose();
     factoryQueuePanel = null;
+    hideSpectatorBanner();
 
     // Dispose native UI
     disposeNativeUI();
@@ -803,6 +805,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     economyBar = null;
     factoryQueuePanel?.dispose();
     factoryQueuePanel = null;
+    hideSpectatorBanner();
     // The previous session's cursor overlay owns a DOM node + a live rAF
     // loop — without this, a back-to-back startGame() (room-state re-entry
     // that skips quitToLobby) leaks both and stacks a second overlay.
@@ -933,11 +936,24 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         const m = ev.data;
         switch (m?.type) {
             case 'gp:authenticated': {
-                console.log(`[gameWorker] authenticated playerId=${m.playerId} team=${m.team}`);
+                console.log(`[gameWorker] authenticated playerId=${m.playerId} team=${m.team} role=${m.role}`);
                 // G4: the lobby-roster myTeamGuess used to construct economyBar
                 // can be stale/absent (spectator, late roster fetch); this is the
                 // authoritative value, so re-point the bar's team filter at it.
                 economyBar?.setTeam(m.team);
+
+                // PLAN-metalstorm-onboarding.md §4: the spectator banner is
+                // engine-level (not native-ui) so it shows up for BAR/ZK too,
+                // not just Metalstorm. Enlist reuses the lobby connection's
+                // HTTP session — it stays alive for the life of the game.
+                if (m.role === 'spectator') {
+                    showSpectatorBanner(async () => {
+                        const data = await lobbyUI?.enlist();
+                        return !!data?.id;
+                    });
+                } else {
+                    hideSpectatorBanner();
+                }
 
                 // Initialize native UI for Metalstorm. Resolve the gameId from
                 // (in priority) the ?game= URL param, localStorage, then the
@@ -951,7 +967,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 if (gameId === 'metalstorm') {
                     // Initialize with empty httpBase for local/dev environment
                     // In production, this would be the lobby HTTP URL
-                    void initializeNativeUI(gameId, '', m.playerId, m.team);
+                    void initializeNativeUI(gameId, '', m.playerId, m.team, null, m.role);
                 }
                 break;
             }

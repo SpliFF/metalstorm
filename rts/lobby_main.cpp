@@ -196,9 +196,18 @@ static GameServerInstance spawnGameServer(
     // their string storage outlives the execvp call in the child.
     // Player spec format:  <username>:<team>:<posIdx>
     // AI spec format:      <id>:<team>:<posIdx>
+    //
+    // `playerRoster` is documented as "non-spectators" above, but callers
+    // pass the room's full player list (spectators included) — filter here
+    // so a spectator never gets baked into --player as a phantom team-0
+    // player. Spectators reach the game server by authenticating without a
+    // --player entry; ClientMessageHandler's AuthRequest handler treats
+    // "authenticated but not in the roster" as role=spectator (see PLAN
+    // metalstorm-onboarding.md §4).
     std::vector<std::string> playerArgStorage;
     playerArgStorage.reserve(playerRoster.size());
     for (const auto& p : playerRoster) {
+        if (p.isSpectator) continue;
         playerArgStorage.push_back(
             p.username + ":" +
             std::to_string(static_cast<int>(p.team)) + ":" +
@@ -1481,6 +1490,7 @@ int main(int argc, char* argv[])
             pj["team"] = p.team;
             pj["ready"] = p.ready;
             pj["is_host"] = p.isHost;
+            pj["is_spectator"] = p.isSpectator;
             pj["start_pos"] = p.startPos;
             j["players"].push_back(std::move(pj));
         }
@@ -2055,6 +2065,29 @@ int main(int argc, char* argv[])
             ? (uint8_t)std::atoi(j["team"].get<std::string>().c_str())
             : (uint8_t)j.value("team", 0);
         rooms.SetTeam(room->id, static_cast<uint32_t>(userId), team);
+        broadcastRooms();
+        return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
+    });
+
+    // POST /api/rooms/enlist — spectator → player (PLAN-metalstorm-onboarding
+    // §4). Only converts the LOBBY's roster; a spectator who enlists while
+    // watching an already-Active game keeps observing under their existing
+    // spring-server session until they rejoin — the running game server's
+    // --player roster is fixed at spawn time (dynamic mid-game roster growth
+    // is the Stage-7-gated "metalstorm-lobby" work). Enlisting before the
+    // game starts converts cleanly: the next spawnGameServer call picks up
+    // the updated non-spectator roster.
+    net.AddHttpPost("/api/rooms/enlist", RouteAuth::TokenRequired, [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        auto* room = findPlayerRoom(static_cast<uint32_t>(userId));
+        if (!room) return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+        if (j.is_discarded()) return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+        uint8_t team = j.contains("team") && j["team"].is_string()
+            ? (uint8_t)std::atoi(j["team"].get<std::string>().c_str())
+            : (uint8_t)j.value("team", 255);
+        if (!rooms.EnlistSpectator(room->id, static_cast<uint32_t>(userId), team))
+            return HttpAuth::JsonResponse(403, R"({"error":"cannot enlist"})");
         broadcastRooms();
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
     });

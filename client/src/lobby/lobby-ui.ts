@@ -424,7 +424,7 @@ export class LobbyUI {
         const players: RoomPlayerInfo[] = (r.players ?? []).map((p: any) => ({
             playerId: p.player_id ?? 0, username: p.username ?? '',
             team: p.team ?? 0, ready: p.ready ?? false,
-            isSpectator: false, isHost: p.is_host ?? false,
+            isSpectator: p.is_spectator ?? false, isHost: p.is_host ?? false,
             startPos: p.start_pos ?? -1,
         }));
         const aiSlots: RoomAISlotInfo[] = (r.ai_slots ?? []).map((s: any) => ({
@@ -731,6 +731,15 @@ export class LobbyUI {
                 `Host: ${this.esc(r.hostName)}`;
             const joinLabel = r.state >= 5 ? 'Ended'
                 : (r.state >= 3 ? 'Watch / Rejoin' : 'Join');
+            // A room already Loading/Active auto-spectates anyone not on its
+            // original roster (RoomManager::JoinRoom's isActive branch) — the
+            // plain Join button already gets you in as a spectator there, so
+            // the explicit Spectate button only adds value pre-game (Filling),
+            // where the default Join would claim a player slot instead
+            // (PLAN-metalstorm-onboarding.md §4).
+            const spectateHtml = (r.state < 3 && r.state < 5)
+                ? `<button class="spectate-btn" data-id="${r.id}">Spectate</button>`
+                : '';
             return renderTemplate(this.templates.browserRoomEntry, {
                 id: r.id,
                 name: this.esc(r.name),
@@ -738,12 +747,18 @@ export class LobbyUI {
                 detail,
                 join_label: joinLabel,
                 disabled_attr: r.state >= 5 ? ' disabled' : '',
+                spectate_html: spectateHtml,
             });
         }).join('');
 
         el.querySelectorAll('.join-btn:not([disabled])').forEach(btn => {
             (btn as HTMLElement).onclick = () => {
                 this.joinRoom(parseInt(btn.getAttribute('data-id')!));
+            };
+        });
+        el.querySelectorAll('.spectate-btn').forEach(btn => {
+            (btn as HTMLElement).onclick = () => {
+                this.joinRoom(parseInt(btn.getAttribute('data-id')!), /*asSpectator=*/true);
             };
         });
     }
@@ -973,14 +988,20 @@ export class LobbyUI {
         // the host. We compose a small HTML fragment in JS rather than
         // adding more conditional placeholders to the template.
         const actions: string[] = [];
-        if (preGame) {
+        // Spectators (PLAN-metalstorm-onboarding.md §4) aren't part of the
+        // ready-check (RoomManager::AllReady already excludes them) — Ready
+        // doesn't apply to them; Enlist is their path to a team slot instead.
+        if (preGame && !myPlayer?.isSpectator) {
             actions.push(`<button id="ready-btn" class="${myPlayer?.ready ? 'secondary' : ''}">${myPlayer?.ready ? 'Unready' : 'Ready'}</button>`);
+        }
+        if (myPlayer?.isSpectator) {
+            actions.push('<button id="enlist-btn" class="primary">Enlist</button>');
         }
         if (preGame && amHost) {
             actions.push('<button id="start-btn" class="primary">Start Game</button>');
         }
         if (gameRunning) {
-            actions.push('<button id="rejoin-btn" class="primary">Rejoin Game</button>');
+            actions.push(`<button id="rejoin-btn" class="primary">${myPlayer?.isSpectator ? 'Watch Game' : 'Rejoin Game'}</button>`);
         }
         // No "End Game" or "Close Room" buttons. Room lifecycle is
         // handled via Leave: last human out kills the game and room.
@@ -995,6 +1016,8 @@ export class LobbyUI {
         document.getElementById('leave-btn')!.onclick = () => this.leave();
         document.getElementById('ready-btn')?.addEventListener('click',
             () => this.ready(!myPlayer?.ready));
+        document.getElementById('enlist-btn')?.addEventListener('click',
+            () => this.enlist());
         document.getElementById('start-btn')?.addEventListener('click',
             () => this.startGame());
         document.getElementById('rejoin-btn')?.addEventListener('click', () => {
@@ -1111,11 +1134,11 @@ export class LobbyUI {
         }
     }
 
-    async joinRoom(roomId: number): Promise<void> {
+    async joinRoom(roomId: number, asSpectator: boolean = false): Promise<void> {
         if (!this.authToken) return;
         let data: any = null;
         try {
-            data = await this.lobbyPost('/api/rooms/join', { room_id: roomId });
+            data = await this.lobbyPost('/api/rooms/join', { room_id: roomId, as_spectator: asSpectator });
         } catch { /* network / non-JSON error — handled as a failed join below */ }
         if (data?.id) {
             this.updateCurrentRoomFromJson(data);
@@ -1152,6 +1175,21 @@ export class LobbyUI {
         if (!this.authToken) return;
         const data = await this.lobbyPost('/api/rooms/team', { team });
         if (data?.id) this.updateCurrentRoomFromJson(data);
+    }
+
+    /// Spectator → player (PLAN-metalstorm-onboarding.md §4). Auto-assigns
+    /// the next open team. Converting before the game starts is the fully
+    /// working path — the new roster entry rides the next spawnGameServer
+    /// call. Enlisting while watching an already-running game updates the
+    /// lobby's roster (so a restart/rejoin picks it up) but does not grant
+    /// command rights on the CURRENT session — the running spring-server's
+    /// --player roster is fixed at spawn (dynamic mid-game roster growth is
+    /// tracked separately, gated behind Stage 7).
+    async enlist(): Promise<{ id: number } | null> {
+        if (!this.authToken) return null;
+        const data = await this.lobbyPost('/api/rooms/enlist', { team: 255 });
+        if (data?.id) this.updateCurrentRoomFromJson(data);
+        return data?.id ? data : null;
     }
 
     async startGame(): Promise<void> {
