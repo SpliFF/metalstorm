@@ -72,6 +72,7 @@ import {
     disposeNativeUI,
     uiStore,
     mapGestureBridge,
+    configureCommandPresets,
 } from './ui/native-ui/index.js';
 
 // Active in-game templates. Starts with engine defaults; overwritten when
@@ -873,6 +874,13 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         token: localStorage.getItem('springrts-token') ?? '',
         enabled: CONFIG.errorReportingEnabled,
         buildStamp: CONFIG.buildStamp,
+    });
+    // PLAN-metalstorm-scripting.md task 6: command-composer presets are
+    // stored per-account on the lobby — same endpoint/token as the error
+    // channel above, just a different route pair.
+    configureCommandPresets({
+        endpoint: CONFIG.httpUrl,
+        token: localStorage.getItem('springrts-token') ?? '',
     });
     gameWorker = new GameWorker();
     // PLAN-metalstorm-scripting.md task 4: the map-arm gesture bridge posts

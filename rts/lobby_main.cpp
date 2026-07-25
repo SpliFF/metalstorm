@@ -1039,6 +1039,89 @@ int main(int argc, char* argv[])
         }
     });
 
+    // PLAN-metalstorm-scripting.md task 6: command-composer presets, stored
+    // per account. Each preset is a filled CommandIntent (verb/subject/
+    // target/priority/when) — the server stores `intent` opaquely and never
+    // parses or executes it; re-issuing a preset re-runs the client's own
+    // compile (compile-table.ts). No saved logic, no triggers-on-triggers.
+    // Scoped to the caller's own user id (TokenRequired), same auth shape as
+    // /api/client-errors above.
+    net.AddHttpPost("/api/presets/list", RouteAuth::TokenRequired,
+        [&db](const std::string&, const std::string&, const HttpRequestHeaders& headers) -> HttpResponse {
+        int64_t userId = HttpAuth::ValidateToken(db, headers.authorization);
+        if (userId <= 0) return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
+
+        nlohmann::json arr = nlohmann::json::array();
+        for (const auto& p : db.GetCommandPresets(userId)) {
+            try {
+                nlohmann::json entry;
+                entry["name"] = p.name;
+                entry["updated_at"] = p.updatedAt;
+                entry["intent"] = nlohmann::json::parse(p.intentJson);
+                arr.push_back(std::move(entry));
+            } catch (const std::exception&) {
+                continue; // corrupt row — skip rather than send unparsable JSON to the client
+            }
+        }
+        nlohmann::json resp;
+        resp["presets"] = arr;
+        std::string json = resp.dump();
+        return {.contentType = "application/json", .body = {json.begin(), json.end()}, .status = 200,
+                .cacheControl = "no-store"};
+    });
+
+    net.AddHttpPost("/api/presets/save", RouteAuth::TokenRequired,
+        [&db](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+        int64_t userId = HttpAuth::ValidateToken(db, headers.authorization);
+        if (userId <= 0) return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
+
+        // A filled intent (a handful of slot values) is nowhere near this
+        // size; the cap exists to reject abuse, not to constrain a real one.
+        if (body.size() > 8 * 1024)
+            return HttpAuth::JsonResponse(413, R"({"error":"preset too large"})");
+
+        try {
+            nlohmann::json j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/true);
+            if (!j.is_object() || !j.contains("name") || !j.contains("intent"))
+                return HttpAuth::JsonResponse(400, R"({"error":"bad request"})");
+
+            std::string name = j.value("name", "");
+            if (name.empty() || name.size() > 80)
+                return HttpAuth::JsonResponse(400, R"({"error":"invalid name - must be 1 to 80 characters"})");
+
+            // Cap only bites on genuinely new names — re-saving an existing
+            // preset (editing it in place) is always allowed.
+            if (!db.CommandPresetExists(userId, name) && db.CountCommandPresets(userId) >= 50)
+                return HttpAuth::JsonResponse(429, R"({"error":"preset limit reached - max 50"})");
+
+            std::string intentJson = j["intent"].dump();
+            if (!db.SaveCommandPreset(userId, name, intentJson))
+                return HttpAuth::JsonResponse(500, R"({"error":"save failed"})");
+
+            return HttpAuth::JsonResponse(200, R"({"ok":true})");
+        } catch (const std::exception&) {
+            return HttpAuth::JsonResponse(400, R"({"error":"malformed preset"})");
+        }
+    });
+
+    net.AddHttpPost("/api/presets/delete", RouteAuth::TokenRequired,
+        [&db](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+        int64_t userId = HttpAuth::ValidateToken(db, headers.authorization);
+        if (userId <= 0) return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
+
+        try {
+            nlohmann::json j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/true);
+            std::string name = j.value("name", "");
+            if (name.empty())
+                return HttpAuth::JsonResponse(400, R"({"error":"invalid name"})");
+
+            bool deleted = db.DeleteCommandPreset(userId, name);
+            return HttpAuth::JsonResponse(200, deleted ? R"({"ok":true})" : R"({"ok":false})");
+        } catch (const std::exception&) {
+            return HttpAuth::JsonResponse(400, R"({"error":"malformed request"})");
+        }
+    });
+
     // ─────── PLAN-gm-tools: GM dashboard + admin verbs (lobby side) ───────
     // The GM per-game verbs (pause/rollback/grant/broadcast/inspect/kick) live
     // on each game server's own /api/gm/<verb> plane (browser→game port, same

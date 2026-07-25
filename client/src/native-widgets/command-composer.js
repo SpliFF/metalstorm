@@ -24,6 +24,7 @@ import {
 } from '../ui/native-ui/compile-table.js';
 import { mapGestureBridge } from '../ui/native-ui/map-gesture.js';
 import { previewDirectiveCost, matchSelectionToGroup } from '../ui/native-ui/cost-preview.js';
+import { listCommandPresets, saveCommandPreset, deleteCommandPreset } from '../ui/native-ui/command-presets.js';
 import { injectStyle } from '../ui/ui.js';
 import composerCss from './command-composer.css?raw';
 
@@ -60,6 +61,15 @@ const state = {
 
     // Cost preview (task 5)
     costModel: null,        // authority-cost.js cost model, once loaded (null = not ready/unavailable)
+
+    // Presets (task 6): a filled, re-parameterisable template, not logic —
+    // re-loading one just re-fills the slots; re-issuing it re-runs the
+    // normal compile. `presetsCache` mirrors the server list so the menu
+    // doesn't refetch on every open; refreshed on mount and after
+    // save/delete. `staleNotice` surfaces "player must re-pick" (§9) —
+    // never a silent retarget.
+    presetsCache: null,     // CommandPreset[] | null (null = not loaded yet)
+    staleNotice: null,      // string | null
 
     // Context (set on init)
     ctx: null,
@@ -121,6 +131,10 @@ function init(ctx) {
     // dependency for the composer to be usable.
     loadCostModel();
 
+    // Presets (task 6): best-effort prefetch so the first menu-open isn't a
+    // blank flash; refreshPresetsCache() re-fetches after save/delete.
+    refreshPresetsCache();
+
     console.log('[command-composer] Initialized');
 }
 
@@ -181,6 +195,8 @@ function render() {
     // sentence, and a separate row cost 40px of play area for one optional
     // token.
     const html = `
+        ${state.staleNotice ? `<div class="composer-row composer-stale-notice">⚠ ${state.staleNotice}</div>` : ''}
+
         <div class="composer-row composer-sentence">
             ${renderSlotChip('verb', state.verb, '[VERB]')}
             ${renderSlotChip('subject', state.subject ? formatSubject(state.subject) : null, '[SUBJECT]')}
@@ -198,6 +214,8 @@ function render() {
         <div class="composer-row composer-controls">
             <div class="composer-echo${state.verb && state.subject && state.target ? ' is-ready' : ''}">${renderEcho()}</div>
             <div class="composer-cost" id="composer-cost"></div>
+            <button id="save-preset-btn" class="nui-btn" title="Save this command as a reusable preset">💾</button>
+            <button id="presets-btn" class="nui-btn" title="Load or delete a saved preset">📁</button>
             <button id="commit-btn" class="nui-btn nui-btn--primary">Commit</button>
             <button id="clear-btn" class="nui-btn nui-btn--danger">Clear</button>
         </div>
@@ -205,6 +223,7 @@ function render() {
         <div id="autocomplete-panel" class="nui-menu" hidden></div>
         <div id="verb-menu" class="nui-menu" hidden></div>
         <div id="when-menu" class="nui-menu" hidden></div>
+        <div id="presets-menu" class="nui-menu" hidden></div>
     `;
 
     state.container.innerHTML = html;
@@ -247,12 +266,19 @@ function targetChipLabel() {
  * only if there genuinely isn't room above.
  */
 function openMenu(menu, slotName) {
-    menu.hidden = false;
-
     const chip = state.container.querySelector(`.slot-chip[data-slot="${slotName}"]`);
     if (!chip) return;
+    openMenuNear(menu, chip);
+}
 
-    const anchor = chip.getBoundingClientRect();
+/** Position-and-show `menu` against an arbitrary anchor element (a slot chip
+ *  or a toolbar button, e.g. the presets button — task 6). Factored out of
+ *  `openMenu` so non-slot triggers can reuse the same viewport-space
+ *  placement math instead of needing a fake `data-slot`. */
+function openMenuNear(menu, anchorEl) {
+    menu.hidden = false;
+
+    const anchor = anchorEl.getBoundingClientRect();
     const gap = 6;
     const height = menu.offsetHeight;
 
@@ -260,7 +286,7 @@ function openMenu(menu, slotName) {
     menu.style.top = fitsAbove
         ? `${anchor.top - gap - height}px`
         : `${anchor.bottom + gap}px`;
-    // Keep the menu on screen when the chip sits near the right edge.
+    // Keep the menu on screen when the anchor sits near the right edge.
     menu.style.left = `${Math.max(gap, Math.min(anchor.left, window.innerWidth - menu.offsetWidth - gap))}px`;
 }
 
@@ -307,6 +333,13 @@ function wireEventHandlers() {
     if (clearBtn) {
         clearBtn.addEventListener('click', handleClear);
     }
+
+    // Presets (task 6)
+    const saveBtn = state.container.querySelector('#save-preset-btn');
+    if (saveBtn) saveBtn.addEventListener('click', handleSavePreset);
+
+    const presetsBtn = state.container.querySelector('#presets-btn');
+    if (presetsBtn) presetsBtn.addEventListener('click', () => renderPresetsMenu(presetsBtn));
 }
 
 /**
@@ -314,6 +347,9 @@ function wireEventHandlers() {
  */
 function openSlotEditor(slotName) {
     state.activeSlot = slotName;
+    // Any manual re-pick is the player acting on a stale-preset notice
+    // (§9) — clear it rather than leaving it stuck on screen.
+    state.staleNotice = null;
 
     if (slotName === 'verb') {
         renderVerbMenu();
@@ -788,6 +824,159 @@ function handleClear() {
     state.searchQuery = '';
     state.mapArmActive = false;
     state.subjectAutoFilled = false;
+    state.staleNotice = null;
+
+    render();
+}
+
+/**
+ * Preset save/load (PLAN-metalstorm-scripting.md task 6). A preset stores a
+ * *filled* CommandIntent, never logic — loading one just re-fills the slots
+ * exactly like a manual pick would, and committing re-runs the normal
+ * compile. Nothing here bypasses validateIntent/compileIntent.
+ */
+
+/** Re-fetch the caller's saved presets and re-render the menu if it's open. */
+async function refreshPresetsCache() {
+    state.presetsCache = await listCommandPresets();
+    const menu = state.container?.querySelector('#presets-menu');
+    if (menu && !menu.hidden) renderPresetsMenu();
+}
+
+/** Save button: prompts for a name and stores the current filled intent.
+ *  Disabled-by-content, not disabled-by-attribute — same "click it and find
+ *  out" as the rest of this widget's prompt()-based inputs (task 1-3). */
+async function handleSavePreset() {
+    const intent = buildIntent();
+    if (!intent || validateIntent(intent)) {
+        alert('Fill all required slots (verb, subject, target) before saving a preset.');
+        return;
+    }
+
+    const name = prompt('Preset name? (e.g. "Assault North Basin — high")', '');
+    if (!name) return;
+
+    const error = await saveCommandPreset(name.trim(), intent);
+    if (error) {
+        alert(`Could not save preset: ${error}`);
+        return;
+    }
+
+    await refreshPresetsCache();
+}
+
+/** Presets button: opens the saved-preset list. Each entry loads on click;
+ *  a trailing × deletes it (with confirmation, since delete has no undo). */
+function renderPresetsMenu(anchorEl) {
+    const menu = state.container?.querySelector('#presets-menu');
+    if (!menu) return;
+
+    const button = anchorEl ?? state.container.querySelector('#presets-btn');
+
+    if (state.presetsCache === null) {
+        menu.innerHTML = `<div class="nui-menu__item nui-menu__item--disabled">Loading…</div>`;
+        openMenuNear(menu, button);
+        refreshPresetsCache();
+        return;
+    }
+
+    if (state.presetsCache.length === 0) {
+        menu.innerHTML = `<div class="nui-menu__item nui-menu__item--disabled">No saved presets yet</div>`;
+        openMenuNear(menu, button);
+        return;
+    }
+
+    menu.innerHTML = state.presetsCache
+        .map((p, i) => `
+            <div class="composer-preset-item" data-index="${i}">
+                <span class="composer-preset-name">${escapeHtml(p.name)}</span>
+                <button type="button" class="composer-preset-delete" data-index="${i}" title="Delete preset">×</button>
+            </div>
+        `)
+        .join('');
+    openMenuNear(menu, button);
+
+    for (const nameEl of menu.querySelectorAll('.composer-preset-name')) {
+        nameEl.addEventListener('click', () => {
+            const index = parseInt(nameEl.closest('.composer-preset-item').getAttribute('data-index'), 10);
+            menu.hidden = true;
+            loadPreset(state.presetsCache[index]);
+        });
+    }
+    for (const delEl of menu.querySelectorAll('.composer-preset-delete')) {
+        delEl.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            const index = parseInt(delEl.getAttribute('data-index'), 10);
+            const preset = state.presetsCache[index];
+            if (!preset || !confirm(`Delete preset "${preset.name}"?`)) return;
+            await deleteCommandPreset(preset.name);
+            await refreshPresetsCache();
+        });
+    }
+}
+
+function escapeHtml(s) {
+    const div = document.createElement('div');
+    div.textContent = s;
+    return div.innerHTML;
+}
+
+/**
+ * Load a saved preset into the slots (task 6). A preset holds a `NamedEntity`
+ * snapshot for an entity target and a bare `groupId` for a group subject —
+ * both are re-validated against *live* state here, never trusted as-is:
+ *
+ *   - Subject (group): the groupId must still exist in the current org-group
+ *     roster. If not, the Subject slot is left EMPTY and flagged — never
+ *     silently rebound to a different group (§9 "never silently retarget").
+ *   - Target (entity): re-resolved by (type, id) against the live
+ *     `namedEntityIndex`, both to catch a deleted/completed entity AND to
+ *     pick up a live rename (§9 "index keys on id; display text tracks
+ *     renames live") rather than replaying the preset's stale name/position.
+ *   - Target (point/area/route): raw coordinates, never stale — filled as-is.
+ *   - Priority / When: always filled as-is (no entity reference to go stale).
+ */
+function loadPreset(preset) {
+    if (!preset || !preset.intent) return;
+    const intent = preset.intent;
+    const staleParts = [];
+
+    state.verb = intent.verb ?? null;
+    state.priority = typeof intent.priority === 'number' ? intent.priority : 50;
+    state.when = intent.when ?? null;
+    state.subjectAutoFilled = false;
+
+    // Subject
+    if (intent.subject?.type === 'group') {
+        const groups = state.ctx?.store.getOrgGroups() ?? [];
+        const stillExists = groups.some((g) => g.groupId === intent.subject.groupId);
+        if (stillExists) {
+            state.subject = intent.subject;
+        } else {
+            state.subject = null;
+            staleParts.push('the saved group no longer exists');
+        }
+    } else {
+        // idle-filter / ai subjects reference no persistent id — never stale.
+        state.subject = intent.subject ?? null;
+    }
+
+    // Target
+    if (intent.target?.shape === 'entity' && intent.target.entity) {
+        const live = namedEntityIndex.get(intent.target.entity.type, intent.target.entity.id);
+        if (live) {
+            state.target = { shape: 'entity', entity: live };
+        } else {
+            state.target = null;
+            staleParts.push('the saved target no longer exists');
+        }
+    } else {
+        state.target = intent.target ?? null;
+    }
+
+    state.staleNotice = staleParts.length
+        ? `Preset "${preset.name}" — ${staleParts.join(' and ')}. Please re-pick before committing.`
+        : null;
 
     render();
 }

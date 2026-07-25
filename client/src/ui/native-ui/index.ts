@@ -62,3 +62,12 @@ export type {
     StandingOrderPayload,
     AIGuidancePayload,
 } from './compile-table.js';
+
+// Command-composer presets (PLAN-metalstorm-scripting.md task 6)
+export {
+    configureCommandPresets,
+    listCommandPresets,
+    saveCommandPreset,
+    deleteCommandPreset,
+} from './command-presets.js';
+export type { CommandPreset } from './command-presets.js';

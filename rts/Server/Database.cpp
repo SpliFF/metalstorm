@@ -98,6 +98,19 @@ void Database::CreateTables() {
         );
         CREATE INDEX IF NOT EXISTS idx_client_errors_stack_hash ON client_errors(stack_hash);
         CREATE INDEX IF NOT EXISTS idx_client_errors_created_at ON client_errors(created_at);
+
+        -- PLAN-metalstorm-scripting.md task 6: saved command-composer
+        -- presets. `intent_json` is opaque to the server — a filled
+        -- CommandIntent, not logic.
+        CREATE TABLE IF NOT EXISTS command_presets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL REFERENCES users(id),
+            name TEXT NOT NULL,
+            intent_json TEXT NOT NULL DEFAULT '',
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(user_id, name)
+        );
+        CREATE INDEX IF NOT EXISTS idx_command_presets_user ON command_presets(user_id);
     )";
 
     char* errMsg = nullptr;
@@ -467,6 +480,109 @@ int Database::CountRecentClientErrors(int64_t userId, int windowSeconds) {
 
     sqlite3_finalize(stmt);
     return count;
+}
+
+bool Database::SaveCommandPreset(int64_t userId, const std::string& name, const std::string& intentJson) {
+    // Upsert on (user_id, name) — re-saving a preset under the same name
+    // overwrites the filled template rather than accumulating duplicates.
+    const char* sql =
+        "INSERT INTO command_presets (user_id, name, intent_json, updated_at) "
+        "VALUES (?, ?, ?, CURRENT_TIMESTAMP) "
+        "ON CONFLICT(user_id, name) DO UPDATE SET "
+        "intent_json = excluded.intent_json, updated_at = CURRENT_TIMESTAMP";
+    sqlite3_stmt* stmt = nullptr;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        SLOG(SPRING_LOG_ERROR, "SaveCommandPreset: prepare failed: %s", sqlite3_errmsg(db));
+        return false;
+    }
+
+    sqlite3_bind_int64(stmt, 1, userId);
+    sqlite3_bind_text(stmt, 2, name.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, intentJson.c_str(), -1, SQLITE_TRANSIENT);
+
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    if (!ok)
+        SLOG(SPRING_LOG_ERROR, "SaveCommandPreset: upsert failed: %s", sqlite3_errmsg(db));
+
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+std::vector<Database::CommandPresetRecord> Database::GetCommandPresets(int64_t userId, int limit) {
+    std::vector<CommandPresetRecord> out;
+    const char* sql =
+        "SELECT name, intent_json, updated_at FROM command_presets "
+        "WHERE user_id = ? ORDER BY updated_at DESC LIMIT ?";
+    sqlite3_stmt* stmt = nullptr;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        return out;
+
+    sqlite3_bind_int64(stmt, 1, userId);
+    sqlite3_bind_int(stmt, 2, limit);
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        CommandPresetRecord rec;
+        const unsigned char* name = sqlite3_column_text(stmt, 0);
+        const unsigned char* intentJson = sqlite3_column_text(stmt, 1);
+        const unsigned char* updatedAt = sqlite3_column_text(stmt, 2);
+        rec.name = name ? reinterpret_cast<const char*>(name) : "";
+        rec.intentJson = intentJson ? reinterpret_cast<const char*>(intentJson) : "";
+        rec.updatedAt = updatedAt ? reinterpret_cast<const char*>(updatedAt) : "";
+        out.push_back(std::move(rec));
+    }
+
+    sqlite3_finalize(stmt);
+    return out;
+}
+
+bool Database::DeleteCommandPreset(int64_t userId, const std::string& name) {
+    const char* sql = "DELETE FROM command_presets WHERE user_id = ? AND name = ?";
+    sqlite3_stmt* stmt = nullptr;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        return false;
+
+    sqlite3_bind_int64(stmt, 1, userId);
+    sqlite3_bind_text(stmt, 2, name.c_str(), -1, SQLITE_TRANSIENT);
+
+    sqlite3_step(stmt);
+    bool deleted = sqlite3_changes(db) > 0;
+    sqlite3_finalize(stmt);
+    return deleted;
+}
+
+int Database::CountCommandPresets(int64_t userId) {
+    const char* sql = "SELECT COUNT(*) FROM command_presets WHERE user_id = ?";
+    sqlite3_stmt* stmt = nullptr;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        return 0;
+
+    sqlite3_bind_int64(stmt, 1, userId);
+
+    int count = 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+        count = sqlite3_column_int(stmt, 0);
+
+    sqlite3_finalize(stmt);
+    return count;
+}
+
+bool Database::CommandPresetExists(int64_t userId, const std::string& name) {
+    const char* sql = "SELECT 1 FROM command_presets WHERE user_id = ? AND name = ?";
+    sqlite3_stmt* stmt = nullptr;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        return false;
+
+    sqlite3_bind_int64(stmt, 1, userId);
+    sqlite3_bind_text(stmt, 2, name.c_str(), -1, SQLITE_TRANSIENT);
+
+    bool exists = sqlite3_step(stmt) == SQLITE_ROW;
+    sqlite3_finalize(stmt);
+    return exists;
 }
 
 int Database::CleanExpiredSessions(int maxAgeSeconds) {

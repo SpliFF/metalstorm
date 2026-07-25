@@ -98,6 +98,62 @@
 }
 .composer-cost.is-refused { color: var(--nui-bad); font-weight: 600; }
 
+/* Icon-only preset buttons (task 6) — narrow so they don't crowd out the
+   echo/Commit/Clear in the 560px control row. */
+#save-preset-btn,
+#presets-btn {
+    flex: none;
+    padding: 3px 7px;
+}
+
+/* Stale-preset warning (task 6, §9 "flags the slot; the player re-picks;
+   never silently retargets") — a full-width banner above the sentence row,
+   same alert colour as the cost-refused/insufficient-authority state. */
+.composer-stale-notice {
+    padding: 4px 8px;
+    background: rgba(224, 103, 103, 0.12);
+    border: 1px solid #6d3535;
+    border-radius: 2px;
+    color: var(--nui-bad);
+    font-size: 11px;
+}
+
+/* ── Presets menu (task 6) ─────────────────────────────────────────── */
+
+.composer-preset-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 2px 2px 8px;
+    border-radius: 2px;
+}
+.composer-preset-item:hover { background: var(--nui-accent-dim); }
+.composer-preset-name {
+    flex: 1;
+    min-width: 0;
+    padding: 2px 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--nui-text);
+    font-size: 11px;
+    cursor: pointer;
+}
+.composer-preset-delete {
+    flex: none;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    background: none;
+    border: none;
+    border-radius: 2px;
+    color: var(--nui-text-faint);
+    font-size: 13px;
+    line-height: 1;
+    cursor: pointer;
+}
+.composer-preset-delete:hover { background: rgba(224, 103, 103, 0.25); color: var(--nui-bad); }
+
 /* ── Slot-picker menus ──────────────────────────────────────────────── */
 
 .command-composer .nui-menu__item--disabled {

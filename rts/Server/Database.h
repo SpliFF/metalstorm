@@ -159,6 +159,38 @@ public:
     /// 5/hour is advisory only; PLAN-security-hardening.md §1 "junk floods" row).
     int CountRecentClientErrors(int64_t userId, int windowSeconds);
 
+    /// A saved command-composer preset (PLAN-metalstorm-scripting.md task 6).
+    /// `intentJson` is the client's compile-table.ts `CommandIntent`
+    /// (verb/subject/target/priority/when), stored opaquely — the server
+    /// never parses or interprets it, just round-trips it. This is a filled
+    /// template, not logic: re-issuing a preset re-runs the client's compile,
+    /// there is no server-side execution of presets.
+    struct CommandPresetRecord {
+        std::string name;
+        std::string intentJson;
+        std::string updatedAt;
+    };
+
+    /// Create or overwrite a preset (unique per user+name). Returns true on
+    /// success.
+    bool SaveCommandPreset(int64_t userId, const std::string& name, const std::string& intentJson);
+
+    /// A user's saved presets, most-recently-updated first.
+    std::vector<CommandPresetRecord> GetCommandPresets(int64_t userId, int limit = 200);
+
+    /// Delete a preset by name. Returns true if a row was deleted.
+    bool DeleteCommandPreset(int64_t userId, const std::string& name);
+
+    /// Count of presets currently saved for a user — backs the per-account
+    /// cap in the /api/presets/save route (SaveCommandPreset itself has no
+    /// cap; the route enforces it before calling save on a brand-new name).
+    int CountCommandPresets(int64_t userId);
+
+    /// True if a preset with this name already exists for the user — lets
+    /// the save route distinguish "update" (always allowed) from "create"
+    /// (capped) without an extra round trip.
+    bool CommandPresetExists(int64_t userId, const std::string& name);
+
 private:
     void CreateTables();
 
