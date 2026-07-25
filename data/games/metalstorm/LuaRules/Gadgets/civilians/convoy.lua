@@ -35,6 +35,15 @@ local function spawnConvoyVehicle(civ, route)
             waypointIndex = 2,  -- Start heading to waypoint 2 (spawned at waypoint 1)
         })
         Spring.Log("Civilians", LOG.INFO, "Spawned convoy vehicle " .. unitID .. " for route " .. route.id)
+
+        -- Let a scenario-staged escort objective for this route claim the
+        -- vehicle as its payload (game_scenario.lua, deferred since no
+        -- convoy unit exists at scenario-load time). Defensive nil-check:
+        -- convoy.lua has no scenario dependency when none is loaded.
+        if GG and GG.Scenario and GG.Scenario.NotifyConvoySpawn then
+            GG.Scenario.NotifyConvoySpawn(route.id, unitID)
+        end
+
         return unitID
     end
 

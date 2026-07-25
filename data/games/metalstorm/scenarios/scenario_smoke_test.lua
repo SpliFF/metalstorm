@@ -10,13 +10,17 @@
 --     "players": [{"username": "test1", "team": 0}],
 --     "aiSlots": [{"aiId": "null", "team": 1}] }
 --
--- Region keys use the CURRENT grid model (GG.Regions.KeyAt(x, z), REGION_SIZE
--- 2048 elmos — see game_regions.lua): "2:2" covers team 0's start position
+-- Region keys use the grid model (GG.Regions.KeyAt(x, z), REGION_SIZE 2048
+-- elmos — see game_regions.lua): "2:2" covers team 0's start position
 -- (4352, 4352), "6:6" covers team 1's (13056, 13056), "4:4" is the
--- (uncontested) map centre. This will need to move to named graph keys
--- (mapdata/regions.lua already ships "west_bastion" etc. for this map) once
--- the concurrent metalstorm-backbone region rewrite lands — see the
--- FILE-SCOPE NOTE in game_scenario.lua.
+-- (uncontested) map centre. The metalstorm-backbone region rewrite (named
+-- map-authored graph, commit 0838b8066b) has landed, but it only takes
+-- effect for maps that ship a mapdata/regions.lua — green_flat_x34_v3 does
+-- not, so game_regions.lua falls back to the grid here and these keys stay
+-- correct as-is. See scenarios/meridian_basin.lua for a scenario on a map
+-- that DOES ship a named graph, and the FILE-SCOPE NOTE in
+-- game_scenario.lua for how a scenario's region keys must match whichever
+-- provider its map actually uses.
 
 return {
     version   = 1,
