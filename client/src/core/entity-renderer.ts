@@ -53,6 +53,7 @@ import {
     createZKMaterial, setActiveZKShadowGenerator, zkOptionsFromCustomParams,
     type ZKUnitTextures,
 } from './zk-model-material.js';
+import { matchAimSlots, type UnitAimPieces, type AimPiece } from './turret-aim-controller.js';
 
 /** Per-material texture URIs, keyed by material name in the .gltf.
  *  Single-material models (all S3O/DAE content) use just the `materials[0]`
@@ -666,8 +667,18 @@ export class EntityRenderer {
     // Spring-euler per-piece poses pushed by TurretAimController for a
     // native's turret/barrel. Same shape as `pieceOverrides` so both run
     // through springToBabylonLocal identically. Merge precedence (see
-    // computePieceWorldMatrices): streamed 0x05 > aim > clip > rest.
+    // computePieceWorldMatrices): streamed 0x05 > aim > wheel > clip > rest.
     private aimPoses = new Map<number, PieceOverrides>();
+    // --- Cosmetic wheel-spin poses (PLAN-metalstorm-train T6) ---
+    // Pushed by TrainPresentation for axle pieces. A SEPARATE map from
+    // aimPoses even though both are Spring-euler per-piece pose overrides:
+    // setAimPose/setWheelPose each REPLACE their whole per-unit map, so a
+    // train car with an engaged turret AND spinning axles needs its own
+    // channel — sharing aimPoses would have whichever system ticks last
+    // that frame silently blank the other's pieces. Piece indices never
+    // overlap (turret/barrel vs axleN), so precedence relative to aimPose
+    // doesn't matter for correctness.
+    private wheelPoses = new Map<number, PieceOverrides>();
     // Units ever seen in a 0x05 piece-state snapshot — the sim owns their
     // pieces, so the cosmetic aim controller declines them (ZK/BAR/future
     // s4 sim aim). Read by game-processor's TurretAimDeps.simDrivesPieces.
@@ -1600,21 +1611,26 @@ export class EntityRenderer {
         overrides: PieceOverrides | null,
         clipPose?: ReadonlyMap<number, Matrix> | null,
         aimPose?: PieceOverrides | null,
+        wheelPose?: PieceOverrides | null,
     ): Matrix[] {
         const out = new Array<Matrix>(tmpl.pieces.length);
         for (let i = 0; i < tmpl.pieces.length; i++) {
             const piece = tmpl.pieces[i];
             // §16c merge policy, highest precedence first:
-            //   streamed 0x05 (overrides) > aim controller > authored clip
-            //   > rest pose.
-            // 0x05 and aim are Spring-euler (springToBabylonLocal); the clip
-            // pose is already a Babylon parent-relative local matrix.
+            //   streamed 0x05 (overrides) > aim controller > wheel spin >
+            //   authored clip > rest pose. aimPose/wheelPose piece indices
+            //   never overlap (turret/barrel vs axleN), so their relative
+            //   order doesn't matter in practice.
+            // 0x05, aim and wheel are Spring-euler (springToBabylonLocal);
+            // the clip pose is already a Babylon parent-relative local matrix.
             let local: Matrix;
             const serverOv = overrides?.get(i);
             const aimOv = aimPose?.get(i);
+            const wheelOv = wheelPose?.get(i);
             const clip = clipPose?.get(i);
             if (serverOv) local = this.springToBabylonLocal(serverOv);
             else if (aimOv) local = this.springToBabylonLocal(aimOv);
+            else if (wheelOv) local = this.springToBabylonLocal(wheelOv);
             else if (clip) local = clip;
             else local = piece.localMatrix;
             out[i] = piece.parentIndex >= 0
@@ -1940,8 +1956,9 @@ export class EntityRenderer {
                 const overrides = this.pieceOverrides.get(id) ?? null;
                 const clipPose = this.clipPoses.get(id) ?? null;
                 const aimPose = this.aimPoses.get(id) ?? null;
-                const pieceWorld = (overrides || clipPose || aimPose)
-                    ? this.computePieceWorldMatrices(tmpl, overrides, clipPose, aimPose)
+                const wheelPose = this.wheelPoses.get(id) ?? null;
+                const pieceWorld = (overrides || clipPose || aimPose || wheelPose)
+                    ? this.computePieceWorldMatrices(tmpl, overrides, clipPose, aimPose, wheelPose)
                     : null;
 
                 // Push one instance matrix per piece with geometry
@@ -2198,8 +2215,9 @@ export class EntityRenderer {
         const overrides = this.pieceOverrides.get(id) ?? null;
         const clipPose = this.clipPoses.get(id) ?? null;
         const aimPose = this.aimPoses.get(id) ?? null;
-        const modelWorld = (overrides || clipPose || aimPose)
-            ? this.computePieceWorldMatrices(tmpl, overrides, clipPose, aimPose)[pieceIdx]
+        const wheelPose = this.wheelPoses.get(id) ?? null;
+        const modelWorld = (overrides || clipPose || aimPose || wheelPose)
+            ? this.computePieceWorldMatrices(tmpl, overrides, clipPose, aimPose, wheelPose)[pieceIdx]
             : tmpl.pieces[pieceIdx].restWorldMatrix;
 
         const rotation = (lerped.heading / 65535) * Math.PI * 2;
@@ -2310,6 +2328,27 @@ export class EntityRenderer {
         return true;
     }
 
+    /** Cosmetic wheel-spin pose override (PLAN-metalstorm-train T6): a
+     *  Spring-euler per-piece pose for a train car's axle pieces. Separate
+     *  channel from setAimPose — see the `wheelPoses` field comment for why
+     *  sharing it would clobber a simultaneously-engaged turret. Pass null
+     *  to clear. Returns false for an unknown unit. */
+    setWheelPose(id: number, pose: ReadonlyMap<number, {
+        px: number; py: number; pz: number;
+        rx: number; ry: number; rz: number;
+    }> | null): boolean {
+        if (pose === null) {
+            this.wheelPoses.delete(id);
+            return true;
+        }
+        if (!this.entityMeta.has(id)) {
+            this.wheelPoses.delete(id);
+            return false;
+        }
+        this.wheelPoses.set(id, pose as PieceOverrides);
+        return true;
+    }
+
     /** Live interpolated pose (world position + wire heading u16) for a
      *  unit, or null if it has no held position. Backs TurretAimController's
      *  unit-pose + target-pose sampling. */
@@ -2332,44 +2371,29 @@ export class EntityRenderer {
      * of the turret whose name reads as a barrel/sleeve/gun. Offsets are the
      * pieces' rest translations in Spring space (localMatrix m[12..14]).
      */
-    getAimPieces(id: number): {
-        turret: { idx: number; px: number; py: number; pz: number };
-        barrel?: { idx: number; px: number; py: number; pz: number };
-    } | null {
+    /** Turret (+ optional barrel) pieces for a unit, one entry per weapon
+     *  slot (`turret`, `turret2`, …) — see matchAimSlots for the naming
+     *  convention. null when the model has no turret piece at all. Backs
+     *  TurretAimController's cosmetic aim (DESIGN-MODEL-BUILDING §16c/§19). */
+    getAimPieces(id: number): UnitAimPieces | null {
         const meta = this.entityMeta.get(id);
         if (!meta) return null;
         const tmpl = this.modelTemplates.get(meta.defId);
         if (!tmpl) return null;
         const pieces = tmpl.pieces;
-        let turretIdx = -1;
-        for (let i = 0; i < pieces.length; i++) {
-            if (pieces[i].name.toLowerCase() === 'turret') { turretIdx = i; break; }
-        }
-        if (turretIdx < 0) return null;
-        const offOf = (i: number) => {
+        const matches = matchAimSlots(pieces);
+        if (matches.length === 0) return null;
+        const offOf = (i: number): AimPiece => {
             const m = pieces[i].localMatrix.m;
             return { idx: i, px: m[12], py: m[13], pz: m[14] };
         };
-        // First descendant of the turret whose name reads as a barrel.
-        let barrelIdx = -1;
-        for (let i = 0; i < pieces.length; i++) {
-            if (i === turretIdx) continue;
-            // Walk the parent chain to check the piece hangs under the turret.
-            let anc = pieces[i].parentIndex;
-            let underTurret = false;
-            while (anc >= 0) {
-                if (anc === turretIdx) { underTurret = true; break; }
-                anc = pieces[anc].parentIndex;
-            }
-            if (!underTurret) continue;
-            const n = pieces[i].name.toLowerCase();
-            if (n.includes('barrel') || n.includes('sleeve') || n === 'gun') {
-                barrelIdx = i; break;
-            }
-        }
-        return barrelIdx >= 0
-            ? { turret: offOf(turretIdx), barrel: offOf(barrelIdx) }
-            : { turret: offOf(turretIdx) };
+        return {
+            slots: matches.map((m) => ({
+                slot: m.slot,
+                turret: offOf(m.turretIdx),
+                barrel: m.barrelIdx !== undefined ? offOf(m.barrelIdx) : undefined,
+            })),
+        };
     }
 
     removeEntity(id: number): void {
@@ -2378,6 +2402,7 @@ export class EntityRenderer {
         this.pieceOverrides.delete(id);
         this.clipPoses.delete(id);
         this.aimPoses.delete(id);
+        this.wheelPoses.delete(id);
         this.pieceStreamed.delete(id);
     }
 
@@ -2646,6 +2671,7 @@ export class EntityRenderer {
         this.pieceOverrides.clear();
         this.clipPoses.clear();
         this.aimPoses.clear();
+        this.wheelPoses.clear();
         this.pieceStreamed.clear();
         this.radarBlipMeshes.clear();
         this.defIsBuilding.clear();

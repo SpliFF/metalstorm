@@ -72,7 +72,7 @@ export class TrainPresentation {
      * the render loop (game-processor tick or main loop).
      *
      * Derives velocity from position delta, accumulates rotation, and
-     * pushes piece overrides to the EntityRenderer via setAimPose.
+     * pushes piece overrides to the EntityRenderer via setWheelPose.
      */
     tick(deltaMs: number): void {
         const deltaSec = deltaMs / 1000;
@@ -143,8 +143,10 @@ export class TrainPresentation {
 
             // Build piece overrides: rotate each axle around its X axis
             // (assuming the axle piece's local X axis is the wheel's axle).
-            // Use the renderer's existing setAimPose method (cosmetic pose
-            // override system used by turret aim — repurposed for wheels).
+            // setWheelPose is a channel separate from setAimPose (turret
+            // aim) — sharing one map would have whichever system ticks
+            // last each frame silently blank the other's pieces (see
+            // EntityRenderer's `wheelPoses` field comment).
             const overrides = new Map<number, {
                 px: number; py: number; pz: number;
                 rx: number; ry: number; rz: number;
@@ -165,9 +167,9 @@ export class TrainPresentation {
                 });
             }
 
-            // Push the overrides to the renderer. setAimPose returns false
+            // Push the overrides to the renderer. setWheelPose returns false
             // if the unit is unknown (destroyed mid-frame) — silently ignore.
-            this.renderer.setAimPose(id, overrides);
+            this.renderer.setWheelPose(id, overrides);
         }
     }
 

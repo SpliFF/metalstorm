@@ -409,6 +409,13 @@ function gpEnsureClipPlayer(r: EntityRenderer): ClipPlayer {
             const v = Number(cp?.turret_slew_deg_per_sec);
             return Number.isFinite(v) && v > 0 ? v : undefined;
         },
+        // Multi-turret slot resolution (DESIGN-MODEL-BUILDING §16c/§19): the
+        // unit def's per-slot weapon list narrows a Fired event's weaponDefId
+        // to a candidate turret before falling back to muzzle-position match.
+        weaponDefIds: (id) => {
+            const defId = r.getEntityDefId(id);
+            return defId === undefined ? null : gpDefCache?.getUnitDef(defId)?.weaponDefIds ?? null;
+        },
     }, r);
     gpClipPolicy = new ClipAutoPolicy({
         getClip: (id, name) => r.getClip(id, name),
