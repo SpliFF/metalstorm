@@ -233,6 +233,161 @@ describe("U-turn detection via the real AllowCommand callin", function()
     end)
 end)
 
+-- Regression guards for the 2026-07-26 reverse-drive-kinematics fire: the
+-- 2026-07-25 fire only wired up U-turn *detection* (the describe block
+-- above) — nothing physically moved. These specs exercise the actual motion.
+describe("single-engine reverse crawl actually moves the consist", function()
+    local function makeConsist(world, gadgetObj)
+        local engineHalf = mock.HalfLength(mock.ENGINE_DEF_ID)
+        local gunHalf = mock.HalfLength(mock.GUN_DEF_ID)
+        -- Placed at the real (gap-included) coupling length, not the
+        -- footprint-adjacent zero-gap distance used by the CanCouple range
+        -- specs above — this represents an already-coupled, settled train,
+        -- which is what a reverse order would actually be issued to.
+        local couplingLength = engineHalf + 1.0 + gunHalf
+        world.setUnit(1, { defID = mock.ENGINE_DEF_ID, x = 0, z = 0, heading = 0 })
+        world.setUnit(2, { defID = mock.GUN_DEF_ID, x = 0, z = -couplingLength })
+        gadgetObj:UnitCreated(1, mock.ENGINE_DEF_ID)
+        gadgetObj:UnitCreated(2, mock.GUN_DEF_ID)
+        assert.is_true(GG.Train.Couple(1, 2))
+        return engineHalf, gunHalf, couplingLength
+    end
+
+    it("pulls the leader onto MoveCtrl and backs it toward a goal behind it, without turning", function()
+        local world, gadgetObj = mock.new()
+        gadgetObj:Initialize()
+        makeConsist(world, gadgetObj)
+
+        gadgetObj:AllowCommand(1, mock.ENGINE_DEF_ID, 1,
+            CMD.MOVE, { 0, 0, -1000 }, {}, 0, 1, false, false)
+
+        -- Stock CGroundMoveType can't drive in reverse, so the leader must
+        -- come off it (same MoveCtrl mechanism already used for followers).
+        assert.is_true(world.moveCtrl[1].enabled)
+
+        local startZ = world.units[1].z
+        for frame = 1, 30 do
+            gadgetObj:GameFrame(frame)
+        end
+
+        assert.is_true(world.units[1].z < startZ)   -- moved toward the goal (-Z)
+        assert.are.equal(0, world.units[1].heading)  -- no pivot — a straight crawl
+    end)
+
+    it("keeps the follower coupled at the correct spacing while the leader backs up", function()
+        local world, gadgetObj = mock.new()
+        gadgetObj:Initialize()
+        local engineHalf, gunHalf, couplingLength = makeConsist(world, gadgetObj)
+
+        gadgetObj:AllowCommand(1, mock.ENGINE_DEF_ID, 1,
+            CMD.MOVE, { 0, 0, -1000 }, {}, 0, 1, false, false)
+
+        for frame = 1, 10 do
+            gadgetObj:GameFrame(frame)
+        end
+
+        local dz = world.units[1].z - world.units[2].z
+        assert.is_true(math.abs(dz - couplingLength) < 0.001)
+    end)
+
+    it("hands control back to stock movement once it draws level with the goal", function()
+        local world, gadgetObj = mock.new()
+        gadgetObj:Initialize()
+        makeConsist(world, gadgetObj)
+
+        -- Far enough that the crawl runs for a while before arriving.
+        gadgetObj:AllowCommand(1, mock.ENGINE_DEF_ID, 1,
+            CMD.MOVE, { 0, 0, -100 }, {}, 0, 1, false, false)
+        assert.is_true(world.moveCtrl[1].enabled)
+
+        for frame = 1, 200 do
+            gadgetObj:GameFrame(frame)
+        end
+
+        assert.is_false(world.moveCtrl[1].enabled)
+        assert.is_true(world.units[1].z < -40)    -- made real progress
+        assert.is_true(world.units[1].z > -100)   -- and didn't overshoot the goal
+    end)
+
+    it("a fresh order supersedes an in-progress crawl instead of stacking with it", function()
+        local world, gadgetObj = mock.new()
+        gadgetObj:Initialize()
+        makeConsist(world, gadgetObj)
+
+        gadgetObj:AllowCommand(1, mock.ENGINE_DEF_ID, 1,
+            CMD.MOVE, { 0, 0, -1000 }, {}, 0, 1, false, false)
+        gadgetObj:GameFrame(1)
+        assert.is_true(world.moveCtrl[1].enabled)
+
+        -- Redirect to a goal ahead of the leader — no U-turn this time, so
+        -- the crawl must end and stock movement resume.
+        gadgetObj:AllowCommand(1, mock.ENGINE_DEF_ID, 1,
+            CMD.MOVE, { 0, 0, 1000 }, {}, 0, 1, false, false)
+
+        assert.is_false(world.moveCtrl[1].enabled)
+    end)
+end)
+
+describe("two-engine leadership swap re-issues the order to the new leader", function()
+    local function makeConsist(world, gadgetObj)
+        local halfLength = mock.HalfLength(mock.ENGINE_DEF_ID)
+        world.setUnit(1, { defID = mock.ENGINE_DEF_ID, x = 0, z = 0, heading = 0 })
+        world.setUnit(2, { defID = mock.ENGINE_DEF_ID, x = 0, z = -(halfLength * 2 + 1.0), heading = 0 })
+        gadgetObj:UnitCreated(1, mock.ENGINE_DEF_ID)
+        gadgetObj:UnitCreated(2, mock.ENGINE_DEF_ID)
+        assert.is_true(GG.Train.Couple(1, 2))
+    end
+
+    it("gives the new leader its own MOVE order instead of leaving it stranded", function()
+        local world, gadgetObj = mock.new()
+        gadgetObj:Initialize()
+        makeConsist(world, gadgetObj)
+
+        gadgetObj:AllowCommand(1, mock.ENGINE_DEF_ID, 1,
+            CMD.MOVE, { 0, 0, -1000 }, {}, 0, 1, false, false)
+
+        assert.are.equal(0, world.rp(1, 'train_is_leader'))
+        assert.are.equal(1, world.rp(2, 'train_is_leader'))
+
+        local movesToNewLeader = 0
+        for _, o in ipairs(world.orders) do
+            if o.unitID == 2 and o.cmdID == CMD.MOVE then
+                movesToNewLeader = movesToNewLeader + 1
+                assert.are.same({ 0, 0, -1000 }, o.params)
+            end
+        end
+        assert.are.equal(1, movesToNewLeader)
+
+        -- The new leader must be driving under its own stock move type, not
+        -- still parked under MoveCtrl as a follower.
+        assert.is_falsy(world.moveCtrl[2].enabled)
+    end)
+
+    it("does not ping-pong the swap back to the old leader (re-entrancy guard)", function()
+        local world, gadgetObj = mock.new()
+        gadgetObj:Initialize()
+        makeConsist(world, gadgetObj)
+
+        -- Both engines face the same way in this mock, so the re-issued
+        -- order dispatches straight back through AllowCommand for unit 2
+        -- (see train_mock.lua's GiveOrderToUnit) and — from unit 2's own
+        -- position — the goal reads as a U-turn again too. Without the
+        -- reissuingOrder guard this recurses: swap back to 1, re-issue to
+        -- 1, which reads as a U-turn from 1 again, swap to 2, forever.
+        gadgetObj:AllowCommand(1, mock.ENGINE_DEF_ID, 1,
+            CMD.MOVE, { 0, 0, -1000 }, {}, 0, 1, false, false)
+
+        -- Exactly one swap happened (one "Reversing consist" echo), and
+        -- leadership settled on unit 2, not bounced back to unit 1.
+        local swaps = 0
+        for _, msg in ipairs(world.echoes) do
+            if msg:find("Reversing consist", 1, true) then swaps = swaps + 1 end
+        end
+        assert.are.equal(1, swaps)
+        assert.are.equal(1, world.rp(2, 'train_is_leader'))
+    end)
+end)
+
 describe("damage→speed factor recomputes on live (non-lethal) damage", function()
     local HP_RECOMPUTE_INTERVAL = 15  -- game_train.lua cadence (0.5 s at 30 Hz)
 

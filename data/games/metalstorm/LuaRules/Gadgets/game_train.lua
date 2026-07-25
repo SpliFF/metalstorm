@@ -56,6 +56,44 @@
 --   removed: it livelocked consist leaders at turninplacespeedlimit. The
 --   unit def (turninplace=false, turnrate) already enforces train-like
 --   turning natively.
+-- REVERSE-DRIVE KINEMATICS (2026-07-26, following up the 2026-07-25 U-turn
+-- fire — detection worked, motion didn't):
+-- - Single-engine backing was previously a no-op: consist.reversing got set
+--   and an Echo fired, but nothing drove the leader anywhere, so it still
+--   turned in place toward the goal (CGroundMoveType has no native reverse —
+--   Spring ground units always turn-and-drive-forward). StartReverseCrawl /
+--   UpdateReverseCrawl now take the leader off its stock move type (the same
+--   Spring.MoveCtrl Lua API already used for followers — no engine C++
+--   change) and translate the WHOLE consist (leader + followers) rigidly
+--   along the leader's fixed -facing axis each frame, at
+--   REVERSE_SPEED_FACTOR × its normal max speed × the damage speed factor.
+--   Rigid translation (not the breadcrumb/arc-length trail used for forward
+--   following) is deliberate: the trail model samples the leader's PAST
+--   positions to place followers behind it, which only works when the
+--   follower is behind the leader in the direction of travel. Backing up
+--   inverts that — the trailing car leads into the reverse direction — so
+--   trailing would need to sample a breadcrumb that doesn't exist yet
+--   (the future). A straight, non-turning crawl has no curvature to trail
+--   through, so translating every unit by the same per-frame delta keeps
+--   coupling spacing exact with far less complexity. Control reverts to the
+--   leader's stock move type once its projected progress along the crawl
+--   axis closes to within REVERSE_ARRIVAL_DIST of the goal (or a fresh order
+--   supersedes it), same as the existing SwapLeader hand-back pattern.
+--   Field notes: PLAN-metalstorm-train.md §2/§7 (unchanged in this file —
+--   see .tasks/notes/metalstorm-train.md for the write-up).
+-- - Two-engine leadership swap flipped consist.leader/params but left the
+--   queued MOVE/FIGHT/PATROL order attached to the OLD leader, which
+--   SwapLeader had just put under MoveCtrl (stock move type disabled) — the
+--   order sat inert and the swapped consist never actually drove anywhere.
+--   AllowCommand now re-issues the same order to the new leader via
+--   Spring.GiveOrderToUnit immediately after a successful swap. Since
+--   GiveOrderToUnit dispatches AllowCommand synchronously (same callin, same
+--   call stack — this is a faithful Recoil order-gate reproduction, not a
+--   queued/deferred effect), a consist.reissuingOrder guard prevents the
+--   re-entrant call from evaluating the swap logic again — needed for
+--   degenerate geometry (goal roughly equidistant from both ends) where the
+--   new leader's own CheckForUTurn could otherwise also read true and
+--   ping-pong the swap forever.
 
 function gadget:GetInfo()
     return {
@@ -102,6 +140,7 @@ local BREADCRUMB_BUFFER_SIZE = 512  -- ring buffer size for path history
 local BREADCRUMB_SAMPLE_DIST = 2.0  -- minimum distance between breadcrumb samples
 local REVERSE_SPEED_FACTOR = 0.3    -- speed multiplier when backing single-engine
 local UTURN_ANGLE_THRESHOLD = 150   -- degrees - prefer reverse if turn > this
+local REVERSE_ARRIVAL_DIST = 48     -- elmos - hand back to stock movement once this close
 
 -- Damage-speed constants (T3)
 local DAMAGE_SPEED_FLOOR = 0.2      -- minimum speed factor from damage
@@ -152,7 +191,17 @@ local trainDefs = {}  -- defID -> {role, linkF, linkR, halfLength}
             readIdx = number,         -- oldest valid position
             totalArcLength = number,  -- total arc length traveled
         },
-        reversing = boolean,          -- true when consist is in reverse
+        reversing = boolean,          -- true when the leader/follower roles
+                                       -- have physically inverted (two-engine
+                                       -- swap) — flips follower arc-length
+                                       -- sign, NOT set for single-engine
+                                       -- reverse-crawl (see reverseCrawl).
+        reverseCrawl = nil or {       -- present while a single-engine consist
+            goalX = number,           -- is backing straight toward a goal
+            goalZ = number,           -- that's behind it (rigid translation,
+            dirX = number,            -- not breadcrumb trailing — see the
+            dirZ = number,            -- REVERSE-DRIVE KINEMATICS file note)
+        },
         lastLeaderPos = {x,y,z},     -- for arc-length calculation
         lastLeaderHeading = number,
 
@@ -173,10 +222,11 @@ local trainDefs = {}  -- defID -> {role, linkF, linkR, halfLength}
 -- control via SetupConsistMovement — all defined later in the file (Lua's
 -- `local function` isn't visible to code above it, so calling these without
 -- a forward declaration is a nil-global call the first time any of those
--- code paths actually run). CheckForUTurn/SwapLeader are needed by
--- gadget:AllowCommand, which is also defined above them.
+-- code paths actually run). CheckForUTurn/SwapLeader/StartReverseCrawl/
+-- FinishReverseCrawl are needed by gadget:AllowCommand, which is also
+-- defined above them.
 local UpdateConsistHP, UpdateSpeedFactor, UpdateConsistParams, SetupConsistMovement
-local CheckForUTurn, SwapLeader
+local CheckForUTurn, SwapLeader, StartReverseCrawl, FinishReverseCrawl
 
 local function GetTrainDef(unitDefID)
     if trainDefs[unitDefID] then
@@ -749,16 +799,38 @@ function gadget:AllowCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdO
         local consistID = consistsByUnit[unitID]
         if consistID then
             local consist = consists[consistID]
-            if consist and unitID == consist.leader and #cmdParams >= 3 then
+            if consist and unitID == consist.leader and #cmdParams >= 3
+                    and not consist.reissuingOrder then
+                -- A fresh order supersedes any reverse-crawl already in
+                -- progress — hand control back and re-decide from scratch
+                -- against the new goal rather than crawling toward a target
+                -- the player no longer wants.
+                if consist.reverseCrawl then
+                    FinishReverseCrawl(consist)
+                end
+
                 local targetX, targetZ = cmdParams[1], cmdParams[3]
                 if CheckForUTurn(consist, targetX, targetZ) then
                     if SwapLeader(consist) then
                         Spring.Echo("Reversing consist to avoid U-turn")
                         UpdateConsistParams(consist)
+
+                        -- SwapLeader only flips leadership/state; the queued
+                        -- order stays attached to the OLD leader, which is
+                        -- now a MoveCtrl'd follower (stock move type
+                        -- disabled) — its queued command can't drive
+                        -- anything. Re-issue the same order to the new
+                        -- leader so the swapped consist actually moves.
+                        -- reissuingOrder guards against GiveOrderToUnit's
+                        -- synchronous re-entrant AllowCommand call re-running
+                        -- this swap logic (see file header note).
+                        consist.reissuingOrder = true
+                        Spring.GiveOrderToUnit(consist.leader, cmdID, cmdParams, cmdOptions)
+                        consist.reissuingOrder = false
                     elseif consist.engineCount == 1 then
-                        -- Single engine - will have to back up slowly
+                        -- Single engine - back up slowly toward the goal.
                         Spring.Echo("Single-engine consist will reverse slowly")
-                        consist.reversing = true
+                        StartReverseCrawl(consist, targetX, targetZ)
                     end
                 end
             end
@@ -884,9 +956,27 @@ local function GetBreadcrumbAtArcLength(consist, targetArcLength)
 end
 
 local function EnableFollowerMoveCtrl(unitID)
-    -- Enable script control for this follower
+    -- Enable script control for this unit (a follower, or — during a
+    -- single-engine reverse crawl — the leader itself).
     Spring.MoveCtrl.Enable(unitID)
     Spring.MoveCtrl.SetNoBlocking(unitID, true) -- Cars don't block each other
+    -- CScriptMoveType defaults `extrapolate = true` (ScriptMoveType.h), which
+    -- makes the engine's own per-frame Update() ADD whatever velocity is set
+    -- via Spring.MoveCtrl.SetVelocity to owner->pos as a raw per-frame delta
+    -- — on top of any explicit Spring.MoveCtrl.SetPosition call the same
+    -- frame (ScriptMoveType.cpp:104-123, `owner->Move(velVec, true)`). Every
+    -- caller here (UpdateFollowerPosition, UpdateReverseCrawl) already sets
+    -- position explicitly every frame from first principles (breadcrumb trail
+    -- / rigid translation) and only uses SetVelocity for the REPORTED value
+    -- (GetUnitVelocity, for client dust/audio) — extrapolation is pure
+    -- unwanted drift on top of that, not integration we want. Found live
+    -- 2026-07-26 while verifying the reverse crawl (a ~31x per-frame
+    -- overshoot on the leader, since its velocity there is comparatively
+    -- large); it silently affects follower placement too — usually invisible
+    -- there because followers overwrite position absolutely every frame, but
+    -- real (velVec is always world +Z regardless of actual heading, so it's
+    -- most visible off a straight north-south line, e.g. mid-turn).
+    Spring.MoveCtrl.SetExtrapolate(unitID, false)
 end
 
 local function DisableFollowerMoveCtrl(unitID)
@@ -1031,6 +1121,109 @@ function SetupConsistMovement(consist)
     AddBreadcrumb(consist, x, y, z, consist.lastLeaderHeading)
 end
 
+function StartReverseCrawl(consist, targetX, targetZ)
+    -- Single-engine consists can't swap ends, and Spring ground units have
+    -- no native reverse gear (CGroundMoveType always turns to face its
+    -- goal) — so the only way to back the leader up without turning is to
+    -- take it off its stock move type, same as a follower.
+    local leader = consist.leader
+    if not leader then return end
+
+    -- Same helper the followers use (Enable + SetNoBlocking + disabling
+    -- CScriptMoveType's extrapolation — see its comment).
+    EnableFollowerMoveCtrl(leader)
+
+    -- Fix the crawl direction to -facing at the moment the order lands. No
+    -- turning happens during the crawl, so this stays constant for its
+    -- duration (see the rigid-translation rationale in the file header).
+    local fx, _, fz = Spring.GetUnitDirection(leader)
+    fx, fz = fx or 0, fz or -1
+    local flen = math.sqrt(fx * fx + fz * fz)
+    if flen < 1e-6 then fx, fz, flen = 0, -1, 1 end
+
+    consist.reverseCrawl = {
+        goalX = targetX,
+        goalZ = targetZ,
+        dirX = -fx / flen,
+        dirZ = -fz / flen,
+    }
+end
+
+function FinishReverseCrawl(consist)
+    consist.reverseCrawl = nil
+
+    local leader = consist.leader
+    if leader and not Spring.GetUnitIsDead(leader) then
+        -- Hand back to the stock move type; it already has the original
+        -- queued goal and will complete or fine-tune the approach itself.
+        Spring.MoveCtrl.Disable(leader)
+    end
+
+    -- Reseed breadcrumbs from the arrival position/heading so forward
+    -- following resumes cleanly (same pattern SetupConsistMovement uses
+    -- after initial coupling).
+    if consist.leader then
+        SetupConsistMovement(consist)
+    end
+end
+
+local function UpdateReverseCrawl(consist)
+    local leader = consist.leader
+    if not leader or Spring.GetUnitIsDead(leader) then
+        consist.reverseCrawl = nil
+        return
+    end
+
+    local rc = consist.reverseCrawl
+    local lx, ly, lz = Spring.GetUnitPosition(leader)
+    if not lx then
+        consist.reverseCrawl = nil
+        return
+    end
+
+    local dx, dz = rc.goalX - lx, rc.goalZ - lz
+    local distRemaining = math.sqrt(dx * dx + dz * dz)
+
+    -- Progress projected onto the fixed crawl axis. Using the projection
+    -- (not raw distance) to decide arrival means a goal that's slightly off
+    -- the exact reverse axis still ends the crawl once the leader draws
+    -- level with it, instead of overshooting and crawling away forever.
+    local axisProgress = dx * rc.dirX + dz * rc.dirZ
+    if axisProgress <= REVERSE_ARRIVAL_DIST or distRemaining <= REVERSE_ARRIVAL_DIST then
+        FinishReverseCrawl(consist)
+        return
+    end
+
+    local defID = Spring.GetUnitDefID(leader)
+    local def = defID and UnitDefs[defID]
+    local baseSpeed = (def and def.speed) or 0  -- elmos/sec, same convention as the damage speed-cap code below
+    local factor = consist.speedFactor or 1.0
+    local step = baseSpeed * REVERSE_SPEED_FACTOR * factor / (Game.gameSpeed or 30)  -- elmos/frame
+    if step > axisProgress then step = axisProgress end
+
+    local ddx = rc.dirX * step
+    local ddz = rc.dirZ * step
+
+    -- Translate every live unit in the consist (leader included) by the
+    -- same delta. A straight, non-turning crawl has no curvature to trail
+    -- through, so this keeps each car's existing coupling offset exact
+    -- without re-deriving it from the breadcrumb trail (which can't be used
+    -- here — see the file header note).
+    for _, unitID in ipairs(consist.units) do
+        if not Spring.GetUnitIsDead(unitID) then
+            local ux, uy, uz = Spring.GetUnitPosition(unitID)
+            if ux then
+                Spring.MoveCtrl.SetPosition(unitID, ux + ddx, uy, uz + ddz)
+                -- Reported value only (GetUnitVelocity, client FX) — extrapolation
+                -- off this same velocity is disabled by EnableFollowerMoveCtrl, so
+                -- this doesn't double-apply. elmos/frame, matching ddx/ddz (NOT the
+                -- elmos/sec convention MoveCtrl.SetGroundMoveTypeData("maxSpeed") uses).
+                Spring.MoveCtrl.SetVelocity(unitID, ddx, 0, ddz)
+            end
+        end
+    end
+end
+
 --------------------------------------------------------------------------------
 -- Game frame update
 --------------------------------------------------------------------------------
@@ -1051,7 +1244,12 @@ function gadget:GameFrame(frame)
 
     -- Update all consists every frame
     for consistID, consist in pairs(consists) do
-        if consist.leader and not Spring.GetUnitIsDead(consist.leader) then
+        if consist.reverseCrawl then
+            -- Single-engine reverse crawl in progress: rigid translation
+            -- replaces the normal breadcrumb/follower update entirely for
+            -- this consist until it hands control back (see file header).
+            UpdateReverseCrawl(consist)
+        elseif consist.leader and not Spring.GetUnitIsDead(consist.leader) then
             -- Update leader breadcrumb
             local x, y, z = Spring.GetUnitPosition(consist.leader)
             local heading = Spring.GetUnitHeading(consist.leader) or 0
