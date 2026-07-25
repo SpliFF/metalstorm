@@ -25,6 +25,7 @@ import {
 import { mapGestureBridge } from '../ui/native-ui/map-gesture.js';
 import { previewDirectiveCost, matchSelectionToGroup } from '../ui/native-ui/cost-preview.js';
 import { listCommandPresets, saveCommandPreset, deleteCommandPreset } from '../ui/native-ui/command-presets.js';
+import { acceleratorFill } from '../ui/native-ui/free-text-accelerator.js';
 import { injectStyle } from '../ui/ui.js';
 import composerCss from './command-composer.css?raw';
 
@@ -70,6 +71,16 @@ const state = {
     // never a silent retarget.
     presetsCache: null,     // CommandPreset[] | null (null = not loaded yet)
     staleNotice: null,      // string | null
+
+    // Free-text accelerator (task 7): OPTIONAL, gated behind its own toggle
+    // (hidden by default — the structured builder is the source of truth,
+    // this is a power-user shortcut, not the primary UI). `accelValue`
+    // persists the typed text across re-renders; `accelNotice` is a
+    // transparency readout of what the last Fill matched vs ignored, never
+    // an error state.
+    accelVisible: false,    // Whether the text-field row is shown
+    accelValue: '',         // Current text-field contents
+    accelNotice: null,      // string | null
 
     // Context (set on init)
     ctx: null,
@@ -214,11 +225,24 @@ function render() {
         <div class="composer-row composer-controls">
             <div class="composer-echo${state.verb && state.subject && state.target ? ' is-ready' : ''}">${renderEcho()}</div>
             <div class="composer-cost" id="composer-cost"></div>
+            <button id="accel-toggle-btn" class="nui-btn${state.accelVisible ? ' is-active' : ''}"
+                title="Type a command in plain keywords (optional accelerator — the chips above stay in charge)"
+                aria-pressed="${state.accelVisible}">⌨</button>
             <button id="save-preset-btn" class="nui-btn" title="Save this command as a reusable preset">💾</button>
             <button id="presets-btn" class="nui-btn" title="Load or delete a saved preset">📁</button>
             <button id="commit-btn" class="nui-btn nui-btn--primary">Commit</button>
             <button id="clear-btn" class="nui-btn nui-btn--danger">Clear</button>
         </div>
+
+        ${state.accelVisible ? `
+        <div class="composer-row composer-accel">
+            <input type="text" id="accel-input" class="composer-accel-input"
+                placeholder='Try: &quot;attack meridian high when contested&quot;'
+                value="${escapeHtml(state.accelValue)}" />
+            <button id="accel-fill-btn" class="nui-btn nui-btn--primary">Fill slots</button>
+        </div>
+        ${state.accelNotice ? `<div class="composer-row composer-accel-notice">${escapeHtml(state.accelNotice)}</div>` : ''}
+        ` : ''}
 
         <div id="autocomplete-panel" class="nui-menu" hidden></div>
         <div id="verb-menu" class="nui-menu" hidden></div>
@@ -340,6 +364,27 @@ function wireEventHandlers() {
 
     const presetsBtn = state.container.querySelector('#presets-btn');
     if (presetsBtn) presetsBtn.addEventListener('click', () => renderPresetsMenu(presetsBtn));
+
+    // Free-text accelerator (task 7)
+    const accelToggleBtn = state.container.querySelector('#accel-toggle-btn');
+    if (accelToggleBtn) {
+        accelToggleBtn.addEventListener('click', () => {
+            state.accelVisible = !state.accelVisible;
+            render();
+            if (state.accelVisible) state.container.querySelector('#accel-input')?.focus();
+        });
+    }
+
+    const accelInput = state.container.querySelector('#accel-input');
+    if (accelInput) {
+        accelInput.addEventListener('input', (e) => { state.accelValue = e.target.value; });
+        accelInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') handleAccelFill();
+        });
+    }
+
+    const accelFillBtn = state.container.querySelector('#accel-fill-btn');
+    if (accelFillBtn) accelFillBtn.addEventListener('click', handleAccelFill);
 }
 
 /**
@@ -348,8 +393,10 @@ function wireEventHandlers() {
 function openSlotEditor(slotName) {
     state.activeSlot = slotName;
     // Any manual re-pick is the player acting on a stale-preset notice
-    // (§9) — clear it rather than leaving it stuck on screen.
+    // (§9) or refining an accelerator-filled sentence — clear both rather
+    // than leaving either stuck on screen.
     state.staleNotice = null;
+    state.accelNotice = null;
 
     if (slotName === 'verb') {
         renderVerbMenu();
@@ -825,6 +872,7 @@ function handleClear() {
     state.mapArmActive = false;
     state.subjectAutoFilled = false;
     state.staleNotice = null;
+    state.accelNotice = null;
 
     render();
 }
@@ -977,6 +1025,42 @@ function loadPreset(preset) {
     state.staleNotice = staleParts.length
         ? `Preset "${preset.name}" — ${staleParts.join(' and ')}. Please re-pick before committing.`
         : null;
+
+    render();
+}
+
+/**
+ * Free-text accelerator (PLAN-metalstorm-scripting.md task 7): parses the
+ * typed text with the closed-vocabulary keyword→slot dictionary and
+ * REPLACES the current verb/subject/target/priority/when with whatever it
+ * resolved (a slot it couldn't resolve is cleared, not left stale from
+ * before) — same full-replace semantics as loading a preset. This is a
+ * proposal, not a send: every chip stays individually clickable afterwards,
+ * and Commit still runs the normal validate/compile path untouched.
+ */
+function handleAccelFill() {
+    if (!state.accelValue.trim()) return;
+
+    const result = acceleratorFill(state.accelValue, namedEntityIndex);
+
+    state.verb = result.verb;
+    state.subject = result.subject;
+    state.target = result.target;
+    if (result.priority !== null) state.priority = result.priority;
+    state.when = result.when;
+    state.subjectAutoFilled = false;
+    state.staleNotice = null;
+
+    const filled = [
+        result.verb && 'verb', result.subject && 'subject', result.target && 'target',
+        result.priority !== null && 'priority', result.when && 'when',
+    ].filter(Boolean);
+
+    state.accelNotice = result.unmatched.length
+        ? `Filled: ${filled.length ? filled.join(', ') : 'nothing'}. Not recognised: ${result.unmatched.join(', ')}.`
+        : filled.length
+        ? `Filled: ${filled.join(', ')}.`
+        : 'Nothing recognised — try the chips above instead.';
 
     render();
 }

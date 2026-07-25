@@ -101,9 +101,32 @@
 /* Icon-only preset buttons (task 6) — narrow so they don't crowd out the
    echo/Commit/Clear in the 560px control row. */
 #save-preset-btn,
-#presets-btn {
+#presets-btn,
+#accel-toggle-btn {
     flex: none;
     padding: 3px 7px;
+}
+/* Toggle-pressed state (task 7) — the free-text row is optional/gated, so
+   the button that reveals it needs a visible "currently open" cue distinct
+   from plain hover, same accent used for a filled slot chip. */
+#accel-toggle-btn.is-active {
+    background: rgba(74, 158, 255, 0.18);
+    border-color: var(--nui-accent-dim);
+    color: #cfe4ff;
+}
+
+/* ── Free-text accelerator row (task 7) ───────────────────────────────
+   OPTIONAL — hidden until #accel-toggle-btn is clicked. The structured
+   sentence above stays the source of truth; this is a shortcut that fills
+   the same chips, never a separate input path to the sim. */
+.composer-accel {
+    gap: 6px;
+}
+.composer-accel-input { flex: 1; }
+.composer-accel-notice {
+    padding: 2px 8px;
+    color: var(--nui-text-dim);
+    font-size: 10px;
 }
 
 /* Stale-preset warning (task 6, §9 "flags the slot; the player re-picks;
