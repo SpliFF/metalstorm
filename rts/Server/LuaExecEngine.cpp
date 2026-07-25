@@ -95,13 +95,22 @@ std::string ExecuteInLuaState(lua_State* L, const std::string& code) {
 
     int top = lua_gettop(L);
 
+    // gadgetHandler.GG is deliberately not a real Lua global: vanilla
+    // Spring/Recoil gadget sandboxing (gadgets.lua's setfenv-based
+    // NewGadget()) copies it into each gadget's private _ENV table only,
+    // never into _G (see docs/debugging-console.md). Exec code runs
+    // against the raw global env, so it never sees that per-gadget copy.
+    // Give it the same convenience alias here, scoped to this call only —
+    // this changes nothing about the real synced env gadgets execute in.
+    const std::string preamble = "local GG = gadgetHandler and gadgetHandler.GG; ";
+
     // Try loading as expression first (prepend "return ")
-    std::string expr = "return " + code;
+    std::string expr = preamble + "return " + code;
     int err = luaL_loadstring(L, expr.c_str());
     if (err != LUA_OK) {
         lua_pop(L, 1);
         // Try as statement
-        err = luaL_loadstring(L, code.c_str());
+        err = luaL_loadstring(L, (preamble + code).c_str());
         if (err != LUA_OK) {
             std::string msg = lua_tostring(L, -1);
             lua_pop(L, 1);
