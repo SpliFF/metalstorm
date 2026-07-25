@@ -9,6 +9,14 @@ local activeConvoys = {}
 -- Next spawn time for each route: route_id → frame
 local nextSpawn = {}
 
+-- Route endpoints are civilian site centres (mapdata/civilians.lua reuses the
+-- site pos as waypoint 1), and spawn.seed places the site building exactly
+-- there — ms_habitat is 12×12 footprint squares = a 96-elmo blocked yardmap.
+-- A vehicle created at that exact point materialises inside the building and
+-- can never path out. Spawn it this far along the route instead, clear of the
+-- footprint (half-width 48) plus margin.
+local SPAWN_CLEARANCE = 150
+
 --- Spawn a new convoy vehicle for a route
 local function spawnConvoyVehicle(civ, route)
     if not route.waypoints or #route.waypoints == 0 then
@@ -24,17 +32,34 @@ local function spawnConvoyVehicle(civ, route)
     end
 
     local wp1 = route.waypoints[1]
-    local y = Spring.GetGroundHeight(wp1.x, wp1.z)
-    local unitID = Spring.CreateUnit(defName, wp1.x, y, wp1.z, 'south', civ.gaiaTeam)
+    local sx, sz = wp1.x, wp1.z
+    local wp2 = route.waypoints[2]
+    if wp2 then
+        local dx, dz = wp2.x - sx, wp2.z - sz
+        local d = math.sqrt(dx * dx + dz * dz)
+        if d > SPAWN_CLEARANCE then
+            sx = sx + dx / d * SPAWN_CLEARANCE
+            sz = sz + dz / d * SPAWN_CLEARANCE
+        end
+    end
+    local y = Spring.GetGroundHeight(sx, sz)
+    local unitID = Spring.CreateUnit(defName, sx, y, sz, 'south', civ.gaiaTeam)
 
     if unitID then
         civ.population[unitID] = { role = 'convoy', route = route.id }
         activeConvoys[route.id] = activeConvoys[route.id] or {}
-        table.insert(activeConvoys[route.id], {
+        local convoyData = {
             unitID = unitID,
             waypointIndex = 2,  -- Start heading to waypoint 2 (spawned at waypoint 1)
-        })
+        }
+        table.insert(activeConvoys[route.id], convoyData)
         Spring.Log("Civilians", LOG.INFO, "Spawned convoy vehicle " .. unitID .. " for route " .. route.id)
+        if wp2 then
+            -- Start rolling now rather than waiting for the next convoy tick.
+            Spring.GiveOrderToUnit(unitID, CMD.MOVE,
+                { wp2.x, Spring.GetGroundHeight(wp2.x, wp2.z), wp2.z }, {})
+            convoyData.orderedWaypoint = 2
+        end
 
         -- Let a scenario-staged escort objective for this route claim the
         -- vehicle as its payload (game_scenario.lua, deferred since no
@@ -80,10 +105,15 @@ local function updateConvoyMovement(civ, route, convoyData)
         end
     end
 
-    -- Give move order to current waypoint
+    -- (Re)issue the move order only when the target waypoint changed or the
+    -- unit has gone idle (path ended short, got bumped off it). An
+    -- unconditional fresh MOVE every tick replaces the command queue and
+    -- restarts pathfinding from scratch each time.
     wp = route.waypoints[convoyData.waypointIndex]
-    if wp then
+    if wp and (convoyData.orderedWaypoint ~= convoyData.waypointIndex
+               or Spring.GetUnitCommandCount(unitID) == 0) then
         Spring.GiveOrderToUnit(unitID, CMD.MOVE, { wp.x, Spring.GetGroundHeight(wp.x, wp.z), wp.z }, {})
+        convoyData.orderedWaypoint = convoyData.waypointIndex
     end
 
     return true

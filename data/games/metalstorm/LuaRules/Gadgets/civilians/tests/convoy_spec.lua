@@ -38,6 +38,11 @@ local function freshWorld()
             world.orders[unitID] = world.orders[unitID] or {}
             table.insert(world.orders[unitID], { cmd = cmd, params = params, options = options })
         end,
+        -- Queue depth stand-in: orders accumulate as they're given; a test
+        -- clears world.orders[unitID] to simulate the unit going idle.
+        GetUnitCommandCount = function(unitID)
+            return #(world.orders[unitID] or {})
+        end,
         Log = function(section, level, msg)
             world.logMessages[#world.logMessages + 1] = { section = section, level = level, msg = msg }
         end,
@@ -152,6 +157,75 @@ describe("convoy.lua", function()
             -- Should destroy unit when route complete
             convoy.tick(civ, 1804)
             assert.truthy(world.units[unitID].destroyed)
+        end)
+
+        it("spawns clear of the site building at waypoint 1", function()
+            local world = freshWorld()
+            local civ = {
+                gaiaTeam = 99,
+                population = {},
+                convoyRoutes = {
+                    {
+                        id = 'test_convoy',
+                        waypoints = {
+                            { x = 1000, z = 1000 },
+                            { x = 2000, z = 1000 },
+                        },
+                        defName = 'civ_truck',
+                        intervalSec = 60,
+                    },
+                },
+            }
+
+            convoy.tick(civ, 0)
+            convoy.tick(civ, 1801)
+            local unitID = next(civ.population)
+            assert.truthy(unitID)
+            -- Offset 150 elmos along the route (wp1 is the habitat building's
+            -- centre — spawning there puts the truck inside the building).
+            assert.equals(1150, world.units[unitID].x)
+            assert.equals(1000, world.units[unitID].z)
+            -- Rolling immediately: move order to waypoint 2 issued at spawn.
+            assert.truthy(world.orders[unitID])
+            assert.equals(CMD.MOVE, world.orders[unitID][1].cmd)
+            assert.equals(2000, world.orders[unitID][1].params[1])
+        end)
+
+        it("does not re-issue a move order while one is still queued", function()
+            local world = freshWorld()
+            local civ = {
+                gaiaTeam = 99,
+                population = {},
+                convoyRoutes = {
+                    {
+                        id = 'test_convoy',
+                        waypoints = {
+                            { x = 1000, z = 1000 },
+                            { x = 9000, z = 1000 },
+                        },
+                        defName = 'civ_truck',
+                        intervalSec = 600,
+                    },
+                },
+            }
+
+            convoy.tick(civ, 0)
+            convoy.tick(civ, 1801)
+            local unitID = next(civ.population)
+            assert.equals(1, #world.orders[unitID])   -- spawn-time order only
+
+            -- Several movement ticks while en-route: no fresh MOVE spam
+            -- (a fresh order would restart pathfinding every tick).
+            convoy.tick(civ, 1802)
+            convoy.tick(civ, 1803)
+            assert.equals(1, #world.orders[unitID])
+
+            -- Unit goes idle without reaching the waypoint → re-issue.
+            world.orders[unitID] = {}
+            convoy.tick(civ, 1804)
+            assert.equals(1, #world.orders[unitID])
+            assert.equals(CMD.MOVE, world.orders[unitID][1].cmd)
+            assert.equals(9000, world.orders[unitID][1].params[1])
         end)
 
         it("handles empty convoy routes gracefully", function()
