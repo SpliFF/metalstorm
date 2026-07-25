@@ -156,7 +156,11 @@ return {
         { type = 'escort', scope = 'tactical', forTeam = 0,
           params = {
               payloadUnitIDs = {},
-              destArea = { x = 13800, z = 2500, r = 400 },  -- north_market approx center
+              -- Route terminus (north_market site pos = the route's last
+              -- waypoint). Must cover where the truck actually stops —
+              -- convoy.lua despawns it on route completion, so a destArea
+              -- offset from the terminus can never be satisfied.
+              destArea = { x = 13492, z = 3900, r = 400 },
               quorum = 1,
           },
           _populatePayloadFrom = { route = 'convoy_north' },
@@ -167,7 +171,8 @@ return {
         { type = 'escort', scope = 'tactical', forTeam = 4,
           params = {
               payloadUnitIDs = {},
-              destArea = { x = 13800, z = 13900, r = 400 },  -- south_market approx center
+              -- Route terminus (south_market site pos), same as the north run.
+              destArea = { x = 13492, z = 12484, r = 400 },
               quorum = 1,
           },
           _populatePayloadFrom = { route = 'convoy_south' },
