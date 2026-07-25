@@ -17,7 +17,21 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 #include <vector>
+
+// Pure gate for StateStreamer::CheckWinCondition's hardcoded last-team-standing
+// fallback (teams 0/1 empty-unit-count check). Kept as a free function so it's
+// unit-testable without a live sim/GameServerContext.
+//
+// PLAN-metalstorm-teams.md §4 is explicit: "GameOver conditions are
+// objective/scenario-driven, never 'team has no players'" — so the fallback
+// must never run for Metalstorm, regardless of cheat state. It also must never
+// run under cheats (scenarios intentionally leave AI slots empty and rely on
+// cheats to keep the sim running indefinitely — see StateStreamer.cpp).
+inline bool ShouldRunEliminationFallback(const std::string& gameId, bool cheatEnabled) {
+    return !cheatEnabled && gameId != "metalstorm";
+}
 
 class GameOverRelay {
 public:

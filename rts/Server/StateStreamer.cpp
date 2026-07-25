@@ -176,9 +176,14 @@ void StateStreamer::CheckWinCondition(int) {
     }
 
     // 2. Hardcoded last-team-standing fallback for games/scenarios with no
-    //    game_over gadget (2-team only). Skipped under cheats so scenarios that
-    //    empty a team on purpose don't self-terminate.
-    if (frame > 30 && (frame % 30) == 0 && winningTeam < 0 && !gs->cheatEnabled) {
+    //    game_over gadget (2-team only, teams 0/1 specifically). See
+    //    ShouldRunEliminationFallback (GameOverState.h) for the gate rationale:
+    //    skipped under cheats, and skipped entirely for Metalstorm (its
+    //    hardcoded team-0/1 indices don't match Metalstorm room layouts —
+    //    human teams can sit at any index, and AI/NullAI filler slots with no
+    //    start unit are normal and must not read as "eliminated").
+    if (frame > 30 && (frame % 30) == 0 && winningTeam < 0
+        && ShouldRunEliminationFallback(ctx.gameId, gs->cheatEnabled)) {
         // Count alive units per team
         int alive[2] = {0, 0};
         const auto& activeUnits = unitHandler.GetActiveUnits();
