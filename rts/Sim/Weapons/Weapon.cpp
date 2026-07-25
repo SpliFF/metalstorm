@@ -251,6 +251,11 @@ void CWeapon::UpdateWeaponPieces(const bool updateAimFrom)
 	const bool aimExists = owner->script->PieceExists(aimFromPiece);
 	const bool muzExists = owner->script->PieceExists(muzzlePiece);
 
+	// A live script binding always wins: clear any stale fallback so we read
+	// from the script's piece table below (and in UpdateWeaponVectors).
+	fallbackMuzzlePiece = nullptr;
+	fallbackAimPiece = nullptr;
+
 	if (aimExists && muzExists)
 		return; // everything fine
 
@@ -263,6 +268,25 @@ void CWeapon::UpdateWeaponPieces(const bool updateAimFrom)
 		return;
 	}
 
+	// Neither piece bound by the unit script. For scriptless units (the
+	// Metalstorm native case — null script, client-cosmetic turret aim)
+	// resolve the muzzle/aim pieces directly from the model by the authoring
+	// name convention: weapon slot N (1-based) → "muzzle"/"turret" for slot 1,
+	// "muzzleN"/"turretN" for slot ≥ 2 — the server mirror of the client
+	// turret-aim-controller's matchAimSlots. This lets ProjectileFired events
+	// carry the true per-turret muzzle position on multi-turret units.
+	// DIVERGENCE from Recoil, which has no engine-level name convention
+	// (games' COB/LUS scripts bind pieces explicitly). Called out here and in
+	// PLAN-metalstorm-train.md per CLAUDE.md's "never deviate silently" rule.
+	ResolveFallbackWeaponPieces();
+	if (fallbackMuzzlePiece != nullptr || fallbackAimPiece != nullptr) {
+		// Not script-piece indices — UpdateWeaponVectors reads the fallback
+		// LocalModelPiece pointers directly. Keep the script indices unset.
+		aimFromPiece = -1;
+		muzzlePiece = -1;
+		return;
+	}
+
 	if (!alreadyWarnedAboutMissingPieces && (owner->script != &CNullUnitScript::value) && !weaponDef->isShield && (dynamic_cast<CNoWeapon*>(this) == nullptr)) {
 		LOG_L(L_WARNING, "%s: weapon%i: Neither AimFromWeapon nor QueryWeapon defined or returned invalid pieceids", owner->unitDef->name.c_str(), weaponNum + LUA_WEAPON_BASE_INDEX);
 		alreadyWarnedAboutMissingPieces = true;
@@ -270,6 +294,35 @@ void CWeapon::UpdateWeaponPieces(const bool updateAimFrom)
 
 	aimFromPiece = -1;
 	muzzlePiece = -1;
+}
+
+
+// Resolve the muzzle/aim LocalModelPiece for this weapon from the owner's
+// model by the piece-name convention (see UpdateWeaponPieces). Sets both
+// fallback pointers (one may substitute for the other when only one piece
+// exists, mirroring the script "some scripts only implement one" rule).
+// Leaves both null when the model has neither piece.
+void CWeapon::ResolveFallbackWeaponPieces()
+{
+	fallbackMuzzlePiece = nullptr;
+	fallbackAimPiece = nullptr;
+
+	const LocalModel& lm = owner->localModel;
+	if (!lm.Initialized())
+		return;
+
+	// weaponNum is 0-based; the model names slot 1 without a suffix.
+	const int slot = weaponNum + 1;
+	const std::string suffix = (slot <= 1) ? std::string() : std::to_string(slot);
+
+	fallbackMuzzlePiece = lm.GetPieceByName("muzzle" + suffix);
+	fallbackAimPiece    = lm.GetPieceByName("turret" + suffix);
+
+	// Fall back to a single available piece for the missing one, so a model
+	// that carries only a muzzle (or only a turret) still fires from a real
+	// point rather than the unit centre.
+	if (fallbackMuzzlePiece == nullptr) fallbackMuzzlePiece = fallbackAimPiece;
+	if (fallbackAimPiece    == nullptr) fallbackAimPiece    = fallbackMuzzlePiece;
 }
 
 
@@ -287,8 +340,17 @@ void CWeapon::UpdateWeaponVectors()
 {
 	ZoneScoped;
 
-	relAimFromPos = owner->script->GetPiecePos(aimFromPiece);
-	owner->script->GetEmitDirPos(muzzlePiece, relWeaponMuzzlePos, weaponDir);
+	// Scriptless units (Metalstorm native) bind muzzle/aim pieces by name
+	// convention rather than through the null script's (empty) piece table —
+	// read the resolved LocalModelPiece directly. See UpdateWeaponPieces.
+	const bool haveFallback = (fallbackMuzzlePiece != nullptr || fallbackAimPiece != nullptr);
+	if (haveFallback) {
+		relAimFromPos = fallbackAimPiece->GetAbsolutePos();
+		fallbackMuzzlePiece->GetEmitDirPos(relWeaponMuzzlePos, weaponDir);
+	} else {
+		relAimFromPos = owner->script->GetPiecePos(aimFromPiece);
+		owner->script->GetEmitDirPos(muzzlePiece, relWeaponMuzzlePos, weaponDir);
+	}
 
 	// One-shot diagnostic: a unit-script that failed to bind a real
 	// piece for either aimFromWeapon or queryWeapon leaves the muzzle
@@ -297,10 +359,12 @@ void CWeapon::UpdateWeaponVectors()
 	// player can't reconcile with the visible barrel. Surface this at
 	// load time so missing piece bindings get fixed at the source
 	// (unit script) rather than masquerading as renderer glitches.
-	// PLAN-combat-vfx.md F5 / Phase 6.
-	if (aimFromPiece < 0 || muzzlePiece < 0
-	    || (relAimFromPos == ZeroVector && relWeaponMuzzlePos == UpVector
-	        && weaponDir == UpVector))
+	// PLAN-combat-vfx.md F5 / Phase 6. Suppressed when a name-convention
+	// fallback bound a real piece (the intended scriptless path).
+	if (!haveFallback
+	    && (aimFromPiece < 0 || muzzlePiece < 0
+	        || (relAimFromPos == ZeroVector && relWeaponMuzzlePos == UpVector
+	            && weaponDir == UpVector)))
 	{
 		static std::unordered_set<uint64_t> warned;
 		const uint64_t unitDefId = owner->unitDef ? owner->unitDef->id : 0;

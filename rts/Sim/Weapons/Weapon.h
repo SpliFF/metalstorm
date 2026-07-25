@@ -15,6 +15,7 @@
 class CUnit;
 class CWeaponProjectile;
 struct WeaponDef;
+struct LocalModelPiece;
 
 
 class CWeapon : public CObject
@@ -112,6 +113,7 @@ protected:
 	static bool TargetInWater(const float3 tgtPos, const SWeaponTarget&);
 
 	void UpdateWeaponPieces(const bool updateAimFrom = true);
+	void ResolveFallbackWeaponPieces();
 	float3 GetLeadVec(const CUnit* unit) const;
 
 private:
@@ -142,6 +144,22 @@ public:
 
 	int aimFromPiece;
 	int muzzlePiece;
+
+	// Scriptless muzzle/aim binding (Metalstorm native units). The COB/LUS
+	// unit-script convention (QueryWeaponN / AimFromWeaponN) drives
+	// aimFromPiece/muzzlePiece normally. When the unit runs the null script
+	// — the Metalstorm case, where turret aim is client-cosmetic and no
+	// server-side unit script exists — those return -1 and every weapon
+	// would fire from the unit centre. These resolve the muzzle/aim origin
+	// directly from the model's pieces by the authoring name convention
+	// (weapon slot N: "muzzle"/"turret" for slot 1, "muzzleN"/"turretN" for
+	// slot ≥ 2), mirroring the client turret-aim-controller (matchAimSlots).
+	// Non-null only for scriptless units that matched a piece; UpdateWeaponVectors
+	// reads from these instead of the (empty) null-script piece table.
+	// DIVERGENCE from Recoil (no engine-level piece-name convention there);
+	// called out per CLAUDE.md — see UpdateWeaponPieces and PLAN-metalstorm-train.md.
+	const LocalModelPiece* fallbackMuzzlePiece = nullptr;
+	const LocalModelPiece* fallbackAimPiece = nullptr;
 
 	int reaimTime;                          // time between successive reaims in ticks
 
