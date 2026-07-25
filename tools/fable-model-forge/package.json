@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "babylonpress-ktx2-encoder": "^0.6.0",
+    "pngjs": "^7.0.0"
+  }
+}
