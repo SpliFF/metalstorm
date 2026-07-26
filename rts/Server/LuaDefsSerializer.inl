@@ -15,11 +15,13 @@
 #define LUA_DEFS_SERIALIZER_INL
 
 #include "Server/ProjectileTextureDefaults.h"
+#include "Sim/Misc/GlobalConstants.h"
 #include "Sim/MoveTypes/FootprintProfile.h"
 
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdlib>
 #include <cstring>
 #include <unordered_map>
 #include <utility>
@@ -275,6 +277,80 @@ inline std::string SerializeOneUnitDef(
     b.add_bool("can_self_destruct", ud.canSelfD,    /*def=*/true);
     b.add_int("self_d_countdown", ud.selfDCountdown);
     b.add_int("category_bits", static_cast<long long>(ud.category));
+
+    // Impostor/LOD tier (PLAN-metalstorm-beta-units.md §2.1, engine ask B1).
+    // Opt-in via customParams impostor_distance (elmos, Full→Impostor switch
+    // distance); impostor_only additionally means the def has no 3D model at
+    // all (the impostor billboard IS the model — infantry/civilians per the
+    // plan's roster table), so the switch distance defaults to near-zero
+    // instead of never. icon_distance (Impostor→Icon) defaults to 4x the
+    // impostor distance when not given explicitly.
+    // FIDELITY-STANDIN: no baked-atlas pipeline yet (§6 task 4b is a separate
+    // milestone) — diffuse_uri is a conventional-but-likely-nonexistent path,
+    // walk/idle frame counts default to 1. The client's ImpostorRenderer
+    // doesn't load the texture yet either (flat grey placeholder quad), so
+    // this doesn't regress anything: it only wires the tier switch itself.
+    {
+        const auto impostorOnlyIt = ud.customParams.find("impostor_only");
+        const bool impostorOnly = impostorOnlyIt != ud.customParams.end() &&
+            impostorOnlyIt->second != "0" && !impostorOnlyIt->second.empty();
+
+        float impostorDist = 0.0f;
+        bool haveImpostorDist = false;
+        const auto impostorDistIt = ud.customParams.find("impostor_distance");
+        if (impostorDistIt != ud.customParams.end()) {
+            impostorDist = std::strtof(impostorDistIt->second.c_str(), nullptr);
+            haveImpostorDist = impostorDist > 0.0f;
+        }
+        if (!haveImpostorDist && impostorOnly) {
+            impostorDist = 1.0f;  // always-impostor: no model to fall back to
+            haveImpostorDist = true;
+        }
+
+        if (haveImpostorDist) {
+            // No customParams icon_distance override → effectively never
+            // (macro-map's own strategic-zoom icons are a separate system,
+            // PLAN-macro-map.md §1; this per-def icon_distance only matters
+            // for a def that explicitly wants EntityRenderer to stop drawing
+            // it at some finite range). Deliberately NOT a multiple of
+            // impostorDist — impostor_only defs default impostorDist to ~1
+            // elmo (always-impostor), and 4x that would hide the unit
+            // almost immediately.
+            float iconDist = 1.0e9f;
+            const auto iconDistIt = ud.customParams.find("icon_distance");
+            if (iconDistIt != ud.customParams.end()) {
+                const float parsed = std::strtof(iconDistIt->second.c_str(), nullptr);
+                if (parsed > 0.0f) iconDist = parsed;
+            }
+            detail::LuaBuilder ltb;
+            ltb.add_float("impostor_distance", impostorDist);
+            ltb.add_float("icon_distance", iconDist);
+            b.add_raw("lod_thresholds", ltb.finish());
+
+            std::string impostorStem = ud.modelName.empty() ? ud.name
+                : fs::path(ud.modelName).stem().string();
+            detail::LuaBuilder imp;
+            imp.add_str("diffuse_uri", "/api/games/data/" + gameId +
+                "/models/" + impostorStem + "_impostor.ktx2");
+            imp.add_int("walk_frames", 1);
+            imp.add_int("idle_frames", 1);
+            // Quad size: 2x the model radius when a model exists (matches
+            // the bake pipeline's eventual convention, §6). impostor_only
+            // defs have no model (GetModelRadius() == 0) — fall back to the
+            // footprint world size (footprint units are 2*SQUARE_SIZE elmos
+            // each, GlobalConstants.h) so the billboard is human/vehicle-
+            // scaled instead of a degenerate ~0-size quad.
+            float quadSize = ud.GetModelRadius() * 2.0f;
+            if (quadSize <= 0.0f) {
+                quadSize = static_cast<float>(std::max(ud.xsize, ud.zsize)) *
+                    (2.0f * SQUARE_SIZE);
+            }
+            quadSize = std::max(quadSize, 1.0f);
+            imp.add_float("width", quadSize);
+            imp.add_float("height", quadSize);
+            b.add_raw("impostor", imp.finish());
+        }
+    }
 
     // Sounds: emit a Lua array of {id, path, name, category,
     // volume, pitch} tables in the same packing order as the FB

@@ -49,6 +49,7 @@ import { LosBitmapStore, type LosBitmap } from './los-bitmap.js';
 // done in main.ts) so unit `.ktx2` textures transcode here.
 import './ktx2-config.js';
 import { EntityRenderer, setModelMaterialPort } from './entity-renderer.js';
+import { ImpostorRenderer, LodTier } from './impostor-renderer.js';
 
 /**
  * The model-material port id that `zk-model-material.ts` reproduces
@@ -1662,6 +1663,16 @@ export function gpInit(msg: GpInitToWorker): void {
     // pass the sun so the team-color material can sample the live CSM.
     entityRenderer.setShadowGenerator(gpCtx.sceneLighting.csm, gpCtx.sceneLighting.sun);
     gpCtx.entityRenderer = entityRenderer;
+
+    // PLAN-metalstorm-beta-units.md §2.1 / engine ask B1: billboard/impostor
+    // LOD tier. Wired before any defs stream so setUnitDefs' atlas/threshold
+    // registration (entity-renderer.ts) never races the impostorRenderer ref.
+    const impostorRenderer = new ImpostorRenderer(scene, engine);
+    impostorRenderer.setPresentationClock(gpPresentationClock);
+    impostorRenderer.setShadowGenerator(gpCtx.sceneLighting.csm);
+    entityRenderer.setImpostorRenderer(impostorRenderer);
+    gpCtx.impostorRenderer = impostorRenderer;
+    (globalThis as Record<string, unknown>).__impostorRenderer = impostorRenderer;  // GW8 debug hook
     // GW8: expose the scene-debug hooks on the worker globalThis so the main
     // devtools console can reach them via window.__gp('__entityRenderer…')
     // (the render-core move stranded these here). Mirrors the __fxLightPool /
@@ -1882,6 +1893,10 @@ export function gpInit(msg: GpInitToWorker): void {
         // entityRenderer.tick() advances the presentation clock (L0) and
         // interpolates every unit to the presentation cursor before render.
         gpCtx.entityRenderer?.tick();
+        // Flush this frame's Impostor-tier instances entityRenderer.tick()
+        // just routed to impostorRenderer.addInstance() into thin-instance
+        // buffers (PLAN-metalstorm-beta-units.md §2.1, engine ask B1).
+        gpCtx.impostorRenderer?.render(camera.position);
         // PLAN-metalstorm-train T6: wheel-spin for train cars (updates piece
         // poses via setAimPose based on ground speed derived from position delta).
         gpTrainPresentation?.tick(dt * 1000); // tick() expects deltaMs
@@ -2715,6 +2730,8 @@ export function gpShutdown(): void {
     gpCtx.connection = null;
     gpCtx.entityRenderer?.dispose();
     gpCtx.entityRenderer = null;
+    gpCtx.impostorRenderer?.dispose();
+    gpCtx.impostorRenderer = null;
     gpBuildingPlateRenderer?.dispose();
     gpBuildingPlateRenderer = null;
     gpDefCache?.clear();
@@ -3070,6 +3087,17 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
         case 'setWireframe':
             if (gpScene) gpScene.forceWireframe = Boolean(args[0]);
             return null;
+        // PLAN-metalstorm-beta-units.md §2.1 / engine ask B1: F8 panel's
+        // force-LOD dropdown. null = no override (per-def thresholds decide).
+        case 'setForceLodTier': {
+            const v = args[0] as 'full' | 'impostor' | 'icon' | null;
+            const tier = v === 'full' ? LodTier.Full
+                : v === 'impostor' ? LodTier.Impostor
+                : v === 'icon' ? LodTier.Icon
+                : null;
+            gpCtx.entityRenderer?.setForceLodTier(tier);
+            return null;
+        }
         // — PLAN-model-harness task 6: generic clip player. Clips are
         //   authored .glb AnimationGroups captured at model load; playback
         //   samples channels each render frame into the per-piece clip-pose

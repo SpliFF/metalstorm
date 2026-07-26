@@ -221,17 +221,19 @@ export function createModelViewerPanel(api: PanelApi): ModelViewerPanel {
     const render = group('Render');
     const lod = el('select',
         'background:#123; color:#cde; border:1px solid #456; font:11px monospace; margin:2px 4px 2px 0;');
-    for (const [value, label, enabled] of [
-        ['full', 'LOD: full model', true],
-        ['impostor', 'LOD: impostor (beta-units B1 — not built yet)', false],
-        ['icon', 'LOD: icon (beta-units B1 — not built yet)', false],
+    for (const [value, label] of [
+        ['full', 'LOD: full model'],
+        ['impostor', 'LOD: impostor (billboard)'],
+        ['icon', 'LOD: icon (hidden — PLAN-macro-map.md owns strategic icons)'],
     ] as const) {
         const o = el('option', '', label);
         o.value = value;
-        o.disabled = !enabled;
         lod.append(o);
     }
-    lod.title = 'force a LOD tier; impostor/icon activate once beta-units B1 lands';
+    lod.title = 'force a LOD tier on the staged unit, overriding its def thresholds';
+    lod.addEventListener('change', () => {
+        api.h.setForceLodTier(lod.value as 'full' | 'impostor' | 'icon');
+    });
     const wire = checkbox('wireframe', 'scene-wide forceWireframe', (on) => api.h.setWireframe(on));
     const pause = checkbox('pause render', 'freeze the worker render loop (sim keeps running)',
         (on) => { if (on) api.h.pause(); else api.h.resume(); });

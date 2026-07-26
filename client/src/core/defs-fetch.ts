@@ -33,6 +33,8 @@ import type {
     CegSpawnInfo,
     CegPropertyInfo,
     GroundFlashInfo,
+    UnitImpostorInfo,
+    UnitLodThresholds,
 } from './connection.js';
 
 // ─── Public API ──────────────────────────────────────────────────
@@ -327,7 +329,29 @@ function toUnitDefInfos(parsed: any): UnitDefInfo[] {
         selfDCountdown: num(d.self_d_countdown),
         categoryBits: num(d.category_bits),
         sounds: toSoundRefs(d.sounds),
+        impostor: toImpostorInfo(d.impostor),
+        lodThresholds: toLodThresholds(d.lod_thresholds),
     }));
+}
+
+function toImpostorInfo(v: any): UnitImpostorInfo | undefined {
+    if (!v || typeof v !== 'object') return undefined;
+    return {
+        diffuseUri: str(v.diffuse_uri),
+        teamMaskUri: v.team_mask_uri ? str(v.team_mask_uri) : undefined,
+        walkFrames: num(v.walk_frames, 1),
+        idleFrames: num(v.idle_frames, 1),
+        width: num(v.width),
+        height: num(v.height),
+    };
+}
+
+function toLodThresholds(v: any): UnitLodThresholds | undefined {
+    if (!v || typeof v !== 'object') return undefined;
+    return {
+        impostorDistance: num(v.impostor_distance, Number.POSITIVE_INFINITY),
+        iconDistance: num(v.icon_distance, Number.POSITIVE_INFINITY),
+    };
 }
 
 function toWeaponDefInfos(parsed: any): WeaponDefInfo[] {
