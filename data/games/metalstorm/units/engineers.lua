@@ -12,7 +12,9 @@ return mk{
         [1] = { override = { workertime = 50,
                 description = 'Field engineer team — repairs and light works' },
                 -- Impostor-first per PLAN-metalstorm-beta-units.md §2.1.
-                impostorOnly = true },
+                -- Authored sprite: models/ms_engineers_s1_impostor{,_team}.ktx2.
+                impostorOnly = true, impostorSize = 12,
+                impostorTeamMask = true },
         [2] = { override = { workertime = 120 } },
         [3] = { override = { workertime = 300,
                 description = 'Heavy construction rig pair' } },

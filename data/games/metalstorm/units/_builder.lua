@@ -85,6 +85,17 @@ local function mk(spec)
             if impostorOnly then
                 def.customparams.impostor_only = '1'
             end
+            -- Sprite quad height/width in elmos (member-scaled — the squad
+            -- footprint fallback is way oversized for a single soldier).
+            local impostorSize = o.impostorSize or spec.impostorSize
+            if impostorSize then
+                def.customparams.impostor_size = tostring(impostorSize)
+            end
+            -- Authored `<stem>_impostor_team.ktx2` sidecar exists (R = team
+            -- colour blend) — tells the serializer to emit team_mask_uri.
+            if o.impostorTeamMask or spec.impostorTeamMask then
+                def.customparams.impostor_team_mask = '1'
+            end
         end
 
         -- Scale 4 = single super-heavy unit: multi-piece, cosmetic turrets

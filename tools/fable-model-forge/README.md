@@ -62,3 +62,14 @@ assets-manifest gate requires them before any model merges).
 
 `out/*.png` are the texture sources — re-encode with `node encode.mjs`
 after editing `paint.py`.
+
+## Impostor sprites (beta-units task 4b)
+
+`gen_impostor_sprites.py` paints the billboard sprite atlases for the
+impostor-only infantry/civilian defs (no 3D model at all — §2.1
+impostor-first): `ms_soldiers_s1`, `ms_engineers_s1`, `ms_civilians`,
+`ms_militia`. Single-frame 256² sprites (walk/idle flipbook rows wait on
+fx-offload X2), fable palette, flat 3-tone facets + outline, plus R8 team
+masks for the team-coloured defs. `node encode_sprites.mjs` encodes them
+(diffuse sRGB + alpha cutout, mask linear); shipped files are
+`data/games/metalstorm/models/<stem>_impostor{,_team}.ktx2`.

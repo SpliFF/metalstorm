@@ -28,9 +28,15 @@ local mapinfo = {
 		maxWind = 22,
 		fogStart = -0.3,
 		fogEnd = 2.0,
-		fogColor = {0.2, 0.2, 0.3},
-		sunColor = {1, 0.8, 0.4},
-		skyColor = {0.7, 0.7, 0.9},
+		fogColor = {0.24, 0.26, 0.30},
+		-- Near-neutral lighting: the terrain tiles are flat swatches from the
+		-- shared palette atlas (art/STYLE.md — "colour comes from the palette,
+		-- not from lighting"), so a tinted sun/ambient repaints the whole map.
+		-- The original values here were copy-pasted from green_flat_x34_v3
+		-- (orange sun + lime ambient) and turned the concrete/steel palette
+		-- olive — see the 2026-07-26 map-rendering fix.
+		sunColor = {1.0, 0.97, 0.92},
+		skyColor = {0.65, 0.70, 0.78},
 		skyDir = {1.0, 0.8, 1.0},
 		cloudDensity = 0.1,
 		cloudColor = {1.0, 1.0, 1.0},
@@ -39,7 +45,7 @@ local mapinfo = {
 		sunStartAngle = 0.0,
 		sunOrbitTime = 1440.0,
 		sunDir = {1, 0.7, 1},
-		groundAmbientColor = {0.6, 0.9, 0.2},
+		groundAmbientColor = {0.45, 0.46, 0.48},
 		groundDiffuseColor = {0.9, 0.9, 0.9},
 		groundSpecularColor = {0.5, 0.5, 0.5},
 		groundShadowDensity = 0.8,

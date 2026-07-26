@@ -96,10 +96,18 @@ return {
     -- districts are seeded via mapdata/civilians.lua's site data once
     -- spawn.seed is implemented — see that file's schema doc — this
     -- section is a small always-on population independent of that TODO).
+    --
+    -- x is offset +220 from the habitat's exact centre (2700): ms_habitat's
+    -- footprint (12x12 → 96-elmo half-extent per axis) blocks ground out to
+    -- ~96 elmos, so spawning directly on the centre point traps the unit
+    -- inside the building's blocked yardmap — GiveOrderToUnit "succeeds" but
+    -- the unit can never leave (found + fixed 2026-07-26, civilian idle-tail
+    -- investigation — these two were 2 of the population's stuck static
+    -- civilians).
     civilians = {
         units = {
-            { def = 'ms_civilians', x = 2700, z = 3900, facing = 'south', role = 'ambient' }, -- ash_habitat
-            { def = 'ms_civilians', x = 2700, z = 12484, facing = 'north', role = 'ambient' }, -- shale_habitat
+            { def = 'ms_civilians', x = 2920, z = 3900, facing = 'south', role = 'ambient' }, -- ash_habitat
+            { def = 'ms_civilians', x = 2920, z = 12484, facing = 'north', role = 'ambient' }, -- shale_habitat
         },
     },
 

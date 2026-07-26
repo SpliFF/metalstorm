@@ -38,6 +38,7 @@ import {
     type DirectionalLight,
 } from '@babylonjs/core';
 import { TeamColorPlugin } from './team-color-plugin.js';
+import { TEAM_COLORS } from './team-colors.js';
 import '@babylonjs/loaders/glTF/index.js';
 // KTX2 loader is registered in main.ts (the app entry). All unit
 // textures resolve to `.ktx2` URIs after the texture pipeline migration.
@@ -442,19 +443,8 @@ function loadUnitTextures(
     };
 }
 
-// Spring engine's 10 default team colors (from TeamBase::teamDefaultColor).
-const TEAM_COLORS = [
-    new Color3(90/255, 90/255, 255/255),   // blue
-    new Color3(200/255, 0/255, 0/255),     // red
-    new Color3(255/255, 255/255, 255/255), // white
-    new Color3(38/255, 155/255, 32/255),   // green
-    new Color3(7/255, 31/255, 125/255),    // dark blue
-    new Color3(150/255, 10/255, 180/255),  // purple
-    new Color3(255/255, 255/255, 0/255),   // yellow
-    new Color3(50/255, 50/255, 50/255),    // black
-    new Color3(152/255, 200/255, 220/255), // light blue
-    new Color3(171/255, 171/255, 131/255), // tan
-];
+// Spring engine's 10 default team colors: now the shared team-colors.ts
+// module (imported at the top) so the impostor sprite path tints identically.
 
 // Fallback shape types for defs without models
 enum UnitShape { Box = 0, Cylinder, Cone, Sphere }
@@ -598,6 +588,14 @@ export class EntityRenderer {
     private cursorFrame = 0;
     private entityMeta = new Map<number, EntityMeta>();
     private teamMaterials: StandardMaterial[] = [];
+    /** DefIds whose entities render via the Metalstorm squad fan-out
+     *  (client/squads — squad_size > 1) instead of a single unit mesh.
+     *  The interpolator + entityMeta still track them (the squad adapter
+     *  reads their interpolated pose via getEntityPose), but tick() skips
+     *  emitting an instance so the sim-authoritative body isn't drawn on
+     *  top of its cosmetic soldiers. Populated by the worker adapter as
+     *  squad defs stream in (game-processor). */
+    private squadDefIds = new Set<number>();
     /** Map heightmap data for terrain re-projection of ground units.
      *  Entity Y comes from the server snapped to terrain on each sim
      *  frame, but state streams at ~10 Hz and we lerp between frames —
@@ -1873,6 +1871,12 @@ export class EntityRenderer {
         const groups = new Map<string, { mesh: Mesh; matrices: number[]; count: number }>();
 
         for (const [id, meta] of this.entityMeta) {
+            // Squad-fan-out defs (client/squads) draw their cosmetic members
+            // via the squad adapter, not a single unit mesh here. Skip so the
+            // sim body isn't rendered under the soldiers. (Still interpolated
+            // + tracked above — the adapter samples getEntityPose(id).)
+            if (this.squadDefIds.size && this.squadDefIds.has(meta.defId)) continue;
+
             // LOS bucket: own units & permissive sessions read 0x0F (all
             // bits set) so the INLOS check passes naturally. Enemy units
             // bucket into in-LOS / radar-blip / ghost / hidden.
@@ -2417,6 +2421,24 @@ export class EntityRenderer {
     getEntityPose(id: number): { x: number; y: number; z: number; heading: number } | null {
         const p = this.interpolator.getInterpolated(id, this.cursorFrame);
         return p ? { x: p.x, y: p.y, z: p.z, heading: p.heading } : null;
+    }
+
+    /** Register a defId as a squad-fan-out def: its entities keep being
+     *  interpolated + tracked but stop drawing a single unit mesh (the
+     *  Metalstorm squad adapter renders their members instead). Idempotent. */
+    markSquadDef(defId: number): void {
+        this.squadDefIds.add(defId);
+    }
+
+    /** True if `defId` renders via the squad fan-out (see markSquadDef). */
+    isSquadDef(defId: number): boolean {
+        return this.squadDefIds.has(defId);
+    }
+
+    /** Team colour for the squad adapter's cosmetic member material —
+     *  same palette the unit meshes use, so soldiers match their vehicles. */
+    getTeamColor(team: number): Color3 {
+        return TEAM_COLORS[team % TEAM_COLORS.length];
     }
 
     /** True once the sim has streamed a 0x05 piece-state snapshot for this

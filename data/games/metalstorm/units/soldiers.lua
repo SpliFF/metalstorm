@@ -11,8 +11,10 @@ return mk{
                 description = 'Rifle section — numerous and expendable',
                 -- Impostor-first per PLAN-metalstorm-beta-units.md §2.1: no
                 -- 3D model for beta, billboard impostor is the unit's
-                -- normal render at any distance.
-                impostorOnly = true },
+                -- normal render at any distance. Authored sprite atlas:
+                -- models/ms_soldiers_s1_impostor{,_team}.ktx2 (task 4b).
+                impostorOnly = true, impostorSize = 12,
+                impostorTeamMask = true },
         [2] = { weapons = { [1] = { name = 'MS_MG_S2' } } },
         [3] = { weapons = { [1] = { name = 'MS_AC_S1' },
                             [2] = { name = 'MS_MORTAR_S1' } },
