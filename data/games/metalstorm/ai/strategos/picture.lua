@@ -45,20 +45,30 @@ end
 -- (regions plan §5 / ask R1); owner/contested come from region_* rulesParams.
 -- Empty (no graph loaded, or AI4/AI1 unavailable) is honest "unknown", not
 -- an error — regionOf() and every caller already degrade safely on {}.
+-- Static region geometry cache. The graph GEOMETRY (polygons, neighbors,
+-- value, tags) never changes during a game — only owner/contested do (via
+-- region_* rulesParams). The live run flagged the original per-tick reload as
+-- the dominant strategic-tick cost: AI.getMapData re-read + JSON-parsed
+-- regions.json AND rebuilt the point-lookup grid every 5 s (~7 ms, over the
+-- §6 2 ms budget). So load the geometry ONCE, and each tick overlay only the
+-- live owner/contested onto the SAME table (stable identity → the regionOf
+-- lookup grid, which keys off that identity, also builds once, not per tick).
+-- Module-level like powerTable; freshPicture() in the specs reloads the module
+-- and resets it, so tests stay isolated.
+local staticRegions = nil
+
 local function readRegions(c)
-    local regions = {}
     local AI = _G.AI
-    -- Static graph geometry from regions.json via the AI4 file API — the SAME
-    -- file the client mirror (ui/lib/regions.js) fetches, so both agree by
-    -- construction. Adjacency IS strategic distance (plan §2) — no terrain,
-    -- no pathfinding. `polygon` is retained for the regionOf lookup grid the
-    -- task-3 Picture builder will construct.
-    if c.mapData then
+    -- Build the static geometry table once, on the first tick that has the AI4
+    -- file API. Same regions.json the client mirror (ui/lib/regions.js) fetches
+    -- → both agree by construction. Adjacency IS strategic distance (plan §2).
+    if staticRegions == nil and c.mapData then
         local ok, data = pcall(AI.getMapData, 'regions.json')
         if ok and type(data) == 'table' and type(data.regions) == 'table' then
+            staticRegions = {}
             for _, r in ipairs(data.regions) do
                 if r.key then
-                    regions[r.key] = {
+                    staticRegions[r.key] = {
                         name      = r.name,
                         value     = r.value or 0,
                         tags      = r.tags or {},
@@ -71,11 +81,22 @@ local function readRegions(c)
             end
         end
     end
-    -- Overlay live owner/contested from region_* rulesParams (AI1). Absent
-    -- params leave the static defaults — an honest "unknown" ownership for a
-    -- region the AI can't currently see the control state of.
+    -- No geometry loaded (AI4 unavailable, or the read failed) → honest empty
+    -- "unknown" graph; regionOf() and every caller already degrade safely on {}.
+    if staticRegions == nil then return {} end
+
+    -- Overlay live owner/contested from region_* rulesParams (AI1) onto the
+    -- cached geometry, IN PLACE. Reset to the static default first so a region
+    -- whose param went unknown doesn't keep a stale owner (in practice
+    -- game_regions.lua always publishes region_<key>_team as -1..N, never nil,
+    -- but resetting is the honest default). Absent rulesParam surface leaves
+    -- everything "unknown".
+    for _, region in pairs(staticRegions) do
+        region.owner = nil
+        region.contested = false
+    end
     if c.rulesParam then
-        for key, region in pairs(regions) do
+        for key, region in pairs(staticRegions) do
             local owner = AI.getRulesParam('game', 'region_' .. key .. '_team')
             if owner ~= nil then region.owner = owner end
             local contested = AI.getRulesParam('game', 'region_' .. key .. '_contested')
@@ -84,7 +105,7 @@ local function readRegions(c)
             end
         end
     end
-    return regions
+    return staticRegions
 end
 
 -- Mirrors game_objectives.lua's PUBLISHED_FIELDS exactly (same list
@@ -473,15 +494,14 @@ local function buildLookupGrid(regions, cellSize)
     return { cellSize = cellSize, cells = cells }
 end
 
--- Cached by object identity of the `regions` table it was built from. The
--- O(1) payoff is WITHIN one strategic tick: buildLedger/updateIntel call
--- regionOf once per own/enemy unit (up to hundreds) against the SAME
--- `regions` table readRegions() produced for this refresh, so the grid is
--- built once per tick and reused for every point query in it, rather than
--- once per unit. readRegions() returns a fresh table each tick (owner/
--- contested overlay changes every refresh), so the cache naturally misses
--- and rebuilds across ticks — at 0.2 Hz over ~50 regions that rebuild is
--- itself negligible; it's the per-unit cost this amortises.
+-- Cached by object identity of the `regions` table it was built from. Since
+-- readRegions() now caches the static geometry and returns the SAME table
+-- every tick (only owner/contested change, overlaid in place — the grid keys
+-- off polygons, which don't), this cache hits across ticks too: the lookup
+-- grid is built ONCE for the whole game, not per tick. Within a tick it still
+-- amortises the per-unit cost (buildLedger/updateIntel call regionOf once per
+-- own/enemy unit against the same table). A fresh regions table (e.g. a test
+-- fixture, or a future dynamic graph) naturally misses and rebuilds.
 local cachedGridFor, cachedGrid = nil, nil
 
 --- Region at world position → key. O(1) cell lookup (bbox filter) + a

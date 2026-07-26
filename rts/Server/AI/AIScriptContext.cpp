@@ -9,6 +9,7 @@
 
 #define LOG_SECTION "ai"
 
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -271,11 +272,37 @@ void AIScriptContext::ProcessSnapshot() {
     }
 
     lua_pushinteger(L, currentSnapshot.frame);
+    // Strategic-tick budget instrumentation (plan §6 — ≤ 2 ms at LOD 0). This
+    // pcall runs the AI's whole onUpdate, which for strategos is either a cheap
+    // self-throttled early-return (most frames) or a full strategic tick
+    // (picture→slate→planner→actuators) every STRATEGIC_TICK_FRAMES. Timing it
+    // here — around the marshalling boundary, on the sim thread — is the honest
+    // measure of what the tick actually costs the server.
+    const auto t0 = std::chrono::steady_clock::now();
     int err = lua_pcall(L, 1, 0, 0);
+    const auto t1 = std::chrono::steady_clock::now();
     if (err != LUA_OK) {
         SLOG_SCOPED(SPRING_LOG_ERROR, name.c_str(), "onUpdate error: %s",
             lua_tostring(L, -1));
         lua_pop(L, 1);
+    }
+    const double ms =
+        std::chrono::duration<double, std::milli>(t1 - t0).count();
+    // This is the FULL onUpdate wall — compute PLUS whatever narration the AI
+    // does (on a headless run, AI.log/announce routes to synchronous SLOG,
+    // which dominates and is NOT part of the §6 compute budget). The
+    // authoritative §6 "table arithmetic over regions ≤ 2 ms" number is
+    // measured inside Lua with AI.nowMs() around the pure pipeline and logged
+    // in the strategos tick summary. Here we only surface the full wall as an
+    // informational metric; only a real strategic tick clears the threshold —
+    // the ~14/15 throttled early-returns are microseconds and stay out of the
+    // log.
+    constexpr double kLogThresholdMs = 0.15;
+    if (ms >= kLogThresholdMs) {
+        SLOG_SCOPED(SPRING_LOG_INFO, name.c_str(),
+            "onUpdate wall %.3f ms at frame %lld (compute+narration; §6 compute "
+            "budget checked Lua-side)",
+            ms, static_cast<long long>(currentSnapshot.frame));
     }
 }
 
@@ -311,6 +338,12 @@ void AIScriptContext::RegisterAPI() {
 
     lua_pushcfunction(L, l_getDefExport);
     lua_setfield(L, -2, "getDefExport");
+
+    lua_pushcfunction(L, l_log);
+    lua_setfield(L, -2, "log");
+
+    lua_pushcfunction(L, l_nowMs);
+    lua_setfield(L, -2, "nowMs");
 
     // AI2 directive-shaped write verbs (org-group / directive / posture).
     lua_pushcfunction(L, l_createGroup);
@@ -615,6 +648,31 @@ int AIScriptContext::l_issueCommand(lua_State* L) {
 int AIScriptContext::l_getFrame(lua_State* L) {
     auto* ctx = GetAIContext(L);
     lua_pushinteger(L, ctx->currentSnapshot.frame);
+    return 1;
+}
+
+// AI.log(msg) — write a line to the server log under this AI's section. A
+// headless server AI has no chat wire or HUD, so this is how a full-side run's
+// boot line, per-directive announcements and tick errors become visible (plan
+// §5.1). Best-effort and non-fatal: a non-string arg is coerced via tostring.
+int AIScriptContext::l_log(lua_State* L) {
+    auto* ctx = GetAIContext(L);
+    const char* msg = lua_tostring(L, 1);
+    SLOG_SCOPED(SPRING_LOG_INFO, ctx->name.c_str(), "%s",
+        msg != nullptr ? msg : "(nil)");
+    return 0;
+}
+
+// AI.nowMs() — monotonic milliseconds, for the AI to self-time the compute
+// portion of its strategic tick (plan §6 ≤ 2 ms). This is the honest measure
+// of the §6 "table arithmetic over regions" cost: unlike the C++ pcall timer
+// (which wraps the whole onUpdate, INCLUDING the diagnostic narration that on
+// a headless run routes to synchronous SLOG), the AI brackets only the pure
+// pipeline with this clock. Steady-clock delta → no wall-date leak.
+int AIScriptContext::l_nowMs(lua_State* L) {
+    const auto now = std::chrono::steady_clock::now().time_since_epoch();
+    const double ms = std::chrono::duration<double, std::milli>(now).count();
+    lua_pushnumber(L, ms);
     return 1;
 }
 

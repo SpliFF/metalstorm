@@ -25,6 +25,8 @@
 --   writes: AI.createGroup · AI.issueDirective · AI.setPosture (AI2 — the
 --           directive-shaped write surface; routed through the SAME engine
 --           managers + charge callins as a human player's commands).
+--   infra:  AI.log(msg) (server-log channel — a headless AI has no chat/HUD,
+--           §5.1) · AI.nowMs() (monotonic clock for self-timing the §6 tick).
 -- Still assumed-but-absent (each module feature-detects + degrades): squad
 -- views, LOD, chat/stake/parley (I1). See README "Engine asks".
 
@@ -134,6 +136,15 @@ end
 -- LOD (plan §3 / PLAN-ai.md) stretches the period for dormant NPC factions.
 --=============================================================================
 local function strategicTick(frame)
+    -- §6 compute-budget clock (≤ 2 ms). We bracket ONLY the pure pipeline
+    -- (read mirrors → goals → allocate) — the "table arithmetic over regions"
+    -- §6 budgets — with the AI's monotonic clock. The actuator's WRITE step and
+    -- all narration (which on a headless run route to synchronous SLOG) are
+    -- deliberately outside this window; they're I/O, not the §6 compute cost.
+    local AI = _G.AI
+    local clock = (type(AI) == 'table' and type(AI.nowMs) == 'function') and AI.nowMs or nil
+    local t0 = clock and clock() or nil
+
     -- 1. READ — refresh the Picture from mirrors + decay memory (picture.lua).
     local picture = Picture.refresh({
         frame  = frame,
@@ -157,11 +168,49 @@ local function strategicTick(frame)
         config      = Config,
     })
 
+    -- Compute cost measured here, before the WRITE/narration I/O below.
+    local computeMs = (t0 and clock) and (clock() - t0) or nil
+
     -- 4. WRITE — the actuator is the ONLY module that emits commands. It maps
     --    directives onto real verbs (or the standing-order fallback pre-AI2)
     --    and announces intent (plan §5.1) + publishes the intent report
     --    (PLAN-metalstorm-interaction.md §6.3).
     self.actuators:apply(plan, picture)
+
+    -- Tick summary — one legible line per strategic tick so a headless full-side
+    -- run is observable (plan §5.1: the AI's reasoning must be inspectable). Not
+    -- a decision input; pure narration. Counts what the pipeline produced this
+    -- tick + the governor's economy so region/objective progress is traceable.
+    local nGoals, nDir, nBoard, ownStrength = 0, 0, 0, 0
+    local rOwned, rNeutral, rEnemy = 0, 0, 0
+    for _ in pairs(slate) do nGoals = nGoals + 1 end
+    nDir = #(plan.directives or {})
+    for _, r in pairs(picture.regions or {}) do
+        if r.owner == self.role.teamId then rOwned = rOwned + 1
+        elseif r.owner == nil or r.owner == -1 then rNeutral = rNeutral + 1
+        else rEnemy = rEnemy + 1 end
+    end
+    local objActive, objDone = 0, 0
+    for _, o in pairs(picture.board or {}) do
+        nBoard = nBoard + 1
+        if o.state == 'active' then objActive = objActive + 1
+        elseif o.state == 'complete' then objDone = objDone + 1 end
+    end
+    for _, b in pairs(picture.ledger or {}) do ownStrength = ownStrength + (b.strength or 0) end
+    -- §6 budget verdict: compute (pipeline) ms vs the 2 ms LOD-0 target. Flag
+    -- with a marker so an over-budget tick is greppable; this log line itself
+    -- is I/O and runs AFTER the measured window, so it never inflates the number.
+    local budgetTag = ''
+    if computeMs then
+        budgetTag = string.format(' computeMs=%.3f%s', computeMs,
+            computeMs > 2.0 and ' OVER_BUDGET' or '')
+    end
+    self.actuators:chat(string.format(
+        "[strategos] tick f=%d goals=%d directives=%d regions(own/neu/enemy)=%d/%d/%d "
+        .. "obj(active/done)=%d/%d ownStr=%d budget=%d spent=%d%s",
+        frame, nGoals, nDir, rOwned, rNeutral, rEnemy, objActive, objDone,
+        math.floor(ownStrength), math.floor(plan.budget or 0),
+        math.floor(plan.spent or 0), budgetTag))
 
     -- 5. PARLEY — evaluate proposals addressed to us and respond
     -- (interaction §6.2). The decision is computed unconditionally (pure,

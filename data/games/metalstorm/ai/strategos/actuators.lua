@@ -72,6 +72,7 @@ function Actuators._detect()
         setPosture     = has('setPosture'),       -- AI2
         initiateBuild  = has('initiateBuild'),    -- AI2 (not yet on the surface)
         chat           = has('chat') or has('sendChat'),
+        log            = has('log'),               -- server-log channel (headless)
         marker         = has('marker') or has('setMarker'),
         stakeBounty    = has('stakeBounty'),      -- authority stake from AI
         respond        = has('respondProposal'),  -- interaction I1
@@ -126,13 +127,17 @@ function Actuators:stakeBounty(objectiveDef, amount)
 end
 
 --- Narrate via chat (plan §5.1 — spend is socially visible). Best-effort.
+-- Falls back to the server-log channel (AI.log) when no in-game chat wire
+-- exists yet — on a headless full-side run the log is the only place the AI's
+-- spend/decisions/errors surface, so narration must not silently vanish.
 function Actuators:chat(msg)
     local AI = _G.AI
     if type(AI) == 'table' then
         if type(AI.chat) == 'function' then return AI.chat(msg) end
         if type(AI.sendChat) == 'function' then return AI.sendChat(msg) end
+        if type(AI.log) == 'function' then return AI.log(msg) end
     end
-    -- No chat verb: swallow (never error — narration is non-essential).
+    -- No chat/log verb: swallow (never error — narration is non-essential).
     return false
 end
 

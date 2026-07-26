@@ -100,6 +100,18 @@ private:
     static int l_issueDirective(lua_State* L);
     static int l_setPosture(lua_State* L);
 
+    // Log channel: a headless server AI has no chat wire / HUD, but its
+    // decisions and errors must still be visible (plan §5.1 — "spend is
+    // socially visible"). AI.log(msg) routes to the server log under the AI's
+    // section, so a full-side run's goals/directives/errors are inspectable.
+    static int l_log(lua_State* L);
+
+    // Monotonic millisecond clock for the AI to self-time its strategic tick
+    // (plan §6 budget). Sandbox-safe: a steady_clock delta since context
+    // construction, so it leaks no wall-clock date and can't be used for
+    // anything but interval timing.
+    static int l_nowMs(lua_State* L);
+
     std::string name;
     int teamId;
     int allyTeamId;
