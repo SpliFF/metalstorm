@@ -37,14 +37,18 @@ local function findNearestSite(civ, x, z, excludeSite)
     return nearest
 end
 
---- Helper: is a region safe for civilians? (gaia/uncontrolled = safe, contested/enemy = unsafe)
+--- Helper: is a region safe for civilians? Unsafe only while CONTESTED (active
+--- fighting) — matches estate.lua's credible-threat model (PLAN-metalstorm-
+--- interaction.md §3: a threat is enemy presence, not mere non-gaia
+--- ownership). A team peacefully holding its home district (the common case:
+--- every scenario's districts are pre-owned by a faction from GameStart) is
+--- not itself a threat to bystanders — only live combat is.
 local function isRegionSafe(regionKey, gaiaTeam)
     local owner = GG.Regions.ControllingTeam(regionKey)
     if owner == nil or owner == gaiaTeam then
         return true
     end
 
-    -- Check if contested
     local contested = GG.Regions.GetContested()
     for _, key in ipairs(contested) do
         if key == regionKey then
@@ -52,8 +56,7 @@ local function isRegionSafe(regionKey, gaiaTeam)
         end
     end
 
-    -- Region is controlled by a non-gaia team but not contested - still unsafe for civilians
-    return false
+    return true
 end
 
 --- Helper: find the nearest safe region from current position
