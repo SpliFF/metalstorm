@@ -446,6 +446,37 @@ export interface UnitDefInfo {
     /// Per-unit sounds (select/order_ack/build/working/...). Empty when
     /// the unit's def has no sound assets.
     sounds: SoundRefInfo[];
+    /** Impostor atlas metadata for the billboard LOD tier (PLAN-metalstorm-beta-units.md
+     *  §2.1, engine ask B1). Absent = this def has no impostor tier. Emitted by
+     *  LuaDefsSerializer.inl from `customParams.impostor_distance`. */
+    impostor?: UnitImpostorInfo;
+    /** LOD distance thresholds (elmos) — Full→Impostor and Impostor→Icon switch
+     *  points. Absent = always render the Full tier (fallback-safe default). */
+    lodThresholds?: UnitLodThresholds;
+}
+
+export interface UnitImpostorInfo {
+    /** Atlas diffuse+alpha texture URI, 8 columns (headings) × N rows (anim
+     *  frames). FIDELITY-STANDIN: the bake pipeline (beta-units task 4b) hasn't
+     *  landed yet, so this may point at a placeholder/nonexistent asset — the
+     *  renderer doesn't load it yet either (flat grey quad until then). */
+    diffuseUri: string;
+    /** Team-color mask atlas URI (R = blend amount), same layout. */
+    teamMaskUri?: string;
+    /** Number of walk-cycle frames (atlas rows [0, walkFrames)). */
+    walkFrames: number;
+    /** Number of idle frames (atlas rows [walkFrames, walkFrames+idleFrames)). */
+    idleFrames: number;
+    /** Billboard quad size in elmos. */
+    width: number;
+    height: number;
+}
+
+export interface UnitLodThresholds {
+    /** Distance beyond which to switch Full → Impostor (elmos). */
+    impostorDistance: number;
+    /** Distance beyond which to switch Impostor → Icon (elmos). */
+    iconDistance: number;
 }
 
 export interface UnitOrderInfo {

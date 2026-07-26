@@ -16,6 +16,7 @@ import type { WorkerSelection } from './worker-selection.js';
 import type { EntityRenderer } from './entity-renderer.js';
 import type { FxLightPool } from './fx-light-pool.js';
 import type { ProjectileRenderer } from './projectile-renderer.js';
+import type { ImpostorRenderer } from './impostor-renderer.js';
 import type { SceneLighting } from './scene-lighting.js';
 import { defaultMapLighting, type MapLighting } from './map-lighting.js';
 
@@ -30,6 +31,8 @@ export const gpCtx = {
     fxLightPool:        null as FxLightPool | null,
     /** was gpProjectileRenderer (~4935) */
     projectileRenderer: null as ProjectileRenderer | null,
+    /** Billboard/impostor LOD renderer (PLAN-metalstorm-beta-units.md §2.1, B1) */
+    impostorRenderer:   null as ImpostorRenderer | null,
     /** was gpSceneLighting (~4889) */
     sceneLighting:      null as SceneLighting | null,
     /** was gpMapLighting (~4895) — keep current initialiser semantics */

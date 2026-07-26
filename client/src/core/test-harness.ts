@@ -547,6 +547,12 @@ export class TestHarness {
         void this.deps.workerCall('setWireframe', [on]);
     }
 
+    /** Force every entity to one LOD tier (F8 panel's force-LOD dropdown,
+     *  PLAN-metalstorm-beta-units.md §2.1). null restores per-def thresholds. */
+    setForceLodTier(tier: 'full' | 'impostor' | 'icon' | null): void {
+        void this.deps.workerCall('setForceLodTier', [tier]);
+    }
+
     // ─── Model harness: generic clip player (PLAN-model-harness task 6) ──
     //
     // Plays authored .glb animation clips through the client animator

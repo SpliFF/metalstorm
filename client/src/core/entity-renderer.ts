@@ -54,6 +54,7 @@ import {
     type ZKUnitTextures,
 } from './zk-model-material.js';
 import { matchAimSlots, type UnitAimPieces, type AimPiece } from './turret-aim-controller.js';
+import { LodTier, type ImpostorRenderer } from './impostor-renderer.js';
 
 /** Per-material texture URIs, keyed by material name in the .gltf.
  *  Single-material models (all S3O/DAE content) use just the `materials[0]`
@@ -716,6 +717,14 @@ export class EntityRenderer {
      *  the setter itself. */
     private shadowGenerator: ShadowGenerator | null = null;
 
+    /** Billboard/impostor LOD tier renderer (PLAN-metalstorm-beta-units.md §2.1,
+     *  engine ask B1). Null until wired by the bootstrap — tick() falls back to
+     *  always-Full when unset (identical to pre-B1 behaviour). */
+    private impostorRenderer: ImpostorRenderer | null = null;
+    /** Model-viewer F8 panel LOD override (force-LOD dropdown). Null = no
+     *  override, per-def thresholds decide the tier normally. */
+    private forceLodTier: LodTier | null = null;
+
     constructor(scene: Scene) {
         this.scene = scene;
 
@@ -732,6 +741,20 @@ export class EntityRenderer {
      *  arrival wall-time. */
     setPresentationClock(clock: PresentationClock): void {
         this.presClock = clock;
+    }
+
+    /** Wire the impostor/billboard LOD renderer (PLAN-metalstorm-beta-units.md
+     *  §2.1). Once set, tick() routes Impostor-tier entities to it instead of
+     *  the per-piece model path. */
+    setImpostorRenderer(renderer: ImpostorRenderer | null): void {
+        this.impostorRenderer = renderer;
+    }
+
+    /** Force every entity to a single LOD tier regardless of per-def
+     *  thresholds (model-viewer F8 panel's force-LOD dropdown). Pass null to
+     *  restore normal distance-based tier selection. */
+    setForceLodTier(tier: LodTier | null): void {
+        this.forceLodTier = tier;
     }
 
     /**
@@ -834,6 +857,17 @@ export class EntityRenderer {
             this.defModelUrls.set(def.defId, def.modelUrl);
             if ((def.flags & UDF_FLAG_IS_BUILDING) !== 0) {
                 this.defIsBuilding.add(def.defId);
+            }
+
+            // PLAN-metalstorm-beta-units.md §2.1 / engine ask B1: hand the
+            // impostor renderer its per-def atlas + LOD thresholds as soon as
+            // they stream, so the first ensureModelLoaded/tick sighting of
+            // this def can already resolve to the Impostor tier.
+            if (this.impostorRenderer) {
+                if (def.impostor) this.impostorRenderer.registerAtlas(def.defId, def.impostor);
+                if (def.lodThresholds) {
+                    this.impostorRenderer.registerLodThresholds(def.defId, def.lodThresholds);
+                }
             }
 
             // Defs without a model file get their template slot pinned
@@ -1910,6 +1944,34 @@ export class EntityRenderer {
                     pitch: ghost.pitch, roll: ghost.roll }
                 : this.interpolator.getInterpolated(id, cursorFrame);
             if (!lerped) continue;
+
+            // PLAN-metalstorm-beta-units.md §2.1 / engine ask B1: LOD tier
+            // decision. Icon tier isn't rendered here at all (strategic map
+            // symbol — PLAN-macro-map.md owns that); Impostor tier routes to
+            // the billboard renderer instead of the per-piece model path
+            // below. No impostorRenderer wired, or no thresholds registered
+            // for this def, both fall through to Full (pre-B1 behaviour).
+            // TODO(beta-units-crossfade): blend both tiers over 0.3s at the
+            // model↔impostor boundary instead of a hard cut (deferred, §7).
+            if (this.impostorRenderer) {
+                const camPos = this.scene.activeCamera?.position
+                    ?? new Vector3(lerped.x, lerped.y, lerped.z);
+                const tier = this.impostorRenderer.determineLodTier(
+                    meta.defId,
+                    new Vector3(lerped.x, lerped.y, lerped.z),
+                    camPos,
+                    this.forceLodTier ?? undefined,
+                );
+                if (tier === LodTier.Icon) continue;
+                if (tier === LodTier.Impostor) {
+                    const groundYI = this.sampleHeight(lerped.x, lerped.z);
+                    const yI = Number.isNaN(groundYI) ? lerped.y : Math.max(lerped.y, groundYI);
+                    const rotationI = (lerped.heading / 65535) * Math.PI * 2;
+                    this.impostorRenderer.addInstance(
+                        meta.defId, meta.team, lerped.x, yI, lerped.z, rotationI);
+                    continue;
+                }
+            }
 
             // Lazy-load: trigger the glb + texture fetch the first
             // time we see an entity of this def. Until the load

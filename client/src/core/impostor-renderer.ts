@@ -31,6 +31,7 @@ import {
     MeshBuilder,
     Vector3,
     Matrix,
+    Quaternion,
     StandardMaterial,
     Texture,
     Color3,
@@ -90,7 +91,7 @@ interface ImpostorInstance {
 }
 
 /** Quantize a heading (radians) to the nearest atlas column (0–7). */
-function quantizeHeading(radians: number): number {
+export function quantizeHeading(radians: number): number {
     // 8 headings: 0° (col 0), 45° (col 1), ..., 315° (col 7)
     // Normalize to [0, 2π), then divide into 8 bins
     let normalized = radians % (2 * Math.PI);
@@ -199,8 +200,21 @@ export class ImpostorRenderer {
             };
 
             for (const inst of instances) {
-                // World matrix: translation only (quad faces camera, no rotation)
-                const mat = Matrix.Translation(inst.x, inst.y, inst.z);
+                // Camera-facing (Y-axis) billboard baked per-instance.
+                // Mesh.billboardMode does NOT apply per-thin-instance — Babylon
+                // computes it once from the MESH's own transform (our mesh sits
+                // at the origin), so every instance would share one rotation
+                // derived from origin→camera instead of its own position→camera.
+                // In practice that left the quad edge-on (invisible) from most
+                // camera angles. Yaw-only (not full ALL-axis) so the card stays
+                // upright — the standard convention for ground-unit sprite
+                // impostors, and consistent with the heading-quantized atlas
+                // column this def eventually selects.
+                const dx = cameraPos.x - inst.x;
+                const dz = cameraPos.z - inst.z;
+                const yaw = Math.atan2(dx, dz);
+                const rot = Quaternion.RotationAxis(Vector3.Up(), yaw);
+                const mat = Matrix.Compose(Vector3.One(), rot, new Vector3(inst.x, inst.y, inst.z));
                 const arr = new Float32Array(16);
                 mat.copyToArray(arr, 0);
                 for (let i = 0; i < 16; i++) group.matrices.push(arr[i]);
@@ -258,13 +272,16 @@ export class ImpostorRenderer {
             return null;
         }
 
-        // Create a camera-facing billboard quad
+        // Create the billboard quad. NOT mesh.billboardMode — that only
+        // billboards the mesh's own transform (this mesh sits at the
+        // origin; the actual per-unit positions are thin-instance matrices),
+        // so each instance bakes its own camera-facing rotation in render()
+        // instead (see the yaw computation there).
         mesh = MeshBuilder.CreatePlane(
             `impostor_${defId}_${team}`,
-            { width: atlas.width, height: atlas.height },
+            { width: atlas.width, height: atlas.height, sideOrientation: Mesh.DOUBLESIDE },
             this.scene,
         );
-        mesh.billboardMode = Mesh.BILLBOARDMODE_ALL;
         mesh.isPickable = false;
         mesh.alwaysSelectAsActiveMesh = true;
 
@@ -317,6 +334,17 @@ export class ImpostorRenderer {
         if (dist >= thresholds.iconDistance) return LodTier.Icon;
         if (dist >= thresholds.impostorDistance) return LodTier.Impostor;
         return LodTier.Full;
+    }
+
+    /** Test/debug accessor: current thinInstanceCount per (defId, team) mesh
+     *  key ("impostor:{defId}:{team}"). Used by impostor-renderer.test.ts to
+     *  assert batching without reaching into private state. */
+    getDebugMeshCounts(): Map<string, number> {
+        const out = new Map<string, number>();
+        for (const [key, mesh] of this.impostorMeshes) {
+            out.set(key, mesh.thinInstanceCount);
+        }
+        return out;
     }
 
     /** Clean up all impostor meshes. */

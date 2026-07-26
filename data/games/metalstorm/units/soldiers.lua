@@ -8,7 +8,11 @@ return mk{
     baseFootprint = 2, formation = 'line',
     scales = {
         [1] = { weapons = { [1] = { name = 'MS_MG_S1' } },
-                description = 'Rifle section — numerous and expendable' },
+                description = 'Rifle section — numerous and expendable',
+                -- Impostor-first per PLAN-metalstorm-beta-units.md §2.1: no
+                -- 3D model for beta, billboard impostor is the unit's
+                -- normal render at any distance.
+                impostorOnly = true },
         [2] = { weapons = { [1] = { name = 'MS_MG_S2' } } },
         [3] = { weapons = { [1] = { name = 'MS_AC_S1' },
                             [2] = { name = 'MS_MORTAR_S1' } },

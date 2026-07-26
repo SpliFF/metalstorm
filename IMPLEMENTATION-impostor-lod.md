@@ -119,16 +119,29 @@ Vitest unit tests for:
 - LOD tier selection with various thresholds
 - Impostor instance batching
 
-## Implementation Steps (B1)
+## Implementation Steps (B1) — DONE (session 2, 2026-07-26)
 
 1. ✅ ImpostorRenderer class (impostor-renderer.ts)
-2. ⏳ Modify EntityRenderer.tick() to inject LOD decision
-3. ⏳ Wire ImpostorRenderer into game-processor.ts render loop
-4. ⏳ Add impostor/lodThresholds fields to UnitDefInfo TypeScript types
-5. ⏳ Server-side: emit impostor metadata in LuaDefsSerializer.inl (GameUnitDefs)
-6. ⏳ Model-viewer: enable force-LOD dropdown + wire state
-7. ⏳ Tests: Vitest + in-browser verification
-8. ⏳ Document findings + update PLAN-metalstorm-beta-units.md
+2. ✅ Modify EntityRenderer.tick() to inject LOD decision
+3. ✅ Wire ImpostorRenderer into game-processor.ts render loop
+4. ✅ Add impostor/lodThresholds fields to UnitDefInfo TypeScript types
+5. ✅ Server-side: emit impostor metadata in LuaDefsSerializer.inl (GameUnitDefs)
+6. ✅ Model-viewer: enable force-LOD dropdown + wire state
+7. ✅ Tests: Vitest (quantizeHeading, tier selection, batching) + in-browser verification
+8. ✅ Document findings (below) + update PLAN-metalstorm-beta-units.md
+
+### Session 2 finding: `mesh.billboardMode` doesn't billboard per-thin-instance
+
+`Mesh.billboardMode` only orients the MESH's own transform relative to the
+camera — it does not touch individual thin-instance matrices. Since the
+impostor mesh sits at the world origin (all real positioning happens via
+per-instance matrices), setting `billboardMode = BILLBOARDMODE_ALL` computed
+one bogus rotation from origin→camera and applied it to the whole mesh,
+leaving every actual instance edge-on (invisible) from most camera angles.
+Fixed by baking a per-instance Y-axis camera-facing rotation directly into
+each instance's matrix in `render()`, and removing the mesh-level
+`billboardMode` entirely. Verified live from multiple camera angles (see
+PLAN-metalstorm-beta-units.md field notes).
 
 ## Open Questions
 
@@ -152,11 +165,19 @@ All explicitly noted per CLAUDE.md contract:
 
 ## File Checklist
 
-- [x] `client/src/core/impostor-renderer.ts` (new)
-- [ ] `client/src/core/entity-renderer.ts` (modify tick(), add determineLodTier integration)
-- [ ] `client/src/core/game-processor.ts` (wire ImpostorRenderer)
-- [ ] `client/src/core/connection.ts` (UnitDefInfo type extension)
-- [ ] `client/src/scenarios/model-viewer/panel.ts` (enable dropdown)
-- [ ] `client/src/scenarios/model-viewer/routines.ts` (wire forceLodTier state)
-- [ ] `rts/Server/LuaDefsSerializer.inl` (emit impostor fields)
-- [ ] `client/src/core/impostor-renderer.test.ts` (new, Vitest)
+- [x] `client/src/core/impostor-renderer.ts` (new; session 2: fixed per-instance billboard)
+- [x] `client/src/core/entity-renderer.ts` (tick() LOD injection + setImpostorRenderer/setForceLodTier)
+- [x] `client/src/core/game-processor.ts` (instantiate + tick + dispose ImpostorRenderer)
+- [x] `client/src/core/gp-context.ts` (impostorRenderer seam ref)
+- [x] `client/src/core/connection.ts` (UnitDefInfo.impostor / .lodThresholds)
+- [x] `client/src/core/defs-fetch.ts` (parse impostor/lod_thresholds from the Lua bake)
+- [x] `client/src/core/test-harness.ts` (setForceLodTier worker RPC)
+- [x] `client/src/scenarios/model-viewer/panel.ts` (force-LOD dropdown wired + enabled)
+- [x] `rts/Server/LuaDefsSerializer.inl` (emit impostor + lod_thresholds from customParams)
+- [x] `client/src/core/impostor-renderer.test.ts` (new, Vitest — 8 tests)
+- [x] `data/games/metalstorm/units/_builder.lua` + `soldiers.lua` + `engineers.lua` (impostorOnly opt-in, scale 1)
+
+Not done (out of scope for B1, tracked separately): the atlas bake pipeline
+(beta-units task 4b — headless Blender render → sprite atlas), per-instance
+heading/animFrame attributes (fx-offload X2), and the 0.3s crossfade at the
+model↔impostor boundary (deferred per §7 of this doc).

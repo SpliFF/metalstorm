@@ -73,6 +73,20 @@ local function mk(spec)
             },
         }
 
+        -- Impostor LOD opt-in (PLAN-metalstorm-beta-units.md §2.1, engine ask
+        -- B1). impostorOnly units (infantry/civilians per the beta roster)
+        -- have no 3D model at all — the billboard impostor IS their normal
+        -- render, so the engine defaults the switch distance to near-zero
+        -- when none is given explicitly.
+        local impostorOnly = o.impostorOnly or spec.impostorOnly
+        local impostorDistance = o.impostorDistance or spec.impostorDistance
+        if impostorOnly or impostorDistance then
+            def.customparams.impostor_distance = tostring(impostorDistance or 1)
+            if impostorOnly then
+                def.customparams.impostor_only = '1'
+            end
+        end
+
         -- Scale 4 = single super-heavy unit: multi-piece, cosmetic turrets
         -- (the "one synced entity, cosmetic sub-parts" pattern).
         if s == 4 then
