@@ -43,6 +43,7 @@ import {
 } from '@babylonjs/core';
 import { TeamColorPlugin } from './team-color-plugin.js';
 import { ImpostorUvPlugin } from './impostor-uv-plugin.js';
+import { DitherFadePlugin } from './dither-fade-plugin.js';
 import {
     type AtlasGrid, DEFAULT_GRID, isDirectional, atlasRows, selectCellIndex,
 } from './impostor-atlas.js';
@@ -132,12 +133,20 @@ export function quantizeHeading(radians: number): number {
  * R-mask sidecar. Shared with the squad member fan-out path
  * (squad-render-backend.ts), which draws per-member sprites for
  * impostor-only infantry defs.
+ *
+ * `withFade` attaches DitherFadePlugin so the caller can crossfade the sprite
+ * in/out across the member LOD boundary via a per-instance `fade` attribute
+ * (squad member fan-out, M5). A caller that opts in MUST upload a `fade`
+ * thin-instance buffer (default 1.0), or every fragment reads fade=0 and
+ * discards. The entity-level impostor path leaves it off (hard Full↔Impostor
+ * swap, no per-instance fade attribute).
  */
 export function createImpostorMaterial(
     name: string,
     atlas: ImpostorAtlas,
     team: number,
     scene: Scene,
+    withFade = false,
 ): PBRMaterial {
     const mat = new PBRMaterial(name, scene);
     mat.metallic = 0.0;
@@ -176,6 +185,7 @@ export function createImpostorMaterial(
         uv.yawBins = grid.yawBins;
         uv.atlasRows = atlasRows(grid);
     }
+    if (withFade) new DitherFadePlugin(mat);
     return mat;
 }
 

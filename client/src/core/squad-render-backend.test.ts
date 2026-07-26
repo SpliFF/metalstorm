@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
     NullEngine, Scene, FreeCamera, Vector3, Color3, Matrix, Mesh, MeshBuilder,
 } from '@babylonjs/core';
-import { SquadRenderBackend, type MemberModel } from './squad-render-backend.js';
+import { SquadRenderBackend, FADE_FRAC, type MemberModel } from './squad-render-backend.js';
 import type { ImpostorAtlas } from './impostor-renderer.js';
 
 // Members of defs with an impostor sprite atlas draw as camera-facing billboard
@@ -142,11 +142,10 @@ describe('SquadRenderBackend impostor sprite members', () => {
         const model = findMesh(scene, 'memberModel_d7');
         expect(model).toBeDefined();
         expect(model!.thinInstanceCount).toBe(1);
-        // The sprite pool exists (created for the initial resting tier) but has
-        // no live instance for this member after it migrated to the model pool.
-        const sprite = findMesh(scene, 'squadSprite_d7_t2');
-        const sm = sprite!.thinInstanceGetWorldMatrices()[0].toArray();
-        expect(Array.from(sm).every((v) => v === 0)).toBe(true);
+        // Pure model tier: full opacity, and no sprite slot held (slots are
+        // allocated lazily — a member that spawns close never touches the
+        // sprite pool).
+        expect(backend.getMemberFades(h)).toEqual({ model: 1 });
     });
 
     it('draws a member beyond impostorDistance as the sprite, not the 3D model', () => {
@@ -196,6 +195,48 @@ describe('SquadRenderBackend impostor sprite members', () => {
         expect(Array.from(spriteLive).some((v) => v !== 0)).toBe(true);
         const mm = model.thinInstanceGetWorldMatrices()[0].toArray();
         expect(Array.from(mm).every((v) => v === 0)).toBe(true);
+    });
+
+    it('crossfades BOTH tiers inside the boundary band (M5 no-pop)', () => {
+        const models = new Map([[7, bodyFactory(7)]]);
+        const { backend, scene } = makeBackend(new Set([7]), { models, impostorDist: 900 });
+        backend.setSquadTeam(1, 0);
+        const h = backend.createMember(1, 0, { defId: 7, variant: 0 });
+        // Camera at (100,50,0); place the member at dist 820 → inside the
+        // [765,900] crossfade band (inner = 900·(1−0.15)).
+        backend.updateMember(h, 100, 50, 820, 0, 0);
+        backend.flush();
+
+        const fades = backend.getMemberFades(h);
+        expect(fades.model).toBeGreaterThan(0);
+        expect(fades.model).toBeLessThan(1);
+        expect(fades.sprite).toBeGreaterThan(0);
+        expect(fades.sprite).toBeLessThan(1);
+        // Complementary — the two opacities sum to 1 across the band.
+        expect(fades.model! + fades.sprite!).toBeCloseTo(1);
+        // Both tiers are actually DRAWN this frame (dual residency = the pop
+        // is dissolved, not a hard cut).
+        expect(findMesh(scene, 'memberModel_d7')!.thinInstanceCount).toBe(1);
+        expect(findMesh(scene, 'squadSprite_d7_t0')!.thinInstanceCount).toBe(1);
+    });
+
+    it('shifts the crossfade weighting toward the model as the member nears', () => {
+        const models = new Map([[7, bodyFactory(7)]]);
+        const { backend } = makeBackend(new Set([7]), { models, impostorDist: 900 });
+        backend.setSquadTeam(1, 0);
+        const h = backend.createMember(1, 0, { defId: 7, variant: 0 });
+        const inner = 900 * (1 - FADE_FRAC);
+
+        backend.updateMember(h, 100, 50, inner + 5, 0, 0);  // near the model edge
+        backend.flush();
+        const near = backend.getMemberFades(h);
+
+        backend.updateMember(h, 100, 50, 900 - 5, 0, 0);    // near the sprite edge
+        backend.flush();
+        const far = backend.getMemberFades(h);
+
+        expect(near.model!).toBeGreaterThan(far.model!);
+        expect(near.sprite!).toBeLessThan(far.sprite!);
     });
 
     it('stays on the sprite tier until the model finishes loading, then migrates', () => {

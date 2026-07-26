@@ -27,6 +27,14 @@
 // (or as its model finishes loading); the pool move reuses the alloc/free slot
 // machinery. Model meshes are BORROWED from EntityRenderer (owned=false) so the
 // backend never disposes them.
+//
+// M5 — no-pop boundary crossfade (PLAN-metalstorm-impostors.md §2.1 "no pop"
+// gate): the MODEL↔SPRITE swap is not a hard cut. Over a distance band just
+// inside impostorDistance a member is drawn in BOTH pools at once — the 3D
+// body fading out (fade 1→0) while the sprite fades in (fade 0→1) — via a
+// screen-door (ordered-dither) opacity that discards fragments per-pixel
+// (DitherFadePlugin). No alpha blending, so the alpha-test / opaque pipelines
+// and depth writes are untouched; the two tiers just interleave per pixel.
 
 import {
     Scene, Mesh, MeshBuilder, StandardMaterial, Color3,
@@ -63,6 +71,11 @@ interface InstancePool {
     highWater: number;        // count uploaded to thinInstanceCount
     free: number[];           // released indices, LIFO
     dirty: boolean;
+    /** Present on MODEL and SPRITE pools (those whose material carries
+     *  DitherFadePlugin): per-instance screen-door fade (1 = opaque). Uploaded
+     *  each flush as the `fade` thin-instance buffer. Default 1 so a slot not
+     *  in the crossfade band renders fully. */
+    fade?: Float32Array;
     /** Present on impostor-sprite pools only. Sprite quads are screen-aligned
      *  (shared camera rotation), so their matrices AND per-member directional
      *  cell selectors are recomposed every flush() from the stored member
@@ -84,23 +97,33 @@ interface InstancePool {
 
 interface MemberSlot { pool: InstancePool; index: number; }
 
-/** Per-member LOD state (members can migrate between the model/sprite/capsule
- *  pools every frame). Wrecks stay on the simpler MemberSlot. */
+/** Per-member LOD state. A member holds AT MOST a model slot and a sprite slot
+ *  simultaneously (both live only inside the crossfade band, M5), OR a single
+ *  capsule slot for atlas-less defs. Wrecks stay on the simpler MemberSlot. */
 interface MemberEntry {
     defId: number;
     team: number;
-    pool: InstancePool;         // current pool
-    index: number;              // slot in the current pool
     /** Impostor sprite atlas (undefined → capsule-only def, never MODEL/SPRITE). */
     atlas?: ImpostorAtlas;
     /** Full→impostor member switch distance (elmos). Undefined → the def has no
      *  3D model tier, so the member never leaves the sprite pool. */
     impostorDist?: number;
+    /** Current occupancy — model/sprite are mutually inclusive (crossfade),
+     *  capsule is exclusive of both. */
+    model?: MemberSlot;
+    sprite?: MemberSlot;
+    capsule?: MemberSlot;
 }
 
 const MEMBER_HEIGHT = 9;      // elmos — proxy capsule height
 const MEMBER_RADIUS = 1.6;
 const WRECK_SIZE = 4;         // elmos — flat debris box
+
+/** Crossfade band width as a fraction of impostorDistance (M5). The member is
+ *  drawn in both tiers across `[D·(1−FADE_FRAC), D]`; below that band it is
+ *  pure model, at/above D pure sprite. A fraction (not an absolute) keeps the
+ *  band proportionate for any def's switch distance. */
+export const FADE_FRAC = 0.15;
 
 export interface SquadHost {
     /** Terrain height sample (client heightmap) for member Y. */
@@ -178,15 +201,9 @@ export class SquadRenderBackend {
         // member; the model itself is resolved live (it may still be loading).
         const impostorDist = (atlas && this.host.getMemberModel)
             ? this.host.getImpostorDistance?.(v.defId) : undefined;
-        const entry: MemberEntry = {
-            defId: v.defId, team, atlas, impostorDist,
-            pool: null!, index: 0,
-        };
-        // Initial pool: sprite for atlas defs (the safe far-tier default until
-        // the first updateMember re-evaluates distance), capsule otherwise.
-        const pool = atlas ? this.getSpritePool(v.defId, team, atlas) : this.getMemberPool(team);
-        entry.pool = pool;
-        entry.index = this.allocSlot(pool);
+        const entry: MemberEntry = { defId: v.defId, team, atlas, impostorDist };
+        // Slots are allocated lazily by the first updateMember once the member's
+        // world position (hence its LOD tier + fade) is known.
         const handle = this.nextHandle++;
         this.memberByHandle.set(handle, entry);
         return handle;
@@ -197,38 +214,84 @@ export class SquadRenderBackend {
         if (!entry) return;
         // Gait 0..1 → a subtle vertical bob so a moving squad reads as walking.
         const bob = Math.sin(gait * Math.PI * 2) * 0.4;
+        const my = y + bob;
 
-        // Per-frame LOD: pick the pool this member belongs in at its current
-        // distance, migrating its slot (free old, alloc new) when the tier
-        // changes. Sprite↔model popping across the boundary is smoothed in M5.
-        const target = this.pickPool(entry, x, y, z);
-        if (target !== entry.pool) {
-            this.freeSlot(entry.pool, entry.index);
-            entry.pool = target;
-            entry.index = this.allocSlot(target);
-        }
-
-        const sprite = entry.pool.sprite;
-        if (sprite) {
-            // Screen-aligned matrices + directional cell are composed in flush()
-            // against the current camera; here we only record the member's pose
-            // (ground position + facing).
-            const base = entry.index * 3;
-            sprite.pos[base] = x;
-            sprite.pos[base + 1] = y + bob;
-            sprite.pos[base + 2] = z;
-            sprite.heading[entry.index] = headingY;
-            sprite.alive[entry.index] = 1;
-            entry.pool.dirty = true;
+        // Atlas-less def → proxy capsule, exclusive of the model/sprite tiers.
+        if (!entry.atlas) {
+            this.freeModel(entry);
+            this.freeSprite(entry);
+            const pool = this.ensureCapsule(entry);
+            this.writeMatrix(pool, entry.capsule!.index,
+                x, my + MEMBER_HEIGHT * 0.5, z, headingY, 1);
             return;
         }
-        if (entry.pool.model) {
-            // 3D body — real facing from headingY, feet on the ground (models
-            // are authored feet-at-origin; yOffset is 0 for Recoil placement).
-            this.writeModelMatrix(entry.pool, entry.index, x, y + bob, z, headingY);
-            return;
+        this.freeCapsule(entry);
+
+        // Decide the model/sprite fades for this member at its current distance.
+        // The model tier needs a declared switch distance AND a loaded body; the
+        // body is only fetched when the member is within D (no preloading for
+        // far members — preserves the M4 lazy-load).
+        let modelFade: number | undefined;
+        let spriteFade: number | undefined;
+        let model: MemberModel | undefined;
+        const D = entry.impostorDist;
+        if (D === undefined || !this.host.getMemberModel) {
+            spriteFade = 1;                              // no 3D tier for this def
+        } else {
+            const cam = this.scene.activeCamera?.position;
+            const inner = D * (1 - FADE_FRAC);
+            if (!cam) {
+                // No camera (tests / headless) → prefer the model if it loads.
+                model = this.host.getMemberModel(entry.defId, entry.team);
+                if (model) modelFade = 1; else spriteFade = 1;
+            } else {
+                const dx = cam.x - x, dy = cam.y - y, dz = cam.z - z;
+                const d2 = dx * dx + dy * dy + dz * dz;
+                if (d2 >= D * D) {
+                    spriteFade = 1;                      // far: pure sprite
+                } else {
+                    // Within D → the body is needed (may still be loading).
+                    model = this.host.getMemberModel(entry.defId, entry.team);
+                    if (!model) {
+                        spriteFade = 1;                  // still loading → sprite
+                    } else if (d2 <= inner * inner) {
+                        modelFade = 1;                   // pure model
+                    } else {
+                        // Crossfade band: both tiers live, dithered complementarily.
+                        const t = (Math.sqrt(d2) - inner) / (D - inner);
+                        modelFade = 1 - t;
+                        spriteFade = t;
+                    }
+                }
+            }
         }
-        this.writeMatrix(entry.pool, entry.index, x, y + MEMBER_HEIGHT * 0.5 + bob, z, headingY, 1);
+
+        // Reconcile model occupancy.
+        if (modelFade !== undefined && model) {
+            const pool = this.ensureModel(entry, model);
+            pool.fade![entry.model!.index] = modelFade;
+            this.writeModelMatrix(pool, entry.model!.index, x, my, z, headingY);
+        } else {
+            this.freeModel(entry);
+        }
+
+        // Reconcile sprite occupancy (screen-aligned matrix + directional cell
+        // are composed in flush() against the camera; here we record the pose).
+        if (spriteFade !== undefined) {
+            const pool = this.ensureSprite(entry);
+            const i = entry.sprite!.index;
+            const s = pool.sprite!;
+            const base = i * 3;
+            s.pos[base] = x;
+            s.pos[base + 1] = my;
+            s.pos[base + 2] = z;
+            s.heading[i] = headingY;
+            s.alive[i] = 1;
+            pool.fade![i] = spriteFade;
+            pool.dirty = true;
+        } else {
+            this.freeSprite(entry);
+        }
     }
 
     destroyMember(handle: number, _death: unknown): void {
@@ -240,27 +303,51 @@ export class SquadRenderBackend {
     releaseMember(handle: number): void {
         const entry = this.memberByHandle.get(handle);
         if (!entry) return;
-        this.freeSlot(entry.pool, entry.index);
+        this.freeModel(entry);
+        this.freeSprite(entry);
+        this.freeCapsule(entry);
         this.memberByHandle.delete(handle);
     }
 
-    /** Choose the pool a member belongs in at its current world position:
-     *  MODEL when a body is available and the member is within impostorDistance,
-     *  else SPRITE for atlas defs, else the proxy CAPSULE. */
-    private pickPool(entry: MemberEntry, x: number, y: number, z: number): InstancePool {
-        if (!entry.atlas) return this.getMemberPool(entry.team);
-        if (entry.impostorDist !== undefined && this.host.getMemberModel) {
-            const cam = this.scene.activeCamera?.position;
-            if (cam) {
-                const dx = cam.x - x, dy = cam.y - y, dz = cam.z - z;
-                const d2 = dx * dx + dy * dy + dz * dz;
-                if (d2 < entry.impostorDist * entry.impostorDist) {
-                    const model = this.host.getMemberModel(entry.defId, entry.team);
-                    if (model) return this.getModelPool(entry.defId, entry.team, model);
-                }
-            }
+    // --- per-member slot reconciliation (M5 dual residency) -----------------
+
+    private ensureModel(entry: MemberEntry, model: MemberModel): InstancePool {
+        const pool = this.getModelPool(entry.defId, entry.team, model);
+        if (!entry.model || entry.model.pool !== pool) {
+            if (entry.model) this.freeSlot(entry.model.pool, entry.model.index);
+            entry.model = { pool, index: this.allocSlot(pool) };
         }
-        return this.getSpritePool(entry.defId, entry.team, entry.atlas);
+        return pool;
+    }
+
+    private ensureSprite(entry: MemberEntry): InstancePool {
+        const pool = this.getSpritePool(entry.defId, entry.team, entry.atlas!);
+        if (!entry.sprite || entry.sprite.pool !== pool) {
+            if (entry.sprite) this.freeSlot(entry.sprite.pool, entry.sprite.index);
+            entry.sprite = { pool, index: this.allocSlot(pool) };
+        }
+        return pool;
+    }
+
+    private ensureCapsule(entry: MemberEntry): InstancePool {
+        const pool = this.getMemberPool(entry.team);
+        if (!entry.capsule || entry.capsule.pool !== pool) {
+            if (entry.capsule) this.freeSlot(entry.capsule.pool, entry.capsule.index);
+            entry.capsule = { pool, index: this.allocSlot(pool) };
+        }
+        return pool;
+    }
+
+    private freeModel(entry: MemberEntry): void {
+        if (entry.model) { this.freeSlot(entry.model.pool, entry.model.index); entry.model = undefined; }
+    }
+
+    private freeSprite(entry: MemberEntry): void {
+        if (entry.sprite) { this.freeSlot(entry.sprite.pool, entry.sprite.index); entry.sprite = undefined; }
+    }
+
+    private freeCapsule(entry: MemberEntry): void {
+        if (entry.capsule) { this.freeSlot(entry.capsule.pool, entry.capsule.index); entry.capsule = undefined; }
     }
 
     spawnWreck(x: number, y: number, z: number, headingY: number, _v: unknown): number {
@@ -314,6 +401,19 @@ export class SquadRenderBackend {
             if (p.normal.x * x + p.normal.y * y + p.normal.z * z + p.d < 0) return false;
         }
         return true;
+    }
+
+    /** Test/debug accessor: a member's current LOD occupancy + per-tier fade
+     *  (M5 crossfade). Both `model` and `sprite` present with fades in (0,1)
+     *  means the member is mid-crossfade across the boundary band. */
+    getMemberFades(handle: number): { model?: number; sprite?: number; capsule?: boolean } {
+        const entry = this.memberByHandle.get(handle);
+        if (!entry) return {};
+        return {
+            model: entry.model ? entry.model.pool.fade![entry.model.index] : undefined,
+            sprite: entry.sprite ? entry.sprite.pool.fade![entry.sprite.index] : undefined,
+            capsule: entry.capsule ? true : undefined,
+        };
     }
 
     // --- per-frame flush ----------------------------------------------------
@@ -386,12 +486,15 @@ export class SquadRenderBackend {
         const mesh = MeshBuilder.CreatePlane(`squadSprite_d${defId}_t${team}`, {
             width: atlas.width, height: atlas.height, sideOrientation: Mesh.DOUBLESIDE,
         }, this.scene);
+        // withFade: the sprite material carries DitherFadePlugin for the M5
+        // model↔sprite crossfade — so this pool MUST upload a `fade` buffer.
         mesh.material = createImpostorMaterial(
-            `squadSpriteMat_d${defId}_t${team}`, atlas, team, this.scene);
+            `squadSpriteMat_d${defId}_t${team}`, atlas, team, this.scene, true);
         mesh.isPickable = false;
         mesh.alwaysSelectAsActiveMesh = true;
         mesh.doNotSyncBoundingInfo = true;
         pool = this.newPool(mesh);
+        pool.fade = new Float32Array(pool.capacity).fill(1);
         pool.sprite = {
             halfH: atlas.height * 0.5,
             grid: gridOf(atlas),
@@ -457,6 +560,9 @@ export class SquadRenderBackend {
         if (pool) return pool;
         pool = this.newPool(model.mesh, 64, false);
         pool.model = { restWorld: model.restWorld, yOffset: model.yOffset };
+        // The member material carries DitherFadePlugin (M5 crossfade) → this
+        // pool uploads a `fade` buffer (default 1 = fully opaque body).
+        pool.fade = new Float32Array(pool.capacity).fill(1);
         this.modelPools.set(key, pool);
         return pool;
     }
@@ -486,6 +592,7 @@ export class SquadRenderBackend {
         const base = index * 16;
         pool.matrices.fill(0, base, base + 16);
         if (pool.sprite) pool.sprite.alive[index] = 0;
+        if (pool.fade) pool.fade[index] = 1;   // reset for the next occupant
         pool.free.push(index);
         pool.dirty = true;
     }
@@ -495,6 +602,11 @@ export class SquadRenderBackend {
         const next = new Float32Array(cap * 16);
         next.set(pool.matrices);
         pool.matrices = next;
+        if (pool.fade) {
+            const fade = new Float32Array(cap).fill(1);
+            fade.set(pool.fade);
+            pool.fade = fade;
+        }
         pool.capacity = cap;
         if (pool.sprite) {
             const pos = new Float32Array(cap * 3);
@@ -552,6 +664,11 @@ export class SquadRenderBackend {
         // vertex shader). Only sprite pools carry it; capsule/wreck pools don't.
         if (pool.sprite) {
             pool.mesh.thinInstanceSetBuffer('cellIndex', pool.sprite.cells, 1, false);
+        }
+        // Per-instance screen-door fade (DitherFadePlugin reads it) — model and
+        // sprite pools only; capsule/wreck materials don't carry the plugin.
+        if (pool.fade) {
+            pool.mesh.thinInstanceSetBuffer('fade', pool.fade, 1, false);
         }
         pool.mesh.thinInstanceCount = pool.highWater;
         pool.mesh.isVisible = pool.highWater > 0;

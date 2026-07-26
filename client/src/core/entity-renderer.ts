@@ -56,6 +56,7 @@ import {
 } from './zk-model-material.js';
 import { matchAimSlots, type UnitAimPieces, type AimPiece } from './turret-aim-controller.js';
 import { LodTier, type ImpostorRenderer } from './impostor-renderer.js';
+import { DitherFadePlugin } from './dither-fade-plugin.js';
 
 /** Per-material texture URIs, keyed by material name in the .gltf.
  *  Single-material models (all S3O/DAE content) use just the `materials[0]`
@@ -660,6 +661,14 @@ export class EntityRenderer {
     // was needless GPU + memory pressure (and a leak: mesh.dispose() doesn't
     // free the material). Disposed in the model-template cleanup.
     private unitMaterials = new Map<string, Material>();
+
+    // Dedicated member-model materials (M5), keyed the same way as unitMaterials
+    // but SEPARATE so the DitherFadePlugin (screen-door LOD crossfade, reads a
+    // per-instance `fade` attribute) never rides the shared full-unit material —
+    // full units set no `fade` attribute, so a shared plugin would read fade=0
+    // and discard them entirely. Same texture/team pipeline as the unit
+    // material otherwise, so a member reads identically to a full unit.
+    private memberMaterials = new Map<string, Material>();
 
     // --- Per-entity piece pose overrides ---
     // Populated by applyPieceState() from server-streamed piece transforms.
@@ -1508,7 +1517,9 @@ export class EntityRenderer {
      * Materials are shared across pieces resolving to the same texture set
      * (keyed by def/team/materialKey) — one PBRMaterial instead of one per piece.
      */
-    private resolvePieceMaterial(defId: number, team: number, piece: PieceInfo): Material {
+    private resolvePieceMaterial(
+        defId: number, team: number, piece: PieceInfo, forMember = false,
+    ): Material {
         const tmpl = this.modelTemplates.get(defId);
         const teamColor = TEAM_COLORS[team % TEAM_COLORS.length];
         const customParams = this.defInfos.get(defId)?.customParams;
@@ -1517,8 +1528,11 @@ export class EntityRenderer {
             ? tmpl?.materialTextures.get(materialKey) : undefined)
             ?? tmpl?.textures;
 
+        // Member materials are cached separately (they carry DitherFadePlugin,
+        // which must never leak onto the shared full-unit material).
+        const cache = forMember ? this.memberMaterials : this.unitMaterials;
         const matCacheKey = `${defId}:${team}:${materialKey ?? (pieceTextures ? '_default' : '_fallback')}`;
-        let mat = this.unitMaterials.get(matCacheKey);
+        let mat = cache.get(matCacheKey);
         if (!mat) {
             const matName = `unit_${defId}_t${team}_${materialKey ?? 'mat'}`;
             if (pieceTextures) {
@@ -1538,7 +1552,11 @@ export class EntityRenderer {
                     teamColor, this.scene, customParams,
                 );
             }
-            this.unitMaterials.set(matCacheKey, mat);
+            // Member material: attach the screen-door LOD crossfade plugin. A
+            // no-op at fade=1 (the common case); the squad backend drives fade
+            // 1→0 only inside the model↔impostor transition band.
+            if (forMember) new DitherFadePlugin(mat);
+            cache.set(matCacheKey, mat);
         }
         return mat;
     }
@@ -1577,7 +1595,7 @@ export class EntityRenderer {
         if (!mesh) {
             mesh = piece.mesh.clone(`member_${defId}_t${team}_${piece.name}`);
             mesh.makeGeometryUnique();
-            mesh.material = this.resolvePieceMaterial(defId, team, piece);
+            mesh.material = this.resolvePieceMaterial(defId, team, piece, true);
             mesh.isPickable = false;
             mesh.isVisible = false;                        // shown once instances populate
             mesh.thinInstanceEnablePicking = false;
@@ -2782,6 +2800,8 @@ export class EntityRenderer {
         // it dies with the scene via WHITE_TEX_CACHE's WeakMap.)
         for (const mat of this.unitMaterials.values()) mat.dispose();
         this.unitMaterials.clear();
+        for (const mat of this.memberMaterials.values()) mat.dispose();
+        this.memberMaterials.clear();
         for (const tmpl of this.modelTemplates.values()) {
             if (tmpl) {
                 for (const p of tmpl.pieces) {
