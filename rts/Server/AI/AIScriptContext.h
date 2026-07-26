@@ -35,10 +35,16 @@ public:
     /// cache dir (`data/games/<id>/cache/defs/<key>`, holds power.json). Empty
     /// disables the corresponding accessor (it returns nil — an unconfigured
     /// AI is blind, which the Picture builder treats as "unknown", not error).
+    ///
+    /// `playerId` is the AI's virtual playerID (PLAN-metalstorm-ai.md §1, AI3):
+    /// each AI slot is registered as a real CPlayer, so the strategos charge
+    /// identity is keyed by this playerID (authority_player_<id>), not the team.
+    /// -1 disables player attribution (single-buffer / test AIs).
     AIScriptContext(const std::string& name, int teamId, int allyTeamId,
                     const std::string& pluginDir = "",
                     const std::string& mapDataDir = "",
-                    const std::string& defExportDir = "");
+                    const std::string& defExportDir = "",
+                    int playerId = -1);
     ~AIScriptContext() override;
 
     // --- IScriptContext ---
@@ -75,6 +81,9 @@ public:
     /// when no worker is processing a snapshot (tests, or between ticks).
     bool TryGetGlobalNumber(const char* name, double& out) const;
 
+    /// Get the AI's virtual playerID (AI3), or -1 if unattributed.
+    int GetPlayerId() const { return playerId; }
+
 private:
     /// Register the AI API functions into the Lua state.
     void RegisterAPI();
@@ -86,6 +95,7 @@ private:
     static int l_getFrame(lua_State* L);
     static int l_getMapSize(lua_State* L);
     static int l_getTeamId(lua_State* L);      // AI-team down payment
+    static int l_getPlayerId(lua_State* L);    // AI3 virtual playerID
     static int l_getRulesParam(lua_State* L);  // AI1
     static int l_require(lua_State* L);         // AI0-loader
     static int l_getMapData(lua_State* L);      // AI4: map data dir read
@@ -115,6 +125,7 @@ private:
     std::string name;
     int teamId;
     int allyTeamId;
+    int playerId;             // AI3: the AI's virtual playerID (-1 = unattributed)
     std::string pluginDir;    // AI0-loader: module resolution root
     std::string mapDataDir;   // AI4: getMapData sandbox root (data/maps/<id>)
     std::string defExportDir; // AI4: getDefExport sandbox root (def cache dir)

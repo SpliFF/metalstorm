@@ -31,6 +31,11 @@ enum class AICommandKind : uint8_t {
 struct AICommand {
     AICommandKind kind = AICommandKind::UnitCommand;
     int teamId = 0;
+    // The AI's virtual playerID (PLAN-metalstorm-ai.md §1, AI3). Every AI slot
+    // is a real CPlayer, so its commands attribute to its own playerID — this
+    // is the charge identity the authority gate debits (authority_player_<id>),
+    // never the team leader. -1 means "no attributed player" (pre-AI3 / tests).
+    int playerId = -1;
 
     // --- UnitCommand ---
     uint32_t unitId = 0;

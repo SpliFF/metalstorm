@@ -879,6 +879,42 @@ int main(int argc, char* argv[])
     // of the GameServerContext that binds them; deferred-GameStart logic now
     // lives in GameStartCoordinator::CheckAndFireGameStart.)
 
+    // --- AI virtual players (PLAN-metalstorm-ai.md §1, AI3) ---
+    //
+    // Each AI slot becomes a real CPlayer with its own playerID, registered
+    // NOW — before GameStart fires — so:
+    //   (a) FireGameStart's leader pass makes the AI its OWN team's leader (its
+    //       virtual player is the only active player on that team), instead of
+    //       the old SetLeader(hostHuman) fallback; and
+    //   (b) game_authority.lua's GameStart loop over Spring.GetPlayerList()
+    //       runs its PlayerAdded flow for the AI, creating authority_player_<id>
+    //       — the exact same pool-creation path a human takes. The AI's charge
+    //       identity (its authority pool) is thus keyed by this playerID.
+    // Registering here (ahead of both the dev-mode and roster-mode GameStart)
+    // keeps the AI in GetPlayerList() at GameStart time in either mode.
+    //
+    // Deliberate departure from stock Spring, where a SkirmishAI is NOT a
+    // player (CLAUDE.md "never deviate silently"): Metalstorm's design makes
+    // the AI a virtual player (§1) so it pays authority through the same gate.
+    // isAI marks it so "lowest active player = host human" logic skips it
+    // (Simulation.cpp FireGameStart). The AI runtime setup below reads back
+    // rq.playerNum so strategos keys its spend by the same id.
+    for (auto& rq : requestedAIs) {
+        const int pNum = nextPlayerNum++;
+        CPlayer p;
+        p.name      = "AI:" + rq.id + "@t" + std::to_string(rq.team);
+        p.team      = rq.team;
+        p.active    = true;
+        p.spectator = false;
+        p.isAI      = true;
+        p.playerNum = pNum;
+        playerHandler.AddPlayer(p);
+        rq.playerNum = pNum;
+        SLOG(SPRING_LOG_NOTICE,
+            "registered AI virtual player #%d '%s' on team %d",
+            pNum, p.name.c_str(), rq.team);
+    }
+
     // Dev-mode: no roster means no players to wait for
     if (rosterPlayersNeeded == 0) {
         SLOG(SPRING_LOG_NOTICE, "no player roster (dev mode), firing GameStart immediately");
@@ -950,11 +986,14 @@ int main(int argc, char* argv[])
             // the game def cache dir (holds power.json). Empty when unset —
             // the accessor then returns nil and the Picture treats it as
             // "unknown", never an error.
+            //
+            // rq.playerNum was allocated by the AI virtual-player block above
+            // (AI3): strategos keys its authority charge identity by this id.
             const std::string aiDefExportDir = defsCacheKey.empty()
                 ? std::string()
                 : DefsCache::CacheDir(gameId, defsCacheKey);
             if (aiPool.AddAI(match->id, rq.team, allyTeam, code, match->folderPath,
-                             mapPath, aiDefExportDir)) {
+                             mapPath, aiDefExportDir, rq.playerNum)) {
                 SLOG(SPRING_LOG_NOTICE,
                     "loaded AI '%s' (%s) on team %d",
                     match->displayName.c_str(), match->id.c_str(), rq.team);

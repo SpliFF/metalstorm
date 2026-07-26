@@ -96,6 +96,68 @@ TEST_CASE("AI VM: require loader + getRulesParam + getTeamId end to end") {
     fs::remove_all(dir);
 }
 
+TEST_CASE("AI VM: virtual playerID plumbs through (AI3 charge identity)") {
+    // AI3 (PLAN-metalstorm-ai.md §1): each AI slot is a virtual player, so the
+    // VM knows its playerID via AI.getPlayerId() and every command it issues is
+    // attributed to that id (AICommand::playerId) — the authority charge
+    // identity. Prove both: the Lua-visible getter and the drained command tag.
+    const fs::path dir = fs::temp_directory_path() / "strategos_ai_pid_plugin";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    {
+        std::ofstream m(dir / "main.lua");
+        m << "function onUpdate(frame)\n"
+             "  AI.issueCommand(1, 42, AI.getPlayerId())\n"
+             "end\n";
+    }
+    const std::string code = ReadFile(dir / "main.lua");
+
+    AIScriptContext ctx("ai_pid", /*teamId*/ 2, /*allyTeamId*/ 2, dir.string(),
+                        /*mapDataDir*/ "", /*defExportDir*/ "", /*playerId*/ 7);
+    REQUIRE(ctx.Init(code, "main.lua"));
+    CHECK(ctx.GetPlayerId() == 7);
+
+    AIStateSnapshot snap;
+    snap.frame = 1;
+    snap.teamId = 2;
+    aiCommandQueue.Drain();
+    ctx.PushSnapshot(std::move(snap));
+    ctx.ProcessSnapshot();
+
+    auto cmds = aiCommandQueue.Drain();
+    REQUIRE(cmds.size() == 1);
+    CHECK(cmds[0].teamId == 2);
+    CHECK(cmds[0].playerId == 7);                       // AICommand carries the AI's id
+    REQUIRE(cmds[0].numParams == 1);
+    CHECK(cmds[0].params[0] == doctest::Approx(7));     // AI.getPlayerId() in Lua
+
+    fs::remove_all(dir);
+}
+
+TEST_CASE("AI VM: unattributed AI (no virtual player) reports playerId -1") {
+    const fs::path dir = fs::temp_directory_path() / "strategos_ai_nopid_plugin";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    {
+        std::ofstream m(dir / "main.lua");
+        m << "function onUpdate(frame) AI.issueCommand(1, 42, AI.getPlayerId()) end\n";
+    }
+    const std::string code = ReadFile(dir / "main.lua");
+    // Default ctor playerId = -1 (single-buffer / test AI, no virtual player).
+    AIScriptContext ctx("ai_nopid", 0, 0, dir.string());
+    REQUIRE(ctx.Init(code, "main.lua"));
+    CHECK(ctx.GetPlayerId() == -1);
+
+    AIStateSnapshot snap; snap.teamId = 0;
+    aiCommandQueue.Drain();
+    ctx.PushSnapshot(std::move(snap));
+    ctx.ProcessSnapshot();
+    auto cmds = aiCommandQueue.Drain();
+    REQUIRE(cmds.size() == 1);
+    CHECK(cmds[0].playerId == -1);
+    fs::remove_all(dir);
+}
+
 TEST_CASE("AI VM: require rejects path traversal") {
     const fs::path dir = WriteSyntheticPlugin();
     // A module name escaping the plugin folder must fail to load, which makes

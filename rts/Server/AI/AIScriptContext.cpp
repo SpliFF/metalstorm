@@ -147,9 +147,10 @@ int ReadSandboxedJson(lua_State* L, const std::string& root, const char* api) {
 AIScriptContext::AIScriptContext(const std::string& name, int teamId, int allyTeamId,
                                  const std::string& pluginDir,
                                  const std::string& mapDataDir,
-                                 const std::string& defExportDir)
-    : name(name), teamId(teamId), allyTeamId(allyTeamId), pluginDir(pluginDir),
-      mapDataDir(mapDataDir), defExportDir(defExportDir)
+                                 const std::string& defExportDir,
+                                 int playerId)
+    : name(name), teamId(teamId), allyTeamId(allyTeamId), playerId(playerId),
+      pluginDir(pluginDir), mapDataDir(mapDataDir), defExportDir(defExportDir)
 {
     permissions.synced = false; // AI doesn't directly modify sim state
     permissions.fullRead = false;
@@ -330,6 +331,9 @@ void AIScriptContext::RegisterAPI() {
     lua_pushcfunction(L, l_getTeamId);
     lua_setfield(L, -2, "getTeamId");
 
+    lua_pushcfunction(L, l_getPlayerId);
+    lua_setfield(L, -2, "getPlayerId");
+
     lua_pushcfunction(L, l_getRulesParam);
     lua_setfield(L, -2, "getRulesParam");
 
@@ -413,6 +417,16 @@ int AIScriptContext::l_require(lua_State* L) {
 int AIScriptContext::l_getTeamId(lua_State* L) {
     auto* ctx = GetAIContext(L);
     lua_pushinteger(L, ctx->teamId);
+    return 1;
+}
+
+// AI3: the AI's virtual playerID. Each AI slot is a real CPlayer (server_main
+// registers it before GameStart), so strategos can key its charge identity by
+// this id — the authority gate debits authority_player_<id>, never the team
+// leader. Returns -1 if this VM was created without a virtual player (tests).
+int AIScriptContext::l_getPlayerId(lua_State* L) {
+    auto* ctx = GetAIContext(L);
+    lua_pushinteger(L, ctx->playerId);
     return 1;
 }
 
@@ -502,6 +516,7 @@ int AIScriptContext::l_createGroup(lua_State* L) {
     AICommand cmd;
     cmd.kind    = AICommandKind::CreateGroup;
     cmd.teamId  = ctx->teamId;
+    cmd.playerId = ctx->playerId;   // AI3: attribute to the AI's virtual player (charge identity)
     cmd.echelon = static_cast<uint8_t>(luaL_optinteger(L, 2, 1)); // default Platoon
     const lua_Integer n = luaL_len(L, 1);
     cmd.squadIds.reserve(static_cast<size_t>(n > 0 ? n : 0));
@@ -530,6 +545,7 @@ int AIScriptContext::l_issueDirective(lua_State* L) {
     AICommand cmd;
     cmd.kind   = AICommandKind::IssueDirective;
     cmd.teamId = ctx->teamId;
+    cmd.playerId = ctx->playerId;   // AI3: directive charges authority_player_<id>, not the team
     ReadGroupHandle(L, 1, cmd);
 
     cmd.directiveType     = static_cast<uint8_t>(TableNumber(L, 2, "type", 0));
@@ -570,6 +586,7 @@ int AIScriptContext::l_setPosture(lua_State* L) {
     AICommand cmd;
     cmd.kind   = AICommandKind::SetPosture;
     cmd.teamId = ctx->teamId;
+    cmd.playerId = ctx->playerId;   // AI3: posture change attributed to the AI's virtual player
     ReadGroupHandle(L, 1, cmd);
     size_t len = 0;
     const char* s = luaL_checklstring(L, 2, &len);
@@ -631,6 +648,7 @@ int AIScriptContext::l_issueCommand(lua_State* L) {
 
     AICommand cmd;
     cmd.teamId = ctx->teamId;
+    cmd.playerId = ctx->playerId;   // AI3: attribute to the AI's virtual player
     cmd.unitId = static_cast<uint32_t>(luaL_checkinteger(L, 1));
     cmd.commandId = static_cast<int>(luaL_checkinteger(L, 2));
 

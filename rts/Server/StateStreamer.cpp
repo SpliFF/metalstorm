@@ -560,8 +560,12 @@ void StateStreamer::TickAI(int) {
     if (aiCmds.empty()) return;
 
     const uint32_t frame = static_cast<uint32_t>(sim.GetFrameNum());
-    // AI has no distinct player identity until AI3 (see header comment).
-    constexpr int kAIPlayerID = -1;
+    // AI3: each AI slot is a real virtual player (its own playerID + pool), so
+    // the charge callin is fed the command's own attributed playerId, not a
+    // hardcoded -1. That routes the debit to authority_player_<id> (its own
+    // pool) and lets the co-commander's own-pool-only flag be honoured — the
+    // AI2+AI3 composition. A command with playerId == -1 (a test / unattributed
+    // AI) still falls to the interim team-pool free-pass in the charge gadget.
 
     // createGroup→issueDirective correlation, resolved within this batch:
     // token → the real engine group id the create produced (0 if it failed).
@@ -634,7 +638,7 @@ void StateStreamer::TickAI(int) {
                 // (insufficient authority) drops the directive, exactly as the
                 // wire handler replies 402 and does not create it.
                 if (!eventHandler.AllowDirectiveCreate(
-                        cmd.teamId, kAIPlayerID, groupId,
+                        cmd.teamId, cmd.playerId, groupId,
                         cmd.directiveType, cmd.requestedStrength))
                     continue;
 
