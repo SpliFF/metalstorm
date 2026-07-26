@@ -63,13 +63,33 @@ assets-manifest gate requires them before any model merges).
 `out/*.png` are the texture sources — re-encode with `node encode.mjs`
 after editing `paint.py`.
 
-## Impostor sprites (beta-units task 4b)
+## Infantry: 3D bodies + baked directional impostors
 
-`gen_impostor_sprites.py` paints the billboard sprite atlases for the
-impostor-only infantry/civilian defs (no 3D model at all — §2.1
-impostor-first): `ms_soldiers_s1`, `ms_engineers_s1`, `ms_civilians`,
-`ms_militia`. Single-frame 256² sprites (walk/idle flipbook rows wait on
-fx-offload X2), fable palette, flat 3-tone facets + outline, plus R8 team
-masks for the team-coloured defs. `node encode_sprites.mjs` encodes them
-(diffuse sRGB + alpha cutout, mask linear); shipped files are
-`data/games/metalstorm/models/<stem>_impostor{,_team}.ktx2`.
+The infantry family (`ms_soldiers_s1`, `ms_engineers_s1`, `ms_civilians`,
+`ms_militia`) ships a close-range 3D body AND a far-range directional
+impostor baked FROM that body — 3D model is the source of truth, so the two
+can never diverge (PLAN-metalstorm-impostors).
+
+- **Bodies** — `python3 gen_infantry.py` builds four low-poly humanoids
+  (one shared body plan, `infantry_layout.py` dims + flat-swatch atlas,
+  `paint_infantry.py` maps) then `node encode_infantry.mjs` for the shared
+  `fable_infantry_*.ktx2` PBR set. Preview turntables:
+  `node preview/shoot_infantry.mjs` (needs a static server on :8901 rooted
+  here, e.g. `python3 -m http.server 8901`).
+- **Impostors** — `python3 bake_impostors.py` renders each body into an
+  8-yaw × 3-pitch atlas (`impostor_convention.py` is the ONE shared layout
+  definition — the runtime mirrors it) via a pure-Python orthographic
+  software rasteriser over the meshlib geometry, sampling the same painted
+  atlas the body uses. Writes `out/<stem>_impostor.png` (RGBA, 2048×768),
+  `out/<stem>_impostor_team.png` (R8 mask, team defs only) and
+  `out/<stem>_impostor.json` (atlas metadata for the def serializer), plus
+  golden contact-sheet/yaw QA under `preview/impostor_strips/`. Then
+  `node encode_sprites.mjs` → `data/games/metalstorm/models/<stem>_impostor{,_team}.ktx2`.
+  `frames=1` today (walk/idle flipbook rows wait on fx-offload X2); the row
+  layout already reserves them as `frame*pitch_bins + pitch`.
+
+> The impostor lighting is a stable per-view camera-relative key so every
+> column reads its facets identically (legibility from any angle is the
+> whole point of a directional impostor); world-fixed sun on impostors is
+> deferred fidelity work — the LOD swap happens at ≲20 px where shading
+> direction is imperceptible.

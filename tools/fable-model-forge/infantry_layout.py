@@ -60,8 +60,15 @@ def _cell(idx):
 
 
 def SW(dif, ao=232, rough=170, metal=28, team=False, emis=None):
-    """Allocate a flat swatch cell; return a Zone that maps any face into
-    it. The cell is solid so the world-window/axes are irrelevant."""
+    """Allocate a flat swatch cell; return a Zone mapping EVERY face to the
+    cell's centre. The cell is a solid colour, so the exact UV inside it is
+    irrelevant — but it must land INSIDE the cell. A finite world window
+    (the old (-1,1)) does not: infantry are ~1.8 m tall, so any face above
+    world-y=1 (torso, head, helmet, hi-vis vest) mapped OUTSIDE its cell into
+    a neighbour's colour — the model read near-monochrome and team panels
+    vanished. A huge symmetric window collapses fu,fv→0.5 for all real
+    coordinates, pinning every face to the cell centre (also the safest spot
+    for mip minification)."""
     idx = _next[0]
     _next[0] += 1
     if idx >= 64:
@@ -69,7 +76,8 @@ def SW(dif, ao=232, rough=170, metal=28, team=False, emis=None):
     rect = _cell(idx)
     SWATCHES.append(dict(rect=rect, dif=dif, ao=ao, rough=rough,
                          metal=metal, team=team, emis=emis))
-    return Zone(rect, ('x', 'y'), ((-1.0, 1.0), (1.0, -1.0)))
+    BIG = 1.0e4
+    return Zone(rect, ('x', 'y'), ((-BIG, BIG), (BIG, -BIG)))
 
 
 # shared / mechanical
