@@ -57,6 +57,21 @@ GG.AIGuidance = GG.AIGuidance or {}
 local VETO_TTL_FRAMES   = 9000   -- 5 min (§6.3 "blacklists that goal for 5 min")
 local CHANGE_RING_SIZE  = 8      -- mirrors authority/parley event rings
 
+-- §5.1 "a group a human directed within the last 3 min is untouchable — tracked
+-- from directive events". The touch lock is a TIMED asset lock: a human issuing
+-- a directive to a group locks it against the co-commander for this window, then
+-- it frees naturally (swept in GameFrame). This is the formal engine expression
+-- of the 3-min rule the plan describes; a widget's explicit lock
+-- (guidance.lock) is the permanent counterpart, and both publish through the
+-- SAME lock_keys the AI reads (picture.lua assetLocks).
+local TOUCH_LOCK_TTL_FRAMES = 5400   -- 3 min @ 30 Hz (= INTEL_DECAY_FRAMES)
+
+-- Intent report (§6.3 "what my AI is doing"): a short, rolling window of the
+-- AI's most-recent charged directives, published for ai-command-panel.js. Each
+-- entry expires so the panel reflects CURRENT intent, not a growing history.
+local INTENT_MAX        = 8      -- ai-command-panel renders the most recent N
+local INTENT_TTL_FRAMES = 600    -- 20 s ≈ 4 strategic ticks — stale intent clears
+
 local STANCES = { defensive = true, balanced = true, aggressive = true }
 local PAINTS  = { priority = true, normal = true, forbidden = true }
 local ROES    = { free = true, observed_only = true, deny_area = true }
@@ -74,7 +89,9 @@ local function storeFor(teamID)
     local s = stores[teamID]
     if not s then
         s = { stance = 'balanced', regionPaint = {}, assetLocks = {},
-              delegated = {}, funding = {}, roe = 'free', veto = {} }
+              delegated = {}, funding = {}, roe = 'free', veto = {},
+              touchLocks = {},  -- groupId -> expiry frame (§5.1 3-min human-touched)
+              intent = {} }     -- rolling list of recent AI directives (§6.3), newest first
         stores[teamID] = s
     end
     return s
@@ -94,11 +111,19 @@ local function publish(teamID)
     Spring.SetTeamRulesParam(teamID, p .. 'funding_rateCap', s.funding.rateCap or -1)
 
     local paintKeys, lockKeys, delegKeys, vetoKeys = {}, {}, {}, {}
+    local seenLock = {}
     for key, value in pairs(s.regionPaint) do
         paintKeys[#paintKeys + 1] = key
         Spring.SetTeamRulesParam(teamID, p .. 'paint_' .. key, value)
     end
-    for groupId in pairs(s.assetLocks) do lockKeys[#lockKeys + 1] = tostring(groupId) end
+    -- Explicit (permanent) + touch (timed 3-min) locks both feed lock_keys —
+    -- the AI reads one merged set; dedup so a group with both isn't listed twice.
+    for groupId in pairs(s.assetLocks) do
+        if not seenLock[groupId] then seenLock[groupId] = true; lockKeys[#lockKeys + 1] = tostring(groupId) end
+    end
+    for groupId in pairs(s.touchLocks) do
+        if not seenLock[groupId] then seenLock[groupId] = true; lockKeys[#lockKeys + 1] = tostring(groupId) end
+    end
     for objId in pairs(s.delegated) do delegKeys[#delegKeys + 1] = tostring(objId) end
     for goalId in pairs(s.veto) do vetoKeys[#vetoKeys + 1] = tostring(goalId) end
 
@@ -106,6 +131,23 @@ local function publish(teamID)
     Spring.SetTeamRulesParam(teamID, p .. 'lock_keys', table.concat(lockKeys, ','))
     Spring.SetTeamRulesParam(teamID, p .. 'delegated_keys', table.concat(delegKeys, ','))
     Spring.SetTeamRulesParam(teamID, p .. 'veto_keys', table.concat(vetoKeys, ','))
+end
+
+-- Intent report publish (§6.3). ai-command-panel.js reads
+-- guidance_<team>_intent_count + intent_<i>_{goal,group,spend}. Team-PRIVATE,
+-- same losAccess as the rest of the guidance store (default → owning team only).
+local function publishIntent(teamID)
+    local s = storeFor(teamID)
+    local p = 'guidance_' .. teamID .. '_'
+    local n = math.min(#s.intent, INTENT_MAX)
+    Spring.SetTeamRulesParam(teamID, p .. 'intent_count', n)
+    for i = 1, n do
+        local e = s.intent[i]
+        local ip = p .. 'intent_' .. (i - 1) .. '_'
+        Spring.SetTeamRulesParam(teamID, ip .. 'goal', e.goal)
+        Spring.SetTeamRulesParam(teamID, ip .. 'group', e.group)
+        Spring.SetTeamRulesParam(teamID, ip .. 'spend', e.spend)
+    end
 end
 
 --- Change feed (§6.2 "a change feed (who set what) so conflicting humans
@@ -144,6 +186,46 @@ function GG.AIGuidance.Get(teamID)
         roe = s.roe,
         veto = s.veto,
     }
+end
+
+-- Directive type (engine OrgGroups.h enum, mirrored in ai/strategos/
+-- actuators.lua) → a human-legible label for the intent report. Keyed by the
+-- numeric directiveType the charge callin carries.
+local DIRECTIVE_LABEL = {
+    [0] = 'Defend area', [1] = 'Patrol', [2] = 'Rally', [3] = 'Fall back',
+    [4] = 'Reinforce', [5] = 'Screen', [6] = 'Supply', [7] = 'Build base',
+    [8] = 'Move', [9] = 'Assault', [10] = 'Defend', [11] = 'Overwatch',
+    [12] = 'Withdraw', [13] = 'Escort', [14] = 'Hold the front',
+}
+
+--- Record one AI directive as intent (§6.3), so ai-command-panel.js shows what
+--- the co-commander is doing + its authority spend (spend is socially visible,
+--- §5.1). Called from the authority charge path when an AI virtual player's
+--- directive is charged — NOT by the AI VM (separate Lua state, can't write
+--- synced). `group` 0 = an area-scoped directive (no fixed roster). Newest-first
+--- rolling window; entries expire (GameFrame sweep) so the panel stays current.
+function GG.AIGuidance.RecordIntent(teamID, directiveType, group, spend)
+    if not teamID then return end
+    local s = storeFor(teamID)
+    table.insert(s.intent, 1, {
+        goal  = DIRECTIVE_LABEL[directiveType] or ('Directive ' .. tostring(directiveType)),
+        group = group or 0,
+        spend = math.floor(spend or 0),
+        frame = Spring.GetGameFrame(),
+    })
+    while #s.intent > INTENT_MAX do s.intent[#s.intent] = nil end
+    publishIntent(teamID)
+end
+
+--- Timed "human-touched" asset lock (§5.1). A human directing a group makes it
+--- untouchable by the co-commander for TOUCH_LOCK_TTL_FRAMES (3 min). Called
+--- from the authority charge path when a HUMAN's directive targets a real group.
+--- Re-touching extends the window (the human is actively steering it).
+function GG.AIGuidance.TouchGroup(teamID, groupID, frame)
+    if not teamID or not groupID or groupID == 0 then return end
+    local s = storeFor(teamID)
+    s.touchLocks[groupID] = (frame or Spring.GetGameFrame()) + TOUCH_LOCK_TTL_FRAMES
+    publish(teamID)
 end
 
 -- ============================================================
@@ -276,6 +358,22 @@ function gadget:GameFrame(frame)
                 swept = true
             end
         end
+        -- §5.1: expire human-touched locks so a group the human hasn't steered
+        -- in 3 min frees for the co-commander again.
+        for groupId, expiresAt in pairs(s.touchLocks) do
+            if frame >= expiresAt then
+                s.touchLocks[groupId] = nil
+                swept = true
+            end
+        end
         if swept then publish(teamID) end
+        -- Expire stale intent so the panel reflects only what the AI is doing NOW.
+        if #s.intent > 0 then
+            local kept = {}
+            for _, e in ipairs(s.intent) do
+                if (frame - (e.frame or frame)) < INTENT_TTL_FRAMES then kept[#kept + 1] = e end
+            end
+            if #kept ~= #s.intent then s.intent = kept; publishIntent(teamID) end
+        end
     end
 end

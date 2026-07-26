@@ -99,10 +99,34 @@ end
 -- same nil-safe convention as AllowCommand. It is NOT an AI path anymore.
 -- ============================================================
 
+--- isAI is surfaced only through GetPlayerInfo's player-options table
+--- (getPlayerOpts=true, 11th return): opts.isAI == "1" for a virtual AI player.
+local function isAIPlayer(playerID)
+    if not playerID then return false end
+    local opts = select(11, Spring.GetPlayerInfo(playerID, true))
+    return type(opts) == 'table' and opts.isAI == '1'
+end
+
 function gadget:AllowDirectiveCreate(team, playerID, groupID, directiveType, requestedStrength)
     if not GG.Authority then return true end
+    local rawPlayer = playerID
     if playerID and playerID < 0 then playerID = nil end
-    return GG.Authority.ChargeDirective(playerID, team, groupID, directiveType, requestedStrength)
+    local allowed, cost = GG.Authority.ChargeDirective(
+        playerID, team, groupID, directiveType, requestedStrength)
+
+    -- Interaction §5.1/§6.3 hooks, only on a directive that actually landed:
+    if allowed and GG.AIGuidance then
+        if isAIPlayer(rawPlayer) then
+            -- The AI's own directive → intent report (ai-command-panel.js), so
+            -- its spend is socially visible (§5.1). group 0 = area-scoped.
+            GG.AIGuidance.RecordIntent(team, directiveType, groupID or 0, cost or 0)
+        elseif groupID and groupID ~= 0 then
+            -- A HUMAN directing a real group → 3-min touch lock so the
+            -- co-commander leaves that group alone while the human steers it.
+            GG.AIGuidance.TouchGroup(team, groupID)
+        end
+    end
+    return allowed
 end
 
 function gadget:AllowStandingOrderCreate(team, playerID, orderType)

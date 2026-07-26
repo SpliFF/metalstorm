@@ -112,7 +112,7 @@ end
 -- ui/lib/objectives.js's pull() polls) — the public objective contract.
 local BOARD_FIELDS = {
     'type', 'scope', 'state', 'reward', 'team', 'team2', 'progress',
-    'phase', 'stage', 'expire', 'region', 'x', 'z', 'r', 'suggested',
+    'phase', 'stage', 'expire', 'region', 'x', 'z', 'r', 'suggested', 'source',
 }
 
 --- Objective board: board[id] = { type, scope, state, reward, team, progress,
@@ -125,17 +125,15 @@ local BOARD_FIELDS = {
 -- clearPublished() clears among the rest, so a dead/gap id reads back with no
 -- `type` and is skipped, same liveness check as objectives.js's `list()`.
 --
--- GAP: game_objectives.lua's internal `source` ('scripted'|'systemic'|'bounty')
--- and the raw `bounty` stake amount are NEVER published (not in
--- PUBLISHED_FIELDS) — a staked bounty folds invisibly into `reward` via
--- `o.reward + EscrowTotal(o.id)` at publish time. There is today no honest,
--- player-visible signal distinguishing "this objective's reward includes a
--- staked bounty" from "this objective was naturally high-value" — the AI
--- cannot see it any more than a human player can from the objectives panel.
--- slate.lua's `o.source == 'bounty'` branch (planner §3.2 co-commander ×3
--- weighting) therefore never fires from real data today; it only exercises
--- via hand-built test fixtures. Needs an engine/game-Lua ask (publish a
--- `suggested`-like `bounty` flag) to close, not a Picture-side fix.
+-- `source` ('scripted'|'systemic'|'bounty') is now PUBLISHED by
+-- game_objectives.lua (task 4) — a staked bounty is publicly known (a commander
+-- visibly stakes authority on it), so surfacing the flag is fog-honest, exactly
+-- like the pre-existing `suggested` hint. This closes the gap the picture-task-3
+-- notes flagged: slate.lua's `o.source == 'bounty'` branch (planner §3.2
+-- co-commander ×3 weighting) now fires from real data, not only test fixtures.
+-- The raw stake AMOUNT still folds into the published `reward` via
+-- `o.reward + EscrowTotal(o.id)` (a bigger reward the AI already values higher);
+-- only the categorical bounty FLAG is what the ×3 needs, and that is what ships.
 local function readBoard(c)
     local board = {}
     if not c.rulesParam then return board end
@@ -159,6 +157,11 @@ local function readBoard(c)
                 progress = o.progress or 0, phase = o.phase, stage = o.stage,
                 expire = o.expire, region = o.region, pos = pos,
                 suggested = o.suggested,
+                -- `source` ∈ 'scripted'|'systemic'|'bounty' (game_objectives.lua
+                -- now publishes it — a staked bounty is publicly known, so this
+                -- is fog-honest). slate.lua keys the co-commander ×3 bounty
+                -- weighting off source == 'bounty'.
+                source = o.source,
             }
         end
     end
@@ -170,7 +173,8 @@ end
 -- game_authority.lua's ALLIED_LOS note).
 local function readEconomy(c, role)
     if not c.rulesParam or not (role and role.teamId) then
-        return { ownPool = 0, teamPool = 0, costScale = 1.0, reserveHonoured = true }
+        return { ownPool = 0, teamPool = 0, costScale = 1.0, reserveHonoured = true,
+                 humans = 0 }
     end
     local AI = _G.AI
     -- AI.getRulesParam('team', key) reads OUR OWN team's params only (2-arg,
@@ -178,17 +182,28 @@ local function readEconomy(c, role)
     -- authority_pool is the team-wide savings pool (game_authority.lua
     -- Spring.SetTeamRulesParam(teamID, 'authority_pool', v, ALLIED_LOS)).
     local teamPool = tonumber(AI.getRulesParam('team', 'authority_pool')) or 0
-    -- GAP: authority_player_<playerID> (the per-player pool) needs a
-    -- playerID. AI3 ("AI slots get playerIDs + pools like humans") has NOT
-    -- landed — plan §9.1: "verified FALSE — AI = team only, no playerID".
-    -- Until it does there is no per-AI pool to read; ownPool honestly stays
-    -- 0. This doesn't blind full_side (teamAuthorityFallback=true still
-    -- reaches teamPool through the governor's fallback term below) — only
-    -- co-commander's "own pool only, never the team fallback" invariant
-    -- (plan §5) is unenforceable meanwhile, the exact gap the plan's AI3
-    -- status already tracks (authority lane, not this Picture builder).
+
+    -- Own player pool (AI3, now LANDED): each AI slot is a real virtual player
+    -- with its own `authority_player_<playerID>` pool (integer-normalised key —
+    -- game_authority.lua's pkey()), published {allied=true} so this AI reads it
+    -- over the 'team' scope. AI.getPlayerId() (AI3) returns the AI's virtual
+    -- playerID; -1 means unattributed (single-buffer / test AI) → no own pool.
+    local ownPool = 0
+    local pid = (type(AI.getPlayerId) == 'function') and AI.getPlayerId() or -1
+    if pid and pid >= 0 then
+        ownPool = tonumber(AI.getRulesParam('team',
+            'authority_player_' .. math.floor(pid))) or 0
+    end
+
+    -- Human presence on our team (game_teams.lua's co-commander coordinator
+    -- publishes team_active_humans, {allied=true}). Drives the co-commander /
+    -- caretaker role switch (§5.1): humans present → etiquette; none → the
+    -- full-side slate. Absent param (no coordinator) → nil, treated as "unknown"
+    -- by main.lua, which then keeps the profile's baseline role.
+    local humans = tonumber(AI.getRulesParam('team', 'team_active_humans'))
+
     return {
-        ownPool = 0,
+        ownPool = ownPool,
         teamPool = teamPool,
         -- GAP: authority_cost_scale is an Initialize()-time modoption read
         -- straight into a local in game_authority.lua — never republished as
@@ -197,6 +212,7 @@ local function readEconomy(c, role)
         -- guessing at an engine surface that doesn't exist.
         costScale = 1.0,
         teamFallback = role.teamAuthorityFallback or false,
+        humans = humans,   -- nil = coordinator absent / unknown
     }
 end
 

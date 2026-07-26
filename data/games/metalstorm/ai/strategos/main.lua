@@ -59,7 +59,10 @@ local Roles     = need('roles')
 local self = {
     booted        = false,
     role          = nil,   -- resolved Roles entry (full_side | co_commander | npc)
+    baseRole      = nil,   -- the profile's baseline role (before caretaker derivation)
+    roleCache     = {},    -- id → resolved Roles entry (caretaker up/downgrade, §5.1)
     profile       = nil,   -- personality weights table (profiles/*.lua)
+    playerId      = -1,    -- AI3 virtual playerID (own authority pool identity)
     rng           = nil,   -- seedable RNG (plan §6) — reproducible decisions
     actuators     = nil,   -- Actuators instance (the write surface)
     lastTickFrame = -1,    -- frame of the last strategic tick
@@ -93,6 +96,51 @@ local function resolveTeamId()
     return 0
 end
 
+--- Our virtual playerID (AI3): the authority charge identity. -1 when the VM
+-- was created without a virtual player (tests / pre-AI3 runtime).
+local function resolvePlayerId()
+    local AI = _G.AI
+    if type(AI) == 'table' and type(AI.getPlayerId) == 'function' then
+        return AI.getPlayerId()
+    end
+    return -1
+end
+
+--- Present-human count on our own team (game_teams.lua's co-commander
+-- coordinator publishes team_active_humans, {allied=true}). nil = coordinator
+-- absent / unknown → keep the profile's baseline role (don't guess).
+local function teamHumans()
+    local AI = _G.AI
+    if type(AI) ~= 'table' or type(AI.getRulesParam) ~= 'function' then return nil end
+    return tonumber(AI.getRulesParam('team', 'team_active_humans'))
+end
+
+--- Effective role for THIS tick (PLAN-metalstorm-ai.md §5/§5.1). An AI sharing
+-- a team with humans is a co-commander by construction — delegation-first,
+-- idle-only, own-pool-only, guidance-binding; when the last human leaves it
+-- silently upgrades to the full-side slate (caretaker), and back the moment one
+-- rejoins. NPCs never flip. This is DERIVED from live human presence rather than
+-- hardcoded, which keeps the synced own-pool-only flag (game_teams drives
+-- SetOwnPoolOnly off the same count) and the AI's goal slate consistent by
+-- construction. When the coordinator hasn't published a count (headless
+-- full-side runs, AI-only games), we keep the profile's baseline role.
+local function effectiveRole(state)
+    local base = state.baseRole
+    if base.id == 'npc' then return base end       -- NPC never flips (§5)
+    local humans = teamHumans()
+    if humans == nil then return base end           -- unknown → baseline
+    local wantId = (humans > 0) and 'co_commander' or 'full_side'
+    if base.id == wantId then return base end
+    local cached = state.roleCache[wantId]
+    if not cached then
+        cached = Roles.resolve(wantId, Config)
+        cached.teamId = base.teamId
+        cached.scriptedSlate = base.scriptedSlate
+        state.roleCache[wantId] = cached
+    end
+    return cached
+end
+
 local function resolveProfile()
     -- STUB: once AI1 (AI.getRulesParam) lands, read e.g.
     --   local key = Picture.readProfileHint()  -- 'default'|'aggressive'|...
@@ -111,13 +159,16 @@ end
 --=============================================================================
 local function boot(frame)
     self.profile      = resolveProfile()
-    self.role         = Roles.resolve(self.profile.role, Config)
-    self.role.teamId  = resolveTeamId()
+    self.baseRole     = Roles.resolve(self.profile.role, Config)
+    self.baseRole.teamId = resolveTeamId()
+    self.playerId     = resolvePlayerId()
     -- A profile may attach a scripted slate (NPC scenarios) — install it onto
     -- the role, which is where slate.build looks for it.
     if self.profile.scriptedSlate then
-        self.role.scriptedSlate = self.profile.scriptedSlate
+        self.baseRole.scriptedSlate = self.profile.scriptedSlate
     end
+    self.roleCache = { [self.baseRole.id] = self.baseRole }
+    self.role         = self.baseRole              -- effective role, re-derived each tick
     self.rng          = Config.makeRNG(Config.SEED)   -- seed is fixed for repro
     self.actuators = Actuators.new({
         role    = self.role,
@@ -128,7 +179,8 @@ local function boot(frame)
     -- Narrate boot so the game log shows which brain woke up (plan §5.1:
     -- the AI's spend is socially visible; boot is the first line).
     self.actuators:chat(string.format(
-        "[strategos] online — role=%s profile=%s", self.role.id, self.profile.id))
+        "[strategos] online — role=%s profile=%s player=%d",
+        self.role.id, self.profile.id, self.playerId))
 end
 
 --=============================================================================
@@ -145,16 +197,29 @@ local function strategicTick(frame)
     local clock = (type(AI) == 'table' and type(AI.nowMs) == 'function') and AI.nowMs or nil
     local t0 = clock and clock() or nil
 
+    -- 0. ROLE — derive the effective role from live human presence (§5.1
+    --    caretaker up/downgrade). Cheap (one rulesParam read); done before the
+    --    Picture so guidance/economy read under the right policy. Narrate a flip
+    --    so a handoff is legible in the log (plan §5.1).
+    local role = effectiveRole(self)
+    if role ~= self.role then
+        self.actuators:chat(string.format(
+            "[strategos] role -> %s (team humans=%s)", role.id,
+            tostring(teamHumans())))
+        self.role = role
+        self.actuators.role = role
+    end
+
     -- 1. READ — refresh the Picture from mirrors + decay memory (picture.lua).
     local picture = Picture.refresh({
         frame  = frame,
         memory = self.memory,
-        role   = self.role,
+        role   = role,
         config = Config,
     })
 
     -- 2. GOALS — explicit (objective board) + implicit (standing needs). Pure.
-    local slate = Slate.build(picture, self.profile, self.role)
+    local slate = Slate.build(picture, self.profile, role)
 
     -- 3. ALLOCATE — score, assign under force floors, apply commitment
     --    hysteresis + the budget governor. Pure; returns a directive list.
@@ -162,7 +227,7 @@ local function strategicTick(frame)
         picture     = picture,
         slate       = slate,
         profile     = self.profile,
-        role        = self.role,
+        role        = role,
         commitments = self.commitments,   -- read + updated in place
         rng         = self.rng,
         config      = Config,
@@ -186,7 +251,7 @@ local function strategicTick(frame)
     for _ in pairs(slate) do nGoals = nGoals + 1 end
     nDir = #(plan.directives or {})
     for _, r in pairs(picture.regions or {}) do
-        if r.owner == self.role.teamId then rOwned = rOwned + 1
+        if r.owner == role.teamId then rOwned = rOwned + 1
         elseif r.owner == nil or r.owner == -1 then rNeutral = rNeutral + 1
         else rEnemy = rEnemy + 1 end
     end
@@ -205,11 +270,14 @@ local function strategicTick(frame)
         budgetTag = string.format(' computeMs=%.3f%s', computeMs,
             computeMs > 2.0 and ' OVER_BUDGET' or '')
     end
+    local econ = picture.economy or {}
     self.actuators:chat(string.format(
-        "[strategos] tick f=%d goals=%d directives=%d regions(own/neu/enemy)=%d/%d/%d "
-        .. "obj(active/done)=%d/%d ownStr=%d budget=%d spent=%d%s",
-        frame, nGoals, nDir, rOwned, rNeutral, rEnemy, objActive, objDone,
-        math.floor(ownStrength), math.floor(plan.budget or 0),
+        "[strategos] tick f=%d role=%s goals=%d directives=%d "
+        .. "regions(own/neu/enemy)=%d/%d/%d obj(active/done)=%d/%d ownStr=%d "
+        .. "pool(own/team)=%d/%d budget=%d spent=%d%s",
+        frame, role.id, nGoals, nDir, rOwned, rNeutral, rEnemy, objActive, objDone,
+        math.floor(ownStrength), math.floor(econ.ownPool or 0),
+        math.floor(econ.teamPool or 0), math.floor(plan.budget or 0),
         math.floor(plan.spent or 0), budgetTag))
 
     -- 5. PARLEY — evaluate proposals addressed to us and respond
@@ -217,7 +285,7 @@ local function strategicTick(frame)
     -- testable now); only the actual respond CALL is gated on engine ask I1
     -- (Actuators:respondProposal degrades to a no-op false until then, same
     -- as every other AI2-class verb in actuators.lua).
-    for _, r in ipairs(Planner.evaluateProposals(picture, self.profile, self.role)) do
+    for _, r in ipairs(Planner.evaluateProposals(picture, self.profile, role)) do
         self.actuators:respondProposal(r.id, r.decision)
     end
 end

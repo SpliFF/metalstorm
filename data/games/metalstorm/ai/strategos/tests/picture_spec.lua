@@ -62,6 +62,9 @@ local function makeAI(opts)
     if opts.enemyUnits ~= nil then
         ai.getVisibleEnemies = function() return opts.enemyUnits end
     end
+    if opts.playerId ~= nil then
+        ai.getPlayerId = function() return opts.playerId end   -- AI3 virtual playerID
+    end
     return ai
 end
 
@@ -334,5 +337,56 @@ describe("Picture.refresh — power table", function()
         local picture = refresh(Picture, ai)
         assert.is_not_nil(picture.power[55])
         assert.are.equal('artillery', picture.power[55].class)
+    end)
+end)
+
+--=============================================================================
+-- Task 4 (co-commander): the live-data path for delegation-first scoring +
+-- AI3 own-pool + caretaker human-presence read.
+--=============================================================================
+describe("Picture.refresh — co-commander live data (task 4)", function()
+    it("reads the AI's own pool from authority_player_<playerID> (AI3)", function()
+        local Picture = freshPicture()
+        local ai = makeAI({
+            playerId = 7,
+            rulesParams = {
+                ['team:authority_pool']       = 500,
+                ['team:authority_player_7']   = 120,
+                ['team:team_active_humans']   = 1,
+            },
+        })
+        local p = refresh(Picture, ai, { role = role({ readsGuidance = true }) })
+        assert.are.equal(120, p.economy.ownPool)   -- own pool, not the 500 team pool
+        assert.are.equal(500, p.economy.teamPool)
+        assert.are.equal(1,   p.economy.humans)     -- caretaker up/downgrade signal
+    end)
+
+    it("leaves ownPool 0 for an unattributed AI (playerId -1)", function()
+        local Picture = freshPicture()
+        local ai = makeAI({
+            playerId = -1,
+            rulesParams = { ['team:authority_pool'] = 500, ['team:authority_player_-1'] = 999 },
+        })
+        local p = refresh(Picture, ai)
+        assert.are.equal(0, p.economy.ownPool)
+    end)
+
+    it("surfaces objective source (bounty) so slate's ×3 fires from real board data", function()
+        local Picture = freshPicture()
+        local ai = makeAI({
+            rulesParams = {
+                ['game:objective_count']       = 1,
+                ['game:objective_1_type']      = 'kill',
+                ['game:objective_1_scope']     = 'strategic',
+                ['game:objective_1_state']     = 'active',
+                ['game:objective_1_reward']    = 150,
+                ['game:objective_1_team']      = -1,
+                ['game:objective_1_source']    = 'bounty',
+                ['game:objective_1_suggested'] = 1,
+            },
+        })
+        local p = refresh(Picture, ai)
+        assert.are.equal('bounty', p.board[1].source)
+        assert.are.equal(1, p.board[1].suggested)
     end)
 end)

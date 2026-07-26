@@ -122,6 +122,61 @@ local function isPresent(playerID)
 end
 
 -- ============================================================
+-- Co-commander coordinator (PLAN-metalstorm-ai.md §5/§5.1)
+-- ============================================================
+-- An AI virtual player sharing a team with a present human is a CO-COMMANDER:
+-- it may spend only its OWN authority pool, never the team's shared savings
+-- (§5 invariant). When the last human leaves, the AI becomes the team's
+-- caretaker and reverts to full-side behaviour (may draw the team pool); when a
+-- human rejoins it is a co-commander again (§5.1 up/downgrade). Both the synced
+-- own-pool-only flag (driven below via GG.Authority.SetOwnPoolOnly) and the AI
+-- VM's own goal-slate role (main.lua effectiveRole) key off the SAME published
+-- fact — team_active_humans — so they cannot disagree.
+--
+-- isAI is surfaced ONLY through GetPlayerInfo's player-options table (the 11th
+-- return, getPlayerOpts=true): opts.isAI == "1" for a virtual AI player
+-- (LuaSyncedRead.cpp). The flat returns can't distinguish an AI from a human,
+-- so a plain isPresent() check counts an AI as a "player" — we must inspect the
+-- opts to split humans from AIs here.
+local function isAIPlayer(playerID)
+    local opts = select(11, Spring.GetPlayerInfo(playerID, true))
+    return type(opts) == 'table' and opts.isAI == '1'
+end
+
+--- Recompute co-commander state for every team and publish it. Cheap (a couple
+--- of GetPlayerList/GetPlayerInfo passes); called only when team human-presence
+--- can change — GameStart + every join/leave.
+local function refreshCoCommanders()
+    local gaia = Spring.GetGaiaTeamID()
+    for _, teamID in ipairs(Spring.GetTeamList()) do
+        if teamID ~= gaia then
+            local humans, ais = 0, nil
+            for _, playerID in ipairs(Spring.GetPlayerList(teamID, true)) do
+                if isPresent(playerID) then
+                    if isAIPlayer(playerID) then
+                        ais = ais or {}
+                        ais[#ais + 1] = playerID
+                    else
+                        humans = humans + 1
+                    end
+                end
+            end
+            -- The AI VM reads this over the 'team' scope for its caretaker
+            -- up/downgrade (main.lua teamHumans()).
+            Spring.SetTeamRulesParam(teamID, 'team_active_humans', humans, ALLIED_LOS)
+            -- Drive the synced own-pool-only invariant per AI on the team:
+            -- humans present → co-commander (own pool only); none → caretaker /
+            -- full-side (team fallback allowed). SetOwnPoolOnly is idempotent.
+            if ais and GG.Authority and GG.Authority.SetOwnPoolOnly then
+                for _, aiID in ipairs(ais) do
+                    GG.Authority.SetOwnPoolOnly(aiID, humans > 0)
+                end
+            end
+        end
+    end
+end
+
+-- ============================================================
 -- Leader policy (§5) — see the header note: this is bookkeeping only, never
 -- an engine write. reassignLeader is idempotent (safe under E1 join/leave
 -- interleaving) — it recomputes from current presence rather than
@@ -178,6 +233,7 @@ function gadget:PlayerAdded(playerID)
 
     reassignLeader(teamID)      -- §5: a team with no present leader gets one
     suggestObjective(playerID, teamID)
+    refreshCoCommanders()       -- §5.1: a human (re)joining downgrades an AI to co-commander
 end
 
 -- ============================================================
@@ -218,6 +274,7 @@ function gadget:PlayerRemoved(playerID, reason)
 
     reassignLeader(teamID)
     maybeActivateCaretaker(teamID)
+    refreshCoCommanders()       -- §5.1: last human leaving upgrades the AI to caretaker
 end
 
 -- ============================================================
@@ -304,6 +361,10 @@ function gadget:GameStart()
     for _, playerID in ipairs(Spring.GetPlayerList()) do
         gadget:PlayerAdded(playerID)
     end
+    -- Establish the initial co-commander / caretaker split once the whole
+    -- roster is seeded (PlayerAdded already refreshed per-join, but this
+    -- guarantees every team is published even for a zero-drop-in start).
+    refreshCoCommanders()
 end
 
 function gadget:GameFrame(frame)

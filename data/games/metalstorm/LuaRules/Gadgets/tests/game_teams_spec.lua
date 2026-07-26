@@ -284,3 +284,66 @@ describe("scoreboard (§6)", function()
         assert.are.equal(100, world.rp('score_7_earned'))
     end)
 end)
+
+describe("co-commander coordinator (§5/§5.1)", function()
+    it("flags an AI sharing a team with a human as own-pool-only", function()
+        local world, g = mock.new()
+        world.setPlayer(3, 1, true)                  -- human on team 1
+        world.setPlayer(7, 1, true, false, true)     -- AI virtual player on team 1
+        g:PlayerAdded(7)
+        assert.are.equal(1, world.trp(1, 'team_active_humans'))
+        assert.is_true(world.ownPoolOnly[7])         -- co-commander: own pool only
+    end)
+
+    it("a full-side AI on a human-less team is NOT own-pool-only (may use team fallback)", function()
+        local world, g = mock.new()
+        world.setPlayer(7, 1, true, false, true)     -- AI alone on team 1
+        g:PlayerAdded(7)
+        assert.are.equal(0, world.trp(1, 'team_active_humans'))
+        assert.is_false(world.ownPoolOnly[7])
+    end)
+
+    it("does NOT count an AI teammate as a human (two AIs, no human, are full-side)", function()
+        local world, g = mock.new()
+        world.setPlayer(7, 1, true, false, true)
+        world.setPlayer(8, 1, true, false, true)
+        g:PlayerAdded(7)
+        assert.are.equal(0, world.trp(1, 'team_active_humans'))
+        assert.is_false(world.ownPoolOnly[7])
+        assert.is_false(world.ownPoolOnly[8])
+    end)
+
+    it("upgrades the AI to caretaker (clears own-pool-only) when the last human leaves", function()
+        local world, g = mock.new()
+        world.setPlayer(3, 1, true)
+        world.setPlayer(7, 1, true, false, true)
+        g:PlayerAdded(7)
+        assert.is_true(world.ownPoolOnly[7])
+        world.setPlayer(3, 1, false)                 -- human goes inactive
+        g:PlayerRemoved(3)
+        assert.are.equal(0, world.trp(1, 'team_active_humans'))
+        assert.is_false(world.ownPoolOnly[7])        -- caretaker: team fallback restored
+    end)
+
+    it("downgrades the AI back to co-commander when a human rejoins", function()
+        local world, g = mock.new()
+        world.setPlayer(7, 1, true, false, true)
+        g:PlayerAdded(7)
+        assert.is_false(world.ownPoolOnly[7])
+        world.setPlayer(3, 1, true)                  -- human joins
+        g:PlayerAdded(3)
+        assert.are.equal(1, world.trp(1, 'team_active_humans'))
+        assert.is_true(world.ownPoolOnly[7])
+    end)
+
+    it("leaves a human teammate's own-pool-only untouched (only AIs are flagged)", function()
+        local world, g = mock.new()
+        world.setPlayer(3, 1, true)
+        world.setPlayer(7, 1, true, false, true)
+        g:PlayerAdded(7)
+        -- only playerID 7 (the AI) was ever passed to SetOwnPoolOnly
+        for _, call in ipairs(world.ownPoolOnlyCalls) do
+            assert.are.equal(7, call.playerID)
+        end
+    end)
+end)

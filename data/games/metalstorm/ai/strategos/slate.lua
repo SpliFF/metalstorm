@@ -33,12 +33,21 @@ local function explicitGoals(picture, role, out)
                 out[#out + 1] = {
                     kind     = 'OBJECTIVE',
                     id       = 'obj:' .. tostring(id),
+                    -- source == 'bounty' → planner §3.2 co-commander ×3 (a
+                    -- teammate staking a bounty is literally the human tasking
+                    -- the AI, §5). game_objectives.lua now publishes `source`.
                     source   = (o.source == 'bounty') and 'bounty' or 'explicit',
                     region   = o.region,
                     echelon  = o.scope == 'strategic' and 'army' or 'platoon',
                     directive = Slate.directiveForObjective(o),
                     value    = (o.reward or 0) + (o.bounty or 0),
-                    meta     = { objType = o.type, pos = o.pos, progress = o.progress },
+                    -- `suggested` (the soft-tasking hint published on the board,
+                    -- §5.1) → planner sourceWeight ×2. It was read into the board
+                    -- (picture BOARD_FIELDS) but never threaded onto the goal;
+                    -- carry it on meta.suggested so the ×2 actually fires.
+                    meta     = { objType = o.type, pos = o.pos, progress = o.progress,
+                                 suggested = (o.suggested == 1 or o.suggested == true
+                                              or o.suggested == '1') or nil },
                 }
             end
         end

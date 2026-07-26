@@ -537,7 +537,9 @@ function GG.Authority.ChargeDirective(playerID, teamID, groupID, directiveType, 
     end
     local classMod = CostSpec.order_class[class] or 1.0
     local cost = Formula.cost(CostSpec.base_k, base, 1.0, classMod, costScale)
-    return debitPools(teamID, playerID, cost, class)
+    -- Return the cost as a second value (existing callers ignore it) so the
+    -- charge gate can surface an AI directive's real spend in the intent report.
+    return debitPools(teamID, playerID, cost, class), cost
 end
 
 --- Charge for creating a classic (non-directive-wire) standing order

@@ -250,7 +250,7 @@ function Actuators:apply(plan, picture)
                 self:initiateBuild(d.factoryId, d.defName)
             end
             -- Announce intent per directive (plan §5.1): "Taking N Basin ...".
-            self:_announce(d)
+            self:_announce(d, picture)
         end
     end
 
@@ -314,17 +314,44 @@ end
 --=============================================================================
 -- Narration + intent publishing (best-effort, non-essential).
 --=============================================================================
-function Actuators:_announce(d)
-    if d.type ~= 'directive' then return end
-    local where = d.region and (" " .. tostring(d.region)) or ""
-    self:chat(string.format("[strategos] %s%s with %s (~%s auth)",
-        tostring(d.directive), where, tostring(d.groupId), tostring(d.predictedCost)))
+-- Verb-ish phrasing per directive so the announcement reads like intent, not a
+-- log dump ("Taking N Basin with 3rd Armoured, ~4 min", plan §5.1). Keyed by
+-- the planner's directive SHAPE name.
+local INTENT_VERB = {
+    DEFEND = 'Holding', DEFEND_FRONT = 'Holding the front at', SCREEN = 'Scouting',
+    TAKE_AND_HOLD = 'Taking', ASSAULT = 'Assaulting', SECURE = 'Securing',
+    ESCORT = 'Escorting to', BUILD = 'Building at', RALLY = 'Staging at',
+    WITHDRAW = 'Falling back from', OVERWATCH = 'Watching',
+}
+
+--- Announce intent on EVERY directive (plan §5.1 — the AI's spend is socially
+-- visible). Names the region (from the region graph), the committed force, the
+-- authority spend, and a coarse ETA from the assigned strength (a heuristic, not
+-- a path estimate — honest flavour, marked "~"). Best-effort chat/log.
+function Actuators:_announce(d, picture)
+    if d.type ~= 'directive' and d.type ~= 'posture' then return end
+    local regions = (picture and picture.regions) or {}
+    local region = d.region and regions[d.region]
+    local where = (region and region.name) or (d.region and tostring(d.region)) or "the field"
+    local verb = INTENT_VERB[d.directive] or tostring(d.directive)
+    -- Coarse ETA: bigger commitments muster/travel slower. A flavour heuristic
+    -- (~2 min floor, +1 min per 6 strength), never presented as precise.
+    local etaMin = 2 + math.floor((d.strength or 0) / 6)
+    local cost = d.predictedCost and math.floor(d.predictedCost) or 0
+    self:chat(string.format("[strategos] %s %s — %d force, ~%d min (~%d auth)",
+        verb, where, math.max(1, math.floor(d.strength or 0)), etaMin, cost))
 end
 
 function Actuators:_publishIntent(intent)
-    -- TODO(I1): write a compact intent blob into game_ai_guidance.lua via an
-    -- AI-side SendLuaRulesMsg-equivalent so ai-command-panel.js renders "what
-    -- my AI is doing" + veto buttons (interaction §6.3). For now: no-op sink.
+    -- The intent report the panel reads (guidance_<team>_intent_*) is now
+    -- published SYNCED-SIDE from the authority charge path: when the AI's
+    -- directive is charged, game_authority_charge.lua calls
+    -- GG.AIGuidance.RecordIntent, so ai-command-panel.js renders exactly the
+    -- directives the AI actually paid for (spend socially visible, §5.1/§6.3).
+    -- The AI VM is a separate Lua state and cannot write synced rulesParams, so
+    -- driving the report from the charge (which already crosses into synced with
+    -- the AI's playerID) is the honest transport — no fabricated AI→synced write
+    -- path. This local hook keeps lastIntent for the tick summary only.
 end
 
 function Actuators:noteError(frame, err)

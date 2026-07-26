@@ -258,7 +258,7 @@ end
 
 local PUBLISHED_FIELDS = {
     'type', 'scope', 'state', 'reward', 'team', 'team2', 'progress',
-    'phase', 'stage', 'expire', 'region', 'x', 'z', 'r', 'suggested',
+    'phase', 'stage', 'expire', 'region', 'x', 'z', 'r', 'suggested', 'source',
 }
 
 -- Objectives are the shared strategic board (PLAN-metalstorm §"Objectives are
@@ -289,6 +289,13 @@ local function publish(o, ctx)
     -- PLAN-metalstorm-teams.md §3.3: joiner onboarding hint, set via
     -- GG.Objectives.SuggestFor. The panel renders this as "yours to take".
     if o.suggestedFor then Spring.SetGameRulesParam(p .. 'suggested', o.suggestedFor, PUBLIC) end
+    -- source ∈ 'scripted'|'systemic'|'bounty' (§3.3). A staked bounty is
+    -- publicly known (a commander visibly stakes authority on the objective),
+    -- so surfacing the flag is fog-honest — it lets the co-commander AI apply
+    -- its ×3 bounty weighting (PLAN-metalstorm-ai §3.2/§5) to a teammate's
+    -- tasking, exactly as it already sees the `suggested` soft-hint. Only the
+    -- categorical flag ships; the stake amount stays folded into `reward`.
+    if o.source then Spring.SetGameRulesParam(p .. 'source', o.source, PUBLIC) end
     if o.phase then Spring.SetGameRulesParam(p .. 'phase', o.phase, PUBLIC) end
     if o.type == 'extract' and o.data and o.data.phase then
         Spring.SetGameRulesParam(p .. 'stage', o.data.phase, PUBLIC)
