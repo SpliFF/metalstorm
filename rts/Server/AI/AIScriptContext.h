@@ -28,8 +28,17 @@ public:
     /// sibling modules live). It anchors the plugin-scoped `require` loader
     /// (engine ask AI0-loader) so a multi-file AI (e.g. strategos) can boot.
     /// Empty disables the loader (single-buffer AIs still work).
+    ///
+    /// `mapDataDir` / `defExportDir` are the two sandboxed read roots for the
+    /// AI4 file API (`AI.getMapData` / `AI.getDefExport`): the processed map's
+    /// data dir (`data/maps/<id>`, holds regions.json) and the game's def
+    /// cache dir (`data/games/<id>/cache/defs/<key>`, holds power.json). Empty
+    /// disables the corresponding accessor (it returns nil — an unconfigured
+    /// AI is blind, which the Picture builder treats as "unknown", not error).
     AIScriptContext(const std::string& name, int teamId, int allyTeamId,
-                    const std::string& pluginDir = "");
+                    const std::string& pluginDir = "",
+                    const std::string& mapDataDir = "",
+                    const std::string& defExportDir = "");
     ~AIScriptContext() override;
 
     // --- IScriptContext ---
@@ -60,6 +69,12 @@ public:
     /// Get the team this AI controls.
     int GetTeamId() const { return teamId; }
 
+    /// Diagnostic/test accessor: read a numeric global from the VM (e.g.
+    /// picture.lua's static-load summary). Returns false if the VM is dead
+    /// or the global is absent/non-numeric. Not thread-safe — call only
+    /// when no worker is processing a snapshot (tests, or between ticks).
+    bool TryGetGlobalNumber(const char* name, double& out) const;
+
 private:
     /// Register the AI API functions into the Lua state.
     void RegisterAPI();
@@ -73,11 +88,15 @@ private:
     static int l_getTeamId(lua_State* L);      // AI-team down payment
     static int l_getRulesParam(lua_State* L);  // AI1
     static int l_require(lua_State* L);         // AI0-loader
+    static int l_getMapData(lua_State* L);      // AI4: map data dir read
+    static int l_getDefExport(lua_State* L);    // AI4: def export dir read
 
     std::string name;
     int teamId;
     int allyTeamId;
-    std::string pluginDir;   // AI0-loader: module resolution root
+    std::string pluginDir;    // AI0-loader: module resolution root
+    std::string mapDataDir;   // AI4: getMapData sandbox root (data/maps/<id>)
+    std::string defExportDir; // AI4: getDefExport sandbox root (def cache dir)
     ScriptPermissions permissions;
     lua_State* L = nullptr;
 

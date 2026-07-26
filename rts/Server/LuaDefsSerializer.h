@@ -133,6 +133,22 @@ std::string SerializeWeaponDefs(
     const std::string& gameId,
     const std::unordered_set<std::string>* projectileTextureNames = nullptr);
 
+/// Serialise the expected-DPS power table to compact JSON (AI4 /
+/// combat-resolution §2.3, ask C7). One entry per unit def:
+///
+///   { "defs": { "<defId>": { "name","dps","hp","class"?,"scale"? }, ... } }
+///
+/// `dps` sums each of the unit's weapons' expected DPS using the SAME
+/// formula weapondefs.lua's `expected_dps` uses (default_damage × salvo /
+/// reload), so the strategic AI (which reads this via the sandboxed
+/// AI.getDefExport file API) and the client (which can fetch the same file
+/// from the def cache dir) see identical numbers — no AI-only math.
+/// `class`/`scale` come from the `ms_class`/`ms_scale` custom params when
+/// present. Emitted as JSON (not brotli Lua source) so both mirrors decode
+/// it the same trivial way; the AI reader parses it C++-side.
+template<typename UnitDefVec>
+std::string SerializePowerTable(const UnitDefVec& defs);
+
 } // namespace LuaDefsSerializer
 
 // Template implementations live in the .inl, included below so call

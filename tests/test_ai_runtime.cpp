@@ -127,3 +127,145 @@ TEST_CASE("AI VM: strategos multi-file plugin boots via the loader") {
     ctx.ProcessSnapshot(); // must not crash the VM
     CHECK(ctx.IsRunning());
 }
+
+// ── AI4: sandboxed read-only file API (AI.getMapData / AI.getDefExport) ──
+
+namespace {
+
+// A synthetic plugin that reads regions.json (map data root) + power.json
+// (def export root), probes an escape path and a missing file, and reports
+// everything back through AI.issueCommand so the test can assert on it.
+fs::path WriteFileReaderPlugin() {
+    const fs::path dir = fs::temp_directory_path() / "strategos_ai4_reader";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    std::ofstream(dir / "main.lua") <<
+        "function onUpdate(frame)\n"
+        "  local rg = AI.getMapData('regions.json')\n"
+        "  local pw = AI.getDefExport('power.json')\n"
+        "  local rgCount  = (type(rg)=='table' and type(rg.regions)=='table') and #rg.regions or -1\n"
+        "  local firstVal = (rgCount>0) and (rg.regions[1].value or -1) or -1\n"
+        "  local nb       = (rgCount>0 and type(rg.regions[1].neighbors)=='table') and #rg.regions[1].neighbors or -1\n"
+        "  local pwDps    = (type(pw)=='table' and type(pw.defs)=='table' and pw.defs['5']) and pw.defs['5'].dps or -1\n"
+        "  -- an escape path must RAISE (pcall returns false) →1 means rejected\n"
+        "  local escRej   = (not pcall(AI.getMapData, '../secret.json')) and 1 or 0\n"
+        "  -- a missing file must return nil, NOT raise\n"
+        "  local missNil  = (AI.getMapData('nope.json') == nil) and 1 or 0\n"
+        "  AI.issueCommand(AI.getTeamId(), 777, rgCount, firstVal, nb, pwDps, escRej, missNil)\n"
+        "end\n";
+    return dir;
+}
+
+} // namespace
+
+TEST_CASE("AI4: getMapData + getDefExport decode JSON, reject escapes") {
+    const fs::path plugin = WriteFileReaderPlugin();
+
+    // Two separate sandbox roots, each with one fixture file.
+    const fs::path mapDir = fs::temp_directory_path() / "strategos_ai4_map";
+    const fs::path defDir = fs::temp_directory_path() / "strategos_ai4_defs";
+    fs::remove_all(mapDir); fs::remove_all(defDir);
+    fs::create_directories(mapDir); fs::create_directories(defDir);
+    std::ofstream(mapDir / "regions.json") <<
+        R"({"provider":"graph","mapWidth":1000,"mapHeight":1000,"regions":[)"
+        R"({"key":"north","name":"North","value":42,"tags":["hq"],"neighbors":["south","east"],"polygon":[{"x":0,"z":0}]},)"
+        R"({"key":"south","name":"South","value":7,"tags":[],"neighbors":["north"],"polygon":[]}]})";
+    std::ofstream(defDir / "power.json") <<
+        R"({"defs":{"5":{"name":"tank","dps":12.5,"hp":300,"class":"tanks","scale":"2"}}})";
+
+    const std::string code = ReadFile(plugin / "main.lua");
+    AIScriptContext ctx("ai4_reader", /*teamId*/ 2, /*allyTeamId*/ 2,
+                        plugin.string(), mapDir.string(), defDir.string());
+    REQUIRE(ctx.Init(code, "main.lua"));
+
+    AIStateSnapshot snap;
+    snap.teamId = 2;
+    aiCommandQueue.Drain();
+    ctx.PushSnapshot(std::move(snap));
+    ctx.ProcessSnapshot();
+
+    auto cmds = aiCommandQueue.Drain();
+    REQUIRE(cmds.size() == 1);
+    const AICommand& c = cmds[0];
+    CHECK(c.commandId == 777);
+    REQUIRE(c.numParams == 6);
+    CHECK(c.params[0] == doctest::Approx(2));      // #regions
+    CHECK(c.params[1] == doctest::Approx(42));     // regions[1].value
+    CHECK(c.params[2] == doctest::Approx(2));      // regions[1].neighbors count
+    CHECK(c.params[3] == doctest::Approx(12.5));   // power.defs['5'].dps
+    CHECK(c.params[4] == doctest::Approx(1));      // escape path rejected (raised)
+    CHECK(c.params[5] == doctest::Approx(1));      // missing file → nil (no raise)
+
+    fs::remove_all(plugin); fs::remove_all(mapDir); fs::remove_all(defDir);
+}
+
+TEST_CASE("AI4: unconfigured root → nil (no crash)") {
+    // No mapDataDir / defExportDir passed → the accessors return nil so a
+    // blind AI degrades honestly instead of erroring.
+    fs::path dir = fs::temp_directory_path() / "strategos_ai4_blind";
+    fs::remove_all(dir); fs::create_directories(dir);
+    std::ofstream(dir / "main.lua") <<
+        "function onUpdate(frame)\n"
+        "  local a = (AI.getMapData('regions.json') == nil) and 1 or 0\n"
+        "  local b = (AI.getDefExport('power.json') == nil) and 1 or 0\n"
+        "  AI.issueCommand(AI.getTeamId(), 888, a, b)\n"
+        "end\n";
+
+    const std::string code = ReadFile(dir / "main.lua");
+    AIScriptContext ctx("ai4_blind", 0, 0, dir.string()); // no read roots
+    REQUIRE(ctx.Init(code, "main.lua"));
+    AIStateSnapshot snap;
+    aiCommandQueue.Drain();
+    ctx.PushSnapshot(std::move(snap));
+    ctx.ProcessSnapshot();
+    auto cmds = aiCommandQueue.Drain();
+    REQUIRE(cmds.size() == 1);
+    CHECK(cmds[0].params[0] == doctest::Approx(1));
+    CHECK(cmds[0].params[1] == doctest::Approx(1));
+    fs::remove_all(dir);
+}
+
+TEST_CASE("AI4: the real strategos VM reads both static files") {
+    // The real strategos picture.lua (readRegions/loadPowerTable) now pulls
+    // regions.json + power.json through the AI4 API on every strategic tick.
+    // Boot the real plugin with populated sandbox roots, tick once, and read
+    // back the diagnostic globals picture.lua sets — proving both reads ran
+    // inside the real strategos VM and decoded correctly.
+    const fs::path plugin = fs::path(SPRING_SOURCE_DIR) /
+        "data/games/metalstorm/ai/strategos";
+    if (!fs::exists(plugin / "main.lua")) {
+        MESSAGE("strategos plugin not present; skipping");
+        return;
+    }
+
+    const fs::path mapDir = fs::temp_directory_path() / "strategos_ai4_realmap";
+    const fs::path defDir = fs::temp_directory_path() / "strategos_ai4_realdefs";
+    fs::remove_all(mapDir); fs::remove_all(defDir);
+    fs::create_directories(mapDir); fs::create_directories(defDir);
+    std::ofstream(mapDir / "regions.json") <<
+        R"({"provider":"graph","mapWidth":512,"mapHeight":512,"regions":[)"
+        R"({"key":"alpha","name":"Alpha","value":10,"tags":[],"neighbors":["bravo"],"polygon":[]},)"
+        R"({"key":"bravo","name":"Bravo","value":20,"tags":[],"neighbors":["alpha"],"polygon":[]}]})";
+    std::ofstream(defDir / "power.json") <<
+        R"({"defs":{"3":{"name":"mech","dps":8,"hp":500,"class":"mechs","scale":"1"}}})";
+
+    const std::string code = ReadFile(plugin / "main.lua");
+    AIScriptContext ctx("strategos", /*teamId*/ 1, /*allyTeamId*/ 1,
+                        plugin.string(), mapDir.string(), defDir.string());
+    REQUIRE(ctx.Init(code, "main.lua"));
+
+    AIStateSnapshot snap;
+    snap.teamId = 1;
+    snap.frame = 1;
+    ctx.PushSnapshot(std::move(snap));
+    ctx.ProcessSnapshot();   // boot + first strategic tick (Picture.refresh)
+    CHECK(ctx.IsRunning());
+
+    double regions = -1.0, power = -1.0;
+    REQUIRE(ctx.TryGetGlobalNumber("AI_STRATEGOS_STATIC_REGIONS", regions));
+    REQUIRE(ctx.TryGetGlobalNumber("AI_STRATEGOS_STATIC_POWER", power));
+    CHECK(regions == doctest::Approx(2));   // both regions decoded
+    CHECK(power == doctest::Approx(1));      // the one power-table def decoded
+
+    fs::remove_all(mapDir); fs::remove_all(defDir);
+}

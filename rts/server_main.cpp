@@ -837,6 +837,41 @@ int main(int argc, char* argv[])
                 defsCacheKey.clear();
             }
         }
+
+        // Expected-DPS power table (AI4 / combat-resolution §2.3, ask C7).
+        // A compact power.json written into the same content-addressed cache
+        // dir, alongside the .lua.br def files. It is plain JSON (served with
+        // Content-Type: application/json by the static handler), so BOTH the
+        // strategic AI (via the sandboxed AI.getDefExport file API) and the
+        // browser client (a future fetch at the same cache/defs URL) read the
+        // identical numbers — no AI-only power math. Derived from the same
+        // parsed defs as weapondefs.lua's expected_dps. Written whenever
+        // absent (or under --no-cache); the content key already covers the
+        // inputs, so a stale power.json is impossible for a live key.
+        if (!defsCacheKey.empty()) {
+            const fs::path powerPath =
+                fs::path(DefsCache::CacheDir(gameId, defsCacheKey)) / "power.json";
+            if (CacheControl::IsNoCache() || !fs::exists(powerPath)) {
+                const std::string powerSrc =
+                    L::SerializePowerTable(unitDefHandler->GetUnitDefsVec());
+                std::error_code pec;
+                fs::create_directories(powerPath.parent_path(), pec);
+                std::ofstream pf(powerPath, std::ios::binary | std::ios::trunc);
+                if (pf) {
+                    pf.write(powerSrc.data(),
+                             static_cast<std::streamsize>(powerSrc.size()));
+                }
+                if (pf) {
+                    SLOG(SPRING_LOG_NOTICE,
+                         "power table baked: gameId=%s key=%s (%zu B JSON)",
+                         gameId.c_str(), defsCacheKey.c_str(), powerSrc.size());
+                } else {
+                    SLOG(SPRING_LOG_WARNING,
+                         "power table write failed: gameId=%s key=%s",
+                         gameId.c_str(), defsCacheKey.c_str());
+                }
+            }
+        }
     }
 
     // (playerTeamByUsername / clientPlayerNum / nextPlayerNum /
@@ -909,7 +944,17 @@ int main(int argc, char* argv[])
             // Pass the plugin folder so the AI VM's plugin-scoped `require`
             // (AI0-loader) can resolve sibling modules (a multi-file AI like
             // strategos wires config/picture/slate/planner/... via require).
-            if (aiPool.AddAI(match->id, rq.team, allyTeam, code, match->folderPath)) {
+            //
+            // Also pass the two AI4 file-read sandbox roots: the processed
+            // map data dir (mapPath = data/maps/<id>, holds regions.json) and
+            // the game def cache dir (holds power.json). Empty when unset —
+            // the accessor then returns nil and the Picture treats it as
+            // "unknown", never an error.
+            const std::string aiDefExportDir = defsCacheKey.empty()
+                ? std::string()
+                : DefsCache::CacheDir(gameId, defsCacheKey);
+            if (aiPool.AddAI(match->id, rq.team, allyTeam, code, match->folderPath,
+                             mapPath, aiDefExportDir)) {
                 SLOG(SPRING_LOG_NOTICE,
                     "loaded AI '%s' (%s) on team %d",
                     match->displayName.c_str(), match->id.c_str(), rq.team);

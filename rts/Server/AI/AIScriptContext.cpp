@@ -5,14 +5,18 @@
 #include "LuaInclude.h"
 #include "System/SpringLog/SpringLog.h"
 
+#include <nlohmann/json.hpp>
+
 #define LOG_SECTION "ai"
 
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <system_error>
 
 // Store the AIScriptContext pointer in the Lua extra space
 static AIScriptContext* GetAIContext(lua_State* L) {
@@ -20,9 +24,131 @@ static AIScriptContext* GetAIContext(lua_State* L) {
     return reinterpret_cast<AIScriptContext*>(*extra);
 }
 
+namespace {
+
+// AI4 file-read sandbox. The two read roots (map data dir, def export dir)
+// are FLAT — regions.json and power.json sit directly in them — so the leaf
+// check is stricter than l_require's: it forbids ALL path separators, not
+// just leading ones, and any '..'. There is no legitimate subdirectory read,
+// so refusing them removes a whole class of traversal before it starts.
+bool IsSafeLeafName(const std::string& n) {
+    if (n.empty()) return false;
+    if (n.find("..") != std::string::npos) return false;
+    for (char c : n) {
+        if (c == '/' || c == '\\') return false;
+    }
+    return true;
+}
+
+// Recursively push a decoded JSON value as the equivalent Lua value.
+// JSON null → Lua nil (harmless for our flat objects; our exports carry
+// no nulls inside arrays where a nil would punch a hole).
+void PushJson(lua_State* L, const nlohmann::json& j) {
+    switch (j.type()) {
+        case nlohmann::json::value_t::boolean:
+            lua_pushboolean(L, j.get<bool>() ? 1 : 0);
+            break;
+        case nlohmann::json::value_t::number_integer:
+            lua_pushinteger(L, static_cast<lua_Integer>(j.get<int64_t>()));
+            break;
+        case nlohmann::json::value_t::number_unsigned:
+            lua_pushinteger(L, static_cast<lua_Integer>(j.get<uint64_t>()));
+            break;
+        case nlohmann::json::value_t::number_float:
+            lua_pushnumber(L, j.get<double>());
+            break;
+        case nlohmann::json::value_t::string: {
+            const std::string& s = j.get_ref<const nlohmann::json::string_t&>();
+            lua_pushlstring(L, s.data(), s.size());
+            break;
+        }
+        case nlohmann::json::value_t::array: {
+            lua_createtable(L, static_cast<int>(j.size()), 0);
+            int idx = 1;
+            for (const auto& el : j) {
+                PushJson(L, el);
+                lua_rawseti(L, -2, idx++);
+            }
+            break;
+        }
+        case nlohmann::json::value_t::object: {
+            lua_createtable(L, 0, static_cast<int>(j.size()));
+            for (auto it = j.begin(); it != j.end(); ++it) {
+                PushJson(L, it.value());
+                lua_setfield(L, -2, it.key().c_str());
+            }
+            break;
+        }
+        default:  // null, discarded, binary
+            lua_pushnil(L);
+            break;
+    }
+}
+
+// Shared body for AI.getMapData / AI.getDefExport. Reads a JSON file from a
+// sandboxed root and pushes the decoded table.
+//
+// Contract, deliberately mirroring l_require's sandbox posture:
+//   * unconfigured root (empty) or missing file → nil (honest degrade: an
+//     AI with no data does nothing rash, per PLAN-metalstorm-ai §2);
+//   * a name that tries to escape the root → a LOUD Lua error (like
+//     l_require rejecting '..'), so a broken/hostile plugin fails visibly;
+//   * malformed JSON → a Lua error (the file exists but is corrupt — not a
+//     "blind AI" case, a real fault worth surfacing).
+int ReadSandboxedJson(lua_State* L, const std::string& root, const char* api) {
+    const char* rawName = luaL_checkstring(L, 1);
+    if (root.empty()) {           // feature not configured for this AI
+        lua_pushnil(L);
+        return 1;
+    }
+
+    const std::string name = rawName;
+    if (!IsSafeLeafName(name)) {
+        return luaL_error(L, "%s: illegal file name '%s'", api, rawName);
+    }
+
+    namespace fs = std::filesystem;
+    const fs::path path = fs::path(root) / name;
+
+    // Defence in depth against a symlinked root/leaf: resolve and require
+    // the target stays under the root prefix. weakly_canonical tolerates a
+    // not-yet-existing leaf (normalises lexically past the missing tail).
+    std::error_code ec;
+    const fs::path canonRoot = fs::weakly_canonical(fs::path(root), ec);
+    const fs::path canonPath = fs::weakly_canonical(path, ec);
+    if (!ec) {
+        const std::string r = canonRoot.string();
+        const std::string p = canonPath.string();
+        if (p.size() < r.size() || p.compare(0, r.size(), r) != 0) {
+            return luaL_error(L, "%s: path escapes sandbox '%s'", api, rawName);
+        }
+    }
+
+    std::ifstream file(path, std::ios::binary);
+    if (!file.is_open()) {        // missing → nil (not an error)
+        lua_pushnil(L);
+        return 1;
+    }
+    const std::string src((std::istreambuf_iterator<char>(file)),
+                          std::istreambuf_iterator<char>());
+
+    nlohmann::json j = nlohmann::json::parse(src, nullptr, /*allow_exceptions=*/false);
+    if (j.is_discarded()) {
+        return luaL_error(L, "%s: '%s' is not valid JSON", api, rawName);
+    }
+
+    PushJson(L, j);
+    return 1;
+}
+
+} // namespace
+
 AIScriptContext::AIScriptContext(const std::string& name, int teamId, int allyTeamId,
-                                 const std::string& pluginDir)
-    : name(name), teamId(teamId), allyTeamId(allyTeamId), pluginDir(pluginDir)
+                                 const std::string& pluginDir,
+                                 const std::string& mapDataDir,
+                                 const std::string& defExportDir)
+    : name(name), teamId(teamId), allyTeamId(allyTeamId), pluginDir(pluginDir),
+      mapDataDir(mapDataDir), defExportDir(defExportDir)
 {
     permissions.synced = false; // AI doesn't directly modify sim state
     permissions.fullRead = false;
@@ -180,6 +306,12 @@ void AIScriptContext::RegisterAPI() {
     lua_pushcfunction(L, l_getRulesParam);
     lua_setfield(L, -2, "getRulesParam");
 
+    lua_pushcfunction(L, l_getMapData);
+    lua_setfield(L, -2, "getMapData");
+
+    lua_pushcfunction(L, l_getDefExport);
+    lua_setfield(L, -2, "getDefExport");
+
     lua_setglobal(L, "AI");
 }
 
@@ -265,6 +397,34 @@ int AIScriptContext::l_getRulesParam(lua_State* L) {
     else
         lua_pushnumber(L, it->second.num);
     return 1;
+}
+
+// AI4: AI.getMapData(name) — read a JSON file from the processed map's data
+// dir (regions.json + friends), decoded to a Lua table. Same file the client
+// fetches from /api/maps/data/<id>/, so the AI's region graph and the client's
+// mirror stay honest by construction (no separate AI map data).
+int AIScriptContext::l_getMapData(lua_State* L) {
+    auto* ctx = GetAIContext(L);
+    return ReadSandboxedJson(L, ctx->mapDataDir, "AI.getMapData");
+}
+
+// AI4: AI.getDefExport(name) — read a JSON file from the game's def cache dir
+// (power.json = the expected-DPS power table), decoded to a Lua table. The
+// power table is computed from the SAME parsed defs as weapondefs.lua's
+// expected_dps and written into the HTTP-served cache dir, so the AI and the
+// client read identical numbers (combat-resolution §2.3 / ask C7).
+int AIScriptContext::l_getDefExport(lua_State* L) {
+    auto* ctx = GetAIContext(L);
+    return ReadSandboxedJson(L, ctx->defExportDir, "AI.getDefExport");
+}
+
+bool AIScriptContext::TryGetGlobalNumber(const char* name, double& out) const {
+    if (!L) return false;
+    lua_getglobal(L, name);
+    const bool ok = lua_isnumber(L, -1) != 0;
+    if (ok) out = lua_tonumber(L, -1);
+    lua_pop(L, 1);
+    return ok;
 }
 
 int AIScriptContext::l_getOwnUnits(lua_State* L) {

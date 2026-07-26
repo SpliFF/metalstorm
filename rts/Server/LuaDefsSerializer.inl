@@ -21,8 +21,12 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -697,6 +701,97 @@ inline std::string SerializeWeaponDefs(
         first = false;
         out += SerializeOneWeaponDef(defs[i], modelsDir, gameId,
                                      projectileTextureNames);
+    }
+    out += "}}";
+    return out;
+}
+
+// ─── Expected-DPS power table (AI4 / combat-resolution §2.3, ask C7) ──
+
+namespace detail {
+
+/// Minimal JSON string literal. Escapes the mandatory control set; the
+/// def names/class/scale we emit are plain ASCII identifiers in practice.
+inline std::string JsonStr(std::string_view s)
+{
+    std::string o;
+    o.reserve(s.size() + 2);
+    o.push_back('"');
+    for (char c : s) {
+        switch (c) {
+            case '"':  o += "\\\""; break;
+            case '\\': o += "\\\\"; break;
+            case '\n': o += "\\n";  break;
+            case '\r': o += "\\r";  break;
+            case '\t': o += "\\t";  break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    char buf[8];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x",
+                                  static_cast<unsigned>(static_cast<unsigned char>(c)));
+                    o += buf;
+                } else {
+                    o.push_back(c);
+                }
+        }
+    }
+    o.push_back('"');
+    return o;
+}
+
+/// JSON number. JSON has no inf/nan — a non-finite value (e.g. a zero
+/// reload slipping through) is clamped to 0 so the output stays parseable.
+inline std::string JsonNum(double v)
+{
+    if (!std::isfinite(v)) v = 0.0;
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.9g", v);
+    return std::string(buf);
+}
+
+} // namespace detail
+
+template<typename UnitDefVec>
+std::string SerializePowerTable(const UnitDefVec& defs)
+{
+    std::string out = "{\"defs\":{";
+    bool first = true;
+    for (size_t i = 1; i < defs.size(); ++i) {
+        const auto& ud = defs[i];
+        if (ud.id <= 0) continue;
+
+        // Σ over the unit's weapons of default_damage × salvo / reload —
+        // byte-for-byte the weapondefs.lua expected_dps formula.
+        double dps = 0.0;
+        for (const auto& w : ud.weapons) {
+            if (w.def == nullptr) continue;
+            const auto& wd = *w.def;
+            const double reloadSec = (wd.reload > 0.0f) ? wd.reload : 1.0;
+            const double salvo = static_cast<double>(std::max(1, wd.salvosize));
+            dps += (static_cast<double>(wd.damages.GetDefault()) * salvo) / reloadSec;
+        }
+
+        if (!first) out += ',';
+        first = false;
+        out += detail::JsonStr(std::to_string(ud.id));
+        out += ":{\"name\":";
+        out += detail::JsonStr(ud.name);
+        out += ",\"dps\":";
+        out += detail::JsonNum(dps);
+        out += ",\"hp\":";
+        out += detail::JsonNum(ud.health);
+
+        const auto itc = ud.customParams.find("ms_class");
+        if (itc != ud.customParams.end()) {
+            out += ",\"class\":";
+            out += detail::JsonStr(itc->second);
+        }
+        const auto its = ud.customParams.find("ms_scale");
+        if (its != ud.customParams.end()) {
+            out += ",\"scale\":";
+            out += detail::JsonStr(its->second);
+        }
+        out += "}";
     }
     out += "}}";
     return out;

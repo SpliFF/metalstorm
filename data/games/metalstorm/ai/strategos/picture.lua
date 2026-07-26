@@ -24,6 +24,8 @@ local function caps()
     return {
         present     = type(AI) == 'table',
         rulesParam  = type(AI) == 'table' and type(AI.getRulesParam) == 'function', -- AI1
+        mapData     = type(AI) == 'table' and type(AI.getMapData)    == 'function', -- AI4
+        defExport   = type(AI) == 'table' and type(AI.getDefExport)  == 'function', -- AI4
         ownSquads   = type(AI) == 'table' and type(AI.getOwnSquads)  == 'function', -- AI2
         enemySquads = type(AI) == 'table' and type(AI.getVisibleEnemySquads) == 'function',
         lod         = type(AI) == 'table' and type(AI.getLODLevel)   == 'function',
@@ -43,13 +45,45 @@ end
 -- (regions plan §5 / ask R1); owner/contested come from region_* rulesParams.
 -- STUB until AI1: returns {}.
 local function readRegions(c)
-    if not c.rulesParam then return {} end
-    -- TODO(AI1): iterate the region index (from the cached regions.json the
-    -- runtime should hand the VM alongside the snapshot) and overlay
-    --   owner     = AI.getRulesParam('game', 'region_'..key..'_team')
-    --   contested = AI.getRulesParam('game', 'region_'..key..'_contested')
-    -- Adjacency IS strategic distance (plan §2) — no terrain, no pathfinding.
-    return {}
+    local regions = {}
+    local AI = _G.AI
+    -- Static graph geometry from regions.json via the AI4 file API — the SAME
+    -- file the client mirror (ui/lib/regions.js) fetches, so both agree by
+    -- construction. Adjacency IS strategic distance (plan §2) — no terrain,
+    -- no pathfinding. `polygon` is retained for the regionOf lookup grid the
+    -- task-3 Picture builder will construct.
+    if c.mapData then
+        local ok, data = pcall(AI.getMapData, 'regions.json')
+        if ok and type(data) == 'table' and type(data.regions) == 'table' then
+            for _, r in ipairs(data.regions) do
+                if r.key then
+                    regions[r.key] = {
+                        name      = r.name,
+                        value     = r.value or 0,
+                        tags      = r.tags or {},
+                        neighbors = r.neighbors or {},
+                        polygon   = r.polygon,
+                        owner     = nil,     -- overlaid from rulesParams below
+                        contested = false,
+                    }
+                end
+            end
+        end
+    end
+    -- Overlay live owner/contested from region_* rulesParams (AI1). Absent
+    -- params leave the static defaults — an honest "unknown" ownership for a
+    -- region the AI can't currently see the control state of.
+    if c.rulesParam then
+        for key, region in pairs(regions) do
+            local owner = AI.getRulesParam('game', 'region_' .. key .. '_team')
+            if owner ~= nil then region.owner = owner end
+            local contested = AI.getRulesParam('game', 'region_' .. key .. '_contested')
+            if contested ~= nil then
+                region.contested = (contested == 1 or contested == true)
+            end
+        end
+    end
+    return regions
 end
 
 --- Objective board: board[id] = { type, scope, state, reward, team, progress,
@@ -270,8 +304,20 @@ local powerTable = nil
 local function loadPowerTable(c)
     if powerTable then return powerTable end
     powerTable = {}
-    -- TODO: ingest the def→JSON expected-DPS export (combat-resolution ask C7)
-    -- keyed by defID → { dps, hp, class, scale, counters = {...} }.
+    -- AI4: the expected-DPS export (power.json) carries the SAME numbers the
+    -- client sees (combat-resolution §2.3 / ask C7) — dps/hp/class/scale per
+    -- def. Read once via the sandboxed def-export API and re-key by numeric
+    -- defID so strength math can look up `power[unit.defId]` directly. JSON
+    -- object keys arrive as strings; tonumber() restores the integer key.
+    local AI = _G.AI
+    if c.defExport then
+        local ok, data = pcall(AI.getDefExport, 'power.json')
+        if ok and type(data) == 'table' and type(data.defs) == 'table' then
+            for sid, entry in pairs(data.defs) do
+                powerTable[tonumber(sid) or sid] = entry
+            end
+        end
+    end
     return powerTable
 end
 
@@ -319,6 +365,17 @@ function Picture.refresh(ctx)
     if picture.guidance.funding then
         picture.economy.fundingRateCap = picture.guidance.funding.rateCap
     end
+
+    -- Diagnostic surface (a headless AI has no HUD): the runtime log and the
+    -- AI4 boundary test read these globals to confirm the static file reads
+    -- returned data — same pattern as main.lua's AI_STRATEGOS_BOOT_ERROR.
+    local nRegions = 0
+    for _ in pairs(regions) do nRegions = nRegions + 1 end
+    local nPower = 0
+    for _ in pairs(picture.power) do nPower = nPower + 1 end
+    _G.AI_STRATEGOS_STATIC_REGIONS = nRegions
+    _G.AI_STRATEGOS_STATIC_POWER   = nPower
+
     return picture
 end
 
