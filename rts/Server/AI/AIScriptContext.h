@@ -90,6 +90,15 @@ private:
     static int l_require(lua_State* L);         // AI0-loader
     static int l_getMapData(lua_State* L);      // AI4: map data dir read
     static int l_getDefExport(lua_State* L);    // AI4: def export dir read
+    // AI2: directive-shaped write surface (org-group / directive / posture).
+    // These push AICommands the drain routes through the SAME manager + charge
+    // path as a human player's wire message (StateStreamer::TickAI). There is
+    // deliberately NO per-squad command verb here — the strategic floor
+    // (PLAN-metalstorm-ai §1/§4). The pre-existing l_issueCommand stays as the
+    // generic runtime's per-unit path (test channel / non-Metalstorm AIs).
+    static int l_createGroup(lua_State* L);
+    static int l_issueDirective(lua_State* L);
+    static int l_setPosture(lua_State* L);
 
     std::string name;
     int teamId;
@@ -101,6 +110,11 @@ private:
     lua_State* L = nullptr;
 
     std::atomic<bool> running{false};
+
+    // AI2: monotonic counter minting client-local group tokens for
+    // createGroup→issueDirective correlation (see AICommandQueue.h). Worker
+    // thread only (the AI VM runs single-threaded per context).
+    uint32_t nextGroupToken = 1;
 
     // Snapshot queue (sim thread writes, worker thread reads)
     std::mutex snapshotMutex;

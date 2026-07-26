@@ -39,8 +39,12 @@
 #include "Sim/Misc/GlobalConstants.h"
 #include "Map/ReadMap.h"
 #include "System/SpringLog/SpringLog.h"
+#include "System/EventHandler.h"
 
 #include <algorithm>
+#include <cmath>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <variant>
 #include <type_traits>
@@ -538,22 +542,131 @@ void StateStreamer::EvaluateStandingOrders(int) {
     }
 }
 
-// Tick AI runtime and drain AI commands
+// Tick AI runtime and drain AI commands.
+//
+// AI commands are applied here, on the sim thread, through the EXACT manager
+// call + charge callin a human player's wire message hits (see
+// ClientMessageHandler.cpp OrgGroupCreate / GroupDirective / GroupPosture) —
+// one command path for humans and AI (PLAN-metalstorm-ai §1/§4, AI2). The AI
+// has no CPlayer yet (AI3 unlanded), so its playerID is -1: the charge gadget
+// maps that to nil → team-pool charging (game_authority_charge.lua), the
+// interim "free-pass" the plan keeps until AI3 gives each AI slot a real pool.
 void StateStreamer::TickAI(int) {
     auto& aiPool = ctx.aiPool;
     auto& sim = ctx.sim;
     aiPool.Tick(sim.GetFrameNum());
-    {
-        auto aiCmds = aiPool.DrainCommands();
-        for (const auto& cmd : aiCmds) {
-            CUnit* unit = unitHandler.GetUnit(cmd.unitId);
-            if (unit == nullptr || unit->isDead) continue;
-            if (unit->team != cmd.teamId) continue; // validate ownership
 
-            Command simCmd(cmd.commandId, cmd.options);
-            for (int i = 0; i < cmd.numParams; i++)
-                simCmd.PushParam(cmd.params[i]);
-            unit->commandAI->GiveCommand(simCmd);
+    auto aiCmds = aiPool.DrainCommands();
+    if (aiCmds.empty()) return;
+
+    const uint32_t frame = static_cast<uint32_t>(sim.GetFrameNum());
+    // AI has no distinct player identity until AI3 (see header comment).
+    constexpr int kAIPlayerID = -1;
+
+    // createGroup→issueDirective correlation, resolved within this batch:
+    // token → the real engine group id the create produced (0 if it failed).
+    std::unordered_map<uint32_t, uint32_t> tokenToGroup;
+    // §8 E6: clamp directive issue rate ≤ 1 / group / tick UNCONDITIONALLY —
+    // a structural backstop below the planner so a defeated cost governor
+    // (authority_cost_scale=0) still can't spam. Key: (team, groupKey), where
+    // groupKey is the resolved group id for a group-scoped directive, else the
+    // target area quantised to the region lookup cell for an area-scoped one
+    // (its "group" analogue) — so distinct regions still each get a directive.
+    std::unordered_set<uint64_t> directiveKeys;
+
+    for (const auto& cmd : aiCmds) {
+        switch (cmd.kind) {
+            case AICommandKind::UnitCommand: {
+                // Legacy generic per-unit path (test channel / non-Metalstorm
+                // tactical AIs). The strategos actuator never emits this.
+                CUnit* unit = unitHandler.GetUnit(cmd.unitId);
+                if (unit == nullptr || unit->isDead) continue;
+                if (unit->team != cmd.teamId) continue; // validate ownership
+                Command simCmd(cmd.commandId, cmd.options);
+                for (int i = 0; i < cmd.numParams; i++)
+                    simCmd.PushParam(cmd.params[i]);
+                unit->commandAI->GiveCommand(simCmd);
+                break;
+            }
+            case AICommandKind::CreateGroup: {
+                // Mirrors ClientMessageHandler OrgGroupCreate (no charge callin
+                // exists for group create — the roster is free; the directive
+                // that commits it is what charges).
+                const uint32_t gid = orgGroups.Create(
+                    cmd.teamId, static_cast<Echelon>(cmd.echelon), cmd.text,
+                    cmd.squadIds, /*parentId*/ 0, frame);
+                tokenToGroup[cmd.groupToken] = gid; // 0 on rejection (army tier)
+                break;
+            }
+            case AICommandKind::IssueDirective: {
+                // Resolve the target group: a same-batch token, a real id, or 0.
+                uint32_t groupId = cmd.groupId;
+                if (cmd.refToken != 0) {
+                    auto it = tokenToGroup.find(cmd.refToken);
+                    if (it == tokenToGroup.end() || it->second == 0)
+                        continue;               // group create failed → drop
+                    groupId = it->second;
+                }
+                // A group-scoped directive must target one this AI's team owns.
+                if (groupId != 0) {
+                    const OrgGroup* g = orgGroups.Get(groupId);
+                    if (g == nullptr || g->team != cmd.teamId) continue;
+                }
+
+                // §8 E6 rate clamp (unconditional).
+                uint64_t key;
+                if (groupId != 0) {
+                    key = (uint64_t(1) << 48) | groupId;
+                } else if (cmd.directiveParams.size() >= 3) {
+                    const int64_t qx = std::llround(cmd.directiveParams[0] / 256.0);
+                    const int64_t qz = std::llround(cmd.directiveParams[2] / 256.0);
+                    key = (uint64_t(2) << 48)
+                        ^ (static_cast<uint64_t>(static_cast<uint32_t>(qx)) << 16)
+                        ^  static_cast<uint64_t>(static_cast<uint32_t>(qz));
+                } else {
+                    key = (uint64_t(3) << 48);   // area, no anchor → one/team/tick
+                }
+                const uint64_t clampKey =
+                    (static_cast<uint64_t>(static_cast<uint32_t>(cmd.teamId)) << 52) ^ key;
+                if (!directiveKeys.insert(clampKey).second) continue; // already this tick
+
+                // Same charge gate as a human GroupDirective create. A veto
+                // (insufficient authority) drops the directive, exactly as the
+                // wire handler replies 402 and does not create it.
+                if (!eventHandler.AllowDirectiveCreate(
+                        cmd.teamId, kAIPlayerID, groupId,
+                        cmd.directiveType, cmd.requestedStrength))
+                    continue;
+
+                StandingOrderConditions conds;
+                conds.idleOnly = true;
+                if (cmd.withinRadius > 0.0f) {
+                    conds.withinCenter = float3(cmd.withinX, 0.0f, cmd.withinZ);
+                    conds.withinRadius = cmd.withinRadius;
+                }
+                const uint32_t did = directiveManager.Create(
+                    cmd.teamId, static_cast<DirectiveType>(cmd.directiveType),
+                    cmd.priority, static_cast<OrderShape>(cmd.shape),
+                    cmd.directiveParams, conds, groupId, cmd.requestedStrength,
+                    /*phasesJson*/ std::string(), cmd.expiresInFrames, frame);
+                SLOG(SPRING_LOG_DEBUG,
+                    "AI directive: team=%d created directive %u type=%u group=%u "
+                    "reqStrength=%u (planner-issued, same path as a human's)",
+                    cmd.teamId, did, static_cast<unsigned>(cmd.directiveType),
+                    groupId, cmd.requestedStrength);
+                break;
+            }
+            case AICommandKind::SetPosture: {
+                uint32_t groupId = cmd.groupId;
+                if (cmd.refToken != 0) {
+                    auto it = tokenToGroup.find(cmd.refToken);
+                    if (it == tokenToGroup.end() || it->second == 0) continue;
+                    groupId = it->second;
+                }
+                if (groupId == 0) continue;   // posture needs a real group
+                orgGroups.SetPosture(groupId, cmd.teamId, cmd.text);
+                break;
+            }
         }
     }
 }

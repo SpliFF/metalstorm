@@ -1,11 +1,14 @@
 // test_ai_runtime — AI VM boundary: the plugin-scoped module loader
-// (AI0-loader), AI.getRulesParam (AI1), and AI.getTeamId.
+// (AI0-loader), AI.getRulesParam (AI1), AI.getTeamId, the AI4 file API, and the
+// AI2 directive-shaped write verbs (createGroup / issueDirective / setPosture).
 //
 // These exercise the real AIScriptContext Lua VM (no sim needed): a snapshot
-// is hand-built, pushed, and processed, and the AI reports its observations
-// back through AI.issueCommand — the one existing observable channel — which
-// we drain and assert on. A second case boots the *real* strategos multi-file
-// plugin to prove the loader resolves its require() graph end to end.
+// is hand-built, pushed, and processed, and the AI's observations/commands are
+// drained off aiCommandQueue and asserted on. The AI2 cases confirm the verbs
+// push correctly-shaped commands (incl. createGroup→issueDirective token
+// correlation) and that the REAL strategos pipeline emits a directive into the
+// queue. Applying those commands to the sim (DirectiveManager + the charge
+// callin) needs a full sim and is covered by the live smoke.
 
 #include <doctest/doctest.h>
 
@@ -266,6 +269,172 @@ TEST_CASE("AI4: the real strategos VM reads both static files") {
     REQUIRE(ctx.TryGetGlobalNumber("AI_STRATEGOS_STATIC_POWER", power));
     CHECK(regions == doctest::Approx(2));   // both regions decoded
     CHECK(power == doctest::Approx(1));      // the one power-table def decoded
+
+    fs::remove_all(mapDir); fs::remove_all(defDir);
+}
+
+// ── AI2: directive-shaped write verbs (createGroup / issueDirective / setPosture) ──
+
+namespace {
+
+// A synthetic plugin that exercises all three AI2 write verbs, including the
+// createGroup→issueDirective/setPosture token correlation (a negative handle
+// is a same-batch group token). It stashes the returned handle in a global so
+// the test can confirm it is the negated group token.
+fs::path WriteDirectiveVerbPlugin() {
+    const fs::path dir = fs::temp_directory_path() / "strategos_ai2_verbs";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    std::ofstream(dir / "main.lua") <<
+        "function onUpdate(frame)\n"
+        "  local h = AI.createGroup({10, 20, 30}, 1)      -- negative token handle\n"
+        "  _G.HANDLE = h\n"
+        "  AI.issueDirective(h, { type=9, priority=7, shape=1,\n"
+        "    params={150,0,50,64}, requestedStrength=500,\n"
+        "    within={x=150, z=50, radius=64} })            -- group-scoped (via token)\n"
+        "  AI.issueDirective(0, { type=5, priority=3, shape=1, params={10,0,20,8} })\n"
+        "  AI.setPosture(h, '{\\\"roe\\\":\\\"hold\\\"}')\n"
+        "end\n";
+    return dir;
+}
+
+} // namespace
+
+TEST_CASE("AI2: directive verbs push correctly-shaped commands (with token correlation)") {
+    const fs::path dir = WriteDirectiveVerbPlugin();
+    const std::string code = ReadFile(dir / "main.lua");
+
+    AIScriptContext ctx("ai2_verbs", /*teamId*/ 4, /*allyTeamId*/ 4, dir.string());
+    REQUIRE(ctx.Init(code, "main.lua"));
+
+    AIStateSnapshot snap;
+    snap.teamId = 4;
+    aiCommandQueue.Drain();
+    ctx.PushSnapshot(std::move(snap));
+    ctx.ProcessSnapshot();
+
+    auto cmds = aiCommandQueue.Drain();
+    REQUIRE(cmds.size() == 4);
+
+    // 1. createGroup
+    const AICommand& g = cmds[0];
+    CHECK(g.kind == AICommandKind::CreateGroup);
+    CHECK(g.teamId == 4);
+    CHECK(g.echelon == 1);
+    REQUIRE(g.squadIds.size() == 3);
+    CHECK(g.squadIds[0] == 10u);
+    CHECK(g.squadIds[2] == 30u);
+    CHECK(g.groupToken > 0u);
+    const uint32_t token = g.groupToken;
+
+    // The handle handed back to Lua is the negated token.
+    double handle = 0.0;
+    REQUIRE(ctx.TryGetGlobalNumber("HANDLE", handle));
+    CHECK(handle == doctest::Approx(-static_cast<double>(token)));
+
+    // 2. group-scoped directive — references the create via refToken, not a real id
+    const AICommand& d0 = cmds[1];
+    CHECK(d0.kind == AICommandKind::IssueDirective);
+    CHECK(d0.refToken == token);
+    CHECK(d0.groupId == 0u);
+    CHECK(d0.directiveType == 9);
+    CHECK(d0.priority == 7);
+    CHECK(d0.shape == 1);
+    REQUIRE(d0.directiveParams.size() == 4);
+    CHECK(d0.directiveParams[0] == doctest::Approx(150));
+    CHECK(d0.directiveParams[3] == doctest::Approx(64));
+    CHECK(d0.requestedStrength == 500u);
+    CHECK(d0.withinRadius == doctest::Approx(64));
+    CHECK(d0.withinX == doctest::Approx(150));
+    CHECK(d0.withinZ == doctest::Approx(50));
+
+    // 3. area-scoped directive — no group, no token, no within filter
+    const AICommand& d1 = cmds[2];
+    CHECK(d1.kind == AICommandKind::IssueDirective);
+    CHECK(d1.refToken == 0u);
+    CHECK(d1.groupId == 0u);
+    CHECK(d1.directiveType == 5);
+    CHECK(d1.withinRadius == doctest::Approx(0));
+
+    // 4. posture — references the same created group, carries the JSON
+    const AICommand& p = cmds[3];
+    CHECK(p.kind == AICommandKind::SetPosture);
+    CHECK(p.refToken == token);
+    CHECK(p.text == "{\"roe\":\"hold\"}");
+
+    fs::remove_all(dir);
+}
+
+TEST_CASE("AI2: real strategos VM issues a directive into the command queue") {
+    // End-to-end proof that the whole strategos pipeline (picture → slate →
+    // planner → actuators) reaches the directive-shaped command queue: boot the
+    // REAL plugin, feed it a two-region picture (one owned, one neutral-adjacent
+    // = an EXPAND/SCOUT goal) plus one own unit and a funded team pool, tick
+    // once, and confirm at least one IssueDirective command lands on the queue
+    // anchored on the target region. The sim-thread drain (which turns this into
+    // a real DirectiveManager::Create + AllowDirectiveCreate charge) needs a
+    // full sim and is covered by the live smoke, not here.
+    const fs::path plugin = fs::path(SPRING_SOURCE_DIR) /
+        "data/games/metalstorm/ai/strategos";
+    if (!fs::exists(plugin / "main.lua")) {
+        MESSAGE("strategos plugin not present; skipping");
+        return;
+    }
+
+    const fs::path mapDir = fs::temp_directory_path() / "strategos_ai2_map";
+    const fs::path defDir = fs::temp_directory_path() / "strategos_ai2_defs";
+    fs::remove_all(mapDir); fs::remove_all(defDir);
+    fs::create_directories(mapDir); fs::create_directories(defDir);
+    // home = owned square [0..100]²; front = neutral square [100..200]×[0..100],
+    // adjacent to home → EXPAND (neutral, adjacent-to-owned, no threat).
+    std::ofstream(mapDir / "regions.json") <<
+        R"({"provider":"graph","mapWidth":512,"mapHeight":512,"regions":[)"
+        R"({"key":"home","name":"Home","value":10,"tags":[],"neighbors":["front"],)"
+        R"("polygon":[{"x":0,"z":0},{"x":100,"z":0},{"x":100,"z":100},{"x":0,"z":100}]},)"
+        R"({"key":"front","name":"Front","value":20,"tags":[],"neighbors":["home"],)"
+        R"("polygon":[{"x":100,"z":0},{"x":200,"z":0},{"x":200,"z":100},{"x":100,"z":100}]}]})";
+    std::ofstream(defDir / "power.json") <<
+        R"({"defs":{"3":{"name":"tank","dps":12,"hp":500,"class":"tanks","scale":"2"}}})";
+
+    const std::string code = ReadFile(plugin / "main.lua");
+    AIScriptContext ctx("strategos", /*teamId*/ 1, /*allyTeamId*/ 1,
+                        plugin.string(), mapDir.string(), defDir.string());
+    REQUIRE(ctx.Init(code, "main.lua"));
+
+    AIStateSnapshot snap;
+    snap.teamId = 1;
+    snap.frame = 1;
+    // Region control overlay + a funded team pool (full_side draws the team
+    // fallback pool; ownPool is honestly 0 until AI3).
+    snap.gameParams["region_home_team"]  = AIRulesParamValue{false, 1.0, ""};
+    snap.gameParams["region_front_team"] = AIRulesParamValue{false, -1.0, ""};
+    snap.teamParams["authority_pool"]    = AIRulesParamValue{false, 100000.0, ""};
+    // One own unit sitting inside the home polygon → a force package of ~500.
+    AISquadInfo u;
+    u.unitId = 42; u.defId = 3; u.team = 1;
+    u.position = float3(50.0f, 0.0f, 50.0f); u.health = 500.0f;
+    snap.ownUnits.push_back(u);
+
+    aiCommandQueue.Drain();
+    ctx.PushSnapshot(std::move(snap));
+    ctx.ProcessSnapshot();   // boot + one strategic tick
+    CHECK(ctx.IsRunning());
+
+    auto cmds = aiCommandQueue.Drain();
+    int directives = 0;
+    const AICommand* issued = nullptr;
+    for (const auto& c : cmds) {
+        // Structural floor: the strategos actuator must emit NO per-squad command.
+        CHECK(c.kind != AICommandKind::UnitCommand);
+        if (c.kind == AICommandKind::IssueDirective) { ++directives; issued = &c; }
+    }
+    REQUIRE(directives >= 1);
+    // The directive anchors on the FRONT region centroid (150, 50) — proving the
+    // actuator resolved region geometry from regions.json, not a stub.
+    REQUIRE(issued->directiveParams.size() >= 3);
+    CHECK(issued->directiveParams[0] == doctest::Approx(150));
+    CHECK(issued->directiveParams[2] == doctest::Approx(50));
+    CHECK(issued->requestedStrength > 0u);   // demand cap threaded from the package
 
     fs::remove_all(mapDir); fs::remove_all(defDir);
 }

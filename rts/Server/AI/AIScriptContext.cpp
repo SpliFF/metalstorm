@@ -312,6 +312,16 @@ void AIScriptContext::RegisterAPI() {
     lua_pushcfunction(L, l_getDefExport);
     lua_setfield(L, -2, "getDefExport");
 
+    // AI2 directive-shaped write verbs (org-group / directive / posture).
+    lua_pushcfunction(L, l_createGroup);
+    lua_setfield(L, -2, "createGroup");
+
+    lua_pushcfunction(L, l_issueDirective);
+    lua_setfield(L, -2, "issueDirective");
+
+    lua_pushcfunction(L, l_setPosture);
+    lua_setfield(L, -2, "setPosture");
+
     lua_setglobal(L, "AI");
 }
 
@@ -416,6 +426,124 @@ int AIScriptContext::l_getMapData(lua_State* L) {
 int AIScriptContext::l_getDefExport(lua_State* L) {
     auto* ctx = GetAIContext(L);
     return ReadSandboxedJson(L, ctx->defExportDir, "AI.getDefExport");
+}
+
+// === AI2: directive-shaped write verbs =====================================
+//
+// These are the AI's ENTIRE strategic write surface. Each pushes an AICommand
+// the sim-thread drain (StateStreamer::TickAI) routes through the same manager
+// call + charge callin a human's wire message hits (OrgGroupCreate /
+// GroupDirective / GroupPosture in ClientMessageHandler.cpp). There is no
+// per-squad target verb here by design — the strategic floor (PLAN-metalstorm-
+// ai §1/§4). The verbs marshal only numbers/strings; the string-directive →
+// DirectiveType mapping and region → shape geometry live in game Lua
+// (actuators.lua), keeping this surface generic.
+
+namespace {
+// Read a group handle argument (see AICommandKind doc): a NEGATIVE value is a
+// same-batch createGroup token (set refToken), a POSITIVE value is a real
+// engine group id (set groupId), 0/absent is condition/area scope.
+void ReadGroupHandle(lua_State* L, int idx, AICommand& cmd) {
+    if (lua_isnoneornil(L, idx)) return;                    // area scope
+    const lua_Integer h = luaL_checkinteger(L, idx);
+    if (h < 0)      cmd.refToken = static_cast<uint32_t>(-h);
+    else if (h > 0) cmd.groupId  = static_cast<uint32_t>(h);
+}
+
+// Optional numeric field off a Lua table on the stack at `tblIdx`.
+lua_Number TableNumber(lua_State* L, int tblIdx, const char* key, lua_Number def) {
+    lua_getfield(L, tblIdx, key);
+    const lua_Number v = lua_isnumber(L, -1) ? lua_tonumber(L, -1) : def;
+    lua_pop(L, 1);
+    return v;
+}
+} // namespace
+
+// AI.createGroup(squadIds, echelon?) -> handle. Mints a client-local token,
+// returns it NEGATED so the AI can pass it straight to issueDirective/
+// setPosture this same tick. squadIds is an array of unit ids.
+int AIScriptContext::l_createGroup(lua_State* L) {
+    auto* ctx = GetAIContext(L);
+    luaL_checktype(L, 1, LUA_TTABLE);
+
+    AICommand cmd;
+    cmd.kind    = AICommandKind::CreateGroup;
+    cmd.teamId  = ctx->teamId;
+    cmd.echelon = static_cast<uint8_t>(luaL_optinteger(L, 2, 1)); // default Platoon
+    const lua_Integer n = luaL_len(L, 1);
+    cmd.squadIds.reserve(static_cast<size_t>(n > 0 ? n : 0));
+    for (lua_Integer i = 1; i <= n; ++i) {
+        lua_rawgeti(L, 1, i);
+        if (lua_isnumber(L, -1))
+            cmd.squadIds.push_back(static_cast<uint32_t>(lua_tointeger(L, -1)));
+        lua_pop(L, 1);
+    }
+    cmd.groupToken = ctx->nextGroupToken++;
+    aiCommandQueue.Push(cmd);
+
+    lua_pushinteger(L, -static_cast<lua_Integer>(cmd.groupToken)); // negative handle
+    return 1;
+}
+
+// AI.issueDirective(groupHandle, spec) -> true. `spec` is a table:
+//   { type, priority, shape, params={x,y,z,...}, requestedStrength,
+//     expiresInFrames, within={x=,z=,radius=} }
+// The directive flows through DirectiveManager::Create guarded by the same
+// AllowDirectiveCreate charge callin a human GroupDirective-create hits.
+int AIScriptContext::l_issueDirective(lua_State* L) {
+    auto* ctx = GetAIContext(L);
+    luaL_checktype(L, 2, LUA_TTABLE);
+
+    AICommand cmd;
+    cmd.kind   = AICommandKind::IssueDirective;
+    cmd.teamId = ctx->teamId;
+    ReadGroupHandle(L, 1, cmd);
+
+    cmd.directiveType     = static_cast<uint8_t>(TableNumber(L, 2, "type", 0));
+    cmd.priority          = static_cast<uint8_t>(TableNumber(L, 2, "priority", 0));
+    cmd.shape             = static_cast<uint8_t>(TableNumber(L, 2, "shape", 0));
+    cmd.requestedStrength = static_cast<uint32_t>(TableNumber(L, 2, "requestedStrength", 0));
+    cmd.expiresInFrames   = static_cast<uint32_t>(TableNumber(L, 2, "expiresInFrames", 0));
+
+    lua_getfield(L, 2, "params");
+    if (lua_istable(L, -1)) {
+        const lua_Integer np = luaL_len(L, -1);
+        cmd.directiveParams.reserve(static_cast<size_t>(np > 0 ? np : 0));
+        for (lua_Integer i = 1; i <= np; ++i) {
+            lua_rawgeti(L, -1, i);
+            cmd.directiveParams.push_back(static_cast<float>(lua_tonumber(L, -1)));
+            lua_pop(L, 1);
+        }
+    }
+    lua_pop(L, 1);
+
+    lua_getfield(L, 2, "within");
+    if (lua_istable(L, -1)) {
+        cmd.withinX      = static_cast<float>(TableNumber(L, -1, "x", 0));
+        cmd.withinZ      = static_cast<float>(TableNumber(L, -1, "z", 0));
+        cmd.withinRadius = static_cast<float>(TableNumber(L, -1, "radius", 0));
+    }
+    lua_pop(L, 1);
+
+    aiCommandQueue.Push(cmd);
+    lua_pushboolean(L, 1);
+    return 1;
+}
+
+// AI.setPosture(groupHandle, postureJson) -> true. Routes through
+// OrgGroupManager::SetPosture, same as a human GroupPosture message.
+int AIScriptContext::l_setPosture(lua_State* L) {
+    auto* ctx = GetAIContext(L);
+    AICommand cmd;
+    cmd.kind   = AICommandKind::SetPosture;
+    cmd.teamId = ctx->teamId;
+    ReadGroupHandle(L, 1, cmd);
+    size_t len = 0;
+    const char* s = luaL_checklstring(L, 2, &len);
+    cmd.text.assign(s, len);
+    aiCommandQueue.Push(cmd);
+    lua_pushboolean(L, 1);
+    return 1;
 }
 
 bool AIScriptContext::TryGetGlobalNumber(const char* name, double& out) const {

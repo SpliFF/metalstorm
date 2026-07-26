@@ -272,6 +272,11 @@ local function emit(assignments, packages, usedPkg, ctx)
                     region    = a.goal.region,
                     goalId    = a.goal.id,
                     predictedCost = a.cost,
+                    -- Committed force size (the assigned package's aggregate
+                    -- strength) → the directive's requestedStrength demand cap
+                    -- in the actuator, so one directive can't drain the whole
+                    -- idle pool (plan §3.2 demand model).
+                    strength  = a.pkg.strength,
                 }
                 intent[#intent + 1] = {
                     goal = a.goal.id, group = pid, region = a.goal.region,

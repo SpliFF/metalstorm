@@ -65,10 +65,11 @@ few directives/minute at 0.2 Hz).
 ## Engine asks (what unblocks each stub)
 
 The AI runtime is real but incomplete (`rts/Server/AI/*`, ARCHITECTURE.md Phase
-4 ⏳). The current VM exposes only `AI.getOwnUnits / getVisibleEnemies /
-issueCommand / getFrame / getMapSize`, opens only `base/table/string/math/utf8`,
-and loads a single entry buffer. Each ask below flips a feature-detect from
-stub to live with no rewrite:
+4 ⏳). The VM exposes reads (`AI.getOwnUnits / getVisibleEnemies / getFrame /
+getMapSize / getTeamId / getRulesParam / getMapData / getDefExport`) and the
+AI2 directive-shaped writes (`AI.createGroup / issueDirective / setPosture`); it
+opens only `base/table/string/math/utf8`. Each ask below flips a feature-detect
+from stub to live with no rewrite:
 
 | Ask | What | Unblocks | Status |
 |---|---|---|---|
@@ -76,7 +77,7 @@ stub to live with no rewrite:
 | **AI0-loader** | a plugin-scoped `require`/module loader in the AI VM (or bundle-at-discovery) | `main.lua` wiring the multi-file layout (pure modules already test headless) | ✅ 2026-07-20 — `AIScriptContext::l_require`, sandboxed; `tests/test_ai_runtime.cpp` boots this plugin |
 | **AI1** | `AI.getRulesParam(scope, key)` | the whole Picture: regions, board, pools, guidance, parley | ✅ 2026-07-20 — snapshot carries game+team params; `caps().rulesParam` now true |
 | **AI4** | `AI.getMapData` / `AI.getDefExport` (sandboxed file reads) | region graph geometry + the expected-DPS power table | ✅ 2026-07-27 — same files the client fetches; see `rts/Server/AI/AIScriptContext.cpp` |
-| **AI2** | org-group / directive / posture verbs on the command interface | the real actuator; standing-order fallback until then | ⏸ deferred — waits on macro-orders `directive-protocol` |
+| **AI2** | org-group / directive / posture verbs on the command interface | the real actuator (standing-order fallback DELETED) | ✅ 2026-07-27 — `AI.createGroup / issueDirective / setPosture`; drained on the sim thread through the SAME `OrgGroupManager`/`DirectiveManager` + `AllowDirectiveCreate` charge path as a human's wire message (`StateStreamer::TickAI`). Directive-shaped only — no per-squad verb (strategic floor). §8 E6 rate clamp (≤1/group/tick) enforced in the drain unconditionally |
 | **AI3** | AI slots get playerIDs + pools + `PlayerAdded` flow | authority integration (likely already true via virtual-player design — verify) | ⚠ verified FALSE — AI = team only, no playerID; leader is the host player. **DECIDED 2026-07-26: virtual playerID + pool per AI slot** (authority lane) — until it lands, `picture.economy.ownPool` honestly reads 0 |
 | **AI-team** | `AI.getTeamId()` / squad views / `AI.getLODLevel()` | friendly-vs-enemy scoring, squad-accurate ledger, LOD cadence | ◑ partial — `AI.getTeamId()` landed 2026-07-20; squad views + `getLODLevel` still pending |
 | **I1** | AI-side `SendLuaRulesMsg`-equivalent (`AI.sendGameMessage`) | parley responses + the intent-report blob (interaction §6) | pending |

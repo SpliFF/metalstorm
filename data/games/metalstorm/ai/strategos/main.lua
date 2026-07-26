@@ -19,11 +19,14 @@
 -- both of which rebuild honestly from fresh input — acceptable amnesia.
 --
 -- RUNTIME SURFACE: the VM exposes a global `AI` table (AIScriptContext.cpp):
---   AI.getOwnUnits() · AI.getVisibleEnemies() · AI.issueCommand(id,cmd,...)
---   AI.getFrame() · AI.getMapSize().
--- The richer surface this plan assumes (AI.getRulesParam, squad views, LOD,
--- directive/posture verbs, chat, stake) does NOT exist yet — every module
--- feature-detects and degrades. See README "Engine asks" (AI1/AI2/I1).
+--   reads:  AI.getOwnUnits() · AI.getVisibleEnemies() · AI.getFrame() ·
+--           AI.getMapSize() · AI.getTeamId() · AI.getRulesParam (AI1) ·
+--           AI.getMapData / AI.getDefExport (AI4)
+--   writes: AI.createGroup · AI.issueDirective · AI.setPosture (AI2 — the
+--           directive-shaped write surface; routed through the SAME engine
+--           managers + charge callins as a human player's commands).
+-- Still assumed-but-absent (each module feature-detects + degrades): squad
+-- views, LOD, chat/stake/parley (I1). See README "Engine asks".
 
 --=============================================================================
 -- Module loading.  See README "Engine ask AI0-loader".
