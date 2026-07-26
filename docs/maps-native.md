@@ -122,27 +122,60 @@ sub-target — bad for "dominant band by area" checks. A **linear** blend
 (clamped, with a corner kink at each end) holds close to the target slope
 across nearly the whole transition, which is what the validator needs.
 
-### Splat/tile palette
+### Texture pass (tiles + hillshade + grain)
 
-The generator classifies each 32-elmo tile by its sampled slope/water band
-and picks one of 8 fixed flat-color tiles (4 dry slope bands + 4 water
-depth bands). **The 4 dry bands sample the shared unit/building palette
-atlas verbatim** (`data/games/metalstorm/unittextures/atlas_palette.ktx2`,
-row 3 — concrete grey / worn steel / civilian tan / ground-contact dark —
-see `tools/scripts/make_palette_atlas.py` and `art/STYLE.md`), so terrain
-reads as the same material language as buildings and civilian props. Water
-has no atlas swatch (it's a unit-material sheet, not a terrain one) — the 4
+The band *palette* is unchanged from the first texture pass: each 32-elmo
+tile is classified by slope/water band, and **the 4 dry bands sample the
+shared unit/building palette atlas verbatim**
+(`data/games/metalstorm/unittextures/atlas_palette.ktx2`, row 3 — concrete
+grey / worn steel / civilian tan / ground-contact dark — see
+`tools/scripts/make_palette_atlas.py` and `art/STYLE.md`), so terrain reads
+as the same material language as buildings and civilian props. Water has no
+atlas swatch (it's a unit-material sheet, not a terrain one) — the 4
 water-band colours are this map's own addition; that's a deliberate,
 called-out deviation, not a silent one.
 
-Tiles are DXT1, encoded as **solid color per 4×4 block** (`color0 = color1
-- 1` forces 4-color opaque mode deterministically, indices all zero select
-`color0`) — trivial to encode correctly and matches the flat-shaded,
-no-baked-gradient art direction. `solid_tile_record()` also fills mip1-3
-with the same solid block (cheap since a constant-color image downsamples
-to the same constant color) — **but MapProcessor's `ExtractBinaryData`
-currently only extracts mip0** from each SMT record (`TILE_MIP0_SIZE=512`
-bytes, the rest is skipped) into `tiles.ktx2`. See §6 "Known limitation".
+The original pass shipped these as 8 solid-colour tiles (one per band, every
+texel identical), which rendered as giant monochrome blocks with staircase
+band edges — rejected in review ("hideously ugly"). The 2026-07-27 rework
+(`meridian.py`'s texture stage) keeps the palette language but generates
+real per-texel content:
+
+- **Band scale + boundary blending.** The 8 bands sit on a linear scale
+  (`BAND_SCALE`: channel→deep→shallow→ford→flat→veh→infantry→cliff) where
+  adjacent indices are the pairs that physically border each other. Each
+  tile carries a 3×3 grid of band samples at its corner/edge/centre
+  vertices (16-elmo spacing, shared with neighbouring tiles), bilinearly
+  interpolated per texel with hash-noise dithering — band boundaries become
+  organic blended transitions instead of hard 32-elmo staircases, and the
+  blend is continuous across tile edges by construction.
+- **Baked hillshade.** Per-texel value multiplier from a Lambert term
+  against the fixed light direction matching `mapinfo.lua`'s `sunDir`
+  {1, 0.7, 1}, plus a subtle elevation-lightening term (higher ground reads
+  lighter) — this is what makes ridge/basin relief legible at strategic
+  zoom, standing in for the baked lighting real Spring maps have. Sampled
+  at the tile's 4 corner vertices (quantized, `SHADE_LEVELS`), bilinearly
+  interpolated + dithered per texel; attenuated under water
+  (`WATER_SHADE_DAMP`). Value-only — hue stays with the palette.
+- **Per-band grain.** Two-scale value noise per texel (fine per-texel +
+  coarse bilinear value-noise lattice): coarse/strong speckle for cliff
+  rock, medium for scarps/steel, fine for concrete, subtle for water
+  (`GRAIN` table). Applied on a value-lifted colour (`GRAIN_LIFT`) so grain
+  stays visible on the near-black cliff swatch.
+- **Deduped tile set.** Tiles are rendered once per unique descriptor
+  (band grid, corner shades, noise-phase variant) and referenced by the
+  tileindex — plateau interiors get 4 phase variants so tiling doesn't
+  repeat verbatim; gradient/boundary tiles coarsen shade + variant space to
+  bound the SMT size (~5.5k unique tiles ≈ 3.7 MB for Meridian Basin; the
+  generator prints the count and warns above ~6 MB).
+- **All noise is integer hashing** of (variant, texel) coords — no
+  `random`, no OS entropy — so `--selftest` byte-determinism holds.
+- **Real DXT1 encoding + real mips.** Blocks are encoded with
+  luminance-extreme endpoints in 4-colour opaque mode (nearest-palette
+  2-bit indices), and each SMT record carries genuine box-filtered mip1-3
+  (MapProcessor extracts all 4 levels since the mip-chain fix — see §6).
+- **Minimap.** Regenerated with the same band blending + hillshade
+  (continuous, unquantized shade) so minimap and terrain agree.
 
 ### Determinism
 
@@ -220,28 +253,34 @@ baked the correct range into the SMF header (`ReadSMFHeader` fills
 `meta.minHeight`/`maxHeight` from there when there's no mapinfo override) —
 simpler than keeping two copies of the height range in sync.
 
-## 6. Known limitation: terrain texture aliasing (mip chain)
+## 6. Resolved limitations (mip chain, FOW overlay streaks)
 
-Golden screenshots (`docs/maps/screenshots/meridian_basin_*.png`, captured
-via `window.test.cameraFitMap()`/`cameraSnapToGround()` +
-`window.test.screenshot()` against a real running direct-start session — not
-synthetic) show pronounced horizontal-band aliasing on the terrain at any
-distance beyond point-blank. Root cause, diagnosed while building this map:
-`MapProcessor::ExtractBinaryData` extracts only `TILE_MIP0_SIZE` (512 bytes,
-the 32×32-texel mip0) from each SMT tile record into `tiles.ktx2` and
-explicitly skips the remaining mip1-3 data the SMT format carries. WebGL2
-cannot runtime-generate mipmaps for compressed (DXT1/BC1) textures —
-`gl.generateMipmap()` only works on uncompressed formats — so a compressed
-terrain tile atlas with no precomputed mip chain has no mipmapping at all,
-and severe minification aliasing is the expected result at any viewing
-distance. This is a **pipeline-wide issue** (affects every map using this
-tile-extraction path, not just this one — existing maps likely mask it with
-higher-frequency painted textures that alias less visibly than solid flat
-color blocks do), not something to fix inside a map-authoring task; flagged
-here and forked to its own lane rather than patched under this task's diff.
-The generator already computes real mip1-3 data per tile
-(`solid_tile_record`) — the fix is entirely on the extraction/KTX2-packing
-side.
+Two renderer-side issues wrecked the first golden screenshots and are both
+fixed as of 2026-07-27 — recorded here because their symptoms (severe
+banding/streaking at strategic zoom) look like authored-texture bugs and
+cost real diagnosis time twice:
+
+- **Compressed-texture mip chain** (fixed by the terrain-mip-chain lane):
+  `MapProcessor::ExtractBinaryData` originally extracted only mip0 from
+  each SMT tile record. WebGL2 cannot runtime-generate mipmaps for
+  compressed (DXT1/BC1) textures, so the terrain atlas had no mipmapping at
+  all → severe minification aliasing at any distance. It now extracts all
+  4 SMT mip levels into a multi-level `tiles.ktx2` and the client samples
+  trilinear — which also means a generator **must emit genuine box-filtered
+  mip1-3** per tile record, not repeats of mip0 (`meridian.py`'s
+  `encode_tile_record` does).
+- **FOW overlay z-fighting** (fixed in `terrain.ts` `TerrainFog.build`):
+  the LOS-darkening overlay is heightmap-following geometry lifted 8 elmos
+  above the terrain. At a fitMap camera (~20k elmos up, `minZ=1`) the
+  resolvable z-buffer delta is ~25 elmos, so the lift alone z-fought and
+  the whole overlay rendered as horizontal streak bands — present in *both*
+  pre-2026-07-27 goldens and initially indistinguishable from texture
+  aliasing. Diagnosis trick: zero the darkening
+  (`window.__gp("__fowDarkening.set({radar:0,explored:0,unscouted:0})")`) —
+  if the streaks vanish, it's the overlay, not the terrain data. Fixed with
+  a polygon-offset depth bias (`zOffset`/`zOffsetUnits` on
+  `terrainFogMat`), which scales with depth quantization and holds at every
+  zoom.
 
 ## 7. Verifying a map end-to-end
 

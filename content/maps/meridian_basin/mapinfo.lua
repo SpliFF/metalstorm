@@ -20,9 +20,10 @@ local mapinfo = {
 		maxheight = 1400, -- Ridge crests
 		smtFileName0 = "maps/meridian_basin.smt",
 	},
-	resources = {
-		detailTex = "detailtexbright.bmp",
-	},
+	-- No resources.detailTex: the referenced file never shipped and the
+	-- client terrain material has no detail-texture consumer yet (the
+	-- mapinfo field is plumbed to the wire but unread by terrain.ts).
+	-- Close-zoom texture comes from the generator's per-texel grain pass.
 	atmosphere = {
 		minWind = 5,
 		maxWind = 22,
