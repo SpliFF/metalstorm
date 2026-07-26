@@ -73,6 +73,7 @@ const std::unordered_map<int, std::string>* gAITeams = nullptr;
 #include "System/FileSystem/FileSystem.h"
 
 #include "System/Scripting/ScriptEventDispatcher.h"
+#include "Server/TeamLeaderSelect.h"
 #include "Server/IntelEventCollector.h"
 #include "Server/UnitLifecycleCollector.h"
 #include "Server/FeatureLifecycleCollector.h"
@@ -333,19 +334,17 @@ void CSimulation::FireGameStart()
     // misbehave: BAR's game_end.lua treats `hasLeader == false` as a wiped-out
     // team, marks every allyteam dead, and fires a premature GameOver (~frame
     // 120). Do the equivalent assignment here, now that the whole roster has
-    // connected — a team with active human players takes the lowest as leader
-    // (via CTeam::AddPlayer, the same join path Recoil uses); an AI team takes
-    // the host player (the lowest active human, our single-host model — matches
-    // the assumption already baked into GetAIInfo's hostPlayer = leader).
+    // connected.
+    //
+    // AI3 (PLAN-metalstorm-ai.md §1): AI slots are now real virtual players on
+    // their team (server_main registered them before this runs), so an AI team
+    // is led by its OWN AI player via the same CTeam::AddPlayer join path
+    // Recoil uses — we no longer fall an AI team's leader back to the host
+    // human (the old SetLeader(hostHuman) hack is gone). On a MIXED team
+    // (co-commander: the AI shares a human team) the HUMAN leads, so we prefer
+    // a non-isAI player and only fall to the AI when the team has no human. A
+    // team with neither a human nor an AI stays honestly leaderless.
     {
-        int hostPlayer = -1;
-        for (int p = 0; p < playerHandler.ActivePlayers(); ++p) {
-            const CPlayer* pl = playerHandler.Player(p);
-            if (pl != nullptr && pl->active && !pl->IsSpectator()) {
-                hostPlayer = p;
-                break;
-            }
-        }
         const int numTeams = teamHandler.ActiveTeams();
         for (int t = 0; t < numTeams; ++t) {
             if (t == teamHandler.GaiaTeamID())
@@ -354,11 +353,17 @@ void CSimulation::FireGameStart()
             if (team == nullptr || team->HasLeader())
                 continue;
             const std::vector<int> teamPlayers = playerHandler.ActivePlayersInTeam(t);
-            if (!teamPlayers.empty()) {
-                team->AddPlayer(teamPlayers.front());
-            } else if (gAITeams != nullptr && gAITeams->count(t) > 0 && hostPlayer >= 0) {
-                team->SetLeader(hostPlayer);
+            std::vector<TeamLeaderSelect::Candidate> cands;
+            cands.reserve(teamPlayers.size());
+            for (int p : teamPlayers) {
+                const CPlayer* pl = playerHandler.Player(p);
+                if (pl != nullptr)
+                    cands.push_back({p, pl->isAI});
             }
+            const int leader =
+                TeamLeaderSelect::SelectLeader(cands.begin(), cands.end());
+            if (leader >= 0)
+                team->AddPlayer(leader);
         }
     }
 

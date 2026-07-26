@@ -28,8 +28,12 @@ public:
     /// sibling modules live). It anchors the plugin-scoped `require` loader
     /// (engine ask AI0-loader) so a multi-file AI (e.g. strategos) can boot.
     /// Empty disables the loader (single-buffer AIs still work).
+    /// `playerId` is the AI's virtual playerID (PLAN-metalstorm-ai.md §1, AI3):
+    /// each AI slot is registered as a real CPlayer, so the strategos charge
+    /// identity is keyed by this playerID (authority_player_<id>), not the team.
+    /// -1 disables player attribution (single-buffer / test AIs).
     AIScriptContext(const std::string& name, int teamId, int allyTeamId,
-                    const std::string& pluginDir = "");
+                    const std::string& pluginDir = "", int playerId = -1);
     ~AIScriptContext() override;
 
     // --- IScriptContext ---
@@ -60,6 +64,9 @@ public:
     /// Get the team this AI controls.
     int GetTeamId() const { return teamId; }
 
+    /// Get the AI's virtual playerID (AI3), or -1 if unattributed.
+    int GetPlayerId() const { return playerId; }
+
 private:
     /// Register the AI API functions into the Lua state.
     void RegisterAPI();
@@ -71,12 +78,14 @@ private:
     static int l_getFrame(lua_State* L);
     static int l_getMapSize(lua_State* L);
     static int l_getTeamId(lua_State* L);      // AI-team down payment
+    static int l_getPlayerId(lua_State* L);    // AI3 virtual playerID
     static int l_getRulesParam(lua_State* L);  // AI1
     static int l_require(lua_State* L);         // AI0-loader
 
     std::string name;
     int teamId;
     int allyTeamId;
+    int playerId;            // AI3: the AI's virtual playerID (-1 = unattributed)
     std::string pluginDir;   // AI0-loader: module resolution root
     ScriptPermissions permissions;
     lua_State* L = nullptr;

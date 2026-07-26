@@ -20,9 +20,12 @@ public:
     /// Add an AI player. Loads the script from the given code string.
     /// `pluginDir` is the plugin's on-disk folder, used by the AI VM's
     /// plugin-scoped `require` loader (AI0-loader) to resolve sibling
-    /// modules; pass "" for single-buffer AIs. Returns true on success.
+    /// modules; pass "" for single-buffer AIs. `playerId` is the AI's virtual
+    /// playerID (AI3) — its authority charge identity; pass -1 if unattributed.
+    /// Returns true on success.
     bool AddAI(const std::string& name, int teamId, int allyTeamId,
-               const std::string& scriptCode, const std::string& pluginDir = "");
+               const std::string& scriptCode, const std::string& pluginDir = "",
+               int playerId = -1);
 
     /// Called by the sim thread every N ticks.
     /// Builds snapshots, pushes to AIs, drains commands.

@@ -82,9 +82,21 @@ end
 -- AllowCommand above: these fire once, at creation, before the C++
 -- DirectiveManager/StandingOrderManager stores the object — not per
 -- decomposed squad command (those are fromLua and free, unaffected by
--- this gadget). playerID of -1 (no session->clientPlayerNum entry yet)
--- is passed through as nil so GG.Authority falls back to team-pool-only
--- charging, same convention as AllowCommand's already-nil-safe playerID.
+-- this gadget).
+--
+-- AI3 (PLAN-metalstorm-ai.md §1/§5, decision 2026-07-26): the interim "AI
+-- creates free by design" free-pass is GONE. AI slots are now real virtual
+-- players with their own playerID + authority pool, so when the AI directive
+-- path (AI2's TickAI routing) fires this callin it passes the AI's REAL
+-- playerID and the charge debits authority_player_<aiID> — the AI's own pool,
+-- exactly like a human. A co-commander AI additionally flags itself
+-- own-pool-only (GG.Authority.SetOwnPoolOnly) so it can never fall back to the
+-- shared team pool (§5 invariant, enforced in debitPools).
+--
+-- A playerID of -1 remains coerced to nil ONLY for a genuinely unattributed
+-- directive (a gadget-internal create with no issuing player / a session with
+-- no clientPlayerNum entry yet) — that residual case charges team-pool-only,
+-- same nil-safe convention as AllowCommand. It is NOT an AI path anymore.
 -- ============================================================
 
 function gadget:AllowDirectiveCreate(team, playerID, groupID, directiveType, requestedStrength)
