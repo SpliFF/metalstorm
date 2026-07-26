@@ -21,6 +21,9 @@ return {
             -- models/ms_civilians_impostor.ktx2 — deliberately no team mask,
             -- civilians read as neutral population.
             impostor_only = '1', impostor_size = '11',
+            -- v2 directional atlas grid (8 yaw × 3 pitch × 1 frame), matching
+            -- bake_impostors.py / impostor_convention.py (M3).
+            impostor_yaw_bins = '8', impostor_pitch_bins = '3', impostor_frames = '1',
         },
     },
     ms_militia = {
@@ -43,6 +46,9 @@ return {
             -- (models/ms_militia_impostor{,_team}.ktx2).
             impostor_only = '1', impostor_size = '11',
             impostor_team_mask = '1',
+            -- v2 directional atlas grid (8 yaw × 3 pitch × 1 frame), matching
+            -- bake_impostors.py / impostor_convention.py (M3).
+            impostor_yaw_bins = '8', impostor_pitch_bins = '3', impostor_frames = '1',
         },
     },
 }

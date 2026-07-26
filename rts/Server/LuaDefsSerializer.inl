@@ -285,11 +285,11 @@ inline std::string SerializeOneUnitDef(
     // plan's roster table), so the switch distance defaults to near-zero
     // instead of never. icon_distance (Impostor→Icon) defaults to 4x the
     // impostor distance when not given explicitly.
-    // FIDELITY-STANDIN: no baked-atlas pipeline yet (§6 task 4b is a separate
-    // milestone) — diffuse_uri is a conventional-but-likely-nonexistent path,
-    // walk/idle frame counts default to 1. The client's ImpostorRenderer
-    // doesn't load the texture yet either (flat grey placeholder quad), so
-    // this doesn't regress anything: it only wires the tier switch itself.
+    // The baked-atlas pipeline (PLAN-metalstorm-impostors.md M2) produces v2
+    // directional atlases (8 yaw × 3 pitch, baked from the 3D bodies); the
+    // client's ImpostorRenderer directional-selects a cell per instance from
+    // the yaw_bins/pitch_bins/frames grid emitted below. diffuse_uri points at
+    // the deployed <stem>_impostor.ktx2.
     {
         const auto impostorOnlyIt = ud.customParams.find("impostor_only");
         const bool impostorOnly = impostorOnlyIt != ud.customParams.end() &&
@@ -344,6 +344,27 @@ inline std::string SerializeOneUnitDef(
             }
             imp.add_int("walk_frames", 1);
             imp.add_int("idle_frames", 1);
+            // v2 directional atlas grid (PLAN-metalstorm-impostors.md M3).
+            // Source: customParams impostor_yaw_bins / impostor_pitch_bins /
+            // impostor_frames, set by the game (metalstorm's _builder.lua) to
+            // match the baked atlas's convention (impostor_convention.py: 8×3×1).
+            // Default 1/1/1 → a legacy single-frame atlas / non-metalstorm game
+            // keeps the whole-quad mapping, so the client never directional-
+            // selects a def that didn't opt in. DEVIATION (recorded in the plan
+            // lane notes): the plan's M2 "For M3" note suggested the serializer
+            // read the baked <stem>_impostor.json sidecar; that sidecar is a
+            // gitignored forge artifact not deployed into data/, and the engine
+            // has no JSON parser here, so the grid rides customParams like the
+            // rest of the impostor block instead.
+            auto gridParam = [&](const char* key) -> long long {
+                const auto it = ud.customParams.find(key);
+                if (it == ud.customParams.end()) return 1;
+                const long long v = std::strtoll(it->second.c_str(), nullptr, 10);
+                return v > 0 ? v : 1;
+            };
+            imp.add_int("yaw_bins", gridParam("impostor_yaw_bins"));
+            imp.add_int("pitch_bins", gridParam("impostor_pitch_bins"));
+            imp.add_int("frames", gridParam("impostor_frames"));
             // Quad size: authored customParams impostor_size (elmos, square)
             // wins — impostor-only infantry render the sprite per squad
             // MEMBER, so the quad must be human-scaled, which no derivation

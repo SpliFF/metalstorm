@@ -456,10 +456,9 @@ export interface UnitDefInfo {
 }
 
 export interface UnitImpostorInfo {
-    /** Atlas diffuse+alpha texture URI, 8 columns (headings) × N rows (anim
-     *  frames). FIDELITY-STANDIN: the bake pipeline (beta-units task 4b) hasn't
-     *  landed yet, so this may point at a placeholder/nonexistent asset — the
-     *  renderer doesn't load it yet either (flat grey quad until then). */
+    /** Atlas diffuse+alpha texture URI. v2 directional layout: `yawBins`
+     *  columns × (`pitchBins`·`frames`) rows, baked by
+     *  tools/fable-model-forge/bake_impostors.py (PLAN-metalstorm-impostors.md). */
     diffuseUri: string;
     /** Team-color mask atlas URI (R = blend amount), same layout. */
     teamMaskUri?: string;
@@ -470,6 +469,12 @@ export interface UnitImpostorInfo {
     /** Billboard quad size in elmos. */
     width: number;
     height: number;
+    /** v2 directional grid (default 1/1/1 = legacy single-frame atlas). Both
+     *  the baker and the runtime derive these from impostor_convention.py /
+     *  impostor-atlas.ts. */
+    yawBins?: number;
+    pitchBins?: number;
+    frames?: number;
 }
 
 export interface UnitLodThresholds {

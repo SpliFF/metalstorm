@@ -42,6 +42,10 @@ import {
     type CascadedShadowGenerator,
 } from '@babylonjs/core';
 import { TeamColorPlugin } from './team-color-plugin.js';
+import { ImpostorUvPlugin } from './impostor-uv-plugin.js';
+import {
+    type AtlasGrid, DEFAULT_GRID, isDirectional, atlasRows, selectCellIndex,
+} from './impostor-atlas.js';
 import { getTeamColor } from './team-colors.js';
 import type { PresentationClock } from './presentation-clock.js';
 import type { EntityStateSnapshot } from './entity-state.js';
@@ -49,8 +53,9 @@ import type { EntityStateSnapshot } from './entity-state.js';
 /** Impostor atlas metadata — per unit def. Sourced from the def's client
  *  content or auto-derived from the model. */
 export interface ImpostorAtlas {
-    /** Atlas texture URI (diffuse + alpha). 8 columns (headings 0°, 45°, …, 315°)
-     *  × N rows (animation frames: walk[0..k], idle[0..m]). */
+    /** Atlas texture URI (diffuse + alpha). v2 directional layout: `yawBins`
+     *  columns × (`pitchBins`·`frames`) rows — see impostor-atlas.ts /
+     *  impostor_convention.py. */
     diffuseUri: string;
     /** Team-color mask atlas URI (R = blend amount, same layout). */
     teamMaskUri?: string;
@@ -61,6 +66,20 @@ export interface ImpostorAtlas {
     /** Quad size in world units (elmos). Derived from model bounds. */
     width: number;
     height: number;
+    /** v2 directional grid (PLAN-metalstorm-impostors.md M3). Absent = a
+     *  legacy single-frame atlas (1×1×1): the whole quad maps to the whole
+     *  texture and no directional select happens. */
+    yawBins?: number;
+    pitchBins?: number;
+    frames?: number;
+}
+
+/** The directional grid for an atlas, defaulting a legacy atlas to 1×1×1. */
+export function gridOf(atlas: ImpostorAtlas): AtlasGrid {
+    if (atlas.yawBins && atlas.pitchBins && atlas.frames) {
+        return { yawBins: atlas.yawBins, pitchBins: atlas.pitchBins, frames: atlas.frames };
+    }
+    return DEFAULT_GRID;
 }
 
 /** LOD tier — drives EntityRenderer's per-entity visibility decision. */
@@ -146,6 +165,17 @@ export function createImpostorMaterial(
         mask.hasAlpha = false;
         plugin.teamMask = mask;
     }
+
+    // v2 directional atlas: the per-instance `cellIndex` attribute selects one
+    // (yaw, pitch) cell; the UV-remap plugin rewrites vMainUV1 so the albedo,
+    // alpha, and team mask all read that cell. Legacy 1×1 atlases skip it and
+    // keep the whole-quad mapping (M3, PLAN-metalstorm-impostors.md).
+    const grid = gridOf(atlas);
+    if (isDirectional(grid)) {
+        const uv = new ImpostorUvPlugin(mat);
+        uv.yawBins = grid.yawBins;
+        uv.atlasRows = atlasRows(grid);
+    }
     return mat;
 }
 
@@ -211,10 +241,10 @@ export class ImpostorRenderer {
             this.pendingInstances.set(key, batch);
         }
 
-        // FIDELITY-STANDIN: animation frame logic simplified.
-        // Real implementation: check snapshot.state_anim (MOVING/IDLE),
-        // sample gait phase from velocity × time → walk flipbook frame,
-        // or use idle frame. For now: frame 0 always.
+        // Flipbook frame within the atlas (row-group `frame·pitchBins + pitch`).
+        // frames=1 today, so always 0 — walk/idle flipbook rows are fx-offload
+        // X2 territory (the atlas layout already reserves them downward, so X2
+        // is additive). NOT a standin: single-pose is the plan's M3 state.
         const animFrame = 0;
 
         batch.push({
@@ -229,12 +259,19 @@ export class ImpostorRenderer {
 
     /** Flush pending instances → thin-instance buffers. Called per render. */
     render(cameraPos: Vector3): void {
+        // Screen-aligned (spherical) card orientation, shared by every card
+        // this frame: the camera's own world rotation (view yaw + pitch, no
+        // roll). Directionality comes from per-instance atlas frame SELECTION,
+        // not from twisting each card toward the camera position — that shared
+        // rotation is what kills the point-blank fan-out (PLAN M3). Fallback
+        // to identity when there's no active camera (unit tests).
+        const cardRot = this.scene.activeCamera?.absoluteRotation ?? Quaternion.Identity();
+
         // Group instances per mesh
         const groups = new Map<string, {
             mesh: Mesh;
             matrices: number[];
-            headings: number[];
-            frames: number[];
+            cells: number[];
             count: number;
         }>();
 
@@ -248,44 +285,39 @@ export class ImpostorRenderer {
             const mesh = this.getOrCreateImpostorMesh(defId, team);
             if (!mesh) continue;
 
+            const atlas = this.atlases.get(defId);
+            const grid = atlas ? gridOf(atlas) : DEFAULT_GRID;
             // Instance positions are ground anchors (entity Y is at ground
-            // level) — lift the quad by half its height so the sprite's
-            // feet touch the ground instead of the figure being half-buried.
-            const halfH = (this.atlases.get(defId)?.height ?? 0) * 0.5;
+            // level) — lift the quad by half its height so the sprite's feet
+            // touch the ground. The card pitches with the camera, so lift along
+            // the card's local up (cardRot·Y) rather than world up, keeping the
+            // feet on the terrain from a steep angle.
+            const halfH = (atlas?.height ?? 0) * 0.5;
+            const up = new Vector3(0, halfH, 0);
+            up.rotateByQuaternionToRef(cardRot, up);
 
             const group = {
                 mesh,
                 matrices: [] as number[],
-                headings: [] as number[],
-                frames: [] as number[],
+                cells: [] as number[],
                 count: 0,
             };
 
             for (const inst of instances) {
-                // Camera-facing (Y-axis) billboard baked per-instance.
-                // Mesh.billboardMode does NOT apply per-thin-instance — Babylon
-                // computes it once from the MESH's own transform (our mesh sits
-                // at the origin), so every instance would share one rotation
-                // derived from origin→camera instead of its own position→camera.
-                // In practice that left the quad edge-on (invisible) from most
-                // camera angles. Yaw-only (not full ALL-axis) so the card stays
-                // upright — the standard convention for ground-unit sprite
-                // impostors, and consistent with the heading-quantized atlas
-                // column this def eventually selects.
-                const dx = cameraPos.x - inst.x;
-                const dz = cameraPos.z - inst.z;
-                const yaw = Math.atan2(dx, dz);
-                const rot = Quaternion.RotationAxis(Vector3.Up(), yaw);
-                const mat = Matrix.Compose(Vector3.One(), rot,
-                    new Vector3(inst.x, inst.y + halfH, inst.z));
+                const mat = Matrix.Compose(Vector3.One(), cardRot,
+                    new Vector3(inst.x + up.x, inst.y + up.y, inst.z + up.z));
                 const arr = new Float32Array(16);
                 mat.copyToArray(arr, 0);
                 for (let i = 0; i < 16; i++) group.matrices.push(arr[i]);
 
-                // Per-instance heading (for atlas column select)
-                group.headings.push(quantizeHeading(inst.heading));
-                // Per-instance anim frame (atlas row)
-                group.frames.push(inst.animFrame);
+                // Per-instance directional cell: column from the relative yaw
+                // between the camera and the unit's facing, row from camera
+                // pitch (impostor-atlas.selectCellIndex). animFrame reserved for
+                // fx-offload X2 flipbook rows (frames=1 today).
+                const vx = cameraPos.x - inst.x;
+                const vy = cameraPos.y - inst.y;
+                const vz = cameraPos.z - inst.z;
+                group.cells.push(selectCellIndex(vx, vy, vz, inst.heading, grid, inst.animFrame));
                 group.count++;
             }
 
@@ -293,17 +325,15 @@ export class ImpostorRenderer {
         }
 
         // Update mesh buffers
-        for (const [key, group] of groups) {
+        for (const [, group] of groups) {
             group.mesh.isVisible = true;
             const matBuf = new Float32Array(group.matrices);
             group.mesh.thinInstanceSetBuffer('matrix', matBuf, 16, false);
-
-            // FIDELITY-STANDIN: per-instance heading/frame attributes not yet wired.
-            // When fx-offload X2 lands, these become custom vertex attributes
-            // (thinInstanceSetBuffer('heading', …) + shader reads). For now the
-            // shader uses a fixed atlas frame (column 0, row 0).
-            // TODO(fx-offload-X2): thinInstanceSetBuffer('heading', Float32Array(group.headings), 1)
-            // TODO(fx-offload-X2): thinInstanceSetBuffer('animFrame', Float32Array(group.frames), 1)
+            // Per-instance directional cell selector (ImpostorUvPlugin reads it
+            // in the vertex shader). Harmless on legacy 1×1 atlases (the plugin
+            // isn't attached, so the attribute is simply unused).
+            group.mesh.thinInstanceSetBuffer('cellIndex',
+                new Float32Array(group.cells), 1, false);
 
             group.mesh.thinInstanceCount = group.count;
             group.mesh.thinInstanceRefreshBoundingInfo(false);
@@ -353,8 +383,12 @@ export class ImpostorRenderer {
 
         // Shadow casting (if enabled). The material is ALPHATEST, so the
         // shadow depth pass samples the albedo alpha and casts the sprite
-        // silhouette, not the full quad.
-        if (this.shadowGenerator) {
+        // silhouette. A DIRECTIONAL atlas is excluded: the UV-remap lives in
+        // the material's own vertex shader and doesn't reach Babylon's shadow
+        // depth shader, so a directional caster would shadow the whole-atlas
+        // silhouette (all cells overlaid). See impostor-uv-plugin.ts — the LOD
+        // swap happens at ≲20 px where a cast shadow is sub-pixel anyway.
+        if (this.shadowGenerator && !isDirectional(gridOf(atlas))) {
             this.shadowGenerator.addShadowCaster(mesh);
         }
 

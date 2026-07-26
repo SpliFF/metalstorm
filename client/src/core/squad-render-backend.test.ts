@@ -9,6 +9,7 @@ import type { ImpostorAtlas } from './impostor-renderer.js';
 
 const ATLAS: ImpostorAtlas = {
     diffuseUri: '', walkFrames: 1, idleFrames: 1, width: 12, height: 12,
+    yawBins: 8, pitchBins: 3, frames: 1,
 };
 
 function makeBackend(atlasDefs: Set<number>) {
@@ -54,25 +55,45 @@ describe('SquadRenderBackend impostor sprite members', () => {
         expect(findMesh(scene, 'squadSprite_')).toBeUndefined();
     });
 
-    it('re-billboards an idle sprite member when the camera moves', () => {
+    it('screen-aligned cards do NOT twist when the camera only moves position', () => {
+        // The anti-fan-out contract (PLAN M3): every card shares one rotation
+        // derived from the camera view, not from each member's position → the
+        // matrix is identical when only the camera translates.
         const { backend, scene, camera } = makeBackend(new Set([7]));
         backend.setSquadTeam(1, 0);
         const h = backend.createMember(1, 0, { defId: 7, variant: 0 });
         backend.updateMember(h, 0, 0, 0, 0, 0);
+        camera.computeWorldMatrix(true);
         backend.flush();
         const mesh = findMesh(scene, 'squadSprite_d7_t0')!;
-        const before = Array.from(
-            (mesh.thinInstanceGetWorldMatrices()[0]).toArray());
+        const before = Array.from((mesh.thinInstanceGetWorldMatrices()[0]).toArray());
 
-        // Member is NOT updated again — only the camera moves.
+        // Member is NOT updated again — only the camera translates (no rotation).
         camera.position.set(-100, 50, 0);
+        camera.computeWorldMatrix(true);
         backend.flush();
-        const after = Array.from(
-            (mesh.thinInstanceGetWorldMatrices()[0]).toArray());
+        const after = Array.from((mesh.thinInstanceGetWorldMatrices()[0]).toArray());
+        expect(after).toEqual(before);
+        // Ground anchor + half-height lift along the (unchanged) card up.
+        expect(after[13]).toBeCloseTo(ATLAS.height / 2);
+    });
+
+    it('re-orients screen-aligned cards when the camera rotates', () => {
+        const { backend, scene, camera } = makeBackend(new Set([7]));
+        backend.setSquadTeam(1, 0);
+        const h = backend.createMember(1, 0, { defId: 7, variant: 0 });
+        backend.updateMember(h, 0, 0, 0, 0, 0);
+        camera.computeWorldMatrix(true);
+        backend.flush();
+        const mesh = findMesh(scene, 'squadSprite_d7_t0')!;
+        const before = Array.from((mesh.thinInstanceGetWorldMatrices()[0]).toArray());
+
+        // Camera yaws — the shared card rotation must follow.
+        camera.rotation.y += 0.6;
+        camera.computeWorldMatrix(true);
+        backend.flush();
+        const after = Array.from((mesh.thinInstanceGetWorldMatrices()[0]).toArray());
         expect(after).not.toEqual(before);
-        // Translation (ground anchor + half height lift) is unchanged.
-        expect(after.slice(12, 15)).toEqual(before.slice(12, 15));
-        expect(after[13]).toBe(ATLAS.height / 2);
     });
 
     it('a released sprite slot stops rendering and is reusable', () => {

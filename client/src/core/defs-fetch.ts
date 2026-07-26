@@ -343,6 +343,9 @@ function toImpostorInfo(v: any): UnitImpostorInfo | undefined {
         idleFrames: num(v.idle_frames, 1),
         width: num(v.width),
         height: num(v.height),
+        yawBins: num(v.yaw_bins, 1),
+        pitchBins: num(v.pitch_bins, 1),
+        frames: num(v.frames, 1),
     };
 }
 

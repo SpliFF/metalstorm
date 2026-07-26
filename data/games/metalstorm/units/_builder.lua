@@ -85,6 +85,14 @@ local function mk(spec)
             if impostorOnly then
                 def.customparams.impostor_only = '1'
             end
+            -- v2 directional atlas grid (PLAN-metalstorm-impostors.md M3): the
+            -- baker (bake_impostors.py / impostor_convention.py) renders an
+            -- 8-yaw × 3-pitch × 1-frame atlas for every infantry impostor, and
+            -- the client directional-selects a cell from these. Keep in sync
+            -- with impostor_convention.py if the bake grid ever changes.
+            def.customparams.impostor_yaw_bins = '8'
+            def.customparams.impostor_pitch_bins = '3'
+            def.customparams.impostor_frames = '1'
             -- Sprite quad height/width in elmos (member-scaled — the squad
             -- footprint fallback is way oversized for a single soldier).
             local impostorSize = o.impostorSize or spec.impostorSize

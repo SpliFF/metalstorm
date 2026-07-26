@@ -26,7 +26,8 @@ import {
     Scene, Mesh, MeshBuilder, StandardMaterial, Color3,
     Vector3, Quaternion, Matrix,
 } from '@babylonjs/core';
-import { createImpostorMaterial, type ImpostorAtlas } from './impostor-renderer.js';
+import { createImpostorMaterial, gridOf, type ImpostorAtlas } from './impostor-renderer.js';
+import { type AtlasGrid, selectCellIndex } from './impostor-atlas.js';
 
 /** A grow-on-demand thin-instance pool for one visual class (members of a
  *  given team, or wrecks). Freed slots are collapsed to a zero-scale matrix so
@@ -38,15 +39,19 @@ interface InstancePool {
     highWater: number;        // count uploaded to thinInstanceCount
     free: number[];           // released indices, LIFO
     dirty: boolean;
-    /** Present on impostor-sprite pools only. Sprite quads face the camera,
-     *  so their matrices are recomposed every flush() from the stored member
-     *  positions + the current camera — updateMember() just records the
-     *  position (a member idling while the camera orbits must still
-     *  re-billboard). */
+    /** Present on impostor-sprite pools only. Sprite quads are screen-aligned
+     *  (shared camera rotation), so their matrices AND per-member directional
+     *  cell selectors are recomposed every flush() from the stored member
+     *  positions/headings + the current camera — updateMember() just records
+     *  the pose (a member idling while the camera orbits must re-billboard and
+     *  re-select its yaw column). */
     sprite?: {
         halfH: number;          // quad half-height (ground-anchor lift)
+        grid: AtlasGrid;        // atlas directional grid (yaw × pitch × frames)
         pos: Float32Array;      // capacity * 3, member ground positions
+        heading: Float32Array;  // capacity, member facing (radians, RH)
         alive: Uint8Array;      // capacity, 1 = slot has a live member
+        cells: Float32Array;    // capacity, per-member packed cell index (GPU)
     };
 }
 
@@ -130,12 +135,14 @@ export class SquadRenderBackend {
         const bob = Math.sin(gait * Math.PI * 2) * 0.4;
         const sprite = slot.pool.sprite;
         if (sprite) {
-            // Billboard matrices are composed in flush() against the current
-            // camera; here we only record the member's ground position.
+            // Screen-aligned matrices + directional cell are composed in flush()
+            // against the current camera; here we only record the member's pose
+            // (ground position + facing).
             const base = slot.index * 3;
             sprite.pos[base] = x;
             sprite.pos[base + 1] = y + bob;
             sprite.pos[base + 2] = z;
+            sprite.heading[slot.index] = headingY;
             sprite.alive[slot.index] = 1;
             slot.pool.dirty = true;
             return;
@@ -218,9 +225,13 @@ export class SquadRenderBackend {
      *  an idle member must still turn with an orbiting camera. */
     flush(): void {
         for (const pool of this.memberPools.values()) this.flushPool(pool);
-        const cameraPos = this.scene.activeCamera?.position;
+        const cam = this.scene.activeCamera;
+        const cameraPos = cam?.position;
+        // Screen-aligned card orientation, shared by every sprite this frame:
+        // the camera's world rotation (view yaw + pitch, no roll).
+        const cardRot = cam?.absoluteRotation ?? Quaternion.Identity();
         for (const pool of this.spritePools.values()) {
-            if (cameraPos) this.billboardSpritePool(pool, cameraPos);
+            if (cameraPos) this.billboardSpritePool(pool, cameraPos, cardRot);
             this.flushPool(pool);
         }
         if (this.wreckPool) this.flushPool(this.wreckPool);
@@ -275,29 +286,39 @@ export class SquadRenderBackend {
         pool = this.newPool(mesh);
         pool.sprite = {
             halfH: atlas.height * 0.5,
+            grid: gridOf(atlas),
             pos: new Float32Array(pool.capacity * 3),
+            heading: new Float32Array(pool.capacity),
             alive: new Uint8Array(pool.capacity),
+            cells: new Float32Array(pool.capacity),
         };
         this.spritePools.set(key, pool);
         return pool;
     }
 
-    /** Recompose every live sprite slot's matrix as a yaw-only camera-facing
-     *  billboard (mesh-level billboardMode doesn't apply per-thin-instance —
-     *  see impostor-renderer.ts). Alloc-free. */
-    private billboardSpritePool(pool: InstancePool, cameraPos: Vector3): void {
+    /** Recompose every live sprite slot as a SCREEN-ALIGNED billboard (shared
+     *  camera rotation — no per-member twist-toward-camera, which is what kills
+     *  the point-blank fan-out) and re-select its directional atlas cell from
+     *  the member's facing + the camera (impostor-atlas.ts). Alloc-free. */
+    private billboardSpritePool(pool: InstancePool, cameraPos: Vector3, cardRot: Quaternion): void {
         const sprite = pool.sprite;
         if (!sprite || pool.highWater === 0) return;
+        // Ground-anchor lift along the card's local up so feet stay on terrain
+        // as the card pitches with the camera.
+        this._t.set(0, sprite.halfH, 0);
+        this._t.rotateByQuaternionToRef(cardRot, this._t);
+        const upx = this._t.x, upy = this._t.y, upz = this._t.z;
+        this._s.set(1, 1, 1);
         for (let i = 0; i < pool.highWater; i++) {
             if (!sprite.alive[i]) continue;
             const base = i * 3;
             const x = sprite.pos[base], y = sprite.pos[base + 1], z = sprite.pos[base + 2];
-            const yaw = Math.atan2(cameraPos.x - x, cameraPos.z - z);
-            this._s.set(1, 1, 1);
-            Quaternion.RotationYawPitchRollToRef(yaw, 0, 0, this._q);
-            this._t.set(x, y + sprite.halfH, z);
-            Matrix.ComposeToRef(this._s, this._q, this._t, this._m);
+            this._t.set(x + upx, y + upy, z + upz);
+            Matrix.ComposeToRef(this._s, cardRot, this._t, this._m);
             this._m.copyToArray(pool.matrices, i * 16);
+            sprite.cells[i] = selectCellIndex(
+                cameraPos.x - x, cameraPos.y - y, cameraPos.z - z,
+                sprite.heading[i], sprite.grid);
         }
         pool.dirty = true;
     }
@@ -357,9 +378,15 @@ export class SquadRenderBackend {
             const pos = new Float32Array(cap * 3);
             pos.set(pool.sprite.pos);
             pool.sprite.pos = pos;
+            const heading = new Float32Array(cap);
+            heading.set(pool.sprite.heading);
+            pool.sprite.heading = heading;
             const alive = new Uint8Array(cap);
             alive.set(pool.sprite.alive);
             pool.sprite.alive = alive;
+            const cells = new Float32Array(cap);
+            cells.set(pool.sprite.cells);
+            pool.sprite.cells = cells;
         }
     }
 
@@ -381,6 +408,11 @@ export class SquadRenderBackend {
         if (!pool.dirty) return;
         pool.dirty = false;
         pool.mesh.thinInstanceSetBuffer('matrix', pool.matrices, 16, false);
+        // Per-member directional cell selector (ImpostorUvPlugin reads it in the
+        // vertex shader). Only sprite pools carry it; capsule/wreck pools don't.
+        if (pool.sprite) {
+            pool.mesh.thinInstanceSetBuffer('cellIndex', pool.sprite.cells, 1, false);
+        }
         pool.mesh.thinInstanceCount = pool.highWater;
         pool.mesh.isVisible = pool.highWater > 0;
         if (pool.highWater > 0) {
