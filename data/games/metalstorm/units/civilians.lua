@@ -16,11 +16,11 @@ return {
         customparams = {
             ms_class = 'civilians', civilian = '1',
             squad_size = '12', formation_type = 'blob', formation_radius = '20',
-            -- Impostor-first (PLAN-metalstorm-beta-units.md §2.1 roster:
-            -- civilian-on-foot ships with no 3D model). Authored sprite:
-            -- models/ms_civilians_impostor.ktx2 — deliberately no team mask,
-            -- civilians read as neutral population.
-            impostor_only = '1', impostor_size = '11',
+            -- Member LOD (PLAN-metalstorm-impostors.md M4): 3D body up close
+            -- (models/ms_civilians.gltf), baked directional sprite far
+            -- (models/ms_civilians_impostor.ktx2 — deliberately no team mask,
+            -- civilians read as neutral population).
+            impostor_distance = '900', impostor_size = '11',
             -- v2 directional atlas grid (8 yaw × 3 pitch × 1 frame), matching
             -- bake_impostors.py / impostor_convention.py (M3).
             impostor_yaw_bins = '8', impostor_pitch_bins = '3', impostor_frames = '1',
@@ -42,9 +42,10 @@ return {
         customparams = {
             ms_class = 'civilians', civilian = '1',
             squad_size = '8', formation_type = 'blob', formation_radius = '18',
-            -- Impostor-first like ms_civilians; militia get a team armband
-            -- (models/ms_militia_impostor{,_team}.ktx2).
-            impostor_only = '1', impostor_size = '11',
+            -- Member LOD (PLAN-metalstorm-impostors.md M4): 3D body up close
+            -- (models/ms_militia.gltf), baked directional sprite far; militia
+            -- get a team armband (models/ms_militia_impostor{,_team}.ktx2).
+            impostor_distance = '900', impostor_size = '11',
             impostor_team_mask = '1',
             -- v2 directional atlas grid (8 yaw × 3 pitch × 1 frame), matching
             -- bake_impostors.py / impostor_convention.py (M3).

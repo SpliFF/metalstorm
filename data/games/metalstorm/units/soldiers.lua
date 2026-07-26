@@ -9,11 +9,14 @@ return mk{
     scales = {
         [1] = { weapons = { [1] = { name = 'MS_MG_S1' } },
                 description = 'Rifle section — numerous and expendable',
-                -- Impostor-first per PLAN-metalstorm-beta-units.md §2.1: no
-                -- 3D model for beta, billboard impostor is the unit's
-                -- normal render at any distance. Authored sprite atlas:
-                -- models/ms_soldiers_s1_impostor{,_team}.ktx2 (task 4b).
-                impostorOnly = true, impostorSize = 12,
+                -- Member LOD (PLAN-metalstorm-impostors.md M4): a real low-poly
+                -- 3D body (models/ms_soldiers_s1.gltf) draws each squad member
+                -- up close; beyond impostorDistance the baked directional
+                -- sprite (models/ms_soldiers_s1_impostor{,_team}.ktx2) takes
+                -- over. No longer impostorOnly — the sprite is the FAR tier,
+                -- not the only tier. 900 elmos ≈ where a ~1.8 m body is ≲20 px
+                -- tall at 1080p (tune by eye in the Meridian pass).
+                impostorDistance = 900, impostorSize = 12,
                 impostorTeamMask = true },
         [2] = { weapons = { [1] = { name = 'MS_MG_S2' } } },
         [3] = { weapons = { [1] = { name = 'MS_AC_S1' },

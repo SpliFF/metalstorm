@@ -1597,9 +1597,16 @@ async function gpLoadSquadSystem(gameId: string, scene: Scene, er: EntityRendere
     gpSquadBackend = new SquadRenderBackend(scene, {
         getGroundHeight: (x, z) => er.getGroundHeight(x, z),
         getTeamColor: (t) => er.getTeamColor(t),
-        // Impostor-first defs (beta-units §2.1) draw members as sprite
-        // billboards from the impostor atlas registry instead of capsules.
+        // Members beyond impostorDistance draw as sprite billboards from the
+        // impostor atlas registry (impostors §2.1 / M3).
         getImpostorAtlas: (defId) => gpCtx.impostorRenderer?.getAtlas(defId),
+        // Members within impostorDistance draw the real low-poly 3D body (M4).
+        // EntityRenderer owns the loaded mesh + team material; it returns
+        // undefined until the model streams, so the member stays on the sprite
+        // tier until then and migrates in on the next update.
+        getMemberModel: (defId, team) => er.getMemberModel(defId, team),
+        getImpostorDistance: (defId) =>
+            gpDefCache?.getUnitDef(defId)?.lodThresholds?.impostorDistance,
     });
     const url = `/api/games/data/${gameId}/client/squads/index.js`;
     try {
