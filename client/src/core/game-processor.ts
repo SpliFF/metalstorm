@@ -1597,6 +1597,9 @@ async function gpLoadSquadSystem(gameId: string, scene: Scene, er: EntityRendere
     gpSquadBackend = new SquadRenderBackend(scene, {
         getGroundHeight: (x, z) => er.getGroundHeight(x, z),
         getTeamColor: (t) => er.getTeamColor(t),
+        // Impostor-first defs (beta-units §2.1) draw members as sprite
+        // billboards from the impostor atlas registry instead of capsules.
+        getImpostorAtlas: (defId) => gpCtx.impostorRenderer?.getAtlas(defId),
     });
     const url = `/api/games/data/${gameId}/client/squads/index.js`;
     try {

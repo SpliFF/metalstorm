@@ -38,6 +38,7 @@ import {
     type DirectionalLight,
 } from '@babylonjs/core';
 import { TeamColorPlugin } from './team-color-plugin.js';
+import { TEAM_COLORS } from './team-colors.js';
 import '@babylonjs/loaders/glTF/index.js';
 // KTX2 loader is registered in main.ts (the app entry). All unit
 // textures resolve to `.ktx2` URIs after the texture pipeline migration.
@@ -442,19 +443,8 @@ function loadUnitTextures(
     };
 }
 
-// Spring engine's 10 default team colors (from TeamBase::teamDefaultColor).
-const TEAM_COLORS = [
-    new Color3(90/255, 90/255, 255/255),   // blue
-    new Color3(200/255, 0/255, 0/255),     // red
-    new Color3(255/255, 255/255, 255/255), // white
-    new Color3(38/255, 155/255, 32/255),   // green
-    new Color3(7/255, 31/255, 125/255),    // dark blue
-    new Color3(150/255, 10/255, 180/255),  // purple
-    new Color3(255/255, 255/255, 0/255),   // yellow
-    new Color3(50/255, 50/255, 50/255),    // black
-    new Color3(152/255, 200/255, 220/255), // light blue
-    new Color3(171/255, 171/255, 131/255), // tan
-];
+// Spring engine's 10 default team colors: now the shared team-colors.ts
+// module (imported at the top) so the impostor sprite path tints identically.
 
 // Fallback shape types for defs without models
 enum UnitShape { Box = 0, Cylinder, Cone, Sphere }

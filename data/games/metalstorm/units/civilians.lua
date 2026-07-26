@@ -16,6 +16,11 @@ return {
         customparams = {
             ms_class = 'civilians', civilian = '1',
             squad_size = '12', formation_type = 'blob', formation_radius = '20',
+            -- Impostor-first (PLAN-metalstorm-beta-units.md §2.1 roster:
+            -- civilian-on-foot ships with no 3D model). Authored sprite:
+            -- models/ms_civilians_impostor.ktx2 — deliberately no team mask,
+            -- civilians read as neutral population.
+            impostor_only = '1', impostor_size = '11',
         },
     },
     ms_militia = {
@@ -34,6 +39,10 @@ return {
         customparams = {
             ms_class = 'civilians', civilian = '1',
             squad_size = '8', formation_type = 'blob', formation_radius = '18',
+            -- Impostor-first like ms_civilians; militia get a team armband
+            -- (models/ms_militia_impostor{,_team}.ktx2).
+            impostor_only = '1', impostor_size = '11',
+            impostor_team_mask = '1',
         },
     },
 }

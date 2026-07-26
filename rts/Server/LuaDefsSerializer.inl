@@ -332,15 +332,34 @@ inline std::string SerializeOneUnitDef(
             detail::LuaBuilder imp;
             imp.add_str("diffuse_uri", "/api/games/data/" + gameId +
                 "/models/" + impostorStem + "_impostor.ktx2");
+            // Team-colour mask sidecar (R = blend amount, same convention as
+            // the model pipeline's `<stem>_team.ktx2`). Opt-in via
+            // customParams impostor_team_mask so defs without the authored
+            // sidecar don't trigger a 404 texture fetch per (def, team).
+            const auto teamMaskIt = ud.customParams.find("impostor_team_mask");
+            if (teamMaskIt != ud.customParams.end() &&
+                teamMaskIt->second != "0" && !teamMaskIt->second.empty()) {
+                imp.add_str("team_mask_uri", "/api/games/data/" + gameId +
+                    "/models/" + impostorStem + "_impostor_team.ktx2");
+            }
             imp.add_int("walk_frames", 1);
             imp.add_int("idle_frames", 1);
-            // Quad size: 2x the model radius when a model exists (matches
-            // the bake pipeline's eventual convention, §6). impostor_only
-            // defs have no model (GetModelRadius() == 0) — fall back to the
-            // footprint world size (footprint units are 2*SQUARE_SIZE elmos
-            // each, GlobalConstants.h) so the billboard is human/vehicle-
-            // scaled instead of a degenerate ~0-size quad.
-            float quadSize = ud.GetModelRadius() * 2.0f;
+            // Quad size: authored customParams impostor_size (elmos, square)
+            // wins — impostor-only infantry render the sprite per squad
+            // MEMBER, so the quad must be human-scaled, which no derivation
+            // from the squad unit's footprint can express. Otherwise: 2x the
+            // model radius when a model exists (matches the bake pipeline's
+            // eventual convention, §6); impostor_only defs have no model
+            // (GetModelRadius() == 0) — fall back to the footprint world
+            // size (footprint units are 2*SQUARE_SIZE elmos each,
+            // GlobalConstants.h) so the billboard is at least unit-scaled
+            // instead of a degenerate ~0-size quad.
+            float quadSize = 0.0f;
+            const auto sizeIt = ud.customParams.find("impostor_size");
+            if (sizeIt != ud.customParams.end())
+                quadSize = std::strtof(sizeIt->second.c_str(), nullptr);
+            if (quadSize <= 0.0f)
+                quadSize = ud.GetModelRadius() * 2.0f;
             if (quadSize <= 0.0f) {
                 quadSize = static_cast<float>(std::max(ud.xsize, ud.zsize)) *
                     (2.0f * SQUARE_SIZE);

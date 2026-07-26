@@ -9,17 +9,24 @@
 // heightmap + camera. Everything here is presentation only — nothing feeds the
 // sim (CLAUDE.md squad-based design; PLAN-latency-squads.md).
 //
-// Members are a procedural proxy (a small capsule, team-coloured) rather than a
-// per-piece soldier model — a DELIBERATE first-wire simplification, not a Recoil
-// divergence: soldier-model fan-out is Metalstorm-specific cosmetic presentation
-// with no Recoil equivalent, and the sim only ever knows the single squad unit.
-// Swapping the proxy for real member models is a later polish step behind the
-// same RenderBackend seam.
+// Members draw as one of two visual classes:
+//  - IMPOSTOR SPRITE — defs with a registered impostor atlas (beta-units
+//    §2.1 impostor-first infantry/civilians: authored `<stem>_impostor.ktx2`
+//    sprite sheets) render each member as a camera-facing billboard quad,
+//    thin-instanced per (defId, team) with the shared impostor material
+//    (impostor-renderer.ts: alpha-tested PBR + TeamColorPlugin).
+//  - PROXY CAPSULE — everything else keeps the small team-coloured capsule,
+//    a DELIBERATE first-wire simplification, not a Recoil divergence:
+//    soldier-model fan-out is Metalstorm-specific cosmetic presentation with
+//    no Recoil equivalent, and the sim only ever knows the single squad
+//    unit. Swapping the capsule for real member models is a later polish
+//    step behind the same RenderBackend seam.
 
 import {
     Scene, Mesh, MeshBuilder, StandardMaterial, Color3,
     Vector3, Quaternion, Matrix,
 } from '@babylonjs/core';
+import { createImpostorMaterial, type ImpostorAtlas } from './impostor-renderer.js';
 
 /** A grow-on-demand thin-instance pool for one visual class (members of a
  *  given team, or wrecks). Freed slots are collapsed to a zero-scale matrix so
@@ -31,6 +38,16 @@ interface InstancePool {
     highWater: number;        // count uploaded to thinInstanceCount
     free: number[];           // released indices, LIFO
     dirty: boolean;
+    /** Present on impostor-sprite pools only. Sprite quads face the camera,
+     *  so their matrices are recomposed every flush() from the stored member
+     *  positions + the current camera — updateMember() just records the
+     *  position (a member idling while the camera orbits must still
+     *  re-billboard). */
+    sprite?: {
+        halfH: number;          // quad half-height (ground-anchor lift)
+        pos: Float32Array;      // capacity * 3, member ground positions
+        alive: Uint8Array;      // capacity, 1 = slot has a live member
+    };
 }
 
 interface MemberSlot { pool: InstancePool; index: number; }
@@ -44,6 +61,9 @@ export interface SquadHost {
     getGroundHeight(x: number, z: number): number;
     /** Same team palette the unit meshes use. */
     getTeamColor(team: number): Color3;
+    /** Impostor sprite atlas for a def, if one streamed (impostor-renderer's
+     *  registry) — members of such defs draw as sprite billboards. */
+    getImpostorAtlas(defId: number): ImpostorAtlas | undefined;
 }
 
 export class SquadRenderBackend {
@@ -56,8 +76,10 @@ export class SquadRenderBackend {
      *  (game-processor) as squads are routed. */
     private squadTeam = new Map<number, number>();
 
-    /** One member pool per team (lazily created). */
+    /** One capsule member pool per team (lazily created). */
     private memberPools = new Map<number, InstancePool>();
+    /** One sprite member pool per "defId:team" (lazily created). */
+    private spritePools = new Map<string, InstancePool>();
     /** Single shared wreck pool. */
     private wreckPool: InstancePool | null = null;
 
@@ -89,9 +111,12 @@ export class SquadRenderBackend {
 
     // --- RenderBackend interface -------------------------------------------
 
-    createMember(squadId: number, _memberId: number, _v: { defId: number; variant: number }): number {
+    createMember(squadId: number, _memberId: number, v: { defId: number; variant: number }): number {
         const team = this.squadTeam.get(squadId) ?? 0;
-        const pool = this.getMemberPool(team);
+        const atlas = this.host.getImpostorAtlas(v.defId);
+        const pool = atlas
+            ? this.getSpritePool(v.defId, team, atlas)
+            : this.getMemberPool(team);
         const index = this.allocSlot(pool);
         const handle = this.nextHandle++;
         this.memberByHandle.set(handle, { pool, index });
@@ -103,6 +128,18 @@ export class SquadRenderBackend {
         if (!slot) return;
         // Gait 0..1 → a subtle vertical bob so a moving squad reads as walking.
         const bob = Math.sin(gait * Math.PI * 2) * 0.4;
+        const sprite = slot.pool.sprite;
+        if (sprite) {
+            // Billboard matrices are composed in flush() against the current
+            // camera; here we only record the member's ground position.
+            const base = slot.index * 3;
+            sprite.pos[base] = x;
+            sprite.pos[base + 1] = y + bob;
+            sprite.pos[base + 2] = z;
+            sprite.alive[slot.index] = 1;
+            slot.pool.dirty = true;
+            return;
+        }
         this.writeMatrix(slot.pool, slot.index, x, y + MEMBER_HEIGHT * 0.5 + bob, z, headingY, 1);
     }
 
@@ -175,16 +212,26 @@ export class SquadRenderBackend {
     // --- per-frame flush ----------------------------------------------------
 
     /** Upload dirty pools. Called once per render frame after
-     *  SquadManager.update() has issued this frame's member transforms. */
+     *  SquadManager.update() has issued this frame's member transforms.
+     *  Sprite pools re-billboard against the active camera every flush
+     *  (yaw-only camera facing, same convention as impostor-renderer.ts) —
+     *  an idle member must still turn with an orbiting camera. */
     flush(): void {
         for (const pool of this.memberPools.values()) this.flushPool(pool);
+        const cameraPos = this.scene.activeCamera?.position;
+        for (const pool of this.spritePools.values()) {
+            if (cameraPos) this.billboardSpritePool(pool, cameraPos);
+            this.flushPool(pool);
+        }
         if (this.wreckPool) this.flushPool(this.wreckPool);
     }
 
     dispose(): void {
         for (const pool of this.memberPools.values()) pool.mesh.dispose();
+        for (const pool of this.spritePools.values()) pool.mesh.dispose();
         this.wreckPool?.mesh.dispose();
         this.memberPools.clear();
+        this.spritePools.clear();
         this.wreckPool = null;
         this.memberByHandle.clear();
         this.wreckByHandle.clear();
@@ -211,6 +258,48 @@ export class SquadRenderBackend {
         pool = this.newPool(mesh);
         this.memberPools.set(team, pool);
         return pool;
+    }
+
+    private getSpritePool(defId: number, team: number, atlas: ImpostorAtlas): InstancePool {
+        const key = `${defId}:${team}`;
+        let pool = this.spritePools.get(key);
+        if (pool) return pool;
+        const mesh = MeshBuilder.CreatePlane(`squadSprite_d${defId}_t${team}`, {
+            width: atlas.width, height: atlas.height, sideOrientation: Mesh.DOUBLESIDE,
+        }, this.scene);
+        mesh.material = createImpostorMaterial(
+            `squadSpriteMat_d${defId}_t${team}`, atlas, team, this.scene);
+        mesh.isPickable = false;
+        mesh.alwaysSelectAsActiveMesh = true;
+        mesh.doNotSyncBoundingInfo = true;
+        pool = this.newPool(mesh);
+        pool.sprite = {
+            halfH: atlas.height * 0.5,
+            pos: new Float32Array(pool.capacity * 3),
+            alive: new Uint8Array(pool.capacity),
+        };
+        this.spritePools.set(key, pool);
+        return pool;
+    }
+
+    /** Recompose every live sprite slot's matrix as a yaw-only camera-facing
+     *  billboard (mesh-level billboardMode doesn't apply per-thin-instance —
+     *  see impostor-renderer.ts). Alloc-free. */
+    private billboardSpritePool(pool: InstancePool, cameraPos: Vector3): void {
+        const sprite = pool.sprite;
+        if (!sprite || pool.highWater === 0) return;
+        for (let i = 0; i < pool.highWater; i++) {
+            if (!sprite.alive[i]) continue;
+            const base = i * 3;
+            const x = sprite.pos[base], y = sprite.pos[base + 1], z = sprite.pos[base + 2];
+            const yaw = Math.atan2(cameraPos.x - x, cameraPos.z - z);
+            this._s.set(1, 1, 1);
+            Quaternion.RotationYawPitchRollToRef(yaw, 0, 0, this._q);
+            this._t.set(x, y + sprite.halfH, z);
+            Matrix.ComposeToRef(this._s, this._q, this._t, this._m);
+            this._m.copyToArray(pool.matrices, i * 16);
+        }
+        pool.dirty = true;
     }
 
     private getWreckPool(): InstancePool {
@@ -253,6 +342,7 @@ export class SquadRenderBackend {
         // Collapse to zero scale so the freed slot renders as nothing.
         const base = index * 16;
         pool.matrices.fill(0, base, base + 16);
+        if (pool.sprite) pool.sprite.alive[index] = 0;
         pool.free.push(index);
         pool.dirty = true;
     }
@@ -263,6 +353,14 @@ export class SquadRenderBackend {
         next.set(pool.matrices);
         pool.matrices = next;
         pool.capacity = cap;
+        if (pool.sprite) {
+            const pos = new Float32Array(cap * 3);
+            pos.set(pool.sprite.pos);
+            pool.sprite.pos = pos;
+            const alive = new Uint8Array(cap);
+            alive.set(pool.sprite.alive);
+            pool.sprite.alive = alive;
+        }
     }
 
     /** Compose scale·yaw·translate into the pool's matrix buffer at `index`.
