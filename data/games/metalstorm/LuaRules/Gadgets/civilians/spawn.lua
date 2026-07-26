@@ -2,6 +2,29 @@
 -- Plain library module (NOT a gadget). Included by game_civilians.lua.
 local spawn = {}
 
+-- Extra clearance (elmos) added on top of a building's footprint corner
+-- radius when scattering population around it, to cover the spawned unit's
+-- own footprint plus a small pathfinding margin.
+local SCATTER_MARGIN = 40
+
+--- The circular radius (elmos) that fully clears a building's footprint at
+--- every angle, not just along its axes. A footprint is a rectangle, so its
+--- corner (half-diagonal) reaches farther than its edges — a scatter radius
+--- only checked against the edge distance can still land on a diagonal
+--- corner of the blocked yardmap. Data-driven from the def's actual
+--- xsize/zsize (rather than a flat guess) since site buildings vary
+--- (habitat/depot/transit_hub have different footprints).
+local function footprintClearRadius(buildingDefName)
+    local bdef = buildingDefName and UnitDefNames[buildingDefName]
+    if not bdef then return 0 end
+    -- xsize/zsize are full footprint width in elmos = value * 4 for the half-extent
+    -- (Spring convention: xsize/zsize already encode footprint*2, and
+    -- SQUARE_SIZE=8, so half-width elmos = xsize/2 * 8 = xsize * 4).
+    local halfX = (bdef.xsize or 0) * 4
+    local halfZ = (bdef.zsize or 0) * 4
+    return math.sqrt(halfX * halfX + halfZ * halfZ) + SCATTER_MARGIN
+end
+
 --- Spawn one civilian group/vehicle on the Gaia team. Returns unitID.
 function spawn.one(civ, defName, x, z, facing)
     local y = Spring.GetGroundHeight(x, z)
@@ -64,6 +87,10 @@ function spawn.seed(civ)
         if site.population and site.population > 0 and site.defPool then
             local spawnCount = site.population
             local defPool = site.defPool
+            -- Minimum scatter radius that clears the site building's footprint
+            -- at every angle (falls back to the old flat 100 if there's no
+            -- building, e.g. an unrecognised site.kind).
+            local minRadius = math.max(100, footprintClearRadius(buildingDef))
 
             for i = 1, spawnCount do
                 -- Pick a def from the pool (round-robin for even distribution)
@@ -77,9 +104,9 @@ function spawn.seed(civ)
                     actualDef = 'ms_civtruck'
                 end
 
-                -- Scatter around the site position (radius ~100-150 elmos)
+                -- Scatter around the site position, clear of the building
                 local angle = math.random() * 2 * math.pi
-                local radius = 100 + math.random() * 50
+                local radius = minRadius + math.random() * 50
                 local x = site.pos.x + radius * math.cos(angle)
                 local z = site.pos.z + radius * math.sin(angle)
 

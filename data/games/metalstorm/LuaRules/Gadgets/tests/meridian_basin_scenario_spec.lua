@@ -158,8 +158,9 @@ describe("Meridian Basin Scenario", function()
         assert.is_table(scn.civilians.units)
         assert.equals(2, #scn.civilians.units)  -- North + south habitats
 
-        -- Verify positions match habitat locations
-        assert.equals(2700, scn.civilians.units[1].x)
+        -- Verify positions are offset from the habitat centre (clear of the
+        -- building's blocked footprint — see meridian_basin.lua's comment).
+        assert.equals(2920, scn.civilians.units[1].x)
         assert.equals('ambient', scn.civilians.units[1].role)
     end)
 
