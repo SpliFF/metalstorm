@@ -23,7 +23,12 @@ local Slate = {}
 local function explicitGoals(picture, role, out)
     for id, o in pairs(picture.board or {}) do
         if o.state == 'active' and (role.explicitMode ~= 'none') then
-            local eligible = (o.team == nil) or (o.team == role.teamId)
+            -- game_objectives.lua always publishes `team` as `o.forTeam or -1`
+            -- (never nil) — -1 means "open to anyone" (matches
+            -- ui/lib/objectives.js's own forTeam() convention). `nil` is kept
+            -- as an equivalent for hand-built test fixtures / a not-yet-read
+            -- board entry.
+            local eligible = (o.team == nil) or (o.team == -1) or (o.team == role.teamId)
             if eligible then
                 out[#out + 1] = {
                     kind     = 'OBJECTIVE',
@@ -162,11 +167,24 @@ function Slate.intelStale(key, intel)
 end
 
 --- Composition gap vs threat (counters bias from profile doctrine). STUB:
--- returns nil (no gap) until the power/counters table is ingested.
+-- returns nil (no gap) — the DATA it would need does not exist yet, so this
+-- stays a documented gap rather than a guess:
+--   1. picture.lua's ledger[region].byClass / intel[region].byClass are now
+--      populated (task 3, keyed off the power-table def→class map), so "own
+--      composition" and "enemy composition" per region ARE available.
+--   2. There is no counters/effectiveness matrix anywhere in the game data
+--      (no `strongVs`/`weakVs`/counter_class on any unit def or in
+--      weapondefs.lua) to turn "enemy has lots of class X" into "therefore
+--      build class Y" — that relationship doesn't exist to read, only to
+--      invent, and CLAUDE.md is explicit: reproduce the game's own data,
+--      don't substitute hardcoded balance guesses for it.
+--   3. There is no "factory idle" signal on the AI surface either
+--      (AI.getOwnUnits returns id/x/z/health/defId only — no build-queue or
+--      order state; see rts/Server/AI/AIScriptContext.h).
+-- Needs a real counters table (a combat-resolution/game-data ask) and an
+-- idle-factory read (an AI-surface ask) before this can be more than a
+-- guess; both are engine/game-data gaps, not a Picture-shape problem.
 function Slate.compositionGap(picture, profile)
-    -- TODO: compare own byClass strength to enemy intel composition through
-    -- the counters table (combat-resolution) with profile.doctrine bias;
-    -- require an idle factory. Return { class, defName, region, value }.
     return nil
 end
 

@@ -43,7 +43,8 @@ end
 --- Region graph: regions[key] = { owner, contested, value, tags, neighbors }.
 -- Geometry (value/tags/neighbors) comes from the static regions.json export
 -- (regions plan §5 / ask R1); owner/contested come from region_* rulesParams.
--- STUB until AI1: returns {}.
+-- Empty (no graph loaded, or AI4/AI1 unavailable) is honest "unknown", not
+-- an error — regionOf() and every caller already degrade safely on {}.
 local function readRegions(c)
     local regions = {}
     local AI = _G.AI
@@ -86,32 +87,96 @@ local function readRegions(c)
     return regions
 end
 
+-- Mirrors game_objectives.lua's PUBLISHED_FIELDS exactly (same list
+-- ui/lib/objectives.js's pull() polls) — the public objective contract.
+local BOARD_FIELDS = {
+    'type', 'scope', 'state', 'reward', 'team', 'team2', 'progress',
+    'phase', 'stage', 'expire', 'region', 'x', 'z', 'r', 'suggested',
+}
+
 --- Objective board: board[id] = { type, scope, state, reward, team, progress,
 -- pos }. Objectives are public (objectives plan §6-E3) → all readable.
--- STUB until AI1.
+-- `objective_count` is a HIGH-WATER MARK, not a live count (game_objectives.lua
+-- §1 "Publishing v2"): ids 1..count may be missing (resolved-and-retention-
+-- expired, or an id burned by a rejected Create). Mirrors ui/lib/objectives.js's
+-- `pull()` poll-per-field pattern exactly, since AI.getRulesParam is the same
+-- per-key getter shape — `type` is the field publish() sets first and
+-- clearPublished() clears among the rest, so a dead/gap id reads back with no
+-- `type` and is skipped, same liveness check as objectives.js's `list()`.
+--
+-- GAP: game_objectives.lua's internal `source` ('scripted'|'systemic'|'bounty')
+-- and the raw `bounty` stake amount are NEVER published (not in
+-- PUBLISHED_FIELDS) — a staked bounty folds invisibly into `reward` via
+-- `o.reward + EscrowTotal(o.id)` at publish time. There is today no honest,
+-- player-visible signal distinguishing "this objective's reward includes a
+-- staked bounty" from "this objective was naturally high-value" — the AI
+-- cannot see it any more than a human player can from the objectives panel.
+-- slate.lua's `o.source == 'bounty'` branch (planner §3.2 co-commander ×3
+-- weighting) therefore never fires from real data today; it only exercises
+-- via hand-built test fixtures. Needs an engine/game-Lua ask (publish a
+-- `suggested`-like `bounty` flag) to close, not a Picture-side fix.
 local function readBoard(c)
-    if not c.rulesParam then return {} end
-    -- TODO(AI1): count = AI.getRulesParam('game','objective_count'); for i=1..count
-    -- read objective_<i>_{type,scope,state,reward,team,progress,x,z,region}.
-    return {}
+    local board = {}
+    if not c.rulesParam then return board end
+    local AI = _G.AI
+    local count = tonumber(AI.getRulesParam('game', 'objective_count')) or 0
+    for id = 1, count do
+        local p = 'objective_' .. id .. '_'
+        local o = {}
+        for _, field in ipairs(BOARD_FIELDS) do
+            o[field] = AI.getRulesParam('game', p .. field)
+        end
+        if o.type ~= nil then
+            -- Position hint is exactly one of `region` (resolve via the
+            -- region graph) or `x`/`z`/`r` world coordinates — never both
+            -- (game_objectives.lua's positionHint()).
+            local pos = nil
+            if o.x ~= nil then pos = { x = o.x, z = o.z, r = o.r } end
+            board[id] = {
+                type = o.type, scope = o.scope, state = o.state,
+                reward = o.reward or 0, team = o.team, team2 = o.team2,
+                progress = o.progress or 0, phase = o.phase, stage = o.stage,
+                expire = o.expire, region = o.region, pos = pos,
+                suggested = o.suggested,
+            }
+        end
+    end
+    return board
 end
 
 --- Economy: own player pool + team pool (authority plan §1 — both
 -- team-scoped, allied-visibility rulesParams, NOT public/game-scoped: see
 -- game_authority.lua's ALLIED_LOS note).
--- STUB until AI1: zeros (governor then behaves as "broke" → turtles, safe).
 local function readEconomy(c, role)
-    if not c.rulesParam then
+    if not c.rulesParam or not (role and role.teamId) then
         return { ownPool = 0, teamPool = 0, costScale = 1.0, reserveHonoured = true }
     end
-    -- TODO(AI1):
-    --   ownPool  = AI.getRulesParam('team', teamID, 'authority_player_'..playerID)
-    --   teamPool = AI.getRulesParam('team', teamID, 'authority_pool')
-    --   costScale= AI.getRulesParam('game','... modoption mirror ...') or 1.0
-    -- Co-commander role NEVER draws the team fallback (plan §5) — that policy
-    -- lives in the actuator's charge call, but the planner reads the flag here.
-    return { ownPool = 0, teamPool = 0, costScale = 1.0,
-             teamFallback = role and role.teamAuthorityFallback or false }
+    local AI = _G.AI
+    -- AI.getRulesParam('team', key) reads OUR OWN team's params only (2-arg,
+    -- AI1 — the snapshot carries no other team's rulesParams, fog-honest).
+    -- authority_pool is the team-wide savings pool (game_authority.lua
+    -- Spring.SetTeamRulesParam(teamID, 'authority_pool', v, ALLIED_LOS)).
+    local teamPool = tonumber(AI.getRulesParam('team', 'authority_pool')) or 0
+    -- GAP: authority_player_<playerID> (the per-player pool) needs a
+    -- playerID. AI3 ("AI slots get playerIDs + pools like humans") has NOT
+    -- landed — plan §9.1: "verified FALSE — AI = team only, no playerID".
+    -- Until it does there is no per-AI pool to read; ownPool honestly stays
+    -- 0. This doesn't blind full_side (teamAuthorityFallback=true still
+    -- reaches teamPool through the governor's fallback term below) — only
+    -- co-commander's "own pool only, never the team fallback" invariant
+    -- (plan §5) is unenforceable meanwhile, the exact gap the plan's AI3
+    -- status already tracks (authority lane, not this Picture builder).
+    return {
+        ownPool = 0,
+        teamPool = teamPool,
+        -- GAP: authority_cost_scale is an Initialize()-time modoption read
+        -- straight into a local in game_authority.lua — never republished as
+        -- a rulesParam mirror, so there is no AI- (or client-) readable
+        -- source for it today. Default to 1.0 (no scaling) rather than
+        -- guessing at an engine surface that doesn't exist.
+        costScale = 1.0,
+        teamFallback = role.teamAuthorityFallback or false,
+    }
 end
 
 --- Comma-list rulesParam value -> array of raw string entries (empty array
@@ -131,11 +196,10 @@ end
 -- once AI1 lands), BINDING on the planner. Only meaningful for
 -- co-commander/caretaker roles (role.readsGuidance).
 --
--- STUB until AI1 (AI.getRulesParam): the read SHAPE and rulesParam names
--- below are real (they match game_ai_guidance.lua's publish() exactly) —
--- only the actual AI.getRulesParam plumbing is missing. Degrades to `empty`
--- (the planner already treats an all-empty guidance as "no override", never
--- an error) until that capability exists.
+-- rulesParam names below match game_ai_guidance.lua's publish() exactly.
+-- Degrades to `empty` (the planner already treats an all-empty guidance as
+-- "no override", never an error) whenever the role doesn't read guidance or
+-- AI.getRulesParam isn't available.
 local function readGuidance(c, role)
     local empty = {
         stance = nil, regionPaint = {}, assetLocks = {},
@@ -146,7 +210,13 @@ local function readGuidance(c, role)
     local AI = _G.AI
     local teamID = role.teamId
     local prefix = 'guidance_' .. teamID .. '_'
-    local function get(key) return AI.getRulesParam('team', teamID, prefix .. key) end
+    -- AI.getRulesParam('team', key) is 2-arg (AI1): 'team' scope is
+    -- implicitly OUR OWN team (the snapshot only ever carries this AI's own
+    -- teamParams — fog-honest, no cross-team read). The key itself already
+    -- embeds teamID as literal text (game_ai_guidance.lua's publish()
+    -- convention), which is why `prefix` still needs teamID even though the
+    -- scope alone would resolve to the right team.
+    local function get(key) return AI.getRulesParam('team', prefix .. key) end
 
     local regionPaint = {}
     for _, key in ipairs(splitList(get('paint_keys'))) do
@@ -175,7 +245,7 @@ end
 -- planner scores proposals (ai/strategos/planner.lua Planner.evaluateProposals),
 -- the actuator responds (Actuators:respondProposal, engine ask I1).
 --
--- STUB until AI1: rulesParam names match game_parley.lua's publish() exactly
+-- rulesParam names match game_parley.lua's publish() exactly
 -- (parley_count high-water + parley_<id>_* fields, GAME-scoped/public — a
 -- negotiation record is visible to both parties and spectators, unlike
 -- guidance). trust is necessarily PARTIAL: there is no "list every team"
@@ -228,9 +298,22 @@ end
 -- regions and note the fidelity. Strength = current health (regions plan §2).
 --=============================================================================
 
+--- def→class lookup: powerTable[defId].class, or nil for defs with no
+-- ms_class customParam (statics/civilians — see units/_builder.lua). A
+-- missing class buckets under the `_unclassed` byClass key rather than being
+-- dropped, so ledger.strength still accounts for every unit's health.
+local function classOf(power, defId)
+    local entry = power and power[defId]
+    return entry and entry.class or nil
+end
+
 --- Own force ledger: ledger[regionKey] = { strength, groups, byClass }.
--- Buckets units/squads into regions via the region point-lookup.
-local function buildLedger(c, regions)
+-- Buckets units/squads into regions via the region point-lookup grid
+-- (regionOf, regions §1.2) and classes via the power-table def→class map
+-- (AI4). Unresolved points land under 'wilds' (regionOf's own catch-all,
+-- mirroring ui/lib/regions.js); a totally blind AI (no graph loaded) falls
+-- back further to the synthetic '_all' bucket.
+local function buildLedger(c, regions, power)
     local ledger = {}
     local AI = _G.AI
     local list
@@ -242,25 +325,23 @@ local function buildLedger(c, regions)
         return ledger
     end
     for _, u in ipairs(list or {}) do
-        -- TODO: regionOf(u.x, u.z) needs the region lookup grid (regions §1.2)
-        -- rebuilt from regions.json client-side. Until the graph is readable,
-        -- bucket everything under a single synthetic key so downstream code
-        -- has a valid, if coarse, ledger.
         local key = Picture.regionOf(u.x, u.z, regions) or '_all'
         local bucket = ledger[key]
         if not bucket then
             bucket = { strength = 0, groups = {}, byClass = {} }
             ledger[key] = bucket
         end
-        bucket.strength = bucket.strength + (u.health or 0)
-        -- byClass/byScale needs the def→class map (def export); stubbed.
+        local health = u.health or 0
+        bucket.strength = bucket.strength + health
+        local class = classOf(power, u.defId) or '_unclassed'
+        bucket.byClass[class] = (bucket.byClass[class] or 0) + health
     end
     return ledger
 end
 
 --- Enemy intel with decaying memory (plan §2). Fresh sightings overwrite;
 -- unseen regions decay toward "unknown" and are forgotten below a floor.
-local function updateIntel(c, regions, memory, frame, config)
+local function updateIntel(c, regions, memory, frame, config, power)
     local intel = memory.intel
     local AI = _G.AI
 
@@ -284,13 +365,23 @@ local function updateIntel(c, regions, memory, frame, config)
     end
     for _, e in ipairs(list or {}) do
         local key = Picture.regionOf(e.x, e.z, regions) or '_all'
-        local mem = intel[key] or { strength = 0 }
-        mem.strength      = (mem.strength or 0) + (e.health or 0)
+        local mem = intel[key] or { strength = 0, byClass = {} }
+        mem.byClass = mem.byClass or {}
+        local health = e.health or 0
+        mem.strength      = (mem.strength or 0) + health
+        local class = classOf(power, e.defId) or '_unclassed'
+        mem.byClass[class] = (mem.byClass[class] or 0) + health
         mem.lastSeenFrame = frame
         mem.confidence    = 1.0
         intel[key] = mem
     end
-    -- TODO: radar blips (position only, no type) as low-confidence entries.
+
+    -- GAP: radar blips (position-only, no unit type) would fold in here as
+    -- low-confidence entries — AIScriptContext exposes no such surface today
+    -- (only getOwnUnits/getVisibleEnemies, both full sightings; see
+    -- rts/Server/AI/AIScriptContext.h). No `l_getRadarBlips`-shaped callin
+    -- exists to feature-detect against, unlike every other §2 source. Needs
+    -- an engine ask before this can be anything but a documented gap.
     return intel
 end
 
@@ -322,14 +413,105 @@ local function loadPowerTable(c)
 end
 
 --=============================================================================
--- Region point-lookup (shared helper). Real impl needs the lookup grid built
--- from regions.json (regions §1.2). STUB: no graph → nil (callers fall back
--- to the '_all' synthetic bucket).
+-- Region point-lookup (shared helper). Mirrors ui/lib/regions.js's
+-- `graphKeyAt` EXACTLY (same cell size, same bbox-then-point-in-polygon
+-- confirm, same 'wilds' fallback) — client-side order-cost prediction and
+-- this Picture must agree on which region a point falls in, or the AI's
+-- authority-cost math (config.lua predictDirectiveCost) would silently
+-- diverge from what the sim actually charges (regions plan §5).
 --=============================================================================
+local DEFAULT_LOOKUP_CELL = 256
+
+--- Ray-casting point-in-polygon test — identical algorithm to
+-- ui/lib/regions.js's `pointInPolygon` (same edge-crossing formula, same
+-- z/x roles), just Lua's 1-based indexing in place of JS's 0-based.
+local function pointInPolygon(x, z, polygon)
+    local inside = false
+    local n = #polygon
+    local j = n
+    for i = 1, n do
+        local pi, pj = polygon[i], polygon[j]
+        if ((pi.z > z) ~= (pj.z > z)) and
+           (x < (pj.x - pi.x) * (z - pi.z) / (pj.z - pi.z) + pi.x) then
+            inside = not inside
+        end
+        j = i
+    end
+    return inside
+end
+
+--- Cell ("cx:cz") → list of region keys whose bbox overlaps it. Mirrors
+-- ui/lib/regions.js's `buildLookupGrid` (bbox-per-region, register into
+-- every overlapped cell; no bounds clamping needed here since authored
+-- polygons are already validated in-bounds — MapProcessor.cpp rejects
+-- out-of-bounds vertices at export time).
+local function buildLookupGrid(regions, cellSize)
+    local cells = {}
+    for key, r in pairs(regions) do
+        local polygon = r.polygon
+        if polygon and #polygon > 0 then
+            local minX, maxX = math.huge, -math.huge
+            local minZ, maxZ = math.huge, -math.huge
+            for _, pt in ipairs(polygon) do
+                if pt.x < minX then minX = pt.x end
+                if pt.x > maxX then maxX = pt.x end
+                if pt.z < minZ then minZ = pt.z end
+                if pt.z > maxZ then maxZ = pt.z end
+            end
+            local cx0, cx1 = math.floor(minX / cellSize), math.floor(maxX / cellSize)
+            local cz0, cz1 = math.floor(minZ / cellSize), math.floor(maxZ / cellSize)
+            for cz = cz0, cz1 do
+                for cx = cx0, cx1 do
+                    local cellKey = cx .. ':' .. cz
+                    local list = cells[cellKey]
+                    if not list then list = {}; cells[cellKey] = list end
+                    list[#list + 1] = key
+                end
+            end
+        end
+    end
+    return { cellSize = cellSize, cells = cells }
+end
+
+-- Cached by object identity of the `regions` table it was built from. The
+-- O(1) payoff is WITHIN one strategic tick: buildLedger/updateIntel call
+-- regionOf once per own/enemy unit (up to hundreds) against the SAME
+-- `regions` table readRegions() produced for this refresh, so the grid is
+-- built once per tick and reused for every point query in it, rather than
+-- once per unit. readRegions() returns a fresh table each tick (owner/
+-- contested overlay changes every refresh), so the cache naturally misses
+-- and rebuilds across ticks — at 0.2 Hz over ~50 regions that rebuild is
+-- itself negligible; it's the per-unit cost this amortises.
+local cachedGridFor, cachedGrid = nil, nil
+
+--- Region at world position → key. O(1) cell lookup (bbox filter) + a
+-- point-in-polygon confirm on every bbox candidate (a cell's overlap list is
+-- a filter, not a verdict — same reasoning as the client). `nil` regions (no
+-- graph loaded at all, a blind AI) → nil, matching the existing '_all'
+-- synthetic-bucket convention callers already use; a loaded graph with no
+-- polygon covering the point → 'wilds', the reserved catch-all key
+-- (regions/partition.lua validateGraph — an authored region may never claim
+-- it) — the SAME resolution ui/lib/regions.js's graph provider returns.
 function Picture.regionOf(x, z, regions)
     if not regions or next(regions) == nil then return nil end
-    -- TODO: O(1) lookup-grid cell → region, boundary point-in-polygon confirm.
-    return nil
+
+    if cachedGridFor ~= regions then
+        cachedGrid = buildLookupGrid(regions, DEFAULT_LOOKUP_CELL)
+        cachedGridFor = regions
+    end
+
+    local cx = math.floor(x / cachedGrid.cellSize)
+    local cz = math.floor(z / cachedGrid.cellSize)
+    local candidates = cachedGrid.cells[cx .. ':' .. cz]
+    if candidates then
+        for _, key in ipairs(candidates) do
+            local r = regions[key]
+            if r and r.polygon and pointInPolygon(x, z, r.polygon) then
+                return key
+            end
+        end
+    end
+    return 'wilds'
 end
 
 --=============================================================================
@@ -343,6 +525,7 @@ function Picture.refresh(ctx)
     local config  = ctx.config
 
     local regions = readRegions(c)
+    local power   = loadPowerTable(c)   -- computed first: ledger/intel byClass keys off it
     local picture = {
         frame     = frame,
         caps      = c,                                  -- for diagnostics/tests
@@ -354,10 +537,10 @@ function Picture.refresh(ctx)
         economy   = readEconomy(c, role),
         guidance  = readGuidance(c, role),
         parley    = readParley(c, role),
-        power     = loadPowerTable(c),
+        power     = power,
 
-        ledger    = buildLedger(c, regions),
-        intel     = updateIntel(c, regions, memory, frame, config),
+        ledger    = buildLedger(c, regions, power),
+        intel     = updateIntel(c, regions, memory, frame, config, power),
     }
     -- Guidance funding rate cap (interaction §6.2) clamps the governor's
     -- spend/min — planner.lua's governor() already reads
