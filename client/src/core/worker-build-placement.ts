@@ -56,6 +56,7 @@ import type { DefCache } from './def-cache.js';
 import { CommandBuffer, OPT, type CommandNotifier } from './command-buffer.js';
 import { nearestMetalSpot, type MetalSpot } from './metal-spots.js';
 import { DRAG_THRESHOLD_PX } from './selection-core.js';
+import { isTerrainMesh } from './terrain.js';
 
 /// Bit 11 of UnitDef.flags marks a factory (see protocol.fbs). Exported —
 /// PLAN-playable.md G4 reuses it in game-processor.ts to find the selected
@@ -613,7 +614,7 @@ export class WorkerBuildPlacement {
      *  terrain mesh. Null on a miss so callers fall back to the cursor-pick Y. */
     private sampleTerrainY(x: number, z: number): number | null {
         const ray = new Ray(new Vector3(x, 1e6, z), new Vector3(0, -1, 0), 2e6);
-        const pick = this.scene.pickWithRay(ray, (m) => m.name === 'terrain');
+        const pick = this.scene.pickWithRay(ray, isTerrainMesh);
         return (pick?.hit && pick.pickedPoint) ? pick.pickedPoint.y : null;
     }
 
@@ -734,7 +735,7 @@ export class WorkerBuildPlacement {
         const camera = this.opts.getCamera(viewId);
         if (!camera) return null;
         const dpr = this.opts.getDpr();
-        const pick = this.scene.pick(cssX * dpr, cssY * dpr, (m) => m.name === 'terrain', false, camera);
+        const pick = this.scene.pick(cssX * dpr, cssY * dpr, isTerrainMesh, false, camera);
         return (pick?.hit && pick.pickedPoint) ? pick.pickedPoint : null;
     }
 

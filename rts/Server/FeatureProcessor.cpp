@@ -11,6 +11,8 @@
 #include "System/FileSystem/FileHandler.h"
 #include "System/SpringLog/SpringLog.h"
 
+#include <nlohmann/json.hpp>
+
 #define LOG_SECTION "feature-proc"
 
 #include <algorithm>
@@ -18,6 +20,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -66,6 +69,18 @@ int luaGetInt(lua_State* L, const char* field, int def = 0) {
     return static_cast<int>(luaGetFloat(L, field, static_cast<float>(def)));
 }
 
+/// Read `a`, falling back to the alternate spelling `b` when absent.
+/// Def files that call `lowerkeys()` expose `footprintx`; the ones that
+/// just `return { ... }` keep Spring's authored `footprintX`. Presence
+/// has to be tested explicitly — a value-based fallback can't tell an
+/// absent field from one legitimately set to the default.
+int luaGetIntAlt(lua_State* L, const char* a, const char* b, int def) {
+    lua_getfield(L, -1, a);
+    const bool present = !lua_isnil(L, -1);
+    lua_pop(L, 1);
+    return luaGetInt(L, present ? a : b, def);
+}
+
 bool luaGetBool(lua_State* L, const char* field, bool def = false) {
     lua_getfield(L, -1, field);
     bool v = def;
@@ -98,14 +113,35 @@ lua_State* CreateMapLuaState(const std::string& mapDir) {
         "end\n"
         "module = module or function() end\n"
         "Spring = Spring or { Echo = print, GetGameFrame = function() return 0 end }\n"
+        // Recoil's lowerkeys (LuaUtils::LowerKeysReal) is RECURSIVE and
+        // rewrites in place. A shallow copy only lowercases the def names
+        // — every def *body* keeps Spring's mixed-case spelling
+        // (`footprintX`, `blocking`, `damage`), so the parser below reads
+        // defaults for half the fields. Keys are collected before being
+        // rewritten because mutating a table mid-`pairs` is undefined;
+        // `seen` makes self-referential def tables terminate, as Recoil's
+        // checkedSet does.
         "function lowerkeys(t)\n"
         "  if type(t) ~= 'table' then return t end\n"
-        "  local out = {}\n"
-        "  for k,v in pairs(t) do\n"
-        "    if type(k) == 'string' then out[k:lower()] = v\n"
-        "    else out[k] = v end\n"
+        "  local seen = {}\n"
+        "  local function walk(tbl)\n"
+        "    if seen[tbl] then return tbl end\n"
+        "    seen[tbl] = true\n"
+        "    local renames = {}\n"
+        "    for k, v in pairs(tbl) do\n"
+        "      if type(v) == 'table' then walk(v) end\n"
+        "      if type(k) == 'string' then\n"
+        "        local lk = k:lower()\n"
+        "        if lk ~= k then renames[#renames + 1] = { k, lk, v } end\n"
+        "      end\n"
+        "    end\n"
+        "    for _, r in ipairs(renames) do\n"
+        "      tbl[r[1]] = nil\n"
+        "      tbl[r[2]] = r[3]\n"
+        "    end\n"
+        "    return tbl\n"
         "  end\n"
-        "  return out\n"
+        "  return walk(t)\n"
         "end\n"
     );
     LuaVFSSimple::Register(L);
@@ -152,10 +188,8 @@ void ParseFeatureDef(lua_State* L,
     // subdirectory like `objects3d/foo.s3o` or just `foo.s3o`).
     def.modelFile = luaGetString(L, "object");
 
-    def.footprintX = luaGetInt(L, "footprintx", 1);
-    if (def.footprintX <= 0) def.footprintX = luaGetInt(L, "footprintX", 1);
-    def.footprintZ = luaGetInt(L, "footprintz", 1);
-    if (def.footprintZ <= 0) def.footprintZ = luaGetInt(L, "footprintZ", 1);
+    def.footprintX = luaGetIntAlt(L, "footprintx", "footprintX", 1);
+    def.footprintZ = luaGetIntAlt(L, "footprintz", "footprintZ", 1);
 
     def.height = luaGetFloat(L, "height", 0);
     def.radius = luaGetFloat(L, "radius", 0);
@@ -468,6 +502,121 @@ std::string ReadS3OTexture1(const std::string& s3oPath) {
     return std::string(buf);
 }
 
+/// Copy `src` to `dst` when the destination is missing or older.
+/// Returns false only on a real filesystem error.
+bool CopyIfStale(const fs::path& src, const fs::path& dst) {
+    std::error_code ec;
+    if (fs::exists(dst) &&
+        fs::last_write_time(src, ec) <= fs::last_write_time(dst, ec) && !ec) {
+        return true;
+    }
+    fs::copy_file(src, dst, fs::copy_options::overwrite_existing, ec);
+    if (ec) {
+        SLOG(SPRING_LOG_ERROR, "copy failed: %s -> %s: %s",
+            src.string().c_str(), dst.string().c_str(), ec.message().c_str());
+        return false;
+    }
+    return true;
+}
+
+/// True when `ref` already names a model in the runtime's native form.
+/// The client loads glTF 2.0 directly (Babylon SceneLoader), so a map that
+/// ships authored `.gltf`/`.glb` props — anything out of
+/// `tools/fable-model-forge` or `tools/mapgen/gen_vegetation_models.py` —
+/// has nothing to convert.
+bool IsNativeGltf(const std::string& ref) {
+    const std::string ext = toLower(fs::path(ref).extension().string());
+    return ext == ".gltf" || ext == ".glb";
+}
+
+/// Install an already-native glTF prop into `features/` verbatim, together
+/// with every sidecar it needs, instead of round-tripping it through
+/// Assimp.
+///
+/// The round-trip would be actively lossy here: modelimporter rewrites
+/// every texture URI on the assumption that a *separate* pass (S3O channel
+/// splitting in gameconverter) will later materialise the `_diffuse` /
+/// `_orm` / `_team` KTX2 set, drops non-Assimp material extensions, and
+/// re-derives SPRINGRTS_geometry that the authoring tool already emitted
+/// exactly. `ReadS3OTexture1` also can't see the textures of a non-S3O
+/// model, so the texture-conversion step above finds nothing to convert.
+///
+/// Sidecars come from the document itself (`buffers[].uri`, `images[].uri`)
+/// plus the impostor-atlas naming convention (`<stem>_impostor.*`, baked by
+/// tools/fable-model-forge/bake_impostors.py) so the client's LOD tier can
+/// resolve them next to the model. `.glb` is self-contained — the file is
+/// simply copied.
+///
+/// `textureFile` stays empty: a native glTF references its own images by
+/// URI (relative to the model, i.e. inside `features/`), which is how unit
+/// models already load. The client's `applyTexture` override is only for
+/// the S3O path, where the texture lives outside the document.
+void InstallNativeModelForDef(MapMetadata& meta, MapFeatureDef& def,
+                              const std::string& srcModel) {
+    const fs::path src(srcModel);
+    const fs::path srcDir = src.parent_path();
+    const fs::path featuresDir = fs::path(meta.processedDir) / "features";
+    const std::string fileName = src.filename().string();
+
+    if (!CopyIfStale(src, featuresDir / fileName)) {
+        def.modelFile.clear();
+        return;
+    }
+
+    std::vector<std::string> sidecars;
+    if (toLower(src.extension().string()) == ".gltf") {
+        std::ifstream f(src);
+        nlohmann::json doc = nlohmann::json::parse(f, nullptr,
+                                                   /*allow_exceptions=*/false);
+        if (doc.is_discarded()) {
+            SLOG(SPRING_LOG_WARNING, "%s: unparseable glTF '%s', "
+                "sidecars not resolved", def.name.c_str(), fileName.c_str());
+        } else {
+            for (const char* section : {"buffers", "images"}) {
+                if (!doc.contains(section) || !doc[section].is_array()) continue;
+                for (const auto& e : doc[section]) {
+                    if (!e.contains("uri") || !e["uri"].is_string()) continue;
+                    const std::string uri = e["uri"].get<std::string>();
+                    // Data URIs are inline; absolute/parent paths would
+                    // escape the map package, so both are ignored.
+                    if (uri.rfind("data:", 0) == 0) continue;
+                    if (uri.find("..") != std::string::npos) continue;
+                    if (!uri.empty() && uri[0] == '/') continue;
+                    sidecars.push_back(uri);
+                }
+            }
+        }
+    }
+
+    // Impostor atlases are named by convention, not referenced from the
+    // glTF (they are an LOD tier, not a material input).
+    const std::string stem = src.stem().string();
+    if (fs::is_directory(srcDir)) {
+        for (const auto& entry : fs::directory_iterator(srcDir)) {
+            if (!entry.is_regular_file()) continue;
+            const std::string n = entry.path().filename().string();
+            if (n.rfind(stem + "_impostor", 0) == 0) sidecars.push_back(n);
+        }
+    }
+
+    int copied = 0;
+    for (const auto& rel : sidecars) {
+        const fs::path from = srcDir / rel;
+        if (!fs::exists(from)) {
+            SLOG(SPRING_LOG_WARNING, "%s: sidecar '%s' referenced by %s "
+                "is missing", def.name.c_str(), rel.c_str(), fileName.c_str());
+            continue;
+        }
+        const fs::path to = featuresDir / fs::path(rel).filename();
+        if (CopyIfStale(from, to)) ++copied;
+    }
+
+    def.modelFile = fileName;
+    def.textureFile.clear();
+    SLOG(SPRING_LOG_INFO, "%s: native glTF '%s' installed (+%d sidecar(s))",
+        def.name.c_str(), fileName.c_str(), copied);
+}
+
 void ConvertAssetsForDef(MapMetadata& meta, MapFeatureDef& def) {
     const std::string srcModel = ResolveModelPath(meta.sourcePath, def.modelFile);
     if (srcModel.empty()) {
@@ -479,6 +628,12 @@ void ConvertAssetsForDef(MapMetadata& meta, MapFeatureDef& def) {
 
     fs::path featuresDir = fs::path(meta.processedDir) / "features";
     fs::create_directories(featuresDir);
+
+    // ---- Native glTF props bypass the S3O conversion pipeline ----
+    if (IsNativeGltf(srcModel)) {
+        InstallNativeModelForDef(meta, def, srcModel);
+        return;
+    }
 
     // ---- Texture: read the S3O's tex1 field, find on disk, convert ----
     std::string texBasename = ReadS3OTexture1(srcModel);

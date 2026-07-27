@@ -37,9 +37,20 @@ def world_offset(pieces, i):
     return off
 
 
+DEFAULT_TEXTURE_MAPS = ('diffuse', 'orm', 'emissive', 'team')
+
+
 def export(pieces, stem, texmode='ktx2', outdir='out', clips=None,
-           normal_map=False):
-    """clips (optional): authored animation clips —
+           normal_map=False, texture_maps=DEFAULT_TEXTURE_MAPS):
+    """texture_maps: which of the PBR set this model actually ships.
+    Units use the full four (`DEFAULT_TEXTURE_MAPS`); map props such as
+    the vegetation set (tools/mapgen/gen_vegetation_models.py) ship only
+    ('diffuse', 'orm') — no emissive, and no team colour, since features
+    are never team-owned. Slots that are absent are omitted from the
+    material (and SPRINGRTS_team_color from extensionsUsed) rather than
+    pointed at a black placeholder nobody has to download.
+
+    clips (optional): authored animation clips —
         [{'name': 'walk',
           'channels': [(piece_name, 'rotation'|'translation'|'scale',
                         [(t_sec, value), ...]), ...]}, ...]
@@ -192,10 +203,11 @@ def export(pieces, stem, texmode='ktx2', outdir='out', clips=None,
 
     # ── materials / textures ──
     ext = 'png' if texmode == 'png' else 'ktx2'
-    names = [f'{stem}_diffuse.{ext}', f'{stem}_orm.{ext}',
-             f'{stem}_emissive.{ext}', f'{stem}_team.{ext}']
-    if normal_map:
-        names.append(f'{stem}_normals.{ext}')
+    if 'diffuse' not in texture_maps:
+        raise ValueError('texture_maps must include "diffuse"')
+    slots = list(texture_maps) + (['normals'] if normal_map else [])
+    names = [f'{stem}_{s}.{ext}' for s in slots]
+    slot_index = {s: i for i, s in enumerate(slots)}
     images = [dict(mimeType=f'image/{ "png" if texmode == "png" else "ktx2"}',
                    uri=n) for n in names]
     ntex = len(names)
@@ -205,21 +217,24 @@ def export(pieces, stem, texmode='ktx2', outdir='out', clips=None,
         textures = [dict(sampler=0,
                          extensions=dict(KHR_texture_basisu=dict(source=i)))
                     for i in range(ntex)]
-    material = dict(
-        name=stem,
-        pbrMetallicRoughness=dict(
-            baseColorTexture=dict(index=0),
-            metallicRoughnessTexture=dict(index=1),
-            metallicFactor=1.0, roughnessFactor=1.0),
-        occlusionTexture=dict(index=1),
-        emissiveTexture=dict(index=2),
-        emissiveFactor=[1.0, 1.0, 1.0],
-        extensions=dict(SPRINGRTS_team_color=dict(maskTexture=dict(index=3))),
-    )
+    pbr = dict(baseColorTexture=dict(index=slot_index['diffuse']),
+               metallicFactor=1.0, roughnessFactor=1.0)
+    material = dict(name=stem, pbrMetallicRoughness=pbr)
+    if 'orm' in slot_index:
+        pbr['metallicRoughnessTexture'] = dict(index=slot_index['orm'])
+        material['occlusionTexture'] = dict(index=slot_index['orm'])
+    if 'emissive' in slot_index:
+        material['emissiveTexture'] = dict(index=slot_index['emissive'])
+        material['emissiveFactor'] = [1.0, 1.0, 1.0]
+    if 'team' in slot_index:
+        material['extensions'] = dict(
+            SPRINGRTS_team_color=dict(maskTexture=dict(index=slot_index['team'])))
     if normal_map:
-        material['normalTexture'] = dict(index=4)
+        material['normalTexture'] = dict(index=slot_index['normals'])
 
-    used = ['SPRINGRTS_geometry', 'SPRINGRTS_team_color']
+    used = ['SPRINGRTS_geometry']
+    if 'team' in slot_index:
+        used.append('SPRINGRTS_team_color')
     required = []
     if texmode != 'png':
         used = ['KHR_texture_basisu'] + used

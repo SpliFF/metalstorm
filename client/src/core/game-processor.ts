@@ -33,9 +33,10 @@ import type { EntityStateSnapshot } from './entity-state.js';
 // `window.__*` injections in scene-lighting/client-settings were switched to
 // `globalThis` for this move — PLAN-game-worker.md GW4 Bucket-2).
 import {
-    buildTerrainMesh, loadTerrainTextures, TerrainFog, DeformableTerrain,
+    buildTerrainMesh, loadTerrainTextures, attachTerrainSplatFromDecals,
+    TerrainFog, DeformableTerrain, isTerrainMesh, attachTerrainDecalOverlay,
     setTerrainDecalPluginEnabled, attachTerrainWaterAbsorption,
-    type MapDimensions, type FogDarkening,
+    type MapDimensions, type FogDarkening, type TerrainMeshGroup,
 } from './terrain.js';
 import { fetchMapDataHttp, type ParsedMapData } from './map-data.js';
 import {
@@ -94,8 +95,9 @@ import { setActiveFxLightPool } from './zk-model-material.js';
 import { DistortionRenderer } from './distortion-renderer.js';
 import { MuzzleFlareRenderer } from './muzzle-flare-renderer.js';
 import { DecalOverlay, buildTrackTypeNames } from './decal-overlay.js';
-import { attachDecalOverlay } from './decal-overlay-plugin.js';
 import { renderMapFeatures, DynamicFeatureRenderer } from './feature-renderer.js';
+import type { FeatureLodController } from './feature-lod-renderer.js';
+import { FeatureTier, type FeatureLodConfig } from './feature-lod.js';
 import { RTSCamera } from './rts-camera.js';
 import { TrainPresentation } from './train-presentation.js';
 import { OrbitRig, type OrbitTarget } from './orbit-rig.js';
@@ -326,7 +328,9 @@ function gpSchedule(frame: number, kind: ScheduledKind, fire: () => void): void 
 let gpDrainedSoundEvents: ResolvedSoundEvent[] = [];
 /// GW4-c3 terrain state, populated once the map data HTTP fetch resolves.
 /// Mirrors the pre-move main.ts `onMapData` terrain build.
-let gpTerrainMesh: Mesh | null = null;
+/// PLAN-maps M4: the terrain is a chunk grid sharing one material, not a
+/// single mesh — `TerrainMeshGroup` owns the chunks + LOD levels.
+let gpTerrain: TerrainMeshGroup | null = null;
 let gpTerrainFog: TerrainFog | null = null;
 let gpDeformTerrain: DeformableTerrain | null = null;
 let gpMapData: ParsedMapData | null = null;
@@ -358,6 +362,10 @@ let gpBuildBeamRenderer: BuildBeamRenderer | null = null;
 let gpCombatFX: CombatFX | null = null;
 let gpDecalOverlay: DecalOverlay | null = null;
 let gpDynamicFeatureRenderer: DynamicFeatureRenderer | null = null;
+/// PLAN-maps.md M6: distance LOD for map features that ship a baked impostor
+/// atlas. Null on every map whose features have none (all maps today) — the
+/// full-mesh path in feature-renderer.ts is unchanged for those.
+let gpFeatureLod: FeatureLodController | null = null;
 let gpTrainPresentation: TrainPresentation | null = null;
 /// Metalstorm squad fan-out (PLAN-metalstorm-squads.md §6). The pure-logic
 /// squad system is a NATIVE game module loaded over HTTP from
@@ -648,10 +656,10 @@ async function gpLoadMap(msg: GpInitToWorker): Promise<void> {
     });
 
     // Terrain mesh from the embedded heightmap.
-    const terrainMesh = buildTerrainMesh(scene, mapDims, map.heightmap);
-    terrainMesh.receiveShadows = true;
-    gpTerrainMesh = terrainMesh;
-    gpDeformTerrain = new DeformableTerrain(terrainMesh, mapDims);
+    const terrain = buildTerrainMesh(scene, mapDims, map.heightmap);
+    terrain.setReceiveShadows(true);
+    gpTerrain = terrain;
+    gpDeformTerrain = new DeformableTerrain(terrain);
     postLog(1, '[gp] terrain mesh built from MapData heightmap');
 
     // GW4-c4: hand the heightmap to the entity renderer so units clamp to the
@@ -697,9 +705,27 @@ async function gpLoadMap(msg: GpInitToWorker): Promise<void> {
 
     // DXT1/KTX2 tile textures over HTTP.
     if (map.tilesX > 0 && map.tilesZ > 0) {
-        loadTerrainTextures(scene, terrainMesh, mapBaseUrl, mapDims).catch(e => {
+        loadTerrainTextures(scene, terrain, mapBaseUrl, mapDims).catch(e => {
             postLog(2, `[gp] terrain texture loading failed: ${e}`);
         });
+    }
+
+    // Recoil splat-detail shading (PLAN-maps.md §1.2): near-field signed
+    // detail layers over the baked tile albedo. No-op when the map ships no
+    // splat textures. Attached now (before the async tile-atlas swap lands);
+    // the reattach dance in terrain.ts carries it across material swaps.
+    if (map.decals?.splatDistrTex && map.decals?.splatDetailTex) {
+        try {
+            attachTerrainSplatFromDecals(scene, terrain, {
+                splatDistrTex: map.decals.splatDistrTex,
+                splatDetailTex: map.decals.splatDetailTex,
+                splatScales: map.decals.splatScales,
+                splatMults: map.decals.splatMults,
+            }, mapBaseUrl, mapDims);
+            postLog(0, '[gp] terrain splat-detail attached');
+        } catch (e) {
+            postLog(2, `[gp] terrain splat attach failed: ${e}`);
+        }
     }
 
     // GW4-c5: ground decal overlay (PLAN-decals.md D7) — craters from scar
@@ -713,18 +739,25 @@ async function gpLoadMap(msg: GpInitToWorker): Promise<void> {
     decalOverlay.setTrackTypes(
         buildTrackTypeNames((gpDefCache?.getAllUnitDefs() ?? []).map(d => d.trackType)));
     gpDecalOverlay = decalOverlay;
-    if (terrainMesh.material) {
-        attachDecalOverlay(terrainMesh.material,
-            decalOverlay.coarseTexture, decalOverlay.fineTexture, decalOverlay.fineState,
-            decalOverlay.coarseTexel, decalOverlay.fineTexel,
-            map.widthElmos, map.heightElmos);
-    }
+    // Attaches to every terrain material (one shared instance today, one per
+    // atlas page once the paged path swaps materials in).
+    attachTerrainDecalOverlay(terrain, decalOverlay,
+        map.widthElmos, map.heightElmos);
 
     // GW4-c5: static map-placed features (rocks, trees, wrecks) — thin-instanced
     // .glb, registered as shadow casters. Runtime feature spawns go through the
     // dynamic feature renderer (onFeatureLifecycle).
-    renderMapFeatures(scene, map, gpCtx.sceneLighting!.csm).catch((err) =>
-        postLog(2, `[gp] renderMapFeatures failed: ${err}`));
+    gpFeatureLod?.dispose();
+    gpFeatureLod = null;
+    renderMapFeatures(scene, map, gpCtx.sceneLighting!.csm).then((res) => {
+        // A map reload may have raced ahead of the async .glb loads; only
+        // adopt the controller if this scene is still the live one.
+        if (gpScene !== scene) { res.lod?.dispose(); return; }
+        gpFeatureLod = res.lod;
+        if (res.lod) {
+            postLog(1, `[gp] feature impostor LOD active: ${res.lod.typeCount} type(s)`);
+        }
+    }).catch((err) => postLog(2, `[gp] renderMapFeatures failed: ${err}`));
 
     // Water plane at Y=0 (maps with voidWater=true ship their own fluid widget).
     // FIDELITY-STANDIN: a flat alpha-blended plane instead of Recoil's BumpWater
@@ -763,8 +796,8 @@ async function gpLoadMap(msg: GpInitToWorker): Promise<void> {
     // terrain.ts's reattach path.
     if (map.minHeight < 0 && !map.water.voidWater) {
         void loadMapWaterAbsorption(mapSourceAbs).then((colors) => {
-            if (gpTerrainMesh === terrainMesh && gpScene) {
-                attachTerrainWaterAbsorption(terrainMesh, colors);
+            if (gpTerrain === terrain && gpScene) {
+                attachTerrainWaterAbsorption(terrain, colors);
             }
         });
     }
@@ -1915,7 +1948,7 @@ export function gpInit(msg: GpInitToWorker): void {
     (globalThis as Record<string, unknown>).__perfToggles = {
         /** Hazard #1: the ~10-tap terrain decal-overlay fragment block. */
         terrainPlugin: (on: boolean): boolean =>
-            setTerrainDecalPluginEnabled(gpTerrainMesh, on),
+            setTerrainDecalPluginEnabled(gpTerrain, on),
         /** Hazard #2: the periodic + pan-driven full RTT re-stamp. */
         decalFade: (on: boolean): boolean => {
             if (!gpDecalOverlay) return false;
@@ -1935,6 +1968,25 @@ export function gpInit(msg: GpInitToWorker): void {
         /** Hazard #5: skip the LuaUI render-thread pass. */
         luaUi: (on: boolean): boolean => { gpUiPassEnabled = on; return on; },
     };
+    // PLAN-maps.md M6: map-feature LOD live-tuning + attribution, e.g.
+    //   window.__gp('__featureLod.get()')                        // tier counts
+    //   window.__gp('__featureLod.set({impostorDistance: 800})')
+    //   window.__gp('__featureLod.force("far")')                 // A/B a tier
+    //   window.__gp('__featureLod.force(null)')
+    // `get()` returns null on maps whose features ship no impostor atlases.
+    (globalThis as Record<string, unknown>).__featureLod = {
+        get: (): Record<string, unknown> | null => gpFeatureLod?.getStats() ?? null,
+        set: (patch: Partial<FeatureLodConfig>): FeatureLodConfig | null =>
+            gpFeatureLod?.setConfig(patch) ?? null,
+        force: (tier: 'near' | 'far' | 'culled' | null): string | null => {
+            if (!gpFeatureLod) return null;
+            const map: Record<string, FeatureTier> = {
+                near: FeatureTier.Near, far: FeatureTier.Far, culled: FeatureTier.Culled,
+            };
+            return gpFeatureLod.setForceTier(tier ? (map[tier] ?? null) : null);
+        },
+    };
+
     // Fog-of-war terrain-darkening live-tuning hook (docs/lighting.md). The
     // out-of-vision terrain is dimmed, never blacked out; tune the per-tier
     // levels from the main DevTools console, e.g.
@@ -2172,6 +2224,10 @@ export function gpInit(msg: GpInitToWorker): void {
         gpCtx.fxLightPool?.update(fxDt, camera.position);
         gpDistortion?.tick(fxDt);
         gpMuzzleFlare?.tick(fxDt);
+        // PLAN-maps.md M6: feature LOD. Per-frame work is one billboard-matrix
+        // uniform per feature type plus any live crossfade; the tier pass
+        // itself is throttled internally (interval + camera-movement gates).
+        gpFeatureLod?.update(camera, now);
         gpMark(3);  // decals+lights
         scene.render();
         gpMark(4);  // render
@@ -2368,7 +2424,7 @@ export function gpInit(msg: GpInitToWorker): void {
         pickGround: (cssX, cssY, viewId) => {
             if (viewId !== 0) return null;
             const dpr = gpDpr;
-            const pick = scene.pick(cssX * dpr, cssY * dpr, (m) => m.name === 'terrain', false, camera);
+            const pick = scene.pick(cssX * dpr, cssY * dpr, isTerrainMesh, false, camera);
             return (pick?.hit && pick.pickedPoint) ? pick.pickedPoint : null;
         },
         onArmedChanged: (armed) => postToMain({ type: 'gp:directiveShapeArmed', armed }),
@@ -3000,6 +3056,8 @@ export function gpShutdown(): void {
     gpDecalOverlay = null;
     gpDynamicFeatureRenderer?.dispose();
     gpDynamicFeatureRenderer = null;
+    gpFeatureLod?.dispose();
+    gpFeatureLod = null;
     gpFxSimSpeed = 1;
     // Model-harness rigs (PLAN-model-harness): the scene they drive is being
     // disposed below, so just drop them — no restore needed.
@@ -3011,7 +3069,7 @@ export function gpShutdown(): void {
     gpAimController = null;
     gpTerrainFog?.dispose();
     gpTerrainFog = null;
-    gpTerrainMesh = null;
+    gpTerrain = null;
     gpDeformTerrain = null;
     gpMapData = null;
     gpStartCameraFramed = false;   // re-frame the next game's start on load

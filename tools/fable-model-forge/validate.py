@@ -5,13 +5,20 @@ pieces, team mask on materials[0], clip names, SPRINGRTS_geometry) plus
 piece/parent + POSITION min/max sanity. Usage:
 
     python3 validate.py out/fable_tank.gltf [tri_budget] [piece,piece,...]
+                        [--no-team]
+
+--no-team skips the team-mask check for models that are never team-owned:
+map props (tools/mapgen/gen_vegetation_models.py) ship diffuse + ORM only.
 """
 import json
 import sys
 
-path = sys.argv[1] if len(sys.argv) > 1 else 'out/fable_tank.gltf'
-budget = int(sys.argv[2]) if len(sys.argv) > 2 else 2000
-required = (sys.argv[3].split(',') if len(sys.argv) > 3 else
+argv = [a for a in sys.argv[1:] if not a.startswith('--')]
+want_team = '--no-team' not in sys.argv
+
+path = argv[0] if len(argv) > 0 else 'out/fable_tank.gltf'
+budget = int(argv[1]) if len(argv) > 1 else 2000
+required = (argv[2].split(',') if len(argv) > 2 else
             ['body', 'turret', 'barrel', 'muzzle'])
 
 doc = json.load(open(path))
@@ -35,12 +42,15 @@ print(f"required pieces : {'OK' if not missing else 'MISSING ' + str(missing)}")
 if missing:
     fails.append('pieces')
 
-mat0 = (doc.get('materials') or [{}])[0]
-mask = mat0.get('extensions', {}).get('SPRINGRTS_team_color', {}) \
-           .get('maskTexture', {}).get('index')
-print(f"team mask mat[0]: {'OK (texture %s)' % mask if isinstance(mask, int) else 'FAIL'}")
-if not isinstance(mask, int):
-    fails.append('team mask')
+if want_team:
+    mat0 = (doc.get('materials') or [{}])[0]
+    mask = mat0.get('extensions', {}).get('SPRINGRTS_team_color', {}) \
+               .get('maskTexture', {}).get('index')
+    print(f"team mask mat[0]: {'OK (texture %s)' % mask if isinstance(mask, int) else 'FAIL'}")
+    if not isinstance(mask, int):
+        fails.append('team mask')
+else:
+    print("team mask mat[0]: skipped (--no-team)")
 
 geo = doc.get('extensions', {}).get('SPRINGRTS_geometry')
 ok_geo = bool(geo) and 'SPRINGRTS_geometry' in doc.get('extensionsUsed', [])

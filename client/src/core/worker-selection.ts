@@ -39,6 +39,7 @@ import type { Connection } from './connection.js';
 import { CommandBuffer, CMD, OPT, type CommandNotifier } from './command-buffer.js';
 import { SELECT_PIXEL_RADIUS, SELECT_RADIUS, DRAG_THRESHOLD_PX } from './selection-core.js';
 import { SoundCategory } from './sound-events.js';
+import { isTerrainMesh } from './terrain.js';
 
 /** Canvas-relative CSS-pixel rectangle for the main-thread drag overlay. */
 export interface DragBox { x0: number; y0: number; x1: number; y1: number; }
@@ -462,7 +463,7 @@ export class WorkerSelection {
     private pickGroundAt(cssX: number, cssY: number, camera: FreeCamera): Vector3 | null {
         const pick = this.scene.pick(
             cssX * this.dpr, cssY * this.dpr,
-            (m) => m.name === 'terrain', false, camera);
+            isTerrainMesh, false, camera);
         return (pick?.hit && pick.pickedPoint) ? pick.pickedPoint : null;
     }
 

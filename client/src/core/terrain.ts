@@ -1,10 +1,19 @@
 /**
- * Terrain — heightmap mesh + DXT1 tile texture compositing.
+ * Terrain — chunked heightmap mesh + DXT1 tile texture compositing.
  *
  * Builds a terrain mesh from uint16 heightmap data and textures it
  * by compositing 32x32 DXT1 tiles into larger WebGL textures using
  * compressedTexSubImage2D. No intermediate format conversion — raw
  * DXT1 bytes go straight from the server to the GPU.
+ *
+ * PLAN-maps.md M4: the mesh is a **grid of chunk meshes** at full heightmap
+ * resolution (one vertex per map square), not a single 512²-subsampled mesh.
+ * Every chunk shares one material instance (so material plugins bind once and
+ * the draw count stays bounded), keeps GLOBAL 0..1 map UVs (so the atlas
+ * paging + splat/decal plugins are unaffected), and carries a step-4 LOD1
+ * variant registered via `Mesh.addLODLevel` plus one-vertex downward skirts
+ * that hide the T-junction cracks between neighbouring chunks at different
+ * LODs. Small maps (≤513² heightmaps) keep the single-mesh, no-LOD path.
  *
  * Spring coordinate system: X = east, Y = up, Z = south.
  * Each map square is SQUARE_SIZE (8) elmos wide.
@@ -24,11 +33,14 @@ import {
     Vector3,
     VertexBuffer,
 } from '@babylonjs/core';
+import type { Material } from '@babylonjs/core';
 import { getEngineGl } from './engine-gl.js';
 import { DynamicTexture } from '@babylonjs/core/Materials/Textures/dynamicTexture';
 import type { LosBitmap } from './los-bitmap.js';
 import { DecalOverlayPlugin, attachDecalOverlay } from './decal-overlay-plugin.js';
+import type { FineWindowState } from './decal-overlay.js';
 import { WaterAbsorptionPlugin, attachWaterAbsorption } from './water-absorption-plugin.js';
+import { TerrainSplatPlugin, attachTerrainSplat } from './terrain-splat-plugin.js';
 import type { MapWaterAbsorption } from './map-lighting.js';
 
 const SQUARE_SIZE = 8;
@@ -56,224 +68,703 @@ export interface MapDimensions {
     tilesZ: number;
 }
 
+// ---------------------------------------------------------------------------
+// Chunked terrain mesh (PLAN-maps.md M4)
+// ---------------------------------------------------------------------------
+
+/** Target quads-per-axis in one chunk at full heightmap resolution. */
+const DEFAULT_CHUNK_QUADS = 128;
+/** Hard cap on chunks per axis. 8 → ≤64 terrain draw calls at whole-map zoom,
+ *  the PLAN-maps.md §3 guardrail. Bigger maps get bigger chunks, not more. */
+const MAX_CHUNKS_PER_AXIS = 8;
+/** Decimation step of the LOD1 (far) chunk geometry — one vertex per 4 map
+ *  squares, i.e. the density the old 512-cap mesh used on a 2049² map. */
+const LOD1_STEP = 4;
+/** Heightmaps this size or smaller keep the single-mesh, no-LOD path (they
+ *  already rendered at full resolution under the old 512 cap). */
+const SINGLE_MESH_MAX_HM = 513;
+/** Chunk-border skirt depth bounds (elmos). The skirt is a 1-vertex apron
+ *  dropped straight down from each chunk edge; it only becomes visible where
+ *  a crack would otherwise open between chunks at different LODs. */
+const MIN_SKIRT_DEPTH = 12;
+const MAX_SKIRT_DEPTH = 400;
+
+/** How `buildTerrainMesh` split (or didn't split) the heightmap into chunks. */
+export interface TerrainChunkPlan {
+    /** Quads per axis in a full chunk (the last row/column may be smaller). */
+    chunkQuads: number;
+    chunksX: number;
+    chunksZ: number;
+    /** Heightmap step of the LOD1 geometry; 0 = no LOD level at all. */
+    lodStep: number;
+    /** Camera distance (elmos) beyond which a chunk swaps to LOD1. */
+    lodDistance: number;
+    /** True for the single-mesh small-map path (no chunk seams, no skirts). */
+    single: boolean;
+}
+
+export interface TerrainChunkOptions {
+    chunkQuads?: number;
+    maxChunksPerAxis?: number;
+    lodStep?: number;
+}
+
 /**
- * Build a terrain mesh from uint16 heightmap data.
- * Heights are scaled from uint16 (0-65535) to world units using min/max height.
+ * Plan the chunk grid for a `hmW × hmH` corner heightmap. Pure (no Babylon)
+ * so the sizing + LOD policy is unit-tested.
+ *
+ * - ≤513² heightmaps → one chunk, no LOD, no skirts (unchanged from the old
+ *   single-mesh path, which was already full-resolution at that size).
+ * - larger → `chunkQuads`-sized chunks, doubling the chunk size until the grid
+ *   fits `maxChunksPerAxis` so the draw count stays bounded. A 2049² map
+ *   (2048 quads) lands on 8×8 chunks of 256 quads = 64 draws.
  */
-export function buildTerrainMesh(
-    scene: Scene,
-    dims: MapDimensions,
-    heightData: Uint16Array,
-): Mesh {
-    const hmW = dims.mapx + 1; // vertices = squares + 1
-    const hmH = dims.mapy + 1;
+export function planTerrainChunks(
+    hmW: number, hmH: number, opts: TerrainChunkOptions = {},
+): TerrainChunkPlan {
+    const quadsX = Math.max(1, hmW - 1);
+    const quadsZ = Math.max(1, hmH - 1);
 
-    // Subsample for performance (target ~512 vertices per axis max)
-    const MAX_VERTS = 512;
-    const stepX = Math.max(1, Math.floor(hmW / MAX_VERTS));
-    const stepZ = Math.max(1, Math.floor(hmH / MAX_VERTS));
-    const gridW = Math.floor((hmW - 1) / stepX) + 1;
-    const gridH = Math.floor((hmH - 1) / stepZ) + 1;
+    if (hmW <= SINGLE_MESH_MAX_HM && hmH <= SINGLE_MESH_MAX_HM) {
+        return {
+            chunkQuads: Math.max(quadsX, quadsZ),
+            chunksX: 1, chunksZ: 1,
+            lodStep: 0, lodDistance: Infinity, single: true,
+        };
+    }
 
-    const numVerts = gridW * gridH;
-    const positions = new Float32Array(numVerts * 3);
-    const normals = new Float32Array(numVerts * 3);
-    const uvs = new Float32Array(numVerts * 2);
+    const maxPerAxis = Math.max(1, opts.maxChunksPerAxis ?? MAX_CHUNKS_PER_AXIS);
+    let chunkQuads = Math.max(1, opts.chunkQuads ?? DEFAULT_CHUNK_QUADS);
+    while (Math.ceil(quadsX / chunkQuads) > maxPerAxis
+        || Math.ceil(quadsZ / chunkQuads) > maxPerAxis) {
+        chunkQuads *= 2;
+    }
+    const chunkWorld = chunkQuads * SQUARE_SIZE;
+    return {
+        chunkQuads,
+        chunksX: Math.ceil(quadsX / chunkQuads),
+        chunksZ: Math.ceil(quadsZ / chunkQuads),
+        lodStep: opts.lodStep ?? LOD1_STEP,
+        // Babylon measures LOD distance from the camera to the chunk's
+        // bounding-sphere CENTRE, so the switch has to clear a chunk's own
+        // half-diagonal (~0.7·chunkWorld) before the ground under the camera
+        // would drop to LOD1. 2× chunk width with a 3000-elmo floor keeps the
+        // camera's own chunk + its immediate ring at full resolution at
+        // gameplay zoom, while whole-map zoom (camera thousands of elmos up)
+        // puts everything on LOD1.
+        lodDistance: Math.max(3000, chunkWorld * 2),
+        single: false,
+    };
+}
 
-    const hRange = dims.maxHeight - dims.minHeight;
+/** CPU-side geometry of one terrain surface (a chunk at one LOD). */
+export interface SurfaceGeometry {
+    positions: Float32Array;
+    uvs: Float32Array;
+    indices: Uint16Array | Uint32Array;
+    /** Source heightmap column sampled by each grid column (length gw). */
+    srcXs: Int32Array;
+    /** Source heightmap row sampled by each grid row (length gh). */
+    srcZs: Int32Array;
+    gw: number;
+    gh: number;
+    /** Vertex count of the regular grid; skirt vertices follow it. */
+    gridVerts: number;
+    /** Grid vertex each skirt vertex hangs from (skirt vertex k lives at
+     *  index `gridVerts + k`). Empty when the surface has no skirt. */
+    skirtSrc: Int32Array;
+    skirtDepth: number;
+}
 
-    for (let gz = 0; gz < gridH; gz++) {
-        const srcZ = Math.min(gz * stepZ, hmH - 1);
-        for (let gx = 0; gx < gridW; gx++) {
-            const srcX = Math.min(gx * stepX, hmW - 1);
-            const idx = gz * gridW + gx;
+/** Heightmap columns/rows sampled by a surface spanning [a0..a1] at `step`.
+ *  The last entry always lands exactly on `a1` so neighbouring chunks share
+ *  their border vertices even when the span isn't a multiple of `step`. */
+function axisSamples(a0: number, a1: number, step: number): Int32Array {
+    const span = Math.max(0, a1 - a0);
+    const n = Math.floor(span / step) + 1 + (span % step ? 1 : 0);
+    const out = new Int32Array(Math.max(1, n));
+    for (let i = 0; i < out.length; i++) out[i] = Math.min(a0 + i * step, a1);
+    return out;
+}
 
-            const raw = heightData[srcZ * hmW + srcX];
-            const worldY = dims.minHeight + (raw / 65535) * hRange;
+/**
+ * Build the positions/UVs/indices of one terrain surface covering heightmap
+ * corners [x0..x1] × [z0..z1] at `step`, optionally with a border skirt.
+ *
+ * UVs are GLOBAL map UVs (`srcX / (hmW-1)`, `srcZ / (hmH-1)`) — the atlas
+ * paging (`applyPagedTextures`) and the splat/decal plugins all sample in
+ * whole-map space, so a chunk must not renormalise them.
+ *
+ * Triangle winding is tl→bl→tr / tr→bl→br, unchanged from the pre-chunk mesh
+ * (PLAN-coordinate-system Phase 2d RH scene). Terrain materials run with
+ * `backFaceCulling = false`, which is also what makes the vertical skirt
+ * quads visible from either side.
+ */
+export function buildSurfaceGeometry(p: {
+    x0: number; z0: number; x1: number; z1: number;
+    step: number; hmW: number; hmH: number;
+    sampleY: (sx: number, sz: number) => number;
+    skirt: boolean;
+    /** Optional cache of index buffers keyed by grid shape. Every same-shaped
+     *  chunk has byte-identical topology, so a 2049² map's 64 chunks share ~2
+     *  index arrays instead of allocating 64 (~100 MB of CPU heap saved).
+     *  Safe because nothing mutates a surface's indices in place — the paged
+     *  atlas path builds a fresh permuted array per surface. */
+    indexCache?: Map<string, Uint16Array | Uint32Array>;
+}): SurfaceGeometry {
+    const { x0, z0, x1, z1, step, hmW, hmH, sampleY, skirt } = p;
+    const srcXs = axisSamples(x0, x1, step);
+    const srcZs = axisSamples(z0, z1, step);
+    const gw = srcXs.length, gh = srcZs.length;
+    const gridVerts = gw * gh;
+    const skirtCount = skirt ? 2 * gw + 2 * gh : 0;
+    const total = gridVerts + skirtCount;
 
-            positions[idx * 3 + 0] = srcX * SQUARE_SIZE;
-            positions[idx * 3 + 1] = worldY;
-            positions[idx * 3 + 2] = srcZ * SQUARE_SIZE;
+    const positions = new Float32Array(total * 3);
+    const uvs = new Float32Array(total * 2);
+    const invW = 1 / Math.max(1, hmW - 1);
+    const invH = 1 / Math.max(1, hmH - 1);
 
-            // UV maps to full map extent (0..1)
-            uvs[idx * 2 + 0] = gx / (gridW - 1);
-            uvs[idx * 2 + 1] = gz / (gridH - 1);
+    let minY = Infinity, maxY = -Infinity;
+    for (let iz = 0; iz < gh; iz++) {
+        const sz = srcZs[iz];
+        for (let ix = 0; ix < gw; ix++) {
+            const sx = srcXs[ix];
+            const v = iz * gw + ix;
+            const y = sampleY(sx, sz);
+            positions[v * 3 + 0] = sx * SQUARE_SIZE;
+            positions[v * 3 + 1] = y;
+            positions[v * 3 + 2] = sz * SQUARE_SIZE;
+            uvs[v * 2 + 0] = sx * invW;
+            uvs[v * 2 + 1] = sz * invH;
+            if (y < minY) minY = y;
+            if (y > maxY) maxY = y;
         }
     }
 
-    // Triangle indices. PLAN-coordinate-system Phase 2d switched the
-    // scene to RH (`useRightHandedSystem = true`) so CCW-from-camera is
-    // now the front face. Per-quad winding is tl→bl→tr / tr→bl→br;
-    // that matches Babylon's default backface rule for terrain viewed
-    // from above. The `terrainTexMat` material has backface culling off
-    // anyway, but keeping the winding aligned avoids hidden ordering
-    // bugs if culling is ever turned on.
-    const numQuads = (gridW - 1) * (gridH - 1);
-    const indices = new Uint32Array(numQuads * 6);
+    // The crack a LOD mismatch can open is bounded by the local height
+    // variation, so scale the apron with it (clamped) instead of picking one
+    // global constant that is either visible on flat maps or too short on
+    // cliffs.
+    const skirtDepth = skirt
+        ? Math.min(MAX_SKIRT_DEPTH, Math.max(MIN_SKIRT_DEPTH, (maxY - minY) * 0.35))
+        : 0;
+
+    const strips: Int32Array[] = [];
+    if (skirt) {
+        const top = new Int32Array(gw), bottom = new Int32Array(gw);
+        for (let ix = 0; ix < gw; ix++) {
+            top[ix] = ix;
+            bottom[ix] = (gh - 1) * gw + ix;
+        }
+        const left = new Int32Array(gh), right = new Int32Array(gh);
+        for (let iz = 0; iz < gh; iz++) {
+            left[iz] = iz * gw;
+            right[iz] = iz * gw + (gw - 1);
+        }
+        strips.push(top, bottom, left, right);
+    }
+
+    const skirtSrc = new Int32Array(skirtCount);
+    let k = 0;
+    for (const strip of strips) {
+        for (let i = 0; i < strip.length; i++) {
+            const src = strip[i];
+            const v = gridVerts + k;
+            positions[v * 3 + 0] = positions[src * 3 + 0];
+            positions[v * 3 + 1] = positions[src * 3 + 1] - skirtDepth;
+            positions[v * 3 + 2] = positions[src * 3 + 2];
+            uvs[v * 2 + 0] = uvs[src * 2 + 0];
+            uvs[v * 2 + 1] = uvs[src * 2 + 1];
+            skirtSrc[k++] = src;
+        }
+    }
+
+    const gridQuads = Math.max(0, gw - 1) * Math.max(0, gh - 1);
+    let skirtQuads = 0;
+    for (const strip of strips) skirtQuads += Math.max(0, strip.length - 1);
+
+    // Topology depends only on the grid shape, so same-shaped chunks reuse it.
+    const shapeKey = `${gw}x${gh}${skirt ? 's' : ''}`;
+    const cached = p.indexCache?.get(shapeKey);
+    if (cached) {
+        return {
+            positions, uvs, indices: cached, srcXs, srcZs, gw, gh,
+            gridVerts, skirtSrc, skirtDepth,
+        };
+    }
+
+    const indices = total <= 65535
+        ? new Uint16Array((gridQuads + skirtQuads) * 6)
+        : new Uint32Array((gridQuads + skirtQuads) * 6);
+
     let ti = 0;
-    for (let gz = 0; gz < gridH - 1; gz++) {
-        for (let gx = 0; gx < gridW - 1; gx++) {
-            const tl = gz * gridW + gx;
+    for (let iz = 0; iz < gh - 1; iz++) {
+        for (let ix = 0; ix < gw - 1; ix++) {
+            const tl = iz * gw + ix;
             const tr = tl + 1;
-            const bl = (gz + 1) * gridW + gx;
+            const bl = (iz + 1) * gw + ix;
             const br = bl + 1;
             indices[ti++] = tl; indices[ti++] = bl; indices[ti++] = tr;
             indices[ti++] = tr; indices[ti++] = bl; indices[ti++] = br;
         }
     }
+    let base = gridVerts;
+    for (const strip of strips) {
+        for (let i = 0; i < strip.length - 1; i++) {
+            const a = strip[i], b = strip[i + 1];
+            const as = base + i, bs = base + i + 1;
+            indices[ti++] = a; indices[ti++] = as; indices[ti++] = b;
+            indices[ti++] = b; indices[ti++] = as; indices[ti++] = bs;
+        }
+        base += strip.length;
+    }
+    p.indexCache?.set(shapeKey, indices);
 
-    // Babylon's VertexData.ComputeNormals uses (p2-p0) × (p1-p0) — the
-    // opposite of standard (p1-p0) × (p2-p0) — so feeding the indices
-    // above produces -Y face normals. Negate every component so terrain
-    // light contributions (HemisphericLight up-vector, DirectionalLight
-    // sun) hit the upward-facing side. Without this, hemispheric ambient
-    // grounds out near (0.21, 0.175, 0.14) (the groundColor term) and
-    // the sun's N·L collapses to ~0; map renders nearly black.
-    VertexData.ComputeNormals(positions, indices, normals);
-    for (let i = 0; i < normals.length; i++) normals[i] = -normals[i];
+    return {
+        positions, uvs, indices, srcXs, srcZs, gw, gh,
+        gridVerts, skirtSrc, skirtDepth,
+    };
+}
 
-    const mesh = new Mesh('terrain', scene);
+/**
+ * Central-difference heightfield normal at corner (sx, sz), written into
+ * `normals[vi]`. Exact for a regular grid and, crucially, computed from the
+ * *global* heightfield sampler — so a chunk-border vertex gets the same normal
+ * in both chunks that own it and the seam stays invisible.
+ *
+ * Up-facing: normalize(-dH/dx, 1, -dH/dz). (The pre-chunk mesh got the same
+ * orientation by negating `VertexData.ComputeNormals` output; deriving it
+ * analytically here means static and deformed terrain agree exactly.)
+ */
+function writeHeightfieldNormal(
+    normals: Float32Array, vi: number, sx: number, sz: number,
+    sampleY: (x: number, z: number) => number,
+    hmW: number, hmH: number, step: number,
+): void {
+    const xm = Math.max(0, sx - step), xp = Math.min(hmW - 1, sx + step);
+    const zm = Math.max(0, sz - step), zp = Math.min(hmH - 1, sz + step);
+    const dx = (xp - xm) * SQUARE_SIZE;
+    const dz = (zp - zm) * SQUARE_SIZE;
+    const dHdx = dx > 0 ? (sampleY(xp, sz) - sampleY(xm, sz)) / dx : 0;
+    const dHdz = dz > 0 ? (sampleY(sx, zp) - sampleY(sx, zm)) / dz : 0;
+    const nx = -dHdx, ny = 1, nz = -dHdz;
+    const inv = 1 / Math.hypot(nx, ny, nz);
+    normals[vi * 3 + 0] = nx * inv;
+    normals[vi * 3 + 1] = ny * inv;
+    normals[vi * 3 + 2] = nz * inv;
+}
+
+/** Normals for a whole surface. Always sampled at heightmap step 1 (even for
+ *  LOD1 geometry) so shading detail — and therefore the perceived relief —
+ *  doesn't pop when a chunk swaps LOD. */
+export function computeSurfaceNormals(
+    geo: SurfaceGeometry,
+    sampleY: (sx: number, sz: number) => number,
+    hmW: number, hmH: number,
+    out?: Float32Array,
+): Float32Array {
+    const normals = out ?? new Float32Array(geo.positions.length);
+    for (let iz = 0; iz < geo.gh; iz++) {
+        for (let ix = 0; ix < geo.gw; ix++) {
+            writeHeightfieldNormal(normals, iz * geo.gw + ix,
+                geo.srcXs[ix], geo.srcZs[iz], sampleY, hmW, hmH, 1);
+        }
+    }
+    copySkirtNormals(geo, normals);
+    return normals;
+}
+
+/** Skirt vertices inherit their source vertex's normal (they're an apron of
+ *  the same surface, not a separate wall). */
+function copySkirtNormals(geo: SurfaceGeometry, normals: Float32Array): void {
+    for (let k = 0; k < geo.skirtSrc.length; k++) {
+        const d = (geo.gridVerts + k) * 3, s = geo.skirtSrc[k] * 3;
+        normals[d + 0] = normals[s + 0];
+        normals[d + 1] = normals[s + 1];
+        normals[d + 2] = normals[s + 2];
+    }
+}
+
+/** One drawable terrain surface: a chunk at a single level of detail. */
+export interface TerrainSurface {
+    mesh: Mesh;
+    /** Heightmap step this surface samples (1 = full resolution). */
+    step: number;
+    geo: SurfaceGeometry;
+    normals: Float32Array;
+}
+
+/** One terrain chunk: full-res LOD0 mesh + optional decimated LOD1. */
+export interface TerrainChunk {
+    cx: number;
+    cz: number;
+    /** Heightmap corner range this chunk covers, inclusive on both ends —
+     *  neighbouring chunks share their border column/row. */
+    x0: number; z0: number; x1: number; z1: number;
+    lod0: TerrainSurface;
+    lod1: TerrainSurface | null;
+}
+
+/** Name prefix of a pickable (LOD0) terrain chunk mesh. LOD meshes use a
+ *  different prefix so pick predicates never hit them — Babylon's
+ *  `scene.pick` skips its own `isPickable` check when a predicate is given. */
+const TERRAIN_CHUNK_PREFIX = 'terrain_';
+const TERRAIN_LOD_PREFIX = 'terrainLod';
+
+/** Pick/ray predicate: is this mesh part of the drawn terrain surface?
+ *  Replaces the `m.name === 'terrain'` checks scattered through the camera,
+ *  selection, command and build-placement pick paths. */
+export function isTerrainMesh(mesh: { name: string }): boolean {
+    return mesh.name === 'terrain' || mesh.name.startsWith(TERRAIN_CHUNK_PREFIX);
+}
+
+/**
+ * The terrain as a set of chunk meshes sharing one material.
+ *
+ * Everything that used to take the single `Mesh` takes this instead:
+ * materials are applied to every chunk (and every LOD level), plugin
+ * attach/reattach walks `materials`, and `heightAt`/`setHeightAt` give
+ * DeformableTerrain a chunk-agnostic view of the live heightfield (which is
+ * also how chunk-border normals stay continuous — the neighbour's heights are
+ * readable through the group).
+ */
+export class TerrainMeshGroup {
+    private _material: Material | null = null;
+
+    constructor(
+        readonly dims: MapDimensions,
+        readonly plan: TerrainChunkPlan,
+        readonly chunks: TerrainChunk[],
+    ) {}
+
+    /** Corner heightmap width/height (= map squares + 1). */
+    get hmW(): number { return this.dims.mapx + 1; }
+    get hmH(): number { return this.dims.mapy + 1; }
+
+    /** LOD0 chunk meshes — the pickable, frustum-culled draw set. */
+    get meshes(): Mesh[] { return this.chunks.map((c) => c.lod0.mesh); }
+
+    /** Every surface, LOD levels included. */
+    get surfaces(): TerrainSurface[] {
+        const out: TerrainSurface[] = [];
+        for (const c of this.chunks) {
+            out.push(c.lod0);
+            if (c.lod1) out.push(c.lod1);
+        }
+        return out;
+    }
+
+    /** Every mesh, LOD levels included (material/shadow/dispose operations). */
+    get allMeshes(): Mesh[] { return this.surfaces.map((s) => s.mesh); }
+
+    /** A representative mesh — for code that just needs *a* terrain mesh
+     *  handle (scene-graph parenting, debug hooks). */
+    get primaryMesh(): Mesh { return this.chunks[0].lod0.mesh; }
+
+    /** The shared material instance (single StandardMaterial, or the paged
+     *  MultiMaterial). Every chunk carries the same one. */
+    get material(): Material | null { return this._material; }
+
+    setMaterial(mat: Material | null): void {
+        this._material = mat;
+        for (const m of this.allMeshes) m.material = mat;
+    }
+
+    /** The StandardMaterials behind the terrain — the MultiMaterial's
+     *  sub-materials when paged, otherwise the single material. This is the
+     *  list material plugins attach to. */
+    get materials(): Material[] {
+        const m = this._material;
+        if (!m) return [];
+        if (m instanceof MultiMaterial) {
+            return m.subMaterials.filter((s): s is Material => !!s);
+        }
+        return [m];
+    }
+
+    setReceiveShadows(v: boolean): void {
+        for (const m of this.allMeshes) m.receiveShadows = v;
+    }
+
+    /** Chunk owning corner (sx, sz) — the one whose [x0..x1] range starts at
+     *  or before it. Border corners are owned by up to 4 chunks; this returns
+     *  the "primary" (higher-index) owner, which `setHeightAt` complements. */
+    private primaryChunk(sx: number, sz: number): TerrainChunk {
+        const q = this.plan.chunkQuads;
+        const cx = Math.min(Math.floor(sx / q), this.plan.chunksX - 1);
+        const cz = Math.min(Math.floor(sz / q), this.plan.chunksZ - 1);
+        return this.chunks[cz * this.plan.chunksX + cx];
+    }
+
+    /** World-Y of heightmap corner (sx, sz), read straight out of the LOD0
+     *  vertex buffers (which are full-resolution, so no interpolation). */
+    heightAt(sx: number, sz: number): number {
+        const x = sx < 0 ? 0 : sx > this.hmW - 1 ? this.hmW - 1 : sx;
+        const z = sz < 0 ? 0 : sz > this.hmH - 1 ? this.hmH - 1 : sz;
+        const c = this.primaryChunk(x, z);
+        const g = c.lod0.geo;
+        return g.positions[((z - c.z0) * g.gw + (x - c.x0)) * 3 + 1];
+    }
+
+    /** Write world-Y into every LOD0 chunk that owns corner (sx, sz) — up to
+     *  four at a chunk corner — so the shared border vertices stay identical
+     *  and `heightAt` is single-valued. */
+    setHeightAt(sx: number, sz: number, y: number): void {
+        const q = this.plan.chunkQuads;
+        const cxBase = Math.min(Math.floor(sx / q), this.plan.chunksX - 1);
+        const czBase = Math.min(Math.floor(sz / q), this.plan.chunksZ - 1);
+        for (let dz = 0; dz <= 1; dz++) {
+            const cz = czBase - dz;
+            if (cz < 0 || (dz === 1 && sz % q !== 0)) continue;
+            for (let dx = 0; dx <= 1; dx++) {
+                const cx = cxBase - dx;
+                if (cx < 0 || (dx === 1 && sx % q !== 0)) continue;
+                const c = this.chunks[cz * this.plan.chunksX + cx];
+                if (sx < c.x0 || sx > c.x1 || sz < c.z0 || sz > c.z1) continue;
+                const g = c.lod0.geo;
+                g.positions[((sz - c.z0) * g.gw + (sx - c.x0)) * 3 + 1] = y;
+            }
+        }
+    }
+
+    dispose(): void {
+        for (const m of this.allMeshes) m.dispose();
+        this._material?.dispose();
+        this._material = null;
+    }
+}
+
+/** Wrap one surface's CPU geometry in a Babylon mesh. `updatable = true`
+ *  keeps the position + normal buffers CPU-backed so DeformableTerrain can
+ *  rewrite affected vertices in place. */
+function createSurfaceMesh(
+    scene: Scene, name: string, geo: SurfaceGeometry, normals: Float32Array,
+): Mesh {
+    const mesh = new Mesh(name, scene);
     const vd = new VertexData();
-    vd.positions = positions;
-    vd.indices = indices;
+    vd.positions = geo.positions;
+    vd.indices = geo.indices;
     vd.normals = normals;
-    vd.uvs = uvs;
-    // `updatable = true` keeps the position + normal buffers CPU-backed so
-    // DeformableTerrain (PLAN-deformable-terrain T3) can rewrite affected
-    // vertices in place on each heightmap patch without recreating the mesh.
+    vd.uvs = geo.uvs;
     vd.applyToMesh(mesh, true);
-
-    // Default material (replaced when textures load)
-    const mat = new StandardMaterial('terrainMat', scene);
-    mat.diffuseColor = new Color3(0.3, 0.35, 0.2);
-    mat.specularColor = new Color3(0.05, 0.05, 0.05);
-    mat.backFaceCulling = false;
-    mesh.material = mat;
-
-    console.log(`[terrain] mesh: ${gridW}x${gridH} vertices (step ${stepX})`);
     return mesh;
 }
 
 /**
+ * Build the terrain from uint16 heightmap data.
+ * Heights are scaled from uint16 (0-65535) to world units using min/max height.
+ *
+ * Returns a `TerrainMeshGroup`: one chunk for small maps, an N×N grid of
+ * full-resolution chunk meshes (each with a step-4 LOD1 and border skirts)
+ * for larger ones. All chunks share one material instance.
+ */
+export function buildTerrainMesh(
+    scene: Scene,
+    dims: MapDimensions,
+    heightData: Uint16Array,
+    opts: TerrainChunkOptions = {},
+): TerrainMeshGroup {
+    const hmW = dims.mapx + 1; // vertices = squares + 1
+    const hmH = dims.mapy + 1;
+    const plan = planTerrainChunks(hmW, hmH, opts);
+    const hRange = dims.maxHeight - dims.minHeight;
+    const rawY = (sx: number, sz: number): number =>
+        dims.minHeight + (heightData[sz * hmW + sx] / 65535) * hRange;
+
+    // Pass 1 — LOD0 geometry for every chunk (positions/UVs/indices). Normals
+    // come after, because a chunk-border normal needs the NEIGHBOUR chunk's
+    // heights and those only exist once every chunk's positions are filled.
+    const q = plan.chunkQuads;
+    const indexCache = new Map<string, Uint16Array | Uint32Array>();
+    const lod0Geo: SurfaceGeometry[] = [];
+    const bounds: { x0: number; z0: number; x1: number; z1: number }[] = [];
+    for (let cz = 0; cz < plan.chunksZ; cz++) {
+        for (let cx = 0; cx < plan.chunksX; cx++) {
+            const x0 = cx * q, z0 = cz * q;
+            const x1 = Math.min(x0 + q, hmW - 1);
+            const z1 = Math.min(z0 + q, hmH - 1);
+            bounds.push({ x0, z0, x1, z1 });
+            lod0Geo.push(buildSurfaceGeometry({
+                x0, z0, x1, z1, step: 1, hmW, hmH,
+                sampleY: rawY, skirt: !plan.single, indexCache,
+            }));
+        }
+    }
+
+    // Global heightfield sampler backed by the LOD0 buffers — identical to
+    // `TerrainMeshGroup.heightAt`, but usable before the group exists.
+    const heightAt = (sx: number, sz: number): number => {
+        const x = sx < 0 ? 0 : sx > hmW - 1 ? hmW - 1 : sx;
+        const z = sz < 0 ? 0 : sz > hmH - 1 ? hmH - 1 : sz;
+        const cx = Math.min(Math.floor(x / q), plan.chunksX - 1);
+        const cz = Math.min(Math.floor(z / q), plan.chunksZ - 1);
+        const i = cz * plan.chunksX + cx;
+        const g = lod0Geo[i], b = bounds[i];
+        return g.positions[((z - b.z0) * g.gw + (x - b.x0)) * 3 + 1];
+    };
+
+    // Pass 2 — normals, meshes, LOD levels.
+    const chunks: TerrainChunk[] = [];
+    let lod0Verts = 0, lod1Verts = 0;
+    for (let cz = 0; cz < plan.chunksZ; cz++) {
+        for (let cx = 0; cx < plan.chunksX; cx++) {
+            const i = cz * plan.chunksX + cx;
+            const b = bounds[i];
+            const geo = lod0Geo[i];
+            const normals = computeSurfaceNormals(geo, heightAt, hmW, hmH);
+            const name = plan.single ? 'terrain' : `${TERRAIN_CHUNK_PREFIX}${cx}_${cz}`;
+            const mesh = createSurfaceMesh(scene, name, geo, normals);
+            lod0Verts += geo.positions.length / 3;
+
+            let lod1: TerrainSurface | null = null;
+            if (plan.lodStep > 1) {
+                const g1 = buildSurfaceGeometry({
+                    x0: b.x0, z0: b.z0, x1: b.x1, z1: b.z1,
+                    step: plan.lodStep, hmW, hmH, sampleY: heightAt, skirt: true,
+                    indexCache,
+                });
+                const n1 = computeSurfaceNormals(g1, heightAt, hmW, hmH);
+                const m1 = createSurfaceMesh(
+                    scene, `${TERRAIN_LOD_PREFIX}1_${cx}_${cz}`, g1, n1);
+                // Babylon renders a LOD mesh only in place of its master
+                // (Mesh.isBlocked hides it from the normal active-mesh pass);
+                // it must also stay out of ray picks, which use the LOD0
+                // geometry for every chunk regardless of what's drawn.
+                m1.isPickable = false;
+                mesh.addLODLevel(plan.lodDistance, m1);
+                lod1 = { mesh: m1, step: plan.lodStep, geo: g1, normals: n1 };
+                lod1Verts += g1.positions.length / 3;
+            }
+
+            chunks.push({ cx, cz, ...b, lod0: { mesh, step: 1, geo, normals }, lod1 });
+        }
+    }
+
+    const group = new TerrainMeshGroup(dims, plan, chunks);
+
+    // Default material (replaced when textures load). ONE instance shared by
+    // every chunk + LOD mesh: material plugins bind per material, and the
+    // paged-atlas path relies on a single MultiMaterial across the whole map.
+    const mat = new StandardMaterial('terrainMat', scene);
+    mat.diffuseColor = new Color3(0.3, 0.35, 0.2);
+    mat.specularColor = new Color3(0.05, 0.05, 0.05);
+    mat.backFaceCulling = false;
+    group.setMaterial(mat);
+
+    console.log(`[terrain] ${plan.chunksX}x${plan.chunksZ} chunk(s) of ` +
+        `${plan.chunkQuads} quads @ full heightmap res (${hmW}x${hmH} corners); ` +
+        `LOD0 ${Math.round(lod0Verts / 1000)}k verts` +
+        (plan.lodStep > 1
+            ? `, LOD1 step ${plan.lodStep} ${Math.round(lod1Verts / 1000)}k verts ` +
+              `@ ${plan.lodDistance} elmos`
+            : ' (single-mesh path, no LOD)'));
+    return group;
+}
+
+/**
  * DeformableTerrain — applies live server heightmap patches (envelope 0x09,
- * PLAN-deformable-terrain T3) to the terrain mesh built by `buildTerrainMesh`.
+ * PLAN-deformable-terrain T3) to the chunked terrain built by
+ * `buildTerrainMesh`.
  *
- * The mesh is subsampled to ≤512 vertices per axis (see `buildTerrainMesh`):
- * grid vertex (gx, gz) samples corner-heightmap cell (gx·stepX, gz·stepZ).
- * A patch arrives in corner coordinates [x1..x2]×[z1..z2] with actual world-Y
- * heights. For each grid vertex whose sampled corner falls inside the patch
- * rect, we rewrite its Y, then recompute vertex normals over the affected
- * region plus a one-vertex skirt using central differences over the
- * heightfield (exact for a regular grid; matches the +Y-up orientation
- * `buildTerrainMesh` produces by negating ComputeNormals output), and push
- * just the position + normal buffers back to the GPU.
+ * Since M4 the LOD0 chunks carry one vertex per heightmap corner, so a patch
+ * lands exactly — the old "patch narrower than one grid step disappears"
+ * subsample limitation is gone. A patch arrives in corner coordinates
+ * [x1..x2]×[z1..z2] with actual world-Y heights; we
  *
- * **Subsample limitation (documented):** on large maps stepX/stepZ > 1, so a
- * patch narrower than one grid step may contain no sampled corner and produce
- * no visible change. This is the same subsampling the static mesh already
- * accepts; full-resolution maps (the common test maps) deform exactly. A
- * CDLOD / per-corner mesh is the v2 upgrade (PLAN-deformable-terrain T3 note).
+ *   1. write them into every LOD0 chunk that owns those corners (border
+ *      corners belong to up to four chunks),
+ *   2. recompute normals over the patch plus a one-corner ring (central
+ *      differences over the *global* heightfield via `group.heightAt`, so
+ *      chunk-border normals stay continuous),
+ *   3. re-derive the affected chunks' skirt vertices, and
+ *   4. re-upload the position + normal buffers of ONLY the touched chunks —
+ *      at both LOD levels. On a 2049² map that's ≤ a few hundred kB per patch
+ *      instead of the whole-map buffer the pre-M4 code re-uploaded.
  */
 export class DeformableTerrain {
-    private positions: Float32Array;
-    private normals: Float32Array;
-    private readonly gridW: number;
-    private readonly gridH: number;
-    private readonly stepX: number;
-    private readonly stepZ: number;
-    private readonly hmW: number; // corner heightmap width  = mapx + 1
-    private readonly hmH: number; // corner heightmap height = mapy + 1
     private patchCount = 0;
 
-    constructor(private mesh: Mesh, dims: MapDimensions) {
-        this.hmW = dims.mapx + 1;
-        this.hmH = dims.mapy + 1;
-        const MAX_VERTS = 512;
-        this.stepX = Math.max(1, Math.floor(this.hmW / MAX_VERTS));
-        this.stepZ = Math.max(1, Math.floor(this.hmH / MAX_VERTS));
-        this.gridW = Math.floor((this.hmW - 1) / this.stepX) + 1;
-        this.gridH = Math.floor((this.hmH - 1) / this.stepZ) + 1;
-
-        const pos = mesh.getVerticesData(VertexBuffer.PositionKind);
-        const nrm = mesh.getVerticesData(VertexBuffer.NormalKind);
-        if (!pos || !nrm) {
-            throw new Error('[terrain] DeformableTerrain: mesh has no position/normal data');
-        }
-        // getVerticesData may return a plain number[] depending on Babylon's
-        // backing store; normalise to Float32Array we own and write through.
-        this.positions = pos instanceof Float32Array ? pos : new Float32Array(pos);
-        this.normals = nrm instanceof Float32Array ? nrm : new Float32Array(nrm);
-    }
+    constructor(private group: TerrainMeshGroup) {}
 
     /** Apply one heightmap patch (corner coords, actual world-Y heights). */
     applyPatch(p: { x1: number; z1: number; x2: number; z2: number; heights: Float32Array }): void {
         const { x1, z1, x2, z2, heights } = p;
+        const g = this.group;
         const pw = x2 - x1 + 1;
+        const sx0 = Math.max(0, x1), sx1 = Math.min(g.hmW - 1, x2);
+        const sz0 = Math.max(0, z1), sz1 = Math.min(g.hmH - 1, z2);
+        if (sx0 > sx1 || sz0 > sz1) return;
 
-        // Grid-vertex range whose sampled corner can fall inside the rect.
-        let gx0 = Math.ceil(x1 / this.stepX);
-        let gx1 = Math.floor(x2 / this.stepX);
-        let gz0 = Math.ceil(z1 / this.stepZ);
-        let gz1 = Math.floor(z2 / this.stepZ);
-        // Clamp to the last grid vertex (which clamps its source to hmW/H-1).
-        gx0 = Math.max(0, gx0); gx1 = Math.min(this.gridW - 1, gx1);
-        gz0 = Math.max(0, gz0); gz1 = Math.min(this.gridH - 1, gz1);
-        if (gx0 > gx1 || gz0 > gz1) return; // patch fell between grid samples
-
-        for (let gz = gz0; gz <= gz1; gz++) {
-            const srcZ = Math.min(gz * this.stepZ, this.hmH - 1);
-            if (srcZ < z1 || srcZ > z2) continue;
-            for (let gx = gx0; gx <= gx1; gx++) {
-                const srcX = Math.min(gx * this.stepX, this.hmW - 1);
-                if (srcX < x1 || srcX > x2) continue;
-                const worldY = heights[(srcZ - z1) * pw + (srcX - x1)];
-                this.positions[(gz * this.gridW + gx) * 3 + 1] = worldY;
+        for (let sz = sz0; sz <= sz1; sz++) {
+            for (let sx = sx0; sx <= sx1; sx++) {
+                g.setHeightAt(sx, sz, heights[(sz - z1) * pw + (sx - x1)]);
             }
         }
 
-        // Recompute normals over the affected grid region + a 1-vertex skirt so
-        // the seam to undisturbed terrain stays smooth.
-        const nx0 = Math.max(0, gx0 - 1), nx1 = Math.min(this.gridW - 1, gx1 + 1);
-        const nz0 = Math.max(0, gz0 - 1), nz1 = Math.min(this.gridH - 1, gz1 + 1);
-        for (let gz = nz0; gz <= nz1; gz++) {
-            for (let gx = nx0; gx <= nx1; gx++) {
-                this.recomputeNormal(gx, gz);
-            }
+        // Normals one corner outside the patch also change (central
+        // differences), so the refresh region is the patch grown by 1.
+        const nx0 = Math.max(0, sx0 - 1), nx1 = Math.min(g.hmW - 1, sx1 + 1);
+        const nz0 = Math.max(0, sz0 - 1), nz1 = Math.min(g.hmH - 1, sz1 + 1);
+        for (const chunk of g.chunks) {
+            if (chunk.x1 < nx0 || chunk.x0 > nx1
+                || chunk.z1 < nz0 || chunk.z0 > nz1) continue;
+            this.refreshSurface(chunk.lod0, nx0, nz0, nx1, nz1);
+            if (chunk.lod1) this.refreshSurface(chunk.lod1, nx0, nz0, nx1, nz1);
         }
-
-        this.mesh.updateVerticesData(VertexBuffer.PositionKind, this.positions, true);
-        this.mesh.updateVerticesData(VertexBuffer.NormalKind, this.normals, false);
         this.patchCount++;
     }
 
     /** Number of patches applied so far (debug / verification handle). */
     get appliedPatches(): number { return this.patchCount; }
 
-    /** Central-difference heightfield normal at grid vertex (gx, gz). The
-     *  world spacing between grid samples is stepX·SQUARE_SIZE (X) and
-     *  stepZ·SQUARE_SIZE (Z); forward/backward difference at the borders. */
-    private recomputeNormal(gx: number, gz: number): void {
-        const W = this.gridW, H = this.gridH;
-        const yAt = (x: number, z: number) => this.positions[(z * W + x) * 3 + 1];
+    /** Re-sample + re-normal the part of one surface covering heightmap
+     *  corners [sx0..sx1]×[sz0..sz1], then re-upload that surface's buffers. */
+    private refreshSurface(
+        s: TerrainSurface, sx0: number, sz0: number, sx1: number, sz1: number,
+    ): void {
+        const g = this.group;
+        const geo = s.geo;
+        const [ix0, ix1] = gridRange(geo.srcXs, sx0, sx1);
+        const [iz0, iz1] = gridRange(geo.srcZs, sz0, sz1);
+        if (ix0 < 0 || iz0 < 0) return;
 
-        const xm = gx > 0 ? gx - 1 : gx;
-        const xp = gx < W - 1 ? gx + 1 : gx;
-        const zm = gz > 0 ? gz - 1 : gz;
-        const zp = gz < H - 1 ? gz + 1 : gz;
+        const sample = (x: number, z: number): number => g.heightAt(x, z);
+        for (let iz = iz0; iz <= iz1; iz++) {
+            const sz = geo.srcZs[iz];
+            for (let ix = ix0; ix <= ix1; ix++) {
+                const sx = geo.srcXs[ix];
+                const vi = iz * geo.gw + ix;
+                geo.positions[vi * 3 + 1] = sample(sx, sz);
+                writeHeightfieldNormal(
+                    s.normals, vi, sx, sz, sample, g.hmW, g.hmH, 1);
+            }
+        }
+        // The border apron is small (≤ 2·(gw+gh) verts) — just re-derive all
+        // of it rather than working out which strip the patch touched.
+        for (let k = 0; k < geo.skirtSrc.length; k++) {
+            const d = geo.gridVerts + k, src = geo.skirtSrc[k];
+            geo.positions[d * 3 + 1] = geo.positions[src * 3 + 1] - geo.skirtDepth;
+        }
+        copySkirtNormals(geo, s.normals);
 
-        const dx = (xp - xm) * this.stepX * SQUARE_SIZE;
-        const dz = (zp - zm) * this.stepZ * SQUARE_SIZE;
-        const dHdx = dx > 0 ? (yAt(xp, gz) - yAt(xm, gz)) / dx : 0;
-        const dHdz = dz > 0 ? (yAt(gx, zp) - yAt(gx, zm)) / dz : 0;
-
-        // Up-facing heightfield normal: normalize(-dHdx, 1, -dHdz).
-        let nx = -dHdx, ny = 1, nz = -dHdz;
-        const inv = 1 / Math.hypot(nx, ny, nz);
-        nx *= inv; ny *= inv; nz *= inv;
-
-        const o = (gz * W + gx) * 3;
-        this.normals[o] = nx; this.normals[o + 1] = ny; this.normals[o + 2] = nz;
+        s.mesh.updateVerticesData(VertexBuffer.PositionKind, geo.positions, true);
+        s.mesh.updateVerticesData(VertexBuffer.NormalKind, s.normals, false);
     }
+}
+
+/** Inclusive grid-index range of the samples in `srcs` (monotonic) that fall
+ *  in [lo..hi]; [-1,-2] when none do. */
+function gridRange(srcs: Int32Array, lo: number, hi: number): [number, number] {
+    let first = -1, last = -2;
+    for (let i = 0; i < srcs.length; i++) {
+        const v = srcs[i];
+        if (v >= lo && v <= hi) {
+            if (first < 0) first = i;
+            last = i;
+        }
+    }
+    return [first, last];
 }
 
 /**
@@ -605,7 +1096,7 @@ async function buildMapAtlasPages(
  */
 export async function loadTerrainTextures(
     scene: Scene,
-    terrainMesh: Mesh,
+    terrain: TerrainMeshGroup,
     mapBaseUrl: string,
     dims: MapDimensions,
 ): Promise<void> {
@@ -617,9 +1108,9 @@ export async function loadTerrainTextures(
 
     if (atlas.pages.length === 1) {
         const p = atlas.pages[0];
-        applyWebGLTexture(scene, terrainMesh, p.webglTex, p.width, p.height, p.mipLevels);
+        applyWebGLTexture(scene, terrain, p.webglTex, p.width, p.height, p.mipLevels);
     } else {
-        applyPagedTextures(scene, terrainMesh, atlas, dims);
+        applyPagedTextures(scene, terrain, atlas, dims);
     }
 }
 
@@ -629,7 +1120,7 @@ export async function loadTerrainTextures(
  * externally-created GL texture into Babylon's material system.
  */
 export function applyWebGLTexture(
-    scene: Scene, mesh: Mesh,
+    scene: Scene, terrain: TerrainMeshGroup,
     webglTex: WebGLTexture, width: number, height: number,
     mipLevels = 1,
 ): void {
@@ -650,10 +1141,12 @@ export function applyWebGLTexture(
 
     // Remove vertex colours if present (they'd multiply with the sampled
     // diffuse colour and darken the terrain)
-    if (mesh.isVerticesDataPresent(VertexBuffer.ColorKind)) {
-        mesh.removeVerticesData(VertexBuffer.ColorKind);
+    for (const mesh of terrain.allMeshes) {
+        if (mesh.isVerticesDataPresent(VertexBuffer.ColorKind)) {
+            mesh.removeVerticesData(VertexBuffer.ColorKind);
+        }
+        mesh.hasVertexAlpha = false;
     }
-    mesh.hasVertexAlpha = false;
 
     const mat = new StandardMaterial('terrainTexMat', scene);
     mat.diffuseTexture = texture;
@@ -666,33 +1159,75 @@ export function applyWebGLTexture(
     // main.ts; this textured material is built later (once the map atlas
     // finishes loading) and swapped in here. Without re-attaching, the
     // textured terrain samples no overlay and scars/tracks never render.
-    const prevPlugin = findDecalOverlayPlugin(mesh.material);
-    const prevWater = findWaterAbsorptionPlugin(mesh.material);
-    mesh.material = mat;
+    // Anisotropic filtering on the baked far-field: the oblique RTS camera
+    // samples the ground at grazing angles where trilinear alone blurs badly.
+    // 8x on the bake per PLAN-maps.md (4x default elsewhere).
+    texture.anisotropicFilteringLevel = 8;
+
+    // Chunks share ONE material, so the previous plugin state lives on that
+    // one material regardless of how many chunk meshes reference it.
+    const prev = terrain.material;
+    const prevPlugin = findDecalOverlayPlugin(prev);
+    const prevWater = findWaterAbsorptionPlugin(prev);
+    const prevSplat = findTerrainSplatPlugin(prev);
+    terrain.setMaterial(mat);
+    prev?.dispose();
     reattachDecalOverlay(mat, prevPlugin);
     reattachWaterAbsorption(mat, prevWater);
+    reattachTerrainSplat(mat, prevSplat);
 }
 
-/** Locate the DecalOverlayPlugin attached to a material, if any. */
+/** Locate the DecalOverlayPlugin attached to a material, if any (first
+ *  sub-material for a MultiMaterial — all pages carry the same overlay). */
 function findDecalOverlayPlugin(
-    mat: Mesh['material'],
+    mat: Material | null,
 ): DecalOverlayPlugin | undefined {
-    return mat && mat.pluginManager
-        ? (mat.pluginManager as unknown as { _plugins?: unknown[] })._plugins
+    let m: Material | null = mat;
+    if (m instanceof MultiMaterial) m = m.subMaterials.find((s) => !!s) ?? null;
+    return m && m.pluginManager
+        ? (m.pluginManager as unknown as { _plugins?: unknown[] })._plugins
             ?.find((p): p is DecalOverlayPlugin => p instanceof DecalOverlayPlugin)
         : undefined;
 }
 
-/** Enable/disable the terrain decal-overlay shader plugin on a terrain mesh —
- *  the PLAN-perf P0 hazard-#1 isolation toggle (the ~10-tap per-fragment decal
- *  block). Returns whether a plugin was found + toggled. */
+/** Enable/disable the terrain decal-overlay shader plugin — the PLAN-perf P0
+ *  hazard-#1 isolation toggle (the ~10-tap per-fragment decal block). Applies
+ *  to every terrain material (all pages). Returns whether any plugin was
+ *  found + toggled. */
 export function setTerrainDecalPluginEnabled(
-    mesh: Mesh | null, on: boolean,
+    terrain: TerrainMeshGroup | null, on: boolean,
 ): boolean {
-    const plugin = mesh ? findDecalOverlayPlugin(mesh.material) : undefined;
-    if (!plugin) return false;
-    plugin.isEnabled = on;
-    return true;
+    let found = false;
+    for (const mat of terrain?.materials ?? []) {
+        const plugin = findDecalOverlayPlugin(mat);
+        if (!plugin) continue;
+        plugin.isEnabled = on;
+        found = true;
+    }
+    return found;
+}
+
+/** Attach the ground-decal overlay (PLAN-decals.md) to every terrain
+ *  material. Idempotent — materials that already carry the plugin are left
+ *  alone, so the async map-load path can call it more than once. */
+export function attachTerrainDecalOverlay(
+    terrain: TerrainMeshGroup,
+    decals: {
+        coarseTexture: Texture; fineTexture: Texture;
+        fineState: FineWindowState;
+        coarseTexel: number; fineTexel: number;
+    },
+    worldW: number, worldH: number,
+): boolean {
+    let attached = false;
+    for (const mat of terrain.materials) {
+        if (findDecalOverlayPlugin(mat)) continue;
+        attachDecalOverlay(mat,
+            decals.coarseTexture, decals.fineTexture, decals.fineState,
+            decals.coarseTexel, decals.fineTexel, worldW, worldH);
+        attached = true;
+    }
+    return attached;
 }
 
 /** Re-attach the ground-decal overlay (preserving live-tuned strengths). */
@@ -714,11 +1249,12 @@ function reattachDecalOverlay(
 /** Locate the WaterAbsorptionPlugin on a material (first sub-material for a
  *  MultiMaterial — all pages carry identical colours). */
 function findWaterAbsorptionPlugin(
-    mat: Mesh['material'],
+    mat: Material | null,
 ): WaterAbsorptionPlugin | undefined {
-    if (mat instanceof MultiMaterial) mat = mat.subMaterials.find(m => !!m) ?? null;
-    return mat && mat.pluginManager
-        ? (mat.pluginManager as unknown as { _plugins?: unknown[] })._plugins
+    let m: Material | null = mat;
+    if (m instanceof MultiMaterial) m = m.subMaterials.find((s) => !!s) ?? null;
+    return m && m.pluginManager
+        ? (m.pluginManager as unknown as { _plugins?: unknown[] })._plugins
             ?.find((p): p is WaterAbsorptionPlugin => p instanceof WaterAbsorptionPlugin)
         : undefined;
 }
@@ -736,18 +1272,81 @@ function reattachWaterAbsorption(
     }
 }
 
+/** Locate the TerrainSplatPlugin on a material (first sub-material for a
+ *  MultiMaterial — all pages share the same splat textures). */
+function findTerrainSplatPlugin(
+    mat: Material | null,
+): TerrainSplatPlugin | undefined {
+    let m: Material | null = mat;
+    if (m instanceof MultiMaterial) m = m.subMaterials.find((s) => !!s) ?? null;
+    return m && m.pluginManager
+        ? (m.pluginManager as unknown as { _plugins?: unknown[] })._plugins
+            ?.find((p): p is TerrainSplatPlugin => p instanceof TerrainSplatPlugin)
+        : undefined;
+}
+
+/** Re-attach the splat-detail plugin after a material swap (shares textures). */
+function reattachTerrainSplat(
+    mat: StandardMaterial, prev: TerrainSplatPlugin | undefined,
+): void {
+    if (prev && prev.distrTexture && prev.detailTexture) {
+        attachTerrainSplat(
+            mat, prev.distrTexture, prev.detailTexture,
+            prev.texScales, prev.texMults, prev.worldW, prev.worldH);
+    }
+}
+
+/** Attach Recoil splat-detail shading (PLAN-maps.md §1.2) to a terrain mesh
+ *  from the map's decals metadata. Loads splat_distr + splat_detail textures
+ *  and attaches the plugin to every material (single or paged); idempotent,
+ *  and survives later material swaps via the reattach calls above. */
+export function attachTerrainSplatFromDecals(
+    scene: Scene,
+    terrain: TerrainMeshGroup,
+    decals: {
+        splatDistrTex: string; splatDetailTex: string;
+        splatScales: [number, number, number, number];
+        splatMults: [number, number, number, number];
+    },
+    mapBaseUrl: string,
+    dims: MapDimensions,
+): boolean {
+    if (!decals.splatDistrTex || !decals.splatDetailTex) return false;
+    const resolve = (u: string): string =>
+        /^(https?:)?\/\//.test(u) || u.startsWith('/') ? u : `${mapBaseUrl}/${u}`;
+
+    const distr = new Texture(resolve(decals.splatDistrTex), scene,
+        false, false /* invertY: KTX2 path ignores, raster stays top-down */);
+    distr.wrapU = Texture.CLAMP_ADDRESSMODE;
+    distr.wrapV = Texture.CLAMP_ADDRESSMODE;
+    distr.anisotropicFilteringLevel = 4;
+    const detail = new Texture(resolve(decals.splatDetailTex), scene, false, false);
+    detail.wrapU = Texture.WRAP_ADDRESSMODE;
+    detail.wrapV = Texture.WRAP_ADDRESSMODE;
+    detail.anisotropicFilteringLevel = 4;
+
+    const worldW = dims.mapx * SQUARE_SIZE;
+    const worldH = dims.mapy * SQUARE_SIZE;
+    let attached = false;
+    for (const m of terrain.materials) {
+        if (m instanceof StandardMaterial && !findTerrainSplatPlugin(m)) {
+            attachTerrainSplat(m, distr, detail,
+                decals.splatScales, decals.splatMults, worldW, worldH);
+            attached = true;
+        }
+    }
+    return attached;
+}
+
 /** Attach the underwater terrain-absorption tint (Recoil SMF
  *  `SMF_WATER_ABSORPTION`) to a terrain mesh's material(s) — handles both the
  *  single-material and paged MultiMaterial forms, and survives later material
  *  swaps via the reattach calls in applyTexture / applyPagedTextures. No-op if
  *  already attached (idempotent for the async mapinfo-parse → attach path). */
 export function attachTerrainWaterAbsorption(
-    mesh: Mesh, colors: MapWaterAbsorption,
+    terrain: TerrainMeshGroup, colors: MapWaterAbsorption,
 ): void {
-    const mats = mesh.material instanceof MultiMaterial
-        ? mesh.material.subMaterials
-        : [mesh.material];
-    for (const m of mats) {
+    for (const m of terrain.materials) {
         if (m instanceof StandardMaterial && !findWaterAbsorptionPlugin(m)) {
             attachWaterAbsorption(m, colors);
         }
@@ -755,36 +1354,37 @@ export function attachTerrainWaterAbsorption(
 }
 
 /**
- * Apply a paged DXT1 atlas (over-cap maps) as a MultiMaterial on a single
- * terrain mesh. The mesh keeps its global 0..1 UVs; each page sub-material
- * remaps that range onto its texture via Texture `uScale/uOffset` and the
- * mesh triangles are regrouped into one SubMesh per page.
+ * Apply a paged DXT1 atlas (over-cap maps) as a MultiMaterial shared by every
+ * terrain chunk. Chunks keep their global 0..1 map UVs; each page
+ * sub-material remaps that range onto its texture via Texture
+ * `uScale/uOffset`, and each chunk's triangles are regrouped into one SubMesh
+ * per page it overlaps (a chunk usually falls entirely inside one page, in
+ * which case it ends up with exactly one SubMesh; chunks straddling a page
+ * boundary get one SubMesh per page they touch).
  *
- * Keeping a single mesh + StandardMaterial-per-page means lighting, CSM
- * shadows, the decal overlay, picking and DeformableTerrain all keep working
- * unchanged — only the draw is split by texture page.
+ * One MultiMaterial for the whole terrain means lighting, CSM shadows, the
+ * decal overlay, the splat plugin, picking and DeformableTerrain all keep
+ * working unchanged — only the draw is split by texture page.
  */
 function applyPagedTextures(
-    scene: Scene, mesh: Mesh, atlas: MapAtlasPages, dims: MapDimensions,
+    scene: Scene, terrain: TerrainMeshGroup, atlas: MapAtlasPages, dims: MapDimensions,
 ): void {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const engine = scene.getEngine() as any;
 
-    if (mesh.isVerticesDataPresent(VertexBuffer.ColorKind)) {
-        mesh.removeVerticesData(VertexBuffer.ColorKind);
+    for (const mesh of terrain.allMeshes) {
+        if (mesh.isVerticesDataPresent(VertexBuffer.ColorKind)) {
+            mesh.removeVerticesData(VertexBuffer.ColorKind);
+        }
+        mesh.hasVertexAlpha = false;
     }
-    mesh.hasVertexAlpha = false;
 
-    const prevPlugin = findDecalOverlayPlugin(mesh.material);
-    const prevWater = findWaterAbsorptionPlugin(mesh.material);
+    const prevMat = terrain.material;
+    const prevPlugin = findDecalOverlayPlugin(prevMat);
+    const prevWater = findWaterAbsorptionPlugin(prevMat);
+    const prevSplat = findTerrainSplatPlugin(prevMat);
 
-    // Regroup triangles by which page their UV centroid falls in, so each
-    // page becomes a contiguous SubMesh index range.
-    const uvs = mesh.getVerticesData(VertexBuffer.UVKind)!;
-    const numVerts = uvs.length / 2;
-    const oldIdx = mesh.getIndices()!;
     const numPages = atlas.pagesX * atlas.pagesZ;
-    const buckets: number[][] = Array.from({ length: numPages }, () => []);
     const pageOf = (cu: number, cv: number): number => {
         let px = Math.floor((cu * dims.tilesX) / atlas.pageTilesX);
         let pz = Math.floor((cv * dims.tilesZ) / atlas.pageTilesZ);
@@ -792,23 +1392,41 @@ function applyPagedTextures(
         pz = Math.min(Math.max(pz, 0), atlas.pagesZ - 1);
         return pz * atlas.pagesX + px;
     };
-    for (let t = 0; t < oldIdx.length; t += 3) {
-        const a = oldIdx[t], b = oldIdx[t + 1], c = oldIdx[t + 2];
-        const cu = (uvs[a * 2] + uvs[b * 2] + uvs[c * 2]) / 3;
-        const cv = (uvs[a * 2 + 1] + uvs[b * 2 + 1] + uvs[c * 2 + 1]) / 3;
-        buckets[pageOf(cu, cv)].push(a, b, c);
-    }
 
-    const newIdx = new Uint32Array(oldIdx.length);
-    const ranges: { page: number; start: number; count: number }[] = [];
-    let cursor = 0;
-    for (let p = 0; p < numPages; p++) {
-        const b = buckets[p];
-        if (b.length > 0) ranges.push({ page: p, start: cursor, count: b.length });
-        newIdx.set(b, cursor);
-        cursor += b.length;
+    // Regroup each surface's triangles by which page their UV centroid falls
+    // in, so every page becomes a contiguous SubMesh index range on that mesh.
+    let submeshCount = 0;
+    for (const s of terrain.surfaces) {
+        const geo = s.geo;
+        const uvs = geo.uvs;
+        const numVerts = uvs.length / 2;
+        const oldIdx = geo.indices;
+        const buckets: number[][] = Array.from({ length: numPages }, () => []);
+        for (let t = 0; t < oldIdx.length; t += 3) {
+            const a = oldIdx[t], b = oldIdx[t + 1], c = oldIdx[t + 2];
+            const cu = (uvs[a * 2] + uvs[b * 2] + uvs[c * 2]) / 3;
+            const cv = (uvs[a * 2 + 1] + uvs[b * 2 + 1] + uvs[c * 2 + 1]) / 3;
+            buckets[pageOf(cu, cv)].push(a, b, c);
+        }
+
+        const newIdx = oldIdx instanceof Uint16Array
+            ? new Uint16Array(oldIdx.length) : new Uint32Array(oldIdx.length);
+        const ranges: { page: number; start: number; count: number }[] = [];
+        let cursor = 0;
+        for (let p = 0; p < numPages; p++) {
+            const b = buckets[p];
+            if (b.length > 0) ranges.push({ page: p, start: cursor, count: b.length });
+            newIdx.set(b, cursor);
+            cursor += b.length;
+        }
+        geo.indices = newIdx;
+        s.mesh.setIndices(newIdx, numVerts);
+        s.mesh.subMeshes = [];
+        for (const r of ranges) {
+            new SubMesh(r.page, 0, numVerts, r.start, r.count, s.mesh);
+        }
+        submeshCount += ranges.length;
     }
-    mesh.setIndices(newIdx, numVerts);
 
     // One StandardMaterial per page, remapping global UV onto the page.
     const multi = new MultiMaterial('terrainMulti', scene);
@@ -829,6 +1447,7 @@ function applyPagedTextures(
         texture.vOffset = -page.tileZ0 / page.tileCountZ;
         texture.wrapU = Texture.CLAMP_ADDRESSMODE;
         texture.wrapV = Texture.CLAMP_ADDRESSMODE;
+        texture.anisotropicFilteringLevel = 8;
 
         const mat = new StandardMaterial(`terrainTexMat_${p}`, scene);
         mat.diffuseTexture = texture;
@@ -837,17 +1456,14 @@ function applyPagedTextures(
         mat.backFaceCulling = false;
         reattachDecalOverlay(mat, prevPlugin);
         reattachWaterAbsorption(mat, prevWater);
+        reattachTerrainSplat(mat, prevSplat);
         multi.subMaterials[p] = mat;
     }
-    mesh.material = multi;
+    terrain.setMaterial(multi);
+    prevMat?.dispose();
 
-    // Replace the default full-mesh submesh with one per non-empty page.
-    mesh.subMeshes = [];
-    for (const r of ranges) {
-        new SubMesh(r.page, 0, numVerts, r.start, r.count, mesh);
-    }
-    console.log(`[terrain] applied ${ranges.length} page submesh(es) ` +
-        `(${atlas.pagesX}x${atlas.pagesZ} grid)`);
+    console.log(`[terrain] applied ${submeshCount} page submesh(es) across ` +
+        `${terrain.surfaces.length} surface(s) (${atlas.pagesX}x${atlas.pagesZ} grid)`);
 }
 
 /**

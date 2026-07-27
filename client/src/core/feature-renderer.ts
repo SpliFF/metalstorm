@@ -36,6 +36,9 @@ import '@babylonjs/loaders/glTF/index.js';
 import type { ParsedMapData, MapFeatureInstance, MapFeatureDefInfo } from './map-data.js';
 import type { FeatureDefInfo, FeatureSpawnInfo } from './connection.js';
 import type { DefCache } from './def-cache.js';
+import { FeatureLodController, type FeatureImpostorAtlas } from './feature-lod-renderer.js';
+import { DEFAULT_FEATURE_LOD_CONFIG, type FeatureLodConfig, type LodPlacement } from './feature-lod.js';
+import { DEFAULT_ATLAS_LAYOUT, normalizeAtlasLayout } from './impostor-atlas.js';
 
 /// Hash a string to a stable RGB tint — used only for placeholder boxes
 /// so each fallback type still gets a distinct colour.
@@ -152,10 +155,194 @@ function renderPlaceholder(
     return base;
 }
 
+// ── Impostor LOD discovery (PLAN-maps.md M6 / §1.4) ──────────────────────
+//
+// A feature type gets the LOD treatment only when a baked impostor atlas
+// exists for it. Discovery is by MANIFEST, not by probing: a per-models-dir
+// `impostors.json` costs one request for the whole map, whereas HEAD-probing
+// `<stem>_impostor.ktx2` per type costs a 404 per feature type on every map
+// that has none (which is every map today). `probePerType` turns the probe
+// path on for content that ships atlases without a manifest.
+
 /**
- * Render every map feature using its converted glb model. Returns the list
- * of root meshes — one per feature type that successfully loaded, plus one
- * placeholder mesh per type that did not.
+ * One atlas description. Every field is optional — defaults are the v2 atlas
+ * convention plus the model's own bounding box.
+ *
+ * Two spellings are accepted so the manifest and the baker's own per-model
+ * sidecar (`tools/fable-model-forge/bake_impostors.py` writes
+ * `<stem>_impostor.json` = `{cols, rows, cell, pitches, width, height,
+ * centreY}`) can both be read without a conversion step in the content
+ * pipeline. `yawBins`/`pitchBins` and `cols`/`rows` are the same thing.
+ */
+interface ImpostorManifestEntry {
+    /** Atlas filename relative to the models dir. Default `<stem>_impostor.ktx2`. */
+    diffuse?: string;
+    yawBins?: number;
+    pitchBins?: number;
+    frames?: number;
+    /** Baker spelling of yawBins / pitchBins. */
+    cols?: number;
+    rows?: number;
+    /** Elevation (degrees above the horizon) each row was baked at. */
+    pitches?: number[];
+    /** Card size in elmos at scale 1. Default = the model's own extents. */
+    width?: number;
+    height?: number;
+    /** Height of the card CENTRE above the placement point (the baker frames
+     *  on the bounding-sphere centre). Default = height / 2. */
+    centreY?: number;
+    /** Row 0 is the top row of the image (baker convention). Default true. */
+    topDown?: boolean;
+    /** Per-type swap distance override, elmos. */
+    impostorDistance?: number;
+}
+
+type ImpostorManifest = Record<string, ImpostorManifestEntry>;
+
+/** `.../models/tree_conifer.glb` → `.../models/` */
+function modelDirOf(url: string): string {
+    return url.substring(0, url.lastIndexOf('/') + 1);
+}
+
+/** `.../tree_conifer.glb` → `tree_conifer` */
+function modelStemOf(url: string): string {
+    const file = url.substring(url.lastIndexOf('/') + 1);
+    const dot = file.lastIndexOf('.');
+    return dot > 0 ? file.substring(0, dot) : file;
+}
+
+/// Fetch `<dir>impostors.json`. Missing / malformed / unreachable all mean
+/// "this content ships no impostors" — never an error, the caller just keeps
+/// the full-mesh path.
+async function fetchImpostorManifest(dirUrl: string): Promise<ImpostorManifest | null> {
+    try {
+        const resp = await fetch(`${dirUrl}impostors.json`);
+        if (!resp.ok) return null;
+        const json: unknown = await resp.json();
+        if (!json || typeof json !== 'object') return null;
+        const rec = json as Record<string, unknown>;
+        const atlases = (rec.atlases && typeof rec.atlases === 'object') ? rec.atlases : rec;
+        return atlases as ImpostorManifest;
+    } catch {
+        return null;
+    }
+}
+
+/// Fetch the baker's per-model `<stem>_impostor.json` sidecar. Null when the
+/// model has none.
+async function fetchAtlasSidecar(dirUrl: string, stem: string): Promise<ImpostorManifestEntry | null> {
+    try {
+        const resp = await fetch(`${dirUrl}${stem}_impostor.json`);
+        if (!resp.ok) return null;
+        const json: unknown = await resp.json();
+        return (json && typeof json === 'object') ? json as ImpostorManifestEntry : null;
+    } catch {
+        return null;
+    }
+}
+
+/// Last-resort discovery: the atlas image exists but carries no metadata.
+async function probeImpostorAtlas(dirUrl: string, stem: string): Promise<boolean> {
+    try {
+        const resp = await fetch(`${dirUrl}${stem}_impostor.ktx2`, { method: 'HEAD' });
+        return resp.ok;
+    } catch {
+        return false;
+    }
+}
+
+/// Resolve the atlas description for one type. Manifest first (one request per
+/// models dir); the baker's sidecar fills in whatever the manifest omitted, and
+/// is the whole description in `probePerType` mode. Returns null when the type
+/// has no atlas at all — the caller then keeps the original full-mesh path.
+async function resolveAtlasEntry(
+    dirUrl: string, stem: string,
+    manifest: ImpostorManifest | null | undefined, probePerType: boolean,
+): Promise<ImpostorManifestEntry | null> {
+    const listed = manifest ? manifest[stem] : undefined;
+    if (listed !== undefined) {
+        const entry: ImpostorManifestEntry = (listed && typeof listed === 'object') ? listed : {};
+        const hasGrid = entry.yawBins !== undefined || entry.cols !== undefined;
+        const hasSize = entry.width !== undefined || entry.height !== undefined;
+        if (hasGrid && hasSize) return entry;
+        // Manifest listed it but didn't describe it — the baker's sidecar is
+        // authoritative; explicit manifest fields still win.
+        return { ...(await fetchAtlasSidecar(dirUrl, stem) ?? {}), ...entry };
+    }
+    if (!probePerType) return null;
+    const sidecar = await fetchAtlasSidecar(dirUrl, stem);
+    if (sidecar) return sidecar;
+    return (await probeImpostorAtlas(dirUrl, stem)) ? {} : null;
+}
+
+/// Local-space extents of the loaded model, used for the impostor card size
+/// and for inflating tile bounds so an edge-of-tile tree isn't culled by its
+/// own trunk position.
+function modelExtentsOf(mesh: Mesh): { radius: number; height: number; width: number } {
+    const bb = mesh.getBoundingInfo().boundingBox;
+    const min = bb.minimum;
+    const max = bb.maximum;
+    const spanX = Math.max(1e-3, max.x - min.x);
+    const spanZ = Math.max(1e-3, max.z - min.z);
+    return {
+        radius: 0.5 * Math.max(spanX, spanZ),
+        height: Math.max(1e-3, max.y - min.y),
+        width: Math.max(spanX, spanZ),
+    };
+}
+
+/// Build the atlas spec for a type, or null when it has none.
+function atlasSpecFor(
+    def: MapFeatureDefInfo, entry: ImpostorManifestEntry | null, extents: { width: number; height: number },
+): FeatureImpostorAtlas | null {
+    if (!entry) return null;
+    const dir = modelDirOf(def.modelUrl);
+    const stem = modelStemOf(def.modelUrl);
+    return {
+        diffuseUrl: `${dir}${entry.diffuse ?? `${stem}_impostor.ktx2`}`,
+        layout: normalizeAtlasLayout({
+            yawBins: entry.yawBins ?? entry.cols ?? DEFAULT_ATLAS_LAYOUT.yawBins,
+            pitchBins: entry.pitchBins ?? entry.rows ?? DEFAULT_ATLAS_LAYOUT.pitchBins,
+            frames: entry.frames ?? DEFAULT_ATLAS_LAYOUT.frames,
+            pitchDegrees: entry.pitches,
+        }),
+        width: entry.width ?? extents.width,
+        height: entry.height ?? extents.height,
+        lift: entry.centreY,
+        topDown: entry.topDown ?? true,
+        impostorDistance: entry.impostorDistance,
+    };
+}
+
+/// MapFeatureInstance → the shape the LOD math wants. Scale matches
+/// `buildInstanceMatrices` exactly so the NEAR tier is byte-identical to the
+/// pre-LOD path.
+function toLodPlacements(instances: MapFeatureInstance[]): LodPlacement[] {
+    return instances.map((f) => ({
+        x: f.x, y: f.y, z: f.z,
+        rotation: f.rotation,
+        scale: Math.max(0.25, f.relativeSize),
+    }));
+}
+
+/** What `renderMapFeatures` hands back. `lod` is null on maps whose features
+ *  ship no impostor atlases — i.e. every map today. */
+export interface MapFeatureRenderResult {
+    /** Full-mesh thin-instance roots for types with no impostor tier, plus
+     *  placeholders. Registered as shadow casters. */
+    meshes: Mesh[];
+    /** LOD controller for the types that DO have an atlas, or null. Must be
+     *  ticked once per frame and disposed on map teardown. */
+    lod: FeatureLodController | null;
+}
+
+/**
+ * Render every map feature using its converted glb model.
+ *
+ * Types with a baked impostor atlas go through `FeatureLodController` —
+ * spatially chunked tiles that swap full mesh → impostor card → nothing by
+ * camera distance. Types without one keep the original single-mesh
+ * whole-map thin-instance path unchanged.
  *
  * Loading is asynchronous (each glb is fetched + parsed by Babylon), so this
  * function returns a Promise that resolves once every type has been wired up.
@@ -164,7 +351,8 @@ function renderPlaceholder(
  */
 export async function renderMapFeatures(
     scene: Scene, map: ParsedMapData, shadowGenerator: ShadowGenerator | null = null,
-): Promise<Mesh[]> {
+    lodConfig: Partial<FeatureLodConfig> = {},
+): Promise<MapFeatureRenderResult> {
     // Bucket placements by type index.
     const buckets = new Map<number, MapFeatureInstance[]>();
     for (const f of map.features) {
@@ -173,10 +361,34 @@ export async function renderMapFeatures(
         b.push(f);
     }
 
+    const cfg: FeatureLodConfig = { ...DEFAULT_FEATURE_LOD_CONFIG, ...lodConfig };
+
+    // One manifest fetch per distinct models directory (normally exactly one).
+    const manifests = new Map<string, ImpostorManifest | null>();
+    if (cfg.enabled) {
+        const dirs = new Set<string>();
+        for (const [typeIdx] of buckets) {
+            const url = map.featureDefs[typeIdx]?.modelUrl;
+            if (url) dirs.add(modelDirOf(url));
+        }
+        await Promise.all([...dirs].map(async (dir) => {
+            manifests.set(dir, await fetchImpostorManifest(dir));
+        }));
+    }
+
     const results: Mesh[] = [];
+    let lod: FeatureLodController | null = null;
+    const lodFor = (): FeatureLodController => {
+        if (!lod) {
+            lod = new FeatureLodController(scene, shadowGenerator);
+            lod.setConfig(cfg);
+        }
+        return lod;
+    };
     let modelTypes = 0;
     let skippedTypes = 0;
     let placeholderTypes = 0;
+    let lodTypes = 0;
 
     // Issue all glb loads in parallel.
     const promises: Promise<void>[] = [];
@@ -234,6 +446,31 @@ export async function renderMapFeatures(
 
                 applyTexture(primary, def, scene);
 
+                // PLAN-maps.md M6: does this type have a baked impostor atlas?
+                // Manifest first (one request per models dir), the baker's
+                // per-model sidecar for the details. No atlas → fall through to
+                // the original single-mesh path, unchanged.
+                const extents = modelExtentsOf(primary);
+                const dir = modelDirOf(def.modelUrl);
+                let entry: ImpostorManifestEntry | null = null;
+                if (cfg.enabled) {
+                    entry = await resolveAtlasEntry(
+                        dir, modelStemOf(def.modelUrl),
+                        manifests.get(dir), cfg.probePerType);
+                }
+                const atlas = atlasSpecFor(def, entry, extents);
+                if (atlas) {
+                    lodFor().addType({
+                        typeName,
+                        template: primary,
+                        placements: toLodPlacements(instances),
+                        atlas,
+                        modelExtent: { radius: extents.radius, height: extents.height },
+                    });
+                    lodTypes++;
+                    return;
+                }
+
                 primary.thinInstanceSetBuffer(
                     'matrix',
                     buildInstanceMatrices(instances),
@@ -276,10 +513,11 @@ export async function renderMapFeatures(
 
     console.log(
         `[features] rendered ${map.features.length} placement(s) across ` +
-        `${modelTypes} model type(s), ${placeholderTypes} load-failure placeholder(s), ` +
+        `${modelTypes} model type(s), ${lodTypes} impostor-LOD type(s), ` +
+        `${placeholderTypes} load-failure placeholder(s), ` +
         `${skippedTypes} decal-only type(s) skipped`,
     );
-    return results;
+    return { meshes: results, lod };
 }
 
 // ── Dynamic feature renderer (wrecks / debris / runtime spawns) ───────────

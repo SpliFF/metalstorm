@@ -1,9 +1,14 @@
 import { describe, it, expect } from 'vitest';
+import { NullEngine, Scene, VertexBuffer } from '@babylonjs/core';
 import {
     planAtlasPages, extractKtx2Levels, compositeAtlasLevel,
     fogTierAlpha255, DEFAULT_FOG_DARKENING,
-    type AtlasPagePlan, type MapDimensions,
+    planTerrainChunks, buildSurfaceGeometry, computeSurfaceNormals,
+    buildTerrainMesh, DeformableTerrain, isTerrainMesh,
+    type AtlasPagePlan, type MapDimensions, type SurfaceGeometry,
 } from './terrain.js';
+
+const SQUARE_SIZE = 8;
 
 const TILE_PIXELS = 32;
 const MAX = 16384; // typical WebGL2 MAX_TEXTURE_SIZE
@@ -257,5 +262,384 @@ describe('fogTierAlpha255 (FOW terrain darkening)', () => {
         expect(fogTierAlpha255(false, true, false, bad)).toBe(0);
         expect(fogTierAlpha255(false, false, true, bad)).toBe(255);
         expect(fogTierAlpha255(false, false, false, bad)).toBe(255);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Chunked full-resolution terrain (PLAN-maps.md M4)
+// ---------------------------------------------------------------------------
+
+describe('planTerrainChunks', () => {
+    it('keeps small maps (≤513² heightmaps) on the single-mesh, no-LOD path', () => {
+        for (const hm of [129, 257, 513]) {
+            const plan = planTerrainChunks(hm, hm);
+            expect(plan.single).toBe(true);
+            expect(plan.chunksX).toBe(1);
+            expect(plan.chunksZ).toBe(1);
+            expect(plan.lodStep).toBe(0); // no LOD level at all
+        }
+    });
+
+    it('splits a 2049² heightmap (16384-elmo map) into 8x8 full-res chunks', () => {
+        const plan = planTerrainChunks(2049, 2049);
+        expect(plan.single).toBe(false);
+        // 2048 quads / 8 chunks = 256 quads per chunk → 257² verts at step 1.
+        expect(plan.chunkQuads).toBe(256);
+        expect(plan.chunksX).toBe(8);
+        expect(plan.chunksZ).toBe(8);
+        // Draw-call guardrail (PLAN-maps.md §3): ≤ ~64 terrain draws.
+        expect(plan.chunksX * plan.chunksZ).toBeLessThanOrEqual(64);
+        expect(plan.lodStep).toBe(4);
+        // The switch has to clear a chunk's own half-diagonal (Babylon measures
+        // to the bounding-sphere centre) or the ground under the camera pops.
+        const halfDiag = (plan.chunkQuads * SQUARE_SIZE * Math.SQRT2) / 2;
+        expect(plan.lodDistance).toBeGreaterThan(halfDiag);
+    });
+
+    it('uses the 128-quad default when it already fits the chunk cap', () => {
+        const plan = planTerrainChunks(1025, 1025);
+        expect(plan.chunkQuads).toBe(128);
+        expect(plan.chunksX).toBe(8);
+        expect(plan.chunksZ).toBe(8);
+    });
+
+    it('handles non-square maps and a non-power-of-two remainder', () => {
+        const plan = planTerrainChunks(2049, 1025);
+        expect(plan.chunksX).toBe(8);
+        expect(plan.chunksZ).toBe(4);   // 1024 quads / 256
+        const p2 = planTerrainChunks(801, 801, { chunkQuads: 128 });
+        expect(p2.chunksX).toBe(Math.ceil(800 / 128)); // 7 (last chunk short)
+    });
+});
+
+/** Sampler standing in for a real heightmap: a deterministic ridge. */
+const ridgeY = (sx: number, sz: number): number =>
+    100 * Math.sin(sx * 0.01) + 50 * Math.cos(sz * 0.013);
+
+function chunkGeo(x0: number, x1: number, z0: number, z1: number,
+                  step: number, hm = 2049, skirt = true): SurfaceGeometry {
+    return buildSurfaceGeometry({
+        x0, z0, x1, z1, step, hmW: hm, hmH: hm, sampleY: ridgeY, skirt,
+    });
+}
+
+describe('buildSurfaceGeometry (terrain chunk)', () => {
+    it('is full-resolution at step 1 — one vertex per heightmap corner', () => {
+        const geo = chunkGeo(256, 512, 0, 256, 1);
+        expect(geo.gw).toBe(257);
+        expect(geo.gh).toBe(257);
+        expect(geo.gridVerts).toBe(257 * 257);
+        for (let i = 0; i < geo.gw; i++) expect(geo.srcXs[i]).toBe(256 + i);
+        // A step-1 chunk of a 2049² map is exactly one vertex per 8 elmos.
+        expect(geo.positions[3] - geo.positions[0]).toBe(SQUARE_SIZE);
+    });
+
+    it('places vertices at world XZ = corner × SQUARE_SIZE with the sampled Y', () => {
+        const geo = chunkGeo(256, 512, 128, 384, 1);
+        const at = (ix: number, iz: number) => {
+            const v = (iz * geo.gw + ix) * 3;
+            return [geo.positions[v], geo.positions[v + 1], geo.positions[v + 2]];
+        };
+        // Float32 vertex buffer — compare with float32 tolerance.
+        const near = (got: number[], want: number[]) =>
+            got.forEach((v, i) => expect(v).toBeCloseTo(want[i], 4));
+        near(at(0, 0), [256 * SQUARE_SIZE, ridgeY(256, 128), 128 * SQUARE_SIZE]);
+        near(at(geo.gw - 1, geo.gh - 1),
+            [512 * SQUARE_SIZE, ridgeY(512, 384), 384 * SQUARE_SIZE]);
+    });
+
+    it('keeps UVs in GLOBAL 0..1 map space (atlas paging + splat depend on it)', () => {
+        const geo = chunkGeo(256, 512, 512, 768, 1);
+        const uvAt = (ix: number, iz: number) => {
+            const v = (iz * geo.gw + ix) * 2;
+            return [geo.uvs[v], geo.uvs[v + 1]];
+        };
+        expect(uvAt(0, 0)).toEqual([256 / 2048, 512 / 2048]);
+        expect(uvAt(geo.gw - 1, geo.gh - 1)).toEqual([512 / 2048, 768 / 2048]);
+        // Whole-map corner chunks anchor the 0..1 range exactly.
+        const first = chunkGeo(0, 256, 0, 256, 1);
+        expect(first.uvs[0]).toBe(0);
+        const last = chunkGeo(1792, 2048, 1792, 2048, 1);
+        const lastV = (last.gh * last.gw - 1) * 2;
+        expect(last.uvs[lastV]).toBe(1);
+        expect(last.uvs[lastV + 1]).toBe(1);
+    });
+
+    it('neighbouring chunks agree exactly on their shared border column', () => {
+        const left = chunkGeo(0, 256, 0, 256, 1);
+        const right = chunkGeo(256, 512, 0, 256, 1);
+        for (let iz = 0; iz < left.gh; iz++) {
+            const l = (iz * left.gw + (left.gw - 1)) * 3;   // left chunk's last column
+            const r = (iz * right.gw) * 3;                  // right chunk's first column
+            expect(left.positions[l]).toBe(right.positions[r]);
+            expect(left.positions[l + 1]).toBe(right.positions[r + 1]);
+            expect(left.positions[l + 2]).toBe(right.positions[r + 2]);
+            const lu = (iz * left.gw + (left.gw - 1)) * 2, ru = (iz * right.gw) * 2;
+            expect(left.uvs[lu]).toBe(right.uvs[ru]);
+            expect(left.uvs[lu + 1]).toBe(right.uvs[ru + 1]);
+        }
+    });
+
+    it('LOD1 (step 4) shares the chunk border vertices with LOD0', () => {
+        const lod0 = chunkGeo(256, 512, 256, 512, 1);
+        const lod1 = chunkGeo(256, 512, 256, 512, 4);
+        expect(lod1.gw).toBe(65); // 256 quads / 4 + 1
+        expect(lod1.srcXs[0]).toBe(lod0.srcXs[0]);
+        expect(lod1.srcXs[lod1.gw - 1]).toBe(lod0.srcXs[lod0.gw - 1]);
+        expect(lod1.positions[1]).toBe(lod0.positions[1]); // same corner height
+    });
+
+    it('includes the final corner when the span is not a multiple of the step', () => {
+        // Last chunk of an 801-corner map: 800 - 768 = 32 quads, step 4 divides
+        // it; step 3 (pathological) must still land the last vertex on 800.
+        const geo = buildSurfaceGeometry({
+            x0: 768, z0: 0, x1: 800, z1: 32, step: 3,
+            hmW: 801, hmH: 801, sampleY: ridgeY, skirt: false,
+        });
+        expect(geo.srcXs[geo.gw - 1]).toBe(800);
+        expect(geo.srcZs[geo.gh - 1]).toBe(32);
+    });
+
+    it('adds a downward border skirt that inherits the edge UVs', () => {
+        const geo = chunkGeo(256, 512, 256, 512, 1);
+        expect(geo.skirtSrc.length).toBe(2 * geo.gw + 2 * geo.gh);
+        expect(geo.skirtDepth).toBeGreaterThan(0);
+        expect(geo.positions.length / 3).toBe(geo.gridVerts + geo.skirtSrc.length);
+        for (let k = 0; k < geo.skirtSrc.length; k++) {
+            const d = geo.gridVerts + k, s = geo.skirtSrc[k];
+            expect(geo.positions[d * 3]).toBe(geo.positions[s * 3]);         // same X
+            expect(geo.positions[d * 3 + 2]).toBe(geo.positions[s * 3 + 2]); // same Z
+            expect(geo.positions[d * 3 + 1])
+                .toBeCloseTo(geo.positions[s * 3 + 1] - geo.skirtDepth, 3);  // hangs down
+            expect(geo.uvs[d * 2]).toBe(geo.uvs[s * 2]);
+            expect(geo.uvs[d * 2 + 1]).toBe(geo.uvs[s * 2 + 1]);
+        }
+        // Skirt-free surfaces (the single-mesh small-map path) have none.
+        const noSkirt = chunkGeo(0, 128, 0, 128, 1, 2049, false);
+        expect(noSkirt.skirtSrc.length).toBe(0);
+        expect(noSkirt.positions.length / 3).toBe(noSkirt.gridVerts);
+    });
+
+    it('indices stay 16-bit while a chunk fits, and cover grid + skirt quads', () => {
+        const geo = chunkGeo(0, 128, 0, 128, 1);           // 129² + skirt < 65535
+        expect(geo.indices).toBeInstanceOf(Uint16Array);
+        const gridQuads = (geo.gw - 1) * (geo.gh - 1);
+        const skirtQuads = 2 * (geo.gw - 1) + 2 * (geo.gh - 1);
+        expect(geo.indices.length).toBe((gridQuads + skirtQuads) * 6);
+        // Plain-JS scan, asserted once — 100k+ expect() calls is too slow.
+        const numVerts = geo.positions.length / 3;
+        let maxIdx = -1;
+        for (const i of geo.indices) if (i > maxIdx) maxIdx = i;
+        expect(maxIdx).toBeLessThan(numVerts);
+        expect(maxIdx).toBeGreaterThanOrEqual(geo.gridVerts); // skirt is indexed
+    });
+});
+
+describe('computeSurfaceNormals', () => {
+    it('produces up-facing unit normals, flat ground → +Y', () => {
+        const flat = buildSurfaceGeometry({
+            x0: 0, z0: 0, x1: 16, z1: 16, step: 1, hmW: 17, hmH: 17,
+            sampleY: () => 42, skirt: true,
+        });
+        const n = computeSurfaceNormals(flat, () => 42, 17, 17);
+        for (let v = 0; v < n.length / 3; v++) {
+            expect(n[v * 3 + 1]).toBeCloseTo(1, 6);
+            expect(Math.hypot(n[v * 3], n[v * 3 + 1], n[v * 3 + 2])).toBeCloseTo(1, 6);
+        }
+    });
+
+    it('is continuous across a chunk border (both chunks see the same slope)', () => {
+        const left = chunkGeo(0, 128, 0, 128, 1);
+        const right = chunkGeo(128, 256, 0, 128, 1);
+        const nl = computeSurfaceNormals(left, ridgeY, 2049, 2049);
+        const nr = computeSurfaceNormals(right, ridgeY, 2049, 2049);
+        for (let iz = 0; iz < left.gh; iz++) {
+            const l = (iz * left.gw + (left.gw - 1)) * 3;
+            const r = (iz * right.gw) * 3;
+            for (let c = 0; c < 3; c++) expect(nl[l + c]).toBeCloseTo(nr[r + c], 6);
+        }
+    });
+
+    it('slopes tilt the normal away from the uphill direction', () => {
+        // Height rising with X → normal leans towards -X.
+        const geo = buildSurfaceGeometry({
+            x0: 0, z0: 0, x1: 8, z1: 8, step: 1, hmW: 9, hmH: 9,
+            sampleY: (sx) => sx * SQUARE_SIZE, skirt: false,
+        });
+        const n = computeSurfaceNormals(geo, (sx) => sx * SQUARE_SIZE, 9, 9);
+        const mid = (4 * geo.gw + 4) * 3;
+        expect(n[mid]).toBeCloseTo(-Math.SQRT1_2, 5); // 45° slope
+        expect(n[mid + 1]).toBeCloseTo(Math.SQRT1_2, 5);
+    });
+});
+
+/** A small but chunked map: 641² corners → 5×5 chunks of 128 quads. */
+function makeChunkedTerrain() {
+    const engine = new NullEngine();
+    const scene = new Scene(engine);
+    const mapx = 640, mapy = 640;
+    const dims: MapDimensions = {
+        mapx, mapy, minHeight: 0, maxHeight: 655.35, tilesX: 160, tilesZ: 160,
+    };
+    const hmW = mapx + 1;
+    const heights = new Uint16Array(hmW * (mapy + 1));
+    for (let z = 0; z <= mapy; z++) {
+        for (let x = 0; x <= mapx; x++) heights[z * hmW + x] = (x * 37 + z * 11) % 65535;
+    }
+    // Force chunking (the plan's small-map cutoff is 513²; 641² is above it).
+    const group = buildTerrainMesh(scene, dims, heights, { chunkQuads: 128 });
+    const worldY = (sx: number, sz: number) =>
+        (heights[sz * hmW + sx] / 65535) * (dims.maxHeight - dims.minHeight);
+    return { scene, dims, group, heights, hmW, worldY };
+}
+
+describe('buildTerrainMesh (chunk grid)', () => {
+    it('builds one shared-material chunk mesh per grid cell, each with a LOD1', () => {
+        const { group } = makeChunkedTerrain();
+        expect(group.plan.chunksX).toBe(5);
+        expect(group.plan.chunksZ).toBe(5);
+        expect(group.chunks).toHaveLength(25);
+        expect(group.meshes).toHaveLength(25);
+
+        const mat = group.material;
+        expect(mat).toBeTruthy();
+        // Shared material instance: plugins bind per material, so one attach
+        // must cover the whole terrain.
+        for (const m of group.allMeshes) expect(m.material).toBe(mat);
+        expect(group.materials).toEqual([mat]);
+
+        for (const c of group.chunks) {
+            expect(c.lod0.step).toBe(1);
+            expect(c.lod1).not.toBeNull();
+            expect(c.lod1!.step).toBe(4);
+            expect(c.lod0.mesh.getLODLevels()).toHaveLength(1);
+            expect(c.lod0.mesh.getLODLevels()[0].mesh).toBe(c.lod1!.mesh);
+            expect(c.lod1!.mesh.isPickable).toBe(false);
+            // LOD0 has ~16x the vertices of LOD1 (step 4 in both axes).
+            expect(c.lod0.geo.gridVerts).toBe(129 * 129);
+            expect(c.lod1!.geo.gridVerts).toBe(33 * 33);
+        }
+    });
+
+    it('shares one index buffer between same-shaped chunks', () => {
+        const { group } = makeChunkedTerrain();
+        // 5x5 chunks of 128 quads over 640 quads: every chunk is full size, so
+        // all 25 LOD0 surfaces (and all 25 LOD1 surfaces) share topology.
+        const idx0 = group.chunks[0].lod0.geo.indices;
+        const idx1 = group.chunks[0].lod1!.geo.indices;
+        for (const c of group.chunks) {
+            expect(c.lod0.geo.indices).toBe(idx0);
+            expect(c.lod1!.geo.indices).toBe(idx1);
+        }
+        expect(idx0).not.toBe(idx1); // different grid shapes → different buffers
+    });
+
+    it('only the LOD0 chunk meshes answer the terrain pick predicate', () => {
+        const { group } = makeChunkedTerrain();
+        for (const c of group.chunks) {
+            expect(isTerrainMesh(c.lod0.mesh)).toBe(true);
+            expect(isTerrainMesh(c.lod1!.mesh)).toBe(false);
+        }
+        expect(isTerrainMesh({ name: 'terrain' })).toBe(true);   // single-mesh path
+        expect(isTerrainMesh({ name: 'terrainFog' })).toBe(false);
+        expect(isTerrainMesh({ name: 'water' })).toBe(false);
+    });
+
+    it('gives every chunk its own bounding box (per-chunk frustum culling)', () => {
+        const { group } = makeChunkedTerrain();
+        for (const c of group.chunks) {
+            const bb = c.lod0.mesh.getBoundingInfo().boundingBox;
+            expect(bb.minimum.x).toBeCloseTo(c.x0 * SQUARE_SIZE, 3);
+            expect(bb.maximum.x).toBeCloseTo(c.x1 * SQUARE_SIZE, 3);
+            expect(bb.minimum.z).toBeCloseTo(c.z0 * SQUARE_SIZE, 3);
+            expect(bb.maximum.z).toBeCloseTo(c.z1 * SQUARE_SIZE, 3);
+        }
+    });
+
+    it('samples the heightmap at full resolution, chunk-boundary corners included', () => {
+        const { group, worldY } = makeChunkedTerrain();
+        for (const [sx, sz] of [[0, 0], [1, 1], [127, 3], [128, 128], [129, 128],
+                                [255, 256], [640, 640], [317, 512]]) {
+            expect(group.heightAt(sx, sz)).toBeCloseTo(worldY(sx, sz), 3);
+        }
+    });
+
+    it('keeps small maps on one un-LODded mesh named "terrain"', () => {
+        const engine = new NullEngine();
+        const scene = new Scene(engine);
+        const dims: MapDimensions = {
+            mapx: 512, mapy: 512, minHeight: 0, maxHeight: 100, tilesX: 128, tilesZ: 128,
+        };
+        const group = buildTerrainMesh(scene, dims, new Uint16Array(513 * 513));
+        expect(group.plan.single).toBe(true);
+        expect(group.chunks).toHaveLength(1);
+        expect(group.meshes[0].name).toBe('terrain');
+        expect(group.meshes[0].getLODLevels()).toHaveLength(0);
+        expect(group.chunks[0].lod0.geo.skirtSrc.length).toBe(0);
+        // Full resolution, as the old ≤512-step-1 path already was.
+        expect(group.chunks[0].lod0.geo.gw).toBe(513);
+    });
+});
+
+describe('DeformableTerrain (per-chunk patches)', () => {
+    it('applies a patch straddling a chunk border to both chunks and both LODs', () => {
+        const { group } = makeChunkedTerrain();
+        const deform = new DeformableTerrain(group);
+        const x1 = 124, x2 = 132, z1 = 8, z2 = 12;
+        const pw = x2 - x1 + 1;
+        const heights = new Float32Array(pw * (z2 - z1 + 1)).fill(500);
+        deform.applyPatch({ x1, z1, x2, z2, heights });
+        expect(deform.appliedPatches).toBe(1);
+
+        // Border column 128 is owned by chunk (0,0) and chunk (1,0) — both
+        // vertex buffers must carry the new height or a crack opens.
+        expect(group.heightAt(128, 10)).toBe(500);
+        const left = group.chunks[0], right = group.chunks[1];
+        expect(left.x1).toBe(128);
+        expect(right.x0).toBe(128);
+        const lg = left.lod0.geo, rg = right.lod0.geo;
+        expect(lg.positions[((10 - left.z0) * lg.gw + (128 - left.x0)) * 3 + 1]).toBe(500);
+        expect(rg.positions[((10 - right.z0) * rg.gw + (128 - right.x0)) * 3 + 1]).toBe(500);
+
+        // LOD1 samples every 4th corner: (128, 8) and (128, 12) are on its grid.
+        const r1 = right.lod1!.geo;
+        expect(r1.positions[((12 - right.z0) / 4 * r1.gw + 0) * 3 + 1]).toBe(500);
+
+        // Normals were recomputed over the patch (flat top → +Y up).
+        const vi = (10 - right.z0) * rg.gw + (130 - right.x0);
+        expect(right.lod0.normals[vi * 3 + 1]).toBeCloseTo(1, 6);
+
+        // Skirts follow the deformed edge so the LOD seam stays covered.
+        for (let k = 0; k < rg.skirtSrc.length; k++) {
+            const d = rg.gridVerts + k, s = rg.skirtSrc[k];
+            expect(rg.positions[d * 3 + 1])
+                .toBeCloseTo(rg.positions[s * 3 + 1] - rg.skirtDepth, 3);
+        }
+    });
+
+    it('uploads only the touched chunks and leaves the rest alone', () => {
+        const { group } = makeChunkedTerrain();
+        const deform = new DeformableTerrain(group);
+        const before = group.chunks.map((c) => {
+            const p = c.lod0.mesh.getVerticesData(VertexBuffer.PositionKind)!;
+            return Array.from(p.slice(0, 12));
+        });
+        const heights = new Float32Array(9).fill(300);
+        deform.applyPatch({ x1: 300, z1: 300, x2: 302, z2: 302, heights });
+
+        expect(group.heightAt(301, 301)).toBe(300);
+        // Chunk (0,0) is nowhere near the patch — untouched.
+        const after0 = group.chunks[0].lod0.mesh
+            .getVerticesData(VertexBuffer.PositionKind)!;
+        expect(Array.from(after0.slice(0, 12))).toEqual(before[0]);
+    });
+
+    it('ignores patches that fall outside the heightmap', () => {
+        const { group } = makeChunkedTerrain();
+        const deform = new DeformableTerrain(group);
+        deform.applyPatch({
+            x1: 900, z1: 900, x2: 902, z2: 902, heights: new Float32Array(9).fill(7),
+        });
+        expect(deform.appliedPatches).toBe(0);
     });
 });

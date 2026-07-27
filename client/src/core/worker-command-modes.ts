@@ -64,6 +64,7 @@ import type { EntityRenderer } from './entity-renderer.js';
 import type { Connection, UnitCommandQueueInfo } from './connection.js';
 import { CommandBuffer, CMD, OPT, type CommandNotifier } from './command-buffer.js';
 import { SELECT_RADIUS, DRAG_THRESHOLD_PX } from './selection-core.js';
+import { isTerrainMesh } from './terrain.js';
 
 /// Spring `CMDTYPE_*` (rts/Sim/Units/CommandAI/Command.h) → modal target class.
 /// Only world-target types reach `activateCommandFromMenu` (instant + ICON_MODE
@@ -589,7 +590,7 @@ export class WorkerCommandModes {
         if (!camera) return null;
         const dpr = this.opts.getDpr();
         const pick = this.scene.pick(cssX * dpr, cssY * dpr,
-            (m) => m.name === 'terrain', false, camera);
+            isTerrainMesh, false, camera);
         return (pick?.hit && pick.pickedPoint) ? pick.pickedPoint : null;
     }
 
