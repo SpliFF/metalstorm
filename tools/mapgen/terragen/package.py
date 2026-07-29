@@ -34,6 +34,12 @@ class MapPackageConfig:
     start_positions: list[tuple[float, float]] = field(default_factory=list)
     splat_tex_scales: tuple = (0.006, 0.02, 0.009, 0.0022)
     splat_tex_mults: tuple = (0.25, 0.35, 0.22, 0.22)
+    # water surface look (mapinfo water block). Defaults suit maps where
+    # water is an accent (fords, lakes); sea-dominated maps want a brighter,
+    # more opaque surface so the ocean reads at strategic zoom.
+    water_surface_color: tuple = (0.35, 0.42, 0.50)
+    water_surface_alpha: float = 0.45
+    water_base_color: tuple = (0.28, 0.36, 0.43)
     road_type_speed: float = 1.35     # terrainTypes speed multiplier on roads
     voidwater: bool = False
     seed: int = 1
@@ -149,9 +155,9 @@ local mapinfo = {{
     water = {{
         damage = 0,
         voidwater = {str(cfg.voidwater).lower()},
-        surfacecolor = {{ 0.35, 0.42, 0.50 }},
-        surfacealpha = 0.45,
-        basecolor = {{ 0.28, 0.36, 0.43 }},
+        surfacecolor = {{ {cfg.water_surface_color[0]}, {cfg.water_surface_color[1]}, {cfg.water_surface_color[2]} }},
+        surfacealpha = {cfg.water_surface_alpha},
+        basecolor = {{ {cfg.water_base_color[0]}, {cfg.water_base_color[1]}, {cfg.water_base_color[2]} }},
         mincolor = {{ 0.05, 0.08, 0.11 }},
         absorb = {{ 0.006, 0.004, 0.002 }},
     }},

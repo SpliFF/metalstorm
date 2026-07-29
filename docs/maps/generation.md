@@ -275,17 +275,35 @@ before processing; the C++ validator rejects the map otherwise.
 
 ## 8. Adding a new map
 
-1. Author a layout skeleton (regions, tags, elevations, districts, start
-   rows) or generate free-form: settlements from `settle.pick_sites`, starts
-   from the same scoring with land-guarantee masks.
-2. Write a generator script composing the §3 stages — copy meridian2.py and
-   replace the structural-surface + contract sections. Pick a
+Two shipped generator styles to copy from:
+
+- **Layout-driven** (`meridian2.py`): a hand-authored region skeleton with
+  gameplay contracts re-enforced after erosion. Copy it when the map's
+  strategic layout is designed first (regions.lua + E1 validation).
+- **Free-form parameterized** (`archipelago.py` → Skerry Reach): everything
+  derived from CLI parameters — `--seed`, `--landmass` (fraction of area
+  above the waterline, enforced by quantile calibration before AND after
+  erosion), `--islands`. Same parameters ⇒ byte-identical map (verified:
+  independent cold runs hash equal). Island centres via deterministic
+  dart-throwing; starts round-robin across the largest islands via
+  `settle` scoring (its own contract: 8 dry, separated, flattened pads);
+  per-island road networks (roads never island-hop); the full placement
+  layer set (§6) including `tools/mapgen/vegetation_defs.lua`, the shared
+  prop-def file generated maps install as `features/vegetation.lua`.
+
+Recipe:
+1. Copy the closer generator; replace the surface-synthesis section. Pick a
    `bio.ClimateParams` (an ice or desert map is a parameter set: `lat_hot`,
    `altitude_lapse`, `base_moisture`, `wind_dir`, plus species tables).
-3. Add `mapdata/regions.lua` (hand-authored or emitted from the layout) if
-   the game uses the region system; keep the E1 self-check wired.
-4. Run `--fast --preview-only` until the preview reads well, then full-res,
-   then mapconverter, then the in-game pass.
+2. Add `mapdata/regions.lua` + the E1 self-check if the game uses the
+   region system; free-form maps assert their own generated contracts
+   (land fraction, dry starts) instead.
+3. Iterate: `--fast --preview-only` for composition (30-60 s),
+   `--no-package` for placement-layer tuning (~70 s full-res with cached
+   erosion — watch the per-layer `suit %` coverage in the output), then
+   full-res, `gen_vegetation_models.py --out <map dir>`, mapconverter,
+   in-game pass. If you change the synthesis code, bump the generator's
+   `SYNTH_REV` so the erosion cache re-keys.
 
 ## 9. Goldens
 

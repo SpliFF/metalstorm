@@ -1,0 +1,213 @@
+{
+ "asset": {
+  "version": "2.0",
+  "generator": "fable-model-forge 1.0 (Claude Fable 5, hand-built glTF)"
+ },
+ "scene": 0,
+ "scenes": [
+  {
+   "nodes": [
+    0
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "name": "MS_rock_boulder_large",
+   "children": [
+    1
+   ]
+  },
+  {
+   "name": "boulder_large",
+   "mesh": 0
+  }
+ ],
+ "meshes": [
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1,
+      "TEXCOORD_0": 2
+     },
+     "indices": 3,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  }
+ ],
+ "accessors": [
+  {
+   "bufferView": 0,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 2880,
+   "type": "VEC3",
+   "min": [
+    -43.081233978271484,
+    0.0,
+    -32.613094329833984
+   ],
+   "max": [
+    35.96819305419922,
+    39.391387939453125,
+    34.31010437011719
+   ]
+  },
+  {
+   "bufferView": 1,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 2880,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 2,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 2880,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 3,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 2880,
+   "type": "SCALAR"
+  }
+ ],
+ "bufferViews": [
+  {
+   "buffer": 0,
+   "byteOffset": 0,
+   "byteLength": 34560,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 34560,
+   "byteLength": 34560,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 69120,
+   "byteLength": 23040,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 92160,
+   "byteLength": 11520,
+   "target": 34963
+  }
+ ],
+ "buffers": [
+  {
+   "byteLength": 103680,
+   "uri": "rock_boulder_large.bin"
+  }
+ ],
+ "samplers": [
+  {}
+ ],
+ "images": [
+  {
+   "mimeType": "image/ktx2",
+   "uri": "rock_boulder_large_diffuse.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "rock_boulder_large_orm.ktx2"
+  }
+ ],
+ "textures": [
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 0
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 1
+    }
+   }
+  }
+ ],
+ "materials": [
+  {
+   "name": "rock_boulder_large",
+   "pbrMetallicRoughness": {
+    "baseColorTexture": {
+     "index": 0
+    },
+    "metallicFactor": 1.0,
+    "roughnessFactor": 1.0,
+    "metallicRoughnessTexture": {
+     "index": 1
+    }
+   },
+   "occlusionTexture": {
+    "index": 1
+   }
+  }
+ ],
+ "extensions": {
+  "SPRINGRTS_geometry": {
+   "configVersion": 8,
+   "height": 39.3914,
+   "midpos": [
+    -3.55652,
+    19.69569,
+    0.84851
+   ],
+   "mins": [
+    -43.08123,
+    0.0,
+    -32.61309
+   ],
+   "maxs": [
+    35.96819,
+    39.39139,
+    34.31011
+   ],
+   "radius": 55.4058,
+   "pieces": [
+    {
+     "name": "boulder_large",
+     "parent": -1,
+     "offset": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "mins": [
+      -43.08123,
+      0.0,
+      -32.61309
+     ],
+     "maxs": [
+      35.96819,
+      39.39139,
+      34.31011
+     ]
+    }
+   ]
+  }
+ },
+ "extensionsUsed": [
+  "KHR_texture_basisu",
+  "SPRINGRTS_geometry"
+ ],
+ "extensionsRequired": [
+  "KHR_texture_basisu"
+ ]
+}
