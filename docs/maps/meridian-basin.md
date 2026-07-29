@@ -4,6 +4,12 @@
 artifact that seeds the mechanical work: the generator (task 2), civilian/convoy data (task 3),
 region validation (task 4), and the scenario file (task 5) all build against it.
 
+> **Generator note (2026-07-27):** the map is now built by the realistic terragen pipeline
+> (`tools/mapgen/meridian2.py` — erosion, rivers, biomes, roads, vegetation), which honours
+> this layout as its constraint skeleton. The original plateau generator (`meridian.py`) is
+> superseded. See **[generation.md](generation.md)** for the pipeline; the region geography,
+> rows, and chokepoint contracts described below are unchanged and still authoritative.
+
 **Canonical source:** [`tools/mapgen/meridian_layout.json`](../../tools/mapgen/meridian_layout.json).
 That file is the *single source* the generator reads to build **both** the heightmap **and**
 `mapdata/regions.lua`, so the map and its region graph can never disagree (beta-map §2). This
