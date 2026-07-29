@@ -1367,6 +1367,29 @@ static bool RegionsExportFresh(const std::string& sourcePath, const std::string&
     return outTime >= srcTime;
 }
 
+bool MapProcessor::ProcessedOutputCurrent(const std::string& srcDir, const std::string& stampPath) {
+    std::error_code ec;
+    const auto stampTime = fs::last_write_time(stampPath, ec);
+    if (ec) return true;   // no stamp (legacy processed dir) → don't force
+    auto it = fs::recursive_directory_iterator(
+        srcDir, fs::directory_options::skip_permission_denied, ec);
+    if (ec) return true;   // can't scan source → don't force a reprocess loop
+    for (; it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        if (ec) break;
+        if (!it->is_regular_file(ec)) continue;
+        const auto t = fs::last_write_time(it->path(), ec);
+        if (!ec && t > stampTime) return false;
+    }
+    return true;
+}
+
+/// (Re)write the end-of-processing stamp ProcessedOutputCurrent compares
+/// against. Written strictly after every processed output file.
+static void TouchProcessedStamp(const std::string& processedDir) {
+    std::ofstream f(processedDir + "/.processed-stamp", std::ios::trunc);
+    f << "ok\n";
+}
+
 void MapProcessor::ScanAndProcess(const std::string& mapsDir, const std::string& dataDir, sqlite3* db) {
     EnsureTable(db);
     if (!fs::is_directory(mapsDir)) {
@@ -1382,13 +1405,17 @@ void MapProcessor::ScanAndProcess(const std::string& mapsDir, const std::string&
         std::string processedDir = dataDir + "/maps/" + mapId;
         bool filesExist = fs::exists(processedDir + "/heightmap.bin");
         bool regionsFresh = RegionsExportFresh(mapDir.path().string(), processedDir);
+        bool sourceCurrent = !filesExist || ProcessedOutputCurrent(
+            mapDir.path().string(), processedDir + "/.processed-stamp");
 
-        if (existing.formatVersion >= MAP_FORMAT_VERSION && filesExist && regionsFresh) {
+        if (existing.formatVersion >= MAP_FORMAT_VERSION && filesExist && regionsFresh && sourceCurrent) {
             SLOG(SPRING_LOG_DEBUG, "%s: up to date (v%d)", mapId.c_str(), existing.formatVersion);
             continue;
         }
-        if (existing.formatVersion >= MAP_FORMAT_VERSION && filesExist && !regionsFresh) {
-            SLOG(SPRING_LOG_INFO, "%s: mapdata/regions.lua changed — reprocessing", mapId.c_str());
+        if (existing.formatVersion >= MAP_FORMAT_VERSION && filesExist) {
+            SLOG(SPRING_LOG_INFO, "%s: %s — reprocessing", mapId.c_str(),
+                 !sourceCurrent ? "source content changed"
+                                : "mapdata/regions.lua changed");
         }
 
         MapMetadata meta;
@@ -1407,6 +1434,7 @@ void MapProcessor::ScanAndProcess(const std::string& mapsDir, const std::string&
 
         if (ProcessMap(meta)) {
             StoreMetadata(db, meta);
+            TouchProcessedStamp(meta.processedDir);
             SLOG(SPRING_LOG_INFO, "%s: done (%d features, %d start positions, luaGaia=%s)",
                 mapId.c_str(), static_cast<int>(meta.features.size()),
                 static_cast<int>(meta.startPositions.size()),

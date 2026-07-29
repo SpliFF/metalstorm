@@ -12,6 +12,13 @@ class MapProcessor : public MapMetadataDb {
 public:
     void ScanAndProcess(const std::string& mapsDir, const std::string& dataDir, sqlite3* db);
 
+    /// True when no file under the source map dir is newer than the map's
+    /// `.processed-stamp` (written at the end of processing). A regenerated
+    /// SMF/SMT/mapinfo/featureplacer config bumps a source mtime and makes
+    /// this false, so mapconverter reprocesses without --force. A missing
+    /// stamp (legacy processed dir) counts as current.
+    static bool ProcessedOutputCurrent(const std::string& srcDir, const std::string& stampPath);
+
 private:
     bool ReadMapInfo(const std::string& mapDir, MapMetadata& meta);
     bool ReadSMFHeader(MapMetadata& meta);

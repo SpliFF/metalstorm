@@ -80,11 +80,15 @@ bool ProcessOneMap(const fs::path& mapDir, const std::string& dataDir,
 
     MapProcessor proc;
 
-    // Check if already up-to-date (unless --force)
+    // Check if already up-to-date (unless --force). A regenerated source
+    // (newer than the processed dir's .processed-stamp) reprocesses
+    // automatically — no --force needed after tools/mapgen runs.
     if (!force) {
         MapMetadata existing = proc.GetMap(db, mapId);
         bool filesExist = fs::exists(processedDir + "/heightmap.bin");
-        if (existing.formatVersion >= MAP_FORMAT_VERSION && filesExist) {
+        bool sourceCurrent = MapProcessor::ProcessedOutputCurrent(
+            mapDir.string(), processedDir + "/.processed-stamp");
+        if (existing.formatVersion >= MAP_FORMAT_VERSION && filesExist && sourceCurrent) {
             SLOG(SPRING_LOG_DEBUG, "%s: up to date (v%d)",
                 mapId.c_str(), existing.formatVersion);
             return true;
