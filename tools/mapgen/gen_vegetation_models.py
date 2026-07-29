@@ -370,12 +370,52 @@ def build_boulder(pal: Palette, rng: np.random.Generator) -> Part:
     return p
 
 
+def build_boulder_large(pal: Palette, rng: np.random.Generator) -> Part:
+    """Craggy outcrop-scale boulder (~40 elmos tall, ~85 wide): a main
+    displaced icosphere plus two shouldered companion rocks, all base-cut to
+    Y=0. Placed by the placement.py boulder layers (clusters + lone erratics)."""
+    p = Part("boulder_large")
+
+    def rock(centre, radii, amp, lobes, shear):
+        unit, faces = icosphere(2)
+        disp = _lumpy(unit, rng, amp, lobes=lobes)
+        pts = unit * disp[:, None] * np.array(radii)
+        pts[:, 2] += shear * np.maximum(pts[:, 1], 0.0)
+        cut = -radii[1] * 0.36
+        pts[:, 1] = np.maximum(pts[:, 1], cut)
+        pts[:, 1] -= cut
+        pts += np.array(centre)
+        for (a, b, c) in faces:
+            tri = [pts[a], pts[b], pts[c]]
+            n = np.cross(tri[1] - tri[0], tri[2] - tri[0])
+            ln = np.linalg.norm(n)
+            if ln < 1e-9:
+                continue
+            up = (n / ln)[1]
+            if up > 0.82:
+                sw = "moss"
+            elif up > 0.45:
+                sw = "rock_lt"
+            elif up > -0.10:
+                sw = "rock"
+            else:
+                sw = "rock_dk"
+            p.add_face([tuple(v) for v in tri], uvs=pal.uvs(sw, 3))
+
+    rock((0.0, 0.0, 0.0), (34.0, 27.0, 30.0), 0.27, 7, 0.20)
+    rock((-27.0, 0.0, 14.0), (16.0, 12.0, 14.0), 0.24, 5, 0.12)
+    rock((22.0, 0.0, -19.0), (13.0, 9.5, 12.0), 0.26, 5, -0.15)
+    return p
+
+
 SPECIES = {
-    # name -> (builder, seed)   names MUST match terragen/vegetation.py
+    # name -> (builder, seed)   names MUST match the feature defs referenced
+    # by terragen placement layers (vegetation.py species + placement.py)
     "tree_conifer":   (build_conifer,  0xC0F1),
     "tree_broadleaf": (build_broadleaf, 0xB2EA),
     "bush_scrub":     (build_bush,     0x5C2B),
     "rock_boulder":   (build_boulder,  0x0B0D),
+    "rock_boulder_large": (build_boulder_large, 0xB16B),
 }
 
 

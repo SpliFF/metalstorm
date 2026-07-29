@@ -314,36 +314,81 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False)
     b = bio.classify(h, slope, temp, moist, 0.0, river_mask=water_all)
     print(f"biomes done {time.time()-t_start:.0f}s")
 
-    # 7b. vegetation placements. The prop models + defs now ship in the map
-    # package (objects3d/*.gltf from gen_vegetation_models.py, defs in
-    # features/vegetation.lua — PLAN-maps.md M6), so this only needs the
-    # flag because a full scatter replaces the hand-written placeholder
-    # placement list with tens of thousands of entries.
+    # 7b. placement (terragen/placement.py): vegetation + boulder features,
+    # scree/sand ground stamps. Stamps always run — the albedo bake and
+    # splat-distr composite them (baked decals). Feature emission stays behind
+    # the flag because a full scatter replaces the placement list with tens of
+    # thousands of entries.
+    from terragen import placement as pl
+    from terragen import vegetation as veg
+
+    excl = road_mask.copy() | (h <= 2.0) | rivers
+    excl = ndimage.binary_dilation(excl, iterations=2)
+    for sx, sz in starts:  # keep start pads clear
+        excl |= box_mask(h.shape, cell, sx - 500, sz - 500, sx + 500, sz + 500)
+    # keep the ford decks + corridors passable (no blocking features)
+    for r in layout["regions"]:
+        if any(t in ("corridor", "choke") for t in r["tags"]):
+            bb = r["bbox"]
+            excl |= box_mask(h.shape, cell, bb["x0"], bb["z0"], bb["x1"], bb["z1"])
+
+    ctx = pl.PlacementContext(h, slope, b, moist, cell, seed, exclusion=excl)
+
+    def sand_suit(c):
+        desert = pl.biome_suitability({bio.DESERT: 0.9})(c)
+        shore = (c.height > 0.5) & (c.height < 6.0) & (c.slope_deg < 8.0)
+        return np.maximum(desert, shore.astype(np.float32) * 0.5)
+
+    stamp_res = pl.run(ctx, [
+        pl.Layer("talus_scree", pl.StampEmit("scree", (70.0, 180.0), 0.85),
+                 suitability=pl.below_cliffs(34.0, 6),
+                 stratum=150.0, max_slope_deg=32.0, respect_exclusion=False),
+        pl.Layer("sand_flats", pl.StampEmit("sand", (90.0, 220.0), 0.8),
+                 suitability=sand_suit,
+                 stratum=280.0, max_slope_deg=10.0, respect_exclusion=False),
+    ], progress=print)
+    stamps = stamp_res.stamps
+
     feature_files = None
     if with_features:
-        from terragen import vegetation as veg
+        def species_layer(sp):
+            return pl.Layer(
+                sp.name, pl.FeatureEmit([(sp.name, 1.0)], sp.scale_range),
+                suitability=lambda c, sp=sp: veg.build_density_field(
+                    sp, c.biome_ids, c.moisture, c.cellsize, c.seed,
+                    exclusion=c.exclusion),
+                stratum=sp.stratum, max_slope_deg=sp.max_slope_deg)
 
-        excl = road_mask.copy() | (h <= 2.0) | rivers
-        excl = ndimage.binary_dilation(excl, iterations=2)
-        for sx, sz in starts:  # keep start pads clear
-            excl |= box_mask(h.shape, cell, sx - 500, sz - 500, sx + 500, sz + 500)
-        # keep the ford decks + corridors passable (no blocking trees)
-        for r in layout["regions"]:
-            if any(t in ("corridor", "choke") for t in r["tags"]):
-                bb = r["bbox"]
-                excl |= box_mask(h.shape, cell, bb["x0"], bb["z0"], bb["x1"], bb["z1"])
+        scree_fld = stamps.get("scree")
 
-        placements: list[tuple[str, float, float, float, float]] = []
-        for sp in veg.TEMPERATE_SPECIES:
-            dens = veg.build_density_field(sp, b, moist, cell, seed, exclusion=excl)
-            dat, sat = veg.make_samplers(dens, slope, cell)
-            pts = veg.scatter(sp, seed, MAP_SIZE, MAP_SIZE, dat, sat)
-            for x, z, rot, sc in pts:
-                placements.append((sp.name, float(x), float(z), float(rot), float(sc)))
-        print(f"vegetation: {len(placements)} placements")
+        def boulder_suit(c):
+            s = pl.biome_suitability({bio.ROCK: 0.75, bio.TUNDRA: 0.4,
+                                      bio.GRASSLAND: 0.2, bio.SNOW: 0.15})(c)
+            if scree_fld is not None:  # boulder fields favour talus aprons
+                s = np.maximum(s, scree_fld.astype(np.float32) * 0.9)
+            return s
+
+        res = pl.run(ctx, [
+            *(species_layer(sp) for sp in veg.TEMPERATE_SPECIES),
+            pl.Layer("boulder_field",
+                     pl.FeatureEmit([("rock_boulder_large", 0.35),
+                                     ("rock_boulder", 0.65)], (0.8, 1.4)),
+                     suitability=pl.slope_window(boulder_suit, 0.0, 30.0),
+                     sampler="clusters", cluster_stratum=1100.0,
+                     cluster_radius=180.0, cluster_members=(4, 10),
+                     max_slope_deg=30.0),
+            pl.Layer("erratic",  # lone outcrops on open ground
+                     pl.FeatureEmit([("rock_boulder_large", 1.0)], (0.9, 1.3)),
+                     suitability=pl.slope_window(
+                         pl.biome_suitability({bio.GRASSLAND: 0.18,
+                                               bio.TUNDRA: 0.22,
+                                               bio.ROCK: 0.2}), 0.0, 22.0),
+                     stratum=2300.0, max_slope_deg=22.0),
+        ], progress=print)
+        print(f"placement: {len(res.features)} features total")
 
         lines = ["-- GENERATED by meridian2.py", "return {", "  objectlist = {"]
-        for name, x, z, rot, _sc in placements:
+        for name, x, z, rot, _sc in res.features:
             heading = int((rot / (2 * np.pi)) * 65536) & 0xFFFF
             lines.append(f"    {{ name = '{name}', x = {x:.0f}, z = {z:.0f}, rot = \"{heading}\" }},")
         lines += ["  },", "  unitlist = {}, buildinglist = {},", "}"]
@@ -361,7 +406,8 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False)
         from PIL import Image
         from terragen import bake as bk
         os.makedirs(out_dir, exist_ok=True)
-        baker = bk.AlbedoBaker(h, slope, b, moist, road_dist, 0.0, cell, seed)
+        baker = bk.AlbedoBaker(h, slope, b, moist, road_dist, 0.0, cell, seed,
+                               stamps=stamps)
         shade = bk.hillshade(h, cell)
         Image.fromarray(bk.make_minimap(baker, shade)).save(
             os.path.join(out_dir, "preview.png"))
@@ -380,13 +426,14 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False)
     )
     pkg.write_package(
         out_dir, cfg, h, slope, b, moist, road_dist, road_mask, cell,
-        scratch_dir=scratch, feature_files=feature_files,
+        scratch_dir=scratch, feature_files=feature_files, stamps=stamps,
     )
 
     # quick-look preview (albedo * hillshade) for iteration without the client
     from PIL import Image
     from terragen import bake as bk
-    baker = bk.AlbedoBaker(h, slope, b, moist, road_dist, 0.0, cell, seed)
+    baker = bk.AlbedoBaker(h, slope, b, moist, road_dist, 0.0, cell, seed,
+                           stamps=stamps)
     shade = bk.hillshade(h, cell)
     Image.fromarray(bk.make_minimap(baker, shade)).save(os.path.join(out_dir, "preview.png"))
 

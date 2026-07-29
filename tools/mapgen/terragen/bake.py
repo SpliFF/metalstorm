@@ -39,6 +39,14 @@ SAND_COLOR = np.array((178, 160, 128), dtype=np.float32)
 BED_SHALLOW = np.array((110, 108, 88), dtype=np.float32)   # wet gravel
 BED_DEEP = np.array((52, 64, 58), dtype=np.float32)        # dark silt
 
+# Ground-stamp styles (placement.py StampEmit fields -> bake colour + which
+# splat-distr detail channel carries their per-texel grain).
+# stamp id -> (colour, tone noise amplitude, splat channel index or None)
+STAMP_STYLE = {
+    "scree": (np.array((124, 117, 108), dtype=np.float32), 0.10, 1),  # rock granulation
+    "sand":  (SAND_COLOR, 0.08, 2),                                   # sand ripple
+}
+
 
 class AlbedoBaker:
     """Samples map-scale fields (heightmap grid res) and synthesizes albedo
@@ -55,6 +63,7 @@ class AlbedoBaker:
         cellsize: float,
         seed: int,
         road_width: float = 44.0,
+        stamps: dict[str, np.ndarray] | None = None,   # placement.py ground stamps
     ):
         self.h = height.astype(np.float32)
         self.slope = slope_deg.astype(np.float32)
@@ -77,12 +86,40 @@ class AlbedoBaker:
             if bid < maxid:
                 self.lut[bid] = c
 
+        # Smoothed per-biome weight fields (grid res). Baking blends colours
+        # through these instead of nearest-id lookup, so biome edges become
+        # gradual, irregular transitions rather than 8-elmo grid staircases.
+        from scipy import ndimage
+        ids = np.unique(biome_ids)
+        self.bio_ids = ids
+        fields = np.empty(biome_ids.shape + (ids.size,), dtype=np.float32)
+        for i, b_val in enumerate(ids):
+            fields[..., i] = ndimage.gaussian_filter(
+                (biome_ids == b_val).astype(np.float32), 2.0
+            )
+        self.bio_fields = fields
+        self.bio_lut = self.lut[ids]                      # (nb, 3)
+        # per-biome patchiness sign: adjacent-id biomes get opposite signs so
+        # one shared noise field pushes their shared boundary both ways
+        self.bio_sign = np.where((ids.astype(np.int64) & 1) > 0, 1.0, -1.0).astype(np.float32)
+        self.veg_idx = np.flatnonzero(np.isin(ids, [bio.GRASSLAND, bio.FOREST, bio.WETLAND]))
+        self.snow_idx = np.flatnonzero(ids == bio.SNOW)
+
+        # ground stamps (scree/sand …): (field, colour, tone amp) per stamp
+        self.stamp_list = [
+            (fld.astype(np.float32),) + STAMP_STYLE[name][:2]
+            for name, fld in (stamps or {}).items()
+            if name in STAMP_STYLE
+        ]
+
     def _bilinear(self, arr: np.ndarray, x: np.ndarray, z: np.ndarray) -> np.ndarray:
         cx = np.clip(x / self.cs, 0, self.gw - 1.001)
         cz = np.clip(z / self.cs, 0, self.gh - 1.001)
         c0 = cx.astype(np.int32); r0 = cz.astype(np.int32)
         fx = (cx - c0).astype(np.float32); fz = (cz - r0).astype(np.float32)
         c1 = np.minimum(c0 + 1, self.gw - 1); r1 = np.minimum(r0 + 1, self.gh - 1)
+        if arr.ndim == 3:                    # vector field (H, W, K)
+            fx = fx[..., None]; fz = fz[..., None]
         a = arr[r0, c0] * (1 - fx) + arr[r0, c1] * fx
         b = arr[r1, c0] * (1 - fx) + arr[r1, c1] * fx
         return a * (1 - fz) + b * fz
@@ -104,34 +141,64 @@ class AlbedoBaker:
         slope = self._bilinear(self.slope, X, Z)
         moist = self._bilinear(self.moist, X, Z)
         rdist = self._bilinear(self.rdist, X, Z)
-        bid = self._nearest(self.biome, X, Z)
 
-        col = self.lut[bid].copy()          # (rows, w, 3)
-
-        # --- tonal variation: macro patchiness + fine grain ---
+        # --- tonal variation: macro patchiness + mid-scale mottling ---
+        # Deliberately NO per-texel grain here: the SMT layer is deduplicated
+        # (dxt1.cluster_tiles), so baked high-frequency noise turns into a
+        # visibly repeating 32-elmo tile pattern. Per-texel grain is the
+        # runtime splat-detail layer's job; the bake stays low-frequency.
         macro = tn.fbm(self.noise, X / 620.0, Z / 620.0, octaves=3).astype(np.float32)
-        grain = tn.fbm(self.noise, X / 6.5 + 91.0, Z / 6.5 - 47.0, octaves=2).astype(np.float32)
-        tone = 1.0 + 0.10 * macro + 0.07 * grain
+        mid = tn.fbm(self.noise, X / 52.0 + 91.0, Z / 52.0 - 47.0, octaves=2).astype(np.float32)
+
+        # --- biome colour: smoothed weight fields through a warped domain ---
+        # Boundaries become irregular, patchy gradients instead of the 8-elmo
+        # axis-aligned staircase that nearest-id lookup produced.
+        wax = tn.fbm(self.noise, X / 140.0 + 37.0, Z / 140.0 - 11.0, octaves=2)
+        waz = tn.fbm(self.noise, X / 140.0 + 177.0, Z / 140.0 + 91.0, octaves=2)
+        wbx = tn.fbm(self.noise, X / 26.0 - 63.0, Z / 26.0 + 29.0, octaves=1)
+        wbz = tn.fbm(self.noise, X / 26.0 + 7.0, Z / 26.0 - 101.0, octaves=1)
+        wx = X + 22.0 * wax + 6.0 * wbx
+        wz = Z + 22.0 * waz + 6.0 * wbz
+        wgt = self._bilinear(self.bio_fields, wx, wz)     # (rows, w, nb)
+        # patchy transition zones: one shared noise field pushes each biome's
+        # weight up/down (opposite signs for adjacent ids); only active where
+        # weights are mixed (w*(1-w) term), interiors are untouched
+        wgt = np.clip(
+            wgt + 0.5 * (mid[..., None] * self.bio_sign) * (4.0 * wgt * (1.0 - wgt)),
+            0.0, 1.0,
+        )
+        wgt *= wgt                                        # sharpen the blend band
+        wgt /= np.maximum(wgt.sum(axis=-1, keepdims=True), 1e-5)
+        col = (wgt @ self.bio_lut).astype(np.float32)     # (rows, w, 3)
+
+        tone = 1.0 + 0.10 * macro + 0.05 * mid
         col *= tone[..., None]
 
         # hue drift on vegetation (yellower when dry, greener when wet)
-        veg = (bid == bio.GRASSLAND) | (bid == bio.FOREST) | (bid == bio.WETLAND)
+        vegw = wgt[..., self.veg_idx].sum(axis=-1) if self.veg_idx.size else np.float32(0)
         dryness = np.clip(0.55 - moist, 0.0, 0.55) / 0.55
-        col[..., 0] += np.where(veg, 26.0 * dryness * (0.6 + 0.4 * macro), 0.0)
-        col[..., 1] -= np.where(veg, 8.0 * dryness, 0.0)
+        col[..., 0] += 26.0 * vegw * dryness * (0.6 + 0.4 * macro)
+        col[..., 1] -= 8.0 * vegw * dryness
 
         # --- slope rock exposure (any biome) ---
+        snoww = wgt[..., self.snow_idx].sum(axis=-1) if self.snow_idx.size else np.float32(0)
         rockmix = np.clip((slope - 22.0) / 14.0, 0.0, 1.0).astype(np.float32)
-        rockmix *= np.where(bid == bio.SNOW, 0.6, 1.0)  # snow clings longer
-        rock_tone = ROCK_COLOR * (1.0 + 0.12 * macro + 0.08 * grain)[..., None]
+        rockmix *= 1.0 - 0.4 * snoww                      # snow clings longer
+        rock_tone = ROCK_COLOR * (1.0 + 0.12 * macro + 0.06 * mid)[..., None]
         col = col * (1 - rockmix[..., None]) + rock_tone * rockmix[..., None]
+
+        # --- ground stamps (scree, sand, …) — warped sampling for ragged edges ---
+        for fld, s_color, s_tone in self.stamp_list:
+            sw = np.clip(self._bilinear(fld, wx, wz), 0.0, 1.0).astype(np.float32)
+            s_col = s_color * (1.0 + s_tone * mid)[..., None]
+            col = col * (1 - sw[..., None]) + s_col * sw[..., None]
 
         # --- wetness + waterbed ---
         depth = np.clip(self.wl - h, 0.0, None)
         under = depth > 0.0
         bedmix = np.clip(depth / 22.0, 0.0, 1.0)[..., None].astype(np.float32)
         bed = BED_SHALLOW * (1 - bedmix) + BED_DEEP * bedmix
-        bed *= (1.0 + 0.08 * grain)[..., None]
+        bed *= (1.0 + 0.06 * mid)[..., None]
         col = np.where(under[..., None], bed, col)
 
         # shoreline: sand band just above water, wet-darkening
@@ -146,7 +213,7 @@ class AlbedoBaker:
         deck = np.clip((half - rdist) / 3.0, 0.0, 1.0).astype(np.float32)       # sharp edge
         shoulder = np.clip((half * 2.2 - rdist) / (half * 2.2), 0.0, 1.0) ** 2
         shoulder = (shoulder * 0.35 * (deck < 0.5)).astype(np.float32)
-        road_tone = ROAD_COLOR * (1.0 + 0.10 * grain)[..., None]
+        road_tone = ROAD_COLOR * (1.0 + 0.08 * mid)[..., None]
         col = col * (1 - deck[..., None]) + road_tone * deck[..., None]
         col *= (1.0 - shoulder)[..., None]  # worn verge
 
@@ -218,32 +285,50 @@ def make_splat_detail(seed: int, size: int = 1024) -> np.ndarray:
     R=grass blades, G=rock granulation, B=sand/dirt ripple, A=snow/soft."""
     n = tn.SimplexNoise(seed * 17 + 3)
     yy, xx = np.mgrid[0:size, 0:size].astype(np.float64)
+    u = xx / size
+    v = yy / size
 
-    def wrap_fbm(x, y, freq, octaves):
-        # tileable via 4-corner blend
-        u = x / size; v = y / size
-        a = tn.fbm(n, x / freq, y / freq, octaves=octaves)
-        b = tn.fbm(n, (x - size) / freq, y / freq, octaves=octaves)
-        c = tn.fbm(n, x / freq, (y - size) / freq, octaves=octaves)
-        d = tn.fbm(n, (x - size) / freq, (y - size) / freq, octaves=octaves)
-        return (a * (1 - u) * (1 - v) + b * u * (1 - v) + c * (1 - u) * v + d * u * v)
+    def wrap_fbm(freq_x, freq_y, ox, oy, octaves):
+        # Seamlessly tiling fbm via 4-corner blend. The blend weights u/v MUST
+        # come from the raw tile coords; domain offsets and anisotropic
+        # frequency apply inside the noise sample only. (Passing offset/scaled
+        # coords as the blend coords pushed u,v outside [0,1] — extrapolation
+        # instead of blending — which showed up in-game as structured banding
+        # repeating at the splat texscale period.)
+        def s(px, py):
+            return tn.fbm(n, px / freq_x + ox, py / freq_y + oy, octaves=octaves)
+        a = s(xx, yy); b = s(xx - size, yy)
+        c = s(xx, yy - size); d = s(xx - size, yy - size)
+        return a * (1 - u) * (1 - v) + b * u * (1 - v) + c * (1 - u) * v + d * u * v
 
-    grass = wrap_fbm(xx, yy, 9.0, 4) * 0.9 + wrap_fbm(xx * 3 + 31, yy * 0.33, 5.0, 2) * 0.4
-    rock = np.abs(wrap_fbm(xx + 71, yy - 13, 34.0, 5)) * -1.3 + 0.35
-    sand = np.sin(xx / 9.0 + wrap_fbm(xx, yy, 60.0, 3) * 14.0) * 0.35 + wrap_fbm(xx - 5, yy + 44, 7.0, 3) * 0.3
-    snow = wrap_fbm(xx + 200, yy + 200, 16.0, 4) * 0.5
+    # R: grass — clumps + fine blade streaks (high freq in x, stretched in y)
+    grass = wrap_fbm(9.0, 9.0, 0.0, 0.0, 4) * 0.9 + wrap_fbm(1.7, 15.0, 31.0, 0.0, 2) * 0.4
+    # G: rock granulation (inverted ridged)
+    rock = np.abs(wrap_fbm(34.0, 34.0, 71.0, -13.0, 5)) * -1.3 + 0.35
+    # B: sand/dirt ripple — x-periodic sine (integer cycles per tile) + patches
+    ripple_cycles = 18.0  # ~57 px wavelength, exact tile period
+    sand = (
+        np.sin(2 * np.pi * ripple_cycles * u + wrap_fbm(60.0, 60.0, 0.0, 0.0, 3) * 14.0) * 0.35
+        + wrap_fbm(7.0, 7.0, -5.0, 44.0, 3) * 0.3
+    )
+    # A: snow/soft undulation
+    snow = wrap_fbm(16.0, 16.0, 200.0, 200.0, 4) * 0.5
 
     out = np.stack([grass, rock, sand, snow], axis=-1)
-    out = np.clip(0.5 + 0.5 * out / (np.abs(out).std() * 3.5), 0.0, 1.0)
+    # zero-mean each channel: signed splat detail must average to 0 so the
+    # mip-faded far field matches the near field with no brightness offset
+    out -= out.mean(axis=(0, 1))
+    out = np.clip(0.5 + 0.5 * out / (out.std(axis=(0, 1)) * 3.0), 0.0, 1.0)
     return (out * 255).astype(np.uint8)
 
 
 def make_splat_distr(
     biome_ids: np.ndarray, slope_deg: np.ndarray, height: np.ndarray,
     water_level: float, size: int = 1024,
+    stamps: dict[str, np.ndarray] | None = None,
 ) -> np.ndarray:
     """RGBA weights choosing the 4 detail layers (grass/rock/sand/snow) from
-    biome + slope, downsampled + blurred to `size`."""
+    biome + slope (+ placement ground stamps), downsampled + blurred to `size`."""
     from scipy import ndimage
 
     grass = np.isin(biome_ids, [bio.GRASSLAND, bio.FOREST, bio.WETLAND]).astype(np.float32)
@@ -253,6 +338,15 @@ def make_splat_distr(
     sand = np.maximum(sand, (height < water_level + 4.0) & (height > water_level - 6.0))
     snow = np.isin(biome_ids, [bio.SNOW, bio.TUNDRA]).astype(np.float32)
     snow[biome_ids == bio.TUNDRA] = 0.4
+
+    # ground stamps carry the matching detail grain (scree -> rock channel, …)
+    chans = [grass, rockb, sand, snow]
+    for name, fld in (stamps or {}).items():
+        style = STAMP_STYLE.get(name)
+        if style and style[2] is not None:
+            np.maximum(chans[style[2]], fld.astype(np.float32) * 0.9,
+                       out=chans[style[2]])
+    grass, rockb, sand, snow = chans
 
     w = np.stack([grass, rockb, sand, snow], axis=-1)
     total = w.sum(axis=-1, keepdims=True)

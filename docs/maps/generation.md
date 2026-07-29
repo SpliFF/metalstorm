@@ -43,7 +43,8 @@ scatter (never Python's process-salted `hash()`), no OS randomness anywhere.
 | `biomes.py` | Temperature (latitude gradient + altitude lapse + noise), moisture (noise + water-proximity + directional rain shadow), Whittaker-ish classification into 8 ids (grassland/forest/desert/tundra/snow/rock/wetland/water), soft blend weights. |
 | `roads.py` | Least-cost road planning: 8-connected Dijkstra on a decimated grid with slope² cost, water/bridge penalties and max-grade cutoffs; MST topology over settlements (+ optional loops); Chaikin smoothing; full-res rasterization to mask + distance field; **cut-and-fill grading** of terrain under roads. |
 | `settle.py` | Settlement-site scoring (windowed flatness × water proximity × biome desirability × edge falloff) and greedy separated site selection. |
-| `vegetation.py` | Per-species density fields (biome base × moisture bonus × clump noise, minus exclusion zones) and **stratified-jitter scatter** — one hashed candidate per grid stratum, accepted with probability = local density. Blue-noise-like, order-independent, deterministic. |
+| `vegetation.py` | Per-species density fields (biome base × moisture bonus × clump noise, minus exclusion zones) and the **stratified-jitter hash engine** — one hashed candidate per grid stratum, accepted with probability = local density. Blue-noise-like, order-independent, deterministic. |
+| `placement.py` | The **prop & ground-stamp placement subsystem** (§6): declarative `Layer`s = suitability field × sampler (`scatter`/`clusters`) × emit target (`FeatureEmit` → featureplacer entries, `StampEmit` → ground fields the bake composites). Composable suitability helpers (`biome_suitability`, `slope_window`, `below_cliffs`). |
 | `dxt1.py` | Vectorized BC1/DXT1 range-fit encoder and **SMT tile clustering**: seeded minibatch k-means over 8×8 downsampled tile features, representatives chosen as *real source tiles* (never averages). |
 | `smf.py` | SMF/SMT container writer (heightmap quantization, tile index, typemap/metalmap, the 9-level minimap DXT1 chain). Layout matches `rts/Server/MapProcessor.cpp` exactly. |
 | `bake.py` | The albedo bake + splat textures (§5). |
@@ -140,38 +141,94 @@ Two layers, matching what Spring/Recoil (and SupCom/Frostbite/Unity) converge
 on — see the research record in PLAN-maps.md §1.2:
 
 1. **Baked whole-map albedo at 1 texel/elmo** in the SMT tile layer.
-   *Unlit* — material colour only (biome palettes + macro/grain tonal noise,
-   slope rock exposure, wetness/shore darkening, riverbed tint by depth, sharp
-   road decks with worn shoulders). Relief shading comes from the real-time
-   sun + full-resolution mesh normals + CSM, and an unlit bake also clusters
-   far better: `dxt1.cluster_tiles` vector-quantizes the 262,144 tiles of a
-   16k map to a ~12k-tile budget (~8 MB SMT instead of ~178 MB). The SMT
-   format *is* a deduplicated megatexture — this uses it as designed.
+   *Unlit* — material colour only (biome palettes + macro/mid tonal noise,
+   slope rock exposure, ground stamps (§6), wetness/shore darkening, riverbed
+   tint by depth, sharp road decks with worn shoulders). Relief shading comes
+   from the real-time sun + full-resolution mesh normals + CSM, and an unlit
+   bake also clusters far better: `dxt1.cluster_tiles` vector-quantizes the
+   262,144 tiles of a 16k map to a ~12k-tile budget (~8 MB SMT instead of
+   ~178 MB). The SMT format *is* a deduplicated megatexture — this uses it
+   as designed.
+
+   Two hard-won rules keep the bake artefact-free:
+   - **The bake stays low-frequency** (nothing under ~50-elmo wavelength).
+     Tile dedup collapses uniform areas onto a handful of representative
+     tiles, so any baked per-texel grain becomes the *same* 32-elmo noise
+     pattern repeating with visible grid seams. Per-texel grain is the
+     runtime splat layer's job.
+   - **Biome colours blend through smoothed weight fields sampled via a
+     fractally warped domain** (per-biome Gaussian one-hots, ±22-elmo warp
+     at two scales, noise-perturbed in the mixed zone, then sharpened and
+     renormalized). Nearest-id lookup at heightmap res produces 8-elmo
+     axis-aligned staircases at every biome edge; the warped blend gives
+     irregular, patchy transitions (snow↔rock, grass↔forest) instead.
 2. **Recoil's signed splat detail** up close: `splat_distr.png` (RGBA layer
-   weights from biomes/slope) + `splat_detail.png` (4 tileable greyscale
-   layers: grass/rock/sand/snow, procedurally synthesized, centred on 0.5).
-   The client's `TerrainSplatPlugin` implements the exact SMF shader formula —
+   weights from biomes/slope + ground stamps) + `splat_detail.png` (4 tileable
+   greyscale layers: grass/rock/sand/snow, procedurally synthesized). The
+   client's `TerrainSplatPlugin` implements the exact SMF shader formula —
    `detail = dot(2·tex−1, distr·texMults)` **added before lighting** — so the
    signed detail self-fades through the mip chain with no distance threshold.
    Per-channel `texScales` at widely different rates provide multi-scale
    anti-tiling for free.
 
+   Detail-texture synthesis rules: the seamless-tiling wrapper's 4-corner
+   blend weights must come from the **raw** tile coordinates — domain offsets
+   and anisotropic frequencies apply inside the noise sample only (offset
+   blend coords extrapolate instead of blending and render as structured
+   banding repeating at the texscale period). Directional components (the
+   sand ripple) use an integer number of cycles per tile. Every channel is
+   **zero-meaned** before encoding, so the mip-faded far field carries no
+   brightness offset relative to the near field.
+
 The minimap *does* bake hillshade (legibility beats physical correctness on a
 2D map). `typemap` value 1 marks road surfaces; `mapinfo.lua` `terrainTypes`
 gives them a speed multiplier.
 
-## 6. Vegetation
+## 6. Placement (vegetation, boulders, ground stamps)
 
-The generator emits `mapconfig/featureplacer/config.lua` placements for the
-species in `vegetation.TEMPERATE_SPECIES` (`tree_conifer`, `tree_broadleaf`,
-`bush_scrub`, `rock_boulder`). The models are **procedurally forged**
+`terragen/placement.py` is the placement subsystem: everything the generator
+drops onto the finished heightfield goes through one declarative model.
+
+A **`Layer`** is one placement rule:
+
+- **WHERE** — a `suitability(ctx) -> (H,W) [0,1]` field, composed from
+  helpers (`biome_suitability`, `slope_window`, `below_cliffs`, `combine`)
+  or any custom closure over the `PlacementContext`
+  (height/slope/biomes/moisture/exclusion).
+- **HOW** — a sampler: `scatter` (stratified-jitter blue noise, one hashed
+  candidate per stratum cell) or `clusters` (sparse hashed seeds accepted by
+  suitability, then a hashed ring of members — talus fans, boulder fields).
+  A line/network sampler family (roads, rail, bridge slots, following
+  `roads.plan_roads` polylines) is the planned third kind.
+- **WHAT** — an emit target: `FeatureEmit` (weighted feature-def names →
+  featureplacer `objectlist` entries, i.e. real sim features) or `StampEmit`
+  (soft smoothstep discs rasterized into named grid-res fields — **baked
+  decals**: `bake.py` composites them into the albedo with warped ragged
+  edges, and `make_splat_distr` routes each stamp to its detail channel via
+  `STAMP_STYLE`, so scree gets rock granulation and sand gets ripple grain
+  at zero runtime cost).
+
+All randomness is `_hash01` integer hashing keyed on `(seed, layer name)` —
+fully deterministic, no RNG order dependence. Future placement families
+(wreckage, dwellings, rail lines, bridges) are new layers/targets on this
+model, not new mechanisms.
+
+Meridian's layer set: the four `vegetation.TEMPERATE_SPECIES` scatter layers
+(species density fields become layer suitabilities), `boulder_field` clusters
+(`rock_boulder_large` + `rock_boulder` mixed, favouring rocky biomes and the
+scree aprons), `erratic` lone outcrops on open ground, `talus_scree` stamps
+below cliffs (>34° dilated), and `sand_flats` stamps (desert + low flat
+shores). The models are **procedurally forged**
 (`tools/mapgen/gen_vegetation_models.py` → glTF + KTX2 into the map's
 `objects3d/`, deterministic, licence-free), with 8-yaw × 3-pitch impostor
 atlases baked by `tools/fable-model-forge/bake_impostors.py`.
 
-Placement rules: per-biome densities with moisture bonuses and clump noise;
-exclusion zones for roads, water, start pads, and `corridor`/`choke` regions
-(chokepoints stay passable). Trees and boulders are `blocking`; scrub is not.
+Exclusion zones (roads, water, start pads, `corridor`/`choke` regions) gate
+feature layers so chokepoints stay passable; stamps ignore them (the road
+deck is painted over stamps in the bake). Trees and boulders are `blocking`;
+scrub is not. Per-placement scale is recorded but the Spring featureplacer
+format doesn't carry it — size variety comes from multiple feature defs
+(`rock_boulder` vs `rock_boulder_large`).
 
 Rendering: `feature-lod-renderer.ts` splits each species into 2048-elmo tiles
 with three tiers — full mesh (≤2500 elmos), impostor card (≤10000), culled
@@ -186,12 +243,19 @@ casting cost ~18 ms/frame at close zoom on the 54k-feature Meridian.
 # regenerate (full res, with vegetation)
 cd tools/mapgen && .venv/bin/python meridian2.py --with-features
 
-# process into data/maps (build-blocking E1 validation runs here)
-build/release/tools/mapconverter/mapconverter --force content/maps/meridian_basin
+# process into data/maps (build-blocking E1 validation runs here).
+# Regenerated sources are auto-detected: processing writes a
+# .processed-stamp, and any source file newer than it triggers a reprocess —
+# --force is only needed to rebuild an UNCHANGED map (e.g. after C++
+# processing changes).
+build/release/tools/mapconverter/mapconverter content/maps/meridian_basin
 
-# then: restart the Vite client if worker code changed, create a room on the
-# map in the browser, and eyeball at strategic/gameplay/close zoom
-# (docs/debugging.md + the run-springrts-web skill for the drive recipe)
+# then: RESTART THE LOBBY (its maps-table handle goes stale after the
+# converter writes the DB — symptoms: /api/maps returns [], metadata.json
+# 404s, blank canvas behind the HUD), restart the Vite client if worker code
+# changed, create a room on the map in the browser, and eyeball at
+# strategic/gameplay/close zoom (docs/debugging.md + the run-springrts-web
+# skill for the drive recipe)
 ```
 
 The self-check output (`E1 <region> expected=… dominant=…`) must be all-OK

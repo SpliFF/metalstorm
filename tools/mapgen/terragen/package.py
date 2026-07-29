@@ -52,6 +52,7 @@ def write_package(
     scratch_dir: str,
     regions_lua: str | None = None,
     feature_files: dict[str, str] | None = None,  # relpath -> content
+    stamps: dict[str, np.ndarray] | None = None,  # placement.py ground stamps
     progress=print,
 ) -> None:
     maps_dir = os.path.join(out_dir, "maps")
@@ -59,7 +60,7 @@ def write_package(
 
     baker = bk.AlbedoBaker(
         height, slope_deg, biome_ids, moisture, road_dist,
-        cfg.water_level, cellsize, cfg.seed,
+        cfg.water_level, cellsize, cfg.seed, stamps=stamps,
     )
 
     progress("baking albedo tiles (1 texel/elmo)...")
@@ -95,7 +96,8 @@ def write_package(
     )
 
     progress("splat textures...")
-    Image.fromarray(bk.make_splat_distr(biome_ids, slope_deg, height, cfg.water_level)).save(
+    Image.fromarray(bk.make_splat_distr(biome_ids, slope_deg, height, cfg.water_level,
+                                        stamps=stamps)).save(
         os.path.join(maps_dir, "splat_distr.png")
     )
     Image.fromarray(bk.make_splat_detail(cfg.seed)).save(

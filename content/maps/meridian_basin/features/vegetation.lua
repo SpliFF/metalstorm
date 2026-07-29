@@ -85,4 +85,21 @@ return lowerkeys({
 		category     = "rock",
 	},
 
+	rock_boulder_large = {
+		name         = "Outcrop",
+		description  = "Rock outcrop",
+		object       = "rock_boulder_large.gltf",
+		footprintX   = 9,
+		footprintZ   = 9,
+		height       = 42,
+		radius       = 38,
+		blocking     = true,
+		reclaimable  = true,
+		metal        = 60,
+		energy       = 0,
+		damage       = 6000,
+		flammable    = 0,
+		category     = "rock",
+	},
+
 })
