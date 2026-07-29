@@ -142,7 +142,8 @@ def blend_toward(h, target, mask, cellsize, feather_elmos):
     return h * (1 - w) + target * w
 
 
-def generate(out_dir, seed, fast=False, with_features=False, preview_only=False):
+def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
+             no_package=False):
     t_start = time.time()
     layout = load_layout()
     cell = 32.0 if fast else 8.0
@@ -300,8 +301,13 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False)
                        max_slope_deg=26.0, water_penalty=30.0)
     polylines = rd.plan_roads(h, 0.0, cell, sites, rp)
     road_mask, road_dist = rd.rasterize_roads(polylines, h.shape, cell, rp)
+    # worn junction plazas where routes meet (district centres + waypoints;
+    # the trailing 2 gate sites sit on start pads — no plaza there)
+    plaza_sites = sites[:-2]
+    rd.carve_plazas(road_mask, road_dist, plaza_sites, 85.0, cell, rp)
     h = rd.flatten_under_roads(h, road_dist, cell, rp)
-    print(f"roads done {time.time()-t_start:.0f}s ({len(polylines)} segments)")
+    print(f"roads done {time.time()-t_start:.0f}s "
+          f"({len(polylines)} segments, {len(plaza_sites)} plazas)")
 
     # 7. biomes
     gy, gx = np.gradient(h, cell)
@@ -332,7 +338,8 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False)
             bb = r["bbox"]
             excl |= box_mask(h.shape, cell, bb["x0"], bb["z0"], bb["x1"], bb["z1"])
 
-    ctx = pl.PlacementContext(h, slope, b, moist, cell, seed, exclusion=excl)
+    ctx = pl.PlacementContext(h, slope, b, moist, cell, seed, exclusion=excl,
+                              paths=polylines)
 
     def sand_suit(c):
         desert = pl.biome_suitability({bio.DESERT: 0.9})(c)
@@ -368,8 +375,52 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False)
                 s = np.maximum(s, scree_fld.astype(np.float32) * 0.9)
             return s
 
+        # deadwood accumulates in the forest-edge band; sparse stumps inside
+        def deadwood_suit(c):
+            edge = pl.forest_edge([bio.FOREST])(c) * 0.42
+            interior = pl.biome_suitability({bio.FOREST: 0.09})(c)
+            return edge + interior
+
+        # broken fence runs flank the roads (dry ground only; the exclusion
+        # mask covers the road deck itself, so fences opt out of it)
+        def fence_suit(c):
+            return (c.height > 2.0).astype(np.float32) * 0.5
+
+        # ruin sites: flat open ground within sight of a road
+        def ruin_suit(c):
+            near = (road_dist > 120.0) & (road_dist < 900.0)
+            flat = c.slope_deg < 12.0
+            ground = np.isin(c.biome_ids, [bio.GRASSLAND, bio.TUNDRA])
+            return (near & flat & ground).astype(np.float32) * 0.85
+
+        # lone monoliths on high open ground
+        def stone_suit(c):
+            hi = c.height > np.percentile(c.height, 70)
+            ground = np.isin(c.biome_ids,
+                             [bio.TUNDRA, bio.GRASSLAND, bio.ROCK, bio.SNOW])
+            return (hi & ground & (c.slope_deg < 24.0)).astype(np.float32)
+
         res = pl.run(ctx, [
             *(species_layer(sp) for sp in veg.TEMPERATE_SPECIES),
+            pl.Layer("deadwood",
+                     pl.FeatureEmit([("fallen_log", 0.55), ("tree_stump", 0.45)],
+                                    (0.9, 1.2)),
+                     suitability=deadwood_suit, stratum=70.0, max_slope_deg=28.0),
+            pl.Layer("road_fences",
+                     pl.FeatureEmit([("log_fence", 1.0)], (0.95, 1.1)),
+                     suitability=fence_suit, sampler="along_paths",
+                     path_spacing=22.0, path_offset=30.0, path_offset_jitter=4.0,
+                     max_slope_deg=18.0, respect_exclusion=False),
+            pl.Layer("ruin_colonnade",
+                     pl.TemplateEmit(
+                         pl.ring_template("ruin_pillar", 7, 46.0, 0.65)
+                         + pl.ring_template("ruin_wall", 3, 64.0, 0.55, phase=0.4)
+                         + [("standing_stone", 0.0, 0.0, 0.35)],
+                         jitter=5.0),
+                     suitability=ruin_suit, stratum=1100.0, max_slope_deg=12.0),
+            pl.Layer("ridge_stones",
+                     pl.FeatureEmit([("standing_stone", 1.0)], (0.9, 1.3)),
+                     suitability=stone_suit, stratum=800.0, max_slope_deg=24.0),
             pl.Layer("boulder_field",
                      pl.FeatureEmit([("rock_boulder_large", 0.35),
                                      ("rock_boulder", 0.65)], (0.8, 1.4)),
@@ -400,6 +451,11 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False)
     ok = selfcheck(layout, h, cell)
     if not ok:
         print("WARNING: E1 self-check has mismatches (see above)")
+
+    # placement-tuning iteration mode: skip the ~10 min bake/package
+    if no_package:
+        print(f"NO PACKAGE (placement tuning) — total {time.time()-t_start:.0f}s")
+        return h, b, slope
 
     # 9. package
     if preview_only:
@@ -491,9 +547,11 @@ def main():
                          "placeholder placement list")
     ap.add_argument("--preview-only", action="store_true",
                     help="skip the package bake; write preview.png only")
+    ap.add_argument("--no-package", action="store_true",
+                    help="stop after placement + E1 (fast layer-tuning loop)")
     args = ap.parse_args()
     generate(args.out, args.seed, fast=args.fast, with_features=args.with_features,
-             preview_only=args.preview_only)
+             preview_only=args.preview_only, no_package=args.no_package)
 
 
 if __name__ == "__main__":

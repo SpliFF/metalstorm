@@ -370,6 +370,121 @@ def build_boulder(pal: Palette, rng: np.random.Generator) -> Part:
     return p
 
 
+def _transform(part: Part, fn) -> None:
+    """Apply a point transform to every vertex in-place. Proper rotations
+    (det=+1) preserve winding; the selftest volume check guards the rest."""
+    part.pos = [tuple(fn(np.asarray(v, dtype=np.float64))) for v in part.pos]
+
+
+def _box(part: Part, pal: Palette, x0, x1, y0, y1, z0, z1,
+         swatches=("rock_lt", "rock", "rock_dk")):
+    """Axis-aligned box with outward winding. swatches = (top, side, bottom)."""
+    top, side, bottom = swatches
+    part.add_face([(x0, y1, z0), (x0, y1, z1), (x1, y1, z1), (x1, y1, z0)],
+                  uvs=pal.uvs(top, 4))
+    part.add_face([(x0, y0, z0), (x1, y0, z0), (x1, y0, z1), (x0, y0, z1)],
+                  uvs=pal.uvs(bottom, 4))
+    part.add_face([(x1, y0, z0), (x1, y1, z0), (x1, y1, z1), (x1, y0, z1)],
+                  uvs=pal.uvs(side, 4))
+    part.add_face([(x0, y0, z1), (x0, y1, z1), (x0, y1, z0), (x0, y0, z0)],
+                  uvs=pal.uvs(side, 4))
+    part.add_face([(x1, y0, z1), (x1, y1, z1), (x0, y1, z1), (x0, y0, z1)],
+                  uvs=pal.uvs(side, 4))
+    part.add_face([(x0, y0, z0), (x0, y1, z0), (x1, y1, z0), (x1, y0, z0)],
+                  uvs=pal.uvs(side, 4))
+
+
+def build_fallen_log(pal: Palette, rng: np.random.Generator) -> Part:
+    """Windthrown trunk lying along +X, ~36 elmos, one sawn/snapped end.
+    Built vertically with trunk() (known-good winding) then rotated flat."""
+    p = Part("fallen_log")
+    top = trunk(p, pal, rng,
+                [(0.0, 3.6), (12.0, 3.1), (24.0, 2.7), (36.0, 2.2)],
+                n=8, swatch="bark_dk")
+    # snapped end: jagged fan instead of a flat cap
+    apex = (rng.uniform(-1.0, 1.0), 38.5, rng.uniform(-1.0, 1.0))
+    _fan_apex(p, top, apex, pal, "bark_lt")
+    # lay it down: proper rotation about Z (+Y -> +X, det=+1), then a roll
+    # about the new axis, then sink slightly into the ground
+    roll = rng.uniform(0.0, 2.0 * np.pi)
+    cr, sr = np.cos(roll), np.sin(roll)
+    _transform(p, lambda v: (v[1],
+                             (-v[0]) * cr - v[2] * sr + 2.6,
+                             (-v[0]) * sr + v[2] * cr))
+    return p
+
+
+def build_stump(pal: Palette, rng: np.random.Generator) -> Part:
+    """Low cut/snapped stump, ~11 elmos, jagged top."""
+    p = Part("stump")
+    top = trunk(p, pal, rng,
+                [(0.0, 5.0), (4.0, 4.3), (8.0, 4.0)],
+                n=9, swatch="bark_dk")
+    apex = (rng.uniform(-1.5, 1.5), 11.0 + rng.uniform(0.0, 2.0),
+            rng.uniform(-1.5, 1.5))
+    _fan_apex(p, top, apex, pal, "bark_lt")
+    return p
+
+
+def build_standing_stone(pal: Palette, rng: np.random.Generator) -> Part:
+    """Weathered monolith, ~32 elmos: tapered pentagonal shaft with a lean."""
+    p = Part("standing_stone")
+    top = trunk(p, pal, rng,
+                [(0.0, 7.2), (9.0, 6.3), (20.0, 5.2), (29.0, 3.6)],
+                n=5, swatch="rock", lean=(rng.uniform(-3, 3), rng.uniform(-3, 3)))
+    apex = (rng.uniform(-1.0, 1.0), 33.0, rng.uniform(-1.0, 1.0))
+    _fan_apex(p, top, apex, pal, "rock_lt")
+    return p
+
+
+def build_ruin_pillar(pal: Palette, rng: np.random.Generator) -> Part:
+    """Broken column on a square plinth, ~20 elmos: dressed-stone drums
+    snapped at an uneven height."""
+    p = Part("ruin_pillar")
+    _box(p, pal, -6.2, 6.2, 0.0, 2.6, -6.2, 6.2)          # plinth
+    h_break = rng.uniform(14.0, 24.0)
+    top = trunk(p, pal, rng,
+                [(2.4, 4.4), (8.0, 4.1), (h_break, 3.8)],
+                n=10, swatch="rock_lt")
+    apex = (rng.uniform(-1.6, 1.6), h_break + rng.uniform(1.5, 3.5),
+            rng.uniform(-1.6, 1.6))
+    _fan_apex(p, top, apex, pal, "rock")
+    return p
+
+
+def build_ruin_wall(pal: Palette, rng: np.random.Generator) -> Part:
+    """Collapsed wall fragment, ~30 elmos long: a run of stone courses with
+    a broken, uneven top line and a fallen block at one end."""
+    p = Part("ruin_wall")
+    x = -15.0
+    for _ in range(5):
+        w = rng.uniform(4.5, 6.5)
+        h = rng.uniform(6.0, 13.0)
+        zoff = rng.uniform(-0.5, 0.5)
+        _box(p, pal, x, x + w - 0.15, 0.0, h, -1.9 + zoff, 1.9 + zoff)
+        x += w
+    # toppled block in front of the wall line
+    _box(p, pal, rng.uniform(6.0, 10.0), rng.uniform(12.0, 15.0),
+         0.0, 2.8, 4.5, 8.2, swatches=("rock", "rock_dk", "rock_dk"))
+    return p
+
+
+def build_log_fence(pal: Palette, rng: np.random.Generator) -> Part:
+    """Broken split-rail fence segment, ~18 elmos: two posts, one full rail,
+    one snapped half-rail. Placed along roads by the along_paths sampler."""
+    p = Part("log_fence")
+    for px in (-8.0, 8.0):
+        top = trunk(p, pal, rng, [(0.0, 1.15), (6.8, 0.95)], n=5,
+                    swatch="bark_dk", lean=(rng.uniform(-0.5, 0.5),
+                                            rng.uniform(-0.5, 0.5)))
+        _cap(p, top, pal, "bark_lt", down=False)
+    _box(p, pal, -9.0, 9.0, 4.6, 5.6, -0.5, 0.5,
+         swatches=("bark_lt", "bark", "bark_dk"))
+    _box(p, pal, -9.0, rng.uniform(-1.0, 3.0), 2.3, 3.2, -0.5, 0.5,
+         swatches=("bark_lt", "bark", "bark_dk"))
+    return p
+
+
 def build_boulder_large(pal: Palette, rng: np.random.Generator) -> Part:
     """Craggy outcrop-scale boulder (~40 elmos tall, ~85 wide): a main
     displaced icosphere plus two shouldered companion rocks, all base-cut to
@@ -416,6 +531,12 @@ SPECIES = {
     "bush_scrub":     (build_bush,     0x5C2B),
     "rock_boulder":   (build_boulder,  0x0B0D),
     "rock_boulder_large": (build_boulder_large, 0xB16B),
+    "fallen_log":     (build_fallen_log, 0xF411),
+    "tree_stump":     (build_stump,     0x57B9),
+    "standing_stone": (build_standing_stone, 0x57A2),
+    "ruin_pillar":    (build_ruin_pillar, 0x9111),
+    "ruin_wall":      (build_ruin_wall,  0x9A11),
+    "log_fence":      (build_log_fence,  0xFE2C),
 }
 
 

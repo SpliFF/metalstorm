@@ -196,10 +196,15 @@ A **`Layer`** is one placement rule:
   or any custom closure over the `PlacementContext`
   (height/slope/biomes/moisture/exclusion).
 - **HOW** — a sampler: `scatter` (stratified-jitter blue noise, one hashed
-  candidate per stratum cell) or `clusters` (sparse hashed seeds accepted by
-  suitability, then a hashed ring of members — talus fans, boulder fields).
-  A line/network sampler family (roads, rail, bridge slots, following
-  `roads.plan_roads` polylines) is the planned third kind.
+  candidate per stratum cell), `clusters` (sparse hashed seeds accepted by
+  suitability, then a hashed ring of members — talus fans, boulder fields),
+  or `along_paths` (stations along `ctx.paths` polylines — the road network
+  today, rail later — with hashed dropout, lateral offset, and rotation set
+  to the local path heading: fences, roadside debris, sleepers, poles).
+  `TemplateEmit` turns any sampler's placements into composed *sites*: a
+  template of (name, dx, dz, keep) elements rotated by the site's hashed
+  rotation with per-element jitter and dropout — ruin colonnades lose
+  different pillars at every site; dwelling compounds use the same shape.
 - **WHAT** — an emit target: `FeatureEmit` (weighted feature-def names →
   featureplacer `objectlist` entries, i.e. real sim features) or `StampEmit`
   (soft smoothstep discs rasterized into named grid-res fields — **baked
@@ -216,12 +221,19 @@ model, not new mechanisms.
 Meridian's layer set: the four `vegetation.TEMPERATE_SPECIES` scatter layers
 (species density fields become layer suitabilities), `boulder_field` clusters
 (`rock_boulder_large` + `rock_boulder` mixed, favouring rocky biomes and the
-scree aprons), `erratic` lone outcrops on open ground, `talus_scree` stamps
-below cliffs (>34° dilated), and `sand_flats` stamps (desert + low flat
-shores). The models are **procedurally forged**
-(`tools/mapgen/gen_vegetation_models.py` → glTF + KTX2 into the map's
-`objects3d/`, deterministic, licence-free), with 8-yaw × 3-pitch impostor
-atlases baked by `tools/fable-model-forge/bake_impostors.py`.
+scree aprons), `erratic` lone outcrops, `deadwood` (fallen logs + stumps in
+the `forest_edge` band, sparse inside), `road_fences` (broken split-rail
+segments along the road polylines), `ruin_colonnade` template sites (7-pillar
+ring + 3 wall fragments + optional centre monolith, on flat open ground
+within sight of a road), `ridge_stones` (lone monoliths on high ground),
+`talus_scree` stamps below cliffs (>34° dilated), and `sand_flats` stamps
+(desert + low flat shores). Roads additionally get **junction plazas**
+(`roads.carve_plazas`): circular worn decks merged into the road distance
+field at district centres and convoy waypoints, so grading and the bake
+treat them exactly like the ways that meet them. All models are
+**procedurally forged** (`tools/mapgen/gen_vegetation_models.py` → glTF +
+KTX2 into the map's `objects3d/`, deterministic, licence-free), with 8-yaw ×
+3-pitch impostor atlases baked by `tools/fable-model-forge/bake_impostors.py`.
 
 Exclusion zones (roads, water, start pads, `corridor`/`choke` regions) gate
 feature layers so chokepoints stay passable; stamps ignore them (the road

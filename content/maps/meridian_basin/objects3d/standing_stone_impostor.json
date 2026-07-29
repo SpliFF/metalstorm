@@ -1,0 +1,14 @@
+{
+ "yawBins": 8,
+ "pitchBins": 3,
+ "frames": 1,
+ "pitchDegrees": [
+  18.0,
+  42.0,
+  68.0
+ ],
+ "cell": 128,
+ "width": 38.85100703687977,
+ "height": 38.85100703687977,
+ "centreY": 16.5
+}

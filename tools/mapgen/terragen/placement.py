@@ -20,15 +20,20 @@ Concepts
       decals with zero runtime cost. (A future runtime-decal target for
       dynamic content would slot in beside these two.)
 - Samplers:
-    * ``scatter``  — stratified-jitter, one candidate per stratum cell,
+    * ``scatter``     — stratified-jitter, one candidate per stratum cell,
       accepted with probability = suitability (approximate blue noise,
       deterministic; the engine behind vegetation scatter).
-    * ``clusters`` — sparse seed points accepted by suitability, then a
+    * ``clusters``    — sparse seed points accepted by suitability, then a
       hashed ring of members around each seed (talus fans, boulder fields,
       debris rings around wrecks).
-  Line/network layers (roads, rail, bridge slots) are the planned third
-  family: they take a polyline from roads.plan_roads instead of a
-  suitability field and emit along-path placements.
+    * ``along_paths`` — walk the ctx.paths polylines (road network, later
+      rail) at a fixed spacing with hashed dropout and lateral offset;
+      placements carry the local path heading (fences, roadside debris,
+      later rail sleepers / power poles).
+- ``TemplateEmit`` composes a *site* into many features: a template of
+  (name, dx, dz) elements rotated by the site's hashed rotation, with
+  per-element jitter and dropout — ruin circles, wall lines, later
+  dwelling compounds. Sites come from whichever sampler the layer uses.
 
 Everything is deterministic: all randomness comes from vegetation._hash01
 (seeded integer hashing) keyed on layer name — no RNG order dependence.
@@ -58,6 +63,7 @@ class PlacementContext:
     seed: int
     exclusion: np.ndarray     # bool (H, W): no features here (roads, pads, water…)
     water_level: float = 0.0
+    paths: list | None = None # list of (N,2) world-coord polylines (roads…)
 
     @property
     def map_w(self) -> float:
@@ -105,6 +111,30 @@ class StampEmit:
     strength: float = 1.0                   # peak field value per stamp
 
 
+@dataclass
+class TemplateEmit:
+    """Each placement is a SITE expanded into a composed arrangement.
+
+    elements: (feature def name, dx, dz, keep_prob) in site-local coords,
+    rotated by the site's rotation. Each element gets hashed jitter and an
+    independent dropout roll — a ruin ring loses different pillars at every
+    site. Elements landing on excluded/steep ground are dropped silently.
+    """
+    elements: list[tuple[str, float, float, float]]
+    jitter: float = 4.0                     # per-element positional jitter (elmos)
+    align_elements: bool = True             # elements face the site centre
+
+
+def ring_template(name: str, n: int, radius: float, keep: float,
+                  phase: float = 0.0) -> list[tuple[str, float, float, float]]:
+    """n elements of `name` evenly spaced on a circle — ruin colonnades."""
+    out = []
+    for i in range(n):
+        a = phase + 2.0 * np.pi * i / n
+        out.append((name, radius * np.cos(a), radius * np.sin(a), keep))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Layer
 # ---------------------------------------------------------------------------
@@ -122,6 +152,11 @@ class Layer:
     cluster_stratum: float = 1024.0         # seed-candidate pitch
     cluster_radius: float = 140.0           # member spread around a seed
     cluster_members: tuple[int, int] = (3, 9)
+    # along_paths sampler:
+    path_spacing: float = 160.0             # station pitch along the polyline
+    path_offset: float = 30.0               # lateral distance from centreline
+    path_offset_jitter: float = 6.0
+    path_both_sides: bool = True            # hashed side pick vs always +offset
 
 
 @dataclass
@@ -198,7 +233,57 @@ def _sample_clusters(layer: Layer, ctx: PlacementContext, suit: np.ndarray, lsee
     return x[live], z[live], rot[live], scale_t[live], pick_t[live]
 
 
-_SAMPLERS = {"scatter": _sample_scatter, "clusters": _sample_clusters}
+def _sample_along_paths(layer: Layer, ctx: PlacementContext, suit: np.ndarray, lseed: int):
+    """Stations along ctx.paths polylines. Placement rotation = local path
+    heading (featureplacer convention: rotation about +Y from +X toward +Z),
+    so fences and roadside props align with the way."""
+    e = np.empty(0)
+    if not ctx.paths:
+        return e, e, e, e, e
+    xs, zs, rots, sc, pk = [], [], [], [], []
+    for pi, poly in enumerate(ctx.paths):
+        p = np.asarray(poly, dtype=np.float64)
+        if p.shape[0] < 2:
+            continue
+        seg = np.diff(p, axis=0)
+        seglen = np.hypot(seg[:, 0], seg[:, 1])
+        cum = np.concatenate([[0.0], np.cumsum(seglen)])
+        total = cum[-1]
+        if total < layer.path_spacing:
+            continue
+        n = int(total / layer.path_spacing)
+        si = np.arange(n)
+        pkey = np.full(n, pi, dtype=np.int64)
+        phase = _hash01(pkey, si, lseed, 21) * layer.path_spacing
+        s = si * layer.path_spacing + phase
+        idx = np.clip(np.searchsorted(cum, s, side="right") - 1, 0, len(seglen) - 1)
+        t = (s - cum[idx]) / np.maximum(seglen[idx], 1e-6)
+        pos = p[idx] + seg[idx] * t[:, None]
+        tang = seg[idx] / np.maximum(seglen[idx], 1e-6)[:, None]
+        nrm = np.stack([-tang[:, 1], tang[:, 0]], axis=1)
+        side = np.where(_hash01(pkey, si, lseed, 22) < 0.5, -1.0, 1.0) \
+            if layer.path_both_sides else np.ones(n)
+        off = layer.path_offset + (
+            _hash01(pkey, si, lseed, 23) * 2.0 - 1.0) * layer.path_offset_jitter
+        pos = pos + nrm * (side * off)[:, None]
+        heading = np.arctan2(tang[:, 1], tang[:, 0])
+        xs.append(pos[:, 0]); zs.append(pos[:, 1]); rots.append(heading)
+        sc.append(_hash01(pkey, si, lseed, 24)); pk.append(_hash01(pkey, si, lseed, 25))
+    if not xs:
+        return e, e, e, e, e
+    x = np.concatenate(xs); z = np.concatenate(zs); rot = np.concatenate(rots)
+    scale_t = np.concatenate(sc); pick_t = np.concatenate(pk)
+    ok = (x >= 0) & (z >= 0) & (x < ctx.map_w) & (z < ctx.map_h)
+    ok &= _hash01((x * 8.0).astype(np.int64), (z * 8.0).astype(np.int64),
+                  lseed, 26) < ctx.sample(suit, x, z)
+    ok &= ctx.sample(ctx.slope_deg, x, z) <= layer.max_slope_deg
+    if layer.respect_exclusion:
+        ok &= ~ctx.excluded_at(x, z)
+    return x[ok], z[ok], rot[ok], scale_t[ok], pick_t[ok]
+
+
+_SAMPLERS = {"scatter": _sample_scatter, "clusters": _sample_clusters,
+             "along_paths": _sample_along_paths}
 
 
 # ---------------------------------------------------------------------------
@@ -234,9 +319,43 @@ def run(ctx: PlacementContext, layers: list[Layer],
     for layer in layers:
         lseed = (ctx.seed * 131 + zlib.crc32(layer.name.encode())) & 0x7FFFFFFF
         suit = np.clip(layer.suitability(ctx), 0.0, 1.0).astype(np.float32)
+        cov = float((suit > 0).mean())
+        if cov < 0.001:
+            progress(f"placement[{layer.name}]: WARNING suitability covers "
+                     f"{cov:.4%} of the map — layer will starve")
         x, z, rot, scale_t, pick_t = _SAMPLERS[layer.sampler](layer, ctx, suit, lseed)
 
-        if isinstance(layer.emit, FeatureEmit):
+        if isinstance(layer.emit, TemplateEmit):
+            em = layer.emit
+            placed = 0
+            for i in range(x.size):
+                srot = float(rot[i])
+                cs, sn = np.cos(srot), np.sin(srot)
+                for j, (name, dx, dz, keep) in enumerate(em.elements):
+                    ii = np.array([i], dtype=np.int64)
+                    jj = np.array([j], dtype=np.int64)
+                    if _hash01(ii, jj, lseed, 31)[0] >= keep:
+                        continue
+                    jx = (_hash01(ii, jj, lseed, 32)[0] * 2 - 1) * em.jitter
+                    jz = (_hash01(ii, jj, lseed, 33)[0] * 2 - 1) * em.jitter
+                    ex = float(x[i]) + dx * cs - dz * sn + jx
+                    ez = float(z[i]) + dx * sn + dz * cs + jz
+                    exa = np.array([ex]); eza = np.array([ez])
+                    if not (0 <= ex < ctx.map_w and 0 <= ez < ctx.map_h):
+                        continue
+                    if ctx.sample(ctx.slope_deg, exa, eza)[0] > layer.max_slope_deg:
+                        continue
+                    if layer.respect_exclusion and ctx.excluded_at(exa, eza)[0]:
+                        continue
+                    if em.align_elements:
+                        erot = srot + float(np.arctan2(dz, dx)) + np.pi / 2
+                    else:
+                        erot = _hash01(ii, jj, lseed, 34)[0] * 2 * np.pi
+                    out.features.append((name, ex, ez, float(erot), 1.0))
+                    placed += 1
+            progress(f"placement[{layer.name}]: {x.size} sites -> {placed} features "
+                     f"(suit {cov:.2%})")
+        elif isinstance(layer.emit, FeatureEmit):
             names = layer.emit.names
             wsum = sum(w for _, w in names)
             edges = np.cumsum([w / wsum for _, w in names])
@@ -247,7 +366,7 @@ def run(ctx: PlacementContext, layers: list[Layer],
                 out.features.append(
                     (names[idx[i]][0], float(x[i]), float(z[i]), float(rot[i]), float(sc[i]))
                 )
-            progress(f"placement[{layer.name}]: {x.size} features")
+            progress(f"placement[{layer.name}]: {x.size} features (suit {cov:.2%})")
         else:
             st = layer.emit
             fld = out.stamps.setdefault(
@@ -285,6 +404,23 @@ def slope_window(inner, lo: float, hi: float, soft: float = 4.0):
         if lo > 0:
             band = band * np.clip((sl - lo) / soft, 0, 1)
         return s * band.astype(np.float32)
+    return f
+
+
+def forest_edge(forest_ids, lo: float = 0.12, hi: float = 0.55,
+                sigma_world: float = 90.0):
+    """1.0 in the transition band at a forest boundary (smoothed forest
+    coverage between lo..hi), 0 in open ground and deep interior — where
+    deadwood, stumps and windthrow accumulate. sigma_world is in elmos so
+    the band width is resolution-independent (a cell-unit sigma made the
+    band 4x thinner at full res than in --fast validation runs)."""
+    from scipy import ndimage
+
+    def f(ctx: PlacementContext) -> np.ndarray:
+        cover = ndimage.gaussian_filter(
+            np.isin(ctx.biome_ids, forest_ids).astype(np.float32),
+            max(1.0, sigma_world / ctx.cellsize))
+        return ((cover > lo) & (cover < hi)).astype(np.float32)
     return f
 
 

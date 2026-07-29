@@ -209,6 +209,39 @@ def rasterize_roads(
     return mask, dist
 
 
+def carve_plazas(
+    road_mask: np.ndarray,
+    road_dist: np.ndarray,
+    sites: list[tuple[float, float]],
+    radius: float,
+    cellsize: float,
+    params: RoadParams | None = None,
+) -> None:
+    """Merge circular worn plazas into the road fields in-place.
+
+    Each site becomes a disc that reads as road surface: the distance field
+    is lowered so `road_dist < road_width/2` holds across the disc, which
+    makes flatten_under_roads grade it level and the albedo bake paint it as
+    deck with the same sharp edge + worn shoulder as the ways that meet it.
+    """
+    p = params or RoadParams()
+    H, W = road_mask.shape
+    half = p.road_width * 0.5
+    rc = int(np.ceil((radius + half) / cellsize)) + 2
+    for (sx, sz) in sites:
+        c = sx / cellsize; r = sz / cellsize
+        c0 = max(0, int(c) - rc); c1 = min(W, int(c) + rc + 1)
+        r0 = max(0, int(r) - rc); r1 = min(H, int(r) + rc + 1)
+        if c0 >= c1 or r0 >= r1:
+            continue
+        zz, xx = np.mgrid[r0:r1, c0:c1]
+        d = np.hypot(xx - c, zz - r) * cellsize
+        plaza_dist = np.maximum(d - (radius - half), 0.0)
+        np.minimum(road_dist[r0:r1, c0:c1], plaza_dist,
+                   out=road_dist[r0:r1, c0:c1])
+        road_mask[r0:r1, c0:c1] |= d <= radius
+
+
 def flatten_under_roads(
     height: np.ndarray,
     road_dist: np.ndarray,
