@@ -8,7 +8,7 @@
 // that lands (X4, currently un-started) — until then this module accumulates
 // its own phase locally from (dt, speed) using the same formula member.js
 // already uses for its own gait, so the two stay visually consistent without
-// a real shared-state wire. Flagging this explicitly per CLAUDE.md: this is
+// a real shared-state wire. Flagging this explicitly per AGENTS.md: this is
 // a deliberate, temporary divergence, not a silent one.
 //
 // footprint_profile shape (PLAN-metalstorm-flow.md §1 — mocked by callers

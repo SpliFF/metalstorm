@@ -23,7 +23,7 @@
 //     map picks, same scoped-down approach objectives-panel.js takes for
 //     bounty targets.
 //   - submitting a proposal: calls the documented `ctx.sendCommand`
-//     stand-in (warn-once-if-absent, per CLAUDE.md's no-silent-stand-ins
+//     stand-in (warn-once-if-absent, per AGENTS.md's no-silent-stand-ins
 //     contract) — command names ('parley.propose'/'parley.respond'/
 //     'parley.withdraw') match game_parley.lua's gadget:RecvLuaMsg dispatch
 //     exactly, so wiring a real sendCommand later is a pure plumbing task,

@@ -10,11 +10,11 @@
 
 Three tiers per PLAN-metalstorm-beta-units.md §2.1:
 
-| Tier | Representation | Renderer |
-|------|---------------|----------|
-| **Full** | 3D model, all pieces, thin-instanced per piece | EntityRenderer (existing) |
-| **Impostor** | Camera-facing quad, atlas frame by heading×anim | ImpostorRenderer (new) |
-| **Icon** | Strategic map symbol | Not rendered by EntityRenderer |
+| Tier         | Representation                                  | Renderer                       |
+| ------------ | ----------------------------------------------- | ------------------------------ |
+| **Full**     | 3D model, all pieces, thin-instanced per piece  | EntityRenderer (existing)      |
+| **Impostor** | Camera-facing quad, atlas frame by heading×anim | ImpostorRenderer (new)         |
+| **Icon**     | Strategic map symbol                            | Not rendered by EntityRenderer |
 
 ### 2. Per-Def Configuration
 
@@ -70,11 +70,13 @@ for each visible entity:
 ### 4. Coordination with fx-offload X2
 
 Per-instance attributes for impostors:
+
 - `heading` (float, quantized → atlas column 0–7)
 - `animFrame` (float, atlas row index)
 - `teamId` (float, for team-color shader)
 
 **X2 compatibility:** These attributes use the **same naming and layout** as X2's planned animation-texture attributes for full models. When X2 lands, both paths can share:
+
 - The same vertex shader inputs
 - The same per-instance buffer layout
 - The same animation-state logic in the JS animation system
@@ -93,6 +95,7 @@ The panel dropdown (panel.ts:221–231) already exists with disabled impostor/ic
 ### 6. Default LOD Thresholds
 
 When a def has no `lodThresholds`, default behavior:
+
 - `impostorDistance = Infinity` (never switch to impostor)
 - `iconDistance = Infinity` (never switch to icon)
 - Result: always render Full tier (backward-compatible)
@@ -100,6 +103,7 @@ When a def has no `lodThresholds`, default behavior:
 ### 7. Crossfade (Deferred)
 
 PLAN-metalstorm-beta-units.md §2.1 mentions "crossfade over ~0.3s at the model↔impostor boundary so the swap doesn't pop". This is **deferred** from B1:
+
 - Requires alpha-blending both tiers simultaneously during transition
 - Needs hysteresis to avoid thrashing at the boundary
 - Plan explicitly allows landing the tier system first, crossfade later
@@ -109,12 +113,14 @@ PLAN-metalstorm-beta-units.md §2.1 mentions "crossfade over ~0.3s at the model�
 ### 8. Tests
 
 Per PLAN-metalstorm-beta-units.md §8:
+
 - Model loads → impostor mesh created
 - determineLodTier() returns correct tier based on distance
 - One draw call per (defId, team) impostor group (batching)
 - Golden screenshot: strategic-zoom mixed-army shot (most units as impostors)
 
 Vitest unit tests for:
+
 - quantizeHeading(radians) → correct column 0–7
 - LOD tier selection with various thresholds
 - Impostor instance batching
@@ -145,7 +151,7 @@ PLAN-metalstorm-beta-units.md field notes).
 
 ## Open Questions
 
-1. **Atlas generation pipeline:** PLAN-metalstorm-beta-units.md §6 says "impostor bake (§2.1): headless Blender render → atlas layout". This is **out of scope for B1** — the impostor *renderer* lands now, the bake tooling is task 4b's Blender-CLI script (separate milestone).
+1. **Atlas generation pipeline:** PLAN-metalstorm-beta-units.md §6 says "impostor bake (§2.1): headless Blender render → atlas layout". This is **out of scope for B1** — the impostor _renderer_ lands now, the bake tooling is task 4b's Blender-CLI script (separate milestone).
 
 2. **Default thresholds:** Should we auto-derive sensible defaults from model bounds? E.g. `impostorDistance = modelRadius * 50`? Or leave them as opt-in (Infinity default)?
 
@@ -157,7 +163,7 @@ PLAN-metalstorm-beta-units.md field notes).
 
 ## FIDELITY-STANDIN Markers
 
-All explicitly noted per CLAUDE.md contract:
+All explicitly noted per AGENTS.md contract:
 
 1. **Impostor shader:** Fixed atlas frame (col 0, row 0) until fx-offload X2 wires per-instance heading/animFrame attributes.
 2. **Animation frame logic:** Always frame 0 (no velocity→gait-phase→walk-flipbook logic) until fx-offload X4 animation system lands.

@@ -12,7 +12,7 @@
 // generated config, but the engine does not yet consume it: gsRNG is
 // hard-seeded to a fixed constant at CGlobalSynced::ResetState()
 // (rts/Sim/Misc/GlobalSynced.cpp) and there is no `--seed` / config `seed`
-// field wired to it. Per CLAUDE.md's no-silent-deviation rule this is called
+// field wired to it. Per AGENTS.md's no-silent-deviation rule this is called
 // out explicitly rather than pretended away: today, varying `seed` across a
 // matrix produces distinct labelled rows (useful for the batch driver's own
 // bookkeeping and for `expandMatrix`'s reproducibility guarantee, §6 "meta"

@@ -8,7 +8,7 @@
 -- Why a standalone script rather than a C++ engine addition: the game's
 -- static data (data/games/metalstorm/**) is served as-is by the static-data
 -- pipeline (client/vite-static-data-plugin.ts dev, nginx/CDN prod — see
--- CLAUDE.md "Resolved Design Decisions" / production deployment notes) at
+-- AGENTS.md "Resolved Design Decisions" / production deployment notes) at
 -- `/api/games/data/<gameId>/...`. Writing `authority_cost.json` straight
 -- into `data/games/metalstorm/` makes it servable with zero server code —
 -- the "same pattern as defs -> JSON" the plan calls for, using the
@@ -34,7 +34,7 @@ local data = chunk()
 local function isArray(t)
     local n = 0
     for _ in pairs(t) do n = n + 1 end
-    if n == 0 then return false end   -- empty table -> object {}
+    if n == 0 then return false end -- empty table -> object {}
     for i = 1, n do
         if t[i] == nil then return false end
     end
@@ -45,11 +45,11 @@ local encodeValue
 
 local function encodeString(s)
     local out = s:gsub('[%c"\\]', function(c)
-        if c == '"'  then return '\\"'  end
+        if c == '"' then return '\\"' end
         if c == '\\' then return '\\\\' end
-        if c == '\n' then return '\\n'  end
-        if c == '\t' then return '\\t'  end
-        if c == '\r' then return '\\r'  end
+        if c == '\n' then return '\\n' end
+        if c == '\t' then return '\\t' end
+        if c == '\r' then return '\\r' end
         return string.format('\\u%04x', c:byte())
     end)
     return '"' .. out .. '"'
@@ -74,9 +74,12 @@ end
 
 encodeValue = function(v)
     local ty = type(v)
-    if ty == 'string' then return encodeString(v)
-    elseif ty == 'number' then return tostring(v)
-    elseif ty == 'boolean' then return tostring(v)
+    if ty == 'string' then
+        return encodeString(v)
+    elseif ty == 'number' then
+        return tostring(v)
+    elseif ty == 'boolean' then
+        return tostring(v)
     elseif ty == 'table' then
         if isArray(v) then return encodeArray(v) else return encodeObject(v) end
     else

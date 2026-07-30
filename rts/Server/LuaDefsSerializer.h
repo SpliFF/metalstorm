@@ -27,7 +27,7 @@
  *   /api/games/data/<gameId>/cache/defs/<key>/unitdefs.lua.br
  * with `Content-Encoding: br` so the browser decompresses transparently.
  *
- * See `docs/unit_scripts.md` and the design notes in `CLAUDE.md`
+ * See `docs/unit_scripts.md` and the design notes in `AGENTS.md`
  * §"Resolved Design Decisions" for the rationale.
  */
 
@@ -41,7 +41,9 @@
 
 // Forward decls — heavy headers stay out of this one.
 struct FeatureDef;
-namespace CegLoader { struct CegDef; }
+namespace CegLoader {
+struct CegDef;
+}
 
 namespace LuaDefsSerializer {
 
@@ -82,27 +84,29 @@ namespace detail {
 /// elision so matching that behaviour keeps wire sizes comparable.
 class LuaBuilder {
 public:
-    void add_raw(const char* key, std::string val);          // pre-emitted
-    void add_str(const char* key, std::string_view val,
-                 std::string_view def = std::string_view());
-    void add_float(const char* key, double val, double def = 0.0);
-    void add_int(const char* key, long long val, long long def = 0);
-    void add_bool(const char* key, bool val, bool def = false);
-    std::string finish();
+  void add_raw(const char *key, std::string val); // pre-emitted
+  void add_str(const char *key, std::string_view val,
+               std::string_view def = std::string_view());
+  void add_float(const char *key, double val, double def = 0.0);
+  void add_int(const char *key, long long val, long long def = 0);
+  void add_bool(const char *key, bool val, bool def = false);
+  std::string finish();
+
 private:
-    std::vector<std::pair<std::string, std::string>> pairs_;
+  std::vector<std::pair<std::string, std::string>> pairs_;
 };
 
 /// Emit `{1,2,3}` for a vector of u16 ids. Always emits — caller
 /// should skip the field when the vector is empty (LuaBuilder will
 /// not, since this returns a non-default raw string).
-std::string IntVector(const std::vector<uint16_t>& vec);
+std::string IntVector(const std::vector<uint16_t> &vec);
 
 /// Emit `{1.5, 2.0, ...}` for a vector of floats.
-std::string FloatVector(const std::vector<float>& vec);
+std::string FloatVector(const std::vector<float> &vec);
 
 /// Emit `{k1="v1",k2="v2"}` for a string→string map, sorted by key.
-std::string StringMap(const std::vector<std::pair<std::string, std::string>>& kvs);
+std::string
+StringMap(const std::vector<std::pair<std::string, std::string>> &kvs);
 
 } // namespace detail
 
@@ -111,27 +115,24 @@ std::string StringMap(const std::vector<std::pair<std::string, std::string>>& kv
 /// Serialise the game's FeatureDef vector to Lua source. Model URLs
 /// resolve to existing `.gltf` files under `modelsDir`; empty URL
 /// when no model exists on disk.
-std::string SerializeFeatureDefs(
-    const std::vector<FeatureDef>& defs,
-    const std::string& gameId,
-    const std::filesystem::path& modelsDir);
+std::string SerializeFeatureDefs(const std::vector<FeatureDef> &defs,
+                                 const std::string &gameId,
+                                 const std::filesystem::path &modelsDir);
 
 /// Serialise CEG defs to Lua source.
-std::string SerializeCegDefs(const std::vector<CegLoader::CegDef>& defs);
+std::string SerializeCegDefs(const std::vector<CegLoader::CegDef> &defs);
 
 // ─── Template serializers (header-only; UnitDef/WeaponDef types may
 //     vary between sim build and test build) ─────────────────────
 
-template<typename UnitDefVec>
-std::string SerializeUnitDefs(
-    const UnitDefVec& defs,
-    const std::string& gameId);
+template <typename UnitDefVec>
+std::string SerializeUnitDefs(const UnitDefVec &defs,
+                              const std::string &gameId);
 
-template<typename WeaponDefVec>
+template <typename WeaponDefVec>
 std::string SerializeWeaponDefs(
-    const WeaponDefVec& defs,
-    const std::string& gameId,
-    const std::unordered_set<std::string>* projectileTextureNames = nullptr);
+    const WeaponDefVec &defs, const std::string &gameId,
+    const std::unordered_set<std::string> *projectileTextureNames = nullptr);
 
 } // namespace LuaDefsSerializer
 

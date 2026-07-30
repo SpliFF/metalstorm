@@ -30,7 +30,7 @@ function gadget:GetInfo()
         author  = "metalstorm",
         date    = "2026",
         license = "GPL v2",
-        layer   = -100,            -- before objectives/regions/teams
+        layer   = -100, -- before objectives/regions/teams
         enabled = true,
     }
 end
@@ -39,35 +39,35 @@ if not gadgetHandler:IsSyncedCode() then
     return false
 end
 
-local Formula   = VFS.Include("LuaRules/Gadgets/authority/formula.lua")
-local Attribute = VFS.Include("LuaRules/Gadgets/authority/attribute.lua")
-local Classify  = VFS.Include("LuaRules/Gadgets/authority/classify.lua")
-local Escrow    = VFS.Include("LuaRules/Gadgets/authority/escrow.lua")
-local Ledger    = VFS.Include("LuaRules/Gadgets/authority/ledger.lua")
-local Metrics   = VFS.Include("LuaRules/Gadgets/authority/metrics.lua")
-local CostSpec  = VFS.Include("LuaRules/Configs/authority_cost.lua")
+local Formula                      = VFS.Include("LuaRules/Gadgets/authority/formula.lua")
+local Attribute                    = VFS.Include("LuaRules/Gadgets/authority/attribute.lua")
+local Classify                     = VFS.Include("LuaRules/Gadgets/authority/classify.lua")
+local Escrow                       = VFS.Include("LuaRules/Gadgets/authority/escrow.lua")
+local Ledger                       = VFS.Include("LuaRules/Gadgets/authority/ledger.lua")
+local Metrics                      = VFS.Include("LuaRules/Gadgets/authority/metrics.lua")
+local CostSpec                     = VFS.Include("LuaRules/Configs/authority_cost.lua")
 
-local STARTING_TEAM_AUTHORITY = 500
-local EVENT_RING_SIZE = 8
-local STIPEND_PERIOD_FRAMES = 1800     -- 1 minute at GAME_SPEED 30
-local LEDGER_PUBLISH_PERIOD_FRAMES = 900  -- 30 s at GAME_SPEED 30 (§1)
+local STARTING_TEAM_AUTHORITY      = 500
+local EVENT_RING_SIZE              = 8
+local STIPEND_PERIOD_FRAMES        = 1800 -- 1 minute at GAME_SPEED 30
+local LEDGER_PUBLISH_PERIOD_FRAMES = 900 -- 30 s at GAME_SPEED 30 (§1)
 
-local costScale  = 1.0
-local joinGrant  = 100
-local teamStipend = 0
+local costScale                    = 1.0
+local joinGrant                    = 100
+local teamStipend                  = 0
 
 -- Ledger state (PLAN-metalstorm-economy.md §1): reason-tagged accumulators
 -- for long-horizon economy monitoring (gm-tools dashboard, headless validation).
-local ledgerState = Ledger.newState()
+local ledgerState                  = Ledger.newState()
 
 -- Metrics state (§2): health metrics computed from ledger counters (velocity
 -- EMA, dead-team time) — feeds gm-tools dashboard.
-local metricsState = Metrics.newState()
+local metricsState                 = Metrics.newState()
 
 -- Previous ledger snapshot (for delta computation in GameFrame)
-local prevLedger = {}
+local prevLedger                   = {}
 
-GG.Authority = GG.Authority or {}
+GG.Authority                       = GG.Authority or {}
 
 --- Export ledger counters (PLAN-metalstorm-economy.md §1: for stats-dump
 --- and game_events hooks). Returns { [teamID] = {mint=N, burn=M, move=K, unmapped=U}, ... }
@@ -116,7 +116,8 @@ function GG.Authority.IsOverflowing(playerID_or_nil, teamID)
     end
     local ceiling
     if playerID_or_nil then
-        ceiling = econ.soft_ceiling_C_base  -- per-player ceiling (§3: C_base × teamPlayerCount for team, C_base for player)
+        ceiling = econ
+        .soft_ceiling_C_base               -- per-player ceiling (§3: C_base × teamPlayerCount for team, C_base for player)
         local pool = getPlayerPool(playerID_or_nil)
         local excess = pool - ceiling
         return excess > 0, ceiling, excess
@@ -460,7 +461,7 @@ end
 --- administrative fee (base=1) under the 'standing' class instead of
 --- scaling with committed strength.
 ---
---- SCOPED SIMPLIFICATION (CLAUDE.md "never deviate from Recoil silently" —
+--- SCOPED SIMPLIFICATION (AGENTS.md "never deviate from Recoil silently" —
 --- called out explicitly, not silent): regionMod is pinned to 1.0. A
 --- per-unit order's regionMod reads the ISSUING UNIT's position
 --- (GG.Regions.CostModifierAt(unitID)); a directive has no single
@@ -508,13 +509,13 @@ function gadget:Initialize()
     -- (cold start + gadget reload), covering test scenes that skip GameStart
     -- — the §6 "authority_cost_scale=0 ... must not even require pools to
     -- exist" guarantee shouldn't depend on GameStart having fired.
-    local mo = Spring.GetModOptions()
+    local mo    = Spring.GetModOptions()
     costScale   = tonumber(mo.authority_cost_scale) or 1.0
     joinGrant   = tonumber(mo.authority_join_grant) or 100
     teamStipend = tonumber(mo.authority_team_stipend) or 0
 
     -- E1 load-time assert (§5): ceiling must be ≥ 2× the priciest single decision
-    local econ = CostSpec.economy
+    local econ  = CostSpec.economy
     if econ and econ.soft_ceiling_C_base then
         -- The priciest order = build (orderMod 3.0) × largest unit base × enemy region (regionMod 2.0)
         -- Conservatively estimate largest unit base as ~500 (scale-4 units; real values from defs)
@@ -530,12 +531,12 @@ function gadget:Initialize()
 end
 
 function gadget:GameStart()
-    local mo = Spring.GetModOptions()
+    local mo    = Spring.GetModOptions()
     costScale   = tonumber(mo.authority_cost_scale) or 1.0
     joinGrant   = tonumber(mo.authority_join_grant) or 100
     teamStipend = tonumber(mo.authority_team_stipend) or 0
 
-    local gaia = Spring.GetGaiaTeamID()
+    local gaia  = Spring.GetGaiaTeamID()
     for _, teamID in ipairs(Spring.GetTeamList()) do
         if teamID ~= gaia then
             setTeamPool(teamID, STARTING_TEAM_AUTHORITY)
@@ -564,7 +565,7 @@ function gadget:GameFrame(frame)
         if teamID ~= gaia then
             -- Velocity: compute ledger deltas since last frame
             local curr = Ledger.counters(ledgerState, teamID)
-            local prev = prevLedger[teamID] or {mint=0, burn=0, move=0, unmapped=0}
+            local prev = prevLedger[teamID] or { mint = 0, burn = 0, move = 0, unmapped = 0 }
             local mintDelta = curr.mint - prev.mint
             local burnDelta = curr.burn - prev.burn
             Metrics.updateVelocity(metricsState, teamID, mintDelta, burnDelta)

@@ -26,7 +26,7 @@
  *   - AIGuidance has no charge site (advisory, never a spend — AI's own
  *     budget governance lives in ai/strategos, PLAN-metalstorm-ai.md §3.2).
  *
- * SCOPED SIMPLIFICATION (documented per CLAUDE.md "never deviate from Recoil
+ * SCOPED SIMPLIFICATION (documented per AGENTS.md "never deviate from Recoil
  * silently"): two inputs are pinned to their neutral default, matching the
  * exact same simplification the server-side charge makes (so client preview
  * and server charge stay in lockstep — the actual requirement, not perfect
@@ -36,25 +36,30 @@
  * yet).
  */
 
-export type Echelon = 'Squad' | 'Platoon' | 'Army';
+export type Echelon = "Squad" | "Platoon" | "Army";
 
 export interface CostModelLike {
-    predict(p: { baseCost: number; orderClassKey: string; regionMod: number; costScale: number }): number | null;
-    canAfford(cost: number, playerPool: number, teamPool: number): boolean;
+  predict(p: {
+    baseCost: number;
+    orderClassKey: string;
+    regionMod: number;
+    costScale: number;
+  }): number | null;
+  canAfford(cost: number, playerPool: number, teamPool: number): boolean;
 }
 
 export interface OrgGroupLike {
-    groupId: number;
-    echelon: Echelon;
-    memberIds: number[];
-    baseCostSum: number;
+  groupId: number;
+  echelon: Echelon;
+  memberIds: number[];
+  baseCostSum: number;
 }
 
 export interface CostPreview {
-    cost: number;
-    affordable: boolean;
-    /** 0 when affordable; otherwise how much more authority is needed. */
-    shortfall: number;
+  cost: number;
+  affordable: boolean;
+  /** 0 when affordable; otherwise how much more authority is needed. */
+  shortfall: number;
 }
 
 /**
@@ -65,29 +70,30 @@ export interface CostPreview {
  *     (network hasn't fetched authority_cost.json yet).
  */
 export function previewDirectiveCost(
-    compiledType: string,
-    group: OrgGroupLike | null,
-    costModel: CostModelLike,
-    playerPool: number,
-    teamPool: number,
+  compiledType: string,
+  group: OrgGroupLike | null,
+  costModel: CostModelLike,
+  playerPool: number,
+  teamPool: number,
 ): CostPreview | null {
-    if (compiledType !== 'GroupDirective' && compiledType !== 'StandingOrder') return null;
-    const hasGroup = compiledType === 'GroupDirective' && group !== null;
-    const orderClassKey = hasGroup ? 'directive' : 'standing';
-    const baseCost = hasGroup ? (group as OrgGroupLike).baseCostSum : 1;
-    const cost = costModel.predict({
-        baseCost,
-        orderClassKey,
-        regionMod: 1.0,
-        costScale: 1.0,
-    });
-    if (cost === null) return null;
-    const affordable = costModel.canAfford(cost, playerPool, teamPool);
-    return {
-        cost,
-        affordable,
-        shortfall: affordable ? 0 : cost - (playerPool + teamPool),
-    };
+  if (compiledType !== "GroupDirective" && compiledType !== "StandingOrder")
+    return null;
+  const hasGroup = compiledType === "GroupDirective" && group !== null;
+  const orderClassKey = hasGroup ? "directive" : "standing";
+  const baseCost = hasGroup ? (group as OrgGroupLike).baseCostSum : 1;
+  const cost = costModel.predict({
+    baseCost,
+    orderClassKey,
+    regionMod: 1.0,
+    costScale: 1.0,
+  });
+  if (cost === null) return null;
+  const affordable = costModel.canAfford(cost, playerPool, teamPool);
+  return {
+    cost,
+    affordable,
+    shortfall: affordable ? 0 : cost - (playerPool + teamPool),
+  };
 }
 
 /**
@@ -99,14 +105,14 @@ export function previewDirectiveCost(
  * guessing wrong and silently steering an order at the wrong roster.
  */
 export function matchSelectionToGroup(
-    selectedUnitIds: readonly number[],
-    groups: readonly OrgGroupLike[],
+  selectedUnitIds: readonly number[],
+  groups: readonly OrgGroupLike[],
 ): number | null {
-    if (selectedUnitIds.length === 0) return null;
-    const selected = new Set(selectedUnitIds);
-    for (const g of groups) {
-        if (g.memberIds.length !== selected.size) continue;
-        if (g.memberIds.every((id) => selected.has(id))) return g.groupId;
-    }
-    return null;
+  if (selectedUnitIds.length === 0) return null;
+  const selected = new Set(selectedUnitIds);
+  for (const g of groups) {
+    if (g.memberIds.length !== selected.size) continue;
+    if (g.memberIds.every((id) => selected.has(id))) return g.groupId;
+  }
+  return null;
 }

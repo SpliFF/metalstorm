@@ -25,7 +25,7 @@
 //     for native-ui widgets yet (ai-command-panel.js and command-composer.js
 //     are in the same state) — postBounty() calls the documented
 //     `ctx.sendCommand` stand-in and warns once (not silently) if it's
-//     absent, per CLAUDE.md's no-silent-stand-ins contract.
+//     absent, per AGENTS.md's no-silent-stand-ins contract.
 //   - map markers: PLAN-macro-map.md's strategic-map overlay doesn't exist
 //     yet either — publishMarkers() calls the documented `ctx.strategicMap`
 //     stand-in and warns once if it's absent. Region-hinted objectives
