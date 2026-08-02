@@ -576,6 +576,22 @@ interface PieceRenderEntry {
     pieceIdx: number;
 }
 
+/**
+ * A def's real 3D model, prepared for drawing the many cosmetic *members* a
+ * squad fans out into (PLAN-macro-squads.md: the visible unit is the squad
+ * member, not the squad). One entry per geometry piece; the caller thin-
+ * instances each piece with `rest × memberWorld`, exactly as tick() does for
+ * a single sim entity.
+ *
+ * Handed to SquadRenderBackend through the SquadHost seam so squad members of
+ * a modelled def draw as that model instead of the proxy capsule.
+ */
+export interface SquadMemberModel {
+    pieces: { mesh: Mesh; rest: Matrix }[];
+    /** Vertical offset so the model's base sits at the member's ground Y. */
+    yOffset: number;
+}
+
 export class EntityRenderer {
     private scene: Scene;
     private interpolator = new EntityInterpolator();
@@ -640,6 +656,18 @@ export class EntityRenderer {
     // Per-piece thin-instance meshes, keyed by "model:{defId}:{team}:{pieceIdx}"
     // or "shape:{shape}:{team}" for fallbacks.
     private renderMeshes = new Map<string, Mesh>();
+
+    // Squad-member models, keyed by "{defId}:{team}" — resolved templates handed
+    // to SquadRenderBackend. A `null` value is a permanent negative cache ("this
+    // def has no usable member model"); `undefined` means "not resolved yet".
+    private squadMemberModels = new Map<string, SquadMemberModel | null>();
+    // The meshes those models are built from, keyed
+    // "squadmodel:{defId}:{team}:{pieceIdx}". Deliberately NOT in
+    // `renderMeshes`: tick()'s hide-pass zeroes every renderMeshes entry it
+    // didn't write this frame, and squad-member instances are driven by
+    // SquadRenderBackend's own flush() (the sim-authoritative squad body is
+    // never drawn at all — see `squadDefIds`).
+    private squadMemberMeshes = new Map<string, Mesh>();
 
     // Unit materials, SHARED across all pieces that use the same texture set,
     // keyed by "{defId}:{team}:{materialKey}". A unit's pieces almost always
@@ -764,6 +792,7 @@ export class EntityRenderer {
         setActiveZKShadowGenerator(csm as CascadedShadowGenerator | null, sun);
         if (!csm) return;
         for (const mesh of this.renderMeshes.values()) csm.addShadowCaster(mesh);
+        for (const mesh of this.squadMemberMeshes.values()) csm.addShadowCaster(mesh);
         for (const mesh of this.shapeMeshes.values()) csm.addShadowCaster(mesh);
     }
 
@@ -1458,12 +1487,25 @@ export class EntityRenderer {
     /**
      * Get or create the thin-instance render mesh for a specific piece
      * of a specific (defId, team). Clones the template piece mesh.
+     *
+     * `store` lets a second consumer (squad members) reuse the whole
+     * material-resolution path while keeping its meshes out of
+     * `renderMeshes` — tick()'s hide-pass zeroes everything in there that it
+     * didn't write this frame, which would fight a caller that drives its own
+     * thin instances.
      */
-    private getOrCreatePieceMesh(defId: number, team: number, pieceIdx: number, piece: PieceInfo): Mesh {
-        const key = `model:${defId}:${team}:${pieceIdx}`;
-        let mesh = this.renderMeshes.get(key);
+    private getOrCreatePieceMesh(
+        defId: number,
+        team: number,
+        pieceIdx: number,
+        piece: PieceInfo,
+        store: Map<string, Mesh> = this.renderMeshes,
+        keyPrefix = 'model',
+    ): Mesh {
+        const key = `${keyPrefix}:${defId}:${team}:${pieceIdx}`;
+        let mesh = store.get(key);
         if (!mesh) {
-            mesh = piece.mesh.clone(`unit_${defId}_t${team}_p${pieceIdx}_${piece.name}`);
+            mesh = piece.mesh.clone(`${keyPrefix === 'model' ? 'unit' : keyPrefix}_${defId}_t${team}_p${pieceIdx}_${piece.name}`);
             mesh.makeGeometryUnique();
 
             const tmpl = this.modelTemplates.get(defId);
@@ -1532,10 +1574,57 @@ export class EntityRenderer {
             mesh.alwaysSelectAsActiveMesh = true;
             mesh.renderingGroupId = 2;
             mesh.receiveShadows = true;
-            this.renderMeshes.set(key, mesh);
+            store.set(key, mesh);
             this.shadowGenerator?.addShadowCaster(mesh);
         }
         return mesh;
+    }
+
+    /**
+     * The real member model for a squad def, or null while it is still
+     * loading / if the def ships no model.
+     *
+     * Squad members used to be team-coloured proxy capsules unconditionally
+     * (squad-render-backend.ts's "first wire" simplification), which meant a
+     * def like `ms_tanks_s2` rendered as four capsules even though its
+     * `fable_tank` glTF was shipped, loaded and correct — that was the bulk of
+     * the "the scenario starts with placeholders" report. This hands the
+     * loaded template's pieces to SquadRenderBackend so members draw as the
+     * actual model.
+     *
+     * Kicks off the lazy model fetch on first call and returns null until it
+     * lands; the caller retries (a member drawn as a capsule for the first few
+     * frames is upgraded in place once the load completes).
+     */
+    getSquadMemberModel(defId: number, team: number): SquadMemberModel | null {
+        const key = `${defId}:${team}`;
+        const cached = this.squadMemberModels.get(key);
+        if (cached !== undefined) return cached;
+
+        this.ensureModelLoaded(defId);
+        const tmpl = this.modelTemplates.get(defId);
+        if (tmpl === undefined) return null;      // still loading — retry later
+        if (tmpl === null) {                      // def has no model, ever
+            this.squadMemberModels.set(key, null);
+            return null;
+        }
+
+        const pieces: { mesh: Mesh; rest: Matrix }[] = [];
+        for (let pi = 0; pi < tmpl.pieces.length; pi++) {
+            const piece = tmpl.pieces[pi];
+            if (!piece.mesh) continue;            // structural node, no geometry
+            pieces.push({
+                mesh: this.getOrCreatePieceMesh(
+                    defId, team, pi, piece, this.squadMemberMeshes, 'squadmodel'),
+                rest: piece.restWorldMatrix,
+            });
+        }
+        // A template with no drawable geometry is as useless as no template:
+        // cache the negative so we stop re-walking it every frame.
+        const model: SquadMemberModel | null =
+            pieces.length > 0 ? { pieces, yOffset: tmpl.yOffset } : null;
+        this.squadMemberModels.set(key, model);
+        return model;
     }
 
     private getFallbackMesh(defId: number, team: number): Mesh {
@@ -2517,6 +2606,10 @@ export class EntityRenderer {
         // update(); zero their live counts so nothing renders from the parked
         // session before the first post-reconnect snapshot rebuilds them.
         for (const mesh of this.renderMeshes.values()) mesh.thinInstanceCount = 0;
+        // Squad-member instances are owned by SquadRenderBackend, but the
+        // meshes are ours — park them too, or the pre-detach members hang in
+        // the scene until the squad system refills its pools.
+        for (const mesh of this.squadMemberMeshes.values()) mesh.thinInstanceCount = 0;
         if (this.selectionMesh) this.selectionMesh.thinInstanceCount = 0;
     }
 
@@ -2709,6 +2802,9 @@ export class EntityRenderer {
     dispose(): void {
         for (const mesh of this.renderMeshes.values()) mesh.dispose();
         this.renderMeshes.clear();
+        for (const mesh of this.squadMemberMeshes.values()) mesh.dispose();
+        this.squadMemberMeshes.clear();
+        this.squadMemberModels.clear();
         // Shared unit materials are owned here (mesh.dispose() doesn't free
         // them), so dispose them explicitly. NOT their textures — those are
         // the shared template textures, disposed by the template loop below.

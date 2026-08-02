@@ -1,7 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { NullEngine, Scene, FreeCamera, Vector3, Color3, Mesh } from '@babylonjs/core';
+import {
+    NullEngine, Scene, FreeCamera, Vector3, Color3, Mesh, Matrix, MeshBuilder,
+} from '@babylonjs/core';
 import { SquadRenderBackend } from './squad-render-backend.js';
 import type { ImpostorAtlas } from './impostor-renderer.js';
+import type { SquadMemberModel } from './entity-renderer.js';
 
 // Beta-units task 4b: members of defs with an impostor sprite atlas draw as
 // camera-facing billboard quads (per-(defId, team) thin-instance pools);
@@ -168,6 +171,7 @@ describe('SquadRenderBackend impostor sprite members', () => {
     });
 
     it('a released sprite slot stops rendering and is reusable', () => {
+        // (kept below; the real-model suite follows this describe block)
         const { backend, scene } = makeBackend(new Set([7]));
         backend.setSquadTeam(1, 0);
         const h = backend.createMember(1, 0, { defId: 7, variant: 0 });
@@ -178,5 +182,168 @@ describe('SquadRenderBackend impostor sprite members', () => {
         // Slot collapsed to zero scale — matrix is all zeros.
         const m = mesh.thinInstanceGetWorldMatrices()[0].toArray();
         expect(Array.from(m).every((v) => v === 0)).toBe(true);
+    });
+});
+
+// A squad def with a real 3D model must draw its members AS that model, not as
+// the team-coloured proxy capsule. This was the bulk of the 2026-08-03 "the
+// scenario starts with units that are mostly placeholders" report: `ms_tanks_s2`
+// carries `override objectname = 'fable_tank'`, the glTF ships and loads fine,
+// and every member still rendered as a blue capsule.
+
+const MODEL_Y_OFFSET = 3;
+
+/** A two-piece stand-in model: a hull at the origin and a turret raised 5
+ *  elmos, so a test can tell "rest transform applied" from "identity". */
+function makeModel(scene: Scene): SquadMemberModel {
+    const hull = MeshBuilder.CreateBox('hull', { size: 4 }, scene);
+    const turret = MeshBuilder.CreateBox('turret', { size: 2 }, scene);
+    return {
+        pieces: [
+            { mesh: hull, rest: Matrix.Identity() },
+            { mesh: turret, rest: Matrix.Translation(0, 5, 0) },
+        ],
+        yOffset: MODEL_Y_OFFSET,
+    };
+}
+
+function makeModelBackend(opts: { modelReady: boolean }) {
+    const engine = new NullEngine();
+    const scene = new Scene(engine);
+    scene.activeCamera = new FreeCamera('cam', new Vector3(0, 50, -50), scene);
+    const state = { ready: opts.modelReady, model: null as SquadMemberModel | null };
+    const backend = new SquadRenderBackend(scene, {
+        getGroundHeight: () => 0,
+        getTeamColor: () => new Color3(1, 0, 0),
+        getImpostorAtlas: () => undefined,
+        getSquadMemberModel: () => {
+            if (!state.ready) return null;
+            state.model ??= makeModel(scene);
+            return state.model;
+        },
+    });
+    return { backend, scene, state };
+}
+
+describe('SquadRenderBackend real-model members', () => {
+    it('draws members of a modelled def as the model, not the proxy capsule', () => {
+        const { backend, scene } = makeModelBackend({ modelReady: true });
+        backend.setSquadTeam(1, 0);
+        const h = backend.createMember(1, 0, { defId: 7, variant: 0 });
+        backend.updateMember(h, 10, 0, 20, 0, 0);
+        backend.flush();
+
+        const hull = scene.meshes.find((m) => m.name === 'hull') as Mesh;
+        const turret = scene.meshes.find((m) => m.name === 'turret') as Mesh;
+        expect(hull.thinInstanceCount).toBe(1);
+        expect(turret.thinInstanceCount).toBe(1);
+        // The capsule pool must not have been created at all.
+        expect(scene.meshes.find((m) => m.name.startsWith('squadMember_t')))
+            .toBeUndefined();
+    });
+
+    it('composes piece rest transforms and the template yOffset', () => {
+        const { backend, scene } = makeModelBackend({ modelReady: true });
+        backend.setSquadTeam(1, 0);
+        const h = backend.createMember(1, 0, { defId: 7, variant: 0 });
+        // gait 0 ⇒ no bob, so the Y below is exact.
+        backend.updateMember(h, 10, 100, 20, 0, 0);
+        backend.flush();
+
+        const hull = scene.meshes.find((m) => m.name === 'hull') as Mesh;
+        const turret = scene.meshes.find((m) => m.name === 'turret') as Mesh;
+        const hullM = hull.thinInstanceGetWorldMatrices()[0].toArray();
+        const turretM = turret.thinInstanceGetWorldMatrices()[0].toArray();
+
+        // Hull sits at the member position lifted by the template's yOffset —
+        // NOT by the capsule's half-height (the old unconditional lift).
+        expect(hullM[12]).toBeCloseTo(10, 6);
+        expect(hullM[13]).toBeCloseTo(100 + MODEL_Y_OFFSET, 6);
+        expect(hullM[14]).toBeCloseTo(20, 6);
+        // Turret carries its own +5 rest offset on top.
+        expect(turretM[13]).toBeCloseTo(100 + MODEL_Y_OFFSET + 5, 6);
+    });
+
+    it('upgrades a capsule member in place once its model finishes loading', () => {
+        const { backend, scene, state } = makeModelBackend({ modelReady: false });
+        backend.setSquadTeam(1, 0);
+        const h = backend.createMember(1, 0, { defId: 7, variant: 0 });
+        backend.updateMember(h, 10, 100, 20, 0, 0);
+        backend.flush();
+
+        // Model not loaded yet → capsule, as before.
+        const capsule = scene.meshes.find(
+            (m) => m.name === 'squadMember_t0') as Mesh;
+        expect(capsule.thinInstanceCount).toBe(1);
+
+        // The glTF lands. No further updateMember call — the swap must happen
+        // on flush() alone, and must replay the member's last pose.
+        state.ready = true;
+        backend.flush();
+
+        const hull = scene.meshes.find((m) => m.name === 'hull') as Mesh;
+        expect(hull.thinInstanceCount).toBe(1);
+        const hullM = hull.thinInstanceGetWorldMatrices()[0].toArray();
+        expect(hullM[12]).toBeCloseTo(10, 6);
+        expect(hullM[13]).toBeCloseTo(100 + MODEL_Y_OFFSET, 6);
+        expect(hullM[14]).toBeCloseTo(20, 6);
+        // The vacated capsule slot renders nothing.
+        const capM = capsule.thinInstanceGetWorldMatrices()[0].toArray();
+        expect(Array.from(capM).every((v) => v === 0)).toBe(true);
+    });
+
+    it('keeps the capsule for a def with neither an atlas nor a model', () => {
+        const { backend, scene } = makeModelBackend({ modelReady: false });
+        backend.setSquadTeam(1, 0);
+        const h = backend.createMember(1, 0, { defId: 7, variant: 0 });
+        backend.updateMember(h, 0, 0, 0, 0, 0);
+        backend.flush();
+        backend.flush(); // a retry that still resolves nothing must not throw
+
+        const capsule = scene.meshes.find(
+            (m) => m.name === 'squadMember_t0') as Mesh;
+        expect(capsule.thinInstanceCount).toBe(1);
+        expect(scene.meshes.find((m) => m.name === 'hull')).toBeUndefined();
+    });
+
+    it('releases every piece of a model member', () => {
+        const { backend, scene } = makeModelBackend({ modelReady: true });
+        backend.setSquadTeam(1, 0);
+        const h = backend.createMember(1, 0, { defId: 7, variant: 0 });
+        backend.updateMember(h, 10, 0, 20, 0, 0);
+        backend.flush();
+        backend.releaseMember(h);
+        backend.flush();
+
+        for (const name of ['hull', 'turret']) {
+            const mesh = scene.meshes.find((m) => m.name === name) as Mesh;
+            const m = mesh.thinInstanceGetWorldMatrices()[0].toArray();
+            expect(Array.from(m).every((v) => v === 0)).toBe(true);
+        }
+    });
+
+    it('an impostor atlas still wins over a real model', () => {
+        // Infantry ship an authored sprite atlas AND (later) may gain a model;
+        // the billboard is the intended render for them, so it must take
+        // priority rather than being silently replaced by geometry.
+        const engine = new NullEngine();
+        const scene = new Scene(engine);
+        scene.activeCamera = new FreeCamera('cam', new Vector3(0, 50, -50), scene);
+        const backend = new SquadRenderBackend(scene, {
+            getGroundHeight: () => 0,
+            getTeamColor: () => new Color3(1, 0, 0),
+            getImpostorAtlas: () => ATLAS,
+            getSquadMemberModel: () => makeModel(scene),
+        });
+        backend.setSquadTeam(1, 0);
+        const h = backend.createMember(1, 0, { defId: 7, variant: 0 });
+        backend.updateMember(h, 0, 0, 0, 0, 0);
+        backend.flush();
+
+        const sprite = scene.meshes.find(
+            (m) => m.name === 'squadSprite_d7_t0') as Mesh;
+        expect(sprite.thinInstanceCount).toBe(1);
+        const hull = scene.meshes.find((m) => m.name === 'hull') as Mesh | undefined;
+        expect(hull?.thinInstanceCount ?? 0).toBe(0);
     });
 });

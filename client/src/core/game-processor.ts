@@ -1633,6 +1633,10 @@ async function gpLoadSquadSystem(gameId: string, scene: Scene, er: EntityRendere
         // Impostor-first defs (beta-units §2.1) draw members as sprite
         // billboards from the impostor atlas registry instead of capsules.
         getImpostorAtlas: (defId) => gpCtx.impostorRenderer?.getAtlas(defId),
+        // Everything else with a real model draws members as that model
+        // (ms_tanks_s2 → fable_tank, …); only defs with neither an atlas nor
+        // a model fall through to the proxy capsule.
+        getSquadMemberModel: (defId, team) => er.getSquadMemberModel(defId, team),
     });
     const url = `/api/games/data/${gameId}/client/squads/index.js`;
     try {

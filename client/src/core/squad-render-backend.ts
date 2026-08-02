@@ -9,18 +9,24 @@
 // heightmap + camera. Everything here is presentation only — nothing feeds the
 // sim (AGENTS.md squad-based design; PLAN-latency-squads.md).
 //
-// Members draw as one of two visual classes:
+// Members draw as one of three visual classes, in priority order:
 //  - IMPOSTOR SPRITE — defs with a registered impostor atlas (beta-units
 //    §2.1 impostor-first infantry/civilians: authored `<stem>_impostor.ktx2`
 //    sprite sheets) render each member as a camera-facing billboard quad,
 //    thin-instanced per (defId, team) with the shared impostor material
 //    (impostor-renderer.ts: alpha-tested PBR + TeamColorPlugin).
-//  - PROXY CAPSULE — everything else keeps the small team-coloured capsule,
-//    a DELIBERATE first-wire simplification, not a Recoil divergence:
-//    soldier-model fan-out is Metalstorm-specific cosmetic presentation with
-//    no Recoil equivalent, and the sim only ever knows the single squad
-//    unit. Swapping the capsule for real member models is a later polish
-//    step behind the same RenderBackend seam.
+//  - REAL MODEL — defs with a loaded 3D model draw each member as that
+//    model, one thin-instance pool per (defId, team, piece), matrices
+//    composed exactly as EntityRenderer.tick() does for a single sim entity
+//    (`piece.restWorldMatrix × memberWorld`, translation lifted by the
+//    template's yOffset). Models load lazily, so a member created before its
+//    def's glTF lands starts on the capsule and is migrated in place by
+//    `flush()` the frame the model becomes available.
+//  - PROXY CAPSULE — the last resort, for defs that ship neither an impostor
+//    atlas nor a model file (see the missing-model warning the server logs at
+//    defs-bake time). Not a Recoil divergence: soldier-model fan-out is
+//    Metalstorm-specific cosmetic presentation with no Recoil equivalent, and
+//    the sim only ever knows the single squad unit.
 
 import {
   Scene,
@@ -39,17 +45,32 @@ import {
   type ImpostorAtlas,
 } from "./impostor-renderer.js";
 import type { AtlasLayout } from "./impostor-atlas.js";
+import type { SquadMemberModel } from "./entity-renderer.js";
+
+/** One drawable mesh inside a pool, with its own thin-instance buffer.
+ *  Capsule / sprite / wreck pools have exactly one; a real-model pool has one
+ *  per geometry piece of the model. */
+interface PoolPiece {
+  mesh: Mesh;
+  matrices: Float32Array; // capacity * 16
+  /** Rest-pose transform of this piece inside the model. Null on single-mesh
+   *  pools, where the member's world matrix IS the instance matrix. */
+  rest: Matrix | null;
+}
 
 /** A grow-on-demand thin-instance pool for one visual class (members of a
  *  given team, or wrecks). Freed slots are collapsed to a zero-scale matrix so
- *  they render as nothing until the index is reused. */
+ *  they render as nothing until the index is reused. A slot index addresses
+ *  the same member across every piece of the pool. */
 interface InstancePool {
-  mesh: Mesh;
-  matrices: Float32Array; // capacity * 16
+  pieces: PoolPiece[];
   capacity: number;
   highWater: number; // count uploaded to thinInstanceCount
   free: number[]; // released indices, LIFO
   dirty: boolean;
+  /** Present on real-model pools only: the template's base lift, so the
+   *  model's feet sit on the member's ground position. */
+  modelYOffset?: number;
   /** Present on impostor-sprite pools only. Sprite quads face the camera,
    *  so their matrices are recomposed every flush() from the stored member
    *  positions + the current camera — updateMember() just records the
@@ -68,6 +89,20 @@ interface MemberSlot {
   index: number;
 }
 
+/** A member still drawing as a capsule because its def's model had not
+ *  finished loading when the member was created. `flush()` retries the model
+ *  lookup once per frame and migrates these in place (see `upgradePending`),
+ *  replaying the last pose so the swap costs no visible frame. */
+interface PendingModelMember {
+  handle: number;
+  defId: number;
+  team: number;
+  x: number;
+  y: number;
+  z: number;
+  headingY: number;
+}
+
 const MEMBER_HEIGHT = 9; // elmos — proxy capsule height
 const MEMBER_RADIUS = 1.6;
 const WRECK_SIZE = 4; // elmos — flat debris box
@@ -80,6 +115,13 @@ export interface SquadHost {
   /** Impostor sprite atlas for a def, if one streamed (impostor-renderer's
    *  registry) — members of such defs draw as sprite billboards. */
   getImpostorAtlas(defId: number): ImpostorAtlas | undefined;
+  /** The def's real 3D model, prepared for member drawing
+   *  (EntityRenderer.getSquadMemberModel). Null while the glTF is still
+   *  loading, or permanently for a def that ships no model — the caller falls
+   *  back to the proxy capsule and retries each frame until it resolves.
+   *  Optional so a host that has no model source (tests, headless) keeps the
+   *  old capsule-only behaviour. */
+  getSquadMemberModel?(defId: number, team: number): SquadMemberModel | null;
 }
 
 export class SquadRenderBackend {
@@ -96,8 +138,14 @@ export class SquadRenderBackend {
   private memberPools = new Map<number, InstancePool>();
   /** One sprite member pool per "defId:team" (lazily created). */
   private spritePools = new Map<string, InstancePool>();
+  /** One real-model member pool per "defId:team" (lazily created). */
+  private modelPools = new Map<string, InstancePool>();
   /** Single shared wreck pool. */
   private wreckPool: InstancePool | null = null;
+
+  /** Members on the capsule fallback whose def may still resolve to a model.
+   *  Keyed by handle so a release can drop the entry in O(1). */
+  private pendingModel = new Map<number, PendingModelMember>();
 
   /** handle → member slot. Handles are dense positive ints; -1 means "no
    *  instance" (the logic treats -1 as released, per render-backend.js). */
@@ -110,6 +158,7 @@ export class SquadRenderBackend {
   private _q = new Quaternion();
   private _t = new Vector3();
   private _m = Matrix.Identity();
+  private _pm = Matrix.Identity(); // rest × member-world, per model piece
 
   constructor(scene: Scene, host: SquadHost) {
     this.scene = scene;
@@ -133,12 +182,24 @@ export class SquadRenderBackend {
     v: { defId: number; variant: number },
   ): number {
     const team = this.squadTeam.get(squadId) ?? 0;
-    const atlas = this.host.getImpostorAtlas(v.defId);
-    const pool = atlas
-      ? this.getSpritePool(v.defId, team, atlas)
-      : this.getMemberPool(team);
-    const index = this.allocSlot(pool);
     const handle = this.nextHandle++;
+
+    // Priority: impostor sprite → real model → proxy capsule.
+    const atlas = this.host.getImpostorAtlas(v.defId);
+    let pool = atlas ? this.getSpritePool(v.defId, team, atlas) : null;
+    if (!pool) pool = this.getModelPool(v.defId, team);
+    if (!pool) {
+      pool = this.getMemberPool(team);
+      // No atlas and no model *yet* — the glTF may still be in flight, so
+      // keep this member on the retry list rather than freezing it as a
+      // capsule for the rest of the game.
+      if (!atlas) {
+        this.pendingModel.set(handle, {
+          handle, defId: v.defId, team, x: 0, y: 0, z: 0, headingY: 0,
+        });
+      }
+    }
+    const index = this.allocSlot(pool);
     this.memberByHandle.set(handle, { pool, index });
     return handle;
   }
@@ -167,15 +228,23 @@ export class SquadRenderBackend {
       slot.pool.dirty = true;
       return;
     }
-    this.writeMatrix(
-      slot.pool,
-      slot.index,
-      x,
-      y + MEMBER_HEIGHT * 0.5 + bob,
-      z,
-      headingY,
-      1,
-    );
+    const pending = this.pendingModel.get(handle);
+    if (pending) {
+      // Retain the pose so an upgrade to the real model this frame can replay
+      // it into the new slot instead of showing an empty matrix for a frame.
+      pending.x = x;
+      pending.y = y;
+      pending.z = z;
+      pending.headingY = headingY;
+    }
+    // A real model is authored with its base at Y=0 and lifted by the
+    // template's yOffset (same convention as EntityRenderer.tick()); the proxy
+    // capsule is centre-origin, so it lifts by half its height instead.
+    const lift =
+      slot.pool.modelYOffset !== undefined
+        ? slot.pool.modelYOffset
+        : MEMBER_HEIGHT * 0.5;
+    this.writeMatrix(slot.pool, slot.index, x, y + lift + bob, z, headingY, 1);
   }
 
   destroyMember(handle: number, _death: unknown): void {
@@ -189,6 +258,7 @@ export class SquadRenderBackend {
     if (!slot) return;
     this.freeSlot(slot.pool, slot.index);
     this.memberByHandle.delete(handle);
+    this.pendingModel.delete(handle);
   }
 
   spawnWreck(
@@ -219,7 +289,7 @@ export class SquadRenderBackend {
     // No per-instance alpha on a shared material — fade by shrinking the
     // debris toward nothing instead. Preserves position/heading.
     const base = slot.index * 16;
-    const m = slot.pool.matrices;
+    const m = slot.pool.pieces[0].matrices; // the wreck pool is single-mesh
     // Re-scale the rotation/scale 3×3 block by alpha relative to unit.
     // Cheapest correct path: recompose from the stored translation.
     const tx = m[12],
@@ -263,7 +333,9 @@ export class SquadRenderBackend {
    *  entity impostor path share one convention, including whether the card
    *  tilts with camera pitch (a property of the pool's atlas layout). */
   flush(): void {
+    if (this.pendingModel.size) this.upgradePending();
     for (const pool of this.memberPools.values()) this.flushPool(pool);
+    for (const pool of this.modelPools.values()) this.flushPool(pool);
     const camera = this.scene.activeCamera;
     for (const pool of this.spritePools.values()) {
       if (camera && pool.sprite) {
@@ -277,16 +349,47 @@ export class SquadRenderBackend {
     if (this.wreckPool) this.flushPool(this.wreckPool);
   }
 
+  /** Move every capsule member whose def's model has finished loading onto
+   *  that model, replaying its last pose. Runs once per frame and only while
+   *  something is still pending, so a game whose defs all resolved (or that
+   *  ships no models at all) pays a single Map.size check per frame. */
+  private upgradePending(): void {
+    for (const p of [...this.pendingModel.values()]) {
+      const pool = this.getModelPool(p.defId, p.team);
+      if (!pool) continue; // still loading, or this def has no model at all
+      const slot = this.memberByHandle.get(p.handle);
+      if (!slot) {
+        this.pendingModel.delete(p.handle);
+        continue;
+      }
+      this.freeSlot(slot.pool, slot.index);
+      const index = this.allocSlot(pool);
+      this.memberByHandle.set(p.handle, { pool, index });
+      this.pendingModel.delete(p.handle);
+      this.writeMatrix(
+        pool, index, p.x, p.y + (pool.modelYOffset ?? 0), p.z, p.headingY, 1);
+    }
+  }
+
   dispose(): void {
-    for (const pool of this.memberPools.values()) pool.mesh.dispose();
-    for (const pool of this.spritePools.values()) pool.mesh.dispose();
-    this.wreckPool?.mesh.dispose();
+    for (const pool of this.memberPools.values()) this.disposePool(pool);
+    for (const pool of this.spritePools.values()) this.disposePool(pool);
+    // Model pools' meshes are OWNED BY EntityRenderer (its squadMemberMeshes
+    // cache, shared across pools of the same def+team) — dropping the pool
+    // must not dispose them. EntityRenderer.dispose() frees them.
     this.memberPools.clear();
     this.spritePools.clear();
+    this.modelPools.clear();
+    if (this.wreckPool) this.disposePool(this.wreckPool);
     this.wreckPool = null;
     this.memberByHandle.clear();
     this.wreckByHandle.clear();
     this.squadTeam.clear();
+    this.pendingModel.clear();
+  }
+
+  private disposePool(pool: InstancePool): void {
+    for (const p of pool.pieces) p.mesh.dispose();
   }
 
   // --- internals ----------------------------------------------------------
@@ -313,8 +416,26 @@ export class SquadRenderBackend {
     mesh.isPickable = false;
     mesh.alwaysSelectAsActiveMesh = true;
     mesh.doNotSyncBoundingInfo = true;
-    pool = this.newPool(mesh);
+    pool = this.newPool([{ mesh, rest: null }]);
     this.memberPools.set(team, pool);
+    return pool;
+  }
+
+  /** The real-model pool for a def+team, or null if the host has no model for
+   *  it (yet, or ever). Never caches the negative itself — the host owns that
+   *  decision (EntityRenderer keeps a permanent null for model-less defs), so
+   *  a repeated call while a glTF is in flight stays a cheap Map lookup there. */
+  private getModelPool(defId: number, team: number): InstancePool | null {
+    const key = `${defId}:${team}`;
+    const existing = this.modelPools.get(key);
+    if (existing) return existing;
+    const model = this.host.getSquadMemberModel?.(defId, team);
+    if (!model || model.pieces.length === 0) return null;
+    const pool = this.newPool(
+      model.pieces.map((p) => ({ mesh: p.mesh, rest: p.rest })),
+    );
+    pool.modelYOffset = model.yOffset;
+    this.modelPools.set(key, pool);
     return pool;
   }
 
@@ -344,7 +465,7 @@ export class SquadRenderBackend {
     mesh.isPickable = false;
     mesh.alwaysSelectAsActiveMesh = true;
     mesh.doNotSyncBoundingInfo = true;
-    pool = this.newPool(mesh);
+    pool = this.newPool([{ mesh, rest: null }]);
     pool.sprite = {
       halfH: atlas.height * 0.5,
       layout: layoutOf(atlas),
@@ -362,6 +483,7 @@ export class SquadRenderBackend {
   private billboardSpritePool(pool: InstancePool, cardRot: Quaternion): void {
     const sprite = pool.sprite;
     if (!sprite || pool.highWater === 0) return;
+    const matrices = pool.pieces[0].matrices; // sprite pools are single-mesh
     this._s.set(1, 1, 1);
     // Ground-anchor lift along the card's own local up, so a tilted card keeps
     // its base on the terrain instead of hovering (or sinking) as the camera
@@ -379,7 +501,7 @@ export class SquadRenderBackend {
         z = sprite.pos[base + 2];
       this._t.set(x + lx, y + ly, z + lz);
       Matrix.ComposeToRef(this._s, cardRot, this._t, this._m);
-      this._m.copyToArray(pool.matrices, i * 16);
+      this._m.copyToArray(matrices, i * 16);
     }
     pool.dirty = true;
   }
@@ -402,16 +524,22 @@ export class SquadRenderBackend {
     mesh.isPickable = false;
     mesh.alwaysSelectAsActiveMesh = true;
     mesh.doNotSyncBoundingInfo = true;
-    this.wreckPool = this.newPool(mesh);
+    this.wreckPool = this.newPool([{ mesh, rest: null }]);
     return this.wreckPool;
   }
 
-  private newPool(mesh: Mesh, capacity = 64): InstancePool {
-    const matrices = new Float32Array(capacity * 16);
-    mesh.thinInstanceSetBuffer("matrix", matrices, 16, false);
-    mesh.thinInstanceCount = 0;
-    mesh.isVisible = false;
-    return { mesh, matrices, capacity, highWater: 0, free: [], dirty: false };
+  private newPool(
+    meshes: { mesh: Mesh; rest: Matrix | null }[],
+    capacity = 64,
+  ): InstancePool {
+    const pieces: PoolPiece[] = meshes.map(({ mesh, rest }) => {
+      const matrices = new Float32Array(capacity * 16);
+      mesh.thinInstanceSetBuffer("matrix", matrices, 16, false);
+      mesh.thinInstanceCount = 0;
+      mesh.isVisible = false;
+      return { mesh, matrices, rest };
+    });
+    return { pieces, capacity, highWater: 0, free: [], dirty: false };
   }
 
   private allocSlot(pool: InstancePool): number {
@@ -429,7 +557,7 @@ export class SquadRenderBackend {
   private freeSlot(pool: InstancePool, index: number): void {
     // Collapse to zero scale so the freed slot renders as nothing.
     const base = index * 16;
-    pool.matrices.fill(0, base, base + 16);
+    for (const p of pool.pieces) p.matrices.fill(0, base, base + 16);
     if (pool.sprite) pool.sprite.alive[index] = 0;
     pool.free.push(index);
     pool.dirty = true;
@@ -437,9 +565,11 @@ export class SquadRenderBackend {
 
   private growPool(pool: InstancePool): void {
     const cap = pool.capacity * 2;
-    const next = new Float32Array(cap * 16);
-    next.set(pool.matrices);
-    pool.matrices = next;
+    for (const p of pool.pieces) {
+      const next = new Float32Array(cap * 16);
+      next.set(p.matrices);
+      p.matrices = next;
+    }
     pool.capacity = cap;
     if (pool.sprite) {
       const pos = new Float32Array(cap * 3);
@@ -466,18 +596,31 @@ export class SquadRenderBackend {
     Quaternion.RotationYawPitchRollToRef(headingY, 0, 0, this._q);
     this._t.set(x, y, z);
     Matrix.ComposeToRef(this._s, this._q, this._t, this._m);
-    this._m.copyToArray(pool.matrices, index * 16);
+    const base = index * 16;
+    for (const p of pool.pieces) {
+      // Same composition order as EntityRenderer.tick(): piece-local vertices
+      // → model space via the piece's rest transform → world via the member's
+      // transform. Single-mesh pools have no rest transform and write direct.
+      if (p.rest) {
+        p.rest.multiplyToRef(this._m, this._pm);
+        this._pm.copyToArray(p.matrices, base);
+      } else {
+        this._m.copyToArray(p.matrices, base);
+      }
+    }
     pool.dirty = true;
   }
 
   private flushPool(pool: InstancePool): void {
     if (!pool.dirty) return;
     pool.dirty = false;
-    pool.mesh.thinInstanceSetBuffer("matrix", pool.matrices, 16, false);
-    pool.mesh.thinInstanceCount = pool.highWater;
-    pool.mesh.isVisible = pool.highWater > 0;
-    if (pool.highWater > 0) {
-      pool.mesh.thinInstanceRefreshBoundingInfo(false);
+    for (const p of pool.pieces) {
+      p.mesh.thinInstanceSetBuffer("matrix", p.matrices, 16, false);
+      p.mesh.thinInstanceCount = pool.highWater;
+      p.mesh.isVisible = pool.highWater > 0;
+      if (pool.highWater > 0) {
+        p.mesh.thinInstanceRefreshBoundingInfo(false);
+      }
     }
   }
 }

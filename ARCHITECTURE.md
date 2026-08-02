@@ -110,7 +110,8 @@ Full CLI flag list (from `rts/server_main.cpp`):
 | `core/connection.ts` | WebTransport game-stream connection to server (over `WebTransportAdapter`). FlatBuffers dispatch. Events: `onMapData`, `onUnitDefs`, `onEntityState`, `onCombatEvents`, etc. GW4 relocates it into the game-processor worker (PLAN-game-worker.md). |
 | `core/transport.ts` | Transport abstraction over the game connection. `WebTransportAdapter` (QUIC/HTTP-3) — class-based send (`control`/`state`/`vision`/`bulk`/`datagram`), newest-wins state. WebRTC removed (PLAN-game-worker.md). |
 | `core/game-worker-protocol.ts` | **Frozen GW4 message contract** (PLAN-game-worker.md): the game-processor worker ⇄ main-thread interfaces (`Gp*ToWorker` init/input/config, `Gp*ToMain` sceneState/audio/config/gameOver). Also (WP2c) `LegacyWorkerMessage` (all legacy `type` strings) + `WorkerInbound` union used to type `self.onmessage`. |
-| `core/entity-renderer.ts` | Per-piece thin-instanced unit renderer. Loads `.glb` via `setUnitDefs()`, groups by (defId, team, pieceIdx). Fallback: procedural shapes. |
+| `core/entity-renderer.ts` | Per-piece thin-instanced unit renderer. Loads `.glb` via `setUnitDefs()`, groups by (defId, team, pieceIdx). Fallback: procedural shapes. Also publishes `getSquadMemberModel(defId, team)` — the same loaded pieces, prepared for the squad fan-out. Those meshes live in a **separate** `squadMemberMeshes` map, not `renderMeshes`: `tick()`'s hide-pass zeroes every `renderMeshes` entry it didn't write this frame, which would fight a caller driving its own thin instances. |
+| `core/squad-render-backend.ts` | Babylon implementation of the Metalstorm squad `RenderBackend` (`data/games/metalstorm/client/squads/`): draws the cosmetic members one sim squad fans out into. Three visual classes, in priority order — **impostor sprite** (defs with an authored atlas: infantry, civilians), **real model** (the def's own glTF pieces, thin-instanced per (defId, team, piece); models load lazily so a member created early starts on the capsule and is migrated in place by `flush()`), **proxy capsule** (defs with neither — the server names these at defs-bake time, see below). |
 | `core/feature-renderer.ts` | Thin-instanced map feature renderer. Types with no baked impostor atlas keep the single whole-map mesh (pattern reference for entity-renderer); types listed in a `models/impostors.json` manifest are handed to `FeatureLodController` instead. Also hosts `DynamicFeatureRenderer` (runtime wrecks/debris). |
 | `core/feature-lod.ts` | PLAN-maps.md M6 — pure spatial-chunking + tier math for the map-feature LOD (tile partition, point→AABB distance, `assignTier` with hysteresis, `farDensity` prefix thinning). No Babylon imports; unit-tested. |
 | `core/feature-lod-renderer.ts` | PLAN-maps.md M6 — Babylon side of the feature LOD: per (type, tile) NEAR (full mesh, casts CSM) / FAR (impostor card, no shadows) / CULLED meshes with static matrix buffers, dither crossfade, per-tile frustum culling. Debug: `window.__gp('__featureLod.get()/.set()/.force()')`. **Clones must `makeGeometryUnique()`** — thin-instance buffers live on the Geometry, which `Mesh.clone()` shares. |
@@ -626,12 +627,25 @@ Projectile streaming: server sends GameWeaponDefs (incremental, per-client, only
 Client: DefCache accumulates defs → EntityRenderer.setUnitDefs() (additive batches)
 Client: DefCache → ProjectileRenderer.setWeaponDefs() (per-type mesh + material)
 Model loading: SceneLoader.ImportMeshAsync per defId → thin instances
+Squad defs:   the sim body is not drawn; SquadRenderBackend draws the members
+              (impostor sprite → real model → proxy capsule)
 Fallback: procedural shapes (box/cylinder/cone/sphere) when no .glb exists
 ```
 
 Defs are streamed on-demand: the server tracks `knownUnitDefs` and `knownWeaponDefs`
 per ClientSession and sends each def exactly once per game session, just before the
 first entity/projectile state update that references it.
+
+**Missing models degrade silently by design, so the server names them loudly.**
+`LuaDefsSerializer::SerializeOneUnitDef` emits `model_url` only when
+`models/<objectname>.gltf` exists; otherwise it emits `""` and the client falls
+back to a procedural shape (or, for a squad def, the proxy capsule). Nothing in
+that chain is an error, which is how a scenario can be mostly placeholders with
+a clean log. `FindDefsWithMissingModels` closes the hole: once per defs bake the
+server logs a WARNING naming every def whose `objectname` resolves to no `.gltf`
+and which is not `impostor_only` (that flag means "the billboard IS the model" —
+infantry/civilians per PLAN-metalstorm-beta-units.md §2.1, so a missing file is
+correct for them). Covered by `tests/test_defs_missing_models.cpp`.
 
 ## Weapon / Projectile Rendering Strategies (target model)
 
