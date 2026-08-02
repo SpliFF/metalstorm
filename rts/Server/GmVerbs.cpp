@@ -11,6 +11,7 @@
 #include "ClientSession.h"
 #include "Protocol.h"
 #include "PerfMetrics.h"
+#include "SyncedInputJournal.h"
 #include "WebTransport/WebTransportServer.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/TeamHandler.h"
@@ -253,6 +254,13 @@ void RegisterGmVerbs(GameServerContext& ctx, ISnapshotStore& store) {
             const GmRollbackOutcome o = DoRollback(store, ctx.roomId, frame);
 
             if (o.status == GmRollbackStatus::Ok) {
+                // The journal must see the discontinuity (PLAN-replay §6 E2 —
+                // a rollback starts a NEW replay segment). Without this record
+                // a replay would keep applying the post-rollback command stream
+                // to the pre-rollback state and diverge with no explanation.
+                syncedinput::Journal().RecordSnapshotRestore(
+                    o.preCheckpointFrame, frame);
+
                 // Generation-nonce full-boot (E1): a real nonce mechanism is
                 // persistence/quickstart machinery not yet built; GameRestarting
                 // is the available full-reentry signal — clients reset + reconnect

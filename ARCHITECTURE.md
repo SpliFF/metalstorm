@@ -524,6 +524,7 @@ data/
 | `/api/content/manifest` | JSON index of all servable assets |
 | `/api/content/assets/*` | Individual asset files from content roots |
 | `POST /api/gm/*` | GM verbs (`pause`/`resume`/`grant`/`broadcast`/`inspect`/`kick`/`rollback`/`checkpoint`/`hibernate`/`snapshots`). AdminOnly + audited; the dashboard POSTs here directly (browser→game port). PLAN-gm-tools task 2 (`GmVerbs.cpp`). |
+| `/api/journal` | JSON synced-input cause-stream tallies (`seen`/`recorded`/`appended`/`skipped` + per-kind). Loopback-only. With `--journal-audit [N]` also reports the in-memory ring's head/tail. See [Synced-input funnel](#synced-input-funnel-the-cause-stream). |
 | `/api/wt/info` | JSON `{port, transport, certMode}` — WebTransport (QUIC) endpoint discovery. `certMode:"hashes"` (dev/self-hosted default) adds `certHashes:[current,next]` (+ back-compat `certHash`) for `serverCertificateHashes` pinning; `certMode:"webpki"` (`--wt-cert`/`--wt-key` configured) publishes no hash — the browser validates the CA cert normally. Replaces the removed `/api/rtc/offer` + `/api/rtc/candidate` WebRTC signaling. |
 
 ### Log server (`spring-logserver`)
@@ -572,6 +573,50 @@ Client → server: PlayerCommand (move, attack, stop)
 Client → server: ViewportUpdate (camera position/zoom)
 Client: interpolates entities between ticks, renders via Babylon.js
 ```
+
+### Synced-input funnel (the cause stream)
+
+Everything that changes the synced sim from **outside** it passes through
+`syncedinput::Journal()` (`rts/Server/SyncedInputJournal.{h,cpp}`) before it is
+applied. There are exactly five such places, and they are the server tick's own
+source order — `TickPhase` names them:
+
+```
+server tick (server_main.cpp)
+  BeginTick(frame)
+  1 Inbound     DrainInbound  → ClientMessageHandler::HandleMessage   ← records ALL 45 wire verbs
+  2 Disconnect  DrainDisconnects → PlayerLeft / PlayerRemoved
+    sim.SimFrame()
+  3 LuaExec     luaExecEngine drain (admin console + POST /api/exec)
+  4 Stream      streamer.Tick → StateStreamer::TickAI (AI command drain)
+  + anchor      CSimulation::FireGameStart (roster/leaders)
+```
+
+Records are ordered by `(frame, phase, seq)`. Frame alone is insufficient: while
+`gs->paused` is set or before GameStart the frame does not advance while inbound
+messages keep arriving, so `seq` (process-monotonic) is the real total order.
+
+The inbound site records the **raw wire bytes before dispatch**, not a decoded
+form — a replay re-feeds them through the same `HandleMessage`, and messages the
+live run rejected (rate limit, stale sequence, authority veto) are in the stream
+so a replay rejects them identically. Which verbs are kept is decided by one
+exhaustive classifier (`ClassifyClientPayload`, four-way: Synced / Setup /
+Unsynced / Ignored), never by the individual handlers;
+`tests/test_synced_input_journal.cpp` walks the generated
+`EnumValuesClientPayload()` so a verb added to `protocol.fbs` without a
+classification fails a test.
+
+**Not recorded, deliberately:** commands the sim gives itself — factory exit
+rally, `StatisticalCombat` retaliation, `WaitCommandsAI`, `LuaSyncedCtrl`
+`GiveCommand` from a gadget callin. Those are *consequences*; re-execution
+reproduces them, and recording them would double-apply. AI output *is* recorded:
+the AI VM runs on its own threads and which tick its commands land on is not part
+of the synced state.
+
+Storage is pluggable (`IJournal`). The default is `NullJournal` — the funnel still
+classifies and counts, and `GET /api/journal` (loopback) reports the tallies.
+`--journal-audit [N]` attaches a bounded in-memory journal; the durable journal is
+PLAN-persistence's.
 
 ### Def + Model Loading
 ```

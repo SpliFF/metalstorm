@@ -34,6 +34,7 @@
 #include "Server/ResourcesParser.h"
 #include "Server/StandingOrders.h"
 #include "Server/OrgGroups.h"
+#include "Server/SyncedInputJournal.h"
 #include "Server/AI/AIRuntimePool.h"
 #include "Server/AI/AIDiscovery.h"
 #include "Server/PerfMetrics.h"
@@ -251,6 +252,9 @@ int main(int argc, char* argv[])
     bool debugMode = false;
     bool logMessages = false;
 
+    // PLAN-replay task 1: 0 = no journal attached (the funnel still counts).
+    int journalAuditRecords = 0;
+
     // Simple arg parsing: --port N, --game PATH, --map PATH, --db PATH,
     // --idle-exit-seconds N (0 = never), --idle-startup-grace-seconds N,
     // --log-file PATH, --log-level LEVEL, --log-server URL,
@@ -258,6 +262,8 @@ int main(int argc, char* argv[])
     // --wt-cert PATH, --wt-key PATH,
     // --headless-run config.json (PLAN-headless: no-client batch/soak run),
     // --max-wall-min N (headless hard wall-clock ceiling, default 60),
+    // --journal-audit [N] (PLAN-replay: record the synced-input cause stream
+    //   in memory, cap N records, expose at GET /api/journal),
     // --player username:team:pos (repeatable),
     // --ai id:team:pos (repeatable)
     for (int i = 1; i < argc; i++) {
@@ -286,6 +292,16 @@ int main(int argc, char* argv[])
             headlessConfigPath = argv[++i];
         } else if (arg == "--max-wall-min" && i + 1 < argc) {
             maxWallMin = std::atoi(argv[++i]);
+        } else if (arg == "--journal-audit") {
+            // PLAN-replay task 1. Attaches the in-memory journal so the cause
+            // stream is observable live (GET /api/journal) and summarised at
+            // shutdown. Storage is deliberately in-memory only: the durable
+            // journal belongs to PLAN-persistence phase 2, and this flag is
+            // how the completeness audit is checked against a real game
+            // without waiting for it.
+            journalAuditRecords = 100000;
+            if (i + 1 < argc && argv[i + 1][0] != '-')
+                journalAuditRecords = std::max(1, std::atoi(argv[++i]));
         } else if (arg == "--log-file" && i + 1 < argc) {
             logFile = argv[++i];
         } else if (arg == "--log-level" && i + 1 < argc) {
@@ -638,6 +654,70 @@ int main(int argc, char* argv[])
     // lands (they refuse cleanly, audited). Must outlive the server loop.
     NullSnapshotStore gmSnapshotStore;
     RegisterGmVerbs(ctx, gmSnapshotStore);
+
+    // PLAN-replay task 1: attach the in-memory cause-stream journal under
+    // --journal-audit. Must outlive the server loop (the funnel holds a raw
+    // pointer, deliberately — a shared_ptr here would imply an ownership
+    // question that does not exist: there is exactly one journal per process
+    // and it is this one).
+    syncedinput::MemoryJournal auditJournal(
+        journalAuditRecords > 0 ? static_cast<size_t>(journalAuditRecords) : 1);
+    if (journalAuditRecords > 0) {
+        syncedinput::Journal().SetJournal(&auditJournal);
+        SLOG(SPRING_LOG_NOTICE,
+             "synced-input journal: audit mode, cap %d records (GET /api/journal)",
+             journalAuditRecords);
+    }
+    // Always registered — with no journal attached it reports the counters
+    // only, which is the useful answer to "is anything bypassing the funnel".
+    // GET + LocalhostOrAdmin degrades to loopback-only (NetworkServer.h's
+    // enforcement note); that is the right ceiling for a diagnostic that
+    // exposes raw player input.
+    net.AddHttpGet("/api/journal", RouteAuth::LocalhostOrAdmin,
+                   [&auditJournal](const std::string&) -> HttpResponse {
+        const auto& rec = syncedinput::Journal();
+        const auto& c = rec.Stats();
+        nlohmann::json j;
+        j["enabled"]  = rec.Enabled();
+        j["frame"]    = rec.Frame();
+        j["seen"]     = c.seen;
+        j["recorded"] = c.recorded;
+        j["appended"] = c.appended;
+        j["skipped"]  = c.skipped;
+        for (int k = 0; k < 6; ++k) {
+            j["byKind"][syncedinput::InputKindName(
+                static_cast<syncedinput::InputKind>(k))] = c.byKind[k];
+        }
+        if (rec.Enabled()) {
+            j["ringDropped"] = auditJournal.Dropped();
+            // Head/tail only: the whole ring can be 100 k records and this is
+            // a diagnostic, not the export path (that is PLAN-replay task 3's
+            // .msr packer, which reads Records() directly).
+            const auto& rs = auditJournal.Records();
+            j["ringSize"] = rs.size();
+            auto row = [](const syncedinput::Record& r) {
+                nlohmann::json o;
+                o["seq"]      = r.seq;
+                o["frame"]    = r.frame;
+                o["phase"]    = syncedinput::TickPhaseName(r.phase);
+                o["kind"]     = syncedinput::InputKindName(r.kind);
+                o["subKind"]  = r.subKind;
+                o["playerId"] = r.playerId;
+                o["bytes"]    = r.payload.size();
+                return o;
+            };
+            const size_t n = rs.size();
+            const size_t head = std::min<size_t>(n, 20);
+            for (size_t i = 0; i < head; ++i) j["head"].push_back(row(rs[i]));
+            for (size_t i = (n > 20 ? n - 20 : head); i < n; ++i)
+                j["tail"].push_back(row(rs[i]));
+        }
+        const std::string body = j.dump();
+        HttpResponse resp;
+        resp.contentType = "application/json";
+        resp.body.assign(body.begin(), body.end());
+        return resp;
+    });
 
     if (!net.Start(port)) {
         SLOG(SPRING_LOG_ERROR, "failed to start network server");
@@ -1246,6 +1326,16 @@ int main(int argc, char* argv[])
         // Rate-limit token buckets now refill lazily on command arrival;
         // no per-tick reset required. See ClientSession::TryConsumeCommandBudget.
 
+        // Open the journal's tick window (PLAN-replay task 1). Everything
+        // recorded until the next BeginTick is stamped with this frame; the
+        // SetPhase calls below mark which of the tick's five input phases each
+        // record belongs to. Note the frame is read BEFORE SimFrame — inputs
+        // applied this tick act on the state at frame N and must replay there,
+        // not at N+1. While the sim is paused or pre-GameStart the frame does
+        // not advance at all, which is exactly why records also carry the
+        // monotonic `seq` (see TickPhase's comment).
+        syncedinput::Journal().BeginTick(sim.GetFrameNum());
+
         // Drain inbound messages from WebTransport streams and dispatch each
         // through the extracted ClientMessageHandler.
         auto messages = rtcServer.DrainInbound();
@@ -1260,6 +1350,7 @@ int main(int argc, char* argv[])
         // to AI, end the game, etc.). We also broadcast a PlayerLeft
         // FlatBuffers message so remaining clients can update their UI.
         {
+            syncedinput::Journal().SetPhase(syncedinput::TickPhase::Disconnect);
             auto disconnects = rtcServer.DrainDisconnects();
             for (ClientID dcId : disconnects) {
                 // C1: drop the handshake gate first — a client that handshook
@@ -1299,6 +1390,12 @@ int main(int argc, char* argv[])
                 auto pIt = clientPlayerNum.find(dcId);
                 if (pIt != clientPlayerNum.end()) {
                     int pNum = pIt->second;
+                    // Journal chokepoint #2 of 5: a disconnect fires
+                    // PlayerRemoved into synced Lua, so gadgets can (and in
+                    // Metalstorm do) change synced state in response. Only
+                    // recorded for a client that reached a player number —
+                    // an unauthenticated drop touches nothing synced.
+                    syncedinput::Journal().RecordDisconnect(pNum, leaveReason);
                     playerHandler.PlayerLeft(pNum, leaveReason);
                     eventHandler.PlayerRemoved(pNum, leaveReason);
                     // Forward to the client LuaUI worker (widget:PlayerRemoved).
@@ -1327,8 +1424,16 @@ int main(int argc, char* argv[])
 
         // Process pending console commands (from WS thread or HTTP)
         {
+            syncedinput::Journal().SetPhase(syncedinput::TickPhase::LuaExec);
             LuaExecRequest req;
             while (luaExecEngine.TryPop(req)) {
+                // Journal chokepoint #3 of 5: exec runs arbitrary Lua against
+                // the synced state (spawn, kill, give resources, set cheats —
+                // the whole spring-debug MCP surface arrives here via
+                // /api/exec). Recorded at the drain, not at Push: Push happens
+                // on the network/HTTP thread at an indeterminate moment, and
+                // it is the drain frame that decides what the code observes.
+                syncedinput::Journal().RecordLuaExec(-1, req.scope, req.code);
                 auto result = ExecuteLuaExecRequest(req);
                 // Deliver to sync waiters (HTTP POST /api/exec)
                 luaExecEngine.DeliverResult(result);
@@ -1346,6 +1451,7 @@ int main(int argc, char* argv[])
         // piece/build streaming, standing-order eval, AI tick, combat/decal/
         // heightmap/lifecycle/team-stats/LOS broadcasts). Runs every block in
         // the exact prior source order; see StateStreamer::Tick.
+        syncedinput::Journal().SetPhase(syncedinput::TickPhase::Stream);
         streamer.Tick(sim.GetFrameNum());
 
         const int entityCount = static_cast<int>(unitHandler.GetActiveUnits().size());
@@ -1455,6 +1561,14 @@ int main(int argc, char* argv[])
                                static_cast<int>(unitHandler.GetActiveUnits().size()),
                                snap.simFps, gs->speedFactor, /*simRunning=*/false);
     }
+
+    // Synced-input cause-stream summary (PLAN-replay task 1). Emitted whether
+    // or not --journal-audit attached a journal: the funnel's counters run
+    // unconditionally, so every run reports how many synced inputs it applied.
+    // A run that reports recorded=0 while units clearly moved is the signal
+    // that an input path bypassed the funnel.
+    SLOG(SPRING_LOG_NOTICE, "synced-input journal: %s",
+         syncedinput::FormatAudit(syncedinput::Journal().Stats()).c_str());
 
     // Clear our liveness row so the lobby/launch_game stop treating us as a
     // live, ready game server. On restart the re-exec'd process republishes it.

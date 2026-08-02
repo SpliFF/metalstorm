@@ -23,6 +23,7 @@
 #include "StandingOrders.h"
 #include "OrgGroups.h"
 #include "PerfMetrics.h"
+#include "SyncedInputJournal.h"
 #include "AI/AIRuntimePool.h"
 #include "WebTransport/WebTransportServer.h"
 #include "Lua/LuaRules.h"
@@ -43,6 +44,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -542,6 +544,65 @@ void StateStreamer::EvaluateStandingOrders(int) {
     }
 }
 
+namespace {
+/// Flatten one drained AICommand into the journal's opaque payload
+/// (PLAN-replay task 1). AICommand is not trivially copyable — it carries
+/// three heap fields — so it cannot be memcpy'd into a record. The encoding
+/// is deliberately dumb and self-describing-by-position rather than a
+/// flatbuffer: nothing but the replay driver ever reads it back, it must not
+/// acquire a schema dependency, and every field is fixed-width or
+/// length-prefixed so a decoder is a mirror of this function.
+///
+/// Ordering note: the CreateGroup→IssueDirective token correlation is resolved
+/// *within* a drained batch, so `groupToken`/`refToken` are meaningless across
+/// batches. They are recorded anyway — a replay re-pushes the whole batch in
+/// the same order and re-resolves them the same way.
+std::vector<uint8_t> SerializeAICommand(const AICommand& c) {
+    std::vector<uint8_t> out;
+    out.reserve(96);
+    auto putU8  = [&](uint8_t v)  { out.push_back(v); };
+    auto putU32 = [&](uint32_t v) {
+        for (int i = 0; i < 4; ++i) out.push_back(static_cast<uint8_t>(v >> (8 * i)));
+    };
+    auto putI32 = [&](int32_t v)  { putU32(static_cast<uint32_t>(v)); };
+    auto putF32 = [&](float v)    {
+        uint32_t bits; std::memcpy(&bits, &v, 4); putU32(bits);
+    };
+
+    putU8(static_cast<uint8_t>(c.kind));
+    putI32(c.teamId);
+    putI32(c.playerId);
+    // UnitCommand fields
+    putU32(c.unitId);
+    putI32(c.commandId);
+    putU8(c.options);
+    const int nParams = (c.numParams < 0) ? 0
+                      : (c.numParams > 8) ? 8 : c.numParams;
+    putU8(static_cast<uint8_t>(nParams));
+    for (int i = 0; i < nParams; ++i) putF32(c.params[i]);
+    // Directive-shaped fields
+    putU8(c.echelon);
+    putU32(static_cast<uint32_t>(c.squadIds.size()));
+    for (uint32_t id : c.squadIds) putU32(id);
+    putU32(c.groupToken);
+    putU32(c.groupId);
+    putU32(c.refToken);
+    putU8(c.directiveType);
+    putU8(c.priority);
+    putU8(c.shape);
+    putU32(static_cast<uint32_t>(c.directiveParams.size()));
+    for (float f : c.directiveParams) putF32(f);
+    putU32(c.requestedStrength);
+    putU32(c.expiresInFrames);
+    putF32(c.withinX);
+    putF32(c.withinZ);
+    putF32(c.withinRadius);
+    putU32(static_cast<uint32_t>(c.text.size()));
+    out.insert(out.end(), c.text.begin(), c.text.end());
+    return out;
+}
+} // namespace
+
 // Tick AI runtime and drain AI commands.
 //
 // AI commands are applied here, on the sim thread, through the EXACT manager
@@ -579,6 +640,17 @@ void StateStreamer::TickAI(int) {
     std::unordered_set<uint64_t> directiveKeys;
 
     for (const auto& cmd : aiCmds) {
+        // Journal chokepoint #4 of 5 (PLAN-replay task 1). AI output is an
+        // INPUT to the sim, not a consequence of it: the AI runs in a separate
+        // VM on its own threads, and which commands land on which tick depends
+        // on that VM's scheduling — which is not part of the synced state and
+        // is not reproducible by re-execution. So the drained command stream
+        // must be recorded verbatim. Recorded before the switch, so all four
+        // AICommandKinds are covered by one call site.
+        const std::vector<uint8_t> aiBlob = SerializeAICommand(cmd);
+        syncedinput::Journal().RecordAICommand(
+            cmd.playerId, aiBlob.data(), aiBlob.size());
+
         switch (cmd.kind) {
             case AICommandKind::UnitCommand: {
                 // Legacy generic per-unit path (test channel / non-Metalstorm
