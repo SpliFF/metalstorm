@@ -34,8 +34,11 @@ import {
 } from "@babylonjs/core";
 import {
   createImpostorMaterial,
+  computeCardRotation,
+  layoutOf,
   type ImpostorAtlas,
 } from "./impostor-renderer.js";
+import type { AtlasLayout } from "./impostor-atlas.js";
 
 /** A grow-on-demand thin-instance pool for one visual class (members of a
  *  given team, or wrecks). Freed slots are collapsed to a zero-scale matrix so
@@ -54,6 +57,7 @@ interface InstancePool {
    *  re-billboard). */
   sprite?: {
     halfH: number; // quad half-height (ground-anchor lift)
+    layout: AtlasLayout; // decides whether the card tilts with camera pitch
     pos: Float32Array; // capacity * 3, member ground positions
     alive: Uint8Array; // capacity, 1 = slot has a live member
   };
@@ -253,14 +257,21 @@ export class SquadRenderBackend {
 
   /** Upload dirty pools. Called once per render frame after
    *  SquadManager.update() has issued this frame's member transforms.
-   *  Sprite pools re-billboard against the active camera every flush
-   *  (yaw-only camera facing, same convention as impostor-renderer.ts) —
-   *  an idle member must still turn with an orbiting camera. */
+   *  Sprite pools re-billboard against the active camera every flush — an idle
+   *  member must still turn with an orbiting camera. The card rotation comes
+   *  from `computeCardRotation` (impostor-renderer.ts), so this path and the
+   *  entity impostor path share one convention, including whether the card
+   *  tilts with camera pitch (a property of the pool's atlas layout). */
   flush(): void {
     for (const pool of this.memberPools.values()) this.flushPool(pool);
-    const cameraPos = this.scene.activeCamera?.position;
+    const camera = this.scene.activeCamera;
     for (const pool of this.spritePools.values()) {
-      if (cameraPos) this.billboardSpritePool(pool, cameraPos);
+      if (camera && pool.sprite) {
+        this.billboardSpritePool(
+          pool,
+          computeCardRotation(camera, pool.sprite.layout),
+        );
+      }
       this.flushPool(pool);
     }
     if (this.wreckPool) this.flushPool(this.wreckPool);
@@ -336,6 +347,7 @@ export class SquadRenderBackend {
     pool = this.newPool(mesh);
     pool.sprite = {
       halfH: atlas.height * 0.5,
+      layout: layoutOf(atlas),
       pos: new Float32Array(pool.capacity * 3),
       alive: new Uint8Array(pool.capacity),
     };
@@ -343,23 +355,30 @@ export class SquadRenderBackend {
     return pool;
   }
 
-  /** Recompose every live sprite slot's matrix as a yaw-only camera-facing
-   *  billboard (mesh-level billboardMode doesn't apply per-thin-instance —
-   *  see impostor-renderer.ts). Alloc-free. */
-  private billboardSpritePool(pool: InstancePool, cameraPos: Vector3): void {
+  /** Recompose every live sprite slot's matrix against the batch's shared card
+   *  rotation (mesh-level billboardMode doesn't apply per-thin-instance — see
+   *  impostor-renderer.ts). `cardRot` is uniform across the pool, so it is
+   *  resolved once per flush in the caller, never per sprite. Alloc-free. */
+  private billboardSpritePool(pool: InstancePool, cardRot: Quaternion): void {
     const sprite = pool.sprite;
     if (!sprite || pool.highWater === 0) return;
+    this._s.set(1, 1, 1);
+    // Ground-anchor lift along the card's own local up, so a tilted card keeps
+    // its base on the terrain instead of hovering (or sinking) as the camera
+    // pitches. For an upright card this is exactly the old world-up lift.
+    this._t.set(0, sprite.halfH, 0);
+    this._t.rotateByQuaternionToRef(cardRot, this._t);
+    const lx = this._t.x,
+      ly = this._t.y,
+      lz = this._t.z;
     for (let i = 0; i < pool.highWater; i++) {
       if (!sprite.alive[i]) continue;
       const base = i * 3;
       const x = sprite.pos[base],
         y = sprite.pos[base + 1],
         z = sprite.pos[base + 2];
-      const yaw = Math.atan2(cameraPos.x - x, cameraPos.z - z);
-      this._s.set(1, 1, 1);
-      Quaternion.RotationYawPitchRollToRef(yaw, 0, 0, this._q);
-      this._t.set(x, y + sprite.halfH, z);
-      Matrix.ComposeToRef(this._s, this._q, this._t, this._m);
+      this._t.set(x + lx, y + ly, z + lz);
+      Matrix.ComposeToRef(this._s, cardRot, this._t, this._m);
       this._m.copyToArray(pool.matrices, i * 16);
     }
     pool.dirty = true;

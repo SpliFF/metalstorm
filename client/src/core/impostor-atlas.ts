@@ -76,6 +76,31 @@ export function atlasRowCount(layout: AtlasLayout): number {
 }
 
 /**
+ * Does an impostor card for this atlas TILT with the camera pitch (a full
+ * screen-aligned/spherical billboard), or stay upright and only yaw?
+ *
+ * The answer is a property of the ATLAS, not a global convention — which is
+ * why it lives here beside the layout rather than being hardcoded per
+ * renderer (PLAN-metalstorm-impostors.md §Card orientation, amended):
+ *
+ *  - `pitchBins > 1` — the sheet was baked from several camera ELEVATIONS, so
+ *    a steep camera has a real top-down row to show. The card must tilt to
+ *    face the camera, or that row is painted onto a quad which is nearly
+ *    edge-on to the viewer and reads as a dark smudge.
+ *  - `pitchBins === 1` — the sheet is a single horizon-level view. Tilting it
+ *    flat under a steep camera shows that FRONT view lying on the ground, i.e.
+ *    a unit that appears to have fallen over. An upright, yaw-only card is
+ *    correct here; the foreshortening is the honest cost of having no
+ *    elevation rows to select from.
+ *
+ * So a single-row atlas keeps the upright convention and automatically starts
+ * tilting the moment it is re-baked with elevation rows — no renderer change.
+ */
+export function cardTiltsWithPitch(layout: AtlasLayout): boolean {
+    return layout.pitchBins > 1;
+}
+
+/**
  * Quantize an angle (radians) to the nearest of `bins` evenly-spaced azimuth
  * columns. Generalises `quantizeHeading()` (impostor-renderer.ts, bins = 8) to
  * any grid width; negative and >2pi inputs wrap.

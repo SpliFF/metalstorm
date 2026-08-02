@@ -54,7 +54,7 @@ describe('SquadRenderBackend impostor sprite members', () => {
         expect(findMesh(scene, 'squadSprite_')).toBeUndefined();
     });
 
-    it('re-billboards an idle sprite member when the camera moves', () => {
+    it('re-billboards an idle sprite member when the camera turns', () => {
         const { backend, scene, camera } = makeBackend(new Set([7]));
         backend.setSquadTeam(1, 0);
         const h = backend.createMember(1, 0, { defId: 7, variant: 0 });
@@ -64,15 +64,107 @@ describe('SquadRenderBackend impostor sprite members', () => {
         const before = Array.from(
             (mesh.thinInstanceGetWorldMatrices()[0]).toArray());
 
-        // Member is NOT updated again — only the camera moves.
-        camera.position.set(-100, 50, 0);
+        // Member is NOT updated again — only the camera turns.
+        camera.rotation.y += 1.0;
         backend.flush();
         const after = Array.from(
             (mesh.thinInstanceGetWorldMatrices()[0]).toArray());
         expect(after).not.toEqual(before);
-        // Translation (ground anchor + half height lift) is unchanged.
+        // Translation (ground anchor + half-height lift) is unchanged.
         expect(after.slice(12, 15)).toEqual(before.slice(12, 15));
         expect(after[13]).toBe(ATLAS.height / 2);
+    });
+
+    // §Card orientation: the card rotation is shared per frame AND whether it
+    // tilts with camera pitch is a property of the ATLAS (cardTiltsWithPitch).
+    describe('card orientation', () => {
+        /** The card's local up in world space = matrix row 1. */
+        const localUp = (m: Float32Array | number[]) =>
+            [m[4], m[5], m[6]] as [number, number, number];
+        /** Where the card's base edge sits = translation − halfH · localUp. */
+        const basePoint = (m: Float32Array | number[], halfH: number) =>
+            [m[12] - halfH * m[4], m[13] - halfH * m[5], m[14] - halfH * m[6]];
+
+        function spriteMatrix(atlas: ImpostorAtlas, pitchDown: number) {
+            const engine = new NullEngine();
+            const scene = new Scene(engine);
+            const camera = new FreeCamera('cam', new Vector3(0, 200, -200), scene);
+            camera.rotation.x = pitchDown; // look down at the ground
+            scene.activeCamera = camera;
+            const backend = new SquadRenderBackend(scene, {
+                getGroundHeight: () => 0,
+                getTeamColor: () => new Color3(1, 0, 0),
+                getImpostorAtlas: () => atlas,
+            });
+            backend.setSquadTeam(1, 0);
+            const h = backend.createMember(1, 0, { defId: 7, variant: 0 });
+            backend.updateMember(h, 0, 0, 0, 0, 0);
+            backend.flush();
+            const mesh = findMesh(scene, 'squadSprite_d7_t0')!;
+            return Array.from(mesh.thinInstanceGetWorldMatrices()[0].toArray());
+        }
+
+        it('keeps a single-view atlas card upright under a steep camera', () => {
+            // No pitch rows to show, so tilting would lay the one horizon-level
+            // view flat on the ground (a unit that looks like it fell over).
+            const m = spriteMatrix(ATLAS, 1.2);
+            const [ux, uy, uz] = localUp(m);
+            expect(ux).toBeCloseTo(0, 6);
+            expect(uy).toBeCloseTo(1, 6);
+            expect(uz).toBeCloseTo(0, 6);
+            // Upright ⇒ the lift is world-up ⇒ base sits on the ground.
+            expect(m[13]).toBeCloseTo(ATLAS.height / 2, 6);
+        });
+
+        it('tilts a pitch-row atlas card and keeps its base on the ground', () => {
+            const tilted: ImpostorAtlas = {
+                ...ATLAS,
+                layout: { yawBins: 8, pitchBins: 3, frames: 1 },
+            };
+            const m = spriteMatrix(tilted, 1.2);
+            // The card leans back to face the steep camera...
+            expect(localUp(m)[1]).toBeLessThan(0.9);
+            // ...and the ground-anchor lift leans with it, so the base edge
+            // stays pinned to the member's ground position (0, 0, 0) rather
+            // than the card hovering half its height above the terrain.
+            const [bx, by, bz] = basePoint(m, tilted.height / 2);
+            expect(bx).toBeCloseTo(0, 5);
+            expect(by).toBeCloseTo(0, 5);
+            expect(bz).toBeCloseTo(0, 5);
+        });
+
+        it('shares one rotation across members, so a squad never fans out', () => {
+            const tilted: ImpostorAtlas = {
+                ...ATLAS,
+                layout: { yawBins: 8, pitchBins: 3, frames: 1 },
+            };
+            const engine = new NullEngine();
+            const scene = new Scene(engine);
+            const camera = new FreeCamera('cam', new Vector3(0, 40, -40), scene);
+            camera.rotation.x = 0.8;
+            scene.activeCamera = camera;
+            const backend = new SquadRenderBackend(scene, {
+                getGroundHeight: () => 0,
+                getTeamColor: () => new Color3(1, 0, 0),
+                getImpostorAtlas: () => tilted,
+            });
+            backend.setSquadTeam(1, 0);
+            // Two members spread wide either side of the camera axis — the case
+            // that produced the visible radial fan-out at point-blank range.
+            const a = backend.createMember(1, 0, { defId: 7, variant: 0 });
+            const b = backend.createMember(1, 1, { defId: 7, variant: 0 });
+            backend.updateMember(a, -30, 0, 0, 0, 0);
+            backend.updateMember(b, 30, 0, 0, 0, 0);
+            backend.flush();
+            const mesh = findMesh(scene, 'squadSprite_d7_t0')!;
+            const ma = mesh.thinInstanceGetWorldMatrices()[0].toArray();
+            const mb = mesh.thinInstanceGetWorldMatrices()[1].toArray();
+            // Identical 3×3 rotation blocks; only the translation differs.
+            for (const i of [0, 1, 2, 4, 5, 6, 8, 9, 10]) {
+                expect(mb[i]).toBeCloseTo(ma[i], 6);
+            }
+            expect(mb[12]).not.toBeCloseTo(ma[12], 3);
+        });
     });
 
     it('a released sprite slot stops rendering and is reusable', () => {
