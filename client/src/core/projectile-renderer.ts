@@ -52,6 +52,7 @@ import {
     effectForImpact,
     impactContextFlags,
 } from './weapon-fx-dispatch.js';
+import { AssetLoader, LoadPriority } from './asset-loader.js';
 import { registerProjectileBeamShader } from './shaders/projectile-beam.js';
 import { registerProjectileLaserShader } from './shaders/projectile-laser.js';
 import {
@@ -528,10 +529,20 @@ export class ProjectileRenderer {
     /// (see scheduleResolverRebuild's comment).
     private resolverSettled = false;
 
+    /// Shared AssetLoader by default; game-processor.ts overrides via
+    /// setAssetLoader() so unit/feature/projectile loads draw from one
+    /// concurrency pool (PLAN-lazy-loading.md).
+    private assetLoader = new AssetLoader();
+
     constructor(scene: Scene) {
         this.scene = scene;
         this.fallbackVisual = createFallbackVisual(0, ProjectileType.Explosive, 1.0,
             [1, 0.8, 0.2], 0.8, scene);
+    }
+
+    /** Inject a shared AssetLoader — see EntityRenderer.setAssetLoader. */
+    setAssetLoader(loader: AssetLoader): void {
+        this.assetLoader = loader;
     }
 
     /// Inject the CEG runtime after init(). Same lifecycle as
@@ -758,9 +769,11 @@ export class ProjectileRenderer {
         const fileName = modelUrl.substring(lastSlash + 1);
 
         // Don't stamp model URLs — see entity-renderer.ts loadModel().
-        const result = await SceneLoader.ImportMeshAsync(
-            '', baseUrl, fileName, this.scene,
-        );
+        // Routed through the shared AssetLoader so a burst of newly-fired
+        // weapon types shares its concurrency pool with unit and feature
+        // loads (PLAN-lazy-loading.md).
+        const result = await this.assetLoader.schedule(`projectile:${defId}`, LoadPriority.P3,
+            () => SceneLoader.ImportMeshAsync('', baseUrl, fileName, this.scene));
 
         // The current visual may have been replaced or disposed (e.g.
         // setWeaponDefs called again with new data) while we were

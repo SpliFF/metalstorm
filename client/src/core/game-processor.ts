@@ -47,6 +47,7 @@ import { LosBitmapStore, type LosBitmap } from './los-bitmap.js';
 // done in main.ts) so unit `.ktx2` textures transcode here.
 import './ktx2-config.js';
 import { EntityRenderer, setLightingStyle, setModelMaterialPort } from './entity-renderer.js';
+import { AssetLoader, LoadPriority } from './asset-loader.js';
 
 /**
  * The model-material port id that `zk-model-material.ts` reproduces
@@ -1283,7 +1284,15 @@ export function gpInit(msg: GpInitToWorker): void {
     gpPresentationClock = new PresentationClock();
     gpEventScheduler = new EventScheduler();
 
+    // PLAN-lazy-loading.md: one AssetLoader shared across unit/feature/
+    // projectile model fetches so their concurrency is capped together —
+    // Babylon's ImportMeshAsync is bottlenecked on the main thread anyway,
+    // so this just stops a reveal burst from also saturating the HTTP pool.
+    const gpAssetLoader = new AssetLoader();
+    gpCtx.assetLoader = gpAssetLoader;
+
     const entityRenderer = new EntityRenderer(scene);
+    entityRenderer.setAssetLoader(gpAssetLoader);
     entityRenderer.setPresentationClock(gpPresentationClock);
     // PLAN-lighting L3/L4: register with the sun shadow generator up-front
     // (before any def streams in) so the first ensureModel load isn't raced;
@@ -1360,6 +1369,7 @@ export function gpInit(msg: GpInitToWorker): void {
     // off Fired/Impact/Trajectory events and injects the CEG getRuntime() + FX
     // light pool + distortion + muzzle flare for its hooks.
     const projectileRenderer = new ProjectileRenderer(scene);
+    projectileRenderer.setAssetLoader(gpAssetLoader);
     gpCtx.projectileRenderer = projectileRenderer;
     (globalThis as Record<string, unknown>).__projectileRenderer = projectileRenderer;  // GW8 debug hook
     const buildBeamRenderer = new BuildBeamRenderer(scene);
@@ -1399,6 +1409,7 @@ export function gpInit(msg: GpInitToWorker): void {
     // reclaim removals). Map-placed features load once via renderMapFeatures
     // in gpLoadMap.
     const dynamicFeatureRenderer = new DynamicFeatureRenderer(scene, defCache);
+    dynamicFeatureRenderer.setAssetLoader(gpAssetLoader);
     dynamicFeatureRenderer.setShadowGenerator(gpCtx.sceneLighting.csm);
     gpDynamicFeatureRenderer = dynamicFeatureRenderer;
 
@@ -1756,6 +1767,11 @@ function gpRecomputeBuildTiles(): void {
             buildTime:  def?.buildTime ?? 0,
             tooltip:    def?.tooltip ?? '',
         });
+        // PLAN-lazy-loading.md P4 pre-warm trigger: cheap insurance so a
+        // player who actually clicks one of these tiles isn't starting the
+        // .glb fetch from scratch. Only fires the load if it hasn't
+        // started; never competes with anything more urgent.
+        er?.prewarmModel(defId);
     }
     gpBuildTiles = tiles;
     gpBuildTilesDirty = true;
