@@ -70,10 +70,22 @@ end
 -- 3. Scoring (§3.2).  Every term is a plain function of the Picture.
 --=============================================================================
 
+--- Stance bias (guidance §6.2, BINDING). A human sets one of three stances on
+-- the guidance store (game_ai_guidance.lua STANCES); it re-weights the whole
+-- goal slate by kind. `defensive` leans the co-commander into holding ground
+-- and discounts pushing out; `aggressive` does the reverse; `balanced` (and any
+-- unset/unknown stance) is neutral — no entry, ×1. This is the coarse "how hard
+-- should you press" dial that sits above the per-goal delegation weights.
+local STANCE_BIAS = {
+    defensive  = { DEFEND = 1.5, SCOUT = 1.0, EXPAND = 0.55, BUILD = 1.1, OBJECTIVE = 0.9,  RESERVE = 1.0 },
+    aggressive = { DEFEND = 0.8, SCOUT = 1.1, EXPAND = 1.45, BUILD = 1.0, OBJECTIVE = 1.25, RESERVE = 1.0 },
+}
+
 --- expectedValue: objective reward | region value, scaled by profile weights
--- (aggression multiplies enemy-owned region value; §3.4) and guidance paint.
--- Region-derived values are lifted onto the authority scale (§3.2 "× strategic
--- weights"); objective goals already carry an authority reward and are not.
+-- (aggression multiplies enemy-owned region value; §3.4), guidance paint, and
+-- the guidance stance. Region-derived values are lifted onto the authority
+-- scale (§3.2 "× strategic weights"); objective goals already carry an
+-- authority reward and are not.
 local function expectedValue(goal, picture, profile, guidance, config)
     local v = goal.value or 0
     if goal.kind ~= 'OBJECTIVE' then
@@ -86,6 +98,8 @@ local function expectedValue(goal, picture, profile, guidance, config)
     if goal.region and guidance.regionPaint[goal.region] == 'priority' then
         v = v * 2.0                                    -- guidance §6.2 (binding)
     end
+    local bias = STANCE_BIAS[guidance.stance]          -- guidance stance (binding)
+    if bias then v = v * (bias[goal.kind] or 1.0) end
     return v
 end
 
@@ -272,6 +286,11 @@ local function emit(assignments, packages, usedPkg, ctx)
                     region    = a.goal.region,
                     goalId    = a.goal.id,
                     predictedCost = a.cost,
+                    -- Committed force size (the assigned package's aggregate
+                    -- strength) → the directive's requestedStrength demand cap
+                    -- in the actuator, so one directive can't drain the whole
+                    -- idle pool (plan §3.2 demand model).
+                    strength  = a.pkg.strength,
                 }
                 intent[#intent + 1] = {
                     goal = a.goal.id, group = pid, region = a.goal.region,

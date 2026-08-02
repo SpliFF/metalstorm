@@ -208,15 +208,64 @@ local function playerTeam(playerID)
     local _, _, _, teamID = Spring.GetPlayerInfo(playerID, false)
     return teamID
 end
+-- playerID → canonical integer, used for EVERY authority_player_<id> /
+-- authority_granted_<id> rulesParam key. CRITICAL (AI3 bugfix): Spring's
+-- GetPlayerList() returns player ids as Lua 5.4 FLOATS (0.0, 3.0, ...), while
+-- the charge callins (AllowCommand / AllowDirectiveCreate) receive them as
+-- INTEGERS from C++. Concatenated raw, a float 0.0 makes key
+-- 'authority_player_0.0' but an integer 0 makes 'authority_player_0' — two
+-- DIFFERENT keys for the same player. That mismatch meant a pool created by
+-- PlayerAdded (float-keyed) was invisible to the charge (int-keyed), so the
+-- player silently drained the TEAM pool instead of their own — and made the
+-- co-commander own-pool-only invariant unenforceable. Normalising to an
+-- integer here is the single fix for both the AI and human paths.
+local function pkey(playerID)
+    return 'authority_player_' .. math.floor(playerID)
+end
 local function setPlayerPool(playerID, v)
     local teamID = playerTeam(playerID)
     if not teamID then return end
-    Spring.SetTeamRulesParam(teamID, 'authority_player_' .. playerID, v, ALLIED_LOS)
+    Spring.SetTeamRulesParam(teamID, pkey(playerID), v, ALLIED_LOS)
 end
 local function getPlayerPool(playerID)
     local teamID = playerTeam(playerID)
     if not teamID then return 0 end
-    return Spring.GetTeamRulesParam(teamID, 'authority_player_' .. playerID) or 0
+    return Spring.GetTeamRulesParam(teamID, pkey(playerID)) or 0
+end
+
+-- Own-pool-only flag (AI3 / PLAN-metalstorm-ai.md §5). Stored as a per-player
+-- teamRulesParam (allied-scoped, mirrors the pool) so it's the single source of
+-- truth AND inspectable by the HUD/tests. When set, debitPools charges the
+-- player's own pool ONLY — never the team fallback (Attribute.attribute's
+-- ownPoolOnly path). This is the enforceable form of the co-commander invariant
+-- "own pool only, never the team fallback": the co-commander AI role sets it on
+-- its own virtual playerID via GG.Authority.SetOwnPoolOnly; a full-side AI (and
+-- every human) leaves it unset and keeps the normal team-fallback behaviour.
+local function setOwnPoolOnly(playerID, flag)
+    local teamID = playerTeam(playerID)
+    if not teamID then return end
+    Spring.SetTeamRulesParam(teamID, pkey(playerID) .. '_own_pool_only',
+        flag and 1 or 0, ALLIED_LOS)
+end
+local function getOwnPoolOnly(playerID)
+    if not playerID then return false end
+    local teamID = playerTeam(playerID)
+    if not teamID then return false end
+    return (Spring.GetTeamRulesParam(teamID,
+        pkey(playerID) .. '_own_pool_only') or 0) ~= 0
+end
+
+--- Public API for the co-commander AI role (PLAN-metalstorm-ai.md §5, task 4):
+--- flag a player so its authority charges draw from its OWN pool only, never
+--- the team fallback. Called from the AI's role config on its own virtual
+--- playerID (the AI knows its id via AI.getPlayerId()). Idempotent; pass a
+--- falsy flag to clear (e.g. when a co-commander is promoted to full-side in
+--- caretaker mode). Honoured by every charge site through debitPools.
+function GG.Authority.SetOwnPoolOnly(playerID, flag)
+    setOwnPoolOnly(playerID, flag)
+end
+function GG.Authority.GetOwnPoolOnly(playerID)
+    return getOwnPoolOnly(playerID)
 end
 
 -- ============================================================
@@ -388,7 +437,12 @@ local function debitPools(teamID, playerID, cost, class)
     if cost <= 0 then return true end
     local playerPool = playerID and getPlayerPool(playerID) or 0
     local teamPool = getTeamPool(teamID)
-    local allowed, spentFromPlayer, spentFromTeam = Attribute.attribute(playerPool, teamPool, cost)
+    -- AI3 (§5): a player flagged own-pool-only (the co-commander AI) gets NO
+    -- team fallback — its own pool must cover the whole cost or the order is
+    -- refused. Full-side AIs and humans are unflagged and keep team fallback.
+    local ownPoolOnly = getOwnPoolOnly(playerID)
+    local allowed, spentFromPlayer, spentFromTeam =
+        Attribute.attribute(playerPool, teamPool, cost, ownPoolOnly)
     if not allowed then
         emitEvent('refusal', cost, 'insufficient_authority', playerID, teamID)
         return false
@@ -484,7 +538,9 @@ function GG.Authority.ChargeDirective(playerID, teamID, groupID, directiveType, 
     end
     local classMod = CostSpec.order_class[class] or 1.0
     local cost = Formula.cost(CostSpec.base_k, base, 1.0, classMod, costScale)
-    return debitPools(teamID, playerID, cost, class)
+    -- Return the cost as a second value (existing callers ignore it) so the
+    -- charge gate can surface an AI directive's real spend in the intent report.
+    return debitPools(teamID, playerID, cost, class), cost
 end
 
 --- Charge for creating a classic (non-directive-wire) standing order
@@ -633,7 +689,10 @@ end
 -- playerID — authority_granted_<id> is what distinguishes "fresh join"
 -- from "reconnect" (there is no separate engine signal).
 function gadget:PlayerAdded(playerID)
-    local key = 'authority_granted_' .. playerID
+    -- Integer-normalised key (AI3 bugfix, see pkey): PlayerAdded receives
+    -- playerID from GetPlayerList (a Lua float), so the raw '..' would key the
+    -- guard by 'authority_granted_0.0' while any int-keyed lookup misses it.
+    local key = 'authority_granted_' .. math.floor(playerID)
     if Spring.GetGameRulesParam(key) then return end
     Spring.SetGameRulesParam(key, 1)
     local teamID = playerTeam(playerID)

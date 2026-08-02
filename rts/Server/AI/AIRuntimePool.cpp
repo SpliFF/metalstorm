@@ -17,8 +17,12 @@ AIRuntimePool::~AIRuntimePool() {
 }
 
 bool AIRuntimePool::AddAI(const std::string& name, int teamId, int allyTeamId,
-                          const std::string& scriptCode, const std::string& pluginDir) {
-    auto ctx = std::make_unique<AIScriptContext>(name, teamId, allyTeamId, pluginDir);
+                          const std::string& scriptCode, const std::string& pluginDir,
+                          const std::string& mapDataDir,
+                          const std::string& defExportDir,
+                          int playerId) {
+    auto ctx = std::make_unique<AIScriptContext>(name, teamId, allyTeamId, pluginDir,
+                                                 mapDataDir, defExportDir, playerId);
 
     if (!ctx->Init(scriptCode, name + ".lua")) {
         SLOG(SPRING_LOG_ERROR, "failed to initialise AI '%s' for team %d",

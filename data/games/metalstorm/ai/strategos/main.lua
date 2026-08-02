@@ -19,11 +19,16 @@
 -- both of which rebuild honestly from fresh input — acceptable amnesia.
 --
 -- RUNTIME SURFACE: the VM exposes a global `AI` table (AIScriptContext.cpp):
---   AI.getOwnUnits() · AI.getVisibleEnemies() · AI.issueCommand(id,cmd,...)
---   AI.getFrame() · AI.getMapSize().
--- The richer surface this plan assumes (AI.getRulesParam, squad views, LOD,
--- directive/posture verbs, chat, stake) does NOT exist yet — every module
--- feature-detects and degrades. See README "Engine asks" (AI1/AI2/I1).
+--   reads:  AI.getOwnUnits() · AI.getVisibleEnemies() · AI.getFrame() ·
+--           AI.getMapSize() · AI.getTeamId() · AI.getRulesParam (AI1) ·
+--           AI.getMapData / AI.getDefExport (AI4)
+--   writes: AI.createGroup · AI.issueDirective · AI.setPosture (AI2 — the
+--           directive-shaped write surface; routed through the SAME engine
+--           managers + charge callins as a human player's commands).
+--   infra:  AI.log(msg) (server-log channel — a headless AI has no chat/HUD,
+--           §5.1) · AI.nowMs() (monotonic clock for self-timing the §6 tick).
+-- Still assumed-but-absent (each module feature-detects + degrades): squad
+-- views, LOD, chat/stake/parley (I1). See README "Engine asks".
 
 --=============================================================================
 -- Module loading.  See README "Engine ask AI0-loader".
@@ -54,7 +59,10 @@ local Roles     = need('roles')
 local self = {
     booted        = false,
     role          = nil,   -- resolved Roles entry (full_side | co_commander | npc)
+    baseRole      = nil,   -- the profile's baseline role (before caretaker derivation)
+    roleCache     = {},    -- id → resolved Roles entry (caretaker up/downgrade, §5.1)
     profile       = nil,   -- personality weights table (profiles/*.lua)
+    playerId      = -1,    -- AI3 virtual playerID (own authority pool identity)
     rng           = nil,   -- seedable RNG (plan §6) — reproducible decisions
     actuators     = nil,   -- Actuators instance (the write surface)
     lastTickFrame = -1,    -- frame of the last strategic tick
@@ -88,6 +96,51 @@ local function resolveTeamId()
     return 0
 end
 
+--- Our virtual playerID (AI3): the authority charge identity. -1 when the VM
+-- was created without a virtual player (tests / pre-AI3 runtime).
+local function resolvePlayerId()
+    local AI = _G.AI
+    if type(AI) == 'table' and type(AI.getPlayerId) == 'function' then
+        return AI.getPlayerId()
+    end
+    return -1
+end
+
+--- Present-human count on our own team (game_teams.lua's co-commander
+-- coordinator publishes team_active_humans, {allied=true}). nil = coordinator
+-- absent / unknown → keep the profile's baseline role (don't guess).
+local function teamHumans()
+    local AI = _G.AI
+    if type(AI) ~= 'table' or type(AI.getRulesParam) ~= 'function' then return nil end
+    return tonumber(AI.getRulesParam('team', 'team_active_humans'))
+end
+
+--- Effective role for THIS tick (PLAN-metalstorm-ai.md §5/§5.1). An AI sharing
+-- a team with humans is a co-commander by construction — delegation-first,
+-- idle-only, own-pool-only, guidance-binding; when the last human leaves it
+-- silently upgrades to the full-side slate (caretaker), and back the moment one
+-- rejoins. NPCs never flip. This is DERIVED from live human presence rather than
+-- hardcoded, which keeps the synced own-pool-only flag (game_teams drives
+-- SetOwnPoolOnly off the same count) and the AI's goal slate consistent by
+-- construction. When the coordinator hasn't published a count (headless
+-- full-side runs, AI-only games), we keep the profile's baseline role.
+local function effectiveRole(state)
+    local base = state.baseRole
+    if base.id == 'npc' then return base end       -- NPC never flips (§5)
+    local humans = teamHumans()
+    if humans == nil then return base end           -- unknown → baseline
+    local wantId = (humans > 0) and 'co_commander' or 'full_side'
+    if base.id == wantId then return base end
+    local cached = state.roleCache[wantId]
+    if not cached then
+        cached = Roles.resolve(wantId, Config)
+        cached.teamId = base.teamId
+        cached.scriptedSlate = base.scriptedSlate
+        state.roleCache[wantId] = cached
+    end
+    return cached
+end
+
 local function resolveProfile()
     -- STUB: once AI1 (AI.getRulesParam) lands, read e.g.
     --   local key = Picture.readProfileHint()  -- 'default'|'aggressive'|...
@@ -106,13 +159,16 @@ end
 --=============================================================================
 local function boot(frame)
     self.profile      = resolveProfile()
-    self.role         = Roles.resolve(self.profile.role, Config)
-    self.role.teamId  = resolveTeamId()
+    self.baseRole     = Roles.resolve(self.profile.role, Config)
+    self.baseRole.teamId = resolveTeamId()
+    self.playerId     = resolvePlayerId()
     -- A profile may attach a scripted slate (NPC scenarios) — install it onto
     -- the role, which is where slate.build looks for it.
     if self.profile.scriptedSlate then
-        self.role.scriptedSlate = self.profile.scriptedSlate
+        self.baseRole.scriptedSlate = self.profile.scriptedSlate
     end
+    self.roleCache = { [self.baseRole.id] = self.baseRole }
+    self.role         = self.baseRole              -- effective role, re-derived each tick
     self.rng          = Config.makeRNG(Config.SEED)   -- seed is fixed for repro
     self.actuators = Actuators.new({
         role    = self.role,
@@ -123,7 +179,8 @@ local function boot(frame)
     -- Narrate boot so the game log shows which brain woke up (plan §5.1:
     -- the AI's spend is socially visible; boot is the first line).
     self.actuators:chat(string.format(
-        "[strategos] online — role=%s profile=%s", self.role.id, self.profile.id))
+        "[strategos] online — role=%s profile=%s player=%d",
+        self.role.id, self.profile.id, self.playerId))
 end
 
 --=============================================================================
@@ -131,16 +188,38 @@ end
 -- LOD (plan §3 / PLAN-ai.md) stretches the period for dormant NPC factions.
 --=============================================================================
 local function strategicTick(frame)
+    -- §6 compute-budget clock (≤ 2 ms). We bracket ONLY the pure pipeline
+    -- (read mirrors → goals → allocate) — the "table arithmetic over regions"
+    -- §6 budgets — with the AI's monotonic clock. The actuator's WRITE step and
+    -- all narration (which on a headless run route to synchronous SLOG) are
+    -- deliberately outside this window; they're I/O, not the §6 compute cost.
+    local AI = _G.AI
+    local clock = (type(AI) == 'table' and type(AI.nowMs) == 'function') and AI.nowMs or nil
+    local t0 = clock and clock() or nil
+
+    -- 0. ROLE — derive the effective role from live human presence (§5.1
+    --    caretaker up/downgrade). Cheap (one rulesParam read); done before the
+    --    Picture so guidance/economy read under the right policy. Narrate a flip
+    --    so a handoff is legible in the log (plan §5.1).
+    local role = effectiveRole(self)
+    if role ~= self.role then
+        self.actuators:chat(string.format(
+            "[strategos] role -> %s (team humans=%s)", role.id,
+            tostring(teamHumans())))
+        self.role = role
+        self.actuators.role = role
+    end
+
     -- 1. READ — refresh the Picture from mirrors + decay memory (picture.lua).
     local picture = Picture.refresh({
         frame  = frame,
         memory = self.memory,
-        role   = self.role,
+        role   = role,
         config = Config,
     })
 
     -- 2. GOALS — explicit (objective board) + implicit (standing needs). Pure.
-    local slate = Slate.build(picture, self.profile, self.role)
+    local slate = Slate.build(picture, self.profile, role)
 
     -- 3. ALLOCATE — score, assign under force floors, apply commitment
     --    hysteresis + the budget governor. Pure; returns a directive list.
@@ -148,11 +227,14 @@ local function strategicTick(frame)
         picture     = picture,
         slate       = slate,
         profile     = self.profile,
-        role        = self.role,
+        role        = role,
         commitments = self.commitments,   -- read + updated in place
         rng         = self.rng,
         config      = Config,
     })
+
+    -- Compute cost measured here, before the WRITE/narration I/O below.
+    local computeMs = (t0 and clock) and (clock() - t0) or nil
 
     -- 4. WRITE — the actuator is the ONLY module that emits commands. It maps
     --    directives onto real verbs (or the standing-order fallback pre-AI2)
@@ -160,12 +242,50 @@ local function strategicTick(frame)
     --    (PLAN-metalstorm-interaction.md §6.3).
     self.actuators:apply(plan, picture)
 
+    -- Tick summary — one legible line per strategic tick so a headless full-side
+    -- run is observable (plan §5.1: the AI's reasoning must be inspectable). Not
+    -- a decision input; pure narration. Counts what the pipeline produced this
+    -- tick + the governor's economy so region/objective progress is traceable.
+    local nGoals, nDir, nBoard, ownStrength = 0, 0, 0, 0
+    local rOwned, rNeutral, rEnemy = 0, 0, 0
+    for _ in pairs(slate) do nGoals = nGoals + 1 end
+    nDir = #(plan.directives or {})
+    for _, r in pairs(picture.regions or {}) do
+        if r.owner == role.teamId then rOwned = rOwned + 1
+        elseif r.owner == nil or r.owner == -1 then rNeutral = rNeutral + 1
+        else rEnemy = rEnemy + 1 end
+    end
+    local objActive, objDone = 0, 0
+    for _, o in pairs(picture.board or {}) do
+        nBoard = nBoard + 1
+        if o.state == 'active' then objActive = objActive + 1
+        elseif o.state == 'complete' then objDone = objDone + 1 end
+    end
+    for _, b in pairs(picture.ledger or {}) do ownStrength = ownStrength + (b.strength or 0) end
+    -- §6 budget verdict: compute (pipeline) ms vs the 2 ms LOD-0 target. Flag
+    -- with a marker so an over-budget tick is greppable; this log line itself
+    -- is I/O and runs AFTER the measured window, so it never inflates the number.
+    local budgetTag = ''
+    if computeMs then
+        budgetTag = string.format(' computeMs=%.3f%s', computeMs,
+            computeMs > 2.0 and ' OVER_BUDGET' or '')
+    end
+    local econ = picture.economy or {}
+    self.actuators:chat(string.format(
+        "[strategos] tick f=%d role=%s goals=%d directives=%d "
+        .. "regions(own/neu/enemy)=%d/%d/%d obj(active/done)=%d/%d ownStr=%d "
+        .. "pool(own/team)=%d/%d budget=%d spent=%d%s",
+        frame, role.id, nGoals, nDir, rOwned, rNeutral, rEnemy, objActive, objDone,
+        math.floor(ownStrength), math.floor(econ.ownPool or 0),
+        math.floor(econ.teamPool or 0), math.floor(plan.budget or 0),
+        math.floor(plan.spent or 0), budgetTag))
+
     -- 5. PARLEY — evaluate proposals addressed to us and respond
     -- (interaction §6.2). The decision is computed unconditionally (pure,
     -- testable now); only the actual respond CALL is gated on engine ask I1
     -- (Actuators:respondProposal degrades to a no-op false until then, same
     -- as every other AI2-class verb in actuators.lua).
-    for _, r in ipairs(Planner.evaluateProposals(picture, self.profile, self.role)) do
+    for _, r in ipairs(Planner.evaluateProposals(picture, self.profile, role)) do
         self.actuators:respondProposal(r.id, r.decision)
     end
 end

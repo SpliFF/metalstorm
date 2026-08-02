@@ -25,11 +25,15 @@ function M.new()
         onChargeHandlers = {},
         onCompleteHandlers = {},
         caretakerActivations = {}, -- recorded GG.AI.ActivateCaretaker(teamID) calls
+        ownPoolOnly = {},          -- playerID -> flag (co-commander coordinator)
+        ownPoolOnlyCalls = {},     -- recorded GG.Authority.SetOwnPoolOnly calls
+        gaiaTeam = 99,             -- a team id that never collides with test teams
     }
 
-    function world.setPlayer(playerID, teamID, active, spectator)
+    function world.setPlayer(playerID, teamID, active, spectator, isAI)
         world.players[playerID] = {
             team = teamID, active = active ~= false, spectator = spectator == true,
+            isAI = isAI == true,
         }
     end
 
@@ -62,9 +66,30 @@ function M.new()
     _G.Spring = {
         GetGameFrame = function() return world.frame end,
         GetModOptions = function() return world.modOptions end,
-        GetPlayerInfo = function(playerID, _)
+        GetGaiaTeamID = function() return world.gaiaTeam end,
+        -- Distinct teams that currently have any player (enough for the
+        -- co-commander coordinator, which only acts on teams with players).
+        GetTeamList = function()
+            local seen, out = {}, {}
+            for _, p in pairs(world.players) do
+                if p.team ~= nil and not seen[p.team] then
+                    seen[p.team] = true
+                    out[#out + 1] = p.team
+                end
+            end
+            table.sort(out)
+            return out
+        end,
+        GetPlayerInfo = function(playerID, getOpts)
             local p = world.players[playerID]
             if not p then return nil end
+            if getOpts then
+                -- Mirror LuaSyncedRead.cpp: 11th return is the player-options
+                -- table, carrying isAI="1" only for a virtual AI player.
+                local opts = p.isAI and { isAI = '1' } or {}
+                return 'player' .. playerID, p.active, p.spectator, p.team,
+                       p.team, 0, 0, '', 0, false, opts, false
+            end
             return 'player' .. playerID, p.active, p.spectator, p.team
         end,
         -- Mirrors rts/Lua/LuaSyncedRead.cpp GetPlayerList: teamID<0 (or nil)
@@ -108,6 +133,11 @@ function M.new()
         Authority = {
             OnAward = function(fn) world.onAwardHandlers[#world.onAwardHandlers + 1] = fn end,
             OnCharge = function(fn) world.onChargeHandlers[#world.onChargeHandlers + 1] = fn end,
+            SetOwnPoolOnly = function(playerID, flag)
+                world.ownPoolOnly[playerID] = flag and true or false
+                world.ownPoolOnlyCalls[#world.ownPoolOnlyCalls + 1] =
+                    { playerID = playerID, flag = flag and true or false }
+            end,
         },
         Objectives = {
             LowestParticipationTactical = function(teamID)

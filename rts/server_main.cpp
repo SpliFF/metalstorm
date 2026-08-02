@@ -837,12 +837,83 @@ int main(int argc, char* argv[])
                 defsCacheKey.clear();
             }
         }
+
+        // Expected-DPS power table (AI4 / combat-resolution §2.3, ask C7).
+        // A compact power.json written into the same content-addressed cache
+        // dir, alongside the .lua.br def files. It is plain JSON (served with
+        // Content-Type: application/json by the static handler), so BOTH the
+        // strategic AI (via the sandboxed AI.getDefExport file API) and the
+        // browser client (a future fetch at the same cache/defs URL) read the
+        // identical numbers — no AI-only power math. Derived from the same
+        // parsed defs as weapondefs.lua's expected_dps. Written whenever
+        // absent (or under --no-cache); the content key already covers the
+        // inputs, so a stale power.json is impossible for a live key.
+        if (!defsCacheKey.empty()) {
+            const fs::path powerPath =
+                fs::path(DefsCache::CacheDir(gameId, defsCacheKey)) / "power.json";
+            if (CacheControl::IsNoCache() || !fs::exists(powerPath)) {
+                const std::string powerSrc =
+                    L::SerializePowerTable(unitDefHandler->GetUnitDefsVec());
+                std::error_code pec;
+                fs::create_directories(powerPath.parent_path(), pec);
+                std::ofstream pf(powerPath, std::ios::binary | std::ios::trunc);
+                if (pf) {
+                    pf.write(powerSrc.data(),
+                             static_cast<std::streamsize>(powerSrc.size()));
+                }
+                if (pf) {
+                    SLOG(SPRING_LOG_NOTICE,
+                         "power table baked: gameId=%s key=%s (%zu B JSON)",
+                         gameId.c_str(), defsCacheKey.c_str(), powerSrc.size());
+                } else {
+                    SLOG(SPRING_LOG_WARNING,
+                         "power table write failed: gameId=%s key=%s",
+                         gameId.c_str(), defsCacheKey.c_str());
+                }
+            }
+        }
     }
 
     // (playerTeamByUsername / clientPlayerNum / nextPlayerNum /
     // connectedRosterPlayers / rosterPlayersNeeded were declared above, ahead
     // of the GameServerContext that binds them; deferred-GameStart logic now
     // lives in GameStartCoordinator::CheckAndFireGameStart.)
+
+    // --- AI virtual players (PLAN-metalstorm-ai.md §1, AI3) ---
+    //
+    // Each AI slot becomes a real CPlayer with its own playerID, registered
+    // NOW — before GameStart fires — so:
+    //   (a) FireGameStart's leader pass makes the AI its OWN team's leader (its
+    //       virtual player is the only active player on that team), instead of
+    //       the old SetLeader(hostHuman) fallback; and
+    //   (b) game_authority.lua's GameStart loop over Spring.GetPlayerList()
+    //       runs its PlayerAdded flow for the AI, creating authority_player_<id>
+    //       — the exact same pool-creation path a human takes. The AI's charge
+    //       identity (its authority pool) is thus keyed by this playerID.
+    // Registering here (ahead of both the dev-mode and roster-mode GameStart)
+    // keeps the AI in GetPlayerList() at GameStart time in either mode.
+    //
+    // Deliberate departure from stock Spring, where a SkirmishAI is NOT a
+    // player (CLAUDE.md "never deviate silently"): Metalstorm's design makes
+    // the AI a virtual player (§1) so it pays authority through the same gate.
+    // isAI marks it so "lowest active player = host human" logic skips it
+    // (Simulation.cpp FireGameStart). The AI runtime setup below reads back
+    // rq.playerNum so strategos keys its spend by the same id.
+    for (auto& rq : requestedAIs) {
+        const int pNum = nextPlayerNum++;
+        CPlayer p;
+        p.name      = "AI:" + rq.id + "@t" + std::to_string(rq.team);
+        p.team      = rq.team;
+        p.active    = true;
+        p.spectator = false;
+        p.isAI      = true;
+        p.playerNum = pNum;
+        playerHandler.AddPlayer(p);
+        rq.playerNum = pNum;
+        SLOG(SPRING_LOG_NOTICE,
+            "registered AI virtual player #%d '%s' on team %d",
+            pNum, p.name.c_str(), rq.team);
+    }
 
     // Dev-mode: no roster means no players to wait for
     if (rosterPlayersNeeded == 0) {
@@ -909,7 +980,20 @@ int main(int argc, char* argv[])
             // Pass the plugin folder so the AI VM's plugin-scoped `require`
             // (AI0-loader) can resolve sibling modules (a multi-file AI like
             // strategos wires config/picture/slate/planner/... via require).
-            if (aiPool.AddAI(match->id, rq.team, allyTeam, code, match->folderPath)) {
+            //
+            // Also pass the two AI4 file-read sandbox roots: the processed
+            // map data dir (mapPath = data/maps/<id>, holds regions.json) and
+            // the game def cache dir (holds power.json). Empty when unset —
+            // the accessor then returns nil and the Picture treats it as
+            // "unknown", never an error.
+            //
+            // rq.playerNum was allocated by the AI virtual-player block above
+            // (AI3): strategos keys its authority charge identity by this id.
+            const std::string aiDefExportDir = defsCacheKey.empty()
+                ? std::string()
+                : DefsCache::CacheDir(gameId, defsCacheKey);
+            if (aiPool.AddAI(match->id, rq.team, allyTeam, code, match->folderPath,
+                             mapPath, aiDefExportDir, rq.playerNum)) {
                 SLOG(SPRING_LOG_NOTICE,
                     "loaded AI '%s' (%s) on team %d",
                     match->displayName.c_str(), match->id.c_str(), rq.team);

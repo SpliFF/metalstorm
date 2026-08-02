@@ -52,6 +52,13 @@ public:
 	bool isFromDemo = false;
 	bool readyToStart = false;
 	bool desynced = false;
+	// Metalstorm virtual-player model (PLAN-metalstorm-ai.md §1, AI3): AI slots
+	// are registered as real CPlayers so they own a playerID + authority pool
+	// and command through the same charge path as humans. This flag marks such
+	// a player as engine-driven (no network session) so "lowest active player =
+	// host human" logic can skip it. Departure from stock Spring, where a
+	// SkirmishAI is not a player — called out explicitly per CLAUDE.md.
+	bool isAI = false;
 
 	std::string countryCode;
 

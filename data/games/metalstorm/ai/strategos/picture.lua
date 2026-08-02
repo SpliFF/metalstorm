@@ -24,6 +24,8 @@ local function caps()
     return {
         present     = type(AI) == 'table',
         rulesParam  = type(AI) == 'table' and type(AI.getRulesParam) == 'function', -- AI1
+        mapData     = type(AI) == 'table' and type(AI.getMapData)    == 'function', -- AI4
+        defExport   = type(AI) == 'table' and type(AI.getDefExport)  == 'function', -- AI4
         ownSquads   = type(AI) == 'table' and type(AI.getOwnSquads)  == 'function', -- AI2
         enemySquads = type(AI) == 'table' and type(AI.getVisibleEnemySquads) == 'function',
         lod         = type(AI) == 'table' and type(AI.getLODLevel)   == 'function',
@@ -41,43 +43,177 @@ end
 --- Region graph: regions[key] = { owner, contested, value, tags, neighbors }.
 -- Geometry (value/tags/neighbors) comes from the static regions.json export
 -- (regions plan §5 / ask R1); owner/contested come from region_* rulesParams.
--- STUB until AI1: returns {}.
+-- Empty (no graph loaded, or AI4/AI1 unavailable) is honest "unknown", not
+-- an error — regionOf() and every caller already degrade safely on {}.
+-- Static region geometry cache. The graph GEOMETRY (polygons, neighbors,
+-- value, tags) never changes during a game — only owner/contested do (via
+-- region_* rulesParams). The live run flagged the original per-tick reload as
+-- the dominant strategic-tick cost: AI.getMapData re-read + JSON-parsed
+-- regions.json AND rebuilt the point-lookup grid every 5 s (~7 ms, over the
+-- §6 2 ms budget). So load the geometry ONCE, and each tick overlay only the
+-- live owner/contested onto the SAME table (stable identity → the regionOf
+-- lookup grid, which keys off that identity, also builds once, not per tick).
+-- Module-level like powerTable; freshPicture() in the specs reloads the module
+-- and resets it, so tests stay isolated.
+local staticRegions = nil
+
 local function readRegions(c)
-    if not c.rulesParam then return {} end
-    -- TODO(AI1): iterate the region index (from the cached regions.json the
-    -- runtime should hand the VM alongside the snapshot) and overlay
-    --   owner     = AI.getRulesParam('game', 'region_'..key..'_team')
-    --   contested = AI.getRulesParam('game', 'region_'..key..'_contested')
-    -- Adjacency IS strategic distance (plan §2) — no terrain, no pathfinding.
-    return {}
+    local AI = _G.AI
+    -- Build the static geometry table once, on the first tick that has the AI4
+    -- file API. Same regions.json the client mirror (ui/lib/regions.js) fetches
+    -- → both agree by construction. Adjacency IS strategic distance (plan §2).
+    if staticRegions == nil and c.mapData then
+        local ok, data = pcall(AI.getMapData, 'regions.json')
+        if ok and type(data) == 'table' and type(data.regions) == 'table' then
+            staticRegions = {}
+            for _, r in ipairs(data.regions) do
+                if r.key then
+                    staticRegions[r.key] = {
+                        name      = r.name,
+                        value     = r.value or 0,
+                        tags      = r.tags or {},
+                        neighbors = r.neighbors or {},
+                        polygon   = r.polygon,
+                        owner     = nil,     -- overlaid from rulesParams below
+                        contested = false,
+                    }
+                end
+            end
+        end
+    end
+    -- No geometry loaded (AI4 unavailable, or the read failed) → honest empty
+    -- "unknown" graph; regionOf() and every caller already degrade safely on {}.
+    if staticRegions == nil then return {} end
+
+    -- Overlay live owner/contested from region_* rulesParams (AI1) onto the
+    -- cached geometry, IN PLACE. Reset to the static default first so a region
+    -- whose param went unknown doesn't keep a stale owner (in practice
+    -- game_regions.lua always publishes region_<key>_team as -1..N, never nil,
+    -- but resetting is the honest default). Absent rulesParam surface leaves
+    -- everything "unknown".
+    for _, region in pairs(staticRegions) do
+        region.owner = nil
+        region.contested = false
+    end
+    if c.rulesParam then
+        for key, region in pairs(staticRegions) do
+            local owner = AI.getRulesParam('game', 'region_' .. key .. '_team')
+            if owner ~= nil then region.owner = owner end
+            local contested = AI.getRulesParam('game', 'region_' .. key .. '_contested')
+            if contested ~= nil then
+                region.contested = (contested == 1 or contested == true)
+            end
+        end
+    end
+    return staticRegions
 end
+
+-- Mirrors game_objectives.lua's PUBLISHED_FIELDS exactly (same list
+-- ui/lib/objectives.js's pull() polls) — the public objective contract.
+local BOARD_FIELDS = {
+    'type', 'scope', 'state', 'reward', 'team', 'team2', 'progress',
+    'phase', 'stage', 'expire', 'region', 'x', 'z', 'r', 'suggested', 'source',
+}
 
 --- Objective board: board[id] = { type, scope, state, reward, team, progress,
 -- pos }. Objectives are public (objectives plan §6-E3) → all readable.
--- STUB until AI1.
+-- `objective_count` is a HIGH-WATER MARK, not a live count (game_objectives.lua
+-- §1 "Publishing v2"): ids 1..count may be missing (resolved-and-retention-
+-- expired, or an id burned by a rejected Create). Mirrors ui/lib/objectives.js's
+-- `pull()` poll-per-field pattern exactly, since AI.getRulesParam is the same
+-- per-key getter shape — `type` is the field publish() sets first and
+-- clearPublished() clears among the rest, so a dead/gap id reads back with no
+-- `type` and is skipped, same liveness check as objectives.js's `list()`.
+--
+-- `source` ('scripted'|'systemic'|'bounty') is now PUBLISHED by
+-- game_objectives.lua (task 4) — a staked bounty is publicly known (a commander
+-- visibly stakes authority on it), so surfacing the flag is fog-honest, exactly
+-- like the pre-existing `suggested` hint. This closes the gap the picture-task-3
+-- notes flagged: slate.lua's `o.source == 'bounty'` branch (planner §3.2
+-- co-commander ×3 weighting) now fires from real data, not only test fixtures.
+-- The raw stake AMOUNT still folds into the published `reward` via
+-- `o.reward + EscrowTotal(o.id)` (a bigger reward the AI already values higher);
+-- only the categorical bounty FLAG is what the ×3 needs, and that is what ships.
 local function readBoard(c)
-    if not c.rulesParam then return {} end
-    -- TODO(AI1): count = AI.getRulesParam('game','objective_count'); for i=1..count
-    -- read objective_<i>_{type,scope,state,reward,team,progress,x,z,region}.
-    return {}
+    local board = {}
+    if not c.rulesParam then return board end
+    local AI = _G.AI
+    local count = tonumber(AI.getRulesParam('game', 'objective_count')) or 0
+    for id = 1, count do
+        local p = 'objective_' .. id .. '_'
+        local o = {}
+        for _, field in ipairs(BOARD_FIELDS) do
+            o[field] = AI.getRulesParam('game', p .. field)
+        end
+        if o.type ~= nil then
+            -- Position hint is exactly one of `region` (resolve via the
+            -- region graph) or `x`/`z`/`r` world coordinates — never both
+            -- (game_objectives.lua's positionHint()).
+            local pos = nil
+            if o.x ~= nil then pos = { x = o.x, z = o.z, r = o.r } end
+            board[id] = {
+                type = o.type, scope = o.scope, state = o.state,
+                reward = o.reward or 0, team = o.team, team2 = o.team2,
+                progress = o.progress or 0, phase = o.phase, stage = o.stage,
+                expire = o.expire, region = o.region, pos = pos,
+                suggested = o.suggested,
+                -- `source` ∈ 'scripted'|'systemic'|'bounty' (game_objectives.lua
+                -- now publishes it — a staked bounty is publicly known, so this
+                -- is fog-honest). slate.lua keys the co-commander ×3 bounty
+                -- weighting off source == 'bounty'.
+                source = o.source,
+            }
+        end
+    end
+    return board
 end
 
 --- Economy: own player pool + team pool (authority plan §1 — both
 -- team-scoped, allied-visibility rulesParams, NOT public/game-scoped: see
 -- game_authority.lua's ALLIED_LOS note).
--- STUB until AI1: zeros (governor then behaves as "broke" → turtles, safe).
 local function readEconomy(c, role)
-    if not c.rulesParam then
-        return { ownPool = 0, teamPool = 0, costScale = 1.0, reserveHonoured = true }
+    if not c.rulesParam or not (role and role.teamId) then
+        return { ownPool = 0, teamPool = 0, costScale = 1.0, reserveHonoured = true,
+                 humans = 0 }
     end
-    -- TODO(AI1):
-    --   ownPool  = AI.getRulesParam('team', teamID, 'authority_player_'..playerID)
-    --   teamPool = AI.getRulesParam('team', teamID, 'authority_pool')
-    --   costScale= AI.getRulesParam('game','... modoption mirror ...') or 1.0
-    -- Co-commander role NEVER draws the team fallback (plan §5) — that policy
-    -- lives in the actuator's charge call, but the planner reads the flag here.
-    return { ownPool = 0, teamPool = 0, costScale = 1.0,
-             teamFallback = role and role.teamAuthorityFallback or false }
+    local AI = _G.AI
+    -- AI.getRulesParam('team', key) reads OUR OWN team's params only (2-arg,
+    -- AI1 — the snapshot carries no other team's rulesParams, fog-honest).
+    -- authority_pool is the team-wide savings pool (game_authority.lua
+    -- Spring.SetTeamRulesParam(teamID, 'authority_pool', v, ALLIED_LOS)).
+    local teamPool = tonumber(AI.getRulesParam('team', 'authority_pool')) or 0
+
+    -- Own player pool (AI3, now LANDED): each AI slot is a real virtual player
+    -- with its own `authority_player_<playerID>` pool (integer-normalised key —
+    -- game_authority.lua's pkey()), published {allied=true} so this AI reads it
+    -- over the 'team' scope. AI.getPlayerId() (AI3) returns the AI's virtual
+    -- playerID; -1 means unattributed (single-buffer / test AI) → no own pool.
+    local ownPool = 0
+    local pid = (type(AI.getPlayerId) == 'function') and AI.getPlayerId() or -1
+    if pid and pid >= 0 then
+        ownPool = tonumber(AI.getRulesParam('team',
+            'authority_player_' .. math.floor(pid))) or 0
+    end
+
+    -- Human presence on our team (game_teams.lua's co-commander coordinator
+    -- publishes team_active_humans, {allied=true}). Drives the co-commander /
+    -- caretaker role switch (§5.1): humans present → etiquette; none → the
+    -- full-side slate. Absent param (no coordinator) → nil, treated as "unknown"
+    -- by main.lua, which then keeps the profile's baseline role.
+    local humans = tonumber(AI.getRulesParam('team', 'team_active_humans'))
+
+    return {
+        ownPool = ownPool,
+        teamPool = teamPool,
+        -- GAP: authority_cost_scale is an Initialize()-time modoption read
+        -- straight into a local in game_authority.lua — never republished as
+        -- a rulesParam mirror, so there is no AI- (or client-) readable
+        -- source for it today. Default to 1.0 (no scaling) rather than
+        -- guessing at an engine surface that doesn't exist.
+        costScale = 1.0,
+        teamFallback = role.teamAuthorityFallback or false,
+        humans = humans,   -- nil = coordinator absent / unknown
+    }
 end
 
 --- Comma-list rulesParam value -> array of raw string entries (empty array
@@ -97,11 +233,10 @@ end
 -- once AI1 lands), BINDING on the planner. Only meaningful for
 -- co-commander/caretaker roles (role.readsGuidance).
 --
--- STUB until AI1 (AI.getRulesParam): the read SHAPE and rulesParam names
--- below are real (they match game_ai_guidance.lua's publish() exactly) —
--- only the actual AI.getRulesParam plumbing is missing. Degrades to `empty`
--- (the planner already treats an all-empty guidance as "no override", never
--- an error) until that capability exists.
+-- rulesParam names below match game_ai_guidance.lua's publish() exactly.
+-- Degrades to `empty` (the planner already treats an all-empty guidance as
+-- "no override", never an error) whenever the role doesn't read guidance or
+-- AI.getRulesParam isn't available.
 local function readGuidance(c, role)
     local empty = {
         stance = nil, regionPaint = {}, assetLocks = {},
@@ -112,7 +247,13 @@ local function readGuidance(c, role)
     local AI = _G.AI
     local teamID = role.teamId
     local prefix = 'guidance_' .. teamID .. '_'
-    local function get(key) return AI.getRulesParam('team', teamID, prefix .. key) end
+    -- AI.getRulesParam('team', key) is 2-arg (AI1): 'team' scope is
+    -- implicitly OUR OWN team (the snapshot only ever carries this AI's own
+    -- teamParams — fog-honest, no cross-team read). The key itself already
+    -- embeds teamID as literal text (game_ai_guidance.lua's publish()
+    -- convention), which is why `prefix` still needs teamID even though the
+    -- scope alone would resolve to the right team.
+    local function get(key) return AI.getRulesParam('team', prefix .. key) end
 
     local regionPaint = {}
     for _, key in ipairs(splitList(get('paint_keys'))) do
@@ -141,7 +282,7 @@ end
 -- planner scores proposals (ai/strategos/planner.lua Planner.evaluateProposals),
 -- the actuator responds (Actuators:respondProposal, engine ask I1).
 --
--- STUB until AI1: rulesParam names match game_parley.lua's publish() exactly
+-- rulesParam names match game_parley.lua's publish() exactly
 -- (parley_count high-water + parley_<id>_* fields, GAME-scoped/public — a
 -- negotiation record is visible to both parties and spectators, unlike
 -- guidance). trust is necessarily PARTIAL: there is no "list every team"
@@ -194,9 +335,22 @@ end
 -- regions and note the fidelity. Strength = current health (regions plan §2).
 --=============================================================================
 
+--- def→class lookup: powerTable[defId].class, or nil for defs with no
+-- ms_class customParam (statics/civilians — see units/_builder.lua). A
+-- missing class buckets under the `_unclassed` byClass key rather than being
+-- dropped, so ledger.strength still accounts for every unit's health.
+local function classOf(power, defId)
+    local entry = power and power[defId]
+    return entry and entry.class or nil
+end
+
 --- Own force ledger: ledger[regionKey] = { strength, groups, byClass }.
--- Buckets units/squads into regions via the region point-lookup.
-local function buildLedger(c, regions)
+-- Buckets units/squads into regions via the region point-lookup grid
+-- (regionOf, regions §1.2) and classes via the power-table def→class map
+-- (AI4). Unresolved points land under 'wilds' (regionOf's own catch-all,
+-- mirroring ui/lib/regions.js); a totally blind AI (no graph loaded) falls
+-- back further to the synthetic '_all' bucket.
+local function buildLedger(c, regions, power)
     local ledger = {}
     local AI = _G.AI
     local list
@@ -208,25 +362,23 @@ local function buildLedger(c, regions)
         return ledger
     end
     for _, u in ipairs(list or {}) do
-        -- TODO: regionOf(u.x, u.z) needs the region lookup grid (regions §1.2)
-        -- rebuilt from regions.json client-side. Until the graph is readable,
-        -- bucket everything under a single synthetic key so downstream code
-        -- has a valid, if coarse, ledger.
         local key = Picture.regionOf(u.x, u.z, regions) or '_all'
         local bucket = ledger[key]
         if not bucket then
             bucket = { strength = 0, groups = {}, byClass = {} }
             ledger[key] = bucket
         end
-        bucket.strength = bucket.strength + (u.health or 0)
-        -- byClass/byScale needs the def→class map (def export); stubbed.
+        local health = u.health or 0
+        bucket.strength = bucket.strength + health
+        local class = classOf(power, u.defId) or '_unclassed'
+        bucket.byClass[class] = (bucket.byClass[class] or 0) + health
     end
     return ledger
 end
 
 --- Enemy intel with decaying memory (plan §2). Fresh sightings overwrite;
 -- unseen regions decay toward "unknown" and are forgotten below a floor.
-local function updateIntel(c, regions, memory, frame, config)
+local function updateIntel(c, regions, memory, frame, config, power)
     local intel = memory.intel
     local AI = _G.AI
 
@@ -250,13 +402,23 @@ local function updateIntel(c, regions, memory, frame, config)
     end
     for _, e in ipairs(list or {}) do
         local key = Picture.regionOf(e.x, e.z, regions) or '_all'
-        local mem = intel[key] or { strength = 0 }
-        mem.strength      = (mem.strength or 0) + (e.health or 0)
+        local mem = intel[key] or { strength = 0, byClass = {} }
+        mem.byClass = mem.byClass or {}
+        local health = e.health or 0
+        mem.strength      = (mem.strength or 0) + health
+        local class = classOf(power, e.defId) or '_unclassed'
+        mem.byClass[class] = (mem.byClass[class] or 0) + health
         mem.lastSeenFrame = frame
         mem.confidence    = 1.0
         intel[key] = mem
     end
-    -- TODO: radar blips (position only, no type) as low-confidence entries.
+
+    -- GAP: radar blips (position-only, no unit type) would fold in here as
+    -- low-confidence entries — AIScriptContext exposes no such surface today
+    -- (only getOwnUnits/getVisibleEnemies, both full sightings; see
+    -- rts/Server/AI/AIScriptContext.h). No `l_getRadarBlips`-shaped callin
+    -- exists to feature-detect against, unlike every other §2 source. Needs
+    -- an engine ask before this can be anything but a documented gap.
     return intel
 end
 
@@ -270,20 +432,122 @@ local powerTable = nil
 local function loadPowerTable(c)
     if powerTable then return powerTable end
     powerTable = {}
-    -- TODO: ingest the def→JSON expected-DPS export (combat-resolution ask C7)
-    -- keyed by defID → { dps, hp, class, scale, counters = {...} }.
+    -- AI4: the expected-DPS export (power.json) carries the SAME numbers the
+    -- client sees (combat-resolution §2.3 / ask C7) — dps/hp/class/scale per
+    -- def. Read once via the sandboxed def-export API and re-key by numeric
+    -- defID so strength math can look up `power[unit.defId]` directly. JSON
+    -- object keys arrive as strings; tonumber() restores the integer key.
+    local AI = _G.AI
+    if c.defExport then
+        local ok, data = pcall(AI.getDefExport, 'power.json')
+        if ok and type(data) == 'table' and type(data.defs) == 'table' then
+            for sid, entry in pairs(data.defs) do
+                powerTable[tonumber(sid) or sid] = entry
+            end
+        end
+    end
     return powerTable
 end
 
 --=============================================================================
--- Region point-lookup (shared helper). Real impl needs the lookup grid built
--- from regions.json (regions §1.2). STUB: no graph → nil (callers fall back
--- to the '_all' synthetic bucket).
+-- Region point-lookup (shared helper). Mirrors ui/lib/regions.js's
+-- `graphKeyAt` EXACTLY (same cell size, same bbox-then-point-in-polygon
+-- confirm, same 'wilds' fallback) — client-side order-cost prediction and
+-- this Picture must agree on which region a point falls in, or the AI's
+-- authority-cost math (config.lua predictDirectiveCost) would silently
+-- diverge from what the sim actually charges (regions plan §5).
 --=============================================================================
+local DEFAULT_LOOKUP_CELL = 256
+
+--- Ray-casting point-in-polygon test — identical algorithm to
+-- ui/lib/regions.js's `pointInPolygon` (same edge-crossing formula, same
+-- z/x roles), just Lua's 1-based indexing in place of JS's 0-based.
+local function pointInPolygon(x, z, polygon)
+    local inside = false
+    local n = #polygon
+    local j = n
+    for i = 1, n do
+        local pi, pj = polygon[i], polygon[j]
+        if ((pi.z > z) ~= (pj.z > z)) and
+           (x < (pj.x - pi.x) * (z - pi.z) / (pj.z - pi.z) + pi.x) then
+            inside = not inside
+        end
+        j = i
+    end
+    return inside
+end
+
+--- Cell ("cx:cz") → list of region keys whose bbox overlaps it. Mirrors
+-- ui/lib/regions.js's `buildLookupGrid` (bbox-per-region, register into
+-- every overlapped cell; no bounds clamping needed here since authored
+-- polygons are already validated in-bounds — MapProcessor.cpp rejects
+-- out-of-bounds vertices at export time).
+local function buildLookupGrid(regions, cellSize)
+    local cells = {}
+    for key, r in pairs(regions) do
+        local polygon = r.polygon
+        if polygon and #polygon > 0 then
+            local minX, maxX = math.huge, -math.huge
+            local minZ, maxZ = math.huge, -math.huge
+            for _, pt in ipairs(polygon) do
+                if pt.x < minX then minX = pt.x end
+                if pt.x > maxX then maxX = pt.x end
+                if pt.z < minZ then minZ = pt.z end
+                if pt.z > maxZ then maxZ = pt.z end
+            end
+            local cx0, cx1 = math.floor(minX / cellSize), math.floor(maxX / cellSize)
+            local cz0, cz1 = math.floor(minZ / cellSize), math.floor(maxZ / cellSize)
+            for cz = cz0, cz1 do
+                for cx = cx0, cx1 do
+                    local cellKey = cx .. ':' .. cz
+                    local list = cells[cellKey]
+                    if not list then list = {}; cells[cellKey] = list end
+                    list[#list + 1] = key
+                end
+            end
+        end
+    end
+    return { cellSize = cellSize, cells = cells }
+end
+
+-- Cached by object identity of the `regions` table it was built from. Since
+-- readRegions() now caches the static geometry and returns the SAME table
+-- every tick (only owner/contested change, overlaid in place — the grid keys
+-- off polygons, which don't), this cache hits across ticks too: the lookup
+-- grid is built ONCE for the whole game, not per tick. Within a tick it still
+-- amortises the per-unit cost (buildLedger/updateIntel call regionOf once per
+-- own/enemy unit against the same table). A fresh regions table (e.g. a test
+-- fixture, or a future dynamic graph) naturally misses and rebuilds.
+local cachedGridFor, cachedGrid = nil, nil
+
+--- Region at world position → key. O(1) cell lookup (bbox filter) + a
+-- point-in-polygon confirm on every bbox candidate (a cell's overlap list is
+-- a filter, not a verdict — same reasoning as the client). `nil` regions (no
+-- graph loaded at all, a blind AI) → nil, matching the existing '_all'
+-- synthetic-bucket convention callers already use; a loaded graph with no
+-- polygon covering the point → 'wilds', the reserved catch-all key
+-- (regions/partition.lua validateGraph — an authored region may never claim
+-- it) — the SAME resolution ui/lib/regions.js's graph provider returns.
 function Picture.regionOf(x, z, regions)
     if not regions or next(regions) == nil then return nil end
-    -- TODO: O(1) lookup-grid cell → region, boundary point-in-polygon confirm.
-    return nil
+
+    if cachedGridFor ~= regions then
+        cachedGrid = buildLookupGrid(regions, DEFAULT_LOOKUP_CELL)
+        cachedGridFor = regions
+    end
+
+    local cx = math.floor(x / cachedGrid.cellSize)
+    local cz = math.floor(z / cachedGrid.cellSize)
+    local candidates = cachedGrid.cells[cx .. ':' .. cz]
+    if candidates then
+        for _, key in ipairs(candidates) do
+            local r = regions[key]
+            if r and r.polygon and pointInPolygon(x, z, r.polygon) then
+                return key
+            end
+        end
+    end
+    return 'wilds'
 end
 
 --=============================================================================
@@ -297,6 +561,7 @@ function Picture.refresh(ctx)
     local config  = ctx.config
 
     local regions = readRegions(c)
+    local power   = loadPowerTable(c)   -- computed first: ledger/intel byClass keys off it
     local picture = {
         frame     = frame,
         caps      = c,                                  -- for diagnostics/tests
@@ -308,10 +573,10 @@ function Picture.refresh(ctx)
         economy   = readEconomy(c, role),
         guidance  = readGuidance(c, role),
         parley    = readParley(c, role),
-        power     = loadPowerTable(c),
+        power     = power,
 
-        ledger    = buildLedger(c, regions),
-        intel     = updateIntel(c, regions, memory, frame, config),
+        ledger    = buildLedger(c, regions, power),
+        intel     = updateIntel(c, regions, memory, frame, config, power),
     }
     -- Guidance funding rate cap (interaction §6.2) clamps the governor's
     -- spend/min — planner.lua's governor() already reads
@@ -319,6 +584,17 @@ function Picture.refresh(ctx)
     if picture.guidance.funding then
         picture.economy.fundingRateCap = picture.guidance.funding.rateCap
     end
+
+    -- Diagnostic surface (a headless AI has no HUD): the runtime log and the
+    -- AI4 boundary test read these globals to confirm the static file reads
+    -- returned data — same pattern as main.lua's AI_STRATEGOS_BOOT_ERROR.
+    local nRegions = 0
+    for _ in pairs(regions) do nRegions = nRegions + 1 end
+    local nPower = 0
+    for _ in pairs(picture.power) do nPower = nPower + 1 end
+    _G.AI_STRATEGOS_STATIC_REGIONS = nRegions
+    _G.AI_STRATEGOS_STATIC_POWER   = nPower
+
     return picture
 end
 

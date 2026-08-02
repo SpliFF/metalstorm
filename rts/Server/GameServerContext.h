@@ -40,6 +40,10 @@ struct RequestedAI {
     std::string id;
     int team = 0;
     int startPos = -1;
+    // AI3 (PLAN-metalstorm-ai.md §1): the virtual playerID allocated for this
+    // AI slot at startup (server_main registers a real CPlayer per AI). -1
+    // until registered. Passed to AIRuntimePool::AddAI as the charge identity.
+    int playerNum = -1;
 };
 
 struct GameServerContext {

@@ -10,11 +10,14 @@ like a human.
 Design source of truth: [`PLAN-metalstorm-ai.md`](../../../../../PLAN-metalstorm-ai.md).
 Runtime it targets: [`PLAN-ai.md`](../../../../../PLAN-ai.md).
 
-> **Status: structural skeleton.** Every module, data shape, and control-flow
-> path is in place; the heavy *computations* are stubbed with `TODO`s keyed to
-> the engine ask that unblocks each one. The pure decision core (slate +
-> planner + config + roles + profiles) is complete enough to test headless
-> today — see `tests/`.
+> **Status: reads live, decisions are pure and tested, writes are stubbed.**
+> The Picture builder (`picture.lua`) now reads real rulesParams + the AI4
+> file API end-to-end (regions, board, economy, force ledger/intel, power
+> table); the pure decision core (slate + planner + config + roles +
+> profiles) is complete and tested headless — see `tests/`. What's left:
+> `actuators.lua`'s real verbs wait on AI2, and a few data gaps (bounty
+> visibility, cost-scale mirror, radar blips, composition counters) are
+> documented at their call sites, not guessed at.
 
 ## Module map
 
@@ -62,26 +65,35 @@ few directives/minute at 0.2 Hz).
 ## Engine asks (what unblocks each stub)
 
 The AI runtime is real but incomplete (`rts/Server/AI/*`, ARCHITECTURE.md Phase
-4 ⏳). The current VM exposes only `AI.getOwnUnits / getVisibleEnemies /
-issueCommand / getFrame / getMapSize`, opens only `base/table/string/math/utf8`,
-and loads a single entry buffer. Each ask below flips a feature-detect from
-stub to live with no rewrite:
+4 ⏳). The VM exposes reads (`AI.getOwnUnits / getVisibleEnemies / getFrame /
+getMapSize / getTeamId / getRulesParam / getMapData / getDefExport`) and the
+AI2 directive-shaped writes (`AI.createGroup / issueDirective / setPosture`); it
+opens only `base/table/string/math/utf8`. Each ask below flips a feature-detect
+from stub to live with no rewrite:
 
 | Ask | What | Unblocks | Status |
 |---|---|---|---|
 | **AI0-boot** | AI plugins boot reliably (existing Phase-4 repair) | everything | ✅ 2026-07-20 — fixed by AI0-loader (missing `require` was the boot failure) |
 | **AI0-loader** | a plugin-scoped `require`/module loader in the AI VM (or bundle-at-discovery) | `main.lua` wiring the multi-file layout (pure modules already test headless) | ✅ 2026-07-20 — `AIScriptContext::l_require`, sandboxed; `tests/test_ai_runtime.cpp` boots this plugin |
 | **AI1** | `AI.getRulesParam(scope, key)` | the whole Picture: regions, board, pools, guidance, parley | ✅ 2026-07-20 — snapshot carries game+team params; `caps().rulesParam` now true |
-| **AI2** | org-group / directive / posture verbs on the command interface | the real actuator; standing-order fallback until then | ⏸ deferred — waits on macro-orders `directive-protocol` |
-| **AI3** | AI slots get playerIDs + pools + `PlayerAdded` flow | authority integration (likely already true via virtual-player design — verify) | ⚠ verified FALSE — AI = team only, no playerID; leader is the host player. Authority-lane decision (see PLAN-metalstorm-ai §9.1) |
+| **AI4** | `AI.getMapData` / `AI.getDefExport` (sandboxed file reads) | region graph geometry + the expected-DPS power table | ✅ 2026-07-27 — same files the client fetches; see `rts/Server/AI/AIScriptContext.cpp` |
+| **AI2** | org-group / directive / posture verbs on the command interface | the real actuator (standing-order fallback DELETED) | ✅ 2026-07-27 — `AI.createGroup / issueDirective / setPosture`; drained on the sim thread through the SAME `OrgGroupManager`/`DirectiveManager` + `AllowDirectiveCreate` charge path as a human's wire message (`StateStreamer::TickAI`). Directive-shaped only — no per-squad verb (strategic floor). §8 E6 rate clamp (≤1/group/tick) enforced in the drain unconditionally |
+| **AI3** | AI slots get playerIDs + pools + `PlayerAdded` flow | authority integration (likely already true via virtual-player design — verify) | ⚠ verified FALSE — AI = team only, no playerID; leader is the host player. **DECIDED 2026-07-26: virtual playerID + pool per AI slot** (authority lane) — until it lands, `picture.economy.ownPool` honestly reads 0 |
 | **AI-team** | `AI.getTeamId()` / squad views / `AI.getLODLevel()` | friendly-vs-enemy scoring, squad-accurate ledger, LOD cadence | ◑ partial — `AI.getTeamId()` landed 2026-07-20; squad views + `getLODLevel` still pending |
 | **I1** | AI-side `SendLuaRulesMsg`-equivalent (`AI.sendGameMessage`) | parley responses + the intent-report blob (interaction §6) | pending |
 | **I2** | team-private rulesParam visibility survives streaming | guidance-store privacy (co-commander orders hidden from enemies) | pending |
 
-AI0-loader + AI1 landed: the plugin **boots in the engine VM** and can read
-rulesParams. The Picture population from those params (regions/board/economy)
-is still Lua-side stub work (plan task 3, now unblocked). Until that fills in,
-the planner correctly does almost nothing (a blind AI holds position) — safe.
+AI0-loader + AI1 + AI4 landed: the plugin **boots in the engine VM**, reads
+rulesParams, and reads the region-graph/power-table JSON exports. The Picture
+builder (plan task 3) is now wired end-to-end against real data: regions
+(geometry + live owner/contested), board (objectives), economy (team pool),
+`Picture.regionOf` (lookup-grid + point-in-polygon, mirrors
+`ui/lib/regions.js`), and byClass force bucketing off the power table. Three
+data gaps remain, each documented at its call site rather than guessed at:
+bounty-vs-natural-reward is unpublished (`readBoard` in `picture.lua`), the
+`authority_cost_scale` modoption has no rulesParam mirror (`readEconomy`), and
+there is no radar-blip or idle-factory surface on the AI VM yet
+(`updateIntel` / `slate.lua`'s `compositionGap`).
 
 ## Integration risks worth a human decision
 
@@ -115,5 +127,14 @@ busted tests/            # from data/games/metalstorm/ai/strategos/
 engine-coupled `picture.lua`) and asserts decisions: broke AI turtles to
 postures, a threatened valuable region draws DEFEND, RESERVE always present,
 commitment hysteresis resists thrash, force floors skip undersized packages.
-This is the plan's §11 test surface; expand it as the stubs fill in.
+
+`tests/picture_spec.lua` mocks `_G.AI` (the same feature-detected surface
+`AIScriptContext.cpp` exposes) and drives `Picture.refresh`/`Picture.regionOf`
+directly, against `tests/fixtures/regions.json` (a real, small "graph"-shaped
+export in the same format `MapProcessor.cpp` produces): region geometry +
+owner/contested overlay, objective high-water-mark gap skipping, economy pool
+reads, the lookup-grid/point-in-polygon region resolver, and intel decay.
+
+This is the plan's §11 test surface; expand it as the remaining stubs
+(AI2 actuator verbs, AI3 own-pool, `compositionGap`) fill in.
 ```

@@ -472,3 +472,95 @@ describe("co-commander etiquette (§5.1/§11)", function()
         assert.are.equal(2, #chatLog)  -- second suggestion emitted
     end)
 end)
+
+--=============================================================================
+describe("guidance stance re-weights the slate (binding, §6.2)", function()
+    -- One package, a threatened home (DEFEND) and open ground next door
+    -- (EXPAND). The stance a human sets decides which the package takes:
+    -- defensive holds home, aggressive pushes into the open ground.
+    local function stanceFixture(stance)
+        local role = fullSideRole()
+        return makePicture({
+            _role = role,
+            regions = {
+                home   = { owner = 0, value = 1.0, neighbors = { 'front', 'plains' } },
+                front  = { owner = 1, value = 1.0, neighbors = { 'home' } },
+                plains = { owner = nil, value = 1.0, neighbors = { 'home' } },
+            },
+            intel   = { front = { strength = 8, confidence = 1.0, lastSeenFrame = 1000 } },
+            -- Small package so directive/posture COST asymmetry doesn't swamp
+            -- the stance signal — this test isolates the stance value multiplier.
+            ledger  = { home = { strength = 10 } },
+            economy = { ownPool = 100000, teamPool = 0, costScale = 1.0 },
+            guidance = { stance = stance, regionPaint = {}, assetLocks = {},
+                         delegated = {}, veto = {} },
+        })
+    end
+
+    local function outcome(out)
+        local defend, expand = false, false
+        for _, d in ipairs(out.directives) do
+            if d.goalId == 'def:home' then defend = true end
+            if d.goalId == 'exp:plains' then expand = true end
+        end
+        return defend, expand
+    end
+
+    it("defensive stance holds home instead of expanding", function()
+        local defend, expand = outcome(plan(stanceFixture('defensive')))
+        assert.is_true(defend)
+        assert.is_false(expand)
+    end)
+
+    it("aggressive stance pushes into the open ground instead of holding", function()
+        local defend, expand = outcome(plan(stanceFixture('aggressive')))
+        assert.is_true(expand)
+        assert.is_false(defend)
+    end)
+end)
+
+--=============================================================================
+describe("suggested_for ×2 weighting (co-commander soft tasking, §5.1)", function()
+    -- Same shape as the bounty ×3 test, but the tasking is the softer
+    -- `suggested` hint published on the board (picture threads it onto
+    -- meta.suggested). A full-side AI ignores it; a co-commander's ×2 pulls it.
+    local function fixture(role)
+        return makePicture({
+            _role = role,
+            regions = {
+                home   = { owner = 0, value = 1.0, neighbors = { 'plains' } },
+                plains = { owner = nil, value = 1.5, neighbors = { 'home' } },
+            },
+            board = {
+                -- reward 200 < EXPAND raw value (1.5 × 200 = 300) < 2 × 200:
+                -- full-side takes the ground, the ×2 suggested flips it.
+                ['1'] = { type = 'control', scope = 'strategic', state = 'active',
+                          team = -1, region = 'target', reward = 200, suggested = 1 },
+            },
+            ledger  = { home = { strength = 1000 } },
+            economy = { ownPool = 100000, teamPool = 0, costScale = 1.0 },
+        })
+    end
+
+    local function winners(out)
+        local expandWon, objWon = false, false
+        for _, d in ipairs(out.directives) do
+            if d.goalId == 'exp:plains' then expandWon = true end
+            if d.goalId == 'obj:1' then objWon = true end
+        end
+        return expandWon, objWon
+    end
+
+    it("a full-side AI takes the open ground over the suggested objective", function()
+        local expandWon, objWon = winners(plan(fixture(fullSideRole())))
+        assert.is_true(expandWon)
+        assert.is_false(objWon)
+    end)
+
+    it("a co-commander's ×2 suggested weighting flips it to the objective", function()
+        local expandWon, objWon =
+            winners(plan(fixture(coCommanderRole()), nil, caretakerProfile))
+        assert.is_true(objWon)
+        assert.is_false(expandWon)
+    end)
+end)
