@@ -15,6 +15,7 @@ GADGET_ALLOWLIST = {
 	['game_authority.lua']        = true,
 	['game_authority_charge.lua'] = true,
 	['game_civilians.lua']        = true,
+	['game_gameover.lua']         = true,
 	['game_objectives.lua']       = true,
 	['game_parley.lua']           = true,
 	['game_regions.lua']          = true,

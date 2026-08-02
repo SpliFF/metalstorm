@@ -126,9 +126,21 @@ return {
     -- Phase 2: Strategic control of the basin
     -- Phase 3: Final evacuation extraction
     objectives = {
-        -- STRATEGIC: Control the basin (the endgame objective)
+        -- STRATEGIC: Control the basin — this scenario's VICTORY OBJECTIVE.
+        --
+        -- `victory = true` makes it terminal (PLAN-metalstorm-wars.md §7.1):
+        -- game_gameover.lua watches for it to resolve 'complete' and runs the
+        -- war down — winding_down → resolving (escrow settled) →
+        -- Spring.GameOver(the winning side's allyteams). A scenario IS a war
+        -- template, so a scenario is where "how does this war end" is
+        -- authored; Meridian Basin is the beta/showcase war, so its ending is
+        -- deliberately reachable inside one session: open race (forTeam nil,
+        -- either faction may take it) on a 30 s hold
+        -- (DEFAULT_CONTROL_HOLD_FRAMES) of the map's central contested region.
+        -- No expiry — the basin is the war's focal point, it does not lapse.
         { type = 'control', scope = 'strategic', forTeam = nil, region = 'meridian_basin', reward = 300,
-          expiresAtFrame = nil }, -- open-ended, the war's focal point
+          victory = true,
+          expiresAtFrame = nil },
 
         -- TACTICAL Phase 1: Protect the civilian districts
         -- North habitat protection (ash_habitat grid cells)
