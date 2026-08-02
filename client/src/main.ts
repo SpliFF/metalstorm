@@ -1278,6 +1278,14 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             case 'gp:orgGroups':
                 uiStore.updateOrgGroups(m.groups);
                 break;
+            // PLAN-macro-ui.md §3: directive snapshot (own team + allies) →
+            // native-UI store, for the org panel's fulfillment % / directive
+            // icons and the directive inspector. The worker has posted this
+            // since the macro lane landed, but nothing consumed it — a
+            // dead producer (ARCHITECTURE.md § "Client porting gotchas").
+            case 'gp:directives':
+                uiStore.updateDirectives(m.directives);
+                break;
             // Spring.AssignMouseCursor / ReplaceMouseCursor (widgets, worker) →
             // register a cursor pack under a logical name (ZK/BAR swap in their
             // own animated PNGs over the engine defaults).
