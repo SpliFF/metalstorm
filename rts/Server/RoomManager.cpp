@@ -48,6 +48,22 @@ void RoomManager::EnsureTables(sqlite3* db) {
             sqlite3_exec(db, "DROP TABLE IF EXISTS room_mod_options", nullptr, nullptr, nullptr);
         }
     }
+    {
+        // Second probe, same pattern: room_ai_slots grew a `profile` column
+        // (PLAN-metalstorm-ai.md §10 task 6) after the table above had
+        // already shipped, so its own staleness isn't caught by the
+        // `persistent` probe alone.
+        sqlite3_stmt* stmt = nullptr;
+        int rc = sqlite3_prepare_v2(db,
+            "SELECT profile FROM room_ai_slots LIMIT 1", -1, &stmt, nullptr);
+        sqlite3_finalize(stmt);
+        if (rc != SQLITE_OK) {
+            sqlite3_exec(db, "DROP TABLE IF EXISTS rooms", nullptr, nullptr, nullptr);
+            sqlite3_exec(db, "DROP TABLE IF EXISTS room_members", nullptr, nullptr, nullptr);
+            sqlite3_exec(db, "DROP TABLE IF EXISTS room_ai_slots", nullptr, nullptr, nullptr);
+            sqlite3_exec(db, "DROP TABLE IF EXISTS room_mod_options", nullptr, nullptr, nullptr);
+        }
+    }
     sqlite3_exec(db, R"(
         CREATE TABLE IF NOT EXISTS rooms (
             id INTEGER PRIMARY KEY,
@@ -85,6 +101,7 @@ void RoomManager::EnsureTables(sqlite3* db) {
             display_name TEXT NOT NULL DEFAULT '',
             team INTEGER NOT NULL DEFAULT 0,
             start_pos INTEGER NOT NULL DEFAULT -1,
+            profile TEXT NOT NULL DEFAULT '',
             PRIMARY KEY (room_id, slot_index)
         );
     )", nullptr, nullptr, nullptr);
@@ -190,7 +207,7 @@ void RoomManager::PersistAISlotsLocked(const GameRoom& room) {
     }
     static const char* kInsert =
         "INSERT INTO room_ai_slots (room_id, slot_index, ai_id, "
-        "display_name, team, start_pos) VALUES (?, ?, ?, ?, ?, ?)";
+        "display_name, team, start_pos, profile) VALUES (?, ?, ?, ?, ?, ?, ?)";
     sqlite3_stmt* s = nullptr;
     if (sqlite3_prepare_v2(db, kInsert, -1, &s, nullptr) == SQLITE_OK) {
         for (size_t i = 0; i < room.aiSlots.size(); ++i) {
@@ -202,6 +219,7 @@ void RoomManager::PersistAISlotsLocked(const GameRoom& room) {
             BindText(s, 4, slot.displayName);
             sqlite3_bind_int(s, 5, slot.team);
             sqlite3_bind_int(s, 6, slot.startPos);
+            BindText(s, 7, slot.profile);
             if (sqlite3_step(s) != SQLITE_DONE) {
                 SLOG(SPRING_LOG_WARNING, "PersistAISlots step: %s",
                     sqlite3_errmsg(db));
@@ -317,7 +335,7 @@ void RoomManager::LoadFromDatabase() {
     // 3. AI slots — preserve slot_index ordering
     {
         const char* kSql =
-            "SELECT room_id, ai_id, display_name, team, start_pos "
+            "SELECT room_id, ai_id, display_name, team, start_pos, profile "
             "FROM room_ai_slots ORDER BY room_id, slot_index";
         sqlite3_stmt* s = nullptr;
         if (sqlite3_prepare_v2(db, kSql, -1, &s, nullptr) == SQLITE_OK) {
@@ -332,6 +350,8 @@ void RoomManager::LoadFromDatabase() {
                 slot.displayName = dn ? reinterpret_cast<const char*>(dn) : "";
                 slot.team = static_cast<uint8_t>(sqlite3_column_int(s, 3));
                 slot.startPos = static_cast<int8_t>(sqlite3_column_int(s, 4));
+                const unsigned char* pr = sqlite3_column_text(s, 5);
+                slot.profile = pr ? reinterpret_cast<const char*>(pr) : "";
                 it->second.aiSlots.push_back(std::move(slot));
             }
             sqlite3_finalize(s);
@@ -737,6 +757,28 @@ bool RoomManager::SetAITeam(
         roomId, static_cast<unsigned>(slotIndex),
         room.aiSlots[slotIndex].aiId.c_str(),
         static_cast<unsigned>(team));
+    PersistAISlotsLocked(room);
+    return true;
+}
+
+bool RoomManager::SetAIProfile(
+    uint32_t roomId, uint32_t requesterId,
+    uint8_t slotIndex, const std::string& profile)
+{
+    std::lock_guard<std::recursive_mutex> lock(mutex);
+    auto it = rooms.find(roomId);
+    if (it == rooms.end()) return false;
+    GameRoom& room = it->second;
+
+    // Host-only, same as AddAISlot / SetAITeam. AI slots have no
+    // intrinsic owner besides the host.
+    if (room.hostPlayerId != requesterId) return false;
+    if (slotIndex >= room.aiSlots.size()) return false;
+
+    room.aiSlots[slotIndex].profile = profile;
+    SLOG(SPRING_LOG_INFO, "room %u: ai slot %u (%s) profile -> '%s'",
+        roomId, static_cast<unsigned>(slotIndex),
+        room.aiSlots[slotIndex].aiId.c_str(), profile.c_str());
     PersistAISlotsLocked(room);
     return true;
 }
