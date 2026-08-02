@@ -582,7 +582,8 @@ void StateStreamer::BroadcastEntityDeaths(int) {
     auto& sessions = ctx.sessions;
     auto deaths = unitDeaths.Drain();
     for (const auto& death : deaths) {
-        auto msg = Protocol::BuildEntityDestroy(death.unitId, 1, death.x, death.y, death.z);
+        auto msg = Protocol::BuildEntityDestroy(death.unitId, 1, death.x, death.y, death.z,
+                                                death.frame);
         // Bit 31 of losMask is the "ally team >= 32 — broadcast to
         // everyone" escape hatch (see UnitDeathEvent docs).
         const bool broadcastAll = (death.losMask & (1u << 31)) != 0;

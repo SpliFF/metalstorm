@@ -15,6 +15,7 @@
 
 import * as flatbuffers from 'flatbuffers';
 import { WebTransportAdapter, type GameTransport } from './transport.js';
+import { netSimDecide, type NetSimConfig } from './net-sim.js';
 import { ClientMessage } from '../protocol/spring-web/client-message.js';
 import { ClientPayload } from '../protocol/spring-web/client-payload.js';
 import { ServerMessage } from '../protocol/spring-web/server-message.js';
@@ -508,6 +509,13 @@ export interface WeaponDefInfo {
     defId: number;
     name: string;
     projectileType: number;
+    /** PLAN-latency L2 presentation tier: `FX_TIER_COSMETIC` (1) means no sim
+     *  projectile exists — the server resolves the outcome at fire time and the
+     *  client invents the whole flight, converging on the impact by
+     *  construction. `FX_TIER_SYNCED` (2) means a real server projectile whose
+     *  outcome is contingent on sim state. Resolved server-side at def load
+     *  (WeaponDef::ClassifyFxTier), overridable via `customParams.fxTier`. */
+    fxTier: number;
     projectileSpeed: number;
     range: number;
     aoe: number;
@@ -769,11 +777,11 @@ export interface ConnectionEvents {
     onProjectileFired?: (events: ProjectileFiredInfo[], frame: number) => void;
     onProjectileImpacts?: (events: ProjectileImpactInfo[], frame: number) => void;
     onProjectileTrajectories?: (events: ProjectileTrajectoryInfo[], frame: number) => void;
-    /** `frame` is the sim frame of the most recent GameEventBatch — the death's
-     *  own frame in practice, since the server broadcasts combat events (which
-     *  carry the kill) immediately before the EntityDestroy for the same tick on
-     *  the same reliable, in-order lane (StateStreamer::Tick). Lets L1 schedule
-     *  the death to land on the same presentation frame as its explosion. */
+    /** `frame` is the sim frame the unit died on, taken from
+     *  `EntityDestroy.frame` (stamped server-side at kill time). Falls back to
+     *  the most recent GameEventBatch frame only against a server that predates
+     *  that field. Lets L1 schedule the death to land on the same presentation
+     *  frame as its explosion. */
     onEntityDestroy?: (entityId: number, x: number, y: number, z: number, frame: number) => void;
     /** Per-unit sensor radius override. Emitted by
      *  Spring.SetUnitSensorRadius on the server. `sensorType` matches
@@ -882,10 +890,9 @@ export class Connection {
     public playerId: number = 0;
     public myTeam: number = -1;
     private clock = new ServerClock();
-    /** Sim frame of the most recent GameEventBatch. Fed to onEntityDestroy so
-     *  L1 can present a death on the same frame as its (batched) explosion —
-     *  the batch is delivered immediately before the destroy on the same
-     *  reliable, in-order lane (StateStreamer::Tick). */
+    /** Sim frame of the most recent GameEventBatch. Legacy fallback for
+     *  onEntityDestroy against a server that does not stamp
+     *  `EntityDestroy.frame`. */
     private lastEventFrame = 0;
     private pingInterval: ReturnType<typeof setInterval> | null = null;
     private httpBase = '';  // e.g. "http://localhost:9100"
@@ -1145,23 +1152,23 @@ export class Connection {
         this.sendPing();
     }
 
-    /** Route an inbound WebTransport message by envelope byte. Entity-state
-     *  frames pass through the artificial-latency sim (netsim); everything else
-     *  (FlatBuffers control, projectile/piece/decals/los/heightmap) dispatches
-     *  directly. The transport delivers each whole message regardless of which
-     *  QUIC stream/tier it arrived on. */
+    /** Route an inbound WebTransport message by envelope byte. **Every**
+     *  envelope passes through the artificial-latency sim (netsim) when it is
+     *  armed — see `receiveWithNetSim` for the two-lane model. The transport
+     *  delivers each whole message regardless of which QUIC stream/tier it
+     *  arrived on. */
     private routeIncoming(data: Uint8Array): void {
         if (data.length < 1) return;
         // GW8: per-envelope bandwidth tally (PLAN-performance PC-2). The single
         // inbound dispatch — captures every stream/tier byte before netsim.
         recordInbound(data);
-        const env = data[0];
-        if (env === ENVELOPE_ENTITY_STATE_FULL || env === ENVELOPE_ENTITY_STATE_DELTA) {
-            this.receiveStateFrame(data);
-        } else {
-            this.handleBinaryMessage(data);
-            if (env === ENVELOPE_FLATBUFFERS) this.controlObserver?.(data);
-        }
+        this.receiveWithNetSim(data);
+    }
+
+    /** Dispatch one inbound envelope, plus the control-observer tap. */
+    private dispatchIncoming(data: Uint8Array): void {
+        this.handleBinaryMessage(data);
+        if (data[0] === ENVELOPE_FLATBUFFERS) this.controlObserver?.(data);
     }
 
     // ─── Send ───
@@ -1425,6 +1432,12 @@ export class Connection {
             clearInterval(this.pingInterval);
             this.pingInterval = null;
         }
+        // Drop netsim-delayed envelopes still in flight — now that the sim
+        // covers the control lane too, letting these land post-teardown would
+        // re-enter auth/state handlers on a dead connection.
+        for (const t of this.netSimTimers) clearTimeout(t);
+        this.netSimTimers.clear();
+        this.netSimStreamReleaseAt = 0;
     }
 
     private sendPing(): void {
@@ -1446,20 +1459,30 @@ export class Connection {
     }
 
     /**
-     * Artificial-latency injection for the unreliable state channel
+     * Artificial-latency injection for the whole inbound link
      * (PLAN-latency.md L0 — "THE validation tool for the whole stage").
      * Reproduces intercontinental conditions on localhost so every L0/L1/L2
      * mitigation can be A/B'd against "does it still look right at 200 ms ±
-     * jitter, 2 % loss?". Applied ONLY to the state channel (0x02/0x03 entity
-     * state etc.) — the reliable control channel is left untouched, matching
-     * reality (TCP-like reliability vs. lossy datagrams). Per-packet random
-     * jitter naturally produces reordering; the PresentationClock's base_frame
-     * sequence tracking detects the reorder/loss. */
-    private netSim = { enabled: false, delayMs: 0, jitterMs: 0, lossProb: 0 };
+     * jitter, 2 % loss?". Applied to **every** envelope, split into a lossy
+     * datagram lane (entity state) and an ordered reliable lane (everything
+     * else, including `Pong`) — see `receiveWithNetSim` for why both matter.
+     * Per-packet random jitter on the datagram lane naturally produces
+     * reordering; the PresentationClock's base_frame sequence tracking detects
+     * the reorder/loss. */
+    private netSim: NetSimConfig = { enabled: false, delayMs: 0, jitterMs: 0, lossProb: 0 };
 
-    /** Configure (or disable) artificial latency on the state channel.
-     *  `{ delayMs, jitterMs, lossProb }` — lossProb in [0,1]. Enabled
-     *  whenever delay/jitter/loss is non-zero. */
+    /** Monotonic release timestamp for the ordered (reliable-stream) netsim
+     *  lane — see `receiveWithNetSim`. Absolute `performance.now()` ms; only
+     *  ever compared against the current time, so it does not grow unbounded. */
+    private netSimStreamReleaseAt = 0;
+    /** In-flight netsim timers, cleared on disconnect so a teardown does not
+     *  deliver stale envelopes into a dead handler set. */
+    private netSimTimers = new Set<ReturnType<typeof setTimeout>>();
+
+    /** Configure (or disable) artificial latency on the inbound link.
+     *  `{ delayMs, jitterMs, lossProb }` — lossProb in [0,1], and applies to
+     *  the entity-state lane only (the reliable lane is never dropped).
+     *  Enabled whenever delay/jitter/loss is non-zero. */
     setNetSim(cfg: { delayMs?: number; jitterMs?: number; lossProb?: number }): void {
         if (cfg.delayMs != null) this.netSim.delayMs = Math.max(0, cfg.delayMs);
         if (cfg.jitterMs != null) this.netSim.jitterMs = Math.max(0, cfg.jitterMs);
@@ -1474,24 +1497,28 @@ export class Connection {
         return this.netSim;
     }
 
-    /** Inbound state-channel frame — passes through the artificial-latency
-     *  simulator (when armed) before normal dispatch. */
-    private receiveStateFrame(data: Uint8Array): void {
-        if (!this.netSim.enabled) {
-            this.handleBinaryMessage(data);
-            return;
-        }
-        if (this.netSim.lossProb > 0 && Math.random() < this.netSim.lossProb) {
-            return; // dropped packet
-        }
-        const jitter = this.netSim.jitterMs > 0
-            ? (Math.random() * 2 - 1) * this.netSim.jitterMs
-            : 0;
-        const delay = Math.max(0, this.netSim.delayMs + jitter);
-        if (delay <= 0) {
-            this.handleBinaryMessage(data);
-        } else {
-            setTimeout(() => this.handleBinaryMessage(data), delay);
+    /** Inbound envelope — passes through the artificial-latency simulator
+     *  (when armed) before normal dispatch. The two-lane model and why both
+     *  lanes matter live in `net-sim.ts`; this method owns only the timers. */
+    private receiveWithNetSim(data: Uint8Array): void {
+        const env = data[0];
+        const isState = env === ENVELOPE_ENTITY_STATE_FULL || env === ENVELOPE_ENTITY_STATE_DELTA;
+        const verdict = netSimDecide(
+            this.netSim, isState, performance.now(),
+            this.netSimStreamReleaseAt, Math.random,
+        );
+        switch (verdict.kind) {
+            case 'drop': return;
+            case 'pass': this.dispatchIncoming(data); return;
+            case 'delay': {
+                this.netSimStreamReleaseAt = verdict.streamReleaseAt;
+                const timer = setTimeout(() => {
+                    this.netSimTimers.delete(timer);
+                    this.dispatchIncoming(data);
+                }, verdict.delayMs);
+                this.netSimTimers.add(timer);
+                return;
+            }
         }
     }
 
@@ -2170,12 +2197,17 @@ export class Connection {
     private handleEntityDestroy(msg: ServerMessage): void {
         const destroy = msg.payload(new EntityDestroy()) as EntityDestroy;
         const pos = destroy.position();
+        // L2 carried item: the destroy now carries the true death frame,
+        // stamped server-side at kill time. Fall back to the last
+        // GameEventBatch frame only when the field is absent (0 — a server
+        // predating the field), which is the old lower-bound guess.
+        const deathFrame = destroy.frame() || this.lastEventFrame;
         this.events.onEntityDestroy?.(
             destroy.entityId(),
             pos ? pos.x() : 0,
             pos ? pos.y() : 0,
             pos ? pos.z() : 0,
-            this.lastEventFrame,
+            deathFrame,
         );
     }
 

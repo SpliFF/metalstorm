@@ -531,6 +531,15 @@ table EntityDestroy {
     entity_id: uint32;
     destruction_type: uint8;    // Normal, explode, fade, etc.
     position: Vec3;
+    /// Sim frame the unit actually died on, stamped at CUnit::KillUnit time
+    /// (not at broadcast time). L1 schedules the death on the presentation
+    /// timeline at this frame so it lands together with its explosion.
+    /// Before this field existed the client had to guess with
+    /// `max(last GameEventBatch frame, newest entity-state base_frame)`,
+    /// which is only a lower bound: the server sends no combat batch on
+    /// event-less ticks, and it LOS-filters those batches per viewer while
+    /// destroys use a different losMask. 0 = unstamped (pre-L2 server).
+    frame: uint32 = 0;
 }
 
 /// Sensor type ordering matches `Spring.GetUnitSensorRadius`'s `type`

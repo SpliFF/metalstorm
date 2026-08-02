@@ -336,6 +336,10 @@ function toWeaponDefInfos(parsed: any): WeaponDefInfo[] {
         defId: num(d.def_id),
         name: str(d.name),
         projectileType: num(d.projectile_type),
+        // L2: default to synced (2) if a pre-L2 server omitted the field —
+        // never invent a client-owned flight for a weapon the server is still
+        // simulating, or the bolt would be drawn twice.
+        fxTier: num(d.fx_tier) || 2,
         projectileSpeed: num(d.projectile_speed),
         range: num(d.range),
         aoe: num(d.aoe),

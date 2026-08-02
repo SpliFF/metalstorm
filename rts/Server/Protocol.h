@@ -314,12 +314,14 @@ inline std::vector<uint8_t> BuildCombatEventBatch(
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_GameEventBatch, batch.Union());
 }
 
-/// Build an EntityDestroy message.
+/// Build an EntityDestroy message. `frame` is the sim frame the unit died on
+/// (stamped at kill time by UnitDeathCollector), so the client can schedule the
+/// death on the presentation timeline instead of inferring a lower bound.
 inline std::vector<uint8_t> BuildEntityDestroy(uint32_t entityId, uint8_t destructionType,
-                                                float x, float y, float z) {
+                                                float x, float y, float z, uint32_t frame) {
     flatbuffers::FlatBufferBuilder fbb(128);
     auto pos = SpringWeb::Vec3(x, y, z);
-    auto destroy = SpringWeb::CreateEntityDestroy(fbb, entityId, destructionType, &pos);
+    auto destroy = SpringWeb::CreateEntityDestroy(fbb, entityId, destructionType, &pos, frame);
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_EntityDestroy, destroy.Union());
 }
 

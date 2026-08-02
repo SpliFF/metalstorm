@@ -6908,6 +6908,7 @@ struct EntityDestroyT : public ::flatbuffers::NativeTable {
   uint32_t entity_id = 0;
   uint8_t destruction_type = 0;
   std::unique_ptr<SpringWeb::Vec3> position{};
+  uint32_t frame = 0;
   EntityDestroyT() = default;
   EntityDestroyT(const EntityDestroyT &o);
   EntityDestroyT(EntityDestroyT&&) FLATBUFFERS_NOEXCEPT = default;
@@ -6920,7 +6921,8 @@ struct EntityDestroy FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
     VT_ENTITY_ID = 4,
     VT_DESTRUCTION_TYPE = 6,
-    VT_POSITION = 8
+    VT_POSITION = 8,
+    VT_FRAME = 10
   };
   uint32_t entity_id() const {
     return GetField<uint32_t>(VT_ENTITY_ID, 0);
@@ -6931,11 +6933,23 @@ struct EntityDestroy FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const SpringWeb::Vec3 *position() const {
     return GetStruct<const SpringWeb::Vec3 *>(VT_POSITION);
   }
+  /// Sim frame the unit actually died on, stamped at CUnit::KillUnit time
+  /// (not at broadcast time). L1 schedules the death on the presentation
+  /// timeline at this frame so it lands together with its explosion.
+  /// Before this field existed the client had to guess with
+  /// `max(last GameEventBatch frame, newest entity-state base_frame)`,
+  /// which is only a lower bound: the server sends no combat batch on
+  /// event-less ticks, and it LOS-filters those batches per viewer while
+  /// destroys use a different losMask. 0 = unstamped (pre-L2 server).
+  uint32_t frame() const {
+    return GetField<uint32_t>(VT_FRAME, 0);
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<uint32_t>(verifier, VT_ENTITY_ID, 4) &&
            VerifyField<uint8_t>(verifier, VT_DESTRUCTION_TYPE, 1) &&
            VerifyField<SpringWeb::Vec3>(verifier, VT_POSITION, 4) &&
+           VerifyField<uint32_t>(verifier, VT_FRAME, 4) &&
            verifier.EndTable();
   }
   EntityDestroyT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -6956,6 +6970,9 @@ struct EntityDestroyBuilder {
   void add_position(const SpringWeb::Vec3 *position) {
     fbb_.AddStruct(EntityDestroy::VT_POSITION, position);
   }
+  void add_frame(uint32_t frame) {
+    fbb_.AddElement<uint32_t>(EntityDestroy::VT_FRAME, frame, 0);
+  }
   explicit EntityDestroyBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -6971,8 +6988,10 @@ inline ::flatbuffers::Offset<EntityDestroy> CreateEntityDestroy(
     ::flatbuffers::FlatBufferBuilder &_fbb,
     uint32_t entity_id = 0,
     uint8_t destruction_type = 0,
-    const SpringWeb::Vec3 *position = nullptr) {
+    const SpringWeb::Vec3 *position = nullptr,
+    uint32_t frame = 0) {
   EntityDestroyBuilder builder_(_fbb);
+  builder_.add_frame(frame);
   builder_.add_position(position);
   builder_.add_entity_id(entity_id);
   builder_.add_destruction_type(destruction_type);
@@ -16782,13 +16801,15 @@ inline ::flatbuffers::Offset<EntityCreate> CreateEntityCreate(::flatbuffers::Fla
 inline EntityDestroyT::EntityDestroyT(const EntityDestroyT &o)
       : entity_id(o.entity_id),
         destruction_type(o.destruction_type),
-        position((o.position) ? new SpringWeb::Vec3(*o.position) : nullptr) {
+        position((o.position) ? new SpringWeb::Vec3(*o.position) : nullptr),
+        frame(o.frame) {
 }
 
 inline EntityDestroyT &EntityDestroyT::operator=(EntityDestroyT o) FLATBUFFERS_NOEXCEPT {
   std::swap(entity_id, o.entity_id);
   std::swap(destruction_type, o.destruction_type);
   std::swap(position, o.position);
+  std::swap(frame, o.frame);
   return *this;
 }
 
@@ -16804,6 +16825,7 @@ inline void EntityDestroy::UnPackTo(EntityDestroyT *_o, const ::flatbuffers::res
   { auto _e = entity_id(); _o->entity_id = _e; }
   { auto _e = destruction_type(); _o->destruction_type = _e; }
   { auto _e = position(); if (_e) _o->position = std::unique_ptr<SpringWeb::Vec3>(new SpringWeb::Vec3(*_e)); }
+  { auto _e = frame(); _o->frame = _e; }
 }
 
 inline ::flatbuffers::Offset<EntityDestroy> EntityDestroy::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const EntityDestroyT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
@@ -16817,11 +16839,13 @@ inline ::flatbuffers::Offset<EntityDestroy> CreateEntityDestroy(::flatbuffers::F
   auto _entity_id = _o->entity_id;
   auto _destruction_type = _o->destruction_type;
   auto _position = _o->position ? _o->position.get() : nullptr;
+  auto _frame = _o->frame;
   return SpringWeb::CreateEntityDestroy(
       _fbb,
       _entity_id,
       _destruction_type,
-      _position);
+      _position,
+      _frame);
 }
 
 inline EntitySensorUpdateT *EntitySensorUpdate::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {

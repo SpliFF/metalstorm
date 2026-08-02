@@ -419,6 +419,11 @@ inline std::string SerializeOneWeaponDef(
     // client mirrors the same enum and dispatches each value to its
     // own visual builder.
     b.add_int("projectile_type", static_cast<int>(wd.projectileType));
+    // PLAN-latency L2.0 presentation tier: 1 = cosmetic (client owns the whole
+    // invented flight, no sim projectile exists), 2 = synced (real
+    // CWeaponProjectile, outcome contingent on sim state). The client needs
+    // this *before* the first shot so it knows how to treat each weapon.
+    b.add_int("fx_tier", static_cast<int>(wd.fxTier));
     b.add_float("projectile_speed", wd.projectilespeed);
     b.add_float("range", wd.range);
     b.add_float("aoe", wd.damages.damageAreaOfEffect);
