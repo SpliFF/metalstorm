@@ -12,7 +12,8 @@
     { "aiId": "null", "team": 3, "startPos": 3 },
     { "aiId": "null", "team": 5, "startPos": 5 },
     { "aiId": "null", "team": 6, "startPos": 6 },
-    { "aiId": "null", "team": 7, "startPos": 7 }
+    { "aiId": "null", "team": 7, "startPos": 7 },
+    { "aiId": "strategos", "team": 8, "startPos": 0 }
   ],
   "players": [
     { "username": "dev-north", "team": 0, "startPos": 0, "spectator": false },

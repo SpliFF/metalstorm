@@ -347,3 +347,31 @@ describe("co-commander coordinator (§5/§5.1)", function()
         end
     end)
 end)
+
+describe("GG.Teams.AIPlayers (§5 — the shared isAI test)", function()
+    -- Exported so game_scenario.lua's `ai` staging can find the virtual player
+    -- behind a scenario-declared NPC slot without re-deriving the subtle
+    -- opts.isAI == '1' check (an 11th GetPlayerInfo return, string-valued).
+    it("lists only present AI players on the team, in playerID order", function()
+        local world = mock.new()
+        world.setPlayer(3, 1, true)                  -- human
+        world.setPlayer(9, 1, true, false, true)     -- AI
+        world.setPlayer(7, 1, true, false, true)     -- AI
+        world.setPlayer(5, 2, true, false, true)     -- AI, different team
+        assert.are.same({ 7, 9 }, GG.Teams.AIPlayers(1))
+        assert.are.same({ 5 }, GG.Teams.AIPlayers(2))
+    end)
+
+    it("is empty for a team with no AI — the 'declared but no slot' case", function()
+        local world = mock.new()
+        world.setPlayer(3, 1, true)
+        assert.are.same({}, GG.Teams.AIPlayers(1))
+        assert.are.same({}, GG.Teams.AIPlayers(8))
+    end)
+
+    it("excludes a disconnected AI", function()
+        local world = mock.new()
+        world.setPlayer(7, 1, false, false, true)
+        assert.are.same({}, GG.Teams.AIPlayers(1))
+    end)
+end)

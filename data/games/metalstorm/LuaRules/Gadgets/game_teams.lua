@@ -143,6 +143,24 @@ local function isAIPlayer(playerID)
     return type(opts) == 'table' and opts.isAI == '1'
 end
 
+-- Exported because the isAI test above is a subtle one (an 11th return value,
+-- a STRING '1', only present with getPlayerOpts=true) that other gadgets need
+-- and would otherwise re-derive slightly differently. game_scenario.lua uses it
+-- to find the AI virtual player behind a scenario-declared NPC slot.
+GG.Teams = GG.Teams or {}
+
+--- Present AI virtual players on `teamID`, in playerID order. Empty when the
+--- team has no AI (e.g. the scenario declares an NPC faction but the launch
+--- supplied no `--ai` slot for it) — callers report that rather than guessing.
+function GG.Teams.AIPlayers(teamID)
+    local out = {}
+    for _, playerID in ipairs(Spring.GetPlayerList(teamID, true) or {}) do
+        if isPresent(playerID) and isAIPlayer(playerID) then out[#out + 1] = playerID end
+    end
+    table.sort(out)
+    return out
+end
+
 --- Recompute co-commander state for every team and publish it. Cheap (a couple
 --- of GetPlayerList/GetPlayerInfo passes); called only when team human-presence
 --- can change — GameStart + every join/leave.

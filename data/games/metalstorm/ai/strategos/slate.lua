@@ -134,9 +134,15 @@ local function implicitGoals(picture, profile, role, config, out)
         end
     end
 
-    -- RESERVE: always present, lowest priority — soaks uncommitted force at
-    -- the weighted centroid of owned regions (§3.1). The planner sends any
-    -- surplus here rather than trickling it into losing fights.
+    Slate.reserveGoal(out)
+end
+
+--- RESERVE: always present, lowest priority — soaks uncommitted force at the
+-- weighted centroid of owned regions (§3.1). The planner sends any surplus
+-- here rather than trickling it into losing fights. Hoisted out of
+-- implicitGoals because a SCRIPTED slate replaces the standing needs but still
+-- needs the surplus sink to exist.
+function Slate.reserveGoal(out)
     out[#out + 1] = {
         kind = 'RESERVE', id = 'reserve', source = 'implicit',
         region = nil, echelon = 'army', directive = 'RALLY',
@@ -203,13 +209,27 @@ end
 function Slate.build(picture, profile, role)
     local out = {}
     explicitGoals(picture, role, out)
-    implicitGoals(picture, profile, role, picture.config, out)
 
-    -- NPC scripted subset (§5): a scenario may hand the role a fixed slate
-    -- (raid / defend home / toll a route). If present, it REPLACES the
-    -- generated implicit goals but keeps explicit objectives it's eligible for.
+    -- NPC scripted subset (§5): a scenario hands the role a fixed slate (raid /
+    -- defend home / toll a route) via scripted.lua. When one actually fires it
+    -- REPLACES the generated standing needs — a raider raids what the scenario
+    -- put on its menu; it does not opportunistically SCOUT the whole frontier —
+    -- while explicit board objectives the role is eligible for are untouched
+    -- (an NPC's explicitMode is 'none', so in practice it has none). RESERVE
+    -- still runs either way: the planner needs the surplus sink to exist.
+    --
+    -- A scriptedSlate that returns false (no scenario parameters published)
+    -- falls through to the normal implicit slate rather than leaving the AI
+    -- goal-less — see Scripted.build's contract.
+    local scripted = false
     if role.scriptedSlate then
-        role.scriptedSlate(picture, out)
+        scripted = role.scriptedSlate(picture, out, role, profile) and true or false
+    end
+
+    if scripted then
+        Slate.reserveGoal(out)
+    else
+        implicitGoals(picture, profile, role, picture.config, out)
     end
     return out
 end
