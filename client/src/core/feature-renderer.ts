@@ -174,7 +174,7 @@ function renderPlaceholder(
  * centreY}`) can both be read without a conversion step in the content
  * pipeline. `yawBins`/`pitchBins` and `cols`/`rows` are the same thing.
  */
-interface ImpostorManifestEntry {
+export interface ImpostorManifestEntry {
     /** Atlas filename relative to the models dir. Default `<stem>_impostor.ktx2`. */
     diffuse?: string;
     yawBins?: number;
@@ -183,8 +183,14 @@ interface ImpostorManifestEntry {
     /** Baker spelling of yawBins / pitchBins. */
     cols?: number;
     rows?: number;
-    /** Elevation (degrees above the horizon) each row was baked at. */
+    /** Elevation (degrees above the horizon) each row was baked at. Baker
+     *  spelling is `pitchDegrees`; `pitches` is the older alias. */
+    pitchDegrees?: number[];
     pitches?: number[];
+    /** Relative yaw (DEGREES) that column 0 was baked at — the atlas's azimuth
+     *  phase. Omitted = 0, i.e. column 0 is the instance's back, which is what
+     *  `bake_impostors.py`'s default `vegetation` convention emits. */
+    azimuthPhaseDegrees?: number;
     /** Card size in elmos at scale 1. Default = the model's own extents. */
     width?: number;
     height?: number;
@@ -292,7 +298,9 @@ function modelExtentsOf(mesh: Mesh): { radius: number; height: number; width: nu
 }
 
 /// Build the atlas spec for a type, or null when it has none.
-function atlasSpecFor(
+/** Exported for test: this is the seam where a manifest field silently going
+ *  missing would make the runtime select cells against the wrong arc or phase. */
+export function atlasSpecFor(
     def: MapFeatureDefInfo, entry: ImpostorManifestEntry | null, extents: { width: number; height: number },
 ): FeatureImpostorAtlas | null {
     if (!entry) return null;
@@ -304,7 +312,8 @@ function atlasSpecFor(
             yawBins: entry.yawBins ?? entry.cols ?? DEFAULT_ATLAS_LAYOUT.yawBins,
             pitchBins: entry.pitchBins ?? entry.rows ?? DEFAULT_ATLAS_LAYOUT.pitchBins,
             frames: entry.frames ?? DEFAULT_ATLAS_LAYOUT.frames,
-            pitchDegrees: entry.pitches,
+            pitchDegrees: entry.pitchDegrees ?? entry.pitches,
+            azimuthPhaseDegrees: entry.azimuthPhaseDegrees,
         }),
         width: entry.width ?? extents.width,
         height: entry.height ?? extents.height,

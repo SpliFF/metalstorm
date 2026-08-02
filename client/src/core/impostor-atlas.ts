@@ -1,17 +1,24 @@
 /**
- * impostor-atlas.ts — the ONE place the impostor sprite-atlas layout
- * convention lives (PLAN-metalstorm-impostors.md "Atlas format (v2)").
+ * impostor-atlas.ts — the runtime half of the impostor sprite-atlas layout
+ * convention (PLAN-metalstorm-impostors.md "Atlas format (v2)"). The baker half
+ * is `tools/fable-model-forge/impostor_convention.py`; the two are kept in step
+ * by a cross-check test that reads the constants out of that file.
  *
- * Both the baker and the runtime must agree on this or you get a silent
- * wrong-frame bug, so the convention is stated once, here, and imported
- * everywhere else:
+ * Baker/runtime disagreement here is a silent wrong-frame bug, and it has
+ * already happened once: two independently-written, each-internally-consistent
+ * implementations disagreed by 180 degrees about what column 0 was, while both
+ * rendered "correct" pixels for their own baker. The fix (user decision
+ * 2026-08-03, option (b)) is that an atlas DECLARES its own arc and phase in
+ * metadata and the runtime reads what it is told, rather than either side
+ * assuming a global convention:
  *
  *   - Grid = `yawBins` columns x (`pitchBins` * `frames`) rows.
- *   - Columns = camera AZIMUTH relative to the instance's own forward axis,
- *     clockwise. Column 0 = dead-front view, column `yawBins/4` = viewed from
- *     the instance's right, column `yawBins/2` = back.
+ *   - Columns = camera AZIMUTH relative to the instance's own facing, i.e. the
+ *     runtime's `atan2(toCamX, toCamZ) - heading`. Which view column 0 holds is
+ *     the atlas's `azimuthPhase` — see it below, and mind that the zero point
+ *     is the BACK, not the front.
  *   - Rows, top->bottom within a frame group = camera ELEVATION above the
- *     instance's horizon. The 3-bin default is 15 deg / 45 deg / 80 deg.
+ *     instance's horizon, at the atlas's own `pitchDegrees`.
  *   - Flipbook frames extend downward as further row groups:
  *     `row = frame * pitchBins + pitchRow`.
  *   - Legacy single-view atlases are just `{yawBins: 1, pitchBins: 1,
@@ -30,11 +37,50 @@ export interface AtlasLayout {
     /** Animation frames (row groups). 1 = static. */
     frames: number;
     /** Elevation (degrees above the horizon) each pitch row was baked at.
-     *  Bakers emit their own arc — `bake_impostors.py` uses 18/42/68 where the
-     *  §2.1 hand-authored sheets used 15/45/80 — so the runtime must read the
-     *  baker's numbers rather than assume. Absent = the defaults below. */
+     *  Bakers emit their own arc — the `vegetation` convention uses 18/42/68
+     *  where the `infantry_v2` sheets use 15/45/80 — so the runtime must read
+     *  the baker's numbers rather than assume. Absent = the defaults below. */
     pitchDegrees?: readonly number[];
+    /**
+     * Relative yaw (RADIANS) that column 0 was baked at — i.e. the atlas's
+     * azimuth phase. Absent = {@link DEFAULT_AZIMUTH_PHASE}.
+     *
+     * Relative yaw is `viewYaw - heading`, and its zero point is easy to get
+     * backwards, so: placing a `-Z`-forward model at heading `h` sends its
+     * forward to world `(-sin h, ., -cos h)`, which makes the camera direction
+     * at relative yaw 0 exactly `-forward`. So
+     *
+     *   - relative yaw 0   = camera directly BEHIND, showing the instance's BACK
+     *   - relative yaw PI  = camera directly IN FRONT, showing its FRONT
+     *
+     * and hence {@link AZIMUTH_PHASE_COL0_BACK} = 0 (the default, and what
+     * every atlas baked by `bake_impostors.py`'s `vegetation` convention uses)
+     * versus {@link AZIMUTH_PHASE_COL0_FRONT} = PI (the `infantry_v2` sheets).
+     * Column `c` sits at relative yaw `azimuthPhase + c*2PI/yawBins`.
+     */
+    azimuthPhase?: number;
 }
+
+/** Phase whose column 0 is the instance's BACK view. The DEFAULT: an atlas that
+ *  declares no phase is read this way, so existing atlases are unaffected. */
+export const AZIMUTH_PHASE_COL0_BACK = 0;
+
+/** Phase whose column 0 is the instance's FRONT view. */
+export const AZIMUTH_PHASE_COL0_FRONT = Math.PI;
+
+/** Applied when an atlas declares no `azimuthPhase`. */
+export const DEFAULT_AZIMUTH_PHASE = AZIMUTH_PHASE_COL0_BACK;
+
+/** Raw layout as it arrives from an atlas sidecar / manifest / def JSON. The
+ *  wire spells the phase in DEGREES (`azimuthPhaseDegrees`) while this module
+ *  works in radians, so the unit is named on the wire rather than left to a
+ *  convention that could silently invert. */
+export type RawAtlasLayout = Partial<AtlasLayout> & {
+    /** Baker/manifest spelling of {@link AtlasLayout.azimuthPhase}, in degrees. */
+    azimuthPhaseDegrees?: number;
+    /** Legacy manifest spelling of {@link AtlasLayout.pitchDegrees}. */
+    pitches?: readonly number[];
+};
 
 /** v2 default: 8 azimuth x 3 elevation, single frame. */
 export const DEFAULT_ATLAS_LAYOUT: AtlasLayout = { yawBins: 8, pitchBins: 3, frames: 1 };
@@ -42,18 +88,29 @@ export const DEFAULT_ATLAS_LAYOUT: AtlasLayout = { yawBins: 8, pitchBins: 3, fra
 /** Single-cell atlas — what a legacy front-view-only sprite sheet is. */
 export const SINGLE_CELL_LAYOUT: AtlasLayout = { yawBins: 1, pitchBins: 1, frames: 1 };
 
-/** Elevation (degrees above the instance horizon) each pitch row was baked at,
- *  for the canonical 3-bin layout. */
+/**
+ * LEGACY FALLBACK arc for a 3-row atlas that declares no `pitchDegrees`.
+ *
+ * This is NOT "the" convention — different atlases ship different arcs, which is
+ * why `pitchDegrees` travels with each one. It happens to match `infantry_v2`
+ * (15/45/80) and NOT the `vegetation` bake (18/42/68), so a multi-row atlas that
+ * loses its declared arc in transit will silently select rows against the wrong
+ * elevations. Kept only so undeclared atlases keep behaving exactly as they do
+ * today; every baker emits the arc, and a multi-row atlas should always declare.
+ */
 export const PITCH_BIN_DEGREES: readonly number[] = [15, 45, 80];
 
 /** Normalise a possibly-partial layout from JSON/def data. */
-export function normalizeAtlasLayout(raw: Partial<AtlasLayout> | null | undefined): AtlasLayout {
+export function normalizeAtlasLayout(raw: RawAtlasLayout | null | undefined): AtlasLayout {
     const clamp = (v: unknown, fallback: number): number => {
         const n = typeof v === 'number' && Number.isFinite(v) ? Math.floor(v) : fallback;
         return n >= 1 ? n : 1;
     };
     const pitchBins = clamp(raw?.pitchBins, 1);
-    const pitches = raw?.pitchDegrees;
+    // `pitches` is the older manifest spelling of the same field; accept both so
+    // a sidecar written by the baker (`pitchDegrees`) can't silently lose its arc
+    // and fall back to a DIFFERENT one than the atlas was baked on.
+    const pitches = raw?.pitchDegrees ?? raw?.pitches;
     const usable = Array.isArray(pitches)
         && pitches.length === pitchBins
         && pitches.every((p) => typeof p === 'number' && Number.isFinite(p));
@@ -61,8 +118,24 @@ export function normalizeAtlasLayout(raw: Partial<AtlasLayout> | null | undefine
         yawBins: clamp(raw?.yawBins, 1),
         pitchBins,
         frames: clamp(raw?.frames, 1),
+        azimuthPhase: normalizeAzimuthPhase(raw),
         ...(usable ? { pitchDegrees: [...(pitches as readonly number[])] } : {}),
     };
+}
+
+/** Resolve the azimuth phase in radians, preferring the wire's explicit
+ *  `azimuthPhaseDegrees`, then a radian `azimuthPhase`, then the default.
+ *  Wrapped into [0, 2PI) so a negative or over-turn declaration still lands on
+ *  the same column. */
+function normalizeAzimuthPhase(raw: RawAtlasLayout | null | undefined): number {
+    const deg = raw?.azimuthPhaseDegrees;
+    const rad = typeof deg === 'number' && Number.isFinite(deg)
+        ? (deg * Math.PI) / 180
+        : (typeof raw?.azimuthPhase === 'number' && Number.isFinite(raw.azimuthPhase)
+            ? raw.azimuthPhase
+            : DEFAULT_AZIMUTH_PHASE);
+    const wrapped = rad % (2 * Math.PI);
+    return wrapped < 0 ? wrapped + 2 * Math.PI : wrapped;
 }
 
 /** Total cells in the atlas. */
@@ -158,6 +231,14 @@ export function atlasCellIndex(col: number, pitchRow: number, frame: number, lay
  * Choose the atlas cell for one instance given the vector from the instance to
  * the camera (world space, Babylon RH: heading 0 = +Z) and the instance's own
  * heading.
+ *
+ * The column comes from the relative yaw `viewYaw - heading`, offset by the
+ * atlas's own {@link AtlasLayout.azimuthPhase} — so column 0 shows whatever view
+ * that atlas baked there. With the default phase of 0 that is the instance's
+ * BACK (relative yaw 0 puts the camera directly behind it); a `PI`-phase sheet
+ * such as `infantry_v2` has its FRONT view in column 0 instead. The phase is
+ * read from the atlas rather than assumed, because two bakers already ship
+ * disagreeing by exactly this 180 degrees.
  */
 export function selectAtlasCell(
     toCamX: number, toCamY: number, toCamZ: number,
@@ -165,7 +246,8 @@ export function selectAtlasCell(
 ): number {
     if (layout.yawBins <= 1 && layout.pitchBins <= 1 && layout.frames <= 1) return 0;
     const viewYaw = Math.atan2(toCamX, toCamZ);
-    const col = quantizeYawBin(viewYaw - heading, layout.yawBins);
+    const phase = layout.azimuthPhase ?? DEFAULT_AZIMUTH_PHASE;
+    const col = quantizeYawBin(viewYaw - heading - phase, layout.yawBins);
     const flat = Math.sqrt(toCamX * toCamX + toCamZ * toCamZ);
     // Straight overhead (flat ~ 0) reads as the highest elevation row.
     const pitch = flat < 1e-4 ? Math.PI / 2 : Math.atan2(toCamY, flat);
