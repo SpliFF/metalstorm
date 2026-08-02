@@ -184,7 +184,8 @@ inline std::vector<uint8_t> BuildCombatEventBatch(
     const std::vector<ProjectileImpactEventData>& projImpacts = {},
     const std::vector<ProjectileTrajectoryEventData>& projTrajectories = {},
     const std::vector<SoundEventData>& sounds = {},
-    const std::vector<SeismicPingData>& seismicPings = {})
+    const std::vector<SeismicPingData>& seismicPings = {},
+    const std::vector<FireOutcomeEventData>& fireOutcomes = {})
 {
     flatbuffers::FlatBufferBuilder fbb(
         256 + events.size() * 32
@@ -192,7 +193,8 @@ inline std::vector<uint8_t> BuildCombatEventBatch(
             + projImpacts.size() * 32
             + projTrajectories.size() * 40
             + sounds.size() * 32
-            + seismicPings.size() * 24);
+            + seismicPings.size() * 24
+            + fireOutcomes.size() * 80);
 
     std::vector<flatbuffers::Offset<SpringWeb::CombatEvent>> combatOffsets;
     combatOffsets.reserve(events.size());
@@ -258,6 +260,30 @@ inline std::vector<uint8_t> BuildCombatEventBatch(
             e.team));
     }
 
+    // PLAN-latency L2.1 — Tier-C fire outcomes. Disjoint from the
+    // fired/impact/trajectory vectors above: a weaponDef contributes to one
+    // side or the other, never both.
+    std::vector<flatbuffers::Offset<SpringWeb::FireOutcomeEvent>> outcomeOffsets;
+    outcomeOffsets.reserve(fireOutcomes.size());
+    for (const auto& e : fireOutcomes) {
+        auto origin = SpringWeb::Vec3(e.origin.x, e.origin.y, e.origin.z);
+        auto tgt    = SpringWeb::Vec3(e.targetPos.x, e.targetPos.y, e.targetPos.z);
+        auto impact = SpringWeb::Vec3(e.impactPos.x, e.impactPos.y, e.impactPos.z);
+        SpringWeb::FireOutcomeEventBuilder fob(fbb);
+        fob.add_fire_frame(e.fireFrame);
+        fob.add_weapon_def_id(e.weaponDefId);
+        fob.add_owner_id(e.ownerId);
+        fob.add_team(e.team);
+        fob.add_origin(&origin);
+        fob.add_target_id(e.targetId);
+        fob.add_target_pos(&tgt);
+        fob.add_outcome(static_cast<SpringWeb::FireOutcome>(e.outcome));
+        fob.add_impact_frame(e.impactFrame);
+        fob.add_impact_pos(&impact);
+        fob.add_gravity(e.gravity);
+        outcomeOffsets.push_back(fob.Finish());
+    }
+
     std::vector<flatbuffers::Offset<SpringWeb::SoundEvent>> soundOffsets;
     soundOffsets.reserve(sounds.size());
     for (const auto& s : sounds) {
@@ -309,8 +335,10 @@ inline std::vector<uint8_t> BuildCombatEventBatch(
     auto soundVec   = fbb.CreateVector(soundOffsets);
     auto seismicVec = fbb.CreateVector(seismicOffsets);
     auto musicVec   = fbb.CreateVector(musicOffsets);
+    auto outcomeVec = fbb.CreateVector(outcomeOffsets);
     auto batch = SpringWeb::CreateGameEventBatch(
-        fbb, frame, /*events=*/0, combatVec, firedVec, impactVec, trajVec, soundVec, seismicVec, musicVec);
+        fbb, frame, /*events=*/0, combatVec, firedVec, impactVec, trajVec, soundVec, seismicVec,
+        musicVec, outcomeVec);
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_GameEventBatch, batch.Union());
 }
 

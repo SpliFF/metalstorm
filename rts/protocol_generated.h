@@ -213,6 +213,10 @@ struct GameEvent;
 struct GameEventBuilder;
 struct GameEventT;
 
+struct FireOutcomeEvent;
+struct FireOutcomeEventBuilder;
+struct FireOutcomeEventT;
+
 struct ProjectileFiredEvent;
 struct ProjectileFiredEventBuilder;
 struct ProjectileFiredEventT;
@@ -1497,6 +1501,49 @@ inline const char *EnumNameProjectileTrajectoryReason(ProjectileTrajectoryReason
   if (::flatbuffers::IsOutRange(e, ProjectileTrajectoryReason_Bounce, ProjectileTrajectoryReason_InterceptRetarget)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesProjectileTrajectoryReason()[index];
+}
+
+/// How a Tier-C (cosmetic) shot ends. Resolved server-side at fire time —
+/// see FireOutcomeEvent. Values mirror ProjectileImpactKind's semantics
+/// where they overlap, but this is a *fire-time prediction*, not a
+/// discovered collision, so it is a separate enum.
+enum FireOutcome : uint8_t {
+  FireOutcome_Hit = 0,
+  FireOutcome_Miss = 1,
+  FireOutcome_Shielded = 2,
+  FireOutcome_Intercepted = 3,
+  FireOutcome_Expired = 4,
+  FireOutcome_MIN = FireOutcome_Hit,
+  FireOutcome_MAX = FireOutcome_Expired
+};
+
+inline const FireOutcome (&EnumValuesFireOutcome())[5] {
+  static const FireOutcome values[] = {
+    FireOutcome_Hit,
+    FireOutcome_Miss,
+    FireOutcome_Shielded,
+    FireOutcome_Intercepted,
+    FireOutcome_Expired
+  };
+  return values;
+}
+
+inline const char * const *EnumNamesFireOutcome() {
+  static const char * const names[6] = {
+    "Hit",
+    "Miss",
+    "Shielded",
+    "Intercepted",
+    "Expired",
+    nullptr
+  };
+  return names;
+}
+
+inline const char *EnumNameFireOutcome(FireOutcome e) {
+  if (::flatbuffers::IsOutRange(e, FireOutcome_Hit, FireOutcome_Expired)) return "";
+  const size_t index = static_cast<size_t>(e);
+  return EnumNamesFireOutcome()[index];
 }
 
 /// What produced a sound. Lets the client resolve `source_def_id` against
@@ -7312,6 +7359,192 @@ inline ::flatbuffers::Offset<GameEvent> CreateGameEventDirect(
 
 ::flatbuffers::Offset<GameEvent> CreateGameEvent(::flatbuffers::FlatBufferBuilder &_fbb, const GameEventT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 
+struct FireOutcomeEventT : public ::flatbuffers::NativeTable {
+  typedef FireOutcomeEvent TableType;
+  uint32_t fire_frame = 0;
+  uint16_t weapon_def_id = 0;
+  uint32_t owner_id = 0;
+  uint8_t team = 0;
+  std::unique_ptr<SpringWeb::Vec3> origin{};
+  uint32_t target_id = 0;
+  std::unique_ptr<SpringWeb::Vec3> target_pos{};
+  SpringWeb::FireOutcome outcome = SpringWeb::FireOutcome_Hit;
+  uint32_t impact_frame = 0;
+  std::unique_ptr<SpringWeb::Vec3> impact_pos{};
+  float gravity = 0.0f;
+  FireOutcomeEventT() = default;
+  FireOutcomeEventT(const FireOutcomeEventT &o);
+  FireOutcomeEventT(FireOutcomeEventT&&) FLATBUFFERS_NOEXCEPT = default;
+  FireOutcomeEventT &operator=(FireOutcomeEventT o) FLATBUFFERS_NOEXCEPT;
+};
+
+/// PLAN-latency L2.1 — Tier-C ("cosmetic") fire outcome.
+///
+/// For a weaponDef classified FX_TIER_COSMETIC the server does NOT spawn a
+/// CWeaponProjectile at all. It resolves the whole shot at fire time and
+/// sends this ONE event in place of the Fired / Trajectory / Impact triple.
+/// Damage is still applied authoritatively on the server, scheduled on the
+/// sim timeline at `impact_frame`.
+///
+/// The client invents the entire visual: it schedules a spawn at
+/// `fire_frame` and a detonation at `impact_frame` on the L1 presentation
+/// timeline, and solves a trajectory that provably satisfies
+/// `pos(fire_frame) == origin` and `pos(impact_frame) == impact_pos`. There
+/// is no mid-flight correction and therefore no snap.
+struct FireOutcomeEvent FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef FireOutcomeEventT NativeTableType;
+  typedef FireOutcomeEventBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_FIRE_FRAME = 4,
+    VT_WEAPON_DEF_ID = 6,
+    VT_OWNER_ID = 8,
+    VT_TEAM = 10,
+    VT_ORIGIN = 12,
+    VT_TARGET_ID = 14,
+    VT_TARGET_POS = 16,
+    VT_OUTCOME = 18,
+    VT_IMPACT_FRAME = 20,
+    VT_IMPACT_POS = 22,
+    VT_GRAVITY = 24
+  };
+  uint32_t fire_frame() const {
+    return GetField<uint32_t>(VT_FIRE_FRAME, 0);
+  }
+  uint16_t weapon_def_id() const {
+    return GetField<uint16_t>(VT_WEAPON_DEF_ID, 0);
+  }
+  uint32_t owner_id() const {
+    return GetField<uint32_t>(VT_OWNER_ID, 0);
+  }
+  uint8_t team() const {
+    return GetField<uint8_t>(VT_TEAM, 0);
+  }
+  const SpringWeb::Vec3 *origin() const {
+    return GetStruct<const SpringWeb::Vec3 *>(VT_ORIGIN);
+  }
+  uint32_t target_id() const {
+    return GetField<uint32_t>(VT_TARGET_ID, 0);
+  }
+  const SpringWeb::Vec3 *target_pos() const {
+    return GetStruct<const SpringWeb::Vec3 *>(VT_TARGET_POS);
+  }
+  SpringWeb::FireOutcome outcome() const {
+    return static_cast<SpringWeb::FireOutcome>(GetField<uint8_t>(VT_OUTCOME, 0));
+  }
+  uint32_t impact_frame() const {
+    return GetField<uint32_t>(VT_IMPACT_FRAME, 0);
+  }
+  const SpringWeb::Vec3 *impact_pos() const {
+    return GetStruct<const SpringWeb::Vec3 *>(VT_IMPACT_POS);
+  }
+  /// Per-frame gravity the server used to resolve the arc (0 for a
+  /// straight shot). Not in PLAN-latency-projectiles §3.1's field list,
+  /// but the client's closed-form solver needs it: the ballistic solution
+  /// through (origin, impact_pos, Δt) is only unique once g is fixed, and
+  /// `mygravity` is a per-projectile resolution of the def default against
+  /// the map gravity that the client cannot reconstruct from weaponDefs
+  /// alone. ProjectileFiredEvent carries it for the same reason.
+  float gravity() const {
+    return GetField<float>(VT_GRAVITY, 0.0f);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<uint32_t>(verifier, VT_FIRE_FRAME, 4) &&
+           VerifyField<uint16_t>(verifier, VT_WEAPON_DEF_ID, 2) &&
+           VerifyField<uint32_t>(verifier, VT_OWNER_ID, 4) &&
+           VerifyField<uint8_t>(verifier, VT_TEAM, 1) &&
+           VerifyField<SpringWeb::Vec3>(verifier, VT_ORIGIN, 4) &&
+           VerifyField<uint32_t>(verifier, VT_TARGET_ID, 4) &&
+           VerifyField<SpringWeb::Vec3>(verifier, VT_TARGET_POS, 4) &&
+           VerifyField<uint8_t>(verifier, VT_OUTCOME, 1) &&
+           VerifyField<uint32_t>(verifier, VT_IMPACT_FRAME, 4) &&
+           VerifyField<SpringWeb::Vec3>(verifier, VT_IMPACT_POS, 4) &&
+           VerifyField<float>(verifier, VT_GRAVITY, 4) &&
+           verifier.EndTable();
+  }
+  FireOutcomeEventT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(FireOutcomeEventT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<FireOutcomeEvent> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const FireOutcomeEventT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct FireOutcomeEventBuilder {
+  typedef FireOutcomeEvent Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_fire_frame(uint32_t fire_frame) {
+    fbb_.AddElement<uint32_t>(FireOutcomeEvent::VT_FIRE_FRAME, fire_frame, 0);
+  }
+  void add_weapon_def_id(uint16_t weapon_def_id) {
+    fbb_.AddElement<uint16_t>(FireOutcomeEvent::VT_WEAPON_DEF_ID, weapon_def_id, 0);
+  }
+  void add_owner_id(uint32_t owner_id) {
+    fbb_.AddElement<uint32_t>(FireOutcomeEvent::VT_OWNER_ID, owner_id, 0);
+  }
+  void add_team(uint8_t team) {
+    fbb_.AddElement<uint8_t>(FireOutcomeEvent::VT_TEAM, team, 0);
+  }
+  void add_origin(const SpringWeb::Vec3 *origin) {
+    fbb_.AddStruct(FireOutcomeEvent::VT_ORIGIN, origin);
+  }
+  void add_target_id(uint32_t target_id) {
+    fbb_.AddElement<uint32_t>(FireOutcomeEvent::VT_TARGET_ID, target_id, 0);
+  }
+  void add_target_pos(const SpringWeb::Vec3 *target_pos) {
+    fbb_.AddStruct(FireOutcomeEvent::VT_TARGET_POS, target_pos);
+  }
+  void add_outcome(SpringWeb::FireOutcome outcome) {
+    fbb_.AddElement<uint8_t>(FireOutcomeEvent::VT_OUTCOME, static_cast<uint8_t>(outcome), 0);
+  }
+  void add_impact_frame(uint32_t impact_frame) {
+    fbb_.AddElement<uint32_t>(FireOutcomeEvent::VT_IMPACT_FRAME, impact_frame, 0);
+  }
+  void add_impact_pos(const SpringWeb::Vec3 *impact_pos) {
+    fbb_.AddStruct(FireOutcomeEvent::VT_IMPACT_POS, impact_pos);
+  }
+  void add_gravity(float gravity) {
+    fbb_.AddElement<float>(FireOutcomeEvent::VT_GRAVITY, gravity, 0.0f);
+  }
+  explicit FireOutcomeEventBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<FireOutcomeEvent> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<FireOutcomeEvent>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<FireOutcomeEvent> CreateFireOutcomeEvent(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint32_t fire_frame = 0,
+    uint16_t weapon_def_id = 0,
+    uint32_t owner_id = 0,
+    uint8_t team = 0,
+    const SpringWeb::Vec3 *origin = nullptr,
+    uint32_t target_id = 0,
+    const SpringWeb::Vec3 *target_pos = nullptr,
+    SpringWeb::FireOutcome outcome = SpringWeb::FireOutcome_Hit,
+    uint32_t impact_frame = 0,
+    const SpringWeb::Vec3 *impact_pos = nullptr,
+    float gravity = 0.0f) {
+  FireOutcomeEventBuilder builder_(_fbb);
+  builder_.add_gravity(gravity);
+  builder_.add_impact_pos(impact_pos);
+  builder_.add_impact_frame(impact_frame);
+  builder_.add_target_pos(target_pos);
+  builder_.add_target_id(target_id);
+  builder_.add_origin(origin);
+  builder_.add_owner_id(owner_id);
+  builder_.add_fire_frame(fire_frame);
+  builder_.add_weapon_def_id(weapon_def_id);
+  builder_.add_outcome(outcome);
+  builder_.add_team(team);
+  return builder_.Finish();
+}
+
+::flatbuffers::Offset<FireOutcomeEvent> CreateFireOutcomeEvent(::flatbuffers::FlatBufferBuilder &_fbb, const FireOutcomeEventT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
 struct ProjectileFiredEventT : public ::flatbuffers::NativeTable {
   typedef ProjectileFiredEvent TableType;
   uint32_t proj_id = 0;
@@ -8036,6 +8269,7 @@ struct GameEventBatchT : public ::flatbuffers::NativeTable {
   std::vector<std::unique_ptr<SpringWeb::SoundEventT>> sounds{};
   std::vector<std::unique_ptr<SpringWeb::SeismicPingT>> seismic_pings{};
   std::vector<std::unique_ptr<SpringWeb::MusicEventT>> music_events{};
+  std::vector<std::unique_ptr<SpringWeb::FireOutcomeEventT>> fire_outcomes{};
   GameEventBatchT() = default;
   GameEventBatchT(const GameEventBatchT &o);
   GameEventBatchT(GameEventBatchT&&) FLATBUFFERS_NOEXCEPT = default;
@@ -8054,7 +8288,8 @@ struct GameEventBatch FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_PROJECTILE_TRAJECTORIES = 14,
     VT_SOUNDS = 16,
     VT_SEISMIC_PINGS = 18,
-    VT_MUSIC_EVENTS = 20
+    VT_MUSIC_EVENTS = 20,
+    VT_FIRE_OUTCOMES = 22
   };
   uint32_t frame() const {
     return GetField<uint32_t>(VT_FRAME, 0);
@@ -8093,6 +8328,18 @@ struct GameEventBatch FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::MusicEvent>> *music_events() const {
     return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::MusicEvent>> *>(VT_MUSIC_EVENTS);
   }
+  /// Tier-C fire outcomes (PLAN-latency L2.1). A weaponDef classified
+  /// FX_TIER_COSMETIC emits exactly one of these per shot and NO
+  /// fired/trajectory/impact events — the two streams are disjoint by
+  /// weaponDef, never both for the same shot.
+  ///
+  /// Appended last on purpose: FlatBuffers assigns vtable slots in
+  /// declaration order, so inserting this above `sounds` would have
+  /// renumbered three existing fields and silently broken any client
+  /// built against the old schema. Additive means "at the end".
+  const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::FireOutcomeEvent>> *fire_outcomes() const {
+    return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::FireOutcomeEvent>> *>(VT_FIRE_OUTCOMES);
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<uint32_t>(verifier, VT_FRAME, 4) &&
@@ -8120,6 +8367,9 @@ struct GameEventBatch FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyOffset(verifier, VT_MUSIC_EVENTS) &&
            verifier.VerifyVector(music_events()) &&
            verifier.VerifyVectorOfTables(music_events()) &&
+           VerifyOffset(verifier, VT_FIRE_OUTCOMES) &&
+           verifier.VerifyVector(fire_outcomes()) &&
+           verifier.VerifyVectorOfTables(fire_outcomes()) &&
            verifier.EndTable();
   }
   GameEventBatchT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -8158,6 +8408,9 @@ struct GameEventBatchBuilder {
   void add_music_events(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::MusicEvent>>> music_events) {
     fbb_.AddOffset(GameEventBatch::VT_MUSIC_EVENTS, music_events);
   }
+  void add_fire_outcomes(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::FireOutcomeEvent>>> fire_outcomes) {
+    fbb_.AddOffset(GameEventBatch::VT_FIRE_OUTCOMES, fire_outcomes);
+  }
   explicit GameEventBatchBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -8179,8 +8432,10 @@ inline ::flatbuffers::Offset<GameEventBatch> CreateGameEventBatch(
     ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::ProjectileTrajectoryEvent>>> projectile_trajectories = 0,
     ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::SoundEvent>>> sounds = 0,
     ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::SeismicPing>>> seismic_pings = 0,
-    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::MusicEvent>>> music_events = 0) {
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::MusicEvent>>> music_events = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::FireOutcomeEvent>>> fire_outcomes = 0) {
   GameEventBatchBuilder builder_(_fbb);
+  builder_.add_fire_outcomes(fire_outcomes);
   builder_.add_music_events(music_events);
   builder_.add_seismic_pings(seismic_pings);
   builder_.add_sounds(sounds);
@@ -8203,7 +8458,8 @@ inline ::flatbuffers::Offset<GameEventBatch> CreateGameEventBatchDirect(
     const std::vector<::flatbuffers::Offset<SpringWeb::ProjectileTrajectoryEvent>> *projectile_trajectories = nullptr,
     const std::vector<::flatbuffers::Offset<SpringWeb::SoundEvent>> *sounds = nullptr,
     const std::vector<::flatbuffers::Offset<SpringWeb::SeismicPing>> *seismic_pings = nullptr,
-    const std::vector<::flatbuffers::Offset<SpringWeb::MusicEvent>> *music_events = nullptr) {
+    const std::vector<::flatbuffers::Offset<SpringWeb::MusicEvent>> *music_events = nullptr,
+    const std::vector<::flatbuffers::Offset<SpringWeb::FireOutcomeEvent>> *fire_outcomes = nullptr) {
   auto events__ = events ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::GameEvent>>(*events) : 0;
   auto combat_events__ = combat_events ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::CombatEvent>>(*combat_events) : 0;
   auto projectile_fired__ = projectile_fired ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::ProjectileFiredEvent>>(*projectile_fired) : 0;
@@ -8212,6 +8468,7 @@ inline ::flatbuffers::Offset<GameEventBatch> CreateGameEventBatchDirect(
   auto sounds__ = sounds ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::SoundEvent>>(*sounds) : 0;
   auto seismic_pings__ = seismic_pings ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::SeismicPing>>(*seismic_pings) : 0;
   auto music_events__ = music_events ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::MusicEvent>>(*music_events) : 0;
+  auto fire_outcomes__ = fire_outcomes ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::FireOutcomeEvent>>(*fire_outcomes) : 0;
   return SpringWeb::CreateGameEventBatch(
       _fbb,
       frame,
@@ -8222,7 +8479,8 @@ inline ::flatbuffers::Offset<GameEventBatch> CreateGameEventBatchDirect(
       projectile_trajectories__,
       sounds__,
       seismic_pings__,
-      music_events__);
+      music_events__,
+      fire_outcomes__);
 }
 
 ::flatbuffers::Offset<GameEventBatch> CreateGameEventBatch(::flatbuffers::FlatBufferBuilder &_fbb, const GameEventBatchT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
@@ -16995,6 +17253,91 @@ inline ::flatbuffers::Offset<GameEvent> CreateGameEvent(::flatbuffers::FlatBuffe
       _payload);
 }
 
+inline FireOutcomeEventT::FireOutcomeEventT(const FireOutcomeEventT &o)
+      : fire_frame(o.fire_frame),
+        weapon_def_id(o.weapon_def_id),
+        owner_id(o.owner_id),
+        team(o.team),
+        origin((o.origin) ? new SpringWeb::Vec3(*o.origin) : nullptr),
+        target_id(o.target_id),
+        target_pos((o.target_pos) ? new SpringWeb::Vec3(*o.target_pos) : nullptr),
+        outcome(o.outcome),
+        impact_frame(o.impact_frame),
+        impact_pos((o.impact_pos) ? new SpringWeb::Vec3(*o.impact_pos) : nullptr),
+        gravity(o.gravity) {
+}
+
+inline FireOutcomeEventT &FireOutcomeEventT::operator=(FireOutcomeEventT o) FLATBUFFERS_NOEXCEPT {
+  std::swap(fire_frame, o.fire_frame);
+  std::swap(weapon_def_id, o.weapon_def_id);
+  std::swap(owner_id, o.owner_id);
+  std::swap(team, o.team);
+  std::swap(origin, o.origin);
+  std::swap(target_id, o.target_id);
+  std::swap(target_pos, o.target_pos);
+  std::swap(outcome, o.outcome);
+  std::swap(impact_frame, o.impact_frame);
+  std::swap(impact_pos, o.impact_pos);
+  std::swap(gravity, o.gravity);
+  return *this;
+}
+
+inline FireOutcomeEventT *FireOutcomeEvent::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<FireOutcomeEventT>(new FireOutcomeEventT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void FireOutcomeEvent::UnPackTo(FireOutcomeEventT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = fire_frame(); _o->fire_frame = _e; }
+  { auto _e = weapon_def_id(); _o->weapon_def_id = _e; }
+  { auto _e = owner_id(); _o->owner_id = _e; }
+  { auto _e = team(); _o->team = _e; }
+  { auto _e = origin(); if (_e) _o->origin = std::unique_ptr<SpringWeb::Vec3>(new SpringWeb::Vec3(*_e)); }
+  { auto _e = target_id(); _o->target_id = _e; }
+  { auto _e = target_pos(); if (_e) _o->target_pos = std::unique_ptr<SpringWeb::Vec3>(new SpringWeb::Vec3(*_e)); }
+  { auto _e = outcome(); _o->outcome = _e; }
+  { auto _e = impact_frame(); _o->impact_frame = _e; }
+  { auto _e = impact_pos(); if (_e) _o->impact_pos = std::unique_ptr<SpringWeb::Vec3>(new SpringWeb::Vec3(*_e)); }
+  { auto _e = gravity(); _o->gravity = _e; }
+}
+
+inline ::flatbuffers::Offset<FireOutcomeEvent> FireOutcomeEvent::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const FireOutcomeEventT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return CreateFireOutcomeEvent(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<FireOutcomeEvent> CreateFireOutcomeEvent(::flatbuffers::FlatBufferBuilder &_fbb, const FireOutcomeEventT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const FireOutcomeEventT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _fire_frame = _o->fire_frame;
+  auto _weapon_def_id = _o->weapon_def_id;
+  auto _owner_id = _o->owner_id;
+  auto _team = _o->team;
+  auto _origin = _o->origin ? _o->origin.get() : nullptr;
+  auto _target_id = _o->target_id;
+  auto _target_pos = _o->target_pos ? _o->target_pos.get() : nullptr;
+  auto _outcome = _o->outcome;
+  auto _impact_frame = _o->impact_frame;
+  auto _impact_pos = _o->impact_pos ? _o->impact_pos.get() : nullptr;
+  auto _gravity = _o->gravity;
+  return SpringWeb::CreateFireOutcomeEvent(
+      _fbb,
+      _fire_frame,
+      _weapon_def_id,
+      _owner_id,
+      _team,
+      _origin,
+      _target_id,
+      _target_pos,
+      _outcome,
+      _impact_frame,
+      _impact_pos,
+      _gravity);
+}
+
 inline ProjectileFiredEventT::ProjectileFiredEventT(const ProjectileFiredEventT &o)
       : proj_id(o.proj_id),
         weapon_def_id(o.weapon_def_id),
@@ -17362,6 +17705,8 @@ inline GameEventBatchT::GameEventBatchT(const GameEventBatchT &o)
   for (const auto &seismic_pings_ : o.seismic_pings) { seismic_pings.emplace_back((seismic_pings_) ? new SpringWeb::SeismicPingT(*seismic_pings_) : nullptr); }
   music_events.reserve(o.music_events.size());
   for (const auto &music_events_ : o.music_events) { music_events.emplace_back((music_events_) ? new SpringWeb::MusicEventT(*music_events_) : nullptr); }
+  fire_outcomes.reserve(o.fire_outcomes.size());
+  for (const auto &fire_outcomes_ : o.fire_outcomes) { fire_outcomes.emplace_back((fire_outcomes_) ? new SpringWeb::FireOutcomeEventT(*fire_outcomes_) : nullptr); }
 }
 
 inline GameEventBatchT &GameEventBatchT::operator=(GameEventBatchT o) FLATBUFFERS_NOEXCEPT {
@@ -17374,6 +17719,7 @@ inline GameEventBatchT &GameEventBatchT::operator=(GameEventBatchT o) FLATBUFFER
   std::swap(sounds, o.sounds);
   std::swap(seismic_pings, o.seismic_pings);
   std::swap(music_events, o.music_events);
+  std::swap(fire_outcomes, o.fire_outcomes);
   return *this;
 }
 
@@ -17395,6 +17741,7 @@ inline void GameEventBatch::UnPackTo(GameEventBatchT *_o, const ::flatbuffers::r
   { auto _e = sounds(); if (_e) { _o->sounds.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->sounds[_i]) { _e->Get(_i)->UnPackTo(_o->sounds[_i].get(), _resolver); } else { _o->sounds[_i] = std::unique_ptr<SpringWeb::SoundEventT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->sounds.resize(0); } }
   { auto _e = seismic_pings(); if (_e) { _o->seismic_pings.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->seismic_pings[_i]) { _e->Get(_i)->UnPackTo(_o->seismic_pings[_i].get(), _resolver); } else { _o->seismic_pings[_i] = std::unique_ptr<SpringWeb::SeismicPingT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->seismic_pings.resize(0); } }
   { auto _e = music_events(); if (_e) { _o->music_events.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->music_events[_i]) { _e->Get(_i)->UnPackTo(_o->music_events[_i].get(), _resolver); } else { _o->music_events[_i] = std::unique_ptr<SpringWeb::MusicEventT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->music_events.resize(0); } }
+  { auto _e = fire_outcomes(); if (_e) { _o->fire_outcomes.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->fire_outcomes[_i]) { _e->Get(_i)->UnPackTo(_o->fire_outcomes[_i].get(), _resolver); } else { _o->fire_outcomes[_i] = std::unique_ptr<SpringWeb::FireOutcomeEventT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->fire_outcomes.resize(0); } }
 }
 
 inline ::flatbuffers::Offset<GameEventBatch> GameEventBatch::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GameEventBatchT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
@@ -17414,6 +17761,7 @@ inline ::flatbuffers::Offset<GameEventBatch> CreateGameEventBatch(::flatbuffers:
   auto _sounds = _o->sounds.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::SoundEvent>> (_o->sounds.size(), [](size_t i, _VectorArgs *__va) { return CreateSoundEvent(*__va->__fbb, __va->__o->sounds[i].get(), __va->__rehasher); }, &_va ) : 0;
   auto _seismic_pings = _o->seismic_pings.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::SeismicPing>> (_o->seismic_pings.size(), [](size_t i, _VectorArgs *__va) { return CreateSeismicPing(*__va->__fbb, __va->__o->seismic_pings[i].get(), __va->__rehasher); }, &_va ) : 0;
   auto _music_events = _o->music_events.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::MusicEvent>> (_o->music_events.size(), [](size_t i, _VectorArgs *__va) { return CreateMusicEvent(*__va->__fbb, __va->__o->music_events[i].get(), __va->__rehasher); }, &_va ) : 0;
+  auto _fire_outcomes = _o->fire_outcomes.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::FireOutcomeEvent>> (_o->fire_outcomes.size(), [](size_t i, _VectorArgs *__va) { return CreateFireOutcomeEvent(*__va->__fbb, __va->__o->fire_outcomes[i].get(), __va->__rehasher); }, &_va ) : 0;
   return SpringWeb::CreateGameEventBatch(
       _fbb,
       _frame,
@@ -17424,7 +17772,8 @@ inline ::flatbuffers::Offset<GameEventBatch> CreateGameEventBatch(::flatbuffers:
       _projectile_trajectories,
       _sounds,
       _seismic_pings,
-      _music_events);
+      _music_events,
+      _fire_outcomes);
 }
 
 inline ResourceUpdateT *ResourceUpdate::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {

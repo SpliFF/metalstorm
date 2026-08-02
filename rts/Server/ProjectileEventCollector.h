@@ -54,6 +54,25 @@ struct ProjectileTrajectoryEventData {
     uint8_t  team;              // owner-team — used by per-session LOS filter
 };
 
+/// PLAN-latency L2.1 — a Tier-C ("cosmetic") shot, resolved whole at fire
+/// time. Replaces the Fired/Trajectory/Impact triple for weaponDefs
+/// classified FX_TIER_COSMETIC; the two streams never both describe the
+/// same shot. See `rts/Sim/Weapons/CosmeticFire.h` for the resolver and
+/// schemas/protocol.fbs `FireOutcomeEvent` for the wire contract.
+struct FireOutcomeEventData {
+    uint32_t fireFrame;
+    uint16_t weaponDefId;
+    uint32_t ownerId;
+    uint8_t  team;              // owner-team — used by per-session LOS filter
+    float3   origin;
+    uint32_t targetId;          // tracked unit, 0 for ground/feature
+    float3   targetPos;         // the weapon's lead-corrected aim point
+    uint8_t  outcome;           // matches schemas FireOutcome
+    uint32_t impactFrame;
+    float3   impactPos;
+    float    gravity;           // per-frame gravity used to solve the arc
+};
+
 /// Thread-safe collector for projectile lifecycle events.
 class ProjectileEventCollector {
 public:
@@ -69,11 +88,16 @@ public:
         std::lock_guard<std::mutex> lock(mutex);
         trajectories.push_back(e);
     }
+    void PushFireOutcome(const FireOutcomeEventData& e) {
+        std::lock_guard<std::mutex> lock(mutex);
+        fireOutcomes.push_back(e);
+    }
 
     struct DrainResult {
         std::vector<ProjectileFiredEventData> fired;
         std::vector<ProjectileImpactEventData> impacts;
         std::vector<ProjectileTrajectoryEventData> trajectories;
+        std::vector<FireOutcomeEventData> fireOutcomes;
     };
 
     DrainResult Drain() {
@@ -82,12 +106,13 @@ public:
         out.fired.swap(fired);
         out.impacts.swap(impacts);
         out.trajectories.swap(trajectories);
+        out.fireOutcomes.swap(fireOutcomes);
         return out;
     }
 
     size_t PendingCount() const {
         std::lock_guard<std::mutex> lock(mutex);
-        return fired.size() + impacts.size() + trajectories.size();
+        return fired.size() + impacts.size() + trajectories.size() + fireOutcomes.size();
     }
 
 private:
@@ -95,6 +120,7 @@ private:
     std::vector<ProjectileFiredEventData> fired;
     std::vector<ProjectileImpactEventData> impacts;
     std::vector<ProjectileTrajectoryEventData> trajectories;
+    std::vector<FireOutcomeEventData> fireOutcomes;
 };
 
 /// Global instance — referenced from CWeaponProjectile lifecycle hooks.

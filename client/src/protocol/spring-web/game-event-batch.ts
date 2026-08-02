@@ -5,6 +5,7 @@
 import * as flatbuffers from 'flatbuffers';
 
 import { CombatEvent, CombatEventT } from '../spring-web/combat-event.js';
+import { FireOutcomeEvent, FireOutcomeEventT } from '../spring-web/fire-outcome-event.js';
 import { GameEvent, GameEventT } from '../spring-web/game-event.js';
 import { MusicEvent, MusicEventT } from '../spring-web/music-event.js';
 import { ProjectileFiredEvent, ProjectileFiredEventT } from '../spring-web/projectile-fired-event.js';
@@ -135,8 +136,29 @@ musicEventsLength():number {
   return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
 }
 
+/**
+ * Tier-C fire outcomes (PLAN-latency L2.1). A weaponDef classified
+ * FX_TIER_COSMETIC emits exactly one of these per shot and NO
+ * fired/trajectory/impact events — the two streams are disjoint by
+ * weaponDef, never both for the same shot.
+ *
+ * Appended last on purpose: FlatBuffers assigns vtable slots in
+ * declaration order, so inserting this above `sounds` would have
+ * renumbered three existing fields and silently broken any client
+ * built against the old schema. Additive means "at the end".
+ */
+fireOutcomes(index: number, obj?:FireOutcomeEvent):FireOutcomeEvent|null {
+  const offset = this.bb!.__offset(this.bb_pos, 22);
+  return offset ? (obj || new FireOutcomeEvent()).__init(this.bb!.__indirect(this.bb!.__vector(this.bb_pos + offset) + index * 4), this.bb!) : null;
+}
+
+fireOutcomesLength():number {
+  const offset = this.bb!.__offset(this.bb_pos, 22);
+  return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
+}
+
 static startGameEventBatch(builder:flatbuffers.Builder) {
-  builder.startObject(9);
+  builder.startObject(10);
 }
 
 static addFrame(builder:flatbuffers.Builder, frame:number) {
@@ -271,12 +293,28 @@ static startMusicEventsVector(builder:flatbuffers.Builder, numElems:number) {
   builder.startVector(4, numElems, 4);
 }
 
+static addFireOutcomes(builder:flatbuffers.Builder, fireOutcomesOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(9, fireOutcomesOffset, 0);
+}
+
+static createFireOutcomesVector(builder:flatbuffers.Builder, data:flatbuffers.Offset[]):flatbuffers.Offset {
+  builder.startVector(4, data.length, 4);
+  for (let i = data.length - 1; i >= 0; i--) {
+    builder.addOffset(data[i]!);
+  }
+  return builder.endVector();
+}
+
+static startFireOutcomesVector(builder:flatbuffers.Builder, numElems:number) {
+  builder.startVector(4, numElems, 4);
+}
+
 static endGameEventBatch(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
 }
 
-static createGameEventBatch(builder:flatbuffers.Builder, frame:number, eventsOffset:flatbuffers.Offset, combatEventsOffset:flatbuffers.Offset, projectileFiredOffset:flatbuffers.Offset, projectileImpactsOffset:flatbuffers.Offset, projectileTrajectoriesOffset:flatbuffers.Offset, soundsOffset:flatbuffers.Offset, seismicPingsOffset:flatbuffers.Offset, musicEventsOffset:flatbuffers.Offset):flatbuffers.Offset {
+static createGameEventBatch(builder:flatbuffers.Builder, frame:number, eventsOffset:flatbuffers.Offset, combatEventsOffset:flatbuffers.Offset, projectileFiredOffset:flatbuffers.Offset, projectileImpactsOffset:flatbuffers.Offset, projectileTrajectoriesOffset:flatbuffers.Offset, soundsOffset:flatbuffers.Offset, seismicPingsOffset:flatbuffers.Offset, musicEventsOffset:flatbuffers.Offset, fireOutcomesOffset:flatbuffers.Offset):flatbuffers.Offset {
   GameEventBatch.startGameEventBatch(builder);
   GameEventBatch.addFrame(builder, frame);
   GameEventBatch.addEvents(builder, eventsOffset);
@@ -287,6 +325,7 @@ static createGameEventBatch(builder:flatbuffers.Builder, frame:number, eventsOff
   GameEventBatch.addSounds(builder, soundsOffset);
   GameEventBatch.addSeismicPings(builder, seismicPingsOffset);
   GameEventBatch.addMusicEvents(builder, musicEventsOffset);
+  GameEventBatch.addFireOutcomes(builder, fireOutcomesOffset);
   return GameEventBatch.endGameEventBatch(builder);
 }
 
@@ -300,7 +339,8 @@ unpack(): GameEventBatchT {
     this.bb!.createObjList<ProjectileTrajectoryEvent, ProjectileTrajectoryEventT>(this.projectileTrajectories.bind(this), this.projectileTrajectoriesLength()),
     this.bb!.createObjList<SoundEvent, SoundEventT>(this.sounds.bind(this), this.soundsLength()),
     this.bb!.createObjList<SeismicPing, SeismicPingT>(this.seismicPings.bind(this), this.seismicPingsLength()),
-    this.bb!.createObjList<MusicEvent, MusicEventT>(this.musicEvents.bind(this), this.musicEventsLength())
+    this.bb!.createObjList<MusicEvent, MusicEventT>(this.musicEvents.bind(this), this.musicEventsLength()),
+    this.bb!.createObjList<FireOutcomeEvent, FireOutcomeEventT>(this.fireOutcomes.bind(this), this.fireOutcomesLength())
   );
 }
 
@@ -315,6 +355,7 @@ unpackTo(_o: GameEventBatchT): void {
   _o.sounds = this.bb!.createObjList<SoundEvent, SoundEventT>(this.sounds.bind(this), this.soundsLength());
   _o.seismicPings = this.bb!.createObjList<SeismicPing, SeismicPingT>(this.seismicPings.bind(this), this.seismicPingsLength());
   _o.musicEvents = this.bb!.createObjList<MusicEvent, MusicEventT>(this.musicEvents.bind(this), this.musicEventsLength());
+  _o.fireOutcomes = this.bb!.createObjList<FireOutcomeEvent, FireOutcomeEventT>(this.fireOutcomes.bind(this), this.fireOutcomesLength());
 }
 }
 
@@ -328,7 +369,8 @@ constructor(
   public projectileTrajectories: (ProjectileTrajectoryEventT)[] = [],
   public sounds: (SoundEventT)[] = [],
   public seismicPings: (SeismicPingT)[] = [],
-  public musicEvents: (MusicEventT)[] = []
+  public musicEvents: (MusicEventT)[] = [],
+  public fireOutcomes: (FireOutcomeEventT)[] = []
 ){}
 
 
@@ -341,6 +383,7 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
   const sounds = GameEventBatch.createSoundsVector(builder, builder.createObjectOffsetList(this.sounds));
   const seismicPings = GameEventBatch.createSeismicPingsVector(builder, builder.createObjectOffsetList(this.seismicPings));
   const musicEvents = GameEventBatch.createMusicEventsVector(builder, builder.createObjectOffsetList(this.musicEvents));
+  const fireOutcomes = GameEventBatch.createFireOutcomesVector(builder, builder.createObjectOffsetList(this.fireOutcomes));
 
   return GameEventBatch.createGameEventBatch(builder,
     this.frame,
@@ -351,7 +394,8 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
     projectileTrajectories,
     sounds,
     seismicPings,
-    musicEvents
+    musicEvents,
+    fireOutcomes
   );
 }
 }

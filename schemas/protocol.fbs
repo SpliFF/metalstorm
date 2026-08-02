@@ -612,6 +612,52 @@ enum ProjectileTrajectoryReason : uint8 {
     InterceptRetarget = 2,
 }
 
+/// How a Tier-C (cosmetic) shot ends. Resolved server-side at fire time —
+/// see FireOutcomeEvent. Values mirror ProjectileImpactKind's semantics
+/// where they overlap, but this is a *fire-time prediction*, not a
+/// discovered collision, so it is a separate enum.
+enum FireOutcome : uint8 {
+    Hit = 0,            // terminates on the target unit (target_id)
+    Miss = 1,           // terminates on terrain / water / open air
+    Shielded = 2,       // terminates on a shield dome
+    Intercepted = 3,    // killed in flight
+    Expired = 4,        // ttl ran out before reaching anything
+}
+
+/// PLAN-latency L2.1 — Tier-C ("cosmetic") fire outcome.
+///
+/// For a weaponDef classified FX_TIER_COSMETIC the server does NOT spawn a
+/// CWeaponProjectile at all. It resolves the whole shot at fire time and
+/// sends this ONE event in place of the Fired / Trajectory / Impact triple.
+/// Damage is still applied authoritatively on the server, scheduled on the
+/// sim timeline at `impact_frame`.
+///
+/// The client invents the entire visual: it schedules a spawn at
+/// `fire_frame` and a detonation at `impact_frame` on the L1 presentation
+/// timeline, and solves a trajectory that provably satisfies
+/// `pos(fire_frame) == origin` and `pos(impact_frame) == impact_pos`. There
+/// is no mid-flight correction and therefore no snap.
+table FireOutcomeEvent {
+    fire_frame: uint32;        // sim frame the shot left the muzzle
+    weapon_def_id: uint16;
+    owner_id: uint32;          // firing unit (0 if unknown) — muzzle attach + LOS
+    team: uint8;               // owner team — per-session LOS filter
+    origin: Vec3;              // muzzle world pos at fire_frame
+    target_id: uint32;         // tracked unit id, 0 if ground/feature
+    target_pos: Vec3;          // resolved aim point (the weapon's lead-corrected target)
+    outcome: FireOutcome;
+    impact_frame: uint32;      // sim frame the visual must arrive & detonate
+    impact_pos: Vec3;          // where the visual terminates (== where damage lands)
+    /// Per-frame gravity the server used to resolve the arc (0 for a
+    /// straight shot). Not in PLAN-latency-projectiles §3.1's field list,
+    /// but the client's closed-form solver needs it: the ballistic solution
+    /// through (origin, impact_pos, Δt) is only unique once g is fixed, and
+    /// `mygravity` is a per-projectile resolution of the def default against
+    /// the map gravity that the client cannot reconstruct from weaponDefs
+    /// alone. ProjectileFiredEvent carries it for the same reason.
+    gravity: float = 0.0;
+}
+
 /// Projectile creation event. Sent once per projectile, when the server
 /// instantiates it. The client uses this to spawn a local visual that
 /// runs the same ballistic / hit-scan motion the simulation runs — no
@@ -775,6 +821,16 @@ table GameEventBatch {
     /// so spectators stay in sync. Usually empty; only populated on
     /// the tick when a state change fires.
     music_events: [MusicEvent];
+    /// Tier-C fire outcomes (PLAN-latency L2.1). A weaponDef classified
+    /// FX_TIER_COSMETIC emits exactly one of these per shot and NO
+    /// fired/trajectory/impact events — the two streams are disjoint by
+    /// weaponDef, never both for the same shot.
+    ///
+    /// Appended last on purpose: FlatBuffers assigns vtable slots in
+    /// declaration order, so inserting this above `sounds` would have
+    /// renumbered three existing fields and silently broken any client
+    /// built against the old schema. Additive means "at the end".
+    fire_outcomes: [FireOutcomeEvent];
 }
 
 table ResourceUpdate {

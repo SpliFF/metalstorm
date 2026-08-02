@@ -136,7 +136,7 @@ void CBombDropper::FireImpl(const bool scriptCall)
 		params.tracking = tracking;
 
 		assert(weaponDef->projectileType == WEAPON_TORPEDO_PROJECTILE);
-		WeaponProjectileFactory::LoadProjectile(params);
+		WeaponProjectileFactory::FireWeaponProjectile(params);
 	} else {
 		// fudge a bit better lateral aim to compensate for imprecise aircraft steering
 		float3 dif = (currentTargetPos - weaponMuzzlePos) * XZVector;
@@ -163,7 +163,7 @@ void CBombDropper::FireImpl(const bool scriptCall)
 		params.gravity = (weaponDef->myGravity == 0)? mapInfo->map.gravity: -weaponDef->myGravity;
 
 		assert(weaponDef->projectileType == WEAPON_EXPLOSIVE_PROJECTILE);
-		WeaponProjectileFactory::LoadProjectile(params);
+		WeaponProjectileFactory::FireWeaponProjectile(params);
 	}
 }
 

@@ -473,6 +473,7 @@ void StateStreamer::BroadcastCombatEvents(int) {
         || !projDrain.fired.empty()
         || !projDrain.impacts.empty()
         || !projDrain.trajectories.empty()
+        || !projDrain.fireOutcomes.empty()
         || !soundDrain.empty()
         || !seismicDrain.empty();
     if (hasAny && rtcServer.GetClientCount() > 0) {
@@ -527,6 +528,20 @@ void StateStreamer::BroadcastCombatEvents(int) {
                     trajectories.push_back(e);
             }
 
+            // Tier-C fire outcomes (PLAN-latency L2.1). Filtered on the same
+            // rule as Fired, which this event replaces: owner-friendly, OR
+            // the muzzle in LOS, OR the impact point in LOS — the last so a
+            // player sees a shell arriving out of the fog rather than an
+            // explosion with no shot attached.
+            std::vector<FireOutcomeEventData> fireOutcomes;
+            fireOutcomes.reserve(projDrain.fireOutcomes.size());
+            for (const auto& e : projDrain.fireOutcomes) {
+                if (teamFriendly(e.team)
+                    || posVisible(e.origin)
+                    || posVisible(e.impactPos))
+                    fireOutcomes.push_back(e);
+            }
+
             // Combat events also benefit from the same filter — the
             // current broadcast leaks fire+miss outcomes from fog.
             std::vector<CombatEventData> visibleCombat;
@@ -558,12 +573,13 @@ void StateStreamer::BroadcastCombatEvents(int) {
 
             if (visibleCombat.empty() && fired.empty()
                 && impacts.empty() && trajectories.empty()
+                && fireOutcomes.empty()
                 && visibleSounds.empty() && visiblePings.empty())
                 return;
 
             auto batch = Protocol::BuildCombatEventBatch(
                 frameNo, visibleCombat, fired, impacts, trajectories,
-                visibleSounds, visiblePings);
+                visibleSounds, visiblePings, fireOutcomes);
             rtcServer.SendReliable(clientId, batch.data(), batch.size());
         });
     }

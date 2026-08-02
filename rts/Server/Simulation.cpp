@@ -24,6 +24,7 @@ const std::unordered_map<int, std::string>* gAITeams = nullptr;
 #include "Sim/Units/CommandAI/CommandAI.h"
 #include "Sim/Units/Scripts/UnitScriptEngine.h"
 #include "Sim/Units/Scripts/UnitScriptFactory.h"
+#include "Sim/Weapons/CosmeticFire.h"
 #include "Sim/Weapons/WeaponDefHandler.h"
 #include "Sim/Weapons/WeaponLoader.h"
 #include "Sim/Features/FeatureHandler.h"
@@ -600,6 +601,9 @@ void CSimulation::Init(const std::string& mapName)
 void CSimulation::Kill()
 {
     running = false;
+    // Drop any Tier-C damage still in flight — the units it would land on
+    // are about to go away, and the DynDamageArray refs must be released.
+    cosmeticFireQueue.Clear();
     defsParser.reset();
     gs->Kill();
     SLOG(SPRING_LOG_INFO, "shut down");
@@ -658,6 +662,11 @@ void CSimulation::SimFrame()
 
     phaseT0 = simProf ? spring_now() : spring_time();
     unitHandler.Update();
+    // PLAN-latency L2.1: Tier-C shots have no projectile to collide, so their
+    // damage lands from this queue instead. Ticked immediately before the
+    // projectile update so a cosmetic impact and a real projectile impact on
+    // the same frame reach the same GameEventBatch.
+    cosmeticFireQueue.Update(gs->frameNum);
     projectileHandler.Update();
     featureHandler.Update();
 

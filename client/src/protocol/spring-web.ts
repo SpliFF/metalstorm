@@ -22,6 +22,8 @@ export { EntityDestroy, EntityDestroyT } from './spring-web/entity-destroy.js';
 export { EntitySensorUpdate, EntitySensorUpdateT } from './spring-web/entity-sensor-update.js';
 export { FeatureLifecycleBatch, FeatureLifecycleBatchT } from './spring-web/feature-lifecycle-batch.js';
 export { FeatureSpawn, FeatureSpawnT } from './spring-web/feature-spawn.js';
+export { FireOutcome } from './spring-web/fire-outcome.js';
+export { FireOutcomeEvent, FireOutcomeEventT } from './spring-web/fire-outcome-event.js';
 export { GameEvent, GameEventT } from './spring-web/game-event.js';
 export { GameEventBatch, GameEventBatchT } from './spring-web/game-event-batch.js';
 export { GameInfo, GameInfoT } from './spring-web/game-info.js';
