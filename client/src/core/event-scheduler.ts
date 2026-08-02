@@ -40,6 +40,19 @@ export interface Scheduled {
     readonly kind: ScheduledKind;
     /** The side effect to run when the cursor reaches `frame`. */
     readonly fire: () => void;
+    /**
+     * Optional pre-roll callback: run repeatedly, every frame the event sits
+     * in the future window `(P, E]`, *before* `fire`. This is the point of the
+     * foreknowledge window — work that must already be finished by the time
+     * the cursor arrives (fetching an about-to-be-revealed unit's model, say)
+     * starts up to `D` frames early instead of on the reveal frame itself.
+     *
+     * Because it runs on many frames it MUST be idempotent and cheap; the
+     * retry is deliberate, since the prerequisite a warm-up needs (the unit's
+     * def, which streams on its own schedule) may not have arrived on the
+     * first attempt.
+     */
+    readonly prep?: () => void;
     /** Monotonic insertion order — the same-frame tiebreaker. */
     readonly seq: number;
 }
@@ -49,9 +62,13 @@ export class EventScheduler {
     private heap: Scheduled[] = [];
     private seqCounter = 0;
 
-    /** Queue an event to fire when the presentation cursor reaches `frame`. */
-    schedule(frame: number, kind: ScheduledKind, fire: () => void): void {
-        this.heapPush({ frame, kind, fire, seq: this.seqCounter++ });
+    /**
+     * Queue an event to fire when the presentation cursor reaches `frame`.
+     * `prep`, if given, is the pre-roll warm-up run by `prefetch()` while the
+     * event is still ahead of the cursor (see `Scheduled.prep`).
+     */
+    schedule(frame: number, kind: ScheduledKind, fire: () => void, prep?: () => void): void {
+        this.heapPush({ frame, kind, fire, prep, seq: this.seqCounter++ });
     }
 
     /**
@@ -85,6 +102,32 @@ export class EventScheduler {
         const out = this.heap.filter((s) => s.frame > P && s.frame <= E);
         out.sort(cmp);
         return out;
+    }
+
+    /**
+     * Run the `prep` warm-up of every queued event in the future window
+     * `(P, E]`. Call once per render frame, right after `drain(P)`.
+     *
+     * Unlike `window()` this walks the heap in place — no filter, no sort, no
+     * allocation — because warm-up order is irrelevant and this is on the
+     * render path. A throwing `prep` is caught per-event: a warm-up failure
+     * must never abort the sweep or the frame (the event still fires on time;
+     * the consumer just falls back to its cold path).
+     */
+    prefetch(P: number, E: number): void {
+        const h = this.heap;
+        for (let i = 0; i < h.length; i++) {
+            const ev = h[i];
+            if (ev.prep === undefined || ev.frame <= P || ev.frame > E) continue;
+            try {
+                ev.prep();
+            } catch (err) {
+                console.error(
+                    `[event-scheduler] '${ev.kind}' pre-roll for frame ${ev.frame} threw:`,
+                    err,
+                );
+            }
+        }
     }
 
     /** Drop every pending event (quit-to-lobby / teardown). */

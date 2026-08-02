@@ -99,6 +99,63 @@ describe('EventScheduler', () => {
         expect(w.map((e) => e.frame)).toEqual([20]); // >P (exclusive), <=E
     });
 
+    // ── pre-roll (L1 LOS-reveal warm-up) ────────────────────────────────────
+
+    it('prefetch() runs prep only for events inside the future window (P, E]', () => {
+        const s = new EventScheduler();
+        const prepped: number[] = [];
+        for (const f of [5, 10, 20, 30, 40]) {
+            s.schedule(f, 'losReveal', () => {}, () => prepped.push(f));
+        }
+        s.prefetch(10, 30);
+        expect(prepped.sort((a, b) => a - b)).toEqual([20, 30]); // >P, <=E
+    });
+
+    it('prefetch() never fires or removes the event it warmed up', () => {
+        const s = new EventScheduler();
+        const log: string[] = [];
+        s.schedule(20, 'losReveal', () => log.push('fire'), () => log.push('prep'));
+        s.prefetch(10, 30);
+        expect(log).toEqual(['prep']);
+        expect(s.size).toBe(1);
+        s.drain(20);
+        expect(log).toEqual(['prep', 'fire']);
+        expect(s.size).toBe(0);
+    });
+
+    it('prefetch() re-runs prep every frame the event stays in the window', () => {
+        // The retry is load-bearing: a reveal's warm-up can no-op on the first
+        // attempt (its def has not streamed in yet) and must land on a later one.
+        const s = new EventScheduler();
+        let attempts = 0;
+        s.schedule(20, 'losReveal', () => {}, () => { attempts++; });
+        for (let p = 10; p < 20; p++) s.prefetch(p, p + 10);
+        expect(attempts).toBe(10);
+    });
+
+    it('prefetch() skips events with no prep and tolerates a throwing one', () => {
+        const s = new EventScheduler();
+        const prepped: number[] = [];
+        const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+        s.schedule(20, 'losReveal', () => {});                       // no prep
+        s.schedule(21, 'losReveal', () => {}, () => { throw new Error('boom'); });
+        s.schedule(22, 'losReveal', () => {}, () => prepped.push(22));
+        s.prefetch(10, 30);
+        expect(prepped).toEqual([22]);      // sweep continued past the thrower
+        expect(errSpy).toHaveBeenCalled();
+        errSpy.mockRestore();
+    });
+
+    it('prefetch() stops warming an event once the cursor has passed it', () => {
+        const s = new EventScheduler();
+        let attempts = 0;
+        s.schedule(20, 'losReveal', () => {}, () => { attempts++; });
+        s.prefetch(10, 30);
+        expect(attempts).toBe(1);
+        s.prefetch(20, 40);                 // frame == P → no longer "future"
+        expect(attempts).toBe(1);
+    });
+
     it('clear() drops all pending events', () => {
         const s = new EventScheduler();
         const fired: number[] = [];

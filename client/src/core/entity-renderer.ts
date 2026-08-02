@@ -1024,6 +1024,15 @@ export interface EntityMeta {
      *  resolves to 0 — engine-tagged map landmarks plus units explicitly
      *  flipped via `Spring.SetUnitAlwaysVisible`. */
     alwaysVisible: boolean;
+    /** PLAN-latency L1 (LOS reveal): false between the frame this entity's
+     *  first state sample *arrived* and the frame it was actually revealed on.
+     *  A reveal lands on the wire ~D frames ahead of the presentation cursor,
+     *  and the interpolator clamps a single-sample entity to that sample — so
+     *  without this gate a unit entering LOS pops into view up to a second
+     *  before the sim frame on which it entered. `markRevealed()` flips it
+     *  when the scheduled `losReveal` fires at the cursor. Entities from the
+     *  join snapshot are born `true` (a bulk world load is not a reveal). */
+    revealed: boolean;
 }
 
 /** Bit values for EntityMeta.losState — mirror Spring's losStatus bits
@@ -1132,6 +1141,27 @@ export class EntityRenderer {
      *  position queries (build beams etc.) so they agree with the render. */
     private cursorFrame = 0;
     private entityMeta = new Map<number, EntityMeta>();
+    /** PLAN-latency L1: `baseFrame` of the very first state snapshot of this
+     *  game. Everything carried by that snapshot is the join-time bulk world
+     *  load, not an in-play LOS reveal, so it renders immediately rather than
+     *  waiting out `D` frames behind a blank screen. Null until the first
+     *  update(); reset with the rest of the renderer state. */
+    private firstStateFrame: number | null = null;
+    /** PLAN-latency L1: notified when an entity is first seen mid-game, so the
+     *  owner (game-processor) can put the reveal on the presentation timeline.
+     *  Null → reveals present immediately, the pre-L1 behaviour. */
+    private onReveal: ((id: number, frame: number, defId: number) => void) | null = null;
+    /** PLAN-latency L1 gate instrumentation. `leadFrames*` is how far ahead of
+     *  the cursor each reveal arrived — i.e. exactly how early the unit used
+     *  to pop in. `warmOnReveal` / `coldOnReveal` count whether the pre-roll
+     *  won the race: warm = the model was resolved by the time the cursor
+     *  reached the reveal frame, cold = it still had to show the procedural
+     *  stand-in. Read via `window.__gp('__entityRenderer.getRevealStats()')`. */
+    private revealStats = {
+        scheduled: 0, revealed: 0,
+        leadFramesSum: 0, leadFramesMax: 0,
+        warmOnReveal: 0, coldOnReveal: 0,
+    };
     private teamMaterials: StandardMaterial[] = [];
     /** Map heightmap data for terrain re-projection of ground units.
      *  Entity Y comes from the server snapped to terrain on each sim
@@ -1239,6 +1269,58 @@ export class EntityRenderer {
      *  arrival wall-time. */
     setPresentationClock(clock: PresentationClock): void {
         this.presClock = clock;
+    }
+
+    /**
+     * Attach the LOS-reveal hook (PLAN-latency L1). Called with
+     * `(entityId, revealFrame, defId)` the first time an entity appears
+     * mid-game; the owner schedules `markRevealed(entityId)` on the
+     * presentation timeline at `revealFrame` and may use `defId` as the
+     * pre-roll warm-up key. Until a hook is set, reveals are immediate.
+     */
+    setRevealHook(hook: (id: number, frame: number, defId: number) => void): void {
+        this.onReveal = hook;
+    }
+
+    /**
+     * The cursor has reached an entity's reveal frame — let it render.
+     * No-op if the entity died or left view again before the cursor arrived
+     * (its meta is gone), which is why this looks the entity up rather than
+     * closing over its meta.
+     */
+    markRevealed(id: number): void {
+        const meta = this.entityMeta.get(id);
+        if (!meta) return;
+        meta.revealed = true;
+        this.revealStats.revealed++;
+        // Did the pre-roll finish in time? `modelTemplates.has` is true once
+        // the fetch resolved (or resolved to null for a model-less def, which
+        // counts as warm — there was nothing to wait for).
+        if (this.modelTemplates.has(meta.defId)) this.revealStats.warmOnReveal++;
+        else this.revealStats.coldOnReveal++;
+    }
+
+    /** PLAN-latency L1 gate readout. `avgLeadFrames` is how many frames early
+     *  a reveal reaches us — the amount of pop-in this gate removed, and the
+     *  pre-roll budget the warm-up gets to spend. */
+    getRevealStats(): Record<string, number> {
+        const s = this.revealStats;
+        return {
+            ...s,
+            avgLeadFrames: s.scheduled > 0 ? s.leadFramesSum / s.scheduled : 0,
+            warmPct: s.revealed > 0 ? (100 * s.warmOnReveal) / s.revealed : 0,
+        };
+    }
+
+    /**
+     * Pre-roll warm-up for a pending reveal: start this def's model/texture
+     * fetch now, `D` frames before the unit is due on screen. Idempotent — the
+     * scheduler re-runs it every frame the reveal sits in the future window,
+     * which is what makes it land even when the def itself is still streaming
+     * (`ensureModelLoaded` no-ops until the def is registered).
+     */
+    warmUpDef(defId: number): void {
+        this.ensureModelLoaded(defId);
     }
 
     /**
@@ -2212,6 +2294,11 @@ export class EntityRenderer {
         if (!entityIds) return;
 
         const frame = snapshot.baseFrame;
+        // PLAN-latency L1: latch the join frame. Entities carried by the first
+        // snapshot are the world as it already stood when we connected, so
+        // they bypass the reveal gate below (otherwise the map would sit empty
+        // for D frames at join).
+        if (this.firstStateFrame === null) this.firstStateFrame = frame;
         // Quanta → radians: server packs angles as i8 with 127 buckets
         // covering [-π/2, π/2]. Pre-compute the inverse scale once.
         const angleScale = 1.5707963267948966 / 127;
@@ -2251,7 +2338,7 @@ export class EntityRenderer {
             let meta = this.entityMeta.get(id);
             const isNew = !meta;
             if (!meta) {
-                meta = { defId: 0, team: 0, healthScale: 1.0, buildProgress: 1.0, losState: 0x0F, alwaysVisible: false };
+                meta = { defId: 0, team: 0, healthScale: 1.0, buildProgress: 1.0, losState: 0x0F, alwaysVisible: false, revealed: true };
                 this.entityMeta.set(id, meta);
             }
             if (defIds) meta.defId = defIds[i];
@@ -2259,6 +2346,24 @@ export class EntityRenderer {
             if (stateBits) meta.alwaysVisible = (stateBits[i] & STATE_BIT_ALWAYS_VISIBLE) !== 0;
             if (health) meta.healthScale = 0.3 + (health[i] / 65535) * 0.7;
             if (buildProgress) meta.buildProgress = buildProgress[i] / 255;
+
+            // PLAN-latency L1 — LOS reveal on the presentation timeline.
+            // This sample arrived at the leading edge E, but the cursor is at
+            // P = E − D, so the sim frame this unit became visible on is still
+            // ~D frames in our future. Hold it out of the render until the
+            // cursor gets there (`markRevealed`), and spend that lead time
+            // fetching its model so it can appear as itself rather than as the
+            // procedural stand-in. Reveals are only deferred once a hook is
+            // wired *and* this isn't the join batch.
+            if (isNew && this.onReveal && frame > this.firstStateFrame) {
+                meta.revealed = false;
+                this.ensureModelLoaded(meta.defId);
+                this.onReveal(id, frame, meta.defId);
+                const lead = this.presClock?.isAnchored ? frame - this.presClock.P : 0;
+                this.revealStats.scheduled++;
+                this.revealStats.leadFramesSum += lead;
+                if (lead > this.revealStats.leadFramesMax) this.revealStats.leadFramesMax = lead;
+            }
 
             const prevLos = isNew ? newLos : meta.losState;
             meta.losState = newLos;
@@ -2332,6 +2437,12 @@ export class EntityRenderer {
         const groups = new Map<string, { mesh: Mesh; matrices: number[]; count: number }>();
 
         for (const [id, meta] of this.entityMeta) {
+            // PLAN-latency L1: a mid-game reveal is held out of the render
+            // until the cursor reaches the frame it happened on. Skipping
+            // before the LOS/ghost/blip buckets keeps it absolute — an
+            // un-revealed entity draws in no form, not even as a radar dot.
+            if (!meta.revealed) continue;
+
             // LOS bucket: own units & permissive sessions read 0x0F (all
             // bits set) so the INLOS check passes naturally. Enemy units
             // bucket into in-LOS / radar-blip / ghost / hidden.
@@ -2988,6 +3099,7 @@ export class EntityRenderer {
         }
         this.selectedIds = [];
         this.entityMeta.clear();
+        this.firstStateFrame = null;
         this.ghostPoses.clear();
         this.pieceOverrides.clear();
         this.clipPoses.clear();

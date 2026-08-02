@@ -272,9 +272,17 @@ let gpEventScheduler: EventScheduler | null = null;
 
 /// Schedule a discrete event onto the presentation timeline, or fire it now if
 /// the scheduler isn't up yet (pre-gpInit safety — never silently dropped).
-function gpSchedule(frame: number, kind: ScheduledKind, fire: () => void): void {
-    if (gpEventScheduler) gpEventScheduler.schedule(frame, kind, fire);
-    else fire();
+/// `prep` is the optional pre-roll warm-up (run while the event is still in
+/// the future window). On the pre-gpInit path there is no window to warm up
+/// in, so it runs once immediately, before the event it was preparing for.
+function gpSchedule(
+    frame: number,
+    kind: ScheduledKind,
+    fire: () => void,
+    prep?: () => void,
+): void {
+    if (gpEventScheduler) gpEventScheduler.schedule(frame, kind, fire, prep);
+    else { prep?.(); fire(); }
 }
 /// GW4-c3 terrain state, populated once the map data HTTP fetch resolves.
 /// Mirrors the pre-move main.ts `onMapData` terrain build.
@@ -1285,6 +1293,19 @@ export function gpInit(msg: GpInitToWorker): void {
 
     const entityRenderer = new EntityRenderer(scene);
     entityRenderer.setPresentationClock(gpPresentationClock);
+    // PLAN-latency L1 (LOS reveal): a unit entering LOS reaches us ~D frames
+    // before the sim frame it became visible on. Put the reveal on the
+    // presentation timeline so it appears on that frame rather than early,
+    // and use the lead time as a pre-roll to fetch its model — so it arrives
+    // as itself instead of popping in as the procedural stand-in.
+    entityRenderer.setRevealHook((id, frame, defId) => {
+        gpSchedule(
+            frame,
+            'losReveal',
+            () => entityRenderer.markRevealed(id),
+            () => entityRenderer.warmUpDef(defId),
+        );
+    });
     // PLAN-lighting L3/L4: register with the sun shadow generator up-front
     // (before any def streams in) so the first ensureModel load isn't raced;
     // pass the sun so the team-color material can sample the live CSM.
@@ -1497,6 +1518,12 @@ export function gpInit(msg: GpInitToWorker): void {
         // impact removes its projectile from this frame's live snapshot.
         if (gpPresentationClock && gpEventScheduler) {
             gpEventScheduler.drain(gpPresentationClock.P);
+            // …then warm up what the cursor is about to reach. The window
+            // (P, E] is the foreknowledge L0 bought us: events already in
+            // hand but not yet due. Re-run each frame because a warm-up can
+            // need something still in flight (a unit's def streams
+            // independently of its state).
+            gpEventScheduler.prefetch(gpPresentationClock.P, gpPresentationClock.E);
         }
         gpMark(1);  // entity
         gpBuildBeamRenderer?.tick();
