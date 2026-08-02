@@ -1,22 +1,20 @@
-"""bake_impostors — 8-yaw x 3-pitch impostor atlas baker for forge models.
+"""bake_impostors — directional impostor atlas baker for forge models.
 
 Renders a forge-emitted `.gltf` (+ sibling `.bin` and `_diffuse.png`) from
 the RTS camera's arc and packs the frames into one atlas PNG:
 
-    <stem>_impostor.png     cols = yaw  (8, CCW from +Z), rows = pitch (3)
+    <stem>_impostor.png     cols = camera yaw, rows = camera pitch
     <stem>_impostor.json    quad size + cell layout for the client LOD tier
 
-Layout is the v2 convention owned by `client/src/core/impostor-atlas.ts`
-(`AtlasLayout`), and the emitted `_impostor.json` uses its field names so the
-runtime can read the manifest verbatim:
+The layout — grid, row stacking, and above all which camera direction each
+(column, row) cell was rendered from — is NOT defined here. It lives in
+`impostor_convention.py`, the one module both this baker and the runtime
+(`client/src/core/impostor-atlas.ts`) derive from; see that file for why, and
+for the definition of the azimuth phase. The emitted `_impostor.json` uses the
+runtime's `AtlasLayout` field names so it can be consumed verbatim.
 
-  - column = camera azimuth relative to the instance, matching the runtime's
-    `atan2(toCamX, toCamZ) - heading` — so column 0 is the camera sitting at
-    the instance's +Z, and column yawBins/4 at its +X;
-  - row 0 is the TOP row of the image and the LOWEST elevation, ascending
-    downward (`selectPitchRow` orders bin centres the same way);
-  - `frames` is 1 — static props have no walk cycle, so the rows buy vertical
-    parallax across the RTS zoom range instead of animation.
+`--convention` picks the arc. It defaults to `vegetation`, which is the arc
+every atlas baked by this script so far used, so the default path is unchanged.
 
 The rasterizer is pure Python/numpy (orthographic, z-buffered, 3x
 supersampled, flat per-face shading sampled from the diffuse atlas), so the
@@ -31,7 +29,7 @@ per-def `impostorDistance` can be authored.
 
 Usage:
     python3 bake_impostors.py out/tree_conifer.gltf [--cell 128] [--out DIR]
-                              [--diffuse PATH]
+                              [--diffuse PATH] [--convention vegetation]
     python3 bake_impostors.py --manifest out/            # fold sidecars
 then encode `<stem>_impostor.png` -> `.ktx2` (encode_sprites.mjs, or
 tools/textureconverter --encoding uastc).
@@ -42,15 +40,13 @@ import argparse
 import glob
 import json
 import os
+from dataclasses import replace
 
 import numpy as np
 from PIL import Image
 
-# Camera arc: 8 yaws x 3 pitches. Pitches are degrees above the horizon,
-# chosen to bracket the playable camera range (near-ground chase, default
-# RTS tilt, strategic top-down).
-YAWS = 8
-PITCHES = (18.0, 42.0, 68.0)
+from impostor_convention import CONVENTIONS, VEGETATION, Convention
+
 SUPERSAMPLE = 3
 # Key/fill so the baked frames read like the lit model rather than a flat
 # cutout. Direction is in world space (sun from the upper front-left, the
@@ -192,11 +188,17 @@ def _render_cell(pos, idx, fcol, right, up, fwd, centre, half, res):
 
 
 def bake(gltf_path: str, diffuse_png: str | None = None,
-         out_dir: str | None = None, cell: int = 128) -> str:
+         out_dir: str | None = None, cell: int | None = None,
+         conv: Convention = VEGETATION) -> str:
     stem = os.path.splitext(os.path.basename(gltf_path))[0]
     base = os.path.dirname(os.path.abspath(gltf_path))
     out_dir = out_dir or base
     diffuse_png = diffuse_png or os.path.join(base, f'{stem}_diffuse.png')
+    # An explicit --cell overrides the convention's, but it must do so THROUGH
+    # the convention so `cell_origin` and the paste target can never disagree.
+    if cell is not None and cell != conv.cell:
+        conv = replace(conv, cell=cell)
+    cell = conv.cell
 
     pos, nrm, uv, idx = load_model(gltf_path)
     tex = np.asarray(Image.open(diffuse_png).convert('RGB'))
@@ -210,13 +212,14 @@ def bake(gltf_path: str, diffuse_png: str | None = None,
     half = float(np.linalg.norm(maxs - centre)) * 1.02
 
     res = cell * SUPERSAMPLE
-    atlas = Image.new('RGBA', (YAWS * cell, len(PITCHES) * cell), (0, 0, 0, 0))
-    for r, pitch in enumerate(PITCHES):
-        cp, sp = np.cos(np.radians(pitch)), np.sin(np.radians(pitch))
-        for c in range(YAWS):
-            yaw = 2 * np.pi * c / YAWS
-            # Camera sits along +fwd_back from the model, looking down -it.
-            fwd = np.array([-np.sin(yaw) * cp, -sp, -np.cos(yaw) * cp])
+    atlas = Image.new('RGBA', (conv.yaw_bins * cell, conv.rows * cell),
+                      (0, 0, 0, 0))
+    for r in range(conv.pitch_bins):
+        for c in range(conv.yaw_bins):
+            # The convention owns which direction this cell is viewed from; it
+            # hands back the instance -> camera direction, and the camera looks
+            # back down the negative of it.
+            fwd = -np.asarray(conv.cam_dir(c, r), dtype=float)
             right = np.cross(fwd, np.array([0.0, 1.0, 0.0]))
             right /= np.linalg.norm(right)
             up = np.cross(right, fwd)
@@ -224,16 +227,18 @@ def bake(gltf_path: str, diffuse_png: str | None = None,
                                       centre, half, res)
             img = Image.fromarray(
                 np.dstack([rgb, alpha]).astype(np.uint8), 'RGBA')
-            atlas.paste(img.resize((cell, cell), Image.LANCZOS),
-                        (c * cell, r * cell))
+            x0, y0 = conv.cell_origin(c, r)
+            atlas.paste(img.resize((cell, cell), Image.LANCZOS), (x0, y0))
 
     os.makedirs(out_dir, exist_ok=True)
     png = os.path.join(out_dir, f'{stem}_impostor.png')
     atlas.save(png)
-    # Field names match client/src/core/impostor-atlas.ts `AtlasLayout` so the
-    # runtime can consume this manifest verbatim (normalizeAtlasLayout).
-    meta = dict(yawBins=YAWS, pitchBins=len(PITCHES), frames=1,
-                pitchDegrees=list(PITCHES), cell=cell,
+    # The layout half comes straight from the convention (field names match
+    # client/src/core/impostor-atlas.ts `AtlasLayout`, so the runtime consumes
+    # this verbatim via normalizeAtlasLayout). The azimuth phase and elevation
+    # arc travel WITH the atlas precisely so the runtime never has to assume
+    # which arc a given sheet was baked on.
+    meta = dict(conv.metadata(),
                 # Quad the client should draw, in world units. The frame is
                 # square and centred on the model's bounding-sphere centre,
                 # which sits `centreY` above the model origin (ground).
@@ -241,8 +246,10 @@ def bake(gltf_path: str, diffuse_png: str | None = None,
                 centreY=float(centre[1]))
     with open(os.path.join(out_dir, f'{stem}_impostor.json'), 'w') as f:
         json.dump(meta, f, indent=1)
-    print(f'[impostor] {stem}_impostor.png {YAWS}x{len(PITCHES)} cells '
-          f'@{cell}px, quad {2 * half:.1f} elmos')
+    print(f'[impostor] {stem}_impostor.png {conv.yaw_bins}x{conv.pitch_bins} '
+          f'cells @{cell}px ({conv.name}: elev '
+          f'{"/".join(f"{p:g}" for p in conv.pitch_degrees)}, col0='
+          f'{conv.metadata()["column0"]}), quad {2 * half:.1f} elmos')
     return png
 
 
@@ -301,6 +308,14 @@ def write_manifest(out_dir: str, stems: list[str] | None = None) -> str:
             diffuse=f'{stem}_impostor.ktx2',
             yawBins=meta['yawBins'], pitchBins=meta['pitchBins'],
             frames=meta['frames'], pitches=meta['pitchDegrees'],
+            # The phase must survive the fold. A sidecar baked on a non-default
+            # convention carries its own column-0 anchor, and dropping it here
+            # would silently re-read that sheet at the default phase — the exact
+            # 180-degree divergence `impostor_convention.py` exists to prevent.
+            # Absent (pre-convention sidecars) means the default, so only emit
+            # the key when the sidecar actually declares one.
+            **({'azimuthPhaseDegrees': meta['azimuthPhaseDegrees']}
+               if 'azimuthPhaseDegrees' in meta else {}),
             width=meta['width'], height=meta['height'],
             centreY=meta['centreY'], topDown=True,
             impostorDistance=swap_distance(meta['height']),
@@ -321,13 +336,17 @@ if __name__ == '__main__':
                     help='model to bake (omit with --manifest)')
     ap.add_argument('--diffuse', default=None)
     ap.add_argument('--out', default=None)
-    ap.add_argument('--cell', type=int, default=128)
+    ap.add_argument('--cell', type=int, default=None,
+                    help="cell size in px; default = the convention's")
+    ap.add_argument('--convention', default=VEGETATION.name,
+                    choices=sorted(CONVENTIONS),
+                    help='atlas arc to bake on (default: %(default)s)')
     ap.add_argument('--manifest', metavar='DIR', default=None,
                     help='fold existing sidecars in DIR into impostors.json')
     a = ap.parse_args()
     if a.manifest:
         write_manifest(a.manifest)
     elif a.gltf:
-        bake(a.gltf, a.diffuse, a.out, a.cell)
+        bake(a.gltf, a.diffuse, a.out, a.cell, CONVENTIONS[a.convention])
     else:
         ap.error('give a model to bake, or --manifest DIR')
