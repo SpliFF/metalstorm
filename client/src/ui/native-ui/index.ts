@@ -3,7 +3,13 @@
  */
 
 export { UIStore, uiStore } from './ui-store.js';
-export type { PlayerInfo, UnitSelection, TeamEconomy, OrgGroupSummary } from './ui-store.js';
+export type {
+    PlayerInfo, UnitSelection, TeamEconomy, OrgGroupSummary, DirectiveSummary,
+} from './ui-store.js';
+
+// Progressive disclosure (PLAN-native-ui.md §3, onboarding §5)
+export { parseRevealPredicate } from './reveal-predicate.js';
+export type { RevealPredicate, RevealStorePath, RevealIdentity } from './reveal-predicate.js';
 
 // Map-arm gesture bridge (PLAN-metalstorm-scripting.md task 4)
 export { mapGestureBridge } from './map-gesture.js';
