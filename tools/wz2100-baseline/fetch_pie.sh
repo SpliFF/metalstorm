@@ -65,7 +65,16 @@ TEXPAGES=(
   "page-17-droid-weapons.png"   # cannons
   "page-33-cyborgs.png"         # cyborg body
   "page-34-buildings.png"       # command HQ
-  # team-colour masks (PIE4 TCMASK)
+  # team-colour masks. blhq names its page through a PIE4 `TCMASK` directive;
+  # the droid parts are PIE2/3 and only set `TYPE & 0x10000`, so the importer
+  # derives `page-<N>_tcmask.png` from the diffuse page (WZ's convention).
+  # There is no `page-14_tcmask` here on purpose: upstream's has no coverage at
+  # all over the Viper/heavy hull islands, so the hulls get an AUTHORED mask
+  # instead (make_tcmask.py → texpages/*_ms_tcmask.png, wired per assembly in
+  # the .wzasm `tcmask` map, which outranks the derived page).
+  "page-16_tcmask.png"          # tracks / wheels
+  "page-17_tcmask.png"          # cannons (upstream is blank — wz_cyborg's gun)
+  "page-33_tcmask.png"          # cyborg body team regions
   "page-34_tcmask.png"          # blhq (command HQ) team regions
 )
 

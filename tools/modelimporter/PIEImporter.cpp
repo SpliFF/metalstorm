@@ -19,6 +19,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <map>
@@ -50,6 +51,29 @@ std::vector<std::string> Tokenize(const std::string& line) {
 
 float ToF(const std::string& s) { return std::strtof(s.c_str(), nullptr); }
 long  ToL(const std::string& s) { return std::strtol(s.c_str(), nullptr, 0); }
+
+/// WZ2100 `TYPE` is a HEXADECIMAL bitfield (doc/PIE.md), so it needs an
+/// explicit base-16 parse — `ToL`'s base-0 auto-detect would read the
+/// unprefixed `10200` as decimal ten-thousand-two-hundred and lose the flag.
+long ToHex(const std::string& s) { return std::strtol(s.c_str(), nullptr, 16); }
+
+/// PIE `TYPE` flag: the model is team-coloured through a `page-N_tcmask.png`
+/// companion of its diffuse page (doc/PIE.md; `iV_IMD_TCMASK` in WZ2100's
+/// lib/ivis_opengl/imd.h). PIE4 states the mask page outright with a `TCMASK`
+/// directive; PIE2/PIE3 only set this flag and leave the name to convention.
+constexpr long kPieTypeTCMask = 0x10000;
+
+/// WZ2100's `pie_MakeTexPageTCMaskName`: a page named `page-<N>-<whatever>.png`
+/// masks through `page-<N>_tcmask.png` — the numeric prefix is the whole key,
+/// the descriptive tail is dropped. Returns empty for a page that does not
+/// follow the `page-` convention (nothing sane to derive).
+std::string TCMaskNameFor(const std::string& page) {
+    if (page.rfind("page-", 0) != 0) return {};
+    size_t i = 5;
+    while (i < page.size() && std::isdigit(static_cast<unsigned char>(page[i]))) ++i;
+    if (i == 5) return {};   // "page-" with no number — nothing to key on
+    return page.substr(0, i) + "_tcmask.png";
+}
 
 std::string StemOf(const std::string& name) {
     size_t slash = name.find_last_of("/\\");
@@ -185,6 +209,9 @@ PIEImporter::Component PIEImporter::ParsePie(const std::string& text,
                 float w = ToF(t[3]), h = ToF(t[4]);
                 if (w > 0 && h > 0) { texW = w; texH = h; }
             }
+        } else if (kw == "TYPE") {
+            // TYPE <hex flags> — only the TCMASK bit matters to us.
+            if (t.size() >= 2) comp.typeFlags = ToHex(t[1]);
         } else if (kw == "TCMASK") {
             // TCMASK <n> <page>
             if (t.size() >= 3) comp.tcmaskPage = t[2];
@@ -250,8 +277,14 @@ PIEImporter::Component PIEImporter::ParsePie(const std::string& text,
                     comp.connectors.emplace_back(ToF(p[0]), ToF(p[1]), ToF(p[2]));
             }
         }
-        // TYPE / EVENT / SHADOWPOINTS / etc. ignored.
+        // EVENT / SHADOWPOINTS / INTERPOLATE / etc. ignored.
     }
+
+    // PIE2/PIE3 have no `TCMASK` directive — they announce the mask through
+    // the TYPE bitfield and leave the page name to WZ's naming convention.
+    // Honour that, so a flagged PIE2/3 part is not silently imported untinted.
+    if (comp.tcmaskPage.empty() && (comp.typeFlags & kPieTypeTCMask) != 0)
+        comp.tcmaskPage = TCMaskNameFor(comp.texPage);
 
     return comp;
 }
@@ -285,6 +318,23 @@ PIEImporter::AssemblySpec PIEImporter::ParseManifest(const std::string& jsonText
     spec.pieDir = doc.value("pie_dir", std::string("pie"));
     const std::string axis = doc.value("dominant_axis", std::string("z"));
     spec.dominantAxis = axis.empty() ? 'z' : axis[0];
+
+    // Optional `"tcmask": { "<diffuse page>": "<mask page>" }` — an
+    // assembly-level team-colour mask, overriding whatever the `.pie` parts
+    // declare (PIE4 directive) or imply (PIE2/3 TYPE flag). This is how
+    // AUTHORED masks reach a WZ model: the stock droid mask pages are all but
+    // empty over the hull/turret islands these assemblies use, so relying on
+    // upstream would import a unit with no usable team identification.
+    if (doc.contains("tcmask")) {
+        if (!doc["tcmask"].is_object())
+            throw DeadlyImportError("PIE: .wzasm \"tcmask\" must be an object");
+        for (const auto& kv : doc["tcmask"].items()) {
+            if (!kv.value().is_string())
+                throw DeadlyImportError("PIE: .wzasm \"tcmask\" entry \"", kv.key(),
+                                        "\" must map to a mask page filename");
+            spec.tcmaskByPage[kv.key()] = kv.value().get<std::string>();
+        }
+    }
 
     if (!doc.contains("parts") || !doc["parts"].is_array() || doc["parts"].empty())
         throw DeadlyImportError("PIE: .wzasm has no parts[]");
@@ -409,8 +459,12 @@ void PIEImporter::BuildScene(const AssemblySpec& spec,
     for (const auto& part : spec.parts) {
         const Component& c = byNode[part.node];
         if (c.texPage.empty()) continue;
-        if (!c.tcmaskPage.empty() && pageToTcmask.find(c.texPage) == pageToTcmask.end())
-            pageToTcmask[c.texPage] = c.tcmaskPage;
+        // The manifest wins over the `.pie`: authored art is the deliberate
+        // choice, the `.pie`-derived page is the upstream default.
+        auto ovr = spec.tcmaskByPage.find(c.texPage);
+        const std::string& mask = (ovr != spec.tcmaskByPage.end()) ? ovr->second : c.tcmaskPage;
+        if (!mask.empty() && pageToTcmask.find(c.texPage) == pageToTcmask.end())
+            pageToTcmask[c.texPage] = mask;
         if (pageToMat.count(c.texPage)) continue;
         pageToMat[c.texPage] = static_cast<unsigned int>(materials.size());
         materials.push_back(nullptr);   // filled below (need tcmask resolved first)

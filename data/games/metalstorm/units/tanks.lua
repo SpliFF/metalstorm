@@ -17,14 +17,11 @@ return mk{
                 -- as a proxy capsule (the Basin Reavers' whole armour
                 -- contingent in scenarios/meridian_basin.lua).
                 --
-                -- KNOWN GAP: the wz_* models ship no `_team.ktx2` mask (only
-                -- wz_building wired TCMASK), and the renderer's
-                -- maskless-no-tint rule means these draw untinted — weaker
-                -- team identification than the capsule they replace. Fix by
-                -- re-baking wz_wheeled/wz_tank with TCMASK→SPRINGRTS_team_color
-                -- (the wz_building precedent), or by replacing both with
-                -- purpose-built stems once the forge grows a light-vehicle
-                -- generator.
+                -- Team colour: wz_wheeled/wz_tank now carry a TCMASK wired to
+                -- `SPRINGRTS_team_color`, so they tint like any other unit.
+                -- The hull/turret mask is AUTHORED (tools/wz2100-baseline/
+                -- make_tcmask.py) — upstream ships none that covers these
+                -- hulls — and the wheels/tracks use the stock WZ page-16 mask.
                 override = { objectname = 'wz_wheeled' } },
         [2] = { weapons = { [1] = { name = 'MS_AC_S3' } },
                 description = 'Main battle tank troop',
