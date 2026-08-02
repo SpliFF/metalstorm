@@ -23,15 +23,23 @@ supersampled, flat per-face shading sampled from the diffuse atlas), so the
 forge keeps its "no GPU, no external binaries" property. Alpha is the
 coverage mask; the client alpha-tests at ~0.4.
 
+Once every prop in a package is baked, `write_manifest()` folds the per-model
+sidecars into one `impostors.json` for the whole directory — the map-level
+manifest `feature-renderer.ts` prefers (one request per models dir instead of
+a HEAD probe + a sidecar fetch per feature type), and the only place a
+per-def `impostorDistance` can be authored.
+
 Usage:
     python3 bake_impostors.py out/tree_conifer.gltf [--cell 128] [--out DIR]
                               [--diffuse PATH]
+    python3 bake_impostors.py --manifest out/            # fold sidecars
 then encode `<stem>_impostor.png` -> `.ktx2` (encode_sprites.mjs, or
 tools/textureconverter --encoding uastc).
 """
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 
@@ -238,11 +246,88 @@ def bake(gltf_path: str, diffuse_png: str | None = None,
     return png
 
 
+# ── map-level manifest ──────────────────────────────────────────────────
+#
+# `feature-renderer.ts` resolves a feature type's atlas from `impostors.json`
+# in the models dir first, and only falls back to per-model sidecar fetches +
+# a HEAD probe when there isn't one. Folding the sidecars into a manifest at
+# bake time turns map load from 1 + N requests into 1, and gives the per-def
+# `impostorDistance` the LOD tier reads (feature-lod-renderer deriveConfig) a
+# place to be authored.
+
+# Swap calibration. A perspective camera projects a world-space span `s` at
+# distance `d` to `s * H / (2 tan(fov/2) d)` pixels, so holding the SWAP
+# PIXEL SIZE constant across props gives each one its own distance: a 20-elmo
+# fence post becomes a card long before a 137-elmo conifer does, and both
+# swap at the same on-screen size. 70 px against a 128 px atlas cell keeps
+# the card oversampled at the moment of the swap (no visible softening), and
+# lands the conifer — the dominant vegetation type — at ~2500 elmos, i.e.
+# exactly the global default it replaces, so forest behaviour is unchanged.
+REFERENCE_VIEWPORT_H = 1080.0
+REFERENCE_FOV_Y = 0.8          # radians; Babylon's default, unset by rts-camera
+SWAP_PIXELS = 70.0
+# Floor for degenerate near-zero props, so a mismeasured model can never swap
+# inside the tile the camera is standing in (feature-lod tileSize is 2048).
+MIN_SWAP_DISTANCE = 256.0
+
+
+def swap_distance(card_size: float) -> float:
+    """Distance (elmos) at which a `card_size`-elmo prop subtends
+    SWAP_PIXELS vertical pixels in the reference view. Computed at the
+    model's authored scale — placements scale by `relativeSize`, but the
+    LOD tier is chosen per 2048-elmo tile of mixed scales, so a per-def
+    number is the right granularity."""
+    px_per_elmo_at_1 = REFERENCE_VIEWPORT_H / (2.0 * np.tan(REFERENCE_FOV_Y / 2.0))
+    d = card_size * px_per_elmo_at_1 / SWAP_PIXELS
+    return float(max(MIN_SWAP_DISTANCE, round(d)))
+
+
+def write_manifest(out_dir: str, stems: list[str] | None = None) -> str:
+    """Fold every `<stem>_impostor.json` in `out_dir` into one
+    `impostors.json`. Keys are model stems, exactly what
+    `feature-renderer.ts modelStemOf()` derives from the def's model URL."""
+    if stems is None:
+        stems = sorted(
+            os.path.basename(p)[:-len('_impostor.json')]
+            for p in glob.glob(os.path.join(out_dir, '*_impostor.json')))
+    atlases = {}
+    for stem in stems:
+        side = os.path.join(out_dir, f'{stem}_impostor.json')
+        if not os.path.exists(side):
+            continue
+        with open(side) as f:
+            meta = json.load(f)
+        atlases[stem] = dict(
+            diffuse=f'{stem}_impostor.ktx2',
+            yawBins=meta['yawBins'], pitchBins=meta['pitchBins'],
+            frames=meta['frames'], pitches=meta['pitchDegrees'],
+            width=meta['width'], height=meta['height'],
+            centreY=meta['centreY'], topDown=True,
+            impostorDistance=swap_distance(meta['height']),
+        )
+    path = os.path.join(out_dir, 'impostors.json')
+    with open(path, 'w') as f:
+        json.dump({'atlases': atlases}, f, indent=1, sort_keys=True)
+    print(f'[impostor] impostors.json: {len(atlases)} atlas(es), swap '
+          f'{min((a["impostorDistance"] for a in atlases.values()), default=0):.0f}'
+          f'-{max((a["impostorDistance"] for a in atlases.values()), default=0):.0f}'
+          f' elmos')
+    return path
+
+
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
-    ap.add_argument('gltf')
+    ap.add_argument('gltf', nargs='?',
+                    help='model to bake (omit with --manifest)')
     ap.add_argument('--diffuse', default=None)
     ap.add_argument('--out', default=None)
     ap.add_argument('--cell', type=int, default=128)
+    ap.add_argument('--manifest', metavar='DIR', default=None,
+                    help='fold existing sidecars in DIR into impostors.json')
     a = ap.parse_args()
-    bake(a.gltf, a.diffuse, a.out, a.cell)
+    if a.manifest:
+        write_manifest(a.manifest)
+    elif a.gltf:
+        bake(a.gltf, a.diffuse, a.out, a.cell)
+    else:
+        ap.error('give a model to bake, or --manifest DIR')

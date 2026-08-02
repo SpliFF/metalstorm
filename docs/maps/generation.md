@@ -235,6 +235,18 @@ treat them exactly like the ways that meet them. All models are
 KTX2 into the map's `objects3d/`, deterministic, licence-free), with 8-yaw ×
 3-pitch impostor atlases baked by `tools/fable-model-forge/bake_impostors.py`.
 
+> **Sourcing divergence (deliberate, recorded per AGENTS.md).** PLAN-maps.md
+> §1.4 originally called for **CC0 third-party** tree/rock models run through
+> the model pipeline. The props are generated instead. Two reasons: the forge
+> style bible (flat-shaded low poly, palette-atlas UVs, elmo-authored) is what
+> every Metalstorm unit is built to, and CC0 nature scans/packs would read as a
+> different game next to them; and generation keeps the whole map package
+> deterministic and free of per-asset licence bookkeeping (no `ASSETS.md` rows,
+> no redistribution terms). PLAN-metalstorm-beta-units.md sanctions the
+> generated-model route alongside CC0 sourcing, so this is a choice between two
+> approved options — not a stand-in. Swapping in CC0 sources later needs no code
+> change: they just have to land in `objects3d/` as glTF with a baked atlas.
+
 Exclusion zones (roads, water, start pads, `corridor`/`choke` regions) gate
 feature layers so chokepoints stay passable; stamps ignore them (the road
 deck is painted over stamps in the bake). Trees and boulders are `blocking`;
@@ -243,11 +255,23 @@ format doesn't carry it — size variety comes from multiple feature defs
 (`rock_boulder` vs `rock_boulder_large`).
 
 Rendering: `feature-lod-renderer.ts` splits each species into 2048-elmo tiles
-with three tiers — full mesh (≤2500 elmos), impostor card (≤10000), culled
-(beyond, and at whole-map camera height, where the albedo bake carries the
-forest read). Vegetation casts CSM shadows only within `shadowDistance`
-(1200 elmos) — Babylon submits every caster to every cascade, so ungated
-casting cost ~18 ms/frame at close zoom on the 54k-feature Meridian.
+with three tiers — full mesh, impostor card, culled (beyond `cullDistance`,
+and at whole-map camera height, where the albedo bake carries the forest
+read). Vegetation casts CSM shadows only within `shadowDistance` (1200 elmos)
+— Babylon submits every caster to every cascade, so ungated casting cost
+~18 ms/frame at close zoom on the 56k-feature Meridian.
+
+The mesh→card distance is **per species**, published in the package-wide
+`objects3d/impostors.json` that `bake_impostors.write_manifest()` folds out of
+the per-model sidecars (FeatureProcessor ships it into the processed
+`features/` dir; the client reads it in one request instead of probing per type).
+Each species' distance is sized so every prop reaches its card at the same
+**on-screen size** (70 px against a 128 px atlas cell, i.e. still oversampled
+at the swap): a 137-elmo conifer swaps at 2505 elmos — the global default it
+replaces, so forest behaviour is unchanged — while a 19-elmo fence post swaps
+at 361 instead of staying a full mesh 7× too far out. The tier dead band scales
+with the threshold (15%, capped by the global `hysteresis`) so a 52-elmo band
+protects a 350-elmo swap rather than a 256-elmo one swamping it.
 
 ## 7. Processing & verification loop
 
@@ -307,11 +331,31 @@ Recipe:
 
 ## 9. Goldens
 
-Reference captures of the shipped Meridian Basin (regenerate after visual
+Reference captures of the two shipped generated maps (regenerate after visual
 changes and eyeball against these):
 
-![strategic zoom](screenshots/meridian_basin_strategic_zoom.jpeg)
-![gameplay zoom](screenshots/meridian_basin_gameplay_zoom.jpeg)
+![Meridian strategic zoom](screenshots/meridian_basin_strategic_zoom.jpeg)
+![Meridian gameplay zoom](screenshots/meridian_basin_gameplay_zoom.jpeg)
+![Skerry strategic zoom](screenshots/skerry_reach_strategic_zoom.jpeg)
+![Skerry gameplay zoom](screenshots/skerry_reach_gameplay_zoom.jpeg)
+
+### Measured LOD cost (2026-08-03, this machine, retina)
+
+Submitted (post-frustum-cull) feature vertices, `__featureLod.force('near')`
+versus the automatic tier assignment, at a fixed camera:
+
+| map (placements) | camera | all-NEAR verts | auto verts | all-NEAR fps | auto fps |
+| --- | --- | --- | --- | --- | --- |
+| Meridian (55 967) | gameplay `y=230` | 8 868 240 | 3 400 300 | 17 | 25 |
+| Meridian (55 967) | strategic `y=8458` | 20 688 912 | **137 296** | 9 | **28** |
+| Skerry (22 436) | gameplay `y=340` | 5 135 776 | 3 164 344 | 22 | 33 |
+| Skerry (22 436) | strategic `y=8568` | 12 612 060 | **82 744** | 11 | **28** |
+
+The far tier costs exactly **8 vertices per instance** on every map, camera and
+species (a DOUBLESIDE quad) — that is the guardrail's "flat" property: card
+cost is independent of model complexity, so adding denser or more detailed
+props cannot raise the far-zoom vertex bill. At strategic zoom that is a 151×
+(Meridian) / 152× (Skerry) reduction and roughly 3× the framerate.
 
 ## 10. Known limits & queued improvements
 
