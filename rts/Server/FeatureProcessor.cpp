@@ -589,7 +589,10 @@ void InstallNativeModelForDef(MapMetadata& meta, MapFeatureDef& def,
     }
 
     // Impostor atlases are named by convention, not referenced from the
-    // glTF (they are an LOD tier, not a material input).
+    // glTF (they are an LOD tier, not a material input). `impostors.json` is
+    // the package-wide manifest folding every atlas sidecar into one file —
+    // the client's preferred discovery path (feature-renderer.ts), so it has
+    // to ride along even though it belongs to no single def.
     const std::string stem = src.stem().string();
     if (fs::is_directory(srcDir)) {
         for (const auto& entry : fs::directory_iterator(srcDir)) {
@@ -597,6 +600,8 @@ void InstallNativeModelForDef(MapMetadata& meta, MapFeatureDef& def,
             const std::string n = entry.path().filename().string();
             if (n.rfind(stem + "_impostor", 0) == 0) sidecars.push_back(n);
         }
+        if (fs::exists(srcDir / "impostors.json"))
+            sidecars.push_back("impostors.json");
     }
 
     int copied = 0;
