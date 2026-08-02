@@ -12,6 +12,7 @@ import {
     atlasCellIndex,
     selectAtlasCell,
     atlasCellUv,
+    cardTiltsWithPitch,
 } from './impostor-atlas.js';
 
 // PLAN-metalstorm-impostors.md "Atlas format (v2)". The baker and the runtime
@@ -205,5 +206,25 @@ describe('atlasCellUv', () => {
 
     it('clamps an out-of-range cell into the grid', () => {
         expect(atlasCellUv(999, DEFAULT_ATLAS_LAYOUT)).toEqual(atlasCellUv(23, DEFAULT_ATLAS_LAYOUT));
+    });
+});
+
+// §Card orientation: a card may only tilt with the camera pitch if its atlas
+// actually holds elevation rows for the steep view to land on.
+describe('card tilt rule', () => {
+    it('tilts only when the atlas has more than one elevation row', () => {
+        expect(cardTiltsWithPitch(DEFAULT_ATLAS_LAYOUT)).toBe(true);
+        expect(cardTiltsWithPitch(SINGLE_CELL_LAYOUT)).toBe(false);
+    });
+
+    it('does not tilt a multi-column, single-row sheet', () => {
+        // 8 yaw views but one horizon-level elevation: turning is correct,
+        // tilting would lay that horizon view flat on the ground.
+        expect(cardTiltsWithPitch({ yawBins: 8, pitchBins: 1, frames: 1 })).toBe(false);
+    });
+
+    it('ignores flipbook frames — only elevation rows license a tilt', () => {
+        expect(cardTiltsWithPitch({ yawBins: 8, pitchBins: 1, frames: 4 })).toBe(false);
+        expect(cardTiltsWithPitch({ yawBins: 8, pitchBins: 2, frames: 4 })).toBe(true);
     });
 });

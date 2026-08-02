@@ -42,6 +42,9 @@ import {
     type CascadedShadowGenerator,
 } from '@babylonjs/core';
 import { TeamColorPlugin } from './team-color-plugin.js';
+import {
+    type AtlasLayout, SINGLE_CELL_LAYOUT, cardTiltsWithPitch,
+} from './impostor-atlas.js';
 import { getTeamColor } from './team-colors.js';
 import type { PresentationClock } from './presentation-clock.js';
 import type { EntityStateSnapshot } from './entity-state.js';
@@ -61,6 +64,45 @@ export interface ImpostorAtlas {
     /** Quad size in world units (elmos). Derived from model bounds. */
     width: number;
     height: number;
+    /** Directional grid this sheet was baked on. Absent = a legacy single-view
+     *  sheet (`SINGLE_CELL_LAYOUT`): one horizon-level front view, so its cards
+     *  stay upright — see `cardTiltsWithPitch()`. */
+    layout?: AtlasLayout;
+}
+
+/** An atlas's grid, defaulting a legacy sheet to the single-cell layout. */
+export function layoutOf(atlas: ImpostorAtlas | undefined): AtlasLayout {
+    return atlas?.layout ?? SINGLE_CELL_LAYOUT;
+}
+
+/**
+ * The card rotation shared by every impostor card of one atlas this frame
+ * (PLAN-metalstorm-impostors.md §Card orientation).
+ *
+ * Two things make this a per-FRAME value rather than a per-instance one:
+ * directionality comes from atlas cell SELECTION, not from twisting the quad,
+ * and a shared rotation is precisely what stops a tight squad's sprites from
+ * fanning out radially when the camera is close.
+ *
+ * Tilt is decided by the atlas (`cardTiltsWithPitch`):
+ *  - elevation rows present → the camera's full world rotation, so the card
+ *    turns to face a steep top-down camera and actually presents the top-down
+ *    row it selected. Without this the card is near edge-on and smears.
+ *  - single row → yaw about world up only, keeping the card upright; a lone
+ *    horizon-level view laid flat would read as a fallen unit.
+ *
+ * Yaw is taken from the camera's own basis (its world matrix row 2 is the
+ * toward-viewer axis in Babylon RH), not from each sprite's position→camera
+ * vector, so it is genuinely uniform across the batch.
+ */
+export function computeCardRotation(
+    camera: { getWorldMatrix(): Matrix; absoluteRotation: Quaternion } | null | undefined,
+    layout: AtlasLayout,
+): Quaternion {
+    if (!camera) return Quaternion.Identity();
+    if (cardTiltsWithPitch(layout)) return camera.absoluteRotation.clone();
+    const m = camera.getWorldMatrix().m;
+    return Quaternion.RotationYawPitchRoll(Math.atan2(m[8], m[10]), 0, 0);
 }
 
 /** LOD tier — drives EntityRenderer's per-entity visibility decision. */
@@ -229,6 +271,11 @@ export class ImpostorRenderer {
 
     /** Flush pending instances → thin-instance buffers. Called per render. */
     render(cameraPos: Vector3): void {
+        // Card orientation is IDENTICAL for every instance in a frame (see
+        // computeCardRotation), so resolve it once here rather than per sprite.
+        // Per-atlas, because whether a card tilts depends on its layout.
+        const camera = this.scene.activeCamera;
+
         // Group instances per mesh
         const groups = new Map<string, {
             mesh: Mesh;
@@ -248,10 +295,20 @@ export class ImpostorRenderer {
             const mesh = this.getOrCreateImpostorMesh(defId, team);
             if (!mesh) continue;
 
+            const atlas = this.atlases.get(defId);
+
+            // One card rotation for the whole batch — shared, so nearby
+            // sprites stay parallel instead of fanning out radially.
+            const cardRot = computeCardRotation(camera, layoutOf(atlas));
+
             // Instance positions are ground anchors (entity Y is at ground
-            // level) — lift the quad by half its height so the sprite's
-            // feet touch the ground instead of the figure being half-buried.
-            const halfH = (this.atlases.get(defId)?.height ?? 0) * 0.5;
+            // level) — lift the quad by half its height so the sprite's feet
+            // touch the ground instead of the figure being half-buried. The
+            // lift rides the card's own local up, so a tilted card keeps its
+            // base on the terrain rather than hovering above it.
+            const halfH = (atlas?.height ?? 0) * 0.5;
+            const lift = new Vector3(0, halfH, 0);
+            lift.rotateByQuaternionToRef(cardRot, lift);
 
             const group = {
                 mesh,
@@ -262,22 +319,16 @@ export class ImpostorRenderer {
             };
 
             for (const inst of instances) {
-                // Camera-facing (Y-axis) billboard baked per-instance.
+                // The card rotation is baked into the instance matrix because
                 // Mesh.billboardMode does NOT apply per-thin-instance — Babylon
                 // computes it once from the MESH's own transform (our mesh sits
-                // at the origin), so every instance would share one rotation
-                // derived from origin→camera instead of its own position→camera.
-                // In practice that left the quad edge-on (invisible) from most
-                // camera angles. Yaw-only (not full ALL-axis) so the card stays
-                // upright — the standard convention for ground-unit sprite
-                // impostors, and consistent with the heading-quantized atlas
-                // column this def eventually selects.
-                const dx = cameraPos.x - inst.x;
-                const dz = cameraPos.z - inst.z;
-                const yaw = Math.atan2(dx, dz);
-                const rot = Quaternion.RotationAxis(Vector3.Up(), yaw);
-                const mat = Matrix.Compose(Vector3.One(), rot,
-                    new Vector3(inst.x, inst.y + halfH, inst.z));
+                // at the origin), which left the quad edge-on from most camera
+                // angles. Unlike a per-instance twist toward the camera
+                // POSITION, `cardRot` is shared by the batch (see
+                // computeCardRotation), which is what keeps a tight squad's
+                // sprites parallel instead of fanning out.
+                const mat = Matrix.Compose(Vector3.One(), cardRot,
+                    new Vector3(inst.x + lift.x, inst.y + lift.y, inst.z + lift.z));
                 const arr = new Float32Array(16);
                 mat.copyToArray(arr, 0);
                 for (let i = 0; i < 16; i++) group.matrices.push(arr[i]);
