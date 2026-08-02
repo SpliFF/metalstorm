@@ -1672,6 +1672,17 @@ export class TerrainFog {
         mesh.receiveShadows = false;
 
         const mat = new StandardMaterial('terrainFogMat', scene);
+        // The world-space FOG_Y_OFFSET alone cannot beat z-buffer precision
+        // at strategic zoom: with minZ=1 the resolvable depth delta at a
+        // fitMap camera (~20k elmos up) is ~25 elmos, so an 8-elmo lift
+        // z-fights and the overlay renders as horizontal streak bands
+        // (visible in the pre-2026-07-27 Meridian Basin goldens). A
+        // polygon-offset depth bias scales with depth quantization, so it
+        // holds at every zoom; the overlay is the last blended draw of its
+        // rendering group and writes no depth, so pulling it toward the
+        // camera cannot occlude anything else.
+        mat.zOffset = -16;
+        mat.zOffsetUnits = -128;
         mat.disableLighting = true;
         // We never sample the diffuse path; the overlay is pure
         // alpha-blended black driven by `opacityTexture`. Setting
