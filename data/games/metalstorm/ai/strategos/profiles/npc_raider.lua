@@ -16,9 +16,14 @@ return {
     opportunism   = 0.5,   -- indifferent to the team bounty economy
     doctrine      = 'raider',
 
-    -- A scenario can attach a fixed slate here (installed onto the role at
-    -- boot). Shape: function(picture, out) that appends scripted goals —
-    -- e.g. raid the nearest civilian district, toll the transit spine.
-    -- Left nil in the skeleton; scenarios provide it (PLAN-metalstorm.md §3).
+    -- The scripted slate itself is the `npc` ROLE's (roles.lua binds
+    -- scripted.lua's builders); a scenario drives it with data — home region,
+    -- raid targets, tolled route — published as team rulesParams by
+    -- game_scenario.lua's `ai` section. See scenarios/meridian_basin.lua's
+    -- Basin Reavers for a shipped example.
+    --
+    -- A profile MAY still override with its own function(picture, out, role,
+    -- profile) -> bool if a faction needs behaviour no scenario data can
+    -- express; main.lua installs it onto the role at boot. Nil = use the role's.
     scriptedSlate = nil,
 }

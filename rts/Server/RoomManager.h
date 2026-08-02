@@ -55,6 +55,13 @@ struct RoomAISlot {
     /// Same semantics as RoomPlayer.startPos — -1 means auto-fill
     /// at game start.
     int8_t startPos = -1;
+    /// Optional personality/difficulty profile name (e.g. "aggressive",
+    /// "caretaker") for AI plugins that support one — PLAN-metalstorm-ai.md
+    /// §10 task 6. Empty = no override (the plugin falls back to its own
+    /// default, or a scenario-published one). Passed through spawnGameServer
+    /// as a 4th "--ai id:team:pos:profile" field; the engine never
+    /// interprets it, just carries it to the game-specific AI VM.
+    std::string profile;
 };
 
 /// Result of a LeaveRoom call, telling the caller what action to take.
@@ -254,6 +261,16 @@ public:
     /// the requester is not the host or the index is out of range.
     bool SetAITeam(uint32_t roomId, uint32_t requesterId,
                    uint8_t slotIndex, uint8_t team);
+
+    /// Set (or, with an empty string, clear) the AI slot at `slotIndex`'s
+    /// personality/difficulty profile (host only) — PLAN-metalstorm-ai.md
+    /// §10 task 6. Not validated against any allow-list here: the profile
+    /// name is opaque, game-specific data (ai/strategos/config.lua's
+    /// Config.PROFILES for Metalstorm); the engine only carries it.
+    /// Returns false if the requester is not the host or the index is out
+    /// of range.
+    bool SetAIProfile(uint32_t roomId, uint32_t requesterId,
+                      uint8_t slotIndex, const std::string& profile);
 
     /// Set the start position for a player slot.
     ///

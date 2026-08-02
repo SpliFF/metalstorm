@@ -244,6 +244,24 @@ int main(int argc, char* argv[])
         return out;
     };
 
+    // --ai takes an optional 4th field (PLAN-metalstorm-ai.md §10 task 6):
+    // "id:team:pos:profile". Same missing-trailing-field semantics as
+    // splitSpec above, just one field wider.
+    auto splitAiSpec = [](const std::string& spec) {
+        std::array<std::string, 4> out;
+        size_t prev = 0;
+        for (int i = 0; i < 4; ++i) {
+            const size_t next = spec.find(':', prev);
+            if (next == std::string::npos) {
+                out[i] = spec.substr(prev);
+                break;
+            }
+            out[i] = spec.substr(prev, next - prev);
+            prev = next + 1;
+        }
+        return out;
+    };
+
     // --- Logging CLI flags ---
     std::string logFile;
     std::string logLevel;
@@ -351,15 +369,16 @@ int main(int argc, char* argv[])
             }
             CGameSetup::SetModOption(kv.substr(0, eq), kv.substr(eq + 1));
         } else if (arg == "--ai" && i + 1 < argc) {
-            // Format: <id>:<team>:<pos>. We parse here and resolve
-            // later, once we have a discovered AI list to look up
-            // against. Accepts the legacy 2-tuple form too, for
-            // dev-smoketest invocations that predate start positions.
+            // Format: <id>:<team>:<pos>:<profile>. We parse here and
+            // resolve later, once we have a discovered AI list to look up
+            // against. Accepts the legacy 2/3-tuple forms too, for
+            // dev-smoketest invocations that predate start positions and
+            // the profile field (PLAN-metalstorm-ai.md §10 task 6).
             const std::string spec = argv[++i];
-            const auto parts = splitSpec(spec);
+            const auto parts = splitAiSpec(spec);
             if (parts[0].empty()) {
                 SLOG(SPRING_LOG_WARNING,
-                    "ignoring malformed --ai '%s' (expected id:team[:pos])",
+                    "ignoring malformed --ai '%s' (expected id:team[:pos[:profile]])",
                     spec.c_str());
                 continue;
             }
@@ -367,6 +386,7 @@ int main(int argc, char* argv[])
             rq.id = parts[0];
             rq.team = parts[1].empty() ? 0 : std::atoi(parts[1].c_str());
             rq.startPos = parts[2].empty() ? -1 : std::atoi(parts[2].c_str());
+            rq.profile = parts[3];
             requestedAIs.push_back(std::move(rq));
         } else if (arg[0] != '-') {
             // Legacy: bare number = port
@@ -398,6 +418,10 @@ int main(int argc, char* argv[])
                 rq.id = s.aiId;
                 rq.team = s.team;
                 rq.startPos = s.startPos;
+                // PLAN-metalstorm-ai.md §10 task 6: previously dropped here —
+                // the manifest's aiSlots[].profile was parsed by
+                // HeadlessRun::ParseConfig but never reached the AI.
+                rq.profile = s.profile;
                 requestedAIs.push_back(std::move(rq));
             }
         }
@@ -993,6 +1017,20 @@ int main(int argc, char* argv[])
         SLOG(SPRING_LOG_NOTICE,
             "registered AI virtual player #%d '%s' on team %d",
             pNum, p.name.c_str(), rq.team);
+
+        // PLAN-metalstorm-ai.md §10 task 6: hand a lobby/manifest-chosen
+        // personality/difficulty profile to the AI VM through the SAME
+        // modoption transport `--modoption` already uses — no new engine
+        // surface. A synced gadget (game_teams.lua) reads this back at
+        // GameStart and republishes it as the team rulesParam
+        // `ai_profile_<playerID>` that ai/strategos/picture.lua already
+        // reads (Picture.readProfileHint). Untrusted text end to end;
+        // main.lua's resolveProfile() is the sole validator (Config.PROFILES
+        // allow-list) — this is just a transport, not a trust boundary.
+        if (!rq.profile.empty()) {
+            CGameSetup::SetModOption(
+                "ai_profile_player" + std::to_string(pNum), rq.profile);
+        }
     }
 
     // Dev-mode: no roster means no players to wait for

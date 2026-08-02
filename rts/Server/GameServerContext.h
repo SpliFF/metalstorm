@@ -35,7 +35,7 @@ struct RequestedPlayer {
     int startPos = -1;
 };
 
-// AI slot request from the lobby (`--ai id:team:pos`).
+// AI slot request from the lobby (`--ai id:team:pos:profile`).
 struct RequestedAI {
     std::string id;
     int team = 0;
@@ -44,6 +44,13 @@ struct RequestedAI {
     // AI slot at startup (server_main registers a real CPlayer per AI). -1
     // until registered. Passed to AIRuntimePool::AddAI as the charge identity.
     int playerNum = -1;
+    // PLAN-metalstorm-ai.md §10 task 6: optional personality/difficulty
+    // profile name (e.g. "aggressive", "caretaker") requested by the lobby
+    // or a --headless-run manifest's aiSlots[].profile. Empty = no override
+    // (the AI VM falls back to a scenario-published ai_profile or
+    // Config.DEFAULT_PROFILE). Untrusted text — validated Lua-side by
+    // main.lua's resolveProfile() against Config.PROFILES, never here.
+    std::string profile;
 };
 
 struct GameServerContext {

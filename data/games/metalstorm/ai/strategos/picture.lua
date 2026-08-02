@@ -278,6 +278,54 @@ local function readGuidance(c, role)
     }
 end
 
+--=============================================================================
+-- Scenario-authored AI slot configuration (PLAN-metalstorm-ai.md §5 NPC column
+-- + §10 task 6 "per-slot profile"). game_scenario.lua's `ai` section publishes
+-- these as team rulesParams ({allied=true}); this is the read side.
+--
+-- Why rulesParams and not a file: the AI4 file API reads STATIC map/def data
+-- that is identical for every AI on the map. Per-slot configuration is neither
+-- static across slots nor map data — it is per-team game state, which is
+-- exactly what the rulesParams mirror (AI1) is for, and it costs nothing new.
+--=============================================================================
+
+--- Which profile should this VM wear? Per-player key first (two AIs can share
+-- one team — a co-commander pair), then the team-wide key. Returns nil when
+-- the scenario/lobby published nothing, leaving Config.DEFAULT_PROFILE.
+--
+-- The value is UNTRUSTED text that ends up in a `require('profiles.'..name)`,
+-- so main.lua validates it against Config.PROFILES before loading; the
+-- plugin-scoped loader's own sandbox (no `..`, no separators) is the backstop.
+function Picture.readProfileHint(playerId)
+    local AI = _G.AI
+    if type(AI) ~= 'table' or type(AI.getRulesParam) ~= 'function' then return nil end
+    if playerId and playerId >= 0 then
+        local v = AI.getRulesParam('team', 'ai_profile_' .. math.floor(playerId))
+        if type(v) == 'string' and v ~= '' then return v end
+    end
+    local v = AI.getRulesParam('team', 'ai_profile')
+    if type(v) == 'string' and v ~= '' then return v end
+    return nil
+end
+
+--- The NPC scripted-slate parameters (scripted.lua's builders consume this).
+-- nil when the scenario published no `ai_slate_kinds` — the honest "this AI
+-- has no script", which scripted.lua turns into a fall-through to the implicit
+-- slate rather than a silently empty goal list.
+local function readScript(c)
+    if not c.rulesParam then return nil end
+    local AI = _G.AI
+    local kinds = AI.getRulesParam('team', 'ai_slate_kinds')
+    if type(kinds) ~= 'string' or kinds == '' then return nil end
+    return {
+        kinds   = splitList(kinds),
+        home    = AI.getRulesParam('team', 'ai_slate_home'),
+        targets = splitList(AI.getRulesParam('team', 'ai_slate_targets')),
+        route   = splitList(AI.getRulesParam('team', 'ai_slate_route')),
+        reach   = tonumber(AI.getRulesParam('team', 'ai_slate_reach')),
+    }
+end
+
 --- Parley board + trust ledger (interaction §1/§2). Read-only here; the
 -- planner scores proposals (ai/strategos/planner.lua Planner.evaluateProposals),
 -- the actuator responds (Actuators:respondProposal, engine ask I1).
@@ -573,6 +621,8 @@ function Picture.refresh(ctx)
         economy   = readEconomy(c, role),
         guidance  = readGuidance(c, role),
         parley    = readParley(c, role),
+        -- Scenario-authored NPC slate parameters (§5); nil for un-scripted AIs.
+        script    = readScript(c),
         power     = power,
 
         ledger    = buildLedger(c, regions, power),

@@ -143,6 +143,61 @@ local function isAIPlayer(playerID)
     return type(opts) == 'table' and opts.isAI == '1'
 end
 
+-- Exported because the isAI test above is a subtle one (an 11th return value,
+-- a STRING '1', only present with getPlayerOpts=true) that other gadgets need
+-- and would otherwise re-derive slightly differently. game_scenario.lua uses it
+-- to find the AI virtual player behind a scenario-declared NPC slot.
+GG.Teams = GG.Teams or {}
+
+--- Present AI virtual players on `teamID`, in playerID order. Empty when the
+--- team has no AI (e.g. the scenario declares an NPC faction but the launch
+--- supplied no `--ai` slot for it) — callers report that rather than guessing.
+function GG.Teams.AIPlayers(teamID)
+    local out = {}
+    for _, playerID in ipairs(Spring.GetPlayerList(teamID, true) or {}) do
+        if isPresent(playerID) and isAIPlayer(playerID) then out[#out + 1] = playerID end
+    end
+    table.sort(out)
+    return out
+end
+
+--- Lobby/manifest per-slot profile transport (PLAN-metalstorm-ai.md §10 task
+--- 6). server_main.cpp publishes a per-AI modoption `ai_profile_player<ID>`
+--- at AI virtual-player registration (from --ai id:team:pos:profile, or a
+--- headless/direct-start manifest's aiSlots[].profile) — ahead of GameStart,
+--- so it's already in Spring.GetModOptions() here. This republishes it as the
+--- team rulesParam `ai_profile_<ID>` that ai/strategos/picture.lua already
+--- reads (Picture.readProfileHint's per-player key), the SAME key a
+--- scenario's `ai` section publishes team-wide (game_scenario.lua) — just
+--- keyed per-player so two AIs sharing a team (a co-commander pair) don't
+--- collide. Modoptions never change mid-game, so a GameStart-once pass is
+--- enough (mirrors caretakerEnabled's own GameStart re-read above). The value
+--- is untrusted text; main.lua's resolveProfile() is the sole validator
+--- (Config.PROFILES allow-list) — this is transport only, not a trust
+--- boundary check.
+local function publishAIProfiles()
+    local mo = Spring.GetModOptions()
+    local gaia = Spring.GetGaiaTeamID()
+    for _, teamID in ipairs(Spring.GetTeamList()) do
+        if teamID ~= gaia then
+            for _, aiID in ipairs(GG.Teams.AIPlayers(teamID)) do
+                -- Integer-normalised key (same AI3 bugfix as game_authority.lua's
+                -- pkey, see its header note): Spring.GetPlayerList() hands back
+                -- playerIDs as Lua-5.4 FLOATS, so an un-floored aiID here would
+                -- read/write 'ai_profile_player0.0' while server_main.cpp's
+                -- CGameSetup::SetModOption wrote the integer-keyed
+                -- 'ai_profile_player0' — a miss that silently left every AI on
+                -- its default profile.
+                local pid = math.floor(aiID)
+                local profile = mo['ai_profile_player' .. pid]
+                if profile and profile ~= '' then
+                    Spring.SetTeamRulesParam(teamID, 'ai_profile_' .. pid, profile, ALLIED_LOS)
+                end
+            end
+        end
+    end
+end
+
 --- Recompute co-commander state for every team and publish it. Cheap (a couple
 --- of GetPlayerList/GetPlayerInfo passes); called only when team human-presence
 --- can change — GameStart + every join/leave.
@@ -365,6 +420,9 @@ function gadget:GameStart()
     -- roster is seeded (PlayerAdded already refreshed per-join, but this
     -- guarantees every team is published even for a zero-drop-in start).
     refreshCoCommanders()
+    -- §10 task 6: republish any lobby/manifest-chosen AI profile now that
+    -- every AI virtual player is in the roster.
+    publishAIProfiles()
 end
 
 function gadget:GameFrame(frame)

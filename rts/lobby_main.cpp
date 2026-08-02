@@ -155,9 +155,11 @@ static int findFreePort(int base = 9100, int floor = 0,
 /// their lobby-assigned team.
 ///
 /// `aiSlots` is the room's AI roster at game-start time. Each slot
-/// becomes a `--ai <id>:<team>:<posIdx>` argument pair; the sim
+/// becomes a `--ai <id>:<team>:<posIdx>[:<profile>]` argument pair; the sim
 /// runs its own AIDiscovery against the same game path and
-/// resolves each id to a main.lua it can actually run.
+/// resolves each id to a main.lua it can actually run. The optional
+/// profile field (PLAN-metalstorm-ai.md §10 task 6) is opaque to the
+/// engine — carried through to the AI plugin, which validates it.
 ///
 /// Both rosters must have `startPos` populated (or -1 if the map
 /// has no start positions at all). The lobby calls
@@ -221,9 +223,15 @@ static GameServerInstance spawnGameServer(
   std::vector<std::string> aiArgStorage;
   aiArgStorage.reserve(aiSlots.size());
   for (const auto &slot : aiSlots) {
-    aiArgStorage.push_back(slot.aiId + ":" +
-                           std::to_string(static_cast<int>(slot.team)) + ":" +
-                           std::to_string(static_cast<int>(slot.startPos)));
+    // 4th field (personality/difficulty profile, PLAN-metalstorm-ai.md §10
+    // task 6) is appended only when set, so a slot with no profile still
+    // produces the plain 3-field spec server_main.cpp has always parsed.
+    std::string spec = slot.aiId + ":" +
+                       std::to_string(static_cast<int>(slot.team)) + ":" +
+                       std::to_string(static_cast<int>(slot.startPos));
+    if (!slot.profile.empty())
+      spec += ":" + slot.profile;
+    aiArgStorage.push_back(std::move(spec));
   }
   // Room modoptions → one "--modoption key=value" pair each. (§5)
   std::vector<std::string> modOptArgStorage;
@@ -1720,6 +1728,7 @@ int main(int argc, char *argv[]) {
       aj["name"] = ai.displayName;
       aj["team"] = ai.team;
       aj["start_pos"] = ai.startPos;
+      aj["profile"] = ai.profile;
       j["ai_slots"].push_back(std::move(aj));
     }
     j["modoptions"] = nlohmann::json::object();
@@ -1943,6 +1952,12 @@ int main(int argc, char *argv[]) {
         int8_t sp = static_cast<int8_t>(aj.value("startPos", -1));
         if (sp >= 0)
           rooms.SetAIStartPos(roomId, host.userId, slotIndex, sp, maxStartPos);
+        // PLAN-metalstorm-ai.md §10 task 6: the manifest's aiSlots[].profile
+        // (already the "same shape as --headless-run" per the doc comment
+        // above) reaches the AI VM via spawnGameServer's --ai 4th field.
+        std::string profile = aj.value("profile", "");
+        if (!profile.empty())
+          rooms.SetAIProfile(roomId, host.userId, slotIndex, profile);
         slotIndex++;
       }
     }
@@ -2491,6 +2506,17 @@ int main(int argc, char *argv[]) {
         if (!rooms.AddAISlot(room->id, static_cast<uint32_t>(userId), aiId,
                              aiName, team))
           return HttpAuth::JsonResponse(400, R"({"error":"cannot add AI"})");
+        // Optional personality/difficulty profile at creation time
+        // (PLAN-metalstorm-ai.md §10 task 6) — same effect as adding the
+        // slot then calling /api/rooms/ai/profile, just one round trip.
+        std::string profile = j.value("profile", "");
+        if (!profile.empty()) {
+          GameRoom *added = rooms.GetRoom(room->id);
+          if (added && !added->aiSlots.empty())
+            rooms.SetAIProfile(room->id, static_cast<uint32_t>(userId),
+                               static_cast<uint8_t>(added->aiSlots.size() - 1),
+                               profile);
+        }
         broadcastRooms();
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
       });
@@ -2569,6 +2595,34 @@ int main(int argc, char *argv[]) {
                              team))
           return HttpAuth::JsonResponse(400,
                                         R"({"error":"cannot set AI team"})");
+        broadcastRooms();
+        return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
+      });
+
+  // POST /api/rooms/ai/profile — set (or, with an empty/absent value,
+  // clear) an AI slot's personality/difficulty profile (PLAN-metalstorm-ai.md
+  // §10 task 6). Body: {"slot_index": N, "profile": "aggressive"}.
+  net.AddHttpPost(
+      "/api/rooms/ai/profile", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        auto *room = findPlayerRoom(static_cast<uint32_t>(userId));
+        if (!room)
+          return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
+        nlohmann::json j =
+            nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+        if (j.is_discarded())
+          return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+        uint8_t slotIndex =
+            j.contains("slot_index") && j["slot_index"].is_string()
+                ? (uint8_t)std::atoi(j["slot_index"].get<std::string>().c_str())
+                : (uint8_t)j.value("slot_index", 0);
+        std::string profile = j.value("profile", "");
+        if (!rooms.SetAIProfile(room->id, static_cast<uint32_t>(userId),
+                                slotIndex, profile))
+          return HttpAuth::JsonResponse(
+              400, R"({"error":"cannot set AI profile"})");
         broadcastRooms();
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
       });

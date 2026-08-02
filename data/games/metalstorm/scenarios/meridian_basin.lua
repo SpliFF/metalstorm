@@ -73,6 +73,50 @@ return {
         { faction = 'union',   team = 5 },
         { faction = 'union',   team = 6 },
         { faction = 'union',   team = 7 },
+        -- Team 8 is the Basin Reavers, an NPC faction (see `ai` below). Every
+        -- team is its own ally team in this engine (Simulation.cpp: "each
+        -- non-Gaia team is its own ally team"), so the Reavers are hostile to
+        -- both sides with no extra configuration.
+        { faction = 'reavers', team = 8 },
+    },
+
+    -- ========================================================================
+    -- NPC factions (PLAN-metalstorm-ai.md §5, the NPC column).
+    -- ========================================================================
+    -- THE BASIN REAVERS. A scavenger band squatting on the East Pass causeway.
+    -- They are not a third army: no EXPAND, no BUILD, no objective income —
+    -- just a garrison on the choke, a toll on the lake crossing behind it, and
+    -- opportunistic raids on the two market districts the evacuation convoys
+    -- run to. That makes the Phase-2 "secure the ridge passes" objective an
+    -- actual fight rather than a walk-in, and gives the escort missions a
+    -- predator, without either side gaining or losing an ally.
+    --
+    -- This block is the SCENARIO half of the split: it says what the faction's
+    -- brain should want. The BEHAVIOUR is the AI plugin's
+    -- (ai/strategos/scripted.lua's garrison/raid/toll builders); the plugin
+    -- reads these values back as team rulesParams over AI1. And, exactly like
+    -- `sides`, it does not itself put an AI on the map: the room manifest must
+    -- supply `{ "aiId": "strategos", "team": 8 }` (both meridian_basin
+    -- manifests do). Without that slot the loader warns and the Reaver units
+    -- are skipped — declared but absent, never silently half-alive.
+    ai = {
+        {
+            team    = 8,
+            profile = 'npc_raider',
+            slate   = {
+                kinds   = { 'garrison', 'raid', 'toll' },
+                home    = 'east_pass',                       -- the causeway choke
+                targets = { 'north_market', 'south_market' }, -- convoy termini
+                route   = { 'still_mere' },                  -- the lake crossing
+                reach   = 2,                                 -- region-graph hops from home
+            },
+            -- §5: "small scripted stipend (scenario-granted, not objective
+            -- income)". An NPC has no objective income at all, so without this
+            -- it would spend its JOIN_GRANT on the opening directives and then
+            -- be permanently broke. Deliberately meagre — the Reavers can
+            -- sustain a garrison and the occasional raid, never a campaign.
+            stipend = { amount = 35, periodSec = 60 },
+        },
     },
 
     -- Starting garrison at each side's primary drop-in (northgate/southgate,
@@ -90,6 +134,16 @@ return {
         { def = 'ms_soldiers_s1', team = 4, x = 6400, z = 14984, facing = 'north', count = 6, spacing = 100 },
         { def = 'ms_engineers_s1', team = 4, x = 6200, z = 15184, facing = 'north', count = 2, spacing = 120 },
         { def = 'ms_radar_s1', team = 4, x = 13184, z = 15184, facing = 'north', count = 1 },
+
+        -- Basin Reavers (team 8, NPC — see the `ai` block below). Camped on
+        -- the East Pass causeway, centroid of the region's polygon
+        -- (mapdata/regions.lua: x 9984..13184, z 7200..9184). Light only:
+        -- east_pass is tagged heavy_restricted, and a raider band that could
+        -- trade blows with a real army would stop being flavour. Skipped with
+        -- a warning if the launch supplied no team 8 (game_scenario.lua
+        -- stageUnits' live-team check).
+        { def = 'ms_soldiers_s1', team = 8, x = 11584, z = 8192, facing = 'north', count = 6, spacing = 110 },
+        { def = 'ms_tanks_s1',    team = 8, x = 11800, z = 8400, facing = 'north', count = 3, spacing = 140 },
     },
 
     -- Ambient civilian presence at the two habitat districts (the market

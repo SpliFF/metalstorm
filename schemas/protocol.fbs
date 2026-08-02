@@ -1296,6 +1296,11 @@ table RoomAISlot {
     /// Same semantics as RoomPlayerInfo.start_pos — -1 means the
     /// lobby will auto-assign at game start.
     start_pos: int8 = -1;
+    /// Optional personality/difficulty profile name for AI plugins that
+    /// support one (e.g. Metalstorm's strategos: "aggressive", "caretaker")
+    /// — PLAN-metalstorm-ai.md §10 task 6. Empty = no override. Opaque to
+    /// the engine; set via POST /api/rooms/ai/profile.
+    profile: string;
 }
 
 /// One available AI plugin, enumerated from content/engine/ai + the
