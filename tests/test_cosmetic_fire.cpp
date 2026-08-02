@@ -53,14 +53,29 @@ CosmeticTargetHit SphereTarget(const float3& centre, float radius) {
 	};
 }
 
+/// Component-wise position compare — float3 has no doctest stringifier, so
+/// this keeps the failure output readable and the intent explicit.
+bool SamePos(const float3& a, const float3& b) {
+	return (a - b).SqLength() < 1e-6f;
+}
+
 } // namespace
 
 
-TEST_CASE("CosmeticFlightPos matches per-tick ballistic integration") {
-	// CWeaponProjectile advances as `speed.y += mygravity; pos += speed`.
-	// The closed form must agree with that recurrence at integer frames,
-	// otherwise the client's invented arc and the server's impact point
-	// describe different flights.
+TEST_CASE("CosmeticFlightPos matches per-tick ballistic integration EXACTLY") {
+	// CProjectile::Update advances as `speed += g; pos += speed` — gravity
+	// BEFORE the step (Projectile.cpp ~117). The closed form must agree with
+	// that recurrence at integer frames, otherwise the walk that resolves the
+	// shot and the shell the sim would have flown describe different arcs.
+	//
+	// Until L2.2 this case asserted the same thing with epsilon 0.02 on y and
+	// a comment explaining the gap away as "that discrepancy, not slop". It
+	// was slop: the closed form was the textbook 0.5*g*t^2, missing the
+	// recurrence's extra 0.5*g*t, so the walk's arc rode above the real shell
+	// by half a step of gravity and grew with t. On a shallow direct-fire arc
+	// that ~2 elmo vertical error became tens of elmos of horizontal overfly
+	// and cost a 3.1x damage shortfall against the sim. The tolerance is now
+	// float epsilon, so the same mistake cannot pass again.
 	const float3 origin(0.0f, 100.0f, 0.0f);
 	const float3 vel(10.0f, 5.0f, 0.0f);
 	const float  g = -0.12f;
@@ -72,13 +87,9 @@ TEST_CASE("CosmeticFlightPos matches per-tick ballistic integration") {
 		p += v;
 
 		const float3 closed = CosmeticFlightPos(origin, vel, g, static_cast<float>(frame));
-		// The recurrence applies gravity before the step, so it accumulates
-		// an extra half-frame of pull versus the continuous form. Half a
-		// frame of a 0.12 elmo/frame^2 pull is well under an elmo even after
-		// 40 frames — the tolerance below is that discrepancy, not slop.
-		CHECK(closed.x == doctest::Approx(p.x).epsilon(0.001));
-		CHECK(closed.z == doctest::Approx(p.z).epsilon(0.001));
-		CHECK(closed.y == doctest::Approx(p.y).epsilon(0.02));
+		CHECK(closed.x == doctest::Approx(p.x).epsilon(0.0001));
+		CHECK(closed.z == doctest::Approx(p.z).epsilon(0.0001));
+		CHECK(closed.y == doctest::Approx(p.y).epsilon(0.0001));
 	}
 }
 
@@ -148,7 +159,17 @@ TEST_CASE("SolveCosmeticFlight stops at the ground when the arc dips into it") {
 	const CosmeticFlight f = SolveCosmeticFlight(origin, vel, g, aim, 0, FlatGround);
 
 	CHECK(f.hitGround);
-	CHECK(f.impactPos.y == doctest::Approx(0.0f).epsilon(0.5));
+	// At or BELOW ground, never above, and by less than one tick of vertical
+	// travel. A real projectile is collision-tested once per tick, so it does
+	// not stop at the crossing — it overshoots into the ground by up to a full
+	// frame and bursts there. The walk reproduces that deliberately (see the
+	// `tEnd = ti` note in SolveCosmeticFlight): resolving to the exact
+	// crossing instead pulls every ground burst short of the sim's and
+	// over-delivers AoE damage. Here vertical speed at impact is |g|*t ~ 10
+	// elmos/frame, and the burst sits 5 below — inside that budget.
+	const float vyAtImpact = std::fabs(g) * static_cast<float>(f.frames);
+	CHECK(f.impactPos.y <= 0.0f);
+	CHECK(f.impactPos.y > -vyAtImpact);
 	CHECK(f.impactPos.x < 500.0f);
 	// The invented flight must never terminate on the fire frame — spawn and
 	// detonation would collapse onto one presentation frame.
@@ -234,6 +255,90 @@ TEST_CASE("SolveCosmeticFlight terminates on the target, not past it") {
 	}
 }
 
+TEST_CASE("CosmeticPredictedPose advances a target by its own velocity") {
+	const float3 pos(100.0f, 20.0f, -50.0f);
+	const float3 vel(2.0f, 0.0f, -1.5f);   // elmos per sim frame
+
+	CHECK(CosmeticPredictedPose(pos, vel, 30.0f).x == doctest::Approx(160.0f));
+	CHECK(CosmeticPredictedPose(pos, vel, 30.0f).z == doctest::Approx(-95.0f));
+
+	SUBCASE("a stationary target is not moved") {
+		CHECK(SamePos(CosmeticPredictedPose(pos, float3(0.0f, 0.0f, 0.0f), 30.0f), pos));
+	}
+	SUBCASE("degenerate lead times leave the pose alone rather than corrupt it") {
+		CHECK(SamePos(CosmeticPredictedPose(pos, vel, 0.0f), pos));
+		CHECK(SamePos(CosmeticPredictedPose(pos, vel, -5.0f), pos));
+		CHECK(SamePos(CosmeticPredictedPose(pos, vel, std::nanf("")), pos));
+		CHECK(SamePos(CosmeticPredictedPose(pos, vel, INFINITY), pos));
+	}
+}
+
+TEST_CASE("Resolving against the arrival pose is what makes the substitution fair") {
+	// The L2 decision the L2.1 measurement forced. A simulated shell has to
+	// connect with wherever the target is when it ARRIVES; the substituted one
+	// was being tested against where the target stood when the trigger was
+	// pulled. On papertanks that inflated damage per shot 2.8x — a balance
+	// change, not a cosmetic one.
+	//
+	// This case is that asymmetry in miniature: a tank driving out of the
+	// shell's path. The fire-time pose is still sitting in the crosshair, so
+	// the old resolution scores a hit the sim would never have given it.
+	const float3 origin(0.0f, 30.0f, 0.0f);
+	const float3 vel(10.0f, 0.0f, 0.0f);      // 30 frames to x = 300
+	const float3 aim(300.0f, 30.0f, 0.0f);
+	const float3 targetPos(300.0f, 30.0f, 0.0f);
+	const float3 targetVel(0.0f, 0.0f, 3.0f); // driving sideways, 90 elmos over the flight
+
+	const float lead = CosmeticFlightFrames(origin, vel, aim);
+	CHECK(lead == doctest::Approx(30.0f));
+
+	SUBCASE("the fire-time pose scores a hit on a target that has driven away") {
+		const CosmeticFlight f = SolveCosmeticFlight(
+			origin, vel, 0.0f, aim, 0, FlatGround, SphereTarget(targetPos, 25.0f));
+		CHECK(f.hitTarget);
+	}
+
+	SUBCASE("the arrival pose does not — the target is 90 elmos off the line") {
+		const float3 arrival = CosmeticPredictedPose(targetPos, targetVel, lead);
+		CHECK(arrival.z == doctest::Approx(90.0f));
+		const CosmeticFlight f = SolveCosmeticFlight(
+			origin, vel, 0.0f, aim, 0, FlatGround, SphereTarget(arrival, 25.0f));
+		CHECK_FALSE(f.hitTarget);
+	}
+
+	SUBCASE("a target driving INTO the path is hit by the arrival pose only") {
+		// The correction cuts both ways: prediction is not a nerf, it is the
+		// sim's own test. Here the tank starts clear of the line and drives
+		// onto it, which the sim would score as a hit and the fire-time pose
+		// would score as a miss.
+		const float3 start(300.0f, 30.0f, -90.0f);
+		const float3 driveIn(0.0f, 0.0f, 3.0f);
+
+		const CosmeticFlight atFire = SolveCosmeticFlight(
+			origin, vel, 0.0f, aim, 0, FlatGround, SphereTarget(start, 25.0f));
+		CHECK_FALSE(atFire.hitTarget);
+
+		const CosmeticFlight atArrival = SolveCosmeticFlight(
+			origin, vel, 0.0f, aim, 0, FlatGround,
+			SphereTarget(CosmeticPredictedPose(start, driveIn, lead), 25.0f));
+		CHECK(atArrival.hitTarget);
+	}
+
+	SUBCASE("a stationary target resolves identically either way") {
+		// The prediction must be a no-op when there is nothing to predict —
+		// otherwise it would perturb every static-target shot in the game.
+		const auto sphere = SphereTarget(
+			CosmeticPredictedPose(targetPos, float3(0.0f, 0.0f, 0.0f), lead), 25.0f);
+		const CosmeticFlight f =
+			SolveCosmeticFlight(origin, vel, 0.0f, aim, 0, FlatGround, sphere);
+		const CosmeticFlight g = SolveCosmeticFlight(
+			origin, vel, 0.0f, aim, 0, FlatGround, SphereTarget(targetPos, 25.0f));
+		CHECK(f.hitTarget == g.hitTarget);
+		CHECK(f.frames == g.frames);
+		CHECK(f.impactPos.x == doctest::Approx(g.impactPos.x));
+	}
+}
+
 TEST_CASE("SolveCosmeticFlight honours ttl the way a self-detonating projectile would") {
 	const float3 origin(0.0f, 500.0f, 0.0f);
 	const float3 vel(10.0f, 0.0f, 0.0f);
@@ -244,10 +349,60 @@ TEST_CASE("SolveCosmeticFlight honours ttl the way a self-detonating projectile 
 	CHECK_FALSE(bounded.hitGround);
 	CHECK(bounded.impactPos.x == doctest::Approx(400.0f).epsilon(0.01));
 
-	// A ttl longer than the flight must not extend it.
+	// A shot that hits nothing flies on to its ttl — it does NOT stop when it
+	// draws level with what it was aimed at.
+	//
+	// This case asserted the opposite until L2.2, and the difference is the
+	// single largest fidelity error the substitution had. A cannon is given
+	// `ttl = predict * 2` exactly so a shot sprayed high overflies its target
+	// and comes down behind it; truncating at the aim point detonated that
+	// shot in mid-air right over the target instead, turning a clean miss
+	// into near-full AoE damage. Measured at 2.3x the sim's damage per shot
+	// against a stationary target.
 	const CosmeticFlight slack = SolveCosmeticFlight(origin, vel, 0.0f, aim, 500, NoGround);
-	CHECK(slack.frames == 100);
-	CHECK(slack.impactPos.x == doctest::Approx(1000.0f).epsilon(0.01));
+	CHECK(slack.frames == 500);
+	CHECK(slack.impactPos.x == doctest::Approx(5000.0f).epsilon(0.01));
+
+	// Unbounded (ttl <= 0) has nothing to stop it, so the aim point survives
+	// as the only defensible terminator. Every substitutable weapon type sets
+	// a real ttl in FireImpl, so this is the fallback, not the normal path.
+	const CosmeticFlight unbounded = SolveCosmeticFlight(origin, vel, 0.0f, aim, 0, NoGround);
+	CHECK(unbounded.frames == 100);
+	CHECK(unbounded.impactPos.x == doctest::Approx(1000.0f).epsilon(0.01));
+}
+
+TEST_CASE("A shot that overflies its target lands beyond it, as the sim's would") {
+	// The concrete shape of the L2.2 correction. Same weapon, same target,
+	// two launch angles: one on the money, one thrown high by spray. Under
+	// the truncated walk BOTH terminated at the target's range, so both dealt
+	// a direct hit's damage. Only the first should.
+	const float3 origin(0.0f, 30.0f, 0.0f);
+	const float3 aim(300.0f, 30.0f, 0.0f);
+	const auto target = SphereTarget(float3(300.0f, 30.0f, 0.0f), 25.0f);
+	const int ttl = 60;   // `predict * 2` for a 30-frame flight
+
+	SUBCASE("on target: terminates on the hull") {
+		const float3 vel(10.0f, 0.0f, 0.0f);
+		const CosmeticFlight f =
+			SolveCosmeticFlight(origin, vel, 0.0f, aim, ttl, FlatGround, target);
+		CHECK(f.hitTarget);
+		CHECK(f.impactPos.x == doctest::Approx(275.0f).epsilon(0.001));
+	}
+
+	SUBCASE("sprayed high: clears the hull and lands well past it") {
+		// Lofted launch, gravity bringing it back down: the shell is ~36
+		// elmos above a 25-elmo hull as it passes x=300, and ploughs in at
+		// x≈585 on frame 59 — inside its ttl of 60.
+		const float3 vel(10.0f, 3.0f, 0.0f);
+		const CosmeticFlight f =
+			SolveCosmeticFlight(origin, vel, -0.12f, aim, ttl, FlatGround, target);
+		CHECK_FALSE(f.hitTarget);
+		CHECK(f.hitGround);
+		// The whole point: the burst is behind the target, where its AoE 64
+		// reaches the hull weakly or not at all — not on top of it.
+		CHECK(f.impactPos.x > 400.0f);
+		CHECK(f.frames > 30);
+	}
 }
 
 TEST_CASE("SolveCosmeticFlight survives a degenerate launch") {

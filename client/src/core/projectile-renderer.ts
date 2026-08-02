@@ -65,6 +65,11 @@ import {
     recordTrailPuff,
     resetMissileTrailState,
 } from './projectile-trails.js';
+import {
+    type CosmeticFlight,
+    evalCosmeticFlight,
+    solveCosmeticFlight,
+} from './cosmetic-flight.js';
 
 /** Default colors per projectile type when the weapon def doesn't
  *  specify one. Keyed by `ProjectileType` (Recoil's
@@ -301,6 +306,11 @@ interface LiveProjectile {
     /// on a slower period than the per-tick CEG trail so the pool isn't
     /// churned every frame. Only used for emissive projectile types.
     lightEmitAccumS: number;
+    /// PLAN-latency L2.2 — non-null for an *invented* Tier-C flight. When
+    /// set, `pos`/`vel` are recomputed from the presentation cursor each
+    /// tick instead of being integrated in wall time, so the bolt is a pure
+    /// function of the frame and lands exactly on its explosion.
+    cosmetic: CosmeticFlight | null;
 }
 
 /** Active beam: from-point, to-point and birth time. Each tick the
@@ -429,6 +439,9 @@ export class ProjectileRenderer {
     private live = new Map<number, LiveProjectile>();
     private liveBeams: LiveBeam[] = [];
     private lastTickMs = performance.now();
+    /// Presentation cursor (fractional sim frame) — the clock invented Tier-C
+    /// flights run on. See setPresentationFrame.
+    private presFrame = 0;
     /// Per-def smoke trail visuals (PLAN §4.4). Entries are created
     /// lazily on the first onFired event for a given missile def whose
     /// `texture2` resolves to a URL; missiles of unconfigured defs
@@ -967,7 +980,146 @@ export class ProjectileRenderer {
             // position and reads as a single brighter flash.
             cegEmitAccumS: -CEG_EMIT_PERIOD_S,
             lightEmitAccumS: 0,
+            cosmetic: null,
         });
+    }
+
+    /**
+     * PLAN-latency L2.2 — spawn the invented visual for a Tier-C shot.
+     *
+     * Called from the L1 timeline's `projSpawn` drain, i.e. on the frame the
+     * presentation cursor reaches `ev.fireFrame`; `detonateCosmetic` is
+     * scheduled for `ev.impactFrame` by the same caller, against the same
+     * `id` — which the caller minted up front (see
+     * `nextCosmeticProjectileId`), so the detonation is well-defined even if
+     * this spawn never ran.
+     *
+     * The entry goes into the *same* `live` map as server-driven projectiles,
+     * which is what makes the authored FX faithful by construction: the A3
+     * read-seam (`snapshotForWorker`) exposes it to `Spring.GetProjectile*`,
+     * so ZK's `gfx_projectile_lights.lua` lights a Tier-C bolt exactly as it
+     * lights a simulated one, and the per-tick CEG trail, missile trail,
+     * follow-light and laser-bolt passes all run unchanged.
+     */
+    spawnCosmetic(id: number, ev: {
+        fireFrame: number;
+        impactFrame: number;
+        weaponDefId: number;
+        origin: { x: number; y: number; z: number };
+        targetPos: { x: number; y: number; z: number };
+        impactPos: { x: number; y: number; z: number };
+        gravity: number;
+    }): void {
+        this.ensureWeaponAssetsLoaded(ev.weaponDefId);
+
+        const flight = solveCosmeticFlight(
+            ev.origin, ev.impactPos, ev.fireFrame, ev.impactFrame, ev.gravity);
+
+        // Muzzle CEG + flare. Same treatment onFired gives a real shot, with
+        // the firing axis taken from the solved launch velocity rather than a
+        // wire `vel` field (there is no projectile, so the event carries none).
+        if (this.cegRuntime) {
+            const dir = unitDirection(
+                flight.vx, flight.vy, flight.vz,
+                ev.targetPos.x - ev.origin.x,
+                ev.targetPos.y - ev.origin.y,
+                ev.targetPos.z - ev.origin.z,
+            );
+            const fxName = effectForFire(this.weaponDefs.get(ev.weaponDefId));
+            if (fxName) {
+                this.cegRuntime.spawn(fxName,
+                    ev.origin.x, ev.origin.y, ev.origin.z, dir.x, dir.y, dir.z);
+            }
+        }
+        const fv = this.weaponVisuals.get(ev.weaponDefId);
+        const mdef = this.weaponDefs.get(ev.weaponDefId);
+        if (this.muzzleFlare && fv?.kind !== 'beam' && mdef) {
+            const size = Math.min(Math.max((mdef.aoe ?? 0) * 0.2, 4), 30);
+            this.muzzleFlare.emit(ev.origin.x, ev.origin.y, ev.origin.z,
+                muzzleFlashColor(resolveColor(mdef)), size);
+        }
+
+        const trail = this.trailVisuals.has(ev.weaponDefId)
+            ? createMissileTrailState() : null;
+        const intensity = mdef?.intensity && mdef.intensity > 0 ? mdef.intensity : 1.0;
+        const p: LiveProjectile = {
+            id,
+            weaponDefId: ev.weaponDefId,
+            pos: new Vector3(ev.origin.x, ev.origin.y, ev.origin.z),
+            vel: new Vector3(),
+            // The polynomial owns the arc; the wall-time integrator never runs
+            // for this entry, so the seconds-scaled `gravity` field is unused.
+            gravity: 0,
+            // Lifetime is the schedule's, not a countdown: the detonation is
+            // already queued on the timeline. MAX_ORPHAN_LIFE_MS still applies
+            // as the backstop if that drain never happens (quit, clock reset).
+            ttl: -1,
+            hitscan: false,
+            targetPos: new Vector3(ev.targetPos.x, ev.targetPos.y, ev.targetPos.z),
+            spawnedAtMs: performance.now(),
+            trail,
+            curLength: 0,
+            stayTime: 0,
+            intensity,
+            impacted: false,
+            cegEmitAccumS: -CEG_EMIT_PERIOD_S,
+            lightEmitAccumS: 0,
+            cosmetic: flight,
+        };
+        evalCosmeticFlight(flight, this.presFrame - flight.fireFrame, p.pos, p.vel);
+        this.live.set(id, p);
+    }
+
+    /**
+     * PLAN-latency L2.2 — terminate an invented flight on its impact frame.
+     * Drained from the timeline at `ev.impactFrame`, so the bolt is already
+     * standing on `impactPos` when the explosion goes off.
+     *
+     * `id` is the one the scheduler minted for this shot and handed to
+     * `spawnCosmetic`. If that spawn never ran (no renderer at the time) the
+     * id is simply absent from `live` — the same case `onImpact` already
+     * handles for a pruned or hitscan projectile, and the reason the id must
+     * be a real cosmetic-range one rather than a `0` placeholder. The impact
+     * FX still fire: a missing bolt is a cosmetic loss, a missing explosion is
+     * a missing *event*.
+     */
+    detonateCosmetic(id: number, ev: {
+        impactPos: { x: number; y: number; z: number };
+        impactKind: number;
+        weaponDefId: number;
+    }): void {
+        const p = this.live.get(id);
+        if (p?.cosmetic) {
+            // Snap to the endpoint before handing over to onImpact. For a
+            // laser bolt this matters: onImpact freezes it in place for the
+            // hardstop/fade animation, and the last tick left it a fraction of
+            // a frame short of the explosion.
+            evalCosmeticFlight(p.cosmetic, p.cosmetic.frames, p.pos, p.vel);
+        }
+        this.onImpact({
+            projId: id,
+            pos: ev.impactPos,
+            impactKind: ev.impactKind,
+            weaponDefId: ev.weaponDefId,
+        });
+    }
+
+    /**
+     * Presentation cursor (fractional sim frame, PresentationClock.P) for this
+     * render frame. Pushed from the worker render loop right before `tick()`.
+     * Only cosmetic flights read it — everything else still integrates in wall
+     * time off the server's position stream.
+     */
+    setPresentationFrame(frame: number): void {
+        if (Number.isFinite(frame)) this.presFrame = frame;
+    }
+
+    /** Warm the .glb/texture fetch for a weapon def ahead of its first shot.
+     *  The L1 pre-roll (`EventScheduler` `prep`) calls this while a scheduled
+     *  Tier-C spawn is still in the `(P, E]` window, so the model is resident
+     *  by the time the bolt appears. Idempotent — see ensureWeaponAssetsLoaded. */
+    warmWeaponAssets(defId: number): void {
+        this.ensureWeaponAssetsLoaded(defId);
     }
 
     /** Push a beam onto the live list. The beam pass in `tick()` rebuilds
@@ -1205,12 +1357,22 @@ export class ProjectileRenderer {
                 continue;
             }
 
-            // pos += vel * dt
-            p.pos.x += p.vel.x * dt;
-            p.pos.y += p.vel.y * dt;
-            p.pos.z += p.vel.z * dt;
-            // vel.y -= g * dt   (g positive pulls down)
-            p.vel.y -= p.gravity * dt;
+            if (p.cosmetic) {
+                // PLAN-latency L2.2: an invented Tier-C flight is a function
+                // of the presentation frame, not of elapsed wall time. Nothing
+                // is integrated, so nothing accumulates error and nothing has
+                // to be corrected — it is standing on its explosion at
+                // impactFrame because the polynomial says so.
+                evalCosmeticFlight(
+                    p.cosmetic, this.presFrame - p.cosmetic.fireFrame, p.pos, p.vel);
+            } else {
+                // pos += vel * dt
+                p.pos.x += p.vel.x * dt;
+                p.pos.y += p.vel.y * dt;
+                p.pos.z += p.vel.z * dt;
+                // vel.y -= g * dt   (g positive pulls down)
+                p.vel.y -= p.gravity * dt;
+            }
 
             // Record a puff at the missile's post-integration position.
             // recordTrailPuff throttles internally — this call is cheap

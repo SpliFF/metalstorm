@@ -48,12 +48,26 @@ CosmeticFireQueue cosmeticFireQueue;
 
 float3 CosmeticFlightPos(const float3& origin, const float3& launchVel, float gravity, float t)
 {
-	// CWeaponProjectile integrates per tick as `speed.y += mygravity;
-	// pos += speed` with mygravity already negative for downward pull. The
-	// closed form of that recurrence at real-valued t is the usual
-	// p = p0 + v0*t + 0.5*g*t^2 on the vertical axis.
+	// CProjectile::Update integrates per tick as `speed += g; pos += speed`,
+	// applying gravity BEFORE the position step (Projectile.cpp ~117). After n
+	// ticks that is p0 + n*v0 + g*(1+2+...+n), i.e.
+	//
+	//     p.y = y0 + v0.y*t + 0.5*g*t*(t + 1)
+	//
+	// NOT the textbook 0.5*g*t^2. The extra half-step `0.5*g*t` is small per
+	// frame and easy to dismiss, but it is a systematic bias in one direction
+	// and it compounds over a flight: with g negative the textbook form rides
+	// ABOVE the real shell by 0.5*|g|*t, so the walk clears a hull the sim
+	// clips and then flies on to hit the ground further out.
+	//
+	// Measured cost of getting this wrong on papertanks (heavy cannon, 250
+	// elmos, both tanks pinned so shot counts match exactly): the substituted
+	// shots landed a mean 36 elmos from the target against the sim's 30, and
+	// scored 16/48 damage events against the sim's 41/48 — a 3.1x damage
+	// SHORTFALL, on a shallow arc where a ~2 elmo vertical error becomes tens
+	// of elmos of horizontal overfly. See PLAN-latency-impl.md Phase L2.2.
 	float3 p = origin + launchVel * t;
-	p.y += 0.5f * gravity * t * t;
+	p.y += 0.5f * gravity * t * (t + 1.0f);
 	return p;
 }
 
@@ -75,6 +89,15 @@ float CosmeticFlightFrames(const float3& origin, const float3& launchVel, const 
 		return delta.Length() / speed3D;
 
 	return 0.0f;
+}
+
+
+float3 CosmeticPredictedPose(const float3& pos, const float3& velPerFrame, float frames)
+{
+	if (!(frames > 0.0f) || !std::isfinite(frames))
+		return pos;
+
+	return pos + velPerFrame * frames;
 }
 
 
@@ -100,18 +123,33 @@ CosmeticFlight SolveCosmeticFlight(
 		return out;
 	}
 
-	// Bound by ttl exactly as the real projectile would self-detonate.
-	if (ttl > 0)
-		t = std::min(t, static_cast<float>(ttl));
+	// How far the walk is allowed to run — NOT the same thing as the time to
+	// the aim point.
+	//
+	// A real projectile flies until it hits something or its ttl expires. It
+	// does not stop when it draws level with what it was aimed at: a cannon
+	// gets `ttl = predict * 2` precisely so a shot sprayed high can overfly
+	// its target and come down well behind it, dealing little or nothing.
+	//
+	// L2.1 walked only as far as the aim point, and that was its largest
+	// error by a wide margin. A sprayed shot that should have sailed past
+	// instead terminated in mid-air directly over the target and delivered
+	// near-full AoE. Measured on papertanks against a STATIONARY heavy tank
+	// — where no pose-prediction effect can exist at all — the substitution
+	// landed 306 dmg/shot against the sim's 132. Extending the horizon to
+	// ttl brings it back to the sim's own number (see PLAN-latency-impl.md
+	// Phase L2.2). The aim-point time survives only as the fallback for an
+	// unbounded shot, which has nothing else to terminate it.
+	const float horizon = (ttl > 0) ? static_cast<float>(ttl) : t;
 
 	// Walk the arc looking for the first termination — the target's collision
-	// sphere or the ground, whichever comes first. Sampling per frame matches
+	// volume or the ground, whichever comes first. Sampling per frame matches
 	// the sim's own collision granularity (CWeaponProjectile only tests once
 	// per tick), so this finds the same crossing tick the real projectile
 	// would have. Bisect inside that tick for a clean impact point rather
 	// than a stair-stepped one.
-	const int steps = static_cast<int>(std::ceil(t));
-	float  tEnd = t;
+	const int steps = static_cast<int>(std::ceil(horizon));
+	float  tEnd = horizon;
 	bool   ground = false;
 	bool   onTarget = false;
 	float3 targetHitPos;
@@ -122,7 +160,7 @@ CosmeticFlight SolveCosmeticFlight(
 
 	float3 prev = origin;
 	for (int i = 1; i <= steps; ++i) {
-		const float ti = std::min(static_cast<float>(i), t);
+		const float ti = std::min(static_cast<float>(i), horizon);
 		const float3 p = CosmeticFlightPos(origin, launchVel, gravity, ti);
 
 		// Unit first, then terrain — the order CProjectileHandler::CheckCollisions
@@ -148,16 +186,24 @@ CosmeticFlight SolveCosmeticFlight(
 			break;
 		}
 
-		float lo = static_cast<float>(i - 1);
-		float hi = ti;
-		for (int iter = 0; iter < 12; ++iter) {
-			const float mid = 0.5f * (lo + hi);
-			if (belowGround(CosmeticFlightPos(origin, launchVel, gravity, mid)))
-				hi = mid;
-			else
-				lo = mid;
-		}
-		tEnd = hi;
+		// Detonate at the TICK, not at the exact ground crossing inside it.
+		//
+		// This looks like a downgrade and is the opposite. A real projectile
+		// is only collision-tested once per tick, so it overshoots the true
+		// crossing by up to a full frame of travel and bursts *there*. On a
+		// shallow direct-fire arc that overshoot is ~10 elmos horizontally —
+		// well inside an AoE radius, so it decides how much damage the shot
+		// delivers. Bisecting to the "clean" crossing pulls every ground burst
+		// short of where the sim would have put it, which reads as the
+		// substitution hitting harder than the real shell: measured 1.83x
+		// total damage with the bisection in, against a sim whose ground
+		// bursts sat at a repeatable 30 elmos while the bisected ones spread
+		// 9-36 (PLAN-latency-impl.md Phase L2.2).
+		//
+		// Prettiness is not the goal here — the impact point is a damage input
+		// first and a visual second, and the client draws the arc through
+		// whatever endpoint this returns either way.
+		tEnd = ti;
 		ground = true;
 		break;
 	}
@@ -352,9 +398,28 @@ bool TryResolveCosmeticFire(const ProjectileParams& params)
 		// The same test CProjectileHandler::CheckUnitCollisions runs against a
 		// live projectile's [prevPos, pos] segment, against the same collision
 		// volume — so a shot the sim would have missed is still a miss here.
-		// The one thing it cannot model is the target moving during the
-		// flight: the pose is frozen at fire time.
-		const CMatrix44f tgtMat = targetUnit->GetTransformMatrix(true);
+		//
+		// Resolved against the target's PREDICTED ARRIVAL pose, not its pose
+		// at fire time. This is the L2 decision the L2.1 measurement forced
+		// (see the header): a simulated shell has to connect with wherever the
+		// target is when it gets there, so testing against the fire-time pose
+		// gave the substituted shot a target that had already left. Advancing
+		// the pose by the flight time restores the thing the sim actually
+		// tests.
+		//
+		// The lead estimate is the flight time to the aim point — exact for a
+		// ballistic arc (horizontal speed is constant), and cheap: no
+		// iteration, no state. It is deliberately the same constant-velocity
+		// assumption CWeapon made when it computed `params.end`, so the
+		// collision test and the aim it is testing agree. Bounded by ttl for
+		// the same reason the flight itself is.
+		float leadFrames = CosmeticFlightFrames(params.pos, params.speed, params.end);
+		if (params.ttl > 0)
+			leadFrames = std::min(leadFrames, static_cast<float>(params.ttl));
+
+		CMatrix44f tgtMat = targetUnit->GetTransformMatrix(true);
+		tgtMat.SetPos(CosmeticPredictedPose(tgtMat.GetPos(), targetUnit->speed, leadFrames));
+
 		targetHit = [targetUnit, tgtMat](const float3& p0, const float3& p1, float3& hitPos) {
 			CollisionQuery cq;
 			if (!CCollisionHandler::DetectHit(targetUnit, tgtMat, p0, p1, &cq))

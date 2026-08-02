@@ -24,28 +24,47 @@
 //     into its path, and cannot be stopped by a shield or an interceptor that
 //     comes up after the trigger is pulled. The classifier's job is to keep
 //     anything whose outcome is genuinely contingent OUT of Tier C.
-//   * The terminal point is predicted from the launch state against the
-//     target's pose AT FIRE TIME, so a target that moves during the flight is
-//     not tracked. **This is the big one, and it is bigger than the design
-//     costed.** The simulated projectile has to connect with wherever the
-//     target is on arrival; the substituted one only has to connect with
-//     where it was aimed. Measured on a papertanks 1v1 at 250 elmos (heavy
-//     cannon, 350 max damage, accuracy 80):
+//   * The terminal point is predicted from the launch state, so a target that
+//     *changes course* during the flight is not tracked. It is resolved
+//     against the target's PREDICTED ARRIVAL pose — position advanced by its
+//     current velocity over the flight time — not against where it stood when
+//     the trigger was pulled.
 //
-//         simulated:    44 shots / 2043 frames,  63.5 dmg/shot (18% of max)
-//         substituted:  12 shots / 2048 frames, 179.8 dmg/shot (51% of max)
+//     That distinction was forced by measurement, not by taste: a simulated
+//     shell has to connect with wherever the target is when it ARRIVES, and
+//     the fire-time pose hands the substituted shell a target that has already
+//     left. The arrival-pose resolution restores the test the sim actually
+//     runs, using the same constant-velocity assumption CWeapon already made
+//     when it led the shot. What remains uncosted is only the target's ability
+//     to accelerate or turn mid-flight — a much smaller residue, and one the
+//     classifier's short-flight rule already bounds.
 //
-//     — a 2.8x jump in damage per shot. The lower shot count is a knock-on:
-//     harder hits mean more explosion impulse, which shoves the target and
-//     costs the shooter re-aim time (the simulated run fires at the reload
-//     ceiling of 2.2 shots/100 frames; the substituted one at 0.59). Total
-//     damage happens to land close (2158 vs 2795) but only by coincidence of
-//     the two effects pulling opposite ways.
+//     See CosmeticPredictedPose. Note the pose was NOT the dominant term: on
+//     a pinned-target duel, where prediction is provably a no-op, the
+//     substitution was still far off parity until the two arc-fidelity bugs
+//     below were fixed.
 //
-//     This is the sanctioned deviation of PLAN-latency-impl decision 2, but
-//     the magnitude is a balance change, not a cosmetic one. It is why
-//     `LatencyCosmeticFire` defaults OFF and why the L2 gate owes a decision:
-//     resolve against a *predicted arrival* pose, or accept and rebalance.
+// Getting damage parity took three corrections, all of them "resolve it the
+// way the sim resolves it" and all of them found by measuring rather than by
+// reading (PLAN-latency-impl.md Phase L2.2 carries the tables):
+//
+//   1. Walk to the ttl, not to the aim point. A projectile does not stop when
+//      it draws level with what it was aimed at; a cannon gets `ttl =
+//      predict * 2` precisely so a sprayed shot overflies and lands behind.
+//   2. Use the sim's arc, not the textbook one. CProjectile::Update applies
+//      gravity BEFORE the position step, so the drop is 0.5*g*t*(t+1), not
+//      0.5*g*t^2. The missing half-step put the walk above the real shell and
+//      grew with t.
+//   3. Detonate at the tick, not at the exact ground crossing. Collisions are
+//      tested once per tick, so a real shell overshoots into the ground by up
+//      to a frame of travel and bursts there.
+//
+// Measured after all three, papertanks heavy cannon with both tanks pinned so
+// shot counts match exactly: 1v1 48 shots both ways, 41/41 damage events,
+// 4592 vs 4789 total damage (0.96x); 20v20 341 shots both ways, 431 vs 434
+// events, 0.94x damage. Before them the same duel ran 2.8x over, then 0.32x
+// under, then 1.83x over — the magnitude of each is why none of the three
+// could be waved through as a rounding detail.
 //   * No feature fireStarter roll and no bounce/ricochet. Both are properties
 //     of a collision that never happens.
 //
@@ -119,6 +138,17 @@ float3 CosmeticFlightPos(const float3& origin, const float3& launchVel, float gr
 /// horizontal component it falls back to 3-D distance over speed. Returns 0
 /// when the launch velocity is degenerate.
 float CosmeticFlightFrames(const float3& origin, const float3& launchVel, const float3& aimPos);
+
+/// Where an object will be `frames` sim frames from now if it holds its
+/// current velocity. Identical to CWorldObject::GetDrawPos(t) — spelled out
+/// as a free function so the arrival-pose resolution below is testable
+/// without a sim, and so the assumption has a name.
+///
+/// It is the SAME constant-velocity assumption CWeapon already makes when it
+/// leads a moving target, so the substituted shot and the aim that produced
+/// it now agree about where the target is going. Negative or non-finite
+/// `frames` is treated as 0.
+float3 CosmeticPredictedPose(const float3& pos, const float3& velPerFrame, float frames);
 
 /// Resolve the whole flight. Pure except for the ground-height lookup, which
 /// is injected so the solver is unit-testable without a loaded map: `groundAt`

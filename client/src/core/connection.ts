@@ -29,6 +29,7 @@ import { CombatEvent } from '../protocol/spring-web/combat-event.js';
 import { ProjectileFiredEvent } from '../protocol/spring-web/projectile-fired-event.js';
 import { ProjectileImpactEvent } from '../protocol/spring-web/projectile-impact-event.js';
 import { ProjectileTrajectoryEvent } from '../protocol/spring-web/projectile-trajectory-event.js';
+import { FireOutcomeEvent } from '../protocol/spring-web/fire-outcome-event.js';
 import { EntityDestroy } from '../protocol/spring-web/entity-destroy.js';
 import { EntitySensorUpdate } from '../protocol/spring-web/entity-sensor-update.js';
 import { SendToUnsyncedEvent } from '../protocol/spring-web/send-to-unsynced-event.js';
@@ -258,6 +259,34 @@ export interface ProjectileTrajectoryInfo {
     pos: { x: number; y: number; z: number };
     vel: { x: number; y: number; z: number };
     reason: number;
+}
+
+/// PLAN-latency L2.1/L2.2 — a Tier-C ("cosmetic") shot, resolved whole at
+/// fire time by the server. Replaces the Fired/Trajectory/Impact triple for
+/// weapon defs classified `FX_TIER_COSMETIC`: there is no sim projectile and
+/// therefore no projectile id, so the client mints its own (see
+/// `ProjectileRenderer.spawnCosmetic`).
+///
+/// The two frames are what makes convergence possible: the client schedules
+/// the spawn at `fireFrame` and the detonation at `impactFrame` on the L1
+/// timeline and solves a flight that terminates on `impactPos` at exactly
+/// `impactFrame` — no mid-flight correction, so no snap.
+export interface FireOutcomeInfo {
+    fireFrame: number;
+    weaponDefId: number;
+    ownerId: number;
+    team: number;
+    origin: { x: number; y: number; z: number };
+    targetId: number;
+    targetPos: { x: number; y: number; z: number };
+    /// `FireOutcome` enum (0 Hit, 1 Miss, 2 Shielded, 3 Intercepted, 4 Expired).
+    outcome: number;
+    impactFrame: number;
+    impactPos: { x: number; y: number; z: number };
+    /// Per-sim-frame gravity the server resolved the arc with; 0 for a
+    /// straight shot. Needed because the ballistic solution through
+    /// (origin, impactPos, Δframes) is only unique once g is fixed.
+    gravity: number;
 }
 
 /// One sound asset attached to a unit or weapon def. The `id` field
@@ -777,6 +806,12 @@ export interface ConnectionEvents {
     onProjectileFired?: (events: ProjectileFiredInfo[], frame: number) => void;
     onProjectileImpacts?: (events: ProjectileImpactInfo[], frame: number) => void;
     onProjectileTrajectories?: (events: ProjectileTrajectoryInfo[], frame: number) => void;
+    /** PLAN-latency L2.2 — Tier-C shots. Unlike every other event family here
+     *  the batch `frame` is NOT the presentation frame: each outcome carries
+     *  its own `fireFrame`/`impactFrame` pair, and both are in the future
+     *  relative to the batch (the server resolved the whole flight up front).
+     *  `frame` is passed for symmetry/diagnostics only. */
+    onFireOutcomes?: (events: FireOutcomeInfo[], frame: number) => void;
     /** `frame` is the sim frame the unit died on, taken from
      *  `EntityDestroy.frame` (stamped server-side at kill time). Falls back to
      *  the most recent GameEventBatch frame only against a server that predates
@@ -2137,6 +2172,35 @@ export class Connection {
                 });
             }
             this.events.onProjectileTrajectories(out, frame);
+        }
+
+        // PLAN-latency L2.2: Tier-C fire outcomes. Present only when the
+        // server is running with `LatencyCosmeticFire` on; on a pre-L2.1
+        // server the vector is absent and the length reads 0.
+        const outcomeCount = batch.fireOutcomesLength();
+        if (outcomeCount > 0 && this.events.onFireOutcomes) {
+            const out: FireOutcomeInfo[] = [];
+            for (let i = 0; i < outcomeCount; i++) {
+                const e = batch.fireOutcomes(i, new FireOutcomeEvent());
+                if (!e) continue;
+                const o = e.origin();
+                const t = e.targetPos();
+                const ip = e.impactPos();
+                out.push({
+                    fireFrame: e.fireFrame(),
+                    weaponDefId: e.weaponDefId(),
+                    ownerId: e.ownerId(),
+                    team: e.team(),
+                    origin: { x: o?.x() ?? 0, y: o?.y() ?? 0, z: o?.z() ?? 0 },
+                    targetId: e.targetId(),
+                    targetPos: { x: t?.x() ?? 0, y: t?.y() ?? 0, z: t?.z() ?? 0 },
+                    outcome: e.outcome(),
+                    impactFrame: e.impactFrame(),
+                    impactPos: { x: ip?.x() ?? 0, y: ip?.y() ?? 0, z: ip?.z() ?? 0 },
+                    gravity: e.gravity(),
+                });
+            }
+            this.events.onFireOutcomes(out, frame);
         }
 
         const soundCount = batch.soundsLength();

@@ -71,6 +71,7 @@ import { DefCache } from './def-cache.js';
 import { fetchAndIngestDefs } from './defs-fetch.js';
 import { PresentationClock } from './presentation-clock.js';
 import { EventScheduler, type ScheduledKind } from './event-scheduler.js';
+import { nextCosmeticProjectileId } from './cosmetic-flight.js';
 // GW4-c5: weapon-FX / projectile / decal / build render modules fold into the
 // worker (audited worker-safe — no DOM/audio; the `window.__*` dev hooks they
 // set are switched to `globalThis`). Ported from main.ts@d6301137f7^.
@@ -283,6 +284,23 @@ function gpSchedule(
 ): void {
     if (gpEventScheduler) gpEventScheduler.schedule(frame, kind, fire, prep);
     else { prep?.(); fire(); }
+}
+
+/// PLAN-latency L2.2: map a `FireOutcome` (a fire-time *prediction*) onto the
+/// `ProjectileImpactKind` the FX consumers already switch on, so a Tier-C
+/// detonation picks the same authored effect its simulated equivalent would.
+/// The two enums are deliberately separate on the wire (different semantics,
+/// different provenance) but the visual vocabulary is shared.
+function fireOutcomeImpactKind(outcome: number): number {
+    switch (outcome) {
+        case 0: return 1;  // Hit         -> Unit
+        case 2: return 3;  // Shielded    -> Shield
+        case 3: return 5;  // Intercepted -> Intercepted
+        case 4: return 4;  // Expired     -> SelfDetonate
+        // Miss (1) and anything unrecognised terminate on ground/water, which
+        // is what Terrain means.
+        default: return 0;
+    }
 }
 /// GW4-c3 terrain state, populated once the map data HTTP fetch resolves.
 /// Mirrors the pre-move main.ts `onMapData` terrain build.
@@ -842,6 +860,50 @@ function gpConnect(msg: GpInitToWorker): void {
         onProjectileTrajectories: (events) => {
             if (!gpCtx.projectileRenderer) return;
             for (const e of events) gpCtx.projectileRenderer.onTrajectory(e);
+        },
+        // PLAN-latency L2.2: a Tier-C shot has no sim projectile — the server
+        // resolved the whole flight at fire time and sent one event carrying
+        // both ends of it. Put both ends on the L1 timeline and the visual
+        // converges by construction: the bolt is spawned when the cursor
+        // reaches `fireFrame` and is standing on `impactPos` when the cursor
+        // reaches `impactFrame`, which is the same frame the explosion and the
+        // scheduled combat/death events for that shot present on.
+        //
+        // Note both frames are ahead of the batch frame — this is the one
+        // event family the server sends with *foreknowledge*, which is why the
+        // pre-roll warm-up below is worth doing: a weapon's .glb has ~D frames
+        // plus the flight time to load before its first bolt is drawn.
+        onFireOutcomes: (events) => {
+            for (const ev of events) {
+                const impactKind = fireOutcomeImpactKind(ev.outcome);
+                // Minted here rather than inside the spawn so both closures
+                // share a real id unconditionally. If the spawn is skipped —
+                // no renderer at that moment — the detonation still names a
+                // projectile in the cosmetic range that simply isn't in the
+                // live map, which `onImpact` already handles. A `0`
+                // placeholder would instead name projectile id 0, an ordinary
+                // *real* id, and evict an unrelated bolt.
+                const cosmeticId = nextCosmeticProjectileId();
+                gpSchedule(ev.fireFrame, 'projSpawn', () => {
+                    gpCtx.projectileRenderer?.spawnCosmetic(cosmeticId, ev);
+                }, () => {
+                    gpCtx.projectileRenderer?.warmWeaponAssets(ev.weaponDefId);
+                });
+                gpSchedule(ev.impactFrame, 'projDetonate', () => {
+                    gpCtx.projectileRenderer?.detonateCosmetic(cosmeticId, {
+                        impactPos: ev.impactPos,
+                        impactKind,
+                        weaponDefId: ev.weaponDefId,
+                    });
+                    gpCombatFX?.onProjectileImpacts([{
+                        projId: cosmeticId,
+                        pos: ev.impactPos,
+                        impactKind,
+                        targetId: ev.targetId,
+                        weaponDefId: ev.weaponDefId,
+                    }]);
+                });
+            }
         },
         // GW4-c5: combat hit/kill events → combatFX (impact CEGs + lights).
         // Also fan out widget:UnitDamaged so intel/health/FX widgets in ZK
@@ -1517,6 +1579,11 @@ export function gpInit(msg: GpInitToWorker): void {
         // and before projectileRenderer.tick() / the A3 mirror so a scheduled
         // impact removes its projectile from this frame's live snapshot.
         if (gpPresentationClock && gpEventScheduler) {
+            // PLAN-latency L2.2: invented Tier-C flights are parametrised by
+            // the cursor, not by wall time. Push it before the drain so a
+            // spawn drained this frame starts at the right point on its arc
+            // rather than at last frame's cursor.
+            gpCtx.projectileRenderer?.setPresentationFrame(gpPresentationClock.P);
             gpEventScheduler.drain(gpPresentationClock.P);
             // …then warm up what the cursor is about to reach. The window
             // (P, E] is the foreknowledge L0 bought us: events already in
