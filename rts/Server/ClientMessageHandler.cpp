@@ -11,6 +11,7 @@
 #include "StandingOrders.h"
 #include "OrgGroups.h"
 #include "LuaExecEngine.h"
+#include "SyncedInputJournal.h"
 #include "Crypto.h"
 #include "WebTransport/WebTransportServer.h"
 #include "Lua/LuaRules.h"
@@ -72,6 +73,27 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
     if (ctx.logMessages) {
         SLOG(SPRING_LOG_DEBUG, "msg: client=%u type=%d size=%zu",
             msg.clientId, (int)clientMsg->payload_type(), msg.data.size());
+    }
+
+    // ── Journal chokepoint #1 of 5: inbound client verbs (PLAN-replay task 1).
+    // Recorded here, once, BEFORE dispatch — so every verb in the switch below
+    // is covered by construction and a newly added case cannot escape the
+    // cause stream. What gets kept is decided by the exhaustive classifier in
+    // SyncedInputJournal.cpp, never by the individual handlers.
+    //
+    // The RAW wire bytes are recorded, not a decoded form: replay re-feeds
+    // them through this same HandleMessage, so a replayed run cannot drift
+    // from the live one through a decode difference. Recording before dispatch
+    // (rather than after a successful apply) is deliberate too — a message
+    // rejected by the rate limiter or the sequence check on the live run must
+    // be rejected identically on replay, and that only holds if replay sees
+    // the same input, including the ones that bounced.
+    {
+        auto pjIt = clientPlayerNum.find(msg.clientId);
+        syncedinput::Journal().RecordClientMessage(
+            static_cast<uint8_t>(clientMsg->payload_type()),
+            pjIt != clientPlayerNum.end() ? pjIt->second : -1,
+            msg.data.data(), msg.data.size());
     }
 
     switch (clientMsg->payload_type()) {

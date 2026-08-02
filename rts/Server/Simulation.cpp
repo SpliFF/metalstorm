@@ -11,6 +11,7 @@
 const std::unordered_map<int, std::string>* gAITeams = nullptr;
 
 #include "Server/SimFrameProfiler.h"
+#include "Server/SyncedInputJournal.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/TeamHandler.h"
 #include "Sim/Misc/Wind.h"
@@ -369,6 +370,26 @@ void CSimulation::FireGameStart()
 
     springlog_log(SPRING_LOG_NOTICE, "sim", "", springlog_get_frame(),
                   "firing GameStart");
+
+    // Journal chokepoint #5 of 5 (PLAN-replay task 1): the anchor record. Every
+    // later record is meaningless without the roster this pins down — team
+    // leader assignment above is itself a synced decision derived from who had
+    // connected by this instant, and it is not recoverable from the command
+    // stream. The full setup (seed, map/defs hashes, modoptions) belongs in the
+    // replay HEADER, not here; this record marks *when* the stream begins.
+    {
+        std::string roster;
+        const int numTeams = teamHandler.ActiveTeams();
+        for (int t = 0; t < numTeams; ++t) {
+            const CTeam* team = teamHandler.Team(t);
+            if (team == nullptr) continue;
+            roster += "t" + std::to_string(t) +
+                      ":a" + std::to_string(team->teamAllyteam) +
+                      ":l" + std::to_string(team->GetLeader()) + ";";
+        }
+        syncedinput::Journal().RecordGameStart(roster);
+    }
+
     eventHandler.GameStart();
     gameStarted = true;
 

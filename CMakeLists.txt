@@ -479,6 +479,7 @@ if(TEST_SOURCES)
         ${CMAKE_SOURCE_DIR}/rts/Server/SoundEventCollector.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/StandingOrders.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/OrgGroups.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/SyncedInputJournal.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/NetworkServer.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/Database.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GameOverState.cpp
@@ -498,7 +499,12 @@ if(TEST_SOURCES)
         ${CMAKE_SOURCE_DIR}/rts/lib/cereal/include
         ${GENERATED_DIR}
     )
-    target_link_libraries(spring-tests PRIVATE lua smmalloc ZLIB::ZLIB doctest::doctest springlog nlohmann_json::nlohmann_json openssl_crypto nghttp2_static SQLite3::SQLite3)
+    # flatbuffers is header-only for our use here: test_synced_input_journal.cpp
+    # includes protocol_generated.h to walk EnumValuesClientPayload(), which is
+    # how the synced-input classifier is proved exhaustive against the real wire
+    # schema instead of against a copy of it (PLAN-replay task 1).
+    add_dependencies(spring-tests generate_flatbuffers)
+    target_link_libraries(spring-tests PRIVATE lua smmalloc ZLIB::ZLIB doctest::doctest springlog nlohmann_json::nlohmann_json openssl_crypto nghttp2_static SQLite3::SQLite3 flatbuffers)
     # Absolute path to the source tree so tests can open checked-in fixtures
     # (e.g. the strategos AI plugin) regardless of the ctest working dir.
     target_compile_definitions(spring-tests PRIVATE SPRING_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
