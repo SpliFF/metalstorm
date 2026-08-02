@@ -1,6 +1,13 @@
 -- meridian_basin_scenario_spec.lua — Milestone 4 verification
 -- Tests the objective-driven demo scenario with escort/protect/extract
 -- objectives tied to civilian populations.
+--
+-- Run from the GAME root, not the plugin root like its neighbours in this
+-- directory: `cd data/games/metalstorm && busted LuaRules/Gadgets/tests/
+-- meridian_basin_scenario_spec.lua`. It dofile()s 'scenarios/meridian_basin.
+-- lua' by a game-root-relative path, so `cd LuaRules/Gadgets && busted tests/`
+-- reports 8 errors ("cannot open scenarios/meridian_basin.lua") that are a
+-- wrong cwd, not real failures.
 
 describe("Meridian Basin Scenario", function()
     local Spring, GG

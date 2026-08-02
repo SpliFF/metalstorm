@@ -227,6 +227,7 @@ local function createPopulatedObjective(o, params, label)
         forTeam = o.forTeam,
         reward = o.reward,
         expiresAtFrame = o.expiresAtFrame,
+        victory = o.victory,
         params = params,
     }
     local id = GG.Objectives.Create(def)
@@ -329,6 +330,8 @@ local function stageObjectives(objectives)
                 type = o.type, scope = o.scope, forTeam = o.forTeam,
                 reward = o.reward, bounty = o.bounty, params = params,
                 expiresAtFrame = o.expiresAtFrame,
+                -- wars §7.1: the scenario's terminal objective (game_gameover.lua).
+                victory = o.victory,
             })
         end
     end

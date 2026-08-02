@@ -103,6 +103,7 @@ local bountyCountByPlayer = {}
     linkedId,               -- mutual-resolve partner (E4)
     expiresAtFrame,
     participation = {},    -- playerID -> weight (§5)
+    victory,               -- true = terminal; completing it ends the war (wars §7.1)
     createdFrame, source,   -- 'scripted'|'systemic'|'bounty'
     systemicKey, systemicRule,  -- generator dedup bookkeeping (nil for non-systemic objectives)
     resolvedFrame,           -- frame it left 'active' (retention window)
@@ -259,6 +260,7 @@ end
 local PUBLISHED_FIELDS = {
     'type', 'scope', 'state', 'reward', 'team', 'team2', 'progress',
     'phase', 'stage', 'expire', 'region', 'x', 'z', 'r', 'suggested', 'source',
+    'victory',
 }
 
 -- Objectives are the shared strategic board (PLAN-metalstorm §"Objectives are
@@ -296,6 +298,10 @@ local function publish(o, ctx)
     -- tasking, exactly as it already sees the `suggested` soft-hint. Only the
     -- categorical flag ships; the stake amount stays folded into `reward`.
     if o.source then Spring.SetGameRulesParam(p .. 'source', o.source, PUBLIC) end
+    -- wars §7.1: the scenario's terminal objective. Public so the panel can
+    -- mark "winning this ends the war" — everyone can see the war's win
+    -- condition, it is not fog-gated intel.
+    if o.victory then Spring.SetGameRulesParam(p .. 'victory', 1, PUBLIC) end
     if o.phase then Spring.SetGameRulesParam(p .. 'phase', o.phase, PUBLIC) end
     if o.type == 'extract' and o.data and o.data.phase then
         Spring.SetGameRulesParam(p .. 'stage', o.data.phase, PUBLIC)
@@ -471,6 +477,7 @@ function GG.Objectives.Create(def)
         participation = Attribution.newParticipation(),
         createdFrame = frame, source = def.source or 'scripted',
         systemicKey = def.systemicKey, systemicRule = def.systemicRule,
+        victory = def.victory or nil,
     }
 
     local ctx = buildCtx(frame)
@@ -636,6 +643,31 @@ function GG.Objectives.Fail(id)
     local o = objectives[id]
     if not o or o.state ~= 'active' then return end
     resolveObjective(o, 'failed', nil, buildCtx(Spring.GetGameFrame()))
+end
+
+--- War-end sweep (PLAN-metalstorm-wars.md §7 `resolving`, called by
+--- game_gameover.lua): every still-active objective resolves 'expired', which
+--- routes through the one terminal path above and so refunds each staked
+--- bounty via SettleEscrow — "no authority is destroyed or awarded to the
+--- enemy by war end". Deliberately NOT 'failed': the objectives weren't lost,
+--- the war stopped. Returns the number swept.
+---
+--- Iterates a snapshot of activeList because resolveObjective mutates it
+--- (removeFromActive swap-pops, and a linked partner / phase parent can
+--- resolve a second entry re-entrantly) — walking the live list would skip.
+function GG.Objectives.ExpireAllActive()
+    local snapshot = {}
+    for i = 1, #activeList do snapshot[i] = activeList[i] end
+    local ctx = buildCtx(Spring.GetGameFrame())
+    local n = 0
+    for _, id in ipairs(snapshot) do
+        local o = objectives[id]
+        if o and o.state == 'active' then
+            resolveObjective(o, 'expired', nil, ctx)
+            n = n + 1
+        end
+    end
+    return n
 end
 
 -- ============================================================

@@ -1,0 +1,210 @@
+-- tests/game_gameover_spec.lua — the war's terminal condition
+-- (PLAN-metalstorm-wars.md §7.1; closes PLAN-endtoend.md D1).
+--
+-- Drives the REAL game_gameover.lua against a fake GG.Objectives — the thing
+-- under test is the gadget's own wiring (victory-flag gating, side→allyteam
+-- derivation, the winding_down grace, escrow sweep ordering, idempotency), not
+-- the objectives registry, which has its own specs under objectives/tests/.
+-- Same deliberate exception as authority_charge_mock.lua: narrowly built for
+-- this file, not a shared framework.
+-- Run from the plugin root: cd data/games/metalstorm/LuaRules/Gadgets && busted tests/
+
+package.path = './?.lua;' .. package.path
+
+local WINDING_DOWN_FRAMES = 300   -- must match the gadget's constant
+
+--- Fresh mock world + a fresh game_gameover.lua instance loaded against it.
+--- `sides` is the scenario's sides table (nil = no scenario at all).
+local function load(sides)
+    local world = {
+        frame = 0,
+        gameRulesParams = {},
+        completeHooks = {},
+        gameOverCalls = {},     -- each entry is the winners list as passed
+        expireCalls = 0,
+        echoes = {},
+    }
+
+    _G.Spring = {
+        GetGameFrame = function() return world.frame end,
+        SetGameRulesParam = function(key, value) world.gameRulesParams[key] = value end,
+        GetGameRulesParam = function(key) return world.gameRulesParams[key] end,
+        -- Matches rts/Server/Simulation.cpp:507 — every team is its own
+        -- allyteam. The gadget must not assume otherwise.
+        --
+        -- Returns a FLOAT, as the live engine does (verified in-sim: team 0 ->
+        -- ally 0.0). This caught a real drift — the published
+        -- war_winner_ally_teams param read "0.0,1.0,2.0,3.0" in a live match
+        -- while an integer-returning mock made the spec pass on "0,1,2,3".
+        -- Keep the float: it is what the gadget actually receives.
+        GetTeamAllyTeamID = function(teamID) return teamID + 0.0 end,
+        GameOver = function(winners) world.gameOverCalls[#world.gameOverCalls + 1] = winners end,
+        Echo = function(msg) world.echoes[#world.echoes + 1] = msg end,
+    }
+
+    _G.gadgetHandler = { IsSyncedCode = function() return true end }
+    _G.gadget = {}
+    _G.GG = {
+        Objectives = {
+            OnComplete = function(fn) world.completeHooks[#world.completeHooks + 1] = fn end,
+            ExpireAllActive = function()
+                world.expireCalls = world.expireCalls + 1
+                -- Assert ordering at the moment of the call: escrow must
+                -- settle BEFORE the game is declared over, never after.
+                assert.are.equal(0, #world.gameOverCalls)
+                assert.are.equal('resolving', world.gameRulesParams['war_state'])
+                return 3
+            end,
+        },
+        Scenario = sides and { data = { sides = sides } } or nil,
+    }
+
+    dofile('./game_gameover.lua')
+    local g = _G.gadget
+    g:Initialize()
+
+    --- Complete an objective through the registered hook.
+    function world.complete(o, completingTeam)
+        for _, fn in ipairs(world.completeHooks) do fn(o, completingTeam) end
+    end
+
+    --- Advance the sim to `frame`, firing GameFrame on the way.
+    function world.runTo(frame)
+        for f = world.frame + 1, frame do
+            world.frame = f
+            g:GameFrame(f)
+        end
+    end
+
+    return world, g
+end
+
+-- Meridian Basin's layout: 4 teams per faction (scenarios/meridian_basin.lua).
+local MERIDIAN_SIDES = {
+    { faction = 'compact', team = 0 }, { faction = 'compact', team = 1 },
+    { faction = 'compact', team = 2 }, { faction = 'compact', team = 3 },
+    { faction = 'union',   team = 4 }, { faction = 'union',   team = 5 },
+    { faction = 'union',   team = 6 }, { faction = 'union',   team = 7 },
+}
+
+local VICTORY_OBJ = { id = 1, type = 'control', victory = true, forTeam = nil }
+local ORDINARY_OBJ = { id = 2, type = 'control', forTeam = nil }
+
+describe("war state", function()
+    it("publishes 'active' at initialize, with no winner yet", function()
+        local world = load(MERIDIAN_SIDES)
+        assert.are.equal('active', world.gameRulesParams['war_state'])
+        assert.is_nil(world.gameRulesParams['war_winner_team'])
+    end)
+
+    it("ignores a non-victory objective completing", function()
+        local world = load(MERIDIAN_SIDES)
+        world.complete(ORDINARY_OBJ, 4)
+        world.runTo(WINDING_DOWN_FRAMES * 2)
+        assert.are.equal('active', world.gameRulesParams['war_state'])
+        assert.are.equal(0, #world.gameOverCalls)
+    end)
+end)
+
+describe("victory objective completing", function()
+    it("enters winding_down immediately and does NOT declare game over yet", function()
+        local world = load(MERIDIAN_SIDES)
+        world.complete(VICTORY_OBJ, 4)
+
+        assert.are.equal('winding_down', world.gameRulesParams['war_state'])
+        assert.are.equal(4, world.gameRulesParams['war_winner_team'])
+        assert.are.equal(0, #world.gameOverCalls)
+    end)
+
+    it("holds the grace period, then resolves and declares", function()
+        local world = load(MERIDIAN_SIDES)
+        world.complete(VICTORY_OBJ, 4)
+
+        world.runTo(WINDING_DOWN_FRAMES - 1)
+        assert.are.equal('winding_down', world.gameRulesParams['war_state'])
+        assert.are.equal(0, #world.gameOverCalls)
+
+        world.runTo(WINDING_DOWN_FRAMES)
+        assert.are.equal('over', world.gameRulesParams['war_state'])
+        assert.are.equal(1, #world.gameOverCalls)
+    end)
+
+    it("settles unresolved escrow before declaring (§7 resolving)", function()
+        -- The ordering assertion itself lives inside the ExpireAllActive mock
+        -- above, which runs at the moment of the call.
+        local world = load(MERIDIAN_SIDES)
+        world.complete(VICTORY_OBJ, 4)
+        world.runTo(WINDING_DOWN_FRAMES)
+        assert.are.equal(1, world.expireCalls)
+    end)
+
+    it("declares game over exactly once, not once per frame", function()
+        local world = load(MERIDIAN_SIDES)
+        world.complete(VICTORY_OBJ, 4)
+        world.runTo(WINDING_DOWN_FRAMES * 3)
+        assert.are.equal(1, #world.gameOverCalls)
+        assert.are.equal(1, world.expireCalls)
+    end)
+end)
+
+describe("winner derivation (wars §1: a side is a faction, not one team)", function()
+    it("wins for every allyteam of the completing team's faction", function()
+        local world = load(MERIDIAN_SIDES)
+        world.complete(VICTORY_OBJ, 4)          -- union
+        world.runTo(WINDING_DOWN_FRAMES)
+        -- Not {4}: teams 5/6/7 are the same side and must not read as losers.
+        assert.are.same({ 4, 5, 6, 7 }, world.gameOverCalls[1])
+        assert.are.equal('4,5,6,7', world.gameRulesParams['war_winner_ally_teams'])
+    end)
+
+    it("wins for the other faction when it takes the objective", function()
+        local world = load(MERIDIAN_SIDES)
+        world.complete(VICTORY_OBJ, 0)          -- compact
+        world.runTo(WINDING_DOWN_FRAMES)
+        assert.are.same({ 0, 1, 2, 3 }, world.gameOverCalls[1])
+    end)
+
+    it("falls back to the completing team alone with no scenario sides", function()
+        local world = load(nil)
+        world.complete(VICTORY_OBJ, 4)
+        world.runTo(WINDING_DOWN_FRAMES)
+        assert.are.same({ 4 }, world.gameOverCalls[1])
+    end)
+
+    it("falls back for a team the sides table doesn't list", function()
+        local world = load(MERIDIAN_SIDES)
+        world.complete(VICTORY_OBJ, 11)
+        world.runTo(WINDING_DOWN_FRAMES)
+        assert.are.same({ 11 }, world.gameOverCalls[1])
+    end)
+end)
+
+describe("edges", function()
+    it("takes forTeam when the hook reports no completing team", function()
+        local world = load(MERIDIAN_SIDES)
+        world.complete({ id = 3, type = 'protect', victory = true, forTeam = 0 }, nil)
+        world.runTo(WINDING_DOWN_FRAMES)
+        assert.are.same({ 0, 1, 2, 3 }, world.gameOverCalls[1])
+    end)
+
+    it("refuses to end the war when no winner can be named", function()
+        -- Declaring a winner we can't identify is worse than not ending:
+        -- everyone would get the neutral overlay off a real victory.
+        local world = load(MERIDIAN_SIDES)
+        world.complete({ id = 4, type = 'control', victory = true, forTeam = nil }, nil)
+        world.runTo(WINDING_DOWN_FRAMES * 2)
+        assert.are.equal('active', world.gameRulesParams['war_state'])
+        assert.are.equal(0, #world.gameOverCalls)
+    end)
+
+    it("latches the first result — a later victory can't overwrite the winner", function()
+        local world = load(MERIDIAN_SIDES)
+        world.complete(VICTORY_OBJ, 4)
+        world.runTo(100)
+        world.complete({ id = 5, type = 'control', victory = true }, 0)   -- other faction
+        world.runTo(WINDING_DOWN_FRAMES)
+
+        assert.are.equal(1, #world.gameOverCalls)
+        assert.are.same({ 4, 5, 6, 7 }, world.gameOverCalls[1])
+    end)
+end)
