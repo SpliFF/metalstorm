@@ -80,6 +80,16 @@ interface AvailableAIInfo {
 /// One discovered game the lobby can host. Populated from
 /// GameListUpdate; drives the "create game" dropdown in the
 /// browser screen. The `id` is what RoomCreate.game_id carries.
+/// One faction declared by a game's gamedata/sidedata.lua, as surfaced by
+/// GET /api/factions/<gameId> (PLAN-metalstorm-lobby.md task 0). Drives the
+/// sign-up form's required faction picker.
+interface AvailableFactionInfo {
+    key: string;
+    name: string;
+    fullName: string;
+    description: string;
+}
+
 interface AvailableGameInfo {
     id: string;
     displayName: string;
@@ -174,6 +184,14 @@ export class LobbyUI {
     /// Defaults to the first discovered game once GameListUpdate
     /// arrives. Passed to RoomCreate.game_id on create.
     private selectedGameId: string = '';
+
+    /// Factions the sign-up form can offer, fetched once when the login
+    /// screen renders (PLAN-metalstorm-lobby.md task 0). There is no game
+    /// selection at sign-up time — an account's faction isn't scoped to a
+    /// room — so this always asks GET /api/games first and uses whichever
+    /// game comes back first, same "first discovered game" convention the
+    /// create-room form falls back to via `selectedGameId`.
+    private availableFactions: AvailableFactionInfo[] = [];
 
     // ─── Public read-only accessors for debugging / automation ───
 
@@ -497,17 +515,67 @@ export class LobbyUI {
             e.preventDefault();
             this.doLogin();
         };
+
+        // PLAN-metalstorm-lobby.md task 0: faction is a required, one-time
+        // sign-up choice — only shown once the user signals "new account"
+        // by filling the confirm-password field (the same signal doLogin()
+        // itself uses to decide login vs. register).
+        const pass2El = document.getElementById('login-pass2') as HTMLInputElement | null;
+        const groupEl = document.getElementById('login-faction-group');
+        const selectEl = document.getElementById('login-faction') as HTMLSelectElement | null;
+        const descEl = document.getElementById('login-faction-desc');
+        if (pass2El && groupEl) {
+            pass2El.oninput = () => groupEl.classList.toggle('hidden', pass2El.value === '');
+        }
+        if (selectEl && descEl) {
+            selectEl.onchange = () => {
+                const f = this.availableFactions.find(x => x.key === selectEl.value);
+                descEl.textContent = f ? f.description : '';
+            };
+        }
+        this.fetchFactionsForSignup();
+    }
+
+    /// Populate the sign-up faction picker. Hardcoded to Metalstorm, not
+    /// "whichever game comes first" — the lobby can discover several game
+    /// folders (this dev tree also carries archived BAR/ZK/papertanks
+    /// content), and `/api/games` is not guaranteed to list Metalstorm
+    /// first (verified: alphabetical, `bar` sorts before `metalstorm`).
+    /// accounts.faction_id is Metalstorm's account model specifically
+    /// (PLAN-metalstorm-lobby.md task 0), not a generic pick-the-first-game
+    /// abstraction — same reasoning as the server's `factionRegistry` scope
+    /// (rts/lobby_main.cpp).
+    private async fetchFactionsForSignup(): Promise<void> {
+        try {
+            const factions = await this.lobbyGet('/api/factions/metalstorm');
+            if (!Array.isArray(factions) || factions.length === 0) return;
+            this.availableFactions = factions;
+
+            const selectEl = document.getElementById('login-faction') as HTMLSelectElement | null;
+            if (!selectEl) return;
+            for (const f of factions) {
+                const opt = document.createElement('option');
+                opt.value = f.key;
+                opt.textContent = f.fullName || f.name;
+                selectEl.appendChild(opt);
+            }
+        } catch {
+            // Sign-up faction choice degrades to "no factions offered" —
+            // login (not register) still works with an empty picker.
+        }
     }
 
     private async doLogin(): Promise<void> {
         const user = (document.getElementById('login-user') as HTMLInputElement).value.trim();
         const pass = (document.getElementById('login-pass') as HTMLInputElement).value;
         const pass2 = (document.getElementById('login-pass2') as HTMLInputElement).value;
+        const faction = (document.getElementById('login-faction') as HTMLSelectElement | null)?.value ?? '';
         const msgEl = document.getElementById('login-msg')!;
 
         if (!user) { msgEl.textContent = 'Enter a username'; return; }
         if (!pass) { msgEl.textContent = 'Enter a password'; return; }
         if (pass2 && pass !== pass2) { msgEl.textContent = 'Passwords do not match'; return; }
+        if (pass2 && !faction) { msgEl.textContent = 'Choose a faction'; return; }
 
         msgEl.textContent = 'Connecting...';
         msgEl.className = 'msg';
@@ -525,7 +593,7 @@ export class LobbyUI {
                 resp = await fetch(`${CONFIG.httpUrl}/api/auth/register`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username: user, password: pass }),
+                    body: JSON.stringify({ username: user, password: pass, faction }),
                 });
             }
 

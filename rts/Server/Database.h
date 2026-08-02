@@ -22,6 +22,15 @@ struct UserRecord {
     /// True for accounts minted by `/api/rooms/direct` (no password ever
     /// set — the account exists only to hold a pre-authorised session).
     bool isDev = false;
+    /// Permanent faction allegiance (PLAN-metalstorm-lobby.md §1a/§1b/§7.1),
+    /// e.g. "compact" / "union" — matches a key from the game's
+    /// gamedata/sidedata.lua (FactionData::Discover). Set once at
+    /// registration and immutable thereafter in the normal flow; nullopt
+    /// only for a not-yet-upgraded guest/provisional account (guest
+    /// accounts themselves are not implemented yet — see PLAN-lobby.md
+    /// §7.1 guest→upgrade). The only normal-flow writer is CreateUser;
+    /// SetFactionByUsername exists solely for the audited admin override.
+    std::optional<std::string> factionId;
 };
 
 class Database {
@@ -38,8 +47,16 @@ public:
     /// Create a user. Returns the new user ID, or 0 on failure (duplicate username).
     /// `isDev` marks accounts minted by `/api/rooms/direct` for a manifest
     /// username that doesn't exist yet — never set for normal registration.
+    /// `factionId` is the permanent faction choice from the sign-up form
+    /// (PLAN-metalstorm-lobby.md task 0); the HTTP register handler
+    /// validates it against the game's declared factions before calling
+    /// this, so by the time it reaches here it is trusted. Left nullopt for
+    /// paths that aren't the real sign-up form (dev/test auto-register,
+    /// `/api/rooms/direct` manifest accounts) — those accounts are not
+    /// normal player registrations.
     int64_t CreateUser(const std::string& username, const std::string& passwordHash,
-                       const std::string& role = "player", bool isDev = false);
+                       const std::string& role = "player", bool isDev = false,
+                       const std::optional<std::string>& factionId = std::nullopt);
 
     /// Look up a user by username. Returns nullopt if not found.
     std::optional<UserRecord> FindUser(const std::string& username);
@@ -85,6 +102,21 @@ public:
     /// updated. Out-param `userId` receives the affected id (0 if not found)
     /// so the caller can revoke sessions + audit with the id.
     bool SetBannedByUsername(const std::string& username, bool banned, int64_t& userId);
+
+    /// Privileged override of a user's permanent faction
+    /// (PLAN-metalstorm-lobby.md §1b: "exceptional reassignment ...
+    /// support/admin only ... audited"). There is deliberately no
+    /// player-facing setter for this — CreateUser's `factionId` parameter
+    /// is the only normal-flow write, and it only ever goes from unset to
+    /// set (a fresh registration), never reassigns an existing account.
+    /// Callers of this override are expected to pair it with
+    /// LogAudit(...) and, per §1b, clear the account's per-war bindings
+    /// (not implemented here — no per-war binding storage exists yet;
+    /// tracked by PLAN-metalstorm-lobby §5.1/task 4). Returns true if a
+    /// row was updated (false if the user doesn't exist). Out-param
+    /// `userId` receives the affected id (0 if not found).
+    bool SetFactionByUsername(const std::string& username, const std::string& factionId,
+                              int64_t& userId);
 
     /// Delete every session belonging to a user (immediate logout). Paired
     /// with SetBanned() so a ban ejects a currently-connected player from the

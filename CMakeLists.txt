@@ -407,6 +407,7 @@ set(LOBBY_SERVER_SOURCES
     rts/Server/GameDiscovery.cpp
     rts/Server/ConfigReader.cpp
     rts/Server/ResourcesParser.cpp
+    rts/Server/FactionData.cpp
 )
 set(LOBBY_LOG_SOURCES
     rts/System/Log/Backend.cpp
@@ -481,6 +482,7 @@ if(TEST_SOURCES)
         ${CMAKE_SOURCE_DIR}/rts/Server/OrgGroups.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/NetworkServer.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/Database.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/FactionData.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GameOverState.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GameMetrics.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GmRollback.cpp

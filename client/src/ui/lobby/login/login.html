@@ -4,6 +4,12 @@
         <input type="text" id="login-user" placeholder="Username" autofocus>
         <input type="password" id="login-pass" placeholder="Password">
         <input type="password" id="login-pass2" placeholder="Confirm password (new accounts)">
+        <div id="login-faction-group" class="login-faction-group hidden">
+            <select id="login-faction" class="game-select">
+                <option value="">Choose your faction…</option>
+            </select>
+            <p id="login-faction-desc" class="hint login-faction-desc"></p>
+        </div>
         <button type="submit" id="login-btn">Login / Register</button>
         <p id="login-msg" class="msg"></p>
         <p class="hint">New username? Enter a password twice to register.</p>
