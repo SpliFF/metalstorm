@@ -425,7 +425,7 @@ add_executable(spring-lobby
     ${LOBBY_LOG_SOURCES}
     rts/System/SafeCStrings.c
 )
-add_dependencies(spring-lobby generate_flatbuffers modelimporter)
+add_dependencies(spring-lobby generate_flatbuffers modelimporter mapconverter)
 target_include_directories(spring-lobby PRIVATE
     ${CMAKE_SOURCE_DIR}/rts
     ${CMAKE_SOURCE_DIR}/rts/lib
@@ -439,6 +439,10 @@ target_compile_definitions(spring-lobby PRIVATE
     # glb detector mtime-compare against the actual binary the lobby
     # would invoke, so a rebuilt importer invalidates the model cache.
     MODELIMPORTER_BINARY_PATH="$<TARGET_FILE:modelimporter>"
+    # Absolute path so RunMapConverterPreflight (lobby_main.cpp) can shell
+    # out to the map-processing pipeline at startup without relying on
+    # $PATH (PLAN-metalstorm-impostors.md M10).
+    MAPCONVERTER_BINARY_PATH="$<TARGET_FILE:mapconverter>"
 )
 target_link_libraries(spring-lobby PRIVATE lua nghttp2_static flatbuffers ZLIB::ZLIB SQLite3::SQLite3 springlog springlog-net springlog-sqlite nlohmann_json::nlohmann_json openssl_crypto)
 if(UNIX)

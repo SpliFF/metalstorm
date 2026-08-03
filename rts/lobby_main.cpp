@@ -84,6 +84,59 @@ static bool ExecPrepared(sqlite3 *db, const char *sql,
   return true;
 }
 
+#ifndef MAPCONVERTER_BINARY_PATH
+#define MAPCONVERTER_BINARY_PATH "mapconverter"
+#endif
+
+/// Run `mapconverter --all content/maps` synchronously at lobby startup so
+/// a checkout whose `data/maps/` predates a `content/maps` source change
+/// self-heals instead of staying stale forever (PLAN-metalstorm-impostors.md
+/// M10 — `data/maps/<id>/features/impostors.json` never landed because
+/// nothing ever called the conversion pipeline after the source manifest
+/// was added). Mirrors gameconverter's own documented contract ("cheap to
+/// run from CI or on every lobby startup as a pre-flight") — mapconverter's
+/// per-map freshness check (`MapProcessor::ProcessedOutputCurrent` against
+/// each map's `.processed-stamp`) makes every call after the first a fast
+/// no-op scan, not a full reprocess.
+///
+/// Deliberately kept out-of-process rather than linking MapProcessor
+/// straight into spring-lobby: MapProcessor pulls in ImageMagick/
+/// modelimporter/Lua-map-processing, and mapconverter's `CopySourceTree`
+/// step (which is what actually notices a new `content/maps/<id>/...`
+/// file) lives in the tool's own main(), not in MapProcessor itself, so
+/// merely calling `MapProcessor::ScanAndProcess` in-process would miss new
+/// source files anyway. Failure is logged, not fatal — a missing
+/// `content/maps` dir (e.g. a stripped prod image) or a missing binary
+/// shouldn't block the lobby from serving whatever `data/` already has.
+static void RunMapConverterPreflight(const std::string &dbPath) {
+  const std::filesystem::path dbFsPath(dbPath);
+  const std::string dataDir =
+      dbFsPath.has_parent_path() && !dbFsPath.parent_path().empty()
+          ? dbFsPath.parent_path().string()
+          : "data";
+
+  const std::string cmd = std::string("\"") + MAPCONVERTER_BINARY_PATH +
+                          "\" --all content/maps --data-dir \"" + dataDir +
+                          "\" --db \"" + dbPath + "\" 2>&1";
+  FILE *p = popen(cmd.c_str(), "r");
+  if (!p) {
+    SLOG(SPRING_LOG_WARNING, "map preflight: failed to launch mapconverter");
+    return;
+  }
+  char buf[256];
+  std::string out;
+  while (fgets(buf, sizeof(buf), p))
+    out += buf;
+  const int rc = pclose(p);
+  if (rc != 0) {
+    SLOG(SPRING_LOG_WARNING,
+         "map preflight: mapconverter exited %d (maps may be stale):\n%s",
+         rc, out.c_str());
+  } else {
+    SLOG(SPRING_LOG_NOTICE, "map preflight: maps up to date");
+  }
+}
+
 // Saved for self-restart via execvp
 static int savedArgc = 0;
 static char **savedArgv = nullptr;
@@ -614,8 +667,12 @@ int main(int argc, char *argv[]) {
     return ready;
   };
 
-  // Map processing is handled offline by tools/mapconverter.
-  // The lobby reads pre-populated data/ + SQLite metadata.
+  // Map processing itself still lives entirely in tools/mapconverter (the
+  // lobby links only the read-only MapMetadataDb) — but we shell out to it
+  // as a startup pre-flight so a lobby start self-heals stale processed
+  // output instead of requiring an operator to remember to run it by hand.
+  // See RunMapConverterPreflight above and PLAN-metalstorm-impostors.md M10.
+  RunMapConverterPreflight(dbPath);
   MapMetadataDb::EnsureTable(mapDb);
 
   // --- Game discovery ---
