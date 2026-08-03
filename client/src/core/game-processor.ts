@@ -1998,6 +1998,11 @@ export function gpInit(msg: GpInitToWorker): void {
          *  scene light list, not just idles them). Returns the new count. */
         lightPool: (n: number): number =>
             gpCtx.fxLightPool?.setPoolCount(n) ?? -1,
+        /** M2: A/B the pooled lights' feature-tile exclusion without a rebuild.
+         *  `fxLightsOnFeatures(true)` restores the pre-M2 behaviour (pool lights
+         *  every vegetation tile); `false` is the shipped default. */
+        fxLightsOnFeatures: (on: boolean): boolean =>
+            !(gpCtx.fxLightPool?.setExcludeTagged(!on) ?? true),
         /** Fill-rate probe: engine hardware scaling ⇒ backing-store resolution.
          *  scale 1.5 ≈ retina-capped baseline; 0.75 halves fill. */
         renderScale: (scale: number): number => {

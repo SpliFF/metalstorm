@@ -28,6 +28,29 @@
 
 import { Color3, PointLight, Scene, Vector3 } from '@babylonjs/core';
 
+/**
+ * Layer-mask bit meaning "the FX light pool must not light this mesh".
+ *
+ * PLAN-perf **M2**. The pool's per-mesh tax is not the light *maths* — it is
+ * that every pooled PointLight in `scene.lights` enters the `_lightSources` of
+ * every mesh it can affect, and Babylon then re-binds up to
+ * `maxSimultaneousLights` (4) lights' worth of uniforms **per draw call**. A
+ * Metalstorm map draws ~400 feature-LOD tiles, so the pool costs ~400 draws ×
+ * 4 lights of uniform uploads per frame for vegetation that has no business
+ * being lit by a muzzle flash. Tagging those meshes and setting
+ * `excludeWithLayerMask` on the pooled lights removes them from
+ * `Light.canAffectMesh` in O(1) — unlike `excludedMeshes`, which is an
+ * `indexOf` scan per mesh per light.
+ *
+ * The bit is **additive** (`mesh.layerMask |= …`), and deliberately sits
+ * outside a camera's default `0x0FFFFFFF` mask, so it cannot change what any
+ * camera renders: cameras test `camera.layerMask & mesh.layerMask`, and the
+ * mesh keeps all of its original low bits. Bits 29/30 are already taken
+ * (`BLIT_LAYER` 0x20000000 in decal-overlay.ts, `DISTORTION_LAYER` 0x40000000
+ * in distortion-renderer.ts); this is bit 28.
+ */
+export const FX_LIGHT_EXCLUDED_LAYER = 0x10000000;
+
 /** Per-slot dynamic-light state. */
 interface LightSlot {
     light: PointLight;
@@ -52,6 +75,8 @@ export interface FxLightPoolOptions {
     intensityFloor?: number;
     /** Cull emissions farther than this from the camera (elmos). */
     maxCameraDistance?: number;
+    /** Skip meshes tagged `FX_LIGHT_EXCLUDED_LAYER` (vegetation). Default on. */
+    excludeTagged?: boolean;
 }
 
 const DEFAULTS = {
@@ -59,6 +84,7 @@ const DEFAULTS = {
     intensityScale: 1.0,
     intensityFloor: 0.05,
     maxCameraDistance: 7000,
+    excludeTagged: true,
 };
 
 export class FxLightPool {
@@ -72,25 +98,44 @@ export class FxLightPool {
         this.scene = scene;
         this.opts = { ...DEFAULTS, ...options };
 
-        for (let i = 0; i < this.opts.count; i++) {
-            // Position is irrelevant while intensity is 0; start at origin.
-            const light = new PointLight(`fxLight${i}`, new Vector3(0, 0, 0), scene);
-            light.intensity = 0;
-            light.range = 1;
-            light.diffuse = new Color3(0, 0, 0);
-            light.specular = new Color3(0, 0, 0);
-            // FX lights never cast shadows — the CSM is the sun's alone and
-            // adding point-light shadow maps would be ruinous.
-            light.shadowEnabled = false;
-            this.slots.push({
-                light, active: false, age: 0, ttl: 0, peak: 0, priority: 0,
-            });
-        }
+        for (let i = 0; i < this.opts.count; i++) this.slots.push(this.makeSlot(i));
 
         // GW4-c5: globalThis (not window) so this resolves in the game-processor
         // worker too; re-proxied to main for devtools in GW8.
         (globalThis as unknown as { __fxLightPool: unknown }).__fxLightPool = this;
     }
+
+    /** One pooled light + its slot bookkeeping. */
+    private makeSlot(i: number): LightSlot {
+        // Position is irrelevant while intensity is 0; start at origin.
+        const light = new PointLight(`fxLight${i}`, new Vector3(0, 0, 0), this.scene);
+        light.intensity = 0;
+        light.range = 1;
+        light.diffuse = new Color3(0, 0, 0);
+        light.specular = new Color3(0, 0, 0);
+        // FX lights never cast shadows — the CSM is the sun's alone and
+        // adding point-light shadow maps would be ruinous.
+        light.shadowEnabled = false;
+        light.excludeWithLayerMask = this.opts.excludeTagged ? FX_LIGHT_EXCLUDED_LAYER : 0;
+        return { light, active: false, age: 0, ttl: 0, peak: 0, priority: 0 };
+    }
+
+    /**
+     * PLAN-perf M2 lever + its A/B toggle: whether pooled lights skip meshes
+     * tagged `FX_LIGHT_EXCLUDED_LAYER` (the feature-LOD vegetation tiles).
+     * Babylon's `excludeWithLayerMask` setter calls `_resyncMeshes()`, so this
+     * takes effect live — the attribution run flips it at a plateau.
+     * Returns the applied value.
+     */
+    setExcludeTagged(on: boolean): boolean {
+        this.opts.excludeTagged = on;
+        const mask = on ? FX_LIGHT_EXCLUDED_LAYER : 0;
+        for (const s of this.slots) s.light.excludeWithLayerMask = mask;
+        return on;
+    }
+
+    /** Whether tagged meshes are currently excluded from the pool. */
+    get excludeTagged(): boolean { return this.opts.excludeTagged; }
 
     /** Master on/off (e.g. a `gfx.fxLights` setting). Idles all slots. */
     setEnabled(on: boolean): void {
@@ -114,16 +159,7 @@ export class FxLightPool {
         while (this.slots.length > n) {
             this.slots.pop()!.light.dispose();  // dispose() removes it from scene.lights
         }
-        while (this.slots.length < n) {
-            const i = this.slots.length;
-            const light = new PointLight(`fxLight${i}`, new Vector3(0, 0, 0), this.scene);
-            light.intensity = 0;
-            light.range = 1;
-            light.diffuse = new Color3(0, 0, 0);
-            light.specular = new Color3(0, 0, 0);
-            light.shadowEnabled = false;
-            this.slots.push({ light, active: false, age: 0, ttl: 0, peak: 0, priority: 0 });
-        }
+        while (this.slots.length < n) this.slots.push(this.makeSlot(this.slots.length));
         this.opts.count = n;
         return this.slots.length;
     }
