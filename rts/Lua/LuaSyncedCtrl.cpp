@@ -1067,7 +1067,7 @@ int LuaSyncedCtrl::GameOver(lua_State* L)
 	// GameInfo{game_over=true, winning_ally_teams=…} to every client (which
 	// drives the game-over overlay + the widget:GameOver callin). See
 	// GameOverState.h.
-	gameOverRelay.Declare(winningAllyTeams);
+	gameOverRelay.Declare(winningAllyTeams, gs->frameNum);
 	// push the number of accepted allyteams
 	lua_pushnumber(L, winningAllyTeams.size());
 	return 1;
