@@ -47,9 +47,9 @@ export class ImpostorUvPlugin extends MaterialPluginBase {
 
     /** Atlas grid the `impostorCell` attribute indexes into. */
     layout: AtlasLayout = { yawBins: 1, pitchBins: 1, frames: 1 };
-    /** Row 0 is the TOP row of the atlas image (the baker's convention).
-     *  Rows are counted from the image top regardless — see the v-flip note in
-     *  `getCustomCode`; this only picks which END of the sheet row 0 sits at. */
+    /** Row 0 is the TOP row of the atlas image (the baker's convention). The
+     *  card's UVs are top-down too (`createImpostorCard`), so this needs no
+     *  flip — see `atlasCellUv`, which this shader mirrors exactly. */
     topDown = true;
     /** Shared card rotation — the camera's world rotation, so the quad's local
      *  +X/+Y/+Z map to screen right / up / toward-viewer. */
@@ -157,21 +157,15 @@ export class ImpostorUvPlugin extends MaterialPluginBase {
             #if defined(IMPOSTOR_CELL) && defined(UV1)
                 float _impCol = mod(impostorCell, uImpostorCols);
                 float _impRow = floor(impostorCell / uImpostorCols);
-                // The atlases ship as KTX2, and Babylon cannot honour a
-                // texture's invertY on a COMPRESSED format — the blocks are
-                // uploaded verbatim, so v=0 lands on the image's TOP row, not
-                // the bottom edge the uncompressed path gives. Flip the quad's
-                // own v and count rows DOWN from the top, which is also the
-                // baker's own indexing (cell_origin returns a top-left px
-                // origin). CONFIRMED LIVE 2026-08-03: without this every
-                // sprite drew upside down AND row 0 sampled the bottom row of
-                // the sheet — a shallow camera got the 80-degree top-down view,
-                // inverted. Two symptoms, one v axis.
-                float _impV = 1.0 - uvUpdated.y;
-                float _impOffV = uImpostorTopDown > 0.5
-                    ? _impRow * uImpostorGrid.y
-                    : 1.0 - (_impRow + 1.0) * uImpostorGrid.y;
-                uvUpdated = vec2(uvUpdated.x, _impV) * uImpostorGrid
+                // Card UVs and atlas rows are BOTH top-down image space (see
+                // atlasCellUv + createImpostorCard), so a top-down atlas needs
+                // no flip — offset straight by the row. The 1-(row+1) form is
+                // the bottom-up-source case only.
+                float _impOffV = 1.0 - (_impRow + 1.0) * uImpostorGrid.y;
+                if (uImpostorTopDown > 0.5) {
+                    _impOffV = _impRow * uImpostorGrid.y;
+                }
+                uvUpdated = uvUpdated * uImpostorGrid
                           + vec2(_impCol * uImpostorGrid.x, _impOffV);
             #endif`,
         };

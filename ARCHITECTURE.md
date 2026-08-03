@@ -110,12 +110,13 @@ Full CLI flag list (from `rts/server_main.cpp`):
 | `core/connection.ts` | WebTransport game-stream connection to server (over `WebTransportAdapter`). FlatBuffers dispatch. Events: `onMapData`, `onUnitDefs`, `onEntityState`, `onCombatEvents`, etc. GW4 relocates it into the game-processor worker (PLAN-game-worker.md). |
 | `core/transport.ts` | Transport abstraction over the game connection. `WebTransportAdapter` (QUIC/HTTP-3) — class-based send (`control`/`state`/`vision`/`bulk`/`datagram`), newest-wins state. WebRTC removed (PLAN-game-worker.md). |
 | `core/game-worker-protocol.ts` | **Frozen GW4 message contract** (PLAN-game-worker.md): the game-processor worker ⇄ main-thread interfaces (`Gp*ToWorker` init/input/config, `Gp*ToMain` sceneState/audio/config/gameOver). Also (WP2c) `LegacyWorkerMessage` (all legacy `type` strings) + `WorkerInbound` union used to type `self.onmessage`. |
-| `core/entity-renderer.ts` | Per-piece thin-instanced unit renderer. Loads `.glb` via `setUnitDefs()`, groups by (defId, team, pieceIdx). Fallback: procedural shapes. |
+| `core/entity-renderer.ts` | Per-piece thin-instanced unit renderer. Loads `.glb` via `setUnitDefs()`, groups by (defId, team, pieceIdx). Fallback: procedural shapes. Also publishes `getMemberModel(defId, team)` — a member-sized mesh + team material for the squad fan-out. Those meshes live in a **separate** `memberModelMeshes` map, not `renderMeshes`: `tick()`'s hide-pass zeroes every `renderMeshes` entry it didn't write this frame, which would fight a caller driving its own thin instances. |
+| `core/squad-render-backend.ts` | Babylon implementation of the Metalstorm squad `RenderBackend` (`data/games/metalstorm/client/squads/`): draws the cosmetic members one sim squad fans out into. Three visual classes, chosen **per member per frame by camera distance** (impostors M4) — **model** (a def with a 3D body, closer than its `impostorDistance`: the real low-poly body with real `headingY` facing, one thin-instance pool per model piece), **impostor sprite** (the same member beyond `impostorDistance`, or any atlas def whose model has not streamed yet: baked 8-yaw × 3-pitch directional card), **proxy capsule** — the **last resort**, held only when a member's def offers neither tier this frame (no atlas *and* no loadable body; the server names those defs at defs-bake time, see below). The two art tiers gate independently: a def with a body but **no** atlas has no sprite tier to hand over to, so its effective `impostorDistance` is `Infinity` and it holds the model tier at every range. The model↔sprite boundary crossfades via a screen-door dither band just inside `impostorDistance` (M5), so neither tier pops. |
 | `core/feature-renderer.ts` | Thin-instanced map feature renderer. Types with no baked impostor atlas keep the single whole-map mesh (pattern reference for entity-renderer); types listed in a `models/impostors.json` manifest are handed to `FeatureLodController` instead. Also hosts `DynamicFeatureRenderer` (runtime wrecks/debris). |
 | `core/feature-lod.ts` | PLAN-maps.md M6 — pure spatial-chunking + tier math for the map-feature LOD (tile partition, point→AABB distance, `assignTier` with hysteresis, `farDensity` prefix thinning). No Babylon imports; unit-tested. |
 | `core/feature-lod-renderer.ts` | PLAN-maps.md M6 — Babylon side of the feature LOD: per (type, tile) NEAR (full mesh, casts CSM) / FAR (impostor card, no shadows) / CULLED meshes with static matrix buffers, dither crossfade, per-tile frustum culling. Debug: `window.__gp('__featureLod.get()/.set()/.force()')`. **Clones must `makeGeometryUnique()`** — thin-instance buffers live on the Geometry, which `Mesh.clone()` shares. |
-| `core/impostor-atlas.ts` | Runtime half of the sprite-atlas convention (yaw × pitch × frame grid, cell index, cell→UV, card-tilt rule). Shared by the feature LOD and the unit/squad impostor path. Pure + unit-tested. Each atlas **declares** its elevation arc (`pitchDegrees`) and azimuth phase (`azimuthPhaseDegrees` on the wire → `azimuthPhase` radians) rather than assuming a global one — phase 0 means column 0 is the instance's **back** (relative yaw 0 puts the camera behind it). Baker half is `tools/fable-model-forge/impostor_convention.py`; a vitest cross-check executes it and round-trips every cell of every shipped convention. |
-| `core/impostor-uv-plugin.ts` | Material plugin: per-instance atlas-cell UV remap (`impostorCell` attribute) + shared screen-aligned billboard rotation, both vertex-stage, so impostor matrix buffers stay static. |
+| `core/impostor-atlas.ts` | Runtime half of the sprite-atlas convention (yaw × pitch × frame grid, cell index, cell→UV, card-tilt rule). Shared by the feature LOD and the unit/squad impostor path. Pure + unit-tested. Each atlas **declares** its elevation arc (`pitchDegrees`) and azimuth phase (`azimuthPhaseDegrees` on the wire → `azimuthPhase` radians) rather than assuming a global one — phase 0 means column 0 is the instance's **back** (relative yaw 0 puts the camera behind it). Baker half is `tools/fable-model-forge/impostor_convention.py`; a vitest cross-check executes it, round-trips every cell of every shipped convention, AND checks each cell's UV rect back into pixels against the baker's own `cell_origin`. **V runs top-down** (row 0 → `ov = 0`, no flip): every atlas ships as KTX2, and Babylon's KTX2 loader cannot honour `invertY` (compressed data can't use `UNPACK_FLIP_Y`, and that path sets no `_invertVScale` compensation as the KTX1 one does), so a KTX2 always lands with its TOP image row at v = 0 — the same convention glTF UVs already use. Impostor cards are built to match by `createImpostorCard()` (impostor-renderer.ts), which is where the flip is owned; assuming Babylon's bottom-up procedural-mesh UVs instead rendered every impostor mirrored AND on pitch row `pitchBins-1-row` (2026-08-03). |
+| `core/impostor-uv-plugin.ts` | Material plugin: per-instance atlas-cell UV remap (`impostorCell` attribute) + shared screen-aligned billboard rotation, both vertex-stage, so impostor matrix buffers stay static. Its GLSL is a hand copy of `atlasCellUv`; a vitest extracts both `_impOffV` expressions from the emitted shader and evaluates them against the TS function, so neither half can be changed alone. |
 | `core/dither-fade-plugin.ts` | Material plugin: screen-door (4×4 Bayer) crossfade for LOD swaps. Fade from a uniform or a per-thin-instance `ditherFade` attribute; `invertPattern` gives the outgoing/incoming tiers complementary halves. |
 | `core/projectile-renderer.ts` | Renders in-flight projectiles (thin instances, per-weapon-type shapes). |
 | `core/build-beam-renderer.ts` | Translucent build-beam shader (procedural cross-section) for nano-spray VFX. |
@@ -626,12 +627,27 @@ Projectile streaming: server sends GameWeaponDefs (incremental, per-client, only
 Client: DefCache accumulates defs → EntityRenderer.setUnitDefs() (additive batches)
 Client: DefCache → ProjectileRenderer.setWeaponDefs() (per-type mesh + material)
 Model loading: SceneLoader.ImportMeshAsync per defId → thin instances
+Squad defs:   the sim body is not drawn; SquadRenderBackend draws the members
+              (near: real model → far: impostor sprite; no atlas: model at all
+               ranges; neither model nor atlas: proxy capsule)
 Fallback: procedural shapes (box/cylinder/cone/sphere) when no .glb exists
 ```
 
 Defs are streamed on-demand: the server tracks `knownUnitDefs` and `knownWeaponDefs`
 per ClientSession and sends each def exactly once per game session, just before the
 first entity/projectile state update that references it.
+
+**Missing models degrade silently by design, so the server names them loudly.**
+`LuaDefsSerializer::SerializeOneUnitDef` emits `model_url` only when
+`models/<objectname>.gltf` exists; otherwise it emits `""` and the client falls
+back to a procedural shape (or, for a squad def with no impostor atlas either,
+the proxy capsule). Nothing in
+that chain is an error, which is how a scenario can be mostly placeholders with
+a clean log. `FindDefsWithMissingModels` closes the hole: once per defs bake the
+server logs a WARNING naming every def whose `objectname` resolves to no `.gltf`
+and which is not `impostor_only` (that flag means "the billboard IS the model" —
+infantry/civilians per PLAN-metalstorm-beta-units.md §2.1, so a missing file is
+correct for them). Covered by `tests/test_defs_missing_models.cpp`.
 
 ## Weapon / Projectile Rendering Strategies (target model)
 

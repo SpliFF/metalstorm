@@ -17,7 +17,7 @@
 //   PIE <version>              // 2 = int coords + pixel-space UVs (/tex-dim)
 //                              // 3 = float coords + normalised UVs
 //                              // 4 = adds TCMASK (team-colour mask page)
-//   TYPE <flags>
+//   TYPE <flags>               // HEX bitfield; 0x10000 = "has a team mask"
 //   TEXTURE 0 <page.png> [w h] // diffuse page; w/h declared for PIE2 (256 256)
 //   TCMASK 0 <page_tcmask.png> // optional (PIE4): greyscale team-colour mask
 //   LEVELS <n>
@@ -54,6 +54,23 @@
 // attaches the mask page on the `aiTextureType_LIGHTMAP` slot (→ glTF
 // `occlusionTexture`) as a carrier; modelimporter's post-fix relocates any
 // `*_tcmask` texture into the `SPRINGRTS_team_color` material extension.
+//
+// Team-colour masks reach a material from three places, most specific first:
+//
+//   1. the manifest's `"tcmask": { "<diffuse page>": "<mask page>" }` map —
+//      AUTHORED art, and the only source that can put team colour where an
+//      artist wants it;
+//   2. a PIE4 `TCMASK` directive (`wz_building`/blhq is the one baseline
+//      model that ships one);
+//   3. the PIE2/PIE3 `TYPE & 0x10000` flag, whose mask page name follows
+//      WZ's convention: `page-<N>-<anything>.png` → `page-<N>_tcmask.png`
+//      (WZ2100's `pie_MakeTexPageTCMaskName`).
+//
+// (3) exists because the flag is genuinely set on the droid prop/weapon parts
+// and dropping it would be a silent import bug — but it is NOT sufficient for
+// the vehicle baseline: the stock `page-14_tcmask` has no coverage at all over
+// the Viper/heavy hull islands, and `page-17_tcmask` (weapons) is entirely
+// black upstream, so those hulls import untinted. Hence (1).
 
 #pragma once
 
@@ -61,6 +78,7 @@
 #include <assimp/types.h>
 
 #include <array>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -101,6 +119,7 @@ private:
         std::vector<aiVector3D> connectors;
         std::string texPage;             // diffuse page filename
         std::string tcmaskPage;          // team-colour mask page (may be empty)
+        long typeFlags = 0;              // PIE `TYPE` bitfield (hex in the file)
         int pieVersion = 2;
     };
 
@@ -121,6 +140,9 @@ private:
         char dominantAxis = 'z';         // 'x' | 'y' | 'z'
         std::string pieDir = "pie";
         std::vector<PartSpec> parts;
+        /// Assembly-level team-colour masks: diffuse page -> mask page.
+        /// Overrides whatever the `.pie` parts declare or imply.
+        std::map<std::string, std::string> tcmaskByPage;
     };
 
     /// Read a whole file into a string via the IO handler.

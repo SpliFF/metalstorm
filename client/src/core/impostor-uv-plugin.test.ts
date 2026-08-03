@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { NullEngine, Scene, PBRMaterial } from '@babylonjs/core';
 import { ImpostorUvPlugin } from './impostor-uv-plugin.js';
+import { atlasCellUv, atlasCellCount } from './impostor-atlas.js';
 
 function makePlugin(): ImpostorUvPlugin {
     const scene = new Scene(new NullEngine());
@@ -32,28 +33,53 @@ describe('ImpostorUvPlugin billboard ground anchor', () => {
     });
 });
 
-describe('ImpostorUvPlugin atlas v axis', () => {
-    // The atlases are KTX2. Babylon cannot apply invertY to a compressed
-    // texture, so v=0 is the image's TOP row — the opposite of the
-    // uncompressed path this shader would otherwise assume. The remap must
-    // therefore flip the quad's own v AND count rows down from the top.
-    //
-    // Getting this wrong is silent and doubly wrong: every sprite draws upside
-    // down AND row 0 samples the far end of the sheet, so a shallow camera is
-    // served the top-down elevation row. Both were live on main until the
-    // 2026-08-03 Meridian pass; no test caught it, hence this one.
-    it('flips the quad v before scaling it into the cell', () => {
+// ── V orientation ────────────────────────────────────────────────────────
+//
+// The shader is a hand-written copy of `atlasCellUv`, so the two can drift —
+// and a V drift is silent (every cell still renders *something*). This pulls
+// the two `_impOffV` expressions straight out of the emitted GLSL, evaluates
+// them, and compares against the TS function for every cell of the shipped 8x3
+// grid, so neither side can be "fixed" alone.
+describe('ImpostorUvPlugin cell UV remap', () => {
+    const layout = { yawBins: 8, pitchBins: 3, frames: 1 };
+
+    /** Both `_impOffV` expressions as emitted: the initialiser (the bottom-up
+     *  source fallback) and the `uImpostorTopDown` override. */
+    function offsetExprs(): { fallback: string; topDown: string } {
         const body = makePlugin().getCustomCode('vertex')!.CUSTOM_VERTEX_UPDATE_POSITION;
-        expect(body).toContain('float _impV = 1.0 - uvUpdated.y');
-        expect(body).toContain('vec2(uvUpdated.x, _impV) * uImpostorGrid');
-        // ...and NOT the un-flipped form, which is what shipped.
-        expect(body).not.toContain('uvUpdated = uvUpdated * uImpostorGrid');
+        expect(body).toContain('float _impRow = floor(impostorCell / uImpostorCols);');
+        const init = /float _impOffV = ([^;]+);/.exec(body);
+        const override = /uImpostorTopDown > 0\.5\) \{\s*_impOffV = ([^;]+);/.exec(body);
+        expect(init).not.toBeNull();
+        expect(override).not.toBeNull();
+        return { fallback: init![1], topDown: override![1] };
+    }
+
+    /** Evaluate one GLSL offset expression for a given row. */
+    const evalOv = (expr: string, row: number, rows: number): number => {
+        const js = expr
+            .replace(/_impRow/g, String(row))
+            .replace(/uImpostorGrid\.y/g, String(1 / rows));
+        return Function(`"use strict"; return (${js});`)() as number;
+    };
+
+    it('matches atlasCellUv on every cell, both row orders', () => {
+        const { fallback, topDown } = offsetExprs();
+        const rows = layout.pitchBins * layout.frames;
+        for (let cell = 0; cell < atlasCellCount(layout); cell++) {
+            const row = Math.floor(cell / layout.yawBins);
+            expect(evalOv(topDown, row, rows))
+                .toBeCloseTo(atlasCellUv(cell, layout, true).ov, 9);
+            expect(evalOv(fallback, row, rows))
+                .toBeCloseTo(atlasCellUv(cell, layout, false).ov, 9);
+        }
     });
 
-    it('puts row 0 at the image top when topDown, at the bottom otherwise', () => {
-        const body = makePlugin().getCustomCode('vertex')!.CUSTOM_VERTEX_UPDATE_POSITION;
-        // topDown → offset counts down from v=0 (image top): row * gridY.
-        expect(body).toContain('? _impRow * uImpostorGrid.y');
-        expect(body).toContain(': 1.0 - (_impRow + 1.0) * uImpostorGrid.y');
+    it('offsets a top-down atlas straight down the image, no flip', () => {
+        // Row 0 is the TOP image row and the card's v = 0 is its TOP edge
+        // (createImpostorCard), so the two meet at 0. The bug that shipped had
+        // this at 1 - 1/rows, which both mirrored the cell and picked row 2.
+        expect(atlasCellUv(0, layout, true).ov).toBe(0);
+        expect(evalOv(offsetExprs().topDown, 0, 3)).toBe(0);
     });
 });

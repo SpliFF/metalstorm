@@ -32,7 +32,6 @@ import {
     Camera,
     Mesh,
     AbstractMesh,
-    MeshBuilder,
     Material,
     PBRMaterial,
     StandardMaterial,
@@ -60,6 +59,7 @@ import {
 import { DitherFadePlugin } from './dither-fade-plugin.js';
 import { ImpostorUvPlugin } from './impostor-uv-plugin.js';
 import { selectAtlasCell, atlasCellCount, type AtlasLayout } from './impostor-atlas.js';
+import { createImpostorCard } from './impostor-renderer.js';
 
 /** Baked impostor atlas for one feature type. */
 export interface FeatureImpostorAtlas {
@@ -390,11 +390,9 @@ export class FeatureLodController {
         // --- FAR: one impostor card per placement. The instance matrix holds
         //     translation + uniform scale ONLY — orientation is the shared
         //     billboard uniform, so this buffer never has to be rebuilt.
-        const farMesh = MeshBuilder.CreatePlane(
+        const farMesh = createImpostorCard(
             `feat_${type.name}_far_${tile.key}`,
-            { width: type.atlas.width, height: type.atlas.height, sideOrientation: Mesh.DOUBLESIDE },
-            this.scene,
-        );
+            type.atlas.width, type.atlas.height, this.scene);
         farMesh.material = type.farMaterial;
         farMesh.isPickable = false;
         farMesh.receiveShadows = false;

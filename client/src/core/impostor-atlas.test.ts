@@ -202,23 +202,39 @@ describe('atlasCellUv', () => {
         expect(atlasCellUv(0, SINGLE_CELL_LAYOUT)).toEqual({ su: 1, sv: 1, ou: 0, ov: 0 });
     });
 
+    // The card's UVs are IMAGE space — v = 0 at the top edge, growing downward
+    // (createImpostorCard, impostor-renderer.ts) — because that is where a KTX2
+    // puts its top image row. So row 0 offsets to v = 0, with NO flip. Asserting
+    // the bottom-up form here instead is exactly the bug that shipped: it
+    // mirrored every sprite AND selected pitch row `pitchBins-1-row`.
     it('maps cell 0 to the TOP-LEFT of the image (baker convention)', () => {
         const uv = atlasCellUv(0, DEFAULT_ATLAS_LAYOUT);
         expect(uv.su).toBeCloseTo(1 / 8, 6);
         expect(uv.sv).toBeCloseTo(1 / 3, 6);
         expect(uv.ou).toBe(0);
-        expect(uv.ov).toBeCloseTo(2 / 3, 6);   // top row in GL's bottom-up V
+        expect(uv.ov).toBeCloseTo(0, 6);
     });
 
     it('walks columns left to right and rows top to bottom', () => {
         expect(atlasCellUv(3, DEFAULT_ATLAS_LAYOUT).ou).toBeCloseTo(3 / 8, 6);
         expect(atlasCellUv(8, DEFAULT_ATLAS_LAYOUT).ov).toBeCloseTo(1 / 3, 6);
-        expect(atlasCellUv(16, DEFAULT_ATLAS_LAYOUT).ov).toBeCloseTo(0, 6);
+        expect(atlasCellUv(16, DEFAULT_ATLAS_LAYOUT).ov).toBeCloseTo(2 / 3, 6);
+    });
+
+    // Row order (which cell) and V direction (which way up the cell's pixels
+    // are) are separate failures that can partially mask each other, so pin the
+    // monotonic direction on its own: later rows must sit FURTHER DOWN the
+    // image, i.e. at a strictly larger v offset.
+    it('gives later pitch rows a strictly larger v offset', () => {
+        const ovs = [0, 8, 16].map((c) => atlasCellUv(c, DEFAULT_ATLAS_LAYOUT).ov);
+        expect(ovs[0]).toBeLessThan(ovs[1]);
+        expect(ovs[1]).toBeLessThan(ovs[2]);
     });
 
     it('flips row order when the atlas is stored bottom-up', () => {
-        expect(atlasCellUv(0, DEFAULT_ATLAS_LAYOUT, false).ov).toBe(0);
+        expect(atlasCellUv(0, DEFAULT_ATLAS_LAYOUT, false).ov).toBeCloseTo(2 / 3, 6);
         expect(atlasCellUv(8, DEFAULT_ATLAS_LAYOUT, false).ov).toBeCloseTo(1 / 3, 6);
+        expect(atlasCellUv(16, DEFAULT_ATLAS_LAYOUT, false).ov).toBeCloseTo(0, 6);
     });
 
     it('clamps an out-of-range cell into the grid', () => {
@@ -326,6 +342,10 @@ describe('cross-check against impostor_convention.py', () => {
         meta: Record<string, unknown>;
         /** Instance -> camera direction per cell, indexed [row][col]. */
         camDirs: [number, number, number][][];
+        /** Baker's top-left cell pixel, indexed [row][col]. */
+        origins: [number, number][][];
+        /** Atlas image size in pixels, (width, height). */
+        size: [number, number];
     }
 
     const forgeDir = fileURLToPath(new URL('../../../tools/fable-model-forge/', import.meta.url));
@@ -338,6 +358,9 @@ for name in ('VEGETATION', 'INFANTRY_V2'):
         'meta': c.metadata(),
         'camDirs': [[list(c.cam_dir(col, row)) for col in range(c.yaw_bins)]
                     for row in range(c.pitch_bins)],
+        'origins': [[list(c.cell_origin(col, row)) for col in range(c.yaw_bins)]
+                    for row in range(c.pitch_bins)],
+        'size': list(c.atlas_size),
     }
 print(json.dumps(out))
 `], { cwd: forgeDir, encoding: 'utf8' }));
@@ -390,6 +413,44 @@ print(json.dumps(out))
                     }
                 }
             }
+        });
+    }
+
+    // ── V orientation ────────────────────────────────────────────────────
+    //
+    // The cell round-trip above proves the runtime asks for the right cell
+    // INDEX. It says nothing about where that index lands in the image — and
+    // "upside-down units" (2026-08-03) was exactly that second failure: a
+    // bottom-up `ov` both mirrored every sprite and sampled pitch row
+    // `pitchBins-1-row`. This is the missing half: the UV rect the runtime
+    // hands the GPU, converted back to pixels, must be the very rectangle the
+    // baker wrote the view into.
+    //
+    // It works because BOTH sides are image space with v growing downward from
+    // the top row: the baker's `cell_origin`, and the card's own UVs
+    // (createImpostorCard builds them top-down, which is also where a KTX2 —
+    // every atlas we ship — puts its top image row).
+    for (const name of ['VEGETATION', 'INFANTRY_V2']) {
+        it(`lands every ${name} cell on the baker's own pixel rect`, () => {
+            const { meta, origins, size } = dumped[name];
+            const layout = normalizeAtlasLayout(meta);
+            const [wpx, hpx] = size;
+
+            for (let row = 0; row < origins.length; row++) {
+                for (let col = 0; col < origins[row].length; col++) {
+                    const uv = atlasCellUv(atlasCellIndex(col, row, 0, layout), layout);
+                    const [ox, oy] = origins[row][col];
+                    expect(uv.ou * wpx).toBeCloseTo(ox, 6);
+                    // The one that was inverted. Row 0 is the TOP image row, so
+                    // it must sit at pixel y = 0, not at the bottom of the sheet.
+                    expect(uv.ov * hpx).toBeCloseTo(oy, 6);
+                    expect(uv.su * wpx).toBeCloseTo(meta.cell as number, 6);
+                    expect(uv.sv * hpx).toBeCloseTo(meta.cell as number, 6);
+                }
+            }
+            // Pin the direction outright, so a future "fix" that flips V and
+            // renumbers rows to compensate still fails here.
+            expect(atlasCellUv(atlasCellIndex(0, 0, 0, layout), layout).ov).toBe(0);
         });
     }
 

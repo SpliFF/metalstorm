@@ -120,8 +120,10 @@ describe('collectDefModelRefs (real Fengari execution against the real unit defs
     it('objectname defaults to the def name (per _builder.lua)', () => {
         // Sample a scale with NO model override — _builder.lua derives
         // objectname = ms_<class>_s<scale> for every un-overridden slot.
-        const tankS1 = refs.find((r) => r.defName === 'ms_tanks_s1');
-        expect(tankS1?.objectname).toBe('ms_tanks_s1');
+        // (Every ms_tanks_* scale now carries an override: s1/s3 were pointed
+        // at the wz_* stems so they stop rendering as placeholders.)
+        const soldiersS3 = refs.find((r) => r.defName === 'ms_soldiers_s3');
+        expect(soldiersS3?.objectname).toBe('ms_soldiers_s3');
     });
 
     it('a scale with an explicit override points at the generated model', () => {

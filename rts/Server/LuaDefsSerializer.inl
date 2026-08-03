@@ -17,6 +17,7 @@
 #include "Server/ProjectileTextureDefaults.h"
 #include "Sim/Misc/GlobalConstants.h"
 #include "Sim/MoveTypes/FootprintProfile.h"
+#include "System/SpringLog/SpringLog.h"
 
 #include <algorithm>
 #include <array>
@@ -512,6 +513,40 @@ inline std::string SerializeOneUnitDef(
     return b.finish();
 }
 
+/// Every def whose `objectname` resolves to a `.gltf` that is not on disk and
+/// which is NOT declared `impostor_only`. Such a def is not an error the
+/// pipeline can see — SerializeOneUnitDef deliberately emits an empty
+/// `model_url` and the client silently degrades it to a procedural shape (or,
+/// for a squad def, to the proxy capsule). That silence is exactly how a
+/// scenario ends up "mostly placeholders" without anything in the logs saying
+/// so, which is why this is reported loudly at bake time.
+///
+/// `impostor_only` defs are excluded by design: the billboard IS their model
+/// (PLAN-metalstorm-beta-units.md §2.1 roster — infantry / civilians ship with
+/// no 3D model at all), so a missing `.gltf` for them is correct, not a gap.
+template<typename UnitDefVec>
+inline std::vector<std::string> FindDefsWithMissingModels(
+    const UnitDefVec& defs,
+    const std::filesystem::path& modelsDir)
+{
+    namespace fs = std::filesystem;
+    std::vector<std::string> missing;
+    for (size_t i = 1; i < defs.size(); ++i) {   // slot 0 is the sentinel
+        const auto& ud = defs[i];
+        if (ud.modelName.empty()) continue;
+
+        const auto impostorOnlyIt = ud.customParams.find("impostor_only");
+        const bool impostorOnly = impostorOnlyIt != ud.customParams.end() &&
+            impostorOnlyIt->second != "0" && !impostorOnlyIt->second.empty();
+        if (impostorOnly) continue;
+
+        const std::string stem = fs::path(ud.modelName).stem().string();
+        if (!fs::exists(modelsDir / (stem + ".gltf")))
+            missing.push_back(ud.name + " (objectname=" + stem + ")");
+    }
+    return missing;
+}
+
 template<typename UnitDefVec>
 inline std::string SerializeUnitDefs(
     const UnitDefVec& defs,
@@ -520,6 +555,23 @@ inline std::string SerializeUnitDefs(
     namespace fs = std::filesystem;
     const fs::path modelsDir = fs::path("data/games") / gameId / "models";
     const auto nameToId = BuildNameToDefIdMap_(defs);
+
+    // Loud, once per defs bake: name every def that will render as a
+    // placeholder because its model file is absent. See
+    // FindDefsWithMissingModels for why this can't be an assertion.
+    if (const auto missing = FindDefsWithMissingModels(defs, modelsDir);
+        !missing.empty()) {
+        std::string list;
+        for (size_t i = 0; i < missing.size(); ++i) {
+            if (i) list += ", ";
+            list += missing[i];
+        }
+        springlog_log(SPRING_LOG_WARNING, "server", "", springlog_get_frame(),
+            "%zu unit def(s) in '%s' claim a model that is not in %s and are "
+            "not impostor_only — these render as PLACEHOLDER shapes: %s",
+            missing.size(), gameId.c_str(), modelsDir.string().c_str(),
+            list.c_str());
+    }
 
     std::string out;
     out.reserve(defs.size() * 512);

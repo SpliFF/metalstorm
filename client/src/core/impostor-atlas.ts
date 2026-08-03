@@ -265,9 +265,32 @@ export function selectAtlasCell(
     return atlasCellIndex(col, row, frame, layout);
 }
 
-/** UV sub-rect for a cell: multiply the quad's 0..1 UV by (su, sv) then add
- *  (ou, ov). `topDown` = row 0 is the TOP row of the image (the baker's
- *  convention); set false if a source atlas is stored bottom-up. */
+/**
+ * UV sub-rect for a cell: multiply the card's 0..1 UV by (su, sv) then add
+ * (ou, ov).
+ *
+ * ── The V convention, and why it is NOT a bottom-up flip ───────────────────
+ *
+ * Both sides of this are IMAGE space, v growing DOWNWARD from the top row:
+ *
+ *  - the atlas image (`topDown` = row 0 is its TOP row — the baker's
+ *    convention, `impostor_convention.py`'s `cell_origin`), and
+ *  - the card's own UVs, which `createImpostorCard()` (impostor-renderer.ts)
+ *    builds top-down precisely so this function needs no flip.
+ *
+ * So `ov = row * sv`, straight through. Do NOT "correct" that to
+ * `1 - (row+1)*sv`: that is the bottom-up-UV form, and it was wrong here
+ * twice over. Every impostor atlas we ship is KTX2, and Babylon's KTX2 loader
+ * cannot honour `invertY` (compressed data can't use UNPACK_FLIP_Y, and unlike
+ * the KTX1 path it does not compensate with `_invertVScale` either) — so a
+ * KTX2 always lands with its TOP image row at v = 0, exactly like the glTF UV
+ * convention the rest of the renderer already speaks. Assuming Babylon's
+ * bottom-up procedural-mesh convention instead both mirrored every sprite
+ * vertically AND selected pitch row `pitchBins-1-row`.
+ *
+ * `topDown = false` is for the opposite case only: a source atlas whose first
+ * row sits at the BOTTOM of the image.
+ */
 export function atlasCellUv(
     cellIndex: number, layout: AtlasLayout, topDown = true,
 ): { su: number; sv: number; ou: number; ov: number } {
@@ -281,6 +304,6 @@ export function atlasCellUv(
     return {
         su, sv,
         ou: col * su,
-        ov: topDown ? 1 - (row + 1) * sv : row * sv,
+        ov: topDown ? row * sv : 1 - (row + 1) * sv,
     };
 }

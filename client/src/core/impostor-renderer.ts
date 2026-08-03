@@ -39,6 +39,7 @@ import {
     PBRMaterial,
     Texture,
     Engine,
+    VertexBuffer,
     type CascadedShadowGenerator,
 } from '@babylonjs/core';
 import { TeamColorPlugin } from './team-color-plugin.js';
@@ -100,6 +101,43 @@ export function cardLift(atlas: ImpostorAtlas | undefined): number {
         return declared;
     }
     return (atlas?.height ?? 0) * 0.5;
+}
+
+/**
+ * Build an impostor card quad — the ONE place an impostor billboard's geometry
+ * is made, shared by the entity path (below), the squad member fan-out
+ * (squad-render-backend.ts) and the map-feature LOD (feature-lod-renderer.ts).
+ *
+ * The card exists to display an atlas image, so its UVs are in ATLAS-IMAGE
+ * space: **v = 0 at the card's TOP edge**, growing downward — the glTF/KTX2
+ * convention, not Babylon's bottom-up procedural-mesh default.
+ *
+ * That flip is this layer's job, and getting it wrong is what rendered every
+ * impostor upside-down: `MeshBuilder.CreatePlane` hands back bottom-up UVs
+ * (v = 1 at the top), while every atlas we ship is a KTX2 — and Babylon's KTX2
+ * loader cannot honour `invertY` (UNPACK_FLIP_Y doesn't apply to compressed
+ * data, and unlike its KTX1 sibling that path sets no `_invertVScale`
+ * compensation either), so a KTX2 always lands with its TOP image row at
+ * v = 0. Bottom-up card UVs therefore mirror the sheet vertically.
+ *
+ * Fixing it here rather than in `atlasCellUv` is deliberate: the mismatch is
+ * between the MESH and the texture, so it must also be right for a legacy
+ * single-cell atlas, which never gets the UV-remap plugin at all. With the
+ * card in image space, `atlasCellUv` / ImpostorUvPlugin are a pure row/column
+ * offset in the baker's own coordinates, with no flip anywhere.
+ */
+export function createImpostorCard(
+    name: string, width: number, height: number, scene: Scene,
+): Mesh {
+    const mesh = MeshBuilder.CreatePlane(
+        name, { width, height, sideOrientation: Mesh.DOUBLESIDE }, scene);
+    const uvs = mesh.getVerticesData(VertexBuffer.UVKind);
+    if (uvs) {
+        // Both halves of the DOUBLESIDE buffer, so the back face matches.
+        for (let i = 1; i < uvs.length; i += 2) uvs[i] = 1 - uvs[i];
+        mesh.setVerticesData(VertexBuffer.UVKind, uvs, false);
+    }
+    return mesh;
 }
 
 /**
@@ -453,11 +491,8 @@ export class ImpostorRenderer {
         // origin; the actual per-unit positions are thin-instance matrices),
         // so each instance bakes its own camera-facing rotation in render()
         // instead (see the yaw computation there).
-        mesh = MeshBuilder.CreatePlane(
-            `impostor_${defId}_${team}`,
-            { width: atlas.width, height: atlas.height, sideOrientation: Mesh.DOUBLESIDE },
-            this.scene,
-        );
+        mesh = createImpostorCard(
+            `impostor_${defId}_${team}`, atlas.width, atlas.height, this.scene);
         mesh.isPickable = false;
         mesh.alwaysSelectAsActiveMesh = true;
 
