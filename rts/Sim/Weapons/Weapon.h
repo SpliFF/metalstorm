@@ -123,6 +123,16 @@ public:
   void UpdateWeaponErrorVector();
   void UpdateWeaponVectors();
 
+  /// Ground-clearance lift applied when a weapon's aim/muzzle origin resolves
+  /// to the unit's feet — an underground popup weapon, or (the Metalstorm
+  /// case) a scriptless unit whose model authors no muzzle/turret piece, so
+  /// relAimFromPos stays ZeroVector. Model-scaled: never exceeds the stock
+  /// Recoil lift, and drops to the model's own half-height for models shorter
+  /// than that, instead of stranding a 1.8-elmo infantry model 10 elmos up.
+  /// Static + parameterised so it is unit-testable without a live CUnit.
+  /// `modelHeight <= 0` (no model) falls back to the stock value.
+  static float GroundClearanceLift(float ownerRadius, float modelHeight);
+
 protected:
   virtual void FireImpl(const bool scriptCall) {}
   // Emit the weapon's fire SoundEvent (shared by the projectile path and the
