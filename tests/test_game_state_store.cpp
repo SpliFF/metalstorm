@@ -253,6 +253,22 @@ TEST_CASE("E2: damaged blobs are detected, not decoded into garbage") {
         CHECK(out.empty());
         CHECK(IsCorruption(st));
     }
+    SUBCASE("corrupted rawSize field does not blow up the allocator") {
+        // Regression (automated review, step 1): rawSize is read from a blob we
+        // have already decided may be damaged, and used to size the output
+        // buffer BEFORE the sha256 that would vouch for it can be checked. A
+        // flipped byte here used to throw std::bad_alloc straight out through
+        // RestoreNewestValid and abort the process — the E2 ladder never ran.
+        // It must be reported as a damaged rung so the ladder can step past it.
+        std::vector<uint8_t> bad = good;
+        const uint64_t huge = 0x0000FFFFFFFFFFFFull;   // ~256 TB
+        for (int i = 0; i < 8; ++i) bad[32 + i] = uint8_t(huge >> (8 * i));
+        DecodeStatus st = DecodeStatus::Ok;
+        REQUIRE_NOTHROW(st = DecodeBlob(bad.data(), bad.size(), meta, got, out));
+        CHECK(st == DecodeStatus::SizeMismatch);
+        CHECK(IsCorruption(st));            // so RestoreNewestValid falls back
+        CHECK(out.empty());
+    }
     SUBCASE("payload swapped for another valid deflate stream") {
         // The checksum, not the codec, is what catches a substituted payload.
         BlobMeta other = meta;
@@ -428,6 +444,36 @@ TEST_CASE("E2 ladder: every rung damaged means unresumable, not a wrong world") 
     CHECK(err.find("unresumable") != std::string::npos);
     CHECK(sim.state == before);          // nothing half-loaded
     CHECK(store.Stats().corruptRungsSkipped == 3);
+}
+
+TEST_CASE("E2 ladder: a damaged length field steps a rung instead of aborting") {
+    // The store-level half of the rawSize regression above: the ladder must
+    // survive a rung whose header length field is corrupt, not unwind through
+    // RestoreNewestValid. Before the fix this test terminated the process.
+    TempDb tdb;
+    FakeSim sim;
+    GameStateStore store(tdb.db, MakeCfg("g1", 3));
+    store.SetSerializer(&sim);
+
+    std::string err;
+    std::vector<uint8_t> stateAt10;
+    for (int i = 1; i <= 2; ++i) {
+        sim.frame = i * 10;
+        sim.FillState(4096, uint8_t(i));
+        if (i == 1) stateAt10 = sim.state;
+        REQUIRE(store.Checkpoint(1, "auto", err) == i * 10);
+    }
+
+    // Corrupt only the newest rung's rawSize field (header offset 32), leaving
+    // every E1 stamp intact so this reads as damage rather than a policy refusal.
+    CorruptBlobAt(tdb.db, "g1", 20, 32);
+
+    sim.state.clear();
+    int32_t restored = -1;
+    REQUIRE_NOTHROW(store.RestoreNewestValid(1, err, restored));
+    CHECK(restored == 10);
+    CHECK(sim.state == stateAt10);
+    CHECK(store.Stats().corruptRungsSkipped == 1);
 }
 
 TEST_CASE("E1: a snapshot history from another binary is refused, ladder not walked") {

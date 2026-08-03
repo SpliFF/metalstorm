@@ -13,6 +13,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <new>
 
 namespace gamestate {
 
@@ -226,7 +227,28 @@ DecodeStatus DecodeBlob(const uint8_t* blob, size_t size, const BlobMeta& expect
         if (compSize != meta.rawSize) return DecodeStatus::SizeMismatch;
         payload.assign(blob + kHeaderSize, blob + kHeaderSize + compSize);
     } else {
-        payload.resize(size_t(meta.rawSize));
+        // rawSize comes out of a blob we have already decided may be damaged —
+        // it is NOT trustworthy yet (the sha256 that would vouch for it covers
+        // the payload, and we cannot check it until after we inflate). Sizing
+        // the buffer straight from it lets one flipped byte in this field throw
+        // std::bad_alloc out through RestoreNewestValid and abort the process,
+        // which is precisely the outcome the E2 ladder exists to prevent.
+        //
+        // deflate cannot expand by more than 1032:1, so anything above that is
+        // a damaged length field, not a big snapshot. This bounds the
+        // allocation by the data we actually hold rather than by an arbitrary
+        // cap, so legitimately large snapshots are unaffected.
+        constexpr uint64_t kMaxDeflateRatio = 1032;
+        if (meta.rawSize > compSize * kMaxDeflateRatio + kHeaderSize)
+            return DecodeStatus::SizeMismatch;
+        try {
+            payload.resize(size_t(meta.rawSize));
+        } catch (const std::bad_alloc&) {
+            // Ratio-plausible but still unallocatable here: treat it as a
+            // damaged rung so the ladder steps past it instead of unwinding.
+            payload.clear();
+            return DecodeStatus::SizeMismatch;
+        }
         uLongf outSize = uLongf(meta.rawSize);
         int rc = uncompress(payload.data(), &outSize, blob + kHeaderSize, uLong(compSize));
         if (rc != Z_OK) {
