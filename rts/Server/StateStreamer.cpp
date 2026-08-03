@@ -24,6 +24,7 @@
 #include "OrgGroups.h"
 #include "PerfMetrics.h"
 #include "SyncedInputJournal.h"
+#include "ReplayPlayer.h"
 #include "AI/AIRuntimePool.h"
 #include "WebTransport/WebTransportServer.h"
 #include "Lua/LuaRules.h"
@@ -601,6 +602,85 @@ std::vector<uint8_t> SerializeAICommand(const AICommand& c) {
     out.insert(out.end(), c.text.begin(), c.text.end());
     return out;
 }
+
+/// Exact mirror of SerializeAICommand — the replay side of chokepoint #4
+/// (PLAN-replay task 2). Returns false on any short/garbled buffer rather than
+/// producing a partly-filled command: a replay that applied half an AI order
+/// would diverge silently, which is the one outcome worse than stopping.
+///
+/// Kept adjacent to the encoder on purpose. The two functions are a matched
+/// pair and the only guard against them drifting apart is that a reader edits
+/// them together; a round-trip doctest lives in tests/test_replay_file.cpp for
+/// the framing, but the field list itself is enforced by proximity.
+bool DeserializeAICommand(const std::vector<uint8_t>& in, AICommand& out) {
+    size_t p = 0;
+    bool ok = true;
+    auto getU8 = [&](uint8_t& v) {
+        if (p + 1 > in.size()) { ok = false; return; }
+        v = in[p++];
+    };
+    auto getU32 = [&](uint32_t& v) {
+        if (p + 4 > in.size()) { ok = false; return; }
+        v = 0;
+        for (int i = 0; i < 4; ++i) v |= static_cast<uint32_t>(in[p + i]) << (8 * i);
+        p += 4;
+    };
+    auto getI32 = [&](int& v) {
+        uint32_t u = 0; getU32(u); v = static_cast<int32_t>(u);
+    };
+    auto getF32 = [&](float& v) {
+        uint32_t u = 0; getU32(u);
+        if (ok) std::memcpy(&v, &u, 4);
+    };
+
+    AICommand c;
+    uint8_t kind = 0;
+    getU8(kind);
+    c.kind = static_cast<AICommandKind>(kind);
+    getI32(c.teamId);
+    getI32(c.playerId);
+    getU32(c.unitId);
+    getI32(c.commandId);
+    getU8(c.options);
+    uint8_t nParams = 0;
+    getU8(nParams);
+    if (!ok || nParams > 8) return false;
+    c.numParams = nParams;
+    for (int i = 0; i < nParams; ++i) getF32(c.params[i]);
+
+    getU8(c.echelon);
+    uint32_t nSquads = 0;
+    getU32(nSquads);
+    if (!ok || nSquads > in.size()) return false;   // length sanity, not a real bound
+    c.squadIds.resize(nSquads);
+    for (uint32_t i = 0; i < nSquads; ++i) getU32(c.squadIds[i]);
+    getU32(c.groupToken);
+    getU32(c.groupId);
+    getU32(c.refToken);
+    getU8(c.directiveType);
+    getU8(c.priority);
+    getU8(c.shape);
+    uint32_t nDirParams = 0;
+    getU32(nDirParams);
+    if (!ok || nDirParams > in.size()) return false;
+    c.directiveParams.resize(nDirParams);
+    for (uint32_t i = 0; i < nDirParams; ++i) getF32(c.directiveParams[i]);
+    getU32(c.requestedStrength);
+    getU32(c.expiresInFrames);
+    getF32(c.withinX);
+    getF32(c.withinZ);
+    getF32(c.withinRadius);
+    uint32_t textLen = 0;
+    getU32(textLen);
+    if (!ok || p + textLen > in.size()) return false;
+    c.text.assign(in.begin() + static_cast<long>(p),
+                  in.begin() + static_cast<long>(p + textLen));
+    p += textLen;
+
+    if (!ok) return false;
+    out = std::move(c);
+    return true;
+}
 } // namespace
 
 // Tick AI runtime and drain AI commands.
@@ -618,6 +698,82 @@ void StateStreamer::TickAI(int) {
     aiPool.Tick(sim.GetFrameNum());
 
     auto aiCmds = aiPool.DrainCommands();
+
+    if (replay::IsReplaying()) {
+        // Replay owns the AI's contribution to the cause stream (PLAN-replay
+        // §7.1: AI output is an INPUT, because which tick a command lands on
+        // depends on the AI VM's thread scheduling, which is not synced state).
+        // So the live runtime's output is DISCARDED — it is re-derived, not
+        // re-executed — and the RECORDED batch is applied in its place, here,
+        // at the exact position in StateStreamer::Tick that the live batch was
+        // applied at. That position matters: EvaluateStandingOrders runs
+        // immediately before this and issues its own commands, so feeding the
+        // recorded AI batch anywhere else in the tick would reorder two command
+        // producers against each other and diverge.
+        //
+        // This is also the ONE Stream-phase feed point. Chokepoint #4 is the
+        // only recording site in that phase, so consuming the phase wholesale
+        // here is complete today; a record of another kind arriving in this
+        // phase means a new input site was added without a matching feed, and
+        // it stops the replay loudly rather than being skipped.
+        if (!aiCmds.empty()) {
+            static bool warnedLiveAI = false;
+            if (!warnedLiveAI) {
+                warnedLiveAI = true;
+                SLOG(SPRING_LOG_INFO,
+                    "replay: discarding live AI output (%zu cmd) — the recorded stream is authoritative",
+                    aiCmds.size());
+            }
+        }
+
+        std::vector<AICommand> replayed;
+        // The journal's tick stamp, not sim.GetFrameNum(): SimFrame() has
+        // already advanced the sim's counter past the frame this tick's
+        // records were stamped with (see server_main's LuaExec feed).
+        for (const syncedinput::Record* r :
+                 replay::Feed().Due(syncedinput::Journal().Frame(),
+                                    syncedinput::TickPhase::Stream)) {
+            if (r->kind != syncedinput::InputKind::AICommand) {
+                replay::Feed().RequestStop(
+                    std::string("unhandled Stream-phase record kind ") +
+                    syncedinput::InputKindName(r->kind));
+                continue;
+            }
+            AICommand cmd;
+            if (!DeserializeAICommand(r->payload, cmd)) {
+                replay::Feed().RequestStop("malformed AICommand record in replay");
+                continue;
+            }
+            replayed.push_back(std::move(cmd));
+        }
+        ApplyAICommands(replayed);
+        return;
+    }
+
+    if (aiCmds.empty()) return;
+
+    // Journal chokepoint #4 of 5 (PLAN-replay task 1). Recorded here, at the
+    // drain, ahead of any application: one call site covers all four
+    // AICommandKinds, and the recording must not depend on whether a given
+    // command survived validation (a command the live run rejected must be
+    // rejected identically on replay, which only holds if replay sees it).
+    for (const auto& cmd : aiCmds) {
+        const std::vector<uint8_t> aiBlob = SerializeAICommand(cmd);
+        syncedinput::Journal().RecordAICommand(
+            cmd.playerId, aiBlob.data(), aiBlob.size());
+    }
+
+    ApplyAICommands(aiCmds);
+}
+
+// Apply a batch of AI commands to the sim. Split out of TickAI so a replay can
+// feed the RECORDED batch through the identical path the live drain uses — the
+// one-command-path rule (PLAN-metalstorm-ai §1/§4, AI2) now covers humans, AI
+// and replay alike. Recording happens in the caller, never here: this function
+// is reached both when the commands are inputs (live) and when they are already
+// journaled (replay), and re-recording in the latter would double the stream.
+void StateStreamer::ApplyAICommands(const std::vector<AICommand>& aiCmds) {
+    auto& sim = ctx.sim;
     if (aiCmds.empty()) return;
 
     const uint32_t frame = static_cast<uint32_t>(sim.GetFrameNum());
@@ -640,17 +796,6 @@ void StateStreamer::TickAI(int) {
     std::unordered_set<uint64_t> directiveKeys;
 
     for (const auto& cmd : aiCmds) {
-        // Journal chokepoint #4 of 5 (PLAN-replay task 1). AI output is an
-        // INPUT to the sim, not a consequence of it: the AI runs in a separate
-        // VM on its own threads, and which commands land on which tick depends
-        // on that VM's scheduling — which is not part of the synced state and
-        // is not reproducible by re-execution. So the drained command stream
-        // must be recorded verbatim. Recorded before the switch, so all four
-        // AICommandKinds are covered by one call site.
-        const std::vector<uint8_t> aiBlob = SerializeAICommand(cmd);
-        syncedinput::Journal().RecordAICommand(
-            cmd.playerId, aiBlob.data(), aiBlob.size());
-
         switch (cmd.kind) {
             case AICommandKind::UnitCommand: {
                 // Legacy generic per-unit path (test channel / non-Metalstorm

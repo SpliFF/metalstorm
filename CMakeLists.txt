@@ -480,6 +480,8 @@ if(TEST_SOURCES)
         ${CMAKE_SOURCE_DIR}/rts/Server/StandingOrders.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/OrgGroups.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/SyncedInputJournal.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/ReplayFile.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/ReplayPlayer.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/NetworkServer.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/Database.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GameOverState.cpp

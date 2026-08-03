@@ -6,6 +6,7 @@
 #include <string>
 
 #include "Lua/LuaRulesParams.h"
+#include "AI/AICommandQueue.h"
 
 struct GameServerContext;
 
@@ -32,6 +33,10 @@ private:
     void StreamBuildActivity(int frameNum);
     void EvaluateStandingOrders(int frameNum);
     void TickAI(int frameNum);
+    /// Apply one batch of AI commands. Shared by the live drain and the replay
+    /// feed so both go through the identical manager calls + charge callins
+    /// (PLAN-replay task 2).
+    void ApplyAICommands(const std::vector<AICommand>& cmds);
     void BroadcastCombatEvents(int frameNum);
     void BroadcastEntityDeaths(int frameNum);
     void BroadcastSensorUpdates(int frameNum);

@@ -16,6 +16,7 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace statsdump {
@@ -107,6 +108,21 @@ std::string BuildDumpJson(const FinalDump& dump);
 // a multi-hour soak on its very last tick (mirrors HeadlessRun's E3 "never a
 // hang" philosophy applied to "never a crash-on-exit").
 bool WriteDumpFile(const std::string& path, const FinalDump& dump, std::string& err);
+
+// Read back just the determinism track — `(frame, stateHash)` per snapshot —
+// from a dump this module wrote. That series is what `--replay --verify`
+// re-executes against (PLAN-replay §4), and it is the only part of a dump a
+// verifier may compare: wallSeconds/simFps/rssKb are properties of the machine
+// that ran it, not of the synced state, and would fail every honest replay.
+//
+// The hex-string encoding above is the trap this function exists to close:
+// `stateHash` is a STRING in the JSON, and a reader that treats it as a number
+// silently truncates every hash past 2^53 to a value that still compares equal
+// often enough to look like it works. Parsed here with strtoull, base 16.
+// Returns false with `err` set on a missing/unparseable file; never throws.
+bool ReadHashTrack(const std::string& path,
+                   std::vector<std::pair<int64_t, uint64_t>>& out,
+                   std::string& err);
 
 // Process resident-set size in KB (0 if unavailable on this platform).
 // Platform-coupled (getrusage) but engine-independent.

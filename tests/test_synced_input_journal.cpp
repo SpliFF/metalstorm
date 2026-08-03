@@ -112,7 +112,7 @@ TEST_CASE("a synced input is recorded exactly once, frame- and phase-correct") {
     rec.BeginTick(42);
     const uint8_t wire[] = {1, 2, 3, 4};
     CHECK(rec.RecordClientMessage(SpringWeb::ClientPayload_PlayerCommand, 7,
-                                  wire, sizeof(wire)));
+                                  /*clientId=*/11, wire, sizeof(wire)));
 
     REQUIRE(j.Records().size() == 1);
     const Record& r = j.Records()[0];
@@ -121,6 +121,10 @@ TEST_CASE("a synced input is recorded exactly once, frame- and phase-correct") {
     CHECK(r.kind == InputKind::ClientMessage);
     CHECK(r.subKind == SpringWeb::ClientPayload_PlayerCommand);
     CHECK(r.playerId == 7);
+    // The transport id survives into the record: replay re-feeds each wire
+    // message under its recorded connection so the session layer it re-enters
+    // tracks the same identities it did live (PLAN-replay task 2).
+    CHECK(r.clientId == 11);
     CHECK(r.payload.size() == sizeof(wire));
     CHECK(r.payload[3] == 4);
     CHECK(rec.Stats().recorded == 1);
@@ -136,9 +140,9 @@ TEST_CASE("unsynced verbs are counted but never stored") {
 
     const uint8_t wire[] = {9};
     CHECK_FALSE(rec.RecordClientMessage(SpringWeb::ClientPayload_ViewportUpdate,
-                                        0, wire, sizeof(wire)));
+                                        0, 1, wire, sizeof(wire)));
     CHECK_FALSE(rec.RecordClientMessage(SpringWeb::ClientPayload_Ping,
-                                        0, wire, sizeof(wire)));
+                                        0, 1, wire, sizeof(wire)));
     CHECK(j.Records().empty());
     CHECK(rec.Stats().seen == 2);
     CHECK(rec.Stats().skipped == 2);
@@ -157,7 +161,7 @@ TEST_CASE("one record per synced-input class, each landing in its own phase") {
 
     rec.BeginTick(100);
     const uint8_t wire[] = {1};
-    rec.RecordClientMessage(SpringWeb::ClientPayload_LuaRulesMsg, 3, wire, 1);
+    rec.RecordClientMessage(SpringWeb::ClientPayload_LuaRulesMsg, 3, 5, wire, 1);
 
     rec.SetPhase(TickPhase::Disconnect);
     rec.RecordDisconnect(3, /*reason=*/3);
@@ -219,7 +223,7 @@ TEST_CASE("seq is a total order even when the frame does not advance") {
     const uint8_t wire[] = {1};
     for (int tick = 0; tick < 4; ++tick) {
         rec.BeginTick(0);                        // paused: frame never moves
-        rec.RecordClientMessage(SpringWeb::ClientPayload_PlayerCommand, 1, wire, 1);
+        rec.RecordClientMessage(SpringWeb::ClientPayload_PlayerCommand, 1, 1, wire, 1);
     }
 
     REQUIRE(j.Records().size() == 4);
@@ -260,7 +264,7 @@ TEST_CASE("ring truncation is counted, never silent") {
 
     const uint8_t wire[] = {1};
     for (int i = 0; i < 5; ++i)
-        rec.RecordClientMessage(SpringWeb::ClientPayload_PlayerCommand, 1, wire, 1);
+        rec.RecordClientMessage(SpringWeb::ClientPayload_PlayerCommand, 1, 1, wire, 1);
 
     CHECK(j.Records().size() == 3);
     CHECK(j.Dropped() == 2);
@@ -280,8 +284,8 @@ TEST_CASE("with no journal attached the funnel still classifies and counts") {
     CHECK_FALSE(rec.Enabled());
 
     const uint8_t wire[] = {1};
-    CHECK(rec.RecordClientMessage(SpringWeb::ClientPayload_PlayerCommand, 1, wire, 1));
-    CHECK_FALSE(rec.RecordClientMessage(SpringWeb::ClientPayload_Ping, 1, wire, 1));
+    CHECK(rec.RecordClientMessage(SpringWeb::ClientPayload_PlayerCommand, 1, 1, wire, 1));
+    CHECK_FALSE(rec.RecordClientMessage(SpringWeb::ClientPayload_Ping, 1, 1, wire, 1));
     CHECK(rec.Stats().recorded == 1);
     CHECK(rec.Stats().appended == 0);
     CHECK(rec.Stats().skipped == 1);

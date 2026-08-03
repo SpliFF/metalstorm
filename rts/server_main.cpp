@@ -35,6 +35,8 @@
 #include "Server/StandingOrders.h"
 #include "Server/OrgGroups.h"
 #include "Server/SyncedInputJournal.h"
+#include "Server/ReplayFile.h"
+#include "Server/ReplayPlayer.h"
 #include "Server/AI/AIRuntimePool.h"
 #include "Server/AI/AIDiscovery.h"
 #include "Server/PerfMetrics.h"
@@ -207,6 +209,17 @@ int main(int argc, char* argv[])
     int maxWallMin = 60;
     headless::Config headlessCfg;
 
+    // --- Replay record/playback (PLAN-replay task 2) ---
+    // `--journal-file <path>` records this game's cause stream to a replay file;
+    // `--replay <path>` re-executes one. The two are mutually exclusive: a
+    // replay that re-recorded its own feed would produce a file whose stream is
+    // a copy of another file's, and the first person to diff them would spend a
+    // day discovering that.
+    std::string journalFilePath;
+    std::string replayFilePath;
+    std::string replayVerifyRef;
+    int replaySeekFrame = 0;
+
     // Human player roster from the lobby. Each `--player <username>:<team>:<pos>`
     // entry gets one slot here. The sim uses this for two things:
     //   1. At AuthRequest time, look up the authenticating username
@@ -264,6 +277,12 @@ int main(int argc, char* argv[])
     // --max-wall-min N (headless hard wall-clock ceiling, default 60),
     // --journal-audit [N] (PLAN-replay: record the synced-input cause stream
     //   in memory, cap N records, expose at GET /api/journal),
+    // --journal-file PATH (PLAN-replay task 2: record the cause stream to a
+    //   replay file),
+    // --replay PATH (re-execute a replay file instead of listening for input),
+    // --replay-seek N (fast-forward to frame N with streaming suppressed),
+    // --verify PATH (compare the replay's state-hash series against a
+    //   --headless-run stats dump; nonzero exit on divergence),
     // --player username:team:pos (repeatable),
     // --ai id:team:pos (repeatable)
     for (int i = 1; i < argc; i++) {
@@ -292,6 +311,14 @@ int main(int argc, char* argv[])
             headlessConfigPath = argv[++i];
         } else if (arg == "--max-wall-min" && i + 1 < argc) {
             maxWallMin = std::atoi(argv[++i]);
+        } else if (arg == "--journal-file" && i + 1 < argc) {
+            journalFilePath = argv[++i];
+        } else if (arg == "--replay" && i + 1 < argc) {
+            replayFilePath = argv[++i];
+        } else if (arg == "--replay-seek" && i + 1 < argc) {
+            replaySeekFrame = std::max(0, std::atoi(argv[++i]));
+        } else if (arg == "--verify" && i + 1 < argc) {
+            replayVerifyRef = argv[++i];
         } else if (arg == "--journal-audit") {
             // PLAN-replay task 1. Attaches the in-memory journal so the cause
             // stream is observable live (GET /api/journal) and summarised at
@@ -414,6 +441,106 @@ int main(int argc, char* argv[])
             headlessCfg.stopAt.frame ? (long long)*headlessCfg.stopAt.frame : -1LL,
             headlessCfg.stopAt.gameOver ? 1 : 0,
             headlessCfg.stopAt.luaCondition ? headlessCfg.stopAt.luaCondition->c_str() : "-");
+    }
+
+    // --- Replay playback setup (PLAN-replay task 2) ---
+    // A replay file carries its own launch spec, so `--replay <file>` alone is
+    // a complete invocation: map, game, modoptions, roster and AI slots all
+    // come out of the header. Explicit CLI flags still win, so an operator can
+    // deliberately re-run a stream against different content — that is a
+    // divergence experiment, and the engineHash/defsCacheKey lines logged below
+    // are what tell them they ran one.
+    if (!replayFilePath.empty()) {
+        if (!journalFilePath.empty()) {
+            SLOG(SPRING_LOG_ERROR,
+                "--replay and --journal-file are mutually exclusive "
+                "(a replay must not re-record its own feed)");
+            return 1;
+        }
+        std::string rerr;
+        if (!replay::Feed().Load(replayFilePath, rerr)) {
+            SLOG(SPRING_LOG_ERROR, "--replay: %s", rerr.c_str());
+            return 1;
+        }
+        const replay::Header& rh = replay::Feed().GetHeader();
+        replay::SetCurrentMode(replayVerifyRef.empty() ? replay::Mode::Play
+                                                       : replay::Mode::Verify);
+
+        if (mapId.empty())      mapId = rh.mapId;
+        if (gameId.empty())     gameId = rh.gameId;
+        if (gameVersion.empty()) gameVersion = rh.gameVersion;
+        if (CGameSetup::GetModOptions().empty()) {
+            for (const auto& kv : rh.modOptions)
+                CGameSetup::SetModOption(kv.first, kv.second);
+        }
+        if (requestedPlayers.empty()) {
+            for (const auto& ps : rh.players) {
+                RequestedPlayer rq;
+                rq.username = ps.username;
+                rq.team     = ps.team;
+                rq.startPos = ps.startPos;
+                requestedPlayers.push_back(std::move(rq));
+            }
+        }
+        if (requestedAIs.empty()) {
+            // The AI SLOTS are re-created (each is a virtual CPlayer and its
+            // team's leader — synced state the sim start depends on), but the
+            // runtime's OUTPUT is discarded and the recorded AICommand stream
+            // applied instead. See StateStreamer::TickAI's replay branch.
+            for (const auto& as : rh.aiSlots) {
+                RequestedAI rq;
+                rq.id       = as.aiId;
+                rq.team     = as.team;
+                rq.startPos = as.startPos;
+                requestedAIs.push_back(std::move(rq));
+            }
+        }
+
+        // Replay rides the headless substrate (PLAN-replay task 2 is literally
+        // "--replay feed mode ON the headless substrate"): no client is needed
+        // for the sim to run to the end of the stream, and the stop condition
+        // is the recording's own end frame.
+        headlessCfg.enabled = true;
+        headlessCfg.maxWallSec = static_cast<int64_t>(std::max(1, maxWallMin)) * 60;
+        headlessCfg.stopAt.frame = replay::Feed().EndFrame();
+        headlessCfg.tickMode = (replay::CurrentMode() == replay::Mode::Verify)
+            ? headless::TickMode::Uncapped   // verification is a batch job
+            : headless::TickMode::Realtime;  // playback is watched by a human
+        if (replaySeekFrame > 0) replay::Feed().SetSeekTarget(replaySeekFrame);
+
+        if (!replayVerifyRef.empty()) {
+            std::vector<std::pair<int64_t, uint64_t>> track;
+            std::string terr;
+            if (!statsdump::ReadHashTrack(replayVerifyRef, track, terr)) {
+                SLOG(SPRING_LOG_ERROR, "--verify: %s", terr.c_str());
+                return 1;
+            }
+            std::vector<replay::HashPoint> pts;
+            pts.reserve(track.size());
+            for (const auto& t : track)
+                pts.push_back({static_cast<int32_t>(t.first), t.second});
+            SLOG(SPRING_LOG_NOTICE, "--verify: %zu reference hash points from %s",
+                 pts.size(), replayVerifyRef.c_str());
+            replay::Feed().SetHashTrack(std::move(pts));
+        }
+
+        SLOG(SPRING_LOG_NOTICE,
+            "replay: %s — %zu records, frames %d..%d, map=%s game=%s%s%s",
+            replayFilePath.c_str(), replay::Feed().RecordCount(),
+            rh.startFrame, replay::Feed().EndFrame(),
+            rh.mapId.c_str(), rh.gameId.c_str(),
+            replay::Feed().Truncated() ? " [TRUNCATED SEGMENT]" : "",
+            replaySeekFrame > 0 ? " [seeking]" : "");
+        if (replaySeekFrame > 0) {
+            SLOG(SPRING_LOG_NOTICE,
+                "replay: seeking to frame %d — no checkpoint index exists yet "
+                "(PLAN-persistence sim serializer unlanded), so this is a full "
+                "uncapped fast-forward from the start with streaming suppressed",
+                replaySeekFrame);
+        }
+    } else if (!journalFilePath.empty()) {
+        SLOG(SPRING_LOG_NOTICE, "recording synced-input cause stream to %s",
+             journalFilePath.c_str());
     }
 
     // PLAN-security-hardening E1 (warn-only — see DevBuildGate::WarnOnly).
@@ -662,6 +789,13 @@ int main(int argc, char* argv[])
     // and it is this one).
     syncedinput::MemoryJournal auditJournal(
         journalAuditRecords > 0 ? static_cast<size_t>(journalAuditRecords) : 1);
+    // The durable recorder (--journal-file). Declared here so it outlives the
+    // server loop like the audit ring does; opened further down, once the defs
+    // cache key exists, because the key is part of the replay header's identity
+    // check. Only one journal can be attached at a time — --journal-file wins,
+    // since a run asked to produce a shareable artefact must not have its
+    // records land in a diagnostic ring instead.
+    replay::Writer replayWriter;
     if (journalAuditRecords > 0) {
         syncedinput::Journal().SetJournal(&auditJournal);
         SLOG(SPRING_LOG_NOTICE,
@@ -959,6 +1093,178 @@ int main(int argc, char* argv[])
     // of the GameServerContext that binds them; deferred-GameStart logic now
     // lives in GameStartCoordinator::CheckAndFireGameStart.)
 
+    // --- Open the replay recorder (PLAN-replay task 2) ---
+    // Here and not earlier: the header carries defsCacheKey, which the defs
+    // bake above computes, and a replay whose header cannot say which defs it
+    // ran against cannot detect the content mismatch that would otherwise
+    // surface as an unexplained divergence. Here and not later: GameStart —
+    // chokepoint #5, the record the whole stream is anchored on — fires a few
+    // lines below, and a recorder opened after it would produce a headless
+    // replay file with no anchor at all.
+    if (!journalFilePath.empty()) {
+        replay::Header rhdr;
+        // FIDELITY-STANDIN: PLAN-replay §1 binds a replay to the exact engine
+        // build ("same-binary bound"), but this tree has no build-identity
+        // macro (no git hash, no version string) for it to record. The stand-in
+        // is the wire protocol version plus this translation unit's compile
+        // stamp: it catches a protocol break and a from-scratch rebuild, and
+        // MISSES a change to any other file in an incremental build. So a
+        // header match is weak evidence of same-binary; a mismatch is still
+        // conclusive evidence of not-same-binary, which is the direction that
+        // prevents a wrong replay from being trusted.
+        rhdr.engineHash   = "proto" + std::to_string(Protocol::CURRENT_PROTOCOL_VERSION) +
+                            "-" + std::string(__DATE__ " " __TIME__);
+        rhdr.gameId       = gameId;
+        rhdr.gameVersion  = gameVersion;
+        rhdr.mapId        = mapId;
+        rhdr.defsCacheKey = defsCacheKey;
+        rhdr.roomId       = roomId;
+        rhdr.startFrame   = sim.GetFrameNum();
+        for (const auto& kv : CGameSetup::GetModOptions())
+            rhdr.modOptions.emplace_back(kv.first, kv.second);
+        for (const auto& rp : requestedPlayers)
+            rhdr.players.push_back({rp.username, rp.team, rp.startPos});
+        for (const auto& ra : requestedAIs)
+            rhdr.aiSlots.push_back({ra.id, ra.team, ra.startPos});
+
+        std::string werr;
+        if (!replayWriter.Open(journalFilePath, rhdr, werr)) {
+            // Fatal on purpose. A run told to produce a replay that silently
+            // produces nothing is worse than one that refuses to start: the
+            // first is discovered days later, when the recording was the point.
+            SLOG(SPRING_LOG_ERROR, "--journal-file: %s", werr.c_str());
+            return 1;
+        }
+        syncedinput::Journal().SetJournal(&replayWriter);
+        SLOG(SPRING_LOG_NOTICE, "replay recording open: %s (defs=%s)",
+             journalFilePath.c_str(), defsCacheKey.c_str());
+        SLOG(SPRING_LOG_WARNING,
+            "replay: engineHash is a stand-in (protocol version + TU compile "
+            "stamp) — this tree exposes no build identity, so a header match "
+            "does NOT prove the replaying binary is the recording one");
+    }
+
+    // ── Replay feed: the inverse of the five recording chokepoints ──
+    //
+    // PLAN-replay §7.1 enumerated exactly five sites at which external input
+    // enters the server. Re-execution has to re-enter at the SAME five, in the
+    // same tick positions, or the cause stream is being replayed against a
+    // different tick shape than it was recorded on. Four of them are fed here
+    // (Inbound, Disconnect, LuaExec, plus the GameStart anchor and the restore
+    // discontinuity); the fifth — the AI drain — is fed inside
+    // StateStreamer::TickAI, because its position relative to standing-order
+    // evaluation inside the streamer tick is load-bearing.
+    //
+    // Everything a record cannot honestly reproduce stops the replay instead of
+    // being skipped. A short replay that says why is a usable artefact; a
+    // complete-looking replay that quietly dropped an input is the failure this
+    // whole subsystem exists to make impossible.
+    auto PeekClientPayloadType = [](const InboundMessage& m) -> uint8_t {
+        flatbuffers::Verifier v(m.data.data(), m.data.size());
+        if (!SpringWeb::VerifyClientMessageBuffer(v)) return 0;
+        const auto* cm = SpringWeb::GetClientMessage(m.data.data());
+        return cm == nullptr ? 0 : static_cast<uint8_t>(cm->payload_type());
+    };
+
+    auto FeedReplayRecord = [&](const syncedinput::Record& r) {
+        switch (r.kind) {
+            case syncedinput::InputKind::ClientMessage: {
+                // The recorded RAW wire bytes go back through the identical
+                // HandleMessage, under the recorded connection id remapped into
+                // the virtual range. Everything the live run did to this
+                // message — verify, rate-limit, sequence-check, authority gate,
+                // and rejection — happens again, identically, because it is the
+                // same code seeing the same bytes from the same client.
+                InboundMessage im;
+                im.clientId = static_cast<ClientID>(replay::VirtualClientId(r.clientId));
+                im.data = r.payload;
+                msgHandler.HandleMessage(im);
+                break;
+            }
+            case syncedinput::InputKind::PlayerDisconnect: {
+                // Only the synced half is replayed. The PlayerLeft broadcast is
+                // a consequence for the OTHER clients, and on a replay server
+                // the streamer's own state broadcasts already tell a spectator
+                // what changed.
+                if (r.playerId >= 0) {
+                    playerHandler.PlayerLeft(r.playerId, r.subKind);
+                    eventHandler.PlayerRemoved(r.playerId, r.subKind);
+                    playerTeamEvents.Push({PlayerTeamEventData::PlayerRemoved, r.subKind,
+                                           static_cast<uint32_t>(r.playerId)});
+                }
+                break;
+            }
+            case syncedinput::InputKind::LuaExec: {
+                // Payload is "<scope>\0<code>" (Recorder::RecordLuaExec).
+                const auto nul = std::find(r.payload.begin(), r.payload.end(), '\0');
+                if (nul == r.payload.end()) {
+                    replay::Feed().RequestStop("malformed LuaExec record (no scope separator)");
+                    break;
+                }
+                LuaExecRequest req;
+                req.requestId = 0;
+                req.clientId  = 0;
+                req.scope.assign(r.payload.begin(), nul);
+                req.code.assign(nul + 1, r.payload.end());
+                ExecuteLuaExecRequest(req);   // result goes nowhere: nobody asked
+                break;
+            }
+            case syncedinput::InputKind::GameStart: {
+                if (!sim.HasGameStarted()) {
+                    SLOG(SPRING_LOG_NOTICE,
+                        "replay: GameStart record reached — firing GameStart");
+                    sim.FireGameStart();
+                }
+                // The record's payload is the roster the live run started with.
+                // Rebuilding it here and comparing is the earliest possible
+                // divergence check: a mismatch means the replay's teams, ally
+                // teams or leaders differ from the recording's, and EVERY later
+                // command is being applied to the wrong world. Caught at frame
+                // 0 instead of as an inexplicable hash mismatch minutes later.
+                std::string roster;
+                for (int t = 0; t < teamHandler.ActiveTeams(); ++t) {
+                    const CTeam* team = teamHandler.Team(t);
+                    if (team == nullptr) continue;
+                    roster += "t" + std::to_string(t) +
+                              ":a" + std::to_string(team->teamAllyteam) +
+                              ":l" + std::to_string(team->GetLeader()) + ";";
+                }
+                const std::string recorded(r.payload.begin(), r.payload.end());
+                if (roster != recorded) {
+                    SLOG(SPRING_LOG_ERROR,
+                        "replay: roster divergence at GameStart — recorded '%s', replay '%s'",
+                        recorded.c_str(), roster.c_str());
+                    replay::Feed().RequestStop("roster divergence at GameStart");
+                }
+                break;
+            }
+            case syncedinput::InputKind::SnapshotRestore: {
+                // §6 E2. Honouring this needs PLAN-persistence's sim serializer
+                // to restore a checkpoint mid-stream; it does not exist yet
+                // (Q-P1 decided the approach 2026-08-03, the walk is unbuilt).
+                // Until it does, a rollback ends the segment — which is what §6
+                // E2 says a rollback does anyway ("rollback starts a NEW
+                // segment"). Replaying the next segment is a separate run.
+                int32_t from = 0, to = 0;
+                if (r.payload.size() >= sizeof(int32_t) * 2) {
+                    std::memcpy(&from, r.payload.data(), sizeof(int32_t));
+                    std::memcpy(&to, r.payload.data() + sizeof(int32_t), sizeof(int32_t));
+                }
+                SLOG(SPRING_LOG_NOTICE,
+                    "replay: snapshot-restore record (frame %d -> %d) ends this segment",
+                    from, to);
+                replay::Feed().RequestStop("snapshot restore — segment boundary (E2)");
+                break;
+            }
+            case syncedinput::InputKind::AICommand: {
+                // Fed by StateStreamer::TickAI, never here — reaching this case
+                // means an AI record was stamped outside the Stream phase.
+                replay::Feed().RequestStop("AICommand record outside the Stream phase");
+                break;
+            }
+        }
+    };
+
     // --- AI virtual players (PLAN-metalstorm-ai.md §1, AI3) ---
     //
     // Each AI slot becomes a real CPlayer with its own playerID, registered
@@ -995,9 +1301,57 @@ int main(int argc, char* argv[])
             pNum, p.name.c_str(), rq.team);
     }
 
-    // Dev-mode: no roster means no players to wait for
-    if (rosterPlayersNeeded == 0) {
+    // Dev-mode: no roster means no players to wait for.
+    //
+    // A replay never takes this path, in EITHER roster shape. GameStart is an
+    // input in its own right (journal chokepoint #5) and its position in the
+    // stream is what every later record is relative to: fire it early and the
+    // pre-game prologue lands on a started sim, fire it late and the opening
+    // frames run without a roster. So under --replay the GameStart RECORD is
+    // the only thing that starts the game — see the feed below.
+    if (replay::IsReplaying()) {
+        // Feed the pre-game prologue HERE, at the exact point in start-up where
+        // the recording fired its own GameStart — not on the first loop tick.
+        //
+        // The distinction is a real off-by-one, not pedantry. The sim frame
+        // counter starts at -1 and the first SimFrame() makes it 0, so a
+        // recording that started the game during set-up entered its loop with
+        // GameStart already fired and its first tick stamped -1. A replay that
+        // waited for its first tick to fire GameStart would stamp that same
+        // tick -1 too — but would have spent it starting the game, so every
+        // subsequent input would land one frame later than it was recorded at.
+        // Feeding the prologue at the same point in start-up keeps the two
+        // loops in lockstep from their first tick.
+        //
+        // Only the INBOUND phase is swept here, and the boundary is exact
+        // rather than conservative. Set-up runs before the loop, so it sits
+        // ahead of the tick's first phase; the pre-SimFrame phases (inbound,
+        // disconnect) are equivalent whether they run here or on the first
+        // tick, because nothing simulates in between. The phases AFTER
+        // SimFrame — exec and the AI drain — are not: in the recording they
+        // ran with the sim already advanced to frame 0, so sweeping them here
+        // would apply them to a world one frame younger than the one they were
+        // recorded against. That is a real divergence, and it is the second
+        // one this milestone's verify run caught.
+        syncedinput::Journal().BeginTick(sim.GetFrameNum());
+        for (const syncedinput::Record* r :
+                 replay::Feed().Due(sim.GetFrameNum(), syncedinput::TickPhase::Inbound)) {
+            FeedReplayRecord(*r);
+        }
+        if (!sim.HasGameStarted()) {
+            SLOG(SPRING_LOG_WARNING,
+                "replay: the recorded prologue contained no GameStart anchor — "
+                "the sim will not start until one arrives in the stream");
+        }
+    } else if (rosterPlayersNeeded == 0) {
         SLOG(SPRING_LOG_NOTICE, "no player roster (dev mode), firing GameStart immediately");
+        // The journal's tick window has never been opened at this point (the
+        // sim loop below is what calls BeginTick), so without this the
+        // GameStart record — the anchor the entire stream is positioned
+        // against — would be stamped with the Recorder's default frame 0 while
+        // every other pre-game record carries the true pre-game frame of -1.
+        // A replay would then look for the anchor at a frame it never visits.
+        syncedinput::Journal().BeginTick(sim.GetFrameNum());
         sim.FireGameStart();
     }
 
@@ -1198,17 +1552,13 @@ int main(int argc, char* argv[])
     // headlessCfg.stateHashEvery sim frames plus once more at termination.
     // Unused unless headlessCfg.enabled && headlessCfg.stateHashEvery > 0.
     std::vector<statsdump::Snapshot> headlessSnapshots;
-    auto captureHeadlessSnapshot = [&](int64_t wallSec) {
-        statsdump::Snapshot snap;
-        snap.frame = sim.GetFrameNum();
-        snap.gameSeconds = snap.frame / (double)GAME_SPEED;
-        snap.wallSeconds = wallSec;
-        snap.simFps = perfMetrics.GetSnapshot().simFps;
-        snap.rssKb = statsdump::GetRssKb();
-        snap.luaHeapKb = GetSyncedLuaHeapKb();
 
-        // Determinism digest: xor-fold every active unit's id/team/pos/health
-        // (stable engine-defined iteration order) plus the synced RNG state.
+    // Determinism digest: xor-fold every active unit's id/team/pos/health
+    // (stable engine-defined iteration order) plus the synced RNG state.
+    // Extracted from the snapshot capture because `--replay --verify` needs the
+    // hash at the reference track's frames WITHOUT paying for a full stats
+    // snapshot (teams, weapons, RSS) at every one of them (PLAN-replay §4).
+    auto computeStateHash = [&]() -> uint64_t {
         std::vector<statsdump::UnitDigest> digest;
         digest.reserve(unitHandler.GetActiveUnits().size());
         for (const CUnit* u : unitHandler.GetActiveUnits()) {
@@ -1219,7 +1569,19 @@ int main(int argc, char* argv[])
             d.health = u->health;
             digest.push_back(d);
         }
-        snap.stateHash = statsdump::ComputeStateHash(digest, gsRNG.GetGenState());
+        return statsdump::ComputeStateHash(digest, gsRNG.GetGenState());
+    };
+
+    auto captureHeadlessSnapshot = [&](int64_t wallSec) {
+        statsdump::Snapshot snap;
+        snap.frame = sim.GetFrameNum();
+        snap.gameSeconds = snap.frame / (double)GAME_SPEED;
+        snap.wallSeconds = wallSec;
+        snap.simFps = perfMetrics.GetSnapshot().simFps;
+        snap.rssKb = statsdump::GetRssKb();
+        snap.luaHeapKb = GetSyncedLuaHeapKb();
+
+        snap.stateHash = computeStateHash();
 
         for (int t = 0; t < teamHandler.ActiveTeams(); ++t) {
             const CTeam* team = teamHandler.Team(t);
@@ -1263,8 +1625,24 @@ int main(int argc, char* argv[])
         // any render). The `headlessUncapped` guard is the ONLY divergence on
         // the normal path — with headless off it is always false, so behaviour
         // is byte-identical (the tick-gate-off regression bar, PLAN-headless §6).
+        // A seek races to its target as fast as the sim computes, with the
+        // wire muted so a watching spectator does not receive the skipped
+        // frames (PLAN-replay §2). Suppression is at the transport, never at
+        // the streamer — see WebTransportServer::SetOutboundSuppressed for why
+        // muting the streamer would change the simulation.
+        if (replay::IsReplaying()) {
+            const bool ff = replay::Feed().FastForwarding(sim.GetFrameNum());
+            if (ff != rtcServer.OutboundSuppressed()) {
+                rtcServer.SetOutboundSuppressed(ff);
+                if (!ff)
+                    SLOG(SPRING_LOG_NOTICE,
+                        "replay: seek complete at frame %d — resuming streaming",
+                        sim.GetFrameNum());
+            }
+        }
         const bool headlessUncapped =
-            headlessCfg.enabled && headlessCfg.tickMode == headless::TickMode::Uncapped;
+            (headlessCfg.enabled && headlessCfg.tickMode == headless::TickMode::Uncapped) ||
+            (replay::IsReplaying() && replay::Feed().FastForwarding(sim.GetFrameNum()));
         if (!headlessUncapped) {
             // Re-read wantedSpeedFactor every tick so live speed changes (via the
             // `speed` exec verb) apply immediately. A headless realtime/xN run
@@ -1336,10 +1714,44 @@ int main(int argc, char* argv[])
         // monotonic `seq` (see TickPhase's comment).
         syncedinput::Journal().BeginTick(sim.GetFrameNum());
 
+        // --- Replay feed, phase 1 of 5: Inbound (PLAN-replay task 2) ---
+        // The inverse of the recording funnel. Fed BEFORE the live drain so a
+        // recorded input always precedes a live spectator's message on the same
+        // tick, exactly as it did when the recording was made (the spectator
+        // did not exist then, so it can only ever be "later").
+        if (replay::IsReplaying()) {
+            for (const syncedinput::Record* r :
+                     replay::Feed().Due(syncedinput::Journal().Frame(),
+                                        syncedinput::TickPhase::Inbound)) {
+                FeedReplayRecord(*r);
+            }
+        }
+
         // Drain inbound messages from WebTransport streams and dispatch each
         // through the extracted ClientMessageHandler.
         auto messages = rtcServer.DrainInbound();
         for (auto& msg : messages) {
+            // A replay's synced state comes from the recorded stream and
+            // nowhere else. A live client attached to a replay server is a
+            // SPECTATOR by construction — even if it authenticates as the
+            // player whose game this is — so its sim-mutating verbs are
+            // refused here rather than being allowed to fork the re-execution.
+            // View-state verbs (viewport, selection, path preview) pass
+            // through untouched: they are what makes spectating work, and by
+            // the classifier's own definition they cannot change the sim.
+            if (replay::IsReplaying() && !replay::IsVirtualClient(msg.clientId)) {
+                const uint8_t ptype = PeekClientPayloadType(msg);
+                if (syncedinput::ShouldRecordClientPayload(ptype)) {
+                    static std::unordered_set<ClientID> warnedReplayClients;
+                    if (warnedReplayClients.insert(msg.clientId).second) {
+                        SLOG(SPRING_LOG_NOTICE,
+                            "replay: client %u sent sim-affecting verb %u — refused "
+                            "(a replay server accepts spectators, not players)",
+                            msg.clientId, static_cast<unsigned>(ptype));
+                    }
+                    continue;
+                }
+            }
             msgHandler.HandleMessage(msg);
         }
 
@@ -1351,6 +1763,14 @@ int main(int argc, char* argv[])
         // FlatBuffers message so remaining clients can update their UI.
         {
             syncedinput::Journal().SetPhase(syncedinput::TickPhase::Disconnect);
+            // Replay feed, phase 2 of 5.
+            if (replay::IsReplaying()) {
+                for (const syncedinput::Record* r :
+                         replay::Feed().Due(syncedinput::Journal().Frame(),
+                                            syncedinput::TickPhase::Disconnect)) {
+                    FeedReplayRecord(*r);
+                }
+            }
             auto disconnects = rtcServer.DrainDisconnects();
             for (ClientID dcId : disconnects) {
                 // C1: drop the handshake gate first — a client that handshook
@@ -1425,8 +1845,42 @@ int main(int argc, char* argv[])
         // Process pending console commands (from WS thread or HTTP)
         {
             syncedinput::Journal().SetPhase(syncedinput::TickPhase::LuaExec);
+            // Replay feed, phase 3 of 5.
+            // NOTE the frame source, here and at every other feed site: the
+            // JOURNAL's tick stamp, never a fresh sim.GetFrameNum(). SimFrame()
+            // has already run by this point in the tick, so the sim's counter
+            // has advanced past the value the recorder stamped this tick's
+            // records with. Re-reading it would make every post-SimFrame input
+            // (exec, AI) arrive one frame late on replay — which is exactly
+            // what it did, and the resulting hash divergence at the very first
+            // checkpoint is what found it.
+            if (replay::IsReplaying()) {
+                for (const syncedinput::Record* r :
+                         replay::Feed().Due(syncedinput::Journal().Frame(),
+                                            syncedinput::TickPhase::LuaExec)) {
+                    FeedReplayRecord(*r);
+                }
+            }
             LuaExecRequest req;
             while (luaExecEngine.TryPop(req)) {
+                // Same rule as the wire: a live operator poking a replay would
+                // be injecting an input the recording never had. Refused with a
+                // reply, not silently dropped — the console is interactive and
+                // an unanswered request looks like a hung server.
+                if (replay::IsReplaying()) {
+                    LuaExecResult refused;
+                    refused.requestId = req.requestId;
+                    refused.clientId  = req.clientId;
+                    refused.scope     = req.scope;
+                    refused.success   = false;
+                    refused.output    = "refused: this server is replaying a "
+                                        "recorded game; exec would diverge it";
+                    luaExecEngine.DeliverResult(refused);
+                    SLOG(SPRING_LOG_NOTICE,
+                        "replay: refused a live exec request (scope=%s)",
+                        req.scope.c_str());
+                    continue;
+                }
                 // Journal chokepoint #3 of 5: exec runs arbitrary Lua against
                 // the synced state (spawn, kill, give resources, set cheats —
                 // the whole spring-debug MCP surface arrives here via
@@ -1517,8 +1971,43 @@ int main(int argc, char* argv[])
                 captureHeadlessSnapshot(rs.wallElapsedSec);
             }
 
+            // Replay verification (PLAN-replay §4): hash at exactly the
+            // reference track's frames and compare. A divergence is LOCATED —
+            // that frame is the bisection point a desync investigation starts
+            // from — and the run keeps going so the report can say whether the
+            // state re-converged (it never does, but "diverged once at N and
+            // stayed wrong" and "diverged at N" are different bug shapes).
+            if (replay::CurrentMode() == replay::Mode::Verify && frame > 0 &&
+                replay::Feed().WantHashAt(frame)) {
+                const uint64_t h = computeStateHash();
+                if (!replay::Feed().CheckHash(frame, h) &&
+                    replay::Feed().Verify().firstDivergenceFrame == frame) {
+                    SLOG(SPRING_LOG_ERROR,
+                        "replay verify: DIVERGENCE at frame %d — expected %016llx, got %016llx",
+                        frame,
+                        (unsigned long long)replay::Feed().Verify().expected,
+                        (unsigned long long)replay::Feed().Verify().actual);
+                }
+            }
+
             headlessStopReason = headless::EvaluateStop(
                 headlessCfg.stopAt, headlessCfg.maxWallSec, rs);
+
+            // Replay's own terminal conditions, evaluated after the shared ones
+            // so a frame limit or wall ceiling still wins. ReplayEnd is a
+            // SUCCESSFUL end: the stream ran out at the frame the recording
+            // ended at, which is the whole job.
+            if (replay::IsReplaying() && headlessStopReason == headless::StopReason::None) {
+                if (replay::Feed().StopRequested()) {
+                    SLOG(SPRING_LOG_ERROR, "replay aborted: %s",
+                         replay::Feed().StopReason().c_str());
+                    headlessStopReason = headless::StopReason::ReplayAborted;
+                } else if (replay::Feed().Exhausted() &&
+                           frame >= replay::Feed().EndFrame()) {
+                    headlessStopReason = headless::StopReason::ReplayEnd;
+                }
+            }
+
             if (headlessStopReason != headless::StopReason::None) {
                 SLOG(SPRING_LOG_NOTICE,
                     "headless run complete: stop=%s frame=%d (%.1fs) wall=%llds",
@@ -1550,6 +2039,67 @@ int main(int argc, char* argv[])
                     }
                 }
             }
+        }
+
+        // Push this tick's journal records to the OS. Per-tick rather than
+        // per-record: the granularity a crash can lose is one tick of inputs,
+        // and the file format already treats a torn tail as the E1 truncation
+        // case rather than as corruption.
+        if (replayWriter.Enabled()) replayWriter.Flush();
+    }
+
+    // --- Close the replay recording (PLAN-replay task 2) ---
+    // The trailer is what marks this file as a COMPLETE segment. Detach from
+    // the funnel first: anything recorded during the teardown below would land
+    // after the trailer and be unreachable to a reader.
+    int replayExitCode = 0;
+    if (replayWriter.Enabled()) {
+        syncedinput::Journal().SetJournal(nullptr);
+        replay::Trailer tr;
+        tr.endFrame    = sim.GetFrameNum();
+        tr.recordCount = replayWriter.Written();
+        const bool wroteBadly = replayWriter.Failed();
+        replayWriter.Close(tr);
+        SLOG(wroteBadly ? SPRING_LOG_ERROR : SPRING_LOG_NOTICE,
+            "replay recording closed: %s (%llu records, end frame %d)%s",
+            journalFilePath.c_str(), (unsigned long long)tr.recordCount,
+            tr.endFrame,
+            wroteBadly ? " — WITH WRITE ERRORS, the segment is incomplete" : "");
+        if (wroteBadly) replayExitCode = 1;
+    }
+
+    // --- Replay verification verdict (PLAN-replay §4) ---
+    if (replay::CurrentMode() == replay::Mode::Verify) {
+        replay::Feed().FinishVerify(sim.GetFrameNum());
+        const auto& v = replay::Feed().Verify();
+        if (v.Passed()) {
+            SLOG(SPRING_LOG_NOTICE,
+                "replay verify: PASS — %d/%d state hashes matched, %llu records fed",
+                v.matched, v.checked, (unsigned long long)replay::Feed().Fed());
+        } else {
+            SLOG(SPRING_LOG_ERROR,
+                "replay verify: FAIL — checked=%d matched=%d missing=%d "
+                "firstDivergence=%d expected=%016llx actual=%016llx",
+                v.checked, v.matched, v.missing, v.firstDivergenceFrame,
+                (unsigned long long)v.expected, (unsigned long long)v.actual);
+            replayExitCode = 2;
+        }
+    }
+    if (replay::IsReplaying()) {
+        // A late record is a record that came due at a frame the replay had
+        // already passed — i.e. the re-execution's frame progression did not
+        // match the recording's. It never silently drops the input, but it is
+        // a divergence signal in its own right and must be said out loud.
+        if (replay::Feed().Late() > 0) {
+            SLOG(SPRING_LOG_WARNING,
+                "replay: %llu record(s) were fed LATE — the replay's frame "
+                "progression did not match the recording's",
+                (unsigned long long)replay::Feed().Late());
+        }
+        if (!replay::Feed().Exhausted()) {
+            SLOG(SPRING_LOG_WARNING,
+                "replay: ended with %zu record(s) unfed",
+                replay::Feed().RecordCount() - static_cast<size_t>(replay::Feed().Fed()));
         }
     }
 
@@ -1611,6 +2161,15 @@ int main(int argc, char* argv[])
     sim.Kill();
     db.Close();
     SLOG(SPRING_LOG_NOTICE, "exited cleanly");
+    if (replayExitCode != 0) {
+        // Tear down the log sinks before returning non-zero — a verify failure
+        // is a normal, expected outcome of a CI run, not a crash.
+        if (!logServer.empty())
+            springlog_net_shutdown();
+        springlog_sqlite_shutdown();
+        springlog_shutdown();
+        return replayExitCode;
+    }
 
     // Tear down optional sinks before the core logger
     if (!logServer.empty())

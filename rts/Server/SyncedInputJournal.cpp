@@ -218,7 +218,7 @@ void MemoryJournal::Append(Record&& r) {
 // ──────────────────────────────── Recorder ─────────────────────────────
 
 bool Recorder::Emit(InputKind kind, uint8_t subKind, int32_t playerId,
-                    const uint8_t* data, size_t size) {
+                    uint32_t clientId, const uint8_t* data, size_t size) {
     ++counters.recorded;
     counters.byKind[static_cast<size_t>(kind)]++;
     if (journal == nullptr || !journal->Enabled())
@@ -231,6 +231,7 @@ bool Recorder::Emit(InputKind kind, uint8_t subKind, int32_t playerId,
     r.kind     = kind;
     r.subKind  = subKind;
     r.playerId = playerId;
+    r.clientId = clientId;
     if (data != nullptr && size > 0)
         r.payload.assign(data, data + size);
     journal->Append(std::move(r));
@@ -239,18 +240,20 @@ bool Recorder::Emit(InputKind kind, uint8_t subKind, int32_t playerId,
 }
 
 bool Recorder::RecordClientMessage(uint8_t payloadType, int32_t playerId,
+                                   uint32_t clientId,
                                    const uint8_t* data, size_t size) {
     ++counters.seen;
     if (!ShouldRecordClientPayload(payloadType)) {
         ++counters.skipped;
         return false;
     }
-    return Emit(InputKind::ClientMessage, payloadType, playerId, data, size);
+    return Emit(InputKind::ClientMessage, payloadType, playerId, clientId,
+                data, size);
 }
 
 bool Recorder::RecordDisconnect(int32_t playerId, uint8_t reason) {
     ++counters.seen;
-    return Emit(InputKind::PlayerDisconnect, reason, playerId, nullptr, 0);
+    return Emit(InputKind::PlayerDisconnect, reason, playerId, 0, nullptr, 0);
 }
 
 bool Recorder::RecordLuaExec(int32_t playerId, const std::string& scope,
@@ -261,18 +264,18 @@ bool Recorder::RecordLuaExec(int32_t playerId, const std::string& scope,
     std::string blob = scope;
     blob.push_back('\0');
     blob += code;
-    return Emit(InputKind::LuaExec, 0, playerId,
+    return Emit(InputKind::LuaExec, 0, playerId, 0,
                 reinterpret_cast<const uint8_t*>(blob.data()), blob.size());
 }
 
 bool Recorder::RecordAICommand(int32_t playerId, const uint8_t* data, size_t size) {
     ++counters.seen;
-    return Emit(InputKind::AICommand, 0, playerId, data, size);
+    return Emit(InputKind::AICommand, 0, playerId, 0, data, size);
 }
 
 bool Recorder::RecordGameStart(const std::string& setupSummary) {
     ++counters.seen;
-    return Emit(InputKind::GameStart, 0, -1,
+    return Emit(InputKind::GameStart, 0, -1, 0,
                 reinterpret_cast<const uint8_t*>(setupSummary.data()),
                 setupSummary.size());
 }
@@ -280,7 +283,7 @@ bool Recorder::RecordGameStart(const std::string& setupSummary) {
 bool Recorder::RecordSnapshotRestore(int32_t fromFrame, int32_t toFrame) {
     ++counters.seen;
     const int32_t frames[2] = {fromFrame, toFrame};
-    return Emit(InputKind::SnapshotRestore, 0, -1,
+    return Emit(InputKind::SnapshotRestore, 0, -1, 0,
                 reinterpret_cast<const uint8_t*>(frames), sizeof(frames));
 }
 

@@ -15,6 +15,12 @@ Part of the [Debugging & Logging Guide](debugging.md) family. This page covers t
   - [Stats dump + determinism hash](#stats-dump--determinism-hash)
   - [Batch driver (`tools/headless-batch`)](#batch-driver-toolsheadless-batch)
   - [Determinism CI hook](#determinism-ci-hook)
+- [Replay record / playback](#replay-record--playback)
+  - [Recording](#recording)
+  - [Playing back](#playing-back)
+  - [Verifying (`--verify`)](#verifying---verify)
+  - [Seeking](#seeking)
+  - [What a replay does and does not carry](#what-a-replay-does-and-does-not-carry)
 - [springcli — Command-Line Tool](#springcli--command-line-tool)
   - [Building](#building)
   - [Commands](#commands)
@@ -359,6 +365,125 @@ wall time is almost entirely the `cmake`/`ninja` build, not the run itself. A
 mismatch prints every diverging snapshot (frame + both hashes) and exits non-zero;
 a run that fails to reach its stop condition (bad exit code) fails loudly rather
 than silently comparing two empty dumps.
+
+> **Known weakness in this fixture (measured 2026-08-03).** `basic_ai` on
+> `green_flat_x34_v3` issues **zero commands** and spawns **zero units** across the
+> full 9000 frames — every one of the 30 snapshots reports `numUnits: 0` for all
+> three teams. The state hash therefore folds an empty unit list plus the synced RNG
+> state, so what this gate actually regression-tests is "the RNG stream is stable",
+> not "the simulation is deterministic". It will not catch a movement, collision,
+> damage or command-ordering divergence, because none of those ever execute. Adding
+> units to the fixture (via `aiSlots` that build, or a start-up spawn) would make it
+> test what its name claims.
+
+---
+
+## Replay record / playback
+
+A replay is the recorded **cause stream** — every input that entered the server from
+outside the deterministic sim — re-executed against the same content. Because the sim
+is deterministic, re-running the inputs reproduces the game; there is no per-frame
+state in the file. See [PLAN-replay.md](../PLAN-replay.md) for the design.
+
+### Recording
+
+```bash
+spring-server --headless-run config.json --journal-file game.msr
+```
+
+`--journal-file` attaches the synced-input funnel's durable writer. It works on any
+server, not just headless ones — a normal lobby-launched game records the same way.
+The file carries its own launch spec (map, game, modoptions, roster, AI slots), so
+playback needs no other argument.
+
+`--journal-file` and `--journal-audit` are mutually exclusive in effect: the file
+writer wins, since a run asked to produce a shareable artefact should not have its
+records land in a diagnostic in-memory ring instead.
+
+### Playing back
+
+```bash
+spring-server --replay game.msr --port 9101 --db /tmp/replay.sqlite
+```
+
+The replay server is an ordinary game server whose inputs are prerecorded, so clients
+connect over the standard wire and spectate with no replay-format knowledge. Two
+behaviours differ from a live server, both deliberate and both logged:
+
+- **Sim-affecting verbs from live clients are refused.** A client attached to a
+  replay is a spectator by construction. View-state verbs (viewport, selection, path
+  preview) pass through untouched.
+- **`/api/exec` is refused**, with a reply rather than silence — injecting Lua into a
+  re-execution would fork it.
+
+### Verifying (`--verify`)
+
+```bash
+spring-server --replay game.msr --verify reference-stats.json
+```
+
+Re-executes headless (uncapped) and compares the state hash at exactly the frames the
+reference [stats dump](#stats-dump--determinism-hash) recorded one at. A divergence is
+reported with its **frame**, which is the bisection point a desync investigation starts
+from:
+
+```
+replay verify: PASS — 30/30 state hashes matched, 8 records fed
+replay verify: FAIL — checked=30 matched=6 missing=0 firstDivergence=1400 expected=… actual=…
+```
+
+Verification never passes vacuously: a run that checked nothing, or that ended before
+reaching every reference point (`missing > 0`), fails.
+
+> **`stateHash` is a hex STRING in the dump, not a number** — see the stats-dump
+> section's note. `--verify` parses it with `strtoull(…, 16)`.
+
+> **Exit-code caveat.** The verdict is also the process exit code (0 pass / 2 fail),
+> but `spring-server` has a **pre-existing** static-destruction crash
+> (`CWeaponDefHandler` destructor, during `__cxa_finalize` *after* `main` returns and
+> after `exited cleanly` is logged) that fires in any run where weapon defs were
+> exercised — it reproduces with no replay flags at all. Until that is fixed, gate CI
+> on the `replay verify:` log line, not on the exit status.
+
+### Seeking
+
+```bash
+spring-server --replay game.msr --replay-seek 3000
+```
+
+Fast-forwards to frame 3000 uncapped with **outbound streaming muted**, then resumes
+normal pacing and streaming. Verified state-neutral: the same replay verifies
+hash-exact with and without a seek.
+
+Suppression is applied at the transport (`WebTransportServer::SetOutboundSuppressed`),
+never by skipping the streamer tick — `StateStreamer::Tick` also evaluates standing
+orders and macro directives, which *issue commands*, so skipping it would change the
+simulation and land the seek on a different world.
+
+Seek is currently a full fast-forward from the start rather than a jump: the algorithm
+is "nearest checkpoint ≤ target, then fast-forward", and the checkpoint index is empty
+until PLAN-persistence's sim serializer lands. It is frame-exact either way, just
+slower for late targets.
+
+### What a replay does and does not carry
+
+Recorded (the five funnel chokepoints): raw client wire messages, player disconnects,
+`/api/exec` Lua, AI commands, the GameStart anchor, and GM snapshot-restore markers.
+
+**Not** recorded: anything the sim causes itself (factory rally orders, retaliation,
+gadget-issued commands) — re-execution reproduces those, and recording them would
+double-apply.
+
+Two gaps to know about:
+
+- **Games with human players do not replay end-to-end yet.** The wire bytes are
+  re-fed under their recorded connection id, but a recorded `AuthRequest` re-enters
+  `db.ValidateSession` against a session row a replica database need not have. A
+  replay of an AI/operator-driven game is complete; a replay of a human game will
+  diverge at the point authentication decides team ownership.
+- **A snapshot-restore record ends the segment.** Honouring it needs a mid-stream
+  checkpoint restore, which does not exist yet. Per PLAN-replay §6 E2 a rollback
+  starts a new segment anyway, so the next segment is a separate replay.
 
 ---
 

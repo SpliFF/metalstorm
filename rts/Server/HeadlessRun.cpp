@@ -51,6 +51,8 @@ const char* StopReasonName(StopReason r) {
         case StopReason::LuaCondition: return "lua-condition";
         case StopReason::LuaError:     return "lua-error";
         case StopReason::WallCeiling:  return "wall-ceiling";
+        case StopReason::ReplayEnd:    return "replay-end";
+        case StopReason::ReplayAborted: return "replay-aborted";
     }
     return "unknown";
 }

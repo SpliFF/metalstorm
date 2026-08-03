@@ -93,6 +93,7 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
         syncedinput::Journal().RecordClientMessage(
             static_cast<uint8_t>(clientMsg->payload_type()),
             pjIt != clientPlayerNum.end() ? pjIt->second : -1,
+            static_cast<uint32_t>(msg.clientId),
             msg.data.data(), msg.data.size());
     }
 

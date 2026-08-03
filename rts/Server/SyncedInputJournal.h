@@ -154,6 +154,18 @@ struct Record {
     InputKind kind     = InputKind::ClientMessage;
     uint8_t   subKind  = 0;     ///< ClientPayload tag when kind == ClientMessage
     int32_t   playerId = -1;    ///< -1 = unattributed (server/operator/test AI)
+    /// Transport-level source id for kind == ClientMessage; 0 otherwise.
+    ///
+    /// playerId is NOT sufficient for re-execution: a client's first messages
+    /// (Handshake, AuthRequest, the room/enlist verbs) arrive *before* it owns
+    /// a player number, so they all record playerId == -1 and become
+    /// indistinguishable from each other and from server-side input. The
+    /// session layer that the replay must re-enter is keyed on the connection,
+    /// so the connection id is what has to survive into the record — replay
+    /// re-feeds each message under its recorded clientId and the handler's
+    /// session/handshake/rate-limit state tracks the same identities it did
+    /// live. (PLAN-replay task 2.)
+    uint32_t  clientId = 0;
     std::vector<uint8_t> payload;
 };
 
@@ -231,8 +243,11 @@ public:
 
     /// The inbound funnel — ONE call covering every client verb. Returns true
     /// if the message was journal-worthy (whether or not a journal is
-    /// attached), so the caller can log/assert on coverage.
+    /// attached), so the caller can log/assert on coverage. `clientId` is the
+    /// transport connection the bytes arrived on; see Record::clientId for why
+    /// playerId alone cannot stand in for it.
     bool RecordClientMessage(uint8_t payloadType, int32_t playerId,
+                             uint32_t clientId,
                              const uint8_t* data, size_t size);
 
     bool RecordDisconnect(int32_t playerId, uint8_t reason);
@@ -246,7 +261,7 @@ public:
 
 private:
     bool Emit(InputKind kind, uint8_t subKind, int32_t playerId,
-              const uint8_t* data, size_t size);
+              uint32_t clientId, const uint8_t* data, size_t size);
 
     IJournal* journal  = nullptr;
     int32_t   curFrame = 0;

@@ -615,8 +615,37 @@ of the synced state.
 
 Storage is pluggable (`IJournal`). The default is `NullJournal` — the funnel still
 classifies and counts, and `GET /api/journal` (loopback) reports the tallies.
-`--journal-audit [N]` attaches a bounded in-memory journal; the durable journal is
-PLAN-persistence's.
+`--journal-audit [N]` attaches a bounded in-memory journal; `--journal-file <path>`
+attaches `replay::Writer`, which is the durable/shareable form. PLAN-persistence's
+journal implements the same `IJournal` seam.
+
+### Replay re-execution
+
+`--replay <file>` runs the tick above with the funnel **inverted**: at each of the
+five phases the server asks `replay::Feed()` what was due and re-enters the same
+code paths with the recorded input. `rts/Server/ReplayFile.{h,cpp}` owns the
+container (header + record framing + trailer); `rts/Server/ReplayPlayer.{h,cpp}`
+owns the cursor, seek state and hash verification, both engine-free and
+doctest-covered. `server_main.cpp` feeds phases 1–3 and the anchor;
+`StateStreamer::TickAI` feeds phase 4 itself, because its position relative to
+standing-order evaluation inside the streamer tick is load-bearing.
+
+Three invariants the implementation depends on, each of which was a real bug first:
+
+- **Feed at the journal's tick stamp, never a fresh `sim.GetFrameNum()`.**
+  `SimFrame()` runs mid-tick, so by the LuaExec and Stream phases the sim's counter
+  has already passed the frame this tick's records were stamped with.
+- **The pre-game prologue is fed during start-up, not on the first loop tick**, and
+  only its pre-`SimFrame` phases. The frame counter starts at −1 and the first
+  `SimFrame()` makes it 0; a recording that started the game during set-up entered
+  its loop one sim-step ahead of a replay that did not.
+- **Streaming suppression (seek) cuts the transport, not the streamer.**
+  `StateStreamer::Tick` issues commands as well as bytes, so muting it would change
+  the simulation.
+
+Replayed wire messages re-enter under their recorded connection id offset into a
+reserved range (`replay::VirtualClientId`) so they cannot collide with a live
+spectator's transport id.
 
 ### Def + Model Loading
 ```
