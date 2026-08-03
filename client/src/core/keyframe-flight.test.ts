@@ -9,8 +9,10 @@ import {
     createKeyframeTrack,
     evalKeyframeTrack,
     keyframeResidual,
+    launchKeyframe,
     pruneKeyframes,
     pushKeyframe,
+    terminalKeyframe,
 } from './keyframe-flight.js';
 
 const V = () => ({ x: NaN, y: NaN, z: NaN });
@@ -302,5 +304,117 @@ describe('knot bookkeeping', () => {
         pruneKeyframes(track, 100_000);
         expect(track.knots).toHaveLength(1);
         expect(at(track, 100_000).pos.x).toBe(200_000);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// PLAN-latency L3.3 — the knots the server stopped sending.
+//
+// The L3 gate accepted a measured +35.6 % of `GameEventBatch` per shot. L3.3
+// takes it back by not sending the two knots the client can already derive:
+// the Launch knot restates the `ProjectileFiredEvent` (every keyframed class),
+// and for a closed-form class the Terminal knot restates the
+// `OutcomeKnownEvent`.
+//
+// "Can derive" is the whole claim, so it is tested as an *equality against the
+// knots themselves*, not as a tolerance on the rendered path. If the derived
+// track ever diverges from the sent one, the saving stops being free and these
+// tests are where that shows up.
+// ---------------------------------------------------------------------------
+
+describe('L3.3 — Launch and Terminal knots derived rather than sent', () => {
+    // A closed-form flight: launch at frame 100 from (0, 200, 0), moving +x
+    // at 12 elmos/frame with map gravity. This is the sim's own recurrence
+    // (speed += g before pos += speed), which is what `ballisticAt` models.
+    const G = -0.11;
+    const SPAWN = 100;
+    const POS = { x: 0, y: 200, z: 0 };
+    const VEL = { x: 12, y: 3, z: 0 };
+
+    /** The track as a pre-L3.3 server built it: an actual Launch knot. */
+    const sentLaunch = () => createKeyframeTrack(
+        knot(SPAWN, POS.x, POS.y, POS.z, VEL.x, VEL.y, VEL.z, KEYFRAME_LAUNCH), G);
+
+    /** The track as L3.3 builds it: from the Fired event and the batch frame. */
+    const derivedLaunch = () => createKeyframeTrack(
+        launchKeyframe(SPAWN, POS, VEL), G);
+
+    it('the derived Launch knot is field-for-field the one the server sent', () => {
+        // The server wrote its knot from the same `evPos` and `speed` as the
+        // Fired event, in the same block, stamped with the same frame. Not
+        // "close enough" — identical, which is why dropping it costs nothing.
+        expect(derivedLaunch().knots[0]).toEqual(sentLaunch().knots[0]);
+    });
+
+    it('the launch-frame gate survives losing the knot', () => {
+        // `launchFrame` is what holds a Tier-S bolt at the muzzle until the
+        // cursor reaches its spawn frame — the L3.2 finding that bolts stopped
+        // appearing `D` frames early. It is derived from the knot, so it has to
+        // come out of the reconstruction too or that win silently regresses.
+        expect(derivedLaunch().launchFrame).toBe(SPAWN);
+    });
+
+    it('renders identically to the sent-knot track across the whole flight', () => {
+        const sent = sentLaunch(), derived = derivedLaunch();
+        for (let f = SPAWN - 5; f <= SPAWN + 60; f++) {
+            expect(at(derived, f)).toEqual(at(sent, f));
+        }
+    });
+
+    it('the derived Terminal knot lands the bolt exactly on the explosion', () => {
+        // The position is taken from `outcome_pos` verbatim rather than
+        // integrated toward, which is what keeps convergence exact by
+        // construction — the same property the sent knot had, and the one the
+        // L3 gate measured at 0.000 elmos.
+        const track = derivedLaunch();
+        const impact = { x: 137.9, y: 61.25, z: 0 };
+        pushKeyframe(track, terminalKeyframe(track, SPAWN + 24, impact));
+
+        const { pos } = at(track, SPAWN + 24);
+        expect(pos.x).toBe(impact.x);
+        expect(pos.y).toBe(impact.y);
+        expect(pos.z).toBe(impact.z);
+    });
+
+    it('the derived Terminal velocity is the sim arc continued, not a guess', () => {
+        // Only the velocity has to be derived at all. For a closed-form class
+        // the continuation IS the sim's arc, so it agrees with what the server
+        // would have measured — up to the last tick, where a ground burst
+        // detonates at the tick boundary rather than at the crossing.
+        const track = derivedLaunch();
+        const t = 24;
+        const expected = { x: 0, y: 0, z: 0 }, ev = { x: 0, y: 0, z: 0 };
+        ballisticAt(track.knots[0], t, G, expected, ev);
+
+        const term = terminalKeyframe(track, SPAWN + t, { x: 1, y: 2, z: 3 });
+        expect(term.vx).toBeCloseTo(ev.x, 10);
+        expect(term.vy).toBeCloseTo(ev.y, 10);
+        expect(term.vz).toBeCloseTo(ev.z, 10);
+        expect(term.kind).toBe(KEYFRAME_TERMINAL);
+    });
+
+    it('holds the terminal position past the outcome frame', () => {
+        // `terminalFrame` has to be set by the derived knot too, or the bolt
+        // flies on through its own burst.
+        const track = derivedLaunch();
+        const impact = { x: 137.9, y: 61.25, z: 0 };
+        pushKeyframe(track, terminalKeyframe(track, SPAWN + 24, impact));
+        expect(track.terminalFrame).toBe(SPAWN + 24);
+        expect(at(track, SPAWN + 40).pos).toEqual(impact);
+    });
+
+    it('derives the Terminal velocity from the LAST knot, not the launch', () => {
+        // A closed-form class can still bounce, and a Bounce knot is still
+        // sent. Continuing from the launch knot across a bounce would put the
+        // terminal tangent under the ground and point the impact CEG the wrong
+        // way — subtle enough to survive a visual check.
+        const track = derivedLaunch();
+        pushKeyframe(track, knot(SPAWN + 10, 120, 8, 0, 12, 2.2, 0, KEYFRAME_BOUNCE));
+
+        const term = terminalKeyframe(track, SPAWN + 14, { x: 168, y: 12, z: 0 });
+        const expected = { x: 0, y: 0, z: 0 }, ev = { x: 0, y: 0, z: 0 };
+        ballisticAt(track.knots[track.knots.length - 1], 4, G, expected, ev);
+        expect(term.vy).toBeCloseTo(ev.y, 10);
+        expect(term.vy).toBeGreaterThan(0);   // still rising out of the bounce
     });
 });

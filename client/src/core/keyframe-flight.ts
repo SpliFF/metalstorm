@@ -194,6 +194,66 @@ export function createKeyframeTrack(first: Keyframe, gravity: number): KeyframeT
 }
 
 /**
+ * PLAN-latency L3.3 — the `Launch` knot the server no longer sends, rebuilt
+ * from the `ProjectileFiredEvent` that used to be paired with it.
+ *
+ * Not an approximation of that knot: the server wrote it from the same `evPos`
+ * and the same `speed` in the same `{}` block as the Fired event, so the two
+ * agreed field-for-field, and its `frame` was the frame the batch carrying
+ * them both is stamped with. Everything a `Launch` knot ever carried is
+ * therefore already here — which is what makes dropping it a pure saving
+ * rather than a trade. See `ProjectileFiredEvent.keyframed`, the one bit that
+ * is genuinely new: whether the server is speaking this contract at all.
+ */
+export function launchKeyframe(
+    frame: number,
+    pos: { x: number; y: number; z: number },
+    vel: { x: number; y: number; z: number },
+): Keyframe {
+    return {
+        frame,
+        x: pos.x, y: pos.y, z: pos.z,
+        vx: vel.x, vy: vel.y, vz: vel.z,
+        kind: KEYFRAME_LAUNCH,
+    };
+}
+
+/**
+ * PLAN-latency L3.3 — likewise the `Terminal` knot, rebuilt from the
+ * `OutcomeKnownEvent` that was always emitted beside it.
+ *
+ * `outcome_pos` and `outcome_frame` are the knot's position and frame verbatim
+ * — the schema already promised they were the same values — so convergence
+ * stays exact by the same construction it had before: the bolt is *given* the
+ * explosion's position, not integrated toward it.
+ *
+ * Only the velocity has to be derived, and only for the closed-form classes
+ * this is used on, where deriving it is exact up to the last tick: the sim's
+ * own recurrence continued from the previous knot. It is used for the CEG emit
+ * direction and the laser shaft basis, never for the position.
+ *
+ * The final tick is where the derivation is *not* exact — a shot that hits the
+ * ground mid-tick detonates at the tick boundary, so the terminal speed is the
+ * speed it had entering that tick rather than at the crossing. That is the same
+ * tick-quantisation L2.2 measured on the Tier-C path, it is a direction rather
+ * than a position, and it is bounded by one frame of gravity.
+ */
+export function terminalKeyframe(
+    track: KeyframeTrack, frame: number,
+    pos: { x: number; y: number; z: number },
+): Keyframe {
+    const last = track.knots[track.knots.length - 1];
+    const p = { x: 0, y: 0, z: 0 }, v = { x: 0, y: 0, z: 0 };
+    ballisticAt(last, frame - last.frame, track.gravity, p, v);
+    return {
+        frame,
+        x: pos.x, y: pos.y, z: pos.z,
+        vx: v.x, vy: v.y, vz: v.z,
+        kind: KEYFRAME_TERMINAL,
+    };
+}
+
+/**
  * Add a knot, keeping `knots` sorted by frame.
  *
  * Two knots can share a frame: `DecideKeyframe` suppresses a second *sampled*

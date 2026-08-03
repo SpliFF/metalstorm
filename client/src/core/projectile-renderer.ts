@@ -81,8 +81,10 @@ import {
     createKeyframeTrack,
     evalKeyframeTrack,
     keyframeResidual,
+    launchKeyframe,
     pruneKeyframes,
     pushKeyframe,
+    terminalKeyframe,
 } from './keyframe-flight.js';
 
 /** Default colors per projectile type when the weapon def doesn't
@@ -550,6 +552,14 @@ export class ProjectileRenderer {
         /// not reached its launch frame. Non-zero is the pre-L3 pop-in being
         /// removed; zero would mean the gate never fires.
         preLaunchTicks: 0,
+        /// PLAN-latency L3.3 — Terminal knots the client built from an
+        /// `OutcomeKnownEvent` because the server did not send one. Read
+        /// against `outcomes`: the two are equal when every resolved shot was a
+        /// closed-form class, and the gap is the guided share. Zero against a
+        /// non-zero `outcomes` means the saving is not reaching this session —
+        /// an old server, or the predicate matching nothing in this game's
+        /// weapon mix.
+        terminalsSynthesised: 0,
     };
 
     /// PLAN-latency L2.3 — resolves a unit's interpolated pose at an arbitrary
@@ -979,7 +989,15 @@ export class ProjectileRenderer {
 
     // ── Event hooks (called from connection.ts) ─────────────────────────────
 
-    /** Server announced a new projectile. Spawn a local entry. */
+    /**
+     * Server announced a new projectile. Spawn a local entry.
+     *
+     * `spawnFrame` is the enclosing batch's frame, i.e. the sim frame the
+     * projectile was created on. PLAN-latency L3.3 uses it as the `Launch`
+     * knot's frame for a `keyframed` projectile — see `launchKeyframe`. It is
+     * only read on that path; the legacy integrator has never had a frame to
+     * work from and still does not.
+     */
     onFired(ev: {
         projId: number;
         weaponDefId: number;
@@ -989,7 +1007,8 @@ export class ProjectileRenderer {
         ttl: number;
         gravity: number;
         hitscan: boolean;
-    }): void {
+        keyframed?: boolean;
+    }, spawnFrame?: number): void {
         // Lazy-load: first fire of a weapon def kicks off the .glb +
         // trail-texture fetch. Until those settle the projectile
         // renders as the procedural placeholder created in setWeaponDefs.
@@ -1104,12 +1123,27 @@ export class ProjectileRenderer {
             lightEmitAccumS: 0,
             cosmetic: null,
             cosmeticTrack: null,
-            // L3.2: filled by the Launch knot, which rides the same batch as
-            // this event when `LatencyTierSKeyframes` is on. Until then (and
-            // for good on a server without it) the integration below runs.
+            // L3.2 filled this from the Launch knot riding the same batch.
+            // L3.3 fills it from this event directly (below) — the knot said
+            // nothing this event does not, so the server stopped sending one
+            // for the closed-form classes and `keyframed` carries the signal
+            // instead. Stays null on a pre-L3 server, or with the flag off,
+            // and the legacy integration runs exactly as it did.
             keyframes: null,
             wireGravity: continuationGravity(def, ev.gravity),
         });
+
+        if (ev.keyframed && spawnFrame !== undefined) {
+            const p = this.live.get(ev.projId)!;
+            p.keyframes = createKeyframeTrack(
+                launchKeyframe(spawnFrame, ev.pos, ev.vel), p.wireGravity);
+            this.keyframeStats.tracks++;
+            // Seed pos/vel off the track at once, for the same reason the
+            // Launch-knot path does: `isPreLaunch` will hold the draw until the
+            // cursor reaches `spawnFrame`, and when it does the bolt must
+            // already be on the spline rather than at the muzzle.
+            evalKeyframeTrack(p.keyframes, this.presFrame, p.pos, p.vel);
+        }
     }
 
     /**
@@ -1286,6 +1320,33 @@ export class ProjectileRenderer {
      * frame the cursor happens to sit past `outcome_frame` — the same reason
      * `detonateCosmetic` snaps before handing over.
      */
+    /**
+     * PLAN-latency L3.3 — an `OutcomeKnownEvent` landed for a keyframed
+     * projectile. Close its spline on the resolution.
+     *
+     * Called on **arrival**, not when the burst drains at `outcomeFrame`. That
+     * is the whole point: the outcome reaches the client `D` frames before the
+     * cursor gets there, and those are exactly the frames over which the
+     * server's `Terminal` knot used to bracket the final approach. Doing this
+     * at drain time would leave the last `D` frames extrapolating and then jump
+     * — which is the correction L3 exists to delete.
+     *
+     * A no-op when the server sent its own Terminal knot (guided classes still
+     * do, and it is strictly better: a measured velocity rather than a derived
+     * one), so `terminalFrame >= 0` is the guard rather than a flag.
+     */
+    onOutcomeKnown(ev: {
+        projId: number;
+        outcomeFrame: number;
+        outcomePos: { x: number; y: number; z: number };
+    }): void {
+        const p = this.live.get(ev.projId);
+        if (!p?.keyframes || p.keyframes.terminalFrame >= 0) return;
+        pushKeyframe(p.keyframes,
+            terminalKeyframe(p.keyframes, ev.outcomeFrame, ev.outcomePos));
+        this.keyframeStats.terminalsSynthesised++;
+    }
+
     detonateKeyframed(projId: number, ev: {
         impactPos: { x: number; y: number; z: number };
         impactKind: number;
@@ -1473,6 +1534,14 @@ export class ProjectileRenderer {
         const p = this.live.get(ev.projId);
         const st = this.keyframeStats;
         if (!p) { st.knotsDropped++; return; }
+        // PLAN-latency L3.3 — a pre-L3.3 server still sends the Launch knot the
+        // track was already built from (client and server ship together, but
+        // the mismatch is cheap to tolerate and expensive to debug). Dropping
+        // it is not merely tidy: pushing it would put a second control point at
+        // the spline's first parameter, and the residual probe would then
+        // measure a knot that changes nothing as if it were a correction.
+        if (ev.kind === KEYFRAME_LAUNCH && p.keyframes
+            && p.keyframes.launchFrame === ev.frame) return;
         st.knots++;
         if (ev.kind >= 0 && ev.kind < st.byKind.length) st.byKind[ev.kind]++;
         const kf: Keyframe = {
@@ -1554,6 +1623,7 @@ export class ProjectileRenderer {
             },
             legacyTrajSuppressed: s.legacyTrajSuppressed,
             preLaunchTicks: s.preLaunchTicks,
+            terminalsSynthesised: s.terminalsSynthesised,
         };
     }
 
@@ -1577,6 +1647,7 @@ export class ProjectileRenderer {
         s.outcomes = 0; s.approachSum = 0; s.approachMax = 0;
         s.approachRatioSum = 0; s.approachRatioMax = 0;
         s.legacyTrajSuppressed = 0; s.preLaunchTicks = 0;
+        s.terminalsSynthesised = 0;
     }
 
     /**

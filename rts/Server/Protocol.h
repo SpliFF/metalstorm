@@ -233,7 +233,8 @@ inline std::vector<uint8_t> BuildCombatEventBatch(
             e.targetId,
             e.ttl,
             e.gravity,
-            e.hitscan));
+            e.hitscan,
+            e.keyframed));
     }
 
     std::vector<flatbuffers::Offset<SpringWeb::ProjectileImpactEvent>> impactOffsets;

@@ -202,13 +202,31 @@ CWeaponProjectile::CWeaponProjectile(const ProjectileParams& params)
 		// can run the same ballistic integration.
 		ev.gravity      = mygravity;
 		ev.hitscan      = hitscan;
+		// PLAN-latency L3.3 — tells the client to start a keyframe track from
+		// this event rather than from a Launch knot. Set for every keyframed
+		// projectile, not just the suppressed ones: the client then treats
+		// "keyframed" and "has a track" as the same thing, and a real Launch
+		// knot arriving in this same batch is a no-op rather than a second
+		// description of the same instant.
+		ev.keyframed    = TierSKeyframesEnabled() && KeyframesApplyTo(weaponDef);
 		projectileEvents.PushFired(ev);
 
-		// PLAN-latency L3 — the spline's first knot, paired with the Fired
-		// event as the schema promises. Written from `evPos` rather than
-		// `pos` so the launch knot and the Fired event agree even when the
-		// hit-scan muzzle standin above rewrote the position.
-		if (TierSKeyframesEnabled() && KeyframesApplyTo(weaponDef)) {
+		// PLAN-latency L3 emitted the spline's first knot here, paired with the
+		// Fired event as the schema promised. L3.3 stopped: the pairing was so
+		// tight that the knot was a verbatim restatement — same `evPos`, same
+		// `speed`, same frame, written three lines below the event carrying
+		// them. `ev.keyframed` above is the only part of it the client could
+		// not already read off the Fired event, so the bool goes and the
+		// ~40-byte knot does not. `launchKeyframe()` in the client rebuilds it.
+		//
+		// This applies to every keyframed class, guided included — unlike the
+		// Terminal knot, whose elision is restricted to the closed-form classes
+		// (`KeyframesRedundantFor`) because a guided flight's terminal velocity
+		// is not derivable.
+		//
+		// The knot is still emitted with `LatencyKeyframeElision` off, which is
+		// the control arm of L3.3's A/B and the revert lever.
+		if (ev.keyframed && !KeyframeElisionEnabled()) {
 			TrajectoryKeyframeData kf;
 			kf.projId = static_cast<uint32_t>(id);
 			kf.frame  = static_cast<uint32_t>(gs->frameNum);
@@ -217,7 +235,14 @@ CWeaponProjectile::CWeaponProjectile(const ProjectileParams& params)
 			kf.kind   = KEYFRAME_LAUNCH;
 			kf.team   = static_cast<uint8_t>(teamID);
 			projectileEvents.PushKeyframe(kf);
+		}
 
+		// `lastFrame` advances whether or not a knot was pushed, because the
+		// client holds a knot at this frame either way — sent, or rebuilt from
+		// the Fired event. If it did not, DecideKeyframe's `lastFrame < 0`
+		// branch would fire on the next Update and emit a *second* Launch knot
+		// mid-flight.
+		if (ev.keyframed) {
 			keyframeState.lastFrame = gs->frameNum;
 			keyframeState.lastStage = KEYFRAME_STAGE_NONE;
 		}
@@ -288,7 +313,14 @@ void CWeaponProjectile::EmitOutcomeKnown(uint8_t impactKind, const float3& impac
 	// ends exactly where the explosion is scheduled. Emitted unconditionally
 	// — this is an event, not a sample, and the one-knot-per-frame rule in
 	// DecideKeyframe must not be able to suppress it.
-	{
+	//
+	// L3.3: except for the closed-form classes, where the OutcomeKnownEvent
+	// pushed immediately below already carries both of the knot's load-bearing
+	// fields — `outcome_pos` is this same `impactPos`, `outcome_frame` this
+	// same frame — and the client derives the remaining one (`vel`) by
+	// continuing its own arc, which for these classes is the sim's arc. The
+	// knot would be a verbatim restatement of the event beside it.
+	if (!KeyframesRedundantFor(weaponDef)) {
 		TrajectoryKeyframeData kf;
 		kf.projId = static_cast<uint32_t>(id);
 		kf.frame  = static_cast<uint32_t>(gs->frameNum);

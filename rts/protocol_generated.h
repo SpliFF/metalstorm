@@ -7622,6 +7622,7 @@ struct ProjectileFiredEventT : public ::flatbuffers::NativeTable {
   int16_t ttl = 0;
   float gravity = 0.0f;
   bool hitscan = false;
+  bool keyframed = false;
   ProjectileFiredEventT() = default;
   ProjectileFiredEventT(const ProjectileFiredEventT &o);
   ProjectileFiredEventT(ProjectileFiredEventT&&) FLATBUFFERS_NOEXCEPT = default;
@@ -7646,7 +7647,8 @@ struct ProjectileFiredEvent FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Tab
     VT_TARGET_ID = 18,
     VT_TTL = 20,
     VT_GRAVITY = 22,
-    VT_HITSCAN = 24
+    VT_HITSCAN = 24,
+    VT_KEYFRAMED = 26
   };
   uint32_t proj_id() const {
     return GetField<uint32_t>(VT_PROJ_ID, 0);
@@ -7683,6 +7685,27 @@ struct ProjectileFiredEvent FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Tab
   bool hitscan() const {
     return GetField<uint8_t>(VT_HITSCAN, 0) != 0;
   }
+  /// PLAN-latency L3.3 — "this projectile's presentation is governed by the
+  /// keyframe contract", i.e. the server has `LatencyTierSKeyframes` on and
+  /// this projectile participates (see TrajectoryKeyframes.h
+  /// `KeyframesApplyTo`). The client starts a keyframe track for it from
+  /// *this event*, using `pos`/`vel`/`gravity` and the enclosing batch's
+  /// `frame`, instead of waiting for a `Launch` knot to say the same thing in
+  /// 40 bytes.
+  ///
+  /// That is the whole reason the field exists. Before L3.3 the client's only
+  /// signal was the arrival of a `Launch` knot, so the server had to send one
+  /// even for flights it knew the client could reproduce exactly. This bool
+  /// carries the signal instead, and `KeyframesRedundantFor` shots then send
+  /// no knots at all.
+  ///
+  /// False on a pre-L3 server, on a server with the flag off, and for
+  /// hit-scan weapons — in all of which the client keeps its legacy
+  /// integrate-and-snap path, which is why the discriminator has to be
+  /// explicit rather than inferred from "no knots have turned up yet".
+  bool keyframed() const {
+    return GetField<uint8_t>(VT_KEYFRAMED, 0) != 0;
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<uint32_t>(verifier, VT_PROJ_ID, 4) &&
@@ -7696,6 +7719,7 @@ struct ProjectileFiredEvent FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Tab
            VerifyField<int16_t>(verifier, VT_TTL, 2) &&
            VerifyField<float>(verifier, VT_GRAVITY, 4) &&
            VerifyField<uint8_t>(verifier, VT_HITSCAN, 1) &&
+           VerifyField<uint8_t>(verifier, VT_KEYFRAMED, 1) &&
            verifier.EndTable();
   }
   ProjectileFiredEventT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -7740,6 +7764,9 @@ struct ProjectileFiredEventBuilder {
   void add_hitscan(bool hitscan) {
     fbb_.AddElement<uint8_t>(ProjectileFiredEvent::VT_HITSCAN, static_cast<uint8_t>(hitscan), 0);
   }
+  void add_keyframed(bool keyframed) {
+    fbb_.AddElement<uint8_t>(ProjectileFiredEvent::VT_KEYFRAMED, static_cast<uint8_t>(keyframed), 0);
+  }
   explicit ProjectileFiredEventBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -7763,7 +7790,8 @@ inline ::flatbuffers::Offset<ProjectileFiredEvent> CreateProjectileFiredEvent(
     uint32_t target_id = 0,
     int16_t ttl = 0,
     float gravity = 0.0f,
-    bool hitscan = false) {
+    bool hitscan = false,
+    bool keyframed = false) {
   ProjectileFiredEventBuilder builder_(_fbb);
   builder_.add_gravity(gravity);
   builder_.add_target_id(target_id);
@@ -7774,6 +7802,7 @@ inline ::flatbuffers::Offset<ProjectileFiredEvent> CreateProjectileFiredEvent(
   builder_.add_proj_id(proj_id);
   builder_.add_ttl(ttl);
   builder_.add_weapon_def_id(weapon_def_id);
+  builder_.add_keyframed(keyframed);
   builder_.add_hitscan(hitscan);
   builder_.add_team(team);
   return builder_.Finish();
@@ -17739,7 +17768,8 @@ inline ProjectileFiredEventT::ProjectileFiredEventT(const ProjectileFiredEventT 
         target_id(o.target_id),
         ttl(o.ttl),
         gravity(o.gravity),
-        hitscan(o.hitscan) {
+        hitscan(o.hitscan),
+        keyframed(o.keyframed) {
 }
 
 inline ProjectileFiredEventT &ProjectileFiredEventT::operator=(ProjectileFiredEventT o) FLATBUFFERS_NOEXCEPT {
@@ -17754,6 +17784,7 @@ inline ProjectileFiredEventT &ProjectileFiredEventT::operator=(ProjectileFiredEv
   std::swap(ttl, o.ttl);
   std::swap(gravity, o.gravity);
   std::swap(hitscan, o.hitscan);
+  std::swap(keyframed, o.keyframed);
   return *this;
 }
 
@@ -17777,6 +17808,7 @@ inline void ProjectileFiredEvent::UnPackTo(ProjectileFiredEventT *_o, const ::fl
   { auto _e = ttl(); _o->ttl = _e; }
   { auto _e = gravity(); _o->gravity = _e; }
   { auto _e = hitscan(); _o->hitscan = _e; }
+  { auto _e = keyframed(); _o->keyframed = _e; }
 }
 
 inline ::flatbuffers::Offset<ProjectileFiredEvent> ProjectileFiredEvent::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const ProjectileFiredEventT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
@@ -17798,6 +17830,7 @@ inline ::flatbuffers::Offset<ProjectileFiredEvent> CreateProjectileFiredEvent(::
   auto _ttl = _o->ttl;
   auto _gravity = _o->gravity;
   auto _hitscan = _o->hitscan;
+  auto _keyframed = _o->keyframed;
   return SpringWeb::CreateProjectileFiredEvent(
       _fbb,
       _proj_id,
@@ -17810,7 +17843,8 @@ inline ::flatbuffers::Offset<ProjectileFiredEvent> CreateProjectileFiredEvent(::
       _target_id,
       _ttl,
       _gravity,
-      _hitscan);
+      _hitscan,
+      _keyframed);
 }
 
 inline ProjectileImpactEventT::ProjectileImpactEventT(const ProjectileImpactEventT &o)

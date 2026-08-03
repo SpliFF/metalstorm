@@ -496,20 +496,29 @@ void StateStreamer::BroadcastCombatEvents(int) {
             static uint64_t tallyKeyframes = 0;
             static uint64_t tallyOutcomes = 0;
             static uint64_t tallyTrajectories = 0;
+            static uint64_t tallyKeyframedShots = 0;
             static uint32_t tallyLastReport = 0;
 
             tallyKeyframes    += projDrain.keyframes.size();
             tallyOutcomes     += projDrain.outcomesKnown.size();
             tallyTrajectories += projDrain.trajectories.size();
+            // PLAN-latency L3.3 — the denominator. `keyframes/shots` is the
+            // number the bandwidth lever moves, and without the shot count the
+            // knot count alone cannot tell "fewer knots per shot" from "fewer
+            // shots". Counts keyframed shots specifically, not all fired
+            // events, so Tier-C and hit-scan shots do not dilute it.
+            for (const auto& f : projDrain.fired)
+                tallyKeyframedShots += (f.keyframed ? 1u : 0u);
 
             if (frameNo >= tallyLastReport + L3_TALLY_PERIOD) {
                 if (tallyKeyframes > 0 || tallyTrajectories > 0 || tallyOutcomes > 0) {
                     LOG_L(L_INFO, "[L3tally] frame=%u cumulative: keyframes=%llu"
-                                  " outcomes=%llu trajectories=%llu",
+                                  " outcomes=%llu trajectories=%llu keyframedShots=%llu",
                           frameNo,
                           static_cast<unsigned long long>(tallyKeyframes),
                           static_cast<unsigned long long>(tallyOutcomes),
-                          static_cast<unsigned long long>(tallyTrajectories));
+                          static_cast<unsigned long long>(tallyTrajectories),
+                          static_cast<unsigned long long>(tallyKeyframedShots));
                 }
                 tallyLastReport = frameNo;
             }

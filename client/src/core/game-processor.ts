@@ -842,9 +842,12 @@ function gpConnect(msg: GpInitToWorker): void {
         // GameEventBatch) drive the projectile renderer + combatFX. The legacy
         // 0x04 per-tick projectile-state envelope is gone — the renderer
         // integrates motion locally off these events.
-        onProjectileFired: (events) => {
+        // PLAN-latency L3.3 — `frame` is now passed through. It is the sim
+        // frame the projectile spawned on, and for a `keyframed` shot it is
+        // the frame of the Launch knot the server has stopped sending.
+        onProjectileFired: (events, frame) => {
             if (!gpCtx.projectileRenderer) return;
-            for (const e of events) gpCtx.projectileRenderer.onFired(e);
+            for (const e of events) gpCtx.projectileRenderer.onFired(e, frame);
         },
         // PLAN-latency L1: present the impact (renderer detonation + shield /
         // airburst FX) on its sim frame. The bolt's flight is still integrated
@@ -881,6 +884,14 @@ function gpConnect(msg: GpInitToWorker): void {
         // clients still see something, and only one of them may be played.
         onOutcomesKnown: (events) => {
             for (const ev of events) {
+                // PLAN-latency L3.3 — close the spline NOW, not at the drain
+                // below. The outcome arrives `D` frames before the cursor
+                // reaches it, and those are precisely the frames the Terminal
+                // knot used to bracket. Deferring it to the drain would leave
+                // the final approach extrapolating and then jump, which is the
+                // correction L3 exists to remove. No-op when the server sent a
+                // Terminal knot of its own.
+                gpCtx.projectileRenderer?.onOutcomeKnown(ev);
                 gpSchedule(ev.outcomeFrame, 'impact', () => {
                     gpCtx.projectileRenderer?.detonateKeyframed(ev.projId, {
                         impactPos: ev.outcomePos,

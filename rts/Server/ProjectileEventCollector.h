@@ -39,6 +39,9 @@ struct ProjectileFiredEventData {
     int16_t  ttl;
     float    gravity;
     bool     hitscan;
+    /// PLAN-latency L3.3 — the client starts a keyframe track from this event.
+    /// See schemas/protocol.fbs `ProjectileFiredEvent.keyframed`.
+    bool     keyframed = false;
 };
 
 struct ProjectileImpactEventData {

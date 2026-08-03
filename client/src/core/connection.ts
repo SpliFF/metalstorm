@@ -243,6 +243,13 @@ export interface ProjectileFiredInfo {
     ttl: number;
     gravity: number;
     hitscan: boolean;
+    /// PLAN-latency L3.3 — the server is streaming this projectile under the
+    /// keyframe contract, so the renderer starts a `KeyframeTrack` from this
+    /// event (at the batch frame) instead of waiting for a `Launch` knot. For
+    /// the closed-form classes no knot is coming at all. False on a pre-L3
+    /// server, which is what keeps the legacy integrate-and-snap path
+    /// reachable.
+    keyframed: boolean;
 }
 
 export interface ProjectileImpactInfo {
@@ -2199,6 +2206,7 @@ export class Connection {
                     ttl: e.ttl(),
                     gravity: e.gravity(),
                     hitscan: e.hitscan(),
+                    keyframed: e.keyframed(),
                 });
             }
             this.events.onProjectileFired(out, frame);

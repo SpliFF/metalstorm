@@ -120,6 +120,12 @@ struct KeyframeState {
 /// integrate-and-snap path alive.
 bool TierSKeyframesEnabled();
 
+/// PLAN-latency L3.3 — is the elision of client-reconstructible knots on?
+/// Reads `LatencyKeyframeElision` once. Defaults ON; off restores the L3-gate
+/// stream verbatim, which is what makes L3.3 measurable as a paired A/B on one
+/// binary. See the CONFIG block in TrajectoryKeyframes.cpp.
+bool KeyframeElisionEnabled();
+
 /// Does a projectile of this weaponDef participate in the keyframe stream?
 ///
 /// The test is "does this projectile have a flight the client must draw over
@@ -129,6 +135,55 @@ bool TierSKeyframesEnabled();
 /// that reaches the sim as a live CWeaponProjectile is, by L2's construction,
 /// Tier S: a substitutable Tier-C shot never spawns one in the first place.
 bool KeyframesApplyTo(const WeaponDef* wd);
+
+/// PLAN-latency L3.3 — can the client reconstruct this projectile's TERMINAL
+/// knot as exactly as the server could send it?
+///
+/// The **Launch** knot is redundant for every keyframed class and is no longer
+/// emitted at all (see the Fired site in WeaponProjectile.cpp): it restated the
+/// `ProjectileFiredEvent` written beside it, and `ProjectileFiredEvent.
+/// keyframed` now carries the one bit that was genuinely new. This predicate is
+/// about the other end.
+///
+/// True for projectile classes whose `Update` is `pos += speed` plus, at most,
+/// a constant per-frame gravity — EMG, Laser, Explosive. For those the client's
+/// `ballisticAt` is not an approximation of the flight but the sim's own
+/// recurrence in closed form (L2.2 measured it to 0.000 elmos), so the Terminal
+/// knot's position is `OutcomeKnownEvent.outcome_pos`, its frame is
+/// `outcome_frame` — both already on the wire for every Tier-S resolution —
+/// and its velocity is the continuation of an arc the client is already
+/// flying. A guided class fails the test on that last clause and keeps its
+/// Terminal knot: the client's continuation there is a guess, so the knot's
+/// velocity is the tangent for a final segment nothing else describes.
+///
+/// Combined with the unconditional Launch drop, a member class emits **zero**
+/// keyframes over an unobstructed flight — the middle was never sent either,
+/// since an unguided shot has no heartbeat by design.
+///
+/// **Deliberate deviation from PLAN-latency-impl §L3.3's literal wording**,
+/// which scoped this to *short-flight* unguided shots (reusing L2.0's
+/// flight-time predicate) — recorded here because the reasoning matters more
+/// than the rule. Flight length is not what makes the knots redundant.
+/// Today's stream already sends an unguided shot NOTHING between Launch and
+/// Terminal however long it flies, so a 90-frame artillery shell is *already*
+/// entirely client-extrapolated; the two end knots are no more informative on
+/// a long flight than a short one. A flight-time clause would only have
+/// withheld the saving from the exact case it was written for. What does bound
+/// the risk is the class test: anything that steers, curves, or bounces off a
+/// behaviour the client does not model is excluded by name, not by duration.
+///
+/// Event knots are NOT suppressed. A `Bounce` is genuinely unpredictable (the
+/// client cannot know the ground height along the arc) and is emitted for
+/// these classes exactly as before; it lands on a track the client has already
+/// created from the Fired event, so nothing about that path changes.
+bool KeyframesRedundantFor(const WeaponDef* wd);
+
+/// The class membership above, as a pure function of `WeaponDef::projectileType`
+/// (a WEAPON_*_PROJECTILE bitmask). Split out for the same reason DecideKeyframe
+/// is pure: this is the part worth testing, and a WeaponDef cannot be stood up
+/// without a def parser. `KeyframesRedundantFor` is this plus the
+/// `KeyframesApplyTo` guard.
+bool KeyframesRedundantForType(unsigned int projectileType);
 
 /// Pure policy: should frame `frame` carry a keyframe for this projectile,
 /// and of what kind? Returns false when nothing should be emitted.

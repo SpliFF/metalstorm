@@ -254,3 +254,80 @@ TEST_CASE("L3 keyframes: wire kind values match the schema")
 	// mistaken for a real stage id.
 	CHECK(KEYFRAME_STAGE_NONE > KEYFRAME_TERMINAL);
 }
+
+
+// ---------------------------------------------------------------------------
+// PLAN-latency L3.3 — which projectile classes need no knots at all.
+//
+// The L3 gate accepted a measured +35.6 % of GameEventBatch per shot. This
+// predicate is the lever that takes it back: for a class whose Update is
+// `pos += speed` (plus at most a constant gravity), the client's closed form
+// IS the sim's recurrence, so the Launch knot restates the ProjectileFiredEvent
+// and the Terminal knot restates the OutcomeKnownEvent. Both are dropped and
+// the class emits nothing.
+//
+// Getting the membership wrong is silent in both directions — a class wrongly
+// included renders a flight the sim never flew, a class wrongly excluded just
+// keeps paying — so the set is pinned here rather than inferred.
+// ---------------------------------------------------------------------------
+
+#include "Sim/Projectiles/WeaponProjectiles/WeaponProjectileTypes.h"
+
+TEST_CASE("L3.3 redundancy: the closed-form classes send no knots")
+{
+	// Read off their Update() implementations, not off the def:
+	//   CEmgProjectile::Update      pos += speed
+	//   CLaserProjectile::UpdatePos SetPosition(pos + speed)
+	//   CExplosiveProjectile        CProjectile::Update — speed += g; pos += speed
+	CHECK(KeyframesRedundantForType(WEAPON_EMG_PROJECTILE));
+	CHECK(KeyframesRedundantForType(WEAPON_LASER_PROJECTILE));
+	CHECK(KeyframesRedundantForType(WEAPON_EXPLOSIVE_PROJECTILE));
+}
+
+
+TEST_CASE("L3.3 redundancy: anything the client cannot reproduce keeps its knots")
+{
+	// Steering the client has no model for. Missile and Starburst are also the
+	// only two classes that call MaybeEmitKeyframe at all — excluding them here
+	// is what keeps the guided heartbeat alive.
+	CHECK_FALSE(KeyframesRedundantForType(WEAPON_MISSILE_PROJECTILE));
+	CHECK_FALSE(KeyframesRedundantForType(WEAPON_STARBURST_PROJECTILE));
+	CHECK_FALSE(KeyframesRedundantForType(WEAPON_TORPEDO_PROJECTILE));
+
+	// Non-ballistic motion of other kinds: Fireball's spark drift, Flame's
+	// curve. Neither steers, so neither gets a heartbeat — but neither flies
+	// the closed-form arc either, so their Launch/Terminal pair is the only
+	// truthful thing the client has and it stays.
+	CHECK_FALSE(KeyframesRedundantForType(WEAPON_FIREBALL_PROJECTILE));
+	CHECK_FALSE(KeyframesRedundantForType(WEAPON_FLAME_PROJECTILE));
+
+	// Hit-scan classes never reach the predicate in the live path
+	// (KeyframesApplyTo rejects them first), but the type test must not claim
+	// them either — a beam has no flight to reconstruct from anything.
+	CHECK_FALSE(KeyframesRedundantForType(WEAPON_BEAMLASER_PROJECTILE));
+	CHECK_FALSE(KeyframesRedundantForType(WEAPON_LARGEBEAMLASER_PROJECTILE));
+	CHECK_FALSE(KeyframesRedundantForType(WEAPON_LIGHTNING_PROJECTILE));
+
+	// A projectile whose type never got set. Defaulting to "redundant" would
+	// silently mute an unknown class's whole stream.
+	CHECK_FALSE(KeyframesRedundantForType(0u));
+	CHECK_FALSE(KeyframesRedundantForType(WEAPON_BASE_PROJECTILE));
+}
+
+
+TEST_CASE("L3.3 redundancy: suppression cannot unsuppress a later sampled knot")
+{
+	// The Fired site advances `lastFrame` whether or not it actually pushed a
+	// Launch knot, because the client holds a knot at that frame either way.
+	// If it did not, a suppressed launch would leave lastFrame at -1 and the
+	// very next DecideKeyframe call would emit a *second* Launch mid-flight.
+	KeyframeState st = After(100);
+	uint8_t kind = 0xEE;
+	CHECK_FALSE(DecideKeyframe(st, /*projId=*/7, /*frame=*/100,
+	                           KEYFRAME_STAGE_NONE, /*guided=*/false, kind));
+
+	KeyframeState fresh;   // lastFrame == -1, i.e. the bug this guards against
+	CHECK(DecideKeyframe(fresh, /*projId=*/7, /*frame=*/100,
+	                     KEYFRAME_STAGE_NONE, /*guided=*/false, kind));
+	CHECK(kind == KEYFRAME_LAUNCH);
+}
