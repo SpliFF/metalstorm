@@ -383,6 +383,9 @@ interface SquadSystemHandle {
     reportThreat(hint: { x: number; z: number; radius?: number; squadId?: number }): void;
     setPassability(p: unknown): void;
     update(dt: number): void;
+    // PLAN-metalstorm-squad-performance.md §12a — camera-driven LOD tiering.
+    setLod(id: number, tier: 'full' | 'centroid' | 'icon'): void;
+    updateLod(camX: number, camY: number, camZ: number, pxScale: number, dt: number): void;
     // PLAN-metalstorm-squad-performance.md §14 S0 — permanent perf counters.
     recordFlush(ms: number): void;
     perfDump(): unknown;
@@ -1670,6 +1673,9 @@ function gpTickSquads(dt: number): void {
         const pose = er?.getEntityPose(id);
         if (pose) gpSquadSystem.syncPose(id, { x: pose.x, y: pose.y, z: pose.z, heading: pose.heading * H });
     }
+    // Tier BEFORE stepping, so this frame's centroids (just synced above) are
+    // what the camera is measured against and the step honours the new tiers.
+    gpComputeSquadLod(dt);
     gpSquadSystem.update(dt);
     // flushMs (§14 S0): flush() runs the render-backend thin-instance upload
     // AFTER update() returns, so the manager can't time it itself — measured
@@ -1677,6 +1683,28 @@ function gpTickSquads(dt: number): void {
     const flushStart = performance.now();
     gpSquadBackend?.flush();
     gpSquadSystem.recordFlush(performance.now() - flushStart);
+}
+
+/// PLAN-metalstorm-squad-performance.md §12a — per-frame squad LOD tiering,
+/// the plan's primary scaling lever: without it every routed squad runs the
+/// full per-member steering loop no matter how far away or off-screen it is
+/// (§0d), which is what caps the OO engine at ~500 squads @ 60 fps.
+///
+/// This half is deliberately thin — it turns the live camera into the two
+/// numbers the tier decision needs and hands them to the squad system:
+///   pxScale = renderHeight / (2·tan(fovY/2))
+///   screenPx(squad) = formationRadius · pxScale / distanceToCamera
+/// The per-squad walk lives in SquadManager.updateLod (it holds the centroids
+/// and formation radii) and the decision itself in the game module's lod.js
+/// `computeTier`, which is pure and headless-testable. Reading the Babylon
+/// camera directly rather than RTSCamera.getPose() keeps this correct while
+/// the model-harness orbit rig owns the view-0 camera.
+function gpComputeSquadLod(dt: number): void {
+    if (!gpSquadSystem || !gpCamera || !gpEngine) return;
+    const fov = gpCamera.fov || (45 * Math.PI / 180);   // vertical, radians
+    const pxScale = gpEngine.getRenderHeight() / (2 * Math.tan(fov * 0.5));
+    const p = gpCamera.position;
+    gpSquadSystem.updateLod(p.x, p.y, p.z, pxScale, dt);
 }
 
 /// Build the passability sampler from the client heightmap and install it, so

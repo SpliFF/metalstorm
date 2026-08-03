@@ -90,6 +90,26 @@ export const DEFAULT_CONFIG = {
   // (PLAN-macro-map.md tiers).
   steerMinScreenPx: 8,
 
+  // LOD tiering (PLAN-metalstorm-squad-performance.md §12a, lod.js). These are
+  // VISUAL thresholds — deliberately fixed, not machine-derived: how small a
+  // squad has to look before its members stop being worth simulating doesn't
+  // depend on the hardware. Machine adaptation is the §12c frame-time
+  // governor's job (§14 S2), and the governor never writes a tier.
+  //
+  // Below this apparent size the squad is a map symbol, not a crowd: members
+  // are released outright (0 instances) and the backend draws one marker.
+  iconScreenPx: 3,
+  // Grace before an off-screen squad drops to icon. A camera pan sweeping a
+  // battle would otherwise pay release+rebuild for every squad it crosses.
+  lodOffscreenGraceSec: 1.0,
+  // Consecutive frames wanting a new tier before it is applied (macro-map §1
+  // "don't flicker at boundaries"). Also absorbs the one-frame staleness of
+  // scene.frustumPlanes during the entity phase (perf plan §15 risk 2).
+  lodDwellFrames: 30,
+  // Demote band: a tier is entered at its px threshold but left only below
+  // this multiple of it, so a camera parked exactly at a boundary sits still.
+  lodDemoteBand: 0.8,
+
   // Big-unit threading (PLAN-metalstorm-flow.md §4, task 3/4). Weight applied
   // to the accumulated big-unit push term alongside arrival/separation.
   bigUnitWeight: 1.6,
@@ -182,8 +202,12 @@ export const DEFAULT_CONFIG = {
   // Seedable RNG for the stagger-interval draw (squad.js _staggerInterval).
   // Threaded so the future OO-vs-SoA parity suite (§14 S6) can seed both
   // engines identically — swap for a seeded generator in a test, never call
-  // Math.random() directly from squad logic.
-  random: Math.random,
+  // Math.random() directly from squad logic. Deliberately a wrapper, not a
+  // bare `Math.random` reference: capturing the reference at module-eval time
+  // silently defeats `vi.spyOn(Math, 'random')`, which squad-casualties.test.js
+  // uses to pin the stagger interval (it went flaky the moment S0 threaded
+  // this config key through).
+  random: () => Math.random(),
 };
 
 // THE routing predicate — canonical single home (PLAN-metalstorm-structure.md

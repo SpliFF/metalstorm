@@ -29,7 +29,10 @@ interface InstancePool {
     matrices: Float32Array;   // capacity * 16
     capacity: number;
     highWater: number;        // count uploaded to thinInstanceCount
-    free: number[];           // released indices, LIFO
+    free: number[];           // released indices, LIFO (may hold stale >= highWater)
+    freeMask: Uint8Array;     // 1 = index is free; lets flush reclaim the tail
+    view: Float32Array;       // matrices.subarray(0, highWater*16) — the live prefix
+    viewCount: number;        // highWater `view` was cut at (view is rebuilt when this moves)
     dirty: boolean;
 }
 
@@ -38,6 +41,17 @@ interface MemberSlot { pool: InstancePool; index: number; }
 const MEMBER_HEIGHT = 9;      // elmos — proxy capsule height
 const MEMBER_RADIUS = 1.6;
 const WRECK_SIZE = 4;         // elmos — flat debris box
+
+// Icon-tier marker (PLAN-metalstorm-squad-performance.md §12b). A squad at
+// `icon` LOD has released every member instance, so this flat ground quad is
+// the only thing left standing in for it. INTERIM BY DECREE: the real
+// strategic glyph language is PLAN-macro-map.md §3, and when its
+// strategic-renderer lands it takes over at the setIcon/clearIcon seam below —
+// do not grow this into one.
+const ICON_QUAD_SIZE = 1;     // elmos — unit quad; per-instance scale sizes it
+const ICON_MIN_SIZE = 48;     // elmos — floor so a small squad still reads far off
+const ICON_SIZE_MUL = 2.5;    // × formation radius
+const ICON_LIFT = 2;          // elmos above the centroid, to clear the terrain
 
 export interface SquadHost {
     /** Terrain height sample (client heightmap) for member Y. */
@@ -60,6 +74,10 @@ export class SquadRenderBackend {
     private memberPools = new Map<number, InstancePool>();
     /** Single shared wreck pool. */
     private wreckPool: InstancePool | null = null;
+    /** One icon-marker pool per team (§12b) — one instance per icon-tier squad. */
+    private iconPools = new Map<number, InstancePool>();
+    /** squadId → its live icon instance. Absent = the squad isn't at icon tier. */
+    private iconBySquad = new Map<number, MemberSlot>();
 
     /** handle → member slot. Handles are dense positive ints; -1 means "no
      *  instance" (the logic treats -1 as released, per render-backend.js). */
@@ -85,6 +103,7 @@ export class SquadRenderBackend {
 
     forgetSquad(squadId: number): void {
         this.squadTeam.delete(squadId);
+        this.clearIcon(squadId);
     }
 
     // --- RenderBackend interface -------------------------------------------
@@ -162,14 +181,59 @@ export class SquadRenderBackend {
         return Number.isFinite(h) ? h : 0;
     }
 
-    isOnScreen(x: number, y: number, z: number): boolean {
+    /** Frustum test, optionally padded by `radius` so a sphere straddling a
+     *  frustum plane still counts as visible (LOD tiering evaluates this at a
+     *  squad's centroid with its formation radius — §12a). Babylon's frustum
+     *  planes are normalized, so `d` is a true signed distance.
+     *
+     *  NB (perf plan §15 risk 2): scene.frustumPlanes is refreshed inside
+     *  scene.render(), which runs LATER in the frame than the squad tick, so
+     *  callers see last frame's frustum. One frame of lag, absorbed by the LOD
+     *  dwell hysteresis — not a bug. */
+    isOnScreen(x: number, y: number, z: number, radius = 0): boolean {
         const planes = this.scene.frustumPlanes;
         if (!planes) return false;
         for (let i = 0; i < planes.length; i++) {
             const p = planes[i];
-            if (p.normal.x * x + p.normal.y * y + p.normal.z * z + p.d < 0) return false;
+            if (p.normal.x * x + p.normal.y * y + p.normal.z * z + p.d < -radius) return false;
         }
         return true;
+    }
+
+    // --- icon-tier markers (§12b) -------------------------------------------
+    //
+    // THE SEAM. PLAN-macro-map.md's strategic renderer replaces the two methods
+    // below (and nothing else) when it lands; the squad logic calls them
+    // through the optional setIcon/clearIcon slots of the RenderBackend
+    // contract and knows nothing about what gets drawn.
+
+    /** Show or move this squad's icon marker. Upsert — the manager re-issues it
+     *  every frame while the squad is at icon tier so the marker tracks the
+     *  interpolated centroid. */
+    setIcon(squadId: number, x: number, y: number, z: number, radius: number): void {
+        const team = this.squadTeam.get(squadId) ?? 0;
+        const pool = this.getIconPool(team);
+        let slot = this.iconBySquad.get(squadId);
+        // Pool mismatch = the squad changed team since the marker was allocated
+        // (rare — capture/unit-give); move it rather than leaving a stray quad.
+        if (slot && slot.pool !== pool) {
+            this.freeSlot(slot.pool, slot.index);
+            slot = undefined;
+        }
+        if (!slot) {
+            slot = { pool, index: this.allocSlot(pool) };
+            this.iconBySquad.set(squadId, slot);
+        }
+        const scale = Math.max(ICON_MIN_SIZE, radius * ICON_SIZE_MUL) / ICON_QUAD_SIZE;
+        this.writeMatrix(pool, slot.index, x, y + ICON_LIFT, z, 0, scale);
+    }
+
+    /** The squad left icon tier (or was removed) — drop its marker. */
+    clearIcon(squadId: number): void {
+        const slot = this.iconBySquad.get(squadId);
+        if (!slot) return;
+        this.freeSlot(slot.pool, slot.index);
+        this.iconBySquad.delete(squadId);
     }
 
     // --- per-frame flush ----------------------------------------------------
@@ -178,16 +242,20 @@ export class SquadRenderBackend {
      *  SquadManager.update() has issued this frame's member transforms. */
     flush(): void {
         for (const pool of this.memberPools.values()) this.flushPool(pool);
+        for (const pool of this.iconPools.values()) this.flushPool(pool);
         if (this.wreckPool) this.flushPool(this.wreckPool);
     }
 
     dispose(): void {
         for (const pool of this.memberPools.values()) pool.mesh.dispose();
+        for (const pool of this.iconPools.values()) pool.mesh.dispose();
         this.wreckPool?.mesh.dispose();
         this.memberPools.clear();
+        this.iconPools.clear();
         this.wreckPool = null;
         this.memberByHandle.clear();
         this.wreckByHandle.clear();
+        this.iconBySquad.clear();
         this.squadTeam.clear();
     }
 
@@ -213,6 +281,34 @@ export class SquadRenderBackend {
         return pool;
     }
 
+    /** Per-team icon-marker pool. The quad is authored lying flat (rotation
+     *  baked into its vertices) so per-instance matrices stay plain
+     *  yaw+scale+translate — same `writeMatrix` path as members, which keeps
+     *  the W-row untouched (docs/lighting.md's thin-instance packing trap).
+     *  Unlit and non-shadow-casting: a marker is a UI affordance drawn in the
+     *  world, not a lit object. */
+    private getIconPool(team: number): InstancePool {
+        let pool = this.iconPools.get(team);
+        if (pool) return pool;
+        const mesh = MeshBuilder.CreatePlane(`squadIcon_t${team}`, { size: ICON_QUAD_SIZE }, this.scene);
+        mesh.rotation.x = Math.PI / 2;
+        mesh.bakeCurrentTransformIntoVertices();
+        const mat = new StandardMaterial(`squadIconMat_t${team}`, this.scene);
+        const c = this.host.getTeamColor(team);
+        mat.disableLighting = true;
+        mat.emissiveColor = c;
+        mat.diffuseColor = c;
+        mat.specularColor = new Color3(0, 0, 0);
+        mat.backFaceCulling = false;
+        mesh.material = mat;
+        mesh.isPickable = false;
+        mesh.alwaysSelectAsActiveMesh = true;
+        mesh.doNotSyncBoundingInfo = true;
+        pool = this.newPool(mesh);
+        this.iconPools.set(team, pool);
+        return pool;
+    }
+
     private getWreckPool(): InstancePool {
         if (this.wreckPool) return this.wreckPool;
         const mesh = MeshBuilder.CreateBox('squadWreck', {
@@ -234,26 +330,43 @@ export class SquadRenderBackend {
         mesh.thinInstanceSetBuffer('matrix', matrices, 16, false);
         mesh.thinInstanceCount = 0;
         mesh.isVisible = false;
-        return { mesh, matrices, capacity, highWater: 0, free: [], dirty: false };
+        return {
+            mesh, matrices, capacity, highWater: 0,
+            free: [], freeMask: new Uint8Array(capacity),
+            view: matrices, viewCount: -1, dirty: false,
+        };
     }
 
     private allocSlot(pool: InstancePool): number {
-        let index: number;
-        if (pool.free.length) {
-            index = pool.free.pop()!;
-        } else {
+        let index = -1;
+        // Entries left in `free` by a tail trim (see flushPool) are stale — the
+        // slot no longer exists. Discard them lazily on pop rather than
+        // compacting the array, which keeps alloc/free O(1) amortized even
+        // when an LOD sweep frees tens of thousands of slots at once.
+        while (pool.free.length) {
+            const i = pool.free.pop()!;
+            if (i < pool.highWater && pool.freeMask[i]) { index = i; break; }
+        }
+        if (index < 0) {
             if (pool.highWater >= pool.capacity) this.growPool(pool);
             index = pool.highWater++;
         }
+        pool.freeMask[index] = 0;
         pool.dirty = true;
         return index;
     }
 
     private freeSlot(pool: InstancePool, index: number): void {
-        // Collapse to zero scale so the freed slot renders as nothing.
+        // Collapse the 3×3 to zero scale so the freed slot renders as nothing.
+        // The W-row must stay (0,0,0,1) — docs/lighting.md "thin-instance matrix
+        // packing breaks shadow casting": the CSM depth shader never
+        // reconstructs w, so m[15]=0 corrupts the caster silhouette even though
+        // the main pass looks fine.
         const base = index * 16;
         pool.matrices.fill(0, base, base + 16);
+        pool.matrices[base + 15] = 1;
         pool.free.push(index);
+        pool.freeMask[index] = 1;
         pool.dirty = true;
     }
 
@@ -262,7 +375,11 @@ export class SquadRenderBackend {
         const next = new Float32Array(cap * 16);
         next.set(pool.matrices);
         pool.matrices = next;
+        const mask = new Uint8Array(cap);
+        mask.set(pool.freeMask);
+        pool.freeMask = mask;
         pool.capacity = cap;
+        pool.viewCount = -1;    // `view` pointed into the old buffer
     }
 
     /** Compose scale·yaw·translate into the pool's matrix buffer at `index`.
@@ -282,10 +399,27 @@ export class SquadRenderBackend {
     private flushPool(pool: InstancePool): void {
         if (!pool.dirty) return;
         pool.dirty = false;
-        pool.mesh.thinInstanceSetBuffer('matrix', pool.matrices, 16, false);
-        pool.mesh.thinInstanceCount = pool.highWater;
-        pool.mesh.isVisible = pool.highWater > 0;
-        if (pool.highWater > 0) {
+        // Reclaim the free tail. LOD demotion (PLAN-metalstorm-squad-performance
+        // §12) releases members in bulk — at 5k squads it frees ~95% of the
+        // pool — and without this the pool would keep drawing (and uploading)
+        // every dead hole forever, eating the entire tiering win. Amortized
+        // O(1): the loop stops at the first live slot.
+        let hw = pool.highWater;
+        while (hw > 0 && pool.freeMask[hw - 1]) hw--;
+        pool.highWater = hw;
+        // Upload only the live prefix. thinInstanceSetBuffer re-uploads the
+        // WHOLE Float32Array it is handed and `matrices` is sized to capacity,
+        // so passing the full array costs a multi-MB copy per frame once a pool
+        // has ever grown large. The subarray view is cached, not recut per
+        // frame, so Babylon keeps seeing the same object while hw is stable.
+        if (pool.viewCount !== hw) {
+            pool.view = pool.matrices.subarray(0, hw * 16);
+            pool.viewCount = hw;
+        }
+        pool.mesh.thinInstanceSetBuffer('matrix', pool.view, 16, false);
+        pool.mesh.thinInstanceCount = hw;
+        pool.mesh.isVisible = hw > 0;
+        if (hw > 0) {
             pool.mesh.thinInstanceRefreshBoundingInfo(false);
         }
     }

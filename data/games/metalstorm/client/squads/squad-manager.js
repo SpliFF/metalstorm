@@ -3,6 +3,7 @@
 
 import { Squad } from './squad.js';
 import { DEFAULT_CONFIG, linearCount } from './config.js';
+import { computeTier, screenPxFor, LOD_ICON } from './lod.js';
 import { BigUnitRepulsor } from './big-unit-repulsor.js';
 import { createPatchSet } from './patches.js';
 
@@ -206,7 +207,67 @@ export class SquadManager {
     const sq = this.squads.get(id);
     if (!sq) return;
     sq.destroy(this._now);
+    // Order matters: destroy() first (it reads member positions for the death
+    // cascade), THEN drop any icon marker this squad was drawing (§12b).
+    if (sq.lod === LOD_ICON) this.backend.clearIcon?.(id);
     this.squads.delete(id);
+  }
+
+  // --- LOD tiering (PLAN-metalstorm-squad-performance.md §12a) -------------
+
+  /** Force a squad's tier, bypassing the hysteresis dwell. For tests, scripted
+   *  scenes and the `state.lod` ingest path — the per-frame camera-driven path
+   *  is `updateLod()`. Keeps the icon marker in step either way. */
+  setLod(id, tier) {
+    const sq = this.squads.get(id);
+    if (!sq) return;
+    const prev = sq.lod;
+    sq.lod = tier;
+    this._syncIcon(sq, prev, tier);
+  }
+
+  /** Per-frame camera-driven tiering for every squad. The adapter
+   *  (game-processor.ts `gpComputeSquadLod`) supplies raw camera state only —
+   *  position plus `pxScale` = renderHeight / (2·tan(fov/2)), so that
+   *  screenPx = formationRadius·pxScale/dist — and the on-screen test comes
+   *  from the backend's frustum (`isOnScreen`, radius-padded at the centroid).
+   *
+   *  DEVIATION from §12a's "the adapter is the only writer of `lod`": the walk
+   *  runs here, because the manager is what holds each squad's centroid and
+   *  formation radius (the adapter would need a second per-squad Map lookup
+   *  per frame to get them). The rule's actual intent is preserved — the
+   *  CAMERA is still the only thing that decides a tier, and the §12c governor
+   *  (S2) must never call this or write `lod` at all; it may only choose how
+   *  much work each tier gets in a given frame. */
+  updateLod(camX, camY, camZ, pxScale, dt) {
+    const b = this.backend;
+    for (const sq of this.squads.values()) {
+      const radius = sq.def.formationRadius || 1;
+      const dx = sq.cx - camX, dy = sq.cy - camY, dz = sq.cz - camZ;
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      // Frustum test at the centroid, padded by the formation radius so a
+      // squad whose centroid is just off-frame but whose members are visible
+      // stays in a stepping tier.
+      const onScreen = b.isOnScreen ? b.isOnScreen(sq.cx, sq.cy, sq.cz, radius) : true;
+      const prev = sq.lod;
+      const tier = computeTier(sq._lodState, screenPxFor(radius, dist, pxScale), onScreen, dt, this.cfg);
+      if (tier !== prev) sq.lod = tier;   // setter drives release / rebuild
+      this._syncIcon(sq, prev, tier);
+    }
+  }
+
+  /** Icon-tier marker upkeep (§12b — the INTERIM per-team marker quad, an
+   *  explicit throwaway until PLAN-macro-map.md's strategic renderer takes
+   *  over at this exact `setIcon`/`clearIcon` seam). Icon squads have no
+   *  member instances, so without this they'd simply vanish from the world
+   *  view. Re-issued every frame while icon so the marker tracks the
+   *  interpolated centroid; `setIcon` is an upsert. */
+  _syncIcon(sq, prevTier, tier) {
+    if (tier === LOD_ICON) {
+      this.backend.setIcon?.(sq.id, sq.cx, sq.cy, sq.cz, sq.def.formationRadius || 1);
+    } else if (prevTier === LOD_ICON) {
+      this.backend.clearIcon?.(sq.id);
+    }
   }
 
   /** An impact/combat event landed; route to nearby squads as a casualty hint

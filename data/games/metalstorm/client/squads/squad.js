@@ -10,6 +10,7 @@ import { profileFor } from './movement-profiles.js';
 import { steerMember as airSteer } from './air-cohesion.js';
 import { steerMember as navalSteer } from './naval-cohesion.js';
 import { projectDropPoint, descendStep, scatterSlot } from './squad-transport.js';
+import { LOD_ICON, LOD_FULL, createLodState } from './lod.js';
 
 // Reused scratch objects — the per-frame loops must not allocate (§7 perf).
 // New passability-aware terms (projection/potential-field results, air/naval
@@ -76,7 +77,11 @@ export class Squad {
     this._deathQueue = [];              // { member, dirX, dirZ }[]
     this._nextStaggerAt = 0;
 
-    this._lod = 'full';                 // 'full' | 'centroid' | 'icon' (see setter below)
+    this._lod = LOD_FULL;               // 'full' | 'centroid' | 'icon' (see setter below)
+    // Hysteresis state for the camera-driven tiering (§12a, lod.js). Owned by
+    // SquadManager.updateLod; lives here so the tier and its dwell counter
+    // can't drift apart when something writes `lod` out of band.
+    this._lodState = createLodState(this._lod);
     this._spawned = false;
 
     // Transport (PLAN-metalstorm-squad-transport.md §2): a client-only
@@ -249,9 +254,15 @@ export class Squad {
     if (value === this._lod) return;
     const prev = this._lod;
     this._lod = value;
+    // Re-base the §12a hysteresis on whatever just happened, so an out-of-band
+    // write (a test, syncSquad's `state.lod`, SquadManager.setLod) doesn't get
+    // undone by a stale pending transition on the next camera frame.
+    this._lodState.tier = value;
+    this._lodState.want = value;
+    this._lodState.dwell = 0;
     if (!this._spawned) return;
-    if (prev !== 'icon' && value === 'icon') this._releaseInstances();
-    else if (prev === 'icon' && value !== 'icon') this._rebuildInstances();
+    if (prev !== LOD_ICON && value === LOD_ICON) this._releaseInstances();
+    else if (prev === LOD_ICON && value !== LOD_ICON) this._rebuildInstances();
   }
 
   _releaseInstances() {
@@ -305,7 +316,12 @@ export class Squad {
         m.y = this.backend.groundHeight(m.x, m.z);
       }
       if (i < initialAlive) {
-        m.handle = this.backend.createMember(this.id, i, m.visual);
+        // A squad can first appear already at icon tier (spawned off-screen or
+        // far away — §12a). Skip straight to `released` rather than creating an
+        // instance the very next `lod` write would release; _rebuildInstances
+        // creates it if the camera ever comes close.
+        if (this._lod === LOD_ICON) m.released = true;
+        else m.handle = this.backend.createMember(this.id, i, m.visual);
       } else {
         m.alive = false;    // absent from the start, no death animation (§6)
       }
@@ -607,7 +623,13 @@ export class Squad {
   update(dt, nowSec, neighbourQuery, passability, bigUnits = NO_BIG_UNITS) {
     this._drainDeathQueue(nowSec);
     if (this._updateTransport(dt)) return; // BOARDING/LOADED: transport owns the frame
-    if (this.lod !== 'full') return this._updateCentroid();
+    // Icon tier costs nothing per member BY CONSTRUCTION (§5's table): every
+    // member is released, so there is no instance to move and no steering to
+    // run — the backend draws one marker at the centroid instead (§12b).
+    // Casualties still land: _drainDeathQueue above and setStrength/_reconcileCount
+    // are event-time, not part of this loop (squad-sync §5 pitfall 3).
+    if (this._lod === LOD_ICON) return;
+    if (this._lod !== LOD_FULL) return this._updateCentroid();
 
     if (this._prevUpdateCx != null && dt > 1e-6) {
       this._centroidSpeed = Math.hypot(this.cx - this._prevUpdateCx, this.cz - this._prevUpdateCz) / dt;
