@@ -2024,6 +2024,11 @@ export class Connection {
                     for (let i = 0; i < info.winningAllyTeamsLength(); i++) {
                         winners.push(info.winningAllyTeams(i) ?? 0);
                     }
+                    // One-shot and load-bearing: this is the only client-side
+                    // proof the result crossed the wire. Without it a missing
+                    // overlay is indistinguishable from a message that never
+                    // arrived (PLAN-endtoend D17 cost a fire to that ambiguity).
+                    console.warn(`[connection] GAME OVER received: frame=${info.frame()} winners=[${winners.join(',')}]`);
                     this.events.onGameOver?.(info.frame(), winners);
                 }
                 break;

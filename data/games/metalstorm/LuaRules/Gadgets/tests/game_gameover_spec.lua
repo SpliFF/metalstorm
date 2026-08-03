@@ -18,7 +18,11 @@ local WINDING_DOWN_FRAMES = 300   -- must match the gadget's constant
 --- `victoryCount` is what GG.Objectives.VictoryObjectiveCount() reports —
 --- how many `victory = true` objectives the war staged. Defaults to 1 (a
 --- normal, endable war); pass 0 for the endless case (PLAN-endtoend.md D10).
-local function load(sides, victoryCount)
+--- `teams` is the list of teams the ROOM actually staffed, Gaia last. It
+--- defaults to a fully staffed 8-team Meridian room + Gaia, because that is
+--- the war as authored; pass a shorter list for a downsized room (D14), which
+--- is the common live case and the one that produced D18.
+local function load(sides, victoryCount, teams)
     local world = {
         frame = 0,
         gameRulesParams = {},
@@ -26,7 +30,10 @@ local function load(sides, victoryCount)
         gameOverCalls = {},     -- each entry is the winners list as passed
         expireCalls = 0,
         echoes = {},
+        -- Gaia is the last team index, exactly as the engine allocates it.
+        teams = teams or { 0, 1, 2, 3, 4, 5, 6, 7, 8 },
     }
+    world.gaia = world.teams[#world.teams]
 
     _G.Spring = {
         GetGameFrame = function() return world.frame end,
@@ -41,7 +48,28 @@ local function load(sides, victoryCount)
         -- while an integer-returning mock made the spec pass on "0,1,2,3".
         -- Keep the float: it is what the gadget actually receives.
         GetTeamAllyTeamID = function(teamID) return teamID + 0.0 end,
-        GameOver = function(winners) world.gameOverCalls[#world.gameOverCalls + 1] = winners end,
+        -- Floats again, as the live engine returns them (a live 2-slot room
+        -- reported teams 0.0, 1.0, 2.0 with Gaia at 2).
+        GetTeamList = function()
+            local out = {}
+            for i, t in ipairs(world.teams) do out[i] = t + 0.0 end
+            return out
+        end,
+        GetGaiaTeamID = function() return world.gaia + 0.0 end,
+        -- The real Spring.GameOver validates every id against ValidAllyTeam
+        -- and returns how many it accepted (LuaSyncedCtrl.cpp). Model both:
+        -- an id belonging to no staffed team is silently dropped, which is
+        -- exactly the mechanism behind D18.
+        GameOver = function(winners)
+            world.gameOverCalls[#world.gameOverCalls + 1] = winners
+            local accepted = 0
+            for _, a in ipairs(winners) do
+                for _, t in ipairs(world.teams) do
+                    if t == a then accepted = accepted + 1 break end
+                end
+            end
+            return accepted
+        end,
         Echo = function(msg) world.echoes[#world.echoes + 1] = msg end,
     }
 
@@ -202,6 +230,50 @@ describe("winner derivation (wars §1: a side is a faction, not one team)", func
         world.complete(VICTORY_OBJ, 11)
         world.runTo(WINDING_DOWN_FRAMES)
         assert.are.same({ 11 }, world.gameOverCalls[1])
+    end)
+
+    -- PLAN-endtoend.md D18. A room sized by its slots rather than by its war
+    -- (D14) staffs only part of the scenario's sides table, so the side→
+    -- allyteam mapping must not claim teams the room never created.
+    it("claims only the side teams the room actually staffed", function()
+        -- 2-slot Meridian: human team 0, AI team 1, Gaia at 2. The `compact`
+        -- side lists 0-3; teams 2 and 3 are not this room's compact players.
+        local world = load(MERIDIAN_SIDES, nil, { 0, 1, 2 })
+        world.complete(VICTORY_OBJ, 0)
+        world.runTo(WINDING_DOWN_FRAMES)
+        -- Not {0,1,2,3}: 3 exists nowhere and 2 is Gaia.
+        assert.are.same({ 0, 1 }, world.gameOverCalls[1])
+        assert.are.equal('0,1', world.gameRulesParams['war_winner_ally_teams'])
+    end)
+
+    it("never declares Gaia a winner", function()
+        local world = load(MERIDIAN_SIDES, nil, { 0, 1, 2 })
+        world.complete(VICTORY_OBJ, 0)
+        world.runTo(WINDING_DOWN_FRAMES)
+        for _, a in ipairs(world.gameOverCalls[1]) do
+            assert.are_not.equal(world.gaia, a)
+        end
+    end)
+
+    it("declares nothing the engine will silently drop", function()
+        -- The log lines the humans read must agree: every id handed to
+        -- Spring.GameOver is accepted, so no WARNING is emitted.
+        local world = load(MERIDIAN_SIDES, nil, { 0, 1, 2 })
+        world.complete(VICTORY_OBJ, 0)
+        world.runTo(WINDING_DOWN_FRAMES)
+        for _, msg in ipairs(world.echoes) do
+            assert.is_nil(msg:match('WARNING: declared'))
+        end
+    end)
+
+    it("narrows to the lone staffed member of a side", function()
+        -- A 1-slot union room: teams 5-7 of the `union` side were never
+        -- created, so the winner is team 4 by itself rather than the
+        -- scenario's full four.
+        local world = load(MERIDIAN_SIDES, nil, { 4, 5 })  -- 5 is Gaia here
+        world.complete(VICTORY_OBJ, 4)
+        world.runTo(WINDING_DOWN_FRAMES)
+        assert.are.same({ 4 }, world.gameOverCalls[1])
     end)
 end)
 

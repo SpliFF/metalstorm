@@ -115,10 +115,30 @@ end
 --- Falls back to just the completing team's allyteam when there is no sides
 --- table to group by — the honest answer when the game can't know who else
 --- was on that side.
+---
+--- The sides table is the *scenario's* roster, and a room is not obliged to
+--- staff all of it (D14 — rooms are sized by their slots, not by their war).
+--- So every side team is checked against the teams this room actually has
+--- before its allyteam is claimed as a winner. Without that check a scenario
+--- team with no room slot contributes an allyteam id that does not exist —
+--- Meridian Basin's 4-team `compact` side in a 2-slot room produced
+--- {0,1,2,3} where 3 was nothing at all, and `Spring.GameOver` then dropped
+--- it silently (LuaSyncedCtrl.cpp validates each id with ValidAllyTeam), so
+--- the Lua log claimed four winners and the server relay reported three.
+--- Gaia is excluded for the same reason it is excluded everywhere else: it
+--- is the world, not a side, and it occupies a real team index that a
+--- downsized room's scenario mapping will otherwise land on (in that same
+--- 2-slot room, Gaia sat at team 2 and was declared a co-winner).
 local function winnersFor(completingTeam)
     local allyOf = function(t)
         local a = Spring.GetTeamAllyTeamID(t)
         return a or t
+    end
+
+    local gaia = Spring.GetGaiaTeamID and Spring.GetGaiaTeamID() or nil
+    local staffed = {}
+    for _, t in ipairs(Spring.GetTeamList() or {}) do
+        if t ~= gaia then staffed[t] = true end
     end
 
     local faction = factionOf(completingTeam)
@@ -126,7 +146,7 @@ local function winnersFor(completingTeam)
 
     local seen, out = {}, {}
     for _, s in ipairs(GG.Scenario.data.sides) do
-        if s.faction == faction and s.team then
+        if s.faction == faction and s.team and staffed[s.team] then
             local a = allyOf(s.team)
             if not seen[a] then
                 seen[a] = true
@@ -187,7 +207,21 @@ local function resolve()
 
     Spring.Echo('[game_gameover] GAME OVER — winning allyteams {' ..
                 joinIds(winners) .. '}')
-    Spring.GameOver(winners)
+    -- Spring.GameOver returns how many of the ids it *accepted* — it drops
+    -- any that fail ValidAllyTeam. Log the two together: this line and the
+    -- server relay's "N winning allyteam(s)" are the only record of what the
+    -- clients were actually told, and when they disagreed nobody could tell
+    -- whether an allyteam had been lost in transit or was never real
+    -- (PLAN-endtoend D18 — it was the latter, and it cost a fire to
+    -- establish that). winnersFor now only produces staffed teams, so a
+    -- mismatch here means a genuinely new problem.
+    local accepted = Spring.GameOver(winners)
+    if accepted ~= #winners then
+        Spring.Echo('[game_gameover] WARNING: declared ' .. #winners ..
+                    ' winning allyteam(s) but the engine accepted ' ..
+                    string.format('%d', accepted or 0) ..
+                    ' — some ids are not valid allyteams in this room')
+    end
 end
 
 function gadget:Initialize()
