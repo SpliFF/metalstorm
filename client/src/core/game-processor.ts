@@ -383,6 +383,10 @@ interface SquadSystemHandle {
     reportThreat(hint: { x: number; z: number; radius?: number; squadId?: number }): void;
     setPassability(p: unknown): void;
     update(dt: number): void;
+    // PLAN-metalstorm-squad-performance.md §14 S0 — permanent perf counters.
+    recordFlush(ms: number): void;
+    perfDump(): unknown;
+    perfReset(): void;
 }
 /// Sim-scaled delta multiplier for VISUAL FX aging — slows / freezes effect
 /// lifetimes with the game speed (paused → 0). Driven by onGameInfo. The
@@ -1667,7 +1671,12 @@ function gpTickSquads(dt: number): void {
         if (pose) gpSquadSystem.syncPose(id, { x: pose.x, y: pose.y, z: pose.z, heading: pose.heading * H });
     }
     gpSquadSystem.update(dt);
+    // flushMs (§14 S0): flush() runs the render-backend thin-instance upload
+    // AFTER update() returns, so the manager can't time it itself — measured
+    // here and folded into the same perf counters via recordFlush.
+    const flushStart = performance.now();
     gpSquadBackend?.flush();
+    gpSquadSystem.recordFlush(performance.now() - flushStart);
 }
 
 /// Build the passability sampler from the client heightmap and install it, so
@@ -3059,6 +3068,13 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
             return gpFrameProfiler.dump(num(0, gpFrameProfiler.windowMs));
         case 'perfReset':
             gpFrameProfiler.reset();
+            return null;
+        // — squad-system perf counters (PLAN-metalstorm-squad-performance.md
+        //   §14 S0 scenario-ladder harness): window.test.squadPerf(). —
+        case 'squadPerf':
+            return gpSquadSystem?.perfDump() ?? null;
+        case 'squadPerfReset':
+            gpSquadSystem?.perfReset();
             return null;
         // — per-def legacy entity-FX script cost (PLAN-fx-offload X5). Ranked
         //   most-expensive-first, same shape/convention as uiProfileDump. —

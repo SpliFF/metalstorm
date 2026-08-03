@@ -6,11 +6,66 @@ import { DEFAULT_CONFIG, linearCount } from './config.js';
 import { BigUnitRepulsor } from './big-unit-repulsor.js';
 import { createPatchSet } from './patches.js';
 
+// Exponential moving average (α=0.1) for the perf counters' *Ms fields (§14
+// S0) — smooths single-frame noise (GC pause, one dense frame) over a
+// steady-state measurement window without keeping a sample buffer.
+const PERF_EMA_ALPHA = 0.1;
+function ema(prev, sample) {
+  return prev + (sample - prev) * PERF_EMA_ALPHA;
+}
+
+// Thin counting wrapper around the RenderBackend handed to every Squad, so
+// the manager can track matrixWrites (PLAN-metalstorm-squad-performance.md
+// §14 S0) without instrumenting squad.js's already-tight per-member call
+// sites. Fixed-arity forwarding only — no `...rest`/spread — so it doesn't
+// allocate per call (squad.js's own no-allocation-in-the-loop rule, §7).
+// The manager's own direct backend calls (wreck pool TTL/fade/despawn) go
+// through the raw `this.backend`, not this wrapper — only Squad instances
+// (created via _activate) receive it, since matrixWrites means member
+// render writes specifically.
+function wrapBackendForPerf(backend, perf) {
+  return {
+    createMember(squadId, memberId, visual) { return backend.createMember(squadId, memberId, visual); },
+    updateMember(handle, x, y, z, headingY, gait) {
+      perf.matrixWrites++;
+      return backend.updateMember(handle, x, y, z, headingY, gait);
+    },
+    destroyMember(handle, death) { return backend.destroyMember(handle, death); },
+    releaseMember(handle) { return backend.releaseMember(handle); },
+    spawnWreck(x, y, z, headingY, visual) { return backend.spawnWreck(x, y, z, headingY, visual); },
+    groundHeight(x, z) { return backend.groundHeight(x, z); },
+    isOnScreen(x, y, z) { return backend.isOnScreen ? backend.isOnScreen(x, y, z) : false; },
+  };
+}
+
 export class SquadManager {
   constructor(backend, config = {}) {
     this.backend = backend;
     this.cfg = { ...DEFAULT_CONFIG, countCurve: linearCount, ...config };
     this.squads = new Map();        // sim unit id → Squad
+
+    // Permanent perf counters (PLAN-metalstorm-squad-performance.md §14 S0).
+    // Frame-scoped fields (membersStepped/neighbourChecks/matrixWrites/
+    // tierCounts/stepped/coasted) are snapshots of the MOST RECENT frame, not
+    // running totals — that's what makes "membersStepped ≈ alive members at
+    // full LOD" a meaningful self-consistency check. The *Ms fields are EMA-
+    // smoothed (like the future §12c governor) so a single noisy frame
+    // doesn't skew a steady-state dump. `ladderLevel` is a stub (always 0)
+    // until the frame-time governor (§14 S2) lands.
+    this._perf = {
+      frame: 0,
+      tierCounts: { full: 0, centroid: 0, icon: 0 },
+      stepped: { full: 0, centroid: 0, icon: 0 },
+      coasted: { full: 0, centroid: 0, icon: 0 },
+      membersStepped: 0,
+      neighbourChecks: 0,
+      matrixWrites: 0,
+      gridRebuildMs: 0,
+      stepMs: 0,
+      flushMs: 0,
+      ladderLevel: 0,
+    };
+    this._perfBackend = wrapBackendForPerf(backend, this._perf);
     // Last known pose/strength for an id whose def hasn't arrived yet
     // (squad-sync H1: state can arrive before the on-demand def). Flushed by
     // noteDef(); cleared on removeSquad() so a reused id never resurrects a
@@ -348,7 +403,7 @@ export class SquadManager {
     // authoritative for it now; a stale leftover would only matter if this
     // id were later destroyed and reused (H2), so clear it here too.
     this._pendingById.delete(id);
-    const sq = new Squad(id, def, this.backend, this.cfg);
+    const sq = new Squad(id, def, this._perfBackend, this.cfg);
     sq.onWreck = (x, z, extra) => this._registerWreck(x, z, extra);
     this.squads.set(id, sq);
     const strength = state.strength || state;
@@ -364,11 +419,68 @@ export class SquadManager {
   /** Drive all squads one render step. `dt` seconds. */
   update(dt) {
     this._now += dt;
+    this._perf.frame++;
+    this._perf.neighbourChecks = 0;
+    this._perf.matrixWrites = 0;
     this._tickWreckPool();
+
+    const gridStart = performance.now();
     this._rebuildGrid();
+    this._perf.gridRebuildMs = ema(this._perf.gridRebuildMs, performance.now() - gridStart);
+
     for (const bu of this._bigUnitList) bu.update(dt);
     const query = (m) => this._neighbours(m);
-    for (const sq of this.squads.values()) sq.update(dt, this._now, query, this.passability, this._bigUnitList);
+
+    const tierCounts = { full: 0, centroid: 0, icon: 0 };
+    const stepStart = performance.now();
+    for (const sq of this.squads.values()) {
+      if (tierCounts[sq.lod] != null) tierCounts[sq.lod]++;
+      sq.update(dt, this._now, query, this.passability, this._bigUnitList);
+    }
+    this._perf.stepMs = ema(this._perf.stepMs, performance.now() - stepStart);
+    this._perf.tierCounts = tierCounts;
+    // Today only the 'full' tier runs the per-member steer loop; 'centroid'/
+    // 'icon' squads coast via Squad._updateCentroid (§14 S1). This split is
+    // the seam the S2 governor's real time-slicing (some 'full' squads
+    // coasting too) will widen — see PLAN-metalstorm-squad-performance.md §12d.
+    this._perf.stepped = { full: tierCounts.full, centroid: 0, icon: 0 };
+    this._perf.coasted = { full: 0, centroid: tierCounts.centroid, icon: tierCounts.icon };
+  }
+
+  /** External timing hook: the worker adapter (game-processor.ts gpTickSquads)
+   *  flushes the render backend's thin-instance buffers AFTER this manager's
+   *  update() returns, so flushMs can't be measured from inside update() —
+   *  the adapter times its own `backend.flush()` call and reports it here. */
+  recordFlush(ms) {
+    this._perf.flushMs = ema(this._perf.flushMs, ms);
+  }
+
+  /** Snapshot of the permanent perf counters (§14 S0) — reachable via
+   *  `window.__gp('__squadSystem.perfDump()')` / `window.test.squadPerf()`. */
+  perfDump() {
+    return {
+      frame: this._perf.frame,
+      squads: this.squads.size,
+      tierCounts: { ...this._perf.tierCounts },
+      stepped: { ...this._perf.stepped },
+      coasted: { ...this._perf.coasted },
+      membersStepped: this._perf.membersStepped,
+      neighbourChecks: this._perf.neighbourChecks,
+      matrixWrites: this._perf.matrixWrites,
+      gridRebuildMs: this._perf.gridRebuildMs,
+      stepMs: this._perf.stepMs,
+      flushMs: this._perf.flushMs,
+      ladderLevel: this._perf.ladderLevel,
+    };
+  }
+
+  /** Zero the EMA-smoothed timing fields before a fresh measurement window
+   *  (scenario-ladder recipe, §14 S0) — the frame-scoped count fields don't
+   *  need resetting, they're overwritten every update(). */
+  perfReset() {
+    this._perf.gridRebuildMs = 0;
+    this._perf.stepMs = 0;
+    this._perf.flushMs = 0;
   }
 
   // --- spatial hash (PLAN-metalstorm-squad-collision.md §1) ---------------
@@ -382,10 +494,15 @@ export class SquadManager {
   _rebuildGrid() {
     this._grid.clear();
     this._denseAgg.clear();
+    // membersStepped (§14 S0): counted here, not a separate traversal — this
+    // loop already visits exactly the alive+non-released members of every
+    // full-LOD squad (the ones that will run the per-member steer loop).
+    let membersStepped = 0;
     for (const sq of this.squads.values()) {
       if (sq.lod !== 'full') continue;
-      for (const m of sq.memberPositions()) this._insert(m.x, m.z, m);
+      for (const m of sq.memberPositions()) { this._insert(m.x, m.z, m); membersStepped++; }
     }
+    this._perf.membersStepped = membersStepped;
     for (const r of this._repulsors.values()) this._insert(r.x, r.z, r);
 
     // Wrecks: collision-active only within their post-spawn grace window
@@ -444,7 +561,7 @@ export class SquadManager {
 
         if (bucket.length > this.cfg.denseCellOccupancy) {
           const agg = this._denseAggregate(gx, gz, bucket);
-          yield agg; yielded++;
+          yield agg; yielded++; this._perf.neighbourChecks++;
           continue;
         }
 
@@ -452,14 +569,14 @@ export class SquadManager {
         if (bucket.length <= remaining) {
           for (const m of bucket) {
             if (m === self) continue;
-            yield m; yielded++;
+            yield m; yielded++; this._perf.neighbourChecks++;
           }
         } else {
           const stride = bucket.length / remaining;
           for (let i = 0, idx = 0; i < remaining; i++, idx += stride) {
             const m = bucket[Math.floor(idx)];
             if (m === self) continue;
-            yield m; yielded++;
+            yield m; yielded++; this._perf.neighbourChecks++;
           }
         }
       }

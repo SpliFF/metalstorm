@@ -176,6 +176,14 @@ export const DEFAULT_CONFIG = {
   // with explicit UnitLoaded/UnitUnloaded callins once streamed — fragile by
   // design.
   transportHeuristicRadius: 40,
+
+  // --- Perf (PLAN-metalstorm-squad-performance.md §10f) -------------------
+
+  // Seedable RNG for the stagger-interval draw (squad.js _staggerInterval).
+  // Threaded so the future OO-vs-SoA parity suite (§14 S6) can seed both
+  // engines identically — swap for a seeded generator in a test, never call
+  // Math.random() directly from squad logic.
+  random: Math.random,
 };
 
 // THE routing predicate — canonical single home (PLAN-metalstorm-structure.md

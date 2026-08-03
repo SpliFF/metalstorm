@@ -424,7 +424,7 @@ export class Squad {
 
   _staggerInterval() {
     const { staggerIntervalMinSec: lo, staggerIntervalMaxSec: hi } = this.cfg;
-    return lo + Math.random() * (hi - lo);
+    return lo + this.cfg.random() * (hi - lo);
   }
 
   /** Drain the stagger queue at its own pace, independent of reconcile
