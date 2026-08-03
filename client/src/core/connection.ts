@@ -560,6 +560,16 @@ export type UnitCommandKindStr = 'issued' | 'done';
 /** One synced command event mirrored from the server. Shape matches
  *  the LuaUI `widgetHandler:UnitCommand` / `UnitCmdDone` callin
  *  argument lists so the worker can forward directly. */
+/** Observer for commands that have just gone on the wire (PLAN-latency L4.1).
+ *  Receives one entry per `PlayerCommand`; a `PlayerCommandBatch` arrives as
+ *  one call carrying all of its inner commands. */
+export type CommandSink = (commands: ReadonlyArray<{
+    commandId: number;
+    unitIds: readonly number[];
+    params: readonly number[];
+    options: number;
+}>) => void;
+
 export interface UnitCommandEventMsg {
     kind: UnitCommandKindStr;
     unitId: number;
@@ -1001,6 +1011,8 @@ export class Connection {
      *  server / LuaRules / LuaGaia / LuaAI:* live on the game server). */
     get gameHttpUrl(): string { return this.httpBase; }
     private commandSequence = 0;
+    /** PLAN-latency L4.1 — see `setCommandSink`. */
+    private commandSink: CommandSink | null = null;
 
     /** Whether the control channel is currently usable. */
     get controlOpen(): boolean { return this.transport?.connected ?? false; }
@@ -1446,6 +1458,21 @@ export class Connection {
             timeoutFrames,
         );
         this.sendClientMessage(builder, ClientPayload.PlayerCommand, cmd);
+        this.commandSink?.([{ commandId, unitIds, params, options }]);
+    }
+
+    /** Install (or clear) the sent-command sink (PLAN-latency L4.1). Wired
+     *  from `gpInit` to `PendingActionRegistry.register` so optimistic
+     *  artifacts can be drawn at click time and reconciled later.
+     *
+     *  This is deliberately *here* and not in `CommandBuffer`: every
+     *  client-issued order funnels through `sendPlayerCommand` /
+     *  `sendPlayerCommandBatch`, including ones a `CommandNotify` widget
+     *  rewrote or issued itself (lua-ui-host `giveOrder`), which never touch
+     *  a CommandBuffer. The sink sees commands in the exact form that went on
+     *  the wire, which is what the server will ack. */
+    setCommandSink(fn: CommandSink | null): void {
+        this.commandSink = fn;
     }
 
     /** Send a PlayerCommandBatch — atomic execution of N PlayerCommand
@@ -1503,6 +1530,12 @@ export class Connection {
             cmdsVec,
         );
         this.sendClientMessage(builder, ClientPayload.PlayerCommandBatch, batch);
+        this.commandSink?.(commands.map(c => ({
+            commandId: c.commandId,
+            unitIds: c.unitIds,
+            params: c.params,
+            options: c.options ?? 0,
+        })));
     }
 
     sendClientMessage(builder: flatbuffers.Builder, payloadType: ClientPayload, payloadOffset: number): void {

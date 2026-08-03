@@ -71,6 +71,7 @@ import { DefCache } from './def-cache.js';
 import { fetchAndIngestDefs } from './defs-fetch.js';
 import { PresentationClock } from './presentation-clock.js';
 import { EventScheduler, type ScheduledKind } from './event-scheduler.js';
+import { PendingActionRegistry } from './pending-actions.js';
 import { nextCosmeticProjectileId } from './cosmetic-flight.js';
 // GW4-c5: weapon-FX / projectile / decal / build render modules fold into the
 // worker (audited worker-safe — no DOM/audio; the `window.__*` dev hooks they
@@ -213,6 +214,25 @@ let gpEconomyDirty = false;
 /// selection change can re-render the path/waypoint overlays immediately rather
 /// than waiting for the next broadcast.
 let gpLastCommandQueues: import('./connection.js').UnitCommandQueueInfo[] = [];
+/// PLAN-latency L4.1: optimistic-input registry. Commands the client has sent
+/// but the server has not yet acked are drawn on top of `gpLastCommandQueues`,
+/// so a waypoint appears on click instead of on the next 1 Hz snapshot.
+/// Created in gpInit, drained in the render loop, cleared in gpShutdown.
+let gpPendingActions: PendingActionRegistry | null = null;
+/// A/B switch for the L4 measurement (gp:test 'setOptimisticInput'). Off makes
+/// the overlays read the raw snapshot exactly as they did pre-L4.1. Ships ON:
+/// unlike L2/L3 this adds no wire traffic and no server behaviour, so there is
+/// nothing for a config flag to protect — the control arm exists to measure
+/// against, not to fall back to.
+let gpOptimisticInput = true;
+
+/// The overlay view: the last snapshot with outstanding optimistic orders
+/// merged on top. Identical to `gpLastCommandQueues` when nothing is pending.
+function gpMergedCommandQueues(): import('./connection.js').UnitCommandQueueInfo[] {
+    return gpPendingActions && gpOptimisticInput
+        ? gpPendingActions.merge(gpLastCommandQueues)
+        : gpLastCommandQueues;
+}
 /// Shift-held state (drives the command-path / waypoint overlay gate). Tracked
 /// from the forwarded key/pointer `mods` bitmask (bit 0 = shift); cleared on blur.
 let gpShiftHeld = false;
@@ -973,15 +993,46 @@ function gpConnect(msg: GpInitToWorker): void {
         // (Widget forward + the build-pending-ghost reaper land in c5c/c6.)
         onUnitCommandQueues: (queues) => {
             gpLastCommandQueues = queues;
+            // PLAN-latency L4.1: hand off every optimistic entry this snapshot
+            // now carries authoritatively, THEN merge what is still outstanding
+            // on top. Order matters — retiring first is what keeps an order
+            // from being drawn twice as the snapshot catches up.
+            gpPendingActions?.retire(queues);
+            const merged = gpMergedCommandQueues();
             const sel = gpCtx.selection?.selection ?? [];
-            gpCommandPathRenderer?.update(queues, sel);
-            gpWaypointMarkerRenderer?.update(queues, sel);
+            gpCommandPathRenderer?.update(merged, sel);
+            gpWaypointMarkerRenderer?.update(merged, sel);
             // PLAN-playable.md G4: the selected factory's queue may have
             // changed (unit completed, order added/removed) — re-resolve.
             gpRecomputeFactoryQueue();
             // PLAN-playable.md G3b: reap pending build-ghosts whose order has
             // left the queue (construction started / cancelled).
-            gpBuildPlacement?.onCommandQueuesUpdated(queues);
+            // L4.1: fed the MERGED view, which fixes a race that predates this
+            // phase — the reaper's "not in the snapshot" test is a dispose, and
+            // the snapshot is 1 Hz and independent of our send, so a ghost
+            // placed shortly before one landed was reaped before the order
+            // could possibly have reached the server. An unconfirmed build
+            // order is present in the merged view, so the ghost now survives
+            // until it is confirmed or times out.
+            gpBuildPlacement?.onCommandQueuesUpdated(merged);
+        },
+        // PLAN-latency L4.1: the per-tick command ack. This stream has been on
+        // the wire and fully decoded since long before L4 — with no subscriber
+        // at all. It is the confirmation half of optimistic input: an `issued`
+        // event means the order really landed on that unit's queue, ~RTT after
+        // the click rather than up to a snapshot period later.
+        onUnitCommand: (events) => {
+            if (!gpPendingActions) return;
+            const before = gpPendingActions.stats().confirmedTotal;
+            gpPendingActions.confirm(events);
+            if (gpPendingActions.stats().confirmedTotal !== before) {
+                // Re-render immediately: a confirmed entry swaps its synthetic
+                // negative tag for the server's, which the overlays key on.
+                const sel = gpCtx.selection?.selection ?? [];
+                const merged = gpMergedCommandQueues();
+                gpCommandPathRenderer?.update(merged, sel);
+                gpWaypointMarkerRenderer?.update(merged, sel);
+            }
         },
         // PLAN-playable.md G3a: selection-scoped command descriptions (~1 Hz).
         // GW4-regression fix (U3/onResourceUpdate-class): pre-GW4 the main-thread
@@ -1275,6 +1326,18 @@ function gpConnect(msg: GpInitToWorker): void {
         onServerRestart: () => postToMain({ type: 'gp:reload' }),
     });
     gpCtx.connection = conn;
+    // PLAN-latency L4.1: register every command that goes on the wire, in the
+    // form it went (post-CommandNotify, so widget rewrites and widget-issued
+    // orders are covered — neither passes through a CommandBuffer).
+    conn.setCommandSink((commands) => {
+        for (const c of commands) gpPendingActions?.register(c);
+        // Draw it now. This is the whole point of the phase: the artifact
+        // appears on the click, not on the ack and not on the next snapshot.
+        const sel = gpCtx.selection?.selection ?? [];
+        const merged = gpMergedCommandQueues();
+        gpCommandPathRenderer?.update(merged, sel);
+        gpWaypointMarkerRenderer?.update(merged, sel);
+    });
     conn.connect(msg.gameHttpUrl, msg.username, '', msg.token);
 }
 
@@ -1399,6 +1462,13 @@ export function gpInit(msg: GpInitToWorker): void {
 
     gpPresentationClock = new PresentationClock();
     gpEventScheduler = new EventScheduler();
+    // PLAN-latency L4.1. RTT is read lazily through gpCtx because the
+    // ServerClock belongs to the per-game Connection, which gpConnect builds
+    // after this; 0 before the first pong just means the window sits on its
+    // floor, which is the right conservative default.
+    gpPendingActions = new PendingActionRegistry({
+        getRttMs: () => gpCtx.connection?.serverClock.getRtt() ?? 0,
+    });
 
     const entityRenderer = new EntityRenderer(scene);
     entityRenderer.setPresentationClock(gpPresentationClock);
@@ -1645,6 +1715,22 @@ export function gpInit(msg: GpInitToWorker): void {
             // independently of its state).
             gpEventScheduler.prefetch(gpPresentationClock.P, gpPresentationClock.E);
         }
+        // PLAN-latency L4.1: retire optimistic orders whose window has run out.
+        // Deliberately on wall time, not the presentation cursor — an
+        // unconfirmed order is a control-timeline artifact and its deadline is
+        // a round trip, not a frame. A rollback is the only refutation the
+        // server gives us (there is no veto message), so it is logged.
+        if (gpPendingActions) {
+            const rolledBack = gpPendingActions.expire();
+            if (rolledBack > 0) {
+                postLog(2, `[L4] rolled back ${rolledBack} unconfirmed order(s) ` +
+                    `— no ack within the confirmation window`);
+                const sel = gpCtx.selection?.selection ?? [];
+                const merged = gpMergedCommandQueues();
+                gpCommandPathRenderer?.update(merged, sel);
+                gpWaypointMarkerRenderer?.update(merged, sel);
+            }
+        }
         gpMark(1);  // entity
         gpBuildBeamRenderer?.tick();
         gpCtx.projectileRenderer?.tick();
@@ -1734,8 +1820,9 @@ export function gpInit(msg: GpInitToWorker): void {
         // they appear immediately on a selection change (don't wait for the next
         // ~1 Hz UnitCommandQueuesUpdate). (sceneState mirroring → main is c5c.)
         onSelectionChange: (ids) => {
-            gpCommandPathRenderer?.update(gpLastCommandQueues, ids);
-            gpWaypointMarkerRenderer?.update(gpLastCommandQueues, ids);
+            const merged = gpMergedCommandQueues();
+            gpCommandPathRenderer?.update(merged, ids);
+            gpWaypointMarkerRenderer?.update(merged, ids);
             // GW4-c6-1b: feed LuaUI selection (Spring.GetSelectedUnits +
             // widgetHandler:SelectionChanged) so build-menu / order panels
             // react to what the player picked.
@@ -2332,7 +2419,10 @@ export function gpShutdown(): void {
     gpStandingOrderRenderer?.dispose();
     gpStandingOrderRenderer = null;
     gpLastCommandQueues = [];
+    gpPendingActions?.clear();
+    gpPendingActions = null;
     gpShiftHeld = false;
+    gpCtx.connection?.setCommandSink(null);
     gpCtx.connection?.disconnect();
     gpCtx.connection = null;
     gpCtx.entityRenderer?.dispose();
@@ -2427,6 +2517,49 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
         // — per-envelope bandwidth tally (GW8 / PLAN-performance PC-2) —
         case 'netStats':
             return snapshotNetStats();
+        // — optimistic input (PLAN-latency L4.1). `pendingStats` is the
+        //   measurement surface for the L4 gate: confirmation latency, the
+        //   rollback count, and mergeCollisions (expected 0 — non-zero means
+        //   the overlay is double-drawing). Reset before measuring: L3.2's
+        //   finding that counters spanning the boot transient are worthless
+        //   applies here too, and boot-time RTT drives the whole window. —
+        case 'pendingStats':
+            return gpPendingActions?.stats() ?? null;
+        case 'pendingReset':
+            gpPendingActions?.resetStats();
+            return null;
+        // A/B control for the L4 measurement: with optimism off, the overlays
+        // read the raw ~1 Hz snapshot exactly as they did before L4.1, so both
+        // arms of a paired run share one binary and differ only here.
+        case 'setOptimisticInput':
+            gpOptimisticInput = args[0] !== false;
+            return gpOptimisticInput;
+        // Probes for that measurement: `overlayOrders` counts the orders in
+        // the view handed to the overlay renderers for one unit;
+        // `markerCount` counts the marker meshes actually in the scene.
+        case 'overlayOrders':
+            return gpMergedCommandQueues()
+                .find(q => q.unitId === num(0))?.orders.length ?? 0;
+        case 'markerCount':
+            return gpWaypointMarkerRenderer?.markerCount ?? 0;
+        // The overlays are gated on Spring's "hold Shift to see queued orders"
+        // gesture, which normally rides the forwarded key mods. Drive it
+        // directly so a measurement can watch markerCount without synthesising
+        // key events.
+        case 'setShift':
+            gpSetShift(args[0] !== false);
+            return null;
+        // Issue an order down the real CLIENT path. `window.test.order` goes
+        // the other way — it POSTs to the game server's exec endpoint, so the
+        // sim gets the order but `sendPlayerCommand` is never called and the
+        // optimistic path is not exercised at all. This lands on exactly the
+        // call the right-click path ends at; only hit-testing and the
+        // CommandNotify widget gate are skipped, and those are client-local
+        // and identical in both arms of an A/B.
+        case 'clientOrder':
+            gpCtx.connection?.sendPlayerCommand(
+                num(1), obj<number[]>(0, []), obj<number[]>(2, []), num(3), 0);
+            return null;
         // — per-phase frame-time distribution (PLAN-perf P0 attribution) —
         //   arg 0 = window ms (default 30 s); returns structured stats + a
         //   pre-formatted table.
