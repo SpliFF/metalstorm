@@ -642,9 +642,9 @@ export class WidgetLoader {
             setMarkers: (markers: any[]) => {
                 if (!warned) {
                     console.warn('[widget-loader] strategicMap.setMarkers not yet wired (strategic-map overlay gap)');
+                    console.log('[widget-loader] setMarkers (stub):', markers);
                     warned = true;
                 }
-                console.log('[widget-loader] setMarkers (stub):', markers);
             },
         };
     }

@@ -251,6 +251,15 @@ export class AudioManager {
     /// Keyed by lower-cased logical name (e.g. `"weapon/laser1"`,
     /// `"bot_select"`).
     private soundItems = new Map<string, SoundItem>();
+    /// Set true by the first ingestSoundItems() call. Lets callers that
+    /// depend on named-lookup resolution (SoundEventPlayer) tell "not found
+    /// because sounds.lua hasn't loaded yet" apart from "not found, never
+    /// will be" — see whenSoundItemsReady().
+    private soundItemsIngested = false;
+    private soundItemsReadyResolve: (() => void) | null = null;
+    private soundItemsReadyPromise: Promise<void> = new Promise((resolve) => {
+        this.soundItemsReadyResolve = resolve;
+    });
 
     /// Active music streaming elements — A/B pair for crossfading.
     /// `playMusic()` always targets the inactive slot and ramps both
@@ -488,6 +497,9 @@ export class AudioManager {
             }
         }
         console.log(`[audio] ingested ${this.soundItems.size} SoundItem(s)`);
+        this.soundItemsIngested = true;
+        this.soundItemsReadyResolve?.();
+        this.soundItemsReadyResolve = null;
     }
 
     /// Look up a SoundItem by logical name (case-insensitive).
@@ -495,6 +507,20 @@ export class AudioManager {
     resolveSoundItem(name: string): SoundItem | undefined {
         if (!name) return undefined;
         return this.soundItems.get(name.toLowerCase());
+    }
+
+    /// Resolves once ingestSoundItems() has run at least once, or after
+    /// `timeoutMs` — whichever comes first. Lets a caller defer a
+    /// name-based lookup that raced the async sounds.lua load instead of
+    /// falling back to a less reliable path immediately (see
+    /// SoundEventPlayer.playResolved). Bounded so a game that never posts
+    /// SoundItems doesn't stall callers forever.
+    whenSoundItemsReady(timeoutMs: number): Promise<void> {
+        if (this.soundItemsIngested) return Promise.resolve();
+        return Promise.race([
+            this.soundItemsReadyPromise,
+            new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
+        ]);
     }
 
     private stripSoundsPrefix(p: string): string {
