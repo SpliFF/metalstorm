@@ -17,8 +17,10 @@ return mk{
                 -- Size + ground-anchor lift measured off the SHIPPED sheet
                 -- (2026-08-03 M5 live pass) — see soldiers.lua for the method
                 -- and for what the old 12 / 4.0109 pair got wrong.
+                -- centreY CORRECTED AGAIN 2026-08-03 (M11 fire 2), 0.9175 ->
+                -- 0.7759: measured hover 0.1416 elmos (20 deg / 45 deg).
                 impostorDistance = 260, impostorSize = 2.3056,
-                impostorCentreY = 0.9175,
+                impostorCentreY = 0.7759,
                 impostorTeamMask = true },
         [2] = { override = { workertime = 120 } },
         [3] = { override = { workertime = 300,

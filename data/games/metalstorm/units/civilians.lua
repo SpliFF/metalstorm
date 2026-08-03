@@ -32,7 +32,9 @@ return {
             -- CORRECTED 2026-08-03 (M5 live pass) from 3.6554, which had been
             -- derived from an assumed 11-elmo quad rather than measured off the
             -- shipped sheet. See soldiers.lua.
-            impostor_centre_y = '0.9000',
+            -- CORRECTED AGAIN 2026-08-03 (M11 fire 2), 0.9000 -> 0.7470:
+            -- measured hover 0.1530 elmos. See _builder.lua.
+            impostor_centre_y = '0.7470',
         },
     },
     ms_militia = {
@@ -61,7 +63,9 @@ return {
             -- ms_civilians above and _builder.lua.
             impostor_yaw_bins = '8', impostor_pitch_bins = '3', impostor_frames = '1',
             impostor_azimuth_phase = '180', impostor_pitch_degrees = '15,45,80',
-            impostor_centre_y = '0.9075',
+            -- CORRECTED AGAIN 2026-08-03 (M11 fire 2), 0.9075 -> 0.7544:
+            -- measured hover 0.1531 elmos. See _builder.lua.
+            impostor_centre_y = '0.7544',
         },
     },
 }

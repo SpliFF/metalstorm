@@ -22,8 +22,14 @@ return mk{
                 -- and the baker centres each cell on the model's bbox centre,
                 -- so centreY IS that centre's Y (0.9225). The old numbers drew
                 -- the sprite ~5x the 1.845-elmo 3D body it swaps with.
+                -- centreY CORRECTED AGAIN 2026-08-03 (M11 fire 2), 0.9225 ->
+                -- 0.7650: the bbox-centre value made the sprite hover 0.1575
+                -- elmos above the model it swaps with. Measured in-game at two
+                -- camera pitches (20 deg, 45 deg), which agree to 0.0003; then
+                -- confirmed by re-measuring the residual after the edit landed.
+                -- See _builder.lua for the method and its two traps.
                 impostorDistance = 260, impostorSize = 2.3615,
-                impostorCentreY = 0.9225,
+                impostorCentreY = 0.7650,
                 impostorTeamMask = true },
         [2] = { weapons = { [1] = { name = 'MS_MG_S2' } } },
         [3] = { weapons = { [1] = { name = 'MS_AC_S1' },
