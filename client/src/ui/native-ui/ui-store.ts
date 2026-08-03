@@ -46,25 +46,60 @@ export interface TeamEconomy {
 /** Org-group summary for widget consumption (PLAN-macro-ui.md §3, fed by
  *  `gp:orgGroups` — main.ts). `baseCostSum` is the worker-computed Σ
  *  `authority_cost_base` over current members (PLAN-metalstorm-authority.md
- *  §3.3), used by the command composer's cost preview (task 5). */
+ *  §3.3), used by the command composer's cost preview (task 5).
+ *
+ *  `parentId` / `currentDirectiveId` / `postureJson` mirror `OrgGroupInfoMsg`
+ *  and are what make an order-of-battle *tree* renderable: the OOB sidebar
+ *  needs the parent link to nest armies → platoons → squads, the directive id
+ *  to show each node's current-directive icon, and the posture blob for its
+ *  posture chips. They arrive over `gp:orgGroups` already; this type used to
+ *  drop them, which is why the panel couldn't be built against the store. */
 export interface OrgGroupSummary {
     groupId: number;
     echelon: 'Squad' | 'Platoon' | 'Army';
     ownerTeam: number;
+    /** 0 = top-level (no parent). */
+    parentId: number;
     name: string;
     memberIds: number[];
+    /** 0 = none currently assigned. Index into the `directives` mirror. */
+    currentDirectiveId: number;
+    /** Raw posture blob (PLAN-macro-orders.md §3); '' when unset. */
+    postureJson: string;
     baseCostSum: number;
+}
+
+/** One live macro directive (PLAN-macro-directives.md §1), fed by
+ *  `gp:directives` — own team + allies, same visibility rule as the
+ *  standing-order broadcast.
+ *
+ *  The org panel reads `assignedStrength / requestedStrength` for its
+ *  fulfillment %, and the directive inspector reads the rest. */
+export interface DirectiveSummary {
+    directiveId: number;
+    ownerTeam: number;
+    groupId: number;
+    type: string;
+    priority: number;
+    shape: 'Point' | 'Circle' | 'Polygon' | 'Polyline';
+    params: number[];
+    requestedStrength: number;
+    assignedStrength: number;
+    assignedSquadCount: number;
+    active: boolean;
+    createdAtFrame: number;
+    expiresAtFrame: number;
 }
 
 export class UIStore {
     // State mirrors
     private gameRulesParams = new Map<string, number | string>();
     private teamRulesParams = new Map<number, Map<string, number | string>>();
-    private playerRoster = new Map<number, PlayerInfo>();
+    private players = new Map<number, PlayerInfo>();
     private selection: UnitSelection = { unitIds: [], cmdDescs: [] };
     private economy = new Map<number, TeamEconomy>();
     private unitQueues = new Map<number, any[]>(); // unitId -> command queue
-    private directives = new Map<number, any>(); // directive/standing order state
+    private directives = new Map<number, DirectiveSummary>(); // directiveId -> live directive
     private gameEvents: any[] = []; // recent events
     private orgGroups: OrgGroupSummary[] = [];
 
@@ -138,7 +173,7 @@ export class UIStore {
 
     /** Get player info */
     getPlayer(playerId: number): PlayerInfo | undefined {
-        return this.playerRoster.get(playerId);
+        return this.players.get(playerId);
     }
 
     /** Get current selection */
@@ -153,12 +188,42 @@ export class UIStore {
 
     /** Get all players */
     getPlayers(): PlayerInfo[] {
-        return Array.from(this.playerRoster.values());
+        return Array.from(this.players.values());
     }
+
+    /** Get player roster — native-JS widget public API (mirrors
+     *  gameRulesParam/teamRulesParam's singular-getter shape; see
+     *  scoreboard-panel.js / authority-bar.js's `ctx.store.playerRoster()`).
+     *  Arrow-function field, not a prototype method: callers destructure it
+     *  off `ctx.store` into a bare reference before calling
+     *  (`const getRoster = ctx.store.playerRoster; getRoster()`), which would
+     *  drop `this` for an ordinary method. */
+    playerRoster = (): PlayerInfo[] => {
+        return this.getPlayers();
+    };
 
     /** Get the current org-group snapshot (own team, PLAN-macro-ui.md §3). */
     getOrgGroups(): readonly OrgGroupSummary[] {
         return this.orgGroups;
+    }
+
+    /** All live directives (own team + allies), newest-first by creation frame
+     *  so an alert feed / inspector list needs no re-sort. */
+    getDirectives(): readonly DirectiveSummary[] {
+        return Array.from(this.directives.values())
+            .sort((a, b) => b.createdAtFrame - a.createdAtFrame);
+    }
+
+    /** One directive by id — the org panel's per-node lookup via
+     *  `OrgGroupSummary.currentDirectiveId`. */
+    getDirective(directiveId: number): DirectiveSummary | undefined {
+        return this.directives.get(directiveId);
+    }
+
+    /** Directives targeting one org group (a group may hold more than one
+     *  over its life; `currentDirectiveId` names the active one). */
+    getDirectivesForGroup(groupId: number): DirectiveSummary[] {
+        return this.getDirectives().filter(d => d.groupId === groupId);
     }
 
     // ─── Update methods (called by native UI loader / connection) ───
@@ -203,22 +268,22 @@ export class UIStore {
 
     /** Update player roster */
     updatePlayerRoster(players: PlayerInfo[]): void {
-        this.playerRoster.clear();
+        this.players.clear();
         for (const player of players) {
-            this.playerRoster.set(player.playerId, player);
+            this.players.set(player.playerId, player);
         }
         this.notifySubscribers(['playerRoster']);
     }
 
     /** Add or update a player */
     updatePlayer(player: PlayerInfo): void {
-        this.playerRoster.set(player.playerId, player);
+        this.players.set(player.playerId, player);
         this.notifySubscribers(['playerRoster']);
     }
 
     /** Remove a player */
     removePlayer(playerId: number): void {
-        this.playerRoster.delete(playerId);
+        this.players.delete(playerId);
         this.notifySubscribers(['playerRoster']);
     }
 
@@ -259,6 +324,20 @@ export class UIStore {
     updateOrgGroups(groups: OrgGroupSummary[]): void {
         this.orgGroups = groups;
         this.notifySubscribers(['orgGroups']);
+    }
+
+    /** Replace the directive snapshot (`gp:directives` forwarding — own team +
+     *  allies, change-driven).
+     *
+     *  A full replace, not a merge: the worker's `onDirectiveState` is itself a
+     *  snapshot, so merging would resurrect directives the server has since
+     *  revoked and leave the org panel showing dead intent forever. */
+    updateDirectives(directives: DirectiveSummary[]): void {
+        this.directives.clear();
+        for (const d of directives) {
+            this.directives.set(d.directiveId, d);
+        }
+        this.notifySubscribers(['directives']);
     }
 
     /** Add game event */
@@ -316,7 +395,7 @@ export class UIStore {
     clear(): void {
         this.gameRulesParams.clear();
         this.teamRulesParams.clear();
-        this.playerRoster.clear();
+        this.players.clear();
         this.selection = { unitIds: [], cmdDescs: [] };
         this.economy.clear();
         this.unitQueues.clear();

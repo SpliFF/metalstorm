@@ -1,27 +1,72 @@
 import { describe, it, expect } from 'vitest';
-import { NullEngine, Scene, FreeCamera, Vector3, Color3, Mesh } from '@babylonjs/core';
-import { SquadRenderBackend } from './squad-render-backend.js';
+import {
+    NullEngine, Scene, FreeCamera, Vector3, Color3, Matrix, Mesh, MeshBuilder,
+} from '@babylonjs/core';
+import { SquadRenderBackend, FADE_FRAC, type MemberModel } from './squad-render-backend.js';
 import type { ImpostorAtlas } from './impostor-renderer.js';
 
-// Beta-units task 4b: members of defs with an impostor sprite atlas draw as
-// camera-facing billboard quads (per-(defId, team) thin-instance pools);
-// defs without an atlas keep the proxy capsule pools.
+// Members of defs with an impostor sprite atlas draw as camera-facing billboard
+// quads (per-(defId, team) thin-instance pools); defs without an atlas keep the
+// proxy capsule pools. With a 3D member model (M4) they swap to the real body
+// within impostorDistance and back to the sprite beyond it.
 
+/** A single-view (legacy) sheet: no elevation rows, so its cards stay upright. */
 const ATLAS: ImpostorAtlas = {
     diffuseUri: '', walkFrames: 1, idleFrames: 1, width: 12, height: 12,
 };
 
-function makeBackend(atlasDefs: Set<number>) {
+/** The `infantry_v2` shape the four infantry atlases declare (M8): 8 yaw x 3
+ *  pitch, 15/45/80 arc, column 0 = the unit's FRONT (phase 180 degrees). */
+const DIRECTIONAL: ImpostorAtlas = {
+    ...ATLAS,
+    layout: {
+        yawBins: 8, pitchBins: 3, frames: 1,
+        pitchDegrees: [15, 45, 80], azimuthPhase: Math.PI,
+    },
+};
+
+interface HostOpts {
+    /** defId → MemberModel factory (or undefined = model not available yet). */
+    models?: Map<number, (scene: Scene) => Mesh | undefined>;
+    impostorDist?: number;
+}
+
+function makeBackend(atlasDefs: Set<number>, opts: HostOpts = {}) {
     const engine = new NullEngine();
     const scene = new Scene(engine);
     const camera = new FreeCamera('cam', new Vector3(100, 50, 0), scene);
     scene.activeCamera = camera;
+    const memberMeshes = new Map<string, Mesh>();
     const backend = new SquadRenderBackend(scene, {
         getGroundHeight: () => 0,
         getTeamColor: () => new Color3(1, 0, 0),
         getImpostorAtlas: (defId) => (atlasDefs.has(defId) ? ATLAS : undefined),
+        getMemberModel: opts.models
+            ? (defId, team): MemberModel | undefined => {
+                const factory = opts.models!.get(defId);
+                if (!factory) return undefined;
+                const key = `${defId}:${team}`;
+                let mesh = memberMeshes.get(key);
+                if (!mesh) {
+                    const m = factory(scene);
+                    if (!m) return undefined;         // still loading
+                    memberMeshes.set(key, m);
+                    mesh = m;
+                }
+                return { mesh, restWorld: Matrix.Identity(), yOffset: 0, height: 10 };
+            }
+            : undefined,
+        getImpostorDistance: opts.models
+            ? () => opts.impostorDist ?? 900
+            : undefined,
     });
-    return { backend, scene, camera };
+    return { backend, scene, camera, memberMeshes };
+}
+
+/** A dedicated body mesh factory for the MODEL tier. */
+function bodyFactory(defId: number) {
+    return (scene: Scene) =>
+        MeshBuilder.CreateBox(`memberModel_d${defId}`, { size: 4 }, scene);
 }
 
 function findMesh(scene: Scene, prefix: string): Mesh | undefined {
@@ -54,25 +99,317 @@ describe('SquadRenderBackend impostor sprite members', () => {
         expect(findMesh(scene, 'squadSprite_')).toBeUndefined();
     });
 
-    it('re-billboards an idle sprite member when the camera moves', () => {
+    it('screen-aligned cards do NOT twist when the camera only moves position', () => {
+        // The anti-fan-out contract (PLAN M3): every card shares one rotation
+        // derived from the camera view, not from each member's position → the
+        // matrix is identical when only the camera translates.
         const { backend, scene, camera } = makeBackend(new Set([7]));
         backend.setSquadTeam(1, 0);
         const h = backend.createMember(1, 0, { defId: 7, variant: 0 });
         backend.updateMember(h, 0, 0, 0, 0, 0);
+        camera.computeWorldMatrix(true);
         backend.flush();
         const mesh = findMesh(scene, 'squadSprite_d7_t0')!;
-        const before = Array.from(
-            (mesh.thinInstanceGetWorldMatrices()[0]).toArray());
+        const before = Array.from((mesh.thinInstanceGetWorldMatrices()[0]).toArray());
 
-        // Member is NOT updated again — only the camera moves.
+        // Member is NOT updated again — only the camera translates (no rotation).
         camera.position.set(-100, 50, 0);
+        camera.computeWorldMatrix(true);
         backend.flush();
-        const after = Array.from(
-            (mesh.thinInstanceGetWorldMatrices()[0]).toArray());
+        const after = Array.from((mesh.thinInstanceGetWorldMatrices()[0]).toArray());
+        expect(after).toEqual(before);
+        // Ground anchor + half-height lift along the (unchanged) card up.
+        expect(after[13]).toBeCloseTo(ATLAS.height / 2);
+    });
+
+    it('re-orients screen-aligned cards when the camera rotates', () => {
+        const { backend, scene, camera } = makeBackend(new Set([7]));
+        backend.setSquadTeam(1, 0);
+        const h = backend.createMember(1, 0, { defId: 7, variant: 0 });
+        backend.updateMember(h, 0, 0, 0, 0, 0);
+        camera.computeWorldMatrix(true);
+        backend.flush();
+        const mesh = findMesh(scene, 'squadSprite_d7_t0')!;
+        const before = Array.from((mesh.thinInstanceGetWorldMatrices()[0]).toArray());
+
+        // Camera yaws — the shared card rotation must follow.
+        camera.rotation.y += 0.6;
+        camera.computeWorldMatrix(true);
+        backend.flush();
+        const after = Array.from((mesh.thinInstanceGetWorldMatrices()[0]).toArray());
         expect(after).not.toEqual(before);
-        // Translation (ground anchor + half height lift) is unchanged.
-        expect(after.slice(12, 15)).toEqual(before.slice(12, 15));
-        expect(after[13]).toBe(ATLAS.height / 2);
+    });
+
+    // §Card orientation: the card rotation is shared per frame AND whether it
+    // tilts with camera pitch is a property of the ATLAS (cardTiltsWithPitch).
+    describe('card orientation', () => {
+        /** The card's local up in world space = matrix row 1. */
+        const localUp = (m: Float32Array | number[]) =>
+            [m[4], m[5], m[6]] as [number, number, number];
+        /** Where the card's base edge sits = translation − halfH · localUp. */
+        const basePoint = (m: Float32Array | number[], halfH: number) =>
+            [m[12] - halfH * m[4], m[13] - halfH * m[5], m[14] - halfH * m[6]];
+
+        function spriteMatrix(atlas: ImpostorAtlas, pitchDown: number) {
+            const engine = new NullEngine();
+            const scene = new Scene(engine);
+            const camera = new FreeCamera('cam', new Vector3(0, 200, -200), scene);
+            camera.rotation.x = pitchDown; // look down at the ground
+            scene.activeCamera = camera;
+            const backend = new SquadRenderBackend(scene, {
+                getGroundHeight: () => 0,
+                getTeamColor: () => new Color3(1, 0, 0),
+                getImpostorAtlas: () => atlas,
+            });
+            backend.setSquadTeam(1, 0);
+            const h = backend.createMember(1, 0, { defId: 7, variant: 0 });
+            backend.updateMember(h, 0, 0, 0, 0, 0);
+            backend.flush();
+            const mesh = findMesh(scene, 'squadSprite_d7_t0')!;
+            return Array.from(mesh.thinInstanceGetWorldMatrices()[0].toArray());
+        }
+
+        it('keeps a single-view atlas card upright under a steep camera', () => {
+            // No pitch rows to show, so tilting would lay the one horizon-level
+            // view flat on the ground (a unit that looks like it fell over).
+            const m = spriteMatrix(ATLAS, 1.2);
+            const [ux, uy, uz] = localUp(m);
+            expect(ux).toBeCloseTo(0, 6);
+            expect(uy).toBeCloseTo(1, 6);
+            expect(uz).toBeCloseTo(0, 6);
+            // Upright ⇒ the lift is world-up ⇒ base sits on the ground.
+            expect(m[13]).toBeCloseTo(ATLAS.height / 2, 6);
+        });
+
+        it('tilts a pitch-row atlas card and keeps its base on the ground', () => {
+            const m = spriteMatrix(DIRECTIONAL, 1.2);
+            // The card leans back to face the steep camera...
+            expect(localUp(m)[1]).toBeLessThan(0.9);
+            // ...and the ground-anchor lift leans with it, so the base edge
+            // stays pinned to the member's ground position (0, 0, 0) rather
+            // than the card hovering half its height above the terrain.
+            const [bx, by, bz] = basePoint(m, DIRECTIONAL.height / 2);
+            expect(bx).toBeCloseTo(0, 5);
+            expect(by).toBeCloseTo(0, 5);
+            expect(bz).toBeCloseTo(0, 5);
+        });
+
+        it('shares one rotation across members, so a squad never fans out', () => {
+            const engine = new NullEngine();
+            const scene = new Scene(engine);
+            const camera = new FreeCamera('cam', new Vector3(0, 40, -40), scene);
+            camera.rotation.x = 0.8;
+            scene.activeCamera = camera;
+            const backend = new SquadRenderBackend(scene, {
+                getGroundHeight: () => 0,
+                getTeamColor: () => new Color3(1, 0, 0),
+                getImpostorAtlas: () => DIRECTIONAL,
+            });
+            backend.setSquadTeam(1, 0);
+            // Two members spread wide either side of the camera axis — the case
+            // that produced the visible radial fan-out at point-blank range.
+            const a = backend.createMember(1, 0, { defId: 7, variant: 0 });
+            const b = backend.createMember(1, 1, { defId: 7, variant: 0 });
+            backend.updateMember(a, -30, 0, 0, 0, 0);
+            backend.updateMember(b, 30, 0, 0, 0, 0);
+            backend.flush();
+            const mesh = findMesh(scene, 'squadSprite_d7_t0')!;
+            const ma = mesh.thinInstanceGetWorldMatrices()[0].toArray();
+            const mb = mesh.thinInstanceGetWorldMatrices()[1].toArray();
+            // Identical 3×3 rotation blocks; only the translation differs.
+            for (const i of [0, 1, 2, 4, 5, 6, 8, 9, 10]) {
+                expect(mb[i]).toBeCloseTo(ma[i], 6);
+            }
+            expect(mb[12]).not.toBeCloseTo(ma[12], 3);
+        });
+
+        it('selects a per-member atlas cell from its own facing', () => {
+            // Directionality comes from cell SELECTION, not card geometry: two
+            // members at the same spot with opposite headings must land in
+            // different atlas columns even though their cards are identical.
+            const engine = new NullEngine();
+            const scene = new Scene(engine);
+            const camera = new FreeCamera('cam', new Vector3(0, 20, -200), scene);
+            scene.activeCamera = camera;
+            const backend = new SquadRenderBackend(scene, {
+                getGroundHeight: () => 0,
+                getTeamColor: () => new Color3(1, 0, 0),
+                getImpostorAtlas: () => DIRECTIONAL,
+            });
+            backend.setSquadTeam(1, 0);
+            const a = backend.createMember(1, 0, { defId: 7, variant: 0 });
+            const b = backend.createMember(1, 1, { defId: 7, variant: 0 });
+            backend.updateMember(a, 0, 0, 0, 0, 0);          // facing +Z (away)
+            backend.updateMember(b, 0, 0, 0, Math.PI, 0);    // facing −Z (at cam)
+            backend.flush();
+            const cells = backend.getSpriteCells(7, 0)!;
+            expect(cells[0]).not.toBe(cells[1]);
+            // Camera is level with the members, so both pick the lowest
+            // elevation row (15°) — the difference is purely the yaw column.
+            const yawBins = DIRECTIONAL.layout!.yawBins;
+            expect(Math.floor(cells[0] / yawBins)).toBe(0);
+            expect(Math.floor(cells[1] / yawBins)).toBe(0);
+            // Opposite headings ⇒ columns half the ring apart.
+            const delta = Math.abs(cells[0] - cells[1]);
+            expect(Math.min(delta, yawBins - delta)).toBe(yawBins / 2);
+        });
+    });
+
+    it('draws a member within impostorDistance as the 3D model, not a sprite', () => {
+        const models = new Map([[7, bodyFactory(7)]]);
+        const { backend, scene } = makeBackend(new Set([7]), { models, impostorDist: 900 });
+        backend.setSquadTeam(1, 2);
+        const h = backend.createMember(1, 0, { defId: 7, variant: 0 });
+        // Camera at (100,50,0); place the member ~10 elmos away → inside 900.
+        backend.updateMember(h, 100, 0, 8, 0, 0);
+        backend.flush();
+
+        const model = findMesh(scene, 'memberModel_d7');
+        expect(model).toBeDefined();
+        expect(model!.thinInstanceCount).toBe(1);
+        // Pure model tier: full opacity, and no sprite slot held (slots are
+        // allocated lazily — a member that spawns close never touches the
+        // sprite pool).
+        expect(backend.getMemberFades(h)).toEqual({ model: 1 });
+    });
+
+    it('draws a member beyond impostorDistance as the sprite, not the 3D model', () => {
+        const models = new Map([[7, bodyFactory(7)]]);
+        const { backend, scene } = makeBackend(new Set([7]), { models, impostorDist: 900 });
+        backend.setSquadTeam(1, 0);
+        const h = backend.createMember(1, 0, { defId: 7, variant: 0 });
+        // Far from the camera (well beyond 900 elmos).
+        backend.updateMember(h, -2000, 0, 2000, 0, 0);
+        backend.flush();
+
+        const sprite = findMesh(scene, 'squadSprite_d7_t0')!;
+        expect(sprite.thinInstanceCount).toBe(1);
+        // No model instance is live.
+        const model = findMesh(scene, 'memberModel_d7');
+        if (model) {
+            const mm = model.thinInstanceGetWorldMatrices()[0]?.toArray();
+            if (mm) expect(Array.from(mm).every((v) => v === 0)).toBe(true);
+        }
+    });
+
+    it('migrates a member between sprite and model pools as it nears the camera', () => {
+        const models = new Map([[7, bodyFactory(7)]]);
+        const { backend, scene } = makeBackend(new Set([7]), { models, impostorDist: 900 });
+        backend.setSquadTeam(1, 0);
+        const h = backend.createMember(1, 0, { defId: 7, variant: 0 });
+
+        // Start far → sprite.
+        backend.updateMember(h, -3000, 0, 0, 0, 0);
+        backend.flush();
+        const sprite = findMesh(scene, 'squadSprite_d7_t0')!;
+        expect(sprite.thinInstanceCount).toBe(1);
+
+        // Move next to the camera → model, and the sprite slot goes dark.
+        backend.updateMember(h, 100, 0, 6, 0, 0);
+        backend.flush();
+        const model = findMesh(scene, 'memberModel_d7')!;
+        expect(model.thinInstanceCount).toBe(1);
+        const sm = sprite.thinInstanceGetWorldMatrices()[0].toArray();
+        expect(Array.from(sm).every((v) => v === 0)).toBe(true);
+
+        // Back out → sprite again, model slot goes dark.
+        backend.updateMember(h, -3000, 0, 0, 0, 0);
+        backend.flush();
+        expect(sprite.thinInstanceCount).toBeGreaterThanOrEqual(1);
+        const spriteLive = sprite.thinInstanceGetWorldMatrices()[0].toArray();
+        expect(Array.from(spriteLive).some((v) => v !== 0)).toBe(true);
+        const mm = model.thinInstanceGetWorldMatrices()[0].toArray();
+        expect(Array.from(mm).every((v) => v === 0)).toBe(true);
+    });
+
+    it('crossfades BOTH tiers inside the boundary band (M5 no-pop)', () => {
+        const models = new Map([[7, bodyFactory(7)]]);
+        const { backend, scene } = makeBackend(new Set([7]), { models, impostorDist: 900 });
+        backend.setSquadTeam(1, 0);
+        const h = backend.createMember(1, 0, { defId: 7, variant: 0 });
+        // Camera at (100,50,0); place the member at dist 820 → inside the
+        // [765,900] crossfade band (inner = 900·(1−0.15)).
+        backend.updateMember(h, 100, 50, 820, 0, 0);
+        backend.flush();
+
+        const fades = backend.getMemberFades(h);
+        expect(fades.model).toBeGreaterThan(0);
+        expect(fades.model).toBeLessThan(1);
+        expect(fades.sprite).toBeGreaterThan(0);
+        expect(fades.sprite).toBeLessThan(1);
+        // Complementary — the two opacities sum to 1 across the band.
+        expect(fades.model! + fades.sprite!).toBeCloseTo(1);
+        // Both tiers are actually DRAWN this frame (dual residency = the pop
+        // is dissolved, not a hard cut).
+        expect(findMesh(scene, 'memberModel_d7')!.thinInstanceCount).toBe(1);
+        expect(findMesh(scene, 'squadSprite_d7_t0')!.thinInstanceCount).toBe(1);
+    });
+
+    it('shifts the crossfade weighting toward the model as the member nears', () => {
+        const models = new Map([[7, bodyFactory(7)]]);
+        const { backend } = makeBackend(new Set([7]), { models, impostorDist: 900 });
+        backend.setSquadTeam(1, 0);
+        const h = backend.createMember(1, 0, { defId: 7, variant: 0 });
+        const inner = 900 * (1 - FADE_FRAC);
+
+        backend.updateMember(h, 100, 50, inner + 5, 0, 0);  // near the model edge
+        backend.flush();
+        const near = backend.getMemberFades(h);
+
+        backend.updateMember(h, 100, 50, 900 - 5, 0, 0);    // near the sprite edge
+        backend.flush();
+        const far = backend.getMemberFades(h);
+
+        expect(near.model!).toBeGreaterThan(far.model!);
+        expect(near.sprite!).toBeLessThan(far.sprite!);
+    });
+
+    it('stays on the sprite tier until the model finishes loading, then migrates', () => {
+        // Factory returns undefined (loading) first, then a mesh.
+        let ready = false;
+        const models = new Map<number, (s: Scene) => Mesh | undefined>([
+            [7, (s) => (ready ? MeshBuilder.CreateBox('memberModel_d7', { size: 4 }, s) : undefined)],
+        ]);
+        const { backend, scene } = makeBackend(new Set([7]), { models, impostorDist: 900 });
+        backend.setSquadTeam(1, 0);
+        const h = backend.createMember(1, 0, { defId: 7, variant: 0 });
+
+        // Close to the camera, but the model isn't loaded → sprite.
+        backend.updateMember(h, 100, 0, 6, 0, 0);
+        backend.flush();
+        expect(findMesh(scene, 'squadSprite_d7_t0')!.thinInstanceCount).toBe(1);
+        expect(findMesh(scene, 'memberModel_d7')).toBeUndefined();
+
+        // Model loads → next update migrates it in.
+        ready = true;
+        backend.updateMember(h, 100, 0, 6, 0, 0);
+        backend.flush();
+        expect(findMesh(scene, 'memberModel_d7')!.thinInstanceCount).toBe(1);
+    });
+
+    it('does NOT dispose the borrowed model mesh on backend.dispose()', () => {
+        const models = new Map([[7, bodyFactory(7)]]);
+        const { backend, scene } = makeBackend(new Set([7]), { models, impostorDist: 900 });
+        backend.setSquadTeam(1, 0);
+        const h = backend.createMember(1, 0, { defId: 7, variant: 0 });
+        backend.updateMember(h, 100, 0, 6, 0, 0);
+        backend.flush();
+        const model = findMesh(scene, 'memberModel_d7')!;
+        expect(model.isDisposed()).toBe(false);
+
+        backend.dispose();
+        // EntityRenderer owns the mesh — the backend leaves it alive.
+        expect(model.isDisposed()).toBe(false);
+    });
+
+    it('keeps members on the sprite tier when the host exposes no model API', () => {
+        // No models map → getMemberModel/getImpostorDistance undefined.
+        const { backend, scene } = makeBackend(new Set([7]));
+        backend.setSquadTeam(1, 0);
+        const h = backend.createMember(1, 0, { defId: 7, variant: 0 });
+        backend.updateMember(h, 100, 0, 6, 0, 0);   // right next to the camera
+        backend.flush();
+        expect(findMesh(scene, 'squadSprite_d7_t0')!.thinInstanceCount).toBe(1);
     });
 
     it('a released sprite slot stops rendering and is reusable', () => {

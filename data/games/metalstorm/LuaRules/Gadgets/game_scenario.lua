@@ -4,9 +4,10 @@
 -- room manifest names one (quickstart --direct manifest's top-level
 -- "scenario" field, threaded through as the `scenario` modoption — see
 -- rts/lobby_main.cpp runDirectStart): pre-set units, region ownership,
--- initial objectives, civilian population. No engine change — everything
--- below is existing Lua surface (Spring.CreateUnit/GiveOrderToUnit, the
--- backbone gadgets' GG.* APIs).
+-- initial objectives, civilian population, NPC faction AI slots. No engine
+-- change — everything below is existing Lua surface
+-- (Spring.CreateUnit/GiveOrderToUnit/SetTeamRulesParam, the backbone gadgets'
+-- GG.* APIs).
 --
 -- Consumers of the format:
 --   * scenarios/tutorial_01.lua    — PLAN-metalstorm-onboarding §2
@@ -49,6 +50,14 @@ end
 
 local SUPPORTED_VERSION = 1
 local DEFAULT_SPACING = 150        -- elmos between grid-spread squad instances
+local ALLIED_LOS = { allied = true }   -- same visibility as every other team param
+
+-- Scripted-slate kinds the shipped AI plugin implements
+-- (data/games/metalstorm/ai/strategos/scripted.lua's Builders). Kept here as a
+-- literal rather than read from the plugin because the plugin lives in a
+-- SEPARATE Lua state (the AI VM) that synced gadgets cannot reach — so the two
+-- lists are a documented pair: add a builder there, add its name here.
+local AI_SLATE_KINDS = { garrison = true, raid = true, toll = true }
 local DEFAULT_CONTROL_HOLD_FRAMES = 900   -- 30s hold to complete — mirrors
                                             -- objectives/generator.lua's
                                             -- CONTROL_HOLD_FRAMES; scenario
@@ -136,6 +145,58 @@ local function validate(scn, knownDefs)
         end
     end
 
+    -- AI slots (PLAN-metalstorm-ai.md §5). Validated hard: a typo'd slate kind
+    -- or region key would otherwise produce an AI that boots fine and then
+    -- silently never does anything, which is the worst possible failure mode
+    -- for a faction whose whole purpose is to act.
+    for i, a in ipairs(scn.ai or {}) do
+        local ctx = 'ai[' .. i .. ']'
+        if type(a.team) ~= 'number' then
+            errors[#errors + 1] = ctx .. ': needs a numeric "team"'
+        end
+        if a.profile ~= nil and type(a.profile) ~= 'string' then
+            errors[#errors + 1] = ctx .. ': "profile" must be a string'
+        end
+        local slate = a.slate
+        if slate ~= nil then
+            if type(slate) ~= 'table' then
+                errors[#errors + 1] = ctx .. ': "slate" must be a table'
+            else
+                for _, kind in ipairs(slate.kinds or {}) do
+                    if not AI_SLATE_KINDS[kind] then
+                        errors[#errors + 1] = ctx .. ': unknown slate kind "' ..
+                            tostring(kind) .. '"'
+                    end
+                end
+                if slate.kinds and #slate.kinds == 0 then
+                    errors[#errors + 1] = ctx .. ': "slate.kinds" is empty'
+                end
+                -- Region keys are checked against the LIVE graph when one is
+                -- available (GG.Regions.Keys()), so a scenario written against
+                -- a different map's graph fails at load, not at first tick.
+                local known = GG.Regions and GG.Regions.Keys and GG.Regions.Keys()
+                if known then
+                    local set = {}
+                    for _, k in ipairs(known) do set[k] = true end
+                    local function checkRegion(key, field)
+                        if key ~= nil and not set[key] then
+                            errors[#errors + 1] = ctx .. '.slate.' .. field ..
+                                ': unknown region "' .. tostring(key) .. '"'
+                        end
+                    end
+                    checkRegion(slate.home, 'home')
+                    for _, k in ipairs(slate.targets or {}) do checkRegion(k, 'targets') end
+                    for _, k in ipairs(slate.route or {}) do checkRegion(k, 'route') end
+                end
+            end
+        end
+        if a.stipend ~= nil then
+            if type(a.stipend) ~= 'table' or type(a.stipend.amount) ~= 'number' then
+                errors[#errors + 1] = ctx .. ': "stipend" needs a numeric "amount"'
+            end
+        end
+    end
+
     return errors
 end
 
@@ -153,8 +214,29 @@ local function stageRegions(regions)
     end
 end
 
+--- teamID -> true for every team this game actually has. A scenario may declare
+--- more sides than the launch supplied (an optional NPC faction is the common
+--- case): spawning for a team that doesn't exist is a hard engine error, so
+--- those entries are skipped with a warning instead.
+local function buildLiveTeams()
+    local live = {}
+    for _, teamID in ipairs(Spring.GetTeamList() or {}) do live[teamID] = true end
+    return live
+end
+
 local function stageUnits(units)
+    local liveTeams = buildLiveTeams()
+    local warned = {}
     for _, u in ipairs(units or {}) do
+        if u.team ~= nil and not liveTeams[u.team] then
+            if not warned[u.team] then
+                warned[u.team] = true
+                Spring.Echo('[game_scenario] WARNING: scenario spawns units for team ' ..
+                            tostring(u.team) .. ' which this game does not have — skipped ' ..
+                            '(add a player/AI slot for it in the room manifest)')
+            end
+            goto continue
+        end
         for _, off in ipairs(gridOffsets(u.count, u.spacing)) do
             local ux, uz = u.x + off[1], u.z + off[2]
             local uy = Spring.GetGroundHeight(ux, uz)
@@ -162,6 +244,106 @@ local function stageUnits(units)
             if unitID and u.orders then
                 for _, o in ipairs(u.orders) do
                     Spring.GiveOrderToUnit(unitID, resolveCmd(o.cmd), o.params or {}, o.options or {})
+                end
+            end
+        end
+        ::continue::
+    end
+end
+
+-- ============================================================
+-- AI slots (PLAN-metalstorm-ai.md §5) — scenario-authored faction brains
+-- ============================================================
+-- A scenario declares WHAT an AI slot should be; the launch (room manifest /
+-- `--ai <plugin>:<team>:<pos>`) decides WHETHER an AI is actually there, the
+-- same split `sides` already uses for players. Staging publishes the config as
+-- team rulesParams that the AI VM reads back over AI1
+-- (AI.getRulesParam('team', ...) — see ai/strategos/picture.lua readScript /
+-- readProfileHint). rulesParams rather than a file because this is per-team
+-- game state, not static map data: the AI4 file API is for the latter.
+--
+-- Keys published (the contract with picture.lua):
+--   ai_profile              which profiles/*.lua the slot wears
+--   ai_slate_kinds          comma list: garrison,raid,toll
+--   ai_slate_home           region key to hold
+--   ai_slate_targets        comma list of raid-target region keys
+--   ai_slate_route          comma list of region keys to deny/toll
+--   ai_slate_reach          raid radius in region-graph hops
+--
+-- Stipends (§5 NPC column: "small scripted stipend, scenario-granted, not
+-- objective income") are granted on a timer from GameFrame below — an NPC has
+-- no objective income by design, so without one it would issue a handful of
+-- opening directives and then be permanently broke.
+local aiStipends = {}    -- { { team, amount, periodFrames, nextFrame }, ... }
+
+local function commaList(list)
+    if type(list) ~= 'table' or #list == 0 then return nil end
+    return table.concat(list, ',')
+end
+
+local function stageAI(entries)
+    aiStipends = {}
+    for _, a in ipairs(entries or {}) do
+        local team = a.team
+        local function set(key, value)
+            if value ~= nil then
+                Spring.SetTeamRulesParam(team, key, value, ALLIED_LOS)
+            end
+        end
+
+        set('ai_profile', a.profile)
+
+        local slate = a.slate
+        if slate then
+            set('ai_slate_kinds',   commaList(slate.kinds))
+            set('ai_slate_home',    slate.home)
+            set('ai_slate_targets', commaList(slate.targets))
+            set('ai_slate_route',   commaList(slate.route))
+            set('ai_slate_reach',   slate.reach)
+        end
+
+        if a.stipend then
+            local periodSec = a.stipend.periodSec or 60
+            aiStipends[#aiStipends + 1] = {
+                team = team,
+                amount = a.stipend.amount,
+                periodFrames = math.max(1, math.floor(periodSec * 30)),
+                nextFrame = math.max(1, math.floor(periodSec * 30)),
+            }
+        end
+
+        -- Loud when the declaration has no brain behind it: the scenario asked
+        -- for a faction and the launch didn't supply one, so its units will sit
+        -- there doing nothing. A documented warning, never a silent no-op.
+        local ais = GG.Teams and GG.Teams.AIPlayers and GG.Teams.AIPlayers(team)
+        if ais and #ais == 0 then
+            Spring.Echo('[game_scenario] WARNING: scenario declares an AI on team ' ..
+                        tostring(team) .. ' (profile "' .. tostring(a.profile) ..
+                        '") but no AI player is on that team — add an --ai slot ' ..
+                        'for it or its forces will idle')
+        else
+            Spring.Echo('[game_scenario] staged AI team=' .. tostring(team) ..
+                        ' profile=' .. tostring(a.profile) ..
+                        ' slate=' .. tostring(slate and commaList(slate.kinds)))
+        end
+    end
+end
+
+--- Pay every due scripted stipend into the AI player's OWN pool. Own pool, not
+--- the team pool: an NPC's roles.lua entry sets teamAuthorityFallback=false, so
+--- the planner's governor only ever sees `authority_player_<id>` — money in the
+--- team pool would be invisible to it (§5 NPC column + §3.3 budget governor).
+local function payStipends(frame)
+    for _, s in ipairs(aiStipends) do
+        if frame >= s.nextFrame then
+            s.nextFrame = frame + s.periodFrames
+            local ais = GG.Teams and GG.Teams.AIPlayers and GG.Teams.AIPlayers(s.team) or {}
+            for _, playerID in ipairs(ais) do
+                if GG.Authority and GG.Authority.Award then
+                    -- Reason 'stipend' is already in authority/ledger.lua's
+                    -- REASON_CLASS (mint); a new string would land in the
+                    -- 'unmapped' bucket and warn.
+                    GG.Authority.Award({ player = playerID }, s.amount, 'stipend')
                 end
             end
         end
@@ -381,6 +563,7 @@ function gadget:GameStart()
     stageUnits(scn.units)
     stageCivilians(scn.civilians)
     stageObjectives(scn.objectives)
+    stageAI(scn.ai)
 
     GG.Scenario.name = name
     GG.Scenario.data = scn
@@ -398,4 +581,8 @@ function gadget:GameFrame(frame)
                    ' deferred objectives at frame 30')
         resolveDeferredObjectives()
     end
+
+    -- Scripted AI stipends (§5 NPC column). Cheap: the list is empty for every
+    -- scenario that declares none, which is all of them but the NPC ones.
+    if #aiStipends > 0 then payStipends(frame) end
 end

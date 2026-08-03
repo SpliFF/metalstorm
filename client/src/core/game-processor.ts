@@ -1630,9 +1630,16 @@ async function gpLoadSquadSystem(gameId: string, scene: Scene, er: EntityRendere
     gpSquadBackend = new SquadRenderBackend(scene, {
         getGroundHeight: (x, z) => er.getGroundHeight(x, z),
         getTeamColor: (t) => er.getTeamColor(t),
-        // Impostor-first defs (beta-units §2.1) draw members as sprite
-        // billboards from the impostor atlas registry instead of capsules.
+        // Members beyond impostorDistance draw as sprite billboards from the
+        // impostor atlas registry (impostors §2.1 / M3).
         getImpostorAtlas: (defId) => gpCtx.impostorRenderer?.getAtlas(defId),
+        // Members within impostorDistance draw the real low-poly 3D body (M4).
+        // EntityRenderer owns the loaded mesh + team material; it returns
+        // undefined until the model streams, so the member stays on the sprite
+        // tier until then and migrates in on the next update.
+        getMemberModel: (defId, team) => er.getMemberModel(defId, team),
+        getImpostorDistance: (defId) =>
+            gpDefCache?.getUnitDef(defId)?.lodThresholds?.impostorDistance,
     });
     const url = `/api/games/data/${gameId}/client/squads/index.js`;
     try {
@@ -2875,13 +2882,20 @@ async function gpBootLuaUI(map: ParsedMapData, mapSourceAbs: string, msg: GpInit
     // fired mid-cold-start and booted with empty UnitDefNames (the config-include
     // nil-index spam c6-1b eliminated). On a healthy server defs resolve in well
     // under this; on a dead one a degraded boot at the cap beats an infinite hang.
-    await Promise.race([
-        gpDefsReady,
-        new Promise<void>((resolve) => setTimeout(() => {
+    await new Promise<void>((resolve) => {
+        // Race gpDefsReady against a 90s cap, but clear the timer once either
+        // side wins — an uncleared timer fires this warning ~90s into every
+        // session regardless of whether defs (and boot) already succeeded
+        // seconds earlier, which is what a bare Promise.race did here before.
+        const timer = setTimeout(() => {
             postLog(3, '[gp] LuaUI boot: defs not ready after 90s — booting anyway (server never authed?)');
             resolve();
-        }, 90000)),
-    ]);
+        }, 90000);
+        void gpDefsReady.then(() => {
+            clearTimeout(timer);
+            resolve();
+        });
+    });
     if (getRuntime() || !gpEngine) return;  // a concurrent boot won the race while awaiting
     try {
         await init(null, msg.gameId, msg.lobbyUrl, mapDataTransfer, undefined, gl);

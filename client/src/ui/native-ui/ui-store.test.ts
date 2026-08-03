@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { UIStore } from './ui-store';
+import { UIStore, type DirectiveSummary } from './ui-store';
 
 describe('UIStore', () => {
     let store: UIStore;
@@ -146,6 +146,93 @@ describe('UIStore', () => {
         store.addGameEvent({ id: 999, type: 'new' });
         vi.runAllTimers();
         expect(callback).toHaveBeenCalled();
+    });
+
+    // ─── Directive mirror (`gp:directives`) — PLAN-macro-ui.md §3 ───
+
+    const directive = (directiveId: number, over: Partial<DirectiveSummary> = {}): DirectiveSummary => ({
+        directiveId, ownerTeam: 1, groupId: 7, type: 'DefendFront', priority: 2,
+        shape: 'Polyline', params: [1, 2, 3], requestedStrength: 200,
+        assignedStrength: 80, assignedSquadCount: 3, active: true,
+        createdAtFrame: directiveId * 10, expiresAtFrame: 0, ...over,
+    });
+
+    it('should store directives and index them by id and group', () => {
+        store.updateDirectives([directive(1), directive(2, { groupId: 9 })]);
+
+        expect(store.getDirectives()).toHaveLength(2);
+        expect(store.getDirective(1)?.type).toBe('DefendFront');
+        expect(store.getDirective(99)).toBeUndefined();
+        expect(store.getDirectivesForGroup(7).map(d => d.directiveId)).toEqual([1]);
+        expect(store.getDirectivesForGroup(9).map(d => d.directiveId)).toEqual([2]);
+    });
+
+    it('should return directives newest-first', () => {
+        store.updateDirectives([directive(1), directive(3), directive(2)]);
+        expect(store.getDirectives().map(d => d.directiveId)).toEqual([3, 2, 1]);
+    });
+
+    it('should replace rather than merge the directive snapshot', () => {
+        // A revoked directive must disappear — merging would leave the org
+        // panel showing dead intent for the rest of the game.
+        store.updateDirectives([directive(1), directive(2)]);
+        store.updateDirectives([directive(2)]);
+
+        expect(store.getDirectives().map(d => d.directiveId)).toEqual([2]);
+        expect(store.getDirective(1)).toBeUndefined();
+    });
+
+    it('should notify directive subscribers', () => {
+        vi.useFakeTimers();
+        const callback = vi.fn();
+        store.subscribe(['directives'], callback);
+
+        store.updateDirectives([directive(1)]);
+        vi.runAllTimers();
+
+        expect(callback).toHaveBeenCalled();
+    });
+
+    it('should carry the org-tree fields the OOB panel needs', () => {
+        // parentId / currentDirectiveId / postureJson arrive over gp:orgGroups
+        // and used to be dropped by this type — that omission is what blocked
+        // the org panel from being built against the store.
+        store.updateOrgGroups([{
+            groupId: 4, echelon: 'Platoon', ownerTeam: 1, parentId: 2,
+            name: '3rd Armoured', memberIds: [11, 12],
+            currentDirectiveId: 1, postureJson: '{"roe":"free"}', baseCostSum: 50,
+        }]);
+
+        const [g] = store.getOrgGroups();
+        expect(g.parentId).toBe(2);
+        expect(g.currentDirectiveId).toBe(1);
+        expect(g.postureJson).toBe('{"roe":"free"}');
+    });
+
+    it('should let a group resolve its current directive through the store', () => {
+        store.updateDirectives([directive(1, { groupId: 4, requestedStrength: 200, assignedStrength: 80 })]);
+        store.updateOrgGroups([{
+            groupId: 4, echelon: 'Platoon', ownerTeam: 1, parentId: 0,
+            name: '3rd Armoured', memberIds: [11], currentDirectiveId: 1,
+            postureJson: '', baseCostSum: 10,
+        }]);
+
+        // The exact lookup the org panel's fulfillment % does.
+        const [g] = store.getOrgGroups();
+        const d = store.getDirective(g.currentDirectiveId)!;
+        expect(d.assignedStrength / d.requestedStrength).toBeCloseTo(0.4);
+    });
+
+    it('should clear directives on clear()', () => {
+        store.updateDirectives([directive(1)]);
+        store.updateOrgGroups([{
+            groupId: 1, echelon: 'Squad', ownerTeam: 1, parentId: 0, name: 'A',
+            memberIds: [], currentDirectiveId: 0, postureJson: '', baseCostSum: 0,
+        }]);
+        store.clear();
+
+        expect(store.getDirectives()).toHaveLength(0);
+        expect(store.getOrgGroups()).toHaveLength(0);
     });
 
     it('should clear all state', () => {

@@ -1229,8 +1229,9 @@ inline std::vector<uint8_t> BuildRoomStateUpdate(const GameRoom& room) {
     for (const auto& s : room.aiSlots) {
         auto aiIdOff = fbb.CreateString(s.aiId);
         auto displayOff = fbb.CreateString(s.displayName);
+        auto profileOff = fbb.CreateString(s.profile);
         aiSlotOffsets.push_back(SpringWeb::CreateRoomAISlot(
-            fbb, aiIdOff, displayOff, s.team, s.startPos));
+            fbb, aiIdOff, displayOff, s.team, s.startPos, profileOff));
     }
     auto aiSlotsVec = fbb.CreateVector(aiSlotOffsets);
 

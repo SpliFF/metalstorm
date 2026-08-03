@@ -15,6 +15,7 @@
 
 import * as flatbuffers from 'flatbuffers';
 import { WebTransportAdapter, type GameTransport } from './transport.js';
+import type { AtlasLayout } from './impostor-atlas.js';
 import { ClientMessage } from '../protocol/spring-web/client-message.js';
 import { ClientPayload } from '../protocol/spring-web/client-payload.js';
 import { ServerMessage } from '../protocol/spring-web/server-message.js';
@@ -456,10 +457,9 @@ export interface UnitDefInfo {
 }
 
 export interface UnitImpostorInfo {
-    /** Atlas diffuse+alpha texture URI, 8 columns (headings) × N rows (anim
-     *  frames). FIDELITY-STANDIN: the bake pipeline (beta-units task 4b) hasn't
-     *  landed yet, so this may point at a placeholder/nonexistent asset — the
-     *  renderer doesn't load it yet either (flat grey quad until then). */
+    /** Atlas diffuse+alpha texture URI. v2 directional layout: `yawBins`
+     *  columns × (`pitchBins`·`frames`) rows, baked by
+     *  tools/fable-model-forge/bake_impostors.py (PLAN-metalstorm-impostors.md). */
     diffuseUri: string;
     /** Team-color mask atlas URI (R = blend amount), same layout. */
     teamMaskUri?: string;
@@ -470,6 +470,16 @@ export interface UnitImpostorInfo {
     /** Billboard quad size in elmos. */
     width: number;
     height: number;
+    /** Ground-anchor lift in elmos: how far above the unit's ground point the
+     *  quad's CENTRE sits. Absent = `height/2`, i.e. the model's ground point
+     *  was baked onto the cell's bottom edge. */
+    centreY?: number;
+    /** v2 directional grid, plus the arc and azimuth phase THIS atlas was baked
+     *  on. Resolved from the def JSON by `toImpostorInfo` (defs-fetch.ts) via
+     *  `normalizeAtlasLayout`, so the runtime reads what the baker declared
+     *  rather than assuming a global convention — see impostor-atlas.ts.
+     *  Default 1x1x1 = a legacy single-view atlas. */
+    layout?: AtlasLayout;
 }
 
 export interface UnitLodThresholds {

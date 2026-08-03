@@ -1276,6 +1276,14 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             case 'gp:orgGroups':
                 uiStore.updateOrgGroups(m.groups);
                 break;
+            // PLAN-macro-ui.md §3: directive snapshot (own team + allies) →
+            // native-UI store, for the org panel's fulfillment % / directive
+            // icons and the directive inspector. The worker has posted this
+            // since the macro lane landed, but nothing consumed it — a
+            // dead producer (ARCHITECTURE.md § "Client porting gotchas").
+            case 'gp:directives':
+                uiStore.updateDirectives(m.directives);
+                break;
             // Spring.AssignMouseCursor / ReplaceMouseCursor (widgets, worker) →
             // register a cursor pack under a logical name (ZK/BAR swap in their
             // own animated PNGs over the engine defaults).
@@ -1354,6 +1362,20 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         })),
     };
     gameWorker.postMessage(init, [offscreen]);
+
+    // Native-UI store mirror of the same lobby roster handed to the worker
+    // above (gp:init `players`) — wires ctx.store.playerRoster() for widgets
+    // like scoreboard-panel.js/authority-bar.js that need "which playerIds
+    // exist" beyond the local player. AIs excluded (no lobby player entry —
+    // see seedPlayersFromRoster's faithfulness note); mid-game join/reconnect
+    // restreaming isn't covered here, only the roster present at game start.
+    uiStore.updatePlayerRoster((lobbyUI?.room?.players ?? []).map((p) => ({
+        playerId: p.playerId,
+        name: p.username,
+        teamId: p.team,
+        isSpectator: p.isSpectator,
+        isAI: false,
+    })));
 
     // GW4-c5b: the interactive camera + scene.pick live in the worker, but the
     // canvas still receives DOM pointer/wheel events on the main thread (only its

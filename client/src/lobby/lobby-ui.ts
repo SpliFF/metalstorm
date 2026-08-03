@@ -65,6 +65,10 @@ interface RoomAISlotInfo {
     /// Map start position index assigned to this AI. -1 = unset
     /// (the lobby auto-fills at game start).
     startPos: number;
+    /// Personality/difficulty profile name (PLAN-metalstorm-ai.md §10 task
+    /// 6), e.g. "aggressive"/"caretaker" for the strategos AI. Empty = no
+    /// override (the plugin falls back to its own default).
+    profile: string;
 }
 
 /// One AI plugin the server discovered under content/engine/ai or
@@ -94,6 +98,20 @@ interface AvailableGameInfo {
     /// back to gameplay on the renderer side.
     lighting: string;
 }
+
+/// Mirrors ai/strategos/config.lua's Config.PROFILES allow-list. A
+/// documented duplicate, not a source of truth (like game_scenario.lua's
+/// AI_SLATE_KINDS) — the plugin lives in a separate Lua VM the client can't
+/// introspect, and only the "strategos" AI ships selectable profiles today.
+/// PLAN-metalstorm-ai.md §10 task 6.
+const STRATEGOS_PROFILES: { id: string; label: string }[] = [
+    { id: '', label: '(default)' },
+    { id: 'default', label: 'Balanced' },
+    { id: 'aggressive', label: 'Aggressive' },
+    { id: 'caretaker', label: 'Caretaker' },
+    { id: 'mentor', label: 'Mentor (suggest-only)' },
+    { id: 'npc_raider', label: 'NPC Raider (needs scenario slate)' },
+];
 
 interface CurrentRoom {
     id: number; name: string; mapId: string; gameId: string;
@@ -430,6 +448,7 @@ export class LobbyUI {
         const aiSlots: RoomAISlotInfo[] = (r.ai_slots ?? []).map((s: any) => ({
             aiId: s.ai_id ?? '', displayName: s.name ?? s.ai_id ?? '',
             team: s.team ?? 0, startPos: s.start_pos ?? -1,
+            profile: s.profile ?? '',
         }));
         const newGameId = r.game ?? '';
         this.currentRoom = {
@@ -824,6 +843,11 @@ export class LobbyUI {
             if (posSel && posSel !== document.activeElement) {
                 posSel.value = String(slot.startPos);
             }
+
+            const profileSel = row.querySelector('.ai-profile-select') as HTMLSelectElement | null;
+            if (profileSel && profileSel !== document.activeElement) {
+                profileSel.value = slot.profile;
+            }
         });
 
         return true;
@@ -949,10 +973,21 @@ export class LobbyUI {
                 + `<option value="0"${slot.team === 0 ? ' selected' : ''}>Team 1</option>`
                 + `<option value="1"${slot.team === 1 ? ' selected' : ''}>Team 2</option>`
                 + `</select>`;
+            // Personality/difficulty profile dropdown (§10 task 6) — only
+            // the strategos AI ships selectable profiles; other plugins
+            // (e.g. "null") get no dropdown at all.
+            const profileSel = slot.aiId !== 'strategos' ? '' : (canEdit
+                ? `<select class="ai-profile-select" name="ai-profile-${idx}" data-slot="${idx}">`
+                  + STRATEGOS_PROFILES.map(p =>
+                      `<option value="${this.esc(p.id)}"${p.id === slot.profile ? ' selected' : ''}>${this.esc(p.label)}</option>`
+                  ).join('')
+                  + `</select>`
+                : `<span class="player-status">${this.esc(slot.profile || '(default)')}</span>`);
             return `<div class="player-row ai-row"><span class="player-icon">🤖</span>`
                 + `<span class="player-name">${nameText}</span>`
                 + teamSel
                 + posSel
+                + profileSel
                 + `<span class="player-status">AI</span>`
                 + removeBtn
                 + `</div>`;
@@ -1086,6 +1121,15 @@ export class LobbyUI {
                 const idx = parseInt(el.dataset.slot ?? '-1');
                 const team = parseInt(el.value);
                 if (idx >= 0) this.setAITeam(idx, team);
+            };
+        });
+        // Per-AI-row personality/difficulty profile dropdowns (§10 task 6).
+        // Same data-slot addressing as the team dropdown above.
+        this.container.querySelectorAll('.ai-profile-select').forEach(sel => {
+            (sel as HTMLSelectElement).onchange = (e) => {
+                const el = e.target as HTMLSelectElement;
+                const idx = parseInt(el.dataset.slot ?? '-1');
+                if (idx >= 0) this.setAIProfile(idx, el.value);
             };
         });
 
@@ -1250,6 +1294,13 @@ export class LobbyUI {
         if (data?.id) this.updateCurrentRoomFromJson(data);
     }
 
+    /// Set (or, with '' clear) an AI slot's personality/difficulty profile
+    /// (PLAN-metalstorm-ai.md §10 task 6).
+    async setAIProfile(slotIndex: number, profile: string): Promise<void> {
+        const data = await this.lobbyPost('/api/rooms/ai/profile', { slot_index: slotIndex, profile });
+        if (data?.id) this.updateCurrentRoomFromJson(data);
+    }
+
     async setStartPos(
         target: { kind: 'self' } | { kind: 'player'; playerId: number } | { kind: 'ai'; slotIndex: number },
         posIndex: number,
@@ -1378,6 +1429,7 @@ export class LobbyUI {
                 displayName: s.displayName() ?? '',
                 team: s.team(),
                 startPos: s.startPos(),
+                profile: s.profile() ?? '',
             });
         }
         const newGameId = u.gameId() ?? '';

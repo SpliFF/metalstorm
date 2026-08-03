@@ -1,8 +1,13 @@
 import { describe, it, expect } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import {
     DEFAULT_ATLAS_LAYOUT,
     SINGLE_CELL_LAYOUT,
     PITCH_BIN_DEGREES,
+    AZIMUTH_PHASE_COL0_BACK,
+    AZIMUTH_PHASE_COL0_FRONT,
+    DEFAULT_AZIMUTH_PHASE,
     normalizeAtlasLayout,
     atlasCellCount,
     atlasRowCount,
@@ -12,6 +17,8 @@ import {
     atlasCellIndex,
     selectAtlasCell,
     atlasCellUv,
+    cardTiltsWithPitch,
+    type AtlasLayout,
 } from './impostor-atlas.js';
 
 // PLAN-metalstorm-impostors.md "Atlas format (v2)". The baker and the runtime
@@ -22,15 +29,21 @@ import {
 const deg = (d: number): number => (d * Math.PI) / 180;
 
 describe('normalizeAtlasLayout', () => {
+    // Normalising always RESOLVES the azimuth phase, so a consumer never has to
+    // repeat the defaulting rule (and can't forget to).
+    const backAnchored = { azimuthPhase: AZIMUTH_PHASE_COL0_BACK };
+
     it('defaults a missing/garbage layout to a single cell (legacy atlas)', () => {
-        expect(normalizeAtlasLayout(null)).toEqual(SINGLE_CELL_LAYOUT);
-        expect(normalizeAtlasLayout({ yawBins: 0, pitchBins: -3 })).toEqual(SINGLE_CELL_LAYOUT);
-        expect(normalizeAtlasLayout({ yawBins: NaN })).toEqual(SINGLE_CELL_LAYOUT);
+        expect(normalizeAtlasLayout(null)).toEqual({ ...SINGLE_CELL_LAYOUT, ...backAnchored });
+        expect(normalizeAtlasLayout({ yawBins: 0, pitchBins: -3 }))
+            .toEqual({ ...SINGLE_CELL_LAYOUT, ...backAnchored });
+        expect(normalizeAtlasLayout({ yawBins: NaN }))
+            .toEqual({ ...SINGLE_CELL_LAYOUT, ...backAnchored });
     });
 
     it('floors fractional bin counts', () => {
         expect(normalizeAtlasLayout({ yawBins: 8.9, pitchBins: 3.2, frames: 1 }))
-            .toEqual({ yawBins: 8, pitchBins: 3, frames: 1 });
+            .toEqual({ yawBins: 8, pitchBins: 3, frames: 1, ...backAnchored });
     });
 });
 
@@ -140,22 +153,27 @@ describe('atlasCellIndex', () => {
 });
 
 describe('selectAtlasCell', () => {
-    it('picks the dead-front column when the camera is in front of the instance', () => {
-        // Instance heading 0 = facing +Z; camera on +Z at 15deg elevation.
+    // A forge model's forward axis is -Z, and placing it at heading h rotates it
+    // about +Y, sending that forward to world (-sin h, ., -cos h). So a camera on
+    // +Z is looking at the BACK of an instance at heading 0 — relative yaw 0 is
+    // the back, not the front. `impostor-renderer.test.ts` pins that against
+    // Babylon's real transform; these cases pin the resulting column choice.
+    it('picks column 0 for a camera behind the instance (default phase)', () => {
+        // Camera on +Z at 15deg elevation, instance at heading 0 => its back.
         const cell = selectAtlasCell(0, 26.79, 100, 0, DEFAULT_ATLAS_LAYOUT);
         expect(cell % 8).toBe(0);
         expect(Math.floor(cell / 8)).toBe(0);
     });
 
-    it('picks the back column when the camera is behind the instance', () => {
+    it('picks the opposite column for a camera in front of the instance', () => {
         const cell = selectAtlasCell(0, 26.79, -100, 0, DEFAULT_ATLAS_LAYOUT);
         expect(cell % 8).toBe(4);
     });
 
     it('is relative to the instance heading, not the world axes', () => {
-        // Camera due +Z, instance turned to face the camera => front view again.
+        // Camera due +Z, instance at heading 0 => back view, column 0.
         const cell = selectAtlasCell(0, 26.79, 100, 0, DEFAULT_ATLAS_LAYOUT);
-        // Instance rotated 90deg: the camera now sees its left/right side.
+        // Instance rotated 90deg: the camera now sees one of its sides.
         const turned = selectAtlasCell(0, 26.79, 100, Math.PI / 2, DEFAULT_ATLAS_LAYOUT);
         expect(cell % 8).toBe(0);
         expect(turned % 8).toBe(6);
@@ -205,5 +223,185 @@ describe('atlasCellUv', () => {
 
     it('clamps an out-of-range cell into the grid', () => {
         expect(atlasCellUv(999, DEFAULT_ATLAS_LAYOUT)).toEqual(atlasCellUv(23, DEFAULT_ATLAS_LAYOUT));
+    });
+});
+
+// §Card orientation: a card may only tilt with the camera pitch if its atlas
+// actually holds elevation rows for the steep view to land on.
+describe('card tilt rule', () => {
+    it('tilts only when the atlas has more than one elevation row', () => {
+        expect(cardTiltsWithPitch(DEFAULT_ATLAS_LAYOUT)).toBe(true);
+        expect(cardTiltsWithPitch(SINGLE_CELL_LAYOUT)).toBe(false);
+    });
+
+    it('does not tilt a multi-column, single-row sheet', () => {
+        // 8 yaw views but one horizon-level elevation: turning is correct,
+        // tilting would lay that horizon view flat on the ground.
+        expect(cardTiltsWithPitch({ yawBins: 8, pitchBins: 1, frames: 1 })).toBe(false);
+    });
+
+    it('ignores flipbook frames — only elevation rows license a tilt', () => {
+        expect(cardTiltsWithPitch({ yawBins: 8, pitchBins: 1, frames: 4 })).toBe(false);
+        expect(cardTiltsWithPitch({ yawBins: 8, pitchBins: 2, frames: 4 })).toBe(true);
+    });
+});
+
+// ── Azimuth phase (user decision 2026-08-03, option (b)) ──────────────────
+//
+// Two bakers already ship disagreeing by exactly 180deg about which view sits in
+// column 0, each self-consistent with its own runtime. Rather than re-baking
+// either set, an atlas DECLARES its phase and the runtime reads it.
+describe('azimuth phase', () => {
+    const atPhase = (azimuthPhase: number): AtlasLayout =>
+        ({ ...DEFAULT_ATLAS_LAYOUT, azimuthPhase });
+
+    it('defaults to the back-anchored phase, i.e. today’s behaviour', () => {
+        expect(DEFAULT_AZIMUTH_PHASE).toBe(AZIMUTH_PHASE_COL0_BACK);
+        expect(AZIMUTH_PHASE_COL0_BACK).toBe(0);
+        expect(AZIMUTH_PHASE_COL0_FRONT).toBeCloseTo(Math.PI, 12);
+        // An undeclared atlas must select exactly what it selects today.
+        expect(normalizeAtlasLayout({ yawBins: 8, pitchBins: 3, frames: 1 }).azimuthPhase)
+            .toBe(AZIMUTH_PHASE_COL0_BACK);
+    });
+
+    it('puts the FRONT view in column 0 at a PI phase', () => {
+        // Camera on -Z at 15deg elevation = in front of a heading-0 instance.
+        const front = selectAtlasCell(0, 26.79, -100, 0, atPhase(AZIMUTH_PHASE_COL0_FRONT));
+        expect(front % 8).toBe(0);
+        // ...and its back moves to the opposite column.
+        const back = selectAtlasCell(0, 26.79, 100, 0, atPhase(AZIMUTH_PHASE_COL0_FRONT));
+        expect(back % 8).toBe(4);
+    });
+
+    it('offsets every column by the phase without disturbing the pitch row', () => {
+        for (const [x, z] of [[0, 100], [100, 100], [100, 0], [0, -100], [-100, -100]]) {
+            const base = selectAtlasCell(x, 26.79, z, 0, atPhase(AZIMUTH_PHASE_COL0_BACK));
+            const shifted = selectAtlasCell(x, 26.79, z, 0, atPhase(AZIMUTH_PHASE_COL0_FRONT));
+            expect(shifted % 8).toBe((base % 8 + 4) % 8);
+            expect(Math.floor(shifted / 8)).toBe(Math.floor(base / 8));
+        }
+    });
+
+    it('reads the phase in DEGREES off the wire and wraps out-of-range values', () => {
+        expect(normalizeAtlasLayout({ pitchBins: 3, azimuthPhaseDegrees: 180 }).azimuthPhase)
+            .toBeCloseTo(Math.PI, 12);
+        // -180 and 540 are the same column as 180.
+        expect(normalizeAtlasLayout({ azimuthPhaseDegrees: -180 }).azimuthPhase)
+            .toBeCloseTo(Math.PI, 12);
+        expect(normalizeAtlasLayout({ azimuthPhaseDegrees: 540 }).azimuthPhase)
+            .toBeCloseTo(Math.PI, 12);
+        // Garbage falls back to the default rather than producing NaN columns.
+        expect(normalizeAtlasLayout({ azimuthPhaseDegrees: Number.NaN }).azimuthPhase)
+            .toBe(DEFAULT_AZIMUTH_PHASE);
+    });
+
+    it('accepts the older `pitches` spelling so a declared arc is never lost', () => {
+        // The baker writes `pitchDegrees`; an older manifest says `pitches`.
+        // Dropping it would silently select rows against the WRONG elevations.
+        expect(normalizeAtlasLayout({ pitchBins: 3, pitches: [18, 42, 68] }).pitchDegrees)
+            .toEqual([18, 42, 68]);
+        expect(normalizeAtlasLayout({
+            pitchBins: 3, pitchDegrees: [15, 45, 80], pitches: [18, 42, 68],
+        }).pitchDegrees).toEqual([15, 45, 80]);
+    });
+});
+
+
+// ── Baker <-> runtime cross-check ─────────────────────────────────────────
+//
+// The top correctness risk the plan names. Rather than re-stating the baker's
+// numbers here (which is how the two conventions drifted apart in the first
+// place), this EXECUTES `impostor_convention.py` — the baker's own definition —
+// and asserts that for every cell of every shipped convention, feeding the
+// runtime the exact metadata the baker emits plus the exact camera direction it
+// rendered that cell from recovers precisely that cell.
+//
+// That round-trip is what makes a DECLARED phase sufficient and a re-bake
+// unnecessary (user decision 2026-08-03, option (b)).
+//
+// `impostor_convention.py` imports only `math` + `dataclasses` specifically so
+// this can run without the forge's numpy/pillow venv.
+describe('cross-check against impostor_convention.py', () => {
+    interface PyProfile {
+        meta: Record<string, unknown>;
+        /** Instance -> camera direction per cell, indexed [row][col]. */
+        camDirs: [number, number, number][][];
+    }
+
+    const forgeDir = fileURLToPath(new URL('../../../tools/fable-model-forge/', import.meta.url));
+    const dumped: Record<string, PyProfile> = JSON.parse(execFileSync('python3', ['-c', `
+import json, impostor_convention as ic
+out = {}
+for name in ('VEGETATION', 'INFANTRY_V2'):
+    c = getattr(ic, name)
+    out[name] = {
+        'meta': c.metadata(),
+        'camDirs': [[list(c.cam_dir(col, row)) for col in range(c.yaw_bins)]
+                    for row in range(c.pitch_bins)],
+    }
+print(json.dumps(out))
+`], { cwd: forgeDir, encoding: 'utf8' }));
+
+    it('exports the two profiles this runtime knows about', () => {
+        expect(Object.keys(dumped).sort()).toEqual(['INFANTRY_V2', 'VEGETATION']);
+    });
+
+    it('agrees on the phase anchors, and that undeclared means back-anchored', () => {
+        expect(dumped.VEGETATION.meta.azimuthPhaseDegrees).toBe(0);
+        expect(dumped.VEGETATION.meta.column0).toBe('back');
+        expect(dumped.INFANTRY_V2.meta.azimuthPhaseDegrees).toBe(180);
+        expect(dumped.INFANTRY_V2.meta.column0).toBe('front');
+        // VEGETATION declares no phase at all in Python — it takes the dataclass
+        // default — so this also pins "default == back == today's behaviour".
+        expect(DEFAULT_AZIMUTH_PHASE).toBe(AZIMUTH_PHASE_COL0_BACK);
+        expect(normalizeAtlasLayout(dumped.VEGETATION.meta).azimuthPhase)
+            .toBe(AZIMUTH_PHASE_COL0_BACK);
+        expect(normalizeAtlasLayout(dumped.INFANTRY_V2.meta).azimuthPhase)
+            .toBeCloseTo(AZIMUTH_PHASE_COL0_FRONT, 12);
+    });
+
+    it('keeps the legacy TS pitch fallback matching an arc that really ships', () => {
+        // PITCH_BIN_DEGREES is only a fallback for an atlas that lost its arc,
+        // but it must be one of the arcs that actually exist, not a third one.
+        const arcs = Object.values(dumped).map((p) => (p.meta.pitchDegrees as number[]).join());
+        expect(arcs).toContain([...PITCH_BIN_DEGREES].join());
+    });
+
+    for (const name of ['VEGETATION', 'INFANTRY_V2']) {
+        it(`round-trips every cell of ${name} through the emitted metadata`, () => {
+            const { meta, camDirs } = dumped[name];
+            // The runtime consumes the sidecar verbatim — no hand-translation.
+            const layout = normalizeAtlasLayout(meta);
+            expect(layout.pitchDegrees).toEqual(meta.pitchDegrees);
+            expect(atlasCellCount(layout)).toBe(camDirs.length * camDirs[0].length);
+
+            for (let row = 0; row < camDirs.length; row++) {
+                for (let col = 0; col < camDirs[row].length; col++) {
+                    const [x, y, z] = camDirs[row][col];
+                    const want = atlasCellIndex(col, row, 0, layout);
+                    // At heading 0 the model frame IS the world frame.
+                    expect(selectAtlasCell(x, y, z, 0, layout)).toBe(want);
+                    // Turning the instance and its camera together must not
+                    // change which cell is chosen.
+                    for (const h of [Math.PI / 2, -1.1, 2.7]) {
+                        const rx = x * Math.cos(h) + z * Math.sin(h);
+                        const rz = -x * Math.sin(h) + z * Math.cos(h);
+                        expect(selectAtlasCell(rx, y, rz, h, layout)).toBe(want);
+                    }
+                }
+            }
+        });
+    }
+
+    it('would catch a phase disagreement — the bug that actually shipped', () => {
+        // Sanity-check the check: reading an INFANTRY_V2 atlas as if it were
+        // back-anchored (what main's runtime did before the phase existed) must
+        // select the cell 180deg away, not the right one.
+        const layout = normalizeAtlasLayout(dumped.INFANTRY_V2.meta);
+        const asIfDefault: AtlasLayout = { ...layout, azimuthPhase: AZIMUTH_PHASE_COL0_BACK };
+        const [x, y, z] = dumped.INFANTRY_V2.camDirs[0][0];
+        expect(selectAtlasCell(x, y, z, 0, layout) % layout.yawBins).toBe(0);
+        expect(selectAtlasCell(x, y, z, 0, asIfDefault) % layout.yawBins)
+            .toBe(layout.yawBins / 2);
     });
 });

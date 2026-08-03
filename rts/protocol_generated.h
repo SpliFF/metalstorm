@@ -11667,6 +11667,7 @@ struct RoomAISlotT : public ::flatbuffers::NativeTable {
   std::string display_name{};
   uint8_t team = 0;
   int8_t start_pos = -1;
+  std::string profile{};
 };
 
 /// An AI player occupying a slot in a room's roster. Unlike human
@@ -11680,7 +11681,8 @@ struct RoomAISlot FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_AI_ID = 4,
     VT_DISPLAY_NAME = 6,
     VT_TEAM = 8,
-    VT_START_POS = 10
+    VT_START_POS = 10,
+    VT_PROFILE = 12
   };
   const ::flatbuffers::String *ai_id() const {
     return GetPointer<const ::flatbuffers::String *>(VT_AI_ID);
@@ -11696,6 +11698,13 @@ struct RoomAISlot FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   int8_t start_pos() const {
     return GetField<int8_t>(VT_START_POS, -1);
   }
+  /// Optional personality/difficulty profile name for AI plugins that
+  /// support one (e.g. Metalstorm's strategos: "aggressive", "caretaker")
+  /// — PLAN-metalstorm-ai.md §10 task 6. Empty = no override. Opaque to
+  /// the engine; set via POST /api/rooms/ai/profile.
+  const ::flatbuffers::String *profile() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_PROFILE);
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyOffset(verifier, VT_AI_ID) &&
@@ -11704,6 +11713,8 @@ struct RoomAISlot FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyString(display_name()) &&
            VerifyField<uint8_t>(verifier, VT_TEAM, 1) &&
            VerifyField<int8_t>(verifier, VT_START_POS, 1) &&
+           VerifyOffset(verifier, VT_PROFILE) &&
+           verifier.VerifyString(profile()) &&
            verifier.EndTable();
   }
   RoomAISlotT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -11727,6 +11738,9 @@ struct RoomAISlotBuilder {
   void add_start_pos(int8_t start_pos) {
     fbb_.AddElement<int8_t>(RoomAISlot::VT_START_POS, start_pos, -1);
   }
+  void add_profile(::flatbuffers::Offset<::flatbuffers::String> profile) {
+    fbb_.AddOffset(RoomAISlot::VT_PROFILE, profile);
+  }
   explicit RoomAISlotBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -11743,8 +11757,10 @@ inline ::flatbuffers::Offset<RoomAISlot> CreateRoomAISlot(
     ::flatbuffers::Offset<::flatbuffers::String> ai_id = 0,
     ::flatbuffers::Offset<::flatbuffers::String> display_name = 0,
     uint8_t team = 0,
-    int8_t start_pos = -1) {
+    int8_t start_pos = -1,
+    ::flatbuffers::Offset<::flatbuffers::String> profile = 0) {
   RoomAISlotBuilder builder_(_fbb);
+  builder_.add_profile(profile);
   builder_.add_display_name(display_name);
   builder_.add_ai_id(ai_id);
   builder_.add_start_pos(start_pos);
@@ -11757,15 +11773,18 @@ inline ::flatbuffers::Offset<RoomAISlot> CreateRoomAISlotDirect(
     const char *ai_id = nullptr,
     const char *display_name = nullptr,
     uint8_t team = 0,
-    int8_t start_pos = -1) {
+    int8_t start_pos = -1,
+    const char *profile = nullptr) {
   auto ai_id__ = ai_id ? _fbb.CreateString(ai_id) : 0;
   auto display_name__ = display_name ? _fbb.CreateString(display_name) : 0;
+  auto profile__ = profile ? _fbb.CreateString(profile) : 0;
   return SpringWeb::CreateRoomAISlot(
       _fbb,
       ai_id__,
       display_name__,
       team,
-      start_pos);
+      start_pos,
+      profile__);
 }
 
 ::flatbuffers::Offset<RoomAISlot> CreateRoomAISlot(::flatbuffers::FlatBufferBuilder &_fbb, const RoomAISlotT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
@@ -21300,6 +21319,7 @@ inline void RoomAISlot::UnPackTo(RoomAISlotT *_o, const ::flatbuffers::resolver_
   { auto _e = display_name(); if (_e) _o->display_name = _e->str(); }
   { auto _e = team(); _o->team = _e; }
   { auto _e = start_pos(); _o->start_pos = _e; }
+  { auto _e = profile(); if (_e) _o->profile = _e->str(); }
 }
 
 inline ::flatbuffers::Offset<RoomAISlot> RoomAISlot::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const RoomAISlotT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
@@ -21314,12 +21334,14 @@ inline ::flatbuffers::Offset<RoomAISlot> CreateRoomAISlot(::flatbuffers::FlatBuf
   auto _display_name = _o->display_name.empty() ? 0 : _fbb.CreateString(_o->display_name);
   auto _team = _o->team;
   auto _start_pos = _o->start_pos;
+  auto _profile = _o->profile.empty() ? 0 : _fbb.CreateString(_o->profile);
   return SpringWeb::CreateRoomAISlot(
       _fbb,
       _ai_id,
       _display_name,
       _team,
-      _start_pos);
+      _start_pos,
+      _profile);
 }
 
 inline RoomAIInfoT *RoomAIInfo::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {

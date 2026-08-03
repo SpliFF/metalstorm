@@ -56,7 +56,11 @@ export function loadDirManifest(baseUrl: string): Promise<DirManifest> {
         try {
             const resp = await fetch(`${baseUrl}/manifest.json`);
             if (!resp.ok) {
-                console.warn(
+                // A 404 here is an expected, documented case (see file header —
+                // "not every directory has one"), not a broken build step; only
+                // surface unexpected server responses (5xx etc.) as a warning.
+                const log = resp.status === 404 ? console.debug : console.warn;
+                log(
                     `[dir-manifest] no manifest at ${baseUrl}/manifest.json ` +
                     `(${resp.status}) — sidecar fetches will run blind`
                 );

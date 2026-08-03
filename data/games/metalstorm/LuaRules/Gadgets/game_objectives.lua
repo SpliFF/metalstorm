@@ -825,7 +825,21 @@ function gadget:GameFrame(frame)
         end
     end
 
-    Generator.tick(buildWorld(frame, evalTick, ctx), genState)
+    -- Stop generating once the war leaves 'active' (game_gameover.lua's §7
+    -- chain: winding_down → resolving → over). Existing objectives keep being
+    -- evaluated above — a final push during the grace window still resolves —
+    -- but new ones must not appear. During wind-down they are unwinnable by
+    -- construction (10 s left) and `resolve()` expires them again seconds
+    -- later; the generator was seen growing a settled Meridian board from 9
+    -- objectives to 34 on 2026-08-03, when the server was still simulating
+    -- past the declared win. The sim freeze (PostGamePolicy.h) is what stops
+    -- this after the result lands; this gate covers the grace window before
+    -- it, and does not depend on the freeze to be correct.
+    --
+    -- nil means "no gameover gadget in this game" → active, generate.
+    if (GG.WarState or 'active') == 'active' then
+        Generator.tick(buildWorld(frame, evalTick, ctx), genState)
+    end
 
     -- Resolve-retention: clear rulesParams for objectives past the 30s window.
     for i = #pendingClear, 1, -1 do

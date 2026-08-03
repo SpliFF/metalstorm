@@ -52,6 +52,7 @@ local Slate     = need('slate')
 local Planner   = need('planner')
 local Actuators = need('actuators')
 local Roles     = need('roles')
+local Lod       = need('lod')
 
 --=============================================================================
 -- Instance state (persists across onUpdate calls — the VM is long-lived).
@@ -66,6 +67,12 @@ local self = {
     rng           = nil,   -- seedable RNG (plan §6) — reproducible decisions
     actuators     = nil,   -- Actuators instance (the write surface)
     lastTickFrame = -1,    -- frame of the last strategic tick
+
+    -- LOD (lod.lua): `lodState` holds the de-escalation dwell tracker, `lodTier`
+    -- the tier the NEXT wake-up period is derived from. Re-derived every tick
+    -- from the Picture; a fresh VM starts at the role's alert floor.
+    lodState      = nil,
+    lodTier       = 0,
 
     -- Decay memory (plan §2 "enemy estimate"): per-region strength +
     -- lastSeenFrame, decayed toward "unknown". Rebuilds from sightings.
@@ -141,24 +148,35 @@ local function effectiveRole(state)
     return cached
 end
 
+--- Which personality is this slot? The scenario (game_scenario.lua's `ai`
+-- section) or a future lobby modoption publishes `ai_profile_<playerID>` /
+-- `ai_profile` on the team; Picture.readProfileHint reads it over AI1. The
+-- profile carries its own role binding, so choosing a profile chooses the
+-- deployment role too (§5 "one brain, three configs").
+--
+-- The hint is untrusted text going into a require(), so it is checked against
+-- Config.PROFILES; an unknown or missing name falls back to the default and
+-- says so, rather than erroring out a whole faction over a scenario typo.
 local function resolveProfile()
-    -- STUB: once AI1 (AI.getRulesParam) lands, read e.g.
-    --   local key = Picture.readProfileHint()  -- 'default'|'aggressive'|...
-    -- set by a gadget from the per-slot modoption (plan §10.6). For now,
-    -- default. Profiles carry their own role binding.
+    local hint = Picture.readProfileHint(resolvePlayerId())
     local name = Config.DEFAULT_PROFILE
+    local rejected = nil
+    if hint then
+        if Config.PROFILES[hint] then name = hint else rejected = hint end
+    end
     local ok, profile = pcall(need, 'profiles.' .. name)
     if not ok or type(profile) ~= 'table' then
         profile = need('profiles.default')
     end
-    return profile
+    return profile, rejected
 end
 
 --=============================================================================
 -- Boot (first onUpdate — the runtime has no onInit callin yet, only onUpdate).
 --=============================================================================
 local function boot(frame)
-    self.profile      = resolveProfile()
+    local profile, rejectedProfile = resolveProfile()
+    self.profile      = profile
     self.baseRole     = Roles.resolve(self.profile.role, Config)
     self.baseRole.teamId = resolveTeamId()
     self.playerId     = resolvePlayerId()
@@ -169,6 +187,8 @@ local function boot(frame)
     end
     self.roleCache = { [self.baseRole.id] = self.baseRole }
     self.role         = self.baseRole              -- effective role, re-derived each tick
+    self.lodState     = Lod.newState(self.baseRole)
+    self.lodTier      = self.lodState.tier
     self.rng          = Config.makeRNG(Config.SEED)   -- seed is fixed for repro
     self.actuators = Actuators.new({
         role    = self.role,
@@ -179,8 +199,16 @@ local function boot(frame)
     -- Narrate boot so the game log shows which brain woke up (plan §5.1:
     -- the AI's spend is socially visible; boot is the first line).
     self.actuators:chat(string.format(
-        "[strategos] online — role=%s profile=%s player=%d",
-        self.role.id, self.profile.id, self.playerId))
+        "[strategos] online — role=%s profile=%s player=%d lod=%d..%d",
+        self.role.id, self.profile.id, self.playerId,
+        self.baseRole.lodFloor or 0, self.baseRole.lodCeil or 0))
+    if rejectedProfile then
+        -- Loud, not silent: a scenario naming a profile this plugin doesn't
+        -- ship is an authoring bug, and a quietly-default AI hides it.
+        self.actuators:chat(string.format(
+            "[strategos] WARNING: unknown profile '%s' requested — using '%s'",
+            tostring(rejectedProfile), self.profile.id))
+    end
 end
 
 --=============================================================================
@@ -233,12 +261,25 @@ local function strategicTick(frame)
         config      = Config,
     })
 
+    -- 3b. LOD — pick the tier the NEXT wake-up period derives from (lod.lua).
+    --     Inside the measured window: it is a BFS over the region graph, i.e.
+    --     exactly the "table arithmetic over regions" §6 budgets. Narrate tier
+    --     changes so a faction going dormant (or waking) is legible in the log.
+    local prevTier = self.lodTier
+    self.lodTier = Lod.evaluate(self.lodState, picture, role, Config)
+
     -- Compute cost measured here, before the WRITE/narration I/O below.
     local computeMs = (t0 and clock) and (clock() - t0) or nil
 
+    if self.lodTier ~= prevTier then
+        self.actuators:chat(string.format(
+            "[strategos] lod %d -> %d (next tick in %d frames)",
+            prevTier, self.lodTier, Lod.periodFor(self.lodTier, role, Config)))
+    end
+
     -- 4. WRITE — the actuator is the ONLY module that emits commands. It maps
-    --    directives onto real verbs (or the standing-order fallback pre-AI2)
-    --    and announces intent (plan §5.1) + publishes the intent report
+    --    directives onto the real AI2 verbs (the standing-order fallback is
+    --    gone) and announces intent (plan §5.1) + publishes the intent report
     --    (PLAN-metalstorm-interaction.md §6.3).
     self.actuators:apply(plan, picture)
 
@@ -272,10 +313,12 @@ local function strategicTick(frame)
     end
     local econ = picture.economy or {}
     self.actuators:chat(string.format(
-        "[strategos] tick f=%d role=%s goals=%d directives=%d "
+        "[strategos] tick f=%d role=%s lod=%d%s goals=%d directives=%d "
         .. "regions(own/neu/enemy)=%d/%d/%d obj(active/done)=%d/%d ownStr=%d "
         .. "pool(own/team)=%d/%d budget=%d spent=%d%s",
-        frame, role.id, nGoals, nDir, rOwned, rNeutral, rEnemy, objActive, objDone,
+        frame, role.id, self.lodTier,
+        picture.script and (' script=' .. table.concat(picture.script.kinds or {}, '+')) or '',
+        nGoals, nDir, rOwned, rNeutral, rEnemy, objActive, objDone,
         math.floor(ownStrength), math.floor(econ.ownPool or 0),
         math.floor(econ.teamPool or 0), math.floor(plan.budget or 0),
         math.floor(plan.spent or 0), budgetTag))
@@ -305,9 +348,14 @@ function onUpdate(frame)
         end
     end
 
-    -- LOD gate (plan §3): dormant NPC factions think far less often. Until
-    -- AI.getLODLevel() exists, role.tickFrames is the static cadence.
-    local period = self.role and self.role.tickFrames or Config.STRATEGIC_TICK_FRAMES
+    -- LOD gate (plan §3 / PLAN-ai.md LOD table): a dormant NPC faction thinks
+    -- once a minute instead of once every five seconds. The tier is re-derived
+    -- at the end of every tick from that tick's Picture (lod.lua), clamped into
+    -- the role's own LOD band — so a co-commander is pinned at LOD 0 and only an
+    -- NPC ever actually goes quiet.
+    local period = self.role
+        and Lod.periodFor(self.lodTier, self.role, Config)
+        or Config.STRATEGIC_TICK_FRAMES
     if self.lastTickFrame >= 0 and (frame - self.lastTickFrame) < period then
         return
     end

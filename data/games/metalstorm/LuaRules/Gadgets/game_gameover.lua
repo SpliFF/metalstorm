@@ -79,6 +79,11 @@ local function joinIds(ids)
 end
 
 local function publishState()
+    -- GG mirror for other gadgets. The rulesParam is the *client's* view;
+    -- a gadget reading it back would go through a string round-trip to learn
+    -- something this gadget already knows, so publish both. game_objectives
+    -- reads this to stop generating new missions into a war that is ending.
+    GG.WarState = warState
     Spring.SetGameRulesParam('war_state', warState, PUBLIC)
     if winningTeam then
         Spring.SetGameRulesParam('war_winner_team', winningTeam, PUBLIC)

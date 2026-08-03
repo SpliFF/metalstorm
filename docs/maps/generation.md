@@ -29,17 +29,23 @@ the fine detail layer.
 
 ## 2. Library layout (`tools/mapgen/terragen/`)
 
-Pure numpy, no GPL dependencies (`numpy`/`scipy`/`scikit-image`/`Pillow` in
-`tools/mapgen/.venv`). All stages are data-in/data-out on `(H, W)` float64
-grids; no file I/O inside the library. Everything is deterministic: seeded
-`PCG64` permutation tables for noise, splitmix-style integer hashing for
-scatter (never Python's process-salted `hash()`), no OS randomness anywhere.
+Pure numpy, no GPL dependencies (`numpy`/`scipy`/`scikit-image`/`Pillow`/
+`numba` in `tools/mapgen/.venv`; numba is BSD-licensed, validated against the
+rejected GPL-3 alternatives — PLAN-maps.md §2b). All stages are data-in/
+data-out on `(H, W)` float64 grids; no file I/O inside the library. Everything
+is deterministic: seeded `PCG64` permutation tables for noise, splitmix-style
+integer hashing for scatter (never Python's process-salted `hash()`), no OS
+randomness anywhere. The numba `@njit` kernels (noise, `resolve_flats`,
+`d8_receivers`, the LEM solve, thermal erosion) are additionally
+**thread-count-independent** — every parallel (`prange`) loop writes one
+output element per iteration with no cross-thread accumulation, so results
+don't depend on `NUMBA_NUM_THREADS` (verified: `terragen/_selftest_numba.py`).
 
 | Module | Contents |
 |---|---|
-| `noise.py` | Seeded 2D simplex noise (vectorized), fBm, ridged multifractal (Musgrave weighting), billow, two-channel domain warping. |
-| `hydrology.py` | Priority-flood depression filling (via `skimage` morphological reconstruction), flat resolution (vectorized wavefront BFS), D8 steepest-descent receivers, **level-order** flow-tree processing, flow accumulation, river-network extraction, flow-path lengths. |
-| `erosion.py` | Fluvial erosion: the **implicit Braun & Willett (2013) stream-power solver** (`h' = (h + dt·U + F·h_recv') / (1+F)`, `F = K·A^m·dt/dx`), unconditionally stable, plus talus-angle **thermal erosion** (vectorized 8-neighbour transfers). Accepts a per-cell erodibility field (lithology variation). |
+| `noise.py` | Seeded 2D simplex noise, fBm, ridged multifractal (Musgrave weighting), billow, two-channel domain warping — fused `@njit` kernels (PLAN-maps.md §2b item 1: ~70-80× measured on fBm). |
+| `hydrology.py` | Priority-flood depression filling (via `skimage` morphological reconstruction, not ported — see below), D8 steepest-descent receivers and flat resolution (both `@njit`; `resolve_flats` walks an explicit frontier queue instead of re-scanning the whole grid every BFS ring — ~100-700× measured), **level-order** flow-tree processing, flow accumulation, river-network extraction, flow-path lengths. |
+| `erosion.py` | Fluvial erosion: the **implicit Braun & Willett (2013) stream-power solver** (`h' = (h + dt·U + F·h_recv') / (1+F)`, `F = K·A^m·dt/dx`), unconditionally stable, plus talus-angle **thermal erosion** (8-neighbour transfers) — both `@njit`. Accepts a per-cell erodibility field (lithology variation). |
 | `biomes.py` | Temperature (latitude gradient + altitude lapse + noise), moisture (noise + water-proximity + directional rain shadow), Whittaker-ish classification into 8 ids (grassland/forest/desert/tundra/snow/rock/wetland/water), soft blend weights. |
 | `roads.py` | Least-cost road planning: 8-connected Dijkstra on a decimated grid with slope² cost, water/bridge penalties and max-grade cutoffs; MST topology over settlements (+ optional loops); Chaikin smoothing; full-res rasterization to mask + distance field; **cut-and-fill grading** of terrain under roads. |
 | `settle.py` | Settlement-site scoring (windowed flatness × water proximity × biome desirability × edge falloff) and greedy separated site selection. |
@@ -94,13 +100,20 @@ seed + config (+ optional layout skeleton)
 
 The **eroded heightfield is cached** at
 `$TMPDIR/meridian2_eroded_<seed>_<res>.npy` — erosion is the long pole
-(~11 min at 2049²), and contract/packaging iteration shouldn't re-pay it.
-Delete the cache after changing anything upstream of stage 3 (base synthesis,
+(~75 s/iter at 2049² post-numba-port, down from ~11 min for the full 30-iter
+run pre-port), and contract/packaging iteration shouldn't re-pay it. Delete
+the cache after changing anything upstream of stage 3 (base synthesis,
 erosion parameters, seed).
 
-Timings (M2 Pro, 2049²): erosion ~11 min (dominant; a numba port measured at
-~20× is queued — PLAN-maps.md §2b), bake+cluster ~5 min, everything else
-seconds. `--fast --preview-only` iterates in ~20 s.
+Timings (M2 Pro, real layout terrain, numba-ported — PLAN-maps.md §2b item 1):
+erosion per-iteration ~0.15 s @513², ~2.5 s @2049² (was ~0.4 s / ~22-40 s
+pre-port — `resolve_flats` alone went from seconds-to-tens-of-seconds down to
+tens of milliseconds), ~17.5 s @4097². `fill_depressions` (skimage, not
+ported — reimplementing morphological reconstruction bit-exact was judged too
+risky) and `topo_levels` (plain numpy, not ported) are now the dominant
+remaining per-iteration cost at 4097² (~7.6 s and ~4.2 s respectively) — the
+next lever if 4097² needs to get faster still. bake+cluster ~5 min,
+everything else seconds. `--fast --preview-only` iterates in ~20 s.
 
 ## 4. Gameplay contracts on realistic terrain
 
@@ -360,9 +373,12 @@ props cannot raise the far-zoom vertex bill. At strategic zoom that is a 151×
 ## 10. Known limits & queued improvements
 
 Tracked with citations and measurements in **PLAN-maps.md §2b**: numba port of
-the hot kernels (~20× generation speedup), monotone-water-surface river
-carving with `min`-combine and meander offsets, mapgen4-style rain-shadow
-sweep, Galin-style road segment masks (kills 8-connected staircase) + trunk
+the hot kernels — **done** (item 1: ~9-80× depending on stage, `resolve_flats`
+alone ~100-700×; `fill_depressions`/`topo_levels` are now the dominant
+remaining per-iteration cost and are the next lever if needed) —
+monotone-water-surface river carving with `min`-combine and meander offsets,
+mapgen4-style rain-shadow sweep, Galin-style road segment masks (kills
+8-connected staircase) + trunk
 reuse discount, v2 streamed texture pages (TEXTURE_2D_ARRAY cache, CPU-side
 residency), client river-ribbon water surfaces, hemi-octahedral impostors.
 Real-world DEM was evaluated and rejected as shipping terrain (30 m Nyquist,

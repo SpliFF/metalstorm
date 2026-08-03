@@ -1,18 +1,35 @@
 """Hydrology: depression filling, D8 flow routing, accumulation, rivers.
 
-Everything is vectorized numpy. The one algorithm that is naturally serial
-(downstream accumulation / upstream solves) is handled with *level-order
-processing*: cells are grouped by their depth in the flow (receiver) tree and
-each level is processed as one vectorized operation. Tree depth on a 2k x 2k
-map is a few thousand, so passes stay cheap.
+Everything is vectorized numpy, except `resolve_flats` and `d8_receivers`
+which are numba `@njit` kernels (PLAN-maps.md §2b item 1 — profiling showed
+`resolve_flats` dominates the per-iteration LEM cost by ~1-2 orders of
+magnitude over everything else it calls alongside, ~22-25s/iter @2049² vs
+~1-2s for `fill_depressions` and <1s for the rest combined, so it was pulled
+into the numba port even though it lives outside erosion.py). The one
+algorithm that is naturally serial (downstream accumulation / upstream
+solves) is handled with *level-order processing*: cells are grouped by their
+depth in the flow (receiver) tree and each level is processed as one
+vectorized operation. Tree depth on a 2k x 2k map is a few thousand, so
+passes stay cheap.
 
 Grid convention: elevation arrays are (H, W) float64, row-major, cell index
 i = r * W + c. D8 receivers point to the steepest-descent neighbour
 (diagonals use distance sqrt(2)); outlet/pit cells receive themselves.
+
+`resolve_flats` is also an algorithmic win, not just a JIT one: the original
+formulation re-scans the *entire* grid every BFS ring (dilate-and-mask over
+the full (H, W) boolean arrays, repeated once per step of the wavefront).
+The numba version walks an explicit frontier queue, touching each flat cell
+exactly once — O(#flat cells) total instead of O(steps x H x W). Both
+compute the exact same distance-labelling (same 8-neighbour adjacency, same
+BFS order, same off-by-one "unreached cells get the final step count" edge
+case), so output is byte-identical; see
+`tools/mapgen/terragen/_selftest_numba.py`.
 """
 from __future__ import annotations
 
 import numpy as np
+from numba import njit, prange
 
 # D8 neighbour offsets (dr, dc) and distances
 _D8 = np.array(
@@ -20,6 +37,12 @@ _D8 = np.array(
     dtype=np.int64,
 )
 _D8_DIST = np.array([np.sqrt(2), 1, np.sqrt(2), 1, 1, np.sqrt(2), 1, np.sqrt(2)])
+
+# Same 8 directions, unzipped to flat int64 arrays for the numba kernels
+# below (and reused by erosion.py's thermal_erode, which needs identical
+# ordering for bit-identical tie-breaks/summation order).
+_D8_DR = np.ascontiguousarray(_D8[:, 0])
+_D8_DC = np.ascontiguousarray(_D8[:, 1])
 
 
 def fill_depressions(dem: np.ndarray) -> np.ndarray:
@@ -36,67 +59,153 @@ def fill_depressions(dem: np.ndarray) -> np.ndarray:
     return reconstruction(seed, dem, method="erosion").astype(dem.dtype)
 
 
+@njit(cache=True)
+def _resolve_flats_kernel(filled: np.ndarray, epsilon: float) -> np.ndarray:
+    H, W = filled.shape
+
+    # A cell is "flat-stuck" if no 8-neighbour is strictly lower. Border
+    # cells always drain off-map (has_lower forced True => never flat), so
+    # only interior cells need the neighbour scan.
+    flat = np.zeros((H, W), dtype=np.bool_)
+    for r in range(1, H - 1):
+        for c in range(1, W - 1):
+            v = filled[r, c]
+            has_lower = False
+            for k in range(8):
+                if filled[r + _D8_DR[k], c + _D8_DC[k]] < v:
+                    has_lower = True
+                    break
+            flat[r, c] = not has_lower
+
+    any_flat = False
+    for r in range(H):
+        for c in range(W):
+            if flat[r, c]:
+                any_flat = True
+                break
+        if any_flat:
+            break
+    if not any_flat:
+        return filled.copy()
+
+    # Initial frontier (distance 1): flat cells adjacent to a non-flat
+    # neighbour with elevation <= this cell's (an actual drain point).
+    # Out-of-bounds neighbours count as non-flat (matches the original's
+    # constant-False-padded flat mask) but never arise for in-bounds flat
+    # cells since border cells are never flat.
+    init_r = np.empty(H * W, dtype=np.int64)
+    init_c = np.empty(H * W, dtype=np.int64)
+    n_init = 0
+    for r in range(H):
+        for c in range(W):
+            if not flat[r, c]:
+                continue
+            v = filled[r, c]
+            near_drain = False
+            for k in range(8):
+                nr = r + _D8_DR[k]
+                nc = c + _D8_DC[k]
+                if nr < 0 or nr >= H or nc < 0 or nc >= W:
+                    nb_flat = False
+                    nb_elev = v
+                else:
+                    nb_flat = flat[nr, nc]
+                    nb_elev = filled[nr, nc]
+                if (not nb_flat) and nb_elev <= v:
+                    near_drain = True
+                    break
+            if near_drain:
+                init_r[n_init] = r
+                init_c[n_init] = c
+                n_init += 1
+
+    visited = np.zeros((H, W), dtype=np.bool_)
+    dist = np.zeros((H, W), dtype=np.int32)
+    for i in range(n_init):
+        visited[init_r[i], init_c[i]] = True
+
+    cur_r = init_r[:n_init].copy()
+    cur_c = init_c[:n_init].copy()
+    step = 1
+    final_step = step
+    max_steps = H + W
+
+    while cur_r.size > 0:
+        for i in range(cur_r.size):
+            dist[cur_r[i], cur_c[i]] = step
+
+        cap = cur_r.size * 8
+        nxt_r = np.empty(cap, dtype=np.int64)
+        nxt_c = np.empty(cap, dtype=np.int64)
+        n_nxt = 0
+        for i in range(cur_r.size):
+            r = cur_r[i]
+            c = cur_c[i]
+            for k in range(8):
+                nr = r + _D8_DR[k]
+                nc = c + _D8_DC[k]
+                if nr < 0 or nr >= H or nc < 0 or nc >= W:
+                    continue
+                if flat[nr, nc] and not visited[nr, nc]:
+                    visited[nr, nc] = True
+                    nxt_r[n_nxt] = nr
+                    nxt_c[n_nxt] = nc
+                    n_nxt += 1
+
+        step += 1
+        if step > max_steps:
+            final_step = step
+            cur_r = np.empty(0, dtype=np.int64)
+            cur_c = np.empty(0, dtype=np.int64)
+            break
+        cur_r = nxt_r[:n_nxt].copy()
+        cur_c = nxt_c[:n_nxt].copy()
+        final_step = step
+
+    out = np.empty((H, W), dtype=filled.dtype)
+    for r in range(H):
+        for c in range(W):
+            d = dist[r, c]
+            if flat[r, c] and not visited[r, c]:
+                d = final_step
+            out[r, c] = filled[r, c] + epsilon * d
+    return out
+
+
 def resolve_flats(filled: np.ndarray, epsilon: float = 1e-4) -> np.ndarray:
     """Impose a tiny drainage gradient across flat areas (incl. filled
     depressions) so D8 routing never stalls.
 
-    Vectorized wavefront BFS: start from flat cells that touch strictly lower
-    ground ("outlets"), sweep inward, each wave adding `epsilon` elevation.
-    Returns a routing elevation (filled + epsilon * wave-distance); use it for
-    flow routing only, never as display/collision terrain.
+    Vectorized wavefront BFS (numba): start from flat cells that touch
+    strictly lower ground ("outlets"), sweep inward, each wave adding
+    `epsilon` elevation. Returns a routing elevation (filled + epsilon *
+    wave-distance); use it for flow routing only, never as display/collision
+    terrain.
     """
-    H, W = filled.shape
-    pad = np.pad(filled, 1, mode="edge")
+    return _resolve_flats_kernel(np.ascontiguousarray(filled), epsilon)
 
-    # A cell is "flat-stuck" if no 8-neighbour is strictly lower.
-    has_lower = np.zeros((H, W), dtype=bool)
-    for dr, dc in _D8:
-        nb = pad[1 + dr : 1 + dr + H, 1 + dc : 1 + dc + W]
-        has_lower |= nb < filled
-    # Border cells always drain off-map.
-    has_lower[0, :] = has_lower[-1, :] = True
-    has_lower[:, 0] = has_lower[:, -1] = True
 
-    flat = ~has_lower
-    if not flat.any():
-        return filled.copy()
-
-    dist = np.zeros((H, W), dtype=np.int32)
-    frontier = np.zeros((H, W), dtype=bool)
-    # Outlet ring: flat cells adjacent to a non-flat cell of equal-or-lower
-    # routing elevation (i.e. same flat surface touching drainage).
-    padflat = np.pad(flat, 1, mode="constant", constant_values=False)
-    near_drain = np.zeros((H, W), dtype=bool)
-    for dr, dc in _D8:
-        nbflat = padflat[1 + dr : 1 + dr + H, 1 + dc : 1 + dc + W]
-        nbelev = pad[1 + dr : 1 + dr + H, 1 + dc : 1 + dc + W]
-        near_drain |= (~nbflat) & (nbelev <= filled)
-    frontier = flat & near_drain
-
-    visited = frontier.copy()
-    step = 1
-    while frontier.any():
-        dist[frontier] = step
-        newf = np.zeros((H, W), dtype=bool)
-        padv = np.pad(visited, 1, mode="constant", constant_values=False)
-        for dr, dc in _D8:
-            nb = padv[1 + dr : 1 + dr + H, 1 + dc : 1 + dc + W]
-            newf |= nb
-        frontier = flat & ~visited & newf & np.isclose(
-            filled, filled, atol=0
-        )  # same-surface constraint handled by flat mask
-        # Only spread across cells of (approximately) the same flat elevation
-        # as at least one visited neighbour:
-        frontier &= newf
-        visited |= frontier
-        step += 1
-        if step > H + W:  # safety
-            break
-
-    # Unreached flat cells (fully enclosed with no drain — true endorheic
-    # basin floor after filling shouldn't exist, but guard anyway).
-    dist[flat & ~visited] = step
-    return filled + epsilon * dist.astype(filled.dtype)
+@njit(cache=True, parallel=True)
+def _d8_receivers_kernel(elev: np.ndarray) -> np.ndarray:
+    H, W = elev.shape
+    best_idx = np.empty(H * W, dtype=np.int64)
+    for r in prange(H):
+        for c in range(W):
+            self_idx = r * W + c
+            v = elev[r, c]
+            best_slope = 0.0
+            best = self_idx
+            for k in range(8):
+                nr = r + _D8_DR[k]
+                nc = c + _D8_DC[k]
+                if nr < 0 or nr >= H or nc < 0 or nc >= W:
+                    continue
+                slope = (v - elev[nr, nc]) / _D8_DIST[k]
+                if slope > best_slope:
+                    best_slope = slope
+                    best = nr * W + nc
+            best_idx[self_idx] = best
+    return best_idx
 
 
 def d8_receivers(elev: np.ndarray) -> np.ndarray:
@@ -105,24 +214,7 @@ def d8_receivers(elev: np.ndarray) -> np.ndarray:
     Cells with no lower neighbour (pits — after filling these are only map
     borders / lake spill cells) receive themselves.
     """
-    H, W = elev.shape
-    pad = np.pad(elev, 1, mode="constant", constant_values=np.inf)
-
-    best_slope = np.zeros((H, W), dtype=elev.dtype)
-    best_idx = np.arange(H * W, dtype=np.int64).reshape(H, W)  # default: self
-
-    rows = np.arange(H)[:, None]
-    cols = np.arange(W)[None, :]
-    for k, (dr, dc) in enumerate(_D8):
-        nb = pad[1 + dr : 1 + dr + H, 1 + dc : 1 + dc + W]
-        slope = (elev - nb) / _D8_DIST[k]
-        better = slope > best_slope
-        nb_r = np.clip(rows + dr, 0, H - 1)
-        nb_c = np.clip(cols + dc, 0, W - 1)
-        cand = nb_r * W + nb_c
-        best_idx = np.where(better, cand, best_idx)
-        best_slope = np.where(better, slope, best_slope)
-    return best_idx.ravel()
+    return _d8_receivers_kernel(np.ascontiguousarray(elev))
 
 
 def topo_levels(receivers: np.ndarray) -> list[np.ndarray]:

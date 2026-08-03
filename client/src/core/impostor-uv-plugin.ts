@@ -21,8 +21,13 @@
  *    on nearby squad members). Shared rotation = a single mat4 uniform applied
  *    to the local vertex position, so the instance matrix carries only
  *    translation + uniform scale and never changes. The ground anchor lift is
- *    applied AFTER the rotation so a pitched card keeps its feet on the
- *    terrain instead of swinging its base into the air.
+ *    applied BEFORE the rotation so it rotates WITH the card, keeping a pitched
+ *    card's base pinned to its placement point instead of hovering above the
+ *    terrain.
+ *
+ *    Whether a card tilts at all is a property of its ATLAS, not a global
+ *    choice — see `cardTiltsWithPitch()` in impostor-atlas.ts; callers drive
+ *    `billboard` from it.
  *
  * Uniform scale is required on the instance matrix for (2) to be exact:
  * T * S * R == T * R * S only while S is uniform. Feature placements scale
@@ -133,8 +138,16 @@ export class ImpostorUvPlugin extends MaterialPluginBase {
             // Runs before instancesVertex, so positionUpdated / normalUpdated /
             // uvUpdated are all still in LOCAL space here.
             CUSTOM_VERTEX_UPDATE_POSITION: `#ifdef IMPOSTOR_BILLBOARD
-                positionUpdated = (uBillboardRot * vec4(positionUpdated, 0.0)).xyz;
+                // Lift BEFORE the rotation, so it rotates WITH the card (the
+                // card's own local up) rather than along world up. The quad is
+                // modelled centred on its origin; shifting it up by half its
+                // height first puts its base edge on the origin, and the base
+                // then stays pinned to the placement point at every tilt.
+                // Lifting after the rotation instead would translate a pitched
+                // (near-horizontal) card straight up in world space and leave
+                // it hovering one lift above the terrain.
                 positionUpdated.y += uImpostorLift;
+                positionUpdated = (uBillboardRot * vec4(positionUpdated, 0.0)).xyz;
                 #ifdef NORMAL
                     normalUpdated = (uBillboardRot * vec4(normalUpdated, 0.0)).xyz;
                 #endif
