@@ -487,14 +487,27 @@ bool RoomManager::JoinRoom(
         player.isSpectator = asSpectator;
         if (!asSpectator) {
             if (room.IsFull()) return false;
-            int team0 = 0, team1 = 0;
-            for (const auto& p : room.players) {
-                if (!p.isSpectator) {
-                    if (p.team == 0) team0++;
-                    else team1++;
+            // Seat the joiner on the least-occupied of the room's slot
+            // teams, in offer order. This used to hardcode 0-vs-1, which on
+            // a scenario whose sides are teams 0 and 4 dropped every joiner
+            // onto team 1 — a team the scenario stages no army for
+            // (endtoend D19, PLAN-metalstorm-wars.md §7.4). On a legacy
+            // two-team room SlotTeams() is {0,1} and this is the same
+            // round-robin it always was.
+            const std::vector<uint8_t> slotTeams = room.SlotTeams();
+            player.team = slotTeams.front();
+            size_t best = static_cast<size_t>(-1);
+            for (const uint8_t t : slotTeams) {
+                size_t occupants = 0;
+                for (const auto& p : room.players)
+                    if (!p.isSpectator && p.team == t) occupants++;
+                for (const auto& a : room.aiSlots)
+                    if (a.team == t) occupants++;
+                if (occupants < best) {
+                    best = occupants;
+                    player.team = t;
                 }
             }
-            player.team = (team0 <= team1) ? 0 : 1;
         }
         SLOG(SPRING_LOG_INFO, "player '%s' joined room %u%s",
             username.c_str(), roomId, asSpectator ? " (spectator)" : "");
@@ -609,9 +622,20 @@ bool RoomManager::EnlistSpectator(uint32_t roomId, uint32_t playerId, uint8_t te
             usedTeams.insert(ai.team);
         }
 
-        // Assign to the first unused team, or team 0 if all are used
-        team = 0;
-        for (uint8_t t = 0; t < it->second.maxPlayers; ++t) {
+        // Assign to the first unoccupied slot team, or the first one if
+        // every side is taken. Walks the room's offered teams rather than
+        // 0..maxPlayers, so an enlisting spectator lands on a side the
+        // scenario actually stages an army for (§7.4).
+        //
+        // Deliberate behaviour change for a legacy room with maxPlayers > 2:
+        // this used to be the ONE path that could seat somebody on team 2 or
+        // 3, while JoinRoom above only ever produced 0 or 1 and the room
+        // screen only ever offered two. Enlist was the outlier — it could put
+        // a player on a team the rest of the room could not represent — and
+        // it now agrees with them. On a 2-slot room this is identical.
+        const std::vector<uint8_t> slotTeams = it->second.SlotTeams();
+        team = slotTeams.front();
+        for (const uint8_t t : slotTeams) {
             if (usedTeams.find(t) == usedTeams.end()) {
                 team = t;
                 break;

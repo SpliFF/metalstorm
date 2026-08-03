@@ -34,6 +34,9 @@ import { RoomListUpdate } from '../protocol/spring-web/room-list-update.js';
 import { RoomStateUpdate } from '../protocol/spring-web/room-state-update.js';
 import { renderTemplate } from '../ui/ui.js';
 import {
+    defaultTeamForNewSlot, renderSideOptions, warSidesForRoom,
+} from './war-sides.js';
+import {
     getDefaultLobbyTemplates,
     type LobbyTemplates,
 } from '../ui/lobby/loader.js';
@@ -1128,10 +1131,16 @@ export class LobbyUI {
                 + `</select>`;
         };
 
+        // The room's slot list (PLAN-metalstorm-wars.md §7.4). A slot picks a
+        // SIDE — Compact / Union — and the server has already resolved each
+        // side to the team its army is staged on. Falls back to the legacy
+        // Team 1 / Team 2 for every room whose game ships no scenarios.
+        const sides = warSidesForRoom(r.modOptions);
+
         // Pre-render each player row through the template so games
-        // can restyle the row layout. The `{{startpos_html}}`
-        // placeholder receives the start-pos select (possibly
-        // empty if the map ships no positions).
+        // can restyle the row layout. The `{{startpos_html}}` and
+        // `{{team_options}}` placeholders receive the start-pos select
+        // (possibly empty if the map ships no positions) and the side list.
         const playersHtml = r.players.map(p => {
             const canEdit = preGame && (p.playerId === this.myPlayerId || amHost);
             const posSel = renderStartPosSelect(
@@ -1142,8 +1151,7 @@ export class LobbyUI {
                 host_icon: p.isHost ? '★' : '●',
                 ready_class: p.ready ? 'ready' : '',
                 select_disabled: p.playerId !== this.myPlayerId ? ' disabled' : '',
-                team0_selected: p.team === 0 ? ' selected' : '',
-                team1_selected: p.team === 1 ? ' selected' : '',
+                team_options: renderSideOptions(sides, p.team),
                 status: p.isSpectator ? 'Spectator' : (p.ready ? '✓ Ready' : '—'),
                 startpos_html: posSel,
             });
@@ -1163,16 +1171,21 @@ export class LobbyUI {
             const canEdit = preGame && amHost;
             const posSel = renderStartPosSelect(
                 slot.startPos, `ai:${idx}`, canEdit);
-            // Team dropdown mirrors the player-row layout: a two-option
-            // select tagged with data-slot so the change handler below
-            // can resolve it back to the slot index without replaying
-            // the whole roster. Disabled for non-hosts and while a
+            // Side dropdown mirrors the player-row layout: one option per
+            // side the room offers, tagged with data-slot so the change
+            // handler below can resolve it back to the slot index without
+            // replaying the whole roster. Disabled for non-hosts and while a
             // game is running.
+            //
+            // This select is where endtoend D19 lived: it offered team
+            // indices 0 and 1, so the AI opponent on a Meridian war landed on
+            // team 1 — a compact teammate the scenario stages no army for —
+            // and the union's whole force was skipped. It now offers the
+            // scenario's sides, so the opponent lands on team 4 with an army.
             const teamDisabled = canEdit ? '' : ' disabled';
             const teamSel =
                 `<select class="ai-team-select" name="ai-team-${idx}" data-slot="${idx}"${teamDisabled}>`
-                + `<option value="0"${slot.team === 0 ? ' selected' : ''}>Team 1</option>`
-                + `<option value="1"${slot.team === 1 ? ' selected' : ''}>Team 2</option>`
+                + renderSideOptions(sides, slot.team)
                 + `</select>`;
             // Personality/difficulty profile dropdown (§10 task 6) — only
             // the strategos AI ships selectable profiles; other plugins
@@ -1210,12 +1223,19 @@ export class LobbyUI {
                         + (ai.isEngineProvided ? ' (engine)' : '');
                     return `<option value="${this.esc(ai.id)}">${label}</option>`;
                 }).join('');
+                // Default the new slot to a side nobody holds, so "Add AI" on
+                // a fresh room produces an *opponent* rather than a second
+                // occupant of the host's side.
+                const occupied = [
+                    ...r.players.filter(p => !p.isSpectator).map(p => p.team),
+                    ...r.aiSlots.map(s => s.team),
+                ];
+                const aiDefaultTeam = defaultTeamForNewSlot(sides, occupied);
                 addAIHtml =
                     `<div class="ai-add-row">`
                     + `<select id="ai-add-select" class="team-select">${options}</select>`
                     + `<select id="ai-add-team" class="team-select">`
-                    + `<option value="0">Team 1</option>`
-                    + `<option value="1">Team 2</option>`
+                    + renderSideOptions(sides, aiDefaultTeam)
                     + `</select>`
                     + `<button id="ai-add-btn" class="primary">Add AI</button>`
                     + `</div>`;

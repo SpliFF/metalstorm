@@ -85,6 +85,121 @@ bool HasVictoryObjective(lua_State* L, int index) {
     return found;
 }
 
+/// Collect the distinct `team` values named by the array field `key` on the
+/// table at `index` (`units`, `ai`, …). Entries with no numeric `team` are
+/// ignored — `stageUnits` treats those as "any team" and so does this.
+std::vector<uint8_t> CollectTeams(lua_State* L, int index, const char* key) {
+    std::vector<uint8_t> out;
+    lua_getfield(L, index, key);
+    if (!lua_istable(L, -1)) {
+        lua_pop(L, 1);
+        return out;
+    }
+    const int arr = lua_gettop(L);
+    const lua_Integer n = static_cast<lua_Integer>(lua_rawlen(L, arr));
+    for (lua_Integer i = 1; i <= n; ++i) {
+        lua_rawgeti(L, arr, i);
+        if (lua_istable(L, -1)) {
+            lua_getfield(L, -1, "team");
+            if (lua_isnumber(L, -1)) {
+                const auto team =
+                    static_cast<uint8_t>(lua_tointeger(L, -1));
+                if (std::find(out.begin(), out.end(), team) == out.end())
+                    out.push_back(team);
+            }
+            lua_pop(L, 1);
+        }
+        lua_pop(L, 1);
+    }
+    lua_pop(L, 1);
+    return out;
+}
+
+/// Read the `sides` block and collapse it to one entry per faction, applying
+/// the §7.4 resolution rule. See ScenarioDiscovery.h's ScenarioSide for why
+/// the unit of a room slot is a side rather than a team.
+std::vector<ScenarioDiscovery::ScenarioSide> ReadSides(lua_State* L, int index) {
+    std::vector<ScenarioDiscovery::ScenarioSide> out;
+
+    const std::vector<uint8_t> unitTeams = CollectTeams(L, index, "units");
+    const std::vector<uint8_t> aiTeams = CollectTeams(L, index, "ai");
+
+    lua_getfield(L, index, "sides");
+    if (!lua_istable(L, -1)) {
+        lua_pop(L, 1);
+        return out;
+    }
+    const int sides = lua_gettop(L);
+    const lua_Integer n = static_cast<lua_Integer>(lua_rawlen(L, sides));
+    for (lua_Integer i = 1; i <= n; ++i) {
+        lua_rawgeti(L, sides, i);
+        if (lua_istable(L, -1)) {
+            const int entry = lua_gettop(L);
+            const std::string faction = GetStringField(L, entry, "faction");
+            lua_getfield(L, entry, "team");
+            const bool hasTeam = lua_isnumber(L, -1) != 0;
+            const auto team = static_cast<uint8_t>(lua_tointeger(L, -1));
+            lua_pop(L, 1);
+
+            if (!faction.empty() && hasTeam) {
+                // Group by faction, preserving first-declaration order — the
+                // first playable side is the one a room's host is seated on,
+                // so the order the author wrote is the order the lobby shows.
+                auto it = std::find_if(
+                    out.begin(), out.end(),
+                    [&](const ScenarioDiscovery::ScenarioSide& s) {
+                        return s.faction == faction;
+                    });
+                if (it == out.end()) {
+                    ScenarioDiscovery::ScenarioSide s;
+                    s.faction = faction;
+                    out.push_back(std::move(s));
+                    it = out.end() - 1;
+                }
+                if (std::find(it->teams.begin(), it->teams.end(), team) ==
+                    it->teams.end())
+                    it->teams.push_back(team);
+            }
+        }
+        lua_pop(L, 1);
+    }
+    lua_pop(L, 1);
+
+    const auto contains = [](const std::vector<uint8_t>& v, uint8_t t) {
+        return std::find(v.begin(), v.end(), t) != v.end();
+    };
+
+    for (auto& side : out) {
+        std::sort(side.teams.begin(), side.teams.end());
+
+        // Rule 3: the lowest declared team the scenario actually stages a
+        // starting force for. Without this the lobby would happily seat a
+        // player on a side's *second* team and hand them an empty army —
+        // which, on the AI's slot, is exactly endtoend D19.
+        side.team = side.teams.empty() ? 0 : side.teams.front();
+        for (const uint8_t t : side.teams) {
+            if (contains(unitTeams, t)) {
+                side.team = t;
+                side.staged = true;
+                break;
+            }
+        }
+
+        // Rule 2: an NPC side is one whose every declared team is claimed by
+        // a `scenario.ai` entry. Data-driven, so Meridian's `reavers` is
+        // excluded by what the scenario says rather than by its name.
+        side.npc = !side.teams.empty();
+        for (const uint8_t t : side.teams) {
+            if (!contains(aiTeams, t)) {
+                side.npc = false;
+                break;
+            }
+        }
+    }
+
+    return out;
+}
+
 /// Evaluate one scenario file and fill `out`. Returns false when the file
 /// does not evaluate to a table — a scenario that needs sim globals at
 /// file scope lands here, is logged once, and is simply not offered.
@@ -110,6 +225,7 @@ bool LoadOne(const fs::path& file, ScenarioDiscovery::ScenarioInfo& out) {
             out.displayName = out.id;
         out.tutorial = GetBoolField(L, scn, "tutorial", false);
         out.terminal = HasVictoryObjective(L, scn);
+        out.sides = ReadSides(L, scn);
 
         // `world.map` names the map the scenario is authored for. A
         // scenario with no `world` table (or no `map` in it) simply has no
@@ -161,9 +277,23 @@ std::vector<ScenarioInfo> Discover(const std::string& gamePath) {
         SLOG(SPRING_LOG_INFO, "discovered %zu scenario(s) in '%s'", out.size(),
              dir.string().c_str());
         for (const auto& s : out) {
-            SLOG(SPRING_LOG_INFO, "  - %s (%s) map='%s'%s%s", s.displayName.c_str(),
-                 s.id.c_str(), s.mapId.c_str(), s.tutorial ? " tutorial" : "",
-                 s.terminal ? " terminal" : " NO-TERMINAL-CONDITION");
+            SLOG(SPRING_LOG_INFO, "  - %s (%s) map='%s'%s%s sides='%s'",
+                 s.displayName.c_str(), s.id.c_str(), s.mapId.c_str(),
+                 s.tutorial ? " tutorial" : "",
+                 s.terminal ? " terminal" : " NO-TERMINAL-CONDITION",
+                 EncodeWarSides(s).c_str());
+            for (const auto& side : s.sides) {
+                if (side.npc || side.staged)
+                    continue;
+                // A playable side the scenario stages no starting force for
+                // is a room slot that begins with no army (endtoend D19).
+                SLOG(SPRING_LOG_WARNING,
+                     "    scenario '%s' side '%s' resolves to team %u, which "
+                     "it stages no starting units for — a player or AI on "
+                     "that side would start with nothing",
+                     s.id.c_str(), side.faction.c_str(),
+                     static_cast<unsigned>(side.team));
+            }
         }
     }
 
@@ -185,6 +315,39 @@ const ScenarioInfo* DefaultForMap(const std::vector<ScenarioInfo>& scenarios,
             best = &s;
     }
     return best;
+}
+
+std::vector<ScenarioSide> PlayableSides(const ScenarioInfo& info) {
+    std::vector<ScenarioSide> out;
+    for (const auto& s : info.sides) {
+        if (!s.npc)
+            out.push_back(s);
+    }
+    return out;
+}
+
+std::string EncodeWarSides(const ScenarioInfo& info) {
+    std::string out;
+    for (const auto& s : PlayableSides(info)) {
+        // The faction key is authored content, but it lands in a modoption
+        // that is split on ',' and ':' downstream — a key containing either
+        // would silently reshape the list, so skip it rather than emit a
+        // string no parser can recover.
+        if (s.faction.find(',') != std::string::npos ||
+            s.faction.find(':') != std::string::npos) {
+            SLOG(SPRING_LOG_WARNING,
+                 "scenario '%s': side faction '%s' contains ',' or ':' and "
+                 "cannot be encoded as a war_sides entry — side dropped",
+                 info.id.c_str(), s.faction.c_str());
+            continue;
+        }
+        if (!out.empty())
+            out += ',';
+        out += s.faction;
+        out += ':';
+        out += std::to_string(static_cast<unsigned>(s.team));
+    }
+    return out;
 }
 
 const ScenarioInfo* FindById(const std::vector<ScenarioInfo>& scenarios,
