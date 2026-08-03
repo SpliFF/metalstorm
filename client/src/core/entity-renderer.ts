@@ -2659,8 +2659,20 @@ export class EntityRenderer {
         return this.entityMeta.get(id);
     }
 
-    getEntityPosition(id: number): { x: number; y: number; z: number } | null {
-        return this.interpolator.getInterpolated(id, this.cursorFrame);
+    /**
+     * Interpolated pose of an entity, by default at the presentation cursor.
+     *
+     * `atFrame` asks for a *different* frame off the same sample buffer.
+     * PLAN-latency L2.3 uses it to read a shot's target where it is expected to
+     * be on the shot's `impactFrame` — normally a frame the interpolator
+     * already holds real samples for, because entity state streams at the
+     * leading edge `E` while the cursor presents `D` frames behind it. Beyond
+     * the newest sample `getInterpolated` falls back to its own bounded
+     * extrapolate-then-hold, so the caller never has to special-case it.
+     */
+    getEntityPosition(id: number, atFrame?: number): { x: number; y: number; z: number } | null {
+        return this.interpolator.getInterpolated(
+            id, atFrame !== undefined ? atFrame : this.cursorFrame);
     }
 
     /**

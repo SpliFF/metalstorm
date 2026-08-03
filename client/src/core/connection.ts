@@ -610,6 +610,11 @@ export interface WeaponDefInfo {
     energyCost: number;
     /** Behaviour bitfield. See `GameWeaponDef.flags` in protocol.fbs. */
     flags: number;
+    /** `flags` bit 0 — the sim guides this weapon's projectile at its target
+     *  every tick (`WeaponDef::tracks`). PLAN-latency L2.3 reads it to decide
+     *  whether an invented Tier-C flight may bend toward a moving target: a
+     *  guided missile should, an unguided shell should not. */
+    tracks: boolean;
     customParams: Record<string, string>;
     /** Lobby URL of the projectile's `.glb`, or empty when the def
      *  doesn't reference a model — the renderer uses procedural shapes

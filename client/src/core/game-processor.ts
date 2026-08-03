@@ -1455,6 +1455,12 @@ export function gpInit(msg: GpInitToWorker): void {
     projectileRenderer.setLightPool(gpCtx.fxLightPool);
     projectileRenderer.setDistortion(gpDistortion);
     projectileRenderer.setMuzzleFlare(gpMuzzleFlare);
+    // PLAN-latency L2.3: lets an invented Tier-C flight read where its target
+    // is expected to be on the frame it lands, off the same interpolator the
+    // units themselves are drawn from — so a guided bolt and the unit it is
+    // chasing are quoting one source, not two.
+    projectileRenderer.setTargetPoseProvider(
+        (unitId, frame) => entityRenderer.getEntityPosition(unitId, frame));
 
     // Resolve weapon-def texture names → KTX2 URLs (shared by projectiles, CEG,
     // muzzle flares). Async; the renderers consult it lazily when they first see

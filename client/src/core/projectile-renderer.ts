@@ -67,6 +67,10 @@ import {
 } from './projectile-trails.js';
 import {
     type CosmeticFlight,
+    type CosmeticTracking,
+    TRACK_VEL_SAMPLE_LAG,
+    applyCosmeticTracking,
+    beginCosmeticTracking,
     evalCosmeticFlight,
     solveCosmeticFlight,
 } from './cosmetic-flight.js';
@@ -311,6 +315,11 @@ interface LiveProjectile {
     /// tick instead of being integrated in wall time, so the bolt is a pure
     /// function of the frame and lands exactly on its explosion.
     cosmetic: CosmeticFlight | null;
+    /// PLAN-latency L2.3 — non-null when this invented flight is guided
+    /// (`weaponDef.tracks`) at a live unit. Bends the middle of the arc toward
+    /// the target's current expected pose at `impactFrame`; both endpoints stay
+    /// pinned, so convergence is untouched.
+    cosmeticTrack: CosmeticTracking | null;
 }
 
 /** Active beam: from-point, to-point and birth time. Each tick the
@@ -442,6 +451,14 @@ export class ProjectileRenderer {
     /// Presentation cursor (fractional sim frame) — the clock invented Tier-C
     /// flights run on. See setPresentationFrame.
     private presFrame = 0;
+    /// PLAN-latency L2.3 — resolves a unit's interpolated pose at an arbitrary
+    /// frame. Injected (rather than reached for) because the projectile
+    /// renderer has no business holding an entity renderer, and because a host
+    /// without one — tests, native-UI games — then simply leaves Tier-C flights
+    /// untracked instead of needing a stub. See setTargetPoseProvider.
+    private targetPose:
+        ((unitId: number, frame: number) => { x: number; y: number; z: number } | null)
+        | null = null;
     /// Per-def smoke trail visuals (PLAN §4.4). Entries are created
     /// lazily on the first onFired event for a given missile def whose
     /// `texture2` resolves to a URL; missiles of unconfigured defs
@@ -981,6 +998,7 @@ export class ProjectileRenderer {
             cegEmitAccumS: -CEG_EMIT_PERIOD_S,
             lightEmitAccumS: 0,
             cosmetic: null,
+            cosmeticTrack: null,
         });
     }
 
@@ -1006,6 +1024,7 @@ export class ProjectileRenderer {
         impactFrame: number;
         weaponDefId: number;
         origin: { x: number; y: number; z: number };
+        targetId: number;
         targetPos: { x: number; y: number; z: number };
         impactPos: { x: number; y: number; z: number };
         gravity: number;
@@ -1065,9 +1084,39 @@ export class ProjectileRenderer {
             cegEmitAccumS: -CEG_EMIT_PERIOD_S,
             lightEmitAccumS: 0,
             cosmetic: flight,
+            // L2.3: only weapons the sim would itself have guided. A real
+            // CMissileProjectile with `tracks` steers at its target every tick;
+            // a cannon shell does not, and bending one toward a target that
+            // dodged would be *less* faithful than letting it fly to the point
+            // the explosion actually happened at.
+            cosmeticTrack: mdef?.tracks
+                ? beginCosmeticTracking(flight, ev.targetId,
+                    this.targetPose?.(ev.targetId, flight.fireFrame) ?? null,
+                    this.targetPose?.(
+                        ev.targetId, flight.fireFrame - TRACK_VEL_SAMPLE_LAG) ?? null)
+                : null,
         };
         evalCosmeticFlight(flight, this.presFrame - flight.fireFrame, p.pos, p.vel);
         this.live.set(id, p);
+    }
+
+    /**
+     * PLAN-latency L2.3 — supply the interpolated pose of a unit at an
+     * arbitrary presentation frame (`EntityRenderer.getEntityPosition`).
+     *
+     * Queried at `impactFrame`, which is normally *inside* the interpolator's
+     * buffer rather than beyond it: the shot is fired at the leading edge `E`
+     * and presented `D` frames behind it, so by the time a bolt is airborne the
+     * client usually holds real samples spanning the frame it will land on.
+     * That is the whole reason a Tier-C shot can track a moving target without
+     * predicting anything — it is reading the future off a buffer, not guessing
+     * at it.
+     */
+    setTargetPoseProvider(
+        fn: ((unitId: number, frame: number) => { x: number; y: number; z: number } | null)
+            | null,
+    ): void {
+        this.targetPose = fn;
     }
 
     /**
@@ -1094,6 +1143,10 @@ export class ProjectileRenderer {
             // laser bolt this matters: onImpact freezes it in place for the
             // hardstop/fade animation, and the last tick left it a fraction of
             // a frame short of the explosion.
+            //
+            // No tracking term here on purpose: `trackingWeight(1) === 0`, so a
+            // tracked bolt terminates on `impactPos` exactly as an untracked
+            // one does. L2.3 bends the middle of the arc, never its ends.
             evalCosmeticFlight(p.cosmetic, p.cosmetic.frames, p.pos, p.vel);
         }
         this.onImpact({
@@ -1363,8 +1416,19 @@ export class ProjectileRenderer {
                 // is integrated, so nothing accumulates error and nothing has
                 // to be corrected — it is standing on its explosion at
                 // impactFrame because the polynomial says so.
-                evalCosmeticFlight(
-                    p.cosmetic, this.presFrame - p.cosmetic.fireFrame, p.pos, p.vel);
+                const ct = this.presFrame - p.cosmetic.fireFrame;
+                evalCosmeticFlight(p.cosmetic, ct, p.pos, p.vel);
+                if (p.cosmeticTrack) {
+                    // L2.3: read where the target actually is at the cursor and
+                    // bend the middle of the arc by however far that is off the
+                    // course the shot was aimed at. Null (dead / out of LOS /
+                    // evicted) holds the last correction — see
+                    // applyCosmeticTracking.
+                    applyCosmeticTracking(
+                        p.cosmetic, p.cosmeticTrack, ct,
+                        this.targetPose?.(p.cosmeticTrack.targetId, this.presFrame) ?? null,
+                        p.pos, p.vel);
+                }
             } else {
                 // pos += vel * dt
                 p.pos.x += p.vel.x * dt;

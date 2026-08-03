@@ -1,9 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import {
     type CosmeticFlight,
+    applyCosmeticTracking,
+    beginCosmeticTracking,
     evalCosmeticFlight,
+    TRACK_VEL_SAMPLE_LAG,
+    maxTrackingOffset,
     nextCosmeticProjectileId,
     solveCosmeticFlight,
+    trackingWeight,
+    trackingWeightSlope,
 } from './cosmetic-flight.js';
 
 const V = (x: number, y: number, z: number) => ({ x, y, z });
@@ -175,5 +181,237 @@ describe('nextCosmeticProjectileId', () => {
             expect(Number.isSafeInteger(id)).toBe(true);
             expect(id).toBeLessThan(0x7fff_ffff);
         }
+    });
+});
+
+/* ------------------------------------------------------------------------ *
+ * L2.3 — moving-target tracking
+ * ------------------------------------------------------------------------ */
+
+/** Evaluate a tracked flight at `t` against a target pose, as the renderer
+ *  does: base arc first, tracking folded in second. */
+function atTracked(
+    c: CosmeticFlight,
+    tr: ReturnType<typeof beginCosmeticTracking>,
+    t: number,
+    live: { x: number; y: number; z: number } | null,
+) {
+    const pos = V(NaN, NaN, NaN);
+    const vel = V(NaN, NaN, NaN);
+    evalCosmeticFlight(c, t, pos, vel);
+    if (tr) applyCosmeticTracking(c, tr, t, live, pos, vel);
+    return { pos, vel };
+}
+
+/** Begin tracking a target that was holding still when the shot was fired. */
+function trackStill(c: CosmeticFlight, id: number, at: { x: number; y: number; z: number }) {
+    return beginCosmeticTracking(c, id, at, at);
+}
+
+/** Begin tracking a target on a constant course of `v` elmos/frame. */
+function trackMoving(
+    c: CosmeticFlight, id: number,
+    at: { x: number; y: number; z: number },
+    v: { x: number; y: number; z: number },
+) {
+    return beginCosmeticTracking(c, id, at, V(
+        at.x - v.x * TRACK_VEL_SAMPLE_LAG,
+        at.y - v.y * TRACK_VEL_SAMPLE_LAG,
+        at.z - v.z * TRACK_VEL_SAMPLE_LAG));
+}
+
+describe('trackingWeight', () => {
+    it('is zero at both ends — the endpoints L2.2 pinned stay pinned', () => {
+        expect(trackingWeight(0)).toBe(0);
+        expect(trackingWeight(1)).toBe(0);
+        // and outside, for a cursor that ran past or behind the flight
+        expect(trackingWeight(-0.5)).toBe(0);
+        expect(trackingWeight(1.5)).toBe(0);
+    });
+
+    it('reaches full correction exactly at the blend-back point', () => {
+        expect(trackingWeight(0.9)).toBeCloseTo(1, 12);
+    });
+
+    it('is continuous and C^1 across the join at 0.9', () => {
+        // A discontinuity in either value or slope reads as the missile
+        // flinching; the join is the one place the two branches could disagree.
+        // eps is small because the two sides approach zero slope at very
+        // different rates: the blend-out is compressed into 10% of the flight,
+        // so its slope grows 9x faster off the join than the ramp-in's does.
+        // Both still reach 0 *at* the join, which is what C^1 asks for.
+        const eps = 1e-8;
+        expect(trackingWeight(0.9 - eps)).toBeCloseTo(trackingWeight(0.9 + eps), 9);
+        expect(trackingWeightSlope(0.9 - eps)).toBeCloseTo(0, 4);
+        expect(trackingWeightSlope(0.9 + eps)).toBeCloseTo(0, 4);
+    });
+
+    it('matches its own analytic slope by finite difference', () => {
+        // The slope feeds the velocity the CEG trail and follow-light steer by,
+        // so a wrong derivative points the exhaust the wrong way.
+        const h = 1e-5;
+        for (const u of [0.1, 0.35, 0.6, 0.85, 0.93, 0.97]) {
+            const fd = (trackingWeight(u + h) - trackingWeight(u - h)) / (2 * h);
+            expect(fd).toBeCloseTo(trackingWeightSlope(u), 3);
+        }
+    });
+
+    it('never exceeds 1 anywhere in the flight', () => {
+        for (let i = 0; i <= 1000; i++) {
+            const w = trackingWeight(i / 1000);
+            expect(w).toBeGreaterThanOrEqual(0);
+            expect(w).toBeLessThanOrEqual(1 + 1e-12);
+        }
+    });
+});
+
+describe('maxTrackingOffset', () => {
+    it('bounds the blend-out step by the bolt\'s own per-frame travel', () => {
+        // The property the cap exists for: during the final 10% the tracking
+        // term must never move the bolt further in one frame than the base arc
+        // already does, or L2.3 reintroduces exactly the snap L2 removed.
+        const c = solveCosmeticFlight(V(0, 0, 0), V(300, 0, 0), 100, 130, 0);
+        const tr = trackStill(c, 7, V(0, 0, 0))!;
+        const cap = maxTrackingOffset(c);
+        // Drive the correction to the cap, along a fresh axis so the base arc
+        // (pure +x) and the correction (pure +z) don't alias.
+        const live = V(0, 0, 10_000);
+        const normalStep = 300 / c.frames;
+        let worst = 0;
+        for (let f = 1; f <= c.frames; f++) {
+            const a = atTracked(c, tr, f - 1, live).pos;
+            const b = atTracked(c, tr, f, live).pos;
+            const d = Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z);
+            worst = Math.max(worst, d);
+        }
+        expect(cap).toBeGreaterThan(0);
+        // Worst single-frame step stays within the normal step plus the cap's
+        // own budget of one — i.e. at most 2x, never an unbounded lurch.
+        expect(worst).toBeLessThanOrEqual(normalStep * 2 + 1e-6);
+    });
+
+    it('scales with flight length, not with flight time', () => {
+        const short = solveCosmeticFlight(V(0, 0, 0), V(150, 0, 0), 0, 10, 0);
+        const long = solveCosmeticFlight(V(0, 0, 0), V(600, 0, 0), 0, 10, 0);
+        expect(maxTrackingOffset(long)).toBeCloseTo(4 * maxTrackingOffset(short), 6);
+    });
+});
+
+describe('beginCosmeticTracking', () => {
+    it('declines without a target or without an anchor pose', () => {
+        const c = solveCosmeticFlight(V(0, 0, 0), V(100, 0, 0), 0, 10, 0);
+        // Ground/feature shot: no unit to track.
+        expect(beginCosmeticTracking(c, 0, V(1, 2, 3))).toBeNull();
+        // Target known but never seen — no anchor means no defined correction,
+        // and guessing one would move a bolt off an arc that is provably right.
+        expect(beginCosmeticTracking(c, 42, null)).toBeNull();
+        expect(beginCosmeticTracking(c, 42, V(NaN, 0, 0))).toBeNull();
+    });
+});
+
+describe('applyCosmeticTracking', () => {
+    // 300 elmos over 30 frames => offset cap is 300/15 = 20 elmos.
+    const flight = () => solveCosmeticFlight(V(0, 0, 0), V(300, 0, 0), 100, 130, 0);
+    const CAP = 20;
+
+    it('leaves the flight bit-identical while the target holds its course', () => {
+        // The common case, and the one that must not regress L2.2's measured
+        // numbers: a target doing exactly what the shot was aimed at gives a
+        // zero correction at every t, moving or not.
+        const c = flight();
+        const v = V(0, 0, 2);                       // 2 elmos/frame sideways
+        const tr = trackMoving(c, 5, V(300, 0, 0), v)!;
+        for (let f = 0; f <= c.frames; f++) {
+            const onCourse = V(300 + v.x * f, v.y * f, v.z * f);
+            const plain = at(c, f);
+            const tracked = atTracked(c, tr, f, onCourse);
+            expect(tracked.pos).toEqual(plain.pos);
+            expect(tracked.vel).toEqual(plain.vel);
+        }
+    });
+
+    it('still terminates exactly on impactPos when the target has broken course', () => {
+        // The convergence invariant, under the condition that stresses it.
+        const c = flight();
+        const tr = trackStill(c, 5, V(300, 0, 0))!;
+        const live = V(300, 0, 12);                 // stopped dead, then slid sideways
+        const end = atTracked(c, tr, c.frames, live).pos;
+        expect(end.x).toBe(c.ix);
+        expect(end.y).toBe(c.iy);
+        expect(end.z).toBe(c.iz);
+        // ... and it leaves the muzzle where the server said, too.
+        const start = atTracked(c, tr, 0, live).pos;
+        expect(start).toEqual(V(c.ox, c.oy, c.oz));
+    });
+
+    it('bends the middle of the arc toward the departure', () => {
+        const c = flight();
+        const tr = trackStill(c, 5, V(300, 0, 0))!;
+        const live = V(300, 0, 12);
+        const mid = atTracked(c, tr, c.frames * 0.6, live).pos;
+        // Base arc is pure +x, so any z offset is the tracking term.
+        expect(mid.z).toBeGreaterThan(1);
+        expect(mid.z).toBeLessThanOrEqual(12);
+    });
+
+    it('measures the departure from the assumed course, not the travel', () => {
+        // The distinction the first implementation got wrong: a target crossing
+        // at speed is not "off course" — the shot was already led at it.
+        const c = flight();
+        const v = V(0, 0, 4);
+        const tr = trackMoving(c, 5, V(300, 0, 0), v)!;
+        const t = 15;
+        const onCourse = V(300, 0, v.z * t);
+        expect(atTracked(c, tr, t, onCourse).pos.z).toBeCloseTo(0, 9);
+        // Same absolute position, but the shot was NOT led there: full offset.
+        const still = trackStill(c, 5, V(300, 0, 0))!;
+        expect(atTracked(c, still, t, onCourse).pos.z).toBeGreaterThan(1);
+    });
+
+    it('saturates at the cap rather than lurching after a huge departure', () => {
+        const c = flight();
+        const tr = trackStill(c, 5, V(300, 0, 0))!;
+        expect(maxTrackingOffset(c)).toBeCloseTo(CAP, 9);
+        atTracked(c, tr, c.frames * 0.9, V(300, 0, 100_000));
+        expect(Math.hypot(tr.cx, tr.cy, tr.cz)).toBeCloseTo(CAP, 6);
+    });
+
+    it('holds the last correction when the target stops resolving', () => {
+        // Decision 2: a Tier-C shot flies through to its precomputed impact even
+        // when the target dies mid-flight. Dropping the correction instead would
+        // snap the bolt back onto the base arc on the frame of the death.
+        const c = flight();
+        const tr = trackStill(c, 5, V(300, 0, 0))!;
+        const live = V(300, 0, 12);
+        const before = atTracked(c, tr, c.frames * 0.5, live).pos;
+        const held = { cx: tr.cx, cy: tr.cy, cz: tr.cz };
+        const after = atTracked(c, tr, c.frames * 0.5, null).pos;
+        expect(after).toEqual(before);
+        expect({ cx: tr.cx, cy: tr.cy, cz: tr.cz }).toEqual(held);
+    });
+
+    it('is a pure function of the cursor — a backwards step retraces exactly', () => {
+        // The presentation cursor was measured stepping backwards on ~0.9% of
+        // render ticks (L2 gate finding 2). Nothing here may integrate.
+        const c = flight();
+        const tr = trackStill(c, 5, V(300, 0, 0))!;
+        const live = V(300, 0, 14);
+        const forward = atTracked(c, tr, 20, live).pos;
+        atTracked(c, tr, 27, live);
+        const back = atTracked(c, tr, 20, live).pos;
+        expect(back).toEqual(forward);
+    });
+
+    it('contributes the analytic derivative to velocity', () => {
+        const c = flight();
+        const tr = trackStill(c, 5, V(300, 0, 0))!;
+        const live = V(300, 0, 14);
+        const t = c.frames * 0.5;
+        const h = 1e-4;
+        const a = atTracked(c, tr, t - h, live).pos;
+        const b = atTracked(c, tr, t + h, live).pos;
+        // Finite-difference the *rendered* path in elmos/second (frames -> s).
+        const fdz = (b.z - a.z) / (2 * h) * 30;
+        expect(atTracked(c, tr, t, live).vel.z).toBeCloseTo(fdz, 3);
     });
 });

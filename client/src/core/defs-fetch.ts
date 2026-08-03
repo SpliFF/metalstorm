@@ -35,6 +35,12 @@ import type {
     GroundFlashInfo,
 } from './connection.js';
 
+/** `GameWeaponDef.flags` bit 0 = `WeaponDef::tracks` (the sim steers this
+ *  weapon's projectile at its target every tick). Assigned in
+ *  rts/Server/LuaDefsSerializer.inl's weapon flag block — decoded here rather
+ *  than added as another wire field, since the bit is already sent. */
+const WEAPON_FLAG_TRACKS = 1 << 0;
+
 // ─── Public API ──────────────────────────────────────────────────
 
 /** Fetch all four def categories in parallel, decode via a sandboxed
@@ -390,6 +396,7 @@ function toWeaponDefInfos(parsed: any): WeaponDefInfo[] {
         metalCost: num(d.metal_cost),
         energyCost: num(d.energy_cost),
         flags: num(d.flags),
+        tracks: (num(d.flags) & WEAPON_FLAG_TRACKS) !== 0,
         customParams: stringMap(d.custom_params),
         modelUrl: str(d.model_url),
         texture1: str(d.texture1),
