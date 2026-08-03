@@ -108,12 +108,41 @@ local function mk(spec)
                 def.customparams.impostor_size = tostring(impostorSize)
             end
             -- Ground-anchor lift: distance from the unit's ground point up to
-            -- the card's CENTRE, in elmos. NOT half the quad height — the M2
-            -- baker fits all 24 views to one shared scale, so the tallest view
-            -- sets it and the rest leave clear cell below the feet. Measured
-            -- off the shipped .gltf through the baker's own framing(): the
-            -- ground point lands ~0.18 of a cell above its bottom edge, giving
-            -- ~0.32·height. Half the height would hover the sprite ~2 elmos.
+            -- the card's CENTRE, in elmos. NOT half the quad height.
+            -- It is MEASURED IN-GAME, not derived. The surviving baker
+            -- (`bake_impostors.py`) frames each cell on the model's bbox centre
+            -- and writes `centreY = centre[1]`, but the four shipped infantry
+            -- sheets came from M2's baker, which did NOT survive the collision
+            -- (M8 deviation 3) and framed differently — fitting the surviving
+            -- baker's ortho framing to the shipped KTX2 alpha leaves a 39 px RMS
+            -- residual, so the bbox centre is simply the wrong number for these
+            -- sheets. Using it made every infantry sprite hover ~0.155 elmos
+            -- above the 3D body it swaps with (M11, 2026-08-03).
+            -- Method for a re-measure: force one class to the model tier and
+            -- then the sprite tier at an identical camera, and take the
+            -- HEAD-TOP pixel offset between the two silhouettes. Two traps,
+            -- both of which give a plausible wrong answer:
+            --  1. Use the head-top, never the foot line: the model tier casts
+            --     a shadow and the sprite tier does not (M3 deviation 2), so
+            --     the foot edge is contaminated by ~15 px of shadow bleed.
+            --  2. Convert with the IMAGE-PLANE px-per-elmo, (renderHeightPx /
+            --     camera.fov) / distance — NOT the projection of a world-Y
+            --     unit vector. `infantry_v2` has pitchBins > 1, so
+            --     `cardTiltsWithPitch` is true and the card carries the full
+            --     camera rotation: `billboardSpritePool` applies the lift along
+            --     the CARD's up, i.e. straight up the screen. Using the
+            --     world-Y scale inflates the answer by 1/cos(pitch) and the
+            --     error hides itself, because it also cancels the row-vs-camera
+            --     foreshortening term below.
+            -- Subtract that foreshortening term before comparing pitches:
+            -- the row is baked at 15/45/80 deg, so at camera elevation tc with
+            -- row elevation tr the sprite is short by H*(cos tc - cos tr).
+            -- With both corrections the two pitches agree to 0.0003 elmos and
+            -- all four classes land on 0.0655 +/- 0.0024 of `impostorSize` —
+            -- one framing constant, not four.
+            -- Read it off the model, never off an assumed quad height: the
+            -- 2026-08-03 live pass found all four defs carrying a lift derived
+            -- from a 12-elmo quad the sheets were never baked at.
             local impostorCentreY = o.impostorCentreY or spec.impostorCentreY
             if impostorCentreY then
                 def.customparams.impostor_centre_y = string.format('%.4f', impostorCentreY)
