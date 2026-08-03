@@ -108,12 +108,14 @@ local function mk(spec)
                 def.customparams.impostor_size = tostring(impostorSize)
             end
             -- Ground-anchor lift: distance from the unit's ground point up to
-            -- the card's CENTRE, in elmos. NOT half the quad height — the M2
-            -- baker fits all 24 views to one shared scale, so the tallest view
-            -- sets it and the rest leave clear cell below the feet. Measured
-            -- off the shipped .gltf through the baker's own framing(): the
-            -- ground point lands ~0.18 of a cell above its bottom edge, giving
-            -- ~0.32·height. Half the height would hover the sprite ~2 elmos.
+            -- the card's CENTRE, in elmos. NOT half the quad height — the
+            -- baker frames every cell centred on the MODEL'S BOUNDING-BOX
+            -- CENTRE (bake_impostors.py writes `centreY = centre[1]`), so the
+            -- lift is exactly that centre's Y and nothing else. For a ~1.8 m
+            -- body that is ~0.92, a little under 0.4 of the quad.
+            -- Read it off the model, never off an assumed quad height: the
+            -- 2026-08-03 live pass found all four defs carrying a lift derived
+            -- from a 12-elmo quad the sheets were never baked at.
             local impostorCentreY = o.impostorCentreY or spec.impostorCentreY
             if impostorCentreY then
                 def.customparams.impostor_centre_y = string.format('%.4f', impostorCentreY)

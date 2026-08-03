@@ -31,3 +31,29 @@ describe('ImpostorUvPlugin billboard ground anchor', () => {
         expect(makePlugin().getCustomCode('fragment')).toBeNull();
     });
 });
+
+describe('ImpostorUvPlugin atlas v axis', () => {
+    // The atlases are KTX2. Babylon cannot apply invertY to a compressed
+    // texture, so v=0 is the image's TOP row — the opposite of the
+    // uncompressed path this shader would otherwise assume. The remap must
+    // therefore flip the quad's own v AND count rows down from the top.
+    //
+    // Getting this wrong is silent and doubly wrong: every sprite draws upside
+    // down AND row 0 samples the far end of the sheet, so a shallow camera is
+    // served the top-down elevation row. Both were live on main until the
+    // 2026-08-03 Meridian pass; no test caught it, hence this one.
+    it('flips the quad v before scaling it into the cell', () => {
+        const body = makePlugin().getCustomCode('vertex')!.CUSTOM_VERTEX_UPDATE_POSITION;
+        expect(body).toContain('float _impV = 1.0 - uvUpdated.y');
+        expect(body).toContain('vec2(uvUpdated.x, _impV) * uImpostorGrid');
+        // ...and NOT the un-flipped form, which is what shipped.
+        expect(body).not.toContain('uvUpdated = uvUpdated * uImpostorGrid');
+    });
+
+    it('puts row 0 at the image top when topDown, at the bottom otherwise', () => {
+        const body = makePlugin().getCustomCode('vertex')!.CUSTOM_VERTEX_UPDATE_POSITION;
+        // topDown → offset counts down from v=0 (image top): row * gridY.
+        expect(body).toContain('? _impRow * uImpostorGrid.y');
+        expect(body).toContain(': 1.0 - (_impRow + 1.0) * uImpostorGrid.y');
+    });
+});
