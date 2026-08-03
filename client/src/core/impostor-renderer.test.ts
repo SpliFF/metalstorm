@@ -1,8 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { NullEngine, Scene, Vector3, FreeCamera, Quaternion, Matrix } from '@babylonjs/core';
+import {
+    NullEngine, Scene, Vector3, FreeCamera, Quaternion, Matrix, VertexBuffer,
+} from '@babylonjs/core';
 import {
     ImpostorRenderer, LodTier, quantizeHeading, computeCardRotation, layoutOf,
-    cardLift, type ImpostorAtlas,
+    cardLift, createImpostorCard, type ImpostorAtlas,
 } from './impostor-renderer.js';
 import {
     SINGLE_CELL_LAYOUT, DEFAULT_ATLAS_LAYOUT, selectAtlasCell,
@@ -232,5 +234,45 @@ describe('azimuth phase zero point (vs Babylon placement)', () => {
         const front = { ...DEFAULT_ATLAS_LAYOUT, azimuthPhase: AZIMUTH_PHASE_COL0_FRONT };
         expect(selectAtlasCell(toCam.x, toCam.y, toCam.z, h, back) % 8).toBe(0);
         expect(selectAtlasCell(toCam.x, toCam.y, toCam.z, h, front) % 8).toBe(4);
+    });
+});
+
+// ── Card UV space ────────────────────────────────────────────────────────
+//
+// The other half of the "upside-down units" fix (2026-08-03). `atlasCellUv`
+// offsets a cell in IMAGE space; that is only correct if the card it is
+// offsetting samples in image space too. `MeshBuilder.CreatePlane` does NOT —
+// it hands back Babylon's bottom-up procedural-mesh UVs (v = 1 at the top) —
+// while every atlas we ship is a KTX2, which Babylon cannot invertY (compressed
+// data, and its KTX2 path sets no `_invertVScale` either) and which therefore
+// always arrives with its TOP image row at v = 0. Bottom-up card UVs mirror the
+// whole sheet vertically, which is what shipped.
+describe('createImpostorCard', () => {
+    const cardUvs = (): { y: number; v: number }[] => {
+        const scene = new Scene(new NullEngine());
+        const mesh = createImpostorCard('card', 4, 10, scene);
+        const pos = mesh.getVerticesData(VertexBuffer.PositionKind)!;
+        const uv = mesh.getVerticesData(VertexBuffer.UVKind)!;
+        const out: { y: number; v: number }[] = [];
+        for (let i = 0; i < uv.length / 2; i++) out.push({ y: pos[i * 3 + 1], v: uv[i * 2 + 1] });
+        return out;
+    };
+
+    it('puts v = 0 at the card TOP edge (image space, matching KTX2)', () => {
+        const verts = cardUvs();
+        const top = Math.max(...verts.map((p) => p.y));
+        const bottom = Math.min(...verts.map((p) => p.y));
+        expect(top).toBeGreaterThan(bottom);
+        for (const p of verts) {
+            expect(p.v).toBeCloseTo(p.y === top ? 0 : 1, 6);
+        }
+    });
+
+    it('flips BOTH faces of the double-sided quad', () => {
+        // sideOrientation: DOUBLESIDE duplicates the vertices; a flip applied to
+        // only the front half leaves the back face mirrored against it.
+        const verts = cardUvs();
+        expect(verts.length).toBe(8);
+        expect(verts.filter((p) => p.v === 0).length).toBe(4);
     });
 });

@@ -47,7 +47,9 @@ export class ImpostorUvPlugin extends MaterialPluginBase {
 
     /** Atlas grid the `impostorCell` attribute indexes into. */
     layout: AtlasLayout = { yawBins: 1, pitchBins: 1, frames: 1 };
-    /** Row 0 is the TOP row of the atlas image (the baker's convention). */
+    /** Row 0 is the TOP row of the atlas image (the baker's convention). The
+     *  card's UVs are top-down too (`createImpostorCard`), so this needs no
+     *  flip — see `atlasCellUv`, which this shader mirrors exactly. */
     topDown = true;
     /** Shared card rotation — the camera's world rotation, so the quad's local
      *  +X/+Y/+Z map to screen right / up / toward-viewer. */
@@ -155,9 +157,13 @@ export class ImpostorUvPlugin extends MaterialPluginBase {
             #if defined(IMPOSTOR_CELL) && defined(UV1)
                 float _impCol = mod(impostorCell, uImpostorCols);
                 float _impRow = floor(impostorCell / uImpostorCols);
-                float _impOffV = _impRow * uImpostorGrid.y;
+                // Card UVs and atlas rows are BOTH top-down image space (see
+                // atlasCellUv + createImpostorCard), so a top-down atlas needs
+                // no flip — offset straight by the row. The 1-(row+1) form is
+                // the bottom-up-source case only.
+                float _impOffV = 1.0 - (_impRow + 1.0) * uImpostorGrid.y;
                 if (uImpostorTopDown > 0.5) {
-                    _impOffV = 1.0 - (_impRow + 1.0) * uImpostorGrid.y;
+                    _impOffV = _impRow * uImpostorGrid.y;
                 }
                 uvUpdated = uvUpdated * uImpostorGrid
                           + vec2(_impCol * uImpostorGrid.x, _impOffV);

@@ -41,8 +41,8 @@ import {
     Vector3, Quaternion, Matrix,
 } from '@babylonjs/core';
 import {
-    createImpostorMaterial, computeCardRotation, layoutOf, cardLift,
-    type ImpostorAtlas,
+    createImpostorMaterial, createImpostorCard, computeCardRotation, layoutOf,
+    cardLift, type ImpostorAtlas,
 } from './impostor-renderer.js';
 import { type AtlasLayout, selectAtlasCell } from './impostor-atlas.js';
 
@@ -501,9 +501,8 @@ export class SquadRenderBackend {
         const key = `${defId}:${team}`;
         let pool = this.spritePools.get(key);
         if (pool) return pool;
-        const mesh = MeshBuilder.CreatePlane(`squadSprite_d${defId}_t${team}`, {
-            width: atlas.width, height: atlas.height, sideOrientation: Mesh.DOUBLESIDE,
-        }, this.scene);
+        const mesh = createImpostorCard(
+            `squadSprite_d${defId}_t${team}`, atlas.width, atlas.height, this.scene);
         // withFade: the sprite material carries DitherFadePlugin for the M5
         // model↔sprite crossfade — so this pool MUST upload a `ditherFade` buffer.
         mesh.material = createImpostorMaterial(
