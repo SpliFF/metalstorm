@@ -46,6 +46,30 @@
 // snapshot store's transaction discipline"; the framing + integrity helpers
 // here (EncodeBlob/DecodeBlob) are that shared piece.
 //
+// ROOM SCOPING — why roomId is a per-call argument and not StoreConfig
+// -------------------------------------------------------------------
+// A snapshot's partition key is the PAIR (gameId, roomId). `gameId` alone is
+// not an identity: it is the *content* id (`--game`, e.g. "metalstorm"), so
+// every concurrent room of the same game carries the same one — and the lobby
+// launches every game-server process against the same `--db`, so all of those
+// rooms share one `game_snapshots` table. Partitioning on `game_id` alone let
+// a second room's prune delete a first room's entire history and then let the
+// first room restore the *second room's world* into its own sim, returning
+// true. E1 cannot catch that: same engine, same map, same layout hash, so
+// every stamp matches. Every read, restore, ladder walk and prune below binds
+// both columns, and retention is last-K PER ROOM.
+//
+// The room is carried per call rather than in StoreConfig deliberately.
+// ISnapshotStore (GmVerbs.h) already passes roomId on every method, so a
+// StoreConfig field would create a second source of truth for the same fact,
+// and there is no correct way to reconcile them at runtime: refusing on
+// disagreement breaks a store that legitimately serves more than one room,
+// and preferring either one silently discards a caller's argument — which is
+// exactly the defect this scoping replaces. With no room in the config the
+// store has no room opinion that can be wrong, and a caller's roomId is
+// always the one that is honoured. StoreConfig keeps `gameId` because it is
+// process-wide content identity that no interface method carries.
+//
 // DEVIATION — zstd → zlib deflate
 // -------------------------------
 // The plan specifies zstd. zstd is not a dependency of this build and adding
@@ -197,11 +221,14 @@ void MapDigestOf(const std::string& mapHash, uint8_t* out32);
 // ───────────────────────────── The store ─────────────────────────────
 
 struct StoreConfig {
-    std::string gameId;          ///< partitions rows; a game's snapshot history
+    /// Content id (`--game`). Half of the partition key — the other half is
+    /// the per-call roomId; see "ROOM SCOPING" above for why it is not here.
+    std::string gameId;
     uint64_t    engineHash = 0;  ///< this binary's identity (E1)
     std::string mapHash;         ///< processed-map hash (E1)
-    /// Retention: how many snapshots to keep per game. §2 default 3, which is
-    /// also the depth of the E2 fallback ladder.
+    /// Retention: how many snapshots to keep per (game, room). §2 default 3,
+    /// which is also the depth of the E2 fallback ladder. Applied per room, so
+    /// a busy room cannot prune a quiet one's history away.
     int retain = 3;
 };
 
@@ -278,13 +305,13 @@ public:
     /// makes the whole history unloadable by this binary.
     bool RestoreNewestValid(uint32_t roomId, std::string& err, int32_t& restoredFrame);
 
-    /// Delete rows beyond `retain` for this game, oldest first. Called after
-    /// every successful commit; exposed for the lobby's scheduled prune.
-    /// Returns the number of rows deleted.
-    int Prune();
+    /// Delete rows beyond `retain` for (gameId, roomId), oldest first. Called
+    /// after every successful commit; exposed for the lobby's scheduled prune.
+    /// Returns the number of rows deleted. Never touches another room.
+    int Prune(uint32_t roomId);
 
-    /// Newest snapshot frame for this game, or -1 if there are none. Does not
-    /// validate the blob.
+    /// Newest snapshot frame for (gameId, roomId), or -1 if there are none.
+    /// Does not validate the blob.
     int32_t NewestFrame(uint32_t roomId);
 
     StoreStats Stats() const;
@@ -310,9 +337,10 @@ private:
     /// Compress + frame + commit one job in a single transaction, then prune.
     bool WriteJob(const Job& job, std::string& err);
     /// Prune with dbMtx already held (the in-transaction path).
-    int PruneLocked();
-    /// Read the blob for an exact frame. Returns false if there is no row.
-    bool LoadBlob(int32_t frame, std::vector<uint8_t>& blob);
+    int PruneLocked(uint32_t roomId);
+    /// Read the blob for an exact frame in this room. Returns false if there
+    /// is no such row — including when another room has that frame.
+    bool LoadBlob(uint32_t roomId, int32_t frame, std::vector<uint8_t>& blob);
     /// Decode + hand to the serializer. Shared by Restore/RestoreNewestValid.
     /// `simRefused` distinguishes "the bytes were good but the sim said no"
     /// from a blob problem — only the latter is an E2 rung to step past.

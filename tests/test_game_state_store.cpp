@@ -116,6 +116,19 @@ int CountRows(sqlite3* db, const char* gameId) {
     return n;
 }
 
+int CountRows(sqlite3* db, const char* gameId, uint32_t roomId) {
+    sqlite3_stmt* st = nullptr;
+    REQUIRE(sqlite3_prepare_v2(db,
+        "SELECT COUNT(*) FROM game_snapshots WHERE game_id=? AND room_id=?",
+        -1, &st, nullptr) == SQLITE_OK);
+    sqlite3_bind_text(st, 1, gameId, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(st, 2, int(roomId));
+    REQUIRE(sqlite3_step(st) == SQLITE_ROW);
+    const int n = sqlite3_column_int(st, 0);
+    sqlite3_finalize(st);
+    return n;
+}
+
 } // namespace
 
 // ───────────────────────── Blob framing (pure) ─────────────────────────
@@ -269,6 +282,20 @@ TEST_CASE("E2: damaged blobs are detected, not decoded into garbage") {
         CHECK(IsCorruption(st));            // so RestoreNewestValid falls back
         CHECK(out.empty());
     }
+    SUBCASE("a zero rawSize claim must not excuse a payload that is there") {
+        // Regression (automated review of step 1, finding F3): the rawSize == 0
+        // fast path matched the empty-payload sha256 and returned Ok without
+        // requiring compSize == 0, so a blob claiming zero raw size while
+        // carrying compressed bytes decoded as a *valid empty snapshot* — an
+        // integrity check that did not check. It is a damaged rung: the two
+        // length fields disagree.
+        std::vector<uint8_t> bad = good;
+        for (int i = 0; i < 8; ++i) bad[32 + i] = 0;        // rawSize := 0
+        Sha256(nullptr, 0, bad.data() + 48);                 // and its digest
+        CHECK(DecodeBlob(bad.data(), bad.size(), meta, got, out) ==
+              DecodeStatus::SizeMismatch);
+        CHECK(out.empty());
+    }
     SUBCASE("payload swapped for another valid deflate stream") {
         // The checksum, not the codec, is what catches a substituted payload.
         BlobMeta other = meta;
@@ -388,6 +415,108 @@ TEST_CASE("retention keeps the last K snapshots and prunes the rest") {
     REQUIRE(other.Checkpoint(2, "auto", err) == 42);
     CHECK(CountRows(tdb.db, "g1") == 3);
     CHECK(CountRows(tdb.db, "g2") == 1);
+}
+
+TEST_CASE("two rooms of ONE game share a DB without seeing or pruning each other") {
+    // Regression (automated review of step 1, finding F1). Not the same case as
+    // the two-*games* check above: `gameId` is the CONTENT id (`--game`, e.g.
+    // "metalstorm"), so every concurrent room of the same game carries the same
+    // one, and the lobby launches every game-server process against the same
+    // `--db`. Partitioning on game_id alone therefore let one room prune
+    // another's entire history away and then restore that other room's world
+    // into its own sim, reporting success. E1 cannot catch it — same engine,
+    // same map, same layout hash, so every stamp matches.
+    TempDb tdb;
+    FakeSim simA, simB;
+    GameStateStore roomA(tdb.db, MakeCfg("metalstorm", 3));
+    GameStateStore roomB(tdb.db, MakeCfg("metalstorm", 3));
+    roomA.SetSerializer(&simA);
+    roomB.SetSerializer(&simB);
+    constexpr uint32_t kRoomA = 7;
+    constexpr uint32_t kRoomB = 8;
+
+    std::string err;
+    std::vector<uint8_t> aAtFrame300;
+    for (int i = 1; i <= 3; ++i) {
+        simA.frame = i * 100;
+        simA.FillState(1024, uint8_t(i));
+        if (i == 3) aAtFrame300 = simA.state;
+        REQUIRE(roomA.Checkpoint(kRoomA, "auto", err) == i * 100);
+    }
+    REQUIRE(CountRows(tdb.db, "metalstorm", kRoomA) == 3);
+
+    // Room B now writes MORE than `retain` snapshots, so its prune fires
+    // repeatedly. Retention is last-K PER ROOM: none of that may reach A.
+    for (int i = 1; i <= 5; ++i) {
+        simB.frame = 500 + i;
+        simB.FillState(1024, uint8_t(100 + i));
+        REQUIRE(roomB.Checkpoint(kRoomB, "auto", err) == 500 + i);
+    }
+
+    CHECK(CountRows(tdb.db, "metalstorm", kRoomA) == 3);   // A's history survived
+    CHECK(CountRows(tdb.db, "metalstorm", kRoomB) == 3);   // B pruned only itself
+
+    // A's reads never observe B's rows.
+    const std::vector<SnapshotInfo> listA = roomA.List(kRoomA);
+    REQUIRE(listA.size() == 3);
+    CHECK(listA[0].frame == 300);
+    CHECK(listA[1].frame == 200);
+    CHECK(listA[2].frame == 100);
+    CHECK(roomA.NewestFrame(kRoomA) == 300);
+    CHECK(roomB.NewestFrame(kRoomB) == 505);
+
+    // The wrong-world restore: A's ladder must land on A's own newest frame
+    // carrying A's own bytes, not on B's newer rows.
+    simA.state.clear();
+    int32_t restored = -1;
+    REQUIRE(roomA.RestoreNewestValid(kRoomA, err, restored));
+    CHECK(restored == 300);
+    CHECK(simA.state == aAtFrame300);
+
+    // A frame that exists only in room B is not restorable from room A, even
+    // though its blob would decode cleanly against A's identical stamps.
+    std::string exactErr;
+    CHECK_FALSE(roomA.Restore(kRoomA, 505, exactErr));
+    CHECK(exactErr.find("505") != std::string::npos);
+    CHECK(simA.state == aAtFrame300);      // and nothing was loaded
+
+    // roomId is a per-call argument, not store identity (see GameStateStore.h
+    // "ROOM SCOPING"): the same store asked about another room answers about
+    // that room, rather than silently substituting one it was configured with.
+    const std::vector<SnapshotInfo> listBviaA = roomA.List(kRoomB);
+    REQUIRE(listBviaA.size() == 3);
+    CHECK(listBviaA[0].frame == 505);
+    CHECK(roomA.NewestFrame(kRoomB) == 505);
+}
+
+TEST_CASE("retention is per room: a busy room cannot starve a quiet one") {
+    // The prune half of F1 in isolation, with the quiet room never writing
+    // again after the busy one starts — the shape a resumable-but-idle room has.
+    TempDb tdb;
+    FakeSim quietSim, busySim;
+    GameStateStore quiet(tdb.db, MakeCfg("metalstorm", 2));
+    GameStateStore busy(tdb.db, MakeCfg("metalstorm", 2));
+    quiet.SetSerializer(&quietSim);
+    busy.SetSerializer(&busySim);
+
+    std::string err;
+    quietSim.frame = 42;
+    quietSim.FillState(256, 1);
+    REQUIRE(quiet.Checkpoint(1, "auto", err) == 42);
+
+    for (int i = 0; i < 20; ++i) {
+        busySim.frame = 1000 + i;
+        busySim.FillState(256, uint8_t(i));
+        REQUIRE(busy.Checkpoint(2, "auto", err) == 1000 + i);
+    }
+
+    CHECK(CountRows(tdb.db, "metalstorm", 1) == 1);
+    CHECK(CountRows(tdb.db, "metalstorm", 2) == 2);   // retain=2, per room
+    CHECK(quiet.NewestFrame(1) == 42);
+
+    // The explicit prune is room-scoped too.
+    CHECK(quiet.Prune(1) == 0);
+    CHECK(CountRows(tdb.db, "metalstorm", 1) == 1);
 }
 
 TEST_CASE("E2 ladder: a damaged newest snapshot falls back to the previous rung") {

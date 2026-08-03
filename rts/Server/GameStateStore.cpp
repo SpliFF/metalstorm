@@ -217,6 +217,12 @@ DecodeStatus DecodeBlob(const uint8_t* blob, size_t size, const BlobMeta& expect
     if (compSize != size - kHeaderSize) return DecodeStatus::TooShort;
 
     if (meta.rawSize == 0) {
+        // Both lengths must agree that there is nothing here. Matching the
+        // empty-payload digest alone would let a blob claiming zero raw size
+        // while carrying compressed bytes decode as a *valid empty snapshot* —
+        // an integrity check that does not check. Disagreeing length fields
+        // are damage, so this is a rung the E2 ladder steps past.
+        if (compSize != 0) return DecodeStatus::SizeMismatch;
         uint8_t d[32];
         Sha256(nullptr, 0, d);
         return std::memcmp(d, meta.rawSha256, 32) == 0 ? DecodeStatus::Ok
@@ -289,9 +295,14 @@ void GameStateStore::EnsureTables(sqlite3* db) {
         "  sha256 TEXT NOT NULL,"
         "  blob BLOB NOT NULL"
         ")", nullptr, nullptr, nullptr);
+    // Every query partitions on (game_id, room_id) — see the header's "ROOM
+    // SCOPING". The old game_id-only index is dropped rather than left behind:
+    // nothing reads by game_id alone any more, so it would only cost writes.
     sqlite3_exec(db,
-        "CREATE INDEX IF NOT EXISTS idx_game_snapshots_game_id"
-        " ON game_snapshots(game_id, id DESC)", nullptr, nullptr, nullptr);
+        "CREATE INDEX IF NOT EXISTS idx_game_snapshots_room"
+        " ON game_snapshots(game_id, room_id, id DESC)", nullptr, nullptr, nullptr);
+    sqlite3_exec(db, "DROP INDEX IF EXISTS idx_game_snapshots_game_id",
+                 nullptr, nullptr, nullptr);
 }
 
 // ─────────────────────────── Lifecycle ───────────────────────────
@@ -339,17 +350,19 @@ bool GameStateStore::Available() const {
 
 // ─────────────────────────── Read paths ───────────────────────────
 
-std::vector<SnapshotInfo> GameStateStore::List(uint32_t /*roomId*/) {
+std::vector<SnapshotInfo> GameStateStore::List(uint32_t roomId) {
     std::vector<SnapshotInfo> out;
     if (!db) return out;
     std::lock_guard<std::mutex> dbLock(dbMtx);
     sqlite3_stmt* st = nullptr;
     if (sqlite3_prepare_v2(db,
             "SELECT frame, taken_at, blob_size, label FROM game_snapshots"
-            " WHERE game_id = ? ORDER BY id DESC", -1, &st, nullptr) != SQLITE_OK) {
+            " WHERE game_id = ? AND room_id = ? ORDER BY id DESC",
+            -1, &st, nullptr) != SQLITE_OK) {
         return out;
     }
     sqlite3_bind_text(st, 1, cfg.gameId.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(st, 2, int(roomId));
     while (sqlite3_step(st) == SQLITE_ROW) {
         SnapshotInfo info;
         info.frame     = sqlite3_column_int(st, 0);
@@ -363,34 +376,37 @@ std::vector<SnapshotInfo> GameStateStore::List(uint32_t /*roomId*/) {
     return out;
 }
 
-int32_t GameStateStore::NewestFrame(uint32_t /*roomId*/) {
+int32_t GameStateStore::NewestFrame(uint32_t roomId) {
     if (!db) return -1;
     std::lock_guard<std::mutex> dbLock(dbMtx);
     sqlite3_stmt* st = nullptr;
     if (sqlite3_prepare_v2(db,
-            "SELECT frame FROM game_snapshots WHERE game_id = ?"
+            "SELECT frame FROM game_snapshots WHERE game_id = ? AND room_id = ?"
             " ORDER BY id DESC LIMIT 1", -1, &st, nullptr) != SQLITE_OK) {
         return -1;
     }
     sqlite3_bind_text(st, 1, cfg.gameId.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(st, 2, int(roomId));
     int32_t frame = -1;
     if (sqlite3_step(st) == SQLITE_ROW) frame = sqlite3_column_int(st, 0);
     sqlite3_finalize(st);
     return frame;
 }
 
-bool GameStateStore::LoadBlob(int32_t frame, std::vector<uint8_t>& blob) {
+bool GameStateStore::LoadBlob(uint32_t roomId, int32_t frame, std::vector<uint8_t>& blob) {
     blob.clear();
     if (!db) return false;
     std::lock_guard<std::mutex> dbLock(dbMtx);
     sqlite3_stmt* st = nullptr;
     if (sqlite3_prepare_v2(db,
-            "SELECT blob FROM game_snapshots WHERE game_id = ? AND frame = ?"
+            "SELECT blob FROM game_snapshots"
+            " WHERE game_id = ? AND room_id = ? AND frame = ?"
             " ORDER BY id DESC LIMIT 1", -1, &st, nullptr) != SQLITE_OK) {
         return false;
     }
     sqlite3_bind_text(st, 1, cfg.gameId.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int(st, 2, frame);
+    sqlite3_bind_int(st, 2, int(roomId));
+    sqlite3_bind_int(st, 3, frame);
     bool found = false;
     if (sqlite3_step(st) == SQLITE_ROW) {
         const void* data = sqlite3_column_blob(st, 0);
@@ -575,7 +591,9 @@ bool GameStateStore::WriteJob(const Job& job, std::string& err) {
         return false;
     }
 
-    PruneLocked();
+    // Per-room retention: this room's own history is what gets trimmed, so a
+    // busy room cannot prune a quiet one down to nothing (see "ROOM SCOPING").
+    PruneLocked(job.roomId);
 
     if (sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr) != SQLITE_OK) {
         err = std::string("commit failed: ") + sqlite3_errmsg(db);
@@ -592,26 +610,30 @@ bool GameStateStore::WriteJob(const Job& job, std::string& err) {
     return true;
 }
 
-int GameStateStore::PruneLocked() {
+int GameStateStore::PruneLocked(uint32_t roomId) {
     if (!db) return 0;
     sqlite3_stmt* st = nullptr;
     if (sqlite3_prepare_v2(db,
-            "DELETE FROM game_snapshots WHERE game_id = ? AND id NOT IN ("
-            "  SELECT id FROM game_snapshots WHERE game_id = ? ORDER BY id DESC LIMIT ?"
+            "DELETE FROM game_snapshots"
+            " WHERE game_id = ? AND room_id = ? AND id NOT IN ("
+            "  SELECT id FROM game_snapshots WHERE game_id = ? AND room_id = ?"
+            "  ORDER BY id DESC LIMIT ?"
             ")", -1, &st, nullptr) != SQLITE_OK) {
         return 0;
     }
     sqlite3_bind_text(st, 1, cfg.gameId.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(st, 2, cfg.gameId.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int(st, 3, cfg.retain);
+    sqlite3_bind_int(st, 2, int(roomId));
+    sqlite3_bind_text(st, 3, cfg.gameId.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(st, 4, int(roomId));
+    sqlite3_bind_int(st, 5, cfg.retain);
     sqlite3_step(st);
     sqlite3_finalize(st);
     return sqlite3_changes(db);
 }
 
-int GameStateStore::Prune() {
+int GameStateStore::Prune(uint32_t roomId) {
     std::lock_guard<std::mutex> dbLock(dbMtx);
-    return PruneLocked();
+    return PruneLocked(roomId);
 }
 
 void GameStateStore::Flush() {
@@ -650,13 +672,17 @@ DecodeStatus GameStateStore::ApplyBlob(const std::vector<uint8_t>& blob,
     return DecodeStatus::Ok;
 }
 
-bool GameStateStore::Restore(uint32_t /*roomId*/, int32_t frame, std::string& err) {
+bool GameStateStore::Restore(uint32_t roomId, int32_t frame, std::string& err) {
     if (!db) { err = "no database"; return false; }
     if (!serializer) { err = NoSerializerReason(); return false; }
 
     std::vector<uint8_t> blob;
-    if (!LoadBlob(frame, blob)) {
-        err = "no snapshot at frame " + std::to_string(frame);
+    // Scoped to this room: another room's snapshot at the same frame would
+    // decode cleanly against identical E1 stamps, so absence here is the only
+    // thing standing between a GM and someone else's world.
+    if (!LoadBlob(roomId, frame, blob)) {
+        err = "no snapshot at frame " + std::to_string(frame) + " for room " +
+              std::to_string(roomId);
         return false;
     }
     int32_t landed = -1;
@@ -671,7 +697,7 @@ bool GameStateStore::Restore(uint32_t /*roomId*/, int32_t frame, std::string& er
     return true;
 }
 
-bool GameStateStore::RestoreNewestValid(uint32_t /*roomId*/, std::string& err,
+bool GameStateStore::RestoreNewestValid(uint32_t roomId, std::string& err,
                                         int32_t& restoredFrame) {
     restoredFrame = -1;
     if (!db) { err = "no database"; return false; }
@@ -682,14 +708,19 @@ bool GameStateStore::RestoreNewestValid(uint32_t /*roomId*/, std::string& err,
     {
         std::lock_guard<std::mutex> dbLock(dbMtx);
         sqlite3_stmt* st = nullptr;
+        // The ladder walks THIS room's rungs. Mixing rooms in would let a
+        // damaged newest snapshot "fall back" onto another room's world, which
+        // is worse than being unresumable: it succeeds.
         if (sqlite3_prepare_v2(db,
-                "SELECT frame, blob FROM game_snapshots WHERE game_id = ?"
+                "SELECT frame, blob FROM game_snapshots"
+                " WHERE game_id = ? AND room_id = ?"
                 " ORDER BY id DESC LIMIT ?", -1, &st, nullptr) != SQLITE_OK) {
             err = std::string("prepare failed: ") + sqlite3_errmsg(db);
             return false;
         }
         sqlite3_bind_text(st, 1, cfg.gameId.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int(st, 2, cfg.retain);
+        sqlite3_bind_int(st, 2, int(roomId));
+        sqlite3_bind_int(st, 3, cfg.retain);
         while (sqlite3_step(st) == SQLITE_ROW) {
             Rung r;
             r.frame = sqlite3_column_int(st, 0);
@@ -704,7 +735,10 @@ bool GameStateStore::RestoreNewestValid(uint32_t /*roomId*/, std::string& err,
         sqlite3_finalize(st);
     }
 
-    if (rungs.empty()) { err = "no snapshots for game " + cfg.gameId; return false; }
+    if (rungs.empty()) {
+        err = "no snapshots for game " + cfg.gameId + " room " + std::to_string(roomId);
+        return false;
+    }
 
     for (const Rung& r : rungs) {
         int32_t landed = -1;
@@ -731,7 +765,8 @@ bool GameStateStore::RestoreNewestValid(uint32_t /*roomId*/, std::string& err,
             // E1: the whole retained history carries these stamps. Refuse with
             // the specific reason instead of walking K identical failures.
             err = std::string("snapshot refused (") + rungErr + ") — this binary "
-                  "cannot load game " + cfg.gameId + "'s snapshots";
+                  "cannot load game " + cfg.gameId + " room " +
+                  std::to_string(roomId) + "'s snapshots";
             LogWarn("%s", err.c_str());
             return false;
         }
@@ -743,7 +778,8 @@ bool GameStateStore::RestoreNewestValid(uint32_t /*roomId*/, std::string& err,
     }
 
     err = "all " + std::to_string(rungs.size()) + " retained snapshots for game " +
-          cfg.gameId + " are damaged — unresumable";
+          cfg.gameId + " room " + std::to_string(roomId) +
+          " are damaged — unresumable";
     LogWarn("%s", err.c_str());
     return false;
 }
