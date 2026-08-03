@@ -56,6 +56,7 @@ import {
 } from './zk-model-material.js';
 import { matchAimSlots, type UnitAimPieces, type AimPiece } from './turret-aim-controller.js';
 import { LodTier, type ImpostorRenderer } from './impostor-renderer.js';
+import { DitherFadePlugin } from './dither-fade-plugin.js';
 
 /** Per-material texture URIs, keyed by material name in the .gltf.
  *  Single-material models (all S3O/DAE content) use just the `materials[0]`
@@ -576,22 +577,6 @@ interface PieceRenderEntry {
     pieceIdx: number;
 }
 
-/**
- * A def's real 3D model, prepared for drawing the many cosmetic *members* a
- * squad fans out into (PLAN-macro-squads.md: the visible unit is the squad
- * member, not the squad). One entry per geometry piece; the caller thin-
- * instances each piece with `rest × memberWorld`, exactly as tick() does for
- * a single sim entity.
- *
- * Handed to SquadRenderBackend through the SquadHost seam so squad members of
- * a modelled def draw as that model instead of the proxy capsule.
- */
-export interface SquadMemberModel {
-    pieces: { mesh: Mesh; rest: Matrix }[];
-    /** Vertical offset so the model's base sits at the member's ground Y. */
-    yOffset: number;
-}
-
 export class EntityRenderer {
     private scene: Scene;
     private interpolator = new EntityInterpolator();
@@ -657,17 +642,16 @@ export class EntityRenderer {
     // or "shape:{shape}:{team}" for fallbacks.
     private renderMeshes = new Map<string, Mesh>();
 
-    // Squad-member models, keyed by "{defId}:{team}" — resolved templates handed
-    // to SquadRenderBackend. A `null` value is a permanent negative cache ("this
-    // def has no usable member model"); `undefined` means "not resolved yet".
-    private squadMemberModels = new Map<string, SquadMemberModel | null>();
-    // The meshes those models are built from, keyed
-    // "squadmodel:{defId}:{team}:{pieceIdx}". Deliberately NOT in
-    // `renderMeshes`: tick()'s hide-pass zeroes every renderMeshes entry it
-    // didn't write this frame, and squad-member instances are driven by
-    // SquadRenderBackend's own flush() (the sim-authoritative squad body is
-    // never drawn at all — see `squadDefIds`).
-    private squadMemberMeshes = new Map<string, Mesh>();
+    // Member-tier 3D model meshes for the squad fan-out (PLAN-metalstorm-impostors
+    // M4), keyed by "member:{defId}:{team}". A dedicated clone of a squad def's
+    // single body piece with its team material, handed to SquadRenderBackend to
+    // thin-instance its own close-range members. Kept OUT of `renderMeshes` on
+    // purpose: the render() loop hides every renderMeshes entry not active this
+    // frame, and squad defs are skipped there (line ~1878), so a member mesh
+    // stored in renderMeshes would be force-hidden every frame — clobbering the
+    // squad backend's thin instances. This map is disposed with the renderer but
+    // never touched by render().
+    private memberModelMeshes = new Map<string, Mesh>();
 
     // Unit materials, SHARED across all pieces that use the same texture set,
     // keyed by "{defId}:{team}:{materialKey}". A unit's pieces almost always
@@ -677,6 +661,14 @@ export class EntityRenderer {
     // was needless GPU + memory pressure (and a leak: mesh.dispose() doesn't
     // free the material). Disposed in the model-template cleanup.
     private unitMaterials = new Map<string, Material>();
+
+    // Dedicated member-model materials (M5), keyed the same way as unitMaterials
+    // but SEPARATE so the DitherFadePlugin (screen-door LOD crossfade, reads a
+    // per-instance `ditherFade` attribute) never rides the shared full-unit
+    // material — full units set no `ditherFade` attribute, so a shared plugin
+    // would read fade=0 and discard them entirely. Same texture/team pipeline as the unit
+    // material otherwise, so a member reads identically to a full unit.
+    private memberMaterials = new Map<string, Material>();
 
     // --- Per-entity piece pose overrides ---
     // Populated by applyPieceState() from server-streamed piece transforms.
@@ -792,7 +784,6 @@ export class EntityRenderer {
         setActiveZKShadowGenerator(csm as CascadedShadowGenerator | null, sun);
         if (!csm) return;
         for (const mesh of this.renderMeshes.values()) csm.addShadowCaster(mesh);
-        for (const mesh of this.squadMemberMeshes.values()) csm.addShadowCaster(mesh);
         for (const mesh of this.shapeMeshes.values()) csm.addShadowCaster(mesh);
     }
 
@@ -1487,86 +1478,15 @@ export class EntityRenderer {
     /**
      * Get or create the thin-instance render mesh for a specific piece
      * of a specific (defId, team). Clones the template piece mesh.
-     *
-     * `store` lets a second consumer (squad members) reuse the whole
-     * material-resolution path while keeping its meshes out of
-     * `renderMeshes` — tick()'s hide-pass zeroes everything in there that it
-     * didn't write this frame, which would fight a caller that drives its own
-     * thin instances.
      */
-    private getOrCreatePieceMesh(
-        defId: number,
-        team: number,
-        pieceIdx: number,
-        piece: PieceInfo,
-        store: Map<string, Mesh> = this.renderMeshes,
-        keyPrefix = 'model',
-    ): Mesh {
-        const key = `${keyPrefix}:${defId}:${team}:${pieceIdx}`;
-        let mesh = store.get(key);
+    private getOrCreatePieceMesh(defId: number, team: number, pieceIdx: number, piece: PieceInfo): Mesh {
+        const key = `model:${defId}:${team}:${pieceIdx}`;
+        let mesh = this.renderMeshes.get(key);
         if (!mesh) {
-            mesh = piece.mesh.clone(`${keyPrefix === 'model' ? 'unit' : keyPrefix}_${defId}_t${team}_p${pieceIdx}_${piece.name}`);
+            mesh = piece.mesh.clone(`unit_${defId}_t${team}_p${pieceIdx}_${piece.name}`);
             mesh.makeGeometryUnique();
 
-            const tmpl = this.modelTemplates.get(defId);
-            const teamColor = TEAM_COLORS[team % TEAM_COLORS.length];
-
-            // Always replace the imported material with our own team-colour
-            // material so every unit gets team tinting + the same
-            // lighting/shadow pipeline regardless of whether the model ships
-            // a texture sidecar. Skipping the replacement (the previous
-            // `else if (!mesh.material)` branch) left units without a
-            // sidecar — e.g. ZK's `factoryveh` — keeping the PBR material
-            // from the glTF import and rendering broken.
-            const customParams = this.defInfos.get(defId)?.customParams;
-            // Bind this piece's own material on multi-material models
-            // (Warzone .pie units, whose pieces reference different texture
-            // pages); fall back to the model-wide default for single-
-            // material content and structural pieces.
-            //
-            // Read the piece's glTF material name LIVE from the template
-            // mesh: Babylon's glTF loader hasn't reliably assigned
-            // `mesh.material` yet at load-time capture (materialKey is often
-            // undefined there), but it's always set by the time a piece
-            // first renders here. `piece.mesh` keeps its imported material —
-            // getOrCreatePieceMesh clones the mesh and only reassigns the
-            // clone — so this stays the glTF material name across frames.
-            const materialKey = piece.mesh?.material?.name ?? piece.materialKey;
-            const pieceTextures = (materialKey
-                ? tmpl?.materialTextures.get(materialKey) : undefined)
-                ?? tmpl?.textures;
-
-            // Share ONE material across every piece that resolves to the same
-            // texture set (keyed by def/team/materialKey). Pieces of one unit
-            // overwhelmingly share a single glTF material, so this reuses one
-            // PBRMaterial instead of building an identical one per piece.
-            const matCacheKey = `${defId}:${team}:${materialKey ?? (pieceTextures ? '_default' : '_fallback')}`;
-            let mat = this.unitMaterials.get(matCacheKey);
-            if (!mat) {
-                const matName = `unit_${defId}_t${team}_${materialKey ?? 'mat'}`;
-                if (pieceTextures) {
-                    mat = createUnitMaterial(
-                        matName, pieceTextures, teamColor, this.scene, customParams);
-                } else {
-                    // No texture sidecar — synthesise a white diffuse and mark
-                    // it syntheticFallback, which flips the team-colour
-                    // plugin's syntheticAlbedo flag → full team tint. The unit
-                    // renders as a flat team-coloured shape through the same
-                    // material pipeline as textured units (without the flag
-                    // the maskless-no-tint rule would leave it flat white,
-                    // with zero team identification).
-                    const fallbackDiffuse = getWhiteFallbackDiffuse(this.scene);
-                    mat = createUnitMaterial(
-                        matName,
-                        { diffuse: fallbackDiffuse, emissive: null, orm: null,
-                          teamMask: null, normal: null, invertTeamColor: false,
-                          syntheticFallback: true },
-                        teamColor, this.scene, customParams,
-                    );
-                }
-                this.unitMaterials.set(matCacheKey, mat);
-            }
-            mesh.material = mat;
+            mesh.material = this.resolvePieceMaterial(defId, team, piece);
 
             mesh.isPickable = false;
             mesh.isVisible = false;
@@ -1574,57 +1494,135 @@ export class EntityRenderer {
             mesh.alwaysSelectAsActiveMesh = true;
             mesh.renderingGroupId = 2;
             mesh.receiveShadows = true;
-            store.set(key, mesh);
+            this.renderMeshes.set(key, mesh);
             this.shadowGenerator?.addShadowCaster(mesh);
         }
         return mesh;
     }
 
     /**
-     * The real member model for a squad def, or null while it is still
-     * loading / if the def ships no model.
+     * Resolve (and cache) the team-colour material for one model piece. Shared
+     * by the per-piece unit render path (getOrCreatePieceMesh) and the squad
+     * member-model path (getMemberModel), so a member mesh takes the exact same
+     * team tinting + lighting/shadow pipeline as a full unit.
      *
-     * Squad members used to be team-coloured proxy capsules unconditionally
-     * (squad-render-backend.ts's "first wire" simplification), which meant a
-     * def like `ms_tanks_s2` rendered as four capsules even though its
-     * `fable_tank` glTF was shipped, loaded and correct — that was the bulk of
-     * the "the scenario starts with placeholders" report. This hands the
-     * loaded template's pieces to SquadRenderBackend so members draw as the
-     * actual model.
-     *
-     * Kicks off the lazy model fetch on first call and returns null until it
-     * lands; the caller retries (a member drawn as a capsule for the first few
-     * frames is upgraded in place once the load completes).
+     * Always replaces the imported glTF material with our own team-colour
+     * material so every piece gets team tinting regardless of whether the model
+     * ships a texture sidecar (skipping the replacement left sidecar-less units
+     * — e.g. ZK's `factoryveh` — rendering with the broken imported PBR
+     * material). Binds the piece's own material on multi-material models, else
+     * the model-wide default; reads the glTF material name LIVE from the
+     * template mesh because Babylon's glTF loader often hasn't assigned
+     * `mesh.material` at load-time capture but always has by first render.
+     * Materials are shared across pieces resolving to the same texture set
+     * (keyed by def/team/materialKey) — one PBRMaterial instead of one per piece.
      */
-    getSquadMemberModel(defId: number, team: number): SquadMemberModel | null {
-        const key = `${defId}:${team}`;
-        const cached = this.squadMemberModels.get(key);
-        if (cached !== undefined) return cached;
+    private resolvePieceMaterial(
+        defId: number, team: number, piece: PieceInfo, forMember = false,
+    ): Material {
+        const tmpl = this.modelTemplates.get(defId);
+        const teamColor = TEAM_COLORS[team % TEAM_COLORS.length];
+        const customParams = this.defInfos.get(defId)?.customParams;
+        const materialKey = piece.mesh?.material?.name ?? piece.materialKey;
+        const pieceTextures = (materialKey
+            ? tmpl?.materialTextures.get(materialKey) : undefined)
+            ?? tmpl?.textures;
 
+        // Member materials are cached separately (they carry DitherFadePlugin,
+        // which must never leak onto the shared full-unit material).
+        const cache = forMember ? this.memberMaterials : this.unitMaterials;
+        const matCacheKey = `${defId}:${team}:${materialKey ?? (pieceTextures ? '_default' : '_fallback')}`;
+        let mat = cache.get(matCacheKey);
+        if (!mat) {
+            const matName = `unit_${defId}_t${team}_${materialKey ?? 'mat'}`;
+            if (pieceTextures) {
+                mat = createUnitMaterial(
+                    matName, pieceTextures, teamColor, this.scene, customParams);
+            } else {
+                // No texture sidecar — synthesise a white diffuse and mark it
+                // syntheticFallback, which flips the team-colour plugin's
+                // syntheticAlbedo flag → full team tint, so the piece renders
+                // as a flat team-coloured shape rather than flat white.
+                const fallbackDiffuse = getWhiteFallbackDiffuse(this.scene);
+                mat = createUnitMaterial(
+                    matName,
+                    { diffuse: fallbackDiffuse, emissive: null, orm: null,
+                      teamMask: null, normal: null, invertTeamColor: false,
+                      syntheticFallback: true },
+                    teamColor, this.scene, customParams,
+                );
+            }
+            // Member material: attach the screen-door LOD crossfade plugin,
+            // reading a per-instance `ditherFade` attribute. A no-op at fade=1
+            // (the common case); the squad backend drives fade 1→0 only inside
+            // the model↔impostor transition band. Pattern polarity is the
+            // NON-inverted half — the sprite material takes the inverted half
+            // (createImpostorMaterial), so the two tiers interleave exactly
+            // rather than overlapping.
+            if (forMember) {
+                const fade = new DitherFadePlugin(mat);
+                fade.useAttribute = true;
+                fade.invertPattern = false;
+                fade.isEnabled = true;
+            }
+            cache.set(matCacheKey, mat);
+        }
+        return mat;
+    }
+
+    /**
+     * Member-tier 3D model source for the squad fan-out (PLAN-metalstorm-impostors
+     * M4). Ensures the def's model is loaded, then returns a thin-instance-ready
+     * render mesh (team-coloured through the same material pipeline as full
+     * units) plus the transform data SquadRenderBackend composes each close-range
+     * member against. Returns `undefined` while the model is still loading, when
+     * the def has no model, or for a multi-geometry-piece model.
+     *
+     * DEVIATION (recorded in the lane notes): single-geometry-piece models only.
+     * Infantry are one static `body` piece by the M1 contract, so a member is a
+     * single rigid mesh. A multi-piece squad member would need per-member,
+     * per-piece matrix composition (the full unit path) fanned out across every
+     * soldier — deferred until a squad def actually ships a multi-piece member.
+     * Such a def simply keeps drawing the sprite tier at all ranges (graceful).
+     *
+     * The returned mesh is NOT stored in `renderMeshes` (see memberModelMeshes)
+     * so the entity render loop never fights the squad backend for it. Each
+     * (defId, team) yields one shared mesh; the backend owns its thin-instance
+     * matrix buffer.
+     */
+    getMemberModel(defId: number, team: number):
+        { mesh: Mesh; restWorld: Matrix; yOffset: number; height: number } | undefined {
         this.ensureModelLoaded(defId);
         const tmpl = this.modelTemplates.get(defId);
-        if (tmpl === undefined) return null;      // still loading — retry later
-        if (tmpl === null) {                      // def has no model, ever
-            this.squadMemberModels.set(key, null);
-            return null;
-        }
+        if (!tmpl) return undefined;                       // not loaded yet / no model
+        const geometry = tmpl.pieces.filter((p) => p.mesh != null);
+        if (geometry.length !== 1) return undefined;       // multi-piece: see DEVIATION
+        const piece = geometry[0];
 
-        const pieces: { mesh: Mesh; rest: Matrix }[] = [];
-        for (let pi = 0; pi < tmpl.pieces.length; pi++) {
-            const piece = tmpl.pieces[pi];
-            if (!piece.mesh) continue;            // structural node, no geometry
-            pieces.push({
-                mesh: this.getOrCreatePieceMesh(
-                    defId, team, pi, piece, this.squadMemberMeshes, 'squadmodel'),
-                rest: piece.restWorldMatrix,
-            });
+        const key = `member:${defId}:${team}`;
+        let mesh = this.memberModelMeshes.get(key);
+        if (!mesh) {
+            mesh = piece.mesh.clone(`member_${defId}_t${team}_${piece.name}`);
+            mesh.makeGeometryUnique();
+            mesh.material = this.resolvePieceMaterial(defId, team, piece, true);
+            mesh.isPickable = false;
+            mesh.isVisible = false;                        // shown once instances populate
+            mesh.thinInstanceEnablePicking = false;
+            mesh.alwaysSelectAsActiveMesh = true;
+            mesh.renderingGroupId = 2;
+            mesh.receiveShadows = true;
+            this.memberModelMeshes.set(key, mesh);
+            // Cast shadows like full units — one caster mesh with N thin
+            // instances (not N casters), so the cost is one extra depth-pass
+            // draw per (defId, team), which the M5 perf pass re-checks.
+            this.shadowGenerator?.addShadowCaster(mesh);
         }
-        // A template with no drawable geometry is as useless as no template:
-        // cache the negative so we stop re-walking it every frame.
-        const model: SquadMemberModel | null =
-            pieces.length > 0 ? { pieces, yOffset: tmpl.yOffset } : null;
-        this.squadMemberModels.set(key, model);
-        return model;
+        return {
+            mesh,
+            restWorld: piece.restWorldMatrix,
+            yOffset: tmpl.yOffset,
+            height: tmpl.modelHeight,
+        };
     }
 
     private getFallbackMesh(defId: number, team: number): Mesh {
@@ -2606,10 +2604,6 @@ export class EntityRenderer {
         // update(); zero their live counts so nothing renders from the parked
         // session before the first post-reconnect snapshot rebuilds them.
         for (const mesh of this.renderMeshes.values()) mesh.thinInstanceCount = 0;
-        // Squad-member instances are owned by SquadRenderBackend, but the
-        // meshes are ours — park them too, or the pre-detach members hang in
-        // the scene until the squad system refills its pools.
-        for (const mesh of this.squadMemberMeshes.values()) mesh.thinInstanceCount = 0;
         if (this.selectionMesh) this.selectionMesh.thinInstanceCount = 0;
     }
 
@@ -2802,9 +2796,12 @@ export class EntityRenderer {
     dispose(): void {
         for (const mesh of this.renderMeshes.values()) mesh.dispose();
         this.renderMeshes.clear();
-        for (const mesh of this.squadMemberMeshes.values()) mesh.dispose();
-        this.squadMemberMeshes.clear();
-        this.squadMemberModels.clear();
+        // Member-tier meshes (M4) share the unit material cache (freed below)
+        // but own their cloned geometry — dispose them here since the render
+        // loop never tracks them. SquadRenderBackend borrows these and must
+        // NOT dispose them itself.
+        for (const mesh of this.memberModelMeshes.values()) mesh.dispose();
+        this.memberModelMeshes.clear();
         // Shared unit materials are owned here (mesh.dispose() doesn't free
         // them), so dispose them explicitly. NOT their textures — those are
         // the shared template textures, disposed by the template loop below.
@@ -2812,6 +2809,8 @@ export class EntityRenderer {
         // it dies with the scene via WHITE_TEX_CACHE's WeakMap.)
         for (const mat of this.unitMaterials.values()) mat.dispose();
         this.unitMaterials.clear();
+        for (const mat of this.memberMaterials.values()) mat.dispose();
+        this.memberMaterials.clear();
         for (const tmpl of this.modelTemplates.values()) {
             if (tmpl) {
                 for (const p of tmpl.pieces) {

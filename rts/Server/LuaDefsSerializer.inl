@@ -290,12 +290,11 @@ inline std::string SerializeOneUnitDef(
     // plan's roster table), so the switch distance defaults to near-zero
     // instead of never. icon_distance (Impostor→Icon) defaults to 4x the
     // impostor distance when not given explicitly.
-    //
-    // (No longer a stand-in: §6 task 4b landed the baked-atlas pipeline, the
-    // authored `<stem>_impostor{,_team}.ktx2` sheets ship in models/, and
-    // ImpostorRenderer loads diffuse_uri — impostor-renderer.ts. The former
-    // FIDELITY-STANDIN note here claiming a "flat grey placeholder quad" was
-    // stale and has been removed.)
+    // The baked-atlas pipeline (PLAN-metalstorm-impostors.md M2) produces v2
+    // directional atlases (8 yaw × 3 pitch, baked from the 3D bodies); the
+    // client's ImpostorRenderer directional-selects a cell per instance from
+    // the yaw_bins/pitch_bins/frames grid emitted below. diffuse_uri points at
+    // the deployed <stem>_impostor.ktx2.
     {
         const auto impostorOnlyIt = ud.customParams.find("impostor_only");
         const bool impostorOnly = impostorOnlyIt != ud.customParams.end() &&
@@ -350,6 +349,63 @@ inline std::string SerializeOneUnitDef(
             }
             imp.add_int("walk_frames", 1);
             imp.add_int("idle_frames", 1);
+            // v2 directional atlas grid (PLAN-metalstorm-impostors.md M3).
+            // Source: customParams impostor_yaw_bins / impostor_pitch_bins /
+            // impostor_frames, set by the game (metalstorm's _builder.lua) to
+            // match the baked atlas's convention (impostor_convention.py: 8×3×1).
+            // Default 1/1/1 → a legacy single-frame atlas / non-metalstorm game
+            // keeps the whole-quad mapping, so the client never directional-
+            // selects a def that didn't opt in. DEVIATION (recorded in the plan
+            // lane notes): the plan's M2 "For M3" note suggested the serializer
+            // read the baked <stem>_impostor.json sidecar; that sidecar is a
+            // gitignored forge artifact never deployed into data/, so the grid
+            // rides customParams like the rest of the impostor block instead.
+            auto gridParam = [&](const char* key) -> long long {
+                const auto it = ud.customParams.find(key);
+                if (it == ud.customParams.end()) return 1;
+                const long long v = std::strtoll(it->second.c_str(), nullptr, 10);
+                return v > 0 ? v : 1;
+            };
+            const long long pitchBins = gridParam("impostor_pitch_bins");
+            imp.add_int("yaw_bins", gridParam("impostor_yaw_bins"));
+            imp.add_int("pitch_bins", pitchBins);
+            imp.add_int("frames", gridParam("impostor_frames"));
+            // The atlas's OWN azimuth phase and elevation arc (M7/M8). Two
+            // bakers ship disagreeing by exactly 180 degrees on what column 0
+            // is, and on the elevation arc, so an atlas DECLARES both and the
+            // runtime reads what it is told rather than assuming a global
+            // convention (user decision 2026-08-03, option (b)). Omitted =
+            // phase 0 (column 0 = the unit's BACK) and the runtime's legacy
+            // fallback arc, i.e. exactly today's behaviour.
+            //   impostor_azimuth_phase  — degrees; 180 = column 0 is the FRONT
+            //                             view, which is what the four
+            //                             `infantry_v2` sheets were baked at.
+            //   impostor_pitch_degrees  — comma-separated elevations above the
+            //                             horizon, top row first; must supply
+            //                             exactly impostor_pitch_bins entries.
+            const auto phaseIt = ud.customParams.find("impostor_azimuth_phase");
+            if (phaseIt != ud.customParams.end() && !phaseIt->second.empty()) {
+                imp.add_float("azimuth_phase_degrees",
+                    std::strtof(phaseIt->second.c_str(), nullptr));
+            }
+            const auto arcIt = ud.customParams.find("impostor_pitch_degrees");
+            if (arcIt != ud.customParams.end() && !arcIt->second.empty()) {
+                std::vector<float> arc;
+                const std::string& spec = arcIt->second;
+                for (size_t i = 0; i < spec.size();) {
+                    size_t comma = spec.find(',', i);
+                    if (comma == std::string::npos) comma = spec.size();
+                    const std::string tok = spec.substr(i, comma - i);
+                    if (!tok.empty()) arc.push_back(std::strtof(tok.c_str(), nullptr));
+                    i = comma + 1;
+                }
+                // A partial arc is worse than none: the runtime would fall back
+                // to a DIFFERENT arc than the sheet was baked on and silently
+                // select the wrong elevation row. Emit only a complete one.
+                if (static_cast<long long>(arc.size()) == pitchBins) {
+                    imp.add_raw("pitch_degrees", detail::FloatVector(arc));
+                }
+            }
             // Quad size: authored customParams impostor_size (elmos, square)
             // wins — impostor-only infantry render the sprite per squad
             // MEMBER, so the quad must be human-scaled, which no derivation
@@ -373,6 +429,19 @@ inline std::string SerializeOneUnitDef(
             quadSize = std::max(quadSize, 1.0f);
             imp.add_float("width", quadSize);
             imp.add_float("height", quadSize);
+            // Ground-anchor lift: how far ABOVE the unit's ground point the
+            // quad's centre sits, in elmos. The runtime defaults this to
+            // height/2, which is only right when the baker put the model's
+            // ground point on the cell's BOTTOM edge. A baker that reserves a
+            // margin, or that fits all views to one shared scale, leaves clear
+            // cell below the feet — then height/2 hovers the sprite by exactly
+            // that margin. So the atlas declares its own (customParams
+            // impostor_centre_y), measured from the bake.
+            const auto centreIt = ud.customParams.find("impostor_centre_y");
+            if (centreIt != ud.customParams.end() && !centreIt->second.empty()) {
+                const float centreY = std::strtof(centreIt->second.c_str(), nullptr);
+                if (centreY > 0.0f) imp.add_float("centre_y", centreY);
+            }
             b.add_raw("impostor", imp.finish());
         }
     }

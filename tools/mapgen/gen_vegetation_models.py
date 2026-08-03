@@ -623,8 +623,15 @@ def main() -> None:
 
     if args.selftest:
         print(f"[veg] selftest OK ({len(SPECIES)} species)")
-    else:
-        print(f"[veg] wrote {len(SPECIES)} species -> {out_dir}")
+        return
+
+    if not args.no_impostors:
+        # One manifest for the whole package: the client resolves a feature
+        # type's atlas from this in a single request, and it carries each
+        # species' own swap distance (a 20-elmo fence post has no business
+        # staying a full mesh as far out as a 137-elmo conifer).
+        bake_impostors.write_manifest(out_dir, list(SPECIES))
+    print(f"[veg] wrote {len(SPECIES)} species -> {out_dir}")
 
 
 if __name__ == "__main__":

@@ -50,6 +50,7 @@
 #include "Server/HeadlessRun.h"
 #include "Server/StatsDump.h"
 #include "Server/GameOverState.h"
+#include "Server/PostGamePolicy.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Lua/LuaRules.h"
 #include "Server/HttpAuth.h"
@@ -93,6 +94,7 @@
 #include <fstream>
 #include <chrono>
 #include <filesystem>
+#include <optional>
 #include <random>
 #include <thread>
 #include <unordered_set>
@@ -195,6 +197,14 @@ int main(int argc, char* argv[])
     };
     int idleExitSeconds = envInt("SPRING_IDLE_EXIT_SECONDS", 300);          // 5 min
     int idleStartupGraceSeconds = envInt("SPRING_IDLE_STARTUP_GRACE_SECONDS", 120);  // 2 min
+    // Post-game observation window: how long a *finished* server stays up with
+    // its world frozen before shutting down and releasing its port. Distinct
+    // from idle exit — this one runs with clients still connected, which is the
+    // case idle exit by definition never covers. Same flag > env > default
+    // precedence; <= 0 disables it (the room then lives until idle exit or a
+    // kill). See PostGamePolicy.h.
+    int postGameExitSeconds =
+        envInt("SPRING_POSTGAME_EXIT_SECONDS", postgame::kDefaultExitSeconds);
 
     // --- Headless run mode (PLAN-headless task 1) ---
     // `--headless-run <config.json>` runs the sim to completion with no browser
@@ -275,6 +285,7 @@ int main(int argc, char* argv[])
 
     // Simple arg parsing: --port N, --game PATH, --map PATH, --db PATH,
     // --idle-exit-seconds N (0 = never), --idle-startup-grace-seconds N,
+    // --postgame-exit-seconds N (0 = never; shutdown delay after game over),
     // --log-file PATH, --log-level LEVEL, --log-server URL,
     // --log-sqlite PATH, --debug, --log-messages,
     // --wt-cert PATH, --wt-key PATH,
@@ -306,6 +317,8 @@ int main(int argc, char* argv[])
             idleExitSeconds = std::atoi(argv[++i]);
         } else if (arg == "--idle-startup-grace-seconds" && i + 1 < argc) {
             idleStartupGraceSeconds = std::atoi(argv[++i]);
+        } else if (arg == "--postgame-exit-seconds" && i + 1 < argc) {
+            postGameExitSeconds = std::atoi(argv[++i]);
         } else if (arg == "--headless-run" && i + 1 < argc) {
             headlessConfigPath = argv[++i];
         } else if (arg == "--max-wall-min" && i + 1 < argc) {
@@ -1197,6 +1210,11 @@ int main(int argc, char* argv[])
     if (!roomPersistent && idleExitEnabled)
         SLOG(SPRING_LOG_NOTICE, "idle self-termination: exit after %ds with no "
             "clients (%ds startup grace)", kIdleExitSec, kStartupGraceSec);
+    const bool postGameExitEnabled = postGameExitSeconds > 0 && !headlessCfg.enabled;
+    const int kPostGameExitSec = postGameExitSeconds;
+    if (postGameExitEnabled)
+        SLOG(SPRING_LOG_NOTICE, "post-game shutdown: exit %ds after game over",
+            kPostGameExitSec);
     auto writeGameStatus = [&](bool ready, int clients) {
         if (!statusDb) return;
         char sql[256];
@@ -1220,6 +1238,11 @@ int main(int argc, char* argv[])
     const auto serverStartTime = std::chrono::steady_clock::now();
     auto lastClientTime = serverStartTime;   // last instant clientCount > 0 (or launch)
     auto lastStatusWrite = serverStartTime;
+    // Wall clock of the first tick that observed a declared result. Stamped
+    // from the loop rather than read off the sim frame because the observation
+    // window is a wall-clock promise to the humans looking at the overlay, and
+    // the sim frame stops advancing the moment the result lands.
+    std::optional<std::chrono::steady_clock::time_point> gameOverAt;
 
     // (The team-stats-history send cursor + win-check latch + State-tier lane
     // constants now live as StateStreamer members.)
@@ -1358,6 +1381,28 @@ int main(int argc, char* argv[])
                     keepRunning.store(false);
                 }
             }
+            // Post-game exit: a finished war has nothing left to serve, so the
+            // process stops and hands its port back once the observation
+            // window closes. Idle exit does not cover this — players who leave
+            // the result overlay open never trip it, and the room held :9100
+            // indefinitely (observed live, 2026-08-03). Applies to persistent
+            // rooms too: persistence is about surviving an *empty* room, not
+            // about outliving the match. Headless runs are excluded — their
+            // own stop conditions already treat game over as a stop and would
+            // otherwise be pre-empted by this timer's exit reason.
+            if (postGameExitEnabled && gameOverRelay.IsDeclared()) {
+                if (!gameOverAt) gameOverAt = wall;
+                const int since = static_cast<int>(
+                    std::chrono::duration_cast<std::chrono::seconds>(
+                        wall - *gameOverAt).count());
+                if (postgame::ShouldExit(true, since, kPostGameExitSec)) {
+                    SLOG(SPRING_LOG_NOTICE,
+                        "game over %ds ago — shutting down finished game server "
+                        "(frame %d, %d client(s) still connected)",
+                        since, sim.GetFrameNum(), clients);
+                    keepRunning.store(false);
+                }
+            }
         }
 
         perfMetrics.BeginTick();
@@ -1455,7 +1500,17 @@ int main(int argc, char* argv[])
         // combat events kept streaming. Gating SimFrame here stops the sim
         // cleanly while the loop keeps running (GameInfo still broadcasts
         // paused=true, console commands still process).
-        if (sim.HasGameStarted() && !g_luaDebugger.IsPaused() && !gs->paused) {
+        //
+        // Also skip once the match is over. Declaring a winner used to be a
+        // pure notification: the sim ran on past the declared frame for as
+        // long as the room lived, spawning objectives and paying out income
+        // into a finished war (PostGamePolicy.h has the measurements). Game
+        // over freezes the world at the frame the clients were shown as the
+        // result. The loop itself keeps running — admin `exec` still works
+        // for post-mortem inspection, and the observation-window timer in the
+        // lifetime-bookkeeping block above is what stops the process.
+        if (sim.HasGameStarted() && !g_luaDebugger.IsPaused() && !gs->paused
+            && !gameOverRelay.IsDeclared()) {
             sim.SimFrame();
             springlog_set_frame(sim.GetFrameNum());
         }
@@ -1507,7 +1562,8 @@ int main(int argc, char* argv[])
             const auto snap = perfMetrics.GetSnapshot();
             metricsWriter.SampleTick(snap.tickTimeUs);
             const bool simRunning = sim.HasGameStarted() && !g_luaDebugger.IsPaused() &&
-                                    !gs->paused && rtcServer.GetClientCount() > 0;
+                                    !gs->paused && !gameOverRelay.IsDeclared() &&
+                                    rtcServer.GetClientCount() > 0;
             metricsWriter.MaybeWrite(snap.frame, snap.clientCount, entityCount,
                                      snap.simFps, gs->speedFactor, simRunning);
         }

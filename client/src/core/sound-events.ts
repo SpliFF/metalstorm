@@ -110,6 +110,23 @@ export class SoundEventPlayer {
     }
 
     private playResolved(e: SoundEventInfo, ref: SoundRefInfo): void {
+        // A named sound that doesn't resolve yet might just be racing the
+        // async gamedata/sounds.lua ingest (LuaUI boot posts SoundItems well
+        // after combat can start) rather than genuinely missing. ref.path is
+        // the server's flat `sounds/<name>.webm` guess — it doesn't know
+        // about subdirectories or SoundItem key→filename remaps (e.g.
+        // `ac_fire` → `sounds/weapons/autocannon_fire.webm`), so it 404s
+        // reliably for anything not living directly under sounds/. Wait
+        // (bounded) for the ingest instead of taking that fallback and
+        // permanently negative-caching a URL that was never going to work.
+        if (ref.name && !this.audio.resolveSoundItem(ref.name)) {
+            void this.audio.whenSoundItemsReady(5000).then(() => this.playResolvedNow(e, ref));
+            return;
+        }
+        this.playResolvedNow(e, ref);
+    }
+
+    private playResolvedNow(e: SoundEventInfo, ref: SoundRefInfo): void {
         // Resolve SoundItem (per gamedata/sounds.lua) if a name is set.
         const item: SoundItem | undefined =
             ref.name ? this.audio.resolveSoundItem(ref.name) : undefined;

@@ -29,17 +29,23 @@ the fine detail layer.
 
 ## 2. Library layout (`tools/mapgen/terragen/`)
 
-Pure numpy, no GPL dependencies (`numpy`/`scipy`/`scikit-image`/`Pillow` in
-`tools/mapgen/.venv`). All stages are data-in/data-out on `(H, W)` float64
-grids; no file I/O inside the library. Everything is deterministic: seeded
-`PCG64` permutation tables for noise, splitmix-style integer hashing for
-scatter (never Python's process-salted `hash()`), no OS randomness anywhere.
+Pure numpy, no GPL dependencies (`numpy`/`scipy`/`scikit-image`/`Pillow`/
+`numba` in `tools/mapgen/.venv`; numba is BSD-licensed, validated against the
+rejected GPL-3 alternatives — PLAN-maps.md §2b). All stages are data-in/
+data-out on `(H, W)` float64 grids; no file I/O inside the library. Everything
+is deterministic: seeded `PCG64` permutation tables for noise, splitmix-style
+integer hashing for scatter (never Python's process-salted `hash()`), no OS
+randomness anywhere. The numba `@njit` kernels (noise, `resolve_flats`,
+`d8_receivers`, the LEM solve, thermal erosion) are additionally
+**thread-count-independent** — every parallel (`prange`) loop writes one
+output element per iteration with no cross-thread accumulation, so results
+don't depend on `NUMBA_NUM_THREADS` (verified: `terragen/_selftest_numba.py`).
 
 | Module | Contents |
 |---|---|
-| `noise.py` | Seeded 2D simplex noise (vectorized), fBm, ridged multifractal (Musgrave weighting), billow, two-channel domain warping. |
-| `hydrology.py` | Priority-flood depression filling (via `skimage` morphological reconstruction), flat resolution (vectorized wavefront BFS), D8 steepest-descent receivers, **level-order** flow-tree processing, flow accumulation, river-network extraction, flow-path lengths. |
-| `erosion.py` | Fluvial erosion: the **implicit Braun & Willett (2013) stream-power solver** (`h' = (h + dt·U + F·h_recv') / (1+F)`, `F = K·A^m·dt/dx`), unconditionally stable, plus talus-angle **thermal erosion** (vectorized 8-neighbour transfers). Accepts a per-cell erodibility field (lithology variation). |
+| `noise.py` | Seeded 2D simplex noise, fBm, ridged multifractal (Musgrave weighting), billow, two-channel domain warping — fused `@njit` kernels (PLAN-maps.md §2b item 1: ~70-80× measured on fBm). |
+| `hydrology.py` | Priority-flood depression filling (via `skimage` morphological reconstruction, not ported — see below), D8 steepest-descent receivers and flat resolution (both `@njit`; `resolve_flats` walks an explicit frontier queue instead of re-scanning the whole grid every BFS ring — ~100-700× measured), **level-order** flow-tree processing, flow accumulation, river-network extraction, flow-path lengths. |
+| `erosion.py` | Fluvial erosion: the **implicit Braun & Willett (2013) stream-power solver** (`h' = (h + dt·U + F·h_recv') / (1+F)`, `F = K·A^m·dt/dx`), unconditionally stable, plus talus-angle **thermal erosion** (8-neighbour transfers) — both `@njit`. Accepts a per-cell erodibility field (lithology variation). |
 | `biomes.py` | Temperature (latitude gradient + altitude lapse + noise), moisture (noise + water-proximity + directional rain shadow), Whittaker-ish classification into 8 ids (grassland/forest/desert/tundra/snow/rock/wetland/water), soft blend weights. |
 | `roads.py` | Least-cost road planning: 8-connected Dijkstra on a decimated grid with slope² cost, water/bridge penalties and max-grade cutoffs; MST topology over settlements (+ optional loops); Chaikin smoothing; full-res rasterization to mask + distance field; **cut-and-fill grading** of terrain under roads. |
 | `settle.py` | Settlement-site scoring (windowed flatness × water proximity × biome desirability × edge falloff) and greedy separated site selection. |
@@ -94,13 +100,20 @@ seed + config (+ optional layout skeleton)
 
 The **eroded heightfield is cached** at
 `$TMPDIR/meridian2_eroded_<seed>_<res>.npy` — erosion is the long pole
-(~11 min at 2049²), and contract/packaging iteration shouldn't re-pay it.
-Delete the cache after changing anything upstream of stage 3 (base synthesis,
+(~75 s/iter at 2049² post-numba-port, down from ~11 min for the full 30-iter
+run pre-port), and contract/packaging iteration shouldn't re-pay it. Delete
+the cache after changing anything upstream of stage 3 (base synthesis,
 erosion parameters, seed).
 
-Timings (M2 Pro, 2049²): erosion ~11 min (dominant; a numba port measured at
-~20× is queued — PLAN-maps.md §2b), bake+cluster ~5 min, everything else
-seconds. `--fast --preview-only` iterates in ~20 s.
+Timings (M2 Pro, real layout terrain, numba-ported — PLAN-maps.md §2b item 1):
+erosion per-iteration ~0.15 s @513², ~2.5 s @2049² (was ~0.4 s / ~22-40 s
+pre-port — `resolve_flats` alone went from seconds-to-tens-of-seconds down to
+tens of milliseconds), ~17.5 s @4097². `fill_depressions` (skimage, not
+ported — reimplementing morphological reconstruction bit-exact was judged too
+risky) and `topo_levels` (plain numpy, not ported) are now the dominant
+remaining per-iteration cost at 4097² (~7.6 s and ~4.2 s respectively) — the
+next lever if 4097² needs to get faster still. bake+cluster ~5 min,
+everything else seconds. `--fast --preview-only` iterates in ~20 s.
 
 ## 4. Gameplay contracts on realistic terrain
 
@@ -235,6 +248,18 @@ treat them exactly like the ways that meet them. All models are
 KTX2 into the map's `objects3d/`, deterministic, licence-free), with 8-yaw ×
 3-pitch impostor atlases baked by `tools/fable-model-forge/bake_impostors.py`.
 
+> **Sourcing divergence (deliberate, recorded per AGENTS.md).** PLAN-maps.md
+> §1.4 originally called for **CC0 third-party** tree/rock models run through
+> the model pipeline. The props are generated instead. Two reasons: the forge
+> style bible (flat-shaded low poly, palette-atlas UVs, elmo-authored) is what
+> every Metalstorm unit is built to, and CC0 nature scans/packs would read as a
+> different game next to them; and generation keeps the whole map package
+> deterministic and free of per-asset licence bookkeeping (no `ASSETS.md` rows,
+> no redistribution terms). PLAN-metalstorm-beta-units.md sanctions the
+> generated-model route alongside CC0 sourcing, so this is a choice between two
+> approved options — not a stand-in. Swapping in CC0 sources later needs no code
+> change: they just have to land in `objects3d/` as glTF with a baked atlas.
+
 Exclusion zones (roads, water, start pads, `corridor`/`choke` regions) gate
 feature layers so chokepoints stay passable; stamps ignore them (the road
 deck is painted over stamps in the bake). Trees and boulders are `blocking`;
@@ -243,11 +268,23 @@ format doesn't carry it — size variety comes from multiple feature defs
 (`rock_boulder` vs `rock_boulder_large`).
 
 Rendering: `feature-lod-renderer.ts` splits each species into 2048-elmo tiles
-with three tiers — full mesh (≤2500 elmos), impostor card (≤10000), culled
-(beyond, and at whole-map camera height, where the albedo bake carries the
-forest read). Vegetation casts CSM shadows only within `shadowDistance`
-(1200 elmos) — Babylon submits every caster to every cascade, so ungated
-casting cost ~18 ms/frame at close zoom on the 54k-feature Meridian.
+with three tiers — full mesh, impostor card, culled (beyond `cullDistance`,
+and at whole-map camera height, where the albedo bake carries the forest
+read). Vegetation casts CSM shadows only within `shadowDistance` (1200 elmos)
+— Babylon submits every caster to every cascade, so ungated casting cost
+~18 ms/frame at close zoom on the 56k-feature Meridian.
+
+The mesh→card distance is **per species**, published in the package-wide
+`objects3d/impostors.json` that `bake_impostors.write_manifest()` folds out of
+the per-model sidecars (FeatureProcessor ships it into the processed
+`features/` dir; the client reads it in one request instead of probing per type).
+Each species' distance is sized so every prop reaches its card at the same
+**on-screen size** (70 px against a 128 px atlas cell, i.e. still oversampled
+at the swap): a 137-elmo conifer swaps at 2505 elmos — the global default it
+replaces, so forest behaviour is unchanged — while a 19-elmo fence post swaps
+at 361 instead of staying a full mesh 7× too far out. The tier dead band scales
+with the threshold (15%, capped by the global `hysteresis`) so a 52-elmo band
+protects a 350-elmo swap rather than a 256-elmo one swamping it.
 
 ## 7. Processing & verification loop
 
@@ -307,18 +344,41 @@ Recipe:
 
 ## 9. Goldens
 
-Reference captures of the shipped Meridian Basin (regenerate after visual
+Reference captures of the two shipped generated maps (regenerate after visual
 changes and eyeball against these):
 
-![strategic zoom](screenshots/meridian_basin_strategic_zoom.jpeg)
-![gameplay zoom](screenshots/meridian_basin_gameplay_zoom.jpeg)
+![Meridian strategic zoom](screenshots/meridian_basin_strategic_zoom.jpeg)
+![Meridian gameplay zoom](screenshots/meridian_basin_gameplay_zoom.jpeg)
+![Skerry strategic zoom](screenshots/skerry_reach_strategic_zoom.jpeg)
+![Skerry gameplay zoom](screenshots/skerry_reach_gameplay_zoom.jpeg)
+
+### Measured LOD cost (2026-08-03, this machine, retina)
+
+Submitted (post-frustum-cull) feature vertices, `__featureLod.force('near')`
+versus the automatic tier assignment, at a fixed camera:
+
+| map (placements) | camera | all-NEAR verts | auto verts | all-NEAR fps | auto fps |
+| --- | --- | --- | --- | --- | --- |
+| Meridian (55 967) | gameplay `y=230` | 8 868 240 | 3 400 300 | 17 | 25 |
+| Meridian (55 967) | strategic `y=8458` | 20 688 912 | **137 296** | 9 | **28** |
+| Skerry (22 436) | gameplay `y=340` | 5 135 776 | 3 164 344 | 22 | 33 |
+| Skerry (22 436) | strategic `y=8568` | 12 612 060 | **82 744** | 11 | **28** |
+
+The far tier costs exactly **8 vertices per instance** on every map, camera and
+species (a DOUBLESIDE quad) — that is the guardrail's "flat" property: card
+cost is independent of model complexity, so adding denser or more detailed
+props cannot raise the far-zoom vertex bill. At strategic zoom that is a 151×
+(Meridian) / 152× (Skerry) reduction and roughly 3× the framerate.
 
 ## 10. Known limits & queued improvements
 
 Tracked with citations and measurements in **PLAN-maps.md §2b**: numba port of
-the hot kernels (~20× generation speedup), monotone-water-surface river
-carving with `min`-combine and meander offsets, mapgen4-style rain-shadow
-sweep, Galin-style road segment masks (kills 8-connected staircase) + trunk
+the hot kernels — **done** (item 1: ~9-80× depending on stage, `resolve_flats`
+alone ~100-700×; `fill_depressions`/`topo_levels` are now the dominant
+remaining per-iteration cost and are the next lever if needed) —
+monotone-water-surface river carving with `min`-combine and meander offsets,
+mapgen4-style rain-shadow sweep, Galin-style road segment masks (kills
+8-connected staircase) + trunk
 reuse discount, v2 streamed texture pages (TEXTURE_2D_ARRAY cache, CPU-side
 residency), client river-ribbon water surfaces, hemi-octahedral impostors.
 Real-world DEM was evaluated and rejected as shipping terrain (30 m Nyquist,

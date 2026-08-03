@@ -1,9 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { NullEngine, Scene, Vector3, FreeCamera } from '@babylonjs/core';
+import { NullEngine, Scene, Vector3, FreeCamera, Quaternion, Matrix } from '@babylonjs/core';
 import {
     ImpostorRenderer, LodTier, quantizeHeading, computeCardRotation, layoutOf,
+    cardLift, type ImpostorAtlas,
 } from './impostor-renderer.js';
-import { SINGLE_CELL_LAYOUT, DEFAULT_ATLAS_LAYOUT } from './impostor-atlas.js';
+import {
+    SINGLE_CELL_LAYOUT, DEFAULT_ATLAS_LAYOUT, selectAtlasCell,
+    AZIMUTH_PHASE_COL0_BACK, AZIMUTH_PHASE_COL0_FRONT,
+} from './impostor-atlas.js';
 
 // PLAN-metalstorm-beta-units.md §2.1 / engine ask B1. Covers the three
 // pieces of B1 logic the design doc calls out for unit coverage: heading
@@ -148,5 +152,85 @@ describe('computeCardRotation', () => {
         expect(layoutOf(undefined)).toEqual(SINGLE_CELL_LAYOUT);
         expect(layoutOf({ diffuseUri: '', walkFrames: 1, idleFrames: 1, width: 1, height: 1 }))
             .toEqual(SINGLE_CELL_LAYOUT);
+    });
+});
+
+// The ground anchor. `height/2` is only right when the baker put the model's
+// ground point on the cell's BOTTOM edge; the `infantry_v2` sheets keep a
+// margin and share one scale across 24 views, so their feet sit ~18% of a cell
+// above it and a half-height lift hovers them ~2 elmos. Hence a declared lift.
+describe('cardLift', () => {
+    const atlas = (extra: Partial<ImpostorAtlas> = {}): ImpostorAtlas => ({
+        diffuseUri: '', walkFrames: 1, idleFrames: 1, width: 12, height: 12, ...extra,
+    });
+
+    it('falls back to half the card height when the atlas declares nothing', () => {
+        expect(cardLift(atlas())).toBe(6);
+    });
+
+    it('uses the atlas\'s own declared lift when present', () => {
+        expect(cardLift(atlas({ centreY: 3.8457 }))).toBeCloseTo(3.8457, 6);
+    });
+
+    it('ignores a nonsensical declaration rather than sinking the card', () => {
+        for (const centreY of [0, -1, NaN]) {
+            expect(cardLift(atlas({ centreY }))).toBe(6);
+        }
+    });
+
+    it('is 0 for a missing atlas', () => {
+        expect(cardLift(undefined)).toBe(0);
+    });
+
+    it('places the declared ground point on the terrain, not the card centre', () => {
+        // A card of height h whose baked ground point is a fraction f of the
+        // sheet above its bottom edge needs a lift of h*(0.5 − f). Check the
+        // measured infantry number lands the feet at y = 0 for an upright card.
+        const a = atlas({ centreY: 3.8457 });
+        const groundFractionOfCell = 0.17953;   // measured off the M2 bake
+        const feetLocalY = -a.height / 2 + groundFractionOfCell * a.height;
+        expect(cardLift(a) + feetLocalY).toBeCloseTo(0, 3);
+    });
+});
+
+// The zero point of the atlas azimuth phase, pinned against Babylon's REAL
+// placement transform rather than asserted in prose. This is the fact that a
+// stale docstring got backwards (it claimed column 0 was "dead-front"), letting
+// two self-consistent conventions drift 180deg apart unnoticed — so it is worth
+// a test that would fail if the engine's handedness ever changed under us.
+describe('azimuth phase zero point (vs Babylon placement)', () => {
+    /** World-space forward of a `-Z`-forward model placed at `heading`. */
+    const worldForward = (heading: number): Vector3 => {
+        const m = Matrix.Identity();
+        Matrix.ComposeToRef(
+            Vector3.One(), Quaternion.RotationAxis(Vector3.UpReadOnly, heading),
+            Vector3.Zero(), m);
+        return Vector3.TransformNormal(new Vector3(0, 0, -1), m);
+    };
+
+    it('sends a -Z forward to (-sin h, ., -cos h)', () => {
+        for (const h of [0, Math.PI / 2, Math.PI, 2.3, -0.7]) {
+            const f = worldForward(h);
+            expect(f.x).toBeCloseTo(-Math.sin(h), 6);
+            expect(f.z).toBeCloseTo(-Math.cos(h), 6);
+        }
+    });
+
+    it('puts relative yaw 0 directly BEHIND the instance, not in front', () => {
+        for (const h of [0, Math.PI / 2, Math.PI, 2.3, -0.7]) {
+            // Relative yaw 0 means viewYaw == heading, i.e. toCam = (sin h, ., cos h).
+            const toCam = new Vector3(Math.sin(h), 0, Math.cos(h));
+            // That is exactly the anti-forward direction => we see the BACK.
+            expect(Vector3.Dot(toCam, worldForward(h))).toBeCloseTo(-1, 6);
+        }
+    });
+
+    it('so the default phase reads a behind-camera as column 0, and PI reads it as the far column', () => {
+        const h = 1.2;
+        const toCam = new Vector3(Math.sin(h), 0.5, Math.cos(h));
+        const back = { ...DEFAULT_ATLAS_LAYOUT, azimuthPhase: AZIMUTH_PHASE_COL0_BACK };
+        const front = { ...DEFAULT_ATLAS_LAYOUT, azimuthPhase: AZIMUTH_PHASE_COL0_FRONT };
+        expect(selectAtlasCell(toCam.x, toCam.y, toCam.z, h, back) % 8).toBe(0);
+        expect(selectAtlasCell(toCam.x, toCam.y, toCam.z, h, front) % 8).toBe(4);
     });
 });

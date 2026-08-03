@@ -42,8 +42,11 @@ import {
     type CascadedShadowGenerator,
 } from '@babylonjs/core';
 import { TeamColorPlugin } from './team-color-plugin.js';
+import { ImpostorUvPlugin } from './impostor-uv-plugin.js';
+import { DitherFadePlugin } from './dither-fade-plugin.js';
 import {
     type AtlasLayout, SINGLE_CELL_LAYOUT, cardTiltsWithPitch,
+    isDirectionalAtlas, selectAtlasCell,
 } from './impostor-atlas.js';
 import { getTeamColor } from './team-colors.js';
 import type { PresentationClock } from './presentation-clock.js';
@@ -52,8 +55,9 @@ import type { EntityStateSnapshot } from './entity-state.js';
 /** Impostor atlas metadata — per unit def. Sourced from the def's client
  *  content or auto-derived from the model. */
 export interface ImpostorAtlas {
-    /** Atlas texture URI (diffuse + alpha). 8 columns (headings 0°, 45°, …, 315°)
-     *  × N rows (animation frames: walk[0..k], idle[0..m]). */
+    /** Atlas texture URI (diffuse + alpha). v2 directional layout: `yawBins`
+     *  columns × (`pitchBins`·`frames`) rows — see impostor-atlas.ts /
+     *  impostor_convention.py. */
     diffuseUri: string;
     /** Team-color mask atlas URI (R = blend amount, same layout). */
     teamMaskUri?: string;
@@ -68,11 +72,34 @@ export interface ImpostorAtlas {
      *  sheet (`SINGLE_CELL_LAYOUT`): one horizon-level front view, so its cards
      *  stay upright — see `cardTiltsWithPitch()`. */
     layout?: AtlasLayout;
+    /** Ground-anchor lift in elmos — see {@link cardLift}. */
+    centreY?: number;
 }
 
 /** An atlas's grid, defaulting a legacy sheet to the single-cell layout. */
 export function layoutOf(atlas: ImpostorAtlas | undefined): AtlasLayout {
     return atlas?.layout ?? SINGLE_CELL_LAYOUT;
+}
+
+/**
+ * How far above its ground point the card's CENTRE must sit, so the figure's
+ * feet land on the terrain rather than hovering (or sinking).
+ *
+ * `height/2` is only correct when the baker put the model's ground point on
+ * the cell's BOTTOM edge. A baker that keeps a margin, or that fits all 24
+ * views to one shared scale (so the tallest view sets the scale and the rest
+ * leave slack), ends up with clear pixels below the feet — and then `height/2`
+ * hovers the sprite by exactly that slack. The `infantry_v2` sheets do this:
+ * their ground point sits ~18% of a cell above its bottom edge, so the
+ * declared lift is ~0.32·height rather than 0.5·height. Atlases that declare
+ * nothing keep the bottom-edge assumption.
+ */
+export function cardLift(atlas: ImpostorAtlas | undefined): number {
+    const declared = atlas?.centreY;
+    if (typeof declared === 'number' && Number.isFinite(declared) && declared > 0) {
+        return declared;
+    }
+    return (atlas?.height ?? 0) * 0.5;
 }
 
 /**
@@ -153,14 +180,22 @@ export function quantizeHeading(radians: number): number {
  * dielectric so the sprite takes scene sun/ambient/shadow like the unit
  * models, plus TeamColorPlugin against the optional `_impostor_team.ktx2`
  * R-mask sidecar. Shared with the squad member fan-out path
- * (squad-render-backend.ts), which draws per-member sprites for
- * impostor-only infantry defs.
+ * (squad-render-backend.ts), which draws per-member sprites beyond the def's
+ * impostorDistance.
+ *
+ * `withFade` attaches DitherFadePlugin so the caller can crossfade the sprite
+ * in/out across the member LOD boundary via a per-instance `ditherFade`
+ * attribute (squad member fan-out, M5). A caller that opts in MUST upload a
+ * `ditherFade` thin-instance buffer (default 1.0), or every fragment reads
+ * fade=0 and discards. The entity-level impostor path leaves it off (hard
+ * Full↔Impostor swap, no per-instance fade attribute).
  */
 export function createImpostorMaterial(
     name: string,
     atlas: ImpostorAtlas,
     team: number,
     scene: Scene,
+    withFade = false,
 ): PBRMaterial {
     const mat = new PBRMaterial(name, scene);
     mat.metallic = 0.0;
@@ -187,6 +222,31 @@ export function createImpostorMaterial(
         const mask = new Texture(atlas.teamMaskUri, scene);
         mask.hasAlpha = false;
         plugin.teamMask = mask;
+    }
+
+    // v2 directional atlas: the per-instance `impostorCell` attribute selects
+    // one (yaw, pitch) cell and the UV-remap plugin scales/offsets the quad's
+    // UVs into it, so the albedo, alpha, and team mask all read that cell.
+    // Legacy 1x1 atlases skip it and keep the whole-quad mapping (M3).
+    //
+    // `billboard` stays OFF here: this path bakes the shared card rotation into
+    // each thin-instance matrix (see render()), so the shader must not rotate
+    // again. The feature-LOD path is the one that drives the plugin's billboard.
+    const layout = layoutOf(atlas);
+    if (isDirectionalAtlas(layout)) {
+        const uv = new ImpostorUvPlugin(mat);
+        uv.layout = layout;
+        uv.cellSelect = true;
+        uv.isEnabled = true;
+    }
+    if (withFade) {
+        const fade = new DitherFadePlugin(mat);
+        // Per-instance `ditherFade` attribute, and the complementary half of
+        // the Bayer pattern versus the member-model material, so the two tiers
+        // interleave exactly instead of overlapping (see squad-render-backend).
+        fade.useAttribute = true;
+        fade.invertPattern = true;
+        fade.isEnabled = true;
     }
     return mat;
 }
@@ -253,10 +313,10 @@ export class ImpostorRenderer {
             this.pendingInstances.set(key, batch);
         }
 
-        // FIDELITY-STANDIN: animation frame logic simplified.
-        // Real implementation: check snapshot.state_anim (MOVING/IDLE),
-        // sample gait phase from velocity × time → walk flipbook frame,
-        // or use idle frame. For now: frame 0 always.
+        // Flipbook frame within the atlas (row-group `frame·pitchBins + pitch`).
+        // frames=1 today, so always 0 — walk/idle flipbook rows are fx-offload
+        // X2 territory (the atlas layout already reserves them downward, so X2
+        // is additive). NOT a standin: single-pose is the plan's M3 state.
         const animFrame = 0;
 
         batch.push({
@@ -280,8 +340,7 @@ export class ImpostorRenderer {
         const groups = new Map<string, {
             mesh: Mesh;
             matrices: number[];
-            headings: number[];
-            frames: number[];
+            cells: number[];
             count: number;
         }>();
 
@@ -296,25 +355,25 @@ export class ImpostorRenderer {
             if (!mesh) continue;
 
             const atlas = this.atlases.get(defId);
+            const layout = layoutOf(atlas);
 
             // One card rotation for the whole batch — shared, so nearby
             // sprites stay parallel instead of fanning out radially.
-            const cardRot = computeCardRotation(camera, layoutOf(atlas));
+            const cardRot = computeCardRotation(camera, layout);
 
             // Instance positions are ground anchors (entity Y is at ground
-            // level) — lift the quad by half its height so the sprite's feet
-            // touch the ground instead of the figure being half-buried. The
-            // lift rides the card's own local up, so a tilted card keeps its
-            // base on the terrain rather than hovering above it.
-            const halfH = (atlas?.height ?? 0) * 0.5;
-            const lift = new Vector3(0, halfH, 0);
+            // level) — lift the quad so the sprite's feet touch the ground
+            // instead of the figure being half-buried, by the atlas's own
+            // declared lift (`cardLift`, NOT unconditionally half the height).
+            // The lift rides the card's own local up, so a tilted card keeps
+            // its base on the terrain rather than hovering above it.
+            const lift = new Vector3(0, cardLift(atlas), 0);
             lift.rotateByQuaternionToRef(cardRot, lift);
 
             const group = {
                 mesh,
                 matrices: [] as number[],
-                headings: [] as number[],
-                frames: [] as number[],
+                cells: [] as number[],
                 count: 0,
             };
 
@@ -333,10 +392,15 @@ export class ImpostorRenderer {
                 mat.copyToArray(arr, 0);
                 for (let i = 0; i < 16; i++) group.matrices.push(arr[i]);
 
-                // Per-instance heading (for atlas column select)
-                group.headings.push(quantizeHeading(inst.heading));
-                // Per-instance anim frame (atlas row)
-                group.frames.push(inst.animFrame);
+                // Per-instance directional cell: column from the relative yaw
+                // between the camera and the unit's facing (offset by the
+                // atlas's own azimuth phase), row from camera pitch against the
+                // atlas's own arc — impostor-atlas.selectAtlasCell. animFrame is
+                // reserved for fx-offload X2 flipbook rows (frames=1 today).
+                const vx = cameraPos.x - inst.x;
+                const vy = cameraPos.y - inst.y;
+                const vz = cameraPos.z - inst.z;
+                group.cells.push(selectAtlasCell(vx, vy, vz, inst.heading, layout, inst.animFrame));
                 group.count++;
             }
 
@@ -344,17 +408,15 @@ export class ImpostorRenderer {
         }
 
         // Update mesh buffers
-        for (const [key, group] of groups) {
+        for (const [, group] of groups) {
             group.mesh.isVisible = true;
             const matBuf = new Float32Array(group.matrices);
             group.mesh.thinInstanceSetBuffer('matrix', matBuf, 16, false);
-
-            // FIDELITY-STANDIN: per-instance heading/frame attributes not yet wired.
-            // When fx-offload X2 lands, these become custom vertex attributes
-            // (thinInstanceSetBuffer('heading', …) + shader reads). For now the
-            // shader uses a fixed atlas frame (column 0, row 0).
-            // TODO(fx-offload-X2): thinInstanceSetBuffer('heading', Float32Array(group.headings), 1)
-            // TODO(fx-offload-X2): thinInstanceSetBuffer('animFrame', Float32Array(group.frames), 1)
+            // Per-instance directional cell selector (ImpostorUvPlugin reads it
+            // in the vertex shader). Harmless on legacy 1×1 atlases (the plugin
+            // isn't attached, so the attribute is simply unused).
+            group.mesh.thinInstanceSetBuffer('impostorCell',
+                new Float32Array(group.cells), 1, false);
 
             group.mesh.thinInstanceCount = group.count;
             group.mesh.thinInstanceRefreshBoundingInfo(false);
@@ -404,8 +466,12 @@ export class ImpostorRenderer {
 
         // Shadow casting (if enabled). The material is ALPHATEST, so the
         // shadow depth pass samples the albedo alpha and casts the sprite
-        // silhouette, not the full quad.
-        if (this.shadowGenerator) {
+        // silhouette. A DIRECTIONAL atlas is excluded: the UV-remap lives in
+        // the material's own vertex shader and doesn't reach Babylon's shadow
+        // depth shader, so a directional caster would shadow the whole-atlas
+        // silhouette (all cells overlaid). See impostor-uv-plugin.ts — the LOD
+        // swap happens at ≲20 px where a cast shadow is sub-pixel anyway.
+        if (this.shadowGenerator && !isDirectionalAtlas(layoutOf(atlas))) {
             this.shadowGenerator.addShadowCaster(mesh);
         }
 

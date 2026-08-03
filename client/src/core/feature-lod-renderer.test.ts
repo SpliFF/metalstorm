@@ -164,4 +164,51 @@ describe('FeatureLodController', () => {
         const { ctrl } = makeHarness([]);
         expect(ctrl.typeCount).toBe(0);
     });
+
+    // A per-def swap distance (impostors.json `impostorDistance`, sized by
+    // bake_impostors.write_manifest so every prop reaches the card at the same
+    // on-screen size) is what keeps small props from staying full meshes as far
+    // out as a tree. The dead band has to shrink with it.
+    it('uses the atlas per-type impostorDistance and scales hysteresis to it', () => {
+        const { scene, camera, ctrl, template } = makeHarness([place(5000, 100)]);
+        ctrl.addType({
+            typeName: 'stump',
+            template: template.clone('stumpTemplate', null, true),
+            placements: [place(5000, 100)],
+            atlas: {
+                diffuseUrl: 'about:blank#stump_impostor.ktx2',
+                layout: DEFAULT_ATLAS_LAYOUT,
+                width: 19, height: 19, topDown: true,
+                impostorDistance: 350,
+            },
+            modelExtent: { radius: 5, height: 10 },
+        });
+
+        const rowFor = (name: string) =>
+            (ctrl.getStats().types as { name: string; impostorDistance: number }[])
+                .find(r => r.name === name)!;
+        expect(rowFor('tree').impostorDistance).toBe(2000);   // global default
+        expect(rowFor('stump').impostorDistance).toBe(350);   // per-type override
+
+        // Camera at (100,100,100): the tile is ~3.9k away, so the tree tile is
+        // FAR and the stump tile — swapping ten times closer — is FAR too.
+        ctrl.update(camera, 1000);
+        expect(tileMesh(scene, 'feat_tree_far_5:0').isEnabled(false)).toBe(true);
+        expect(tileMesh(scene, 'feat_stump_far_5:0').isEnabled(false)).toBe(true);
+
+        // 350 elmos off the tile edge (tile AABB starts at x=4995): well inside
+        // the tree's 2000 threshold, still at the stump's.
+        camera.position.set(4645, 0, 100);
+        ctrl.update(camera, 2000);
+        expect(tileMesh(scene, 'feat_tree_near_5:0').isEnabled(false)).toBe(true);
+        expect(tileMesh(scene, 'feat_stump_far_5:0').isEnabled(false)).toBe(true);
+
+        // 280 elmos. The scaled dead band (350 * 0.15 = 52.5) lets the stump
+        // promote at 297.5; the unscaled global 100 would have held it in FAR
+        // down to 250, a band nearly a third as wide as the threshold itself.
+        camera.position.set(4715, 0, 100);
+        ctrl.update(camera, 3000);
+        expect(tileMesh(scene, 'feat_stump_near_5:0').isEnabled(false)).toBe(true);
+        expect(tileMesh(scene, 'feat_stump_far_5:0').isEnabled(false)).toBe(false);
+    });
 });

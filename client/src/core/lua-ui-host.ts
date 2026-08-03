@@ -2522,7 +2522,13 @@ defaultFont = activeFont
     ];
     const luaUiEntry = LUAUI_ENTRY_CANDIDATES.find((p) => vfsExists(p));
     if (!luaUiEntry) {
-        postLog(4, `[LuaUI] no recognised LuaUI entry point in VFS (tried ${LUAUI_ENTRY_CANDIDATES.join(', ')}) — no overlay will load`);
+        // Not necessarily a problem: games with a native-JS widget system
+        // (e.g. metalstorm) ship no LuaUI/*.lua at all by design, so this
+        // probe misses on every one of their sessions. There's no per-game
+        // "I use native widgets" flag to gate the probe on yet, so just
+        // downgrade below WARN/ERROR rather than raising a false alarm on an
+        // intentional configuration.
+        postLog(1, `[LuaUI] no recognised LuaUI entry point in VFS (tried ${LUAUI_ENTRY_CANDIDATES.join(', ')}) — no overlay will load`);
     }
     const entryToBoot = luaUiEntry ?? 'LuaUI/camain.lua';
 
