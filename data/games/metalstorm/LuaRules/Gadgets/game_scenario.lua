@@ -619,7 +619,66 @@ function gadget:GameStart()
     Spring.Echo('[game_scenario] staged "' .. (scn.name or name) .. '"')
 end
 
+-- ============================================================
+-- "Can this war be FOUGHT?" — the sibling of game_gameover's
+-- "can this war END?" (PLAN-metalstorm-wars.md §7.4, endtoend D19).
+--
+-- stageUnits already warns about the scenario's half of the mismatch: a
+-- scenario team the room does not have. The half that actually ends the match
+-- before it starts is the inverse — a LIVE team nothing was staged for. A war
+-- created through the Create Game dialog spent three minutes in exactly that
+-- state (team 0 = 13 units, team 1 = 0 units, no opponent on the board) and
+-- the only trace was one skipped-team line nobody read.
+--
+-- So it is now as loud as an endless war, published the same way, and checked
+-- against the staged board rather than against the request — it does not care
+-- how the room was created, so no boot path can bypass it.
+local UNSTAGED_CHECK_FRAME = 60
+local unstagedChecked = false
+
+local function checkEveryTeamHasAnArmy()
+    local gaia = Spring.GetGaiaTeamID and Spring.GetGaiaTeamID() or nil
+    local empty = {}
+    for _, teamID in ipairs(Spring.GetTeamList() or {}) do
+        -- Only teams somebody actually occupies. The engine materialises every
+        -- index up to the highest one the launch named, so a room seating its
+        -- two sides on teams 0 and 4 also gets teams 1-3 — real, live, and
+        -- nobody's. Those are filler, not a missing army; GetTeamInfo's leader
+        -- is -1 for them and >= 0 for a team with a player or an AI.
+        local _, leader = Spring.GetTeamInfo(teamID)
+        if teamID ~= gaia and leader ~= nil and leader >= 0 then
+            local units = Spring.GetTeamUnits(teamID)
+            if units == nil or #units == 0 then
+                -- '%d', not the raw number: Spring hands team ids back as Lua
+                -- floats, so a bare concat says "team(s) 1.0" (the same trap
+                -- game_gameover's joinIds exists for).
+                empty[#empty + 1] = string.format('%d', teamID)
+            end
+        end
+    end
+
+    Spring.SetGameRulesParam('war_teams_unstaged', #empty, { public = true })
+    if #empty == 0 then return end
+
+    Spring.Echo('[game_scenario] WARNING: team(s) ' .. commaList(empty) ..
+                ' are in this war with NO units — nothing was staged for ' ..
+                'them, so those sides cannot fight and cannot be fought. ' ..
+                (GG.Scenario and GG.Scenario.name
+                    and ('Scenario "' .. GG.Scenario.name ..
+                         '" stages a starting force for its own teams only; ' ..
+                         'check the room seated its slots on the sides the ' ..
+                         'scenario declares')
+                    or 'No scenario was staged (the `scenario` modoption is ' ..
+                       'unset)') ..
+                '. See PLAN-metalstorm-wars.md §7.4.')
+end
+
 function gadget:GameFrame(frame)
+    if not unstagedChecked and frame >= UNSTAGED_CHECK_FRAME then
+        unstagedChecked = true
+        checkEveryTeamHasAnArmy()
+    end
+
     -- Resolve deferred objectives after civilians have had a chance to spawn
     -- (civilians spawn at GameStart via stageCivilians, so frame 30 = 1 second
     -- after game start gives them time to settle)
