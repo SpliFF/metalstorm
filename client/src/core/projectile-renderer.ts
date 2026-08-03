@@ -8,7 +8,10 @@
  *   - Trajectory: proj_id, pos, vel  (bounce / steered)
  *
  * The client tracks each live projectile in a `Map<projId, LiveProjectile>`
- * and integrates pos += vel*dt; vel.y -= gravity*dt every render tick. On
+ * and integrates vel.y += gravity*dt; pos += vel*dt every render tick
+ * (gravity first, matching `CProjectile::Update`; the wire's gravity is
+ * already negative for downward pull, and only ballistic projectile types
+ * get it at all — see projectile-ballistics.ts). On
  * impact the entry is removed (the explosion VFX is fired by combat-fx /
  * combat events). On trajectory it overwrites pos+vel.
  *
@@ -52,6 +55,7 @@ import {
     effectForImpact,
     impactContextFlags,
 } from './weapon-fx-dispatch.js';
+import { isBallistic } from './projectile-ballistics.js';
 import { registerProjectileBeamShader } from './shaders/projectile-beam.js';
 import { registerProjectileLaserShader } from './shaders/projectile-laser.js';
 import {
@@ -948,7 +952,7 @@ export class ProjectileRenderer {
             weaponDefId: ev.weaponDefId,
             pos: new Vector3(ev.pos.x, ev.pos.y, ev.pos.z),
             vel: new Vector3(ev.vel.x * vps, ev.vel.y * vps, ev.vel.z * vps),
-            gravity: ev.gravity * vps * vps,
+            gravity: isBallistic(def?.projectileType) ? ev.gravity * vps * vps : 0,
             ttl: ev.ttl > 0 ? ev.ttl / SIM_TICKS_PER_SEC : -1,
             hitscan: false,
             targetPos: new Vector3(ev.targetPos.x, ev.targetPos.y, ev.targetPos.z),
@@ -1205,12 +1209,26 @@ export class ProjectileRenderer {
                 continue;
             }
 
+            // Semi-implicit Euler, gravity BEFORE position — the exact
+            // order `CProjectile::Update()` uses:
+            //     SetVelocityAndSpeed(speed + UpVector * mygravity);
+            //     SetPosition(pos + speed);
+            // Integrating position first instead drifts a ballistic shell
+            // by |g| * dt * elapsed (≈4.3 elmos over the first second at
+            // map gravity 130) — enough to walk a long cannon shot off
+            // where the sim actually put it.
+            //
+            // `gravity` arrives from the wire as the sim's `mygravity`,
+            // which is ALREADY NEGATIVE for downward pull — MapInfo.cpp
+            // stores `map.gravity = -gravity / (GAME_SPEED * GAME_SPEED)`.
+            // So we ADD it, exactly as the sim does. Subtracting flipped
+            // every ballistic shot into an upward accelerating arc that
+            // left the play area entirely.
+            p.vel.y += p.gravity * dt;
             // pos += vel * dt
             p.pos.x += p.vel.x * dt;
             p.pos.y += p.vel.y * dt;
             p.pos.z += p.vel.z * dt;
-            // vel.y -= g * dt   (g positive pulls down)
-            p.vel.y -= p.gravity * dt;
 
             // Record a puff at the missile's post-integration position.
             // recordTrailPuff throttles internally — this call is cheap
