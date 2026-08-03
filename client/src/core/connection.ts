@@ -30,6 +30,8 @@ import { ProjectileFiredEvent } from '../protocol/spring-web/projectile-fired-ev
 import { ProjectileImpactEvent } from '../protocol/spring-web/projectile-impact-event.js';
 import { ProjectileTrajectoryEvent } from '../protocol/spring-web/projectile-trajectory-event.js';
 import { FireOutcomeEvent } from '../protocol/spring-web/fire-outcome-event.js';
+import { TrajectoryKeyframe } from '../protocol/spring-web/trajectory-keyframe.js';
+import { OutcomeKnownEvent } from '../protocol/spring-web/outcome-known-event.js';
 import { EntityDestroy } from '../protocol/spring-web/entity-destroy.js';
 import { EntitySensorUpdate } from '../protocol/spring-web/entity-sensor-update.js';
 import { SendToUnsyncedEvent } from '../protocol/spring-web/send-to-unsynced-event.js';
@@ -287,6 +289,38 @@ export interface FireOutcomeInfo {
     /// straight shot. Needed because the ballistic solution through
     /// (origin, impactPos, Δframes) is only unique once g is fixed.
     gravity: number;
+}
+
+/// PLAN-latency L3.2 — one knot on a Tier-S projectile's flight path. `vel` is
+/// in elmos / sim-frame, the same unit as ProjectileFiredInfo and the unit the
+/// spline is parametrised in; keyframe-flight.ts converts on the way out.
+export interface TrajectoryKeyframeInfo {
+    projId: number;
+    frame: number;
+    pos: { x: number; y: number; z: number };
+    vel: { x: number; y: number; z: number };
+    /// `TrajectoryKeyframeKind` (0 Launch, 1 Heartbeat, 2 StageChange,
+    /// 3 Retarget, 4 Bounce, 5 Terminal).
+    kind: number;
+}
+
+/// PLAN-latency L3.2 — a Tier-S shot's resolved outcome with the sim frame it
+/// resolves on, so the client can schedule the burst instead of playing it on
+/// packet arrival.
+///
+/// Carries the same information as `ProjectileImpactInfo` plus the frame, and
+/// with a *more accurate* `outcome`: shield absorption and interceptor kills
+/// both funnel through the sim's no-argument `Collision()` overload and have
+/// always been reported as `Terrain` by the legacy impact event, whereas the
+/// server records the real kind for this one (L3.1, `SetWebOutcomeHint`).
+export interface OutcomeKnownInfo {
+    projId: number;
+    /// `ProjectileImpactKind` — same vocabulary as ProjectileImpactInfo.
+    outcome: number;
+    outcomeFrame: number;
+    outcomePos: { x: number; y: number; z: number };
+    targetId: number;
+    weaponDefId: number;
 }
 
 /// One sound asset attached to a unit or weapon def. The `id` field
@@ -817,6 +851,16 @@ export interface ConnectionEvents {
      *  relative to the batch (the server resolved the whole flight up front).
      *  `frame` is passed for symmetry/diagnostics only. */
     onFireOutcomes?: (events: FireOutcomeInfo[], frame: number) => void;
+    /** PLAN-latency L3.2 — Tier-S trajectory knots. Delivered immediately
+     *  rather than scheduled: a keyframe is data about the path, not an event
+     *  on it, and the spline it feeds is evaluated at the presentation cursor
+     *  by the renderer. `frame` is the batch frame (= the knot's own frame in
+     *  practice) and is passed for diagnostics. */
+    onTrajectoryKeyframes?: (events: TrajectoryKeyframeInfo[], frame: number) => void;
+    /** PLAN-latency L3.2 — a Tier-S shot's resolution, stamped with the frame
+     *  it resolves on. The consumer schedules the burst at `outcomeFrame` on
+     *  the L1 timeline; see the dedupe note on `onProjectileImpacts`. */
+    onOutcomesKnown?: (events: OutcomeKnownInfo[], frame: number) => void;
     /** `frame` is the sim frame the unit died on, taken from
      *  `EntityDestroy.frame` (stamped server-side at kill time). Falls back to
      *  the most recent GameEventBatch frame only against a server that predates
@@ -2160,12 +2204,48 @@ export class Connection {
             this.events.onProjectileFired(out, frame);
         }
 
+        // PLAN-latency L3.2 — decoded ahead of the impacts below because it
+        // *supersedes* them. The server emits both for a Tier-S resolution:
+        // the legacy `ProjectileImpactEvent` so a pre-L3 client still sees the
+        // burst, and `OutcomeKnownEvent` carrying the same resolution plus the
+        // frame it happens on (and a truer `outcome` — see OutcomeKnownInfo).
+        // Unlike the keyframe/trajectory pair, which the server made mutually
+        // exclusive at the emit site, these two genuinely both go out; the
+        // client is the one that must not play the explosion twice.
+        //
+        // Suppression is conditional on a consumer actually being registered
+        // for the replacement: a host that only implements `onProjectileImpacts`
+        // must keep seeing every impact rather than lose the Tier-S ones to a
+        // handler it does not have.
+        const outcomeKnownCount = this.events.onOutcomesKnown
+            ? batch.outcomesKnownLength() : 0;
+        const outcomesKnown: OutcomeKnownInfo[] = [];
+        const superseded = new Set<number>();
+        for (let i = 0; i < outcomeKnownCount; i++) {
+            const e = batch.outcomesKnown(i, new OutcomeKnownEvent());
+            if (!e) continue;
+            const p = e.outcomePos();
+            outcomesKnown.push({
+                projId: e.projId(),
+                outcome: e.outcome(),
+                outcomeFrame: e.outcomeFrame(),
+                outcomePos: { x: p?.x() ?? 0, y: p?.y() ?? 0, z: p?.z() ?? 0 },
+                targetId: e.targetId(),
+                weaponDefId: e.weaponDefId(),
+            });
+            superseded.add(e.projId());
+        }
+
         const impactCount = batch.projectileImpactsLength();
         if (impactCount > 0 && this.events.onProjectileImpacts) {
             const out: ProjectileImpactInfo[] = [];
             for (let i = 0; i < impactCount; i++) {
                 const e = batch.projectileImpacts(i, new ProjectileImpactEvent());
                 if (!e) continue;
+                // Both events are pushed by the same `Collision()` call, so
+                // they always share a batch — the dedupe never has to span
+                // one, and a suppressed impact is never simply lost.
+                if (superseded.has(e.projId())) continue;
                 const p = e.pos();
                 out.push({
                     projId: e.projId(),
@@ -2175,7 +2255,7 @@ export class Connection {
                     weaponDefId: e.weaponDefId(),
                 });
             }
-            this.events.onProjectileImpacts(out, frame);
+            if (out.length > 0) this.events.onProjectileImpacts(out, frame);
         }
 
         const trajCount = batch.projectileTrajectoriesLength();
@@ -2223,6 +2303,34 @@ export class Connection {
                 });
             }
             this.events.onFireOutcomes(out, frame);
+        }
+
+        // PLAN-latency L3.2: Tier-S keyframes. Dispatched *after* the Fired
+        // events above so a Launch knot arriving in its projectile's own batch
+        // finds the live entry already created, and *before* the outcomes
+        // below so the Terminal knot is on the track before the burst that
+        // shares its frame is scheduled.
+        const keyframeCount = batch.trajectoryKeyframesLength();
+        if (keyframeCount > 0 && this.events.onTrajectoryKeyframes) {
+            const out: TrajectoryKeyframeInfo[] = [];
+            for (let i = 0; i < keyframeCount; i++) {
+                const e = batch.trajectoryKeyframes(i, new TrajectoryKeyframe());
+                if (!e) continue;
+                const p = e.pos();
+                const v = e.vel();
+                out.push({
+                    projId: e.projId(),
+                    frame: e.frame(),
+                    pos: { x: p?.x() ?? 0, y: p?.y() ?? 0, z: p?.z() ?? 0 },
+                    vel: { x: v?.x() ?? 0, y: v?.y() ?? 0, z: v?.z() ?? 0 },
+                    kind: e.kind(),
+                });
+            }
+            this.events.onTrajectoryKeyframes(out, frame);
+        }
+
+        if (outcomesKnown.length > 0 && this.events.onOutcomesKnown) {
+            this.events.onOutcomesKnown(outcomesKnown, frame);
         }
 
         const soundCount = batch.soundsLength();

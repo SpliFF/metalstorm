@@ -74,6 +74,16 @@ import {
     evalCosmeticFlight,
     solveCosmeticFlight,
 } from './cosmetic-flight.js';
+import {
+    KEYFRAME_LAUNCH,
+    type Keyframe,
+    type KeyframeTrack,
+    createKeyframeTrack,
+    evalKeyframeTrack,
+    keyframeResidual,
+    pruneKeyframes,
+    pushKeyframe,
+} from './keyframe-flight.js';
 
 /** Default colors per projectile type when the weapon def doesn't
  *  specify one. Keyed by `ProjectileType` (Recoil's
@@ -320,6 +330,20 @@ interface LiveProjectile {
     /// the target's current expected pose at `impactFrame`; both endpoints stay
     /// pinned, so convergence is untouched.
     cosmeticTrack: CosmeticTracking | null;
+    /// PLAN-latency L3.2 — non-null once a `TrajectoryKeyframe` has arrived for
+    /// this (Tier-S, simulated) projectile. Like `cosmetic` it makes `pos`/`vel`
+    /// a pure function of the presentation cursor, but from knots the server
+    /// streams as the flight happens rather than from a closed form solved at
+    /// fire time: a Tier-S outcome is contingent, so its path cannot be known
+    /// up front. Null on a pre-L3 server, or with `LatencyTierSKeyframes` off,
+    /// in which case the wall-time integrator and `onTrajectory` still run.
+    keyframes: KeyframeTrack | null;
+    /// Gravity exactly as `ProjectileFiredEvent` sent it: per sim-**frame**²,
+    /// signed in Recoil's `mygravity` convention (negative pulls down). Kept
+    /// alongside the seconds-scaled `gravity` above because the keyframe
+    /// solver's arc is written in the sim's own frame recurrence and must not
+    /// round-trip through a unit conversion to get there.
+    wireGravity: number;
 }
 
 /** Active beam: from-point, to-point and birth time. Each tick the
@@ -435,6 +459,43 @@ const FOLLOW_LIGHT_RANGE = 80;
 /// truth between 1 Hz snapshots.
 const TRAIL_RESET_DELTA_SQ = 400;
 
+/**
+ * PLAN-latency L3.2 — projectile classes whose sim `Update()` actually
+ * integrates `mygravity`, as a `ProjectileType` mask.
+ *
+ * `ProjectileFiredEvent.gravity` carries `mygravity` unconditionally, and
+ * `CProjectile`'s constructor initialises that from the map for *every*
+ * projectile whether or not its class ever reads it. Only these classes do:
+ *
+ *   - `CExplosiveProjectile::Update` → `CProjectile::Update` (the ballistic step)
+ *   - `CFireBallProjectile`, `CMissileProjectile`, `CStarburstProjectile`,
+ *     `CTorpedoProjectile` — each adds `UpVector * mygravity` explicitly
+ *
+ * `CLaserProjectile::UpdatePos` and `CEmgProjectile::Update` are plain
+ * `pos += speed`, and flame/beam/lightning never reach a live flight path at
+ * all. Applying map gravity to those was worth **~32 elmos of phantom drop
+ * over a 19-frame LaserCannon flight** — measured as the entire residual on
+ * ZK's `striderdante_heatray` before this mask existed, swamping the guided
+ * steering the residual is meant to report.
+ *
+ * The alternative fix is server-side (send the gravity the projectile really
+ * experiences, which would also help the legacy integrator); this stays
+ * client-side because it needs no wire change and the client already keys
+ * per-class behaviour off `projectileType` throughout this file.
+ */
+const GRAVITY_INTEGRATING_TYPES =
+    ProjectileType.Explosive | ProjectileType.Fireball | ProjectileType.Missile
+    | ProjectileType.Starburst | ProjectileType.Torpedo;
+
+/** Gravity the keyframe track should continue an unbracketed flight under.
+ *  Unknown def (never streamed, or a game that ships none) keeps the wire
+ *  value: a shot that arcs slightly wrong reads better than one that does not
+ *  arc at all, and the terminal knot corrects it either way. */
+function continuationGravity(def: WeaponDefInfo | undefined, wire: number): number {
+    if (!def) return wire;
+    return (def.projectileType & GRAVITY_INTEGRATING_TYPES) !== 0 ? wire : 0;
+}
+
 export class ProjectileRenderer {
     private scene: Scene;
     private weaponVisuals = new Map<number, WeaponVisual>();
@@ -451,6 +512,46 @@ export class ProjectileRenderer {
     /// Presentation cursor (fractional sim frame) — the clock invented Tier-C
     /// flights run on. See setPresentationFrame.
     private presFrame = 0;
+    /**
+     * PLAN-latency L3.2 gate instrumentation — the client-side counterpart of
+     * the server's `[L3tally]` line, read with
+     * `window.__gp('__projectileRenderer.getKeyframeStats()')`.
+     *
+     * It exists because this lane has twice paid for discovering late that a
+     * stream was empty: `knots` separates "the flag is off / the wrong binary
+     * is serving" from "the spline is misbehaving", and `byKind` separates an
+     * unguided flight (Launch + Terminal only) from a guided one, which is the
+     * distinction the L3.1 A/B could not make with the vehicle it had.
+     *
+     * The two measured quantities:
+     *   * `residual*` — how far the rendered path moves when a knot lands, the
+     *     one correction L3 does not design away. Zero for unguided by
+     *     construction (`keyframeResidual`); quoted as a ratio against the
+     *     bolt's own per-frame travel, because a shift smaller than the
+     *     distance it was already covering in a frame cannot read as a snap.
+     *   * `approach*` — the gap between where the spline had the bolt on the
+     *     detonation tick and the terminal knot it is snapped onto, in the same
+     *     per-frame-travel units. The L2.2 analogue read 0.60× a render step.
+     */
+    private keyframeStats = {
+        knots: 0, knotsDropped: 0, tracks: 0,
+        byKind: [0, 0, 0, 0, 0, 0],
+        residualSamples: 0, residualSum: 0, residualMax: 0,
+        residualRatioSum: 0, residualRatioMax: 0,
+        outcomes: 0, approachSum: 0, approachMax: 0,
+        approachRatioSum: 0, approachRatioMax: 0,
+        /// Legacy trajectory events arriving for a projectile that already has
+        /// a track. The server makes the two streams exclusive at the emit
+        /// site, so a non-zero reading here is a server-side defect, not a
+        /// client one — and it would otherwise show up only as a bolt that
+        /// twitches.
+        legacyTrajSuppressed: 0,
+        /// Render ticks a bolt was held at the muzzle because the cursor had
+        /// not reached its launch frame. Non-zero is the pre-L3 pop-in being
+        /// removed; zero would mean the gate never fires.
+        preLaunchTicks: 0,
+    };
+
     /// PLAN-latency L2.3 — resolves a unit's interpolated pose at an arbitrary
     /// frame. Injected (rather than reached for) because the projectile
     /// renderer has no business holding an entity renderer, and because a host
@@ -621,6 +722,10 @@ export class ProjectileRenderer {
         }> = [];
         const invTick = 1 / SIM_TICKS_PER_SEC;
         for (const p of this.live.values()) {
+            // L3.2: a bolt the player cannot see yet must not be visible to
+            // Lua either — ZK's gfx_projectile_lights.lua would otherwise light
+            // an unlaunched projectile sitting inside the barrel.
+            if (this.isPreLaunch(p)) continue;
             out.push({
                 id: p.id,
                 defId: p.weaponDefId,
@@ -999,6 +1104,11 @@ export class ProjectileRenderer {
             lightEmitAccumS: 0,
             cosmetic: null,
             cosmeticTrack: null,
+            // L3.2: filled by the Launch knot, which rides the same batch as
+            // this event when `LatencyTierSKeyframes` is on. Until then (and
+            // for good on a server without it) the integration below runs.
+            keyframes: null,
+            wireGravity: continuationGravity(def, ev.gravity),
         });
     }
 
@@ -1095,6 +1205,13 @@ export class ProjectileRenderer {
                     this.targetPose?.(
                         ev.targetId, flight.fireFrame - TRACK_VEL_SAMPLE_LAG) ?? null)
                 : null,
+            // A Tier-C shot is not in the sim, so no keyframe can ever name it
+            // — the two latency paths are disjoint by construction.
+            keyframes: null,
+            // Unused on this path — a Tier-C shot never gets a track — but the
+            // wire value here is already the *solved* gravity (0 for a straight
+            // shot), so no mask is wanted even if one day it were read.
+            wireGravity: ev.gravity,
         };
         evalCosmeticFlight(flight, this.presFrame - flight.fireFrame, p.pos, p.vel);
         this.live.set(id, p);
@@ -1151,6 +1268,50 @@ export class ProjectileRenderer {
         }
         this.onImpact({
             projId: id,
+            pos: ev.impactPos,
+            impactKind: ev.impactKind,
+            weaponDefId: ev.weaponDefId,
+        });
+    }
+
+    /**
+     * PLAN-latency L3.2 — terminate a keyframed Tier-S flight on the frame the
+     * sim resolved it, drained from the timeline at `OutcomeKnownEvent`'s
+     * `outcome_frame`.
+     *
+     * The Terminal knot and this event are written by the same server call with
+     * the same frame and the same position, so the spline already ends here.
+     * Taking the knot verbatim rather than re-evaluating makes "the bolt is
+     * standing on its explosion" exact instead of within the fraction of a
+     * frame the cursor happens to sit past `outcome_frame` — the same reason
+     * `detonateCosmetic` snaps before handing over.
+     */
+    detonateKeyframed(projId: number, ev: {
+        impactPos: { x: number; y: number; z: number };
+        impactKind: number;
+        weaponDefId: number;
+    }): void {
+        const p = this.live.get(projId);
+        if (p?.keyframes) {
+            const k = p.keyframes.knots[p.keyframes.knots.length - 1];
+            const st = this.keyframeStats;
+            const gap = Math.hypot(k.x - p.pos.x, k.y - p.pos.y, k.z - p.pos.z);
+            const perFrame = Math.hypot(p.vel.x, p.vel.y, p.vel.z) / SIM_TICKS_PER_SEC;
+            st.outcomes++;
+            st.approachSum += gap;
+            if (gap > st.approachMax) st.approachMax = gap;
+            if (perFrame > 1e-6) {
+                const ratio = gap / perFrame;
+                st.approachRatioSum += ratio;
+                if (ratio > st.approachRatioMax) st.approachRatioMax = ratio;
+            }
+            p.pos.copyFromFloats(k.x, k.y, k.z);
+            p.vel.copyFromFloats(
+                k.vx * SIM_TICKS_PER_SEC, k.vy * SIM_TICKS_PER_SEC,
+                k.vz * SIM_TICKS_PER_SEC);
+        }
+        this.onImpact({
+            projId,
             pos: ev.impactPos,
             impactKind: ev.impactKind,
             weaponDefId: ev.weaponDefId,
@@ -1288,6 +1449,146 @@ export class ProjectileRenderer {
         // the event position directly.
     }
 
+    /**
+     * PLAN-latency L3.2 — a knot on a Tier-S projectile's flight path.
+     *
+     * Unlike every other projectile event this one is *not* scheduled onto the
+     * L1 timeline. A keyframe is not an event on the flight, it is data about
+     * it: the frame it applies to is carried in the knot itself, and the track
+     * is sampled at the presentation cursor. Delaying delivery by `D` frames
+     * would only mean the cursor spends that long unbracketed for no gain.
+     *
+     * A knot for an unknown projectile is dropped. That is the normal case for
+     * a bolt already reaped by TTL or an impact, and for a `Fired` event this
+     * client never saw (LOS, join-in-progress) — inventing a track from a
+     * mid-flight knot would draw a bolt from nowhere.
+     */
+    onKeyframe(ev: {
+        projId: number;
+        frame: number;
+        pos: { x: number; y: number; z: number };
+        vel: { x: number; y: number; z: number };
+        kind: number;
+    }): void {
+        const p = this.live.get(ev.projId);
+        const st = this.keyframeStats;
+        if (!p) { st.knotsDropped++; return; }
+        st.knots++;
+        if (ev.kind >= 0 && ev.kind < st.byKind.length) st.byKind[ev.kind]++;
+        const kf: Keyframe = {
+            frame: ev.frame,
+            x: ev.pos.x, y: ev.pos.y, z: ev.pos.z,
+            vx: ev.vel.x, vy: ev.vel.y, vz: ev.vel.z,
+            kind: ev.kind,
+        };
+        if (p.keyframes) {
+            // Measure before pushing: this is the visible cost of the knot,
+            // i.e. how far the path the cursor is standing on jumps. Sampled at
+            // the cursor rather than at the knot's own frame — a shift out in
+            // the unrendered future is not a correction anyone can see.
+            const r = keyframeResidual(p.keyframes, kf, this.presFrame);
+            const perFrame = Math.hypot(p.vel.x, p.vel.y, p.vel.z) / SIM_TICKS_PER_SEC;
+            st.residualSamples++;
+            st.residualSum += r;
+            if (r > st.residualMax) st.residualMax = r;
+            if (perFrame > 1e-6) {
+                const ratio = r / perFrame;
+                st.residualRatioSum += ratio;
+                if (ratio > st.residualRatioMax) st.residualRatioMax = ratio;
+            }
+        }
+        if (!p.keyframes) {
+            st.tracks++;
+            // First knot for this projectile takes over its motion. Normally
+            // it is the Launch knot; if the Launch was lost or filtered, a
+            // later knot still yields a well-formed track — one whose
+            // `launchFrame` is that knot's, so the bolt appears from there
+            // rather than being drawn at a position nothing has vouched for.
+            p.keyframes = createKeyframeTrack(kf, p.wireGravity);
+        } else {
+            pushKeyframe(p.keyframes, kf);
+        }
+        if (ev.kind === KEYFRAME_LAUNCH) {
+            // Seed pos/vel from the track immediately so a bolt drawn in the
+            // same frame this arrived is already on the spline rather than at
+            // the muzzle. Everything after this comes from tick().
+            evalKeyframeTrack(p.keyframes, this.presFrame, p.pos, p.vel);
+        }
+    }
+
+    /**
+     * PLAN-latency L3.2 gate readout. See `keyframeStats`. Derived means are
+     * computed here rather than accumulated so the hot path stays two adds.
+     *
+     * `live`/`keyframed` are the instantaneous picture, deliberately alongside
+     * the cumulative counters: "0 keyframed of 12 live" is the flag being off,
+     * "12 of 12" with `knots` flat is a stalled stream, and the two failures
+     * look identical from the totals alone.
+     */
+    getKeyframeStats(): Record<string, unknown> {
+        const s = this.keyframeStats;
+        let keyframed = 0;
+        for (const p of this.live.values()) if (p.keyframes) keyframed++;
+        const mean = (sum: number, n: number) => (n > 0 ? sum / n : 0);
+        return {
+            live: this.live.size, keyframed,
+            knots: s.knots, knotsDropped: s.knotsDropped, tracks: s.tracks,
+            byKind: {
+                launch: s.byKind[0], heartbeat: s.byKind[1],
+                stageChange: s.byKind[2], retarget: s.byKind[3],
+                bounce: s.byKind[4], terminal: s.byKind[5],
+            },
+            residual: {
+                n: s.residualSamples,
+                meanElmos: mean(s.residualSum, s.residualSamples),
+                maxElmos: s.residualMax,
+                meanPerFrameTravel: mean(s.residualRatioSum, s.residualSamples),
+                maxPerFrameTravel: s.residualRatioMax,
+            },
+            approach: {
+                n: s.outcomes,
+                meanElmos: mean(s.approachSum, s.outcomes),
+                maxElmos: s.approachMax,
+                meanPerFrameTravel: mean(s.approachRatioSum, s.outcomes),
+                maxPerFrameTravel: s.approachRatioMax,
+            },
+            legacyTrajSuppressed: s.legacyTrajSuppressed,
+            preLaunchTicks: s.preLaunchTicks,
+        };
+    }
+
+    /**
+     * Zero the counters above. Call immediately before a measured window.
+     *
+     * This is not a convenience. The counters are cumulative from page load,
+     * and the first seconds of a session are exactly when the presentation
+     * cursor is furthest from the knots it is being asked to interpolate —
+     * measured here, an unreset run reported a mean residual of **538 elmos**
+     * against **7.3 elmos** for the same battle with the counters zeroed after
+     * the clock settled. A gate that quotes the unreset figure is quoting the
+     * boot transient, not the spline.
+     */
+    resetKeyframeStats(): void {
+        const s = this.keyframeStats;
+        s.knots = 0; s.knotsDropped = 0; s.tracks = 0;
+        s.byKind = [0, 0, 0, 0, 0, 0];
+        s.residualSamples = 0; s.residualSum = 0; s.residualMax = 0;
+        s.residualRatioSum = 0; s.residualRatioMax = 0;
+        s.outcomes = 0; s.approachSum = 0; s.approachMax = 0;
+        s.approachRatioSum = 0; s.approachRatioMax = 0;
+        s.legacyTrajSuppressed = 0; s.preLaunchTicks = 0;
+    }
+
+    /**
+     * PLAN-latency L3.2 — is this projectile's launch still in the cursor's
+     * future? True only on the keyframe path; without a track there is no
+     * frame to compare against and the bolt draws from the moment it arrives,
+     * exactly as it did pre-L3.
+     */
+    private isPreLaunch(p: LiveProjectile): boolean {
+        return p.keyframes !== null && this.presFrame < p.keyframes.launchFrame;
+    }
+
     /** Server reported a trajectory change (bounce / steered). Override
      *  pos+vel in place. */
     onTrajectory(ev: {
@@ -1297,6 +1598,14 @@ export class ProjectileRenderer {
     }): void {
         const p = this.live.get(ev.projId);
         if (!p) return;
+        // PLAN-latency L3.2 — the keyframe stream and the trajectory stream are
+        // mutually exclusive at the server's emit site (TrajectoryKeyframes.h),
+        // so this should be unreachable for a keyframed projectile. Guard it
+        // anyway: applying a legacy snapshot would teleport a bolt whose whole
+        // point is that its position is a pure function of the cursor, and the
+        // failure would look like a rendering glitch rather than a stream that
+        // stacked.
+        if (p.keyframes) { this.keyframeStats.legacyTrajSuppressed++; return; }
         const vps = SIM_TICKS_PER_SEC;
         // Trajectory snapshots arrive once per second per missile
         // (MissileProjectile.cpp's id-staggered rotor). Between snapshots
@@ -1429,6 +1738,15 @@ export class ProjectileRenderer {
                         this.targetPose?.(p.cosmeticTrack.targetId, this.presFrame) ?? null,
                         p.pos, p.vel);
                 }
+            } else if (p.keyframes) {
+                // PLAN-latency L3.2: same property as the Tier-C branch above,
+                // reached from streamed knots instead of a solved arc. Nothing
+                // is integrated, so the extrapolate-and-snap the legacy branch
+                // below needs — and the trail reset that hides it — have no
+                // analogue here: a knot landing ahead of the cursor changes the
+                // path the cursor is *about* to walk, not the path it is on.
+                pruneKeyframes(p.keyframes, this.presFrame);
+                evalKeyframeTrack(p.keyframes, this.presFrame, p.pos, p.vel);
             } else {
                 // pos += vel * dt
                 p.pos.x += p.vel.x * dt;
@@ -1436,6 +1754,22 @@ export class ProjectileRenderer {
                 p.pos.z += p.vel.z * dt;
                 // vel.y -= g * dt   (g positive pulls down)
                 p.vel.y -= p.gravity * dt;
+            }
+
+            // PLAN-latency L3.2 — the Fired event arrives at the leading edge
+            // `E`, so a Tier-S bolt exists client-side `D` frames before the
+            // cursor says it was fired. Pre-L3 it started flying on arrival and
+            // was that much ahead of the units around it; now the knot stamps
+            // the launch frame, so it holds at the muzzle, undrawn, until the
+            // cursor gets there. Nothing that marks the world — trail puffs,
+            // per-tick CEG, follow-lights — may run during that window.
+            if (this.isPreLaunch(p)) {
+                this.keyframeStats.preLaunchTicks++;
+                // The orphan backstop still applies. Pre-launch normally lasts
+                // `D` frames, but a stalled presentation clock would otherwise
+                // strand an undrawn entry in `live` indefinitely.
+                if (nowMs - p.spawnedAtMs > MAX_ORPHAN_LIFE_MS) dead.push(p.id);
+                continue;
             }
 
             // Record a puff at the missile's post-integration position.
@@ -1560,6 +1894,10 @@ export class ProjectileRenderer {
         // billboard/velocity composer).
         const laserGroups = new Map<number, LiveProjectile[]>();
         for (const p of this.live.values()) {
+            // L3.2: a Tier-S bolt whose launch frame the cursor has not reached
+            // is not drawn at all. It is held at the muzzle rather than dropped
+            // because the knots for the rest of its flight are already arriving.
+            if (this.isPreLaunch(p)) continue;
             const v = this.weaponVisuals.get(p.weaponDefId);
             if (v && (v.kind === 'beam' || v.kind === 'lightning')) continue;
             if (v && v.kind === 'laserBolt') {

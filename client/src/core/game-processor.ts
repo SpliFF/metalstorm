@@ -861,6 +861,42 @@ function gpConnect(msg: GpInitToWorker): void {
             if (!gpCtx.projectileRenderer) return;
             for (const e of events) gpCtx.projectileRenderer.onTrajectory(e);
         },
+        // PLAN-latency L3.2: knots on a Tier-S projectile's path. Deliberately
+        // NOT put on the presentation timeline — unlike an impact or a death,
+        // a keyframe is not something that *happens* at a frame, it is a
+        // statement about where the flight is at one. Delaying it to the cursor
+        // would only leave the spline unbracketed for `D` frames longer.
+        onTrajectoryKeyframes: (events) => {
+            if (!gpCtx.projectileRenderer) return;
+            for (const e of events) gpCtx.projectileRenderer.onKeyframe(e);
+        },
+        // PLAN-latency L3.2: the Tier-S half of what L2.2's `onFireOutcomes`
+        // does for Tier-C — the burst presents on the frame the sim resolved
+        // it, not on packet arrival. Convergence comes for free: the Terminal
+        // knot the server wrote alongside this event carries the same frame and
+        // position, so the bolt is standing on the explosion when it goes off.
+        //
+        // The legacy `ProjectileImpactEvent` for these same shots is suppressed
+        // in the decode (see connection.ts) — the server emits both so pre-L3
+        // clients still see something, and only one of them may be played.
+        onOutcomesKnown: (events) => {
+            for (const ev of events) {
+                gpSchedule(ev.outcomeFrame, 'impact', () => {
+                    gpCtx.projectileRenderer?.detonateKeyframed(ev.projId, {
+                        impactPos: ev.outcomePos,
+                        impactKind: ev.outcome,
+                        weaponDefId: ev.weaponDefId,
+                    });
+                    gpCombatFX?.onProjectileImpacts([{
+                        projId: ev.projId,
+                        pos: ev.outcomePos,
+                        impactKind: ev.outcome,
+                        targetId: ev.targetId,
+                        weaponDefId: ev.weaponDefId,
+                    }]);
+                });
+            }
+        },
         // PLAN-latency L2.2: a Tier-C shot has no sim projectile — the server
         // resolved the whole flight at fire time and sent one event carrying
         // both ends of it. Put both ends on the L1 timeline and the visual
