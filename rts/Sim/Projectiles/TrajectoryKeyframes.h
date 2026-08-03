@@ -25,12 +25,17 @@
 //      state mis-renders when it does.
 //
 // A keyframe is a *knot*: a position and velocity stamped with the sim frame
-// they hold at. The client fits a Catmull-Rom spline through the knots
-// parametrised by frame and evaluates it at P. Motion becomes a pure function
-// of P, corrections stop existing as a category, and the terminal knot lands
-// exactly on the explosion because both are stamped with the same frame.
+// they hold at. The client interpolates the knots parametrised by frame and
+// evaluates at P. Motion becomes a pure function of P, corrections stop
+// existing as a category, and the terminal knot lands exactly on the explosion
+// because both are stamped with the same frame.
 //
-// Emission policy, and why it is cheaper than what it replaces:
+// (The client spline is a cubic Hermite using the `vel` on each knot as the
+// tangent, not the Catmull-Rom this header originally specified — the sim
+// records the derivative, so there is no reason to estimate it by finite
+// difference. See client/src/core/keyframe-flight.ts and L3.2 in the plan.)
+//
+// Emission policy:
 //
 //   * Unguided projectiles (cannon shells, plain explosives) get Launch,
 //     Bounce and Terminal only. Their path between knots is a closed-form
@@ -44,9 +49,17 @@
 //     every guidance stage transition, which is where the path actually bends
 //     and where a uniform sample rate is worst.
 //
-// Net: unguided shots lose their (rare) trajectory events, guided shots
-// double their sample rate but stop needing the snap-hiding machinery. The
-// L3 gate measures the resulting bandwidth rather than asserting it.
+// Net cost, MEASURED (L3.2 A/B, ZK, matched 926-frame windows): this stream
+// is NOT cheaper than what it replaces — it costs **+35.6 % of GameEventBatch
+// per shot** (791 vs 583 B/shot). An earlier revision of this comment asserted
+// the opposite; that assertion was wrong for any realistic weapon mix, for two
+// reasons it did not account for. Unguided *Laser*-class shots emitted no
+// trajectory events at all before, so their Launch+Terminal pair is pure
+// addition rather than a replacement; and the guided heartbeat below is 2× the
+// rotor it supersedes, which also creates batches on ticks that previously had
+// none (batch count rose 44 %). The stream is kept, and defaults on, because
+// it buys frame-stamped motion and on-frame outcomes — not because it is free.
+// Cadence is the tuning lever if the cost needs recovering; see L3.3.
 //
 // Everything in this header is a pure function of its arguments plus a small
 // per-projectile state struct. That is deliberate: the policy is the part
@@ -93,8 +106,18 @@ struct KeyframeState {
 /// While this is off the server emits the legacy ProjectileTrajectoryEvent
 /// stream and no keyframes; while it is on the two swap over, so a client
 /// never sees both descriptions of the same projectile and cannot double-
-/// apply them. Defaults OFF until an L3-capable client ships — see
-/// PLAN-latency-impl.md §L3.
+/// apply them. Defaults ON since the L3 gate — see PLAN-latency-impl.md
+/// §"L3 gate".
+///
+/// Note what "exclusive" costs an OLD client talking to a NEW server: it still
+/// gets its bursts (the legacy ProjectileImpactEvent is emitted alongside
+/// OutcomeKnownEvent precisely so it does), but it gets **no mid-flight
+/// corrections at all**, because the trajectory events it does understand are
+/// the ones the keyframes displaced. It degrades to pure local integration.
+/// That is acceptable here only because client and server ship together; the
+/// tolerated skew in this codebase is the other direction — a new client
+/// against a pre-L3 server, which the client handles by keeping the legacy
+/// integrate-and-snap path alive.
 bool TierSKeyframesEnabled();
 
 /// Does a projectile of this weaponDef participate in the keyframe stream?

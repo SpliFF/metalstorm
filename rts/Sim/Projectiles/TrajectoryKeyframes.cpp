@@ -6,13 +6,16 @@
 #include "System/Config/ConfigHandler.h"
 #include "System/Log/ILog.h"
 
-// PLAN-latency L3 — Tier-S keyframes. Defaults OFF: the stream only pays for
-// itself once a client splines through it, and until then it would be pure
-// added bandwidth on top of the trajectory events it is meant to replace.
-// Flip to ON with the L3 gate, the way LatencyCosmeticFire was flipped at the
-// L2 gate.
+// PLAN-latency L3 — Tier-S keyframes. Defaults ON since the L3 gate
+// (2026-08-03). It was OFF while no client splined through the stream; L3.2
+// shipped that client and the gate then measured every presentation criterion
+// green — see PLAN-latency-impl.md §"L3 gate". The gate was decided on
+// presentation quality, deliberately: the stream *costs* +35.6 % of
+// GameEventBatch per shot (L3.2's A/B), and that cost is accepted here rather
+// than argued away. The mitigation levers are identified and measured-for, not
+// applied — see L3.3 in the plan.
 CONFIG(bool, LatencyTierSKeyframes)
-	.defaultValue(false)
+	.defaultValue(true)
 	.description("PLAN-latency L3: stream frame-stamped trajectory keyframes for"
 	             " simulated (Tier-S) projectiles instead of ProjectileTrajectoryEvent"
 	             " corrections. Requires an L3-capable client to render the result.");
