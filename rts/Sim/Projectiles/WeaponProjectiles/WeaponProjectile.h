@@ -5,6 +5,7 @@
 
 #include "Sim/Projectiles/Projectile.h"
 #include "Sim/Projectiles/ProjectileParams.h" // easier to include this here
+#include "Sim/Projectiles/TrajectoryKeyframes.h" // KeyframeState (by value below)
 #include "WeaponProjectileTypes.h"
 
 struct WeaponDef;
@@ -64,10 +65,50 @@ public:
 
 	const DynDamageArray* damages;
 
+	/// PLAN-latency L3 — record the outcome the sim actually resolved, for
+	/// the benefit of the OutcomeKnownEvent the terminal site emits.
+	///
+	/// Shield absorption and interceptor kills both reach the projectile
+	/// through the no-argument Collision() overload, which cannot tell them
+	/// apart from a terrain hit and reports all three as Terrain. Callers
+	/// that know better say so here first. (The legacy ProjectileImpactEvent
+	/// keeps its existing — wrong — kind for those two cases; correcting it
+	/// would change today's client VFX in a server-only milestone. The
+	/// keyframe stream reports them accurately and supersedes it.)
+	/// `targetId` is the shield-host unit or the interceptor's victim — the
+	/// no-argument overload has no argument to derive it from.
+	void SetWebOutcomeHint(uint8_t kind, uint32_t targetId = 0u) {
+		webOutcomeHint = kind;
+		webOutcomeTargetId = targetId;
+	}
+
+	/// PLAN-latency L3 — keyframe emission bookkeeping. Deliberately NOT
+	/// creg-registered: it is presentation-stream state with no effect on
+	/// simulation results, and a reload that resets it costs at most one
+	/// redundant Launch knot.
+	KeyframeState keyframeState;
+
 protected:
 	CWeaponProjectile() { }
 	void UpdateInterception();
 	virtual void UpdateGroundBounce();
+
+	/// PLAN-latency L3 — write one keyframe for this projectile at the
+	/// current sim frame and advance `keyframeState`. No-op when the feature
+	/// is off or the weapon does not participate. See TrajectoryKeyframes.h.
+	void EmitKeyframe(uint8_t kind, uint8_t stage);
+
+	/// PLAN-latency L3 — sampling half of the above: ask the policy whether
+	/// this frame needs a knot, and write it if so.
+	void MaybeEmitKeyframe(uint8_t stage, bool guided);
+
+	/// PLAN-latency L3 — terminal knot + OutcomeKnownEvent, emitted from the
+	/// Collision sites so the spline provably ends on the explosion.
+	void EmitOutcomeKnown(uint8_t impactKind, const float3& impactPos, uint32_t targetId);
+
+	/// 0xFF = "not set, derive the kind from the collision arguments".
+	uint8_t webOutcomeHint = 0xFFu;
+	uint32_t webOutcomeTargetId = 0u;
 
 protected:
 	const WeaponDef* weaponDef;

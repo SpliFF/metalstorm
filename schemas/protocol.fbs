@@ -711,6 +711,95 @@ table ProjectileTrajectoryEvent {
     team: uint8 = 0;
 }
 
+/// PLAN-latency L3 — why a Tier-S trajectory keyframe was emitted. The
+/// client does not branch on this for the motion itself (every keyframe is
+/// just a spline knot); it exists so the renderer can pick a fitting
+/// incidental effect and so the emission policy is auditable on the wire.
+enum TrajectoryKeyframeKind : uint8 {
+    /// First knot, written at the muzzle on the spawn frame. Always paired
+    /// with a ProjectileFiredEvent for the same proj_id.
+    Launch = 0,
+    /// Periodic re-sync for a guided projectile whose steering the client
+    /// cannot reproduce. Cadence is the heartbeat interval (decision 5).
+    Heartbeat = 1,
+    /// The projectile's guidance stage changed (starburst launch→turn→seek,
+    /// missile tracker acquiring, ttl expiry handing it to gravity).
+    StageChange = 2,
+    /// Steered onto a different target mid-flight.
+    Retarget = 3,
+    /// Bounced off ground or water; pos/vel are post-bounce.
+    Bounce = 4,
+    /// Last knot, written at the terminal position on the frame the sim
+    /// resolved the projectile. Always paired with an OutcomeKnownEvent.
+    Terminal = 5,
+}
+
+/// PLAN-latency L3 — a knot on a Tier-S projectile's flight path.
+///
+/// Replaces ProjectileTrajectoryEvent's "rewrite pos/vel and keep
+/// integrating" contract with "here is a point the path passes through, at
+/// this frame". The client fits a Catmull-Rom spline through the knots
+/// parametrised by `frame` and evaluates it at the presentation cursor P,
+/// so the rendered path is a function of P alone — no local integrator, no
+/// extrapolate-and-snap, and therefore no correction jumps.
+///
+/// The `frame` field is the whole point: a trajectory event's position was
+/// only meaningful relative to when the packet happened to arrive, which is
+/// why the old path had to snap. A keyframe is timestamped on the sim
+/// timeline and lands on the L1 presentation timeline unambiguously.
+/// Ordering rule the client must apply: if two knots for the same proj_id
+/// carry the same `frame`, the LATER one in the vector wins. That happens
+/// when a sampled knot (Heartbeat/StageChange) and an event knot (Bounce,
+/// Terminal) fall on one frame — the event knot is the post-event state and
+/// is pushed second. Vector order is emission order, and a batch is drained
+/// once per tick, so the pair can never straddle two batches.
+table TrajectoryKeyframe {
+    proj_id: uint32;
+    /// Sim frame this knot is stamped at. Spline parameter, not a hint.
+    frame: uint32;
+    pos: Vec3;
+    vel: Vec3;                 // elmos / sim frame — the spline tangent
+    kind: TrajectoryKeyframeKind;
+    /// Owner-team id — see ProjectileImpactEvent.team. Lets the per-session
+    /// filter keep ally keyframes flowing through fog of war.
+    team: uint8 = 0;
+}
+
+/// PLAN-latency L3 — a Tier-S projectile's resolved outcome, stamped with
+/// the frame it resolves on.
+///
+/// ProjectileImpactEvent carries no frame, so the client can only play the
+/// explosion when the packet arrives — which is `D` frames after the
+/// presentation cursor shows the projectile reaching the target. This event
+/// carries `outcome_frame`, so the client schedules the flash/burst on the
+/// L1 timeline and it fires exactly when the rendered projectile arrives.
+///
+/// Emitted the moment the sim resolves the shot: a collision, a shield
+/// absorption, or an interceptor kill. Disjoint from FireOutcomeEvent,
+/// which is the Tier-C (never-simulated) equivalent resolved at FIRE time.
+table OutcomeKnownEvent {
+    proj_id: uint32;
+    /// Reuses ProjectileImpactKind — this IS a discovered collision, unlike
+    /// FireOutcomeEvent's fire-time prediction, so the same vocabulary fits.
+    /// Shield and Intercepted are reported accurately here; the legacy
+    /// ProjectileImpactEvent reports both as Terrain (both paths funnel
+    /// through the no-argument CWeaponProjectile::Collision overload).
+    outcome: ProjectileImpactKind;
+    /// Sim frame the outcome resolves on — schedule the FX here.
+    outcome_frame: uint32;
+    /// Where the visual terminates. The final keyframe (kind=Terminal) for
+    /// this proj_id carries the same position, so the spline provably ends
+    /// on the explosion.
+    outcome_pos: Vec3;
+    /// Hit unit / feature / shield-host (0 for terrain).
+    target_id: uint32 = 0;
+    /// Owner-team id — see ProjectileImpactEvent.team.
+    team: uint8 = 0;
+    /// Weapon def driving the explosion, so the client can resolve the CEG
+    /// without a live projectile entry to look up.
+    weapon_def_id: uint16 = 0;
+}
+
 /// What produced a sound. Lets the client resolve `source_def_id` against
 /// the right def cache (unit defs vs weapon defs vs features) and lets
 /// synced filters target rules per-source-type.
@@ -831,6 +920,22 @@ table GameEventBatch {
     /// renumbered three existing fields and silently broken any client
     /// built against the old schema. Additive means "at the end".
     fire_outcomes: [FireOutcomeEvent];
+    /// Tier-S trajectory keyframes (PLAN-latency L3). Spline knots for
+    /// projectiles that DO exist in the sim, as opposed to `fire_outcomes`
+    /// above which describes shots that never did.
+    ///
+    /// While `LatencyTierSKeyframes` is off these are empty and
+    /// `projectile_trajectories` carries the old rewrite-and-integrate
+    /// stream; while it is on the two swap over. They are never both
+    /// populated for the same projectile — see TrajectoryKeyframes.h.
+    ///
+    /// Appended at the end for the same vtable reason as `fire_outcomes`.
+    trajectory_keyframes: [TrajectoryKeyframe];
+    /// Frame-stamped outcomes for Tier-S projectiles (PLAN-latency L3).
+    /// Rides alongside `projectile_impacts` rather than replacing it: the
+    /// impact event still drives the non-latency consumers (sound, ghost
+    /// cleanup), this one drives the L1-scheduled visual.
+    outcomes_known: [OutcomeKnownEvent];
 }
 
 table ResourceUpdate {

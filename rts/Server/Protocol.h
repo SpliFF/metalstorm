@@ -185,7 +185,9 @@ inline std::vector<uint8_t> BuildCombatEventBatch(
     const std::vector<ProjectileTrajectoryEventData>& projTrajectories = {},
     const std::vector<SoundEventData>& sounds = {},
     const std::vector<SeismicPingData>& seismicPings = {},
-    const std::vector<FireOutcomeEventData>& fireOutcomes = {})
+    const std::vector<FireOutcomeEventData>& fireOutcomes = {},
+    const std::vector<TrajectoryKeyframeData>& keyframes = {},
+    const std::vector<OutcomeKnownEventData>& outcomesKnown = {})
 {
     flatbuffers::FlatBufferBuilder fbb(
         256 + events.size() * 32
@@ -194,7 +196,9 @@ inline std::vector<uint8_t> BuildCombatEventBatch(
             + projTrajectories.size() * 40
             + sounds.size() * 32
             + seismicPings.size() * 24
-            + fireOutcomes.size() * 80);
+            + fireOutcomes.size() * 80
+            + keyframes.size() * 48
+            + outcomesKnown.size() * 40);
 
     std::vector<flatbuffers::Offset<SpringWeb::CombatEvent>> combatOffsets;
     combatOffsets.reserve(events.size());
@@ -284,6 +288,40 @@ inline std::vector<uint8_t> BuildCombatEventBatch(
         outcomeOffsets.push_back(fob.Finish());
     }
 
+    // PLAN-latency L3 — Tier-S keyframes + frame-stamped outcomes. Exclusive
+    // with `projTrajectories` above: while LatencyTierSKeyframes is on the
+    // emit sites write knots and no trajectory events, and vice versa, so a
+    // client can never see two descriptions of the same projectile's motion.
+    std::vector<flatbuffers::Offset<SpringWeb::TrajectoryKeyframe>> keyframeOffsets;
+    keyframeOffsets.reserve(keyframes.size());
+    for (const auto& e : keyframes) {
+        auto pos = SpringWeb::Vec3(e.pos.x, e.pos.y, e.pos.z);
+        auto vel = SpringWeb::Vec3(e.vel.x, e.vel.y, e.vel.z);
+        SpringWeb::TrajectoryKeyframeBuilder kfb(fbb);
+        kfb.add_proj_id(e.projId);
+        kfb.add_frame(e.frame);
+        kfb.add_pos(&pos);
+        kfb.add_vel(&vel);
+        kfb.add_kind(static_cast<SpringWeb::TrajectoryKeyframeKind>(e.kind));
+        kfb.add_team(e.team);
+        keyframeOffsets.push_back(kfb.Finish());
+    }
+
+    std::vector<flatbuffers::Offset<SpringWeb::OutcomeKnownEvent>> knownOffsets;
+    knownOffsets.reserve(outcomesKnown.size());
+    for (const auto& e : outcomesKnown) {
+        auto pos = SpringWeb::Vec3(e.outcomePos.x, e.outcomePos.y, e.outcomePos.z);
+        SpringWeb::OutcomeKnownEventBuilder okb(fbb);
+        okb.add_proj_id(e.projId);
+        okb.add_outcome(static_cast<SpringWeb::ProjectileImpactKind>(e.outcome));
+        okb.add_outcome_frame(e.outcomeFrame);
+        okb.add_outcome_pos(&pos);
+        okb.add_target_id(e.targetId);
+        okb.add_team(e.team);
+        okb.add_weapon_def_id(e.weaponDefId);
+        knownOffsets.push_back(okb.Finish());
+    }
+
     std::vector<flatbuffers::Offset<SpringWeb::SoundEvent>> soundOffsets;
     soundOffsets.reserve(sounds.size());
     for (const auto& s : sounds) {
@@ -336,9 +374,11 @@ inline std::vector<uint8_t> BuildCombatEventBatch(
     auto seismicVec = fbb.CreateVector(seismicOffsets);
     auto musicVec   = fbb.CreateVector(musicOffsets);
     auto outcomeVec = fbb.CreateVector(outcomeOffsets);
+    auto keyframeVec = fbb.CreateVector(keyframeOffsets);
+    auto knownVec    = fbb.CreateVector(knownOffsets);
     auto batch = SpringWeb::CreateGameEventBatch(
         fbb, frame, /*events=*/0, combatVec, firedVec, impactVec, trajVec, soundVec, seismicVec,
-        musicVec, outcomeVec);
+        musicVec, outcomeVec, keyframeVec, knownVec);
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_GameEventBatch, batch.Union());
 }
 

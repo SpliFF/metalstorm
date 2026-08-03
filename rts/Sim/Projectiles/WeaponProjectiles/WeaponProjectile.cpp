@@ -203,6 +203,24 @@ CWeaponProjectile::CWeaponProjectile(const ProjectileParams& params)
 		ev.gravity      = mygravity;
 		ev.hitscan      = hitscan;
 		projectileEvents.PushFired(ev);
+
+		// PLAN-latency L3 — the spline's first knot, paired with the Fired
+		// event as the schema promises. Written from `evPos` rather than
+		// `pos` so the launch knot and the Fired event agree even when the
+		// hit-scan muzzle standin above rewrote the position.
+		if (TierSKeyframesEnabled() && KeyframesApplyTo(weaponDef)) {
+			TrajectoryKeyframeData kf;
+			kf.projId = static_cast<uint32_t>(id);
+			kf.frame  = static_cast<uint32_t>(gs->frameNum);
+			kf.pos    = evPos;
+			kf.vel    = float3(speed.x, speed.y, speed.z);
+			kf.kind   = KEYFRAME_LAUNCH;
+			kf.team   = static_cast<uint8_t>(teamID);
+			projectileEvents.PushKeyframe(kf);
+
+			keyframeState.lastFrame = gs->frameNum;
+			keyframeState.lastStage = KEYFRAME_STAGE_NONE;
+		}
 	}
 
 	if (!weaponDef->targetable)
@@ -215,6 +233,81 @@ CWeaponProjectile::CWeaponProjectile(const ProjectileParams& params)
 CWeaponProjectile::~CWeaponProjectile()
 {
 	DynDamageArray::DecRef(damages);
+}
+
+
+// PLAN-latency L3 — Tier-S keyframe emission. See TrajectoryKeyframes.h for
+// the policy and why the stream replaces ProjectileTrajectoryEvent rather
+// than supplementing it.
+
+void CWeaponProjectile::EmitKeyframe(uint8_t kind, uint8_t stage)
+{
+	if (!TierSKeyframesEnabled() || !KeyframesApplyTo(weaponDef))
+		return;
+
+	TrajectoryKeyframeData kf;
+	kf.projId = static_cast<uint32_t>(id);
+	kf.frame  = static_cast<uint32_t>(gs->frameNum);
+	kf.pos    = pos;
+	kf.vel    = float3(speed.x, speed.y, speed.z);
+	kf.kind   = kind;
+	kf.team   = static_cast<uint8_t>(teamID);
+	projectileEvents.PushKeyframe(kf);
+
+	keyframeState.lastFrame = gs->frameNum;
+	keyframeState.lastStage = stage;
+}
+
+
+void CWeaponProjectile::MaybeEmitKeyframe(uint8_t stage, bool guided)
+{
+	if (!TierSKeyframesEnabled() || !KeyframesApplyTo(weaponDef))
+		return;
+
+	uint8_t kind = KEYFRAME_HEARTBEAT;
+	if (DecideKeyframe(keyframeState, static_cast<uint32_t>(id), gs->frameNum,
+	                   stage, guided, kind))
+		EmitKeyframe(kind, stage);
+}
+
+
+void CWeaponProjectile::EmitOutcomeKnown(uint8_t impactKind, const float3& impactPos,
+                                         uint32_t targetId)
+{
+	if (!TierSKeyframesEnabled() || !KeyframesApplyTo(weaponDef))
+		return;
+
+	// A caller that knows the real outcome (shield absorption, interceptor
+	// kill) recorded it via SetWebOutcomeHint; otherwise the collision
+	// arguments are the whole story.
+	const bool hinted = (webOutcomeHint != 0xFFu);
+	const uint8_t  outcome  = hinted ? webOutcomeHint : impactKind;
+	const uint32_t outTarget = hinted ? webOutcomeTargetId : targetId;
+
+	// Terminal knot first, at the impact point, so the spline's last segment
+	// ends exactly where the explosion is scheduled. Emitted unconditionally
+	// — this is an event, not a sample, and the one-knot-per-frame rule in
+	// DecideKeyframe must not be able to suppress it.
+	{
+		TrajectoryKeyframeData kf;
+		kf.projId = static_cast<uint32_t>(id);
+		kf.frame  = static_cast<uint32_t>(gs->frameNum);
+		kf.pos    = impactPos;
+		kf.vel    = float3(speed.x, speed.y, speed.z);
+		kf.kind   = KEYFRAME_TERMINAL;
+		kf.team   = static_cast<uint8_t>(teamID);
+		projectileEvents.PushKeyframe(kf);
+	}
+
+	OutcomeKnownEventData ev;
+	ev.projId       = static_cast<uint32_t>(id);
+	ev.outcome      = outcome;
+	ev.outcomeFrame = static_cast<uint32_t>(gs->frameNum);
+	ev.outcomePos   = impactPos;
+	ev.targetId     = outTarget;
+	ev.team         = static_cast<uint8_t>(teamID);
+	ev.weaponDefId  = (weaponDef != nullptr) ? static_cast<uint16_t>(weaponDef->id) : 0u;
+	projectileEvents.PushOutcomeKnown(ev);
 }
 
 
@@ -294,6 +387,13 @@ void CWeaponProjectile::Collision(CFeature* feature)
 		projectileEvents.PushImpact(ev);
 	}
 
+	// PLAN-latency L3 — the same resolution, stamped with the frame it
+	// happens on so the client can schedule the burst on the presentation
+	// timeline instead of playing it on packet arrival.
+	EmitOutcomeKnown((feature != nullptr) ? 2u /* Feature */ : 0u /* Terrain */,
+	                 impactPos,
+	                 (feature != nullptr) ? static_cast<uint32_t>(feature->id) : 0u);
+
 	// Hit sound for terrain/feature impacts. Unit hits go through
 	// Unit::DoDamage which emits the same sound at the damage site.
 	// Synced rules get a veto via eventHandler.AllowSound.
@@ -346,6 +446,10 @@ void CWeaponProjectile::Collision(CUnit* unit)
 		projectileEvents.PushImpact(ev);
 	}
 
+	// PLAN-latency L3 — frame-stamped twin of the impact event above.
+	EmitOutcomeKnown(1u /* Unit */, impactPos,
+	                 (unit != nullptr) ? static_cast<uint32_t>(unit->id) : 0u);
+
 	Explode(unit, nullptr, impactPos, impactDir);
 }
 
@@ -373,14 +477,19 @@ void CWeaponProjectile::UpdateInterception()
 	if (owner() == nullptr)
 		targetPos = po->pos + po->speed;
 
+	// PLAN-latency L3 — the interceptee dies to an interceptor, not to the
+	// terrain the no-argument Collision() overload would otherwise report.
+	// Tell it so before it resolves; see SetWebOutcomeHint.
 	if (hitscan) {
 		if (ClosestPointOnLine(startPos, targetPos, po->pos).SqDistance(po->pos) < Square(weaponDef->collisionSize)) {
+			po->SetWebOutcomeHint(5u /* Intercepted */, static_cast<uint32_t>(id));
 			po->Collision();
 			Collision();
 		}
 	} else {
 		// FIXME: if (pos.SqDistance(po->pos) < Square(weaponDef->collisionSize)) {
 		if (pos.SqDistance(po->pos) < Square(damages->damageAreaOfEffect)) {
+			po->SetWebOutcomeHint(5u /* Intercepted */, static_cast<uint32_t>(id));
 			po->Collision();
 			Collision();
 		}
@@ -438,7 +547,13 @@ void CWeaponProjectile::UpdateGroundBounce()
 
 		// Notify the web client that this projectile's trajectory just changed
 		// so it can update its local pos/vel without per-tick state streaming.
-		{
+		//
+		// PLAN-latency L3: with keyframes on, this becomes a Bounce knot
+		// instead. The two streams are exclusive — a client must never see
+		// both descriptions of the same projectile (TrajectoryKeyframes.h).
+		if (TierSKeyframesEnabled() && KeyframesApplyTo(weaponDef)) {
+			EmitKeyframe(KEYFRAME_BOUNCE, keyframeState.lastStage);
+		} else {
 			ProjectileTrajectoryEventData ev;
 			ev.projId = static_cast<uint32_t>(id);
 			ev.pos    = pos;

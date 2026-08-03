@@ -165,6 +165,10 @@ bool CPlasmaRepulser::IncomingProjectile(CWeaponProjectile* p, const float3& hit
 	if (owner->UseEnergy(weaponDef->shieldEnergyUse)) {
 		curPower -= (shieldDamage * (weaponDef->shieldPower != 0.0f));
 
+		// PLAN-latency L3 — the shield absorbed it. Collision() alone would
+		// report a terrain hit, which is what the L3 gate's "shield
+		// deflections flash on contact" bullet needs to distinguish.
+		p->SetWebOutcomeHint(3u /* Shield */, static_cast<uint32_t>(owner->id));
 		p->Collision();
 
 		if (defHitFrames > 0)

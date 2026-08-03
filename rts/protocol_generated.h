@@ -229,6 +229,14 @@ struct ProjectileTrajectoryEvent;
 struct ProjectileTrajectoryEventBuilder;
 struct ProjectileTrajectoryEventT;
 
+struct TrajectoryKeyframe;
+struct TrajectoryKeyframeBuilder;
+struct TrajectoryKeyframeT;
+
+struct OutcomeKnownEvent;
+struct OutcomeKnownEventBuilder;
+struct OutcomeKnownEventT;
+
 struct SoundEvent;
 struct SoundEventBuilder;
 struct SoundEventT;
@@ -1544,6 +1552,62 @@ inline const char *EnumNameFireOutcome(FireOutcome e) {
   if (::flatbuffers::IsOutRange(e, FireOutcome_Hit, FireOutcome_Expired)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesFireOutcome()[index];
+}
+
+/// PLAN-latency L3 — why a Tier-S trajectory keyframe was emitted. The
+/// client does not branch on this for the motion itself (every keyframe is
+/// just a spline knot); it exists so the renderer can pick a fitting
+/// incidental effect and so the emission policy is auditable on the wire.
+enum TrajectoryKeyframeKind : uint8_t {
+  /// First knot, written at the muzzle on the spawn frame. Always paired
+  /// with a ProjectileFiredEvent for the same proj_id.
+  TrajectoryKeyframeKind_Launch = 0,
+  /// Periodic re-sync for a guided projectile whose steering the client
+  /// cannot reproduce. Cadence is the heartbeat interval (decision 5).
+  TrajectoryKeyframeKind_Heartbeat = 1,
+  /// The projectile's guidance stage changed (starburst launch→turn→seek,
+  /// missile tracker acquiring, ttl expiry handing it to gravity).
+  TrajectoryKeyframeKind_StageChange = 2,
+  /// Steered onto a different target mid-flight.
+  TrajectoryKeyframeKind_Retarget = 3,
+  /// Bounced off ground or water; pos/vel are post-bounce.
+  TrajectoryKeyframeKind_Bounce = 4,
+  /// Last knot, written at the terminal position on the frame the sim
+  /// resolved the projectile. Always paired with an OutcomeKnownEvent.
+  TrajectoryKeyframeKind_Terminal = 5,
+  TrajectoryKeyframeKind_MIN = TrajectoryKeyframeKind_Launch,
+  TrajectoryKeyframeKind_MAX = TrajectoryKeyframeKind_Terminal
+};
+
+inline const TrajectoryKeyframeKind (&EnumValuesTrajectoryKeyframeKind())[6] {
+  static const TrajectoryKeyframeKind values[] = {
+    TrajectoryKeyframeKind_Launch,
+    TrajectoryKeyframeKind_Heartbeat,
+    TrajectoryKeyframeKind_StageChange,
+    TrajectoryKeyframeKind_Retarget,
+    TrajectoryKeyframeKind_Bounce,
+    TrajectoryKeyframeKind_Terminal
+  };
+  return values;
+}
+
+inline const char * const *EnumNamesTrajectoryKeyframeKind() {
+  static const char * const names[7] = {
+    "Launch",
+    "Heartbeat",
+    "StageChange",
+    "Retarget",
+    "Bounce",
+    "Terminal",
+    nullptr
+  };
+  return names;
+}
+
+inline const char *EnumNameTrajectoryKeyframeKind(TrajectoryKeyframeKind e) {
+  if (::flatbuffers::IsOutRange(e, TrajectoryKeyframeKind_Launch, TrajectoryKeyframeKind_Terminal)) return "";
+  const size_t index = static_cast<size_t>(e);
+  return EnumNamesTrajectoryKeyframeKind()[index];
 }
 
 /// What produced a sound. Lets the client resolve `source_def_id` against
@@ -7944,6 +8008,286 @@ inline ::flatbuffers::Offset<ProjectileTrajectoryEvent> CreateProjectileTrajecto
 
 ::flatbuffers::Offset<ProjectileTrajectoryEvent> CreateProjectileTrajectoryEvent(::flatbuffers::FlatBufferBuilder &_fbb, const ProjectileTrajectoryEventT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 
+struct TrajectoryKeyframeT : public ::flatbuffers::NativeTable {
+  typedef TrajectoryKeyframe TableType;
+  uint32_t proj_id = 0;
+  uint32_t frame = 0;
+  std::unique_ptr<SpringWeb::Vec3> pos{};
+  std::unique_ptr<SpringWeb::Vec3> vel{};
+  SpringWeb::TrajectoryKeyframeKind kind = SpringWeb::TrajectoryKeyframeKind_Launch;
+  uint8_t team = 0;
+  TrajectoryKeyframeT() = default;
+  TrajectoryKeyframeT(const TrajectoryKeyframeT &o);
+  TrajectoryKeyframeT(TrajectoryKeyframeT&&) FLATBUFFERS_NOEXCEPT = default;
+  TrajectoryKeyframeT &operator=(TrajectoryKeyframeT o) FLATBUFFERS_NOEXCEPT;
+};
+
+/// PLAN-latency L3 — a knot on a Tier-S projectile's flight path.
+///
+/// Replaces ProjectileTrajectoryEvent's "rewrite pos/vel and keep
+/// integrating" contract with "here is a point the path passes through, at
+/// this frame". The client fits a Catmull-Rom spline through the knots
+/// parametrised by `frame` and evaluates it at the presentation cursor P,
+/// so the rendered path is a function of P alone — no local integrator, no
+/// extrapolate-and-snap, and therefore no correction jumps.
+///
+/// The `frame` field is the whole point: a trajectory event's position was
+/// only meaningful relative to when the packet happened to arrive, which is
+/// why the old path had to snap. A keyframe is timestamped on the sim
+/// timeline and lands on the L1 presentation timeline unambiguously.
+/// Ordering rule the client must apply: if two knots for the same proj_id
+/// carry the same `frame`, the LATER one in the vector wins. That happens
+/// when a sampled knot (Heartbeat/StageChange) and an event knot (Bounce,
+/// Terminal) fall on one frame — the event knot is the post-event state and
+/// is pushed second. Vector order is emission order, and a batch is drained
+/// once per tick, so the pair can never straddle two batches.
+struct TrajectoryKeyframe FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef TrajectoryKeyframeT NativeTableType;
+  typedef TrajectoryKeyframeBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_PROJ_ID = 4,
+    VT_FRAME = 6,
+    VT_POS = 8,
+    VT_VEL = 10,
+    VT_KIND = 12,
+    VT_TEAM = 14
+  };
+  uint32_t proj_id() const {
+    return GetField<uint32_t>(VT_PROJ_ID, 0);
+  }
+  /// Sim frame this knot is stamped at. Spline parameter, not a hint.
+  uint32_t frame() const {
+    return GetField<uint32_t>(VT_FRAME, 0);
+  }
+  const SpringWeb::Vec3 *pos() const {
+    return GetStruct<const SpringWeb::Vec3 *>(VT_POS);
+  }
+  const SpringWeb::Vec3 *vel() const {
+    return GetStruct<const SpringWeb::Vec3 *>(VT_VEL);
+  }
+  SpringWeb::TrajectoryKeyframeKind kind() const {
+    return static_cast<SpringWeb::TrajectoryKeyframeKind>(GetField<uint8_t>(VT_KIND, 0));
+  }
+  /// Owner-team id — see ProjectileImpactEvent.team. Lets the per-session
+  /// filter keep ally keyframes flowing through fog of war.
+  uint8_t team() const {
+    return GetField<uint8_t>(VT_TEAM, 0);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<uint32_t>(verifier, VT_PROJ_ID, 4) &&
+           VerifyField<uint32_t>(verifier, VT_FRAME, 4) &&
+           VerifyField<SpringWeb::Vec3>(verifier, VT_POS, 4) &&
+           VerifyField<SpringWeb::Vec3>(verifier, VT_VEL, 4) &&
+           VerifyField<uint8_t>(verifier, VT_KIND, 1) &&
+           VerifyField<uint8_t>(verifier, VT_TEAM, 1) &&
+           verifier.EndTable();
+  }
+  TrajectoryKeyframeT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(TrajectoryKeyframeT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<TrajectoryKeyframe> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const TrajectoryKeyframeT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct TrajectoryKeyframeBuilder {
+  typedef TrajectoryKeyframe Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_proj_id(uint32_t proj_id) {
+    fbb_.AddElement<uint32_t>(TrajectoryKeyframe::VT_PROJ_ID, proj_id, 0);
+  }
+  void add_frame(uint32_t frame) {
+    fbb_.AddElement<uint32_t>(TrajectoryKeyframe::VT_FRAME, frame, 0);
+  }
+  void add_pos(const SpringWeb::Vec3 *pos) {
+    fbb_.AddStruct(TrajectoryKeyframe::VT_POS, pos);
+  }
+  void add_vel(const SpringWeb::Vec3 *vel) {
+    fbb_.AddStruct(TrajectoryKeyframe::VT_VEL, vel);
+  }
+  void add_kind(SpringWeb::TrajectoryKeyframeKind kind) {
+    fbb_.AddElement<uint8_t>(TrajectoryKeyframe::VT_KIND, static_cast<uint8_t>(kind), 0);
+  }
+  void add_team(uint8_t team) {
+    fbb_.AddElement<uint8_t>(TrajectoryKeyframe::VT_TEAM, team, 0);
+  }
+  explicit TrajectoryKeyframeBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<TrajectoryKeyframe> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<TrajectoryKeyframe>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<TrajectoryKeyframe> CreateTrajectoryKeyframe(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint32_t proj_id = 0,
+    uint32_t frame = 0,
+    const SpringWeb::Vec3 *pos = nullptr,
+    const SpringWeb::Vec3 *vel = nullptr,
+    SpringWeb::TrajectoryKeyframeKind kind = SpringWeb::TrajectoryKeyframeKind_Launch,
+    uint8_t team = 0) {
+  TrajectoryKeyframeBuilder builder_(_fbb);
+  builder_.add_vel(vel);
+  builder_.add_pos(pos);
+  builder_.add_frame(frame);
+  builder_.add_proj_id(proj_id);
+  builder_.add_team(team);
+  builder_.add_kind(kind);
+  return builder_.Finish();
+}
+
+::flatbuffers::Offset<TrajectoryKeyframe> CreateTrajectoryKeyframe(::flatbuffers::FlatBufferBuilder &_fbb, const TrajectoryKeyframeT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
+struct OutcomeKnownEventT : public ::flatbuffers::NativeTable {
+  typedef OutcomeKnownEvent TableType;
+  uint32_t proj_id = 0;
+  SpringWeb::ProjectileImpactKind outcome = SpringWeb::ProjectileImpactKind_Terrain;
+  uint32_t outcome_frame = 0;
+  std::unique_ptr<SpringWeb::Vec3> outcome_pos{};
+  uint32_t target_id = 0;
+  uint8_t team = 0;
+  uint16_t weapon_def_id = 0;
+  OutcomeKnownEventT() = default;
+  OutcomeKnownEventT(const OutcomeKnownEventT &o);
+  OutcomeKnownEventT(OutcomeKnownEventT&&) FLATBUFFERS_NOEXCEPT = default;
+  OutcomeKnownEventT &operator=(OutcomeKnownEventT o) FLATBUFFERS_NOEXCEPT;
+};
+
+/// PLAN-latency L3 — a Tier-S projectile's resolved outcome, stamped with
+/// the frame it resolves on.
+///
+/// ProjectileImpactEvent carries no frame, so the client can only play the
+/// explosion when the packet arrives — which is `D` frames after the
+/// presentation cursor shows the projectile reaching the target. This event
+/// carries `outcome_frame`, so the client schedules the flash/burst on the
+/// L1 timeline and it fires exactly when the rendered projectile arrives.
+///
+/// Emitted the moment the sim resolves the shot: a collision, a shield
+/// absorption, or an interceptor kill. Disjoint from FireOutcomeEvent,
+/// which is the Tier-C (never-simulated) equivalent resolved at FIRE time.
+struct OutcomeKnownEvent FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef OutcomeKnownEventT NativeTableType;
+  typedef OutcomeKnownEventBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_PROJ_ID = 4,
+    VT_OUTCOME = 6,
+    VT_OUTCOME_FRAME = 8,
+    VT_OUTCOME_POS = 10,
+    VT_TARGET_ID = 12,
+    VT_TEAM = 14,
+    VT_WEAPON_DEF_ID = 16
+  };
+  uint32_t proj_id() const {
+    return GetField<uint32_t>(VT_PROJ_ID, 0);
+  }
+  /// Reuses ProjectileImpactKind — this IS a discovered collision, unlike
+  /// FireOutcomeEvent's fire-time prediction, so the same vocabulary fits.
+  /// Shield and Intercepted are reported accurately here; the legacy
+  /// ProjectileImpactEvent reports both as Terrain (both paths funnel
+  /// through the no-argument CWeaponProjectile::Collision overload).
+  SpringWeb::ProjectileImpactKind outcome() const {
+    return static_cast<SpringWeb::ProjectileImpactKind>(GetField<uint8_t>(VT_OUTCOME, 0));
+  }
+  /// Sim frame the outcome resolves on — schedule the FX here.
+  uint32_t outcome_frame() const {
+    return GetField<uint32_t>(VT_OUTCOME_FRAME, 0);
+  }
+  /// Where the visual terminates. The final keyframe (kind=Terminal) for
+  /// this proj_id carries the same position, so the spline provably ends
+  /// on the explosion.
+  const SpringWeb::Vec3 *outcome_pos() const {
+    return GetStruct<const SpringWeb::Vec3 *>(VT_OUTCOME_POS);
+  }
+  /// Hit unit / feature / shield-host (0 for terrain).
+  uint32_t target_id() const {
+    return GetField<uint32_t>(VT_TARGET_ID, 0);
+  }
+  /// Owner-team id — see ProjectileImpactEvent.team.
+  uint8_t team() const {
+    return GetField<uint8_t>(VT_TEAM, 0);
+  }
+  /// Weapon def driving the explosion, so the client can resolve the CEG
+  /// without a live projectile entry to look up.
+  uint16_t weapon_def_id() const {
+    return GetField<uint16_t>(VT_WEAPON_DEF_ID, 0);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<uint32_t>(verifier, VT_PROJ_ID, 4) &&
+           VerifyField<uint8_t>(verifier, VT_OUTCOME, 1) &&
+           VerifyField<uint32_t>(verifier, VT_OUTCOME_FRAME, 4) &&
+           VerifyField<SpringWeb::Vec3>(verifier, VT_OUTCOME_POS, 4) &&
+           VerifyField<uint32_t>(verifier, VT_TARGET_ID, 4) &&
+           VerifyField<uint8_t>(verifier, VT_TEAM, 1) &&
+           VerifyField<uint16_t>(verifier, VT_WEAPON_DEF_ID, 2) &&
+           verifier.EndTable();
+  }
+  OutcomeKnownEventT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(OutcomeKnownEventT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<OutcomeKnownEvent> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const OutcomeKnownEventT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct OutcomeKnownEventBuilder {
+  typedef OutcomeKnownEvent Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_proj_id(uint32_t proj_id) {
+    fbb_.AddElement<uint32_t>(OutcomeKnownEvent::VT_PROJ_ID, proj_id, 0);
+  }
+  void add_outcome(SpringWeb::ProjectileImpactKind outcome) {
+    fbb_.AddElement<uint8_t>(OutcomeKnownEvent::VT_OUTCOME, static_cast<uint8_t>(outcome), 0);
+  }
+  void add_outcome_frame(uint32_t outcome_frame) {
+    fbb_.AddElement<uint32_t>(OutcomeKnownEvent::VT_OUTCOME_FRAME, outcome_frame, 0);
+  }
+  void add_outcome_pos(const SpringWeb::Vec3 *outcome_pos) {
+    fbb_.AddStruct(OutcomeKnownEvent::VT_OUTCOME_POS, outcome_pos);
+  }
+  void add_target_id(uint32_t target_id) {
+    fbb_.AddElement<uint32_t>(OutcomeKnownEvent::VT_TARGET_ID, target_id, 0);
+  }
+  void add_team(uint8_t team) {
+    fbb_.AddElement<uint8_t>(OutcomeKnownEvent::VT_TEAM, team, 0);
+  }
+  void add_weapon_def_id(uint16_t weapon_def_id) {
+    fbb_.AddElement<uint16_t>(OutcomeKnownEvent::VT_WEAPON_DEF_ID, weapon_def_id, 0);
+  }
+  explicit OutcomeKnownEventBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<OutcomeKnownEvent> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<OutcomeKnownEvent>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<OutcomeKnownEvent> CreateOutcomeKnownEvent(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    uint32_t proj_id = 0,
+    SpringWeb::ProjectileImpactKind outcome = SpringWeb::ProjectileImpactKind_Terrain,
+    uint32_t outcome_frame = 0,
+    const SpringWeb::Vec3 *outcome_pos = nullptr,
+    uint32_t target_id = 0,
+    uint8_t team = 0,
+    uint16_t weapon_def_id = 0) {
+  OutcomeKnownEventBuilder builder_(_fbb);
+  builder_.add_target_id(target_id);
+  builder_.add_outcome_pos(outcome_pos);
+  builder_.add_outcome_frame(outcome_frame);
+  builder_.add_proj_id(proj_id);
+  builder_.add_weapon_def_id(weapon_def_id);
+  builder_.add_team(team);
+  builder_.add_outcome(outcome);
+  return builder_.Finish();
+}
+
+::flatbuffers::Offset<OutcomeKnownEvent> CreateOutcomeKnownEvent(::flatbuffers::FlatBufferBuilder &_fbb, const OutcomeKnownEventT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
 struct SoundEventT : public ::flatbuffers::NativeTable {
   typedef SoundEvent TableType;
   uint16_t sound_id = 0;
@@ -8270,6 +8614,8 @@ struct GameEventBatchT : public ::flatbuffers::NativeTable {
   std::vector<std::unique_ptr<SpringWeb::SeismicPingT>> seismic_pings{};
   std::vector<std::unique_ptr<SpringWeb::MusicEventT>> music_events{};
   std::vector<std::unique_ptr<SpringWeb::FireOutcomeEventT>> fire_outcomes{};
+  std::vector<std::unique_ptr<SpringWeb::TrajectoryKeyframeT>> trajectory_keyframes{};
+  std::vector<std::unique_ptr<SpringWeb::OutcomeKnownEventT>> outcomes_known{};
   GameEventBatchT() = default;
   GameEventBatchT(const GameEventBatchT &o);
   GameEventBatchT(GameEventBatchT&&) FLATBUFFERS_NOEXCEPT = default;
@@ -8289,7 +8635,9 @@ struct GameEventBatch FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_SOUNDS = 16,
     VT_SEISMIC_PINGS = 18,
     VT_MUSIC_EVENTS = 20,
-    VT_FIRE_OUTCOMES = 22
+    VT_FIRE_OUTCOMES = 22,
+    VT_TRAJECTORY_KEYFRAMES = 24,
+    VT_OUTCOMES_KNOWN = 26
   };
   uint32_t frame() const {
     return GetField<uint32_t>(VT_FRAME, 0);
@@ -8340,6 +8688,26 @@ struct GameEventBatch FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::FireOutcomeEvent>> *fire_outcomes() const {
     return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::FireOutcomeEvent>> *>(VT_FIRE_OUTCOMES);
   }
+  /// Tier-S trajectory keyframes (PLAN-latency L3). Spline knots for
+  /// projectiles that DO exist in the sim, as opposed to `fire_outcomes`
+  /// above which describes shots that never did.
+  ///
+  /// While `LatencyTierSKeyframes` is off these are empty and
+  /// `projectile_trajectories` carries the old rewrite-and-integrate
+  /// stream; while it is on the two swap over. They are never both
+  /// populated for the same projectile — see TrajectoryKeyframes.h.
+  ///
+  /// Appended at the end for the same vtable reason as `fire_outcomes`.
+  const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::TrajectoryKeyframe>> *trajectory_keyframes() const {
+    return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::TrajectoryKeyframe>> *>(VT_TRAJECTORY_KEYFRAMES);
+  }
+  /// Frame-stamped outcomes for Tier-S projectiles (PLAN-latency L3).
+  /// Rides alongside `projectile_impacts` rather than replacing it: the
+  /// impact event still drives the non-latency consumers (sound, ghost
+  /// cleanup), this one drives the L1-scheduled visual.
+  const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::OutcomeKnownEvent>> *outcomes_known() const {
+    return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::OutcomeKnownEvent>> *>(VT_OUTCOMES_KNOWN);
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<uint32_t>(verifier, VT_FRAME, 4) &&
@@ -8370,6 +8738,12 @@ struct GameEventBatch FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyOffset(verifier, VT_FIRE_OUTCOMES) &&
            verifier.VerifyVector(fire_outcomes()) &&
            verifier.VerifyVectorOfTables(fire_outcomes()) &&
+           VerifyOffset(verifier, VT_TRAJECTORY_KEYFRAMES) &&
+           verifier.VerifyVector(trajectory_keyframes()) &&
+           verifier.VerifyVectorOfTables(trajectory_keyframes()) &&
+           VerifyOffset(verifier, VT_OUTCOMES_KNOWN) &&
+           verifier.VerifyVector(outcomes_known()) &&
+           verifier.VerifyVectorOfTables(outcomes_known()) &&
            verifier.EndTable();
   }
   GameEventBatchT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -8411,6 +8785,12 @@ struct GameEventBatchBuilder {
   void add_fire_outcomes(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::FireOutcomeEvent>>> fire_outcomes) {
     fbb_.AddOffset(GameEventBatch::VT_FIRE_OUTCOMES, fire_outcomes);
   }
+  void add_trajectory_keyframes(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::TrajectoryKeyframe>>> trajectory_keyframes) {
+    fbb_.AddOffset(GameEventBatch::VT_TRAJECTORY_KEYFRAMES, trajectory_keyframes);
+  }
+  void add_outcomes_known(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::OutcomeKnownEvent>>> outcomes_known) {
+    fbb_.AddOffset(GameEventBatch::VT_OUTCOMES_KNOWN, outcomes_known);
+  }
   explicit GameEventBatchBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -8433,8 +8813,12 @@ inline ::flatbuffers::Offset<GameEventBatch> CreateGameEventBatch(
     ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::SoundEvent>>> sounds = 0,
     ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::SeismicPing>>> seismic_pings = 0,
     ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::MusicEvent>>> music_events = 0,
-    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::FireOutcomeEvent>>> fire_outcomes = 0) {
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::FireOutcomeEvent>>> fire_outcomes = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::TrajectoryKeyframe>>> trajectory_keyframes = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::OutcomeKnownEvent>>> outcomes_known = 0) {
   GameEventBatchBuilder builder_(_fbb);
+  builder_.add_outcomes_known(outcomes_known);
+  builder_.add_trajectory_keyframes(trajectory_keyframes);
   builder_.add_fire_outcomes(fire_outcomes);
   builder_.add_music_events(music_events);
   builder_.add_seismic_pings(seismic_pings);
@@ -8459,7 +8843,9 @@ inline ::flatbuffers::Offset<GameEventBatch> CreateGameEventBatchDirect(
     const std::vector<::flatbuffers::Offset<SpringWeb::SoundEvent>> *sounds = nullptr,
     const std::vector<::flatbuffers::Offset<SpringWeb::SeismicPing>> *seismic_pings = nullptr,
     const std::vector<::flatbuffers::Offset<SpringWeb::MusicEvent>> *music_events = nullptr,
-    const std::vector<::flatbuffers::Offset<SpringWeb::FireOutcomeEvent>> *fire_outcomes = nullptr) {
+    const std::vector<::flatbuffers::Offset<SpringWeb::FireOutcomeEvent>> *fire_outcomes = nullptr,
+    const std::vector<::flatbuffers::Offset<SpringWeb::TrajectoryKeyframe>> *trajectory_keyframes = nullptr,
+    const std::vector<::flatbuffers::Offset<SpringWeb::OutcomeKnownEvent>> *outcomes_known = nullptr) {
   auto events__ = events ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::GameEvent>>(*events) : 0;
   auto combat_events__ = combat_events ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::CombatEvent>>(*combat_events) : 0;
   auto projectile_fired__ = projectile_fired ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::ProjectileFiredEvent>>(*projectile_fired) : 0;
@@ -8469,6 +8855,8 @@ inline ::flatbuffers::Offset<GameEventBatch> CreateGameEventBatchDirect(
   auto seismic_pings__ = seismic_pings ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::SeismicPing>>(*seismic_pings) : 0;
   auto music_events__ = music_events ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::MusicEvent>>(*music_events) : 0;
   auto fire_outcomes__ = fire_outcomes ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::FireOutcomeEvent>>(*fire_outcomes) : 0;
+  auto trajectory_keyframes__ = trajectory_keyframes ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::TrajectoryKeyframe>>(*trajectory_keyframes) : 0;
+  auto outcomes_known__ = outcomes_known ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::OutcomeKnownEvent>>(*outcomes_known) : 0;
   return SpringWeb::CreateGameEventBatch(
       _fbb,
       frame,
@@ -8480,7 +8868,9 @@ inline ::flatbuffers::Offset<GameEventBatch> CreateGameEventBatchDirect(
       sounds__,
       seismic_pings__,
       music_events__,
-      fire_outcomes__);
+      fire_outcomes__,
+      trajectory_keyframes__,
+      outcomes_known__);
 }
 
 ::flatbuffers::Offset<GameEventBatch> CreateGameEventBatch(::flatbuffers::FlatBufferBuilder &_fbb, const GameEventBatchT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
@@ -17538,6 +17928,131 @@ inline ::flatbuffers::Offset<ProjectileTrajectoryEvent> CreateProjectileTrajecto
       _team);
 }
 
+inline TrajectoryKeyframeT::TrajectoryKeyframeT(const TrajectoryKeyframeT &o)
+      : proj_id(o.proj_id),
+        frame(o.frame),
+        pos((o.pos) ? new SpringWeb::Vec3(*o.pos) : nullptr),
+        vel((o.vel) ? new SpringWeb::Vec3(*o.vel) : nullptr),
+        kind(o.kind),
+        team(o.team) {
+}
+
+inline TrajectoryKeyframeT &TrajectoryKeyframeT::operator=(TrajectoryKeyframeT o) FLATBUFFERS_NOEXCEPT {
+  std::swap(proj_id, o.proj_id);
+  std::swap(frame, o.frame);
+  std::swap(pos, o.pos);
+  std::swap(vel, o.vel);
+  std::swap(kind, o.kind);
+  std::swap(team, o.team);
+  return *this;
+}
+
+inline TrajectoryKeyframeT *TrajectoryKeyframe::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<TrajectoryKeyframeT>(new TrajectoryKeyframeT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void TrajectoryKeyframe::UnPackTo(TrajectoryKeyframeT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = proj_id(); _o->proj_id = _e; }
+  { auto _e = frame(); _o->frame = _e; }
+  { auto _e = pos(); if (_e) _o->pos = std::unique_ptr<SpringWeb::Vec3>(new SpringWeb::Vec3(*_e)); }
+  { auto _e = vel(); if (_e) _o->vel = std::unique_ptr<SpringWeb::Vec3>(new SpringWeb::Vec3(*_e)); }
+  { auto _e = kind(); _o->kind = _e; }
+  { auto _e = team(); _o->team = _e; }
+}
+
+inline ::flatbuffers::Offset<TrajectoryKeyframe> TrajectoryKeyframe::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const TrajectoryKeyframeT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return CreateTrajectoryKeyframe(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<TrajectoryKeyframe> CreateTrajectoryKeyframe(::flatbuffers::FlatBufferBuilder &_fbb, const TrajectoryKeyframeT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const TrajectoryKeyframeT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _proj_id = _o->proj_id;
+  auto _frame = _o->frame;
+  auto _pos = _o->pos ? _o->pos.get() : nullptr;
+  auto _vel = _o->vel ? _o->vel.get() : nullptr;
+  auto _kind = _o->kind;
+  auto _team = _o->team;
+  return SpringWeb::CreateTrajectoryKeyframe(
+      _fbb,
+      _proj_id,
+      _frame,
+      _pos,
+      _vel,
+      _kind,
+      _team);
+}
+
+inline OutcomeKnownEventT::OutcomeKnownEventT(const OutcomeKnownEventT &o)
+      : proj_id(o.proj_id),
+        outcome(o.outcome),
+        outcome_frame(o.outcome_frame),
+        outcome_pos((o.outcome_pos) ? new SpringWeb::Vec3(*o.outcome_pos) : nullptr),
+        target_id(o.target_id),
+        team(o.team),
+        weapon_def_id(o.weapon_def_id) {
+}
+
+inline OutcomeKnownEventT &OutcomeKnownEventT::operator=(OutcomeKnownEventT o) FLATBUFFERS_NOEXCEPT {
+  std::swap(proj_id, o.proj_id);
+  std::swap(outcome, o.outcome);
+  std::swap(outcome_frame, o.outcome_frame);
+  std::swap(outcome_pos, o.outcome_pos);
+  std::swap(target_id, o.target_id);
+  std::swap(team, o.team);
+  std::swap(weapon_def_id, o.weapon_def_id);
+  return *this;
+}
+
+inline OutcomeKnownEventT *OutcomeKnownEvent::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<OutcomeKnownEventT>(new OutcomeKnownEventT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void OutcomeKnownEvent::UnPackTo(OutcomeKnownEventT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = proj_id(); _o->proj_id = _e; }
+  { auto _e = outcome(); _o->outcome = _e; }
+  { auto _e = outcome_frame(); _o->outcome_frame = _e; }
+  { auto _e = outcome_pos(); if (_e) _o->outcome_pos = std::unique_ptr<SpringWeb::Vec3>(new SpringWeb::Vec3(*_e)); }
+  { auto _e = target_id(); _o->target_id = _e; }
+  { auto _e = team(); _o->team = _e; }
+  { auto _e = weapon_def_id(); _o->weapon_def_id = _e; }
+}
+
+inline ::flatbuffers::Offset<OutcomeKnownEvent> OutcomeKnownEvent::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const OutcomeKnownEventT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return CreateOutcomeKnownEvent(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<OutcomeKnownEvent> CreateOutcomeKnownEvent(::flatbuffers::FlatBufferBuilder &_fbb, const OutcomeKnownEventT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const OutcomeKnownEventT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _proj_id = _o->proj_id;
+  auto _outcome = _o->outcome;
+  auto _outcome_frame = _o->outcome_frame;
+  auto _outcome_pos = _o->outcome_pos ? _o->outcome_pos.get() : nullptr;
+  auto _target_id = _o->target_id;
+  auto _team = _o->team;
+  auto _weapon_def_id = _o->weapon_def_id;
+  return SpringWeb::CreateOutcomeKnownEvent(
+      _fbb,
+      _proj_id,
+      _outcome,
+      _outcome_frame,
+      _outcome_pos,
+      _target_id,
+      _team,
+      _weapon_def_id);
+}
+
 inline SoundEventT::SoundEventT(const SoundEventT &o)
       : sound_id(o.sound_id),
         source_def_id(o.source_def_id),
@@ -17707,6 +18222,10 @@ inline GameEventBatchT::GameEventBatchT(const GameEventBatchT &o)
   for (const auto &music_events_ : o.music_events) { music_events.emplace_back((music_events_) ? new SpringWeb::MusicEventT(*music_events_) : nullptr); }
   fire_outcomes.reserve(o.fire_outcomes.size());
   for (const auto &fire_outcomes_ : o.fire_outcomes) { fire_outcomes.emplace_back((fire_outcomes_) ? new SpringWeb::FireOutcomeEventT(*fire_outcomes_) : nullptr); }
+  trajectory_keyframes.reserve(o.trajectory_keyframes.size());
+  for (const auto &trajectory_keyframes_ : o.trajectory_keyframes) { trajectory_keyframes.emplace_back((trajectory_keyframes_) ? new SpringWeb::TrajectoryKeyframeT(*trajectory_keyframes_) : nullptr); }
+  outcomes_known.reserve(o.outcomes_known.size());
+  for (const auto &outcomes_known_ : o.outcomes_known) { outcomes_known.emplace_back((outcomes_known_) ? new SpringWeb::OutcomeKnownEventT(*outcomes_known_) : nullptr); }
 }
 
 inline GameEventBatchT &GameEventBatchT::operator=(GameEventBatchT o) FLATBUFFERS_NOEXCEPT {
@@ -17720,6 +18239,8 @@ inline GameEventBatchT &GameEventBatchT::operator=(GameEventBatchT o) FLATBUFFER
   std::swap(seismic_pings, o.seismic_pings);
   std::swap(music_events, o.music_events);
   std::swap(fire_outcomes, o.fire_outcomes);
+  std::swap(trajectory_keyframes, o.trajectory_keyframes);
+  std::swap(outcomes_known, o.outcomes_known);
   return *this;
 }
 
@@ -17742,6 +18263,8 @@ inline void GameEventBatch::UnPackTo(GameEventBatchT *_o, const ::flatbuffers::r
   { auto _e = seismic_pings(); if (_e) { _o->seismic_pings.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->seismic_pings[_i]) { _e->Get(_i)->UnPackTo(_o->seismic_pings[_i].get(), _resolver); } else { _o->seismic_pings[_i] = std::unique_ptr<SpringWeb::SeismicPingT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->seismic_pings.resize(0); } }
   { auto _e = music_events(); if (_e) { _o->music_events.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->music_events[_i]) { _e->Get(_i)->UnPackTo(_o->music_events[_i].get(), _resolver); } else { _o->music_events[_i] = std::unique_ptr<SpringWeb::MusicEventT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->music_events.resize(0); } }
   { auto _e = fire_outcomes(); if (_e) { _o->fire_outcomes.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->fire_outcomes[_i]) { _e->Get(_i)->UnPackTo(_o->fire_outcomes[_i].get(), _resolver); } else { _o->fire_outcomes[_i] = std::unique_ptr<SpringWeb::FireOutcomeEventT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->fire_outcomes.resize(0); } }
+  { auto _e = trajectory_keyframes(); if (_e) { _o->trajectory_keyframes.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->trajectory_keyframes[_i]) { _e->Get(_i)->UnPackTo(_o->trajectory_keyframes[_i].get(), _resolver); } else { _o->trajectory_keyframes[_i] = std::unique_ptr<SpringWeb::TrajectoryKeyframeT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->trajectory_keyframes.resize(0); } }
+  { auto _e = outcomes_known(); if (_e) { _o->outcomes_known.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->outcomes_known[_i]) { _e->Get(_i)->UnPackTo(_o->outcomes_known[_i].get(), _resolver); } else { _o->outcomes_known[_i] = std::unique_ptr<SpringWeb::OutcomeKnownEventT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->outcomes_known.resize(0); } }
 }
 
 inline ::flatbuffers::Offset<GameEventBatch> GameEventBatch::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const GameEventBatchT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
@@ -17762,6 +18285,8 @@ inline ::flatbuffers::Offset<GameEventBatch> CreateGameEventBatch(::flatbuffers:
   auto _seismic_pings = _o->seismic_pings.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::SeismicPing>> (_o->seismic_pings.size(), [](size_t i, _VectorArgs *__va) { return CreateSeismicPing(*__va->__fbb, __va->__o->seismic_pings[i].get(), __va->__rehasher); }, &_va ) : 0;
   auto _music_events = _o->music_events.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::MusicEvent>> (_o->music_events.size(), [](size_t i, _VectorArgs *__va) { return CreateMusicEvent(*__va->__fbb, __va->__o->music_events[i].get(), __va->__rehasher); }, &_va ) : 0;
   auto _fire_outcomes = _o->fire_outcomes.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::FireOutcomeEvent>> (_o->fire_outcomes.size(), [](size_t i, _VectorArgs *__va) { return CreateFireOutcomeEvent(*__va->__fbb, __va->__o->fire_outcomes[i].get(), __va->__rehasher); }, &_va ) : 0;
+  auto _trajectory_keyframes = _o->trajectory_keyframes.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::TrajectoryKeyframe>> (_o->trajectory_keyframes.size(), [](size_t i, _VectorArgs *__va) { return CreateTrajectoryKeyframe(*__va->__fbb, __va->__o->trajectory_keyframes[i].get(), __va->__rehasher); }, &_va ) : 0;
+  auto _outcomes_known = _o->outcomes_known.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::OutcomeKnownEvent>> (_o->outcomes_known.size(), [](size_t i, _VectorArgs *__va) { return CreateOutcomeKnownEvent(*__va->__fbb, __va->__o->outcomes_known[i].get(), __va->__rehasher); }, &_va ) : 0;
   return SpringWeb::CreateGameEventBatch(
       _fbb,
       _frame,
@@ -17773,7 +18298,9 @@ inline ::flatbuffers::Offset<GameEventBatch> CreateGameEventBatch(::flatbuffers:
       _sounds,
       _seismic_pings,
       _music_events,
-      _fire_outcomes);
+      _fire_outcomes,
+      _trajectory_keyframes,
+      _outcomes_known);
 }
 
 inline ResourceUpdateT *ResourceUpdate::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {

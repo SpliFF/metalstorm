@@ -8,11 +8,13 @@ import { CombatEvent, CombatEventT } from '../spring-web/combat-event.js';
 import { FireOutcomeEvent, FireOutcomeEventT } from '../spring-web/fire-outcome-event.js';
 import { GameEvent, GameEventT } from '../spring-web/game-event.js';
 import { MusicEvent, MusicEventT } from '../spring-web/music-event.js';
+import { OutcomeKnownEvent, OutcomeKnownEventT } from '../spring-web/outcome-known-event.js';
 import { ProjectileFiredEvent, ProjectileFiredEventT } from '../spring-web/projectile-fired-event.js';
 import { ProjectileImpactEvent, ProjectileImpactEventT } from '../spring-web/projectile-impact-event.js';
 import { ProjectileTrajectoryEvent, ProjectileTrajectoryEventT } from '../spring-web/projectile-trajectory-event.js';
 import { SeismicPing, SeismicPingT } from '../spring-web/seismic-ping.js';
 import { SoundEvent, SoundEventT } from '../spring-web/sound-event.js';
+import { TrajectoryKeyframe, TrajectoryKeyframeT } from '../spring-web/trajectory-keyframe.js';
 
 
 export class GameEventBatch implements flatbuffers.IUnpackableObject<GameEventBatchT> {
@@ -157,8 +159,46 @@ fireOutcomesLength():number {
   return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
 }
 
+/**
+ * Tier-S trajectory keyframes (PLAN-latency L3). Spline knots for
+ * projectiles that DO exist in the sim, as opposed to `fire_outcomes`
+ * above which describes shots that never did.
+ *
+ * While `LatencyTierSKeyframes` is off these are empty and
+ * `projectile_trajectories` carries the old rewrite-and-integrate
+ * stream; while it is on the two swap over. They are never both
+ * populated for the same projectile — see TrajectoryKeyframes.h.
+ *
+ * Appended at the end for the same vtable reason as `fire_outcomes`.
+ */
+trajectoryKeyframes(index: number, obj?:TrajectoryKeyframe):TrajectoryKeyframe|null {
+  const offset = this.bb!.__offset(this.bb_pos, 24);
+  return offset ? (obj || new TrajectoryKeyframe()).__init(this.bb!.__indirect(this.bb!.__vector(this.bb_pos + offset) + index * 4), this.bb!) : null;
+}
+
+trajectoryKeyframesLength():number {
+  const offset = this.bb!.__offset(this.bb_pos, 24);
+  return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
+}
+
+/**
+ * Frame-stamped outcomes for Tier-S projectiles (PLAN-latency L3).
+ * Rides alongside `projectile_impacts` rather than replacing it: the
+ * impact event still drives the non-latency consumers (sound, ghost
+ * cleanup), this one drives the L1-scheduled visual.
+ */
+outcomesKnown(index: number, obj?:OutcomeKnownEvent):OutcomeKnownEvent|null {
+  const offset = this.bb!.__offset(this.bb_pos, 26);
+  return offset ? (obj || new OutcomeKnownEvent()).__init(this.bb!.__indirect(this.bb!.__vector(this.bb_pos + offset) + index * 4), this.bb!) : null;
+}
+
+outcomesKnownLength():number {
+  const offset = this.bb!.__offset(this.bb_pos, 26);
+  return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
+}
+
 static startGameEventBatch(builder:flatbuffers.Builder) {
-  builder.startObject(10);
+  builder.startObject(12);
 }
 
 static addFrame(builder:flatbuffers.Builder, frame:number) {
@@ -309,12 +349,44 @@ static startFireOutcomesVector(builder:flatbuffers.Builder, numElems:number) {
   builder.startVector(4, numElems, 4);
 }
 
+static addTrajectoryKeyframes(builder:flatbuffers.Builder, trajectoryKeyframesOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(10, trajectoryKeyframesOffset, 0);
+}
+
+static createTrajectoryKeyframesVector(builder:flatbuffers.Builder, data:flatbuffers.Offset[]):flatbuffers.Offset {
+  builder.startVector(4, data.length, 4);
+  for (let i = data.length - 1; i >= 0; i--) {
+    builder.addOffset(data[i]!);
+  }
+  return builder.endVector();
+}
+
+static startTrajectoryKeyframesVector(builder:flatbuffers.Builder, numElems:number) {
+  builder.startVector(4, numElems, 4);
+}
+
+static addOutcomesKnown(builder:flatbuffers.Builder, outcomesKnownOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(11, outcomesKnownOffset, 0);
+}
+
+static createOutcomesKnownVector(builder:flatbuffers.Builder, data:flatbuffers.Offset[]):flatbuffers.Offset {
+  builder.startVector(4, data.length, 4);
+  for (let i = data.length - 1; i >= 0; i--) {
+    builder.addOffset(data[i]!);
+  }
+  return builder.endVector();
+}
+
+static startOutcomesKnownVector(builder:flatbuffers.Builder, numElems:number) {
+  builder.startVector(4, numElems, 4);
+}
+
 static endGameEventBatch(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
 }
 
-static createGameEventBatch(builder:flatbuffers.Builder, frame:number, eventsOffset:flatbuffers.Offset, combatEventsOffset:flatbuffers.Offset, projectileFiredOffset:flatbuffers.Offset, projectileImpactsOffset:flatbuffers.Offset, projectileTrajectoriesOffset:flatbuffers.Offset, soundsOffset:flatbuffers.Offset, seismicPingsOffset:flatbuffers.Offset, musicEventsOffset:flatbuffers.Offset, fireOutcomesOffset:flatbuffers.Offset):flatbuffers.Offset {
+static createGameEventBatch(builder:flatbuffers.Builder, frame:number, eventsOffset:flatbuffers.Offset, combatEventsOffset:flatbuffers.Offset, projectileFiredOffset:flatbuffers.Offset, projectileImpactsOffset:flatbuffers.Offset, projectileTrajectoriesOffset:flatbuffers.Offset, soundsOffset:flatbuffers.Offset, seismicPingsOffset:flatbuffers.Offset, musicEventsOffset:flatbuffers.Offset, fireOutcomesOffset:flatbuffers.Offset, trajectoryKeyframesOffset:flatbuffers.Offset, outcomesKnownOffset:flatbuffers.Offset):flatbuffers.Offset {
   GameEventBatch.startGameEventBatch(builder);
   GameEventBatch.addFrame(builder, frame);
   GameEventBatch.addEvents(builder, eventsOffset);
@@ -326,6 +398,8 @@ static createGameEventBatch(builder:flatbuffers.Builder, frame:number, eventsOff
   GameEventBatch.addSeismicPings(builder, seismicPingsOffset);
   GameEventBatch.addMusicEvents(builder, musicEventsOffset);
   GameEventBatch.addFireOutcomes(builder, fireOutcomesOffset);
+  GameEventBatch.addTrajectoryKeyframes(builder, trajectoryKeyframesOffset);
+  GameEventBatch.addOutcomesKnown(builder, outcomesKnownOffset);
   return GameEventBatch.endGameEventBatch(builder);
 }
 
@@ -340,7 +414,9 @@ unpack(): GameEventBatchT {
     this.bb!.createObjList<SoundEvent, SoundEventT>(this.sounds.bind(this), this.soundsLength()),
     this.bb!.createObjList<SeismicPing, SeismicPingT>(this.seismicPings.bind(this), this.seismicPingsLength()),
     this.bb!.createObjList<MusicEvent, MusicEventT>(this.musicEvents.bind(this), this.musicEventsLength()),
-    this.bb!.createObjList<FireOutcomeEvent, FireOutcomeEventT>(this.fireOutcomes.bind(this), this.fireOutcomesLength())
+    this.bb!.createObjList<FireOutcomeEvent, FireOutcomeEventT>(this.fireOutcomes.bind(this), this.fireOutcomesLength()),
+    this.bb!.createObjList<TrajectoryKeyframe, TrajectoryKeyframeT>(this.trajectoryKeyframes.bind(this), this.trajectoryKeyframesLength()),
+    this.bb!.createObjList<OutcomeKnownEvent, OutcomeKnownEventT>(this.outcomesKnown.bind(this), this.outcomesKnownLength())
   );
 }
 
@@ -356,6 +432,8 @@ unpackTo(_o: GameEventBatchT): void {
   _o.seismicPings = this.bb!.createObjList<SeismicPing, SeismicPingT>(this.seismicPings.bind(this), this.seismicPingsLength());
   _o.musicEvents = this.bb!.createObjList<MusicEvent, MusicEventT>(this.musicEvents.bind(this), this.musicEventsLength());
   _o.fireOutcomes = this.bb!.createObjList<FireOutcomeEvent, FireOutcomeEventT>(this.fireOutcomes.bind(this), this.fireOutcomesLength());
+  _o.trajectoryKeyframes = this.bb!.createObjList<TrajectoryKeyframe, TrajectoryKeyframeT>(this.trajectoryKeyframes.bind(this), this.trajectoryKeyframesLength());
+  _o.outcomesKnown = this.bb!.createObjList<OutcomeKnownEvent, OutcomeKnownEventT>(this.outcomesKnown.bind(this), this.outcomesKnownLength());
 }
 }
 
@@ -370,7 +448,9 @@ constructor(
   public sounds: (SoundEventT)[] = [],
   public seismicPings: (SeismicPingT)[] = [],
   public musicEvents: (MusicEventT)[] = [],
-  public fireOutcomes: (FireOutcomeEventT)[] = []
+  public fireOutcomes: (FireOutcomeEventT)[] = [],
+  public trajectoryKeyframes: (TrajectoryKeyframeT)[] = [],
+  public outcomesKnown: (OutcomeKnownEventT)[] = []
 ){}
 
 
@@ -384,6 +464,8 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
   const seismicPings = GameEventBatch.createSeismicPingsVector(builder, builder.createObjectOffsetList(this.seismicPings));
   const musicEvents = GameEventBatch.createMusicEventsVector(builder, builder.createObjectOffsetList(this.musicEvents));
   const fireOutcomes = GameEventBatch.createFireOutcomesVector(builder, builder.createObjectOffsetList(this.fireOutcomes));
+  const trajectoryKeyframes = GameEventBatch.createTrajectoryKeyframesVector(builder, builder.createObjectOffsetList(this.trajectoryKeyframes));
+  const outcomesKnown = GameEventBatch.createOutcomesKnownVector(builder, builder.createObjectOffsetList(this.outcomesKnown));
 
   return GameEventBatch.createGameEventBatch(builder,
     this.frame,
@@ -395,7 +477,9 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
     sounds,
     seismicPings,
     musicEvents,
-    fireOutcomes
+    fireOutcomes,
+    trajectoryKeyframes,
+    outcomesKnown
   );
 }
 }
