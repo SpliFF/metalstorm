@@ -62,9 +62,10 @@ return {
     sides = {
         -- Informational only — team/slot assignment is the direct-start
         -- manifest's job (see manifests/meridian_basin_direct.json). Faction
-        -- keys per gamedata/sidedata.lua's design draft (that file is still
-        -- an inert stub — factions aren't mechanically differentiated yet,
-        -- same as scenario_smoke_test.lua's usage).
+        -- keys per gamedata/sidedata.lua, which now declares these two
+        -- factions for real (lobby sign-up reads them). They are still not
+        -- mechanically differentiated in sim — no per-faction rosters or
+        -- faction-gated gadgets — same as scenario_smoke_test.lua's usage.
         { faction = 'compact', team = 0 },
         { faction = 'compact', team = 1 },
         { faction = 'compact', team = 2 },
