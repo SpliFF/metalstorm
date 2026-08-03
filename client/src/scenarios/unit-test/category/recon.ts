@@ -12,12 +12,15 @@
  *     either fully in LOS or detected on radar.
  *
  * Notes:
- *   - Jammer units don't *extend* recon — they hide things — so the
- *     test is a degenerate pass: the jammer spawns, no probe is added,
- *     and the test reports `applicable=true, pass=true` with a detail
- *     noting "jammer (no positive probe)". A future iteration can
- *     verify the jammer actually hides a probe spawned inside its
- *     radius from the enemy's perspective.
+ *   - Jammer units don't *extend* recon — they hide things — so their
+ *     probe is a positive/negative control pair instead of a single
+ *     detection probe: a "hidden" unit inside the jam radius and a
+ *     "control" unit just outside it, both owned by the jammer's own
+ *     team, plus an enemy `staticheavyradar` tower placed far enough
+ *     away that only its radar circle (not its sight circle) reaches
+ *     either one. Pass requires the enemy's radar to miss the hidden
+ *     unit *and* see the control unit — proving the jam field is what
+ *     made the difference, not a lack of enemy radar coverage.
  */
 
 import type { TestHarness } from '../../../core/test-harness.js';
@@ -25,11 +28,29 @@ import type { UnitClassification } from '../catalog.js';
 import { sleep } from '../../types.js';
 
 const PROBE_DEF = 'shieldraid';
+/** Stationary ZK "Advanced Radar" — radarDistance=5600 comfortably
+ *  covers every jammer radius in the ZK catalog (max 600), and its
+ *  sightDistance=1120 is short enough to keep clear of both jam-test
+ *  targets so only the radar bit (not direct sight) is exercised. */
+const ENEMY_RADAR_DEF = 'staticheavyradar';
 const CMD_FIRE_STATE = 45;
 const CMD_MOVE_STATE = 50;
 /** Settle time (wall ms at 5× sim speed ≈ 4 sim seconds) — enough for
  *  LOS quads to update once after both units exist. */
 const SETTLE_WALL_MS = 800;
+/** Fraction of the jammer's radius used to place the "hidden" unit —
+ *  well inside the jam field so a partial-radius miss doesn't trip a
+ *  false negative. */
+const JAM_HIDDEN_FACTOR = 0.5;
+/** Fraction of the jammer's radius (plus a flat margin) used to place
+ *  the "control" unit just outside the jam field — same enemy radar
+ *  coverage, just past the radius that should hide it. */
+const JAM_CONTROL_FACTOR = 1.6;
+const JAM_CONTROL_MARGIN = 100;
+/** Elmos further out than the "hidden" unit to place the enemy radar
+ *  tower — past its own 1120-elmo sight range but well inside its
+ *  5600-elmo radar range for any jammer radius in the catalog. */
+const RADAR_TOWER_OFFSET = 2500;
 
 export interface CategoryResult {
     applicable: boolean;
@@ -78,13 +99,76 @@ export async function runRecon(
     const utId = Number(utSpawn.match(/:\s*(\d+)/)?.[1] ?? 0);
     if (!utId) return { applicable: true, pass: false, detail: `spawn failed: ${utSpawn}` };
 
-    // Jammer-only units: spawning succeeds is all we assert (a real
-    // detect-vs-jamming test needs two ally teams + a probe and is out
-    // of scope for v1).
+    // Jammer-only units: verify the jam field actually hides a unit
+    // from an enemy's radar, using a positive/negative control pair
+    // (see the file header comment for the layout and why it's needed).
     if (isJammer) {
+        const hiddenX = utX - Math.floor(jammerR * JAM_HIDDEN_FACTOR);
+        const hiddenZ = utZ;
+        const controlX = utX - Math.floor(jammerR * JAM_CONTROL_FACTOR) - JAM_CONTROL_MARGIN;
+        const controlZ = utZ;
+        const radarTowerX = hiddenX - RADAR_TOWER_OFFSET;
+        const radarTowerZ = utZ;
+
+        const hiddenOut = await h.spawn(PROBE_DEF, hiddenX, hiddenZ, team, 1);
+        const hiddenId = Number(hiddenOut.match(/:\s*(\d+)/)?.[1] ?? 0);
+        const controlOut = await h.spawn(PROBE_DEF, controlX, controlZ, team, 1);
+        const controlId = Number(controlOut.match(/:\s*(\d+)/)?.[1] ?? 0);
+        const towerOut = await h.spawn(ENEMY_RADAR_DEF, radarTowerX, radarTowerZ, enemyTeam, 1);
+        const towerId = Number(towerOut.match(/:\s*(\d+)/)?.[1] ?? 0);
+        if (!hiddenId || !controlId || !towerId) {
+            return {
+                applicable: true, pass: false,
+                detail: `jammer probe setup failed (hidden=${hiddenOut} control=${controlOut} tower=${towerOut})`,
+            };
+        }
+
+        // Pin both mobile targets so they don't wander before the
+        // settle window elapses (same hold-state workaround as the
+        // radar probe below).
+        for (const id of [hiddenId, controlId]) {
+            try {
+                await h.lua(
+                    `Spring.GiveOrderToUnit(${id}, ${CMD_MOVE_STATE}, {0}, 0); `
+                    + `Spring.GiveOrderToUnit(${id}, ${CMD_FIRE_STATE}, {0}, 0)`,
+                );
+            } catch { /* hold-state failure is non-fatal */ }
+        }
+
+        await sleep(SETTLE_WALL_MS);
+
+        // A jammer never hides a unit from its own ally team (engine:
+        // CLosHandler::InJammer returns false when allyTeam == the
+        // jammed unit's allyteam) — the query must come from the
+        // *enemy's* ally team, resolved off the radar tower we own.
+        const jamStateRaw = await h.lua(`
+            local enemyAlly = Spring.GetUnitAllyTeam(${towerId}) or 0
+            local function radar(id)
+                local s = Spring.GetUnitLosState(id, enemyAlly, false)
+                if type(s) == 'table' then return s.radar and true or false end
+                return s and true or false
+            end
+            return string.format('%s,%s', tostring(radar(${hiddenId})), tostring(radar(${controlId})))
+        `);
+        const [hiddenRadarRaw, controlRadarRaw] = jamStateRaw.split(',');
+        const hiddenRadar = hiddenRadarRaw === 'true';
+        const controlRadar = controlRadarRaw === 'true';
+
+        for (const id of [hiddenId, controlId, towerId]) {
+            try { await h.lua(`Spring.DestroyUnit(${id}, false, true)`); } catch {}
+        }
+
+        // Pass requires both halves of the pair: the jam field hides
+        // the inside unit AND the enemy's radar genuinely reaches the
+        // outside unit — otherwise "hidden" not being seen could just
+        // mean the enemy has no radar coverage there at all.
+        const pass = !hiddenRadar && controlRadar;
         return {
-            applicable: true, pass: true,
-            detail: `jammer r=${jammerR} (no positive probe)`,
+            applicable: true,
+            pass,
+            detail: pass
+                ? `jam r=${jammerR}: hidden unseen, control seen by enemy radar`
+                : `jam r=${jammerR}: hidden radar=${hiddenRadar} control radar=${controlRadar} (expected false,true)`,
         };
     }
     // Sonar-only units: would need a water unit at depth to detect.
