@@ -47,7 +47,19 @@ local function newWorld(opts)
             return #world.createdUnits
         end,
         GiveOrderToUnit = function() end,
+        -- Errors on an unknown team, exactly as the engine does
+        -- ("SetTeamRulesParam(): Bad teamID: 8"). A permissive mock here hid
+        -- PLAN-endtoend.md D10's second half for two lanes: staging a slate
+        -- for a team the launch didn't supply aborted gadget:GameStart part
+        -- way through, leaving GG.Scenario.name/.data unset — and only ever
+        -- on the player path, since every direct manifest declared all 8
+        -- Meridian teams. Keep this strict.
         SetTeamRulesParam = function(teamID, key, value)
+            local live = false
+            for _, t in ipairs(world.teams) do if t == teamID then live = true end end
+            if not live then
+                error('SetTeamRulesParam(): Bad teamID: ' .. tostring(teamID))
+            end
             world.teamRulesParams[teamID] = world.teamRulesParams[teamID] or {}
             world.teamRulesParams[teamID][key] = value
         end,
@@ -305,5 +317,131 @@ describe("the SHIPPED meridian_basin Basin Reavers", function()
         for _, u in ipairs(world.createdUnits) do
             assert.are_not.equal(8, u.team)
         end
+    end)
+end)
+
+-- PLAN-endtoend.md D10 — a room created through the Create Game dialog has
+-- only the slots the host filled (two, typically), while Meridian Basin
+-- declares eight teams plus the team-8 Reaver NPC. stageAI must survive that
+-- shape, because everything after it in gadget:GameStart is load-bearing:
+-- GG.Scenario.data.sides is where game_gameover derives the winning
+-- allyteams from, so an abort here makes the war unwinnable even when the
+-- victory objective staged correctly.
+describe("a launch with fewer teams than the scenario declares", function()
+    local function echoesMatching(world, needle)
+        local n = 0
+        for _, m in ipairs(world.echoes) do
+            if m:find(needle, 1, true) then n = n + 1 end
+        end
+        return n
+    end
+
+    it("stages the shipped Meridian war in a two-team lobby room", function()
+        local world, g = newWorld({
+            name = 'meridian_basin',
+            teams = { 0, 1 },     -- host + one AI, what the dialog produces
+            aiPlayers = { [1] = { 2 } },
+        })
+        assert.has_no.errors(function() g:GameStart() end)
+
+        -- Reached the end of GameStart: these are set on the last lines, so
+        -- they are the proof that nothing aborted partway.
+        assert.are.equal('meridian_basin', GG.Scenario.name)
+        assert.is_table(GG.Scenario.data)
+        assert.is_table(GG.Scenario.data.sides)
+        assert.are.equal('meridian_basin', world.gameRulesParams['scenario_name'])
+    end)
+
+    it("skips the missing team's slate with a warning, not an error", function()
+        local world, g = newWorld({
+            name = 'meridian_basin',
+            teams = { 0, 1 },
+            aiPlayers = { [1] = { 2 } },
+        })
+        g:GameStart()
+        assert.are.equal(1, echoesMatching(world, 'AI slate for team 8'))
+        assert.is_nil(world.trp(8, 'ai_profile'))
+    end)
+
+    it("still stages a slate for a team the launch DOES have", function()
+        local world, g = newWorld({
+            scenario = baseScenario({ ai = {
+                { team = 0, profile = 'default', slate = { kinds = { 'garrison' }, home = 'a' } },
+                { team = 8, profile = 'npc_raider', slate = { kinds = { 'raid' }, home = 'b' } },
+            } }),
+            teams = { 0, 1 },
+            aiPlayers = { [0] = { 1 } },
+        })
+        assert.has_no.errors(function() g:GameStart() end)
+        assert.are.equal('default', world.trp(0, 'ai_profile'))
+        assert.is_nil(world.trp(8, 'ai_profile'))
+    end)
+
+    it("pays no stipend to a team that was skipped", function()
+        local world, g = newWorld({
+            scenario = baseScenario(),   -- team 8 only
+            teams = { 0, 1 },
+            aiPlayers = {},
+        })
+        g:GameStart()
+        g:GameFrame(1800)
+        assert.are.equal(0, #world.awards)
+    end)
+end)
+
+-- PLAN-endtoend.md D10 — objectives scoped to a team the launch didn't supply.
+-- Not a cosmetic skip: when such an objective resolves or expires,
+-- game_objectives pays its reward through GG.Authority, which calls
+-- Spring.GetTeamRulesParam on that team and throws "Bad teamID". The error
+-- leaves the Objectives gadget's callin, gadgetHandler removes the gadget,
+-- and every objective — the victory objective included — stops being
+-- evaluated for the rest of the match.
+describe("objectives scoped to a team the launch does not have", function()
+    local function scenarioWithObjectives()
+        return {
+            version = 1, name = 'objective scoping test',
+            world = { regions = {} }, units = {}, ai = {},
+            objectives = {
+                { type = 'control', scope = 'strategic', forTeam = nil,
+                  region = 'meridian_basin', victory = true },
+                { type = 'control', scope = 'tactical', forTeam = 0, region = 'west_pass' },
+                { type = 'control', scope = 'tactical', forTeam = 4, region = 'east_pass' },
+            },
+        }
+    end
+
+    local function created(world, g)
+        local made = {}
+        GG.Objectives.Create = function(def)
+            made[#made + 1] = def
+            return #made
+        end
+        g:GameStart()
+        return made
+    end
+
+    it("keeps the open-race victory objective and the live team's", function()
+        local world, g = newWorld({ scenario = scenarioWithObjectives(), teams = { 0, 1 } })
+        local made = created(world, g)
+        assert.are.equal(2, #made)
+        assert.is_true(made[1].victory)
+        assert.is_nil(made[1].forTeam)
+        assert.are.equal(0, made[2].forTeam)
+    end)
+
+    it("skips the missing team's objective with a warning", function()
+        local world, g = newWorld({ scenario = scenarioWithObjectives(), teams = { 0, 1 } })
+        created(world, g)
+        local warned = 0
+        for _, e in ipairs(world.echoes) do
+            if e:find('scopes objectives to team 4', 1, true) then warned = warned + 1 end
+        end
+        assert.are.equal(1, warned)
+    end)
+
+    it("stages every objective when the launch has all the teams", function()
+        local world, g = newWorld({ scenario = scenarioWithObjectives(), teams = { 0, 1, 4 } })
+        local made = created(world, g)
+        assert.are.equal(3, #made)
     end)
 end)

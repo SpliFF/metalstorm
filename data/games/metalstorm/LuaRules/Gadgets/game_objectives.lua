@@ -84,6 +84,12 @@ local PARTICIPATION_PRESENCE_WEIGHT = 2.0   -- §5 "presence at completion... 2.
 
 local objectives = {}      -- id -> objective
 local nextId = 1
+-- How many objectives carrying `victory = true` have ever been created.
+-- game_gameover.lua reads this to say out loud whether the war it is
+-- watching has any terminal condition at all (PLAN-endtoend.md D10). A
+-- high-water mark, not a live count: an expired victory objective still
+-- means the war was *authored* to be endable, which is the question asked.
+local victoryObjectivesCreated = 0
 local rewardScale = 1.0
 local evalTick = 0
 local genState = Generator.newState()
@@ -491,6 +497,7 @@ function GG.Objectives.Create(def)
 
     objectives[id] = o
     addToActive(id)
+    if o.victory then victoryObjectivesCreated = victoryObjectivesCreated + 1 end
 
     if def.phases and #def.phases > 0 then
         o.phaseDefs = def.phases
@@ -581,6 +588,14 @@ end
 --- Read-only accessor for scenario scripts/tests. Do not mutate the result.
 function GG.Objectives.Get(id)
     return objectives[id]
+end
+
+--- How many `victory = true` objectives this war has ever staged
+--- (PLAN-endtoend.md D10). Zero means game_gameover.lua has nothing to
+--- watch and the war cannot end — which used to be the silent outcome of
+--- creating a room through the lobby instead of a direct manifest.
+function GG.Objectives.VictoryObjectiveCount()
+    return victoryObjectivesCreated
 end
 
 --- `teamID`'s lowest-participation active tactical objective

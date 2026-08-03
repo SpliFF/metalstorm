@@ -405,6 +405,7 @@ set(LOBBY_SERVER_SOURCES
     rts/Server/GameServersDb.cpp
     rts/Server/AI/AIDiscovery.cpp
     rts/Server/GameDiscovery.cpp
+    rts/Server/ScenarioDiscovery.cpp
     rts/Server/ConfigReader.cpp
     rts/Server/ResourcesParser.cpp
 )
@@ -480,6 +481,7 @@ if(TEST_SOURCES)
         ${CMAKE_SOURCE_DIR}/rts/Server/PlayerTeamEventCollector.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/ProjectileEventCollector.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/RoomManager.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/ScenarioDiscovery.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/SoundEventCollector.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/StandingOrders.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/OrgGroups.cpp
