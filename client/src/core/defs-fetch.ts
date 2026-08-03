@@ -23,6 +23,7 @@ import {
     to_jsstring,
 } from 'fengari-web';
 
+import { normalizeAtlasLayout } from './impostor-atlas.js';
 import type { DefCache } from './def-cache.js';
 import type {
     UnitDefInfo,
@@ -334,7 +335,11 @@ function toUnitDefInfos(parsed: any): UnitDefInfo[] {
     }));
 }
 
-function toImpostorInfo(v: any): UnitImpostorInfo | undefined {
+/** Exported for test: the unit-def seam where an atlas field silently going
+ *  missing would make the runtime select cells against the wrong arc or phase
+ *  — the same hazard `atlasSpecFor` guards on the map-feature side. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function toImpostorInfo(v: any): UnitImpostorInfo | undefined {
     if (!v || typeof v !== 'object') return undefined;
     return {
         diffuseUri: str(v.diffuse_uri),
@@ -343,6 +348,23 @@ function toImpostorInfo(v: any): UnitImpostorInfo | undefined {
         idleFrames: num(v.idle_frames, 1),
         width: num(v.width),
         height: num(v.height),
+        centreY: typeof v.centre_y === 'number' ? v.centre_y : undefined,
+        // The atlas declares its OWN grid, elevation arc and azimuth phase; the
+        // runtime must read them rather than assume a global convention (two
+        // bakers already shipped disagreeing by 180 degrees — see
+        // impostor-atlas.ts). This is that seam for unit defs; `atlasSpecFor`
+        // in feature-renderer.ts is the map-feature equivalent.
+        layout: normalizeAtlasLayout({
+            yawBins: num(v.yaw_bins, 1),
+            pitchBins: num(v.pitch_bins, 1),
+            frames: num(v.frames, 1),
+            pitchDegrees: Array.isArray(v.pitch_degrees)
+                ? v.pitch_degrees.map((p: unknown) => num(p))
+                : undefined,
+            azimuthPhaseDegrees: typeof v.azimuth_phase_degrees === 'number'
+                ? v.azimuth_phase_degrees
+                : undefined,
+        }),
     };
 }
 

@@ -11,9 +11,12 @@ return mk{
     scales = {
         [1] = { override = { workertime = 50,
                 description = 'Field engineer team — repairs and light works' },
-                -- Impostor-first per PLAN-metalstorm-beta-units.md §2.1.
-                -- Authored sprite: models/ms_engineers_s1_impostor{,_team}.ktx2.
-                impostorOnly = true, impostorSize = 12,
+                -- Member LOD (PLAN-metalstorm-impostors.md M4): 3D body up close
+                -- (models/ms_engineers_s1.gltf), baked directional sprite far
+                -- (models/ms_engineers_s1_impostor{,_team}.ktx2). See soldiers.lua.
+                -- Ground-anchor lift, measured off the bake — see soldiers.lua.
+                impostorDistance = 900, impostorSize = 12,
+                impostorCentreY = 4.0109,
                 impostorTeamMask = true },
         [2] = { override = { workertime = 120 } },
         [3] = { override = { workertime = 300,

@@ -149,6 +149,16 @@ export function atlasRowCount(layout: AtlasLayout): number {
 }
 
 /**
+ * Does this atlas hold more than one view? A multi-cell sheet needs the
+ * per-instance UV remap (and, because that remap cannot reach Babylon's shadow
+ * depth shader, must be kept out of the shadow caster list — see
+ * `impostor-uv-plugin.ts`). A 1x1x1 legacy sheet needs neither.
+ */
+export function isDirectionalAtlas(layout: AtlasLayout): boolean {
+    return atlasCellCount(layout) > 1;
+}
+
+/**
  * Does an impostor card for this atlas TILT with the camera pitch (a full
  * screen-aligned/spherical billboard), or stay upright and only yaw?
  *

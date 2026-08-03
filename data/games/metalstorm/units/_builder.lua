@@ -85,11 +85,38 @@ local function mk(spec)
             if impostorOnly then
                 def.customparams.impostor_only = '1'
             end
+            -- The `infantry_v2` atlas convention (tools/fable-model-forge/
+            -- impostor_convention.py INFANTRY_V2), declared per atlas rather
+            -- than assumed globally: two bakers ship in this repo and they
+            -- disagree by 180° on what column 0 is and on the elevation arc, so
+            -- the runtime must be TOLD (user decision 2026-08-03, option (b)).
+            -- Keep these in step with INFANTRY_V2 — a cross-check test pins the
+            -- Python and TS sides to each other, but this Lua is the third copy.
+            def.customparams.impostor_yaw_bins = '8'
+            def.customparams.impostor_pitch_bins = '3'
+            def.customparams.impostor_frames = '1'
+            -- 180° = column 0 is the unit's FRONT view. (Relative yaw 0 puts
+            -- the camera BEHIND a −Z-forward model, so 0 would mean its back —
+            -- the exact zero point that let the two bakers drift apart.)
+            def.customparams.impostor_azimuth_phase = '180'
+            -- Camera elevations above the horizon, top row first.
+            def.customparams.impostor_pitch_degrees = '15,45,80'
             -- Sprite quad height/width in elmos (member-scaled — the squad
             -- footprint fallback is way oversized for a single soldier).
             local impostorSize = o.impostorSize or spec.impostorSize
             if impostorSize then
                 def.customparams.impostor_size = tostring(impostorSize)
+            end
+            -- Ground-anchor lift: distance from the unit's ground point up to
+            -- the card's CENTRE, in elmos. NOT half the quad height — the M2
+            -- baker fits all 24 views to one shared scale, so the tallest view
+            -- sets it and the rest leave clear cell below the feet. Measured
+            -- off the shipped .gltf through the baker's own framing(): the
+            -- ground point lands ~0.18 of a cell above its bottom edge, giving
+            -- ~0.32·height. Half the height would hover the sprite ~2 elmos.
+            local impostorCentreY = o.impostorCentreY or spec.impostorCentreY
+            if impostorCentreY then
+                def.customparams.impostor_centre_y = string.format('%.4f', impostorCentreY)
             end
             -- Authored `<stem>_impostor_team.ktx2` sidecar exists (R = team
             -- colour blend) — tells the serializer to emit team_mask_uri.
