@@ -121,7 +121,6 @@ import { StandingOrderRenderer } from './standing-order-renderer.js';
 import { getEngineGl } from './engine-gl.js';
 import {
     applyPlayerTeamRosterEffect,
-    seedPlayersFromRoster,
     reconcilePlayerAllyTeams,
     PlayerTeamEventKind,
     type ProjectileEntry,
@@ -989,15 +988,20 @@ function gpConnect(msg: GpInitToWorker): void {
     gpFirstStateReceived = false;
     const conn = new Connection({
         onStateChange: (state) => postLog(1, `[gp] connection state: ${state}`),
-        onAuthenticated: (playerId, _token, team, defsCacheKey, role) => {
-            postLog(1, `[gp] authenticated playerId=${playerId} team=${team} role=${role} defsKey=${defsCacheKey || '(none)'}`);
-            postToMain({ type: 'gp:authenticated', playerId, team, role });
+        onAuthenticated: ({ accountId, playerNum, team, defsCacheKey, role }) => {
+            postLog(1, `[gp] authenticated accountId=${accountId} playerNum=${playerNum} team=${team} role=${role} defsKey=${defsCacheKey || '(none)'}`);
+            postToMain({ type: 'gp:authenticated', accountId, playerNum, team, role });
             // GW4-c6-1b: seed LuaUI identity so Spring.GetMyTeamID /
             // GetLocalPlayerID / GetMyAllyTeamID resolve. AuthResponse carries
             // no allyTeam, so default myAllyTeam to the team until the team
             // table is wired (correct for single-team / AI cases; proper ally
             // resolution from the team table is a later seam).
-            liveState.identity = { myTeam: team, myAllyTeam: team, myPlayerId: playerId };
+            //
+            // myPlayerId is Spring's playerNum, NOT the account id — this used
+            // to be seeded with the account id, which made Spring
+            // .GetLocalPlayerID() disagree with every synced playerID the
+            // server sends (PLAN-endtoend D3).
+            liveState.identity = { myTeam: team, myAllyTeam: team, myPlayerId: playerNum };
             // GW4-c5b-3: tell the standing-order overlay who "we" are so its
             // own/allied filtering works (server already scopes the broadcast;
             // this drives own-vs-allied styling + the show-allies toggle).
@@ -1020,6 +1024,35 @@ function gpConnect(msg: GpInitToWorker): void {
             }
             // Register a viewport so the server starts streaming entity state.
             void gpRegisterViewport(msg.lobbyUrl, msg.mapId);
+        },
+        // The game server's authoritative roster (auth + every change). This
+        // supersedes the gp:init lobby-room seed below: it carries sim
+        // playerNums, AI virtual players, and mid-game joins/leaves, none of
+        // which the lobby snapshot has. Applied to liveState so
+        // Spring.GetPlayerList()/GetPlayerInfo answer correctly, and forwarded
+        // to main for the native-UI store.
+        onPlayerRoster: (players) => {
+            postLog(1, `[gp] player roster: ${players.length} entries`);
+            liveState.players.clear();
+            for (const p of players) {
+                liveState.players.set(p.playerNum, {
+                    name: p.name || `Player${p.playerNum}`,
+                    active: p.active,
+                    spectator: p.spectator,
+                    team: p.team,
+                    // -1 (unknown) would break allied-vs-enemy checks that
+                    // compare ally teams; fall back to the team id, the same
+                    // best-effort seedPlayersFromRoster uses pre-GameStart.
+                    allyTeam: p.allyTeam >= 0 ? p.allyTeam : p.team,
+                    pingMs: 0,
+                    cpuUsage: 0,
+                    country: '',
+                    rank: 0,
+                    hasController: !p.spectator,
+                    customKeys: {},
+                });
+            }
+            postToMain({ type: 'gp:playerRoster', players });
         },
         onAuthFailed: (m) => { gpAuthFailed = m; postLog(4, `[gp] auth failed: ${m}`); },
         onServerError: (code, m) => postLog(4, `[gp] server error ${code}: ${m}`),
@@ -1369,8 +1402,10 @@ function gpConnect(msg: GpInitToWorker): void {
                 });
             }
             // PLAN-bar.md UI-2: now that the team→allyTeam map is known, correct
-            // each seeded player's allyTeam (seedPlayersFromRoster could only
-            // best-effort it at gp:init, before TeamStartInfo arrived).
+            // each player's allyTeam. Still needed alongside the server roster:
+            // a roster broadcast before GameStart carries ally_team = -1 (the
+            // sim hasn't assigned them), which onPlayerRoster falls back to the
+            // team id for.
             reconcilePlayerAllyTeams(liveState.players, liveState.teams);
             liveState.allyStartBoxes.clear();
             for (const b of data.boxes) {
@@ -1799,18 +1834,15 @@ export function gpInit(msg: GpInitToWorker): void {
     // framebuffer — so view size must be the device-pixel backing store size.
     liveState.viewport = { width: canvas.width, height: canvas.height };
 
-    // PLAN-bar.md UI-2 (gui_chat:2647 + every other player-aware HUD widget):
-    // seed the human-player roster from the lobby room state NOW, before LuaUI
-    // boots, so Spring.GetPlayerList()/GetPlayerInfo(id) resolve every player
-    // when a widget's Initialize / first PlayerChanged runs (Recoil's
-    // playerHandler invariant). The worker's own setRoster/rosterUpdate path is
-    // dead (zero callers — same gap the team-roster fix found), so without this
-    // the roster is empty and gui_chat's PlayerChanged → GetPlayerInfo(id) → nil
-    // name → "table index is nil". allyTeam is corrected once TeamStartInfo
-    // lands (reconcilePlayerAllyTeams in onTeamStartInfo).
-    if (msg.players && msg.players.length) {
-        seedPlayersFromRoster(liveState.players, msg.players);
-    }
+    // PLAN-bar.md UI-2 (gui_chat:2647 + every other player-aware HUD widget)
+    // wants Spring.GetPlayerList()/GetPlayerInfo(id) to resolve every player
+    // before a widget's Initialize / first PlayerChanged runs (Recoil's
+    // playerHandler invariant) — otherwise gui_chat's PlayerChanged →
+    // GetPlayerInfo(id) → nil name → "table index is nil". That used to be
+    // seeded here from the lobby room state handed in on gp:init; it is now
+    // the server's `PlayerRoster` (see onPlayerRoster), which arrives on auth
+    // — before the defs fetch that gates the LuaUI boot — and unlike the lobby
+    // seed carries real sim playerNums, AI virtual players, and later changes.
 
     const engine = new Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true });
     const scene = new Scene(engine);

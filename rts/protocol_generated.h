@@ -341,6 +341,14 @@ struct PlayerLeft;
 struct PlayerLeftBuilder;
 struct PlayerLeftT;
 
+struct PlayerEntry;
+struct PlayerEntryBuilder;
+struct PlayerEntryT;
+
+struct PlayerRoster;
+struct PlayerRosterBuilder;
+struct PlayerRosterT;
+
 struct RoomPlayerInfo;
 struct RoomPlayerInfoBuilder;
 struct RoomPlayerInfoT;
@@ -2357,11 +2365,12 @@ enum ServerPayload : uint8_t {
   ServerPayload_DirectiveState = 43,
   ServerPayload_RulesParamUpdate = 44,
   ServerPayload_RulesParamKeyDictionary = 45,
+  ServerPayload_PlayerRoster = 46,
   ServerPayload_MIN = ServerPayload_NONE,
-  ServerPayload_MAX = ServerPayload_RulesParamKeyDictionary
+  ServerPayload_MAX = ServerPayload_PlayerRoster
 };
 
-inline const ServerPayload (&EnumValuesServerPayload())[46] {
+inline const ServerPayload (&EnumValuesServerPayload())[47] {
   static const ServerPayload values[] = {
     ServerPayload_NONE,
     ServerPayload_AuthResponse,
@@ -2408,13 +2417,14 @@ inline const ServerPayload (&EnumValuesServerPayload())[46] {
     ServerPayload_OrgGroupState,
     ServerPayload_DirectiveState,
     ServerPayload_RulesParamUpdate,
-    ServerPayload_RulesParamKeyDictionary
+    ServerPayload_RulesParamKeyDictionary,
+    ServerPayload_PlayerRoster
   };
   return values;
 }
 
 inline const char * const *EnumNamesServerPayload() {
-  static const char * const names[47] = {
+  static const char * const names[48] = {
     "NONE",
     "AuthResponse",
     "EntityCreate",
@@ -2461,13 +2471,14 @@ inline const char * const *EnumNamesServerPayload() {
     "DirectiveState",
     "RulesParamUpdate",
     "RulesParamKeyDictionary",
+    "PlayerRoster",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNameServerPayload(ServerPayload e) {
-  if (::flatbuffers::IsOutRange(e, ServerPayload_NONE, ServerPayload_RulesParamKeyDictionary)) return "";
+  if (::flatbuffers::IsOutRange(e, ServerPayload_NONE, ServerPayload_PlayerRoster)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesServerPayload()[index];
 }
@@ -2656,6 +2667,10 @@ template<> struct ServerPayloadTraits<SpringWeb::RulesParamKeyDictionary> {
   static const ServerPayload enum_value = ServerPayload_RulesParamKeyDictionary;
 };
 
+template<> struct ServerPayloadTraits<SpringWeb::PlayerRoster> {
+  static const ServerPayload enum_value = ServerPayload_PlayerRoster;
+};
+
 template<typename T> struct ServerPayloadUnionTraits {
   static const ServerPayload enum_value = ServerPayload_NONE;
 };
@@ -2838,6 +2853,10 @@ template<> struct ServerPayloadUnionTraits<SpringWeb::RulesParamUpdateT> {
 
 template<> struct ServerPayloadUnionTraits<SpringWeb::RulesParamKeyDictionaryT> {
   static const ServerPayload enum_value = ServerPayload_RulesParamKeyDictionary;
+};
+
+template<> struct ServerPayloadUnionTraits<SpringWeb::PlayerRosterT> {
+  static const ServerPayload enum_value = ServerPayload_PlayerRoster;
 };
 
 struct ServerPayloadUnion {
@@ -3229,6 +3248,14 @@ struct ServerPayloadUnion {
   const SpringWeb::RulesParamKeyDictionaryT *AsRulesParamKeyDictionary() const {
     return type == ServerPayload_RulesParamKeyDictionary ?
       reinterpret_cast<const SpringWeb::RulesParamKeyDictionaryT *>(value) : nullptr;
+  }
+  SpringWeb::PlayerRosterT *AsPlayerRoster() {
+    return type == ServerPayload_PlayerRoster ?
+      reinterpret_cast<SpringWeb::PlayerRosterT *>(value) : nullptr;
+  }
+  const SpringWeb::PlayerRosterT *AsPlayerRoster() const {
+    return type == ServerPayload_PlayerRoster ?
+      reinterpret_cast<const SpringWeb::PlayerRosterT *>(value) : nullptr;
   }
 };
 
@@ -8145,6 +8172,7 @@ struct AuthResponseT : public ::flatbuffers::NativeTable {
   int8_t team = -1;
   std::string role{};
   std::string defs_cache_key{};
+  int32_t player_num = -1;
 };
 
 struct AuthResponse FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
@@ -8157,7 +8185,8 @@ struct AuthResponse FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_MESSAGE = 10,
     VT_TEAM = 12,
     VT_ROLE = 14,
-    VT_DEFS_CACHE_KEY = 16
+    VT_DEFS_CACHE_KEY = 16,
+    VT_PLAYER_NUM = 18
   };
   SpringWeb::AuthStatus status() const {
     return static_cast<SpringWeb::AuthStatus>(GetField<uint8_t>(VT_STATUS, 0));
@@ -8165,6 +8194,9 @@ struct AuthResponse FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const ::flatbuffers::String *token() const {
     return GetPointer<const ::flatbuffers::String *>(VT_TOKEN);
   }
+  /// The authenticated DB **account** id — stable across games, rooms and
+  /// reconnects. NOT the sim player number; see `player_num` below and the
+  /// identity contract in PLAN-native-ui.md §3.3.
   uint32_t player_id() const {
     return GetField<uint32_t>(VT_PLAYER_ID, 0);
   }
@@ -8194,6 +8226,19 @@ struct AuthResponse FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const ::flatbuffers::String *defs_cache_key() const {
     return GetPointer<const ::flatbuffers::String *>(VT_DEFS_CACHE_KEY);
   }
+  /// Spring's `playerNum` for this session — the **sim** player id, assigned
+  /// per game server in connect order (AI virtual players take the low
+  /// numbers, registered before any client connects). This is what every
+  /// synced surface keys on: `gadget:PlayerAdded(playerID)`,
+  /// `Spring.GetPlayerList()`, `UnitCommandEvent.player_id`, `LuaUIMsg
+  /// .player_id`, and Metalstorm's per-player authority pool rulesParam
+  /// `authority_player_<playerNum>`. It is unrelated to `player_id` above:
+  /// the two coincide only by accident on low-id dev accounts, which is what
+  /// hid this for so long (PLAN-endtoend.md D3).
+  /// -1 on the lobby, which has no sim.
+  int32_t player_num() const {
+    return GetField<int32_t>(VT_PLAYER_NUM, -1);
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<uint8_t>(verifier, VT_STATUS, 1) &&
@@ -8207,6 +8252,7 @@ struct AuthResponse FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyString(role()) &&
            VerifyOffset(verifier, VT_DEFS_CACHE_KEY) &&
            verifier.VerifyString(defs_cache_key()) &&
+           VerifyField<int32_t>(verifier, VT_PLAYER_NUM, 4) &&
            verifier.EndTable();
   }
   AuthResponseT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -8239,6 +8285,9 @@ struct AuthResponseBuilder {
   void add_defs_cache_key(::flatbuffers::Offset<::flatbuffers::String> defs_cache_key) {
     fbb_.AddOffset(AuthResponse::VT_DEFS_CACHE_KEY, defs_cache_key);
   }
+  void add_player_num(int32_t player_num) {
+    fbb_.AddElement<int32_t>(AuthResponse::VT_PLAYER_NUM, player_num, -1);
+  }
   explicit AuthResponseBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -8258,8 +8307,10 @@ inline ::flatbuffers::Offset<AuthResponse> CreateAuthResponse(
     ::flatbuffers::Offset<::flatbuffers::String> message = 0,
     int8_t team = -1,
     ::flatbuffers::Offset<::flatbuffers::String> role = 0,
-    ::flatbuffers::Offset<::flatbuffers::String> defs_cache_key = 0) {
+    ::flatbuffers::Offset<::flatbuffers::String> defs_cache_key = 0,
+    int32_t player_num = -1) {
   AuthResponseBuilder builder_(_fbb);
+  builder_.add_player_num(player_num);
   builder_.add_defs_cache_key(defs_cache_key);
   builder_.add_role(role);
   builder_.add_message(message);
@@ -8278,7 +8329,8 @@ inline ::flatbuffers::Offset<AuthResponse> CreateAuthResponseDirect(
     const char *message = nullptr,
     int8_t team = -1,
     const char *role = nullptr,
-    const char *defs_cache_key = nullptr) {
+    const char *defs_cache_key = nullptr,
+    int32_t player_num = -1) {
   auto token__ = token ? _fbb.CreateString(token) : 0;
   auto message__ = message ? _fbb.CreateString(message) : 0;
   auto role__ = role ? _fbb.CreateString(role) : 0;
@@ -8291,7 +8343,8 @@ inline ::flatbuffers::Offset<AuthResponse> CreateAuthResponseDirect(
       message__,
       team,
       role__,
-      defs_cache_key__);
+      defs_cache_key__,
+      player_num);
 }
 
 ::flatbuffers::Offset<AuthResponse> CreateAuthResponse(::flatbuffers::FlatBufferBuilder &_fbb, const AuthResponseT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
@@ -11430,6 +11483,10 @@ struct PlayerLeft FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_TEAM = 8,
     VT_REASON = 10
   };
+  /// DB **account** id, like `AuthResponse.player_id` — not the sim
+  /// playerNum. Anything that needs to key a departure against synced state
+  /// should read the `PlayerRoster` broadcast that accompanies this message
+  /// (the leaver's entry flips to `active = false`).
   uint32_t player_id() const {
     return GetField<uint32_t>(VT_PLAYER_ID, 0);
   }
@@ -11515,6 +11572,253 @@ inline ::flatbuffers::Offset<PlayerLeft> CreatePlayerLeftDirect(
 }
 
 ::flatbuffers::Offset<PlayerLeft> CreatePlayerLeft(::flatbuffers::FlatBufferBuilder &_fbb, const PlayerLeftT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
+struct PlayerEntryT : public ::flatbuffers::NativeTable {
+  typedef PlayerEntry TableType;
+  int32_t player_num = 0;
+  std::string name{};
+  int16_t team = -1;
+  int16_t ally_team = -1;
+  bool spectator = false;
+  bool is_ai = false;
+  bool active = true;
+  uint32_t account_id = 0;
+};
+
+/// One row of the game server's authoritative player roster.
+///
+/// Roster entries exist for every `CPlayer` in the server's `playerHandler`:
+/// humans (commanding and spectating) and AI virtual players alike. Metalstorm
+/// deliberately registers each AI slot as a real player so it pays authority
+/// through the same gate as a human (PLAN-metalstorm-ai.md §1) — a departure
+/// from stock Spring, where a SkirmishAI is not a player. `is_ai` is how a
+/// client tells the two apart.
+struct PlayerEntry FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef PlayerEntryT NativeTableType;
+  typedef PlayerEntryBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_PLAYER_NUM = 4,
+    VT_NAME = 6,
+    VT_TEAM = 8,
+    VT_ALLY_TEAM = 10,
+    VT_SPECTATOR = 12,
+    VT_IS_AI = 14,
+    VT_ACTIVE = 16,
+    VT_ACCOUNT_ID = 18
+  };
+  /// Spring's `playerNum`. THE sim-side identity — same value as
+  /// `AuthResponse.player_num`, `UnitCommandEvent.player_id`, and the
+  /// `<playerID>` in Metalstorm's `authority_player_<id>` /
+  /// `score_<id>_earned` rulesParams.
+  int32_t player_num() const {
+    return GetField<int32_t>(VT_PLAYER_NUM, 0);
+  }
+  const ::flatbuffers::String *name() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_NAME);
+  }
+  /// Sim team id. -1 for a spectator (no team).
+  int16_t team() const {
+    return GetField<int16_t>(VT_TEAM, -1);
+  }
+  /// The team's ally team. -1 when the team is unknown / unassigned.
+  int16_t ally_team() const {
+    return GetField<int16_t>(VT_ALLY_TEAM, -1);
+  }
+  bool spectator() const {
+    return GetField<uint8_t>(VT_SPECTATOR, 0) != 0;
+  }
+  /// True for an AI virtual player (see the table comment).
+  bool is_ai() const {
+    return GetField<uint8_t>(VT_IS_AI, 0) != 0;
+  }
+  /// False once the player has disconnected. Entries are kept rather than
+  /// removed so a scoreboard can still name a player who dropped.
+  bool active() const {
+    return GetField<uint8_t>(VT_ACTIVE, 1) != 0;
+  }
+  /// DB account id for a human — the value `AuthResponse.player_id` carries
+  /// for that session. 0 for AI virtual players, which have no account.
+  uint32_t account_id() const {
+    return GetField<uint32_t>(VT_ACCOUNT_ID, 0);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<int32_t>(verifier, VT_PLAYER_NUM, 4) &&
+           VerifyOffset(verifier, VT_NAME) &&
+           verifier.VerifyString(name()) &&
+           VerifyField<int16_t>(verifier, VT_TEAM, 2) &&
+           VerifyField<int16_t>(verifier, VT_ALLY_TEAM, 2) &&
+           VerifyField<uint8_t>(verifier, VT_SPECTATOR, 1) &&
+           VerifyField<uint8_t>(verifier, VT_IS_AI, 1) &&
+           VerifyField<uint8_t>(verifier, VT_ACTIVE, 1) &&
+           VerifyField<uint32_t>(verifier, VT_ACCOUNT_ID, 4) &&
+           verifier.EndTable();
+  }
+  PlayerEntryT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(PlayerEntryT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<PlayerEntry> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const PlayerEntryT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct PlayerEntryBuilder {
+  typedef PlayerEntry Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_player_num(int32_t player_num) {
+    fbb_.AddElement<int32_t>(PlayerEntry::VT_PLAYER_NUM, player_num, 0);
+  }
+  void add_name(::flatbuffers::Offset<::flatbuffers::String> name) {
+    fbb_.AddOffset(PlayerEntry::VT_NAME, name);
+  }
+  void add_team(int16_t team) {
+    fbb_.AddElement<int16_t>(PlayerEntry::VT_TEAM, team, -1);
+  }
+  void add_ally_team(int16_t ally_team) {
+    fbb_.AddElement<int16_t>(PlayerEntry::VT_ALLY_TEAM, ally_team, -1);
+  }
+  void add_spectator(bool spectator) {
+    fbb_.AddElement<uint8_t>(PlayerEntry::VT_SPECTATOR, static_cast<uint8_t>(spectator), 0);
+  }
+  void add_is_ai(bool is_ai) {
+    fbb_.AddElement<uint8_t>(PlayerEntry::VT_IS_AI, static_cast<uint8_t>(is_ai), 0);
+  }
+  void add_active(bool active) {
+    fbb_.AddElement<uint8_t>(PlayerEntry::VT_ACTIVE, static_cast<uint8_t>(active), 1);
+  }
+  void add_account_id(uint32_t account_id) {
+    fbb_.AddElement<uint32_t>(PlayerEntry::VT_ACCOUNT_ID, account_id, 0);
+  }
+  explicit PlayerEntryBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<PlayerEntry> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<PlayerEntry>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<PlayerEntry> CreatePlayerEntry(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    int32_t player_num = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> name = 0,
+    int16_t team = -1,
+    int16_t ally_team = -1,
+    bool spectator = false,
+    bool is_ai = false,
+    bool active = true,
+    uint32_t account_id = 0) {
+  PlayerEntryBuilder builder_(_fbb);
+  builder_.add_account_id(account_id);
+  builder_.add_name(name);
+  builder_.add_player_num(player_num);
+  builder_.add_ally_team(ally_team);
+  builder_.add_team(team);
+  builder_.add_active(active);
+  builder_.add_is_ai(is_ai);
+  builder_.add_spectator(spectator);
+  return builder_.Finish();
+}
+
+inline ::flatbuffers::Offset<PlayerEntry> CreatePlayerEntryDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    int32_t player_num = 0,
+    const char *name = nullptr,
+    int16_t team = -1,
+    int16_t ally_team = -1,
+    bool spectator = false,
+    bool is_ai = false,
+    bool active = true,
+    uint32_t account_id = 0) {
+  auto name__ = name ? _fbb.CreateString(name) : 0;
+  return SpringWeb::CreatePlayerEntry(
+      _fbb,
+      player_num,
+      name__,
+      team,
+      ally_team,
+      spectator,
+      is_ai,
+      active,
+      account_id);
+}
+
+::flatbuffers::Offset<PlayerEntry> CreatePlayerEntry(::flatbuffers::FlatBufferBuilder &_fbb, const PlayerEntryT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
+struct PlayerRosterT : public ::flatbuffers::NativeTable {
+  typedef PlayerRoster TableType;
+  std::vector<std::unique_ptr<SpringWeb::PlayerEntryT>> players{};
+  PlayerRosterT() = default;
+  PlayerRosterT(const PlayerRosterT &o);
+  PlayerRosterT(PlayerRosterT&&) FLATBUFFERS_NOEXCEPT = default;
+  PlayerRosterT &operator=(PlayerRosterT o) FLATBUFFERS_NOEXCEPT;
+};
+
+/// The full player roster, sent reliably to each client on auth and
+/// re-broadcast to everyone whenever it changes (join, reconnect, leave).
+/// Always complete, never a delta — it is a handful of rows and a client that
+/// missed one broadcast would otherwise be permanently wrong.
+///
+/// This is the only place the client learns player *names* and which
+/// playerNums exist; the lobby room roster is not a substitute (it has no AI
+/// entries, no sim playerNums, and is frozen at game start).
+struct PlayerRoster FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef PlayerRosterT NativeTableType;
+  typedef PlayerRosterBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_PLAYERS = 4
+  };
+  const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::PlayerEntry>> *players() const {
+    return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::PlayerEntry>> *>(VT_PLAYERS);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyOffset(verifier, VT_PLAYERS) &&
+           verifier.VerifyVector(players()) &&
+           verifier.VerifyVectorOfTables(players()) &&
+           verifier.EndTable();
+  }
+  PlayerRosterT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(PlayerRosterT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<PlayerRoster> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const PlayerRosterT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct PlayerRosterBuilder {
+  typedef PlayerRoster Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_players(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::PlayerEntry>>> players) {
+    fbb_.AddOffset(PlayerRoster::VT_PLAYERS, players);
+  }
+  explicit PlayerRosterBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<PlayerRoster> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<PlayerRoster>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<PlayerRoster> CreatePlayerRoster(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<SpringWeb::PlayerEntry>>> players = 0) {
+  PlayerRosterBuilder builder_(_fbb);
+  builder_.add_players(players);
+  return builder_.Finish();
+}
+
+inline ::flatbuffers::Offset<PlayerRoster> CreatePlayerRosterDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    const std::vector<::flatbuffers::Offset<SpringWeb::PlayerEntry>> *players = nullptr) {
+  auto players__ = players ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::PlayerEntry>>(*players) : 0;
+  return SpringWeb::CreatePlayerRoster(
+      _fbb,
+      players__);
+}
+
+::flatbuffers::Offset<PlayerRoster> CreatePlayerRoster(::flatbuffers::FlatBufferBuilder &_fbb, const PlayerRosterT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 
 struct RoomPlayerInfoT : public ::flatbuffers::NativeTable {
   typedef RoomPlayerInfo TableType;
@@ -17901,6 +18205,9 @@ struct ServerMessage FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const SpringWeb::RulesParamKeyDictionary *payload_as_RulesParamKeyDictionary() const {
     return payload_type() == SpringWeb::ServerPayload_RulesParamKeyDictionary ? static_cast<const SpringWeb::RulesParamKeyDictionary *>(payload()) : nullptr;
   }
+  const SpringWeb::PlayerRoster *payload_as_PlayerRoster() const {
+    return payload_type() == SpringWeb::ServerPayload_PlayerRoster ? static_cast<const SpringWeb::PlayerRoster *>(payload()) : nullptr;
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<uint8_t>(verifier, VT_PAYLOAD_TYPE, 1) &&
@@ -18091,6 +18398,10 @@ template<> inline const SpringWeb::RulesParamUpdate *ServerMessage::payload_as<S
 
 template<> inline const SpringWeb::RulesParamKeyDictionary *ServerMessage::payload_as<SpringWeb::RulesParamKeyDictionary>() const {
   return payload_as_RulesParamKeyDictionary();
+}
+
+template<> inline const SpringWeb::PlayerRoster *ServerMessage::payload_as<SpringWeb::PlayerRoster>() const {
+  return payload_as_PlayerRoster();
 }
 
 struct ServerMessageBuilder {
@@ -19873,6 +20184,7 @@ inline void AuthResponse::UnPackTo(AuthResponseT *_o, const ::flatbuffers::resol
   { auto _e = team(); _o->team = _e; }
   { auto _e = role(); if (_e) _o->role = _e->str(); }
   { auto _e = defs_cache_key(); if (_e) _o->defs_cache_key = _e->str(); }
+  { auto _e = player_num(); _o->player_num = _e; }
 }
 
 inline ::flatbuffers::Offset<AuthResponse> AuthResponse::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const AuthResponseT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
@@ -19890,6 +20202,7 @@ inline ::flatbuffers::Offset<AuthResponse> CreateAuthResponse(::flatbuffers::Fla
   auto _team = _o->team;
   auto _role = _o->role.empty() ? 0 : _fbb.CreateString(_o->role);
   auto _defs_cache_key = _o->defs_cache_key.empty() ? 0 : _fbb.CreateString(_o->defs_cache_key);
+  auto _player_num = _o->player_num;
   return SpringWeb::CreateAuthResponse(
       _fbb,
       _status,
@@ -19898,7 +20211,8 @@ inline ::flatbuffers::Offset<AuthResponse> CreateAuthResponse(::flatbuffers::Fla
       _message,
       _team,
       _role,
-      _defs_cache_key);
+      _defs_cache_key,
+      _player_num);
 }
 
 inline EntityCreateT::EntityCreateT(const EntityCreateT &o)
@@ -21260,6 +21574,89 @@ inline ::flatbuffers::Offset<PlayerLeft> CreatePlayerLeft(::flatbuffers::FlatBuf
       _username,
       _team,
       _reason);
+}
+
+inline PlayerEntryT *PlayerEntry::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<PlayerEntryT>(new PlayerEntryT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void PlayerEntry::UnPackTo(PlayerEntryT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = player_num(); _o->player_num = _e; }
+  { auto _e = name(); if (_e) _o->name = _e->str(); }
+  { auto _e = team(); _o->team = _e; }
+  { auto _e = ally_team(); _o->ally_team = _e; }
+  { auto _e = spectator(); _o->spectator = _e; }
+  { auto _e = is_ai(); _o->is_ai = _e; }
+  { auto _e = active(); _o->active = _e; }
+  { auto _e = account_id(); _o->account_id = _e; }
+}
+
+inline ::flatbuffers::Offset<PlayerEntry> PlayerEntry::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const PlayerEntryT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return CreatePlayerEntry(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<PlayerEntry> CreatePlayerEntry(::flatbuffers::FlatBufferBuilder &_fbb, const PlayerEntryT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const PlayerEntryT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _player_num = _o->player_num;
+  auto _name = _o->name.empty() ? 0 : _fbb.CreateString(_o->name);
+  auto _team = _o->team;
+  auto _ally_team = _o->ally_team;
+  auto _spectator = _o->spectator;
+  auto _is_ai = _o->is_ai;
+  auto _active = _o->active;
+  auto _account_id = _o->account_id;
+  return SpringWeb::CreatePlayerEntry(
+      _fbb,
+      _player_num,
+      _name,
+      _team,
+      _ally_team,
+      _spectator,
+      _is_ai,
+      _active,
+      _account_id);
+}
+
+inline PlayerRosterT::PlayerRosterT(const PlayerRosterT &o) {
+  players.reserve(o.players.size());
+  for (const auto &players_ : o.players) { players.emplace_back((players_) ? new SpringWeb::PlayerEntryT(*players_) : nullptr); }
+}
+
+inline PlayerRosterT &PlayerRosterT::operator=(PlayerRosterT o) FLATBUFFERS_NOEXCEPT {
+  std::swap(players, o.players);
+  return *this;
+}
+
+inline PlayerRosterT *PlayerRoster::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<PlayerRosterT>(new PlayerRosterT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void PlayerRoster::UnPackTo(PlayerRosterT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = players(); if (_e) { _o->players.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { if(_o->players[_i]) { _e->Get(_i)->UnPackTo(_o->players[_i].get(), _resolver); } else { _o->players[_i] = std::unique_ptr<SpringWeb::PlayerEntryT>(_e->Get(_i)->UnPack(_resolver)); }; } } else { _o->players.resize(0); } }
+}
+
+inline ::flatbuffers::Offset<PlayerRoster> PlayerRoster::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const PlayerRosterT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return CreatePlayerRoster(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<PlayerRoster> CreatePlayerRoster(::flatbuffers::FlatBufferBuilder &_fbb, const PlayerRosterT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const PlayerRosterT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _players = _o->players.size() ? _fbb.CreateVector<::flatbuffers::Offset<SpringWeb::PlayerEntry>> (_o->players.size(), [](size_t i, _VectorArgs *__va) { return CreatePlayerEntry(*__va->__fbb, __va->__o->players[i].get(), __va->__rehasher); }, &_va ) : 0;
+  return SpringWeb::CreatePlayerRoster(
+      _fbb,
+      _players);
 }
 
 inline RoomPlayerInfoT *RoomPlayerInfo::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
@@ -24771,6 +25168,10 @@ inline bool VerifyServerPayload(::flatbuffers::Verifier &verifier, const void *o
       auto ptr = reinterpret_cast<const SpringWeb::RulesParamKeyDictionary *>(obj);
       return verifier.VerifyTable(ptr);
     }
+    case ServerPayload_PlayerRoster: {
+      auto ptr = reinterpret_cast<const SpringWeb::PlayerRoster *>(obj);
+      return verifier.VerifyTable(ptr);
+    }
     default: return true;
   }
 }
@@ -24970,6 +25371,10 @@ inline void *ServerPayloadUnion::UnPack(const void *obj, ServerPayload type, con
       auto ptr = reinterpret_cast<const SpringWeb::RulesParamKeyDictionary *>(obj);
       return ptr->UnPack(resolver);
     }
+    case ServerPayload_PlayerRoster: {
+      auto ptr = reinterpret_cast<const SpringWeb::PlayerRoster *>(obj);
+      return ptr->UnPack(resolver);
+    }
     default: return nullptr;
   }
 }
@@ -25157,6 +25562,10 @@ inline ::flatbuffers::Offset<void> ServerPayloadUnion::Pack(::flatbuffers::FlatB
       auto ptr = reinterpret_cast<const SpringWeb::RulesParamKeyDictionaryT *>(value);
       return CreateRulesParamKeyDictionary(_fbb, ptr, _rehasher).Union();
     }
+    case ServerPayload_PlayerRoster: {
+      auto ptr = reinterpret_cast<const SpringWeb::PlayerRosterT *>(value);
+      return CreatePlayerRoster(_fbb, ptr, _rehasher).Union();
+    }
     default: return 0;
   }
 }
@@ -25341,6 +25750,10 @@ inline ServerPayloadUnion::ServerPayloadUnion(const ServerPayloadUnion &u) : typ
     }
     case ServerPayload_RulesParamKeyDictionary: {
       value = new SpringWeb::RulesParamKeyDictionaryT(*reinterpret_cast<SpringWeb::RulesParamKeyDictionaryT *>(u.value));
+      break;
+    }
+    case ServerPayload_PlayerRoster: {
+      value = new SpringWeb::PlayerRosterT(*reinterpret_cast<SpringWeb::PlayerRosterT *>(u.value));
       break;
     }
     default:
@@ -25572,6 +25985,11 @@ inline void ServerPayloadUnion::Reset() {
     }
     case ServerPayload_RulesParamKeyDictionary: {
       auto ptr = reinterpret_cast<SpringWeb::RulesParamKeyDictionaryT *>(value);
+      delete ptr;
+      break;
+    }
+    case ServerPayload_PlayerRoster: {
+      auto ptr = reinterpret_cast<SpringWeb::PlayerRosterT *>(value);
       delete ptr;
       break;
     }

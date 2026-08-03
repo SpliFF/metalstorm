@@ -14,6 +14,7 @@
 #include "SyncedInputJournal.h"
 #include "GameOverState.h"
 #include "PostGamePolicy.h"
+#include "PlayerRosterBroadcast.h"
 #include "Crypto.h"
 #include "WebTransport/WebTransportServer.h"
 #include "Lua/LuaRules.h"
@@ -274,11 +275,31 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                     const bool isSpectator = rosterRequired && team < 0;
                     const std::string& effectiveRole =
                         isSpectator ? kSpectatorRole : reconnectUser->role;
+                    // Register a Spring CPlayer so Lua can
+                    // query player info and receive callins.
+                    // Spectators ARE players in Spring's playerHandler
+                    // (PlayerBase::spectator), just non-commanding ones.
+                    //
+                    // This runs BEFORE BuildAuthResponse because the response
+                    // now carries `player_num` — the client cannot derive it
+                    // (it is a per-server allocation, not the account id), and
+                    // every synced key it reads back is scoped by it.
+                    const int pNum = nextPlayerNum++;
+                    {
+                        CPlayer p;
+                        p.name = reconnectUser->username;
+                        p.team = team;
+                        p.active = true;
+                        p.playerNum = pNum;
+                        p.spectator = isSpectator;
+                        playerHandler.AddPlayer(p);
+                        clientPlayerNum[msg.clientId] = pNum;
+                    }
                     auto resp = Protocol::BuildAuthResponse(
                         SpringWeb::AuthStatus_OK, auth->token()->str(),
                         static_cast<uint32_t>(userId), "",
                         static_cast<int8_t>(team), effectiveRole,
-                        defsCacheKey);
+                        defsCacheKey, static_cast<int32_t>(pNum));
                     rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
                     // Register the session — previously the
                     // token path skipped this, which meant a
@@ -289,21 +310,6 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                         reconnectUser->username, effectiveRole);
                     if (auto* s = sessions.GetSession(msg.clientId))
                         s->team = team;
-                    // Register a Spring CPlayer so Lua can
-                    // query player info and receive callins.
-                    // Spectators ARE players in Spring's playerHandler
-                    // (PlayerBase::spectator), just non-commanding ones.
-                    {
-                        int pNum = nextPlayerNum++;
-                        CPlayer p;
-                        p.name = reconnectUser->username;
-                        p.team = team;
-                        p.active = true;
-                        p.playerNum = pNum;
-                        p.spectator = isSpectator;
-                        playerHandler.AddPlayer(p);
-                        clientPlayerNum[msg.clientId] = pNum;
-                    }
                     // One-shot standing-order snapshot so a
                     // mid-game reconnect sees existing orders
                     // immediately, without waiting for the
@@ -313,10 +319,16 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                     start.PushOrgGroupsTo(msg.clientId, team);
                     start.PushDirectivesTo(msg.clientId, team);
                     sendPostAuthOneShots();
+                    // The roster changed (this player joined), so everyone
+                    // gets it — not just the new arrival. Sent after
+                    // AddSession so the joiner's own row carries its account
+                    // id rather than a 0 placeholder.
+                    Protocol::BroadcastPlayerRoster(ctx);
                     SLOG(SPRING_LOG_NOTICE,
-                        "client %u reconnected as '%s' (id=%lld) team=%d role=%s",
+                        "client %u reconnected as '%s' (account id=%lld) "
+                        "playerNum=%d team=%d role=%s",
                         msg.clientId, reconnectUser->username.c_str(),
-                        userId, team, effectiveRole.c_str());
+                        userId, pNum, team, effectiveRole.c_str());
                     // Track roster connection for GameStart
                     if (playerTeamByUsername.count(reconnectUser->username)) {
                         connectedRosterPlayers.insert(reconnectUser->username);
@@ -411,20 +423,16 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             std::string token = generateToken();
             db.CreateSession(user->id, token);
 
-            auto resp = Protocol::BuildAuthResponse(
-                SpringWeb::AuthStatus_OK, token,
-                static_cast<uint32_t>(user->id), "",
-                static_cast<int8_t>(team), effectiveRole, defsCacheKey);
-            rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
-            sessions.AddSession(msg.clientId, user->id, user->username, effectiveRole);
-            if (auto* s = sessions.GetSession(msg.clientId))
-                s->team = team;
             // Register a Spring CPlayer so Lua can query
             // player info and receive callins. Spectators ARE players in
             // Spring's playerHandler (PlayerBase::spectator), just
             // non-commanding ones.
+            //
+            // Ordered ahead of BuildAuthResponse for the same reason as the
+            // reconnect path above: the response carries `player_num`, and
+            // nothing downstream can reconstruct it.
+            const int pNum = nextPlayerNum++;
             {
-                int pNum = nextPlayerNum++;
                 CPlayer p;
                 p.name = user->username;
                 p.team = team;
@@ -434,6 +442,15 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                 playerHandler.AddPlayer(p);
                 clientPlayerNum[msg.clientId] = pNum;
             }
+            auto resp = Protocol::BuildAuthResponse(
+                SpringWeb::AuthStatus_OK, token,
+                static_cast<uint32_t>(user->id), "",
+                static_cast<int8_t>(team), effectiveRole, defsCacheKey,
+                static_cast<int32_t>(pNum));
+            rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
+            sessions.AddSession(msg.clientId, user->id, user->username, effectiveRole);
+            if (auto* s = sessions.GetSession(msg.clientId))
+                s->team = team;
             // One-shot standing-order snapshot for the freshly
             // authenticated session — mirrors the reconnect
             // path above. Without this, mid-game joins
@@ -448,9 +465,15 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             // GameStart for the final post-spawn values) and the game's
             // modoptions. Shared with the reconnect path above.
             sendPostAuthOneShots();
+            // Roster changed — everyone gets the new full roster, after
+            // AddSession so the joiner's row carries its account id.
+            Protocol::BroadcastPlayerRoster(ctx);
 
-            SLOG(SPRING_LOG_NOTICE, "client %u authenticated as '%s' (id=%lld) team=%d role=%s",
-                msg.clientId, username, user->id, team, effectiveRole.c_str());
+            SLOG(SPRING_LOG_NOTICE,
+                "client %u authenticated as '%s' (account id=%lld) "
+                "playerNum=%d team=%d role=%s",
+                msg.clientId, username, user->id, pNum, team,
+                effectiveRole.c_str());
 
             // Track roster connection for GameStart
             if (playerTeamByUsername.count(user->username)) {

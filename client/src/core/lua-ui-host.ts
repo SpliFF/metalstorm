@@ -4751,12 +4751,13 @@ export function dispatchPlayerChanged(playerId: number): void {
 /** Enforce Recoil's invariant before a player-status callin: the engine
  *  always holds the player in `playerHandler` when PlayerChanged/PlayerAdded
  *  fires, so a widget reading `Spring.GetPlayerInfo(id)` gets a valid name.
- *  The primary roster seed is now seedPlayersFromRoster() at gp:init (the
- *  lobby room snapshot), so `liveState.players` is populated before LuaUI boots.
- *  This stays as a defensive fallback for an id that isn't in that snapshot
- *  (e.g. a future mid-game join before a roster restream); for the local player
- *  we know team/allyTeam from identity. ensurePlayerEntry is a no-op when the
- *  id is already seeded. See BAR gui_chat crash (PLAN-bar.md UI-2). */
+ *  The roster comes from the server's PlayerRoster broadcast (onPlayerRoster),
+ *  which lands on auth — before the defs fetch that gates the LuaUI boot — so
+ *  `liveState.players` is populated before any widget initialises. This stays
+ *  as a defensive fallback for an id that isn't in the latest broadcast (a
+ *  callin racing a roster change); for the local player we know team/allyTeam
+ *  from identity. ensurePlayerEntry is a no-op when the id is already present.
+ *  See BAR gui_chat crash (PLAN-bar.md UI-2). */
 function ensureRosteredForCallin(playerId: number): void {
     const seed = playerId === liveState.identity.myPlayerId
         ? { team: liveState.identity.myTeam, allyTeam: liveState.identity.myAllyTeam }

@@ -10,6 +10,7 @@
 #include "Server/Simulation.h"
 #include "Server/NetworkServer.h"
 #include "Server/Protocol.h"
+#include "Server/PlayerRosterBroadcast.h"
 #include "Server/Database.h"
 #include "Server/GameMetrics.h"
 #include "Server/GmVerbs.h"
@@ -1489,6 +1490,13 @@ int main(int argc, char* argv[])
 
                 handshakedClients.erase(dcId);
                 sessions.RemoveSession(dcId);
+
+                // The roster changed: the leaver's entry is now inactive.
+                // Broadcast after RemoveSession/erase so the snapshot reflects
+                // the post-disconnect state rather than the state we just left.
+                // Kept (not removed) so a scoreboard can still name a player
+                // who dropped — see PlayerEntry.active in protocol.fbs.
+                Protocol::BroadcastPlayerRoster(ctx);
             }
         }
 

@@ -3,6 +3,7 @@
 
 #include "Simulation.h"
 #include "Protocol.h"
+#include "PlayerRosterBroadcast.h"
 #include "WebTransport/WebTransportServer.h"
 #include "Sim/Misc/TeamHandler.h"
 #include "Map/ReadMap.h"
@@ -107,5 +108,10 @@ void GameStartCoordinator::CheckAndFireGameStart() {
     if (ctx.rtcServer.GetClientCount() > 0) {
         auto tsi = BuildTeamStartInfoMsg();
         ctx.rtcServer.BroadcastReliable(tsi.data(), tsi.size());
+        // Same reason, for the roster: a player's ally team is read off
+        // `teamHandler`, which is only fully populated once GameStart has run
+        // its team/leader pass. The rosters sent on auth carry the pre-game
+        // ally teams (often -1), so every client needs the corrected snapshot.
+        Protocol::BroadcastPlayerRoster(ctx);
     }
 }

@@ -18,7 +18,7 @@
  */
 
 import type { RmlOpsToMain, RmlEventToWorker, RmlResizeToWorker } from '../ui/rml/rml-protocol.js';
-import type { ResourceUpdateInfo, OrgGroupInfoMsg, DirectiveInfoMsg } from './connection.js';
+import type { ResourceUpdateInfo, OrgGroupInfoMsg, DirectiveInfoMsg, RosterPlayerInfo } from './connection.js';
 import type { PresentationClockStats } from './presentation-clock.js';
 
 // ─── main → worker ──────────────────────────────────────────────────────────
@@ -71,19 +71,11 @@ export interface GpInitToWorker {
     gfx: Record<string, unknown>;
     /** Lifted from `localStorage` on main (standing-order-renderer SHOW_ALLIES). */
     standingOrderShowAllies: boolean;
-    /**
-     * Lobby room roster snapshot (human players only) taken at game start, so
-     * the worker seeds `liveState.players` BEFORE LuaUI boots — Recoil's
-     * playerHandler is always fully populated before widgets initialize.
-     * `id` is in the game-server playerID space (lobby player_id == the
-     * worker's Spring.GetMyPlayerID(), verified live). Without this the worker
-     * roster is empty (the setRoster/rosterUpdate path is dead) and every
-     * player-aware widget breaks — e.g. BAR gui_chat:2647 "table index is nil".
-     * AIs are excluded (they occupy teams without a player entry; queried via
-     * the team API). The server-streamed roster (mid-game joins/reconnects) is
-     * the documented P1 "richer roster restream". See PLAN-bar.md UI-2.
-     */
-    players?: { id: number; name: string; team: number; spectator: boolean }[];
+    // NOTE: this used to carry a lobby room roster snapshot to seed
+    // `liveState.players` before the LuaUI boot. It claimed lobby `player_id`
+    // was the game-server playerID; it is not — it is the DB account id, and
+    // the snapshot had no AI slots (PLAN-endtoend D3). Replaced by the server's
+    // `PlayerRoster` broadcast, which arrives on auth (also before the boot).
     /**
      * PLAN-client-resilience.md task 3: server-operator opt-out for the
      * `/api/client-errors` report channel (spring-lobby `--disable-client-
@@ -638,8 +630,14 @@ export type GpMessageToMain =
      *  server's winners list (empty = undecided); `won` is the local player's
      *  result (true/false), or null for a draw/undecided/spectator. */
     | { type: 'gp:gameOver'; frame: number; winningAllyTeams: number[]; won: boolean | null }
-    /** Worker reached the game server + authed (mirrors connection onAuthenticated). */
-    | { type: 'gp:authenticated'; playerId: number; team: number; role: string }
+    /** Worker reached the game server + authed (mirrors connection onAuthenticated).
+     *  `accountId` is the DB account; `playerNum` is Spring's sim player id.
+     *  They are different numbers — see `AuthenticatedInfo` in connection.ts. */
+    | { type: 'gp:authenticated'; accountId: number; playerNum: number; team: number; role: string }
+    /** Full player roster from the game server, on auth and on every change.
+     *  Main mirrors it into the native-UI store so widgets can name players
+     *  (including AI virtual players, which the lobby roster omits). */
+    | { type: 'gp:playerRoster'; players: RosterPlayerInfo[] }
     /** Server restart detected — main reloads. */
     | { type: 'gp:reload' }
     /** Metalstorm counterbattery reveal (Q-D-c): a statistical volley from an

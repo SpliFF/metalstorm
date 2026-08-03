@@ -48,6 +48,8 @@ import { RulesParamValueKind } from '../protocol/spring-web/rules-param-value-ki
 import { ResourceUpdate } from '../protocol/spring-web/resource-update.js';
 import { MapData } from '../protocol/spring-web/map-data.js';
 import { PlayerLeft } from '../protocol/spring-web/player-left.js';
+import { PlayerRoster } from '../protocol/spring-web/player-roster.js';
+import { PlayerEntry } from '../protocol/spring-web/player-entry.js';
 import { SoundEvent } from '../protocol/spring-web/sound-event.js';
 import { SeismicPing } from '../protocol/spring-web/seismic-ping.js';
 import { MusicEvent } from '../protocol/spring-web/music-event.js';
@@ -917,6 +919,46 @@ export type SendToUnsyncedArgInfo =
     | { kind: 'number'; value: number }
     | { kind: 'string'; value: string };
 
+/**
+ * The two identities a session has, kept apart on purpose.
+ *
+ * They are different numbers and coincide only by accident on low-id dev
+ * accounts — which is precisely how the authority HUD shipped reading
+ * `authority_player_<accountId>` and rendering 0 forever (PLAN-endtoend D3).
+ * Anything that touches sim state wants `playerNum`; anything that touches
+ * the lobby, HTTP or a DB row wants `accountId`.
+ */
+export interface AuthenticatedInfo {
+    /** DB account id — stable across games, rooms and reconnects. */
+    accountId: number;
+    /** Spring `playerNum` — the sim player id, allocated per game server.
+     *  -1 on the lobby connection, which has no sim. */
+    playerNum: number;
+    token: string;
+    team: number;
+    defsCacheKey: string;
+    role: string;
+}
+
+/** One row of the game server's authoritative player roster (PlayerRoster). */
+export interface RosterPlayerInfo {
+    /** Spring `playerNum` — see AuthenticatedInfo. */
+    playerNum: number;
+    name: string;
+    /** Sim team id; -1 for a spectator. */
+    team: number;
+    /** The team's ally team; -1 when unknown/unassigned. */
+    allyTeam: number;
+    spectator: boolean;
+    /** True for an AI virtual player (PLAN-metalstorm-ai.md §1). */
+    isAI: boolean;
+    /** False once the player has disconnected; the row is kept so a
+     *  scoreboard can still name them. */
+    active: boolean;
+    /** DB account id; 0 for AI players and for players whose session is gone. */
+    accountId: number;
+}
+
 export interface ConnectionEvents {
     onStateChange?: (state: ConnectionState) => void;
     /** Fires when the server accepts auth. `defsCacheKey` is the
@@ -925,7 +967,7 @@ export interface ConnectionEvents {
      *  bake them. Construct URLs as
      *    /api/games/data/{gameId}/cache/defs/{key}/unitdefs.bin
      *    /api/games/data/{gameId}/cache/defs/{key}/weapondefs.bin */
-    onAuthenticated?: (playerId: number, token: string, team: number, defsCacheKey: string, role: string) => void;
+    onAuthenticated?: (auth: AuthenticatedInfo) => void;
     onAuthFailed?: (message: string) => void;
     onServerError?: (code: number, message: string) => void;
     onEntityState?: (snapshot: EntityStateSnapshot, isDelta: boolean) => void;
@@ -976,7 +1018,15 @@ export interface ConnectionEvents {
     /** Fired on the server's game-over broadcast. `winningAllyTeams` is the
      *  winners list from `Spring.GameOver(...)` (empty = undecided). */
     onGameOver?: (frame: number, winningAllyTeams: number[]) => void;
+    /** `playerId` here is the DB **account** id, not the sim playerNum —
+     *  matching what the server puts on the wire. The `onPlayerRoster`
+     *  broadcast that accompanies a departure is the sim-keyed view. */
     onPlayerLeft?: (playerId: number, username: string, team: number, reason: number) => void;
+    /** The complete player roster, sent on auth and re-broadcast on every
+     *  change. Always full, never a delta. The only source of player *names*
+     *  and of which sim playerNums exist — including AI virtual players, which
+     *  the lobby roster does not carry. */
+    onPlayerRoster?: (players: RosterPlayerInfo[]) => void;
     onMapData?: (map: ParsedMapData) => void;
     /** Per-tick batch of feature lifecycle events. `spawns` is a list of
      *  new features (wrecks, debris, gadget-spawned); `removed` is feature
@@ -1080,7 +1130,12 @@ export class Connection {
     private _state: ConnectionState = 'disconnected';
     private events: ConnectionEvents;
     private sessionToken: string | null = null;
-    public playerId: number = 0;
+    /** DB account id. Set by HTTP login/validate and by AuthResponse. See
+     *  {@link AuthenticatedInfo} for why this is not `playerNum`. */
+    public accountId: number = 0;
+    /** Spring `playerNum` — the sim player id. -1 until a game server's
+     *  AuthResponse assigns one (the lobby connection never has one). */
+    public playerNum: number = -1;
     public myTeam: number = -1;
     public myRole: string = '';  // "admin", "player", or "spectator"
     private clock = new ServerClock();
@@ -1274,7 +1329,7 @@ export class Connection {
             if (resp.ok) {
                 const data = await resp.json();
                 if (data.valid) {
-                    this.playerId = data.user_id ?? this.playerId;
+                    this.accountId = data.user_id ?? this.accountId;
                     this.myTeam = data.team ?? this.myTeam;
                     console.log(`[connection] token valid for user '${data.username}'`);
                     return;
@@ -1305,7 +1360,7 @@ export class Connection {
         if (!data.token) throw new Error('no token in login response');
 
         this.sessionToken = data.token;
-        this.playerId = data.user_id ?? 0;
+        this.accountId = data.user_id ?? 0;
         this.myTeam = data.team ?? -1;
     }
 
@@ -1910,14 +1965,22 @@ export class Connection {
             case ServerPayload.AuthResponse: {
                 const ar = msg.payload(new AuthResponse()) as AuthResponse;
                 if (ar.status() === AuthStatus.OK) {
-                    this.playerId = ar.playerId();
+                    this.accountId = ar.playerId();
+                    this.playerNum = ar.playerNum();
                     this.myTeam = ar.team();
                     this.myRole = ar.role() ?? '';
                     if (ar.token()) this.sessionToken = ar.token();
                     const defsCacheKey = ar.defsCacheKey() ?? '';
-                    console.log(`[connection] AuthResponse OK: playerId=${this.playerId}, team=${this.myTeam}, role=${this.myRole}, defsKey=${defsCacheKey || '(none)'}`);
+                    console.log(`[connection] AuthResponse OK: accountId=${this.accountId}, playerNum=${this.playerNum}, team=${this.myTeam}, role=${this.myRole}, defsKey=${defsCacheKey || '(none)'}`);
                     this.setState('connected');
-                    this.events.onAuthenticated?.(this.playerId, this.sessionToken ?? '', this.myTeam, defsCacheKey, this.myRole);
+                    this.events.onAuthenticated?.({
+                        accountId: this.accountId,
+                        playerNum: this.playerNum,
+                        token: this.sessionToken ?? '',
+                        team: this.myTeam,
+                        defsCacheKey,
+                        role: this.myRole,
+                    });
                 } else {
                     const errMsg = ar.message() ?? 'auth failed';
                     console.error(`[connection] AuthResponse rejected: ${errMsg}`);
@@ -2119,6 +2182,26 @@ export class Connection {
                 } catch (err) {
                     console.error('[connection] failed to parse MapData:', err);
                 }
+                break;
+            }
+            case ServerPayload.PlayerRoster: {
+                const pr = msg.payload(new PlayerRoster()) as PlayerRoster;
+                const players: RosterPlayerInfo[] = [];
+                for (let i = 0; i < pr.playersLength(); i++) {
+                    const p = pr.players(i, new PlayerEntry());
+                    if (!p) continue;
+                    players.push({
+                        playerNum: p.playerNum(),
+                        name: p.name() ?? '',
+                        team: p.team(),
+                        allyTeam: p.allyTeam(),
+                        spectator: p.spectator(),
+                        isAI: p.isAi(),
+                        active: p.active(),
+                        accountId: p.accountId(),
+                    });
+                }
+                this.events.onPlayerRoster?.(players);
                 break;
             }
             case ServerPayload.PlayerLeft: {

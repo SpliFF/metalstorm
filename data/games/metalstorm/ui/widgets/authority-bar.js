@@ -4,11 +4,17 @@
 // and renders the award/charge event ring (task 4) + refusal toasts
 // (task 6 "veto toast") as a small stacked toast queue.
 //
-// Contract (proposed; PLAN-native-ui.md §3 — loader not built yet):
+// Contract (PLAN-native-ui.md §3):
 //   init(ctx)  — ctx.store    read API over the streamed state mirrors
 //                ctx.mount    DOM element inside #ui-root (pointer-events:auto)
-//                ctx.identity { playerId, teamId }
+//                ctx.identity { playerId, teamId, accountId }
 //   dispose()  — remove subscriptions/DOM.
+//
+// `ctx.identity.playerId` is Spring's SIM playerNum, which is what the
+// `authority_player_<playerID>` rulesParam key below is scoped by — NOT the DB
+// account id (`ctx.identity.accountId`). Reading the account id here is what
+// made this pill display `YOU 0` against a server pool of 100 for every real
+// account (PLAN-endtoend.md D3); see PLAN-native-ui.md §3.3.
 // Updates are EVENT-DRIVEN (store subscriptions), never per-frame
 // (PLAN-native-ui.md "no per-frame DOM mutation").
 //

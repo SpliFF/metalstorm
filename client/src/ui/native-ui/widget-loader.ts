@@ -84,9 +84,21 @@ export interface WidgetDescriptor {
 export interface WidgetContext {
     store: UIStore;
     mount: HTMLElement;      // DOM mount point inside #ui-root
+    /**
+     * Who the local session is, in the sim's terms.
+     *
+     * `playerId` is Spring's **sim playerNum** — the id that scopes every
+     * rulesParam key (`authority_player_<playerId>`, `score_<playerId>_*`),
+     * every Lua callin argument, and every server-side player check. It is
+     * NOT the DB account id; the two are different numbers and coincide only
+     * by accident on low-id dev accounts. `accountId` is available for the
+     * rare widget that needs the persistent account (profiles, ratings) —
+     * never for anything sim-scoped. See PLAN-native-ui.md §3.3.
+     */
     identity: {
         playerId: number;
         teamId: number;
+        accountId: number;
     };
     sendCommand?: (cmd: any) => void;        // Command submission API (stub for now)
     strategicMap?: {                         // Strategic map overlay API (stub for now)
@@ -138,6 +150,9 @@ export class WidgetLoader {
     private uiRoot: HTMLElement | null = null;
     private sendCommandProvider: ((cmd: any) => void) | null = null;
     private gameId = '';
+    /** Local DB account id, surfaced as `ctx.identity.accountId`. Distinct
+     *  from the sim playerNum threaded through as `playerId`. */
+    private accountId = 0;
     /** PLAN-metalstorm-onboarding.md §4 — gates `hideForSpectator` widgets. */
     private isSpectator = false;
     /** PLAN-metalstorm-onboarding.md §5 — when false, `revealOn` is ignored and
@@ -171,10 +186,11 @@ export class WidgetLoader {
      *
      * @param gameId - Game identifier (e.g., "metalstorm")
      * @param httpBase - HTTP base URL for fetching game data
-     * @param playerId - Local player ID
+     * @param playerId - Local **sim playerNum** (see WidgetContext.identity)
      * @param teamId - Local player's team ID
      * @param role - Session role ("player" / "spectator" / "admin"); gates
      *   `hideForSpectator` manifest entries (PLAN-metalstorm-onboarding §4).
+     * @param accountId - Local DB account id (see WidgetContext.identity)
      */
     async load(
         gameId: string,
@@ -182,9 +198,13 @@ export class WidgetLoader {
         playerId: number,
         teamId: number,
         role: string = '',
+        accountId: number = 0,
     ): Promise<void> {
         this.gameId = gameId;
         this.isSpectator = role === 'spectator';
+        // Held on the instance rather than threaded through armReveal /
+        // loadWidget: it is session-constant and only the ctx builder reads it.
+        this.accountId = accountId;
         const generation = this.generation;
         const stale = () => this.generation !== generation;
 
@@ -569,7 +589,7 @@ export class WidgetLoader {
         const context: WidgetContext = {
             store: uiStore,
             mount: panel ? panel.body : mountElement,
-            identity: { playerId, teamId },
+            identity: { playerId, teamId, accountId: this.accountId },
             sendCommand: this.createSendCommand(),
             strategicMap: this.createStrategicMapStub(),
             setBadge: panel ? panel.setBadge : () => {},

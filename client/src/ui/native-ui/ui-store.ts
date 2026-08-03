@@ -22,11 +22,19 @@ type Subscriber = () => void;
 type UnsubscribeFn = () => void;
 
 export interface PlayerInfo {
+    /** Spring's sim `playerNum` — the id every rulesParam key and Lua callin
+     *  is scoped by, NOT the DB account id. See PLAN-native-ui.md §3.3. */
     playerId: number;
     name: string;
     teamId: number;
+    /** The team's ally team; -1 when unknown (pre-GameStart, or a spectator).
+     *  Optional so existing seeds that predate the server roster still typecheck. */
+    allyTeamId?: number;
     isSpectator: boolean;
     isAI: boolean;
+    /** False once the player has disconnected. The row is kept so a scoreboard
+     *  can still name them. Absent = assume active. */
+    isActive?: boolean;
 }
 
 export interface UnitSelection {
