@@ -40,7 +40,21 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          brew install cmake ninja ngtcp2 nghttp3 openssl@3
+          set -e
+          # Formula names are libngtcp2 / libnghttp3, NOT ngtcp2 / nghttp3 —
+          # the latter don't exist in homebrew-core and made every run of this
+          # workflow between 2026-07-11 and 2026-08-03 die here in ~20 s,
+          # before it ever reached the assertions below. Keep them in sync with
+          # CMakeLists.txt's `foreach(_qpkg libngtcp2 libngtcp2_crypto_ossl
+          # libnghttp3)` prefix probe, which is what actually has to find them.
+          brew install cmake ninja libngtcp2 libnghttp3 openssl@3
+          # The QUIC TLS path needs OpenSSL >= 3.5; the runner image ships its
+          # own openssl@3 and `brew install` is a no-op on an already-installed
+          # older one, so upgrade explicitly and assert the version rather than
+          # failing later inside ngtcp2_crypto_ossl with a confusing error.
+          brew upgrade openssl@3 || true
+          "$(brew --prefix openssl@3)/bin/openssl" version
+          pkg-config --version
 
       - name: Configure + build (dev — sanity control)
         run: |
@@ -52,6 +66,26 @@ jobs:
           cmake --preset release -B build/prod -DSPRING_PROD=ON -DSPRING_SKIP_AUDIOCONVERTER=ON
           cmake --build build/prod --target spring-server spring-lobby spring-logserver -j 4
 
+      # Scope of this assertion list, stated because it has not grown since the
+      # gate was written and that looks like drift rather than design:
+      # only routes whose *capability* has no place in a production binary are
+      # compile-gated — arbitrary Lua/SQL exec, PID/port disclosure, and the
+      # logserver's unauthenticated ingest/restart. Routes added since
+      # (`/api/gm/*`, `/api/admin/*`, `/api/client-errors`) are deliberately NOT
+      # in this list: they are operational surface a production deployment needs
+      # to *have*, so they are gated at runtime by `RouteAuth::AdminOnly` /
+      # `TokenRequired` (default-deny, enforced centrally in
+      # NetworkServer::DispatchPost) rather than compiled away. The
+      # complementary check for those is the route-table snapshot doctest in the
+      # ctest step below, which fails if a route is registered without a
+      # classification: RouteAuth is a mandatory argument to
+      # AddHttpGet/AddHttpPost, so an unclassified route is a compile error, and
+      # tests/test_route_auth.cpp pins that mechanism. (Note what that does NOT
+      # cover: nothing snapshots the *real* lobby/server route inventory against
+      # PLAN-security-hardening.md §1.1 — lobby_main.cpp registers its routes
+      # inline in main(), so there is nothing to call from a unit test. See the
+      # header comment in test_route_auth.cpp.) If you add a route that runs
+      # arbitrary code or discloses infrastructure, it belongs here as well.
       - name: Verify gated routes are compiled out under SPRING_PROD
         run: |
           set -e
