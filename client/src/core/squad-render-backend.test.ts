@@ -29,6 +29,9 @@ interface HostOpts {
     /** defId → MemberModel factory (or undefined = model not available yet). */
     models?: Map<number, (scene: Scene) => Mesh | undefined>;
     impostorDist?: number;
+    /** Extra rest-pose pieces beyond the factory's, to exercise a multi-piece
+     *  body (a vehicle: hull + tracks + turret). */
+    extraPieces?: number;
 }
 
 function makeBackend(atlasDefs: Set<number>, opts: HostOpts = {}) {
@@ -53,7 +56,20 @@ function makeBackend(atlasDefs: Set<number>, opts: HostOpts = {}) {
                     memberMeshes.set(key, m);
                     mesh = m;
                 }
-                return { mesh, restWorld: Matrix.Identity(), yOffset: 0, height: 10 };
+                const pieces = [{ mesh, restWorld: Matrix.Identity() }];
+                for (let p = 1; p <= (opts.extraPieces ?? 0); p++) {
+                    const pk = `${defId}:${team}:${p}`;
+                    let pm = memberMeshes.get(pk);
+                    if (!pm) {
+                        pm = MeshBuilder.CreateBox(
+                            `memberPiece_d${defId}_p${p}`, { size: 2 }, scene);
+                        memberMeshes.set(pk, pm);
+                    }
+                    // A non-identity rest pose per piece, so a piece composed
+                    // against the wrong one lands visibly off.
+                    pieces.push({ mesh: pm, restWorld: Matrix.Translation(0, p * 3, 0) });
+                }
+                return { pieces, yOffset: 0, height: 10 };
             }
             : undefined,
         getImpostorDistance: opts.models
@@ -410,6 +426,150 @@ describe('SquadRenderBackend impostor sprite members', () => {
         backend.updateMember(h, 100, 0, 6, 0, 0);   // right next to the camera
         backend.flush();
         expect(findMesh(scene, 'squadSprite_d7_t0')!.thinInstanceCount).toBe(1);
+    });
+
+    // A def with a 3D body but NO impostor atlas (ms_tanks_s2 → fable_tank).
+    // The model tier must not be gated on the def ALSO having an atlas — there
+    // is simply no sprite tier to hand over to, so the model holds at all
+    // ranges and the capsule is only reached when no body loads at all.
+    describe('atlas-less defs with a 3D body', () => {
+        it('draws the MODEL tier, not the proxy capsule', () => {
+            const models = new Map([[7, bodyFactory(7)]]);
+            const { backend, scene } = makeBackend(new Set(), { models });
+            backend.setSquadTeam(1, 0);
+            const h = backend.createMember(1, 0, { defId: 7, variant: 0 });
+            backend.updateMember(h, 100, 0, 8, 0, 0);
+            backend.flush();
+
+            expect(findMesh(scene, 'memberModel_d7')!.thinInstanceCount).toBe(1);
+            expect(backend.getMemberFades(h)).toEqual({ model: 1 });
+            // The capsule pool is never even created for this def.
+            expect(findMesh(scene, 'squadMember_t0')).toBeUndefined();
+            expect(findMesh(scene, 'squadSprite_')).toBeUndefined();
+        });
+
+        it('holds the model tier at any range — the sprite tier is unreachable', () => {
+            // The host still reports a switch distance; with no atlas behind it
+            // the member must NOT fall off the model tier into the capsule.
+            const models = new Map([[7, bodyFactory(7)]]);
+            const { backend, scene } = makeBackend(new Set(), { models, impostorDist: 900 });
+            backend.setSquadTeam(1, 0);
+            const h = backend.createMember(1, 0, { defId: 7, variant: 0 });
+            backend.updateMember(h, -9000, 0, 9000, 0, 0);   // far beyond 900
+            backend.flush();
+
+            expect(backend.getMemberFades(h)).toEqual({ model: 1 });
+            expect(findMesh(scene, 'memberModel_d7')!.thinInstanceCount).toBe(1);
+            expect(findMesh(scene, 'squadMember_t0')).toBeUndefined();
+        });
+
+        it('uses the capsule while the body loads, then migrates to the model', () => {
+            let ready = false;
+            const models = new Map<number, (s: Scene) => Mesh | undefined>([
+                [7, (s) => (ready ? MeshBuilder.CreateBox('memberModel_d7', { size: 4 }, s) : undefined)],
+            ]);
+            const { backend, scene } = makeBackend(new Set(), { models });
+            backend.setSquadTeam(1, 0);
+            const h = backend.createMember(1, 0, { defId: 7, variant: 0 });
+
+            backend.updateMember(h, 100, 0, 6, 0, 0);
+            backend.flush();
+            expect(findMesh(scene, 'memberModel_d7')).toBeUndefined();
+            const capsule = findMesh(scene, 'squadMember_t0')!;
+            expect(capsule.thinInstanceCount).toBe(1);
+            expect(backend.getMemberFades(h)).toEqual({ capsule: true });
+
+            ready = true;
+            backend.updateMember(h, 100, 0, 6, 0, 0);
+            backend.flush();
+            expect(findMesh(scene, 'memberModel_d7')!.thinInstanceCount).toBe(1);
+            // The capsule slot went dark — the member left it.
+            const cm = capsule.thinInstanceGetWorldMatrices()[0].toArray();
+            expect(Array.from(cm).every((v) => v === 0)).toBe(true);
+            expect(backend.getMemberFades(h)).toEqual({ model: 1 });
+        });
+
+        it('keeps the capsule for a def with neither an atlas nor a body', () => {
+            // Host exposes the model API, but this def has no entry in it.
+            const models = new Map([[99, bodyFactory(99)]]);
+            const { backend, scene } = makeBackend(new Set(), { models });
+            backend.setSquadTeam(1, 0);
+            const h = backend.createMember(1, 0, { defId: 7, variant: 0 });
+            backend.updateMember(h, 100, 0, 6, 0, 0);
+            backend.flush();
+
+            expect(findMesh(scene, 'squadMember_t0')!.thinInstanceCount).toBe(1);
+            expect(backend.getMemberFades(h)).toEqual({ capsule: true });
+        });
+    });
+
+    // Vehicles are several geometry pieces (fable_tank: hull / tracks_l /
+    // tracks_r / turret / barrel); one pool per piece, not one per member.
+    describe('multi-piece member bodies', () => {
+        it('thin-instances every piece against its own rest pose', () => {
+            const models = new Map([[7, bodyFactory(7)]]);
+            const { backend, scene } = makeBackend(
+                new Set(), { models, extraPieces: 2 });
+            backend.setSquadTeam(1, 0);
+            const h = backend.createMember(1, 0, { defId: 7, variant: 0 });
+            backend.updateMember(h, 100, 0, 8, 0, 0);
+            backend.flush();
+
+            const body = findMesh(scene, 'memberModel_d7')!;
+            const p1 = findMesh(scene, 'memberPiece_d7_p1')!;
+            const p2 = findMesh(scene, 'memberPiece_d7_p2')!;
+            expect(body.thinInstanceCount).toBe(1);
+            expect(p1.thinInstanceCount).toBe(1);
+            expect(p2.thinInstanceCount).toBe(1);
+            // Each piece carries ITS OWN rest translation (0 / +3 / +6 in Y)
+            // on top of the shared member position.
+            const yOf = (m: Mesh) => m.thinInstanceGetWorldMatrices()[0].getTranslation().y;
+            expect(yOf(body)).toBeCloseTo(0);
+            expect(yOf(p1)).toBeCloseTo(3);
+            expect(yOf(p2)).toBeCloseTo(6);
+        });
+
+        it('frees every piece slot when the member leaves the model tier', () => {
+            const models = new Map([[7, bodyFactory(7)]]);
+            const { backend, scene } = makeBackend(
+                new Set([7]), { models, impostorDist: 900, extraPieces: 2 });
+            backend.setSquadTeam(1, 0);
+            const h = backend.createMember(1, 0, { defId: 7, variant: 0 });
+            backend.updateMember(h, 100, 0, 8, 0, 0);       // close → model
+            backend.flush();
+            const pieces = [
+                findMesh(scene, 'memberModel_d7')!,
+                findMesh(scene, 'memberPiece_d7_p1')!,
+                findMesh(scene, 'memberPiece_d7_p2')!,
+            ];
+
+            backend.updateMember(h, -3000, 0, 3000, 0, 0);  // far → sprite
+            backend.flush();
+            for (const m of pieces) {
+                const mm = m.thinInstanceGetWorldMatrices()[0].toArray();
+                expect(Array.from(mm).every((v) => v === 0)).toBe(true);
+            }
+            expect(findMesh(scene, 'squadSprite_d7_t0')!.thinInstanceCount).toBe(1);
+        });
+
+        it('applies the crossfade opacity to every piece at once', () => {
+            const models = new Map([[7, bodyFactory(7)]]);
+            const { backend } = makeBackend(
+                new Set([7]), { models, impostorDist: 900, extraPieces: 2 });
+            backend.setSquadTeam(1, 0);
+            const h = backend.createMember(1, 0, { defId: 7, variant: 0 });
+            // Inside the [765,900] band → partial model opacity.
+            backend.updateMember(h, 100, 50, 820, 0, 0);
+            backend.flush();
+
+            const fades = backend.getMemberFades(h);
+            expect(fades.model).toBeGreaterThan(0);
+            expect(fades.model).toBeLessThan(1);
+            const perPiece = backend.getModelFades(h);
+            expect(perPiece).toHaveLength(3);
+            // A body that dissolved piece-by-piece would read as a broken model.
+            for (const f of perPiece!) expect(f).toBeCloseTo(fades.model!);
+        });
     });
 
     it('a released sprite slot stops rendering and is reusable', () => {

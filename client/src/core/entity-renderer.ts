@@ -57,6 +57,7 @@ import {
 import { matchAimSlots, type UnitAimPieces, type AimPiece } from './turret-aim-controller.js';
 import { LodTier, type ImpostorRenderer } from './impostor-renderer.js';
 import { DitherFadePlugin } from './dither-fade-plugin.js';
+import type { MemberModel } from './squad-render-backend.js';
 
 /** Per-material texture URIs, keyed by material name in the .gltf.
  *  Single-material models (all S3O/DAE content) use just the `materials[0]`
@@ -1572,57 +1573,54 @@ export class EntityRenderer {
 
     /**
      * Member-tier 3D model source for the squad fan-out (PLAN-metalstorm-impostors
-     * M4). Ensures the def's model is loaded, then returns a thin-instance-ready
-     * render mesh (team-coloured through the same material pipeline as full
-     * units) plus the transform data SquadRenderBackend composes each close-range
-     * member against. Returns `undefined` while the model is still loading, when
-     * the def has no model, or for a multi-geometry-piece model.
+     * M4). Ensures the def's model is loaded, then returns one thin-instance-ready
+     * render mesh PER GEOMETRY PIECE (team-coloured through the same material
+     * pipeline as full units) plus the transform data SquadRenderBackend composes
+     * each close-range member against. Returns `undefined` while the model is
+     * still loading or when the def has no model at all.
      *
-     * DEVIATION (recorded in the lane notes): single-geometry-piece models only.
-     * Infantry are one static `body` piece by the M1 contract, so a member is a
-     * single rigid mesh. A multi-piece squad member would need per-member,
-     * per-piece matrix composition (the full unit path) fanned out across every
-     * soldier — deferred until a squad def actually ships a multi-piece member.
-     * Such a def simply keeps drawing the sprite tier at all ranges (graceful).
+     * Multi-piece bodies are supported: infantry are one static `body` piece by
+     * the M1 contract, but a squad of vehicles (`ms_tanks_s2` → `fable_tank`:
+     * hull / tracks_l / tracks_r / turret / barrel) is not, and gating this on a
+     * single piece stranded those defs on the proxy capsule. Each piece becomes
+     * its own thin-instance pool, so the cost is per PIECE per (defId, team) —
+     * not per member — and pieces are drawn in their rest pose (a member's
+     * turret does not aim; see MemberModel in squad-render-backend.ts).
      *
-     * The returned mesh is NOT stored in `renderMeshes` (see memberModelMeshes)
-     * so the entity render loop never fights the squad backend for it. Each
-     * (defId, team) yields one shared mesh; the backend owns its thin-instance
-     * matrix buffer.
+     * The returned meshes are NOT stored in `renderMeshes` (see memberModelMeshes)
+     * so the entity render loop never fights the squad backend for them. Each
+     * (defId, team, piece) yields one shared mesh; the backend owns its
+     * thin-instance matrix buffer.
      */
-    getMemberModel(defId: number, team: number):
-        { mesh: Mesh; restWorld: Matrix; yOffset: number; height: number } | undefined {
+    getMemberModel(defId: number, team: number): MemberModel | undefined {
         this.ensureModelLoaded(defId);
         const tmpl = this.modelTemplates.get(defId);
         if (!tmpl) return undefined;                       // not loaded yet / no model
         const geometry = tmpl.pieces.filter((p) => p.mesh != null);
-        if (geometry.length !== 1) return undefined;       // multi-piece: see DEVIATION
-        const piece = geometry[0];
+        if (geometry.length === 0) return undefined;       // no drawable geometry
 
-        const key = `member:${defId}:${team}`;
-        let mesh = this.memberModelMeshes.get(key);
-        if (!mesh) {
-            mesh = piece.mesh.clone(`member_${defId}_t${team}_${piece.name}`);
-            mesh.makeGeometryUnique();
-            mesh.material = this.resolvePieceMaterial(defId, team, piece, true);
-            mesh.isPickable = false;
-            mesh.isVisible = false;                        // shown once instances populate
-            mesh.thinInstanceEnablePicking = false;
-            mesh.alwaysSelectAsActiveMesh = true;
-            mesh.renderingGroupId = 2;
-            mesh.receiveShadows = true;
-            this.memberModelMeshes.set(key, mesh);
-            // Cast shadows like full units — one caster mesh with N thin
-            // instances (not N casters), so the cost is one extra depth-pass
-            // draw per (defId, team), which the M5 perf pass re-checks.
-            this.shadowGenerator?.addShadowCaster(mesh);
-        }
-        return {
-            mesh,
-            restWorld: piece.restWorldMatrix,
-            yOffset: tmpl.yOffset,
-            height: tmpl.modelHeight,
-        };
+        const pieces = geometry.map((piece, i) => {
+            const key = `member:${defId}:${team}:${i}`;
+            let mesh = this.memberModelMeshes.get(key);
+            if (!mesh) {
+                mesh = piece.mesh.clone(`member_${defId}_t${team}_p${i}_${piece.name}`);
+                mesh.makeGeometryUnique();
+                mesh.material = this.resolvePieceMaterial(defId, team, piece, true);
+                mesh.isPickable = false;
+                mesh.isVisible = false;                    // shown once instances populate
+                mesh.thinInstanceEnablePicking = false;
+                mesh.alwaysSelectAsActiveMesh = true;
+                mesh.renderingGroupId = 2;
+                mesh.receiveShadows = true;
+                this.memberModelMeshes.set(key, mesh);
+                // Cast shadows like full units — one caster mesh with N thin
+                // instances (not N casters), so the cost is one extra depth-pass
+                // draw per (defId, team, piece), which the M5 perf pass re-checks.
+                this.shadowGenerator?.addShadowCaster(mesh);
+            }
+            return { mesh, restWorld: piece.restWorldMatrix };
+        });
+        return { pieces, yOffset: tmpl.yOffset, height: tmpl.modelHeight };
     }
 
     private getFallbackMesh(defId: number, team: number): Mesh {
