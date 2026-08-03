@@ -22,23 +22,31 @@
 #include <algorithm>
 #include <cmath>
 
-// PLAN-latency L2.1. Default OFF, for two independent reasons.
+// PLAN-latency L2.1/L2.3. Default ON since 2026-08-03. It shipped OFF, and the
+// three things it was waiting on have each been closed by measurement rather
+// than by argument — recorded here because "why is this on?" is the question a
+// reader will have, and the answers are not guessable from the code:
 //
-// 1. The substitution is only *observable* once the client renders it (L2.2):
-//    with it on and no client-side consumer, a Tier-C weapon fires and nothing
-//    is drawn, because the fired/impact events it replaces are exactly what
-//    the current projectile renderer listens to. Damage stays correct either
-//    way — that half is a rendering cliff, not a correctness one — but
-//    shipping it on before L2.2 would make every MG, autocannon and mortar in
-//    the game invisible.
-// 2. It measurably changes combat balance: resolving against the target's
-//    fire-time pose lands 2.8x the damage per shot that the simulated
-//    projectile does. Numbers and method in CosmeticFire.h. That needs a
-//    decision before it goes on anywhere, independent of the renderer.
+// 1. No client consumer. Closed by L2.2: `cosmetic-flight.ts` +
+//    `spawnCosmetic`/`detonateCosmetic` invent and draw the arc on the L1
+//    presentation timeline, and convergence is exact by construction (the
+//    endpoint is taken verbatim off the wire, measured 0.000 elmos on 750/750
+//    detonations).
+// 2. Combat balance. L2.1 measured 2.8x over-delivery against the simulated
+//    path. Closed by L2.2 at 0.96x (1v1) / 0.94x (20v20) on identical shot
+//    counts — and note the L2.1 diagnosis (fire-time target pose) was only
+//    part of it; the arc-fidelity corrections in CosmeticFire.h did most of
+//    the work.
+// 3. Authored FX had never been seen reading an *invented* bolt in a game that
+//    actually has such widgets. Closed on ZK: `gfx_projectile_lights.lua`
+//    lights Tier-C bolts through the A3 live map, 7,222 point lights landing
+//    on a cosmetic bolt (best 0.0005 elmos) carrying the widget's own
+//    arithmetic over ZK's authored light params.
 //
-// L2.2 clears reason 1. Reason 2 is the L2 gate's to settle.
+// Turn it off with `LatencyCosmeticFire = 0` in springsettings.cfg; the
+// simulated path is untouched and still correct.
 CONFIG(bool, LatencyCosmeticFire)
-	.defaultValue(false)
+	.defaultValue(true)
 	.description("PLAN-latency L2.1: resolve FX_TIER_COSMETIC weapon shots at fire time"
 	             " instead of spawning a sim projectile. Requires an L2.2-capable client"
 	             " to render the result.");

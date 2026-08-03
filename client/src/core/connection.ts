@@ -930,6 +930,13 @@ export class Connection {
      *  `EntityDestroy.frame`. */
     private lastEventFrame = 0;
     private pingInterval: ReturnType<typeof setInterval> | null = null;
+    /** PLAN-latency L2.3: warm-up ping timers. The steady cadence is 30 s,
+     *  which is far too slow to correct the boot-stall RTT sample that the
+     *  very first ping picks up (the pong is queued behind the content load).
+     *  These fire a short geometric burst right after connect so a clean
+     *  sample lands within a second or two of the game becoming interactive;
+     *  `ServerClock` then adopts it immediately (fast-down smoothing). */
+    private warmupPings: ReturnType<typeof setTimeout>[] = [];
     private httpBase = '';  // e.g. "http://localhost:9100"
 
     /** Public read-only accessor for the game server HTTP base URL.
@@ -1185,6 +1192,14 @@ export class Connection {
 
         this.pingInterval = setInterval(() => this.sendPing(), 30000);
         this.sendPing();
+        // Warm-up burst (see `warmupPings`). Spread geometrically so the
+        // series straddles whenever the load stall actually ends, rather than
+        // betting on one guess at its duration. The tail reaches past a minute
+        // on purpose: a cold ZK room takes ~90 s to become interactive here,
+        // and a burst that stops at 16 s measures nothing but the stall.
+        for (const delayMs of [500, 1000, 2000, 4000, 8000, 16000, 32000, 64000]) {
+            this.warmupPings.push(setTimeout(() => this.sendPing(), delayMs));
+        }
     }
 
     /** Route an inbound WebTransport message by envelope byte. **Every**
@@ -1463,6 +1478,8 @@ export class Connection {
     }
 
     private cleanup(): void {
+        for (const t of this.warmupPings) clearTimeout(t);
+        this.warmupPings.length = 0;
         if (this.pingInterval) {
             clearInterval(this.pingInterval);
             this.pingInterval = null;
