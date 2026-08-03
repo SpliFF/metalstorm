@@ -631,6 +631,14 @@ def main() -> None:
         # species' own swap distance (a 20-elmo fence post has no business
         # staying a full mesh as far out as a 137-elmo conifer).
         bake_impostors.write_manifest(out_dir, list(SPECIES))
+        # ...and immediately check it back against the models and the pixels
+        # just baked. write_manifest() hand-picks the fields it copies out of
+        # each sidecar, which is exactly how `azimuthPhaseDegrees` once went
+        # missing; `centreY` going the same way would silently hover every
+        # prop rather than raising anything. Cheap, and it fails the run.
+        if not bake_impostors.verify_manifest(out_dir):
+            raise SystemExit("[veg] impostors.json does not describe the "
+                             "atlases that were just baked")
     print(f"[veg] wrote {len(SPECIES)} species -> {out_dir}")
 
 
