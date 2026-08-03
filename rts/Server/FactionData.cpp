@@ -35,6 +35,55 @@ std::string GetStringField(lua_State* L, const char* field) {
     return v;
 }
 
+/// Registry key holding the game folder that `VFS.Include` resolves
+/// against. Set before the sidedata chunk runs. Same mechanism as
+/// ConfigReader's kBaseDirRegistryKey — separate key so the two shims
+/// can never read each other's base dir if they ever share a state.
+constexpr const char* kBaseDirRegistryKey = "factiondata.base_dir";
+
+/// VFS.Include(path) — minimal shim, deliberately a subset of the sim's.
+/// Resolves `path` against the game folder in the registry and returns
+/// whatever the included chunk returned. A missing file returns nil,
+/// matching Spring's own VFS.Include, so a game whose sidedata.lua tests
+/// its include for nil (BAR does) gets the error message it wrote rather
+/// than an opaque Lua type error.
+int L_VFS_Include(lua_State* L) {
+    const char* pathArg = luaL_checkstring(L, 1);
+
+    lua_pushstring(L, kBaseDirRegistryKey);
+    lua_gettable(L, LUA_REGISTRYINDEX);
+    const std::string baseDir = lua_isstring(L, -1) ? lua_tostring(L, -1) : "";
+    lua_pop(L, 1);
+
+    const fs::path target =
+        baseDir.empty() ? fs::path(pathArg) : fs::path(baseDir) / pathArg;
+
+    std::error_code ec;
+    if (!fs::exists(target, ec)) {
+        lua_pushnil(L);
+        return 1;
+    }
+    if (luaL_loadfile(L, target.string().c_str()) != LUA_OK)
+        return luaL_error(L, "VFS.Include: parse error in %s: %s",
+            target.string().c_str(), lua_tostring(L, -1));
+    if (lua_pcall(L, 0, 1, 0) != LUA_OK)
+        return luaL_error(L, "VFS.Include: exec error in %s: %s",
+            target.string().c_str(), lua_tostring(L, -1));
+    return 1;
+}
+
+/// Install `_G.VFS = { Include = ... }` and point the shim at `baseDir`.
+void InstallVFS(lua_State* L, const fs::path& baseDir) {
+    lua_pushstring(L, kBaseDirRegistryKey);
+    lua_pushstring(L, baseDir.string().c_str());
+    lua_settable(L, LUA_REGISTRYINDEX);
+
+    lua_newtable(L);
+    lua_pushcfunction(L, L_VFS_Include);
+    lua_setfield(L, -2, "Include");
+    lua_setglobal(L, "VFS");
+}
+
 } // namespace
 
 namespace FactionData {
@@ -53,6 +102,10 @@ std::vector<FactionInfo> Discover(const std::string& gameFolderPath) {
         return out;
     }
     luaL_openlibs(L);
+    // Resolve VFS.Include relative to the game folder, so BAR's
+    // `VFS.Include("gamedata/sides_enum.lua")` lands inside the archive
+    // and not the lobby's cwd. See FactionData.h.
+    InstallVFS(L, fs::path(gameFolderPath));
 
     if (luaL_loadfile(L, path.string().c_str()) != LUA_OK ||
         lua_pcall(L, 0, 1, 0) != LUA_OK) {
@@ -79,6 +132,8 @@ std::vector<FactionInfo> Discover(const std::string& gameFolderPath) {
         info.fullName    = GetStringField(L, "fullName");
         info.description = GetStringField(L, "description");
         info.startUnit   = GetStringField(L, "startUnit");
+        if (info.startUnit.empty())
+            info.startUnit = GetStringField(L, "startunit"); // see FactionData.h
         lua_pop(L, 1); // entry table
 
         if (info.name.empty()) {

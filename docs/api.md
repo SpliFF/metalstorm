@@ -47,17 +47,26 @@ curl -X POST http://localhost:8011/api/auth/login \
 
 Create a new account. Auto-logs in on success.
 
+`faction` is **required** and permanent: it is the account's allegiance and there is no
+player-facing route that changes it afterwards (only the admin override below). It must be
+one of the keys from [`GET /api/factions/<gameId>`](#get-apifactionsgameid) — free text is
+rejected. The accepted set is Metalstorm's declared factions specifically, not a union over
+every game the lobby serves, so a key that is valid for another game (ZK's `robots`, say) is
+still rejected here.
+
 ```bash
 curl -X POST http://localhost:8011/api/auth/register \
-  -d '{"username":"newplayer","password":"secret"}'
+  -d '{"username":"newplayer","password":"secret","faction":"compact"}'
 ```
 
 **Response (201):**
 ```json
-{"token":"...","user_id":6,"username":"newplayer","role":"player"}
+{"token":"...","user_id":6,"username":"newplayer","role":"player","faction":"compact"}
 ```
 
-**Errors:** 400 (invalid username length), 409 (username taken)
+**Errors:** 400 (invalid username length), 400 `{"error":"faction is required"}` (field
+missing or empty), 400 `{"error":"unknown faction"}` (not a declared faction key), 409
+(username taken)
 
 ### Using Authentication
 
@@ -89,9 +98,12 @@ Accounts have a role: `player` (default for all registrations), `spectator`, or 
 Nothing auto-elevates. Grant the role with a one-shot CLI command on the lobby binary (it promotes an already-registered account and exits — it does not start the server, and it never creates accounts):
 
 ```bash
-# 1. register the operator account (if it doesn't exist yet)
+# 1. register the operator account (if it doesn't exist yet).
+#    `faction` is required — any declared key works, an operator account's
+#    faction has no gameplay meaning. List the valid keys with:
+#      curl http://localhost:8011/api/factions/metalstorm
 curl -X POST http://localhost:8011/api/auth/register \
-  -d '{"username":"admin","password":"<password>"}'
+  -d '{"username":"admin","password":"<password>","faction":"compact"}'
 
 # 2. promote it (run once; safe to run directly, not via mprocs)
 ./build/debug/spring-lobby --promote-admin admin
@@ -119,6 +131,45 @@ A fresh or wiped `data/spring-server.db` needs step 2 re-run. The debug MCP tool
 |----------|-------------|-------|
 | `GET /api/vfs/game/{gameId}/*` | Game source files (Lua, images, JSON) | 5 min |
 | `GET /api/games/data/{gameId}/*` | Preprocessed game assets (unit .glb models) | immutable |
+
+### Factions
+
+#### GET /api/factions/{gameId}
+
+Public. The factions a game declares in its `gamedata/sidedata.lua`, in declaration order.
+Read at lobby startup, so the response is stable for the process lifetime. The sign-up form
+calls this to render the required faction picker.
+
+```bash
+curl http://localhost:8011/api/factions/metalstorm
+```
+
+```json
+[{"key":"compact","name":"Compact","fullName":"The Compact","description":"..."},
+ {"key":"union","name":"Union","fullName":"The Free Union","description":"..."}]
+```
+
+`key` is `name` lowercased — the same derivation the engine's `SideParser` uses — and is the
+value stored on the account and accepted by `POST /api/auth/register`. A game that declares
+no factions returns `[]`; that is a valid state, not an error.
+
+**Errors:** 400 (missing game id), 404 `{"error":"game not found"}` (no such game on this
+lobby)
+
+#### POST /api/admin/set-faction
+
+**Admin only.** Override a user's permanent faction. This is the only route that can change
+a faction after sign-up — deliberately support/admin-only, and audited (`set_faction` in the
+audit log). `faction` is validated against the same registry registration uses.
+
+```bash
+curl -u admin:<password> -X POST http://localhost:8011/api/admin/set-faction \
+  -d '{"username":"newplayer","faction":"union"}'
+# → {"ok":true}
+```
+
+**Errors:** 400 (`username` or `faction` missing), 400 `{"ok":false,"error":"unknown faction"}`,
+401 (no/invalid token), 403 (not an admin), 404 `{"ok":false,"error":"no such user"}`
 
 ### Rooms
 

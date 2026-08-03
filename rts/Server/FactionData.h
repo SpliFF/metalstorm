@@ -4,9 +4,20 @@
 //
 // A bare-lua_State reader in the same spirit as ConfigReader/
 // ResourcesParser/AIDiscovery (rts/Server/ConfigReader.h explains why the
-// lobby doesn't reuse the sim's rts/Lua/LuaParser). sidedata.lua needs no
-// VFS shim — it's a self-contained data file with no VFS.Include calls —
-// so this loads it with a plain luaL_loadfile, no sandbox setup.
+// lobby doesn't reuse the sim's rts/Lua/LuaParser).
+//
+// sidedata.lua DOES need a VFS shim. An earlier revision of this comment
+// claimed the opposite ("a self-contained data file with no VFS.Include
+// calls") and justified a plain luaL_loadfile with it; that was wrong for
+// real game data. BAR's opens with
+//   local SIDES = VFS.Include("gamedata/sides_enum.lua")
+//   if not SIDES then error("[Sidedata] Failed to load sides_enum.lua!") end
+// which raised `attempt to index a nil value (global 'VFS')` on every lobby
+// boot and made /api/factions/bar return [] instead of BAR's four real
+// sides. So Discover installs the same minimal `VFS.Include` shim
+// ConfigReader uses for legacy-game wrappers, resolved relative to the game
+// folder. Nothing else from the sim's VFS is provided — a sidedata.lua that
+// reaches for more still fails safe (empty vector + one warning).
 #pragma once
 
 #include <string>
@@ -37,8 +48,11 @@ struct FactionInfo {
     /// Lore/identity blurb shown on the sign-up form. May be empty.
     std::string description;
 
-    /// Starting unit def id (`startUnit` field). Informational only at
-    /// this layer — the lobby doesn't validate it against unit defs.
+    /// Starting unit def id. Informational only at this layer — the lobby
+    /// doesn't validate it against unit defs. Read from `startUnit` and,
+    /// failing that, `startunit`: the sim reads this through LuaTable,
+    /// which lowercases keys, so both spellings are live in shipped data
+    /// (Metalstorm uses `startUnit`, BAR and ZK use `startunit`).
     std::string startUnit;
 };
 

@@ -142,3 +142,52 @@ TEST_CASE("FactionData::Discover skips entries missing `name` and drops duplicat
     CHECK(factions[0].startUnit == "unit_a");
     CHECK(factions[1].key == "beta");
 }
+
+TEST_CASE("FactionData::Discover resolves VFS.Include against the game folder") {
+    // Regression for the "sidedata.lua needs no VFS shim" claim that used to
+    // sit in FactionData.h: BAR's real sidedata.lua opens with
+    // `VFS.Include("gamedata/sides_enum.lua")` and errors out if it comes back
+    // nil, which made every lobby boot log a warning and /api/factions/bar
+    // return []. This fixture mirrors that shape exactly.
+    const fs::path dir = fs::temp_directory_path() / "faction_data_test_vfs";
+    fs::create_directories(dir / "gamedata");
+    {
+        std::ofstream f(dir / "gamedata" / "sides_enum.lua");
+        f << "return { ARMADA = 'arm', CORTEX = 'cor' }\n";
+    }
+    {
+        std::ofstream f(dir / "gamedata" / "sidedata.lua");
+        f << "local SIDES = VFS.Include('gamedata/sides_enum.lua')\n"
+             "if not SIDES then error('failed to load sides_enum.lua') end\n"
+             "return {\n"
+             "    { name = 'Armada', startunit = SIDES.ARMADA .. 'com' },\n"
+             "    { name = 'Cortex', startunit = SIDES.CORTEX .. 'com' },\n"
+             "}\n";
+    }
+
+    auto factions = FactionData::Discover(dir.string());
+    REQUIRE(factions.size() == 2);
+    CHECK(factions[0].key == "armada");
+    // Lowercase `startunit` — the spelling BAR and ZK ship. The sim reads it
+    // through LuaTable (which lowercases keys) so both spellings are valid
+    // game data; this reader accepts either.
+    CHECK(factions[0].startUnit == "armcom");
+    CHECK(factions[1].key == "cortex");
+    CHECK(factions[1].startUnit == "corcom");
+}
+
+TEST_CASE("FactionData::Discover treats a missing VFS.Include target as nil, not a crash") {
+    // Spring's own VFS.Include returns nil for a missing file, and BAR's
+    // sidedata.lua relies on that to raise its own error(). Anything that
+    // goes wrong inside the chunk must still degrade to an empty vector.
+    const fs::path dir = fs::temp_directory_path() / "faction_data_test_vfs_missing";
+    fs::create_directories(dir / "gamedata");
+    {
+        std::ofstream f(dir / "gamedata" / "sidedata.lua");
+        f << "local SIDES = VFS.Include('gamedata/does_not_exist.lua')\n"
+             "if not SIDES then error('failed to load sides_enum.lua') end\n"
+             "return { { name = 'Armada' } }\n";
+    }
+
+    CHECK(FactionData::Discover(dir.string()).empty());
+}

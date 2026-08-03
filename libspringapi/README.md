@@ -70,8 +70,13 @@ if (auth.success) {
     std::cout << "user: " << auth.username << " (id=" << auth.userId << ")\n";
 }
 
-// Register a new account (auto-logs in):
-auto reg = springapi::registerUser("http://localhost:8011", "newplayer", "secret");
+// Register a new account (auto-logs in).
+// The 4th argument is the faction key. It is optional here — the field is
+// omitted from the request when empty — but the server may require it: a
+// Metalstorm lobby rejects a factionless sign-up with
+// 400 {"error":"faction is required"}, surfaced as reg.error.
+// Valid keys come from GET /api/factions/<gameId>.
+auto reg = springapi::registerUser("http://localhost:8011", "newplayer", "secret", "compact");
 ```
 
 ### Command Execution
