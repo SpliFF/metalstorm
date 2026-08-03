@@ -10,19 +10,38 @@ bool Player::Load(const std::string& path, std::string& err) {
         err = res.error;
         return false;
     }
-    header    = std::move(res.header);
-    records   = std::move(res.records);
-    truncated = res.truncated;
-    cursor    = 0;
-    fed       = 0;
-    late      = 0;
+    header      = std::move(res.header);
+    records     = std::move(res.records);
+    checkpoints = std::move(res.checkpoints);
+    startCheckpoint = std::move(res.startCheckpoint);
+    truncated   = res.truncated;
+    cursor      = 0;
+    fed         = 0;
+    late        = 0;
+
+    // The file's own hash track is the default reference series (task 3): a
+    // recording verifies against itself with no second file. An explicit
+    // `--verify <path>` calls SetHashTrack afterwards and wins.
+    if (!res.hashTrack.empty()) SetHashTrack(std::move(res.hashTrack));
 
     // A clean file states where the recording ended. A truncated one does not,
-    // so the last complete record is the furthest point the segment is known to
-    // be consistent to (§6 E1) — the caller stops there.
+    // so the furthest point the segment is known to be consistent to has to be
+    // inferred from its blocks (§6 E1) — the caller stops there.
+    //
+    // Both series count, and that is not cosmetic. Records are sparse: a quiet
+    // AI game can go a whole minute without one, while hash points land on a
+    // fixed cadence. Inferring the end from records alone (which is what task 2
+    // did, when records were the only blocks) makes a killed recording claim to
+    // end at its last *input* — for a papertanks run whose only record is the
+    // frame -1 GameStart anchor, that reads as "ends at frame -1", so the replay
+    // stops before its first tick and every embedded hash point is reported
+    // MISSING. Observed on a real `kill -9`'d recording, not hypothesised.
     endFrame = res.trailer.endFrame;
-    if (endFrame < 0 || truncated)
+    if (endFrame < 0 || truncated) {
         endFrame = records.empty() ? 0 : records.back().frame;
+        if (!hashTrack.empty())
+            endFrame = std::max(endFrame, hashTrack.back().frame);
+    }
 
     // The funnel appends in seq order, so file order is already the total
     // order. Sorting anyway costs one pass over a loaded file and makes the

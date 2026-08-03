@@ -218,7 +218,16 @@ int main(int argc, char* argv[])
     std::string journalFilePath;
     std::string replayFilePath;
     std::string replayVerifyRef;
+    bool replayVerify = false;
     int replaySeekFrame = 0;
+    // PLAN-replay task 3: state-hash cadence for a recording, in sim frames
+    // (300 = every 10 s at GAME_SPEED 30). On by default because a replay
+    // without its own hash track cannot be verified at all, and the cost is one
+    // unit-list walk twice a game-minute. 0 disables it.
+    int journalHashEvery = 300;
+    // `--replay <in> --replay-export <out>`: repack and exit, no sim.
+    std::string replayExportPath;
+    replay::Codec replayExportCodec = replay::Codec::Deflate;
 
     // Human player roster from the lobby. Each `--player <username>:<team>:<pos>`
     // entry gets one slot here. The sim uses this for two things:
@@ -279,10 +288,15 @@ int main(int argc, char* argv[])
     //   in memory, cap N records, expose at GET /api/journal),
     // --journal-file PATH (PLAN-replay task 2: record the cause stream to a
     //   replay file),
+    // --journal-hash-every N (PLAN-replay task 3: embed a state-hash reference
+    //   point every N sim frames; 0 = none),
     // --replay PATH (re-execute a replay file instead of listening for input),
     // --replay-seek N (fast-forward to frame N with streaming suppressed),
-    // --verify PATH (compare the replay's state-hash series against a
-    //   --headless-run stats dump; nonzero exit on divergence),
+    // --verify [PATH] (compare the replay's state-hash series against the
+    //   file's own embedded track, or against a --headless-run stats dump when
+    //   PATH is given; nonzero exit on divergence),
+    // --replay-export PATH / --replay-export-codec none|deflate (repack the
+    //   file given by --replay into a shareable .msr and exit),
     // --player username:team:pos (repeatable),
     // --ai id:team:pos (repeatable)
     for (int i = 1; i < argc; i++) {
@@ -317,8 +331,24 @@ int main(int argc, char* argv[])
             replayFilePath = argv[++i];
         } else if (arg == "--replay-seek" && i + 1 < argc) {
             replaySeekFrame = std::max(0, std::atoi(argv[++i]));
-        } else if (arg == "--verify" && i + 1 < argc) {
-            replayVerifyRef = argv[++i];
+        } else if (arg == "--journal-hash-every" && i + 1 < argc) {
+            journalHashEvery = std::max(0, std::atoi(argv[++i]));
+        } else if (arg == "--replay-export" && i + 1 < argc) {
+            replayExportPath = argv[++i];
+        } else if (arg == "--replay-export-codec" && i + 1 < argc) {
+            std::string cerr_;
+            if (!replay::ParseCodec(argv[++i], replayExportCodec, cerr_)) {
+                SLOG(SPRING_LOG_ERROR, "--replay-export-codec: %s", cerr_.c_str());
+                return 1;
+            }
+        } else if (arg == "--verify") {
+            // The argument is OPTIONAL as of task 3: a recording carries its own
+            // hash track, so `--verify` alone is the normal form. A PATH still
+            // works and overrides the embedded track — that is how the negative
+            // control (verify a stream against another game's hashes) is run.
+            replayVerify = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-')
+                replayVerifyRef = argv[++i];
         } else if (arg == "--journal-audit") {
             // PLAN-replay task 1. Attaches the in-memory journal so the cause
             // stream is observable live (GET /api/journal) and summarised at
@@ -443,6 +473,50 @@ int main(int argc, char* argv[])
             headlessCfg.stopAt.luaCondition ? headlessCfg.stopAt.luaCondition->c_str() : "-");
     }
 
+    // --- Replay export/import (PLAN-replay task 3, the `.msr` packer) ---
+    // A pure file-to-file transform: no sim, no content, no port. Handled here
+    // so `--replay-export` costs a process start and nothing else, and so a
+    // corrupt file is reported by the packer rather than by a half-built world.
+    if (!replayExportPath.empty()) {
+        if (replayFilePath.empty()) {
+            SLOG(SPRING_LOG_ERROR,
+                "--replay-export needs --replay <input.msr> to say what to pack");
+            return 1;
+        }
+        std::string perr;
+        if (!replay::Pack(replayFilePath, replayExportPath, replayExportCodec, perr)) {
+            SLOG(SPRING_LOG_ERROR, "--replay-export: %s", perr.c_str());
+            return 1;
+        }
+        // Re-load the product and report what it actually contains. Reporting
+        // the *input's* tallies would hide precisely the bug this export could
+        // have: a section dropped on the way through.
+        const replay::LoadResult out = replay::Load(replayExportPath);
+        auto fileSize = [](const std::string& p) -> long long {
+            std::FILE* f = std::fopen(p.c_str(), "rb");
+            if (f == nullptr) return -1;
+            std::fseek(f, 0, SEEK_END);
+            const long long n = std::ftell(f);
+            std::fclose(f);
+            return n;
+        };
+        const long long inBytes = fileSize(replayFilePath);
+        const long long outBytes = fileSize(replayExportPath);
+        SLOG(SPRING_LOG_NOTICE,
+            "replay export: %s -> %s (codec=%s, %lld -> %lld bytes, "
+            "%zu records, %zu hash points, %zu checkpoints)%s",
+            replayFilePath.c_str(), replayExportPath.c_str(),
+            replay::CodecName(replayExportCodec), inBytes, outBytes,
+            out.records.size(), out.hashTrack.size(), out.checkpoints.size(),
+            out.truncated ? " [TRUNCATED SEGMENT — preserved as truncated]" : "");
+        if (!out.ok) {
+            SLOG(SPRING_LOG_ERROR, "replay export produced an unreadable file: %s",
+                 out.error.c_str());
+            return 1;
+        }
+        return 0;
+    }
+
     // --- Replay playback setup (PLAN-replay task 2) ---
     // A replay file carries its own launch spec, so `--replay <file>` alone is
     // a complete invocation: map, game, modoptions, roster and AI slots all
@@ -463,8 +537,8 @@ int main(int argc, char* argv[])
             return 1;
         }
         const replay::Header& rh = replay::Feed().GetHeader();
-        replay::SetCurrentMode(replayVerifyRef.empty() ? replay::Mode::Play
-                                                       : replay::Mode::Verify);
+        replay::SetCurrentMode(replayVerify ? replay::Mode::Verify
+                                            : replay::Mode::Play);
 
         if (mapId.empty())      mapId = rh.mapId;
         if (gameId.empty())     gameId = rh.gameId;
@@ -508,35 +582,62 @@ int main(int argc, char* argv[])
             : headless::TickMode::Realtime;  // playback is watched by a human
         if (replaySeekFrame > 0) replay::Feed().SetSeekTarget(replaySeekFrame);
 
-        if (!replayVerifyRef.empty()) {
-            std::vector<std::pair<int64_t, uint64_t>> track;
-            std::string terr;
-            if (!statsdump::ReadHashTrack(replayVerifyRef, track, terr)) {
-                SLOG(SPRING_LOG_ERROR, "--verify: %s", terr.c_str());
+        if (replayVerify) {
+            if (!replayVerifyRef.empty()) {
+                // Explicit reference file: overrides the embedded track. Two
+                // real uses — cross-checking against an independent
+                // `--headless-run`, and the negative control that proves the
+                // gate is not vacuous.
+                std::vector<std::pair<int64_t, uint64_t>> track;
+                std::string terr;
+                if (!statsdump::ReadHashTrack(replayVerifyRef, track, terr)) {
+                    SLOG(SPRING_LOG_ERROR, "--verify: %s", terr.c_str());
+                    return 1;
+                }
+                std::vector<replay::HashPoint> pts;
+                pts.reserve(track.size());
+                for (const auto& t : track)
+                    pts.push_back({static_cast<int32_t>(t.first), t.second});
+                SLOG(SPRING_LOG_NOTICE,
+                    "--verify: %zu reference hash points from %s (overriding the "
+                    "file's own embedded track)", pts.size(), replayVerifyRef.c_str());
+                replay::Feed().SetHashTrack(std::move(pts));
+            } else if (replay::Feed().HasHashTrack()) {
+                SLOG(SPRING_LOG_NOTICE,
+                    "--verify: using the recording's own embedded hash track");
+            } else {
+                // Refused rather than run: a verify with no reference points
+                // reaches the end reporting checked=0, and while VerifyResult
+                // already calls that a failure, "FAIL, checked=0" three minutes
+                // from now is a worse message than this one right now.
+                SLOG(SPRING_LOG_ERROR,
+                    "--verify: %s carries no embedded hash track (recorded "
+                    "before task 3, or with --journal-hash-every 0) and no "
+                    "reference file was given — nothing to verify against",
+                    replayFilePath.c_str());
                 return 1;
             }
-            std::vector<replay::HashPoint> pts;
-            pts.reserve(track.size());
-            for (const auto& t : track)
-                pts.push_back({static_cast<int32_t>(t.first), t.second});
-            SLOG(SPRING_LOG_NOTICE, "--verify: %zu reference hash points from %s",
-                 pts.size(), replayVerifyRef.c_str());
-            replay::Feed().SetHashTrack(std::move(pts));
         }
 
         SLOG(SPRING_LOG_NOTICE,
-            "replay: %s — %zu records, frames %d..%d, map=%s game=%s%s%s",
+            "replay: %s — %zu records, %zu hash points, %zu checkpoints, "
+            "frames %d..%d, map=%s game=%s%s%s",
             replayFilePath.c_str(), replay::Feed().RecordCount(),
+            replay::Feed().HashTrackSize(), replay::Feed().Checkpoints().size(),
             rh.startFrame, replay::Feed().EndFrame(),
             rh.mapId.c_str(), rh.gameId.c_str(),
             replay::Feed().Truncated() ? " [TRUNCATED SEGMENT]" : "",
             replaySeekFrame > 0 ? " [seeking]" : "");
         if (replaySeekFrame > 0) {
             SLOG(SPRING_LOG_NOTICE,
-                "replay: seeking to frame %d — no checkpoint index exists yet "
-                "(PLAN-persistence sim serializer unlanded), so this is a full "
-                "uncapped fast-forward from the start with streaming suppressed",
-                replaySeekFrame);
+                "replay: seeking to frame %d — the checkpoint index is %s, so "
+                "this is a full uncapped fast-forward from the start with "
+                "streaming suppressed (T2-d)",
+                replaySeekFrame,
+                replay::Feed().Checkpoints().empty()
+                    ? "empty (PLAN-persistence sim serializer unlanded, so no "
+                      "recorder writes checkpoint blobs)"
+                    : "populated but restore is not implemented");
         }
     } else if (!journalFilePath.empty()) {
         SLOG(SPRING_LOG_NOTICE, "recording synced-input cause stream to %s",
@@ -1136,8 +1237,10 @@ int main(int argc, char* argv[])
             return 1;
         }
         syncedinput::Journal().SetJournal(&replayWriter);
-        SLOG(SPRING_LOG_NOTICE, "replay recording open: %s (defs=%s)",
-             journalFilePath.c_str(), defsCacheKey.c_str());
+        SLOG(SPRING_LOG_NOTICE,
+             "replay recording open: %s (defs=%s, state-hash every %d frames%s)",
+             journalFilePath.c_str(), defsCacheKey.c_str(), journalHashEvery,
+             journalHashEvery > 0 ? "" : " — DISABLED, this file will not be verifiable");
         SLOG(SPRING_LOG_WARNING,
             "replay: engineHash is a stand-in (protocol version + TU compile "
             "stamp) — this tree exposes no build identity, so a header match "
@@ -1935,6 +2038,48 @@ int main(int argc, char* argv[])
                 frame, frame / (float)GAME_SPEED, rtcServer.GetClientCount());
         }
 
+        // --- State-hash track: record and verify (PLAN-replay §4, task 3) ---
+        //
+        // ONE site for both halves, on purpose. A determinism hash is only
+        // comparable against another hash taken at the SAME point in the tick,
+        // and the two halves run in different processes months apart — if they
+        // drift to different statements the divergence report becomes a report
+        // about this file. Recording and verifying from the same `if` makes
+        // that drift impossible rather than merely unlikely.
+        //
+        // It sits outside the `headlessCfg.enabled` block below because
+        // recording happens in ordinary player-facing games, which are not
+        // headless. (Task 2 verified inside that block, against a track that
+        // came from a --headless-run stats dump captured a few statements
+        // later, after the stop-condition Lua poll. That poll only runs under
+        // --headless-run with a luaCondition set, so the two sites agreed in
+        // practice; they are now the same site and agree by construction.)
+        //
+        // Frame 0 is skipped: before GameStart there is nothing to hash.
+        if (frame > 0) {
+            if (journalHashEvery > 0 && replayWriter.Enabled() &&
+                (frame % journalHashEvery) == 0) {
+                replayWriter.AppendHashPoint(frame, computeStateHash());
+            }
+            // A divergence is LOCATED — that frame is the bisection point a
+            // desync investigation starts from — and the run keeps going so the
+            // report can say whether the state re-converged (it never does, but
+            // "diverged once at N and stayed wrong" and "diverged at N" are
+            // different bug shapes).
+            if (replay::CurrentMode() == replay::Mode::Verify &&
+                replay::Feed().WantHashAt(frame)) {
+                const uint64_t h = computeStateHash();
+                if (!replay::Feed().CheckHash(frame, h) &&
+                    replay::Feed().Verify().firstDivergenceFrame == frame) {
+                    SLOG(SPRING_LOG_ERROR,
+                        "replay verify: DIVERGENCE at frame %d — expected %016llx, got %016llx",
+                        frame,
+                        (unsigned long long)replay::Feed().Verify().expected,
+                        (unsigned long long)replay::Feed().Verify().actual);
+                }
+            }
+        }
+
         // --- Headless run: stop-condition evaluation (PLAN-headless task 1) ---
         // Only reached under --headless-run, so a normal game never enters this
         // block (regression bar). Evaluated after the tick + streamer, so the
@@ -1969,25 +2114,6 @@ int main(int argc, char* argv[])
             if (headlessCfg.stateHashEvery > 0 && frame > 0 &&
                 (frame % headlessCfg.stateHashEvery) == 0) {
                 captureHeadlessSnapshot(rs.wallElapsedSec);
-            }
-
-            // Replay verification (PLAN-replay §4): hash at exactly the
-            // reference track's frames and compare. A divergence is LOCATED —
-            // that frame is the bisection point a desync investigation starts
-            // from — and the run keeps going so the report can say whether the
-            // state re-converged (it never does, but "diverged once at N and
-            // stayed wrong" and "diverged at N" are different bug shapes).
-            if (replay::CurrentMode() == replay::Mode::Verify && frame > 0 &&
-                replay::Feed().WantHashAt(frame)) {
-                const uint64_t h = computeStateHash();
-                if (!replay::Feed().CheckHash(frame, h) &&
-                    replay::Feed().Verify().firstDivergenceFrame == frame) {
-                    SLOG(SPRING_LOG_ERROR,
-                        "replay verify: DIVERGENCE at frame %d — expected %016llx, got %016llx",
-                        frame,
-                        (unsigned long long)replay::Feed().Verify().expected,
-                        (unsigned long long)replay::Feed().Verify().actual);
-                }
             }
 
             headlessStopReason = headless::EvaluateStop(
@@ -2059,12 +2185,24 @@ int main(int argc, char* argv[])
         tr.endFrame    = sim.GetFrameNum();
         tr.recordCount = replayWriter.Written();
         const bool wroteBadly = replayWriter.Failed();
+        const uint64_t hashPts = replayWriter.HashPointsWritten();
         replayWriter.Close(tr);
         SLOG(wroteBadly ? SPRING_LOG_ERROR : SPRING_LOG_NOTICE,
-            "replay recording closed: %s (%llu records, end frame %d)%s",
+            "replay recording closed: %s (%llu records, %llu hash points, "
+            "end frame %d)%s",
             journalFilePath.c_str(), (unsigned long long)tr.recordCount,
-            tr.endFrame,
+            (unsigned long long)hashPts, tr.endFrame,
             wroteBadly ? " — WITH WRITE ERRORS, the segment is incomplete" : "");
+        // A recording with no hash track cannot be verified later, and the
+        // reason is always a flag the operator set — say so at the moment the
+        // file is finished, not when a CI run three weeks later refuses it.
+        if (!wroteBadly && hashPts == 0) {
+            SLOG(SPRING_LOG_WARNING,
+                "replay: no state-hash reference points were recorded "
+                "(--journal-hash-every %d, ended at frame %d) — `--replay %s "
+                "--verify` will have nothing to check against",
+                journalHashEvery, tr.endFrame, journalFilePath.c_str());
+        }
         if (wroteBadly) replayExitCode = 1;
     }
 

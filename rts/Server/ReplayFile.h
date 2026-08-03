@@ -9,11 +9,23 @@
 // launch spec that `--replay <file>` alone can bring up an identical server)
 // and the **record stream** (syncedinput::Record, verbatim, in seq order).
 //
-// The remaining three sections — the embedded start checkpoint, the checkpoint
-// index and the state-hash track — are PLAN-replay task 3's `.msr` packer and
-// PLAN-persistence's snapshot blobs. They are deliberately NOT invented here:
-// the container is a versioned, section-agnostic frame so task 3 can add them
-// without a format break (see kFormatVersion's comment).
+// Task 3 added the remaining three sections through that same seam: the
+// **state-hash track** (recorded live, the reference series `--replay --verify`
+// re-executes against), the **checkpoint index** and the **embedded start
+// checkpoint**. The last two are format-complete and plumbed but carry no bytes
+// yet — the blobs are PLAN-persistence's `ISimSerializer` output, which is
+// unbuilt. That is stated rather than faked: a reader sees an empty index, not
+// a fabricated one.
+//
+// COMPRESSION IS AN EXPORT STEP, NOT A RECORDING ONE (task 3)
+// -----------------------------------------------------------
+// PLAN-replay §1 calls the shareable artefact a "zstd container". The *codec*
+// is a documented deviation (see Codec below); the *placement* is a deliberate
+// design decision. A live recorder writes codec `None` — uncompressed, one
+// block at a time — because a torn compressed stream is unrecoverable and would
+// destroy the E1 truncation guarantee below, which is the property that makes a
+// crashed server's file useful at all. `Pack()` compresses a *complete* segment
+// at export time, when there is nothing left to lose.
 //
 // WHY NOT FLATBUFFERS
 // -------------------
@@ -43,13 +55,51 @@
 namespace replay {
 
 /// Bumped on any incompatible framing change. Readers refuse a file whose
-/// version they do not know rather than misparse it. Adding a *section* (task
-/// 3's checkpoint index / hash track) does not need a bump: sections are
-/// introduced as new block markers, and an unknown marker is a hard stop with
-/// a named error, which is what forces the version discussion to happen.
-constexpr uint16_t kFormatVersion = 1;
+/// version they do not know rather than misparse it. Adding a *section* does
+/// not need a bump: sections are introduced as new block markers, and an
+/// unknown marker is a hard stop with a named error, which is what forces the
+/// version discussion to happen.
+///
+/// v2 (task 3) is such a bump, for two reasons the marker seam could not
+/// absorb: a **codec byte** now sits between the version and the header (so a
+/// packed file is self-describing rather than needing a second magic), and the
+/// **trailer grew two counts**. A v1 reader would mis-frame both. Refusing v1
+/// costs nothing — a replay is same-binary bound by construction (§1), so no v1
+/// file outlives the binary that could replay it anyway.
+constexpr uint16_t kFormatVersion = 2;
 
 constexpr char kMagic[8] = {'M', 'S', 'R', 'E', 'P', 'L', 'A', 'Y'};
+
+/// How the body after the codec byte is stored.
+///
+/// FIDELITY-STANDIN: PLAN-replay §1 specifies a **zstd** container. This tree
+/// does not link zstd, and `find_package(ZSTD REQUIRED)` would add a new hard
+/// system dependency to four targets on a CI runner whose brew step is already
+/// the standing breakage (PLAN.md security S-A). zlib is `REQUIRED` and already
+/// linked into every target that touches this file, so `Deflate` is what ships.
+/// `Zstd` keeps its wire value reserved so adopting it later is a codec-byte
+/// addition, not a format break — no reader written today will misparse one.
+enum class Codec : uint8_t {
+    None    = 0,   ///< raw blocks; what a live recorder always writes
+    Deflate = 1,   ///< zlib, whole-body; what `Pack()` writes
+    Zstd    = 2,   ///< RESERVED — not implemented, refused with a named error
+};
+
+/// One reference point of the determinism-hash track (§4). Recorded live at a
+/// fixed frame cadence and re-computed at the identical tick position during
+/// `--replay --verify`; a mismatch locates a divergence to a frame.
+struct HashPoint {
+    int32_t  frame = 0;
+    uint64_t hash  = 0;
+};
+
+/// One entry of the checkpoint index (§1, "seek points, every ~5 min").
+/// `blob` is PLAN-persistence's serialized sim state. Format-complete and
+/// empty today: nothing writes one, because `ISimSerializer` is unbuilt.
+struct Checkpoint {
+    int32_t frame = 0;
+    std::vector<uint8_t> blob;
+};
 
 /// The launch spec a replay server needs to reconstruct an identical world.
 /// `--replay <file>` fills every CLI-equivalent field from here, so a replay is
@@ -88,6 +138,8 @@ struct Header {
 struct Trailer {
     int32_t  endFrame    = -1;   ///< last frame the recording server ticked
     uint64_t recordCount = 0;    ///< records written; a cross-check on the stream
+    uint64_t hashPointCount  = 0;  ///< §4 reference points written
+    uint64_t checkpointCount = 0;  ///< index entries written (0 until persistence lands)
 };
 
 // ─────────────────────────────── Writing ───────────────────────────────
@@ -114,20 +166,44 @@ public:
     bool Enabled() const override { return fp != nullptr; }
     void Append(syncedinput::Record&& r) override;
 
+    /// Append one determinism-hash reference point (§4). The caller must emit
+    /// these at a *fixed frame cadence and a fixed position in the tick*: the
+    /// verifier re-computes the hash from the identical site, and a reference
+    /// taken a few statements earlier in the tick than the check is a false
+    /// divergence that looks exactly like a real one.
+    void AppendHashPoint(int32_t frame, uint64_t hash);
+
+    /// Append one checkpoint-index entry. Nothing calls this yet — the blob is
+    /// PLAN-persistence's serialized sim state and that serializer is unbuilt.
+    void AppendCheckpoint(int32_t frame, const std::vector<uint8_t>& blob);
+
+    /// Embed the start checkpoint (§1). Must be called before the first
+    /// Append() so it lands ahead of the stream; also unused today, same reason.
+    void WriteStartCheckpoint(const std::vector<uint8_t>& blob);
+
     /// Push buffered bytes to the OS. Called at tick end.
     void Flush();
 
     /// Write the trailer and close. After this the file is a *clean* recording;
     /// skipping it (crash, kill -9) leaves the truncation marker set instead.
-    void Close(const Trailer& t);
+    /// `t`'s hashPointCount/checkpointCount are overwritten with what was
+    /// actually written — the trailer states fact, not intent.
+    void Close(Trailer t);
 
     uint64_t Written() const { return written; }
+    uint64_t HashPointsWritten() const { return hashPoints; }
+    uint64_t CheckpointsWritten() const { return checkpoints; }
     bool     Failed() const { return failed; }
 
 private:
+    void WriteBlock(const std::vector<uint8_t>& buf);
+
     std::FILE* fp      = nullptr;
     uint64_t   written = 0;
+    uint64_t   hashPoints  = 0;
+    uint64_t   checkpoints = 0;
     bool       failed  = false;
+    bool       streamStarted = false;   ///< guards WriteStartCheckpoint's ordering
     std::string path;
 };
 
@@ -137,15 +213,43 @@ struct LoadResult {
     std::string error;
     Header  header;
     Trailer trailer;
+    Codec   codec = Codec::None;     ///< how the file on disk stored its body
     /// True when the file ended without a trailer, or on a half-written record.
     /// `records` still holds every complete record read up to that point (E1).
     bool truncated = false;
     std::vector<syncedinput::Record> records;
+    std::vector<HashPoint>  hashTrack;     ///< §4 reference series, frame order
+    std::vector<Checkpoint> checkpoints;   ///< seek index (empty today)
+    std::vector<uint8_t>    startCheckpoint;  ///< §1 embedded start state (empty today)
 };
 
-/// Read a whole replay file into memory. Records come back in file order, which
-/// is seq order — the funnel appends monotonically.
+/// Read a whole replay file into memory, transparently decompressing a packed
+/// one. Records come back in file order, which is seq order — the funnel
+/// appends monotonically. Blocks of different KINDS may be interleaved in any
+/// order: the reader buckets by marker and never assumes a section layout, so
+/// a streaming recorder and the packer can write the same file differently.
 LoadResult Load(const std::string& path);
+
+// ─────────────────────── Export / import (the `.msr` packer) ───────────────
+/// Write a complete container from in-memory content. Section order is
+/// canonical (start checkpoint → records → hash points → checkpoints), so
+/// packing the same content twice is byte-identical. `content.truncated`
+/// is honoured: a truncated segment is re-emitted WITHOUT a trailer, so the
+/// packed copy still reads as truncated rather than laundering a crashed
+/// recording into a clean-looking one.
+bool WriteFile(const std::string& path, const LoadResult& content, Codec codec,
+               std::string& err);
+
+/// Load `in`, re-emit it to `out` under `codec`. `Codec::Deflate` is the export
+/// form (shareable, ~one order of magnitude smaller on a real stream);
+/// `Codec::None` is the import/unpack form. Round-tripping is lossless.
+bool Pack(const std::string& in, const std::string& out, Codec codec,
+          std::string& err);
+
+/// Parse a codec name for the CLI. Returns false on an unknown/unimplemented
+/// name (including "zstd", which is reserved but not built).
+bool ParseCodec(const std::string& name, Codec& out, std::string& err);
+const char* CodecName(Codec c);
 
 // ───────────────────── Encoding primitives (test seam) ─────────────────
 /// Encode/decode one record. Exposed so the doctest can prove round-trip

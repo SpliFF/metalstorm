@@ -17,6 +17,7 @@ Part of the [Debugging & Logging Guide](debugging.md) family. This page covers t
   - [Determinism CI hook](#determinism-ci-hook)
 - [Replay record / playback](#replay-record--playback)
   - [Recording](#recording)
+  - [Exporting a shareable `.msr` (`--replay-export`)](#exporting-a-shareable-msr---replay-export)
   - [Playing back](#playing-back)
   - [Verifying (`--verify`)](#verifying---verify)
   - [Seeking](#seeking)
@@ -400,6 +401,40 @@ playback needs no other argument.
 writer wins, since a run asked to produce a shareable artefact should not have its
 records land in a diagnostic in-memory ring instead.
 
+The recording also embeds a **state-hash track** — a determinism reference point every
+`--journal-hash-every N` sim frames (default **300**, i.e. every 10 s; `0` disables it).
+That track is what `--verify` checks against, so a file recorded with `0` can never be
+verified afterwards; the recorder warns about it at open *and* at close rather than
+letting it be discovered by a CI run weeks later.
+
+```bash
+spring-server --headless-run config.json --journal-file game.msr --journal-hash-every 300
+```
+
+### Exporting a shareable `.msr` (`--replay-export`)
+
+```bash
+spring-server --replay game.msr --replay-export shared.msr
+spring-server --replay shared.msr --replay-export plain.msr --replay-export-codec none
+```
+
+Repacks a recording and exits — no sim, no content, no port. The default codec is
+`deflate` (~3× on a real papertanks stream); `none` is the unpack/import direction.
+Importing needs no flag at all: `--replay` decompresses transparently.
+
+Two properties worth relying on:
+
+- **A truncated segment stays truncated.** Packing a `kill -9`'d recording re-emits it
+  without a trailer, so the copy still reads `[TRUNCATED SEGMENT]`. Laundering a crashed
+  recording into a clean-looking artefact is the one thing the packer must never do.
+- **A live recorder never compresses.** Compression is an export step precisely because
+  a torn deflate stream is unrecoverable, and salvaging a torn *recording* is the whole
+  point of the truncation handling.
+
+> The format reserves a `zstd` codec value (PLAN-replay §1 specifies zstd) but does not
+> implement it: this tree links zlib and not libzstd. `--replay-export-codec zstd` is a
+> spoken error, never a silent substitution.
+
 ### Playing back
 
 ```bash
@@ -419,13 +454,27 @@ behaviours differ from a live server, both deliberate and both logged:
 ### Verifying (`--verify`)
 
 ```bash
-spring-server --replay game.msr --verify reference-stats.json
+spring-server --replay game.msr --verify                        # embedded track
+spring-server --replay game.msr --verify reference-stats.json   # explicit override
 ```
 
 Re-executes headless (uncapped) and compares the state hash at exactly the frames the
-reference [stats dump](#stats-dump--determinism-hash) recorded one at. A divergence is
-reported with its **frame**, which is the bisection point a desync investigation starts
-from:
+reference track recorded one at.
+
+**The argument is optional.** With none, the recording's own embedded hash track is the
+reference — one file, one command, nothing to point at the wrong run. Passing a
+[stats dump](#stats-dump--determinism-hash) *overrides* the embedded track, which is how
+the negative control is run (verify one game's stream against another game's hashes; it
+must fail). A `--verify` with neither is refused up front rather than three minutes later
+with `checked=0`.
+
+Recording and verification compute the hash at the **same statement** in the tick, not
+merely at the same frame — they share one call site in `server_main.cpp`, because a
+reference taken a few statements earlier in the tick than the check is a false divergence
+indistinguishable from a real one.
+
+A divergence is reported with its **frame**, which is the bisection point a desync
+investigation starts from:
 
 ```
 replay verify: PASS — 30/30 state hashes matched, 8 records fed

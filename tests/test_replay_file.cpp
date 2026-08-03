@@ -233,3 +233,285 @@ TEST_CASE("a missing file is an error, never an empty replay") {
     CHECK_FALSE(res.ok);
     CHECK(res.records.empty());
 }
+
+// ─────────────────── task 3: hash track / index / packer ──────────────────
+
+TEST_CASE("the state-hash track round-trips and the trailer counts it") {
+    // §4: the hash track IS the verification reference. If the container can
+    // lose a point, `--verify` silently checks fewer frames than it claims to,
+    // which is the "degrades from proof to usually works" failure the plan
+    // names by hand.
+    const std::string path = TempPath("hashtrack");
+    {
+        replay::Writer w;
+        std::string err;
+        REQUIRE(w.Open(path, SampleHeader(), err));
+        w.Append(MakeRecord(1, 0, TickPhase::Inbound, InputKind::GameStart, "t0:a0:l0;"));
+        w.AppendHashPoint(300, 0xfeedfacecafebeefULL);
+        w.Append(MakeRecord(2, 310, TickPhase::Stream, InputKind::AICommand, "z"));
+        w.AppendHashPoint(600, 0x0000000000000001ULL);
+        w.AppendHashPoint(900, 0xffffffffffffffffULL);
+        CHECK(w.HashPointsWritten() == 3);
+        replay::Trailer t;
+        t.endFrame = 900;
+        t.recordCount = w.Written();
+        w.Close(t);
+        CHECK_FALSE(w.Failed());
+    }
+
+    const replay::LoadResult res = replay::Load(path);
+    REQUIRE(res.ok);
+    CHECK_FALSE(res.truncated);
+    CHECK(res.records.size() == 2);
+    REQUIRE(res.hashTrack.size() == 3);
+    CHECK(res.hashTrack[0].frame == 300);
+    CHECK(res.hashTrack[0].hash == 0xfeedfacecafebeefULL);
+    // The full 64-bit range must survive: a hash truncated to 53 bits (the
+    // JSON-number trap docs/debugging-tools.md warns about for the stats dump)
+    // would still "match" often enough to look fine.
+    CHECK(res.hashTrack[2].hash == 0xffffffffffffffffULL);
+    // Close() states what was written, not what the caller hoped.
+    CHECK(res.trailer.hashPointCount == 3);
+    CHECK(res.trailer.checkpointCount == 0);
+
+    std::remove(path.c_str());
+}
+
+TEST_CASE("hash points and records interleave without confusing the reader") {
+    // The recorder writes both as they happen, so the file is interleaved; the
+    // packer writes them in sections. Both must read identically.
+    const std::string path = TempPath("interleaved");
+    {
+        replay::Writer w;
+        std::string err;
+        REQUIRE(w.Open(path, SampleHeader(), err));
+        for (int i = 1; i <= 5; ++i) {
+            w.Append(MakeRecord(static_cast<uint64_t>(i), i * 100,
+                                TickPhase::Inbound, InputKind::ClientMessage, "m"));
+            w.AppendHashPoint(i * 100, static_cast<uint64_t>(i) * 0x1111111111111111ULL);
+        }
+        replay::Trailer t;
+        t.endFrame = 500;
+        t.recordCount = w.Written();
+        w.Close(t);
+    }
+    const replay::LoadResult res = replay::Load(path);
+    REQUIRE(res.ok);
+    CHECK(res.records.size() == 5);
+    REQUIRE(res.hashTrack.size() == 5);
+    CHECK(res.hashTrack[4].frame == 500);
+    std::remove(path.c_str());
+}
+
+TEST_CASE("the checkpoint index and start checkpoint carry opaque blobs") {
+    // Nothing writes these yet (PLAN-persistence's sim serializer is unbuilt),
+    // so this is the format's own proof that it is ready for them — and that
+    // an empty index reads as empty rather than as a parse failure.
+    const std::string path = TempPath("checkpoints");
+    const std::vector<uint8_t> start{0xDE, 0xAD, 0x00, 0xBE, 0xEF};
+    const std::vector<uint8_t> mid(4096, 0x5A);
+    {
+        replay::Writer w;
+        std::string err;
+        REQUIRE(w.Open(path, SampleHeader(), err));
+        w.WriteStartCheckpoint(start);
+        w.Append(MakeRecord(1, 0, TickPhase::Inbound, InputKind::GameStart, "g"));
+        w.AppendCheckpoint(9000, mid);
+        CHECK(w.CheckpointsWritten() == 1);
+        replay::Trailer t;
+        t.endFrame = 9000;
+        t.recordCount = w.Written();
+        w.Close(t);
+        CHECK_FALSE(w.Failed());
+    }
+    const replay::LoadResult res = replay::Load(path);
+    REQUIRE(res.ok);
+    CHECK(res.startCheckpoint == start);          // embedded NUL survives
+    REQUIRE(res.checkpoints.size() == 1);
+    CHECK(res.checkpoints[0].frame == 9000);
+    CHECK(res.checkpoints[0].blob == mid);
+    CHECK(res.trailer.checkpointCount == 1);
+    std::remove(path.c_str());
+}
+
+TEST_CASE("a start checkpoint written after the stream began is refused") {
+    // It would describe a world the already-written records were applied to.
+    const std::string path = TempPath("late-start-ckpt");
+    replay::Writer w;
+    std::string err;
+    REQUIRE(w.Open(path, SampleHeader(), err));
+    w.Append(MakeRecord(1, 0, TickPhase::Inbound, InputKind::GameStart, "g"));
+    w.WriteStartCheckpoint({1, 2, 3});
+    CHECK(w.Failed());
+    std::remove(path.c_str());
+}
+
+TEST_CASE("an unknown block marker is a named error, not a truncation") {
+    // The header promises that new sections attach at the marker seam and that
+    // an unknown one stops the reader loudly. Silently treating it as a torn
+    // tail would hand back a short replay that looks like a crashed recording.
+    const std::string path = TempPath("unknown-section");
+    {
+        replay::Writer w;
+        std::string err;
+        REQUIRE(w.Open(path, SampleHeader(), err));
+        w.Append(MakeRecord(1, 0, TickPhase::Inbound, InputKind::GameStart, "g"));
+        w.Flush();
+        std::FILE* f = std::fopen(path.c_str(), "ab");
+        REQUIRE(f != nullptr);
+        const uint8_t future[] = {0x5A, 0x01, 0x02, 0x03, 0x04};   // 'Z' block
+        std::fwrite(future, 1, sizeof(future), f);
+        std::fclose(f);
+    }
+    const replay::LoadResult res = replay::Load(path);
+    CHECK_FALSE(res.ok);
+    CHECK(res.error.find("unknown replay block marker 0x5A") != std::string::npos);
+    std::remove(path.c_str());
+}
+
+TEST_CASE("packing round-trips every section and shrinks a real stream") {
+    const std::string raw    = TempPath("pack-src");
+    const std::string packed = TempPath("pack-out");
+    const std::string back   = TempPath("pack-back");
+    {
+        replay::Writer w;
+        std::string err;
+        REQUIRE(w.Open(raw, SampleHeader(), err));
+        w.WriteStartCheckpoint(std::vector<uint8_t>(64, 0x11));
+        // Wire traffic repeats heavily, which is the case the codec is for.
+        for (int i = 1; i <= 200; ++i) {
+            w.Append(MakeRecord(static_cast<uint64_t>(i), i * 10,
+                                TickPhase::Inbound, InputKind::ClientMessage,
+                                std::string(120, static_cast<char>('a' + (i % 7)))));
+            if (i % 10 == 0)
+                w.AppendHashPoint(i * 10, static_cast<uint64_t>(i) * 0x9E3779B97F4A7C15ULL);
+        }
+        w.AppendCheckpoint(2000, std::vector<uint8_t>(512, 0x22));
+        replay::Trailer t;
+        t.endFrame = 2000;
+        t.recordCount = w.Written();
+        w.Close(t);
+    }
+
+    std::string perr;
+    REQUIRE(replay::Pack(raw, packed, replay::Codec::Deflate, perr));
+
+    const replay::LoadResult src = replay::Load(raw);
+    const replay::LoadResult dst = replay::Load(packed);
+    REQUIRE(dst.ok);
+    CHECK(dst.codec == replay::Codec::Deflate);
+    CHECK_FALSE(dst.truncated);
+    REQUIRE(dst.records.size() == src.records.size());
+    CHECK(dst.records.back().payload == src.records.back().payload);
+    CHECK(dst.records.back().seq == src.records.back().seq);
+    REQUIRE(dst.hashTrack.size() == 20);
+    REQUIRE(src.hashTrack.size() == 20);
+    for (size_t i = 0; i < dst.hashTrack.size(); ++i) {
+        CHECK(dst.hashTrack[i].frame == src.hashTrack[i].frame);
+        CHECK(dst.hashTrack[i].hash == src.hashTrack[i].hash);
+    }
+    CHECK(dst.startCheckpoint == src.startCheckpoint);
+    REQUIRE(dst.checkpoints.size() == 1);
+    CHECK(dst.checkpoints[0].blob == src.checkpoints[0].blob);
+    CHECK(dst.trailer.endFrame == src.trailer.endFrame);
+    CHECK(dst.trailer.hashPointCount == src.trailer.hashPointCount);
+    CHECK(dst.header.mapId == src.header.mapId);
+
+    auto sizeOf = [](const std::string& p) -> long {
+        std::FILE* f = std::fopen(p.c_str(), "rb");
+        if (f == nullptr) return -1;
+        std::fseek(f, 0, SEEK_END);
+        const long n = std::ftell(f);
+        std::fclose(f);
+        return n;
+    };
+    CHECK(sizeOf(packed) > 0);
+    CHECK(sizeOf(packed) < sizeOf(raw));
+
+    // Import: unpacking is the same call with Codec::None, and it must be
+    // byte-for-byte re-loadable.
+    REQUIRE(replay::Pack(packed, back, replay::Codec::None, perr));
+    const replay::LoadResult round = replay::Load(back);
+    REQUIRE(round.ok);
+    CHECK(round.codec == replay::Codec::None);
+    CHECK(round.records.size() == src.records.size());
+    CHECK(round.hashTrack.size() == src.hashTrack.size());
+    CHECK(round.checkpoints.size() == src.checkpoints.size());
+
+    std::remove(raw.c_str());
+    std::remove(packed.c_str());
+    std::remove(back.c_str());
+}
+
+TEST_CASE("packing a truncated segment keeps it truncated") {
+    // The one thing the packer must never do is launder a crashed recording
+    // into a clean-looking artefact — the trailer's absence is the only signal
+    // that the game did not actually end where the file does (§6 E1).
+    const std::string raw    = TempPath("pack-trunc-src");
+    const std::string packed = TempPath("pack-trunc-out");
+    {
+        replay::Writer w;
+        std::string err;
+        REQUIRE(w.Open(raw, SampleHeader(), err));
+        w.Append(MakeRecord(1, 0, TickPhase::Inbound, InputKind::GameStart, "g"));
+        w.AppendHashPoint(300, 0x1234);
+        w.Flush();
+        // no Close(): killed mid-recording
+    }
+    std::string perr;
+    REQUIRE(replay::Pack(raw, packed, replay::Codec::Deflate, perr));
+    const replay::LoadResult res = replay::Load(packed);
+    REQUIRE(res.ok);
+    CHECK(res.truncated);
+    CHECK(res.records.size() == 1);
+    CHECK(res.hashTrack.size() == 1);
+    CHECK(res.trailer.endFrame == -1);
+    std::remove(raw.c_str());
+    std::remove(packed.c_str());
+}
+
+TEST_CASE("a corrupted packed body is refused, never half-parsed") {
+    const std::string raw    = TempPath("pack-corrupt-src");
+    const std::string packed = TempPath("pack-corrupt-out");
+    {
+        replay::Writer w;
+        std::string err;
+        REQUIRE(w.Open(raw, SampleHeader(), err));
+        for (int i = 1; i <= 50; ++i)
+            w.Append(MakeRecord(static_cast<uint64_t>(i), i, TickPhase::Inbound,
+                                InputKind::ClientMessage, std::string(64, 'q')));
+        replay::Trailer t;
+        t.endFrame = 50;
+        t.recordCount = w.Written();
+        w.Close(t);
+    }
+    std::string perr;
+    REQUIRE(replay::Pack(raw, packed, replay::Codec::Deflate, perr));
+    {
+        std::FILE* f = std::fopen(packed.c_str(), "r+b");
+        REQUIRE(f != nullptr);
+        std::fseek(f, 40, SEEK_SET);       // inside the deflate stream
+        const uint8_t junk[] = {0xFF, 0x00, 0xFF, 0x00};
+        std::fwrite(junk, 1, sizeof(junk), f);
+        std::fclose(f);
+    }
+    const replay::LoadResult res = replay::Load(packed);
+    CHECK_FALSE(res.ok);
+    CHECK(res.records.empty());
+    std::remove(raw.c_str());
+    std::remove(packed.c_str());
+}
+
+TEST_CASE("codec names parse, and zstd is refused as reserved-not-built") {
+    replay::Codec c = replay::Codec::None;
+    std::string err;
+    CHECK(replay::ParseCodec("deflate", c, err));
+    CHECK(c == replay::Codec::Deflate);
+    CHECK(replay::ParseCodec("none", c, err));
+    CHECK(c == replay::Codec::None);
+    // The plan says zstd; this tree links zlib. That deviation must be a
+    // spoken error, not a silent substitution into a different codec.
+    CHECK_FALSE(replay::ParseCodec("zstd", c, err));
+    CHECK(err.find("reserved") != std::string::npos);
+    CHECK_FALSE(replay::ParseCodec("lzma", c, err));
+}

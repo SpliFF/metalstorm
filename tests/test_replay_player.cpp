@@ -232,3 +232,65 @@ TEST_CASE("virtual client ids cannot collide with live transport ids") {
     // Distinct recorded connections stay distinct after remapping.
     CHECK(replay::VirtualClientId(1) != replay::VirtualClientId(2));
 }
+
+// ─────────────────── task 3: embedded hash track ──────────────────────────
+
+TEST_CASE("a file's own hash track is installed on load") {
+    // The point of embedding it: `--verify` needs no second file, and cannot be
+    // pointed at the wrong one by accident.
+    const std::string path = "/tmp/springweb-replay-player-embedded.msr";
+    {
+        replay::Writer w;
+        replay::Header h;
+        h.gameId = "papertanks";
+        std::string err;
+        REQUIRE(w.Open(path, h, err));
+        w.Append(Rec(1, 0, TickPhase::Inbound, InputKind::GameStart));
+        w.AppendHashPoint(300, 0xAAAAAAAAAAAAAAAAULL);
+        w.AppendHashPoint(600, 0xBBBBBBBBBBBBBBBBULL);
+        replay::Trailer t;
+        t.endFrame = 600;
+        t.recordCount = w.Written();
+        w.Close(t);
+    }
+    replay::Player p;
+    std::string err;
+    REQUIRE(p.Load(path, err));
+    CHECK(p.HasHashTrack());
+    CHECK(p.HashTrackSize() == 2);
+    CHECK(p.WantHashAt(300));
+    CHECK_FALSE(p.WantHashAt(301));
+    CHECK(p.CheckHash(300, 0xAAAAAAAAAAAAAAAAULL));
+    CHECK_FALSE(p.CheckHash(600, 0xBBBBBBBBBBBBBBBCULL));
+    CHECK(p.Verify().firstDivergenceFrame == 600);
+    p.FinishVerify(600);
+    CHECK_FALSE(p.Verify().Passed());
+    std::remove(path.c_str());
+}
+
+TEST_CASE("a truncated segment ends at its last hash point, not its last record") {
+    // Records are sparse and hash points are on a cadence, so on a killed
+    // recording the last hash point is usually the later of the two — and it
+    // proves the sim reached that frame. Ending at the last RECORD instead
+    // makes an AI-only game (whose sole record is the frame -1 GameStart
+    // anchor) claim to end before its first tick, and every embedded reference
+    // point is then reported MISSING rather than checked. Seen in the field.
+    const std::string path = "/tmp/springweb-replay-player-trunc-hash.msr";
+    {
+        replay::Writer w;
+        replay::Header h;
+        std::string err;
+        REQUIRE(w.Open(path, h, err));
+        w.Append(Rec(1, -1, TickPhase::Inbound, InputKind::GameStart));
+        w.AppendHashPoint(150, 0x11);
+        w.AppendHashPoint(300, 0x22);
+        w.Flush();
+        // no Close(): killed mid-recording
+    }
+    replay::Player p;
+    std::string err;
+    REQUIRE(p.Load(path, err));
+    CHECK(p.Truncated());
+    CHECK(p.EndFrame() == 300);
+    std::remove(path.c_str());
+}

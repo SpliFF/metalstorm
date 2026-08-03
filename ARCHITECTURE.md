@@ -624,9 +624,16 @@ journal implements the same `IJournal` seam.
 `--replay <file>` runs the tick above with the funnel **inverted**: at each of the
 five phases the server asks `replay::Feed()` what was due and re-enters the same
 code paths with the recorded input. `rts/Server/ReplayFile.{h,cpp}` owns the
-container (header + record framing + trailer); `rts/Server/ReplayPlayer.{h,cpp}`
+container (magic + version + codec byte + JSON header + marker-framed blocks +
+trailer, where the block kinds are records, state-hash points, checkpoint-index
+entries and the embedded start checkpoint — an unknown marker is a named hard
+error, which is the seam future sections attach to); `rts/Server/ReplayPlayer.{h,cpp}`
 owns the cursor, seek state and hash verification, both engine-free and
-doctest-covered. `server_main.cpp` feeds phases 1–3 and the anchor;
+doctest-covered. A live recording is always uncompressed so a torn tail stays
+salvageable; `--replay-export` repacks a finished segment through zlib (the
+format reserves a zstd codec value that this tree does not link). The checkpoint
+sections are format-complete but carry no bytes: the blobs are PLAN-persistence's
+`ISimSerializer` output, which is unbuilt. `server_main.cpp` feeds phases 1–3 and the anchor;
 `StateStreamer::TickAI` feeds phase 4 itself, because its position relative to
 standing-order evaluation inside the streamer tick is load-bearing.
 

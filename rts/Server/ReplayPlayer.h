@@ -62,14 +62,11 @@ enum class Mode {
     Verify,   ///< feed the stream headless and compare state hashes (§4)
 };
 
-/// One reference point from a recorded determinism-hash track. Task 2 reads
-/// these from a `--headless-run` stats dump (the harness PLAN-headless task 4
-/// already ships); task 3 will embed the same series in the replay file itself,
-/// at which point `--verify` needs no second file.
-struct HashPoint {
-    int32_t  frame = 0;
-    uint64_t hash  = 0;
-};
+// `HashPoint` and `Checkpoint` now live in ReplayFile.h: task 3 embedded both
+// series in the container, so they are file-format types that the player reads,
+// not player-local ones. `--verify` therefore needs no second file; passing one
+// is still supported and OVERRIDES the embedded track, which is exactly how the
+// negative control is run (verify a stream against a different game's hashes).
 
 /// Verification outcome (§4: "re-execution must reproduce the hash track
 /// exactly"). A divergence is located to a frame, which is the whole point —
@@ -101,6 +98,12 @@ public:
     const Header& GetHeader() const { return header; }
     bool Truncated() const { return truncated; }
     size_t RecordCount() const { return records.size(); }
+    /// Seek index carried by the file (§1). Empty on every file written so far:
+    /// nothing produces checkpoint blobs until PLAN-persistence's sim
+    /// serializer lands. Reported at start-up so an operator can see that a
+    /// seek is a full fast-forward rather than a jump (T2-d).
+    const std::vector<Checkpoint>& Checkpoints() const { return checkpoints; }
+    bool HasStartCheckpoint() const { return !startCheckpoint.empty(); }
 
     /// Frame the recording ended at: the trailer's value on a clean file, else
     /// the last record's frame (E1 — the segment truncates at the last
@@ -126,8 +129,11 @@ public:
     bool FastForwarding(int32_t curFrame) const { return curFrame < seekTarget; }
 
     // ── verify ──
+    /// Replace the reference series. Load() already installs the file's own
+    /// embedded track (task 3); this is the explicit `--verify <file>` override.
     void SetHashTrack(std::vector<HashPoint> track);
     bool HasHashTrack() const { return !hashTrack.empty(); }
+    size_t HashTrackSize() const { return hashTrack.size(); }
     /// True when `frame` is one of the reference points — the caller should
     /// compute a state hash on exactly these frames and hand it to CheckHash.
     bool WantHashAt(int32_t frame) const;
@@ -157,6 +163,8 @@ private:
     bool truncated = false;
     Header header;
     std::vector<syncedinput::Record> records;
+    std::vector<Checkpoint> checkpoints;
+    std::vector<uint8_t> startCheckpoint;
     size_t   cursor    = 0;
     uint64_t fed       = 0;
     uint64_t late      = 0;
