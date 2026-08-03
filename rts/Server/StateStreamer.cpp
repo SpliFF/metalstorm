@@ -120,7 +120,23 @@ void ComputeParamDelta(const LuaRulesParams::Params& oldParams,
 } // namespace
 
 void StateStreamer::Tick(int /*frameNum*/) {
+    // Post-game: everything below CheckWinCondition is a *producer* — it
+    // streams state, evaluates standing orders, ticks the AI. Once the result
+    // has gone out the sim is frozen (server_main's SimFrame gate) so none of
+    // it has anything new to say, and re-running it on a stationary frame is
+    // actively harmful: the cadence gates here are all `frame % N == 0`, so a
+    // frame that happens to be divisible by 30 (14610 was) would fire every
+    // "once a second" broadcast at the full 30 Hz tick rate for the whole
+    // observation window. See PostGamePolicy.h for the freeze rationale.
+    //
+    // Latched *before* CheckWinCondition so the tick that declares the result
+    // still runs the full pipeline once — clients get the final board state
+    // streamed alongside the game-over GameInfo, not the state from up to
+    // three frames earlier.
+    const bool wasOver = gameOverSent;
     CheckWinCondition(0);
+    if (wasOver)
+        return;
     StreamResources(0);
     StreamCommandQueues(0);
     BroadcastGameInfo(0);
@@ -209,6 +225,16 @@ void StateStreamer::CheckWinCondition(int) {
                 static_cast<uint8_t>(teamHandler.AllyTeam(winningTeam)) };
             SLOG(SPRING_LOG_NOTICE, "GAME OVER: team %d (allyteam %d) wins (frame %d)",
                 winningTeam, teamHandler.AllyTeam(winningTeam), frame);
+            // Latch the result in the relay even though this path builds its
+            // own broadcast: `gameOverRelay` is what the sim freeze, the
+            // post-game verb gate and the late-join replay all read, and a
+            // fallback win has to stop the world exactly like a Lua-declared
+            // one. ConsumePending is drained immediately — the broadcast is
+            // right below, and the branch above is unreachable once
+            // gameOverSent latches, so an un-drained `pending` would sit true
+            // forever with nobody left to send it.
+            gameOverRelay.Declare(winners, frame);
+            { std::vector<uint8_t> drained; gameOverRelay.ConsumePending(drained); }
             // Broadcast GameInfo with game_over=true (NOT via paused — a normal
             // pause must not end the game) + the winning allyteam.
             auto gameOver = Protocol::BuildGameInfo(

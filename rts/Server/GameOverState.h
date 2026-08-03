@@ -38,10 +38,11 @@ public:
     // Record the game result. First declaration wins (a game is over once); a
     // later declaration — e.g. the fallback firing after a gadget already
     // called Spring.GameOver — is ignored so the winners can't be overwritten.
-    void Declare(const std::vector<uint8_t>& winners) {
+    void Declare(const std::vector<uint8_t>& winners, int frame = 0) {
         if (declared)
             return;
         winningAllyTeams = winners;
+        declaredFrame = frame;
         declared = true;
         pending = true;
     }
@@ -59,9 +60,20 @@ public:
 
     bool IsDeclared() const { return declared; }
 
+    // The retained result, for everything that needs it *after* the one-shot
+    // broadcast has already gone out. ConsumePending intentionally fires once
+    // — a client that authenticates later never saw it, and without this a
+    // spectator joining a finished match gets a normal live HUD with no
+    // overlay (observed live 2026-08-03: a spectator joining ~2400 frames
+    // after the win saw a game that looked like it was still being played).
+    // ClientMessageHandler replays a game-over GameInfo from these on auth.
+    const std::vector<uint8_t>& Winners() const { return winningAllyTeams; }
+    int DeclaredFrame() const { return declaredFrame; }
+
 private:
     bool declared = false;                    // latched forever after first game-over
     bool pending  = false;                    // true until StateStreamer broadcasts once
+    int  declaredFrame = 0;                   // sim frame the result was declared at
     std::vector<uint8_t> winningAllyTeams;    // as passed to Spring.GameOver(...)
 };
 

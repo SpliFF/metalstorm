@@ -104,6 +104,26 @@ describe("war state", function()
         assert.are.equal('active', world.gameRulesParams['war_state'])
         assert.are.equal(0, #world.gameOverCalls)
     end)
+
+    -- GG.WarState is the in-sim mirror of the rulesParam, and it is load-
+    -- bearing: game_objectives.lua reads it to stop the systemic generator
+    -- once the war leaves 'active'. Without it the generator kept spawning
+    -- missions into a war that was ending (a live Meridian board grew 9 → 34
+    -- objectives past the declared win, 2026-08-03). A gadget cannot read the
+    -- param back cheaply, so drift between the two would silently un-gate the
+    -- generator — hence asserted at every state, not just at init.
+    it("mirrors the war state to GG.WarState at every transition", function()
+        local world = load(MERIDIAN_SIDES)
+        assert.are.equal('active', GG.WarState)
+
+        world.complete(VICTORY_OBJ, 4)
+        assert.are.equal('winding_down', GG.WarState)
+        assert.are.equal(world.gameRulesParams['war_state'], GG.WarState)
+
+        world.runTo(WINDING_DOWN_FRAMES)
+        assert.are.equal('over', GG.WarState)
+        assert.are.equal(world.gameRulesParams['war_state'], GG.WarState)
+    end)
 end)
 
 describe("victory objective completing", function()

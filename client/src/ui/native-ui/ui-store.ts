@@ -95,7 +95,7 @@ export class UIStore {
     // State mirrors
     private gameRulesParams = new Map<string, number | string>();
     private teamRulesParams = new Map<number, Map<string, number | string>>();
-    private playerRoster = new Map<number, PlayerInfo>();
+    private players = new Map<number, PlayerInfo>();
     private selection: UnitSelection = { unitIds: [], cmdDescs: [] };
     private economy = new Map<number, TeamEconomy>();
     private unitQueues = new Map<number, any[]>(); // unitId -> command queue
@@ -173,7 +173,7 @@ export class UIStore {
 
     /** Get player info */
     getPlayer(playerId: number): PlayerInfo | undefined {
-        return this.playerRoster.get(playerId);
+        return this.players.get(playerId);
     }
 
     /** Get current selection */
@@ -188,8 +188,19 @@ export class UIStore {
 
     /** Get all players */
     getPlayers(): PlayerInfo[] {
-        return Array.from(this.playerRoster.values());
+        return Array.from(this.players.values());
     }
+
+    /** Get player roster — native-JS widget public API (mirrors
+     *  gameRulesParam/teamRulesParam's singular-getter shape; see
+     *  scoreboard-panel.js / authority-bar.js's `ctx.store.playerRoster()`).
+     *  Arrow-function field, not a prototype method: callers destructure it
+     *  off `ctx.store` into a bare reference before calling
+     *  (`const getRoster = ctx.store.playerRoster; getRoster()`), which would
+     *  drop `this` for an ordinary method. */
+    playerRoster = (): PlayerInfo[] => {
+        return this.getPlayers();
+    };
 
     /** Get the current org-group snapshot (own team, PLAN-macro-ui.md §3). */
     getOrgGroups(): readonly OrgGroupSummary[] {
@@ -257,22 +268,22 @@ export class UIStore {
 
     /** Update player roster */
     updatePlayerRoster(players: PlayerInfo[]): void {
-        this.playerRoster.clear();
+        this.players.clear();
         for (const player of players) {
-            this.playerRoster.set(player.playerId, player);
+            this.players.set(player.playerId, player);
         }
         this.notifySubscribers(['playerRoster']);
     }
 
     /** Add or update a player */
     updatePlayer(player: PlayerInfo): void {
-        this.playerRoster.set(player.playerId, player);
+        this.players.set(player.playerId, player);
         this.notifySubscribers(['playerRoster']);
     }
 
     /** Remove a player */
     removePlayer(playerId: number): void {
-        this.playerRoster.delete(playerId);
+        this.players.delete(playerId);
         this.notifySubscribers(['playerRoster']);
     }
 
@@ -384,7 +395,7 @@ export class UIStore {
     clear(): void {
         this.gameRulesParams.clear();
         this.teamRulesParams.clear();
-        this.playerRoster.clear();
+        this.players.clear();
         this.selection = { unitIds: [], cmdDescs: [] };
         this.economy.clear();
         this.unitQueues.clear();
