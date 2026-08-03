@@ -1,0 +1,113 @@
+// ScenarioDiscovery — enumerate the scenario files a game ships under
+// `<game>/scenarios/*.lua`, so the lobby can offer them at room-create
+// time instead of leaving the choice to a dev-only manifest field.
+//
+// WHY THIS EXISTS (PLAN-endtoend.md D10). `game_scenario.lua` reads the
+// scenario name from the `scenario` modoption. Until this module, the only
+// writer of that modoption was the `/api/rooms/direct` manifest path — so a
+// war created the way a *player* creates one (the Create Game dialog) staged
+// no scenario at all, and therefore had no `victory = true` objective, and
+// therefore could never end. The design call recorded in
+// PLAN-metalstorm-wars.md §7.1 is: **the scenario is an ordinary room
+// setting**, defaulted from the room's map and overridable by the host,
+// rather than a hidden property of the boot path.
+//
+// A scenario already declares the map it is written for (`world.map`), so
+// the map→scenario default reads a coupling the *content* already states
+// rather than inventing one in the lobby. The lobby surfaces the chosen
+// scenario in the room JSON so the coupling is visible, not silent.
+//
+// Expected shape at `<game>/scenarios/<id>.lua` (PLAN-persistence.md §5,
+// the format `game_scenario.lua` loads):
+//
+//     return {
+//         version = 1,
+//         name    = 'Meridian Basin — Standard War',
+//         tutorial = false,
+//         world   = { map = 'meridian_basin', regions = { ... } },
+//         objectives = {
+//             { type = 'control', ..., victory = true },
+//         },
+//     }
+//
+// Like GameDiscovery/AIDiscovery this parses with a bare `lua_State` and
+// never touches the sim's Lua API — the lobby binary has no VFS, no
+// `Spring.*`, and no sim globals to offer. A scenario that needs any of
+// those at file scope will fail to load here and is simply not offered;
+// `game_scenario.lua` remains the authority at GameStart.
+#pragma once
+
+#include <string>
+#include <vector>
+
+namespace ScenarioDiscovery {
+
+/// One discovered scenario file.
+struct ScenarioInfo {
+    /// Stable identifier — the file stem, which is exactly the string
+    /// `game_scenario.lua` feeds to `VFS.Include('scenarios/' .. name ..
+    /// '.lua')`. This is what goes into the `scenario` modoption.
+    std::string id;
+
+    /// Human-readable `name` field. Falls back to `id` when absent.
+    std::string displayName;
+
+    /// `world.map` — the map this scenario is authored for. Empty when
+    /// the scenario declares none, in which case it is never picked as a
+    /// map default (it can still be chosen explicitly).
+    std::string mapId;
+
+    /// `tutorial` field. Tutorial scenarios are excluded from the
+    /// map-default pick — the tutorial has its own boot path
+    /// (`?direct=tutorial`) and is not what a Create Game default should
+    /// silently hand a player.
+    bool tutorial = false;
+
+    /// True when any entry in `objectives` carries `victory = true`.
+    ///
+    /// This is the whole point of the module: `victory` is the ONLY
+    /// terminal condition `game_gameover.lua` watches, so a scenario
+    /// without one produces a war that cannot end. The lobby prefers
+    /// terminal scenarios when defaulting and warns loudly at room start
+    /// when the war it is about to spawn has no terminal condition.
+    bool terminal = false;
+};
+
+/// Scan `<gamePath>/scenarios/` for `*.lua` files and parse each.
+/// A missing `scenarios/` directory returns an empty vector — most games
+/// ship none, and that is not an error. Results are sorted by `id` so the
+/// lobby's dropdown ordering is stable across restarts.
+std::vector<ScenarioInfo> Discover(const std::string& gamePath);
+
+/// Pick the scenario to default a room on `mapId` to, or nullptr when the
+/// map has no default.
+///
+/// Rules:
+///   1. `world.map` must equal `mapId`.
+///   2. Tutorials are never candidates — the tutorial has its own boot path
+///      and is not what a Create Game default should silently hand a player.
+///   3. **`terminal` is required, not merely preferred.** The whole purpose
+///      of this default is "don't create a war that cannot end", and a
+///      non-terminal scenario does not serve it — auto-applying one would
+///      stage units and objectives the host never asked for while leaving
+///      the war just as endless. A non-terminal scenario stays explicitly
+///      selectable; it is only never *automatic*. (Concretely: this is what
+///      keeps `scenario_smoke_test` off every dev manifest that boots on
+///      green_flat_x34_v3 without naming a scenario.)
+///   4. Ties break on lowest `id`, so the pick is deterministic. Callers
+///      should log which scenario they applied; `DefaultForMap` is
+///      deliberately silent so it stays testable.
+///
+/// The returned pointer aliases into `scenarios` and is valid only as long
+/// as that vector is.
+const ScenarioInfo* DefaultForMap(const std::vector<ScenarioInfo>& scenarios,
+                                  const std::string& mapId);
+
+/// Find a scenario by its `id`, or nullptr. Used to validate a
+/// host-supplied `scenario` before it is written to a modoption, so a
+/// typo surfaces in the lobby rather than as a hard `error()` inside
+/// `game_scenario.lua` at GameStart.
+const ScenarioInfo* FindById(const std::vector<ScenarioInfo>& scenarios,
+                             const std::string& id);
+
+} // namespace ScenarioDiscovery

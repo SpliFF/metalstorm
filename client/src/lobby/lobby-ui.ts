@@ -113,11 +113,33 @@ const STRATEGOS_PROFILES: { id: string; label: string }[] = [
     { id: 'npc_raider', label: 'NPC Raider (needs scenario slate)' },
 ];
 
+/// One entry from `GET /api/games/<id>/scenarios` — a war template the game
+/// ships under `scenarios/<id>.lua` (PLAN-endtoend.md D10).
+interface AvailableScenarioInfo {
+    /// The `scenario` modoption value; what game_scenario.lua VFS.Includes.
+    id: string;
+    displayName: string;
+    /// The scenario's `world.map`. Used to filter the picker down to the
+    /// map being created on, and to pick the default.
+    map: string;
+    /// Tutorial scenarios have their own boot path and are never offered
+    /// as a plain create-room choice.
+    tutorial: boolean;
+    /// Whether the scenario declares a `victory = true` objective. False
+    /// means the war has no terminal condition and cannot end — surfaced
+    /// in the picker rather than discovered 40 minutes in.
+    terminal: boolean;
+}
+
 interface CurrentRoom {
     id: number; name: string; mapId: string; gameId: string;
     state: number; players: RoomPlayerInfo[];
     aiSlots: RoomAISlotInfo[];
     gameServerPort: number;
+    /// Room modoptions as the lobby reports them. `scenario` is the war
+    /// this room will stage; the room screen shows it so the coupling
+    /// between map and war is visible rather than implicit.
+    modOptions: Record<string, string>;
 }
 
 export class LobbyUI {
@@ -192,6 +214,21 @@ export class LobbyUI {
     /// Defaults to the first discovered game once GameListUpdate
     /// arrives. Passed to RoomCreate.game_id on create.
     private selectedGameId: string = '';
+
+    /// Scenarios (war templates) the selected game ships, from
+    /// `GET /api/games/<id>/scenarios`. Empty for games that ship none,
+    /// which hides the War picker entirely. PLAN-endtoend.md D10.
+    private availableScenarios: AvailableScenarioInfo[] = [];
+
+    /// The game id `availableScenarios` was fetched for — the list is
+    /// per-game, so changing the game dropdown invalidates it.
+    private availableScenariosForGame: string = '';
+
+    /// The scenario id the user picked in the create-room form, or null
+    /// for "whatever this map's war is" (the server-side default).
+    /// Distinct from '': that is an explicit "no scenario", which the
+    /// server honours rather than overriding with the map default.
+    private selectedScenarioId: string | null = null;
 
     // ─── Public read-only accessors for debugging / automation ───
 
@@ -456,11 +493,19 @@ export class LobbyUI {
             gameId: newGameId,
             state: r.state ?? 0, players, aiSlots,
             gameServerPort: r.game_server_port ?? 0,
+            modOptions: (r.modoptions && typeof r.modoptions === 'object')
+                ? r.modoptions as Record<string, string> : {},
         };
 
         // Refresh AI list when entering a room with a different game
         if (this.availableAIsForGame !== newGameId) {
             this.refreshAIList();
+        }
+        // Same for the scenario list — the room screen resolves the room's
+        // `scenario` modoption to a display name out of it. Covers the
+        // auto-rejoin path, where the create form was never opened.
+        if (newGameId && this.availableScenariosForGame !== newGameId) {
+            this.refreshScenarioList(newGameId);
         }
 
         const gameRunning = this.currentRoom.state === 3 || this.currentRoom.state === 4;
@@ -662,7 +707,7 @@ export class LobbyUI {
             const name = (document.getElementById('new-room-name') as HTMLInputElement).value || 'Game';
             const selected = this.container.querySelector('.map-card.selected');
             const mapId = selected?.getAttribute('data-map-id') ?? '';
-            this.createRoom(name, mapId);
+            this.createRoom(name, mapId, this.selectedScenarioId);
         };
 
         // Populate the game dropdown if the list has already arrived.
@@ -694,6 +739,119 @@ export class LobbyUI {
         sel.disabled = false;
         sel.onchange = () => {
             this.selectedGameId = sel.value;
+            // The scenario list is per-game. Drop the stale pick rather
+            // than carry a Metalstorm war id into a ZK room.
+            this.selectedScenarioId = null;
+            this.refreshScenarioList();
+        };
+        this.refreshScenarioList();
+    }
+
+    /// Fetch the selected game's scenarios, once per game. Games that ship
+    /// none return `[]` and the War row stays hidden, so this is a no-op
+    /// for every game but Metalstorm today. PLAN-endtoend.md D10.
+    private async refreshScenarioList(forGameId?: string): Promise<void> {
+        const gameId = forGameId ?? this.selectedGameId;
+        if (!gameId) return;
+        if (this.availableScenariosForGame === gameId) {
+            this.renderScenarioOptions();
+            return;
+        }
+        try {
+            const list = await this.lobbyGet(
+                `/api/games/${encodeURIComponent(gameId)}/scenarios`);
+            this.availableScenarios = Array.isArray(list) ? list.map((s: any) => ({
+                id: s.id ?? '', displayName: s.displayName ?? s.id ?? '',
+                map: s.map ?? '', tutorial: !!s.tutorial, terminal: !!s.terminal,
+            })) : [];
+            this.availableScenariosForGame = gameId;
+        } catch {
+            this.availableScenarios = [];
+            this.availableScenariosForGame = gameId;
+        }
+        this.renderScenarioOptions();
+        // Also refreshes the room screen's "War:" label, which resolves the
+        // room's scenario id to a display name out of this same list.
+        if (this.currentScreen === 'room' && this.currentRoom) this.showRoom();
+    }
+
+    /// Which scenarios are offerable for the map currently selected in the
+    /// create form. Tutorials are excluded (they have their own boot path),
+    /// and so are scenarios authored for a different map — a scenario's
+    /// region keys only make sense against its own map's region graph, so
+    /// offering a cross-map pairing would stage a broken war.
+    private scenariosForSelectedMap(): AvailableScenarioInfo[] {
+        return this.availableScenarios.filter(
+            s => !s.tutorial && s.map === this.selectedMapId);
+    }
+
+    /// Repopulate the War picker. Hidden when the selected game+map pair
+    /// has no scenarios at all, so create-room is visually unchanged for
+    /// games that don't use them.
+    private renderScenarioOptions(): void {
+        const row = document.getElementById('scenario-row');
+        const sel = document.getElementById('scenario-select') as HTMLSelectElement | null;
+        const note = document.getElementById('scenario-note');
+        if (!row || !sel) return;
+
+        const offerable = this.scenariosForSelectedMap();
+        if (offerable.length === 0) {
+            row.style.display = 'none';
+            // Don't leave a pick from a previous map applied to this one.
+            this.selectedScenarioId = null;
+            return;
+        }
+        row.style.display = 'block';
+
+        // The default entry carries no value, so the create request omits
+        // `scenario` entirely and the server applies the map's default —
+        // one owner for that decision, not two that can disagree. Mirrors
+        // ScenarioDiscovery::DefaultForMap exactly, including its rule that a
+        // non-terminal scenario is never automatic; when the map has only
+        // endless wars the honest default is "no war", not one of them.
+        const serverDefault = offerable.find(s => s.terminal) ?? null;
+        const options = [
+            serverDefault
+                ? `<option value="">${this.esc(serverDefault.displayName)} (default for this map)</option>`
+                : `<option value="">No war (default) — a free-form battle with no ending</option>`,
+            ...offerable.map(s => {
+                const selAttr = s.id === this.selectedScenarioId ? ' selected' : '';
+                const suffix = s.terminal ? '' : ' — no ending';
+                return `<option value="${this.esc(s.id)}"${selAttr}>`
+                    + `${this.esc(s.displayName)}${suffix}</option>`;
+            }),
+        ];
+        sel.innerHTML = options.join('');
+        sel.value = this.selectedScenarioId ?? '';
+
+        const describe = () => {
+            if (!note) return;
+            const picked = this.selectedScenarioId
+                ? offerable.find(s => s.id === this.selectedScenarioId)
+                : serverDefault;
+            if (!picked) {
+                // No scenario at all — the map ships no endable war. Say so
+                // here rather than let the player find out by attrition.
+                note.className = 'scenario-note endless';
+                note.textContent =
+                    'No war will be staged, so this battle has no ending. '
+                    + 'Leave by detaching.';
+            } else if (!picked.terminal) {
+                note.className = 'scenario-note endless';
+                note.textContent =
+                    'This war declares no victory objective — it has no ending. '
+                    + 'Leave by detaching.';
+            } else {
+                note.className = 'scenario-note';
+                note.textContent =
+                    `Ends when the war's victory objective is completed.`;
+            }
+        };
+        describe();
+
+        sel.onchange = () => {
+            this.selectedScenarioId = sel.value === '' ? null : sel.value;
+            describe();
         };
     }
 
@@ -730,8 +888,51 @@ export class LobbyUI {
                 el.querySelectorAll('.map-card').forEach(c => c.classList.remove('selected'));
                 card.classList.add('selected');
                 this.selectedMapId = card.getAttribute('data-map-id') ?? '';
+                // Wars are authored per map, so the picker's contents change
+                // with the map. Drop any pick that belonged to the old one.
+                this.selectedScenarioId = null;
+                this.renderScenarioOptions();
             };
         });
+
+        // The map list usually arrives after renderGameOptions() ran, so the
+        // War row was rendered against an empty `selectedMapId`. Redo it now
+        // that a map is actually selected.
+        this.renderScenarioOptions();
+    }
+
+    /// The room screen's "Map · War" line (PLAN-endtoend.md D10).
+    ///
+    /// The war is read from the room's own `scenario` modoption, which the
+    /// lobby resolved at create time — not re-derived here, so what the
+    /// player reads is exactly what the sim will stage. Its display name
+    /// comes from the cached scenario list when we have it and falls back
+    /// to the raw id when we don't (a room joined without ever opening the
+    /// create form). Returns '' for rooms with no scenario in a game that
+    /// ships none, which collapses the row.
+    private renderRoomSetupLine(r: CurrentRoom): string {
+        const parts: string[] = [];
+        if (r.mapId) parts.push(`Map: <strong>${this.esc(r.mapId)}</strong>`);
+
+        const scenarioId = r.modOptions.scenario ?? '';
+        const gameHasScenarios =
+            this.availableScenariosForGame === r.gameId
+            && this.availableScenarios.length > 0;
+        if (scenarioId) {
+            const info = this.availableScenarios.find(s => s.id === scenarioId);
+            const label = info ? info.displayName : scenarioId;
+            // Only claim "no ending" when we actually know the scenario —
+            // an unrecognised id means we have no list, not that the war
+            // is endless.
+            const warn = info && !info.terminal
+                ? ` <span class="scenario-note endless">(no ending)</span>` : '';
+            parts.push(`War: <strong>${this.esc(label)}</strong>${warn}`);
+        } else if (gameHasScenarios) {
+            parts.push(
+                `War: <span class="scenario-note endless">none — this war `
+                + `cannot end</span>`);
+        }
+        return parts.length > 0 ? parts.join(' &middot; ') : '';
     }
 
     private renderRoomList(): void {
@@ -993,6 +1194,8 @@ export class LobbyUI {
                 + `</div>`;
         }).join('');
 
+        // (The map + war line is built by renderRoomSetupLine below.)
+
         // Host-only: "Add AI" row, rendered below the AI slots. Lists
         // every discovered plugin. Shows a disabled placeholder if the
         // list hasn't arrived yet (server responds asynchronously).
@@ -1044,6 +1247,7 @@ export class LobbyUI {
         this.container.innerHTML = renderTemplate(this.templates.room, {
             name: this.esc(r.name),
             state: ROOM_STATE_LABELS[r.state] || '?',
+            setup_html: this.renderRoomSetupLine(r),
             players_html: playersHtml + aiRowsHtml + addAIHtml,
             actions_html: actions.join(''),
         });
@@ -1167,11 +1371,18 @@ export class LobbyUI {
 
     // ─── Room operations (all HTTP POST) ───
 
-    async createRoom(name: string, mapId: string = ''): Promise<void> {
+    async createRoom(name: string, mapId: string = '',
+                     scenarioId: string | null = null): Promise<void> {
         if (!this.authToken) return;
-        const data = await this.lobbyPost('/api/rooms', {
+        // `scenario` is omitted, not sent empty, when the host left the
+        // picker on its default — an empty string means "deliberately no
+        // scenario" server-side and would suppress the map default
+        // (PLAN-endtoend.md D10).
+        const body: Record<string, string> = {
             name, map: mapId, game: this.selectedGameId,
-        });
+        };
+        if (scenarioId !== null) body.scenario = scenarioId;
+        const data = await this.lobbyPost('/api/rooms', body);
         if (data?.id) {
             this.updateCurrentRoomFromJson(data);
             if (this.currentRoom) this.showRoom();
@@ -1433,11 +1644,20 @@ export class LobbyUI {
             });
         }
         const newGameId = u.gameId() ?? '';
+        // RoomStateUpdate carries no modoptions, so carry the ones we already
+        // have for this room forward rather than blanking the room screen's
+        // "War:" label every time a player readies up. A different room id
+        // means different modoptions, so those start empty until the JSON
+        // path (updateCurrentRoomFromJson) fills them in.
+        const carriedModOptions =
+            this.currentRoom && this.currentRoom.id === u.roomId()
+                ? this.currentRoom.modOptions : {};
         this.currentRoom = {
             id: u.roomId(), name: u.name() ?? '', mapId: u.mapId() ?? '',
             gameId: newGameId,
             state: u.state(), players, aiSlots,
             gameServerPort: u.gameServerPort(),
+            modOptions: carriedModOptions,
         };
 
         // The AI list is per-game (each game has its own ai/ folder
@@ -1446,6 +1666,9 @@ export class LobbyUI {
         // list, or when we don't have a cached list at all.
         if (this.availableAIsForGame !== newGameId) {
             this.refreshAIList();
+        }
+        if (newGameId && this.availableScenariosForGame !== newGameId) {
+            this.refreshScenarioList(newGameId);
         }
 
         // Loading (3) or Active (4) → game is running, jump to the

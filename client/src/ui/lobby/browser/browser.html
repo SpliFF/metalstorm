@@ -15,6 +15,15 @@
         <div id="map-selector" class="map-grid">
             <div class="empty-state">Loading maps...</div>
         </div>
+        <!-- Scenario ("war") picker, PLAN-endtoend.md D10. Hidden entirely
+             for games that ship no scenarios (Paper Tanks, ZK) so their
+             create form is unchanged. Repopulated whenever the game or map
+             selection changes; the default is the map's own war. -->
+        <div id="scenario-row" style="display:none">
+            <div class="map-select-label">War:</div>
+            <select id="scenario-select" class="game-select"></select>
+            <div id="scenario-note" class="scenario-note"></div>
+        </div>
         <div class="btn-row">
             <button id="do-create-btn" class="primary">Create</button>
             <button id="cancel-create-btn" class="secondary">Cancel</button>

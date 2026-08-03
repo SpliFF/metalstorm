@@ -15,7 +15,10 @@ local WINDING_DOWN_FRAMES = 300   -- must match the gadget's constant
 
 --- Fresh mock world + a fresh game_gameover.lua instance loaded against it.
 --- `sides` is the scenario's sides table (nil = no scenario at all).
-local function load(sides)
+--- `victoryCount` is what GG.Objectives.VictoryObjectiveCount() reports —
+--- how many `victory = true` objectives the war staged. Defaults to 1 (a
+--- normal, endable war); pass 0 for the endless case (PLAN-endtoend.md D10).
+local function load(sides, victoryCount)
     local world = {
         frame = 0,
         gameRulesParams = {},
@@ -55,8 +58,11 @@ local function load(sides)
                 assert.are.equal('resolving', world.gameRulesParams['war_state'])
                 return 3
             end,
+            VictoryObjectiveCount = function()
+                return victoryCount == nil and 1 or victoryCount
+            end,
         },
-        Scenario = sides and { data = { sides = sides } } or nil,
+        Scenario = sides and { name = 'meridian_basin', data = { sides = sides } } or nil,
     }
 
     dofile('./game_gameover.lua')
@@ -226,5 +232,71 @@ describe("edges", function()
 
         assert.are.equal(1, #world.gameOverCalls)
         assert.are.same({ 4, 5, 6, 7 }, world.gameOverCalls[1])
+    end)
+end)
+
+-- PLAN-endtoend.md D10 — "a war created through the lobby has no scenario, so
+-- it can never end". The lobby now defaults a scenario per map, but this is
+-- the check no boot path can bypass: it reads the staged board, not how the
+-- board was asked for.
+describe("endless-war check", function()
+    local function echoesMatching(world, needle)
+        local hits = 0
+        for _, msg in ipairs(world.echoes) do
+            if msg:find(needle, 1, true) then hits = hits + 1 end
+        end
+        return hits
+    end
+
+    it("publishes war_can_end = 1 when a victory objective exists", function()
+        local world = load(MERIDIAN_SIDES, 1)
+        world.runTo(60)
+        assert.are.equal(1, world.gameRulesParams['war_can_end'])
+        assert.are.equal(0, echoesMatching(world, 'NO victory objective'))
+    end)
+
+    it("warns loudly and publishes war_can_end = 0 when none exists", function()
+        local world = load(MERIDIAN_SIDES, 0)
+        world.runTo(60)
+        assert.are.equal(0, world.gameRulesParams['war_can_end'])
+        assert.are.equal(1, echoesMatching(world, 'NO victory objective'))
+    end)
+
+    it("names the scenario that declared no victory objective", function()
+        local world = load(MERIDIAN_SIDES, 0)
+        world.runTo(60)
+        assert.are.equal(1, echoesMatching(world, 'scenario "meridian_basin" declares none'))
+    end)
+
+    it("names the unset modoption when no scenario was staged at all", function()
+        -- This is the exact D10 shape: a lobby-created room, `scenario`
+        -- modoption never written, game_scenario.lua returned early.
+        local world = load(nil, 0)
+        world.runTo(60)
+        assert.are.equal(1, echoesMatching(world, 'the `scenario` modoption is unset'))
+    end)
+
+    it("warns once, not every frame", function()
+        local world = load(MERIDIAN_SIDES, 0)
+        world.runTo(WINDING_DOWN_FRAMES * 2)
+        assert.are.equal(1, echoesMatching(world, 'NO victory objective'))
+    end)
+
+    it("does not check before frame 60 — objectives are still staging", function()
+        local world = load(MERIDIAN_SIDES, 0)
+        world.runTo(59)
+        assert.is_nil(world.gameRulesParams['war_can_end'])
+        assert.are.equal(0, echoesMatching(world, 'NO victory objective'))
+    end)
+
+    it("survives a GG.Objectives with no VictoryObjectiveCount", function()
+        -- Forward-compat: an older game_objectives.lua in the same archive
+        -- must degrade to the warning, not to a Lua error that takes the
+        -- whole gadget down.
+        local world = load(MERIDIAN_SIDES, 1)
+        _G.GG.Objectives.VictoryObjectiveCount = nil
+        world.runTo(60)
+        assert.are.equal(0, world.gameRulesParams['war_can_end'])
+        assert.are.equal(1, echoesMatching(world, 'NO victory objective'))
     end)
 end)

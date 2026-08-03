@@ -208,7 +208,45 @@ function gadget:Initialize()
     publishState()
 end
 
+-- The invariant, checked in the sim itself (PLAN-endtoend.md D10): a war with
+-- no `victory = true` objective has no terminal condition and will run
+-- forever. The lobby now defaults a scenario per map and warns at room start,
+-- but this is the check that cannot be bypassed by *any* boot path —
+-- create-room, --direct manifest, headless run — because it reads the staged
+-- board rather than how the board was requested.
+--
+-- Frame 60, not GameStart: game_scenario stages objectives at GameStart and
+-- resolves the deferred ones at frame 30, and game_objectives' systemic
+-- generator has had a tick. By 2 s in, whatever this war has is what it has.
+--
+-- Loud, not fatal. A scenario-less war is legitimate (a sandbox, a smoke
+-- fixture, the tutorial); what was wrong was that it looked identical to a
+-- real one. Deliberately says so on the client too, so a player in an
+-- endless room finds out at the start rather than by attrition.
+local ENDLESS_CHECK_FRAME = 60
+local endlessChecked = false
+
+local function checkWarCanEnd()
+    local count = GG.Objectives and GG.Objectives.VictoryObjectiveCount
+        and GG.Objectives.VictoryObjectiveCount() or 0
+    Spring.SetGameRulesParam('war_can_end', count > 0 and 1 or 0, PUBLIC)
+    if count > 0 then return end
+
+    local scenario = GG.Scenario and GG.Scenario.name
+    Spring.Echo('[game_gameover] WARNING: this war has NO victory objective' ..
+                (scenario
+                    and (' — scenario "' .. scenario .. '" declares none')
+                    or ' — no scenario was staged (the `scenario` modoption ' ..
+                        'is unset)') ..
+                '; it has no terminal condition and cannot end. ' ..
+                'See PLAN-metalstorm-wars.md §7.1.')
+end
+
 function gadget:GameFrame(frame)
+    if not endlessChecked and frame >= ENDLESS_CHECK_FRAME then
+        endlessChecked = true
+        checkWarCanEnd()
+    end
     if resolveAtFrame and frame >= resolveAtFrame then
         resolveAtFrame = nil
         resolve()

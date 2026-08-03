@@ -283,8 +283,28 @@ end
 
 local function stageAI(entries)
     aiStipends = {}
+    local liveTeams = buildLiveTeams()
+    local warned = {}
     for _, a in ipairs(entries or {}) do
         local team = a.team
+        -- Same guard stageUnits already had, and for the same reason: a
+        -- scenario declares more sides than a given launch supplies, and
+        -- SetTeamRulesParam on a team the game doesn't have is a hard engine
+        -- error. Unguarded it aborted gadget:GameStart partway, which left
+        -- GG.Scenario.name/.data unset — and game_gameover derives the
+        -- winning allyteams from GG.Scenario.data.sides, so the war became
+        -- unwinnable again for a *second* reason (PLAN-endtoend.md D10).
+        -- Only reachable from the player path: every direct manifest that
+        -- verified this chain declared all 8 Meridian teams.
+        if team ~= nil and not liveTeams[team] then
+            if not warned[team] then
+                warned[team] = true
+                Spring.Echo('[game_scenario] WARNING: scenario declares an AI slate for team ' ..
+                            tostring(team) .. ' which this game does not have — skipped ' ..
+                            '(add a player/AI slot for it in the room manifest)')
+            end
+            goto continue
+        end
         local function set(key, value)
             if value ~= nil then
                 Spring.SetTeamRulesParam(team, key, value, ALLIED_LOS)
@@ -326,6 +346,7 @@ local function stageAI(entries)
                         ' profile=' .. tostring(a.profile) ..
                         ' slate=' .. tostring(slate and commaList(slate.kinds)))
         end
+        ::continue::
     end
 end
 
@@ -472,7 +493,32 @@ local function notifyConvoySpawn(routeId, unitID)
 end
 
 local function stageObjectives(objectives)
+    local liveTeams = buildLiveTeams()
+    local warned = {}
     for _, o in ipairs(objectives or {}) do
+        -- Third and last place the "scenario declares more teams than the
+        -- launch supplied" mismatch bites (PLAN-endtoend.md D10; stageUnits
+        -- and stageAI guard the other two). An objective scoped to a missing
+        -- team is not merely useless — nobody can complete it, and when it
+        -- expires or resolves, game_objectives pays its reward through
+        -- GG.Authority, whose getTeamPool does Spring.GetTeamRulesParam on
+        -- that team and throws "Bad teamID". That error propagates out of the
+        -- Objectives gadget's callin, so gadgetHandler REMOVES the gadget —
+        -- and with the objective evaluator gone, the war's victory objective
+        -- can never progress. Observed live: "Removed gadget: Objectives" at
+        -- frame 5669 of a two-team lobby room on Meridian Basin.
+        --
+        -- Open-race objectives (forTeam nil) are unaffected, which is why the
+        -- victory objective itself survives either way.
+        if o.forTeam ~= nil and not liveTeams[o.forTeam] then
+            if not warned[o.forTeam] then
+                warned[o.forTeam] = true
+                Spring.Echo('[game_scenario] WARNING: scenario scopes objectives to team ' ..
+                            tostring(o.forTeam) .. ' which this game does not have — skipped ' ..
+                            '(add a player/AI slot for it in the room manifest)')
+            end
+            goto continue
+        end
         -- Authoring convenience: flat type-specific fields (region,
         -- targetUnitID, duration) fold into GG.Objectives.Create's `params`
         -- sub-table — the shape game_objectives.lua's evaluators read.
@@ -516,6 +562,7 @@ local function stageObjectives(objectives)
                 victory = o.victory,
             })
         end
+        ::continue::
     end
 end
 
