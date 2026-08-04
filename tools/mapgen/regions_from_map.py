@@ -406,7 +406,35 @@ def build_regions(hs, ok, comp, W, H, target: int, starts, seed: int):
     return regions, cols, rows, cw, ch
 
 
-def to_lua(regions):
+def map_extent(W: int, H: int) -> tuple[int, int]:
+    """The map's size in elmos, which is NOT the sample count times 8.
+
+    The heightmap has (mapx + 1) x (mapy + 1) samples — one per grid CORNER —
+    while the map itself is mapx * mapy squares, i.e. `(W - 1) * 8` elmos wide.
+    Emitting a polygon vertex at sample index W therefore overshoots the map by
+    exactly one square.
+
+    That overshoot is not cosmetic. regions/partition.lua rejects any region
+    with a vertex outside the map (`pt.x > mapWidth`), and game_regions.lua's
+    response to a failed validation is to fall back to the fixed 2048-elmo
+    grid — silently, as far as anything downstream can tell. So every graph
+    this tool wrote was being discarded by the sim, and every named region key
+    (which is what scenarios and the AI's slate address) resolved to nothing.
+    Measured on scorched_crossing_v2.4: vertices at 7176 against a 7168-elmo
+    map, "7 regions out of bounds", provider = grid.
+    """
+    return (W - 1) * ELMOS_PER_SQUARE, (H - 1) * ELMOS_PER_SQUARE
+
+
+def _poly_elmos(c, W: int, H: int):
+    """A cell's rectangle in elmos, clamped to the map (see `map_extent`)."""
+    mw, mh = map_extent(W, H)
+    x0, x1 = min(c["x0"] * ELMOS_PER_SQUARE, mw), min(c["x1"] * ELMOS_PER_SQUARE, mw)
+    z0, z1 = min(c["z0"] * ELMOS_PER_SQUARE, mh), min(c["z1"] * ELMOS_PER_SQUARE, mh)
+    return x0, x1, z0, z1
+
+
+def to_lua(regions, W, H):
     """Emit `mapdata/regions.lua` — the AUTHORED source, not the export.
 
     This is the file that actually drives everything. `game_regions.lua` picks
@@ -428,8 +456,7 @@ def to_lua(regions):
     ]
     for r in regions:
         c = r["_c"]
-        x0, x1 = c["x0"] * ELMOS_PER_SQUARE, c["x1"] * ELMOS_PER_SQUARE
-        z0, z1 = c["z0"] * ELMOS_PER_SQUARE, c["z1"] * ELMOS_PER_SQUARE
+        x0, x1, z0, z1 = _poly_elmos(c, W, H)
         poly = ", ".join(f"{{x={x}, z={z}}}" for x, z in
                          ((x0, z0), (x1, z0), (x1, z1), (x0, z1)))
         tags = ", ".join(f'"{t}"' for t in r["tags"])
@@ -452,10 +479,7 @@ def to_json(regions, W, H, cw, ch, provider="graph"):
     out_regions = []
     for r in regions:
         c = r["_c"]
-        x0 = c["x0"] * ELMOS_PER_SQUARE
-        x1 = c["x1"] * ELMOS_PER_SQUARE
-        z0 = c["z0"] * ELMOS_PER_SQUARE
-        z1 = c["z1"] * ELMOS_PER_SQUARE
+        x0, x1, z0, z1 = _poly_elmos(c, W, H)
         out_regions.append({
             "key": r["key"],
             "name": r["name"],
@@ -630,7 +654,7 @@ def main(argv=None):
         os.makedirs(mapdata, exist_ok=True)
         lua_path = os.path.join(mapdata, "regions.lua")
         with open(lua_path, "w", encoding="utf-8") as f:
-            f.write(to_lua(regions))
+            f.write(to_lua(regions, W, H))
         # regions.json is MapProcessor's export, not an input — but writing it
         # here too means the graph is live for the AI and the client overlay
         # without waiting for a map reprocess. A reprocess will regenerate it
