@@ -278,6 +278,31 @@ export class WorkerBuildPlacement {
     return this.placement !== null;
   }
 
+  /** The placed-but-unbuilt ghosts, as plain data. Measurement surface for
+   *  PLAN-latency L4's gate bullet 6 (the build-ghost race): the reaper's
+   *  effect is a `dispose()`, so "the ghost survived that snapshot" is only
+   *  observable as this list's contents. Read-only copy. */
+  get pendingBuildList(): Array<{ defId: number; gx: number; gz: number; owners: number[] }> {
+    return this.pendingBuilds.map((pb) => ({
+      defId: pb.defId,
+      gx: pb.gx,
+      gz: pb.gz,
+      owners: [...pb.owners],
+    }));
+  }
+
+  /** Commit the armed placement at a world XZ, skipping the pointer pick.
+   *  Same relationship to the left-click that `clientOrder` has to a
+   *  right-click (L4.1 method note): everything downstream of hit-testing is
+   *  the real path, and hit-testing is client-local and identical in both
+   *  arms of an A/B. Returns false if no placement is armed. */
+  placeArmedBuildAt(x: number, z: number, queue = false): boolean {
+    if (!this.placement) return false;
+    const y = this.sampleTerrainY(x, z) ?? 0;
+    this.issueBuildAt(new Vector3(x, y, z), queue);
+    return true;
+  }
+
   /** Snapshot for `gp:sceneState.buildGhost`. Null when nothing is armed. */
   getGhostState(): BuildGhostState | null {
     const p = this.placement;

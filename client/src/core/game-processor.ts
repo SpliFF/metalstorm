@@ -258,6 +258,10 @@ let gpPendingActions: PendingActionRegistry | null = null;
 /// nothing for a config flag to protect — the control arm exists to measure
 /// against, not to fall back to.
 let gpOptimisticInput = true;
+/// The ~1 Hz `BuildUnitCommandQueues` beat, tallied for the L4 gate's
+/// build-ghost race measurement (bullet 6) — see `snapshotStats`.
+let gpQueueSnapshotCount = 0;
+let gpQueueSnapshotLastMs = 0;
 /// PLAN-latency L4.3 — the bounded positional lean. Separate registry from
 /// `gpPendingActions` on purpose: the overlay's lifecycle is "until the server
 /// confirms", the lean's is "until the server's own motion catches up", and
@@ -1364,6 +1368,11 @@ function gpConnect(msg: GpInitToWorker): void {
         // (Widget forward + the build-pending-ghost reaper land in c5c/c6.)
         onUnitCommandQueues: (queues) => {
             gpLastCommandQueues = queues;
+            // L4 gate bullet 6: the race being tested is "a ghost placed just
+            // before a snapshot". A trial can only aim for that gap if it can
+            // see the ~1 Hz beat, so tally it. (`snapshotStats` probe.)
+            gpQueueSnapshotCount++;
+            gpQueueSnapshotLastMs = performance.now();
             // PLAN-latency L4.1: hand off every optimistic entry this snapshot
             // now carries authoritatively, THEN merge what is still outstanding
             // on top. Order matters — retiring first is what keeps an order
@@ -3634,6 +3643,25 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
             gpBuildPlacement?.startBuildPlacement(
                 num(0), { shift: args[1] === true, ctrl: args[2] === true });
             return null;
+        // — L4 gate bullet 6 probes (the build-ghost race) —
+        // `clientBuildPlace` is the left-click that commits an armed ghost,
+        // minus the terrain pick; `pendingBuilds` is the only observable of
+        // the reaper's verdict, since reaping is a `dispose()`.
+        case 'clientBuildPlace':
+            return gpBuildPlacement?.placeArmedBuildAt(
+                num(0), num(1), args[2] === true) ?? false;
+        case 'pendingBuilds':
+            return gpBuildPlacement?.pendingBuildList ?? [];
+        // The ~1 Hz command-queue beat. A bullet-6 trial has to place its
+        // ghost *into* the gap before a snapshot, which needs the phase.
+        case 'snapshotStats':
+            return {
+                count: gpQueueSnapshotCount,
+                lastAtMs: gpQueueSnapshotLastMs,
+                sinceMs: gpQueueSnapshotLastMs > 0
+                    ? performance.now() - gpQueueSnapshotLastMs : -1,
+                nowMs: performance.now(),
+            };
         // What the native FactoryQueuePanel would render right now: one row per
         // production run, with the confirmed/optimistic split L4.2 added. This
         // is the worker-side value, so it is free of the sceneState post's
