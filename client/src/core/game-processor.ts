@@ -76,6 +76,7 @@ import { DefCache } from './def-cache.js';
 import { fetchAndIngestDefs } from './defs-fetch.js';
 import { PresentationClock } from './presentation-clock.js';
 import { EventScheduler, type ScheduledKind } from './event-scheduler.js';
+import { nextCosmeticProjectileId } from './cosmetic-flight.js';
 // GW4-c5: weapon-FX / projectile / decal / build render modules fold into the
 // worker (audited worker-safe — no DOM/audio; the `window.__*` dev hooks they
 // set are switched to `globalThis`). Ported from main.ts@d6301137f7^.
@@ -317,9 +318,34 @@ let gpEventScheduler: EventScheduler | null = null;
 
 /// Schedule a discrete event onto the presentation timeline, or fire it now if
 /// the scheduler isn't up yet (pre-gpInit safety — never silently dropped).
-function gpSchedule(frame: number, kind: ScheduledKind, fire: () => void): void {
-    if (gpEventScheduler) gpEventScheduler.schedule(frame, kind, fire);
-    else fire();
+/// `prep` is the optional pre-roll warm-up (run while the event is still in
+/// the future window). On the pre-gpInit path there is no window to warm up
+/// in, so it runs once immediately, before the event it was preparing for.
+function gpSchedule(
+    frame: number,
+    kind: ScheduledKind,
+    fire: () => void,
+    prep?: () => void,
+): void {
+    if (gpEventScheduler) gpEventScheduler.schedule(frame, kind, fire, prep);
+    else { prep?.(); fire(); }
+}
+
+/// PLAN-latency L2.2: map a `FireOutcome` (a fire-time *prediction*) onto the
+/// `ProjectileImpactKind` the FX consumers already switch on, so a Tier-C
+/// detonation picks the same authored effect its simulated equivalent would.
+/// The two enums are deliberately separate on the wire (different semantics,
+/// different provenance) but the visual vocabulary is shared.
+function fireOutcomeImpactKind(outcome: number): number {
+    switch (outcome) {
+        case 0: return 1;  // Hit         -> Unit
+        case 2: return 3;  // Shielded    -> Shield
+        case 3: return 5;  // Intercepted -> Intercepted
+        case 4: return 4;  // Expired     -> SelfDetonate
+        // Miss (1) and anything unrecognised terminate on ground/water, which
+        // is what Terrain means.
+        default: return 0;
+    }
 }
 /// Sounds fired by the timeline drain this render frame. Accumulated so a
 /// heavy drain posts ONE gp:audioSoundEvents batch (the message already
@@ -1133,7 +1159,10 @@ function gpConnect(msg: GpInitToWorker): void {
         // GameEventBatch) drive the projectile renderer + combatFX. The legacy
         // 0x04 per-tick projectile-state envelope is gone — the renderer
         // integrates motion locally off these events.
-        onProjectileFired: (events) => {
+        // PLAN-latency L3.3 — `frame` is now passed through. It is the sim
+        // frame the projectile spawned on, and for a `keyframed` shot it is
+        // the frame of the Launch knot the server has stopped sending.
+        onProjectileFired: (events, frame) => {
             // §16c: engage cosmetic turret aim toward each shot's target.
             // Runs even without a projectile renderer so aim is independent
             // of projectile visuals.
@@ -1143,7 +1172,7 @@ function gpConnect(msg: GpInitToWorker): void {
                 for (const e of events) gpAimController?.onFired(e, now);
             }
             if (!gpCtx.projectileRenderer) return;
-            for (const e of events) gpCtx.projectileRenderer.onFired(e);
+            for (const e of events) gpCtx.projectileRenderer.onFired(e, frame);
         },
         // PLAN-latency L1: present the impact (renderer detonation + shield /
         // airburst FX) on its sim frame. The bolt's flight is still integrated
@@ -1159,6 +1188,94 @@ function gpConnect(msg: GpInitToWorker): void {
         onProjectileTrajectories: (events) => {
             if (!gpCtx.projectileRenderer) return;
             for (const e of events) gpCtx.projectileRenderer.onTrajectory(e);
+        },
+        // PLAN-latency L3.2: knots on a Tier-S projectile's path. Deliberately
+        // NOT put on the presentation timeline — unlike an impact or a death,
+        // a keyframe is not something that *happens* at a frame, it is a
+        // statement about where the flight is at one. Delaying it to the cursor
+        // would only leave the spline unbracketed for `D` frames longer.
+        onTrajectoryKeyframes: (events) => {
+            if (!gpCtx.projectileRenderer) return;
+            for (const e of events) gpCtx.projectileRenderer.onKeyframe(e);
+        },
+        // PLAN-latency L3.2: the Tier-S half of what L2.2's `onFireOutcomes`
+        // does for Tier-C — the burst presents on the frame the sim resolved
+        // it, not on packet arrival. Convergence comes for free: the Terminal
+        // knot the server wrote alongside this event carries the same frame and
+        // position, so the bolt is standing on the explosion when it goes off.
+        //
+        // The legacy `ProjectileImpactEvent` for these same shots is suppressed
+        // in the decode (see connection.ts) — the server emits both so pre-L3
+        // clients still see something, and only one of them may be played.
+        onOutcomesKnown: (events) => {
+            for (const ev of events) {
+                // PLAN-latency L3.3 — close the spline NOW, not at the drain
+                // below. The outcome arrives `D` frames before the cursor
+                // reaches it, and those are precisely the frames the Terminal
+                // knot used to bracket. Deferring it to the drain would leave
+                // the final approach extrapolating and then jump, which is the
+                // correction L3 exists to remove. No-op when the server sent a
+                // Terminal knot of its own.
+                gpCtx.projectileRenderer?.onOutcomeKnown(ev);
+                gpSchedule(ev.outcomeFrame, 'impact', () => {
+                    gpCtx.projectileRenderer?.detonateKeyframed(ev.projId, {
+                        impactPos: ev.outcomePos,
+                        impactKind: ev.outcome,
+                        weaponDefId: ev.weaponDefId,
+                    });
+                    gpCombatFX?.onProjectileImpacts([{
+                        projId: ev.projId,
+                        pos: ev.outcomePos,
+                        impactKind: ev.outcome,
+                        targetId: ev.targetId,
+                        weaponDefId: ev.weaponDefId,
+                    }]);
+                });
+            }
+        },
+        // PLAN-latency L2.2: a Tier-C shot has no sim projectile — the server
+        // resolved the whole flight at fire time and sent one event carrying
+        // both ends of it. Put both ends on the L1 timeline and the visual
+        // converges by construction: the bolt is spawned when the cursor
+        // reaches `fireFrame` and is standing on `impactPos` when the cursor
+        // reaches `impactFrame`, which is the same frame the explosion and the
+        // scheduled combat/death events for that shot present on.
+        //
+        // Note both frames are ahead of the batch frame — this is the one
+        // event family the server sends with *foreknowledge*, which is why the
+        // pre-roll warm-up below is worth doing: a weapon's .glb has ~D frames
+        // plus the flight time to load before its first bolt is drawn.
+        onFireOutcomes: (events) => {
+            for (const ev of events) {
+                const impactKind = fireOutcomeImpactKind(ev.outcome);
+                // Minted here rather than inside the spawn so both closures
+                // share a real id unconditionally. If the spawn is skipped —
+                // no renderer at that moment — the detonation still names a
+                // projectile in the cosmetic range that simply isn't in the
+                // live map, which `onImpact` already handles. A `0`
+                // placeholder would instead name projectile id 0, an ordinary
+                // *real* id, and evict an unrelated bolt.
+                const cosmeticId = nextCosmeticProjectileId();
+                gpSchedule(ev.fireFrame, 'projSpawn', () => {
+                    gpCtx.projectileRenderer?.spawnCosmetic(cosmeticId, ev);
+                }, () => {
+                    gpCtx.projectileRenderer?.warmWeaponAssets(ev.weaponDefId);
+                });
+                gpSchedule(ev.impactFrame, 'projDetonate', () => {
+                    gpCtx.projectileRenderer?.detonateCosmetic(cosmeticId, {
+                        impactPos: ev.impactPos,
+                        impactKind,
+                        weaponDefId: ev.weaponDefId,
+                    });
+                    gpCombatFX?.onProjectileImpacts([{
+                        projId: cosmeticId,
+                        pos: ev.impactPos,
+                        impactKind,
+                        targetId: ev.targetId,
+                        weaponDefId: ev.weaponDefId,
+                    }]);
+                });
+            }
         },
         // GW4-c5: combat hit/kill events → combatFX (impact CEGs + lights).
         // Also fan out widget:UnitDamaged so intel/health/FX widgets in ZK
@@ -1953,6 +2070,19 @@ export function gpInit(msg: GpInitToWorker): void {
 
     const entityRenderer = new EntityRenderer(scene);
     entityRenderer.setPresentationClock(gpPresentationClock);
+    // PLAN-latency L1 (LOS reveal): a unit entering LOS reaches us ~D frames
+    // before the sim frame it became visible on. Put the reveal on the
+    // presentation timeline so it appears on that frame rather than early,
+    // and use the lead time as a pre-roll to fetch its model — so it arrives
+    // as itself instead of popping in as the procedural stand-in.
+    entityRenderer.setRevealHook((id, frame, defId) => {
+        gpSchedule(
+            frame,
+            'losReveal',
+            () => entityRenderer.markRevealed(id),
+            () => entityRenderer.warmUpDef(defId),
+        );
+    });
     // PLAN-lighting L3/L4: register with the sun shadow generator up-front
     // (before any def streams in) so the first ensureModel load isn't raced;
     // pass the sun so the team-color material can sample the live CSM.
@@ -2082,6 +2212,12 @@ export function gpInit(msg: GpInitToWorker): void {
     projectileRenderer.setLightPool(gpCtx.fxLightPool);
     projectileRenderer.setDistortion(gpDistortion);
     projectileRenderer.setMuzzleFlare(gpMuzzleFlare);
+    // PLAN-latency L2.3: lets an invented Tier-C flight read where its target
+    // is expected to be on the frame it lands, off the same interpolator the
+    // units themselves are drawn from — so a guided bolt and the unit it is
+    // chasing are quoting one source, not two.
+    projectileRenderer.setTargetPoseProvider(
+        (unitId, frame) => entityRenderer.getEntityPosition(unitId, frame));
 
     // Resolve weapon-def texture names → KTX2 URLs (shared by projectiles, CEG,
     // muzzle flares). Async; the renderers consult it lazily when they first see
@@ -2227,6 +2363,11 @@ export function gpInit(msg: GpInitToWorker): void {
         // and before projectileRenderer.tick() / the A3 mirror so a scheduled
         // impact removes its projectile from this frame's live snapshot.
         if (gpPresentationClock && gpEventScheduler) {
+            // PLAN-latency L2.2: invented Tier-C flights are parametrised by
+            // the cursor, not by wall time. Push it before the drain so a
+            // spawn drained this frame starts at the right point on its arc
+            // rather than at last frame's cursor.
+            gpCtx.projectileRenderer?.setPresentationFrame(gpPresentationClock.P);
             gpEventScheduler.drain(gpPresentationClock.P);
             // Flush the drain's fired sounds as ONE post — a heavy drain
             // (mass kill, refocus) would otherwise structured-clone dozens
@@ -2235,6 +2376,12 @@ export function gpInit(msg: GpInitToWorker): void {
                 postToMain({ type: 'gp:audioSoundEvents', events: gpDrainedSoundEvents });
                 gpDrainedSoundEvents = [];
             }
+            // …then warm up what the cursor is about to reach. The window
+            // (P, E] is the foreknowledge L0 bought us: events already in
+            // hand but not yet due. Re-run each frame because a warm-up can
+            // need something still in flight (a unit's def streams
+            // independently of its state).
+            gpEventScheduler.prefetch(gpPresentationClock.P, gpPresentationClock.E);
         }
         gpMark(1);  // entity
         gpBuildBeamRenderer?.tick();

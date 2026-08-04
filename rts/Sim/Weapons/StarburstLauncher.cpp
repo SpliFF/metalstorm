@@ -43,7 +43,7 @@ void CStarburstLauncher::FireImpl(const bool scriptCall)
 	params.tracking = tracking;
 	params.maxRange = (weaponDef->flighttime > 0 || weaponDef->fixedLauncher)? MAX_PROJECTILE_RANGE: range;
 
-	WeaponProjectileFactory::LoadProjectile(params);
+	WeaponProjectileFactory::FireWeaponProjectile(params);
 }
 
 bool CStarburstLauncher::HaveFreeLineOfFire(const float3 srcPos, const float3 tgtPos, const SWeaponTarget& trg) const

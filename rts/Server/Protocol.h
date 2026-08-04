@@ -224,7 +224,10 @@ inline std::vector<uint8_t> BuildCombatEventBatch(
     const std::vector<SoundEventData>& sounds = {},
     const std::vector<SeismicPingData>& seismicPings = {},
     const std::vector<VolleyOutcomeData>& volleyOutcomes = {},
-    const std::vector<DamageFieldEventData>& damageFields = {})
+    const std::vector<DamageFieldEventData>& damageFields = {},
+    const std::vector<FireOutcomeEventData>& fireOutcomes = {},
+    const std::vector<TrajectoryKeyframeData>& keyframes = {},
+    const std::vector<OutcomeKnownEventData>& outcomesKnown = {})
 {
     flatbuffers::FlatBufferBuilder fbb(
         256 + events.size() * 32
@@ -234,7 +237,10 @@ inline std::vector<uint8_t> BuildCombatEventBatch(
             + sounds.size() * 32
             + seismicPings.size() * 24
             + volleyOutcomes.size() * 56
-            + damageFields.size() * 48);
+            + damageFields.size() * 48
+            + fireOutcomes.size() * 80
+            + keyframes.size() * 48
+            + outcomesKnown.size() * 40);
 
     std::vector<flatbuffers::Offset<SpringWeb::CombatEvent>> combatOffsets;
     combatOffsets.reserve(events.size());
@@ -269,7 +275,8 @@ inline std::vector<uint8_t> BuildCombatEventBatch(
             e.targetId,
             e.ttl,
             e.gravity,
-            e.hitscan));
+            e.hitscan,
+            e.keyframed));
     }
 
     std::vector<flatbuffers::Offset<SpringWeb::ProjectileImpactEvent>> impactOffsets;
@@ -298,6 +305,64 @@ inline std::vector<uint8_t> BuildCombatEventBatch(
             &vel,
             static_cast<SpringWeb::ProjectileTrajectoryReason>(e.reason),
             e.team));
+    }
+
+    // PLAN-latency L2.1 — Tier-C fire outcomes. Disjoint from the
+    // fired/impact/trajectory vectors above: a weaponDef contributes to one
+    // side or the other, never both.
+    std::vector<flatbuffers::Offset<SpringWeb::FireOutcomeEvent>> outcomeOffsets;
+    outcomeOffsets.reserve(fireOutcomes.size());
+    for (const auto& e : fireOutcomes) {
+        auto origin = SpringWeb::Vec3(e.origin.x, e.origin.y, e.origin.z);
+        auto tgt    = SpringWeb::Vec3(e.targetPos.x, e.targetPos.y, e.targetPos.z);
+        auto impact = SpringWeb::Vec3(e.impactPos.x, e.impactPos.y, e.impactPos.z);
+        SpringWeb::FireOutcomeEventBuilder fob(fbb);
+        fob.add_fire_frame(e.fireFrame);
+        fob.add_weapon_def_id(e.weaponDefId);
+        fob.add_owner_id(e.ownerId);
+        fob.add_team(e.team);
+        fob.add_origin(&origin);
+        fob.add_target_id(e.targetId);
+        fob.add_target_pos(&tgt);
+        fob.add_outcome(static_cast<SpringWeb::FireOutcome>(e.outcome));
+        fob.add_impact_frame(e.impactFrame);
+        fob.add_impact_pos(&impact);
+        fob.add_gravity(e.gravity);
+        outcomeOffsets.push_back(fob.Finish());
+    }
+
+    // PLAN-latency L3 — Tier-S keyframes + frame-stamped outcomes. Exclusive
+    // with `projTrajectories` above: while LatencyTierSKeyframes is on the
+    // emit sites write knots and no trajectory events, and vice versa, so a
+    // client can never see two descriptions of the same projectile's motion.
+    std::vector<flatbuffers::Offset<SpringWeb::TrajectoryKeyframe>> keyframeOffsets;
+    keyframeOffsets.reserve(keyframes.size());
+    for (const auto& e : keyframes) {
+        auto pos = SpringWeb::Vec3(e.pos.x, e.pos.y, e.pos.z);
+        auto vel = SpringWeb::Vec3(e.vel.x, e.vel.y, e.vel.z);
+        SpringWeb::TrajectoryKeyframeBuilder kfb(fbb);
+        kfb.add_proj_id(e.projId);
+        kfb.add_frame(e.frame);
+        kfb.add_pos(&pos);
+        kfb.add_vel(&vel);
+        kfb.add_kind(static_cast<SpringWeb::TrajectoryKeyframeKind>(e.kind));
+        kfb.add_team(e.team);
+        keyframeOffsets.push_back(kfb.Finish());
+    }
+
+    std::vector<flatbuffers::Offset<SpringWeb::OutcomeKnownEvent>> knownOffsets;
+    knownOffsets.reserve(outcomesKnown.size());
+    for (const auto& e : outcomesKnown) {
+        auto pos = SpringWeb::Vec3(e.outcomePos.x, e.outcomePos.y, e.outcomePos.z);
+        SpringWeb::OutcomeKnownEventBuilder okb(fbb);
+        okb.add_proj_id(e.projId);
+        okb.add_outcome(static_cast<SpringWeb::ProjectileImpactKind>(e.outcome));
+        okb.add_outcome_frame(e.outcomeFrame);
+        okb.add_outcome_pos(&pos);
+        okb.add_target_id(e.targetId);
+        okb.add_team(e.team);
+        okb.add_weapon_def_id(e.weaponDefId);
+        knownOffsets.push_back(okb.Finish());
     }
 
     std::vector<flatbuffers::Offset<SpringWeb::SoundEvent>> soundOffsets;
@@ -393,18 +458,23 @@ inline std::vector<uint8_t> BuildCombatEventBatch(
     auto musicVec   = fbb.CreateVector(musicOffsets);
     auto volleyVec  = fbb.CreateVector(volleyOffsets);
     auto fieldVec   = fbb.CreateVector(fieldOffsets);
+    auto outcomeVec = fbb.CreateVector(outcomeOffsets);
+    auto keyframeVec = fbb.CreateVector(keyframeOffsets);
+    auto knownVec    = fbb.CreateVector(knownOffsets);
     auto batch = SpringWeb::CreateGameEventBatch(
         fbb, frame, /*events=*/0, combatVec, firedVec, impactVec, trajVec, soundVec, seismicVec, musicVec,
-        volleyVec, fieldVec);
+        volleyVec, fieldVec, outcomeVec, keyframeVec, knownVec);
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_GameEventBatch, batch.Union());
 }
 
-/// Build an EntityDestroy message.
+/// Build an EntityDestroy message. `frame` is the sim frame the unit died on
+/// (stamped at kill time by UnitDeathCollector), so the client can schedule the
+/// death on the presentation timeline instead of inferring a lower bound.
 inline std::vector<uint8_t> BuildEntityDestroy(uint32_t entityId, uint8_t destructionType,
-                                                float x, float y, float z) {
+                                                float x, float y, float z, uint32_t frame) {
     flatbuffers::FlatBufferBuilder fbb(128);
     auto pos = SpringWeb::Vec3(x, y, z);
-    auto destroy = SpringWeb::CreateEntityDestroy(fbb, entityId, destructionType, &pos);
+    auto destroy = SpringWeb::CreateEntityDestroy(fbb, entityId, destructionType, &pos, frame);
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_EntityDestroy, destroy.Union());
 }
 

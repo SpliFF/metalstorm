@@ -64,5 +64,5 @@ void CLaserCannon::FireImpl(const bool scriptCall)
 	params.speed = dir * projectileSpeed;
 	params.ttl = mix(std::max(ttlreq, ttlmax), std::min(ttlreq, ttlmax), weaponDef->selfExplode);
 
-	WeaponProjectileFactory::LoadProjectile(params);
+	WeaponProjectileFactory::FireWeaponProjectile(params);
 }

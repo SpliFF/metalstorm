@@ -35,6 +35,6 @@ void CFlameThrower::FireImpl(const bool scriptCall)
 	params.spread = spread;
 	params.ttl = math::ceil(std::max(dist, range) / projectileSpeed * weaponDef->duration);
 
-	WeaponProjectileFactory::LoadProjectile(params);
+	WeaponProjectileFactory::FireWeaponProjectile(params);
 }
 

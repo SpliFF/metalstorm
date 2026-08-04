@@ -1418,7 +1418,8 @@ void CUnit::DoDamage(
 		if (at >= 32) { losMask |= (1u << 31); break; }
 		if (losStatus[at] & LOS_INLOS) losMask |= (1u << at);
 	}
-	unitDeaths.Push(static_cast<uint32_t>(id), pos.x, pos.y, pos.z, losMask);
+	unitDeaths.Push(static_cast<uint32_t>(id), pos.x, pos.y, pos.z, losMask,
+	                static_cast<uint32_t>(gs->frameNum));
 
 	KillUnit(attacker, false, false);
 

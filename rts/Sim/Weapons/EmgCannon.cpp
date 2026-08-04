@@ -35,5 +35,5 @@ void CEmgCannon::FireImpl(const bool scriptCall)
 	params.speed = dir * projectileSpeed;
 	params.ttl = weaponDef->flighttime > 0 ? weaponDef->flighttime : math::ceil(std::max(dist, range) / projectileSpeed);
 
-	WeaponProjectileFactory::LoadProjectile(params);
+	WeaponProjectileFactory::FireWeaponProjectile(params);
 }

@@ -795,6 +795,10 @@ export class Minimap {
 
         if (this.entityRenderer) {
             for (const [id, meta] of this.entityRenderer.getEntities() as IterableIterator<[number, EntityMeta]>) {
+                // PLAN-latency L1: honour the reveal gate — a contact the
+                // cursor hasn't reached yet must not leak onto the minimap
+                // ahead of the world view.
+                if (!meta.revealed) continue;
                 const pos = this.entityRenderer.getEntityPosition(id);
                 if (!pos) continue;
                 classify(id, meta.team, meta.losState, pos.x, pos.z);

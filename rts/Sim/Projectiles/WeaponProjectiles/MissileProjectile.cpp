@@ -190,7 +190,19 @@ void CMissileProjectile::Update()
 	// enough — the client's pos += vel*dt would drift off-course.
 	// Rate matches StarburstProjectile: 1 Hz with an id-staggered
 	// rotor (~30 sim frames apart per projectile).
-	if (!luaMoveCtrl
+	//
+	// PLAN-latency L3: with keyframes on this becomes a frame-stamped knot
+	// on a 15-frame rotor plus one at every guidance-stage transition, and
+	// the trajectory event is not sent at all. A missile has two stages the
+	// client cannot otherwise see coming — the extraHeight apex handing over
+	// to level flight, and ttl expiry handing the missile to gravity + drag
+	// — and both are exactly where a uniform sample rate reads worst.
+	if (!luaMoveCtrl && TierSKeyframesEnabled()) {
+		const uint8_t stage = (ttl <= 0)            ? 2u   // ballistic fall
+		                    : (extraHeightTime > 0) ? 0u   // climbing to apex
+		                                            : 1u;  // tracking
+		MaybeEmitKeyframe(stage, /*guided=*/true);
+	} else if (!luaMoveCtrl
 	    && (static_cast<int>(id) % 30) == (gs->frameNum % 30)) {
 		ProjectileTrajectoryEventData ev;
 		ev.projId = static_cast<uint32_t>(id);
