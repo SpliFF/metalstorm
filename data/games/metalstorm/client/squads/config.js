@@ -197,6 +197,26 @@ export const DEFAULT_CONFIG = {
   // design.
   transportHeuristicRadius: 40,
 
+  // --- Frame-time governor (PLAN-metalstorm-squad-performance.md §12c,
+  // §14 S2) -----------------------------------------------------------------
+  // Hardware-adaptive by construction: both budget inputs are MEASURED on the
+  // running machine (governor.js), never a squad/member count. A 120 Hz
+  // desktop and a 25 fps laptop steady-state at different ladder levels from
+  // the exact same constants below.
+
+  // Policy, not throughput: how much of a frame squads deserve, and the
+  // floor frame time used to size that share (so a machine bursting well
+  // past 60 fps doesn't get handed an unbounded budget).
+  squadFrameShare: 0.35,
+  frameBudgetCapMs: 33.3,
+  // EMA smoothing for the governor's own cost sample (separate from the
+  // *Ms perf-counter EMAs above, which use PERF_EMA_ALPHA in squad-manager.js).
+  governorCostEmaAlpha: 0.05,
+  // Asymmetric hysteresis (§12c): escalate fast, relax slow, so the ladder
+  // never oscillates at the budget boundary.
+  governorEscalateFrames: 30,
+  governorRelaxFrames: 240,
+
   // --- Perf (PLAN-metalstorm-squad-performance.md §10f) -------------------
 
   // Seedable RNG for the stagger-interval draw (squad.js _staggerInterval).

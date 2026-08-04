@@ -28,22 +28,31 @@ export function arrive(px, pz, tx, tz, maxSpeed, arrivalRadius, out) {
  * `neighbours` is an iterator of {x,z,squadId?,radius?}; accumulates into
  * out {x,z}.
  *
+ * `includeOther` (PLAN-metalstorm-squad-performance.md §12c ladder L1 "drop
+ * inter-squad separation"): when false, a neighbour that isn't same-squad
+ * (another squad's member, a repulsor, a wreck, a dense-cell aggregate) is
+ * skipped outright rather than weighted — NOT zero-weighted, which would
+ * still dilute the average via `n`. Default true preserves every existing
+ * caller's behaviour unchanged.
+ *
  * ORCA seam (§3 — decision recorded, NOT implemented): a future velocity-
  * obstacle avoidance term would query neighbours through the same
  * SquadManager._neighbours generator and replace only this function's body,
  * so it can drop in without touching call sites.
  */
-export function separate(px, pz, selfSquadId, neighbours, separationRadius, sameWeight, otherWeight, deadband, out) {
+export function separate(px, pz, selfSquadId, neighbours, separationRadius, sameWeight, otherWeight, deadband, out, includeOther = true) {
   out.x = 0; out.z = 0;
   let n = 0;
   for (const nb of neighbours) {
+    const same = nb.squadId === selfSquadId;
+    if (!same && !includeOther) continue;
     const dx = px - nb.x, dz = pz - nb.z;
     const d2 = dx * dx + dz * dz;
     const r = nb.radius ?? separationRadius;
     if (d2 > 1e-6 && d2 < r * r) {
       const d = Math.sqrt(d2);
       if (r - d < deadband) continue; // §7: weak overlap near the boundary — ignore
-      const w = nb.squadId === selfSquadId ? sameWeight : otherWeight;
+      const w = same ? sameWeight : otherWeight;
       out.x += (dx / d / d) * w;   // weight by inverse distance, then pair-type
       out.z += (dz / d / d) * w;
       n++;
