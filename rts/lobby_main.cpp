@@ -220,6 +220,15 @@ static int findFreePort(int base = 9100, int floor = 0,
 /// AutoAssignStartPositions before this function to fill in any
 /// -1 values, so a well-formed handoff always carries a concrete
 /// slot assignment per team.
+/// `--replay-dir <dir>`: when set, every game server the lobby spawns is given
+/// a `--journal-file <dir>/room-<id>.msr` and records its own cause stream
+/// (PLAN-replay task 2). Off by default — recording is a per-deployment choice,
+/// not something a dev lobby should start doing silently — and file-scope
+/// rather than an twelfth spawnGameServer parameter for the same reason
+/// CacheControl::IsNoCache() is: it is a process-wide operator setting, not a
+/// property of the room being started.
+static std::string gReplayDir;
+
 static GameServerInstance spawnGameServer(
     uint32_t roomId, const std::string &gameId, const std::string &gameVersion,
     const std::string &mapId, const std::string &dbPath,
@@ -294,6 +303,24 @@ static GameServerInstance spawnGameServer(
     modOptArgStorage.push_back(key + "=" + value);
   }
 
+  // Replay recording (PLAN-replay). One file per room; the port disambiguates
+  // rooms reusing an id across a lobby restart. Created here rather than in the
+  // child so a directory that cannot be made is reported by the lobby instead
+  // of vanishing into a forked process's log.
+  std::string replayPathStorage;
+  if (!gReplayDir.empty()) {
+    std::error_code ec;
+    std::filesystem::create_directories(gReplayDir, ec);
+    if (ec) {
+      SLOG(SPRING_LOG_WARNING, "--replay-dir '%s' is not usable (%s) — room %u "
+           "will not be recorded",
+           gReplayDir.c_str(), ec.message().c_str(), roomId);
+    } else {
+      replayPathStorage = gReplayDir + "/room-" + std::to_string(roomId) + "-p" +
+                          std::to_string(inst.port) + ".msr";
+    }
+  }
+
   pid_t pid = fork();
   if (pid == 0) {
     // Child process — redirect stdout/stderr to log file
@@ -358,6 +385,10 @@ static GameServerInstance spawnGameServer(
     for (const auto &spec : modOptArgStorage) {
       argv.push_back("--modoption");
       argv.push_back(spec.c_str());
+    }
+    if (!replayPathStorage.empty()) {
+      argv.push_back("--journal-file");
+      argv.push_back(replayPathStorage.c_str());
     }
     if (devBuildAcknowledged)
       argv.push_back(DevBuildGate::kFlag);
@@ -492,6 +523,8 @@ int main(int argc, char *argv[]) {
       wtCertPath = argv[++i];
     } else if (arg == "--wt-key" && i + 1 < argc) {
       wtKeyPath = argv[++i];
+    } else if (arg == "--replay-dir" && i + 1 < argc) {
+      gReplayDir = argv[++i];
     } else if (arg == "--disable-client-error-reports") {
       clientErrorReportsEnabled = false;
     } else if (arg == "--game" && i + 1 < argc) {

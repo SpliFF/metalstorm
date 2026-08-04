@@ -54,8 +54,32 @@ bool Player::Load(const std::string& path, std::string& err) {
                          return a.seq < b.seq;
                      });
 
+    // T2-a: build the identity index up front. Scanned in the sorted stream
+    // order, so a connection that authenticated more than once (a reconnect on
+    // the same transport id) resolves to its LAST resolution — the one in force
+    // for the rest of the recording.
+    identities.clear();
+    for (const syncedinput::Record& r : records) {
+        if (r.kind != syncedinput::InputKind::AuthIdentity) continue;
+        syncedinput::AuthIdentity id;
+        if (!syncedinput::DecodeAuthIdentity(r.payload, id)) {
+            // A malformed identity is not skippable: the connection it belongs
+            // to would silently fall back to "never authenticated" and every
+            // later command from it would be refused, producing a confident
+            // replay of a game nobody played.
+            err = "corrupt auth-identity record at seq " + std::to_string(r.seq);
+            return false;
+        }
+        identities[RecordedClientId(r.clientId)] = std::move(id);
+    }
+
     loaded = true;
     return true;
+}
+
+const syncedinput::AuthIdentity* Player::IdentityFor(uint32_t recordedClientId) const {
+    auto it = identities.find(RecordedClientId(recordedClientId));
+    return it == identities.end() ? nullptr : &it->second;
 }
 
 std::vector<const syncedinput::Record*> Player::Due(int32_t frame,

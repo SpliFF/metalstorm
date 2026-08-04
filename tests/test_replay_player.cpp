@@ -294,3 +294,113 @@ TEST_CASE("a truncated segment ends at its last hash point, not its last record"
     CHECK(p.EndFrame() == 300);
     std::remove(path.c_str());
 }
+
+// ─────────── T2-a: identity is resolved from the stream, not the DB ────────
+
+namespace {
+
+Record IdentityRec(uint64_t seq, uint32_t clientId,
+                   const syncedinput::AuthIdentity& id) {
+    Record r = Rec(seq, -1, TickPhase::Inbound, InputKind::AuthIdentity);
+    r.clientId = clientId;
+    r.playerId = id.playerNum;
+    r.payload  = syncedinput::EncodeAuthIdentity(id);
+    return r;
+}
+
+syncedinput::AuthIdentity Id(int64_t uid, const std::string& name, int team,
+                             int pNum) {
+    syncedinput::AuthIdentity id;
+    id.userId = uid; id.username = name; id.role = "player";
+    id.team = team; id.playerNum = pNum;
+    return id;
+}
+
+}  // namespace
+
+TEST_CASE("identities are indexed at load, before the first record is fed") {
+    // The ordering constraint the whole design turns on: an AuthIdentity record
+    // necessarily FOLLOWS the AuthRequest it describes, but the replay needs it
+    // WHILE re-entering that AuthRequest. Pre-indexing is what makes the answer
+    // available before the question is re-asked.
+    const std::string path = "/tmp/springweb-replay-player-identity.msr";
+    replay::Player p = LoadFrom(path, {
+        Rec(1, -1, TickPhase::Inbound, InputKind::ClientMessage),   // AuthRequest
+        IdentityRec(2, 5, Id(1001, "north", 0, 2)),
+        IdentityRec(3, 6, Id(1002, "south", 4, 3)),
+        Rec(4, -1, TickPhase::Inbound, InputKind::GameStart),
+    }, true, 100);
+
+    CHECK(p.IdentityCount() == 2);
+    // Nothing has been fed yet — the lookup is already answerable.
+    CHECK(p.Fed() == 0);
+
+    const syncedinput::AuthIdentity* north = p.IdentityFor(5);
+    REQUIRE(north != nullptr);
+    CHECK(north->username == "north");
+    CHECK(north->userId == 1001);
+    CHECK(north->team == 0);
+    CHECK(north->playerNum == 2);
+
+    // The lookup takes either form of the id: replayed messages arrive under
+    // the VIRTUAL id, and that is what the handler has in hand.
+    CHECK(p.IdentityFor(replay::VirtualClientId(6)) != nullptr);
+    CHECK(p.IdentityFor(replay::VirtualClientId(6))->username == "south");
+    CHECK(replay::RecordedClientId(replay::VirtualClientId(6)) == 6u);
+
+    // A connection that never authenticated has no identity, and that absence
+    // is meaningful: the replay reproduces the refusal rather than asking a
+    // database that may answer differently.
+    CHECK(p.IdentityFor(7) == nullptr);
+}
+
+TEST_CASE("the last resolution on a connection is the one in force") {
+    const std::string path = "/tmp/springweb-replay-player-identity-re.msr";
+    replay::Player p = LoadFrom(path, {
+        IdentityRec(1, 5, Id(1001, "north", 0, 2)),
+        IdentityRec(2, 5, Id(1001, "north", 4, 6)),   // re-auth on the same id
+    }, true, 100);
+    CHECK(p.IdentityCount() == 1);
+    REQUIRE(p.IdentityFor(5) != nullptr);
+    CHECK(p.IdentityFor(5)->team == 4);
+    CHECK(p.IdentityFor(5)->playerNum == 6);
+}
+
+TEST_CASE("a corrupt identity record fails the load instead of vanishing") {
+    // Skipping it would leave that connection reading as "never authenticated",
+    // so every order the human gave would be refused and the replay would
+    // confidently reproduce a game nobody played.
+    const std::string path = "/tmp/springweb-replay-player-identity-bad.msr";
+    {
+        replay::Writer w;
+        replay::Header h;
+        std::string err;
+        REQUIRE(w.Open(path, h, err));
+        Record bad = Rec(1, -1, TickPhase::Inbound, InputKind::AuthIdentity);
+        bad.clientId = 5;
+        bad.payload  = {0x01, 0x02, 0x03};        // too short for any identity
+        w.Append(std::move(bad));
+        replay::Trailer t;
+        t.endFrame = 10;
+        w.Close(t);
+    }
+    replay::Player p;
+    std::string err;
+    CHECK_FALSE(p.Load(path, err));
+    CHECK(err.find("auth-identity") != std::string::npos);
+    std::remove(path.c_str());
+}
+
+TEST_CASE("identity records stay in the stream and are fed as no-ops") {
+    // They ride the ordinary record path so the container, the packer and the
+    // audit route need no special case; server_main's feed switch ignores them.
+    const std::string path = "/tmp/springweb-replay-player-identity-feed.msr";
+    replay::Player p = LoadFrom(path, {
+        IdentityRec(1, 5, Id(1001, "north", 0, 2)),
+        Rec(2, -1, TickPhase::Inbound, InputKind::GameStart),
+    }, true, 100);
+    auto due = p.Due(-1, TickPhase::Inbound);
+    REQUIRE(due.size() == 2);
+    CHECK(due[0]->kind == InputKind::AuthIdentity);
+    CHECK(due[1]->kind == InputKind::GameStart);
+}

@@ -966,7 +966,10 @@ int main(int argc, char* argv[])
         j["recorded"] = c.recorded;
         j["appended"] = c.appended;
         j["skipped"]  = c.skipped;
-        for (int k = 0; k < 6; ++k) {
+        // Bound by the counter array, not a literal: a kind added without
+        // widening this loop reads as "never happened" on the one route an
+        // operator uses to check the cause stream is complete.
+        for (size_t k = 0; k < std::size(c.byKind); ++k) {
             j["byKind"][syncedinput::InputKindName(
                 static_cast<syncedinput::InputKind>(k))] = c.byKind[k];
         }
@@ -1412,6 +1415,17 @@ int main(int argc, char* argv[])
                 replay::Feed().RequestStop("AICommand record outside the Stream phase");
                 break;
             }
+            case syncedinput::InputKind::AuthIdentity: {
+                // Deliberate no-op (PLAN-replay T2-a). This record is the DB's
+                // ANSWER to an AuthRequest, not an input — and it necessarily
+                // sits AFTER the message it describes, so consuming it in
+                // stream order would arrive too late to be of any use. It is
+                // indexed at Player::Load() instead, and ClientMessageHandler
+                // reads it while re-entering the AuthRequest. It stays in the
+                // stream so the container, the packer and the audit route need
+                // no special case.
+                break;
+            }
         }
     };
 
@@ -1473,7 +1487,20 @@ int main(int argc, char* argv[])
     // pre-game prologue lands on a started sim, fire it late and the opening
     // frames run without a roster. So under --replay the GameStart RECORD is
     // the only thing that starts the game — see the feed below.
-    if (replay::IsReplaying()) {
+    //
+    // WHERE the prologue is fed depends on the roster shape, and the condition
+    // below is deliberately the SAME `rosterPlayersNeeded == 0` test the live
+    // run branched on (PLAN-replay T2-a). A recording with no human roster
+    // fired GameStart right here during set-up, so its prologue belongs here.
+    // A recording WITH a roster did not: it fired GameStart from
+    // CheckAndFireGameStart in the loop, once the last human authenticated —
+    // which is after the AI slot resolution just above. Sweeping such a
+    // prologue here would authenticate the humans *before* the AI virtual
+    // players exist, so GameStart's leader pass would run over a different
+    // player set and every team leader could land on a different player than
+    // the recording had. That is caught by the GameStart record's own roster
+    // check, but the fix is to feed at the right place, not to detect it.
+    if (replay::IsReplaying() && rosterPlayersNeeded == 0) {
         // Feed the pre-game prologue HERE, at the exact point in start-up where
         // the recording fired its own GameStart — not on the first loop tick.
         //

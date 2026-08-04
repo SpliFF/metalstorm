@@ -48,6 +48,7 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "ReplayFile.h"
@@ -104,6 +105,22 @@ public:
     /// seek is a full fast-forward rather than a jump (T2-d).
     const std::vector<Checkpoint>& Checkpoints() const { return checkpoints; }
     bool HasStartCheckpoint() const { return !startCheckpoint.empty(); }
+
+    /// Identity the live run resolved for a recorded connection, or nullptr if
+    /// that connection never authenticated successfully (PLAN-replay T2-a).
+    ///
+    /// Indexed at LOAD time, not consumed from the stream, and that ordering is
+    /// the whole point: the AuthIdentity record necessarily FOLLOWS the
+    /// AuthRequest it describes (the answer cannot precede the question), but
+    /// replay needs it *while* re-entering that AuthRequest. Pre-indexing makes
+    /// the lookup available from the first tick. The records stay in the stream
+    /// so the container, the packer and `/api/journal` need no special case;
+    /// feeding one is a documented no-op.
+    ///
+    /// The key is the RECORDED connection id, i.e. what `RecordedClientId()`
+    /// recovers from the virtual id a replayed message arrives under.
+    const syncedinput::AuthIdentity* IdentityFor(uint32_t recordedClientId) const;
+    size_t IdentityCount() const { return identities.size(); }
 
     /// Frame the recording ended at: the trailer's value on a clean file, else
     /// the last record's frame (E1 — the segment truncates at the last
@@ -165,6 +182,9 @@ private:
     std::vector<syncedinput::Record> records;
     std::vector<Checkpoint> checkpoints;
     std::vector<uint8_t> startCheckpoint;
+    /// recorded clientId (masked to the virtual range's payload bits) → the
+    /// identity its last successful auth resolved to.
+    std::unordered_map<uint32_t, syncedinput::AuthIdentity> identities;
     size_t   cursor    = 0;
     uint64_t fed       = 0;
     uint64_t late      = 0;
@@ -204,6 +224,13 @@ inline uint32_t VirtualClientId(uint32_t recordedId) {
 }
 inline bool IsVirtualClient(uint32_t id) {
     return (id & kVirtualClientBase) != 0;
+}
+/// Inverse of VirtualClientId — recovers the id the message was recorded
+/// under, which is the key the identity index and the recording's own logs
+/// use. Lossless for every id the transport actually allocates (they are
+/// small counters, nowhere near the 28-bit payload width).
+inline uint32_t RecordedClientId(uint32_t virtualId) {
+    return virtualId & 0x0FFFFFFFu;
 }
 
 }  // namespace replay

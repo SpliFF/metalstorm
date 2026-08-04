@@ -12,6 +12,7 @@
 #include "OrgGroups.h"
 #include "LuaExecEngine.h"
 #include "SyncedInputJournal.h"
+#include "ReplayPlayer.h"
 #include "GameOverState.h"
 #include "PostGamePolicy.h"
 #include "PlayerRosterBroadcast.h"
@@ -251,6 +252,136 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                 }
             };
 
+            // Journal chokepoint #1's companion (PLAN-replay T2-a). The
+            // AuthRequest bytes are already in the stream; this records what
+            // the accounts database turned them INTO, because a re-execution
+            // has no database that can answer the same way — a replica need
+            // not carry the `sessions` row, and a campaign replayed weeks
+            // later is asking about a token that has expired by construction.
+            auto recordAuthIdentity = [&](int64_t userId,
+                                          const std::string& name,
+                                          const std::string& role, int team,
+                                          int pNum, bool spectator) {
+                syncedinput::AuthIdentity id;
+                id.userId    = userId;
+                id.username  = name;
+                id.role      = role;
+                id.team      = team;
+                id.playerNum = pNum;
+                id.spectator = spectator;
+                syncedinput::Journal().RecordAuthIdentity(
+                    static_cast<uint32_t>(msg.clientId), id);
+            };
+
+            // ── Replay: the recorded stream is the identity authority ──────
+            // (PLAN-replay §7.10, T2-a.) A replayed AuthRequest must NOT reach
+            // `db` at all. Not as an optimisation — as correctness: the token
+            // path would fail on a replica DB and fall through to "Session
+            // expired", leaving the connection with no session, so every later
+            // PlayerCommand from it would bounce at the REQUIRE_SESSION guard
+            // and the replay would confidently reproduce a game in which the
+            // human player never issued an order. The password path is worse
+            // still: it would WRITE a fresh session row into the database of a
+            // machine that is only replaying.
+            //
+            // Only live clients keep the database path. A live client on a
+            // replay server is a spectator (server_main refuses its
+            // sim-affecting verbs), so its identity is its own business.
+            if (replay::IsReplaying() && replay::IsVirtualClient(msg.clientId)) {
+                const uint32_t recId = replay::RecordedClientId(msg.clientId);
+                const syncedinput::AuthIdentity* rid =
+                    replay::Feed().IdentityFor(recId);
+                if (rid == nullptr) {
+                    // Only successful resolutions are recorded, so the absence
+                    // of one IS the recorded outcome: this connection's auth
+                    // failed live (wrong password, expired token, ban, unknown
+                    // account). Reproduce the refusal rather than re-asking a
+                    // database that may well answer differently.
+                    SLOG(SPRING_LOG_NOTICE,
+                        "replay: recorded client %u never authenticated "
+                        "successfully — refusing, as the recording did", recId);
+                    auto resp = Protocol::BuildAuthResponse(
+                        SpringWeb::AuthStatus_InvalidCredentials, "", 0,
+                        "Replay: no recorded identity");
+                    rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
+                    break;
+                }
+
+                // The DB-derived half (account id, username, role) is taken
+                // from the record. The half the LAUNCH SPEC determines — team
+                // and player number — is re-derived here and compared, the
+                // same discipline the GameStart record's roster check uses: a
+                // divergence in either means every later PlayerCommand is
+                // about to be authorised against a different player or team
+                // than the recording used, and the honest response is to stop
+                // with a located reason rather than produce a confident replay
+                // of a game nobody played.
+                const int derivedTeam = resolveTeam(rid->username);
+                if (derivedTeam != rid->team) {
+                    SLOG(SPRING_LOG_ERROR,
+                        "replay: team divergence authenticating '%s' — recorded "
+                        "team %d, replay roster resolves %d",
+                        rid->username.c_str(), rid->team, derivedTeam);
+                    replay::Feed().RequestStop("team divergence at auth");
+                    break;
+                }
+                if (nextPlayerNum != rid->playerNum) {
+                    SLOG(SPRING_LOG_ERROR,
+                        "replay: player-number divergence authenticating '%s' — "
+                        "recorded playerNum %d, replay would allocate %d "
+                        "(player registration order differs from the recording)",
+                        rid->username.c_str(), rid->playerNum, nextPlayerNum);
+                    replay::Feed().RequestStop("player-number divergence at auth");
+                    break;
+                }
+
+                const int pNum = rid->playerNum;
+                nextPlayerNum = pNum + 1;
+                {
+                    CPlayer p;
+                    p.name      = rid->username;
+                    p.team      = rid->team;
+                    p.active    = true;
+                    p.playerNum = pNum;
+                    p.spectator = rid->spectator;
+                    playerHandler.AddPlayer(p);
+                    clientPlayerNum[msg.clientId] = pNum;
+                }
+                // Sent for symmetry with the live paths, and it costs nothing:
+                // the virtual id has no transport, so the reply is dropped.
+                // Keeping the send means the two paths do not drift.
+                auto resp = Protocol::BuildAuthResponse(
+                    SpringWeb::AuthStatus_OK, "",
+                    static_cast<uint32_t>(rid->userId), "",
+                    static_cast<int8_t>(rid->team), rid->role, defsCacheKey,
+                    static_cast<int32_t>(pNum));
+                rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
+                sessions.AddSession(msg.clientId, rid->userId, rid->username,
+                                    rid->role);
+                if (auto* s = sessions.GetSession(msg.clientId))
+                    s->team = rid->team;
+                start.PushStandingOrdersTo(msg.clientId, rid->team);
+                start.PushOrgGroupsTo(msg.clientId, rid->team);
+                start.PushDirectivesTo(msg.clientId, rid->team);
+                sendPostAuthOneShots();
+                Protocol::BroadcastPlayerRoster(ctx);
+                SLOG(SPRING_LOG_NOTICE,
+                    "replay: client %u authenticated as '%s' from the recorded "
+                    "stream (account id=%lld) playerNum=%d team=%d role=%s",
+                    msg.clientId, rid->username.c_str(),
+                    (long long)rid->userId, pNum, rid->team, rid->role.c_str());
+                // GameStart is reached exactly as it was live: through the
+                // roster-connected count. The GameStart RECORD still arrives
+                // next in the stream and finds the game already started, so it
+                // does its roster cross-check and fires nothing (server_main's
+                // GameStart case is guarded on HasGameStarted).
+                if (playerTeamByUsername.count(rid->username)) {
+                    connectedRosterPlayers.insert(rid->username);
+                    start.CheckAndFireGameStart();
+                }
+                break;
+            }
+
             // Try token-based reconnection first
             const bool hasToken = auth->token() && auth->token()->size() > 0;
             if (hasToken) {
@@ -311,6 +442,8 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                         reconnectUser->username, effectiveRole);
                     if (auto* s = sessions.GetSession(msg.clientId))
                         s->team = team;
+                    recordAuthIdentity(userId, reconnectUser->username,
+                                       effectiveRole, team, pNum, isSpectator);
                     // One-shot standing-order snapshot so a
                     // mid-game reconnect sees existing orders
                     // immediately, without waiting for the
@@ -452,6 +585,8 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             sessions.AddSession(msg.clientId, user->id, user->username, effectiveRole);
             if (auto* s = sessions.GetSession(msg.clientId))
                 s->team = team;
+            recordAuthIdentity(user->id, user->username, effectiveRole, team,
+                               pNum, isSpectator);
             // One-shot standing-order snapshot for the freshly
             // authenticated session — mirrors the reconnect
             // path above. Without this, mid-game joins

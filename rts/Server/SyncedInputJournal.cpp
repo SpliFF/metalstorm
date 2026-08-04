@@ -2,7 +2,9 @@
 
 #include "SyncedInputJournal.h"
 
+#include <algorithm>
 #include <cstdio>
+#include <cstring>
 
 namespace syncedinput {
 
@@ -88,8 +90,73 @@ const char* InputKindName(InputKind k) {
         case InputKind::AICommand:        return "ai-command";
         case InputKind::GameStart:        return "game-start";
         case InputKind::SnapshotRestore:  return "snapshot-restore";
+        case InputKind::AuthIdentity:     return "auth-identity";
     }
     return "?";
+}
+
+namespace {
+
+void PutU16(std::vector<uint8_t>& b, uint16_t v) {
+    b.push_back(static_cast<uint8_t>(v & 0xFF));
+    b.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
+}
+
+void PutStr(std::vector<uint8_t>& b, const std::string& s) {
+    // Truncation would silently change an identity, so an over-long field is a
+    // refusal at decode time rather than a quiet cut here; usernames and roles
+    // are bounded far below 64 KiB by the accounts schema.
+    PutU16(b, static_cast<uint16_t>(std::min<size_t>(s.size(), 0xFFFF)));
+    b.insert(b.end(), s.begin(), s.begin() + std::min<size_t>(s.size(), 0xFFFF));
+}
+
+bool TakeBytes(const std::vector<uint8_t>& b, size_t& off, void* dst, size_t n) {
+    if (off + n > b.size()) return false;
+    std::memcpy(dst, b.data() + off, n);
+    off += n;
+    return true;
+}
+
+bool TakeStr(const std::vector<uint8_t>& b, size_t& off, std::string& out) {
+    uint8_t lo = 0, hi = 0;
+    if (!TakeBytes(b, off, &lo, 1) || !TakeBytes(b, off, &hi, 1)) return false;
+    const size_t n = static_cast<size_t>(lo) | (static_cast<size_t>(hi) << 8);
+    if (off + n > b.size()) return false;
+    out.assign(reinterpret_cast<const char*>(b.data() + off), n);
+    off += n;
+    return true;
+}
+
+}  // namespace
+
+std::vector<uint8_t> EncodeAuthIdentity(const AuthIdentity& id) {
+    std::vector<uint8_t> b;
+    b.reserve(32 + id.username.size() + id.role.size());
+    const int64_t uid = id.userId;
+    const uint8_t* p = reinterpret_cast<const uint8_t*>(&uid);
+    b.insert(b.end(), p, p + sizeof(uid));
+    const int32_t nums[2] = {id.team, id.playerNum};
+    p = reinterpret_cast<const uint8_t*>(nums);
+    b.insert(b.end(), p, p + sizeof(nums));
+    b.push_back(id.spectator ? 1 : 0);
+    PutStr(b, id.username);
+    PutStr(b, id.role);
+    return b;
+}
+
+bool DecodeAuthIdentity(const std::vector<uint8_t>& payload, AuthIdentity& out) {
+    size_t off = 0;
+    int32_t nums[2] = {-1, -1};
+    uint8_t spec = 0;
+    if (!TakeBytes(payload, off, &out.userId, sizeof(out.userId))) return false;
+    if (!TakeBytes(payload, off, nums, sizeof(nums))) return false;
+    if (!TakeBytes(payload, off, &spec, 1)) return false;
+    if (!TakeStr(payload, off, out.username)) return false;
+    if (!TakeStr(payload, off, out.role)) return false;
+    out.team      = nums[0];
+    out.playerNum = nums[1];
+    out.spectator = spec != 0;
+    return true;
 }
 
 const char* WireClassName(WireClass c) {
@@ -138,6 +205,19 @@ WireClass ClassifyClientPayload(uint8_t payloadType) {
             return WireClass::Synced;
 
         // ── Setup: shapes who may cause what ─────────────────────────────
+        // The C1 protocol gate. It carries no state of its own, which is why
+        // this sat in Unsynced until 2026-08-04 — but it is the gate that
+        // decides whether the AuthRequest below is admissible at all
+        // (ClientMessageHandler refuses auth from a connection that never
+        // handshook), so a stream that drops it cannot re-enter its own
+        // authentications: the replayed AuthRequest is rejected for want of a
+        // handshake and the game runs on with no human player, a different
+        // team leader and a roster divergence at GameStart. Observed exactly
+        // that way on a real Metalstorm recording, PLAN-replay §7.10.
+        // Recording it also means a version mismatch that was REJECTED live is
+        // rejected identically on replay, which the "shapes who may cause
+        // what" rule wants and a synthesised handshake would silently undo.
+        case Handshake:
         // Auth assigns the player number and team a later PlayerCommand is
         // authorised against; without it the routing of the synced stream is
         // not reconstructible.
@@ -158,7 +238,6 @@ WireClass ClassifyClientPayload(uint8_t payloadType) {
             return WireClass::Setup;
 
         // ── Unsynced: per-client view state ──────────────────────────────
-        case Handshake:          // protocol version check, no state
         case Ping:               // RTT only
         case ViewportUpdate:     // server-side visibility filtering input
         case SelectionState:     // drives HUD/streaming priority, not the sim
@@ -287,6 +366,13 @@ bool Recorder::RecordSnapshotRestore(int32_t fromFrame, int32_t toFrame) {
                 reinterpret_cast<const uint8_t*>(frames), sizeof(frames));
 }
 
+bool Recorder::RecordAuthIdentity(uint32_t clientId, const AuthIdentity& id) {
+    ++counters.seen;
+    const std::vector<uint8_t> blob = EncodeAuthIdentity(id);
+    return Emit(InputKind::AuthIdentity, id.spectator ? 1 : 0, id.playerNum,
+                clientId, blob.data(), blob.size());
+}
+
 Recorder& Journal() {
     static Recorder instance;
     return instance;
@@ -297,12 +383,13 @@ std::string FormatAudit(const Counters& c) {
     std::snprintf(buf, sizeof(buf),
         "seen=%llu recorded=%llu appended=%llu skipped=%llu "
         "[client-message=%llu disconnect=%llu lua-exec=%llu ai-command=%llu "
-        "game-start=%llu snapshot-restore=%llu]",
+        "game-start=%llu snapshot-restore=%llu auth-identity=%llu]",
         (unsigned long long)c.seen, (unsigned long long)c.recorded,
         (unsigned long long)c.appended, (unsigned long long)c.skipped,
         (unsigned long long)c.byKind[0], (unsigned long long)c.byKind[1],
         (unsigned long long)c.byKind[2], (unsigned long long)c.byKind[3],
-        (unsigned long long)c.byKind[4], (unsigned long long)c.byKind[5]);
+        (unsigned long long)c.byKind[4], (unsigned long long)c.byKind[5],
+        (unsigned long long)c.byKind[6]);
     return std::string(buf);
 }
 

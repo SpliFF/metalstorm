@@ -620,7 +620,10 @@ Storage is pluggable (`IJournal`). The default is `NullJournal` — the funnel s
 classifies and counts, and `GET /api/journal` (loopback) reports the tallies.
 `--journal-audit [N]` attaches a bounded in-memory journal; `--journal-file <path>`
 attaches `replay::Writer`, which is the durable/shareable form. PLAN-persistence's
-journal implements the same `IJournal` seam.
+journal implements the same `IJournal` seam. The lobby's `--replay-dir <dir>`
+gives every game server it spawns a `--journal-file <dir>/room-<id>-p<port>.msr`,
+so a deployment records whole matches without per-room configuration; it is off
+by default.
 
 ### Replay re-execution
 
@@ -645,10 +648,15 @@ Three invariants the implementation depends on, each of which was a real bug fir
 - **Feed at the journal's tick stamp, never a fresh `sim.GetFrameNum()`.**
   `SimFrame()` runs mid-tick, so by the LuaExec and Stream phases the sim's counter
   has already passed the frame this tick's records were stamped with.
-- **The pre-game prologue is fed during start-up, not on the first loop tick**, and
-  only its pre-`SimFrame` phases. The frame counter starts at −1 and the first
-  `SimFrame()` makes it 0; a recording that started the game during set-up entered
-  its loop one sim-step ahead of a replay that did not.
+- **The pre-game prologue is fed where the recording's own GameStart fired**, and
+  only its pre-`SimFrame` phases. With no human roster that is during start-up:
+  the frame counter starts at −1 and the first `SimFrame()` makes it 0, so a
+  recording that started the game during set-up entered its loop one sim-step
+  ahead of a replay that did not. With a roster it is on the first loop tick,
+  because the live run fired GameStart from `CheckAndFireGameStart` once the last
+  human authenticated — which is *after* AI slot resolution. Feeding such a
+  prologue during start-up authenticates the humans before the AI virtual players
+  exist and lands the team leaders on different players.
 - **Streaming suppression (seek) cuts the transport, not the streamer.**
   `StateStreamer::Tick` issues commands as well as bytes, so muting it would change
   the simulation.
@@ -656,6 +664,23 @@ Three invariants the implementation depends on, each of which was a real bug fir
 Replayed wire messages re-enter under their recorded connection id offset into a
 reserved range (`replay::VirtualClientId`) so they cannot collide with a live
 spectator's transport id.
+
+**Identity during a re-execution comes from the stream, not the database.** An
+`AuthRequest` is the one recorded verb whose effect depends on state the replay
+does not have: turning a session token or a password into (account id, username,
+role) is a query against `users`/`sessions`, and a replica DB need not carry
+either — a campaign replayed later is asking about a token that has expired by
+construction. So every successful auth also records an `InputKind::AuthIdentity`
+entry (`syncedinput::AuthIdentity`, keyed on the connection id), and a replayed
+`AuthRequest` reads that instead of touching `db`. `Player::Load` indexes the
+entries up front rather than consuming them in stream order — the answer
+necessarily *follows* the question in the stream but is needed *while* the
+question is re-asked — and feeding one is a documented no-op. The DB-derived half
+(account id, username, role) is authoritative; the launch-spec-derived half (team,
+player number) is re-derived and compared, and a mismatch stops the replay the
+same way the GameStart roster check does. `Handshake` is journaled for the same
+reason: it is the C1 gate that decides whether an `AuthRequest` is admissible at
+all, so a stream without it cannot re-enter its own authentications.
 
 ### Def + Model Loading
 ```
