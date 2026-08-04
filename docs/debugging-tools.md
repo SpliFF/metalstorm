@@ -15,6 +15,7 @@ Part of the [Debugging & Logging Guide](debugging.md) family. This page covers t
   - [Stats dump + determinism hash](#stats-dump--determinism-hash)
   - [Batch driver (`tools/headless-batch`)](#batch-driver-toolsheadless-batch)
   - [Determinism CI hook](#determinism-ci-hook)
+  - [Fixture-replay verify CI hook](#fixture-replay-verify-ci-hook)
 - [Replay record / playback](#replay-record--playback)
   - [Recording](#recording)
   - [Exporting a shareable `.msr` (`--replay-export`)](#exporting-a-shareable-msr---replay-export)
@@ -228,6 +229,10 @@ force-disabled under `--headless-run`, so the sim starts and ticks with zero cli
     { "aiId": "basic_ai", "team": 0, "startPos": 0, "profile": "aggressive" },
     { "aiId": "basic_ai", "team": 1, "startPos": 1, "profile": "default" }
   ],
+  "modOptions": {                     // same key=value pairs as --modoption
+    "startunits": "skirmish",         // values are strings; bools/numbers are coerced
+    "combatwatch": "0"
+  },
   "headless": {
     "tickMode": "uncapped",           // "uncapped" | "realtime" | "xN" (e.g. "x5")
     "stopAt": { "frame": 9000 },      // and/or "gameOver": true, "luaCondition": "GG.Some.Predicate"
@@ -256,6 +261,14 @@ child process to exit.
 
 `stopAt` precedence: `luaCondition`-errored > `gameOver` > `frame` > `luaCondition` >
 `--max-wall-min` (always active as the outermost runaway guard).
+
+`modOptions` fills the same role for a manifest that `--modoption key=value` fills on
+the command line — synced gadgets read them via `Spring.GetModOptions()` and the
+defs-cache key includes them. Precedence is **per key**: an explicit `--modoption`
+wins over the manifest's entry for that key, and the manifest supplies the rest (same
+rule as `map`/`game`/`aiSlots`). Values reach Lua as **strings** whatever their JSON
+type, so `true` arrives as `"1"` and `3` as `"3"`. A malformed entry (object/array
+value, empty key) is skipped rather than aborting the run.
 
 ### Stats dump + determinism hash
 
@@ -363,19 +376,75 @@ PaperTanks-scale — a 2-AI, 5-game-minute (`stopAt.frame: 9000`) uncapped run a
 `green_flat_x34_v3` with `stateHashEvery: 300` (30 snapshots) — chosen small enough
 that the actual sim run costs single-digit wall-seconds; the workflow's ~2-minute
 wall time is almost entirely the `cmake`/`ninja` build, not the run itself. A
-mismatch prints every diverging snapshot (frame + both hashes) and exits non-zero;
-a run that fails to reach its stop condition (bad exit code) fails loudly rather
-than silently comparing two empty dumps.
+mismatch prints every diverging snapshot (frame + both hashes) and exits non-zero.
 
-> **Known weakness in this fixture (measured 2026-08-03).** `basic_ai` on
-> `green_flat_x34_v3` issues **zero commands** and spawns **zero units** across the
-> full 9000 frames — every one of the 30 snapshots reports `numUnits: 0` for all
-> three teams. The state hash therefore folds an empty unit list plus the synced RNG
-> state, so what this gate actually regression-tests is "the RNG stream is stable",
-> not "the simulation is deterministic". It will not catch a movement, collision,
-> damage or command-ordering divergence, because none of those ever execute. Adding
-> units to the fixture (via `aiSlots` that build, or a start-up spawn) would make it
-> test what its name claims.
+#### The fixture must not be vacuous
+
+> **This gate ran green for weeks while testing almost nothing** (found 2026-08-03,
+> fixed 2026-08-04). Paper Tanks ships no side data and no start-unit gadget, so a
+> `--headless-run` of it produced a game with **zero units** — every one of the 30
+> snapshots reported `numUnits: 0`, and the state hash folded an empty unit list plus
+> the synced RNG state. Two runs of an empty world agree perfectly. What the gate
+> actually regression-tested was "the RNG stream is stable"; it could not have caught
+> a movement, collision, damage or command-ordering divergence, because none of those
+> ever executed.
+
+The fix has two halves, and the second is the one that keeps it fixed:
+
+1. **The fixture stages a real army.** `modOptions.startunits: "skirmish"` turns on
+   `data/games/papertanks/LuaRules/Gadgets/game_start_units.lua`, which stages 12
+   units a side (heavy/light tanks, scouts, artillery, an HQ) on opposite sides of the
+   map centre and walks the mobile ones into the middle. Deterministic by
+   construction: no RNG, no wall clock, sorted team ids, positions a pure function of
+   (map size, team slot, unit index). It is **off unless the modoption is set**, so
+   every other Paper Tanks invocation is unaffected. The fixture also sets
+   `combatwatch: "0"` — `combat_watch.lua` logs one line per shot, which buries the
+   verdict once there is real combat.
+2. **Both drivers reject a vacuous run before comparing anything**
+   (`tools/headless-batch/lib/fixture-checks.mjs`). A dump must show peak units,
+   damage dealt *and* units died above zero. Deaths are required specifically because
+   units that exist and shoot but never die leave the destruction/removal path — a
+   classic source of iteration-order nondeterminism — untested. A hash comparison
+   cannot tell you it compared two empty worlds, so the content is asserted
+   separately and up front.
+
+Measured on the fixed fixture: `peakUnits=23 peakDamage=18788 peakDeaths=19`, and the
+recording went from **1 journal record** (the GameStart anchor, nothing else ever
+happened) to **1799**.
+
+### Fixture-replay verify CI hook
+
+`tools/headless-batch/replay-verify-run.mjs` is the second gate over the same fixture,
+and a strictly harder question than the pair-run. The pair-run asks *"does the same
+input produce the same output twice?"*; this asks *"does re-feeding the recorded
+**cause stream** reproduce the run?"* — which additionally covers journal completeness
+(an unrecorded synced input surfaces as a divergence), record ordering, and the `.msr`
+container round-trip.
+
+```bash
+make test-replay-verify
+# builds spring-server, then:
+node tools/headless-batch/replay-verify-run.mjs \
+  --server-bin build/debug/spring-server \
+  --out-dir build/replay-verify --pack
+```
+
+Three passes: record the fixture with `--journal-file` + `--journal-hash-every`,
+re-execute it with `--replay … --verify`, then (with `--pack`) repack via
+`--replay-export` and verify the packed copy too.
+
+> **Gate on the log line, never the exit code.** `spring-server` aborts during static
+> destruction (`CWeaponDefHandler`, inside `__cxa_finalize`, *after* `main` returns and
+> after `exited cleanly` is logged) in any run that exercised weapon defs. That is a
+> pre-existing defect unrelated to replay, and it means the process status is noise
+> here. Both drivers parse the engine's own verdict instead — `replay verify: PASS/FAIL`
+> for the replay gate, `headless run complete:` for the pair-run. A run that produces
+> **no** verdict is its own failure mode (`absent`), never "no FAIL seen".
+
+Live results on the fixed fixture (debug build): 1799 records / 30 hash points
+recorded, `PASS — 30/30 state hashes matched` on both the raw recording and the packed
+copy (178 887 → 9 350 bytes). Negative control: flipping one bit of the frame-4800
+reference reports `FAIL … firstDivergence=4800`, located exactly.
 
 ---
 
@@ -492,7 +561,9 @@ reaching every reference point (`missing > 0`), fails.
 > (`CWeaponDefHandler` destructor, during `__cxa_finalize` *after* `main` returns and
 > after `exited cleanly` is logged) that fires in any run where weapon defs were
 > exercised — it reproduces with no replay flags at all. Until that is fixed, gate CI
-> on the `replay verify:` log line, not on the exit status.
+> on the `replay verify:` log line, not on the exit status. See
+> [Fixture-replay verify CI hook](#fixture-replay-verify-ci-hook) for the driver that
+> does this.
 
 ### Seeking
 

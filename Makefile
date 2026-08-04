@@ -1,4 +1,4 @@
-.PHONY: setup build build-release test test-cpp test-client test-all dev-client generate-protocol export-metalstorm-specs clean test-headless-batch test-headless-determinism
+.PHONY: setup build build-release test test-cpp test-client test-all dev-client generate-protocol export-metalstorm-specs clean test-headless-batch test-headless-determinism test-replay-verify
 
 # First-time setup
 setup:
@@ -47,10 +47,11 @@ test-client:
 
 test-all: test-cpp test-client
 
-# headless-batch matrix-expansion unit test (pure, no server build needed —
-# PLAN-headless.md task 3 §6 "meta" requirement).
+# headless-batch pure unit tests (no server build needed): matrix expansion
+# (PLAN-headless.md task 3 §6 "meta" requirement), the fixture non-vacuity
+# checks and the replay-verdict parser (PLAN-replay.md task 5).
 test-headless-batch:
-	node tools/headless-batch/test/matrix.test.mjs
+	cd tools/headless-batch && node --test test/matrix.test.mjs test/fixture-checks.test.mjs test/replay-verdict.test.mjs
 
 # Determinism pair-run CI hook (PLAN-headless.md task 4): builds spring-server,
 # runs the PaperTanks-scale fixture twice, diffs the two stateHash sequences.
@@ -59,6 +60,18 @@ test-headless-determinism:
 	node tools/headless-batch/determinism-pair-run.mjs \
 		--server-bin build/debug/spring-server \
 		--out-dir build/headless-determinism
+
+# Fixture-replay verify (PLAN-replay.md task 5): record the same fixture to a
+# replay file, then re-execute the recorded cause stream and assert it
+# reproduces its own embedded state-hash track — including through the .msr
+# export packer. Gates on the `replay verify:` log line, never the exit code
+# (T2-b: spring-server aborts during static destruction after main returns).
+test-replay-verify:
+	cmake --build build/debug --target spring-server
+	node tools/headless-batch/replay-verify-run.mjs \
+		--server-bin build/debug/spring-server \
+		--out-dir build/replay-verify \
+		--pack
 
 # Development
 dev-client:

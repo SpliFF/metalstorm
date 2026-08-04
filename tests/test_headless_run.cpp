@@ -2,6 +2,11 @@
 
 #include "Server/HeadlessRun.h"
 
+// <unordered_map>, not <map>: `rts/` is on the include path and `rts/Map/`
+// shadows the standard header on macOS's case-insensitive filesystem.
+#include <string>
+#include <unordered_map>
+
 // PLAN-headless task 1 — the pure stop-condition + pacing + config-parse core
 // of --headless-run. These tests are the "stop-condition matrix" the plan's §6
 // asks for (frame / gameOver / luaCondition / wall-ceiling), plus the pacing
@@ -142,6 +147,51 @@ TEST_CASE("ParseConfig: full manifest") {
     CHECK(*c.stopAt.luaCondition == "GG.Balance.Done");
     CHECK(c.statsDump == "out/run-01.json");
     CHECK(c.stateHashEvery == 900);
+}
+
+TEST_CASE("ParseConfig: modOptions") {
+    // PLAN-replay task 5: a headless manifest is supposed to be a COMPLETE
+    // launch spec, and modoptions were the one part of it that only a CLI flag
+    // could supply — which is why the determinism fixture could not ask Paper
+    // Tanks to stage a start army.
+    const char* json = R"({
+        "modOptions": {
+            "startunits": "skirmish",
+            "combatwatch": "0",
+            "ffa": true,
+            "waves": 3,
+            "multiplier": 1.5,
+            "nested": { "no": "spelling" },
+            "": "dropped"
+        }
+    })";
+    Config c;
+    std::string err;
+    REQUIRE(ParseConfig(json, c, err));
+
+    // Values arrive as strings whatever their JSON type — CGameSetup stores
+    // modoptions as strings and Spring.GetModOptions() hands them to Lua as
+    // strings, so a JSON bool/number is coerced rather than rejected.
+    std::unordered_map<std::string, std::string> got(c.modOptions.begin(), c.modOptions.end());
+    CHECK(got["startunits"] == "skirmish");
+    CHECK(got["combatwatch"] == "0");
+    CHECK(got["ffa"] == "1");
+    CHECK(got["waves"] == "3");
+    CHECK(got["multiplier"].rfind("1.5", 0) == 0);
+    // No spelling as a key=value pair -> silently skipped, not a parse error:
+    // a malformed option must not abort a multi-hour soak at start-up.
+    CHECK(got.count("nested") == 0);
+    CHECK(got.count("") == 0);
+    CHECK(c.modOptions.size() == 5);
+
+    // Absent block is not an error and leaves the list empty.
+    Config d;
+    REQUIRE(ParseConfig("{}", d, err));
+    CHECK(d.modOptions.empty());
+    // Wrong type is ignored the same way a malformed aiSlot is.
+    Config e;
+    REQUIRE(ParseConfig(R"({"modOptions":[1,2]})", e, err));
+    CHECK(e.modOptions.empty());
 }
 
 TEST_CASE("ParseConfig: tickMode variants") {

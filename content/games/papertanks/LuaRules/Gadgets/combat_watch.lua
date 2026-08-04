@@ -25,6 +25,19 @@ if not gadgetHandler:IsSyncedCode() then
     return false
 end
 
+-- `--modoption combatwatch=0` switches the whole gadget off. Default is ON,
+-- so nothing about an ordinary Paper Tanks session changes. The one caller
+-- that needs it off is CI: with a real start army (game_start_units.lua) the
+-- per-shot DAMAGE lines below run to thousands of lines across a 5-game-minute
+-- run, which buries the `replay verify:` verdict the gate reads.
+do
+    local opts = Spring.GetModOptions() or {}
+    local cw = opts.combatwatch
+    if cw == '0' or cw == 'false' or cw == false then
+        return false
+    end
+end
+
 local spGetAllUnits           = Spring.GetAllUnits
 local spGetUnitTeam           = Spring.GetUnitTeam
 local spGetUnitHealth         = Spring.GetUnitHealth

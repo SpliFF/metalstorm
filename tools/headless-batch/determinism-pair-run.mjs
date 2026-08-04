@@ -23,6 +23,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir, readFile, rm } from 'node:fs/promises';
 import { loadJson, writeJson } from './lib/config.mjs';
 import { runHeadless } from './lib/run-server.mjs';
+import { checkFixtureNonVacuous, describeFixture } from './lib/fixture-checks.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_REPO_ROOT = path.resolve(HERE, '..', '..');
@@ -39,9 +40,21 @@ async function runOnce({ serverBin, config, index, outDir, port, maxWallMin, rep
     await writeJson(configPath, cfg);
 
     const result = await runHeadless({ serverBin, configPath, port, dbPath, maxWallMin, cwd: repoRoot });
-    if (result.exitCode !== 0) {
-        throw new Error(`run ${index} exited with code ${result.exitCode}:\n${result.stderr.split('\n').slice(-30).join('\n')}`);
+
+    // NOT gated on the exit code — PLAN-replay T2-b. `spring-server` aborts
+    // during static destruction (CWeaponDefHandler, inside __cxa_finalize,
+    // AFTER main returns and after the completion line is logged) in any run
+    // that exercised weapon defs. This gate never saw it before only because
+    // the fixture had no units and so never loaded a weapon; now that it
+    // stages a real army, the process status is noise. The run's own
+    // completion line, and the dump it wrote, are the evidence.
+    const out = `${result.stdout}\n${result.stderr}`;
+    const done = out.match(/headless run complete: stop=(\S+) frame=(-?\d+)/);
+    if (!done) {
+        throw new Error(`run ${index} never reached its stop condition (exit=${result.exitCode} signal=${result.signal}):\n` +
+            out.split('\n').slice(-30).join('\n'));
     }
+    console.log(`  run ${index}: ${done[0]}`);
     return JSON.parse(await readFile(dumpPath, 'utf8'));
 }
 
@@ -97,6 +110,19 @@ async function main() {
     console.log(`  run 0: status=${dumpA.status} frame=${dumpA.frame} snapshots=${dumpA.snapshots.length}`);
     const dumpB = await runOnce({ serverBin, config, index: 1, outDir, port, maxWallMin, repoRoot });
     console.log(`  run 1: status=${dumpB.status} frame=${dumpB.frame} snapshots=${dumpB.snapshots.length}`);
+
+    // Two identical EMPTY worlds match perfectly. That is exactly what this
+    // gate did for its first weeks: the fixture's game ships no start units,
+    // so all 30 snapshots folded `numUnits: 0` and the comparison covered the
+    // synced RNG stream and nothing else (PLAN-replay T2-c). Assert the run
+    // had content BEFORE trusting the agreement.
+    const nonVacuous = checkFixtureNonVacuous(dumpA);
+    console.log(`  fixture content: ${describeFixture(nonVacuous.measured)}`);
+    if (!nonVacuous.ok) {
+        console.error('VACUOUS FIXTURE — the stateHash sequences would agree over nothing:');
+        for (const p of nonVacuous.problems) console.error(`  - ${p}`);
+        process.exit(1);
+    }
 
     const problems = diffDumps(dumpA, dumpB);
     if (problems.length > 0) {

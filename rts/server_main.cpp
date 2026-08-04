@@ -496,6 +496,15 @@ int main(int argc, char* argv[])
                 requestedAIs.push_back(std::move(rq));
             }
         }
+        // Manifest modoptions fill gaps left by --modoption, same precedence
+        // rule as map/game/aiSlots above. Per-key rather than all-or-nothing:
+        // a fixture that sets three options and an operator who overrides one
+        // of them from the command line both get what they asked for.
+        for (const auto& kv : headlessCfg.modOptions) {
+            if (CGameSetup::GetModOptions().count(kv.first) > 0)
+                continue;
+            CGameSetup::SetModOption(kv.first, kv.second);
+        }
 
         std::string modeStr =
             headlessCfg.tickMode == headless::TickMode::Uncapped ? "uncapped"

@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace headless {
@@ -84,6 +85,18 @@ struct Config {
     std::string map;
     std::string game;
     std::vector<AiSlot> aiSlots;
+
+    // Room modoptions, the same key=value pairs `--modoption` carries. A
+    // headless fixture that wants a game's synced gadgets configured (start
+    // armies, chicken mode, multipliers) had no way to say so before: the
+    // manifest is supposed to be a complete launch spec, and modoptions were
+    // the one part of it only a CLI flag could supply. Parsed in declaration
+    // order and applied by server_main only for keys `--modoption` did not
+    // already set, so an explicit flag still wins (same precedence as
+    // map/game/aiSlots). Values are strings on the wire — CGameSetup stores
+    // them as strings and Spring.GetModOptions() hands them to Lua as strings —
+    // so JSON numbers/bools are coerced rather than rejected.
+    std::vector<std::pair<std::string, std::string>> modOptions;
 };
 
 // Observed sim state at the current tick, fed to EvaluateStop.

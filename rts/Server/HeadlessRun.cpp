@@ -92,6 +92,23 @@ bool ParseConfig(const std::string& jsonText, Config& out, std::string& err) {
             out.aiSlots.push_back(std::move(slot));
         }
     }
+    if (j.contains("modOptions") && j["modOptions"].is_object()) {
+        // nlohmann preserves insertion order only with ordered_json; plain
+        // json sorts keys. Either way the ORDER is not semantically load-
+        // bearing (CGameSetup is a map), but it is deterministic, which is
+        // what a determinism fixture needs.
+        for (const auto& [key, val] : j["modOptions"].items()) {
+            if (key.empty())
+                continue;
+            std::string s;
+            if (val.is_string())        s = val.get<std::string>();
+            else if (val.is_boolean())  s = val.get<bool>() ? "1" : "0";
+            else if (val.is_number_integer()) s = std::to_string(val.get<int64_t>());
+            else if (val.is_number())   s = std::to_string(val.get<double>());
+            else continue;  // objects/arrays/null have no modoption spelling
+            out.modOptions.emplace_back(key, std::move(s));
+        }
+    }
 
     // --- The `headless` block (run behaviour) ---
     if (!j.contains("headless"))
