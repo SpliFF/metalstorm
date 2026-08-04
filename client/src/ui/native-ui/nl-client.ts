@@ -31,8 +31,8 @@ import { planUtterance, type ExchangeDeps, type ExchangeOutcome } from './consol
 import type { AcceleratorResult } from './free-text-accelerator.js';
 import {
     validateNLResponse,
-    type NLPriority, type NLResponse, type NLSubject, type NLTarget, type NLWhen,
-    type ValidationResult,
+    type NLGroupAction, type NLPriority, type NLResponse, type NLSubject, type NLTarget,
+    type NLWhen, type ValidationResult,
 } from './nl-envelope.js';
 import {
     executeNLResponse,
@@ -45,8 +45,64 @@ export interface LocalParse {
     response: NLResponse;
     /** "didn't understand: 'quickly'" — the accelerator's unclaimed words. */
     notes: string[];
-    /** The M0 outcome this was built from, for callers that still want its copy. */
-    outcome: ExchangeOutcome;
+    /**
+     * The M0 outcome this was built from, for callers that still want its copy.
+     * Absent when the sentence never reached the slot-filler — a rename is
+     * matched ahead of it (see `parseGroupRename`) and produces no
+     * `CompiledMessage`, which is the only shape `ExchangeOutcome` can carry.
+     */
+    outcome?: ExchangeOutcome;
+}
+
+type NLRename = Extract<NLGroupAction, { op: 'rename' }>;
+
+/**
+ * "Name this group Hammerfall" — matched BEFORE the slot-filler.
+ *
+ * A rename is not one of the eleven verbs and never will be: `compile-table.ts`
+ * turns verbs into directives, and this produces an `OrgGroup` update. So it is
+ * a pattern in front of the accelerator rather than a twelfth entry in its
+ * table — the accelerator stays a table of things that move armies.
+ *
+ * Two shapes, and the order they are tried in matters:
+ *   1. the SELECTION form — "name/call/rename this group <name>" — which emits
+ *      no `groupRef` at all (see `NLGroupAction`), and
+ *   2. the REFERENCE form — "rename <group> to <name>".
+ * Shape 1 is tried first because "rename this group to Hammerfall" satisfies
+ * shape 2 as well, with `groupRef = "this group"` — a phrase the resolver would
+ * hunt for in the name index and rightly not find.
+ *
+ * Nothing here resolves anything: like every other producer in this file it
+ * emits names (or the absence of one) and lets `nl-resolver.ts` decide.
+ */
+const RENAME_SELECTION =
+    /^(?:name|call|rename)\s+(?:(?:this|that|the|my)\s+)?(?:group|squad|platoon|army|force|them|it)\s+(?:(?:to|as)\s+)?(.+)$/i;
+const RENAME_REFERENCE = /^rename\s+(.+?)\s+to\s+(.+)$/i;
+
+export function parseGroupRename(utterance: string): NLRename | null {
+    const text = utterance.trim();
+
+    const selection = RENAME_SELECTION.exec(text);
+    if (selection) {
+        const name = cleanName(selection[1]);
+        return name ? { op: 'rename', name } : null;
+    }
+
+    const reference = RENAME_REFERENCE.exec(text);
+    if (reference) {
+        const groupRef = cleanName(reference[1]);
+        const name = cleanName(reference[2]);
+        return groupRef && name ? { op: 'rename', groupRef, name } : null;
+    }
+
+    return null;
+}
+
+/** Trim the punctuation a spoken or typed name arrives wrapped in. Whatever
+ *  survives still faces the envelope validator's charset/length gate — this
+ *  only stops a stray quote from being *part of the callsign*. */
+function cleanName(raw: string): string {
+    return raw.trim().replace(/^["'`]+|["'`.!]+$/g, '').trim();
 }
 
 /**
@@ -58,6 +114,21 @@ export interface LocalParse {
  * depending on whether the proxy happened to be up.
  */
 export function acceleratorToEnvelope(utterance: string, deps: ExchangeDeps): LocalParse {
+    const rename = parseGroupRename(utterance);
+    if (rename) {
+        return {
+            notes: [],
+            response: {
+                // `say` restates the ORDER, never its outcome — the executor
+                // still has to find the group, and may refuse.
+                say: rename.groupRef
+                    ? `rename ${rename.groupRef} to "${rename.name}"`
+                    : `rename the selected group to "${rename.name}"`,
+                actions: [{ kind: 'group', group: rename }],
+            },
+        };
+    }
+
     const outcome = planUtterance(utterance, deps);
 
     if (outcome.kind === 'refused') {

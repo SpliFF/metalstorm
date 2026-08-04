@@ -336,9 +336,26 @@ function runGuidance(
 
 // ─────────────────────────────── group ───────────────────────────────
 
+/** The selected group as a plain id, via the resolver's own `selection`
+ *  subject rule — so "this group" can't come to mean two different things in
+ *  two different verbs. */
+function selectionGroupId(ports: ExecutorPorts): Resolution<number> {
+    const subject = ports.resolver.resolveSingleSubject({ type: 'selection' });
+    if (subject.kind !== 'ok') return subject as Resolution<number>;
+    const groupId = subject.value.type === 'group' ? subject.value.groupId : 0;
+    if (!groupId) return { kind: 'refuse', reason: 'Nothing is selected — select a group first.' };
+    return { kind: 'ok', value: groupId };
+}
+
 function runGroup(group: NLGroupAction, ports: ExecutorPorts, report: ExecutionReport): Dispatched {
     if (group.op === 'rename') {
-        const id = ports.resolver.resolveGroupId(group.groupRef);
+        // No groupRef = "this group" = the selection, resolved through the same
+        // subject path an unqualified order uses, so "name this group X" and
+        // "defend Northgate" agree on what "this" means — and produce the same
+        // "nothing is selected" refusal when it means nothing.
+        const id = group.groupRef !== undefined
+            ? ports.resolver.resolveGroupId(group.groupRef)
+            : selectionGroupId(ports);
         if (id.kind !== 'ok') return id as Dispatched;
 
         // The existing OrgGroup update case (integration.ts): empty add/remove

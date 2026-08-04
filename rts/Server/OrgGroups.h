@@ -149,6 +149,10 @@ public:
     std::vector<const OrgGroup*> GetTeamGroups(int team) const;
     const std::vector<OrgGroup>& GetAllGroups() const { return groups; }
 
+    /// Size of the auto-naming callsign register. Exposed only so tests can
+    /// exhaust it and pin the numeric-suffix wrap.
+    static size_t CallsignCount();
+
     void Clear();
 
 private:
@@ -160,6 +164,13 @@ private:
     /// Remove `unitId` from every group except `exceptGroupId`. Returns the
     /// team whose group lost the member, or -1. Enforces the one-platoon rule.
     int PullFromOtherGroups(uint32_t unitId, uint32_t exceptGroupId);
+
+    /// Pick a callsign not already in use by `team` ("Chimera Platoon"). The
+    /// used-set is derived from the team's live groups, so a disband frees the
+    /// name back up and a hand-typed rename blocks it — see OrgGroups.cpp.
+    /// Never returns empty: the register wraps with a numeric suffix.
+    std::string AssignCallsign(int team, Echelon echelon) const;
+
     void NotifyChange(int team) { if (changeNotifier) changeNotifier(team); }
 };
 

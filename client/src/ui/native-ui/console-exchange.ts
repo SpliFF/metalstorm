@@ -200,7 +200,8 @@ export function planUtterance(utterance: string, deps: ExchangeDeps): ExchangeOu
             notes,
             parsed,
             text: `I didn't hear an order in that. Verbs I know: ${VERB_LIST.join(', ')}. ` +
-                  `Try "defend Northgate" or "3rd Armoured attack Slag Forge high".`,
+                  `Try "defend Northgate" or "3rd Armoured attack Slag Forge high". ` +
+                  `To name a squad: "name this group Hammerfall".`,
         };
     }
 

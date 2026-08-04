@@ -18,6 +18,32 @@
     },
 
     {
+      "name": "rename what is selected — no groupRef at all",
+      "utterance": "name this group Hammerfall",
+      "context": "basin-selected",
+      "note": "\"This group\" IS the selection, so the envelope omits groupRef entirely (NLGroupAction). The alternative — looking up the selected group's current name and shipping that as the ref — round-trips id → name → id through a fuzzy search to arrive back where it started, with a chance of landing somewhere else on the way.",
+      "expected": {
+        "say": "Kestrel Flight is now Hammerfall.",
+        "actions": [{ "kind": "group", "group": { "op": "rename", "name": "Hammerfall" } }]
+      },
+      "expect": {
+        "sends": [{ "type": "OrgGroup", "groupId": 4 }],
+        "saysLike": ["is now \"Hammerfall\""]
+      }
+    },
+
+    {
+      "name": "renaming with nothing selected refuses, it does not pick one",
+      "utterance": "name this group Hammerfall",
+      "context": "basin",
+      "note": "Same rule the unqualified-order path follows: an absent groupRef means the selection, and no selection means no group — not the first group on the list.",
+      "expected": {
+        "actions": [{ "kind": "group", "group": { "op": "rename", "name": "Hammerfall" } }]
+      },
+      "expect": { "sends": [], "refusals": 1, "saysLike": ["Nothing is selected"] }
+    },
+
+    {
       "name": "rename resolves the group strictly",
       "utterance": "call that lot Hammerfall",
       "context": "ambiguous-forces",

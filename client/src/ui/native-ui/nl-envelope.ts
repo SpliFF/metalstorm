@@ -148,10 +148,20 @@ export type NLQuery =
     | { op: 'resources' }
     | { op: 'objectives' };
 
-/** "Name this group Hammerfall" → the existing OrgGroup update case. */
+/**
+ * "Name this group Hammerfall" → the existing OrgGroup update case.
+ *
+ * `groupRef` is OPTIONAL on a rename, and its absence means "the group that is
+ * selected" — the same thing `NLSubject`'s `selection` type means, and for the
+ * same reason. "Name THIS group Hammerfall" is the phrasing a player actually
+ * uses, and the alternative (looking up the selected group's current name and
+ * shipping that as the ref) would round-trip id → name → id through a fuzzy
+ * search just to arrive back where it started, with a chance of landing on a
+ * different group on the way. The envelope stays id-free either way.
+ */
 export type NLGroupAction =
     | { op: 'create'; name: string; memberRefs?: string[] }
-    | { op: 'rename'; groupRef: string; name: string };
+    | { op: 'rename'; groupRef?: string; name: string };
 
 export type NLAction =
     | { kind: 'command'; intent: NLCommandIntent }
@@ -601,7 +611,10 @@ function validateGroup(g: unknown, path: string, push: (m: string) => void): voi
             else g.memberRefs.forEach((m, i) => checkRef(m, `${path}.memberRefs[${i}]`, push));
         }
     } else if (g.op === 'rename') {
-        checkRef(g.groupRef, `${path}.groupRef`, push);
+        // Absent groupRef = the selection (see NLGroupAction). Present but not
+        // a valid name is still an error — an omitted field and a malformed one
+        // must not mean the same thing.
+        if (g.groupRef !== undefined) checkRef(g.groupRef, `${path}.groupRef`, push);
         checkRef(g.name, `${path}.name`, push);
     } else {
         push(`${path}.op ${JSON.stringify(g.op)} is not 'create' or 'rename'`);

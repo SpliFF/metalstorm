@@ -18,7 +18,7 @@
  */
 
 import {
-    NamedEntityIndex, type EntityType, type NamedEntity,
+    NamedEntityIndex, parseLandmarksFromRulesParams, type EntityType, type NamedEntity,
 } from '../named-entity-index.js';
 import type { OrgGroupSummary } from '../ui-store.js';
 import type { ClassVocabulary } from '../class-vocabulary.js';
@@ -133,9 +133,26 @@ function memberIds(group: FixtureGroup): number[] {
 export function buildFixtureWorld(context: FixtureContext, vocabulary: ClassVocabulary): FixtureWorld {
     const entities: NamedEntity[] = [];
 
+    // Landmarks take the long way round on purpose. Every other place in a
+    // fixture is a hand-built `NamedEntity`, which is fine because its producer
+    // is landed and covered elsewhere; landmarks have NO publisher yet (that is
+    // the scenario-gen lane's), so a hand-built one would prove only that the
+    // fixture builder works. Instead the fixture synthesizes the
+    // `landmark_<key>_x/_z/_name` rulesParams a publisher would emit and runs
+    // them through the REAL parser — so "escort the grain silo" is evidence
+    // about the wire shape the day something starts publishing it.
+    const landmarkParams = new Map<string, number | string>();
     for (const place of context.places ?? []) {
+        if (place.t === 'landmark') {
+            const key = place.k ?? slug(place.n);
+            landmarkParams.set(`landmark_${key}_x`, place.x);
+            landmarkParams.set(`landmark_${key}_z`, place.z);
+            landmarkParams.set(`landmark_${key}_name`, place.n);
+            continue;
+        }
         entities.push({ id: place.k ?? slug(place.n), type: place.t, name: place.n, x: place.x, z: place.z });
     }
+    entities.push(...parseLandmarksFromRulesParams(landmarkParams));
     for (const objective of context.objectives ?? []) {
         entities.push({ id: objective.id, type: 'objective', name: objective.n, x: objective.x, z: objective.z });
     }

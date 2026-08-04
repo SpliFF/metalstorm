@@ -243,6 +243,9 @@ function showHelp() {
         'Verbs: attack, secure, defend, hold, patrol, screen, scout, escort, withdraw, reinforce, build. ' +
         'Priority: low, normal, high, urgent. When: "under attack", "contested".');
     say('system',
+        'Naming: "name this group Hammerfall" renames what you have selected; ' +
+        '"rename Chimera Platoon to Hammerfall" names one by its current callsign.');
+    say('system',
         classes
             ? `Unit classes for an "idle <class>" subject: ${classes}.`
             : 'Unit-class vocabulary is not loaded — "idle <class>" subjects are unavailable.');

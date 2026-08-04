@@ -292,7 +292,7 @@ export class NamedEntityIndex {
  * convention), NOT a synthetic colon-delimited contract. See:
  *   - regions:    game_regions.lua      → `region_<key>_name/_x/_z`
  *   - objectives: game_objectives.lua   → `objective_<id>_type/_state/_region/_x/_z` + `objective_count`
- *   - landmarks:  (no publisher yet)    → `landmark_<name>_x/_z` (reserved shape)
+ *   - landmarks:  (scenario-gen lane)   → `landmark_<key>_x/_z` + optional `_name`
  * Region keys and landmark names can themselves contain underscores
  * (`west_scarp_n`), so every parser anchors the field suffix at end-of-string
  * and lets the greedy `(.+)` capture the full id — never split on the first
@@ -302,10 +302,12 @@ export class NamedEntityIndex {
 /**
  * Parse regions from gameRulesParams into named entities.
  *
- * `region_<key>_name` (display string) + `region_<key>_x` / `_z` (polygon
- * centroid, elmos) — published once at setup by game_regions.lua. A region is
- * only emitted once all three are present (grid-provider maps publish none of
- * them, so they contribute no named places). The dynamic `region_<key>_team` /
+ * `region_<key>_name` (display string) + `region_<key>_x` / `_z` (centre point,
+ * elmos) — published once at setup by game_regions.lua, by BOTH partition
+ * providers: a graph map publishes its authored names and polygon centroids, a
+ * grid map publishes derived sector names ("Sector B9") and clipped cell
+ * centres. A region is only emitted once all three are present. The dynamic
+ * `region_<key>_team` /
  * `_contested` control state is intentionally NOT part of the entity — it
  * changes far more often than the composer needs and belongs to the strategic
  * overlay, not the name index.
@@ -426,13 +428,40 @@ export function parseObjectivesFromRulesParams(
     return result;
 }
 
+/** "grain_silo" → "Grain Silo". The fallback display name for a landmark whose
+ *  publisher supplied only coordinates: a key is a slug, and a slug is not
+ *  something a player says. */
+function deslug(key: string): string {
+    return key
+        .split(/[_\-]+/)
+        .filter(Boolean)
+        .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+        .join(' ');
+}
+
 /**
- * Parse landmarks from gameRulesParams (`landmark_<name>_x/_z`).
+ * Parse landmarks from gameRulesParams (`landmark_<key>_x/_z`, optional
+ * `landmark_<key>_name`).
  *
- * No gadget publishes landmarks yet (scenario/map-authored places are a
- * future producer — PLAN-persistence §5); this parser exists so that path is
- * a data change, not a code change, and to keep the free-text accelerator's
- * `landmark` target type meaningful the moment they land.
+ * Landmarks are the "defend the grain silo" places — the named scenery a
+ * scenario places, as opposed to a region (a partition cell) or an objective (a
+ * scored goal). Nothing publishes them yet: the real producer is the
+ * scenario-gen lane's job. This side is the CONSUMER, and its contract is that
+ * the publisher's arrival is a data change, not a code change — so the shape is
+ * pinned here and every degradation is defined:
+ *
+ *   - no landmark params at all → no landmarks, no warning, nothing else
+ *     affected (the state the game shipped in, and still runs in);
+ *   - x without z (or the reverse) → dropped, because a place you can't point
+ *     at is not a target;
+ *   - x/z with no `_name` → named from the key ("grain_silo" → "Grain Silo"),
+ *     which is the shape the parser accepted before `_name` existed;
+ *   - `_name` present → it wins, so a landmark can be called "The Grain Silo"
+ *     without its rulesParam key having to be.
+ *
+ * `_name` mirrors `region_<key>_name` deliberately: two publishers of named
+ * places should not need two different shapes, and the parser that reads them
+ * shouldn't either.
  */
 export function parseLandmarksFromRulesParams(
     params: ReadonlyMap<string, number | string>
@@ -440,17 +469,19 @@ export function parseLandmarksFromRulesParams(
     const landmarks = new Map<string, Partial<NamedEntity>>();
 
     for (const [key, value] of params.entries()) {
-        const match = key.match(/^landmark_(.+)_(x|z)$/);
+        const match = key.match(/^landmark_(.+)_(name|x|z)$/);
         if (!match) continue;
 
-        const [, name, field] = match;
-        let landmark = landmarks.get(name);
+        const [, id, field] = match;
+        let landmark = landmarks.get(id);
         if (!landmark) {
-            landmark = { id: name, name, type: 'landmark' };
-            landmarks.set(name, landmark);
+            landmark = { id, name: deslug(id), type: 'landmark' };
+            landmarks.set(id, landmark);
         }
 
-        if (field === 'x' && typeof value === 'number') {
+        if (field === 'name' && typeof value === 'string' && value) {
+            landmark.name = value;
+        } else if (field === 'x' && typeof value === 'number') {
             landmark.x = value;
         } else if (field === 'z' && typeof value === 'number') {
             landmark.z = value;

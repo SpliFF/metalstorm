@@ -223,6 +223,24 @@
     },
 
     {
+      "name": "defend the grain silo — a landmark, from landmark_* rulesParams",
+      "utterance": "defend the grain silo",
+      "context": "basin",
+      "note": "The plan's own example utterance (§ worldbuilding). Nothing publishes landmark_* yet — the scenario-gen lane owns that — so the fixture world synthesizes the rulesParams and runs them through the REAL parseLandmarksFromRulesParams (fixture-world.ts). This fixture is therefore evidence about the WIRE SHAPE, not about a hand-built entity: the day a publisher lands, the resolver already finds what it emits. No subject named and nothing selected ⇒ the team-wide standing order, same as any unqualified order.",
+      "expected": {
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "defend",
+            "subject": { "type": "any" },
+            "target": { "type": "entity-ref", "name": "Grain Silo" }
+          }
+        }]
+      },
+      "expect": { "sends": [{ "type": "StandingOrder" }] }
+    },
+
+    {
       "name": "withdraw takes only a point, so a named place becomes one",
       "utterance": "pull Chimera Squad back to Randtown",
       "context": "basin",

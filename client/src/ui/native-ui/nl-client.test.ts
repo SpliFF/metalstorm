@@ -14,7 +14,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { acceleratorToEnvelope, runLocalUtterance } from './nl-client.js';
+import { acceleratorToEnvelope, parseGroupRename, runLocalUtterance } from './nl-client.js';
 import { validateNLResponse } from './nl-envelope.js';
 import { planUtterance } from './console-exchange.js';
 import type { NLConsoleLine, NLSentCommand } from './nl-executor.js';
@@ -248,5 +248,89 @@ describe('a validation failure is visible, not swallowed', () => {
         const bad = validateNLResponse({ actions: [{ kind: 'command', intent: { verb: 'nuke' } }] }, { vocabulary });
         expect(bad.ok).toBe(false);
         if (!bad.ok) expect(bad.errors[0]).toContain('not a known verb');
+    });
+});
+
+/**
+ * "Name this group Hammerfall" (§5, M2). A rename is not one of the eleven
+ * verbs — it produces an `OrgGroup` update, not a directive — so it is matched
+ * ahead of the slot-filler rather than added to it.
+ */
+describe('the rename phrasings', () => {
+    it('reads "name this group X" as a rename of the SELECTION (no groupRef)', () => {
+        for (const utterance of [
+            'name this group Hammerfall',
+            'call this group Hammerfall',
+            'rename this group to Hammerfall',
+            'name the group Hammerfall',
+            'call that squad Hammerfall',
+            'name my platoon as Hammerfall',
+            'call them Hammerfall',
+        ]) {
+            expect(parseGroupRename(utterance), utterance).toEqual({ op: 'rename', name: 'Hammerfall' });
+        }
+    });
+
+    it('reads "rename A to B" as a rename of a NAMED group', () => {
+        expect(parseGroupRename('rename Chimera Squad to Hammerfall'))
+            .toEqual({ op: 'rename', groupRef: 'Chimera Squad', name: 'Hammerfall' });
+    });
+
+    it('prefers the selection shape when a sentence satisfies both', () => {
+        // "rename this group to X" also matches the reference shape, with
+        // groupRef = "this group" — a phrase the index will never hold.
+        expect(parseGroupRename('rename this group to Hammerfall'))
+            .toEqual({ op: 'rename', name: 'Hammerfall' });
+    });
+
+    it('strips the punctuation a name arrives wrapped in', () => {
+        expect(parseGroupRename('name this group "Hammerfall".'))
+            .toEqual({ op: 'rename', name: 'Hammerfall' });
+    });
+
+    it('keeps its hands off sentences that are orders', () => {
+        for (const utterance of [
+            'defend Northgate',
+            'Chimera Squad attack Slag Forge',
+            'name',
+            'call',
+            'rename Chimera Squad',           // no new name given
+            'idle tanks hold Slag Forge',
+        ]) {
+            expect(parseGroupRename(utterance), utterance).toBeNull();
+        }
+    });
+
+    it('renames the selected group end to end, through the normal send path', () => {
+        const { sent, lines } = run('name this group Hammerfall', 'basin-selected');
+        expect(sent).toEqual([{
+            type: 'OrgGroup', action: 'update', groupId: 4,
+            addIds: [], removeIds: [], name: 'Hammerfall',
+        }]);
+        expect(lines.some((l) => l.kind === 'ok' && l.text.includes('Hammerfall'))).toBe(true);
+    });
+
+    it('refuses rather than picking a group when nothing is selected', () => {
+        const { sent, lines } = run('name this group Hammerfall', 'basin');
+        expect(sent).toEqual([]);
+        expect(lines.some((l) => l.kind === 'refused' && l.text.includes('Nothing is selected'))).toBe(true);
+    });
+
+    it('asks when the named group is ambiguous, and sends nothing', () => {
+        const { sent, lines } = run('rename Chimera to Hammerfall', 'ambiguous-forces');
+        expect(sent).toEqual([]);
+        expect(lines.some((l) => l.kind === 'ask')).toBe(true);
+    });
+
+    it('produces a valid envelope for every rename phrasing', () => {
+        for (const utterance of [
+            'name this group Hammerfall',
+            'rename Chimera Squad to Hammerfall',
+            'call them Rust Column',
+        ]) {
+            const { response } = acceleratorToEnvelope(utterance, setup().deps);
+            const result = validateNLResponse(response, { vocabulary });
+            expect(result.ok ? [] : result.errors, utterance).toEqual([]);
+        }
     });
 });
