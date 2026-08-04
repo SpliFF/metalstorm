@@ -135,10 +135,23 @@ local function winnersFor(completingTeam)
         return a or t
     end
 
+    -- "Staffed" means a team someone is actually playing — NOT merely a team
+    -- the engine materialised. Seating the two sides on teams 0 and 4 (wars
+    -- §7.4) makes the engine allocate teams 1-3 as unoccupied filler: they are
+    -- live, they are in GetTeamList(), they are valid allyteams, and they have
+    -- no leader and no units. Excluding only Gaia here let all three through,
+    -- so a compact-side win told the player "Ally team 0, Ally team 1, Ally
+    -- team 2 & Ally team 3 share victory" — three of the four do not exist.
+    -- The asymmetry is why it survived D18: the union side's filler teams are
+    -- Gaia or unallocated, so a team-4 win looked clean. The leader == -1 test
+    -- is the same one game_scenario.lua's war_teams_unstaged check uses.
     local gaia = Spring.GetGaiaTeamID and Spring.GetGaiaTeamID() or nil
     local staffed = {}
     for _, t in ipairs(Spring.GetTeamList() or {}) do
-        if t ~= gaia then staffed[t] = true end
+        if t ~= gaia then
+            local _, leader = Spring.GetTeamInfo(t)
+            if leader and leader ~= -1 then staffed[t] = true end
+        end
     end
 
     local faction = factionOf(completingTeam)

@@ -122,16 +122,28 @@ return {
     -- Starting garrison at each side's primary drop-in (northgate/southgate,
     -- start_positions[1] in the layout graph) plus a radar picket at the
     -- flank home region (northwatch/southwatch, tagged "radar_high").
+    --
+    -- Opening postures are wars §7.5(c): the scenario sends the army it
+    -- stages. Every MOBILE combat unit on both sides gets a FIGHT toward the
+    -- basin's centre — (8192, 8192), the centroid of the region polygon in
+    -- mapdata/regions.lua (x 6400..9984, z 7200..9184) — and deliberately NOT
+    -- toward each side's near edge of it: ordering team 0 to z=7600 and team 4
+    -- to z=8784 made two armies "arrive" 1184 elmos apart, in the same region
+    -- and out of range of each other, which is a land-grab race rather than a
+    -- battle. Engineers stay home: a builder walking into the contested core
+    -- is not a posture, it is a casualty. The radar is immobile.
     units = {
         { def = 'ms_tanks_s2', team = 0, x = 6600, z = 1200, facing = 'south', count = 4, spacing = 150,
-          orders = { { cmd = 'FIGHT', params = { 8192, 0, 7600 } } } },
-        { def = 'ms_soldiers_s1', team = 0, x = 6400, z = 1400, facing = 'south', count = 6, spacing = 100 },
+          orders = { { cmd = 'FIGHT', params = { 8192, 0, 8192 } } } },
+        { def = 'ms_soldiers_s1', team = 0, x = 6400, z = 1400, facing = 'south', count = 6, spacing = 100,
+          orders = { { cmd = 'FIGHT', params = { 8192, 0, 8192 } } } },
         { def = 'ms_engineers_s1', team = 0, x = 6200, z = 1200, facing = 'south', count = 2, spacing = 120 },
         { def = 'ms_radar_s1', team = 0, x = 13184, z = 1200, facing = 'south', count = 1 },
 
         { def = 'ms_tanks_s2', team = 4, x = 6600, z = 15184, facing = 'north', count = 4, spacing = 150,
-          orders = { { cmd = 'FIGHT', params = { 8192, 0, 8784 } } } },
-        { def = 'ms_soldiers_s1', team = 4, x = 6400, z = 14984, facing = 'north', count = 6, spacing = 100 },
+          orders = { { cmd = 'FIGHT', params = { 8192, 0, 8192 } } } },
+        { def = 'ms_soldiers_s1', team = 4, x = 6400, z = 14984, facing = 'north', count = 6, spacing = 100,
+          orders = { { cmd = 'FIGHT', params = { 8192, 0, 8192 } } } },
         { def = 'ms_engineers_s1', team = 4, x = 6200, z = 15184, facing = 'north', count = 2, spacing = 120 },
         { def = 'ms_radar_s1', team = 4, x = 13184, z = 15184, facing = 'north', count = 1 },
 
@@ -189,11 +201,20 @@ return {
         -- template, so a scenario is where "how does this war end" is
         -- authored; Meridian Basin is the beta/showcase war, so its ending is
         -- deliberately reachable inside one session: open race (forTeam nil,
-        -- either faction may take it) on a 30 s hold
-        -- (DEFAULT_CONTROL_HOLD_FRAMES) of the map's central contested region.
-        -- No expiry — the basin is the war's focal point, it does not lapse.
+        -- either faction may take it) on a hold of the map's central contested
+        -- region. No expiry — the basin is the war's focal point, it does not
+        -- lapse.
+        --
+        -- `notBefore` is wars §7.5(a): the hold clock does not accrue before
+        -- this frame, so the war cannot be won before the sides can physically
+        -- meet. Together with the victory hold (5400, §7.5(b), applied by
+        -- game_scenario.lua's DEFAULT_VICTORY_HOLD_FRAMES) it puts a 9000-frame
+        -- (5 min) floor on this war. Without it, D20: an unopposed three-unit
+        -- patrol walked into the middle at ~frame 4900 and the war was over 1350
+        -- frames later, at the same frame every time, whatever the player did.
         { type = 'control', scope = 'strategic', forTeam = nil, region = 'meridian_basin', reward = 300,
           victory = true,
+          notBefore = 3600,
           expiresAtFrame = nil },
 
         -- TACTICAL Phase 1: Protect the civilian districts
