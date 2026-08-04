@@ -1254,6 +1254,8 @@ def main(argv=None):
                     help="output file (default: <game-dir>/scenarios/<id>.lua)")
     ap.add_argument("--stdout", action="store_true",
                     help="write the scenario to stdout instead of a file")
+    ap.add_argument("--meta-json", default=None, metavar="FILE",
+                    help="also write the generation metadata to FILE as JSON")
     ap.add_argument("--verify", action="store_true",
                     help="generate and check, but write nothing (exit 2 on reject)")
     args = ap.parse_args(argv)
@@ -1292,6 +1294,32 @@ def main(argv=None):
     for kind, key, owner in meta["clusters"]:
         say(f"    {kind:8s} {key:22s} "
             f"{'neutral (Gaia)' if owner == 'neutral' else f'hostile team {owner}'}")
+
+    # --meta-json is how a PROGRAM ingests this run — specifically the lobby's
+    # POST /api/admin/scenarios/generate, which shells out to this script and
+    # needs the id, the display name and the map back. It cannot read them off
+    # stdout: under --stdout that stream carries the scenario and nothing else
+    # (see the comment above), and the human summary is prose whose shape is
+    # free to change. It cannot re-derive the id either — that would mean a
+    # second implementation of scenario_id()'s hash in C++, and two hash
+    # implementations that must agree forever is exactly one too many.
+    #
+    # Written before the --stdout / --verify early returns so every mode emits
+    # it: `--verify --meta-json` is a useful "what WOULD this produce" probe.
+    if args.meta_json:
+        import json
+        payload = dict(meta)
+        # The knobs, echoed back so a stored scenario records the complete
+        # input needed to reproduce itself. `seed`, `map_id` and `version` are
+        # already top-level fields of meta.
+        payload["params"] = {
+            "sides": args.sides, "towns": args.towns,
+            "outposts": args.outposts, "bases": args.bases,
+            "mines": args.mines, "hostility": args.hostility,
+            "roster": args.roster,
+        }
+        with open(args.meta_json, "w", encoding="utf-8") as f:
+            json.dump(payload, f, sort_keys=True, indent=2)
 
     if args.stdout:
         sys.stdout.write(lua)

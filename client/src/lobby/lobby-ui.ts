@@ -36,6 +36,11 @@ import { renderTemplate } from '../ui/ui.js';
 import {
     defaultTeamForNewSlot, renderSideOptions, warSidesForRoom,
 } from './war-sides.js';
+import type { AvailableScenarioInfo } from './scenario-picker.js';
+import {
+    defaultScenarioFor, parseScenarioList, resolveScenarioLabel, scenarioNote,
+    scenarioOptionLabel, scenariosForMap,
+} from './scenario-picker.js';
 import {
     getDefaultLobbyTemplates,
     type LobbyTemplates,
@@ -116,23 +121,9 @@ const STRATEGOS_PROFILES: { id: string; label: string }[] = [
     { id: 'npc_raider', label: 'NPC Raider (needs scenario slate)' },
 ];
 
-/// One entry from `GET /api/games/<id>/scenarios` — a war template the game
-/// ships under `scenarios/<id>.lua` (PLAN-endtoend.md D10).
-interface AvailableScenarioInfo {
-    /// The `scenario` modoption value; what game_scenario.lua VFS.Includes.
-    id: string;
-    displayName: string;
-    /// The scenario's `world.map`. Used to filter the picker down to the
-    /// map being created on, and to pick the default.
-    map: string;
-    /// Tutorial scenarios have their own boot path and are never offered
-    /// as a plain create-room choice.
-    tutorial: boolean;
-    /// Whether the scenario declares a `victory = true` objective. False
-    /// means the war has no terminal condition and cannot end — surfaced
-    /// in the picker rather than discovered 40 minutes in.
-    terminal: boolean;
-}
+// AvailableScenarioInfo and every rule that operates on it now live in
+// ./scenario-picker.ts, so they can be tested without a DOM — same move, and
+// the same reason, as war-sides.ts. Imported above.
 
 interface CurrentRoom {
     id: number; name: string; mapId: string; gameId: string;
@@ -763,10 +754,10 @@ export class LobbyUI {
         try {
             const list = await this.lobbyGet(
                 `/api/games/${encodeURIComponent(gameId)}/scenarios`);
-            this.availableScenarios = Array.isArray(list) ? list.map((s: any) => ({
-                id: s.id ?? '', displayName: s.displayName ?? s.id ?? '',
-                map: s.map ?? '', tutorial: !!s.tutorial, terminal: !!s.terminal,
-            })) : [];
+            // Shipped and generated wars arrive in the same list — the server
+            // materialises `generated_scenarios` rows into the directory it
+            // then discovers, so there is nothing to merge here.
+            this.availableScenarios = parseScenarioList(list);
             this.availableScenariosForGame = gameId;
         } catch {
             this.availableScenarios = [];
@@ -779,13 +770,9 @@ export class LobbyUI {
     }
 
     /// Which scenarios are offerable for the map currently selected in the
-    /// create form. Tutorials are excluded (they have their own boot path),
-    /// and so are scenarios authored for a different map — a scenario's
-    /// region keys only make sense against its own map's region graph, so
-    /// offering a cross-map pairing would stage a broken war.
+    /// create form. See scenariosForMap for the filtering rules.
     private scenariosForSelectedMap(): AvailableScenarioInfo[] {
-        return this.availableScenarios.filter(
-            s => !s.tutorial && s.map === this.selectedMapId);
+        return scenariosForMap(this.availableScenarios, this.selectedMapId);
     }
 
     /// Repopulate the War picker. Hidden when the selected game+map pair
@@ -812,16 +799,15 @@ export class LobbyUI {
         // ScenarioDiscovery::DefaultForMap exactly, including its rule that a
         // non-terminal scenario is never automatic; when the map has only
         // endless wars the honest default is "no war", not one of them.
-        const serverDefault = offerable.find(s => s.terminal) ?? null;
+        const serverDefault = defaultScenarioFor(offerable);
         const options = [
             serverDefault
                 ? `<option value="">${this.esc(serverDefault.displayName)} (default for this map)</option>`
                 : `<option value="">No war (default) — a free-form battle with no ending</option>`,
             ...offerable.map(s => {
                 const selAttr = s.id === this.selectedScenarioId ? ' selected' : '';
-                const suffix = s.terminal ? '' : ' — no ending';
                 return `<option value="${this.esc(s.id)}"${selAttr}>`
-                    + `${this.esc(s.displayName)}${suffix}</option>`;
+                    + `${this.esc(scenarioOptionLabel(s))}</option>`;
             }),
         ];
         sel.innerHTML = options.join('');
@@ -829,26 +815,12 @@ export class LobbyUI {
 
         const describe = () => {
             if (!note) return;
-            const picked = this.selectedScenarioId
+            const picked = (this.selectedScenarioId
                 ? offerable.find(s => s.id === this.selectedScenarioId)
-                : serverDefault;
-            if (!picked) {
-                // No scenario at all — the map ships no endable war. Say so
-                // here rather than let the player find out by attrition.
-                note.className = 'scenario-note endless';
-                note.textContent =
-                    'No war will be staged, so this battle has no ending. '
-                    + 'Leave by detaching.';
-            } else if (!picked.terminal) {
-                note.className = 'scenario-note endless';
-                note.textContent =
-                    'This war declares no victory objective — it has no ending. '
-                    + 'Leave by detaching.';
-            } else {
-                note.className = 'scenario-note';
-                note.textContent =
-                    `Ends when the war's victory objective is completed.`;
-            }
+                : serverDefault) ?? null;
+            const { className, text } = scenarioNote(picked);
+            note.className = className;
+            note.textContent = text;
         };
         describe();
 
@@ -922,12 +894,15 @@ export class LobbyUI {
             this.availableScenariosForGame === r.gameId
             && this.availableScenarios.length > 0;
         if (scenarioId) {
-            const info = this.availableScenarios.find(s => s.id === scenarioId);
-            const label = info ? info.displayName : scenarioId;
+            // Resolves generated wars as well as shipped ones — they are in
+            // the same list — so a room created with one shows its minted name
+            // rather than a raw `gen_<map>_<hash>` id.
+            const { label, known, terminal } =
+                resolveScenarioLabel(this.availableScenarios, scenarioId);
             // Only claim "no ending" when we actually know the scenario —
             // an unrecognised id means we have no list, not that the war
             // is endless.
-            const warn = info && !info.terminal
+            const warn = known && !terminal
                 ? ` <span class="scenario-note endless">(no ending)</span>` : '';
             parts.push(`War: <strong>${this.esc(label)}</strong>${warn}`);
         } else if (gameHasScenarios) {

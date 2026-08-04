@@ -406,6 +406,7 @@ set(LOBBY_SERVER_SOURCES
     rts/Server/AI/AIDiscovery.cpp
     rts/Server/GameDiscovery.cpp
     rts/Server/ScenarioDiscovery.cpp
+    rts/Server/ScenarioDb.cpp
     rts/Server/ConfigReader.cpp
     rts/Server/ResourcesParser.cpp
 )
@@ -444,6 +445,11 @@ target_compile_definitions(spring-lobby PRIVATE
     # out to the map-processing pipeline at startup without relying on
     # $PATH (PLAN-metalstorm-impostors.md M10).
     MAPCONVERTER_BINARY_PATH="$<TARGET_FILE:mapconverter>"
+    # Absolute path to the scenario generator, so POST /api/admin/scenarios/
+    # generate can shell out to it without depending on the lobby's cwd. Not a
+    # target: scenariogen.py is a source file, not a build product, so this is
+    # CMAKE_SOURCE_DIR rather than a generator expression.
+    SCENARIOGEN_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/tools/mapgen/scenariogen.py"
 )
 target_link_libraries(spring-lobby PRIVATE lua nghttp2_static flatbuffers ZLIB::ZLIB SQLite3::SQLite3 springlog springlog-net springlog-sqlite nlohmann_json::nlohmann_json openssl_crypto)
 if(UNIX)
@@ -482,6 +488,7 @@ if(TEST_SOURCES)
         ${CMAKE_SOURCE_DIR}/rts/Server/ProjectileEventCollector.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/RoomManager.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/ScenarioDiscovery.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/ScenarioDb.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/SoundEventCollector.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/StandingOrders.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/OrgGroups.cpp
