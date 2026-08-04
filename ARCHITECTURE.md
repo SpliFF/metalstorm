@@ -632,8 +632,11 @@ five phases the server asks `replay::Feed()` what was due and re-enters the same
 code paths with the recorded input. `rts/Server/ReplayFile.{h,cpp}` owns the
 container (magic + version + codec byte + JSON header + marker-framed blocks +
 trailer, where the block kinds are records, state-hash points, checkpoint-index
-entries and the embedded start checkpoint — an unknown marker is a named hard
-error, which is the seam future sections attach to); `rts/Server/ReplayPlayer.{h,cpp}`
+entries, the embedded start checkpoint and the game's outcome — an unknown marker
+is a named hard error, which is the seam future sections attach to, and the
+outcome block is what that seam is for: adding it left every `.msr` already on
+disk readable, because a reader that knows a marker and does not find it is
+simply looking at an older file); `rts/Server/ReplayPlayer.{h,cpp}`
 owns the cursor, seek state and hash verification, both engine-free and
 doctest-covered. A live recording is always uncompressed so a torn tail stays
 salvageable; `--replay-export` repacks a finished segment through zlib (the
@@ -733,6 +736,45 @@ and controller are per-client answers) on every landed control and on a 1 s
 wall-clock heartbeat; **a live game never sends one, and that absence is the
 client's entire mode signal** — the playback bar mounts on the first one it
 receives.
+
+### Replay browsing
+
+The lobby serves what it recorded. `POST /api/replays/list` returns a row per
+`.msr` in `--replay-dir` and `POST /api/replays/watch {file}` spawns a
+`spring-server --replay` for one; both 404 when the flag is unset. (POSTs for a
+read because `HttpGetHandler` never receives an Authorization header, so
+NetworkServer degrades every non-Public GET to loopback-only.) Listing goes
+through `replay::LoadSummary`, which walks the block framing and **skips**
+payloads rather than materialising every `Record` the way `Load` does, and
+counts blocks itself instead of trusting the trailer — which is what lets it
+report a duration for a *truncated* recording, i.e. for exactly the crashed
+servers an operator most wants to watch. A requested filename is resolved by
+matching it against the directory listing rather than by concatenation, so
+there is no path string to defeat, and an unreadable file is refused before the
+fork (a replay server handed one exits immediately, and the room it left behind
+would read as a crashed game).
+
+**A replay is served as an ordinary room**, and that is the load-bearing
+decision rather than an implementation shortcut: a room is already the only
+thing that carries a `game_server_port` to a browser and the only thing whose
+lifecycle kills a server when the last person leaves. `roomToJson` gains one
+field (`replay_file`); everything else about entering a game is the path a
+player already takes. Three behaviours follow without being written — casting
+is `JoinRoom` (a second caller for a file already being watched joins the
+existing room instead of spawning a rival server, which is how the control
+deck's driver/succession rule became reachable from the lobby), a cast ends on
+the existing `Abandoned` branch, and the health loop **deletes** a replay room
+whose server exited instead of calling `ResetRoomForNextGame` on it, because a
+recording has no next game.
+
+**A start frame is a control, never a launch option.** `--replay-seek` exists
+and the lobby does not use it: with no checkpoints the launch-time seek is an
+uncapped fast-forward from frame 0 during which the server does not service its
+QUIC connections, so a watcher's handshake goes unanswered long enough for the
+transport to time out, and it reconnects as a client the control deck no longer
+recognises as the driver. The `?watch=<file>&frame=N` deep link therefore sends
+an ordinary `ReplayControl::Seek` once attached. The same stall is still
+reachable from the playback bar on a long recording; checkpoints are the fix.
 
 ### Def + Model Loading
 ```

@@ -101,6 +101,30 @@ struct Checkpoint {
     std::vector<uint8_t> blob;
 };
 
+/// How the recorded game ENDED (task 4c). §5 asks a replay browser to list
+/// "date, duration, players, outcome" — the first three are derivable from the
+/// header and the trailer, and the fourth was in no section of the container,
+/// so a listing could only ever have shown a dash there.
+///
+/// It is a section of its own rather than a trailer field for a compatibility
+/// reason that is the whole point of the marker seam: a reader that does not
+/// know a marker hard-stops, but a reader that knows one and does not find it
+/// is simply looking at a file recorded before the block existed. Adding the
+/// outcome as a block means every `.msr` already on disk still loads, with
+/// `declared = false` — "this recording predates outcome capture" and "this
+/// game never reached a result" are the same statement to a viewer, and both
+/// are honest. Widening the trailer instead would have been a format bump that
+/// invalidated every existing file to add a display column.
+///
+/// A game that was still running when the recorder stopped (the E1 crash case,
+/// or an operator killing a live server) has no outcome block at all, which is
+/// exactly right: it has no outcome.
+struct Outcome {
+    bool declared = false;         ///< false = the recording never reached a result
+    int32_t frame = 0;             ///< sim frame `Spring.GameOver` was declared at
+    std::vector<uint8_t> winningAllyTeams;  ///< as passed to Spring.GameOver()
+};
+
 /// The launch spec a replay server needs to reconstruct an identical world.
 /// `--replay <file>` fills every CLI-equivalent field from here, so a replay is
 /// self-contained: no "remember which map it was" step, and a mismatch between
@@ -181,6 +205,12 @@ public:
     /// Append() so it lands ahead of the stream; also unused today, same reason.
     void WriteStartCheckpoint(const std::vector<uint8_t>& blob);
 
+    /// Record how the game ended (task 4c). Called once, immediately before
+    /// `Close()`, and only when a result was actually declared — the absence of
+    /// the block is the "no outcome" answer, so writing an empty one would
+    /// destroy the distinction it exists to carry.
+    void WriteOutcome(int32_t frame, const std::vector<uint8_t>& winningAllyTeams);
+
     /// Push buffered bytes to the OS. Called at tick end.
     void Flush();
 
@@ -221,6 +251,7 @@ struct LoadResult {
     std::vector<HashPoint>  hashTrack;     ///< §4 reference series, frame order
     std::vector<Checkpoint> checkpoints;   ///< seek index (empty today)
     std::vector<uint8_t>    startCheckpoint;  ///< §1 embedded start state (empty today)
+    Outcome outcome;                       ///< how the game ended, if it did
 };
 
 /// Read a whole replay file into memory, transparently decompressing a packed
@@ -229,6 +260,64 @@ struct LoadResult {
 /// order: the reader buckets by marker and never assumes a section layout, so
 /// a streaming recorder and the packer can write the same file differently.
 LoadResult Load(const std::string& path);
+
+// ─────────────────────────── Listing (task 4c) ─────────────────────────
+/// What a replay BROWSER needs to know about a file, which is everything
+/// except the stream itself.
+///
+/// `Load` is the wrong tool for a listing: it materialises every record, and a
+/// directory of weeks-long campaign segments would be gigabytes of `Record`
+/// allocation to render a table of dates. `LoadSummary` walks the same block
+/// stream and skips payloads instead of copying them — so the cost is one pass
+/// over the file's framing, and the peak allocation is the header.
+struct Summary {
+    bool ok = false;
+    std::string error;
+    std::string path;
+    uint64_t    fileBytes = 0;
+    /// Unix seconds, from the directory entry. Only `ListDirectory` fills it
+    /// (0 from a bare `LoadSummary`). It is the fallback for the listing's date
+    /// column on a recording written before `Header::recordedAt` had a
+    /// producer — a worse answer than the header's own stamp, and a much
+    /// better one than a blank.
+    int64_t     modifiedAtUnix = 0;
+
+    Header  header;
+    Trailer trailer;      ///< only meaningful when `truncated` is false
+    Outcome outcome;
+    Codec   codec = Codec::None;
+    bool    truncated = false;
+
+    /// Counted from the blocks actually present, not read out of the trailer.
+    /// A truncated file has no trailer at all, and those are precisely the
+    /// recordings a browser most needs to describe.
+    uint64_t recordCount     = 0;
+    uint64_t hashPointCount  = 0;
+    uint64_t checkpointCount = 0;
+
+    /// Highest frame stamped on any record. For a clean recording the trailer's
+    /// `endFrame` is the authority (the server ticked on past the last input);
+    /// for a truncated one this is the only evidence of how far the game got.
+    int32_t lastRecordFrame = -1;
+
+    /// The frame a viewer should be told the recording runs to. Trailer end
+    /// frame when clean, last record frame when truncated.
+    int32_t EndFrame() const { return truncated ? lastRecordFrame : trailer.endFrame; }
+};
+
+/// Read `path`'s header, trailer, outcome and block counts without decoding the
+/// record stream. A packed file still has to be inflated whole — the header
+/// lives inside the compressed body, by design, so that a packed file is
+/// self-describing from one codec byte — but even then the records are skipped
+/// rather than decoded.
+Summary LoadSummary(const std::string& path);
+
+/// Every `*.msr` in `dir`, newest-modified first. Unreadable files come back
+/// with `ok = false` and their `error` set rather than being dropped: a replay
+/// the browser cannot open is a thing an operator needs to see, not a gap.
+/// A missing or unreadable directory yields an empty list, not an error — an
+/// operator who has recorded nothing yet has an empty browser, not a fault.
+std::vector<Summary> ListDirectory(const std::string& dir);
 
 // ─────────────────────── Export / import (the `.msr` packer) ───────────────
 /// Write a complete container from in-memory content. Section order is

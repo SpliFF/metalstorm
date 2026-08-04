@@ -408,6 +408,12 @@ set(LOBBY_SERVER_SOURCES
     rts/Server/ScenarioDiscovery.cpp
     rts/Server/ConfigReader.cpp
     rts/Server/ResourcesParser.cpp
+    # PLAN-replay task 4c: the lobby reads .msr headers to list replays and to
+    # refuse an unreadable one before forking a server for it. ReplayFile is
+    # deliberately free of the sim and the wire schema, so this pulls in only
+    # SyncedInputJournal's record type and zlib (already linked).
+    rts/Server/ReplayFile.cpp
+    rts/Server/SyncedInputJournal.cpp
 )
 set(LOBBY_LOG_SOURCES
     rts/System/Log/Backend.cpp

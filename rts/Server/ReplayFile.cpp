@@ -5,6 +5,10 @@
 
 #include <algorithm>
 #include <cstring>
+#include <filesystem>
+#include <memory>
+
+#include <sys/stat.h>
 
 using json = nlohmann::json;
 using syncedinput::Record;
@@ -25,6 +29,7 @@ constexpr uint8_t kTrailerMarker    = 0x54;  // 'T'
 constexpr uint8_t kHashMarker       = 0x48;  // 'H' — task 3, state-hash track
 constexpr uint8_t kCheckpointMarker = 0x43;  // 'C' — task 3, checkpoint index
 constexpr uint8_t kStartCkptMarker  = 0x53;  // 'S' — task 3, embedded start state
+constexpr uint8_t kOutcomeMarker    = 0x4F;  // 'O' — task 4c, how the game ended
 
 void PutU8(std::vector<uint8_t>& o, uint8_t v) { o.push_back(v); }
 void PutU32(std::vector<uint8_t>& o, uint32_t v) {
@@ -260,6 +265,13 @@ void EncodeHashPoint(const HashPoint& p, std::vector<uint8_t>& out) {
     PutU64(out, p.hash);
 }
 
+void EncodeOutcome(const Outcome& o, std::vector<uint8_t>& out) {
+    PutU8(out, kOutcomeMarker);
+    PutI32(out, o.frame);
+    PutU32(out, static_cast<uint32_t>(o.winningAllyTeams.size()));
+    out.insert(out.end(), o.winningAllyTeams.begin(), o.winningAllyTeams.end());
+}
+
 void EncodeBlob(uint8_t marker, int32_t frame, const std::vector<uint8_t>& blob,
                 std::vector<uint8_t>& out) {
     PutU8(out, marker);
@@ -283,6 +295,9 @@ std::vector<uint8_t> BuildBody(const LoadResult& c) {
     for (const auto& h : c.hashTrack) EncodeHashPoint(h, body);
     for (const auto& cp : c.checkpoints)
         EncodeBlob(kCheckpointMarker, cp.frame, cp.blob, body);
+    // Ahead of the trailer, mirroring the live writer: the outcome is the last
+    // thing the game knows before the recording is closed.
+    if (c.outcome.declared) EncodeOutcome(c.outcome, body);
 
     // A truncated segment stays trailer-less, so the repacked copy still
     // announces itself as truncated (E1). Laundering one into a clean file
@@ -387,6 +402,14 @@ void Writer::WriteStartCheckpoint(const std::vector<uint8_t>& blob) {
     std::vector<uint8_t> buf;
     EncodeBlob(kStartCkptMarker, 0, blob, buf);
     WriteBlock(buf);
+}
+
+void Writer::WriteOutcome(int32_t frame, const std::vector<uint8_t>& winners) {
+    if (fp == nullptr) return;
+    std::vector<uint8_t> buf;
+    EncodeOutcome({true, frame, winners}, buf);
+    WriteBlock(buf);
+    streamStarted = true;
 }
 
 void Writer::Flush() {
@@ -549,6 +572,22 @@ LoadResult Load(const std::string& path) {
             p = cp + len;
             continue;
         }
+        if (marker == kOutcomeMarker) {
+            size_t op = p + 1;
+            Outcome o;
+            uint32_t len = 0;
+            if (!GetI32(buf, op, o.frame) || !GetU32(buf, op, len) ||
+                op + len > buf.size()) {
+                res.truncated = true;
+                break;
+            }
+            o.declared = true;
+            o.winningAllyTeams.assign(buf.begin() + static_cast<long>(op),
+                                      buf.begin() + static_cast<long>(op + len));
+            res.outcome = std::move(o);
+            p = op + len;
+            continue;
+        }
 
         char hex[8];
         std::snprintf(hex, sizeof(hex), "0x%02X", marker);
@@ -568,6 +607,292 @@ LoadResult Load(const std::string& path) {
     if (!sawTrailer) res.truncated = true;
     res.ok = true;
     return res;
+}
+
+// ────────────────────────── Listing (task 4c) ──────────────────────────
+namespace {
+
+/// Sequential reader over either the file itself (codec None) or an inflated
+/// body held in memory. The point of the abstraction is that the *walk* below
+/// is written once: it is the same block framing either way, and the only
+/// difference is whether skipping a payload is an fseek or a pointer bump.
+class BlockSource {
+public:
+    explicit BlockSource(std::FILE* f) : fp(f) {}
+    explicit BlockSource(std::vector<uint8_t>&& m) : mem(std::move(m)) {}
+
+    bool Read(void* dst, size_t n) {
+        if (fp != nullptr) return std::fread(dst, 1, n, fp) == n;
+        if (pos + n > mem.size()) return false;
+        std::memcpy(dst, mem.data() + pos, n);
+        pos += n;
+        return true;
+    }
+    /// Skip forward without materialising the bytes. Seeking past EOF is legal
+    /// on a FILE* and only shows up as a short read on the next block, which is
+    /// exactly the truncation outcome we want — but a payload length read out
+    /// of a garbled block can be enormous, so the bound is checked here rather
+    /// than trusted.
+    bool Skip(uint64_t n) {
+        if (fp != nullptr) {
+            const long here = std::ftell(fp);
+            if (here < 0) return false;
+            if (static_cast<uint64_t>(here) + n > size) return false;
+            return std::fseek(fp, static_cast<long>(n), SEEK_CUR) == 0;
+        }
+        if (pos + n > mem.size()) return false;
+        pos += static_cast<size_t>(n);
+        return true;
+    }
+    void SetSize(uint64_t s) { size = s; }
+
+private:
+    std::FILE* fp = nullptr;
+    std::vector<uint8_t> mem;
+    size_t pos = 0;
+    uint64_t size = 0;
+};
+
+bool ReadU8(BlockSource& s, uint8_t& v)  { return s.Read(&v, 1); }
+bool ReadU32(BlockSource& s, uint32_t& v) {
+    uint8_t b[4];
+    if (!s.Read(b, 4)) return false;
+    v = static_cast<uint32_t>(b[0]) | (static_cast<uint32_t>(b[1]) << 8) |
+        (static_cast<uint32_t>(b[2]) << 16) | (static_cast<uint32_t>(b[3]) << 24);
+    return true;
+}
+bool ReadI32(BlockSource& s, int32_t& v) {
+    uint32_t u = 0;
+    if (!ReadU32(s, u)) return false;
+    v = static_cast<int32_t>(u);
+    return true;
+}
+bool ReadU64(BlockSource& s, uint64_t& v) {
+    uint8_t b[8];
+    if (!s.Read(b, 8)) return false;
+    v = 0;
+    for (int i = 7; i >= 0; --i) v = (v << 8) | b[i];
+    return true;
+}
+
+}  // namespace
+
+Summary LoadSummary(const std::string& path) {
+    Summary sum;
+    sum.path = path;
+
+    std::FILE* fp = std::fopen(path.c_str(), "rb");
+    if (fp == nullptr) {
+        sum.error = "cannot open replay file: " + path;
+        return sum;
+    }
+    std::fseek(fp, 0, SEEK_END);
+    const long fileLen = std::ftell(fp);
+    std::fseek(fp, 0, SEEK_SET);
+    sum.fileBytes = fileLen > 0 ? static_cast<uint64_t>(fileLen) : 0;
+
+    char magic[sizeof(kMagic)];
+    uint8_t vlo = 0, vhi = 0, codecByte = 0;
+    if (std::fread(magic, 1, sizeof(magic), fp) != sizeof(magic) ||
+        std::memcmp(magic, kMagic, sizeof(kMagic)) != 0) {
+        std::fclose(fp);
+        sum.error = "not a replay file (bad magic): " + path;
+        return sum;
+    }
+    if (std::fread(&vlo, 1, 1, fp) != 1 || std::fread(&vhi, 1, 1, fp) != 1 ||
+        std::fread(&codecByte, 1, 1, fp) != 1) {
+        std::fclose(fp);
+        sum.error = "replay header truncated (no version/codec)";
+        return sum;
+    }
+    const uint16_t version = static_cast<uint16_t>(vlo | (vhi << 8));
+    if (version != kFormatVersion) {
+        std::fclose(fp);
+        sum.error = "replay format version " + std::to_string(version) +
+                    " != supported " + std::to_string(kFormatVersion);
+        return sum;
+    }
+    sum.codec = static_cast<Codec>(codecByte);
+
+    // A packed body has to come in whole — the header sits inside the
+    // compressed stream so that one codec byte makes the file self-describing
+    // (see the header's note). The saving over Load() is still the one that
+    // matters: the records are walked, not decoded into Record objects.
+    std::unique_ptr<BlockSource> src;
+    if (sum.codec == Codec::None) {
+        src = std::make_unique<BlockSource>(fp);
+        src->SetSize(sum.fileBytes);
+    } else if (sum.codec == Codec::Deflate) {
+        uint64_t rawLen = 0;
+        uint32_t compLen = 0;
+        uint8_t lenBuf[12];
+        if (std::fread(lenBuf, 1, sizeof(lenBuf), fp) != sizeof(lenBuf)) {
+            std::fclose(fp);
+            sum.error = "packed replay is truncated in its compressed body";
+            return sum;
+        }
+        for (int i = 7; i >= 0; --i) rawLen = (rawLen << 8) | lenBuf[i];
+        compLen = static_cast<uint32_t>(lenBuf[8]) |
+                  (static_cast<uint32_t>(lenBuf[9]) << 8) |
+                  (static_cast<uint32_t>(lenBuf[10]) << 16) |
+                  (static_cast<uint32_t>(lenBuf[11]) << 24);
+        std::vector<uint8_t> comp(compLen);
+        if (compLen > 0 && std::fread(comp.data(), 1, compLen, fp) != compLen) {
+            std::fclose(fp);
+            sum.error = "packed replay is truncated in its compressed body";
+            return sum;
+        }
+        std::vector<uint8_t> body;
+        if (!InflateAll(comp.data(), comp.size(), static_cast<size_t>(rawLen),
+                        body, sum.error)) {
+            std::fclose(fp);
+            return sum;
+        }
+        std::fclose(fp);
+        fp = nullptr;
+        src = std::make_unique<BlockSource>(std::move(body));
+        src->SetSize(rawLen);
+    } else {
+        std::fclose(fp);
+        sum.error = std::string("replay uses codec '") + CodecName(sum.codec) +
+                    "' which this build cannot decode";
+        return sum;
+    }
+
+    struct Closer {
+        std::FILE* f;
+        ~Closer() { if (f != nullptr) std::fclose(f); }
+    } closer{fp};
+
+    uint32_t hlen = 0;
+    if (!ReadU32(*src, hlen)) {
+        sum.error = "replay header truncated";
+        return sum;
+    }
+    std::string hjson(hlen, '\0');
+    if (hlen > 0 && !src->Read(hjson.data(), hlen)) {
+        sum.error = "replay header truncated";
+        return sum;
+    }
+    if (!DecodeHeaderJson(hjson, sum.header, sum.error)) return sum;
+
+    // Block walk. Every branch either consumes a fixed-width prefix and skips a
+    // declared payload, or gives up and calls the file truncated — the same E1
+    // reading Load() gives, reached without allocating a byte of payload.
+    bool sawTrailer = false;
+    for (;;) {
+        uint8_t marker = 0;
+        if (!ReadU8(*src, marker)) break;  // clean EOF or a torn block
+
+        if (marker == kRecordMarker) {
+            uint8_t fixed[27];  // seq(8) frame(4) phase kind subKind playerId(4) clientId(4) len(4)
+            if (!src->Read(fixed, sizeof(fixed))) { sum.truncated = true; break; }
+            int32_t frame = static_cast<int32_t>(
+                static_cast<uint32_t>(fixed[8]) |
+                (static_cast<uint32_t>(fixed[9]) << 8) |
+                (static_cast<uint32_t>(fixed[10]) << 16) |
+                (static_cast<uint32_t>(fixed[11]) << 24));
+            const uint32_t len = static_cast<uint32_t>(fixed[23]) |
+                                 (static_cast<uint32_t>(fixed[24]) << 8) |
+                                 (static_cast<uint32_t>(fixed[25]) << 16) |
+                                 (static_cast<uint32_t>(fixed[26]) << 24);
+            if (!src->Skip(len)) { sum.truncated = true; break; }
+            ++sum.recordCount;
+            if (frame > sum.lastRecordFrame) sum.lastRecordFrame = frame;
+            continue;
+        }
+        if (marker == kHashMarker) {
+            if (!src->Skip(12)) { sum.truncated = true; break; }
+            ++sum.hashPointCount;
+            continue;
+        }
+        if (marker == kCheckpointMarker || marker == kStartCkptMarker) {
+            int32_t frame = 0;
+            uint32_t len = 0;
+            if (marker == kCheckpointMarker && !ReadI32(*src, frame)) {
+                sum.truncated = true;
+                break;
+            }
+            if (!ReadU32(*src, len) || !src->Skip(len)) {
+                sum.truncated = true;
+                break;
+            }
+            if (marker == kCheckpointMarker) ++sum.checkpointCount;
+            continue;
+        }
+        if (marker == kOutcomeMarker) {
+            Outcome o;
+            uint32_t len = 0;
+            if (!ReadI32(*src, o.frame) || !ReadU32(*src, len)) {
+                sum.truncated = true;
+                break;
+            }
+            o.winningAllyTeams.resize(len);
+            if (len > 0 && !src->Read(o.winningAllyTeams.data(), len)) {
+                sum.truncated = true;
+                break;
+            }
+            o.declared = true;
+            sum.outcome = std::move(o);
+            continue;
+        }
+        if (marker == kTrailerMarker) {
+            Trailer t;
+            if (!ReadI32(*src, t.endFrame) || !ReadU64(*src, t.recordCount) ||
+                !ReadU64(*src, t.hashPointCount) ||
+                !ReadU64(*src, t.checkpointCount)) {
+                sum.truncated = true;
+                break;
+            }
+            sum.trailer = t;
+            sawTrailer = true;
+            break;
+        }
+
+        char hex[8];
+        std::snprintf(hex, sizeof(hex), "0x%02X", marker);
+        sum.error = std::string("unknown replay block marker ") + hex +
+                    " — this file carries a section this build does not know";
+        return sum;
+    }
+
+    if (!sawTrailer) sum.truncated = true;
+    sum.ok = true;
+    return sum;
+}
+
+std::vector<Summary> ListDirectory(const std::string& dir) {
+    std::vector<Summary> out;
+    std::error_code ec;
+    if (dir.empty() || !std::filesystem::is_directory(dir, ec)) return out;
+
+    std::vector<std::pair<std::filesystem::file_time_type, std::string>> files;
+    for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+        if (ec) break;
+        if (!entry.is_regular_file(ec)) continue;
+        if (entry.path().extension() != ".msr") continue;
+        std::error_code tec;
+        files.emplace_back(entry.last_write_time(tec), entry.path().string());
+    }
+    // Newest first: a replay browser's default question is "what did I just
+    // play", not "what is the oldest thing on disk".
+    std::sort(files.begin(), files.end(),
+              [](const auto& a, const auto& b) { return a.first > b.first; });
+
+    out.reserve(files.size());
+    for (const auto& [mtime, p] : files) {
+        Summary s = LoadSummary(p);
+        s.path = p;
+        // Unix seconds via stat() rather than the file_time_type we sorted on:
+        // `file_clock`'s epoch is unspecified and this libc++ has no
+        // `clock_cast`, so converting it portably is more machinery than
+        // asking the OS the question directly.
+        struct stat st{};
+        if (::stat(p.c_str(), &st) == 0)
+            s.modifiedAtUnix = static_cast<int64_t>(st.st_mtime);
+        out.push_back(std::move(s));
+    }
+    return out;
 }
 
 // ─────────────────────── Export / import (the packer) ──────────────────

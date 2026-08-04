@@ -9,7 +9,9 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { describeReplayBar, seekFrameFor, SPEED_STEPS } from './replay-bar.js';
+import {
+    describeReplayBar, seekFrameFor, shouldApplyDeepLinkSeek, SPEED_STEPS,
+} from './replay-bar.js';
 import type { ReplayStateInfo } from '../core/connection.js';
 
 function state(over: Partial<ReplayStateInfo> = {}): ReplayStateInfo {
@@ -153,5 +155,43 @@ describe('SPEED_STEPS', () => {
             expect(s).toBeLessThanOrEqual(8);
         }
         expect(SPEED_STEPS).toContain(1);
+    });
+});
+
+describe('shouldApplyDeepLinkSeek', () => {
+    // A `?watch=<file>&frame=N` deep link (task 4c). The frame arrives as an
+    // ordinary seek rather than a `--replay-seek` launch flag, because a
+    // replay server told to seek at launch stalls its network loop through the
+    // whole fast-forward and the watcher times out before attaching.
+    it('seeks forward when the controls are yours', () => {
+        expect(shouldApplyDeepLinkSeek(state({ currentFrame: 60 }), 200, 3000)).toBe(true);
+    });
+
+    it('does nothing when someone else is driving the cast', () => {
+        // Otherwise a deep link into a running cast yanks it, or — since the
+        // server refuses — raises a toast the watcher never asked for.
+        expect(shouldApplyDeepLinkSeek(state({ controllerPlayerNum: 201 }), 200, 3000))
+            .toBe(false);
+        expect(shouldApplyDeepLinkSeek(state({ controllerPlayerNum: -1 }), 200, 3000))
+            .toBe(false);
+    });
+
+    it('does not re-queue a seek that is already running', () => {
+        expect(shouldApplyDeepLinkSeek(
+            state({ seeking: true, seekTarget: 3000 }), 200, 3000)).toBe(false);
+    });
+
+    it('refuses a target playback has already passed — that is a rewind', () => {
+        expect(shouldApplyDeepLinkSeek(state({ currentFrame: 4000 }), 200, 3000)).toBe(false);
+        expect(shouldApplyDeepLinkSeek(state({ currentFrame: 3000 }), 200, 3000)).toBe(false);
+    });
+
+    it('refuses a target past the end of the recording', () => {
+        expect(shouldApplyDeepLinkSeek(state(), 200, 6150)).toBe(false);
+        expect(shouldApplyDeepLinkSeek(state(), 200, 99999)).toBe(false);
+    });
+
+    it('treats no frame as no request', () => {
+        expect(shouldApplyDeepLinkSeek(state(), 200, 0)).toBe(false);
     });
 });

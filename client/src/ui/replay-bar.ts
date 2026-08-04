@@ -142,6 +142,35 @@ export function showReplayRefusal(message: string): void {
     render();
 }
 
+/// A `?watch=<file>&frame=N` deep link's start frame, waiting for the bar to
+/// be attached (PLAN-replay task 4c). 0 = none.
+let deepLinkSeekFrame = 0;
+
+/** Publish a deep link's start frame. It is applied as an ordinary Seek the
+ *  first moment this client is attached and holds the controls — NOT as a
+ *  launch option on the replay server, which stalls the server's network loop
+ *  through the whole fast-forward and times the watcher out before it can
+ *  attach at all (measured; see the watch route in lobby_main.cpp). */
+export function setDeepLinkSeekFrame(frame: number): void {
+    deepLinkSeekFrame = Math.max(0, Math.floor(frame));
+}
+
+/** Whether a published deep-link frame should be sent as a seek right now.
+ *
+ *  Pure, because every clause is a way to get it wrong: sending it while
+ *  another seek is in flight re-queues the same jump, sending it when someone
+ *  else drives the cast earns a refusal toast the watcher did not ask for, and
+ *  sending it when playback has already passed the target is a backward seek —
+ *  which this build refuses. */
+export function shouldApplyDeepLinkSeek(
+    st: ReplayStateInfo, myPlayerNum: number, frame: number): boolean {
+    if (frame <= 0) return false;
+    if (st.seeking) return false;
+    if (st.controllerPlayerNum < 0 || st.controllerPlayerNum !== myPlayerNum) return false;
+    if (frame >= st.endFrame) return false;
+    return frame > st.currentFrame;
+}
+
 /** Mount (or refresh) the bar from a ReplayState. Idempotent — call it on
  *  every update. */
 export function updateReplayBar(st: ReplayStateInfo, playerNum: number,
@@ -151,6 +180,18 @@ export function updateReplayBar(st: ReplayStateInfo, playerNum: number,
     myPlayerNum = playerNum;
     if (!root) root = buildBar();
     render();
+
+    // One-shot, and cleared whether or not it was sendable: a deep link is a
+    // request about the moment the watcher arrived, and re-trying it every
+    // second would fight whoever is driving. It waits for `playerNum` to be
+    // known, though — a state that lands before the auth reply has been
+    // handled would otherwise burn the request on "I am nobody".
+    if (deepLinkSeekFrame > 0 && playerNum >= 0) {
+        const frame = deepLinkSeekFrame;
+        deepLinkSeekFrame = 0;
+        if (shouldApplyDeepLinkSeek(st, playerNum, frame))
+            sender(ReplayAction.Seek, { frame });
+    }
 }
 
 export function hideReplayBar(): void {

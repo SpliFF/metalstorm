@@ -2,8 +2,17 @@
     <div class="lobby-header">
         <h2>Game Rooms</h2>
         <button id="create-room-btn">+ New Game</button>
+        <!-- Replay browser (PLAN-replay.md task 4c). Hidden entirely on a
+             lobby that is not recording — /api/replays/list 404s there, and an
+             empty "Replays" panel would read as a broken feature rather than
+             an unconfigured one. -->
+        <button id="show-replays-btn" style="display:none">▶ Replays</button>
     </div>
     <div id="room-list" class="room-list"></div>
+    <div id="replay-panel" class="replay-panel" style="display:none">
+        <h3>Replays</h3>
+        <div id="replay-list" class="replay-list"></div>
+    </div>
     <div id="create-form" class="create-form" style="display:none">
         <h3>Create Game</h3>
         <input type="text" id="new-room-name" placeholder="Room name" value="My Game">

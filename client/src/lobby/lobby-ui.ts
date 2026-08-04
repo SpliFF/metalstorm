@@ -40,6 +40,10 @@ import {
     getDefaultLobbyTemplates,
     type LobbyTemplates,
 } from '../ui/lobby/loader.js';
+import {
+    describeReplayEntry, parseWatchFrame, type ReplayListing,
+} from './replay-browser.js';
+import { setDeepLinkSeekFrame } from '../ui/replay-bar.js';
 
 const ROOM_STATE_LABELS = ['Setup', 'Waiting', 'Ready Check', 'Loading', 'In Progress', 'Ended'];
 
@@ -49,6 +53,10 @@ interface RoomInfo {
     id: number; name: string; mapId: string;
     playerCount: number; maxPlayers: number;
     state: number; hasPassword: boolean; hostName: string;
+    /// PLAN-replay task 4c: set when this room is a live replay cast rather
+    /// than a game. Joining one goes through /api/replays/watch, not
+    /// /api/rooms/join — the watch route is what knows about the recording.
+    replayFile?: string;
 }
 
 interface RoomPlayerInfo {
@@ -266,6 +274,19 @@ export class LobbyUI {
         this.suppressed = suppressed;
         this.injectStyles();
 
+        // §5's digest deep-link: `?watch=<file>&frame=N` → watch that
+        // recording as soon as there is a session to watch it with. Held
+        // rather than fired here because the constructor usually runs before
+        // auto-login has resolved, and the watch route needs a token.
+        const params = new URLSearchParams(window.location.search);
+        const watchFile = params.get('watch');
+        if (watchFile) {
+            this.pendingWatch = {
+                file: watchFile,
+                frame: parseWatchFrame(params.get('frame')),
+            };
+        }
+
         // Try auto-login with saved session
         const savedUser = localStorage.getItem('springrts-username');
         const savedToken = localStorage.getItem('springrts-token');
@@ -457,6 +478,7 @@ export class LobbyUI {
             playerCount: r.players?.length ?? 0, maxPlayers: 8,
             state: r.state ?? 0, hasPassword: false,
             hostName: r.players?.find((p: any) => p.is_host)?.username ?? '',
+            replayFile: r.replay_file,
         }));
 
         // Check if our current room still exists
@@ -719,6 +741,118 @@ export class LobbyUI {
         // handler that updates `selectedGameId`.
         this.renderGameOptions();
         this.renderRoomList();
+        this.wireReplayPanel();
+    }
+
+    // ===================== REPLAYS (PLAN-replay task 4c) =====================
+
+    /// Cached rows from the last `/api/replays/list`. Null until the first
+    /// fetch resolves; an empty array means "this lobby records, and has
+    /// nothing yet", which is a different screen from "this lobby does not
+    /// record" (that one hides the button entirely).
+    private replays: ReplayListing[] | null = null;
+    /// Set from `?watch=<file>[&frame=N]` at construction and consumed once a
+    /// browser screen exists. Deferred rather than fired immediately because a
+    /// deep link usually arrives before login has finished.
+    private pendingWatch: { file: string; frame: number } | null = null;
+
+    private wireReplayPanel(): void {
+        const btn = document.getElementById('show-replays-btn') as HTMLButtonElement | null;
+        const panel = document.getElementById('replay-panel');
+        if (!btn || !panel) return;
+        btn.onclick = () => {
+            const showing = panel.style.display !== 'none';
+            panel.style.display = showing ? 'none' : 'block';
+            if (!showing) void this.refreshReplays();
+        };
+        // Probe once per browser render so the button only appears on a lobby
+        // that is actually recording. A pending deep link opens the panel
+        // itself, so the probe doubles as the deep link's trigger.
+        void this.refreshReplays().then(() => {
+            if (this.replays === null) return;
+            btn.style.display = '';
+            const pending = this.pendingWatch;
+            if (pending) {
+                this.pendingWatch = null;
+                void this.watchReplay(pending.file, pending.frame);
+            }
+        });
+    }
+
+    /// Fetch the replay list. Leaves `this.replays` null — and the button
+    /// hidden — when the lobby is not recording (the route 404s).
+    private async refreshReplays(): Promise<void> {
+        try {
+            const resp = await this.lobbyPost('/api/replays/list');
+            if (!resp || !Array.isArray(resp.replays)) { this.replays = null; return; }
+            this.replays = resp.replays as ReplayListing[];
+        } catch {
+            this.replays = null;
+        }
+        this.renderReplayList();
+    }
+
+    private renderReplayList(): void {
+        const el = document.getElementById('replay-list');
+        if (!el) return;
+        const list = this.replays ?? [];
+        if (list.length === 0) {
+            el.innerHTML = '<div class="empty-state">No replays recorded yet.</div>';
+            return;
+        }
+        el.innerHTML = list.map(r => {
+            const m = describeReplayEntry(r);
+            return renderTemplate(this.templates.browserReplayEntry, {
+                file: this.esc(r.file),
+                title: this.esc(m.title),
+                outcome: this.esc(m.outcome),
+                players: this.esc(m.players),
+                detail: this.esc(m.detail),
+                watch_label: m.watchLabel,
+                disabled_attr: m.disabled ? ' disabled' : '',
+            });
+        }).join('');
+
+        el.querySelectorAll('.watch-btn:not([disabled])').forEach(btn => {
+            (btn as HTMLElement).onclick = () => {
+                void this.watchReplay(btn.getAttribute('data-file')!);
+            };
+        });
+    }
+
+    /**
+     * Ask the lobby to serve a recording, and adopt the room it returns.
+     *
+     * The response is an ordinary room JSON with a `game_server_port` — which
+     * is the entire point of making a replay a real room. Handing it to
+     * `updateCurrentRoomFromJson` runs the same Loading→connect path a player
+     * takes out of the room screen, so nothing about entering a game forks for
+     * replays. (4a and 4b were both verified by hand-injecting exactly this
+     * object; this route is what produces it for real.)
+     *
+     * `frame` is NOT sent to the lobby. A replay server told to seek at launch
+     * fast-forwards with its network loop stalled and the watcher's connection
+     * times out before it can attach — so the start frame is published for the
+     * replay bar to send as an ordinary seek once it is attached, through 4b's
+     * control channel. See the watch route in lobby_main.cpp.
+     */
+    async watchReplay(file: string, frame = 0): Promise<void> {
+        setDeepLinkSeekFrame(frame);
+        const resp = await this.lobbyPost('/api/replays/watch', { file });
+        if (!resp || resp.error) {
+            const msg = resp?.error ?? 'could not start a replay server';
+            console.error(`[lobby] watch '${file}' failed: ${msg}`);
+            const el = document.getElementById('replay-list');
+            if (el) {
+                const note = document.createElement('div');
+                note.className = 'replay-error';
+                note.textContent = `Could not watch ${file}: ${msg}`;
+                el.prepend(note);
+            }
+            return;
+        }
+        console.log(`[lobby] watching '${file}' in room ${resp.id} on port ${resp.game_server_port}`);
+        this.updateCurrentRoomFromJson(resp);
     }
 
     /// Repopulate the `<select id="game-select">` inside the
@@ -948,11 +1082,14 @@ export class LobbyUI {
         }
 
         el.innerHTML = this.rooms.map(r => {
-            const detail =
-                `${r.mapId ? this.esc(r.mapId) : '<em>No map</em>'} · ` +
-                `${r.playerCount}/${r.maxPlayers} players · ` +
-                `Host: ${this.esc(r.hostName)}`;
-            const joinLabel = r.state >= 5 ? 'Ended'
+            const detail = r.replayFile
+                ? `replay · ${this.esc(r.replayFile)} · ` +
+                  `${r.playerCount} watching`
+                : `${r.mapId ? this.esc(r.mapId) : '<em>No map</em>'} · ` +
+                  `${r.playerCount}/${r.maxPlayers} players · ` +
+                  `Host: ${this.esc(r.hostName)}`;
+            const joinLabel = r.replayFile ? 'Join cast'
+                : r.state >= 5 ? 'Ended'
                 : (r.state >= 3 ? 'Watch / Rejoin' : 'Join');
             // A room already Loading/Active auto-spectates anyone not on its
             // original roster (RoomManager::JoinRoom's isActive branch) — the
@@ -960,7 +1097,7 @@ export class LobbyUI {
             // the explicit Spectate button only adds value pre-game (Filling),
             // where the default Join would claim a player slot instead
             // (PLAN-metalstorm-onboarding.md §4).
-            const spectateHtml = (r.state < 3 && r.state < 5)
+            const spectateHtml = (!r.replayFile && r.state < 3 && r.state < 5)
                 ? `<button class="spectate-btn" data-id="${r.id}">Spectate</button>`
                 : '';
             return renderTemplate(this.templates.browserRoomEntry, {
@@ -976,7 +1113,14 @@ export class LobbyUI {
 
         el.querySelectorAll('.join-btn:not([disabled])').forEach(btn => {
             (btn as HTMLElement).onclick = () => {
-                this.joinRoom(parseInt(btn.getAttribute('data-id')!));
+                const id = parseInt(btn.getAttribute('data-id')!);
+                const room = this.rooms.find(r => r.id === id);
+                // A replay cast is joined through the watch route, which knows
+                // how to attach a second spectator to a server that is already
+                // playing a file (§5 casting). /api/rooms/join would put the
+                // watcher in the room without ever telling the replay server.
+                if (room?.replayFile) { void this.watchReplay(room.replayFile); return; }
+                this.joinRoom(id);
             };
         });
         el.querySelectorAll('.spectate-btn').forEach(btn => {

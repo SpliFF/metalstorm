@@ -10,7 +10,9 @@
 
 #include <doctest/doctest.h>
 
+#include <chrono>
 #include <cstdio>
+#include <filesystem>
 #include <string>
 
 #include <unistd.h>
@@ -514,4 +516,298 @@ TEST_CASE("codec names parse, and zstd is refused as reserved-not-built") {
     CHECK_FALSE(replay::ParseCodec("zstd", c, err));
     CHECK(err.find("reserved") != std::string::npos);
     CHECK_FALSE(replay::ParseCodec("lzma", c, err));
+}
+
+// ─────────────────────── Outcome + summary (task 4c) ───────────────────
+//
+// The replay browser reads these two and nothing else. What is being defended
+// here is the pair of distinctions a listing collapses if it gets them wrong:
+// "this game ended in a result" vs "this recording just stopped", and "this
+// file is cheap to describe" vs "describing it means loading the whole match".
+
+TEST_CASE("a declared outcome round-trips, and its absence is a real answer") {
+    const std::string ended  = TempPath("outcome-ended");
+    const std::string unended = TempPath("outcome-unended");
+
+    {
+        replay::Writer w;
+        std::string err;
+        REQUIRE(w.Open(ended, SampleHeader(), err));
+        w.Append(MakeRecord(1, 0, TickPhase::Inbound, InputKind::GameStart, "t0:a0:l0;"));
+        w.WriteOutcome(6150, std::vector<uint8_t>{4, 7});
+        replay::Trailer t;
+        t.endFrame = 6180;
+        t.recordCount = w.Written();
+        w.Close(t);
+        CHECK_FALSE(w.Failed());
+    }
+    {
+        // Same shape, no result — a game the operator stopped mid-match.
+        replay::Writer w;
+        std::string err;
+        REQUIRE(w.Open(unended, SampleHeader(), err));
+        w.Append(MakeRecord(1, 0, TickPhase::Inbound, InputKind::GameStart, "t0:a0:l0;"));
+        replay::Trailer t;
+        t.endFrame = 6180;
+        t.recordCount = w.Written();
+        w.Close(t);
+    }
+
+    const replay::LoadResult a = replay::Load(ended);
+    REQUIRE(a.ok);
+    CHECK(a.outcome.declared);
+    CHECK(a.outcome.frame == 6150);
+    REQUIRE(a.outcome.winningAllyTeams.size() == 2);
+    CHECK(a.outcome.winningAllyTeams[0] == 4);
+    CHECK(a.outcome.winningAllyTeams[1] == 7);
+    // The stream is untouched by the new section.
+    REQUIRE(a.records.size() == 1);
+    CHECK(a.records[0].kind == InputKind::GameStart);
+
+    const replay::LoadResult b = replay::Load(unended);
+    REQUIRE(b.ok);
+    CHECK_FALSE(b.outcome.declared);
+    CHECK(b.outcome.winningAllyTeams.empty());
+
+    std::remove(ended.c_str());
+    std::remove(unended.c_str());
+}
+
+TEST_CASE("a file recorded before the outcome block still loads") {
+    // The compatibility claim the marker seam is supposed to buy: adding a
+    // SECTION does not invalidate the files that predate it. Every .msr on disk
+    // today is exactly this file — every block the writer emits except 'O'.
+    const std::string path = TempPath("outcome-legacy");
+    {
+        replay::Writer w;
+        std::string err;
+        REQUIRE(w.Open(path, SampleHeader(), err));
+        w.WriteStartCheckpoint(std::vector<uint8_t>(16, 0x33));
+        w.Append(MakeRecord(1, 10, TickPhase::Inbound, InputKind::ClientMessage, "x"));
+        w.AppendHashPoint(10, 0xABCDEF);
+        w.AppendCheckpoint(300, std::vector<uint8_t>(8, 0x44));
+        replay::Trailer t;
+        t.endFrame = 300;
+        t.recordCount = w.Written();
+        w.Close(t);
+    }
+
+    const replay::LoadResult res = replay::Load(path);
+    REQUIRE(res.ok);
+    CHECK_FALSE(res.truncated);
+    CHECK_FALSE(res.outcome.declared);
+    CHECK(res.records.size() == 1);
+    CHECK(res.hashTrack.size() == 1);
+    CHECK(res.checkpoints.size() == 1);
+
+    std::remove(path.c_str());
+}
+
+TEST_CASE("packing preserves the outcome") {
+    const std::string raw    = TempPath("outcome-pack-src");
+    const std::string packed = TempPath("outcome-pack-out");
+    {
+        replay::Writer w;
+        std::string err;
+        REQUIRE(w.Open(raw, SampleHeader(), err));
+        for (int i = 1; i <= 20; ++i)
+            w.Append(MakeRecord(static_cast<uint64_t>(i), i * 30, TickPhase::Inbound,
+                                InputKind::ClientMessage, std::string(64, 'q')));
+        w.WriteOutcome(600, std::vector<uint8_t>{1});
+        replay::Trailer t;
+        t.endFrame = 610;
+        t.recordCount = w.Written();
+        w.Close(t);
+    }
+
+    std::string perr;
+    REQUIRE(replay::Pack(raw, packed, replay::Codec::Deflate, perr));
+    const replay::LoadResult dst = replay::Load(packed);
+    REQUIRE(dst.ok);
+    CHECK(dst.outcome.declared);
+    CHECK(dst.outcome.frame == 600);
+    REQUIRE(dst.outcome.winningAllyTeams.size() == 1);
+    CHECK(dst.outcome.winningAllyTeams[0] == 1);
+
+    std::remove(raw.c_str());
+    std::remove(packed.c_str());
+}
+
+TEST_CASE("a summary reads the same facts as a full load, without the stream") {
+    const std::string path = TempPath("summary-clean");
+    {
+        replay::Writer w;
+        std::string err;
+        REQUIRE(w.Open(path, SampleHeader(), err));
+        w.WriteStartCheckpoint(std::vector<uint8_t>(32, 0x55));
+        for (int i = 1; i <= 50; ++i) {
+            w.Append(MakeRecord(static_cast<uint64_t>(i), i * 30, TickPhase::Inbound,
+                                InputKind::ClientMessage, std::string(200, 'z')));
+            if (i % 10 == 0) w.AppendHashPoint(i * 30, static_cast<uint64_t>(i));
+        }
+        w.AppendCheckpoint(900, std::vector<uint8_t>(128, 0x66));
+        w.WriteOutcome(1490, std::vector<uint8_t>{0});
+        replay::Trailer t;
+        t.endFrame = 1500;
+        t.recordCount = w.Written();
+        w.Close(t);
+    }
+
+    const replay::LoadResult full = replay::Load(path);
+    const replay::Summary sum = replay::LoadSummary(path);
+    REQUIRE(sum.ok);
+    CHECK_FALSE(sum.truncated);
+    CHECK(sum.header.mapId == full.header.mapId);
+    CHECK(sum.header.players.size() == full.header.players.size());
+    CHECK(sum.header.players[0].username == "alice");
+    CHECK(sum.header.aiSlots[0].aiId == "basic_ai");
+    CHECK(sum.trailer.endFrame == 1500);
+    CHECK(sum.recordCount == full.records.size());
+    CHECK(sum.hashPointCount == full.hashTrack.size());
+    CHECK(sum.checkpointCount == full.checkpoints.size());
+    CHECK(sum.lastRecordFrame == 1500);
+    CHECK(sum.outcome.declared);
+    CHECK(sum.outcome.frame == 1490);
+    CHECK(sum.EndFrame() == 1500);
+    CHECK(sum.fileBytes > 0);
+    CHECK(sum.codec == replay::Codec::None);
+
+    std::remove(path.c_str());
+}
+
+TEST_CASE("a summary of a truncated segment reports how far the game got") {
+    // The listing case that matters most: a crashed server's file. It has no
+    // trailer, so the recording's end frame has to come from the last record
+    // that survived — otherwise the browser shows "0:00" for every crash, which
+    // is the length of the one thing an operator most wants to watch.
+    const std::string path = TempPath("summary-truncated");
+    {
+        replay::Writer w;
+        std::string err;
+        REQUIRE(w.Open(path, SampleHeader(), err));
+        for (int i = 1; i <= 12; ++i)
+            w.Append(MakeRecord(static_cast<uint64_t>(i), i * 90, TickPhase::Inbound,
+                                InputKind::ClientMessage, "payload"));
+        w.Flush();
+        // No Close(): the recorder died. (~Writer leaves the trailer off.)
+    }
+
+    const replay::Summary sum = replay::LoadSummary(path);
+    REQUIRE(sum.ok);
+    CHECK(sum.truncated);
+    CHECK(sum.recordCount == 12);
+    CHECK(sum.lastRecordFrame == 12 * 90);
+    CHECK(sum.EndFrame() == 12 * 90);
+    CHECK_FALSE(sum.outcome.declared);
+
+    std::remove(path.c_str());
+}
+
+TEST_CASE("a summary reads a packed file too") {
+    const std::string raw    = TempPath("summary-pack-src");
+    const std::string packed = TempPath("summary-pack-out");
+    {
+        replay::Writer w;
+        std::string err;
+        REQUIRE(w.Open(raw, SampleHeader(), err));
+        for (int i = 1; i <= 30; ++i)
+            w.Append(MakeRecord(static_cast<uint64_t>(i), i * 30, TickPhase::Inbound,
+                                InputKind::ClientMessage, std::string(100, 'k')));
+        w.WriteOutcome(880, std::vector<uint8_t>{2, 3});
+        replay::Trailer t;
+        t.endFrame = 900;
+        t.recordCount = w.Written();
+        w.Close(t);
+    }
+    std::string perr;
+    REQUIRE(replay::Pack(raw, packed, replay::Codec::Deflate, perr));
+
+    const replay::Summary sum = replay::LoadSummary(packed);
+    REQUIRE(sum.ok);
+    CHECK(sum.codec == replay::Codec::Deflate);
+    CHECK_FALSE(sum.truncated);
+    CHECK(sum.recordCount == 30);
+    CHECK(sum.trailer.endFrame == 900);
+    CHECK(sum.outcome.declared);
+    REQUIRE(sum.outcome.winningAllyTeams.size() == 2);
+    CHECK(sum.outcome.winningAllyTeams[1] == 3);
+    CHECK(sum.header.gameId == "papertanks");
+
+    std::remove(raw.c_str());
+    std::remove(packed.c_str());
+}
+
+TEST_CASE("summarising a non-replay file is an error, never a blank entry") {
+    const std::string path = TempPath("summary-garbage");
+    {
+        std::FILE* f = std::fopen(path.c_str(), "wb");
+        REQUIRE(f != nullptr);
+        const char junk[] = "this is a screenshot, not a replay";
+        std::fwrite(junk, 1, sizeof(junk), f);
+        std::fclose(f);
+    }
+    const replay::Summary sum = replay::LoadSummary(path);
+    CHECK_FALSE(sum.ok);
+    CHECK(sum.error.find("magic") != std::string::npos);
+    std::remove(path.c_str());
+
+    const replay::Summary missing = replay::LoadSummary(TempPath("summary-absent"));
+    CHECK_FALSE(missing.ok);
+    CHECK_FALSE(missing.error.empty());
+}
+
+TEST_CASE("a directory listing is newest-first and keeps unreadable files visible") {
+    const std::string dir = "/tmp/springweb-replay-test-listdir";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+
+    auto write = [&](const char* name, int endFrame) {
+        replay::Writer w;
+        std::string err;
+        REQUIRE(w.Open(dir + "/" + name, SampleHeader(), err));
+        w.Append(MakeRecord(1, endFrame, TickPhase::Inbound, InputKind::GameStart, "g"));
+        replay::Trailer t;
+        t.endFrame = endFrame;
+        t.recordCount = w.Written();
+        w.Close(t);
+    };
+    write("room-1-p9100.msr", 300);
+    // Distinct mtimes without sleeping on the test: state them.
+    std::filesystem::last_write_time(
+        dir + "/room-1-p9100.msr",
+        std::filesystem::file_time_type::clock::now() - std::chrono::hours(2));
+    write("room-2-p9101.msr", 600);
+    std::filesystem::last_write_time(
+        dir + "/room-2-p9101.msr",
+        std::filesystem::file_time_type::clock::now() - std::chrono::hours(1));
+    {
+        std::FILE* f = std::fopen((dir + "/broken.msr").c_str(), "wb");
+        REQUIRE(f != nullptr);
+        std::fwrite("garbage", 1, 7, f);
+        std::fclose(f);
+    }
+    // Not a .msr — must not appear at all.
+    {
+        std::FILE* f = std::fopen((dir + "/notes.txt").c_str(), "wb");
+        REQUIRE(f != nullptr);
+        std::fwrite("hi", 1, 2, f);
+        std::fclose(f);
+    }
+
+    const auto list = replay::ListDirectory(dir);
+    REQUIRE(list.size() == 3);
+    // Newest first — `broken.msr` was written last.
+    CHECK(list[0].path.find("broken.msr") != std::string::npos);
+    CHECK_FALSE(list[0].ok);
+    CHECK_FALSE(list[0].error.empty());
+    CHECK(list[1].path.find("room-2") != std::string::npos);
+    CHECK(list[1].trailer.endFrame == 600);
+    CHECK(list[2].path.find("room-1") != std::string::npos);
+    CHECK(list[2].trailer.endFrame == 300);
+
+    // A directory that does not exist is an empty browser, not a fault.
+    CHECK(replay::ListDirectory("/tmp/springweb-replay-test-no-such-dir").empty());
+    CHECK(replay::ListDirectory("").empty());
+
+    std::filesystem::remove_all(dir);
 }

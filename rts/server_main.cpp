@@ -94,6 +94,7 @@
 #include <array>
 #include <csignal>
 #include <cstdio>
+#include <ctime>
 #include <unistd.h>
 #include <atomic>
 #include <fstream>
@@ -1273,6 +1274,20 @@ int main(int argc, char* argv[])
         rhdr.defsCacheKey = defsCacheKey;
         rhdr.roomId       = roomId;
         rhdr.startFrame   = sim.GetFrameNum();
+        // §1 has carried a `recordedAt` since task 2 and nothing ever wrote
+        // one — a dead producer that only showed up when task 4c's listing
+        // went looking for the date column. Wall clock is safe here precisely
+        // because it is informational: the replay path never feeds it back
+        // into the sim, so it cannot fork a re-execution the way any other
+        // clock read would.
+        {
+            const std::time_t now = std::time(nullptr);
+            std::tm utc{};
+            gmtime_r(&now, &utc);
+            char stamp[32] = {0};
+            std::strftime(stamp, sizeof(stamp), "%Y-%m-%dT%H:%M:%SZ", &utc);
+            rhdr.recordedAt = stamp;
+        }
         for (const auto& kv : CGameSetup::GetModOptions())
             rhdr.modOptions.emplace_back(kv.first, kv.second);
         for (const auto& rp : requestedPlayers)
@@ -2395,6 +2410,14 @@ int main(int argc, char* argv[])
     int replayExitCode = 0;
     if (replayWriter.Enabled()) {
         syncedinput::Journal().SetJournal(nullptr);
+        // How the game ENDED (task 4c). Written only when a result was
+        // actually declared: the block's absence is the "still running / never
+        // finished" answer a replay browser needs, and an empty block would
+        // erase that distinction rather than record it. It goes in ahead of the
+        // trailer because the trailer is what closes the segment.
+        if (gameOverRelay.IsDeclared())
+            replayWriter.WriteOutcome(gameOverRelay.DeclaredFrame(),
+                                      gameOverRelay.Winners());
         replay::Trailer tr;
         tr.endFrame    = sim.GetFrameNum();
         tr.recordCount = replayWriter.Written();
