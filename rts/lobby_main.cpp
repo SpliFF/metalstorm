@@ -462,6 +462,11 @@ int main(int argc, char *argv[]) {
   // off in a self-hosted sample config that explicitly passes this flag).
   // Surfaced to the client via /api/version.
   bool clientErrorReportsEnabled = true;
+  // PLAN-client-resilience.md task 4 / §3: "SQLite table with retention (30
+  // days)". Rows are pruned by age from the main loop. 0 or less disables
+  // pruning entirely (an operator who wants the whole history), which is why
+  // the default is a real number and not a sentinel.
+  int clientErrorRetentionDays = 30;
 
   for (int i = 1; i < argc; i++) {
     std::string arg = argv[i];
@@ -494,6 +499,8 @@ int main(int argc, char *argv[]) {
       wtKeyPath = argv[++i];
     } else if (arg == "--disable-client-error-reports") {
       clientErrorReportsEnabled = false;
+    } else if (arg == "--client-error-retention-days" && i + 1 < argc) {
+      clientErrorRetentionDays = std::atoi(argv[++i]);
     } else if (arg == "--game" && i + 1 < argc) {
       // Back-compat: `--game <path>` is translated into
       // `--games-dir <parent>` so existing scripts that point
@@ -842,6 +849,18 @@ int main(int argc, char *argv[]) {
     if (!reaped.empty())
       SLOG(SPRING_LOG_NOTICE, "startup: reaped %zu abandoned room(s)",
            reaped.size());
+  }
+
+  // --- Prune expired crash reports (PLAN-client-resilience task 4) ---
+  // Once at startup and hourly below. A lobby that is restarted more often
+  // than it runs for an hour still prunes; one that runs for weeks does not
+  // need a restart to stay bounded.
+  {
+    const int pruned = db.PruneClientErrors(clientErrorRetentionDays);
+    if (pruned > 0)
+      SLOG(SPRING_LOG_NOTICE,
+           "startup: pruned %d client error report(s) older than %d days",
+           pruned, clientErrorRetentionDays);
   }
 
   // Reset any room stuck in Loading/Active without a live game-server.
@@ -1628,6 +1647,97 @@ int main(int argc, char *argv[]) {
         nlohmann::json out;
         out["ok"] = true;
         out["banned"] = banned;
+        return HttpAuth::JsonResponse(200, out.dump());
+      });
+
+  // POST /api/admin/client-errors — the crash view (PLAN-client-resilience
+  // task 4): client_errors grouped by stack hash, top crashers first. Task 3
+  // has been writing these rows since 2026-07-19 and nothing read them; this
+  // is the read side. Admin-gated like the rest of the dashboard's plane —
+  // crash reports carry account ids, stacks and log-ring lines.
+  net.AddHttpPost(
+      "/api/admin/client-errors", RouteAuth::AdminOnly,
+      [&db, requireLobbyAdmin,
+       clientErrorRetentionDays](const std::string &, const std::string &body,
+                                 const HttpRequestHeaders &headers)
+          -> HttpResponse {
+        int64_t uid;
+        std::string uname;
+        if (auto e = requireLobbyAdmin(headers, uid, uname))
+          return *e;
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+        int limit = j.is_discarded() ? 50 : j.value("limit", 50);
+        int sinceDays = j.is_discarded() ? 0 : j.value("sinceDays", 0);
+        limit = std::clamp(limit, 1, 200);
+        nlohmann::json groups = nlohmann::json::array();
+        for (const auto &g : db.GetClientErrorGroups(limit, sinceDays))
+          groups.push_back({{"stack_hash", g.stackHash},
+                            {"error_class", g.errorClass},
+                            {"message", g.message},
+                            {"recovery_rung", g.recoveryRung},
+                            {"reports", g.reports},
+                            {"occurrences", g.occurrences},
+                            {"users", g.users},
+                            {"first_seen", g.firstSeen},
+                            {"last_seen", g.lastSeen},
+                            {"first_build", g.firstBuild},
+                            {"last_build", g.lastBuild},
+                            {"games", g.games}});
+        nlohmann::json out;
+        out["ok"] = true;
+        out["groups"] = groups;
+        // So the operator can tell an empty view apart from a pruned one.
+        out["retention_days"] = clientErrorRetentionDays;
+        return HttpAuth::JsonResponse(200, out.dump());
+      });
+
+  // POST /api/admin/client-errors/detail {stack_hash} — every stored report
+  // for one crash site. This is also the export-to-JSON payload: the
+  // dashboard downloads this response verbatim for filing an issue, so it
+  // carries the full stack and log ring rather than the group summary.
+  // Stacks are MINIFIED — there is no source-map upload pipeline (task 3's
+  // documented residual), so the frames read as `a.b@chunk-x.js:1:2345`.
+  net.AddHttpPost(
+      "/api/admin/client-errors/detail", RouteAuth::AdminOnly,
+      [&db, requireLobbyAdmin](
+          const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        int64_t uid;
+        std::string uname;
+        if (auto e = requireLobbyAdmin(headers, uid, uname))
+          return *e;
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+        const std::string stackHash =
+            j.is_discarded() ? "" : j.value("stack_hash", std::string(""));
+        if (stackHash.empty())
+          return HttpAuth::JsonResponse(
+              400, R"({"ok":false,"error":"stack_hash required"})");
+        int limit = j.is_discarded() ? 200 : j.value("limit", 200);
+        limit = std::clamp(limit, 1, 500);
+        nlohmann::json reports = nlohmann::json::array();
+        for (const auto &r : db.GetClientErrorsByHash(stackHash, limit))
+          reports.push_back({{"id", r.id},
+                             {"created_at", r.createdAt},
+                             {"user_id", r.userId},
+                             {"reason", r.reason},
+                             {"error_class", r.errorClass},
+                             {"message", r.message},
+                             {"stack", r.stack},
+                             {"stack_hash", r.stackHash},
+                             {"recovery_rung", r.recoveryRung},
+                             {"phase", r.phase},
+                             {"frame", r.frame},
+                             {"entity_count", r.entityCount},
+                             {"game_id", r.gameId},
+                             {"map_id", r.mapId},
+                             {"build_stamp", r.buildStamp},
+                             {"gpu_renderer", r.gpuRenderer},
+                             {"log_ring", r.logRing},
+                             {"count", r.count}});
+        nlohmann::json out;
+        out["ok"] = true;
+        out["stack_hash"] = stackHash;
+        out["reports"] = reports;
         return HttpAuth::JsonResponse(200, out.dump());
       });
 
@@ -3260,8 +3370,20 @@ int main(int argc, char *argv[]) {
 
   // --- Main loop (10 Hz for lobby — HTTP serving + process management) ---
   int reapTick = 0;
+  int errorPruneTick = 0;
   while (keepRunning.load()) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    // Prune expired crash reports ~hourly at 10 Hz. Cheap (one indexed
+    // DELETE on created_at) and idempotent, so a no-op hour costs nothing.
+    if (++errorPruneTick >= 36000) {
+      errorPruneTick = 0;
+      const int pruned = db.PruneClientErrors(clientErrorRetentionDays);
+      if (pruned > 0)
+        SLOG(SPRING_LOG_NOTICE,
+             "pruned %d client error report(s) older than %d days", pruned,
+             clientErrorRetentionDays);
+    }
 
     // Periodically reap abandoned rooms (~every 60s at 10 Hz). Catches
     // rooms whose host closed the browser during a long-lived lobby,

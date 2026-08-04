@@ -12,6 +12,9 @@
  *     directly to that game server's own /api/gm/<verb> plane (browser→game
  *     port, same admin token — the proven admin path).
  *   - Ban list: account ban/unban via the lobby.
+ *   - Client crashes: `client_errors` grouped by stack hash (top crashers,
+ *     first/last seen, build range, affected games) with a per-group
+ *     drill-down and export-to-JSON — PLAN-client-resilience.md task 4.
  *
  * The raw-string delimiter is )HTML" so the page body's own )" sequences don't
  * terminate the literal early.
@@ -66,6 +69,13 @@ inline constexpr const char* kGmDashboardHtml = R"HTML(<!doctype html>
   .log { font-size: 12px; max-height: 220px; overflow: auto; border-top: 1px solid #1c2330; }
   .log div { padding: 3px 0; border-bottom: 1px solid #161c27; }
   .log .act { color: #86b4e0; }
+  tr.crash { cursor: pointer; }
+  tr.crash:hover td { background: #141a24; }
+  td.msg { white-space: normal; max-width: 460px; word-break: break-word; }
+  .hash { color: #7d8797; font-size: 11px; }
+  pre.stack { margin: 6px 0 0; padding: 8px; background: #0f131b; border: 1px solid #212938;
+              border-radius: 6px; max-height: 240px; overflow: auto; font-size: 11px;
+              white-space: pre-wrap; word-break: break-all; }
   #login { max-width: 320px; margin: 80px auto; }
   #err { color: #ff9ba6; min-height: 18px; }
   #toast { position: fixed; bottom: 18px; right: 18px; display: flex; flex-direction: column; gap: 6px; z-index: 20; }
@@ -142,6 +152,17 @@ function renderShell() {
       <div class="card"><h2>Fleet <span class="muted" id="ftime"></span></h2>
         <div id="fleet">loading…</div></div>
       <div id="drill"></div>
+      <div class="card"><h2>Client crashes <span class="muted" id="crashmeta"></span></h2>
+        <div class="row">
+          <select id="crashsince">
+            <option value="1">last 24h</option>
+            <option value="7" selected>last 7 days</option>
+            <option value="30">last 30 days</option>
+            <option value="0">all retained</option>
+          </select>
+          <button id="crashrefresh">Refresh</button></div>
+        <div id="crashes" style="margin-top:10px">loading…</div>
+        <div id="crashdrill"></div></div>
       <div class="card"><h2>Ban list</h2>
         <div class="row"><input id="banu" placeholder="username">
           <button class="danger" id="banbtn">Ban</button>
@@ -151,7 +172,10 @@ function renderShell() {
   $('#logout').onclick = () => { localStorage.removeItem('gm-token'); TOKEN=''; renderLogin(); };
   $('#banbtn').onclick = () => doBan(true);
   $('#unbanbtn').onclick = () => doBan(false);
+  $('#crashrefresh').onclick = loadCrashes;
+  $('#crashsince').onchange = loadCrashes;
   loadBanned();
+  loadCrashes();
 }
 
 function alarmBadges(g) {
@@ -292,6 +316,78 @@ async function doBan(ban, uname) {
   const { ok, j } = await api(ban ? '/api/admin/ban' : '/api/admin/unban', { username });
   toast(ok ? `${ban?'banned':'unbanned'} ${username}` : `${j.error||'failed'}`, !ok);
   if (ok) { $('#banu').value=''; loadBanned(); }
+}
+
+// --- Client crashes (PLAN-client-resilience task 4) ---
+// Rows are grouped by stack HASH, not by message: stacks arrive minified
+// (no source-map upload pipeline exists — task 3's documented residual), so
+// the frames are unreadable but the hash is a stable per-crash-site identity.
+let openHash = null;
+
+async function loadCrashes() {
+  const sinceDays = +$('#crashsince').value;
+  const { ok, j } = await api('/api/admin/client-errors', { sinceDays, limit: 100 });
+  if (!ok) { $('#crashes').innerHTML = `<div class="muted">${esc(j.error||'failed to load crash reports')}</div>`; return; }
+  const groups = j.groups || [];
+  $('#crashmeta').textContent = `· retention ${j.retention_days > 0 ? j.retention_days + 'd' : 'off'}`;
+  if (!groups.length) {
+    $('#crashes').innerHTML = '<div class="muted">no client crash reports in this window</div>';
+    $('#crashdrill').innerHTML = ''; openHash = null; return;
+  }
+  let h = `<table><thead><tr><th>error</th><th>occurrences</th><th>reports</th><th>users</th>
+    <th>first seen</th><th>last seen</th><th>builds</th><th>rung</th><th>games</th></tr></thead><tbody>`;
+  for (const g of groups) {
+    const builds = g.first_build && g.first_build !== g.last_build
+      ? `${esc(g.first_build)} → ${esc(g.last_build)}` : esc(g.last_build || '—');
+    h += `<tr class="crash" data-h="${esc(g.stack_hash)}">
+      <td class="msg"><b>${esc(g.error_class||'Error')}</b>: ${esc(g.message||'—')}
+        <div class="hash">${esc(g.stack_hash)}</div></td>
+      <td>${g.occurrences}</td><td>${g.reports}</td><td>${g.users}</td>
+      <td>${esc(g.first_seen||'—')}</td><td>${esc(g.last_seen||'—')}</td>
+      <td>${builds}</td><td>${esc(g.recovery_rung||'—')}</td>
+      <td>${esc(g.games||'—')}</td></tr>`;
+  }
+  h += '</tbody></table>';
+  $('#crashes').innerHTML = h;
+  $('#crashes').querySelectorAll('tr.crash').forEach(tr =>
+    tr.onclick = () => openCrash(tr.dataset.h));
+  if (openHash) openCrash(openHash);
+}
+
+async function openCrash(stackHash) {
+  const { ok, j } = await api('/api/admin/client-errors/detail', { stack_hash: stackHash });
+  const d = $('#crashdrill');
+  if (!ok) { d.innerHTML = `<div class="muted">${esc(j.error||'detail failed')}</div>`; return; }
+  openHash = stackHash;
+  const reports = j.reports || [];
+  const top = reports[0] || {};
+  d.innerHTML = `<div class="card"><h2>${esc(top.error_class||'Error')} <span class="hash">${esc(stackHash)}</span>
+      <a class="link" style="float:right" id="crashclose">close ✕</a>
+      <button id="crashexport" style="float:right;margin-right:10px">Export JSON</button></h2>
+    <div class="muted">${reports.length} stored report(s) · newest ${esc(top.created_at||'—')} ·
+      frame ${top.frame ?? '—'} · phase ${esc(top.phase||'—')} · entities ${top.entity_count ?? '—'} ·
+      rung ${esc(top.recovery_rung||'—')} · ${esc(top.gpu_renderer||'unknown gpu')}</div>
+    <pre class="stack">${esc(top.stack||'(no stack)')}</pre>
+    <h2 style="margin-top:14px;font-size:12px" class="muted">Last log-ring lines</h2>
+    <pre class="stack">${esc(top.log_ring||'(none)')}</pre>
+    <h2 style="margin-top:14px;font-size:12px" class="muted">Occurrences</h2>
+    <div class="log">${reports.map(r =>
+      `<div><span class="muted">${esc(r.created_at||'')}</span> user #${r.user_id}
+        · ${esc(r.game_id||'—')}/${esc(r.map_id||'—')} · f${r.frame}
+        · build ${esc(r.build_stamp||'—')} · ×${r.count}</div>`).join('')}</div></div>`;
+  $('#crashclose').onclick = () => { openHash = null; d.innerHTML = ''; };
+  $('#crashexport').onclick = () => exportCrash(stackHash, j);
+}
+
+// Export-to-JSON: the detail response verbatim, so a filed issue carries the
+// same bytes the operator was looking at.
+function exportCrash(stackHash, payload) {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `client-errors-${stackHash.slice(0, 16) || 'group'}.json`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
 async function boot() {

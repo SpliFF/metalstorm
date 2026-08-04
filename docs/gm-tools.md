@@ -29,6 +29,13 @@ It shows:
   from the shared SQLite `game_servers` + `game_status` + `game_metrics` tables.
 - **Per-game drill-down** (click a row) — the tick-p95 timeline, the audit trail
   for that game, a live `inspect` panel, and the verb buttons.
+- **Client crashes** — `client_errors` grouped by stack hash over a selectable
+  window: top crashers with occurrence/report/user counts, first-and-last seen,
+  build range, recovery rung and affected games. Click a row for the full stack,
+  the log-ring tail and every occurrence; **Export JSON** downloads that payload
+  for filing an issue. Stacks are minified (no source-map pipeline), so quote the
+  build stamp. Full guide:
+  [debugging.md](debugging.md#reading-the-dashboard-crash-view).
 - **Ban list** — account ban/unban.
 
 The dashboard talks to two planes:
