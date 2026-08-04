@@ -171,13 +171,44 @@ await window.__gp(`(()=>{const e=__entityRenderer.scene.getEngine();
   return [e.getRenderWidth(), e.getRenderHeight()];})()`);
 ```
 
-To restore, don't call `renderScale` again — nudge the page size
-(`resize_page` 1280→1281→1280) so the client's own resize path re-applies the
-DPR cap, then read the buffer back to confirm.
+**It is worse than one-way — it compounds.** PLAN-perf **M4** measured
+`setHardwareScalingLevel` scaling the *current* backing store rather than
+re-deriving it from a CSS size, so each call shrinks the buffer again:
+960×600 → `setHardwareScalingLevel(1.333)` → 720×450 → `(1)` → 720×450 → `(1.333)`
+→ 540×337. Asking for the level you want does not get you the buffer you want.
 
-**Game choice for UI testing: use `zk`, not `papertanks`.** PaperTanks ships no
-configured LuaUI/minimap/sounds, so UI/HUD tests against it prove nothing —
-widgets simply don't exist there. ZK (and BAR) have full HUDs.
+To restore, set the scaling level back to **1** *and* trigger a **real** page
+resize — a genuinely different size, then the one you want. The 1280→1281→1280
+nudge this file previously recommended does **not** work; M4 tried it and the
+buffer stayed at 960×600. What works:
+
+```js
+await window.__gp('__entityRenderer.scene.getEngine().setHardwareScalingLevel(1)');
+// then resize_page 1100×700, wait ~4 s, resize_page 1280×800, wait ~5 s
+// then read the buffer back — only believe getRenderWidth(), never the level
+```
+
+**⚠️ A toggle that recompiles a shader makes the frame look fast — it isn't.**
+Babylon skips drawing any mesh whose effect is not ready, so for several seconds
+after you flip a material plugin, re-enable a mesh, or detach a post pipeline,
+the frame is cheap *because half the scene is missing*. M4 hit this three times;
+the worst case reported a −11.7 ms "win" for disabling post-processing that a
+properly settled window showed to be **0.0 ms**. Two tells, both cheap:
+
+- the distribution goes **bimodal** — `p50` far below `p95` (e.g. p50 9.0 / p95 23.8)
+  where a settled window has p95 ≈ p50 + 2 ms;
+- **draw calls per frame** drop below what the scene should be issuing.
+
+So after any such toggle, settle **12–20 s**, and gate the window on a draw-call
+count in the expected range, not on elapsed time alone. Draw calls are not
+per-frame anywhere obvious — `engine._drawCalls.current` is cumulative, so
+sample it twice against `engine.frameId` and divide.
+
+**Game choice for UI testing: use `metalstorm`, not `papertanks`.** PaperTanks
+ships no configured LuaUI/minimap/sounds, so UI/HUD tests against it prove
+nothing — widgets simply don't exist there. (This line used to say "use `zk`";
+ZK and BAR were archived 2026-08-02 and are no longer the test vehicle — see
+PLAN.md Code-session contract.)
 
 ## Lobby JS API (`window.lobby`)
 
