@@ -21,6 +21,7 @@ import { stampUrl } from '../../config.js';
 import { injectStyle } from '../ui.js';
 import { clientSettings } from '../../core/client-settings.js';
 import { parseRevealPredicate } from './reveal-predicate.js';
+import { classVocabulary, loadClassVocabulary } from './class-vocabulary.js';
 import nativeUiCss from './native-ui.css?raw';
 
 /**
@@ -131,6 +132,10 @@ const BUILTIN_WIDGETS: Record<string, () => Promise<{ default: Widget }>> = {
     // @ts-ignore — command-composer.js is untyped JS (same as the game-dir
     // widgets); it exports a default { id, init, dispose } matching Widget.
     'command-composer': () => import('../../native-widgets/command-composer.js'),
+    // @ts-ignore — same shape; the NL command console (PLAN-metalstorm-
+    // command-language.md §4) needs the bundled console-exchange + accelerator
+    // + class-vocabulary modules.
+    'command-console': () => import('../../native-widgets/command-console.js'),
 };
 
 /** Widget mounting waits on the game's stylesheets; don't wait forever. */
@@ -231,7 +236,16 @@ export class WidgetLoader {
         const baseUrl = `${httpBase}/api/games/data/${encodeURIComponent(gameId)}/ui`;
 
         // Game skin goes in after the design system so it can override tokens.
-        await this.injectGameStyles(manifest.styles ?? [], baseUrl);
+        // The class vocabulary (PLAN-metalstorm-command-language.md §2) is a
+        // sibling of the manifest in the same ui/ dir and is fetched with the
+        // styles rather than after them — widgets that parse sentences read it
+        // from the shared holder at mount, and a missing/failed vocabulary is
+        // never fatal (an empty one costs keyword coverage, nothing else).
+        classVocabulary.reset();
+        await Promise.all([
+            this.injectGameStyles(manifest.styles ?? [], baseUrl),
+            loadClassVocabulary(gameId, httpBase),
+        ]);
         if (stale()) return;
 
         // Load and mount each widget

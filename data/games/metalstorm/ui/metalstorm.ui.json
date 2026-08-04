@@ -55,6 +55,17 @@
       "title": "Compose Command",
       "subscribes": ["gameRulesParams", "teamRulesParams"],
       "hideForSpectator": true
+    },
+    {
+      "id": "command-console",
+      "entry": "widgets/command-console.js",
+      "builtin": true,
+      "_builtin_note": "Mounted from the client bundle (client/src/native-widgets/command-console.js) via BUILTIN_WIDGETS — same reason as the composer: it depends on bundled native-ui modules (console-exchange + free-text-accelerator + class-vocabulary + named-entity-index). There is no game-dir copy.",
+      "mount": "bottom-center",
+      "title": "Command",
+      "_chrome": "PLAN-metalstorm-command-language.md §4 — the natural-language console: a you:/game: transcript plus one text field. Docked bottom-centre under the composer, which it eventually absorbs (the composer's free-text field is the same parser).",
+      "subscribes": ["selection", "orgGroups"],
+      "hideForSpectator": true
     }
   ]
 }

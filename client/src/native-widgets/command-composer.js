@@ -26,6 +26,7 @@ import { mapGestureBridge } from '../ui/native-ui/map-gesture.js';
 import { previewDirectiveCost, matchSelectionToGroup } from '../ui/native-ui/cost-preview.js';
 import { listCommandPresets, saveCommandPreset, deleteCommandPreset } from '../ui/native-ui/command-presets.js';
 import { acceleratorFill } from '../ui/native-ui/free-text-accelerator.js';
+import { classVocabulary } from '../ui/native-ui/class-vocabulary.js';
 import { injectStyle } from '../ui/ui.js';
 import composerCss from './command-composer.css?raw';
 
@@ -43,11 +44,20 @@ import composerCss from './command-composer.css?raw';
 const AUTHORITY_COST_LIB_URL = '/api/games/data/metalstorm/ui/lib/authority-cost.js';
 const AUTHORITY_COST_SPEC_URL = '/api/games/data/metalstorm/authority_cost.json';
 
-/** Idle-filter subject classes offered by the Subject picker. A closed
- *  vocabulary (mirrors free-text-accelerator.ts's IDLE_FILTER_CLASSES) — the
- *  composer builds valid-by-construction intents, so it only offers filter
- *  classes the sim understands rather than a free-text box. */
-const IDLE_FILTER_CLASSES = ['armour', 'infantry', 'air', 'artillery'];
+/** Idle-filter subject classes offered by the Subject picker, read from the
+ *  shipped class vocabulary (`class-vocabulary.json`) — the same table the
+ *  free-text accelerator parses against. The composer builds
+ *  valid-by-construction intents, so it only offers filter classes the sim
+ *  actually has: these are literal `customparams.ms_class` values, not the
+ *  hand-kept `['armour','infantry','air','artillery']` list that used to live
+ *  here and named two classes that never existed. */
+function idleFilterClasses() {
+    return classVocabulary.current.classNames().map((className) => ({
+        className,
+        label: classVocabulary.current.data.classes[className].plural
+            || classVocabulary.current.data.classes[className].display,
+    }));
+}
 
 /** Entity types the Target picker searches — the "where to act" vocabulary
  *  (regions/objectives/landmarks), never Subjects (groups). Mirrors
@@ -447,8 +457,8 @@ function renderSubjectMenu() {
         .map((g) => `<div class="nui-menu__item subject-group-option" data-group-id="${g.groupId}">${escapeHtml(g.name || `Group ${g.groupId}`)} <span class="composer-menu-hint">${g.echelon}</span></div>`)
         .join('');
 
-    const idleItems = IDLE_FILTER_CLASSES
-        .map((c) => `<div class="nui-menu__item subject-idle-option" data-class="${c}">Idle ${c}</div>`)
+    const idleItems = idleFilterClasses()
+        .map((c) => `<div class="nui-menu__item subject-idle-option" data-class="${escapeHtml(c.className)}">Idle ${escapeHtml(c.label)}</div>`)
         .join('');
 
     menu.innerHTML = `
@@ -710,7 +720,10 @@ function formatSubject(subject) {
         const label = `Group ${subject.groupId}`;
         return state.subjectAutoFilled ? `${label} (from selection)` : label;
     } else if (subject.type === 'idle-filter') {
-        return `Idle ${subject.filterClass}`;
+        // The slot carries the sim's own `ms_class`; the chip shows the
+        // vocabulary's spoken plural for it ("staticdefense" → "defenses").
+        const entry = classVocabulary.current.data.classes?.[subject.filterClass];
+        return `Idle ${entry?.plural || entry?.display || subject.filterClass}`;
     } else if (subject.type === 'ai') {
         return 'the AI';
     }
@@ -1145,7 +1158,7 @@ function loadPreset(preset) {
 function handleAccelFill() {
     if (!state.accelValue.trim()) return;
 
-    const result = acceleratorFill(state.accelValue, namedEntityIndex);
+    const result = acceleratorFill(state.accelValue, namedEntityIndex, classVocabulary.current);
 
     state.verb = result.verb;
     state.subject = result.subject;
