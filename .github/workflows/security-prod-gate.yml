@@ -36,7 +36,18 @@ jobs:
   prod-gate:
     runs-on: macos-14
     steps:
+      # `submodules: recursive` is load-bearing, not hygiene. This job runs on
+      # macos-14 (arm64), where rts/System/simd_compat.h takes the
+      # `defined(__aarch64__)` branch and includes "lib/sse2neon/sse2neon.h" —
+      # which lives in the rts/lib/sse2neon submodule. A bare checkout leaves
+      # that directory empty, so every translation unit that reaches
+      # SpringThreading.h dies with "file not found". That is exactly how the
+      # 2026-08-03 run failed (the first run ever to get past `brew install`):
+      # it built 434 of 811 objects and then hit the missing header. entt /
+      # nowide / cereal are needed by the same build for the same reason.
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install build dependencies
         run: |
