@@ -22,6 +22,52 @@ describe("control.validateParams", function()
         assert.is_false(control.validateParams({ regionKey = 'r1', holdFrames = 0 }))
         assert.is_false(control.validateParams({ regionKey = 'r1' }))
     end)
+
+    it("accepts an optional non-negative notBefore and rejects a bad one", function()
+        assert.is_true(control.validateParams({ regionKey = 'r1', holdFrames = 100, notBefore = 0 }))
+        assert.is_true(control.validateParams({ regionKey = 'r1', holdFrames = 100, notBefore = 3600 }))
+        assert.is_false(control.validateParams({ regionKey = 'r1', holdFrames = 100, notBefore = -1 }))
+        assert.is_false(control.validateParams({ regionKey = 'r1', holdFrames = 100, notBefore = 'soon' }))
+    end)
+end)
+
+-- PLAN-metalstorm-wars.md §7.5a / endtoend D20: a terminal objective must not
+-- be winnable before the sides can reach it.
+describe("control open-race delay (notBefore)", function()
+    it("cannot complete before notBefore + holdFrames, however early the region was taken", function()
+        local o = { params = { regionKey = 'r1', holdFrames = 100, notBefore = 1000 } }
+        control.init(o, fakeCtx(0, nil, true))
+        control.check(o, fakeCtx(0, 5, true))          -- team 5 walks in at frame 0
+        assert.is_nil(control.check(o, fakeCtx(100, 5, true)))    -- holdFrames elapsed, race shut
+        assert.is_nil(control.check(o, fakeCtx(1000, 5, true)))   -- race opens: clock starts NOW
+        assert.is_nil(control.check(o, fakeCtx(1099, 5, true)))
+        local state, team = control.check(o, fakeCtx(1100, 5, true))
+        assert.are.equal('complete', state)
+        assert.are.equal(5, team)
+    end)
+
+    it("does not delay a team that takes the region after the race opened", function()
+        local o = { params = { regionKey = 'r1', holdFrames = 100, notBefore = 1000 } }
+        control.init(o, fakeCtx(0, nil, true))
+        control.check(o, fakeCtx(2000, 5, true))
+        assert.are.equal('complete', (control.check(o, fakeCtx(2100, 5, true))))
+    end)
+
+    it("reports 0 progress while holding a region the race has not opened on", function()
+        local o = { params = { regionKey = 'r1', holdFrames = 100, notBefore = 1000 } }
+        control.init(o, fakeCtx(0, nil, true))
+        control.check(o, fakeCtx(0, 5, true))
+        assert.are.equal(0, control.progress(o, fakeCtx(500, 5, true)))
+        assert.are.equal(0, control.progress(o, fakeCtx(1000, 5, true)))
+        assert.are.equal(0.5, control.progress(o, fakeCtx(1050, 5, true)))
+    end)
+
+    it("behaves exactly as before when notBefore is absent (no regression)", function()
+        local o = { params = { regionKey = 'r1', holdFrames = 100 } }
+        control.init(o, fakeCtx(0, nil, true))
+        control.check(o, fakeCtx(0, 5, true))
+        assert.are.equal('complete', (control.check(o, fakeCtx(100, 5, true))))
+    end)
 end)
 
 describe("control.init", function()
