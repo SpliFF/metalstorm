@@ -44,6 +44,7 @@ import {
     type MapLighting,
 } from './map-lighting.js';
 import { createSceneLighting, applyMapLighting, setLightingStyle, type SceneLighting } from './scene-lighting.js';
+import type { ShadowDepthBoundsMode } from './shadow-depth-bounds.js';
 import { LosBitmapStore, type LosBitmap } from './los-bitmap.js';
 // GW4-c4: world entity rendering moves into the worker. Side-effect import
 // registers Babylon's KTX2 loader + pins the transcoder URLs (previously only
@@ -729,6 +730,13 @@ async function gpLoadMap(msg: GpInitToWorker): Promise<void> {
     // arrived yet we fall back to map centre and let onTeamStartInfo snap the
     // camera the moment it does. now pan/zoom/orbit are live off the forwarded
     // input.
+    // PLAN-perf M8: the same bounds feed the analytic CSM depth-slab fit — the
+    // box every shadow caster/receiver lives in is the map itself by its
+    // heightmap range.
+    sceneLighting.shadowDepthBounds.setMapBounds(
+        map.widthElmos, map.heightElmos, map.minHeight, map.maxHeight,
+        { data: map.heightmap, mapx: map.mapx, mapy: map.mapy, squareSize: map.squareSize });
+
     const rtsCam = gpViewCameras.get(0);
     rtsCam?.setMapBounds(map.widthElmos, map.heightElmos);
     if (!gpTryFrameStartCamera()) {
@@ -2211,6 +2219,12 @@ export function gpInit(msg: GpInitToWorker): void {
         },
         /** Hazard #5: skip the LuaUI render-thread pass. */
         luaUi: (on: boolean): boolean => { gpUiPassEnabled = on; return on; },
+        /** M8: how the CSM cascades get fitted to the visible depth slab —
+         *  'analytic' (shipped, CPU-derived from camera + map bounds),
+         *  'reduce' (Babylon's depth pass + readback, the M4 stall), or
+         *  'off' (no fit at all). Returns the applied mode, or null pre-map. */
+        shadowDepthBounds: (mode: ShadowDepthBoundsMode): string | null =>
+            gpCtx.sceneLighting?.shadowDepthBounds.setMode(mode) ?? null,
     };
     // PLAN-maps.md M6: map-feature LOD live-tuning + attribution, e.g.
     //   window.__gp('__featureLod.get()')                        // tier counts
@@ -2505,6 +2519,12 @@ export function gpInit(msg: GpInitToWorker): void {
         // uniform per feature type plus any live crossfade; the tier pass
         // itself is throttled internally (interval + camera-movement gates).
         gpFeatureLod?.update(camera, now);
+        // PLAN-perf M8: fit the CSM cascades to the visible depth slab from the
+        // camera pose + map bounds, replacing Babylon's autoCalcDepthBounds
+        // (a second depth pass + 12-step reduction + a GPU→CPU readback that
+        // stalls the pipeline). Must run before scene.render() consumes the
+        // shadow generator; it is ~24 segment clips, well inside the noise.
+        gpCtx.sceneLighting?.shadowDepthBounds.update(camera);
         gpMark(3);  // decals+lights
         scene.render();
         gpMark(4);  // render
