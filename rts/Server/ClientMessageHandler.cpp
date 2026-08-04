@@ -13,6 +13,8 @@
 #include "LuaExecEngine.h"
 #include "SyncedInputJournal.h"
 #include "ReplayPlayer.h"
+#include "ReplayControlDeck.h"
+#include "ReplayStateBroadcast.h"
 #include "GameOverState.h"
 #include "PostGamePolicy.h"
 #include "PlayerRosterBroadcast.h"
@@ -318,6 +320,29 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                     static_cast<uint32_t>(msg.clientId), id);
             };
 
+            // ── Replay playback controls: attach the watcher (task 4b) ──────
+            // Attach ORDER decides who drives (ReplayControlDeck.h: first in
+            // holds the controls, succession on leave), so this runs exactly
+            // once per admitted session and only after AddSession — the deck
+            // keys on the reserved spectator player number, which is kept on
+            // the session because a replay spectator deliberately has no
+            // `clientPlayerNum` entry to keep it in.
+            auto attachReplayWatcher = [&](int pNum) {
+                if (!replaySpectator) return;
+                auto* s = sessions.GetSession(msg.clientId);
+                if (!s) return;
+                s->replaySpectatorPlayerNum = pNum;
+                replay::Controls().Attach(pNum);
+                SLOG(SPRING_LOG_NOTICE,
+                    "replay: spectator playerNum %d attached to the playback "
+                    "controls (%zu watching, controller is %d)",
+                    pNum, replay::Controls().WatcherCount(),
+                    replay::Controls().Controller());
+                // Everyone's bar changes when the watcher count or the
+                // controller does, so this is a broadcast, not a one-shot.
+                Protocol::BroadcastReplayState(ctx);
+            };
+
             // ── Replay: the recorded stream is the identity authority ──────
             // (PLAN-replay §7.10, T2-a.) A replayed AuthRequest must NOT reach
             // `db` at all. Not as an optimisation — as correctness: the token
@@ -484,6 +509,7 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                         s->team = team;
                     recordAuthIdentity(userId, reconnectUser->username,
                                        effectiveRole, team, pNum, isSpectator);
+                    attachReplayWatcher(pNum);
                     // One-shot standing-order snapshot so a
                     // mid-game reconnect sees existing orders
                     // immediately, without waiting for the
@@ -626,6 +652,7 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                 s->team = team;
             recordAuthIdentity(user->id, user->username, effectiveRole, team,
                                pNum, isSpectator);
+            attachReplayWatcher(pNum);
             // One-shot standing-order snapshot for the freshly
             // authenticated session — mirrors the reconnect
             // path above. Without this, mid-game joins
@@ -1189,6 +1216,106 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                     session->selectedUnits.insert(ids->Get(i));
                 }
             }
+            break;
+        }
+        // ── Replay playback controls (PLAN-replay task 4b) ───────────────
+        // Classified `Ignored` in SyncedInputJournal.cpp, so this verb is
+        // never journaled and the replay server's inbound gate lets it past
+        // (server_main refuses recordable verbs from live clients, which is
+        // exactly why the controls could not ride `ConsoleCommand`: that one
+        // is `Synced`, see §7.13 T4a-1).
+        //
+        // On a LIVE server it is dropped like the ungated verbs below. Not
+        // "harmlessly ignored" — dropped deliberately, because there is no
+        // playback to control and a client sending one is either confused or
+        // probing.
+        case SpringWeb::ClientPayload_ReplayControl: {
+            if (!replay::IsReplaying()) {
+                SLOG(SPRING_LOG_DEBUG,
+                    "rejecting ReplayControl from client=%u — this server is "
+                    "not replaying anything", msg.clientId);
+                break;
+            }
+            auto* session = sessions.GetSession(msg.clientId);
+            if (!session || session->replaySpectatorPlayerNum < 0) {
+                // A recorded (virtual) connection cannot send one — it has no
+                // transport — so this is an unauthenticated live client.
+                auto err = Protocol::BuildServerError(401, "Not authenticated");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                break;
+            }
+            auto* rc = clientMsg->payload_as_ReplayControl();
+            if (!rc) break;
+
+            replay::ControlRequest req;
+            req.action  = static_cast<replay::ControlAction>(rc->action());
+            req.speed   = rc->speed();
+            req.frame   = rc->frame();
+            req.povTeam = rc->pov_team();
+
+            const replay::ControlDecision d = replay::Controls().Decide(
+                session->replaySpectatorPlayerNum, req,
+                sim.GetFrameNum(), replay::Feed().EndFrame());
+
+            if (!d.accepted) {
+                // 403, and with the reason attached: the two refusals a
+                // watcher will actually hit — someone else is driving, and
+                // this recording cannot rewind — are both things a person
+                // needs told rather than a button that does nothing.
+                auto err = Protocol::BuildServerError(403, d.reason);
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                SLOG(SPRING_LOG_NOTICE,
+                    "replay: refused a playback control from playerNum %d: %s",
+                    session->replaySpectatorPlayerNum, d.reason.c_str());
+                // Still resend the state: the bar's optimistic position has to
+                // snap back to the truth after a refusal.
+                Protocol::SendReplayStateTo(ctx, msg.clientId);
+                break;
+            }
+
+            // ── apply ──
+            // Pause is `gs->paused`, exactly as PLAN-replay §2 specifies: the
+            // sim-loop gate already skips SimFrame on it, and with the frame
+            // frozen the feed's cursor pops nothing, so the recorded stream
+            // stops with the world. Nothing synced observes it (no callin
+            // fires while paused), so it cannot fork the re-execution.
+            if (d.setPaused) gs->paused = d.paused;
+            // Speed is `gs->wantedSpeedFactor` — also §2's answer. It is NOT
+            // folded into the state hash (StatsDump::ComputeStateHash covers
+            // unit digests and the RNG only), so driving it cannot make a
+            // replay diverge from its own reference track.
+            if (d.setSpeed) {
+                gs->wantedSpeedFactor = d.speed;
+                gs->speedFactor       = d.speed;
+            }
+            if (d.setSeek) replay::Feed().SetSeekTarget(d.seekTarget);
+            if (d.setPov) {
+                // POV is per-client and needs no controller rights: it is this
+                // watcher's fog, read by StateStreamer at five sites, and one
+                // watcher changing it cannot touch another's stream. Note this
+                // is the FIRST producer these two session fields have ever
+                // had — they were written by nothing before today.
+                session->spectatorVisibilityTeam = d.povTeam;
+                session->spectatorVisibilityMode = (d.povTeam >= 0)
+                    ? SpectatorVisibilityMode::Team
+                    : SpectatorVisibilityMode::Global;
+                SLOG(SPRING_LOG_NOTICE,
+                    "replay: spectator playerNum %d switched POV to %s",
+                    session->replaySpectatorPlayerNum,
+                    d.povTeam >= 0 ? ("team " + std::to_string(d.povTeam)).c_str()
+                                   : "global view");
+                Protocol::SendReplayStateTo(ctx, msg.clientId);
+                break;
+            }
+            SLOG(SPRING_LOG_NOTICE,
+                "replay: playerNum %d set playback paused=%d speed=%.2f "
+                "seek=%d (frame %d)",
+                session->replaySpectatorPlayerNum,
+                replay::Controls().Paused() ? 1 : 0,
+                replay::Controls().Speed(),
+                d.setSeek ? d.seekTarget : -1, sim.GetFrameNum());
+            // Shared state changed, so every watcher's bar does.
+            Protocol::BroadcastReplayState(ctx);
             break;
         }
         case SpringWeb::ClientPayload_PathRequest: {

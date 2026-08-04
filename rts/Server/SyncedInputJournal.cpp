@@ -65,8 +65,9 @@ enum Tag : uint8_t {
     GroupDirective = 42,
     GroupDirectiveRemove = 43,
     GroupPosture = 44,
+    ReplayControl = 45,
     // Not a tag — the exclusive upper bound used by IsKnownClientPayload.
-    TagCount = 45,
+    TagCount = 46,
 };
 
 } // namespace
@@ -266,6 +267,15 @@ WireClass ClassifyClientPayload(uint8_t payloadType) {
         case LogIngest:
         case LogSubscribe:
         case LogUnsubscribe:
+        // Replay playback controls (PLAN-replay task 4b). `Ignored` is the
+        // classification, not a shrug: a control that changes which frame the
+        // recorded feed is at, how fast it advances or whether it advances is
+        // not an input to the simulation and must never enter a cause stream —
+        // journalling one would make "pause" part of the recording and replay
+        // it back at whoever watches next. It reaches a handler only while
+        // replay::IsReplaying(); on a live server ClientMessageHandler drops
+        // it exactly like the ungated verbs above.
+        case ReplayControl:
             return WireClass::Ignored;
 
         case TagCount:

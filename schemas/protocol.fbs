@@ -605,6 +605,65 @@ table ConsoleResponse {
     level: uint8;
 }
 
+// ============================================================
+// Replay playback controls (PLAN-replay.md task 4b)
+// ============================================================
+//
+// These change the PLAYBACK, not the sim: which frame the recorded feed is
+// at, how fast it advances, whether it advances, and which team's fog the
+// watcher sees. They are deliberately NOT one of the console verbs §2/§5
+// originally named. `ConsoleCommand` is classified `Synced` — the most
+// destructive input class there is (SyncedInputJournal.cpp) — and a replay
+// server refuses every recordable verb from a live client by construction,
+// so routing playback controls through it would have meant either widening
+// that gate or journalling a control that is not part of any cause stream.
+// `ReplayControl` is classified `Ignored` instead: never recorded, dropped
+// outright on a live server, handled only while `replay::IsReplaying()`.
+
+enum ReplayControlAction : byte {
+    Pause = 0,      // freeze the feed (gs->paused)
+    Resume = 1,
+    SetSpeed = 2,   // `speed` = playback multiplier
+    Seek = 3,       // `frame` = target sim frame
+    SetPovTeam = 4, // `pov_team` = team whose fog to watch; -1 = global view
+}
+
+/// Spectator → replay server. Ignored (and logged) anywhere else.
+table ReplayControl {
+    action: ReplayControlAction;
+    speed: float = 1.0;
+    frame: int = 0;
+    pov_team: int = -1;
+}
+
+/// Replay server → every attached spectator, on change and on a slow
+/// heartbeat. This is what a seek bar is drawn from; a live game never
+/// sends it, so a client that never receives one shows no playback UI.
+table ReplayState {
+    start_frame: int;           // first frame in the recording
+    end_frame: int;             // last frame in the recording
+    current_frame: int;         // where playback is now
+    paused: bool;
+    speed: float;               // playback multiplier in effect
+    seeking: bool;              // fast-forwarding toward seek_target
+    seek_target: int;
+    /// Player number of the spectator holding the controls, or -1 if
+    /// nobody is attached. Compare against your own AuthResponse
+    /// `player_num` to know whether the buttons are yours.
+    controller_player_num: int;
+    /// Seek-bar ticks: frames the recording carries a checkpoint at.
+    /// Empty until PLAN-persistence's sim serializer lands, which is also
+    /// why a backward seek is refused rather than served (see
+    /// ReplayControlDeck.h).
+    checkpoint_frames: [int];
+    truncated: bool;            // E1: the segment ends early
+    game_id: string;
+    map_id: string;
+    /// This client's own POV: -1 = global view, else the team whose fog
+    /// it is watching. Per-client, unlike everything above it.
+    pov_team: int;
+}
+
 // Union of all client→server message types
 union ClientPayload {
     Handshake,
@@ -651,6 +710,7 @@ union ClientPayload {
     GroupDirective,
     GroupDirectiveRemove,
     GroupPosture,
+    ReplayControl,
 }
 
 table ClientMessage {
@@ -2138,6 +2198,7 @@ union ServerPayload {
     RulesParamUpdate,
     RulesParamKeyDictionary,
     PlayerRoster,
+    ReplayState,
 }
 
 table ServerMessage {

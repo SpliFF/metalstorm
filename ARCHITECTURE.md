@@ -700,6 +700,40 @@ pool per player in its GameStart roster loop *without* filtering them, while
 and no `clientPlayerNum` entry, so the `LuaUIMsg` relay (which resolves both ends
 through those) drops its messages on a replay server.
 
+**Playback controls are their own wire class, not a console verb.** Pause,
+speed, seek and POV change the *playback* — which frame the recorded feed is
+at, how fast it advances, whose fog is rendered — and none of that is an input
+to the simulation. Routing them through `ConsoleCommand`, which is what "ride
+the existing debug-console verbs" would have meant, was not possible: that verb
+is classified `Synced`, the class the replay gate refuses from live clients by
+construction, and widening the gate would have admitted arbitrary Lua to a
+re-executing sim. So `ClientPayload::ReplayControl` is classified **`Ignored`**
+— never journaled (a recorded "pause" would replay at whoever watched next) and
+dropped outright on a live server — and is handled only while
+`replay::IsReplaying()`. The policy behind it is pure and lives in
+`replay::ControlDeck` (`rts/Server/ReplayControlDeck.h`): **the first spectator
+to attach drives, and control passes to the longest-attached survivor when the
+driver leaves**, so a cast whose host closes their tab does not freeze for
+everyone else. POV is deliberately outside that rule — it is per-client state
+(`ClientSession::spectatorVisibilityMode/Team`, read by `StateStreamer` at five
+sites and, until this landed, written by nothing at all).
+
+Applying an accepted decision is a three-line translation: pause is `gs->paused`
+(the sim-loop gate already skips `SimFrame` on it, and with the frame frozen the
+feed's cursor pops nothing), speed is `gs->wantedSpeedFactor` — a replay in
+`Mode::Play` paces from `computeTickInterval()` rather than the headless run
+config for exactly this reason — and seek is `Feed().SetSeekTarget()`. Neither
+pause nor speed can fork the re-execution: the state hash folds unit digests and
+the RNG, not pacing. **A backward seek is refused, not served**: seek is "load
+the nearest checkpoint ≤ target and fast-forward", nothing writes checkpoint
+blobs until PLAN-persistence's sim serializer lands, and the record cursor is
+monotonic — so there is no way back, and the refusal says so rather than
+no-op'ing. The server broadcasts `ServerPayload::ReplayState` per client (POV
+and controller are per-client answers) on every landed control and on a 1 s
+wall-clock heartbeat; **a live game never sends one, and that absence is the
+client's entire mode signal** — the playback bar mounts on the first one it
+receives.
+
 ### Def + Model Loading
 ```
 Lobby startup: GameProcessor converts <game>/objects3d/*.s3o → data/games/<id>/models/*.glb

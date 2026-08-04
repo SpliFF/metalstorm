@@ -217,6 +217,14 @@ struct ConsoleResponse;
 struct ConsoleResponseBuilder;
 struct ConsoleResponseT;
 
+struct ReplayControl;
+struct ReplayControlBuilder;
+struct ReplayControlT;
+
+struct ReplayState;
+struct ReplayStateBuilder;
+struct ReplayStateT;
+
 struct ClientMessage;
 struct ClientMessageBuilder;
 struct ClientMessageT;
@@ -807,6 +815,45 @@ inline const char *EnumNameOrderShape(OrderShape e) {
   return EnumNamesOrderShape()[index];
 }
 
+enum ReplayControlAction : int8_t {
+  ReplayControlAction_Pause = 0,
+  ReplayControlAction_Resume = 1,
+  ReplayControlAction_SetSpeed = 2,
+  ReplayControlAction_Seek = 3,
+  ReplayControlAction_SetPovTeam = 4,
+  ReplayControlAction_MIN = ReplayControlAction_Pause,
+  ReplayControlAction_MAX = ReplayControlAction_SetPovTeam
+};
+
+inline const ReplayControlAction (&EnumValuesReplayControlAction())[5] {
+  static const ReplayControlAction values[] = {
+    ReplayControlAction_Pause,
+    ReplayControlAction_Resume,
+    ReplayControlAction_SetSpeed,
+    ReplayControlAction_Seek,
+    ReplayControlAction_SetPovTeam
+  };
+  return values;
+}
+
+inline const char * const *EnumNamesReplayControlAction() {
+  static const char * const names[6] = {
+    "Pause",
+    "Resume",
+    "SetSpeed",
+    "Seek",
+    "SetPovTeam",
+    nullptr
+  };
+  return names;
+}
+
+inline const char *EnumNameReplayControlAction(ReplayControlAction e) {
+  if (::flatbuffers::IsOutRange(e, ReplayControlAction_Pause, ReplayControlAction_SetPovTeam)) return "";
+  const size_t index = static_cast<size_t>(e);
+  return EnumNamesReplayControlAction()[index];
+}
+
 enum ClientPayload : uint8_t {
   ClientPayload_NONE = 0,
   ClientPayload_Handshake = 1,
@@ -853,11 +900,12 @@ enum ClientPayload : uint8_t {
   ClientPayload_GroupDirective = 42,
   ClientPayload_GroupDirectiveRemove = 43,
   ClientPayload_GroupPosture = 44,
+  ClientPayload_ReplayControl = 45,
   ClientPayload_MIN = ClientPayload_NONE,
-  ClientPayload_MAX = ClientPayload_GroupPosture
+  ClientPayload_MAX = ClientPayload_ReplayControl
 };
 
-inline const ClientPayload (&EnumValuesClientPayload())[45] {
+inline const ClientPayload (&EnumValuesClientPayload())[46] {
   static const ClientPayload values[] = {
     ClientPayload_NONE,
     ClientPayload_Handshake,
@@ -903,13 +951,14 @@ inline const ClientPayload (&EnumValuesClientPayload())[45] {
     ClientPayload_OrgGroupDisband,
     ClientPayload_GroupDirective,
     ClientPayload_GroupDirectiveRemove,
-    ClientPayload_GroupPosture
+    ClientPayload_GroupPosture,
+    ClientPayload_ReplayControl
   };
   return values;
 }
 
 inline const char * const *EnumNamesClientPayload() {
-  static const char * const names[46] = {
+  static const char * const names[47] = {
     "NONE",
     "Handshake",
     "AuthRequest",
@@ -955,13 +1004,14 @@ inline const char * const *EnumNamesClientPayload() {
     "GroupDirective",
     "GroupDirectiveRemove",
     "GroupPosture",
+    "ReplayControl",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNameClientPayload(ClientPayload e) {
-  if (::flatbuffers::IsOutRange(e, ClientPayload_NONE, ClientPayload_GroupPosture)) return "";
+  if (::flatbuffers::IsOutRange(e, ClientPayload_NONE, ClientPayload_ReplayControl)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesClientPayload()[index];
 }
@@ -1146,6 +1196,10 @@ template<> struct ClientPayloadTraits<SpringWeb::GroupPosture> {
   static const ClientPayload enum_value = ClientPayload_GroupPosture;
 };
 
+template<> struct ClientPayloadTraits<SpringWeb::ReplayControl> {
+  static const ClientPayload enum_value = ClientPayload_ReplayControl;
+};
+
 template<typename T> struct ClientPayloadUnionTraits {
   static const ClientPayload enum_value = ClientPayload_NONE;
 };
@@ -1324,6 +1378,10 @@ template<> struct ClientPayloadUnionTraits<SpringWeb::GroupDirectiveRemoveT> {
 
 template<> struct ClientPayloadUnionTraits<SpringWeb::GroupPostureT> {
   static const ClientPayload enum_value = ClientPayload_GroupPosture;
+};
+
+template<> struct ClientPayloadUnionTraits<SpringWeb::ReplayControlT> {
+  static const ClientPayload enum_value = ClientPayload_ReplayControl;
 };
 
 struct ClientPayloadUnion {
@@ -1707,6 +1765,14 @@ struct ClientPayloadUnion {
   const SpringWeb::GroupPostureT *AsGroupPosture() const {
     return type == ClientPayload_GroupPosture ?
       reinterpret_cast<const SpringWeb::GroupPostureT *>(value) : nullptr;
+  }
+  SpringWeb::ReplayControlT *AsReplayControl() {
+    return type == ClientPayload_ReplayControl ?
+      reinterpret_cast<SpringWeb::ReplayControlT *>(value) : nullptr;
+  }
+  const SpringWeb::ReplayControlT *AsReplayControl() const {
+    return type == ClientPayload_ReplayControl ?
+      reinterpret_cast<const SpringWeb::ReplayControlT *>(value) : nullptr;
   }
 };
 
@@ -2366,11 +2432,12 @@ enum ServerPayload : uint8_t {
   ServerPayload_RulesParamUpdate = 44,
   ServerPayload_RulesParamKeyDictionary = 45,
   ServerPayload_PlayerRoster = 46,
+  ServerPayload_ReplayState = 47,
   ServerPayload_MIN = ServerPayload_NONE,
-  ServerPayload_MAX = ServerPayload_PlayerRoster
+  ServerPayload_MAX = ServerPayload_ReplayState
 };
 
-inline const ServerPayload (&EnumValuesServerPayload())[47] {
+inline const ServerPayload (&EnumValuesServerPayload())[48] {
   static const ServerPayload values[] = {
     ServerPayload_NONE,
     ServerPayload_AuthResponse,
@@ -2418,13 +2485,14 @@ inline const ServerPayload (&EnumValuesServerPayload())[47] {
     ServerPayload_DirectiveState,
     ServerPayload_RulesParamUpdate,
     ServerPayload_RulesParamKeyDictionary,
-    ServerPayload_PlayerRoster
+    ServerPayload_PlayerRoster,
+    ServerPayload_ReplayState
   };
   return values;
 }
 
 inline const char * const *EnumNamesServerPayload() {
-  static const char * const names[48] = {
+  static const char * const names[49] = {
     "NONE",
     "AuthResponse",
     "EntityCreate",
@@ -2472,13 +2540,14 @@ inline const char * const *EnumNamesServerPayload() {
     "RulesParamUpdate",
     "RulesParamKeyDictionary",
     "PlayerRoster",
+    "ReplayState",
     nullptr
   };
   return names;
 }
 
 inline const char *EnumNameServerPayload(ServerPayload e) {
-  if (::flatbuffers::IsOutRange(e, ServerPayload_NONE, ServerPayload_PlayerRoster)) return "";
+  if (::flatbuffers::IsOutRange(e, ServerPayload_NONE, ServerPayload_ReplayState)) return "";
   const size_t index = static_cast<size_t>(e);
   return EnumNamesServerPayload()[index];
 }
@@ -2671,6 +2740,10 @@ template<> struct ServerPayloadTraits<SpringWeb::PlayerRoster> {
   static const ServerPayload enum_value = ServerPayload_PlayerRoster;
 };
 
+template<> struct ServerPayloadTraits<SpringWeb::ReplayState> {
+  static const ServerPayload enum_value = ServerPayload_ReplayState;
+};
+
 template<typename T> struct ServerPayloadUnionTraits {
   static const ServerPayload enum_value = ServerPayload_NONE;
 };
@@ -2857,6 +2930,10 @@ template<> struct ServerPayloadUnionTraits<SpringWeb::RulesParamKeyDictionaryT> 
 
 template<> struct ServerPayloadUnionTraits<SpringWeb::PlayerRosterT> {
   static const ServerPayload enum_value = ServerPayload_PlayerRoster;
+};
+
+template<> struct ServerPayloadUnionTraits<SpringWeb::ReplayStateT> {
+  static const ServerPayload enum_value = ServerPayload_ReplayState;
 };
 
 struct ServerPayloadUnion {
@@ -3256,6 +3333,14 @@ struct ServerPayloadUnion {
   const SpringWeb::PlayerRosterT *AsPlayerRoster() const {
     return type == ServerPayload_PlayerRoster ?
       reinterpret_cast<const SpringWeb::PlayerRosterT *>(value) : nullptr;
+  }
+  SpringWeb::ReplayStateT *AsReplayState() {
+    return type == ServerPayload_ReplayState ?
+      reinterpret_cast<SpringWeb::ReplayStateT *>(value) : nullptr;
+  }
+  const SpringWeb::ReplayStateT *AsReplayState() const {
+    return type == ServerPayload_ReplayState ?
+      reinterpret_cast<const SpringWeb::ReplayStateT *>(value) : nullptr;
   }
 };
 
@@ -7791,6 +7876,326 @@ inline ::flatbuffers::Offset<ConsoleResponse> CreateConsoleResponseDirect(
 
 ::flatbuffers::Offset<ConsoleResponse> CreateConsoleResponse(::flatbuffers::FlatBufferBuilder &_fbb, const ConsoleResponseT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
 
+struct ReplayControlT : public ::flatbuffers::NativeTable {
+  typedef ReplayControl TableType;
+  SpringWeb::ReplayControlAction action = SpringWeb::ReplayControlAction_Pause;
+  float speed = 1.0f;
+  int32_t frame = 0;
+  int32_t pov_team = -1;
+};
+
+/// Spectator → replay server. Ignored (and logged) anywhere else.
+struct ReplayControl FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef ReplayControlT NativeTableType;
+  typedef ReplayControlBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_ACTION = 4,
+    VT_SPEED = 6,
+    VT_FRAME = 8,
+    VT_POV_TEAM = 10
+  };
+  SpringWeb::ReplayControlAction action() const {
+    return static_cast<SpringWeb::ReplayControlAction>(GetField<int8_t>(VT_ACTION, 0));
+  }
+  float speed() const {
+    return GetField<float>(VT_SPEED, 1.0f);
+  }
+  int32_t frame() const {
+    return GetField<int32_t>(VT_FRAME, 0);
+  }
+  int32_t pov_team() const {
+    return GetField<int32_t>(VT_POV_TEAM, -1);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<int8_t>(verifier, VT_ACTION, 1) &&
+           VerifyField<float>(verifier, VT_SPEED, 4) &&
+           VerifyField<int32_t>(verifier, VT_FRAME, 4) &&
+           VerifyField<int32_t>(verifier, VT_POV_TEAM, 4) &&
+           verifier.EndTable();
+  }
+  ReplayControlT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(ReplayControlT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<ReplayControl> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const ReplayControlT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct ReplayControlBuilder {
+  typedef ReplayControl Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_action(SpringWeb::ReplayControlAction action) {
+    fbb_.AddElement<int8_t>(ReplayControl::VT_ACTION, static_cast<int8_t>(action), 0);
+  }
+  void add_speed(float speed) {
+    fbb_.AddElement<float>(ReplayControl::VT_SPEED, speed, 1.0f);
+  }
+  void add_frame(int32_t frame) {
+    fbb_.AddElement<int32_t>(ReplayControl::VT_FRAME, frame, 0);
+  }
+  void add_pov_team(int32_t pov_team) {
+    fbb_.AddElement<int32_t>(ReplayControl::VT_POV_TEAM, pov_team, -1);
+  }
+  explicit ReplayControlBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<ReplayControl> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<ReplayControl>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<ReplayControl> CreateReplayControl(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    SpringWeb::ReplayControlAction action = SpringWeb::ReplayControlAction_Pause,
+    float speed = 1.0f,
+    int32_t frame = 0,
+    int32_t pov_team = -1) {
+  ReplayControlBuilder builder_(_fbb);
+  builder_.add_pov_team(pov_team);
+  builder_.add_frame(frame);
+  builder_.add_speed(speed);
+  builder_.add_action(action);
+  return builder_.Finish();
+}
+
+::flatbuffers::Offset<ReplayControl> CreateReplayControl(::flatbuffers::FlatBufferBuilder &_fbb, const ReplayControlT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
+struct ReplayStateT : public ::flatbuffers::NativeTable {
+  typedef ReplayState TableType;
+  int32_t start_frame = 0;
+  int32_t end_frame = 0;
+  int32_t current_frame = 0;
+  bool paused = false;
+  float speed = 0.0f;
+  bool seeking = false;
+  int32_t seek_target = 0;
+  int32_t controller_player_num = 0;
+  std::vector<int32_t> checkpoint_frames{};
+  bool truncated = false;
+  std::string game_id{};
+  std::string map_id{};
+  int32_t pov_team = 0;
+};
+
+/// Replay server → every attached spectator, on change and on a slow
+/// heartbeat. This is what a seek bar is drawn from; a live game never
+/// sends it, so a client that never receives one shows no playback UI.
+struct ReplayState FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
+  typedef ReplayStateT NativeTableType;
+  typedef ReplayStateBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_START_FRAME = 4,
+    VT_END_FRAME = 6,
+    VT_CURRENT_FRAME = 8,
+    VT_PAUSED = 10,
+    VT_SPEED = 12,
+    VT_SEEKING = 14,
+    VT_SEEK_TARGET = 16,
+    VT_CONTROLLER_PLAYER_NUM = 18,
+    VT_CHECKPOINT_FRAMES = 20,
+    VT_TRUNCATED = 22,
+    VT_GAME_ID = 24,
+    VT_MAP_ID = 26,
+    VT_POV_TEAM = 28
+  };
+  int32_t start_frame() const {
+    return GetField<int32_t>(VT_START_FRAME, 0);
+  }
+  int32_t end_frame() const {
+    return GetField<int32_t>(VT_END_FRAME, 0);
+  }
+  int32_t current_frame() const {
+    return GetField<int32_t>(VT_CURRENT_FRAME, 0);
+  }
+  bool paused() const {
+    return GetField<uint8_t>(VT_PAUSED, 0) != 0;
+  }
+  float speed() const {
+    return GetField<float>(VT_SPEED, 0.0f);
+  }
+  bool seeking() const {
+    return GetField<uint8_t>(VT_SEEKING, 0) != 0;
+  }
+  int32_t seek_target() const {
+    return GetField<int32_t>(VT_SEEK_TARGET, 0);
+  }
+  /// Player number of the spectator holding the controls, or -1 if
+  /// nobody is attached. Compare against your own AuthResponse
+  /// `player_num` to know whether the buttons are yours.
+  int32_t controller_player_num() const {
+    return GetField<int32_t>(VT_CONTROLLER_PLAYER_NUM, 0);
+  }
+  /// Seek-bar ticks: frames the recording carries a checkpoint at.
+  /// Empty until PLAN-persistence's sim serializer lands, which is also
+  /// why a backward seek is refused rather than served (see
+  /// ReplayControlDeck.h).
+  const ::flatbuffers::Vector<int32_t> *checkpoint_frames() const {
+    return GetPointer<const ::flatbuffers::Vector<int32_t> *>(VT_CHECKPOINT_FRAMES);
+  }
+  bool truncated() const {
+    return GetField<uint8_t>(VT_TRUNCATED, 0) != 0;
+  }
+  const ::flatbuffers::String *game_id() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_GAME_ID);
+  }
+  const ::flatbuffers::String *map_id() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_MAP_ID);
+  }
+  /// This client's own POV: -1 = global view, else the team whose fog
+  /// it is watching. Per-client, unlike everything above it.
+  int32_t pov_team() const {
+    return GetField<int32_t>(VT_POV_TEAM, 0);
+  }
+  bool Verify(::flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<int32_t>(verifier, VT_START_FRAME, 4) &&
+           VerifyField<int32_t>(verifier, VT_END_FRAME, 4) &&
+           VerifyField<int32_t>(verifier, VT_CURRENT_FRAME, 4) &&
+           VerifyField<uint8_t>(verifier, VT_PAUSED, 1) &&
+           VerifyField<float>(verifier, VT_SPEED, 4) &&
+           VerifyField<uint8_t>(verifier, VT_SEEKING, 1) &&
+           VerifyField<int32_t>(verifier, VT_SEEK_TARGET, 4) &&
+           VerifyField<int32_t>(verifier, VT_CONTROLLER_PLAYER_NUM, 4) &&
+           VerifyOffset(verifier, VT_CHECKPOINT_FRAMES) &&
+           verifier.VerifyVector(checkpoint_frames()) &&
+           VerifyField<uint8_t>(verifier, VT_TRUNCATED, 1) &&
+           VerifyOffset(verifier, VT_GAME_ID) &&
+           verifier.VerifyString(game_id()) &&
+           VerifyOffset(verifier, VT_MAP_ID) &&
+           verifier.VerifyString(map_id()) &&
+           VerifyField<int32_t>(verifier, VT_POV_TEAM, 4) &&
+           verifier.EndTable();
+  }
+  ReplayStateT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(ReplayStateT *_o, const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static ::flatbuffers::Offset<ReplayState> Pack(::flatbuffers::FlatBufferBuilder &_fbb, const ReplayStateT* _o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct ReplayStateBuilder {
+  typedef ReplayState Table;
+  ::flatbuffers::FlatBufferBuilder &fbb_;
+  ::flatbuffers::uoffset_t start_;
+  void add_start_frame(int32_t start_frame) {
+    fbb_.AddElement<int32_t>(ReplayState::VT_START_FRAME, start_frame, 0);
+  }
+  void add_end_frame(int32_t end_frame) {
+    fbb_.AddElement<int32_t>(ReplayState::VT_END_FRAME, end_frame, 0);
+  }
+  void add_current_frame(int32_t current_frame) {
+    fbb_.AddElement<int32_t>(ReplayState::VT_CURRENT_FRAME, current_frame, 0);
+  }
+  void add_paused(bool paused) {
+    fbb_.AddElement<uint8_t>(ReplayState::VT_PAUSED, static_cast<uint8_t>(paused), 0);
+  }
+  void add_speed(float speed) {
+    fbb_.AddElement<float>(ReplayState::VT_SPEED, speed, 0.0f);
+  }
+  void add_seeking(bool seeking) {
+    fbb_.AddElement<uint8_t>(ReplayState::VT_SEEKING, static_cast<uint8_t>(seeking), 0);
+  }
+  void add_seek_target(int32_t seek_target) {
+    fbb_.AddElement<int32_t>(ReplayState::VT_SEEK_TARGET, seek_target, 0);
+  }
+  void add_controller_player_num(int32_t controller_player_num) {
+    fbb_.AddElement<int32_t>(ReplayState::VT_CONTROLLER_PLAYER_NUM, controller_player_num, 0);
+  }
+  void add_checkpoint_frames(::flatbuffers::Offset<::flatbuffers::Vector<int32_t>> checkpoint_frames) {
+    fbb_.AddOffset(ReplayState::VT_CHECKPOINT_FRAMES, checkpoint_frames);
+  }
+  void add_truncated(bool truncated) {
+    fbb_.AddElement<uint8_t>(ReplayState::VT_TRUNCATED, static_cast<uint8_t>(truncated), 0);
+  }
+  void add_game_id(::flatbuffers::Offset<::flatbuffers::String> game_id) {
+    fbb_.AddOffset(ReplayState::VT_GAME_ID, game_id);
+  }
+  void add_map_id(::flatbuffers::Offset<::flatbuffers::String> map_id) {
+    fbb_.AddOffset(ReplayState::VT_MAP_ID, map_id);
+  }
+  void add_pov_team(int32_t pov_team) {
+    fbb_.AddElement<int32_t>(ReplayState::VT_POV_TEAM, pov_team, 0);
+  }
+  explicit ReplayStateBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  ::flatbuffers::Offset<ReplayState> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = ::flatbuffers::Offset<ReplayState>(end);
+    return o;
+  }
+};
+
+inline ::flatbuffers::Offset<ReplayState> CreateReplayState(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    int32_t start_frame = 0,
+    int32_t end_frame = 0,
+    int32_t current_frame = 0,
+    bool paused = false,
+    float speed = 0.0f,
+    bool seeking = false,
+    int32_t seek_target = 0,
+    int32_t controller_player_num = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<int32_t>> checkpoint_frames = 0,
+    bool truncated = false,
+    ::flatbuffers::Offset<::flatbuffers::String> game_id = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> map_id = 0,
+    int32_t pov_team = 0) {
+  ReplayStateBuilder builder_(_fbb);
+  builder_.add_pov_team(pov_team);
+  builder_.add_map_id(map_id);
+  builder_.add_game_id(game_id);
+  builder_.add_checkpoint_frames(checkpoint_frames);
+  builder_.add_controller_player_num(controller_player_num);
+  builder_.add_seek_target(seek_target);
+  builder_.add_speed(speed);
+  builder_.add_current_frame(current_frame);
+  builder_.add_end_frame(end_frame);
+  builder_.add_start_frame(start_frame);
+  builder_.add_truncated(truncated);
+  builder_.add_seeking(seeking);
+  builder_.add_paused(paused);
+  return builder_.Finish();
+}
+
+inline ::flatbuffers::Offset<ReplayState> CreateReplayStateDirect(
+    ::flatbuffers::FlatBufferBuilder &_fbb,
+    int32_t start_frame = 0,
+    int32_t end_frame = 0,
+    int32_t current_frame = 0,
+    bool paused = false,
+    float speed = 0.0f,
+    bool seeking = false,
+    int32_t seek_target = 0,
+    int32_t controller_player_num = 0,
+    const std::vector<int32_t> *checkpoint_frames = nullptr,
+    bool truncated = false,
+    const char *game_id = nullptr,
+    const char *map_id = nullptr,
+    int32_t pov_team = 0) {
+  auto checkpoint_frames__ = checkpoint_frames ? _fbb.CreateVector<int32_t>(*checkpoint_frames) : 0;
+  auto game_id__ = game_id ? _fbb.CreateString(game_id) : 0;
+  auto map_id__ = map_id ? _fbb.CreateString(map_id) : 0;
+  return SpringWeb::CreateReplayState(
+      _fbb,
+      start_frame,
+      end_frame,
+      current_frame,
+      paused,
+      speed,
+      seeking,
+      seek_target,
+      controller_player_num,
+      checkpoint_frames__,
+      truncated,
+      game_id__,
+      map_id__,
+      pov_team);
+}
+
+::flatbuffers::Offset<ReplayState> CreateReplayState(::flatbuffers::FlatBufferBuilder &_fbb, const ReplayStateT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
 struct ClientMessageT : public ::flatbuffers::NativeTable {
   typedef ClientMessage TableType;
   SpringWeb::ClientPayloadUnion payload{};
@@ -7941,6 +8346,9 @@ struct ClientMessage FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   }
   const SpringWeb::GroupPosture *payload_as_GroupPosture() const {
     return payload_type() == SpringWeb::ClientPayload_GroupPosture ? static_cast<const SpringWeb::GroupPosture *>(payload()) : nullptr;
+  }
+  const SpringWeb::ReplayControl *payload_as_ReplayControl() const {
+    return payload_type() == SpringWeb::ClientPayload_ReplayControl ? static_cast<const SpringWeb::ReplayControl *>(payload()) : nullptr;
   }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
@@ -8128,6 +8536,10 @@ template<> inline const SpringWeb::GroupDirectiveRemove *ClientMessage::payload_
 
 template<> inline const SpringWeb::GroupPosture *ClientMessage::payload_as<SpringWeb::GroupPosture>() const {
   return payload_as_GroupPosture();
+}
+
+template<> inline const SpringWeb::ReplayControl *ClientMessage::payload_as<SpringWeb::ReplayControl>() const {
+  return payload_as_ReplayControl();
 }
 
 struct ClientMessageBuilder {
@@ -18208,6 +18620,9 @@ struct ServerMessage FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const SpringWeb::PlayerRoster *payload_as_PlayerRoster() const {
     return payload_type() == SpringWeb::ServerPayload_PlayerRoster ? static_cast<const SpringWeb::PlayerRoster *>(payload()) : nullptr;
   }
+  const SpringWeb::ReplayState *payload_as_ReplayState() const {
+    return payload_type() == SpringWeb::ServerPayload_ReplayState ? static_cast<const SpringWeb::ReplayState *>(payload()) : nullptr;
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<uint8_t>(verifier, VT_PAYLOAD_TYPE, 1) &&
@@ -18402,6 +18817,10 @@ template<> inline const SpringWeb::RulesParamKeyDictionary *ServerMessage::paylo
 
 template<> inline const SpringWeb::PlayerRoster *ServerMessage::payload_as<SpringWeb::PlayerRoster>() const {
   return payload_as_PlayerRoster();
+}
+
+template<> inline const SpringWeb::ReplayState *ServerMessage::payload_as<SpringWeb::ReplayState>() const {
+  return payload_as_ReplayState();
 }
 
 struct ServerMessageBuilder {
@@ -20137,6 +20556,103 @@ inline ::flatbuffers::Offset<ConsoleResponse> CreateConsoleResponse(::flatbuffer
       _success,
       _output,
       _level);
+}
+
+inline ReplayControlT *ReplayControl::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<ReplayControlT>(new ReplayControlT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void ReplayControl::UnPackTo(ReplayControlT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = action(); _o->action = _e; }
+  { auto _e = speed(); _o->speed = _e; }
+  { auto _e = frame(); _o->frame = _e; }
+  { auto _e = pov_team(); _o->pov_team = _e; }
+}
+
+inline ::flatbuffers::Offset<ReplayControl> ReplayControl::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const ReplayControlT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return CreateReplayControl(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<ReplayControl> CreateReplayControl(::flatbuffers::FlatBufferBuilder &_fbb, const ReplayControlT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const ReplayControlT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _action = _o->action;
+  auto _speed = _o->speed;
+  auto _frame = _o->frame;
+  auto _pov_team = _o->pov_team;
+  return SpringWeb::CreateReplayControl(
+      _fbb,
+      _action,
+      _speed,
+      _frame,
+      _pov_team);
+}
+
+inline ReplayStateT *ReplayState::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<ReplayStateT>(new ReplayStateT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void ReplayState::UnPackTo(ReplayStateT *_o, const ::flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = start_frame(); _o->start_frame = _e; }
+  { auto _e = end_frame(); _o->end_frame = _e; }
+  { auto _e = current_frame(); _o->current_frame = _e; }
+  { auto _e = paused(); _o->paused = _e; }
+  { auto _e = speed(); _o->speed = _e; }
+  { auto _e = seeking(); _o->seeking = _e; }
+  { auto _e = seek_target(); _o->seek_target = _e; }
+  { auto _e = controller_player_num(); _o->controller_player_num = _e; }
+  { auto _e = checkpoint_frames(); if (_e) { _o->checkpoint_frames.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->checkpoint_frames[_i] = _e->Get(_i); } } else { _o->checkpoint_frames.resize(0); } }
+  { auto _e = truncated(); _o->truncated = _e; }
+  { auto _e = game_id(); if (_e) _o->game_id = _e->str(); }
+  { auto _e = map_id(); if (_e) _o->map_id = _e->str(); }
+  { auto _e = pov_team(); _o->pov_team = _e; }
+}
+
+inline ::flatbuffers::Offset<ReplayState> ReplayState::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const ReplayStateT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  return CreateReplayState(_fbb, _o, _rehasher);
+}
+
+inline ::flatbuffers::Offset<ReplayState> CreateReplayState(::flatbuffers::FlatBufferBuilder &_fbb, const ReplayStateT *_o, const ::flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { ::flatbuffers::FlatBufferBuilder *__fbb; const ReplayStateT* __o; const ::flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _start_frame = _o->start_frame;
+  auto _end_frame = _o->end_frame;
+  auto _current_frame = _o->current_frame;
+  auto _paused = _o->paused;
+  auto _speed = _o->speed;
+  auto _seeking = _o->seeking;
+  auto _seek_target = _o->seek_target;
+  auto _controller_player_num = _o->controller_player_num;
+  auto _checkpoint_frames = _o->checkpoint_frames.size() ? _fbb.CreateVector(_o->checkpoint_frames) : 0;
+  auto _truncated = _o->truncated;
+  auto _game_id = _o->game_id.empty() ? 0 : _fbb.CreateString(_o->game_id);
+  auto _map_id = _o->map_id.empty() ? 0 : _fbb.CreateString(_o->map_id);
+  auto _pov_team = _o->pov_team;
+  return SpringWeb::CreateReplayState(
+      _fbb,
+      _start_frame,
+      _end_frame,
+      _current_frame,
+      _paused,
+      _speed,
+      _seeking,
+      _seek_target,
+      _controller_player_num,
+      _checkpoint_frames,
+      _truncated,
+      _game_id,
+      _map_id,
+      _pov_team);
 }
 
 inline ClientMessageT *ClientMessage::UnPack(const ::flatbuffers::resolver_function_t *_resolver) const {
@@ -24190,6 +24706,10 @@ inline bool VerifyClientPayload(::flatbuffers::Verifier &verifier, const void *o
       auto ptr = reinterpret_cast<const SpringWeb::GroupPosture *>(obj);
       return verifier.VerifyTable(ptr);
     }
+    case ClientPayload_ReplayControl: {
+      auto ptr = reinterpret_cast<const SpringWeb::ReplayControl *>(obj);
+      return verifier.VerifyTable(ptr);
+    }
     default: return true;
   }
 }
@@ -24385,6 +24905,10 @@ inline void *ClientPayloadUnion::UnPack(const void *obj, ClientPayload type, con
       auto ptr = reinterpret_cast<const SpringWeb::GroupPosture *>(obj);
       return ptr->UnPack(resolver);
     }
+    case ClientPayload_ReplayControl: {
+      auto ptr = reinterpret_cast<const SpringWeb::ReplayControl *>(obj);
+      return ptr->UnPack(resolver);
+    }
     default: return nullptr;
   }
 }
@@ -24568,6 +25092,10 @@ inline ::flatbuffers::Offset<void> ClientPayloadUnion::Pack(::flatbuffers::FlatB
       auto ptr = reinterpret_cast<const SpringWeb::GroupPostureT *>(value);
       return CreateGroupPosture(_fbb, ptr, _rehasher).Union();
     }
+    case ClientPayload_ReplayControl: {
+      auto ptr = reinterpret_cast<const SpringWeb::ReplayControlT *>(value);
+      return CreateReplayControl(_fbb, ptr, _rehasher).Union();
+    }
     default: return 0;
   }
 }
@@ -24748,6 +25276,10 @@ inline ClientPayloadUnion::ClientPayloadUnion(const ClientPayloadUnion &u) : typ
     }
     case ClientPayload_GroupPosture: {
       value = new SpringWeb::GroupPostureT(*reinterpret_cast<SpringWeb::GroupPostureT *>(u.value));
+      break;
+    }
+    case ClientPayload_ReplayControl: {
+      value = new SpringWeb::ReplayControlT(*reinterpret_cast<SpringWeb::ReplayControlT *>(u.value));
       break;
     }
     default:
@@ -24977,6 +25509,11 @@ inline void ClientPayloadUnion::Reset() {
       delete ptr;
       break;
     }
+    case ClientPayload_ReplayControl: {
+      auto ptr = reinterpret_cast<SpringWeb::ReplayControlT *>(value);
+      delete ptr;
+      break;
+    }
     default: break;
   }
   value = nullptr;
@@ -25170,6 +25707,10 @@ inline bool VerifyServerPayload(::flatbuffers::Verifier &verifier, const void *o
     }
     case ServerPayload_PlayerRoster: {
       auto ptr = reinterpret_cast<const SpringWeb::PlayerRoster *>(obj);
+      return verifier.VerifyTable(ptr);
+    }
+    case ServerPayload_ReplayState: {
+      auto ptr = reinterpret_cast<const SpringWeb::ReplayState *>(obj);
       return verifier.VerifyTable(ptr);
     }
     default: return true;
@@ -25375,6 +25916,10 @@ inline void *ServerPayloadUnion::UnPack(const void *obj, ServerPayload type, con
       auto ptr = reinterpret_cast<const SpringWeb::PlayerRoster *>(obj);
       return ptr->UnPack(resolver);
     }
+    case ServerPayload_ReplayState: {
+      auto ptr = reinterpret_cast<const SpringWeb::ReplayState *>(obj);
+      return ptr->UnPack(resolver);
+    }
     default: return nullptr;
   }
 }
@@ -25566,6 +26111,10 @@ inline ::flatbuffers::Offset<void> ServerPayloadUnion::Pack(::flatbuffers::FlatB
       auto ptr = reinterpret_cast<const SpringWeb::PlayerRosterT *>(value);
       return CreatePlayerRoster(_fbb, ptr, _rehasher).Union();
     }
+    case ServerPayload_ReplayState: {
+      auto ptr = reinterpret_cast<const SpringWeb::ReplayStateT *>(value);
+      return CreateReplayState(_fbb, ptr, _rehasher).Union();
+    }
     default: return 0;
   }
 }
@@ -25754,6 +26303,10 @@ inline ServerPayloadUnion::ServerPayloadUnion(const ServerPayloadUnion &u) : typ
     }
     case ServerPayload_PlayerRoster: {
       value = new SpringWeb::PlayerRosterT(*reinterpret_cast<SpringWeb::PlayerRosterT *>(u.value));
+      break;
+    }
+    case ServerPayload_ReplayState: {
+      value = new SpringWeb::ReplayStateT(*reinterpret_cast<SpringWeb::ReplayStateT *>(u.value));
       break;
     }
     default:
@@ -25990,6 +26543,11 @@ inline void ServerPayloadUnion::Reset() {
     }
     case ServerPayload_PlayerRoster: {
       auto ptr = reinterpret_cast<SpringWeb::PlayerRosterT *>(value);
+      delete ptr;
+      break;
+    }
+    case ServerPayload_ReplayState: {
+      auto ptr = reinterpret_cast<SpringWeb::ReplayStateT *>(value);
       delete ptr;
       break;
     }

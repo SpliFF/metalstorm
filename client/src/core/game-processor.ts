@@ -213,6 +213,10 @@ let gpDirectiveCapture: DirectiveShapeCapture | null = null;
 /// — same visibility rule as standing orders). Cached so gp:selectOrgGroup
 /// can resolve a group id to its member roster without a round trip.
 let gpLastOrgGroups: OrgGroupInfoMsg[] = [];
+/// True once this connection has received a ReplayState — i.e. it is talking
+/// to a replay server (PLAN-replay task 4b: a live game never sends one).
+/// Gates forwarding 403s to the playback bar.
+let gpSawReplayState = false;
 let gpLastDirectives: DirectiveInfoMsg[] = [];
 /// G3a: per-unit command descriptions (UnitCmdDescsUpdate, ~1 Hz, selection-
 /// scoped). Cached so the buildable-tile set can be recomputed on selection
@@ -1054,8 +1058,28 @@ function gpConnect(msg: GpInitToWorker): void {
             }
             postToMain({ type: 'gp:playerRoster', players });
         },
+        // Replay playback state (PLAN-replay task 4b). Forwarded verbatim to
+        // main, where the bar lives — it is DOM, and it has to survive a
+        // worker recycle. A live game never sends this, so a client that
+        // never receives one simply never shows a bar.
+        onReplayState: (state) => {
+            gpSawReplayState = true;
+            postToMain({ type: 'gp:replayState', state });
+        },
         onAuthFailed: (m) => { gpAuthFailed = m; postLog(4, `[gp] auth failed: ${m}`); },
-        onServerError: (code, m) => postLog(4, `[gp] server error ${code}: ${m}`),
+        onServerError: (code, m) => {
+            postLog(4, `[gp] server error ${code}: ${m}`);
+            // PLAN-replay task 4b: a refused playback control comes back as a
+            // 403 with the reason. Console-only was not good enough — a
+            // watcher who clicks "seek backwards" and sees nothing happen has
+            // been given a dead button, which is precisely what the reason
+            // string exists to prevent. Only forwarded once this connection is
+            // known to be a replay (it has sent a ReplayState), so a live
+            // game's 403s do not raise a playback toast.
+            if (code === 403 && gpSawReplayState) {
+                postToMain({ type: 'gp:replayRefused', message: m });
+            }
+        },
         onEntityState: (snapshot, isDelta) => {
             gpFirstStateReceived = true;
             gpCtx.entityRenderer?.update(snapshot, isDelta);
@@ -3831,6 +3855,14 @@ export function gpHandlePlayerCommand(commandId: number, unitIds: number[], para
 /// same routing as gpHandleSelectOrgGroup above.
 export function gpHandleSelectionState(unitIds: number[]): void {
     gpCtx.selection?.setSelectionExternal(unitIds);
+}
+
+/// Replay playback control from the main-thread bar (PLAN-replay task 4b).
+/// Straight to the Connection: there is no worker-side state to keep in step,
+/// because the authoritative answer is the ReplayState broadcast that follows.
+export function gpHandleReplayControl(
+    action: number, speed?: number, frame?: number, povTeam?: number): void {
+    gpCtx.connection?.sendReplayControl(action, { speed, frame, povTeam });
 }
 
 /// Org panel row click → world selection (PLAN-macro-ui.md §1: selecting a

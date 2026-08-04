@@ -54,8 +54,15 @@ TEST_CASE("the classifier's tag mirror matches the generated enum") {
     CHECK(ClassifyClientPayload(SpringWeb::ClientPayload_Ping) == WireClass::Unsynced);
     CHECK(ClassifyClientPayload(SpringWeb::ClientPayload_ChatSend) == WireClass::Ignored);
     CHECK(ClassifyClientPayload(SpringWeb::ClientPayload_LogIngest) == WireClass::Ignored);
+    // Replay playback controls (task 4b). `Ignored` is a load-bearing
+    // classification, not a leftover: journalling a control that changes which
+    // frame the FEED is at would put "pause" into the cause stream and replay
+    // it back at the next watcher. If someone ever moves this to Synced or
+    // Setup they have to delete this line to do it.
+    CHECK(ClassifyClientPayload(SpringWeb::ClientPayload_ReplayControl) == WireClass::Ignored);
+    CHECK_FALSE(ShouldRecordClientPayload(SpringWeb::ClientPayload_ReplayControl));
     // The last tag today. If this fails the union grew — extend the mirror.
-    CHECK(SpringWeb::ClientPayload_MAX == SpringWeb::ClientPayload_GroupPosture);
+    CHECK(SpringWeb::ClientPayload_MAX == SpringWeb::ClientPayload_ReplayControl);
     CHECK_FALSE(IsKnownClientPayload(
         static_cast<uint8_t>(SpringWeb::ClientPayload_MAX) + 1));
 }

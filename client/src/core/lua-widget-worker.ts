@@ -28,7 +28,7 @@ import {
     gpHandleGroupPosture, gpHandleGroupDirectiveUpdate, gpHandleGroupDirectiveRemove,
     gpHandleSelectOrgGroup, gpHandleArmDirectiveShape, gpHandleCancelDirectiveShape,
     gpHandleStandingOrderCreate, gpHandleLuaRulesMsg, gpHandleConsoleCommand,
-    gpHandlePlayerCommand, gpHandleSelectionState,
+    gpHandlePlayerCommand, gpHandleSelectionState, gpHandleReplayControl,
 } from './game-processor.js';
 // PLAN-rml.md: DOM events + viewport changes route straight into the RmlUi
 // bridge (no game-processor state needed).
@@ -255,6 +255,11 @@ self.onmessage = async (e: MessageEvent<WorkerInbound>) => {
             break;
         case 'gp:selectionState':
             gpHandleSelectionState(msg.unitIds as number[]);
+            break;
+        case 'gp:replayControl':
+            gpHandleReplayControl(msg.action as number, msg.speed as number | undefined,
+                                  msg.frame as number | undefined,
+                                  msg.povTeam as number | undefined);
             break;
 
         case 'gp:armDirectiveShape':

@@ -1,5 +1,7 @@
 #include "ReplayPlayer.h"
 
+#include "ReplayControlDeck.h"
+
 #include <algorithm>
 
 namespace replay {
@@ -154,5 +156,10 @@ Mode CurrentMode() { return g_mode; }
 void SetCurrentMode(Mode m) { g_mode = m; }
 
 int AllocSpectatorPlayerNum() { return g_nextSpectatorPlayerNum++; }
+
+ControlDeck& Controls() {
+    static ControlDeck instance;
+    return instance;
+}
 
 }  // namespace replay

@@ -30,6 +30,7 @@ import { PlayerRoster, PlayerRosterT } from '../spring-web/player-roster.js';
 import { PlayerTeamEventBatch, PlayerTeamEventBatchT } from '../spring-web/player-team-event-batch.js';
 import { Pong, PongT } from '../spring-web/pong.js';
 import { ReconnectResponse, ReconnectResponseT } from '../spring-web/reconnect-response.js';
+import { ReplayState, ReplayStateT } from '../spring-web/replay-state.js';
 import { ResourceUpdate, ResourceUpdateT } from '../spring-web/resource-update.js';
 import { RoomListUpdate, RoomListUpdateT } from '../spring-web/room-list-update.js';
 import { RoomPlayerJoined, RoomPlayerJoinedT } from '../spring-web/room-player-joined.js';
@@ -130,7 +131,7 @@ unpackTo(_o: ServerMessageT): void {
 export class ServerMessageT implements flatbuffers.IGeneratedObject {
 constructor(
   public payloadType: ServerPayload = ServerPayload.NONE,
-  public payload: AIListUpdateT|AuthResponseT|ChatReceiveT|ConsoleResponseT|DirectiveStateT|EntityCreateT|EntityDestroyT|EntitySensorUpdateT|FeatureLifecycleBatchT|GameEventBatchT|GameInfoT|GameListUpdateT|GameModOptionsT|GameRestartingT|GameStartedT|LogBatchT|LuaUIMsgRelayT|MapDataT|MapListUpdateT|OrgGroupStateT|PathResponseT|PlayerLeftT|PlayerRosterT|PlayerTeamEventBatchT|PongT|ReconnectResponseT|ResourceUpdateT|RoomListUpdateT|RoomPlayerJoinedT|RoomPlayerLeftT|RoomStateUpdateT|RulesParamKeyDictionaryT|RulesParamUpdateT|SendToUnsyncedEventT|ServerErrorT|StandingOrderStateT|TeamStartInfoT|TeamStatsHistoryBatchT|UnitArmoredUpdateT|UnitCmdDescsUpdateT|UnitCommandBatchT|UnitCommandQueuesUpdateT|UnitLifecycleBatchT|UnitSelfDUpdateT|UnitStockpileUpdateT|UnitTransportUpdateT|null = null
+  public payload: AIListUpdateT|AuthResponseT|ChatReceiveT|ConsoleResponseT|DirectiveStateT|EntityCreateT|EntityDestroyT|EntitySensorUpdateT|FeatureLifecycleBatchT|GameEventBatchT|GameInfoT|GameListUpdateT|GameModOptionsT|GameRestartingT|GameStartedT|LogBatchT|LuaUIMsgRelayT|MapDataT|MapListUpdateT|OrgGroupStateT|PathResponseT|PlayerLeftT|PlayerRosterT|PlayerTeamEventBatchT|PongT|ReconnectResponseT|ReplayStateT|ResourceUpdateT|RoomListUpdateT|RoomPlayerJoinedT|RoomPlayerLeftT|RoomStateUpdateT|RulesParamKeyDictionaryT|RulesParamUpdateT|SendToUnsyncedEventT|ServerErrorT|StandingOrderStateT|TeamStartInfoT|TeamStatsHistoryBatchT|UnitArmoredUpdateT|UnitCmdDescsUpdateT|UnitCommandBatchT|UnitCommandQueuesUpdateT|UnitLifecycleBatchT|UnitSelfDUpdateT|UnitStockpileUpdateT|UnitTransportUpdateT|null = null
 ){}
 
 

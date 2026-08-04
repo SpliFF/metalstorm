@@ -38,6 +38,8 @@
 #include "Server/SyncedInputJournal.h"
 #include "Server/ReplayFile.h"
 #include "Server/ReplayPlayer.h"
+#include "Server/ReplayControlDeck.h"
+#include "Server/ReplayStateBroadcast.h"
 #include "Server/AI/AIRuntimePool.h"
 #include "Server/AI/AIDiscovery.h"
 #include "Server/PerfMetrics.h"
@@ -1732,6 +1734,10 @@ int main(int argc, char* argv[])
     const auto serverStartTime = std::chrono::steady_clock::now();
     auto lastClientTime = serverStartTime;   // last instant clientCount > 0 (or launch)
     auto lastStatusWrite = serverStartTime;
+    /// Playback-bar heartbeat (task 4b). Wall-clock, not frame-based, on
+    /// purpose: a PAUSED replay advances no frames at all, and the bar still
+    /// has to learn that the controller changed or that a seek finished.
+    auto lastReplayStateAt = serverStartTime;
     // Wall clock of the first tick that observed a declared result. Stamped
     // from the loop rather than read off the sim frame because the observation
     // window is a wall-clock promise to the humans looking at the overlay, and
@@ -1835,10 +1841,18 @@ int main(int argc, char* argv[])
             const bool ff = replay::Feed().FastForwarding(sim.GetFrameNum());
             if (ff != rtcServer.OutboundSuppressed()) {
                 rtcServer.SetOutboundSuppressed(ff);
-                if (!ff)
+                if (!ff) {
                     SLOG(SPRING_LOG_NOTICE,
                         "replay: seek complete at frame %d — resuming streaming",
                         sim.GetFrameNum());
+                    // Task 4b: the bar has been showing "seeking" since the
+                    // control landed, and the frames it would have learned the
+                    // truth from were the ones the suppression muted. Clear
+                    // the flag and tell every watcher, on the tick streaming
+                    // comes back rather than on the next heartbeat.
+                    replay::Controls().SeekFinished();
+                    Protocol::BroadcastReplayState(ctx);
+                }
             }
         }
         const bool headlessUncapped =
@@ -1849,7 +1863,16 @@ int main(int argc, char* argv[])
             // `speed` exec verb) apply immediately. A headless realtime/xN run
             // paces from its run config instead — there is no client to send
             // speed verbs.
-            tickInterval = headlessCfg.enabled
+            //
+            // A REPLAY in Play mode is the exception to that last sentence and
+            // takes computeTickInterval() too (task 4b). It is headless-enabled
+            // — that is how it inherits the stop conditions — but it very much
+            // does have a client sending speed verbs, and pacing it from the
+            // run config instead would have made the playback-speed control a
+            // dead button. Verify mode keeps the config pacing: it is an
+            // uncapped batch job with no clients at all.
+            tickInterval =
+                (headlessCfg.enabled && replay::CurrentMode() != replay::Mode::Play)
                 ? std::chrono::microseconds(headless::TickIntervalMicros(
                       headlessCfg.tickMode, headlessCfg.tickMultiple, GAME_SPEED))
                 : computeTickInterval();
@@ -2064,8 +2087,29 @@ int main(int argc, char* argv[])
                     clientPlayerNum.erase(pIt);
                 }
 
+                // A replay watcher leaving (task 4b). Two things follow from
+                // mechanism (3) of §7.12 — the spectator is not in
+                // `playerHandler` and has no `clientPlayerNum` entry — and
+                // both are load-bearing: the PlayerRemoved block above is
+                // skipped entirely, so nothing synced fires (T4a-3's implicit
+                // invariant, now with a comment at the site that depends on
+                // it), and the controls have to be handed on HERE, because
+                // there is no roster change to notice it anywhere else.
+                const int replayWatcher = session->replaySpectatorPlayerNum;
+                if (replayWatcher >= 0) {
+                    replay::Controls().Detach(replayWatcher);
+                    SLOG(SPRING_LOG_NOTICE,
+                        "replay: spectator playerNum %d detached (%zu still "
+                        "watching, controller is now %d)",
+                        replayWatcher, replay::Controls().WatcherCount(),
+                        replay::Controls().Controller());
+                }
+
                 handshakedClients.erase(dcId);
                 sessions.RemoveSession(dcId);
+                // After RemoveSession, so the departing watcher is not one of
+                // the recipients and the successor learns it is driving.
+                if (replayWatcher >= 0) Protocol::BroadcastReplayState(ctx);
 
                 // The roster changed: the leaver's entry is now inactive.
                 // Broadcast after RemoveSession/erase so the snapshot reflects
@@ -2164,6 +2208,21 @@ int main(int argc, char* argv[])
         // the exact prior source order; see StateStreamer::Tick.
         syncedinput::Journal().SetPhase(syncedinput::TickPhase::Stream);
         streamer.Tick(sim.GetFrameNum());
+
+        // Playback-bar heartbeat (task 4b). Every control that lands already
+        // broadcasts; this is the self-heal for a bar that missed one, and the
+        // only thing that moves the frame readout while nothing else is
+        // happening. Suppressed during a seek's fast-forward — the transport
+        // is muted there anyway, and the bar should not animate through frames
+        // the watcher is not being shown.
+        if (replay::IsReplaying() &&
+            !replay::Feed().FastForwarding(sim.GetFrameNum())) {
+            const auto wallNow = std::chrono::steady_clock::now();
+            if (wallNow - lastReplayStateAt >= std::chrono::seconds(1)) {
+                lastReplayStateAt = wallNow;
+                Protocol::BroadcastReplayState(ctx);
+            }
+        }
 
         const int entityCount = static_cast<int>(unitHandler.GetActiveUnits().size());
         perfMetrics.SetFrame(sim.GetFrameNum());

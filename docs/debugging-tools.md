@@ -520,6 +520,41 @@ behaviours differ from a live server, both deliberate and both logged:
 - **`/api/exec` is refused**, with a reply rather than silence — injecting Lua into a
   re-execution would fork it.
 
+A spectator is admitted as `role=spectator`, `team=-1` and a player number from a
+reserved range (200+), and is **not** registered in the sim's player list at all — so
+it never appears in `Spring.GetPlayerList()` and cannot mint synced rules params the
+recording never had. The trade is stated rather than hidden: with no roster row, the
+`LuaUIMsg` relay drops a replay spectator's chat.
+
+#### Playback controls
+
+A spectator gets a playback bar in the browser: play/pause, a speed cycle
+(0.5/1/2/4/8×), a click-to-seek track, and a global ⇄ team POV toggle. It rides
+`ClientPayload::ReplayControl`, a verb classified `Ignored` — never journaled, and
+dropped by a live server, which is why the bar only ever appears on a replay (the
+server's `ReplayState` message is the mode signal; a live game never sends one).
+
+Two refusals are expected and both come back with a reason the bar shows:
+
+- **Backward seek.** Seek is "load the nearest checkpoint ≤ target, then fast-forward",
+  and nothing writes checkpoint blobs yet (PLAN-persistence's sim serializer owns that),
+  so the record cursor cannot be rewound. Forward seek works and is frame-exact; it
+  fast-forwards uncapped with the wire muted, so the watcher does not see the skipped
+  frames.
+- **Not the controller.** With several spectators on one replay ("casting"), the first
+  to attach drives; control passes to the longest-attached survivor when the driver
+  leaves. POV is exempt — it is a per-client view choice, so every watcher sets their
+  own.
+
+Server-side, each landed control logs a line:
+
+```
+replay: spectator playerNum 200 attached to the playback controls (1 watching, controller is 200)
+replay: playerNum 200 set playback paused=0 speed=2.00 seek=5217 (frame 4299)
+replay: seek complete at frame 5217 — resuming streaming
+replay: refused a playback control from playerNum 201: another spectator is driving this replay (player 200)
+```
+
 ### Verifying (`--verify`)
 
 ```bash
