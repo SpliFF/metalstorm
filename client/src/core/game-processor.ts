@@ -77,6 +77,7 @@ import { fetchAndIngestDefs } from './defs-fetch.js';
 import { PresentationClock } from './presentation-clock.js';
 import { EventScheduler, type ScheduledKind } from './event-scheduler.js';
 import { PendingActionRegistry } from './pending-actions.js';
+import { MotionLeanRegistry } from './motion-lean.js';
 import { nextCosmeticProjectileId } from './cosmetic-flight.js';
 // GW4-c5: weapon-FX / projectile / decal / build render modules fold into the
 // worker (audited worker-safe — no DOM/audio; the `window.__*` dev hooks they
@@ -257,6 +258,14 @@ let gpPendingActions: PendingActionRegistry | null = null;
 /// nothing for a config flag to protect — the control arm exists to measure
 /// against, not to fall back to.
 let gpOptimisticInput = true;
+/// PLAN-latency L4.3 — the bounded positional lean. Separate registry from
+/// `gpPendingActions` on purpose: the overlay's lifecycle is "until the server
+/// confirms", the lean's is "until the server's own motion catches up", and
+/// they are neither the same clock nor the same evidence.
+let gpMotionLean: MotionLeanRegistry | null = null;
+/// A/B switch for the L4.3 measurement (gp:test 'setPositionalLean'), the same
+/// shape as `gpOptimisticInput`: off restores the pre-L4.3 body pose exactly.
+let gpPositionalLean = true;
 /// PLAN-latency L4.2 measurement counters for the order-ack bark. `attempts`
 /// counts player commands the sink acked; `played` counts the ones whose def
 /// actually carried an `ok` sound. The gap between them is the real coverage
@@ -1731,7 +1740,13 @@ function gpConnect(msg: GpInitToWorker): void {
     // form it went (post-CommandNotify, so widget rewrites and widget-issued
     // orders are covered — neither passes through a CommandBuffer).
     conn.setCommandSink((commands, source) => {
-        for (const c of commands) gpPendingActions?.register(c);
+        for (const c of commands) {
+            gpPendingActions?.register(c);
+            // L4.3: the same sink drives the body lean. Two registries, one
+            // subscription — a command that reaches the overlay always reaches
+            // the lean, so they can never disagree about what was ordered.
+            if (gpPositionalLean) gpMotionLean?.onCommandSent(c);
+        }
         // Draw it now. This is the whole point of the phase: the artifact
         // appears on the click, not on the ack and not on the next snapshot.
         const sel = gpCtx.selection?.selection ?? [];
@@ -2163,9 +2178,19 @@ export function gpInit(msg: GpInitToWorker): void {
     gpPendingActions = new PendingActionRegistry({
         getRttMs: () => gpCtx.connection?.serverClock.getRtt() ?? 0,
     });
+    gpMotionLean = new MotionLeanRegistry({
+        getRttMs: () => gpCtx.connection?.serverClock.getRtt() ?? 0,
+        warn: (msg) => postLog(3, msg),
+    });
 
     const entityRenderer = new EntityRenderer(scene);
     entityRenderer.setPresentationClock(gpPresentationClock);
+    // PLAN-latency L4.3: the body starts moving on the click, by a bounded
+    // few elmos, and gives the lead back one-for-one as the server's own
+    // motion arrives. Applied downstream of the L1 reveal gate, so an
+    // un-revealed entity can never be leaned.
+    entityRenderer.setLeanProvider((id, x, z, heading) =>
+        gpPositionalLean ? (gpMotionLean?.offsetFor(id, x, z, heading) ?? null) : null);
     // PLAN-latency L1 (LOS reveal): a unit entering LOS reaches us ~D frames
     // before the sim frame it became visible on. Put the reveal on the
     // presentation timeline so it appears on that frame rather than early,
@@ -2439,6 +2464,10 @@ export function gpInit(msg: GpInitToWorker): void {
         gpAimController?.tick(performance.now());
         gpMark(0);  // camera
 
+        // PLAN-latency L4.3: roll the lean's per-frame memo over and expire
+        // leans whose hold + decay has run out. Must run before the entity
+        // pass, which is what queries it (body and selection ring both).
+        gpMotionLean?.beginFrame();
         // entityRenderer.tick() advances the presentation clock (L0) and
         // interpolates every unit to the presentation cursor before render.
         gpCtx.entityRenderer?.tick();
@@ -3379,6 +3408,8 @@ export function gpShutdown(): void {
     gpLastCommandQueues = [];
     gpPendingActions?.clear();
     gpPendingActions = null;
+    gpMotionLean?.clear();
+    gpMotionLean = null;
     gpShiftHeld = false;
     gpTrackingCamera = false;
     gpCtx.connection?.setCommandSink(null);
@@ -3535,6 +3566,38 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
         case 'setOptimisticInput':
             gpOptimisticInput = args[0] !== false;
             return gpOptimisticInput;
+        // — bounded positional lean (PLAN-latency L4.3). `leanStats` is the
+        //   correction-budget alarm's readout: `maxOffsetElmos` must stay at
+        //   or under `maxLeanElmos` and `boundExceededTotal` must be 0, while
+        //   `decayedTotal` counts the leans the server never justified (the
+        //   ones a player could see walked back). `setPositionalLean(false)`
+        //   is the A/B control arm — same binary, body pose exactly pre-L4.3. —
+        case 'leanStats':
+            return gpMotionLean?.stats() ?? null;
+        case 'leanReset':
+            gpMotionLean?.resetStats();
+            return null;
+        case 'setPositionalLean':
+            gpPositionalLean = args[0] !== false;
+            if (!gpPositionalLean) gpMotionLean?.clear();
+            return gpPositionalLean;
+        // Probe for the L4.3 measurement: the *drawn* position of a unit,
+        // lean included, against `getEntityPosition` which reads through it.
+        // The gap between the two IS the lean, so one call measures both the
+        // bound and the hand-back.
+        case 'leanOffset': {
+            // Reads through the same per-frame memo the render pass filled, so
+            // for a drawn unit this is the exact offset on screen rather than
+            // a re-evaluation at a different instant.
+            const p = gpCtx.entityRenderer?.getEntityPose(num(0));
+            if (!p) return null;
+            const o = gpMotionLean?.offsetFor(num(0), p.x, p.z, p.heading) ?? null;
+            return {
+                dx: o?.dx ?? 0, dz: o?.dz ?? 0, dHeading: o?.dHeading ?? 0,
+                elmos: o ? Math.hypot(o.dx, o.dz) : 0,
+                authoritativeX: p.x, authoritativeZ: p.z,
+            };
+        }
         // Probes for that measurement: `overlayOrders` counts the orders in
         // the view handed to the overlay renderers for one unit;
         // `markerCount` counts the marker meshes actually in the scene.
