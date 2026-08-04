@@ -132,6 +132,30 @@ is a screenshot. Combined with the trap above, that is a good way to conclude
 something false about a page. Dismiss the dialog (`handle_dialog`), or read the
 other client, before drawing conclusions.
 
+**⚠️ The camera silently drifts under CDP — anything that needs a fixed view
+must re-verify it.** A CDP-driven session hands the worker `RTSCamera` held keys
+and/or a pointer parked at the canvas corner, and its pan loop
+(`client/src/core/rts-camera.ts:405-434`) then walks the view across the map
+over the next few minutes **with no event, no log line and no visual glitch**.
+`setCameraPose` itself is exact, so a check taken right after setting always
+passes and proves nothing. PLAN-perf **M6** lost five 30 s perf windows to this
+and the numbers looked like a perfectly ordinary warm-up curve (38.0 → 43.6 →
+39.0 → 43.9 → 43.5 ms p95) while the camera travelled from (8192, 620, 7480) to
+(6583, 398, 951). Before pinning:
+
+```js
+const cv = document.querySelector('canvas');
+cv.dispatchEvent(new PointerEvent('pointerleave',
+  {clientX: 640, clientY: 400, bubbles: true, pointerId: 1, pointerType: 'mouse'}));
+window.dispatchEvent(new Event('blur'));   // RTSCamera.blur(): keys + drag + mouseInCanvas
+await window.test.deps.workerCall('setCameraPose', [pose, 0]);
+```
+
+Then re-read `await window.test.cameraPose()` **at the end** of every
+measurement / comparison window and discard the window if it moved. A synthetic
+pointer re-centre alone does **not** fix it — the held keys are the dominant
+term. This bites screenshot A/Bs exactly as hard as it bites perf captures.
+
 **Game choice for UI testing: use `zk`, not `papertanks`.** PaperTanks ships no
 configured LuaUI/minimap/sounds, so UI/HUD tests against it prove nothing —
 widgets simply don't exist there. ZK (and BAR) have full HUDs.
