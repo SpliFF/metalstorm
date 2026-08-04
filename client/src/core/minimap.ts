@@ -200,6 +200,10 @@ export class Minimap {
             cursor: crosshair; display: block;
         `;
         config.parentElement.appendChild(this.canvas);
+        // Ownership starts 'default', and setOwnership early-returns on a
+        // no-op transition, so the shell has to be revealed here — see
+        // setDefaultShellVisible for why hud.html ships it hidden.
+        this.setDefaultShellVisible(true);
 
         this.engine = new Engine(this.canvas, false, { preserveDrawingBuffer: false });
         this.scene = new Scene(this.engine);
@@ -311,6 +315,11 @@ export class Minimap {
     setOwnership(mode: 'default' | 'widget'): void {
         if (this.ownership === mode) return;
         this.ownership = mode;
+        // The sidebar shell (#hud-minimap: border, Detach button) belongs to
+        // default ownership only. Under widget ownership the canvas is
+        // reparented onto document.body, so leaving the shell up would draw an
+        // empty bordered box with a Detach button next to the real minimap.
+        this.setDefaultShellVisible(mode === 'default');
         if (mode === 'widget') {
             // Strip the sidebar styling (border, rounded corners, block
             // layout) — the chili frame supplies its own chrome.
@@ -330,6 +339,29 @@ export class Minimap {
             this.defaultParent.appendChild(this.canvas);
         }
         this.broadcastState();
+    }
+
+    /**
+     * Show or hide the in-page minimap shell (`#hud-minimap` — the bordered
+     * panel plus its Detach button that `#minimap-container` lives inside).
+     *
+     * hud.html ships the shell `display:none` with the note "hidden by default
+     * since chili widgets render their own HUD on the LuaUI overlay above".
+     * That was true of ZK and BAR, whose LuaUI drew a minimap and claimed this
+     * one via setGeometry. Both are archived, and **Metalstorm ships no LuaUI
+     * at all** — so nothing ever claimed the minimap and nothing ever drew one:
+     * a Metalstorm player had no minimap, in a 16,384-elmo-wide map, with their
+     * army 6 km from where the camera starts. The client's own minimap was
+     * built, fed and rendering correctly the whole time behind a `display:none`
+     * inherited from a game that no longer exists.
+     *
+     * So the shell now follows ownership: visible under 'default', hidden the
+     * moment a widget claims the canvas. A game that does ship a chili minimap
+     * gets exactly the old behaviour, one setGeometry call later.
+     */
+    private setDefaultShellVisible(visible: boolean): void {
+        const shell = this.defaultParent.closest('#hud-minimap') as HTMLElement | null;
+        if (shell) shell.style.display = visible ? 'block' : 'none';
     }
 
     /** Publish the current geometry + ownership on the
@@ -946,6 +978,10 @@ export class Minimap {
         // direct `window.close()` path as a backup; popups that
         // were opened by this same window are allowed to be closed
         // by it without requiring user interaction.
+        // Put the shell back the way hud.html ships it, so a disposed minimap
+        // doesn't leave an empty bordered box with a Detach button on the HUD
+        // between games (main.ts disposes and rebuilds one per session).
+        this.setDefaultShellVisible(false);
         this.channel?.postMessage({ type: 'gameEnded' });
         if (this.detachedWindow && !this.detachedWindow.closed) {
             try { this.detachedWindow.close(); } catch { /* cross-origin or gone */ }

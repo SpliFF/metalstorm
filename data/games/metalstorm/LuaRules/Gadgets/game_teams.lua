@@ -369,7 +369,13 @@ end
 
 local function publishScoreboard()
     for _, playerID in ipairs(Spring.GetPlayerList()) do
-        local p = 'score_' .. playerID .. '_'
+        -- Integer-normalised key — the SAME AI3 bugfix publishAIProfiles above
+        -- documents, and this site did not get it. Spring.GetPlayerList() hands
+        -- back playerIDs as Lua-5.4 FLOATS, so the un-floored concat published
+        -- 'score_1.0_earned' while ui/lib/scoreboard.js reads
+        -- `score_${playerId}_earned` off an integer playerNum — every row read
+        -- zero, for every player, in every match.
+        local p = 'score_' .. math.floor(playerID) .. '_'
         Spring.SetGameRulesParam(p .. 'earned', earned[playerID] or 0)
         Spring.SetGameRulesParam(p .. 'spent', spent[playerID] or 0)
         Spring.SetGameRulesParam(p .. 'objectives', objectivesDone[playerID] or 0)
