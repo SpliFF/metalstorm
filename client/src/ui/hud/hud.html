@@ -15,7 +15,15 @@
 </div>
 <div id="hud-minimap" class="hud-panel" style="display:none">
     <div id="minimap-container"></div>
-    <button id="detach-minimap-btn">Detach ↗</button>
+    <!-- "Pop out", NOT "Detach": this opens the minimap in a second browser
+         window (Minimap.detach → window.open). "Detach" is the platform's word
+         for parking a game session (detachToLobby / gp:detach), and while this
+         button read "Detach ↗" it was the only such-labelled control in the
+         Metalstorm HUD — so it read as the way to leave the match, did nothing
+         a player could see (the popup opens behind), and was twice diagnosed
+         as "detach is broken" (PLAN-endtoend D6/D25). There is still no
+         session-detach affordance in the HUD; that gap is D6. -->
+    <button id="detach-minimap-btn">Pop out ↗</button>
 </div>
 <div id="hud-help" class="hud-panel" style="display:none">
     Left click: select &nbsp; Right click: move/attack &nbsp; S: stop &nbsp; Shift: queue &nbsp; ESC: quit
