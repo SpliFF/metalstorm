@@ -91,6 +91,21 @@ export interface AcceleratorResult {
      * and so the M1 envelope (which does carry scale) has it ready.
      */
     subjectScale: number | null;
+    /**
+     * The words the player actually used for the subject / target, as handed to
+     * the index — NOT the name of whatever the index returned.
+     *
+     * The M1 envelope adapter (`nl-client.ts`) emits these, and the difference is
+     * load-bearing. This slot-filler takes the top-scoring hit; the resolver
+     * refuses to when two candidates are comparable. If the adapter emitted the
+     * MATCHED name, a sentence saying "Chimera" where both "Chimera Squad" and
+     * "Chimera Reserve" exist would leave here as the exact name of whichever one
+     * happened to sort first — laundering the guess into a certainty and moving
+     * possibly the wrong army. Emitting the player's own words instead lets the
+     * resolver see the same ambiguity the player created, and ask.
+     */
+    subjectQuery: string | null;
+    targetQuery: string | null;
 }
 
 interface Token {
@@ -135,6 +150,9 @@ function markConsumed(tokens: Token[], start: number, end: number): void {
  * Only the words that appear in the matched entity's own name are consumed —
  * everything else stays unclaimed and ends up in `unmatched`, which is the
  * transparency contract this module is built on.
+ *
+ * Returns the matched entity AND the query span that matched it. The caller needs
+ * the span, not just the entity: see `AcceleratorResult.subjectQuery`.
  */
 function claimEntityInRun(
     tokens: Token[],
@@ -142,7 +160,7 @@ function claimEntityInRun(
     to: number,
     types: EntityType[],
     index: AcceleratorSearchIndex,
-): NamedEntity | null {
+): { entity: NamedEntity; query: string } | null {
     const candidates: number[] = [];
     for (let i = from; i < to; i++) {
         if (!tokens[i].consumed && tokens[i].word && !STOPWORDS.has(tokens[i].word)) candidates.push(i);
@@ -161,7 +179,7 @@ function claimEntityInRun(
             for (const i of window) {
                 if (matchWords.has(tokens[i].word)) tokens[i].consumed = true;
             }
-            return match;
+            return { entity: match, query };
         }
     }
     return null;
@@ -211,7 +229,7 @@ export function acceleratorFill(
     const tokens = tokenize(text);
     const result: AcceleratorResult = {
         verb: null, subject: null, target: null, priority: null, when: null,
-        unmatched: [], subjectScale: null,
+        unmatched: [], subjectScale: null, subjectQuery: null, targetQuery: null,
     };
 
     // ── Verb (single word, closed vocabulary) ──
@@ -288,18 +306,21 @@ export function acceleratorFill(
     // Subject: named group/platoon/army, searched in the unclaimed run
     // BEFORE the verb (positional heuristic — see file header).
     if (!result.subject && verbIndex >= 0) {
-        const match = claimEntityInRun(tokens, 0, verbIndex, SUBJECT_ENTITY_TYPES, index);
-        if (match) {
-            result.subject = { type: 'group', groupId: typeof match.id === 'number' ? match.id : Number(match.id) };
+        const hit = claimEntityInRun(tokens, 0, verbIndex, SUBJECT_ENTITY_TYPES, index);
+        if (hit) {
+            const id = hit.entity.id;
+            result.subject = { type: 'group', groupId: typeof id === 'number' ? id : Number(id) };
+            result.subjectQuery = hit.query;
         }
     }
 
     // Target: named entity, searched in the unclaimed run AFTER the verb
     // (or the whole remainder if no verb was recognised).
     const targetStart = verbIndex >= 0 ? verbIndex + 1 : 0;
-    const match = claimEntityInRun(tokens, targetStart, tokens.length, TARGET_ENTITY_TYPES, index);
-    if (match) {
-        result.target = { shape: 'entity', entity: match };
+    const hit = claimEntityInRun(tokens, targetStart, tokens.length, TARGET_ENTITY_TYPES, index);
+    if (hit) {
+        result.target = { shape: 'entity', entity: hit.entity };
+        result.targetQuery = hit.query;
     }
 
     if (contestedRequested && result.target?.entity

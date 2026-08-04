@@ -32,7 +32,8 @@ import {
     type CommandIntent, type CommandSubject, type CommandTarget,
     type CompiledMessage, type CommandVerb,
 } from './compile-table.js';
-import { acceleratorFill, type AcceleratorSearchIndex } from './free-text-accelerator.js';
+import { acceleratorFill, type AcceleratorResult, type AcceleratorSearchIndex } from './free-text-accelerator.js';
+import { aiGuidanceToWire } from './guidance-wire.js';
 import type { ClassVocabulary } from './class-vocabulary.js';
 
 /** Priority used when the sentence names no band — matches the composer's
@@ -72,19 +73,46 @@ export type ExchangeOutcome =
           /** Transparency hints ("didn't understand: 'quickly'"). */
           notes: string[];
           intent: CommandIntent;
+          /**
+           * The raw slot-filler output, before any of the fallbacks below were
+           * applied. The M1 envelope adapter (`nl-client.ts`) needs the SLOTS as
+           * parsed — an id-free, name-shaped envelope can't be reconstructed
+           * from `intent`, whose subject is already an id and whose target is
+           * already a resolved entity. Exposing the parse is cheaper and more
+           * honest than the adapter guessing which fallback fired.
+           */
+          parsed: AcceleratorResult;
+          /** Which of the three subject rules produced `intent.subject`. */
+          subjectSource: 'named' | 'selection' | 'team';
+          /**
+           * `text` without its outcome clause — "Chimera Squad — defend
+           * Northgate · high priority", the part that restates WHAT WAS HEARD
+           * rather than what happened.
+           *
+           * The envelope adapter uses this as the envelope's `say`, and the
+           * distinction is not cosmetic: `text` asserts an outcome ("→ standing
+           * order set"), and the executor may still refuse or ask a question
+           * after resolution. A leading acknowledgement that has already claimed
+           * success is exactly the dishonesty this lane keeps closing — it was
+           * observed live, printing "standing order set" one line above "which
+           * place did you mean?".
+           */
+          heard: string;
       }
     | {
           kind: 'refused';
           text: string;
           notes: string[];
+          /** As above; present even on a refusal so the adapter can report the
+           *  same unmatched words the console does. */
+          parsed?: AcceleratorResult;
           /** Machine-readable reason, for tests and later telemetry. */
           reason:
               | 'empty'
               | 'no-verb'
               | 'no-target'
               | 'invalid-intent'
-              | 'uncompilable'
-              | 'unsupported-target';
+              | 'uncompilable';
       };
 
 /** "didn't understand: 'quickly', 'please'" — the accelerator's `unmatched`,
@@ -132,6 +160,10 @@ function describeTarget(target: CommandTarget): string {
  * there would let the player believe a filter is being applied that isn't.
  */
 function describeOutcome(command: CompiledMessage, subject: CommandSubject): string {
+    // An order to the AI lands in the guidance store, and the store's own words
+    // for what it now holds are the only honest echo (guidance-wire.ts).
+    if (command.type === 'AIGuidance') return aiGuidanceToWire(command.payload).describe;
+
     const base = command.type === 'GroupDirective' ? 'directive issued'
         : command.type === 'StandingOrder' ? 'standing order set'
         : 'sent';
@@ -166,6 +198,7 @@ export function planUtterance(utterance: string, deps: ExchangeDeps): ExchangeOu
             kind: 'refused',
             reason: 'no-verb',
             notes,
+            parsed,
             text: `I didn't hear an order in that. Verbs I know: ${VERB_LIST.join(', ')}. ` +
                   `Try "defend Northgate" or "3rd Armoured attack Slag Forge high".`,
         };
@@ -192,6 +225,7 @@ export function planUtterance(utterance: string, deps: ExchangeDeps): ExchangeOu
             kind: 'refused',
             reason: 'no-target',
             notes: [],
+            parsed,
             text: `"${parsed.verb}" needs a place I know.${leftovers} Name a region or objective, ` +
                   `e.g. "${parsed.verb} Northgate".`,
         };
@@ -207,7 +241,7 @@ export function planUtterance(utterance: string, deps: ExchangeDeps): ExchangeOu
 
     const invalid = validateIntent(intent);
     if (invalid) {
-        return { kind: 'refused', reason: 'invalid-intent', notes, text: `${invalid}. Nothing sent.` };
+        return { kind: 'refused', reason: 'invalid-intent', notes, parsed, text: `${invalid}. Nothing sent.` };
     }
 
     const command = compileIntent(intent);
@@ -216,24 +250,17 @@ export function planUtterance(utterance: string, deps: ExchangeDeps): ExchangeOu
             kind: 'refused',
             reason: 'uncompilable',
             notes,
+            parsed,
             text: `I can't turn "${parsed.verb} ${describeTarget(parsed.target)}" into an order. Nothing sent.`,
         };
     }
 
-    // AIGuidance has no sim target yet — `createSendCommand` logs it and drops
-    // it (integration.ts, interaction §6 not implemented). Sending it anyway
-    // would render as a success line for an order that never happened, so it
-    // is refused here, out loud, until the M1 guidance bridge lands.
-    if (command.type === 'AIGuidance') {
-        return {
-            kind: 'refused',
-            reason: 'unsupported-target',
-            notes,
-            text: 'Orders to the AI aren\'t wired to the guidance store yet — nothing sent. ' +
-                  'Use the AI Command panel, or name a group.',
-        };
-    }
-
+    // AIGuidance used to be refused here: `createSendCommand` logged and dropped
+    // it, so reporting it as sent would have been a lie. The M1 guidance bridge
+    // (guidance-wire.ts) closed that — an order to the AI now reaches
+    // game_ai_guidance.lua — so it executes like any other command. The echo
+    // still names what the STORE did rather than what the sentence said, because
+    // the store paints regions and sets stances; it takes no directives.
     const subjectText = describeSubject(subject, deps, parsed.subjectScale, fromSelection);
     const band = getPriorityBand(intent.priority);
     const whenText = parsed.when
@@ -244,12 +271,17 @@ export function planUtterance(utterance: string, deps: ExchangeDeps): ExchangeOu
             : ''
         : '';
 
+    const heard = `${subjectText} — ${parsed.verb} ${describeTarget(parsed.target)} · ` +
+                  `${band} priority${whenText}`;
+
     return {
         kind: 'sent',
         command,
         intent,
         notes,
-        text: `${subjectText} — ${parsed.verb} ${describeTarget(parsed.target)} · ` +
-              `${band} priority${whenText} → ${describeOutcome(command, subject)}.`,
+        parsed,
+        heard,
+        subjectSource: parsed.subject ? 'named' : fromSelection ? 'selection' : 'team',
+        text: `${heard} → ${describeOutcome(command, subject)}.`,
     };
 }

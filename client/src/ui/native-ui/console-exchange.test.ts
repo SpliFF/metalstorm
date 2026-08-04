@@ -177,14 +177,17 @@ describe('planUtterance — refusing out loud', () => {
         expect(outcome.text).toContain('Nothing sent');
     });
 
-    it('refuses an order to the AI while the guidance bridge is missing', () => {
-        // compileIntent produces AIGuidance happily, but createSendCommand
-        // drops it (integration.ts) — reporting success would be a lie.
+    it('sends an order to the AI, and echoes what the STORE now holds', () => {
+        // This used to be a refusal: compileIntent produced AIGuidance happily,
+        // but createSendCommand dropped it, so reporting success would have been
+        // a lie. M1's guidance bridge (guidance-wire.ts) made it a real send —
+        // and the echo names the store write, not the sentence, because the
+        // guidance store paints regions and sets stances; it takes no directives.
         const outcome = planUtterance('ai attack Northgate', deps());
-        expect(outcome.kind).toBe('refused');
-        if (outcome.kind !== 'refused') return;
-        expect(outcome.reason).toBe('unsupported-target');
-        expect(outcome.text).toContain('nothing sent');
+        expect(outcome.kind).toBe('sent');
+        if (outcome.kind !== 'sent') return;
+        expect(outcome.command.type).toBe('AIGuidance');
+        expect(outcome.text).toContain('is now priority for the AI');
     });
 
     it('refuses an empty utterance', () => {

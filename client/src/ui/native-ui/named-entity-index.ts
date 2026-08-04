@@ -128,6 +128,27 @@ export class NamedEntityIndex {
      * @param limit - Max results (default 10)
      */
     search(query: string, typeFilter?: EntityType | EntityType[], limit = 10): NamedEntity[] {
+        return this.searchScored(query, typeFilter, limit).map((r) => r.entity);
+    }
+
+    /**
+     * The same search, with the relevance scores exposed.
+     *
+     * `nl-resolver.ts` needs them: its whole contract is "exact match wins, a
+     * UNIQUE fuzzy hit above a threshold wins, two comparable hits become a
+     * clarification" (PLAN-metalstorm-command-language.md §5). That rule cannot
+     * be expressed against a bare ranked list — "Randtown" beating "Randtown
+     * East" by one scoring tier and tying with it are the difference between an
+     * order and a question, and a resolver that re-derived the scores itself
+     * would be a second scoring function free to disagree with this one.
+     *
+     * Score tiers: 1000 exact, 500 whole-name prefix, 100 substring. Those are
+     * the only three a query can earn — see the note in the loop below about the
+     * fourth that never could.
+     */
+    searchScored(
+        query: string, typeFilter?: EntityType | EntityType[], limit = 10,
+    ): Array<{ entity: NamedEntity; score: number }> {
         if (!query) return [];
 
         const lowerQuery = query.toLowerCase();
@@ -149,27 +170,27 @@ export class NamedEntityIndex {
                 score = 500; // Prefix match
             } else if (lowerName.includes(lowerQuery)) {
                 score = 100; // Contains match
-            } else {
-                // Try fuzzy match (simple word boundary check)
-                const words = lowerName.split(/\s+/);
-                for (const word of words) {
-                    if (word.startsWith(lowerQuery)) {
-                        score = 50;
-                        break;
-                    }
-                }
             }
+            // There used to be a fourth tier here (50, "any word starts with the
+            // query"), and it could never fire: a word of the name is a substring
+            // of the name, so a query that prefixes a word is always caught by the
+            // `includes` tier above at 100. Removed rather than documented,
+            // because `nl-resolver.ts` sets its acceptance threshold against these
+            // tiers and a phantom tier makes that threshold impossible to reason
+            // about. Behaviour is unchanged — the branch was unreachable.
 
             if (score > 0) {
                 results.push({ entity, score });
             }
         }
 
-        // Sort by score descending
-        results.sort((a, b) => b.score - a.score);
+        // Sort by score descending, then by name so equal-scoring hits come back
+        // in a stable order (the resolver's ambiguity check compares the top two
+        // — with an unstable sort, which one "won" would vary between calls).
+        results.sort((a, b) => b.score - a.score || a.entity.name.localeCompare(b.entity.name));
 
         // Return top N
-        return results.slice(0, limit).map(r => r.entity);
+        return results.slice(0, limit);
     }
 
     /**

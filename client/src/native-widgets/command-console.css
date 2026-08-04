@@ -66,6 +66,9 @@
    composer's insufficient-authority readout, no background flash. */
 .cc-line--refused .cc-line__text { color: var(--nui-bad); }
 .cc-line--system .cc-line__text { color: var(--nui-text-faint); }
+/* A question. Deliberately NOT the refusal colour — nothing went wrong, the
+   console just needs one more word before it will move an army. */
+.cc-line--ask .cc-line__text { color: var(--nui-accent); font-weight: 500; }
 
 /* Transparency hints ("didn't understand: 'quickly'") hang under their line,
    dim, so they never read as part of the order that was actually issued. */

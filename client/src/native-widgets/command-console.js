@@ -5,15 +5,22 @@
  * The front door to the command language: a scrolling `you:` / `game:`
  * transcript and one text field. Type a sentence, the sentence executes.
  *
- * V0 (this file) runs the LOCAL path only — no LLM, no voice:
+ * This runs the LOCAL path only — no LLM, no voice — but it runs it through the
+ * M1 ENVELOPE, which is the path the proxy will use:
  *
  *     utterance → acceleratorFill (closed-vocab slot-filler, fed by the
  *     shipped class-vocabulary.json) → planUtterance (console-exchange.ts)
- *     → compileIntent → ctx.sendCommand
+ *     → NLResponse (nl-client.ts adapter) → validateNLResponse
+ *     → executeNLResponse → ctx.sendCommand
  *
- * M4 adds the server proxy in front of the slot-filler and M6 adds
- * push-to-talk into this same input; both land as new `planUtterance`-shaped
- * producers, so the transcript, the refusal copy and this widget don't change.
+ * Routing the offline parser through the same envelope, validator and executor
+ * the LLM will use means every typed order in the game exercises that contract
+ * from M1 — if the schema or the resolver is wrong, it shows up now, not when
+ * the proxy lands. From the player's seat nothing changed: same sentences, same
+ * transcript, same refusal copy.
+ *
+ * M4 adds the server proxy as a second producer of the SAME envelope, and M6
+ * adds push-to-talk into this same input; neither changes this widget.
  *
  * This widget is deliberately DUMB. It owns DOM, scroll position and event
  * wiring; it owns no parsing, no verb table and no decision about what a
@@ -31,7 +38,8 @@
 
 import { namedEntityIndex } from '../ui/native-ui/named-entity-index.js';
 import { classVocabulary } from '../ui/native-ui/class-vocabulary.js';
-import { planUtterance } from '../ui/native-ui/console-exchange.js';
+import { runLocalUtterance } from '../ui/native-ui/nl-client.js';
+import { NLResolver } from '../ui/native-ui/nl-resolver.js';
 import { matchSelectionToGroup } from '../ui/native-ui/cost-preview.js';
 import { injectStyle } from '../ui/ui.js';
 import consoleCss from './command-console.css?raw';
@@ -152,6 +160,29 @@ function groupLabel(groupId) {
     return group?.name || `Group ${groupId}`;
 }
 
+/**
+ * The resolver for THIS session: the live name index, the shipped vocabulary,
+ * the store's own-team org groups, and whatever is selected.
+ *
+ * Two ports are deliberately absent, and their absence is load-bearing:
+ *   - `unitClass` (a unit's `ms_class`) — the widget context exposes the ui-store
+ *     but no defs mirror, so which squads are the tank squads is genuinely
+ *     unknowable here. A class-count order therefore REFUSES with that reason
+ *     instead of grabbing the first N groups. The defs join arrives with the
+ *     query engine in M3.
+ *   - `groupPosition` — `gp:orgGroups` carries member ids but no centroid, so
+ *     nearest-to-target is skipped and ranking falls through to largest-first.
+ * Built fresh per utterance so it always sees the current store snapshot.
+ */
+function buildResolver() {
+    return new NLResolver({
+        index: namedEntityIndex,
+        vocabulary: classVocabulary.current,
+        groups: state.ctx?.store.getOrgGroups() ?? [],
+        selectionGroupId: selectedGroupId(),
+    });
+}
+
 function submit() {
     const utterance = state.inputEl.value.trim();
     if (!utterance) return;
@@ -164,27 +195,42 @@ function submit() {
         return;
     }
 
-    const outcome = planUtterance(utterance, {
+    if (!state.ctx?.sendCommand) {
+        // Never report an order as issued when there was nothing to issue it
+        // through — the connection isn't wired (or was torn down). Checked
+        // BEFORE the run rather than after, so no "ok" line is ever printed for
+        // a send that had nowhere to go.
+        say('refused', 'Not connected to the game — nothing sent.');
+        return;
+    }
+
+    runLocalUtterance(utterance, {
         index: namedEntityIndex,
         vocabulary: classVocabulary.current,
         selectionGroupId: selectedGroupId(),
         groupLabel,
+        ports: {
+            sendCommand: state.ctx.sendCommand,
+            resolver: buildResolver(),
+            console: { say: renderLine },
+        },
     });
+}
 
-    if (outcome.kind === 'refused') {
-        say('refused', outcome.text, outcome.notes);
-        return;
-    }
-
-    if (!state.ctx?.sendCommand) {
-        // Never report an order as issued when there was nothing to issue it
-        // through — the connection isn't wired (or was torn down).
-        say('refused', 'Not connected to the game — nothing sent.', outcome.notes);
-        return;
-    }
-
-    state.ctx.sendCommand(outcome.command);
-    say('ok', outcome.text, outcome.notes);
+/**
+ * One executor line → one transcript line. The executor decides WHAT is said;
+ * this only decides how it looks, which is the same division of labour the rest
+ * of the widget follows.
+ *
+ * A question's candidate list rides in as a dim note. Clickable chips that
+ * resubmit are M5's job (plan §4) — rendering the options as text now means the
+ * player can always see what they are choosing between, without this widget
+ * growing a resubmission flow it would have to hand over later.
+ */
+function renderLine(line) {
+    const notes = [...(line.notes ?? [])];
+    if (line.options?.length) notes.push(`options: ${line.options.join(' · ')}`);
+    say(line.kind, line.text, notes);
 }
 
 /** The closed vocabulary, read out of the shipped data rather than restated

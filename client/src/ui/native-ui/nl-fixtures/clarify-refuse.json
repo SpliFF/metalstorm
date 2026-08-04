@@ -1,0 +1,271 @@
+{
+  "_comment": "Golden fixtures: asking instead of acting, and refusing instead of guessing (PLAN-metalstorm-command-language.md §1, §5). Two distinct sources of a question: the MODEL asks (`clarify` on the envelope, actions empty), or the RESOLVER asks (a well-formed envelope whose refs are ambiguous — synthesized client-side, no second LLM call). Both must end with a question and zero sends.",
+
+  "fixtures": [
+    {
+      "name": "the model asks, with chips",
+      "utterance": "send the tanks in",
+      "context": "basin",
+      "note": "clarify ⇒ actions must be empty — the validator enforces it. Asking and acting are exclusive; a question that also fires an order asks about something already done.",
+      "expected": {
+        "clarify": {
+          "question": "Which tank squads — Chimera, Basilisk or Warhound?",
+          "options": ["Chimera Squad", "Basilisk Squad", "Warhound Squad"]
+        },
+        "actions": []
+      },
+      "expect": { "sends": [], "clarifies": true }
+    },
+
+    {
+      "name": "the model asks where",
+      "utterance": "defend the gate",
+      "context": "basin",
+      "expected": {
+        "clarify": {
+          "question": "Which gate — Northgate or Fallow Gate?",
+          "options": ["Northgate", "Fallow Gate"]
+        },
+        "actions": []
+      },
+      "expect": { "sends": [], "clarifies": true }
+    },
+
+    {
+      "name": "the resolver asks: two squads fit the name equally",
+      "utterance": "Chimera, attack Northgate",
+      "context": "ambiguous-forces",
+      "note": "THE unforgivable-failure guard. 'Chimera' prefix-matches both squads; the strict force rule asks even when one would score higher, because a points win is not evidence about which squad the player meant.",
+      "expected": {
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "attack",
+            "subject": { "type": "entity-ref", "name": "Chimera" },
+            "target": { "type": "entity-ref", "name": "Northgate" }
+          }
+        }]
+      },
+      "expect": { "sends": [], "clarifies": true, "saysLike": ["Chimera Squad"] }
+    },
+
+    {
+      "name": "the resolver asks: two places tie",
+      "utterance": "attack Rand",
+      "context": "ambiguous-places",
+      "note": "Places resolve on outright score dominance. 'Rand' prefix-matches both cities at the same tier, so there is no winner and it asks.",
+      "expected": {
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "attack",
+            "subject": { "type": "any" },
+            "target": { "type": "entity-ref", "name": "Rand" }
+          }
+        }]
+      },
+      "expect": { "sends": [], "clarifies": true }
+    },
+
+    {
+      "name": "an exact match beats the tie it sits inside",
+      "utterance": "attack Randtown",
+      "context": "ambiguous-places",
+      "note": "The other half of the rule: 'Randtown' is an exact hit, so the fuzzy tier — where 'Randtown East' also matches — is never consulted. Ambiguity must not make a precise sentence unusable.",
+      "expected": {
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "attack",
+            "subject": { "type": "any" },
+            "target": { "type": "entity-ref", "name": "Randtown" }
+          }
+        }]
+      },
+      "expect": { "sends": [{ "type": "GroupDirective", "groupId": 0 }] }
+    },
+
+    {
+      "name": "the resolver asks: fewer squads than the sentence wanted",
+      "utterance": "move 2 tank squads to Randtown",
+      "context": "one-tank-squad",
+      "note": "The plan's 'I only have one tank squad — send Chimera Squad alone?'. Sending one when two were asked for is a decision the player has to make.",
+      "expected": {
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "secure",
+            "subject": { "type": "class-count", "class": "tanks", "count": 2 },
+            "target": { "type": "entity-ref", "name": "Randtown" }
+          }
+        }]
+      },
+      "expect": { "sends": [], "clarifies": true, "saysLike": ["only have 1 tank squad, not 2"] }
+    },
+
+    {
+      "name": "no candidates at all is a refusal, not an offer to auto-form",
+      "utterance": "move 2 tank squads to Randtown",
+      "context": "no-tanks",
+      "expected": {
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "secure",
+            "subject": { "type": "class-count", "class": "tanks", "count": 2 },
+            "target": { "type": "entity-ref", "name": "Randtown" }
+          }
+        }]
+      },
+      "expect": { "sends": [], "refusals": 1, "saysLike": ["no tank squads under command"] }
+    },
+
+    {
+      "name": "no unit-class lookup means no class-count order",
+      "utterance": "move 2 tank squads to Randtown",
+      "context": "no-defs",
+      "note": "What the live client hits TODAY: the widget context has no defs mirror, so which squads are tank squads is unknowable. Refuses with that reason instead of taking the first two groups.",
+      "expected": {
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "secure",
+            "subject": { "type": "class-count", "class": "tanks", "count": 2 },
+            "target": { "type": "entity-ref", "name": "Randtown" }
+          }
+        }]
+      },
+      "expect": { "sends": [], "refusals": 1, "saysLike": ["isn't wired up on the client"] }
+    },
+
+    {
+      "name": "an unknown place refuses; it does not fuzzy-match into the void",
+      "utterance": "attack Wolfden",
+      "context": "basin",
+      "expected": {
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "attack",
+            "subject": { "type": "any" },
+            "target": { "type": "entity-ref", "name": "Wolfden" }
+          }
+        }]
+      },
+      "expect": { "sends": [], "refusals": 1, "saysLike": ["don't know a place called"] }
+    },
+
+    {
+      "name": "an empty board refuses every reference",
+      "utterance": "defend Northgate",
+      "context": "empty",
+      "expected": {
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "defend",
+            "subject": { "type": "any" },
+            "target": { "type": "entity-ref", "name": "Northgate" }
+          }
+        }]
+      },
+      "expect": { "sends": [], "refusals": 1 }
+    },
+
+    {
+      "name": "the model refuses out of scope",
+      "utterance": "resign and start a new game",
+      "context": "basin",
+      "expected": {
+        "actions": [{ "kind": "refuse", "reason": "I can't leave or start matches from here — use the menu." }]
+      },
+      "expect": { "sends": [], "refusals": 1 }
+    },
+
+    {
+      "name": "a route verb has no sentence form yet",
+      "utterance": "Chimera Squad patrol Northgate",
+      "context": "basin",
+      "note": "`patrol` and `screen` accept shape 'route' alone and the envelope has no multi-point target. Refused by name rather than silently downgraded to a one-point patrol, which would look like a patrol and behave like a move.",
+      "expected": {
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "patrol",
+            "subject": { "type": "entity-ref", "name": "Chimera Squad" },
+            "target": { "type": "entity-ref", "name": "Northgate" }
+          }
+        }]
+      },
+      "expect": { "sends": [], "refusals": 1, "saysLike": ["needs a route"] }
+    },
+
+    {
+      "name": "an on-sight standing order has no wire slot",
+      "utterance": "if you see Chimera squad, follow it",
+      "context": "basin",
+      "note": "A plan §0 example utterance, and an honest gap: WhenCondition has no sighting case and the sim evaluates no sighting predicate. Sending the directive without its trigger would fire it immediately — the opposite of what was asked.",
+      "expected": {
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "escort",
+            "subject": { "type": "selection" },
+            "target": { "type": "entity-ref", "name": "Grain Silo" },
+            "standing": { "onSight": "Chimera Squad" }
+          }
+        }]
+      },
+      "expect": { "sends": [], "refusals": 1, "saysLike": ["on-sight trigger"] }
+    },
+
+    {
+      "name": "a selection subject with nothing selected refuses",
+      "utterance": "attack Slag Forge",
+      "context": "basin",
+      "note": "The model was told there was a selection and there wasn't (a stale context, or a model that assumed). Refuses rather than silently widening to team-wide, because 'everything I own attacks Slag Forge' is not what was asked.",
+      "expected": {
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "attack",
+            "subject": { "type": "selection" },
+            "target": { "type": "entity-ref", "name": "Slag Forge" }
+          }
+        }]
+      },
+      "expect": { "sends": [], "refusals": 1, "saysLike": ["Nothing is selected"] }
+    },
+
+    {
+      "name": "a multi-class role can't fill a single-class idle filter",
+      "utterance": "idle air defense hold Northgate",
+      "context": "basin",
+      "note": "'air defense' spans staticdefense(scale≥2) ∪ fighters and `filterClass` holds one class. Picking a branch would be a guess; refused with what to say instead.",
+      "expected": {
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "hold",
+            "subject": { "type": "idle-filter", "filterClass": "air defense" },
+            "target": { "type": "entity-ref", "name": "Northgate" }
+          }
+        }]
+      },
+      "expect": { "sends": [], "refusals": 1, "saysLike": ["spans more than one unit class"] }
+    },
+
+    {
+      "name": "guidance on a region nobody has heard of",
+      "utterance": "prioritise Wolfden",
+      "context": "basin",
+      "expected": {
+        "actions": [{
+          "kind": "guidance",
+          "guidance": { "op": "paint", "value": "priority", "regionRef": "Wolfden" }
+        }]
+      },
+      "expect": { "sends": [], "refusals": 1, "saysLike": ["don't know a region called"] }
+    }
+  ]
+}

@@ -20,5 +20,12 @@
     "noFallthroughCasesInSwitch": true
   },
   "include": ["src"],
-  "exclude": ["src/protocol", "src/**/*.test.ts"]
+  /* Test code is excluded because it imports node builtins (`node:fs` and
+     friends) and the project ships no `@types/node` — browser code must not get
+     node globals just so a fixture loader can read a file. `*.test-support.ts`
+     is the same category: a module imported ONLY by tests, which for that reason
+     may use the node surface too (see nl-fixtures/load-fixtures.test-support.ts).
+     Anything a test-support module shares with the app belongs in a normal
+     module instead — e.g. nl-fixtures/fixture-world.ts, which stays typechecked. */
+  "exclude": ["src/protocol", "src/**/*.test.ts", "src/**/*.test-support.ts"]
 }
