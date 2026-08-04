@@ -67,15 +67,25 @@ jobs:
           "$(brew --prefix openssl@3)/bin/openssl" version
           pkg-config --version
 
+      # `-- -k 0` tells ninja to keep going after a failed object instead of
+      # stopping at the first one. It does NOT make a broken build pass -- the
+      # step still exits non-zero -- it makes one run report *every* compile
+      # error rather than the earliest. That matters here because this job is
+      # the only place the code is built with the runner's Xcode 15.4 toolchain
+      # (local dev is Apple clang 16), so it is the only place a whole class of
+      # portability breakage is visible at all. Fixed one-error-at-a-time this
+      # gate cost four dispatches across three days -- brew formula names, then
+      # a missing submodule, then a missing <deque>, then a C++20 P0960
+      # aggregate-init use -- each one masking the next. Keep the flag.
       - name: Configure + build (dev — sanity control)
         run: |
           cmake --preset release -B build/dev-control -DSPRING_SKIP_AUDIOCONVERTER=ON
-          cmake --build build/dev-control --target spring-server spring-lobby spring-logserver -j 4
+          cmake --build build/dev-control --target spring-server spring-lobby spring-logserver -j 4 -- -k 0
 
       - name: Configure + build (SPRING_PROD=ON — the actual gate)
         run: |
           cmake --preset release -B build/prod -DSPRING_PROD=ON -DSPRING_SKIP_AUDIOCONVERTER=ON
-          cmake --build build/prod --target spring-server spring-lobby spring-logserver -j 4
+          cmake --build build/prod --target spring-server spring-lobby spring-logserver -j 4 -- -k 0
 
       # Scope of this assertion list, stated because it has not grown since the
       # gate was written and that looks like drift rather than design:
