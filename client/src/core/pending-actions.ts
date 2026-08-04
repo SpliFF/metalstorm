@@ -22,14 +22,53 @@
  *   - **confirmed** — a `UnitCommandBatch` `issued` event names the same
  *     (unit, cmdId, position). That stream is per-tick and already on the wire;
  *     until L4.1 it had no subscriber at all. The entry adopts the server's
- *     `tag` and stops being able to time out, because it is now known real.
+ *     `tag` and stops being able to *roll back*. It does not stop being able
+ *     to die: an ack is not an acceptance (see below).
  *   - **retired** — a later snapshot contains the order (matched by that
  *     adopted tag). The overlay hands off to authoritative data and forgets it.
  *   - **rolled back** — nothing confirmed it inside the window, so it is
  *     dropped and the artifact disappears. **Refusal is observed as silence:**
- *     the server sends no veto message (`AllowCommand` is not exposed to the
- *     web layer — advisory engine-ask A1 is still open), so a timeout is the
- *     only refutation available. Everything here is built around that.
+ *     the server sends no veto message, so a timeout is the only refutation
+ *     available. Everything here is built around that.
+ *   - **refuted** — confirmed, but a snapshot that provably post-dates the ack
+ *     does not carry the order. See "two kinds of refusal" below.
+ *
+ * ## Two kinds of refusal, and why only one of them is silent
+ *
+ * `CCommandAI::GiveCommand` (CommandAI.cpp:817-826, byte-identical to upstream
+ * Recoil, so the ordering is faithful reproduction and not ours to change):
+ *
+ *     if (!eventHandler.AllowCommand(...)) return;   // (1) gadget veto
+ *     eventHandler.UnitCommand(...);                 // (2) the ack we consume
+ *     GiveCommandReal(c, fromSynced);                // (3) -> AllowedCommand()
+ *
+ * So the two refusal classes land on opposite sides of the ack:
+ *
+ *   - **Gadget vetoes run at (1), before the ack.** Metalstorm's authority
+ *     economy charges and refuses in `gadget:AllowCommand`
+ *     (`game_authority_charge.lua`, layer +100), so a refused order produces
+ *     *no* ack at all and rolls back on the ordinary unconfirmed window. This
+ *     is the class the optimistic-refusal UX cares about and it was already
+ *     correct.
+ *   - **The engine's own legality check runs at (3), after the ack.**
+ *     `CCommandAI::AllowedCommand` rejects e.g. CMD_BUILD on a non-builder —
+ *     and we have already confirmed the entry. Measured 2026-08-04: a build
+ *     order to a tank acked at 84 ms and never entered the queue.
+ *
+ * The second class is why a confirmed entry cannot simply be trusted (which
+ * was design decision 5's assumption). It is refuted by *evidence* instead:
+ * the first queue snapshot to arrive after the ack. That snapshot is
+ * conclusive because both streams go out over the same reliable ordered
+ * channel (`rtcServer.SendReliable`) and the streaming phase is monotone in
+ * frame, so anything the client receives after the ack was built at a sim
+ * frame at or after the one the ack was raised on. If the order were real and
+ * still queued, that snapshot would carry it.
+ *
+ * Absence of the unit is the same evidence as absence of the order:
+ * `Protocol::BuildUnitCommandQueues` skips units whose visible queue is empty
+ * ("the client treats absence as `empty queue`"), so a refused order to an
+ * otherwise-idle unit — the common case, and exactly the measured one — shows
+ * up as a missing row rather than a short row.
  *
  * Deliberately an *overlay with an expiry*, not a client-side queue store.
  * PLAN-state-change Phase 2 wants the latter (replay `UnitCommandBatch` into
@@ -78,8 +117,26 @@ const CONFIRM_SLACK_MS = 500;
 /** How long a *confirmed* entry may wait for a snapshot to carry its tag
  *  before we drop it anyway. Needed because not every acked command ever
  *  appears in a queue snapshot — an order that completes inside one snapshot
- *  period (a short move) is acked and then gone. 3 snapshot periods. */
+ *  period (a short move) is acked and then gone. 3 snapshot periods.
+ *
+ *  This is the *no evidence yet* cap only. Once a snapshot has actually been
+ *  examined the entry switches to `REFUTE_GRACE_MS` — see `retire()`. */
 const RETIRE_MS = 3000;
+
+/** How long a confirmed entry survives after a snapshot has positively failed
+ *  to carry its order. The evidence is already conclusive (see the module
+ *  doc), so this is a grace, not a second window: it keeps the artifact from
+ *  vanishing in the same frame as the snapshot repaint, and it gives an order
+ *  whose echoed waypoint drifted past `POS_EPSILON` one more matching attempt.
+ *
+ *  What it buys: a refused order is drawn for the ack (~RTT) plus at most one
+ *  snapshot period plus this, i.e. ~1.1 s at the worst snapshot phase and
+ *  ~0.6 s on average — the same order as the unconfirmed rollback window,
+ *  instead of the flat 3 s `RETIRE_MS` it used to ride. That matters more than
+ *  a stray line suggests, because a non-shift entry also `replaces` the
+ *  merged view, so a phantom order *hides the unit's real queue* for as long
+ *  as it is drawn. */
+const REFUTE_GRACE_MS = 250;
 
 /** Commands whose acceptance we draw. Positional orders and builds (`cmdId<0`)
  *  are the queue-shaped ones the overlay renderers understand. State commands
@@ -121,6 +178,10 @@ interface Entry {
     tag: number;
     /** Wall-clock deadline: rollback while unconfirmed, retire once confirmed. */
     deadline: number;
+    /** Registration time, kept for the entry's whole life (unlike `issuedAt`,
+     *  which is dropped at confirmation) so a refutation can report how long
+     *  the artifact was actually on screen — the number L4.4 claims. */
+    readonly bornAt: number;
     /** True once `retire()` has tested this (confirmed) entry against the
      *  current snapshot and *kept* it — which is positive evidence that the
      *  snapshot does not contain its order, so `merge()` must draw both. Reset
@@ -128,6 +189,11 @@ interface Entry {
      *  exists for is exactly an ack that lands after its snapshot did. */
     vetted: boolean;
 }
+
+/** Shared empty-orders sentinel: a unit missing from a snapshot has an empty
+ *  queue, and allocating a fresh `[]` per absent unit per snapshot is pure
+ *  garbage on the 1 Hz path. */
+const NO_ORDERS: readonly UnitOrderInfo[] = [];
 
 /** One command as it went on the wire. */
 export interface SentCommand {
@@ -145,6 +211,11 @@ export interface PendingActionStats {
     registered: number;
     confirmedTotal: number;
     retiredTotal: number;
+    /** Confirmed entries a snapshot positively refuted (the order was acked
+     *  but never queued — engine `AllowedCommand`, a completed short order, or
+     *  an unmatchable echo). Distinct from `retiredTotal`, which means the
+     *  server demonstrably DID take the order. */
+    refutedTotal: number;
     rolledBackTotal: number;
     /** Entries dropped because the player cleared the queue themselves. */
     clearedTotal: number;
@@ -155,6 +226,11 @@ export interface PendingActionStats {
     /** Confirmation latency (ms) — click to ack. */
     lastConfirmMs: number;
     meanConfirmMs: number;
+    /** How long a refuted entry was drawn (ms) — click to disappearance. This
+     *  is the L4.4 number: the visible lifetime of an order the server acked
+     *  and then refused. */
+    lastRefuteMs: number;
+    meanRefuteMs: number;
 }
 
 export class PendingActionRegistry {
@@ -166,19 +242,32 @@ export class PendingActionRegistry {
     private registered = 0;
     private confirmedTotal = 0;
     private retiredTotal = 0;
+    private refutedTotal = 0;
     private rolledBackTotal = 0;
     private clearedTotal = 0;
     private mergeCollisions = 0;
     private confirmMsSum = 0;
     private confirmMsCount = 0;
     private lastConfirmMs = 0;
+    private refuteMsSum = 0;
+    private refuteMsCount = 0;
+    private lastRefuteMs = 0;
     /** Issue time per entry id, kept only until confirmation. */
     private issuedAt = new Map<number, number>();
+
+    /** A/B control for the L4.4 measurement (`gp:test setSnapshotRefutation`).
+     *  Off restores the pre-L4.4 behaviour exactly: a missing unit row is
+     *  "no evidence" and a confirmed entry rides the flat `RETIRE_MS` cap. Both
+     *  arms then share one binary and differ only here. */
+    private refuteOnSnapshot = true;
 
     constructor(opts: { getRttMs: () => number; now?: () => number }) {
         this.getRttMs = opts.getRttMs;
         this.now = opts.now ?? (() => performance.now());
     }
+
+    /** @see refuteOnSnapshot */
+    setSnapshotRefutation(on: boolean): void { this.refuteOnSnapshot = on; }
 
     /** Confirmation window in ms, derived from the live RTT estimate. */
     private confirmWindowMs(): number {
@@ -227,6 +316,7 @@ export class PendingActionRegistry {
                 state: 'unconfirmed',
                 tag: -id,
                 deadline,
+                bornAt: t,
                 vetted: false,
             });
             this.issuedAt.set(id, t);
@@ -296,7 +386,16 @@ export class PendingActionRegistry {
         const claimed = new Set<UnitOrderInfo>();
         this.entries = this.entries.filter(e => {
             if (e.state !== 'confirmed') return true;
-            const orders = ordersByUnit.get(e.unitId);
+            // A missing row is an EMPTY queue, not an unknown one:
+            // `Protocol::BuildUnitCommandQueues` omits units with no
+            // externally-visible orders. Treating absence as "no evidence"
+            // (which is what this did until 2026-08-04) is why a refused order
+            // to an idle unit — the measured case in the L4 gate's finding 1 —
+            // rode the full 3 s cap: the tank had no other orders, so it never
+            // appeared in a snapshot at all and was never tested.
+            const orders = this.refuteOnSnapshot
+                ? (ordersByUnit.get(e.unitId) ?? NO_ORDERS)
+                : ordersByUnit.get(e.unitId);
             if (!orders) return true;
             const hit = orders.find(o => !claimed.has(o) && orderIs(e, o));
             if (hit) {
@@ -304,9 +403,23 @@ export class PendingActionRegistry {
                 this.retiredTotal++;
                 return false;
             }
-            // Kept: this snapshot demonstrably does not carry the order, so
-            // `merge()` must stop treating it as a possible duplicate.
-            e.vetted = true;
+            // Kept, but now on the evidence clock. This snapshot post-dates the
+            // ack and demonstrably does not carry the order, which means one of
+            // three things, and all three end the same way: the order was
+            // refused after the ack (`AllowedCommand`), it already completed,
+            // or the server queued it under a form `orderIs` cannot match. Only
+            // the last would still want drawing, and in that case the snapshot
+            // itself carries a matching order for the renderers to draw — so
+            // letting go costs nothing visually.
+            //
+            // `vetted` also stops `merge()` treating it as a possible duplicate.
+            if (!e.vetted) {
+                e.vetted = true;
+                if (this.refuteOnSnapshot) {
+                    e.deadline = Math.min(
+                        e.deadline, this.now() + REFUTE_GRACE_MS);
+                }
+            }
             return true;
         });
     }
@@ -330,6 +443,15 @@ export class PendingActionRegistry {
                 this.rolledBackTotal++;
                 rolledBack++;
                 this.issuedAt.delete(e.id);
+            } else if (e.vetted) {
+                // A snapshot tested it and it was not there — refuted, not
+                // merely un-carried. Counted apart from `retiredTotal` because
+                // the two mean opposite things about whether the server took
+                // the order, and the L4 gate needs to tell them apart.
+                this.refutedTotal++;
+                this.lastRefuteMs = t - e.bornAt;
+                this.refuteMsSum += this.lastRefuteMs;
+                this.refuteMsCount++;
             } else {
                 this.retiredTotal++;
             }
@@ -399,12 +521,16 @@ export class PendingActionRegistry {
             registered: this.registered,
             confirmedTotal: this.confirmedTotal,
             retiredTotal: this.retiredTotal,
+            refutedTotal: this.refutedTotal,
             rolledBackTotal: this.rolledBackTotal,
             clearedTotal: this.clearedTotal,
             mergeCollisions: this.mergeCollisions,
             lastConfirmMs: this.lastConfirmMs,
             meanConfirmMs: this.confirmMsCount > 0
                 ? this.confirmMsSum / this.confirmMsCount : 0,
+            lastRefuteMs: this.lastRefuteMs,
+            meanRefuteMs: this.refuteMsCount > 0
+                ? this.refuteMsSum / this.refuteMsCount : 0,
         };
     }
 
@@ -414,12 +540,16 @@ export class PendingActionRegistry {
         this.registered = 0;
         this.confirmedTotal = 0;
         this.retiredTotal = 0;
+        this.refutedTotal = 0;
         this.rolledBackTotal = 0;
         this.clearedTotal = 0;
         this.mergeCollisions = 0;
         this.confirmMsSum = 0;
         this.confirmMsCount = 0;
         this.lastConfirmMs = 0;
+        this.refuteMsSum = 0;
+        this.refuteMsCount = 0;
+        this.lastRefuteMs = 0;
     }
 
     /** Drop everything (quit to lobby, reconnect). */

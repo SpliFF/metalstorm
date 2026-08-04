@@ -270,6 +270,10 @@ let gpMotionLean: MotionLeanRegistry | null = null;
 /// A/B switch for the L4.3 measurement (gp:test 'setPositionalLean'), the same
 /// shape as `gpOptimisticInput`: off restores the pre-L4.3 body pose exactly.
 let gpPositionalLean = true;
+/// A/B switch for the L4.4 measurement (gp:test 'setSnapshotRefutation'): off
+/// restores the pre-L4.4 rule that a confirmed entry can only leave via the
+/// flat 3 s cap. Module-scope so it survives a registry rebuild on rejoin.
+let gpSnapshotRefutation = true;
 /// PLAN-latency L4.2 measurement counters for the order-ack bark. `attempts`
 /// counts player commands the sink acked; `played` counts the ones whose def
 /// actually carried an `ok` sound. The gap between them is the real coverage
@@ -2187,6 +2191,7 @@ export function gpInit(msg: GpInitToWorker): void {
     gpPendingActions = new PendingActionRegistry({
         getRttMs: () => gpCtx.connection?.serverClock.getRtt() ?? 0,
     });
+    gpPendingActions.setSnapshotRefutation(gpSnapshotRefutation);
     gpMotionLean = new MotionLeanRegistry({
         getRttMs: () => gpCtx.connection?.serverClock.getRtt() ?? 0,
         warn: (msg) => postLog(3, msg),
@@ -3575,6 +3580,16 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
         case 'setOptimisticInput':
             gpOptimisticInput = args[0] !== false;
             return gpOptimisticInput;
+        // A/B control for the L4.4 measurement (PLAN-latency-impl §L4.4): with
+        // snapshot refutation off, a confirmed entry rides the flat 3 s
+        // RETIRE_MS cap exactly as it did before L4.4, so the two arms share
+        // one binary. `pendingStats.lastRefuteMs` / `refutedTotal` are the
+        // readout — how long an order the server acked and then REFUSED stayed
+        // on screen.
+        case 'setSnapshotRefutation':
+            gpSnapshotRefutation = args[0] !== false;
+            gpPendingActions?.setSnapshotRefutation(gpSnapshotRefutation);
+            return gpSnapshotRefutation;
         // — bounded positional lean (PLAN-latency L4.3). `leanStats` is the
         //   correction-budget alarm's readout: `maxOffsetElmos` must stay at
         //   or under `maxLeanElmos` and `boundExceededTotal` must be 0, while

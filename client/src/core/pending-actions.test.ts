@@ -290,6 +290,99 @@ describe('PendingActionRegistry', () => {
         expect(reg.stats().unconfirmed).toBe(1);
     });
 
+    // --- L4.4: an ack is not an acceptance (PLAN-latency-impl §L4.4). The
+    // engine's own `AllowedCommand` runs AFTER the `UnitCommand` callin, so a
+    // refused order is confirmed and then never queued.
+    describe('snapshot refutation of a confirmed entry', () => {
+        it('refutes a confirmed order the next snapshot does not carry', () => {
+            const { reg, advance } = mk();
+            reg.register({ commandId: CMD_MOVE, unitIds: [7], params: [100, 0, 200] });
+            advance(84);                       // the measured ack latency
+            reg.confirm([issued(7, CMD_MOVE, [100, 0, 200], 0)]);
+            // A snapshot in which unit 7 has some OTHER order: post-dates the
+            // ack, so it is conclusive that ours was refused.
+            reg.retire([{
+                unitId: 7,
+                orders: [{ cmdId: CMD_MOVE, params: [900, 0, 900], options: 0, tag: 4, timeout: 0 }],
+            }]);
+            expect(reg.size).toBe(1);          // grace, not an instant pop
+            advance(250);
+            expect(reg.expire()).toBe(0);      // not a *rollback*
+            expect(reg.size).toBe(0);
+            expect(reg.stats().refutedTotal).toBe(1);
+            expect(reg.stats().retiredTotal).toBe(0);
+        });
+
+        it('treats a unit missing from the snapshot as an empty queue', () => {
+            // The measured case: a build order to a tank. The tank has no other
+            // orders, so `BuildUnitCommandQueues` omits it entirely — before
+            // L4.4 that read as "no evidence" and the ghost rode the 3 s cap.
+            const { reg, advance } = mk();
+            reg.register({ commandId: -42, unitIds: [7], params: [100, 0, 200] });
+            advance(84);
+            reg.confirm([issued(7, -42, [100, 0, 200], 0)]);
+            reg.retire([{ unitId: 99, orders: [] }]);   // unit 7 absent
+            advance(250);
+            reg.expire();
+            expect(reg.size).toBe(0);
+            expect(reg.stats().refutedTotal).toBe(1);
+        });
+
+        it('bounds a refused order well inside the old 3 s cap', () => {
+            const { reg, advance, at } = mk();
+            reg.register({ commandId: CMD_MOVE, unitIds: [7], params: [1, 0, 2] });
+            advance(84);
+            reg.confirm([issued(7, CMD_MOVE, [1, 0, 2], 0)]);
+            // Worst-case snapshot phase: a full period after the ack.
+            advance(1000);
+            reg.retire([]);
+            advance(250);
+            reg.expire();
+            expect(reg.size).toBe(0);
+            expect(at()).toBeLessThan(3000);   // the pre-L4.4 bound
+        });
+
+        it('still retires normally when the snapshot does carry the order', () => {
+            const { reg, advance } = mk();
+            reg.register({ commandId: CMD_MOVE, unitIds: [7], params: [100, 0, 200] });
+            reg.confirm([issued(7, CMD_MOVE, [100, 0, 200], 91)]);
+            reg.retire([{
+                unitId: 7,
+                orders: [{ cmdId: CMD_MOVE, params: [100, 43, 200], options: 0, tag: 91, timeout: 0 }],
+            }]);
+            expect(reg.stats().retiredTotal).toBe(1);
+            expect(reg.stats().refutedTotal).toBe(0);
+            advance(5000);
+            expect(reg.stats().refutedTotal).toBe(0);
+        });
+
+        it('an unconfirmed entry is never refuted by a snapshot', () => {
+            // It cannot be: the snapshot may predate our order entirely. Only
+            // the ack establishes the ordering that makes absence conclusive.
+            const { reg, advance } = mk();
+            reg.register({ commandId: CMD_MOVE, unitIds: [7], params: [1, 0, 2] });
+            reg.retire([]);
+            advance(250);
+            reg.expire();
+            expect(reg.size).toBe(1);          // still drawn, still waiting
+            expect(reg.stats().refutedTotal).toBe(0);
+        });
+
+        it('a confirmed entry no snapshot ever examined still rides the cap', () => {
+            const { reg, advance } = mk();
+            reg.register({ commandId: CMD_MOVE, unitIds: [7], params: [1, 0, 2] });
+            reg.confirm([issued(7, CMD_MOVE, [1, 0, 2], 0)]);
+            advance(2900);
+            reg.expire();
+            expect(reg.size).toBe(1);
+            advance(200);
+            reg.expire();
+            expect(reg.size).toBe(0);
+            expect(reg.stats().retiredTotal).toBe(1);   // not refuted
+            expect(reg.stats().refutedTotal).toBe(0);
+        });
+    });
+
     it('clear() drains everything', () => {
         const { reg } = mk();
         reg.register({ commandId: CMD_MOVE, unitIds: [1, 2, 3], params: [1, 0, 2] });
