@@ -1,17 +1,23 @@
 /**
  * aim-rotation — static turret aiming at a moving target.
  *
- * Spawn a turretlaser at map centre. Spawn a shieldraid 200 elmos
- * away on a different team and give it a chain of move orders that
- * walks the target around the turret in a square. Observe whether
- * the turret hits and damages the moving target during a fixed
- * observation window.
+ * Spawn an `ms_staticdefense_s1` at map centre. Spawn an `ms_mechs_s1`
+ * 200 elmos away on a different team and give it a chain of move orders
+ * that walks it around the turret in a square. Observe whether the
+ * turret hits and damages the moving target during a fixed observation
+ * window.
  *
  * Aim-bench heritage: targets aim regressions where headless
  * LocalModelPiece stubs returned identity matrices, causing weapons
  * to fire straight up or in fixed world directions instead of
  * tracking. A clean run shows the target taking sustained damage
  * even as it changes direction.
+ *
+ * Metalstorm port (2026-08-04) — was ZK `turretlaser` / `shieldraid`.
+ * Both replacements carry MS_MG_S2 (range 380), so the 200-elmo orbit
+ * stays inside the turret's envelope on every leg of the square, which
+ * is what makes "damage stopped" mean "aim broke" rather than "the
+ * target walked out of range".
  */
 
 import type { Scenario } from '../types.js';
@@ -19,23 +25,27 @@ import { sleep, parseUnitField, currentFrame } from '../types.js';
 
 const CMD_MOVE = 10;
 const FLAT_MAP_CENTER = 8704;
+/** Orbit radius. Corners sit at r·√2 ≈ 283 elmos from the turret, still
+ *  inside MS_MG_S2's 380. */
 const ORBIT_RADIUS = 200;
+const TURRET_DEF = 'ms_staticdefense_s1';
+const TARGET_DEF = 'ms_mechs_s1';
 
 let _turretId = 0;
 let _targetId = 0;
 
 const scenario: Scenario = {
     name: 'aim-rotation',
-    description: 'Static turretlaser fires at a shieldraid walking a square around it. Asserts the moving target takes sustained damage (i.e. the turret tracks).',
+    description: 'Static ms_staticdefense_s1 fires at an ms_mechs_s1 walking a square around it. Asserts the moving target takes sustained damage (i.e. the turret tracks).',
     map: 'green_flat_x34_v3',
-    gameId: 'zk',
+    gameId: 'metalstorm',
     aiSlots: [{ aiId: 'null', team: 1 }],
     playerTeam: 0,
     async setup(h) {
         await h.setLogging({ combat: true, weapon: true });
         await h.clear();
-        const turretOut = await h.spawn('turretlaser', FLAT_MAP_CENTER, FLAT_MAP_CENTER, 0, 1);
-        const targetOut = await h.spawn('shieldraid', FLAT_MAP_CENTER + ORBIT_RADIUS, FLAT_MAP_CENTER, 1, 1);
+        const turretOut = await h.spawn(TURRET_DEF, FLAT_MAP_CENTER, FLAT_MAP_CENTER, 0, 1);
+        const targetOut = await h.spawn(TARGET_DEF, FLAT_MAP_CENTER + ORBIT_RADIUS, FLAT_MAP_CENTER, 1, 1);
         const turretId = Number(turretOut.match(/:\s*(\d+)/)?.[1] ?? 0);
         const targetId = Number(targetOut.match(/:\s*(\d+)/)?.[1] ?? 0);
         if (!turretId || !targetId) throw new Error(`spawn parse failed: ${turretOut} / ${targetOut}`);

@@ -6,38 +6,51 @@
  * Categories shipped today:
  *   - movement — `canMove` units; assert arrival at a goal point.
  *   - combat   — `canShoot` units; assert HP damage / firing / target acq.
- *   - economy  — `producesResources` units; assert team income delta.
  *   - recon    — units with radar/sonar/jammer; assert detection of
  *                an enemy probe inside the recon radius.
  *
  * The selection filter widens to any unit that's relevant to ≥1
- * category, so mexes, radars, fusion, sonar towers and jammers all
- * cycle through the loop alongside mobile units.
+ * category, so radars cycle through the loop alongside mobile units.
  *
  * URL filters:
  *   ?scenario=unit-test-loop
- *   ?scenario=unit-test-loop&units=shieldraid,armraz,reef
+ *   ?scenario=unit-test-loop&units=ms_mechs_s1,ms_tanks_s2,ms_radar_s1
  *
  * Per-unit flow:
  *   1. `h.clear()` — wipe leftover units from the previous iteration.
- *   2. `spawnEconomy()` — drop fusion + 5 mexes around the anchor so
- *      categories that need resources (build, etc.) have them.
- *   3. Snapshot log high-water mark.
- *   4. Run each applicable category, capturing pass/fail/detail.
- *   5. Fetch logs since snapshot, attach any WARN/ERROR to the row.
+ *   2. Snapshot log high-water mark.
+ *   3. Run each applicable category, capturing pass/fail/detail.
+ *   4. Fetch logs since snapshot, attach any WARN/ERROR to the row.
  *
  * Results land on `window.unitTestResults` as a structured array plus
  * a summary line printed to the console.
+ *
+ * **Metalstorm port (2026-08-04).** Two things went with the ZK port:
+ *
+ *   - **The economy bootstrap** (`unit-test/economy.ts` — one fusion +
+ *     five mexes per iteration, so build/assist probes had resources).
+ *     Metalstorm has no passive resource producer at all; its economy is
+ *     authority-based (PLAN-metalstorm-economy.md), so there is nothing
+ *     to spawn.
+ *   - **The economy category** (`category/economy.ts`). It gated on
+ *     `producesResources`, which is false for all 74 Metalstorm defs, so
+ *     it could only ever return "not applicable" — an assertion that can
+ *     never fire. When authority income becomes observable per-unit, the
+ *     replacement is a new category against *that*, not a revival of the
+ *     mex/fusion one.
+ *
+ * `catalog.ts` still carries the ZK `customParams.income_*` fallbacks in
+ * its `producesResources` classification. That is deliberate: the field
+ * is what a future economy category would key off, and dropping the
+ * classification would make re-adding one harder than leaving it.
  */
 
 import type { Scenario, AssertionResult } from '../types.js';
 import type { TestHarness } from '../../core/test-harness.js';
 import { loadCatalog, pickUnits, type UnitClassification } from '../unit-test/catalog.js';
-import { spawnEconomy } from '../unit-test/economy.js';
 import { runMovement, type CategoryResult } from '../unit-test/category/movement.js';
 import { runCombat } from '../unit-test/category/combat.js';
 import { runRecon } from '../unit-test/category/recon.js';
-import { runEconomy } from '../unit-test/category/economy.js';
 import {
     logHighWaterMark, fetchLogsSince, formatLogEntry, type LogEntry,
 } from '../lib/log-fetch.js';
@@ -55,7 +68,6 @@ interface PerUnitResult {
         movement?: CategoryResult;
         combat?: CategoryResult;
         recon?: CategoryResult;
-        economy?: CategoryResult;
     };
     logs: LogEntry[];
     elapsedMs: number;
@@ -86,11 +98,11 @@ let _units: UnitClassification[] = [];
 
 const scenario: Scenario = {
     name: 'unit-test-loop',
-    description: 'Iterate land+air units through movement (v1) and record pass/fail. Use ?units=a,b,c to test a subset.',
+    description: 'Iterate land+air units through movement, combat and recon and record pass/fail. Use ?units=a,b,c to test a subset.',
     map: 'green_flat_x34_v3',
-    gameId: 'zk',
-    // NullAI on team 1 keeps the dead-team workaround in spawn-via-Gaia
-    // happy and gives us a permanent enemy team for future combat tests.
+    gameId: 'metalstorm',
+    // NullAI on team 1 gives the combat and recon categories a permanent
+    // enemy team to spawn their dummy targets and probes onto.
     aiSlots: [{ aiId: 'null', team: 1 }],
     playerTeam: PLAYER_TEAM,
 
@@ -104,9 +116,8 @@ const scenario: Scenario = {
         });
 
         // Crank sim speed so each unit's movement test completes in a
-        // few wall seconds instead of a few wall minutes. The headless
-        // sim CPU-caps somewhere around 1.5–2× for ZK, but request 5
-        // and let it land where it lands.
+        // few wall seconds instead of a few wall minutes. Request 5 and
+        // let it land wherever the headless sim's CPU budget allows.
         await h.simSpeed(5);
 
         // Frame the test playground so an observer can watch each unit
@@ -119,9 +130,11 @@ const scenario: Scenario = {
 
         const catalog = await loadCatalog(h);
         const requested = parseUnitsParam();
-        // Any unit relevant to at least one shipped category. Drops
-        // pure scaffolding / decorations (and `terraunit`, `wreck`-style
-        // pseudo-defs) but keeps mexes, fusion, radars and jammers.
+        // Any unit relevant to at least one shipped category. Drops pure
+        // scaffolding / decorations but keeps radars and every mover or
+        // shooter. `producesResources` stays in the predicate even though
+        // no Metalstorm def sets it — so a future economy unit is picked
+        // up by the sweep the day it lands rather than silently skipped.
         const units = pickUnits(catalog, requested, /*requireMovement*/ false)
             .filter((u) => u.canMove || u.canShoot || u.producesResources || u.extendsRecon);
 
@@ -134,7 +147,7 @@ const scenario: Scenario = {
         };
         _units = units;
 
-        console.log(`[unit-test-loop] catalog: ${catalog.length} total, ${units.length} selected (movement + combat + economy + recon)`);
+        console.log(`[unit-test-loop] catalog: ${catalog.length} total, ${units.length} selected (movement + combat + recon)`);
         if (requested) console.log(`[unit-test-loop] URL filter: ${requested.join(', ')}`);
     },
 
@@ -178,8 +191,8 @@ const scenario: Scenario = {
                 detail: `${aggregate.passed} passed`,
             },
             // Soft signal — useful in the report but never gating, since
-            // many WARN/ERROR lines come from ZK gadgets we haven't
-            // quieted (e.g. Chili rendering, perks shaders).
+            // WARN/ERROR lines also come from game gadgets unrelated to
+            // the unit under test.
             {
                 name: 'no unit triggered new ERROR-level logs',
                 ok: aggregate.results.every((r) => !r.logs.some((l) => l.level >= 4)),
@@ -200,20 +213,9 @@ async function runOneUnit(
         categories: {}, logs: [], elapsedMs: 0,
     };
 
-    // Clean the slate. Note: clear() wipes ALL teams' units. Economy
-    // gets re-spawned right after.
+    // Clean the slate. Note: clear() wipes ALL teams' units, so every
+    // category below starts from an empty board and spawns what it needs.
     try { await h.clear(); } catch { /* nothing to clear is fine */ }
-
-    try {
-        await spawnEconomy(h, PLAYER_TEAM, ANCHOR_X, ANCHOR_Z);
-    } catch (err: any) {
-        result.categories.movement = {
-            applicable: true, pass: false,
-            detail: `economy bootstrap failed: ${err?.message ?? err}`,
-        };
-        result.elapsedMs = performance.now() - startMs;
-        return result;
-    }
 
     const sinceLogId = await logHighWaterMark();
 
@@ -236,18 +238,6 @@ async function runOneUnit(
         );
     } catch (err: any) {
         result.categories.combat = {
-            applicable: true, pass: false,
-            detail: `category threw: ${err?.message ?? err}`,
-        };
-    }
-
-    try {
-        result.categories.economy = await runEconomy(
-            { h, anchorX: ANCHOR_X, anchorZ: ANCHOR_Z, team: PLAYER_TEAM },
-            unit,
-        );
-    } catch (err: any) {
-        result.categories.economy = {
             applicable: true, pass: false,
             detail: `category threw: ${err?.message ?? err}`,
         };

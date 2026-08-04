@@ -82,6 +82,20 @@ async function checkCoupling(h: TestHarness, unit1: number, unit2: number, expec
     return Math.abs(dist - expectedDist) < tolerance;
 }
 
+/**
+ * Pull the unit ID out of a spawn response.
+ *
+ * The response is `"spawned 1 unit(s): <id>"` (LuaExecEngine.cpp), so a
+ * bare `/\d+/` matches the *count* — every ID came back as 1 and the
+ * coupling pass then died on `[GiveOrderToUnit] invalid unitID`. Anchor on
+ * the colon, the same way `TestHarness.spawnAndFocus` does.
+ */
+function spawnedUnitId(out: string): number {
+    const m = out.match(/:\s*(\d+)/);
+    if (!m) throw new Error(`[train-verification] could not parse spawn output: ${out}`);
+    return Number(m[1]);
+}
+
 // Test 1: Spawn and couple the consist
 async function testSpawnAndCouple(h: TestHarness, state: TrainTestState): Promise<void> {
     console.log('[train-verification] Test 1: Spawning and coupling consist');
@@ -93,27 +107,27 @@ async function testSpawnAndCouple(h: TestHarness, state: TrainTestState): Promis
 
     // Front engine - spawn returns string with unit ID
     const engineFrontStr = await h.spawn('fable_train_engine', x, z, 0, 1); // Team 0, count 1
-    state.engineFront = parseInt(engineFrontStr.match(/\d+/)?.[0] || '0');
+    state.engineFront = spawnedUnitId(engineFrontStr);
 
     // Gun car 1
     const gunCar1Str = await h.spawn('fable_train_gun', x - spacing, z, 0, 1);
-    state.gunCar1 = parseInt(gunCar1Str.match(/\d+/)?.[0] || '0');
+    state.gunCar1 = spawnedUnitId(gunCar1Str);
 
     // Troop car
     const troopCarStr = await h.spawn('fable_train_troop', x - 2*spacing, z, 0, 1);
-    state.troopCar = parseInt(troopCarStr.match(/\d+/)?.[0] || '0');
+    state.troopCar = spawnedUnitId(troopCarStr);
 
     // Cargo car
     const cargoCarStr = await h.spawn('fable_train_cargo', x - 3*spacing, z, 0, 1);
-    state.cargoCar = parseInt(cargoCarStr.match(/\d+/)?.[0] || '0');
+    state.cargoCar = spawnedUnitId(cargoCarStr);
 
     // Gun car 2
     const gunCar2Str = await h.spawn('fable_train_gun', x - 4*spacing, z, 0, 1);
-    state.gunCar2 = parseInt(gunCar2Str.match(/\d+/)?.[0] || '0');
+    state.gunCar2 = spawnedUnitId(gunCar2Str);
 
     // Rear engine (facing opposite for reverse capability)
     const engineRearStr = await h.spawn('fable_train_engine', x - 5*spacing, z, 0, 1); // Team 0, count 1
-    state.engineRear = parseInt(engineRearStr.match(/\d+/)?.[0] || '0');
+    state.engineRear = spawnedUnitId(engineRearStr);
 
     state.consistUnits = [state.engineFront, state.gunCar1, state.troopCar,
                           state.cargoCar, state.gunCar2, state.engineRear];
@@ -277,15 +291,15 @@ async function testFiringArcs(h: TestHarness, state: TrainTestState): Promise<vo
         const x = centerX + Math.cos(angle) * radius;
         const z = centerZ + Math.sin(angle) * radius;
         const targetStr = await h.spawn('ms_mechs_s1', x, z, 1, 1); // Team 1 enemy units
-        const targetId = parseInt(targetStr.match(/\d+/)?.[0] || '0');
+        const targetId = spawnedUnitId(targetStr);
         state.targetRing.push(targetId);
     }
 
     // Also spawn air targets for AA testing
     const airStr1 = await h.spawn('ms_fighters_s1', centerX, centerZ + 300, 1, 1);
-    const airTarget1 = parseInt(airStr1.match(/\d+/)?.[0] || '0');
+    const airTarget1 = spawnedUnitId(airStr1);
     const airStr2 = await h.spawn('ms_fighters_s1', centerX, centerZ - 300, 1, 1);
-    const airTarget2 = parseInt(airStr2.match(/\d+/)?.[0] || '0');
+    const airTarget2 = spawnedUnitId(airStr2);
 
     // Warp air targets to altitude
     await h.lua(`
@@ -437,7 +451,7 @@ async function testSquadTransport(h: TestHarness, state: TrainTestState): Promis
 
     for (let i = 0; i < 4; i++) {
         const squadStr = await h.spawn('ms_soldiers_s1', squadX + i * 20, squadZ, 0, 1);
-        const squadId = parseInt(squadStr.match(/\d+/)?.[0] || '0');
+        const squadId = spawnedUnitId(squadStr);
         state.squadUnits.push(squadId);
     }
 
@@ -464,9 +478,9 @@ async function testSquadTransport(h: TestHarness, state: TrainTestState): Promis
 
     // Spawn enemy targets for fire platform test
     const enemyStr1 = await h.spawn('ms_mechs_s1', TRACK_START_X + 200, squadZ, 1, 1);
-    const enemy1 = parseInt(enemyStr1.match(/\d+/)?.[0] || '0');
+    const enemy1 = spawnedUnitId(enemyStr1);
     const enemyStr2 = await h.spawn('ms_mechs_s1', TRACK_START_X - 200, squadZ, 1, 1);
-    const enemy2 = parseInt(enemyStr2.match(/\d+/)?.[0] || '0');
+    const enemy2 = spawnedUnitId(enemyStr2);
 
     await sleep(3000); // Let loaded squads fire
 

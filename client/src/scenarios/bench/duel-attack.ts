@@ -1,57 +1,64 @@
 /**
  * duel-attack — 1v1 combat path sanity check.
  *
- * Spawn one shieldraid (Bandit) on team 0 and one on the opposing
- * NullAI team. Order team 0 to attack team 1. Within a 5-second
- * observation window the attacker should acquire its target and the
- * laser should deal lethal damage (shieldraid HP 340, laser DPS well
- * over that across the window).
+ * Spawn one `ms_mechs_s1` on team 0 and one on team 1, 150 elmos apart,
+ * and order team 0 to attack. Within a 5-second window the attacker
+ * should acquire its target and its autocannon should land damage.
  *
- * Dead-team note: the runner enables cheats + `revive_team all` before
- * setup. ZK's game_over.lua otherwise flags teams 0 and 1 isDead at
- * frame 45 (no units → alliance destroyed), and Spring.CreateUnit on
- * a dead team raises a Lua error that aborts the spawn snippet. With
- * cheats on the periodic check returns early, and with isDead reset
- * the fast `CreateUnit(team)` path works.
+ * Metalstorm port (2026-08-04). Was ZK `shieldraid` vs `shieldraid` with
+ * a laser; ZK is archived (PLAN.md "The goal"), so this is a rewrite
+ * against Metalstorm defs, not a `gameId` swap. `ms_mechs_s1` carries
+ * MS_MG_S2 — range 380, ~90 damage a shot — so the pair is in range from
+ * frame 1 at 150 elmos and neither has to pursue.
+ *
+ * The assertion is "took damage", not "died", deliberately: at 900 HP a
+ * mech survives the window comfortably, so the test measures a real HP
+ * delta instead of racing a kill. A destroy still passes (the delta is
+ * then the full bar) — it just isn't required, which keeps the result
+ * stable if weapon balance moves.
+ *
+ * No pre-setup `cheats on` / `revive_team all` here or in the runner:
+ * that was a ZK game_over.lua workaround and Metalstorm has no gadget
+ * that flags unit-less teams dead (see runner.ts).
  */
 
 import type { Scenario } from '../types.js';
 import { sleep, parseUnitField, currentFrame } from '../types.js';
 
 const CMD_ATTACK = 20;
-const FLAT_MAP_CENTER = 8704; // green_flat_x34_v3 is 17408×17408 elmos
+/** green_flat_x34_v3 is 17408×17408 elmos. */
+const FLAT_MAP_CENTER = 8704;
+/** Half-separation. MS_MG_S2 reaches 380, so 150 total keeps both
+ *  inside range with margin for the spawn scatter. */
+const HALF_SEPARATION = 75;
+const COMBATANT = 'ms_mechs_s1';
 
 let _aId = 0;
 let _tId = 0;
 
 const scenario: Scenario = {
     name: 'duel-attack',
-    description: '1v1 shieldraid attacker vs shieldraid target. Asserts target took damage and a shot was fired within the observation window.',
+    description: '1v1 ms_mechs_s1 attacker vs a held-still ms_mechs_s1 target. Asserts the attacker acquires and lands damage inside the observation window.',
     map: 'green_flat_x34_v3',
-    gameId: 'zk',
+    gameId: 'metalstorm',
     aiSlots: [{ aiId: 'null', team: 1 }],
     playerTeam: 0,
     async setup(h) {
         await h.setLogging({ combat: true, weapon: true });
         await h.clear();
-        // Place attacker and target straddling map centre. shieldraid
-        // weapon range is 232; with 150 elmo separation the attacker is
-        // already in range from the first frame and doesn't need to
-        // pursue. The target is held stationary + fire-disabled so
-        // (a) it stays in range for the whole window and (b) it doesn't
-        // pursue the attacker, which previously turned the test into
-        // a 700-elmo chase neither could resolve before the timeout.
-        const aOut = await h.spawn('shieldraid', FLAT_MAP_CENTER - 75, FLAT_MAP_CENTER, 0, 1);
-        const tOut = await h.spawn('shieldraid', FLAT_MAP_CENTER + 75, FLAT_MAP_CENTER, 1, 1);
+        const aOut = await h.spawn(COMBATANT, FLAT_MAP_CENTER - HALF_SEPARATION, FLAT_MAP_CENTER, 0, 1);
+        const tOut = await h.spawn(COMBATANT, FLAT_MAP_CENTER + HALF_SEPARATION, FLAT_MAP_CENTER, 1, 1);
         const aId = Number(aOut.match(/:\s*(\d+)/)?.[1] ?? 0);
         const tId = Number(tOut.match(/:\s*(\d+)/)?.[1] ?? 0);
         if (!aId || !tId) throw new Error(`spawn parse failed: ${aOut} / ${tOut}`);
         _aId = aId;
         _tId = tId;
-        // Hold-position + hold-fire the target so it's a stationary dummy.
-        // Spring.SetUnit{Move,Fire}State aren't wired into our LuaSyncedCtrl
-        // yet (Phase 4 API gap); use the CMD_*_STATE order verbs instead.
-        // 50 = CMD_MOVE_STATE (0=Hold), 45 = CMD_FIRE_STATE (0=HoldFire).
+        // Hold-position + hold-fire the target so it's a stationary dummy:
+        // it stays in range for the whole window and doesn't turn the test
+        // into a mutual chase. Spring.SetUnit{Move,Fire}State aren't wired
+        // into our LuaSyncedCtrl yet (Phase 4 API gap), so use the
+        // CMD_*_STATE order verbs. 50 = CMD_MOVE_STATE (0=Hold),
+        // 45 = CMD_FIRE_STATE (0=HoldFire).
         await h.lua(`Spring.GiveOrderToUnit(${tId}, 50, {0}, 0); Spring.GiveOrderToUnit(${tId}, 45, {0}, 0)`);
         // Camera framing so screenshots are useful.
         await h.cameraSnapToGround(FLAT_MAP_CENTER, FLAT_MAP_CENTER, { height: 600, durationMs: 0 });
@@ -66,11 +73,10 @@ const scenario: Scenario = {
         const beforeT = await h.unitState(tId);
         const beforeHp = parseUnitField(beforeT, 'hp')?.split('/')[0];
 
-        // Sample the attacker's targeting state mid-window so it isn't
-        // affected by the target dying before the assertions run (the
-        // shieldraid kills its dummy in ~1s now that LaserCannon hits
-        // land — by the 5s mark the attacker no longer has anything to
-        // aim at). 750ms / ~22 frames is well past the first reload.
+        // Sample the attacker's targeting state mid-window rather than at
+        // the end: if the target does die early, `hasTarget` goes back to
+        // no and a late sample would read as "never acquired". 750ms is
+        // ~22 sim frames, well past the first reload.
         await sleep(750);
         const midA = await h.unitState(aId);
         const midHasTarget = /hasTarget=yes/.test(midA);

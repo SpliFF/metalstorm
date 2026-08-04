@@ -1,20 +1,25 @@
 /**
  * move-pathing — movement + pathfinding sanity check.
  *
- * Spawn a single shieldraid at one side of the flat map and order it
- * to move ~6000 elmos across to the opposite side. Asserts the unit
+ * Spawn a single `ms_tanks_s1` at one side of the flat map and order it
+ * to move 5000 elmos across to the opposite side. Asserts the unit
  * arrived within the expected wall-clock budget and that no enemies
  * are present that would distract it (combat is out of scope here).
  *
  * Catches regressions in: movement orders being accepted, MoveDef
  * pathing, unit reaching its goal, frame rate sufficient for the
  * traversal.
+ *
+ * Metalstorm port (2026-08-04) — was ZK `shieldraid` (70 elmos/sec).
+ * `ms_tanks_s1` does 78, so the same 5000-elmo corridor and the same
+ * 30 s budget at 5× sim speed carry over unchanged.
  */
 
 import type { Scenario } from '../types.js';
 import { sleep, parseUnitField, parseUnitPos, currentFrame } from '../types.js';
 
 const CMD_MOVE = 10;
+const MOVER_DEF = 'ms_tanks_s1';
 
 let _startX = 0;
 let _goalX = 0;
@@ -23,16 +28,16 @@ let _id = 0;
 
 const scenario: Scenario = {
     name: 'move-pathing',
-    description: 'Single shieldraid traverses the flat map. Asserts arrival within a generous frame budget.',
+    description: 'Single ms_tanks_s1 traverses the flat map. Asserts arrival within a generous frame budget.',
     map: 'green_flat_x34_v3',
-    gameId: 'zk',
+    gameId: 'metalstorm',
     aiSlots: [{ aiId: 'null', team: 1 }],
     playerTeam: 0,
     async setup(h) {
         await h.setLogging({ order: true, unit: true });
         await h.clear();
-        // 5× sim speed → ~14s wall for 5000 elmos at shieldraid's
-        // 70 elmos/sec. The sim loop reads wantedSpeedFactor every
+        // 5× sim speed → ~13s wall for 5000 elmos at ms_tanks_s1's
+        // 78 elmos/sec. The sim loop reads wantedSpeedFactor every
         // tick (rts/server_main.cpp), so this takes effect immediately.
         await h.simSpeed(5);
 
@@ -43,7 +48,7 @@ const scenario: Scenario = {
         _goalX = goalX;
         _z = z;
 
-        const out = await h.spawn('shieldraid', startX, z, 0, 1);
+        const out = await h.spawn(MOVER_DEF, startX, z, 0, 1);
         const id = Number(out.match(/:\s*(\d+)/)?.[1] ?? 0);
         if (!id) throw new Error(`spawn parse failed: ${out}`);
         _id = id;
@@ -56,8 +61,8 @@ const scenario: Scenario = {
         const startX = _startX;
         const goalX = _goalX;
         const distance = goalX - startX;
-        // 5000 elmos at 70 elmos/sec = ~71 sim seconds. At 5× sim
-        // speed (set in setup) that's ~14s wall. Give 30s budget so
+        // 5000 elmos at 78 elmos/sec = ~64 sim seconds. At 5× sim
+        // speed (set in setup) that's ~13s wall. Give 30s budget so
         // pathing detours have headroom.
         const TIMEOUT_MS = 30000;
         const ARRIVAL_THRESHOLD = 250;

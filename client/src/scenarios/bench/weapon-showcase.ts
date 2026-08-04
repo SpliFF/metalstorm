@@ -12,24 +12,32 @@
  * — the camera zooms in close enough that projectile travel, trail
  * puffs and impact CEGs are clearly readable.
  *
- * Coverage (ZK names in parens):
- *   - LaserCannon       (shieldraid → Bandit)
- *   - BeamLaser         (cloakaa → Gremlin, fires at flying drone)
- *   - Cannon            (staticheavyarty → Big Bertha)
- *   - StarburstLauncher (vehheavyarty Impaler — ballistic missile rover)
- *   - StarburstLauncher (staticnuke → Trinity)        ← nuclear missile
- *   - MissileLauncher   (bomberstrike → Magpie)
- *   - LightningCannon   (shieldfelon → Felon)
- *   - DGun              (striderantiheavy → Ultimatum)
- *   - AircraftBomb      (bomberstrike — second weapon)
- *   - Flak (Cannon)     (turretaaflak → Thresher → flying drone)
- *   - Ground-to-air SAM (hoveraa → Flail → flying drone)
- *   - Air-to-air        (planefighter → Swift, MoveCtrl warped airborne)
- *   - Naval / torpedo   (PLACEHOLDER — current test map has no water)
+ * **Metalstorm port (2026-08-04).** The ZK edition toured thirteen
+ * archetypes (BeamLaser, LightningCannon, DGun, StarburstLauncher, the
+ * Trinity nuke…). Metalstorm's whole arsenal is four WeaponDef types —
+ * **Cannon, MissileLauncher, AircraftBomb, TorpedoLauncher** — so the
+ * tour is genuinely shorter, not abbreviated. What that costs is stated
+ * plainly rather than faked: there is no hit-scan weapon in Metalstorm,
+ * so the beam-rendering path has no coverage here at all, and the
+ * stockpile / manual-fire (DGun) firing paths have no Metalstorm caller.
+ * Those branches were deleted rather than left dead — a `?only=nuke` that
+ * silently matches nothing is worse than one that lists what exists.
+ *
+ * Coverage (the unit carrying each weapon in parens):
+ *   - Cannon, rapid short         (ms_mechs_s1 — MS_MG_S2, r 380)
+ *   - Cannon, autocannon          (ms_tanks_s2 — MS_AC_S3, r 520)
+ *   - Cannon, railgun             (ms_mechs_s4 — MS_RAILGUN_S3, r 900)
+ *   - Cannon, ballistic howitzer  (ms_artillery_s2 — MS_HOWITZER_S1, r 1100)
+ *   - Cannon, flak vs air         (ms_staticdefense_s3 — MS_FLAK_S2, r 800)
+ *   - MissileLauncher, cruise     (fable_colossus — MS_MISSILE_CRUISE_S1, r 2400)
+ *   - MissileLauncher, SAM        (ms_mechs_s3 — MS_MISSILE_AA_S2, r 950)
+ *   - AircraftBomb                (ms_bombers_s2 — MS_BOMB_S2)
+ *   - Air-to-air                  (ms_fighters_s3 vs an airborne fighter)
+ *   - TorpedoLauncher             (PLACEHOLDER — the test map has no water)
  *
  * URL params (all optional):
  *   ?scenario=weapon-showcase
- *   ?scenario=weapon-showcase&only=nuke         run just the named entry
+ *   ?scenario=weapon-showcase&only=howitzer     run just the named entry
  *   ?scenario=weapon-showcase&speed=0.1         sim-speed multiplier
  *   ?scenario=weapon-showcase&dwellMs=20000     ms per archetype
  *   ?scenario=weapon-showcase&fitAll=1          frame every pair at once
@@ -46,10 +54,19 @@ import { sleep } from '../types.js';
 const CMD_ATTACK       = 20;
 const CMD_MOVE_STATE   = 50;
 const CMD_FIRE_STATE   = 45;
-const CMD_MANUALFIRE   = 105;
 
 // Map metrics: green_flat_x34_v3 is 17408×17408 elmos, completely flat.
 const MAP_CENTER = 8704;
+
+/** Static, unarmed, 12000 HP, large footprint — the closest thing
+ *  Metalstorm has to a dedicated damage sink. Every ground entry shoots
+ *  at one; `spawnConfigured` lifts its HP to 1e9 so a long dwell doesn't
+ *  end early in a kill. */
+const GROUND_TARGET = 'ms_garrison';
+/** Air target for the AA entries. Metalstorm has no equivalent of ZK's
+ *  `fakeunit_aatarget` drone, so a real fighter is MoveCtrl-warped to
+ *  altitude and pinned there on hold-fire. */
+const AIR_TARGET = 'ms_fighters_s1';
 
 // Phase V capture hook. The cycle publishes the active archetype on
 // `window.__showcase` so an external driver (screenshot capture) can sync
@@ -73,8 +90,7 @@ function setShowcasePhase(phase: ShowcaseProgress['phase']): void {
 
 // Default sim-speed and per-pair dwell. 0.25× makes projectile travel
 // readable; 18 s of wall time = 4.5 s of sim time, comfortably more
-// than a reload for every weapon listed below except the nuke
-// (which the scenario stockpiles explicitly).
+// than a reload for every weapon listed below.
 const DEFAULT_SPEED = 0.25;
 const DEFAULT_DWELL_MS = 18_000;
 
@@ -89,7 +105,10 @@ interface WeaponEntry {
     /// Unit def name of the target. Always spawned on team 1.
     target: string;
     /// Separation between shooter (west) and target (east) in elmos.
-    /// Tuned per-weapon so the target sits comfortably inside range.
+    /// Tuned per-weapon so the target sits comfortably inside range —
+    /// and, on multi-weapon shooters, so that only the weapon this
+    /// entry is about can reach (that is how the cruise-missile entry
+    /// isolates the launcher from the autocannon on the same unit).
     distance: number;
     /// `true` → keep the target on the ground but hold-fire (still
     /// invulnerable). `'flying'` → MoveCtrl-warp the target to a
@@ -100,27 +119,16 @@ interface WeaponEntry {
     /// targetMode is 'ground'.
     targetAlt?: number;
     /// `true` when the shooter itself needs to be airborne — used for
-    /// the air-to-air entry. We MoveCtrl-warp it after spawn so the
-    /// engine's stuck-on-ground takeoff path doesn't gate the test.
+    /// the bomber and air-to-air entries. We MoveCtrl-warp it after
+    /// spawn so the engine's stuck-on-ground takeoff path doesn't gate
+    /// the test.
     shooterFlying?: boolean;
-    /// `true` for stockpile-gated weapons (nukes). The scenario
-    /// pre-stockpiles via the `stockpile` server verb and orders an
-    /// attack-ground at the target instead of a unit-attack.
-    stockpile?: boolean;
-    /// `true` for manual-fire / DGun weapons. Switches the order
-    /// verb to `CMD_MANUALFIRE` against the target position.
-    manualFire?: boolean;
-    /// Extra Lua to run before the attack order — e.g. raising
-    /// stockpile count, force-acquiring the target. Receives the
-    /// shooter+target IDs as substitution placeholders `$SID` / `$TID`.
-    extraSetup?: string;
     /// Per-entry camera padding override. `cameraFitUnits` defaults to
     /// 1.4; this scenario default is `DEFAULT_PADDING` (2.2 — wide
     /// enough that both units sit comfortably inside the frame with
-    /// projectile travel between them). Tall buildings (Big Bertha,
-    /// staticnuke) need 2.8–3.2 so the silhouette doesn't clip the top
-    /// of the viewport; very-close pairs (DGun at 350 elmos) can drop
-    /// to 1.8 to keep the action readable.
+    /// projectile travel between them). Tall buildings need 2.8–3.2 so
+    /// the silhouette doesn't clip the top of the viewport; very-close
+    /// pairs can drop to 1.8 to keep the action readable.
     padding?: number;
     /// Camera pitch in degrees. Defaults to `DEFAULT_PITCH` (45° — a
     /// half-bird's-eye that keeps both ground silhouettes and arcing
@@ -131,24 +139,26 @@ interface WeaponEntry {
     pitchDeg?: number;
     /// Optional camera focus point. When set, the camera snaps to this
     /// ground point at `cameraHeight` instead of fitting the units.
-    /// Used by nuke / long-range weapons whose projectile arc dwarfs
-    /// the shooter+target footprint (a unit-fit would lose the arc).
+    /// Used by long-range weapons whose projectile arc dwarfs the
+    /// shooter+target footprint (a unit-fit would lose the arc).
     cameraFocus?: { x: number; z: number };
     /// Camera height for `cameraFocus`-mode entries. In elmos above the
     /// ground point.
     cameraHeight?: number;
     /// `true` to disable the tracking camera for this entry. Defaults
     /// to `false` (tracking on, follows the selected shooter). Disable
-    /// when the projectile arcs far away from the shooter (nukes, long
-    /// SAMs) so the camera stays fixed and the arc plays through the
-    /// frame instead of being chased.
+    /// when the projectile arcs far away from the shooter (artillery,
+    /// cruise missiles) so the camera stays fixed and the arc plays
+    /// through the frame instead of being chased.
     noTracking?: boolean;
     /// Hold the (mobile) shooter in place so it fires from its spawn
     /// position instead of advancing to optimal range. Needed for mobile
-    /// artillery (Impaler) — a ground-fit camera assumes the shooter
-    /// stays put. Bombers/aircraft must NOT set this (they need to move).
+    /// artillery and the cruise-missile walker — a ground-fit camera
+    /// assumes the shooter stays put, and closing the range would let a
+    /// shorter-ranged second weapon steal the shot. Aircraft must NOT
+    /// set this (they need to move).
     shooterHoldPos?: boolean;
-    /// Long-arc weapons (nuke, artillery, starburst) launch a projectile
+    /// Long-arc weapons (howitzer, cruise missile) launch a projectile
     /// that travels far from the shooter and lands off-frame. When set,
     /// the camera pans to the impact point `delayMs` after the fire order
     /// so the hit itself is on screen; the next entry restores the camera.
@@ -170,130 +180,107 @@ const DEFAULT_PITCH = 45;
 
 const WEAPONS: WeaponEntry[] = [
     {
-        key: 'lasercannon',
-        title: 'LaserCannon — moving bolt with cap glow (shieldraid → Bandit)',
-        shooter: 'shieldraid', target: 'damagesink',
-        distance: 200, targetMode: 'ground',
-        // Both units small; default framing works well. Slightly looser
-        // padding so the laser bolts mid-flight stay clear of the edges.
+        key: 'mg',
+        title: 'Cannon (rapid, short) — MS_MG_S2 from an ms_mechs_s1 recon walker',
+        shooter: 'ms_mechs_s1', target: GROUND_TARGET,
+        distance: 300, targetMode: 'ground',
         padding: 2.2, pitchDeg: 38,
     },
     {
-        key: 'beamlaser',
-        title: 'BeamLaser — hit-scan beam (cloakaa → Gremlin, vs airborne drone)',
-        shooter: 'cloakaa', target: 'fakeunit_aatarget',
-        distance: 400, targetMode: 'flying', targetAlt: 220,
-        padding: 2.4, pitchDeg: 30,
+        key: 'autocannon',
+        title: 'Cannon (autocannon) — MS_AC_S3 from an ms_tanks_s2',
+        shooter: 'ms_tanks_s2', target: GROUND_TARGET,
+        distance: 450, targetMode: 'ground',
+        padding: 2.2, pitchDeg: 40,
     },
     {
-        key: 'cannon',
-        title: 'Cannon — ballistic plasma (staticheavyarty → Big Bertha)',
-        shooter: 'staticheavyarty', target: 'damagesink',
-        distance: 1200, targetMode: 'ground',
-        // Big Bertha is a tall building (~120 elmos) — wider padding +
-        // steeper pitch so its silhouette doesn't fill the frame and the
-        // projectile arc has room to play out toward the target.
-        padding: 3.0, pitchDeg: 50,
-        noTracking: true,
-        // Plasma shell arcs 1200 elmos to the target — pan to the impact
-        // once it's mid-descent so the hit is on screen.
-        impactCam: { delayMs: 5000, height: 650, pitchDeg: 48 },
-    },
-    {
-        key: 'starburst',
-        title: 'StarburstLauncher — ballistic missile (vehheavyarty Impaler)',
-        // empmissile ("Shockley") was a one-shot EMP *missile* unit — it
-        // rendered as a bare missile sitting on the ground with nothing to
-        // launch it. Impaler is a real artillery rover that fires a
-        // StarburstLauncher missile and stays put to reload.
-        shooter: 'vehheavyarty', target: 'damagesink',
-        distance: 800, targetMode: 'ground',
+        key: 'railgun',
+        title: 'Cannon (railgun, flat/fast) — MS_RAILGUN_S3 from an ms_mechs_s4',
+        shooter: 'ms_mechs_s4', target: GROUND_TARGET,
+        distance: 700, targetMode: 'ground',
+        // The mech also carries MS_AC_S3 (520) and MS_FLAK_S2 (800);
+        // 700 elmos is past the autocannon so the railgun is what fires
+        // at the ground target, and flak won't engage a building.
         shooterHoldPos: true,
-        // Focus the camera mid-arc with extra height so the missile
-        // climb + descent is visible end-to-end. Tracking off because
-        // the projectile leaves the shooter quickly.
+        padding: 2.6, pitchDeg: 35,
+    },
+    {
+        key: 'howitzer',
+        title: 'Cannon (ballistic arc) — MS_HOWITZER_S1 from an ms_artillery_s2',
+        shooter: 'ms_artillery_s2', target: GROUND_TARGET,
+        distance: 900, targetMode: 'ground',
+        shooterHoldPos: true,
+        // Focus mid-arc with extra height so the climb + descent is
+        // visible end-to-end. Tracking off — the shell leaves the
+        // shooter immediately.
         cameraFocus: { x: MAP_CENTER, z: MAP_CENTER },
         cameraHeight: 1400, pitchDeg: 40,
         noTracking: true,
         impactCam: { delayMs: 5500, height: 700, pitchDeg: 45 },
     },
     {
-        key: 'nuke',
-        title: 'StarburstLauncher (nuke) — Trinity ICBM',
-        shooter: 'staticnuke', target: 'damagesink',
+        key: 'cruise',
+        title: 'MissileLauncher (cruise) — MS_MISSILE_CRUISE_S1 from a fable_colossus',
+        shooter: 'fable_colossus', target: GROUND_TARGET,
+        // 2000 elmos: inside the cruise missile's 2400 and far outside
+        // the colossus's other weapon (MS_AC_S3, 520), so the entry
+        // shows the launcher and nothing else.
         distance: 2000, targetMode: 'ground',
-        stockpile: true,
-        // Nuke needs the widest camera — it climbs ~1800 elmos and
-        // travels 2000 horizontally. Stand the camera back at 2500
-        // height with a 35° pitch so the ascent, turn, and descent
-        // are all readable.
+        shooterHoldPos: true,
         cameraFocus: { x: MAP_CENTER, z: MAP_CENTER },
-        cameraHeight: 2500, pitchDeg: 35,
+        cameraHeight: 2200, pitchDeg: 35,
         noTracking: true,
-        // The Trinity has a long flight — pan to the impact late so the
-        // detonation (and its huge CEG) fills the frame.
-        impactCam: { delayMs: 11000, height: 1400, pitchDeg: 45 },
+        impactCam: { delayMs: 9000, height: 1200, pitchDeg: 45 },
     },
     {
-        key: 'missile',
-        title: 'MissileLauncher — guided rocket (bomberstrike → Magpie heavy missiles)',
-        shooter: 'bomberstrike', target: 'damagesink',
-        distance: 500, targetMode: 'ground',
-        shooterFlying: true,
-        padding: 2.6, pitchDeg: 35,
-    },
-    {
-        key: 'lightning',
-        title: 'LightningCannon — bolt arc (shieldfelon → Felon)',
-        shooter: 'shieldfelon', target: 'damagesink',
-        distance: 300, targetMode: 'ground',
-        padding: 2.4, pitchDeg: 40,
-    },
-    {
-        key: 'dgun',
-        title: 'DGun — Disintegrator fireball (striderantiheavy → Ultimatum)',
-        shooter: 'striderantiheavy', target: 'damagesink',
-        distance: 350, targetMode: 'ground',
-        manualFire: true,
-        // Tighter framing — the fireball is short-range and dramatic.
-        padding: 2.0, pitchDeg: 40,
-    },
-    {
-        key: 'flak',
-        title: 'Flak (Cannon, AA) — Thresher vs airborne drone',
-        shooter: 'turretaaflak', target: 'fakeunit_aatarget',
-        distance: 500, targetMode: 'flying', targetAlt: 240,
-        // Flak turret is medium-tall + the target is up at y=240,
-        // so the vertical extent dominates the framing.
-        padding: 2.8, pitchDeg: 30,
-        noTracking: true,
-    },
-    {
-        key: 'ground-to-air',
-        title: 'Ground-to-air SAM (StarburstLauncher) — Flail vs airborne drone',
-        shooter: 'hoveraa', target: 'fakeunit_aatarget',
+        key: 'sam',
+        title: 'MissileLauncher (ground-to-air SAM) — MS_MISSILE_AA_S2 from an ms_mechs_s3 vs an airborne fighter',
+        shooter: 'ms_mechs_s3', target: AIR_TARGET,
         distance: 600, targetMode: 'flying', targetAlt: 260,
+        shooterHoldPos: true,
         padding: 2.6, pitchDeg: 32,
         noTracking: true,
     },
     {
+        key: 'flak',
+        title: 'Cannon (flak, AA) — MS_FLAK_S2 from an ms_staticdefense_s3 vs an airborne fighter',
+        shooter: 'ms_staticdefense_s3', target: AIR_TARGET,
+        distance: 500, targetMode: 'flying', targetAlt: 240,
+        // The turret is medium-tall and the target is up at y=240, so
+        // the vertical extent dominates the framing.
+        padding: 2.8, pitchDeg: 30,
+        noTracking: true,
+    },
+    {
+        key: 'bomb',
+        title: 'AircraftBomb — MS_BOMB_S2 dropped by an ms_bombers_s2',
+        shooter: 'ms_bombers_s2', target: GROUND_TARGET,
+        distance: 900, targetMode: 'ground',
+        // AircraftBomb needs a physical fly-over, not just LOS + range
+        // (CBombDropper::TestRange), so give the bomber a real approach
+        // run and do NOT hold its position.
+        shooterFlying: true,
+        padding: 2.8, pitchDeg: 35,
+    },
+    {
         key: 'air-to-air',
-        title: 'Air-to-air — Swift vs airborne drone (both warped to altitude)',
-        shooter: 'planefighter', target: 'fakeunit_aatarget',
+        title: 'Air-to-air — ms_fighters_s3 vs an airborne fighter (both warped to altitude)',
+        shooter: 'ms_fighters_s3', target: AIR_TARGET,
         distance: 400, targetMode: 'flying', targetAlt: 250,
         shooterFlying: true,
         padding: 2.6, pitchDeg: 25,
     },
     // ── PLACEHOLDER: naval / torpedo ────────────────────────────────────
-    // The test map green_flat_x34_v3 has no water, so torpedo /
-    // depth-charge / hovertorpedo weapons can't fire (they refuse to
-    // engage land targets). Restore this entry once a water-bearing
-    // test map is added to the bench set:
+    // Metalstorm has TorpedoLauncher (ms_torpedo_s1..3 on the subs,
+    // ms_depthcharge_s1 on ms_ships_s2) but green_flat_x34_v3 has no
+    // water, so none of them can fire — they refuse to engage land
+    // targets, and the sub can't spawn afloat in the first place.
+    // Restore this entry once a water-bearing map joins the bench set:
     //   {
     //       key: 'torpedo',
-    //       title: 'TorpedoLauncher — Duck vs naval target',
-    //       shooter: 'amphraid', target: '<naval target>',
-    //       distance: 400, targetMode: 'ground',
+    //       title: 'TorpedoLauncher — ms_subs_s1 vs a surface ship',
+    //       shooter: 'ms_subs_s1', target: 'ms_ships_s1',
+    //       distance: 500, targetMode: 'ground',
     //   },
 ];
 
@@ -378,26 +365,6 @@ async function fireOneEntry(
         flyAlt: w.targetMode === 'flying' ? (w.targetAlt ?? 220) : undefined,
     });
 
-    if (w.extraSetup) {
-        await h.lua(w.extraSetup
-            .replace(/\$SID/g, String(sId))
-            .replace(/\$TID/g, String(tId)));
-    }
-
-    // Power any grid-gated static weapon. ZK's mex_overdrive low-power
-    // system (unit_mex_overdrive.lua) flags a pylon as `lowpower` and
-    // disables its weapon when the pylon's energy grid has no income. The
-    // bench team has no economy, so static shooters (staticheavyarty's
-    // "Very Heavy Plasma Cannon", AA turrets) sit unpowered and never
-    // fire. Granting the shooter's own pylon a large `current_energyIncome`
-    // gives its grid enough capacity to cover the weapon's `neededLink`, so
-    // the gadget clears `lowpower` on its next slow-update. Set early — the
-    // gadget needs a cycle or two before the attack order lands — and
-    // harmless for mobile shooters, which aren't pylons.
-    await h.lua(
-        `Spring.SetUnitRulesParam(${sId}, "current_energyIncome", 1e6)\n` +
-        `Spring.SetUnitRulesParam(${sId}, "lowpower", 0)`);
-
     // Give the entity-renderer a frame to learn about the new units
     // before we ask the camera to frame them. Without this the
     // cameraFitUnits call hits the case where one or both ids aren't
@@ -408,8 +375,8 @@ async function fireOneEntry(
     // per-entry padding+pitch overrides (or the scenario defaults of
     // 2.2 / 45°). Entries that explicitly set `cameraFocus` snap to a
     // ground point with `cameraHeight` instead — used by long-arc
-    // weapons (nuke, starburst) whose projectile dwarfs the
-    // shooter+target footprint and would be lost in a unit-fit.
+    // weapons whose projectile dwarfs the shooter+target footprint and
+    // would be lost in a unit-fit.
     const padding = w.padding ?? DEFAULT_PADDING;
     const pitchDeg = w.pitchDeg ?? DEFAULT_PITCH;
     if (w.cameraFocus) {
@@ -421,36 +388,12 @@ async function fireOneEntry(
     }
     h.select([sId]);
     // Tracking on by default — follows the selected shooter through
-    // any movement. Disabled for nuke / SAM / Big Bertha where the
+    // any movement. Disabled for artillery / cruise / AA where the
     // projectile arcs away from the shooter and a fixed camera reads
     // better.
     h.setTrackingCamera(!w.noTracking);
 
-    // Stockpile pre-fill for nukes: the live stockpile timer is in
-    // minutes — without the cheat the scenario would time out long
-    // before the missile launched. The server `stockpile` verb sets
-    // numStockpiled directly and wires u->stockpileWeapon if it isn't
-    // yet, so this works the tick after spawn — no flaky sleep needed.
-    if (w.stockpile) {
-        await h.stockpile(sId, 4, 0);
-    }
-
-    // Issue the firing order. Three flavours:
-    //   - DGun / true manual-fire (Commander) → CMD_MANUALFIRE at ground.
-    //     The def's `canManualFire = true` so CommandAI accepts it.
-    //   - Stockpile (staticnuke et al.) → CMD_ATTACK at ground. Even
-    //     though the unit *visually* fires its stockpile weapon, the
-    //     def has `canManualFire = false` so CommandAI silently drops a
-    //     MANUALFIRE order. Attack-ground routes through the stockpile
-    //     firing path.
-    //   - Everything else → CMD_ATTACK against the unit id.
-    if (w.manualFire) {
-        await h.order(sId, CMD_MANUALFIRE, [tx, 0, tz]);
-    } else if (w.stockpile) {
-        await h.order(sId, CMD_ATTACK, [tx, 0, tz]);
-    } else {
-        await h.order(sId, CMD_ATTACK, [tId]);
-    }
+    await h.order(sId, CMD_ATTACK, [tId]);
 
     console.log(`[weapon-showcase] ► ${w.key}: ${w.title}`);
     setShowcasePhase('firing');
@@ -483,9 +426,9 @@ async function fireOneEntry(
 
 const scenario: Scenario = {
     name: 'weapon-showcase',
-    description: 'Slow-mo tour of every weapon archetype: lasers, beams, cannons, missiles, lightning, DGun, flak, AA, air-to-air, and the Trinity nuke. Camera zooms in close per pair.',
+    description: "Slow-mo tour of Metalstorm's weapon archetypes: cannons (MG, autocannon, railgun, howitzer, flak), cruise and SAM missiles, aircraft bombs and air-to-air. Camera zooms in close per pair.",
     map: 'green_flat_x34_v3',
-    gameId: 'zk',
+    gameId: 'metalstorm',
     aiSlots: [{ aiId: 'null', team: 1 }],
     playerTeam: 0,
 
@@ -517,10 +460,11 @@ const scenario: Scenario = {
         if (fitAll) {
             // One-shot: lay every pair out along a single horizontal
             // line, no cycling. Useful for screenshots of all weapons
-            // firing simultaneously. Pairs are spaced 1500 elmos apart
-            // around the map centre; the camera fits the whole line.
+            // firing simultaneously. Pairs are spaced 2500 elmos apart
+            // around the map centre (wide enough for the 2000-elmo
+            // cruise pair); the camera fits the whole line.
             const allIds: number[] = [];
-            const spacing = 1500;
+            const spacing = 2500;
             const startX = MAP_CENTER - (entries.length - 1) * 0.5 * spacing;
             for (let i = 0; i < entries.length; i++) {
                 const w = entries[i];
@@ -528,27 +472,14 @@ const scenario: Scenario = {
                 const half = w.distance * 0.5;
                 const sId = await spawnConfigured(h, w.shooter, cx - half, MAP_CENTER, 0, {
                     flyAlt: w.shooterFlying ? 200 : undefined,
+                    holdPos: w.shooterHoldPos,
                 });
                 const tId = await spawnConfigured(h, w.target, cx + half, MAP_CENTER, 1, {
                     holdFire: true,
                     invulnerable: true,
                     flyAlt: w.targetMode === 'flying' ? (w.targetAlt ?? 220) : undefined,
                 });
-                // Power grid-gated static weapons (see fireOneEntry).
-                await h.lua(
-                    `Spring.SetUnitRulesParam(${sId}, "current_energyIncome", 1e6)\n` +
-                    `Spring.SetUnitRulesParam(${sId}, "lowpower", 0)`);
-                if (w.stockpile) {
-                    await h.stockpile(sId, 4, 0);
-                }
-                if (w.manualFire) {
-                    await h.order(sId, CMD_MANUALFIRE, [cx + half, 0, MAP_CENTER]);
-                } else if (w.stockpile) {
-                    // Attack-ground; stockpile units have canManualFire=false
-                    await h.order(sId, CMD_ATTACK, [cx + half, 0, MAP_CENTER]);
-                } else {
-                    await h.order(sId, CMD_ATTACK, [tId]);
-                }
+                await h.order(sId, CMD_ATTACK, [tId]);
                 allIds.push(sId, tId);
                 console.log(`[weapon-showcase] +${w.key}: ${w.title}`);
             }

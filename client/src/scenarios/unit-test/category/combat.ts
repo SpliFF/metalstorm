@@ -6,9 +6,9 @@
  *   1. **hit** — target HP dropped. Means aim + weapon piece bindings
  *      work end-to-end.
  *   2. **fired** — the weapon's `reloadFrame` advanced past the spawn
- *      baseline. Means the firing path runs but the projectile/beam
- *      missed (likely the well-known ZK piece-binding gap that affects
- *      most mobile units — see PLAN-scenarios.md open follow-ups).
+ *      baseline. Means the firing path runs but the projectile missed
+ *      (typically a weapon-piece binding gap — see PLAN-scenarios.md
+ *      open follow-ups).
  *   3. **acquired** — `hasTarget` flipped true on at least one weapon
  *      but the reload counter never moved. Useful "did targetting work
  *      at all" diagnostic.
@@ -26,6 +26,16 @@ import { sleep, parseUnitField } from '../../types.js';
 const CMD_ATTACK = 20;
 const CMD_FIRE_STATE = 45;
 const CMD_MOVE_STATE = 50;
+/*
+ * Metalstorm port (2026-08-04). The shape of the test is unchanged; the
+ * three dummy-target defs and the reason the target's HP is boosted are
+ * what moved. ZK's `OverkillPrevention_CheckBlockNoFire` gadget — which
+ * used to make a small-HP target read as "the weapon never fired" —
+ * has no Metalstorm counterpart, so the boost is now purely so a fat
+ * weapon can't end the observation window with a one-shot kill before
+ * the poll loop samples it.
+ */
+
 /** Wall ms to observe firing. At 5× sim speed this covers ~30 sim
  *  seconds — long enough for slow-cycle weapons (e.g. siege artillery)
  *  to get one shot off. */
@@ -57,30 +67,25 @@ const BOMBER_APPROACH_OFFSET = 3000;
  *  CMD_ATTACK on a target whose visibility/LOS/team allocations
  *  the sim hasn't fully wired yet. */
 const TARGET_SETTLE_MS = 200;
-/** Stationary punching-bag def. `staticheavyradar` sits at ground
- *  level on land (no water dependency). Its declared HP is only 330,
- *  which trips ZK's per-attacker `OverkillPrevention_CheckBlockNoFire`
- *  for any weapon with `okp_damage >= 330` (most bombers, anti-air,
- *  heavy artillery). We crank max-HP to TARGET_HP_BOOST after spawn so
- *  OKP stays silent and we measure raw weapon delivery, not the OKP
- *  gating decision. */
-const TARGET_DEF = 'staticheavyradar';
-/** Bigger target used for the bomber-runway profile. `factoryplane` is
- *  16×14 footprint (vs the radar's 4×4) so near-miss bomb drops still
- *  land impulse + splash on it, and — crucially — `factoryplane` is a
- *  ZK airpad, so the bomber can rearm on the same building it's been
- *  ordered to attack. Without this, every bomber drops one bomb, flies
- *  off toward the nearest pad (often nothing), and the test only ever
- *  sees a single fly-by. */
-const BOMBER_TARGET_DEF = 'factoryplane';
-/** Boosted max-HP for the target. Picked well above the largest
- *  `okp_damage` value in ZK (`turretaaheavy` = 1600) plus comfortable
- *  headroom for multi-shot salvos. */
+/** Stationary punching-bag def. `ms_radar_s1` is a small, unarmed,
+ *  immobile land structure — it can't shoot back, can't wander, and has
+ *  no water dependency, which is everything the dummy needs to be. */
+const TARGET_DEF = 'ms_radar_s1';
+/** Bigger target used for the bomber-runway profile. `ms_garrison` has a
+ *  far larger footprint than the radar, so a near-miss bomb drop still
+ *  lands impulse + splash on it. Note Metalstorm ships no airbase
+ *  (`isAirBase` is false on every def, `ms_airbase` included), so a
+ *  bomber cannot rearm mid-test — BOMBER_OBS_WALL_MS has to cover the
+ *  whole engagement from the bomber's initial load. */
+const BOMBER_TARGET_DEF = 'ms_garrison';
+/** Boosted max-HP for the target, so a heavy weapon can't kill it inside
+ *  one poll interval and score `inert` for a shot that clearly landed.
+ *  Well above the largest single Metalstorm salvo. */
 const TARGET_HP_BOOST = 50000;
-/** Air target used when the UUT only has AA weapons. Drone has 360 HP,
- *  spawns cheap, and gets MoveCtrl-pinned to altitude so AA testers
- *  don't have to chase it. Same OKP boost applied. */
-const AIR_TARGET_DEF = 'dronefighter';
+/** Air target used when the UUT only has AA weapons. Metalstorm has no
+ *  cheap decoy drone, so a real fighter is spawned and MoveCtrl-pinned
+ *  to altitude — AA testers don't have to chase it. Same HP boost. */
+const AIR_TARGET_DEF = 'ms_fighters_s1';
 const AIR_TARGET_ALT = 200;
 const TARGET_HP_FALLBACK = 1; // assertion bound — any drop counts
 
@@ -148,10 +153,9 @@ export async function runCombat(
 
     // Target sits 800 elmos east of the anchor. UUT placement depends
     // on what it is:
-    //   - ground UUT: 200 elmos west of target (most ZK weapon ranges
-    //     250–800 are in range from frame 1; clears the mex cluster
-    //     since easternmost mex is at anchor + 220 and UUT lands at
-    //     anchor + 600).
+    //   - ground UUT: 200 elmos west of target. Metalstorm's ground
+    //     weapon ranges run 300–3200, so every one of them is in range
+    //     from frame 1 and the test measures delivery, not approach.
     //   - non-bomber air UUT: 600 elmos west of target — far enough
     //     out that the unit isn't in min-range yet, close enough that
     //     it acquires within the standard observation window.
@@ -173,17 +177,15 @@ export async function runCombat(
     if (!targetId) {
         return { applicable: true, pass: false, detail: `target spawn (${targetDef}) failed: ${tSpawn}` };
     }
-    // Boost target HP so ZK's overkill-prevention gadget doesn't block
-    // high-damage UUTs (e.g. bomberassault's 2500-dmg bomb, anti-air
-    // turrets with okp_damage 1600). Without this the bomber dives in,
-    // gets BlockShot=true, and the test scores `inert` for a weapon
-    // that would otherwise pass.
+    // Boost target HP so a heavy UUT can't one-shot the dummy between
+    // two polls of the observation loop — that would read as `inert`
+    // (target gone, no HP delta seen) for a weapon that in fact landed.
     try {
         await h.lua(
             `Spring.SetUnitMaxHealth(${targetId}, ${TARGET_HP_BOOST}); `
             + `Spring.SetUnitHealth(${targetId}, { health = ${TARGET_HP_BOOST} })`,
         );
-    } catch { /* non-fatal — test will just see OKP-gated misses */ }
+    } catch { /* non-fatal — a fragile dummy just risks an early kill */ }
     if (useAirTarget) {
         // Lift the air target to fixed altitude with MoveCtrl-enabled
         // (the natural takeoff path doesn't fire — see PLAN-scenarios
