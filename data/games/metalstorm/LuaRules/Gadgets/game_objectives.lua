@@ -84,6 +84,12 @@ local PARTICIPATION_PRESENCE_WEIGHT = 2.0   -- §5 "presence at completion... 2.
 
 local objectives = {}      -- id -> objective
 local nextId = 1
+-- How many objectives carrying `victory = true` have ever been created.
+-- game_gameover.lua reads this to say out loud whether the war it is
+-- watching has any terminal condition at all (PLAN-endtoend.md D10). A
+-- high-water mark, not a live count: an expired victory objective still
+-- means the war was *authored* to be endable, which is the question asked.
+local victoryObjectivesCreated = 0
 local rewardScale = 1.0
 local evalTick = 0
 local genState = Generator.newState()
@@ -260,7 +266,7 @@ end
 local PUBLISHED_FIELDS = {
     'type', 'scope', 'state', 'reward', 'team', 'team2', 'progress',
     'phase', 'stage', 'expire', 'region', 'x', 'z', 'r', 'suggested', 'source',
-    'victory',
+    'victory', 'completed_by',
 }
 
 -- Objectives are the shared strategic board (PLAN-metalstorm §"Objectives are
@@ -287,6 +293,15 @@ local function publish(o, ctx)
     -- PLAN-metalstorm-interaction.md §1 joint_objective: the widened
     -- co-eligible team, if any (GG.Objectives.WidenEligibility).
     if o.forTeam2 then Spring.SetGameRulesParam(p .. 'team2', o.forTeam2, PUBLIC) end
+    -- endtoend D11: WHO completed it, which `team` above cannot carry. `team`
+    -- is the ELIGIBILITY field (`o.forTeam or -1`) and ui/lib/objectives.js
+    -- filters on it — an open race publishes -1 so both sides see it, and
+    -- overwriting that at resolve would hide the result from the loser during
+    -- the retention window. So the outcome gets its own key, and an open-race
+    -- victory stops reading as "completed by nobody".
+    if o.completedBy then
+        Spring.SetGameRulesParam(p .. 'completed_by', o.completedBy, PUBLIC)
+    end
     Spring.SetGameRulesParam(p .. 'progress', o.progress or 0, PUBLIC)
     -- PLAN-metalstorm-teams.md §3.3: joiner onboarding hint, set via
     -- GG.Objectives.SuggestFor. The panel renders this as "yours to take".
@@ -418,6 +433,12 @@ function resolveObjective(o, state, completingTeam, ctx)
     pendingClear[#pendingClear + 1] = o.id
 
     if state == 'complete' then
+        -- endtoend D11. The eval loop resolves INSTEAD of recomputing progress
+        -- on the completing tick, so a finished objective published whatever
+        -- the previous tick measured — the victory objective froze at
+        -- `progress = 0.89999` and read as unfinished. Completion IS 1.
+        o.progress = 1
+        o.completedBy = completingTeam or o.forTeam
         awardObjective(o, completingTeam)
         for _, fn in ipairs(completeHooks) do fn(o, completingTeam) end
     else
@@ -491,6 +512,7 @@ function GG.Objectives.Create(def)
 
     objectives[id] = o
     addToActive(id)
+    if o.victory then victoryObjectivesCreated = victoryObjectivesCreated + 1 end
 
     if def.phases and #def.phases > 0 then
         o.phaseDefs = def.phases
@@ -581,6 +603,14 @@ end
 --- Read-only accessor for scenario scripts/tests. Do not mutate the result.
 function GG.Objectives.Get(id)
     return objectives[id]
+end
+
+--- How many `victory = true` objectives this war has ever staged
+--- (PLAN-endtoend.md D10). Zero means game_gameover.lua has nothing to
+--- watch and the war cannot end — which used to be the silent outcome of
+--- creating a room through the lobby instead of a direct manifest.
+function GG.Objectives.VictoryObjectiveCount()
+    return victoryObjectivesCreated
 end
 
 --- `teamID`'s lowest-participation active tactical objective

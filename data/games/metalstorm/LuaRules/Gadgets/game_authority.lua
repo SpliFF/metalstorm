@@ -307,6 +307,26 @@ end
 --- weight, team = weight }` shorthand, chosen because Award has no other
 --- way to learn which team's pool the "team" share belongs to — recorded
 --- here since the plan text left the shape implicit.
+--- True when `teamID` is a team this game actually has.
+---
+--- Spring.Get/SetTeamRulesParam raise a hard Lua error on an unknown team,
+--- and Award is called from inside the Objectives gadget's eval callin — so
+--- one award aimed at a team that isn't there does not just lose the payment,
+--- it propagates out of the callin and gadgetHandler REMOVES the Objectives
+--- gadget. The whole objective system, victory objective included, then stops
+--- evaluating for the rest of the match. Observed live on a two-team lobby
+--- room whose scenario declared eight ("Removed gadget: Objectives" at frame
+--- 5669, PLAN-endtoend.md D10). game_scenario now filters its own staging, so
+--- this is the backstop for every other caller — the systemic generator, a
+--- bounty on a team that has since been removed, a mid-match team wipe.
+local function teamExists(teamID)
+    if teamID == nil then return false end
+    for _, t in ipairs(Spring.GetTeamList() or {}) do
+        if t == teamID then return true end
+    end
+    return false
+end
+
 function GG.Authority.Award(target, amount, reason)
     if amount == nil or amount <= 0 then return end
 
@@ -320,6 +340,12 @@ function GG.Authority.Award(target, amount, reason)
     end
 
     if target.team then
+        if not teamExists(target.team) then
+            Spring.Echo('[Authority] WARNING: award of ' .. tostring(amount) ..
+                        ' to team ' .. tostring(target.team) ..
+                        ' ("' .. tostring(reason) .. '") dropped — this game has no such team')
+            return
+        end
         setTeamPool(target.team, getTeamPool(target.team) + amount)
         emitEvent('award', amount, reason, nil, target.team)
         fireAward(nil, target.team, amount)
@@ -345,7 +371,7 @@ function GG.Authority.Award(target, amount, reason)
             end
         end
         local teamShare = amount * (spec.teamWeight or 0) / totalWeight
-        if teamShare > 0 then
+        if teamShare > 0 and teamExists(spec.team) then
             setTeamPool(spec.team, getTeamPool(spec.team) + teamShare)
             emitEvent('award', teamShare, reason, nil, spec.team)
             Ledger.tagAward(ledgerState, spec.team, teamShare, reason)
@@ -475,25 +501,50 @@ end
 --- basis for a group-scoped directive create. Reads the LIVE roster via
 --- Spring.GetOrgGroups rather than trusting requestedStrength (a demand
 --- target, not the actual committed membership).
-local function sumGroupBaseCost(teamID, groupID)
+local function groupMembers(teamID, groupID)
     local groups = Spring.GetOrgGroups(teamID)
-    if not groups then return 0 end
+    if not groups then return nil end
     for _, g in ipairs(groups) do
-        if g.id == groupID then
-            local sum = 0
-            for _, unitID in ipairs(g.members) do
-                local udid = Spring.GetUnitDefID(unitID)
-                local ud = udid and UnitDefs[udid]
-                local base = 1
-                if ud and ud.customParams and ud.customParams.authority_cost_base then
-                    base = tonumber(ud.customParams.authority_cost_base) or 1
-                end
-                sum = sum + base
-            end
-            return sum
-        end
+        if g.id == groupID then return g.members end
     end
-    return 0
+    return nil
+end
+
+local function sumGroupBaseCost(teamID, groupID)
+    local members = groupMembers(teamID, groupID)
+    if not members then return 0 end
+    local sum = 0
+    for _, unitID in ipairs(members) do
+        local udid = Spring.GetUnitDefID(unitID)
+        local ud = udid and UnitDefs[udid]
+        local base = 1
+        if ud and ud.customParams and ud.customParams.authority_cost_base then
+            base = tonumber(ud.customParams.authority_cost_base) or 1
+        end
+        sum = sum + base
+    end
+    return sum
+end
+
+--- PLAN-metalstorm-objectives.md §5 "last_commander notes" (review A7): the
+--- directive-create charge stamps `last_commander` onto every member of the
+--- group it just charged for. Without it, army-directive play — the INTENDED
+--- default — attributes nothing: the decomposed per-squad commands are
+--- `fromLua` and free, so `game_authority_charge.lua`'s AllowCommand hook (the
+--- only other stamp site) never sees them, and objectives/attribution.lua gets
+--- an empty participation map. §5 records this as resolved 2026-07-12; it was
+--- decided and not built. Measured live on the player path 2026-08-04: a
+--- committed directive charged 2 authority, moved the squad, and left every
+--- unit unstamped, so `score_<player>_objectives` could only ever read 0
+--- (endtoend D11's third symptom).
+---
+--- Stamped only on a charge that was ACCEPTED — a refused directive moves
+--- nothing, so crediting its author would be attribution for work not done.
+local function stampCommander(teamID, groupID, playerID)
+    if not playerID or not groupID or groupID == 0 then return end
+    for _, unitID in ipairs(groupMembers(teamID, groupID) or {}) do
+        Spring.SetUnitRulesParam(unitID, 'last_commander', playerID)
+    end
 end
 
 --- Charge for creating a macro directive (PLAN-metalstorm-authority.md
@@ -540,7 +591,9 @@ function GG.Authority.ChargeDirective(playerID, teamID, groupID, directiveType, 
     local cost = Formula.cost(CostSpec.base_k, base, 1.0, classMod, costScale)
     -- Return the cost as a second value (existing callers ignore it) so the
     -- charge gate can surface an AI directive's real spend in the intent report.
-    return debitPools(teamID, playerID, cost, class), cost
+    local ok = debitPools(teamID, playerID, cost, class)
+    if ok then stampCommander(teamID, groupID, playerID) end
+    return ok, cost
 end
 
 --- Charge for creating a classic (non-directive-wire) standing order

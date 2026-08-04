@@ -21,6 +21,7 @@
 #include "Server/GmDashboardPage.h"
 #include "Server/HttpAuth.h"
 #include "Server/ResourcesParser.h"
+#include "Server/ScenarioDiscovery.h"
 #include "Server/TokenBucket.h"
 #include "System/SpringLog/SpringLog.h"
 #include "System/SpringLog/SpringLogSqlite.h"
@@ -692,11 +693,32 @@ int main(int argc, char *argv[]) {
   std::unordered_map<std::string, std::string> gamePathsById;
   std::unordered_map<std::string, std::string> gameVersionsById;
   std::unordered_map<std::string, std::vector<AIDiscovery::AIInfo>> aisByGame;
+  // --- Per-game scenario discovery (PLAN-endtoend.md D10) ---
+  // A scenario file IS a war template (PLAN-metalstorm-wars.md §7.1), and the
+  // `victory = true` objective it declares is the only terminal condition
+  // game_gameover.lua watches. Discovering them here lets the ordinary
+  // create-room path default and offer one, instead of leaving the `scenario`
+  // modoption writable only by the dev-only /api/rooms/direct manifest — which
+  // is how a lobby-created Metalstorm war ended up with no way to finish.
+  std::unordered_map<std::string, std::vector<ScenarioDiscovery::ScenarioInfo>>
+      scenariosByGame;
   for (const auto &g : availableGames) {
     gamePathsById[g.id] = g.folderPath;
     gameVersionsById[g.id] = g.version;
     aisByGame[g.id] = AIDiscovery::Discover(enginePath, g.folderPath);
+    scenariosByGame[g.id] = ScenarioDiscovery::Discover(g.folderPath);
   }
+
+  /// Scenarios `gameId` ships, or an empty list for an unknown game.
+  /// Captured by reference everywhere below — `scenariosByGame` is built
+  /// once at startup and never mutated, same lifetime rule as
+  /// `availableGames`.
+  auto scenariosFor = [&scenariosByGame](const std::string &gameId)
+      -> const std::vector<ScenarioDiscovery::ScenarioInfo> & {
+    static const std::vector<ScenarioDiscovery::ScenarioInfo> kNone;
+    auto it = scenariosByGame.find(gameId);
+    return (it == scenariosByGame.end()) ? kNone : it->second;
+  };
 
   // --- Game server instances ---
   std::unordered_map<uint32_t, GameServerInstance>
@@ -1851,6 +1873,224 @@ int main(int argc, char *argv[]) {
     bool spectator;
   };
 
+  // Publish the room's slot layout as the `war_sides` modoption
+  // (PLAN-metalstorm-wars.md §7.4, forced by endtoend D19).
+  //
+  // A scenario's sides declare many teams each but stage a starting force for
+  // only one of them — Meridian Basin's compact side is teams 0–3 and its
+  // army is on team 0; the union is 4–7 and its army is on team 4. The room's
+  // slot dropdowns used to offer a hardcoded `Team 1`/`Team 2`, so the AI
+  // opponent was seated on team 1: a declared compact *teammate* with no
+  // units, while the union's whole army was skipped for want of a team 4.
+  // The room had one army.
+  //
+  // So the room offers SIDES, and this is where the side→team resolution
+  // (ScenarioDiscovery::EncodeWarSides) is written down — once, at create
+  // time, in the same "ordinary room setting" shape §7.3 chose for
+  // `scenario`. Everything downstream reads this one string: RoomManager's
+  // GameRoom::SlotTeams() takes the integers, the client renders the labels,
+  // and the sim receives it as a modoption like any other.
+  //
+  // Clears the option for a scenario-less room, so a host switching away from
+  // a scenario does not leave a stale side list behind.
+  auto applyWarSides = [&](uint32_t roomId, uint32_t hostId,
+                           const std::string &gameId,
+                           const std::string &scenarioId) {
+    std::string encoded;
+    if (!scenarioId.empty()) {
+      const ScenarioDiscovery::ScenarioInfo *info =
+          ScenarioDiscovery::FindById(scenariosFor(gameId), scenarioId);
+      if (info != nullptr)
+        encoded = ScenarioDiscovery::EncodeWarSides(*info);
+    }
+    rooms.SetModOption(roomId, hostId, "war_sides", encoded);
+    if (!encoded.empty())
+      SLOG(SPRING_LOG_NOTICE, "room %u: war sides '%s' (from scenario '%s')",
+           roomId, encoded.c_str(), scenarioId.c_str());
+  };
+
+  // Resolve and apply the room's `scenario` modoption (PLAN-endtoend.md D10,
+  // design call in PLAN-metalstorm-wars.md §7.1).
+  //
+  // `explicitChoice` is the host's pick, if they made one (nullptr = no pick).
+  // A pick wins outright — including the empty string, which is how a host
+  // deliberately asks for a scenario-less room and is therefore NOT
+  // overridden by the map default. Callers validate the id against
+  // `scenariosFor(gameId)` first; game_scenario.lua `error()`s on a missing
+  // file at GameStart, so a typo should surface in the lobby, not the sim.
+  //
+  // With no pick at all, the map's default applies. A scenario declares the
+  // map it was authored for (`world.map`), so this reads a coupling the
+  // content already states — and the result lands in the room JSON, so the
+  // player can see which war they are about to fight rather than having it
+  // chosen behind their back.
+  //
+  // Also publishes the room's slot layout via applyWarSides above, on every
+  // branch: the two settings are resolved from the same scenario and a room
+  // must never carry one without the other.
+  //
+  // Returns the scenario id now in effect ("" if none).
+  auto applyRoomScenario = [&](uint32_t roomId, uint32_t hostId,
+                               const std::string &gameId,
+                               const std::string &mapId,
+                               const std::string *explicitChoice)
+      -> std::string {
+    if (explicitChoice != nullptr) {
+      if (explicitChoice->empty()) {
+        SLOG(SPRING_LOG_NOTICE,
+             "room %u: host asked for no scenario on map '%s'", roomId,
+             mapId.c_str());
+        applyWarSides(roomId, hostId, gameId, {});
+        return {};
+      }
+      rooms.SetModOption(roomId, hostId, "scenario", *explicitChoice);
+      SLOG(SPRING_LOG_NOTICE, "room %u: scenario '%s' (host choice)", roomId,
+           explicitChoice->c_str());
+      applyWarSides(roomId, hostId, gameId, *explicitChoice);
+      return *explicitChoice;
+    }
+
+    const ScenarioDiscovery::ScenarioInfo *def =
+        ScenarioDiscovery::DefaultForMap(scenariosFor(gameId), mapId);
+    if (def == nullptr) {
+      applyWarSides(roomId, hostId, gameId, {});
+      return {};
+    }
+    rooms.SetModOption(roomId, hostId, "scenario", def->id);
+    SLOG(SPRING_LOG_NOTICE, "room %u: scenario '%s' (default for map '%s')%s",
+         roomId, def->id.c_str(), mapId.c_str(),
+         def->terminal ? "" : " — WARNING: declares no victory objective");
+    applyWarSides(roomId, hostId, gameId, def->id);
+    return def->id;
+  };
+
+  // The first side of the room's slot list, i.e. where a host who has
+  // expressed no preference belongs. CreateRoom seats the host on team 0,
+  // which is right for a legacy two-team room and right for Meridian by
+  // coincidence; this makes it right on purpose.
+  auto seatHostOnFirstSide = [&](uint32_t roomId, uint32_t hostId) {
+    const GameRoom *room = rooms.GetRoom(roomId);
+    if (room == nullptr)
+      return;
+    const std::vector<uint8_t> slotTeams = room->SlotTeams();
+    const RoomPlayer *host = nullptr;
+    for (const auto &p : room->players)
+      if (p.playerId == hostId)
+        host = &p;
+    if (host == nullptr || host->isSpectator)
+      return;
+    if (std::find(slotTeams.begin(), slotTeams.end(), host->team) !=
+        slotTeams.end())
+      return; // already on a side the room offers
+    rooms.SetTeam(roomId, hostId, slotTeams.front());
+    SLOG(SPRING_LOG_NOTICE, "room %u: host seated on team %u (first side)",
+         roomId, static_cast<unsigned>(slotTeams.front()));
+  };
+
+  // The slot team to put a solo room's auto-added opponent on: the first of
+  // the room's offered sides nobody occupies. Replaces a hardcoded
+  // `hostTeam == 0 ? 1 : 0`, which on a Meridian room produced a Null AI on
+  // team 1 — a live team the scenario stages no units for, which is the same
+  // empty-army condition D19 filed.
+  auto firstFreeSlotTeam = [](const GameRoom &room,
+                              uint8_t hostTeam) -> uint8_t {
+    const std::vector<uint8_t> slotTeams = room.SlotTeams();
+    for (const uint8_t t : slotTeams) {
+      bool taken = (t == hostTeam);
+      for (const auto &p : room.players)
+        if (!p.isSpectator && p.team == t)
+          taken = true;
+      for (const auto &a : room.aiSlots)
+        if (a.team == t)
+          taken = true;
+      if (!taken)
+        return t;
+    }
+    // Every offered side is occupied (or the room offers only one). Fall
+    // back to the old behaviour so a single-side scenario still gets an
+    // opponent rather than a same-team AI that ends the match instantly.
+    return (hostTeam == 0) ? 1 : 0;
+  };
+
+  // The invariant this lane exists to encode: a war that no path can
+  // terminate should not be created quietly. Called just before the game
+  // server is spawned, on every start path.
+  //
+  // It warns rather than refuses. Scenario-less rooms are legitimate for
+  // every game that ships no scenarios at all (Paper Tanks, ZK) and for
+  // Metalstorm fixtures on maps with no authored war; refusing would break
+  // those. What was actually wrong was that the endless case was silent.
+  auto warnIfWarCannotEnd = [&](const GameRoom *room) {
+    if (room == nullptr)
+      return;
+    const auto &available = scenariosFor(room->gameId);
+    if (available.empty())
+      return; // not a scenario-driven game — nothing to say
+
+    std::string scenario;
+    auto it = room->modOptions.find("scenario");
+    if (it != room->modOptions.end())
+      scenario = it->second;
+
+    if (scenario.empty()) {
+      SLOG(SPRING_LOG_WARNING,
+           "room %u ('%s', game '%s', map '%s') starting with NO SCENARIO — "
+           "no victory objective will be staged, so this war has no terminal "
+           "condition and cannot end (PLAN-metalstorm-wars.md §7.1)",
+           room->id, room->name.c_str(), room->gameId.c_str(),
+           room->mapId.c_str());
+      return;
+    }
+    const ScenarioDiscovery::ScenarioInfo *info =
+        ScenarioDiscovery::FindById(available, scenario);
+    if (info == nullptr) {
+      SLOG(SPRING_LOG_WARNING,
+           "room %u starting with scenario '%s', which game '%s' does not "
+           "ship — game_scenario.lua will fail to load it at GameStart",
+           room->id, scenario.c_str(), room->gameId.c_str());
+    } else if (!info->terminal) {
+      SLOG(SPRING_LOG_WARNING,
+           "room %u starting with scenario '%s', which declares no "
+           "`victory = true` objective — this war has no terminal condition "
+           "and cannot end (PLAN-metalstorm-wars.md §7.1)",
+           room->id, scenario.c_str());
+    } else {
+      SLOG(SPRING_LOG_NOTICE, "room %u: war '%s' is terminable via scenario %s",
+           room->id, room->name.c_str(), scenario.c_str());
+    }
+
+    // Sibling invariant to "can this war end": can this war be *fought*?
+    // A live team the scenario stages no starting force for is a side with
+    // no army, and a war with one army is not a match — endtoend D19, where
+    // a lobby-created Meridian room put the AI opponent on team 1 and the
+    // player spent three minutes alone on the board. The sim re-checks the
+    // staged board at frame 60 (game_scenario.lua), which is authoritative;
+    // this says it before the game server is even spawned.
+    // A scenario that declares no `sides` says nothing about which teams
+    // should have an army (the smoke fixtures are like this), so there is
+    // nothing to check it against.
+    if (info == nullptr || info->sides.empty())
+      return;
+    std::set<uint8_t> occupied;
+    for (const auto &p : room->players)
+      if (!p.isSpectator)
+        occupied.insert(p.team);
+    for (const auto &a : room->aiSlots)
+      occupied.insert(a.team);
+    for (const uint8_t team : occupied) {
+      bool staged = false;
+      for (const auto &side : info->sides)
+        if (side.team == team && side.staged)
+          staged = true;
+      if (!staged)
+        SLOG(SPRING_LOG_WARNING,
+             "room %u: team %u is occupied but scenario '%s' stages no "
+             "starting force for it — that side begins the war with no army "
+             "(PLAN-metalstorm-wars.md §7.4)",
+             room->id, static_cast<unsigned>(team), scenario.c_str());
+    }
+  };
+
   struct DirectStartResult {
     bool ok = false;
     std::string error;
@@ -1992,10 +2232,18 @@ int main(int argc, char *argv[]) {
     // GameStart. Threaded as an ordinary modoption — Spring.GetModOptions()
     // is the existing, faithful path server Lua already reads config
     // through, so no new plumbing is needed beyond this one field.
-    std::string scenarioName = manifest.value("scenario", "");
-    if (!scenarioName.empty()) {
-      rooms.SetModOption(roomId, host.userId, "scenario", scenarioName);
-    }
+    //
+    // Routed through the SAME applyRoomScenario the ordinary create-room path
+    // uses, deliberately (PLAN-endtoend.md D10). This field used to be the
+    // only writer of the modoption anywhere, which is exactly why the two
+    // paths diverged: every gameover verification ran through a manifest that
+    // named a scenario, and nobody noticed the player path named none. A
+    // manifest that omits the field now gets the map's default, same as a
+    // lobby-created room.
+    const std::string manifestScenario = manifest.value("scenario", "");
+    applyRoomScenario(roomId, host.userId, gameId, mapId,
+                      manifest.contains("scenario") ? &manifestScenario
+                                                    : nullptr);
 
     if (manifest.contains("aiSlots") && manifest["aiSlots"].is_array()) {
       uint8_t slotIndex = 0;
@@ -2036,7 +2284,7 @@ int main(int argc, char *argv[]) {
       for (const auto &a : room->aiSlots)
         teams.insert(a.team);
       if (teams.size() <= 1) {
-        const uint8_t aiTeam = (host.team == 0) ? 1 : 0;
+        const uint8_t aiTeam = firstFreeSlotTeam(*room, host.team);
         rooms.AddAISlot(roomId, host.userId, "null", "Null AI", aiTeam);
       }
     }
@@ -2051,6 +2299,7 @@ int main(int argc, char *argv[]) {
     rooms.AutoAssignStartPositions(roomId, maxStartPos);
 
     GameRoom *room = rooms.GetRoom(roomId);
+    warnIfWarCannotEnd(room);
     auto gpIt = gamePathsById.find(gameId);
     if (gpIt != gamePathsById.end()) {
       const auto vit = gameVersionsById.find(gameId);
@@ -2112,9 +2361,32 @@ int main(int argc, char *argv[]) {
           }
         }
 
+        // `scenario` is optional (PLAN-endtoend.md D10). Absent means "use
+        // whatever this map's war is", which is what the Create Game dialog
+        // sends when the host leaves the picker on its default. An
+        // explicitly-empty string means "no scenario, deliberately".
+        // Validate before CreateRoom so a typo never leaves a half-made room
+        // behind.
+        const bool hasScenarioChoice = j.contains("scenario");
+        const std::string scenarioChoice = j.value("scenario", "");
+        if (hasScenarioChoice && !scenarioChoice.empty() &&
+            ScenarioDiscovery::FindById(scenariosFor(gameId), scenarioChoice) ==
+                nullptr) {
+          return HttpAuth::JsonResponse(
+              400, R"({"error":"unknown scenario for this game"})");
+        }
+
         uint32_t roomId = rooms.CreateRoom(
             name, mapId, gameId, 8, "", static_cast<uint32_t>(userId),
             0 /*no WS clientId*/, user->username, persistent);
+
+        applyRoomScenario(roomId, static_cast<uint32_t>(userId), gameId, mapId,
+                          hasScenarioChoice ? &scenarioChoice : nullptr);
+        // Only on this path: the direct-start manifest applies its own
+        // explicit host team afterwards, and overruling it here would be the
+        // same "chosen behind your back" property §7.3 rejected.
+        seatHostOnFirstSide(roomId, static_cast<uint32_t>(userId));
+
         auto *room = rooms.GetRoom(roomId);
         broadcastRooms();
         return HttpAuth::JsonResponse(200, roomToJson(room));
@@ -2208,15 +2480,61 @@ int main(int argc, char *argv[]) {
   static std::unordered_map<std::string, std::string> resourcesCache;
   net.AddHttpGet(
       "/api/games/*", RouteAuth::Public,
-      [&gamesDir](const std::string &url) -> HttpResponse {
-        // Match /api/games/<id>/resources.json and /api/games/<id>/ui-manifest.
-        // /api/games/data/* and /api/games (no trailing path) are handled by
-        // their own routes registered earlier — the wildcard here only sees
-        // URLs that those didn't match.
+      [&gamesDir, &scenariosFor](const std::string &url) -> HttpResponse {
+        // Match /api/games/<id>/resources.json, /api/games/<id>/ui-manifest
+        // and /api/games/<id>/scenarios. /api/games/data/* and /api/games (no
+        // trailing path) are handled by their own routes registered earlier —
+        // the wildcard here only sees URLs that those didn't match.
         const std::string prefix = "/api/games/";
         if (url.size() <= prefix.size())
           return {.contentType = "text/plain", .body = {}, .status = 404};
         const std::string rest = url.substr(prefix.size());
+
+        // /api/games/<id>/scenarios — the war templates this game ships
+        // (PLAN-endtoend.md D10). Feeds the Create Game dialog's scenario
+        // picker: `map` lets the client filter to the map being created on,
+        // and `terminal` is what makes "this war can never end" a visible
+        // property of the choice rather than a surprise 40 minutes in.
+        // Always 200; an empty list for a game that ships no scenarios.
+        const std::string scnSuffix = "/scenarios";
+        if (rest.size() > scnSuffix.size() &&
+            rest.compare(rest.size() - scnSuffix.size(), scnSuffix.size(),
+                         scnSuffix) == 0) {
+          const std::string gameId =
+              rest.substr(0, rest.size() - scnSuffix.size());
+          if (gameId.empty() || gameId.find('/') != std::string::npos ||
+              gameId.find("..") != std::string::npos)
+            return {.contentType = "text/plain", .body = {}, .status = 400};
+
+          nlohmann::json arr = nlohmann::json::array();
+          for (const auto &s : scenariosFor(gameId)) {
+            nlohmann::json sj;
+            sj["id"] = s.id;
+            sj["displayName"] = s.displayName;
+            sj["map"] = s.mapId;
+            sj["tutorial"] = s.tutorial;
+            sj["terminal"] = s.terminal;
+            // The scenario's playable sides, resolved to one team each
+            // (PLAN-metalstorm-wars.md §7.4). NPC sides are omitted — a
+            // player is never offered Meridian's reavers. The room screen
+            // reads the *room's* `war_sides` modoption rather than this, but
+            // the Create Game dialog needs it before a room exists.
+            nlohmann::json sidesArr = nlohmann::json::array();
+            for (const auto &side : ScenarioDiscovery::PlayableSides(s)) {
+              nlohmann::json sd;
+              sd["faction"] = side.faction;
+              sd["team"] = side.team;
+              sd["staged"] = side.staged;
+              sidesArr.push_back(std::move(sd));
+            }
+            sj["sides"] = std::move(sidesArr);
+            arr.push_back(std::move(sj));
+          }
+          const std::string body = arr.dump();
+          return {.contentType = "application/json",
+                  .body = std::vector<uint8_t>(body.begin(), body.end()),
+                  .status = 200};
+        }
 
         // /api/games/<id>/ui-manifest — JSON list of override files present
         // under data/games/<id>/ui/. Always 200; empty list when the dir
@@ -2751,7 +3069,7 @@ int main(int argc, char *argv[]) {
                 break;
               }
             }
-            const uint8_t aiTeam = (hostTeam == 0) ? 1 : 0;
+            const uint8_t aiTeam = firstFreeSlotTeam(*room, hostTeam);
             if (rooms.AddAISlot(room->id, static_cast<uint32_t>(userId), "null",
                                 "Null AI", aiTeam)) {
               SLOG(SPRING_LOG_NOTICE,
@@ -2768,6 +3086,16 @@ int main(int argc, char *argv[]) {
         if (!rooms.StartGame(room->id, static_cast<uint32_t>(userId)))
           return HttpAuth::JsonResponse(400,
                                         R"({"error":"cannot start game"})");
+
+        // Last line of defence before the game server forks: say out loud
+        // whether the war we are about to spawn can ever finish
+        // (PLAN-endtoend.md D10). Deliberately does NOT back-fill a missing
+        // scenario here — applyRoomScenario at create time is the single
+        // owner of that decision, and silently overturning a host's choice at
+        // start is the same "chosen behind your back" property the design
+        // call rejected. Rooms created before this change (and persistent
+        // rooms restored from the DB) surface here as the warning.
+        warnIfWarCannotEnd(room);
 
         // Give every still-unassigned slot a distinct map start position
         // before spawning the game server. AutoAssignStartPositions skips

@@ -147,6 +147,11 @@ export class WaypointMarkerRenderer {
     /** Per-waypoint instances. Disposed and rebuilt on each render(). */
     private instances: InstancedMesh[] = [];
 
+    /** Number of waypoint markers currently in the scene. Read-only probe for
+     *  the PLAN-latency L4 measurement — it counts the artifact the player
+     *  actually sees, rather than the data structure behind it. */
+    get markerCount(): number { return this.instances.length; }
+
     /// Same fingerprint scheme as CommandPathRenderer — skip the rebuild
     /// when nothing changed between broadcasts to avoid a 1 Hz flicker.
     private renderedFingerprint = '';

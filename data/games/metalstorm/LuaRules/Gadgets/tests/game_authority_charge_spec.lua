@@ -158,3 +158,70 @@ describe("defensive: GG.Authority not yet Initialized", function()
         assert.are.equal(100, world.trp(TEAM, 'authority_player_' .. PLAYER))
     end)
 end)
+
+-- PLAN-metalstorm-objectives.md §5 "last_commander notes" (review A7).
+-- Decided 2026-07-12, recorded as resolved, and never built: measured live on
+-- the player path 2026-08-04, a committed directive charged its author and
+-- left every unit unstamped, so objectives/attribution.lua saw an empty
+-- participation map and `score_<player>_objectives` could only read 0
+-- (endtoend D11's third symptom).
+describe("directive-create attribution stamp (objectives §5 / A7)", function()
+    it("stamps last_commander on every member of the charged group", function()
+        local world, gadgetObj = mock.new()
+        world.setUnit(10, 15)
+        world.setUnit(11, 25)
+        world.setOrgGroup(TEAM, 42, { 10, 11 })
+        setPools(world, 100, 100)
+
+        assert.is_true(gadgetObj:AllowDirectiveCreate(TEAM, PLAYER, 42, 9, 0))
+
+        assert.are.equal(PLAYER, world.urp(10, 'last_commander'))
+        assert.are.equal(PLAYER, world.urp(11, 'last_commander'))
+    end)
+
+    it("does not stamp when the charge is refused (no credit for work not done)", function()
+        local world, gadgetObj = mock.new()
+        world.setUnit(10, 500)
+        world.setOrgGroup(TEAM, 42, { 10 })
+        setPools(world, 1, 1)
+
+        assert.is_false(gadgetObj:AllowDirectiveCreate(TEAM, PLAYER, 42, 9, 0))
+        assert.is_nil(world.urp(10, 'last_commander'))
+    end)
+
+    it("re-stamps a group directed by a second commander", function()
+        local world, gadgetObj = mock.new()
+        world.setUnit(10, 5)
+        world.setOrgGroup(TEAM, 42, { 10 })
+        setPools(world, 100, 100)
+        world.setPlayer(8, TEAM)
+        world.teamRulesParams[TEAM]['authority_player_8'] = 100
+
+        assert.is_true(gadgetObj:AllowDirectiveCreate(TEAM, PLAYER, 42, 9, 0))
+        assert.are.equal(PLAYER, world.urp(10, 'last_commander'))
+        assert.is_true(gadgetObj:AllowDirectiveCreate(TEAM, 8, 42, 9, 0))
+        assert.are.equal(8, world.urp(10, 'last_commander'))
+    end)
+
+    it("stamps nothing for an unattributed directive (playerID -1 -> nil)", function()
+        local world, gadgetObj = mock.new()
+        world.setUnit(10, 5)
+        world.setOrgGroup(TEAM, 42, { 10 })
+        setPools(world, 0, 100)
+
+        assert.is_true(gadgetObj:AllowDirectiveCreate(TEAM, -1, 42, 9, 0))
+        assert.is_nil(world.urp(10, 'last_commander'))
+    end)
+
+    -- endtoend D24: the composer's canned subjects ("Idle infantry") compile to
+    -- groupId 0, which has no roster at create time, so this stamp cannot
+    -- reach them. Asserted so the limit is stated rather than assumed away.
+    it("cannot stamp a condition-scoped directive (groupID 0) — see D24", function()
+        local world, gadgetObj = mock.new()
+        world.setUnit(10, 5)
+        setPools(world, 100, 100)
+
+        assert.is_true(gadgetObj:AllowDirectiveCreate(TEAM, PLAYER, 0, 9, 0))
+        assert.is_nil(world.urp(10, 'last_commander'))
+    end)
+end)

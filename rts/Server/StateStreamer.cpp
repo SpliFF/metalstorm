@@ -24,6 +24,7 @@
 #include "OrgGroups.h"
 #include "PerfMetrics.h"
 #include "SyncedInputJournal.h"
+#include "System/Log/ILog.h"
 #include "AI/AIRuntimePool.h"
 #include "WebTransport/WebTransportServer.h"
 #include "Lua/LuaRules.h"
@@ -800,12 +801,57 @@ void StateStreamer::BroadcastCombatEvents(int) {
         || !projDrain.fired.empty()
         || !projDrain.impacts.empty()
         || !projDrain.trajectories.empty()
+        || !projDrain.fireOutcomes.empty()
+        || !projDrain.keyframes.empty()
+        || !projDrain.outcomesKnown.empty()
         || !soundDrain.empty()
         || !volleyDrain.empty()
         || !fieldDrain.empty()
         || !seismicDrain.empty();
     if (hasAny && rtcServer.GetClientCount() > 0) {
         const uint32_t frameNo = static_cast<uint32_t>(sim.GetFrameNum());
+
+        // PLAN-latency L3 — pre-filter emission tally, summarised every
+        // L3_TALLY_PERIOD frames. This is what the L3 gate's bandwidth
+        // bullet measures against, and before the client decodes keyframes
+        // it is the only way to tell "the stream is live" from "the stream
+        // is empty" — a distinction this lane has twice paid for learning
+        // late. L_INFO because an L_DEBUG line is invisible under the
+        // server's default filter, and the period keeps it to one line per
+        // 10 s of game time. Counted pre-filter on purpose: this is what the
+        // sim produced, not what one session was allowed to see.
+        {
+            constexpr uint32_t L3_TALLY_PERIOD = 300;
+            static uint64_t tallyKeyframes = 0;
+            static uint64_t tallyOutcomes = 0;
+            static uint64_t tallyTrajectories = 0;
+            static uint64_t tallyKeyframedShots = 0;
+            static uint32_t tallyLastReport = 0;
+
+            tallyKeyframes    += projDrain.keyframes.size();
+            tallyOutcomes     += projDrain.outcomesKnown.size();
+            tallyTrajectories += projDrain.trajectories.size();
+            // PLAN-latency L3.3 — the denominator. `keyframes/shots` is the
+            // number the bandwidth lever moves, and without the shot count the
+            // knot count alone cannot tell "fewer knots per shot" from "fewer
+            // shots". Counts keyframed shots specifically, not all fired
+            // events, so Tier-C and hit-scan shots do not dilute it.
+            for (const auto& f : projDrain.fired)
+                tallyKeyframedShots += (f.keyframed ? 1u : 0u);
+
+            if (frameNo >= tallyLastReport + L3_TALLY_PERIOD) {
+                if (tallyKeyframes > 0 || tallyTrajectories > 0 || tallyOutcomes > 0) {
+                    LOG_L(L_INFO, "[L3tally] frame=%u cumulative: keyframes=%llu"
+                                  " outcomes=%llu trajectories=%llu keyframedShots=%llu",
+                          frameNo,
+                          static_cast<unsigned long long>(tallyKeyframes),
+                          static_cast<unsigned long long>(tallyOutcomes),
+                          static_cast<unsigned long long>(tallyTrajectories),
+                          static_cast<unsigned long long>(tallyKeyframedShots));
+                }
+                tallyLastReport = frameNo;
+            }
+        }
 
         sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
             int viewerAllyTeam = -1;
@@ -861,6 +907,41 @@ void StateStreamer::BroadcastCombatEvents(int) {
             for (const auto& e : projDrain.trajectories) {
                 if (teamFriendly(e.team) || posVisible(e.pos))
                     trajectories.push_back(e);
+            }
+
+            // Tier-C fire outcomes (PLAN-latency L2.1). Filtered on the same
+            // rule as Fired, which this event replaces: owner-friendly, OR
+            // the muzzle in LOS, OR the impact point in LOS — the last so a
+            // player sees a shell arriving out of the fog rather than an
+            // explosion with no shot attached.
+            std::vector<FireOutcomeEventData> fireOutcomes;
+            fireOutcomes.reserve(projDrain.fireOutcomes.size());
+            for (const auto& e : projDrain.fireOutcomes) {
+                if (teamFriendly(e.team)
+                    || posVisible(e.origin)
+                    || posVisible(e.impactPos))
+                    fireOutcomes.push_back(e);
+            }
+
+            // PLAN-latency L3 — Tier-S keyframes. Same rule as the
+            // trajectory events they replace: owner-friendly, or the knot
+            // itself in LOS. A projectile crossing a LOS bubble therefore
+            // contributes only the knots inside it, which is exactly the
+            // segment the viewer can see.
+            std::vector<TrajectoryKeyframeData> keyframes;
+            keyframes.reserve(projDrain.keyframes.size());
+            for (const auto& e : projDrain.keyframes) {
+                if (teamFriendly(e.team) || posVisible(e.pos))
+                    keyframes.push_back(e);
+            }
+
+            // Frame-stamped outcomes. Filtered like ProjectileImpactEvent,
+            // whose resolution this restates.
+            std::vector<OutcomeKnownEventData> outcomesKnown;
+            outcomesKnown.reserve(projDrain.outcomesKnown.size());
+            for (const auto& e : projDrain.outcomesKnown) {
+                if (teamFriendly(e.team) || posVisible(e.outcomePos))
+                    outcomesKnown.push_back(e);
             }
 
             // Combat events also benefit from the same filter — the
@@ -958,13 +1039,16 @@ void StateStreamer::BroadcastCombatEvents(int) {
 
             if (visibleCombat.empty() && fired.empty()
                 && impacts.empty() && trajectories.empty()
+                && fireOutcomes.empty()
+                && keyframes.empty() && outcomesKnown.empty()
                 && visibleSounds.empty() && visiblePings.empty()
                 && visibleVolleys.empty() && visibleFields.empty())
                 return;
 
             auto batch = Protocol::BuildCombatEventBatch(
                 frameNo, visibleCombat, fired, impacts, trajectories,
-                visibleSounds, visiblePings, visibleVolleys, visibleFields);
+                visibleSounds, visiblePings, visibleVolleys, visibleFields,
+                fireOutcomes, keyframes, outcomesKnown);
             rtcServer.SendStream(clientId, StreamClass::Control, batch.data(), batch.size(), kEventLaneCombat);
         });
     }
@@ -983,7 +1067,8 @@ void StateStreamer::BroadcastEntityDeaths(int) {
     auto& sessions = ctx.sessions;
     auto deaths = unitDeaths.Drain();
     for (const auto& death : deaths) {
-        auto msg = Protocol::BuildEntityDestroy(death.unitId, 1, death.x, death.y, death.z);
+        auto msg = Protocol::BuildEntityDestroy(death.unitId, 1, death.x, death.y, death.z,
+                                                death.frame);
         // Bit 31 of losMask is the "ally team >= 32 — broadcast to
         // everyone" escape hatch (see UnitDeathEvent docs).
         const bool broadcastAll = (death.losMask & (1u << 31)) != 0;

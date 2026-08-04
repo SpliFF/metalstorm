@@ -115,10 +115,30 @@ end
 --- Falls back to just the completing team's allyteam when there is no sides
 --- table to group by — the honest answer when the game can't know who else
 --- was on that side.
+---
+--- The sides table is the *scenario's* roster, and a room is not obliged to
+--- staff all of it (D14 — rooms are sized by their slots, not by their war).
+--- So every side team is checked against the teams this room actually has
+--- before its allyteam is claimed as a winner. Without that check a scenario
+--- team with no room slot contributes an allyteam id that does not exist —
+--- Meridian Basin's 4-team `compact` side in a 2-slot room produced
+--- {0,1,2,3} where 3 was nothing at all, and `Spring.GameOver` then dropped
+--- it silently (LuaSyncedCtrl.cpp validates each id with ValidAllyTeam), so
+--- the Lua log claimed four winners and the server relay reported three.
+--- Gaia is excluded for the same reason it is excluded everywhere else: it
+--- is the world, not a side, and it occupies a real team index that a
+--- downsized room's scenario mapping will otherwise land on (in that same
+--- 2-slot room, Gaia sat at team 2 and was declared a co-winner).
 local function winnersFor(completingTeam)
     local allyOf = function(t)
         local a = Spring.GetTeamAllyTeamID(t)
         return a or t
+    end
+
+    local gaia = Spring.GetGaiaTeamID and Spring.GetGaiaTeamID() or nil
+    local staffed = {}
+    for _, t in ipairs(Spring.GetTeamList() or {}) do
+        if t ~= gaia then staffed[t] = true end
     end
 
     local faction = factionOf(completingTeam)
@@ -126,7 +146,7 @@ local function winnersFor(completingTeam)
 
     local seen, out = {}, {}
     for _, s in ipairs(GG.Scenario.data.sides) do
-        if s.faction == faction and s.team then
+        if s.faction == faction and s.team and staffed[s.team] then
             local a = allyOf(s.team)
             if not seen[a] then
                 seen[a] = true
@@ -187,7 +207,21 @@ local function resolve()
 
     Spring.Echo('[game_gameover] GAME OVER — winning allyteams {' ..
                 joinIds(winners) .. '}')
-    Spring.GameOver(winners)
+    -- Spring.GameOver returns how many of the ids it *accepted* — it drops
+    -- any that fail ValidAllyTeam. Log the two together: this line and the
+    -- server relay's "N winning allyteam(s)" are the only record of what the
+    -- clients were actually told, and when they disagreed nobody could tell
+    -- whether an allyteam had been lost in transit or was never real
+    -- (PLAN-endtoend D18 — it was the latter, and it cost a fire to
+    -- establish that). winnersFor now only produces staffed teams, so a
+    -- mismatch here means a genuinely new problem.
+    local accepted = Spring.GameOver(winners)
+    if accepted ~= #winners then
+        Spring.Echo('[game_gameover] WARNING: declared ' .. #winners ..
+                    ' winning allyteam(s) but the engine accepted ' ..
+                    string.format('%d', accepted or 0) ..
+                    ' — some ids are not valid allyteams in this room')
+    end
 end
 
 function gadget:Initialize()
@@ -208,7 +242,45 @@ function gadget:Initialize()
     publishState()
 end
 
+-- The invariant, checked in the sim itself (PLAN-endtoend.md D10): a war with
+-- no `victory = true` objective has no terminal condition and will run
+-- forever. The lobby now defaults a scenario per map and warns at room start,
+-- but this is the check that cannot be bypassed by *any* boot path —
+-- create-room, --direct manifest, headless run — because it reads the staged
+-- board rather than how the board was requested.
+--
+-- Frame 60, not GameStart: game_scenario stages objectives at GameStart and
+-- resolves the deferred ones at frame 30, and game_objectives' systemic
+-- generator has had a tick. By 2 s in, whatever this war has is what it has.
+--
+-- Loud, not fatal. A scenario-less war is legitimate (a sandbox, a smoke
+-- fixture, the tutorial); what was wrong was that it looked identical to a
+-- real one. Deliberately says so on the client too, so a player in an
+-- endless room finds out at the start rather than by attrition.
+local ENDLESS_CHECK_FRAME = 60
+local endlessChecked = false
+
+local function checkWarCanEnd()
+    local count = GG.Objectives and GG.Objectives.VictoryObjectiveCount
+        and GG.Objectives.VictoryObjectiveCount() or 0
+    Spring.SetGameRulesParam('war_can_end', count > 0 and 1 or 0, PUBLIC)
+    if count > 0 then return end
+
+    local scenario = GG.Scenario and GG.Scenario.name
+    Spring.Echo('[game_gameover] WARNING: this war has NO victory objective' ..
+                (scenario
+                    and (' — scenario "' .. scenario .. '" declares none')
+                    or ' — no scenario was staged (the `scenario` modoption ' ..
+                        'is unset)') ..
+                '; it has no terminal condition and cannot end. ' ..
+                'See PLAN-metalstorm-wars.md §7.1.')
+end
+
 function gadget:GameFrame(frame)
+    if not endlessChecked and frame >= ENDLESS_CHECK_FRAME then
+        endlessChecked = true
+        checkWarCanEnd()
+    end
     if resolveAtFrame and frame >= resolveAtFrame then
         resolveAtFrame = nil
         resolve()

@@ -83,14 +83,19 @@ function M.new()
         GetPlayerInfo = function(playerID, getOpts)
             local p = world.players[playerID]
             if not p then return nil end
+            -- teamID as a FLOAT for the same reason GetPlayerList returns
+            -- float playerIDs (see its note): the engine does, and a rulesParam
+            -- key built as `'guidance_' .. teamID` then reads 'guidance_4.0_'
+            -- where every client-side reader asks for 'guidance_4_'.
+            local team = p.team and (p.team + 0.0) or p.team
             if getOpts then
                 -- Mirror LuaSyncedRead.cpp: 11th return is the player-options
                 -- table, carrying isAI="1" only for a virtual AI player.
                 local opts = p.isAI and { isAI = '1' } or {}
-                return 'player' .. playerID, p.active, p.spectator, p.team,
-                       p.team, 0, 0, '', 0, false, opts, false
+                return 'player' .. playerID, p.active, p.spectator, team,
+                       team, 0, 0, '', 0, false, opts, false
             end
-            return 'player' .. playerID, p.active, p.spectator, p.team
+            return 'player' .. playerID, p.active, p.spectator, team
         end,
         -- Mirrors rts/Lua/LuaSyncedRead.cpp GetPlayerList: teamID<0 (or nil)
         -- = no team filter (specs included); a specific teamID excludes
@@ -109,7 +114,15 @@ function M.new()
                     if p.spectator or p.team ~= teamID then include = false end
                 end
                 if activeOnly and not p.active then include = false end
-                if include then out[#out + 1] = playerID end
+                -- FLOAT, deliberately: the real engine hands playerIDs back as
+                -- Lua-5.4 floats (measured live — `Spring.GetPlayerList()[2]`
+                -- has math.type 'float'), so `'score_' .. playerID` makes
+                -- 'score_1.0_' and any integer-keyed reader misses it. This
+                -- mock used to return integers, which is precisely why the
+                -- scoreboard's float-keyed publish passed its specs for months
+                -- while reading zero in every live match. Keep it float so a
+                -- key built without math.floor fails here first.
+                if include then out[#out + 1] = playerID + 0.0 end
             end
             table.sort(out)
             return out

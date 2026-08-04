@@ -1180,6 +1180,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 break;
             }
             case 'gp:gameOver':
+                console.warn(`[main] gp:gameOver frame=${m.frame} winners=[${(m.winningAllyTeams ?? []).join(',')}] won=${m.won} — showing overlay`);
                 showGameOver(gameTemplates, m.frame, {
                     winningAllyTeams: m.winningAllyTeams,
                     won: m.won,

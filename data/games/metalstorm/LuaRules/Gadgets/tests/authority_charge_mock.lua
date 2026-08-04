@@ -24,11 +24,18 @@ function M.new()
         unitDefIdByUnit = {},   -- unitID -> unitDefID
         orgGroups = {},         -- teamID -> { {id=.., members={...}}, ... }
         players = {},           -- playerID -> teamID
+        unitRulesParams = {},   -- unitID -> key -> value
     }
 
     function world.trp(teamID, key)
         local t = world.teamRulesParams[teamID]
         return t and t[key]
+    end
+
+    --- objectives §5's `last_commander` attribution stamp.
+    function world.urp(unitID, key)
+        local u = world.unitRulesParams[unitID]
+        return u and u[key]
     end
 
     --- Register a player's team so playerTeam()/getPlayerPool() (which read
@@ -73,6 +80,11 @@ function M.new()
         GetGameRulesParam = function(key) return world.gameRulesParams[key] end,
         GetUnitDefID = function(unitID) return world.unitDefIdByUnit[unitID] end,
         GetOrgGroups = function(teamID) return world.orgGroups[teamID] or {} end,
+        SetUnitRulesParam = function(unitID, key, value)
+            world.unitRulesParams[unitID] = world.unitRulesParams[unitID] or {}
+            world.unitRulesParams[unitID][key] = value
+        end,
+        GetUnitRulesParam = function(unitID, key) return world.urp(unitID, key) end,
         Log = function() end,
     }
     _G.UnitDefs = world.unitDefs

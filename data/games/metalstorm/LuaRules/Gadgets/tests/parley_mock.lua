@@ -56,7 +56,11 @@ function M.new(gadgetFile)
         GetPlayerInfo = function(playerID)
             local p = world.players[playerID]
             if not p then return nil end
-            return 'player' .. playerID, true, false, p.team
+            -- teamID as a FLOAT, mirroring the engine (same note as
+            -- spring_mock.lua): a rulesParam key built as `'guidance_' .. teamID`
+            -- from this value becomes 'guidance_10.0_', which no reader asks
+            -- for. Returning an integer here is what let that ship.
+            return 'player' .. playerID, true, false, p.team and (p.team + 0.0) or p.team
         end,
         GetGaiaTeamID = function() return 99 end,
         SetGameRulesParam = function(key, value) world.gameRulesParams[key] = value end,

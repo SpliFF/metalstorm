@@ -111,6 +111,27 @@ A black/empty game area in a screenshot does NOT mean nothing rendered. Use
 human-viewed browser, or data-level checks (`window.__gp` mesh/texture counts)
 instead of trusting the pixel capture.
 
+**…and the exact converse — `highResScreenshot()` cannot see the DOM.** It
+renders the *canvas*, so no HTML overlay is in it: not the game-over overlay,
+not the quit confirm, not the HUD panels, not a toast. Reaching for it out of
+habit gives you a picture of a live-looking game with the overlay you were
+checking for cropped out of existence — that is how PLAN-endtoend's D17 was
+filed as "the finish never reaches a connected client" against a build where it
+did. Pick by what you are looking at:
+
+| Looking at | Use |
+|---|---|
+| terrain, units, projectiles, lighting | `window.test.highResScreenshot()` |
+| any overlay / HUD / panel / dialog | CDP `take_screenshot`, or query it: `document.getElementById('game-over-overlay')?.innerText` |
+
+When in doubt, assert on the DOM — it is cheaper and unambiguous.
+
+**A modal `window.alert()` blocks CDP as well as the page.** While one is open
+`evaluate_script` cannot run against that tab at all, so the only reading left
+is a screenshot. Combined with the trap above, that is a good way to conclude
+something false about a page. Dismiss the dialog (`handle_dialog`), or read the
+other client, before drawing conclusions.
+
 **Game choice for UI testing: use `zk`, not `papertanks`.** PaperTanks ships no
 configured LuaUI/minimap/sounds, so UI/HUD tests against it prove nothing —
 widgets simply don't exist there. ZK (and BAR) have full HUDs.

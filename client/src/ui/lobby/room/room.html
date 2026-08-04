@@ -4,6 +4,11 @@
         <span class="room-badge">{{state}}</span>
         <button id="leave-btn" class="secondary">Leave</button>
     </div>
+    <!-- Map + war line (PLAN-endtoend.md D10). The war a room will stage is
+         derived from its map, so it has to be visible before Start — a
+         coupling nobody can see is the same as no coupling at all. Empty
+         string for games with no scenarios, which collapses the row. -->
+    <div class="room-setup">{{setup_html}}</div>
     <div class="player-list">{{players_html}}</div>
     <div class="room-actions">{{actions_html}}</div>
 </div>

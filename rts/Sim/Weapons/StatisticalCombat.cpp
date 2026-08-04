@@ -18,7 +18,10 @@
 #include "Game/GameHelper.h"
 #include "Map/Ground.h"
 #include "Server/CombatEventCollector.h"
+#include "System/SpringLog/SpringLog.h"
 #include "System/creg/creg_cond.h"
+
+#define LOG_SECTION "combat"
 
 StatisticalCombatManager statisticalCombatManager;
 
@@ -94,6 +97,24 @@ WeaponResolution StatCombat::ParseResolution(
 	if (v == "mixed")       return WEAPON_RESOLUTION_MIXED;
 	if (v == "field")       return WEAPON_RESOLUTION_FIELD;
 	// "sim" and the legacy "ballistic" both mean: a real server projectile.
+	if (v == "sim" || v == "ballistic")
+		return WEAPON_RESOLUTION_SIM;
+
+	// Anything else is an authoring mistake — a typo ("statistcal"), a value
+	// from a newer plan revision, or a stale key. Silently answering `sim`
+	// makes a def that was meant to be statistical fire real projectiles
+	// with no diagnostic anywhere, which is indistinguishable from the
+	// feature not being implemented. Be loud, once per distinct value.
+	{
+		static spring::unordered_map<std::string, bool> warned;
+		if (warned.emplace(v, true).second) {
+			SLOG(SPRING_LOG_WARNING,
+				"weapon def customparams.resolution='%s' is not a recognised "
+				"value (expected one of: statistical, mixed, field, sim, "
+				"ballistic) — falling back to 'sim' (real projectile)",
+				v.c_str());
+		}
+	}
 	return WEAPON_RESOLUTION_SIM;
 }
 

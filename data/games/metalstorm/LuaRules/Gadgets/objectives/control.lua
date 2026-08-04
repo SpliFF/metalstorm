@@ -16,7 +16,28 @@ function control.validateParams(params)
     if type(params.holdFrames) ~= 'number' or params.holdFrames <= 0 then
         return false, 'holdFrames must be a positive number'
     end
+    if params.notBefore ~= nil and
+       (type(params.notBefore) ~= 'number' or params.notBefore < 0) then
+        return false, 'notBefore must be a non-negative number'
+    end
     return true
+end
+
+--- Open-race delay (PLAN-metalstorm-wars.md §7.5a). The hold clock does not
+--- begin accruing before `notBefore`, so completion is always at or after
+--- `notBefore + holdFrames` no matter how early a team took the region. This
+--- is what makes "the war ended before the sides could meet" unrepresentable
+--- rather than merely unlikely: a scenario states the frame at which its prize
+--- becomes winnable, and no staging or pathing change can undercut it.
+---
+--- Clamping the START (rather than gating the completion test) is deliberate.
+--- Gating completion would let a team that walked in at frame 60 bank the whole
+--- hold and win on the tick `notBefore` passes — the delay would buy no time to
+--- contest, which is the entire point of having it.
+local function accrualStart(o, since)
+    local notBefore = o.params.notBefore or 0
+    if since < notBefore then return notBefore end
+    return since
 end
 
 --- Create-time setup. A bogus regionKey (unknown to the region graph) fails
@@ -53,7 +74,7 @@ function control.check(o, ctx)
     if not eligible(o, owner) then return nil end   -- not an eligible team
 
     if not held[owner] then held[owner] = ctx.frame end
-    if (ctx.frame - held[owner]) >= o.params.holdFrames then
+    if (ctx.frame - accrualStart(o, held[owner])) >= o.params.holdFrames then
         return 'complete', owner
     end
     return nil
@@ -64,7 +85,9 @@ function control.progress(o, ctx)
     if not owner or not eligible(o, owner) then return 0 end
     local since = o.data.heldSince[owner]
     if not since then return 0 end
-    return math.min(1, (ctx.frame - since) / o.params.holdFrames)
+    local held = ctx.frame - accrualStart(o, since)
+    if held <= 0 then return 0 end   -- holding, but the race hasn't opened yet
+    return math.min(1, held / o.params.holdFrames)
 end
 
 --- Participation credit: the currently-accumulating team's units inside the

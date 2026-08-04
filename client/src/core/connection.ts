@@ -16,6 +16,7 @@
 import * as flatbuffers from 'flatbuffers';
 import { WebTransportAdapter, type GameTransport } from './transport.js';
 import type { AtlasLayout } from './impostor-atlas.js';
+import { netSimDecide, type NetSimConfig } from './net-sim.js';
 import { ClientMessage } from '../protocol/spring-web/client-message.js';
 import { ClientPayload } from '../protocol/spring-web/client-payload.js';
 import { ServerMessage } from '../protocol/spring-web/server-message.js';
@@ -31,6 +32,9 @@ import { DamageFieldEvent } from '../protocol/spring-web/damage-field-event.js';
 import { ProjectileFiredEvent } from '../protocol/spring-web/projectile-fired-event.js';
 import { ProjectileImpactEvent } from '../protocol/spring-web/projectile-impact-event.js';
 import { ProjectileTrajectoryEvent } from '../protocol/spring-web/projectile-trajectory-event.js';
+import { FireOutcomeEvent } from '../protocol/spring-web/fire-outcome-event.js';
+import { TrajectoryKeyframe } from '../protocol/spring-web/trajectory-keyframe.js';
+import { OutcomeKnownEvent } from '../protocol/spring-web/outcome-known-event.js';
 import { EntityDestroy } from '../protocol/spring-web/entity-destroy.js';
 import { EntitySensorUpdate } from '../protocol/spring-web/entity-sensor-update.js';
 import { SendToUnsyncedEvent } from '../protocol/spring-web/send-to-unsynced-event.js';
@@ -333,6 +337,13 @@ export interface ProjectileFiredInfo {
     ttl: number;
     gravity: number;
     hitscan: boolean;
+    /// PLAN-latency L3.3 — the server is streaming this projectile under the
+    /// keyframe contract, so the renderer starts a `KeyframeTrack` from this
+    /// event (at the batch frame) instead of waiting for a `Launch` knot. For
+    /// the closed-form classes no knot is coming at all. False on a pre-L3
+    /// server, which is what keeps the legacy integrate-and-snap path
+    /// reachable.
+    keyframed: boolean;
 }
 
 export interface ProjectileImpactInfo {
@@ -351,6 +362,66 @@ export interface ProjectileTrajectoryInfo {
     pos: { x: number; y: number; z: number };
     vel: { x: number; y: number; z: number };
     reason: number;
+}
+
+/// PLAN-latency L2.1/L2.2 — a Tier-C ("cosmetic") shot, resolved whole at
+/// fire time by the server. Replaces the Fired/Trajectory/Impact triple for
+/// weapon defs classified `FX_TIER_COSMETIC`: there is no sim projectile and
+/// therefore no projectile id, so the client mints its own (see
+/// `ProjectileRenderer.spawnCosmetic`).
+///
+/// The two frames are what makes convergence possible: the client schedules
+/// the spawn at `fireFrame` and the detonation at `impactFrame` on the L1
+/// timeline and solves a flight that terminates on `impactPos` at exactly
+/// `impactFrame` — no mid-flight correction, so no snap.
+export interface FireOutcomeInfo {
+    fireFrame: number;
+    weaponDefId: number;
+    ownerId: number;
+    team: number;
+    origin: { x: number; y: number; z: number };
+    targetId: number;
+    targetPos: { x: number; y: number; z: number };
+    /// `FireOutcome` enum (0 Hit, 1 Miss, 2 Shielded, 3 Intercepted, 4 Expired).
+    outcome: number;
+    impactFrame: number;
+    impactPos: { x: number; y: number; z: number };
+    /// Per-sim-frame gravity the server resolved the arc with; 0 for a
+    /// straight shot. Needed because the ballistic solution through
+    /// (origin, impactPos, Δframes) is only unique once g is fixed.
+    gravity: number;
+}
+
+/// PLAN-latency L3.2 — one knot on a Tier-S projectile's flight path. `vel` is
+/// in elmos / sim-frame, the same unit as ProjectileFiredInfo and the unit the
+/// spline is parametrised in; keyframe-flight.ts converts on the way out.
+export interface TrajectoryKeyframeInfo {
+    projId: number;
+    frame: number;
+    pos: { x: number; y: number; z: number };
+    vel: { x: number; y: number; z: number };
+    /// `TrajectoryKeyframeKind` (0 Launch, 1 Heartbeat, 2 StageChange,
+    /// 3 Retarget, 4 Bounce, 5 Terminal).
+    kind: number;
+}
+
+/// PLAN-latency L3.2 — a Tier-S shot's resolved outcome with the sim frame it
+/// resolves on, so the client can schedule the burst instead of playing it on
+/// packet arrival.
+///
+/// Carries the same information as `ProjectileImpactInfo` plus the frame, and
+/// with a *more accurate* `outcome`: shield absorption and interceptor kills
+/// both funnel through the sim's no-argument `Collision()` overload and have
+/// always been reported as `Terrain` by the legacy impact event, whereas the
+/// server records the real kind for this one (L3.1, `SetWebOutcomeHint`).
+export interface OutcomeKnownInfo {
+    projId: number;
+    /// `ProjectileImpactKind` — same vocabulary as ProjectileImpactInfo.
+    outcome: number;
+    outcomeFrame: number;
+    outcomePos: { x: number; y: number; z: number };
+    targetId: number;
+    weaponDefId: number;
 }
 
 /// One sound asset attached to a unit or weapon def. The `id` field
@@ -658,6 +729,16 @@ export type UnitCommandKindStr = 'issued' | 'done';
 /** One synced command event mirrored from the server. Shape matches
  *  the LuaUI `widgetHandler:UnitCommand` / `UnitCmdDone` callin
  *  argument lists so the worker can forward directly. */
+/** Observer for commands that have just gone on the wire (PLAN-latency L4.1).
+ *  Receives one entry per `PlayerCommand`; a `PlayerCommandBatch` arrives as
+ *  one call carrying all of its inner commands. */
+export type CommandSink = (commands: ReadonlyArray<{
+    commandId: number;
+    unitIds: readonly number[];
+    params: readonly number[];
+    options: number;
+}>) => void;
+
 export interface UnitCommandEventMsg {
     kind: UnitCommandKindStr;
     unitId: number;
@@ -677,6 +758,13 @@ export interface WeaponDefInfo {
     defId: number;
     name: string;
     projectileType: number;
+    /** PLAN-latency L2 presentation tier: `FX_TIER_COSMETIC` (1) means no sim
+     *  projectile exists — the server resolves the outcome at fire time and the
+     *  client invents the whole flight, converging on the impact by
+     *  construction. `FX_TIER_SYNCED` (2) means a real server projectile whose
+     *  outcome is contingent on sim state. Resolved server-side at def load
+     *  (WeaponDef::ClassifyFxTier), overridable via `customParams.fxTier`. */
+    fxTier: number;
     projectileSpeed: number;
     range: number;
     aoe: number;
@@ -746,6 +834,11 @@ export interface WeaponDefInfo {
     energyCost: number;
     /** Behaviour bitfield. See `GameWeaponDef.flags` in protocol.fbs. */
     flags: number;
+    /** `flags` bit 0 — the sim guides this weapon's projectile at its target
+     *  every tick (`WeaponDef::tracks`). PLAN-latency L2.3 reads it to decide
+     *  whether an invented Tier-C flight may bend toward a moving target: a
+     *  guided missile should, an unguided shell should not. */
+    tracks: boolean;
     customParams: Record<string, string>;
     /** Lobby URL of the projectile's `.glb`, or empty when the def
      *  doesn't reference a model — the renderer uses procedural shapes
@@ -991,16 +1084,27 @@ export interface ConnectionEvents {
     onProjectileFired?: (events: ProjectileFiredInfo[], frame: number) => void;
     onProjectileImpacts?: (events: ProjectileImpactInfo[], frame: number) => void;
     onProjectileTrajectories?: (events: ProjectileTrajectoryInfo[], frame: number) => void;
-    /** `frame` is the client's best lower bound on the death's sim frame:
-     *  max(last GameEventBatch frame, newest entity-state base_frame). When a
-     *  same-tick combat batch preceded the destroy (kill visible to this
-     *  viewer) that batch's frame wins and the death lands on the same
-     *  presentation frame as its explosion; otherwise (Lua DestroyUnit /
-     *  self-d, or the kill event LOS-filtered away — the server sends no
-     *  batch on event-less ticks and filters batches per viewer) the newest
-     *  observed state frame keeps the stamp fresh so the mesh isn't removed
-     *  up to ~D early. Proper L2 fix: a real frame field on the EntityDestroy
-     *  wire message. */
+    /** PLAN-latency L2.2 — Tier-C shots. Unlike every other event family here
+     *  the batch `frame` is NOT the presentation frame: each outcome carries
+     *  its own `fireFrame`/`impactFrame` pair, and both are in the future
+     *  relative to the batch (the server resolved the whole flight up front).
+     *  `frame` is passed for symmetry/diagnostics only. */
+    onFireOutcomes?: (events: FireOutcomeInfo[], frame: number) => void;
+    /** PLAN-latency L3.2 — Tier-S trajectory knots. Delivered immediately
+     *  rather than scheduled: a keyframe is data about the path, not an event
+     *  on it, and the spline it feeds is evaluated at the presentation cursor
+     *  by the renderer. `frame` is the batch frame (= the knot's own frame in
+     *  practice) and is passed for diagnostics. */
+    onTrajectoryKeyframes?: (events: TrajectoryKeyframeInfo[], frame: number) => void;
+    /** PLAN-latency L3.2 — a Tier-S shot's resolution, stamped with the frame
+     *  it resolves on. The consumer schedules the burst at `outcomeFrame` on
+     *  the L1 timeline; see the dedupe note on `onProjectileImpacts`. */
+    onOutcomesKnown?: (events: OutcomeKnownInfo[], frame: number) => void;
+    /** `frame` is the sim frame the unit died on, taken from
+     *  `EntityDestroy.frame` (stamped server-side at kill time). Falls back to
+     *  the most recent GameEventBatch frame only against a server that predates
+     *  that field. Lets L1 schedule the death to land on the same presentation
+     *  frame as its explosion. */
     onEntityDestroy?: (entityId: number, x: number, y: number, z: number, frame: number) => void;
     /** Per-unit sensor radius override. Emitted by
      *  Spring.SetUnitSensorRadius on the server. `sensorType` matches
@@ -1139,17 +1243,22 @@ export class Connection {
     public myTeam: number = -1;
     public myRole: string = '';  // "admin", "player", or "spectator"
     private clock = new ServerClock();
-    /** Sim frame of the most recent GameEventBatch. When a combat batch for
-     *  the same tick precedes an EntityDestroy (same reliable, in-order lane,
-     *  StateStreamer::Tick) this is the death's own frame, letting L1 present
-     *  the death with its explosion. NOT guaranteed per destroy — see
-     *  handleEntityDestroy. */
+    /** Sim frame of the most recent GameEventBatch. Legacy fallback for
+     *  onEntityDestroy against a server that does not stamp
+     *  `EntityDestroy.frame`. */
     private lastEventFrame = 0;
     /** Newest entity-state base_frame delivered (post-netsim) — the same
      *  leading edge PresentationClock.newestObservedFrame tracks, kept here so
      *  the destroy stamp needs no reach into the worker's clock. */
     private newestStateFrame = 0;
     private pingInterval: ReturnType<typeof setInterval> | null = null;
+    /** PLAN-latency L2.3: warm-up ping timers. The steady cadence is 30 s,
+     *  which is far too slow to correct the boot-stall RTT sample that the
+     *  very first ping picks up (the pong is queued behind the content load).
+     *  These fire a short geometric burst right after connect so a clean
+     *  sample lands within a second or two of the game becoming interactive;
+     *  `ServerClock` then adopts it immediately (fast-down smoothing). */
+    private warmupPings: ReturnType<typeof setTimeout>[] = [];
     private httpBase = '';  // e.g. "http://localhost:9100"
 
     /** Public read-only accessor for the game server HTTP base URL.
@@ -1158,6 +1267,8 @@ export class Connection {
      *  server / LuaRules / LuaGaia / LuaAI:* live on the game server). */
     get gameHttpUrl(): string { return this.httpBase; }
     private commandSequence = 0;
+    /** PLAN-latency L4.1 — see `setCommandSink`. */
+    private commandSink: CommandSink | null = null;
 
     // W3: Key interning dictionary for RulesParamUpdate
     private keyDictionary: string[] = [];
@@ -1409,25 +1520,33 @@ export class Connection {
 
         this.pingInterval = setInterval(() => this.sendPing(), 30000);
         this.sendPing();
+        // Warm-up burst (see `warmupPings`). Spread geometrically so the
+        // series straddles whenever the load stall actually ends, rather than
+        // betting on one guess at its duration. The tail reaches past a minute
+        // on purpose: a cold ZK room takes ~90 s to become interactive here,
+        // and a burst that stops at 16 s measures nothing but the stall.
+        for (const delayMs of [500, 1000, 2000, 4000, 8000, 16000, 32000, 64000]) {
+            this.warmupPings.push(setTimeout(() => this.sendPing(), delayMs));
+        }
     }
 
-    /** Route an inbound WebTransport message by envelope byte. Entity-state
-     *  frames pass through the artificial-latency sim (netsim); everything else
-     *  (FlatBuffers control, projectile/piece/decals/los/heightmap) dispatches
-     *  directly. The transport delivers each whole message regardless of which
-     *  QUIC stream/tier it arrived on. */
+    /** Route an inbound WebTransport message by envelope byte. **Every**
+     *  envelope passes through the artificial-latency sim (netsim) when it is
+     *  armed — see `receiveWithNetSim` for the two-lane model. The transport
+     *  delivers each whole message regardless of which QUIC stream/tier it
+     *  arrived on. */
     private routeIncoming(data: Uint8Array): void {
         if (data.length < 1) return;
         // GW8: per-envelope bandwidth tally (PLAN-performance PC-2). The single
         // inbound dispatch — captures every stream/tier byte before netsim.
         recordInbound(data);
-        const env = data[0];
-        if (env === ENVELOPE_ENTITY_STATE_FULL || env === ENVELOPE_ENTITY_STATE_DELTA) {
-            this.receiveStateFrame(data);
-        } else {
-            this.handleBinaryMessage(data);
-            if (env === ENVELOPE_FLATBUFFERS) this.controlObserver?.(data);
-        }
+        this.receiveWithNetSim(data);
+    }
+
+    /** Dispatch one inbound envelope, plus the control-observer tap. */
+    private dispatchIncoming(data: Uint8Array): void {
+        this.handleBinaryMessage(data);
+        if (data[0] === ENVELOPE_FLATBUFFERS) this.controlObserver?.(data);
     }
 
     // ─── Send ───
@@ -1616,6 +1735,21 @@ export class Connection {
             timeoutFrames,
         );
         this.sendClientMessage(builder, ClientPayload.PlayerCommand, cmd);
+        this.commandSink?.([{ commandId, unitIds, params, options }]);
+    }
+
+    /** Install (or clear) the sent-command sink (PLAN-latency L4.1). Wired
+     *  from `gpInit` to `PendingActionRegistry.register` so optimistic
+     *  artifacts can be drawn at click time and reconciled later.
+     *
+     *  This is deliberately *here* and not in `CommandBuffer`: every
+     *  client-issued order funnels through `sendPlayerCommand` /
+     *  `sendPlayerCommandBatch`, including ones a `CommandNotify` widget
+     *  rewrote or issued itself (lua-ui-host `giveOrder`), which never touch
+     *  a CommandBuffer. The sink sees commands in the exact form that went on
+     *  the wire, which is what the server will ack. */
+    setCommandSink(fn: CommandSink | null): void {
+        this.commandSink = fn;
     }
 
     /** Send a PlayerCommandBatch — atomic execution of N PlayerCommand
@@ -1673,6 +1807,12 @@ export class Connection {
             cmdsVec,
         );
         this.sendClientMessage(builder, ClientPayload.PlayerCommandBatch, batch);
+        this.commandSink?.(commands.map(c => ({
+            commandId: c.commandId,
+            unitIds: c.unitIds,
+            params: c.params,
+            options: c.options ?? 0,
+        })));
     }
 
     // ---- Macro command & control (PLAN-macro-orders / PLAN-macro-directives) ----
@@ -1826,10 +1966,18 @@ export class Connection {
     }
 
     private cleanup(): void {
+        for (const t of this.warmupPings) clearTimeout(t);
+        this.warmupPings.length = 0;
         if (this.pingInterval) {
             clearInterval(this.pingInterval);
             this.pingInterval = null;
         }
+        // Drop netsim-delayed envelopes still in flight — now that the sim
+        // covers the control lane too, letting these land post-teardown would
+        // re-enter auth/state handlers on a dead connection.
+        for (const t of this.netSimTimers) clearTimeout(t);
+        this.netSimTimers.clear();
+        this.netSimStreamReleaseAt = 0;
     }
 
     private sendPing(): void {
@@ -1851,20 +1999,30 @@ export class Connection {
     }
 
     /**
-     * Artificial-latency injection for the unreliable state channel
+     * Artificial-latency injection for the whole inbound link
      * (PLAN-latency.md L0 — "THE validation tool for the whole stage").
      * Reproduces intercontinental conditions on localhost so every L0/L1/L2
      * mitigation can be A/B'd against "does it still look right at 200 ms ±
-     * jitter, 2 % loss?". Applied ONLY to the state channel (0x02/0x03 entity
-     * state etc.) — the reliable control channel is left untouched, matching
-     * reality (TCP-like reliability vs. lossy datagrams). Per-packet random
-     * jitter naturally produces reordering; the PresentationClock's base_frame
-     * sequence tracking detects the reorder/loss. */
-    private netSim = { enabled: false, delayMs: 0, jitterMs: 0, lossProb: 0 };
+     * jitter, 2 % loss?". Applied to **every** envelope, split into a lossy
+     * datagram lane (entity state) and an ordered reliable lane (everything
+     * else, including `Pong`) — see `receiveWithNetSim` for why both matter.
+     * Per-packet random jitter on the datagram lane naturally produces
+     * reordering; the PresentationClock's base_frame sequence tracking detects
+     * the reorder/loss. */
+    private netSim: NetSimConfig = { enabled: false, delayMs: 0, jitterMs: 0, lossProb: 0 };
 
-    /** Configure (or disable) artificial latency on the state channel.
-     *  `{ delayMs, jitterMs, lossProb }` — lossProb in [0,1]. Enabled
-     *  whenever delay/jitter/loss is non-zero. */
+    /** Monotonic release timestamp for the ordered (reliable-stream) netsim
+     *  lane — see `receiveWithNetSim`. Absolute `performance.now()` ms; only
+     *  ever compared against the current time, so it does not grow unbounded. */
+    private netSimStreamReleaseAt = 0;
+    /** In-flight netsim timers, cleared on disconnect so a teardown does not
+     *  deliver stale envelopes into a dead handler set. */
+    private netSimTimers = new Set<ReturnType<typeof setTimeout>>();
+
+    /** Configure (or disable) artificial latency on the inbound link.
+     *  `{ delayMs, jitterMs, lossProb }` — lossProb in [0,1], and applies to
+     *  the entity-state lane only (the reliable lane is never dropped).
+     *  Enabled whenever delay/jitter/loss is non-zero. */
     setNetSim(cfg: { delayMs?: number; jitterMs?: number; lossProb?: number }): void {
         if (cfg.delayMs != null) this.netSim.delayMs = Math.max(0, cfg.delayMs);
         if (cfg.jitterMs != null) this.netSim.jitterMs = Math.max(0, cfg.jitterMs);
@@ -1879,24 +2037,28 @@ export class Connection {
         return this.netSim;
     }
 
-    /** Inbound state-channel frame — passes through the artificial-latency
-     *  simulator (when armed) before normal dispatch. */
-    private receiveStateFrame(data: Uint8Array): void {
-        if (!this.netSim.enabled) {
-            this.handleBinaryMessage(data);
-            return;
-        }
-        if (this.netSim.lossProb > 0 && Math.random() < this.netSim.lossProb) {
-            return; // dropped packet
-        }
-        const jitter = this.netSim.jitterMs > 0
-            ? (Math.random() * 2 - 1) * this.netSim.jitterMs
-            : 0;
-        const delay = Math.max(0, this.netSim.delayMs + jitter);
-        if (delay <= 0) {
-            this.handleBinaryMessage(data);
-        } else {
-            setTimeout(() => this.handleBinaryMessage(data), delay);
+    /** Inbound envelope — passes through the artificial-latency simulator
+     *  (when armed) before normal dispatch. The two-lane model and why both
+     *  lanes matter live in `net-sim.ts`; this method owns only the timers. */
+    private receiveWithNetSim(data: Uint8Array): void {
+        const env = data[0];
+        const isState = env === ENVELOPE_ENTITY_STATE_FULL || env === ENVELOPE_ENTITY_STATE_DELTA;
+        const verdict = netSimDecide(
+            this.netSim, isState, performance.now(),
+            this.netSimStreamReleaseAt, Math.random,
+        );
+        switch (verdict.kind) {
+            case 'drop': return;
+            case 'pass': this.dispatchIncoming(data); return;
+            case 'delay': {
+                this.netSimStreamReleaseAt = verdict.streamReleaseAt;
+                const timer = setTimeout(() => {
+                    this.netSimTimers.delete(timer);
+                    this.dispatchIncoming(data);
+                }, verdict.delayMs);
+                this.netSimTimers.add(timer);
+                return;
+            }
         }
     }
 
@@ -2024,6 +2186,11 @@ export class Connection {
                     for (let i = 0; i < info.winningAllyTeamsLength(); i++) {
                         winners.push(info.winningAllyTeams(i) ?? 0);
                     }
+                    // One-shot and load-bearing: this is the only client-side
+                    // proof the result crossed the wire. Without it a missing
+                    // overlay is indistinguishable from a message that never
+                    // arrived (PLAN-endtoend D17 cost a fire to that ambiguity).
+                    console.warn(`[connection] GAME OVER received: frame=${info.frame()} winners=[${winners.join(',')}]`);
                     this.events.onGameOver?.(info.frame(), winners);
                 }
                 break;
@@ -2666,9 +2833,42 @@ export class Connection {
                     ttl: e.ttl(),
                     gravity: e.gravity(),
                     hitscan: e.hitscan(),
+                    keyframed: e.keyframed(),
                 });
             }
             this.events.onProjectileFired(out, frame);
+        }
+
+        // PLAN-latency L3.2 — decoded ahead of the impacts below because it
+        // *supersedes* them. The server emits both for a Tier-S resolution:
+        // the legacy `ProjectileImpactEvent` so a pre-L3 client still sees the
+        // burst, and `OutcomeKnownEvent` carrying the same resolution plus the
+        // frame it happens on (and a truer `outcome` — see OutcomeKnownInfo).
+        // Unlike the keyframe/trajectory pair, which the server made mutually
+        // exclusive at the emit site, these two genuinely both go out; the
+        // client is the one that must not play the explosion twice.
+        //
+        // Suppression is conditional on a consumer actually being registered
+        // for the replacement: a host that only implements `onProjectileImpacts`
+        // must keep seeing every impact rather than lose the Tier-S ones to a
+        // handler it does not have.
+        const outcomeKnownCount = this.events.onOutcomesKnown
+            ? batch.outcomesKnownLength() : 0;
+        const outcomesKnown: OutcomeKnownInfo[] = [];
+        const superseded = new Set<number>();
+        for (let i = 0; i < outcomeKnownCount; i++) {
+            const e = batch.outcomesKnown(i, new OutcomeKnownEvent());
+            if (!e) continue;
+            const p = e.outcomePos();
+            outcomesKnown.push({
+                projId: e.projId(),
+                outcome: e.outcome(),
+                outcomeFrame: e.outcomeFrame(),
+                outcomePos: { x: p?.x() ?? 0, y: p?.y() ?? 0, z: p?.z() ?? 0 },
+                targetId: e.targetId(),
+                weaponDefId: e.weaponDefId(),
+            });
+            superseded.add(e.projId());
         }
 
         const impactCount = batch.projectileImpactsLength();
@@ -2677,6 +2877,10 @@ export class Connection {
             for (let i = 0; i < impactCount; i++) {
                 const e = batch.projectileImpacts(i, new ProjectileImpactEvent());
                 if (!e) continue;
+                // Both events are pushed by the same `Collision()` call, so
+                // they always share a batch — the dedupe never has to span
+                // one, and a suppressed impact is never simply lost.
+                if (superseded.has(e.projId())) continue;
                 const p = e.pos();
                 out.push({
                     projId: e.projId(),
@@ -2686,7 +2890,7 @@ export class Connection {
                     weaponDefId: e.weaponDefId(),
                 });
             }
-            this.events.onProjectileImpacts(out, frame);
+            if (out.length > 0) this.events.onProjectileImpacts(out, frame);
         }
 
         const trajCount = batch.projectileTrajectoriesLength();
@@ -2705,6 +2909,63 @@ export class Connection {
                 });
             }
             this.events.onProjectileTrajectories(out, frame);
+        }
+
+        // PLAN-latency L2.2: Tier-C fire outcomes. Present only when the
+        // server is running with `LatencyCosmeticFire` on; on a pre-L2.1
+        // server the vector is absent and the length reads 0.
+        const outcomeCount = batch.fireOutcomesLength();
+        if (outcomeCount > 0 && this.events.onFireOutcomes) {
+            const out: FireOutcomeInfo[] = [];
+            for (let i = 0; i < outcomeCount; i++) {
+                const e = batch.fireOutcomes(i, new FireOutcomeEvent());
+                if (!e) continue;
+                const o = e.origin();
+                const t = e.targetPos();
+                const ip = e.impactPos();
+                out.push({
+                    fireFrame: e.fireFrame(),
+                    weaponDefId: e.weaponDefId(),
+                    ownerId: e.ownerId(),
+                    team: e.team(),
+                    origin: { x: o?.x() ?? 0, y: o?.y() ?? 0, z: o?.z() ?? 0 },
+                    targetId: e.targetId(),
+                    targetPos: { x: t?.x() ?? 0, y: t?.y() ?? 0, z: t?.z() ?? 0 },
+                    outcome: e.outcome(),
+                    impactFrame: e.impactFrame(),
+                    impactPos: { x: ip?.x() ?? 0, y: ip?.y() ?? 0, z: ip?.z() ?? 0 },
+                    gravity: e.gravity(),
+                });
+            }
+            this.events.onFireOutcomes(out, frame);
+        }
+
+        // PLAN-latency L3.2: Tier-S keyframes. Dispatched *after* the Fired
+        // events above so a Launch knot arriving in its projectile's own batch
+        // finds the live entry already created, and *before* the outcomes
+        // below so the Terminal knot is on the track before the burst that
+        // shares its frame is scheduled.
+        const keyframeCount = batch.trajectoryKeyframesLength();
+        if (keyframeCount > 0 && this.events.onTrajectoryKeyframes) {
+            const out: TrajectoryKeyframeInfo[] = [];
+            for (let i = 0; i < keyframeCount; i++) {
+                const e = batch.trajectoryKeyframes(i, new TrajectoryKeyframe());
+                if (!e) continue;
+                const p = e.pos();
+                const v = e.vel();
+                out.push({
+                    projId: e.projId(),
+                    frame: e.frame(),
+                    pos: { x: p?.x() ?? 0, y: p?.y() ?? 0, z: p?.z() ?? 0 },
+                    vel: { x: v?.x() ?? 0, y: v?.y() ?? 0, z: v?.z() ?? 0 },
+                    kind: e.kind(),
+                });
+            }
+            this.events.onTrajectoryKeyframes(out, frame);
+        }
+
+        if (outcomesKnown.length > 0 && this.events.onOutcomesKnown) {
+            this.events.onOutcomesKnown(outcomesKnown, frame);
         }
 
         const soundCount = batch.soundsLength();
@@ -2765,21 +3026,18 @@ export class Connection {
     private handleEntityDestroy(msg: ServerMessage): void {
         const destroy = msg.payload(new EntityDestroy()) as EntityDestroy;
         const pos = destroy.position();
-        // The destroy message carries no frame of its own (proper L2 fix: a
-        // real frame field on the EntityDestroy wire message). lastEventFrame
-        // is only the death's frame when a same-tick combat batch preceded it;
-        // the server sends no batch on event-less ticks and LOS-filters batch
-        // contents per viewer while destroys use a different losMask — so a
-        // Lua DestroyUnit / self-d / filtered kill would otherwise inherit an
-        // unrelated, possibly stale batch frame and present the removal up to
-        // ~D (0.13–1 s) early. Fall back to the newest observed entity-state
-        // frame: both are lower bounds on the true death frame, so take the max.
+        // L2 carried item: the destroy now carries the true death frame,
+        // stamped server-side at kill time. Fall back to the old lower-bound
+        // guess — max(last GameEventBatch frame, newest observed entity-state
+        // frame) — only when the field is absent (0 — a server predating it).
+        const deathFrame = destroy.frame()
+            || Math.max(this.lastEventFrame, this.newestStateFrame);
         this.events.onEntityDestroy?.(
             destroy.entityId(),
             pos ? pos.x() : 0,
             pos ? pos.y() : 0,
             pos ? pos.z() : 0,
-            Math.max(this.lastEventFrame, this.newestStateFrame),
+            deathFrame,
         );
     }
 

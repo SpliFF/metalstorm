@@ -37,6 +37,10 @@ public:
 	const std::vector<WeaponDef>& GetWeaponDefsVec() const { return weaponDefsVector; }
 
 private:
+	/// PLAN-latency L2.0 — post-load pass assigning every def its `fxTier`
+	/// (needs the whole def set; see WeaponDef::ClassifyFxTier).
+	void ClassifyFxTiers();
+
 	std::vector<WeaponDef> weaponDefsVector;
 	spring::unordered_map<std::string, int> weaponDefIDs;
 };
