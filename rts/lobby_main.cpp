@@ -1873,6 +1873,42 @@ int main(int argc, char *argv[]) {
     bool spectator;
   };
 
+  // Publish the room's slot layout as the `war_sides` modoption
+  // (PLAN-metalstorm-wars.md §7.4, forced by endtoend D19).
+  //
+  // A scenario's sides declare many teams each but stage a starting force for
+  // only one of them — Meridian Basin's compact side is teams 0–3 and its
+  // army is on team 0; the union is 4–7 and its army is on team 4. The room's
+  // slot dropdowns used to offer a hardcoded `Team 1`/`Team 2`, so the AI
+  // opponent was seated on team 1: a declared compact *teammate* with no
+  // units, while the union's whole army was skipped for want of a team 4.
+  // The room had one army.
+  //
+  // So the room offers SIDES, and this is where the side→team resolution
+  // (ScenarioDiscovery::EncodeWarSides) is written down — once, at create
+  // time, in the same "ordinary room setting" shape §7.3 chose for
+  // `scenario`. Everything downstream reads this one string: RoomManager's
+  // GameRoom::SlotTeams() takes the integers, the client renders the labels,
+  // and the sim receives it as a modoption like any other.
+  //
+  // Clears the option for a scenario-less room, so a host switching away from
+  // a scenario does not leave a stale side list behind.
+  auto applyWarSides = [&](uint32_t roomId, uint32_t hostId,
+                           const std::string &gameId,
+                           const std::string &scenarioId) {
+    std::string encoded;
+    if (!scenarioId.empty()) {
+      const ScenarioDiscovery::ScenarioInfo *info =
+          ScenarioDiscovery::FindById(scenariosFor(gameId), scenarioId);
+      if (info != nullptr)
+        encoded = ScenarioDiscovery::EncodeWarSides(*info);
+    }
+    rooms.SetModOption(roomId, hostId, "war_sides", encoded);
+    if (!encoded.empty())
+      SLOG(SPRING_LOG_NOTICE, "room %u: war sides '%s' (from scenario '%s')",
+           roomId, encoded.c_str(), scenarioId.c_str());
+  };
+
   // Resolve and apply the room's `scenario` modoption (PLAN-endtoend.md D10,
   // design call in PLAN-metalstorm-wars.md §7.1).
   //
@@ -1889,6 +1925,10 @@ int main(int argc, char *argv[]) {
   // player can see which war they are about to fight rather than having it
   // chosen behind their back.
   //
+  // Also publishes the room's slot layout via applyWarSides above, on every
+  // branch: the two settings are resolved from the same scenario and a room
+  // must never carry one without the other.
+  //
   // Returns the scenario id now in effect ("" if none).
   auto applyRoomScenario = [&](uint32_t roomId, uint32_t hostId,
                                const std::string &gameId,
@@ -1900,23 +1940,76 @@ int main(int argc, char *argv[]) {
         SLOG(SPRING_LOG_NOTICE,
              "room %u: host asked for no scenario on map '%s'", roomId,
              mapId.c_str());
+        applyWarSides(roomId, hostId, gameId, {});
         return {};
       }
       rooms.SetModOption(roomId, hostId, "scenario", *explicitChoice);
       SLOG(SPRING_LOG_NOTICE, "room %u: scenario '%s' (host choice)", roomId,
            explicitChoice->c_str());
+      applyWarSides(roomId, hostId, gameId, *explicitChoice);
       return *explicitChoice;
     }
 
     const ScenarioDiscovery::ScenarioInfo *def =
         ScenarioDiscovery::DefaultForMap(scenariosFor(gameId), mapId);
-    if (def == nullptr)
+    if (def == nullptr) {
+      applyWarSides(roomId, hostId, gameId, {});
       return {};
+    }
     rooms.SetModOption(roomId, hostId, "scenario", def->id);
     SLOG(SPRING_LOG_NOTICE, "room %u: scenario '%s' (default for map '%s')%s",
          roomId, def->id.c_str(), mapId.c_str(),
          def->terminal ? "" : " — WARNING: declares no victory objective");
+    applyWarSides(roomId, hostId, gameId, def->id);
     return def->id;
+  };
+
+  // The first side of the room's slot list, i.e. where a host who has
+  // expressed no preference belongs. CreateRoom seats the host on team 0,
+  // which is right for a legacy two-team room and right for Meridian by
+  // coincidence; this makes it right on purpose.
+  auto seatHostOnFirstSide = [&](uint32_t roomId, uint32_t hostId) {
+    const GameRoom *room = rooms.GetRoom(roomId);
+    if (room == nullptr)
+      return;
+    const std::vector<uint8_t> slotTeams = room->SlotTeams();
+    const RoomPlayer *host = nullptr;
+    for (const auto &p : room->players)
+      if (p.playerId == hostId)
+        host = &p;
+    if (host == nullptr || host->isSpectator)
+      return;
+    if (std::find(slotTeams.begin(), slotTeams.end(), host->team) !=
+        slotTeams.end())
+      return; // already on a side the room offers
+    rooms.SetTeam(roomId, hostId, slotTeams.front());
+    SLOG(SPRING_LOG_NOTICE, "room %u: host seated on team %u (first side)",
+         roomId, static_cast<unsigned>(slotTeams.front()));
+  };
+
+  // The slot team to put a solo room's auto-added opponent on: the first of
+  // the room's offered sides nobody occupies. Replaces a hardcoded
+  // `hostTeam == 0 ? 1 : 0`, which on a Meridian room produced a Null AI on
+  // team 1 — a live team the scenario stages no units for, which is the same
+  // empty-army condition D19 filed.
+  auto firstFreeSlotTeam = [](const GameRoom &room,
+                              uint8_t hostTeam) -> uint8_t {
+    const std::vector<uint8_t> slotTeams = room.SlotTeams();
+    for (const uint8_t t : slotTeams) {
+      bool taken = (t == hostTeam);
+      for (const auto &p : room.players)
+        if (!p.isSpectator && p.team == t)
+          taken = true;
+      for (const auto &a : room.aiSlots)
+        if (a.team == t)
+          taken = true;
+      if (!taken)
+        return t;
+    }
+    // Every offered side is occupied (or the room offers only one). Fall
+    // back to the old behaviour so a single-side scenario still gets an
+    // opponent rather than a same-team AI that ends the match instantly.
+    return (hostTeam == 0) ? 1 : 0;
   };
 
   // The invariant this lane exists to encode: a war that no path can
@@ -1964,6 +2057,37 @@ int main(int argc, char *argv[]) {
     } else {
       SLOG(SPRING_LOG_NOTICE, "room %u: war '%s' is terminable via scenario %s",
            room->id, room->name.c_str(), scenario.c_str());
+    }
+
+    // Sibling invariant to "can this war end": can this war be *fought*?
+    // A live team the scenario stages no starting force for is a side with
+    // no army, and a war with one army is not a match — endtoend D19, where
+    // a lobby-created Meridian room put the AI opponent on team 1 and the
+    // player spent three minutes alone on the board. The sim re-checks the
+    // staged board at frame 60 (game_scenario.lua), which is authoritative;
+    // this says it before the game server is even spawned.
+    // A scenario that declares no `sides` says nothing about which teams
+    // should have an army (the smoke fixtures are like this), so there is
+    // nothing to check it against.
+    if (info == nullptr || info->sides.empty())
+      return;
+    std::set<uint8_t> occupied;
+    for (const auto &p : room->players)
+      if (!p.isSpectator)
+        occupied.insert(p.team);
+    for (const auto &a : room->aiSlots)
+      occupied.insert(a.team);
+    for (const uint8_t team : occupied) {
+      bool staged = false;
+      for (const auto &side : info->sides)
+        if (side.team == team && side.staged)
+          staged = true;
+      if (!staged)
+        SLOG(SPRING_LOG_WARNING,
+             "room %u: team %u is occupied but scenario '%s' stages no "
+             "starting force for it — that side begins the war with no army "
+             "(PLAN-metalstorm-wars.md §7.4)",
+             room->id, static_cast<unsigned>(team), scenario.c_str());
     }
   };
 
@@ -2160,7 +2284,7 @@ int main(int argc, char *argv[]) {
       for (const auto &a : room->aiSlots)
         teams.insert(a.team);
       if (teams.size() <= 1) {
-        const uint8_t aiTeam = (host.team == 0) ? 1 : 0;
+        const uint8_t aiTeam = firstFreeSlotTeam(*room, host.team);
         rooms.AddAISlot(roomId, host.userId, "null", "Null AI", aiTeam);
       }
     }
@@ -2258,6 +2382,10 @@ int main(int argc, char *argv[]) {
 
         applyRoomScenario(roomId, static_cast<uint32_t>(userId), gameId, mapId,
                           hasScenarioChoice ? &scenarioChoice : nullptr);
+        // Only on this path: the direct-start manifest applies its own
+        // explicit host team afterwards, and overruling it here would be the
+        // same "chosen behind your back" property §7.3 rejected.
+        seatHostOnFirstSide(roomId, static_cast<uint32_t>(userId));
 
         auto *room = rooms.GetRoom(roomId);
         broadcastRooms();
@@ -2386,6 +2514,20 @@ int main(int argc, char *argv[]) {
             sj["map"] = s.mapId;
             sj["tutorial"] = s.tutorial;
             sj["terminal"] = s.terminal;
+            // The scenario's playable sides, resolved to one team each
+            // (PLAN-metalstorm-wars.md §7.4). NPC sides are omitted — a
+            // player is never offered Meridian's reavers. The room screen
+            // reads the *room's* `war_sides` modoption rather than this, but
+            // the Create Game dialog needs it before a room exists.
+            nlohmann::json sidesArr = nlohmann::json::array();
+            for (const auto &side : ScenarioDiscovery::PlayableSides(s)) {
+              nlohmann::json sd;
+              sd["faction"] = side.faction;
+              sd["team"] = side.team;
+              sd["staged"] = side.staged;
+              sidesArr.push_back(std::move(sd));
+            }
+            sj["sides"] = std::move(sidesArr);
             arr.push_back(std::move(sj));
           }
           const std::string body = arr.dump();
@@ -2927,7 +3069,7 @@ int main(int argc, char *argv[]) {
                 break;
               }
             }
-            const uint8_t aiTeam = (hostTeam == 0) ? 1 : 0;
+            const uint8_t aiTeam = firstFreeSlotTeam(*room, hostTeam);
             if (rooms.AddAISlot(room->id, static_cast<uint32_t>(userId), "null",
                                 "Null AI", aiTeam)) {
               SLOG(SPRING_LOG_NOTICE,
