@@ -141,6 +141,20 @@ export class BuildMenu {
                 tile.appendChild(cost);
             }
 
+            // PLAN-latency L4.2 — queue chip. How many of this def the current
+            // selection has queued, counted over the worker's *merged*
+            // command-queue view, so it appears on the click rather than on the
+            // next 1 Hz snapshot. While the order is still unconfirmed the chip
+            // is drawn unsettled (dimmed + outlined) so the player can tell
+            // "we've asked for this" from "the server has it".
+            if (bt.queued > 0) {
+                const chip = document.createElement('span');
+                chip.className = 'build-menu-queued';
+                chip.textContent = String(bt.queued);
+                if (bt.queuedPending > 0) chip.classList.add('build-menu-queued-pending');
+                tile.appendChild(chip);
+            }
+
             // Caption — short name strip across the bottom. Falls back to
             // the internal name (e.g. "armcom") if the human name hasn't
             // arrived yet, so the player at least sees something.
@@ -248,6 +262,28 @@ export class BuildMenu {
     font: 10px/1.1 ui-monospace, Menlo, monospace;
     pointer-events: none;
     text-shadow: 0 1px 0 #000;
+}
+.build-menu-queued {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    min-width: 14px;
+    padding: 1px 3px;
+    background: #2f6fd0;
+    border: 1px solid #79b0ff;
+    border-radius: 7px;
+    color: #f2f7ff;
+    font: 10px/1.1 ui-monospace, Menlo, monospace;
+    text-align: center;
+    pointer-events: none;
+    text-shadow: 0 1px 0 rgba(0, 0, 0, 0.6);
+}
+/* Still unconfirmed by the server — hollow rather than solid, so an
+   optimistic count never masquerades as an authoritative one. */
+.build-menu-queued-pending {
+    background: rgba(47, 111, 208, 0.25);
+    border-style: dashed;
+    color: #b9d5ff;
 }
 .build-menu-caption {
     position: absolute;

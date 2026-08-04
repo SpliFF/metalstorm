@@ -729,15 +729,24 @@ export type UnitCommandKindStr = 'issued' | 'done';
 /** One synced command event mirrored from the server. Shape matches
  *  the LuaUI `widgetHandler:UnitCommand` / `UnitCmdDone` callin
  *  argument lists so the worker can forward directly. */
+/** Who asked for a command (PLAN-latency L4.2). Recoil acks a *player's* order
+ *  with the unit's `ok` sound in `SelectedUnitsHandler::GiveCommand` and stays
+ *  silent for `Spring.GiveOrderToUnit`, so the audible half of L4.2 needs to
+ *  tell the two apart at the one choke point that sees both. */
+export type CommandSource = 'player' | 'widget';
+
 /** Observer for commands that have just gone on the wire (PLAN-latency L4.1).
  *  Receives one entry per `PlayerCommand`; a `PlayerCommandBatch` arrives as
  *  one call carrying all of its inner commands. */
-export type CommandSink = (commands: ReadonlyArray<{
-    commandId: number;
-    unitIds: readonly number[];
-    params: readonly number[];
-    options: number;
-}>) => void;
+export type CommandSink = (
+    commands: ReadonlyArray<{
+        commandId: number;
+        unitIds: readonly number[];
+        params: readonly number[];
+        options: number;
+    }>,
+    source: CommandSource,
+) => void;
 
 export interface UnitCommandEventMsg {
     kind: UnitCommandKindStr;
@@ -1719,6 +1728,10 @@ export class Connection {
         params: number[],
         options: number = 0,
         timeoutFrames: number = 0,
+        /** PLAN-latency L4.2 — 'widget' for `Spring.GiveOrderToUnit` and
+         *  friends, which Recoil does not ack audibly. Defaults to 'player'
+         *  because every other caller is a player gesture. */
+        source: CommandSource = 'player',
     ): void {
         if (!this.authenticated) return;
         const builder = new flatbuffers.Builder(128 + unitIds.length * 4 + params.length * 4);
@@ -1735,7 +1748,7 @@ export class Connection {
             timeoutFrames,
         );
         this.sendClientMessage(builder, ClientPayload.PlayerCommand, cmd);
-        this.commandSink?.([{ commandId, unitIds, params, options }]);
+        this.commandSink?.([{ commandId, unitIds, params, options }], source);
     }
 
     /** Install (or clear) the sent-command sink (PLAN-latency L4.1). Wired
@@ -1765,6 +1778,7 @@ export class Connection {
             options?: number;
             timeoutFrames?: number;
         }>,
+        source: CommandSource = 'player',
     ): void {
         if (!this.authenticated) return;
         if (commands.length === 0) return;
@@ -1812,7 +1826,7 @@ export class Connection {
             unitIds: c.unitIds,
             params: c.params,
             options: c.options ?? 0,
-        })));
+        })), source);
     }
 
     // ---- Macro command & control (PLAN-macro-orders / PLAN-macro-directives) ----

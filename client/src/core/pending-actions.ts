@@ -121,6 +121,12 @@ interface Entry {
     tag: number;
     /** Wall-clock deadline: rollback while unconfirmed, retire once confirmed. */
     deadline: number;
+    /** True once `retire()` has tested this (confirmed) entry against the
+     *  current snapshot and *kept* it — which is positive evidence that the
+     *  snapshot does not contain its order, so `merge()` must draw both. Reset
+     *  on confirmation, because the hazard the merge-time duplicate guard
+     *  exists for is exactly an ack that lands after its snapshot did. */
+    vetted: boolean;
 }
 
 /** One command as it went on the wire. */
@@ -221,6 +227,7 @@ export class PendingActionRegistry {
                 state: 'unconfirmed',
                 tag: -id,
                 deadline,
+                vetted: false,
             });
             this.issuedAt.set(id, t);
             this.registered++;
@@ -257,6 +264,7 @@ export class PendingActionRegistry {
             // there is nothing real to adopt is the honest state: the order is
             // confirmed, but we still cannot address it by tag.
             if (ev.tag > 0) e.tag = ev.tag;
+            e.vetted = false;
             e.deadline = this.now() + RETIRE_MS;
             this.confirmedTotal++;
             const issued = this.issuedAt.get(e.id);
@@ -272,19 +280,33 @@ export class PendingActionRegistry {
     /**
      * Hand off to authoritative data: drop every confirmed entry whose tag now
      * appears in the snapshot. Call before `merge()` on the snapshot path.
+     *
+     * Each snapshot order retires **at most one** entry. Positional orders are
+     * self-limiting (two orders to the same waypoint are the same order), but
+     * L4.2's factory queues are not: a build order carries no params at all, so
+     * every queued `-defId` on that factory matches every pending one. Without
+     * claiming, two fast clicks on the same build tile both retire against the
+     * single order the first snapshot carries, and the row's count dips to 1
+     * before the next snapshot restores 2.
      */
     retire(queues: readonly UnitCommandQueueInfo[]): void {
         if (this.entries.length === 0) return;
         const ordersByUnit = new Map<number, readonly UnitOrderInfo[]>();
         for (const q of queues) ordersByUnit.set(q.unitId, q.orders);
+        const claimed = new Set<UnitOrderInfo>();
         this.entries = this.entries.filter(e => {
             if (e.state !== 'confirmed') return true;
             const orders = ordersByUnit.get(e.unitId);
             if (!orders) return true;
-            if (orders.some(o => orderIs(e, o))) {
+            const hit = orders.find(o => !claimed.has(o) && orderIs(e, o));
+            if (hit) {
+                claimed.add(hit);
                 this.retiredTotal++;
                 return false;
             }
+            // Kept: this snapshot demonstrably does not carry the order, so
+            // `merge()` must stop treating it as a possible duplicate.
+            e.vetted = true;
             return true;
         });
     }
@@ -422,16 +444,37 @@ function mergeOrders(
         if (es[i].replaces) { from = i; break; }
     }
     const tail = es.slice(from);
+    // Guard against double-drawing: `retire()` normally removes a confirmed
+    // entry the moment the snapshot carries its order, but `merge()` also runs
+    // on selection changes and on the send path against the *cached* snapshot,
+    // and an ack that lands after its snapshot leaves a confirmed entry whose
+    // order is already in that cache.
+    //
+    // Three constraints, all learned from L4.2's factory queues:
+    //   - only **confirmed** entries can shadow a server order. An unconfirmed
+    //     one is by definition not in the snapshot yet, so treating it as a
+    //     duplicate hides a real order.
+    //   - not entries `retire()` has already **vetted** against this snapshot.
+    //     Retire runs first on the snapshot path with the same predicate, so a
+    //     confirmed entry that survived it is proof the snapshot lacks its
+    //     order. Shadowing it there is how two fast build clicks displayed ×1.
+    //   - each entry shadows at most **one** server order. A build order
+    //     carries no params, so `orderIs` matches every queued `-defId` on that
+    //     factory; without this, one pending build hid an entire five-deep
+    //     production row.
+    const unclaimed = new Set(
+        tail.filter(e => e.state === 'confirmed' && !e.vetted));
     const base: UnitOrderInfo[] = es[from]?.replaces
         ? []
         : serverOrders.filter(o => {
-            // Guard against double-drawing: `retire()` normally removes a
-            // confirmed entry the moment the snapshot carries its order, but
-            // `merge()` also runs on selection changes and on the send path
-            // against the cached snapshot.
-            const dup = tail.some(e => orderIs(e, o));
-            if (dup) reg.noteCollision();
-            return !dup;
+            let dup: Entry | undefined;
+            for (const e of unclaimed) {
+                if (orderIs(e, o)) { dup = e; break; }
+            }
+            if (!dup) return true;
+            unclaimed.delete(dup);
+            reg.noteCollision();
+            return false;
         });
     for (const e of tail) {
         base.push({

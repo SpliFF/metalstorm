@@ -305,4 +305,94 @@ describe('PendingActionRegistry', () => {
         expect(reg.stats().registered).toBe(0);
         expect(reg.stats().unconfirmed).toBe(1);
     });
+
+    // PLAN-latency L4.2 — the factory-queue panel put paramless build orders
+    // through merge()/retire() for the first time. A build order has nothing to
+    // discriminate on but its `-defId`, so every queued instance on a factory
+    // matches every pending one, and the one-to-many matches both paths did
+    // silently were suddenly a visibly wrong row count.
+    describe('factory build orders (paramless, non-unique)', () => {
+        const BUILD = -408;
+
+        /** A factory queue holding `n` identical build orders, tags 1..n. */
+        function factoryQueue(unitId: number, n: number): UnitCommandQueueInfo[] {
+            return [{
+                unitId,
+                orders: Array.from({ length: n }, (_, i) => ({
+                    cmdId: BUILD, params: [], options: 0, tag: i + 1, timeout: 0,
+                })),
+            }];
+        }
+
+        it('draws a queued build immediately, with a non-addressable tag', () => {
+            const { reg } = mk();
+            reg.register({ commandId: BUILD, unitIds: [42], params: [] });
+            const orders = reg.merge([])[0].orders;
+            expect(orders).toHaveLength(1);
+            expect(orders[0].cmdId).toBe(BUILD);
+            // Synthetic negative tag: confirmed-or-not, it is not a CMD.REMOVE
+            // anchor, which is what the panel keys "cancellable" off.
+            expect(orders[0].tag).toBeLessThanOrEqual(0);
+        });
+
+        it('appends to an existing production run instead of replacing it', () => {
+            const { reg } = mk();
+            // No shift held — but a build is always treated as appending.
+            reg.register({ commandId: BUILD, unitIds: [42], params: [], options: 0 });
+            expect(reg.merge(factoryQueue(42, 3))[0].orders).toHaveLength(4);
+        });
+
+        it('a freshly-confirmed build shadows at most ONE snapshot order', () => {
+            const { reg } = mk();
+            reg.register({ commandId: BUILD, unitIds: [42], params: [] });
+            reg.confirm([issued(42, BUILD, [], 0)]);
+            // An ack that beat its snapshot is the one case the merge-time
+            // duplicate guard exists for, and the snapshot may already carry
+            // this order — so shadowing one of the three is right. Shadowing
+            // all three is not: before L4.2 the guard matched this single
+            // entry against every identical build and the row read ×1.
+            expect(reg.merge(factoryQueue(42, 3))[0].orders).toHaveLength(3);
+            expect(reg.stats().mergeCollisions).toBe(1);
+        });
+
+        it('does not shadow an order retire() already proved absent', () => {
+            const { reg } = mk();
+            reg.register({ commandId: BUILD, unitIds: [42], params: [] });
+            reg.confirm([issued(42, BUILD, [], 0)]);
+            // retire() runs first on the snapshot path with the same predicate.
+            // It keeps the entry, which is proof this snapshot lacks its order.
+            reg.retire(factoryQueue(42, 3));
+            expect(reg.size).toBe(0);
+
+            // Same again, but with more entries than the snapshot can retire.
+            const b = mk().reg;
+            b.register({ commandId: BUILD, unitIds: [42], params: [] });
+            b.register({ commandId: BUILD, unitIds: [42], params: [] });
+            b.confirm([issued(42, BUILD, [], 0), issued(42, BUILD, [], 0)]);
+            b.retire(factoryQueue(42, 1));
+            expect(b.size).toBe(1);
+            // The survivor is vetted, so it adds to the row rather than
+            // hiding the one order the snapshot does carry.
+            expect(b.merge(factoryQueue(42, 1))[0].orders).toHaveLength(2);
+            expect(b.stats().mergeCollisions).toBe(0);
+        });
+
+        it('two fast clicks retire against two orders, not one twice', () => {
+            const { reg } = mk();
+            reg.register({ commandId: BUILD, unitIds: [42], params: [] });
+            reg.register({ commandId: BUILD, unitIds: [42], params: [] });
+            reg.confirm([issued(42, BUILD, [], 0), issued(42, BUILD, [], 0)]);
+            expect(reg.stats().confirmedTotal).toBe(2);
+            // The first snapshot carries only the first of the two orders.
+            reg.retire(factoryQueue(42, 1));
+            expect(reg.size).toBe(1);
+            expect(reg.stats().retiredTotal).toBe(1);
+            // ...so the row still reads ×2 rather than dipping to ×1.
+            expect(reg.merge(factoryQueue(42, 1))[0].orders).toHaveLength(2);
+            // The next snapshot carries both and the overlay lets go.
+            reg.retire(factoryQueue(42, 2));
+            expect(reg.size).toBe(0);
+            expect(reg.stats().retiredTotal).toBe(2);
+        });
+    });
 });

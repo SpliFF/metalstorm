@@ -267,6 +267,23 @@ export class WorkerSelection {
         return null;
     }
 
+    /**
+     * PLAN-latency L4.2 — play the order-ack (`ok`) bark for a player order.
+     *
+     * Called from the `Connection` command sink rather than from the gesture
+     * handlers, because the gestures are only one of the paths that put an
+     * order on the wire: build placement, the native build menu, the order
+     * panel's state toggles and the factory-queue cancel button all bypassed
+     * the one call site this replaces, so every one of them was silent. The
+     * sink is also *after* the `CommandNotify` widget gate, which means a
+     * vetoed order no longer barks — the old call site acked orders that were
+     * never sent.
+     */
+    playOrderAck(unitId: number): void {
+        if (unitId === undefined || unitId < 0) return;
+        this.playUnitSound(unitId, SoundCategory.OrderAck);
+    }
+
     /** Play a unit's `category` sound (select / order-ack) at its position. */
     private playUnitSound(id: number, category: number): void {
         if (!this.onUiSound) return;
@@ -393,9 +410,10 @@ export class WorkerSelection {
                 cmd, this.selectedIds.slice(),
                 [groundPos.x, groundPos.y, groundPos.z], opts);
         }
-        // Recoil acks an issued order with the first selected unit's `ok`
-        // sound (`SelectedUnitsHandler::GiveCommand` → `sounds.ok`).
-        this.playUnitSound(this.selectedIds[0], SoundCategory.OrderAck);
+        // The order-ack bark used to be played here. PLAN-latency L4.2 moved
+        // it to the `Connection` command sink (`playOrderAck`) so that every
+        // player order path acks, not just this one — and so that an order a
+        // CommandNotify widget vetoes stays silent, which it did not here.
     }
 
     private pickNearestEntityAt(groundPos: Vector3): { id: number; team: number } {

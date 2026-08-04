@@ -1314,7 +1314,14 @@ export class LuaWidgetManager {
                 const options = Number(msg.options | 0);
                 const timeoutFrames = Number(msg.timeoutFrames | 0);
                 if (unitIds.length === 0) break;
-                conn.sendPlayerCommand(cmdId, unitIds, params, options, timeoutFrames);
+                // PLAN-latency L4.2: tagged 'widget' so the sink does not play
+                // an order-ack bark. Recoil's `ok` sound comes from
+                // `SelectedUnitsHandler::GiveCommand` — the player's path —
+                // and `Spring.GiveOrderToUnit` is silent. A widget that
+                // re-issues orders every frame (cmd_keep_target and friends)
+                // would otherwise machine-gun the ack.
+                conn.sendPlayerCommand(
+                    cmdId, unitIds, params, options, timeoutFrames, 'widget');
                 break;
             }
 
