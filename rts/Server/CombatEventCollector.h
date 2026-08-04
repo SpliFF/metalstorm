@@ -174,13 +174,19 @@ struct UnitDeathEvent {
     uint32_t unitId;
     float x, y, z;
     uint32_t losMask;
+    /// Sim frame the death occurred on, stamped at push time. The collector
+    /// is drained once per tick so this normally equals the drain frame, but
+    /// stamping at the source is what makes the wire field authoritative
+    /// rather than a lower bound (PLAN-latency-impl L2 carried item).
+    uint32_t frame;
 };
 
 class UnitDeathCollector {
 public:
-    void Push(uint32_t unitId, float x, float y, float z, uint32_t losMask) {
+    void Push(uint32_t unitId, float x, float y, float z, uint32_t losMask,
+              uint32_t frame) {
         std::lock_guard<std::mutex> lock(mutex);
-        events.push_back({unitId, x, y, z, losMask});
+        events.push_back({unitId, x, y, z, losMask, frame});
     }
 
     std::vector<UnitDeathEvent> Drain() {

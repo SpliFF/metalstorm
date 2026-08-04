@@ -85,6 +85,22 @@ local function playerTeam(playerID)
     return teamID
 end
 
+--- teamID → canonical integer for EVERY `guidance_<team>_*` rulesParam key.
+--- Same AI3 bugfix as game_authority.lua's pkey and game_teams.lua's
+--- publishAIProfiles: Spring hands team/player ids back as Lua-5.4 FLOATS on
+--- some paths and integers on others, and `'guidance_' .. 4.0` makes
+--- 'guidance_4.0_' where `'guidance_' .. 4` makes 'guidance_4_'. Both families
+--- were being published live — measured in a real match: 25 float-keyed params
+--- on team 4 alongside 21 integer-keyed ones, holding DIFFERENT intent lists
+--- (8 entries vs 7), because whichever path published last only refreshed its
+--- own family. ai-command-panel.js reads the integer form, so a float-path
+--- publish silently left the panel stale. Table keys need no such care —
+--- Lua normalises t[4.0] to t[4] — so `stores` is safe as-is; only the string
+--- key is at risk.
+local function teamKey(teamID)
+    return math.floor(teamID)
+end
+
 local function storeFor(teamID)
     local s = stores[teamID]
     if not s then
@@ -104,7 +120,7 @@ end
 -- ============================================================
 local function publish(teamID)
     local s = storeFor(teamID)
-    local p = 'guidance_' .. teamID .. '_'
+    local p = 'guidance_' .. teamKey(teamID) .. '_'
 
     Spring.SetTeamRulesParam(teamID, p .. 'stance', s.stance)
     Spring.SetTeamRulesParam(teamID, p .. 'roe', s.roe)
@@ -138,7 +154,7 @@ end
 -- same losAccess as the rest of the guidance store (default → owning team only).
 local function publishIntent(teamID)
     local s = storeFor(teamID)
-    local p = 'guidance_' .. teamID .. '_'
+    local p = 'guidance_' .. teamKey(teamID) .. '_'
     local n = math.min(#s.intent, INTENT_MAX)
     Spring.SetTeamRulesParam(teamID, p .. 'intent_count', n)
     for i = 1, n do
@@ -157,13 +173,13 @@ local function recordChange(teamID, field, value, playerID)
     local seq = (changeSeq[teamID] or 0) + 1
     changeSeq[teamID] = seq
     local slot = seq % CHANGE_RING_SIZE
-    local p = 'guidance_' .. teamID .. '_change_' .. slot .. '_'
+    local p = 'guidance_' .. teamKey(teamID) .. '_change_' .. slot .. '_'
     Spring.SetTeamRulesParam(teamID, p .. 'field', field)
     Spring.SetTeamRulesParam(teamID, p .. 'value', tostring(value))
     Spring.SetTeamRulesParam(teamID, p .. 'player', playerID or -1)
     Spring.SetTeamRulesParam(teamID, p .. 'frame', Spring.GetGameFrame())
     Spring.SetTeamRulesParam(teamID, p .. 'seq', seq)
-    Spring.SetTeamRulesParam(teamID, 'guidance_' .. teamID .. '_change', seq)
+    Spring.SetTeamRulesParam(teamID, 'guidance_' .. teamKey(teamID) .. '_change', seq)
 end
 
 -- ============================================================

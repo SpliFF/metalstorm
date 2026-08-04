@@ -134,7 +134,16 @@ void CStarburstProjectile::Update()
 	// streaming used to consume. The `id % 30 == frame % 30` rotor
 	// staggers per-projectile emission across the tick so simultaneous
 	// salvos don't clump on one frame.
-	if (!luaMoveCtrl
+	//
+	// PLAN-latency L3: with keyframes on this becomes a frame-stamped knot
+	// on a 15-frame rotor plus one at each of the three stage transitions
+	// UpdateTrajectory switches on. Those transitions are the whole problem
+	// with sampling a starburst uniformly — the path is nearly straight
+	// within a stage and hinges sharply between them, so a knot placed on
+	// the hinge is worth several placed anywhere else.
+	if (!luaMoveCtrl && TierSKeyframesEnabled()) {
+		MaybeEmitKeyframe(TrajectoryStage(), /*guided=*/true);
+	} else if (!luaMoveCtrl
 	    && (static_cast<int>(id) % 30) == (gs->frameNum % 30)) {
 		ProjectileTrajectoryEventData ev;
 		ev.projId = static_cast<uint32_t>(id);
@@ -174,6 +183,18 @@ void CStarburstProjectile::UpdateTargeting()
 	targetPos.y = std::max(targetPos.y, targetPos.y * weaponDef->waterweapon);
 	targetPos += aimError;
 }
+
+uint8_t CStarburstProjectile::TrajectoryStage() const
+{
+	if (uptime > 0)
+		return 0u;  // stage 1: going upwards
+	if (turnToTarget && ttl > 0 && distanceToTravel > 0.0f)
+		return 1u;  // stage 2: turn to target
+	if (ttl > 0 && distanceToTravel > 0.0f)
+		return 2u;  // stage 3: hit target
+	return 3u;      // out of fuel / range — gravity has it now
+}
+
 
 void CStarburstProjectile::UpdateTrajectory()
 {

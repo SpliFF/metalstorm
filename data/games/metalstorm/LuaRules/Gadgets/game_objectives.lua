@@ -266,7 +266,7 @@ end
 local PUBLISHED_FIELDS = {
     'type', 'scope', 'state', 'reward', 'team', 'team2', 'progress',
     'phase', 'stage', 'expire', 'region', 'x', 'z', 'r', 'suggested', 'source',
-    'victory',
+    'victory', 'completed_by',
 }
 
 -- Objectives are the shared strategic board (PLAN-metalstorm §"Objectives are
@@ -293,6 +293,15 @@ local function publish(o, ctx)
     -- PLAN-metalstorm-interaction.md §1 joint_objective: the widened
     -- co-eligible team, if any (GG.Objectives.WidenEligibility).
     if o.forTeam2 then Spring.SetGameRulesParam(p .. 'team2', o.forTeam2, PUBLIC) end
+    -- endtoend D11: WHO completed it, which `team` above cannot carry. `team`
+    -- is the ELIGIBILITY field (`o.forTeam or -1`) and ui/lib/objectives.js
+    -- filters on it — an open race publishes -1 so both sides see it, and
+    -- overwriting that at resolve would hide the result from the loser during
+    -- the retention window. So the outcome gets its own key, and an open-race
+    -- victory stops reading as "completed by nobody".
+    if o.completedBy then
+        Spring.SetGameRulesParam(p .. 'completed_by', o.completedBy, PUBLIC)
+    end
     Spring.SetGameRulesParam(p .. 'progress', o.progress or 0, PUBLIC)
     -- PLAN-metalstorm-teams.md §3.3: joiner onboarding hint, set via
     -- GG.Objectives.SuggestFor. The panel renders this as "yours to take".
@@ -424,6 +433,12 @@ function resolveObjective(o, state, completingTeam, ctx)
     pendingClear[#pendingClear + 1] = o.id
 
     if state == 'complete' then
+        -- endtoend D11. The eval loop resolves INSTEAD of recomputing progress
+        -- on the completing tick, so a finished objective published whatever
+        -- the previous tick measured — the victory objective froze at
+        -- `progress = 0.89999` and read as unfinished. Completion IS 1.
+        o.progress = 1
+        o.completedBy = completingTeam or o.forTeam
         awardObjective(o, completingTeam)
         for _, fn in ipairs(completeHooks) do fn(o, completingTeam) end
     else

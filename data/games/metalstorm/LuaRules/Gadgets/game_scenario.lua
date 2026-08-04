@@ -63,6 +63,17 @@ local DEFAULT_CONTROL_HOLD_FRAMES = 900   -- 30s hold to complete — mirrors
                                             -- CONTROL_HOLD_FRAMES; scenario
                                             -- authors override via o.holdFrames
 
+-- PLAN-metalstorm-wars.md §7.5b. A `victory = true` control objective ENDS THE
+-- WAR, so it is sized against the map rather than against a tactical reward:
+-- the question is "can an enemy who sees the region flip reach it before the
+-- hold completes". 30 s cannot be that on any map worth fighting over — on
+-- Meridian a home row → basin crossing is ~2500-3000 frames, so the terminal
+-- hold at 900 was decided by whoever walked in first (endtoend D20: an
+-- unopposed three-unit patrol won the war 45 s after arriving). Tactical
+-- control objectives keep 900; they are rewards, not endings. Scenario authors
+-- override either via o.holdFrames.
+local DEFAULT_VICTORY_HOLD_FRAMES = 5400  -- 3 min
+
 -- ============================================================
 -- Helpers
 -- ============================================================
@@ -530,8 +541,13 @@ local function stageObjectives(objectives)
         if o.targetUnitID and params.targetUnitID == nil then params.targetUnitID = o.targetUnitID end
         if o.duration and params.duration == nil then params.duration = o.duration end
         if o.type == 'control' and params.holdFrames == nil then
-            params.holdFrames = o.holdFrames or DEFAULT_CONTROL_HOLD_FRAMES
+            params.holdFrames = o.holdFrames or
+                (o.victory and DEFAULT_VICTORY_HOLD_FRAMES or DEFAULT_CONTROL_HOLD_FRAMES)
         end
+        -- wars §7.5a: the open-race delay. Authored flat on the objective for
+        -- the same reason `region`/`duration` are — the scenario states when
+        -- its prize becomes winnable, the evaluator reads it out of `params`.
+        if o.notBefore and params.notBefore == nil then params.notBefore = o.notBefore end
 
         -- Check if this objective needs runtime unit population
         -- (empty targetUnitIDs/payloadUnitIDs + a _populateFrom marker)
@@ -673,10 +689,146 @@ local function checkEveryTeamHasAnArmy()
                 '. See PLAN-metalstorm-wars.md §7.4.')
 end
 
+-- ============================================================
+-- "Can this war be CONTESTED?" — the third sibling (wars §7.5, endtoend D20).
+--
+-- §7.4 above made "a side with no army" loud. D20 is the next one down: two
+-- armies exist, and the war still ends without a shot, because one side was
+-- staged and never told to go anywhere while the other's terminal objective
+-- was winnable before anybody could cross the map. Both halves are properties
+-- of the SCENARIO — they are read back off `GG.Scenario.data`, not off live
+-- command queues, so an AI that has not issued its first directive by frame 60
+-- cannot false-positive them.
+-- ============================================================
+
+--- name -> movement speed (elmos/sec; 0 for buildings) for every shipped def.
+local function buildDefSpeeds()
+    local speeds = {}
+    for _, def in pairs(UnitDefs) do speeds[def.name] = def.speed or 0 end
+    return speeds
+end
+
+--- Staged mobile force per team: { [team] = { n, ordered, speedMin, x, z } }.
+--- Centroid is count-weighted (a `count = 4` entry is four units), matching
+--- how stageUnits actually puts them on the board.
+local function stagedForceByTeam(scn, speeds)
+    local byTeam = {}
+    for _, u in ipairs((scn and scn.units) or {}) do
+        local speed = speeds[u.def] or 0
+        if speed > 0 and u.team ~= nil then
+            local n = math.max(1, tonumber(u.count) or 1)
+            local f = byTeam[u.team]
+            if not f then
+                f = { n = 0, ordered = 0, speedMin = math.huge, sx = 0, sz = 0 }
+                byTeam[u.team] = f
+            end
+            f.n = f.n + n
+            if u.orders and #u.orders > 0 then f.ordered = f.ordered + n end
+            if speed < f.speedMin then f.speedMin = speed end
+            f.sx = f.sx + (u.x or 0) * n
+            f.sz = f.sz + (u.z or 0) * n
+        end
+    end
+    for _, f in pairs(byTeam) do
+        f.x, f.z = f.sx / f.n, f.sz / f.n
+    end
+    return byTeam
+end
+
+--- Live, occupied, non-Gaia teams (same filter §7.4's check uses: the engine
+--- materialises filler teams between the two sides, and their leader is -1).
+local function liveOccupiedTeams()
+    local gaia = Spring.GetGaiaTeamID and Spring.GetGaiaTeamID() or nil
+    local live = {}
+    for _, teamID in ipairs(Spring.GetTeamList() or {}) do
+        local _, leader = Spring.GetTeamInfo(teamID)
+        if teamID ~= gaia and leader ~= nil and leader >= 0 then live[teamID] = true end
+    end
+    return live
+end
+
+--- §7.5 check 1 — `war_units_unordered`. A side whose whole staged force sits
+--- on its spawn tile is not an army, it is scenery: measured on Meridian, nine
+--- of the player's thirteen units were at their exact spawn coordinates at the
+--- frame the war ended.
+local function checkStagedForcesHaveOrders(byTeam, live)
+    local silent = {}
+    for teamID, f in pairs(byTeam) do
+        if live[teamID] and f.n > 0 and f.ordered == 0 then
+            silent[#silent + 1] = string.format('%d', teamID)
+        end
+    end
+    table.sort(silent)
+    Spring.SetGameRulesParam('war_units_unordered', #silent, { public = true })
+    if #silent == 0 then return end
+    Spring.Echo('[game_scenario] WARNING: team(s) ' .. commaList(silent) ..
+                ' have a staged army with NO opening orders — every unit will ' ..
+                'sit on its spawn until a player or AI moves it, so this side ' ..
+                'cannot contest anything on its own. See ' ..
+                'PLAN-metalstorm-wars.md §7.5.')
+end
+
+--- §7.5 check 2 — `war_victory_unreachable`. The terminal objective may not be
+--- winnable before the sides can reach it. Distance is straight-line and speed
+--- is the side's slowest staged unit, so the estimate UNDERSTATES travel time
+--- (real routes detour around the ridge) — the check therefore only fires when
+--- the war is certainly decidable before contact, never on a marginal one.
+local function checkVictoryIsContestable(scn, byTeam, live)
+    local victory
+    for _, o in ipairs((scn and scn.objectives) or {}) do
+        if o.victory and o.type == 'control' then victory = o end
+    end
+    if not victory then
+        Spring.SetGameRulesParam('war_victory_unreachable', 0, { public = true })
+        return   -- no terminal control objective: §7.1's "ends by detach" case
+    end
+
+    local key = victory.region or (victory.params and victory.params.regionKey)
+    local rx = key and Spring.GetGameRulesParam('region_' .. key .. '_x')
+    local rz = key and Spring.GetGameRulesParam('region_' .. key .. '_z')
+    if not rx or not rz then
+        Spring.SetGameRulesParam('war_victory_unreachable', 0, { public = true })
+        return   -- region graph has no geometry for it; nothing honest to check
+    end
+
+    local earliest = (victory.notBefore or 0) +
+                     (victory.holdFrames or DEFAULT_VICTORY_HOLD_FRAMES)
+    local worstFrames, worstTeam = 0, nil
+    for teamID, f in pairs(byTeam) do
+        if live[teamID] and f.n > 0 and f.speedMin > 0 then
+            local dx, dz = rx - f.x, rz - f.z
+            local frames = math.sqrt(dx * dx + dz * dz) / (f.speedMin / 30)
+            if frames > worstFrames then worstFrames, worstTeam = frames, teamID end
+        end
+    end
+
+    local unreachable = (worstTeam ~= nil and earliest < worstFrames)
+    Spring.SetGameRulesParam('war_victory_unreachable', unreachable and 1 or 0,
+                             { public = true })
+    if not unreachable then return end
+    Spring.Echo(string.format(
+        '[game_scenario] WARNING: the victory objective (control %s) can ' ..
+        'complete at frame %.0f, but team %d needs at least %.0f frames to ' ..
+        'reach it — this war can be won before the sides can meet. Raise ' ..
+        'notBefore/holdFrames on it, or stage that side closer. See ' ..
+        'PLAN-metalstorm-wars.md §7.5.',
+        tostring(key), earliest, worstTeam, worstFrames))
+end
+
+local function checkWarCanBeContested()
+    local scn = GG.Scenario and GG.Scenario.data
+    if not scn then return end   -- no scenario: §7.3's warnIfWarCannotEnd owns that
+    local byTeam = stagedForceByTeam(scn, buildDefSpeeds())
+    local live = liveOccupiedTeams()
+    checkStagedForcesHaveOrders(byTeam, live)
+    checkVictoryIsContestable(scn, byTeam, live)
+end
+
 function gadget:GameFrame(frame)
     if not unstagedChecked and frame >= UNSTAGED_CHECK_FRAME then
         unstagedChecked = true
         checkEveryTeamHasAnArmy()
+        checkWarCanBeContested()
     end
 
     -- Resolve deferred objectives after civilians have had a chance to spawn

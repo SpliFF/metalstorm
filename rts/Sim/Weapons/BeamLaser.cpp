@@ -382,7 +382,7 @@ void CBeamLaser::FireInternal(float3 curDir)
 			pparams.startAlpha = std::clamp(startAlpha * baseAlpha, 0.0f, 255.0f);
 			pparams.endAlpha = std::clamp(endAlpha * baseAlpha, 0.0f, 255.0f);
 
-			WeaponProjectileFactory::LoadProjectile(pparams);
+			WeaponProjectileFactory::FireWeaponProjectile(pparams);
 		}
 
 		curPos = hitPos;

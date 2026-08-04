@@ -132,7 +132,7 @@ void CCannon::FireImpl(const bool scriptCall)
 	params.ttl = ttl;
 	params.gravity = gravity;
 
-	WeaponProjectileFactory::LoadProjectile(params);
+	WeaponProjectileFactory::FireWeaponProjectile(params);
 }
 
 void CCannon::SlowUpdate()
