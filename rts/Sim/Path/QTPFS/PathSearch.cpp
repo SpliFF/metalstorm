@@ -1991,11 +1991,12 @@ void QTPFS::PathSearch::TracePath(IPath* path) {
 			#endif
 
 
-			points.emplace_front(tmpPoint
+			// Braced init rather than emplace_front — see the P0960 note above.
+			points.push_front(TracePoint{tmpPoint
 					, tmpNode->GetIndex() //| (ONLY_NODE_ID_MASK * int(tmpPoint == prvPoint))
 					, tmpNode->nodeNumber
 					, tmpNode->xmin, tmpNode->zmin
-					, tmpNode->xmax, tmpNode->zmax);
+					, tmpNode->xmax, tmpNode->zmax});
 			//nodesWithoutPoints += int(tmpPoint == prvPoint);
 			boundaryMins.x = std::min(boundaryMins.x, float(tmpNode->xmin*SQUARE_SIZE));
 			boundaryMins.z = std::min(boundaryMins.z, float(tmpNode->zmin*SQUARE_SIZE));
@@ -2021,11 +2022,12 @@ void QTPFS::PathSearch::TracePath(IPath* path) {
 		if (tmpNode != nullptr) {
 			assert( !isPresent(points, *tmpNode) );
 
-			points.emplace_front(float3()
+			// Braced init rather than emplace_front — see the P0960 note above.
+			points.push_front(TracePoint{float3()
 					, tmpNode->GetIndex() | ONLY_NODE_ID_MASK
 					, tmpNode->nodeNumber
 					, tmpNode->xmin, tmpNode->zmin
-					, tmpNode->xmax, tmpNode->zmax);
+					, tmpNode->xmax, tmpNode->zmax});
 			// LOG("%s: [%d] tgtNode=%d point ", __func__, SearchThreadData::SEARCH_FORWARD
 			// 		, tmpNode->GetIndex());
 			nodesWithoutPoints++;
