@@ -21,6 +21,36 @@
  *     either one. Pass requires the enemy's radar to miss the hidden
  *     unit *and* see the control unit — proving the jam field is what
  *     made the difference, not a lack of enemy radar coverage.
+ *   - Sonar-only units (sonarRadius > 0, radarRadius === 0) can't be
+ *     probed on a dry map — a target has to actually be underwater for
+ *     sonar to be the thing detecting it. Without `ReconCtx.waterSite`
+ *     the test soft-passes with the declared range (today's behaviour
+ *     on the dry `unit-test-loop` sandbox). When a caller supplies a
+ *     confirmed-deep-water site (see the `recon-sonar` scenario), this
+ *     promotes to the same positive/negative shape as the jammer check:
+ *     a submersible probe at ~60% of the UUT's sonar radius (should be
+ *     seen) and a second one well beyond it (should not — see
+ *     SONAR_NEG_FACTOR/SONAR_NEG_FLOOR for why "well beyond" needs more
+ *     margin than the declared radius alone suggests), both placed
+ *     along the site's verified-deep direction. The UUT itself does not
+ *     need to be underwater — sonar coverage originates from the unit's
+ *     position regardless of its own terrain; only the *target* being
+ *     submerged matters (`LosHandler.cpp` `ILosType::GetRadius` reads
+ *     `unit->sonarRadius` unconditionally, and `InRadar`/`InLos` gate
+ *     purely on the target's `IsUnderWater()`).
+ *   - A fixed set of bot-only/PvE fixture defs (`comm_cai_*`,
+ *     `comm_trainer_*`, `comm_hammer`, `chickenbroodqueen`, `chickena`)
+ *     detect the negative-control probe regardless of distance —
+ *     verified deterministic across repeat full-catalog runs (same
+ *     defs, same failure shape, unaffected by a longer inter-iteration
+ *     decay wait or a same-probe recheck), so it isn't the margin or a
+ *     timing race. `alwaysVisible` is unset on all of them and no
+ *     `UnitCreated`/`customParams` hook matching their names was found
+ *     in the zk Lua tree, so the exact mechanism is unconfirmed — but
+ *     none of these defs are real player-controlled multiplayer units
+ *     (AI-practice dummy commanders and Raptor PvE mobs), so a stealth
+ *     probe doesn't have a real target to exercise here anyway. See
+ *     `recon-sonar.ts`'s `KNOWN_ALWAYS_DETECTED` for the exclusion.
  */
 
 import type { TestHarness } from '../../../core/test-harness.js';
@@ -51,6 +81,30 @@ const JAM_CONTROL_MARGIN = 100;
  *  tower — past its own 1120-elmo sight range but well inside its
  *  5600-elmo radar range for any jammer radius in the catalog. */
 const RADAR_TOWER_OFFSET = 2500;
+/** Submersible probe for the sonar water-site check — cheap ZK minisub,
+ *  waterline 15 comfortably clears the shallowest confirmed-deep depth
+ *  (-15 or deeper) the `recon-sonar` scenario measures before use. */
+const WATER_PROBE_DEF = 'subscout';
+/** Fraction of the UUT's own sonar radius used to place the "detected"
+ *  water probe — mirrors JAM_HIDDEN_FACTOR's "well inside" margin. */
+const SONAR_POS_FACTOR = 0.6;
+/**
+ * Multiplier and flat floor for the "missed" control probe's distance
+ * (`max(sonarR * SONAR_NEG_FACTOR, sonarR + SONAR_NEG_FLOOR)`).
+ *
+ * Live binary-search on a lone `armcom1` (declared sonarRadius=300)
+ * found the *actual* detection boundary between real distances 457
+ * (still detected) and 493 (not detected) — the true range is ~1.5-1.6x
+ * the declared UnitDef field, not 1.0x. A flat `sonarR * 1.5` alone
+ * still isn't enough margin for small radii (240-300: the gap needs to
+ * be ~160-190 elmos, more than 0.5x of a 240-300 range) — hence the
+ * flat-floor term. Root cause unconfirmed (not simple mip-cell
+ * quantization: at `radarMipLevel`, the cell size is 32 elmos, far
+ * smaller than the ~150-190 elmo excess measured) — treat the
+ * declared field as a lower bound on real coverage, not the boundary.
+ */
+const SONAR_NEG_FACTOR = 1.8;
+const SONAR_NEG_FLOOR = 250;
 
 export interface CategoryResult {
     applicable: boolean;
@@ -64,6 +118,16 @@ export interface ReconCtx {
     anchorZ: number;
     team: number;
     enemyTeam: number;
+    /**
+     * Real underwater test site. When present, promotes the sonar-only
+     * soft-pass to a strict positive/negative probe check. `x`/`z` is a
+     * confirmed-deep-water point (does not need to be near `anchorX`/
+     * `anchorZ` — the UUT is spawned here instead of at the anchor for
+     * sonar-only units); `dirX`/`dirZ` is a unit vector along which real
+     * water (depth sufficient for `WATER_PROBE_DEF`) extends at least
+     * `safeRadius` elmos from that point, as verified by the caller.
+     */
+    waterSite?: { x: number; z: number; dirX: number; dirZ: number; safeRadius: number };
 }
 
 export async function runRecon(
@@ -76,9 +140,12 @@ export async function runRecon(
     const radiiRaw = await h.lua(`
         local ud = UnitDefs[${unit.defId}]
         if not ud then return '0,0,0,0' end
+        -- %d requires an exact-integer representation (Lua 5.4) and
+        -- these fields are sometimes fractional (e.g. losRadius); floor
+        -- first rather than format directly.
         return string.format('%d,%d,%d,%d',
-            ud.radarRadius or 0, ud.sonarRadius or 0,
-            ud.jammerRadius or 0, ud.losRadius or 0)
+            math.floor(ud.radarRadius or 0), math.floor(ud.sonarRadius or 0),
+            math.floor(ud.jammerRadius or 0), math.floor(ud.losRadius or 0))
     `);
     const [radarR, sonarR, jammerR, losR] = radiiRaw.split(',').map(Number);
     // Radar is the only positive-detection range we can probe on land
@@ -89,6 +156,79 @@ export async function runRecon(
     const isApplicable = radarR > 0 || isJammer || isSonarOnly;
     if (!isApplicable) {
         return { applicable: false, pass: true, detail: `no recon ext (los=${losR})` };
+    }
+
+    // Sonar-only units need a real underwater target to probe — see the
+    // file header. Without a water site, soft-pass as before. With one,
+    // the UUT spawns *at* the site instead of the dry anchor (its own
+    // terrain doesn't matter — see header) and this branch returns
+    // early, skipping the generic dry-anchor spawn below entirely.
+    if (isSonarOnly) {
+        if (!ctx.waterSite) {
+            return {
+                applicable: true, pass: true,
+                detail: `sonar-only r=${sonarR} (soft: needs water probe)`,
+            };
+        }
+        const { x: siteX, z: siteZ, dirX, dirZ, safeRadius } = ctx.waterSite;
+        const posDist = Math.round(sonarR * SONAR_POS_FACTOR);
+        const negDist = Math.round(Math.max(sonarR * SONAR_NEG_FACTOR, sonarR + SONAR_NEG_FLOOR));
+        if (negDist > safeRadius) {
+            return {
+                applicable: true, pass: true,
+                detail: `sonar-only r=${sonarR} (soft: exceeds ${safeRadius}-elmo water site)`,
+            };
+        }
+
+        const uutOut = await h.spawn(unit.name, siteX, siteZ, team, 1);
+        const uutId = Number(uutOut.match(/:\s*(\d+)/)?.[1] ?? 0);
+        if (!uutId) return { applicable: true, pass: false, detail: `spawn failed: ${uutOut}` };
+
+        const posX = siteX + dirX * posDist;
+        const posZ = siteZ + dirZ * posDist;
+        const negX = siteX + dirX * negDist;
+        const negZ = siteZ + dirZ * negDist;
+        const posOut = await h.spawn(WATER_PROBE_DEF, posX, posZ, enemyTeam, 1);
+        const posId = Number(posOut.match(/:\s*(\d+)/)?.[1] ?? 0);
+        const negOut = await h.spawn(WATER_PROBE_DEF, negX, negZ, enemyTeam, 1);
+        const negId = Number(negOut.match(/:\s*(\d+)/)?.[1] ?? 0);
+        if (!posId || !negId) {
+            for (const id of [uutId, posId, negId]) {
+                if (id) { try { await h.lua(`Spring.DestroyUnit(${id}, false, true)`); } catch {} }
+            }
+            return {
+                applicable: true, pass: false,
+                detail: `water probe spawn failed (pos=${posOut} neg=${negOut})`,
+            };
+        }
+
+        await sleep(SETTLE_WALL_MS);
+
+        const stateRaw = await h.lua(`
+            local allyTeam = Spring.GetUnitAllyTeam(${uutId}) or 0
+            local function radar(id)
+                local s = Spring.GetUnitLosState(id, allyTeam, false)
+                if type(s) == 'table' then return s.radar and true or false end
+                return s and true or false
+            end
+            return string.format('%s,%s', tostring(radar(${posId})), tostring(radar(${negId})))
+        `);
+        const [posRadarRaw, negRadarRaw] = stateRaw.split(',');
+        const posDetected = posRadarRaw === 'true';
+        const negDetected = negRadarRaw === 'true';
+
+        for (const id of [uutId, posId, negId]) {
+            try { await h.lua(`Spring.DestroyUnit(${id}, false, true)`); } catch {}
+        }
+
+        const pass = posDetected && !negDetected;
+        return {
+            applicable: true,
+            pass,
+            detail: pass
+                ? `sonar r=${sonarR}: detected @ ${posDist} elmos, missed @ ${negDist} elmos (water probe)`
+                : `sonar r=${sonarR}: pos(${posDist})=${posDetected} neg(${negDist})=${negDetected} (expected true,false)`,
+        };
     }
 
     // 400 elmos north-west of anchor — clear of the bootstrap mex/fusion
@@ -169,16 +309,6 @@ export async function runRecon(
             detail: pass
                 ? `jam r=${jammerR}: hidden unseen, control seen by enemy radar`
                 : `jam r=${jammerR}: hidden radar=${hiddenRadar} control radar=${controlRadar} (expected false,true)`,
-        };
-    }
-    // Sonar-only units: would need a water unit at depth to detect.
-    // Our flat sandbox map is dry, so we soft-pass with the declared
-    // sonar range. A future iteration can spawn an `attackdrone` /
-    // submarine inside sonar range over water.
-    if (isSonarOnly) {
-        return {
-            applicable: true, pass: true,
-            detail: `sonar-only r=${sonarR} (soft: needs water probe)`,
         };
     }
 
