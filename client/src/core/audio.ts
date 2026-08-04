@@ -236,6 +236,10 @@ export class AudioManager {
     private channelActiveCount: Record<AudioChannel, number>;
 
     private voices: Voice[] = [];
+    /// Voices currently pinned to a caller-chosen key by playLoop() — a
+    /// piece-attached loop (engine idle, turret servo) that fx-bindings.ts
+    /// starts/stops/repositions by name instead of fire-and-forget play().
+    private activeLoops = new Map<string, Voice>();
     private bufferCache = new Map<string, AudioBuffer>();
     private resumed = false;
     private priorityFloor = 0;
@@ -247,6 +251,15 @@ export class AudioManager {
     /// Keyed by lower-cased logical name (e.g. `"weapon/laser1"`,
     /// `"bot_select"`).
     private soundItems = new Map<string, SoundItem>();
+    /// Set true by the first ingestSoundItems() call. Lets callers that
+    /// depend on named-lookup resolution (SoundEventPlayer) tell "not found
+    /// because sounds.lua hasn't loaded yet" apart from "not found, never
+    /// will be" — see whenSoundItemsReady().
+    private soundItemsIngested = false;
+    private soundItemsReadyResolve: (() => void) | null = null;
+    private soundItemsReadyPromise: Promise<void> = new Promise((resolve) => {
+        this.soundItemsReadyResolve = resolve;
+    });
 
     /// Active music streaming elements — A/B pair for crossfading.
     /// `playMusic()` always targets the inactive slot and ramps both
@@ -369,6 +382,18 @@ export class AudioManager {
         this.resumed = true;
     }
 
+    /// PLAN-quickstart.md §3.4 (Part B — detach): suspend the AudioContext
+    /// without tearing it down, so a parked session stops emitting sound while
+    /// the worker + decoded-buffer cache stay alive. Clears `resumed` so the
+    /// re-entry click's `resume()` re-arms the context (the autoplay-policy
+    /// gesture is satisfied by that click). Distinct from `dispose()`, which
+    /// closes the context permanently. Best-effort: a context already closed or
+    /// interrupted throws, which we swallow.
+    async suspend(): Promise<void> {
+        this.resumed = false;
+        try { await this.ctx.suspend(); } catch { /* already closed/interrupted */ }
+    }
+
     dispose(): void {
         this.stopMusic();
         for (const voice of this.voices) {
@@ -472,6 +497,9 @@ export class AudioManager {
             }
         }
         console.log(`[audio] ingested ${this.soundItems.size} SoundItem(s)`);
+        this.soundItemsIngested = true;
+        this.soundItemsReadyResolve?.();
+        this.soundItemsReadyResolve = null;
     }
 
     /// Look up a SoundItem by logical name (case-insensitive).
@@ -479,6 +507,20 @@ export class AudioManager {
     resolveSoundItem(name: string): SoundItem | undefined {
         if (!name) return undefined;
         return this.soundItems.get(name.toLowerCase());
+    }
+
+    /// Resolves once ingestSoundItems() has run at least once, or after
+    /// `timeoutMs` — whichever comes first. Lets a caller defer a
+    /// name-based lookup that raced the async sounds.lua load instead of
+    /// falling back to a less reliable path immediately (see
+    /// SoundEventPlayer.playResolved). Bounded so a game that never posts
+    /// SoundItems doesn't stall callers forever.
+    whenSoundItemsReady(timeoutMs: number): Promise<void> {
+        if (this.soundItemsIngested) return Promise.resolve();
+        return Promise.race([
+            this.soundItemsReadyPromise,
+            new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
+        ]);
     }
 
     private stripSoundsPrefix(p: string): string {
@@ -710,6 +752,126 @@ export class AudioManager {
         };
 
         source.start();
+    }
+
+    // ============================================================
+    // Piece-attached loops (fx-bindings.ts loopSound binding — PLAN-fx-offload X4)
+    // ============================================================
+
+    /**
+     * Start (or reposition, if already running) a looping voice pinned to
+     * `key` — the fx-bindings interpreter's own start/stop hysteresis owns
+     * when this is called, so this method is a plain idempotent "make sure
+     * this loop is playing at this position" rather than a toggle. Shares
+     * `acquireVoice`'s channel-cap/eviction rules with one-shot `play()`;
+     * a looped voice competes for the same 96-voice pool exactly like any
+     * other sound, so nothing needs its own budget.
+     */
+    playLoop(key: string, req: SoundRequest): void {
+        if (!this.resumed) return;
+        const existing = this.activeLoops.get(key);
+        if (existing?.active) {
+            this.repositionLoop(existing, req);
+            return;
+        }
+
+        const channel = req.channel ?? AudioChannel.General;
+        if (!this.channelEnabled[channel]) return;
+        const priority = req.priority ?? 0;
+        if (priority < this.priorityFloor) return;
+
+        const voice = this.acquireVoice(channel, priority, req.x, req.y, req.z);
+        if (!voice) return;
+        if (voice.source) {
+            try { voice.source.stop(); } catch { /* already stopped */ }
+        }
+
+        const source = this.ctx.createBufferSource();
+        source.buffer = req.buffer;
+        source.loop = true;
+        source.playbackRate.value = req.pitch ?? 1;
+
+        if (voice.channel !== channel) {
+            voice.gain.disconnect();
+            voice.gain.connect(this.channelBuses[channel]);
+            voice.channel = channel;
+        }
+
+        const spatial = req.spatial !== false;
+        if (spatial) {
+            source.connect(voice.panner);
+            voice.panner.panningModel = 'HRTF';
+            voice.panner.rolloffFactor = req.rolloff ?? 1;
+            voice.panner.positionX.cancelScheduledValues(this.ctx.currentTime);
+            voice.panner.positionY.cancelScheduledValues(this.ctx.currentTime);
+            voice.panner.positionZ.cancelScheduledValues(this.ctx.currentTime);
+            voice.panner.positionX.setValueAtTime(req.x, this.ctx.currentTime);
+            voice.panner.positionY.setValueAtTime(req.y, this.ctx.currentTime);
+            voice.panner.positionZ.setValueAtTime(req.z, this.ctx.currentTime);
+        } else {
+            source.connect(voice.gain);
+        }
+
+        voice.gain.gain.value = req.volume ?? 1;
+        voice.source = source;
+        voice.priority = priority;
+        voice.startTime = this.ctx.currentTime;
+        voice.active = true;
+        voice.posX = req.x;
+        voice.posY = req.y;
+        voice.posZ = req.z;
+        this.channelActiveCount[channel]++;
+
+        source.onended = () => {
+            // A loop only "ends" via explicit stopLoop() (which calls
+            // source.stop()) or eviction by acquireVoice() elsewhere —
+            // either way the voice bookkeeping is the same as a one-shot.
+            voice.active = false;
+            voice.source = null;
+            this.channelActiveCount[voice.channel] =
+                Math.max(0, this.channelActiveCount[voice.channel] - 1);
+            this.activeLoops.delete(key);
+        };
+
+        this.activeLoops.set(key, voice);
+        source.start();
+    }
+
+    /// Reposition an already-playing loop voice (piece moved this frame).
+    /// No-op if the loop isn't spatial.
+    private repositionLoop(voice: Voice, req: SoundRequest): void {
+        if (req.spatial === false) return;
+        const now = this.ctx.currentTime;
+        voice.panner.positionX.setValueAtTime(req.x, now);
+        voice.panner.positionY.setValueAtTime(req.y, now);
+        voice.panner.positionZ.setValueAtTime(req.z, now);
+        voice.posX = req.x;
+        voice.posY = req.y;
+        voice.posZ = req.z;
+    }
+
+    /// Update just the position of an active loop by key — cheaper call
+    /// shape than playLoop() for the common per-frame "still moving" case.
+    updateLoopPosition(key: string, x: number, y: number, z: number): void {
+        const voice = this.activeLoops.get(key);
+        if (!voice?.active) return;
+        const now = this.ctx.currentTime;
+        voice.panner.positionX.setValueAtTime(x, now);
+        voice.panner.positionY.setValueAtTime(y, now);
+        voice.panner.positionZ.setValueAtTime(z, now);
+        voice.posX = x;
+        voice.posY = y;
+        voice.posZ = z;
+    }
+
+    /// Stop a loop started by playLoop(). No-op if `key` isn't active.
+    stopLoop(key: string): void {
+        const voice = this.activeLoops.get(key);
+        if (!voice) return;
+        this.activeLoops.delete(key);
+        if (voice.source) {
+            try { voice.source.stop(); } catch { /* already stopped */ }
+        }
     }
 
     // ============================================================

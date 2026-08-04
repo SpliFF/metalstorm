@@ -10,14 +10,54 @@
 
 struct sqlite3;
 
-/// Increment to reprocess all maps. v15 changes legacy-Z conversion
-/// in MapProcessor::ProcessMap from negation (`z → -z`, putting values
-/// in `[-mapZ, 0]`) to reflection through mapZ/2 (`z → mapZ - z`,
-/// keeping values in `[0, mapZ]`) — same logical purpose (convert
-/// legacy LH author intent to engine RH convention) but the engine's
-/// world bounds are now positive-quadrant per PLAN-coordinate-system-
-/// option-a.md, so persisted MapMetadata records must follow suit.
-constexpr int MAP_FORMAT_VERSION = 15;
+/// Increment to reprocess all maps.
+/// v15 changed legacy-Z conversion in MapProcessor::ProcessMap from negation
+/// (`z → -z`, putting values in `[-mapZ, 0]`) to reflection through mapZ/2
+/// (`z → mapZ - z`, keeping values in `[0, mapZ]`) — same logical purpose
+/// (convert legacy LH author intent to engine RH convention) but the
+/// engine's world bounds are now positive-quadrant per PLAN-coordinate-
+/// system-option-a.md, so persisted MapMetadata records must follow suit.
+/// v16 adds the `regions.json` export (PLAN-metalstorm-regions.md §5/§8
+/// R1) — a static re-serialisation of the map's authored region graph
+/// (`mapdata/regions.lua`), or a grid fallback descriptor when no graph is
+/// authored / it fails validation. Sibling of heightmap.bin etc. in the
+/// processed map directory.
+/// PLAN-metalstorm-impostors.md M10 investigated bumping this to force a
+/// reprocess after `features/impostors.json` started shipping (e55f0d9400)
+/// and deliberately did NOT: `mapconverter --all` calls `ProcessOneMap` per
+/// map, and each call's own `ScanAndProcess(dataDir + "/maps", ...)` scans
+/// *every* already-existing map dir as a side effect, not just the one it
+/// was asked to convert. A version bump makes every already-processed map
+/// stale at once, so the side-effect scan triggered by the FIRST map in
+/// the `--all` loop reprocesses every later map too — using whatever stale
+/// content is already sitting in its `data/maps/<id>/` from the previous
+/// run, since that later map's own `CopySourceTree` (which would have
+/// pulled in the new source file) hasn't run yet. That reprocess still
+/// bumps the stored format version, so when the outer loop finally reaches
+/// the later map, its own fast-path check now reads "already current" and
+/// skips it — `CopySourceTree` never runs, and the new source file never
+/// lands. Confirmed live: an `--all` run against a scratch checkout seeded
+/// at v16 left meridian_basin and skerry_reach without `impostors.json`
+/// even though every map's stored formatVersion read 17 afterward; a
+/// direct single-map `mapconverter content/maps/meridian_basin` run (no
+/// version differential to race) produced it correctly. The existing
+/// `.processed-stamp` freshness check (MapProcessor::ProcessedOutputCurrent)
+/// doesn't have this problem — it's driven by each map's own real content
+/// mtime, so a side-effect scan of a not-yet-recopied map still correctly
+/// reads "unchanged, current" and defers to that map's own turn in the
+/// `--all` loop, where `CopySourceTree` runs BEFORE the reprocess check.
+/// Known residual gap, not fixed here: a processed dir from *before* the
+/// stamp mechanism existed (pre-98fbd46bda, 2026-07-29) has no stamp file,
+/// and a missing stamp reads as "current" (ProcessedOutputCurrent's
+/// deliberate no-force default) — such a checkout would need the fix
+/// above anyway (a version bump would just hit the same race), so the
+/// actual fix is restructuring `tools/mapconverter/main.cpp`'s `--all`
+/// mode to run every map's `CopySourceTree` before any map's
+/// `ScanAndProcess`. Out of scope here (main.cpp is not part of the
+/// impostors/map-pipeline file scope this fix touched) and moot for every
+/// checkout observed 2026-08-03 (main + every active clone already has a
+/// `.processed-stamp` newer than 98fbd46bda and older than e55f0d9400).
+constexpr int MAP_FORMAT_VERSION = 16;
 
 struct MapStartPosition {
     float x = 0, z = 0;

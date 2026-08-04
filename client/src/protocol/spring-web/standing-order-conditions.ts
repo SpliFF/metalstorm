@@ -109,8 +109,20 @@ hasCapabilitiesLength():number {
   return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
 }
 
+/**
+ * Org-group scope (macro-orders §4.2 — the A+C fusion). When non-zero,
+ * only squads that are members of this org group qualify; this is the
+ * field that draws a group-scoped directive from its own roster rather
+ * than the whole idle pool. 0 = any squad (classic condition/area
+ * scope). For a GroupDirective the server sets this from `group_id`.
+ */
+orgGroup():number {
+  const offset = this.bb!.__offset(this.bb_pos, 20);
+  return offset ? this.bb!.readUint32(this.bb_pos + offset) : 0;
+}
+
 static startStandingOrderConditions(builder:flatbuffers.Builder) {
-  builder.startObject(8);
+  builder.startObject(9);
 }
 
 static addIdleOnly(builder:flatbuffers.Builder, idleOnly:boolean) {
@@ -174,6 +186,10 @@ static startHasCapabilitiesVector(builder:flatbuffers.Builder, numElems:number) 
   builder.startVector(4, numElems, 4);
 }
 
+static addOrgGroup(builder:flatbuffers.Builder, orgGroup:number) {
+  builder.addFieldInt32(8, orgGroup, 0);
+}
+
 static endStandingOrderConditions(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
@@ -189,7 +205,8 @@ unpack(): StandingOrderConditionsT {
     (this.outsideRadiusCenter() !== null ? this.outsideRadiusCenter()!.unpack() : null),
     this.outsideRadiusRadius(),
     this.minStrength(),
-    this.bb!.createScalarList<string>(this.hasCapabilities.bind(this), this.hasCapabilitiesLength())
+    this.bb!.createScalarList<string>(this.hasCapabilities.bind(this), this.hasCapabilitiesLength()),
+    this.orgGroup()
   );
 }
 
@@ -203,6 +220,7 @@ unpackTo(_o: StandingOrderConditionsT): void {
   _o.outsideRadiusRadius = this.outsideRadiusRadius();
   _o.minStrength = this.minStrength();
   _o.hasCapabilities = this.bb!.createScalarList<string>(this.hasCapabilities.bind(this), this.hasCapabilitiesLength());
+  _o.orgGroup = this.orgGroup();
 }
 }
 
@@ -215,7 +233,8 @@ constructor(
   public outsideRadiusCenter: Vec3T|null = null,
   public outsideRadiusRadius: number = 0.0,
   public minStrength: number = 0.0,
-  public hasCapabilities: (string)[] = []
+  public hasCapabilities: (string)[] = [],
+  public orgGroup: number = 0
 ){}
 
 
@@ -232,6 +251,7 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
   StandingOrderConditions.addOutsideRadiusRadius(builder, this.outsideRadiusRadius);
   StandingOrderConditions.addMinStrength(builder, this.minStrength);
   StandingOrderConditions.addHasCapabilities(builder, hasCapabilities);
+  StandingOrderConditions.addOrgGroup(builder, this.orgGroup);
 
   return StandingOrderConditions.endStandingOrderConditions(builder);
 }

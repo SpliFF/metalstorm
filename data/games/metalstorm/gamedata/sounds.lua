@@ -5,11 +5,11 @@
 --
 -- FX WIRING (weapon-fx pass): these SoundItem KEYS are what
 -- weapons/weapons.lua `soundstart` and effects/weapon-fx.json `fireSound` /
--- `impactSound` resolve to. The .webm files under sounds/ are authored later
--- (PLAN-metalstorm.md §11 objects3d/sounds empty for now); Spring loads sound
--- files LAZILY on first play, so declaring a key whose file is not yet present
--- is inert until something actually plays it — nothing does before the Stage-7
--- combat wiring lands. Numbers are plausible placeholders, not a mix.
+-- `impactSound` resolve to. The .webm files under sounds/ are sourced CC0
+-- (Kenney) with a GPL-2.0-or-later WZ2100 fallback for kinetic-weapon reports
+-- that had no good CC0 equivalent — see ASSETS.md for the per-file license
+-- rows (2026-07-26 SFX sourcing pass). Numbers are plausible placeholders,
+-- not a mix.
 local SoundItems = {
 
     -- ── Weapon fire (keyed by weapons.lua soundstart) ──────────────────────

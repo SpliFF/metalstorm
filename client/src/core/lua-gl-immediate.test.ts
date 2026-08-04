@@ -137,6 +137,99 @@ describe('ImmediateModeRenderer — N3 redundant-state elimination', () => {
     });
 });
 
+describe('ImmediateModeRenderer — N4 texture-bind elision', () => {
+    let gl: WebGL2RenderingContext;
+    let counts: Record<string, number>;
+    let imm: ImmediateModeRenderer;
+    const texA = { __id: 'A' } as unknown as WebGLTexture;
+    const texB = { __id: 'B' } as unknown as WebGLTexture;
+
+    beforeEach(() => {
+        ({ gl, counts } = makeMockGL());
+        imm = new ImmediateModeRenderer(gl);
+        imm.beginPass();
+        imm.matrixMode(0x1700);
+        imm.loadIdentity();
+    });
+
+    const d = (before: Record<string, number>, k: string) =>
+        (counts[k] ?? 0) - (before[k] ?? 0);
+
+    it('binds a texture once across consecutive same-texture draws', () => {
+        imm.setTextured(true, texA);
+        const before = { ...counts };
+        imm.rect(0, 0, 10, 10);
+        imm.rect(20, 0, 30, 10);
+        imm.rect(40, 0, 50, 10);
+        // Same texture → one activeTexture + one bindTexture for all three.
+        expect(d(before, 'drawArrays')).toBe(3);
+        expect(d(before, 'bindTexture')).toBe(1);
+        expect(d(before, 'activeTexture')).toBe(1);
+    });
+
+    it('re-binds when the texture changes', () => {
+        imm.setTextured(true, texA);
+        const before = { ...counts };
+        imm.rect(0, 0, 10, 10);
+        imm.setTextured(true, texB);
+        imm.rect(20, 0, 30, 10);
+        expect(d(before, 'bindTexture')).toBe(2);
+    });
+
+    it('re-binds the texture on the first draw of the next pass', () => {
+        imm.setTextured(true, texA);
+        imm.rect(0, 0, 10, 10);
+        const before = { ...counts };
+        imm.beginPass(); // Babylon rebinds textures between passes
+        imm.setTextured(true, texA);
+        imm.rect(0, 0, 10, 10);
+        expect(d(before, 'bindTexture')).toBe(1);
+        expect(d(before, 'activeTexture')).toBe(1);
+    });
+
+    it('skips flush\'s bind when the bridge already bound it (notePassTexBind)', () => {
+        // gl.Texture(icon) live-binds then notes; the following gl.TexRect must
+        // not re-bind the same texture.
+        imm.notePassTexBind(0, texA);
+        imm.setTextured(true, texA);
+        const before = { ...counts };
+        imm.rect(0, 0, 10, 10);
+        expect(d(before, 'bindTexture')).toBe(0);
+        expect(d(before, 'activeTexture')).toBe(0);
+        expect(d(before, 'drawArrays')).toBe(1);
+    });
+
+    it('re-binds after invalidateTextures (gl.CreateTexture / CopyToTexture)', () => {
+        imm.setTextured(true, texA);
+        imm.rect(0, 0, 10, 10);
+        const before = { ...counts };
+        imm.invalidateTextures();
+        imm.rect(20, 0, 30, 10);
+        expect(d(before, 'bindTexture')).toBe(1);
+        expect(d(before, 'activeTexture')).toBe(1);
+    });
+
+    it('callList replay: texBind + same-texture draw bind once, and elide across replays in a pass', () => {
+        imm.startRecording();
+        imm.recordTextureBind(0, texA);
+        imm.setTextured(true, texA);
+        imm.rect(0, 0, 10, 10);
+        const id = imm.stopRecording();
+
+        imm.beginPass();
+        const before = { ...counts };
+        imm.callList(id); // texBind binds texA; draw reuses it → skip
+        expect(d(before, 'bindTexture')).toBe(1);
+        expect(d(before, 'activeTexture')).toBe(1);
+        expect(d(before, 'drawArrays')).toBe(1);
+
+        // Second replay in the SAME pass: texture unchanged → no re-bind.
+        imm.callList(id);
+        expect(d(before, 'bindTexture')).toBe(1);
+        expect(d(before, 'drawArrays')).toBe(2);
+    });
+});
+
 describe('ImmediateModeRenderer — N3 batching (gl.BeginEnd = one draw)', () => {
     it('emits a single drawArrays for a multi-quad BeginEnd batch (the text path)', () => {
         const { gl, counts } = makeMockGL();

@@ -8,19 +8,22 @@
  * No simulation code — just HTTP serving, SQLite, and process management.
  */
 
-#include "Server/NetworkServer.h"
 #include "Server/Database.h"
-#include "Server/RoomManager.h"
-#include "Server/MapMetadata.h"
 #include "Server/GameServersDb.h"
+#include "Server/MapMetadata.h"
+#include "Server/NetworkServer.h"
+#include "Server/RoomManager.h"
 
 #include "Server/AI/AIDiscovery.h"
-#include "Server/GameDiscovery.h"
-#include "Server/ResourcesParser.h"
-#include "Server/HttpAuth.h"
-#include "Server/GmDashboardPage.h"
-#include "Server/DevBuildGate.h"
 #include "Server/CacheControl.h"
+#include "Server/DevBuildGate.h"
+#include "Server/GameDiscovery.h"
+#include "Server/GmDashboardPage.h"
+#include "Server/HttpAuth.h"
+#include "Server/ResourcesParser.h"
+#include "Server/ScenarioDb.h"
+#include "Server/ScenarioDiscovery.h"
+#include "Server/TokenBucket.h"
 #include "System/SpringLog/SpringLog.h"
 #include "System/SpringLog/SpringLogSqlite.h"
 #include <cctype>
@@ -30,65 +33,281 @@
 
 #include <sqlite3.h>
 
+#include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
-#include <atomic>
-#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <string>
 #include <thread>
 #include <unordered_map>
 
-#include <sys/types.h>
 #include <cstring>
-#include <sys/wait.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <unistd.h>
 #include <functional>
+#include <netinet/in.h>
 #include <nlohmann/json.hpp>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #define LOG_SECTION "lobby"
 
 static std::atomic<bool> keepRunning{true};
 static std::atomic<bool> restartRequested{false};
 static void signalHandler(int) { keepRunning.store(false); }
-static void restartHandler(int) { restartRequested.store(true); keepRunning.store(false); }
+static void restartHandler(int) {
+  restartRequested.store(true);
+  keepRunning.store(false);
+}
 
 /// Prepare/bind/step/finalize a single write statement. The `bind` callback
 /// binds parameters onto the prepared statement before it is stepped once.
-static bool ExecPrepared(sqlite3* db, const char* sql,
-                         const std::function<void(sqlite3_stmt*)>& bind) {
-    sqlite3_stmt* stmt = nullptr;
-    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-        SLOG(SPRING_LOG_ERROR, "ExecPrepared prepare failed: %s", sqlite3_errmsg(db));
-        return false;
+static bool ExecPrepared(sqlite3 *db, const char *sql,
+                         const std::function<void(sqlite3_stmt *)> &bind) {
+  sqlite3_stmt *stmt = nullptr;
+  if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+    SLOG(SPRING_LOG_ERROR, "ExecPrepared prepare failed: %s",
+         sqlite3_errmsg(db));
+    return false;
+  }
+  if (bind)
+    bind(stmt);
+  const int rc = sqlite3_step(stmt);
+  sqlite3_finalize(stmt);
+  if (rc != SQLITE_DONE) {
+    SLOG(SPRING_LOG_ERROR, "ExecPrepared step failed (%d): %s", rc,
+         sqlite3_errmsg(db));
+    return false;
+  }
+  return true;
+}
+
+#ifndef MAPCONVERTER_BINARY_PATH
+#define MAPCONVERTER_BINARY_PATH "mapconverter"
+#endif
+
+/// Run `mapconverter --all content/maps` synchronously at lobby startup so
+/// a checkout whose `data/maps/` predates a `content/maps` source change
+/// self-heals instead of staying stale forever (PLAN-metalstorm-impostors.md
+/// M10 — `data/maps/<id>/features/impostors.json` never landed because
+/// nothing ever called the conversion pipeline after the source manifest
+/// was added). Mirrors gameconverter's own documented contract ("cheap to
+/// run from CI or on every lobby startup as a pre-flight") — mapconverter's
+/// per-map freshness check (`MapProcessor::ProcessedOutputCurrent` against
+/// each map's `.processed-stamp`) makes every call after the first a fast
+/// no-op scan, not a full reprocess.
+///
+/// Deliberately kept out-of-process rather than linking MapProcessor
+/// straight into spring-lobby: MapProcessor pulls in ImageMagick/
+/// modelimporter/Lua-map-processing, and mapconverter's `CopySourceTree`
+/// step (which is what actually notices a new `content/maps/<id>/...`
+/// file) lives in the tool's own main(), not in MapProcessor itself, so
+/// merely calling `MapProcessor::ScanAndProcess` in-process would miss new
+/// source files anyway. Failure is logged, not fatal — a missing
+/// `content/maps` dir (e.g. a stripped prod image) or a missing binary
+/// shouldn't block the lobby from serving whatever `data/` already has.
+static void RunMapConverterPreflight(const std::string &dbPath) {
+  const std::filesystem::path dbFsPath(dbPath);
+  const std::string dataDir =
+      dbFsPath.has_parent_path() && !dbFsPath.parent_path().empty()
+          ? dbFsPath.parent_path().string()
+          : "data";
+
+  const std::string cmd = std::string("\"") + MAPCONVERTER_BINARY_PATH +
+                          "\" --all content/maps --data-dir \"" + dataDir +
+                          "\" --db \"" + dbPath + "\" 2>&1";
+  FILE *p = popen(cmd.c_str(), "r");
+  if (!p) {
+    SLOG(SPRING_LOG_WARNING, "map preflight: failed to launch mapconverter");
+    return;
+  }
+  char buf[256];
+  std::string out;
+  while (fgets(buf, sizeof(buf), p))
+    out += buf;
+  const int rc = pclose(p);
+  if (rc != 0) {
+    SLOG(SPRING_LOG_WARNING,
+         "map preflight: mapconverter exited %d (maps may be stale):\n%s",
+         rc, out.c_str());
+  } else {
+    SLOG(SPRING_LOG_NOTICE, "map preflight: maps up to date");
+  }
+}
+
+/// One run of tools/mapgen/scenariogen.py.
+struct ScenarioGenResult {
+  bool ok = false;
+  /// The generated scenario source — the thing that becomes the DB row's
+  /// `lua` column. Empty unless `ok`.
+  std::string lua;
+  /// The `--meta-json` payload, parsed. Carries `id`, `display_name`,
+  /// `map_id`, `seed`, `version` and the echoed `params`.
+  nlohmann::json meta;
+  /// Whatever the generator said on stderr — its human summary on success,
+  /// and on failure the `REJECTED — …` line naming which of its five
+  /// invariants the map violated. Surfaced verbatim to the admin caller:
+  /// "this map cannot host a generated war, and here is which gate said so"
+  /// is the single most useful thing this endpoint can report.
+  std::string diagnostics;
+  int exitCode = -1;
+};
+
+/// True when `s` is safe to interpolate into a shell command line.
+///
+/// Every argument this file passes to the generator goes through here rather
+/// than through quoting alone. `mapId` in particular arrives from an HTTP body
+/// and is concatenated into a popen() string; an allowlist is the only form of
+/// this check that is obviously correct at a glance.
+static bool IsShellSafeToken(const std::string &s) {
+  if (s.empty() || s.size() > 128)
+    return false;
+  for (const char c : s) {
+    const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                    (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
+    if (!ok)
+      return false;
+  }
+  // Leading '-' would be read as an option by the generator's argparse, and
+  // ".." is a traversal even though every character in it passed above.
+  return s.front() != '-' && s.find("..") == std::string::npos;
+}
+
+/// Run tools/mapgen/scenariogen.py for one (map, seed, knobs) and capture both
+/// the scenario source and its metadata.
+///
+/// Shelling out rather than reimplementing: the generator owns the passability
+/// mask, the five gates that refuse to emit an unplayable war, and the id hash.
+/// A C++ port would be a second content pipeline that has to agree with the
+/// first forever. The lobby already shells out to `mapconverter` at startup for
+/// the same reason (RunMapConverterPreflight above).
+///
+/// stderr is redirected to a file rather than merged with 2>&1: under
+/// `--stdout` the generator's stdout carries ONLY the scenario, and merging
+/// would glue its human summary onto the front of the Lua — producing a file
+/// that is not a scenario at all, and, being prose ahead of `return {`, one
+/// ScenarioDiscovery silently drops.
+static ScenarioGenResult
+RunScenarioGen(const std::string &mapsDir, const std::string &mapId,
+               const std::string &gamePath, int64_t seed,
+               const nlohmann::json &knobs) {
+  ScenarioGenResult out;
+
+  if (!IsShellSafeToken(mapId)) {
+    out.diagnostics = "invalid map id";
+    return out;
+  }
+
+  const std::string mapDir = mapsDir + "/" + mapId;
+  std::error_code ec;
+  if (!std::filesystem::is_directory(mapDir, ec)) {
+    out.diagnostics = "no processed map at '" + mapDir +
+                      "' — run the map converter for this map first";
+    return out;
+  }
+
+  // Unique scratch paths. The pid keeps two concurrent admin calls apart even
+  // though HTTP handlers are single-threaded today, and both are removed
+  // before return whatever the outcome.
+  const std::string stem =
+      (std::filesystem::temp_directory_path() /
+       ("scenariogen_" + std::to_string(::getpid()) + "_" + mapId))
+          .string();
+  const std::string metaPath = stem + ".json";
+  const std::string errPath = stem + ".err";
+
+  std::string cmd = "python3 \"" + std::string(SCENARIOGEN_SCRIPT_PATH) +
+                    "\" \"" + mapDir + "\"" +
+                    " --seed " + std::to_string(seed) +
+                    " --game-dir \"" + gamePath + "\"" +
+                    " --stdout --meta-json \"" + metaPath + "\"";
+
+  // Knobs. Integers are range-clamped and strings allowlisted — the generator
+  // validates these too (argparse `choices`), but a bad value must never reach
+  // the shell in the first place.
+  const auto addInt = [&](const char *flag, const char *key, int lo, int hi) {
+    if (!knobs.contains(key) || !knobs[key].is_number_integer())
+      return;
+    const int v = knobs[key].get<int>();
+    if (v < lo || v > hi)
+      return;
+    cmd += std::string(" ") + flag + " " + std::to_string(v);
+  };
+  addInt("--sides", "sides", 2, 8);
+  addInt("--towns", "towns", 0, 32);
+  addInt("--outposts", "outposts", 0, 32);
+  addInt("--bases", "bases", 0, 32);
+  addInt("--mines", "mines", 0, 32);
+  const auto addEnum = [&](const char *flag, const char *key) {
+    if (!knobs.contains(key) || !knobs[key].is_string())
+      return;
+    const std::string v = knobs[key].get<std::string>();
+    if (!IsShellSafeToken(v))
+      return;
+    cmd += std::string(" ") + flag + " " + v;
+  };
+  addEnum("--hostility", "hostility");
+  addEnum("--roster", "roster");
+
+  cmd += " 2>\"" + errPath + "\"";
+
+  FILE *p = popen(cmd.c_str(), "r");
+  if (!p) {
+    out.diagnostics = "failed to launch scenariogen.py";
+    return out;
+  }
+  char buf[4096];
+  size_t n = 0;
+  while ((n = fread(buf, 1, sizeof(buf), p)) > 0)
+    out.lua.append(buf, n);
+  const int rc = pclose(p);
+  out.exitCode = WIFEXITED(rc) ? WEXITSTATUS(rc) : -1;
+
+  {
+    std::ifstream ef(errPath, std::ios::binary);
+    if (ef)
+      out.diagnostics.assign(std::istreambuf_iterator<char>(ef),
+                             std::istreambuf_iterator<char>());
+  }
+
+  if (out.exitCode == 0) {
+    std::ifstream mf(metaPath, std::ios::binary);
+    if (mf) {
+      const std::string metaText((std::istreambuf_iterator<char>(mf)),
+                                 std::istreambuf_iterator<char>());
+      out.meta = nlohmann::json::parse(metaText, nullptr, false);
     }
-    if (bind) bind(stmt);
-    const int rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-    if (rc != SQLITE_DONE) {
-        SLOG(SPRING_LOG_ERROR, "ExecPrepared step failed (%d): %s", rc, sqlite3_errmsg(db));
-        return false;
-    }
-    return true;
+    // A run that exits 0 but produced no usable Lua or no metadata is a
+    // failure here even though the generator thought it succeeded — storing a
+    // row with an empty `lua` would materialise an empty scenario file, which
+    // discovery drops with a warning that blames the content.
+    out.ok = !out.lua.empty() && !out.meta.is_discarded() &&
+             out.meta.is_object() && out.meta.contains("id");
+    if (!out.ok && out.diagnostics.empty())
+      out.diagnostics = "scenariogen.py produced no usable output";
+  }
+
+  std::filesystem::remove(metaPath, ec);
+  std::filesystem::remove(errPath, ec);
+  return out;
 }
 
 // Saved for self-restart via execvp
 static int savedArgc = 0;
-static char** savedArgv = nullptr;
+static char **savedArgv = nullptr;
 
 /// Tracks a spawned game server process.
 struct GameServerInstance {
-    uint32_t roomId = 0;
-    int port = 0;
-    pid_t pid = 0;
-    std::string mapId;
-    std::string gameId;
-    enum State { Starting, Running, Ended, Crashed } state = Starting;
+  uint32_t roomId = 0;
+  int port = 0;
+  pid_t pid = 0;
+  std::string mapId;
+  std::string gameId;
+  enum State { Starting, Running, Ended, Crashed } state = Starting;
 };
 
 /// Find a free TCP port by actually trying to bind one. Caller can
@@ -114,27 +333,29 @@ struct GameServerInstance {
 /// loopback socket, which did not collide with the server's `::`
 /// wildcard the same way, so a busy port could read as free.)
 static int findFreePort(int base = 9100, int floor = 0,
-                        const std::unordered_set<int>& excluded = {}) {
-    int start = (floor > base) ? floor : base;
-    for (int port = start; port < start + 1000; ++port) {
-        if (excluded.count(port)) continue;
-        int s = ::socket(AF_INET6, SOCK_STREAM, 0);
-        if (s < 0) continue;
-        int one = 1;
-        int zero = 0;
-        setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-        setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, &zero, sizeof(zero));
-        sockaddr_in6 addr{};
-        addr.sin6_family = AF_INET6;
-        addr.sin6_addr = in6addr_any;
-        addr.sin6_port = htons(static_cast<uint16_t>(port));
-        if (::bind(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
-            ::close(s);
-            return port;
-        }
-        ::close(s);
+                        const std::unordered_set<int> &excluded = {}) {
+  int start = (floor > base) ? floor : base;
+  for (int port = start; port < start + 1000; ++port) {
+    if (excluded.count(port))
+      continue;
+    int s = ::socket(AF_INET6, SOCK_STREAM, 0);
+    if (s < 0)
+      continue;
+    int one = 1;
+    int zero = 0;
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, &zero, sizeof(zero));
+    sockaddr_in6 addr{};
+    addr.sin6_family = AF_INET6;
+    addr.sin6_addr = in6addr_any;
+    addr.sin6_port = htons(static_cast<uint16_t>(port));
+    if (::bind(s, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) == 0) {
+      ::close(s);
+      return port;
     }
-    return -1;
+    ::close(s);
+  }
+  return -1;
 }
 
 /// Spawn a spring-server process for a game room.
@@ -146,9 +367,11 @@ static int findFreePort(int base = 9100, int floor = 0,
 /// their lobby-assigned team.
 ///
 /// `aiSlots` is the room's AI roster at game-start time. Each slot
-/// becomes a `--ai <id>:<team>:<posIdx>` argument pair; the sim
+/// becomes a `--ai <id>:<team>:<posIdx>[:<profile>]` argument pair; the sim
 /// runs its own AIDiscovery against the same game path and
-/// resolves each id to a main.lua it can actually run.
+/// resolves each id to a main.lua it can actually run. The optional
+/// profile field (PLAN-metalstorm-ai.md §10 task 6) is opaque to the
+/// engine — carried through to the AI plugin, which validates it.
 ///
 /// Both rosters must have `startPos` populated (or -1 if the map
 /// has no start positions at all). The lobby calls
@@ -156,150 +379,173 @@ static int findFreePort(int base = 9100, int floor = 0,
 /// -1 values, so a well-formed handoff always carries a concrete
 /// slot assignment per team.
 static GameServerInstance spawnGameServer(
-    uint32_t roomId, const std::string& gameId,
-    const std::string& gameVersion,
-    const std::string& mapId, const std::string& dbPath,
-    const std::vector<RoomPlayer>& playerRoster,
-    const std::vector<RoomAISlot>& aiSlots,
-    const std::unordered_map<std::string, std::string>& modOptions = {},
-    const std::unordered_set<int>& excludedPorts = {},
+    uint32_t roomId, const std::string &gameId, const std::string &gameVersion,
+    const std::string &mapId, const std::string &dbPath,
+    const std::vector<RoomPlayer> &playerRoster,
+    const std::vector<RoomAISlot> &aiSlots,
+    const std::unordered_map<std::string, std::string> &modOptions = {},
+    const std::unordered_set<int> &excludedPorts = {},
     bool devBuildAcknowledged = false,
     // PLAN-security-hardening.md task 5 (G3): forwarded from the lobby's own
     // --wt-cert/--wt-key to every spawned spring-server, so an operator
     // configures the prod cert once at the lobby instead of per room.
-    const std::string& wtCertPath = "",
-    const std::string& wtKeyPath = "")
-{
-    GameServerInstance inst;
-    inst.roomId = roomId;
-    inst.port = findFreePort(9100, 0, excludedPorts);
-    if (inst.port < 0) {
-        SLOG(SPRING_LOG_ERROR, "no free port in [9100, 10100) for room %u", roomId);
-        inst.state = GameServerInstance::Crashed;
-        return inst;
-    }
-    inst.mapId = mapId;
-    inst.gameId = gameId;
-
-    // Build the command
-    std::string serverBin = "./build/debug/spring-server";
-    // Check if release build exists
-    if (std::filesystem::exists("./build/release/spring-server"))
-        serverBin = "./build/release/spring-server";
-
-    // Create log directory
-    std::filesystem::create_directories("data/logs");
-    std::string logPath = "data/logs/game-" + std::to_string(roomId) + ".log";
-
-    // Assemble the --player and --ai arguments outside the fork so
-    // their string storage outlives the execvp call in the child.
-    // Player spec format:  <username>:<team>:<posIdx>
-    // AI spec format:      <id>:<team>:<posIdx>
-    std::vector<std::string> playerArgStorage;
-    playerArgStorage.reserve(playerRoster.size());
-    for (const auto& p : playerRoster) {
-        playerArgStorage.push_back(
-            p.username + ":" +
-            std::to_string(static_cast<int>(p.team)) + ":" +
-            std::to_string(static_cast<int>(p.startPos)));
-    }
-    std::vector<std::string> aiArgStorage;
-    aiArgStorage.reserve(aiSlots.size());
-    for (const auto& slot : aiSlots) {
-        aiArgStorage.push_back(
-            slot.aiId + ":" +
-            std::to_string(static_cast<int>(slot.team)) + ":" +
-            std::to_string(static_cast<int>(slot.startPos)));
-    }
-    // Room modoptions → one "--modoption key=value" pair each. (§5)
-    std::vector<std::string> modOptArgStorage;
-    modOptArgStorage.reserve(modOptions.size());
-    for (const auto& [key, value] : modOptions) {
-        modOptArgStorage.push_back(key + "=" + value);
-    }
-
-    pid_t pid = fork();
-    if (pid == 0) {
-        // Child process — redirect stdout/stderr to log file
-        FILE* logFile = fopen(logPath.c_str(), "w");
-        if (logFile) {
-            dup2(fileno(logFile), STDOUT_FILENO);
-            dup2(fileno(logFile), STDERR_FILENO);
-            fclose(logFile);
-        }
-
-        // Close all inherited file descriptors (except stdin/out/err).
-        // uWebSockets sockets (our listen socket, all established WS client
-        // connections) do not get FD_CLOEXEC by default on macOS, so without
-        // this the child process ends up holding the parent's listen socket
-        // + every active WebSocket. That leaks state into spring-server and
-        // causes cross-talk between the lobby and game server.
-        int maxFd = static_cast<int>(sysconf(_SC_OPEN_MAX));
-        if (maxFd < 1024) maxFd = 1024;
-        for (int fd = 3; fd < maxFd; fd++) {
-            close(fd);
-        }
-
-        std::string portStr = std::to_string(inst.port);
-        std::string roomStr = std::to_string(roomId);
-
-        // Build argv: fixed args first, then one "--player <spec>"
-        // pair per human slot, then one "--ai <spec>" pair per AI
-        // slot. Player args come first so spring-server's own arg
-        // parser doesn't care about ordering — it reads them into
-        // separate vectors either way.
-        std::vector<const char*> argv;
-        argv.push_back(serverBin.c_str());
-        argv.push_back("--port"); argv.push_back(portStr.c_str());
-        argv.push_back("--room"); argv.push_back(roomStr.c_str());
-        argv.push_back("--game"); argv.push_back(gameId.c_str());
-        if (!gameVersion.empty()) {
-            argv.push_back("--game-version");
-            argv.push_back(gameVersion.c_str());
-        }
-        argv.push_back("--map");  argv.push_back(mapId.c_str());
-        argv.push_back("--db");   argv.push_back(dbPath.c_str());
-        if (!wtCertPath.empty() && !wtKeyPath.empty()) {
-            argv.push_back("--wt-cert"); argv.push_back(wtCertPath.c_str());
-            argv.push_back("--wt-key");  argv.push_back(wtKeyPath.c_str());
-        }
-        for (const auto& spec : playerArgStorage) {
-            argv.push_back("--player");
-            argv.push_back(spec.c_str());
-        }
-        for (const auto& spec : aiArgStorage) {
-            argv.push_back("--ai");
-            argv.push_back(spec.c_str());
-        }
-        for (const auto& spec : modOptArgStorage) {
-            argv.push_back("--modoption");
-            argv.push_back(spec.c_str());
-        }
-        if (devBuildAcknowledged) argv.push_back(DevBuildGate::kFlag);
-        // Propagate --no-cache so a dev lobby's game servers also refresh
-        // their on-disk defs cache each launch (the cache key is
-        // content-blind — see DefsCache.h — so without this an edited
-        // unit def never reaches the browser). Harmless in prod, where
-        // the lobby is never launched with --no-cache.
-        if (CacheControl::IsNoCache()) argv.push_back("--no-cache");
-        argv.push_back(nullptr);
-
-        execvp(serverBin.c_str(), const_cast<char* const*>(argv.data()));
-        // If execvp returns, it failed
-        fprintf(stderr, "ERROR: failed to exec game server: %s\n", serverBin.c_str());
-        _exit(1);
-    } else if (pid > 0) {
-        inst.pid = pid;
-        inst.state = GameServerInstance::Starting;
-        SLOG(SPRING_LOG_NOTICE, "spawned game server pid=%d port=%d for room %u "
-            "(%zu players, %zu AI)",
-            pid, inst.port, roomId, playerRoster.size(), aiSlots.size());
-    } else {
-        SLOG(SPRING_LOG_ERROR, "fork failed");
-        inst.state = GameServerInstance::Crashed;
-    }
-
+    const std::string &wtCertPath = "", const std::string &wtKeyPath = "") {
+  GameServerInstance inst;
+  inst.roomId = roomId;
+  inst.port = findFreePort(9100, 0, excludedPorts);
+  if (inst.port < 0) {
+    SLOG(SPRING_LOG_ERROR, "no free port in [9100, 10100) for room %u", roomId);
+    inst.state = GameServerInstance::Crashed;
     return inst;
+  }
+  inst.mapId = mapId;
+  inst.gameId = gameId;
+
+  // Build the command
+  std::string serverBin = "./build/debug/spring-server";
+  // Check if release build exists
+  if (std::filesystem::exists("./build/release/spring-server"))
+    serverBin = "./build/release/spring-server";
+
+  // Create log directory
+  std::filesystem::create_directories("data/logs");
+  std::string logPath = "data/logs/game-" + std::to_string(roomId) + ".log";
+
+  // Assemble the --player and --ai arguments outside the fork so
+  // their string storage outlives the execvp call in the child.
+  // Player spec format:  <username>:<team>:<posIdx>
+  // AI spec format:      <id>:<team>:<posIdx>
+  //
+  // `playerRoster` is documented as "non-spectators" above, but callers
+  // pass the room's full player list (spectators included) — filter here
+  // so a spectator never gets baked into --player as a phantom team-0
+  // player. Spectators reach the game server by authenticating without a
+  // --player entry; ClientMessageHandler's AuthRequest handler treats
+  // "authenticated but not in the roster" as role=spectator (see PLAN
+  // metalstorm-onboarding.md §4).
+  std::vector<std::string> playerArgStorage;
+  playerArgStorage.reserve(playerRoster.size());
+  for (const auto &p : playerRoster) {
+    if (p.isSpectator)
+      continue;
+    playerArgStorage.push_back(p.username + ":" +
+                               std::to_string(static_cast<int>(p.team)) + ":" +
+                               std::to_string(static_cast<int>(p.startPos)));
+  }
+  std::vector<std::string> aiArgStorage;
+  aiArgStorage.reserve(aiSlots.size());
+  for (const auto &slot : aiSlots) {
+    // 4th field (personality/difficulty profile, PLAN-metalstorm-ai.md §10
+    // task 6) is appended only when set, so a slot with no profile still
+    // produces the plain 3-field spec server_main.cpp has always parsed.
+    std::string spec = slot.aiId + ":" +
+                       std::to_string(static_cast<int>(slot.team)) + ":" +
+                       std::to_string(static_cast<int>(slot.startPos));
+    if (!slot.profile.empty())
+      spec += ":" + slot.profile;
+    aiArgStorage.push_back(std::move(spec));
+  }
+  // Room modoptions → one "--modoption key=value" pair each. (§5)
+  std::vector<std::string> modOptArgStorage;
+  modOptArgStorage.reserve(modOptions.size());
+  for (const auto &[key, value] : modOptions) {
+    modOptArgStorage.push_back(key + "=" + value);
+  }
+
+  pid_t pid = fork();
+  if (pid == 0) {
+    // Child process — redirect stdout/stderr to log file
+    FILE *logFile = fopen(logPath.c_str(), "w");
+    if (logFile) {
+      dup2(fileno(logFile), STDOUT_FILENO);
+      dup2(fileno(logFile), STDERR_FILENO);
+      fclose(logFile);
+    }
+
+    // Close all inherited file descriptors (except stdin/out/err).
+    // uWebSockets sockets (our listen socket, all established WS client
+    // connections) do not get FD_CLOEXEC by default on macOS, so without
+    // this the child process ends up holding the parent's listen socket
+    // + every active WebSocket. That leaks state into spring-server and
+    // causes cross-talk between the lobby and game server.
+    int maxFd = static_cast<int>(sysconf(_SC_OPEN_MAX));
+    if (maxFd < 1024)
+      maxFd = 1024;
+    for (int fd = 3; fd < maxFd; fd++) {
+      close(fd);
+    }
+
+    std::string portStr = std::to_string(inst.port);
+    std::string roomStr = std::to_string(roomId);
+
+    // Build argv: fixed args first, then one "--player <spec>"
+    // pair per human slot, then one "--ai <spec>" pair per AI
+    // slot. Player args come first so spring-server's own arg
+    // parser doesn't care about ordering — it reads them into
+    // separate vectors either way.
+    std::vector<const char *> argv;
+    argv.push_back(serverBin.c_str());
+    argv.push_back("--port");
+    argv.push_back(portStr.c_str());
+    argv.push_back("--room");
+    argv.push_back(roomStr.c_str());
+    argv.push_back("--game");
+    argv.push_back(gameId.c_str());
+    if (!gameVersion.empty()) {
+      argv.push_back("--game-version");
+      argv.push_back(gameVersion.c_str());
+    }
+    argv.push_back("--map");
+    argv.push_back(mapId.c_str());
+    argv.push_back("--db");
+    argv.push_back(dbPath.c_str());
+    if (!wtCertPath.empty() && !wtKeyPath.empty()) {
+      argv.push_back("--wt-cert");
+      argv.push_back(wtCertPath.c_str());
+      argv.push_back("--wt-key");
+      argv.push_back(wtKeyPath.c_str());
+    }
+    for (const auto &spec : playerArgStorage) {
+      argv.push_back("--player");
+      argv.push_back(spec.c_str());
+    }
+    for (const auto &spec : aiArgStorage) {
+      argv.push_back("--ai");
+      argv.push_back(spec.c_str());
+    }
+    for (const auto &spec : modOptArgStorage) {
+      argv.push_back("--modoption");
+      argv.push_back(spec.c_str());
+    }
+    if (devBuildAcknowledged)
+      argv.push_back(DevBuildGate::kFlag);
+    // Propagate --no-cache so a dev lobby's game servers also refresh
+    // their on-disk defs cache each launch (the cache key is
+    // content-blind — see DefsCache.h — so without this an edited
+    // unit def never reaches the browser). Harmless in prod, where
+    // the lobby is never launched with --no-cache.
+    if (CacheControl::IsNoCache())
+      argv.push_back("--no-cache");
+    argv.push_back(nullptr);
+
+    execvp(serverBin.c_str(), const_cast<char *const *>(argv.data()));
+    // If execvp returns, it failed
+    fprintf(stderr, "ERROR: failed to exec game server: %s\n",
+            serverBin.c_str());
+    _exit(1);
+  } else if (pid > 0) {
+    inst.pid = pid;
+    inst.state = GameServerInstance::Starting;
+    SLOG(SPRING_LOG_NOTICE,
+         "spawned game server pid=%d port=%d for room %u "
+         "(%zu players, %zu AI)",
+         pid, inst.port, roomId, playerRoster.size(), aiSlots.size());
+  } else {
+    SLOG(SPRING_LOG_ERROR, "fork failed");
+    inst.state = GameServerInstance::Crashed;
+  }
+
+  return inst;
 }
 
 /// Check if a process exists. Works for both children of this PID
@@ -310,895 +556,1617 @@ static GameServerInstance spawnGameServer(
 /// is the standard portable existence probe: returns 0 if the pid
 /// is alive, -1 with errno=ESRCH if it isn't.
 static bool isProcessAlive(pid_t pid) {
-    if (pid <= 0) return false;
-    // Reap if it's a child of ours and has already exited — otherwise
-    // kill(pid, 0) returns success for zombie processes and the lobby
-    // never notices the game server has died. WNOHANG returns the pid
-    // for an exited child, 0 if still running, -1 (ECHILD) if not our
-    // child (e.g. adopted from the game_servers table across restart).
-    int status = 0;
-    pid_t r = ::waitpid(pid, &status, WNOHANG);
-    if (r == pid) return false;        // reaped zombie — definitely dead
-    if (::kill(pid, 0) == 0) return true;
-    return (errno != ESRCH);  // EPERM means alive but not ours; still "alive"
+  if (pid <= 0)
+    return false;
+  // Reap if it's a child of ours and has already exited — otherwise
+  // kill(pid, 0) returns success for zombie processes and the lobby
+  // never notices the game server has died. WNOHANG returns the pid
+  // for an exited child, 0 if still running, -1 (ECHILD) if not our
+  // child (e.g. adopted from the game_servers table across restart).
+  int status = 0;
+  pid_t r = ::waitpid(pid, &status, WNOHANG);
+  if (r == pid)
+    return false; // reaped zombie — definitely dead
+  if (::kill(pid, 0) == 0)
+    return true;
+  return (errno != ESRCH); // EPERM means alive but not ours; still "alive"
 }
 
-int main(int argc, char* argv[])
-{
-    savedArgc = argc;
-    savedArgv = argv;
+int main(int argc, char *argv[]) {
+  savedArgc = argc;
+  savedArgv = argv;
 
-    std::signal(SIGINT, signalHandler);
-    std::signal(SIGTERM, signalHandler);
-    std::signal(SIGHUP, restartHandler);
-    // Ignore SIGPIPE. The lobby writes to a handful of things that
-    // can get their peer closed under us: WebSocket client sockets,
-    // stdout/stderr (captured by mprocs or similar), and — not yet
-    // but soon — outbound connections to game servers as part of
-    // the restart-recovery work. Default SIGPIPE action terminates
-    // the process the first time any of those hit a closed peer,
-    // which turns a transient write failure into a lobby crash.
-    // Ignoring it means write() returns EPIPE instead, which every
-    // reasonable caller already handles as "peer went away".
-    std::signal(SIGPIPE, SIG_IGN);
+  std::signal(SIGINT, signalHandler);
+  std::signal(SIGTERM, signalHandler);
+  std::signal(SIGHUP, restartHandler);
+  // Ignore SIGPIPE. The lobby writes to a handful of things that
+  // can get their peer closed under us: WebSocket client sockets,
+  // stdout/stderr (captured by mprocs or similar), and — not yet
+  // but soon — outbound connections to game servers as part of
+  // the restart-recovery work. Default SIGPIPE action terminates
+  // the process the first time any of those hit a closed peer,
+  // which turns a transient write failure into a lobby crash.
+  // Ignoring it means write() returns EPIPE instead, which every
+  // reasonable caller already handles as "peer went away".
+  std::signal(SIGPIPE, SIG_IGN);
 
-    int port = 8011;
-    std::string dbPath = "data/spring-server.db";
-    std::string gamesDir = "data/games";
-    std::string logFile;
-    int logLevel = SPRING_LOG_NOTICE;
-    bool debugMode = false;
-    // S2: one-shot admin provisioning. `--promote-admin <user>` grants the
-    // admin role to an existing account and exits without starting the server
-    // — an explicit, auditable op rather than auto-elevating on every boot.
-    std::string promoteAdmin;
-    // PLAN-quickstart.md Part A: dev/test-only bypass of the whole lobby
-    // dance. `dev_direct_start` gates the /api/rooms/direct HTTP endpoint
-    // (E6: off by default, never set in a production config). `--direct
-    // <manifest.json>` is a separate, always-available CLI flag — it's
-    // operator-supplied at process launch, not reachable remotely, so it
-    // doesn't need the same gate; it creates one standing room at boot
-    // (mprocs dev flow: stack comes up with the game already running).
-    bool devDirectStart = false;
-    bool devBuildAcknowledged = false;
-    std::string directManifestPath;
-    // PLAN-security-hardening.md task 5 (G3): prod cert for every spawned
-    // spring-server's QUIC/WebTransport endpoint. See spawnGameServer.
-    std::string wtCertPath;
-    std::string wtKeyPath;
+  int port = 8011;
+  std::string dbPath = "data/spring-server.db";
+  std::string gamesDir = "data/games";
+  std::string logFile;
+  int logLevel = SPRING_LOG_NOTICE;
+  bool debugMode = false;
+  // S2: one-shot admin provisioning. `--promote-admin <user>` grants the
+  // admin role to an existing account and exits without starting the server
+  // — an explicit, auditable op rather than auto-elevating on every boot.
+  std::string promoteAdmin;
+  // PLAN-quickstart.md Part A: dev/test-only bypass of the whole lobby
+  // dance. `dev_direct_start` gates the /api/rooms/direct HTTP endpoint
+  // (E6: off by default, never set in a production config). `--direct
+  // <manifest.json>` is a separate, always-available CLI flag — it's
+  // operator-supplied at process launch, not reachable remotely, so it
+  // doesn't need the same gate; it creates one standing room at boot
+  // (mprocs dev flow: stack comes up with the game already running).
+  bool devDirectStart = false;
+  bool devBuildAcknowledged = false;
+  std::string directManifestPath;
+  // PLAN-security-hardening.md task 5 (G3): prod cert for every spawned
+  // spring-server's QUIC/WebTransport endpoint. See spawnGameServer.
+  std::string wtCertPath;
+  std::string wtKeyPath;
+  // PLAN-client-resilience.md task 3: server-operator opt-out for the
+  // `/api/client-errors` report channel — the "lobby setting" the plan
+  // describes (open-source courtesy: default on for the official beta,
+  // off in a self-hosted sample config that explicitly passes this flag).
+  // Surfaced to the client via /api/version.
+  bool clientErrorReportsEnabled = true;
 
-    for (int i = 1; i < argc; i++) {
-        std::string arg = argv[i];
-        if (arg == "--port" && i + 1 < argc) port = std::atoi(argv[++i]);
-        else if (arg == "--promote-admin" && i + 1 < argc) promoteAdmin = argv[++i];
-        else if (arg == "--db" && i + 1 < argc) dbPath = argv[++i];
-        else if (arg == "--games-dir" && i + 1 < argc) gamesDir = argv[++i];
-        else if (arg == "--log-file" && i + 1 < argc) logFile = argv[++i];
-        else if (arg == "--log-level" && i + 1 < argc) logLevel = std::atoi(argv[++i]);
-        else if (arg == "--debug") { debugMode = true; logLevel = SPRING_LOG_DEBUG; }
-        else if (arg == "--no-cache") { CacheControl::SetNoCache(true); }
-        else if (arg == "--dev-direct-start") { devDirectStart = true; }
-        else if (arg == DevBuildGate::kFlag) { devBuildAcknowledged = true; }
-        else if (arg == "--direct" && i + 1 < argc) { directManifestPath = argv[++i]; }
-        else if (arg == "--wt-cert" && i + 1 < argc) { wtCertPath = argv[++i]; }
-        else if (arg == "--wt-key" && i + 1 < argc) { wtKeyPath = argv[++i]; }
-        else if (arg == "--game" && i + 1 < argc) {
-            // Back-compat: `--game <path>` is translated into
-            // `--games-dir <parent>` so existing scripts that point
-            // at a single game folder still work. The lobby now
-            // always scans a root directory of games rather than
-            // running one-game-at-a-time.
-            const std::string single = argv[++i];
-            namespace fs = std::filesystem;
-            const fs::path p(single);
-            if (p.has_parent_path())
-                gamesDir = p.parent_path().string();
-        }
+  for (int i = 1; i < argc; i++) {
+    std::string arg = argv[i];
+    if (arg == "--port" && i + 1 < argc)
+      port = std::atoi(argv[++i]);
+    else if (arg == "--promote-admin" && i + 1 < argc)
+      promoteAdmin = argv[++i];
+    else if (arg == "--db" && i + 1 < argc)
+      dbPath = argv[++i];
+    else if (arg == "--games-dir" && i + 1 < argc)
+      gamesDir = argv[++i];
+    else if (arg == "--log-file" && i + 1 < argc)
+      logFile = argv[++i];
+    else if (arg == "--log-level" && i + 1 < argc)
+      logLevel = std::atoi(argv[++i]);
+    else if (arg == "--debug") {
+      debugMode = true;
+      logLevel = SPRING_LOG_DEBUG;
+    } else if (arg == "--no-cache") {
+      CacheControl::SetNoCache(true);
+    } else if (arg == "--dev-direct-start") {
+      devDirectStart = true;
+    } else if (arg == DevBuildGate::kFlag) {
+      devBuildAcknowledged = true;
+    } else if (arg == "--direct" && i + 1 < argc) {
+      directManifestPath = argv[++i];
+    } else if (arg == "--wt-cert" && i + 1 < argc) {
+      wtCertPath = argv[++i];
+    } else if (arg == "--wt-key" && i + 1 < argc) {
+      wtKeyPath = argv[++i];
+    } else if (arg == "--disable-client-error-reports") {
+      clientErrorReportsEnabled = false;
+    } else if (arg == "--game" && i + 1 < argc) {
+      // Back-compat: `--game <path>` is translated into
+      // `--games-dir <parent>` so existing scripts that point
+      // at a single game folder still work. The lobby now
+      // always scans a root directory of games rather than
+      // running one-game-at-a-time.
+      const std::string single = argv[++i];
+      namespace fs = std::filesystem;
+      const fs::path p(single);
+      if (p.has_parent_path())
+        gamesDir = p.parent_path().string();
+    }
+  }
+
+  // PLAN-security-hardening E1: checked before any DB open / listen /
+  // fork so a dev build can't spawn game-server children (--direct) or
+  // start listening at all without the operator's explicit acknowledgment.
+  if (!DevBuildGate::CheckAndWarn("spring-lobby", devBuildAcknowledged))
+    return 1;
+
+  if (wtCertPath.empty() != wtKeyPath.empty()) {
+    SLOG(SPRING_LOG_ERROR,
+         "--wt-cert and --wt-key must be given together (got only %s)",
+         wtCertPath.empty() ? "--wt-key" : "--wt-cert");
+    return 1;
+  }
+
+  // --- Logging ---
+  uint32_t logOutputs = SPRING_LOG_OUTPUT_CONSOLE;
+  if (!logFile.empty())
+    logOutputs |= SPRING_LOG_OUTPUT_FILE;
+  springlog_init("spring-lobby", logOutputs);
+  springlog_set_min_level(logLevel);
+  if (!logFile.empty())
+    springlog_set_file(logFile.c_str());
+
+  // Enable SQLite log sink so logs are visible in the debug console.
+  // Uses the same debug.db as the log server and game servers.
+  springlog_sqlite_init("data/debug.db");
+
+  SLOG(SPRING_LOG_NOTICE, "starting on port %d...", port);
+
+  // --- Database ---
+  Database db;
+  if (!db.Open(dbPath)) {
+    SLOG(SPRING_LOG_ERROR, "failed to open database");
+    springlog_shutdown();
+    return 1;
+  }
+
+  // Clean up expired sessions on startup
+  int cleaned = db.CleanExpiredSessions(86400); // 24h
+  if (cleaned > 0)
+    SLOG(SPRING_LOG_INFO, "cleaned %d expired session(s)", cleaned);
+
+  // S2: `--promote-admin <user>` one-shot. Grants the admin role to an
+  // already-registered account (privileged console / SQL exec gate) and
+  // exits — it never starts the server and never creates an account, so it
+  // can't forge credentials. Run once by the operator; ordinary
+  // registrations stay "player".
+  if (!promoteAdmin.empty()) {
+    const bool ok = db.EnsureAdminRole(promoteAdmin);
+    if (ok)
+      SLOG(SPRING_LOG_NOTICE, "granted admin role to '%s'",
+           promoteAdmin.c_str());
+    else
+      SLOG(SPRING_LOG_ERROR, "no such account '%s' — register it first",
+           promoteAdmin.c_str());
+    // The SQLite write is already committed. This is a one-shot utility
+    // invocation; skip the full server-shutdown path (springlog's async
+    // sink thread isn't started in a joinable state this early in init and
+    // aborts at teardown) and exit immediately with the result code.
+    db.Close();
+    std::fflush(stdout);
+    std::_Exit(ok ? 0 : 1);
+  }
+
+  // --- Rooms ---
+  RoomManager rooms;
+
+  // --- Map processing ---
+  // Access the raw sqlite3* handle for MapMetadataDb
+  // (Database wrapper doesn't expose it, so we open a second connection)
+  sqlite3 *mapDb = nullptr;
+  sqlite3_open(dbPath.c_str(), &mapDb);
+
+  // Attach the lobby's SQLite handle to the RoomManager so every room
+  // mutation is write-through. Tables are created (or dropped and
+  // recreated on schema bump) before LoadFromDatabase populates the
+  // in-memory `rooms` map from any rows that survived a previous
+  // lobby instance.
+  if (mapDb) {
+    RoomManager::EnsureTables(mapDb);
+    rooms.SetDatabase(mapDb);
+    rooms.LoadFromDatabase();
+  }
+
+  // game_servers/game_status — maintained in real-time so external tools
+  // (MCP debug server, springcli) can discover running game server ports
+  // without querying the lobby HTTP API. Schema-probed same as
+  // RoomManager::EnsureTables / MapMetadataDb::EnsureTable.
+  GameServersDb::EnsureTables(mapDb);
+
+  // generated_scenarios — procedurally generated wars (scenariogen.py). The
+  // row is the record of truth; `scenarios/gen_*.lua` is a cache rebuilt from
+  // it below, once per game, before discovery runs. Migrated rather than
+  // dropped on a schema bump: unlike game_servers or maps, a row here is the
+  // only copy of the thing. See ScenarioDb.h.
+  ScenarioDb::EnsureTable(mapDb);
+
+  // Helper: persist a game server entry to SQLite
+  auto persistGameServer = [&](const GameServerInstance &inst) {
+    if (!mapDb)
+      return;
+    const char *stateStr = "starting";
+    switch (inst.state) {
+    case GameServerInstance::Starting:
+      stateStr = "starting";
+      break;
+    case GameServerInstance::Running:
+      stateStr = "running";
+      break;
+    case GameServerInstance::Ended:
+      stateStr = "ended";
+      break;
+    case GameServerInstance::Crashed:
+      stateStr = "crashed";
+      break;
+    }
+    ExecPrepared(
+        mapDb,
+        "INSERT OR REPLACE INTO game_servers (room_id, port, pid, map_id, "
+        "game_id, state) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        [&](sqlite3_stmt *s) {
+          sqlite3_bind_int(s, 1, static_cast<int>(inst.roomId));
+          sqlite3_bind_int(s, 2, inst.port);
+          sqlite3_bind_int(s, 3, static_cast<int>(inst.pid));
+          sqlite3_bind_text(s, 4, inst.mapId.c_str(), -1, SQLITE_TRANSIENT);
+          sqlite3_bind_text(s, 5, inst.gameId.c_str(), -1, SQLITE_TRANSIENT);
+          sqlite3_bind_text(s, 6, stateStr, -1, SQLITE_TRANSIENT);
+        });
+  };
+
+  auto removeGameServer = [&](uint32_t roomId) {
+    if (!mapDb)
+      return;
+    ExecPrepared(mapDb, "DELETE FROM game_servers WHERE room_id=?",
+                 [&](sqlite3_stmt *s) {
+                   sqlite3_bind_int(s, 1, static_cast<int>(roomId));
+                 });
+    // The game server normally clears its own game_status row on a clean
+    // exit, but a SIGKILL/crash can leave it behind — drop it here too so a
+    // dead room never looks "ready".
+    ExecPrepared(mapDb, "DELETE FROM game_status WHERE room_id=?",
+                 [&](sqlite3_stmt *s) {
+                   sqlite3_bind_int(s, 1, static_cast<int>(roomId));
+                 });
+  };
+
+  // Read the readiness flag a running game server publishes into `game_status`
+  // (written only by spring-server; see server_main.cpp). Returns true once the
+  // server is accepting connections, which the health-check loop uses to flip
+  // the room Loading→Active. Missing table/row → not ready (false).
+  auto gameServerReady = [&](uint32_t roomId) -> bool {
+    if (!mapDb)
+      return false;
+    sqlite3_stmt *s = nullptr;
+    bool ready = false;
+    if (sqlite3_prepare_v2(mapDb,
+                           "SELECT ready FROM game_status WHERE room_id=?", -1,
+                           &s, nullptr) == SQLITE_OK) {
+      sqlite3_bind_int(s, 1, static_cast<int>(roomId));
+      if (sqlite3_step(s) == SQLITE_ROW)
+        ready = sqlite3_column_int(s, 0) != 0;
+    }
+    if (s)
+      sqlite3_finalize(s);
+    return ready;
+  };
+
+  // Map processing itself still lives entirely in tools/mapconverter (the
+  // lobby links only the read-only MapMetadataDb) — but we shell out to it
+  // as a startup pre-flight so a lobby start self-heals stale processed
+  // output instead of requiring an operator to remember to run it by hand.
+  // See RunMapConverterPreflight above and PLAN-metalstorm-impostors.md M10.
+  RunMapConverterPreflight(dbPath);
+  MapMetadataDb::EnsureTable(mapDb);
+
+  // --- Game discovery ---
+  // Enumerate every subdirectory of `gamesDir` that ships a
+  // game.config.lua (or .json) via ConfigReader. This builds the
+  // list shown in the lobby's "create game" dropdown and, for each
+  // game, the set of AI plugins that game + the engine provide.
+  // The result is immutable for the lifetime of the lobby process
+  // — authors who add a new game must restart the lobby.
+  const std::string enginePath = "content/engine";
+  const std::vector<GameDiscovery::GameInfo> availableGames =
+      GameDiscovery::Discover(gamesDir);
+
+  // --- Per-game AI discovery ---
+  // Game model conversion is handled offline by tools/gameconverter.
+  // The lobby just discovers games and their AI plugins.
+  std::unordered_map<std::string, std::string> gamePathsById;
+  std::unordered_map<std::string, std::string> gameVersionsById;
+  std::unordered_map<std::string, std::vector<AIDiscovery::AIInfo>> aisByGame;
+  // --- Per-game scenario discovery (PLAN-endtoend.md D10) ---
+  // A scenario file IS a war template (PLAN-metalstorm-wars.md §7.1), and the
+  // `victory = true` objective it declares is the only terminal condition
+  // game_gameover.lua watches. Discovering them here lets the ordinary
+  // create-room path default and offer one, instead of leaving the `scenario`
+  // modoption writable only by the dev-only /api/rooms/direct manifest — which
+  // is how a lobby-created Metalstorm war ended up with no way to finish.
+  std::unordered_map<std::string, std::vector<ScenarioDiscovery::ScenarioInfo>>
+      scenariosByGame;
+  /// Rebuild `<game>/scenarios/gen_*.lua` from the `generated_scenarios` rows
+  /// for `gameId`, then re-run discovery over the whole directory.
+  ///
+  /// WHY MATERIALISE-THEN-DISCOVER RATHER THAN MERGE TWO LISTS. A generated
+  /// scenario has to end up in the same list as a shipped one, with the same
+  /// `terminal` flag and the same resolved `sides` — and it has to be loadable
+  /// by the sim, which reaches it only as `VFS.Include('scenarios/<id>.lua')`.
+  /// Writing the file first and then letting `Discover` parse the directory
+  /// satisfies both at once, and does it with ONE implementation of "what does
+  /// this scenario say": the row's denormalised display name can never drift
+  /// from the `name` the sim will actually read, because the lobby never reads
+  /// the row's copy. The alternative — synthesising ScenarioInfo from columns
+  /// — would be a second parser to keep in step with ScenarioDiscovery.cpp.
+  ///
+  /// Also the reason the rebuild-from-DB path is exercised on every single
+  /// lobby start rather than only by its test: if it broke, the lobby would
+  /// stop offering generated wars immediately and visibly.
+  auto refreshScenarios = [&](const std::string &gameId) {
+    auto pathIt = gamePathsById.find(gameId);
+    if (pathIt == gamePathsById.end())
+      return;
+    ScenarioDb::SyncToDisk(mapDb, gameId, pathIt->second);
+    scenariosByGame[gameId] = ScenarioDiscovery::Discover(pathIt->second);
+  };
+
+  for (const auto &g : availableGames) {
+    gamePathsById[g.id] = g.folderPath;
+    gameVersionsById[g.id] = g.version;
+    aisByGame[g.id] = AIDiscovery::Discover(enginePath, g.folderPath);
+    refreshScenarios(g.id);
+  }
+
+  /// Scenarios `gameId` offers — shipped and generated alike, since the
+  /// generated ones are materialised into the same directory before discovery
+  /// reads it. An empty list for an unknown game.
+  ///
+  /// Captured by reference everywhere below. `scenariosByGame` is no longer
+  /// immutable — `refreshScenarios` replaces a game's vector after an admin
+  /// ingest or delete — so the lifetime rule is now: the returned reference is
+  /// valid until the next refresh, and every caller consumes it within one
+  /// HTTP handler. That holds because NetworkServer dispatches every handler on
+  /// its single network thread (NetworkServer.h:177), so no handler can be
+  /// reading the vector while another replaces it. `unordered_map` nodes are
+  /// stable across value assignment, so `kNone` is the only aliasing subtlety
+  /// and it is `static const`.
+  auto scenariosFor = [&scenariosByGame](const std::string &gameId)
+      -> const std::vector<ScenarioDiscovery::ScenarioInfo> & {
+    static const std::vector<ScenarioDiscovery::ScenarioInfo> kNone;
+    auto it = scenariosByGame.find(gameId);
+    return (it == scenariosByGame.end()) ? kNone : it->second;
+  };
+
+  // --- Game server instances ---
+  std::unordered_map<uint32_t, GameServerInstance>
+      gameServers; // roomId → instance
+
+  // --- Adopt-or-reset live game servers across a lobby restart ---
+  //
+  // Walk the `game_servers` table. For each row we either:
+  //   - adopt the running process (re-populate gameServers[roomId])
+  //     so /api/processes and the room browser show it correctly
+  //     and we can SIGTERM it when its room is abandoned;
+  //   - or, if the pid is dead, reset the matching room back to
+  //     Filling and delete the stale row.
+  //
+  // This replaces the previous `waitpid(WNOHANG)` cleanup which
+  // only worked for processes that were children of *this* PID —
+  // every adopted orphan from a prior lobby instance fell through
+  // and got DELETEd as if it had crashed.
+  if (mapDb) {
+    sqlite3_stmt *stmt = nullptr;
+    sqlite3_prepare_v2(mapDb,
+                       "SELECT room_id, port, pid, map_id, game_id, state "
+                       "FROM game_servers",
+                       -1, &stmt, nullptr);
+
+    std::vector<uint32_t> staleRooms;
+    size_t adopted = 0;
+    while (stmt && sqlite3_step(stmt) == SQLITE_ROW) {
+      uint32_t rid = sqlite3_column_int(stmt, 0);
+      int port = sqlite3_column_int(stmt, 1);
+      pid_t pid = sqlite3_column_int(stmt, 2);
+      const unsigned char *mid = sqlite3_column_text(stmt, 3);
+      const unsigned char *gid = sqlite3_column_text(stmt, 4);
+      const unsigned char *st = sqlite3_column_text(stmt, 5);
+
+      if (!isProcessAlive(pid)) {
+        staleRooms.push_back(rid);
+        continue;
+      }
+
+      GameServerInstance inst;
+      inst.roomId = rid;
+      inst.port = port;
+      inst.pid = pid;
+      inst.mapId = mid ? reinterpret_cast<const char *>(mid) : "";
+      inst.gameId = gid ? reinterpret_cast<const char *>(gid) : "";
+      // We don't know the live process's real state without
+      // talking to it. Trust the persisted state for now; the
+      // health-check loop downgrades to Ended if the pid dies.
+      const std::string stateStr =
+          st ? reinterpret_cast<const char *>(st) : "running";
+      if (stateStr == "starting")
+        inst.state = GameServerInstance::Starting;
+      else if (stateStr == "ended")
+        inst.state = GameServerInstance::Ended;
+      else if (stateStr == "crashed")
+        inst.state = GameServerInstance::Crashed;
+      else
+        inst.state = GameServerInstance::Running;
+
+      gameServers[rid] = inst;
+      // Mirror the live port back into the in-memory room so the
+      // browser shows the right "Rejoin" target.
+      if (auto *room = rooms.GetRoom(rid)) {
+        room->gameServerPort = static_cast<uint16_t>(port);
+      }
+      adopted++;
+      SLOG(SPRING_LOG_NOTICE, "adopted game server room=%u pid=%d port=%d (%s)",
+           rid, (int)pid, port, stateStr.c_str());
+    }
+    if (stmt)
+      sqlite3_finalize(stmt);
+
+    for (auto rid : staleRooms) {
+      ExecPrepared(mapDb, "DELETE FROM game_servers WHERE room_id=?",
+                   [&](sqlite3_stmt *s) {
+                     sqlite3_bind_int(s, 1, static_cast<int>(rid));
+                   });
+      // Room metadata is persistent; if a row in `rooms` matches,
+      // reset it back to Filling so the host can launch again.
+      if (rooms.GetRoom(rid))
+        rooms.ResetRoomForNextGame(rid);
+      SLOG(SPRING_LOG_NOTICE,
+           "game_servers row room=%u was stale (pid dead) — cleared", rid);
     }
 
-    // PLAN-security-hardening E1: checked before any DB open / listen /
-    // fork so a dev build can't spawn game-server children (--direct) or
-    // start listening at all without the operator's explicit acknowledgment.
-    if (!DevBuildGate::CheckAndWarn("spring-lobby", devBuildAcknowledged))
-        return 1;
+    SLOG(SPRING_LOG_NOTICE,
+         "startup: adopted %zu game server(s), cleaned %zu stale row(s)",
+         adopted, staleRooms.size());
+  }
 
-    if (wtCertPath.empty() != wtKeyPath.empty()) {
-        SLOG(SPRING_LOG_ERROR, "--wt-cert and --wt-key must be given together (got only %s)",
-             wtCertPath.empty() ? "--wt-key" : "--wt-cert");
-        return 1;
+  // --- Reconcile rooms stuck mid-launch ---
+  // A room in Loading/Active state must be backed by a live game server.
+  // If the adoption pass above found none (the process died and its
+  // game_servers row was already gone — e.g. a lobby restart raced the
+  // bookkeeping), the room is orphaned: the health-check loop only watches
+  // adopted servers, and the reaper below deliberately skips Loading/Active.
+  // Reset any such room to Filling so it's usable again (and reapable if it
+  // turns out to be abandoned).
+  for (GameRoom *room : rooms.GetAllRooms()) {
+    if ((room->state == ERoomState::Loading ||
+         room->state == ERoomState::Active) &&
+        gameServers.find(room->id) == gameServers.end()) {
+      SLOG(SPRING_LOG_NOTICE,
+           "room %u: %s with no live game server — resetting to Filling",
+           room->id, room->state == ERoomState::Active ? "Active" : "Loading");
+      rooms.ResetRoomForNextGame(room->id);
     }
+  }
 
-    // --- Logging ---
-    uint32_t logOutputs = SPRING_LOG_OUTPUT_CONSOLE;
-    if (!logFile.empty())
-        logOutputs |= SPRING_LOG_OUTPUT_FILE;
-    springlog_init("spring-lobby", logOutputs);
-    springlog_set_min_level(logLevel);
-    if (!logFile.empty())
-        springlog_set_file(logFile.c_str());
+  // --- Reap abandoned rooms ---
+  // The lobby is HTTP-only — no persistent lobby socket means a closed
+  // browser never abandons its room, so non-persistent rooms with no live
+  // game pile up in the DB and reload on every restart. Sweep them on
+  // startup and periodically (below). Idle threshold is a proxy for player
+  // presence (the HTTP lobby tracks no liveness). Rooms hosting a live game
+  // and persistent rooms are always kept.
+  constexpr int64_t kRoomIdleReapSeconds = 30 * 60; // 30 minutes
+  {
+    auto reaped = rooms.ReapStaleRooms(kRoomIdleReapSeconds);
+    if (!reaped.empty())
+      SLOG(SPRING_LOG_NOTICE, "startup: reaped %zu abandoned room(s)",
+           reaped.size());
+  }
 
-    // Enable SQLite log sink so logs are visible in the debug console.
-    // Uses the same debug.db as the log server and game servers.
-    springlog_sqlite_init("data/debug.db");
-
-    SLOG(SPRING_LOG_NOTICE, "starting on port %d...", port);
-
-    // --- Database ---
-    Database db;
-    if (!db.Open(dbPath)) {
-        SLOG(SPRING_LOG_ERROR, "failed to open database");
-        springlog_shutdown();
-        return 1;
+  // Reset any room stuck in Loading/Active without a live game-server.
+  // Happens when the previous lobby was killed mid-game without a
+  // clean shutdown (so room.state was persisted as Loading), or when
+  // the game-server died while the lobby was running but its zombie
+  // kept isProcessAlive returning true (waitpid fix applied at the
+  // same time as this sweep). Without this, the room sits in
+  // "Loading" forever in the browser and the host can't relaunch.
+  {
+    size_t reset = 0;
+    for (auto *room : rooms.GetAllRooms()) {
+      const auto st = static_cast<int>(room->state);
+      const bool inFlight = (st >= 3 && st <= 4); // Loading, Active
+      if (!inFlight)
+        continue;
+      if (gameServers.count(room->id) > 0)
+        continue; // adopted; alive
+      SLOG(SPRING_LOG_NOTICE,
+           "room %u stuck in state=%d with no game-server — resetting",
+           room->id, st);
+      rooms.ResetRoomForNextGame(room->id);
+      reset++;
     }
-
-    // Clean up expired sessions on startup
-    int cleaned = db.CleanExpiredSessions(86400); // 24h
-    if (cleaned > 0) SLOG(SPRING_LOG_INFO, "cleaned %d expired session(s)", cleaned);
-
-    // S2: `--promote-admin <user>` one-shot. Grants the admin role to an
-    // already-registered account (privileged console / SQL exec gate) and
-    // exits — it never starts the server and never creates an account, so it
-    // can't forge credentials. Run once by the operator; ordinary
-    // registrations stay "player".
-    if (!promoteAdmin.empty()) {
-        const bool ok = db.EnsureAdminRole(promoteAdmin);
-        if (ok)
-            SLOG(SPRING_LOG_NOTICE, "granted admin role to '%s'", promoteAdmin.c_str());
-        else
-            SLOG(SPRING_LOG_ERROR, "no such account '%s' — register it first",
-                 promoteAdmin.c_str());
-        // The SQLite write is already committed. This is a one-shot utility
-        // invocation; skip the full server-shutdown path (springlog's async
-        // sink thread isn't started in a joinable state this early in init and
-        // aborts at teardown) and exit immediately with the result code.
-        db.Close();
-        std::fflush(stdout);
-        std::_Exit(ok ? 0 : 1);
+    if (reset > 0) {
+      SLOG(SPRING_LOG_NOTICE, "startup: reset %zu orphaned room(s)", reset);
     }
+  }
 
-    // --- Rooms ---
-    RoomManager rooms;
+  // --- Network ---
+  NetworkServer net;
 
-    // --- Map processing ---
-    // Access the raw sqlite3* handle for MapMetadataDb
-    // (Database wrapper doesn't expose it, so we open a second connection)
-    sqlite3* mapDb = nullptr;
-    sqlite3_open(dbPath.c_str(), &mapDb);
+  // PLAN-security-hardening task 6 (G20): wire the default-deny dispatch
+  // gate for RouteAuth::TokenRequired/AdminOnly/LocalhostOrAdmin routes.
+  net.SetRouteAuthCallbacks({
+      .validateToken = [&db](const std::string &authHeader) -> int64_t {
+        return HttpAuth::ValidateAuth(db, authHeader);
+      },
+      .isAdmin = [&db](int64_t userId) -> bool {
+        auto user = db.FindUserById(userId);
+        return user && user->role == "admin";
+      },
+  });
 
-    // Attach the lobby's SQLite handle to the RoomManager so every room
-    // mutation is write-through. Tables are created (or dropped and
-    // recreated on schema bump) before LoadFromDatabase populates the
-    // in-memory `rooms` map from any rows that survived a previous
-    // lobby instance.
-    if (mapDb) {
-        RoomManager::EnsureTables(mapDb);
-        rooms.SetDatabase(mapDb);
-        rooms.LoadFromDatabase();
-    }
+  // SSE channel for real-time room list pushes (replaces client polling)
+  uint32_t roomStreamChannel = net.AddSSE("/api/rooms/stream");
 
-    // game_servers/game_status — maintained in real-time so external tools
-    // (MCP debug server, springcli) can discover running game server ports
-    // without querying the lobby HTTP API. Schema-probed same as
-    // RoomManager::EnsureTables / MapMetadataDb::EnsureTable.
-    GameServersDb::EnsureTables(mapDb);
-
-    // Helper: persist a game server entry to SQLite
-    auto persistGameServer = [&](const GameServerInstance& inst) {
-        if (!mapDb) return;
-        const char* stateStr = "starting";
-        switch (inst.state) {
-            case GameServerInstance::Starting: stateStr = "starting"; break;
-            case GameServerInstance::Running:  stateStr = "running"; break;
-            case GameServerInstance::Ended:    stateStr = "ended"; break;
-            case GameServerInstance::Crashed:  stateStr = "crashed"; break;
-        }
-        ExecPrepared(mapDb,
-            "INSERT OR REPLACE INTO game_servers (room_id, port, pid, map_id, game_id, state) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            [&](sqlite3_stmt* s) {
-                sqlite3_bind_int(s, 1, static_cast<int>(inst.roomId));
-                sqlite3_bind_int(s, 2, inst.port);
-                sqlite3_bind_int(s, 3, static_cast<int>(inst.pid));
-                sqlite3_bind_text(s, 4, inst.mapId.c_str(), -1, SQLITE_TRANSIENT);
-                sqlite3_bind_text(s, 5, inst.gameId.c_str(), -1, SQLITE_TRANSIENT);
-                sqlite3_bind_text(s, 6, stateStr, -1, SQLITE_TRANSIENT);
-            });
-    };
-
-    auto removeGameServer = [&](uint32_t roomId) {
-        if (!mapDb) return;
-        ExecPrepared(mapDb, "DELETE FROM game_servers WHERE room_id=?",
-            [&](sqlite3_stmt* s) { sqlite3_bind_int(s, 1, static_cast<int>(roomId)); });
-        // The game server normally clears its own game_status row on a clean
-        // exit, but a SIGKILL/crash can leave it behind — drop it here too so a
-        // dead room never looks "ready".
-        ExecPrepared(mapDb, "DELETE FROM game_status WHERE room_id=?",
-            [&](sqlite3_stmt* s) { sqlite3_bind_int(s, 1, static_cast<int>(roomId)); });
-    };
-
-    // Read the readiness flag a running game server publishes into `game_status`
-    // (written only by spring-server; see server_main.cpp). Returns true once the
-    // server is accepting connections, which the health-check loop uses to flip
-    // the room Loading→Active. Missing table/row → not ready (false).
-    auto gameServerReady = [&](uint32_t roomId) -> bool {
-        if (!mapDb) return false;
-        sqlite3_stmt* s = nullptr;
-        bool ready = false;
-        if (sqlite3_prepare_v2(mapDb, "SELECT ready FROM game_status WHERE room_id=?",
-                -1, &s, nullptr) == SQLITE_OK) {
-            sqlite3_bind_int(s, 1, static_cast<int>(roomId));
-            if (sqlite3_step(s) == SQLITE_ROW)
-                ready = sqlite3_column_int(s, 0) != 0;
-        }
-        if (s) sqlite3_finalize(s);
-        return ready;
-    };
-
-    // Map processing is handled offline by tools/mapconverter.
-    // The lobby reads pre-populated data/ + SQLite metadata.
-    MapMetadataDb::EnsureTable(mapDb);
-
-    // --- Game discovery ---
-    // Enumerate every subdirectory of `gamesDir` that ships a
-    // game.config.lua (or .json) via ConfigReader. This builds the
-    // list shown in the lobby's "create game" dropdown and, for each
-    // game, the set of AI plugins that game + the engine provide.
-    // The result is immutable for the lifetime of the lobby process
-    // — authors who add a new game must restart the lobby.
-    const std::string enginePath = "content/engine";
-    const std::vector<GameDiscovery::GameInfo> availableGames =
-        GameDiscovery::Discover(gamesDir);
-
-    // --- Per-game AI discovery ---
-    // Game model conversion is handled offline by tools/gameconverter.
-    // The lobby just discovers games and their AI plugins.
-    std::unordered_map<std::string, std::string> gamePathsById;
-    std::unordered_map<std::string, std::string> gameVersionsById;
-    std::unordered_map<std::string, std::vector<AIDiscovery::AIInfo>> aisByGame;
-    for (const auto& g : availableGames) {
-        gamePathsById[g.id] = g.folderPath;
-        gameVersionsById[g.id] = g.version;
-        aisByGame[g.id] = AIDiscovery::Discover(enginePath, g.folderPath);
-    }
-
-    // --- Game server instances ---
-    std::unordered_map<uint32_t, GameServerInstance> gameServers; // roomId → instance
-
-    // --- Adopt-or-reset live game servers across a lobby restart ---
-    //
-    // Walk the `game_servers` table. For each row we either:
-    //   - adopt the running process (re-populate gameServers[roomId])
-    //     so /api/processes and the room browser show it correctly
-    //     and we can SIGTERM it when its room is abandoned;
-    //   - or, if the pid is dead, reset the matching room back to
-    //     Filling and delete the stale row.
-    //
-    // This replaces the previous `waitpid(WNOHANG)` cleanup which
-    // only worked for processes that were children of *this* PID —
-    // every adopted orphan from a prior lobby instance fell through
-    // and got DELETEd as if it had crashed.
-    if (mapDb) {
-        sqlite3_stmt* stmt = nullptr;
-        sqlite3_prepare_v2(mapDb,
-            "SELECT room_id, port, pid, map_id, game_id, state "
-            "FROM game_servers", -1, &stmt, nullptr);
-
-        std::vector<uint32_t> staleRooms;
-        size_t adopted = 0;
-        while (stmt && sqlite3_step(stmt) == SQLITE_ROW) {
-            uint32_t rid = sqlite3_column_int(stmt, 0);
-            int port = sqlite3_column_int(stmt, 1);
-            pid_t pid = sqlite3_column_int(stmt, 2);
-            const unsigned char* mid = sqlite3_column_text(stmt, 3);
-            const unsigned char* gid = sqlite3_column_text(stmt, 4);
-            const unsigned char* st  = sqlite3_column_text(stmt, 5);
-
-            if (!isProcessAlive(pid)) {
-                staleRooms.push_back(rid);
-                continue;
-            }
-
-            GameServerInstance inst;
-            inst.roomId = rid;
-            inst.port   = port;
-            inst.pid    = pid;
-            inst.mapId  = mid ? reinterpret_cast<const char*>(mid) : "";
-            inst.gameId = gid ? reinterpret_cast<const char*>(gid) : "";
-            // We don't know the live process's real state without
-            // talking to it. Trust the persisted state for now; the
-            // health-check loop downgrades to Ended if the pid dies.
-            const std::string stateStr =
-                st ? reinterpret_cast<const char*>(st) : "running";
-            if      (stateStr == "starting") inst.state = GameServerInstance::Starting;
-            else if (stateStr == "ended")    inst.state = GameServerInstance::Ended;
-            else if (stateStr == "crashed")  inst.state = GameServerInstance::Crashed;
-            else                             inst.state = GameServerInstance::Running;
-
-            gameServers[rid] = inst;
-            // Mirror the live port back into the in-memory room so the
-            // browser shows the right "Rejoin" target.
-            if (auto* room = rooms.GetRoom(rid)) {
-                room->gameServerPort = static_cast<uint16_t>(port);
-            }
-            adopted++;
-            SLOG(SPRING_LOG_NOTICE,
-                "adopted game server room=%u pid=%d port=%d (%s)",
-                rid, (int)pid, port, stateStr.c_str());
-        }
-        if (stmt) sqlite3_finalize(stmt);
-
-        for (auto rid : staleRooms) {
-            ExecPrepared(mapDb, "DELETE FROM game_servers WHERE room_id=?",
-                [&](sqlite3_stmt* s) { sqlite3_bind_int(s, 1, static_cast<int>(rid)); });
-            // Room metadata is persistent; if a row in `rooms` matches,
-            // reset it back to Filling so the host can launch again.
-            if (rooms.GetRoom(rid))
-                rooms.ResetRoomForNextGame(rid);
-            SLOG(SPRING_LOG_NOTICE,
-                "game_servers row room=%u was stale (pid dead) — cleared", rid);
-        }
-
-        SLOG(SPRING_LOG_NOTICE,
-            "startup: adopted %zu game server(s), cleaned %zu stale row(s)",
-            adopted, staleRooms.size());
-    }
-
-    // --- Reconcile rooms stuck mid-launch ---
-    // A room in Loading/Active state must be backed by a live game server.
-    // If the adoption pass above found none (the process died and its
-    // game_servers row was already gone — e.g. a lobby restart raced the
-    // bookkeeping), the room is orphaned: the health-check loop only watches
-    // adopted servers, and the reaper below deliberately skips Loading/Active.
-    // Reset any such room to Filling so it's usable again (and reapable if it
-    // turns out to be abandoned).
-    for (GameRoom* room : rooms.GetAllRooms()) {
-        if ((room->state == ERoomState::Loading ||
-             room->state == ERoomState::Active) &&
-            gameServers.find(room->id) == gameServers.end()) {
-            SLOG(SPRING_LOG_NOTICE,
-                "room %u: %s with no live game server — resetting to Filling",
-                room->id, room->state == ERoomState::Active ? "Active" : "Loading");
-            rooms.ResetRoomForNextGame(room->id);
-        }
-    }
-
-    // --- Reap abandoned rooms ---
-    // The lobby is HTTP-only — no persistent lobby socket means a closed
-    // browser never abandons its room, so non-persistent rooms with no live
-    // game pile up in the DB and reload on every restart. Sweep them on
-    // startup and periodically (below). Idle threshold is a proxy for player
-    // presence (the HTTP lobby tracks no liveness). Rooms hosting a live game
-    // and persistent rooms are always kept.
-    constexpr int64_t kRoomIdleReapSeconds = 30 * 60;  // 30 minutes
-    {
-        auto reaped = rooms.ReapStaleRooms(kRoomIdleReapSeconds);
-        if (!reaped.empty())
-            SLOG(SPRING_LOG_NOTICE, "startup: reaped %zu abandoned room(s)",
-                reaped.size());
-    }
-
-    // Reset any room stuck in Loading/Active without a live game-server.
-    // Happens when the previous lobby was killed mid-game without a
-    // clean shutdown (so room.state was persisted as Loading), or when
-    // the game-server died while the lobby was running but its zombie
-    // kept isProcessAlive returning true (waitpid fix applied at the
-    // same time as this sweep). Without this, the room sits in
-    // "Loading" forever in the browser and the host can't relaunch.
-    {
-        size_t reset = 0;
-        for (auto* room : rooms.GetAllRooms()) {
-            const auto st = static_cast<int>(room->state);
-            const bool inFlight = (st >= 3 && st <= 4); // Loading, Active
-            if (!inFlight) continue;
-            if (gameServers.count(room->id) > 0) continue; // adopted; alive
-            SLOG(SPRING_LOG_NOTICE,
-                "room %u stuck in state=%d with no game-server — resetting",
-                room->id, st);
-            rooms.ResetRoomForNextGame(room->id);
-            reset++;
-        }
-        if (reset > 0) {
-            SLOG(SPRING_LOG_NOTICE, "startup: reset %zu orphaned room(s)", reset);
-        }
-    }
-
-    // --- Network ---
-    NetworkServer net;
-
-    // PLAN-security-hardening task 6 (G20): wire the default-deny dispatch
-    // gate for RouteAuth::TokenRequired/AdminOnly/LocalhostOrAdmin routes.
-    net.SetRouteAuthCallbacks({
-        .validateToken = [&db](const std::string& authHeader) -> int64_t {
-            return HttpAuth::ValidateAuth(db, authHeader);
-        },
-        .isAdmin = [&db](int64_t userId) -> bool {
-            auto user = db.FindUserById(userId);
-            return user && user->role == "admin";
-        },
-    });
-
-    // SSE channel for real-time room list pushes (replaces client polling)
-    uint32_t roomStreamChannel = net.AddSSE("/api/rooms/stream");
-
-    // Maps endpoint — full metadata from SQLite
-    net.AddHttpGet("/api/maps", RouteAuth::Public, [mapDb](const std::string&) -> HttpResponse {
+  // Maps endpoint — full metadata from SQLite
+  net.AddHttpGet(
+      "/api/maps", RouteAuth::Public,
+      [mapDb](const std::string &) -> HttpResponse {
         MapMetadataDb db;
         auto maps = db.GetAllMaps(mapDb);
         nlohmann::json arr = nlohmann::json::array();
-        for (const auto& m : maps) {
-            nlohmann::json mj;
-            mj["id"] = m.id;
-            mj["name"] = m.name;
-            mj["shortName"] = m.shortName;
-            mj["description"] = m.description;
-            mj["author"] = m.author;
-            mj["version"] = m.version;
-            mj["mapx"] = m.mapx;
-            mj["mapy"] = m.mapy;
-            mj["widthElmos"] = m.widthElmos;
-            mj["heightElmos"] = m.heightElmos;
-            mj["minHeight"] = m.minHeight;
-            mj["maxHeight"] = m.maxHeight;
-            mj["gravity"] = m.gravity;
-            mj["tidalStrength"] = m.tidalStrength;
-            mj["maxMetal"] = m.maxMetal;
-            mj["extractorRadius"] = m.extractorRadius;
-            mj["tilesX"] = m.tilesX;
-            mj["tilesZ"] = m.tilesZ;
-            mj["numTiles"] = m.numTiles;
-            mj["maxPlayers"] = m.startPositions.size();
-            mj["startPositions"] = nlohmann::json::array();
-            for (const auto& sp : m.startPositions)
-                mj["startPositions"].push_back({{"x", sp.x}, {"z", sp.z}});
-            mj["hasLuaGaia"] = m.hasLuaGaia;
-            mj["minimapUrl"] = "/api/maps/data/" + m.id + "/minimap.ktx2";
-            arr.push_back(std::move(mj));
+        for (const auto &m : maps) {
+          nlohmann::json mj;
+          mj["id"] = m.id;
+          mj["name"] = m.name;
+          mj["shortName"] = m.shortName;
+          mj["description"] = m.description;
+          mj["author"] = m.author;
+          mj["version"] = m.version;
+          mj["mapx"] = m.mapx;
+          mj["mapy"] = m.mapy;
+          mj["widthElmos"] = m.widthElmos;
+          mj["heightElmos"] = m.heightElmos;
+          mj["minHeight"] = m.minHeight;
+          mj["maxHeight"] = m.maxHeight;
+          mj["gravity"] = m.gravity;
+          mj["tidalStrength"] = m.tidalStrength;
+          mj["maxMetal"] = m.maxMetal;
+          mj["extractorRadius"] = m.extractorRadius;
+          mj["tilesX"] = m.tilesX;
+          mj["tilesZ"] = m.tilesZ;
+          mj["numTiles"] = m.numTiles;
+          mj["maxPlayers"] = m.startPositions.size();
+          mj["startPositions"] = nlohmann::json::array();
+          for (const auto &sp : m.startPositions)
+            mj["startPositions"].push_back({{"x", sp.x}, {"z", sp.z}});
+          mj["hasLuaGaia"] = m.hasLuaGaia;
+          mj["minimapUrl"] = "/api/maps/data/" + m.id + "/minimap.ktx2";
+          arr.push_back(std::move(mj));
         }
         std::string json = arr.dump();
         std::vector<uint8_t> body(json.begin(), json.end());
-        return {.contentType = "application/json", .body = std::move(body), .status = 200};
-    });
+        return {.contentType = "application/json",
+                .body = std::move(body),
+                .status = 200};
+      });
 
-    // Static map / game / engine assets are no longer served by the
-    // lobby. In dev the Vite plugin (client/vite-static-data-plugin.ts)
-    // serves them with proper Last-Modified / ETag revalidation. In
-    // production an external static server (nginx / apache / CDN) is
-    // required for `/api/games/data/*`, `/api/maps/data/*` (except
-    // the dynamic `metadata.json` below), `/api/engine/data/*` and
-    // `/api/maps/thumb/*`, plus the built client bundle from
-    // `client/dist/`. See CLAUDE.md for the production deployment notes.
-    //
-    // The only thing the lobby still serves under `/api/maps/data/*`
-    // is the dynamic `metadata.json` endpoint, because it pulls live
-    // map data out of the MapMetadataDb (SQLite) and composes URLs
-    // pointing at the static files.
-    net.AddHttpGet("/api/maps/data/*", RouteAuth::Public, [mapDb](const std::string& url) -> HttpResponse {
+  // Static map / game / engine assets are no longer served by the
+  // lobby. In dev the Vite plugin (client/vite-static-data-plugin.ts)
+  // serves them with proper Last-Modified / ETag revalidation. In
+  // production an external static server (nginx / apache / CDN) is
+  // required for `/api/games/data/*`, `/api/maps/data/*` (except
+  // the dynamic `metadata.json` below), `/api/engine/data/*` and
+  // `/api/maps/thumb/*`, plus the built client bundle from
+  // `client/dist/`. See AGENTS.md for the production deployment notes.
+  //
+  // The only thing the lobby still serves under `/api/maps/data/*`
+  // is the dynamic `metadata.json` endpoint, because it pulls live
+  // map data out of the MapMetadataDb (SQLite) and composes URLs
+  // pointing at the static files.
+  net.AddHttpGet(
+      "/api/maps/data/*", RouteAuth::Public,
+      [mapDb](const std::string &url) -> HttpResponse {
         // URL: /api/maps/data/{mapId}/metadata.json
         std::string rest = url.substr(std::string("/api/maps/data/").size());
         if (rest.find("..") != std::string::npos)
-            return {.contentType = "text/plain", .body = {}, .status = 403};
+          return {.contentType = "text/plain", .body = {}, .status = 403};
 
         auto slashPos = rest.find('/');
         if (slashPos != std::string::npos) {
-            std::string mapId = rest.substr(0, slashPos);
-            std::string filename = rest.substr(slashPos + 1);
-            if (filename == "metadata.json") {
-                MapMetadataDb db;
-                auto m = db.GetMap(mapDb, mapId);
-                if (m.id.empty())
-                    return {.contentType = "text/plain", .body = {}, .status = 404};
+          std::string mapId = rest.substr(0, slashPos);
+          std::string filename = rest.substr(slashPos + 1);
+          if (filename == "metadata.json") {
+            MapMetadataDb db;
+            auto m = db.GetMap(mapDb, mapId);
+            if (m.id.empty())
+              return {.contentType = "text/plain", .body = {}, .status = 404};
 
-                // Build JSON metadata
-                nlohmann::json j;
-                j["mapx"] = m.mapx;
-                j["mapy"] = m.mapy;
-                j["squareSize"] = 8;
-                j["minHeight"] = m.minHeight;
-                j["maxHeight"] = m.maxHeight;
-                j["tilesX"] = m.tilesX;
-                j["tilesZ"] = m.tilesZ;
-                j["numTiles"] = m.numTiles;
-                j["tileSize"] = 32;
+            // Build JSON metadata
+            nlohmann::json j;
+            j["mapx"] = m.mapx;
+            j["mapy"] = m.mapy;
+            j["squareSize"] = 8;
+            j["minHeight"] = m.minHeight;
+            j["maxHeight"] = m.maxHeight;
+            j["tilesX"] = m.tilesX;
+            j["tilesZ"] = m.tilesZ;
+            j["numTiles"] = m.numTiles;
+            j["tileSize"] = 32;
 
-                // Start positions
-                j["startPositions"] = nlohmann::json::array();
-                for (const auto& sp : m.startPositions)
-                    j["startPositions"].push_back({{"x", sp.x}, {"z", sp.z}});
+            // Start positions
+            j["startPositions"] = nlohmann::json::array();
+            for (const auto &sp : m.startPositions)
+              j["startPositions"].push_back({{"x", sp.x}, {"z", sp.z}});
 
-                // Feature types
-                j["featureTypes"] = m.featureTypes;
+            // Feature types
+            j["featureTypes"] = m.featureTypes;
 
-                // Features
-                j["features"] = nlohmann::json::array();
-                for (const auto& f : m.features) {
-                    j["features"].push_back({
-                        {"typeIndex", f.featureType},
-                        {"x", f.x}, {"y", f.y}, {"z", f.z},
-                        {"rotation", f.rotation},
-                        {"relativeSize", f.relativeSize},
-                    });
-                }
-
-                // Feature defs
-                j["featureDefs"] = nlohmann::json::array();
-                for (const auto& d : m.featureDefs) {
-                    std::string modelUrl = d.modelFile.empty()
-                        ? "" : "/api/maps/data/" + m.id + "/features/" + d.modelFile;
-                    std::string texUrl = d.textureFile.empty()
-                        ? "" : "/api/maps/data/" + m.id + "/features/" + d.textureFile;
-                    j["featureDefs"].push_back({
-                        {"name", d.name},
-                        {"modelUrl", modelUrl},
-                        {"textureUrl", texUrl},
-                        {"footprintX", d.footprintX},
-                        {"footprintZ", d.footprintZ},
-                        {"height", d.height},
-                        {"radius", d.radius},
-                        {"blocking", d.blocking},
-                        {"reclaimable", d.reclaimable},
-                        {"metal", d.metal},
-                        {"energy", d.energy},
-                        {"damage", d.damage},
-                    });
-                }
-
-                // Decals
-                auto decalUrl = [&](const std::string& f) -> std::string {
-                    if (f.empty()) return "";
-                    return "/api/maps/data/" + m.id + "/" + f;
-                };
-                {
-                    nlohmann::json dj;
-                    dj["detailTex"] = decalUrl(m.decals.detailTex);
-                    dj["specularTex"] = decalUrl(m.decals.specularTex);
-                    dj["splatDetailTex"] = decalUrl(m.decals.splatDetailTex);
-                    dj["splatDistrTex"] = decalUrl(m.decals.splatDistrTex);
-                    dj["splatNormal"] = {
-                        decalUrl(m.decals.splatDetailNormalTex[0]),
-                        decalUrl(m.decals.splatDetailNormalTex[1]),
-                        decalUrl(m.decals.splatDetailNormalTex[2]),
-                        decalUrl(m.decals.splatDetailNormalTex[3]),
-                    };
-                    dj["detailNormalTex"] = decalUrl(m.decals.detailNormalTex);
-                    dj["splatScales"] = {
-                        m.decals.splatScales[0], m.decals.splatScales[1],
-                        m.decals.splatScales[2], m.decals.splatScales[3],
-                    };
-                    dj["splatMults"] = {
-                        m.decals.splatMults[0], m.decals.splatMults[1],
-                        m.decals.splatMults[2], m.decals.splatMults[3],
-                    };
-                    j["decals"] = std::move(dj);
-                }
-
-                // Water
-                {
-                    nlohmann::json wj;
-                    wj["baseColor"] = {m.water.baseColor[0], m.water.baseColor[1], m.water.baseColor[2]};
-                    wj["surfaceColor"] = {m.water.surfaceColor[0], m.water.surfaceColor[1], m.water.surfaceColor[2]};
-                    wj["minColor"] = {m.water.minColor[0], m.water.minColor[1], m.water.minColor[2]};
-                    wj["surfaceAlpha"] = m.water.surfaceAlpha;
-                    wj["damage"] = m.water.damage;
-                    wj["voidWater"] = m.water.voidWater;
-                    j["water"] = std::move(wj);
-                }
-
-                // hasLuaGaia
-                j["hasLuaGaia"] = m.hasLuaGaia;
-
-                // Map sound preset (from mapinfo.lua's `sound = { preset = ... }`).
-                // Client maps this to AudioManager.setReverbPreset; missing
-                // / empty / "default" means no reverb.
-                j["soundPreset"] = m.soundPreset;
-
-                // Widgets
-                j["widgets"] = m.widgets;
-
-                // URLs for binary data and source assets
-                j["minimapUrl"] = "/api/maps/data/" + m.id + "/minimap.ktx2";
-                j["tilesUrl"] = "/api/maps/data/" + m.id + "/tiles.ktx2";
-                j["mapDataUrl"] = "/api/maps/data/" + m.id;
-                j["mapSourceUrl"] = "/api/maps/data/" + m.id;
-
-                std::string json = j.dump();
-                std::vector<uint8_t> body(json.begin(), json.end());
-                return {
-                    .contentType = "application/json",
-                    .body = std::move(body),
-                    .status = 200,
-                    .cacheControl = CacheControl::StaticAssetHeader(),
-                };
+            // Features
+            j["features"] = nlohmann::json::array();
+            for (const auto &f : m.features) {
+              j["features"].push_back({
+                  {"typeIndex", f.featureType},
+                  {"x", f.x},
+                  {"y", f.y},
+                  {"z", f.z},
+                  {"rotation", f.rotation},
+                  {"relativeSize", f.relativeSize},
+              });
             }
+
+            // Feature defs
+            j["featureDefs"] = nlohmann::json::array();
+            for (const auto &d : m.featureDefs) {
+              std::string modelUrl =
+                  d.modelFile.empty()
+                      ? ""
+                      : "/api/maps/data/" + m.id + "/features/" + d.modelFile;
+              std::string texUrl =
+                  d.textureFile.empty()
+                      ? ""
+                      : "/api/maps/data/" + m.id + "/features/" + d.textureFile;
+              j["featureDefs"].push_back({
+                  {"name", d.name},
+                  {"modelUrl", modelUrl},
+                  {"textureUrl", texUrl},
+                  {"footprintX", d.footprintX},
+                  {"footprintZ", d.footprintZ},
+                  {"height", d.height},
+                  {"radius", d.radius},
+                  {"blocking", d.blocking},
+                  {"reclaimable", d.reclaimable},
+                  {"metal", d.metal},
+                  {"energy", d.energy},
+                  {"damage", d.damage},
+              });
+            }
+
+            // Decals
+            auto decalUrl = [&](const std::string &f) -> std::string {
+              if (f.empty())
+                return "";
+              return "/api/maps/data/" + m.id + "/" + f;
+            };
+            {
+              nlohmann::json dj;
+              dj["detailTex"] = decalUrl(m.decals.detailTex);
+              dj["specularTex"] = decalUrl(m.decals.specularTex);
+              dj["splatDetailTex"] = decalUrl(m.decals.splatDetailTex);
+              dj["splatDistrTex"] = decalUrl(m.decals.splatDistrTex);
+              dj["splatNormal"] = {
+                  decalUrl(m.decals.splatDetailNormalTex[0]),
+                  decalUrl(m.decals.splatDetailNormalTex[1]),
+                  decalUrl(m.decals.splatDetailNormalTex[2]),
+                  decalUrl(m.decals.splatDetailNormalTex[3]),
+              };
+              dj["detailNormalTex"] = decalUrl(m.decals.detailNormalTex);
+              dj["splatScales"] = {
+                  m.decals.splatScales[0],
+                  m.decals.splatScales[1],
+                  m.decals.splatScales[2],
+                  m.decals.splatScales[3],
+              };
+              dj["splatMults"] = {
+                  m.decals.splatMults[0],
+                  m.decals.splatMults[1],
+                  m.decals.splatMults[2],
+                  m.decals.splatMults[3],
+              };
+              j["decals"] = std::move(dj);
+            }
+
+            // Water
+            {
+              nlohmann::json wj;
+              wj["baseColor"] = {m.water.baseColor[0], m.water.baseColor[1],
+                                 m.water.baseColor[2]};
+              wj["surfaceColor"] = {m.water.surfaceColor[0],
+                                    m.water.surfaceColor[1],
+                                    m.water.surfaceColor[2]};
+              wj["minColor"] = {m.water.minColor[0], m.water.minColor[1],
+                                m.water.minColor[2]};
+              wj["surfaceAlpha"] = m.water.surfaceAlpha;
+              wj["damage"] = m.water.damage;
+              wj["voidWater"] = m.water.voidWater;
+              j["water"] = std::move(wj);
+            }
+
+            // hasLuaGaia
+            j["hasLuaGaia"] = m.hasLuaGaia;
+
+            // Map sound preset (from mapinfo.lua's `sound = { preset = ... }`).
+            // Client maps this to AudioManager.setReverbPreset; missing
+            // / empty / "default" means no reverb.
+            j["soundPreset"] = m.soundPreset;
+
+            // Widgets
+            j["widgets"] = m.widgets;
+
+            // URLs for binary data and source assets
+            j["minimapUrl"] = "/api/maps/data/" + m.id + "/minimap.ktx2";
+            j["tilesUrl"] = "/api/maps/data/" + m.id + "/tiles.ktx2";
+            j["mapDataUrl"] = "/api/maps/data/" + m.id;
+            j["mapSourceUrl"] = "/api/maps/data/" + m.id;
+
+            std::string json = j.dump();
+            std::vector<uint8_t> body(json.begin(), json.end());
+            return {
+                .contentType = "application/json",
+                .body = std::move(body),
+                .status = 200,
+                .cacheControl = CacheControl::StaticAssetHeader(),
+            };
+          }
         }
 
         // All other `/api/maps/data/*` paths are static assets served by
         // the Vite plugin in dev / nginx-or-CDN in prod.
         return {.contentType = "text/plain", .body = {}, .status = 404};
-    });
+      });
 
-    // The static handlers for `/api/games/data/*`, `/api/engine/data/*`,
-    // and `/api/maps/thumb/*` were removed (2026-05-25). Dev now uses
-    // the Vite static-data plugin (client/vite-static-data-plugin.ts)
-    // with native Last-Modified / ETag revalidation; production
-    // requires nginx/apache/CDN to serve those paths (see CLAUDE.md
-    // production deployment notes).
+  // The static handlers for `/api/games/data/*`, `/api/engine/data/*`,
+  // and `/api/maps/thumb/*` were removed (2026-05-25). Dev now uses
+  // the Vite static-data plugin (client/vite-static-data-plugin.ts)
+  // with native Last-Modified / ETag revalidation; production
+  // requires nginx/apache/CDN to serve those paths (see AGENTS.md
+  // production deployment notes).
 
-    // --- Process management API ---
-    // PLAN-security-hardening task 2 (G12): unauthenticated PID/port
-    // disclosure is fine for local dev tooling (spring-debug MCP) but has no
-    // place in a production binary — compiled out under SPRING_PROD rather
-    // than left reachable-but-role-gated, since dev tooling connects with no
-    // admin token at all.
+  // --- Process management API ---
+  // PLAN-security-hardening G12: PID/port disclosure is compiled out entirely
+  // under SPRING_PROD (task 2). In dev builds it now also refuses non-loopback
+  // callers (task 11): the LocalhostOrAdmin tag on a GET route degrades to a
+  // forgery-proof loopback-only check in DispatchGet — the local spring-debug
+  // MCP keeps working, a remote peer on a dev box bound public can no longer
+  // enumerate game-server PIDs/ports for recon.
 #ifndef SPRING_PROD
-    net.AddHttpGet("/api/processes", RouteAuth::Public, [&gameServers](const std::string&) -> HttpResponse {
-        nlohmann::json arr = nlohmann::json::array();
-        for (const auto& [roomId, inst] : gameServers) {
-            const char* stateStr = "unknown";
-            switch (inst.state) {
-                case GameServerInstance::Starting: stateStr = "starting"; break;
-                case GameServerInstance::Running:  stateStr = "running"; break;
-                case GameServerInstance::Ended:    stateStr = "ended"; break;
-                case GameServerInstance::Crashed:  stateStr = "crashed"; break;
-            }
-            arr.push_back({
-                {"room_id", roomId},
-                {"port", inst.port},
-                {"pid", (int)inst.pid},
-                {"state", stateStr},
-                {"map", inst.mapId},
-                {"game", inst.gameId},
-            });
-        }
-        std::string json = arr.dump();
-        return {.contentType = "application/json", .body = {json.begin(), json.end()}, .status = 200,
-                .cacheControl = "no-cache"};
-    });
+  net.AddHttpGet("/api/processes", RouteAuth::LocalhostOrAdmin,
+                 [&gameServers](const std::string &) -> HttpResponse {
+                   nlohmann::json arr = nlohmann::json::array();
+                   for (const auto &[roomId, inst] : gameServers) {
+                     const char *stateStr = "unknown";
+                     switch (inst.state) {
+                     case GameServerInstance::Starting:
+                       stateStr = "starting";
+                       break;
+                     case GameServerInstance::Running:
+                       stateStr = "running";
+                       break;
+                     case GameServerInstance::Ended:
+                       stateStr = "ended";
+                       break;
+                     case GameServerInstance::Crashed:
+                       stateStr = "crashed";
+                       break;
+                     }
+                     arr.push_back({
+                         {"room_id", roomId},
+                         {"port", inst.port},
+                         {"pid", (int)inst.pid},
+                         {"state", stateStr},
+                         {"map", inst.mapId},
+                         {"game", inst.gameId},
+                     });
+                   }
+                   std::string json = arr.dump();
+                   return {.contentType = "application/json",
+                           .body = {json.begin(), json.end()},
+                           .status = 200,
+                           .cacheControl = "no-cache"};
+                 });
 #endif // !SPRING_PROD
 
-    // --- HTTP auth endpoints ---
-    HttpAuth::RegisterEndpoints(net, db);
+  // --- HTTP auth endpoints ---
+  HttpAuth::RegisterEndpoints(net, db);
 
-    // Version endpoint — clients use this to get the build stamp for cache-busting
-    net.AddHttpGet("/api/version", RouteAuth::Public, [](const std::string&) -> HttpResponse {
-        std::string json = std::string("{\"engine\":\"springweb\"")
-            + ",\"stamp\":\"" + CacheControl::BuildStamp() + "\""
-            + ",\"no_cache\":" + (CacheControl::IsNoCache() ? "true" : "false") + "}";
+  // Version endpoint — clients use this to get the build stamp for
+  // cache-busting
+  net.AddHttpGet(
+      "/api/version", RouteAuth::Public,
+      [clientErrorReportsEnabled](const std::string &) -> HttpResponse {
+        std::string json =
+            std::string("{\"engine\":\"springweb\"") + ",\"stamp\":\"" +
+            CacheControl::BuildStamp() + "\"" +
+            ",\"no_cache\":" + (CacheControl::IsNoCache() ? "true" : "false") +
+            ",\"errorReportingEnabled\":" +
+            (clientErrorReportsEnabled ? "true" : "false") + "}";
         return {.contentType = "application/json",
-                .body = {json.begin(), json.end()}, .status = 200,
+                .body = {json.begin(), json.end()},
+                .status = 200,
                 .cacheControl = CacheControl::DynamicHeader()};
-    });
+      });
 
-    // ─────── PLAN-gm-tools: GM dashboard + admin verbs (lobby side) ───────
-    // The GM per-game verbs (pause/rollback/grant/broadcast/inspect/kick) live
-    // on each game server's own /api/gm/<verb> plane (browser→game port, same
-    // admin token — the proven admin path; there is no lobby→game HTTP client).
-    // The lobby owns: the fleet/timeline data (shared SQLite), account-level
-    // ban, and the server-rendered dashboard page. These are the *production*
-    // GM surface, so unlike /api/exec they are NOT compiled out under SPRING_PROD.
-    auto requireLobbyAdmin = [&db](const HttpRequestHeaders& headers, int64_t& userId,
-                                   std::string& username) -> std::optional<HttpResponse> {
-        userId = HttpAuth::ValidateToken(db, headers.authorization);
+  // PLAN-client-resilience.md task 3: client crash/fatal report ingestion.
+  // TokenRequired (not AdminOnly) — this is a "players" surface per
+  // PLAN-security-hardening.md §1's row ("junk floods" risk, mitigated by
+  // size cap + per-session rate + dedup — the client enforces its own
+  // 5/hour advisory cap; CountRecentClientErrors below is the server-side
+  // backstop for a client that ignores it). No SafeInvoke wrapper exists on
+  // this branch yet (see DECISIONS.md Part 6 hygiene note) — every
+  // exception-capable call is inside the try/catch so a malformed report
+  // can't take the whole lobby down with it.
+  net.AddHttpPost(
+      "/api/client-errors", RouteAuth::TokenRequired,
+      [&db](const std::string &, const std::string &body,
+            const HttpRequestHeaders &headers) -> HttpResponse {
+        int64_t userId = HttpAuth::ValidateToken(db, headers.authorization);
         if (userId <= 0)
-            return HttpAuth::JsonResponse(401, R"({"ok":false,"error":"unauthorized"})");
-        auto user = db.FindUserById(userId);
-        if (!user || user->role != "admin")
-            return HttpAuth::JsonResponse(403, R"({"ok":false,"error":"forbidden — admin role required"})");
-        username = user->username;
-        return std::nullopt;
-    };
+          return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
 
-    // GET /admin — the server-rendered dashboard shell. Public (it's just HTML/JS
-    // with its own login); every data route it calls is POST + AdminOnly.
-    net.AddHttpGet("/admin", RouteAuth::Public, [](const std::string&) -> HttpResponse {
-        std::string html = kGmDashboardHtml;
-        return {.contentType = "text/html; charset=utf-8",
-                .body = {html.begin(), html.end()}, .status = 200,
-                .cacheControl = "no-cache"};
-    });
+        // Client caps its own payload at 32KB; 40KB gives headroom for JSON
+        // overhead without trusting the client to actually enforce its cap.
+        if (body.size() > 40 * 1024)
+          return HttpAuth::JsonResponse(413, R"({"error":"report too large"})");
 
-    // POST /api/admin/fleet — every game server + its latest sim-health metrics.
-    // GET can't carry a token (dispatch gate only sees POST headers), so admin
-    // data endpoints are POST.
-    net.AddHttpPost("/api/admin/fleet", RouteAuth::AdminOnly,
-        [mapDb, requireLobbyAdmin](const std::string&, const std::string&,
-                                   const HttpRequestHeaders& headers) -> HttpResponse {
-            int64_t uid; std::string uname;
-            if (auto e = requireLobbyAdmin(headers, uid, uname)) return *e;
-            nlohmann::json games = nlohmann::json::array();
-            if (mapDb) {
-                // game_servers ⟕ game_status ⟕ latest game_metrics row per room.
-                const char* sql =
-                    "SELECT gs.room_id, gs.port, gs.pid, gs.map_id, gs.game_id, gs.state, "
-                    "       st.ready, st.client_count, "
-                    "       m.frame, m.tick_p95_us, m.frames_behind, m.entity_count, "
-                    "       m.sim_fps, m.uptime_sec, m.db_size_bytes, m.snapshot_age_sec "
-                    "FROM game_servers gs "
-                    "LEFT JOIN game_status st ON st.room_id = gs.room_id "
-                    "LEFT JOIN (SELECT room_id, MAX(id) AS mid FROM game_metrics GROUP BY room_id) lm "
-                    "       ON lm.room_id = gs.room_id "
-                    "LEFT JOIN game_metrics m ON m.id = lm.mid "
-                    "ORDER BY gs.room_id";
-                sqlite3_stmt* s = nullptr;
-                if (sqlite3_prepare_v2(mapDb, sql, -1, &s, nullptr) == SQLITE_OK) {
-                    auto colInt = [&](int c) -> nlohmann::json {
-                        return sqlite3_column_type(s, c) == SQLITE_NULL
-                            ? nlohmann::json(nullptr) : nlohmann::json(sqlite3_column_int64(s, c));
-                    };
-                    auto colTxt = [&](int c) -> std::string {
-                        auto* t = sqlite3_column_text(s, c);
-                        return t ? reinterpret_cast<const char*>(t) : "";
-                    };
-                    while (sqlite3_step(s) == SQLITE_ROW) {
-                        nlohmann::json g;
-                        g["room_id"] = sqlite3_column_int(s, 0);
-                        g["port"] = sqlite3_column_int(s, 1);
-                        g["game_id"] = colTxt(4);
-                        g["map_id"] = colTxt(3);
-                        g["state"] = colTxt(5);
-                        g["client_count"] = colInt(7);
-                        g["frame"] = colInt(8);
-                        g["tick_p95_us"] = colInt(9);
-                        g["frames_behind"] = colInt(10);
-                        g["entity_count"] = colInt(11);
-                        g["sim_fps"] = sqlite3_column_type(s, 12) == SQLITE_NULL
-                            ? nlohmann::json(nullptr) : nlohmann::json(sqlite3_column_double(s, 12));
-                        g["uptime_sec"] = colInt(13);
-                        g["db_size_bytes"] = colInt(14);
-                        g["snapshot_age_sec"] = colInt(15);
-                        // Engine-sourced alarm badges (economy/long-uptime Lua
-                        // counters land here once that Stage-7 Lua exists).
-                        nlohmann::json alarms = nlohmann::json::array();
-                        const std::string state = colTxt(5);
-                        if (sqlite3_column_type(s, 10) != SQLITE_NULL && sqlite3_column_int(s, 10) > 60)
-                            alarms.push_back({{"label", "lag"}, {"crit", true}});
-                        if (sqlite3_column_type(s, 14) != SQLITE_NULL &&
-                            sqlite3_column_int64(s, 14) > 1024LL * 1024 * 1024)
-                            alarms.push_back({{"label", "db"}, {"crit", false}});
-                        if (state == "crashed")
-                            alarms.push_back({{"label", "crashed"}, {"crit", true}});
-                        g["alarms"] = alarms;
-                        games.push_back(std::move(g));
-                    }
-                }
-                if (s) sqlite3_finalize(s);
+        if (db.CountRecentClientErrors(userId, 3600) >= 20)
+          return HttpAuth::JsonResponse(429, R"({"error":"rate limited"})");
+
+        try {
+          nlohmann::json j =
+              nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/true);
+          if (!j.is_object())
+            return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+
+          Database::ClientErrorRecord rec;
+          rec.userId = userId;
+          rec.reason = j.value("reason", "");
+          rec.errorClass = j.value("error_class", "");
+          rec.message = j.value("message", "");
+          rec.stack = j.value("stack", "");
+          rec.stackHash = j.value("stack_hash", "");
+          rec.recoveryRung = j.value("recovery_rung", "");
+          rec.phase = j.value("phase", "");
+          rec.frame = j.value("frame", 0);
+          rec.entityCount = j.value("entity_count", 0);
+          rec.gameId = j.value("game_id", "");
+          rec.mapId = j.value("map_id", "");
+          rec.buildStamp = j.value("build_stamp", "");
+          rec.gpuRenderer = j.value("gpu_renderer", "");
+          rec.count = j.value("count", 1);
+          if (j.contains("log_ring") && j["log_ring"].is_array()) {
+            std::string joined;
+            for (const auto &line : j["log_ring"]) {
+              if (!line.is_string())
+                continue;
+              if (!joined.empty())
+                joined += "\n";
+              joined += line.get<std::string>();
             }
-            nlohmann::json out;
-            out["ok"] = true;
-            out["games"] = games;
-            return HttpAuth::JsonResponse(200, out.dump());
-        });
+            rec.logRing = joined;
+          }
 
-    // POST /api/admin/game {roomId} — metric timeline + audit tail for one game.
-    net.AddHttpPost("/api/admin/game", RouteAuth::AdminOnly,
-        [mapDb, &db, requireLobbyAdmin](const std::string&, const std::string& body,
-                                        const HttpRequestHeaders& headers) -> HttpResponse {
-            int64_t uid; std::string uname;
-            if (auto e = requireLobbyAdmin(headers, uid, uname)) return *e;
-            nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
-            if (j.is_discarded()) return HttpAuth::JsonResponse(400, R"({"ok":false,"error":"bad json"})");
-            const int roomId = j.value("roomId", -1);
-            if (roomId < 0) return HttpAuth::JsonResponse(400, R"({"ok":false,"error":"roomId required"})");
+          int64_t id = db.InsertClientError(rec);
+          std::string resp = "{\"ok\":true,\"id\":" + std::to_string(id) + "}";
+          return {.contentType = "application/json",
+                  .body = {resp.begin(), resp.end()},
+                  .status = 200};
+        } catch (const std::exception &) {
+          return HttpAuth::JsonResponse(400, R"({"error":"malformed report"})");
+        }
+      });
 
-            nlohmann::json timeline = nlohmann::json::array();
-            if (mapDb) {
-                sqlite3_stmt* s = nullptr;
-                const char* sql =
-                    "SELECT frame, taken_at, resolution, tick_p95_us, frames_behind, "
-                    "entity_count, client_count, sim_fps, uptime_sec, db_size_bytes "
-                    "FROM game_metrics WHERE room_id=? ORDER BY id DESC LIMIT 200";
-                if (sqlite3_prepare_v2(mapDb, sql, -1, &s, nullptr) == SQLITE_OK) {
-                    sqlite3_bind_int(s, 1, roomId);
-                    while (sqlite3_step(s) == SQLITE_ROW) {
-                        timeline.push_back({
-                            {"frame", sqlite3_column_int(s, 0)},
-                            {"taken_at", sqlite3_column_int64(s, 1)},
-                            {"resolution", reinterpret_cast<const char*>(sqlite3_column_text(s, 2))},
-                            {"tick_p95_us", sqlite3_column_int64(s, 3)},
-                            {"frames_behind", sqlite3_column_int64(s, 4)},
-                            {"entity_count", sqlite3_column_int(s, 5)},
-                            {"client_count", sqlite3_column_int(s, 6)},
-                            {"sim_fps", sqlite3_column_double(s, 7)},
-                            {"uptime_sec", sqlite3_column_int64(s, 8)},
-                            {"db_size_bytes", sqlite3_column_int64(s, 9)},
-                        });
-                    }
-                }
-                if (s) sqlite3_finalize(s);
+  // PLAN-metalstorm-scripting.md task 6: command-composer presets, stored
+  // per account. Each preset is a filled CommandIntent (verb/subject/
+  // target/priority/when) — the server stores `intent` opaquely and never
+  // parses or executes it; re-issuing a preset re-runs the client's own
+  // compile (compile-table.ts). No saved logic, no triggers-on-triggers.
+  // Scoped to the caller's own user id (TokenRequired), same auth shape as
+  // /api/client-errors above.
+  net.AddHttpPost(
+      "/api/presets/list", RouteAuth::TokenRequired,
+      [&db](const std::string &, const std::string &,
+            const HttpRequestHeaders &headers) -> HttpResponse {
+        int64_t userId = HttpAuth::ValidateToken(db, headers.authorization);
+        if (userId <= 0)
+          return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
+
+        nlohmann::json arr = nlohmann::json::array();
+        for (const auto &p : db.GetCommandPresets(userId)) {
+          try {
+            nlohmann::json entry;
+            entry["name"] = p.name;
+            entry["updated_at"] = p.updatedAt;
+            entry["intent"] = nlohmann::json::parse(p.intentJson);
+            arr.push_back(std::move(entry));
+          } catch (const std::exception &) {
+            continue; // corrupt row — skip rather than send unparsable JSON to
+                      // the client
+          }
+        }
+        nlohmann::json resp;
+        resp["presets"] = arr;
+        std::string json = resp.dump();
+        return {.contentType = "application/json",
+                .body = {json.begin(), json.end()},
+                .status = 200,
+                .cacheControl = "no-store"};
+      });
+
+  net.AddHttpPost(
+      "/api/presets/save", RouteAuth::TokenRequired,
+      [&db](const std::string &, const std::string &body,
+            const HttpRequestHeaders &headers) -> HttpResponse {
+        int64_t userId = HttpAuth::ValidateToken(db, headers.authorization);
+        if (userId <= 0)
+          return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
+
+        // A filled intent (a handful of slot values) is nowhere near this
+        // size; the cap exists to reject abuse, not to constrain a real one.
+        if (body.size() > 8 * 1024)
+          return HttpAuth::JsonResponse(413, R"({"error":"preset too large"})");
+
+        try {
+          nlohmann::json j =
+              nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/true);
+          if (!j.is_object() || !j.contains("name") || !j.contains("intent"))
+            return HttpAuth::JsonResponse(400, R"({"error":"bad request"})");
+
+          std::string name = j.value("name", "");
+          if (name.empty() || name.size() > 80)
+            return HttpAuth::JsonResponse(
+                400,
+                R"({"error":"invalid name - must be 1 to 80 characters"})");
+
+          // Cap only bites on genuinely new names — re-saving an existing
+          // preset (editing it in place) is always allowed.
+          if (!db.CommandPresetExists(userId, name) &&
+              db.CountCommandPresets(userId) >= 50)
+            return HttpAuth::JsonResponse(
+                429, R"({"error":"preset limit reached - max 50"})");
+
+          std::string intentJson = j["intent"].dump();
+          if (!db.SaveCommandPreset(userId, name, intentJson))
+            return HttpAuth::JsonResponse(500, R"({"error":"save failed"})");
+
+          return HttpAuth::JsonResponse(200, R"({"ok":true})");
+        } catch (const std::exception &) {
+          return HttpAuth::JsonResponse(400, R"({"error":"malformed preset"})");
+        }
+      });
+
+  net.AddHttpPost(
+      "/api/presets/delete", RouteAuth::TokenRequired,
+      [&db](const std::string &, const std::string &body,
+            const HttpRequestHeaders &headers) -> HttpResponse {
+        int64_t userId = HttpAuth::ValidateToken(db, headers.authorization);
+        if (userId <= 0)
+          return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
+
+        try {
+          nlohmann::json j =
+              nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/true);
+          std::string name = j.value("name", "");
+          if (name.empty())
+            return HttpAuth::JsonResponse(400, R"({"error":"invalid name"})");
+
+          bool deleted = db.DeleteCommandPreset(userId, name);
+          return HttpAuth::JsonResponse(200, deleted ? R"({"ok":true})"
+                                                     : R"({"ok":false})");
+        } catch (const std::exception &) {
+          return HttpAuth::JsonResponse(400,
+                                        R"({"error":"malformed request"})");
+        }
+      });
+
+  // ─────── PLAN-gm-tools: GM dashboard + admin verbs (lobby side) ───────
+  // The GM per-game verbs (pause/rollback/grant/broadcast/inspect/kick) live
+  // on each game server's own /api/gm/<verb> plane (browser→game port, same
+  // admin token — the proven admin path; there is no lobby→game HTTP client).
+  // The lobby owns: the fleet/timeline data (shared SQLite), account-level
+  // ban, and the server-rendered dashboard page. These are the *production*
+  // GM surface, so unlike /api/exec they are NOT compiled out under
+  // SPRING_PROD.
+  auto requireLobbyAdmin =
+      [&db](const HttpRequestHeaders &headers, int64_t &userId,
+            std::string &username) -> std::optional<HttpResponse> {
+    userId = HttpAuth::ValidateToken(db, headers.authorization);
+    if (userId <= 0)
+      return HttpAuth::JsonResponse(401,
+                                    R"({"ok":false,"error":"unauthorized"})");
+    auto user = db.FindUserById(userId);
+    if (!user || user->role != "admin")
+      return HttpAuth::JsonResponse(
+          403, R"({"ok":false,"error":"forbidden — admin role required"})");
+    username = user->username;
+    return std::nullopt;
+  };
+
+  // GET /admin — the server-rendered dashboard shell. Public (it's just HTML/JS
+  // with its own login); every data route it calls is POST + AdminOnly.
+  net.AddHttpGet("/admin", RouteAuth::Public,
+                 [](const std::string &) -> HttpResponse {
+                   std::string html = kGmDashboardHtml;
+                   return {.contentType = "text/html; charset=utf-8",
+                           .body = {html.begin(), html.end()},
+                           .status = 200,
+                           .cacheControl = "no-cache"};
+                 });
+
+  // POST /api/admin/fleet — every game server + its latest sim-health metrics.
+  // GET can't carry a token (dispatch gate only sees POST headers), so admin
+  // data endpoints are POST.
+  net.AddHttpPost(
+      "/api/admin/fleet", RouteAuth::AdminOnly,
+      [mapDb,
+       requireLobbyAdmin](const std::string &, const std::string &,
+                          const HttpRequestHeaders &headers) -> HttpResponse {
+        int64_t uid;
+        std::string uname;
+        if (auto e = requireLobbyAdmin(headers, uid, uname))
+          return *e;
+        nlohmann::json games = nlohmann::json::array();
+        if (mapDb) {
+          // game_servers ⟕ game_status ⟕ latest game_metrics row per room.
+          const char *sql =
+              "SELECT gs.room_id, gs.port, gs.pid, gs.map_id, gs.game_id, "
+              "gs.state, "
+              "       st.ready, st.client_count, "
+              "       m.frame, m.tick_p95_us, m.frames_behind, m.entity_count, "
+              "       m.sim_fps, m.uptime_sec, m.db_size_bytes, "
+              "m.snapshot_age_sec "
+              "FROM game_servers gs "
+              "LEFT JOIN game_status st ON st.room_id = gs.room_id "
+              "LEFT JOIN (SELECT room_id, MAX(id) AS mid FROM game_metrics "
+              "GROUP BY room_id) lm "
+              "       ON lm.room_id = gs.room_id "
+              "LEFT JOIN game_metrics m ON m.id = lm.mid "
+              "ORDER BY gs.room_id";
+          sqlite3_stmt *s = nullptr;
+          if (sqlite3_prepare_v2(mapDb, sql, -1, &s, nullptr) == SQLITE_OK) {
+            auto colInt = [&](int c) -> nlohmann::json {
+              return sqlite3_column_type(s, c) == SQLITE_NULL
+                         ? nlohmann::json(nullptr)
+                         : nlohmann::json(sqlite3_column_int64(s, c));
+            };
+            auto colTxt = [&](int c) -> std::string {
+              auto *t = sqlite3_column_text(s, c);
+              return t ? reinterpret_cast<const char *>(t) : "";
+            };
+            while (sqlite3_step(s) == SQLITE_ROW) {
+              nlohmann::json g;
+              g["room_id"] = sqlite3_column_int(s, 0);
+              g["port"] = sqlite3_column_int(s, 1);
+              g["game_id"] = colTxt(4);
+              g["map_id"] = colTxt(3);
+              g["state"] = colTxt(5);
+              g["client_count"] = colInt(7);
+              g["frame"] = colInt(8);
+              g["tick_p95_us"] = colInt(9);
+              g["frames_behind"] = colInt(10);
+              g["entity_count"] = colInt(11);
+              g["sim_fps"] = sqlite3_column_type(s, 12) == SQLITE_NULL
+                                 ? nlohmann::json(nullptr)
+                                 : nlohmann::json(sqlite3_column_double(s, 12));
+              g["uptime_sec"] = colInt(13);
+              g["db_size_bytes"] = colInt(14);
+              g["snapshot_age_sec"] = colInt(15);
+              // Engine-sourced alarm badges (economy/long-uptime Lua
+              // counters land here once that Stage-7 Lua exists).
+              nlohmann::json alarms = nlohmann::json::array();
+              const std::string state = colTxt(5);
+              if (sqlite3_column_type(s, 10) != SQLITE_NULL &&
+                  sqlite3_column_int(s, 10) > 60)
+                alarms.push_back({{"label", "lag"}, {"crit", true}});
+              if (sqlite3_column_type(s, 14) != SQLITE_NULL &&
+                  sqlite3_column_int64(s, 14) > 1024LL * 1024 * 1024)
+                alarms.push_back({{"label", "db"}, {"crit", false}});
+              if (state == "crashed")
+                alarms.push_back({{"label", "crashed"}, {"crit", true}});
+              g["alarms"] = alarms;
+              games.push_back(std::move(g));
             }
-            // Audit tail for this game: GM verbs audit with roomTag "room=<id>"
-            // or target "frame=…"; match on the room tag. (admin_audit has no
-            // room column — the LIKE is a pragmatic per-game filter.)
-            nlohmann::json audit = nlohmann::json::array();
-            {
-                const std::string tag = "room=" + std::to_string(roomId);
-                for (const auto& e : db.GetRecentAuditEntries(400)) {
-                    if (e.argsDigest.find(tag) == std::string::npos &&
-                        e.target.find(tag) == std::string::npos) continue;
-                    audit.push_back({{"createdAt", e.createdAt}, {"username", e.username},
-                                     {"action", e.action}, {"target", e.target},
-                                     {"argsDigest", e.argsDigest}});
-                    if (audit.size() >= 60) break;
-                }
+          }
+          if (s)
+            sqlite3_finalize(s);
+        }
+        nlohmann::json out;
+        out["ok"] = true;
+        out["games"] = games;
+        return HttpAuth::JsonResponse(200, out.dump());
+      });
+
+  // POST /api/admin/game {roomId} — metric timeline + audit tail for one game.
+  net.AddHttpPost(
+      "/api/admin/game", RouteAuth::AdminOnly,
+      [mapDb, &db,
+       requireLobbyAdmin](const std::string &, const std::string &body,
+                          const HttpRequestHeaders &headers) -> HttpResponse {
+        int64_t uid;
+        std::string uname;
+        if (auto e = requireLobbyAdmin(headers, uid, uname))
+          return *e;
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+        if (j.is_discarded())
+          return HttpAuth::JsonResponse(400,
+                                        R"({"ok":false,"error":"bad json"})");
+        const int roomId = j.value("roomId", -1);
+        if (roomId < 0)
+          return HttpAuth::JsonResponse(
+              400, R"({"ok":false,"error":"roomId required"})");
+
+        nlohmann::json timeline = nlohmann::json::array();
+        if (mapDb) {
+          sqlite3_stmt *s = nullptr;
+          const char *sql =
+              "SELECT frame, taken_at, resolution, tick_p95_us, frames_behind, "
+              "entity_count, client_count, sim_fps, uptime_sec, db_size_bytes "
+              "FROM game_metrics WHERE room_id=? ORDER BY id DESC LIMIT 200";
+          if (sqlite3_prepare_v2(mapDb, sql, -1, &s, nullptr) == SQLITE_OK) {
+            sqlite3_bind_int(s, 1, roomId);
+            while (sqlite3_step(s) == SQLITE_ROW) {
+              timeline.push_back({
+                  {"frame", sqlite3_column_int(s, 0)},
+                  {"taken_at", sqlite3_column_int64(s, 1)},
+                  {"resolution",
+                   reinterpret_cast<const char *>(sqlite3_column_text(s, 2))},
+                  {"tick_p95_us", sqlite3_column_int64(s, 3)},
+                  {"frames_behind", sqlite3_column_int64(s, 4)},
+                  {"entity_count", sqlite3_column_int(s, 5)},
+                  {"client_count", sqlite3_column_int(s, 6)},
+                  {"sim_fps", sqlite3_column_double(s, 7)},
+                  {"uptime_sec", sqlite3_column_int64(s, 8)},
+                  {"db_size_bytes", sqlite3_column_int64(s, 9)},
+              });
             }
-            nlohmann::json out;
-            out["ok"] = true;
-            out["timeline"] = timeline;
-            out["audit"] = audit;
-            return HttpAuth::JsonResponse(200, out.dump());
-        });
+          }
+          if (s)
+            sqlite3_finalize(s);
+        }
+        // Audit tail for this game: GM verbs audit with roomTag "room=<id>"
+        // or target "frame=…"; match on the room tag. (admin_audit has no
+        // room column — the tag match is a pragmatic per-game filter.)
+        nlohmann::json audit = nlohmann::json::array();
+        {
+          const std::string tag = "room=" + std::to_string(roomId);
+          // Anchored match, not a bare substring: the tag must sit on a
+          // token boundary and be followed by a non-digit (or end of
+          // string), otherwise roomId=1 also matches "room=10"/"room=199"
+          // and leaks other rooms' audit rows. Writers (GmVerbs roomTag,
+          // direct_start) compose the tag as exactly "room=<id>", but
+          // keep the boundary check so a future "room=<id> …" digest
+          // still matches.
+          const auto hasRoomTag = [&tag](const std::string &s) {
+            for (size_t pos = s.find(tag); pos != std::string::npos;
+                 pos = s.find(tag, pos + 1)) {
+              if (pos > 0 &&
+                  std::isalnum(static_cast<unsigned char>(s[pos - 1])))
+                continue;
+              const size_t end = pos + tag.size();
+              if (end < s.size() &&
+                  std::isdigit(static_cast<unsigned char>(s[end])))
+                continue;
+              return true;
+            }
+            return false;
+          };
+          for (const auto &e : db.GetRecentAuditEntries(400)) {
+            if (!hasRoomTag(e.argsDigest) && !hasRoomTag(e.target))
+              continue;
+            audit.push_back({{"createdAt", e.createdAt},
+                             {"username", e.username},
+                             {"action", e.action},
+                             {"target", e.target},
+                             {"argsDigest", e.argsDigest}});
+            if (audit.size() >= 60)
+              break;
+          }
+        }
+        nlohmann::json out;
+        out["ok"] = true;
+        out["timeline"] = timeline;
+        out["audit"] = audit;
+        return HttpAuth::JsonResponse(200, out.dump());
+      });
 
-    // POST /api/admin/ban {username} — account ban + immediate session revoke.
-    net.AddHttpPost("/api/admin/ban", RouteAuth::AdminOnly,
-        [&db, requireLobbyAdmin](const std::string&, const std::string& body,
-                                 const HttpRequestHeaders& headers) -> HttpResponse {
-            int64_t uid; std::string uname;
-            if (auto e = requireLobbyAdmin(headers, uid, uname)) return *e;
-            nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
-            const std::string target = j.is_discarded() ? "" : j.value("username", std::string(""));
-            if (target.empty()) return HttpAuth::JsonResponse(400, R"({"ok":false,"error":"username required"})");
-            int64_t targetId = 0;
-            if (!db.SetBannedByUsername(target, true, targetId))
-                return HttpAuth::JsonResponse(404, R"({"ok":false,"error":"no such user"})");
-            const int revoked = db.RevokeUserSessions(targetId);
-            db.LogAudit(uid, uname, "ban", target, "sessions_revoked=" + std::to_string(revoked));
-            return HttpAuth::JsonResponse(200,
-                std::string(R"({"ok":true,"revoked":)") + std::to_string(revoked) + "}");
-        });
+  // POST /api/admin/ban {username} — account ban + immediate session revoke.
+  net.AddHttpPost(
+      "/api/admin/ban", RouteAuth::AdminOnly,
+      [&db,
+       requireLobbyAdmin](const std::string &, const std::string &body,
+                          const HttpRequestHeaders &headers) -> HttpResponse {
+        int64_t uid;
+        std::string uname;
+        if (auto e = requireLobbyAdmin(headers, uid, uname))
+          return *e;
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+        const std::string target =
+            j.is_discarded() ? "" : j.value("username", std::string(""));
+        if (target.empty())
+          return HttpAuth::JsonResponse(
+              400, R"({"ok":false,"error":"username required"})");
+        int64_t targetId = 0;
+        if (!db.SetBannedByUsername(target, true, targetId))
+          return HttpAuth::JsonResponse(
+              404, R"({"ok":false,"error":"no such user"})");
+        const int revoked = db.RevokeUserSessions(targetId);
+        db.LogAudit(uid, uname, "ban", target,
+                    "sessions_revoked=" + std::to_string(revoked));
+        return HttpAuth::JsonResponse(200,
+                                      std::string(R"({"ok":true,"revoked":)") +
+                                          std::to_string(revoked) + "}");
+      });
 
-    // POST /api/admin/unban {username}
-    net.AddHttpPost("/api/admin/unban", RouteAuth::AdminOnly,
-        [&db, requireLobbyAdmin](const std::string&, const std::string& body,
-                                 const HttpRequestHeaders& headers) -> HttpResponse {
-            int64_t uid; std::string uname;
-            if (auto e = requireLobbyAdmin(headers, uid, uname)) return *e;
-            nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
-            const std::string target = j.is_discarded() ? "" : j.value("username", std::string(""));
-            if (target.empty()) return HttpAuth::JsonResponse(400, R"({"ok":false,"error":"username required"})");
-            int64_t targetId = 0;
-            if (!db.SetBannedByUsername(target, false, targetId))
-                return HttpAuth::JsonResponse(404, R"({"ok":false,"error":"no such user"})");
-            db.LogAudit(uid, uname, "unban", target, "");
-            return HttpAuth::JsonResponse(200, R"({"ok":true})");
-        });
+  // POST /api/admin/unban {username}
+  net.AddHttpPost(
+      "/api/admin/unban", RouteAuth::AdminOnly,
+      [&db,
+       requireLobbyAdmin](const std::string &, const std::string &body,
+                          const HttpRequestHeaders &headers) -> HttpResponse {
+        int64_t uid;
+        std::string uname;
+        if (auto e = requireLobbyAdmin(headers, uid, uname))
+          return *e;
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+        const std::string target =
+            j.is_discarded() ? "" : j.value("username", std::string(""));
+        if (target.empty())
+          return HttpAuth::JsonResponse(
+              400, R"({"ok":false,"error":"username required"})");
+        int64_t targetId = 0;
+        if (!db.SetBannedByUsername(target, false, targetId))
+          return HttpAuth::JsonResponse(
+              404, R"({"ok":false,"error":"no such user"})");
+        db.LogAudit(uid, uname, "unban", target, "");
+        return HttpAuth::JsonResponse(200, R"({"ok":true})");
+      });
 
-    // POST /api/admin/banned — the current ban list.
-    net.AddHttpPost("/api/admin/banned", RouteAuth::AdminOnly,
-        [&db, requireLobbyAdmin](const std::string&, const std::string&,
-                                 const HttpRequestHeaders& headers) -> HttpResponse {
-            int64_t uid; std::string uname;
-            if (auto e = requireLobbyAdmin(headers, uid, uname)) return *e;
-            nlohmann::json banned = nlohmann::json::array();
-            for (const auto& u : db.GetBannedUsers(200))
-                banned.push_back({{"id", u.id}, {"username", u.username}, {"role", u.role}});
-            nlohmann::json out; out["ok"] = true; out["banned"] = banned;
-            return HttpAuth::JsonResponse(200, out.dump());
-        });
+  // POST /api/admin/banned — the current ban list.
+  net.AddHttpPost(
+      "/api/admin/banned", RouteAuth::AdminOnly,
+      [&db,
+       requireLobbyAdmin](const std::string &, const std::string &,
+                          const HttpRequestHeaders &headers) -> HttpResponse {
+        int64_t uid;
+        std::string uname;
+        if (auto e = requireLobbyAdmin(headers, uid, uname))
+          return *e;
+        nlohmann::json banned = nlohmann::json::array();
+        for (const auto &u : db.GetBannedUsers(200))
+          banned.push_back(
+              {{"id", u.id}, {"username", u.username}, {"role", u.role}});
+        nlohmann::json out;
+        out["ok"] = true;
+        out["banned"] = banned;
+        return HttpAuth::JsonResponse(200, out.dump());
+      });
 
-    // --- HTTP exec endpoint (for CLI/curl access to lobby commands) ---
-    // PLAN-security-hardening task 2: compiled OUT entirely under
-    // SPRING_PROD, not just role-gated — arbitrary SQLite exec on the map DB
-    // has no place in a production binary, belt-and-braces on top of the
-    // AdminOnly dispatch gate + the handler's own role check below.
+  // --- Generated scenarios (PLAN-metalstorm-wars.md §7.1, scenariogen.py) ---
+  //
+  // The user-facing flow is "a scenario is created → saved to the DB →
+  // selectable in the lobby", and these three endpoints are the whole of it.
+  // Every one is POST + AdminOnly, which is not a style choice: GET cannot
+  // carry an Authorization header anywhere in this codebase's client, so a
+  // GET admin route is an unauthenticated admin route.
+  //
+  // Ingest is deliberately thin. It shells out to the generator, stores what
+  // came back, materialises the file, and re-discovers — it does not decide
+  // anything about the scenario's content. Every judgement about whether a war
+  // is playable (reachability per movement class, no unit inside a yardmap,
+  // exactly one victory objective, both sides staged) lives in scenariogen.py
+  // and is expressed by refusing to emit. So a rejection here is reported, not
+  // worked around.
+
+  /// Where processed maps live — `<dataDir>/maps`, alongside the DB. Same
+  /// derivation RunMapConverterPreflight uses for its --data-dir.
+  const std::string mapsDir = [&]() -> std::string {
+    const std::filesystem::path p(dbPath);
+    const std::string dir =
+        p.has_parent_path() && !p.parent_path().empty()
+            ? p.parent_path().string()
+            : std::string("data");
+    return dir + "/maps";
+  }();
+
+  /// Serialise one stored scenario for an admin response. Deliberately shows
+  /// the DISCOVERED view (`terminal`, `sides`) next to the stored provenance
+  /// (`seed`, `params`): the two coming from different places is the point —
+  /// if a materialised file ever failed to parse, `terminal` would read false
+  /// and `discovered` would be false, and the admin list would say so instead
+  /// of echoing the row back and looking healthy.
+  auto describeStoredScenario = [&scenariosFor](const ScenarioDb::Record &r) {
+    nlohmann::json j;
+    j["id"] = r.id;
+    j["gameId"] = r.gameId;
+    j["displayName"] = r.displayName;
+    j["map"] = r.mapId;
+    j["seed"] = r.seed;
+    j["generatorVersion"] = r.generatorVersion;
+    j["params"] = nlohmann::json::parse(r.params, nullptr, false);
+    if (j["params"].is_discarded())
+      j["params"] = nlohmann::json::object();
+    j["createdBy"] = r.createdBy;
+    j["createdAt"] = r.createdAt;
+    j["bytes"] = static_cast<uint64_t>(r.lua.size());
+
+    const ScenarioDiscovery::ScenarioInfo *info =
+        ScenarioDiscovery::FindById(scenariosFor(r.gameId), r.id);
+    j["discovered"] = info != nullptr;
+    j["terminal"] = info != nullptr && info->terminal;
+    nlohmann::json sides = nlohmann::json::array();
+    if (info) {
+      for (const auto &s : ScenarioDiscovery::PlayableSides(*info))
+        sides.push_back({{"faction", s.faction},
+                         {"team", s.team},
+                         {"staged", s.staged}});
+    }
+    j["sides"] = std::move(sides);
+    return j;
+  };
+
+  // POST /api/admin/scenarios/generate
+  //   {gameId, mapId, seed?, sides?, towns?, outposts?, bases?, mines?,
+  //    hostility?, roster?}
+  // Generate a war for `mapId`, store it, materialise it, and return the
+  // entry exactly as the Create Game picker will now see it.
+  net.AddHttpPost(
+      "/api/admin/scenarios/generate", RouteAuth::AdminOnly,
+      [&db, &mapDb, requireLobbyAdmin, &gamePathsById, &mapsDir,
+       &refreshScenarios, &describeStoredScenario](
+          const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        int64_t uid;
+        std::string uname;
+        if (auto e = requireLobbyAdmin(headers, uid, uname))
+          return *e;
+
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+        if (j.is_discarded() || !j.is_object())
+          return HttpAuth::JsonResponse(
+              400, R"({"ok":false,"error":"invalid JSON body"})");
+
+        const std::string gameId = j.value("gameId", std::string("metalstorm"));
+        const std::string mapId = j.value("mapId", std::string(""));
+        if (mapId.empty())
+          return HttpAuth::JsonResponse(
+              400, R"({"ok":false,"error":"mapId required"})");
+
+        auto pathIt = gamePathsById.find(gameId);
+        if (pathIt == gamePathsById.end())
+          return HttpAuth::JsonResponse(
+              404, R"({"ok":false,"error":"no such game"})");
+
+        // Default the seed from the map id exactly as scenariogen.py's own
+        // default does (`sum(ord(c) for c in map_id)`), rather than from a
+        // clock. A generated scenario is reproducible from (map, seed,
+        // version) or it is not reproducible at all, and a timestamp seed
+        // would quietly make every re-run a different war with a different id.
+        int64_t seed = 0;
+        if (j.contains("seed") && j["seed"].is_number_integer()) {
+          seed = j["seed"].get<int64_t>();
+        } else {
+          for (const unsigned char c : mapId)
+            seed += c;
+        }
+        if (seed < 0 || seed > 2147483647)
+          return HttpAuth::JsonResponse(
+              400, R"({"ok":false,"error":"seed out of range"})");
+
+        const ScenarioGenResult gen =
+            RunScenarioGen(mapsDir, mapId, pathIt->second, seed, j);
+        if (!gen.ok) {
+          nlohmann::json err;
+          err["ok"] = false;
+          // The generator's own words. A REJECTED line names which invariant
+          // the map failed and, for the reachability gate, which components
+          // the armies were stranded in — strictly more useful than anything
+          // this layer could say about it.
+          err["error"] = gen.diagnostics.empty()
+                             ? std::string("scenario generation failed")
+                             : gen.diagnostics;
+          err["exitCode"] = gen.exitCode;
+          // 422, not 500: a rejection means "this map cannot host a war on
+          // these knobs", which is a property of the request, not a fault.
+          return HttpAuth::JsonResponse(gen.exitCode == 2 ? 422 : 500,
+                                        err.dump());
+        }
+
+        ScenarioDb::Record rec;
+        rec.id = gen.meta.value("id", std::string(""));
+        rec.gameId = gameId;
+        rec.mapId = gen.meta.value("map_id", mapId);
+        rec.seed = gen.meta.value("seed", seed);
+        rec.generatorVersion = gen.meta.value("version", 0);
+        rec.lua = gen.lua;
+        rec.createdBy = uname;
+        if (gen.meta.contains("params"))
+          rec.params = gen.meta["params"].dump();
+
+        if (!ScenarioDb::ValidateId(rec.id))
+          return HttpAuth::JsonResponse(
+              500,
+              R"({"ok":false,"error":"generator returned an unusable id"})");
+
+        // Two different seeds on one map can mint the same title (the
+        // generator indexes its suffix table `seed % len`), and the picker is
+        // a flat option list with nothing else to tell them apart.
+        rec.displayName = ScenarioDb::DisambiguateDisplayName(
+            mapDb, gameId, gen.meta.value("display_name", rec.id), rec.id);
+
+        const bool existed =
+            ScenarioDb::FindById(mapDb, rec.id).has_value();
+        if (!ScenarioDb::Upsert(mapDb, rec))
+          return HttpAuth::JsonResponse(
+              500, R"({"ok":false,"error":"failed to store scenario"})");
+
+        // Materialise + re-discover, so the very next GET
+        // /api/games/<id>/scenarios sees it. No lobby restart: the whole
+        // point of the requirement is that a created scenario is immediately
+        // selectable.
+        refreshScenarios(gameId);
+
+        db.LogAudit(uid, uname, "scenario_generate", rec.id,
+                    "map=" + rec.mapId + " seed=" + std::to_string(rec.seed));
+
+        nlohmann::json out;
+        out["ok"] = true;
+        // An id encodes (map, seed, generator version) and generation is
+        // deterministic, so re-running the same request is an idempotent
+        // replace rather than a conflict. Reported so the caller can tell
+        // "made a new war" from "re-made the one you already had".
+        out["created"] = !existed;
+        auto stored = ScenarioDb::FindById(mapDb, rec.id);
+        out["scenario"] =
+            stored ? describeStoredScenario(*stored) : nlohmann::json::object();
+        out["diagnostics"] = gen.diagnostics;
+        return HttpAuth::JsonResponse(200, out.dump());
+      });
+
+  // POST /api/admin/scenarios/list {gameId?} — stored scenarios, with the
+  // discovered view of each alongside its provenance.
+  net.AddHttpPost(
+      "/api/admin/scenarios/list", RouteAuth::AdminOnly,
+      [&db, &mapDb, requireLobbyAdmin, &describeStoredScenario](
+          const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        int64_t uid;
+        std::string uname;
+        if (auto e = requireLobbyAdmin(headers, uid, uname))
+          return *e;
+        (void)db;
+
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+        const std::string gameId =
+            (j.is_discarded() || !j.is_object())
+                ? std::string("")
+                : j.value("gameId", std::string(""));
+
+        const std::vector<ScenarioDb::Record> rows =
+            gameId.empty() ? ScenarioDb::ListAll(mapDb)
+                           : ScenarioDb::ListForGame(mapDb, gameId);
+        nlohmann::json arr = nlohmann::json::array();
+        for (const auto &r : rows)
+          arr.push_back(describeStoredScenario(r));
+
+        nlohmann::json out;
+        out["ok"] = true;
+        out["scenarios"] = std::move(arr);
+        return HttpAuth::JsonResponse(200, out.dump());
+      });
+
+  // POST /api/admin/scenarios/delete {id} — drop the row AND the file.
+  //
+  // Both, in that order. A deleted row that left its `.lua` behind would keep
+  // being discovered and offered in the picker forever, with nothing left in
+  // the DB to explain where it came from — the orphan case this endpoint and
+  // ScenarioDb::SyncToDisk's sweep exist to prevent.
+  net.AddHttpPost(
+      "/api/admin/scenarios/delete", RouteAuth::AdminOnly,
+      [&db, &mapDb, requireLobbyAdmin, &gamePathsById, &refreshScenarios](
+          const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        int64_t uid;
+        std::string uname;
+        if (auto e = requireLobbyAdmin(headers, uid, uname))
+          return *e;
+
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+        const std::string id =
+            (j.is_discarded() || !j.is_object())
+                ? std::string("")
+                : j.value("id", std::string(""));
+        if (id.empty())
+          return HttpAuth::JsonResponse(400,
+                                        R"({"ok":false,"error":"id required"})");
+
+        auto rec = ScenarioDb::FindById(mapDb, id);
+        if (!rec)
+          return HttpAuth::JsonResponse(
+              404, R"({"ok":false,"error":"no such generated scenario"})");
+        const std::string gameId = rec->gameId;
+
+        if (!ScenarioDb::Delete(mapDb, id))
+          return HttpAuth::JsonResponse(
+              500, R"({"ok":false,"error":"failed to delete scenario"})");
+
+        // The sweep inside refreshScenarios would collect the now-unclaimed
+        // file anyway; removing it explicitly first means the window in which
+        // a concurrent discovery could still offer a deleted war is zero
+        // rather than "until the resync finishes".
+        auto pathIt = gamePathsById.find(gameId);
+        if (pathIt != gamePathsById.end())
+          ScenarioDb::Unmaterialise(id, pathIt->second);
+        refreshScenarios(gameId);
+
+        db.LogAudit(uid, uname, "scenario_delete", id, "game=" + gameId);
+        return HttpAuth::JsonResponse(200, R"({"ok":true})");
+      });
+
+  // POST /api/admin/scenarios/resync {gameId?} — rebuild every generated
+  // `.lua` from its row and sweep orphans, then re-discover.
+  //
+  // The same code path startup runs, exposed so an operator can repair a
+  // `data/` tree by hand (it is gitignored, so "the files are gone" is a
+  // routine state, not a disaster) without bouncing the lobby.
+  net.AddHttpPost(
+      "/api/admin/scenarios/resync", RouteAuth::AdminOnly,
+      [&db, &mapDb, requireLobbyAdmin, &gamePathsById, &refreshScenarios](
+          const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        int64_t uid;
+        std::string uname;
+        if (auto e = requireLobbyAdmin(headers, uid, uname))
+          return *e;
+
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+        const std::string only =
+            (j.is_discarded() || !j.is_object())
+                ? std::string("")
+                : j.value("gameId", std::string(""));
+
+        nlohmann::json games = nlohmann::json::array();
+        for (const auto &kv : gamePathsById) {
+          if (!only.empty() && kv.first != only)
+            continue;
+          const ScenarioDb::SyncResult r =
+              ScenarioDb::SyncToDisk(mapDb, kv.first, kv.second);
+          refreshScenarios(kv.first);
+          games.push_back({{"gameId", kv.first},
+                           {"written", r.written},
+                           {"orphansRemoved", r.orphansRemoved},
+                           {"failed", r.failed}});
+        }
+
+        db.LogAudit(uid, uname, "scenario_resync", only, "");
+        nlohmann::json out;
+        out["ok"] = true;
+        out["games"] = std::move(games);
+        return HttpAuth::JsonResponse(200, out.dump());
+      });
+
+  // --- HTTP exec endpoint (for CLI/curl access to lobby commands) ---
+  // PLAN-security-hardening task 2: compiled OUT entirely under
+  // SPRING_PROD, not just role-gated — arbitrary SQLite exec on the map DB
+  // has no place in a production binary, belt-and-braces on top of the
+  // AdminOnly dispatch gate + the handler's own role check below.
 #ifndef SPRING_PROD
-    net.AddHttpPost("/api/exec", RouteAuth::AdminOnly, [&rooms, &gameServers, mapDb, &db](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+  net.AddHttpPost(
+      "/api/exec", RouteAuth::AdminOnly,
+      [&rooms, &gameServers, mapDb,
+       &db](const std::string &, const std::string &body,
+            const HttpRequestHeaders &headers) -> HttpResponse {
         // Validate auth token
         int64_t userId = HttpAuth::ValidateToken(db, headers.authorization);
         if (userId <= 0) {
-            return HttpAuth::JsonResponse(401, R"({"error":"unauthorized — use POST /api/auth/login first"})");
+          return HttpAuth::JsonResponse(
+              401,
+              R"({"error":"unauthorized — use POST /api/auth/login first"})");
         }
         // S2: /api/exec runs privileged SQL + lobby control commands. Gate on
         // the admin role — a plain authenticated player must not reach it.
         std::string execUsername;
         {
-            auto execUser = db.FindUserById(userId);
-            if (!execUser || execUser->role != "admin") {
-                return HttpAuth::JsonResponse(403, R"({"error":"forbidden — admin role required"})");
-            }
-            execUsername = execUser->username;
+          auto execUser = db.FindUserById(userId);
+          if (!execUser || execUser->role != "admin") {
+            return HttpAuth::JsonResponse(
+                403, R"({"error":"forbidden — admin role required"})");
+          }
+          execUsername = execUser->username;
         }
 
-        nlohmann::json j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
-        if (j.is_discarded()) return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+        nlohmann::json j =
+            nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+        if (j.is_discarded())
+          return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
         std::string scope = j.value("scope", "");
         std::string code = j.value("code", "");
         bool success = true;
@@ -1209,479 +2177,866 @@ int main(int argc, char* argv[])
         db.LogAudit(userId, execUsername, "exec", scope, code.substr(0, 200));
 
         if (scope == "sql") {
-            std::string upper = code;
-            for (auto& c : upper) c = (char)toupper((unsigned char)c);
-            bool rejected = false;
-            for (const char* kw : {"INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE"}) {
-                if (upper.find(kw) != std::string::npos) { rejected = true; break; }
+          std::string upper = code;
+          for (auto &c : upper)
+            c = (char)toupper((unsigned char)c);
+          bool rejected = false;
+          for (const char *kw :
+               {"INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE"}) {
+            if (upper.find(kw) != std::string::npos) {
+              rejected = true;
+              break;
             }
-            if (rejected) {
-                output = "read-only: mutation queries not allowed";
-                success = false;
-            } else {
-                char* errMsg = nullptr;
-                auto callback = [](void* data, int ncols, char** vals, char** names) -> int {
-                    auto* out = static_cast<std::string*>(data);
-                    if (!out->empty()) *out += "\\n";
-                    for (int i = 0; i < ncols; i++) {
-                        if (i > 0) *out += " | ";
-                        *out += std::string(names[i]) + "=" + (vals[i] ? vals[i] : "NULL");
-                    }
-                    return 0;
-                };
-                int rc = sqlite3_exec(mapDb, code.c_str(), callback, &output, &errMsg);
-                if (rc != SQLITE_OK) {
-                    output = errMsg ? errMsg : "unknown error";
-                    if (errMsg) sqlite3_free(errMsg);
-                    success = false;
-                }
-                if (output.empty()) output = "(no results)";
-            }
-        } else if (scope == "lobby") {
-            if (code == "rooms") {
-                auto allRooms = rooms.GetAllRooms();
-                for (const auto* r : allRooms) {
-                    if (!r) continue;
-                    if (!output.empty()) output += "\\n";
-                    output += "Room " + std::to_string(r->id) + ": " + r->name
-                        + " (" + std::to_string(r->players.size()) + " players)";
-                }
-                if (output.empty()) output = "(no rooms)";
-            } else if (code == "process list") {
-                for (const auto& [rid, inst] : gameServers) {
-                    if (!output.empty()) output += "\\n";
-                    output += "Room " + std::to_string(rid)
-                        + ": pid=" + std::to_string(inst.pid)
-                        + " port=" + std::to_string(inst.port);
-                }
-                if (output.empty()) output = "(no game servers)";
-            } else if (code == "restart") {
-                output = "restarting lobby server...";
-                restartRequested.store(true);
-                keepRunning.store(false);
-            } else {
-                output = "unknown lobby command: " + code;
-                success = false;
-            }
-        } else {
-            output = "unknown scope (lobby handles: sql, lobby)";
+          }
+          if (rejected) {
+            output = "read-only: mutation queries not allowed";
             success = false;
+          } else {
+            char *errMsg = nullptr;
+            auto callback = [](void *data, int ncols, char **vals,
+                               char **names) -> int {
+              auto *out = static_cast<std::string *>(data);
+              if (!out->empty())
+                *out += "\\n";
+              for (int i = 0; i < ncols; i++) {
+                if (i > 0)
+                  *out += " | ";
+                *out +=
+                    std::string(names[i]) + "=" + (vals[i] ? vals[i] : "NULL");
+              }
+              return 0;
+            };
+            int rc =
+                sqlite3_exec(mapDb, code.c_str(), callback, &output, &errMsg);
+            if (rc != SQLITE_OK) {
+              output = errMsg ? errMsg : "unknown error";
+              if (errMsg)
+                sqlite3_free(errMsg);
+              success = false;
+            }
+            if (output.empty())
+              output = "(no results)";
+          }
+        } else if (scope == "lobby") {
+          if (code == "rooms") {
+            auto allRooms = rooms.GetAllRooms();
+            for (const auto *r : allRooms) {
+              if (!r)
+                continue;
+              if (!output.empty())
+                output += "\\n";
+              output += "Room " + std::to_string(r->id) + ": " + r->name +
+                        " (" + std::to_string(r->players.size()) + " players)";
+            }
+            if (output.empty())
+              output = "(no rooms)";
+          } else if (code == "process list") {
+            for (const auto &[rid, inst] : gameServers) {
+              if (!output.empty())
+                output += "\\n";
+              output += "Room " + std::to_string(rid) +
+                        ": pid=" + std::to_string(inst.pid) +
+                        " port=" + std::to_string(inst.port);
+            }
+            if (output.empty())
+              output = "(no game servers)";
+          } else if (code == "restart") {
+            output = "restarting lobby server...";
+            restartRequested.store(true);
+            keepRunning.store(false);
+          } else {
+            output = "unknown lobby command: " + code;
+            success = false;
+          }
+        } else {
+          output = "unknown scope (lobby handles: sql, lobby)";
+          success = false;
         }
 
-        std::string json = "{\"success\":" + std::string(success ? "true" : "false")
-            + ",\"output\":\"" + HttpAuth::JsonEscape(output) + "\"}";
+        std::string json =
+            "{\"success\":" + std::string(success ? "true" : "false") +
+            ",\"output\":\"" + HttpAuth::JsonEscape(output) + "\"}";
         return HttpAuth::JsonResponse(200, json);
-    });
+      });
 #endif // !SPRING_PROD
 
-    // --- Room management HTTP endpoints ---
-    // These mirror the WebSocket room commands for CLI/automation access.
+  // --- Room management HTTP endpoints ---
+  // These mirror the WebSocket room commands for CLI/automation access.
 
-    // Helper: get userId from auth header, return 0 + send 401 if invalid
-    auto requireAuth = [&db](const HttpRequestHeaders& headers) -> int64_t {
-        return HttpAuth::ValidateToken(db, headers.authorization);
+  // Helper: get userId from auth header, return 0 + send 401 if invalid
+  auto requireAuth = [&db](const HttpRequestHeaders &headers) -> int64_t {
+    return HttpAuth::ValidateToken(db, headers.authorization);
+  };
+
+  // Helper: find a player's room by their userId
+  auto findPlayerRoom = [&rooms](uint32_t userId) -> GameRoom * {
+    // RoomManager doesn't have a FindRoomByUserId, so scan all rooms
+    for (auto *room : rooms.GetAllRooms()) {
+      if (!room)
+        continue;
+      if (room->FindPlayer(userId))
+        return room;
+    }
+    return nullptr;
+  };
+
+  // Helper: JSON-serialize a room for API responses
+  auto roomToJson = [](const GameRoom *room) -> std::string {
+    if (!room)
+      return "null";
+    nlohmann::json j;
+    j["id"] = room->id;
+    j["name"] = room->name;
+    j["map"] = room->mapId;
+    j["game"] = room->gameId;
+    j["state"] = static_cast<int>(room->state);
+    j["players"] = nlohmann::json::array();
+    for (const auto &p : room->players) {
+      nlohmann::json pj;
+      pj["player_id"] = p.playerId;
+      pj["username"] = p.username;
+      pj["team"] = p.team;
+      pj["ready"] = p.ready;
+      pj["is_host"] = p.isHost;
+      pj["is_spectator"] = p.isSpectator;
+      pj["start_pos"] = p.startPos;
+      j["players"].push_back(std::move(pj));
+    }
+    j["ai_slots"] = nlohmann::json::array();
+    for (const auto &ai : room->aiSlots) {
+      nlohmann::json aj;
+      aj["ai_id"] = ai.aiId;
+      aj["name"] = ai.displayName;
+      aj["team"] = ai.team;
+      aj["start_pos"] = ai.startPos;
+      aj["profile"] = ai.profile;
+      j["ai_slots"].push_back(std::move(aj));
+    }
+    j["modoptions"] = nlohmann::json::object();
+    for (const auto &[key, value] : room->modOptions)
+      j["modoptions"][key] = value;
+    if (room->gameServerPort > 0)
+      j["game_server_port"] = room->gameServerPort;
+    if (room->persistent)
+      j["persistent"] = true;
+    return j.dump();
+  };
+
+#define HTTP_ROOM_AUTH()                                                       \
+  int64_t userId = requireAuth(headers);                                       \
+  if (userId <= 0)                                                             \
+    return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
+
+  // Broadcast the full room list to all SSE subscribers.
+  // Called after every room mutation so clients stay in sync.
+  auto broadcastRooms = [&]() {
+    auto allRooms = rooms.GetAllRooms();
+    std::string json = "[";
+    bool first = true;
+    for (const auto *r : allRooms) {
+      if (!r)
+        continue;
+      if (!first)
+        json += ",";
+      first = false;
+      json += roomToJson(r);
+    }
+    json += "]";
+    net.SendSSE(roomStreamChannel, json, "rooms");
+  };
+
+  // --- PLAN-quickstart.md Part A: direct-start composite ---
+  //
+  // Mint (or create) a session for a manifest-declared username without a
+  // password step. A missing account is created dev-flagged (is_dev=1)
+  // with an unusable random password hash — it can never log in via
+  // /api/auth/login, only via the token minted here.
+  auto ensureDevSession =
+      [&](const std::string &username) -> std::pair<uint32_t, std::string> {
+    auto user = db.FindUser(username);
+    int64_t uid;
+    if (user) {
+      uid = user->id;
+    } else {
+      uid = db.CreateUser(username,
+                          Crypto::HashPassword(Crypto::GenerateToken(32)),
+                          "player", /*isDev=*/true);
+    }
+    std::string token = HttpAuth::GenerateToken();
+    db.CreateSession(uid, token);
+    return {static_cast<uint32_t>(uid), token};
+  };
+
+  struct ResolvedPlayer {
+    uint32_t userId;
+    std::string username;
+    uint8_t team;
+    int8_t startPos;
+    bool spectator;
+  };
+
+  // Publish the room's slot layout as the `war_sides` modoption
+  // (PLAN-metalstorm-wars.md §7.4, forced by endtoend D19).
+  //
+  // A scenario's sides declare many teams each but stage a starting force for
+  // only one of them — Meridian Basin's compact side is teams 0–3 and its
+  // army is on team 0; the union is 4–7 and its army is on team 4. The room's
+  // slot dropdowns used to offer a hardcoded `Team 1`/`Team 2`, so the AI
+  // opponent was seated on team 1: a declared compact *teammate* with no
+  // units, while the union's whole army was skipped for want of a team 4.
+  // The room had one army.
+  //
+  // So the room offers SIDES, and this is where the side→team resolution
+  // (ScenarioDiscovery::EncodeWarSides) is written down — once, at create
+  // time, in the same "ordinary room setting" shape §7.3 chose for
+  // `scenario`. Everything downstream reads this one string: RoomManager's
+  // GameRoom::SlotTeams() takes the integers, the client renders the labels,
+  // and the sim receives it as a modoption like any other.
+  //
+  // Clears the option for a scenario-less room, so a host switching away from
+  // a scenario does not leave a stale side list behind.
+  auto applyWarSides = [&](uint32_t roomId, uint32_t hostId,
+                           const std::string &gameId,
+                           const std::string &scenarioId) {
+    std::string encoded;
+    if (!scenarioId.empty()) {
+      const ScenarioDiscovery::ScenarioInfo *info =
+          ScenarioDiscovery::FindById(scenariosFor(gameId), scenarioId);
+      if (info != nullptr)
+        encoded = ScenarioDiscovery::EncodeWarSides(*info);
+    }
+    rooms.SetModOption(roomId, hostId, "war_sides", encoded);
+    if (!encoded.empty())
+      SLOG(SPRING_LOG_NOTICE, "room %u: war sides '%s' (from scenario '%s')",
+           roomId, encoded.c_str(), scenarioId.c_str());
+  };
+
+  // Resolve and apply the room's `scenario` modoption (PLAN-endtoend.md D10,
+  // design call in PLAN-metalstorm-wars.md §7.1).
+  //
+  // `explicitChoice` is the host's pick, if they made one (nullptr = no pick).
+  // A pick wins outright — including the empty string, which is how a host
+  // deliberately asks for a scenario-less room and is therefore NOT
+  // overridden by the map default. Callers validate the id against
+  // `scenariosFor(gameId)` first; game_scenario.lua `error()`s on a missing
+  // file at GameStart, so a typo should surface in the lobby, not the sim.
+  //
+  // With no pick at all, the map's default applies. A scenario declares the
+  // map it was authored for (`world.map`), so this reads a coupling the
+  // content already states — and the result lands in the room JSON, so the
+  // player can see which war they are about to fight rather than having it
+  // chosen behind their back.
+  //
+  // Also publishes the room's slot layout via applyWarSides above, on every
+  // branch: the two settings are resolved from the same scenario and a room
+  // must never carry one without the other.
+  //
+  // Returns the scenario id now in effect ("" if none).
+  auto applyRoomScenario = [&](uint32_t roomId, uint32_t hostId,
+                               const std::string &gameId,
+                               const std::string &mapId,
+                               const std::string *explicitChoice)
+      -> std::string {
+    if (explicitChoice != nullptr) {
+      if (explicitChoice->empty()) {
+        SLOG(SPRING_LOG_NOTICE,
+             "room %u: host asked for no scenario on map '%s'", roomId,
+             mapId.c_str());
+        applyWarSides(roomId, hostId, gameId, {});
+        return {};
+      }
+      rooms.SetModOption(roomId, hostId, "scenario", *explicitChoice);
+      SLOG(SPRING_LOG_NOTICE, "room %u: scenario '%s' (host choice)", roomId,
+           explicitChoice->c_str());
+      applyWarSides(roomId, hostId, gameId, *explicitChoice);
+      return *explicitChoice;
+    }
+
+    const ScenarioDiscovery::ScenarioInfo *def =
+        ScenarioDiscovery::DefaultForMap(scenariosFor(gameId), mapId);
+    if (def == nullptr) {
+      applyWarSides(roomId, hostId, gameId, {});
+      return {};
+    }
+    rooms.SetModOption(roomId, hostId, "scenario", def->id);
+    SLOG(SPRING_LOG_NOTICE, "room %u: scenario '%s' (default for map '%s')%s",
+         roomId, def->id.c_str(), mapId.c_str(),
+         def->terminal ? "" : " — WARNING: declares no victory objective");
+    applyWarSides(roomId, hostId, gameId, def->id);
+    return def->id;
+  };
+
+  // The first side of the room's slot list, i.e. where a host who has
+  // expressed no preference belongs. CreateRoom seats the host on team 0,
+  // which is right for a legacy two-team room and right for Meridian by
+  // coincidence; this makes it right on purpose.
+  auto seatHostOnFirstSide = [&](uint32_t roomId, uint32_t hostId) {
+    const GameRoom *room = rooms.GetRoom(roomId);
+    if (room == nullptr)
+      return;
+    const std::vector<uint8_t> slotTeams = room->SlotTeams();
+    const RoomPlayer *host = nullptr;
+    for (const auto &p : room->players)
+      if (p.playerId == hostId)
+        host = &p;
+    if (host == nullptr || host->isSpectator)
+      return;
+    if (std::find(slotTeams.begin(), slotTeams.end(), host->team) !=
+        slotTeams.end())
+      return; // already on a side the room offers
+    rooms.SetTeam(roomId, hostId, slotTeams.front());
+    SLOG(SPRING_LOG_NOTICE, "room %u: host seated on team %u (first side)",
+         roomId, static_cast<unsigned>(slotTeams.front()));
+  };
+
+  // The slot team to put a solo room's auto-added opponent on: the first of
+  // the room's offered sides nobody occupies. Replaces a hardcoded
+  // `hostTeam == 0 ? 1 : 0`, which on a Meridian room produced a Null AI on
+  // team 1 — a live team the scenario stages no units for, which is the same
+  // empty-army condition D19 filed.
+  auto firstFreeSlotTeam = [](const GameRoom &room,
+                              uint8_t hostTeam) -> uint8_t {
+    const std::vector<uint8_t> slotTeams = room.SlotTeams();
+    for (const uint8_t t : slotTeams) {
+      bool taken = (t == hostTeam);
+      for (const auto &p : room.players)
+        if (!p.isSpectator && p.team == t)
+          taken = true;
+      for (const auto &a : room.aiSlots)
+        if (a.team == t)
+          taken = true;
+      if (!taken)
+        return t;
+    }
+    // Every offered side is occupied (or the room offers only one). Fall
+    // back to the old behaviour so a single-side scenario still gets an
+    // opponent rather than a same-team AI that ends the match instantly.
+    return (hostTeam == 0) ? 1 : 0;
+  };
+
+  // The invariant this lane exists to encode: a war that no path can
+  // terminate should not be created quietly. Called just before the game
+  // server is spawned, on every start path.
+  //
+  // It warns rather than refuses. Scenario-less rooms are legitimate for
+  // every game that ships no scenarios at all (Paper Tanks, ZK) and for
+  // Metalstorm fixtures on maps with no authored war; refusing would break
+  // those. What was actually wrong was that the endless case was silent.
+  auto warnIfWarCannotEnd = [&](const GameRoom *room) {
+    if (room == nullptr)
+      return;
+    const auto &available = scenariosFor(room->gameId);
+    if (available.empty())
+      return; // not a scenario-driven game — nothing to say
+
+    std::string scenario;
+    auto it = room->modOptions.find("scenario");
+    if (it != room->modOptions.end())
+      scenario = it->second;
+
+    if (scenario.empty()) {
+      SLOG(SPRING_LOG_WARNING,
+           "room %u ('%s', game '%s', map '%s') starting with NO SCENARIO — "
+           "no victory objective will be staged, so this war has no terminal "
+           "condition and cannot end (PLAN-metalstorm-wars.md §7.1)",
+           room->id, room->name.c_str(), room->gameId.c_str(),
+           room->mapId.c_str());
+      return;
+    }
+    const ScenarioDiscovery::ScenarioInfo *info =
+        ScenarioDiscovery::FindById(available, scenario);
+    if (info == nullptr) {
+      SLOG(SPRING_LOG_WARNING,
+           "room %u starting with scenario '%s', which game '%s' does not "
+           "ship — game_scenario.lua will fail to load it at GameStart",
+           room->id, scenario.c_str(), room->gameId.c_str());
+    } else if (!info->terminal) {
+      SLOG(SPRING_LOG_WARNING,
+           "room %u starting with scenario '%s', which declares no "
+           "`victory = true` objective — this war has no terminal condition "
+           "and cannot end (PLAN-metalstorm-wars.md §7.1)",
+           room->id, scenario.c_str());
+    } else {
+      SLOG(SPRING_LOG_NOTICE, "room %u: war '%s' is terminable via scenario %s",
+           room->id, room->name.c_str(), scenario.c_str());
+    }
+
+    // Sibling invariant to "can this war end": can this war be *fought*?
+    // A live team the scenario stages no starting force for is a side with
+    // no army, and a war with one army is not a match — endtoend D19, where
+    // a lobby-created Meridian room put the AI opponent on team 1 and the
+    // player spent three minutes alone on the board. The sim re-checks the
+    // staged board at frame 60 (game_scenario.lua), which is authoritative;
+    // this says it before the game server is even spawned.
+    // A scenario that declares no `sides` says nothing about which teams
+    // should have an army (the smoke fixtures are like this), so there is
+    // nothing to check it against.
+    if (info == nullptr || info->sides.empty())
+      return;
+    std::set<uint8_t> occupied;
+    for (const auto &p : room->players)
+      if (!p.isSpectator)
+        occupied.insert(p.team);
+    for (const auto &a : room->aiSlots)
+      occupied.insert(a.team);
+    for (const uint8_t team : occupied) {
+      bool staged = false;
+      for (const auto &side : info->sides)
+        if (side.team == team && side.staged)
+          staged = true;
+      if (!staged)
+        SLOG(SPRING_LOG_WARNING,
+             "room %u: team %u is occupied but scenario '%s' stages no "
+             "starting force for it — that side begins the war with no army "
+             "(PLAN-metalstorm-wars.md §7.4)",
+             room->id, static_cast<unsigned>(team), scenario.c_str());
+    }
+  };
+
+  struct DirectStartResult {
+    bool ok = false;
+    std::string error;
+    uint32_t roomId = 0;
+    std::unordered_map<std::string, std::string> sessions;
+  };
+
+  // Composes CreateRoom -> modoptions -> AI slots -> player joins ->
+  // ready -> StartGame -> spawnGameServer: the same sequence
+  // /api/rooms/start already drives (§2.2 "reuse rooms/start's path so
+  // nothing forks"), gathered from one manifest instead of N round trips.
+  // Returns as soon as the game-server process is spawned and its port
+  // known (room state = Loading) — the same synchronous contract
+  // /api/rooms/start already has. The room flips Loading->Active
+  // asynchronously via the health-check loop below, same as today; the
+  // client's existing connect-retry logic already tolerates that gap.
+  auto runDirectStart =
+      [&](const nlohmann::json &manifest) -> DirectStartResult {
+    DirectStartResult result;
+
+    std::string name = manifest.value("name", "");
+    if (name.empty())
+      name = "dev:direct";
+    std::string mapId = manifest.value("map", "");
+    std::string gameId = manifest.value("game", "");
+    if (gameId.empty() && !availableGames.empty())
+      gameId = availableGames[0].id;
+    if (mapId.empty()) {
+      result.error = "map is required";
+      return result;
+    }
+
+    if (!manifest.contains("players") || !manifest["players"].is_array() ||
+        manifest["players"].empty()) {
+      result.error = "players[] must declare at least one player (the host)";
+      return result;
+    }
+
+    // Idempotent restarts (§2.2): a standing room re-created under the
+    // same name replaces the old one rather than accumulating duplicates.
+    for (auto *existing : rooms.GetAllRooms()) {
+      if (existing && existing->name == name) {
+        auto gsIt = gameServers.find(existing->id);
+        if (gsIt != gameServers.end()) {
+          kill(gsIt->second.pid, SIGTERM);
+          removeGameServer(existing->id);
+          gameServers.erase(gsIt);
+        }
+        rooms.DeleteRoom(existing->id);
+        break;
+      }
+    }
+
+    // E1: a declared player already in a (different) room is force-left
+    // — the direct endpoint owns the whole dance atomically now.
+    auto forceLeaveCurrentRoom = [&](uint32_t playerId) {
+      auto *prior = findPlayerRoom(playerId);
+      if (!prior)
+        return;
+      uint32_t priorId = prior->id;
+      auto res = rooms.LeaveRoom(priorId, playerId);
+      if (res == LeaveResult::Abandoned) {
+        auto gsIt = gameServers.find(priorId);
+        if (gsIt != gameServers.end()) {
+          kill(gsIt->second.pid, SIGTERM);
+          removeGameServer(priorId);
+          gameServers.erase(gsIt);
+        }
+        rooms.DeleteRoom(priorId);
+      }
     };
 
-    // Helper: find a player's room by their userId
-    auto findPlayerRoom = [&rooms](uint32_t userId) -> GameRoom* {
-        // RoomManager doesn't have a FindRoomByUserId, so scan all rooms
-        for (auto* room : rooms.GetAllRooms()) {
-            if (!room) continue;
-            if (room->FindPlayer(userId)) return room;
-        }
-        return nullptr;
-    };
-
-    // Helper: JSON-serialize a room for API responses
-    auto roomToJson = [](const GameRoom* room) -> std::string {
-        if (!room) return "null";
-        nlohmann::json j;
-        j["id"] = room->id;
-        j["name"] = room->name;
-        j["map"] = room->mapId;
-        j["game"] = room->gameId;
-        j["state"] = static_cast<int>(room->state);
-        j["players"] = nlohmann::json::array();
-        for (const auto& p : room->players) {
-            nlohmann::json pj;
-            pj["player_id"] = p.playerId;
-            pj["username"] = p.username;
-            pj["team"] = p.team;
-            pj["ready"] = p.ready;
-            pj["is_host"] = p.isHost;
-            pj["start_pos"] = p.startPos;
-            j["players"].push_back(std::move(pj));
-        }
-        j["ai_slots"] = nlohmann::json::array();
-        for (const auto& ai : room->aiSlots) {
-            nlohmann::json aj;
-            aj["ai_id"] = ai.aiId;
-            aj["name"] = ai.displayName;
-            aj["team"] = ai.team;
-            aj["start_pos"] = ai.startPos;
-            j["ai_slots"].push_back(std::move(aj));
-        }
-        j["modoptions"] = nlohmann::json::object();
-        for (const auto& [key, value] : room->modOptions)
-            j["modoptions"][key] = value;
-        if (room->gameServerPort > 0)
-            j["game_server_port"] = room->gameServerPort;
-        if (room->persistent)
-            j["persistent"] = true;
-        return j.dump();
-    };
-
-    #define HTTP_ROOM_AUTH() \
-        int64_t userId = requireAuth(headers); \
-        if (userId <= 0) return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
-
-    // Broadcast the full room list to all SSE subscribers.
-    // Called after every room mutation so clients stay in sync.
-    auto broadcastRooms = [&]() {
-        auto allRooms = rooms.GetAllRooms();
-        std::string json = "[";
-        bool first = true;
-        for (const auto* r : allRooms) {
-            if (!r) continue;
-            if (!first) json += ",";
-            first = false;
-            json += roomToJson(r);
-        }
-        json += "]";
-        net.SendSSE(roomStreamChannel, json, "rooms");
-    };
-
-    // --- PLAN-quickstart.md Part A: direct-start composite ---
-    //
-    // Mint (or create) a session for a manifest-declared username without a
-    // password step. A missing account is created dev-flagged (is_dev=1)
-    // with an unusable random password hash — it can never log in via
-    // /api/auth/login, only via the token minted here.
-    auto ensureDevSession = [&](const std::string& username) -> std::pair<uint32_t, std::string> {
-        auto user = db.FindUser(username);
-        int64_t uid;
-        if (user) {
-            uid = user->id;
-        } else {
-            uid = db.CreateUser(username, Crypto::HashPassword(Crypto::GenerateToken(32)),
-                "player", /*isDev=*/true);
-        }
-        std::string token = HttpAuth::GenerateToken();
-        db.CreateSession(uid, token);
-        return {static_cast<uint32_t>(uid), token};
-    };
-
-    struct ResolvedPlayer {
-        uint32_t userId;
-        std::string username;
-        uint8_t team;
-        int8_t startPos;
-        bool spectator;
-    };
-
-    struct DirectStartResult {
-        bool ok = false;
-        std::string error;
-        uint32_t roomId = 0;
-        std::unordered_map<std::string, std::string> sessions;
-    };
-
-    // Composes CreateRoom -> modoptions -> AI slots -> player joins ->
-    // ready -> StartGame -> spawnGameServer: the same sequence
-    // /api/rooms/start already drives (§2.2 "reuse rooms/start's path so
-    // nothing forks"), gathered from one manifest instead of N round trips.
-    // Returns as soon as the game-server process is spawned and its port
-    // known (room state = Loading) — the same synchronous contract
-    // /api/rooms/start already has. The room flips Loading->Active
-    // asynchronously via the health-check loop below, same as today; the
-    // client's existing connect-retry logic already tolerates that gap.
-    auto runDirectStart = [&](const nlohmann::json& manifest) -> DirectStartResult {
-        DirectStartResult result;
-
-        std::string name = manifest.value("name", "");
-        if (name.empty()) name = "dev:direct";
-        std::string mapId = manifest.value("map", "");
-        std::string gameId = manifest.value("game", "");
-        if (gameId.empty() && !availableGames.empty()) gameId = availableGames[0].id;
-        if (mapId.empty()) { result.error = "map is required"; return result; }
-
-        if (!manifest.contains("players") || !manifest["players"].is_array() ||
-            manifest["players"].empty()) {
-            result.error = "players[] must declare at least one player (the host)";
-            return result;
-        }
-
-        // Idempotent restarts (§2.2): a standing room re-created under the
-        // same name replaces the old one rather than accumulating duplicates.
-        for (auto* existing : rooms.GetAllRooms()) {
-            if (existing && existing->name == name) {
-                auto gsIt = gameServers.find(existing->id);
-                if (gsIt != gameServers.end()) {
-                    kill(gsIt->second.pid, SIGTERM);
-                    removeGameServer(existing->id);
-                    gameServers.erase(gsIt);
-                }
-                rooms.DeleteRoom(existing->id);
-                break;
-            }
-        }
-
-        // E1: a declared player already in a (different) room is force-left
-        // — the direct endpoint owns the whole dance atomically now.
-        auto forceLeaveCurrentRoom = [&](uint32_t playerId) {
-            auto* prior = findPlayerRoom(playerId);
-            if (!prior) return;
-            uint32_t priorId = prior->id;
-            auto res = rooms.LeaveRoom(priorId, playerId);
-            if (res == LeaveResult::Abandoned) {
-                auto gsIt = gameServers.find(priorId);
-                if (gsIt != gameServers.end()) {
-                    kill(gsIt->second.pid, SIGTERM);
-                    removeGameServer(priorId);
-                    gameServers.erase(gsIt);
-                }
-                rooms.DeleteRoom(priorId);
-            }
-        };
-
-        std::vector<ResolvedPlayer> resolvedPlayers;
-        resolvedPlayers.reserve(manifest["players"].size());
-        for (const auto& pj : manifest["players"]) {
-            std::string username = pj.value("username", "");
-            if (username.empty()) { result.error = "player entry missing username"; return result; }
-            auto [uid, token] = ensureDevSession(username);
-            result.sessions[username] = token;
-            resolvedPlayers.push_back({
-                uid, username,
-                static_cast<uint8_t>(pj.value("team", 0)),
-                static_cast<int8_t>(pj.value("startPos", -1)),
-                pj.value("spectator", false),
-            });
-        }
-
-        const ResolvedPlayer& host = resolvedPlayers[0];
-        forceLeaveCurrentRoom(host.userId);
-
-        uint32_t roomId = rooms.CreateRoom(name, mapId, gameId, 8, "",
-            host.userId, 0, host.username, /*persistent=*/false);
-        result.roomId = roomId;
-
-        MapMetadataDb mdb;
-        const size_t spCount = mdb.GetMap(mapDb, mapId).startPositions.size();
-        const int8_t maxStartPos = static_cast<int8_t>(spCount > 127 ? 127 : spCount);
-
-        // Host was added by CreateRoom as team 0, non-spectator, unready —
-        // apply the manifest's team/startPos/ready on top.
-        rooms.SetTeam(roomId, host.userId, host.team);
-        if (host.startPos >= 0)
-            rooms.SetPlayerStartPos(roomId, host.userId, host.userId, host.startPos, maxStartPos);
-        rooms.SetReady(roomId, host.userId, true);
-
-        for (size_t i = 1; i < resolvedPlayers.size(); ++i) {
-            const ResolvedPlayer& p = resolvedPlayers[i];
-            forceLeaveCurrentRoom(p.userId);
-            if (!rooms.JoinRoom(roomId, p.userId, 0, p.username, "", p.spectator)) {
-                result.ok = false;
-                result.error = "failed to bind player '" + p.username + "'";
-                return result;
-            }
-            if (!p.spectator) {
-                rooms.SetTeam(roomId, p.userId, p.team);
-                if (p.startPos >= 0)
-                    rooms.SetPlayerStartPos(roomId, p.userId, p.userId, p.startPos, maxStartPos);
-                rooms.SetReady(roomId, p.userId, true);
-            }
-        }
-
-        if (manifest.contains("modoptions") && manifest["modoptions"].is_object()) {
-            for (auto& [key, value] : manifest["modoptions"].items()) {
-                std::string val = value.is_string() ? value.get<std::string>() : value.dump();
-                rooms.SetModOption(roomId, host.userId, key, val);
-            }
-        }
-
-        if (manifest.contains("aiSlots") && manifest["aiSlots"].is_array()) {
-            uint8_t slotIndex = 0;
-            for (const auto& aj : manifest["aiSlots"]) {
-                std::string aiId = aj.value("aiId", "");
-                if (aiId.empty()) continue;
-                uint8_t team = static_cast<uint8_t>(aj.value("team", 0));
-                if (!rooms.AddAISlot(roomId, host.userId, aiId, aiId, team)) continue;
-                int8_t sp = static_cast<int8_t>(aj.value("startPos", -1));
-                if (sp >= 0)
-                    rooms.SetAIStartPos(roomId, host.userId, slotIndex, sp, maxStartPos);
-                slotIndex++;
-            }
-        }
-
-        const bool autoStart = manifest.value("autoStart", true);
-        if (!autoStart) {
-            result.ok = true;
-            return result;
-        }
-
-        // Same solo-team Null AI safety net as /api/rooms/start (§2.2):
-        // a single-team room trips ZK's game_over.lua ~1.5s in.
-        {
-            GameRoom* room = rooms.GetRoom(roomId);
-            std::set<uint8_t> teams;
-            for (const auto& p : room->players)
-                if (!p.isSpectator) teams.insert(p.team);
-            for (const auto& a : room->aiSlots) teams.insert(a.team);
-            if (teams.size() <= 1) {
-                const uint8_t aiTeam = (host.team == 0) ? 1 : 0;
-                rooms.AddAISlot(roomId, host.userId, "null", "Null AI", aiTeam);
-            }
-        }
-
-        if (!rooms.StartGame(roomId, host.userId)) {
-            result.ok = false;
-            result.error = "cannot start game (internal — all declared players should already be ready)";
-            return result;
-        }
-
-        rooms.AutoAssignStartPositions(roomId, maxStartPos);
-
-        GameRoom* room = rooms.GetRoom(roomId);
-        auto gpIt = gamePathsById.find(gameId);
-        if (gpIt != gamePathsById.end()) {
-            const auto vit = gameVersionsById.find(gameId);
-            const std::string& gameVer = (vit != gameVersionsById.end()) ? vit->second : std::string();
-            std::unordered_set<int> busyPorts;
-            for (const auto& [rid, gi] : gameServers)
-                if (gi.pid > 0 && isProcessAlive(gi.pid)) busyPorts.insert(gi.port);
-            auto inst = spawnGameServer(roomId, gameId, gameVer, mapId, dbPath,
-                room->players, room->aiSlots, room->modOptions, busyPorts, devBuildAcknowledged,
-                wtCertPath, wtKeyPath);
-            gameServers[roomId] = inst;
-            persistGameServer(inst);
-            room->gameServerPort = inst.port;
-        }
-
-        result.ok = true;
+    std::vector<ResolvedPlayer> resolvedPlayers;
+    resolvedPlayers.reserve(manifest["players"].size());
+    for (const auto &pj : manifest["players"]) {
+      std::string username = pj.value("username", "");
+      if (username.empty()) {
+        result.error = "player entry missing username";
         return result;
-    };
+      }
+      auto [uid, token] = ensureDevSession(username);
+      result.sessions[username] = token;
+      resolvedPlayers.push_back({
+          uid,
+          username,
+          static_cast<uint8_t>(pj.value("team", 0)),
+          static_cast<int8_t>(pj.value("startPos", -1)),
+          pj.value("spectator", false),
+      });
+    }
 
-    // POST /api/rooms — create a room
-    net.AddHttpPost("/api/rooms", RouteAuth::TokenRequired, [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+    const ResolvedPlayer &host = resolvedPlayers[0];
+    forceLeaveCurrentRoom(host.userId);
+
+    uint32_t roomId = rooms.CreateRoom(name, mapId, gameId, 8, "", host.userId,
+                                       0, host.username, /*persistent=*/false);
+    result.roomId = roomId;
+
+    MapMetadataDb mdb;
+    const size_t spCount = mdb.GetMap(mapDb, mapId).startPositions.size();
+    const int8_t maxStartPos =
+        static_cast<int8_t>(spCount > 127 ? 127 : spCount);
+
+    // Host was added by CreateRoom as team 0, non-spectator, unready —
+    // apply the manifest's team/startPos/ready on top.
+    rooms.SetTeam(roomId, host.userId, host.team);
+    if (host.startPos >= 0)
+      rooms.SetPlayerStartPos(roomId, host.userId, host.userId, host.startPos,
+                              maxStartPos);
+    rooms.SetReady(roomId, host.userId, true);
+
+    for (size_t i = 1; i < resolvedPlayers.size(); ++i) {
+      const ResolvedPlayer &p = resolvedPlayers[i];
+      forceLeaveCurrentRoom(p.userId);
+      if (!rooms.JoinRoom(roomId, p.userId, 0, p.username, "", p.spectator)) {
+        result.ok = false;
+        result.error = "failed to bind player '" + p.username + "'";
+        return result;
+      }
+      if (!p.spectator) {
+        rooms.SetTeam(roomId, p.userId, p.team);
+        if (p.startPos >= 0)
+          rooms.SetPlayerStartPos(roomId, p.userId, p.userId, p.startPos,
+                                  maxStartPos);
+        rooms.SetReady(roomId, p.userId, true);
+      }
+    }
+
+    if (manifest.contains("modoptions") && manifest["modoptions"].is_object()) {
+      for (auto &[key, value] : manifest["modoptions"].items()) {
+        std::string val =
+            value.is_string() ? value.get<std::string>() : value.dump();
+        rooms.SetModOption(roomId, host.userId, key, val);
+      }
+    }
+
+    // Top-level "scenario" (PLAN-persistence.md §5): names a
+    // scenarios/<name>.lua world file for game_scenario.lua to stage at
+    // GameStart. Threaded as an ordinary modoption — Spring.GetModOptions()
+    // is the existing, faithful path server Lua already reads config
+    // through, so no new plumbing is needed beyond this one field.
+    //
+    // Routed through the SAME applyRoomScenario the ordinary create-room path
+    // uses, deliberately (PLAN-endtoend.md D10). This field used to be the
+    // only writer of the modoption anywhere, which is exactly why the two
+    // paths diverged: every gameover verification ran through a manifest that
+    // named a scenario, and nobody noticed the player path named none. A
+    // manifest that omits the field now gets the map's default, same as a
+    // lobby-created room.
+    const std::string manifestScenario = manifest.value("scenario", "");
+    applyRoomScenario(roomId, host.userId, gameId, mapId,
+                      manifest.contains("scenario") ? &manifestScenario
+                                                    : nullptr);
+
+    if (manifest.contains("aiSlots") && manifest["aiSlots"].is_array()) {
+      uint8_t slotIndex = 0;
+      for (const auto &aj : manifest["aiSlots"]) {
+        std::string aiId = aj.value("aiId", "");
+        if (aiId.empty())
+          continue;
+        uint8_t team = static_cast<uint8_t>(aj.value("team", 0));
+        if (!rooms.AddAISlot(roomId, host.userId, aiId, aiId, team))
+          continue;
+        int8_t sp = static_cast<int8_t>(aj.value("startPos", -1));
+        if (sp >= 0)
+          rooms.SetAIStartPos(roomId, host.userId, slotIndex, sp, maxStartPos);
+        // PLAN-metalstorm-ai.md §10 task 6: the manifest's aiSlots[].profile
+        // (already the "same shape as --headless-run" per the doc comment
+        // above) reaches the AI VM via spawnGameServer's --ai 4th field.
+        std::string profile = aj.value("profile", "");
+        if (!profile.empty())
+          rooms.SetAIProfile(roomId, host.userId, slotIndex, profile);
+        slotIndex++;
+      }
+    }
+
+    const bool autoStart = manifest.value("autoStart", true);
+    if (!autoStart) {
+      result.ok = true;
+      return result;
+    }
+
+    // Same solo-team Null AI safety net as /api/rooms/start (§2.2):
+    // a single-team room trips ZK's game_over.lua ~1.5s in.
+    {
+      GameRoom *room = rooms.GetRoom(roomId);
+      std::set<uint8_t> teams;
+      for (const auto &p : room->players)
+        if (!p.isSpectator)
+          teams.insert(p.team);
+      for (const auto &a : room->aiSlots)
+        teams.insert(a.team);
+      if (teams.size() <= 1) {
+        const uint8_t aiTeam = firstFreeSlotTeam(*room, host.team);
+        rooms.AddAISlot(roomId, host.userId, "null", "Null AI", aiTeam);
+      }
+    }
+
+    if (!rooms.StartGame(roomId, host.userId)) {
+      result.ok = false;
+      result.error = "cannot start game (internal — all declared players "
+                     "should already be ready)";
+      return result;
+    }
+
+    rooms.AutoAssignStartPositions(roomId, maxStartPos);
+
+    GameRoom *room = rooms.GetRoom(roomId);
+    warnIfWarCannotEnd(room);
+    auto gpIt = gamePathsById.find(gameId);
+    if (gpIt != gamePathsById.end()) {
+      const auto vit = gameVersionsById.find(gameId);
+      const std::string &gameVer =
+          (vit != gameVersionsById.end()) ? vit->second : std::string();
+      std::unordered_set<int> busyPorts;
+      for (const auto &[rid, gi] : gameServers)
+        if (gi.pid > 0 && isProcessAlive(gi.pid))
+          busyPorts.insert(gi.port);
+      auto inst =
+          spawnGameServer(roomId, gameId, gameVer, mapId, dbPath, room->players,
+                          room->aiSlots, room->modOptions, busyPorts,
+                          devBuildAcknowledged, wtCertPath, wtKeyPath);
+      gameServers[roomId] = inst;
+      persistGameServer(inst);
+      room->gameServerPort = inst.port;
+    }
+
+    result.ok = true;
+    return result;
+  };
+
+  // POST /api/rooms — create a room
+  net.AddHttpPost(
+      "/api/rooms", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
         HTTP_ROOM_AUTH();
         auto user = db.FindUserById(userId);
-        if (!user) return HttpAuth::JsonResponse(500, R"({"error":"user not found"})");
+        if (!user)
+          return HttpAuth::JsonResponse(500, R"({"error":"user not found"})");
 
-        nlohmann::json j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
-        if (j.is_discarded()) return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+        nlohmann::json j =
+            nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+        if (j.is_discarded())
+          return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
         std::string name = j.value("name", "");
         std::string mapId = j.value("map", "");
         std::string gameId = j.value("game", "");
-        if (name.empty()) name = "Game";
-        if (gameId.empty() && !availableGames.empty()) gameId = availableGames[0].id;
+        if (name.empty())
+          name = "Game";
+        if (gameId.empty() && !availableGames.empty())
+          gameId = availableGames[0].id;
         if (mapId.empty())
-            return HttpAuth::JsonResponse(400, R"({"error":"map is required"})");
+          return HttpAuth::JsonResponse(400, R"({"error":"map is required"})");
 
-        // Accept both JSON string ("true"/"1") and JSON bool/number for `persistent`.
+        // Accept both JSON string ("true"/"1") and JSON bool/number for
+        // `persistent`.
         bool persistent = false;
         if (j.contains("persistent")) {
-            const auto& pv = j["persistent"];
-            if (pv.is_string()) {
-                const std::string persistStr = pv.get<std::string>();
-                persistent = (persistStr == "true" || persistStr == "1");
-            } else if (pv.is_boolean()) {
-                persistent = pv.get<bool>();
-            } else if (pv.is_number()) {
-                persistent = (pv.get<double>() == 1.0);
-            }
+          const auto &pv = j["persistent"];
+          if (pv.is_string()) {
+            const std::string persistStr = pv.get<std::string>();
+            persistent = (persistStr == "true" || persistStr == "1");
+          } else if (pv.is_boolean()) {
+            persistent = pv.get<bool>();
+          } else if (pv.is_number()) {
+            persistent = (pv.get<double>() == 1.0);
+          }
         }
 
-        uint32_t roomId = rooms.CreateRoom(name, mapId, gameId, 8, "",
-            static_cast<uint32_t>(userId), 0 /*no WS clientId*/, user->username,
-            persistent);
-        auto* room = rooms.GetRoom(roomId);
+        // `scenario` is optional (PLAN-endtoend.md D10). Absent means "use
+        // whatever this map's war is", which is what the Create Game dialog
+        // sends when the host leaves the picker on its default. An
+        // explicitly-empty string means "no scenario, deliberately".
+        // Validate before CreateRoom so a typo never leaves a half-made room
+        // behind.
+        const bool hasScenarioChoice = j.contains("scenario");
+        const std::string scenarioChoice = j.value("scenario", "");
+        if (hasScenarioChoice && !scenarioChoice.empty() &&
+            ScenarioDiscovery::FindById(scenariosFor(gameId), scenarioChoice) ==
+                nullptr) {
+          return HttpAuth::JsonResponse(
+              400, R"({"error":"unknown scenario for this game"})");
+        }
+
+        uint32_t roomId = rooms.CreateRoom(
+            name, mapId, gameId, 8, "", static_cast<uint32_t>(userId),
+            0 /*no WS clientId*/, user->username, persistent);
+
+        applyRoomScenario(roomId, static_cast<uint32_t>(userId), gameId, mapId,
+                          hasScenarioChoice ? &scenarioChoice : nullptr);
+        // Only on this path: the direct-start manifest applies its own
+        // explicit host team afterwards, and overruling it here would be the
+        // same "chosen behind your back" property §7.3 rejected.
+        seatHostOnFirstSide(roomId, static_cast<uint32_t>(userId));
+
+        auto *room = rooms.GetRoom(roomId);
         broadcastRooms();
         return HttpAuth::JsonResponse(200, roomToJson(room));
-    });
+      });
 
-    // GET /api/rooms — list rooms
-    net.AddHttpGet("/api/rooms", RouteAuth::Public, [&](const std::string&) -> HttpResponse {
-        auto allRooms = rooms.GetAllRooms();
+  // GET /api/rooms — list rooms
+  net.AddHttpGet("/api/rooms", RouteAuth::Public,
+                 [&](const std::string &) -> HttpResponse {
+                   auto allRooms = rooms.GetAllRooms();
+                   std::string json = "[";
+                   bool first = true;
+                   for (const auto *r : allRooms) {
+                     if (!r)
+                       continue;
+                     if (!first)
+                       json += ",";
+                     first = false;
+                     json += roomToJson(r);
+                   }
+                   json += "]";
+                   return HttpAuth::JsonResponse(200, json);
+                 });
+
+  // GET /api/games — list available games
+  net.AddHttpGet(
+      "/api/games", RouteAuth::Public,
+      [&availableGames](const std::string &) -> HttpResponse {
         std::string json = "[";
         bool first = true;
-        for (const auto* r : allRooms) {
-            if (!r) continue;
-            if (!first) json += ",";
-            first = false;
-            json += roomToJson(r);
+        for (const auto &g : availableGames) {
+          if (!first)
+            json += ",";
+          first = false;
+          json += "{\"id\":\"" + HttpAuth::JsonEscape(g.id) + "\"" +
+                  ",\"displayName\":\"" + HttpAuth::JsonEscape(g.displayName) +
+                  "\"" + ",\"shortName\":\"" +
+                  HttpAuth::JsonEscape(g.shortName) + "\"" +
+                  ",\"description\":\"" + HttpAuth::JsonEscape(g.description) +
+                  "\"" + ",\"version\":\"" + HttpAuth::JsonEscape(g.version) +
+                  "\"" + ",\"lighting\":\"" + HttpAuth::JsonEscape(g.lighting) +
+                  "\"" + ",\"modelMaterialPort\":\"" +
+                  HttpAuth::JsonEscape(g.modelMaterialPort) + "\"}";
         }
         json += "]";
         return HttpAuth::JsonResponse(200, json);
-    });
+      });
 
-    // GET /api/games — list available games
-    net.AddHttpGet("/api/games", RouteAuth::Public, [&availableGames](const std::string&) -> HttpResponse {
-        std::string json = "[";
-        bool first = true;
-        for (const auto& g : availableGames) {
-            if (!first) json += ",";
-            first = false;
-            json += "{\"id\":\"" + HttpAuth::JsonEscape(g.id) + "\""
-                + ",\"displayName\":\"" + HttpAuth::JsonEscape(g.displayName) + "\""
-                + ",\"shortName\":\"" + HttpAuth::JsonEscape(g.shortName) + "\""
-                + ",\"description\":\"" + HttpAuth::JsonEscape(g.description) + "\""
-                + ",\"version\":\"" + HttpAuth::JsonEscape(g.version) + "\""
-                + ",\"lighting\":\"" + HttpAuth::JsonEscape(g.lighting) + "\""
-                + ",\"modelMaterialPort\":\"" + HttpAuth::JsonEscape(g.modelMaterialPort) + "\"}";
-        }
-        json += "]";
-        return HttpAuth::JsonResponse(200, json);
-    });
-
-    // GET /api/ai/* — list AI plugins for a game
-    net.AddHttpGet("/api/ai/*", RouteAuth::Public, [&aisByGame](const std::string& url) -> HttpResponse {
+  // GET /api/ai/* — list AI plugins for a game
+  net.AddHttpGet(
+      "/api/ai/*", RouteAuth::Public,
+      [&aisByGame](const std::string &url) -> HttpResponse {
         std::string gameId = url.substr(std::string("/api/ai/").size());
         if (gameId.empty())
-            return HttpAuth::JsonResponse(400, R"({"error":"missing game id"})");
+          return HttpAuth::JsonResponse(400, R"({"error":"missing game id"})");
 
         auto it = aisByGame.find(gameId);
         if (it == aisByGame.end())
-            return HttpAuth::JsonResponse(404, R"({"error":"game not found"})");
+          return HttpAuth::JsonResponse(404, R"({"error":"game not found"})");
 
         std::string json = "[";
         bool first = true;
-        for (const auto& ai : it->second) {
-            if (!first) json += ",";
-            first = false;
-            json += "{\"id\":\"" + HttpAuth::JsonEscape(ai.id) + "\""
-                + ",\"displayName\":\"" + HttpAuth::JsonEscape(ai.displayName) + "\""
-                + ",\"description\":\"" + HttpAuth::JsonEscape(ai.description) + "\""
-                + ",\"isEngineProvided\":" + (ai.isEngineProvided ? "true" : "false") + "}";
+        for (const auto &ai : it->second) {
+          if (!first)
+            json += ",";
+          first = false;
+          json += "{\"id\":\"" + HttpAuth::JsonEscape(ai.id) + "\"" +
+                  ",\"displayName\":\"" + HttpAuth::JsonEscape(ai.displayName) +
+                  "\"" + ",\"description\":\"" +
+                  HttpAuth::JsonEscape(ai.description) + "\"" +
+                  ",\"isEngineProvided\":" +
+                  (ai.isEngineProvided ? "true" : "false") + "}";
         }
         json += "]";
         return HttpAuth::JsonResponse(200, json);
-    });
+      });
 
-    // GET /api/games/<id>/resources.json — Spring's gamedata/resources.lua
-    // parsed and serialised as JSON. The client uses the
-    // `graphics.projectiletextures` map (and friends) to turn weapon
-    // texture names like `largelaser` into the actual file path
-    // (`gpl/largelaserfalloff.png`), then looks up the matching
-    // `.ktx2` URL via the recursive bitmaps manifest. Selection is
-    // entirely client-side; the lobby does only the Lua-eval step
-    // because resources.lua needs a real Lua VM with a VFS shim.
-    //
-    // Parsed JSON is cached per game on first request — the lobby
-    // is single-threaded for HTTP work so a plain unordered_map
-    // protected by a mutex is enough. Cache invalidation is implicit
-    // (lobby restart re-parses).
-    static std::mutex resourcesCacheMutex;
-    static std::unordered_map<std::string, std::string> resourcesCache;
-    net.AddHttpGet("/api/games/*", RouteAuth::Public, [&gamesDir](const std::string& url) -> HttpResponse {
-        // Match /api/games/<id>/resources.json and /api/games/<id>/ui-manifest.
-        // /api/games/data/* and /api/games (no trailing path) are handled by
-        // their own routes registered earlier — the wildcard here only sees
-        // URLs that those didn't match.
+  // GET /api/games/<id>/resources.json — Spring's gamedata/resources.lua
+  // parsed and serialised as JSON. The client uses the
+  // `graphics.projectiletextures` map (and friends) to turn weapon
+  // texture names like `largelaser` into the actual file path
+  // (`gpl/largelaserfalloff.png`), then looks up the matching
+  // `.ktx2` URL via the recursive bitmaps manifest. Selection is
+  // entirely client-side; the lobby does only the Lua-eval step
+  // because resources.lua needs a real Lua VM with a VFS shim.
+  //
+  // Parsed JSON is cached per game on first request — the lobby
+  // is single-threaded for HTTP work so a plain unordered_map
+  // protected by a mutex is enough. Cache invalidation is implicit
+  // (lobby restart re-parses).
+  static std::mutex resourcesCacheMutex;
+  static std::unordered_map<std::string, std::string> resourcesCache;
+  net.AddHttpGet(
+      "/api/games/*", RouteAuth::Public,
+      [&gamesDir, &scenariosFor](const std::string &url) -> HttpResponse {
+        // Match /api/games/<id>/resources.json, /api/games/<id>/ui-manifest
+        // and /api/games/<id>/scenarios. /api/games/data/* and /api/games (no
+        // trailing path) are handled by their own routes registered earlier —
+        // the wildcard here only sees URLs that those didn't match.
         const std::string prefix = "/api/games/";
         if (url.size() <= prefix.size())
-            return {.contentType = "text/plain", .body = {}, .status = 404};
+          return {.contentType = "text/plain", .body = {}, .status = 404};
         const std::string rest = url.substr(prefix.size());
+
+        // /api/games/<id>/scenarios — the war templates this game ships
+        // (PLAN-endtoend.md D10). Feeds the Create Game dialog's scenario
+        // picker: `map` lets the client filter to the map being created on,
+        // and `terminal` is what makes "this war can never end" a visible
+        // property of the choice rather than a surprise 40 minutes in.
+        // Always 200; an empty list for a game that ships no scenarios.
+        const std::string scnSuffix = "/scenarios";
+        if (rest.size() > scnSuffix.size() &&
+            rest.compare(rest.size() - scnSuffix.size(), scnSuffix.size(),
+                         scnSuffix) == 0) {
+          const std::string gameId =
+              rest.substr(0, rest.size() - scnSuffix.size());
+          if (gameId.empty() || gameId.find('/') != std::string::npos ||
+              gameId.find("..") != std::string::npos)
+            return {.contentType = "text/plain", .body = {}, .status = 400};
+
+          nlohmann::json arr = nlohmann::json::array();
+          for (const auto &s : scenariosFor(gameId)) {
+            nlohmann::json sj;
+            sj["id"] = s.id;
+            sj["displayName"] = s.displayName;
+            sj["map"] = s.mapId;
+            sj["tutorial"] = s.tutorial;
+            sj["terminal"] = s.terminal;
+            // The scenario's playable sides, resolved to one team each
+            // (PLAN-metalstorm-wars.md §7.4). NPC sides are omitted — a
+            // player is never offered Meridian's reavers. The room screen
+            // reads the *room's* `war_sides` modoption rather than this, but
+            // the Create Game dialog needs it before a room exists.
+            nlohmann::json sidesArr = nlohmann::json::array();
+            for (const auto &side : ScenarioDiscovery::PlayableSides(s)) {
+              nlohmann::json sd;
+              sd["faction"] = side.faction;
+              sd["team"] = side.team;
+              sd["staged"] = side.staged;
+              sidesArr.push_back(std::move(sd));
+            }
+            sj["sides"] = std::move(sidesArr);
+            arr.push_back(std::move(sj));
+          }
+          const std::string body = arr.dump();
+          return {.contentType = "application/json",
+                  .body = std::vector<uint8_t>(body.begin(), body.end()),
+                  .status = 200};
+        }
 
         // /api/games/<id>/ui-manifest — JSON list of override files present
         // under data/games/<id>/ui/. Always 200; empty list when the dir
@@ -1690,79 +3045,85 @@ int main(int argc, char* argv[])
         // ship no overrides at all.
         const std::string uiSuffix = "/ui-manifest";
         if (rest.size() > uiSuffix.size() &&
-            rest.compare(rest.size() - uiSuffix.size(), uiSuffix.size(), uiSuffix) == 0)
-        {
-            const std::string gameId = rest.substr(0, rest.size() - uiSuffix.size());
-            if (gameId.empty() || gameId.find('/') != std::string::npos ||
-                gameId.find("..") != std::string::npos)
-                return {.contentType = "text/plain", .body = {}, .status = 400};
+            rest.compare(rest.size() - uiSuffix.size(), uiSuffix.size(),
+                         uiSuffix) == 0) {
+          const std::string gameId =
+              rest.substr(0, rest.size() - uiSuffix.size());
+          if (gameId.empty() || gameId.find('/') != std::string::npos ||
+              gameId.find("..") != std::string::npos)
+            return {.contentType = "text/plain", .body = {}, .status = 400};
 
-            namespace fs = std::filesystem;
-            const fs::path uiDir = fs::path(gamesDir) / gameId / "ui";
-            std::string json = "{\"files\":[";
-            std::error_code ec;
-            if (fs::is_directory(uiDir, ec)) {
-                bool first = true;
-                for (auto it = fs::recursive_directory_iterator(uiDir, ec);
-                     it != fs::recursive_directory_iterator(); it.increment(ec))
-                {
-                    if (ec) break;
-                    if (!it->is_regular_file(ec)) continue;
-                    const auto rel = fs::relative(it->path(), uiDir, ec).generic_string();
-                    if (rel.empty() || rel.find("..") != std::string::npos) continue;
-                    if (!first) json += ",";
-                    first = false;
-                    json += "\"" + HttpAuth::JsonEscape(rel) + "\"";
-                }
+          namespace fs = std::filesystem;
+          const fs::path uiDir = fs::path(gamesDir) / gameId / "ui";
+          std::string json = "{\"files\":[";
+          std::error_code ec;
+          if (fs::is_directory(uiDir, ec)) {
+            bool first = true;
+            for (auto it = fs::recursive_directory_iterator(uiDir, ec);
+                 it != fs::recursive_directory_iterator(); it.increment(ec)) {
+              if (ec)
+                break;
+              if (!it->is_regular_file(ec))
+                continue;
+              const auto rel =
+                  fs::relative(it->path(), uiDir, ec).generic_string();
+              if (rel.empty() || rel.find("..") != std::string::npos)
+                continue;
+              if (!first)
+                json += ",";
+              first = false;
+              json += "\"" + HttpAuth::JsonEscape(rel) + "\"";
             }
-            json += "]}";
-            std::vector<uint8_t> body(json.begin(), json.end());
-            return {
-                .contentType = "application/json",
-                .body = std::move(body),
-                .status = 200,
-            };
+          }
+          json += "]}";
+          std::vector<uint8_t> body(json.begin(), json.end());
+          return {
+              .contentType = "application/json",
+              .body = std::move(body),
+              .status = 200,
+          };
         }
 
         const std::string suffix = "/resources.json";
         if (rest.size() <= suffix.size() ||
-            rest.compare(rest.size() - suffix.size(), suffix.size(), suffix) != 0)
-            return {.contentType = "text/plain", .body = {}, .status = 404};
+            rest.compare(rest.size() - suffix.size(), suffix.size(), suffix) !=
+                0)
+          return {.contentType = "text/plain", .body = {}, .status = 404};
         const std::string gameId = rest.substr(0, rest.size() - suffix.size());
         if (gameId.empty() || gameId.find('/') != std::string::npos ||
             gameId.find("..") != std::string::npos)
-            return {.contentType = "text/plain", .body = {}, .status = 400};
+          return {.contentType = "text/plain", .body = {}, .status = 400};
 
         // Cache hit?
         {
-            std::lock_guard<std::mutex> lock(resourcesCacheMutex);
-            auto it = resourcesCache.find(gameId);
-            if (it != resourcesCache.end()) {
-                std::vector<uint8_t> body(it->second.begin(), it->second.end());
-                return {
-                    .contentType = "application/json",
-                    .body = std::move(body),
-                    .status = 200,
-                    .cacheControl = CacheControl::StaticAssetHeader(),
-                };
-            }
+          std::lock_guard<std::mutex> lock(resourcesCacheMutex);
+          auto it = resourcesCache.find(gameId);
+          if (it != resourcesCache.end()) {
+            std::vector<uint8_t> body(it->second.begin(), it->second.end());
+            return {
+                .contentType = "application/json",
+                .body = std::move(body),
+                .status = 200,
+                .cacheControl = CacheControl::StaticAssetHeader(),
+            };
+          }
         }
 
         const std::string gameDir = gamesDir + "/" + gameId;
         const std::string engineBaseDir = "cont/base/springcontent";
-        const std::string json = ResourcesParser::ParseGameResources(
-            gameId, gameDir, engineBaseDir);
+        const std::string json =
+            ResourcesParser::ParseGameResources(gameId, gameDir, engineBaseDir);
         if (json.empty()) {
-            const std::string err = R"({"error":"parse failed"})";
-            return {
-                .contentType = "application/json",
-                .body = std::vector<uint8_t>(err.begin(), err.end()),
-                .status = 500,
-            };
+          const std::string err = R"({"error":"parse failed"})";
+          return {
+              .contentType = "application/json",
+              .body = std::vector<uint8_t>(err.begin(), err.end()),
+              .status = 500,
+          };
         }
         {
-            std::lock_guard<std::mutex> lock(resourcesCacheMutex);
-            resourcesCache.emplace(gameId, json);
+          std::lock_guard<std::mutex> lock(resourcesCacheMutex);
+          resourcesCache.emplace(gameId, json);
         }
         std::vector<uint8_t> body(json.begin(), json.end());
         return {
@@ -1771,222 +3132,420 @@ int main(int argc, char* argv[])
             .status = 200,
             .cacheControl = CacheControl::StaticAssetHeader(),
         };
-    });
+      });
 
-    // NOTE: /api/rooms/end and /api/rooms/close are removed.
-    // Room lifecycle is handled entirely through /api/rooms/leave:
-    //   - Last human leaves non-persistent room → room abandoned, game killed
-    //   - Host leaves with others present → host transferred
-    //   - Persistent room → stays alive with 0 humans
+  // NOTE: /api/rooms/end and /api/rooms/close are removed.
+  // Room lifecycle is handled entirely through /api/rooms/leave:
+  //   - Last human leaves non-persistent room → room abandoned, game killed
+  //   - Host leaves with others present → host transferred
+  //   - Persistent room → stays alive with 0 humans
 
-    // POST /api/rooms/join — join a room
-    net.AddHttpPost("/api/rooms/join", RouteAuth::TokenRequired, [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+  // POST /api/rooms/join — join a room
+  net.AddHttpPost(
+      "/api/rooms/join", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
         HTTP_ROOM_AUTH();
         auto user = db.FindUserById(userId);
-        if (!user) return HttpAuth::JsonResponse(500, R"({"error":"user not found"})");
+        if (!user)
+          return HttpAuth::JsonResponse(500, R"({"error":"user not found"})");
 
-        nlohmann::json j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
-        if (j.is_discarded()) return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
-        uint32_t roomId = j.contains("room_id") && j["room_id"].is_string()
-            ? (uint32_t)std::atoi(j["room_id"].get<std::string>().c_str())
-            : (uint32_t)j.value("room_id", 0);
+        nlohmann::json j =
+            nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+        if (j.is_discarded())
+          return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+        uint32_t roomId =
+            j.contains("room_id") && j["room_id"].is_string()
+                ? (uint32_t)std::atoi(j["room_id"].get<std::string>().c_str())
+                : (uint32_t)j.value("room_id", 0);
         std::string password = j.value("password", "");
+        bool asSpectator = j.value("as_spectator", false);
 
-        if (!rooms.JoinRoom(roomId, static_cast<uint32_t>(userId), 0, user->username, password))
-            return HttpAuth::JsonResponse(403, R"({"error":"cannot join room"})");
+        if (!rooms.JoinRoom(roomId, static_cast<uint32_t>(userId), 0,
+                            user->username, password, asSpectator))
+          return HttpAuth::JsonResponse(403, R"({"error":"cannot join room"})");
 
         broadcastRooms();
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(roomId)));
-    });
+      });
 
-    // POST /api/rooms/leave — leave a room. If this was the last
-    // human in a non-persistent room, the room is abandoned and any
-    // running game server is killed. If the host leaves with other
-    // humans still present, host is transferred to a random player.
-    net.AddHttpPost("/api/rooms/leave", RouteAuth::TokenRequired, [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+  // POST /api/rooms/leave — leave a room. If this was the last
+  // human in a non-persistent room, the room is abandoned and any
+  // running game server is killed. If the host leaves with other
+  // humans still present, host is transferred to a random player.
+  net.AddHttpPost(
+      "/api/rooms/leave", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
         HTTP_ROOM_AUTH();
-        auto* room = findPlayerRoom(static_cast<uint32_t>(userId));
-        if (!room) return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
+        auto *room = findPlayerRoom(static_cast<uint32_t>(userId));
+        if (!room)
+          return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
         uint32_t rid = room->id;
         auto result = rooms.LeaveRoom(rid, static_cast<uint32_t>(userId));
 
         if (result == LeaveResult::Abandoned) {
-            // Kill the game server if one is running
-            auto gsIt = gameServers.find(rid);
-            if (gsIt != gameServers.end()) {
-                kill(gsIt->second.pid, SIGTERM);
-                gsIt->second.state = GameServerInstance::Ended;
-                removeGameServer(rid);
-                SLOG(SPRING_LOG_NOTICE, "room %u abandoned, killed game server pid %d",
-                    rid, gsIt->second.pid);
-            }
-            rooms.DeleteRoom(rid);
+          // Kill the game server if one is running
+          auto gsIt = gameServers.find(rid);
+          if (gsIt != gameServers.end()) {
+            kill(gsIt->second.pid, SIGTERM);
+            gsIt->second.state = GameServerInstance::Ended;
+            removeGameServer(rid);
+            SLOG(SPRING_LOG_NOTICE,
+                 "room %u abandoned, killed game server pid %d", rid,
+                 gsIt->second.pid);
+          }
+          rooms.DeleteRoom(rid);
         }
 
         broadcastRooms();
         std::string resultStr;
         switch (result) {
-            case LeaveResult::Left:            resultStr = "left"; break;
-            case LeaveResult::HostTransferred: resultStr = "host_transferred"; break;
-            case LeaveResult::Abandoned:       resultStr = "abandoned"; break;
-            case LeaveResult::StillPersistent: resultStr = "persistent"; break;
-            default:                           resultStr = "not_found"; break;
+        case LeaveResult::Left:
+          resultStr = "left";
+          break;
+        case LeaveResult::HostTransferred:
+          resultStr = "host_transferred";
+          break;
+        case LeaveResult::Abandoned:
+          resultStr = "abandoned";
+          break;
+        case LeaveResult::StillPersistent:
+          resultStr = "persistent";
+          break;
+        default:
+          resultStr = "not_found";
+          break;
         }
-        return HttpAuth::JsonResponse(200,
-            "{\"ok\":true,\"result\":\"" + resultStr + "\"}");
-    });
+        return HttpAuth::JsonResponse(200, "{\"ok\":true,\"result\":\"" +
+                                               resultStr + "\"}");
+      });
 
-    // POST /api/rooms/ready
-    net.AddHttpPost("/api/rooms/ready", RouteAuth::TokenRequired, [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+  // POST /api/rooms/ready
+  net.AddHttpPost(
+      "/api/rooms/ready", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
         HTTP_ROOM_AUTH();
-        auto* room = findPlayerRoom(static_cast<uint32_t>(userId));
-        if (!room) return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
-        nlohmann::json j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
-        if (j.is_discarded()) return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+        auto *room = findPlayerRoom(static_cast<uint32_t>(userId));
+        if (!room)
+          return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
+        nlohmann::json j =
+            nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+        if (j.is_discarded())
+          return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
         // Accept JSON string ("true"/"1") or JSON bool/number for `ready`.
         bool ready = false;
         if (j.contains("ready")) {
-            const auto& rv = j["ready"];
-            if (rv.is_string()) {
-                const std::string readyStr = rv.get<std::string>();
-                ready = (readyStr == "true" || readyStr == "1");
-            } else if (rv.is_boolean()) {
-                ready = rv.get<bool>();
-            } else if (rv.is_number()) {
-                ready = (rv.get<double>() == 1.0);
-            }
+          const auto &rv = j["ready"];
+          if (rv.is_string()) {
+            const std::string readyStr = rv.get<std::string>();
+            ready = (readyStr == "true" || readyStr == "1");
+          } else if (rv.is_boolean()) {
+            ready = rv.get<bool>();
+          } else if (rv.is_number()) {
+            ready = (rv.get<double>() == 1.0);
+          }
         }
         rooms.SetReady(room->id, static_cast<uint32_t>(userId), ready);
         broadcastRooms();
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
-    });
+      });
 
-    // POST /api/rooms/team
-    net.AddHttpPost("/api/rooms/team", RouteAuth::TokenRequired, [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+  // POST /api/rooms/team
+  net.AddHttpPost(
+      "/api/rooms/team", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
         HTTP_ROOM_AUTH();
-        auto* room = findPlayerRoom(static_cast<uint32_t>(userId));
-        if (!room) return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
-        nlohmann::json j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
-        if (j.is_discarded()) return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
-        uint8_t team = j.contains("team") && j["team"].is_string()
-            ? (uint8_t)std::atoi(j["team"].get<std::string>().c_str())
-            : (uint8_t)j.value("team", 0);
+        auto *room = findPlayerRoom(static_cast<uint32_t>(userId));
+        if (!room)
+          return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
+        nlohmann::json j =
+            nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+        if (j.is_discarded())
+          return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+        uint8_t team =
+            j.contains("team") && j["team"].is_string()
+                ? (uint8_t)std::atoi(j["team"].get<std::string>().c_str())
+                : (uint8_t)j.value("team", 0);
         rooms.SetTeam(room->id, static_cast<uint32_t>(userId), team);
         broadcastRooms();
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
-    });
+      });
 
-    // POST /api/rooms/startpos
-    net.AddHttpPost("/api/rooms/startpos", RouteAuth::TokenRequired, [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+  // POST /api/rooms/enlist — spectator → player (PLAN-metalstorm-onboarding
+  // §4). Only converts the LOBBY's roster; a spectator who enlists while
+  // watching an already-Active game keeps observing under their existing
+  // spring-server session until they rejoin — the running game server's
+  // --player roster is fixed at spawn time (dynamic mid-game roster growth
+  // is the Stage-7-gated "metalstorm-lobby" work). Enlisting before the
+  // game starts converts cleanly: the next spawnGameServer call picks up
+  // the updated non-spectator roster.
+  net.AddHttpPost(
+      "/api/rooms/enlist", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
         HTTP_ROOM_AUTH();
-        auto* room = findPlayerRoom(static_cast<uint32_t>(userId));
-        if (!room) return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
-        nlohmann::json j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
-        if (j.is_discarded()) return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
-        int8_t pos = j.contains("pos") && j["pos"].is_string()
-            ? (int8_t)std::atoi(j["pos"].get<std::string>().c_str())
-            : (int8_t)j.value("pos", 0);
+        auto *room = findPlayerRoom(static_cast<uint32_t>(userId));
+        if (!room)
+          return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
+        nlohmann::json j =
+            nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+        if (j.is_discarded())
+          return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+        uint8_t team =
+            j.contains("team") && j["team"].is_string()
+                ? (uint8_t)std::atoi(j["team"].get<std::string>().c_str())
+                : (uint8_t)j.value("team", 255);
+        if (!rooms.EnlistSpectator(room->id, static_cast<uint32_t>(userId),
+                                   team))
+          return HttpAuth::JsonResponse(403, R"({"error":"cannot enlist"})");
+        broadcastRooms();
+        return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
+      });
+
+  // POST /api/rooms/startpos
+  net.AddHttpPost(
+      "/api/rooms/startpos", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        auto *room = findPlayerRoom(static_cast<uint32_t>(userId));
+        if (!room)
+          return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
+        nlohmann::json j =
+            nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+        if (j.is_discarded())
+          return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+        int8_t pos =
+            j.contains("pos") && j["pos"].is_string()
+                ? (int8_t)std::atoi(j["pos"].get<std::string>().c_str())
+                : (int8_t)j.value("pos", 0);
         // Find the target player — default to self
-        uint32_t target = j.contains("target_player_id") && j["target_player_id"].is_string()
-            ? (uint32_t)std::atoi(j["target_player_id"].get<std::string>().c_str())
-            : (uint32_t)j.value("target_player_id", static_cast<uint32_t>(userId));
-        rooms.SetPlayerStartPos(room->id, static_cast<uint32_t>(userId), target, pos, 6);
+        uint32_t target =
+            j.contains("target_player_id") && j["target_player_id"].is_string()
+                ? (uint32_t)std::atoi(
+                      j["target_player_id"].get<std::string>().c_str())
+                : (uint32_t)j.value("target_player_id",
+                                    static_cast<uint32_t>(userId));
+        rooms.SetPlayerStartPos(room->id, static_cast<uint32_t>(userId), target,
+                                pos, 6);
         broadcastRooms();
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
-    });
+      });
 
-    // POST /api/rooms/kick
-    net.AddHttpPost("/api/rooms/kick", RouteAuth::TokenRequired, [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+  // POST /api/rooms/kick
+  net.AddHttpPost(
+      "/api/rooms/kick", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
         HTTP_ROOM_AUTH();
-        auto* room = findPlayerRoom(static_cast<uint32_t>(userId));
-        if (!room) return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
-        nlohmann::json j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
-        if (j.is_discarded()) return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
-        uint32_t target = j.contains("target_player_id") && j["target_player_id"].is_string()
-            ? (uint32_t)std::atoi(j["target_player_id"].get<std::string>().c_str())
-            : (uint32_t)j.value("target_player_id", 0);
+        auto *room = findPlayerRoom(static_cast<uint32_t>(userId));
+        if (!room)
+          return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
+        nlohmann::json j =
+            nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+        if (j.is_discarded())
+          return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+        uint32_t target =
+            j.contains("target_player_id") && j["target_player_id"].is_string()
+                ? (uint32_t)std::atoi(
+                      j["target_player_id"].get<std::string>().c_str())
+                : (uint32_t)j.value("target_player_id", 0);
         if (!rooms.KickPlayer(room->id, static_cast<uint32_t>(userId), target))
-            return HttpAuth::JsonResponse(403, R"({"error":"cannot kick"})");
+          return HttpAuth::JsonResponse(403, R"({"error":"cannot kick"})");
         broadcastRooms();
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
-    });
+      });
 
-    // POST /api/rooms/ai/add
-    net.AddHttpPost("/api/rooms/ai/add", RouteAuth::TokenRequired, [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+  // POST /api/rooms/ai/add
+  net.AddHttpPost(
+      "/api/rooms/ai/add", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
         HTTP_ROOM_AUTH();
-        auto* room = findPlayerRoom(static_cast<uint32_t>(userId));
-        if (!room) return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
-        nlohmann::json j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
-        if (j.is_discarded()) return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+        auto *room = findPlayerRoom(static_cast<uint32_t>(userId));
+        if (!room)
+          return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
+        nlohmann::json j =
+            nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+        if (j.is_discarded())
+          return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
         std::string aiId = j.value("ai_id", "");
         std::string aiName = j.value("name", "");
-        if (aiName.empty()) aiName = aiId;
-        uint8_t team = j.contains("team") && j["team"].is_string()
-            ? (uint8_t)std::atoi(j["team"].get<std::string>().c_str())
-            : (uint8_t)j.value("team", 0);
-        if (!rooms.AddAISlot(room->id, static_cast<uint32_t>(userId), aiId, aiName, team))
-            return HttpAuth::JsonResponse(400, R"({"error":"cannot add AI"})");
+        if (aiName.empty())
+          aiName = aiId;
+        uint8_t team =
+            j.contains("team") && j["team"].is_string()
+                ? (uint8_t)std::atoi(j["team"].get<std::string>().c_str())
+                : (uint8_t)j.value("team", 0);
+        if (!rooms.AddAISlot(room->id, static_cast<uint32_t>(userId), aiId,
+                             aiName, team))
+          return HttpAuth::JsonResponse(400, R"({"error":"cannot add AI"})");
+        // Optional personality/difficulty profile at creation time
+        // (PLAN-metalstorm-ai.md §10 task 6) — same effect as adding the
+        // slot then calling /api/rooms/ai/profile, just one round trip.
+        std::string profile = j.value("profile", "");
+        if (!profile.empty()) {
+          GameRoom *added = rooms.GetRoom(room->id);
+          if (added && !added->aiSlots.empty())
+            rooms.SetAIProfile(room->id, static_cast<uint32_t>(userId),
+                               static_cast<uint8_t>(added->aiSlots.size() - 1),
+                               profile);
+        }
         broadcastRooms();
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
-    });
+      });
 
-    // POST /api/rooms/ai/remove
-    net.AddHttpPost("/api/rooms/ai/remove", RouteAuth::TokenRequired, [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+  // POST /api/rooms/ai/remove
+  net.AddHttpPost(
+      "/api/rooms/ai/remove", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
         HTTP_ROOM_AUTH();
-        auto* room = findPlayerRoom(static_cast<uint32_t>(userId));
-        if (!room) return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
-        nlohmann::json j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
-        if (j.is_discarded()) return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
-        uint8_t slotIndex = j.contains("slot_index") && j["slot_index"].is_string()
-            ? (uint8_t)std::atoi(j["slot_index"].get<std::string>().c_str())
-            : (uint8_t)j.value("slot_index", 0);
-        if (!rooms.RemoveAISlot(room->id, static_cast<uint32_t>(userId), slotIndex))
-            return HttpAuth::JsonResponse(400, R"({"error":"cannot remove AI"})");
+        auto *room = findPlayerRoom(static_cast<uint32_t>(userId));
+        if (!room)
+          return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
+        nlohmann::json j =
+            nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+        if (j.is_discarded())
+          return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+        uint8_t slotIndex =
+            j.contains("slot_index") && j["slot_index"].is_string()
+                ? (uint8_t)std::atoi(j["slot_index"].get<std::string>().c_str())
+                : (uint8_t)j.value("slot_index", 0);
+        if (!rooms.RemoveAISlot(room->id, static_cast<uint32_t>(userId),
+                                slotIndex))
+          return HttpAuth::JsonResponse(400, R"({"error":"cannot remove AI"})");
         broadcastRooms();
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
-    });
+      });
 
-    // POST /api/rooms/modoption — host sets/clears one room modoption.
-    // Body: {"key":"...","value":"..."}. An empty/absent value clears it.
-    // (PLAN-bar.md §5.)
-    net.AddHttpPost("/api/rooms/modoption", RouteAuth::TokenRequired, [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+  // POST /api/rooms/modoption — host sets/clears one room modoption.
+  // Body: {"key":"...","value":"..."}. An empty/absent value clears it.
+  // (PLAN-bar.md §5.)
+  net.AddHttpPost(
+      "/api/rooms/modoption", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
         HTTP_ROOM_AUTH();
-        auto* room = findPlayerRoom(static_cast<uint32_t>(userId));
-        if (!room) return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
-        nlohmann::json j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
-        if (j.is_discarded()) return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+        auto *room = findPlayerRoom(static_cast<uint32_t>(userId));
+        if (!room)
+          return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
+        nlohmann::json j =
+            nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+        if (j.is_discarded())
+          return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
         std::string key = j.value("key", "");
         std::string value = j.value("value", "");
-        if (!rooms.SetModOption(room->id, static_cast<uint32_t>(userId), key, value))
-            return HttpAuth::JsonResponse(400, R"({"error":"cannot set modoption"})");
+        if (!rooms.SetModOption(room->id, static_cast<uint32_t>(userId), key,
+                                value))
+          return HttpAuth::JsonResponse(400,
+                                        R"({"error":"cannot set modoption"})");
         broadcastRooms();
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
-    });
+      });
 
-    // POST /api/rooms/ai/team — change an AI slot's team
-    net.AddHttpPost("/api/rooms/ai/team", RouteAuth::TokenRequired, [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+  // POST /api/rooms/ai/team — change an AI slot's team
+  net.AddHttpPost(
+      "/api/rooms/ai/team", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
         HTTP_ROOM_AUTH();
-        auto* room = findPlayerRoom(static_cast<uint32_t>(userId));
-        if (!room) return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
-        nlohmann::json j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
-        if (j.is_discarded()) return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
-        uint8_t slotIndex = j.contains("slot_index") && j["slot_index"].is_string()
-            ? (uint8_t)std::atoi(j["slot_index"].get<std::string>().c_str())
-            : (uint8_t)j.value("slot_index", 0);
-        uint8_t team = j.contains("team") && j["team"].is_string()
-            ? (uint8_t)std::atoi(j["team"].get<std::string>().c_str())
-            : (uint8_t)j.value("team", 0);
-        if (!rooms.SetAITeam(room->id, static_cast<uint32_t>(userId), slotIndex, team))
-            return HttpAuth::JsonResponse(400, R"({"error":"cannot set AI team"})");
+        auto *room = findPlayerRoom(static_cast<uint32_t>(userId));
+        if (!room)
+          return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
+        nlohmann::json j =
+            nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+        if (j.is_discarded())
+          return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+        uint8_t slotIndex =
+            j.contains("slot_index") && j["slot_index"].is_string()
+                ? (uint8_t)std::atoi(j["slot_index"].get<std::string>().c_str())
+                : (uint8_t)j.value("slot_index", 0);
+        uint8_t team =
+            j.contains("team") && j["team"].is_string()
+                ? (uint8_t)std::atoi(j["team"].get<std::string>().c_str())
+                : (uint8_t)j.value("team", 0);
+        if (!rooms.SetAITeam(room->id, static_cast<uint32_t>(userId), slotIndex,
+                             team))
+          return HttpAuth::JsonResponse(400,
+                                        R"({"error":"cannot set AI team"})");
         broadcastRooms();
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
-    });
+      });
 
-    // POST /api/rooms/start — start the game
-    net.AddHttpPost("/api/rooms/start", RouteAuth::TokenRequired, [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+  // POST /api/rooms/ai/profile — set (or, with an empty/absent value,
+  // clear) an AI slot's personality/difficulty profile (PLAN-metalstorm-ai.md
+  // §10 task 6). Body: {"slot_index": N, "profile": "aggressive"}.
+  net.AddHttpPost(
+      "/api/rooms/ai/profile", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
         HTTP_ROOM_AUTH();
-        auto* room = findPlayerRoom(static_cast<uint32_t>(userId));
-        if (!room) return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
+        auto *room = findPlayerRoom(static_cast<uint32_t>(userId));
+        if (!room)
+          return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
+        nlohmann::json j =
+            nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+        if (j.is_discarded())
+          return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+        uint8_t slotIndex =
+            j.contains("slot_index") && j["slot_index"].is_string()
+                ? (uint8_t)std::atoi(j["slot_index"].get<std::string>().c_str())
+                : (uint8_t)j.value("slot_index", 0);
+        std::string profile = j.value("profile", "");
+        if (!rooms.SetAIProfile(room->id, static_cast<uint32_t>(userId),
+                                slotIndex, profile))
+          return HttpAuth::JsonResponse(
+              400, R"({"error":"cannot set AI profile"})");
+        broadcastRooms();
+        return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
+      });
+
+  // PLAN-security-hardening task 11 (G10): /api/rooms/start forks+execs a
+  // spring-server. The host-only check (delegated to RoomManager::StartGame)
+  // already scopes *who* may start *which* room, but nothing bounded the
+  // fork/exec rate or the total live process count — an authenticated user
+  // could loop create→start and fork-bomb the host. Two bounds:
+  //   - a global token bucket (burst 10, ~10/min sustained) on spawns, and
+  //   - a hard ceiling on concurrent live game servers.
+  // Both apply in dev and prod (a spawn is expensive regardless of build).
+  static TokenBucket roomSpawnLimiter(/*burst=*/10.0,
+                                      /*perSecond=*/10.0 / 60.0);
+  constexpr size_t kMaxConcurrentGameServers = 64;
+
+  // POST /api/rooms/start — start the game
+  net.AddHttpPost(
+      "/api/rooms/start", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        auto *room = findPlayerRoom(static_cast<uint32_t>(userId));
+        if (!room)
+          return HttpAuth::JsonResponse(404, R"({"error":"not in a room"})");
+
+        // Fork-bomb brakes (G10), evaluated before any state mutation. Count
+        // only genuinely-alive servers so ended/crashed rooms don't wedge the
+        // cap.
+        {
+          size_t aliveServers = 0;
+          for (const auto &[rid, gi] : gameServers)
+            if (gi.pid > 0 && isProcessAlive(gi.pid))
+              ++aliveServers;
+          if (aliveServers >= kMaxConcurrentGameServers) {
+            SLOG(SPRING_LOG_WARNING,
+                 "room %u start refused: %zu/%zu game servers already live",
+                 room->id, aliveServers, kMaxConcurrentGameServers);
+            return HttpAuth::JsonResponse(
+                503,
+                R"({"error":"server capacity reached — try again shortly"})");
+          }
+        }
+        if (!roomSpawnLimiter.TryConsume())
+          return HttpAuth::JsonResponse(
+              429, R"({"error":"game-start rate limit exceeded"})");
 
         // Auto-add a Null AI if every participant ends up on the same
         // team. Without an opposing ally, ZK's game_over.lua trips its
@@ -1997,31 +3556,48 @@ int main(int argc, char* argv[])
         // anyone who *did* set up an opponent and only kicks in for a
         // genuinely-solo room.
         {
-            std::set<uint8_t> teams;
-            for (const auto& p : room->players) {
-                if (!p.isSpectator) teams.insert(p.team);
+          std::set<uint8_t> teams;
+          for (const auto &p : room->players) {
+            if (!p.isSpectator)
+              teams.insert(p.team);
+          }
+          for (const auto &a : room->aiSlots)
+            teams.insert(a.team);
+          if (teams.size() <= 1) {
+            uint8_t hostTeam = 0;
+            for (const auto &p : room->players) {
+              if (p.playerId == room->hostPlayerId) {
+                hostTeam = p.team;
+                break;
+              }
             }
-            for (const auto& a : room->aiSlots) teams.insert(a.team);
-            if (teams.size() <= 1) {
-                uint8_t hostTeam = 0;
-                for (const auto& p : room->players) {
-                    if (p.playerId == room->hostPlayerId) { hostTeam = p.team; break; }
-                }
-                const uint8_t aiTeam = (hostTeam == 0) ? 1 : 0;
-                if (rooms.AddAISlot(room->id, static_cast<uint32_t>(userId),
-                                    "null", "Null AI", aiTeam)) {
-                    SLOG(SPRING_LOG_NOTICE,
-                        "room %u: solo start detected — auto-added Null AI on team %u",
-                        room->id, static_cast<unsigned>(aiTeam));
-                } else {
-                    SLOG(SPRING_LOG_WARNING,
-                        "room %u: solo start but auto-AddAISlot failed", room->id);
-                }
+            const uint8_t aiTeam = firstFreeSlotTeam(*room, hostTeam);
+            if (rooms.AddAISlot(room->id, static_cast<uint32_t>(userId), "null",
+                                "Null AI", aiTeam)) {
+              SLOG(SPRING_LOG_NOTICE,
+                   "room %u: solo start detected — auto-added Null AI on team "
+                   "%u",
+                   room->id, static_cast<unsigned>(aiTeam));
+            } else {
+              SLOG(SPRING_LOG_WARNING,
+                   "room %u: solo start but auto-AddAISlot failed", room->id);
             }
+          }
         }
 
         if (!rooms.StartGame(room->id, static_cast<uint32_t>(userId)))
-            return HttpAuth::JsonResponse(400, R"({"error":"cannot start game"})");
+          return HttpAuth::JsonResponse(400,
+                                        R"({"error":"cannot start game"})");
+
+        // Last line of defence before the game server forks: say out loud
+        // whether the war we are about to spawn can ever finish
+        // (PLAN-endtoend.md D10). Deliberately does NOT back-fill a missing
+        // scenario here — applyRoomScenario at create time is the single
+        // owner of that decision, and silently overturning a host's choice at
+        // start is the same "chosen behind your back" property the design
+        // call rejected. Rooms created before this change (and persistent
+        // rooms restored from the DB) surface here as the warning.
+        warnIfWarCannotEnd(room);
 
         // Give every still-unassigned slot a distinct map start position
         // before spawning the game server. AutoAssignStartPositions skips
@@ -2032,233 +3608,265 @@ int main(int argc, char* argv[])
         // startPos=-1, the sim spawns ALL teams at map centre, and enemy
         // commanders overlap and immediately fight to a premature GameOver.
         {
-            MapMetadataDb mdb;
-            const size_t spCount = mdb.GetMap(mapDb, room->mapId).startPositions.size();
-            const int8_t maxStartPos =
-                static_cast<int8_t>(spCount > 127 ? 127 : spCount);
-            rooms.AutoAssignStartPositions(room->id, maxStartPos);
+          MapMetadataDb mdb;
+          const size_t spCount =
+              mdb.GetMap(mapDb, room->mapId).startPositions.size();
+          const int8_t maxStartPos =
+              static_cast<int8_t>(spCount > 127 ? 127 : spCount);
+          rooms.AutoAssignStartPositions(room->id, maxStartPos);
         }
 
         // Verify game exists before spawning
         auto it = gamePathsById.find(room->gameId);
 
         if (it != gamePathsById.end()) {
-            const auto vit = gameVersionsById.find(room->gameId);
-            const std::string& gameVer = (vit != gameVersionsById.end()) ? vit->second : std::string();
-            // Skip ports currently held by live spring-server processes.
-            // Without this, the new game-server binds via SO_REUSEPORT
-            // alongside the old one and incoming client connections
-            // round-robin between the two — see findFreePort comment.
-            std::unordered_set<int> busyPorts;
-            for (const auto& [rid, gi] : gameServers) {
-                if (gi.pid > 0 && isProcessAlive(gi.pid)) {
-                    busyPorts.insert(gi.port);
-                }
+          const auto vit = gameVersionsById.find(room->gameId);
+          const std::string &gameVer =
+              (vit != gameVersionsById.end()) ? vit->second : std::string();
+          // Skip ports currently held by live spring-server processes.
+          // Without this, the new game-server binds via SO_REUSEPORT
+          // alongside the old one and incoming client connections
+          // round-robin between the two — see findFreePort comment.
+          std::unordered_set<int> busyPorts;
+          for (const auto &[rid, gi] : gameServers) {
+            if (gi.pid > 0 && isProcessAlive(gi.pid)) {
+              busyPorts.insert(gi.port);
             }
-            auto inst = spawnGameServer(room->id, room->gameId, gameVer,
-                room->mapId, dbPath,
-                room->players, room->aiSlots, room->modOptions, busyPorts, devBuildAcknowledged,
-                wtCertPath, wtKeyPath);
-            gameServers[room->id] = inst;
-            persistGameServer(inst);
-            room->gameServerPort = inst.port;
+          }
+          auto inst = spawnGameServer(
+              room->id, room->gameId, gameVer, room->mapId, dbPath,
+              room->players, room->aiSlots, room->modOptions, busyPorts,
+              devBuildAcknowledged, wtCertPath, wtKeyPath);
+          gameServers[room->id] = inst;
+          persistGameServer(inst);
+          room->gameServerPort = inst.port;
+          // Audit the process spawn (G10 / §3): who started which game/map on
+          // what port. Append-only admin_audit row.
+          {
+            auto starter = db.FindUserById(userId);
+            db.LogAudit(userId, starter ? starter->username : std::string("?"),
+                        "room_start", room->gameId,
+                        "room=" + std::to_string(room->id) + " map=" +
+                            room->mapId + " port=" + std::to_string(inst.port) +
+                            " pid=" + std::to_string(inst.pid));
+          }
         }
 
         broadcastRooms();
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
-    });
+      });
 
-    // POST /api/rooms/direct — PLAN-quickstart.md Part A. Dev/test-only:
-    // collapses the whole lobby dance (login, create, add AI, join, ready,
-    // start) into one manifest + one round trip. Gated by dev_direct_start
-    // (off by default, never set in prod) AND (admin role OR localhost
-    // origin) — two independent latches (E6).
-    //
-    // Response is the same room JSON /api/rooms/start already returns
-    // (state, players, ai_slots, modoptions, game_server_port) plus a
-    // `sessions` map of username -> token. Deliberately does NOT include a
-    // wtInfo field: the lobby process links neither WebTransportServer nor
-    // an outbound HTTP client, so it cannot fetch the spawned game server's
-    // own /api/wt/info without either a new dependency or blocking this
-    // single-threaded HTTP loop for the game server's full cold-boot time
-    // (observed up to 90s+ for a heavy game). The client already does its
-    // own /api/wt/info discovery with connect-retry once it has gamePort,
-    // exactly as it does today after a normal /api/rooms/start — this
-    // reuses that path instead of duplicating it server-side.
-    net.AddHttpPost("/api/rooms/direct", RouteAuth::LocalhostOrAdmin, [&](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+  // POST /api/rooms/direct — PLAN-quickstart.md Part A. Dev/test-only:
+  // collapses the whole lobby dance (login, create, add AI, join, ready,
+  // start) into one manifest + one round trip. Gated by dev_direct_start
+  // (off by default, never set in prod) AND (admin role OR localhost
+  // origin) — two independent latches (E6).
+  //
+  // Response is the same room JSON /api/rooms/start already returns
+  // (state, players, ai_slots, modoptions, game_server_port) plus a
+  // `sessions` map of username -> token. Deliberately does NOT include a
+  // wtInfo field: the lobby process links neither WebTransportServer nor
+  // an outbound HTTP client, so it cannot fetch the spawned game server's
+  // own /api/wt/info without either a new dependency or blocking this
+  // single-threaded HTTP loop for the game server's full cold-boot time
+  // (observed up to 90s+ for a heavy game). The client already does its
+  // own /api/wt/info discovery with connect-retry once it has gamePort,
+  // exactly as it does today after a normal /api/rooms/start — this
+  // reuses that path instead of duplicating it server-side.
+  net.AddHttpPost(
+      "/api/rooms/direct", RouteAuth::LocalhostOrAdmin,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
         if (!devDirectStart)
-            return HttpAuth::JsonResponse(404, R"({"error":"not found"})");
+          return HttpAuth::JsonResponse(404, R"({"error":"not found"})");
         int64_t callerId = 0;
         std::string callerName = "(loopback)";
         if (!headers.remoteIsLoopback) {
-            callerId = HttpAuth::ValidateToken(db, headers.authorization);
-            auto caller = callerId > 0 ? db.FindUserById(callerId) : std::nullopt;
-            if (!caller || caller->role != "admin")
-                return HttpAuth::JsonResponse(403,
-                    R"({"error":"forbidden — direct-start requires admin role or localhost"})");
-            callerName = caller->username;
+          callerId = HttpAuth::ValidateToken(db, headers.authorization);
+          auto caller = callerId > 0 ? db.FindUserById(callerId) : std::nullopt;
+          if (!caller || caller->role != "admin")
+            return HttpAuth::JsonResponse(
+                403,
+                R"({"error":"forbidden — direct-start requires admin role or localhost"})");
+          callerName = caller->username;
         }
 
-        nlohmann::json manifest = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
-        if (manifest.is_discarded()) return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
+        nlohmann::json manifest =
+            nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+        if (manifest.is_discarded())
+          return HttpAuth::JsonResponse(400, R"({"error":"bad json"})");
 
         auto result = runDirectStart(manifest);
         if (!result.ok)
-            return HttpAuth::JsonResponse(400, "{\"error\":\"" + HttpAuth::JsonEscape(result.error) + "\"}");
+          return HttpAuth::JsonResponse(
+              400,
+              "{\"error\":\"" + HttpAuth::JsonEscape(result.error) + "\"}");
 
         // Task 6: direct-start spawns a game-server process off a
         // client-supplied manifest — audit who triggered it.
         db.LogAudit(callerId, callerName, "direct_start",
-            manifest.value("gameId", ""), "room=" + std::to_string(result.roomId));
+                    manifest.value("gameId", ""),
+                    "room=" + std::to_string(result.roomId));
 
-        nlohmann::json resp = nlohmann::json::parse(roomToJson(rooms.GetRoom(result.roomId)));
+        nlohmann::json resp =
+            nlohmann::json::parse(roomToJson(rooms.GetRoom(result.roomId)));
         resp["sessions"] = nlohmann::json::object();
-        for (const auto& [username, token] : result.sessions) resp["sessions"][username] = token;
+        for (const auto &[username, token] : result.sessions)
+          resp["sessions"][username] = token;
         broadcastRooms();
         return HttpAuth::JsonResponse(200, resp.dump());
-    });
+      });
 
-    #undef HTTP_ROOM_AUTH
+#undef HTTP_ROOM_AUTH
 
-    // --direct <manifest.json>: create one standing room at boot, driven
-    // through the same runDirectStart composite as the HTTP endpoint. Not
-    // gated by dev_direct_start — this is an operator-supplied CLI flag at
-    // process launch, not reachable remotely (mprocs dev flow: the stack
-    // comes up with the game already running).
-    if (!directManifestPath.empty()) {
-        std::ifstream mf(directManifestPath);
-        if (!mf) {
-            SLOG(SPRING_LOG_ERROR, "--direct: cannot open manifest '%s'", directManifestPath.c_str());
+  // --direct <manifest.json>: create one standing room at boot, driven
+  // through the same runDirectStart composite as the HTTP endpoint. Not
+  // gated by dev_direct_start — this is an operator-supplied CLI flag at
+  // process launch, not reachable remotely (mprocs dev flow: the stack
+  // comes up with the game already running).
+  if (!directManifestPath.empty()) {
+    std::ifstream mf(directManifestPath);
+    if (!mf) {
+      SLOG(SPRING_LOG_ERROR, "--direct: cannot open manifest '%s'",
+           directManifestPath.c_str());
+    } else {
+      std::string content((std::istreambuf_iterator<char>(mf)),
+                          std::istreambuf_iterator<char>());
+      nlohmann::json manifest =
+          nlohmann::json::parse(content, nullptr, /*allow_exceptions=*/false);
+      if (manifest.is_discarded()) {
+        SLOG(SPRING_LOG_ERROR, "--direct: bad JSON in '%s'",
+             directManifestPath.c_str());
+      } else {
+        auto result = runDirectStart(manifest);
+        if (result.ok) {
+          SLOG(SPRING_LOG_NOTICE,
+               "--direct: standing room ready (room %u, '%s')", result.roomId,
+               manifest.value("name", "dev:direct").c_str());
+          broadcastRooms();
         } else {
-            std::string content((std::istreambuf_iterator<char>(mf)), std::istreambuf_iterator<char>());
-            nlohmann::json manifest = nlohmann::json::parse(content, nullptr, /*allow_exceptions=*/false);
-            if (manifest.is_discarded()) {
-                SLOG(SPRING_LOG_ERROR, "--direct: bad JSON in '%s'", directManifestPath.c_str());
-            } else {
-                auto result = runDirectStart(manifest);
-                if (result.ok) {
-                    SLOG(SPRING_LOG_NOTICE, "--direct: standing room ready (room %u, '%s')",
-                        result.roomId, manifest.value("name", "dev:direct").c_str());
-                    broadcastRooms();
-                } else {
-                    SLOG(SPRING_LOG_ERROR, "--direct: failed to create standing room: %s",
-                        result.error.c_str());
-                }
-            }
+          SLOG(SPRING_LOG_ERROR, "--direct: failed to create standing room: %s",
+               result.error.c_str());
         }
+      }
+    }
+  }
+
+  if (!net.Start(port)) {
+    SLOG(SPRING_LOG_ERROR, "failed to start network");
+    springlog_shutdown();
+    return 1;
+  }
+
+  SLOG(SPRING_LOG_NOTICE, "running (port %d)", port);
+
+  // --- Main loop (10 Hz for lobby — HTTP serving + process management) ---
+  int reapTick = 0;
+  while (keepRunning.load()) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    // Periodically reap abandoned rooms (~every 60s at 10 Hz). Catches
+    // rooms whose host closed the browser during a long-lived lobby,
+    // not just stale rows inherited at startup.
+    if (++reapTick >= 600) {
+      reapTick = 0;
+      auto reaped = rooms.ReapStaleRooms(kRoomIdleReapSeconds);
+      if (!reaped.empty()) {
+        for (uint32_t rid : reaped)
+          removeGameServer(rid); // safety
+        SLOG(SPRING_LOG_NOTICE, "reaped %zu abandoned room(s)", reaped.size());
+        broadcastRooms();
+      }
     }
 
-    if (!net.Start(port)) {
-        SLOG(SPRING_LOG_ERROR, "failed to start network");
-        springlog_shutdown();
-        return 1;
+    // Check game server health every loop iteration
+    for (auto &[roomId, inst] : gameServers) {
+      if (inst.state == GameServerInstance::Starting ||
+          inst.state == GameServerInstance::Running) {
+        if (!isProcessAlive(inst.pid)) {
+          inst.state = GameServerInstance::Ended;
+          removeGameServer(roomId);
+          SLOG(SPRING_LOG_NOTICE, "game server for room %u (pid %d) has exited",
+               roomId, inst.pid);
+
+          // Recycle the room: transition back to Filling,
+          // clear ready flags, zero gameServerPort, drop
+          // reconnection roster.
+          rooms.ResetRoomForNextGame(roomId);
+          broadcastRooms();
+          continue;
+        }
+
+        // Readiness handshake: when a Starting server publishes ready=1
+        // (it's accepting connections + the sim is up), promote it to
+        // Running and flip the room Loading→Active. Until now the
+        // Loading→Active transition was never driven, so rooms read as
+        // "Starting" forever and clients/launch_game raced a not-yet-
+        // listening port. game_status is the only honest ready signal.
+        if (inst.state == GameServerInstance::Starting &&
+            gameServerReady(roomId)) {
+          inst.state = GameServerInstance::Running;
+          persistGameServer(inst); // game_servers.state → 'running'
+          if (auto *room = rooms.GetRoom(roomId);
+              room && room->state == ERoomState::Loading) {
+            rooms.SetRoomState(roomId, ERoomState::Active);
+          }
+          SLOG(SPRING_LOG_NOTICE,
+               "game server for room %u is ready — room now Active", roomId);
+          broadcastRooms();
+        }
+      }
     }
+  }
 
-    SLOG(SPRING_LOG_NOTICE, "running (port %d)", port);
+  if (restartRequested.load()) {
+    SLOG(SPRING_LOG_NOTICE,
+         "restart requested — persisting game server state...");
 
-    // --- Main loop (10 Hz for lobby — HTTP serving + process management) ---
-    int reapTick = 0;
-    while (keepRunning.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-        // Periodically reap abandoned rooms (~every 60s at 10 Hz). Catches
-        // rooms whose host closed the browser during a long-lived lobby,
-        // not just stale rows inherited at startup.
-        if (++reapTick >= 600) {
-            reapTick = 0;
-            auto reaped = rooms.ReapStaleRooms(kRoomIdleReapSeconds);
-            if (!reaped.empty()) {
-                for (uint32_t rid : reaped) removeGameServer(rid);  // safety
-                SLOG(SPRING_LOG_NOTICE, "reaped %zu abandoned room(s)",
-                    reaped.size());
-                broadcastRooms();
-            }
+    // game_servers table is already up-to-date (maintained in real-time).
+    // Just close the database handle.
+    if (mapDb) {
+      for (auto &[rid, inst] : gameServers) {
+        if (inst.state == GameServerInstance::Starting ||
+            inst.state == GameServerInstance::Running) {
+          SLOG(SPRING_LOG_NOTICE,
+               "preserving game server room=%u port=%d pid=%d", rid, inst.port,
+               inst.pid);
         }
-
-        // Check game server health every loop iteration
-        for (auto& [roomId, inst] : gameServers) {
-            if (inst.state == GameServerInstance::Starting || inst.state == GameServerInstance::Running) {
-                if (!isProcessAlive(inst.pid)) {
-                    inst.state = GameServerInstance::Ended;
-                    removeGameServer(roomId);
-                    SLOG(SPRING_LOG_NOTICE, "game server for room %u (pid %d) has exited",
-                        roomId, inst.pid);
-
-                    // Recycle the room: transition back to Filling,
-                    // clear ready flags, zero gameServerPort, drop
-                    // reconnection roster.
-                    rooms.ResetRoomForNextGame(roomId);
-                    broadcastRooms();
-                    continue;
-                }
-
-                // Readiness handshake: when a Starting server publishes ready=1
-                // (it's accepting connections + the sim is up), promote it to
-                // Running and flip the room Loading→Active. Until now the
-                // Loading→Active transition was never driven, so rooms read as
-                // "Starting" forever and clients/launch_game raced a not-yet-
-                // listening port. game_status is the only honest ready signal.
-                if (inst.state == GameServerInstance::Starting && gameServerReady(roomId)) {
-                    inst.state = GameServerInstance::Running;
-                    persistGameServer(inst);  // game_servers.state → 'running'
-                    if (auto* room = rooms.GetRoom(roomId);
-                        room && room->state == ERoomState::Loading) {
-                        rooms.SetRoomState(roomId, ERoomState::Active);
-                    }
-                    SLOG(SPRING_LOG_NOTICE,
-                        "game server for room %u is ready — room now Active", roomId);
-                    broadcastRooms();
-                }
-            }
-        }
-    }
-
-    if (restartRequested.load()) {
-        SLOG(SPRING_LOG_NOTICE, "restart requested — persisting game server state...");
-
-        // game_servers table is already up-to-date (maintained in real-time).
-        // Just close the database handle.
-        if (mapDb) {
-            for (auto& [rid, inst] : gameServers) {
-                if (inst.state == GameServerInstance::Starting ||
-                    inst.state == GameServerInstance::Running) {
-                    SLOG(SPRING_LOG_NOTICE, "preserving game server room=%u port=%d pid=%d",
-                        rid, inst.port, inst.pid);
-                }
-            }
-            sqlite3_close(mapDb);
-            mapDb = nullptr;
-        }
-
-        net.Stop();
-        db.Close();
-        SLOG(SPRING_LOG_NOTICE, "re-exec'ing: %s", savedArgv[0]);
-        springlog_sqlite_shutdown();
-        springlog_shutdown();
-
-        // Re-exec with the same arguments — replaces this process
-        // in-place, so PID is preserved and process managers don't
-        // see a crash.
-        execvp(savedArgv[0], savedArgv);
-        // If execvp returns, it failed
-        fprintf(stderr, "ERROR: restart failed: %s\n", strerror(errno));
-        return 1;
-    }
-
-    SLOG(SPRING_LOG_NOTICE, "shutting down...");
-
-    // Kill any running game servers
-    for (auto& [roomId, inst] : gameServers) {
-        if (isProcessAlive(inst.pid)) {
-            kill(inst.pid, SIGTERM);
-            SLOG(SPRING_LOG_NOTICE, "killed game server pid %d", inst.pid);
-        }
+      }
+      sqlite3_close(mapDb);
+      mapDb = nullptr;
     }
 
     net.Stop();
     db.Close();
-    SLOG(SPRING_LOG_NOTICE, "exited cleanly");
+    SLOG(SPRING_LOG_NOTICE, "re-exec'ing: %s", savedArgv[0]);
     springlog_sqlite_shutdown();
     springlog_shutdown();
-    return 0;
+
+    // Re-exec with the same arguments — replaces this process
+    // in-place, so PID is preserved and process managers don't
+    // see a crash.
+    execvp(savedArgv[0], savedArgv);
+    // If execvp returns, it failed
+    fprintf(stderr, "ERROR: restart failed: %s\n", strerror(errno));
+    return 1;
+  }
+
+  SLOG(SPRING_LOG_NOTICE, "shutting down...");
+
+  // Kill any running game servers
+  for (auto &[roomId, inst] : gameServers) {
+    if (isProcessAlive(inst.pid)) {
+      kill(inst.pid, SIGTERM);
+      SLOG(SPRING_LOG_NOTICE, "killed game server pid %d", inst.pid);
+    }
+  }
+
+  net.Stop();
+  db.Close();
+  SLOG(SPRING_LOG_NOTICE, "exited cleanly");
+  springlog_sqlite_shutdown();
+  springlog_shutdown();
+  return 0;
 }

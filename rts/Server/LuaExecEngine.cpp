@@ -95,13 +95,22 @@ std::string ExecuteInLuaState(lua_State* L, const std::string& code) {
 
     int top = lua_gettop(L);
 
+    // gadgetHandler.GG is deliberately not a real Lua global: vanilla
+    // Spring/Recoil gadget sandboxing (gadgets.lua's setfenv-based
+    // NewGadget()) copies it into each gadget's private _ENV table only,
+    // never into _G (see docs/debugging-console.md). Exec code runs
+    // against the raw global env, so it never sees that per-gadget copy.
+    // Give it the same convenience alias here, scoped to this call only —
+    // this changes nothing about the real synced env gadgets execute in.
+    const std::string preamble = "local GG = gadgetHandler and gadgetHandler.GG; ";
+
     // Try loading as expression first (prepend "return ")
-    std::string expr = "return " + code;
+    std::string expr = preamble + "return " + code;
     int err = luaL_loadstring(L, expr.c_str());
     if (err != LUA_OK) {
         lua_pop(L, 1);
         // Try as statement
-        err = luaL_loadstring(L, code.c_str());
+        err = luaL_loadstring(L, (preamble + code).c_str());
         if (err != LUA_OK) {
             std::string msg = lua_tostring(L, -1);
             lua_pop(L, 1);
@@ -603,7 +612,7 @@ std::string ExecuteServerCommand(const std::string& cmd) {
         return LuaCallInProfiler::Report(topN);
     }
 
-    // sim profile [on|off|reset|status|<topN>]  — CSimulation::SimFrame()
+    // sim profile [on|off|reset|status]  — CSimulation::SimFrame()
     // per-phase wall-time profiler (PLAN-server-cpp-optimisation.md P0):
     // native sim vs unit-script tick vs synced Lua call-ins. Complements
     // `lua profile` (per handle+callin detail) with the coarse phase split.
@@ -694,4 +703,48 @@ LuaExecResult ExecuteLuaExecRequest(const LuaExecRequest& req) {
          req.scope.c_str(), req.code.c_str(), result.output.c_str());
 
     return result;
+}
+
+SyncedPredicateResult EvalSyncedPredicate(const std::string& expr,
+                                          std::string& errOut) {
+    if (!luaRules) {
+        errOut = "LuaRules not loaded";
+        return SyncedPredicateResult::Error;
+    }
+    lua_State* L = luaRules->syncedLuaHandle.GetLuaState();
+    if (!L) {
+        errOut = "synced Lua state is null";
+        return SyncedPredicateResult::Error;
+    }
+
+    const int top = lua_gettop(L);
+    // Wrap in `return (...)` so a bare expression like "GG.Balance.Done" yields
+    // a value we can test. Restore the stack on every path so a per-30s poll
+    // can't leak stack slots over a multi-hour run.
+    const std::string chunk = "return (" + expr + ")";
+    if (luaL_loadstring(L, chunk.c_str()) != LUA_OK) {
+        const char* msg = lua_tostring(L, -1);
+        errOut = msg ? msg : "syntax error";
+        lua_settop(L, top);
+        return SyncedPredicateResult::Error;
+    }
+    if (lua_pcall(L, 0, 1, 0) != LUA_OK) {
+        const char* msg = lua_tostring(L, -1);
+        errOut = msg ? msg : "runtime error";
+        lua_settop(L, top);
+        return SyncedPredicateResult::Error;
+    }
+    const bool truthy = lua_toboolean(L, -1) != 0;
+    lua_settop(L, top);
+    return truthy ? SyncedPredicateResult::True : SyncedPredicateResult::False;
+}
+
+int64_t GetSyncedLuaHeapKb() {
+    if (!luaRules)
+        return 0;
+    lua_State* L = luaRules->syncedLuaHandle.GetLuaState();
+    if (!L)
+        return 0;
+    // LUA_GCCOUNT returns the heap size in Kbytes (read-only, no GC side effect).
+    return static_cast<int64_t>(lua_gc(L, LUA_GCCOUNT, 0));
 }

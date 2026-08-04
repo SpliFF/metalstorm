@@ -29,6 +29,9 @@ export interface PanelApi {
     playClip(name: string): void;
     /** Re-enter orbit on the stage unit (after "RTS cam"). */
     reorbit(): Promise<void>;
+    /** Open a standalone Babylon inspector popup on the staged def's model.
+     *  'cdn' = unpkg UMD build; 'bundled' = the app's own Vite route. */
+    inspectModel(mode: 'cdn' | 'bundled'): void;
 }
 
 export interface ModelViewerPanel {
@@ -218,17 +221,19 @@ export function createModelViewerPanel(api: PanelApi): ModelViewerPanel {
     const render = group('Render');
     const lod = el('select',
         'background:#123; color:#cde; border:1px solid #456; font:11px monospace; margin:2px 4px 2px 0;');
-    for (const [value, label, enabled] of [
-        ['full', 'LOD: full model', true],
-        ['impostor', 'LOD: impostor (beta-units B1 — not built yet)', false],
-        ['icon', 'LOD: icon (beta-units B1 — not built yet)', false],
+    for (const [value, label] of [
+        ['full', 'LOD: full model'],
+        ['impostor', 'LOD: impostor (billboard)'],
+        ['icon', 'LOD: icon (hidden — PLAN-macro-map.md owns strategic icons)'],
     ] as const) {
         const o = el('option', '', label);
         o.value = value;
-        o.disabled = !enabled;
         lod.append(o);
     }
-    lod.title = 'force a LOD tier; impostor/icon activate once beta-units B1 lands';
+    lod.title = 'force a LOD tier on the staged unit, overriding its def thresholds';
+    lod.addEventListener('change', () => {
+        api.h.setForceLodTier(lod.value as 'full' | 'impostor' | 'icon');
+    });
     const wire = checkbox('wireframe', 'scene-wide forceWireframe', (on) => api.h.setWireframe(on));
     const pause = checkbox('pause render', 'freeze the worker render loop (sim keeps running)',
         (on) => { if (on) api.h.pause(); else api.h.resume(); });
@@ -251,6 +256,23 @@ export function createModelViewerPanel(api: PanelApi): ModelViewerPanel {
         btn('sun sweep', 'capture preset: fixed pose × 5 elevations', () => api.capture('sun')),
     );
     root.append(render.root);
+
+    // ── 6. Inspect (Babylon) ─────────────────────────────────────────────
+    // Debugging models is the whole point of this scenario, and the game's
+    // render scene lives in the worker (OffscreenCanvas) where the DOM
+    // Inspector can't reach. These pop a standalone Babylon scene that loads
+    // the SAME model URL with the glTF loader's logging + Khronos validator
+    // and the debugLayer open — a faithful reproduction of the load path.
+    const inspect = group('Inspect (Babylon)');
+    inspect.body.append(
+        btn('Inspector ▸ CDN', 'popup: unpkg UMD Babylon 9.1.0 (isolated) — Inspector + glTF validation on the staged model',
+            () => api.inspectModel('cdn')),
+        btn('Inspector ▸ bundled', 'popup: the app’s own Babylon build (same module graph as the game)',
+            () => api.inspectModel('bundled')),
+        el('div', 'color:#678; margin-top:2px;',
+            'loads the staged model in a DOM scene · console shows validator + geometry dump'),
+    );
+    root.append(inspect.root);
 
     document.body.appendChild(root);
 

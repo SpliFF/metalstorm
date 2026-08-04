@@ -597,11 +597,13 @@ function renderString(
     imm.translate(x, y, 0);
     imm.scale(1, -1, 1);
 
-    // Bind atlas texture
-    const savedTex = gl.getParameter(gl.TEXTURE_BINDING_2D);
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, atlas.getTexture());
-
+    // N4: no manual atlas bind here. flush() binds `currentBoundTexture` (set
+    // via imm.setTextured below) through the per-pass unit-0 texture shadow, so
+    // the old `getParameter(TEXTURE_BINDING_2D)` save + explicit bind + restore
+    // were pure redundancy — one getParameter sync + up to 3 texture calls per
+    // string, and text is ~⅔ of the HUD's draws (× up to 6 renderString calls
+    // for outlined/shadowed Print). Consecutive same-atlas strings now bind the
+    // atlas at most once via the shadow.
     imm.setTextured(true, atlas.getTexture());
     imm.color(color[0], color[1], color[2], color[3] ?? 1);
 
@@ -693,8 +695,8 @@ function renderString(
         }
     });
 
-    // Restore previous texture binding
-    gl.bindTexture(gl.TEXTURE_2D, savedTex);
+    // N4: no texture restore — the atlas stays bound on unit 0 (tracked by the
+    // shadow); the next draw's bindTex0 selects whatever texture it needs.
 
     // Restore modelview (undo the loadIdentity we did at the top)
     imm.popMatrix();

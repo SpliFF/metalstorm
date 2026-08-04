@@ -84,7 +84,24 @@ let logDropCount = 0;
 // Track repeated messages to suppress spamming widgets.
 const recentMsgs = new Map<string, number>();
 
+// PLAN-client-resilience.md task 3: the last ~50 log lines, kept independent
+// of the rate-limit/dedup below (a report needs "what just happened" even
+// during a log storm that's being suppressed downstream). Every postLog()
+// call pushes here first, before any rate-limit check.
+const LOG_RING_CAP = 64;
+const logRing: string[] = [];
+const LEVEL_TAGS = ['DEBUG', 'INFO', 'NOTICE', 'WARN', 'ERROR', 'FATAL'];
+
+/** Last `n` log lines (oldest first), formatted `[LEVEL] message`. Feeds the
+ *  client-error-telemetry payload's `logRing` field. */
+export function getRecentLogLines(n = 50): string[] {
+    return logRing.slice(-n);
+}
+
 export function postLog(level: number, msg: string): void {
+    logRing.push(`[${LEVEL_TAGS[level] ?? level}] ${msg}`);
+    if (logRing.length > LOG_RING_CAP) logRing.shift();
+
     // Suppress exact-duplicate messages (e.g. Key Unbinder spam).
     // Allow the first occurrence and then once every 100 repeats.
     const count = (recentMsgs.get(msg) ?? 0) + 1;
@@ -360,6 +377,7 @@ export interface MinimalWeaponDefWire {
     typeName?: string; description?: string;
     defaultDamage?: number; damages?: number[];
     reloadTime?: number; salvoSize?: number; salvoDelay?: number;
+    expectedDps?: number;
     accuracy?: number; sprayAngle?: number; movingAccuracy?: number;
     targetMoveError?: number; leadLimit?: number;
     edgeEffectiveness?: number;
@@ -631,6 +649,7 @@ function buildLuaWeaponDef(d: MinimalWeaponDefWire): Record<string, LuaValue> {
         reloadTime: d.reloadTime ?? 0,
         salvoSize: d.salvoSize ?? 0,
         salvoDelay: d.salvoDelay ?? 0,
+        expectedDps: d.expectedDps ?? 0,
         accuracy: d.accuracy ?? 0,
         sprayAngle: d.sprayAngle ?? 0,
         movingAccuracy: d.movingAccuracy ?? 0,
@@ -1113,6 +1132,8 @@ export async function init(
                 // `flight_time` (seconds) ≈ projectile ttl; 0 when the def has no
                 // fixed lifetime. Faithful enough for the display widgets.
                 ttl: w.flightTime ?? 0,
+                // Computed expected DPS (tuning-honesty; PLAN-macro-combat §4).
+                expectedDps: w.expectedDps ?? 0,
             };
         },
         getUnitDefFootprint: (defId) => {
@@ -2501,7 +2522,13 @@ defaultFont = activeFont
     ];
     const luaUiEntry = LUAUI_ENTRY_CANDIDATES.find((p) => vfsExists(p));
     if (!luaUiEntry) {
-        postLog(4, `[LuaUI] no recognised LuaUI entry point in VFS (tried ${LUAUI_ENTRY_CANDIDATES.join(', ')}) — no overlay will load`);
+        // Not necessarily a problem: games with a native-JS widget system
+        // (e.g. metalstorm) ship no LuaUI/*.lua at all by design, so this
+        // probe misses on every one of their sessions. There's no per-game
+        // "I use native widgets" flag to gate the probe on yet, so just
+        // downgrade below WARN/ERROR rather than raising a false alarm on an
+        // intentional configuration.
+        postLog(1, `[LuaUI] no recognised LuaUI entry point in VFS (tried ${LUAUI_ENTRY_CANDIDATES.join(', ')}) — no overlay will load`);
     }
     const entryToBoot = luaUiEntry ?? 'LuaUI/camain.lua';
 
@@ -4724,12 +4751,13 @@ export function dispatchPlayerChanged(playerId: number): void {
 /** Enforce Recoil's invariant before a player-status callin: the engine
  *  always holds the player in `playerHandler` when PlayerChanged/PlayerAdded
  *  fires, so a widget reading `Spring.GetPlayerInfo(id)` gets a valid name.
- *  The primary roster seed is now seedPlayersFromRoster() at gp:init (the
- *  lobby room snapshot), so `liveState.players` is populated before LuaUI boots.
- *  This stays as a defensive fallback for an id that isn't in that snapshot
- *  (e.g. a future mid-game join before a roster restream); for the local player
- *  we know team/allyTeam from identity. ensurePlayerEntry is a no-op when the
- *  id is already seeded. See BAR gui_chat crash (PLAN-bar.md UI-2). */
+ *  The roster comes from the server's PlayerRoster broadcast (onPlayerRoster),
+ *  which lands on auth — before the defs fetch that gates the LuaUI boot — so
+ *  `liveState.players` is populated before any widget initialises. This stays
+ *  as a defensive fallback for an id that isn't in the latest broadcast (a
+ *  callin racing a roster change); for the local player we know team/allyTeam
+ *  from identity. ensurePlayerEntry is a no-op when the id is already present.
+ *  See BAR gui_chat crash (PLAN-bar.md UI-2). */
 function ensureRosteredForCallin(playerId: number): void {
     const seed = playerId === liveState.identity.myPlayerId
         ? { team: liveState.identity.myTeam, allyTeam: liveState.identity.myAllyTeam }
@@ -6021,6 +6049,18 @@ export function handleRulesParamUpdate(msg: Record<string, unknown>): void {
     for (const [k, v] of Object.entries(params)) {
         if (v === null) targetMap.delete(k);
         else targetMap.set(k, v);
+    }
+
+    // Forward rules param updates to main thread for native UI
+    // Only forward game and team rules params (not unit/player for now)
+    if (scope === 'game' || scope === 'team') {
+        postToMain({
+            type: 'gp:rulesParamUpdate',
+            scope,
+            id,
+            params,
+            replace
+        });
     }
 }
 

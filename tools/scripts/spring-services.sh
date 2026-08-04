@@ -107,6 +107,16 @@ mprocs_ctl_available() {
     [[ -n "$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null)" ]]
 }
 
+# A pane's `shell:` command from mprocs.yaml, so the kill+start-bg fallback
+# launches the exact command mprocs would. start-bg/restart used to hardcode
+# a parallel arg list that drifted (dropped --dev-direct-start and the
+# --game/--maps/--games-dir set), breaking /api/rooms/direct after a fallback
+# lobby restart.
+mprocs_proc_shell() {
+    grep -A3 "^  $1:" "$MPROCS_CONFIG" | grep -m1 'shell:' \
+        | sed -e 's/^[^"]*"//' -e 's/"[[:space:]]*$//'
+}
+
 # Send a raw ctl command to the running mprocs. Runs from REPO_ROOT so mprocs
 # reads this repo's mprocs.yaml (and thus the right `server:` address).
 mprocs_ctl() {
@@ -238,15 +248,12 @@ cmd_start_bg() {
 
     if [[ -z "$(pids_for "$PAT_LOBBY")" ]]; then
         echo "  lobby: starting"
-        # The lobby + game server read ONLY from data/ (converted output).
-        # content/ is the unconverted source drop, relevant only to the
-        # offline conversion tools (gameconverter / mapconverter). The
-        # lobby defaults to --games-dir data/games and resolves maps under
-        # data/maps, so no content/ paths are passed here.
-        nohup ./build/debug/spring-lobby --no-cache --port 8011 \
-            --db data/spring-server.db \
-            --i-understand-this-is-a-dev-build \
-            >data/logs/lobby.out 2>&1 &
+        # Launch with the mprocs.yaml pane command so the fallback path can
+        # never drift from what mprocs runs (--dev-direct-start etc.).
+        local lobby_cmd
+        lobby_cmd="$(mprocs_proc_shell lobby)"
+        [[ -n "$lobby_cmd" ]] || lobby_cmd="./build/debug/spring-lobby --no-cache --port 8011 --db data/spring-server.db --i-understand-this-is-a-dev-build"
+        nohup bash -c "$lobby_cmd" >data/logs/lobby.out 2>&1 &
     else
         echo "  lobby: already running"
     fi

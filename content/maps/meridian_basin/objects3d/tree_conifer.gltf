@@ -1,0 +1,213 @@
+{
+ "asset": {
+  "version": "2.0",
+  "generator": "fable-model-forge 1.0 (Claude Fable 5, hand-built glTF)"
+ },
+ "scene": 0,
+ "scenes": [
+  {
+   "nodes": [
+    0
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "name": "MS_tree_conifer",
+   "children": [
+    1
+   ]
+  },
+  {
+   "name": "conifer",
+   "mesh": 0
+  }
+ ],
+ "meshes": [
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1,
+      "TEXCOORD_0": 2
+     },
+     "indices": 3,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  }
+ ],
+ "accessors": [
+  {
+   "bufferView": 0,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 624,
+   "type": "VEC3",
+   "min": [
+    -30.138755798339844,
+    0.0,
+    -31.987930297851562
+   ],
+   "max": [
+    26.390371322631836,
+    104.62000274658203,
+    31.020450592041016
+   ]
+  },
+  {
+   "bufferView": 1,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 624,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 2,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 624,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 3,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 918,
+   "type": "SCALAR"
+  }
+ ],
+ "bufferViews": [
+  {
+   "buffer": 0,
+   "byteOffset": 0,
+   "byteLength": 7488,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 7488,
+   "byteLength": 7488,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 14976,
+   "byteLength": 4992,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 19968,
+   "byteLength": 3672,
+   "target": 34963
+  }
+ ],
+ "buffers": [
+  {
+   "byteLength": 23640,
+   "uri": "tree_conifer.bin"
+  }
+ ],
+ "samplers": [
+  {}
+ ],
+ "images": [
+  {
+   "mimeType": "image/ktx2",
+   "uri": "tree_conifer_diffuse.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "tree_conifer_orm.ktx2"
+  }
+ ],
+ "textures": [
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 0
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 1
+    }
+   }
+  }
+ ],
+ "materials": [
+  {
+   "name": "tree_conifer",
+   "pbrMetallicRoughness": {
+    "baseColorTexture": {
+     "index": 0
+    },
+    "metallicFactor": 1.0,
+    "roughnessFactor": 1.0,
+    "metallicRoughnessTexture": {
+     "index": 1
+    }
+   },
+   "occlusionTexture": {
+    "index": 1
+   }
+  }
+ ],
+ "extensions": {
+  "SPRINGRTS_geometry": {
+   "configVersion": 8,
+   "height": 104.62,
+   "midpos": [
+    -1.87419,
+    52.31,
+    -0.48374
+   ],
+   "mins": [
+    -30.13876,
+    0.0,
+    -31.98793
+   ],
+   "maxs": [
+    26.39037,
+    104.62,
+    31.02045
+   ],
+   "radius": 67.2885,
+   "pieces": [
+    {
+     "name": "conifer",
+     "parent": -1,
+     "offset": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "mins": [
+      -30.13876,
+      0.0,
+      -31.98793
+     ],
+     "maxs": [
+      26.39037,
+      104.62,
+      31.02045
+     ]
+    }
+   ]
+  }
+ },
+ "extensionsUsed": [
+  "KHR_texture_basisu",
+  "SPRINGRTS_geometry"
+ ],
+ "extensionsRequired": [
+  "KHR_texture_basisu"
+ ]
+}

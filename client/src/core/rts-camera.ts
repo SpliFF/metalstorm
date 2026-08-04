@@ -23,6 +23,7 @@
  */
 
 import { FreeCamera, Vector3, Quaternion } from '@babylonjs/core';
+import { isTerrainMesh } from './terrain.js';
 
 /** Pending animated camera transition. */
 interface CameraTransition {
@@ -343,7 +344,7 @@ export class RTSCamera {
     private pickGroundAt(cssX: number, cssY: number): Vector3 | null {
         const scene = this.camera.getScene();
         const pick = scene.pick(cssX * this.dpr, cssY * this.dpr,
-            (m) => m.name === 'terrain', false, this.camera);
+            isTerrainMesh, false, this.camera);
         return (pick?.hit && pick.pickedPoint) ? pick.pickedPoint : null;
     }
 

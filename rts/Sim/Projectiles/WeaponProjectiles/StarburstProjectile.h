@@ -33,6 +33,12 @@ private:
 	void UpdateTargeting();
 	void UpdateTrajectory();
 
+	/// PLAN-latency L3 — which of UpdateTrajectory's four branches is
+	/// currently live, as a keyframe stage id. Mirrors that function's
+	/// conditions exactly and must be kept in step with them; it exists so
+	/// the keyframe policy can put a knot on each hinge in the arc.
+	uint8_t TrajectoryStage() const;
+
 	void InitTracerParts();
 	void UpdateTracerPart();
 	void UpdateSmokeTrail();

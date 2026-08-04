@@ -28,18 +28,32 @@ public:
     static constexpr int kMaxFailures = 5;
     static constexpr int kLockoutSeconds = 60;
 
-    bool IsLocked(const std::string& username) {
+    using Clock = std::chrono::steady_clock;
+
+    /// `now` is injectable so tests can drive the clock; production callers
+    /// use the default.
+    bool IsLocked(const std::string& username, Clock::time_point now = Clock::now()) {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = byUsername_.find(username);
         if (it == byUsername_.end()) return false;
-        return std::chrono::steady_clock::now() < it->second.lockedUntil;
+        return now < it->second.lockedUntil;
     }
 
-    void RecordFailure(const std::string& username) {
+    void RecordFailure(const std::string& username, Clock::time_point now = Clock::now()) {
         std::lock_guard<std::mutex> lock(mutex_);
         auto& e = byUsername_[username];
+        // Sliding-window reset: once a lockout has elapsed, the account gets
+        // a fresh kMaxFailures threshold. Without this, failCount only ever
+        // grew, so after the first lockout every single further failure
+        // re-tripped a full kLockoutSeconds lock — one bad login per minute
+        // was a permanent lockout DoS against the account. A genuine burst
+        // still locks after kMaxFailures failures.
+        if (e.lockedUntil != Clock::time_point{} && now >= e.lockedUntil) {
+            e.failCount = 0;
+            e.lockedUntil = Clock::time_point{};
+        }
         if (++e.failCount >= kMaxFailures)
-            e.lockedUntil = std::chrono::steady_clock::now() + std::chrono::seconds(kLockoutSeconds);
+            e.lockedUntil = now + std::chrono::seconds(kLockoutSeconds);
     }
 
     void RecordSuccess(const std::string& username) {
@@ -50,7 +64,7 @@ public:
 private:
     struct Entry {
         int failCount = 0;
-        std::chrono::steady_clock::time_point lockedUntil{};
+        Clock::time_point lockedUntil{};
     };
     std::mutex mutex_;
     std::unordered_map<std::string, Entry> byUsername_;

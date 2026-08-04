@@ -7,7 +7,9 @@
 // The server can host multiple rooms simultaneously.
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -55,6 +57,13 @@ struct RoomAISlot {
     /// Same semantics as RoomPlayer.startPos — -1 means auto-fill
     /// at game start.
     int8_t startPos = -1;
+    /// Optional personality/difficulty profile name (e.g. "aggressive",
+    /// "caretaker") for AI plugins that support one — PLAN-metalstorm-ai.md
+    /// §10 task 6. Empty = no override (the plugin falls back to its own
+    /// default, or a scenario-published one). Passed through spawnGameServer
+    /// as a 4th "--ai id:team:pos:profile" field; the engine never
+    /// interprets it, just carries it to the game-specific AI VM.
+    std::string profile;
 };
 
 /// Result of a LeaveRoom call, telling the caller what action to take.
@@ -113,6 +122,65 @@ struct GameRoom {
     int GetOriginalTeam(uint32_t playerId) const {
         auto it = originalRoster.find(playerId);
         return (it != originalRoster.end()) ? static_cast<int>(it->second) : -1;
+    }
+
+    /// The team indices a slot in this room may be seated on, in the order
+    /// the lobby offers them.
+    ///
+    /// Read out of the `war_sides` modoption
+    /// (`"<faction>:<team>[,<faction>:<team>…]"`, written once by the lobby's
+    /// applyRoomScenario from the room's scenario — PLAN-metalstorm-wars.md
+    /// §7.4). RoomManager parses only the integers and stays entirely
+    /// scenario-agnostic: as far as it is concerned this is just "which team
+    /// indices does this room use".
+    ///
+    /// `{0, 1}` when the modoption is absent or unparseable, which is the
+    /// legacy two-team room every non-scenario game (Paper Tanks, ZK) keeps.
+    ///
+    /// This is what a slot is *offered*, not a whitelist — SetTeam and
+    /// AddAISlot still accept anything, because the direct-start manifests
+    /// legitimately seat an NPC on a team no side declares (Meridian's team-8
+    /// reavers), and that escape hatch is the only reason endtoend D19 was
+    /// findable at all.
+    std::vector<uint8_t> SlotTeams() const {
+        std::vector<uint8_t> out;
+        const auto it = modOptions.find("war_sides");
+        if (it != modOptions.end()) {
+            size_t pos = 0;
+            const std::string& spec = it->second;
+            while (pos < spec.size()) {
+                const size_t comma = spec.find(',', pos);
+                const std::string entry = spec.substr(
+                    pos, comma == std::string::npos ? std::string::npos
+                                                    : comma - pos);
+                // `colon > 0` — an entry with no faction name is not a side,
+                // however parseable its number looks.
+                const size_t colon = entry.find(':');
+                if (colon != std::string::npos && colon > 0 &&
+                    colon + 1 < entry.size()) {
+                    const std::string num = entry.substr(colon + 1);
+                    // Reject anything non-numeric rather than let atoi's 0
+                    // quietly seat two sides on the same team.
+                    if (!num.empty() &&
+                        num.find_first_not_of("0123456789") ==
+                            std::string::npos) {
+                        const int team = std::atoi(num.c_str());
+                        if (team >= 0 && team <= 255) {
+                            const auto t = static_cast<uint8_t>(team);
+                            if (std::find(out.begin(), out.end(), t) ==
+                                out.end())
+                                out.push_back(t);
+                        }
+                    }
+                }
+                if (comma == std::string::npos)
+                    break;
+                pos = comma + 1;
+            }
+        }
+        if (out.empty())
+            return {0, 1};
+        return out;
     }
 
     // --- Helpers ---
@@ -195,6 +263,12 @@ public:
     /// Set a player's ready state.
     bool SetReady(uint32_t roomId, uint32_t playerId, bool ready);
 
+    /// Convert a spectator to an active player ("Enlist"). Returns true on
+    /// success. Fails if the requester is not a spectator, the room is full
+    /// of non-spectator players, or the specified team is invalid. If team
+    /// is 255, auto-assigns the next available team.
+    bool EnlistSpectator(uint32_t roomId, uint32_t playerId, uint8_t team);
+
     /// Kick a player (host only).
     bool KickPlayer(uint32_t roomId, uint32_t requesterId, uint32_t targetId);
 
@@ -248,6 +322,16 @@ public:
     /// the requester is not the host or the index is out of range.
     bool SetAITeam(uint32_t roomId, uint32_t requesterId,
                    uint8_t slotIndex, uint8_t team);
+
+    /// Set (or, with an empty string, clear) the AI slot at `slotIndex`'s
+    /// personality/difficulty profile (host only) — PLAN-metalstorm-ai.md
+    /// §10 task 6. Not validated against any allow-list here: the profile
+    /// name is opaque, game-specific data (ai/strategos/config.lua's
+    /// Config.PROFILES for Metalstorm); the engine only carries it.
+    /// Returns false if the requester is not the host or the index is out
+    /// of range.
+    bool SetAIProfile(uint32_t roomId, uint32_t requesterId,
+                      uint8_t slotIndex, const std::string& profile);
 
     /// Set the start position for a player slot.
     ///

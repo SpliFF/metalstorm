@@ -16,6 +16,20 @@ UnitCommandCollector::UnitCommandCollector()
 
 void UnitCommandCollector::Register() {
     eventHandler.AddClient(this);
+    // AddClient consults WantsEvent(), and CEventClient's default returns
+    // false unless `autoLinkEvents` is set — which none of the server
+    // collectors wire up. Without the explicit InsertEvent pair this client
+    // is constructed, registered, and drained every tick while never being
+    // added to listUnitCommand / listUnitCmdDone, so Drain() always returns
+    // empty and UnitCommandBatch is never sent. That is exactly what it did
+    // until PLAN-latency L4.1 measured the stream and found zero envelopes.
+    // Same trap, same fix as FeatureLifecycleCollector::Register.
+    eventHandler.InsertEvent(this, "UnitCommand");
+    eventHandler.InsertEvent(this, "UnitCmdDone");
+}
+
+bool UnitCommandCollector::WantsEvent(const std::string& eventName) {
+    return eventName == "UnitCommand" || eventName == "UnitCmdDone";
 }
 
 std::vector<UnitCommandEventData> UnitCommandCollector::Drain() {

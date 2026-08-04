@@ -44,13 +44,13 @@ this headless-server fork.
 
 ## TL;DR
 
-| Question | Answer |
-|---|---|
-| Synced or unsynced? | **Synced.** Runs in the synced Lua handle on the sim thread. |
-| Engine or game? | **Engine-hosted, game-provided.** The Lua VM and C++ glue live in the engine; the script files ship with the game. |
-| Gameplay or visuals? | **Both, intertwined.** Most of the code is animation, but the resulting piece transforms feed weapon emit positions, aim rays, and target priority — so animation IS gameplay. |
-| Runs on client? | **No.** The client receives piece transforms over the wire and applies them to the rendered mesh. The script itself never executes browser-side. |
-| Per-instance or per-type? | One Lua chunk per unit *type*, with one instance state per *unit* (kept in the script's Lua tables, keyed by unitID). |
+| Question                  | Answer                                                                                                                                                                         |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Synced or unsynced?       | **Synced.** Runs in the synced Lua handle on the sim thread.                                                                                                                   |
+| Engine or game?           | **Engine-hosted, game-provided.** The Lua VM and C++ glue live in the engine; the script files ship with the game.                                                             |
+| Gameplay or visuals?      | **Both, intertwined.** Most of the code is animation, but the resulting piece transforms feed weapon emit positions, aim rays, and target priority — so animation IS gameplay. |
+| Runs on client?           | **No.** The client receives piece transforms over the wire and applies them to the rendered mesh. The script itself never executes browser-side.                               |
+| Per-instance or per-type? | One Lua chunk per unit _type_, with one instance state per _unit_ (kept in the script's Lua tables, keyed by unitID).                                                          |
 
 ---
 
@@ -175,66 +175,66 @@ Lua-call overhead when a callin is absent.
 
 ### Lifecycle Callins
 
-| Callin | Args | Returns | Triggered by |
-|---|---|---|---|
-| `Create()` | — | nil | unit construction (called from `CLuaUnitScript` ctor) |
-| `Destroy()` | — | nil | unit destruction (before script teardown) |
-| `Killed(recentDamage, maxHealth)` | numbers | `delayedWreckLevel` (number) or nil | unit health hits 0; **return value gates death-anim duration** — engine delays wreck spawn until the script signals completion via `Spring.UnitScript.SetDeathScriptFinished(level)` |
-| `HitByWeapon(hitDir_x, hitDir_z, weaponDefID, damage)` | numbers | optional `newDamage` (number) | weapon impact on this unit; return value can **mutate the damage applied** before armour calculations |
+| Callin                                                 | Args    | Returns                             | Triggered by                                                                                                                                                                         |
+| ------------------------------------------------------ | ------- | ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `Create()`                                             | —       | nil                                 | unit construction (called from `CLuaUnitScript` ctor)                                                                                                                                |
+| `Destroy()`                                            | —       | nil                                 | unit destruction (before script teardown)                                                                                                                                            |
+| `Killed(recentDamage, maxHealth)`                      | numbers | `delayedWreckLevel` (number) or nil | unit health hits 0; **return value gates death-anim duration** — engine delays wreck spawn until the script signals completion via `Spring.UnitScript.SetDeathScriptFinished(level)` |
+| `HitByWeapon(hitDir_x, hitDir_z, weaponDefID, damage)` | numbers | optional `newDamage` (number)       | weapon impact on this unit; return value can **mutate the damage applied** before armour calculations                                                                                |
 
 ### Movement Callins
 
-| Callin | Args | Returns | Triggered by |
-|---|---|---|---|
-| `StartMoving(reversing)` | bool | nil | `CMobility` transitions from idle to moving |
-| `StopMoving()` | — | nil | `CMobility` transitions back to idle |
-| `StartSkidding(vx, vy, vz)` | numbers | nil | physics throws the unit into a skid (collision, ground push) |
-| `StopSkidding()` | — | nil | skid velocity drops below threshold |
-| `ChangeHeading(deltaHeading)` | number | nil | unit's heading slewed by `delta` |
-| `MoveRate(curMoveRate)` | number | nil | walk-cycle speed selector — typically swaps between walk/run animations |
-| `Activate()` / `Deactivate()` | — | nil | unit's active state toggles (factories opening, radars spinning up, etc.) |
-| `WindChanged(heading, strength)` | numbers | nil | wind generators rotate to face the wind |
-| `ExtractionRateChanged(newRate)` | number | nil | metal extractors update visible spinner speed |
-| `RockUnit(rockDir_x, rockDir_z)` | numbers | nil | recoil/flinch from being shot |
-| `Falling()` / `Landed()` | — | nil | aircraft / dropped-unit ground transitions |
-| `setSFXoccupy(curTerrainType)` | number | nil | special-FX occupancy slot (water spray on amphibs, dust on land vehicles) |
+| Callin                           | Args    | Returns | Triggered by                                                              |
+| -------------------------------- | ------- | ------- | ------------------------------------------------------------------------- |
+| `StartMoving(reversing)`         | bool    | nil     | `CMobility` transitions from idle to moving                               |
+| `StopMoving()`                   | —       | nil     | `CMobility` transitions back to idle                                      |
+| `StartSkidding(vx, vy, vz)`      | numbers | nil     | physics throws the unit into a skid (collision, ground push)              |
+| `StopSkidding()`                 | —       | nil     | skid velocity drops below threshold                                       |
+| `ChangeHeading(deltaHeading)`    | number  | nil     | unit's heading slewed by `delta`                                          |
+| `MoveRate(curMoveRate)`          | number  | nil     | walk-cycle speed selector — typically swaps between walk/run animations   |
+| `Activate()` / `Deactivate()`    | —       | nil     | unit's active state toggles (factories opening, radars spinning up, etc.) |
+| `WindChanged(heading, strength)` | numbers | nil     | wind generators rotate to face the wind                                   |
+| `ExtractionRateChanged(newRate)` | number  | nil     | metal extractors update visible spinner speed                             |
+| `RockUnit(rockDir_x, rockDir_z)` | numbers | nil     | recoil/flinch from being shot                                             |
+| `Falling()` / `Landed()`         | —       | nil     | aircraft / dropped-unit ground transitions                                |
+| `setSFXoccupy(curTerrainType)`   | number  | nil     | special-FX occupancy slot (water spray on amphibs, dust on land vehicles) |
 
 ### Transport Callins
 
-| Callin | Args | Returns | Triggered by |
-|---|---|---|---|
-| `BeginTransport(passengerID)` | unitID | nil | transport begins pickup approach |
-| `QueryTransport(passengerID)` | unitID | piece (number) | **returns the docking piece** for this passenger |
-| `TransportPickup(passengerID)` | unitID | nil | passenger attached |
-| `StartUnload()` | — | nil | unload sequence begins |
-| `EndTransport()` | — | nil | unload completes |
-| `TransportDrop(passengerID, x, y, z)` | unitID + floats | nil | passenger detaches at world position |
-| `QueryLandingPads()` | — | table of pieces | **returns landing-pad pieces** the air-traffic-control gadget can dispatch aircraft to |
+| Callin                                | Args            | Returns         | Triggered by                                                                           |
+| ------------------------------------- | --------------- | --------------- | -------------------------------------------------------------------------------------- |
+| `BeginTransport(passengerID)`         | unitID          | nil             | transport begins pickup approach                                                       |
+| `QueryTransport(passengerID)`         | unitID          | piece (number)  | **returns the docking piece** for this passenger                                       |
+| `TransportPickup(passengerID)`        | unitID          | nil             | passenger attached                                                                     |
+| `StartUnload()`                       | —               | nil             | unload sequence begins                                                                 |
+| `EndTransport()`                      | —               | nil             | unload completes                                                                       |
+| `TransportDrop(passengerID, x, y, z)` | unitID + floats | nil             | passenger detaches at world position                                                   |
+| `QueryLandingPads()`                  | —               | table of pieces | **returns landing-pad pieces** the air-traffic-control gadget can dispatch aircraft to |
 
 ### Build Callins
 
-| Callin | Args | Returns | Triggered by |
-|---|---|---|---|
-| `StartBuilding(h_heading, p_pitch)` *(BUILDER)* / `StartBuilding()` *(FACTORY)* | numbers / — | nil | construction begins |
-| `StopBuilding()` | — | nil | construction ends or pauses |
-| `QueryNanoPiece()` | — | piece (number) | **returns the piece nano-beams emit from** for build/repair effects |
-| `QueryBuildInfo()` | — | piece (number) | **returns the piece a factory-built unit appears at** |
+| Callin                                                                          | Args        | Returns        | Triggered by                                                        |
+| ------------------------------------------------------------------------------- | ----------- | -------------- | ------------------------------------------------------------------- |
+| `StartBuilding(h_heading, p_pitch)` _(BUILDER)_ / `StartBuilding()` _(FACTORY)_ | numbers / — | nil            | construction begins                                                 |
+| `StopBuilding()`                                                                | —           | nil            | construction ends or pauses                                         |
+| `QueryNanoPiece()`                                                              | —           | piece (number) | **returns the piece nano-beams emit from** for build/repair effects |
+| `QueryBuildInfo()`                                                              | —           | piece (number) | **returns the piece a factory-built unit appears at**               |
 
 ### Weapon Callins
 
 These are the heavy-hitting gameplay-affecting callins.
 
-| Callin | Args | Returns | Triggered by |
-|---|---|---|---|
-| `QueryWeapon(weaponNum)` | int | piece (number) | engine asks **where projectiles spawn from**; result feeds `CWeapon::muzzlePiece` ([`rts/Sim/Weapons/Weapon.cpp:243`](../rts/Sim/Weapons/Weapon.cpp#L243)) |
-| `AimFromWeapon(weaponNum)` | int | piece (number) | engine asks **where the aim ray starts**; result feeds `CWeapon::aimFromPiece` ([`rts/Sim/Weapons/Weapon.cpp:246`](../rts/Sim/Weapons/Weapon.cpp#L246)) |
-| `AimWeapon(weaponNum, heading - owner heading, pitch)` | int, two numbers | nil (signals completion via `Spring.UnitScript.SetSignalMask` or returns `true` directly in the COB-style API) | engine asks **"is the weapon aimed yet?"**; script returns/yields when aim is good. Until then **firing is blocked**. |
-| `AimShield(weaponNum)` | int | nil | shield emitters orient defensively |
-| `FireWeapon(weaponNum)` | int | nil | fires recoil animation immediately after the projectile leaves |
-| `EndBurst(weaponNum)` | int | nil | end of a burst-fire sequence |
-| `Shot(weaponNum)` | int | nil | fired for every shot in a burst (FireWeapon fires once per burst-trigger) |
-| `BlockShot(weaponNum, targetUnitID, haveUserTarget)` | int, unitID, bool | bool | **return true to veto the shot** even when aim is good (used for friendly-fire avoidance, ammo gating) |
-| `TargetWeight(weaponNum, targetUnitID)` | int, unitID | number | **bias on target priority** (>1 prefers, <1 deprioritises) |
+| Callin                                                 | Args              | Returns                                                                                                        | Triggered by                                                                                                                                               |
+| ------------------------------------------------------ | ----------------- | -------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `QueryWeapon(weaponNum)`                               | int               | piece (number)                                                                                                 | engine asks **where projectiles spawn from**; result feeds `CWeapon::muzzlePiece` ([`rts/Sim/Weapons/Weapon.cpp:243`](../rts/Sim/Weapons/Weapon.cpp#L243)) |
+| `AimFromWeapon(weaponNum)`                             | int               | piece (number)                                                                                                 | engine asks **where the aim ray starts**; result feeds `CWeapon::aimFromPiece` ([`rts/Sim/Weapons/Weapon.cpp:246`](../rts/Sim/Weapons/Weapon.cpp#L246))    |
+| `AimWeapon(weaponNum, heading - owner heading, pitch)` | int, two numbers  | nil (signals completion via `Spring.UnitScript.SetSignalMask` or returns `true` directly in the COB-style API) | engine asks **"is the weapon aimed yet?"**; script returns/yields when aim is good. Until then **firing is blocked**.                                      |
+| `AimShield(weaponNum)`                                 | int               | nil                                                                                                            | shield emitters orient defensively                                                                                                                         |
+| `FireWeapon(weaponNum)`                                | int               | nil                                                                                                            | fires recoil animation immediately after the projectile leaves                                                                                             |
+| `EndBurst(weaponNum)`                                  | int               | nil                                                                                                            | end of a burst-fire sequence                                                                                                                               |
+| `Shot(weaponNum)`                                      | int               | nil                                                                                                            | fired for every shot in a burst (FireWeapon fires once per burst-trigger)                                                                                  |
+| `BlockShot(weaponNum, targetUnitID, haveUserTarget)`   | int, unitID, bool | bool                                                                                                           | **return true to veto the shot** even when aim is good (used for friendly-fire avoidance, ammo gating)                                                     |
+| `TargetWeight(weaponNum, targetUnitID)`                | int, unitID       | number                                                                                                         | **bias on target priority** (>1 prefers, <1 deprioritises)                                                                                                 |
 
 ### Animation-Completion Callins
 
@@ -242,11 +242,11 @@ When a script calls `WaitForMove(piece, axis)` or `WaitForTurn(piece,
 axis)`, the engine wakes the coroutine via these callins. They are
 also routable to user-defined handlers via `Spring.UnitScript.SetSignalMask`.
 
-| Callin | Args | Returns |
-|---|---|---|
-| `MoveFinished(piece, axis)` | ints | nil |
-| `TurnFinished(piece, axis)` | ints | nil |
-| `ScaleFinished(piece)` | int | nil |
+| Callin                      | Args | Returns |
+| --------------------------- | ---- | ------- |
+| `MoveFinished(piece, axis)` | ints | nil     |
+| `TurnFinished(piece, axis)` | ints | nil     |
+| `ScaleFinished(piece)`      | int  | nil     |
 
 ---
 
@@ -260,15 +260,15 @@ import the common ones into local aliases at the top of the file.
 
 ### Animation Primitives
 
-| Function | Signature | Effect |
-|---|---|---|
-| `Move(piece, axis, dest, speed)` | (int, int, number, number?) | translate the piece along `axis` toward `dest`; if `speed` is given, animate over time, else snap |
-| `Turn(piece, axis, angle, speed)` | (int, int, number, number?) | rotate the piece around `axis` to `angle` (radians); animated when `speed` given |
-| `Spin(piece, axis, speed, accel)` | (int, int, number, number?) | continuous spin; `accel` ramps the spin rate up |
-| `StopSpin(piece, axis, decel)` | (int, int, number?) | stop a continuous spin |
-| `SetPieceVisibility(piece, visible)` | (int, bool) | hide/show piece (and its descendants in render output) |
-| `IsInMove(piece, axis)` / `IsInTurn(piece, axis)` / `IsInSpin(piece, axis)` | bools | poll animation state |
-| `WaitForMove(piece, axis)` / `WaitForTurn(piece, axis)` | yields the coroutine until the animation completes |
+| Function                                                                    | Signature                                          | Effect                                                                                            |
+| --------------------------------------------------------------------------- | -------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `Move(piece, axis, dest, speed)`                                            | (int, int, number, number?)                        | translate the piece along `axis` toward `dest`; if `speed` is given, animate over time, else snap |
+| `Turn(piece, axis, angle, speed)`                                           | (int, int, number, number?)                        | rotate the piece around `axis` to `angle` (radians); animated when `speed` given                  |
+| `Spin(piece, axis, speed, accel)`                                           | (int, int, number, number?)                        | continuous spin; `accel` ramps the spin rate up                                                   |
+| `StopSpin(piece, axis, decel)`                                              | (int, int, number?)                                | stop a continuous spin                                                                            |
+| `SetPieceVisibility(piece, visible)`                                        | (int, bool)                                        | hide/show piece (and its descendants in render output)                                            |
+| `IsInMove(piece, axis)` / `IsInTurn(piece, axis)` / `IsInSpin(piece, axis)` | bools                                              | poll animation state                                                                              |
+| `WaitForMove(piece, axis)` / `WaitForTurn(piece, axis)`                     | yields the coroutine until the animation completes |
 
 `axis` is `x_axis`, `y_axis`, or `z_axis` (1, 2, 3 in Spring's
 convention). Most scripts define these as locals at the top of the
@@ -276,11 +276,11 @@ file.
 
 ### Piece Inspection
 
-| Function | Returns | Notes |
-|---|---|---|
-| `GetPieceTranslation(piece)` | float3 | current animated translation relative to parent |
-| `GetPieceRotation(piece)` | float3 (Euler) | current animated rotation |
-| `GetPiecePosDir(piece)` | (pos, dir) | piece world position and forward axis — used to query where a muzzle is currently pointing |
+| Function                     | Returns        | Notes                                                                                      |
+| ---------------------------- | -------------- | ------------------------------------------------------------------------------------------ |
+| `GetPieceTranslation(piece)` | float3         | current animated translation relative to parent                                            |
+| `GetPieceRotation(piece)`    | float3 (Euler) | current animated rotation                                                                  |
+| `GetPiecePosDir(piece)`      | (pos, dir)     | piece world position and forward axis — used to query where a muzzle is currently pointing |
 
 The C++ side reads from these same matrices via `LocalModelPiece`
 ([`rts/Sim/Units/Scripts/LocalModelPieceStub.h`](../rts/Sim/Units/Scripts/LocalModelPieceStub.h))
@@ -289,13 +289,13 @@ to compute projectile spawn vectors. See
 
 ### Special Effects
 
-| Function | Signature | Effect |
-|---|---|---|
-| `EmitSfx(piece, sfxID)` | (int, int) | emit a Custom Explosion Generator (CEG) effect at the piece — used for muzzle flashes, exhaust trails, build sparkles |
-| `Explode(piece, flags)` | (int, int) | detach piece on death and apply explosion physics (`SHATTER`, `EXPLODE_ON_HIT`, etc.) |
-| `ShowFlare(piece)` | int | trigger a weapon-flare effect at the piece |
+| Function                                                       | Signature             | Effect                                                                                                                |
+| -------------------------------------------------------------- | --------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `EmitSfx(piece, sfxID)`                                        | (int, int)            | emit a Custom Explosion Generator (CEG) effect at the piece — used for muzzle flashes, exhaust trails, build sparkles |
+| `Explode(piece, flags)`                                        | (int, int)            | detach piece on death and apply explosion physics (`SHATTER`, `EXPLODE_ON_HIT`, etc.)                                 |
+| `ShowFlare(piece)`                                             | int                   | trigger a weapon-flare effect at the piece                                                                            |
 | `AttachUnit(piece, transporteeID)` / `DropUnit(transporteeID)` | transport pickup/drop |
-| `SetDeathScriptFinished(wreckLevel)` | int | signal end-of-death-animation; engine spawns the wreck and removes the unit |
+| `SetDeathScriptFinished(wreckLevel)`                           | int                   | signal end-of-death-animation; engine spawns the wreck and removes the unit                                           |
 
 ### Coroutine Helpers
 
@@ -304,12 +304,12 @@ Lua coroutines (one per active animation thread per unit), which is
 why ZK's `armcom.lua` defines named signals (`SIG_WALK`, `SIG_LASER`,
 `SIG_DGUN`) — they're masks into the coroutine signal table.
 
-| Function | Effect |
-|---|---|
-| `Spring.UnitScript.StartThread(func, ...)` | spawn a new coroutine |
-| `Spring.UnitScript.SetSignalMask(mask)` | tag the current coroutine; subsequent `Signal(mask)` calls kill matching threads |
-| `Spring.UnitScript.Signal(mask)` | kill all threads with overlapping signal masks |
-| `Spring.UnitScript.Sleep(ms)` | yield the current thread for `ms` milliseconds |
+| Function                                          | Effect                                                                                            |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `Spring.UnitScript.StartThread(func, ...)`        | spawn a new coroutine                                                                             |
+| `Spring.UnitScript.SetSignalMask(mask)`           | tag the current coroutine; subsequent `Signal(mask)` calls kill matching threads                  |
+| `Spring.UnitScript.Signal(mask)`                  | kill all threads with overlapping signal masks                                                    |
+| `Spring.UnitScript.Sleep(ms)`                     | yield the current thread for `ms` milliseconds                                                    |
 | `Spring.UnitScript.CallAsUnit(unitID, func, ...)` | run a function with `activeScript` bound to a different unit's script (used by transport gadgets) |
 
 ---
@@ -411,12 +411,12 @@ Mitigations to consider (not done today):
   given `unitDefID` appears. Pushes the cost out of the critical path
   and amortises it over the first few minutes of play.
 - **Precompile to bytecode at game-import time.** `string.dump` of a
-  loaded chunk is safe to round-trip *within the same Lua build*. The
+  loaded chunk is safe to round-trip _within the same Lua build_. The
   server runs Lua 5.4 throughout, so bytecode caching works fine for
   the synced VM. Saves the parser work but not the file IO or the
   binding step. See [`docs/unit_scripts.md`](unit_scripts.md) (this
   file) and the bake discussion in
-  [`CLAUDE.md`](../CLAUDE.md) §"Resolved Design Decisions" for the
+  [`AGENTS.md`](../AGENTS.md) §"Resolved Design Decisions" for the
   same idea applied to def caches.
 - **Skip scripts for types that won't appear in this game.** ZK loads
   scripts for every `UnitDefs[i]` regardless of whether the room's
@@ -509,14 +509,14 @@ sitting still.
 
 ## Synced / Unsynced / Engine / Game Summary
 
-| Axis | Answer |
-|---|---|
-| Synced or unsynced? | **Synced.** Synced Lua handle on the sim thread. Has full synced API access. |
-| Engine or game? | **Engine-hosted, game-provided.** Lua VM, C++ glue, and callin dispatch are in [`rts/Sim/Units/Scripts/`](../rts/Sim/Units/Scripts/); script source files ship in [`data/games/<gameId>/scripts/`](../data/games/zk/scripts/). |
-| Gameplay or visual? | **Both.** Surface looks visual (`Move`, `Turn`, `Spin`). But the resulting piece transforms drive `QueryWeapon`/`GetEmitDirPos` (projectile launch), `AimWeapon` (firing gate), `BlockShot` (firing veto), `TargetWeight` (target priority), `Killed` (death duration), and several builder/transport piece queries. Animation **is** gameplay because the piece tree is the shared data structure between the two. |
-| Runs on the client? | **No.** Client receives piece transforms in entity state. The script itself executes only on the server. |
-| One per unit or per type? | **One Lua chunk per unit type.** Per-instance state lives in script tables keyed by `unitID`. |
-| Loaded eagerly or lazily? | **Eagerly** by the game's `unit_script.lua` gadget at game start. Could be made lazy without changing semantics. |
+| Axis                      | Answer                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Synced or unsynced?       | **Synced.** Synced Lua handle on the sim thread. Has full synced API access.                                                                                                                                                                                                                                                                                                                                        |
+| Engine or game?           | **Engine-hosted, game-provided.** Lua VM, C++ glue, and callin dispatch are in [`rts/Sim/Units/Scripts/`](../rts/Sim/Units/Scripts/); script source files ship in [`data/games/<gameId>/scripts/`](../data/games/zk/scripts/).                                                                                                                                                                                      |
+| Gameplay or visual?       | **Both.** Surface looks visual (`Move`, `Turn`, `Spin`). But the resulting piece transforms drive `QueryWeapon`/`GetEmitDirPos` (projectile launch), `AimWeapon` (firing gate), `BlockShot` (firing veto), `TargetWeight` (target priority), `Killed` (death duration), and several builder/transport piece queries. Animation **is** gameplay because the piece tree is the shared data structure between the two. |
+| Runs on the client?       | **No.** Client receives piece transforms in entity state. The script itself executes only on the server.                                                                                                                                                                                                                                                                                                            |
+| One per unit or per type? | **One Lua chunk per unit type.** Per-instance state lives in script tables keyed by `unitID`.                                                                                                                                                                                                                                                                                                                       |
+| Loaded eagerly or lazily? | **Eagerly** by the game's `unit_script.lua` gadget at game start. Could be made lazy without changing semantics.                                                                                                                                                                                                                                                                                                    |
 
 ---
 
@@ -556,16 +556,16 @@ Architectural directions worth considering:
 
 ## Source References
 
-| Topic | File |
-|---|---|
-| Callin enum + name table | [`rts/Sim/Units/Scripts/LuaScriptNames.h`](../rts/Sim/Units/Scripts/LuaScriptNames.h), [`LuaScriptNames.cpp`](../rts/Sim/Units/Scripts/LuaScriptNames.cpp) |
-| Lua-side script host | [`rts/Sim/Units/Scripts/LuaUnitScript.cpp`](../rts/Sim/Units/Scripts/LuaUnitScript.cpp), [`LuaUnitScript.h`](../rts/Sim/Units/Scripts/LuaUnitScript.h) |
-| Script factory | [`rts/Sim/Units/Scripts/UnitScriptFactory.cpp`](../rts/Sim/Units/Scripts/UnitScriptFactory.cpp) |
-| Headless piece stubs | [`rts/Sim/Units/Scripts/LocalModelPieceStub.h`](../rts/Sim/Units/Scripts/LocalModelPieceStub.h) |
-| Null-script singleton | [`rts/Sim/Units/Scripts/NullUnitScript.h`](../rts/Sim/Units/Scripts/NullUnitScript.h) |
-| Base script interface | [`rts/Sim/Units/Scripts/UnitScript.h`](../rts/Sim/Units/Scripts/UnitScript.h), [`UnitScript.cpp`](../rts/Sim/Units/Scripts/UnitScript.cpp) |
-| COB (legacy bytecode) runtime | [`rts/Sim/Units/Scripts/Cob*.cpp`](../rts/Sim/Units/Scripts/) |
-| Engine consumers (firing) | [`rts/Sim/Weapons/Weapon.cpp`](../rts/Sim/Weapons/Weapon.cpp) §`UpdateWeaponPieces`, `UpdateWeaponVectors`, `CanFire` |
-| Game-side script loader (ZK) | [`data/games/zk/LuaRules/Gadgets/unit_script.lua`](../data/games/zk/LuaRules/Gadgets/unit_script.lua) |
-| Example unit script | [`data/games/zk/scripts/turretimpulse.lua`](../data/games/zk/scripts/turretimpulse.lua), [`armcom.lua`](../data/games/zk/scripts/armcom.lua) |
-| Headless-fallback projectile path | [`rts/Sim/Projectiles/WeaponProjectiles/WeaponProjectile.cpp:155-175`](../rts/Sim/Projectiles/WeaponProjectiles/WeaponProjectile.cpp#L155-L175) |
+| Topic                             | File                                                                                                                                                       |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Callin enum + name table          | [`rts/Sim/Units/Scripts/LuaScriptNames.h`](../rts/Sim/Units/Scripts/LuaScriptNames.h), [`LuaScriptNames.cpp`](../rts/Sim/Units/Scripts/LuaScriptNames.cpp) |
+| Lua-side script host              | [`rts/Sim/Units/Scripts/LuaUnitScript.cpp`](../rts/Sim/Units/Scripts/LuaUnitScript.cpp), [`LuaUnitScript.h`](../rts/Sim/Units/Scripts/LuaUnitScript.h)     |
+| Script factory                    | [`rts/Sim/Units/Scripts/UnitScriptFactory.cpp`](../rts/Sim/Units/Scripts/UnitScriptFactory.cpp)                                                            |
+| Headless piece stubs              | [`rts/Sim/Units/Scripts/LocalModelPieceStub.h`](../rts/Sim/Units/Scripts/LocalModelPieceStub.h)                                                            |
+| Null-script singleton             | [`rts/Sim/Units/Scripts/NullUnitScript.h`](../rts/Sim/Units/Scripts/NullUnitScript.h)                                                                      |
+| Base script interface             | [`rts/Sim/Units/Scripts/UnitScript.h`](../rts/Sim/Units/Scripts/UnitScript.h), [`UnitScript.cpp`](../rts/Sim/Units/Scripts/UnitScript.cpp)                 |
+| COB (legacy bytecode) runtime     | [`rts/Sim/Units/Scripts/Cob*.cpp`](../rts/Sim/Units/Scripts/)                                                                                              |
+| Engine consumers (firing)         | [`rts/Sim/Weapons/Weapon.cpp`](../rts/Sim/Weapons/Weapon.cpp) §`UpdateWeaponPieces`, `UpdateWeaponVectors`, `CanFire`                                      |
+| Game-side script loader (ZK)      | [`data/games/zk/LuaRules/Gadgets/unit_script.lua`](../data/games/zk/LuaRules/Gadgets/unit_script.lua)                                                      |
+| Example unit script               | [`data/games/zk/scripts/turretimpulse.lua`](../data/games/zk/scripts/turretimpulse.lua), [`armcom.lua`](../data/games/zk/scripts/armcom.lua)               |
+| Headless-fallback projectile path | [`rts/Sim/Projectiles/WeaponProjectiles/WeaponProjectile.cpp:155-175`](../rts/Sim/Projectiles/WeaponProjectiles/WeaponProjectile.cpp#L155-L175)            |

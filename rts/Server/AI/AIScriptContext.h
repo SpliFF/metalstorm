@@ -24,7 +24,27 @@ struct lua_State;
 
 class AIScriptContext : public IScriptContext {
 public:
-    AIScriptContext(const std::string& name, int teamId, int allyTeamId);
+    /// `pluginDir` is the AI plugin's folder on disk (where main.lua and its
+    /// sibling modules live). It anchors the plugin-scoped `require` loader
+    /// (engine ask AI0-loader) so a multi-file AI (e.g. strategos) can boot.
+    /// Empty disables the loader (single-buffer AIs still work).
+    ///
+    /// `mapDataDir` / `defExportDir` are the two sandboxed read roots for the
+    /// AI4 file API (`AI.getMapData` / `AI.getDefExport`): the processed map's
+    /// data dir (`data/maps/<id>`, holds regions.json) and the game's def
+    /// cache dir (`data/games/<id>/cache/defs/<key>`, holds power.json). Empty
+    /// disables the corresponding accessor (it returns nil — an unconfigured
+    /// AI is blind, which the Picture builder treats as "unknown", not error).
+    ///
+    /// `playerId` is the AI's virtual playerID (PLAN-metalstorm-ai.md §1, AI3):
+    /// each AI slot is registered as a real CPlayer, so the strategos charge
+    /// identity is keyed by this playerID (authority_player_<id>), not the team.
+    /// -1 disables player attribution (single-buffer / test AIs).
+    AIScriptContext(const std::string& name, int teamId, int allyTeamId,
+                    const std::string& pluginDir = "",
+                    const std::string& mapDataDir = "",
+                    const std::string& defExportDir = "",
+                    int playerId = -1);
     ~AIScriptContext() override;
 
     // --- IScriptContext ---
@@ -55,6 +75,15 @@ public:
     /// Get the team this AI controls.
     int GetTeamId() const { return teamId; }
 
+    /// Diagnostic/test accessor: read a numeric global from the VM (e.g.
+    /// picture.lua's static-load summary). Returns false if the VM is dead
+    /// or the global is absent/non-numeric. Not thread-safe — call only
+    /// when no worker is processing a snapshot (tests, or between ticks).
+    bool TryGetGlobalNumber(const char* name, double& out) const;
+
+    /// Get the AI's virtual playerID (AI3), or -1 if unattributed.
+    int GetPlayerId() const { return playerId; }
+
 private:
     /// Register the AI API functions into the Lua state.
     void RegisterAPI();
@@ -65,14 +94,50 @@ private:
     static int l_issueCommand(lua_State* L);
     static int l_getFrame(lua_State* L);
     static int l_getMapSize(lua_State* L);
+    static int l_getTeamId(lua_State* L);      // AI-team down payment
+    static int l_getPlayerId(lua_State* L);    // AI3 virtual playerID
+    static int l_getRulesParam(lua_State* L);  // AI1
+    static int l_require(lua_State* L);         // AI0-loader
+    static int l_getMapData(lua_State* L);      // AI4: map data dir read
+    static int l_getDefExport(lua_State* L);    // AI4: def export dir read
+    // AI2: directive-shaped write surface (org-group / directive / posture).
+    // These push AICommands the drain routes through the SAME manager + charge
+    // path as a human player's wire message (StateStreamer::TickAI). There is
+    // deliberately NO per-squad command verb here — the strategic floor
+    // (PLAN-metalstorm-ai §1/§4). The pre-existing l_issueCommand stays as the
+    // generic runtime's per-unit path (test channel / non-Metalstorm AIs).
+    static int l_createGroup(lua_State* L);
+    static int l_issueDirective(lua_State* L);
+    static int l_setPosture(lua_State* L);
+
+    // Log channel: a headless server AI has no chat wire / HUD, but its
+    // decisions and errors must still be visible (plan §5.1 — "spend is
+    // socially visible"). AI.log(msg) routes to the server log under the AI's
+    // section, so a full-side run's goals/directives/errors are inspectable.
+    static int l_log(lua_State* L);
+
+    // Monotonic millisecond clock for the AI to self-time its strategic tick
+    // (plan §6 budget). Sandbox-safe: a steady_clock delta since context
+    // construction, so it leaks no wall-clock date and can't be used for
+    // anything but interval timing.
+    static int l_nowMs(lua_State* L);
 
     std::string name;
     int teamId;
     int allyTeamId;
+    int playerId;             // AI3: the AI's virtual playerID (-1 = unattributed)
+    std::string pluginDir;    // AI0-loader: module resolution root
+    std::string mapDataDir;   // AI4: getMapData sandbox root (data/maps/<id>)
+    std::string defExportDir; // AI4: getDefExport sandbox root (def cache dir)
     ScriptPermissions permissions;
     lua_State* L = nullptr;
 
     std::atomic<bool> running{false};
+
+    // AI2: monotonic counter minting client-local group tokens for
+    // createGroup→issueDirective correlation (see AICommandQueue.h). Worker
+    // thread only (the AI VM runs single-threaded per context).
+    uint32_t nextGroupToken = 1;
 
     // Snapshot queue (sim thread writes, worker thread reads)
     std::mutex snapshotMutex;

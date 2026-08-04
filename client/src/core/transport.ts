@@ -201,8 +201,15 @@ export class WebTransportAdapter implements GameTransport {
     disconnect(): void {
         this.closing = true;
         this._connected = false;
-        try { this.controlWriter?.close(); } catch { /* ignore */ }
-        try { this.stateWriter?.abort(); } catch { /* ignore */ }
+        // close()/abort() return PROMISES that REJECT with "The session is
+        // closed." when the session is already tearing down — the try/catch
+        // only catches a synchronous throw, so without the `.catch` the
+        // rejection is unhandled. On a LIVE reconnect (R1 soft-recover) or a
+        // clean detach that leaves the worker alive, that unhandled rejection
+        // hits the worker's unhandledrejection hook and spuriously escalates
+        // the recovery ladder to R2 (PLAN-client-resilience task 2). Swallow it.
+        try { this.controlWriter?.close()?.catch(() => {}); } catch { /* ignore */ }
+        try { this.stateWriter?.abort()?.catch(() => {}); } catch { /* ignore */ }
         try { this.wt?.close(); } catch { /* ignore */ }
         this.wt = null;
         this.controlWriter = null;

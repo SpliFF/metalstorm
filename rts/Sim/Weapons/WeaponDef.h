@@ -10,6 +10,7 @@
 #include "System/UnorderedMap.hpp"
 #include "Sim/Misc/GlobalConstants.h"
 #include "Sim/Misc/Resource.h"
+#include "Sim/Weapons/StatisticalCombat.h"
 
 // Stub — full texture atlas removed with rendering. The headless server
 // never populates these (no GL atlas loader runs) but laser/beam/missile
@@ -28,6 +29,13 @@ struct AtlasedTexture {
 class CColorMap;
 #include "Sim/Units/Scripts/LocalModelPieceStub.h"
 class LuaTable;
+
+/// PLAN-latency L2 presentation tiers. Wire values — kept in sync with
+/// `WeaponDefInfo.fxTier` on the client. See `WeaponDef::fxTier`.
+enum FxTier : uint8_t {
+	FX_TIER_COSMETIC = 1,
+	FX_TIER_SYNCED   = 2,
+};
 
 struct WeaponDef
 {
@@ -61,6 +69,28 @@ public:
 	}
 
 	bool IsVisibleShield() const { return (visibleShield || visibleShieldHitFrames > 0); }
+
+	bool IsCosmeticFx() const { return fxTier == FX_TIER_COSMETIC; }
+
+	/// Resolve `fxTier` from the parsed def. Reads `customParams.fxtier` first,
+	/// else applies the default heuristic. See the `fxTier` field docs for the
+	/// tier contract.
+	///
+	/// `shieldInterceptMask` is the OR of `shieldInterceptType` over every
+	/// shield weaponDef in the game, so this must run *after* the whole def set
+	/// is parsed (CWeaponDefHandler does it in one post-load pass).
+	///
+	/// Why the mask and not just `interceptedByShieldType != 0`, which is what
+	/// PLAN-latency-impl §L2.0 literally specified: `interceptedByShieldType`
+	/// defaults to `defInterceptType`, and *every* weapon type sets a non-zero
+	/// `defInterceptType` (Cannon 1, Laser 2, Missile 4, Rifle 128, …). The
+	/// literal rule therefore marks essentially every weapon Tier S and the
+	/// classifier never yields a single Tier-C weapon. Whether a weapon can
+	/// *actually* be shield-stopped depends on whether a shield carrying the
+	/// matching bit exists — a property of the def set, resolved once at load.
+	/// That keeps the classification static (decision 3 rejects only *dynamic*
+	/// per-match interceptor awareness, not load-time def-set facts).
+	void ClassifyFxTier(unsigned int shieldInterceptMask);
 
 public:
 	std::string name;
@@ -232,9 +262,33 @@ public:
 	unsigned int projectileType;
 	unsigned int collisionFlags;
 
+	/// PLAN-latency L2 — presentation tier for this weapon's projectiles.
+	/// Decides who owns the visual, NOT who owns the damage (damage is
+	/// authoritative server-side either way).
+	///   FX_TIER_COSMETIC: no CWeaponProjectile is spawned at all. The server
+	///     resolves the outcome at fire time and sends one FireOutcomeEvent
+	///     (fire_frame → impact_frame/impact_pos); the client invents the whole
+	///     flight and converges on the impact by construction. Rifles, MGs,
+	///     most lasers, bolts, plasma, short cannons.
+	///   FX_TIER_SYNCED: a real CWeaponProjectile, because the outcome is
+	///     *contingent* on sim state that cannot be pre-baked — a shield may
+	///     have charge when it arrives, an interceptor may catch it. Artillery,
+	///     capital missiles, torpedoes, anything shield- or interceptor-facing.
+	/// Resolved once at parse time (`ClassifyFxTier`), overridable from Lua via
+	/// `customParams.fxtier = "cosmetic" | "synced"`. Static per weaponDef —
+	/// deliberately no per-match interceptor awareness (PLAN-latency-impl
+	/// decision 3).
+	uint8_t fxTier;
+
 	float cameraShake;
 
 	spring::unordered_map<std::string, std::string> customParams;
+
+	// Metalstorm statistical combat (PLAN-metalstorm-combat-resolution.md §1-2).
+	// Opt-in per def via the `resolution` / legacy `combat_model` customParam.
+	// Absent => Sim (the faithful Recoil projectile path is untouched).
+	WeaponResolution resolution = WEAPON_RESOLUTION_SIM;
+	StatCombat::Tuning statTuning; // only consulted when resolution == statistical
 
 	struct Visuals {
 		float3 color;

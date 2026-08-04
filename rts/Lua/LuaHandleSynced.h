@@ -72,6 +72,9 @@ class CSyncedLuaHandle : public CLuaHandle
 		bool AllowBuilderHoldFire(const CUnit* unit, int action) override;
 		bool AllowStartPosition(int playerID, int teamID, unsigned char readyState, const float3& clampedPos, const float3& rawPickPos) override;
 		bool AllowStandingOrderAssign(unsigned int orderID, const CUnit* unit) override;
+		bool AllowDirectiveAssign(unsigned int directiveID, const CUnit* unit) override;
+		bool AllowStandingOrderCreate(int team, int playerID, unsigned int orderType) override;
+		bool AllowDirectiveCreate(int team, int playerID, unsigned int groupID, unsigned int directiveType, unsigned int requestedStrength) override;
 
 		bool TerraformComplete(const CUnit* unit, const CUnit* build) override;
 		bool MoveCtrlNotify(const CUnit* unit, int data) override;

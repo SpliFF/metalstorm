@@ -6,6 +6,7 @@
 
 #include "Server/NetworkServer.h"
 #include "Server/DevBuildGate.h"
+#include "Server/LogQueryBuilder.h"
 #include "System/SpringLog/SpringLog.h"
 #include "System/SpringLog/SpringLogSqlite.h"
 
@@ -147,18 +148,26 @@ static std::string LogEntryToJson(const BufferedLogEntry& e) {
     return json;
 }
 
-/// Escape a string for safe inclusion in a single-quoted SQL literal by
-/// doubling embedded quotes. Used for the optional game/section filters
-/// (these come from trusted local callers, but doubling keeps a stray
-/// quote from breaking the query).
-static std::string SqlEscape(const std::string& s) {
-    std::string out;
-    out.reserve(s.size());
-    for (char c : s) {
-        if (c == '\'') out += "''";
-        else out += c;
-    }
-    return out;
+/// Serialise one debug_logs result row (columns in the SELECT order fixed by
+/// LogQueryBuilder.h) to a JSON object. Replaces the old sqlite3_exec C-string
+/// callback now that queries run via prepared statements (G2).
+static std::string LogRowToJson(sqlite3_stmt* st) {
+    auto txt = [&](int i) -> std::string {
+        const auto* t = sqlite3_column_text(st, i);
+        return t ? reinterpret_cast<const char*>(t) : "";
+    };
+    std::string e;
+    e += R"({"id":)"        + std::to_string(sqlite3_column_int64(st, 0));
+    e += R"(,"timestamp":)" + std::to_string(sqlite3_column_int64(st, 1));
+    e += R"(,"level":)"     + std::to_string(sqlite3_column_int(st, 2));
+    e += R"(,"section":")"  + JsonEscape(txt(3)) + "\"";
+    e += R"(,"scope":")"    + JsonEscape(txt(4)) + "\"";
+    e += R"(,"process":")"  + JsonEscape(txt(5)) + "\"";
+    e += R"(,"frame":)"     + std::to_string(sqlite3_column_int(st, 6));
+    e += R"(,"room_id":)"   + std::to_string(sqlite3_column_int64(st, 8));
+    e += R"(,"game_id":")"  + JsonEscape(txt(9)) + "\"";
+    e += R"(,"message":")"  + JsonEscape(txt(7)) + "\"}";
+    return e;
 }
 
 /// Extract a path segment after a prefix. E.g. "/api/logs/42" with
@@ -423,42 +432,29 @@ int main(int argc, char** argv) {
             }
             json += "]";
         } else {
-            // Query SQLite directly
+            // Query SQLite directly, via a parameterized statement (G2 — no
+            // caller value is ever concatenated into the SQL text).
             sqlite3* db = nullptr;
             json = "[]";
             if (sqlite3_open_v2(g_dbPath.c_str(), &db, SQLITE_OPEN_READONLY, nullptr) == SQLITE_OK) {
-                std::string sql = "SELECT id, timestamp, level, section, scope, process, frame, message, room_id, game_id "
-                    "FROM debug_logs WHERE level >= " + std::to_string(minLevel);
-                if (roomId != 0) sql += " AND room_id = " + std::to_string(roomId);
-                if (!game.empty()) sql += " AND game_id = '" + SqlEscape(game) + "'";
-                if (since != 0) sql += " AND timestamp >= " + std::to_string(since);
-                if (!section.empty()) sql += " AND section = '" + SqlEscape(section) + "'";
-                if (!scope.empty()) sql += " AND scope = '" + SqlEscape(scope) + "'";
-                sql += " ORDER BY id DESC LIMIT " + std::to_string(limit);
+                LogQueryParams p;
+                p.minLevel = minLevel;
+                p.roomId   = roomId;
+                p.since    = since;
+                p.game     = game;
+                p.section  = section;
+                p.scope    = scope;
+                p.limit    = limit;
 
-                json = "[";
+                std::string arr = "[";
                 bool first = true;
-                auto cb = [](void* data, int ncols, char** vals, char** /*names*/) -> int {
-                    auto* pair = static_cast<std::pair<std::string*, bool*>*>(data);
-                    if (!*pair->second) *pair->first += ",";
-                    *pair->second = false;
-                    std::string entry;
-                    entry += R"({"id":)" + std::string(vals[0] ? vals[0] : "0");
-                    entry += R"(,"timestamp":)" + std::string(vals[1] ? vals[1] : "0");
-                    entry += R"(,"level":)" + std::string(vals[2] ? vals[2] : "0");
-                    entry += R"(,"section":")" + JsonEscape(vals[3] ? vals[3] : "") + "\"";
-                    entry += R"(,"scope":")" + JsonEscape(vals[4] ? vals[4] : "") + "\"";
-                    entry += R"(,"process":")" + JsonEscape(vals[5] ? vals[5] : "") + "\"";
-                    entry += R"(,"frame":)" + std::string(vals[6] ? vals[6] : "0");
-                    entry += R"(,"room_id":)" + std::string(vals[8] ? vals[8] : "0");
-                    entry += R"(,"game_id":")" + JsonEscape(vals[9] ? vals[9] : "") + "\"";
-                    entry += R"(,"message":")" + JsonEscape(vals[7] ? vals[7] : "") + "\"}";
-                    *pair->first += entry;
-                    return 0;
-                };
-                auto pair = std::make_pair(&json, &first);
-                sqlite3_exec(db, sql.c_str(), cb, &pair, nullptr);
-                json += "]";
+                RunLogQuery(db, p, [&](sqlite3_stmt* st) {
+                    if (!first) arr += ",";
+                    first = false;
+                    arr += LogRowToJson(st);
+                });
+                arr += "]";
+                json = arr;
                 sqlite3_close(db);
             }
         }
@@ -506,35 +502,25 @@ int main(int argc, char** argv) {
         if (count == 0 && haveSelector) {
             sqlite3* db = nullptr;
             if (sqlite3_open_v2(g_dbPath.c_str(), &db, SQLITE_OPEN_READONLY, nullptr) == SQLITE_OK) {
-                std::string sql = "SELECT id, timestamp, level, section, scope, process, frame, message, room_id, game_id "
-                    "FROM debug_logs WHERE level >= " + std::to_string(minLevel);
-                if (!query.empty()) sql += " AND message LIKE '%" + SqlEscape(query) + "%'";
-                if (room != 0) sql += " AND room_id = " + std::to_string(room);
-                if (!game.empty()) sql += " AND game_id = '" + SqlEscape(game) + "'";
-                if (!section.empty()) sql += " AND section = '" + SqlEscape(section) + "'";
-                if (since != 0) sql += " AND timestamp >= " + std::to_string(since);
-                sql += " ORDER BY id DESC LIMIT " + std::to_string(limit);
+                // Parameterized (G2) — the search substring and all selectors
+                // are bound values, never spliced into the SQL text.
+                LogQueryParams p;
+                p.minLevel    = minLevel;
+                p.roomId      = room;
+                p.since       = since;
+                p.game        = game;
+                p.section     = section;
+                p.messageLike = query;
+                p.limit       = limit;
+
+                // This block runs only when the ring buffer produced nothing
+                // (guarded by count == 0 above), so json is still just "[".
                 bool first = true;
-                auto cb = [](void* data, int ncols, char** vals, char** /*names*/) -> int {
-                    auto* pair = static_cast<std::pair<std::string*, bool*>*>(data);
-                    if (!*pair->second) *pair->first += ",";
-                    *pair->second = false;
-                    std::string entry;
-                    entry += R"({"id":)" + std::string(vals[0] ? vals[0] : "0");
-                    entry += R"(,"timestamp":)" + std::string(vals[1] ? vals[1] : "0");
-                    entry += R"(,"level":)" + std::string(vals[2] ? vals[2] : "0");
-                    entry += R"(,"section":")" + JsonEscape(vals[3] ? vals[3] : "") + "\"";
-                    entry += R"(,"scope":")" + JsonEscape(vals[4] ? vals[4] : "") + "\"";
-                    entry += R"(,"process":")" + JsonEscape(vals[5] ? vals[5] : "") + "\"";
-                    entry += R"(,"frame":)" + std::string(vals[6] ? vals[6] : "0");
-                    entry += R"(,"room_id":)" + std::string(vals[8] ? vals[8] : "0");
-                    entry += R"(,"game_id":")" + JsonEscape(vals[9] ? vals[9] : "") + "\"";
-                    entry += R"(,"message":")" + JsonEscape(vals[7] ? vals[7] : "") + "\"}";
-                    *pair->first += entry;
-                    return 0;
-                };
-                auto pair = std::make_pair(&json, &first);
-                sqlite3_exec(db, sql.c_str(), cb, &pair, nullptr);
+                RunLogQuery(db, p, [&](sqlite3_stmt* st) {
+                    if (!first) json += ",";
+                    first = false;
+                    json += LogRowToJson(st);
+                });
                 sqlite3_close(db);
             }
         }
@@ -592,16 +578,24 @@ int main(int argc, char** argv) {
     // library — the schema is narrow and stable, and we already use a
     // similar approach for test-event.
     //
-    // PLAN-security-hardening task 2 (G1): spring-logserver links neither
-    // Database nor HttpAuth, so these three write routes can't be RouteAuth-
-    // gated like the other servers' admin routes without pulling in that
-    // dependency (deferred to task 8's full logserver-auth fix). For now,
-    // compiled out entirely under SPRING_PROD: unauthenticated log forgery /
-    // synthetic-event injection / process re-exec have no place in a
-    // production binary. Dev builds keep them (MCP `restart_logserver` +
-    // browser log ingestion rely on this today).
+    // PLAN-security-hardening G1 (tasks 2 + 8): the three mutating routes below
+    // (ingest / test-event / restart) are a defence in depth of two layers:
+    //   1. Compiled out entirely under SPRING_PROD — unauthenticated log
+    //      forgery / synthetic-event injection / process re-exec have no place
+    //      in a production binary.
+    //   2. In dev builds they are classified RouteAuth::LocalhostOrAdmin, not
+    //      Public. spring-logserver links neither Database nor HttpAuth and
+    //      never calls SetRouteAuthCallbacks, so the "…OrAdmin" half can never
+    //      pass (no token validator) — the tag degrades to a pure, forgery-
+    //      proof loopback-peer check enforced centrally by NetworkServer's
+    //      DispatchPost *before* the handler runs. That closes the E1 case (a
+    //      dev build deliberately bound to a public interface via
+    //      --i-understand-this-is-a-dev-build): a remote peer can no longer
+    //      forge logs into the persisted SQLite or re-exec the process. The
+    //      legitimate callers — the MCP `restart_logserver` tool and the local
+    //      browser posting its own logs — are same-host and stay loopback.
 #ifndef SPRING_PROD
-    net.AddHttpPost("/api/logs/ingest", RouteAuth::Public, [](const std::string&, const std::string& body,
+    net.AddHttpPost("/api/logs/ingest", RouteAuth::LocalhostOrAdmin, [](const std::string&, const std::string& body,
                                             const HttpRequestHeaders&) -> HttpResponse {
         // Locate either a top-level entry (no "entries" key) or each
         // element in the entries array. We slice the array string and walk
@@ -680,7 +674,7 @@ int main(int argc, char** argv) {
     });
 
     // POST endpoint for SSE testing — generates a synthetic log event
-    net.AddHttpPost("/api/logs/test-event", RouteAuth::Public, [](const std::string&, const std::string& body,
+    net.AddHttpPost("/api/logs/test-event", RouteAuth::LocalhostOrAdmin, [](const std::string&, const std::string& body,
                                                 const HttpRequestHeaders&) -> HttpResponse {
         // Parse optional message from body
         std::string msg = "test event";
@@ -707,7 +701,7 @@ int main(int argc, char** argv) {
     // keeps mprocs authoritative over the pid (no kill + respawn). Sets the
     // restart flag + wakes the run loop; the actual execvp happens on the
     // main thread once the network server has stopped.
-    net.AddHttpPost("/api/logs/restart", RouteAuth::Public, [](const std::string&, const std::string&,
+    net.AddHttpPost("/api/logs/restart", RouteAuth::LocalhostOrAdmin, [](const std::string&, const std::string&,
                                             const HttpRequestHeaders&) -> HttpResponse {
         g_restart.store(true);
         g_shutdown.store(true);

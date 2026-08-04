@@ -15,11 +15,19 @@
 #define LUA_DEFS_SERIALIZER_INL
 
 #include "Server/ProjectileTextureDefaults.h"
+#include "Sim/Misc/GlobalConstants.h"
+#include "Sim/MoveTypes/FootprintProfile.h"
+#include "System/SpringLog/SpringLog.h"
 
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -176,6 +184,52 @@ inline std::string SerializeOneUnitDef(
     if (!cps.empty()) {
         b.add_raw("custom_params", detail::StringMap(cps));
     }
+    // Metalstorm footprint profile (PLAN-metalstorm-flow §1, engine ask F1):
+    // emit the resolved authored profile so the client derives the same
+    // ground-contact patches (patches.js) + big-unit repulsor semantics
+    // (big-unit-repulsor.js) the sim uses for permeability. underpass carries
+    // the move-class NAMES (the client resolves them the same way the sim
+    // resolved them to pathTypes). Omitted for units with no profile.
+    if (ud.footprintProfile != nullptr) {
+        const footprint::Profile& fp = *ud.footprintProfile;
+        detail::LuaBuilder fb;
+        fb.add_int("hull_x", fp.hullX);
+        fb.add_int("hull_z", fp.hullZ);
+        fb.add_int("clearance", fp.clearance);
+        if (!fp.underpass.empty()) {
+            std::string arr = "{";
+            for (size_t i = 0; i < fp.underpass.size(); ++i) {
+                if (i) arr += ',';
+                arr += LuaQuote(fp.underpass[i]);
+            }
+            arr += '}';
+            fb.add_raw("underpass", std::move(arr));
+        }
+        if (!fp.contacts.empty()) {
+            std::string carr = "{";
+            for (size_t i = 0; i < fp.contacts.size(); ++i) {
+                if (i) carr += ',';
+                const footprint::Contact& c = fp.contacts[i];
+                detail::LuaBuilder cb;
+                const bool isTrack = (c.kind == footprint::Contact::Kind::Track);
+                cb.add_str("kind", isTrack ? "track" : "foot");
+                cb.add_float("x", c.x);
+                cb.add_float("z", c.z);
+                if (isTrack) {
+                    cb.add_float("half_width", c.halfWidth);
+                    cb.add_float("half_length", c.halfLength);
+                } else {
+                    cb.add_float("r", c.r);
+                    cb.add_float("gait_phase", c.gaitPhase);
+                    cb.add_float("gait_duty", c.gaitDuty);
+                }
+                carr += cb.finish();
+            }
+            carr += '}';
+            fb.add_raw("contacts", std::move(carr));
+        }
+        b.add_raw("footprint", fb.finish());
+    }
     b.add_float("repair_speed", ud.repairSpeed);
     b.add_int("transport_size", ud.transportSize);
     b.add_float("transport_mass", ud.transportMass);
@@ -228,6 +282,169 @@ inline std::string SerializeOneUnitDef(
     b.add_bool("can_self_destruct", ud.canSelfD,    /*def=*/true);
     b.add_int("self_d_countdown", ud.selfDCountdown);
     b.add_int("category_bits", static_cast<long long>(ud.category));
+
+    // Impostor/LOD tier (PLAN-metalstorm-beta-units.md §2.1, engine ask B1).
+    // Opt-in via customParams impostor_distance (elmos, Full→Impostor switch
+    // distance); impostor_only additionally means the def has no 3D model at
+    // all (the impostor billboard IS the model — infantry/civilians per the
+    // plan's roster table), so the switch distance defaults to near-zero
+    // instead of never. icon_distance (Impostor→Icon) defaults to 4x the
+    // impostor distance when not given explicitly.
+    // The baked-atlas pipeline (PLAN-metalstorm-impostors.md M2) produces v2
+    // directional atlases (8 yaw × 3 pitch, baked from the 3D bodies); the
+    // client's ImpostorRenderer directional-selects a cell per instance from
+    // the yaw_bins/pitch_bins/frames grid emitted below. diffuse_uri points at
+    // the deployed <stem>_impostor.ktx2.
+    {
+        const auto impostorOnlyIt = ud.customParams.find("impostor_only");
+        const bool impostorOnly = impostorOnlyIt != ud.customParams.end() &&
+            impostorOnlyIt->second != "0" && !impostorOnlyIt->second.empty();
+
+        float impostorDist = 0.0f;
+        bool haveImpostorDist = false;
+        const auto impostorDistIt = ud.customParams.find("impostor_distance");
+        if (impostorDistIt != ud.customParams.end()) {
+            impostorDist = std::strtof(impostorDistIt->second.c_str(), nullptr);
+            haveImpostorDist = impostorDist > 0.0f;
+        }
+        if (!haveImpostorDist && impostorOnly) {
+            impostorDist = 1.0f;  // always-impostor: no model to fall back to
+            haveImpostorDist = true;
+        }
+
+        if (haveImpostorDist) {
+            // No customParams icon_distance override → effectively never
+            // (macro-map's own strategic-zoom icons are a separate system,
+            // PLAN-macro-map.md §1; this per-def icon_distance only matters
+            // for a def that explicitly wants EntityRenderer to stop drawing
+            // it at some finite range). Deliberately NOT a multiple of
+            // impostorDist — impostor_only defs default impostorDist to ~1
+            // elmo (always-impostor), and 4x that would hide the unit
+            // almost immediately.
+            float iconDist = 1.0e9f;
+            const auto iconDistIt = ud.customParams.find("icon_distance");
+            if (iconDistIt != ud.customParams.end()) {
+                const float parsed = std::strtof(iconDistIt->second.c_str(), nullptr);
+                if (parsed > 0.0f) iconDist = parsed;
+            }
+            detail::LuaBuilder ltb;
+            ltb.add_float("impostor_distance", impostorDist);
+            ltb.add_float("icon_distance", iconDist);
+            b.add_raw("lod_thresholds", ltb.finish());
+
+            std::string impostorStem = ud.modelName.empty() ? ud.name
+                : fs::path(ud.modelName).stem().string();
+            detail::LuaBuilder imp;
+            imp.add_str("diffuse_uri", "/api/games/data/" + gameId +
+                "/models/" + impostorStem + "_impostor.ktx2");
+            // Team-colour mask sidecar (R = blend amount, same convention as
+            // the model pipeline's `<stem>_team.ktx2`). Opt-in via
+            // customParams impostor_team_mask so defs without the authored
+            // sidecar don't trigger a 404 texture fetch per (def, team).
+            const auto teamMaskIt = ud.customParams.find("impostor_team_mask");
+            if (teamMaskIt != ud.customParams.end() &&
+                teamMaskIt->second != "0" && !teamMaskIt->second.empty()) {
+                imp.add_str("team_mask_uri", "/api/games/data/" + gameId +
+                    "/models/" + impostorStem + "_impostor_team.ktx2");
+            }
+            imp.add_int("walk_frames", 1);
+            imp.add_int("idle_frames", 1);
+            // v2 directional atlas grid (PLAN-metalstorm-impostors.md M3).
+            // Source: customParams impostor_yaw_bins / impostor_pitch_bins /
+            // impostor_frames, set by the game (metalstorm's _builder.lua) to
+            // match the baked atlas's convention (impostor_convention.py: 8×3×1).
+            // Default 1/1/1 → a legacy single-frame atlas / non-metalstorm game
+            // keeps the whole-quad mapping, so the client never directional-
+            // selects a def that didn't opt in. DEVIATION (recorded in the plan
+            // lane notes): the plan's M2 "For M3" note suggested the serializer
+            // read the baked <stem>_impostor.json sidecar; that sidecar is a
+            // gitignored forge artifact never deployed into data/, so the grid
+            // rides customParams like the rest of the impostor block instead.
+            auto gridParam = [&](const char* key) -> long long {
+                const auto it = ud.customParams.find(key);
+                if (it == ud.customParams.end()) return 1;
+                const long long v = std::strtoll(it->second.c_str(), nullptr, 10);
+                return v > 0 ? v : 1;
+            };
+            const long long pitchBins = gridParam("impostor_pitch_bins");
+            imp.add_int("yaw_bins", gridParam("impostor_yaw_bins"));
+            imp.add_int("pitch_bins", pitchBins);
+            imp.add_int("frames", gridParam("impostor_frames"));
+            // The atlas's OWN azimuth phase and elevation arc (M7/M8). Two
+            // bakers ship disagreeing by exactly 180 degrees on what column 0
+            // is, and on the elevation arc, so an atlas DECLARES both and the
+            // runtime reads what it is told rather than assuming a global
+            // convention (user decision 2026-08-03, option (b)). Omitted =
+            // phase 0 (column 0 = the unit's BACK) and the runtime's legacy
+            // fallback arc, i.e. exactly today's behaviour.
+            //   impostor_azimuth_phase  — degrees; 180 = column 0 is the FRONT
+            //                             view, which is what the four
+            //                             `infantry_v2` sheets were baked at.
+            //   impostor_pitch_degrees  — comma-separated elevations above the
+            //                             horizon, top row first; must supply
+            //                             exactly impostor_pitch_bins entries.
+            const auto phaseIt = ud.customParams.find("impostor_azimuth_phase");
+            if (phaseIt != ud.customParams.end() && !phaseIt->second.empty()) {
+                imp.add_float("azimuth_phase_degrees",
+                    std::strtof(phaseIt->second.c_str(), nullptr));
+            }
+            const auto arcIt = ud.customParams.find("impostor_pitch_degrees");
+            if (arcIt != ud.customParams.end() && !arcIt->second.empty()) {
+                std::vector<float> arc;
+                const std::string& spec = arcIt->second;
+                for (size_t i = 0; i < spec.size();) {
+                    size_t comma = spec.find(',', i);
+                    if (comma == std::string::npos) comma = spec.size();
+                    const std::string tok = spec.substr(i, comma - i);
+                    if (!tok.empty()) arc.push_back(std::strtof(tok.c_str(), nullptr));
+                    i = comma + 1;
+                }
+                // A partial arc is worse than none: the runtime would fall back
+                // to a DIFFERENT arc than the sheet was baked on and silently
+                // select the wrong elevation row. Emit only a complete one.
+                if (static_cast<long long>(arc.size()) == pitchBins) {
+                    imp.add_raw("pitch_degrees", detail::FloatVector(arc));
+                }
+            }
+            // Quad size: authored customParams impostor_size (elmos, square)
+            // wins — impostor-only infantry render the sprite per squad
+            // MEMBER, so the quad must be human-scaled, which no derivation
+            // from the squad unit's footprint can express. Otherwise: 2x the
+            // model radius when a model exists (matches the bake pipeline's
+            // eventual convention, §6); impostor_only defs have no model
+            // (GetModelRadius() == 0) — fall back to the footprint world
+            // size (footprint units are 2*SQUARE_SIZE elmos each,
+            // GlobalConstants.h) so the billboard is at least unit-scaled
+            // instead of a degenerate ~0-size quad.
+            float quadSize = 0.0f;
+            const auto sizeIt = ud.customParams.find("impostor_size");
+            if (sizeIt != ud.customParams.end())
+                quadSize = std::strtof(sizeIt->second.c_str(), nullptr);
+            if (quadSize <= 0.0f)
+                quadSize = ud.GetModelRadius() * 2.0f;
+            if (quadSize <= 0.0f) {
+                quadSize = static_cast<float>(std::max(ud.xsize, ud.zsize)) *
+                    (2.0f * SQUARE_SIZE);
+            }
+            quadSize = std::max(quadSize, 1.0f);
+            imp.add_float("width", quadSize);
+            imp.add_float("height", quadSize);
+            // Ground-anchor lift: how far ABOVE the unit's ground point the
+            // quad's centre sits, in elmos. The runtime defaults this to
+            // height/2, which is only right when the baker put the model's
+            // ground point on the cell's BOTTOM edge. A baker that reserves a
+            // margin, or that fits all views to one shared scale, leaves clear
+            // cell below the feet — then height/2 hovers the sprite by exactly
+            // that margin. So the atlas declares its own (customParams
+            // impostor_centre_y), measured from the bake.
+            const auto centreIt = ud.customParams.find("impostor_centre_y");
+            if (centreIt != ud.customParams.end() && !centreIt->second.empty()) {
+                const float centreY = std::strtof(centreIt->second.c_str(), nullptr);
+                if (centreY > 0.0f) imp.add_float("centre_y", centreY);
+            }
+            b.add_raw("impostor", imp.finish());
+        }
+    }
 
     // Sounds: emit a Lua array of {id, path, name, category,
     // volume, pitch} tables in the same packing order as the FB
@@ -296,6 +513,40 @@ inline std::string SerializeOneUnitDef(
     return b.finish();
 }
 
+/// Every def whose `objectname` resolves to a `.gltf` that is not on disk and
+/// which is NOT declared `impostor_only`. Such a def is not an error the
+/// pipeline can see — SerializeOneUnitDef deliberately emits an empty
+/// `model_url` and the client silently degrades it to a procedural shape (or,
+/// for a squad def, to the proxy capsule). That silence is exactly how a
+/// scenario ends up "mostly placeholders" without anything in the logs saying
+/// so, which is why this is reported loudly at bake time.
+///
+/// `impostor_only` defs are excluded by design: the billboard IS their model
+/// (PLAN-metalstorm-beta-units.md §2.1 roster — infantry / civilians ship with
+/// no 3D model at all), so a missing `.gltf` for them is correct, not a gap.
+template<typename UnitDefVec>
+inline std::vector<std::string> FindDefsWithMissingModels(
+    const UnitDefVec& defs,
+    const std::filesystem::path& modelsDir)
+{
+    namespace fs = std::filesystem;
+    std::vector<std::string> missing;
+    for (size_t i = 1; i < defs.size(); ++i) {   // slot 0 is the sentinel
+        const auto& ud = defs[i];
+        if (ud.modelName.empty()) continue;
+
+        const auto impostorOnlyIt = ud.customParams.find("impostor_only");
+        const bool impostorOnly = impostorOnlyIt != ud.customParams.end() &&
+            impostorOnlyIt->second != "0" && !impostorOnlyIt->second.empty();
+        if (impostorOnly) continue;
+
+        const std::string stem = fs::path(ud.modelName).stem().string();
+        if (!fs::exists(modelsDir / (stem + ".gltf")))
+            missing.push_back(ud.name + " (objectname=" + stem + ")");
+    }
+    return missing;
+}
+
 template<typename UnitDefVec>
 inline std::string SerializeUnitDefs(
     const UnitDefVec& defs,
@@ -304,6 +555,23 @@ inline std::string SerializeUnitDefs(
     namespace fs = std::filesystem;
     const fs::path modelsDir = fs::path("data/games") / gameId / "models";
     const auto nameToId = BuildNameToDefIdMap_(defs);
+
+    // Loud, once per defs bake: name every def that will render as a
+    // placeholder because its model file is absent. See
+    // FindDefsWithMissingModels for why this can't be an assertion.
+    if (const auto missing = FindDefsWithMissingModels(defs, modelsDir);
+        !missing.empty()) {
+        std::string list;
+        for (size_t i = 0; i < missing.size(); ++i) {
+            if (i) list += ", ";
+            list += missing[i];
+        }
+        springlog_log(SPRING_LOG_WARNING, "server", "", springlog_get_frame(),
+            "%zu unit def(s) in '%s' claim a model that is not in %s and are "
+            "not impostor_only — these render as PLACEHOLDER shapes: %s",
+            missing.size(), gameId.c_str(), modelsDir.string().c_str(),
+            list.c_str());
+    }
 
     std::string out;
     out.reserve(defs.size() * 512);
@@ -419,6 +687,11 @@ inline std::string SerializeOneWeaponDef(
     // client mirrors the same enum and dispatches each value to its
     // own visual builder.
     b.add_int("projectile_type", static_cast<int>(wd.projectileType));
+    // PLAN-latency L2.0 presentation tier: 1 = cosmetic (client owns the whole
+    // invented flight, no sim projectile exists), 2 = synced (real
+    // CWeaponProjectile, outcome contingent on sim state). The client needs
+    // this *before* the first shot so it knows how to treat each weapon.
+    b.add_int("fx_tier", static_cast<int>(wd.fxTier));
     b.add_float("projectile_speed", wd.projectilespeed);
     b.add_float("range", wd.range);
     b.add_float("aoe", wd.damages.damageAreaOfEffect);
@@ -464,6 +737,15 @@ inline std::string SerializeOneWeaponDef(
     b.add_float("reload_time", wd.reload);
     b.add_int("salvo_size", wd.salvosize);
     b.add_int("salvo_delay", wd.salvodelay);
+    // Tuning-honesty (PLAN-macro-combat §4 / combat-resolution §2.3): expose the
+    // computed expected damage-per-second so the UI can show real numbers rather
+    // than letting players reverse-engineer statistical combat's hidden math.
+    // DPS = default_damage * salvo_size / reload_time (reload is in seconds).
+    {
+        const float reloadSec = (wd.reload > 0.0f) ? wd.reload : 1.0f;
+        const float salvo = static_cast<float>(std::max(1, wd.salvosize));
+        b.add_float("expected_dps", (defDmg * salvo) / reloadSec);
+    }
     b.add_float("accuracy", wd.accuracy);
     b.add_float("spray_angle", wd.sprayAngle);
     b.add_float("moving_accuracy", wd.movingAccuracy);
@@ -565,6 +847,97 @@ inline std::string SerializeWeaponDefs(
         first = false;
         out += SerializeOneWeaponDef(defs[i], modelsDir, gameId,
                                      projectileTextureNames);
+    }
+    out += "}}";
+    return out;
+}
+
+// ─── Expected-DPS power table (AI4 / combat-resolution §2.3, ask C7) ──
+
+namespace detail {
+
+/// Minimal JSON string literal. Escapes the mandatory control set; the
+/// def names/class/scale we emit are plain ASCII identifiers in practice.
+inline std::string JsonStr(std::string_view s)
+{
+    std::string o;
+    o.reserve(s.size() + 2);
+    o.push_back('"');
+    for (char c : s) {
+        switch (c) {
+            case '"':  o += "\\\""; break;
+            case '\\': o += "\\\\"; break;
+            case '\n': o += "\\n";  break;
+            case '\r': o += "\\r";  break;
+            case '\t': o += "\\t";  break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    char buf[8];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x",
+                                  static_cast<unsigned>(static_cast<unsigned char>(c)));
+                    o += buf;
+                } else {
+                    o.push_back(c);
+                }
+        }
+    }
+    o.push_back('"');
+    return o;
+}
+
+/// JSON number. JSON has no inf/nan — a non-finite value (e.g. a zero
+/// reload slipping through) is clamped to 0 so the output stays parseable.
+inline std::string JsonNum(double v)
+{
+    if (!std::isfinite(v)) v = 0.0;
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%.9g", v);
+    return std::string(buf);
+}
+
+} // namespace detail
+
+template<typename UnitDefVec>
+std::string SerializePowerTable(const UnitDefVec& defs)
+{
+    std::string out = "{\"defs\":{";
+    bool first = true;
+    for (size_t i = 1; i < defs.size(); ++i) {
+        const auto& ud = defs[i];
+        if (ud.id <= 0) continue;
+
+        // Σ over the unit's weapons of default_damage × salvo / reload —
+        // byte-for-byte the weapondefs.lua expected_dps formula.
+        double dps = 0.0;
+        for (const auto& w : ud.weapons) {
+            if (w.def == nullptr) continue;
+            const auto& wd = *w.def;
+            const double reloadSec = (wd.reload > 0.0f) ? wd.reload : 1.0;
+            const double salvo = static_cast<double>(std::max(1, wd.salvosize));
+            dps += (static_cast<double>(wd.damages.GetDefault()) * salvo) / reloadSec;
+        }
+
+        if (!first) out += ',';
+        first = false;
+        out += detail::JsonStr(std::to_string(ud.id));
+        out += ":{\"name\":";
+        out += detail::JsonStr(ud.name);
+        out += ",\"dps\":";
+        out += detail::JsonNum(dps);
+        out += ",\"hp\":";
+        out += detail::JsonNum(ud.health);
+
+        const auto itc = ud.customParams.find("ms_class");
+        if (itc != ud.customParams.end()) {
+            out += ",\"class\":";
+            out += detail::JsonStr(itc->second);
+        }
+        const auto its = ud.customParams.find("ms_scale");
+        if (its != ud.customParams.end()) {
+            out += ",\"scale\":";
+            out += detail::JsonStr(its->second);
+        }
+        out += "}";
     }
     out += "}}";
     return out;

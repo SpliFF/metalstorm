@@ -10,6 +10,7 @@
 import type { Scenario } from './types.js';
 import duelAttack from './bench/duel-attack.js';
 import aimRotation from './bench/aim-rotation.js';
+import aimOriginProbe from './bench/aim-origin-probe.js';
 import movePathing from './bench/move-pathing.js';
 import unitTestLoop from './bench/unit-test-loop.js';
 import weaponFx from './bench/weapon-fx.js';
@@ -17,10 +18,12 @@ import weaponShowcase from './bench/weapon-showcase.js';
 import modelViewer from './model-viewer/index.js';
 import fxViewer from './fx-viewer/index.js';
 import lobbyFlow from './bench/lobby-flow.js';
+import trainVerification from './bench/train-verification.js';
 
 const SCENARIOS: Scenario[] = [
     duelAttack,
     aimRotation,
+    aimOriginProbe,
     movePathing,
     unitTestLoop,
     weaponFx,
@@ -28,6 +31,7 @@ const SCENARIOS: Scenario[] = [
     modelViewer,
     fxViewer,
     lobbyFlow,
+    trainVerification,
 ];
 
 const BY_NAME = new Map<string, Scenario>(SCENARIOS.map((s) => [s.name, s]));

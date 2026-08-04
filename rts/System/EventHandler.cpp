@@ -351,6 +351,27 @@ bool CEventHandler::AllowStandingOrderAssign(unsigned int orderID, const CUnit* 
 }
 
 
+bool CEventHandler::AllowDirectiveAssign(unsigned int directiveID, const CUnit* unit)
+{
+	ZoneScoped;
+	return ControlIterateDefTrue(listAllowDirectiveAssign, &CEventClient::AllowDirectiveAssign, directiveID, unit);
+}
+
+
+bool CEventHandler::AllowStandingOrderCreate(int team, int playerID, unsigned int orderType)
+{
+	ZoneScoped;
+	return ControlIterateDefTrue(listAllowStandingOrderCreate, &CEventClient::AllowStandingOrderCreate, team, playerID, orderType);
+}
+
+
+bool CEventHandler::AllowDirectiveCreate(int team, int playerID, unsigned int groupID, unsigned int directiveType, unsigned int requestedStrength)
+{
+	ZoneScoped;
+	return ControlIterateDefTrue(listAllowDirectiveCreate, &CEventClient::AllowDirectiveCreate, team, playerID, groupID, directiveType, requestedStrength);
+}
+
+
 bool CEventHandler::AllowResourceLevel(int teamID, const std::string& type, float level)
 {
 	ZoneScoped;

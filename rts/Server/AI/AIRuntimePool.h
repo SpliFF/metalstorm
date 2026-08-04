@@ -18,9 +18,18 @@ public:
     ~AIRuntimePool();
 
     /// Add an AI player. Loads the script from the given code string.
-    /// Returns true on success.
+    /// `pluginDir` is the plugin's on-disk folder, used by the AI VM's
+    /// plugin-scoped `require` loader (AI0-loader) to resolve sibling
+    /// modules; pass "" for single-buffer AIs. `mapDataDir` / `defExportDir`
+    /// are the AI4 file-read sandbox roots (processed map data dir + game def
+    /// cache dir); pass "" to leave the matching accessor disabled. `playerId`
+    /// is the AI's virtual playerID (AI3) — its authority charge identity; pass
+    /// -1 if unattributed. Returns true on success.
     bool AddAI(const std::string& name, int teamId, int allyTeamId,
-               const std::string& scriptCode);
+               const std::string& scriptCode, const std::string& pluginDir = "",
+               const std::string& mapDataDir = "",
+               const std::string& defExportDir = "",
+               int playerId = -1);
 
     /// Called by the sim thread every N ticks.
     /// Builds snapshots, pushes to AIs, drains commands.

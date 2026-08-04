@@ -1,0 +1,12 @@
+{
+  "name": "dev:tcmask-verify",
+  "map": "green_flat_x34_v3",
+  "game": "metalstorm",
+  "aiSlots": [
+    { "aiId": "null", "team": 1, "startPos": 1 }
+  ],
+  "players": [
+    { "username": "dev-verify", "team": 0, "startPos": 0, "spectator": false }
+  ],
+  "autoStart": true
+}

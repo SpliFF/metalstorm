@@ -9,7 +9,12 @@
 #include "ClientSession.h"
 #include "RoomManager.h"
 #include "StandingOrders.h"
+#include "OrgGroups.h"
 #include "LuaExecEngine.h"
+#include "SyncedInputJournal.h"
+#include "GameOverState.h"
+#include "PostGamePolicy.h"
+#include "PlayerRosterBroadcast.h"
 #include "Crypto.h"
 #include "WebTransport/WebTransportServer.h"
 #include "Lua/LuaRules.h"
@@ -26,6 +31,7 @@
 #include "Game/Players/PlayerHandler.h"
 #include "Game/GameSetup.h"
 #include "System/SpringLog/SpringLog.h"
+#include "System/EventHandler.h"
 
 #include <algorithm>
 #include <cstring>
@@ -41,6 +47,10 @@ namespace {
 std::string generateToken() {
     return Crypto::GenerateToken(16);
 }
+
+/// ClientSession::role / CanCommandTeam / StateStreamer all key off this
+/// exact string — see PLAN-metalstorm-onboarding.md §4.
+const std::string kSpectatorRole = "spectator";
 } // namespace
 
 void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
@@ -66,6 +76,48 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
     if (ctx.logMessages) {
         SLOG(SPRING_LOG_DEBUG, "msg: client=%u type=%d size=%zu",
             msg.clientId, (int)clientMsg->payload_type(), msg.data.size());
+    }
+
+    // ── Journal chokepoint #1 of 5: inbound client verbs (PLAN-replay task 1).
+    // Recorded here, once, BEFORE dispatch — so every verb in the switch below
+    // is covered by construction and a newly added case cannot escape the
+    // cause stream. What gets kept is decided by the exhaustive classifier in
+    // SyncedInputJournal.cpp, never by the individual handlers.
+    //
+    // The RAW wire bytes are recorded, not a decoded form: replay re-feeds
+    // them through this same HandleMessage, so a replayed run cannot drift
+    // from the live one through a decode difference. Recording before dispatch
+    // (rather than after a successful apply) is deliberate too — a message
+    // rejected by the rate limiter or the sequence check on the live run must
+    // be rejected identically on replay, and that only holds if replay sees
+    // the same input, including the ones that bounced.
+    {
+        auto pjIt = clientPlayerNum.find(msg.clientId);
+        syncedinput::Journal().RecordClientMessage(
+            static_cast<uint8_t>(clientMsg->payload_type()),
+            pjIt != clientPlayerNum.end() ? pjIt->second : -1,
+            msg.data.data(), msg.data.size());
+    }
+
+    // ── Post-game gate. The match is over and the sim is frozen, so anything
+    // that would reach the sim is refused here, once, ahead of the switch.
+    //
+    // Placed after the journal record on purpose: a verb refused live must be
+    // refused identically on replay, and that only holds if replay is fed the
+    // same input including the ones that bounced (see the note above).
+    //
+    // This has to be server-side. The client stops sending orders because the
+    // result overlay covers the screen — which is not a check at all: a
+    // scripted client, or one that reconnects after the win, walks straight
+    // past it. Live on 2026-08-03 a `StandingOrderCreate` posted after the
+    // declared win was accepted *and* charged 2 authority against a player in
+    // a finished match. See PostGamePolicy.h.
+    if (gameOverRelay.IsDeclared() &&
+        postgame::RejectsClientPayload(
+            static_cast<uint8_t>(clientMsg->payload_type()))) {
+        auto err = Protocol::BuildServerError(409, "Game over");
+        rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+        return;
     }
 
     switch (clientMsg->payload_type()) {
@@ -164,15 +216,38 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                 // 30-frame boundary — possibly after the worker has already
                 // booted and snapshotted Game.maxUnits. Sending it on auth
                 // guarantees it lands in liveState before boot.
+                //
+                // It also carries the result when the match is already over.
+                // The game-over broadcast is one-shot (GameOverRelay::
+                // ConsumePending fires exactly once), so before this a session
+                // that authenticated after the win learned nothing about it:
+                // live 2026-08-03 a spectator joining ~2400 frames past the
+                // declared win got a normal HUD with no overlay, reading as a
+                // broken build. `frame` is the declared frame, not the live
+                // one, so the overlay says the battle ended when it actually
+                // did — the two are equal today because game over freezes the
+                // sim, but the overlay's claim shouldn't depend on that.
                 const float3& wv = envResHandler.GetCurrentWindVec();
+                const bool over = gameOverRelay.IsDeclared();
                 auto gi = Protocol::BuildGameInfo(
                     ctx.mapId, ctx.gameId, gs->speedFactor,
-                    static_cast<uint32_t>(sim.GetFrameNum()), gs->paused,
+                    static_cast<uint32_t>(over ? gameOverRelay.DeclaredFrame()
+                                               : sim.GetFrameNum()),
+                    gs->paused,
                     wv.x, wv.y, wv.z,
                     envResHandler.GetCurrentWindStrength(),
                     envResHandler.GetCurrentTidalStrength(),
-                    modInfo.legacyCoordSystem, unitHandler.MaxUnits());
+                    modInfo.legacyCoordSystem, unitHandler.MaxUnits(),
+                    over, over ? gameOverRelay.Winners()
+                               : std::vector<uint8_t>{});
                 rtcServer.SendReliable(msg.clientId, gi.data(), gi.size());
+                if (over) {
+                    SLOG(SPRING_LOG_NOTICE,
+                        "client %u authenticated after game over — replayed "
+                        "result (frame %d, %zu winning allyteam(s))",
+                        msg.clientId, gameOverRelay.DeclaredFrame(),
+                        gameOverRelay.Winners().size());
+                }
             };
 
             // Try token-based reconnection first
@@ -191,17 +266,40 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                         break;
                     }
                     const int team = resolveTeam(reconnectUser->username);
-                    if (rosterRequired && team < 0) {
-                        auto resp = Protocol::BuildAuthResponse(
-                            SpringWeb::AuthStatus_InvalidCredentials,
-                            "", 0, "Not in this room's roster");
-                        rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
-                        break;
+                    // An authenticated user who isn't in the roster the lobby
+                    // handed us is a spectator, not a rejected connection —
+                    // PLAN-metalstorm-onboarding.md §4's "spectate a running
+                    // game" flow depends on this: spawnGameServer never puts
+                    // spectators in --player, so every spectator (pre-game or
+                    // mid-game) lands here with team < 0.
+                    const bool isSpectator = rosterRequired && team < 0;
+                    const std::string& effectiveRole =
+                        isSpectator ? kSpectatorRole : reconnectUser->role;
+                    // Register a Spring CPlayer so Lua can
+                    // query player info and receive callins.
+                    // Spectators ARE players in Spring's playerHandler
+                    // (PlayerBase::spectator), just non-commanding ones.
+                    //
+                    // This runs BEFORE BuildAuthResponse because the response
+                    // now carries `player_num` — the client cannot derive it
+                    // (it is a per-server allocation, not the account id), and
+                    // every synced key it reads back is scoped by it.
+                    const int pNum = nextPlayerNum++;
+                    {
+                        CPlayer p;
+                        p.name = reconnectUser->username;
+                        p.team = team;
+                        p.active = true;
+                        p.playerNum = pNum;
+                        p.spectator = isSpectator;
+                        playerHandler.AddPlayer(p);
+                        clientPlayerNum[msg.clientId] = pNum;
                     }
                     auto resp = Protocol::BuildAuthResponse(
                         SpringWeb::AuthStatus_OK, auth->token()->str(),
                         static_cast<uint32_t>(userId), "",
-                        static_cast<int8_t>(team), defsCacheKey);
+                        static_cast<int8_t>(team), effectiveRole,
+                        defsCacheKey, static_cast<int32_t>(pNum));
                     rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
                     // Register the session — previously the
                     // token path skipped this, which meant a
@@ -209,32 +307,28 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                     // every PlayerCommand bounced at the
                     // REQUIRE_SESSION guard.
                     sessions.AddSession(msg.clientId, userId,
-                        reconnectUser->username, reconnectUser->role);
+                        reconnectUser->username, effectiveRole);
                     if (auto* s = sessions.GetSession(msg.clientId))
                         s->team = team;
-                    // Register a Spring CPlayer so Lua can
-                    // query player info and receive callins.
-                    {
-                        int pNum = nextPlayerNum++;
-                        CPlayer p;
-                        p.name = reconnectUser->username;
-                        p.team = team;
-                        p.active = true;
-                        p.playerNum = pNum;
-                        playerHandler.AddPlayer(p);
-                        clientPlayerNum[msg.clientId] = pNum;
-                    }
                     // One-shot standing-order snapshot so a
                     // mid-game reconnect sees existing orders
                     // immediately, without waiting for the
                     // next mutation to trigger the broadcast
                     // hook.
                     start.PushStandingOrdersTo(msg.clientId, team);
+                    start.PushOrgGroupsTo(msg.clientId, team);
+                    start.PushDirectivesTo(msg.clientId, team);
                     sendPostAuthOneShots();
+                    // The roster changed (this player joined), so everyone
+                    // gets it — not just the new arrival. Sent after
+                    // AddSession so the joiner's own row carries its account
+                    // id rather than a 0 placeholder.
+                    Protocol::BroadcastPlayerRoster(ctx);
                     SLOG(SPRING_LOG_NOTICE,
-                        "client %u reconnected as '%s' (id=%lld) team=%d",
+                        "client %u reconnected as '%s' (account id=%lld) "
+                        "playerNum=%d team=%d role=%s",
                         msg.clientId, reconnectUser->username.c_str(),
-                        userId, team);
+                        userId, pNum, team, effectiveRole.c_str());
                     // Track roster connection for GameStart
                     if (playerTeamByUsername.count(reconnectUser->username)) {
                         connectedRosterPlayers.insert(reconnectUser->username);
@@ -316,45 +410,47 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                 break;
             }
 
-            // Roster membership: reject anyone the lobby
-            // didn't pre-authorise for this game. Dev-mode
-            // (empty roster) skips this check.
+            // Roster membership: an authenticated user not in the lobby's
+            // --player roster is a spectator, not a rejected connection —
+            // see the matching comment on the reconnect path above. Dev-mode
+            // (empty roster) skips this and keeps the "command anything"
+            // smoketest escape hatch for team == -1.
             const int team = resolveTeam(user->username);
-            if (rosterRequired && team < 0) {
-                auto resp = Protocol::BuildAuthResponse(
-                    SpringWeb::AuthStatus_InvalidCredentials,
-                    "", 0, "Not in this room's roster");
-                rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
-                SLOG(SPRING_LOG_WARNING,
-                    "client %u rejected: '%s' not in roster",
-                    msg.clientId, user->username.c_str());
-                break;
-            }
+            const bool isSpectator = rosterRequired && team < 0;
+            const std::string& effectiveRole = isSpectator ? kSpectatorRole : user->role;
 
             // Create session
             std::string token = generateToken();
             db.CreateSession(user->id, token);
 
-            auto resp = Protocol::BuildAuthResponse(
-                SpringWeb::AuthStatus_OK, token,
-                static_cast<uint32_t>(user->id), "",
-                static_cast<int8_t>(team), defsCacheKey);
-            rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
-            sessions.AddSession(msg.clientId, user->id, user->username, user->role);
-            if (auto* s = sessions.GetSession(msg.clientId))
-                s->team = team;
             // Register a Spring CPlayer so Lua can query
-            // player info and receive callins.
+            // player info and receive callins. Spectators ARE players in
+            // Spring's playerHandler (PlayerBase::spectator), just
+            // non-commanding ones.
+            //
+            // Ordered ahead of BuildAuthResponse for the same reason as the
+            // reconnect path above: the response carries `player_num`, and
+            // nothing downstream can reconstruct it.
+            const int pNum = nextPlayerNum++;
             {
-                int pNum = nextPlayerNum++;
                 CPlayer p;
                 p.name = user->username;
                 p.team = team;
                 p.active = true;
                 p.playerNum = pNum;
+                p.spectator = isSpectator;
                 playerHandler.AddPlayer(p);
                 clientPlayerNum[msg.clientId] = pNum;
             }
+            auto resp = Protocol::BuildAuthResponse(
+                SpringWeb::AuthStatus_OK, token,
+                static_cast<uint32_t>(user->id), "",
+                static_cast<int8_t>(team), effectiveRole, defsCacheKey,
+                static_cast<int32_t>(pNum));
+            rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
+            sessions.AddSession(msg.clientId, user->id, user->username, effectiveRole);
+            if (auto* s = sessions.GetSession(msg.clientId))
+                s->team = team;
             // One-shot standing-order snapshot for the freshly
             // authenticated session — mirrors the reconnect
             // path above. Without this, mid-game joins
@@ -362,14 +458,22 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             // create / update / remove fired the broadcast
             // hook.
             start.PushStandingOrdersTo(msg.clientId, team);
+            start.PushOrgGroupsTo(msg.clientId, team);
+            start.PushDirectivesTo(msg.clientId, team);
 
             // Team start positions + ally start boxes (re-broadcast after
             // GameStart for the final post-spawn values) and the game's
             // modoptions. Shared with the reconnect path above.
             sendPostAuthOneShots();
+            // Roster changed — everyone gets the new full roster, after
+            // AddSession so the joiner's row carries its account id.
+            Protocol::BroadcastPlayerRoster(ctx);
 
-            SLOG(SPRING_LOG_NOTICE, "client %u authenticated as '%s' (id=%lld) team=%d",
-                msg.clientId, username, user->id, team);
+            SLOG(SPRING_LOG_NOTICE,
+                "client %u authenticated as '%s' (account id=%lld) "
+                "playerNum=%d team=%d role=%s",
+                msg.clientId, username, user->id, pNum, team,
+                effectiveRole.c_str());
 
             // Track roster connection for GameStart
             if (playerTeamByUsername.count(user->username)) {
@@ -438,13 +542,11 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                         simCmd.PushParam(cmd->params()->Get(i));
                 }
 
-                // Route command to each target unit, dropping
-                // any that don't belong to this session's
-                // team. session->team == -1 means "no roster
-                // restriction" (dev smoketest or spectator)
-                // and lets the command through unchanged,
-                // which preserves the old behaviour when the
-                // lobby isn't in the loop.
+                // Route command to each target unit, dropping any the
+                // session isn't allowed to command. Ownership is enforced
+                // by SessionManager::CanCommandTeam (G4): rostered sessions
+                // reach only their own team, spectators reach nothing, and
+                // the lobby-less team==-1 escape hatch is dev-only.
                 int routed = 0;
                 int rejectedTeam = 0;
                 if (cmd->squad_ids()) {
@@ -453,7 +555,7 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                         CUnit* unit = unitHandler.GetUnit(unitId);
                         if (unit == nullptr || unit->isDead)
                             continue;
-                        if (session->team >= 0 && unit->team != session->team) {
+                        if (!SessionManager::CanCommandTeam(*session, unit->team)) {
                             rejectedTeam++;
                             continue;
                         }
@@ -469,6 +571,18 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                     routed, rejectedTeam,
                     cmd->squad_ids() ? (int)cmd->squad_ids()->size() : 0);
             }
+            break;
+        }
+        // PLAN-quickstart.md §3.3: a client sends this immediately before a
+        // deliberate disconnect() so the imminent PlayerLeft/PlayerRemoved
+        // carries the real reason (e.g. 3=detach) instead of the default 0.
+        // Stored, not acted on immediately — consumed once by the disconnect
+        // drain loop in server_main.cpp, which also clears the entry.
+        case SpringWeb::ClientPayload_PlayerLeaveIntent: {
+            auto* session = sessions.GetSession(msg.clientId);
+            if (!session) break;
+            auto* pli = clientMsg->payload_as_PlayerLeaveIntent();
+            ctx.pendingLeaveReason[msg.clientId] = pli ? pli->reason() : 0;
             break;
         }
         case SpringWeb::ClientPayload_PlayerCommandBatch: {
@@ -543,7 +657,7 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                     uint32_t unitId = cmd->squad_ids()->Get(i);
                     CUnit* unit = unitHandler.GetUnit(unitId);
                     if (unit == nullptr || unit->isDead) continue;
-                    if (session->team >= 0 && unit->team != session->team) {
+                    if (!SessionManager::CanCommandTeam(*session, unit->team)) {
                         totalRejectedTeam++;
                         continue;
                     }
@@ -668,6 +782,29 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             if (room && rooms.StartGame(room->id, static_cast<uint32_t>(session->userId))) {
                 BROADCAST_ROOM_UPDATE(room);
             }
+            break;
+        }
+        case SpringWeb::ClientPayload_RoomEnlist: {
+            auto* session = sessions.GetSession(msg.clientId);
+            if (!session) {
+                auto e = Protocol::BuildServerError(401, "Auth required");
+                rtcServer.SendReliable(msg.clientId, e.data(), e.size());
+                break;
+            }
+            auto* room = rooms.FindRoomByClient(msg.clientId);
+            if (!room) {
+                auto e = Protocol::BuildServerError(400, "Not in a room");
+                rtcServer.SendReliable(msg.clientId, e.data(), e.size());
+                break;
+            }
+            auto* re = clientMsg->payload_as_RoomEnlist();
+            const uint8_t team = re ? re->team() : 255;
+            if (!rooms.EnlistSpectator(room->id, static_cast<uint32_t>(session->userId), team)) {
+                auto e = Protocol::BuildServerError(403, "Cannot enlist");
+                rtcServer.SendReliable(msg.clientId, e.data(), e.size());
+                break;
+            }
+            BROADCAST_ROOM_UPDATE(room);
             break;
         }
         case SpringWeb::ClientPayload_RoomKick: {
@@ -998,6 +1135,22 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                 for (unsigned i = 0; i < p->size(); ++i) params.push_back(p->Get(i));
             }
             auto conds = Protocol::ReadStandingOrderConditions(req->conditions());
+
+            // Authority charge site (PLAN-metalstorm-authority.md §3.2/A2):
+            // game_authority_charge.lua debits the issuing player's pool
+            // (falling back to the team pool) as a side effect of allowing
+            // this callin; a false veto means insufficient authority.
+            {
+                int playerID = -1;
+                auto pIt = clientPlayerNum.find(msg.clientId);
+                if (pIt != clientPlayerNum.end()) playerID = pIt->second;
+                if (!eventHandler.AllowStandingOrderCreate(session->team, playerID, req->type())) {
+                    auto err = Protocol::BuildServerError(402, "Insufficient authority");
+                    rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                    break;
+                }
+            }
+
             const uint32_t id = standingOrders.Create(
                 session->team,
                 static_cast<StandingOrderType>(req->type()),
@@ -1072,6 +1225,297 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             const bool ok = standingOrders.Remove(req->order_id(), session->team);
             if (!ok) {
                 auto err = Protocol::BuildServerError(403, "Not owner of standing order");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+            }
+            break;
+        }
+        // PLAN-security-hardening task 11 (G14): these 14 ClientPayload verbs
+        // are declared in the schema but have no handler. Previously they fell
+        // through `default: break` and were silently discarded — which reads,
+        // to anyone auditing the switch, as "handled". Enumerate them here with
+        // an explicit reject so (a) an operator sees a client probing an
+        // unimplemented verb, and (b) nobody can re-enable one by dropping code
+        // into `default` without deliberately removing it from this block and
+        // giving it a real gate. We drop rather than reply (no amplification)
+        // and rate-limit the log to a DEBUG line.
+        //
+        // Rationale for reject-not-wire: the room-management verbs
+        // (RoomEndGame/RoomAddAI/RoomRemoveAI/RoomSetStartPos/RoomCloseRoom/
+        // RoomSetAITeam) all have working, host-checked HTTP counterparts, so
+        // the WT copies are redundant; the log verbs (LogIngest/LogSubscribe/
+        // LogUnsubscribe) are served by the logserver's own (now
+        // LocalhostOrAdmin-gated) HTTP routes; Ack/ReconnectRequest/ChatSend/
+        // AIListRequest/GameListRequest are protocol niceties with no server
+        // side today. They stay in the union for wire/protocol-version
+        // stability (removing a union member renumbers tags); this block is the
+        // gate. Wire one individually — with its own session+role check — if it
+        // is ever actually needed.
+        case SpringWeb::ClientPayload_ChatSend:
+        case SpringWeb::ClientPayload_Ack:
+        case SpringWeb::ClientPayload_ReconnectRequest:
+        case SpringWeb::ClientPayload_RoomEndGame:
+        case SpringWeb::ClientPayload_RoomAddAI:
+        case SpringWeb::ClientPayload_RoomRemoveAI:
+        case SpringWeb::ClientPayload_AIListRequest:
+        case SpringWeb::ClientPayload_GameListRequest:
+        case SpringWeb::ClientPayload_RoomSetStartPos:
+        case SpringWeb::ClientPayload_RoomCloseRoom:
+        case SpringWeb::ClientPayload_RoomSetAITeam:
+        case SpringWeb::ClientPayload_LogIngest:
+        case SpringWeb::ClientPayload_LogSubscribe:
+        case SpringWeb::ClientPayload_LogUnsubscribe:
+            SLOG(SPRING_LOG_DEBUG, "rejecting unimplemented/ungated verb type=%d from client=%u",
+                (int)clientMsg->payload_type(), msg.clientId);
+            break;
+        // -------- Macro command & control (PLAN-macro-orders / -directives) --------
+        // All six share the standing-order gate discipline: authed team,
+        // one message token (no per-squad order-token — the evaluator fans
+        // out), monotonic sequence. Team scoping = team objects with player
+        // attribution (macro-orders 2026-06-13 update).
+        case SpringWeb::ClientPayload_OrgGroupCreate: {
+            auto* session = sessions.GetSession(msg.clientId);
+            if (!session || session->team < 0) {
+                auto err = Protocol::BuildServerError(401, "Not authenticated");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                break;
+            }
+            auto* req = clientMsg->payload_as_OrgGroupCreate();
+            if (!req) break;
+            if (!SessionManager::TryConsumeCommandBudget(*session, 0)) {
+                auto err = Protocol::BuildServerError(429, "Command rate limit exceeded");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                break;
+            }
+            if (req->sequence() <= session->lastCommandSeq && session->lastCommandSeq > 0) {
+                auto err = Protocol::BuildServerError(400, "Stale command sequence");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                break;
+            }
+            session->lastCommandSeq = req->sequence();
+
+            std::vector<uint32_t> members;
+            if (auto* m = req->member_ids()) {
+                members.reserve(m->size());
+                for (unsigned i = 0; i < m->size(); ++i) members.push_back(m->Get(i));
+            }
+            const uint32_t id = orgGroups.Create(
+                session->team, static_cast<Echelon>(req->echelon()),
+                req->name() ? req->name()->str() : std::string(),
+                members, req->parent_id(),
+                static_cast<uint32_t>(sim.GetFrameNum()));
+            if (id == 0) {
+                // v0 rejects the reserved army tier (echelon/parent) — fail loud.
+                auto err = Protocol::BuildServerError(400,
+                    "Org-group echelon/parent not supported in v0 (army tier reserved)");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+            }
+            break;
+        }
+        case SpringWeb::ClientPayload_OrgGroupUpdate: {
+            auto* session = sessions.GetSession(msg.clientId);
+            if (!session || session->team < 0) {
+                auto err = Protocol::BuildServerError(401, "Not authenticated");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                break;
+            }
+            auto* req = clientMsg->payload_as_OrgGroupUpdate();
+            if (!req) break;
+            if (!SessionManager::TryConsumeCommandBudget(*session, 0)) {
+                auto err = Protocol::BuildServerError(429, "Command rate limit exceeded");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                break;
+            }
+            if (req->sequence() <= session->lastCommandSeq && session->lastCommandSeq > 0) {
+                auto err = Protocol::BuildServerError(400, "Stale command sequence");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                break;
+            }
+            session->lastCommandSeq = req->sequence();
+
+            std::vector<uint32_t> addIds, removeIds;
+            if (auto* a = req->add_ids()) {
+                addIds.reserve(a->size());
+                for (unsigned i = 0; i < a->size(); ++i) addIds.push_back(a->Get(i));
+            }
+            if (auto* r = req->remove_ids()) {
+                removeIds.reserve(r->size());
+                for (unsigned i = 0; i < r->size(); ++i) removeIds.push_back(r->Get(i));
+            }
+            const bool ok = orgGroups.Update(
+                req->group_id(), session->team, addIds, removeIds,
+                req->name() ? req->name()->str() : std::string());
+            if (!ok) {
+                auto err = Protocol::BuildServerError(403, "Not owner of org group");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+            }
+            break;
+        }
+        case SpringWeb::ClientPayload_OrgGroupDisband: {
+            auto* session = sessions.GetSession(msg.clientId);
+            if (!session || session->team < 0) {
+                auto err = Protocol::BuildServerError(401, "Not authenticated");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                break;
+            }
+            auto* req = clientMsg->payload_as_OrgGroupDisband();
+            if (!req) break;
+            if (!SessionManager::TryConsumeCommandBudget(*session, 0)) {
+                auto err = Protocol::BuildServerError(429, "Command rate limit exceeded");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                break;
+            }
+            if (req->sequence() <= session->lastCommandSeq && session->lastCommandSeq > 0) {
+                auto err = Protocol::BuildServerError(400, "Stale command sequence");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                break;
+            }
+            session->lastCommandSeq = req->sequence();
+            // Directives scoped to the group go with it (keeps the manager
+            // dependency one-directional: handler drives both).
+            directiveManager.RemoveForGroup(req->group_id());
+            const bool ok = orgGroups.Disband(req->group_id(), session->team);
+            if (!ok) {
+                auto err = Protocol::BuildServerError(403, "Not owner of org group");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+            }
+            break;
+        }
+        case SpringWeb::ClientPayload_GroupPosture: {
+            auto* session = sessions.GetSession(msg.clientId);
+            if (!session || session->team < 0) {
+                auto err = Protocol::BuildServerError(401, "Not authenticated");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                break;
+            }
+            auto* req = clientMsg->payload_as_GroupPosture();
+            if (!req) break;
+            if (!SessionManager::TryConsumeCommandBudget(*session, 0)) {
+                auto err = Protocol::BuildServerError(429, "Command rate limit exceeded");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                break;
+            }
+            if (req->sequence() <= session->lastCommandSeq && session->lastCommandSeq > 0) {
+                auto err = Protocol::BuildServerError(400, "Stale command sequence");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                break;
+            }
+            session->lastCommandSeq = req->sequence();
+            const bool ok = orgGroups.SetPosture(
+                req->group_id(), session->team,
+                req->posture_json() ? req->posture_json()->str() : std::string());
+            if (!ok) {
+                auto err = Protocol::BuildServerError(403, "Not owner of org group");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+            }
+            break;
+        }
+        case SpringWeb::ClientPayload_GroupDirective: {
+            auto* session = sessions.GetSession(msg.clientId);
+            if (!session || session->team < 0) {
+                auto err = Protocol::BuildServerError(401, "Not authenticated");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                break;
+            }
+            auto* req = clientMsg->payload_as_GroupDirective();
+            if (!req) break;
+            if (!SessionManager::TryConsumeCommandBudget(*session, 0)) {
+                auto err = Protocol::BuildServerError(429, "Command rate limit exceeded");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                break;
+            }
+            if (req->sequence() <= session->lastCommandSeq && session->lastCommandSeq > 0) {
+                auto err = Protocol::BuildServerError(400, "Stale command sequence");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                break;
+            }
+            session->lastCommandSeq = req->sequence();
+
+            // Reject directives scoped to a group the caller doesn't own.
+            const uint32_t groupId = req->group_id();
+            if (groupId != 0) {
+                const OrgGroup* g = orgGroups.Get(groupId);
+                if (g == nullptr || g->team != session->team) {
+                    auto err = Protocol::BuildServerError(403, "Not owner of org group");
+                    rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                    break;
+                }
+            }
+
+            std::vector<float> params;
+            if (auto* p = req->params()) {
+                params.reserve(p->size());
+                for (unsigned i = 0; i < p->size(); ++i) params.push_back(p->Get(i));
+            }
+            auto conds = Protocol::ReadStandingOrderConditions(req->conditions());
+            const std::string phases = req->phases_json() ? req->phases_json()->str() : std::string();
+
+            if (req->directive_id() == 0) {
+                // Authority charge site (PLAN-metalstorm-authority.md
+                // §3.2/A2, PLAN-macro-directives.md §1 "Charge point"):
+                // charged ONCE at directive create, never on Update — the
+                // directive's decomposed per-squad commands are fromLua
+                // and free (§3.2 charging-rules table), so this is the
+                // only spend a directive ever incurs.
+                {
+                    int playerID = -1;
+                    auto pIt = clientPlayerNum.find(msg.clientId);
+                    if (pIt != clientPlayerNum.end()) playerID = pIt->second;
+                    if (!eventHandler.AllowDirectiveCreate(session->team, playerID, groupId,
+                            req->type(), req->requested_strength())) {
+                        auto err = Protocol::BuildServerError(402, "Insufficient authority");
+                        rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                        break;
+                    }
+                }
+
+                const uint32_t id = directiveManager.Create(
+                    session->team, static_cast<DirectiveType>(req->type()),
+                    req->priority(), static_cast<OrderShape>(req->shape()),
+                    std::move(params), std::move(conds), groupId,
+                    req->requested_strength(), phases,
+                    req->expires_in_frames(),
+                    static_cast<uint32_t>(sim.GetFrameNum()));
+                SLOG(SPRING_LOG_DEBUG,
+                    "directive: client %u (team=%d) created directive %u type=%u group=%u",
+                    msg.clientId, session->team, id,
+                    static_cast<unsigned>(req->type()), groupId);
+            } else {
+                const bool ok = directiveManager.Update(
+                    req->directive_id(), session->team,
+                    static_cast<DirectiveType>(req->type()), req->priority(),
+                    static_cast<OrderShape>(req->shape()), std::move(params),
+                    std::move(conds), req->requested_strength(), phases,
+                    req->active());
+                if (!ok) {
+                    auto err = Protocol::BuildServerError(403, "Not owner of directive");
+                    rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                }
+            }
+            break;
+        }
+        case SpringWeb::ClientPayload_GroupDirectiveRemove: {
+            auto* session = sessions.GetSession(msg.clientId);
+            if (!session || session->team < 0) {
+                auto err = Protocol::BuildServerError(401, "Not authenticated");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                break;
+            }
+            auto* req = clientMsg->payload_as_GroupDirectiveRemove();
+            if (!req) break;
+            if (!SessionManager::TryConsumeCommandBudget(*session, 0)) {
+                auto err = Protocol::BuildServerError(429, "Command rate limit exceeded");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                break;
+            }
+            if (req->sequence() <= session->lastCommandSeq && session->lastCommandSeq > 0) {
+                auto err = Protocol::BuildServerError(400, "Stale command sequence");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                break;
+            }
+            session->lastCommandSeq = req->sequence();
+            const bool ok = directiveManager.Remove(req->directive_id(), session->team);
+            if (!ok) {
+                auto err = Protocol::BuildServerError(403, "Not owner of directive");
                 rtcServer.SendReliable(msg.clientId, err.data(), err.size());
             }
             break;

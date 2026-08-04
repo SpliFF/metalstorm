@@ -2226,11 +2226,21 @@ int LuaSyncedRead::GetPlayerInfo(lua_State* L)
 	if (getPlayerOpts) {
 		const PlayerBase::customOpts& playerOpts = player->GetAllValues();
 
-		lua_createtable(L, 0, playerOpts.size());
+		lua_createtable(L, 0, playerOpts.size() + 1);
 
 		for (const auto& pair: playerOpts) {
 			lua_pushsstring(L, pair.first);
 			lua_pushsstring(L, pair.second);
+			lua_rawset(L, -3);
+		}
+		// AI3 (PLAN-metalstorm-ai.md §1): AI slots are virtual players
+		// indistinguishable from humans in the flat return above. Surface the
+		// isAI flag through the player-options table so game Lua (e.g. the
+		// authority co-commander role, scoreboards) can tell them apart without
+		// a return-arity change. Only present (="1") for AI players.
+		if (player->isAI) {
+			lua_pushliteral(L, "isAI");
+			lua_pushliteral(L, "1");
 			lua_rawset(L, -3);
 		}
 	} else {

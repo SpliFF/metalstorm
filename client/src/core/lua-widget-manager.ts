@@ -418,7 +418,10 @@ export class LuaWidgetManager {
             identity: conn ? {
                 myTeam: conn.myTeam,
                 myAllyTeam: conn.myTeam,
-                myPlayerId: conn.playerId,
+                // Spring's sim playerNum, not the DB account id — this is what
+                // Spring.GetLocalPlayerID() must return for a widget's checks
+                // against synced playerIDs to hold. See PLAN-native-ui §3.3.
+                myPlayerId: conn.playerNum,
             } : undefined,
             gameFrame: this.currentFrame,
             selectedUnitIds: this.selectedUnitIds,

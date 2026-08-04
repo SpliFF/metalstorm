@@ -5,6 +5,10 @@
   "target_metres": 8.5,
   "dominant_axis": "z",
   "pie_dir": "pie",
+  "tcmask": {
+    "page-14-droid-hubs.png": "page-14-droid-hubs_ms_tcmask.png",
+    "page-17-droid-weapons.png": "page-17-droid-weapons_ms_tcmask.png"
+  },
   "parts": [
     { "pie": "drhbod09.pie", "node": "body" },
     { "pie": "prhltrk3.pie", "node": "tracks_l", "parent": "body" },

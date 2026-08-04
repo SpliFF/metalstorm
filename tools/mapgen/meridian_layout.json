@@ -1,0 +1,105 @@
+{
+  "$schema_note": "Meridian Basin layout graph — PLAN-metalstorm-beta-map.md task 1. The SINGLE SOURCE the generator (task 2, tools/mapgen/meridian.py|node) reads to build BOTH the heightmap AND mapdata/regions.lua, so the map and its region graph can never disagree (§2). Coordinates in elmos; map origin top-left, +x east, +z south. 1 heightmap square = 8 elmos (SQUARE_SIZE). Human design doc + diagram: docs/maps/meridian-basin.md.",
+  "map": {
+    "name": "Meridian Basin",
+    "key": "meridian_basin",
+    "size": { "x": 16384, "z": 16384 },
+    "square_size": 8,
+    "sides": 2,
+    "players_per_side_max": 4,
+    "symmetry": { "kind": "mirror", "axis": "z", "line": 8192, "note": "North (z<8192) mirrors South (z>8192). East/west corridors are also near-symmetric about x=8192." }
+  },
+
+  "slope_bands": {
+    "note": "maxslope thresholds mirror data/games/metalstorm/gamedata/moveinfo.tdf. The generator MUST band terrain slope to these so the §1 slope bands are guaranteed, not sculpted by eye (E1). A region's terrain_profile.slope_band names the band its passable floor must satisfy.",
+    "bands": [
+      { "id": "flat",     "slope_max": 24, "passable": ["INFANTRY", "VEH", "HEAVY"], "use": "build zones, basin floor, valley/convoy roads, ford decks" },
+      { "id": "veh",      "slope_range": [24, 32], "passable": ["INFANTRY", "VEH"], "blocks": ["HEAVY"], "use": "overlook lips, bluff pinches — HEAVY-restricted" },
+      { "id": "infantry", "slope_range": [32, 45], "passable": ["INFANTRY"], "blocks": ["VEH", "HEAVY"], "use": "ridge/scarp walls — INFANTRY-only high ground" },
+      { "id": "cliff",    "slope_min": 45, "passable": [], "use": "ridge crests, canyon walls framing the passes — impassable to all land" }
+    ]
+  },
+
+  "water_bands": {
+    "note": "Depth thresholds mirror moveinfo.tdf maxwaterdepth (land wade limit) / minwaterdepth (naval float floor). INFANTRY wades <=12, VEH <=20, HEAVY <=30; SHIP floats >=12, SUB >=20. So a ford (<=12) is all-land-wadeable but too shallow for ships; a >30 channel is true naval/sub-only.",
+    "bands": [
+      { "id": "ford",    "depth_max": 12, "land_wade": ["INFANTRY", "VEH", "HEAVY"], "naval": [], "use": "the three land crossings — basin + west_pass + east_pass fords" },
+      { "id": "shallow", "depth_range": [12, 20], "land_wade": ["VEH", "HEAVY"], "naval": ["SHIP"], "use": "lake shores — VEH/HEAVY wade, INFANTRY cannot, ships float (amphibious differentiation)" },
+      { "id": "deep",    "depth_range": [20, 30], "land_wade": ["HEAVY"], "naval": ["SHIP", "SUB"], "use": "mid-lake — only HEAVY still wades at the limit; subs surface here" },
+      { "id": "channel", "depth_min": 30, "land_wade": [], "naval": ["SHIP", "SUB"], "use": "west narrows + still_mere deep center — true naval/sub-only water" }
+    ]
+  },
+
+  "chokepoints": {
+    "note": "Sizing brief (§1): a corridor pinch must be NARROWER than a deployed formation, WIDER than a column, so squads drop into flow/trail-follow column mode (PLAN-metalstorm-flow.md, squad-pathfinding §3). Formation width W_form ~= 2*formation_radius (base formation_radius=24 from units/_builder.lua -> ~48 elmos, growing as radius*sqrt(growth) to ~96 at scale 3). Column width W_col ~= member footprint + lateral jitter: VEH footprintx=2 -> 16 elmos -> ~28; HEAVY footprintx=4 -> 32 elmos -> ~44.",
+    "features": [
+      { "id": "west_ford_deck",  "in_region": "west_pass",      "width_elmo": 44, "mouth_width_elmo": 160, "rationale": "Between HEAVY column (~44) and base formation (~48): a HEAVY squad crosses single-file, no squad can deploy abreast -> column mode. Ridge walls (infantry/cliff band) frame it; INFANTRY can scramble the scarps to flank." },
+      { "id": "east_ford_deck",  "in_region": "east_pass",      "width_elmo": 44, "mouth_width_elmo": 160, "rationale": "Mirror of west_ford_deck; a causeway shoulder of the still_mere lake." },
+      { "id": "basin_ford",      "in_region": "meridian_basin", "width_elmo": 112, "mouth_width_elmo": 320, "rationale": "Widest crossing (> formation ~96) so mid squads keep formation, but multi-squad load makes the flow-field density term bite -> congestion showcase. The most exposed of the three crossings, hence highest region value." }
+    ]
+  },
+
+  "terrain_narrative": "A river enters from the WEST map edge into the west narrows (a deep off-map-fed channel), runs EAST along the contested middle band, FORDS shallowly across the three land crossings (west_pass, meridian_basin, east_pass), and pools into the still_mere lake at the EAST before draining off the east edge. The river IS the front line: North bank (rows A/B/C) vs South bank (rows E/F/G) can only meet by fording one of the three passes, or by boat in the two deep pockets (narrows west, mere east) that flank the land crossings. Two separate naval theatres, three land chokepoints, one high-value central basin.",
+
+  "regions": [
+    { "key": "cinder_forge", "name": "Cinder Forge", "side": "north", "row": "A", "centroid": {"x": 3200, "z": 1200}, "bbox": {"x0": 0, "z0": 0, "x1": 6400, "z1": 2400}, "value": 1.2, "tags": ["industrial", "buildzone", "underpass", "plain", "home"], "terrain_profile": { "slope_band": "flat", "note": "North industrial plain — large flat footprints, gentle slopes; factory families + scale-4 assembly + the scale-4-over-INFANTRY underpass demo lane." }, "neighbors": ["northgate", "ash_habitat", "granary_vale"] },
+    { "key": "northgate", "name": "Northgate", "side": "north", "row": "A", "centroid": {"x": 8192, "z": 1200}, "bbox": {"x0": 6400, "z0": 0, "x1": 9984, "z1": 2400}, "value": 0.8, "tags": ["home", "buildzone", "start"], "terrain_profile": { "slope_band": "flat", "note": "North home / primary drop-in start. Gentle rolling, fully buildable." }, "neighbors": ["cinder_forge", "northwatch", "granary_vale"] },
+    { "key": "northwatch", "name": "Northwatch", "side": "north", "row": "A", "centroid": {"x": 13184, "z": 1200}, "bbox": {"x0": 9984, "z0": 0, "x1": 16384, "z1": 2400}, "value": 0.7, "tags": ["home", "radar_high"], "terrain_profile": { "slope_band": "veh", "note": "North-east home flank with a radar knoll (infantry-only crest for the emplacement, VEH-passable skirts) overlooking the east approach." }, "neighbors": ["northgate", "granary_vale", "north_market"] },
+
+    { "key": "ash_habitat", "name": "Ash Habitat", "side": "north", "row": "B", "centroid": {"x": 2700, "z": 3900}, "bbox": {"x0": 0, "z0": 2400, "x1": 5400, "z1": 5400}, "value": 0.6, "tags": ["civilian", "habitat", "transit"], "terrain_profile": { "slope_band": "flat", "note": "Civilian district (west). Convoy-A endpoint. Gaia-populated; region control starts north-owned." }, "neighbors": ["granary_vale", "cinder_forge", "west_scarp_n"] },
+    { "key": "granary_vale", "name": "Granary Vale", "side": "north", "row": "B", "centroid": {"x": 8000, "z": 3900}, "bbox": {"x0": 5400, "z0": 2400, "x1": 10600, "z1": 5400}, "value": 0.9, "tags": ["open", "valley", "transit"], "terrain_profile": { "slope_band": "flat", "note": "VEH-passable valley — the north transit spine; the convoy road runs flat (<=24) across it. Main northern approach shoulder to the basin." }, "neighbors": ["ash_habitat", "north_market", "cinder_forge", "northgate", "northwatch", "west_scarp_n", "hollow_overlook_n", "east_bluffs_n"] },
+    { "key": "north_market", "name": "North Market", "side": "north", "row": "B", "centroid": {"x": 13492, "z": 3900}, "bbox": {"x0": 10600, "z0": 2400, "x1": 16384, "z1": 5400}, "value": 0.7, "tags": ["civilian", "habitat", "transit"], "terrain_profile": { "slope_band": "flat", "note": "Civilian district (east). Convoy-A endpoint / market town." }, "neighbors": ["granary_vale", "northwatch", "east_bluffs_n"] },
+
+    { "key": "west_scarp_n", "name": "West Scarp (North)", "side": "north", "row": "C", "centroid": {"x": 2700, "z": 6300}, "bbox": {"x0": 0, "z0": 5400, "x1": 5400, "z1": 7200}, "value": 0.8, "tags": ["ridge", "infantry_only", "overlook"], "terrain_profile": { "slope_band": "infantry", "note": "INFANTRY-only ridge (scarp walls 32-45deg, cliff crest) above the west narrows. Only foot squads flank here; VEH/HEAVY are funneled to west_pass." }, "neighbors": ["hollow_overlook_n", "ash_habitat", "granary_vale", "west_narrows", "west_pass"] },
+    { "key": "hollow_overlook_n", "name": "Hollow Overlook (North)", "side": "north", "row": "C", "centroid": {"x": 8000, "z": 6300}, "bbox": {"x0": 5400, "z0": 5400, "x1": 10600, "z1": 7200}, "value": 0.7, "tags": ["valley", "veh_open", "overlook", "heavy_restricted"], "terrain_profile": { "slope_band": "veh", "note": "VEH-passable overlook sloping down to the basin ford, with a HEAVY-restricted lip (24-32deg rim). The main northern gateway onto the central crossing." }, "neighbors": ["west_scarp_n", "east_bluffs_n", "granary_vale", "west_pass", "meridian_basin", "east_pass"] },
+    { "key": "east_bluffs_n", "name": "East Bluffs (North)", "side": "north", "row": "C", "centroid": {"x": 13492, "z": 6300}, "bbox": {"x0": 10600, "z0": 5400, "x1": 16384, "z1": 7200}, "value": 0.8, "tags": ["pass", "heavy_restricted", "overlook"], "terrain_profile": { "slope_band": "veh", "note": "HEAVY-restricted pass (24-32deg pinch) descending to the east causeway and the still_mere shore." }, "neighbors": ["hollow_overlook_n", "north_market", "granary_vale", "east_pass", "still_mere"] },
+
+    { "key": "west_narrows", "name": "West Narrows", "side": "contested", "row": "D", "centroid": {"x": 1600, "z": 8192}, "bbox": {"x0": 0, "z0": 7200, "x1": 3200, "z1": 9184}, "value": 1.0, "tags": ["water", "deep", "naval", "flank"], "terrain_profile": { "water_band": "channel", "note": "Deep off-map-fed channel (>30 depth) — true SHIP+SUB water. Steep shores (cliff band). Ships here threaten the west_pass ford; subs contest it uncontested by land." }, "neighbors": ["west_pass", "west_scarp_n", "west_scarp_s"] },
+    { "key": "west_pass", "name": "West Pass", "side": "contested", "row": "D", "centroid": {"x": 4800, "z": 8192}, "bbox": {"x0": 3200, "z0": 7200, "x1": 6400, "z1": 9184}, "value": 1.4, "tags": ["corridor", "choke", "ridge", "ford"], "terrain_profile": { "slope_band": "flat", "water_band": "ford", "chokepoint": "west_ford_deck", "note": "West ridge corridor: a 44-elmo ford deck (flat) threaded through infantry/cliff-band ridge walls. VEH/HEAVY column across; INFANTRY may scramble the scarps. One of three N<->S land crossings." }, "neighbors": ["west_narrows", "meridian_basin", "west_scarp_n", "west_scarp_s", "hollow_overlook_n", "gulch_overlook_s"] },
+    { "key": "meridian_basin", "name": "Meridian Basin", "side": "contested", "row": "D", "centroid": {"x": 8192, "z": 8192}, "bbox": {"x0": 6400, "z0": 7200, "x1": 9984, "z1": 9184}, "value": 2.5, "tags": ["basin", "contested_core", "ford", "objective"], "terrain_profile": { "slope_band": "flat", "water_band": "ford", "chokepoint": "basin_ford", "note": "Central prize — an open bowl the river fords across (112-elmo crossing). Highest value, most exposed. Formations hold but multi-squad load congests the flow field. The primary control objective." }, "neighbors": ["west_pass", "east_pass", "hollow_overlook_n", "gulch_overlook_s"] },
+    { "key": "east_pass", "name": "East Pass", "side": "contested", "row": "D", "centroid": {"x": 11584, "z": 8192}, "bbox": {"x0": 9984, "z0": 7200, "x1": 13184, "z1": 9184}, "value": 1.4, "tags": ["corridor", "choke", "ridge", "ford", "causeway"], "terrain_profile": { "slope_band": "flat", "water_band": "ford", "chokepoint": "east_ford_deck", "note": "East ridge corridor — a lake-shoulder causeway, 44-elmo deck. Mirror of west_pass; flanked by still_mere so ships/amphibs contest it." }, "neighbors": ["meridian_basin", "still_mere", "east_bluffs_n", "hollow_overlook_n", "east_bluffs_s", "gulch_overlook_s"] },
+    { "key": "still_mere", "name": "Still Mere", "side": "contested", "row": "D", "centroid": {"x": 14784, "z": 8192}, "bbox": {"x0": 13184, "z0": 7200, "x1": 16384, "z1": 9184}, "value": 1.0, "tags": ["water", "lake", "naval", "flank"], "terrain_profile": { "water_band": "graded", "note": "East lake with graded depth — shallow wadeable shores (shallow/deep bands) ringing a channel-deep center. THE amphibious-differentiation showcase (INFANTRY blocked at shore, VEH/HEAVY wade in, SHIP anywhere, SUB deep). Surrounds heron_ait." }, "neighbors": ["east_pass", "heron_ait", "east_bluffs_n", "east_bluffs_s"] },
+    { "key": "heron_ait", "name": "Heron Ait", "side": "contested", "row": "D", "declare_before": "still_mere", "centroid": {"x": 14700, "z": 8192}, "bbox": {"x0": 14200, "z0": 7700, "x1": 15200, "z1": 8700}, "value": 1.1, "tags": ["island", "naval_objective", "buildzone"], "terrain_profile": { "slope_band": "flat", "note": "Buildable island ringed by channel-deep water — reachable only by SHIP transport, amphibious VEH/HEAVY through the shallows, or air. A land objective that ONLY naval/amphibious play can take. Declared before still_mere so its footprint wins the overlap (§1.1 first-declared-wins)." }, "neighbors": ["still_mere"] },
+
+    { "key": "west_scarp_s", "name": "West Scarp (South)", "side": "south", "row": "E", "centroid": {"x": 2700, "z": 10084}, "bbox": {"x0": 0, "z0": 9184, "x1": 5400, "z1": 10984}, "value": 0.8, "tags": ["ridge", "infantry_only", "overlook"], "terrain_profile": { "slope_band": "infantry", "note": "Mirror of west_scarp_n." }, "neighbors": ["gulch_overlook_s", "shale_habitat", "sorghum_vale", "west_narrows", "west_pass"] },
+    { "key": "gulch_overlook_s", "name": "Gulch Overlook (South)", "side": "south", "row": "E", "centroid": {"x": 8000, "z": 10084}, "bbox": {"x0": 5400, "z0": 9184, "x1": 10600, "z1": 10984}, "value": 0.7, "tags": ["valley", "veh_open", "overlook", "heavy_restricted"], "terrain_profile": { "slope_band": "veh", "note": "Mirror of hollow_overlook_n — the southern gateway onto the basin." }, "neighbors": ["west_scarp_s", "east_bluffs_s", "sorghum_vale", "west_pass", "meridian_basin", "east_pass"] },
+    { "key": "east_bluffs_s", "name": "East Bluffs (South)", "side": "south", "row": "E", "centroid": {"x": 13492, "z": 10084}, "bbox": {"x0": 10600, "z0": 9184, "x1": 16384, "z1": 10984}, "value": 0.8, "tags": ["pass", "heavy_restricted", "overlook"], "terrain_profile": { "slope_band": "veh", "note": "Mirror of east_bluffs_n." }, "neighbors": ["gulch_overlook_s", "south_market", "sorghum_vale", "east_pass", "still_mere"] },
+
+    { "key": "shale_habitat", "name": "Shale Habitat", "side": "south", "row": "F", "centroid": {"x": 2700, "z": 12484}, "bbox": {"x0": 0, "z0": 10984, "x1": 5400, "z1": 13984}, "value": 0.6, "tags": ["civilian", "habitat", "transit"], "terrain_profile": { "slope_band": "flat", "note": "Civilian district (west). Convoy-B endpoint. Mirror of ash_habitat." }, "neighbors": ["sorghum_vale", "slag_forge", "west_scarp_s"] },
+    { "key": "sorghum_vale", "name": "Sorghum Vale", "side": "south", "row": "F", "centroid": {"x": 8000, "z": 12484}, "bbox": {"x0": 5400, "z0": 10984, "x1": 10600, "z1": 13984}, "value": 0.9, "tags": ["open", "valley", "transit"], "terrain_profile": { "slope_band": "flat", "note": "VEH-passable valley / south transit spine. Mirror of granary_vale." }, "neighbors": ["shale_habitat", "south_market", "slag_forge", "southgate", "southwatch", "west_scarp_s", "gulch_overlook_s", "east_bluffs_s"] },
+    { "key": "south_market", "name": "South Market", "side": "south", "row": "F", "centroid": {"x": 13492, "z": 12484}, "bbox": {"x0": 10600, "z0": 10984, "x1": 16384, "z1": 13984}, "value": 0.7, "tags": ["civilian", "habitat", "transit"], "terrain_profile": { "slope_band": "flat", "note": "Civilian district (east). Convoy-B endpoint. Mirror of north_market." }, "neighbors": ["sorghum_vale", "southwatch", "east_bluffs_s"] },
+
+    { "key": "slag_forge", "name": "Slag Forge", "side": "south", "row": "G", "centroid": {"x": 3200, "z": 15184}, "bbox": {"x0": 0, "z0": 13984, "x1": 6400, "z1": 16384}, "value": 1.2, "tags": ["industrial", "buildzone", "underpass", "plain", "home"], "terrain_profile": { "slope_band": "flat", "note": "South industrial plain. Mirror of cinder_forge." }, "neighbors": ["southgate", "shale_habitat", "sorghum_vale"] },
+    { "key": "southgate", "name": "Southgate", "side": "south", "row": "G", "centroid": {"x": 8192, "z": 15184}, "bbox": {"x0": 6400, "z0": 13984, "x1": 9984, "z1": 16384}, "value": 0.8, "tags": ["home", "buildzone", "start"], "terrain_profile": { "slope_band": "flat", "note": "South home / primary drop-in start. Mirror of northgate." }, "neighbors": ["slag_forge", "southwatch", "sorghum_vale"] },
+    { "key": "southwatch", "name": "Southwatch", "side": "south", "row": "G", "centroid": {"x": 13184, "z": 15184}, "bbox": {"x0": 9984, "z0": 13984, "x1": 16384, "z1": 16384}, "value": 0.7, "tags": ["home", "radar_high"], "terrain_profile": { "slope_band": "veh", "note": "South-east home flank / radar knoll. Mirror of northwatch." }, "neighbors": ["southgate", "sorghum_vale", "south_market"] }
+  ],
+
+  "civilian_districts": ["ash_habitat", "north_market", "shale_habitat", "south_market"],
+
+  "convoy_routes": [
+    { "id": "convoy_north", "side": "north", "from": "ash_habitat", "to": "north_market", "via": ["granary_vale"], "waypoints": [ {"x": 2700, "z": 3900}, {"x": 8000, "z": 3900}, {"x": 13492, "z": 3900} ], "note": "Lateral road behind the north front (z~3900). Threatenable by raids down through hollow_overlook_n — the natural escort/protect/extract objective generator (§7 civilians)." },
+    { "id": "convoy_south", "side": "south", "from": "shale_habitat", "to": "south_market", "via": ["sorghum_vale"], "waypoints": [ {"x": 2700, "z": 12484}, {"x": 8000, "z": 12484}, {"x": 13492, "z": 12484} ], "note": "Mirror of convoy_north (z~12484)." }
+  ],
+
+  "start_positions": {
+    "note": "Expandable start areas: the whole home row (rows A / G) is buildable start ground; these are the anchored drop-in slots for up to 4 players/side.",
+    "north": [ {"x": 2400, "z": 1200}, {"x": 6600, "z": 1200}, {"x": 9400, "z": 1200}, {"x": 13400, "z": 1200} ],
+    "south": [ {"x": 2400, "z": 15184}, {"x": 6600, "z": 15184}, {"x": 9400, "z": 15184}, {"x": 13400, "z": 15184} ]
+  },
+
+  "scenario_ownership": {
+    "note": "Feeds the scenario file (scenarios/meridian_basin.lua, task 5). Home + mid rows start owned; ridge rows and the contested band start neutral, so early game = expansion through neutral regions (start is 3 region-hops from the basin). Civilian districts are Gaia-populated regardless of control owner.",
+    "north": ["cinder_forge", "northgate", "northwatch", "ash_habitat", "granary_vale", "north_market"],
+    "south": ["slag_forge", "southgate", "southwatch", "shale_habitat", "sorghum_vale", "south_market"],
+    "neutral": ["west_scarp_n", "hollow_overlook_n", "east_bluffs_n", "west_narrows", "west_pass", "meridian_basin", "east_pass", "still_mere", "heron_ait", "west_scarp_s", "gulch_overlook_s", "east_bluffs_s"]
+  },
+
+  "invariants": {
+    "note": "Checked by the region validator + the E1 slope-consistency extension (task 4). Asserted here so the generator and the validator share one contract.",
+    "full_coverage": "The 24 region bboxes tile [0,16384]^2 with no gaps -> no synthetic 'wilds' in the playable area. heron_ait overlaps still_mere (declared first, wins).",
+    "adjacency_symmetric": "Every neighbor edge is reciprocated.",
+    "start_to_basin_hops": 3,
+    "crossings_only_through_D": "North-bank rows (A/B/C) reach South-bank rows (E/F/G) ONLY through a row-D region — the three land fords (west_pass, meridian_basin, east_pass) or the two water pockets (west_narrows, still_mere). This is what makes the chokepoints load-bearing.",
+    "slope_consistency": "A region tagged 'corridor'/'choke' must carry a chokepoint feature whose deck is a 'flat' band passable to its intended classes; a region tagged 'infantry_only' must band its floor to 'infantry'; a 'heavy_restricted' region's pinch bands to 'veh'. (E1)"
+  }
+}

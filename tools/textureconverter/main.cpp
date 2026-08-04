@@ -480,16 +480,34 @@ static bool WrapDdsAsKtx2(const std::string& srcPath,
 // Raw DXT1 wrap path — for the SMT tile atlas
 // ============================================================
 
-/// Wrap a raw DXT1 mip0 block stream as a KTX2 with VK_FORMAT_BC1_RGB.
-/// `srcBytes` must be exactly (w/4)*(h/4)*8 bytes long.
+/// Wrap a raw DXT1 block stream as a KTX2 with VK_FORMAT_BC1_RGB, one or
+/// more mip levels. `srcBytes` holds each level's blocks concatenated in
+/// level order (level 0 first): level L is `(w>>L)/4 * (h>>L)/4 * 8` bytes,
+/// dimensions halving each level (both must stay multiples of 4 down to the
+/// smallest level — true for the 32x32-texel Spring tile atlas, whose 4
+/// levels are 32/16/8/4).
 static bool WrapRawDxt1AsKtx2(const std::vector<uint8_t>& srcBytes,
-                              int w, int h, const std::string& dstPath,
+                              int w, int h, int numLevels,
+                              const std::string& dstPath,
                               bool zstd) {
-    const size_t expect = (size_t)(w / 4) * (h / 4) * 8;
+    std::vector<size_t> levelSize(numLevels), levelOffset(numLevels);
+    size_t expect = 0;
+    for (int lvl = 0; lvl < numLevels; ++lvl) {
+        const int lw = std::max(1, w >> lvl);
+        const int lh = std::max(1, h >> lvl);
+        if (lw % 4 != 0 || lh % 4 != 0) {
+            SLOG(SPRING_LOG_ERROR,
+                "raw-dxt1 level %d dims %dx%d not block-aligned", lvl, lw, lh);
+            return false;
+        }
+        levelSize[lvl] = (size_t)(lw / 4) * (lh / 4) * 8;
+        levelOffset[lvl] = expect;
+        expect += levelSize[lvl];
+    }
     if (srcBytes.size() != expect) {
         SLOG(SPRING_LOG_ERROR,
-            "raw-dxt1 size mismatch: have %zu, expected %zu (%dx%d)",
-            srcBytes.size(), expect, w, h);
+            "raw-dxt1 size mismatch: have %zu, expected %zu (%dx%d, %d levels)",
+            srcBytes.size(), expect, w, h, numLevels);
         return false;
     }
     ktxTexture2* tex = nullptr;
@@ -499,7 +517,7 @@ static bool WrapRawDxt1AsKtx2(const std::vector<uint8_t>& srcBytes,
     ci.baseHeight = (uint32_t)h;
     ci.baseDepth = 1;
     ci.numDimensions = 2;
-    ci.numLevels = 1;
+    ci.numLevels = (uint32_t)numLevels;
     ci.numLayers = 1;
     ci.numFaces = 1;
     ci.isArray = KTX_FALSE;
@@ -512,13 +530,16 @@ static bool WrapRawDxt1AsKtx2(const std::vector<uint8_t>& srcBytes,
             ktxErrorString(rc));
         return false;
     }
-    rc = ktxTexture_SetImageFromMemory(
-        ktxTexture(tex), 0, 0, 0, srcBytes.data(), srcBytes.size());
-    if (rc != KTX_SUCCESS) {
-        SLOG(SPRING_LOG_ERROR, "SetImageFromMemory failed: %s",
-            ktxErrorString(rc));
-        ktxTexture_Destroy(ktxTexture(tex));
-        return false;
+    for (int lvl = 0; lvl < numLevels; ++lvl) {
+        rc = ktxTexture_SetImageFromMemory(
+            ktxTexture(tex), lvl, 0, 0,
+            srcBytes.data() + levelOffset[lvl], levelSize[lvl]);
+        if (rc != KTX_SUCCESS) {
+            SLOG(SPRING_LOG_ERROR, "SetImageFromMemory level %d failed: %s",
+                lvl, ktxErrorString(rc));
+            ktxTexture_Destroy(ktxTexture(tex));
+            return false;
+        }
     }
     if (zstd) {
         ktxTexture2_DeflateZstd(tex, 18);
@@ -531,8 +552,8 @@ static bool WrapRawDxt1AsKtx2(const std::vector<uint8_t>& srcBytes,
             ktxErrorString(rc));
         return false;
     }
-    SLOG(SPRING_LOG_INFO, "raw DXT1 wrap: %dx%d (%zu bytes) -> %s",
-        w, h, srcBytes.size(), dstPath.c_str());
+    SLOG(SPRING_LOG_INFO, "raw DXT1 wrap: %dx%d, %d levels (%zu bytes) -> %s",
+        w, h, numLevels, srcBytes.size(), dstPath.c_str());
     return true;
 }
 
@@ -867,18 +888,24 @@ static void PrintUsage(const char* argv0) {
         "\n"
         "usage:\n"
         "  %s [options] <input> <output.ktx2>\n"
-        "  %s --raw-dxt1 WxH <input> <output.ktx2>\n"
+        "  %s --raw-dxt1 WxH [--mip-levels N] <input> <output.ktx2>\n"
         "  %s --smf-minimap <input.smf> <output.ktx2>\n"
         "\n"
         "DDS sources (BC1/BC3/BC4/BC5) are wrapped as KTX2 without\n"
         "transcoding. RGBA sources (TGA/PNG/JPG/BMP) are encoded via\n"
         "Basis Universal — UASTC for art (default), ETC1S for the SMT\n"
         "tile atlas. The --raw-dxt1 mode wraps a bare DXT1 block stream\n"
-        "(used by mapconverter for the SMT atlas).\n"
+        "(used by mapconverter for the SMT atlas); WxH is level 0's\n"
+        "dimensions. With --mip-levels N > 1, <input> holds N levels'\n"
+        "blocks concatenated in level order (level 0 first), each level\n"
+        "halving both dimensions from the previous (must stay multiples\n"
+        "of 4) — no runtime mip generation, since WebGL2 cannot\n"
+        "generateMipmap() a compressed-format texture.\n"
         "\n"
         "options:\n"
         "  --encoding uastc|etc1s   Encoder for non-DDS sources (default: uastc)\n"
         "  --mipmaps                Generate mip chain for encoded sources\n"
+        "  --mip-levels N           Level count for --raw-dxt1 (default: 1)\n"
         "  --no-zstd                Disable Zstd supercompression\n"
         "  --png-fallback <path>    Also write a downscaled PNG sidecar at <path>\n"
         "                           (for glTF readers without KHR_texture_basisu)\n"
@@ -918,6 +945,7 @@ int main(int argc, char* argv[]) {
     bool rawDxt1 = false;
     bool smfMinimap = false;
     int rawW = 0, rawH = 0;
+    int rawMipLevels = 1;
     std::string pngFallbackPath;
     ChannelOp channelOp = ChannelOp::None;
     std::string tex2Path;
@@ -941,6 +969,15 @@ int main(int argc, char* argv[]) {
             rawDxt1 = true;
             if (!ParseDims(argv[++i], rawW, rawH)) {
                 SLOG(SPRING_LOG_ERROR, "bad --raw-dxt1 dims");
+                springlog_shutdown();
+                return 2;
+            }
+        } else if (a == "--mip-levels" && i + 1 < argc) {
+            try {
+                rawMipLevels = std::stoi(argv[++i]);
+            } catch (...) { rawMipLevels = 0; }
+            if (rawMipLevels < 1) {
+                SLOG(SPRING_LOG_ERROR, "bad --mip-levels");
                 springlog_shutdown();
                 return 2;
             }
@@ -1003,7 +1040,7 @@ int main(int argc, char* argv[]) {
         rc = ExtractSmfMinimapToKtx2(inputPath, outputPath, zstd) ? 0 : 1;
     } else if (rawDxt1) {
         std::vector<uint8_t> bytes = ReadAllBytes(inputPath);
-        rc = WrapRawDxt1AsKtx2(bytes, rawW, rawH, outputPath, zstd) ? 0 : 1;
+        rc = WrapRawDxt1AsKtx2(bytes, rawW, rawH, rawMipLevels, outputPath, zstd) ? 0 : 1;
     } else {
         rc = ConvertGeneric(inputPath, outputPath, enc, genMips, zstd,
                             pngFallbackPath, channelOp, tex2Path);

@@ -23,13 +23,10 @@ import {
     TransformNode,
     Matrix,
     Vector3,
-    Vector4,
     Quaternion,
     StandardMaterial,
-    ShaderMaterial,
     PBRMaterial,
     Material,
-    Effect,
     Color3,
     BoundingInfo,
     SceneLoader,
@@ -41,6 +38,7 @@ import {
     type DirectionalLight,
 } from '@babylonjs/core';
 import { TeamColorPlugin } from './team-color-plugin.js';
+import { TEAM_COLORS } from './team-colors.js';
 import '@babylonjs/loaders/glTF/index.js';
 // KTX2 loader is registered in main.ts (the app entry). All unit
 // textures resolve to `.ktx2` URIs after the texture pipeline migration.
@@ -56,6 +54,10 @@ import {
     createZKMaterial, setActiveZKShadowGenerator, zkOptionsFromCustomParams,
     type ZKUnitTextures,
 } from './zk-model-material.js';
+import { matchAimSlots, type UnitAimPieces, type AimPiece } from './turret-aim-controller.js';
+import { LodTier, type ImpostorRenderer } from './impostor-renderer.js';
+import { DitherFadePlugin } from './dither-fade-plugin.js';
+import type { MemberModel } from './squad-render-backend.js';
 import { AssetLoader, LoadPriority } from './asset-loader.js';
 import { PlaceholderRenderer, type PlaceholderMeshes } from './placeholder-renderer.js';
 
@@ -141,6 +143,12 @@ interface UnitTextures {
      *  TBN — no mesh tangents required. */
     normal: Texture | null;
     invertTeamColor: boolean;
+    /** True only for the synthesized 1×1 white `diffuse` handed to models
+     *  with geometry but no texture config (getWhiteFallbackDiffuse). The
+     *  material factory routes it to TeamColorPlugin.syntheticAlbedo so
+     *  those units render fully team-tinted instead of flat white. Absent
+     *  (falsy) for every real loaded texture set. */
+    syntheticFallback?: boolean;
 }
 
 /**
@@ -267,447 +275,6 @@ function resolveTextureUrl(modelUrl: string, textureName: string): string {
     return `${modelUrl.substring(0, lastSlash + 1)}${textureName}`;
 }
 
-// ─── Team color shader ───
-// PLAN-pbr-mapping.md splits Spring's two source textures across four
-// spec-compliant glTF PBR slots so a third-party viewer renders units
-// correctly out of the box. The runtime composites the four textures
-// here:
-//   diffuseTex.rgb  → base color (RGB pass-through from S3O tex1)
-//   diffuseTex.a    → binary cutout (MASK alphaMode, 0.5 threshold)
-//   emissiveTex.rgb → grayscale self-illumination (S3O tex2.R replicated)
-//   ormTex.g        → roughness (255 - S3O tex2.G, specular inverted)
-//   ormTex.b        → metallic   (S3O tex2.B reflectivity)
-//   teamMaskTex.r   → team-color blend amount (raw S3O tex1.A)
-// `invertMask` flips the team-mask interpretation at sample time so
-// the same encoded image works for both authoring conventions.
-//
-// Uses Babylon's instancesDeclaration/instancesVertex includes for
-// thin-instance support.
-
-// Nanoframe is encoded inline in the team-color shader so we don't
-// duplicate the per-piece pipeline. Build-progress + groundY currently
-// hold neutral values (1.0 / 0.0) — the build-anim branch is a no-op
-// until a per-instance vertex attribute lands. See docs/lighting.md
-// "thin-instance matrix packing breaks shadow casting" for why we
-// can't just pack those values into the world matrix's W row again.
-const TEAMCOLOR_VERTEX = `#version 300 es
-    precision highp float;
-    in vec3 position;
-    in vec3 normal;
-    in vec2 uv;
-
-    // Inlined GLSL-300 equivalent of Babylon's instancesDeclaration /
-    // instancesVertex includes. The stock includes emit
-    //   attribute vec4 worldN;
-    // which is a reserved word in GLSL ES 3.00, breaking shader
-    // compile. Babylon ships no GLSL-300 variant — this is just the
-    // same code with attribute -> in. We only need the
-    // INSTANCES + THIN_INSTANCES path; we never set VELOCITY /
-    // PREPASS_VELOCITY / WORLD_UBO on this material.
-    in vec4 world0;
-    in vec4 world1;
-    in vec4 world2;
-    in vec4 world3;
-    uniform mat4 world;
-
-    uniform mat4 viewProjection;
-    // View matrix is bound by the JS side every frame; we project the
-    // fragment's world position into view-space and pass its (positive)
-    // depth as a varying so the fragment shader can pick a CSM cascade
-    // without re-deriving it from gl_FragCoord.
-    uniform mat4 view;
-
-    out vec2 vUV;
-    out vec3 vNormal;
-    out vec3 vWorldPos;
-    out float vBuildProgress;
-    out float vAboveGround;
-    out float vViewZ;
-
-    void main() {
-        mat4 finalWorld = world * mat4(world0, world1, world2, world3);
-
-        // Neutral until per-instance attribute lands — see docs/lighting.md
-        // "thin-instance matrix packing breaks shadow casting".
-        vBuildProgress = 1.0;
-        float groundY  = 0.0;
-
-        vec4 wp = finalWorld * vec4(position, 1.0);
-        vAboveGround = wp.y - groundY;
-        vNormal = normalize(mat3(finalWorld) * normal);
-        vWorldPos = wp.xyz;
-        vUV = uv;
-        // RH scene + camera at +Y looking down -Z: view*wp has negative
-        // .z for visible fragments. Negate so vViewZ is a positive
-        // distance from the camera, matching Babylon's CSM split values
-        // which are stored as positive linear depths.
-        vViewZ = -(view * vec4(wp.xyz, 1.0)).z;
-        gl_Position = viewProjection * wp;
-    }
-`;
-
-const TEAMCOLOR_FRAGMENT = `#version 300 es
-    precision highp float;
-    uniform sampler2D diffuseTex;
-    uniform sampler2D emissiveTex;
-    uniform sampler2D ormTex;
-    uniform sampler2D teamMaskTex;
-    uniform sampler2D normalTex;
-    uniform vec3 teamColor;
-    uniform float invertMask;
-    uniform vec3 lightDir;
-    uniform float modelHeight;
-    // Each of these is 1.0 when the matching texture was bound, 0.0
-    // when the unit def shipped without one. Unbound samplers still
-    // resolve in WebGL — they hit a 1×1 default — so we route around
-    // them explicitly to keep the result well-defined.
-    uniform float hasEmissive;
-    uniform float hasOrm;
-    uniform float hasTeamMask;
-    uniform float hasNormal;
-    // Sun colour premultiplied by intensity (scene DirectionalLight.diffuse ×
-    // intensity), refreshed every bind. Units respond to the actual sun
-    // brightness/colour and day-night: previously the shader had only lightDir
-    // (direction), so a dimmed, tinted, or below-horizon sun never moved the
-    // model — it stayed a constant grey while the terrain darkened. Applies to
-    // both branches; a white sun (the common case) is a no-op vs the old look.
-    uniform vec3 sunColor;
-#ifndef USE_HALF_LAMBERT
-    // Realistic-branch ambient fill floor, sky-weighted (see below). Lower =>
-    // deeper unlit faces AND visible cast self-shadows, since the CSM term only
-    // scales the sun half — a high floor floods shadows and decouples the model
-    // from the sun. Live-tunable via setAmbientLevel(). The gameplay
-    // (half-Lambert) branch keeps its own fixed floor so BAR/papertanks don't
-    // shift.
-    uniform float ambientLevel;
-#endif
-
-    // PLAN-lighting L3 / L4 — directional sun shadow sampling.
-    //   csmShadowMap     — plain depth array (sampler2DArray). Babylon
-    //                       allocates this when usePercentageCloserFiltering
-    //                       is OFF. Sampled with .r returning linear depth
-    //                       in [0,1]. PCF-compare semantics avoided so the
-    //                       sampler binding is well-defined even before
-    //                       onBindObservable swaps in the real RTT.
-    //   csmMatrices[]    — light-space VP for each cascade (cascade 0 = nearest).
-    //   csmSplits        — far-Z (positive view-space distance) of each cascade.
-    //                       vec4 so we don't blow up the uniform count; first
-    //                       three components feed cascade selection, .w is the
-    //                       absolute max distance.
-    //   shadowDarkness   — Babylon convention: 0 = fully dark, 1 = no shadow.
-    //                       Used as the "fully shadowed" floor in the mix.
-    uniform highp sampler2DArray csmShadowMap;
-    uniform mat4 csmMatrices[4];
-    uniform vec4 csmSplits;
-    uniform float shadowDarkness;
-
-    in vec2 vUV;
-    in vec3 vNormal;
-    in vec3 vWorldPos;
-    in float vBuildProgress;
-    in float vAboveGround;
-    in float vViewZ;
-
-    out vec4 fragColor;
-
-    // Tangent-space → world-space normal perturbation without per-vertex
-    // tangents. Uses screen-space derivatives of world position + UV to
-    // reconstruct a TBN frame at the fragment (Schüler / Mikkelsen). Robust
-    // for soft normal maps on low-poly RTS units; quality degrades at
-    // sharp UV seams which we don't have visible in the camera's typical
-    // distance. Cheaper than per-vertex tangents because the .gltf .bin
-    // payload stays smaller (no tangent attribute) — at the cost of two
-    // dFdx/dFdy pairs per fragment, which RTS overdraw budgets absorb fine.
-    vec3 perturbNormal(vec3 N, vec3 P, vec2 uv) {
-        vec3  dp1  = dFdx(P);
-        vec3  dp2  = dFdy(P);
-        vec2  duv1 = dFdx(uv);
-        vec2  duv2 = dFdy(uv);
-        vec3  dp2perp = cross(dp2, N);
-        vec3  dp1perp = cross(N, dp1);
-        vec3  T       = dp2perp * duv1.x + dp1perp * duv2.x;
-        vec3  B       = dp2perp * duv1.y + dp1perp * duv2.y;
-        float invmax  = inversesqrt(max(dot(T, T), dot(B, B)));
-        mat3  tbn     = mat3(T * invmax, B * invmax, N);
-        vec3  nmap    = texture(normalTex, uv).xyz * 2.0 - 1.0;
-        return normalize(tbn * nmap);
-    }
-
-    // Pick the smallest cascade whose far-Z still contains us, then
-    // sample the cascade's depth layer and compare manually. Returns
-    // 1.0 if the fragment is out-of-cascade, outside the cascade UV
-    // bounds, or unshadowed; 0.0 if shadowed. A small constant bias
-    // keeps self-shadowing artefacts off near-horizontal surfaces.
-    float sampleCsmShadow() {
-        int cascade = 3;
-        if      (vViewZ < csmSplits.x) cascade = 0;
-        else if (vViewZ < csmSplits.y) cascade = 1;
-        else if (vViewZ < csmSplits.z) cascade = 2;
-        else if (vViewZ >= csmSplits.w) return 1.0; // past the last cascade
-
-        vec4 lp = csmMatrices[cascade] * vec4(vWorldPos, 1.0);
-        vec3 ndc = lp.xyz / lp.w;
-        vec3 uv = ndc * 0.5 + 0.5;
-        if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 1.0;
-        if (uv.z < 0.0 || uv.z > 1.0) return 1.0;
-        float bias = 0.0015;
-        float occluder = texture(csmShadowMap, vec3(uv.xy, float(cascade))).r;
-        return (uv.z - bias) > occluder ? 0.0 : 1.0;
-    }
-
-    void main() {
-        vec4 base = texture(diffuseTex, vUV);
-        // No discard. Spring's model shader computes alpha but only
-        // tests it when alphaCtrl is set for a specific pass (shadow
-        // gen, alpha-blend bin); default is "always pass". tex2.A is
-        // sparse engine-side data, not a cutout mask — discarding on
-        // it killed ~90% of fragments for most ZK content.
-
-        // Team-color mask now lives in a dedicated R8 KTX2 (teamMaskTex.r)
-        // rather than the diffuse alpha channel — so cutout and team
-        // tinting don't compete for the same bits. Defaults to 0 (no
-        // team color) for unit defs that don't supply a mask texture.
-        //
-        // Recoil's ModelFragProg.glsl and ZK's ModelFragProgGL4_CUS.glsl
-        // both express the team-color step as
-        //     mix(diffuse.rgb, teamColor.rgb, mask)
-        // — a straight *replace* of the diffuse with the team tint where
-        // the mask is full. The previous form here multiplied teamColor
-        // by base.rgb, which dimmed the team tint to ~zero on units
-        // whose authored decal area happens to be dark (a common
-        // pattern — the team-color decal sits on top of an unlit
-        // recessed panel). Replace, not modulate.
-        float mask = hasTeamMask > 0.5 ? texture(teamMaskTex, vUV).r : 0.0;
-        if (invertMask > 0.5) mask = 1.0 - mask;
-        vec3 color = mix(base.rgb, teamColor, mask);
-
-        // Normal-map perturbation. Falls back to the geometric (vertex-
-        // interpolated) normal for unit defs without a normal map.
-        vec3 N = normalize(vNormal);
-        if (hasNormal > 0.5) {
-            N = perturbNormal(N, vWorldPos, vUV);
-        }
-
-        // Per-game lighting style, selected by the "lighting" field in
-        // modinfo.lua. The two variants differ in how aggressively the
-        // sun-direction term modulates brightness:
-        //
-        //   USE_HALF_LAMBERT (default, "gameplay"):
-        //     Plain N·L Lambert (with a flat ambient floor) leaves the
-        //     side faces of tall, thin units — radar masts, the Lotus
-        //     turret spire — sitting at the minimum ~40% term whenever
-        //     the camera is far enough away that their bright top face
-        //     has shrunk to a few pixels. Half-Lambert shifts the
-        //     diffuse range from [0..1] to [0.5..1] so dark sides keep
-        //     some shape, and a small upward sky-tint lifts the floor
-        //     for upward-facing surfaces. Combined output ~0.55–1.00
-        //     keeps unit silhouettes readable at gameplay distance.
-        //
-        //   else ("realistic"):
-        //     True Lambert (max(0, N·L)) with a low ambient floor +
-        //     stronger sky-hemisphere bias. Side faces facing directly
-        //     away from the sun darken close to the ambient floor;
-        //     close-up shape reads cleanly. Trade-off: tall thin units
-        //     can flatten to near-silhouettes when their lit face has
-        //     shrunk to a few pixels.
-        //
-        // Both variants split ambient and sun terms so the sun-shadow
-        // factor (sunVis below) only attenuates the directional half —
-        // shadowed surfaces darken but never hit zero. Matches how
-        // Spring/ZK shaders express their groundShadowDensity term.
-    #ifdef USE_HALF_LAMBERT
-        float lambert     = dot(N, lightDir) * 0.5 + 0.5;
-        float skyTint     = N.y * 0.5 + 0.5;
-        float ambientTerm = 0.45;
-        float sunTerm     = 0.55 * lambert + 0.05 * skyTint;
-    #else
-        // Maximum-contrast tuning: zero ambient on downward / lateral
-        // normals, a tiny sky-tint on upward-facing surfaces so roofs
-        // and slope tops aren't pitch black under cloud cover (purely
-        // a wayfinding aid, the floor is still <10% of the sun term).
-        // Sun coefficient at 1.0 so unshadowed sun-facing surfaces
-        // hit full albedo. Dark-side surfaces drop to true black after
-        // sRGB encoding, which is the only way to make the front/back
-        // difference unmistakable on dark-albedo content (Spring's
-        // typical greyscale armour). If this is too harsh for shipping,
-        // raise the 0.0 floor a touch — 0.05 keeps the silhouettes
-        // visible against a black backdrop without flattening the look.
-        float lambert     = max(0.0, dot(N, lightDir));
-        float skyTint     = max(0.0, N.y);
-        // Sky-weighted ambient: shadowed/lateral faces keep only a small
-        // fraction of ambientLevel (deep shadow), upward faces get the full
-        // floor. Keeps the front/back contrast realistic without crushing
-        // every dark face to pure black.
-        float ambientTerm = ambientLevel * (0.35 + 0.65 * skyTint);
-        float sunTerm     = 1.00 * lambert;
-    #endif
-
-        // PBR-ish specular driven by ORM.G (roughness) and ORM.B
-        // (metallic). Pure dielectric: spec base = 4% albedo-neutral;
-        // metallic interp tints toward the albedo (standard PBR
-        // convention). Shininess maps roughness to a Blinn-Phong
-        // exponent so a model with roughness=1 (the modelimporter
-        // default when tex2 is absent or its G channel is zero) gets
-        // no highlight — matching how those legacy units rendered
-        // before PBR mapping.
-        vec3 spec = vec3(0.0);
-        if (hasOrm > 0.5) {
-            vec2  mr        = texture(ormTex, vUV).gb;
-            float roughness = mr.x;
-            float metallic  = mr.y;
-            vec3  specBase  = mix(vec3(0.04), color, metallic);
-            float shininess = mix(8.0, 128.0, 1.0 - roughness);
-            // Use the lighting-style-selected lambert term as the
-            // Blinn-Phong driver. Under USE_HALF_LAMBERT this carries
-            // the half-Lambert (0..1) curve, so back-facing fragments
-            // keep a faint highlight; under the realistic branch
-            // lambert is max(0, N·L) so pow() naturally returns 0
-            // for surfaces facing away from the sun — no spec on
-            // shadow-side panels.
-            float specTerm  = pow(lambert, shininess) * (1.0 - roughness);
-            spec = specBase * specTerm;
-        }
-
-        // CSM sun-visibility — 1.0 = unshadowed, shadowDarkness = full
-        // shadow. Apply ONLY to sun + specular contributions; the ambient
-        // floor stays so shadows are darker but not black.
-        //
-        // Clamp + sanitise: when the shadow map isn't bound yet (first
-        // frame before onBindObservable fires) or the cascade matrices
-        // haven't been refreshed, sampleCsmShadow() can produce NaN /
-        // Inf which would propagate through mix and zero the entire
-        // fragment. Clamping forces a safe sample in [0,1].
-        float rawShadow = clamp(sampleCsmShadow(), 0.0, 1.0);
-        float sunVis = mix(shadowDarkness, 1.0, rawShadow);
-
-        // The sun contribution (diffuse + specular) is tinted/scaled by the
-        // real sun colour × intensity, so the model tracks day-night, sun
-        // colour, and a below-horizon sun (sunColor→dark ⇒ only ambient
-        // remains). The ambient floor is NOT sun-scaled — it's the sky/bounce
-        // fill that keeps shadowed faces from going pure black.
-        vec3 sunLit = sunColor * (sunTerm * sunVis);
-        vec3 lit = color * (ambientTerm + sunLit) + spec * sunVis * sunColor;
-
-    #ifdef USE_CUS_PBR
-        // Recoil cus_gl4 metallic look. BAR draws units through cus_gl4,
-        // whose fragment shader adds an environment cubemap reflection
-        // (mixed by the spec/reflectivity channel) and a strong sun
-        // specular on top of the team-coloured albedo. WebGL2 has no
-        // cubemap-reflection pipeline here (same allowance the ZK material
-        // port takes), so approximate the env reflection with a vertical
-        // sky-gradient tint whose strength comes from the model's own
-        // metallic channel (ORM.B = Spring tex2 reflectivity). The boosted
-        // specular stands in for cus_gl4's texColor2.g x 4 highlight.
-        // Result: metallic panels pick up a subtle sky sheen + sharper
-        // glints instead of the flat matte engine-default look.
-        //
-        // Tuning (first live preview was too pale/washed on up-facing
-        // panels): keep the env reflection dim + subtle so metal reads as
-        // "darker base with sharp highlights" rather than a bright sky
-        // wash. The metallic read comes mostly from the boosted specular,
-        // which is already albedo-tinted (specBase = mix(0.04, color,
-        // metallic) above). Final values still want a real-BAR eyeball.
-        float cusMetal = (hasOrm > 0.5) ? texture(ormTex, vUV).b : 0.0;
-        vec3  cusEnv   = mix(vec3(0.10, 0.12, 0.16),
-                             vec3(0.42, 0.48, 0.56), N.y * 0.5 + 0.5);
-        lit = mix(lit, cusEnv, cusMetal * 0.20);
-        lit += spec * 2.0 * sunVis;
-    #endif
-
-        // Additive self-illumination from S3O tex2.R (replicated to
-        // grayscale RGB by the encoder). Most ZK units have no glow
-        // regions and ship a black emissive map; the encoder/Zstd pair
-        // compresses that to a few hundred bytes per file. Emissive
-        // bypasses shadow — a glowing thruster is its own light.
-        if (hasEmissive > 0.5) {
-            lit += texture(emissiveTex, vUV).rgb;
-        }
-
-        // Nanoframe pass — only active during construction. Below the
-        // rising plane the model is fully lit; above it we cut a
-        // checkerboard stipple so the unfinished portion reads as
-        // "ghosted" without using alpha blending (which would force
-        // the whole material into Babylon's transparent pass and break
-        // depth ordering between pieces). A bright scan band sits at
-        // the plane to sell the "construction in progress" look.
-        if (vBuildProgress < 1.0) {
-            float planeY = vBuildProgress * max(modelHeight, 1.0);
-            if (vAboveGround > planeY) {
-                // Checkerboard discard — 50% coverage keeps the unit's
-                // silhouette readable from a distance while still
-                // looking visibly under-construction up close.
-                vec2 px = floor(gl_FragCoord.xy);
-                if (mod(px.x + px.y, 2.0) < 1.0) discard;
-                // Tint the surviving pixels toward the team color so
-                // the ghosted region looks like an active build site.
-                lit = mix(lit, teamColor * 0.7, 0.6);
-            }
-            // 3-elmo-wide gaussian glow centred at the plane.
-            float bandIntensity = exp(-pow((vAboveGround - planeY) / 2.0, 2.0)) * 1.5;
-            lit += teamColor * bandIntensity;
-        }
-        fragColor = vec4(lit, 1.0);
-    }
-`;
-
-// Register the shader once
-Effect.ShadersStore['teamColorVertexShader'] = TEAMCOLOR_VERTEX;
-Effect.ShadersStore['teamColorFragmentShader'] = TEAMCOLOR_FRAGMENT;
-
-/**
- * Per-game shader lighting style. Resolved at game-start from the
- * `lighting` field surfaced by the lobby (`/api/games` / GameListUpdate
- * FlatBuffer). Drives the `#define USE_HALF_LAMBERT` toggle in
- * `createTeamColorMaterial` — every material built after the setter is
- * called picks up the new value. Existing materials don't update mid-
- * game (would need recompile of every ShaderMaterial program); the
- * setting is expected to be set once before any unit materialises.
- *
- *   - "gameplay"  (default) — half-Lambert + 0.45 ambient floor.
- *                  Optimised for silhouette readability at typical RTS
- *                  camera distance.
- *   - "realistic" — true Lambert + low ambient + sky-tinted bias.
- *                   Closer to a third-party glTF viewer's interpretation
- *                   of the same model; better for close-ups.
- *
- * Unknown values fall back to "gameplay" so a future protocol value the
- * client doesn't recognise doesn't render units flat-coloured.
- */
-type LightingStyle = 'gameplay' | 'realistic';
-let currentLightingStyle: LightingStyle = 'gameplay';
-
-export function setLightingStyle(style: string): void {
-    currentLightingStyle = (style === 'realistic') ? 'realistic' : 'gameplay';
-}
-
-// Ambient fill floor for the teamColor REALISTIC branch (sky-weighted in the
-// shader). Lower values deepen unlit faces and let the CSM cast shadow read on
-// the model itself — a high floor floods self-shadows and decouples the model
-// from the sun. New realistic materials pick this up at creation;
-// setAmbientLevel() live-updates existing ones (docs/lighting.md live-tuning).
-// 0.10 = the cinematic/harsh look chosen for Metalstorm. The gameplay
-// half-Lambert branch keeps its own fixed 0.45 floor (BAR/papertanks).
-let currentAmbientLevel = 0.10;
-
-export function setAmbientLevel(value: number, scene?: Scene): number {
-    currentAmbientLevel = value;
-    if (scene) {
-        for (const m of scene.materials) {
-            // No-op on ShaderMaterials without the uniform (FX materials, or
-            // gameplay half-Lambert team materials that compile it out).
-            if (m instanceof ShaderMaterial) m.setFloat('ambientLevel', value);
-        }
-    }
-    return currentAmbientLevel;
-}
-
-/**
- * PLAN-weapon-fx.md Phase Z2: route unit material creation through the
- * ported ZK `defaultMaterialTemplate` instead of the built-in team-color
- * shader. Toggled from main.ts based on the active game id (ZK opts in,
- * others stay on the default shader). The setter only affects materials
- * created AFTER the call — existing meshes keep their original program.
- */
 // Data-driven model-material selection. A game declares which client
 // material "port" it wants via modinfo `modelMaterialPort` (→ /api/games
 // → gp:init → setModelMaterialPort). NO gameId hardcoding — any mod opts
@@ -722,16 +289,11 @@ let modelMaterialPort = '';
 export function setModelMaterialPort(port: string): void {
     modelMaterialPort = port || '';
 }
-/** @deprecated kept for callers not yet migrated; maps to the ZK port. */
-export function setUseZKMaterial(on: boolean): void {
-    modelMaterialPort = on ? 'zk-939' : '';
-}
 
 function createUnitMaterial(
     name: string,
     textures: UnitTextures,
     teamColor: Color3,
-    modelHeight: number,
     scene: Scene,
     customParams: Record<string, string> | undefined,
 ): Material {
@@ -743,118 +305,13 @@ function createUnitMaterial(
         name, textures, teamColor, scene, modelMaterialPort === 'cus-pbr');
 }
 
-// ── Sun + CSM material bind plumbing ───────────────────────────────────
-// See docs/lighting.md "teamColor ShaderMaterial" for the design.
-// Babylon's stock light binding doesn't fire on plain ShaderMaterials,
-// so every team-color material's onBindObservable copies the active
-// sun + CSM uniforms from this module-local registry every draw.
-
-const DEFAULT_LIGHT_DIR = new Vector3(-0.5, 1.0, 0.3).normalize();
-const IDENTITY_CSM_MATRICES: Matrix[] = [
-    Matrix.Identity(), Matrix.Identity(), Matrix.Identity(), Matrix.Identity(),
-];
-
-interface ShadowBindState {
-    csm: CascadedShadowGenerator;
-    sun: DirectionalLight;
-    /// Reused per-bind: 4 matrix slots that mirror the active CSM cascade
-    /// transforms. `setMatrices` expects `Matrix[]`, so we hand a stable
-    /// array reference and copy into the same Matrix objects each frame.
-    matrices: Matrix[];
-    /// Far view-space Z for cascades 0..3. Cascade 3's value doubles as
-    /// the absolute max distance; fragments beyond it return "no shadow".
-    splits: Vector4;
-}
-
-let activeShadowBind: ShadowBindState | null = null;
-
-/**
- * Hand the team-color material factory the active CascadedShadowGenerator
- * + sun. Every existing AND future material's `onBindObservable` calls
- * `bindShadowUniforms` which reads from this slot. Pass `null` during
- * teardown to clear.
- *
- * Called once from `EntityRenderer.setShadowGenerator()`.
- */
-function setActiveShadowGenerator(
-    csm: CascadedShadowGenerator | null, sun: DirectionalLight | null,
-): void {
-    if (!csm || !sun) {
-        activeShadowBind = null;
-        return;
-    }
-    activeShadowBind = {
-        csm,
-        sun,
-        matrices: [Matrix.Identity(), Matrix.Identity(), Matrix.Identity(), Matrix.Identity()],
-        splits: new Vector4(1e30, 1e30, 1e30, 1e30),
-    };
-}
-
-/**
- * Refresh sun + CSM uniforms on a single team-color material. Called by
- * the material's own `onBindObservable` once per draw. Skips the heavy
- * lifting when no CSM is registered yet (the initial values from
- * `createTeamColorMaterial` keep the shader well-defined).
- */
-function bindShadowUniforms(mat: ShaderMaterial): void {
-    const bind = activeShadowBind;
-    if (!bind) return;
-    const { csm, sun, matrices, splits } = bind;
-
-    // Sun direction: shader expects the direction TO the light source
-    // (so N·L is positive for surfaces facing the sun). Babylon's
-    // DirectionalLight.direction is the direction LIGHT TRAVELS — negate.
-    const d = sun.direction;
-    const lx = -d.x, ly = -d.y, lz = -d.z;
-    const len = Math.hypot(lx, ly, lz) || 1;
-    mat.setVector3('lightDir', new Vector3(lx / len, ly / len, lz / len));
-
-    // Sun colour × intensity → the model's directional light term. This is
-    // what makes units track the actual sun (day-night, map sun tint, a
-    // below-horizon sun). Without it the shader only had lightDir (direction)
-    // and stayed a constant grey regardless of how bright the sun was.
-    const si = sun.intensity;
-    mat.setColor3('sunColor', new Color3(sun.diffuse.r * si, sun.diffuse.g * si, sun.diffuse.b * si));
-
-    // Copy each cascade VP matrix into our scratch array (reused per
-    // bind so we don't allocate during the hot path).
-    for (let i = 0; i < 4; i++) {
-        const m = csm.getCascadeTransformMatrix(i);
-        if (m) matrices[i].copyFrom(m);
-    }
-    mat.setMatrices('csmMatrices', matrices);
-
-    // View matrix — vertex shader uses it to compute view-space Z. Babylon
-    // updates `scene.getViewMatrix()` per frame; reuse rather than caching.
-    const view = mat.getScene().getViewMatrix();
-    mat.setMatrix('view', view);
-
-    // Cascade far-Z splits live on CSM as `_viewSpaceFrustumsZ` (private).
-    // Each entry is a plain number — the cascade's far-edge distance in
-    // view space (positive, along the camera's forward axis). Babylon
-    // updates these every frame from the active camera's near/far + lambda.
-    const internal = csm as unknown as { _viewSpaceFrustumsZ?: number[] };
-    const frusta = internal._viewSpaceFrustumsZ;
-    if (frusta && frusta.length >= 4) {
-        splits.set(frusta[0], frusta[1], frusta[2], frusta[3]);
-        mat.setVector4('csmSplits', splits);
-    }
-
-    // Babylon's ShadowGenerator stores darkness as 0=full, 1=none.
-    mat.setFloat('shadowDarkness', csm.getDarkness());
-
-    // Shadow map — sampler2DArrayShadow is set up by Babylon when PCF is
-    // enabled. Pass the RTT through setTexture; Babylon binds it as the
-    // depth-compare sampler in the linked Effect.
-    const shadowMap = csm.getShadowMap();
-    if (shadowMap) mat.setTexture('csmShadowMap', shadowMap);
-}
-
 /// 1×1 RGBA(255,255,255,255) fallback diffuse for models without a
 /// texture sidecar. Cached per-scene so every textureless piece shares
-/// the same GPU resource. Alpha=255 → fully team-coloured in the shader,
-/// matching the previous "flat team-coloured shape" fallback behaviour.
+/// the same GPU resource. The team tint does NOT come from this texel:
+/// materials built around it set `UnitTextures.syntheticFallback`, which
+/// flips the TeamColorPlugin's `syntheticAlbedo` flag → full team tint
+/// (the "flat team-coloured shape" look). Real maskless albedos stay
+/// untinted (see the plugin's `teamMask` FIDELITY note).
 const WHITE_TEX_CACHE = new WeakMap<Scene, RawTexture>();
 
 function getWhiteFallbackDiffuse(scene: Scene): RawTexture {
@@ -933,6 +390,11 @@ function createUnitPBRMaterial(
     plugin.teamColor = teamColor;
     plugin.teamMask = textures.teamMask;
     plugin.invertMask = textures.invertTeamColor;
+    // Synthesized-white fallback (no texture config) → full team tint, so the
+    // unit still reads as "flat team-coloured shape" rather than flat white.
+    // Real maskless albedos keep their texture — a deliberate Recoil deviation
+    // (S3O tex1-alpha=1 ⇒ full tint there); see the plugin's FIDELITY note.
+    plugin.syntheticAlbedo = textures.syntheticFallback === true;
 
     // Fully opaque. (The old discard-stipple build-progress effect is dropped —
     // it was already dead: the vertex shader hardcoded vBuildProgress = 1.0
@@ -985,19 +447,8 @@ function loadUnitTextures(
     };
 }
 
-// Spring engine's 10 default team colors (from TeamBase::teamDefaultColor).
-const TEAM_COLORS = [
-    new Color3(90/255, 90/255, 255/255),   // blue
-    new Color3(200/255, 0/255, 0/255),     // red
-    new Color3(255/255, 255/255, 255/255), // white
-    new Color3(38/255, 155/255, 32/255),   // green
-    new Color3(7/255, 31/255, 125/255),    // dark blue
-    new Color3(150/255, 10/255, 180/255),  // purple
-    new Color3(255/255, 255/255, 0/255),   // yellow
-    new Color3(50/255, 50/255, 50/255),    // black
-    new Color3(152/255, 200/255, 220/255), // light blue
-    new Color3(171/255, 171/255, 131/255), // tan
-];
+// Spring engine's 10 default team colors: now the shared team-colors.ts
+// module (imported at the top) so the impostor sprite path tints identically.
 
 // Fallback shape types for defs without models
 enum UnitShape { Box = 0, Cylinder, Cone, Sphere }
@@ -1026,6 +477,21 @@ export interface EntityMeta {
      *  resolves to 0 — engine-tagged map landmarks plus units explicitly
      *  flipped via `Spring.SetUnitAlwaysVisible`. */
     alwaysVisible: boolean;
+    /** base_frame of the newest snapshot that carried this entity. The
+     *  server recycles unit IDs, so a scheduled 'destroy' (PLAN-latency L1)
+     *  can fire after the same ID was reassigned to a newly visible unit —
+     *  game-processor's onEntityDestroy skips the removal when this is
+     *  newer than the destroy's frame. */
+    lastStateFrame: number;
+    /** PLAN-latency L1 (LOS reveal): false between the frame this entity's
+     *  first state sample *arrived* and the frame it was actually revealed on.
+     *  A reveal lands on the wire ~D frames ahead of the presentation cursor,
+     *  and the interpolator clamps a single-sample entity to that sample — so
+     *  without this gate a unit entering LOS pops into view up to a second
+     *  before the sim frame on which it entered. `markRevealed()` flips it
+     *  when the scheduled `losReveal` fires at the cursor. Entities from the
+     *  join snapshot are born `true` (a bulk world load is not a reveal). */
+    revealed: boolean;
 }
 
 /** Bit values for EntityMeta.losState — mirror Spring's losStatus bits
@@ -1134,7 +600,36 @@ export class EntityRenderer {
      *  position queries (build beams etc.) so they agree with the render. */
     private cursorFrame = 0;
     private entityMeta = new Map<number, EntityMeta>();
+    /** PLAN-latency L1: `baseFrame` of the very first state snapshot of this
+     *  game. Everything carried by that snapshot is the join-time bulk world
+     *  load, not an in-play LOS reveal, so it renders immediately rather than
+     *  waiting out `D` frames behind a blank screen. Null until the first
+     *  update(); reset with the rest of the renderer state. */
+    private firstStateFrame: number | null = null;
+    /** PLAN-latency L1: notified when an entity is first seen mid-game, so the
+     *  owner (game-processor) can put the reveal on the presentation timeline.
+     *  Null → reveals present immediately, the pre-L1 behaviour. */
+    private onReveal: ((id: number, frame: number, defId: number) => void) | null = null;
+    /** PLAN-latency L1 gate instrumentation. `leadFrames*` is how far ahead of
+     *  the cursor each reveal arrived — i.e. exactly how early the unit used
+     *  to pop in. `warmOnReveal` / `coldOnReveal` count whether the pre-roll
+     *  won the race: warm = the model was resolved by the time the cursor
+     *  reached the reveal frame, cold = it still had to show the procedural
+     *  stand-in. Read via `window.__gp('__entityRenderer.getRevealStats()')`. */
+    private revealStats = {
+        scheduled: 0, revealed: 0,
+        leadFramesSum: 0, leadFramesMax: 0,
+        warmOnReveal: 0, coldOnReveal: 0,
+    };
     private teamMaterials: StandardMaterial[] = [];
+    /** DefIds whose entities render via the Metalstorm squad fan-out
+     *  (client/squads — squad_size > 1) instead of a single unit mesh.
+     *  The interpolator + entityMeta still track them (the squad adapter
+     *  reads their interpolated pose via getEntityPose), but tick() skips
+     *  emitting an instance so the sim-authoritative body isn't drawn on
+     *  top of its cosmetic soldiers. Populated by the worker adapter as
+     *  squad defs stream in (game-processor). */
+    private squadDefIds = new Set<number>();
     /** Map heightmap data for terrain re-projection of ground units.
      *  Entity Y comes from the server snapped to terrain on each sim
      *  frame, but state streams at ~10 Hz and we lerp between frames —
@@ -1180,6 +675,17 @@ export class EntityRenderer {
     // or "shape:{shape}:{team}" for fallbacks.
     private renderMeshes = new Map<string, Mesh>();
 
+    // Member-tier 3D model meshes for the squad fan-out (PLAN-metalstorm-impostors
+    // M4), keyed by "member:{defId}:{team}". A dedicated clone of a squad def's
+    // single body piece with its team material, handed to SquadRenderBackend to
+    // thin-instance its own close-range members. Kept OUT of `renderMeshes` on
+    // purpose: the render() loop hides every renderMeshes entry not active this
+    // frame, and squad defs are skipped there (line ~1878), so a member mesh
+    // stored in renderMeshes would be force-hidden every frame — clobbering the
+    // squad backend's thin instances. This map is disposed with the renderer but
+    // never touched by render().
+    private memberModelMeshes = new Map<string, Mesh>();
+
     // Unit materials, SHARED across all pieces that use the same texture set,
     // keyed by "{defId}:{team}:{materialKey}". A unit's pieces almost always
     // share one glTF material, so this collapses e.g. the 18-piece colossus
@@ -1188,6 +694,14 @@ export class EntityRenderer {
     // was needless GPU + memory pressure (and a leak: mesh.dispose() doesn't
     // free the material). Disposed in the model-template cleanup.
     private unitMaterials = new Map<string, Material>();
+
+    // Dedicated member-model materials (M5), keyed the same way as unitMaterials
+    // but SEPARATE so the DitherFadePlugin (screen-door LOD crossfade, reads a
+    // per-instance `ditherFade` attribute) never rides the shared full-unit
+    // material — full units set no `ditherFade` attribute, so a shared plugin
+    // would read fade=0 and discard them entirely. Same texture/team pipeline as the unit
+    // material otherwise, so a member reads identically to a full unit.
+    private memberMaterials = new Map<string, Material>();
 
     // --- Per-entity piece pose overrides ---
     // Populated by applyPieceState() from server-streamed piece transforms.
@@ -1200,6 +714,27 @@ export class EntityRenderer {
     // server piece-state override for that unit (it's a dev inspection
     // tool — the authored clip is exactly what's being judged).
     private clipPoses = new Map<number, ReadonlyMap<number, Matrix>>();
+
+    // --- Cosmetic turret-aim poses (DESIGN-MODEL-BUILDING §16c) ---
+    // Spring-euler per-piece poses pushed by TurretAimController for a
+    // native's turret/barrel. Same shape as `pieceOverrides` so both run
+    // through springToBabylonLocal identically. Merge precedence (see
+    // computePieceWorldMatrices): streamed 0x05 > aim > wheel > clip > rest.
+    private aimPoses = new Map<number, PieceOverrides>();
+    // --- Cosmetic wheel-spin poses (PLAN-metalstorm-train T6) ---
+    // Pushed by TrainPresentation for axle pieces. A SEPARATE map from
+    // aimPoses even though both are Spring-euler per-piece pose overrides:
+    // setAimPose/setWheelPose each REPLACE their whole per-unit map, so a
+    // train car with an engaged turret AND spinning axles needs its own
+    // channel — sharing aimPoses would have whichever system ticks last
+    // that frame silently blank the other's pieces. Piece indices never
+    // overlap (turret/barrel vs axleN), so precedence relative to aimPose
+    // doesn't matter for correctness.
+    private wheelPoses = new Map<number, PieceOverrides>();
+    // Units ever seen in a 0x05 piece-state snapshot — the sim owns their
+    // pieces, so the cosmetic aim controller declines them (ZK/BAR/future
+    // s4 sim aim). Read by game-processor's TurretAimDeps.simDrivesPieces.
+    private pieceStreamed = new Set<number>();
 
     // --- Ghost pose freeze for PREVLOS-only buildings ---
     // The server stops sending updates for buildings that have left LOS
@@ -1232,6 +767,14 @@ export class EntityRenderer {
      *  the setter itself. */
     private shadowGenerator: ShadowGenerator | null = null;
 
+    /** Billboard/impostor LOD tier renderer (PLAN-metalstorm-beta-units.md §2.1,
+     *  engine ask B1). Null until wired by the bootstrap — tick() falls back to
+     *  always-Full when unset (identical to pre-B1 behaviour). */
+    private impostorRenderer: ImpostorRenderer | null = null;
+    /** Model-viewer F8 panel LOD override (force-LOD dropdown). Null = no
+     *  override, per-def thresholds decide the tier normally. */
+    private forceLodTier: LodTier | null = null;
+
     constructor(scene: Scene) {
         this.scene = scene;
         this.placeholderRenderer = new PlaceholderRenderer(scene);
@@ -1251,6 +794,72 @@ export class EntityRenderer {
         this.presClock = clock;
     }
 
+    /** Wire the impostor/billboard LOD renderer (PLAN-metalstorm-beta-units.md
+     *  §2.1). Once set, tick() routes Impostor-tier entities to it instead of
+     *  the per-piece model path. */
+    setImpostorRenderer(renderer: ImpostorRenderer | null): void {
+        this.impostorRenderer = renderer;
+    }
+
+    /** Force every entity to a single LOD tier regardless of per-def
+     *  thresholds (model-viewer F8 panel's force-LOD dropdown). Pass null to
+     *  restore normal distance-based tier selection. */
+    setForceLodTier(tier: LodTier | null): void {
+        this.forceLodTier = tier;
+    }
+
+    /**
+     * Attach the LOS-reveal hook (PLAN-latency L1). Called with
+     * `(entityId, revealFrame, defId)` the first time an entity appears
+     * mid-game; the owner schedules `markRevealed(entityId)` on the
+     * presentation timeline at `revealFrame` and may use `defId` as the
+     * pre-roll warm-up key. Until a hook is set, reveals are immediate.
+     */
+    setRevealHook(hook: (id: number, frame: number, defId: number) => void): void {
+        this.onReveal = hook;
+    }
+
+    /**
+     * The cursor has reached an entity's reveal frame — let it render.
+     * No-op if the entity died or left view again before the cursor arrived
+     * (its meta is gone), which is why this looks the entity up rather than
+     * closing over its meta.
+     */
+    markRevealed(id: number): void {
+        const meta = this.entityMeta.get(id);
+        if (!meta) return;
+        meta.revealed = true;
+        this.revealStats.revealed++;
+        // Did the pre-roll finish in time? `modelTemplates.has` is true once
+        // the fetch resolved (or resolved to null for a model-less def, which
+        // counts as warm — there was nothing to wait for).
+        if (this.modelTemplates.has(meta.defId)) this.revealStats.warmOnReveal++;
+        else this.revealStats.coldOnReveal++;
+    }
+
+    /** PLAN-latency L1 gate readout. `avgLeadFrames` is how many frames early
+     *  a reveal reaches us — the amount of pop-in this gate removed, and the
+     *  pre-roll budget the warm-up gets to spend. */
+    getRevealStats(): Record<string, number> {
+        const s = this.revealStats;
+        return {
+            ...s,
+            avgLeadFrames: s.scheduled > 0 ? s.leadFramesSum / s.scheduled : 0,
+            warmPct: s.revealed > 0 ? (100 * s.warmOnReveal) / s.revealed : 0,
+        };
+    }
+
+    /**
+     * Pre-roll warm-up for a pending reveal: start this def's model/texture
+     * fetch now, `D` frames before the unit is due on screen. Idempotent — the
+     * scheduler re-runs it every frame the reveal sits in the future window,
+     * which is what makes it land even when the def itself is still streaming
+     * (`ensureModelLoaded` no-ops until the def is registered).
+     */
+    warmUpDef(defId: number): void {
+        this.ensureModelLoaded(defId);
+    }
+
     /**
      * Register the directional sun-shadow generator. Adds every existing
      * render mesh as a caster; new meshes auto-register in their create
@@ -1261,11 +870,10 @@ export class EntityRenderer {
         sun: DirectionalLight | null = null,
     ): void {
         this.shadowGenerator = csm;
-        // Cast: CascadedShadowGenerator extends ShadowGenerator. If a
-        // plain ShadowGenerator is passed, the team-color shader uses
-        // its `csmShadowMap` slot as a placeholder (the cascade matrix
-        // path still runs but UV-out-of-bounds returns 1.0 everywhere).
-        setActiveShadowGenerator(csm as CascadedShadowGenerator | null, sun);
+        // PBR unit materials consume the CSM through Babylon's stock light
+        // binding (nothing to wire here); only the hand-ported ZK material
+        // needs the generator + sun handed over for its manual uniform binds.
+        // Cast: CascadedShadowGenerator extends ShadowGenerator.
         setActiveZKShadowGenerator(csm as CascadedShadowGenerator | null, sun);
         if (!csm) return;
         for (const mesh of this.renderMeshes.values()) csm.addShadowCaster(mesh);
@@ -1352,6 +960,17 @@ export class EntityRenderer {
             this.defModelUrls.set(def.defId, def.modelUrl);
             if ((def.flags & UDF_FLAG_IS_BUILDING) !== 0) {
                 this.defIsBuilding.add(def.defId);
+            }
+
+            // PLAN-metalstorm-beta-units.md §2.1 / engine ask B1: hand the
+            // impostor renderer its per-def atlas + LOD thresholds as soon as
+            // they stream, so the first ensureModelLoaded/tick sighting of
+            // this def can already resolve to the Impostor tier.
+            if (this.impostorRenderer) {
+                if (def.impostor) this.impostorRenderer.registerAtlas(def.defId, def.impostor);
+                if (def.lodThresholds) {
+                    this.impostorRenderer.registerLodThresholds(def.defId, def.lodThresholds);
+                }
             }
 
             // Defs without a model file get their template slot pinned
@@ -1632,7 +1251,7 @@ export class EntityRenderer {
                     const mesh = (primitiveMesh ?? node) as Mesh;
                     // glTF material name of this piece, for per-piece texture
                     // binding on multi-material models (captured before the
-                    // material is replaced by our team-color shader).
+                    // material is replaced by our team-colour material).
                     const materialKey = mesh.material?.name;
                     // Detach from hierarchy, keep vertices in piece-local space
                     mesh.parent = null;
@@ -1995,61 +1614,7 @@ export class EntityRenderer {
             mesh = piece.mesh.clone(`unit_${defId}_t${team}_p${pieceIdx}_${piece.name}`);
             mesh.makeGeometryUnique();
 
-            const tmpl = this.modelTemplates.get(defId);
-            const teamColor = TEAM_COLORS[team % TEAM_COLORS.length];
-
-            // Always use the team-color shader so every unit gets team
-            // tinting + the same lighting/shadow pipeline regardless of
-            // whether the model ships a texture sidecar. Skipping the
-            // replacement (the previous `else if (!mesh.material)`
-            // branch) left units without a sidecar — e.g. ZK's
-            // `factoryveh` — keeping the PBR material from the glTF
-            // import and rendering broken.
-            const customParams = this.defInfos.get(defId)?.customParams;
-            // Bind this piece's own material on multi-material models
-            // (Warzone .pie units, whose pieces reference different texture
-            // pages); fall back to the model-wide default for single-
-            // material content and structural pieces.
-            //
-            // Read the piece's glTF material name LIVE from the template
-            // mesh: Babylon's glTF loader hasn't reliably assigned
-            // `mesh.material` yet at load-time capture (materialKey is often
-            // undefined there), but it's always set by the time a piece
-            // first renders here. `piece.mesh` keeps its imported material —
-            // getOrCreatePieceMesh clones the mesh and only reassigns the
-            // clone — so this stays the glTF material name across frames.
-            const materialKey = piece.mesh?.material?.name ?? piece.materialKey;
-            const pieceTextures = (materialKey
-                ? tmpl?.materialTextures.get(materialKey) : undefined)
-                ?? tmpl?.textures;
-
-            // Share ONE material across every piece that resolves to the same
-            // texture set (keyed by def/team/materialKey). Pieces of one unit
-            // overwhelmingly share a single glTF material, so this reuses one
-            // PBRMaterial instead of building an identical one per piece.
-            const matCacheKey = `${defId}:${team}:${materialKey ?? (pieceTextures ? '_default' : '_fallback')}`;
-            let mat = this.unitMaterials.get(matCacheKey);
-            if (!mat) {
-                const matName = `unit_${defId}_t${team}_${materialKey ?? 'mat'}`;
-                if (pieceTextures) {
-                    mat = createUnitMaterial(
-                        matName, pieceTextures, teamColor, tmpl?.modelHeight ?? 1,
-                        this.scene, customParams);
-                } else {
-                    // No texture sidecar — synthesise a white diffuse with
-                    // alpha=1 so the unit renders as a flat team-coloured
-                    // shape through the same shader as textured units.
-                    const fallbackDiffuse = getWhiteFallbackDiffuse(this.scene);
-                    mat = createUnitMaterial(
-                        matName,
-                        { diffuse: fallbackDiffuse, emissive: null, orm: null,
-                          teamMask: null, normal: null, invertTeamColor: false },
-                        teamColor, tmpl?.modelHeight ?? 1, this.scene, customParams,
-                    );
-                }
-                this.unitMaterials.set(matCacheKey, mat);
-            }
-            mesh.material = mat;
+            mesh.material = this.resolvePieceMaterial(defId, team, piece);
 
             mesh.isPickable = false;
             mesh.isVisible = false;
@@ -2061,6 +1626,128 @@ export class EntityRenderer {
             this.shadowGenerator?.addShadowCaster(mesh);
         }
         return mesh;
+    }
+
+    /**
+     * Resolve (and cache) the team-colour material for one model piece. Shared
+     * by the per-piece unit render path (getOrCreatePieceMesh) and the squad
+     * member-model path (getMemberModel), so a member mesh takes the exact same
+     * team tinting + lighting/shadow pipeline as a full unit.
+     *
+     * Always replaces the imported glTF material with our own team-colour
+     * material so every piece gets team tinting regardless of whether the model
+     * ships a texture sidecar (skipping the replacement left sidecar-less units
+     * — e.g. ZK's `factoryveh` — rendering with the broken imported PBR
+     * material). Binds the piece's own material on multi-material models, else
+     * the model-wide default; reads the glTF material name LIVE from the
+     * template mesh because Babylon's glTF loader often hasn't assigned
+     * `mesh.material` at load-time capture but always has by first render.
+     * Materials are shared across pieces resolving to the same texture set
+     * (keyed by def/team/materialKey) — one PBRMaterial instead of one per piece.
+     */
+    private resolvePieceMaterial(
+        defId: number, team: number, piece: PieceInfo, forMember = false,
+    ): Material {
+        const tmpl = this.modelTemplates.get(defId);
+        const teamColor = TEAM_COLORS[team % TEAM_COLORS.length];
+        const customParams = this.defInfos.get(defId)?.customParams;
+        const materialKey = piece.mesh?.material?.name ?? piece.materialKey;
+        const pieceTextures = (materialKey
+            ? tmpl?.materialTextures.get(materialKey) : undefined)
+            ?? tmpl?.textures;
+
+        // Member materials are cached separately (they carry DitherFadePlugin,
+        // which must never leak onto the shared full-unit material).
+        const cache = forMember ? this.memberMaterials : this.unitMaterials;
+        const matCacheKey = `${defId}:${team}:${materialKey ?? (pieceTextures ? '_default' : '_fallback')}`;
+        let mat = cache.get(matCacheKey);
+        if (!mat) {
+            const matName = `unit_${defId}_t${team}_${materialKey ?? 'mat'}`;
+            if (pieceTextures) {
+                mat = createUnitMaterial(
+                    matName, pieceTextures, teamColor, this.scene, customParams);
+            } else {
+                // No texture sidecar — synthesise a white diffuse and mark it
+                // syntheticFallback, which flips the team-colour plugin's
+                // syntheticAlbedo flag → full team tint, so the piece renders
+                // as a flat team-coloured shape rather than flat white.
+                const fallbackDiffuse = getWhiteFallbackDiffuse(this.scene);
+                mat = createUnitMaterial(
+                    matName,
+                    { diffuse: fallbackDiffuse, emissive: null, orm: null,
+                      teamMask: null, normal: null, invertTeamColor: false,
+                      syntheticFallback: true },
+                    teamColor, this.scene, customParams,
+                );
+            }
+            // Member material: attach the screen-door LOD crossfade plugin,
+            // reading a per-instance `ditherFade` attribute. A no-op at fade=1
+            // (the common case); the squad backend drives fade 1→0 only inside
+            // the model↔impostor transition band. Pattern polarity is the
+            // NON-inverted half — the sprite material takes the inverted half
+            // (createImpostorMaterial), so the two tiers interleave exactly
+            // rather than overlapping.
+            if (forMember) {
+                const fade = new DitherFadePlugin(mat);
+                fade.useAttribute = true;
+                fade.invertPattern = false;
+                fade.isEnabled = true;
+            }
+            cache.set(matCacheKey, mat);
+        }
+        return mat;
+    }
+
+    /**
+     * Member-tier 3D model source for the squad fan-out (PLAN-metalstorm-impostors
+     * M4). Ensures the def's model is loaded, then returns one thin-instance-ready
+     * render mesh PER GEOMETRY PIECE (team-coloured through the same material
+     * pipeline as full units) plus the transform data SquadRenderBackend composes
+     * each close-range member against. Returns `undefined` while the model is
+     * still loading or when the def has no model at all.
+     *
+     * Multi-piece bodies are supported: infantry are one static `body` piece by
+     * the M1 contract, but a squad of vehicles (`ms_tanks_s2` → `fable_tank`:
+     * hull / tracks_l / tracks_r / turret / barrel) is not, and gating this on a
+     * single piece stranded those defs on the proxy capsule. Each piece becomes
+     * its own thin-instance pool, so the cost is per PIECE per (defId, team) —
+     * not per member — and pieces are drawn in their rest pose (a member's
+     * turret does not aim; see MemberModel in squad-render-backend.ts).
+     *
+     * The returned meshes are NOT stored in `renderMeshes` (see memberModelMeshes)
+     * so the entity render loop never fights the squad backend for them. Each
+     * (defId, team, piece) yields one shared mesh; the backend owns its
+     * thin-instance matrix buffer.
+     */
+    getMemberModel(defId: number, team: number): MemberModel | undefined {
+        this.ensureModelLoaded(defId);
+        const tmpl = this.modelTemplates.get(defId);
+        if (!tmpl) return undefined;                       // not loaded yet / no model
+        const geometry = tmpl.pieces.filter((p) => p.mesh != null);
+        if (geometry.length === 0) return undefined;       // no drawable geometry
+
+        const pieces = geometry.map((piece, i) => {
+            const key = `member:${defId}:${team}:${i}`;
+            let mesh = this.memberModelMeshes.get(key);
+            if (!mesh) {
+                mesh = piece.mesh.clone(`member_${defId}_t${team}_p${i}_${piece.name}`);
+                mesh.makeGeometryUnique();
+                mesh.material = this.resolvePieceMaterial(defId, team, piece, true);
+                mesh.isPickable = false;
+                mesh.isVisible = false;                    // shown once instances populate
+                mesh.thinInstanceEnablePicking = false;
+                mesh.alwaysSelectAsActiveMesh = true;
+                mesh.renderingGroupId = 2;
+                mesh.receiveShadows = true;
+                this.memberModelMeshes.set(key, mesh);
+                // Cast shadows like full units — one caster mesh with N thin
+                // instances (not N casters), so the cost is one extra depth-pass
+                // draw per (defId, team, piece), which the M5 perf pass re-checks.
+                this.shadowGenerator?.addShadowCaster(mesh);
+            }
+            return { mesh, restWorld: piece.restWorldMatrix };
+        });
+        return { pieces, yOffset: tmpl.yOffset, height: tmpl.modelHeight };
     }
 
     private getFallbackMesh(defId: number, team: number): Mesh {
@@ -2187,17 +1874,29 @@ export class EntityRenderer {
         tmpl: ModelTemplate,
         overrides: PieceOverrides | null,
         clipPose?: ReadonlyMap<number, Matrix> | null,
+        aimPose?: PieceOverrides | null,
+        wheelPose?: PieceOverrides | null,
     ): Matrix[] {
         const out = new Array<Matrix>(tmpl.pieces.length);
         for (let i = 0; i < tmpl.pieces.length; i++) {
             const piece = tmpl.pieces[i];
-            // Dev clip-player pose (already a Babylon parent-relative
-            // local matrix) wins over the server's Spring-space override.
-            let local = clipPose?.get(i);
-            if (!local) {
-                const ov = overrides?.get(i);
-                local = ov ? this.springToBabylonLocal(ov) : piece.localMatrix;
-            }
+            // §16c merge policy, highest precedence first:
+            //   streamed 0x05 (overrides) > aim controller > wheel spin >
+            //   authored clip > rest pose. aimPose/wheelPose piece indices
+            //   never overlap (turret/barrel vs axleN), so their relative
+            //   order doesn't matter in practice.
+            // 0x05, aim and wheel are Spring-euler (springToBabylonLocal);
+            // the clip pose is already a Babylon parent-relative local matrix.
+            let local: Matrix;
+            const serverOv = overrides?.get(i);
+            const aimOv = aimPose?.get(i);
+            const wheelOv = wheelPose?.get(i);
+            const clip = clipPose?.get(i);
+            if (serverOv) local = this.springToBabylonLocal(serverOv);
+            else if (aimOv) local = this.springToBabylonLocal(aimOv);
+            else if (wheelOv) local = this.springToBabylonLocal(wheelOv);
+            else if (clip) local = clip;
+            else local = piece.localMatrix;
             out[i] = piece.parentIndex >= 0
                 ? local.multiply(out[piece.parentIndex])
                 : local.clone();
@@ -2245,6 +1944,11 @@ export class EntityRenderer {
         const seen = new Set<number>();
         for (const u of snapshot.units) {
             seen.add(u.unitId);
+            // The sim owns this unit's pieces — latch it out of cosmetic aim
+            // (§16c) for the rest of its life. Latched, not per-snapshot,
+            // because a sim turret slewing back to rest drops out of the
+            // stream and must not hand control back to the aim controller.
+            this.pieceStreamed.add(u.unitId);
             let map = this.pieceOverrides.get(u.unitId);
             if (!map) {
                 map = new Map();
@@ -2277,6 +1981,11 @@ export class EntityRenderer {
         if (!entityIds) return;
 
         const frame = snapshot.baseFrame;
+        // PLAN-latency L1: latch the join frame. Entities carried by the first
+        // snapshot are the world as it already stood when we connected, so
+        // they bypass the reveal gate below (otherwise the map would sit empty
+        // for D frames at join).
+        if (this.firstStateFrame === null) this.firstStateFrame = frame;
         // Quanta → radians: server packs angles as i8 with 127 buckets
         // covering [-π/2, π/2]. Pre-compute the inverse scale once.
         const angleScale = 1.5707963267948966 / 127;
@@ -2316,14 +2025,34 @@ export class EntityRenderer {
             let meta = this.entityMeta.get(id);
             const isNew = !meta;
             if (!meta) {
-                meta = { defId: 0, team: 0, healthScale: 1.0, buildProgress: 1.0, losState: 0x0F, alwaysVisible: false };
+                meta = { defId: 0, team: 0, healthScale: 1.0, buildProgress: 1.0, losState: 0x0F, alwaysVisible: false, lastStateFrame: 0, revealed: true };
                 this.entityMeta.set(id, meta);
             }
+            // Monotonic — a reordered (late) snapshot must not roll it back.
+            if (frame > meta.lastStateFrame) meta.lastStateFrame = frame;
             if (defIds) meta.defId = defIds[i];
             if (teams) meta.team = teams[i];
             if (stateBits) meta.alwaysVisible = (stateBits[i] & STATE_BIT_ALWAYS_VISIBLE) !== 0;
             if (health) meta.healthScale = 0.3 + (health[i] / 65535) * 0.7;
             if (buildProgress) meta.buildProgress = buildProgress[i] / 255;
+
+            // PLAN-latency L1 — LOS reveal on the presentation timeline.
+            // This sample arrived at the leading edge E, but the cursor is at
+            // P = E − D, so the sim frame this unit became visible on is still
+            // ~D frames in our future. Hold it out of the render until the
+            // cursor gets there (`markRevealed`), and spend that lead time
+            // fetching its model so it can appear as itself rather than as the
+            // procedural stand-in. Reveals are only deferred once a hook is
+            // wired *and* this isn't the join batch.
+            if (isNew && this.onReveal && frame > this.firstStateFrame) {
+                meta.revealed = false;
+                this.ensureModelLoaded(meta.defId);
+                this.onReveal(id, frame, meta.defId);
+                const lead = this.presClock?.isAnchored ? frame - this.presClock.P : 0;
+                this.revealStats.scheduled++;
+                this.revealStats.leadFramesSum += lead;
+                if (lead > this.revealStats.leadFramesMax) this.revealStats.leadFramesMax = lead;
+            }
 
             const prevLos = isNew ? newLos : meta.losState;
             meta.losState = newLos;
@@ -2397,6 +2126,17 @@ export class EntityRenderer {
         const groups = new Map<string, { mesh: Mesh; matrices: number[]; count: number }>();
 
         for (const [id, meta] of this.entityMeta) {
+            // Squad-fan-out defs (client/squads) draw their cosmetic members
+            // via the squad adapter, not a single unit mesh here. Skip so the
+            // sim body isn't rendered under the soldiers. (Still interpolated
+            // + tracked above — the adapter samples getEntityPose(id).)
+            if (this.squadDefIds.size && this.squadDefIds.has(meta.defId)) continue;
+            // PLAN-latency L1: a mid-game reveal is held out of the render
+            // until the cursor reaches the frame it happened on. Skipping
+            // before the LOS/ghost/blip buckets keeps it absolute — an
+            // un-revealed entity draws in no form, not even as a radar dot.
+            if (!meta.revealed) continue;
+
             // LOS bucket: own units & permissive sessions read 0x0F (all
             // bits set) so the INLOS check passes naturally. Enemy units
             // bucket into in-LOS / radar-blip / ghost / hidden.
@@ -2454,6 +2194,34 @@ export class EntityRenderer {
                     pitch: ghost.pitch, roll: ghost.roll }
                 : this.interpolator.getInterpolated(id, cursorFrame);
             if (!lerped) continue;
+
+            // PLAN-metalstorm-beta-units.md §2.1 / engine ask B1: LOD tier
+            // decision. Icon tier isn't rendered here at all (strategic map
+            // symbol — PLAN-macro-map.md owns that); Impostor tier routes to
+            // the billboard renderer instead of the per-piece model path
+            // below. No impostorRenderer wired, or no thresholds registered
+            // for this def, both fall through to Full (pre-B1 behaviour).
+            // TODO(beta-units-crossfade): blend both tiers over 0.3s at the
+            // model↔impostor boundary instead of a hard cut (deferred, §7).
+            if (this.impostorRenderer) {
+                const camPos = this.scene.activeCamera?.position
+                    ?? new Vector3(lerped.x, lerped.y, lerped.z);
+                const tier = this.impostorRenderer.determineLodTier(
+                    meta.defId,
+                    new Vector3(lerped.x, lerped.y, lerped.z),
+                    camPos,
+                    this.forceLodTier ?? undefined,
+                );
+                if (tier === LodTier.Icon) continue;
+                if (tier === LodTier.Impostor) {
+                    const groundYI = this.sampleHeight(lerped.x, lerped.z);
+                    const yI = Number.isNaN(groundYI) ? lerped.y : Math.max(lerped.y, groundYI);
+                    const rotationI = (lerped.heading / 65535) * Math.PI * 2;
+                    this.impostorRenderer.addInstance(
+                        meta.defId, meta.team, lerped.x, yI, lerped.z, rotationI);
+                    continue;
+                }
+            }
 
             // Lazy-load: trigger the glb + texture fetch the first
             // time we see an entity of this def. Until the load
@@ -2513,8 +2281,10 @@ export class EntityRenderer {
                 // chain walk in the static case.
                 const overrides = this.pieceOverrides.get(id) ?? null;
                 const clipPose = this.clipPoses.get(id) ?? null;
-                const pieceWorld = (overrides || clipPose)
-                    ? this.computePieceWorldMatrices(tmpl, overrides, clipPose)
+                const aimPose = this.aimPoses.get(id) ?? null;
+                const wheelPose = this.wheelPoses.get(id) ?? null;
+                const pieceWorld = (overrides || clipPose || aimPose || wheelPose)
+                    ? this.computePieceWorldMatrices(tmpl, overrides, clipPose, aimPose, wheelPose)
                     : null;
 
                 // Push one instance matrix per piece with geometry
@@ -2637,8 +2407,20 @@ export class EntityRenderer {
         return this.entityMeta.get(id);
     }
 
-    getEntityPosition(id: number): { x: number; y: number; z: number } | null {
-        return this.interpolator.getInterpolated(id, this.cursorFrame);
+    /**
+     * Interpolated pose of an entity, by default at the presentation cursor.
+     *
+     * `atFrame` asks for a *different* frame off the same sample buffer.
+     * PLAN-latency L2.3 uses it to read a shot's target where it is expected to
+     * be on the shot's `impactFrame` — normally a frame the interpolator
+     * already holds real samples for, because entity state streams at the
+     * leading edge `E` while the cursor presents `D` frames behind it. Beyond
+     * the newest sample `getInterpolated` falls back to its own bounded
+     * extrapolate-then-hold, so the caller never has to special-case it.
+     */
+    getEntityPosition(id: number, atFrame?: number): { x: number; y: number; z: number } | null {
+        return this.interpolator.getInterpolated(
+            id, atFrame !== undefined ? atFrame : this.cursorFrame);
     }
 
     /**
@@ -2794,8 +2576,10 @@ export class EntityRenderer {
 
         const overrides = this.pieceOverrides.get(id) ?? null;
         const clipPose = this.clipPoses.get(id) ?? null;
-        const modelWorld = (overrides || clipPose)
-            ? this.computePieceWorldMatrices(tmpl, overrides, clipPose)[pieceIdx]
+        const aimPose = this.aimPoses.get(id) ?? null;
+        const wheelPose = this.wheelPoses.get(id) ?? null;
+        const modelWorld = (overrides || clipPose || aimPose || wheelPose)
+            ? this.computePieceWorldMatrices(tmpl, overrides, clipPose, aimPose, wheelPose)[pieceIdx]
             : tmpl.pieces[pieceIdx].restWorldMatrix;
 
         const rotation = (lerped.heading / 65535) * Math.PI * 2;
@@ -2820,6 +2604,41 @@ export class EntityRenderer {
         const tmpl = this.modelTemplates.get(meta.defId);
         if (tmpl === undefined) return null; // still loading
         return tmpl ? tmpl.clips.map((c) => c.name) : [];
+    }
+
+    /** Def id of a live entity, or undefined once it's unknown (never
+     *  streamed, died, evicted). Lets the clip auto-policy reach the def's
+     *  speed / customParams without a second entity table. */
+    getEntityDefId(id: number): number | undefined {
+        return this.entityMeta.get(id)?.defId;
+    }
+
+    /** Resolve a piece's index by name (glb node name, e.g. "Turret") for
+     *  an entity's model — the lookup a `pieceSpin` FX binding
+     *  (fx-bindings.ts, PLAN-fx-offload X4) needs before it can call
+     *  setClipPose(). Null when the entity/template is unknown or no piece
+     *  with that name exists. */
+    getPieceIndex(id: number, pieceName: string): number | null {
+        const meta = this.entityMeta.get(id);
+        if (!meta) return null;
+        const tmpl = this.modelTemplates.get(meta.defId);
+        if (!tmpl) return null;
+        const idx = tmpl.pieces.findIndex((p) => p.name === pieceName);
+        return idx >= 0 ? idx : null;
+    }
+
+    /** Rest-pose parent-relative local matrix for every piece in an
+     *  entity's model, indexed like setClipPose()'s pose map expects. A
+     *  `pieceSpin` binding composes its own spin rotation on top of the
+     *  relevant entry rather than starting from identity, so a spinning
+     *  wheel keeps its authored offset from the hull instead of snapping
+     *  to the origin. Null when the entity/template is unknown. */
+    getRestLocalMatrices(id: number): Matrix[] | null {
+        const meta = this.entityMeta.get(id);
+        if (!meta) return null;
+        const tmpl = this.modelTemplates.get(meta.defId);
+        if (!tmpl) return null;
+        return tmpl.pieces.map((p) => p.localMatrix);
     }
 
     /** Resolve one authored clip plus the rest-pose local matrices the
@@ -2850,11 +2669,151 @@ export class EntityRenderer {
         return true;
     }
 
+    /** Cosmetic turret-aim pose override (DESIGN-MODEL-BUILDING §16c): a
+     *  Spring-euler per-piece pose for the unit's turret/barrel, sitting
+     *  below the server's 0x05 stream and above the authored clip in the
+     *  per-piece merge. Pass null to clear. Returns false for an unknown
+     *  unit so TurretAimController can drop it. */
+    setAimPose(id: number, pose: ReadonlyMap<number, {
+        px: number; py: number; pz: number;
+        rx: number; ry: number; rz: number;
+    }> | null): boolean {
+        if (pose === null) {
+            this.aimPoses.delete(id);
+            return true;
+        }
+        if (!this.entityMeta.has(id)) {
+            this.aimPoses.delete(id);
+            return false;
+        }
+        this.aimPoses.set(id, pose as PieceOverrides);
+        return true;
+    }
+
+    /** Cosmetic wheel-spin pose override (PLAN-metalstorm-train T6): a
+     *  Spring-euler per-piece pose for a train car's axle pieces. Separate
+     *  channel from setAimPose — see the `wheelPoses` field comment for why
+     *  sharing it would clobber a simultaneously-engaged turret. Pass null
+     *  to clear. Returns false for an unknown unit. */
+    setWheelPose(id: number, pose: ReadonlyMap<number, {
+        px: number; py: number; pz: number;
+        rx: number; ry: number; rz: number;
+    }> | null): boolean {
+        if (pose === null) {
+            this.wheelPoses.delete(id);
+            return true;
+        }
+        if (!this.entityMeta.has(id)) {
+            this.wheelPoses.delete(id);
+            return false;
+        }
+        this.wheelPoses.set(id, pose as PieceOverrides);
+        return true;
+    }
+
+    /** Live interpolated pose (world position + wire heading u16) for a
+     *  unit, or null if it has no held position. Backs TurretAimController's
+     *  unit-pose + target-pose sampling. */
+    getEntityPose(id: number): { x: number; y: number; z: number; heading: number } | null {
+        const p = this.interpolator.getInterpolated(id, this.cursorFrame);
+        return p ? { x: p.x, y: p.y, z: p.z, heading: p.heading } : null;
+    }
+
+    /** Register a defId as a squad-fan-out def: its entities keep being
+     *  interpolated + tracked but stop drawing a single unit mesh (the
+     *  Metalstorm squad adapter renders their members instead). Idempotent. */
+    markSquadDef(defId: number): void {
+        this.squadDefIds.add(defId);
+    }
+
+    /** True if `defId` renders via the squad fan-out (see markSquadDef). */
+    isSquadDef(defId: number): boolean {
+        return this.squadDefIds.has(defId);
+    }
+
+    /** Team colour for the squad adapter's cosmetic member material —
+     *  same palette the unit meshes use, so soldiers match their vehicles. */
+    getTeamColor(team: number): Color3 {
+        return TEAM_COLORS[team % TEAM_COLORS.length];
+    }
+
+    /** True once the sim has streamed a 0x05 piece-state snapshot for this
+     *  unit — the sim owns its pieces, so the cosmetic aim controller
+     *  declines it (ZK/BAR turrets, future s4 sim aim). */
+    hasPieceStream(id: number): boolean {
+        return this.pieceStreamed.has(id);
+    }
+
+    /**
+     * Resolve the turret (+ optional barrel) pieces of a unit's model for the
+     * cosmetic aim controller. Returns null unless the model has a piece
+     * named `turret` (case-insensitive). The barrel is the first descendant
+     * of the turret whose name reads as a barrel/sleeve/gun. Offsets are the
+     * pieces' rest translations in Spring space (localMatrix m[12..14]).
+     */
+    /** Turret (+ optional barrel) pieces for a unit, one entry per weapon
+     *  slot (`turret`, `turret2`, …) — see matchAimSlots for the naming
+     *  convention. null when the model has no turret piece at all. Backs
+     *  TurretAimController's cosmetic aim (DESIGN-MODEL-BUILDING §16c/§19). */
+    getAimPieces(id: number): UnitAimPieces | null {
+        const meta = this.entityMeta.get(id);
+        if (!meta) return null;
+        const tmpl = this.modelTemplates.get(meta.defId);
+        if (!tmpl) return null;
+        const pieces = tmpl.pieces;
+        const matches = matchAimSlots(pieces);
+        if (matches.length === 0) return null;
+        const offOf = (i: number): AimPiece => {
+            const m = pieces[i].localMatrix.m;
+            return { idx: i, px: m[12], py: m[13], pz: m[14] };
+        };
+        return {
+            slots: matches.map((m) => ({
+                slot: m.slot,
+                turret: offOf(m.turretIdx),
+                barrel: m.barrelIdx !== undefined ? offOf(m.barrelIdx) : undefined,
+            })),
+        };
+    }
+
     removeEntity(id: number): void {
         this.entityMeta.delete(id);
         this.interpolator.remove(id);
         this.pieceOverrides.delete(id);
         this.clipPoses.delete(id);
+        this.aimPoses.delete(id);
+        this.wheelPoses.delete(id);
+        this.pieceStreamed.delete(id);
+    }
+
+    /**
+     * PLAN-quickstart.md §3.2 (Part B — resync): flush all *dynamic* per-entity
+     * state while keeping every *static* asset the re-entry would otherwise pay
+     * to reload — loaded models (`modelTemplates`), their textures, `defInfos`,
+     * team materials and the thin-instance meshes themselves.
+     *
+     * After a detach the game connection is re-opened against a fresh
+     * server-side ClientSession, which delivers a full (non-delta) snapshot.
+     * That snapshot reconciles the entity set on its own via `update()`, but the
+     * interpolator carries a stale timestamp history across the detach gap and
+     * the thin-instance buffers still hold the pre-detach unit poses. Zeroing
+     * the derived per-entity state here means the first post-reconnect snapshot
+     * repacks instances cleanly from an empty base — no ghosts, no interpolation
+     * jump — the documented-correct behaviour for a late/re-join.
+     */
+    resetForResync(): void {
+        this.entityMeta.clear();
+        this.interpolator.clear();
+        this.ghostPoses.clear();
+        this.pieceOverrides.clear();
+        this.clipPoses.clear();
+        for (const mesh of this.radarBlipMeshes.values()) mesh.thinInstanceCount = 0;
+        this.selectedIds = [];
+        // Thin-instance buffers are derived from entityMeta and repacked every
+        // update(); zero their live counts so nothing renders from the parked
+        // session before the first post-reconnect snapshot rebuilds them.
+        for (const mesh of this.renderMeshes.values()) mesh.thinInstanceCount = 0;
+        if (this.selectionMesh) this.selectionMesh.thinInstanceCount = 0;
     }
 
     /**
@@ -3051,21 +3010,40 @@ export class EntityRenderer {
         this.placeholderRenderer.dispose();
         for (const mesh of this.renderMeshes.values()) mesh.dispose();
         this.renderMeshes.clear();
+        // Member-tier meshes (M4) share the unit material cache (freed below)
+        // but own their cloned geometry — dispose them here since the render
+        // loop never tracks them. SquadRenderBackend borrows these and must
+        // NOT dispose them itself.
+        for (const mesh of this.memberModelMeshes.values()) mesh.dispose();
+        this.memberModelMeshes.clear();
         // Shared unit materials are owned here (mesh.dispose() doesn't free
         // them), so dispose them explicitly. NOT their textures — those are
         // the shared template textures, disposed by the template loop below.
+        // (The 1×1 white fallback diffuse is per-scene, not per-template —
+        // it dies with the scene via WHITE_TEX_CACHE's WeakMap.)
         for (const mat of this.unitMaterials.values()) mat.dispose();
         this.unitMaterials.clear();
+        for (const mat of this.memberMaterials.values()) mat.dispose();
+        this.memberMaterials.clear();
         for (const tmpl of this.modelTemplates.values()) {
             if (tmpl) {
                 for (const p of tmpl.pieces) {
                     if (p.mesh) p.mesh.dispose();
                 }
-                if (tmpl.textures) {
-                    tmpl.textures.diffuse.dispose();
-                    tmpl.textures.emissive?.dispose();
-                    tmpl.textures.orm?.dispose();
-                    tmpl.textures.teamMask?.dispose();
+                // Dispose every texture the template loaded: the model-wide
+                // default set AND the per-material sets (multi-material
+                // models). The two can share UnitTextures objects (deduped
+                // by diffuse URI at load), so collect unique sets first —
+                // Texture.dispose() is idempotent, but no point relying on it.
+                const texSets = new Set<UnitTextures>();
+                if (tmpl.textures) texSets.add(tmpl.textures);
+                for (const t of tmpl.materialTextures.values()) texSets.add(t);
+                for (const t of texSets) {
+                    t.diffuse.dispose();
+                    t.emissive?.dispose();
+                    t.orm?.dispose();
+                    t.teamMask?.dispose();
+                    t.normal?.dispose();
                 }
                 for (const proto of tmpl.ghostPrototypes) {
                     if (proto) proto.dispose();
@@ -3082,9 +3060,13 @@ export class EntityRenderer {
         }
         this.selectedIds = [];
         this.entityMeta.clear();
+        this.firstStateFrame = null;
         this.ghostPoses.clear();
         this.pieceOverrides.clear();
         this.clipPoses.clear();
+        this.aimPoses.clear();
+        this.wheelPoses.clear();
+        this.pieceStreamed.clear();
         this.radarBlipMeshes.clear();
         this.defIsBuilding.clear();
         this.interpolator.clear();

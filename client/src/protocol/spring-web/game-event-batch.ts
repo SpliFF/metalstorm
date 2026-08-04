@@ -5,13 +5,18 @@
 import * as flatbuffers from 'flatbuffers';
 
 import { CombatEvent, CombatEventT } from '../spring-web/combat-event.js';
+import { DamageFieldEvent, DamageFieldEventT } from '../spring-web/damage-field-event.js';
+import { FireOutcomeEvent, FireOutcomeEventT } from '../spring-web/fire-outcome-event.js';
 import { GameEvent, GameEventT } from '../spring-web/game-event.js';
 import { MusicEvent, MusicEventT } from '../spring-web/music-event.js';
+import { OutcomeKnownEvent, OutcomeKnownEventT } from '../spring-web/outcome-known-event.js';
 import { ProjectileFiredEvent, ProjectileFiredEventT } from '../spring-web/projectile-fired-event.js';
 import { ProjectileImpactEvent, ProjectileImpactEventT } from '../spring-web/projectile-impact-event.js';
 import { ProjectileTrajectoryEvent, ProjectileTrajectoryEventT } from '../spring-web/projectile-trajectory-event.js';
 import { SeismicPing, SeismicPingT } from '../spring-web/seismic-ping.js';
 import { SoundEvent, SoundEventT } from '../spring-web/sound-event.js';
+import { TrajectoryKeyframe, TrajectoryKeyframeT } from '../spring-web/trajectory-keyframe.js';
+import { VolleyOutcome, VolleyOutcomeT } from '../spring-web/volley-outcome.js';
 
 
 export class GameEventBatch implements flatbuffers.IUnpackableObject<GameEventBatchT> {
@@ -135,8 +140,99 @@ musicEventsLength():number {
   return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
 }
 
+/**
+ * Metalstorm statistical-combat per-volley outcomes (Model 1). Already
+ * visibility-filtered for this session. Empty for ported games (ZK/BAR
+ * use the projectile path); populated only when statistical weapons fire.
+ * See VolleyOutcome. Appended last for FlatBuffers field-id stability.
+ */
+volleyOutcomes(index: number, obj?:VolleyOutcome):VolleyOutcome|null {
+  const offset = this.bb!.__offset(this.bb_pos, 22);
+  return offset ? (obj || new VolleyOutcome()).__init(this.bb!.__indirect(this.bb!.__vector(this.bb_pos + offset) + index * 4), this.bb!) : null;
+}
+
+volleyOutcomesLength():number {
+  const offset = this.bb!.__offset(this.bb_pos, 22);
+  return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
+}
+
+/**
+ * Metalstorm damage-field lifecycle events (Model 3, C6). Empty for
+ * ported games; populated only when a game creates/expires a barrage
+ * field. Appended last for FlatBuffers field-id stability. See
+ * DamageFieldEvent.
+ */
+damageFields(index: number, obj?:DamageFieldEvent):DamageFieldEvent|null {
+  const offset = this.bb!.__offset(this.bb_pos, 24);
+  return offset ? (obj || new DamageFieldEvent()).__init(this.bb!.__indirect(this.bb!.__vector(this.bb_pos + offset) + index * 4), this.bb!) : null;
+}
+
+damageFieldsLength():number {
+  const offset = this.bb!.__offset(this.bb_pos, 24);
+  return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
+}
+
+/**
+ * Tier-C fire outcomes (PLAN-latency L2.1). A weaponDef classified
+ * FX_TIER_COSMETIC emits exactly one of these per shot and NO
+ * fired/trajectory/impact events — the two streams are disjoint by
+ * weaponDef, never both for the same shot.
+ *
+ * Appended last on purpose: FlatBuffers assigns vtable slots in
+ * declaration order, so inserting this above `sounds` would have
+ * renumbered three existing fields and silently broken any client
+ * built against the old schema. Additive means "at the end".
+ */
+fireOutcomes(index: number, obj?:FireOutcomeEvent):FireOutcomeEvent|null {
+  const offset = this.bb!.__offset(this.bb_pos, 26);
+  return offset ? (obj || new FireOutcomeEvent()).__init(this.bb!.__indirect(this.bb!.__vector(this.bb_pos + offset) + index * 4), this.bb!) : null;
+}
+
+fireOutcomesLength():number {
+  const offset = this.bb!.__offset(this.bb_pos, 26);
+  return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
+}
+
+/**
+ * Tier-S trajectory keyframes (PLAN-latency L3). Spline knots for
+ * projectiles that DO exist in the sim, as opposed to `fire_outcomes`
+ * above which describes shots that never did.
+ *
+ * While `LatencyTierSKeyframes` is off these are empty and
+ * `projectile_trajectories` carries the old rewrite-and-integrate
+ * stream; while it is on the two swap over. They are never both
+ * populated for the same projectile — see TrajectoryKeyframes.h.
+ *
+ * Appended at the end for the same vtable reason as `fire_outcomes`.
+ */
+trajectoryKeyframes(index: number, obj?:TrajectoryKeyframe):TrajectoryKeyframe|null {
+  const offset = this.bb!.__offset(this.bb_pos, 28);
+  return offset ? (obj || new TrajectoryKeyframe()).__init(this.bb!.__indirect(this.bb!.__vector(this.bb_pos + offset) + index * 4), this.bb!) : null;
+}
+
+trajectoryKeyframesLength():number {
+  const offset = this.bb!.__offset(this.bb_pos, 28);
+  return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
+}
+
+/**
+ * Frame-stamped outcomes for Tier-S projectiles (PLAN-latency L3).
+ * Rides alongside `projectile_impacts` rather than replacing it: the
+ * impact event still drives the non-latency consumers (sound, ghost
+ * cleanup), this one drives the L1-scheduled visual.
+ */
+outcomesKnown(index: number, obj?:OutcomeKnownEvent):OutcomeKnownEvent|null {
+  const offset = this.bb!.__offset(this.bb_pos, 30);
+  return offset ? (obj || new OutcomeKnownEvent()).__init(this.bb!.__indirect(this.bb!.__vector(this.bb_pos + offset) + index * 4), this.bb!) : null;
+}
+
+outcomesKnownLength():number {
+  const offset = this.bb!.__offset(this.bb_pos, 30);
+  return offset ? this.bb!.__vector_len(this.bb_pos + offset) : 0;
+}
+
 static startGameEventBatch(builder:flatbuffers.Builder) {
-  builder.startObject(9);
+  builder.startObject(14);
 }
 
 static addFrame(builder:flatbuffers.Builder, frame:number) {
@@ -271,12 +367,92 @@ static startMusicEventsVector(builder:flatbuffers.Builder, numElems:number) {
   builder.startVector(4, numElems, 4);
 }
 
+static addVolleyOutcomes(builder:flatbuffers.Builder, volleyOutcomesOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(9, volleyOutcomesOffset, 0);
+}
+
+static createVolleyOutcomesVector(builder:flatbuffers.Builder, data:flatbuffers.Offset[]):flatbuffers.Offset {
+  builder.startVector(4, data.length, 4);
+  for (let i = data.length - 1; i >= 0; i--) {
+    builder.addOffset(data[i]!);
+  }
+  return builder.endVector();
+}
+
+static startVolleyOutcomesVector(builder:flatbuffers.Builder, numElems:number) {
+  builder.startVector(4, numElems, 4);
+}
+
+static addDamageFields(builder:flatbuffers.Builder, damageFieldsOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(10, damageFieldsOffset, 0);
+}
+
+static createDamageFieldsVector(builder:flatbuffers.Builder, data:flatbuffers.Offset[]):flatbuffers.Offset {
+  builder.startVector(4, data.length, 4);
+  for (let i = data.length - 1; i >= 0; i--) {
+    builder.addOffset(data[i]!);
+  }
+  return builder.endVector();
+}
+
+static startDamageFieldsVector(builder:flatbuffers.Builder, numElems:number) {
+  builder.startVector(4, numElems, 4);
+}
+
+static addFireOutcomes(builder:flatbuffers.Builder, fireOutcomesOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(11, fireOutcomesOffset, 0);
+}
+
+static createFireOutcomesVector(builder:flatbuffers.Builder, data:flatbuffers.Offset[]):flatbuffers.Offset {
+  builder.startVector(4, data.length, 4);
+  for (let i = data.length - 1; i >= 0; i--) {
+    builder.addOffset(data[i]!);
+  }
+  return builder.endVector();
+}
+
+static startFireOutcomesVector(builder:flatbuffers.Builder, numElems:number) {
+  builder.startVector(4, numElems, 4);
+}
+
+static addTrajectoryKeyframes(builder:flatbuffers.Builder, trajectoryKeyframesOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(12, trajectoryKeyframesOffset, 0);
+}
+
+static createTrajectoryKeyframesVector(builder:flatbuffers.Builder, data:flatbuffers.Offset[]):flatbuffers.Offset {
+  builder.startVector(4, data.length, 4);
+  for (let i = data.length - 1; i >= 0; i--) {
+    builder.addOffset(data[i]!);
+  }
+  return builder.endVector();
+}
+
+static startTrajectoryKeyframesVector(builder:flatbuffers.Builder, numElems:number) {
+  builder.startVector(4, numElems, 4);
+}
+
+static addOutcomesKnown(builder:flatbuffers.Builder, outcomesKnownOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(13, outcomesKnownOffset, 0);
+}
+
+static createOutcomesKnownVector(builder:flatbuffers.Builder, data:flatbuffers.Offset[]):flatbuffers.Offset {
+  builder.startVector(4, data.length, 4);
+  for (let i = data.length - 1; i >= 0; i--) {
+    builder.addOffset(data[i]!);
+  }
+  return builder.endVector();
+}
+
+static startOutcomesKnownVector(builder:flatbuffers.Builder, numElems:number) {
+  builder.startVector(4, numElems, 4);
+}
+
 static endGameEventBatch(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
 }
 
-static createGameEventBatch(builder:flatbuffers.Builder, frame:number, eventsOffset:flatbuffers.Offset, combatEventsOffset:flatbuffers.Offset, projectileFiredOffset:flatbuffers.Offset, projectileImpactsOffset:flatbuffers.Offset, projectileTrajectoriesOffset:flatbuffers.Offset, soundsOffset:flatbuffers.Offset, seismicPingsOffset:flatbuffers.Offset, musicEventsOffset:flatbuffers.Offset):flatbuffers.Offset {
+static createGameEventBatch(builder:flatbuffers.Builder, frame:number, eventsOffset:flatbuffers.Offset, combatEventsOffset:flatbuffers.Offset, projectileFiredOffset:flatbuffers.Offset, projectileImpactsOffset:flatbuffers.Offset, projectileTrajectoriesOffset:flatbuffers.Offset, soundsOffset:flatbuffers.Offset, seismicPingsOffset:flatbuffers.Offset, musicEventsOffset:flatbuffers.Offset, volleyOutcomesOffset:flatbuffers.Offset, damageFieldsOffset:flatbuffers.Offset, fireOutcomesOffset:flatbuffers.Offset, trajectoryKeyframesOffset:flatbuffers.Offset, outcomesKnownOffset:flatbuffers.Offset):flatbuffers.Offset {
   GameEventBatch.startGameEventBatch(builder);
   GameEventBatch.addFrame(builder, frame);
   GameEventBatch.addEvents(builder, eventsOffset);
@@ -287,6 +463,11 @@ static createGameEventBatch(builder:flatbuffers.Builder, frame:number, eventsOff
   GameEventBatch.addSounds(builder, soundsOffset);
   GameEventBatch.addSeismicPings(builder, seismicPingsOffset);
   GameEventBatch.addMusicEvents(builder, musicEventsOffset);
+  GameEventBatch.addVolleyOutcomes(builder, volleyOutcomesOffset);
+  GameEventBatch.addDamageFields(builder, damageFieldsOffset);
+  GameEventBatch.addFireOutcomes(builder, fireOutcomesOffset);
+  GameEventBatch.addTrajectoryKeyframes(builder, trajectoryKeyframesOffset);
+  GameEventBatch.addOutcomesKnown(builder, outcomesKnownOffset);
   return GameEventBatch.endGameEventBatch(builder);
 }
 
@@ -300,7 +481,12 @@ unpack(): GameEventBatchT {
     this.bb!.createObjList<ProjectileTrajectoryEvent, ProjectileTrajectoryEventT>(this.projectileTrajectories.bind(this), this.projectileTrajectoriesLength()),
     this.bb!.createObjList<SoundEvent, SoundEventT>(this.sounds.bind(this), this.soundsLength()),
     this.bb!.createObjList<SeismicPing, SeismicPingT>(this.seismicPings.bind(this), this.seismicPingsLength()),
-    this.bb!.createObjList<MusicEvent, MusicEventT>(this.musicEvents.bind(this), this.musicEventsLength())
+    this.bb!.createObjList<MusicEvent, MusicEventT>(this.musicEvents.bind(this), this.musicEventsLength()),
+    this.bb!.createObjList<VolleyOutcome, VolleyOutcomeT>(this.volleyOutcomes.bind(this), this.volleyOutcomesLength()),
+    this.bb!.createObjList<DamageFieldEvent, DamageFieldEventT>(this.damageFields.bind(this), this.damageFieldsLength()),
+    this.bb!.createObjList<FireOutcomeEvent, FireOutcomeEventT>(this.fireOutcomes.bind(this), this.fireOutcomesLength()),
+    this.bb!.createObjList<TrajectoryKeyframe, TrajectoryKeyframeT>(this.trajectoryKeyframes.bind(this), this.trajectoryKeyframesLength()),
+    this.bb!.createObjList<OutcomeKnownEvent, OutcomeKnownEventT>(this.outcomesKnown.bind(this), this.outcomesKnownLength())
   );
 }
 
@@ -315,6 +501,11 @@ unpackTo(_o: GameEventBatchT): void {
   _o.sounds = this.bb!.createObjList<SoundEvent, SoundEventT>(this.sounds.bind(this), this.soundsLength());
   _o.seismicPings = this.bb!.createObjList<SeismicPing, SeismicPingT>(this.seismicPings.bind(this), this.seismicPingsLength());
   _o.musicEvents = this.bb!.createObjList<MusicEvent, MusicEventT>(this.musicEvents.bind(this), this.musicEventsLength());
+  _o.volleyOutcomes = this.bb!.createObjList<VolleyOutcome, VolleyOutcomeT>(this.volleyOutcomes.bind(this), this.volleyOutcomesLength());
+  _o.damageFields = this.bb!.createObjList<DamageFieldEvent, DamageFieldEventT>(this.damageFields.bind(this), this.damageFieldsLength());
+  _o.fireOutcomes = this.bb!.createObjList<FireOutcomeEvent, FireOutcomeEventT>(this.fireOutcomes.bind(this), this.fireOutcomesLength());
+  _o.trajectoryKeyframes = this.bb!.createObjList<TrajectoryKeyframe, TrajectoryKeyframeT>(this.trajectoryKeyframes.bind(this), this.trajectoryKeyframesLength());
+  _o.outcomesKnown = this.bb!.createObjList<OutcomeKnownEvent, OutcomeKnownEventT>(this.outcomesKnown.bind(this), this.outcomesKnownLength());
 }
 }
 
@@ -328,7 +519,12 @@ constructor(
   public projectileTrajectories: (ProjectileTrajectoryEventT)[] = [],
   public sounds: (SoundEventT)[] = [],
   public seismicPings: (SeismicPingT)[] = [],
-  public musicEvents: (MusicEventT)[] = []
+  public musicEvents: (MusicEventT)[] = [],
+  public volleyOutcomes: (VolleyOutcomeT)[] = [],
+  public damageFields: (DamageFieldEventT)[] = [],
+  public fireOutcomes: (FireOutcomeEventT)[] = [],
+  public trajectoryKeyframes: (TrajectoryKeyframeT)[] = [],
+  public outcomesKnown: (OutcomeKnownEventT)[] = []
 ){}
 
 
@@ -341,6 +537,11 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
   const sounds = GameEventBatch.createSoundsVector(builder, builder.createObjectOffsetList(this.sounds));
   const seismicPings = GameEventBatch.createSeismicPingsVector(builder, builder.createObjectOffsetList(this.seismicPings));
   const musicEvents = GameEventBatch.createMusicEventsVector(builder, builder.createObjectOffsetList(this.musicEvents));
+  const volleyOutcomes = GameEventBatch.createVolleyOutcomesVector(builder, builder.createObjectOffsetList(this.volleyOutcomes));
+  const damageFields = GameEventBatch.createDamageFieldsVector(builder, builder.createObjectOffsetList(this.damageFields));
+  const fireOutcomes = GameEventBatch.createFireOutcomesVector(builder, builder.createObjectOffsetList(this.fireOutcomes));
+  const trajectoryKeyframes = GameEventBatch.createTrajectoryKeyframesVector(builder, builder.createObjectOffsetList(this.trajectoryKeyframes));
+  const outcomesKnown = GameEventBatch.createOutcomesKnownVector(builder, builder.createObjectOffsetList(this.outcomesKnown));
 
   return GameEventBatch.createGameEventBatch(builder,
     this.frame,
@@ -351,7 +552,12 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
     projectileTrajectories,
     sounds,
     seismicPings,
-    musicEvents
+    musicEvents,
+    volleyOutcomes,
+    damageFields,
+    fireOutcomes,
+    trajectoryKeyframes,
+    outcomesKnown
   );
 }
 }

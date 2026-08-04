@@ -32,7 +32,7 @@ target_include_directories(mapconverter PRIVATE
     ${CMAKE_SOURCE_DIR}/rts/lib/lua/src
     ${GENERATED_DIR}
 )
-target_link_libraries(mapconverter PRIVATE lua SQLite3::SQLite3 springlog springlog-net)
+target_link_libraries(mapconverter PRIVATE lua SQLite3::SQLite3 springlog springlog-net nlohmann_json::nlohmann_json)
 set_target_properties(mapconverter PROPERTIES
     CXX_STANDARD 17
     CXX_STANDARD_REQUIRED ON

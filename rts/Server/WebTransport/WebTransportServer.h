@@ -13,19 +13,29 @@
 // the GW2 priority tiers are exposed via StreamClass + SendStream/BroadcastStream
 // so the state-streaming sites can target Vision/Bulk tiers explicitly.
 //
-// Transport mapping (PLAN-game-worker.md GW2):
+// Transport mapping (PLAN-game-worker.md GW2 + PLAN-metalstorm-wire.md W1):
 //
-//   Tier            StreamClass  Carrier                 Urgency  Envelopes
+//   Tier            StreamClass  Carrier                 Urgency  Envelopes / Topics
 //   0 Control       Control      reliable bidi stream    0        0x01 FB, ACKs, chat
+//                                                                  Per-topic EVENT lanes (W1):
+//                                                                    lane 0: combat events, volleys, projectiles, sounds
+//                                                                    lane 1: rulesParams (game/team)
+//                                                                    lane 2: orders/directives (future)
+//                                                                    lane 4: GameInfo, game-over, player join/leave
 //   1 Per-frame     State        newest-wins uni stream  1        0x02/0x03 entity, 0x05 piece
 //   2 Vision        Vision       reliable uni stream      3        0x07 LOS, 0x06 build-activity
-//   3 Bulk          Bulk         reliable uni stream      5        0x08 decals, 0x09 heightmap, blobs
+//   3 Bulk          Bulk         reliable uni stream      5        0x08 decals (lane 3), 0x09 heightmap, blobs
 //   (datagram)      Datagram     unreliable datagram      —        future tiny self-contained signals
 //
 // "newest-wins" (State): on a new snapshot, RESET_STREAM any in-flight prior
 // State stream (stale positions are worthless) and open a fresh one. This gives
 // datagram-like skip-stale behaviour without app-level fragmentation, since
 // entity snapshots (6-8 KB) exceed the ~1200 B datagram limit.
+//
+// Per-topic EVENT lanes (W1): distinct lane values on Control/Vision/Bulk tiers
+// create independent QUIC streams, preventing head-of-line blocking. A lost/
+// retransmitted bulk packet (defs, decals) never delays a combat event or
+// rulesParams update. See StateStreamer::kEventLane* constants.
 
 #pragma once
 

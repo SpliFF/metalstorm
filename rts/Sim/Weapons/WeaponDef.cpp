@@ -549,11 +549,91 @@ WeaponDef::WeaponDef(const LuaTable& wdTable, const std::string& name_, int id_)
 	// custom parameters table
 	wdTable.SubTable("customParams").GetMap(customParams);
 
+	// Statistical combat resolution (opt-in; PLAN-metalstorm-combat-resolution).
+	// Parsed once here so the fire path reads cached fields, never string maps.
+	resolution = StatCombat::ParseResolution(customParams);
+	statTuning = StatCombat::ParseTuning(customParams);
+
 	// internal only
 	isNulled = (STRCASECMP(name.c_str(), "noweapon") == 0);
 	isShield = (type == "Shield");
 	noAutoTarget = (manualfire || interceptor || isShield);
 	onlyForward = !turret && (projectileType != WEAPON_STARBURST_PROJECTILE);
+
+	// Provisional tier; CWeaponDefHandler re-runs this over the whole def set
+	// once every shield's interceptType is known (see ClassifyFxTier).
+	fxTier = FX_TIER_SYNCED;
+}
+
+
+void WeaponDef::ClassifyFxTier(unsigned int shieldInterceptMask)
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+
+	// 1. Explicit Lua override wins outright. customParams keys arrive
+	//    lower-cased, so this is `customParams.fxTier` as authored.
+	const auto it = customParams.find("fxtier");
+	if (it != customParams.end()) {
+		if (STRCASECMP(it->second.c_str(), "cosmetic") == 0) { fxTier = FX_TIER_COSMETIC; return; }
+		if (STRCASECMP(it->second.c_str(), "synced")   == 0) { fxTier = FX_TIER_SYNCED;   return; }
+		LOG_L(L_WARNING, "[WeaponDef::%s] weaponDef %s has unrecognised customParams.fxTier '%s'"
+		                 " (expected \"cosmetic\" or \"synced\") — falling back to the classifier",
+		      __func__, name.c_str(), it->second.c_str());
+	}
+
+	// 2. Anything whose outcome is *contingent on sim state at arrival time*
+	//    must stay Tier S — the whole reason the tier split exists.
+	//    A shield may or may not have charge when the shot lands; an
+	//    interceptor may or may not catch it. Neither can be pre-baked at fire
+	//    time, so these keep a real CWeaponProjectile.
+	const bool interceptable   = (targetable != 0);            // a nuke etc. — shootable in flight
+	const bool isInterceptor   = (interceptor != 0);           // its own target may be destroyed first
+	bool       shieldStoppable = (interceptedByShieldType & shieldInterceptMask) != 0;
+
+	// …but "contingent" is about the *window* between fire and arrival, not
+	// merely about whether a shield could ever stop this weapon. Over a very
+	// short flight the shield's charge at fire time is its charge on arrival,
+	// so resolving at fire time is accurate — and even when it is not,
+	// PLAN-latency-projectiles §3.4 lets a Tier-C outcome be `Shielded`,
+	// terminating the invented flight on the dome. This is the flight-time
+	// clause from the design's own default heuristic (§2: "hitscan or
+	// short-range direct-fire or projectiles whose flight is < ~0.3 s ⇒ Tier
+	// C"), which PLAN-latency-impl §L2.0's bullet list omitted.
+	//
+	// Without it the shield clause swamps everything on a game with
+	// broad-spectrum shields: measured on ZK, 673/740 weaponDefs came out
+	// Tier S — ordinary commander lasers and hover cannons included — leaving
+	// L2 with nothing to do on the very game it matters most for.
+	const int flightFrames = (projectilespeed > 0.0f)
+		? static_cast<int>(range / projectilespeed)
+		: 0;
+	const bool shortFlight = IsHitScanWeapon() || (flightFrames <= (GAME_SPEED / 10) * 3);
+	if (shortFlight)
+		shieldStoppable = false;
+
+	// 3. Long-lived strategic ordnance: the flight is long enough that
+	//    inventing it client-side would visibly diverge, and these are exactly
+	//    the shots players watch. Starburst/torpedo trajectories are also too
+	//    complex to solve closed-form.
+	const bool strategicType =
+		(projectileType == WEAPON_STARBURST_PROJECTILE) ||
+		(projectileType == WEAPON_TORPEDO_PROJECTILE);
+
+	// 4. Artillery/nuke class by raw damage — a big shot landing in the wrong
+	//    place is far more noticeable than a rifle tracer doing so.
+	float maxDamage = 0.0f;
+	for (int i = 0, n = damages.GetNumTypes(); i < n; ++i)
+		maxDamage = std::max(maxDamage, damages.Get(i));
+
+	if (interceptable || isInterceptor || shieldStoppable || strategicType || maxDamage > 2000.0f) {
+		fxTier = FX_TIER_SYNCED;
+		return;
+	}
+
+	// Everything else is decoration the client can own outright. Hitscan beams
+	// have no sim flight to begin with, so they are Tier C by the same rule
+	// they already follow (event-rendered, nothing to converge).
+	fxTier = FX_TIER_COSMETIC;
 }
 
 

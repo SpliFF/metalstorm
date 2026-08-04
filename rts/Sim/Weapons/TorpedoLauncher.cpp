@@ -74,5 +74,5 @@ void CTorpedoLauncher::FireImpl(const bool scriptCall)
 	params.ttl = (weaponDef->flighttime == 0)? math::ceil(std::max(dist, range) / projectileSpeed + 25): weaponDef->flighttime;
 	params.tracking = tracking;
 
-	WeaponProjectileFactory::LoadProjectile(params);
+	WeaponProjectileFactory::FireWeaponProjectile(params);
 }

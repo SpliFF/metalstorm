@@ -62,6 +62,12 @@ public:
 	virtual bool IsPushResistant() const { return false; }
 	virtual bool IsPushResitanceBlockActive() const { return false; }
 
+	// Metalstorm footprint permeability (PLAN-metalstorm-flow §3, engine ask F2):
+	// true while this unit rotates without translating. During turn-in-place a
+	// large unit's contacts sweep unpredictably, so its hull hard-blocks even
+	// underpass-permitted classes. Only CGroundMoveType can turn in place.
+	virtual bool IsTurningInPlace() const { return false; }
+
 	bool UseHeading(      ) const { return (useHeading    ); }
 	bool UseHeading(bool b)       { return (useHeading = b); }
 

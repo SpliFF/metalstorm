@@ -9,7 +9,10 @@ return mk{
     scales = {
         [1] = { weapons = { [1] = { name = 'MS_BOMB_S1' } },
                 description = 'Strike drone flight' },
-        [2] = { weapons = { [1] = { name = 'MS_BOMB_S2' } } },
+        [2] = { weapons = { [1] = { name = 'MS_BOMB_S2' } },
+                -- fable_bomber (DESIGN-MODEL-BUILDING.md §26): shipped
+                -- generated model, "s2 compact bomber" per its own header.
+                override = { objectname = 'fable_bomber' } },
         [3] = { weapons = { [1] = { name = 'MS_BOMB_S3' },
                             [2] = { name = 'MS_MG_S2' } } },
         [4] = { weapons = { [1] = { name = 'MS_MISSILE_CRUISE_S2' },

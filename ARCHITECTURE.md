@@ -110,8 +110,14 @@ Full CLI flag list (from `rts/server_main.cpp`):
 | `core/connection.ts` | WebTransport game-stream connection to server (over `WebTransportAdapter`). FlatBuffers dispatch. Events: `onMapData`, `onUnitDefs`, `onEntityState`, `onCombatEvents`, etc. GW4 relocates it into the game-processor worker (PLAN-game-worker.md). |
 | `core/transport.ts` | Transport abstraction over the game connection. `WebTransportAdapter` (QUIC/HTTP-3) — class-based send (`control`/`state`/`vision`/`bulk`/`datagram`), newest-wins state. WebRTC removed (PLAN-game-worker.md). |
 | `core/game-worker-protocol.ts` | **Frozen GW4 message contract** (PLAN-game-worker.md): the game-processor worker ⇄ main-thread interfaces (`Gp*ToWorker` init/input/config, `Gp*ToMain` sceneState/audio/config/gameOver). Also (WP2c) `LegacyWorkerMessage` (all legacy `type` strings) + `WorkerInbound` union used to type `self.onmessage`. |
-| `core/entity-renderer.ts` | Per-piece thin-instanced unit renderer. Loads `.glb` via `setUnitDefs()`, groups by (defId, team, pieceIdx). Fallback: procedural shapes. |
-| `core/feature-renderer.ts` | Single-mesh thin-instanced map feature renderer. Pattern reference for entity-renderer. |
+| `core/entity-renderer.ts` | Per-piece thin-instanced unit renderer. Loads `.glb` via `setUnitDefs()`, groups by (defId, team, pieceIdx). Fallback: procedural shapes. Also publishes `getMemberModel(defId, team)` — a member-sized mesh + team material for the squad fan-out. Those meshes live in a **separate** `memberModelMeshes` map, not `renderMeshes`: `tick()`'s hide-pass zeroes every `renderMeshes` entry it didn't write this frame, which would fight a caller driving its own thin instances. |
+| `core/squad-render-backend.ts` | Babylon implementation of the Metalstorm squad `RenderBackend` (`data/games/metalstorm/client/squads/`): draws the cosmetic members one sim squad fans out into. Three visual classes, chosen **per member per frame by camera distance** (impostors M4) — **model** (a def with a 3D body, closer than its `impostorDistance`: the real low-poly body with real `headingY` facing, one thin-instance pool per model piece), **impostor sprite** (the same member beyond `impostorDistance`, or any atlas def whose model has not streamed yet: baked 8-yaw × 3-pitch directional card), **proxy capsule** — the **last resort**, held only when a member's def offers neither tier this frame (no atlas *and* no loadable body; the server names those defs at defs-bake time, see below). The two art tiers gate independently: a def with a body but **no** atlas has no sprite tier to hand over to, so its effective `impostorDistance` is `Infinity` and it holds the model tier at every range. The model↔sprite boundary crossfades via a screen-door dither band just inside `impostorDistance` (M5), so neither tier pops. |
+| `core/feature-renderer.ts` | Thin-instanced map feature renderer. Types with no baked impostor atlas keep the single whole-map mesh (pattern reference for entity-renderer); types listed in a `models/impostors.json` manifest are handed to `FeatureLodController` instead. Also hosts `DynamicFeatureRenderer` (runtime wrecks/debris). |
+| `core/feature-lod.ts` | PLAN-maps.md M6 — pure spatial-chunking + tier math for the map-feature LOD (tile partition, point→AABB distance, `assignTier` with hysteresis, `farDensity` prefix thinning). No Babylon imports; unit-tested. |
+| `core/feature-lod-renderer.ts` | PLAN-maps.md M6 — Babylon side of the feature LOD: per (type, tile) NEAR (full mesh, casts CSM) / FAR (impostor card, no shadows) / CULLED meshes with static matrix buffers, dither crossfade, per-tile frustum culling. Debug: `window.__gp('__featureLod.get()/.set()/.force()')`. **Clones must `makeGeometryUnique()`** — thin-instance buffers live on the Geometry, which `Mesh.clone()` shares. |
+| `core/impostor-atlas.ts` | Runtime half of the sprite-atlas convention (yaw × pitch × frame grid, cell index, cell→UV, card-tilt rule). Shared by the feature LOD and the unit/squad impostor path. Pure + unit-tested. Each atlas **declares** its elevation arc (`pitchDegrees`) and azimuth phase (`azimuthPhaseDegrees` on the wire → `azimuthPhase` radians) rather than assuming a global one — phase 0 means column 0 is the instance's **back** (relative yaw 0 puts the camera behind it). Baker half is `tools/fable-model-forge/impostor_convention.py`; a vitest cross-check executes it, round-trips every cell of every shipped convention, AND checks each cell's UV rect back into pixels against the baker's own `cell_origin`. **V runs top-down** (row 0 → `ov = 0`, no flip): every atlas ships as KTX2, and Babylon's KTX2 loader cannot honour `invertY` (compressed data can't use `UNPACK_FLIP_Y`, and that path sets no `_invertVScale` compensation as the KTX1 one does), so a KTX2 always lands with its TOP image row at v = 0 — the same convention glTF UVs already use. Impostor cards are built to match by `createImpostorCard()` (impostor-renderer.ts), which is where the flip is owned; assuming Babylon's bottom-up procedural-mesh UVs instead rendered every impostor mirrored AND on pitch row `pitchBins-1-row` (2026-08-03). |
+| `core/impostor-uv-plugin.ts` | Material plugin: per-instance atlas-cell UV remap (`impostorCell` attribute) + shared screen-aligned billboard rotation, both vertex-stage, so impostor matrix buffers stay static. Its GLSL is a hand copy of `atlasCellUv`; a vitest extracts both `_impOffV` expressions from the emitted shader and evaluates them against the TS function, so neither half can be changed alone. |
+| `core/dither-fade-plugin.ts` | Material plugin: screen-door (4×4 Bayer) crossfade for LOD swaps. Fade from a uniform or a per-thin-instance `ditherFade` attribute; `invertPattern` gives the outgoing/incoming tiers complementary halves. |
 | `core/projectile-renderer.ts` | Renders in-flight projectiles (thin instances, per-weapon-type shapes). |
 | `core/build-beam-renderer.ts` | Translucent build-beam shader (procedural cross-section) for nano-spray VFX. |
 | `core/build-activity.ts` | Per-tick build progress wiring; nanoframe state. |
@@ -121,6 +127,9 @@ Full CLI flag list (from `rts/server_main.cpp`):
 | `core/perf-overlay.ts` | Frame-rate / draw-call overlay (toggleable, F11; `?perfprobe` adds Babylon SceneInstrumentation). |
 | `core/frame-profiler.ts` | Permanent per-phase frame-time accumulator (camera/entity/fx/decals+lights/render/ui/total) with rolling-window mean/p50/p95/p99/max; zero hot-path allocation. Driven by the game-processor render loop (`beginFrame`/`gpMark`/`endFrame`); dump via `window.test.perfDump()` / `window.__gp('__frameProfiler.dump()')`. PLAN-perf P0 attribution instrumentation. |
 | `core/widget-profiler.ts` | On-demand per-widget LuaUI cost profiler (PLAN-perf N1). Wraps every widget callin in the Fengari runtime with a `performance.now()` timing closure (same hook site as BAR's tracy zones — handler dispatch is dynamic `w:Callin(...)` lookup in both cawidgets and barwidgets), plus per-block timers inside the runFrame chunk and a JS-side fixed-tax split of `gpRunUiPass` (GL-state save / Fengari / restore / wipeCaches). `window.test.uiProfileStart()` / `uiProfileDump()` / `uiProfileStop()`. Off by default; ~3 ms/frame overhead while active. |
+| `core/fx-bindings.ts` | PLAN-fx-offload X4: declarative per-def FX binding interpreter (uvScroll/pieceSpin/loopSound/emitter/onEvent) replacing per-frame entity `onUpdate` scripts with data (`client/units/<def>/bindings.json`) + a condition vocabulary (`evalWhen`: anim-state, health/velocity threshold, `pieceRotating:<piece>`). Engine-agnostic (no Babylon/Audio imports) so it's unit-testable without a renderer; sinks are injected. |
+| `core/fx-bindings-sinks.ts` | Real `FxSinks` for `pieceSpin` (→ `EntityRenderer.setClipPose`) and `loopSound` (→ `AudioManager` loop control). `uvScroll`/`emitter` stay on `fx-bindings.ts`'s `createStubSinks()` (FIDELITY-STANDIN, warns once) until X2/X3 land. |
+| `core/entity-fx-fence.ts` | PLAN-fx-offload X5: the compatibility-path fence for legacy per-frame entity FX scripts — LOD gate (faithful to PLAN-client-entity.md's distance tiers), per-frame budget cap (PLAN-scripting.md's 3-5ms combined Lua+JS budget), warn-once per def. Per-def cost/skip rows via `window.test.entityFxFenceDump()`/`entityFxFenceReset()`, same ranked convention as `uiProfileDump()`. Wired live into the game-processor render loop (`beginFrame()` every frame); no live caller of `run()` exists yet (no game ships per-frame entity-script content through a dispatch this engine drives) — ready for whichever module becomes that caller. |
 | `core/def-cache.ts` | Accumulates incrementally streamed unit + weapon defs; notifies renderers. |
 | `core/defs-fetch.ts` | HTTP fallback fetch of game/map defs (used during early load and recovery). |
 | `core/entity-state.ts` | Parses Tier 2 binary snapshots (struct-of-arrays with field mask). |
@@ -139,7 +148,7 @@ Full CLI flag list (from `rts/server_main.cpp`):
 | `core/selection-core.ts` | **WP3a**: shared selection/pick/order constants (`SELECT_PIXEL_RADIUS`, `SELECT_RADIUS`, `DRAG_THRESHOLD_PX`) — single source of truth imported by both `input-manager.ts` (legacy main-thread) and `worker-selection.ts`. |
 | `core/engine-gl.ts` | **WP5.2**: `getEngineGl(engine)` — the single upgrade point for reaching Babylon's internal `_gl` WebGL2 context. Used by `terrain.ts` and `game-processor.ts` (`gpBootLuaUI`). If a Babylon upgrade breaks `_gl`, fix it here only. |
 | `core/minimap.ts` | Minimap canvas with entity dots, click-to-pan, detachable popup window. **GW4-c5c-3**: `entityRenderer` is now optional — in the game-processor split the minimap runs on main (own Babylon Engine) but the entity set lives in the worker, so it renders from the `gp:minimapFeed` blips via `applyFeed` (the in-process path, e.g. the detached viewport, is unchanged). Click-to-pan posts `gp:focusWorld` → worker camera. |
-| `core/audio.ts` | `AudioManager`: 96-voice HRTF pool, five Recoil-parity channel buses (General / Battle / UnitReply / UserInterface / BGMusic) with strict-greater-priority per-channel eviction, master `ConvolverNode` for map reverb, dual-HTMLAudioElement music crossfader, SoundItem ingest + resolution, persisted channel/master volume. |
+| `core/audio.ts` | `AudioManager`: 96-voice HRTF pool, five Recoil-parity channel buses (General / Battle / UnitReply / UserInterface / BGMusic) with strict-greater-priority per-channel eviction, master `ConvolverNode` for map reverb, dual-HTMLAudioElement music crossfader, SoundItem ingest + resolution, persisted channel/master volume. `playLoop`/`updateLoopPosition`/`stopLoop` (PLAN-fx-offload X4): a key-addressable looping voice on top of the same pool/eviction rules, for `fx-bindings.ts`'s `loopSound` binding. |
 | `core/sound-events.ts` | `SoundEventPlayer`: resolves server `SoundEvent` → `SoundRef.name` → SoundItem → URL chain, applies per-play gain/pitch random offsets, routes to AudioManager on the channel the server tagged. |
 | `core/music-director.ts` | Subscribes to `MusicEvent`s, picks a random track from the per-state playlist (built from `music_<state>_<n>` SoundItems), crossfades via AudioManager. Gates start on a single `arm()` call from main.ts. |
 | `core/synth-sounds.ts` | Procedural fallback for combat-fx when no real asset is reachable. |
@@ -161,19 +170,27 @@ Full CLI flag list (from `rts/server_main.cpp`):
 | `core/log-ingest.ts` | Forwards client logs to the log server. |
 | `core/renderer-backend.ts` | Backend abstraction (currently WebGL via Babylon.js; placeholder for future WebGPU). |
 | `core/debug-console.ts` | Debug console: log viewer, scope-aware command input, log server WS, Babylon.js inspector toggle. |
-| `core/test-harness.ts` | `window.test` runtime API: spawn/kill/damage/order verbs through `/api/exec`, camera focus on a unit, render-loop pause, screenshot capture, debug-flag toggles. Paired with `.claude/skills/spring-test`. **GW8**: split for the worker — server-bound verbs run on main over HTTP; client-bound (camera/selection/netSim/pause/screenshot) forward to the worker via `workerCall()` (`gp:test`/`gp:testResult`); `selection`/`cameraPose` read the cached `gp:sceneState` feed synchronously. `window.widgets.eval` (Lua) + `window.__gp` (JS into the worker global scope, for `__entityRenderer`/`__fxLightPool`/`__frameProfiler`/`__perfToggles`/… debug hooks) are re-exposed in `main.ts`. **P0**: `perfDump()`/`perfReset()` (per-phase frame-time distribution) + the `__perfToggles` isolation handles (`terrainPlugin`/`decalFade`/`lightPool`/`renderScale`/`luaUi`). **N1**: `uiProfileStart()`/`uiProfileDump()`/`uiProfileStop()` (per-widget LuaUI cost profile — `core/widget-profiler.ts`). The spring-debug MCP browser tools (`browser_test`/`spawn_at_camera`/`evaluate_widget_lua`) all route through these. |
+| `core/test-harness.ts` | `window.test` runtime API: spawn/kill/damage/order verbs through `/api/exec`, camera focus on a unit, render-loop pause, screenshot capture, debug-flag toggles. Paired with `.claude/skills/spring-test`. **GW8**: split for the worker — server-bound verbs run on main over HTTP; client-bound (camera/selection/netSim/pause/screenshot) forward to the worker via `workerCall()` (`gp:test`/`gp:testResult`); `selection`/`cameraPose` read the cached `gp:sceneState` feed synchronously. `window.widgets.eval` (Lua) + `window.__gp` (JS into the worker global scope, for `__entityRenderer`/`__fxLightPool`/`__frameProfiler`/`__perfToggles`/… debug hooks) are re-exposed in `main.ts`. **P0**: `perfDump()`/`perfReset()` (per-phase frame-time distribution) + the `__perfToggles` isolation handles (`terrainPlugin`/`decalFade`/`lightPool`/`renderScale`/`luaUi`). **N1**: `uiProfileStart()`/`uiProfileDump()`/`uiProfileStop()` (per-widget LuaUI cost profile — `core/widget-profiler.ts`). **PLAN-fx-offload X5**: `entityFxFenceDump()`/`entityFxFenceReset()` (per-def legacy entity-FX script cost — `core/entity-fx-fence.ts`). The spring-debug MCP browser tools (`browser_test`/`spawn_at_camera`/`evaluate_widget_lua`) all route through these. |
 | `core/net-inspector.ts` | Network message inspector: decodes the envelope byte + FlatBuffer payload type for the debug console, and keeps an always-on per-envelope bandwidth tally (feeds PLAN-performance PC-2). **GW8**: runs **inside the game-processor worker** (the connection lives there) — `recordInbound` at `connection.routeIncoming`, `recordOutbound` at `sendOnControl`; surfaced to main via `window.test.netStats()`. Worker-safe: the per-frame debug-console log goes through a registered sink (`setNetLogSink`, set by debug-console on main) instead of importing the DOM-constructing console singleton. |
 | `lobby/lobby-ui.ts` | Full lobby UI: login, room browser, room setup, AI slots, start positions. |
 | `ui/ui.ts` | Shared helpers: `injectStyle()`, `renderTemplate()`. |
 | `ui/game/loader.ts` | In-game template loader: `GameTemplates` interface, bundled defaults, `loadGameTemplates()` fetcher. |
 | `ui/lobby/loader.ts` | Lobby template loader: `LobbyTemplates` interface, bundled defaults, `loadGameLobbyTemplates()` fetcher. |
-| `ui/hud/hud.html+css` | In-game HUD (entity count, selection, quit button). |
+| `ui/hud/hud.html+css` | In-game HUD (entity count, selection, quit button). Owns the `.hud-*` class prefix — **not** the native-UI design system, which is `.nui-*` (see below). |
 | `ui/quit-confirm/` | Quit confirmation overlay. |
 | `ui/game-over/` | Game over results overlay. |
+| `ui/native-ui/ui-store.ts` | Native-UI state store (PLAN-native-ui.md §2): mirrors of game/team rulesParams, roster, selection, economy, queues; `subscribe(paths, cb)`. Creates the `#ui-root` overlay (`pointer-events: none`, z-index 100). |
+| `ui/native-ui/widget-loader.ts` | Loads a game's `<game>.ui.json` manifest, imports its `widgets/*.js`, and **owns all HUD chrome**: injects the design system + the game's `styles[]`, creates the dock mounts, and builds the collapsible panel frame around every `title`d widget (`ctx.mount` is the panel *body*, and its header is a real `<button>` with `aria-expanded` so collapsed panels are keyboard-reachable). Collapse state is sticky per game via `clientSettings` (`hud.collapsed.<game>.<widget>`), so it also reads/writes through `Spring.Get/SetConfigInt`. |
+| `ui/native-ui/native-ui.css` | **The native-UI design system** — `--nui-*` tokens, dock/rail geometry (`.ui-mount-*`), panel chrome (`.nui-panel__head/__body/__badge`, `.is-collapsed`), and control primitives (`.nui-btn/-field/-row/-list/-table/-meter/-badge/-chip/-menu/-toast`). Injected once by the widget-loader. |
+| `ui/native-ui/compile-table.ts`, `named-entity-index.ts` | Command-intent → wire-payload compiler and the searchable region/objective/landmark index behind the composer's target slot. |
+| `native-widgets/command-composer.{js,css}` | Engine-bundled widget (mounted via the loader's `BUILTIN_WIDGETS` because it statically imports the two modules above). Compact bottom-centre command bar: slot chips → live echo → `compileIntent` → `ctx.sendCommand`. |
 
 #### Client porting gotchas (hard-won — check before writing new client code)
 
 - **Dead-producer trap (post-GW4, recurring):** the old main-thread `stateUpdate` path is DEAD — every `liveState` field a widget reads needs its own **worker-side producer**. This class of bug has recurred at least four times (camera pose/`viewMatrix` → `gpSyncCameraToLiveState` U1; `onResourceUpdate` → team resources U3; `onUnitCmdDescs`/`sendSelectionState` G3a; `minimapGeometry`/`minimapEvents` G4). When a widget sees stale/zero data that "used to work", suspect a main-thread producer that no longer feeds the worker before suspecting the widget. Similarly, the worker roster is **seeded once at init** (players via `gp:init`, teams via `TeamStartInfo`) — the `setRoster` path is dead; empty-roster crashes are fixed at the seed, not the widget.
+- **Two UI class namespaces, don't cross them:** the engine HUD overlay (`ui/hud/hud.css`) owns `.hud-*` (`#game-hud .hud-panel` etc.); the native-UI design system (`ui/native-ui/native-ui.css`) owns `.nui-*`. They style unrelated elements with equal specificity, so reusing `.hud-panel` for a native panel silently restyles the minimap/selection/help chrome (and vice versa). The design system's bare-element control rules are wrapped in `:where(#ui-root)` so they contribute **zero specificity** — widgets get styled inputs without a class, and a plain class rule in a game stylesheet still overrides them. Keep it that way; an unwrapped `#ui-root` prefix forces every future exception back into the engine sheet as an escape-hatch class.
+- **A `transform` on an overlay container breaks `position: fixed` inside it.** A transformed element becomes the containing block for fixed-position *descendants*, so a widget popover positioned in viewport coordinates lands relative to the container instead — off-screen, with no error. This is why the centred `.ui-mount-*` docks centre with flexbox (`left: 0; right: 0; align-items: center`) rather than `left: 50%; transform: translateX(-50%)`. Applies to any overlay that hosts menus/tooltips.
+- **Panel chrome clips.** `.nui-panel` is `overflow: hidden` and `.nui-panel__body` is `overflow-y: auto`, so anything a widget draws outside its own box (dropdowns, toasts) is clipped unless it escapes: `position: fixed` + JS-set coordinates for menus (see `command-composer.js openMenu()`), or an `overflow: visible` opt-out on the panel for toasts (see `.ms-authority-bar`).
 - **Babylon is right-handed — porting Recoil math:** form a third basis axis as `right × up` (RH). `RotationQuaternionFromAxisToRef` collapses to a reflection if handed an LH basis.
 - **`ShaderMaterial` alpha:** `alphaMode` is IGNORED unless `needAlphaBlending: true` is passed in the constructor options — without it, transparent materials draw opaque black.
 - **GLSL-in-template-literal comment rules:** no backticks in `//` comments (closes the JS template literal → Vite PARSE_ERROR) and no semicolons in `//` comments in raw `ShaderMaterial` source (splits the GLSL → material silently draws nothing).
@@ -192,7 +209,9 @@ Full CLI flag list (from `rts/server_main.cpp`):
 - `0x03` = Entity state delta (custom binary)
 - `0x04` = Projectile state snapshot (custom binary)
 
-**Key server→client messages:** AuthResponse, MapData, GameUnitDefs, GameWeaponDefs, EntityCreate, EntityDestroy, GameEventBatch (CombatEvents, projectile fired/impacts/trajectories, SoundEvents, SeismicPings, MusicEvents), GameInfo, TeamStartInfo (team start positions + ally start boxes; sent on auth + re-broadcast after GameStart → Spring.GetTeamStartPosition/GetAllyTeamStartBox), PlayerTeamEventBatch (reliable per-tick player/team status changes → widget:PlayerChanged/PlayerAdded/PlayerRemoved/TeamDied; pushed from CTeam::Died + CPlayer::StartSpectating/JoinTeam + the disconnect handler), LuaUIMsgRelay (relayed Spring.SendLuaUIMsg → widget:RecvLuaMsg(msg, playerID); server applies the per-receiver audience filter by mode 0=all/'a'=allies/'s'=specs, faithful to Recoil CLuaHandle::HandleLuaMsg; sender gets its own message back), TeamStatsHistoryBatch (reliable per-game-second incremental team stats-history deltas from CTeam::statHistory → Spring.GetTeamStatsHistory; per-team finalised-entry cursor resends the live tail each cadence and rewinds on client join so late joiners get full history), GameModOptions (reliable one-shot on auth — the game's modoptions from CGameSetup::GetModOptions() → worker liveState.modOptions → unsynced Spring.GetModOptions(); values stay strings, faithful to Recoil PushAllOptions; immutable per game server so no re-broadcast), RoomStateUpdate, RoomListUpdate, LogBatch, ConsoleResponse, GameStarted, UnitCommandQueuesUpdate (own + allied team order queues, ~1 Hz), UnitCmdDescsUpdate (selection-scoped command panel data — name/action/texture/tooltip/type/params/hidden per cmd, ~1 Hz).
+**Two player ids, never interchangeable.** `AuthResponse.player_id` is the **DB account id** (stable across games); `AuthResponse.player_num` is Spring's **sim playerNum** (allocated per game server, in connect order, with AI virtual players taking the low numbers). Everything synced keys on `player_num`: rulesParam keys like `authority_player_<id>`, `gadget:PlayerAdded(playerID)`, `Spring.GetPlayerList()`, `UnitCommandEvent.player_id`, `LuaUIMsgRelay.player_id`. The client carries them as `Connection.accountId` / `Connection.playerNum` and hands widgets both as `ctx.identity.accountId` / `ctx.identity.playerId` (the latter being the playerNum). They coincide only by accident on low-id dev accounts — which is why using one for the other went unnoticed for so long; see PLAN-native-ui.md §3.3 and PLAN-endtoend.md D3. **Verify player-scoped behaviour with a fresh, high-id account.**
+
+**Key server→client messages:** AuthResponse, PlayerRoster (complete player roster — humans, spectators and AI virtual players, with names, teams and ally teams; sent reliably on auth and re-broadcast in full on every change: join, reconnect, leave, and once after GameStart when ally teams become known. Never a delta. The only source of player *names* on the client — the lobby room roster is not a substitute, it keys by account id and has no AI entries), MapData, GameUnitDefs, GameWeaponDefs, EntityCreate, EntityDestroy, GameEventBatch (CombatEvents, projectile fired/impacts/trajectories, SoundEvents, SeismicPings, MusicEvents), GameInfo, TeamStartInfo (team start positions + ally start boxes; sent on auth + re-broadcast after GameStart → Spring.GetTeamStartPosition/GetAllyTeamStartBox), PlayerTeamEventBatch (reliable per-tick player/team status changes → widget:PlayerChanged/PlayerAdded/PlayerRemoved/TeamDied; pushed from CTeam::Died + CPlayer::StartSpectating/JoinTeam + the disconnect handler), LuaUIMsgRelay (relayed Spring.SendLuaUIMsg → widget:RecvLuaMsg(msg, playerID); server applies the per-receiver audience filter by mode 0=all/'a'=allies/'s'=specs, faithful to Recoil CLuaHandle::HandleLuaMsg; sender gets its own message back), TeamStatsHistoryBatch (reliable per-game-second incremental team stats-history deltas from CTeam::statHistory → Spring.GetTeamStatsHistory; per-team finalised-entry cursor resends the live tail each cadence and rewinds on client join so late joiners get full history), GameModOptions (reliable one-shot on auth — the game's modoptions from CGameSetup::GetModOptions() → worker liveState.modOptions → unsynced Spring.GetModOptions(); values stay strings, faithful to Recoil PushAllOptions; immutable per game server so no re-broadcast), RoomStateUpdate, RoomListUpdate, LogBatch, ConsoleResponse, GameStarted, UnitCommandQueuesUpdate (own + allied team order queues, ~1 Hz), UnitCmdDescsUpdate (selection-scoped command panel data — name/action/texture/tooltip/type/params/hidden per cmd, ~1 Hz).
 
 **Key client→server messages:** AuthRequest, PlayerCommand, PlayerCommandBatch (schema only, no emitter yet — for atomic build-row / INSERT+REMOVE pairs), SelectionState (debounced 50ms; scopes server's cmd-desc broadcast), ViewportUpdate, RoomCreate/Join/Leave/Ready/StartGame/EndGame, RoomAddAI/RemoveAI, LuaRulesMsg, LuaUIMsg (Spring.SendLuaUIMsg, data + mode), LogIngest, LogSubscribe, LogUnsubscribe, ConsoleCommand.
 
@@ -508,6 +527,7 @@ data/
 | `/api/content/manifest` | JSON index of all servable assets |
 | `/api/content/assets/*` | Individual asset files from content roots |
 | `POST /api/gm/*` | GM verbs (`pause`/`resume`/`grant`/`broadcast`/`inspect`/`kick`/`rollback`/`checkpoint`/`hibernate`/`snapshots`). AdminOnly + audited; the dashboard POSTs here directly (browser→game port). PLAN-gm-tools task 2 (`GmVerbs.cpp`). |
+| `/api/journal` | JSON synced-input cause-stream tallies (`seen`/`recorded`/`appended`/`skipped` + per-kind). Loopback-only. With `--journal-audit [N]` also reports the in-memory ring's head/tail. See [Synced-input funnel](#synced-input-funnel-the-cause-stream). |
 | `/api/wt/info` | JSON `{port, transport, certMode}` — WebTransport (QUIC) endpoint discovery. `certMode:"hashes"` (dev/self-hosted default) adds `certHashes:[current,next]` (+ back-compat `certHash`) for `serverCertificateHashes` pinning; `certMode:"webpki"` (`--wt-cert`/`--wt-key` configured) publishes no hash — the browser validates the CA cert normally. Replaces the removed `/api/rtc/offer` + `/api/rtc/candidate` WebRTC signaling. |
 
 ### Log server (`spring-logserver`)
@@ -557,6 +577,50 @@ Client → server: ViewportUpdate (camera position/zoom)
 Client: interpolates entities between ticks, renders via Babylon.js
 ```
 
+### Synced-input funnel (the cause stream)
+
+Everything that changes the synced sim from **outside** it passes through
+`syncedinput::Journal()` (`rts/Server/SyncedInputJournal.{h,cpp}`) before it is
+applied. There are exactly five such places, and they are the server tick's own
+source order — `TickPhase` names them:
+
+```
+server tick (server_main.cpp)
+  BeginTick(frame)
+  1 Inbound     DrainInbound  → ClientMessageHandler::HandleMessage   ← records ALL 45 wire verbs
+  2 Disconnect  DrainDisconnects → PlayerLeft / PlayerRemoved
+    sim.SimFrame()
+  3 LuaExec     luaExecEngine drain (admin console + POST /api/exec)
+  4 Stream      streamer.Tick → StateStreamer::TickAI (AI command drain)
+  + anchor      CSimulation::FireGameStart (roster/leaders)
+```
+
+Records are ordered by `(frame, phase, seq)`. Frame alone is insufficient: while
+`gs->paused` is set or before GameStart the frame does not advance while inbound
+messages keep arriving, so `seq` (process-monotonic) is the real total order.
+
+The inbound site records the **raw wire bytes before dispatch**, not a decoded
+form — a replay re-feeds them through the same `HandleMessage`, and messages the
+live run rejected (rate limit, stale sequence, authority veto) are in the stream
+so a replay rejects them identically. Which verbs are kept is decided by one
+exhaustive classifier (`ClassifyClientPayload`, four-way: Synced / Setup /
+Unsynced / Ignored), never by the individual handlers;
+`tests/test_synced_input_journal.cpp` walks the generated
+`EnumValuesClientPayload()` so a verb added to `protocol.fbs` without a
+classification fails a test.
+
+**Not recorded, deliberately:** commands the sim gives itself — factory exit
+rally, `StatisticalCombat` retaliation, `WaitCommandsAI`, `LuaSyncedCtrl`
+`GiveCommand` from a gadget callin. Those are *consequences*; re-execution
+reproduces them, and recording them would double-apply. AI output *is* recorded:
+the AI VM runs on its own threads and which tick its commands land on is not part
+of the synced state.
+
+Storage is pluggable (`IJournal`). The default is `NullJournal` — the funnel still
+classifies and counts, and `GET /api/journal` (loopback) reports the tallies.
+`--journal-audit [N]` attaches a bounded in-memory journal; the durable journal is
+PLAN-persistence's.
+
 ### Def + Model Loading
 ```
 Lobby startup: GameProcessor converts <game>/objects3d/*.s3o → data/games/<id>/models/*.glb
@@ -565,12 +629,27 @@ Projectile streaming: server sends GameWeaponDefs (incremental, per-client, only
 Client: DefCache accumulates defs → EntityRenderer.setUnitDefs() (additive batches)
 Client: DefCache → ProjectileRenderer.setWeaponDefs() (per-type mesh + material)
 Model loading: SceneLoader.ImportMeshAsync per defId → thin instances
+Squad defs:   the sim body is not drawn; SquadRenderBackend draws the members
+              (near: real model → far: impostor sprite; no atlas: model at all
+               ranges; neither model nor atlas: proxy capsule)
 Fallback: procedural shapes (box/cylinder/cone/sphere) when no .glb exists
 ```
 
 Defs are streamed on-demand: the server tracks `knownUnitDefs` and `knownWeaponDefs`
 per ClientSession and sends each def exactly once per game session, just before the
 first entity/projectile state update that references it.
+
+**Missing models degrade silently by design, so the server names them loudly.**
+`LuaDefsSerializer::SerializeOneUnitDef` emits `model_url` only when
+`models/<objectname>.gltf` exists; otherwise it emits `""` and the client falls
+back to a procedural shape (or, for a squad def with no impostor atlas either,
+the proxy capsule). Nothing in
+that chain is an error, which is how a scenario can be mostly placeholders with
+a clean log. `FindDefsWithMissingModels` closes the hole: once per defs bake the
+server logs a WARNING naming every def whose `objectname` resolves to no `.gltf`
+and which is not `impostor_only` (that flag means "the billboard IS the model" —
+infantry/civilians per PLAN-metalstorm-beta-units.md §2.1, so a missing file is
+correct for them). Covered by `tests/test_defs_missing_models.cpp`.
 
 ## Weapon / Projectile Rendering Strategies (target model)
 

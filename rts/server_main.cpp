@@ -10,6 +10,7 @@
 #include "Server/Simulation.h"
 #include "Server/NetworkServer.h"
 #include "Server/Protocol.h"
+#include "Server/PlayerRosterBroadcast.h"
 #include "Server/Database.h"
 #include "Server/GameMetrics.h"
 #include "Server/GmVerbs.h"
@@ -33,6 +34,8 @@
 #include "Server/LuaDefsSerializer.h"
 #include "Server/ResourcesParser.h"
 #include "Server/StandingOrders.h"
+#include "Server/OrgGroups.h"
+#include "Server/SyncedInputJournal.h"
 #include "Server/AI/AIRuntimePool.h"
 #include "Server/AI/AIDiscovery.h"
 #include "Server/PerfMetrics.h"
@@ -45,6 +48,11 @@
 #include "Server/ClientMessageHandler.h"
 #include "Server/StateStreamer.h"
 #include "Server/GameHttpRoutes.h"
+#include "Server/HeadlessRun.h"
+#include "Server/StatsDump.h"
+#include "Server/GameOverState.h"
+#include "Server/PostGamePolicy.h"
+#include "Sim/Misc/GlobalSynced.h"
 #include "Lua/LuaRules.h"
 #include "Server/HttpAuth.h"
 #include "Server/CacheControl.h"
@@ -87,6 +95,7 @@
 #include <fstream>
 #include <chrono>
 #include <filesystem>
+#include <optional>
 #include <random>
 #include <thread>
 #include <unordered_set>
@@ -189,6 +198,25 @@ int main(int argc, char* argv[])
     };
     int idleExitSeconds = envInt("SPRING_IDLE_EXIT_SECONDS", 300);          // 5 min
     int idleStartupGraceSeconds = envInt("SPRING_IDLE_STARTUP_GRACE_SECONDS", 120);  // 2 min
+    // Post-game observation window: how long a *finished* server stays up with
+    // its world frozen before shutting down and releasing its port. Distinct
+    // from idle exit — this one runs with clients still connected, which is the
+    // case idle exit by definition never covers. Same flag > env > default
+    // precedence; <= 0 disables it (the room then lives until idle exit or a
+    // kill). See PostGamePolicy.h.
+    int postGameExitSeconds =
+        envInt("SPRING_POSTGAME_EXIT_SECONDS", postgame::kDefaultExitSeconds);
+
+    // --- Headless run mode (PLAN-headless task 1) ---
+    // `--headless-run <config.json>` runs the sim to completion with no browser
+    // client: no clients, no idle-exit, run-config-driven pacing (uncapped /
+    // realtime / xN) and stop conditions (frame / gameOver / luaCondition), all
+    // under a hard wall-clock ceiling (`--max-wall-min`, default 60, E4). When
+    // no config is given the mode stays disabled and the loop behaves exactly
+    // as a normal game (the tick-gate-off regression bar, PLAN-headless §6).
+    std::string headlessConfigPath;
+    int maxWallMin = 60;
+    headless::Config headlessCfg;
 
     // Human player roster from the lobby. Each `--player <username>:<team>:<pos>`
     // entry gets one slot here. The sim uses this for two things:
@@ -227,6 +255,24 @@ int main(int argc, char* argv[])
         return out;
     };
 
+    // --ai takes an optional 4th field (PLAN-metalstorm-ai.md §10 task 6):
+    // "id:team:pos:profile". Same missing-trailing-field semantics as
+    // splitSpec above, just one field wider.
+    auto splitAiSpec = [](const std::string& spec) {
+        std::array<std::string, 4> out;
+        size_t prev = 0;
+        for (int i = 0; i < 4; ++i) {
+            const size_t next = spec.find(':', prev);
+            if (next == std::string::npos) {
+                out[i] = spec.substr(prev);
+                break;
+            }
+            out[i] = spec.substr(prev, next - prev);
+            prev = next + 1;
+        }
+        return out;
+    };
+
     // --- Logging CLI flags ---
     std::string logFile;
     std::string logLevel;
@@ -235,11 +281,19 @@ int main(int argc, char* argv[])
     bool debugMode = false;
     bool logMessages = false;
 
+    // PLAN-replay task 1: 0 = no journal attached (the funnel still counts).
+    int journalAuditRecords = 0;
+
     // Simple arg parsing: --port N, --game PATH, --map PATH, --db PATH,
     // --idle-exit-seconds N (0 = never), --idle-startup-grace-seconds N,
+    // --postgame-exit-seconds N (0 = never; shutdown delay after game over),
     // --log-file PATH, --log-level LEVEL, --log-server URL,
     // --log-sqlite PATH, --debug, --log-messages,
     // --wt-cert PATH, --wt-key PATH,
+    // --headless-run config.json (PLAN-headless: no-client batch/soak run),
+    // --max-wall-min N (headless hard wall-clock ceiling, default 60),
+    // --journal-audit [N] (PLAN-replay: record the synced-input cause stream
+    //   in memory, cap N records, expose at GET /api/journal),
     // --player username:team:pos (repeatable),
     // --ai id:team:pos (repeatable)
     for (int i = 1; i < argc; i++) {
@@ -264,6 +318,22 @@ int main(int argc, char* argv[])
             idleExitSeconds = std::atoi(argv[++i]);
         } else if (arg == "--idle-startup-grace-seconds" && i + 1 < argc) {
             idleStartupGraceSeconds = std::atoi(argv[++i]);
+        } else if (arg == "--postgame-exit-seconds" && i + 1 < argc) {
+            postGameExitSeconds = std::atoi(argv[++i]);
+        } else if (arg == "--headless-run" && i + 1 < argc) {
+            headlessConfigPath = argv[++i];
+        } else if (arg == "--max-wall-min" && i + 1 < argc) {
+            maxWallMin = std::atoi(argv[++i]);
+        } else if (arg == "--journal-audit") {
+            // PLAN-replay task 1. Attaches the in-memory journal so the cause
+            // stream is observable live (GET /api/journal) and summarised at
+            // shutdown. Storage is deliberately in-memory only: the durable
+            // journal belongs to PLAN-persistence phase 2, and this flag is
+            // how the completeness audit is checked against a real game
+            // without waiting for it.
+            journalAuditRecords = 100000;
+            if (i + 1 < argc && argv[i + 1][0] != '-')
+                journalAuditRecords = std::max(1, std::atoi(argv[++i]));
         } else if (arg == "--log-file" && i + 1 < argc) {
             logFile = argv[++i];
         } else if (arg == "--log-level" && i + 1 < argc) {
@@ -313,15 +383,16 @@ int main(int argc, char* argv[])
             }
             CGameSetup::SetModOption(kv.substr(0, eq), kv.substr(eq + 1));
         } else if (arg == "--ai" && i + 1 < argc) {
-            // Format: <id>:<team>:<pos>. We parse here and resolve
-            // later, once we have a discovered AI list to look up
-            // against. Accepts the legacy 2-tuple form too, for
-            // dev-smoketest invocations that predate start positions.
+            // Format: <id>:<team>:<pos>:<profile>. We parse here and
+            // resolve later, once we have a discovered AI list to look up
+            // against. Accepts the legacy 2/3-tuple forms too, for
+            // dev-smoketest invocations that predate start positions and
+            // the profile field (PLAN-metalstorm-ai.md §10 task 6).
             const std::string spec = argv[++i];
-            const auto parts = splitSpec(spec);
+            const auto parts = splitAiSpec(spec);
             if (parts[0].empty()) {
                 SLOG(SPRING_LOG_WARNING,
-                    "ignoring malformed --ai '%s' (expected id:team[:pos])",
+                    "ignoring malformed --ai '%s' (expected id:team[:pos[:profile]])",
                     spec.c_str());
                 continue;
             }
@@ -329,11 +400,58 @@ int main(int argc, char* argv[])
             rq.id = parts[0];
             rq.team = parts[1].empty() ? 0 : std::atoi(parts[1].c_str());
             rq.startPos = parts[2].empty() ? -1 : std::atoi(parts[2].c_str());
+            rq.profile = parts[3];
             requestedAIs.push_back(std::move(rq));
         } else if (arg[0] != '-') {
             // Legacy: bare number = port
             port = std::atoi(argv[i]);
         }
+    }
+
+    // --- Headless run config (PLAN-headless task 1) ---
+    // Parse the run manifest and fold its self-contained map/game/aiSlots into
+    // the same structures the CLI flags fill, but only where a flag was absent
+    // (explicit --map/--game/--ai win over the manifest). The `headless` block
+    // (tickMode / stopAt / statsDump / stateHashEvery) drives the sim loop below.
+    if (!headlessConfigPath.empty()) {
+        std::string cfgErr;
+        if (!headless::ParseConfigFile(headlessConfigPath, headlessCfg, cfgErr)) {
+            SLOG(SPRING_LOG_ERROR, "--headless-run: %s", cfgErr.c_str());
+            return 1;
+        }
+        headlessCfg.enabled = true;
+        headlessCfg.maxWallSec = static_cast<int64_t>(std::max(1, maxWallMin)) * 60;
+
+        if (mapId.empty() && !headlessCfg.map.empty())
+            mapId = headlessCfg.map;
+        if (gameId.empty() && !headlessCfg.game.empty())
+            gameId = headlessCfg.game;
+        if (requestedAIs.empty() && !headlessCfg.aiSlots.empty()) {
+            for (const auto& s : headlessCfg.aiSlots) {
+                RequestedAI rq;
+                rq.id = s.aiId;
+                rq.team = s.team;
+                rq.startPos = s.startPos;
+                // PLAN-metalstorm-ai.md §10 task 6: previously dropped here —
+                // the manifest's aiSlots[].profile was parsed by
+                // HeadlessRun::ParseConfig but never reached the AI.
+                rq.profile = s.profile;
+                requestedAIs.push_back(std::move(rq));
+            }
+        }
+
+        std::string modeStr =
+            headlessCfg.tickMode == headless::TickMode::Uncapped ? "uncapped"
+          : headlessCfg.tickMode == headless::TickMode::Multiple
+                ? ("x" + std::to_string(headlessCfg.tickMultiple))
+          :                                                          "realtime";
+        SLOG(SPRING_LOG_NOTICE,
+            "headless run: tickMode=%s maxWall=%dmin stopAt{frame=%lld gameOver=%d lua=%s}",
+            modeStr.c_str(),
+            maxWallMin,
+            headlessCfg.stopAt.frame ? (long long)*headlessCfg.stopAt.frame : -1LL,
+            headlessCfg.stopAt.gameOver ? 1 : 0,
+            headlessCfg.stopAt.luaCondition ? headlessCfg.stopAt.luaCondition->c_str() : "-");
     }
 
     // PLAN-security-hardening E1 (warn-only — see DevBuildGate::WarnOnly).
@@ -535,6 +653,10 @@ int main(int argc, char* argv[])
     std::unordered_map<ClientID, int> clientPlayerNum;
     int nextPlayerNum = 0;
 
+    // PLAN-quickstart.md §3.3: reason carried by a client's PlayerLeaveIntent
+    // (sent just before disconnect), consumed once when the disconnect drains.
+    std::unordered_map<ClientID, uint8_t> pendingLeaveReason;
+
     // GameStart is deferred until all roster players have connected and
     // registered CPlayers (matches real Spring's "all clients loaded" gate).
     std::unordered_set<std::string> connectedRosterPlayers;
@@ -552,7 +674,7 @@ int main(int argc, char* argv[])
         net, rtcServer, sim, db, sessions, rooms, aiPool, luaExecEngine,
         roomId, gameId, mapId, port, logMessages, /*defsCacheKey=*/std::string{},
         requestedPlayers, requestedAIs, playerTeamByUsername,
-        clientPlayerNum, nextPlayerNum, connectedRosterPlayers,
+        clientPlayerNum, pendingLeaveReason, nextPlayerNum, connectedRosterPlayers,
         rosterPlayersNeeded, handshakedClients,
     };
 
@@ -570,6 +692,70 @@ int main(int argc, char* argv[])
     // lands (they refuse cleanly, audited). Must outlive the server loop.
     NullSnapshotStore gmSnapshotStore;
     RegisterGmVerbs(ctx, gmSnapshotStore);
+
+    // PLAN-replay task 1: attach the in-memory cause-stream journal under
+    // --journal-audit. Must outlive the server loop (the funnel holds a raw
+    // pointer, deliberately — a shared_ptr here would imply an ownership
+    // question that does not exist: there is exactly one journal per process
+    // and it is this one).
+    syncedinput::MemoryJournal auditJournal(
+        journalAuditRecords > 0 ? static_cast<size_t>(journalAuditRecords) : 1);
+    if (journalAuditRecords > 0) {
+        syncedinput::Journal().SetJournal(&auditJournal);
+        SLOG(SPRING_LOG_NOTICE,
+             "synced-input journal: audit mode, cap %d records (GET /api/journal)",
+             journalAuditRecords);
+    }
+    // Always registered — with no journal attached it reports the counters
+    // only, which is the useful answer to "is anything bypassing the funnel".
+    // GET + LocalhostOrAdmin degrades to loopback-only (NetworkServer.h's
+    // enforcement note); that is the right ceiling for a diagnostic that
+    // exposes raw player input.
+    net.AddHttpGet("/api/journal", RouteAuth::LocalhostOrAdmin,
+                   [&auditJournal](const std::string&) -> HttpResponse {
+        const auto& rec = syncedinput::Journal();
+        const auto& c = rec.Stats();
+        nlohmann::json j;
+        j["enabled"]  = rec.Enabled();
+        j["frame"]    = rec.Frame();
+        j["seen"]     = c.seen;
+        j["recorded"] = c.recorded;
+        j["appended"] = c.appended;
+        j["skipped"]  = c.skipped;
+        for (int k = 0; k < 6; ++k) {
+            j["byKind"][syncedinput::InputKindName(
+                static_cast<syncedinput::InputKind>(k))] = c.byKind[k];
+        }
+        if (rec.Enabled()) {
+            j["ringDropped"] = auditJournal.Dropped();
+            // Head/tail only: the whole ring can be 100 k records and this is
+            // a diagnostic, not the export path (that is PLAN-replay task 3's
+            // .msr packer, which reads Records() directly).
+            const auto& rs = auditJournal.Records();
+            j["ringSize"] = rs.size();
+            auto row = [](const syncedinput::Record& r) {
+                nlohmann::json o;
+                o["seq"]      = r.seq;
+                o["frame"]    = r.frame;
+                o["phase"]    = syncedinput::TickPhaseName(r.phase);
+                o["kind"]     = syncedinput::InputKindName(r.kind);
+                o["subKind"]  = r.subKind;
+                o["playerId"] = r.playerId;
+                o["bytes"]    = r.payload.size();
+                return o;
+            };
+            const size_t n = rs.size();
+            const size_t head = std::min<size_t>(n, 20);
+            for (size_t i = 0; i < head; ++i) j["head"].push_back(row(rs[i]));
+            for (size_t i = (n > 20 ? n - 20 : head); i < n; ++i)
+                j["tail"].push_back(row(rs[i]));
+        }
+        const std::string body = j.dump();
+        HttpResponse resp;
+        resp.contentType = "application/json";
+        resp.body.assign(body.begin(), body.end());
+        return resp;
+    });
 
     if (!net.Start(port)) {
         SLOG(SPRING_LOG_ERROR, "failed to start network server");
@@ -638,6 +824,27 @@ int main(int argc, char* argv[])
         });
     });
 
+    // Macro C&C broadcast hooks (PLAN-macro-directives §1). Same visibility
+    // discipline as standing orders — org-group + directive state stream on
+    // change to the owner team and its allies. Both fire from the sim-tick
+    // path on the main thread, so reading live values is safe.
+    orgGroups.SetChangeNotifier([&gameStart, &sessions](int changedTeam) {
+        sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
+            if (session.team < 0) return;
+            if (changedTeam != session.team &&
+                !teamHandler.AlliedTeams(session.team, changedTeam)) return;
+            gameStart.PushOrgGroupsTo(clientId, session.team);
+        });
+    });
+    directiveManager.SetChangeNotifier([&gameStart, &sessions](int changedTeam) {
+        sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
+            if (session.team < 0) return;
+            if (changedTeam != session.team &&
+                !teamHandler.AlliedTeams(session.team, changedTeam)) return;
+            gameStart.PushDirectivesTo(clientId, session.team);
+        });
+    });
+
     // --- Bake def cache for HTTP delivery ---
     //
     // After sim.Init the engine has parsed gamedata/defs.lua (with the
@@ -654,21 +861,62 @@ int main(int argc, char* argv[])
     // re-serialize, browser cache hit.
     std::string& defsCacheKey = ctx.defsCacheKey;
     if (unitDefHandler && weaponDefHandler && !gameId.empty()) {
-        defsCacheKey = DefsCache::ComputeCacheKey(
-            gameId, gameVersion, CGameSetup::GetModOptions());
-
-        // Skip re-baking if the cache files already exist for this key.
-        // This is the warm path: same modOptions in repeat sessions.
-        //
-        // The filenames must match what DefsCache actually writes
-        // (`.lua.br` since the v14-lua migration — the stale `.bin`
-        // probe here never matched, so every launch re-serialised the
-        // defs needlessly). Under --no-cache we deliberately force the
-        // cold path AND overwrite below: the cache key is content-blind
-        // (see DefsCache.h), so an edited/added `units/*.lua` would
-        // otherwise never reach the browser, which fetches this on-disk
-        // payload by key.
+        // Serialize the full def set to Lua source FIRST, then derive the
+        // cache key from the emitted payload (DefsCache::ComputeContentKey).
+        // Serialization is cheap (once per game-server process) and this is
+        // what makes the key content-aware: the old ComputeCacheKey hashed
+        // only gameId/version/modOptions, so any def edit left the key —
+        // and thus the URL the client fetches — frozen at its first bake.
+        // The client then received stale def_ids that disagreed with the
+        // live server def_ids and every native model rendered as a fallback
+        // shape. See DefsCache.h.
         namespace fs = std::filesystem;
+
+        // Probe the game's gamedata/resources.lua for the set of
+        // projectile-texture names. The weapon-def baker uses this to
+        // choose between the primary and fallback name when applying
+        // Spring's per-weaponType defaults (e.g. `missileflaretexture` is
+        // preferred when defined, otherwise `flare`). With an empty set the
+        // baker still writes the primary; the client's resolver chases any
+        // remaining alias.
+        const std::string gameDir = "data/games/" + gameId;
+        const std::string engineBaseDir = "cont/base/springcontent";
+        const auto projTextureNames =
+            ResourcesParser::GetProjectileTextureNames(
+                gameId, gameDir, engineBaseDir);
+
+        // Serialize each def category to Lua source. Output files end in
+        // `.lua.br` and are served with `Content-Encoding: br` so the
+        // browser decompresses transparently. See PLAN-defs.md.
+        namespace L = LuaDefsSerializer;
+        std::string udSrc = L::SerializeUnitDefs(
+            unitDefHandler->GetUnitDefsVec(), gameId);
+        std::string wdSrc = L::SerializeWeaponDefs(
+            weaponDefHandler->GetWeaponDefsVec(), gameId,
+            &projTextureNames);
+        auto cegDefs = CegLoader::LoadAllCegDefs();
+        std::string cdSrc = L::SerializeCegDefs(cegDefs);
+
+        std::string fdSrc;
+        size_t fdDefCount = 0;
+        if (featureDefHandler != nullptr) {
+            const fs::path modelsDir = fs::path("data/games") / gameId / "models";
+            const auto& fdVec = featureDefHandler->GetFeatureDefsVec();
+            fdSrc = L::SerializeFeatureDefs(fdVec, gameId, modelsDir);
+            fdDefCount = fdVec.empty() ? 0 : fdVec.size() - 1;
+        } else {
+            fdSrc = "return{base_url=[[]],defs={}}";
+        }
+
+        defsCacheKey = DefsCache::ComputeContentKey(
+            gameId, gameVersion, CGameSetup::GetModOptions(),
+            udSrc, wdSrc, cdSrc, fdSrc);
+
+        // Skip re-baking (brotli + disk write) if the cache files already
+        // exist for this key. With a content-derived key the warm path is
+        // reached only when the emitted defs are byte-identical to a prior
+        // bake, so it can never serve stale def_ids. Under --no-cache we
+        // still force the cold path AND overwrite below.
         const fs::path dir = DefsCache::CacheDir(gameId, defsCacheKey);
         const bool warm = !CacheControl::IsNoCache()
                        && fs::exists(dir / "unitdefs.lua.br")
@@ -680,45 +928,6 @@ int main(int argc, char* argv[])
             SLOG(SPRING_LOG_NOTICE, "defs cache warm: gameId=%s key=%s",
                  gameId.c_str(), defsCacheKey.c_str());
         } else {
-            // Probe the game's gamedata/resources.lua for the set of
-            // projectile-texture names. The weapon-def baker uses this
-            // to choose between the primary and fallback name when
-            // applying Spring's per-weaponType defaults (e.g.
-            // `missileflaretexture` is preferred when defined,
-            // otherwise `flare`). With an empty set the baker still
-            // writes the primary; the client's resolver chases any
-            // remaining alias.
-            const std::string gameDir = "data/games/" + gameId;
-            const std::string engineBaseDir = "cont/base/springcontent";
-            const auto projTextureNames =
-                ResourcesParser::GetProjectileTextureNames(
-                    gameId, gameDir, engineBaseDir);
-
-            // Serialize each def category to Lua source, then brotli-
-            // compress. Output files end in `.lua.br` and are served
-            // with `Content-Encoding: br` so the browser decompresses
-            // transparently. See PLAN-defs.md for the rationale on
-            // Lua source vs FlatBuffer.
-            namespace L = LuaDefsSerializer;
-            std::string udSrc = L::SerializeUnitDefs(
-                unitDefHandler->GetUnitDefsVec(), gameId);
-            std::string wdSrc = L::SerializeWeaponDefs(
-                weaponDefHandler->GetWeaponDefsVec(), gameId,
-                &projTextureNames);
-            auto cegDefs = CegLoader::LoadAllCegDefs();
-            std::string cdSrc = L::SerializeCegDefs(cegDefs);
-
-            std::string fdSrc;
-            size_t fdDefCount = 0;
-            if (featureDefHandler != nullptr) {
-                const fs::path modelsDir = fs::path("data/games") / gameId / "models";
-                const auto& fdVec = featureDefHandler->GetFeatureDefsVec();
-                fdSrc = L::SerializeFeatureDefs(fdVec, gameId, modelsDir);
-                fdDefCount = fdVec.empty() ? 0 : fdVec.size() - 1;
-            } else {
-                fdSrc = "return{base_url=[[]],defs={}}";
-            }
-
             auto udBytes = L::CompressBrotli(udSrc);
             auto wdBytes = L::CompressBrotli(wdSrc);
             auto cdBytes = L::CompressBrotli(cdSrc);
@@ -746,12 +955,97 @@ int main(int argc, char* argv[])
                 defsCacheKey.clear();
             }
         }
+
+        // Expected-DPS power table (AI4 / combat-resolution §2.3, ask C7).
+        // A compact power.json written into the same content-addressed cache
+        // dir, alongside the .lua.br def files. It is plain JSON (served with
+        // Content-Type: application/json by the static handler), so BOTH the
+        // strategic AI (via the sandboxed AI.getDefExport file API) and the
+        // browser client (a future fetch at the same cache/defs URL) read the
+        // identical numbers — no AI-only power math. Derived from the same
+        // parsed defs as weapondefs.lua's expected_dps. Written whenever
+        // absent (or under --no-cache); the content key already covers the
+        // inputs, so a stale power.json is impossible for a live key.
+        if (!defsCacheKey.empty()) {
+            const fs::path powerPath =
+                fs::path(DefsCache::CacheDir(gameId, defsCacheKey)) / "power.json";
+            if (CacheControl::IsNoCache() || !fs::exists(powerPath)) {
+                const std::string powerSrc =
+                    L::SerializePowerTable(unitDefHandler->GetUnitDefsVec());
+                std::error_code pec;
+                fs::create_directories(powerPath.parent_path(), pec);
+                std::ofstream pf(powerPath, std::ios::binary | std::ios::trunc);
+                if (pf) {
+                    pf.write(powerSrc.data(),
+                             static_cast<std::streamsize>(powerSrc.size()));
+                }
+                if (pf) {
+                    SLOG(SPRING_LOG_NOTICE,
+                         "power table baked: gameId=%s key=%s (%zu B JSON)",
+                         gameId.c_str(), defsCacheKey.c_str(), powerSrc.size());
+                } else {
+                    SLOG(SPRING_LOG_WARNING,
+                         "power table write failed: gameId=%s key=%s",
+                         gameId.c_str(), defsCacheKey.c_str());
+                }
+            }
+        }
     }
 
     // (playerTeamByUsername / clientPlayerNum / nextPlayerNum /
     // connectedRosterPlayers / rosterPlayersNeeded were declared above, ahead
     // of the GameServerContext that binds them; deferred-GameStart logic now
     // lives in GameStartCoordinator::CheckAndFireGameStart.)
+
+    // --- AI virtual players (PLAN-metalstorm-ai.md §1, AI3) ---
+    //
+    // Each AI slot becomes a real CPlayer with its own playerID, registered
+    // NOW — before GameStart fires — so:
+    //   (a) FireGameStart's leader pass makes the AI its OWN team's leader (its
+    //       virtual player is the only active player on that team), instead of
+    //       the old SetLeader(hostHuman) fallback; and
+    //   (b) game_authority.lua's GameStart loop over Spring.GetPlayerList()
+    //       runs its PlayerAdded flow for the AI, creating authority_player_<id>
+    //       — the exact same pool-creation path a human takes. The AI's charge
+    //       identity (its authority pool) is thus keyed by this playerID.
+    // Registering here (ahead of both the dev-mode and roster-mode GameStart)
+    // keeps the AI in GetPlayerList() at GameStart time in either mode.
+    //
+    // Deliberate departure from stock Spring, where a SkirmishAI is NOT a
+    // player (CLAUDE.md "never deviate silently"): Metalstorm's design makes
+    // the AI a virtual player (§1) so it pays authority through the same gate.
+    // isAI marks it so "lowest active player = host human" logic skips it
+    // (Simulation.cpp FireGameStart). The AI runtime setup below reads back
+    // rq.playerNum so strategos keys its spend by the same id.
+    for (auto& rq : requestedAIs) {
+        const int pNum = nextPlayerNum++;
+        CPlayer p;
+        p.name      = "AI:" + rq.id + "@t" + std::to_string(rq.team);
+        p.team      = rq.team;
+        p.active    = true;
+        p.spectator = false;
+        p.isAI      = true;
+        p.playerNum = pNum;
+        playerHandler.AddPlayer(p);
+        rq.playerNum = pNum;
+        SLOG(SPRING_LOG_NOTICE,
+            "registered AI virtual player #%d '%s' on team %d",
+            pNum, p.name.c_str(), rq.team);
+
+        // PLAN-metalstorm-ai.md §10 task 6: hand a lobby/manifest-chosen
+        // personality/difficulty profile to the AI VM through the SAME
+        // modoption transport `--modoption` already uses — no new engine
+        // surface. A synced gadget (game_teams.lua) reads this back at
+        // GameStart and republishes it as the team rulesParam
+        // `ai_profile_<playerID>` that ai/strategos/picture.lua already
+        // reads (Picture.readProfileHint). Untrusted text end to end;
+        // main.lua's resolveProfile() is the sole validator (Config.PROFILES
+        // allow-list) — this is just a transport, not a trust boundary.
+        if (!rq.profile.empty()) {
+            CGameSetup::SetModOption(
+                "ai_profile_player" + std::to_string(pNum), rq.profile);
+        }
+    }
 
     // Dev-mode: no roster means no players to wait for
     if (rosterPlayersNeeded == 0) {
@@ -815,7 +1109,23 @@ int main(int argc, char* argv[])
             // allyTeam defaults to the team id until we grow a real
             // alliance concept — teams are their own ally for now.
             const int allyTeam = rq.team;
-            if (aiPool.AddAI(match->id, rq.team, allyTeam, code)) {
+            // Pass the plugin folder so the AI VM's plugin-scoped `require`
+            // (AI0-loader) can resolve sibling modules (a multi-file AI like
+            // strategos wires config/picture/slate/planner/... via require).
+            //
+            // Also pass the two AI4 file-read sandbox roots: the processed
+            // map data dir (mapPath = data/maps/<id>, holds regions.json) and
+            // the game def cache dir (holds power.json). Empty when unset —
+            // the accessor then returns nil and the Picture treats it as
+            // "unknown", never an error.
+            //
+            // rq.playerNum was allocated by the AI virtual-player block above
+            // (AI3): strategos keys its authority charge identity by this id.
+            const std::string aiDefExportDir = defsCacheKey.empty()
+                ? std::string()
+                : DefsCache::CacheDir(gameId, defsCacheKey);
+            if (aiPool.AddAI(match->id, rq.team, allyTeam, code, match->folderPath,
+                             mapPath, aiDefExportDir, rq.playerNum)) {
                 SLOG(SPRING_LOG_NOTICE,
                     "loaded AI '%s' (%s) on team %d",
                     match->displayName.c_str(), match->id.c_str(), rq.team);
@@ -892,12 +1202,20 @@ int main(int argc, char* argv[])
             nullptr, nullptr, nullptr);
     }
     // idleExitSeconds <= 0 → never idle-exit (treat like a persistent room).
-    const bool idleExitEnabled = idleExitSeconds > 0;
+    // Headless runs have no clients by construction — idle-exit would kill them
+    // right after the startup grace, so it is force-disabled; the run instead
+    // ends on its own stop conditions + the --max-wall-min ceiling.
+    const bool idleExitEnabled = idleExitSeconds > 0 && !headlessCfg.enabled;
     const int kStartupGraceSec = idleStartupGraceSeconds;  // wait for first client
     const int kIdleExitSec = idleExitSeconds;              // then exit after no clients
     if (!roomPersistent && idleExitEnabled)
         SLOG(SPRING_LOG_NOTICE, "idle self-termination: exit after %ds with no "
             "clients (%ds startup grace)", kIdleExitSec, kStartupGraceSec);
+    const bool postGameExitEnabled = postGameExitSeconds > 0 && !headlessCfg.enabled;
+    const int kPostGameExitSec = postGameExitSeconds;
+    if (postGameExitEnabled)
+        SLOG(SPRING_LOG_NOTICE, "post-game shutdown: exit %ds after game over",
+            kPostGameExitSec);
     auto writeGameStatus = [&](bool ready, int clients) {
         if (!statusDb) return;
         char sql[256];
@@ -921,32 +1239,122 @@ int main(int argc, char* argv[])
     const auto serverStartTime = std::chrono::steady_clock::now();
     auto lastClientTime = serverStartTime;   // last instant clientCount > 0 (or launch)
     auto lastStatusWrite = serverStartTime;
+    // Wall clock of the first tick that observed a declared result. Stamped
+    // from the loop rather than read off the sim frame because the observation
+    // window is a wall-clock promise to the humans looking at the overlay, and
+    // the sim frame stops advancing the moment the result lands.
+    std::optional<std::chrono::steady_clock::time_point> gameOverAt;
 
     // (The team-stats-history send cursor + win-check latch + State-tier lane
     // constants now live as StateStreamer members.)
 
-    while (keepRunning.load()) {
-        // Re-read wantedSpeedFactor every tick so live speed changes
-        // (via the `speed` exec verb) apply immediately.
-        tickInterval = computeTickInterval();
+    // Headless-run stop-condition latches (PLAN-headless task 1). Once the
+    // synced-Lua predicate has been observed true / errored it stays latched so
+    // the run stops even if a later poll would read differently. Unused unless
+    // headlessCfg.enabled.
+    bool headlessLuaMet = false;
+    bool headlessLuaErrored = false;
+    headless::StopReason headlessStopReason = headless::StopReason::None;
 
-        // Wait for next tick
-        auto now = std::chrono::steady_clock::now();
-        if (now < nextTick) {
-            std::this_thread::sleep_until(nextTick);
+    // Stats-dump snapshots (PLAN-headless task 2), taken every
+    // headlessCfg.stateHashEvery sim frames plus once more at termination.
+    // Unused unless headlessCfg.enabled && headlessCfg.stateHashEvery > 0.
+    std::vector<statsdump::Snapshot> headlessSnapshots;
+    auto captureHeadlessSnapshot = [&](int64_t wallSec) {
+        statsdump::Snapshot snap;
+        snap.frame = sim.GetFrameNum();
+        snap.gameSeconds = snap.frame / (double)GAME_SPEED;
+        snap.wallSeconds = wallSec;
+        snap.simFps = perfMetrics.GetSnapshot().simFps;
+        snap.rssKb = statsdump::GetRssKb();
+        snap.luaHeapKb = GetSyncedLuaHeapKb();
+
+        // Determinism digest: xor-fold every active unit's id/team/pos/health
+        // (stable engine-defined iteration order) plus the synced RNG state.
+        std::vector<statsdump::UnitDigest> digest;
+        digest.reserve(unitHandler.GetActiveUnits().size());
+        for (const CUnit* u : unitHandler.GetActiveUnits()) {
+            statsdump::UnitDigest d;
+            d.id = u->id;
+            d.team = static_cast<int16_t>(u->team);
+            d.x = u->pos.x; d.y = u->pos.y; d.z = u->pos.z;
+            d.health = u->health;
+            digest.push_back(d);
         }
-        nextTick += tickInterval;
+        snap.stateHash = statsdump::ComputeStateHash(digest, gsRNG.GetGenState());
 
-        // If we fell behind, skip ticks rather than accumulating
-        now = std::chrono::steady_clock::now();
-        if (now > nextTick + tickInterval) {
-            int skipped = 0;
-            while (nextTick + tickInterval < now) {
-                nextTick += tickInterval;
-                skipped++;
+        for (int t = 0; t < teamHandler.ActiveTeams(); ++t) {
+            const CTeam* team = teamHandler.Team(t);
+            const TeamStatistics& ts = team->GetCurrentStats();
+            statsdump::TeamSnapshot row;
+            row.teamId = t;
+            row.allyTeam = team->teamAllyteam;
+            row.dead = team->isDead;
+            row.numUnits = static_cast<int>(team->numUnits);
+            row.metal = team->res.metal;
+            row.energy = team->res.energy;
+            row.metalIncome = team->resIncome.metal;
+            row.energyIncome = team->resIncome.energy;
+            row.metalExpense = team->resExpense.metal;
+            row.energyExpense = team->resExpense.energy;
+            row.damageDealt = ts.damageDealt;
+            row.damageReceived = ts.damageReceived;
+            row.unitsProduced = ts.unitsProduced;
+            row.unitsDied = ts.unitsDied;
+            row.unitsKilled = ts.unitsKilled;
+            snap.teams.push_back(row);
+        }
+
+        for (const auto& [weaponDefId, totals] : combatStats.Snapshot()) {
+            statsdump::WeaponStats row;
+            row.weaponDefId = weaponDefId;
+            row.volleys = totals.volleys;
+            row.kills = totals.kills;
+            row.damage = totals.damage;
+            snap.weapons.push_back(row);
+        }
+
+        headlessSnapshots.push_back(std::move(snap));
+    };
+
+    while (keepRunning.load()) {
+        // --- Pacing ---
+        // Normal games (and headless realtime / xN) sleep to hit the target tick
+        // interval; headless "uncapped" skips wall-clock pacing entirely and
+        // ticks as fast as the sim computes (the sim thread is decoupled from
+        // any render). The `headlessUncapped` guard is the ONLY divergence on
+        // the normal path — with headless off it is always false, so behaviour
+        // is byte-identical (the tick-gate-off regression bar, PLAN-headless §6).
+        const bool headlessUncapped =
+            headlessCfg.enabled && headlessCfg.tickMode == headless::TickMode::Uncapped;
+        if (!headlessUncapped) {
+            // Re-read wantedSpeedFactor every tick so live speed changes (via the
+            // `speed` exec verb) apply immediately. A headless realtime/xN run
+            // paces from its run config instead — there is no client to send
+            // speed verbs.
+            tickInterval = headlessCfg.enabled
+                ? std::chrono::microseconds(headless::TickIntervalMicros(
+                      headlessCfg.tickMode, headlessCfg.tickMultiple, GAME_SPEED))
+                : computeTickInterval();
+
+            // Wait for next tick
+            auto now = std::chrono::steady_clock::now();
+            if (now < nextTick) {
+                std::this_thread::sleep_until(nextTick);
             }
-            if (skipped > 0) {
-                SLOG(SPRING_LOG_WARNING, "sim fell behind, skipped %d ticks", skipped);
+            nextTick += tickInterval;
+
+            // If we fell behind, skip ticks rather than accumulating
+            now = std::chrono::steady_clock::now();
+            if (now > nextTick + tickInterval) {
+                int skipped = 0;
+                while (nextTick + tickInterval < now) {
+                    nextTick += tickInterval;
+                    skipped++;
+                }
+                if (skipped > 0) {
+                    SLOG(SPRING_LOG_WARNING, "sim fell behind, skipped %d ticks", skipped);
+                }
             }
         }
 
@@ -974,11 +1382,43 @@ int main(int argc, char* argv[])
                     keepRunning.store(false);
                 }
             }
+            // Post-game exit: a finished war has nothing left to serve, so the
+            // process stops and hands its port back once the observation
+            // window closes. Idle exit does not cover this — players who leave
+            // the result overlay open never trip it, and the room held :9100
+            // indefinitely (observed live, 2026-08-03). Applies to persistent
+            // rooms too: persistence is about surviving an *empty* room, not
+            // about outliving the match. Headless runs are excluded — their
+            // own stop conditions already treat game over as a stop and would
+            // otherwise be pre-empted by this timer's exit reason.
+            if (postGameExitEnabled && gameOverRelay.IsDeclared()) {
+                if (!gameOverAt) gameOverAt = wall;
+                const int since = static_cast<int>(
+                    std::chrono::duration_cast<std::chrono::seconds>(
+                        wall - *gameOverAt).count());
+                if (postgame::ShouldExit(true, since, kPostGameExitSec)) {
+                    SLOG(SPRING_LOG_NOTICE,
+                        "game over %ds ago — shutting down finished game server "
+                        "(frame %d, %d client(s) still connected)",
+                        since, sim.GetFrameNum(), clients);
+                    keepRunning.store(false);
+                }
+            }
         }
 
         perfMetrics.BeginTick();
         // Rate-limit token buckets now refill lazily on command arrival;
         // no per-tick reset required. See ClientSession::TryConsumeCommandBudget.
+
+        // Open the journal's tick window (PLAN-replay task 1). Everything
+        // recorded until the next BeginTick is stamped with this frame; the
+        // SetPhase calls below mark which of the tick's five input phases each
+        // record belongs to. Note the frame is read BEFORE SimFrame — inputs
+        // applied this tick act on the state at frame N and must replay there,
+        // not at N+1. While the sim is paused or pre-GameStart the frame does
+        // not advance at all, which is exactly why records also carry the
+        // monotonic `seq` (see TickPhase's comment).
+        syncedinput::Journal().BeginTick(sim.GetFrameNum());
 
         // Drain inbound messages from WebTransport streams and dispatch each
         // through the extracted ClientMessageHandler.
@@ -994,6 +1434,7 @@ int main(int argc, char* argv[])
         // to AI, end the game, etc.). We also broadcast a PlayerLeft
         // FlatBuffers message so remaining clients can update their UI.
         {
+            syncedinput::Journal().SetPhase(syncedinput::TickPhase::Disconnect);
             auto disconnects = rtcServer.DrainDisconnects();
             for (ClientID dcId : disconnects) {
                 // C1: drop the handshake gate first — a client that handshook
@@ -1004,16 +1445,27 @@ int main(int argc, char* argv[])
                 auto* session = sessions.GetSession(dcId);
                 if (!session) continue;
 
+                // PLAN-quickstart.md §3.3: a PlayerLeaveIntent sent just before
+                // this disconnect (e.g. gpDetach) overrides the default reason
+                // 0 (voluntary quit) — lets PlayerRemoved distinguish a parked/
+                // reconnecting player from one who actually quit.
+                uint8_t leaveReason = 0;
+                auto lrIt = pendingLeaveReason.find(dcId);
+                if (lrIt != pendingLeaveReason.end()) {
+                    leaveReason = lrIt->second;
+                    pendingLeaveReason.erase(lrIt);
+                }
+
                 SLOG(SPRING_LOG_NOTICE,
-                    "player '%s' (client %u, team %d) disconnected",
-                    session->username.c_str(), dcId, session->team);
+                    "player '%s' (client %u, team %d) disconnected (reason=%d)",
+                    session->username.c_str(), dcId, session->team, leaveReason);
 
                 // Broadcast PlayerLeft to remaining clients
                 auto plMsg = Protocol::BuildPlayerLeft(
                     static_cast<uint32_t>(session->userId),
                     session->username,
                     static_cast<int8_t>(session->team),
-                    0 /* reason: voluntary quit */);
+                    leaveReason);
                 rtcServer.BroadcastReliable(plMsg.data(), plMsg.size());
 
                 // Fire the Spring PlayerRemoved callin into Lua so
@@ -1022,16 +1474,29 @@ int main(int argc, char* argv[])
                 auto pIt = clientPlayerNum.find(dcId);
                 if (pIt != clientPlayerNum.end()) {
                     int pNum = pIt->second;
-                    playerHandler.PlayerLeft(pNum, 0);
-                    eventHandler.PlayerRemoved(pNum, 0);
+                    // Journal chokepoint #2 of 5: a disconnect fires
+                    // PlayerRemoved into synced Lua, so gadgets can (and in
+                    // Metalstorm do) change synced state in response. Only
+                    // recorded for a client that reached a player number —
+                    // an unauthenticated drop touches nothing synced.
+                    syncedinput::Journal().RecordDisconnect(pNum, leaveReason);
+                    playerHandler.PlayerLeft(pNum, leaveReason);
+                    eventHandler.PlayerRemoved(pNum, leaveReason);
                     // Forward to the client LuaUI worker (widget:PlayerRemoved).
-                    playerTeamEvents.Push({PlayerTeamEventData::PlayerRemoved, 0,
+                    playerTeamEvents.Push({PlayerTeamEventData::PlayerRemoved, leaveReason,
                                            static_cast<uint32_t>(pNum)});
                     clientPlayerNum.erase(pIt);
                 }
 
                 handshakedClients.erase(dcId);
                 sessions.RemoveSession(dcId);
+
+                // The roster changed: the leaver's entry is now inactive.
+                // Broadcast after RemoveSession/erase so the snapshot reflects
+                // the post-disconnect state rather than the state we just left.
+                // Kept (not removed) so a scoreboard can still name a player
+                // who dropped — see PlayerEntry.active in protocol.fbs.
+                Protocol::BroadcastPlayerRoster(ctx);
             }
         }
 
@@ -1043,15 +1508,33 @@ int main(int argc, char* argv[])
         // combat events kept streaming. Gating SimFrame here stops the sim
         // cleanly while the loop keeps running (GameInfo still broadcasts
         // paused=true, console commands still process).
-        if (sim.HasGameStarted() && !g_luaDebugger.IsPaused() && !gs->paused) {
+        //
+        // Also skip once the match is over. Declaring a winner used to be a
+        // pure notification: the sim ran on past the declared frame for as
+        // long as the room lived, spawning objectives and paying out income
+        // into a finished war (PostGamePolicy.h has the measurements). Game
+        // over freezes the world at the frame the clients were shown as the
+        // result. The loop itself keeps running — admin `exec` still works
+        // for post-mortem inspection, and the observation-window timer in the
+        // lifetime-bookkeeping block above is what stops the process.
+        if (sim.HasGameStarted() && !g_luaDebugger.IsPaused() && !gs->paused
+            && !gameOverRelay.IsDeclared()) {
             sim.SimFrame();
             springlog_set_frame(sim.GetFrameNum());
         }
 
         // Process pending console commands (from WS thread or HTTP)
         {
+            syncedinput::Journal().SetPhase(syncedinput::TickPhase::LuaExec);
             LuaExecRequest req;
             while (luaExecEngine.TryPop(req)) {
+                // Journal chokepoint #3 of 5: exec runs arbitrary Lua against
+                // the synced state (spawn, kill, give resources, set cheats —
+                // the whole spring-debug MCP surface arrives here via
+                // /api/exec). Recorded at the drain, not at Push: Push happens
+                // on the network/HTTP thread at an indeterminate moment, and
+                // it is the drain frame that decides what the code observes.
+                syncedinput::Journal().RecordLuaExec(-1, req.scope, req.code);
                 auto result = ExecuteLuaExecRequest(req);
                 // Deliver to sync waiters (HTTP POST /api/exec)
                 luaExecEngine.DeliverResult(result);
@@ -1069,6 +1552,7 @@ int main(int argc, char* argv[])
         // piece/build streaming, standing-order eval, AI tick, combat/decal/
         // heightmap/lifecycle/team-stats/LOS broadcasts). Runs every block in
         // the exact prior source order; see StateStreamer::Tick.
+        syncedinput::Journal().SetPhase(syncedinput::TickPhase::Stream);
         streamer.Tick(sim.GetFrameNum());
 
         const int entityCount = static_cast<int>(unitHandler.GetActiveUnits().size());
@@ -1086,7 +1570,8 @@ int main(int argc, char* argv[])
             const auto snap = perfMetrics.GetSnapshot();
             metricsWriter.SampleTick(snap.tickTimeUs);
             const bool simRunning = sim.HasGameStarted() && !g_luaDebugger.IsPaused() &&
-                                    !gs->paused && rtcServer.GetClientCount() > 0;
+                                    !gs->paused && !gameOverRelay.IsDeclared() &&
+                                    rtcServer.GetClientCount() > 0;
             metricsWriter.MaybeWrite(snap.frame, snap.clientCount, entityCount,
                                      snap.simFps, gs->speedFactor, simRunning);
         }
@@ -1096,6 +1581,77 @@ int main(int argc, char* argv[])
         if (frame > 0 && (frame % (GAME_SPEED * 10)) == 0) {
             SLOG(SPRING_LOG_INFO, "frame %d (%.1fs) clients=%d",
                 frame, frame / (float)GAME_SPEED, rtcServer.GetClientCount());
+        }
+
+        // --- Headless run: stop-condition evaluation (PLAN-headless task 1) ---
+        // Only reached under --headless-run, so a normal game never enters this
+        // block (regression bar). Evaluated after the tick + streamer, so the
+        // game-over relay and frame count reflect this frame. The synced-Lua
+        // predicate is polled every 30 game-seconds (§1) and its result latched.
+        if (headlessCfg.enabled) {
+            if (headlessCfg.stopAt.luaCondition && !headlessLuaMet &&
+                !headlessLuaErrored && frame > 0 &&
+                (frame % (GAME_SPEED * 30)) == 0) {
+                std::string perr;
+                const auto pr = EvalSyncedPredicate(
+                    *headlessCfg.stopAt.luaCondition, perr);
+                if (pr == SyncedPredicateResult::Error) {
+                    headlessLuaErrored = true;   // E3: treat as stop, never a hang
+                    SLOG(SPRING_LOG_ERROR, "headless luaCondition '%s' errored: %s",
+                        headlessCfg.stopAt.luaCondition->c_str(), perr.c_str());
+                } else if (pr == SyncedPredicateResult::True) {
+                    headlessLuaMet = true;
+                }
+            }
+
+            headless::RunState rs;
+            rs.frame = frame;
+            rs.gameOverDeclared = gameOverRelay.IsDeclared();
+            rs.luaConditionMet = headlessLuaMet;
+            rs.luaConditionErrored = headlessLuaErrored;
+            rs.wallElapsedSec = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - serverStartTime).count();
+
+            // Stats-dump snapshot cadence (task 2 §1 "stateHashEvery"). Frame 0
+            // is skipped — before GameStart there is nothing meaningful to hash.
+            if (headlessCfg.stateHashEvery > 0 && frame > 0 &&
+                (frame % headlessCfg.stateHashEvery) == 0) {
+                captureHeadlessSnapshot(rs.wallElapsedSec);
+            }
+
+            headlessStopReason = headless::EvaluateStop(
+                headlessCfg.stopAt, headlessCfg.maxWallSec, rs);
+            if (headlessStopReason != headless::StopReason::None) {
+                SLOG(SPRING_LOG_NOTICE,
+                    "headless run complete: stop=%s frame=%d (%.1fs) wall=%llds",
+                    headless::StopReasonName(headlessStopReason), frame,
+                    frame / (float)GAME_SPEED, (long long)rs.wallElapsedSec);
+                keepRunning.store(false);
+
+                // Final stats dump (task 2 §1 "JSON at termination"). Always
+                // takes one last snapshot regardless of stateHashEvery cadence,
+                // so the dump's terminal row matches the reported stop frame.
+                if (!headlessCfg.statsDump.empty()) {
+                    if (headlessCfg.stateHashEvery <= 0 ||
+                        (frame % headlessCfg.stateHashEvery) != 0) {
+                        captureHeadlessSnapshot(rs.wallElapsedSec);
+                    }
+                    statsdump::FinalDump dump;
+                    dump.status = headless::StopReasonName(headlessStopReason);
+                    dump.frame = frame;
+                    dump.gameSeconds = frame / (double)GAME_SPEED;
+                    dump.wallSeconds = rs.wallElapsedSec;
+                    dump.snapshots = headlessSnapshots;
+                    std::string dumpErr;
+                    if (!statsdump::WriteDumpFile(headlessCfg.statsDump, dump, dumpErr)) {
+                        SLOG(SPRING_LOG_ERROR, "headless stats dump write failed: %s",
+                            dumpErr.c_str());
+                    } else {
+                        SLOG(SPRING_LOG_NOTICE, "headless stats dump written: %s (%zu snapshots)",
+                            headlessCfg.statsDump.c_str(), headlessSnapshots.size());
+                    }
+                }
+            }
         }
     }
 
@@ -1107,6 +1663,14 @@ int main(int argc, char* argv[])
                                static_cast<int>(unitHandler.GetActiveUnits().size()),
                                snap.simFps, gs->speedFactor, /*simRunning=*/false);
     }
+
+    // Synced-input cause-stream summary (PLAN-replay task 1). Emitted whether
+    // or not --journal-audit attached a journal: the funnel's counters run
+    // unconditionally, so every run reports how many synced inputs it applied.
+    // A run that reports recorded=0 while units clearly moved is the signal
+    // that an input path bypassed the funnel.
+    SLOG(SPRING_LOG_NOTICE, "synced-input journal: %s",
+         syncedinput::FormatAudit(syncedinput::Journal().Stats()).c_str());
 
     // Clear our liveness row so the lobby/launch_game stop treating us as a
     // live, ready game server. On restart the re-exec'd process republishes it.

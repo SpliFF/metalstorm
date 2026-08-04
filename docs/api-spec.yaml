@@ -96,6 +96,7 @@ components:
               name: { type: string }
               team: { type: integer }
               start_pos: { type: integer }
+              profile: { type: string }
 
     Error:
       type: object
@@ -311,6 +312,13 @@ paths:
                 ai_id: { type: string }
                 name: { type: string }
                 team: { type: integer, default: 0 }
+                profile:
+                  type: string
+                  description: >
+                    Optional personality/difficulty profile for AI plugins
+                    that support one (PLAN-metalstorm-ai.md §10 task 6).
+                    Equivalent to adding the slot then calling
+                    /api/rooms/ai/profile.
 
   /api/rooms/ai/remove:
     post:
@@ -326,6 +334,44 @@ paths:
               properties:
                 slot_index: { type: integer }
 
+  /api/rooms/ai/team:
+    post:
+      summary: Reassign an AI slot to a different team (host only)
+      tags: [Rooms]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [slot_index, team]
+              properties:
+                slot_index: { type: integer }
+                team: { type: integer }
+
+  /api/rooms/ai/profile:
+    post:
+      summary: >
+        Set (or, with profile:"", clear) an AI slot's personality/difficulty
+        profile (host only). PLAN-metalstorm-ai.md §10 task 6 — profiles
+        move planner scoring/commitment/budget-governor behaviour, never
+        fog or per-unit accuracy. `profile` is opaque, game-specific text
+        (Metalstorm's strategos ships "default"/"aggressive"/"caretaker"/
+        "mentor"/"npc_raider" — see ai/strategos/config.lua's
+        Config.PROFILES); the engine only carries it through to the AI VM,
+        which validates it.
+      tags: [Rooms]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [slot_index]
+              properties:
+                slot_index: { type: integer }
+                profile: { type: string }
+
   /api/rooms/start:
     post:
       summary: Start the game (host only, all players must be ready)
@@ -337,6 +383,54 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Room" }
+
+  /api/client-errors:
+    post:
+      summary: Submit a client-side crash/fatal report
+      description: >
+        PLAN-client-resilience.md task 3. The client's watchdog/context-loss/
+        fatal-error hooks POST here; size-capped at 40KB, rate-limited to
+        20/hour/user server-side (the client's own advisory cap is 5/hour per
+        session). Disabled server-wide with the lobby's
+        `--disable-client-error-reports` flag (surfaced via `errorReportingEnabled`
+        on `/api/version`).
+      tags: [Client]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string, enum: [fatal, wedged, contextLost, messageError, injected] }
+                error_class: { type: string }
+                message: { type: string }
+                stack: { type: string }
+                stack_hash: { type: string }
+                recovery_rung: { type: string }
+                phase: { type: string }
+                frame: { type: integer }
+                entity_count: { type: integer }
+                game_id: { type: string }
+                map_id: { type: string }
+                build_stamp: { type: string }
+                gpu_renderer: { type: string }
+                log_ring: { type: array, items: { type: string } }
+                count: { type: integer }
+      responses:
+        "200":
+          description: Report stored
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  id: { type: integer }
+        "413":
+          description: Report exceeds the size cap
+        "429":
+          description: Rate limited (20/hour/user)
 
   /api/wt/info:
     get:

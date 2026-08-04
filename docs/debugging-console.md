@@ -157,6 +157,47 @@ Regex-based parsers that don't account for these **fail silently** (no match →
 
 Switch scopes with the dropdown or the `/connect` meta-command.
 
+### The synced Lua surface seen by `LuaRules`/`LuaGaia` exec
+
+`ExecuteInLuaState()` (`rts/Server/LuaExecEngine.cpp`) runs your code directly
+against the *same* `lua_State*` as `luaRules->syncedLuaHandle` / `luaGaia->syncedLuaHandle`
+— the identical state gadgets execute in, not a copy or a restricted sandbox.
+`GADGET_ALLOWLIST` (set per-game in `LuaRules/main.lua`) only filters which
+gadget *files* get loaded; it has no effect on which `Spring.*` C functions
+exist. Every `Spring.*` entry point — including newer additions like
+`Spring.CreateOrgGroup`/`GetOrgGroups`/`CreateDirective` — is registered once,
+unconditionally, in `LuaSyncedCtrl::PushEntries()` before any gadget or exec
+code runs (`CSyncedLuaHandle::Init()`, `LuaHandleSynced.cpp`). If a `Spring.*`
+function you know exists in the C++ source shows up `nil` in a live exec
+session, suspect a **stale/unrebuilt binary** first — the lobby spawns
+`build/release/spring-server` (not `build/debug`) by default, and adding a new
+`.cpp` file (e.g. a new `Server/*.cpp`) needs a CMake reconfigure before an
+incremental build picks it up. Confirm the C++ function is actually linked in
+before treating an exec-surfaced `nil` as an environment bug — a Lua-mocked
+busted-test pass (`*_mock.lua`) proves the *Lua side* calls the function, not
+that the *live binary* has it wired.
+
+**`GG` is the one deliberate exception**, and it is *not* an engine bug:
+vanilla Spring/Recoil's gadget sandbox (`cont/base/springcontent/LuaGadgets/gadgets.lua`,
+`gadgetHandler:NewGadget()`) copies `gadgetHandler.GG` into each gadget's
+private `setfenv`'d environment table — it is never assigned to the real Lua
+global table (`_G`). That's true both for a live game and for exec, and it's
+intentional (keeps `GG` gadget-scoped like every other per-gadget global,
+matching upstream behaviour) — this project does not patch `gadgets.lua` to
+leak it into `_G` project-wide. Since exec code runs with the real `_G` as its
+environment, plain `GG` is genuinely absent there. Two ways to reach it from
+exec:
+
+```lua
+LuaRules> return gadgetHandler.GG.Authority
+```
+
+or just reference `GG` directly — `ExecuteInLuaState()` prepends a
+`local GG = gadgetHandler and gadgetHandler.GG` alias to every exec call
+(LuaRules and LuaGaia both), scoped to that one call only. It changes nothing
+about the real synced environment gadgets run in; it only makes the debug
+console as ergonomic as gadget code for this one name.
+
 ### Meta-Commands
 
 These work in all scopes and start with `/`:

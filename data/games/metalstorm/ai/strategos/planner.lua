@@ -31,8 +31,13 @@ local function buildPackages(picture, role)
                 strength = bucket.strength,
                 baseSum  = bucket.strength,   -- proxy for Σ authority_cost_base
                 groups   = bucket.groups or {},
-                locked   = false,             -- set by guidance asset_locks
-                idle     = true,              -- TODO: from group directive age (§5.1)
+                locked   = bucket.locked or false,  -- guidance asset_locks or explicit
+                -- idle state: co-commander etiquette (§5.1) — only assign idle force.
+                -- Read from the ledger bucket if present, else default to true (unknown
+                -- = treat as idle, safe conservative default). The real tracking comes
+                -- from directive age (groups directed within last 3 min are NOT idle);
+                -- that logic lives in picture.lua's force-ledger builder (AI1-blocked).
+                idle     = (bucket.idle ~= nil) and bucket.idle or true,
             }
         end
     end
@@ -65,10 +70,22 @@ end
 -- 3. Scoring (§3.2).  Every term is a plain function of the Picture.
 --=============================================================================
 
+--- Stance bias (guidance §6.2, BINDING). A human sets one of three stances on
+-- the guidance store (game_ai_guidance.lua STANCES); it re-weights the whole
+-- goal slate by kind. `defensive` leans the co-commander into holding ground
+-- and discounts pushing out; `aggressive` does the reverse; `balanced` (and any
+-- unset/unknown stance) is neutral — no entry, ×1. This is the coarse "how hard
+-- should you press" dial that sits above the per-goal delegation weights.
+local STANCE_BIAS = {
+    defensive  = { DEFEND = 1.5, SCOUT = 1.0, EXPAND = 0.55, BUILD = 1.1, OBJECTIVE = 0.9,  RESERVE = 1.0 },
+    aggressive = { DEFEND = 0.8, SCOUT = 1.1, EXPAND = 1.45, BUILD = 1.0, OBJECTIVE = 1.25, RESERVE = 1.0 },
+}
+
 --- expectedValue: objective reward | region value, scaled by profile weights
--- (aggression multiplies enemy-owned region value; §3.4) and guidance paint.
--- Region-derived values are lifted onto the authority scale (§3.2 "× strategic
--- weights"); objective goals already carry an authority reward and are not.
+-- (aggression multiplies enemy-owned region value; §3.4), guidance paint, and
+-- the guidance stance. Region-derived values are lifted onto the authority
+-- scale (§3.2 "× strategic weights"); objective goals already carry an
+-- authority reward and are not.
 local function expectedValue(goal, picture, profile, guidance, config)
     local v = goal.value or 0
     if goal.kind ~= 'OBJECTIVE' then
@@ -81,6 +98,8 @@ local function expectedValue(goal, picture, profile, guidance, config)
     if goal.region and guidance.regionPaint[goal.region] == 'priority' then
         v = v * 2.0                                    -- guidance §6.2 (binding)
     end
+    local bias = STANCE_BIAS[guidance.stance]          -- guidance stance (binding)
+    if bias then v = v * (bias[goal.kind] or 1.0) end
     return v
 end
 
@@ -127,13 +146,19 @@ local function sourceWeight(goal, role, guidance, profile)
     return w
 end
 
-local function authorityCost(goal, pkg, picture, gov, config)
+--- Region-ownership bucket for the cost formula's regionMod (friendly/
+-- neutral/enemy). GOAL-dependent only (never `pkg`) — hoisted to per-goal
+-- in `assign` (task 7 perf pass) rather than recomputed once per package.
+local function regionKind(goal, picture)
     local r = goal.region and (picture.regions or {})[goal.region]
-    local kind = 'neutral'
     if r then
-        if r.owner == picture.economy._teamId then kind = 'friendly'
-        elseif r.owner and r.owner ~= -1 then kind = 'enemy' end
+        if r.owner == picture.economy._teamId then return 'friendly' end
+        if r.owner and r.owner ~= -1 then return 'enemy' end
     end
+    return 'neutral'
+end
+
+local function authorityCost(goal, pkg, kind, gov, config)
     if goal.kind == 'DEFEND' then
         return config.predictPostureCost(pkg, kind, gov.costScale)
     end
@@ -154,6 +179,21 @@ end
 
 --=============================================================================
 -- 5+6. Greedy assignment with force floors + commitment hysteresis (§3.3).
+--
+-- PERF (§10 task 7 — measured at the §6 50-region/500-squad fixture: this
+-- loop is goals×packages and was the dominant strategic-tick cost, ~65% of
+-- the tick, mostly two things the profile indicted:
+--   1. `expectedValue`/`sourceWeight`/the region-kind lookup are functions of
+--      GOAL alone — they never read `pkg` — but were being recomputed once
+--      per (goal, pkg) pair. Hoisted out to once per goal.
+--   2. Every candidate pair allocated its own hash table (`pairs_[#pairs_+1]
+--      = {goal=..., pkg=..., ...}`), ~goals×packages allocations/tick (the
+--      dominant source of the measured per-tick GC churn). Replaced with
+--      parallel arrays sorted by an index permutation; only the handful of
+--      WINNING assignments (≤ #goals) get a real table, in `emit`'s shape.
+-- Same scores, same tie-breaks, same greedy order as before — this is a
+-- constant-factor rewrite, not a behaviour change (planner_spec.lua's
+-- fixture-level assertions are the regression guard).
 --=============================================================================
 local function assign(goals, packages, ctx)
     local picture, profile, role = ctx.picture, ctx.profile, ctx.role
@@ -161,68 +201,84 @@ local function assign(goals, packages, ctx)
     local commitments = ctx.commitments
     local guidance = picture.guidance
 
-    -- Score every (goal, package) pair the guidance allows. RESERVE is NOT a
-    -- competitor — it is the sink for force no real goal claimed (§3.1), so it
-    -- is excluded here and swept up after assignment. (Otherwise, since scores
-    -- are cost-dominated and often negative, cheap RESERVE could out-rank a
-    -- costly real objective and steal its package.)
-    local pairs_ = {}
+    -- Parallel candidate arrays (index i <-> one (goal, pkg) pair). RESERVE
+    -- is NOT a competitor — it is the sink for force no real goal claimed
+    -- (§3.1), so it is excluded here and swept up after assignment.
+    -- (Otherwise, since scores are cost-dominated and often negative, cheap
+    -- RESERVE could out-rank a costly real objective and steal its package.)
+    local cGoal, cPkg, cScore, cPs, cCost, cTie = {}, {}, {}, {}, {}, {}
+    local n = 0
+
     for _, goal in ipairs(goals) do
         if not guidanceExcludes(goal, guidance) and goal.kind ~= 'RESERVE' then
+            -- Package-independent terms: once per goal, not once per pair.
+            local ev = expectedValue(goal, picture, profile, guidance, config)
+            local sw = sourceWeight(goal, role, guidance, profile)
+            local kind = regionKind(goal, picture)
+            local c = commitments[goal.id]
+
             for _, pkg in ipairs(packages) do
                 local locked = pkg.locked or guidance.assetLocks[pkg.id]
                 -- Co-commander etiquette: only assign idle/unassigned force,
                 -- and never a locked group (§5.1 / §6.2 lock beats idle).
                 local touchable = (not locked) and (not role.idleOnly or pkg.idle)
                 if touchable then
-                    local ev = expectedValue(goal, picture, profile, guidance, config)
                     local ps = pSuccess(pkg, goal, picture, profile)
-                    local cost = authorityCost(goal, pkg, picture, gov, config)
+                    local cost = authorityCost(goal, pkg, kind, gov, config)
                     local travel = travelPenalty(pkg, goal, picture, config)
-                    local sw = sourceWeight(goal, role, guidance, profile)
                     -- commitment bonus: sticky if this pkg already serves goal.
                     local bonus = 0
-                    local c = commitments[goal.id]
                     if c and c.packageId == pkg.id then
                         local age = picture.frame - (c.sinceFrame or picture.frame)
                         bonus = math.max(0, 1 - age / config.COMMITMENT_DECAY_FRAMES)
                     end
-                    local score = ev * ps * sw - cost - travel + bonus
-                    pairs_[#pairs_ + 1] = {
-                        goal = goal, pkg = pkg, score = score, ps = ps, cost = cost,
-                    }
+                    n = n + 1
+                    cGoal[n], cPkg[n] = goal, pkg
+                    cScore[n] = ev * ps * sw - cost - travel + bonus
+                    cPs[n], cCost[n] = ps, cost
+                    -- Tie-break assigned up front (§10): calling rng.random()
+                    -- inside the sort comparator would violate the strict
+                    -- weak ordering table.sort requires (non-deterministic
+                    -- across calls for the same pair).
+                    cTie[n] = rng.random()
                 end
             end
         end
     end
 
-    -- Descending score; deterministic tie-break via the seeded RNG (§10).
-    table.sort(pairs_, function(a, b)
-        if a.score == b.score then return rng.random() < 0.5 end
-        return a.score > b.score
+    -- Descending score; deterministic tie-break via the pre-assigned value.
+    local order = {}
+    for i = 1, n do order[i] = i end
+    table.sort(order, function(i, j)
+        if cScore[i] == cScore[j] then return cTie[i] < cTie[j] end
+        return cScore[i] > cScore[j]
     end)
 
     local usedPkg, usedGoal, assignments = {}, {}, {}
     local floor = math.max(config.PSUCCESS_FLOOR, profile.pSuccessFloor or 0)
-    for _, cand in ipairs(pairs_) do
-        local gid, pid = cand.goal.id, cand.pkg.id
+    for _, idx in ipairs(order) do
+        local goal, pkg = cGoal[idx], cPkg[idx]
+        local gid, pid = goal.id, pkg.id
         if not usedPkg[pid] and not usedGoal[gid] then
             -- Force floor (§3.3): don't trickle into a losing fight. DEFEND is
             -- exempt (defending your own valuable ground is always worth it).
-            local exemptFloor = cand.goal.kind == 'DEFEND'
-            if exemptFloor or cand.ps >= floor then
+            local exemptFloor = goal.kind == 'DEFEND'
+            if exemptFloor or cPs[idx] >= floor then
                 -- Hysteresis: replacing an existing commitment needs to clear
                 -- the reassign bar (§3.3) — prevents thrash.
                 local existing = commitments[gid]
                 local barOK = true
                 if existing and existing.packageId ~= pid then
-                    barOK = cand.score > (existing.score or 0) * config.REASSIGN_BAR
+                    barOK = cScore[idx] > (existing.score or 0) * config.REASSIGN_BAR
                 end
                 if barOK then
                     usedPkg[pid], usedGoal[gid] = true, true
-                    assignments[#assignments + 1] = cand
+                    assignments[#assignments + 1] = {
+                        goal = goal, pkg = pkg, score = cScore[idx],
+                        ps = cPs[idx], cost = cCost[idx],
+                    }
                     commitments[gid] = {
-                        packageId = pid, sinceFrame = picture.frame, score = cand.score,
+                        packageId = pid, sinceFrame = picture.frame, score = cScore[idx],
                     }
                 end
             end
@@ -260,6 +316,11 @@ local function emit(assignments, packages, usedPkg, ctx)
                     region    = a.goal.region,
                     goalId    = a.goal.id,
                     predictedCost = a.cost,
+                    -- Committed force size (the assigned package's aggregate
+                    -- strength) → the directive's requestedStrength demand cap
+                    -- in the actuator, so one directive can't drain the whole
+                    -- idle pool (plan §3.2 demand model).
+                    strength  = a.pkg.strength,
                 }
                 intent[#intent + 1] = {
                     goal = a.goal.id, group = pid, region = a.goal.region,
@@ -329,6 +390,91 @@ function Planner.plan(ctx)
 
     local assignments, usedPkg = assign(ctx.slate, packages, ctx)
     return emit(assignments, packages, usedPkg, ctx)
+end
+
+--=============================================================================
+-- Proposal/demand evaluation (PLAN-metalstorm-interaction.md §6.2 "AI
+-- proposal evaluation: expected value of terms vs alternatives ... weighted
+-- by the trust ledger and, for demands, by credibility"). PURE — takes the
+-- Picture + profile/role, returns a plain decision list; the caller
+-- (main.lua) applies it via Actuators:respondProposal (engine ask I1). No
+-- Spring/GG/AI access here, same discipline as Planner.plan.
+--=============================================================================
+local TRUST_VALUE_WEIGHT       = 5    -- authority-equivalent value per trust point
+local CEASEFIRE_BASE_VALUE     = 30   -- ceasefires save future order-cost/losses
+local DEMAND_CREDIBILITY_FLOOR = 0.55 -- comply when we'd likely lose the fight anyway
+
+local function regionStrength(picture, region, mine)
+    if not region then return 0 end
+    if mine then
+        local bucket = (picture.ledger or {})[region]
+        return bucket and bucket.strength or 0
+    end
+    local mem = (picture.intel or {})[region]
+    return mem and (mem.strength or 0) * (mem.confidence or 1) or 0
+end
+
+--- Lanchester-square credibility proxy — the SAME shape as pSuccess above
+-- (§6.2 "reuses the pSuccess machinery unchanged"), applied to a demand's
+-- named region instead of a goal/package pair. No visible enemy presence
+-- there at all reads as "not credible" (0), same honest-blindness stance as
+-- pSuccess's own "no known defender" branch.
+local function credibility(picture, region)
+    local theirs = regionStrength(picture, region, false)
+    local ours = regionStrength(picture, region, true)
+    if theirs <= 0 then return 0 end
+    local denom = theirs * theirs + ours * ours
+    if denom <= 0 then return 0 end
+    return (theirs * theirs) / denom
+end
+
+local function evaluateOne(p, picture, profile)
+    local trust = (picture.parley.trust or {})[p.fromTeam] or 0
+
+    if p.kind == 'intel' then
+        return 'accept'   -- free information, no downside (§1 table)
+    end
+
+    if p.kind == 'ceasefire' or p.kind == 'safe_passage' then
+        local value = CEASEFIRE_BASE_VALUE + trust * TRUST_VALUE_WEIGHT
+                     - (profile.aggression or 1.0) * 20   -- aggressive profiles discount standing down
+        return (value >= 0) and 'accept' or 'reject'
+    end
+
+    if p.kind == 'tribute' then
+        local t = p.terms or {}
+        if (t.payer or 'from') == 'from' then return 'accept' end   -- they pay us — pure upside
+        -- We'd be the payer: only worth it with healthy trust (buying real
+        -- peace) relative to the amount asked.
+        local worth = (trust * TRUST_VALUE_WEIGHT) - (t.amount or 0)
+        return (worth >= 0) and 'accept' or 'reject'
+    end
+
+    if p.kind == 'joint_objective' then
+        return (trust >= 0) and 'accept' or 'reject'
+    end
+
+    if p.kind == 'demand' then
+        local t = p.terms or {}
+        local region = t.regionKey or (t.innerTerms and t.innerTerms.regionKey)
+        return (credibility(picture, region) >= DEMAND_CREDIBILITY_FLOOR) and 'accept' or 'reject'
+    end
+
+    return 'reject'   -- unrecognised kind: never silently accept an unknown pact
+end
+
+--- Evaluate every pending (offered/countered) proposal addressed to our own
+-- team. Returns { {id=, decision='accept'|'reject'}, ... } — main.lua feeds
+-- each straight into Actuators:respondProposal(id, decision).
+function Planner.evaluateProposals(picture, profile, role)
+    local teamId = role and role.teamId
+    local out = {}
+    for _, p in ipairs((picture.parley or {}).proposals or {}) do
+        if p.toTeam == teamId and (p.state == 'offered' or p.state == 'countered') then
+            out[#out + 1] = { id = p.id, decision = evaluateOne(p, picture, profile) }
+        end
+    end
+    return out
 end
 
 return Planner

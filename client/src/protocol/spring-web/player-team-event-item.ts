@@ -31,7 +31,8 @@ kind():number {
 }
 
 /**
- * PlayerRemoved reason (0=quit, 1=kicked, 2=timeout); 0 for other kinds.
+ * PlayerRemoved reason (0=quit, 1=kicked, 2=timeout, 3=detach — parked,
+ * may reconnect); 0 for other kinds.
  */
 reason():number {
   return this.bb!.readUint8(this.bb_pos + 1);

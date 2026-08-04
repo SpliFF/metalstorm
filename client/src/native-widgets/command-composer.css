@@ -1,0 +1,218 @@
+/*
+ * command-composer.css — layout for the engine-bundled command composer.
+ *
+ * Everything visual here comes from the native-UI design system tokens
+ * (client/src/ui/native-ui/native-ui.css): the frame, header, chips, buttons and
+ * range input are all .nui-* primitives. This file only arranges them.
+ *
+ * The composer docks bottom-centre, directly over the play area, so its
+ * layout brief is "as short as possible": two rows — the command sentence
+ * with its priority slider, then the plain-language echo with the commit
+ * controls. It used to be a ~340px-tall stack of full-width blocks, which
+ * buried the lower-centre of the viewport where unit orders are issued.
+ */
+
+.command-composer {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    width: 560px;
+    max-width: calc(100vw - 32px);
+}
+
+.composer-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+
+/* ── Row 1: the sentence + priority ─────────────────────────────────── */
+
+.composer-sentence {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex-wrap: wrap;
+    min-width: 0;
+}
+
+.composer-priority {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: auto;
+    padding-left: 8px;
+    border-left: 1px solid var(--nui-border);
+}
+
+.composer-priority-label {
+    color: var(--nui-text-faint);
+    font-size: 10px;
+    white-space: nowrap;
+}
+.composer-priority-label b {
+    color: var(--nui-text);
+    font-weight: 600;
+    text-transform: capitalize;
+}
+
+.composer-priority input[type="range"] { width: 96px; }
+
+.composer-priority-value {
+    min-width: 2.2em;
+    color: var(--nui-text-dim);
+    font: var(--nui-font-mono);
+    text-align: right;
+}
+
+/* ── Row 2: echo + controls ─────────────────────────────────────────── */
+
+.composer-echo {
+    flex: 1;
+    min-width: 0;
+    padding: 4px 8px;
+    background: var(--nui-bg-sunken);
+    border: 1px solid var(--nui-border-sunken);
+    border-radius: 2px;
+    color: var(--nui-text-dim);
+    font: italic var(--nui-font-mono);
+    /* One line, ellipsised — a growing preview would push the panel back up
+       into the play area, which is exactly what this redesign removes. */
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.composer-echo.is-ready { color: var(--nui-text); font-style: normal; }
+
+/* Cost preview (task 5) — sits between the echo and the commit button.
+   Empty (no text) until all required slots are filled, so it never reads
+   as a stray "Cost: n/a" before the player has composed anything. */
+.composer-cost {
+    flex: none;
+    white-space: nowrap;
+    font: var(--nui-font-mono);
+    font-size: 11px;
+    color: var(--nui-text-dim);
+}
+.composer-cost.is-refused { color: var(--nui-bad); font-weight: 600; }
+
+/* Icon-only preset buttons (task 6) — narrow so they don't crowd out the
+   echo/Commit/Clear in the 560px control row. */
+#save-preset-btn,
+#presets-btn,
+#accel-toggle-btn {
+    flex: none;
+    padding: 3px 7px;
+}
+/* Toggle-pressed state (task 7) — the free-text row is optional/gated, so
+   the button that reveals it needs a visible "currently open" cue distinct
+   from plain hover, same accent used for a filled slot chip. */
+#accel-toggle-btn.is-active {
+    background: rgba(74, 158, 255, 0.18);
+    border-color: var(--nui-accent-dim);
+    color: #cfe4ff;
+}
+
+/* ── Free-text accelerator row (task 7) ───────────────────────────────
+   OPTIONAL — hidden until #accel-toggle-btn is clicked. The structured
+   sentence above stays the source of truth; this is a shortcut that fills
+   the same chips, never a separate input path to the sim. */
+.composer-accel {
+    gap: 6px;
+}
+.composer-accel-input { flex: 1; }
+.composer-accel-notice {
+    padding: 2px 8px;
+    color: var(--nui-text-dim);
+    font-size: 10px;
+}
+
+/* Stale-preset warning (task 6, §9 "flags the slot; the player re-picks;
+   never silently retargets") — a full-width banner above the sentence row,
+   same alert colour as the cost-refused/insufficient-authority state. */
+.composer-stale-notice {
+    padding: 4px 8px;
+    background: rgba(224, 103, 103, 0.12);
+    border: 1px solid #6d3535;
+    border-radius: 2px;
+    color: var(--nui-bad);
+    font-size: 11px;
+}
+
+/* ── Presets menu (task 6) ─────────────────────────────────────────── */
+
+.composer-preset-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 2px 2px 8px;
+    border-radius: 2px;
+}
+.composer-preset-item:hover { background: var(--nui-accent-dim); }
+.composer-preset-name {
+    flex: 1;
+    min-width: 0;
+    padding: 2px 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--nui-text);
+    font-size: 11px;
+    cursor: pointer;
+}
+.composer-preset-delete {
+    flex: none;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    background: none;
+    border: none;
+    border-radius: 2px;
+    color: var(--nui-text-faint);
+    font-size: 13px;
+    line-height: 1;
+    cursor: pointer;
+}
+.composer-preset-delete:hover { background: rgba(224, 103, 103, 0.25); color: var(--nui-bad); }
+
+/* ── Slot-picker menus ──────────────────────────────────────────────── */
+
+.command-composer .nui-menu__item--disabled {
+    color: var(--nui-text-faint);
+    cursor: default;
+}
+.command-composer .nui-menu__item--disabled:hover { background: none; color: var(--nui-text-faint); }
+
+/* Viewport-positioned, NOT anchored to the composer: the widget lives inside
+   the loader's panel frame, which clips (`.nui-panel { overflow: hidden }` +
+   the body's `overflow-y: auto`). A menu positioned relative to the composer
+   opens above the panel body and is clipped to a 2px sliver — which silently
+   makes the verb slot, and therefore the whole composer, unusable. `fixed`
+   escapes every clipping ancestor; openMenu() in command-composer.js sets the
+   coordinates from the chip's rect. */
+.command-composer .nui-menu { position: fixed; }
+.command-composer .nui-menu[hidden] { display: none; }
+
+/* Thin rule between menu sections (Subject picker: groups | idle | AI). */
+.command-composer .nui-menu__sep {
+    height: 1px;
+    margin: 3px 4px;
+    background: var(--nui-border);
+}
+
+/* Dim trailing tag on a menu row — the echelon on a group, the entity type
+   on a target result. Right-aligned so the primary label reads first. */
+.command-composer .composer-menu-hint {
+    float: right;
+    margin-left: 8px;
+    color: var(--nui-text-faint);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+/* Target search field sits at the top of its result menu. */
+.command-composer .composer-target-search { padding: 2px 2px 4px; }
+.command-composer .composer-target-search .composer-accel-input { width: 100%; }

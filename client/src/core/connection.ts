@@ -15,6 +15,8 @@
 
 import * as flatbuffers from 'flatbuffers';
 import { WebTransportAdapter, type GameTransport } from './transport.js';
+import type { AtlasLayout } from './impostor-atlas.js';
+import { netSimDecide, type NetSimConfig } from './net-sim.js';
 import { ClientMessage } from '../protocol/spring-web/client-message.js';
 import { ClientPayload } from '../protocol/spring-web/client-payload.js';
 import { ServerMessage } from '../protocol/spring-web/server-message.js';
@@ -25,9 +27,14 @@ import { Pong } from '../protocol/spring-web/pong.js';
 import { ServerError } from '../protocol/spring-web/server-error.js';
 import { GameEventBatch } from '../protocol/spring-web/game-event-batch.js';
 import { CombatEvent } from '../protocol/spring-web/combat-event.js';
+import { VolleyOutcome } from '../protocol/spring-web/volley-outcome.js';
+import { DamageFieldEvent } from '../protocol/spring-web/damage-field-event.js';
 import { ProjectileFiredEvent } from '../protocol/spring-web/projectile-fired-event.js';
 import { ProjectileImpactEvent } from '../protocol/spring-web/projectile-impact-event.js';
 import { ProjectileTrajectoryEvent } from '../protocol/spring-web/projectile-trajectory-event.js';
+import { FireOutcomeEvent } from '../protocol/spring-web/fire-outcome-event.js';
+import { TrajectoryKeyframe } from '../protocol/spring-web/trajectory-keyframe.js';
+import { OutcomeKnownEvent } from '../protocol/spring-web/outcome-known-event.js';
 import { EntityDestroy } from '../protocol/spring-web/entity-destroy.js';
 import { EntitySensorUpdate } from '../protocol/spring-web/entity-sensor-update.js';
 import { SendToUnsyncedEvent } from '../protocol/spring-web/send-to-unsynced-event.js';
@@ -38,9 +45,15 @@ import { TeamStartInfo } from '../protocol/spring-web/team-start-info.js';
 import { PlayerTeamEventBatch } from '../protocol/spring-web/player-team-event-batch.js';
 import { TeamStatsHistoryBatch } from '../protocol/spring-web/team-stats-history-batch.js';
 import { GameModOptions } from '../protocol/spring-web/game-mod-options.js';
+import { RulesParamUpdate } from '../protocol/spring-web/rules-param-update.js';
+import { RulesParamKeyDictionary } from '../protocol/spring-web/rules-param-key-dictionary.js';
+import { RulesParamScope } from '../protocol/spring-web/rules-param-scope.js';
+import { RulesParamValueKind } from '../protocol/spring-web/rules-param-value-kind.js';
 import { ResourceUpdate } from '../protocol/spring-web/resource-update.js';
 import { MapData } from '../protocol/spring-web/map-data.js';
 import { PlayerLeft } from '../protocol/spring-web/player-left.js';
+import { PlayerRoster } from '../protocol/spring-web/player-roster.js';
+import { PlayerEntry } from '../protocol/spring-web/player-entry.js';
 import { SoundEvent } from '../protocol/spring-web/sound-event.js';
 import { SeismicPing } from '../protocol/spring-web/seismic-ping.js';
 import { MusicEvent } from '../protocol/spring-web/music-event.js';
@@ -77,9 +90,24 @@ import { ConsoleCommand } from '../protocol/spring-web/console-command.js';
 import { SelectionState } from '../protocol/spring-web/selection-state.js';
 import { PathRequest } from '../protocol/spring-web/path-request.js';
 import { PathRequestCancel } from '../protocol/spring-web/path-request-cancel.js';
+import { PlayerLeaveIntent } from '../protocol/spring-web/player-leave-intent.js';
 import { PathResponse } from '../protocol/spring-web/path-response.js';
 import { StandingOrderState } from '../protocol/spring-web/standing-order-state.js';
 import { StandingOrderType } from '../protocol/spring-web/standing-order-type.js';
+import { StandingOrderCreate } from '../protocol/spring-web/standing-order-create.js';
+import { OrgGroupState } from '../protocol/spring-web/org-group-state.js';
+import { OrgGroupInfo } from '../protocol/spring-web/org-group-info.js';
+import { OrgGroupCreate } from '../protocol/spring-web/org-group-create.js';
+import { OrgGroupUpdate } from '../protocol/spring-web/org-group-update.js';
+import { OrgGroupDisband } from '../protocol/spring-web/org-group-disband.js';
+import { Echelon } from '../protocol/spring-web/echelon.js';
+import { DirectiveState } from '../protocol/spring-web/directive-state.js';
+import { DirectiveInfo } from '../protocol/spring-web/directive-info.js';
+import { DirectiveType } from '../protocol/spring-web/directive-type.js';
+import { OrderShape } from '../protocol/spring-web/order-shape.js';
+import { GroupDirective } from '../protocol/spring-web/group-directive.js';
+import { GroupDirectiveRemove } from '../protocol/spring-web/group-directive-remove.js';
+import { GroupPosture } from '../protocol/spring-web/group-posture.js';
 import { Vec3 } from '../protocol/spring-web/vec3.js';
 import { AuthResponse } from '../protocol/spring-web/auth-response.js';
 import { AuthStatus } from '../protocol/spring-web/auth-status.js';
@@ -121,6 +149,64 @@ export interface CombatEventInfo {
     x: number;
     y: number;
     z: number;
+}
+
+/// Per-volley outcome decoded from a `GameEventBatch.volley_outcomes` entry —
+/// Metalstorm statistical combat (Model 1). One event per squad-volley; the
+/// client invents `rounds` cosmetic tracers/impacts from it. Already
+/// visibility-filtered server-side (result may be Unknown=2 with attackerId 0
+/// when the firer is hidden). See VolleyOutcome in protocol.fbs.
+export interface VolleyOutcomeInfo {
+    attackerId: number;
+    weaponDefId: number;
+    targetId: number;
+    /// impact position (FX origin + squad casualty hint)
+    x: number;
+    y: number;
+    z: number;
+    resolveFrame: number;
+    /// CombatResult: 0=Hit, 1=Miss, 2=Unknown (visibility-filtered)
+    result: number;
+    damage: number;
+    rounds: number;
+    /// attacker team (255 = hidden)
+    team: number;
+    /// counterbattery reveal — when true, drop a radar blip at (revealX,_,revealZ)
+    revealAttacker: boolean;
+    revealX: number;
+    revealY: number;
+    revealZ: number;
+    /// derived-morale posture: 0=normal, 1=retreating, 2=panicking (only
+    /// meaningful when the attacker is visible, attackerId != 0)
+    attackerPosture: number;
+}
+
+/// Damage-field lifecycle event decoded from a `GameEventBatch.damage_fields`
+/// entry — Metalstorm Model 3 area bombardment (C6). The sim owns all damage;
+/// the client invents the barrage FX (procedural shell arcs + impacts
+/// scattered in the area at `cadence`) from a Created event and tears it down
+/// on Removed / duration expiry. Already visibility-filtered server-side.
+/// See DamageFieldEvent in protocol.fbs.
+export interface DamageFieldEventInfo {
+    fieldId: number;
+    /// 0 = Created (start FX), 1 = Removed (stop FX)
+    kind: number;
+    /// 0 = circle (center + radius), 1 = rect (center + radius(halfX) + halfZ)
+    shape: number;
+    x: number;
+    y: number;
+    z: number;
+    radius: number;
+    halfZ: number;
+    weaponDefId: number;
+    /// damage/sec — client scales impact density
+    intensity: number;
+    /// frames between damage ticks (FX pulse rate)
+    cadence: number;
+    /// remaining frames at creation (0 on Removed)
+    duration: number;
+    /// owner team (255 = neutral)
+    team: number;
 }
 
 /// Per-tick sound emission decoded from a `GameEventBatch.sounds` entry.
@@ -223,6 +309,18 @@ export interface TeamStatsHistoryInfo {
     entries: TeamStatsEntryInfo[];
 }
 
+/// A decoded RulesParamUpdate — a batch of rules-param changes for one scope.
+/// `scope` is 'game' or 'team' (the wire only carries those two today).
+/// `id` is the teamID for team scope (0 / ignored for game). `replace` = true
+/// means clear the target map before applying (join snapshot). `params` maps
+/// key → value, where `null` deletes the key.
+export interface RulesParamUpdateInfo {
+    scope: 'game' | 'team';
+    id: number;
+    replace: boolean;
+    params: Record<string, number | string | null>;
+}
+
 /// Projectile lifecycle event info — decoded from the FlatBuffer batch and
 /// passed to ProjectileRenderer. Velocity values come straight from the
 /// server in elmos / sim-frame; the renderer converts to elmos / second
@@ -239,6 +337,13 @@ export interface ProjectileFiredInfo {
     ttl: number;
     gravity: number;
     hitscan: boolean;
+    /// PLAN-latency L3.3 — the server is streaming this projectile under the
+    /// keyframe contract, so the renderer starts a `KeyframeTrack` from this
+    /// event (at the batch frame) instead of waiting for a `Launch` knot. For
+    /// the closed-form classes no knot is coming at all. False on a pre-L3
+    /// server, which is what keeps the legacy integrate-and-snap path
+    /// reachable.
+    keyframed: boolean;
 }
 
 export interface ProjectileImpactInfo {
@@ -257,6 +362,66 @@ export interface ProjectileTrajectoryInfo {
     pos: { x: number; y: number; z: number };
     vel: { x: number; y: number; z: number };
     reason: number;
+}
+
+/// PLAN-latency L2.1/L2.2 — a Tier-C ("cosmetic") shot, resolved whole at
+/// fire time by the server. Replaces the Fired/Trajectory/Impact triple for
+/// weapon defs classified `FX_TIER_COSMETIC`: there is no sim projectile and
+/// therefore no projectile id, so the client mints its own (see
+/// `ProjectileRenderer.spawnCosmetic`).
+///
+/// The two frames are what makes convergence possible: the client schedules
+/// the spawn at `fireFrame` and the detonation at `impactFrame` on the L1
+/// timeline and solves a flight that terminates on `impactPos` at exactly
+/// `impactFrame` — no mid-flight correction, so no snap.
+export interface FireOutcomeInfo {
+    fireFrame: number;
+    weaponDefId: number;
+    ownerId: number;
+    team: number;
+    origin: { x: number; y: number; z: number };
+    targetId: number;
+    targetPos: { x: number; y: number; z: number };
+    /// `FireOutcome` enum (0 Hit, 1 Miss, 2 Shielded, 3 Intercepted, 4 Expired).
+    outcome: number;
+    impactFrame: number;
+    impactPos: { x: number; y: number; z: number };
+    /// Per-sim-frame gravity the server resolved the arc with; 0 for a
+    /// straight shot. Needed because the ballistic solution through
+    /// (origin, impactPos, Δframes) is only unique once g is fixed.
+    gravity: number;
+}
+
+/// PLAN-latency L3.2 — one knot on a Tier-S projectile's flight path. `vel` is
+/// in elmos / sim-frame, the same unit as ProjectileFiredInfo and the unit the
+/// spline is parametrised in; keyframe-flight.ts converts on the way out.
+export interface TrajectoryKeyframeInfo {
+    projId: number;
+    frame: number;
+    pos: { x: number; y: number; z: number };
+    vel: { x: number; y: number; z: number };
+    /// `TrajectoryKeyframeKind` (0 Launch, 1 Heartbeat, 2 StageChange,
+    /// 3 Retarget, 4 Bounce, 5 Terminal).
+    kind: number;
+}
+
+/// PLAN-latency L3.2 — a Tier-S shot's resolved outcome with the sim frame it
+/// resolves on, so the client can schedule the burst instead of playing it on
+/// packet arrival.
+///
+/// Carries the same information as `ProjectileImpactInfo` plus the frame, and
+/// with a *more accurate* `outcome`: shield absorption and interceptor kills
+/// both funnel through the sim's no-argument `Collision()` overload and have
+/// always been reported as `Terrain` by the legacy impact event, whereas the
+/// server records the real kind for this one (L3.1, `SetWebOutcomeHint`).
+export interface OutcomeKnownInfo {
+    projId: number;
+    /// `ProjectileImpactKind` — same vocabulary as ProjectileImpactInfo.
+    outcome: number;
+    outcomeFrame: number;
+    outcomePos: { x: number; y: number; z: number };
+    targetId: number;
+    weaponDefId: number;
 }
 
 /// One sound asset attached to a unit or weapon def. The `id` field
@@ -355,6 +520,46 @@ export interface UnitDefInfo {
     /// Per-unit sounds (select/order_ack/build/working/...). Empty when
     /// the unit's def has no sound assets.
     sounds: SoundRefInfo[];
+    /** Impostor atlas metadata for the billboard LOD tier (PLAN-metalstorm-beta-units.md
+     *  §2.1, engine ask B1). Absent = this def has no impostor tier. Emitted by
+     *  LuaDefsSerializer.inl from `customParams.impostor_distance`. */
+    impostor?: UnitImpostorInfo;
+    /** LOD distance thresholds (elmos) — Full→Impostor and Impostor→Icon switch
+     *  points. Absent = always render the Full tier (fallback-safe default). */
+    lodThresholds?: UnitLodThresholds;
+}
+
+export interface UnitImpostorInfo {
+    /** Atlas diffuse+alpha texture URI. v2 directional layout: `yawBins`
+     *  columns × (`pitchBins`·`frames`) rows, baked by
+     *  tools/fable-model-forge/bake_impostors.py (PLAN-metalstorm-impostors.md). */
+    diffuseUri: string;
+    /** Team-color mask atlas URI (R = blend amount), same layout. */
+    teamMaskUri?: string;
+    /** Number of walk-cycle frames (atlas rows [0, walkFrames)). */
+    walkFrames: number;
+    /** Number of idle frames (atlas rows [walkFrames, walkFrames+idleFrames)). */
+    idleFrames: number;
+    /** Billboard quad size in elmos. */
+    width: number;
+    height: number;
+    /** Ground-anchor lift in elmos: how far above the unit's ground point the
+     *  quad's CENTRE sits. Absent = `height/2`, i.e. the model's ground point
+     *  was baked onto the cell's bottom edge. */
+    centreY?: number;
+    /** v2 directional grid, plus the arc and azimuth phase THIS atlas was baked
+     *  on. Resolved from the def JSON by `toImpostorInfo` (defs-fetch.ts) via
+     *  `normalizeAtlasLayout`, so the runtime reads what the baker declared
+     *  rather than assuming a global convention — see impostor-atlas.ts.
+     *  Default 1x1x1 = a legacy single-view atlas. */
+    layout?: AtlasLayout;
+}
+
+export interface UnitLodThresholds {
+    /** Distance beyond which to switch Full → Impostor (elmos). */
+    impostorDistance: number;
+    /** Distance beyond which to switch Impostor → Icon (elmos). */
+    iconDistance: number;
 }
 
 export interface UnitOrderInfo {
@@ -452,6 +657,41 @@ export interface StandingOrderInfoMsg {
     expiresAtFrame: number;
 }
 
+/** One org group (PLAN-macro-orders v0: `echelon` is always `'Platoon'` in
+ *  practice — `'Army'` is schema-reserved but rejected server-side). Same
+ *  data shape `Spring.GetOrgGroups` returns. */
+export interface OrgGroupInfoMsg {
+    groupId: number;
+    echelon: 'Squad' | 'Platoon' | 'Army';
+    ownerTeam: number;
+    parentId: number;
+    name: string;
+    memberIds: number[];
+    currentDirectiveId: number;
+    postureJson: string;
+    createdAtFrame: number;
+}
+
+/** One macro directive (PLAN-macro-directives §1). `fulfillment =
+ *  assignedStrength / requestedStrength` — callers should guard
+ *  `requestedStrength === 0` (demand model: 0 = "take what idles",
+ *  fulfillment is meaningless). */
+export interface DirectiveInfoMsg {
+    directiveId: number;
+    ownerTeam: number;
+    groupId: number;
+    type: string;
+    priority: number;
+    shape: 'Point' | 'Circle' | 'Polygon' | 'Polyline';
+    params: number[];
+    requestedStrength: number;
+    assignedStrength: number;
+    assignedSquadCount: number;
+    active: boolean;
+    createdAtFrame: number;
+    expiresAtFrame: number;
+}
+
 /** Decoded server reply to a `Spring.PathRequest`. `waypoints` is the
  *  full path as `[x, y, z]` triples in elmo coordinates; empty array
  *  means the path manager couldn't find a route. */
@@ -489,6 +729,16 @@ export type UnitCommandKindStr = 'issued' | 'done';
 /** One synced command event mirrored from the server. Shape matches
  *  the LuaUI `widgetHandler:UnitCommand` / `UnitCmdDone` callin
  *  argument lists so the worker can forward directly. */
+/** Observer for commands that have just gone on the wire (PLAN-latency L4.1).
+ *  Receives one entry per `PlayerCommand`; a `PlayerCommandBatch` arrives as
+ *  one call carrying all of its inner commands. */
+export type CommandSink = (commands: ReadonlyArray<{
+    commandId: number;
+    unitIds: readonly number[];
+    params: readonly number[];
+    options: number;
+}>) => void;
+
 export interface UnitCommandEventMsg {
     kind: UnitCommandKindStr;
     unitId: number;
@@ -508,6 +758,13 @@ export interface WeaponDefInfo {
     defId: number;
     name: string;
     projectileType: number;
+    /** PLAN-latency L2 presentation tier: `FX_TIER_COSMETIC` (1) means no sim
+     *  projectile exists — the server resolves the outcome at fire time and the
+     *  client invents the whole flight, converging on the impact by
+     *  construction. `FX_TIER_SYNCED` (2) means a real server projectile whose
+     *  outcome is contingent on sim state. Resolved server-side at def load
+     *  (WeaponDef::ClassifyFxTier), overridable via `customParams.fxTier`. */
+    fxTier: number;
     projectileSpeed: number;
     range: number;
     aoe: number;
@@ -551,6 +808,10 @@ export interface WeaponDefInfo {
     reloadTime: number;
     salvoSize: number;
     salvoDelay: number;
+    /** Computed expected damage-per-second (default_damage * salvo_size /
+     *  reload_time). Exposed for tuning-honesty UI so statistical combat's
+     *  math isn't hidden (PLAN-macro-combat §4). */
+    expectedDps: number;
     accuracy: number;
     sprayAngle: number;
     movingAccuracy: number;
@@ -573,6 +834,11 @@ export interface WeaponDefInfo {
     energyCost: number;
     /** Behaviour bitfield. See `GameWeaponDef.flags` in protocol.fbs. */
     flags: number;
+    /** `flags` bit 0 — the sim guides this weapon's projectile at its target
+     *  every tick (`WeaponDef::tracks`). PLAN-latency L2.3 reads it to decide
+     *  whether an invented Tier-C flight may bend toward a moving target: a
+     *  guided missile should, an unguided shell should not. */
+    tracks: boolean;
     customParams: Record<string, string>;
     /** Lobby URL of the projectile's `.glb`, or empty when the def
      *  doesn't reference a model — the renderer uses procedural shapes
@@ -746,6 +1012,46 @@ export type SendToUnsyncedArgInfo =
     | { kind: 'number'; value: number }
     | { kind: 'string'; value: string };
 
+/**
+ * The two identities a session has, kept apart on purpose.
+ *
+ * They are different numbers and coincide only by accident on low-id dev
+ * accounts — which is precisely how the authority HUD shipped reading
+ * `authority_player_<accountId>` and rendering 0 forever (PLAN-endtoend D3).
+ * Anything that touches sim state wants `playerNum`; anything that touches
+ * the lobby, HTTP or a DB row wants `accountId`.
+ */
+export interface AuthenticatedInfo {
+    /** DB account id — stable across games, rooms and reconnects. */
+    accountId: number;
+    /** Spring `playerNum` — the sim player id, allocated per game server.
+     *  -1 on the lobby connection, which has no sim. */
+    playerNum: number;
+    token: string;
+    team: number;
+    defsCacheKey: string;
+    role: string;
+}
+
+/** One row of the game server's authoritative player roster (PlayerRoster). */
+export interface RosterPlayerInfo {
+    /** Spring `playerNum` — see AuthenticatedInfo. */
+    playerNum: number;
+    name: string;
+    /** Sim team id; -1 for a spectator. */
+    team: number;
+    /** The team's ally team; -1 when unknown/unassigned. */
+    allyTeam: number;
+    spectator: boolean;
+    /** True for an AI virtual player (PLAN-metalstorm-ai.md §1). */
+    isAI: boolean;
+    /** False once the player has disconnected; the row is kept so a
+     *  scoreboard can still name them. */
+    active: boolean;
+    /** DB account id; 0 for AI players and for players whose session is gone. */
+    accountId: number;
+}
+
 export interface ConnectionEvents {
     onStateChange?: (state: ConnectionState) => void;
     /** Fires when the server accepts auth. `defsCacheKey` is the
@@ -754,11 +1060,20 @@ export interface ConnectionEvents {
      *  bake them. Construct URLs as
      *    /api/games/data/{gameId}/cache/defs/{key}/unitdefs.bin
      *    /api/games/data/{gameId}/cache/defs/{key}/weapondefs.bin */
-    onAuthenticated?: (playerId: number, token: string, team: number, defsCacheKey: string) => void;
+    onAuthenticated?: (auth: AuthenticatedInfo) => void;
     onAuthFailed?: (message: string) => void;
     onServerError?: (code: number, message: string) => void;
     onEntityState?: (snapshot: EntityStateSnapshot, isDelta: boolean) => void;
     onCombatEvents?: (events: CombatEventInfo[], frame: number) => void;
+    /** Per-volley statistical-combat outcomes (Metalstorm Model 1). The
+     *  client invents cosmetic tracers/impacts, feeds the squad casualty
+     *  impact hint, and drops a counterbattery radar blip when
+     *  `revealAttacker` is set. Empty for ported games. */
+    onVolleyOutcomes?: (events: VolleyOutcomeInfo[], frame: number) => void;
+    /** Damage-field lifecycle events (Metalstorm Model 3 area bombardment,
+     *  C6). Created starts a procedural barrage; Removed / duration expiry
+     *  stops it. Empty for ported games. */
+    onDamageFields?: (events: DamageFieldEventInfo[], frame: number) => void;
     onSoundEvents?: (events: SoundEventInfo[], frame: number) => void;
     onSeismicPings?: (events: SeismicPingInfo[], frame: number) => void;
     /** Music-state transition broadcast — fires once per state change.
@@ -769,11 +1084,27 @@ export interface ConnectionEvents {
     onProjectileFired?: (events: ProjectileFiredInfo[], frame: number) => void;
     onProjectileImpacts?: (events: ProjectileImpactInfo[], frame: number) => void;
     onProjectileTrajectories?: (events: ProjectileTrajectoryInfo[], frame: number) => void;
-    /** `frame` is the sim frame of the most recent GameEventBatch — the death's
-     *  own frame in practice, since the server broadcasts combat events (which
-     *  carry the kill) immediately before the EntityDestroy for the same tick on
-     *  the same reliable, in-order lane (StateStreamer::Tick). Lets L1 schedule
-     *  the death to land on the same presentation frame as its explosion. */
+    /** PLAN-latency L2.2 — Tier-C shots. Unlike every other event family here
+     *  the batch `frame` is NOT the presentation frame: each outcome carries
+     *  its own `fireFrame`/`impactFrame` pair, and both are in the future
+     *  relative to the batch (the server resolved the whole flight up front).
+     *  `frame` is passed for symmetry/diagnostics only. */
+    onFireOutcomes?: (events: FireOutcomeInfo[], frame: number) => void;
+    /** PLAN-latency L3.2 — Tier-S trajectory knots. Delivered immediately
+     *  rather than scheduled: a keyframe is data about the path, not an event
+     *  on it, and the spline it feeds is evaluated at the presentation cursor
+     *  by the renderer. `frame` is the batch frame (= the knot's own frame in
+     *  practice) and is passed for diagnostics. */
+    onTrajectoryKeyframes?: (events: TrajectoryKeyframeInfo[], frame: number) => void;
+    /** PLAN-latency L3.2 — a Tier-S shot's resolution, stamped with the frame
+     *  it resolves on. The consumer schedules the burst at `outcomeFrame` on
+     *  the L1 timeline; see the dedupe note on `onProjectileImpacts`. */
+    onOutcomesKnown?: (events: OutcomeKnownInfo[], frame: number) => void;
+    /** `frame` is the sim frame the unit died on, taken from
+     *  `EntityDestroy.frame` (stamped server-side at kill time). Falls back to
+     *  the most recent GameEventBatch frame only against a server that predates
+     *  that field. Lets L1 schedule the death to land on the same presentation
+     *  frame as its explosion. */
     onEntityDestroy?: (entityId: number, x: number, y: number, z: number, frame: number) => void;
     /** Per-unit sensor radius override. Emitted by
      *  Spring.SetUnitSensorRadius on the server. `sensorType` matches
@@ -791,7 +1122,15 @@ export interface ConnectionEvents {
     /** Fired on the server's game-over broadcast. `winningAllyTeams` is the
      *  winners list from `Spring.GameOver(...)` (empty = undecided). */
     onGameOver?: (frame: number, winningAllyTeams: number[]) => void;
+    /** `playerId` here is the DB **account** id, not the sim playerNum —
+     *  matching what the server puts on the wire. The `onPlayerRoster`
+     *  broadcast that accompanies a departure is the sim-keyed view. */
     onPlayerLeft?: (playerId: number, username: string, team: number, reason: number) => void;
+    /** The complete player roster, sent on auth and re-broadcast on every
+     *  change. Always full, never a delta. The only source of player *names*
+     *  and of which sim playerNums exist — including AI virtual players, which
+     *  the lobby roster does not carry. */
+    onPlayerRoster?: (players: RosterPlayerInfo[]) => void;
     onMapData?: (map: ParsedMapData) => void;
     /** Per-tick batch of feature lifecycle events. `spawns` is a list of
      *  new features (wrecks, debris, gadget-spawned); `removed` is feature
@@ -822,6 +1161,15 @@ export interface ConnectionEvents {
      *  authoritative. Reading `Spring.GetStandingOrders` walks the
      *  same data. */
     onStandingOrders?: (orders: StandingOrderInfoMsg[]) => void;
+    /** Snapshot of all org groups visible to this client (own team only —
+     *  org groups, unlike standing orders, aren't shared with allies).
+     *  Pushed on any create/update/disband, never per-tick. PLAN-macro-ui.md
+     *  org panel + `Spring.GetOrgGroups` read the same data. */
+    onOrgGroupState?: (groups: OrgGroupInfoMsg[]) => void;
+    /** Snapshot of all macro directives visible to this client (own team +
+     *  allies, same visibility rule as standing orders). Pushed on any
+     *  create/update/remove/fulfillment change, never per-tick. */
+    onDirectiveState?: (directives: DirectiveInfoMsg[]) => void;
     onProjectileState?: (snapshot: ProjectileStateSnapshot) => void;
     onPieceState?: (snapshot: PieceStateSnapshot) => void;
     onBuildActivity?: (snapshot: BuildActivitySnapshot) => void;
@@ -858,6 +1206,13 @@ export interface ConnectionEvents {
     /// Feeds the worker's liveState.modOptions so Spring.GetModOptions()
     /// matches the synced set. Values arrive as strings (engine convention).
     onGameModOptions?: (options: Record<string, string>) => void;
+    /// A batch of game/team rules-param changes (RulesParamUpdate) from
+    /// `Spring.Set{Game,Team}RulesParam` in any synced gadget. The server has
+    /// already applied per-team LOS filtering (team scope) and sends a
+    /// `replace`-snapshot on join. Feeds `handleRulesParamUpdate` →
+    /// `Spring.GetGameRulesParam(s)` / `GetTeamRulesParam(s)`. A `null` value
+    /// deletes the key from the client mirror.
+    onRulesParamUpdate?: (update: RulesParamUpdateInfo) => void;
     /// A relayed `Spring.SendLuaUIMsg` (LuaUIMsgRelay). The server already
     /// applied the audience filter; deliver unconditionally to
     /// `widget:RecvLuaMsg(data, playerId)`. `data` preserves embedded NULs.
@@ -879,15 +1234,31 @@ export class Connection {
     private _state: ConnectionState = 'disconnected';
     private events: ConnectionEvents;
     private sessionToken: string | null = null;
-    public playerId: number = 0;
+    /** DB account id. Set by HTTP login/validate and by AuthResponse. See
+     *  {@link AuthenticatedInfo} for why this is not `playerNum`. */
+    public accountId: number = 0;
+    /** Spring `playerNum` — the sim player id. -1 until a game server's
+     *  AuthResponse assigns one (the lobby connection never has one). */
+    public playerNum: number = -1;
     public myTeam: number = -1;
+    public myRole: string = '';  // "admin", "player", or "spectator"
     private clock = new ServerClock();
-    /** Sim frame of the most recent GameEventBatch. Fed to onEntityDestroy so
-     *  L1 can present a death on the same frame as its (batched) explosion —
-     *  the batch is delivered immediately before the destroy on the same
-     *  reliable, in-order lane (StateStreamer::Tick). */
+    /** Sim frame of the most recent GameEventBatch. Legacy fallback for
+     *  onEntityDestroy against a server that does not stamp
+     *  `EntityDestroy.frame`. */
     private lastEventFrame = 0;
+    /** Newest entity-state base_frame delivered (post-netsim) — the same
+     *  leading edge PresentationClock.newestObservedFrame tracks, kept here so
+     *  the destroy stamp needs no reach into the worker's clock. */
+    private newestStateFrame = 0;
     private pingInterval: ReturnType<typeof setInterval> | null = null;
+    /** PLAN-latency L2.3: warm-up ping timers. The steady cadence is 30 s,
+     *  which is far too slow to correct the boot-stall RTT sample that the
+     *  very first ping picks up (the pong is queued behind the content load).
+     *  These fire a short geometric burst right after connect so a clean
+     *  sample lands within a second or two of the game becoming interactive;
+     *  `ServerClock` then adopts it immediately (fast-down smoothing). */
+    private warmupPings: ReturnType<typeof setTimeout>[] = [];
     private httpBase = '';  // e.g. "http://localhost:9100"
 
     /** Public read-only accessor for the game server HTTP base URL.
@@ -896,6 +1267,12 @@ export class Connection {
      *  server / LuaRules / LuaGaia / LuaAI:* live on the game server). */
     get gameHttpUrl(): string { return this.httpBase; }
     private commandSequence = 0;
+    /** PLAN-latency L4.1 — see `setCommandSink`. */
+    private commandSink: CommandSink | null = null;
+
+    // W3: Key interning dictionary for RulesParamUpdate
+    private keyDictionary: string[] = [];
+    private keyDictionaryRev = 0;
 
     /** Whether the control channel is currently usable. */
     get controlOpen(): boolean { return this.transport?.connected ?? false; }
@@ -1063,7 +1440,7 @@ export class Connection {
             if (resp.ok) {
                 const data = await resp.json();
                 if (data.valid) {
-                    this.playerId = data.user_id ?? this.playerId;
+                    this.accountId = data.user_id ?? this.accountId;
                     this.myTeam = data.team ?? this.myTeam;
                     console.log(`[connection] token valid for user '${data.username}'`);
                     return;
@@ -1094,7 +1471,7 @@ export class Connection {
         if (!data.token) throw new Error('no token in login response');
 
         this.sessionToken = data.token;
-        this.playerId = data.user_id ?? 0;
+        this.accountId = data.user_id ?? 0;
         this.myTeam = data.team ?? -1;
     }
 
@@ -1143,25 +1520,33 @@ export class Connection {
 
         this.pingInterval = setInterval(() => this.sendPing(), 30000);
         this.sendPing();
+        // Warm-up burst (see `warmupPings`). Spread geometrically so the
+        // series straddles whenever the load stall actually ends, rather than
+        // betting on one guess at its duration. The tail reaches past a minute
+        // on purpose: a cold ZK room takes ~90 s to become interactive here,
+        // and a burst that stops at 16 s measures nothing but the stall.
+        for (const delayMs of [500, 1000, 2000, 4000, 8000, 16000, 32000, 64000]) {
+            this.warmupPings.push(setTimeout(() => this.sendPing(), delayMs));
+        }
     }
 
-    /** Route an inbound WebTransport message by envelope byte. Entity-state
-     *  frames pass through the artificial-latency sim (netsim); everything else
-     *  (FlatBuffers control, projectile/piece/decals/los/heightmap) dispatches
-     *  directly. The transport delivers each whole message regardless of which
-     *  QUIC stream/tier it arrived on. */
+    /** Route an inbound WebTransport message by envelope byte. **Every**
+     *  envelope passes through the artificial-latency sim (netsim) when it is
+     *  armed — see `receiveWithNetSim` for the two-lane model. The transport
+     *  delivers each whole message regardless of which QUIC stream/tier it
+     *  arrived on. */
     private routeIncoming(data: Uint8Array): void {
         if (data.length < 1) return;
         // GW8: per-envelope bandwidth tally (PLAN-performance PC-2). The single
         // inbound dispatch — captures every stream/tier byte before netsim.
         recordInbound(data);
-        const env = data[0];
-        if (env === ENVELOPE_ENTITY_STATE_FULL || env === ENVELOPE_ENTITY_STATE_DELTA) {
-            this.receiveStateFrame(data);
-        } else {
-            this.handleBinaryMessage(data);
-            if (env === ENVELOPE_FLATBUFFERS) this.controlObserver?.(data);
-        }
+        this.receiveWithNetSim(data);
+    }
+
+    /** Dispatch one inbound envelope, plus the control-observer tap. */
+    private dispatchIncoming(data: Uint8Array): void {
+        this.handleBinaryMessage(data);
+        if (data[0] === ENVELOPE_FLATBUFFERS) this.controlObserver?.(data);
     }
 
     // ─── Send ───
@@ -1189,7 +1574,11 @@ export class Connection {
         const passwordOff = this.pendingPassword
             ? builder.createString(this.pendingPassword) : 0;
         const auth = AuthRequest.createAuthRequest(
-            builder, usernameOff, passwordOff, tokenOff);
+            builder, usernameOff, passwordOff, tokenOff,
+            // W4 cached_defs_hash: engine added the field for the defs-skip
+            // optimization but the client-side population is unwired; send
+            // empty (no cached hash advertised → server sends full defs).
+            0);
         this.sendClientMessage(builder, ClientPayload.AuthRequest, auth);
         console.log(`[connection] sent AuthRequest for '${this.pendingUsername}'`);
     }
@@ -1310,6 +1699,19 @@ export class Connection {
         this.sendClientMessage(builder, ClientPayload.PathRequestCancel, off);
     }
 
+    /** PLAN-quickstart.md §3.3: tell the server *why* a disconnect that is
+     *  about to happen is happening — e.g. reason=3 (detach) so the resulting
+     *  PlayerRemoved lets sim gadgets tell a parked/reconnecting player apart
+     *  from one who actually quit. Send this before `disconnect()`, not
+     *  after — `close()` on the underlying writer flushes queued writes
+     *  before the stream actually closes, so ordering is preserved. */
+    sendPlayerLeaveIntent(reason: number): void {
+        if (!this.authenticated) return;
+        const builder = new flatbuffers.Builder(16);
+        const off = PlayerLeaveIntent.createPlayerLeaveIntent(builder, reason);
+        this.sendClientMessage(builder, ClientPayload.PlayerLeaveIntent, off);
+    }
+
     /** Send a PlayerCommand (unit order) to the server. */
     sendPlayerCommand(
         commandId: number,
@@ -1333,6 +1735,21 @@ export class Connection {
             timeoutFrames,
         );
         this.sendClientMessage(builder, ClientPayload.PlayerCommand, cmd);
+        this.commandSink?.([{ commandId, unitIds, params, options }]);
+    }
+
+    /** Install (or clear) the sent-command sink (PLAN-latency L4.1). Wired
+     *  from `gpInit` to `PendingActionRegistry.register` so optimistic
+     *  artifacts can be drawn at click time and reconciled later.
+     *
+     *  This is deliberately *here* and not in `CommandBuffer`: every
+     *  client-issued order funnels through `sendPlayerCommand` /
+     *  `sendPlayerCommandBatch`, including ones a `CommandNotify` widget
+     *  rewrote or issued itself (lua-ui-host `giveOrder`), which never touch
+     *  a CommandBuffer. The sink sees commands in the exact form that went on
+     *  the wire, which is what the server will ack. */
+    setCommandSink(fn: CommandSink | null): void {
+        this.commandSink = fn;
     }
 
     /** Send a PlayerCommandBatch — atomic execution of N PlayerCommand
@@ -1390,6 +1807,134 @@ export class Connection {
             cmdsVec,
         );
         this.sendClientMessage(builder, ClientPayload.PlayerCommandBatch, batch);
+        this.commandSink?.(commands.map(c => ({
+            commandId: c.commandId,
+            unitIds: c.unitIds,
+            params: c.params,
+            options: c.options ?? 0,
+        })));
+    }
+
+    // ---- Macro command & control (PLAN-macro-orders / PLAN-macro-directives) ----
+
+    /** Create a server-side org group (v0: always `echelon = Platoon`, the
+     *  only tier the server accepts — `parentId` stays 0, the army tier is
+     *  schema-reserved but rejected). Seeds the roster from `memberIds`
+     *  (squad entity ids); a squad already in another group is pulled out
+     *  of it first (server-side, single-membership rule). */
+    sendOrgGroupCreate(name: string, memberIds: number[]): void {
+        if (!this.authenticated) return;
+        const builder = new flatbuffers.Builder(128 + memberIds.length * 4);
+        const nameOff = builder.createString(name);
+        const memberIdsOff = OrgGroupCreate.createMemberIdsVector(builder, memberIds);
+        this.commandSequence++;
+        const off = OrgGroupCreate.createOrgGroupCreate(
+            builder, this.commandSequence, Echelon.Platoon, nameOff, memberIdsOff, 0);
+        this.sendClientMessage(builder, ClientPayload.OrgGroupCreate, off);
+    }
+
+    /** Mutate a group's roster / name. Empty `name` leaves it unchanged. */
+    sendOrgGroupUpdate(groupId: number, addIds: number[], removeIds: number[], name: string = ''): void {
+        if (!this.authenticated) return;
+        const builder = new flatbuffers.Builder(128 + (addIds.length + removeIds.length) * 4);
+        const addOff = OrgGroupUpdate.createAddIdsVector(builder, addIds);
+        const removeOff = OrgGroupUpdate.createRemoveIdsVector(builder, removeIds);
+        const nameOff = builder.createString(name);
+        this.commandSequence++;
+        const off = OrgGroupUpdate.createOrgGroupUpdate(
+            builder, this.commandSequence, groupId, addOff, removeOff, nameOff);
+        this.sendClientMessage(builder, ClientPayload.OrgGroupUpdate, off);
+    }
+
+    /** Disband a group. Members become unassigned; its active directive
+     *  (if any) is removed server-side. */
+    sendOrgGroupDisband(groupId: number): void {
+        if (!this.authenticated) return;
+        const builder = new flatbuffers.Builder(32);
+        this.commandSequence++;
+        const off = OrgGroupDisband.createOrgGroupDisband(builder, this.commandSequence, groupId);
+        this.sendClientMessage(builder, ClientPayload.OrgGroupDisband, off);
+    }
+
+    /** Create (`directiveId = 0`) or update (non-zero) a macro directive.
+     *  `groupId = 0` = condition-scoped (classic area/standing directive);
+     *  non-zero scopes it to that group's roster (the A+C fusion — the
+     *  server derives `conditions.orgGroup` from `groupId`, so the client
+     *  never fills `conditions` itself for a group-scoped directive).
+     *  `shape`/`params` follow the `OrderShape` layout (macro-directives §1):
+     *  Point [x,y,z] · Circle [x,y,z,radius] · Polygon [x1,y1,z1,...] (ring) ·
+     *  Polyline [frontage,x1,y1,z1,...] (the front line). */
+    sendGroupDirective(
+        directiveId: number,
+        groupId: number,
+        type: number,
+        shape: number,
+        params: number[],
+        opts: { priority?: number; requestedStrength?: number; active?: boolean } = {},
+    ): void {
+        if (!this.authenticated) return;
+        const builder = new flatbuffers.Builder(128 + params.length * 4);
+        const paramsOff = GroupDirective.createParamsVector(builder, params);
+        this.commandSequence++;
+        GroupDirective.startGroupDirective(builder);
+        GroupDirective.addSequence(builder, this.commandSequence);
+        GroupDirective.addDirectiveId(builder, directiveId);
+        GroupDirective.addGroupId(builder, groupId);
+        GroupDirective.addType(builder, type);
+        GroupDirective.addPriority(builder, opts.priority ?? 0);
+        GroupDirective.addShape(builder, shape);
+        GroupDirective.addParams(builder, paramsOff);
+        GroupDirective.addRequestedStrength(builder, opts.requestedStrength ?? 0);
+        GroupDirective.addActive(builder, opts.active ?? true);
+        const off = GroupDirective.endGroupDirective(builder);
+        this.sendClientMessage(builder, ClientPayload.GroupDirective, off);
+    }
+
+    /** Create a standing order (condition-scoped, not group-scoped —
+     *  `StandingOrderConditions.idle_only` defaults true / `org_group`
+     *  defaults 0 on the wire, exactly the "pulls from the idle pool"
+     *  semantics the compile-table's ungrouped defend/hold/patrol/screen/
+     *  reinforce branches want; a per-order conditions override isn't
+     *  exposed here because no caller needs one yet). `params` follow the
+     *  same `OrderShape`-implied layout as `sendGroupDirective`; the order's
+     *  own type ⇒ shape mapping is fixed (macro-orders §4), so there is no
+     *  separate shape argument. */
+    sendStandingOrderCreate(
+        type: number, priority: number, params: number[], expiresInFrames = 0,
+    ): void {
+        if (!this.authenticated) return;
+        const builder = new flatbuffers.Builder(128 + params.length * 4);
+        const paramsOff = StandingOrderCreate.createParamsVector(builder, params);
+        this.commandSequence++;
+        StandingOrderCreate.startStandingOrderCreate(builder);
+        StandingOrderCreate.addSequence(builder, this.commandSequence);
+        StandingOrderCreate.addType(builder, type);
+        StandingOrderCreate.addPriority(builder, priority);
+        StandingOrderCreate.addParams(builder, paramsOff);
+        StandingOrderCreate.addExpiresInFrames(builder, expiresInFrames);
+        const off = StandingOrderCreate.endStandingOrderCreate(builder);
+        this.sendClientMessage(builder, ClientPayload.StandingOrderCreate, off);
+    }
+
+    /** Remove a macro directive. Releases its assigned squads back to idle. */
+    sendGroupDirectiveRemove(directiveId: number): void {
+        if (!this.authenticated) return;
+        const builder = new flatbuffers.Builder(32);
+        this.commandSequence++;
+        const off = GroupDirectiveRemove.createGroupDirectiveRemove(builder, this.commandSequence, directiveId);
+        this.sendClientMessage(builder, ClientPayload.GroupDirectiveRemove, off);
+    }
+
+    /** Set a group's posture bundle (engagement / casualty tolerance /
+     *  reinforcement policy / area-weapon ROE — macro-orders §3). Stored
+     *  verbatim and echoed back in `OrgGroupInfo.postureJson`. */
+    sendGroupPosture(groupId: number, postureJson: string): void {
+        if (!this.authenticated) return;
+        const builder = new flatbuffers.Builder(64 + postureJson.length * 2);
+        const jsonOff = builder.createString(postureJson);
+        this.commandSequence++;
+        const off = GroupPosture.createGroupPosture(builder, this.commandSequence, groupId, jsonOff);
+        this.sendClientMessage(builder, ClientPayload.GroupPosture, off);
     }
 
     sendClientMessage(builder: flatbuffers.Builder, payloadType: ClientPayload, payloadOffset: number): void {
@@ -1421,10 +1966,18 @@ export class Connection {
     }
 
     private cleanup(): void {
+        for (const t of this.warmupPings) clearTimeout(t);
+        this.warmupPings.length = 0;
         if (this.pingInterval) {
             clearInterval(this.pingInterval);
             this.pingInterval = null;
         }
+        // Drop netsim-delayed envelopes still in flight — now that the sim
+        // covers the control lane too, letting these land post-teardown would
+        // re-enter auth/state handlers on a dead connection.
+        for (const t of this.netSimTimers) clearTimeout(t);
+        this.netSimTimers.clear();
+        this.netSimStreamReleaseAt = 0;
     }
 
     private sendPing(): void {
@@ -1446,20 +1999,30 @@ export class Connection {
     }
 
     /**
-     * Artificial-latency injection for the unreliable state channel
+     * Artificial-latency injection for the whole inbound link
      * (PLAN-latency.md L0 — "THE validation tool for the whole stage").
      * Reproduces intercontinental conditions on localhost so every L0/L1/L2
      * mitigation can be A/B'd against "does it still look right at 200 ms ±
-     * jitter, 2 % loss?". Applied ONLY to the state channel (0x02/0x03 entity
-     * state etc.) — the reliable control channel is left untouched, matching
-     * reality (TCP-like reliability vs. lossy datagrams). Per-packet random
-     * jitter naturally produces reordering; the PresentationClock's base_frame
-     * sequence tracking detects the reorder/loss. */
-    private netSim = { enabled: false, delayMs: 0, jitterMs: 0, lossProb: 0 };
+     * jitter, 2 % loss?". Applied to **every** envelope, split into a lossy
+     * datagram lane (entity state) and an ordered reliable lane (everything
+     * else, including `Pong`) — see `receiveWithNetSim` for why both matter.
+     * Per-packet random jitter on the datagram lane naturally produces
+     * reordering; the PresentationClock's base_frame sequence tracking detects
+     * the reorder/loss. */
+    private netSim: NetSimConfig = { enabled: false, delayMs: 0, jitterMs: 0, lossProb: 0 };
 
-    /** Configure (or disable) artificial latency on the state channel.
-     *  `{ delayMs, jitterMs, lossProb }` — lossProb in [0,1]. Enabled
-     *  whenever delay/jitter/loss is non-zero. */
+    /** Monotonic release timestamp for the ordered (reliable-stream) netsim
+     *  lane — see `receiveWithNetSim`. Absolute `performance.now()` ms; only
+     *  ever compared against the current time, so it does not grow unbounded. */
+    private netSimStreamReleaseAt = 0;
+    /** In-flight netsim timers, cleared on disconnect so a teardown does not
+     *  deliver stale envelopes into a dead handler set. */
+    private netSimTimers = new Set<ReturnType<typeof setTimeout>>();
+
+    /** Configure (or disable) artificial latency on the inbound link.
+     *  `{ delayMs, jitterMs, lossProb }` — lossProb in [0,1], and applies to
+     *  the entity-state lane only (the reliable lane is never dropped).
+     *  Enabled whenever delay/jitter/loss is non-zero. */
     setNetSim(cfg: { delayMs?: number; jitterMs?: number; lossProb?: number }): void {
         if (cfg.delayMs != null) this.netSim.delayMs = Math.max(0, cfg.delayMs);
         if (cfg.jitterMs != null) this.netSim.jitterMs = Math.max(0, cfg.jitterMs);
@@ -1474,24 +2037,28 @@ export class Connection {
         return this.netSim;
     }
 
-    /** Inbound state-channel frame — passes through the artificial-latency
-     *  simulator (when armed) before normal dispatch. */
-    private receiveStateFrame(data: Uint8Array): void {
-        if (!this.netSim.enabled) {
-            this.handleBinaryMessage(data);
-            return;
-        }
-        if (this.netSim.lossProb > 0 && Math.random() < this.netSim.lossProb) {
-            return; // dropped packet
-        }
-        const jitter = this.netSim.jitterMs > 0
-            ? (Math.random() * 2 - 1) * this.netSim.jitterMs
-            : 0;
-        const delay = Math.max(0, this.netSim.delayMs + jitter);
-        if (delay <= 0) {
-            this.handleBinaryMessage(data);
-        } else {
-            setTimeout(() => this.handleBinaryMessage(data), delay);
+    /** Inbound envelope — passes through the artificial-latency simulator
+     *  (when armed) before normal dispatch. The two-lane model and why both
+     *  lanes matter live in `net-sim.ts`; this method owns only the timers. */
+    private receiveWithNetSim(data: Uint8Array): void {
+        const env = data[0];
+        const isState = env === ENVELOPE_ENTITY_STATE_FULL || env === ENVELOPE_ENTITY_STATE_DELTA;
+        const verdict = netSimDecide(
+            this.netSim, isState, performance.now(),
+            this.netSimStreamReleaseAt, Math.random,
+        );
+        switch (verdict.kind) {
+            case 'drop': return;
+            case 'pass': this.dispatchIncoming(data); return;
+            case 'delay': {
+                this.netSimStreamReleaseAt = verdict.streamReleaseAt;
+                const timer = setTimeout(() => {
+                    this.netSimTimers.delete(timer);
+                    this.dispatchIncoming(data);
+                }, verdict.delayMs);
+                this.netSimTimers.add(timer);
+                return;
+            }
         }
     }
 
@@ -1502,6 +2069,9 @@ export class Connection {
         if (envelope === ENVELOPE_ENTITY_STATE_FULL || envelope === ENVELOPE_ENTITY_STATE_DELTA) {
             const snapshot = parseEntityState(data.subarray(1));
             if (snapshot) {
+                if (snapshot.baseFrame > this.newestStateFrame) {
+                    this.newestStateFrame = snapshot.baseFrame;
+                }
                 this.events.onEntityState?.(snapshot, envelope === ENVELOPE_ENTITY_STATE_DELTA);
             }
             return;
@@ -1557,13 +2127,22 @@ export class Connection {
             case ServerPayload.AuthResponse: {
                 const ar = msg.payload(new AuthResponse()) as AuthResponse;
                 if (ar.status() === AuthStatus.OK) {
-                    this.playerId = ar.playerId();
+                    this.accountId = ar.playerId();
+                    this.playerNum = ar.playerNum();
                     this.myTeam = ar.team();
+                    this.myRole = ar.role() ?? '';
                     if (ar.token()) this.sessionToken = ar.token();
                     const defsCacheKey = ar.defsCacheKey() ?? '';
-                    console.log(`[connection] AuthResponse OK: playerId=${this.playerId}, team=${this.myTeam}, defsKey=${defsCacheKey || '(none)'}`);
+                    console.log(`[connection] AuthResponse OK: accountId=${this.accountId}, playerNum=${this.playerNum}, team=${this.myTeam}, role=${this.myRole}, defsKey=${defsCacheKey || '(none)'}`);
                     this.setState('connected');
-                    this.events.onAuthenticated?.(this.playerId, this.sessionToken ?? '', this.myTeam, defsCacheKey);
+                    this.events.onAuthenticated?.({
+                        accountId: this.accountId,
+                        playerNum: this.playerNum,
+                        token: this.sessionToken ?? '',
+                        team: this.myTeam,
+                        defsCacheKey,
+                        role: this.myRole,
+                    });
                 } else {
                     const errMsg = ar.message() ?? 'auth failed';
                     console.error(`[connection] AuthResponse rejected: ${errMsg}`);
@@ -1607,6 +2186,11 @@ export class Connection {
                     for (let i = 0; i < info.winningAllyTeamsLength(); i++) {
                         winners.push(info.winningAllyTeams(i) ?? 0);
                     }
+                    // One-shot and load-bearing: this is the only client-side
+                    // proof the result crossed the wire. Without it a missing
+                    // overlay is indistinguishable from a message that never
+                    // arrived (PLAN-endtoend D17 cost a fire to that ambiguity).
+                    console.warn(`[connection] GAME OVER received: frame=${info.frame()} winners=[${winners.join(',')}]`);
                     this.events.onGameOver?.(info.frame(), winners);
                 }
                 break;
@@ -1655,6 +2239,48 @@ export class Connection {
                     if (key) options[key] = o.value() ?? '';
                 }
                 this.events.onGameModOptions?.(options);
+                break;
+            }
+            case ServerPayload.RulesParamKeyDictionary: {
+                // W3: Receive and store the key dictionary
+                const dict = msg.payload(new RulesParamKeyDictionary()) as RulesParamKeyDictionary;
+                this.keyDictionary = [''];  // index 0 reserved
+                for (let i = 0; i < dict.keysLength(); i++) {
+                    this.keyDictionary.push(dict.keys(i) ?? '');
+                }
+                this.keyDictionaryRev = dict.dictionaryRev();
+                console.log(`[connection] Received key dictionary rev ${this.keyDictionaryRev} with ${this.keyDictionary.length - 1} keys`);
+                break;
+            }
+            case ServerPayload.RulesParamUpdate: {
+                const upd = msg.payload(new RulesParamUpdate()) as RulesParamUpdate;
+                const params: Record<string, number | string | null> = {};
+                for (let i = 0; i < upd.paramsLength(); i++) {
+                    const e = upd.params(i);
+                    if (!e) continue;
+                    // W3: Try key_id first, fall back to string key
+                    let key: string | null = null;
+                    const keyId = e.keyId();
+                    if (keyId > 0 && keyId < this.keyDictionary.length) {
+                        key = this.keyDictionary[keyId];
+                    } else {
+                        key = e.key();
+                    }
+                    if (!key) continue;
+                    switch (e.valueKind()) {
+                        case RulesParamValueKind.Number: params[key] = e.numVal(); break;
+                        case RulesParamValueKind.String: params[key] = e.strVal() ?? ''; break;
+                        // Nil → delete on the client mirror.
+                        case RulesParamValueKind.Nil:
+                        default:                          params[key] = null; break;
+                    }
+                }
+                this.events.onRulesParamUpdate?.({
+                    scope: upd.scope() === RulesParamScope.Team ? 'team' : 'game',
+                    id: upd.id(),
+                    replace: upd.replace(),
+                    params,
+                });
                 break;
             }
             case ServerPayload.TeamStatsHistoryBatch: {
@@ -1723,6 +2349,26 @@ export class Connection {
                 } catch (err) {
                     console.error('[connection] failed to parse MapData:', err);
                 }
+                break;
+            }
+            case ServerPayload.PlayerRoster: {
+                const pr = msg.payload(new PlayerRoster()) as PlayerRoster;
+                const players: RosterPlayerInfo[] = [];
+                for (let i = 0; i < pr.playersLength(); i++) {
+                    const p = pr.players(i, new PlayerEntry());
+                    if (!p) continue;
+                    players.push({
+                        playerNum: p.playerNum(),
+                        name: p.name() ?? '',
+                        team: p.team(),
+                        allyTeam: p.allyTeam(),
+                        spectator: p.spectator(),
+                        isAI: p.isAi(),
+                        active: p.active(),
+                        accountId: p.accountId(),
+                    });
+                }
+                this.events.onPlayerRoster?.(players);
                 break;
             }
             case ServerPayload.PlayerLeft: {
@@ -1996,6 +2642,60 @@ export class Connection {
                 this.events.onStandingOrders?.(out);
                 break;
             }
+            case ServerPayload.OrgGroupState: {
+                const fbState = msg.payload(new OrgGroupState()) as OrgGroupState;
+                const out: OrgGroupInfoMsg[] = [];
+                for (let i = 0; i < fbState.groupsLength(); i++) {
+                    const g = fbState.groups(i);
+                    if (!g) continue;
+                    const memberIds: number[] = [];
+                    for (let j = 0; j < g.memberIdsLength(); j++) {
+                        memberIds.push(g.memberIds(j) ?? 0);
+                    }
+                    out.push({
+                        groupId: g.groupId(),
+                        echelon: Echelon[g.echelon()] as OrgGroupInfoMsg['echelon'] ?? 'Platoon',
+                        ownerTeam: g.ownerTeam(),
+                        parentId: g.parentId(),
+                        name: g.name() ?? '',
+                        memberIds,
+                        currentDirectiveId: g.currentDirectiveId(),
+                        postureJson: g.postureJson() ?? '',
+                        createdAtFrame: g.createdAtFrame(),
+                    });
+                }
+                this.events.onOrgGroupState?.(out);
+                break;
+            }
+            case ServerPayload.DirectiveState: {
+                const fbState = msg.payload(new DirectiveState()) as DirectiveState;
+                const out: DirectiveInfoMsg[] = [];
+                for (let i = 0; i < fbState.directivesLength(); i++) {
+                    const d = fbState.directives(i);
+                    if (!d) continue;
+                    const params: number[] = [];
+                    for (let j = 0; j < d.paramsLength(); j++) {
+                        params.push(d.params(j) ?? 0);
+                    }
+                    out.push({
+                        directiveId: d.directiveId(),
+                        ownerTeam: d.ownerTeam(),
+                        groupId: d.groupId(),
+                        type: DirectiveType[d.type()] ?? 'DefendArea',
+                        priority: d.priority(),
+                        shape: OrderShape[d.shape()] as DirectiveInfoMsg['shape'] ?? 'Point',
+                        params,
+                        requestedStrength: d.requestedStrength(),
+                        assignedStrength: d.assignedStrength(),
+                        assignedSquadCount: d.assignedSquadCount(),
+                        active: d.active(),
+                        createdAtFrame: d.createdAtFrame(),
+                        expiresAtFrame: d.expiresAtFrame(),
+                    });
+                }
+                this.events.onDirectiveState?.(out);
+                break;
+            }
             case ServerPayload.GameRestarting:
                 console.log('[connection] server restarting — host will reload');
                 this.events.onServerRestart?.();
@@ -2047,6 +2747,68 @@ export class Connection {
             this.events.onCombatEvents(events, frame);
         }
 
+        // Statistical-combat per-volley outcomes (Metalstorm Model 1). Already
+        // visibility-filtered server-side. Drives cosmetic tracers/impacts, the
+        // squad casualty impact hint, and counterbattery radar blips.
+        const volleyCount = batch.volleyOutcomesLength();
+        if (volleyCount > 0 && this.events.onVolleyOutcomes) {
+            const out: VolleyOutcomeInfo[] = [];
+            for (let i = 0; i < volleyCount; i++) {
+                const e = batch.volleyOutcomes(i, new VolleyOutcome());
+                if (!e) continue;
+                const tp = e.targetPos();
+                const rp = e.revealPos();
+                out.push({
+                    attackerId: e.attackerId(),
+                    weaponDefId: e.weaponDefId(),
+                    targetId: e.targetId(),
+                    x: tp ? tp.x() : 0,
+                    y: tp ? tp.y() : 0,
+                    z: tp ? tp.z() : 0,
+                    resolveFrame: e.resolveFrame(),
+                    result: e.result(),
+                    damage: e.damage(),
+                    rounds: e.rounds(),
+                    team: e.team(),
+                    revealAttacker: e.revealAttacker(),
+                    revealX: rp ? rp.x() : 0,
+                    revealY: rp ? rp.y() : 0,
+                    revealZ: rp ? rp.z() : 0,
+                    attackerPosture: e.attackerPosture(),
+                });
+            }
+            this.events.onVolleyOutcomes(out, frame);
+        }
+
+        // Damage-field lifecycle (Metalstorm Model 3, C6). Created/Removed
+        // events; the client invents the barrage FX from them. Already
+        // visibility-filtered server-side (area overlap with known space).
+        const fieldCount = batch.damageFieldsLength();
+        if (fieldCount > 0 && this.events.onDamageFields) {
+            const out: DamageFieldEventInfo[] = [];
+            for (let i = 0; i < fieldCount; i++) {
+                const e = batch.damageFields(i, new DamageFieldEvent());
+                if (!e) continue;
+                const c = e.center();
+                out.push({
+                    fieldId: e.fieldId(),
+                    kind: e.kind(),
+                    shape: e.shape(),
+                    x: c ? c.x() : 0,
+                    y: c ? c.y() : 0,
+                    z: c ? c.z() : 0,
+                    radius: e.radius(),
+                    halfZ: e.halfZ(),
+                    weaponDefId: e.weaponDefId(),
+                    intensity: e.intensity(),
+                    cadence: e.cadence(),
+                    duration: e.duration(),
+                    team: e.team(),
+                });
+            }
+            this.events.onDamageFields(out, frame);
+        }
+
         // Projectile lifecycle events. The renderer integrates motion
         // locally between server updates, so each batch typically carries
         // only Fired/Impact/Trajectory transitions — not per-tick state.
@@ -2071,9 +2833,42 @@ export class Connection {
                     ttl: e.ttl(),
                     gravity: e.gravity(),
                     hitscan: e.hitscan(),
+                    keyframed: e.keyframed(),
                 });
             }
             this.events.onProjectileFired(out, frame);
+        }
+
+        // PLAN-latency L3.2 — decoded ahead of the impacts below because it
+        // *supersedes* them. The server emits both for a Tier-S resolution:
+        // the legacy `ProjectileImpactEvent` so a pre-L3 client still sees the
+        // burst, and `OutcomeKnownEvent` carrying the same resolution plus the
+        // frame it happens on (and a truer `outcome` — see OutcomeKnownInfo).
+        // Unlike the keyframe/trajectory pair, which the server made mutually
+        // exclusive at the emit site, these two genuinely both go out; the
+        // client is the one that must not play the explosion twice.
+        //
+        // Suppression is conditional on a consumer actually being registered
+        // for the replacement: a host that only implements `onProjectileImpacts`
+        // must keep seeing every impact rather than lose the Tier-S ones to a
+        // handler it does not have.
+        const outcomeKnownCount = this.events.onOutcomesKnown
+            ? batch.outcomesKnownLength() : 0;
+        const outcomesKnown: OutcomeKnownInfo[] = [];
+        const superseded = new Set<number>();
+        for (let i = 0; i < outcomeKnownCount; i++) {
+            const e = batch.outcomesKnown(i, new OutcomeKnownEvent());
+            if (!e) continue;
+            const p = e.outcomePos();
+            outcomesKnown.push({
+                projId: e.projId(),
+                outcome: e.outcome(),
+                outcomeFrame: e.outcomeFrame(),
+                outcomePos: { x: p?.x() ?? 0, y: p?.y() ?? 0, z: p?.z() ?? 0 },
+                targetId: e.targetId(),
+                weaponDefId: e.weaponDefId(),
+            });
+            superseded.add(e.projId());
         }
 
         const impactCount = batch.projectileImpactsLength();
@@ -2082,6 +2877,10 @@ export class Connection {
             for (let i = 0; i < impactCount; i++) {
                 const e = batch.projectileImpacts(i, new ProjectileImpactEvent());
                 if (!e) continue;
+                // Both events are pushed by the same `Collision()` call, so
+                // they always share a batch — the dedupe never has to span
+                // one, and a suppressed impact is never simply lost.
+                if (superseded.has(e.projId())) continue;
                 const p = e.pos();
                 out.push({
                     projId: e.projId(),
@@ -2091,7 +2890,7 @@ export class Connection {
                     weaponDefId: e.weaponDefId(),
                 });
             }
-            this.events.onProjectileImpacts(out, frame);
+            if (out.length > 0) this.events.onProjectileImpacts(out, frame);
         }
 
         const trajCount = batch.projectileTrajectoriesLength();
@@ -2110,6 +2909,63 @@ export class Connection {
                 });
             }
             this.events.onProjectileTrajectories(out, frame);
+        }
+
+        // PLAN-latency L2.2: Tier-C fire outcomes. Present only when the
+        // server is running with `LatencyCosmeticFire` on; on a pre-L2.1
+        // server the vector is absent and the length reads 0.
+        const outcomeCount = batch.fireOutcomesLength();
+        if (outcomeCount > 0 && this.events.onFireOutcomes) {
+            const out: FireOutcomeInfo[] = [];
+            for (let i = 0; i < outcomeCount; i++) {
+                const e = batch.fireOutcomes(i, new FireOutcomeEvent());
+                if (!e) continue;
+                const o = e.origin();
+                const t = e.targetPos();
+                const ip = e.impactPos();
+                out.push({
+                    fireFrame: e.fireFrame(),
+                    weaponDefId: e.weaponDefId(),
+                    ownerId: e.ownerId(),
+                    team: e.team(),
+                    origin: { x: o?.x() ?? 0, y: o?.y() ?? 0, z: o?.z() ?? 0 },
+                    targetId: e.targetId(),
+                    targetPos: { x: t?.x() ?? 0, y: t?.y() ?? 0, z: t?.z() ?? 0 },
+                    outcome: e.outcome(),
+                    impactFrame: e.impactFrame(),
+                    impactPos: { x: ip?.x() ?? 0, y: ip?.y() ?? 0, z: ip?.z() ?? 0 },
+                    gravity: e.gravity(),
+                });
+            }
+            this.events.onFireOutcomes(out, frame);
+        }
+
+        // PLAN-latency L3.2: Tier-S keyframes. Dispatched *after* the Fired
+        // events above so a Launch knot arriving in its projectile's own batch
+        // finds the live entry already created, and *before* the outcomes
+        // below so the Terminal knot is on the track before the burst that
+        // shares its frame is scheduled.
+        const keyframeCount = batch.trajectoryKeyframesLength();
+        if (keyframeCount > 0 && this.events.onTrajectoryKeyframes) {
+            const out: TrajectoryKeyframeInfo[] = [];
+            for (let i = 0; i < keyframeCount; i++) {
+                const e = batch.trajectoryKeyframes(i, new TrajectoryKeyframe());
+                if (!e) continue;
+                const p = e.pos();
+                const v = e.vel();
+                out.push({
+                    projId: e.projId(),
+                    frame: e.frame(),
+                    pos: { x: p?.x() ?? 0, y: p?.y() ?? 0, z: p?.z() ?? 0 },
+                    vel: { x: v?.x() ?? 0, y: v?.y() ?? 0, z: v?.z() ?? 0 },
+                    kind: e.kind(),
+                });
+            }
+            this.events.onTrajectoryKeyframes(out, frame);
+        }
+
+        if (outcomesKnown.length > 0 && this.events.onOutcomesKnown) {
+            this.events.onOutcomesKnown(outcomesKnown, frame);
         }
 
         const soundCount = batch.soundsLength();
@@ -2170,12 +3026,18 @@ export class Connection {
     private handleEntityDestroy(msg: ServerMessage): void {
         const destroy = msg.payload(new EntityDestroy()) as EntityDestroy;
         const pos = destroy.position();
+        // L2 carried item: the destroy now carries the true death frame,
+        // stamped server-side at kill time. Fall back to the old lower-bound
+        // guess — max(last GameEventBatch frame, newest observed entity-state
+        // frame) — only when the field is absent (0 — a server predating it).
+        const deathFrame = destroy.frame()
+            || Math.max(this.lastEventFrame, this.newestStateFrame);
         this.events.onEntityDestroy?.(
             destroy.entityId(),
             pos ? pos.x() : 0,
             pos ? pos.y() : 0,
             pos ? pos.z() : 0,
-            this.lastEventFrame,
+            deathFrame,
         );
     }
 

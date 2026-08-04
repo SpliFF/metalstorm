@@ -81,6 +81,32 @@ describe('parseAssetsManifest', () => {
         ].join('\n');
         expect(() => parseAssetsManifest(md)).toThrow();
     });
+
+    it('throws on a row with extra columns instead of silently dropping them', () => {
+        const md = [
+            '| Asset (path in tree) | Target def(s) | Origin (URL) | Author | License | Modifications |',
+            '|---|---|---|---|---|---|',
+            '| objects3d/x.glb | ms_x | https://example.com | A | CC0 | none | surprise |',
+        ].join('\n');
+        expect(() => parseAssetsManifest(md)).toThrow(/expected 6 columns, got 7/);
+    });
+
+    it('ends the table at the first non-table line — a second table in the doc is not parsed as rows', () => {
+        const md = [
+            '| Asset (path in tree) | Target def(s) | Origin (URL) | Author | License | Modifications |',
+            '|---|---|---|---|---|---|',
+            '| objects3d/ms_tanks_s2.glb | ms_tanks_s2 | https://example.com | A | CC0 | none |',
+            '',
+            '## Tooling notes',
+            '',
+            '| Tool | Version | Notes |',
+            '|---|---|---|',
+            '| toktx | 4.3 | ktx2 encoder |',
+        ].join('\n');
+        const rows = parseAssetsManifest(md);
+        expect(rows).toHaveLength(1);
+        expect(rows[0].assetPath).toBe('objects3d/ms_tanks_s2.glb');
+    });
 });
 
 describe('collectDefModelRefs (real Fengari execution against the real unit defs)', () => {
@@ -91,9 +117,21 @@ describe('collectDefModelRefs (real Fengari execution against the real unit defs
         expect(tankNames.sort()).toEqual(['ms_tanks_s1', 'ms_tanks_s2', 'ms_tanks_s3', 'ms_tanks_s4']);
     });
 
-    it('objectname matches the def name (per _builder.lua)', () => {
+    it('objectname defaults to the def name (per _builder.lua)', () => {
+        // Sample a scale with NO model override — _builder.lua derives
+        // objectname = ms_<class>_s<scale> for every un-overridden slot.
+        // (Every ms_tanks_* scale now carries an override: s1/s3 were pointed
+        // at the wz_* stems so they stop rendering as placeholders.)
+        const soldiersS3 = refs.find((r) => r.defName === 'ms_soldiers_s3');
+        expect(soldiersS3?.objectname).toBe('ms_soldiers_s3');
+    });
+
+    it('a scale with an explicit override points at the generated model', () => {
+        // The 8 roster slots that have real art wire it via
+        // `override = { objectname = 'fable_*' }` — deliberately breaking the
+        // name-matches-def default above (PLAN-metalstorm-beta-units.md §7).
         const tankS2 = refs.find((r) => r.defName === 'ms_tanks_s2');
-        expect(tankS2?.objectname).toBe('ms_tanks_s2');
+        expect(tankS2?.objectname).toBe('fable_tank');
     });
 
     it('executes the literal-table files (civilians, buildings) with no builder', () => {
@@ -179,6 +217,33 @@ describe('validateAssets — synthetic fixtures (proves the check actually catch
             '| Asset (path in tree) | Target def(s) | Origin (URL) | Author | License | Modifications |',
             '|---|---|---|---|---|---|',
             '| objects3d/ms_test_s1.glb | ms_test_s1 | https://example.com | Someone | CC0 | rescaled |',
+        ].join('\n'));
+        const violations = validateAssets({ gameRoot: dir, reader: nodeReader });
+        expect(violations.filter((v) => v.severity === 'error')).toEqual([]);
+    });
+
+    it('fails the suite (with the file name) when a units/*.lua def file has a Lua error', () => {
+        const dir = makeFixture();
+        // Touches an unstubbed global — the runtime error must surface with
+        // the def filename, not silently vanish from the licence gate.
+        fs.writeFileSync(path.join(dir, 'units', 'broken.lua'),
+            'return UnstubbedGlobal.mk("nope")\n');
+        fs.writeFileSync(path.join(dir, 'ASSETS.md'), [
+            '| Asset (path in tree) | Target def(s) | Origin (URL) | Author | License | Modifications |',
+            '|---|---|---|---|---|---|',
+            '| _none yet_ | | | | | |',
+        ].join('\n'));
+        expect(() => collectDefModelRefs(dir, nodeReader)).toThrow(/broken\.lua/);
+        expect(() => validateAssets({ gameRoot: dir, reader: nodeReader })).toThrow(/broken\.lua/);
+    });
+
+    it('matches manifest rows to files case-insensitively (extensions were already case-insensitive)', () => {
+        const dir = makeFixture();
+        fs.writeFileSync(path.join(dir, 'objects3d', 'ms_test_s1.GLB'), 'stub');
+        fs.writeFileSync(path.join(dir, 'ASSETS.md'), [
+            '| Asset (path in tree) | Target def(s) | Origin (URL) | Author | License | Modifications |',
+            '|---|---|---|---|---|---|',
+            '| objects3d/MS_Test_S1.glb | ms_test_s1 | https://example.com | Someone | CC0 | none |',
         ].join('\n'));
         const violations = validateAssets({ gameRoot: dir, reader: nodeReader });
         expect(violations.filter((v) => v.severity === 'error')).toEqual([]);

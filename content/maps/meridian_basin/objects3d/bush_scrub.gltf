@@ -1,0 +1,213 @@
+{
+ "asset": {
+  "version": "2.0",
+  "generator": "fable-model-forge 1.0 (Claude Fable 5, hand-built glTF)"
+ },
+ "scene": 0,
+ "scenes": [
+  {
+   "nodes": [
+    0
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "name": "MS_bush_scrub",
+   "children": [
+    1
+   ]
+  },
+  {
+   "name": "scrub",
+   "mesh": 0
+  }
+ ],
+ "meshes": [
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1,
+      "TEXCOORD_0": 2
+     },
+     "indices": 3,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  }
+ ],
+ "accessors": [
+  {
+   "bufferView": 0,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 720,
+   "type": "VEC3",
+   "min": [
+    -16.639053344726562,
+    0.40253499150276184,
+    -11.970575332641602
+   ],
+   "max": [
+    13.200952529907227,
+    20.905166625976562,
+    12.567010879516602
+   ]
+  },
+  {
+   "bufferView": 1,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 720,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 2,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 720,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 3,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 720,
+   "type": "SCALAR"
+  }
+ ],
+ "bufferViews": [
+  {
+   "buffer": 0,
+   "byteOffset": 0,
+   "byteLength": 8640,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 8640,
+   "byteLength": 8640,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 17280,
+   "byteLength": 5760,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 23040,
+   "byteLength": 2880,
+   "target": 34963
+  }
+ ],
+ "buffers": [
+  {
+   "byteLength": 25920,
+   "uri": "bush_scrub.bin"
+  }
+ ],
+ "samplers": [
+  {}
+ ],
+ "images": [
+  {
+   "mimeType": "image/ktx2",
+   "uri": "bush_scrub_diffuse.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "bush_scrub_orm.ktx2"
+  }
+ ],
+ "textures": [
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 0
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 1
+    }
+   }
+  }
+ ],
+ "materials": [
+  {
+   "name": "bush_scrub",
+   "pbrMetallicRoughness": {
+    "baseColorTexture": {
+     "index": 0
+    },
+    "metallicFactor": 1.0,
+    "roughnessFactor": 1.0,
+    "metallicRoughnessTexture": {
+     "index": 1
+    }
+   },
+   "occlusionTexture": {
+    "index": 1
+   }
+  }
+ ],
+ "extensions": {
+  "SPRINGRTS_geometry": {
+   "configVersion": 8,
+   "height": 20.9052,
+   "midpos": [
+    -1.71905,
+    10.45258,
+    0.29822
+   ],
+   "mins": [
+    -16.63905,
+    0.40254,
+    -11.97058
+   ],
+   "maxs": [
+    13.20095,
+    20.90517,
+    12.56701
+   ],
+   "radius": 21.9633,
+   "pieces": [
+    {
+     "name": "scrub",
+     "parent": -1,
+     "offset": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "mins": [
+      -16.63905,
+      0.40254,
+      -11.97058
+     ],
+     "maxs": [
+      13.20095,
+      20.90517,
+      12.56701
+     ]
+    }
+   ]
+  }
+ },
+ "extensionsUsed": [
+  "KHR_texture_basisu",
+  "SPRINGRTS_geometry"
+ ],
+ "extensionsRequired": [
+  "KHR_texture_basisu"
+ ]
+}

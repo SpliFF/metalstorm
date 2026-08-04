@@ -20,7 +20,15 @@
  * order events were scheduled (a monotonic sequence tiebreaker on the heap, so
  * same-frame effects stay deterministic). Past-due events (frame ≤ P at
  * schedule time — e.g. an event that arrives after a stall, or before the
- * cursor has anchored) fire on the very next drain; nothing is ever dropped.
+ * cursor has anchored) fire on the very next drain.
+ *
+ * State vs cosmetic: `drain` only runs from the worker render loop, but the
+ * transport keeps delivering while rAF is throttled (hidden tab) — so the
+ * queue can accumulate minutes of off-screen combat and refocus would fire it
+ * all in one burst. Kinds whose `fire` mutates client state (entity removal,
+ * liveState sweeps, reveals) always run, however late; cosmetic kinds (FX,
+ * sounds, impact visuals) are silently dropped once they lag the cursor by
+ * more than COSMETIC_STALE_FRAMES, collapsing hidden-tab backlogs safely.
  */
 
 /** Event families the timeline carries. `projSpawn`/`projDetonate` are wired by
@@ -34,12 +42,44 @@ export type ScheduledKind =
     | 'projSpawn'
     | 'projDetonate';
 
+/** Kinds whose `fire` mutates client state — mesh/liveState removal
+ *  ('destroy'), renderer adds ('losReveal'). Skipping one leaks meshes or
+ *  desyncs liveState, so they always fire, however late. Every other kind is
+ *  cosmetic (presentation-only FX/audio; even a dropped 'impact' is safe —
+ *  the projectile renderer self-sweeps via TTL / MAX_ORPHAN_LIFE_MS). */
+const STATE_CRITICAL: ReadonlySet<ScheduledKind> = new Set<ScheduledKind>([
+    'destroy',
+    'losReveal',
+]);
+
+/** Staleness horizon for cosmetic fires, in sim frames: 90 ≈ 3 s at
+ *  GAME_SPEED 30 — 3× the display-delay ceiling (DELAY_CEIL_FRAMES = 30 in
+ *  presentation-clock.ts, the largest lag a *legitimately* late event can
+ *  carry, since events arrive ~D ahead of the cursor). The 3× slack covers
+ *  hard-snap stalls and drain hiccups without ever dropping an on-screen
+ *  effect, while a hidden-tab backlog (minutes of frames) collapses to
+ *  silence on refocus instead of firing as one burst. */
+export const COSMETIC_STALE_FRAMES = 90;
+
 export interface Scheduled {
     /** Sim frame the event should be presented on. */
     readonly frame: number;
     readonly kind: ScheduledKind;
     /** The side effect to run when the cursor reaches `frame`. */
     readonly fire: () => void;
+    /**
+     * Optional pre-roll callback: run repeatedly, every frame the event sits
+     * in the future window `(P, E]`, *before* `fire`. This is the point of the
+     * foreknowledge window — work that must already be finished by the time
+     * the cursor arrives (fetching an about-to-be-revealed unit's model, say)
+     * starts up to `D` frames early instead of on the reveal frame itself.
+     *
+     * Because it runs on many frames it MUST be idempotent and cheap; the
+     * retry is deliberate, since the prerequisite a warm-up needs (the unit's
+     * def, which streams on its own schedule) may not have arrived on the
+     * first attempt.
+     */
+    readonly prep?: () => void;
     /** Monotonic insertion order — the same-frame tiebreaker. */
     readonly seq: number;
 }
@@ -49,20 +89,30 @@ export class EventScheduler {
     private heap: Scheduled[] = [];
     private seqCounter = 0;
 
-    /** Queue an event to fire when the presentation cursor reaches `frame`. */
-    schedule(frame: number, kind: ScheduledKind, fire: () => void): void {
-        this.heapPush({ frame, kind, fire, seq: this.seqCounter++ });
+    /**
+     * Queue an event to fire when the presentation cursor reaches `frame`.
+     * `prep`, if given, is the pre-roll warm-up run by `prefetch()` while the
+     * event is still ahead of the cursor (see `Scheduled.prep`).
+     */
+    schedule(frame: number, kind: ScheduledKind, fire: () => void, prep?: () => void): void {
+        this.heapPush({ frame, kind, fire, prep, seq: this.seqCounter++ });
     }
 
     /**
      * Fire every queued event with `frame <= P`, in ascending (frame, seq)
      * order. Call once per render frame with the current presentation cursor.
-     * A throwing `fire` callback is caught and logged so one bad consumer can't
-     * abort the drain (or the render loop).
+     * Cosmetic events staler than COSMETIC_STALE_FRAMES are dropped without
+     * firing (hidden-tab refocus burst collapse); state-critical kinds always
+     * fire. A throwing `fire` callback is caught and logged so one bad
+     * consumer can't abort the drain (or the render loop).
      */
     drain(P: number): void {
         while (this.heap.length > 0 && this.heap[0].frame <= P) {
             const ev = this.heapPop()!;
+            if (!STATE_CRITICAL.has(ev.kind) &&
+                P - ev.frame > COSMETIC_STALE_FRAMES) {
+                continue;
+            }
             try {
                 ev.fire();
             } catch (err) {
@@ -85,6 +135,32 @@ export class EventScheduler {
         const out = this.heap.filter((s) => s.frame > P && s.frame <= E);
         out.sort(cmp);
         return out;
+    }
+
+    /**
+     * Run the `prep` warm-up of every queued event in the future window
+     * `(P, E]`. Call once per render frame, right after `drain(P)`.
+     *
+     * Unlike `window()` this walks the heap in place — no filter, no sort, no
+     * allocation — because warm-up order is irrelevant and this is on the
+     * render path. A throwing `prep` is caught per-event: a warm-up failure
+     * must never abort the sweep or the frame (the event still fires on time;
+     * the consumer just falls back to its cold path).
+     */
+    prefetch(P: number, E: number): void {
+        const h = this.heap;
+        for (let i = 0; i < h.length; i++) {
+            const ev = h[i];
+            if (ev.prep === undefined || ev.frame <= P || ev.frame > E) continue;
+            try {
+                ev.prep();
+            } catch (err) {
+                console.error(
+                    `[event-scheduler] '${ev.kind}' pre-roll for frame ${ev.frame} threw:`,
+                    err,
+                );
+            }
+        }
     }
 
     /** Drop every pending event (quit-to-lobby / teardown). */

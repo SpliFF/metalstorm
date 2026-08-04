@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { EventScheduler } from './event-scheduler.js';
+import { EventScheduler, COSMETIC_STALE_FRAMES } from './event-scheduler.js';
 
 describe('EventScheduler', () => {
     it('fires nothing before the cursor reaches the scheduled frame', () => {
@@ -35,7 +35,7 @@ describe('EventScheduler', () => {
         expect(fired).toEqual(['a', 'b', 'c', 'd']);
     });
 
-    it('fires past-due events immediately on the next drain (never drops)', () => {
+    it('fires past-due events immediately on the next drain', () => {
         const s = new EventScheduler();
         const fired: number[] = [];
         // Cursor is already at 100 when a frame-40 event arrives (e.g. after a
@@ -44,6 +44,39 @@ describe('EventScheduler', () => {
         s.drain(100);
         expect(fired).toEqual([40]);
         expect(s.size).toBe(0);
+    });
+
+    it('drops cosmetic events staler than the staleness horizon', () => {
+        const s = new EventScheduler();
+        const fired: number[] = [];
+        // Hidden-tab scenario: FX queued at frame 10, next drain happens
+        // only after refocus with the cursor far past the horizon.
+        s.schedule(10, 'combatFx', () => fired.push(10));
+        s.schedule(12, 'sound', () => fired.push(12));
+        s.schedule(14, 'impact', () => fired.push(14));
+        s.drain(14 + COSMETIC_STALE_FRAMES + 1); // past the horizon of all three
+        expect(fired).toEqual([]);   // dropped without firing
+        expect(s.size).toBe(0);      // …but removed from the queue
+    });
+
+    it('always fires state-critical events no matter how stale', () => {
+        const s = new EventScheduler();
+        const fired: string[] = [];
+        s.schedule(10, 'destroy', () => fired.push('destroy'));
+        s.schedule(10, 'losReveal', () => fired.push('losReveal'));
+        s.schedule(10, 'combatFx', () => fired.push('combatFx'));
+        s.drain(10_000); // hours past the horizon
+        expect(fired).toEqual(['destroy', 'losReveal']);
+        expect(s.size).toBe(0);
+    });
+
+    it('fires fresh cosmetic events at or within the staleness horizon', () => {
+        const s = new EventScheduler();
+        const fired: number[] = [];
+        s.schedule(10, 'combatFx', () => fired.push(10));
+        // Exactly at the horizon boundary — still fires (drop is strictly >).
+        s.drain(10 + COSMETIC_STALE_FRAMES);
+        expect(fired).toEqual([10]);
     });
 
     it('interleaves late-arriving earlier frames correctly across drains', () => {
@@ -99,6 +132,63 @@ describe('EventScheduler', () => {
         expect(w.map((e) => e.frame)).toEqual([20]); // >P (exclusive), <=E
     });
 
+    // ── pre-roll (L1 LOS-reveal warm-up) ────────────────────────────────────
+
+    it('prefetch() runs prep only for events inside the future window (P, E]', () => {
+        const s = new EventScheduler();
+        const prepped: number[] = [];
+        for (const f of [5, 10, 20, 30, 40]) {
+            s.schedule(f, 'losReveal', () => {}, () => prepped.push(f));
+        }
+        s.prefetch(10, 30);
+        expect(prepped.sort((a, b) => a - b)).toEqual([20, 30]); // >P, <=E
+    });
+
+    it('prefetch() never fires or removes the event it warmed up', () => {
+        const s = new EventScheduler();
+        const log: string[] = [];
+        s.schedule(20, 'losReveal', () => log.push('fire'), () => log.push('prep'));
+        s.prefetch(10, 30);
+        expect(log).toEqual(['prep']);
+        expect(s.size).toBe(1);
+        s.drain(20);
+        expect(log).toEqual(['prep', 'fire']);
+        expect(s.size).toBe(0);
+    });
+
+    it('prefetch() re-runs prep every frame the event stays in the window', () => {
+        // The retry is load-bearing: a reveal's warm-up can no-op on the first
+        // attempt (its def has not streamed in yet) and must land on a later one.
+        const s = new EventScheduler();
+        let attempts = 0;
+        s.schedule(20, 'losReveal', () => {}, () => { attempts++; });
+        for (let p = 10; p < 20; p++) s.prefetch(p, p + 10);
+        expect(attempts).toBe(10);
+    });
+
+    it('prefetch() skips events with no prep and tolerates a throwing one', () => {
+        const s = new EventScheduler();
+        const prepped: number[] = [];
+        const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+        s.schedule(20, 'losReveal', () => {});                       // no prep
+        s.schedule(21, 'losReveal', () => {}, () => { throw new Error('boom'); });
+        s.schedule(22, 'losReveal', () => {}, () => prepped.push(22));
+        s.prefetch(10, 30);
+        expect(prepped).toEqual([22]);      // sweep continued past the thrower
+        expect(errSpy).toHaveBeenCalled();
+        errSpy.mockRestore();
+    });
+
+    it('prefetch() stops warming an event once the cursor has passed it', () => {
+        const s = new EventScheduler();
+        let attempts = 0;
+        s.schedule(20, 'losReveal', () => {}, () => { attempts++; });
+        s.prefetch(10, 30);
+        expect(attempts).toBe(1);
+        s.prefetch(20, 40);                 // frame == P → no longer "future"
+        expect(attempts).toBe(1);
+    });
+
     it('clear() drops all pending events', () => {
         const s = new EventScheduler();
         const fired: number[] = [];
@@ -127,7 +217,7 @@ describe('EventScheduler', () => {
         const frames = [7, 3, 9, 1, 4, 1, 8, 2, 6, 5, 3, 0];
         const fired: number[] = [];
         for (const f of frames) s.schedule(f, 'impact', () => fired.push(f));
-        s.drain(1000);
+        s.drain(50); // within the cosmetic staleness horizon of every frame
         expect(fired).toEqual([...frames].sort((a, b) => a - b));
     });
 });

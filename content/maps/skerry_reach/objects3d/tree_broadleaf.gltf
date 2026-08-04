@@ -1,0 +1,213 @@
+{
+ "asset": {
+  "version": "2.0",
+  "generator": "fable-model-forge 1.0 (Claude Fable 5, hand-built glTF)"
+ },
+ "scene": 0,
+ "scenes": [
+  {
+   "nodes": [
+    0
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "name": "MS_tree_broadleaf",
+   "children": [
+    1
+   ]
+  },
+  {
+   "name": "broadleaf",
+   "mesh": 0
+  }
+ ],
+ "meshes": [
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1,
+      "TEXCOORD_0": 2
+     },
+     "indices": 3,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  }
+ ],
+ "accessors": [
+  {
+   "bufferView": 0,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 1132,
+   "type": "VEC3",
+   "min": [
+    -38.32204055786133,
+    0.0,
+    -27.923803329467773
+   ],
+   "max": [
+    36.879730224609375,
+    93.31794738769531,
+    31.266281127929688
+   ]
+  },
+  {
+   "bufferView": 1,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 1132,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 2,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 1132,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 3,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 1236,
+   "type": "SCALAR"
+  }
+ ],
+ "bufferViews": [
+  {
+   "buffer": 0,
+   "byteOffset": 0,
+   "byteLength": 13584,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 13584,
+   "byteLength": 13584,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 27168,
+   "byteLength": 9056,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 36224,
+   "byteLength": 4944,
+   "target": 34963
+  }
+ ],
+ "buffers": [
+  {
+   "byteLength": 41168,
+   "uri": "tree_broadleaf.bin"
+  }
+ ],
+ "samplers": [
+  {}
+ ],
+ "images": [
+  {
+   "mimeType": "image/ktx2",
+   "uri": "tree_broadleaf_diffuse.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "tree_broadleaf_orm.ktx2"
+  }
+ ],
+ "textures": [
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 0
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 1
+    }
+   }
+  }
+ ],
+ "materials": [
+  {
+   "name": "tree_broadleaf",
+   "pbrMetallicRoughness": {
+    "baseColorTexture": {
+     "index": 0
+    },
+    "metallicFactor": 1.0,
+    "roughnessFactor": 1.0,
+    "metallicRoughnessTexture": {
+     "index": 1
+    }
+   },
+   "occlusionTexture": {
+    "index": 1
+   }
+  }
+ ],
+ "extensions": {
+  "SPRINGRTS_geometry": {
+   "configVersion": 8,
+   "height": 93.3179,
+   "midpos": [
+    -0.72116,
+    46.65897,
+    1.67124
+   ],
+   "mins": [
+    -38.32204,
+    0.0,
+    -27.9238
+   ],
+   "maxs": [
+    36.87973,
+    93.31795,
+    31.26628
+   ],
+   "radius": 66.8338,
+   "pieces": [
+    {
+     "name": "broadleaf",
+     "parent": -1,
+     "offset": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "mins": [
+      -38.32204,
+      0.0,
+      -27.9238
+     ],
+     "maxs": [
+      36.87973,
+      93.31795,
+      31.26628
+     ]
+    }
+   ]
+  }
+ },
+ "extensionsUsed": [
+  "KHR_texture_basisu",
+  "SPRINGRTS_geometry"
+ ],
+ "extensionsRequired": [
+  "KHR_texture_basisu"
+ ]
+}

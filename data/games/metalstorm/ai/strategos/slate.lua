@@ -23,17 +23,31 @@ local Slate = {}
 local function explicitGoals(picture, role, out)
     for id, o in pairs(picture.board or {}) do
         if o.state == 'active' and (role.explicitMode ~= 'none') then
-            local eligible = (o.team == nil) or (o.team == role.teamId)
+            -- game_objectives.lua always publishes `team` as `o.forTeam or -1`
+            -- (never nil) — -1 means "open to anyone" (matches
+            -- ui/lib/objectives.js's own forTeam() convention). `nil` is kept
+            -- as an equivalent for hand-built test fixtures / a not-yet-read
+            -- board entry.
+            local eligible = (o.team == nil) or (o.team == -1) or (o.team == role.teamId)
             if eligible then
                 out[#out + 1] = {
                     kind     = 'OBJECTIVE',
                     id       = 'obj:' .. tostring(id),
+                    -- source == 'bounty' → planner §3.2 co-commander ×3 (a
+                    -- teammate staking a bounty is literally the human tasking
+                    -- the AI, §5). game_objectives.lua now publishes `source`.
                     source   = (o.source == 'bounty') and 'bounty' or 'explicit',
                     region   = o.region,
                     echelon  = o.scope == 'strategic' and 'army' or 'platoon',
                     directive = Slate.directiveForObjective(o),
                     value    = (o.reward or 0) + (o.bounty or 0),
-                    meta     = { objType = o.type, pos = o.pos, progress = o.progress },
+                    -- `suggested` (the soft-tasking hint published on the board,
+                    -- §5.1) → planner sourceWeight ×2. It was read into the board
+                    -- (picture BOARD_FIELDS) but never threaded onto the goal;
+                    -- carry it on meta.suggested so the ×2 actually fires.
+                    meta     = { objType = o.type, pos = o.pos, progress = o.progress,
+                                 suggested = (o.suggested == 1 or o.suggested == true
+                                              or o.suggested == '1') or nil },
                 }
             end
         end
@@ -120,9 +134,15 @@ local function implicitGoals(picture, profile, role, config, out)
         end
     end
 
-    -- RESERVE: always present, lowest priority — soaks uncommitted force at
-    -- the weighted centroid of owned regions (§3.1). The planner sends any
-    -- surplus here rather than trickling it into losing fights.
+    Slate.reserveGoal(out)
+end
+
+--- RESERVE: always present, lowest priority — soaks uncommitted force at the
+-- weighted centroid of owned regions (§3.1). The planner sends any surplus
+-- here rather than trickling it into losing fights. Hoisted out of
+-- implicitGoals because a SCRIPTED slate replaces the standing needs but still
+-- needs the surplus sink to exist.
+function Slate.reserveGoal(out)
     out[#out + 1] = {
         kind = 'RESERVE', id = 'reserve', source = 'implicit',
         region = nil, echelon = 'army', directive = 'RALLY',
@@ -162,11 +182,24 @@ function Slate.intelStale(key, intel)
 end
 
 --- Composition gap vs threat (counters bias from profile doctrine). STUB:
--- returns nil (no gap) until the power/counters table is ingested.
+-- returns nil (no gap) — the DATA it would need does not exist yet, so this
+-- stays a documented gap rather than a guess:
+--   1. picture.lua's ledger[region].byClass / intel[region].byClass are now
+--      populated (task 3, keyed off the power-table def→class map), so "own
+--      composition" and "enemy composition" per region ARE available.
+--   2. There is no counters/effectiveness matrix anywhere in the game data
+--      (no `strongVs`/`weakVs`/counter_class on any unit def or in
+--      weapondefs.lua) to turn "enemy has lots of class X" into "therefore
+--      build class Y" — that relationship doesn't exist to read, only to
+--      invent, and CLAUDE.md is explicit: reproduce the game's own data,
+--      don't substitute hardcoded balance guesses for it.
+--   3. There is no "factory idle" signal on the AI surface either
+--      (AI.getOwnUnits returns id/x/z/health/defId only — no build-queue or
+--      order state; see rts/Server/AI/AIScriptContext.h).
+-- Needs a real counters table (a combat-resolution/game-data ask) and an
+-- idle-factory read (an AI-surface ask) before this can be more than a
+-- guess; both are engine/game-data gaps, not a Picture-shape problem.
 function Slate.compositionGap(picture, profile)
-    -- TODO: compare own byClass strength to enemy intel composition through
-    -- the counters table (combat-resolution) with profile.doctrine bias;
-    -- require an idle factory. Return { class, defName, region, value }.
     return nil
 end
 
@@ -176,13 +209,27 @@ end
 function Slate.build(picture, profile, role)
     local out = {}
     explicitGoals(picture, role, out)
-    implicitGoals(picture, profile, role, picture.config, out)
 
-    -- NPC scripted subset (§5): a scenario may hand the role a fixed slate
-    -- (raid / defend home / toll a route). If present, it REPLACES the
-    -- generated implicit goals but keeps explicit objectives it's eligible for.
+    -- NPC scripted subset (§5): a scenario hands the role a fixed slate (raid /
+    -- defend home / toll a route) via scripted.lua. When one actually fires it
+    -- REPLACES the generated standing needs — a raider raids what the scenario
+    -- put on its menu; it does not opportunistically SCOUT the whole frontier —
+    -- while explicit board objectives the role is eligible for are untouched
+    -- (an NPC's explicitMode is 'none', so in practice it has none). RESERVE
+    -- still runs either way: the planner needs the surplus sink to exist.
+    --
+    -- A scriptedSlate that returns false (no scenario parameters published)
+    -- falls through to the normal implicit slate rather than leaving the AI
+    -- goal-less — see Scripted.build's contract.
+    local scripted = false
     if role.scriptedSlate then
-        role.scriptedSlate(picture, out)
+        scripted = role.scriptedSlate(picture, out, role, profile) and true or false
+    end
+
+    if scripted then
+        Slate.reserveGoal(out)
+    else
+        implicitGoals(picture, profile, role, picture.config, out)
     end
     return out
 end

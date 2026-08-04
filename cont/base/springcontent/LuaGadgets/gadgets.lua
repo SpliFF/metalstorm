@@ -160,6 +160,29 @@ function gadgetHandler:Initialize()
   local unsortedGadgets = {}
   -- get the gadget names
   local gadgetFiles = VFS.DirList(GADGETS_DIR, "*.lua", VFSMODE)
+
+  -- CUSTOM (springrts-web, 2026-07-22): opt-in per-game gadget allow-list.
+  -- The VFS layers engine-base content (and, currently, leaked other-game
+  -- content) under each game, so DirList returns far more gadgets than a
+  -- lean native game wants. For Metalstorm that pulled in springcontent-base
+  -- game_end.lua (which fatally crashed the synced init) plus a pile of
+  -- ZK/BAR-shaped gadgets. When a game sets `_G.GADGET_ALLOWLIST` (a set
+  -- keyed by gadget file basename) the handler loads ONLY those gadgets and
+  -- skips the rest. Absent => stock Recoil behaviour (load every discovered
+  -- gadget), so zk / bar / papertanks are unaffected.
+  if _G.GADGET_ALLOWLIST then
+    local allowed = {}
+    for _, gf in ipairs(gadgetFiles) do
+      local base = string.match(gf, "([^/\\]+)$") or gf
+      if _G.GADGET_ALLOWLIST[base] then
+        allowed[#allowed + 1] = gf
+      else
+        Spring.Log(LOG_SECTION, LOG.INFO,
+          "gadget allow-list: skipping " .. tostring(base))
+      end
+    end
+    gadgetFiles = allowed
+  end
 --  table.sort(gadgetFiles)
 
 --  for k,gf in ipairs(gadgetFiles) do
@@ -1135,6 +1158,30 @@ function gadgetHandler:AllowCommand(
 		cmdID, cmdParams, cmdOptions, cmdTag,
 		playerID, fromSynced, fromLua)
 	) then
+      return false
+    end
+  end
+  return true
+end
+
+-- Metalstorm authority charge dispatchers (PLAN-metalstorm-authority.md §3.2/A2,
+-- PLAN-macro-directives.md §1). The engine's CSyncedLuaHandle looks up a GLOBAL
+-- function of this name; gadgetHandler:UpdateCallIn only registers that global
+-- when both the CALLIN_LIST entry (callins.lua) and this dispatcher exist. A
+-- false return vetoes the create (server answers 402); the charge itself is a
+-- side effect of game_authority_charge.lua's gadget:Allow* returning true.
+function gadgetHandler:AllowStandingOrderCreate(team, playerID, orderType)
+  for _,g in r_ipairs(self.AllowStandingOrderCreateList) do
+    if (not g:AllowStandingOrderCreate(team, playerID, orderType)) then
+      return false
+    end
+  end
+  return true
+end
+
+function gadgetHandler:AllowDirectiveCreate(team, playerID, groupID, directiveType, requestedStrength)
+  for _,g in r_ipairs(self.AllowDirectiveCreateList) do
+    if (not g:AllowDirectiveCreate(team, playerID, groupID, directiveType, requestedStrength)) then
       return false
     end
   end

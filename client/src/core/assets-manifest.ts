@@ -70,7 +70,6 @@ const LICENSE_DENYLIST: RegExp[] = [
 const LICENSE_ALLOWLIST: RegExp[] = [
     /^cc0\b/i,
     /public domain/i,
-    /^cc-by(-sa)?(-\d)/i,
     /^cc-by(-sa)?\b/i,
     /^gpl-2\.0/i,
     /^original\b/i,
@@ -92,9 +91,12 @@ function splitRow(line: string): string[] {
 
 /**
  * Parse the ASSETS.md manifest table. Skips the header, the `---` separator,
- * and the `_none yet_` placeholder row. Throws if the table header doesn't
- * match the expected 6 columns (format drift should fail loudly, not
- * silently parse garbage).
+ * and the `_none yet_` placeholder row. The table ends at the first
+ * non-table line after the header (blank line, heading, prose) so a second
+ * table later in the document is never misread as manifest rows. Throws if
+ * the table header doesn't match the expected 6 columns, or a data row has
+ * anything other than 6 cells (format drift should fail loudly, not
+ * silently parse garbage — a ≥7-cell row would otherwise drop columns).
  */
 export function parseAssetsManifest(markdown: string): ManifestRow[] {
     const lines = markdown.split('\n');
@@ -102,7 +104,10 @@ export function parseAssetsManifest(markdown: string): ManifestRow[] {
     let sawHeader = false;
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
-        if (!line.trim().startsWith('|')) continue;
+        if (!line.trim().startsWith('|')) {
+            if (sawHeader) break;   // table ended — ignore the rest of the doc
+            continue;
+        }
         const cells = splitRow(line);
         if (!sawHeader) {
             if (cells[0].toLowerCase().startsWith('asset')) {
@@ -112,7 +117,7 @@ export function parseAssetsManifest(markdown: string): ManifestRow[] {
         }
         // Separator row: |---|---|...
         if (cells.every((c) => /^:?-+:?$/.test(c))) continue;
-        if (cells.length < 6) {
+        if (cells.length !== 6) {
             throw new Error(`ASSETS.md line ${i + 1}: expected 6 columns, got ${cells.length}`);
         }
         const [assetPath, targetDefs, origin, author, license, modifications] = cells;
@@ -126,9 +131,11 @@ export function parseAssetsManifest(markdown: string): ManifestRow[] {
 }
 
 /** Run one `units/*.lua` def file through Fengari and return its defs table
- * (def name -> def table) as a plain JS object. Returns null on parse/eval
- * failure (caller decides how to report). */
-function evalDefFile(gameRoot: string, filename: string, reader: TreeReader): Record<string, LuaValue> | null {
+ * (def name -> def table) as a plain JS object. Throws (with the filename
+ * in the message) on parse/eval failure or a non-table result — a def file
+ * that fails to evaluate must fail the licence/manifest gate loudly, not
+ * silently vanish from it. */
+function evalDefFile(gameRoot: string, filename: string, reader: TreeReader): Record<string, LuaValue> {
     const filePath = joinPath(gameRoot, 'units', filename);
     const source = reader.readFile(filePath);
     const rt = new LuaRuntime(`units/${filename}`);
@@ -140,14 +147,24 @@ function evalDefFile(gameRoot: string, filename: string, reader: TreeReader): Re
             Include: (includePath: LuaValue): LuaValue => {
                 if (typeof includePath !== 'string') return null;
                 const includeSource = reader.readFile(joinPath(gameRoot, includePath));
-                return rt.evalString(includeSource, includePath);
+                const inc = rt.evalStringEx(includeSource, includePath);
+                if (inc.error !== null) {
+                    // Thrown as a JS error inside the Lua-callable wrapper —
+                    // it re-enters Lua as a Lua error and surfaces through
+                    // the outer evalStringEx with this message attached.
+                    throw new Error(`VFS.Include("${includePath}"): ${inc.error}`);
+                }
+                return inc.value;
             },
         });
-        const result = rt.evalString(source, filename);
-        if (!result || typeof result !== 'object' || Array.isArray(result)) return null;
-        return result as Record<string, LuaValue>;
-    } catch {
-        return null;
+        const { value, error } = rt.evalStringEx(source, filename);
+        if (error !== null) {
+            throw new Error(`units/${filename}: ${error}`);
+        }
+        if (!value || typeof value !== 'object' || Array.isArray(value)) {
+            throw new Error(`units/${filename}: did not return a def table (got ${Array.isArray(value) ? 'array' : typeof value})`);
+        }
+        return value as Record<string, LuaValue>;
     } finally {
         rt.dispose();
     }
@@ -155,7 +172,8 @@ function evalDefFile(gameRoot: string, filename: string, reader: TreeReader): Re
 
 /**
  * Collect every def's `objectname` field across all `units/*.lua` files
- * (skips `_builder.lua` itself — it's a library, not a def file).
+ * (skips `_builder.lua` itself — it's a library, not a def file). Throws
+ * if any def file fails to evaluate (see evalDefFile).
  */
 export function collectDefModelRefs(gameRoot: string, reader: TreeReader): DefModelRef[] {
     const refs: DefModelRef[] = [];
@@ -164,7 +182,6 @@ export function collectDefModelRefs(gameRoot: string, reader: TreeReader): DefMo
         .sort();
     for (const file of files) {
         const defs = evalDefFile(gameRoot, file, reader);
-        if (!defs) continue;
         for (const [defName, def] of Object.entries(defs)) {
             if (!def || typeof def !== 'object' || Array.isArray(def)) continue;
             const objectname = (def as Record<string, LuaValue>).objectname;
@@ -200,17 +217,21 @@ export function validateAssets(opts: ValidateAssetsOptions): AssetViolation[] {
     const manifestSrc = reader.readFile(joinPath(gameRoot, 'ASSETS.md'));
     const rows = parseAssetsManifest(manifestSrc);
 
+    // Keyed on the lowercased path so the row lookup matches listFiles'
+    // case-insensitive extension filter (a `Model.GLB` on disk must find
+    // its `objects3d/model.glb` manifest row and vice versa).
     const byPath = new Map<string, ManifestRow>();
     for (const row of rows) {
-        if (byPath.has(row.assetPath)) {
+        const key = row.assetPath.toLowerCase();
+        if (byPath.has(key)) {
             violations.push({
                 severity: 'error',
-                message: `ASSETS.md line ${row.line}: duplicate row for "${row.assetPath}" (first at line ${byPath.get(row.assetPath)!.line})`,
+                message: `ASSETS.md line ${row.line}: duplicate row for "${row.assetPath}" (first at line ${byPath.get(key)!.line})`,
                 path: row.assetPath,
             });
             continue;
         }
-        byPath.set(row.assetPath, row);
+        byPath.set(key, row);
         if (!isAllowedLicense(row.license)) {
             violations.push({
                 severity: 'error',
@@ -233,7 +254,7 @@ export function validateAssets(opts: ValidateAssetsOptions): AssetViolation[] {
 
     for (const file of listFiles(objects3dDir, '.glb', reader)) {
         const assetPath = `objects3d/${file}`;
-        const row = byPath.get(assetPath);
+        const row = byPath.get(assetPath.toLowerCase());
         const stem = file.replace(/\.glb$/i, '');
         const referencedBy = refsByObjectname.get(stem) ?? [];
         if (!row) {
@@ -258,7 +279,7 @@ export function validateAssets(opts: ValidateAssetsOptions): AssetViolation[] {
 
     for (const file of listFiles(unittexturesDir, '.ktx2', reader)) {
         const assetPath = `unittextures/${file}`;
-        const row = byPath.get(assetPath);
+        const row = byPath.get(assetPath.toLowerCase());
         if (!row) {
             violations.push({
                 severity: 'error',

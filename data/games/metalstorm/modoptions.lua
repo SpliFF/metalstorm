@@ -26,6 +26,22 @@ return {
         section = 'authority',
     },
     {
+        key     = 'authority_join_grant',
+        name    = 'Join grant',
+        desc    = 'Starter authority minted fresh for a new player identity (once per game; re-join grants nothing, PLAN-metalstorm-authority §6)',
+        type    = 'number',
+        def     = 100, min = 0, max = 1000, step = 10,
+        section = 'authority',
+    },
+    {
+        key     = 'authority_team_stipend',
+        name    = 'Team stipend',
+        desc    = 'Authority/minute minted to each team pool regardless of objectives (0 = off; playtest lever only, PLAN-metalstorm-authority §2)',
+        type    = 'number',
+        def     = 0, min = 0, max = 100, step = 5,
+        section = 'authority',
+    },
+    {
         key     = 'objective_density',
         name    = 'Objective density',
         desc    = 'How aggressively systemic objectives are generated',
@@ -37,6 +53,14 @@ return {
             { key = 'dense',  name = 'Dense'  },
         },
         section = 'objectives',
+    },
+    {
+        key     = 'ai_caretaker',
+        name    = 'Caretaker AI',
+        desc    = 'When a side empties (its last human leaves), hand it to a caretaker AI so the world keeps ticking (PLAN-metalstorm-teams §4.5, PLAN-metalstorm-ai §5). Off = the side just idles, no AI takes over.',
+        type    = 'bool',
+        def     = false,
+        section = 'world',
     },
     {
         key     = 'build_time_scale',

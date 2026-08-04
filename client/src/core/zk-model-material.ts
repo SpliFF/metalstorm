@@ -13,8 +13,9 @@
  *   - Babylon `position`, `normal`, `uv` vertex attributes
  *   - Our PBR-split textures (PLAN-pbr-mapping.md): diffuse, emissive,
  *     orm, teamMask, normal — instead of ZK's packed tex1/tex2 pair.
- *   - CSM shadow sampling via `sampler2DArray` (matches the team-color
- *     material in entity-renderer.ts).
+ *   - Manual CSM shadow sampling via `sampler2DArray` (a ShaderMaterial
+ *     doesn't get Babylon's stock light/shadow binding; engine-default
+ *     units use PBRMaterial + TeamColorPlugin and get it automatically).
  *
  * The remaining ZK options (SHADOWMAPPING, NORMALMAPPING, AUTONORMAL,
  * FLASHLIGHTS, UNITSFOG, VERTEX_AO) are honoured. Phase Z2b (faithful
@@ -52,6 +53,15 @@ export interface ZKUnitTextures {
     teamMask: Texture | null;
     normal: Texture | null;
     invertTeamColor: boolean;
+    /** True only for the synthesized 1×1 white diffuse handed to models
+     *  with geometry but no texture config (e.g. ZK's `factoryveh`) —
+     *  renders full team tint so the unit reads as a flat team-coloured
+     *  shape instead of flat white. Same semantics as
+     *  `UnitTextures.syntheticFallback` / `TeamColorPlugin.syntheticAlbedo`
+     *  (see the FIDELITY note in team-color-plugin.ts: real maskless
+     *  albedos deliberately stay untinted, deviating from Recoil's
+     *  tex1-alpha-=-full-tint S3O convention). */
+    syntheticFallback?: boolean;
 }
 
 /** OPTION_* flags from ZK's defaultMaterialTemplate.lua `knownBitOptions`.
@@ -121,11 +131,10 @@ in vec2 uv;
 // so the per-instance transform arrives through world0..world3 (Babylon's
 // instancesDeclaration), NOT the 'world' uniform. Declared with the 300-es
 // 'in' qualifier (Babylon ships no 300-es variant of the include, and the
-// legacy 'attribute' keyword is reserved). Matches createTeamColorMaterial
-// in entity-renderer.ts — without this the vertex stage transforms every
-// instance to the base world (origin) and the unit renders off-screen
-// while still casting a correct shadow (the depth caster handles
-// instances itself).
+// legacy 'attribute' keyword is reserved). Without this the vertex stage
+// transforms every instance to the base world (origin) and the unit
+// renders off-screen while still casting a correct shadow (the depth
+// caster handles instances itself).
 in vec4 world0;
 in vec4 world1;
 in vec4 world2;
@@ -201,8 +210,8 @@ void main() {
 #endif
 
     vec4 clipPos = viewProjection * worldVertex;
-    // View-space Z (positive distance) for CSM cascade selection. Matches
-    // the convention used by the team-color shader.
+    // View-space Z (positive distance) for CSM cascade selection —
+    // matches the positive-depth convention of Babylon's CSM splits
     vViewZ = -(view * worldVertex).z;
     gl_Position = clipPos;
 }
@@ -212,8 +221,8 @@ void main() {
 // Lighting formula preserved from defaultMaterialTemplate.lua: ambient +
 // shadowed Lambert + Blinn-Phong spec (driven by tex2.g), tinted by team
 // color via the mask channel. The cube-reflection term is dropped (no
-// reflectTex on our pipeline) and replaced by a flat sky-tint following
-// the existing teamColor shader's pattern.
+// reflectTex on our pipeline) and replaced by a flat sky-tint (the same
+// approximation the retired custom unit shader used).
 const ZK_FRAGMENT = `#version 300 es
 precision highp float;
 precision highp sampler2DArray;
@@ -226,7 +235,7 @@ uniform sampler2D teamMaskTex;
 uniform sampler2D normalTex;
 
 // Bound-or-not flags so shader handles unit defs that ship without an
-// optional texture (same pattern as the existing teamColor material).
+// optional texture (unbound samplers still resolve, so route explicitly)
 uniform float hasEmissive;
 uniform float hasOrm;
 uniform float hasTeamMask;
@@ -246,6 +255,9 @@ uniform float shadowDarkness;
 
 uniform vec4 teamColor;
 uniform float invertMask;
+// 1.0 only for the synthesized-white-fallback texture set (no texture
+// config) — forces a full team tint so the unit is not flat white
+uniform float forceTeamTint;
 uniform int  simFrame;
 uniform vec2 autoNormalParams;  // {samplingDist, value} — ZK default {1.0, 0.002}
 
@@ -404,9 +416,15 @@ void main() {
     vec3 lightADR = mix(lightAD, lightAD * (0.85 + 0.30 * skyMix), specMask);
 
     // Team color mask: we read R from a dedicated teamMaskTex (PLAN-
-    // pbr-mapping split), not from the diffuse alpha as ZK does.
-    float mask = (hasTeamMask > 0.5) ? texture(teamMaskTex, myUV).r : 0.0;
-    if (invertMask > 0.5) mask = 1.0 - mask;
+    // pbr-mapping split), not from the diffuse alpha as ZK does. No mask
+    // means no tint for a real albedo but full tint for the synthesized
+    // white fallback (forceTeamTint) — same rule as TeamColorPlugin. The
+    // invert only applies to a real mask sample, never the constants
+    float mask = forceTeamTint;
+    if (hasTeamMask > 0.5) {
+        mask = texture(teamMaskTex, myUV).r;
+        if (invertMask > 0.5) mask = 1.0 - mask;
+    }
     vec3 modelDiffuse = mix(base.rgb, teamColor.rgb, mask);
 
     // Emissive — ZK reads tex2.R. We pull R from our dedicated emissive
@@ -598,7 +616,7 @@ export function createZKMaterial(
         uniforms: [
             'world', 'viewProjection', 'view', 'shadowMatrix',
             'cameraPos', 'simFrame',
-            'teamColor', 'invertMask',
+            'teamColor', 'invertMask', 'forceTeamTint',
             'sunDir', 'sunDiffuse', 'sunAmbient', 'sunSpecular',
             'sunSpecularParams', 'shadowDensity',
             'hasEmissive', 'hasOrm', 'hasTeamMask', 'hasNormal',
@@ -624,6 +642,10 @@ export function createZKMaterial(
     mat.setFloat('hasNormal',   textures.normal   ? 1.0 : 0.0);
     mat.setColor4('teamColor', teamColor.toColor4(1.0));
     mat.setFloat('invertMask', textures.invertTeamColor ? 1.0 : 0.0);
+    // Synthesized-white fallback (no texture config, e.g. ZK's factoryveh)
+    // → full team tint; real maskless albedos stay untinted (see the
+    // FIDELITY note on TeamColorPlugin.teamMask — same rule both paths).
+    mat.setFloat('forceTeamTint', textures.syntheticFallback ? 1.0 : 0.0);
 
     mat.setVector3('sunDiffuse',  SUN_DIFFUSE);
     mat.setVector3('sunAmbient',  SUN_AMBIENT);

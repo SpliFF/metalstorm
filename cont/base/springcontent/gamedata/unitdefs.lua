@@ -74,6 +74,22 @@ end
 
 local luaFiles = RecursiveFileSearch('units/', '*.lua')
 
+-- Skip `_`-prefixed helpers: a leading underscore marks a shared include, not
+-- a unitdef. E.g. Metalstorm's units/_builder.lua is a def GENERATOR that real
+-- unit files VFS.Include and call — it returns a function, so scanning it as a
+-- unitdef logged a spurious "Bad return table" every boot. (Convention only;
+-- real unitdef files never start with `_`.)
+do
+  local filtered = {}
+  for _, filename in ipairs(luaFiles) do
+    local base = string.match(filename, "([^/\\]+)$") or filename
+    if string.sub(base, 1, 1) ~= '_' then
+      filtered[#filtered + 1] = filename
+    end
+  end
+  luaFiles = filtered
+end
+
 for _, filename in ipairs(luaFiles) do
   local udEnv = {}
   udEnv._G = udEnv

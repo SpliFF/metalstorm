@@ -1,37 +1,60 @@
 {
-  "_comment": "Metalstorm native JS UI manifest (PLAN-native-ui.md §3 — the game JS-widget API is Stage 7A-4, not built yet). Widgets receive a ui-store read API, a DOM mount inside #ui-root, and the validated command/directive submission API. This manifest is the proposed shape; the loader contract is owned by PLAN-native-ui.md.",
+  "_comment": "Metalstorm native JS UI manifest (PLAN-native-ui.md §3). Widgets receive a ui-store read API, a DOM mount inside #ui-root, and the validated command/directive submission API. Panel CHROME (frame, header, collapse toggle, count badge) is built by the loader from the `title`/`collapsible`/`collapsed` fields below — widgets render content only, so every panel looks the same by construction.",
+  "_layout": "Docking keeps the centre and lower-centre of the viewport clear for unit selection and orders: authority pill top-left; the two heavy negotiation/AI panels in the left rail (collapsed by default); objectives + scoreboard in the right rail; the command composer as a compact bar above the bottom help strip. Rails are fixed-width and scroll internally rather than stretching full-height. Bottom-left and bottom-right belong to the engine HUD (selection readout, minimap).",
   "game": "metalstorm",
   "uiVersion": 1,
+  "styles": ["metalstorm.ui.css"],
   "widgets": [
     {
       "id": "authority-bar",
       "entry": "widgets/authority-bar.js",
-      "mount": "top-center",
+      "mount": "top-left",
+      "_chrome": "No title — the pill renders its own compact frame; a header would double its height for no extra information.",
       "subscribes": ["teamRulesParams", "gameRulesParams", "playerRoster"]
     },
     {
       "id": "objectives-panel",
       "entry": "widgets/objectives-panel.js",
       "mount": "right",
+      "title": "Objectives",
       "subscribes": ["gameRulesParams"]
+    },
+    {
+      "id": "scoreboard-panel",
+      "entry": "widgets/scoreboard-panel.js",
+      "mount": "right",
+      "title": "Scoreboard",
+      "collapsed": true,
+      "subscribes": ["gameRulesParams", "playerRoster"]
     },
     {
       "id": "parley-panel",
       "entry": "widgets/parley-panel.js",
       "mount": "left",
+      "title": "Parley",
+      "collapsed": true,
+      "_chrome": "Collapsed by default and badged with the incoming-proposal count — diplomacy is episodic, so the panel should announce itself rather than occupy the rail permanently.",
       "subscribes": ["gameRulesParams", "teamRulesParams"]
     },
     {
       "id": "ai-command-panel",
       "entry": "widgets/ai-command-panel.js",
       "mount": "left",
-      "subscribes": ["teamRulesParams"]
+      "title": "AI Command",
+      "collapsed": true,
+      "_chrome": "The tallest panel in the HUD (stance, ROE, region paint, asset locks, funding, intent, change feed) — set-and-forget, so it starts collapsed.",
+      "subscribes": ["teamRulesParams"],
+      "hideForSpectator": true
     },
     {
       "id": "command-composer",
       "entry": "widgets/command-composer.js",
+      "builtin": true,
+      "_builtin_note": "Mounted from the client bundle (client/src/native-widgets/command-composer.js) via BUILTIN_WIDGETS, not fetched from this dir — it depends on bundled compile-table + named-entity-index modules. The game-dir command-composer.js is a stub kept for reference.",
       "mount": "bottom-center",
-      "subscribes": ["gameRulesParams", "teamRulesParams"]
+      "title": "Compose Command",
+      "subscribes": ["gameRulesParams", "teamRulesParams"],
+      "hideForSpectator": true
     }
   ]
 }

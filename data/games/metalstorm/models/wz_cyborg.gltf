@@ -271,7 +271,8 @@
   ],
   "extensionsUsed": [
     "KHR_texture_basisu",
-    "SPRINGRTS_geometry"
+    "SPRINGRTS_geometry",
+    "SPRINGRTS_team_color"
   ],
   "images": [
     {
@@ -280,12 +281,27 @@
     },
     {
       "mimeType": "image/ktx2",
+      "uri": "page-33_tcmask.ktx2"
+    },
+    {
+      "mimeType": "image/ktx2",
       "uri": "page-17-droid-weapons.ktx2"
+    },
+    {
+      "mimeType": "image/ktx2",
+      "uri": "page-17_tcmask.ktx2"
     }
   ],
   "materials": [
     {
       "doubleSided": true,
+      "extensions": {
+        "SPRINGRTS_team_color": {
+          "maskTexture": {
+            "index": 1
+          }
+        }
+      },
       "name": "page-33-cyborgs",
       "pbrMetallicRoughness": {
         "baseColorTexture": {
@@ -296,10 +312,17 @@
     },
     {
       "doubleSided": true,
+      "extensions": {
+        "SPRINGRTS_team_color": {
+          "maskTexture": {
+            "index": 3
+          }
+        }
+      },
       "name": "page-17-droid-weapons",
       "pbrMetallicRoughness": {
         "baseColorTexture": {
-          "index": 1
+          "index": 2
         },
         "metallicFactor": 0.0
       }
@@ -398,6 +421,8 @@
   ],
   "samplers": [
     {},
+    {},
+    {},
     {}
   ],
   "scene": 0,
@@ -424,6 +449,22 @@
         }
       },
       "sampler": 1
+    },
+    {
+      "extensions": {
+        "KHR_texture_basisu": {
+          "source": 2
+        }
+      },
+      "sampler": 2
+    },
+    {
+      "extensions": {
+        "KHR_texture_basisu": {
+          "source": 3
+        }
+      },
+      "sampler": 3
     }
   ]
 }

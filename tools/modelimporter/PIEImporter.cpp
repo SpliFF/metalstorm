@@ -19,6 +19,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <map>
@@ -50,6 +51,29 @@ std::vector<std::string> Tokenize(const std::string& line) {
 
 float ToF(const std::string& s) { return std::strtof(s.c_str(), nullptr); }
 long  ToL(const std::string& s) { return std::strtol(s.c_str(), nullptr, 0); }
+
+/// WZ2100 `TYPE` is a HEXADECIMAL bitfield (doc/PIE.md), so it needs an
+/// explicit base-16 parse — `ToL`'s base-0 auto-detect would read the
+/// unprefixed `10200` as decimal ten-thousand-two-hundred and lose the flag.
+long ToHex(const std::string& s) { return std::strtol(s.c_str(), nullptr, 16); }
+
+/// PIE `TYPE` flag: the model is team-coloured through a `page-N_tcmask.png`
+/// companion of its diffuse page (doc/PIE.md; `iV_IMD_TCMASK` in WZ2100's
+/// lib/ivis_opengl/imd.h). PIE4 states the mask page outright with a `TCMASK`
+/// directive; PIE2/PIE3 only set this flag and leave the name to convention.
+constexpr long kPieTypeTCMask = 0x10000;
+
+/// WZ2100's `pie_MakeTexPageTCMaskName`: a page named `page-<N>-<whatever>.png`
+/// masks through `page-<N>_tcmask.png` — the numeric prefix is the whole key,
+/// the descriptive tail is dropped. Returns empty for a page that does not
+/// follow the `page-` convention (nothing sane to derive).
+std::string TCMaskNameFor(const std::string& page) {
+    if (page.rfind("page-", 0) != 0) return {};
+    size_t i = 5;
+    while (i < page.size() && std::isdigit(static_cast<unsigned char>(page[i]))) ++i;
+    if (i == 5) return {};   // "page-" with no number — nothing to key on
+    return page.substr(0, i) + "_tcmask.png";
+}
 
 std::string StemOf(const std::string& name) {
     size_t slash = name.find_last_of("/\\");
@@ -157,6 +181,19 @@ PIEImporter::Component PIEImporter::ParsePie(const std::string& text,
     int level = 0;          // 0 = no LEVEL directive yet (single-level file)
     auto ingesting = [&]() { return level <= 1; };
 
+    // Row-count directives come from untrusted text: a negative or garbage
+    // count must fail the import here, not wrap through int→size_t into
+    // reserve()/line-skips and escape as std::length_error/bad_alloc.
+    constexpr long kMaxRows = 1000000;
+    auto rowCount = [&](const std::vector<std::string>& t, const char* what) -> int {
+        const long n = (t.size() >= 2) ? ToL(t[1]) : 0;
+        if (n < 0 || n > kMaxRows) {
+            throw DeadlyImportError("PIE: bad ", what, " count ", std::to_string(n),
+                                    " in ", nodeName);
+        }
+        return static_cast<int>(n);
+    };
+
     for (size_t i = 0; i < lines.size(); ++i) {
         const std::vector<std::string> t = Tokenize(lines[i]);
         if (t.empty()) continue;
@@ -172,6 +209,9 @@ PIEImporter::Component PIEImporter::ParsePie(const std::string& text,
                 float w = ToF(t[3]), h = ToF(t[4]);
                 if (w > 0 && h > 0) { texW = w; texH = h; }
             }
+        } else if (kw == "TYPE") {
+            // TYPE <hex flags> — only the TCMASK bit matters to us.
+            if (t.size() >= 2) comp.typeFlags = ToHex(t[1]);
         } else if (kw == "TCMASK") {
             // TCMASK <n> <page>
             if (t.size() >= 3) comp.tcmaskPage = t[2];
@@ -182,7 +222,7 @@ PIEImporter::Component PIEImporter::ParsePie(const std::string& text,
         } else if (kw == "LEVELS") {
             // declares the count only; ignore
         } else if (kw == "POINTS") {
-            const int count = (t.size() >= 2) ? static_cast<int>(ToL(t[1])) : 0;
+            const int count = rowCount(t, "POINTS");
             if (!ingesting()) { i += count; continue; }
             points.clear();
             points.reserve(count);
@@ -193,10 +233,10 @@ PIEImporter::Component PIEImporter::ParsePie(const std::string& text,
             }
         } else if (kw == "NORMALS") {
             // Skip its rows — we recompute flat normals for the low-poly look.
-            const int count = (t.size() >= 2) ? static_cast<int>(ToL(t[1])) : 0;
+            const int count = rowCount(t, "NORMALS");
             i += count;
         } else if (kw == "POLYGONS") {
-            const int count = (t.size() >= 2) ? static_cast<int>(ToL(t[1])) : 0;
+            const int count = rowCount(t, "POLYGONS");
             if (!ingesting()) { i += count; continue; }
             for (int j = 0; j < count && i + 1 < lines.size(); ++j) {
                 const std::vector<std::string> p = Tokenize(lines[++i]);
@@ -229,7 +269,7 @@ PIEImporter::Component PIEImporter::ParsePie(const std::string& text,
                 }
             }
         } else if (kw == "CONNECTORS") {
-            const int count = (t.size() >= 2) ? static_cast<int>(ToL(t[1])) : 0;
+            const int count = rowCount(t, "CONNECTORS");
             const bool take = ingesting() && comp.connectors.empty();
             for (int j = 0; j < count && i + 1 < lines.size(); ++j) {
                 const std::vector<std::string> p = Tokenize(lines[++i]);
@@ -237,8 +277,14 @@ PIEImporter::Component PIEImporter::ParsePie(const std::string& text,
                     comp.connectors.emplace_back(ToF(p[0]), ToF(p[1]), ToF(p[2]));
             }
         }
-        // TYPE / EVENT / SHADOWPOINTS / etc. ignored.
+        // EVENT / SHADOWPOINTS / INTERPOLATE / etc. ignored.
     }
+
+    // PIE2/PIE3 have no `TCMASK` directive — they announce the mask through
+    // the TYPE bitfield and leave the page name to WZ's naming convention.
+    // Honour that, so a flagged PIE2/3 part is not silently imported untinted.
+    if (comp.tcmaskPage.empty() && (comp.typeFlags & kPieTypeTCMask) != 0)
+        comp.tcmaskPage = TCMaskNameFor(comp.texPage);
 
     return comp;
 }
@@ -273,6 +319,23 @@ PIEImporter::AssemblySpec PIEImporter::ParseManifest(const std::string& jsonText
     const std::string axis = doc.value("dominant_axis", std::string("z"));
     spec.dominantAxis = axis.empty() ? 'z' : axis[0];
 
+    // Optional `"tcmask": { "<diffuse page>": "<mask page>" }` — an
+    // assembly-level team-colour mask, overriding whatever the `.pie` parts
+    // declare (PIE4 directive) or imply (PIE2/3 TYPE flag). This is how
+    // AUTHORED masks reach a WZ model: the stock droid mask pages are all but
+    // empty over the hull/turret islands these assemblies use, so relying on
+    // upstream would import a unit with no usable team identification.
+    if (doc.contains("tcmask")) {
+        if (!doc["tcmask"].is_object())
+            throw DeadlyImportError("PIE: .wzasm \"tcmask\" must be an object");
+        for (const auto& kv : doc["tcmask"].items()) {
+            if (!kv.value().is_string())
+                throw DeadlyImportError("PIE: .wzasm \"tcmask\" entry \"", kv.key(),
+                                        "\" must map to a mask page filename");
+            spec.tcmaskByPage[kv.key()] = kv.value().get<std::string>();
+        }
+    }
+
     if (!doc.contains("parts") || !doc["parts"].is_array() || doc["parts"].empty())
         throw DeadlyImportError("PIE: .wzasm has no parts[]");
 
@@ -306,6 +369,10 @@ void PIEImporter::BuildScene(const AssemblySpec& spec,
     std::map<std::string, Component> byNode;   // node name -> component
     std::map<std::string, Component> byPie;    // pie filename -> component (for mounts)
     for (const auto& part : spec.parts) {
+        if (byNode.count(part.node)) {
+            throw DeadlyImportError("PIE: duplicate part node \"", part.node,
+                                    "\" in ", spec.name);
+        }
         std::string piePath = part.pie;
         if (!spec.pieDir.empty()) piePath = baseDir + "/" + spec.pieDir + "/" + part.pie;
         else if (!baseDir.empty()) piePath = baseDir + "/" + part.pie;
@@ -317,6 +384,29 @@ void PIEImporter::BuildScene(const AssemblySpec& spec,
     // ---- WZ-space world offset for each part (accumulated mount chain) ----
     std::map<std::string, PartSpec> partByNode;
     for (const auto& part : spec.parts) partByNode[part.node] = part;
+
+    // Validate the parent graph before any offset walks or wiring: a
+    // `parent` naming an undeclared node, or a chain that never reaches a
+    // root (cycle), must fail the import — silently dropping the child
+    // would export e.g. a tank without its turret at exit 0. The 16-hop
+    // bound matches the offset walk's guard below.
+    for (const auto& part : spec.parts) {
+        std::string parent = part.parent;
+        int hops = 0;
+        while (!parent.empty()) {
+            auto pit = partByNode.find(parent);
+            if (pit == partByNode.end()) {
+                throw DeadlyImportError("PIE: part \"", part.node,
+                                        "\" references unknown parent node \"", parent,
+                                        "\" in ", spec.name);
+            }
+            if (++hops > 16) {
+                throw DeadlyImportError("PIE: parent chain for part \"", part.node,
+                                        "\" exceeds 16 hops (cycle?) in ", spec.name);
+            }
+            parent = pit->second.parent;
+        }
+    }
 
     auto mountOffset = [&](const PartSpec& part) -> aiVector3D {
         if (part.hasMount) {
@@ -369,8 +459,12 @@ void PIEImporter::BuildScene(const AssemblySpec& spec,
     for (const auto& part : spec.parts) {
         const Component& c = byNode[part.node];
         if (c.texPage.empty()) continue;
-        if (!c.tcmaskPage.empty() && pageToTcmask.find(c.texPage) == pageToTcmask.end())
-            pageToTcmask[c.texPage] = c.tcmaskPage;
+        // The manifest wins over the `.pie`: authored art is the deliberate
+        // choice, the `.pie`-derived page is the upstream default.
+        auto ovr = spec.tcmaskByPage.find(c.texPage);
+        const std::string& mask = (ovr != spec.tcmaskByPage.end()) ? ovr->second : c.tcmaskPage;
+        if (!mask.empty() && pageToTcmask.find(c.texPage) == pageToTcmask.end())
+            pageToTcmask[c.texPage] = mask;
         if (pageToMat.count(c.texPage)) continue;
         pageToMat[c.texPage] = static_cast<unsigned int>(materials.size());
         materials.push_back(nullptr);   // filled below (need tcmask resolved first)

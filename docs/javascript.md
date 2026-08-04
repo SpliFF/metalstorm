@@ -111,6 +111,26 @@ widgets.list();                     // open/close the F9 overlay
 
 The widget list overlay (F9 or `widgets.list()`) shows checkboxes next to each widget for interactive enable/disable. Enabling a widget re-fetches its source from the lobby server, so toggling off→on serves as a reload action.
 
+## `window.springrts` — Detach / Re-enter (PLAN-quickstart Part B)
+
+Leave and re-enter a running game **without paying the full client boot**. Available after `startGame()` completes; removed by `quitToLobby()`. Wired in [client/src/main.ts](../client/src/main.ts); the parking/keying logic is [client/src/core/detach-session.ts](../client/src/core/detach-session.ts).
+
+**Detach vs quit.** *Quit* (`quitToLobby`, the HUD "Quit" button) tears the game-processor worker down — engine, scene, loaded models, DefCache all destroyed; re-entry is a full boot. *Detach* parks the worker instead: it closes the game connection and pauses its render loop, but keeps engine/scene/models/DefCache/UI alive. Re-entry is a fast reconnect + partial resync.
+
+```js
+window.springrts.detach()    // park the running game, show the lobby (worker stays warm)
+window.springrts.reenter()   // re-enter the parked game — resync if still valid, else full boot
+window.springrts.parked      // → boolean: true while a session is parked
+```
+
+- **`detach()`** — no-op before the first rendered frame (you can only park a running game — edge case E3) or when a session is already parked. Suspends audio, hides the game surface, keeps the saved room/port keys (they are the reconnect creds), and starts a **~10 min TTL** after which the parked worker is disposed. **Metalstorm is the intended target**; the mechanism is game-agnostic but BAR/ZK keep plain `quitToLobby` (their Fengari unit-script boot makes warm re-entry the only viable path, and reconnect-safe Fengari state is unproven — out of scope per the plan).
+- **`reenter()`** — reconnects the parked worker and flushes *dynamic* state (entities, projectiles, combat FX, interpolator) while keeping *static* state (terrain, models, DefCache, lighting, UI). A fresh server-side ClientSession re-streams a full snapshot + re-pushes defs (DefCache no-ops the duplicates); the world repopulates within a few ticks. Falls back to a **full boot** when the parked session no longer matches: TTL expired, a *different* room, or the room's game server was restarted onto a new port (edge case E5) — it never resyncs against a different game instance.
+- **`parked`** — the parked-state getter, useful as a scenario-completion / assertion signal.
+
+> The game only ticks while a client is connected (server design note): a solo dev who detaches pauses the sim until re-entry — usually *desired* for testing; multiplayer games have other clients keeping it live.
+
+The polished lobby "return to game" card and the `PlayerRemoved(reason=detach)` sim wiring are Part B task 6; these globals are the functional/scenario-testable surface today.
+
 ## `window.test` — Test Harness
 
 In-game scripted-testing API. Available after `startGame()` completes; removed by `quitToLobby()`. Defined in [client/src/core/test-harness.ts](../client/src/core/test-harness.ts).
@@ -243,7 +263,9 @@ Or use the `browser_test` MCP tool (in the spring-debug server) to generate the 
 
 ### Driving scenarios for iterative testing
 
-Scenarios live in [client/src/scenarios/](../client/src/scenarios/) and are launched via `?scenario=<name>` (e.g. `?scenario=weapon-showcase&only=missile&dwellMs=60000`). The runner ([client/src/scenarios/runner.ts](../client/src/scenarios/runner.ts)) auto-logs in as `test1:test`, creates a fresh room, waits for first frame, runs `scenario.setup(h)`, then `scenario.run(h)` if defined.
+Scenarios live in [client/src/scenarios/](../client/src/scenarios/) and are launched via `?scenario=<name>` (e.g. `?scenario=weapon-showcase&only=missile&dwellMs=60000`). The runner ([client/src/scenarios/runner.ts](../client/src/scenarios/runner.ts)) auto-logs in as `test1:test`, waits for first frame, runs `scenario.setup(h)`, then `scenario.run(h)` if defined.
+
+> **Direct start is the default room path (PLAN-quickstart Part A).** The runner serialises its scenario into one `POST /api/rooms/direct` call (pre-authorised token, room driven straight to Active) — no login/leaveAll/create/addAI/ready/start dance. The legacy lobby-walk survives **only** behind `?via=lobby`, kept deliberately as a `lobby-flow` regression scenario that exercises the full lobby surface; it is no longer the tax every test pays. Prefer the default direct path for all new bench scenarios.
 
 **ZK cold-boot is ~150 s** because of unit-script loading. For iterative debugging (render/material/shader fixes), reloading the page for every change is painful.
 

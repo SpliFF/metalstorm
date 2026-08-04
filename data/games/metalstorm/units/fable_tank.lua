@@ -1,0 +1,36 @@
+-- fable_tank.lua — FV-9 "Vanguard" railgun MBT.
+--
+-- The generated-model PoC counterpart to units/_wz_baseline.lua
+-- (PLAN-metalstorm-beta-units.md §1/§5, PLAN-model-harness.md): a native,
+-- hand-built glTF authored by Claude Fable 5 in the Cowork sandbox
+-- (tools/fable-model-forge/), wired as a spawnable def so the model-viewer
+-- harness (?scenario=model-viewer&game=metalstorm&def=fable_tank) can
+-- judge it side by side with the WZ2100 conversion baseline.
+--
+-- Model: models/fable_tank.gltf (+.bin, 4 .ktx2) — pieces body /
+-- tracks_l / tracks_r / turret / barrel / muzzle / exhaust, forward -Z,
+-- 1 unit = 1 m (matches the wz baseline convention), 1212 tris,
+-- SPRINGRTS_geometry v8, SPRINGRTS_team_color mask on materials[0].
+-- Licensing: see the Generated rows in ../ASSETS.md.
+
+return {
+    fable_tank = {
+        name = 'FV-9 Vanguard',
+        description = 'Fable railgun MBT — generated-model showcase',
+        objectname = 'fable_tank',
+        category = 'LAND MOBILE TANK',
+        movementclass = 'VEH',
+        maxdamage = 2000, mass = 700,
+        maxvelocity = 2.3, acceleration = 0.24, brakerate = 0.2, turnrate = 680,
+        footprintx = 3, footprintz = 3,
+        sightdistance = 470,
+        canmove = true, canattack = true, canpatrol = true, canstop = true,
+        canguard = true,
+        weapons = { [1] = { name = 'MS_RAILGUN_S2' } },
+        customparams = {
+            ms_class = 'fable_showcase',
+            squad_size = '1',            -- single model: harness frames one unit
+            generator = 'Claude Fable 5 (tools/fable-model-forge)',
+        },
+    },
+}

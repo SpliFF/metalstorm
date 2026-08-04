@@ -11,6 +11,7 @@
 const std::unordered_map<int, std::string>* gAITeams = nullptr;
 
 #include "Server/SimFrameProfiler.h"
+#include "Server/SyncedInputJournal.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/TeamHandler.h"
 #include "Sim/Misc/Wind.h"
@@ -24,19 +25,24 @@ const std::unordered_map<int, std::string>* gAITeams = nullptr;
 #include "Sim/Units/CommandAI/CommandAI.h"
 #include "Sim/Units/Scripts/UnitScriptEngine.h"
 #include "Sim/Units/Scripts/UnitScriptFactory.h"
+#include "Sim/Weapons/CosmeticFire.h"
 #include "Sim/Weapons/WeaponDefHandler.h"
 #include "Sim/Weapons/WeaponLoader.h"
 #include "Sim/Features/FeatureHandler.h"
 #include "Sim/Features/FeatureDefHandler.h"
 #include "Sim/MoveTypes/MoveDefHandler.h"
 #include "Sim/MoveTypes/MoveTypeFactory.h"
+#include "Sim/MoveTypes/FootprintProfile.h"
 #include "Sim/Projectiles/ProjectileHandler.h"
 #include "Sim/Projectiles/ExplosionGenerator.h"
+#include "Sim/Weapons/StatisticalCombat.h"
+#include "Sim/Weapons/DamageField.h"
 #include "Sim/Path/IPathManager.h"
 #include "Game/GameHelper.h"
 #include "Game/Players/PlayerHandler.h"
 #include "Game/WaitCommandsAI.h"
 #include "Game/GlobalUnsynced.h"
+#include "Lua/GadgetPolicy.h"
 #include "Lua/LuaParser.h"
 #include "Lua/LuaSyncedRead.h"
 #include "Map/MapDamage.h"
@@ -69,6 +75,7 @@ const std::unordered_map<int, std::string>* gAITeams = nullptr;
 #include "System/FileSystem/FileSystem.h"
 
 #include "System/Scripting/ScriptEventDispatcher.h"
+#include "Server/TeamLeaderSelect.h"
 #include "Server/IntelEventCollector.h"
 #include "Server/UnitLifecycleCollector.h"
 #include "Server/FeatureLifecycleCollector.h"
@@ -240,6 +247,20 @@ void CSimulation::InitSubsystems(bool hasMap)
     unitDefHandler->Init(defsParser.get());
     SLOG(SPRING_LOG_INFO, "loaded %u unit defs, %u weapon defs",
         unitDefHandler->NumUnitDefs(), weaponDefHandler->NumWeaponDefs());
+
+    // Metalstorm mixed-size group flow (PLAN-metalstorm-flow §1, engine ask F1):
+    // parse gamedata/footprints.lua, resolve underpass move-class names → MoveDef
+    // pathTypes (needs the move defs, hence the hasMap guard), and attach the
+    // resolved profile to every opting UnitDef. Silent no-op for games without
+    // the file (BAR/ZK). The resolved profiles feed the F2 permeability query
+    // (CMoveMath::ObjectBlockType) and the client footprint export.
+    if (footprintProfileHandler.Load()) {
+        if (hasMap)
+            footprintProfileHandler.ResolveMoveClasses(moveDefHandler);
+        footprintProfileHandler.AttachToUnitDefs(*unitDefHandler);
+        SLOG(SPRING_LOG_INFO, "loaded %zu footprint profiles", footprintProfileHandler.Size());
+    }
+
     featureDefHandler->Init(defsParser.get());
 
     CUnit::InitStatic();
@@ -253,6 +274,8 @@ void CSimulation::InitSubsystems(bool hasMap)
     unitHandler.Init();
     featureHandler.Init();
     projectileHandler.Init();
+    statisticalCombatManager.Init();
+    damageFieldManager.Init();
 
     // --- Map-dependent subsystems ---
     if (hasMap) {
@@ -313,19 +336,17 @@ void CSimulation::FireGameStart()
     // misbehave: BAR's game_end.lua treats `hasLeader == false` as a wiped-out
     // team, marks every allyteam dead, and fires a premature GameOver (~frame
     // 120). Do the equivalent assignment here, now that the whole roster has
-    // connected — a team with active human players takes the lowest as leader
-    // (via CTeam::AddPlayer, the same join path Recoil uses); an AI team takes
-    // the host player (the lowest active human, our single-host model — matches
-    // the assumption already baked into GetAIInfo's hostPlayer = leader).
+    // connected.
+    //
+    // AI3 (PLAN-metalstorm-ai.md §1): AI slots are now real virtual players on
+    // their team (server_main registered them before this runs), so an AI team
+    // is led by its OWN AI player via the same CTeam::AddPlayer join path
+    // Recoil uses — we no longer fall an AI team's leader back to the host
+    // human (the old SetLeader(hostHuman) hack is gone). On a MIXED team
+    // (co-commander: the AI shares a human team) the HUMAN leads, so we prefer
+    // a non-isAI player and only fall to the AI when the team has no human. A
+    // team with neither a human nor an AI stays honestly leaderless.
     {
-        int hostPlayer = -1;
-        for (int p = 0; p < playerHandler.ActivePlayers(); ++p) {
-            const CPlayer* pl = playerHandler.Player(p);
-            if (pl != nullptr && pl->active && !pl->IsSpectator()) {
-                hostPlayer = p;
-                break;
-            }
-        }
         const int numTeams = teamHandler.ActiveTeams();
         for (int t = 0; t < numTeams; ++t) {
             if (t == teamHandler.GaiaTeamID())
@@ -334,16 +355,42 @@ void CSimulation::FireGameStart()
             if (team == nullptr || team->HasLeader())
                 continue;
             const std::vector<int> teamPlayers = playerHandler.ActivePlayersInTeam(t);
-            if (!teamPlayers.empty()) {
-                team->AddPlayer(teamPlayers.front());
-            } else if (gAITeams != nullptr && gAITeams->count(t) > 0 && hostPlayer >= 0) {
-                team->SetLeader(hostPlayer);
+            std::vector<TeamLeaderSelect::Candidate> cands;
+            cands.reserve(teamPlayers.size());
+            for (int p : teamPlayers) {
+                const CPlayer* pl = playerHandler.Player(p);
+                if (pl != nullptr)
+                    cands.push_back({p, pl->isAI});
             }
+            const int leader =
+                TeamLeaderSelect::SelectLeader(cands.begin(), cands.end());
+            if (leader >= 0)
+                team->AddPlayer(leader);
         }
     }
 
     springlog_log(SPRING_LOG_NOTICE, "sim", "", springlog_get_frame(),
                   "firing GameStart");
+
+    // Journal chokepoint #5 of 5 (PLAN-replay task 1): the anchor record. Every
+    // later record is meaningless without the roster this pins down — team
+    // leader assignment above is itself a synced decision derived from who had
+    // connected by this instant, and it is not recoverable from the command
+    // stream. The full setup (seed, map/defs hashes, modoptions) belongs in the
+    // replay HEADER, not here; this record marks *when* the stream begins.
+    {
+        std::string roster;
+        const int numTeams = teamHandler.ActiveTeams();
+        for (int t = 0; t < numTeams; ++t) {
+            const CTeam* team = teamHandler.Team(t);
+            if (team == nullptr) continue;
+            roster += "t" + std::to_string(t) +
+                      ":a" + std::to_string(team->teamAllyteam) +
+                      ":l" + std::to_string(team->GetLeader()) + ";";
+        }
+        syncedinput::Journal().RecordGameStart(roster);
+    }
+
     eventHandler.GameStart();
     gameStarted = true;
 
@@ -415,6 +462,20 @@ void CSimulation::InitScripting()
     // dispatched into an empty _G. (Symptom: ZK commander selection
     // bounced off a no-op luaRules->RecvLuaMsg and no commander spawned
     // even though the message reached the server.)
+    // PLAN-security-hardening task 9: log the deployment gadget posture right
+    // before the synced gadget handler enumerates + loads gadgets, and assert
+    // cheats are off under a strict policy (the SyncedGameCommands "cheat"
+    // action refuses to enable them; this catches any other path). The
+    // per-gadget exclusions themselves are enforced at the VFS layer
+    // (LuaVFS::DirList / LoadFileWithModes), invisible to game Lua.
+    if (GadgetPolicy::IsStrict()) {
+        SLOG(SPRING_LOG_NOTICE, "gadget-policy: STRICT — dev/debug/loadstring/AI-relay gadgets excluded, cheats forced off");
+        if (gs->cheatEnabled) {
+            SLOG(SPRING_LOG_WARNING, "gadget-policy: cheats were enabled under a strict policy — forcing off");
+            gs->cheatEnabled = false;
+        }
+    }
+
     if (CLuaRules::LoadHandler(false)) {
         auto* ctx = new LuaScriptContext(&luaRules->syncedLuaHandle);
         scriptDispatcher->AddContext(ctx);
@@ -600,6 +661,9 @@ void CSimulation::Init(const std::string& mapName)
 void CSimulation::Kill()
 {
     running = false;
+    // Drop any Tier-C damage still in flight — the units it would land on
+    // are about to go away, and the DynDamageArray refs must be released.
+    cosmeticFireQueue.Clear();
     defsParser.reset();
     gs->Kill();
     SLOG(SPRING_LOG_INFO, "shut down");
@@ -658,6 +722,18 @@ void CSimulation::SimFrame()
 
     phaseT0 = simProf ? spring_now() : spring_time();
     unitHandler.Update();
+    // Drain statistical volleys whose scheduled resolve frame has arrived
+    // (damage applied via DoDamage). Runs right after unitHandler.Update(),
+    // where this frame's volleys were rolled + queued during weapon fire.
+    statisticalCombatManager.Update(gs->frameNum);
+    // Metalstorm damage fields (Model 3, C6): expire finished fields and apply
+    // area damage for any reaching a cadence tick this frame (via DoDamage).
+    damageFieldManager.Update(gs->frameNum);
+    // PLAN-latency L2.1: Tier-C shots have no projectile to collide, so their
+    // damage lands from this queue instead. Ticked immediately before the
+    // projectile update so a cosmetic impact and a real projectile impact on
+    // the same frame reach the same GameEventBatch.
+    cosmeticFireQueue.Update(gs->frameNum);
     projectileHandler.Update();
     featureHandler.Update();
 

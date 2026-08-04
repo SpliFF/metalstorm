@@ -1,4 +1,4 @@
-.PHONY: setup build build-release test test-cpp test-client test-all dev-client generate-protocol clean
+.PHONY: setup build build-release test test-cpp test-client test-all dev-client generate-protocol export-metalstorm-specs clean test-headless-batch test-headless-determinism
 
 # First-time setup
 setup:
@@ -11,8 +11,17 @@ setup:
 	@echo "Run 'make dev-client' to start the client dev server."
 
 # Build
-build:
+build: export-metalstorm-specs
 	cmake --build build/debug
+
+# Export Metalstorm's shared Lua spec files (e.g. authority_cost.lua, the
+# order-cost formula spec — PLAN-metalstorm-authority.md task 5/A3) to JSON
+# for the client mirror. Output lands in data/games/metalstorm/, served
+# as-is by the static-data pipeline (see tools/scripts/lua-to-json.lua).
+export-metalstorm-specs:
+	lua tools/scripts/lua-to-json.lua \
+		data/games/metalstorm/LuaRules/Configs/authority_cost.lua \
+		data/games/metalstorm/authority_cost.json
 
 # Generate FlatBuffers bindings for both C++ and TypeScript
 generate-protocol: build
@@ -37,6 +46,19 @@ test-client:
 	cd client && npx vitest run
 
 test-all: test-cpp test-client
+
+# headless-batch matrix-expansion unit test (pure, no server build needed —
+# PLAN-headless.md task 3 §6 "meta" requirement).
+test-headless-batch:
+	node tools/headless-batch/test/matrix.test.mjs
+
+# Determinism pair-run CI hook (PLAN-headless.md task 4): builds spring-server,
+# runs the PaperTanks-scale fixture twice, diffs the two stateHash sequences.
+test-headless-determinism:
+	cmake --build build/debug --target spring-server
+	node tools/headless-batch/determinism-pair-run.mjs \
+		--server-bin build/debug/spring-server \
+		--out-dir build/headless-determinism
 
 # Development
 dev-client:

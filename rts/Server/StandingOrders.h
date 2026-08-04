@@ -46,6 +46,10 @@ struct StandingOrderConditions {
     float outsideRadius = 0.0f;                /// 0 = wildcard
     float minStrength = 0.0f;                  /// HP × count threshold
     std::vector<std::string> hasCapabilities;  /// game-specific tags
+    /// Org-group scope (macro-orders §4.2 — the A+C fusion). When non-zero,
+    /// only squads that are members of this org group qualify. 0 = any squad
+    /// (classic condition/area scope). See OrgGroups.h / OrgGroupManager.
+    uint32_t orgGroup = 0;
 };
 
 /// A single standing order. Owned by `team`; visible to its allies via

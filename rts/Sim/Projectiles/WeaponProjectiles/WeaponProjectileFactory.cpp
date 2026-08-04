@@ -14,7 +14,18 @@
 #include "TorpedoProjectile.h"
 #include "Sim/Misc/GlobalConstants.h"
 #include "Sim/Projectiles/ProjectileMemPool.h"
+#include "Sim/Weapons/CosmeticFire.h"
 #include "Sim/Weapons/WeaponDef.h"
+
+unsigned int WeaponProjectileFactory::FireWeaponProjectile(const ProjectileParams& params) {
+	// LATENCY-STANDIN (PLAN-latency L2.1): Tier-C weapons resolve their whole
+	// shot at fire time and never enter the sim. See CosmeticFire.h for the
+	// deviation and its cost.
+	if (TryResolveCosmeticFire(params))
+		return -1u;
+
+	return LoadProjectile(params);
+}
 
 unsigned int WeaponProjectileFactory::LoadProjectile(const ProjectileParams& params) {
 	const WeaponDef* weaponDef = params.weaponDef;

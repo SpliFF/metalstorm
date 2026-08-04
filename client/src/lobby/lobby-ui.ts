@@ -34,6 +34,14 @@ import { RoomListUpdate } from '../protocol/spring-web/room-list-update.js';
 import { RoomStateUpdate } from '../protocol/spring-web/room-state-update.js';
 import { renderTemplate } from '../ui/ui.js';
 import {
+    defaultTeamForNewSlot, renderSideOptions, warSidesForRoom,
+} from './war-sides.js';
+import type { AvailableScenarioInfo } from './scenario-picker.js';
+import {
+    defaultScenarioFor, parseScenarioList, resolveScenarioLabel, scenarioNote,
+    scenarioOptionLabel, scenariosForMap,
+} from './scenario-picker.js';
+import {
     getDefaultLobbyTemplates,
     type LobbyTemplates,
 } from '../ui/lobby/loader.js';
@@ -65,6 +73,10 @@ interface RoomAISlotInfo {
     /// Map start position index assigned to this AI. -1 = unset
     /// (the lobby auto-fills at game start).
     startPos: number;
+    /// Personality/difficulty profile name (PLAN-metalstorm-ai.md §10 task
+    /// 6), e.g. "aggressive"/"caretaker" for the strategos AI. Empty = no
+    /// override (the plugin falls back to its own default).
+    profile: string;
 }
 
 /// One AI plugin the server discovered under content/engine/ai or
@@ -95,11 +107,33 @@ interface AvailableGameInfo {
     lighting: string;
 }
 
+/// Mirrors ai/strategos/config.lua's Config.PROFILES allow-list. A
+/// documented duplicate, not a source of truth (like game_scenario.lua's
+/// AI_SLATE_KINDS) — the plugin lives in a separate Lua VM the client can't
+/// introspect, and only the "strategos" AI ships selectable profiles today.
+/// PLAN-metalstorm-ai.md §10 task 6.
+const STRATEGOS_PROFILES: { id: string; label: string }[] = [
+    { id: '', label: '(default)' },
+    { id: 'default', label: 'Balanced' },
+    { id: 'aggressive', label: 'Aggressive' },
+    { id: 'caretaker', label: 'Caretaker' },
+    { id: 'mentor', label: 'Mentor (suggest-only)' },
+    { id: 'npc_raider', label: 'NPC Raider (needs scenario slate)' },
+];
+
+// AvailableScenarioInfo and every rule that operates on it now live in
+// ./scenario-picker.ts, so they can be tested without a DOM — same move, and
+// the same reason, as war-sides.ts. Imported above.
+
 interface CurrentRoom {
     id: number; name: string; mapId: string; gameId: string;
     state: number; players: RoomPlayerInfo[];
     aiSlots: RoomAISlotInfo[];
     gameServerPort: number;
+    /// Room modoptions as the lobby reports them. `scenario` is the war
+    /// this room will stage; the room screen shows it so the coupling
+    /// between map and war is visible rather than implicit.
+    modOptions: Record<string, string>;
 }
 
 export class LobbyUI {
@@ -118,6 +152,15 @@ export class LobbyUI {
     /// below so a later restart of the *same* persistent room re-arms it.
     private gameStartedForRoomId: number | null = null;
     private onGameStart?: (gameServerPort: number, mapId: string, gameId: string) => void;
+    /// PLAN-quickstart.md Part B: true while a detached game session is
+    /// parked (worker alive, `currentRoom` still points at that game). Guards
+    /// `updateCurrentRoomFromJson`'s gameRunning branch — while detached, a
+    /// live room update must NOT re-hide the lobby or re-fire `onGameStart`
+    /// (the player deliberately backed out to browse); it only needs to
+    /// notice the room ending (E4, below).
+    private detached = false;
+    private onParkedRoomEnded?: () => void;
+    private parkedBanner: HTMLElement | null = null;
     private myPlayerId = 0;
     private pendingRejoinRoomId = 0;
     private authToken = '';
@@ -166,6 +209,21 @@ export class LobbyUI {
     /// arrives. Passed to RoomCreate.game_id on create.
     private selectedGameId: string = '';
 
+    /// Scenarios (war templates) the selected game ships, from
+    /// `GET /api/games/<id>/scenarios`. Empty for games that ship none,
+    /// which hides the War picker entirely. PLAN-endtoend.md D10.
+    private availableScenarios: AvailableScenarioInfo[] = [];
+
+    /// The game id `availableScenarios` was fetched for — the list is
+    /// per-game, so changing the game dropdown invalidates it.
+    private availableScenariosForGame: string = '';
+
+    /// The scenario id the user picked in the create-room form, or null
+    /// for "whatever this map's war is" (the server-side default).
+    /// Distinct from '': that is an explicit "no scenario", which the
+    /// server honours rather than overriding with the map default.
+    private selectedScenarioId: string | null = null;
+
     // ─── Public read-only accessors for debugging / automation ───
 
     get room(): CurrentRoom | null { return this.currentRoom; }
@@ -183,7 +241,9 @@ export class LobbyUI {
     /// (`?direct=`) modes, which own the screen and drive the game
     /// themselves — otherwise the async game-template load resolving into
     /// setTemplates() re-renders (and un-hides) the login form the runner
-    /// had already hidden. See main.ts scenario/direct dispatch.
+    /// had already hidden. See main.ts scenario/direct dispatch. Not
+    /// permanent: quitToLobby lifts it via unsuppress() so quitting a
+    /// scenario/direct game still lands on a usable lobby.
     private suppressed = false;
 
     constructor(
@@ -293,6 +353,17 @@ export class LobbyUI {
     hide(): void { this.container.style.display = 'none'; }
 
     /**
+     * Lift the scenario/direct-boot suppression so the lobby can render
+     * again. Called by main.ts's quitToLobby: in suppressed mode every
+     * show*() path is a no-op, so an ESC-quit out of a `?scenario=` /
+     * `?direct=` game would otherwise land on a permanently blank page.
+     * The template bundle swapped in via setTemplates() while suppressed
+     * was deliberately retained for exactly this un-suppress. No-op when
+     * not suppressed (the normal lobby flow).
+     */
+    unsuppress(): void { this.suppressed = false; }
+
+    /**
      * Inject an already-acquired session token into the lobby. Used by
      * the scenario runner, which performs its own /api/auth/login via
      * fetch (the runner bypasses the saved-session auto-login path) but
@@ -384,6 +455,8 @@ export class LobbyUI {
             const myRoom = rooms.find((r: any) => r.id === this.currentRoom!.id);
             if (!myRoom) {
                 console.log(`[lobby] current room ${this.currentRoom.id} no longer exists`);
+                // E4: the room vanished outright (not just state>=5) while parked.
+                if (this.detached) this.onParkedRoomEnded?.();
                 this.currentRoom = null;
                 localStorage.removeItem('springrts-game-room');
                 localStorage.removeItem('springrts-game-port');
@@ -400,12 +473,13 @@ export class LobbyUI {
         const players: RoomPlayerInfo[] = (r.players ?? []).map((p: any) => ({
             playerId: p.player_id ?? 0, username: p.username ?? '',
             team: p.team ?? 0, ready: p.ready ?? false,
-            isSpectator: false, isHost: p.is_host ?? false,
+            isSpectator: p.is_spectator ?? false, isHost: p.is_host ?? false,
             startPos: p.start_pos ?? -1,
         }));
         const aiSlots: RoomAISlotInfo[] = (r.ai_slots ?? []).map((s: any) => ({
             aiId: s.ai_id ?? '', displayName: s.name ?? s.ai_id ?? '',
             team: s.team ?? 0, startPos: s.start_pos ?? -1,
+            profile: s.profile ?? '',
         }));
         const newGameId = r.game ?? '';
         this.currentRoom = {
@@ -413,17 +487,34 @@ export class LobbyUI {
             gameId: newGameId,
             state: r.state ?? 0, players, aiSlots,
             gameServerPort: r.game_server_port ?? 0,
+            modOptions: (r.modoptions && typeof r.modoptions === 'object')
+                ? r.modoptions as Record<string, string> : {},
         };
 
         // Refresh AI list when entering a room with a different game
         if (this.availableAIsForGame !== newGameId) {
             this.refreshAIList();
         }
+        // Same for the scenario list — the room screen resolves the room's
+        // `scenario` modoption to a display name out of it. Covers the
+        // auto-rejoin path, where the create form was never opened.
+        if (newGameId && this.availableScenariosForGame !== newGameId) {
+            this.refreshScenarioList(newGameId);
+        }
 
         const gameRunning = this.currentRoom.state === 3 || this.currentRoom.state === 4;
         if (gameRunning && this.currentRoom.gameServerPort > 0) {
             localStorage.setItem('springrts-game-room', String(this.currentRoom.id));
             localStorage.setItem('springrts-game-port', String(this.currentRoom.gameServerPort));
+            // Detached: the player deliberately backed out to the lobby while
+            // the worker stays parked. Don't re-hide the lobby or re-fire
+            // onGameStart for a room that's still running — just keep
+            // currentRoom fresh (used by the room view + the parked banner)
+            // and fall through to E4's ended check below.
+            if (this.detached) {
+                if (this.currentScreen === 'room') { if (!this.patchRoom()) this.showRoom(); }
+                return;
+            }
             this.stopPolling();
             this.hide();
             if (this.gameStartedForRoomId !== this.currentRoom.id) {
@@ -431,6 +522,11 @@ export class LobbyUI {
                 this.onGameStart?.(this.currentRoom.gameServerPort, this.currentRoom.mapId, this.currentRoom.gameId);
             }
             return;
+        }
+        if (this.detached && this.currentRoom.state >= 5) {
+            // E4: the game ended while parked — dispose the parked worker via
+            // the caller's callback instead of waiting on the park TTL.
+            this.onParkedRoomEnded?.();
         }
         if (this.currentRoom.state >= 5) {
             this.gameStartedForRoomId = null;
@@ -523,6 +619,55 @@ export class LobbyUI {
         }
     }
 
+    /**
+     * PLAN-quickstart.md Part B: the game-processor worker for `currentRoom`
+     * is parked (detached, not quit) — show a persistent "return to game"
+     * card and start watching this room for state changes so a game-over
+     * while parked disposes the worker immediately (E4) instead of waiting
+     * on the ~10 min TTL. `onReenter` drives the fast `gpResync` path;
+     * `onEnded` is the TTL-independent dispose hook. Idempotent — calling
+     * again (e.g. a second detach guard miss) just refreshes the callbacks.
+     */
+    markParked(onReenter: () => void, onEnded: () => void): void {
+        this.detached = true;
+        this.onParkedRoomEnded = onEnded;
+        this.startPolling();
+        this.renderParkedBanner(onReenter);
+    }
+
+    /// Clear parked state — called on resync (re-entered), TTL dispose, or
+    /// E4 dispose. Safe to call when nothing is parked (no-op banner-wise).
+    clearParked(): void {
+        this.detached = false;
+        this.onParkedRoomEnded = undefined;
+        this.parkedBanner?.remove();
+        this.parkedBanner = null;
+    }
+
+    private renderParkedBanner(onReenter: () => void): void {
+        this.parkedBanner?.remove();
+        const roomName = this.currentRoom?.name || 'your game';
+        const el = document.createElement('div');
+        el.id = 'parked-session-banner';
+        el.style.cssText =
+            'position:fixed;left:50%;bottom:1.5rem;transform:translateX(-50%);z-index:150;' +
+            'display:flex;align-items:center;gap:0.9rem;padding:0.75rem 1rem;' +
+            'background:#161a22;border:1px solid #2a3140;border-radius:10px;' +
+            'box-shadow:0 8px 30px rgba(0,0,0,0.45);color:#e6e8ec;' +
+            'font-family:system-ui,sans-serif;font-size:0.9rem;';
+        const label = document.createElement('span');
+        label.textContent = `Parked: ${roomName}`;
+        const btn = document.createElement('button');
+        btn.textContent = 'Return to game';
+        btn.style.cssText =
+            'padding:0.45rem 1rem;font-size:0.9rem;border:0;border-radius:6px;' +
+            'background:#3b6fe0;color:#fff;cursor:pointer;';
+        btn.onclick = () => onReenter();
+        el.append(label, btn);
+        document.body.appendChild(el);
+        this.parkedBanner = el;
+    }
+
     showBrowser(): void {
         // Suppressed (scenario/direct boot): stay off screen and, crucially,
         // do not null currentRoom — the runner's setCurrentRoomFromJson wiring
@@ -556,7 +701,7 @@ export class LobbyUI {
             const name = (document.getElementById('new-room-name') as HTMLInputElement).value || 'Game';
             const selected = this.container.querySelector('.map-card.selected');
             const mapId = selected?.getAttribute('data-map-id') ?? '';
-            this.createRoom(name, mapId);
+            this.createRoom(name, mapId, this.selectedScenarioId);
         };
 
         // Populate the game dropdown if the list has already arrived.
@@ -588,6 +733,100 @@ export class LobbyUI {
         sel.disabled = false;
         sel.onchange = () => {
             this.selectedGameId = sel.value;
+            // The scenario list is per-game. Drop the stale pick rather
+            // than carry a Metalstorm war id into a ZK room.
+            this.selectedScenarioId = null;
+            this.refreshScenarioList();
+        };
+        this.refreshScenarioList();
+    }
+
+    /// Fetch the selected game's scenarios, once per game. Games that ship
+    /// none return `[]` and the War row stays hidden, so this is a no-op
+    /// for every game but Metalstorm today. PLAN-endtoend.md D10.
+    private async refreshScenarioList(forGameId?: string): Promise<void> {
+        const gameId = forGameId ?? this.selectedGameId;
+        if (!gameId) return;
+        if (this.availableScenariosForGame === gameId) {
+            this.renderScenarioOptions();
+            return;
+        }
+        try {
+            const list = await this.lobbyGet(
+                `/api/games/${encodeURIComponent(gameId)}/scenarios`);
+            // Shipped and generated wars arrive in the same list — the server
+            // materialises `generated_scenarios` rows into the directory it
+            // then discovers, so there is nothing to merge here.
+            this.availableScenarios = parseScenarioList(list);
+            this.availableScenariosForGame = gameId;
+        } catch {
+            this.availableScenarios = [];
+            this.availableScenariosForGame = gameId;
+        }
+        this.renderScenarioOptions();
+        // Also refreshes the room screen's "War:" label, which resolves the
+        // room's scenario id to a display name out of this same list.
+        if (this.currentScreen === 'room' && this.currentRoom) this.showRoom();
+    }
+
+    /// Which scenarios are offerable for the map currently selected in the
+    /// create form. See scenariosForMap for the filtering rules.
+    private scenariosForSelectedMap(): AvailableScenarioInfo[] {
+        return scenariosForMap(this.availableScenarios, this.selectedMapId);
+    }
+
+    /// Repopulate the War picker. Hidden when the selected game+map pair
+    /// has no scenarios at all, so create-room is visually unchanged for
+    /// games that don't use them.
+    private renderScenarioOptions(): void {
+        const row = document.getElementById('scenario-row');
+        const sel = document.getElementById('scenario-select') as HTMLSelectElement | null;
+        const note = document.getElementById('scenario-note');
+        if (!row || !sel) return;
+
+        const offerable = this.scenariosForSelectedMap();
+        if (offerable.length === 0) {
+            row.style.display = 'none';
+            // Don't leave a pick from a previous map applied to this one.
+            this.selectedScenarioId = null;
+            return;
+        }
+        row.style.display = 'block';
+
+        // The default entry carries no value, so the create request omits
+        // `scenario` entirely and the server applies the map's default —
+        // one owner for that decision, not two that can disagree. Mirrors
+        // ScenarioDiscovery::DefaultForMap exactly, including its rule that a
+        // non-terminal scenario is never automatic; when the map has only
+        // endless wars the honest default is "no war", not one of them.
+        const serverDefault = defaultScenarioFor(offerable);
+        const options = [
+            serverDefault
+                ? `<option value="">${this.esc(serverDefault.displayName)} (default for this map)</option>`
+                : `<option value="">No war (default) — a free-form battle with no ending</option>`,
+            ...offerable.map(s => {
+                const selAttr = s.id === this.selectedScenarioId ? ' selected' : '';
+                return `<option value="${this.esc(s.id)}"${selAttr}>`
+                    + `${this.esc(scenarioOptionLabel(s))}</option>`;
+            }),
+        ];
+        sel.innerHTML = options.join('');
+        sel.value = this.selectedScenarioId ?? '';
+
+        const describe = () => {
+            if (!note) return;
+            const picked = (this.selectedScenarioId
+                ? offerable.find(s => s.id === this.selectedScenarioId)
+                : serverDefault) ?? null;
+            const { className, text } = scenarioNote(picked);
+            note.className = className;
+            note.textContent = text;
+        };
+        describe();
+
+        sel.onchange = () => {
+            this.selectedScenarioId = sel.value === '' ? null : sel.value;
+            describe();
         };
     }
 
@@ -624,8 +863,54 @@ export class LobbyUI {
                 el.querySelectorAll('.map-card').forEach(c => c.classList.remove('selected'));
                 card.classList.add('selected');
                 this.selectedMapId = card.getAttribute('data-map-id') ?? '';
+                // Wars are authored per map, so the picker's contents change
+                // with the map. Drop any pick that belonged to the old one.
+                this.selectedScenarioId = null;
+                this.renderScenarioOptions();
             };
         });
+
+        // The map list usually arrives after renderGameOptions() ran, so the
+        // War row was rendered against an empty `selectedMapId`. Redo it now
+        // that a map is actually selected.
+        this.renderScenarioOptions();
+    }
+
+    /// The room screen's "Map · War" line (PLAN-endtoend.md D10).
+    ///
+    /// The war is read from the room's own `scenario` modoption, which the
+    /// lobby resolved at create time — not re-derived here, so what the
+    /// player reads is exactly what the sim will stage. Its display name
+    /// comes from the cached scenario list when we have it and falls back
+    /// to the raw id when we don't (a room joined without ever opening the
+    /// create form). Returns '' for rooms with no scenario in a game that
+    /// ships none, which collapses the row.
+    private renderRoomSetupLine(r: CurrentRoom): string {
+        const parts: string[] = [];
+        if (r.mapId) parts.push(`Map: <strong>${this.esc(r.mapId)}</strong>`);
+
+        const scenarioId = r.modOptions.scenario ?? '';
+        const gameHasScenarios =
+            this.availableScenariosForGame === r.gameId
+            && this.availableScenarios.length > 0;
+        if (scenarioId) {
+            // Resolves generated wars as well as shipped ones — they are in
+            // the same list — so a room created with one shows its minted name
+            // rather than a raw `gen_<map>_<hash>` id.
+            const { label, known, terminal } =
+                resolveScenarioLabel(this.availableScenarios, scenarioId);
+            // Only claim "no ending" when we actually know the scenario —
+            // an unrecognised id means we have no list, not that the war
+            // is endless.
+            const warn = known && !terminal
+                ? ` <span class="scenario-note endless">(no ending)</span>` : '';
+            parts.push(`War: <strong>${this.esc(label)}</strong>${warn}`);
+        } else if (gameHasScenarios) {
+            parts.push(
+                `War: <span class="scenario-note endless">none — this war `
+                + `cannot end</span>`);
+        }
+        return parts.length > 0 ? parts.join(' &middot; ') : '';
     }
 
     private renderRoomList(): void {
@@ -644,6 +929,15 @@ export class LobbyUI {
                 `Host: ${this.esc(r.hostName)}`;
             const joinLabel = r.state >= 5 ? 'Ended'
                 : (r.state >= 3 ? 'Watch / Rejoin' : 'Join');
+            // A room already Loading/Active auto-spectates anyone not on its
+            // original roster (RoomManager::JoinRoom's isActive branch) — the
+            // plain Join button already gets you in as a spectator there, so
+            // the explicit Spectate button only adds value pre-game (Filling),
+            // where the default Join would claim a player slot instead
+            // (PLAN-metalstorm-onboarding.md §4).
+            const spectateHtml = (r.state < 3 && r.state < 5)
+                ? `<button class="spectate-btn" data-id="${r.id}">Spectate</button>`
+                : '';
             return renderTemplate(this.templates.browserRoomEntry, {
                 id: r.id,
                 name: this.esc(r.name),
@@ -651,12 +945,18 @@ export class LobbyUI {
                 detail,
                 join_label: joinLabel,
                 disabled_attr: r.state >= 5 ? ' disabled' : '',
+                spectate_html: spectateHtml,
             });
         }).join('');
 
         el.querySelectorAll('.join-btn:not([disabled])').forEach(btn => {
             (btn as HTMLElement).onclick = () => {
                 this.joinRoom(parseInt(btn.getAttribute('data-id')!));
+            };
+        });
+        el.querySelectorAll('.spectate-btn').forEach(btn => {
+            (btn as HTMLElement).onclick = () => {
+                this.joinRoom(parseInt(btn.getAttribute('data-id')!), /*asSpectator=*/true);
             };
         });
     }
@@ -721,6 +1021,11 @@ export class LobbyUI {
             const posSel = row.querySelector('.startpos-select') as HTMLSelectElement | null;
             if (posSel && posSel !== document.activeElement) {
                 posSel.value = String(slot.startPos);
+            }
+
+            const profileSel = row.querySelector('.ai-profile-select') as HTMLSelectElement | null;
+            if (profileSel && profileSel !== document.activeElement) {
+                profileSel.value = slot.profile;
             }
         });
 
@@ -801,10 +1106,16 @@ export class LobbyUI {
                 + `</select>`;
         };
 
+        // The room's slot list (PLAN-metalstorm-wars.md §7.4). A slot picks a
+        // SIDE — Compact / Union — and the server has already resolved each
+        // side to the team its army is staged on. Falls back to the legacy
+        // Team 1 / Team 2 for every room whose game ships no scenarios.
+        const sides = warSidesForRoom(r.modOptions);
+
         // Pre-render each player row through the template so games
-        // can restyle the row layout. The `{{startpos_html}}`
-        // placeholder receives the start-pos select (possibly
-        // empty if the map ships no positions).
+        // can restyle the row layout. The `{{startpos_html}}` and
+        // `{{team_options}}` placeholders receive the start-pos select
+        // (possibly empty if the map ships no positions) and the side list.
         const playersHtml = r.players.map(p => {
             const canEdit = preGame && (p.playerId === this.myPlayerId || amHost);
             const posSel = renderStartPosSelect(
@@ -815,8 +1126,7 @@ export class LobbyUI {
                 host_icon: p.isHost ? '★' : '●',
                 ready_class: p.ready ? 'ready' : '',
                 select_disabled: p.playerId !== this.myPlayerId ? ' disabled' : '',
-                team0_selected: p.team === 0 ? ' selected' : '',
-                team1_selected: p.team === 1 ? ' selected' : '',
+                team_options: renderSideOptions(sides, p.team),
                 status: p.isSpectator ? 'Spectator' : (p.ready ? '✓ Ready' : '—'),
                 startpos_html: posSel,
             });
@@ -836,25 +1146,43 @@ export class LobbyUI {
             const canEdit = preGame && amHost;
             const posSel = renderStartPosSelect(
                 slot.startPos, `ai:${idx}`, canEdit);
-            // Team dropdown mirrors the player-row layout: a two-option
-            // select tagged with data-slot so the change handler below
-            // can resolve it back to the slot index without replaying
-            // the whole roster. Disabled for non-hosts and while a
+            // Side dropdown mirrors the player-row layout: one option per
+            // side the room offers, tagged with data-slot so the change
+            // handler below can resolve it back to the slot index without
+            // replaying the whole roster. Disabled for non-hosts and while a
             // game is running.
+            //
+            // This select is where endtoend D19 lived: it offered team
+            // indices 0 and 1, so the AI opponent on a Meridian war landed on
+            // team 1 — a compact teammate the scenario stages no army for —
+            // and the union's whole force was skipped. It now offers the
+            // scenario's sides, so the opponent lands on team 4 with an army.
             const teamDisabled = canEdit ? '' : ' disabled';
             const teamSel =
                 `<select class="ai-team-select" name="ai-team-${idx}" data-slot="${idx}"${teamDisabled}>`
-                + `<option value="0"${slot.team === 0 ? ' selected' : ''}>Team 1</option>`
-                + `<option value="1"${slot.team === 1 ? ' selected' : ''}>Team 2</option>`
+                + renderSideOptions(sides, slot.team)
                 + `</select>`;
+            // Personality/difficulty profile dropdown (§10 task 6) — only
+            // the strategos AI ships selectable profiles; other plugins
+            // (e.g. "null") get no dropdown at all.
+            const profileSel = slot.aiId !== 'strategos' ? '' : (canEdit
+                ? `<select class="ai-profile-select" name="ai-profile-${idx}" data-slot="${idx}">`
+                  + STRATEGOS_PROFILES.map(p =>
+                      `<option value="${this.esc(p.id)}"${p.id === slot.profile ? ' selected' : ''}>${this.esc(p.label)}</option>`
+                  ).join('')
+                  + `</select>`
+                : `<span class="player-status">${this.esc(slot.profile || '(default)')}</span>`);
             return `<div class="player-row ai-row"><span class="player-icon">🤖</span>`
                 + `<span class="player-name">${nameText}</span>`
                 + teamSel
                 + posSel
+                + profileSel
                 + `<span class="player-status">AI</span>`
                 + removeBtn
                 + `</div>`;
         }).join('');
+
+        // (The map + war line is built by renderRoomSetupLine below.)
 
         // Host-only: "Add AI" row, rendered below the AI slots. Lists
         // every discovered plugin. Shows a disabled placeholder if the
@@ -870,12 +1198,19 @@ export class LobbyUI {
                         + (ai.isEngineProvided ? ' (engine)' : '');
                     return `<option value="${this.esc(ai.id)}">${label}</option>`;
                 }).join('');
+                // Default the new slot to a side nobody holds, so "Add AI" on
+                // a fresh room produces an *opponent* rather than a second
+                // occupant of the host's side.
+                const occupied = [
+                    ...r.players.filter(p => !p.isSpectator).map(p => p.team),
+                    ...r.aiSlots.map(s => s.team),
+                ];
+                const aiDefaultTeam = defaultTeamForNewSlot(sides, occupied);
                 addAIHtml =
                     `<div class="ai-add-row">`
                     + `<select id="ai-add-select" class="team-select">${options}</select>`
                     + `<select id="ai-add-team" class="team-select">`
-                    + `<option value="0">Team 1</option>`
-                    + `<option value="1">Team 2</option>`
+                    + renderSideOptions(sides, aiDefaultTeam)
                     + `</select>`
                     + `<button id="ai-add-btn" class="primary">Add AI</button>`
                     + `</div>`;
@@ -886,14 +1221,20 @@ export class LobbyUI {
         // the host. We compose a small HTML fragment in JS rather than
         // adding more conditional placeholders to the template.
         const actions: string[] = [];
-        if (preGame) {
+        // Spectators (PLAN-metalstorm-onboarding.md §4) aren't part of the
+        // ready-check (RoomManager::AllReady already excludes them) — Ready
+        // doesn't apply to them; Enlist is their path to a team slot instead.
+        if (preGame && !myPlayer?.isSpectator) {
             actions.push(`<button id="ready-btn" class="${myPlayer?.ready ? 'secondary' : ''}">${myPlayer?.ready ? 'Unready' : 'Ready'}</button>`);
+        }
+        if (myPlayer?.isSpectator) {
+            actions.push('<button id="enlist-btn" class="primary">Enlist</button>');
         }
         if (preGame && amHost) {
             actions.push('<button id="start-btn" class="primary">Start Game</button>');
         }
         if (gameRunning) {
-            actions.push('<button id="rejoin-btn" class="primary">Rejoin Game</button>');
+            actions.push(`<button id="rejoin-btn" class="primary">${myPlayer?.isSpectator ? 'Watch Game' : 'Rejoin Game'}</button>`);
         }
         // No "End Game" or "Close Room" buttons. Room lifecycle is
         // handled via Leave: last human out kills the game and room.
@@ -901,6 +1242,7 @@ export class LobbyUI {
         this.container.innerHTML = renderTemplate(this.templates.room, {
             name: this.esc(r.name),
             state: ROOM_STATE_LABELS[r.state] || '?',
+            setup_html: this.renderRoomSetupLine(r),
             players_html: playersHtml + aiRowsHtml + addAIHtml,
             actions_html: actions.join(''),
         });
@@ -908,6 +1250,8 @@ export class LobbyUI {
         document.getElementById('leave-btn')!.onclick = () => this.leave();
         document.getElementById('ready-btn')?.addEventListener('click',
             () => this.ready(!myPlayer?.ready));
+        document.getElementById('enlist-btn')?.addEventListener('click',
+            () => this.enlist());
         document.getElementById('start-btn')?.addEventListener('click',
             () => this.startGame());
         document.getElementById('rejoin-btn')?.addEventListener('click', () => {
@@ -978,6 +1322,15 @@ export class LobbyUI {
                 if (idx >= 0) this.setAITeam(idx, team);
             };
         });
+        // Per-AI-row personality/difficulty profile dropdowns (§10 task 6).
+        // Same data-slot addressing as the team dropdown above.
+        this.container.querySelectorAll('.ai-profile-select').forEach(sel => {
+            (sel as HTMLSelectElement).onchange = (e) => {
+                const el = e.target as HTMLSelectElement;
+                const idx = parseInt(el.dataset.slot ?? '-1');
+                if (idx >= 0) this.setAIProfile(idx, el.value);
+            };
+        });
 
         // Start-position dropdowns. The `data-owner` attribute
         // encodes the target: "player:<playerId>" for a human row
@@ -1013,22 +1366,29 @@ export class LobbyUI {
 
     // ─── Room operations (all HTTP POST) ───
 
-    async createRoom(name: string, mapId: string = ''): Promise<void> {
+    async createRoom(name: string, mapId: string = '',
+                     scenarioId: string | null = null): Promise<void> {
         if (!this.authToken) return;
-        const data = await this.lobbyPost('/api/rooms', {
+        // `scenario` is omitted, not sent empty, when the host left the
+        // picker on its default — an empty string means "deliberately no
+        // scenario" server-side and would suppress the map default
+        // (PLAN-endtoend.md D10).
+        const body: Record<string, string> = {
             name, map: mapId, game: this.selectedGameId,
-        });
+        };
+        if (scenarioId !== null) body.scenario = scenarioId;
+        const data = await this.lobbyPost('/api/rooms', body);
         if (data?.id) {
             this.updateCurrentRoomFromJson(data);
             if (this.currentRoom) this.showRoom();
         }
     }
 
-    async joinRoom(roomId: number): Promise<void> {
+    async joinRoom(roomId: number, asSpectator: boolean = false): Promise<void> {
         if (!this.authToken) return;
         let data: any = null;
         try {
-            data = await this.lobbyPost('/api/rooms/join', { room_id: roomId });
+            data = await this.lobbyPost('/api/rooms/join', { room_id: roomId, as_spectator: asSpectator });
         } catch { /* network / non-JSON error — handled as a failed join below */ }
         if (data?.id) {
             this.updateCurrentRoomFromJson(data);
@@ -1065,6 +1425,21 @@ export class LobbyUI {
         if (!this.authToken) return;
         const data = await this.lobbyPost('/api/rooms/team', { team });
         if (data?.id) this.updateCurrentRoomFromJson(data);
+    }
+
+    /// Spectator → player (PLAN-metalstorm-onboarding.md §4). Auto-assigns
+    /// the next open team. Converting before the game starts is the fully
+    /// working path — the new roster entry rides the next spawnGameServer
+    /// call. Enlisting while watching an already-running game updates the
+    /// lobby's roster (so a restart/rejoin picks it up) but does not grant
+    /// command rights on the CURRENT session — the running spring-server's
+    /// --player roster is fixed at spawn (dynamic mid-game roster growth is
+    /// tracked separately, gated behind Stage 7).
+    async enlist(): Promise<{ id: number } | null> {
+        if (!this.authToken) return null;
+        const data = await this.lobbyPost('/api/rooms/enlist', { team: 255 });
+        if (data?.id) this.updateCurrentRoomFromJson(data);
+        return data?.id ? data : null;
     }
 
     async startGame(): Promise<void> {
@@ -1122,6 +1497,13 @@ export class LobbyUI {
 
     async setAITeam(slotIndex: number, team: number): Promise<void> {
         const data = await this.lobbyPost('/api/rooms/ai/team', { slot_index: slotIndex, team });
+        if (data?.id) this.updateCurrentRoomFromJson(data);
+    }
+
+    /// Set (or, with '' clear) an AI slot's personality/difficulty profile
+    /// (PLAN-metalstorm-ai.md §10 task 6).
+    async setAIProfile(slotIndex: number, profile: string): Promise<void> {
+        const data = await this.lobbyPost('/api/rooms/ai/profile', { slot_index: slotIndex, profile });
         if (data?.id) this.updateCurrentRoomFromJson(data);
     }
 
@@ -1253,14 +1635,24 @@ export class LobbyUI {
                 displayName: s.displayName() ?? '',
                 team: s.team(),
                 startPos: s.startPos(),
+                profile: s.profile() ?? '',
             });
         }
         const newGameId = u.gameId() ?? '';
+        // RoomStateUpdate carries no modoptions, so carry the ones we already
+        // have for this room forward rather than blanking the room screen's
+        // "War:" label every time a player readies up. A different room id
+        // means different modoptions, so those start empty until the JSON
+        // path (updateCurrentRoomFromJson) fills them in.
+        const carriedModOptions =
+            this.currentRoom && this.currentRoom.id === u.roomId()
+                ? this.currentRoom.modOptions : {};
         this.currentRoom = {
             id: u.roomId(), name: u.name() ?? '', mapId: u.mapId() ?? '',
             gameId: newGameId,
             state: u.state(), players, aiSlots,
             gameServerPort: u.gameServerPort(),
+            modOptions: carriedModOptions,
         };
 
         // The AI list is per-game (each game has its own ai/ folder
@@ -1269,6 +1661,9 @@ export class LobbyUI {
         // list, or when we don't have a cached list at all.
         if (this.availableAIsForGame !== newGameId) {
             this.refreshAIList();
+        }
+        if (newGameId && this.availableScenariosForGame !== newGameId) {
+            this.refreshScenarioList(newGameId);
         }
 
         // Loading (3) or Active (4) → game is running, jump to the

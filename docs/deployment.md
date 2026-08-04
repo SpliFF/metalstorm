@@ -54,6 +54,39 @@ own TLS inside `spring-server` — a reverse proxy sitting in front of the
 lobby's TCP port cannot intercept or offload TLS for it. §4 is the part that
 actually secures that endpoint.
 
+**⚠ Loopback-trust warning — `LocalhostOrAdmin` routes behind a proxy.**
+Some routes are registered with `RouteAuth::LocalhostOrAdmin` (today:
+`POST /api/rooms/direct` on the lobby; `POST /api/exec` on dev-build game
+servers — the latter is compiled out under `SPRING_PROD`). This gate trusts
+the **`accept()`'d TCP peer address**: a connection from 127.0.0.1/::1 is
+treated as an authenticated admin, no token required. A reverse proxy on the
+same host connects to the backend **over loopback**, so blanket-proxying the
+whole port makes every `LocalhostOrAdmin` route effectively **public and
+unauthenticated** — the gate cannot tell the proxy apart from a local admin,
+and it does not (and must not) trust `X-Forwarded-For`-style headers, which
+any client can forge. The rule: **no `LocalhostOrAdmin` route may ever be
+reachable through the reverse proxy.** Safe patterns:
+
+- **Proxy an explicit allowlist of public routes only** (path-prefix
+  forwarding for the UI, static assets, and the public `/api/*` set), rather
+  than forwarding the entire backend port; or
+- **Split the surfaces**: keep the proxied backend port free of any
+  `LocalhostOrAdmin` route and bind localhost-trusting admin routes on a
+  separate port/UNIX socket that the proxy never forwards to (reach it via
+  SSH port-forward when needed).
+
+Re-audit this whenever a new route is added with `LocalhostOrAdmin` — the
+route-table snapshot (`NetworkServer::GetRegisteredRoutes()`, exercised by
+`tests/test_route_auth.cpp`) lists every route's classification.
+
+**`/api/metrics` is public by design** (unauthenticated `GET`, present in
+prod builds): it exposes sim tick timings, entity/client counts, and — once
+an admin enables the SimFrame profiler — per-phase sim cost breakdowns.
+Nothing in it is secret-bearing, but it is operational intelligence (server
+load, game size, player counts). Decide explicitly whether to expose it;
+blocking or auth-gating it at the reverse proxy is the supported way to
+restrict it.
+
 ## 4. WebTransport (QUIC) cert provisioning
 
 PLAN-security-hardening.md task 5 / gap G3. `WebTransportServer` (`rts/Server/
@@ -192,6 +225,13 @@ touch the content-loading paths an operator's deployment exposes:
 - [ ] Every process launched with `--i-understand-this-is-a-dev-build` or a
       `SPRING_PROD` build (no accidental dev-build public exposure)
 - [ ] Reverse proxy terminates TLS for the HTTP/lobby plane (PLAN-static-serving.md)
+- [ ] No `LocalhostOrAdmin` route reachable through the reverse proxy — the
+      proxy connects over loopback and would make the gate public (§3);
+      proxy only the public route set, or split admin routes onto a
+      non-proxied port/socket
+- [ ] Decided whether `/api/metrics` (public, unauthenticated — tick times,
+      entity/client counts) stays exposed, and blocked it at the proxy if not
+      (§3)
 - [ ] `--wt-cert`/`--wt-key` configured on the lobby (webpki mode) for any
       deployment with a real domain; no deploy-hook needed — the hourly
       auto-reload picks up a renewed cert on its own (§4)

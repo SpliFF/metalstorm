@@ -27,7 +27,7 @@ local CMD_RECLAIM   = CMD.RECLAIM
 local CMD_RESURRECT = CMD.RESURRECT
 local CMD_CAPTURE   = CMD.CAPTURE
 
--- DIVERGENCE FROM STANDARD SPRING (called out per CLAUDE.md): Metalstorm has
+-- DIVERGENCE FROM STANDARD SPRING (called out per AGENTS.md): Metalstorm has
 -- NO healing, reclaim, resurrect, or reinforcement-into-an-existing-squad.
 -- These would raise squad strength, which would force the client to re-add a
 -- dead member — and to do that faithfully the sim would have to track
@@ -41,25 +41,25 @@ local CMD_CAPTURE   = CMD.CAPTURE
 -- is REQUIRED (engineers exist for the hour-scale builds, metalstorm §8).
 -- REPAIR on a COMPLETE unit (buildProgress == 1) is healing → forbidden.
 -- So REPAIR is gated by build progress, not blanket-vetoed.
-local FORBIDDEN = {
+local FORBIDDEN     = {
     [CMD_RECLAIM]   = true,
     [CMD_RESURRECT] = true,
-    [CMD_CAPTURE]   = true,   -- capture would transfer strength into a squad too
+    [CMD_CAPTURE]   = true, -- capture would transfer strength into a squad too
 }
 
 function gadget:AllowCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOptions)
     if FORBIDDEN[cmdID] then
-        return false          -- silently refuse; UI should not offer these
+        return false -- silently refuse; UI should not offer these
     end
     if cmdID == CMD_REPAIR then
         -- Allow build-assist (target still under construction); veto healing.
         local targetID = cmdParams and cmdParams[1]
         if targetID then
-            local bp = select(5, Spring.GetUnitHealth(targetID))  -- buildProgress
+            local bp = select(5, Spring.GetUnitHealth(targetID)) -- buildProgress
             if bp and bp < 1.0 then
-                return true   -- build-assist on an incomplete unit — allowed
+                return true                                      -- build-assist on an incomplete unit — allowed
             end
-            return false      -- repair of a complete unit — healing, forbidden
+            return false                                         -- repair of a complete unit — healing, forbidden
         end
         -- Area-repair / no explicit target: default to veto (no healing).
         return false

@@ -3,6 +3,7 @@
 
 #include "Simulation.h"
 #include "Protocol.h"
+#include "PlayerRosterBroadcast.h"
 #include "WebTransport/WebTransportServer.h"
 #include "Sim/Misc/TeamHandler.h"
 #include "Map/ReadMap.h"
@@ -25,6 +26,34 @@ void GameStartCoordinator::PushStandingOrdersTo(ClientID clientId, int team) {
     }
     auto msg = Protocol::BuildStandingOrderState(
         team, allied, standingOrders.GetAllOrders());
+    ctx.rtcServer.SendReliable(clientId, msg.data(), msg.size());
+}
+
+// Allied-team list for `team` (own team excluded — added by the builders).
+static std::vector<int> AlliedTeamsOf(int team) {
+    std::vector<int> allied;
+    const int activeTeams = teamHandler.ActiveTeams();
+    for (int t = 0; t < activeTeams; ++t) {
+        if (t == team) continue;
+        if (teamHandler.AlliedTeams(team, t)) allied.push_back(t);
+    }
+    return allied;
+}
+
+// Push a current OrgGroupState snapshot to one client (macro-directives §1).
+// Same use as PushStandingOrdersTo — live-change broadcast + auth snapshot.
+void GameStartCoordinator::PushOrgGroupsTo(ClientID clientId, int team) {
+    if (team < 0) return;
+    auto msg = Protocol::BuildOrgGroupState(
+        team, AlliedTeamsOf(team), orgGroups.GetAllGroups());
+    ctx.rtcServer.SendReliable(clientId, msg.data(), msg.size());
+}
+
+// Push a current DirectiveState snapshot (incl. fulfillment %) to one client.
+void GameStartCoordinator::PushDirectivesTo(ClientID clientId, int team) {
+    if (team < 0) return;
+    auto msg = Protocol::BuildDirectiveState(
+        team, AlliedTeamsOf(team), directiveManager.GetAllDirectives());
     ctx.rtcServer.SendReliable(clientId, msg.data(), msg.size());
 }
 
@@ -79,5 +108,10 @@ void GameStartCoordinator::CheckAndFireGameStart() {
     if (ctx.rtcServer.GetClientCount() > 0) {
         auto tsi = BuildTeamStartInfoMsg();
         ctx.rtcServer.BroadcastReliable(tsi.data(), tsi.size());
+        // Same reason, for the roster: a player's ally team is read off
+        // `teamHandler`, which is only fully populated once GameStart has run
+        // its team/leader pass. The rosters sent on auth carry the pre-game
+        // ally teams (often -1), so every client needs the corrected snapshot.
+        Protocol::BroadcastPlayerRoster(ctx);
     }
 }

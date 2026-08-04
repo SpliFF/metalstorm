@@ -24,6 +24,7 @@
 #include "Sim/Misc/CollisionVolume.h"
 #include <vector>
 #include <string>
+#include <cctype>
 
 /* Minimal S3DModelPiece stub — only fields the server sim references. */
 struct S3DModelPiece {
@@ -238,6 +239,27 @@ struct LocalModel {
 
 	const LocalModelPiece* GetPiece(int n) const { return HasPiece(n) ? &pieces[n] : nullptr; }
 	      LocalModelPiece* GetPiece(int n)       { return HasPiece(n) ? &pieces[n] : nullptr; }
+
+	/// Resolve a piece by its source-model name, case-insensitive. Used by
+	/// the scriptless weapon-piece fallback (CWeapon::UpdateWeaponPieces) to
+	/// bind muzzle/aim origins by the model's authoring name convention when
+	/// a unit runs the null script (no COB/LUS). Returns nullptr if no piece
+	/// carries the name. Linear scan — piece counts are small and this runs
+	/// only at weapon (re)bind time, not per frame.
+	const LocalModelPiece* GetPieceByName(const std::string& pieceName) const {
+		for (const LocalModelPiece& p : pieces) {
+			if (p.original == nullptr) continue;
+			const std::string& n = p.original->name;
+			if (n.size() != pieceName.size()) continue;
+			bool eq = true;
+			for (size_t i = 0; i < n.size(); ++i) {
+				if (std::tolower(static_cast<unsigned char>(n[i])) !=
+				    std::tolower(static_cast<unsigned char>(pieceName[i]))) { eq = false; break; }
+			}
+			if (eq) return &p;
+		}
+		return nullptr;
+	}
 
 	const CollisionVolume* GetBoundingVolume() const { return &boundingVolume; }
 

@@ -101,6 +101,9 @@ class ModelViewerStage implements StageContext {
     private panel: ModelViewerPanel | null = null;
     private luaDefNames: string[] | null = null;
     private capturePreset: CapturePreset | null;
+    /** Current staged def's model URL (from the streamed def wire), used to
+     *  launch the standalone Babylon inspectors. Null = no model / fallback. */
+    private currentModelUrl: string | null = null;
 
     constructor(h: TestHarness, capturePreset: CapturePreset | null) {
         this.h = h;
@@ -158,6 +161,7 @@ class ModelViewerStage implements StageContext {
                     const id = this.state.stageUnitId;
                     if (id) await this.h.orbit(id, { follow: true });
                 },
+                inspectModel: (mode) => this.openInspector(mode),
             });
         }
         this.state.phase = 'ready';
@@ -190,6 +194,7 @@ class ModelViewerStage implements StageContext {
 
         const wire = await this.pollDefWire(name, 10000);
         this.probe = wire ? probeFromDef(wire) : null;
+        this.currentModelUrl = (wire as unknown as { modelUrl?: string } | null)?.modelUrl || null;
         this.state.showcases = this.probe ? deriveShowcases(this.probe) : [];
         if (!this.probe) this.state.badge = 'def not streamed — probe unavailable';
         await this.probeTransportee(name);
@@ -234,6 +239,22 @@ class ModelViewerStage implements StageContext {
         if (this.capturePreset) await badgePoll;
         this.notify();
         return id;
+    }
+
+    /**
+     * Open a standalone Babylon model inspector on the staged def's model in
+     * a popup — the DOM Inspector the game's worker/OffscreenCanvas scene
+     * can't host. `cdn` = unpkg UMD 9.1.0 (isolated); `bundled` = the app's
+     * own Vite route (same module graph as the game). The window is opened
+     * synchronously from the click so popup blockers allow it.
+     */
+    openInspector(mode: 'cdn' | 'bundled'): void {
+        const page = mode === 'cdn' ? '/model-inspector.html' : '/babylon-inspector.html';
+        const url = this.currentModelUrl
+            ? `${page}?model=${encodeURIComponent(this.currentModelUrl)}`
+            : page;
+        window.open(url, `model-inspector-${mode}`,
+            'width=1400,height=1000,noopener,noreferrer');
     }
 
     /** Streamed defs + sim-side UnitDefs name dump, merged for the picker

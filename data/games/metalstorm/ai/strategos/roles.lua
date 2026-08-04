@@ -13,13 +13,19 @@
 --   idleOnly        bool                     — only assign idle/unassigned force (§5.1)
 --   teamAuthorityFallback bool               — may drain the team pool? (co-cmdr: NO)
 --   readsGuidance   bool                     — obey the guidance store (interaction §6)
---   tickFrames      int                      — strategic cadence (LOD-scaled)
+--   lodFloor/lodCeil int                     — the LOD band this role may range over (§5)
+--   tickFramesBase  int                      — LOD-0 strategic cadence (Lod.periodFor scales it)
+--   tickFrames      int                      — cadence at the role's LOD floor (its alert rate)
 --   caretakerUpgrade bool                    — silently become full-side when humans leave (§5.1)
---   scriptedSlate   fn(picture, out) | nil   — NPC fixed slate (raid/defend/toll)
+--   scriptedSlate   fn(picture, out, role, profile) -> bool | nil
+--                                            — NPC fixed slate (raid/defend/toll); returns
+--                                              true when it actually drove the slate
+
+local Scripted = require('scripted')
 
 local Roles = {}
 
--- Static policy per role. tickFrames is filled in by resolve() from config.
+-- Static policy per role. tickFramesBase/tickFrames are filled in by resolve().
 local DEFS = {
     full_side = {
         id = 'full_side',
@@ -55,7 +61,12 @@ local DEFS = {
         readsGuidance = false,
         lodFloor = 0, lodCeil = 3,        -- LOD by player proximity; dormant when far
         caretakerUpgrade = false,
-        scriptedSlate = nil,              -- a scenario may inject one (raid/toll a route)
+        -- The scripted slate BEHAVIOUR ships with the plugin; a scenario
+        -- supplies its parameters (home/targets/route) through team rulesParams
+        -- → picture.script → scripted.lua's builders. With no scenario behind
+        -- it, Scripted.build returns false and the role falls back to its
+        -- implicitKinds slate above — a plain defensive minor faction.
+        scriptedSlate = Scripted.build,
     },
 }
 
@@ -67,13 +78,14 @@ function Roles.resolve(roleId, config)
     local role = {}
     for k, v in pairs(def) do role[k] = v end
 
+    -- Cadence is now DYNAMIC (lod.lua): tickFramesBase is the LOD-0 rate and
+    -- main.lua rescales it every tick by the live tier. `tickFrames` stays as
+    -- the role's ALERT rate (its LOD floor) so anything reading it — and the
+    -- very first tick, before a Picture exists to evaluate a tier from — gets
+    -- the fastest cadence the role is allowed, never a dormant one.
     local base = config and config.STRATEGIC_TICK_FRAMES or 150
-    local mult = 1
-    if config and config.LOD_TICK_MULT then
-        -- Static cadence proxy until AI.getLODLevel() lands: NPCs use their LOD
-        -- ceiling multiplier (they're usually far); others use LOD 0/1 (×1).
-        mult = config.LOD_TICK_MULT[def.lodCeil] or 1
-    end
+    local mult = ((config and config.LOD_TICK_MULT) or {})[def.lodFloor] or 1
+    role.tickFramesBase = base
     role.tickFrames = base * mult
     role.teamId = nil            -- injected at boot (needs AI.getTeamId — see main)
     return role

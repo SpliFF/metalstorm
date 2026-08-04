@@ -363,3 +363,204 @@ describe("reproducibility (§10)", function()
         end
     end)
 end)
+
+--=============================================================================
+describe("co-commander etiquette (§5.1/§11)", function()
+    local Actuators = require('actuators')
+
+    it("idle-only filtering: busy packages are untouchable", function()
+        -- Co-commander role with idleOnly=true should only assign idle force.
+        -- Test with ONE package idle and ONE busy, and ONE objective that both
+        -- could contest — the busy one should be excluded and go to RESERVE.
+        local role = coCommanderRole()
+        local p = makePicture({
+            _role = role,
+            regions = {
+                home   = { owner = 0, value = 1.0, neighbors = { 'front' } },
+                front  = { owner = 1, value = 2.0, neighbors = { 'home' } },  -- enemy region
+            },
+            board   = {
+                -- One objective: assault the front. Both packages could do it, but
+                -- only the idle one should be assigned. Note: board is a MAP not array!
+                assault_front = {
+                    type = 'kill', scope = 'platoon',
+                    state = 'active', reward = 500, team = nil, progress = 0,
+                    region = 'front', pos = {x = 1000, z = 1000},
+                },
+            },
+            ledger  = {
+                home   = { strength = 500, idle = true, groups = {} },   -- idle package
+                front  = { strength = 600, idle = false, groups = {} },  -- busy package at the front
+            },
+            economy = { ownPool = 10000, teamPool = 0, costScale = 1.0 },
+        })
+
+        local out = plan(p)
+        -- Assert: the objective should be assigned to the idle package ONLY.
+        -- The busy package should be filtered out during scoring (touchable=false).
+        local assigned = {}
+        for _, d in ipairs(out.directives) do
+            if d.goalId == 'obj:assault_front' then
+                assigned[#assigned + 1] = d.groupId
+            end
+        end
+        assert.are.equal(1, #assigned, "objective should be assigned to exactly one package")
+        assert.are.equal('pkg:home', assigned[1], "idle package should win the objective")
+
+        -- Verify the busy package did NOT get the objective (core etiquette test).
+        for _, d in ipairs(out.directives) do
+            if d.goalId == 'obj:assault_front' then
+                assert.are_not.equal('pkg:front', d.groupId, "busy package must not be assigned")
+            end
+        end
+    end)
+
+    it("suggest-only mode (mentor profile): no real commands issued", function()
+        -- Mentor profile has suggest_only=true; actuator should route to
+        -- suggestions rather than issuing real directives.
+        local mentorProfile = require('profiles.mentor')
+        local role = coCommanderRole()
+        local chatLog = {}  -- mock chat sink
+
+        local actuators = Actuators.new({ role = role, profile = mentorProfile })
+        -- Override chat to capture output.
+        function actuators:chat(msg) table.insert(chatLog, msg) end
+
+        local testPlan = {
+            directives = {
+                { type = 'directive', directive = 'TAKE_AND_HOLD', groupId = 'pkg:home',
+                  region = 'plains', goalId = 'exp:plains', predictedCost = 50 },
+            },
+            intent = {},
+        }
+        local picture = { frame = 1000 }
+        actuators:apply(testPlan, picture)
+
+        -- Assert: no real directive was issued (issueDirective was NOT called),
+        -- but a suggestion was emitted via chat.
+        assert.are.equal(1, #chatLog)
+        assert.is_truthy(chatLog[1]:match('%[mentor%]'))
+        assert.is_truthy(chatLog[1]:match('Suggest'))
+    end)
+
+    it("suggest-only rate limiting: respects suggest_period_sec", function()
+        local mentorProfile = require('profiles.mentor')
+        local role = coCommanderRole()
+        local chatLog = {}
+        local actuators = Actuators.new({ role = role, profile = mentorProfile })
+        function actuators:chat(msg) table.insert(chatLog, msg) end
+
+        local testPlan = {
+            directives = {
+                { type = 'directive', directive = 'DEFEND', groupId = 'pkg:home',
+                  region = 'home', goalId = 'def:home', predictedCost = 10 },
+            },
+            intent = {},
+        }
+
+        -- First tick: suggestion emitted.
+        actuators:apply(testPlan, { frame = 1000 })
+        assert.are.equal(1, #chatLog)
+
+        -- Second tick 10 seconds later (300 frames): should be rate-limited.
+        -- mentor.lua has suggest_period_sec=45, so 45*30=1350 frames.
+        actuators:apply(testPlan, { frame = 1300 })
+        assert.are.equal(1, #chatLog)  -- still just one (rate-limited)
+
+        -- Third tick 46 seconds later: now allowed.
+        actuators:apply(testPlan, { frame = 2400 })
+        assert.are.equal(2, #chatLog)  -- second suggestion emitted
+    end)
+end)
+
+--=============================================================================
+describe("guidance stance re-weights the slate (binding, §6.2)", function()
+    -- One package, a threatened home (DEFEND) and open ground next door
+    -- (EXPAND). The stance a human sets decides which the package takes:
+    -- defensive holds home, aggressive pushes into the open ground.
+    local function stanceFixture(stance)
+        local role = fullSideRole()
+        return makePicture({
+            _role = role,
+            regions = {
+                home   = { owner = 0, value = 1.0, neighbors = { 'front', 'plains' } },
+                front  = { owner = 1, value = 1.0, neighbors = { 'home' } },
+                plains = { owner = nil, value = 1.0, neighbors = { 'home' } },
+            },
+            intel   = { front = { strength = 8, confidence = 1.0, lastSeenFrame = 1000 } },
+            -- Small package so directive/posture COST asymmetry doesn't swamp
+            -- the stance signal — this test isolates the stance value multiplier.
+            ledger  = { home = { strength = 10 } },
+            economy = { ownPool = 100000, teamPool = 0, costScale = 1.0 },
+            guidance = { stance = stance, regionPaint = {}, assetLocks = {},
+                         delegated = {}, veto = {} },
+        })
+    end
+
+    local function outcome(out)
+        local defend, expand = false, false
+        for _, d in ipairs(out.directives) do
+            if d.goalId == 'def:home' then defend = true end
+            if d.goalId == 'exp:plains' then expand = true end
+        end
+        return defend, expand
+    end
+
+    it("defensive stance holds home instead of expanding", function()
+        local defend, expand = outcome(plan(stanceFixture('defensive')))
+        assert.is_true(defend)
+        assert.is_false(expand)
+    end)
+
+    it("aggressive stance pushes into the open ground instead of holding", function()
+        local defend, expand = outcome(plan(stanceFixture('aggressive')))
+        assert.is_true(expand)
+        assert.is_false(defend)
+    end)
+end)
+
+--=============================================================================
+describe("suggested_for ×2 weighting (co-commander soft tasking, §5.1)", function()
+    -- Same shape as the bounty ×3 test, but the tasking is the softer
+    -- `suggested` hint published on the board (picture threads it onto
+    -- meta.suggested). A full-side AI ignores it; a co-commander's ×2 pulls it.
+    local function fixture(role)
+        return makePicture({
+            _role = role,
+            regions = {
+                home   = { owner = 0, value = 1.0, neighbors = { 'plains' } },
+                plains = { owner = nil, value = 1.5, neighbors = { 'home' } },
+            },
+            board = {
+                -- reward 200 < EXPAND raw value (1.5 × 200 = 300) < 2 × 200:
+                -- full-side takes the ground, the ×2 suggested flips it.
+                ['1'] = { type = 'control', scope = 'strategic', state = 'active',
+                          team = -1, region = 'target', reward = 200, suggested = 1 },
+            },
+            ledger  = { home = { strength = 1000 } },
+            economy = { ownPool = 100000, teamPool = 0, costScale = 1.0 },
+        })
+    end
+
+    local function winners(out)
+        local expandWon, objWon = false, false
+        for _, d in ipairs(out.directives) do
+            if d.goalId == 'exp:plains' then expandWon = true end
+            if d.goalId == 'obj:1' then objWon = true end
+        end
+        return expandWon, objWon
+    end
+
+    it("a full-side AI takes the open ground over the suggested objective", function()
+        local expandWon, objWon = winners(plan(fixture(fullSideRole())))
+        assert.is_true(expandWon)
+        assert.is_false(objWon)
+    end)
+
+    it("a co-commander's ×2 suggested weighting flips it to the objective", function()
+        local expandWon, objWon =
+            winners(plan(fixture(coCommanderRole()), nil, caretakerProfile))
+        assert.is_true(objWon)
+        assert.is_false(expandWon)
+    end)
+end)

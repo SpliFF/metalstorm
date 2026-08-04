@@ -406,6 +406,345 @@
       ]
     },
 
+
+    "death_infantry": {
+      "usage": "death",
+      "_doc": "Squad member killed — sober: dust flick + brief sparks, no fireball. soldiers/engineers/civilians.",
+      "emitters": [
+        { "shader": "particle", "count": 3, "sprite": "dust", "orient": "billboard",
+          "life": [0.4, 0.8], "size": [4, 12], "speed": [8, 20], "spread": "hemisphere",
+          "gravity": 4, "colorStart": [0.5, 0.44, 0.36, 0.55], "colorEnd": [0.35, 0.3, 0.26, 0] },
+        { "shader": "particle", "count": 3, "sprite": "spark", "orient": "stretch",
+          "life": [0.1, 0.25], "size": [1.4, 0.3], "stretch": 3, "speed": [30, 70],
+          "spread": "hemisphere", "gravity": 24, "colorStart": [5, 3, 1, 1],
+          "colorEnd": [1.5, 0.4, 0.1, 0] }
+      ]
+    },
+
+    "death_vehicle_s1": {
+      "usage": "death",
+      "_doc": "Light vehicle death — small brew-up. Scale-1 vehicles, civilian trucks.",
+      "emitters": [
+        { "shader": "particle", "count": 4, "sprite": "fireball", "orient": "billboard",
+          "life": [0.2, 0.45], "size": [10, 28], "speed": [8, 30], "spread": "hemisphere",
+          "gravity": -2, "colorStart": [4.5, 2.4, 0.7, 1], "colorEnd": [1.2, 0.4, 0.1, 0] },
+        { "shader": "particle", "count": 10, "sprite": "spark", "orient": "stretch",
+          "life": [0.15, 0.4], "size": [2, 0.4], "stretch": 3.5, "speed": [40, 110],
+          "spread": "hemisphere", "gravity": 22, "colorStart": [6, 3.4, 1.1, 1],
+          "colorEnd": [2, 0.6, 0.1, 0] },
+        { "shader": "particle", "count": 4, "sprite": "smoke", "orient": "billboard",
+          "life": [0.8, 1.6], "size": [12, 36], "speed": [8, 20], "spread": "cone:30",
+          "gravity": -5, "colorStart": [0.25, 0.22, 0.2, 0.7], "colorEnd": [0.12, 0.11, 0.1, 0] },
+        { "shader": "particle", "count": 1, "sprite": "scorch", "orient": "ground", "life": [4, 4],
+          "size": [30, 36], "speed": 0, "gravity": 0, "colorStart": [0.1, 0.09, 0.08, 0.7],
+          "colorEnd": [0.1, 0.09, 0.08, 0] }
+      ]
+    },
+
+    "death_vehicle_s2": {
+      "usage": "death",
+      "_doc": "MBT brew-up — fireball, vertical ammo cook-off jet, smoke column. Line tanks / mechs / artillery.",
+      "emitters": [
+        { "shader": "particle", "count": 7, "sprite": "fireball", "orient": "billboard",
+          "life": [0.25, 0.55], "size": [16, 46], "speed": [12, 44], "spread": "hemisphere",
+          "gravity": -2, "colorStart": [4.5, 2.4, 0.7, 1], "colorEnd": [1.2, 0.4, 0.1, 0] },
+        { "shader": "particle", "count": 5, "sprite": "fireball", "orient": "stretch",
+          "life": [0.3, 0.6], "size": [8, 3], "stretch": 4, "speed": [60, 140], "spread": "cone:8",
+          "gravity": 30, "colorStart": [5, 2.8, 0.8, 1], "colorEnd": [1.5, 0.5, 0.1, 0] },
+        { "shader": "particle", "count": 16, "sprite": "spark", "orient": "stretch",
+          "life": [0.2, 0.5], "size": [2.6, 0.4], "stretch": 4, "speed": [50, 160],
+          "spread": "hemisphere", "gravity": 24, "colorStart": [6, 3.4, 1.1, 1],
+          "colorEnd": [2, 0.6, 0.1, 0] },
+        { "shader": "particle", "count": 7, "sprite": "smoke", "orient": "billboard",
+          "life": [1.2, 2.4], "size": [20, 60], "speed": [8, 22], "spread": "cone:26",
+          "gravity": -6, "colorStart": [0.22, 0.2, 0.18, 0.75], "colorEnd": [0.11, 0.1, 0.09, 0] },
+        { "shader": "shockwave", "maxRadius": 60, "strength": 0.5, "life": 0.4 },
+        { "shader": "particle", "count": 1, "sprite": "scorch", "orient": "ground", "life": [5, 5],
+          "size": [50, 60], "speed": 0, "gravity": 0, "colorStart": [0.09, 0.08, 0.07, 0.75],
+          "colorEnd": [0.09, 0.08, 0.07, 0] }
+      ]
+    },
+
+    "death_vehicle_s3": {
+      "usage": "death",
+      "_doc": "Heavy platform death — scaled-up brew-up. Scale-3 armour.",
+      "emitters": [
+        { "shader": "particle", "count": 10, "sprite": "fireball", "orient": "billboard",
+          "life": [0.3, 0.7], "size": [24, 70], "speed": [16, 56], "spread": "hemisphere",
+          "gravity": -2, "colorStart": [4.5, 2.4, 0.7, 1], "colorEnd": [1.2, 0.4, 0.1, 0] },
+        { "shader": "particle", "count": 8, "sprite": "fireball", "orient": "stretch",
+          "life": [0.35, 0.7], "size": [10, 4], "stretch": 4.5, "speed": [80, 180],
+          "spread": "cone:10", "gravity": 34, "colorStart": [5, 2.8, 0.8, 1],
+          "colorEnd": [1.5, 0.5, 0.1, 0] },
+        { "shader": "particle", "count": 26, "sprite": "spark", "orient": "stretch",
+          "life": [0.25, 0.6], "size": [3, 0.5], "stretch": 4.5, "speed": [70, 220],
+          "spread": "hemisphere", "gravity": 26, "colorStart": [6, 3.4, 1.1, 1],
+          "colorEnd": [2, 0.6, 0.1, 0] },
+        { "shader": "particle", "count": 10, "sprite": "smoke", "orient": "billboard",
+          "life": [1.6, 3], "size": [30, 90], "speed": [10, 26], "spread": "cone:28",
+          "gravity": -7, "colorStart": [0.2, 0.18, 0.16, 0.8], "colorEnd": [0.1, 0.09, 0.08, 0] },
+        { "shader": "shockwave", "maxRadius": 100, "strength": 0.7, "life": 0.5 },
+        { "shader": "particle", "count": 1, "sprite": "scorch", "orient": "ground", "life": [6, 6],
+          "size": [80, 95], "speed": 0, "gravity": 0, "colorStart": [0.08, 0.07, 0.06, 0.8],
+          "colorEnd": [0.08, 0.07, 0.06, 0] }
+      ]
+    },
+
+    "death_dreadnought": {
+      "usage": "death",
+      "_doc": "Scale-4 land dreadnought death — STAGED (delay + posSpread showcase): rippling hull explosions along the chassis, then the magazine finale. The squad-scale4 / flow-plan hero moment.",
+      "emitters": [
+        { "shader": "particle", "count": 8, "sprite": "fireball", "orient": "billboard",
+          "life": [0.25, 0.5], "size": [20, 55], "speed": [10, 40], "spread": "hemisphere",
+          "posSpread": [50, 8, 14], "gravity": -2, "colorStart": [4.5, 2.4, 0.7, 1],
+          "colorEnd": [1.2, 0.4, 0.1, 0] },
+        { "shader": "particle", "count": 20, "sprite": "spark", "orient": "stretch",
+          "life": [0.2, 0.5], "size": [2.6, 0.4], "stretch": 4, "speed": [60, 180],
+          "spread": "hemisphere", "posSpread": 30, "gravity": 24, "colorStart": [6, 3.4, 1.1, 1],
+          "colorEnd": [2, 0.6, 0.1, 0] },
+        { "shader": "particle", "count": 6, "sprite": "smoke", "orient": "billboard",
+          "life": [1.2, 2.4], "size": [26, 70], "speed": [8, 22], "spread": "hemisphere",
+          "posSpread": [50, 8, 14], "gravity": -6, "colorStart": [0.22, 0.2, 0.18, 0.75],
+          "colorEnd": [0.11, 0.1, 0.09, 0] },
+        { "shader": "particle", "count": 8, "sprite": "fireball", "orient": "billboard",
+          "delay": 0.35, "life": [0.25, 0.55], "size": [24, 62], "speed": [12, 44],
+          "spread": "hemisphere", "posSpread": [50, 10, 14], "gravity": -2,
+          "colorStart": [4.5, 2.4, 0.7, 1], "colorEnd": [1.2, 0.4, 0.1, 0] },
+        { "shader": "particle", "count": 2, "sprite": "flash", "orient": "billboard",
+          "delay": 0.35, "life": [0.1, 0.16], "size": [26, 46], "speed": 0, "posSpread": 40,
+          "gravity": 0, "colorStart": [5, 4.2, 2.6, 1], "colorEnd": [1.5, 1.2, 0.7, 0] },
+        { "shader": "particle", "count": 20, "sprite": "spark", "orient": "stretch", "delay": 0.35,
+          "life": [0.2, 0.55], "size": [3, 0.5], "stretch": 4.5, "speed": [80, 240],
+          "spread": "hemisphere", "posSpread": 30, "gravity": 26, "colorStart": [6, 3.4, 1.1, 1],
+          "colorEnd": [2, 0.6, 0.1, 0] },
+        { "shader": "particle", "count": 22, "sprite": "fireball", "orient": "billboard",
+          "delay": 0.8, "life": [0.4, 1], "size": [50, 170], "speed": [24, 100],
+          "spread": "hemisphere", "posSpread": 25, "gravity": -1, "colorStart": [4.5, 2.3, 0.7, 1],
+          "colorEnd": [1.2, 0.4, 0.1, 0] },
+        { "shader": "particle", "count": 50, "sprite": "spark", "orient": "stretch", "delay": 0.8,
+          "life": [0.3, 0.85], "size": [3.8, 0.6], "stretch": 5, "speed": [100, 360],
+          "spread": "hemisphere", "gravity": 28, "colorStart": [6, 3.4, 1.1, 1],
+          "colorEnd": [2, 0.6, 0.1, 0] },
+        { "shader": "particle", "count": 24, "sprite": "smoke", "orient": "billboard",
+          "delay": 0.8, "life": [2.5, 5], "size": [70, 220], "speed": [14, 40],
+          "spread": "hemisphere", "gravity": -8, "colorStart": [0.2, 0.18, 0.16, 0.85],
+          "colorEnd": [0.09, 0.08, 0.07, 0] },
+        { "shader": "particle", "count": 16, "sprite": "dust", "orient": "billboard", "delay": 0.8,
+          "life": [1.2, 2.4], "size": [40, 130], "speed": [36, 90], "spread": "disc",
+          "gravity": 11, "colorStart": [0.5, 0.42, 0.32, 0.8], "colorEnd": [0.35, 0.3, 0.24, 0] },
+        { "shader": "shockwave", "delay": 0.8, "maxRadius": 300, "strength": 1.3, "life": 0.9 },
+        { "shader": "particle", "count": 1, "sprite": "scorch", "orient": "ground", "delay": 0.8,
+          "life": [10, 10], "size": [240, 280], "speed": 0, "gravity": 0,
+          "colorStart": [0.07, 0.06, 0.05, 0.85], "colorEnd": [0.07, 0.06, 0.05, 0] }
+      ]
+    },
+
+    "death_aircraft": {
+      "usage": "death",
+      "_doc": "Mid-air kill — fireball + burning debris streaks falling under gravity, no scorch (fx-viewer: raise the height slider). Fighters / bombers.",
+      "emitters": [
+        { "shader": "particle", "count": 6, "sprite": "fireball", "orient": "billboard",
+          "life": [0.2, 0.5], "size": [14, 40], "speed": [12, 44], "spread": "sphere",
+          "gravity": 0, "colorStart": [4.5, 2.4, 0.7, 1], "colorEnd": [1.2, 0.4, 0.1, 0] },
+        { "shader": "particle", "count": 8, "sprite": "fireball", "orient": "stretch",
+          "life": [1, 1.8], "size": [5, 2], "stretch": 4, "speed": [40, 90], "spread": "sphere",
+          "gravity": 90, "colorStart": [4.5, 2.4, 0.7, 1], "colorEnd": [1.2, 0.4, 0.1, 0] },
+        { "shader": "particle", "count": 12, "sprite": "spark", "orient": "stretch",
+          "life": [0.3, 0.8], "size": [2.4, 0.4], "stretch": 4, "speed": [60, 160],
+          "spread": "sphere", "gravity": 60, "colorStart": [6, 3.4, 1.1, 1],
+          "colorEnd": [2, 0.6, 0.1, 0] },
+        { "shader": "particle", "count": 5, "sprite": "smoke", "orient": "billboard",
+          "life": [1, 2], "size": [16, 50], "speed": [6, 18], "spread": "sphere", "gravity": -3,
+          "colorStart": [0.2, 0.18, 0.16, 0.75], "colorEnd": [0.1, 0.09, 0.08, 0] }
+      ]
+    },
+
+    "death_ship": {
+      "usage": "death",
+      "_doc": "Surface-ship death — fireball, water-spray column, spreading foam ring, heavy smoke.",
+      "emitters": [
+        { "shader": "particle", "count": 8, "sprite": "fireball", "orient": "billboard",
+          "life": [0.3, 0.6], "size": [20, 60], "speed": [12, 44], "spread": "hemisphere",
+          "gravity": -2, "colorStart": [4.5, 2.4, 0.7, 1], "colorEnd": [1.2, 0.4, 0.1, 0] },
+        { "shader": "particle", "count": 10, "sprite": "foam", "orient": "stretch",
+          "life": [0.6, 1.3], "size": [9, 3], "stretch": 5, "speed": [50, 110],
+          "spread": "cone:12", "gravity": 30, "colorStart": [0.85, 0.92, 1, 0.9],
+          "colorEnd": [0.6, 0.7, 0.85, 0] },
+        { "shader": "particle", "count": 14, "sprite": "foam", "orient": "billboard",
+          "life": [0.7, 1.4], "size": [12, 40], "speed": [30, 60], "spread": "disc", "gravity": 4,
+          "colorStart": [0.75, 0.85, 0.98, 0.8], "colorEnd": [0.5, 0.6, 0.75, 0] },
+        { "shader": "particle", "count": 8, "sprite": "smoke", "orient": "billboard",
+          "life": [1.5, 3], "size": [26, 80], "speed": [8, 22], "spread": "cone:30", "gravity": -6,
+          "colorStart": [0.2, 0.18, 0.16, 0.8], "colorEnd": [0.1, 0.09, 0.08, 0] },
+        { "shader": "shockwave", "maxRadius": 90, "strength": 0.6, "life": 0.5 }
+      ]
+    },
+
+    "death_sub": {
+      "usage": "death",
+      "_doc": "Submarine death — implosion bubble cloud + rising bubble column; no fire underwater.",
+      "emitters": [
+        { "shader": "particle", "count": 18, "sprite": "foam", "orient": "billboard",
+          "life": [0.6, 1.4], "size": [10, 34], "speed": [8, 26], "spread": "sphere",
+          "gravity": -8, "colorStart": [0.6, 0.75, 0.95, 0.8], "colorEnd": [0.4, 0.55, 0.75, 0] },
+        { "shader": "particle", "count": 8, "sprite": "foam", "orient": "stretch",
+          "life": [0.8, 1.6], "size": [6, 2], "stretch": 5, "speed": [30, 70], "spread": "cone:10",
+          "gravity": -30, "colorStart": [0.75, 0.85, 1, 0.85], "colorEnd": [0.5, 0.65, 0.85, 0] },
+        { "shader": "shockwave", "maxRadius": 60, "strength": 0.5, "life": 0.5 }
+      ]
+    },
+
+    "death_building": {
+      "usage": "death",
+      "_doc": "Structure collapse — dust columns across the footprint (posSpread), fire pockets, debris; reads as fall-down, not blow-up. All buildings / static defenses / radar.",
+      "emitters": [
+        { "shader": "particle", "count": 20, "sprite": "dust", "orient": "billboard",
+          "life": [1.2, 2.6], "size": [24, 70], "speed": [10, 30], "spread": "hemisphere",
+          "posSpread": [40, 6, 40], "gravity": 6, "colorStart": [0.5, 0.44, 0.36, 0.8],
+          "colorEnd": [0.35, 0.3, 0.26, 0] },
+        { "shader": "particle", "count": 5, "sprite": "fireball", "orient": "billboard",
+          "life": [0.25, 0.55], "size": [12, 30], "speed": [8, 26], "spread": "hemisphere",
+          "posSpread": 30, "gravity": -2, "colorStart": [4.5, 2.4, 0.7, 1],
+          "colorEnd": [1.2, 0.4, 0.1, 0] },
+        { "shader": "particle", "count": 16, "sprite": "spark", "orient": "stretch",
+          "life": [0.3, 0.7], "size": [2.6, 0.4], "stretch": 4, "speed": [40, 120],
+          "spread": "hemisphere", "posSpread": 30, "gravity": 40, "colorStart": [5, 3, 1, 1],
+          "colorEnd": [1.5, 0.4, 0.1, 0] },
+        { "shader": "particle", "count": 14, "sprite": "dust", "orient": "billboard",
+          "life": [0.8, 1.6], "size": [20, 64], "speed": [30, 70], "spread": "disc", "gravity": 9,
+          "colorStart": [0.5, 0.42, 0.32, 0.75], "colorEnd": [0.35, 0.3, 0.24, 0] },
+        { "shader": "shockwave", "maxRadius": 80, "strength": 0.6, "life": 0.6 },
+        { "shader": "particle", "count": 1, "sprite": "scorch", "orient": "ground", "life": [8, 8],
+          "size": [130, 150], "speed": 0, "gravity": 0, "colorStart": [0.08, 0.07, 0.06, 0.8],
+          "colorEnd": [0.08, 0.07, 0.06, 0] }
+      ]
+    },
+
+    "smoke_damage_light": {
+      "usage": "attached",
+      "_doc": "Grey damage smoke (health<0.5 binding). Retrigger-friendly one-shot.",
+      "emitters": [
+        { "shader": "particle", "count": 2, "sprite": "smoke", "orient": "billboard",
+          "life": [0.8, 1.4], "size": [6, 18], "speed": [6, 14], "spread": "cone:25",
+          "gravity": -6, "colorStart": [0.4, 0.38, 0.36, 0.5], "colorEnd": [0.2, 0.19, 0.18, 0] }
+      ]
+    },
+
+    "smoke_damage_heavy": {
+      "usage": "attached",
+      "_doc": "Black smoke + embers (health<0.25 binding).",
+      "emitters": [
+        { "shader": "particle", "count": 3, "sprite": "smoke", "orient": "billboard",
+          "life": [1, 1.8], "size": [8, 26], "speed": [8, 18], "spread": "cone:22", "gravity": -7,
+          "colorStart": [0.12, 0.11, 0.1, 0.7], "colorEnd": [0.06, 0.055, 0.05, 0] },
+        { "shader": "particle", "count": 2, "sprite": "spark", "orient": "stretch",
+          "life": [0.2, 0.5], "size": [1.4, 0.3], "stretch": 3, "speed": [15, 40],
+          "spread": "cone:30", "gravity": 10, "colorStart": [4, 1.8, 0.4, 1],
+          "colorEnd": [1.2, 0.3, 0.05, 0] }
+      ]
+    },
+
+    "fire_burning": {
+      "usage": "attached",
+      "_doc": "Open flame licks + smoke — burning wrecks / critical damage. Retrigger at ~4 Hz for a continuous fire.",
+      "emitters": [
+        { "shader": "particle", "count": 3, "sprite": "fireball", "orient": "stretch",
+          "life": [0.25, 0.5], "size": [6, 14], "stretch": 2, "speed": [15, 35],
+          "spread": "cone:15", "gravity": -4, "colorStart": [4.5, 2.2, 0.5, 0.9],
+          "colorEnd": [1.5, 0.5, 0.1, 0] },
+        { "shader": "particle", "count": 1, "sprite": "smoke", "orient": "billboard",
+          "life": [0.8, 1.4], "size": [8, 20], "speed": [8, 16], "spread": "cone:18",
+          "gravity": -6, "colorStart": [0.15, 0.14, 0.13, 0.6], "colorEnd": [0.08, 0.07, 0.07, 0] }
+      ]
+    },
+
+    "dust_trail": {
+      "usage": "attached",
+      "_doc": "Ground dust kicked up by moving vehicles (MOVING binding, rateScale velocity). The dedicated effect the bindings example was waiting on.",
+      "emitters": [
+        { "shader": "particle", "count": 2, "sprite": "dust", "orient": "billboard",
+          "life": [0.5, 0.9], "size": [5, 16], "speed": [8, 18], "spread": "cone:40", "gravity": 3,
+          "colorStart": [0.5, 0.44, 0.35, 0.45], "colorEnd": [0.35, 0.3, 0.25, 0] }
+      ]
+    },
+
+    "footstep_dust": {
+      "usage": "attached",
+      "_doc": "Single contact-plant dust kick (onContactPlant binding — mech/infantry feet, flow-plan gait phase).",
+      "emitters": [
+        { "shader": "particle", "count": 3, "sprite": "dust", "orient": "billboard",
+          "life": [0.3, 0.6], "size": [4, 12], "speed": [15, 30], "spread": "disc", "gravity": 8,
+          "colorStart": [0.5, 0.44, 0.35, 0.5], "colorEnd": [0.35, 0.3, 0.25, 0] }
+      ]
+    },
+
+    "ship_wake": {
+      "usage": "attached",
+      "_doc": "Bow/stern foam churn for surface ships (MOVING binding).",
+      "emitters": [
+        { "shader": "particle", "count": 3, "sprite": "foam", "orient": "billboard",
+          "life": [0.6, 1.2], "size": [5, 18], "speed": [10, 24], "spread": "disc", "gravity": 2,
+          "colorStart": [0.8, 0.88, 1, 0.6], "colorEnd": [0.55, 0.65, 0.8, 0] }
+      ]
+    },
+
+    "thruster_exhaust": {
+      "usage": "attached",
+      "_doc": "Jet exhaust flame + faint haze (fighters/bombers engine binding).",
+      "emitters": [
+        { "shader": "particle", "count": 2, "sprite": "fireball", "orient": "stretch",
+          "life": [0.08, 0.16], "size": [3, 1], "stretch": 3.5, "speed": [60, 100],
+          "spread": "cone:6", "gravity": 0, "colorStart": [2, 2.6, 5, 0.9],
+          "colorEnd": [4, 2.2, 0.6, 0] },
+        { "shader": "particle", "count": 1, "sprite": "smoke", "orient": "billboard",
+          "life": [0.3, 0.6], "size": [3, 10], "speed": [20, 40], "spread": "cone:10",
+          "gravity": 0, "colorStart": [0.3, 0.3, 0.32, 0.3], "colorEnd": [0.15, 0.15, 0.16, 0] }
+      ]
+    },
+
+    "build_sparks": {
+      "usage": "attached",
+      "_doc": "Construction welding — white-blue spark fan + pinpoint flash (engineer build binding, PLAN-metalstorm §8 slow-build).",
+      "emitters": [
+        { "shader": "particle", "count": 6, "sprite": "spark", "orient": "stretch",
+          "life": [0.15, 0.35], "size": [1.6, 0.3], "stretch": 3, "speed": [30, 90],
+          "spread": "cone:30", "gravity": 30, "colorStart": [3, 4, 6.5, 1],
+          "colorEnd": [1, 1.4, 2.6, 0] },
+        { "shader": "particle", "count": 1, "sprite": "flash", "orient": "billboard",
+          "life": [0.06, 0.1], "size": [4, 7], "speed": 0, "gravity": 0,
+          "colorStart": [3.5, 4.2, 6, 0.9], "colorEnd": [1, 1.3, 2, 0] }
+      ]
+    },
+
+    "impact_ricochet": {
+      "usage": "impact",
+      "_doc": "Kinetic round glancing off armour — tight spark fan along the deflection dir + pinprick flash. The armour-class \"bounced\" cosmetic.",
+      "emitters": [
+        { "shader": "particle", "count": 7, "sprite": "spark", "orient": "stretch",
+          "life": [0.12, 0.3], "size": [1.8, 0.3], "stretch": 4, "speed": [90, 220],
+          "spread": "cone:24", "gravity": 12, "colorStart": [6, 3.6, 1.2, 1],
+          "colorEnd": [2, 0.7, 0.15, 0] },
+        { "shader": "particle", "count": 1, "sprite": "flash", "orient": "billboard",
+          "life": [0.05, 0.09], "size": [6, 10], "speed": 0, "gravity": 0,
+          "colorStart": [5, 4, 2, 0.9], "colorEnd": [1.5, 1.2, 0.6, 0] }
+      ]
+    },
+
+    "suppression_field": {
+      "usage": "impact",
+      "_doc": "Statistical damage-field cosmetic (PLAN-metalstorm-combat-resolution Model 3): an AREA peppered with small dust kicks + spark hits via posSpread — no single detonation point.",
+      "emitters": [
+        { "shader": "particle", "count": 14, "sprite": "dust", "orient": "billboard",
+          "life": [0.5, 1.1], "size": [6, 18], "speed": [6, 16], "spread": "hemisphere",
+          "posSpread": [60, 2, 60], "gravity": 6, "colorStart": [0.5, 0.44, 0.35, 0.55],
+          "colorEnd": [0.35, 0.3, 0.25, 0] },
+        { "shader": "particle", "count": 10, "sprite": "spark", "orient": "stretch",
+          "life": [0.1, 0.25], "size": [1.6, 0.3], "stretch": 3, "speed": [40, 100],
+          "spread": "hemisphere", "posSpread": [60, 2, 60], "gravity": 30,
+          "colorStart": [5, 3, 1, 1], "colorEnd": [1.5, 0.4, 0.1, 0] }
+      ]
+    },
+
     "__default_explosion": {
       "usage": "impact",
       "_doc": "Fallback when a weapon def names no impact effect — always renders SOMETHING (mirrors combat-fx.ts DEFAULT_EXPLOSION_NAME). Aliases expl_small.",

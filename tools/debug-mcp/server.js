@@ -18,7 +18,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import Database from 'better-sqlite3';
 import { resolve, join } from 'path';
-import { readFileSync, existsSync, readdirSync, unlinkSync, statSync } from 'fs';
+import { readFileSync, existsSync, readdirSync, unlinkSync, rmdirSync, statSync } from 'fs';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 
@@ -393,6 +393,19 @@ function killProcess(pid, signal = 'SIGKILL') {
     catch { return false; }
 }
 
+// Every payload spring-server writes under cache/defs/<key>/. The `.bin`
+// entries are the pre-v14 FlatBuffer format; since 63287c0e4e the bake emits
+// brotli-compressed Lua source (`.lua.br`) plus `power.json`. Listing only the
+// `.bin` names made this a silent no-op on every current checkout — the tool
+// reported "Removed 0 cache file(s)" and callers read that as "cache cleared",
+// which is the worst possible failure mode for a post-serializer-change verify.
+// See rts/Server/DefsCache.h.
+const DEFS_CACHE_FILES = [
+    'unitdefs.lua.br', 'weapondefs.lua.br', 'cegdefs.lua.br', 'featuredefs.lua.br',
+    'power.json',
+    'unitdefs.bin', 'weapondefs.bin',   // legacy pre-v14 orphans
+];
+
 function clearDefsCache(gameId) {
     const projectRoot = process.env.PROJECT_ROOT || resolve('.');
     const baseDir = join(projectRoot, 'data', 'games');
@@ -404,12 +417,15 @@ function clearDefsCache(gameId) {
         if (!existsSync(cacheDir)) continue;
         const keys = readdirSync(cacheDir);
         for (const k of keys) {
-            for (const f of ['unitdefs.bin', 'weapondefs.bin']) {
+            for (const f of DEFS_CACHE_FILES) {
                 const p = join(cacheDir, k, f);
                 if (existsSync(p)) {
                     try { unlinkSync(p); removed++; } catch { /* ignore */ }
                 }
             }
+            // Drop the now-empty key dir so `ls cache/defs` reflects reality.
+            try { if (readdirSync(join(cacheDir, k)).length === 0) rmdirSync(join(cacheDir, k)); }
+            catch { /* ignore */ }
         }
     }
     return { removed };
@@ -610,7 +626,7 @@ const TOOLS = [
     },
     {
         name: 'clear_defs_cache',
-        description: 'Delete the cached UnitDefs/WeaponDefs FlatBuffer files for a game (or all games). Forces the next game session to re-bake from source. Required after schema changes that did NOT bump the cache key. Cheaper than killing the running game.',
+        description: 'Delete the baked defs cache (unitdefs/weapondefs/cegdefs/featuredefs .lua.br + power.json, plus legacy .bin orphans) for a game, or all games. Forces the next game session to re-bake from source. Required after schema changes that did NOT bump the cache key. Cheaper than killing the running game.',
         inputSchema: {
             type: 'object',
             properties: {

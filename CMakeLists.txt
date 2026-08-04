@@ -405,6 +405,8 @@ set(LOBBY_SERVER_SOURCES
     rts/Server/GameServersDb.cpp
     rts/Server/AI/AIDiscovery.cpp
     rts/Server/GameDiscovery.cpp
+    rts/Server/ScenarioDiscovery.cpp
+    rts/Server/ScenarioDb.cpp
     rts/Server/ConfigReader.cpp
     rts/Server/ResourcesParser.cpp
 )
@@ -425,7 +427,7 @@ add_executable(spring-lobby
     ${LOBBY_LOG_SOURCES}
     rts/System/SafeCStrings.c
 )
-add_dependencies(spring-lobby generate_flatbuffers modelimporter)
+add_dependencies(spring-lobby generate_flatbuffers modelimporter mapconverter)
 target_include_directories(spring-lobby PRIVATE
     ${CMAKE_SOURCE_DIR}/rts
     ${CMAKE_SOURCE_DIR}/rts/lib
@@ -439,6 +441,15 @@ target_compile_definitions(spring-lobby PRIVATE
     # glb detector mtime-compare against the actual binary the lobby
     # would invoke, so a rebuilt importer invalidates the model cache.
     MODELIMPORTER_BINARY_PATH="$<TARGET_FILE:modelimporter>"
+    # Absolute path so RunMapConverterPreflight (lobby_main.cpp) can shell
+    # out to the map-processing pipeline at startup without relying on
+    # $PATH (PLAN-metalstorm-impostors.md M10).
+    MAPCONVERTER_BINARY_PATH="$<TARGET_FILE:mapconverter>"
+    # Absolute path to the scenario generator, so POST /api/admin/scenarios/
+    # generate can shell out to it without depending on the lobby's cwd. Not a
+    # target: scenariogen.py is a source file, not a build product, so this is
+    # CMAKE_SOURCE_DIR rather than a generator expression.
+    SCENARIOGEN_SCRIPT_PATH="${CMAKE_SOURCE_DIR}/tools/mapgen/scenariogen.py"
 )
 target_link_libraries(spring-lobby PRIVATE lua nghttp2_static flatbuffers ZLIB::ZLIB SQLite3::SQLite3 springlog springlog-net springlog-sqlite nlohmann_json::nlohmann_json openssl_crypto)
 if(UNIX)
@@ -475,14 +486,23 @@ if(TEST_SOURCES)
         ${CMAKE_SOURCE_DIR}/rts/Server/DebugFlags.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/PlayerTeamEventCollector.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/ProjectileEventCollector.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/RoomManager.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/ScenarioDiscovery.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/ScenarioDb.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/SoundEventCollector.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/StandingOrders.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/OrgGroups.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/SyncedInputJournal.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/NetworkServer.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/Database.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GameOverState.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GameMetrics.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GmRollback.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GameServersDb.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/HeadlessRun.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/StatsDump.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/AI/AIScriptContext.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/AI/AICommandQueue.cpp
     )
     target_include_directories(spring-tests PRIVATE
         ${CMAKE_SOURCE_DIR}/rts
@@ -492,7 +512,15 @@ if(TEST_SOURCES)
         ${CMAKE_SOURCE_DIR}/rts/lib/cereal/include
         ${GENERATED_DIR}
     )
-    target_link_libraries(spring-tests PRIVATE lua smmalloc ZLIB::ZLIB doctest::doctest springlog nlohmann_json::nlohmann_json openssl_crypto nghttp2_static SQLite3::SQLite3)
+    # flatbuffers is header-only for our use here: test_synced_input_journal.cpp
+    # includes protocol_generated.h to walk EnumValuesClientPayload(), which is
+    # how the synced-input classifier is proved exhaustive against the real wire
+    # schema instead of against a copy of it (PLAN-replay task 1).
+    add_dependencies(spring-tests generate_flatbuffers)
+    target_link_libraries(spring-tests PRIVATE lua smmalloc ZLIB::ZLIB doctest::doctest springlog nlohmann_json::nlohmann_json openssl_crypto nghttp2_static SQLite3::SQLite3 flatbuffers)
+    # Absolute path to the source tree so tests can open checked-in fixtures
+    # (e.g. the strategos AI plugin) regardless of the ctest working dir.
+    target_compile_definitions(spring-tests PRIVATE SPRING_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
     if(UNIX AND NOT APPLE)
         target_link_libraries(spring-tests PRIVATE pthread dl)
     elseif(APPLE)

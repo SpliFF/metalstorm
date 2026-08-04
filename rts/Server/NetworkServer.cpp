@@ -63,6 +63,8 @@ const char* StatusText(int code) {
         case 404: return "404 Not Found";
         case 405: return "405 Method Not Allowed";
         case 409: return "409 Conflict";
+        case 413: return "413 Payload Too Large";
+        case 429: return "429 Too Many Requests";
         case 500: return "500 Internal Server Error";
         default:  return "500 Internal Server Error";
     }
@@ -278,7 +280,7 @@ struct NetworkServer::Impl {
     // NetworkServer::SafeInvokeForTest can exercise the identical exception-
     // handling path without a live socket.
 
-    HttpResponse DispatchGet(const std::string& url) {
+    HttpResponse DispatchGet(const std::string& url, bool remoteIsLoopback) {
         // Strip query string and percent-decode — handlers receive the
         // clean, decoded path only. The raw query string is stashed on a
         // thread-local so handlers can read params via
@@ -288,47 +290,66 @@ struct NetworkServer::Impl {
         const std::string rawPath = (qpos != std::string::npos) ? url.substr(0, qpos) : url;
         const std::string path = UrlDecode(rawPath);
         SetCurrentQueryString(qpos != std::string::npos ? url.substr(qpos + 1) : "");
-        // Try exact matches first, then wildcards. RouteAuth is not enforced
-        // here — see the RouteAuth comment in NetworkServer.h (GET handlers
-        // never receive headers/Authorization; no currently-open GET route
-        // needs auth, so the tag is classification-only for GET today).
+        // Try exact matches first, then wildcards.
         for (auto& route : *getHandlers) {
             if (route.pattern.find('*') == std::string::npos && RouteMatch(route.pattern, path))
-                return SafeInvoke(path, [&] { return route.handler(path); });
+                return CheckGetAuthAndCall(route, path, remoteIsLoopback);
         }
         for (auto& route : *getHandlers) {
             if (route.pattern.find('*') != std::string::npos && RouteMatch(route.pattern, path))
-                return SafeInvoke(path, [&] { return route.handler(path); });
+                return CheckGetAuthAndCall(route, path, remoteIsLoopback);
         }
         return {.contentType = "text/plain", .body = {'4','0','4'}, .status = 404};
+    }
+
+    /// GET auth gate (PLAN-security-hardening G12). GET handlers carry no
+    /// Authorization header, so a non-Public GET route can only be enforced as
+    /// loopback-only — the strongest, forgery-proof check available without a
+    /// token (same degradation the logserver's LocalhostOrAdmin POST uses when
+    /// no token validator is wired). Public GET routes are unaffected. This is
+    /// what lets `/api/processes` (LocalhostOrAdmin) refuse remote recon while
+    /// the local spring-debug MCP keeps working.
+    HttpResponse CheckGetAuthAndCall(const NetworkServer::GetRoute& route,
+                                     const std::string& path, bool remoteIsLoopback) {
+        if (route.auth != RouteAuth::Public && !remoteIsLoopback)
+            return JsonError(403, "forbidden — localhost only");
+        return SafeInvoke(path, [&] { return route.handler(path); });
     }
 
     /// Default-deny check for POST routes (PLAN-security-hardening G20). Runs
     /// before the handler for any non-Public RouteAuth. Belt-and-braces: the
     /// handler is free to do its own auth lookups on top of this for business
     /// logic (e.g. which user is acting), this is just the gate.
+    ///
+    /// The gate itself runs INSIDE SafeInvoke, not just the handler: the auth
+    /// callbacks (validateToken/isAdmin) are SQLite-backed and can throw
+    /// exactly like a handler can — invoking them outside the wrapper meant a
+    /// throwing callback still crashed dispatch, the class of failure
+    /// SafeInvoke exists to eliminate.
     HttpResponse CheckAuthAndCall(const NetworkServer::PostRoute& route, const std::string& path,
                                    const std::string& body, const HttpRequestHeaders& hdrs) {
-        if (route.auth != RouteAuth::Public) {
-            int64_t userId = 0;
-            if (authCallbacks && authCallbacks->validateToken)
-                userId = authCallbacks->validateToken(hdrs.authorization);
-            const bool tokenOk = userId > 0;
-            const bool adminOk = tokenOk && authCallbacks && authCallbacks->isAdmin && authCallbacks->isAdmin(userId);
-            switch (route.auth) {
-                case RouteAuth::TokenRequired:
-                    if (!tokenOk) return JsonError(401, "unauthorized");
-                    break;
-                case RouteAuth::AdminOnly:
-                    if (!adminOk) return JsonError(tokenOk ? 403 : 401, tokenOk ? "forbidden — admin role required" : "unauthorized");
-                    break;
-                case RouteAuth::LocalhostOrAdmin:
-                    if (!hdrs.remoteIsLoopback && !adminOk) return JsonError(tokenOk ? 403 : 401, tokenOk ? "forbidden" : "unauthorized");
-                    break;
-                default: break;
+        return SafeInvoke(path, [&]() -> HttpResponse {
+            if (route.auth != RouteAuth::Public) {
+                int64_t userId = 0;
+                if (authCallbacks && authCallbacks->validateToken)
+                    userId = authCallbacks->validateToken(hdrs.authorization);
+                const bool tokenOk = userId > 0;
+                const bool adminOk = tokenOk && authCallbacks && authCallbacks->isAdmin && authCallbacks->isAdmin(userId);
+                switch (route.auth) {
+                    case RouteAuth::TokenRequired:
+                        if (!tokenOk) return JsonError(401, "unauthorized");
+                        break;
+                    case RouteAuth::AdminOnly:
+                        if (!adminOk) return JsonError(tokenOk ? 403 : 401, tokenOk ? "forbidden — admin role required" : "unauthorized");
+                        break;
+                    case RouteAuth::LocalhostOrAdmin:
+                        if (!hdrs.remoteIsLoopback && !adminOk) return JsonError(tokenOk ? 403 : 401, tokenOk ? "forbidden" : "unauthorized");
+                        break;
+                    default: break;
+                }
             }
-        }
-        return SafeInvoke(path, [&] { return route.handler(path, body, hdrs); });
+            return route.handler(path, body, hdrs);
+        });
     }
 
     HttpResponse DispatchPost(const std::string& url, const std::string& body,
@@ -432,7 +453,7 @@ struct NetworkServer::Impl {
                     return;  // Don't reset — keep connection open for SSE
                 }
             }
-            auto resp = DispatchGet(c.h1Path);
+            auto resp = DispatchGet(c.h1Path, c.remoteIsLoopback);
             H1WriteResponse(c, resp, /*omitBody=*/isHead);
         } else if (c.h1Method == "POST") {
             auto resp = DispatchPost(c.h1Path, c.h1ReadBuf.substr(
@@ -672,7 +693,7 @@ struct NetworkServer::Impl {
                     return;
                 }
             }
-            auto resp = DispatchGet(stream.path);
+            auto resp = DispatchGet(stream.path, conn.remoteIsLoopback);
             H2SubmitResponse(conn, stream, resp, /*omitBody=*/isHead);
         } else if (stream.method == "POST") {
             auto resp = DispatchPost(stream.path, stream.body, stream.headers);
