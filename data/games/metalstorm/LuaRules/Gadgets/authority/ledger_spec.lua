@@ -39,6 +39,31 @@ describe("authority ledger", function()
         assert.is_true(unmapped)
     end)
 
+    -- endtoend D13. distributeAward sends `'objective_' .. o.type`, never the
+    -- documented 'objective_reward', so EVERY objective payout in every match
+    -- landed in unmapped — including the terminal objective's 300, which is
+    -- why it looked like it had paid out to nobody.
+    it("classifies every objective payout reason as mint, by prefix", function()
+        for _, t in ipairs({ 'control', 'kill', 'escort', 'protect', 'extract', 'infra' }) do
+            local cls, unmapped = Ledger.classify('objective_' .. t)
+            assert.are.equal('mint', cls)
+            assert.is_false(unmapped)
+            -- awardPeriodic's variant (infra income)
+            assert.are.equal('mint', Ledger.classify('objective_' .. t .. '_income'))
+        end
+    end)
+
+    it("classifies a standing-order charge as burn", function()
+        local cls, unmapped = Ledger.classify('standing')
+        assert.are.equal('burn', cls)
+        assert.is_false(unmapped)
+    end)
+
+    it("still reports a genuinely unknown reason even near a prefix", function()
+        assert.are.equal('unmapped', Ledger.classify('objectiv_control'))
+        assert.are.equal('unmapped', Ledger.classify('some_objective_control'))
+    end)
+
     it("accumulates awards by team and class", function()
         Ledger.tagAward(state, 1, 100, 'objective_reward')
         Ledger.tagAward(state, 1, 50, 'join_grant')

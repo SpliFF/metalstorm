@@ -64,7 +64,7 @@ void CMissileLauncher::FireImpl(const bool scriptCall)
 	params.speed = startSpeed;
 	params.ttl = weaponDef->flighttime == 0? math::ceil(std::max(targetDist, range) / projectileSpeed + 25 * weaponDef->selfExplode): weaponDef->flighttime;
 
-	WeaponProjectileFactory::LoadProjectile(params);
+	WeaponProjectileFactory::FireWeaponProjectile(params);
 }
 
 bool CMissileLauncher::HaveFreeLineOfFire(const float3 srcPos, const float3 tgtPos, const SWeaponTarget& trg) const

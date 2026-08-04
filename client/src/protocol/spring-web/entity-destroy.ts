@@ -40,8 +40,23 @@ position(obj?:Vec3):Vec3|null {
   return offset ? (obj || new Vec3()).__init(this.bb_pos + offset, this.bb!) : null;
 }
 
+/**
+ * Sim frame the unit actually died on, stamped at CUnit::KillUnit time
+ * (not at broadcast time). L1 schedules the death on the presentation
+ * timeline at this frame so it lands together with its explosion.
+ * Before this field existed the client had to guess with
+ * `max(last GameEventBatch frame, newest entity-state base_frame)`,
+ * which is only a lower bound: the server sends no combat batch on
+ * event-less ticks, and it LOS-filters those batches per viewer while
+ * destroys use a different losMask. 0 = unstamped (pre-L2 server).
+ */
+frame():number {
+  const offset = this.bb!.__offset(this.bb_pos, 10);
+  return offset ? this.bb!.readUint32(this.bb_pos + offset) : 0;
+}
+
 static startEntityDestroy(builder:flatbuffers.Builder) {
-  builder.startObject(3);
+  builder.startObject(4);
 }
 
 static addEntityId(builder:flatbuffers.Builder, entityId:number) {
@@ -56,6 +71,10 @@ static addPosition(builder:flatbuffers.Builder, positionOffset:flatbuffers.Offse
   builder.addFieldStruct(2, positionOffset, 0);
 }
 
+static addFrame(builder:flatbuffers.Builder, frame:number) {
+  builder.addFieldInt32(3, frame, 0);
+}
+
 static endEntityDestroy(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
@@ -66,7 +85,8 @@ unpack(): EntityDestroyT {
   return new EntityDestroyT(
     this.entityId(),
     this.destructionType(),
-    (this.position() !== null ? this.position()!.unpack() : null)
+    (this.position() !== null ? this.position()!.unpack() : null),
+    this.frame()
   );
 }
 
@@ -75,6 +95,7 @@ unpackTo(_o: EntityDestroyT): void {
   _o.entityId = this.entityId();
   _o.destructionType = this.destructionType();
   _o.position = (this.position() !== null ? this.position()!.unpack() : null);
+  _o.frame = this.frame();
 }
 }
 
@@ -82,7 +103,8 @@ export class EntityDestroyT implements flatbuffers.IGeneratedObject {
 constructor(
   public entityId: number = 0,
   public destructionType: number = 0,
-  public position: Vec3T|null = null
+  public position: Vec3T|null = null,
+  public frame: number = 0
 ){}
 
 
@@ -91,6 +113,7 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
   EntityDestroy.addEntityId(builder, this.entityId);
   EntityDestroy.addDestructionType(builder, this.destructionType);
   EntityDestroy.addPosition(builder, (this.position !== null ? this.position!.pack(builder) : 0));
+  EntityDestroy.addFrame(builder, this.frame);
 
   return EntityDestroy.endEntityDestroy(builder);
 }

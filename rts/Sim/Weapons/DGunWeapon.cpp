@@ -27,7 +27,7 @@ void CDGunWeapon::FireImpl(const bool scriptCall)
 	params.speed = dir * projectileSpeed;
 	params.ttl = 1;
 
-	WeaponProjectileFactory::LoadProjectile(params);
+	WeaponProjectileFactory::FireWeaponProjectile(params);
 }
 
 

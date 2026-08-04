@@ -35,11 +35,27 @@ local REASON_CLASS = {
     build            = 'burn',
     posture          = 'burn',
     proposal_fee     = 'burn',
+    standing         = 'burn',   -- GG.Authority.ChargeStandingOrder
 
     -- move (net-zero)
     stake_escrow     = 'move',
     leaver_merge     = 'move',
     player_fallback  = 'move',
+}
+
+-- endtoend D13. game_objectives.lua's distributeAward does NOT send
+-- 'objective_reward' — it sends `'objective_' .. o.type` ('objective_control',
+-- 'objective_escort', …) and `'objective_' .. o.type .. '_income'` for the
+-- periodic infra payout. Every objective payout in every match therefore
+-- landed in `unmapped` and fired the warn, which is why the terminal
+-- objective's 300 authority looked like it had gone nowhere. Matched by
+-- PREFIX rather than enumerated because the reason is built from the type
+-- registry at the call site: adding an objective type must not silently add
+-- an unmapped reason. Objective payouts are new authority → mint, same class
+-- as the 'objective_reward' entry above (kept: it is the documented name and
+-- other callers may still use it).
+local REASON_PREFIX_CLASS = {
+    { prefix = 'objective_', class = 'mint' },
 }
 
 -- One-time warn for unmapped reasons (§1 "loud runtime warn (once per distinct
@@ -51,6 +67,13 @@ local unmappedWarned = {}
 function M.classify(reason)
     local cls = REASON_CLASS[reason]
     if cls then return cls, false end
+    if type(reason) == 'string' then
+        for _, rule in ipairs(REASON_PREFIX_CLASS) do
+            if reason:sub(1, #rule.prefix) == rule.prefix then
+                return rule.class, false
+            end
+        end
+    end
     if not unmappedWarned[reason] then
         unmappedWarned[reason] = true
         Spring.Log('authority', LOG.WARNING, string.format(

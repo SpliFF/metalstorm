@@ -90,8 +90,33 @@ hitscan():boolean {
   return offset ? !!this.bb!.readInt8(this.bb_pos + offset) : false;
 }
 
+/**
+ * PLAN-latency L3.3 — "this projectile's presentation is governed by the
+ * keyframe contract", i.e. the server has `LatencyTierSKeyframes` on and
+ * this projectile participates (see TrajectoryKeyframes.h
+ * `KeyframesApplyTo`). The client starts a keyframe track for it from
+ * *this event*, using `pos`/`vel`/`gravity` and the enclosing batch's
+ * `frame`, instead of waiting for a `Launch` knot to say the same thing in
+ * 40 bytes.
+ *
+ * That is the whole reason the field exists. Before L3.3 the client's only
+ * signal was the arrival of a `Launch` knot, so the server had to send one
+ * even for flights it knew the client could reproduce exactly. This bool
+ * carries the signal instead, and `KeyframesRedundantFor` shots then send
+ * no knots at all.
+ *
+ * False on a pre-L3 server, on a server with the flag off, and for
+ * hit-scan weapons — in all of which the client keeps its legacy
+ * integrate-and-snap path, which is why the discriminator has to be
+ * explicit rather than inferred from "no knots have turned up yet".
+ */
+keyframed():boolean {
+  const offset = this.bb!.__offset(this.bb_pos, 26);
+  return offset ? !!this.bb!.readInt8(this.bb_pos + offset) : false;
+}
+
 static startProjectileFiredEvent(builder:flatbuffers.Builder) {
-  builder.startObject(11);
+  builder.startObject(12);
 }
 
 static addProjId(builder:flatbuffers.Builder, projId:number) {
@@ -138,6 +163,10 @@ static addHitscan(builder:flatbuffers.Builder, hitscan:boolean) {
   builder.addFieldInt8(10, +hitscan, +false);
 }
 
+static addKeyframed(builder:flatbuffers.Builder, keyframed:boolean) {
+  builder.addFieldInt8(11, +keyframed, +false);
+}
+
 static endProjectileFiredEvent(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
@@ -156,7 +185,8 @@ unpack(): ProjectileFiredEventT {
     this.targetId(),
     this.ttl(),
     this.gravity(),
-    this.hitscan()
+    this.hitscan(),
+    this.keyframed()
   );
 }
 
@@ -173,6 +203,7 @@ unpackTo(_o: ProjectileFiredEventT): void {
   _o.ttl = this.ttl();
   _o.gravity = this.gravity();
   _o.hitscan = this.hitscan();
+  _o.keyframed = this.keyframed();
 }
 }
 
@@ -188,7 +219,8 @@ constructor(
   public targetId: number = 0,
   public ttl: number = 0,
   public gravity: number = 0.0,
-  public hitscan: boolean = false
+  public hitscan: boolean = false,
+  public keyframed: boolean = false
 ){}
 
 
@@ -205,6 +237,7 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
   ProjectileFiredEvent.addTtl(builder, this.ttl);
   ProjectileFiredEvent.addGravity(builder, this.gravity);
   ProjectileFiredEvent.addHitscan(builder, this.hitscan);
+  ProjectileFiredEvent.addKeyframed(builder, this.keyframed);
 
   return ProjectileFiredEvent.endProjectileFiredEvent(builder);
 }

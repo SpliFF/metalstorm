@@ -76,6 +76,8 @@ import { DefCache } from './def-cache.js';
 import { fetchAndIngestDefs } from './defs-fetch.js';
 import { PresentationClock } from './presentation-clock.js';
 import { EventScheduler, type ScheduledKind } from './event-scheduler.js';
+import { PendingActionRegistry } from './pending-actions.js';
+import { nextCosmeticProjectileId } from './cosmetic-flight.js';
 // GW4-c5: weapon-FX / projectile / decal / build render modules fold into the
 // worker (audited worker-safe — no DOM/audio; the `window.__*` dev hooks they
 // set are switched to `globalThis`). Ported from main.ts@d6301137f7^.
@@ -244,6 +246,25 @@ let gpEconomyDirty = false;
 /// selection change can re-render the path/waypoint overlays immediately rather
 /// than waiting for the next broadcast.
 let gpLastCommandQueues: import('./connection.js').UnitCommandQueueInfo[] = [];
+/// PLAN-latency L4.1: optimistic-input registry. Commands the client has sent
+/// but the server has not yet acked are drawn on top of `gpLastCommandQueues`,
+/// so a waypoint appears on click instead of on the next 1 Hz snapshot.
+/// Created in gpInit, drained in the render loop, cleared in gpShutdown.
+let gpPendingActions: PendingActionRegistry | null = null;
+/// A/B switch for the L4 measurement (gp:test 'setOptimisticInput'). Off makes
+/// the overlays read the raw snapshot exactly as they did pre-L4.1. Ships ON:
+/// unlike L2/L3 this adds no wire traffic and no server behaviour, so there is
+/// nothing for a config flag to protect — the control arm exists to measure
+/// against, not to fall back to.
+let gpOptimisticInput = true;
+
+/// The overlay view: the last snapshot with outstanding optimistic orders
+/// merged on top. Identical to `gpLastCommandQueues` when nothing is pending.
+function gpMergedCommandQueues(): import('./connection.js').UnitCommandQueueInfo[] {
+    return gpPendingActions && gpOptimisticInput
+        ? gpPendingActions.merge(gpLastCommandQueues)
+        : gpLastCommandQueues;
+}
 /// Shift-held state (drives the command-path / waypoint overlay gate). Tracked
 /// from the forwarded key/pointer `mods` bitmask (bit 0 = shift); cleared on blur.
 let gpShiftHeld = false;
@@ -317,9 +338,34 @@ let gpEventScheduler: EventScheduler | null = null;
 
 /// Schedule a discrete event onto the presentation timeline, or fire it now if
 /// the scheduler isn't up yet (pre-gpInit safety — never silently dropped).
-function gpSchedule(frame: number, kind: ScheduledKind, fire: () => void): void {
-    if (gpEventScheduler) gpEventScheduler.schedule(frame, kind, fire);
-    else fire();
+/// `prep` is the optional pre-roll warm-up (run while the event is still in
+/// the future window). On the pre-gpInit path there is no window to warm up
+/// in, so it runs once immediately, before the event it was preparing for.
+function gpSchedule(
+    frame: number,
+    kind: ScheduledKind,
+    fire: () => void,
+    prep?: () => void,
+): void {
+    if (gpEventScheduler) gpEventScheduler.schedule(frame, kind, fire, prep);
+    else { prep?.(); fire(); }
+}
+
+/// PLAN-latency L2.2: map a `FireOutcome` (a fire-time *prediction*) onto the
+/// `ProjectileImpactKind` the FX consumers already switch on, so a Tier-C
+/// detonation picks the same authored effect its simulated equivalent would.
+/// The two enums are deliberately separate on the wire (different semantics,
+/// different provenance) but the visual vocabulary is shared.
+function fireOutcomeImpactKind(outcome: number): number {
+    switch (outcome) {
+        case 0: return 1;  // Hit         -> Unit
+        case 2: return 3;  // Shielded    -> Shield
+        case 3: return 5;  // Intercepted -> Intercepted
+        case 4: return 4;  // Expired     -> SelfDetonate
+        // Miss (1) and anything unrecognised terminate on ground/water, which
+        // is what Terrain means.
+        default: return 0;
+    }
 }
 /// Sounds fired by the timeline drain this render frame. Accumulated so a
 /// heavy drain posts ONE gp:audioSoundEvents batch (the message already
@@ -1133,7 +1179,10 @@ function gpConnect(msg: GpInitToWorker): void {
         // GameEventBatch) drive the projectile renderer + combatFX. The legacy
         // 0x04 per-tick projectile-state envelope is gone — the renderer
         // integrates motion locally off these events.
-        onProjectileFired: (events) => {
+        // PLAN-latency L3.3 — `frame` is now passed through. It is the sim
+        // frame the projectile spawned on, and for a `keyframed` shot it is
+        // the frame of the Launch knot the server has stopped sending.
+        onProjectileFired: (events, frame) => {
             // §16c: engage cosmetic turret aim toward each shot's target.
             // Runs even without a projectile renderer so aim is independent
             // of projectile visuals.
@@ -1143,7 +1192,7 @@ function gpConnect(msg: GpInitToWorker): void {
                 for (const e of events) gpAimController?.onFired(e, now);
             }
             if (!gpCtx.projectileRenderer) return;
-            for (const e of events) gpCtx.projectileRenderer.onFired(e);
+            for (const e of events) gpCtx.projectileRenderer.onFired(e, frame);
         },
         // PLAN-latency L1: present the impact (renderer detonation + shield /
         // airburst FX) on its sim frame. The bolt's flight is still integrated
@@ -1159,6 +1208,94 @@ function gpConnect(msg: GpInitToWorker): void {
         onProjectileTrajectories: (events) => {
             if (!gpCtx.projectileRenderer) return;
             for (const e of events) gpCtx.projectileRenderer.onTrajectory(e);
+        },
+        // PLAN-latency L3.2: knots on a Tier-S projectile's path. Deliberately
+        // NOT put on the presentation timeline — unlike an impact or a death,
+        // a keyframe is not something that *happens* at a frame, it is a
+        // statement about where the flight is at one. Delaying it to the cursor
+        // would only leave the spline unbracketed for `D` frames longer.
+        onTrajectoryKeyframes: (events) => {
+            if (!gpCtx.projectileRenderer) return;
+            for (const e of events) gpCtx.projectileRenderer.onKeyframe(e);
+        },
+        // PLAN-latency L3.2: the Tier-S half of what L2.2's `onFireOutcomes`
+        // does for Tier-C — the burst presents on the frame the sim resolved
+        // it, not on packet arrival. Convergence comes for free: the Terminal
+        // knot the server wrote alongside this event carries the same frame and
+        // position, so the bolt is standing on the explosion when it goes off.
+        //
+        // The legacy `ProjectileImpactEvent` for these same shots is suppressed
+        // in the decode (see connection.ts) — the server emits both so pre-L3
+        // clients still see something, and only one of them may be played.
+        onOutcomesKnown: (events) => {
+            for (const ev of events) {
+                // PLAN-latency L3.3 — close the spline NOW, not at the drain
+                // below. The outcome arrives `D` frames before the cursor
+                // reaches it, and those are precisely the frames the Terminal
+                // knot used to bracket. Deferring it to the drain would leave
+                // the final approach extrapolating and then jump, which is the
+                // correction L3 exists to remove. No-op when the server sent a
+                // Terminal knot of its own.
+                gpCtx.projectileRenderer?.onOutcomeKnown(ev);
+                gpSchedule(ev.outcomeFrame, 'impact', () => {
+                    gpCtx.projectileRenderer?.detonateKeyframed(ev.projId, {
+                        impactPos: ev.outcomePos,
+                        impactKind: ev.outcome,
+                        weaponDefId: ev.weaponDefId,
+                    });
+                    gpCombatFX?.onProjectileImpacts([{
+                        projId: ev.projId,
+                        pos: ev.outcomePos,
+                        impactKind: ev.outcome,
+                        targetId: ev.targetId,
+                        weaponDefId: ev.weaponDefId,
+                    }]);
+                });
+            }
+        },
+        // PLAN-latency L2.2: a Tier-C shot has no sim projectile — the server
+        // resolved the whole flight at fire time and sent one event carrying
+        // both ends of it. Put both ends on the L1 timeline and the visual
+        // converges by construction: the bolt is spawned when the cursor
+        // reaches `fireFrame` and is standing on `impactPos` when the cursor
+        // reaches `impactFrame`, which is the same frame the explosion and the
+        // scheduled combat/death events for that shot present on.
+        //
+        // Note both frames are ahead of the batch frame — this is the one
+        // event family the server sends with *foreknowledge*, which is why the
+        // pre-roll warm-up below is worth doing: a weapon's .glb has ~D frames
+        // plus the flight time to load before its first bolt is drawn.
+        onFireOutcomes: (events) => {
+            for (const ev of events) {
+                const impactKind = fireOutcomeImpactKind(ev.outcome);
+                // Minted here rather than inside the spawn so both closures
+                // share a real id unconditionally. If the spawn is skipped —
+                // no renderer at that moment — the detonation still names a
+                // projectile in the cosmetic range that simply isn't in the
+                // live map, which `onImpact` already handles. A `0`
+                // placeholder would instead name projectile id 0, an ordinary
+                // *real* id, and evict an unrelated bolt.
+                const cosmeticId = nextCosmeticProjectileId();
+                gpSchedule(ev.fireFrame, 'projSpawn', () => {
+                    gpCtx.projectileRenderer?.spawnCosmetic(cosmeticId, ev);
+                }, () => {
+                    gpCtx.projectileRenderer?.warmWeaponAssets(ev.weaponDefId);
+                });
+                gpSchedule(ev.impactFrame, 'projDetonate', () => {
+                    gpCtx.projectileRenderer?.detonateCosmetic(cosmeticId, {
+                        impactPos: ev.impactPos,
+                        impactKind,
+                        weaponDefId: ev.weaponDefId,
+                    });
+                    gpCombatFX?.onProjectileImpacts([{
+                        projId: cosmeticId,
+                        pos: ev.impactPos,
+                        impactKind,
+                        targetId: ev.targetId,
+                        weaponDefId: ev.weaponDefId,
+                    }]);
+                });
+            }
         },
         // GW4-c5: combat hit/kill events → combatFX (impact CEGs + lights).
         // Also fan out widget:UnitDamaged so intel/health/FX widgets in ZK
@@ -1212,15 +1349,46 @@ function gpConnect(msg: GpInitToWorker): void {
         // (Widget forward + the build-pending-ghost reaper land in c5c/c6.)
         onUnitCommandQueues: (queues) => {
             gpLastCommandQueues = queues;
+            // PLAN-latency L4.1: hand off every optimistic entry this snapshot
+            // now carries authoritatively, THEN merge what is still outstanding
+            // on top. Order matters — retiring first is what keeps an order
+            // from being drawn twice as the snapshot catches up.
+            gpPendingActions?.retire(queues);
+            const merged = gpMergedCommandQueues();
             const sel = gpCtx.selection?.selection ?? [];
-            gpCommandPathRenderer?.update(queues, sel);
-            gpWaypointMarkerRenderer?.update(queues, sel);
+            gpCommandPathRenderer?.update(merged, sel);
+            gpWaypointMarkerRenderer?.update(merged, sel);
             // PLAN-playable.md G4: the selected factory's queue may have
             // changed (unit completed, order added/removed) — re-resolve.
             gpRecomputeFactoryQueue();
             // PLAN-playable.md G3b: reap pending build-ghosts whose order has
             // left the queue (construction started / cancelled).
-            gpBuildPlacement?.onCommandQueuesUpdated(queues);
+            // L4.1: fed the MERGED view, which fixes a race that predates this
+            // phase — the reaper's "not in the snapshot" test is a dispose, and
+            // the snapshot is 1 Hz and independent of our send, so a ghost
+            // placed shortly before one landed was reaped before the order
+            // could possibly have reached the server. An unconfirmed build
+            // order is present in the merged view, so the ghost now survives
+            // until it is confirmed or times out.
+            gpBuildPlacement?.onCommandQueuesUpdated(merged);
+        },
+        // PLAN-latency L4.1: the per-tick command ack. This stream has been on
+        // the wire and fully decoded since long before L4 — with no subscriber
+        // at all. It is the confirmation half of optimistic input: an `issued`
+        // event means the order really landed on that unit's queue, ~RTT after
+        // the click rather than up to a snapshot period later.
+        onUnitCommand: (events) => {
+            if (!gpPendingActions) return;
+            const before = gpPendingActions.stats().confirmedTotal;
+            gpPendingActions.confirm(events);
+            if (gpPendingActions.stats().confirmedTotal !== before) {
+                // Re-render immediately: a confirmed entry swaps its synthetic
+                // negative tag for the server's, which the overlays key on.
+                const sel = gpCtx.selection?.selection ?? [];
+                const merged = gpMergedCommandQueues();
+                gpCommandPathRenderer?.update(merged, sel);
+                gpWaypointMarkerRenderer?.update(merged, sel);
+            }
         },
         // PLAN-playable.md G3a: selection-scoped command descriptions (~1 Hz).
         // GW4-regression fix (U3/onResourceUpdate-class): pre-GW4 the main-thread
@@ -1548,6 +1716,18 @@ function gpConnect(msg: GpInitToWorker): void {
         onServerRestart: () => postToMain({ type: 'gp:reload' }),
     });
     gpCtx.connection = conn;
+    // PLAN-latency L4.1: register every command that goes on the wire, in the
+    // form it went (post-CommandNotify, so widget rewrites and widget-issued
+    // orders are covered — neither passes through a CommandBuffer).
+    conn.setCommandSink((commands) => {
+        for (const c of commands) gpPendingActions?.register(c);
+        // Draw it now. This is the whole point of the phase: the artifact
+        // appears on the click, not on the ack and not on the next snapshot.
+        const sel = gpCtx.selection?.selection ?? [];
+        const merged = gpMergedCommandQueues();
+        gpCommandPathRenderer?.update(merged, sel);
+        gpWaypointMarkerRenderer?.update(merged, sel);
+    });
     conn.connect(msg.gameHttpUrl, msg.username, '', msg.token);
 }
 
@@ -1950,9 +2130,29 @@ export function gpInit(msg: GpInitToWorker): void {
 
     gpPresentationClock = new PresentationClock();
     gpEventScheduler = new EventScheduler();
+    // PLAN-latency L4.1. RTT is read lazily through gpCtx because the
+    // ServerClock belongs to the per-game Connection, which gpConnect builds
+    // after this; 0 before the first pong just means the window sits on its
+    // floor, which is the right conservative default.
+    gpPendingActions = new PendingActionRegistry({
+        getRttMs: () => gpCtx.connection?.serverClock.getRtt() ?? 0,
+    });
 
     const entityRenderer = new EntityRenderer(scene);
     entityRenderer.setPresentationClock(gpPresentationClock);
+    // PLAN-latency L1 (LOS reveal): a unit entering LOS reaches us ~D frames
+    // before the sim frame it became visible on. Put the reveal on the
+    // presentation timeline so it appears on that frame rather than early,
+    // and use the lead time as a pre-roll to fetch its model — so it arrives
+    // as itself instead of popping in as the procedural stand-in.
+    entityRenderer.setRevealHook((id, frame, defId) => {
+        gpSchedule(
+            frame,
+            'losReveal',
+            () => entityRenderer.markRevealed(id),
+            () => entityRenderer.warmUpDef(defId),
+        );
+    });
     // PLAN-lighting L3/L4: register with the sun shadow generator up-front
     // (before any def streams in) so the first ensureModel load isn't raced;
     // pass the sun so the team-color material can sample the live CSM.
@@ -2087,6 +2287,12 @@ export function gpInit(msg: GpInitToWorker): void {
     projectileRenderer.setLightPool(gpCtx.fxLightPool);
     projectileRenderer.setDistortion(gpDistortion);
     projectileRenderer.setMuzzleFlare(gpMuzzleFlare);
+    // PLAN-latency L2.3: lets an invented Tier-C flight read where its target
+    // is expected to be on the frame it lands, off the same interpolator the
+    // units themselves are drawn from — so a guided bolt and the unit it is
+    // chasing are quoting one source, not two.
+    projectileRenderer.setTargetPoseProvider(
+        (unitId, frame) => entityRenderer.getEntityPosition(unitId, frame));
 
     // Resolve weapon-def texture names → KTX2 URLs (shared by projectiles, CEG,
     // muzzle flares). Async; the renderers consult it lazily when they first see
@@ -2232,6 +2438,11 @@ export function gpInit(msg: GpInitToWorker): void {
         // and before projectileRenderer.tick() / the A3 mirror so a scheduled
         // impact removes its projectile from this frame's live snapshot.
         if (gpPresentationClock && gpEventScheduler) {
+            // PLAN-latency L2.2: invented Tier-C flights are parametrised by
+            // the cursor, not by wall time. Push it before the drain so a
+            // spawn drained this frame starts at the right point on its arc
+            // rather than at last frame's cursor.
+            gpCtx.projectileRenderer?.setPresentationFrame(gpPresentationClock.P);
             gpEventScheduler.drain(gpPresentationClock.P);
             // Flush the drain's fired sounds as ONE post — a heavy drain
             // (mass kill, refocus) would otherwise structured-clone dozens
@@ -2239,6 +2450,28 @@ export function gpInit(msg: GpInitToWorker): void {
             if (gpDrainedSoundEvents.length > 0) {
                 postToMain({ type: 'gp:audioSoundEvents', events: gpDrainedSoundEvents });
                 gpDrainedSoundEvents = [];
+            }
+            // …then warm up what the cursor is about to reach. The window
+            // (P, E] is the foreknowledge L0 bought us: events already in
+            // hand but not yet due. Re-run each frame because a warm-up can
+            // need something still in flight (a unit's def streams
+            // independently of its state).
+            gpEventScheduler.prefetch(gpPresentationClock.P, gpPresentationClock.E);
+        }
+        // PLAN-latency L4.1: retire optimistic orders whose window has run out.
+        // Deliberately on wall time, not the presentation cursor — an
+        // unconfirmed order is a control-timeline artifact and its deadline is
+        // a round trip, not a frame. A rollback is the only refutation the
+        // server gives us (there is no veto message), so it is logged.
+        if (gpPendingActions) {
+            const rolledBack = gpPendingActions.expire();
+            if (rolledBack > 0) {
+                postLog(2, `[L4] rolled back ${rolledBack} unconfirmed order(s) ` +
+                    `— no ack within the confirmation window`);
+                const sel = gpCtx.selection?.selection ?? [];
+                const merged = gpMergedCommandQueues();
+                gpCommandPathRenderer?.update(merged, sel);
+                gpWaypointMarkerRenderer?.update(merged, sel);
             }
         }
         gpMark(1);  // entity
@@ -2334,8 +2567,9 @@ export function gpInit(msg: GpInitToWorker): void {
         // they appear immediately on a selection change (don't wait for the next
         // ~1 Hz UnitCommandQueuesUpdate). (sceneState mirroring → main is c5c.)
         onSelectionChange: (ids) => {
-            gpCommandPathRenderer?.update(gpLastCommandQueues, ids);
-            gpWaypointMarkerRenderer?.update(gpLastCommandQueues, ids);
+            const merged = gpMergedCommandQueues();
+            gpCommandPathRenderer?.update(merged, ids);
+            gpWaypointMarkerRenderer?.update(merged, ids);
             // GW4-c6-1b: feed LuaUI selection (Spring.GetSelectedUnits +
             // widgetHandler:SelectionChanged) so build-menu / order panels
             // react to what the player picked.
@@ -3061,8 +3295,11 @@ export function gpShutdown(): void {
     gpStandingOrderRenderer?.dispose();
     gpStandingOrderRenderer = null;
     gpLastCommandQueues = [];
+    gpPendingActions?.clear();
+    gpPendingActions = null;
     gpShiftHeld = false;
     gpTrackingCamera = false;
+    gpCtx.connection?.setCommandSink(null);
     gpCtx.connection?.disconnect();
     gpCtx.connection = null;
     gpCtx.entityRenderer?.dispose();
@@ -3199,6 +3436,49 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
         // — per-envelope bandwidth tally (GW8 / PLAN-performance PC-2) —
         case 'netStats':
             return snapshotNetStats();
+        // — optimistic input (PLAN-latency L4.1). `pendingStats` is the
+        //   measurement surface for the L4 gate: confirmation latency, the
+        //   rollback count, and mergeCollisions (expected 0 — non-zero means
+        //   the overlay is double-drawing). Reset before measuring: L3.2's
+        //   finding that counters spanning the boot transient are worthless
+        //   applies here too, and boot-time RTT drives the whole window. —
+        case 'pendingStats':
+            return gpPendingActions?.stats() ?? null;
+        case 'pendingReset':
+            gpPendingActions?.resetStats();
+            return null;
+        // A/B control for the L4 measurement: with optimism off, the overlays
+        // read the raw ~1 Hz snapshot exactly as they did before L4.1, so both
+        // arms of a paired run share one binary and differ only here.
+        case 'setOptimisticInput':
+            gpOptimisticInput = args[0] !== false;
+            return gpOptimisticInput;
+        // Probes for that measurement: `overlayOrders` counts the orders in
+        // the view handed to the overlay renderers for one unit;
+        // `markerCount` counts the marker meshes actually in the scene.
+        case 'overlayOrders':
+            return gpMergedCommandQueues()
+                .find(q => q.unitId === num(0))?.orders.length ?? 0;
+        case 'markerCount':
+            return gpWaypointMarkerRenderer?.markerCount ?? 0;
+        // The overlays are gated on Spring's "hold Shift to see queued orders"
+        // gesture, which normally rides the forwarded key mods. Drive it
+        // directly so a measurement can watch markerCount without synthesising
+        // key events.
+        case 'setShift':
+            gpSetShift(args[0] !== false);
+            return null;
+        // Issue an order down the real CLIENT path. `window.test.order` goes
+        // the other way — it POSTs to the game server's exec endpoint, so the
+        // sim gets the order but `sendPlayerCommand` is never called and the
+        // optimistic path is not exercised at all. This lands on exactly the
+        // call the right-click path ends at; only hit-testing and the
+        // CommandNotify widget gate are skipped, and those are client-local
+        // and identical in both arms of an A/B.
+        case 'clientOrder':
+            gpCtx.connection?.sendPlayerCommand(
+                num(1), obj<number[]>(0, []), obj<number[]>(2, []), num(3), 0);
+            return null;
         // — per-phase frame-time distribution (PLAN-perf P0 attribution) —
         //   arg 0 = window ms (default 30 s); returns structured stats + a
         //   pre-formatted table.
