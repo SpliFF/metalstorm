@@ -156,6 +156,25 @@ measurement / comparison window and discard the window if it moved. A synthetic
 pointer re-centre alone does **not** fix it — the held keys are the dominant
 term. This bites screenshot A/Bs exactly as hard as it bites perf captures.
 
+**⚠️ Changing the render resolution is one-way — read the buffer back.**
+`window.__gp('__perfToggles.renderScale(s)')` calls
+`Engine.setHardwareScalingLevel(1/s)`, and it does not round-trip: after
+`renderScale(0.5)` then `renderScale(1)`, `getHardwareScalingLevel()` reports 1
+while `getRenderWidth()/getRenderHeight()` still report the *reduced* buffer, and
+`engine.resize(true)` will not fix it — the renderer runs on an OffscreenCanvas
+in the worker, which has no CSS size to re-derive the real backing store from.
+PLAN-perf **M3** captured a window at the wrong buffer this way. So:
+
+```js
+// after ANY resolution change, confirm what you are actually measuring
+await window.__gp(`(()=>{const e=__entityRenderer.scene.getEngine();
+  return [e.getRenderWidth(), e.getRenderHeight()];})()`);
+```
+
+To restore, don't call `renderScale` again — nudge the page size
+(`resize_page` 1280→1281→1280) so the client's own resize path re-applies the
+DPR cap, then read the buffer back to confirm.
+
 **Game choice for UI testing: use `zk`, not `papertanks`.** PaperTanks ships no
 configured LuaUI/minimap/sounds, so UI/HUD tests against it prove nothing —
 widgets simply don't exist there. ZK (and BAR) have full HUDs.
