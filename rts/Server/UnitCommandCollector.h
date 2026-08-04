@@ -46,8 +46,13 @@ public:
     ~UnitCommandCollector() override = default;
 
     /// Register with the engine's EventHandler. Must be called after
-    /// `eventHandler` is constructed.
+    /// `eventHandler` is constructed. Subscribes explicitly — see the
+    /// implementation for why AddClient alone is not enough.
     void Register();
+
+    /// Consulted by `eventHandler.AddClient`; the base returns false, which
+    /// silently unsubscribes this collector from everything.
+    bool WantsEvent(const std::string& eventName) override;
 
     /// Drain events collected since the last call. Thread-safe.
     std::vector<UnitCommandEventData> Drain();

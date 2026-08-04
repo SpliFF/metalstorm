@@ -543,7 +543,11 @@ export class WorkerCommandModes {
     viewId: number,
   ): boolean {
     const meta = this.pickWaypointMarker(cssX, cssY, viewId)?.meta;
-    if (!meta || !meta.tag) return false;
+    // `tag > 0` rather than truthy: server tags start at 1, 0 means
+    // untagged, and PLAN-latency L4.1 draws not-yet-acked orders with a
+    // synthetic NEGATIVE tag. Feeding one back as a REMOVE argument would
+    // be a no-op the server silently drops, so don't pretend it revoked.
+    if (!meta || !(meta.tag > 0)) return false;
     this.commandBuffer.issueImmediate(CMD.REMOVE, [meta.unitId], [meta.tag], 0);
     return true;
   }
@@ -557,7 +561,11 @@ export class WorkerCommandModes {
     viewId: number,
   ): boolean {
     const hit = this.pickWaypointMarker(cssX, cssY, viewId);
-    if (!hit || !hit.meta.tag) return false;
+    // See tryRevokeWaypointAt: a negative tag is an L4.1 optimistic order.
+    // The INSERT below anchors on the tag, so an unacked one would give the
+    // engine an anchor it can't resolve. The bail below (order not in the
+    // snapshot) would catch it anyway; this states the reason.
+    if (!hit || !(hit.meta.tag > 0)) return false;
     const queue = this.opts
       .getLastCommandQueues()
       .find((q) => q.unitId === hit.meta.unitId);
