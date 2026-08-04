@@ -36,6 +36,7 @@ import { renderTemplate } from '../ui/ui.js';
 import {
     defaultTeamForNewSlot, renderSideOptions, warSidesForRoom,
 } from './war-sides.js';
+import { decideRoomTransition } from './room-transition.js';
 import {
     getDefaultLobbyTemplates,
     type LobbyTemplates,
@@ -168,6 +169,14 @@ export class LobbyUI {
     /// (the player deliberately backed out to browse); it only needs to
     /// notice the room ending (E4, below).
     private detached = false;
+    /// True while the game surface (canvas + HUD) owns the screen for
+    /// `currentRoom` — i.e. between `onGameStart` firing and the player
+    /// coming back through `showAfterGame()` (quit, detach, or the
+    /// game-over overlay's Return to Lobby). Room updates that arrive
+    /// while this is set must not touch the screen; updates that arrive
+    /// while it is clear must be allowed to re-render the room view, or
+    /// the room freezes on the state it had when the game began (D25).
+    private inGame = false;
     private onParkedRoomEnded?: () => void;
     private parkedBanner: HTMLElement | null = null;
     private myPlayerId = 0;
@@ -511,36 +520,42 @@ export class LobbyUI {
             this.refreshScenarioList(newGameId);
         }
 
-        const gameRunning = this.currentRoom.state === 3 || this.currentRoom.state === 4;
-        if (gameRunning && this.currentRoom.gameServerPort > 0) {
+        const transition = decideRoomTransition(
+            this.currentRoom.id, this.currentRoom.state, this.currentRoom.gameServerPort,
+            { gameStartedForRoomId: this.gameStartedForRoomId, inGame: this.inGame, detached: this.detached },
+        );
+        if (transition !== 'refresh-room-game-gone') {
+            // A live game to reconnect to — persist the creds a page refresh
+            // uses to land back in it.
             localStorage.setItem('springrts-game-room', String(this.currentRoom.id));
             localStorage.setItem('springrts-game-port', String(this.currentRoom.gameServerPort));
-            // Detached: the player deliberately backed out to the lobby while
-            // the worker stays parked. Don't re-hide the lobby or re-fire
-            // onGameStart for a room that's still running — just keep
-            // currentRoom fresh (used by the room view + the parked banner)
-            // and fall through to E4's ended check below.
-            if (this.detached) {
-                if (this.currentScreen === 'room') { if (!this.patchRoom()) this.showRoom(); }
+        }
+        switch (transition) {
+            case 'stay-in-game':
+                // The game surface owns the screen — `currentRoom` is now
+                // fresh and there is nothing else to do.
                 return;
-            }
-            this.stopPolling();
-            this.hide();
-            if (this.gameStartedForRoomId !== this.currentRoom.id) {
+            case 'enter-game':
                 this.gameStartedForRoomId = this.currentRoom.id;
+                this.inGame = true;
+                this.stopPolling();
+                this.hide();
                 this.onGameStart?.(this.currentRoom.gameServerPort, this.currentRoom.mapId, this.currentRoom.gameId);
-            }
-            return;
-        }
-        if (this.detached && this.currentRoom.state >= 5) {
-            // E4: the game ended while parked — dispose the parked worker via
-            // the caller's callback instead of waiting on the park TTL.
-            this.onParkedRoomEnded?.();
-        }
-        if (this.currentRoom.state >= 5) {
-            this.gameStartedForRoomId = null;
-            localStorage.removeItem('springrts-game-room');
-            localStorage.removeItem('springrts-game-port');
+                return;
+            case 'refresh-room-game-gone':
+                // E4: the game ended while a session was parked — dispose the
+                // parked worker now rather than waiting out the park TTL. Note
+                // this used to test `state >= 5`, which a finished war never
+                // reaches: the lobby recycles the room to `Filling` when the
+                // subprocess exits (RoomManager::ResetRoomForNextGame), so the
+                // TTL was doing all the work.
+                if (this.detached) this.onParkedRoomEnded?.();
+                this.gameStartedForRoomId = null;
+                localStorage.removeItem('springrts-game-room');
+                localStorage.removeItem('springrts-game-port');
+                break;
+            case 'refresh-room':
+                break;
         }
         if (this.currentScreen === 'room') {
             if (!this.patchRoom()) this.showRoom();
@@ -621,6 +636,13 @@ export class LobbyUI {
     /// player is still a member of a room, show the room view;
     /// otherwise show the room browser.
     showAfterGame(): void {
+        // The lobby owns the screen again. Restart the room stream that
+        // entering the game stopped: without this the room view is frozen on
+        // the state it had at kickoff, so a war that has finished (and whose
+        // server has exited) still reads "Loading" and still offers a "Rejoin
+        // Game" button pointed at a dead port — D25's dead end.
+        this.inGame = false;
+        this.startPolling();
         if (this.currentRoom) {
             this.showRoom();
         } else {
@@ -1292,6 +1314,8 @@ export class LobbyUI {
                 // than the lobby.
                 localStorage.setItem('springrts-game-room', String(this.currentRoom.id));
                 localStorage.setItem('springrts-game-port', String(this.currentRoom.gameServerPort));
+                this.inGame = true;
+                this.gameStartedForRoomId = this.currentRoom.id;
                 this.hide();
                 this.onGameStart?.(this.currentRoom.gameServerPort, this.currentRoom.mapId, this.currentRoom.gameId);
             }
