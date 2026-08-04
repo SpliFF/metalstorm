@@ -830,6 +830,10 @@ function computeCostPreview() {
 
     const group = resolveSubjectGroup();
     const teamId = state.ctx.identity.teamId;
+    // Spring's sim playerNum — the id `authority_player_<id>` is keyed by
+    // server-side. Not `identity.accountId`: reading that made the personal
+    // pool a constant 0, so this preview refused every order the team pool
+    // alone couldn't cover (PLAN-endtoend.md D3, PLAN-native-ui.md §3.3).
     const playerId = state.ctx.identity.playerId;
     const playerPool = Number(state.ctx.store.teamRulesParam(teamId, `authority_player_${playerId}`) ?? 0);
     const teamPool = Number(state.ctx.store.teamRulesParam(teamId, 'authority_pool') ?? 0);

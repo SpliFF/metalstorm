@@ -390,3 +390,66 @@ describe("Picture.refresh — co-commander live data (task 4)", function()
         assert.are.equal(1, p.board[1].suggested)
     end)
 end)
+
+--=============================================================================
+-- readScript / readProfileHint — the scenario→AI slot configuration channel
+-- (PLAN-metalstorm-ai.md §5 NPC column). game_scenario.lua's stageAI publishes
+-- these team rulesParams; this is the read side of that contract, so the key
+-- names and the comma-list convention below must match
+-- LuaRules/Gadgets/game_scenario.lua exactly (tests/game_scenario_ai_spec.lua
+-- asserts the write side against the same names).
+--=============================================================================
+describe("Picture.refresh — scenario-authored AI slot config", function()
+    local SLATE_PARAMS = {
+        ['team:ai_profile']        = 'npc_raider',
+        ['team:ai_slate_kinds']    = 'garrison,raid,toll',
+        ['team:ai_slate_home']     = 'east_pass',
+        ['team:ai_slate_targets']  = 'north_market,south_market',
+        ['team:ai_slate_route']    = 'still_mere',
+        ['team:ai_slate_reach']    = 2,
+    }
+
+    it("reads the scripted slate into picture.script", function()
+        local Picture = freshPicture()
+        local p = refresh(Picture, makeAI({ rulesParams = SLATE_PARAMS }))
+        assert.is_not_nil(p.script)
+        assert.are.same({ 'garrison', 'raid', 'toll' }, p.script.kinds)
+        assert.are.equal('east_pass', p.script.home)
+        assert.are.same({ 'north_market', 'south_market' }, p.script.targets)
+        assert.are.same({ 'still_mere' }, p.script.route)
+        assert.are.equal(2, p.script.reach)
+    end)
+
+    it("leaves picture.script nil when no scenario published one", function()
+        local Picture = freshPicture()
+        local p = refresh(Picture, makeAI({ rulesParams = {} }))
+        assert.is_nil(p.script)
+    end)
+
+    it("degrades to nil script with no rulesParam surface at all", function()
+        local Picture = freshPicture()
+        _G.AI = {}
+        local p = Picture.refresh({ frame = 1, memory = { intel = {} },
+                                    role = role(), config = Config })
+        assert.is_nil(p.script)
+    end)
+
+    it("prefers the per-player profile key over the team-wide one", function()
+        local Picture = freshPicture()
+        _G.AI = makeAI({ rulesParams = {
+            ['team:ai_profile']   = 'npc_raider',
+            ['team:ai_profile_4'] = 'aggressive',
+        } })
+        assert.are.equal('aggressive', Picture.readProfileHint(4))
+        assert.are.equal('npc_raider', Picture.readProfileHint(7))   -- no per-player key
+        assert.are.equal('npc_raider', Picture.readProfileHint(-1))  -- unattributed AI
+    end)
+
+    it("returns no profile hint when nothing published one", function()
+        local Picture = freshPicture()
+        _G.AI = makeAI({ rulesParams = {} })
+        assert.is_nil(Picture.readProfileHint(0))
+        _G.AI = {}
+        assert.is_nil(Picture.readProfileHint(0))
+    end)
+end)

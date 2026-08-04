@@ -32,7 +32,6 @@ import {
     Camera,
     Mesh,
     AbstractMesh,
-    MeshBuilder,
     Material,
     PBRMaterial,
     StandardMaterial,
@@ -60,6 +59,7 @@ import {
 import { DitherFadePlugin } from './dither-fade-plugin.js';
 import { ImpostorUvPlugin } from './impostor-uv-plugin.js';
 import { selectAtlasCell, atlasCellCount, type AtlasLayout } from './impostor-atlas.js';
+import { createImpostorCard } from './impostor-renderer.js';
 
 /** Baked impostor atlas for one feature type. */
 export interface FeatureImpostorAtlas {
@@ -125,6 +125,11 @@ interface TypeState {
 }
 
 const EPSILON_FADE = 1 / 512;
+
+/** Largest share of a per-type `impostorDistance` the tier dead band may take
+ *  (see deriveConfig). 15% keeps a threshold-parked camera from ping-ponging
+ *  without making the swap sticky. */
+const HYSTERESIS_FRACTION = 0.15;
 
 export class FeatureLodController {
     private scene: Scene;
@@ -328,9 +333,21 @@ export class FeatureLodController {
     // ── internal ────────────────────────────────────────────────────────
 
     private deriveConfig(atlas: FeatureImpostorAtlas): FeatureLodConfig {
-        return atlas.impostorDistance && atlas.impostorDistance > 0
-            ? { ...this.cfg, impostorDistance: atlas.impostorDistance }
-            : { ...this.cfg };
+        if (!atlas.impostorDistance || atlas.impostorDistance <= 0) return { ...this.cfg };
+        // A small prop swaps CLOSE (bake_impostors.write_manifest sizes the
+        // distance so every type reaches the card at the same on-screen size,
+        // so a 19-elmo stump lands near ~350 elmos). The global hysteresis is
+        // tuned for the tree-scale threshold; left alone it would swamp a
+        // short one — a 256-elmo dead band around 348 means a Far tile only
+        // returns to Near inside 92 elmos, i.e. the camera has to be almost
+        // on top of the tile. Cap it at a fraction of the threshold so the
+        // dead band stays proportional to what it is protecting.
+        const impostorDistance = atlas.impostorDistance;
+        return {
+            ...this.cfg,
+            impostorDistance,
+            hysteresis: Math.min(this.cfg.hysteresis, impostorDistance * HYSTERESIS_FRACTION),
+        };
     }
 
     private buildTile(type: TypeState, tile: FeatureTile): TileState {
@@ -373,11 +390,9 @@ export class FeatureLodController {
         // --- FAR: one impostor card per placement. The instance matrix holds
         //     translation + uniform scale ONLY — orientation is the shared
         //     billboard uniform, so this buffer never has to be rebuilt.
-        const farMesh = MeshBuilder.CreatePlane(
+        const farMesh = createImpostorCard(
             `feat_${type.name}_far_${tile.key}`,
-            { width: type.atlas.width, height: type.atlas.height, sideOrientation: Mesh.DOUBLESIDE },
-            this.scene,
-        );
+            type.atlas.width, type.atlas.height, this.scene);
         farMesh.material = type.farMaterial;
         farMesh.isPickable = false;
         farMesh.receiveShadows = false;

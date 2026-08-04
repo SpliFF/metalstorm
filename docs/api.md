@@ -135,8 +135,10 @@ All room endpoints require authentication.
 | `/api/rooms/startpos` | POST | `{pos: 0-N, target_player_id?}` | Set start position |
 | `/api/rooms/kick` | POST | `{target_player_id}` | Kick player (host only) |
 | `/api/rooms/close` | POST | | Close room (host only) |
-| `/api/rooms/ai/add` | POST | `{ai_id, name?, team?}` | Add AI slot |
+| `/api/rooms/ai/add` | POST | `{ai_id, name?, team?, profile?}` | Add AI slot |
 | `/api/rooms/ai/remove` | POST | `{slot_index}` | Remove AI slot |
+| `/api/rooms/ai/team` | POST | `{slot_index, team}` | Set AI slot's team (host only) |
+| `/api/rooms/ai/profile` | POST | `{slot_index, profile}` | Set (or, with `profile:""`, clear) an AI slot's personality/difficulty profile — host only. `profile` is opaque, game-specific text (e.g. Metalstorm strategos's `"aggressive"`/`"caretaker"`); see PLAN-metalstorm-ai.md §10 task 6. |
 | `/api/rooms/start` | POST | | Start game (spawns server) |
 
 **Room object:**

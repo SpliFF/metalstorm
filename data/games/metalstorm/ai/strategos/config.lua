@@ -117,4 +117,18 @@ end
 Config.DEFAULT_PROFILE = 'default'
 Config.SEED = 1337                     -- fixed → reproducible; vary per test
 
+-- Profiles a scenario/lobby may select for a slot (plan §3.4/§10 task 6). This
+-- is an ALLOW-LIST, not documentation: the selected name arrives as untrusted
+-- rulesParam text and is concatenated into `require('profiles.'..name)`, so
+-- main.lua refuses anything not listed here. (The plugin loader's own sandbox —
+-- no `..`, no path separators — is the second line of defence, not the first.)
+-- Add a profile file AND its name here to ship a new personality.
+Config.PROFILES = {
+    default    = true,
+    aggressive = true,
+    caretaker  = true,
+    mentor     = true,
+    npc_raider = true,
+}
+
 return Config

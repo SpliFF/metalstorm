@@ -146,13 +146,19 @@ local function sourceWeight(goal, role, guidance, profile)
     return w
 end
 
-local function authorityCost(goal, pkg, picture, gov, config)
+--- Region-ownership bucket for the cost formula's regionMod (friendly/
+-- neutral/enemy). GOAL-dependent only (never `pkg`) — hoisted to per-goal
+-- in `assign` (task 7 perf pass) rather than recomputed once per package.
+local function regionKind(goal, picture)
     local r = goal.region and (picture.regions or {})[goal.region]
-    local kind = 'neutral'
     if r then
-        if r.owner == picture.economy._teamId then kind = 'friendly'
-        elseif r.owner and r.owner ~= -1 then kind = 'enemy' end
+        if r.owner == picture.economy._teamId then return 'friendly' end
+        if r.owner and r.owner ~= -1 then return 'enemy' end
     end
+    return 'neutral'
+end
+
+local function authorityCost(goal, pkg, kind, gov, config)
     if goal.kind == 'DEFEND' then
         return config.predictPostureCost(pkg, kind, gov.costScale)
     end
@@ -173,6 +179,21 @@ end
 
 --=============================================================================
 -- 5+6. Greedy assignment with force floors + commitment hysteresis (§3.3).
+--
+-- PERF (§10 task 7 — measured at the §6 50-region/500-squad fixture: this
+-- loop is goals×packages and was the dominant strategic-tick cost, ~65% of
+-- the tick, mostly two things the profile indicted:
+--   1. `expectedValue`/`sourceWeight`/the region-kind lookup are functions of
+--      GOAL alone — they never read `pkg` — but were being recomputed once
+--      per (goal, pkg) pair. Hoisted out to once per goal.
+--   2. Every candidate pair allocated its own hash table (`pairs_[#pairs_+1]
+--      = {goal=..., pkg=..., ...}`), ~goals×packages allocations/tick (the
+--      dominant source of the measured per-tick GC churn). Replaced with
+--      parallel arrays sorted by an index permutation; only the handful of
+--      WINNING assignments (≤ #goals) get a real table, in `emit`'s shape.
+-- Same scores, same tie-breaks, same greedy order as before — this is a
+-- constant-factor rewrite, not a behaviour change (planner_spec.lua's
+-- fixture-level assertions are the regression guard).
 --=============================================================================
 local function assign(goals, packages, ctx)
     local picture, profile, role = ctx.picture, ctx.profile, ctx.role
@@ -180,75 +201,84 @@ local function assign(goals, packages, ctx)
     local commitments = ctx.commitments
     local guidance = picture.guidance
 
-    -- Score every (goal, package) pair the guidance allows. RESERVE is NOT a
-    -- competitor — it is the sink for force no real goal claimed (§3.1), so it
-    -- is excluded here and swept up after assignment. (Otherwise, since scores
-    -- are cost-dominated and often negative, cheap RESERVE could out-rank a
-    -- costly real objective and steal its package.)
-    local pairs_ = {}
+    -- Parallel candidate arrays (index i <-> one (goal, pkg) pair). RESERVE
+    -- is NOT a competitor — it is the sink for force no real goal claimed
+    -- (§3.1), so it is excluded here and swept up after assignment.
+    -- (Otherwise, since scores are cost-dominated and often negative, cheap
+    -- RESERVE could out-rank a costly real objective and steal its package.)
+    local cGoal, cPkg, cScore, cPs, cCost, cTie = {}, {}, {}, {}, {}, {}
+    local n = 0
+
     for _, goal in ipairs(goals) do
         if not guidanceExcludes(goal, guidance) and goal.kind ~= 'RESERVE' then
+            -- Package-independent terms: once per goal, not once per pair.
+            local ev = expectedValue(goal, picture, profile, guidance, config)
+            local sw = sourceWeight(goal, role, guidance, profile)
+            local kind = regionKind(goal, picture)
+            local c = commitments[goal.id]
+
             for _, pkg in ipairs(packages) do
                 local locked = pkg.locked or guidance.assetLocks[pkg.id]
                 -- Co-commander etiquette: only assign idle/unassigned force,
                 -- and never a locked group (§5.1 / §6.2 lock beats idle).
                 local touchable = (not locked) and (not role.idleOnly or pkg.idle)
                 if touchable then
-                    local ev = expectedValue(goal, picture, profile, guidance, config)
                     local ps = pSuccess(pkg, goal, picture, profile)
-                    local cost = authorityCost(goal, pkg, picture, gov, config)
+                    local cost = authorityCost(goal, pkg, kind, gov, config)
                     local travel = travelPenalty(pkg, goal, picture, config)
-                    local sw = sourceWeight(goal, role, guidance, profile)
                     -- commitment bonus: sticky if this pkg already serves goal.
                     local bonus = 0
-                    local c = commitments[goal.id]
                     if c and c.packageId == pkg.id then
                         local age = picture.frame - (c.sinceFrame or picture.frame)
                         bonus = math.max(0, 1 - age / config.COMMITMENT_DECAY_FRAMES)
                     end
-                    local score = ev * ps * sw - cost - travel + bonus
-                    pairs_[#pairs_ + 1] = {
-                        goal = goal, pkg = pkg, score = score, ps = ps, cost = cost,
-                    }
+                    n = n + 1
+                    cGoal[n], cPkg[n] = goal, pkg
+                    cScore[n] = ev * ps * sw - cost - travel + bonus
+                    cPs[n], cCost[n] = ps, cost
+                    -- Tie-break assigned up front (§10): calling rng.random()
+                    -- inside the sort comparator would violate the strict
+                    -- weak ordering table.sort requires (non-deterministic
+                    -- across calls for the same pair).
+                    cTie[n] = rng.random()
                 end
             end
         end
     end
 
-    -- Descending score; deterministic tie-break via a stable index (§10).
-    -- Pre-assign a random tie-breaker value to each pair so the comparison
-    -- function is stable (calling rng.random() inside the comparator violates
-    -- the strict weak ordering — it can return different values for the same
-    -- comparison, which Lua table.sort requires to be consistent).
-    for i, p in ipairs(pairs_) do
-        p._tieBreak = rng.random()
-    end
-    table.sort(pairs_, function(a, b)
-        if a.score == b.score then return a._tieBreak < b._tieBreak end
-        return a.score > b.score
+    -- Descending score; deterministic tie-break via the pre-assigned value.
+    local order = {}
+    for i = 1, n do order[i] = i end
+    table.sort(order, function(i, j)
+        if cScore[i] == cScore[j] then return cTie[i] < cTie[j] end
+        return cScore[i] > cScore[j]
     end)
 
     local usedPkg, usedGoal, assignments = {}, {}, {}
     local floor = math.max(config.PSUCCESS_FLOOR, profile.pSuccessFloor or 0)
-    for _, cand in ipairs(pairs_) do
-        local gid, pid = cand.goal.id, cand.pkg.id
+    for _, idx in ipairs(order) do
+        local goal, pkg = cGoal[idx], cPkg[idx]
+        local gid, pid = goal.id, pkg.id
         if not usedPkg[pid] and not usedGoal[gid] then
             -- Force floor (§3.3): don't trickle into a losing fight. DEFEND is
             -- exempt (defending your own valuable ground is always worth it).
-            local exemptFloor = cand.goal.kind == 'DEFEND'
-            if exemptFloor or cand.ps >= floor then
+            local exemptFloor = goal.kind == 'DEFEND'
+            if exemptFloor or cPs[idx] >= floor then
                 -- Hysteresis: replacing an existing commitment needs to clear
                 -- the reassign bar (§3.3) — prevents thrash.
                 local existing = commitments[gid]
                 local barOK = true
                 if existing and existing.packageId ~= pid then
-                    barOK = cand.score > (existing.score or 0) * config.REASSIGN_BAR
+                    barOK = cScore[idx] > (existing.score or 0) * config.REASSIGN_BAR
                 end
                 if barOK then
                     usedPkg[pid], usedGoal[gid] = true, true
-                    assignments[#assignments + 1] = cand
+                    assignments[#assignments + 1] = {
+                        goal = goal, pkg = pkg, score = cScore[idx],
+                        ps = cPs[idx], cost = cCost[idx],
+                    }
                     commitments[gid] = {
-                        packageId = pid, sinceFrame = picture.frame, score = cand.score,
+                        packageId = pid, sinceFrame = picture.frame, score = cScore[idx],
                     }
                 end
             end

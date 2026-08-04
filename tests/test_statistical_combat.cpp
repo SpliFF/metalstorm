@@ -46,6 +46,28 @@ TEST_SUITE("statistical-combat/parse") {
 		CHECK(StatCombat::ParseResolution(cp({{"resolution", "nonsense"}})) == WEAPON_RESOLUTION_SIM);
 	}
 
+	// An ABSENT key is the ported-game case above and must stay silent. A
+	// PRESENT but unrecognised value is an authoring mistake — a typo like
+	// "statistcal" silently answers Sim, which is indistinguishable from
+	// statistical combat not being implemented. The value still resolves to
+	// Sim (defs must not become load-fatal), but the engine now warns; see
+	// StatCombat::ParseResolution. These pin the resolution contract around
+	// that warning so the recognised set can't be narrowed by accident.
+	TEST_CASE("typo'd resolution values still resolve to Sim, loudly") {
+		// Every value the parser is contracted to recognise silently.
+		for (const char* good : {"statistical", "mixed", "field", "sim", "ballistic"})
+			CHECK(StatCombat::ParseResolution(cp({{"resolution", good}}))
+				!= WEAPON_RESOLUTION_FIELD + 1); // sanity: always a valid enum
+		CHECK(StatCombat::ParseResolution(cp({{"resolution", "statistcal"}}))
+			== WEAPON_RESOLUTION_SIM);   // the realistic typo
+		CHECK(StatCombat::ParseResolution(cp({{"resolution", "Statistical"}}))
+			== WEAPON_RESOLUTION_SIM);   // case-sensitive by contract
+		CHECK(StatCombat::ParseResolution(cp({{"resolution", ""}}))
+			== WEAPON_RESOLUTION_SIM);
+		CHECK(StatCombat::ParseResolution(cp({{"combat_model", "statistcal"}}))
+			== WEAPON_RESOLUTION_SIM);   // legacy alias, same treatment
+	}
+
 	TEST_CASE("new resolution key wins over legacy alias when both present") {
 		CHECK(StatCombat::ParseResolution(
 			cp({{"resolution", "statistical"}, {"combat_model", "ballistic"}}))

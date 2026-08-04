@@ -20,7 +20,19 @@ import { uiStore, type UIStore } from './ui-store.js';
 import { stampUrl } from '../../config.js';
 import { injectStyle } from '../ui.js';
 import { clientSettings } from '../../core/client-settings.js';
+import { parseRevealPredicate } from './reveal-predicate.js';
 import nativeUiCss from './native-ui.css?raw';
+
+/**
+ * Every `subscribes` / `revealOn` store path the loader recognises. Used only
+ * to warn on a manifest typo — a widget that declares `subscribes: ["econmy"]`
+ * still works (it subscribes itself in `init()`), but the typo is a reliable
+ * sign the author expected the loader to wire something it never will.
+ */
+const KNOWN_STORE_PATHS: ReadonlySet<string> = new Set([
+    'gameRulesParams', 'teamRulesParams', 'playerRoster', 'selection',
+    'economy', 'unitQueues', 'directives', 'gameEvents', 'orgGroups',
+]);
 
 export interface WidgetManifest {
     game: string;
@@ -36,8 +48,16 @@ export interface WidgetDescriptor {
     id: string;
     entry: string;           // Relative path like "widgets/authority-bar.js"
     mount: string;           // Mount point: "top-center", "right", "left", etc.
-    subscribes?: string[];   // Store paths this widget subscribes to
-    revealOn?: string;       // Progressive disclosure predicate (not impl yet)
+    /** Advisory: the ui-store paths this widget reads. The loader does not
+     *  wire subscriptions from it (widgets subscribe themselves in `init()`);
+     *  it validates the names and warns on unknown ones, which is how a
+     *  manifest typo gets caught instead of silently doing nothing. */
+    subscribes?: string[];
+    /** Progressive-disclosure predicate (PLAN-native-ui.md §3). The widget
+     *  stays unmounted until this first evaluates true against the ui-store,
+     *  then mounts permanently — disclosure is one-way. Grammar and examples
+     *  in `reveal-predicate.ts`. Absent ⇒ mount immediately. */
+    revealOn?: string;
     builtin?: boolean;       // Mount the client-bundled module from BUILTIN_WIDGETS
                              // instead of fetching entry from the game dir. Used for
                              // engine-provided UI that depends on bundled modules
@@ -64,9 +84,21 @@ export interface WidgetDescriptor {
 export interface WidgetContext {
     store: UIStore;
     mount: HTMLElement;      // DOM mount point inside #ui-root
+    /**
+     * Who the local session is, in the sim's terms.
+     *
+     * `playerId` is Spring's **sim playerNum** — the id that scopes every
+     * rulesParam key (`authority_player_<playerId>`, `score_<playerId>_*`),
+     * every Lua callin argument, and every server-side player check. It is
+     * NOT the DB account id; the two are different numbers and coincide only
+     * by accident on low-id dev accounts. `accountId` is available for the
+     * rare widget that needs the persistent account (profiles, ratings) —
+     * never for anything sim-scoped. See PLAN-native-ui.md §3.3.
+     */
     identity: {
         playerId: number;
         teamId: number;
+        accountId: number;
     };
     sendCommand?: (cmd: any) => void;        // Command submission API (stub for now)
     strategicMap?: {                         // Strategic map overlay API (stub for now)
@@ -118,8 +150,17 @@ export class WidgetLoader {
     private uiRoot: HTMLElement | null = null;
     private sendCommandProvider: ((cmd: any) => void) | null = null;
     private gameId = '';
+    /** Local DB account id, surfaced as `ctx.identity.accountId`. Distinct
+     *  from the sim playerNum threaded through as `playerId`. */
+    private accountId = 0;
     /** PLAN-metalstorm-onboarding.md §4 — gates `hideForSpectator` widgets. */
     private isSpectator = false;
+    /** PLAN-metalstorm-onboarding.md §5 — when false, `revealOn` is ignored and
+     *  every widget mounts at load. Onboarding gates this on `sessions_played`
+     *  so a veteran account gets the whole HUD immediately. */
+    private progressiveDisclosure = true;
+    /** Unsubscribe fns for widgets still waiting on their `revealOn`. */
+    private pendingReveals = new Map<string, () => void>();
     /** Keeps the left rail docked below whatever occupies the top-left mount. */
     private topLeftObserver: ResizeObserver | null = null;
     /**
@@ -132,14 +173,24 @@ export class WidgetLoader {
     private generation = 0;
 
     /**
+     * Enable/disable `revealOn` gating for the next `load()`
+     * (PLAN-metalstorm-onboarding.md §5). Disabled ⇒ every widget mounts at
+     * load regardless of its predicate. Call before `load()`.
+     */
+    setProgressiveDisclosure(enabled: boolean): void {
+        this.progressiveDisclosure = enabled;
+    }
+
+    /**
      * Load and mount all widgets for the given game.
      *
      * @param gameId - Game identifier (e.g., "metalstorm")
      * @param httpBase - HTTP base URL for fetching game data
-     * @param playerId - Local player ID
+     * @param playerId - Local **sim playerNum** (see WidgetContext.identity)
      * @param teamId - Local player's team ID
      * @param role - Session role ("player" / "spectator" / "admin"); gates
      *   `hideForSpectator` manifest entries (PLAN-metalstorm-onboarding §4).
+     * @param accountId - Local DB account id (see WidgetContext.identity)
      */
     async load(
         gameId: string,
@@ -147,9 +198,13 @@ export class WidgetLoader {
         playerId: number,
         teamId: number,
         role: string = '',
+        accountId: number = 0,
     ): Promise<void> {
         this.gameId = gameId;
         this.isSpectator = role === 'spectator';
+        // Held on the instance rather than threaded through armReveal /
+        // loadWidget: it is session-constant and only the ctx builder reads it.
+        this.accountId = accountId;
         const generation = this.generation;
         const stale = () => this.generation !== generation;
 
@@ -186,12 +241,79 @@ export class WidgetLoader {
                 console.log(`[widget-loader] Skipping ${descriptor.id} (spectator session)`);
                 continue;
             }
+            this.validateSubscribes(descriptor);
             try {
-                await this.loadWidget(descriptor, baseUrl, playerId, teamId);
+                // `revealOn` may defer the mount indefinitely; an immediate
+                // widget is awaited so load() still resolves with the initial
+                // HUD fully up (tests and the boot path both rely on that).
+                if (!this.armReveal(descriptor, baseUrl, playerId, teamId, generation)) {
+                    await this.loadWidget(descriptor, baseUrl, playerId, teamId);
+                }
             } catch (e) {
                 console.error(`[widget-loader] Failed to load widget ${descriptor.id}:`, e);
             }
         }
+    }
+
+    /** Warn on `subscribes` entries that name no real store path. */
+    private validateSubscribes(descriptor: WidgetDescriptor): void {
+        for (const path of descriptor.subscribes ?? []) {
+            if (!KNOWN_STORE_PATHS.has(path)) {
+                console.warn(
+                    `[widget-loader] Widget ${descriptor.id} declares subscribes:"${path}", ` +
+                    `which is not a ui-store path (typo?). Known: ${[...KNOWN_STORE_PATHS].join(', ')}`,
+                );
+            }
+        }
+    }
+
+    /**
+     * Apply `revealOn` (PLAN-native-ui.md §3): returns true if the mount was
+     * deferred, false if the widget should be mounted now.
+     *
+     * Disclosure is one-way — once the predicate fires we mount and drop the
+     * subscription, so a widget never disappears again mid-game.
+     */
+    private armReveal(
+        descriptor: WidgetDescriptor,
+        baseUrl: string,
+        playerId: number,
+        teamId: number,
+        generation: number,
+    ): boolean {
+        if (!descriptor.revealOn || !this.progressiveDisclosure) return false;
+
+        const predicate = parseRevealPredicate(descriptor.revealOn);
+        if (!predicate) {
+            // Fail *open*. A malformed predicate that hid the widget would be
+            // an unreachable panel with no player-visible cause; a visible
+            // panel plus a console warning is diagnosable.
+            console.warn(
+                `[widget-loader] Widget ${descriptor.id}: unparseable revealOn ` +
+                `"${descriptor.revealOn}" — mounting immediately`,
+            );
+            return false;
+        }
+
+        const identity = { playerId, teamId };
+        if (predicate.test(uiStore, identity)) return false;   // already true
+
+        const unsubscribe = uiStore.subscribe([...predicate.paths], () => {
+            if (this.generation !== generation) return;         // torn down mid-wait
+            if (!predicate.test(uiStore, identity)) return;
+
+            this.pendingReveals.get(descriptor.id)?.();
+            this.pendingReveals.delete(descriptor.id);
+
+            console.log(`[widget-loader] revealOn fired for ${descriptor.id} ("${predicate.source}")`);
+            this.loadWidget(descriptor, baseUrl, playerId, teamId).catch((e) => {
+                console.error(`[widget-loader] Deferred mount of ${descriptor.id} failed:`, e);
+            });
+        });
+
+        this.pendingReveals.set(descriptor.id, unsubscribe);
+        console.log(`[widget-loader] Widget ${descriptor.id} deferred on revealOn "${predicate.source}"`);
+        return true;
     }
 
     /**
@@ -422,6 +544,11 @@ export class WidgetLoader {
         playerId: number,
         teamId: number,
     ): Promise<void> {
+        // A revealOn mount can fire arbitrarily late, so re-check teardown here
+        // as well as in the subscriber — the dynamic import below is itself a
+        // window in which dispose() can land.
+        const generation = this.generation;
+
         // Get mount point
         const mountElement = this.mountPoints.get(descriptor.mount);
         if (!mountElement) {
@@ -444,6 +571,7 @@ export class WidgetLoader {
             const widgetUrl = stampUrl(`${baseUrl}/${descriptor.entry}`);
             module = await import(/* @vite-ignore */ widgetUrl);
         }
+        if (this.generation !== generation) return;
         const widget = module.default as Widget;
 
         if (!widget || typeof widget.init !== 'function') {
@@ -461,7 +589,7 @@ export class WidgetLoader {
         const context: WidgetContext = {
             store: uiStore,
             mount: panel ? panel.body : mountElement,
-            identity: { playerId, teamId },
+            identity: { playerId, teamId, accountId: this.accountId },
             sendCommand: this.createSendCommand(),
             strategicMap: this.createStrategicMapStub(),
             setBadge: panel ? panel.setBadge : () => {},
@@ -534,9 +662,9 @@ export class WidgetLoader {
             setMarkers: (markers: any[]) => {
                 if (!warned) {
                     console.warn('[widget-loader] strategicMap.setMarkers not yet wired (strategic-map overlay gap)');
+                    console.log('[widget-loader] setMarkers (stub):', markers);
                     warned = true;
                 }
-                console.log('[widget-loader] setMarkers (stub):', markers);
             },
         };
     }
@@ -546,6 +674,14 @@ export class WidgetLoader {
      */
     dispose(): void {
         this.generation++;
+
+        // Drop revealOn watchers first: they hold ui-store subscriptions that
+        // outlive the HUD otherwise, and would mount a widget into a torn-down
+        // mount point on the next store change.
+        for (const unsubscribe of this.pendingReveals.values()) {
+            try { unsubscribe(); } catch { /* nothing useful to do */ }
+        }
+        this.pendingReveals.clear();
 
         for (const [id, { widget }] of this.widgets.entries()) {
             try {

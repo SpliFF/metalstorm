@@ -10,30 +10,30 @@
 //
 // Contract mirrors authority-bar.js/objectives-panel.js exactly:
 //   init(ctx)/dispose(), ctx.store.gameRulesParam(key) singular getter,
-//   ctx.identity = { playerId, teamId }.
+//   ctx.identity = { playerId, teamId, accountId }.
 //
-// NOT wired here (blocked on infrastructure this widget doesn't own — same
-// pre-loader state as every other native-ui widget, see authority-bar.js):
-//   - live rulesParams data at all: the server->client wire producer for
-//     Set{Game,Team,Player,Unit}RulesParam doesn't exist yet (dead consumer
-//     in client/src/core/lua-ui-host.ts) — this widget is correct against
-//     the documented rulesParams contract but unverifiable live until that
-//     lands (PLAN-metalstorm-authority.md field notes has the full writeup).
-//   - a player roster: "which playerIDs exist" / "who's on my team" has no
-//     working accessor yet. The manifest (metalstorm.ui.json) already
-//     declares a `playerRoster` subscription topic — authority-bar.js lists
-//     it too but doesn't consume it either — so this widget subscribes to
-//     the SAME anticipated topic rather than inventing a new one, and reads
-//     it via the documented-but-not-yet-implemented `ctx.store.playerRoster()`
-//     getter (mirrors `gameRulesParam`/`teamRulesParam`'s singular-getter
-//     shape). Until that store method exists, this can only show the LOCAL
-//     player's own row for certain; it warns once (not silently) when the
-//     getter is absent — same documented-stand-in convention as
-//     ctx.sendCommand/ctx.strategicMap in objectives-panel.js.
+// `ctx.identity.playerId` and every `playerId` on a roster entry are Spring's
+// SIM playerNum — the same number the `score_<playerID>_*` keys are scoped by.
+// Not the DB account id; see PLAN-native-ui.md §3.3. Reading the account id
+// here is what made this panel show one anonymous `You 0 0 0` row forever
+// (PLAN-endtoend.md D3).
+//
+// Every player is listed, not just the local team: naming the opposition (and
+// the AI) is the point of a scoreboard, and the underlying rulesParams are
+// gameRulesParams — global by construction, so there is nothing to leak by
+// showing them. Rows are grouped by team so allies read as a block.
 
-import { readScoreboard } from '../lib/scoreboard.js';
+import { readScoreboard, scoreboardRoster } from '../lib/scoreboard.js';
 
 let warnedNoRoster = false;
+
+/** Escape text destined for innerHTML. Player names are user-chosen strings
+ *  that arrive over the wire, so they are never interpolated raw. */
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
 
 export default {
   id: 'scoreboard-panel',
@@ -59,41 +59,70 @@ export default {
     this._render();
   },
 
-  /** Every playerId this widget can currently show a row for — see the
-   *  header note on why this is usually just the local player. */
-  _rosterIds() {
+  /** Roster entries to show — ordering and filtering live in ui/lib so they
+   *  are testable without a DOM. */
+  _rosterEntries() {
     const identity = this.ctx.identity ?? {};
-    const ids = new Set();
-    if (identity.playerId !== undefined) ids.add(identity.playerId);
-
     const getRoster = this.ctx.store && this.ctx.store.playerRoster;
-    if (typeof getRoster === 'function') {
-      for (const p of getRoster() ?? []) {
-        if (p && p.teamId === identity.teamId && p.playerId !== undefined) ids.add(p.playerId);
+
+    if (typeof getRoster !== 'function') {
+      // Should not happen — ui-store has implemented playerRoster() since the
+      // native-UI loader shipped — but a missing getter must read as a
+      // diagnosable warning, not a silently empty panel.
+      if (!warnedNoRoster) {
+        warnedNoRoster = true;
+        console.warn('[scoreboard-panel] ctx.store.playerRoster is not a function — ' +
+          "falling back to the local player's own row");
       }
-    } else if (!warnedNoRoster) {
-      warnedNoRoster = true;
-      console.warn(
-        '[scoreboard-panel] ctx.store.playerRoster is not wired yet — showing only the local ' +
-        "player's own row (FIDELITY-STANDIN: the manifest declares this subscription topic but no " +
-        'store getter implements it yet, see file header).'
-      );
+      return identity.playerId === undefined ? []
+        : scoreboardRoster([{ playerId: identity.playerId, teamId: identity.teamId }], identity);
     }
-    return Array.from(ids);
+
+    return scoreboardRoster(getRoster(), identity);
+  },
+
+  /** Display markup for a roster entry: the player's own name, marked up for
+   *  "you" and for AI opponents. */
+  _label(entry) {
+    if (entry.isSelf) return `${esc(entry.name)} (You)`;
+    if (entry.isAI) return `${esc(entry.name)} <span class="ms-score-ai">AI</span>`;
+    return esc(entry.name);
   },
 
   _render() {
-    const identity = this.ctx.identity ?? {};
-    const rows = readScoreboard((key) => this.ctx.store.gameRulesParam(key), this._rosterIds());
+    const entries = this._rosterEntries();
+    const rows = readScoreboard(
+      (key) => this.ctx.store.gameRulesParam(key),
+      entries.map((e) => e.playerId),
+    );
     const body = this.el.querySelector('tbody');
-    const items = rows.map((r) => (
-      `<tr class="ms-score-row${r.playerId === identity.playerId ? ' is-self' : ''}">` +
-      `<td class="ms-score-player">${r.playerId === identity.playerId ? 'You' : 'P' + r.playerId}</td>` +
-      `<td class="ms-score-earned">${r.earned}</td>` +
-      `<td class="ms-score-spent">${r.spent}</td>` +
-      `<td class="ms-score-objectives">${r.objectives}</td>` +
-      `</tr>`
-    ));
+
+    let lastTeam;
+    const items = [];
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      const e = entries[i];
+      // One separator row per team, so allies read as a block and the
+      // opposition is visibly the opposition.
+      if (e.teamId !== lastTeam) {
+        lastTeam = e.teamId;
+        const own = e.isOwnTeam ? ' is-own-team' : '';
+        items.push(
+          `<tr class="ms-score-teamhead${own}"><td colspan="4">Team ${esc(e.teamId)}` +
+          `${own ? ' <span class="ms-score-ours">(yours)</span>' : ''}</td></tr>`,
+        );
+      }
+      const self = e.isSelf ? ' is-self' : '';
+      items.push(
+        `<tr class="ms-score-row${self}">` +
+        `<td class="ms-score-player">${this._label(e)}</td>` +
+        `<td class="ms-score-earned">${r.earned}</td>` +
+        `<td class="ms-score-spent">${r.spent}</td>` +
+        `<td class="ms-score-objectives">${r.objectives}</td>` +
+        `</tr>`,
+      );
+    }
+
     body.innerHTML = items.join('') ||
       '<tr><td colspan="4" class="nui-empty">No scoreboard data yet</td></tr>';
   },

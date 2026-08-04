@@ -58,8 +58,21 @@ startPos():number {
   return offset ? this.bb!.readInt8(this.bb_pos + offset) : -1;
 }
 
+/**
+ * Optional personality/difficulty profile name for AI plugins that
+ * support one (e.g. Metalstorm's strategos: "aggressive", "caretaker")
+ * — PLAN-metalstorm-ai.md §10 task 6. Empty = no override. Opaque to
+ * the engine; set via POST /api/rooms/ai/profile.
+ */
+profile():string|null
+profile(optionalEncoding:flatbuffers.Encoding):string|Uint8Array|null
+profile(optionalEncoding?:any):string|Uint8Array|null {
+  const offset = this.bb!.__offset(this.bb_pos, 12);
+  return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
+}
+
 static startRoomAISlot(builder:flatbuffers.Builder) {
-  builder.startObject(4);
+  builder.startObject(5);
 }
 
 static addAiId(builder:flatbuffers.Builder, aiIdOffset:flatbuffers.Offset) {
@@ -78,17 +91,22 @@ static addStartPos(builder:flatbuffers.Builder, startPos:number) {
   builder.addFieldInt8(3, startPos, -1);
 }
 
+static addProfile(builder:flatbuffers.Builder, profileOffset:flatbuffers.Offset) {
+  builder.addFieldOffset(4, profileOffset, 0);
+}
+
 static endRoomAISlot(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
 }
 
-static createRoomAISlot(builder:flatbuffers.Builder, aiIdOffset:flatbuffers.Offset, displayNameOffset:flatbuffers.Offset, team:number, startPos:number):flatbuffers.Offset {
+static createRoomAISlot(builder:flatbuffers.Builder, aiIdOffset:flatbuffers.Offset, displayNameOffset:flatbuffers.Offset, team:number, startPos:number, profileOffset:flatbuffers.Offset):flatbuffers.Offset {
   RoomAISlot.startRoomAISlot(builder);
   RoomAISlot.addAiId(builder, aiIdOffset);
   RoomAISlot.addDisplayName(builder, displayNameOffset);
   RoomAISlot.addTeam(builder, team);
   RoomAISlot.addStartPos(builder, startPos);
+  RoomAISlot.addProfile(builder, profileOffset);
   return RoomAISlot.endRoomAISlot(builder);
 }
 
@@ -97,7 +115,8 @@ unpack(): RoomAISlotT {
     this.aiId(),
     this.displayName(),
     this.team(),
-    this.startPos()
+    this.startPos(),
+    this.profile()
   );
 }
 
@@ -107,6 +126,7 @@ unpackTo(_o: RoomAISlotT): void {
   _o.displayName = this.displayName();
   _o.team = this.team();
   _o.startPos = this.startPos();
+  _o.profile = this.profile();
 }
 }
 
@@ -115,19 +135,22 @@ constructor(
   public aiId: string|Uint8Array|null = null,
   public displayName: string|Uint8Array|null = null,
   public team: number = 0,
-  public startPos: number = -1
+  public startPos: number = -1,
+  public profile: string|Uint8Array|null = null
 ){}
 
 
 pack(builder:flatbuffers.Builder): flatbuffers.Offset {
   const aiId = (this.aiId !== null ? builder.createString(this.aiId!) : 0);
   const displayName = (this.displayName !== null ? builder.createString(this.displayName!) : 0);
+  const profile = (this.profile !== null ? builder.createString(this.profile!) : 0);
 
   return RoomAISlot.createRoomAISlot(builder,
     aiId,
     displayName,
     this.team,
-    this.startPos
+    this.startPos,
+    profile
   );
 }
 }

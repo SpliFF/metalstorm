@@ -111,7 +111,7 @@ const connection = new Connection({
     onStateChange(state) {
         statusEl.textContent = state;
     },
-    onAuthenticated(_playerId, _token) {
+    onAuthenticated() {
         statusEl.textContent = 'Connected';
         // Register a viewport covering the full map at strategic zoom
         connection.sendViewportUpdate(0,

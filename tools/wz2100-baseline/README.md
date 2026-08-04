@@ -25,8 +25,9 @@ stay GPL, and every one carries a row in `data/games/metalstorm/ASSETS.md`.
 | File | Role |
 |---|---|
 | `pie/*.pie` | GPL source component parts, checked in (tiny; GPL wants the source available) |
-| `texpages/*.png` | GPL source texture pages (diffuse + `_tcmask`), fetched from the `data-texpages` submodule repo |
-| `*.wzasm` | one assembly manifest per unit — component `.pie` files, mount points, scale, dominant axis (replaces the old `assemblies.json`; read directly by the `.pie` importer) |
+| `texpages/*.png` | texture pages: GPL upstream diffuse + `_tcmask` masks (fetched from `data-texpages`), plus the authored `*_ms_tcmask` masks |
+| `*.wzasm` | one assembly manifest per unit — component `.pie` files, mount points, scale, dominant axis, team-mask overrides (replaces the old `assemblies.json`; read directly by the `.pie` importer) |
+| `make_tcmask.py` | author the vehicle team-colour masks from the `.pie` geometry (see below) |
 | `fetch_pie.sh` | re-download the `.pie` parts + texture pages from pinned upstream refs (provenance) |
 | `build.sh` | run the full pipeline → `data/games/metalstorm/models/` (`.gltf`+`.bin` + `page-*.ktx2`) |
 
@@ -39,10 +40,40 @@ stay GPL, and every one carries a row in `data/games/metalstorm/ASSETS.md`.
 | `wz_cyborg` | `cybd_std` body + `cy_can` cannon | body, gun, muzzle | 33, 17 |
 | `wz_building` | `blhq` command HQ (PIE4, has `TCMASK`) | body | 34 (+ `page-34_tcmask`) |
 
-`wz_building` is PIE4 with a `TCMASK` directive → the importer carries the mask
-page through Assimp and modelimporter's post-fix injects it as the
-`SPRINGRTS_team_color` material extension, so the HQ team-tints (verified: team-0
-blue on the mid-tier bands).
+## Team colour
+
+All four models team-tint, but they get their mask from three different places
+(most specific wins — see `PIEImporter.h`):
+
+| Model | Mask source |
+|---|---|
+| `wz_building` | PIE4 `TCMASK` directive → `page-34_tcmask` |
+| `wz_cyborg` | PIE3 `TYPE & 0x10000` flag → `page-33_tcmask` / `page-17_tcmask` by WZ's `page-<N>_tcmask` naming convention |
+| `wz_tank`, `wz_wheeled` | **authored** hull/turret mask on pages 14/17, wired through the `.wzasm` `tcmask` map; tracks/wheels fall through to the stock `page-16_tcmask` |
+
+The vehicles need authored art because upstream has none that fits them. The
+Viper and heavy hulls (`drlbod01` / `drhbod09`) are `TYPE 200` — not flagged
+team-coloured at all — and the stock `page-14_tcmask` has **zero** coverage over
+the UV islands they use; `page-17_tcmask` (weapons) is **entirely black**
+upstream. Left alone they import untinted grey, which is worse team
+identification than the proxy capsule they replaced.
+
+`make_tcmask.py` authors the mask from geometry the `.pie` parts already carry:
+for the `body` and `turret` of each vehicle it rasterises the UV footprint of
+every triangle whose face normal points up (`n.y > 0.1` — deck, glacis and
+sloped upper flanks, never the underside or the vertical sides) at blend
+strength 0.8, into a 1024² page in the diffuse page's own UV space. Re-run it
+after touching the `.pie` parts or the selection rule:
+
+```sh
+python3 tools/wz2100-baseline/make_tcmask.py --report   # coverage, writes nothing
+python3 tools/wz2100-baseline/make_tcmask.py            # → texpages/*_ms_tcmask.png
+./tools/wz2100-baseline/build.sh                        # bake + re-import
+```
+
+Earlier note, still true: the importer carries whichever mask page wins through
+Assimp on a spare texture slot, and modelimporter's post-fix injects it as the
+`SPRINGRTS_team_color` material extension.
 
 ## Reproduce
 

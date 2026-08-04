@@ -123,6 +123,12 @@ inline std::vector<uint8_t> BuildPong(uint64_t clientTime, uint64_t serverTime) 
 /// the game's UnitDefs/WeaponDefs FlatBuffer payloads via HTTP. Empty
 /// for the lobby (no defs) or when the bake step failed (client falls
 /// back to whatever streaming path is wired).
+///
+/// `playerId` is the DB **account** id; `playerNum` is the **sim** player
+/// number this session was allocated in `playerHandler` (-1 on the lobby,
+/// which has no sim). They are different numbers and are not interchangeable
+/// — everything synced keys on `playerNum`. See the AuthResponse comments in
+/// `schemas/protocol.fbs` and PLAN-native-ui.md §3.3.
 inline std::vector<uint8_t> BuildAuthResponse(
     SpringWeb::AuthStatus status,
     const std::string& token,
@@ -130,7 +136,8 @@ inline std::vector<uint8_t> BuildAuthResponse(
     const std::string& message = "",
     int8_t team = -1,
     const std::string& role = "",
-    const std::string& defsCacheKey = "")
+    const std::string& defsCacheKey = "",
+    int32_t playerNum = -1)
 {
     flatbuffers::FlatBufferBuilder fbb(256);
     auto resp = SpringWeb::CreateAuthResponseDirect(fbb, status,
@@ -139,8 +146,35 @@ inline std::vector<uint8_t> BuildAuthResponse(
         message.empty() ? nullptr : message.c_str(),
         team,
         role.empty() ? nullptr : role.c_str(),
-        defsCacheKey.empty() ? nullptr : defsCacheKey.c_str());
+        defsCacheKey.empty() ? nullptr : defsCacheKey.c_str(),
+        playerNum);
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_AuthResponse, resp.Union());
+}
+
+/// One row for BuildPlayerRoster — mirrors `PlayerEntry` in protocol.fbs.
+struct PlayerRosterRow {
+    int32_t     playerNum = -1;
+    std::string name;
+    int16_t     team = -1;
+    int16_t     allyTeam = -1;
+    bool        spectator = false;
+    bool        isAI = false;
+    bool        active = true;
+    uint32_t    accountId = 0;
+};
+
+/// Build a PlayerRoster. Always the complete roster, never a delta.
+inline std::vector<uint8_t> BuildPlayerRoster(const std::vector<PlayerRosterRow>& rows) {
+    flatbuffers::FlatBufferBuilder fbb(256 + rows.size() * 64);
+    std::vector<flatbuffers::Offset<SpringWeb::PlayerEntry>> entries;
+    entries.reserve(rows.size());
+    for (const auto& r : rows) {
+        entries.push_back(SpringWeb::CreatePlayerEntryDirect(fbb,
+            r.playerNum, r.name.c_str(), r.team, r.allyTeam,
+            r.spectator, r.isAI, r.active, r.accountId));
+    }
+    auto roster = SpringWeb::CreatePlayerRosterDirect(fbb, &entries);
+    return BuildServerMessage(fbb, SpringWeb::ServerPayload_PlayerRoster, roster.Union());
 }
 
 /// Build a ServerError.
@@ -1229,8 +1263,9 @@ inline std::vector<uint8_t> BuildRoomStateUpdate(const GameRoom& room) {
     for (const auto& s : room.aiSlots) {
         auto aiIdOff = fbb.CreateString(s.aiId);
         auto displayOff = fbb.CreateString(s.displayName);
+        auto profileOff = fbb.CreateString(s.profile);
         aiSlotOffsets.push_back(SpringWeb::CreateRoomAISlot(
-            fbb, aiIdOff, displayOff, s.team, s.startPos));
+            fbb, aiIdOff, displayOff, s.team, s.startPos, profileOff));
     }
     auto aiSlotsVec = fbb.CreateVector(aiSlotOffsets);
 

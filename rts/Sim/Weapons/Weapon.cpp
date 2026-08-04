@@ -267,17 +267,37 @@ void CWeapon::UpdateWeaponErrorVector() {
     errorVector = newErrorVector;
 }
 
+float CWeapon::GroundClearanceLift(float ownerRadius, float modelHeight) {
+  // Stock Recoil's flat `UpVector * 10`, widened by this fork to also cover
+  // very large models via the radius term.
+  const float stockLift = std::max(10.0f, ownerRadius * 0.5f);
+  if (!(modelHeight > 0.0f))
+    return stockLift;
+  // Never lift a model higher than the stock value, and for a model SHORTER
+  // than that lift, use its own half-height (its centre) instead. The 0.5
+  // floor keeps the origin clear of the terrain for degenerate models.
+  return std::min(stockLift, std::max(modelHeight * 0.5f, 0.5f));
+}
+
 void CWeapon::UpdateWeaponVectors() {
   ZoneScoped;
 
   // Scriptless units (Metalstorm native) bind muzzle/aim pieces by name
   // convention rather than through the null script's (empty) piece table —
   // read the resolved LocalModelPiece directly. See UpdateWeaponPieces.
+  // Either fallback may be null on its own: ResolveFallbackWeaponPieces
+  // binds "muzzle" and "turret" independently, so a model that authors one
+  // but not the other lands here with a half-filled pair. Each side must be
+  // guarded separately — dereferencing the missing one crashes the server.
   const bool haveFallback =
       (fallbackMuzzlePiece != nullptr || fallbackAimPiece != nullptr);
   if (haveFallback) {
-    relAimFromPos = fallbackAimPiece->GetAbsolutePos();
-    fallbackMuzzlePiece->GetEmitDirPos(relWeaponMuzzlePos, weaponDir);
+    const LocalModelPiece *aimPiece =
+        (fallbackAimPiece != nullptr) ? fallbackAimPiece : fallbackMuzzlePiece;
+    const LocalModelPiece *muzPiece =
+        (fallbackMuzzlePiece != nullptr) ? fallbackMuzzlePiece : fallbackAimPiece;
+    relAimFromPos = aimPiece->GetAbsolutePos();
+    muzPiece->GetEmitDirPos(relWeaponMuzzlePos, weaponDir);
   } else {
     relAimFromPos = owner->script->GetPiecePos(aimFromPiece);
     owner->script->GetEmitDirPos(muzzlePiece, relWeaponMuzzlePos, weaponDir);
@@ -325,8 +345,26 @@ void CWeapon::UpdateWeaponVectors() {
   //       so the weapon never sees a valid target.
   // The 0.5-elmo epsilon picks up the at-ground case while staying
   // well below any sane piece-authored aim offset.
+  //
+  // The lift itself must be MODEL-SCALED. Stock Recoil uses a flat
+  // `UpVector * 10`, which silently assumes Spring-scale models (stock
+  // units are 30-100 elmos tall). Metalstorm models are metre-scale —
+  // ms_soldiers_s1 is 1.845 elmos tall, and its .gltf authors a single
+  // `body` piece, so neither the script nor the name-convention fallback
+  // binds a muzzle and case (b) fires on every shot. A flat 10 then puts
+  // the firing origin 5.4x the model's own height above its feet, and
+  // everything downstream reads from that empty air: the HaveFreeLineOfFire
+  // ray, the firing distance that feeds StatCombat::HitProbability, and
+  // the VolleyOutcome attacker/counterbattery position.
+  //
+  // Take the smaller of the stock lift and the model's own half-height, so
+  // a Spring-scale model keeps the faithful stock value and only models
+  // shorter than the lift are brought down to their own centre — which is
+  // where a weapon with no authored muzzle piece belongs anyway.
+  // DIVERGENCE from Recoil, called out per AGENTS.md.
   const float aimGround = CGround::GetHeightReal(aimFromPos.x, aimFromPos.z);
-  const float liftHeight = std::max(10.0f, owner->radius * 0.5f);
+  const float liftHeight = GroundClearanceLift(
+      owner->radius, (owner->model != nullptr) ? owner->model->height : 0.0f);
   if (aimFromPos.y < aimGround + 0.5f) {
     aimFromPos = owner->pos + UpVector * liftHeight;
   }

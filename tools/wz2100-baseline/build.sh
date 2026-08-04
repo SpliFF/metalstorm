@@ -20,10 +20,17 @@ HERE="$ROOT/tools/wz2100-baseline"
 GAME="$ROOT/data/games/metalstorm"
 MODELS="$GAME/models"
 
-# Locate the modelimporter binary (release preferred, then debug).
-BIN=""
+# Locate the modelimporter binary (release preferred, then debug). Set
+# MODELIMPORTER to point at another build dir — a taskherd lane, say, whose
+# build/{release,debug} are inherited copies it must not reconfigure.
+BIN="${MODELIMPORTER:-}"
+if [ -n "$BIN" ] && [ ! -x "$BIN" ]; then
+  echo "error: MODELIMPORTER=$BIN is not executable" >&2
+  exit 1
+fi
 for cand in "$ROOT/build/release/tools/modelimporter/modelimporter" \
             "$ROOT/build/debug/tools/modelimporter/modelimporter"; do
+  [ -n "$BIN" ] && break
   if [ -x "$cand" ]; then BIN="$cand"; break; fi
 done
 if [ -z "$BIN" ]; then

@@ -347,3 +347,90 @@ describe("co-commander coordinator (§5/§5.1)", function()
         end
     end)
 end)
+
+describe("GG.Teams.AIPlayers (§5 — the shared isAI test)", function()
+    -- Exported so game_scenario.lua's `ai` staging can find the virtual player
+    -- behind a scenario-declared NPC slot without re-deriving the subtle
+    -- opts.isAI == '1' check (an 11th GetPlayerInfo return, string-valued).
+    it("lists only present AI players on the team, in playerID order", function()
+        local world = mock.new()
+        world.setPlayer(3, 1, true)                  -- human
+        world.setPlayer(9, 1, true, false, true)     -- AI
+        world.setPlayer(7, 1, true, false, true)     -- AI
+        world.setPlayer(5, 2, true, false, true)     -- AI, different team
+        assert.are.same({ 7, 9 }, GG.Teams.AIPlayers(1))
+        assert.are.same({ 5 }, GG.Teams.AIPlayers(2))
+    end)
+
+    it("is empty for a team with no AI — the 'declared but no slot' case", function()
+        local world = mock.new()
+        world.setPlayer(3, 1, true)
+        assert.are.same({}, GG.Teams.AIPlayers(1))
+        assert.are.same({}, GG.Teams.AIPlayers(8))
+    end)
+
+    it("excludes a disconnected AI", function()
+        local world = mock.new()
+        world.setPlayer(7, 1, false, false, true)
+        assert.are.same({}, GG.Teams.AIPlayers(1))
+    end)
+end)
+
+describe("AI profile transport (§10 task 6)", function()
+    -- server_main.cpp publishes a per-AI modoption `ai_profile_player<ID>`
+    -- at AI virtual-player registration (from --ai id:team:pos:profile, or
+    -- a headless/direct-start manifest's aiSlots[].profile); GameStart
+    -- republishes it as the team rulesParam `ai_profile_<ID>` that
+    -- ai/strategos/picture.lua's Picture.readProfileHint reads.
+    it("republishes a per-player modoption as the team rulesParam picture.lua reads", function()
+        local world, g = mock.new()
+        world.setPlayer(7, 1, true, false, true)   -- AI virtual player on team 1
+        world.modOptions['ai_profile_player7'] = 'aggressive'
+
+        g:GameStart()
+
+        assert.are.equal('aggressive', world.trp(1, 'ai_profile_7'))
+    end)
+
+    it("does nothing when no modoption is set for that player", function()
+        local world, g = mock.new()
+        world.setPlayer(7, 1, true, false, true)
+
+        g:GameStart()
+
+        assert.is_nil(world.trp(1, 'ai_profile_7'))
+    end)
+
+    it("treats an empty-string modoption value as unset", function()
+        local world, g = mock.new()
+        world.setPlayer(7, 1, true, false, true)
+        world.modOptions['ai_profile_player7'] = ''
+
+        g:GameStart()
+
+        assert.is_nil(world.trp(1, 'ai_profile_7'))
+    end)
+
+    it("keys two AIs on the same team independently (co-commander pair)", function()
+        local world, g = mock.new()
+        world.setPlayer(7, 1, true, false, true)
+        world.setPlayer(8, 1, true, false, true)
+        world.modOptions['ai_profile_player7'] = 'aggressive'
+        world.modOptions['ai_profile_player8'] = 'caretaker'
+
+        g:GameStart()
+
+        assert.are.equal('aggressive', world.trp(1, 'ai_profile_7'))
+        assert.are.equal('caretaker', world.trp(1, 'ai_profile_8'))
+    end)
+
+    it("never publishes under a human player's id", function()
+        local world, g = mock.new()
+        world.setPlayer(3, 1, true)   -- human, not AI
+        world.modOptions['ai_profile_player3'] = 'aggressive'
+
+        g:GameStart()
+
+        assert.is_nil(world.trp(1, 'ai_profile_3'))
+    end)
+end)

@@ -37,6 +37,11 @@ token(optionalEncoding?:any):string|Uint8Array|null {
   return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
 }
 
+/**
+ * The authenticated DB **account** id — stable across games, rooms and
+ * reconnects. NOT the sim player number; see `player_num` below and the
+ * identity contract in PLAN-native-ui.md §3.3.
+ */
 playerId():number {
   const offset = this.bb!.__offset(this.bb_pos, 8);
   return offset ? this.bb!.readUint32(this.bb_pos + offset) : 0;
@@ -88,8 +93,25 @@ defsCacheKey(optionalEncoding?:any):string|Uint8Array|null {
   return offset ? this.bb!.__string(this.bb_pos + offset, optionalEncoding) : null;
 }
 
+/**
+ * Spring's `playerNum` for this session — the **sim** player id, assigned
+ * per game server in connect order (AI virtual players take the low
+ * numbers, registered before any client connects). This is what every
+ * synced surface keys on: `gadget:PlayerAdded(playerID)`,
+ * `Spring.GetPlayerList()`, `UnitCommandEvent.player_id`, `LuaUIMsg
+ * .player_id`, and Metalstorm's per-player authority pool rulesParam
+ * `authority_player_<playerNum>`. It is unrelated to `player_id` above:
+ * the two coincide only by accident on low-id dev accounts, which is what
+ * hid this for so long (PLAN-endtoend.md D3).
+ * -1 on the lobby, which has no sim.
+ */
+playerNum():number {
+  const offset = this.bb!.__offset(this.bb_pos, 18);
+  return offset ? this.bb!.readInt32(this.bb_pos + offset) : -1;
+}
+
 static startAuthResponse(builder:flatbuffers.Builder) {
-  builder.startObject(7);
+  builder.startObject(8);
 }
 
 static addStatus(builder:flatbuffers.Builder, status:AuthStatus) {
@@ -120,12 +142,16 @@ static addDefsCacheKey(builder:flatbuffers.Builder, defsCacheKeyOffset:flatbuffe
   builder.addFieldOffset(6, defsCacheKeyOffset, 0);
 }
 
+static addPlayerNum(builder:flatbuffers.Builder, playerNum:number) {
+  builder.addFieldInt32(7, playerNum, -1);
+}
+
 static endAuthResponse(builder:flatbuffers.Builder):flatbuffers.Offset {
   const offset = builder.endObject();
   return offset;
 }
 
-static createAuthResponse(builder:flatbuffers.Builder, status:AuthStatus, tokenOffset:flatbuffers.Offset, playerId:number, messageOffset:flatbuffers.Offset, team:number, roleOffset:flatbuffers.Offset, defsCacheKeyOffset:flatbuffers.Offset):flatbuffers.Offset {
+static createAuthResponse(builder:flatbuffers.Builder, status:AuthStatus, tokenOffset:flatbuffers.Offset, playerId:number, messageOffset:flatbuffers.Offset, team:number, roleOffset:flatbuffers.Offset, defsCacheKeyOffset:flatbuffers.Offset, playerNum:number):flatbuffers.Offset {
   AuthResponse.startAuthResponse(builder);
   AuthResponse.addStatus(builder, status);
   AuthResponse.addToken(builder, tokenOffset);
@@ -134,6 +160,7 @@ static createAuthResponse(builder:flatbuffers.Builder, status:AuthStatus, tokenO
   AuthResponse.addTeam(builder, team);
   AuthResponse.addRole(builder, roleOffset);
   AuthResponse.addDefsCacheKey(builder, defsCacheKeyOffset);
+  AuthResponse.addPlayerNum(builder, playerNum);
   return AuthResponse.endAuthResponse(builder);
 }
 
@@ -145,7 +172,8 @@ unpack(): AuthResponseT {
     this.message(),
     this.team(),
     this.role(),
-    this.defsCacheKey()
+    this.defsCacheKey(),
+    this.playerNum()
   );
 }
 
@@ -158,6 +186,7 @@ unpackTo(_o: AuthResponseT): void {
   _o.team = this.team();
   _o.role = this.role();
   _o.defsCacheKey = this.defsCacheKey();
+  _o.playerNum = this.playerNum();
 }
 }
 
@@ -169,7 +198,8 @@ constructor(
   public message: string|Uint8Array|null = null,
   public team: number = -1,
   public role: string|Uint8Array|null = null,
-  public defsCacheKey: string|Uint8Array|null = null
+  public defsCacheKey: string|Uint8Array|null = null,
+  public playerNum: number = -1
 ){}
 
 
@@ -186,7 +216,8 @@ pack(builder:flatbuffers.Builder): flatbuffers.Offset {
     message,
     this.team,
     role,
-    defsCacheKey
+    defsCacheKey,
+    this.playerNum
   );
 }
 }

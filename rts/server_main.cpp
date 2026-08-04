@@ -10,6 +10,7 @@
 #include "Server/Simulation.h"
 #include "Server/NetworkServer.h"
 #include "Server/Protocol.h"
+#include "Server/PlayerRosterBroadcast.h"
 #include "Server/Database.h"
 #include "Server/GameMetrics.h"
 #include "Server/GmVerbs.h"
@@ -52,6 +53,7 @@
 #include "Server/HeadlessRun.h"
 #include "Server/StatsDump.h"
 #include "Server/GameOverState.h"
+#include "Server/PostGamePolicy.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Lua/LuaRules.h"
 #include "Server/HttpAuth.h"
@@ -95,6 +97,7 @@
 #include <fstream>
 #include <chrono>
 #include <filesystem>
+#include <optional>
 #include <random>
 #include <thread>
 #include <unordered_set>
@@ -197,6 +200,14 @@ int main(int argc, char* argv[])
     };
     int idleExitSeconds = envInt("SPRING_IDLE_EXIT_SECONDS", 300);          // 5 min
     int idleStartupGraceSeconds = envInt("SPRING_IDLE_STARTUP_GRACE_SECONDS", 120);  // 2 min
+    // Post-game observation window: how long a *finished* server stays up with
+    // its world frozen before shutting down and releasing its port. Distinct
+    // from idle exit — this one runs with clients still connected, which is the
+    // case idle exit by definition never covers. Same flag > env > default
+    // precedence; <= 0 disables it (the room then lives until idle exit or a
+    // kill). See PostGamePolicy.h.
+    int postGameExitSeconds =
+        envInt("SPRING_POSTGAME_EXIT_SECONDS", postgame::kDefaultExitSeconds);
 
     // --- Headless run mode (PLAN-headless task 1) ---
     // `--headless-run <config.json>` runs the sim to completion with no browser
@@ -266,6 +277,24 @@ int main(int argc, char* argv[])
         return out;
     };
 
+    // --ai takes an optional 4th field (PLAN-metalstorm-ai.md §10 task 6):
+    // "id:team:pos:profile". Same missing-trailing-field semantics as
+    // splitSpec above, just one field wider.
+    auto splitAiSpec = [](const std::string& spec) {
+        std::array<std::string, 4> out;
+        size_t prev = 0;
+        for (int i = 0; i < 4; ++i) {
+            const size_t next = spec.find(':', prev);
+            if (next == std::string::npos) {
+                out[i] = spec.substr(prev);
+                break;
+            }
+            out[i] = spec.substr(prev, next - prev);
+            prev = next + 1;
+        }
+        return out;
+    };
+
     // --- Logging CLI flags ---
     std::string logFile;
     std::string logLevel;
@@ -279,6 +308,7 @@ int main(int argc, char* argv[])
 
     // Simple arg parsing: --port N, --game PATH, --map PATH, --db PATH,
     // --idle-exit-seconds N (0 = never), --idle-startup-grace-seconds N,
+    // --postgame-exit-seconds N (0 = never; shutdown delay after game over),
     // --log-file PATH, --log-level LEVEL, --log-server URL,
     // --log-sqlite PATH, --debug, --log-messages,
     // --wt-cert PATH, --wt-key PATH,
@@ -321,6 +351,8 @@ int main(int argc, char* argv[])
             idleExitSeconds = std::atoi(argv[++i]);
         } else if (arg == "--idle-startup-grace-seconds" && i + 1 < argc) {
             idleStartupGraceSeconds = std::atoi(argv[++i]);
+        } else if (arg == "--postgame-exit-seconds" && i + 1 < argc) {
+            postGameExitSeconds = std::atoi(argv[++i]);
         } else if (arg == "--headless-run" && i + 1 < argc) {
             headlessConfigPath = argv[++i];
         } else if (arg == "--max-wall-min" && i + 1 < argc) {
@@ -408,15 +440,16 @@ int main(int argc, char* argv[])
             }
             CGameSetup::SetModOption(kv.substr(0, eq), kv.substr(eq + 1));
         } else if (arg == "--ai" && i + 1 < argc) {
-            // Format: <id>:<team>:<pos>. We parse here and resolve
-            // later, once we have a discovered AI list to look up
-            // against. Accepts the legacy 2-tuple form too, for
-            // dev-smoketest invocations that predate start positions.
+            // Format: <id>:<team>:<pos>:<profile>. We parse here and
+            // resolve later, once we have a discovered AI list to look up
+            // against. Accepts the legacy 2/3-tuple forms too, for
+            // dev-smoketest invocations that predate start positions and
+            // the profile field (PLAN-metalstorm-ai.md §10 task 6).
             const std::string spec = argv[++i];
-            const auto parts = splitSpec(spec);
+            const auto parts = splitAiSpec(spec);
             if (parts[0].empty()) {
                 SLOG(SPRING_LOG_WARNING,
-                    "ignoring malformed --ai '%s' (expected id:team[:pos])",
+                    "ignoring malformed --ai '%s' (expected id:team[:pos[:profile]])",
                     spec.c_str());
                 continue;
             }
@@ -424,6 +457,7 @@ int main(int argc, char* argv[])
             rq.id = parts[0];
             rq.team = parts[1].empty() ? 0 : std::atoi(parts[1].c_str());
             rq.startPos = parts[2].empty() ? -1 : std::atoi(parts[2].c_str());
+            rq.profile = parts[3];
             requestedAIs.push_back(std::move(rq));
         } else if (arg[0] != '-') {
             // Legacy: bare number = port
@@ -455,6 +489,10 @@ int main(int argc, char* argv[])
                 rq.id = s.aiId;
                 rq.team = s.team;
                 rq.startPos = s.startPos;
+                // PLAN-metalstorm-ai.md §10 task 6: previously dropped here —
+                // the manifest's aiSlots[].profile was parsed by
+                // HeadlessRun::ParseConfig but never reached the AI.
+                rq.profile = s.profile;
                 requestedAIs.push_back(std::move(rq));
             }
         }
@@ -1402,6 +1440,20 @@ int main(int argc, char* argv[])
         SLOG(SPRING_LOG_NOTICE,
             "registered AI virtual player #%d '%s' on team %d",
             pNum, p.name.c_str(), rq.team);
+
+        // PLAN-metalstorm-ai.md §10 task 6: hand a lobby/manifest-chosen
+        // personality/difficulty profile to the AI VM through the SAME
+        // modoption transport `--modoption` already uses — no new engine
+        // surface. A synced gadget (game_teams.lua) reads this back at
+        // GameStart and republishes it as the team rulesParam
+        // `ai_profile_<playerID>` that ai/strategos/picture.lua already
+        // reads (Picture.readProfileHint). Untrusted text end to end;
+        // main.lua's resolveProfile() is the sole validator (Config.PROFILES
+        // allow-list) — this is just a transport, not a trust boundary.
+        if (!rq.profile.empty()) {
+            CGameSetup::SetModOption(
+                "ai_profile_player" + std::to_string(pNum), rq.profile);
+        }
     }
 
     // Dev-mode: no roster means no players to wait for.
@@ -1616,6 +1668,11 @@ int main(int argc, char* argv[])
     if (!roomPersistent && idleExitEnabled)
         SLOG(SPRING_LOG_NOTICE, "idle self-termination: exit after %ds with no "
             "clients (%ds startup grace)", kIdleExitSec, kStartupGraceSec);
+    const bool postGameExitEnabled = postGameExitSeconds > 0 && !headlessCfg.enabled;
+    const int kPostGameExitSec = postGameExitSeconds;
+    if (postGameExitEnabled)
+        SLOG(SPRING_LOG_NOTICE, "post-game shutdown: exit %ds after game over",
+            kPostGameExitSec);
     auto writeGameStatus = [&](bool ready, int clients) {
         if (!statusDb) return;
         char sql[256];
@@ -1639,6 +1696,11 @@ int main(int argc, char* argv[])
     const auto serverStartTime = std::chrono::steady_clock::now();
     auto lastClientTime = serverStartTime;   // last instant clientCount > 0 (or launch)
     auto lastStatusWrite = serverStartTime;
+    // Wall clock of the first tick that observed a declared result. Stamped
+    // from the loop rather than read off the sim frame because the observation
+    // window is a wall-clock promise to the humans looking at the overlay, and
+    // the sim frame stops advancing the moment the result lands.
+    std::optional<std::chrono::steady_clock::time_point> gameOverAt;
 
     // (The team-stats-history send cursor + win-check latch + State-tier lane
     // constants now live as StateStreamer members.)
@@ -1801,6 +1863,28 @@ int main(int argc, char* argv[])
                     keepRunning.store(false);
                 }
             }
+            // Post-game exit: a finished war has nothing left to serve, so the
+            // process stops and hands its port back once the observation
+            // window closes. Idle exit does not cover this — players who leave
+            // the result overlay open never trip it, and the room held :9100
+            // indefinitely (observed live, 2026-08-03). Applies to persistent
+            // rooms too: persistence is about surviving an *empty* room, not
+            // about outliving the match. Headless runs are excluded — their
+            // own stop conditions already treat game over as a stop and would
+            // otherwise be pre-empted by this timer's exit reason.
+            if (postGameExitEnabled && gameOverRelay.IsDeclared()) {
+                if (!gameOverAt) gameOverAt = wall;
+                const int since = static_cast<int>(
+                    std::chrono::duration_cast<std::chrono::seconds>(
+                        wall - *gameOverAt).count());
+                if (postgame::ShouldExit(true, since, kPostGameExitSec)) {
+                    SLOG(SPRING_LOG_NOTICE,
+                        "game over %ds ago — shutting down finished game server "
+                        "(frame %d, %d client(s) still connected)",
+                        since, sim.GetFrameNum(), clients);
+                    keepRunning.store(false);
+                }
+            }
         }
 
         perfMetrics.BeginTick();
@@ -1929,6 +2013,13 @@ int main(int argc, char* argv[])
 
                 handshakedClients.erase(dcId);
                 sessions.RemoveSession(dcId);
+
+                // The roster changed: the leaver's entry is now inactive.
+                // Broadcast after RemoveSession/erase so the snapshot reflects
+                // the post-disconnect state rather than the state we just left.
+                // Kept (not removed) so a scoreboard can still name a player
+                // who dropped — see PlayerEntry.active in protocol.fbs.
+                Protocol::BroadcastPlayerRoster(ctx);
             }
         }
 
@@ -1940,7 +2031,17 @@ int main(int argc, char* argv[])
         // combat events kept streaming. Gating SimFrame here stops the sim
         // cleanly while the loop keeps running (GameInfo still broadcasts
         // paused=true, console commands still process).
-        if (sim.HasGameStarted() && !g_luaDebugger.IsPaused() && !gs->paused) {
+        //
+        // Also skip once the match is over. Declaring a winner used to be a
+        // pure notification: the sim ran on past the declared frame for as
+        // long as the room lived, spawning objectives and paying out income
+        // into a finished war (PostGamePolicy.h has the measurements). Game
+        // over freezes the world at the frame the clients were shown as the
+        // result. The loop itself keeps running — admin `exec` still works
+        // for post-mortem inspection, and the observation-window timer in the
+        // lifetime-bookkeeping block above is what stops the process.
+        if (sim.HasGameStarted() && !g_luaDebugger.IsPaused() && !gs->paused
+            && !gameOverRelay.IsDeclared()) {
             sim.SimFrame();
             springlog_set_frame(sim.GetFrameNum());
         }
@@ -2026,7 +2127,8 @@ int main(int argc, char* argv[])
             const auto snap = perfMetrics.GetSnapshot();
             metricsWriter.SampleTick(snap.tickTimeUs);
             const bool simRunning = sim.HasGameStarted() && !g_luaDebugger.IsPaused() &&
-                                    !gs->paused && rtcServer.GetClientCount() > 0;
+                                    !gs->paused && !gameOverRelay.IsDeclared() &&
+                                    rtcServer.GetClientCount() > 0;
             metricsWriter.MaybeWrite(snap.frame, snap.clientCount, entityCount,
                                      snap.simFps, gs->speedFactor, simRunning);
         }

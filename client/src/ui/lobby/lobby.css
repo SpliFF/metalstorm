@@ -173,6 +173,17 @@ button.danger:hover { background: #cc3333; }
 .game-select:focus { outline: none; border-color: #4cc9f0; }
 .game-select:disabled { color: #556; }
 
+/* Sits under the War picker. Carries the one thing about a scenario a
+ * player needs before committing: whether the war has an ending
+ * (PLAN-endtoend.md D10). Amber, not red — an endless war is a legitimate
+ * choice, just not one to make by accident. */
+.scenario-note {
+    font-size: 12px;
+    color: #888;
+    margin: -6px 0 12px;
+}
+.scenario-note.endless { color: #d9a441; }
+
 .map-grid {
     display: flex;
     gap: 8px;
@@ -217,6 +228,17 @@ button.danger:hover { background: #cc3333; }
 }
 
 /* ---- Room view ---- */
+
+/* Map + war line above the player list. Empty for games with no
+ * scenarios, and `:empty` collapses the margin so their room view is
+ * unchanged. */
+.room-setup {
+    font-size: 13px;
+    color: #9aa;
+    margin-bottom: 12px;
+}
+.room-setup:empty { margin-bottom: 0; }
+.room-setup strong { color: #e0e0e0; font-weight: 600; }
 
 .player-list {
     display: flex;

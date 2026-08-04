@@ -39,9 +39,16 @@ import {
     PBRMaterial,
     Texture,
     Engine,
+    VertexBuffer,
     type CascadedShadowGenerator,
 } from '@babylonjs/core';
 import { TeamColorPlugin } from './team-color-plugin.js';
+import { ImpostorUvPlugin } from './impostor-uv-plugin.js';
+import { DitherFadePlugin } from './dither-fade-plugin.js';
+import {
+    type AtlasLayout, SINGLE_CELL_LAYOUT, cardTiltsWithPitch,
+    isDirectionalAtlas, selectAtlasCell,
+} from './impostor-atlas.js';
 import { getTeamColor } from './team-colors.js';
 import type { PresentationClock } from './presentation-clock.js';
 import type { EntityStateSnapshot } from './entity-state.js';
@@ -49,8 +56,9 @@ import type { EntityStateSnapshot } from './entity-state.js';
 /** Impostor atlas metadata — per unit def. Sourced from the def's client
  *  content or auto-derived from the model. */
 export interface ImpostorAtlas {
-    /** Atlas texture URI (diffuse + alpha). 8 columns (headings 0°, 45°, …, 315°)
-     *  × N rows (animation frames: walk[0..k], idle[0..m]). */
+    /** Atlas texture URI (diffuse + alpha). v2 directional layout: `yawBins`
+     *  columns × (`pitchBins`·`frames`) rows — see impostor-atlas.ts /
+     *  impostor_convention.py. */
     diffuseUri: string;
     /** Team-color mask atlas URI (R = blend amount, same layout). */
     teamMaskUri?: string;
@@ -61,6 +69,105 @@ export interface ImpostorAtlas {
     /** Quad size in world units (elmos). Derived from model bounds. */
     width: number;
     height: number;
+    /** Directional grid this sheet was baked on. Absent = a legacy single-view
+     *  sheet (`SINGLE_CELL_LAYOUT`): one horizon-level front view, so its cards
+     *  stay upright — see `cardTiltsWithPitch()`. */
+    layout?: AtlasLayout;
+    /** Ground-anchor lift in elmos — see {@link cardLift}. */
+    centreY?: number;
+}
+
+/** An atlas's grid, defaulting a legacy sheet to the single-cell layout. */
+export function layoutOf(atlas: ImpostorAtlas | undefined): AtlasLayout {
+    return atlas?.layout ?? SINGLE_CELL_LAYOUT;
+}
+
+/**
+ * How far above its ground point the card's CENTRE must sit, so the figure's
+ * feet land on the terrain rather than hovering (or sinking).
+ *
+ * `height/2` is only correct when the baker put the model's ground point on
+ * the cell's BOTTOM edge. A baker that keeps a margin, or that fits all 24
+ * views to one shared scale (so the tallest view sets the scale and the rest
+ * leave slack), ends up with clear pixels below the feet — and then `height/2`
+ * hovers the sprite by exactly that slack. The `infantry_v2` sheets do this:
+ * their ground point sits ~18% of a cell above its bottom edge, so the
+ * declared lift is ~0.32·height rather than 0.5·height. Atlases that declare
+ * nothing keep the bottom-edge assumption.
+ */
+export function cardLift(atlas: ImpostorAtlas | undefined): number {
+    const declared = atlas?.centreY;
+    if (typeof declared === 'number' && Number.isFinite(declared) && declared > 0) {
+        return declared;
+    }
+    return (atlas?.height ?? 0) * 0.5;
+}
+
+/**
+ * Build an impostor card quad — the ONE place an impostor billboard's geometry
+ * is made, shared by the entity path (below), the squad member fan-out
+ * (squad-render-backend.ts) and the map-feature LOD (feature-lod-renderer.ts).
+ *
+ * The card exists to display an atlas image, so its UVs are in ATLAS-IMAGE
+ * space: **v = 0 at the card's TOP edge**, growing downward — the glTF/KTX2
+ * convention, not Babylon's bottom-up procedural-mesh default.
+ *
+ * That flip is this layer's job, and getting it wrong is what rendered every
+ * impostor upside-down: `MeshBuilder.CreatePlane` hands back bottom-up UVs
+ * (v = 1 at the top), while every atlas we ship is a KTX2 — and Babylon's KTX2
+ * loader cannot honour `invertY` (UNPACK_FLIP_Y doesn't apply to compressed
+ * data, and unlike its KTX1 sibling that path sets no `_invertVScale`
+ * compensation either), so a KTX2 always lands with its TOP image row at
+ * v = 0. Bottom-up card UVs therefore mirror the sheet vertically.
+ *
+ * Fixing it here rather than in `atlasCellUv` is deliberate: the mismatch is
+ * between the MESH and the texture, so it must also be right for a legacy
+ * single-cell atlas, which never gets the UV-remap plugin at all. With the
+ * card in image space, `atlasCellUv` / ImpostorUvPlugin are a pure row/column
+ * offset in the baker's own coordinates, with no flip anywhere.
+ */
+export function createImpostorCard(
+    name: string, width: number, height: number, scene: Scene,
+): Mesh {
+    const mesh = MeshBuilder.CreatePlane(
+        name, { width, height, sideOrientation: Mesh.DOUBLESIDE }, scene);
+    const uvs = mesh.getVerticesData(VertexBuffer.UVKind);
+    if (uvs) {
+        // Both halves of the DOUBLESIDE buffer, so the back face matches.
+        for (let i = 1; i < uvs.length; i += 2) uvs[i] = 1 - uvs[i];
+        mesh.setVerticesData(VertexBuffer.UVKind, uvs, false);
+    }
+    return mesh;
+}
+
+/**
+ * The card rotation shared by every impostor card of one atlas this frame
+ * (PLAN-metalstorm-impostors.md §Card orientation).
+ *
+ * Two things make this a per-FRAME value rather than a per-instance one:
+ * directionality comes from atlas cell SELECTION, not from twisting the quad,
+ * and a shared rotation is precisely what stops a tight squad's sprites from
+ * fanning out radially when the camera is close.
+ *
+ * Tilt is decided by the atlas (`cardTiltsWithPitch`):
+ *  - elevation rows present → the camera's full world rotation, so the card
+ *    turns to face a steep top-down camera and actually presents the top-down
+ *    row it selected. Without this the card is near edge-on and smears.
+ *  - single row → yaw about world up only, keeping the card upright; a lone
+ *    horizon-level view laid flat would read as a fallen unit.
+ *
+ * Yaw is taken from the camera's own basis (its world matrix row 2 is the
+ * toward-viewer axis in Babylon RH), not from each sprite's position→camera
+ * vector, so it is genuinely uniform across the batch.
+ */
+export function computeCardRotation(
+    camera: { getWorldMatrix(): Matrix; absoluteRotation: Quaternion } | null | undefined,
+    layout: AtlasLayout,
+): Quaternion {
+    if (!camera) return Quaternion.Identity();
+    if (cardTiltsWithPitch(layout)) return camera.absoluteRotation.clone();
+    const m = camera.getWorldMatrix().m;
+    return Quaternion.RotationYawPitchRoll(Math.atan2(m[8], m[10]), 0, 0);
 }
 
 /** LOD tier — drives EntityRenderer's per-entity visibility decision. */
@@ -111,14 +218,22 @@ export function quantizeHeading(radians: number): number {
  * dielectric so the sprite takes scene sun/ambient/shadow like the unit
  * models, plus TeamColorPlugin against the optional `_impostor_team.ktx2`
  * R-mask sidecar. Shared with the squad member fan-out path
- * (squad-render-backend.ts), which draws per-member sprites for
- * impostor-only infantry defs.
+ * (squad-render-backend.ts), which draws per-member sprites beyond the def's
+ * impostorDistance.
+ *
+ * `withFade` attaches DitherFadePlugin so the caller can crossfade the sprite
+ * in/out across the member LOD boundary via a per-instance `ditherFade`
+ * attribute (squad member fan-out, M5). A caller that opts in MUST upload a
+ * `ditherFade` thin-instance buffer (default 1.0), or every fragment reads
+ * fade=0 and discards. The entity-level impostor path leaves it off (hard
+ * Full↔Impostor swap, no per-instance fade attribute).
  */
 export function createImpostorMaterial(
     name: string,
     atlas: ImpostorAtlas,
     team: number,
     scene: Scene,
+    withFade = false,
 ): PBRMaterial {
     const mat = new PBRMaterial(name, scene);
     mat.metallic = 0.0;
@@ -145,6 +260,31 @@ export function createImpostorMaterial(
         const mask = new Texture(atlas.teamMaskUri, scene);
         mask.hasAlpha = false;
         plugin.teamMask = mask;
+    }
+
+    // v2 directional atlas: the per-instance `impostorCell` attribute selects
+    // one (yaw, pitch) cell and the UV-remap plugin scales/offsets the quad's
+    // UVs into it, so the albedo, alpha, and team mask all read that cell.
+    // Legacy 1x1 atlases skip it and keep the whole-quad mapping (M3).
+    //
+    // `billboard` stays OFF here: this path bakes the shared card rotation into
+    // each thin-instance matrix (see render()), so the shader must not rotate
+    // again. The feature-LOD path is the one that drives the plugin's billboard.
+    const layout = layoutOf(atlas);
+    if (isDirectionalAtlas(layout)) {
+        const uv = new ImpostorUvPlugin(mat);
+        uv.layout = layout;
+        uv.cellSelect = true;
+        uv.isEnabled = true;
+    }
+    if (withFade) {
+        const fade = new DitherFadePlugin(mat);
+        // Per-instance `ditherFade` attribute, and the complementary half of
+        // the Bayer pattern versus the member-model material, so the two tiers
+        // interleave exactly instead of overlapping (see squad-render-backend).
+        fade.useAttribute = true;
+        fade.invertPattern = true;
+        fade.isEnabled = true;
     }
     return mat;
 }
@@ -211,10 +351,10 @@ export class ImpostorRenderer {
             this.pendingInstances.set(key, batch);
         }
 
-        // FIDELITY-STANDIN: animation frame logic simplified.
-        // Real implementation: check snapshot.state_anim (MOVING/IDLE),
-        // sample gait phase from velocity × time → walk flipbook frame,
-        // or use idle frame. For now: frame 0 always.
+        // Flipbook frame within the atlas (row-group `frame·pitchBins + pitch`).
+        // frames=1 today, so always 0 — walk/idle flipbook rows are fx-offload
+        // X2 territory (the atlas layout already reserves them downward, so X2
+        // is additive). NOT a standin: single-pose is the plan's M3 state.
         const animFrame = 0;
 
         batch.push({
@@ -229,12 +369,16 @@ export class ImpostorRenderer {
 
     /** Flush pending instances → thin-instance buffers. Called per render. */
     render(cameraPos: Vector3): void {
+        // Card orientation is IDENTICAL for every instance in a frame (see
+        // computeCardRotation), so resolve it once here rather than per sprite.
+        // Per-atlas, because whether a card tilts depends on its layout.
+        const camera = this.scene.activeCamera;
+
         // Group instances per mesh
         const groups = new Map<string, {
             mesh: Mesh;
             matrices: number[];
-            headings: number[];
-            frames: number[];
+            cells: number[];
             count: number;
         }>();
 
@@ -248,44 +392,53 @@ export class ImpostorRenderer {
             const mesh = this.getOrCreateImpostorMesh(defId, team);
             if (!mesh) continue;
 
+            const atlas = this.atlases.get(defId);
+            const layout = layoutOf(atlas);
+
+            // One card rotation for the whole batch — shared, so nearby
+            // sprites stay parallel instead of fanning out radially.
+            const cardRot = computeCardRotation(camera, layout);
+
             // Instance positions are ground anchors (entity Y is at ground
-            // level) — lift the quad by half its height so the sprite's
-            // feet touch the ground instead of the figure being half-buried.
-            const halfH = (this.atlases.get(defId)?.height ?? 0) * 0.5;
+            // level) — lift the quad so the sprite's feet touch the ground
+            // instead of the figure being half-buried, by the atlas's own
+            // declared lift (`cardLift`, NOT unconditionally half the height).
+            // The lift rides the card's own local up, so a tilted card keeps
+            // its base on the terrain rather than hovering above it.
+            const lift = new Vector3(0, cardLift(atlas), 0);
+            lift.rotateByQuaternionToRef(cardRot, lift);
 
             const group = {
                 mesh,
                 matrices: [] as number[],
-                headings: [] as number[],
-                frames: [] as number[],
+                cells: [] as number[],
                 count: 0,
             };
 
             for (const inst of instances) {
-                // Camera-facing (Y-axis) billboard baked per-instance.
+                // The card rotation is baked into the instance matrix because
                 // Mesh.billboardMode does NOT apply per-thin-instance — Babylon
                 // computes it once from the MESH's own transform (our mesh sits
-                // at the origin), so every instance would share one rotation
-                // derived from origin→camera instead of its own position→camera.
-                // In practice that left the quad edge-on (invisible) from most
-                // camera angles. Yaw-only (not full ALL-axis) so the card stays
-                // upright — the standard convention for ground-unit sprite
-                // impostors, and consistent with the heading-quantized atlas
-                // column this def eventually selects.
-                const dx = cameraPos.x - inst.x;
-                const dz = cameraPos.z - inst.z;
-                const yaw = Math.atan2(dx, dz);
-                const rot = Quaternion.RotationAxis(Vector3.Up(), yaw);
-                const mat = Matrix.Compose(Vector3.One(), rot,
-                    new Vector3(inst.x, inst.y + halfH, inst.z));
+                // at the origin), which left the quad edge-on from most camera
+                // angles. Unlike a per-instance twist toward the camera
+                // POSITION, `cardRot` is shared by the batch (see
+                // computeCardRotation), which is what keeps a tight squad's
+                // sprites parallel instead of fanning out.
+                const mat = Matrix.Compose(Vector3.One(), cardRot,
+                    new Vector3(inst.x + lift.x, inst.y + lift.y, inst.z + lift.z));
                 const arr = new Float32Array(16);
                 mat.copyToArray(arr, 0);
                 for (let i = 0; i < 16; i++) group.matrices.push(arr[i]);
 
-                // Per-instance heading (for atlas column select)
-                group.headings.push(quantizeHeading(inst.heading));
-                // Per-instance anim frame (atlas row)
-                group.frames.push(inst.animFrame);
+                // Per-instance directional cell: column from the relative yaw
+                // between the camera and the unit's facing (offset by the
+                // atlas's own azimuth phase), row from camera pitch against the
+                // atlas's own arc — impostor-atlas.selectAtlasCell. animFrame is
+                // reserved for fx-offload X2 flipbook rows (frames=1 today).
+                const vx = cameraPos.x - inst.x;
+                const vy = cameraPos.y - inst.y;
+                const vz = cameraPos.z - inst.z;
+                group.cells.push(selectAtlasCell(vx, vy, vz, inst.heading, layout, inst.animFrame));
                 group.count++;
             }
 
@@ -293,17 +446,15 @@ export class ImpostorRenderer {
         }
 
         // Update mesh buffers
-        for (const [key, group] of groups) {
+        for (const [, group] of groups) {
             group.mesh.isVisible = true;
             const matBuf = new Float32Array(group.matrices);
             group.mesh.thinInstanceSetBuffer('matrix', matBuf, 16, false);
-
-            // FIDELITY-STANDIN: per-instance heading/frame attributes not yet wired.
-            // When fx-offload X2 lands, these become custom vertex attributes
-            // (thinInstanceSetBuffer('heading', …) + shader reads). For now the
-            // shader uses a fixed atlas frame (column 0, row 0).
-            // TODO(fx-offload-X2): thinInstanceSetBuffer('heading', Float32Array(group.headings), 1)
-            // TODO(fx-offload-X2): thinInstanceSetBuffer('animFrame', Float32Array(group.frames), 1)
+            // Per-instance directional cell selector (ImpostorUvPlugin reads it
+            // in the vertex shader). Harmless on legacy 1×1 atlases (the plugin
+            // isn't attached, so the attribute is simply unused).
+            group.mesh.thinInstanceSetBuffer('impostorCell',
+                new Float32Array(group.cells), 1, false);
 
             group.mesh.thinInstanceCount = group.count;
             group.mesh.thinInstanceRefreshBoundingInfo(false);
@@ -340,11 +491,8 @@ export class ImpostorRenderer {
         // origin; the actual per-unit positions are thin-instance matrices),
         // so each instance bakes its own camera-facing rotation in render()
         // instead (see the yaw computation there).
-        mesh = MeshBuilder.CreatePlane(
-            `impostor_${defId}_${team}`,
-            { width: atlas.width, height: atlas.height, sideOrientation: Mesh.DOUBLESIDE },
-            this.scene,
-        );
+        mesh = createImpostorCard(
+            `impostor_${defId}_${team}`, atlas.width, atlas.height, this.scene);
         mesh.isPickable = false;
         mesh.alwaysSelectAsActiveMesh = true;
 
@@ -353,8 +501,12 @@ export class ImpostorRenderer {
 
         // Shadow casting (if enabled). The material is ALPHATEST, so the
         // shadow depth pass samples the albedo alpha and casts the sprite
-        // silhouette, not the full quad.
-        if (this.shadowGenerator) {
+        // silhouette. A DIRECTIONAL atlas is excluded: the UV-remap lives in
+        // the material's own vertex shader and doesn't reach Babylon's shadow
+        // depth shader, so a directional caster would shadow the whole-atlas
+        // silhouette (all cells overlaid). See impostor-uv-plugin.ts — the LOD
+        // swap happens at ≲20 px where a cast shadow is sub-pixel anyway.
+        if (this.shadowGenerator && !isDirectionalAtlas(layoutOf(atlas))) {
             this.shadowGenerator.addShadowCaster(mesh);
         }
 

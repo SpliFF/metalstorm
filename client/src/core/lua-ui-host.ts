@@ -2522,7 +2522,13 @@ defaultFont = activeFont
     ];
     const luaUiEntry = LUAUI_ENTRY_CANDIDATES.find((p) => vfsExists(p));
     if (!luaUiEntry) {
-        postLog(4, `[LuaUI] no recognised LuaUI entry point in VFS (tried ${LUAUI_ENTRY_CANDIDATES.join(', ')}) — no overlay will load`);
+        // Not necessarily a problem: games with a native-JS widget system
+        // (e.g. metalstorm) ship no LuaUI/*.lua at all by design, so this
+        // probe misses on every one of their sessions. There's no per-game
+        // "I use native widgets" flag to gate the probe on yet, so just
+        // downgrade below WARN/ERROR rather than raising a false alarm on an
+        // intentional configuration.
+        postLog(1, `[LuaUI] no recognised LuaUI entry point in VFS (tried ${LUAUI_ENTRY_CANDIDATES.join(', ')}) — no overlay will load`);
     }
     const entryToBoot = luaUiEntry ?? 'LuaUI/camain.lua';
 
@@ -4745,12 +4751,13 @@ export function dispatchPlayerChanged(playerId: number): void {
 /** Enforce Recoil's invariant before a player-status callin: the engine
  *  always holds the player in `playerHandler` when PlayerChanged/PlayerAdded
  *  fires, so a widget reading `Spring.GetPlayerInfo(id)` gets a valid name.
- *  The primary roster seed is now seedPlayersFromRoster() at gp:init (the
- *  lobby room snapshot), so `liveState.players` is populated before LuaUI boots.
- *  This stays as a defensive fallback for an id that isn't in that snapshot
- *  (e.g. a future mid-game join before a roster restream); for the local player
- *  we know team/allyTeam from identity. ensurePlayerEntry is a no-op when the
- *  id is already seeded. See BAR gui_chat crash (PLAN-bar.md UI-2). */
+ *  The roster comes from the server's PlayerRoster broadcast (onPlayerRoster),
+ *  which lands on auth — before the defs fetch that gates the LuaUI boot — so
+ *  `liveState.players` is populated before any widget initialises. This stays
+ *  as a defensive fallback for an id that isn't in the latest broadcast (a
+ *  callin racing a roster change); for the local player we know team/allyTeam
+ *  from identity. ensurePlayerEntry is a no-op when the id is already present.
+ *  See BAR gui_chat crash (PLAN-bar.md UI-2). */
 function ensureRosteredForCallin(playerId: number): void {
     const seed = playerId === liveState.identity.myPlayerId
         ? { team: liveState.identity.myTeam, allyTeam: liveState.identity.myAllyTeam }

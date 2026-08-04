@@ -84,6 +84,12 @@ local PARTICIPATION_PRESENCE_WEIGHT = 2.0   -- §5 "presence at completion... 2.
 
 local objectives = {}      -- id -> objective
 local nextId = 1
+-- How many objectives carrying `victory = true` have ever been created.
+-- game_gameover.lua reads this to say out loud whether the war it is
+-- watching has any terminal condition at all (PLAN-endtoend.md D10). A
+-- high-water mark, not a live count: an expired victory objective still
+-- means the war was *authored* to be endable, which is the question asked.
+local victoryObjectivesCreated = 0
 local rewardScale = 1.0
 local evalTick = 0
 local genState = Generator.newState()
@@ -103,6 +109,7 @@ local bountyCountByPlayer = {}
     linkedId,               -- mutual-resolve partner (E4)
     expiresAtFrame,
     participation = {},    -- playerID -> weight (§5)
+    victory,               -- true = terminal; completing it ends the war (wars §7.1)
     createdFrame, source,   -- 'scripted'|'systemic'|'bounty'
     systemicKey, systemicRule,  -- generator dedup bookkeeping (nil for non-systemic objectives)
     resolvedFrame,           -- frame it left 'active' (retention window)
@@ -259,6 +266,7 @@ end
 local PUBLISHED_FIELDS = {
     'type', 'scope', 'state', 'reward', 'team', 'team2', 'progress',
     'phase', 'stage', 'expire', 'region', 'x', 'z', 'r', 'suggested', 'source',
+    'victory',
 }
 
 -- Objectives are the shared strategic board (PLAN-metalstorm §"Objectives are
@@ -296,6 +304,10 @@ local function publish(o, ctx)
     -- tasking, exactly as it already sees the `suggested` soft-hint. Only the
     -- categorical flag ships; the stake amount stays folded into `reward`.
     if o.source then Spring.SetGameRulesParam(p .. 'source', o.source, PUBLIC) end
+    -- wars §7.1: the scenario's terminal objective. Public so the panel can
+    -- mark "winning this ends the war" — everyone can see the war's win
+    -- condition, it is not fog-gated intel.
+    if o.victory then Spring.SetGameRulesParam(p .. 'victory', 1, PUBLIC) end
     if o.phase then Spring.SetGameRulesParam(p .. 'phase', o.phase, PUBLIC) end
     if o.type == 'extract' and o.data and o.data.phase then
         Spring.SetGameRulesParam(p .. 'stage', o.data.phase, PUBLIC)
@@ -471,6 +483,7 @@ function GG.Objectives.Create(def)
         participation = Attribution.newParticipation(),
         createdFrame = frame, source = def.source or 'scripted',
         systemicKey = def.systemicKey, systemicRule = def.systemicRule,
+        victory = def.victory or nil,
     }
 
     local ctx = buildCtx(frame)
@@ -484,6 +497,7 @@ function GG.Objectives.Create(def)
 
     objectives[id] = o
     addToActive(id)
+    if o.victory then victoryObjectivesCreated = victoryObjectivesCreated + 1 end
 
     if def.phases and #def.phases > 0 then
         o.phaseDefs = def.phases
@@ -576,6 +590,14 @@ function GG.Objectives.Get(id)
     return objectives[id]
 end
 
+--- How many `victory = true` objectives this war has ever staged
+--- (PLAN-endtoend.md D10). Zero means game_gameover.lua has nothing to
+--- watch and the war cannot end — which used to be the silent outcome of
+--- creating a room through the lobby instead of a direct manifest.
+function GG.Objectives.VictoryObjectiveCount()
+    return victoryObjectivesCreated
+end
+
 --- `teamID`'s lowest-participation active tactical objective
 --- (PLAN-metalstorm-teams.md §3.3 joiner onboarding hint — "point the
 --- joiner at real team work"). "Lowest participation" = smallest sum of
@@ -636,6 +658,31 @@ function GG.Objectives.Fail(id)
     local o = objectives[id]
     if not o or o.state ~= 'active' then return end
     resolveObjective(o, 'failed', nil, buildCtx(Spring.GetGameFrame()))
+end
+
+--- War-end sweep (PLAN-metalstorm-wars.md §7 `resolving`, called by
+--- game_gameover.lua): every still-active objective resolves 'expired', which
+--- routes through the one terminal path above and so refunds each staked
+--- bounty via SettleEscrow — "no authority is destroyed or awarded to the
+--- enemy by war end". Deliberately NOT 'failed': the objectives weren't lost,
+--- the war stopped. Returns the number swept.
+---
+--- Iterates a snapshot of activeList because resolveObjective mutates it
+--- (removeFromActive swap-pops, and a linked partner / phase parent can
+--- resolve a second entry re-entrantly) — walking the live list would skip.
+function GG.Objectives.ExpireAllActive()
+    local snapshot = {}
+    for i = 1, #activeList do snapshot[i] = activeList[i] end
+    local ctx = buildCtx(Spring.GetGameFrame())
+    local n = 0
+    for _, id in ipairs(snapshot) do
+        local o = objectives[id]
+        if o and o.state == 'active' then
+            resolveObjective(o, 'expired', nil, ctx)
+            n = n + 1
+        end
+    end
+    return n
 end
 
 -- ============================================================
@@ -793,7 +840,21 @@ function gadget:GameFrame(frame)
         end
     end
 
-    Generator.tick(buildWorld(frame, evalTick, ctx), genState)
+    -- Stop generating once the war leaves 'active' (game_gameover.lua's §7
+    -- chain: winding_down → resolving → over). Existing objectives keep being
+    -- evaluated above — a final push during the grace window still resolves —
+    -- but new ones must not appear. During wind-down they are unwinnable by
+    -- construction (10 s left) and `resolve()` expires them again seconds
+    -- later; the generator was seen growing a settled Meridian board from 9
+    -- objectives to 34 on 2026-08-03, when the server was still simulating
+    -- past the declared win. The sim freeze (PostGamePolicy.h) is what stops
+    -- this after the result lands; this gate covers the grace window before
+    -- it, and does not depend on the freeze to be correct.
+    --
+    -- nil means "no gameover gadget in this game" → active, generate.
+    if (GG.WarState or 'active') == 'active' then
+        Generator.tick(buildWorld(frame, evalTick, ctx), genState)
+    end
 
     -- Resolve-retention: clear rulesParams for objectives past the 30s window.
     for i = #pendingClear, 1, -1 do

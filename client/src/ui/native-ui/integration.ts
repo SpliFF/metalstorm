@@ -57,10 +57,13 @@ let stopEntityIndexProducer: (() => void) | null = null;
 export async function initializeNativeUI(
     gameId: string,
     httpBase: string,
+    /** Spring's sim `playerNum`, NOT the DB account id — see PLAN-native-ui §3.3. */
     playerId: number,
     teamId: number,
     connection: CommandConnection | null = null,
-    role: string = ''
+    role: string = '',
+    /** DB account id, exposed to widgets as `ctx.identity.accountId`. */
+    accountId: number = 0
 ): Promise<void> {
     // Clean up any existing loader
     if (widgetLoader) {
@@ -93,7 +96,7 @@ export async function initializeNativeUI(
     // (command-composer / ai-command-panel carry `hideForSpectator` in the
     // manifest) — spectators get the same HUD minus every order-issuing
     // panel, no separate spectator build.
-    await widgetLoader.load(gameId, httpBase, playerId, teamId, role);
+    await widgetLoader.load(gameId, httpBase, playerId, teamId, role, accountId);
 }
 
 /**

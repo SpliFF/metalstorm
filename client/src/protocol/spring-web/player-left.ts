@@ -30,6 +30,12 @@ static getSizePrefixedRootAsPlayerLeft(bb:flatbuffers.ByteBuffer, obj?:PlayerLef
   return (obj || new PlayerLeft()).__init(bb.readInt32(bb.position()) + bb.position(), bb);
 }
 
+/**
+ * DB **account** id, like `AuthResponse.player_id` — not the sim
+ * playerNum. Anything that needs to key a departure against synced state
+ * should read the `PlayerRoster` broadcast that accompanies this message
+ * (the leaver's entry flips to `active = false`).
+ */
 playerId():number {
   const offset = this.bb!.__offset(this.bb_pos, 4);
   return offset ? this.bb!.readUint32(this.bb_pos + offset) : 0;

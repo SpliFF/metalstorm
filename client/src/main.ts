@@ -24,7 +24,7 @@ import { CommandPathRenderer } from './core/command-path-renderer.js';
 import { WaypointMarkerRenderer } from './core/waypoint-marker-renderer.js';
 import { StandingOrderRenderer } from './core/standing-order-renderer.js';
 import { DebugTerrainGrid } from './core/debug-terrain-grid.js';
-import { Connection } from './core/connection.js';
+import { Connection, type RosterPlayerInfo } from './core/connection.js';
 import { TimingOverlay } from './core/timing-overlay.js';
 import { fetchBuildStamp, CONFIG } from './config.js';
 import GameWorker from './core/lua-widget-worker.ts?worker';
@@ -970,7 +970,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         const m = ev.data;
         switch (m?.type) {
             case 'gp:authenticated': {
-                console.log(`[gameWorker] authenticated playerId=${m.playerId} team=${m.team} role=${m.role}`);
+                console.log(`[gameWorker] authenticated accountId=${m.accountId} playerNum=${m.playerNum} team=${m.team} role=${m.role}`);
                 // G4: the lobby-roster myTeamGuess used to construct economyBar
                 // can be stale/absent (spectator, late roster fetch); this is the
                 // authoritative value, so re-point the bar's team filter at it.
@@ -1001,10 +1001,30 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 if (gameId === 'metalstorm') {
                     // Initialize with empty httpBase for local/dev environment
                     // In production, this would be the lobby HTTP URL
-                    void initializeNativeUI(gameId, '', m.playerId, m.team, workerCommandConnection, m.role);
+                    //
+                    // `playerNum`, not `accountId`: widget `ctx.identity
+                    // .playerId` is Spring's sim playerID, which is what every
+                    // rulesParam key the widgets read is scoped by
+                    // (`authority_player_<playerNum>`). See PLAN-native-ui §3.3.
+                    void initializeNativeUI(gameId, '', m.playerNum, m.team,
+                        workerCommandConnection, m.role, m.accountId);
                 }
                 break;
             }
+            // Full player roster from the game server — the only source of
+            // player names and of which sim playerNums exist (AI virtual
+            // players included). Replaces the lobby-room seed below.
+            case 'gp:playerRoster':
+                uiStore.updatePlayerRoster(m.players.map((p: RosterPlayerInfo) => ({
+                    playerId: p.playerNum,
+                    name: p.name,
+                    teamId: p.team,
+                    allyTeamId: p.allyTeam,
+                    isSpectator: p.spectator,
+                    isAI: p.isAI,
+                    isActive: p.active,
+                })));
+                break;
             // GW4-c5c: consolidated scene-state feed → the HTML HUD + native
             // build-menu (G3a) + native economy-bar + factory-queue panel (G4).
             // The order-panel remains unbuilt (dead pre-G3b code, unrelated).
@@ -1160,6 +1180,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 break;
             }
             case 'gp:gameOver':
+                console.warn(`[main] gp:gameOver frame=${m.frame} winners=[${(m.winningAllyTeams ?? []).join(',')}] won=${m.won} — showing overlay`);
                 showGameOver(gameTemplates, m.frame, {
                     winningAllyTeams: m.winningAllyTeams,
                     won: m.won,
@@ -1276,6 +1297,14 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             case 'gp:orgGroups':
                 uiStore.updateOrgGroups(m.groups);
                 break;
+            // PLAN-macro-ui.md §3: directive snapshot (own team + allies) →
+            // native-UI store, for the org panel's fulfillment % / directive
+            // icons and the directive inspector. The worker has posted this
+            // since the macro lane landed, but nothing consumed it — a
+            // dead producer (ARCHITECTURE.md § "Client porting gotchas").
+            case 'gp:directives':
+                uiStore.updateDirectives(m.directives);
+                break;
             // Spring.AssignMouseCursor / ReplaceMouseCursor (widgets, worker) →
             // register a cursor pack under a logical name (ZK/BAR swap in their
             // own animated PNGs over the engine defaults).
@@ -1341,19 +1370,18 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         // changes back here via a `gp:config` message (Bucket-3).
         standingOrderShowAllies:
             localStorage.getItem('standing-orders-show-allies') !== 'false',
-        // PLAN-bar.md UI-2: hand the worker the lobby room's player roster so it
-        // can populate Spring.GetPlayerList()/GetPlayerInfo before LuaUI boots
-        // (the worker's own roster stream is dead). Lobby player_id matches the
-        // game-server playerID. Spectators ARE players in Spring's playerHandler,
-        // so they're kept; AIs are excluded (no playerId; queried via the team API).
-        players: (lobbyUI?.room?.players ?? []).map((p) => ({
-            id: p.playerId,
-            name: p.username,
-            team: p.team,
-            spectator: p.isSpectator,
-        })),
     };
     gameWorker.postMessage(init, [offscreen]);
+
+    // NOTE: gp:init used to carry the lobby room's player roster, and this is
+    // where that roster was mirrored into the native-UI store. Both are gone.
+    // The lobby roster keys by DB **account** id and holds no AI slots, so it
+    // was never the sim roster it claimed to be ("Lobby player_id matches the
+    // game-server playerID" was simply false — PLAN-endtoend D3). The game
+    // server now broadcasts a real `PlayerRoster` on auth, which arrives before
+    // LuaUI boots (the boot is gated on the same auth), so the stopgap has an
+    // authoritative replacement rather than merely being deleted. See the
+    // `gp:playerRoster` handler above.
 
     // GW4-c5b: the interactive camera + scene.pick live in the worker, but the
     // canvas still receives DOM pointer/wheel events on the main thread (only its

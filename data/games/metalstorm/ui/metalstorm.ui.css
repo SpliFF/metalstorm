@@ -173,4 +173,31 @@
 
 /* ── Scoreboard ─────────────────────────────────────────────────────── */
 
-.ms-score-player { color: var(--nui-text-dim); }
+.ms-score-player {
+    color: var(--nui-text-dim);
+    /* Player names are arbitrary length; the rail is fixed-width, so clip
+       rather than let one long name push the number columns off the panel. */
+    max-width: 110px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ms-score-row.is-self .ms-score-player { color: var(--nui-text); }
+
+.ms-score-teamhead td {
+    padding-top: 5px;
+    color: var(--nui-text-dim);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    border-bottom: 1px solid var(--nui-border);
+}
+
+.ms-score-teamhead.is-own-team td { color: var(--nui-gold); }
+
+.ms-score-ours,
+.ms-score-ai {
+    font-size: 9px;
+    opacity: 0.75;
+}

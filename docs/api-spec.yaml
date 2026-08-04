@@ -96,6 +96,7 @@ components:
               name: { type: string }
               team: { type: integer }
               start_pos: { type: integer }
+              profile: { type: string }
 
     Error:
       type: object
@@ -311,6 +312,13 @@ paths:
                 ai_id: { type: string }
                 name: { type: string }
                 team: { type: integer, default: 0 }
+                profile:
+                  type: string
+                  description: >
+                    Optional personality/difficulty profile for AI plugins
+                    that support one (PLAN-metalstorm-ai.md §10 task 6).
+                    Equivalent to adding the slot then calling
+                    /api/rooms/ai/profile.
 
   /api/rooms/ai/remove:
     post:
@@ -325,6 +333,44 @@ paths:
               required: [slot_index]
               properties:
                 slot_index: { type: integer }
+
+  /api/rooms/ai/team:
+    post:
+      summary: Reassign an AI slot to a different team (host only)
+      tags: [Rooms]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [slot_index, team]
+              properties:
+                slot_index: { type: integer }
+                team: { type: integer }
+
+  /api/rooms/ai/profile:
+    post:
+      summary: >
+        Set (or, with profile:"", clear) an AI slot's personality/difficulty
+        profile (host only). PLAN-metalstorm-ai.md §10 task 6 — profiles
+        move planner scoring/commitment/budget-governor behaviour, never
+        fog or per-unit accuracy. `profile` is opaque, game-specific text
+        (Metalstorm's strategos ships "default"/"aggressive"/"caretaker"/
+        "mentor"/"npc_raider" — see ai/strategos/config.lua's
+        Config.PROFILES); the engine only carries it through to the AI VM,
+        which validates it.
+      tags: [Rooms]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [slot_index]
+              properties:
+                slot_index: { type: integer }
+                profile: { type: string }
 
   /api/rooms/start:
     post:

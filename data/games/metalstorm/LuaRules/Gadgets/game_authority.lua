@@ -307,6 +307,26 @@ end
 --- weight, team = weight }` shorthand, chosen because Award has no other
 --- way to learn which team's pool the "team" share belongs to — recorded
 --- here since the plan text left the shape implicit.
+--- True when `teamID` is a team this game actually has.
+---
+--- Spring.Get/SetTeamRulesParam raise a hard Lua error on an unknown team,
+--- and Award is called from inside the Objectives gadget's eval callin — so
+--- one award aimed at a team that isn't there does not just lose the payment,
+--- it propagates out of the callin and gadgetHandler REMOVES the Objectives
+--- gadget. The whole objective system, victory objective included, then stops
+--- evaluating for the rest of the match. Observed live on a two-team lobby
+--- room whose scenario declared eight ("Removed gadget: Objectives" at frame
+--- 5669, PLAN-endtoend.md D10). game_scenario now filters its own staging, so
+--- this is the backstop for every other caller — the systemic generator, a
+--- bounty on a team that has since been removed, a mid-match team wipe.
+local function teamExists(teamID)
+    if teamID == nil then return false end
+    for _, t in ipairs(Spring.GetTeamList() or {}) do
+        if t == teamID then return true end
+    end
+    return false
+end
+
 function GG.Authority.Award(target, amount, reason)
     if amount == nil or amount <= 0 then return end
 
@@ -320,6 +340,12 @@ function GG.Authority.Award(target, amount, reason)
     end
 
     if target.team then
+        if not teamExists(target.team) then
+            Spring.Echo('[Authority] WARNING: award of ' .. tostring(amount) ..
+                        ' to team ' .. tostring(target.team) ..
+                        ' ("' .. tostring(reason) .. '") dropped — this game has no such team')
+            return
+        end
         setTeamPool(target.team, getTeamPool(target.team) + amount)
         emitEvent('award', amount, reason, nil, target.team)
         fireAward(nil, target.team, amount)
@@ -345,7 +371,7 @@ function GG.Authority.Award(target, amount, reason)
             end
         end
         local teamShare = amount * (spec.teamWeight or 0) / totalWeight
-        if teamShare > 0 then
+        if teamShare > 0 and teamExists(spec.team) then
             setTeamPool(spec.team, getTeamPool(spec.team) + teamShare)
             emitEvent('award', teamShare, reason, nil, spec.team)
             Ledger.tagAward(ledgerState, spec.team, teamShare, reason)
