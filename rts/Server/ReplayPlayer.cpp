@@ -147,9 +147,12 @@ Player& Feed() {
 
 namespace {
 Mode g_mode = Mode::Off;
+int  g_nextSpectatorPlayerNum = kSpectatorPlayerNumBase;
 }
 
 Mode CurrentMode() { return g_mode; }
 void SetCurrentMode(Mode m) { g_mode = m; }
+
+int AllocSpectatorPlayerNum() { return g_nextSpectatorPlayerNum++; }
 
 }  // namespace replay

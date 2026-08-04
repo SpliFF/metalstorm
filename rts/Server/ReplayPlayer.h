@@ -233,4 +233,50 @@ inline uint32_t RecordedClientId(uint32_t virtualId) {
     return virtualId & 0x0FFFFFFFu;
 }
 
+// ── live spectators on a replay server (PLAN-replay §7.11 T2-a-3) ──────────
+//
+// A replay server has to admit live clients for the plan to have a point —
+// §2's whole architecture is "spectating clients connect through the
+// completely standard wire". But a spectator arrives on a server whose synced
+// state is being reconstructed from a file, so the rule it is admitted under
+// is stricter than the one a spectator on a live game gets: it must be
+// incapable of changing anything the recording determined.
+//
+// Two of the three mechanisms live here; the third (which verbs it may send at
+// all) is server_main's inbound gate.
+//
+//   1. Its player number comes from a range disjoint from the recorded one.
+//      The recorded auths are cross-checked against `nextPlayerNum` (§7.10
+//      design point 2) — a spectator that consumed one would shift the
+//      registration order and stop the replay with a spurious "player-number
+//      divergence". So spectators never touch `nextPlayerNum`; they draw from
+//      here instead. The base is a constant rather than "one past the highest
+//      recorded number" deliberately: a constant cannot be wrong at a moment
+//      when the recording's own auths have not been fed yet.
+//   2. It is NOT registered in `playerHandler`, and therefore never appears in
+//      `Spring.GetPlayerList()`. This is the load-bearing half. Metalstorm's
+//      game_authority.lua runs `PlayerAdded` over the whole player list at
+//      GameStart and grants an authority pool per player WITHOUT filtering
+//      spectators — so a spectator visible to the sim at the wrong moment
+//      would mint synced rules params the recording never had. That is a fork
+//      of the replayed world, and it is one `--verify` could not even see: the
+//      state hash folds units and the RNG, not rules params.
+//
+// The cost of (2) is stated rather than hidden: a replay spectator has no
+// roster row and no `clientPlayerNum` entry, so the LuaUIMsg relay (which
+// resolves senders and recipients through both) drops its messages. Spectator
+// chat on a replay server is task 4b's problem, not a silent gap.
+constexpr int kSpectatorPlayerNumBase = 200;
+
+/// Next player number for a live spectator on a replay server. Monotonic and
+/// process-wide, like Feed() — one server, one allocation sequence.
+int AllocSpectatorPlayerNum();
+
+/// True for a player number handed out by AllocSpectatorPlayerNum. Nothing the
+/// recording contains can reach this range: it is above every roster the lobby
+/// can spawn and below MAX_PLAYERS (251).
+inline bool IsSpectatorPlayerNum(int playerNum) {
+    return playerNum >= kSpectatorPlayerNumBase;
+}
+
 }  // namespace replay

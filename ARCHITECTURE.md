@@ -682,6 +682,24 @@ same way the GameStart roster check does. `Handshake` is journaled for the same
 reason: it is the C1 gate that decides whether an `AuthRequest` is admissible at
 all, so a stream without it cannot re-enter its own authentications.
 
+**A live client on a replay server is a spectator, enforced three ways.** The
+inbound gate refuses every recordable verb from a non-virtual client, exempting
+only `Handshake` and `AuthRequest` — without those two nothing could authenticate
+and nothing could watch. On top of that the auth path forces `team = -1` and
+`role = spectator` regardless of the account, ignores the client's `--player`
+roster membership for GameStart (the recorded GameStart record is the only thing
+allowed to start a replayed game), and takes the player number from a reserved
+constant range (`replay::kSpectatorPlayerNumBase`) rather than `nextPlayerNum`,
+which the recorded auths cross-check against. Third and least obvious: a replay
+spectator is **not registered in `playerHandler`**, so it never appears in
+`Spring.GetPlayerList()`. A disjoint player number keeps the replay's own
+bookkeeping consistent but says nothing about synced Lua, and gadgets do not
+agree about spectators — Metalstorm's `game_authority.lua` grants an authority
+pool per player in its GameStart roster loop *without* filtering them, while
+`game_teams.lua` filters. The consequence is that a spectator has no roster row
+and no `clientPlayerNum` entry, so the `LuaUIMsg` relay (which resolves both ends
+through those) drops its messages on a replay server.
+
 ### Def + Model Loading
 ```
 Lobby startup: GameProcessor converts <game>/objects3d/*.s3o → data/games/<id>/models/*.glb

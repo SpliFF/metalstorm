@@ -12,6 +12,7 @@
 
 #include "Server/ReplayFile.h"
 #include "Server/ReplayPlayer.h"
+#include "protocol_generated.h"
 
 using syncedinput::InputKind;
 using syncedinput::Record;
@@ -231,6 +232,58 @@ TEST_CASE("virtual client ids cannot collide with live transport ids") {
     CHECK_FALSE(replay::IsVirtualClient(9999));
     // Distinct recorded connections stay distinct after remapping.
     CHECK(replay::VirtualClientId(1) != replay::VirtualClientId(2));
+}
+
+TEST_CASE("spectator player numbers are disjoint from every recorded one") {
+    // T2-a-3. A live spectator on a replay server must not consume a player
+    // number from the sequence the recorded auths are cross-checked against
+    // (§7.10 design point 2): taking one would shift the registration order and
+    // stop the replay with a "player-number divergence" that describes the
+    // spectator, not a defect in the recording.
+    const int a = replay::AllocSpectatorPlayerNum();
+    const int b = replay::AllocSpectatorPlayerNum();
+    CHECK(a >= replay::kSpectatorPlayerNumBase);
+    CHECK(b == a + 1);
+    CHECK(replay::IsSpectatorPlayerNum(a));
+    CHECK(replay::IsSpectatorPlayerNum(b));
+
+    // The whole point of a constant base: every number a recording can hold is
+    // below it. Recorded numbers are allocated from 0 by the AI slots and then
+    // the roster, and MAX_PLAYERS is 251 — so the base has to sit above any
+    // roster the lobby can spawn and still leave room above itself.
+    CHECK_FALSE(replay::IsSpectatorPlayerNum(0));
+    CHECK_FALSE(replay::IsSpectatorPlayerNum(replay::kSpectatorPlayerNumBase - 1));
+    CHECK(replay::kSpectatorPlayerNumBase > 32);
+    CHECK(replay::kSpectatorPlayerNumBase < 251);
+}
+
+TEST_CASE("the admission verbs are exactly the two a spectator needs") {
+    // server_main's inbound gate exempts Handshake and AuthRequest from the
+    // "no recordable verb from a live client" rule, because without them no
+    // client can authenticate against a replay server and nothing can spectate
+    // one. The exemption is only safe while both verbs are ones whose live
+    // effect is scoped to the connection that sent them — so this pins the two
+    // properties the gate depends on rather than the gate's own code.
+    //
+    // 1. Both are recordable (else the exemption would be dead code, and a
+    //    reclassification back to Unsynced would silently widen the gate).
+    CHECK(syncedinput::ShouldRecordClientPayload(
+        SpringWeb::ClientPayload_Handshake));
+    CHECK(syncedinput::ShouldRecordClientPayload(
+        SpringWeb::ClientPayload_AuthRequest));
+    // 2. Neither is Synced. A Synced verb reaches the sim by definition, and no
+    //    exemption for one could ever be scoped to a single connection.
+    CHECK(syncedinput::ClassifyClientPayload(SpringWeb::ClientPayload_Handshake)
+          == syncedinput::WireClass::Setup);
+    CHECK(syncedinput::ClassifyClientPayload(SpringWeb::ClientPayload_AuthRequest)
+          == syncedinput::WireClass::Setup);
+    // 3. The rest of Setup stays refused — RoomEnlist in particular can move a
+    //    session between spectator and a team, which is exactly the authority a
+    //    spectator on a replay must not have.
+    CHECK(syncedinput::ShouldRecordClientPayload(
+        SpringWeb::ClientPayload_RoomEnlist));
+    CHECK(syncedinput::ShouldRecordClientPayload(
+        SpringWeb::ClientPayload_PlayerCommand));
 }
 
 // ─────────────────── task 3: embedded hash track ──────────────────────────

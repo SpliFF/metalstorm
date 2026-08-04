@@ -187,6 +187,46 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             };
             const bool rosterRequired = !playerTeamByUsername.empty();
 
+            // ── Live client on a replay server = spectator, unconditionally ──
+            // (PLAN-replay §7.11 T2-a-3.) The recorded connections come back
+            // through the virtual-id branch below; anything else is somebody
+            // who tuned in to watch a re-execution. Its account may well BE the
+            // player whose game this is — the recording is not re-opened to
+            // let them play it again. Forced spectator, forced team -1, a
+            // player number from the reserved range, and deliberately absent
+            // from `playerHandler`/`clientPlayerNum` so no synced pass can see
+            // it (the reasoning is in ReplayPlayer.h next to the constants).
+            const bool replaySpectator =
+                replay::IsReplaying() && !replay::IsVirtualClient(msg.clientId);
+
+            // Register the sim-side player for a LIVE auth and return the
+            // player number the AuthResponse carries. Shared by the token and
+            // the password path, which had drifted into two copies of it.
+            auto registerLivePlayer = [&](const std::string& name, int team,
+                                          bool spectator) -> int {
+                if (replaySpectator) {
+                    // No CPlayer, no clientPlayerNum entry, no consumption of
+                    // `nextPlayerNum` — the recorded auths cross-check against
+                    // that counter and a spectator must not move it.
+                    const int specNum = replay::AllocSpectatorPlayerNum();
+                    SLOG(SPRING_LOG_NOTICE,
+                        "replay: admitting client %u as spectator '%s' "
+                        "(playerNum %d, reserved range; not in the sim roster)",
+                        msg.clientId, name.c_str(), specNum);
+                    return specNum;
+                }
+                const int pNum = nextPlayerNum++;
+                CPlayer p;
+                p.name      = name;
+                p.team      = team;
+                p.active    = true;
+                p.playerNum = pNum;
+                p.spectator = spectator;
+                playerHandler.AddPlayer(p);
+                clientPlayerNum[msg.clientId] = pNum;
+                return pNum;
+            };
+
             // One-shots every authenticated session needs — fresh login AND
             // token reconnect (the browser stores its lobby session token, so
             // the reconnect path is the common case). Without sending these on
@@ -262,6 +302,11 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                                           const std::string& name,
                                           const std::string& role, int team,
                                           int pNum, bool spectator) {
+                // A replay spectator is not part of any cause stream: it is an
+                // observer of one. (Nothing is written during a replay anyway
+                // — `--replay` and `--journal-file` are mutually exclusive —
+                // but the audit ring should not claim otherwise either.)
+                if (replaySpectator) return;
                 syncedinput::AuthIdentity id;
                 id.userId    = userId;
                 id.username  = name;
@@ -397,14 +442,18 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                         rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
                         break;
                     }
-                    const int team = resolveTeam(reconnectUser->username);
+                    // On a replay server the roster belongs to the recording,
+                    // so this account's place in it is irrelevant: team -1.
+                    const int team = replaySpectator
+                        ? -1 : resolveTeam(reconnectUser->username);
                     // An authenticated user who isn't in the roster the lobby
                     // handed us is a spectator, not a rejected connection —
                     // PLAN-metalstorm-onboarding.md §4's "spectate a running
                     // game" flow depends on this: spawnGameServer never puts
                     // spectators in --player, so every spectator (pre-game or
                     // mid-game) lands here with team < 0.
-                    const bool isSpectator = rosterRequired && team < 0;
+                    const bool isSpectator =
+                        replaySpectator || (rosterRequired && team < 0);
                     const std::string& effectiveRole =
                         isSpectator ? kSpectatorRole : reconnectUser->role;
                     // Register a Spring CPlayer so Lua can
@@ -416,17 +465,8 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                     // now carries `player_num` — the client cannot derive it
                     // (it is a per-server allocation, not the account id), and
                     // every synced key it reads back is scoped by it.
-                    const int pNum = nextPlayerNum++;
-                    {
-                        CPlayer p;
-                        p.name = reconnectUser->username;
-                        p.team = team;
-                        p.active = true;
-                        p.playerNum = pNum;
-                        p.spectator = isSpectator;
-                        playerHandler.AddPlayer(p);
-                        clientPlayerNum[msg.clientId] = pNum;
-                    }
+                    const int pNum = registerLivePlayer(
+                        reconnectUser->username, team, isSpectator);
                     auto resp = Protocol::BuildAuthResponse(
                         SpringWeb::AuthStatus_OK, auth->token()->str(),
                         static_cast<uint32_t>(userId), "",
@@ -463,8 +503,15 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                         "playerNum=%d team=%d role=%s",
                         msg.clientId, reconnectUser->username.c_str(),
                         userId, pNum, team, effectiveRole.c_str());
-                    // Track roster connection for GameStart
-                    if (playerTeamByUsername.count(reconnectUser->username)) {
+                    // Track roster connection for GameStart. Never for a replay
+                    // spectator: GameStart on a replay is an input in its own
+                    // right (journal chokepoint #5) and the recorded record is
+                    // the only thing allowed to fire it. A spectator whose
+                    // account happens to be in the recording's roster would
+                    // otherwise start the game early and land the whole
+                    // pre-game prologue on the wrong side of it.
+                    if (!replaySpectator &&
+                        playerTeamByUsername.count(reconnectUser->username)) {
                         connectedRosterPlayers.insert(reconnectUser->username);
                         start.CheckAndFireGameStart();
                     }
@@ -549,8 +596,10 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             // see the matching comment on the reconnect path above. Dev-mode
             // (empty roster) skips this and keeps the "command anything"
             // smoketest escape hatch for team == -1.
-            const int team = resolveTeam(user->username);
-            const bool isSpectator = rosterRequired && team < 0;
+            // Replay servers: see the reconnect path above — team -1 always.
+            const int team = replaySpectator ? -1 : resolveTeam(user->username);
+            const bool isSpectator =
+                replaySpectator || (rosterRequired && team < 0);
             const std::string& effectiveRole = isSpectator ? kSpectatorRole : user->role;
 
             // Create session
@@ -565,17 +614,7 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             // Ordered ahead of BuildAuthResponse for the same reason as the
             // reconnect path above: the response carries `player_num`, and
             // nothing downstream can reconstruct it.
-            const int pNum = nextPlayerNum++;
-            {
-                CPlayer p;
-                p.name = user->username;
-                p.team = team;
-                p.active = true;
-                p.playerNum = pNum;
-                p.spectator = isSpectator;
-                playerHandler.AddPlayer(p);
-                clientPlayerNum[msg.clientId] = pNum;
-            }
+            const int pNum = registerLivePlayer(user->username, team, isSpectator);
             auto resp = Protocol::BuildAuthResponse(
                 SpringWeb::AuthStatus_OK, token,
                 static_cast<uint32_t>(user->id), "",
@@ -611,8 +650,9 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                 msg.clientId, username, user->id, pNum, team,
                 effectiveRole.c_str());
 
-            // Track roster connection for GameStart
-            if (playerTeamByUsername.count(user->username)) {
+            // Track roster connection for GameStart — never for a replay
+            // spectator, same reason as the reconnect path above.
+            if (!replaySpectator && playerTeamByUsername.count(user->username)) {
                 connectedRosterPlayers.insert(user->username);
                 start.CheckAndFireGameStart();
             }

@@ -1962,9 +1962,26 @@ int main(int argc, char* argv[])
             // View-state verbs (viewport, selection, path preview) pass
             // through untouched: they are what makes spectating work, and by
             // the classifier's own definition they cannot change the sim.
+            //
+            // TWO Setup verbs are exempted (PLAN-replay §7.11 T2-a-3). Until
+            // 2026-08-05 this gate refused every recordable verb, which
+            // includes Handshake and AuthRequest — so no live client could
+            // authenticate against a replay server at all, and nothing could
+            // spectate one. That was a gap, not a policy: a spectator MUST
+            // authenticate to watch anything, and both verbs are recorded
+            // precisely because they shape who may cause what, which is an
+            // argument about the RECORDED connections. A live connection's
+            // handshake and auth decide only what that connection may do, and
+            // ClientMessageHandler pins that answer to "spectator, team -1, a
+            // player number from a reserved range, absent from the sim's
+            // roster" regardless of what its account says.
             if (replay::IsReplaying() && !replay::IsVirtualClient(msg.clientId)) {
                 const uint8_t ptype = PeekClientPayloadType(msg);
-                if (syncedinput::ShouldRecordClientPayload(ptype)) {
+                const bool admissionVerb =
+                    ptype == SpringWeb::ClientPayload_Handshake ||
+                    ptype == SpringWeb::ClientPayload_AuthRequest;
+                if (syncedinput::ShouldRecordClientPayload(ptype) &&
+                    !admissionVerb) {
                     static std::unordered_set<ClientID> warnedReplayClients;
                     if (warnedReplayClients.insert(msg.clientId).second) {
                         SLOG(SPRING_LOG_NOTICE,

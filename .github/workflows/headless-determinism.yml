@@ -48,11 +48,33 @@ jobs:
   determinism:
     runs-on: macos-14
     steps:
+      # `submodules: recursive` is load-bearing, not hygiene. This job runs on
+      # macos-14 (arm64), where rts/System/simd_compat.h takes the
+      # `defined(__aarch64__)` branch and includes "lib/sse2neon/sse2neon.h" —
+      # which lives in the rts/lib/sse2neon submodule. A bare checkout leaves
+      # that directory empty, so every translation unit that reaches
+      # SpringThreading.h dies with "file not found". entt / nowide / cereal
+      # are needed by the same build for the same reason.
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install build dependencies
         run: |
-          brew install cmake ninja ngtcp2 nghttp3 openssl@3
+          set -e
+          # Formula names are libngtcp2 / libnghttp3, NOT ngtcp2 / nghttp3 —
+          # the latter do not exist in homebrew-core, and every run of this
+          # workflow died here in ~20 s because of it. Keep them in sync with
+          # CMakeLists.txt's `foreach(_qpkg libngtcp2 libngtcp2_crypto_ossl
+          # libnghttp3)` prefix probe, which is what actually has to find them.
+          brew install cmake ninja libngtcp2 libnghttp3 openssl@3
+          # The QUIC TLS path needs OpenSSL >= 3.5; the runner image ships its
+          # own openssl@3 and `brew install` is a no-op on an already-installed
+          # older one, so upgrade explicitly and print the version rather than
+          # failing later inside ngtcp2_crypto_ossl with a confusing error.
+          brew upgrade openssl@3 || true
+          "$(brew --prefix openssl@3)/bin/openssl" version
+          pkg-config --version
 
       - name: headless-batch pure unit tests (no build needed)
         run: make test-headless-batch
