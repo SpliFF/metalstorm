@@ -324,18 +324,29 @@ async function resolvePath(base: string, rel: string): Promise<string | null> {
   return existsSync(cur) ? cur : null;
 }
 
-/// Map thumbnail with multi-tier fallback. Mirrors the legacy lobby
-/// handler at rts/lobby_main.cpp:820-882 (before deletion):
+/// Map thumbnail with multi-tier fallback. Kept in sync with the C++ route
+/// at rts/Server/GameHttpRoutes.cpp (`/api/maps/thumb/*`), which serves this
+/// in production:
 ///   1. data/maps/<id>/thumbnail.png  (preprocessed 256px, primary)
 ///   2. data/maps/<id>/thumbnail.webp (legacy preprocessed output)
-///   3. data/maps/<id>/**/*minimap.(png|jpg) (author-shipped fallback)
+///   3. data/maps/<id>/preview.(png|webp|jpg) (what the map generator ships)
+///   4. data/maps/<id>/**/*minimap.(png|jpg) (author-shipped fallback)
+///
+/// Tier 3 exists because the generated maps — including Meridian Basin, the
+/// map Metalstorm's standard war is played on — ship `preview.png` and
+/// nothing else an <img> can decode, so the lobby's map picker drew them as
+/// blank cards (PLAN-endtoend.md, fire 15). `minimap.ktx2` is deliberately
+/// not a tier: it is the in-game minimap texture and no browser decodes it.
 function resolveThumb(mapsDir: string, mapId: string): string | null {
-  const png = path.join(mapsDir, mapId, "thumbnail.png");
-  if (existsSync(png)) return png;
-  const webp = path.join(mapsDir, mapId, "thumbnail.webp");
-  if (existsSync(webp)) return webp;
-
   const mapDir = path.join(mapsDir, mapId);
+  for (const name of [
+    "thumbnail.png", "thumbnail.webp",
+    "preview.png", "preview.webp", "preview.jpg",
+  ]) {
+    const p = path.join(mapDir, name);
+    if (existsSync(p)) return p;
+  }
+
   if (!existsSync(mapDir)) return null;
   return findMinimapRecursive(mapDir);
 }

@@ -15,6 +15,7 @@
 #include "System/SpringLog/SpringLog.h"
 
 #include <nlohmann/json.hpp>
+#include <array>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -163,18 +164,36 @@ void RegisterGameHttpRoutes(GameServerContext& ctx,
         if (!fs::is_directory(mapDir))
             return {.contentType = "text/plain", .body = {}, .status = 404};
 
-        // Search for minimap image
-        for (auto& entry : fs::recursive_directory_iterator(mapDir)) {
-            if (!entry.is_regular_file()) continue;
-            auto fname = entry.path().filename().string();
-            auto ext = entry.path().extension().string();
-            if (fname.find("minimap") != std::string::npos &&
-                (ext == ".png" || ext == ".jpg")) {
+        // Search for a browser-displayable thumbnail. Maps do not agree on
+        // what to call it: the older hand-made maps ship `minimap.png`, the
+        // generated ones (Meridian Basin, Skerry Reach) ship `preview.png`,
+        // and some ship only `thumbnail.webp`. Matching `minimap` + png/jpg
+        // alone left the lobby's map picker with a blank card for the
+        // flagship map (PLAN-endtoend.md, fire 15). `.ktx2` is deliberately
+        // not served here — it is the in-game minimap texture and no <img>
+        // can decode it.
+        static const std::array<std::string_view, 3> kStems =
+            {"thumbnail", "preview", "minimap"};
+        auto contentTypeFor = [](const std::string& ext) -> const char* {
+            if (ext == ".png") return "image/png";
+            if (ext == ".webp") return "image/webp";
+            if (ext == ".jpg" || ext == ".jpeg") return "image/jpeg";
+            return nullptr;
+        };
+        // Ranked by stem so a map shipping several gets the most
+        // thumbnail-like one, not whichever the directory walk reached first.
+        for (auto stem : kStems) {
+            for (auto& entry : fs::recursive_directory_iterator(mapDir)) {
+                if (!entry.is_regular_file()) continue;
+                auto fname = entry.path().filename().string();
+                auto ext = entry.path().extension().string();
+                const char* ct = contentTypeFor(ext);
+                if (ct == nullptr || fname.find(stem) == std::string::npos)
+                    continue;
                 std::ifstream f(entry.path(), std::ios::binary);
                 if (!f.is_open()) continue;
                 std::vector<uint8_t> data((std::istreambuf_iterator<char>(f)),
                                            std::istreambuf_iterator<char>());
-                std::string ct = (ext == ".png") ? "image/png" : "image/jpeg";
                 return {.contentType = ct, .body = std::move(data), .status = 200};
             }
         }
