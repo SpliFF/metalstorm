@@ -113,20 +113,27 @@ export const DEFAULT_CONFIG = {
   // `lodFullMemberBudget`; the remainder drop to `centroid` (rigid formation,
   // no steering — squad.js `_updateCentroid`).
   //
-  // 6 500 is derived, not tuned: M19's XL ladder fits
-  //   p95 ms ~= 5.9 + 0.637 us * (all members) + 0.533 us * (steered members)
-  // and at the budget subject (XL900, 10 644 members) that puts p95 at ~16.1
-  // against the 16.7 ms target. Set 0 to disable the policy entirely — every
+  // 5 500 is measured, not guessed. At the budget subject (XL900: 900 sim
+  // units, 10 724 rendered members, 1920x1200) M20 bracketed the policy on and
+  // off four times: steering costs 0.448 us per steered member on top of a
+  // 0.697 us/member floor that survives switching it off, so
+  //   p95 ms ~= 5.9 + 0.697 us * (all members) + 0.448 us * (steered members)
+  // and 5 500 puts the subject at p95 16.1-16.7 against the 16.7 ms target,
+  // from 19.5-20.3 unbudgeted. It is a per-machine number in the same sense
+  // `neighbourCap` is: it encodes how many members THIS class of client can
+  // steer inside a 60 Hz frame. Set 0 to disable the policy entirely — every
   // squad stays `full` and the frame is the pre-M20 frame.
-  lodFullMemberBudget: 6500,
+  lodFullMemberBudget: 5500,
   // Re-rank cadence. The ranking is a sort of the squad list (~1 k entries at
   // XL900), not per-member work, so this is cheap; it is slow only to keep the
   // tier from changing under a squad several times a second.
   lodMemberBudgetIntervalSec: 0.25,
-  // Boundary hysteresis as a fraction of the budget: a squad already at `full`
-  // holds it to budget*(1+h), one at `centroid` is promoted only inside
-  // budget*(1-h). Without it the squads straddling the cap flip tier on every
-  // re-rank as the battle shuffles.
+  // Boundary hysteresis as a fraction of the budget. The budget is a hard cap,
+  // so the slack goes on the way back UP: a squad already at `full` holds it up
+  // to the budget, one at `centroid` is promoted only inside budget*(1-h). The
+  // steady state therefore sits in [budget*(1-h), budget] depending on which
+  // side it converged from, and never above. Without it the squads straddling
+  // the cap flip tier on every re-rank as the battle shuffles.
   lodMemberBudgetHysteresis: 0.1,
 
   // Big-unit threading (PLAN-metalstorm-flow.md §4, task 3/4). Weight applied

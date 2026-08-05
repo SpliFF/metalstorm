@@ -159,9 +159,18 @@ export class SquadManager {
     }
     rank.sort(byLodDistance);
 
+    // The budget is a HARD CAP, so a squad already at `full` holds only up to
+    // the budget itself; hysteresis is spent on the way back UP, where a
+    // demoted squad has to find real slack before it is promoted. That makes
+    // the steady state land somewhere in [budget*(1-h), budget] depending on
+    // which side it converged from — never above it. Putting the slack on the
+    // hold side instead (budget*(1+h)) reads like hysteresis and is not: every
+    // squad starts `full`, so the FIRST pass fills straight to budget*(1+h)
+    // and stays there, quietly making the config value a 10 % understatement
+    // of the real cap. Measured live during M20 before it was fixed.
     const h = this.cfg.lodMemberBudgetHysteresis ?? 0;
-    const holdLimit = budget * (1 + h);      // already `full`: keep it
-    const promoteLimit = budget * (1 - h);   // currently `centroid`: promote it
+    const holdLimit = budget;                // already `full`: keep it, up to the cap
+    const promoteLimit = budget * (1 - h);   // currently `centroid`: needs slack to return
     let used = 0, fullSquads = 0, centroidSquads = 0, centroidMembers = 0;
     for (const sq of rank) {
       const n = sq.aliveCount;

@@ -249,8 +249,26 @@ describe('member budget — the producer M19 found missing', () => {
     expect([...mgr.squads.values()].map(sq => sq.lod)).not.toEqual(before);
   });
 
+  it('never steers more than the budget, from either direction', () => {
+    // The bug this pins was measured live, not reasoned about: with the slack
+    // on the HOLD side (budget*(1+h)) every squad starts `full`, so the first
+    // pass fills straight past the cap and stays there — the config value
+    // silently understating the real cap by h. Approach the steady state from
+    // both sides and require the cap to hold on both.
+    for (const seed of ['full', 'centroid']) {
+      const mgr = makeManager(20, { lodFullMemberBudget: 50, lodMemberBudgetHysteresis: 0.1 });
+      for (const sq of mgr.squads.values()) sq.lod = seed;
+      mgr.setViewPos(0, 0, 0);
+      for (let i = 0; i < 5; i++) { mgr._lodNextAt = 0; mgr.update(1 / 30); }
+      expect(mgr.lodStats.fullMembers).toBeLessThanOrEqual(50);      // the cap, both directions
+      // Squads are indivisible, so the steady state lands within one squad
+      // below whichever limit applied: budget*(1-h) = 45, minus 8.
+      expect(mgr.lodStats.fullMembers).toBeGreaterThan(45 - 8);
+    }
+  });
+
   it('hysteresis holds a boundary squad instead of flapping it', () => {
-    // Budget 24 with h=0.25: `full` holds to 30, `centroid` promotes below 18.
+    // Budget 24 with h=0.25: `full` holds to 24, `centroid` promotes below 18.
     // Squad 3 (cumulative 24) therefore keeps `full` once it has it...
     const mgr = makeManager(10, { lodFullMemberBudget: 24, lodMemberBudgetHysteresis: 0.25 });
     mgr.setViewPos(0, 0, 0);
