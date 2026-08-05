@@ -2232,6 +2232,12 @@ export function gpInit(msg: GpInitToWorker): void {
          *  switches live on `__squadSystem.perfFix(name, on)`. */
         squadBackendLegacy: (on: boolean): boolean =>
             setLegacyBackendPlumbing(on),
+        /** M18: A/B the pooled combat-FX shapes. `combatFxPooled(false)`
+         *  restores the pre-M18 path where every tracer / puff / burst
+         *  allocates its own Babylon mesh and its own draw call; `true` is the
+         *  shipped default (one thin-instance pool per shape + material). */
+        combatFxPooled: (on: boolean): boolean =>
+            gpCombatFX?.setPooled(on) ?? false,
     };
     // PLAN-maps.md M6: map-feature LOD live-tuning + attribution, e.g.
     //   window.__gp('__featureLod.get()')                        // tier counts
