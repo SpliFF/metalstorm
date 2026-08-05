@@ -127,7 +127,12 @@ int springlog_sqlite_init(const char* dbPath) {
         "CREATE INDEX IF NOT EXISTS idx_debug_logs_room ON debug_logs(room_id, timestamp);"
         "CREATE INDEX IF NOT EXISTS idx_debug_logs_level ON debug_logs(level, timestamp);"
         "CREATE INDEX IF NOT EXISTS idx_debug_logs_scope ON debug_logs(scope, timestamp);"
-        "CREATE INDEX IF NOT EXISTS idx_debug_logs_process ON debug_logs(process, timestamp);";
+        "CREATE INDEX IF NOT EXISTS idx_debug_logs_process ON debug_logs(process, timestamp);"
+        // Retention deletes by age alone. Every other index here leads with
+        // room_id/level/scope/process, so none of them can serve
+        // "WHERE timestamp < ?" — without this the hourly prune full-scans
+        // the table (5.76M rows when this was added).
+        "CREATE INDEX IF NOT EXISTS idx_debug_logs_timestamp ON debug_logs(timestamp);";
 
     char* errMsg = nullptr;
     sqlite3_exec(g_db, createSql, nullptr, nullptr, &errMsg);
@@ -146,6 +151,77 @@ int springlog_sqlite_init(const char* dbPath) {
     // Register as sink
     g_sqliteSinkId = springlog_add_sink(SqliteSinkFn, nullptr);
     return 0;
+}
+
+int springlog_sqlite_prune(int retentionDays) {
+    // Fail closed: a config read that produced 0 must not delete everything.
+    if (!g_db || retentionDays <= 0) return 0;
+
+    const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    const long long cutoffMs =
+        (long long)nowMs - (long long)retentionDays * 24LL * 60LL * 60LL * 1000LL;
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(g_db, "DELETE FROM debug_logs WHERE timestamp < ?",
+                           -1, &stmt, nullptr) != SQLITE_OK) {
+        return 0;
+    }
+    sqlite3_bind_int64(stmt, 1, cutoffMs);
+    const int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE) return 0;
+
+    return sqlite3_changes(g_db);
+}
+
+int springlog_sqlite_maintain(const char* dbPath, int retentionDays) {
+    // Deliberately a PRIVATE connection rather than g_db.
+    //
+    // VACUUM refuses to run while the connection has an active statement, and
+    // g_db always does: FlushBatch resets g_insertStmt at the *top* of each
+    // iteration, so after the last insert it is left stepped-but-not-reset.
+    // The logserver logs its own startup lines, the flush thread commits them
+    // within a second, and a VACUUM on g_db then fails with "cannot VACUUM -
+    // SQL statements in progress" — which is exactly what happened when this
+    // was first written against g_db.
+    //
+    // A private connection also keeps startup maintenance off the sink's
+    // hot path entirely. Nothing here may call SLOG: this translation unit
+    // *is* the log sink, and logging from inside it re-enters the queue.
+    if (!dbPath || !dbPath[0] || retentionDays <= 0) return 0;
+
+    sqlite3* db = nullptr;
+    if (sqlite3_open(dbPath, &db) != SQLITE_OK) {
+        sqlite3_close(db);
+        return -1;
+    }
+    sqlite3_busy_timeout(db, 5000);
+
+    const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    const long long cutoffMs =
+        (long long)nowMs - (long long)retentionDays * 24LL * 60LL * 60LL * 1000LL;
+
+    int deleted = 0;
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, "DELETE FROM debug_logs WHERE timestamp < ?",
+                           -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_int64(stmt, 1, cutoffMs);
+        if (sqlite3_step(stmt) == SQLITE_DONE)
+            deleted = sqlite3_changes(db);
+    }
+    if (stmt) sqlite3_finalize(stmt);
+
+    // Reclaim only when the prune was big enough to be worth the exclusive
+    // lock — a DELETE leaves the file at its high-water mark, so without this
+    // the first prune of a long-unpruned database frees millions of rows and
+    // gives back no disk at all.
+    if (deleted >= 100000)
+        sqlite3_exec(db, "VACUUM;", nullptr, nullptr, nullptr);
+
+    sqlite3_close(db);
+    return deleted;
 }
 
 void springlog_sqlite_shutdown(void) {

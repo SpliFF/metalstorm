@@ -3,6 +3,7 @@
  */
 
 #include "Database.h"
+#include "SqliteThreading.h"
 #include "System/SpringLog/SpringLog.h"
 
 #define LOG_SECTION "db"
@@ -21,7 +22,17 @@ bool Database::Open(const std::string& path) {
     if (db)
         Close();
 
-    int rc = sqlite3_open(path.c_str(), &db);
+    // FULLMUTEX: this handle is reached from both the NetworkServer thread
+    // (session validation, audit, client-error ingest on every request) and
+    // the owning process's main loop. macOS system libsqlite3 is built
+    // SQLITE_THREADSAFE=2, so a plain sqlite3_open() would return a NOMUTEX
+    // connection and the two threads would race inside SQLite's own
+    // per-connection state — see D33 / the SQLITE_CONFIG_SERIALIZED note in
+    // lobby_main.cpp's main().
+    int rc = sqlite3_open_v2(path.c_str(), &db,
+                             SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE |
+                                 SQLITE_OPEN_FULLMUTEX,
+                             nullptr);
     if (rc != SQLITE_OK) {
         SLOG(SPRING_LOG_ERROR, "failed to open %s: %s",
             path.c_str(), sqlite3_errmsg(db));
@@ -29,6 +40,10 @@ bool Database::Open(const std::string& path) {
         db = nullptr;
         return false;
     }
+
+    // Wait for a competing writer instead of failing instantly with
+    // SQLITE_BUSY — see kSqliteBusyTimeoutMs.
+    SqliteConfigureSharedHandle(db);
 
     // Enable WAL mode for concurrent reads
     sqlite3_exec(db, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);

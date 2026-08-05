@@ -7,6 +7,7 @@
 #include "Server/NetworkServer.h"
 #include "Server/DevBuildGate.h"
 #include "Server/LogQueryBuilder.h"
+#include "Server/SqliteThreading.h"
 #include "System/SpringLog/SpringLog.h"
 #include "System/SpringLog/SpringLogSqlite.h"
 
@@ -318,6 +319,12 @@ static int JsonGetInt(const std::string& body, const std::string& key, int def) 
 // --- Main ---
 
 int main(int argc, char** argv) {
+    // D33: serialize SQLite before the first connection — the network thread
+    // and the sqlite log sink's flush thread share handles here. Must precede
+    // springlog_init. See Server/SqliteThreading.h.
+    if (!SqliteEnableSerializedMode("spring-logserver"))
+        return 1;
+
     springlog_init("spring-logserver", SPRING_LOG_OUTPUT_CONSOLE);
 
     // Saved for self-restart via execvp (see g_restart handling below).
@@ -331,11 +338,18 @@ int main(int argc, char** argv) {
 
     // Parse args
     bool devBuildAcknowledged = false;
+    // How long debug.db keeps log rows. 14 days is well past the useful life
+    // of a debug log and bounds the file at a few hundred MB at observed
+    // write rates; `--log-retention-days 0` disables pruning entirely for a
+    // long-running investigation.
+    int debugLogRetentionDays = 14;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--port") == 0 && i + 1 < argc)
             g_port = atoi(argv[++i]);
         else if (strcmp(argv[i], "--db") == 0 && i + 1 < argc)
             g_dbPath = argv[++i];
+        else if (strcmp(argv[i], "--log-retention-days") == 0 && i + 1 < argc)
+            debugLogRetentionDays = atoi(argv[++i]);
         else if (strcmp(argv[i], "--log-level") == 0 && i + 1 < argc) {
             const char* lvl = argv[++i];
             if (strcmp(lvl, "debug") == 0) springlog_set_min_level(SPRING_LOG_DEBUG);
@@ -726,9 +740,31 @@ int main(int argc, char** argv) {
     // stays available in prod (requires local process access).
     SLOG(SPRING_LOG_NOTICE, "log server running (SIGINT=stop, SIGHUP=re-exec)");
 #endif
+    // Retention for debug.db. The sqlite sink had none, so the file grew
+    // unbounded — 1.39 GB / 5.76M rows over four months by the time it was
+    // noticed. Pruned ~hourly at 200 ms ticks; one indexed DELETE on
+    // timestamp, idempotent, so a quiet hour costs nothing.
+    int logPruneTick = 0;
+    // Prune once at startup so an already-huge database shrinks on the next
+    // logserver restart rather than an hour into it.
+    if (const int n = springlog_sqlite_maintain(g_dbPath.c_str(), debugLogRetentionDays);
+        n > 0) {
+        SLOG(SPRING_LOG_NOTICE,
+             "pruned %d debug log row(s) older than %d days from %s",
+             n, debugLogRetentionDays, g_dbPath.c_str());
+    }
+
     while (!g_shutdown.load()) {
         struct timespec ts{0, 200L * 1000 * 1000};  // 200 ms
         nanosleep(&ts, nullptr);
+
+        if (++logPruneTick >= 18000) {  // ~1 hour
+            logPruneTick = 0;
+            if (const int n = springlog_sqlite_prune(debugLogRetentionDays); n > 0)
+                SLOG(SPRING_LOG_NOTICE,
+                     "pruned %d debug log row(s) older than %d days",
+                     n, debugLogRetentionDays);
+        }
     }
 
     net.Stop();
