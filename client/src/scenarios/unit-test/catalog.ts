@@ -14,9 +14,9 @@
 import type { TestHarness } from '../../core/test-harness.js';
 
 export interface UnitClassification {
-    /** Numeric defId (1-based, contiguous in ZK). */
+    /** Numeric defId (1-based, contiguous). */
     defId: number;
-    /** Internal name, e.g. "shieldraid", "armcom1". */
+    /** Internal name, e.g. "ms_mechs_s1", "fable_colossus". */
     name: string;
     /** Human label, e.g. "Bandit". */
     humanName: string;
@@ -61,12 +61,17 @@ export async function loadCatalog(h: TestHarness): Promise<UnitClassification[]>
                 end
             end
             local canBuild = def.buildOptions and #def.buildOptions > 0 or false
-            -- ZK declares passive income via customParams (income_metal /
-            -- income_energy) rather than the legacy def.metalMake /
-            -- energyMake fields, and tags mexes with customParams.ismex
-            -- (the runtime metal_handler gadget adds income at spawn
-            -- based on the metalmap). The classic fields are kept as
-            -- a fallback for non-ZK games.
+            -- Passive income, checked three ways because games declare it
+            -- three ways: the legacy def.metalMake / energyMake /
+            -- extractsMetal fields, the generator flags, and
+            -- customParams.income_* / .ismex (how ZK did it). Metalstorm
+            -- sets none of them — its economy is authority-based
+            -- (PLAN-metalstorm-economy.md) — so producesResources is
+            -- false for every current def. The classification is kept
+            -- anyway: it is what a future authority-income category
+            -- would key off, and unit-test-loop's selection filter
+            -- already includes it, so a producer def is swept the day
+            -- one lands.
             local cp = def.customParams or {}
             local incomeM = tonumber(cp.income_metal or 0) or 0
             local incomeE = tonumber(cp.income_energy or 0) or 0
@@ -83,8 +88,9 @@ export async function loadCatalog(h: TestHarness): Promise<UnitClassification[]>
             local extendsRecon = (def.radarRadius or 0) > 0
                 or (def.jammerRadius or 0) > 0
                 or (def.sonarRadius or 0) > 0
-            -- Ship filter: ZK's ship moveDefs have family == 'ship' OR
-            -- minWaterDepth that requires deep water.
+            -- Ship filter: naval moveDefs have family == 'ship' OR a
+            -- minWaterDepth that requires deep water. The bench map is
+            -- dry, so these are excluded from the sweep.
             local moveFamily = def.moveDef and def.moveDef.family or ''
             local needsWater = (def.minWaterDepth or 0) > 0
             local isShip = moveFamily == 'ship' or needsWater

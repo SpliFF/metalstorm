@@ -11,17 +11,21 @@
  * down for screenshots. See ARCHITECTURE.md for the hotkey list.
  *
  * URL params (all optional):
- *   ?scenario=weapon-fx                            shieldraid vs bandit
- *   ?scenario=weapon-fx&unit=raveparty             pick shooter
- *   ?scenario=weapon-fx&target=staticheavyradar    pick target def
- *   ?scenario=weapon-fx&team=0                     shooter team (default 0)
- *   ?scenario=weapon-fx&distance=400               separation in elmos
+ *   ?scenario=weapon-fx                        ms_mechs_s2 vs ms_garrison
+ *   ?scenario=weapon-fx&unit=ms_artillery_s2   pick shooter
+ *   ?scenario=weapon-fx&target=ms_tanks_s2     pick target def
+ *   ?scenario=weapon-fx&team=0                 shooter team (default 0)
+ *   ?scenario=weapon-fx&distance=400           separation in elmos
  *
  * No `?speed=` param: the speed control is a real game feature now.
  * After the scenario boots, press `-` repeatedly to slow the sim,
  * `Pause` to freeze, `T` to toggle tracking on/off. The scenario
  * leaves tracking ON so the camera follows the attacker through the
  * engagement.
+ *
+ * Metalstorm port (2026-08-04) — was ZK `shieldraid` vs `damagesink`.
+ * The defaults are only defaults: this scenario's whole purpose is that
+ * `?unit=` / `?target=` let you point it at whatever is misrendering.
  */
 
 import type { Scenario, AssertionResult } from '../types.js';
@@ -29,10 +33,14 @@ import { sleep } from '../types.js';
 
 const CMD_ATTACK = 20;
 const FLAT_MAP_CENTER = 8704;
-// Default shooter has both a hitscan laser and a cannon archetype —
-// good baseline for verifying both bullet and beam paths render.
-const DEFAULT_SHOOTER = 'shieldraid';
-const DEFAULT_TARGET = 'damagesink';
+/** `ms_mechs_s2` fires MS_AC_S2 — a plain ballistic autocannon, the
+ *  archetype every other Metalstorm ground weapon is a variation on, so
+ *  it's the right default for "is the projectile path rendering at all". */
+const DEFAULT_SHOOTER = 'ms_mechs_s2';
+/** `ms_garrison` is the closest thing Metalstorm has to a damage sink:
+ *  static, unarmed, 12000 HP and a large footprint, so shots land on it
+ *  rather than sailing past. The setup boosts its HP further anyway. */
+const DEFAULT_TARGET = 'ms_garrison';
 const DEFAULT_DISTANCE = 400;
 
 function param(name: string): string | null {
@@ -50,9 +58,9 @@ let _tId = 0;
 
 const scenario: Scenario = {
     name: 'weapon-fx',
-    description: 'Slow-motion engagement bench for diagnosing CEG / beam / projectile rendering. Use +/-/Pause to control speed, T to toggle tracking camera.',
+    description: 'Slow-motion engagement bench for diagnosing CEG / projectile / impact rendering. Use +/-/Pause to control speed, T to toggle tracking camera.',
     map: 'green_flat_x34_v3',
-    gameId: 'zk',
+    gameId: 'metalstorm',
     aiSlots: [{ aiId: 'null', team: 1 }],
     playerTeam: 0,
 

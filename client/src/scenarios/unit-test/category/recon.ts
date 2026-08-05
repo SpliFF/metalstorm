@@ -5,7 +5,7 @@
  *
  * Probe layout:
  *   - UUT spawns at the anchor.
- *   - One enemy `shieldraid` probe spawns at ~60% of the largest recon
+ *   - One enemy `ms_mechs_s1` probe spawns at ~60% of the largest recon
  *     range, in a direction (east) clear of the economy cluster.
  *   - After a brief settle, `Spring.GetUnitLosState` for the probe is
  *     queried from the player's ally team. Pass when the probe is
@@ -24,7 +24,7 @@ import type { TestHarness } from '../../../core/test-harness.js';
 import type { UnitClassification } from '../catalog.js';
 import { sleep } from '../../types.js';
 
-const PROBE_DEF = 'shieldraid';
+const PROBE_DEF = 'ms_mechs_s1';
 const CMD_FIRE_STATE = 45;
 const CMD_MOVE_STATE = 50;
 /** Settle time (wall ms at 5× sim speed ≈ 4 sim seconds) — enough for
@@ -70,8 +70,8 @@ export async function runRecon(
         return { applicable: false, pass: true, detail: `no recon ext (los=${losR})` };
     }
 
-    // 400 elmos north-west of anchor — clear of the bootstrap mex/fusion
-    // cluster and of the movement-test corridor (anchor.x ± 600 east-west).
+    // 400 elmos north-west of anchor — clear of the movement-test
+    // corridor (anchor.x - 600 to anchor.x + 1200, east-west).
     const utX = anchorX - 400;
     const utZ = anchorZ - 400;
     const utSpawn = await h.spawn(unit.name, utX, utZ, team, 1);

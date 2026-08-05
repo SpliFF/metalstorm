@@ -26,7 +26,11 @@
  * The sim's aim itself was measured correct and is NOT what these tests pin:
  * the BeamLaser's firing ray matched the exact muzzle→target geometry
  * (`dirY = -0.0927` vs the geometric `-0.0929`) and both beam and cannon
- * landed damage. See `client/src/scenarios/bench/aim-origin-probe.ts`.
+ * landed damage. That measurement came from the `aim-origin-probe` bench
+ * scenario, which was retired 2026-08-04 with the ZK port (Metalstorm has
+ * no hit-scan weapon, so the beam-vs-ballistic discriminator it relied on
+ * cannot be built) — the finding stands, the harness that produced it is
+ * gone.
  */
 
 import { describe, it, expect } from 'vitest';
