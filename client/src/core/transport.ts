@@ -267,6 +267,40 @@ export class WebTransportAdapter implements GameTransport {
 
     // --- readers ---
 
+    /**
+     * Hand one decoded message to the application, absorbing a handler fault.
+     *
+     * **Load-bearing** (PLAN-endtoend.md D36). `onMessage` runs the whole
+     * inbound application stack — rules-param decode, roster, widget
+     * `RecvLuaMsg` dispatch into the Lua runtime, `GameInfo`. Without this
+     * guard a single throw anywhere in there propagates out of the deframer,
+     * out of the reader loop, and lands in the loop's `catch`, which treats it
+     * as "the stream closed". The connection is then **permanently and
+     * silently deaf on that lane** — measured live 2026-08-05: one injected
+     * throw froze the client's `Spring.GetGameFrame()` at 1650 while the server
+     * ran the war on to 13710 and finished it, with an **empty console** and
+     * the canvas still rendering off the uni/datagram lanes. The terminal
+     * `GameInfo{game_over}` rides this lane, so the player sat on a war that had
+     * already been decided until the page was reloaded. Per-message isolation
+     * keeps one bad message from costing every message after it, and the log
+     * makes a deaf lane say so instead of looking like a live game.
+     */
+    private deliver(msg: Uint8Array, lane: string): void {
+        try {
+            this.events.onMessage?.(msg);
+        } catch (err) {
+            console.error(`[transport] inbound handler threw on the ${lane} lane ` +
+                `(${msg.length} bytes, envelope 0x${(msg[0] ?? 0).toString(16)}) — ` +
+                `message dropped, lane kept open:`, err);
+        }
+    }
+
+    /** Log a reader loop that ended on an error rather than on end-of-stream. */
+    private readerFailed(lane: string, err: unknown): void {
+        if (this.closing) return;   // ordinary teardown — disconnect() closed it
+        console.warn(`[transport] ${lane} reader ended on error:`, err);
+    }
+
     /** Read length-delimited `[u32 len][payload]` frames off the control stream. */
     private async readControlFrames(readable: ReadableStream<Uint8Array>): Promise<void> {
         const reader = readable.getReader();
@@ -275,9 +309,9 @@ export class WebTransportAdapter implements GameTransport {
             for (;;) {
                 const { value, done } = await reader.read();
                 if (done) break;
-                if (value) deframer.push(value, (msg) => this.events.onMessage?.(msg));
+                if (value) deframer.push(value, (msg) => this.deliver(msg, 'control'));
             }
-        } catch { /* stream closed */ }
+        } catch (err) { this.readerFailed('control', err); }
     }
 
     /** Each incoming uni stream is exactly one message (read to FIN). */
@@ -289,7 +323,7 @@ export class WebTransportAdapter implements GameTransport {
                 if (done) break;
                 if (value) void this.readWholeStream(value);
             }
-        } catch { /* session closed */ }
+        } catch (err) { this.readerFailed('uni-stream accept', err); }
     }
 
     private async readWholeStream(stream: ReadableStream<Uint8Array>): Promise<void> {
@@ -301,8 +335,10 @@ export class WebTransportAdapter implements GameTransport {
                 if (done) break;
                 if (value) buf = concat(buf, value);
             }
-            if (buf.length > 0) this.events.onMessage?.(buf);
-        } catch { /* stream reset (newest-wins) — drop */ }
+        } catch { return; /* stream reset (newest-wins) — drop */ }
+        // Outside the read try/catch: a handler fault is not a stream reset,
+        // and `deliver` must not be able to look like one.
+        if (buf.length > 0) this.deliver(buf, 'uni');
     }
 
     private async readDatagrams(readable: ReadableStream<Uint8Array>): Promise<void> {
@@ -311,9 +347,9 @@ export class WebTransportAdapter implements GameTransport {
             for (;;) {
                 const { value, done } = await reader.read();
                 if (done) break;
-                if (value && value.length > 0) this.events.onMessage?.(value);
+                if (value && value.length > 0) this.deliver(value, 'datagram');
             }
-        } catch { /* session closed */ }
+        } catch (err) { this.readerFailed('datagram', err); }
     }
 
     private handleClosed(code: number, reason: string): void {

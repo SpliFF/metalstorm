@@ -42,10 +42,14 @@ export function showGameOver(
         callbacks.winningAllyTeams ?? [], callbacks.won,
     );
 
-    const overlay = document.createElement('div');
-    overlay.id = 'game-over-overlay';
+    // Idempotent: the result can be announced more than once for one match —
+    // the server re-announces it through the post-game window and a resync
+    // gets it replayed at auth (PLAN-endtoend D36). Reuse the existing element
+    // rather than stacking a second `#game-over-overlay` on top of the first.
+    const overlay = document.getElementById('game-over-overlay')
+        ?? document.body.appendChild(Object.assign(document.createElement('div'),
+            { id: 'game-over-overlay' }));
     overlay.innerHTML = renderTemplate(templates.gameOverHtml, { frame, headline, result });
-    document.body.appendChild(overlay);
 
     document.getElementById('return-lobby-btn')?.addEventListener('click', callbacks.onReturnToLobby);
 }

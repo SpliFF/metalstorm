@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { frameControlMessage, ControlFrameDeframer } from './transport';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { frameControlMessage, ControlFrameDeframer, WebTransportAdapter } from './transport';
 
 // The control-stream framing is the one contract the WebTransport client and
 // the C++ WebTransportServer must agree on byte-for-byte (GW2 Control tier).
@@ -66,5 +66,124 @@ describe('control-stream framing', () => {
         expect(framed[1]).toBe(0x02);
         expect(framed[2]).toBe(0x00);
         expect(framed[3]).toBe(0x00);
+    });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PLAN-endtoend.md D36 — a throwing inbound handler must cost exactly one
+// message, not the rest of the connection.
+//
+// The reader loops used to call `onMessage` inside the same try/catch that
+// catches "the stream closed", so any throw from the application stack (a
+// rules-param decode, a widget RecvLuaMsg dispatch into Lua, anything) broke
+// the loop and left the lane **permanently and silently deaf**. Reproduced
+// live 2026-08-05: one injected throw froze the client's Spring.GetGameFrame()
+// at 1650 while the server ran on to 13710 — the war was won and the winner's
+// client never received the terminal GameInfo, so it sat on a finished match
+// that still looked live, with an empty console, until the page was reloaded.
+
+/** Minimal WebTransport double: exposes the controllers so a test can push
+ *  bytes at the adapter's control / datagram readers. */
+class FakeWebTransport {
+    static last: FakeWebTransport | null = null;
+    ready = Promise.resolve();
+    closed = new Promise<never>(() => { /* never settles — no close in these tests */ });
+    control!: ReadableStreamDefaultController<Uint8Array>;
+    datagramCtl!: ReadableStreamDefaultController<Uint8Array>;
+    datagrams: { writable: WritableStream<Uint8Array>; readable: ReadableStream<Uint8Array> };
+    incomingUnidirectionalStreams = new ReadableStream({ start() { /* idle */ } });
+
+    constructor() {
+        FakeWebTransport.last = this;
+        this.datagrams = {
+            writable: new WritableStream(),
+            readable: new ReadableStream<Uint8Array>({ start: (c) => { this.datagramCtl = c; } }),
+        };
+    }
+    createBidirectionalStream(): Promise<{ writable: WritableStream<Uint8Array>;
+                                           readable: ReadableStream<Uint8Array> }> {
+        return Promise.resolve({
+            writable: new WritableStream<Uint8Array>(),
+            readable: new ReadableStream<Uint8Array>({ start: (c) => { this.control = c; } }),
+        });
+    }
+    close(): void { /* no-op */ }
+}
+
+/** Let the reader loops' pending microtasks/reads run. */
+const settle = async (): Promise<void> => {
+    for (let i = 0; i < 8; i++) await new Promise((r) => setTimeout(r, 0));
+};
+
+describe('inbound handler faults are isolated per message', () => {
+    afterEach(() => {
+        vi.restoreAllMocks();
+        delete (globalThis as Record<string, unknown>).WebTransport;
+        FakeWebTransport.last = null;
+    });
+
+    async function connectWith(onMessage: (m: Uint8Array) => void): Promise<FakeWebTransport> {
+        (globalThis as Record<string, unknown>).WebTransport = FakeWebTransport;
+        const adapter = new WebTransportAdapter({ onMessage });
+        await adapter.connect('https://localhost:9100/');
+        await settle();
+        const wt = FakeWebTransport.last;
+        if (!wt) throw new Error('fake transport was not constructed');
+        return wt;
+    }
+
+    it('keeps the control lane open after a handler throws', async () => {
+        const seen: number[] = [];
+        const err = vi.spyOn(console, 'error').mockImplementation(() => { /* quiet */ });
+        const wt = await connectWith((m) => {
+            seen.push(m[0]);
+            if (m[0] === 0xff) throw new Error('handler blew up');
+        });
+
+        wt.control.enqueue(frameControlMessage(new Uint8Array([0xff, 1])));  // throws
+        wt.control.enqueue(frameControlMessage(new Uint8Array([0x11, 2])));  // must still arrive
+        wt.control.enqueue(frameControlMessage(new Uint8Array([0x12, 3])));  // …and this one
+        await settle();
+
+        // Pre-fix this read [0xff] — the loop died on the first message and the
+        // connection never delivered another control frame (the terminal
+        // GameInfo among them).
+        expect(seen).toEqual([0xff, 0x11, 0x12]);
+        expect(err).toHaveBeenCalled();   // and it says so, instead of failing mute
+    });
+
+    it('drains the rest of a coalesced chunk when one frame in it throws', async () => {
+        const seen: number[] = [];
+        vi.spyOn(console, 'error').mockImplementation(() => { /* quiet */ });
+        const wt = await connectWith((m) => {
+            seen.push(m[0]);
+            if (m[0] === 0xff) throw new Error('handler blew up');
+        });
+
+        // One TCP-ish chunk carrying three frames — the throw must not strand
+        // the two behind it in the deframer's buffer.
+        wt.control.enqueue(new Uint8Array([
+            ...frameControlMessage(new Uint8Array([0x21])),
+            ...frameControlMessage(new Uint8Array([0xff])),
+            ...frameControlMessage(new Uint8Array([0x22])),
+        ]));
+        await settle();
+
+        expect(seen).toEqual([0x21, 0xff, 0x22]);
+    });
+
+    it('keeps the datagram lane open after a handler throws', async () => {
+        const seen: number[] = [];
+        vi.spyOn(console, 'error').mockImplementation(() => { /* quiet */ });
+        const wt = await connectWith((m) => {
+            seen.push(m[0]);
+            if (m[0] === 0xff) throw new Error('handler blew up');
+        });
+
+        wt.datagramCtl.enqueue(new Uint8Array([0xff, 9]));
+        wt.datagramCtl.enqueue(new Uint8Array([0x31, 9]));
+        await settle();
+
+        expect(seen).toEqual([0xff, 0x31]);
     });
 });
