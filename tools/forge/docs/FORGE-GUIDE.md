@@ -119,6 +119,14 @@ contact — same painter language as the samples.
 - `export` twice: ktx2 AND png variants (png is the preview/bake source).
 - Run everything with `$FORGE/venv/bin/python` — system python lacks numpy.
 - Never `npm ci`, never create a venv, never `git` anything — it's all here.
+- The impostor BAKER flat-shades each triangle from the diffuse at its UV
+  centroid: bold thin stripes in a cell mapped to large quads flood whole
+  triangles into a checker. That's a baker artifact, not your model — keep
+  large-quad cells low-contrast (tone-on-tone ±15%) and DON'T iterate the
+  bake chasing it.
+- Double-sided non-planar quads: emit explicit triangles with the SAME
+  diagonal on both sides — a reversed quad fan-triangulates the other
+  diagonal and the surfaces cross.
 
 ## Report (structured output)
 
