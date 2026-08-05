@@ -6,8 +6,10 @@ gltf_export, bake_impostors, validate.py, encode.mjs).
 
 - START HERE (agents): docs/FORGE-GUIDE.md — recipe + contracts + pitfalls.
 - Style authority: docs/DESIGN-GUIDE.md (distills data/games/metalstorm/art/STYLE.md).
-- Prefabs: prefabs/PREFABS.md · smoke_test.py renders every part.
-- bin/env.sh (source it), bin/new-workspace.sh, bin/encode.sh.
+- Prefabs: prefabs/PREFABS.md (parts.py geometry + paintlib.py painting) ·
+  smoke_test.py renders every part.
+- bin/env.sh (source it), bin/new-workspace.sh, bin/build.sh (whole build
+  loop in one call), bin/encode.sh.
 - samples/ — 21 complete gen/layout/paint triplets (batch 01).
 - dist/batch-01/ — finished, validated batch-01 assets awaiting integration
   into the game data tree (local only, gitignored — regenerable from samples).
