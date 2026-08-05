@@ -43,6 +43,14 @@ export const DEFAULT_CONFIG = {
   denseCellOccupancy: 16,
   denseCellRadiusMul: 1.5,        // aggregate radius = cellSize * this
 
+  // Fast neighbour broad-phase (PLAN-perf M10): numeric spatial-hash keys and
+  // a reusable neighbour buffer, instead of "gx:gz" string keys and a
+  // generator. Selects exactly the same neighbours — it is an allocation and
+  // dispatch change, not a behaviour change — so this exists only as the
+  // reversible in-session A/B switch Track P requires. Set false to restore
+  // the original path.
+  fastNeighbours: true,
+
   // Wrecks (§5): brief post-spawn presence in the avoidance hash so members
   // don't visibly clip through debris the instant it lands, then
   // permanently non-colliding (members may walk over old wreckage) — keeps

@@ -598,6 +598,15 @@ export class Squad {
 
   /** Steer + integrate living members. `neighbourQuery` yields nearby members
    *  (this squad + others) for separation; supplied by the manager.
+   *
+   *  NEIGHBOUR_QUERY contract — two accepted shapes, because this is the
+   *  hottest call in the client frame (PLAN-perf M10):
+   *    - **hot path**: `query(m)` fills the reusable array `query.buf` and
+   *      returns how many leading entries are live. No allocation per member.
+   *    - **plain**: `query(m)` returns any iterable of neighbours. Simpler and
+   *      allocating; used by the tests and by the legacy A/B path.
+   *  The steerers accept either — a numeric return selects the buffer form.
+   *
    *  `passability` (optional — the manager may not have one built yet) is
    *  the shared grid from passability.js; ground/naval steerers query it,
    *  air ignores it entirely (pathfinding §6).
@@ -683,9 +692,12 @@ export class Squad {
 
     if (m.recoveryLevel >= 2) { _sep.x = 0; _sep.z = 0; }
     else {
-      separate(m.x, m.z, m.squadId, neighbourQuery(m), this.cfg.separationRadius,
+      const nb = neighbourQuery(m);
+      const n = typeof nb === 'number' ? nb : undefined;   // see NEIGHBOUR_QUERY note
+      separate(m.x, m.z, m.squadId, n === undefined ? nb : neighbourQuery.buf,
+        this.cfg.separationRadius,
         this.cfg.separationWeightSameSquad, this.cfg.separationWeightOtherSquad,
-        this.cfg.separationDeadband, _sep);
+        this.cfg.separationDeadband, _sep, n);
     }
 
     softLeashPull(m.x, m.z, this.cx, this.cz, softLeashDist, this.cfg.softLeashGain, _leash);
@@ -748,9 +760,12 @@ export class Squad {
 
     if (m.recoveryLevel >= 2) { _sep.x = 0; _sep.z = 0; }
     else {
-      separate(m.x, m.z, m.squadId, neighbourQuery(m), this.cfg.separationRadius,
+      const nb = neighbourQuery(m);
+      const n = typeof nb === 'number' ? nb : undefined;   // see NEIGHBOUR_QUERY note
+      separate(m.x, m.z, m.squadId, n === undefined ? nb : neighbourQuery.buf,
+        this.cfg.separationRadius,
         this.cfg.separationWeightSameSquad, this.cfg.separationWeightOtherSquad,
-        this.cfg.separationDeadband, _sep);
+        this.cfg.separationDeadband, _sep, n);
     }
     softLeashPull(m.x, m.z, this.cx, this.cz, softLeashDist, this.cfg.softLeashGain, _leash);
 

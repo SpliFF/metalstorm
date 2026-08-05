@@ -25,18 +25,30 @@ export function arrive(px, pz, tx, tz, maxSpeed, arrivalRadius, out) {
  * "part around obstacles strongly" case). `deadband` ignores contributions
  * whose overlap (radius - distance) is below it, so members resting right at
  * each other's separation-radius boundary don't jitter (§7 "boiling").
- * `neighbours` is an iterator of {x,z,squadId?,radius?}; accumulates into
- * out {x,z}.
+ * `neighbours` is an array (or any iterable) of {x,z,squadId?,radius?};
+ * accumulates into out {x,z}.
+ *
+ * `count` (optional) is how many leading entries of `neighbours` are live.
+ * The hot path passes SquadManager's reusable neighbour buffer plus its fill
+ * count, so this runs an indexed loop with no iterator and no allocation
+ * (PLAN-perf M10). Omit it and any iterable works, which is what the tests and
+ * the legacy generator path do.
  *
  * ORCA seam (§3 — decision recorded, NOT implemented): a future velocity-
  * obstacle avoidance term would query neighbours through the same
- * SquadManager._neighbours generator and replace only this function's body,
- * so it can drop in without touching call sites.
+ * SquadManager neighbour query and replace only this function's body, so it
+ * can drop in without touching call sites.
  */
-export function separate(px, pz, selfSquadId, neighbours, separationRadius, sameWeight, otherWeight, deadband, out) {
+export function separate(px, pz, selfSquadId, neighbours, separationRadius, sameWeight, otherWeight, deadband, out, count) {
   out.x = 0; out.z = 0;
+  let list = neighbours, len = count;
+  if (len === undefined) {
+    if (!Array.isArray(list)) list = Array.from(list);
+    len = list.length;
+  }
   let n = 0;
-  for (const nb of neighbours) {
+  for (let i = 0; i < len; i++) {
+    const nb = list[i];
     const dx = px - nb.x, dz = pz - nb.z;
     const d2 = dx * dx + dz * dz;
     const r = nb.radius ?? separationRadius;
