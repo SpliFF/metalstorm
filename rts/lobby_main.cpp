@@ -3606,10 +3606,37 @@ int main(int argc, char *argv[]) {
 
   SLOG(SPRING_LOG_NOTICE, "running (port %d)", port);
 
+  // --- Periodic maintenance connection (PLAN-long-uptime S9) ---
+  // The expired-session sweep below has to run from this thread, and it must
+  // NOT run through `db`: the HTTP route handlers use that handle unguarded
+  // from the NetworkServer thread, and macOS's system libsqlite3 hands out
+  // NOMUTEX handles, so sharing it across threads is a data race on the
+  // handle rather than mere lock contention. A second connection to the same
+  // WAL file is safe by construction (and `Database::Open` gives it a busy
+  // timeout, which is what makes the two writers coexist).
+  Database maintenanceDb;
+  const bool haveMaintenanceDb = maintenanceDb.Open(dbPath);
+  if (!haveMaintenanceDb)
+    SLOG(SPRING_LOG_ERROR,
+         "maintenance db connection failed — expired sessions will not be "
+         "swept while this lobby runs");
+
   // --- Main loop (10 Hz for lobby — HTTP serving + process management) ---
   int reapTick = 0;
+  int sessionSweepTick = 0;
   while (keepRunning.load()) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    // Sweep expired sessions (~hourly at 10 Hz). PLAN-long-uptime S9: the
+    // sweep existed but ran exactly once, at start-up, so a lobby that stays
+    // up for the weeks this plan set exists for swept once and never again —
+    // `sessions` then grew one row per login for the lifetime of the process.
+    if (haveMaintenanceDb && ++sessionSweepTick >= 36000) {
+      sessionSweepTick = 0;
+      const int swept = maintenanceDb.CleanExpiredSessions(86400);
+      if (swept > 0)
+        SLOG(SPRING_LOG_INFO, "swept %d expired session(s)", swept);
+    }
 
     // Periodically reap abandoned rooms (~every 60s at 10 Hz). Catches
     // rooms whose host closed the browser during a long-lived lobby,

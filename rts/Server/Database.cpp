@@ -33,6 +33,14 @@ bool Database::Open(const std::string& path) {
     // Enable WAL mode for concurrent reads
     sqlite3_exec(db, "PRAGMA journal_mode=WAL;", nullptr, nullptr, nullptr);
 
+    // WAL allows concurrent readers but only ONE writer at a time, and the
+    // lobby now opens a second connection to this file for periodic
+    // maintenance (PLAN-long-uptime S9). Without a busy timeout the loser of
+    // a write race gets SQLITE_BUSY back immediately, which every call site
+    // here reports as an ordinary failure — a silently dropped write. Wait
+    // instead.
+    sqlite3_busy_timeout(db, 5000);
+
     CreateTables();
     SLOG(SPRING_LOG_INFO, "opened %s", path.c_str());
     return true;

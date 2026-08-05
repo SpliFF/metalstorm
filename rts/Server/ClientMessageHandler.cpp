@@ -201,6 +201,74 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             const bool replaySpectator =
                 replay::IsReplaying() && !replay::IsVirtualClient(msg.clientId);
 
+            // ── One CPlayer per ACCOUNT, not per authentication ──
+            // (PLAN-long-uptime S12.) `playerHandler.players` is a
+            // fixed-capacity vector — MAX_PLAYERS = 251, with the header
+            // carrying the invariant "must never be resized beyond
+            // MAX_PLAYERS!" — and nothing anywhere erases from it: a
+            // disconnect only clears `active`. Appending a row per
+            // authentication therefore walks into a hard ceiling rather than a
+            // slope: a debug build aborts on the 252nd auth, and a release
+            // build (asserts compiled out) silently reallocates the vector its
+            // own header forbids reallocating. The reconnect path is the
+            // common case — the browser stores its lobby session token — so a
+            // weeks-long game reaches 251 in tab reloads, not in players.
+            //
+            // Resolving a returning username back to the row it already owns
+            // also repairs S2 from underneath: `score_<player>_*` and
+            // `authority_player_<id>` are keyed on playerNum, so a reconnecting
+            // human used to orphan their score and authority pool and resume
+            // with an empty one.
+            //
+            // The lookup itself lives on CPlayerHandler, next to the invariant
+            // it protects. Here it only has to grow a default: a username with
+            // no row yet gets the next free number.
+            auto playerNumForUsername = [&](const std::string& name) -> int {
+                const int existing = playerHandler.HumanPlayer(name);
+                return (existing >= 0) ? existing : nextPlayerNum;
+            };
+
+            // Install (or re-install) the sim-side player row at `pNum` and
+            // point this connection at it. Shared by the two live auth paths
+            // and by the replay re-execution below, so a reconnect replays
+            // through exactly the code it ran through.
+            auto bindPlayer = [&](const std::string& name, int team,
+                                  bool spectator, int pNum) {
+                // Only a FRESH row advances the counter. A reuse must not, or
+                // the next new player skips a slot and the replay's
+                // player-number cross-check diverges on a game nobody changed.
+                if (pNum >= nextPlayerNum)
+                    nextPlayerNum = pNum + 1;
+                // Takeover: another connection may still hold this player
+                // number — a reload whose old transport has not been reaped
+                // yet. Leaving the stale mapping gives one CPlayer two owners,
+                // and the stale one's eventual disconnect would fire
+                // PlayerLeft (and PlayerRemoved into synced Lua) on a player
+                // who is connected again.
+                for (auto it = clientPlayerNum.begin();
+                     it != clientPlayerNum.end();) {
+                    if (it->second == pNum && it->first != msg.clientId) {
+                        SLOG(SPRING_LOG_NOTICE,
+                            "player %d ('%s') re-authenticated on client %u — "
+                            "releasing the stale mapping held by client %u",
+                            pNum, name.c_str(), msg.clientId, it->first);
+                        it = clientPlayerNum.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+                CPlayer p;
+                p.name      = name;
+                p.team      = team;
+                p.active    = true;
+                p.playerNum = pNum;
+                p.spectator = spectator;
+                // AddPlayer indexes by playerNum, so a reused number
+                // overwrites in place and the vector does not grow.
+                playerHandler.AddPlayer(p);
+                clientPlayerNum[msg.clientId] = pNum;
+            };
+
             // Register the sim-side player for a LIVE auth and return the
             // player number the AuthResponse carries. Shared by the token and
             // the password path, which had drifted into two copies of it.
@@ -217,15 +285,8 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                         msg.clientId, name.c_str(), specNum);
                     return specNum;
                 }
-                const int pNum = nextPlayerNum++;
-                CPlayer p;
-                p.name      = name;
-                p.team      = team;
-                p.active    = true;
-                p.playerNum = pNum;
-                p.spectator = spectator;
-                playerHandler.AddPlayer(p);
-                clientPlayerNum[msg.clientId] = pNum;
+                const int pNum = playerNumForUsername(name);
+                bindPlayer(name, team, spectator, pNum);
                 return pNum;
             };
 
@@ -395,28 +456,24 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                     replay::Feed().RequestStop("team divergence at auth");
                     break;
                 }
-                if (nextPlayerNum != rid->playerNum) {
+                // Re-derived through the same S12 rule the live paths use: a
+                // username that already owns a row keeps it, so a recorded
+                // RECONNECT re-derives the number it had rather than the next
+                // free one. Deriving it any other way would make every
+                // recording that contains a reconnect stop here.
+                const int derivedNum = playerNumForUsername(rid->username);
+                if (derivedNum != rid->playerNum) {
                     SLOG(SPRING_LOG_ERROR,
                         "replay: player-number divergence authenticating '%s' — "
                         "recorded playerNum %d, replay would allocate %d "
                         "(player registration order differs from the recording)",
-                        rid->username.c_str(), rid->playerNum, nextPlayerNum);
+                        rid->username.c_str(), rid->playerNum, derivedNum);
                     replay::Feed().RequestStop("player-number divergence at auth");
                     break;
                 }
 
                 const int pNum = rid->playerNum;
-                nextPlayerNum = pNum + 1;
-                {
-                    CPlayer p;
-                    p.name      = rid->username;
-                    p.team      = rid->team;
-                    p.active    = true;
-                    p.playerNum = pNum;
-                    p.spectator = rid->spectator;
-                    playerHandler.AddPlayer(p);
-                    clientPlayerNum[msg.clientId] = pNum;
-                }
+                bindPlayer(rid->username, rid->team, rid->spectator, pNum);
                 // Sent for symmetry with the live paths, and it costs nothing:
                 // the virtual id has no transport, so the reply is dropped.
                 // Keeping the send means the two paths do not drift.

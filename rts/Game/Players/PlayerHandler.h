@@ -38,6 +38,25 @@ public:
 	 */
 	int Player(const std::string& name) const;
 
+	/**
+	 * @brief the playerNum a returning HUMAN account already owns
+	 * @param name account username
+	 * @return its playerNum, or -1 if this account has never authenticated
+	 *
+	 * PLAN-long-uptime S12. `players` is capacity-pinned to MAX_PLAYERS and
+	 * nothing ever erases from it — a disconnect only clears `active` — so a
+	 * server that appends a row per authentication walks into a hard ceiling
+	 * in tab reloads rather than in distinct players. Authentication resolves
+	 * a username back through here and reuses the row it finds.
+	 *
+	 * Differs from Player(name) by skipping AI virtual players: they are
+	 * named "AI:<id>@t<team>", which cannot collide with an account name,
+	 * but `isAI` is what the rule is about so that is what it tests.
+	 * Inactive rows ARE matched — a disconnected player is exactly the case
+	 * this exists for.
+	 */
+	int HumanPlayer(const std::string& name) const;
+
 	void PlayerLeft(int id, unsigned char reason);
 
 	/**
