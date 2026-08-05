@@ -12,7 +12,6 @@ import duelAttack from './bench/duel-attack.js';
 import aimRotation from './bench/aim-rotation.js';
 import movePathing from './bench/move-pathing.js';
 import unitTestLoop from './bench/unit-test-loop.js';
-import reconSonar from './bench/recon-sonar.js';
 import weaponFx from './bench/weapon-fx.js';
 import weaponShowcase from './bench/weapon-showcase.js';
 import modelViewer from './model-viewer/index.js';
@@ -25,7 +24,6 @@ const SCENARIOS: Scenario[] = [
     aimRotation,
     movePathing,
     unitTestLoop,
-    reconSonar,
     weaponFx,
     weaponShowcase,
     modelViewer,
