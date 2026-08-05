@@ -1,0 +1,458 @@
+{
+ "asset": {
+  "version": "2.0",
+  "generator": "fable-model-forge 1.0 (Claude Fable 5, hand-built glTF)"
+ },
+ "scene": 0,
+ "scenes": [
+  {
+   "nodes": [
+    0
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "name": "MS_ms_anc_obelisk_field",
+   "children": [
+    1,
+    2,
+    3
+   ]
+  },
+  {
+   "name": "obelisk_a",
+   "mesh": 0
+  },
+  {
+   "name": "obelisk_b",
+   "mesh": 1,
+   "translation": [
+    -10.0,
+    0.0,
+    0.0
+   ]
+  },
+  {
+   "name": "obelisk_c",
+   "mesh": 2,
+   "translation": [
+    9.5,
+    0.0,
+    0.0
+   ]
+  }
+ ],
+ "meshes": [
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1,
+      "TEXCOORD_0": 2
+     },
+     "indices": 3,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 4,
+      "NORMAL": 5,
+      "TEXCOORD_0": 6
+     },
+     "indices": 7,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 8,
+      "NORMAL": 9,
+      "TEXCOORD_0": 10
+     },
+     "indices": 11,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  }
+ ],
+ "accessors": [
+  {
+   "bufferView": 0,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 764,
+   "type": "VEC3",
+   "min": [
+    -2.475529193878174,
+    -0.6000000238418579,
+    -2.5051417350769043
+   ],
+   "max": [
+    2.8154189586639404,
+    8.947319984436035,
+    2.6336066722869873
+   ]
+  },
+  {
+   "bufferView": 1,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 764,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 2,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 764,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 3,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 1158,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 4,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 572,
+   "type": "VEC3",
+   "min": [
+    -2.0205905437469482,
+    -0.9272539019584656,
+    -2.177502155303955
+   ],
+   "max": [
+    2.355682849884033,
+    5.824850082397461,
+    2.0682549476623535
+   ]
+  },
+  {
+   "bufferView": 5,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 572,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 6,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 572,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 7,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 870,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 8,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 900,
+   "type": "VEC3",
+   "min": [
+    -1.7400341033935547,
+    -0.550000011920929,
+    -3.0722570419311523
+   ],
+   "max": [
+    3.9088621139526367,
+    1.8376646041870117,
+    1.4940221309661865
+   ]
+  },
+  {
+   "bufferView": 9,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 900,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 10,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 900,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 11,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 1326,
+   "type": "SCALAR"
+  }
+ ],
+ "bufferViews": [
+  {
+   "buffer": 0,
+   "byteOffset": 0,
+   "byteLength": 9168,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 9168,
+   "byteLength": 9168,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 18336,
+   "byteLength": 6112,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 24448,
+   "byteLength": 4632,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 29080,
+   "byteLength": 6864,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 35944,
+   "byteLength": 6864,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 42808,
+   "byteLength": 4576,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 47384,
+   "byteLength": 3480,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 50864,
+   "byteLength": 10800,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 61664,
+   "byteLength": 10800,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 72464,
+   "byteLength": 7200,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 79664,
+   "byteLength": 5304,
+   "target": 34963
+  }
+ ],
+ "buffers": [
+  {
+   "byteLength": 84968,
+   "uri": "ms_anc_obelisk_field.bin"
+  }
+ ],
+ "samplers": [
+  {}
+ ],
+ "images": [
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_anc_obelisk_field_diffuse.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_anc_obelisk_field_orm.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_anc_obelisk_field_emissive.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_anc_obelisk_field_normals.ktx2"
+  }
+ ],
+ "textures": [
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 0
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 1
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 2
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 3
+    }
+   }
+  }
+ ],
+ "materials": [
+  {
+   "name": "ms_anc_obelisk_field",
+   "pbrMetallicRoughness": {
+    "baseColorTexture": {
+     "index": 0
+    },
+    "metallicFactor": 1.0,
+    "roughnessFactor": 1.0,
+    "metallicRoughnessTexture": {
+     "index": 1
+    }
+   },
+   "occlusionTexture": {
+    "index": 1
+   },
+   "emissiveTexture": {
+    "index": 2
+   },
+   "emissiveFactor": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "normalTexture": {
+    "index": 3
+   }
+  }
+ ],
+ "extensions": {
+  "SPRINGRTS_geometry": {
+   "configVersion": 8,
+   "height": 8.9473,
+   "midpos": [
+    0.69414,
+    4.47366,
+    -0.21933
+   ],
+   "mins": [
+    -12.02059,
+    -0.92725,
+    -3.07226
+   ],
+   "maxs": [
+    13.40886,
+    8.94732,
+    2.63361
+   ],
+   "radius": 13.7774,
+   "pieces": [
+    {
+     "name": "obelisk_a",
+     "parent": -1,
+     "offset": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "mins": [
+      -2.47553,
+      -0.6,
+      -2.50514
+     ],
+     "maxs": [
+      2.81542,
+      8.94732,
+      2.63361
+     ]
+    },
+    {
+     "name": "obelisk_b",
+     "parent": -1,
+     "offset": [
+      -10.0,
+      0.0,
+      0.0
+     ],
+     "mins": [
+      -2.02059,
+      -0.92725,
+      -2.1775
+     ],
+     "maxs": [
+      2.35568,
+      5.82485,
+      2.06826
+     ]
+    },
+    {
+     "name": "obelisk_c",
+     "parent": -1,
+     "offset": [
+      9.5,
+      0.0,
+      0.0
+     ],
+     "mins": [
+      -1.74003,
+      -0.55,
+      -3.07226
+     ],
+     "maxs": [
+      3.90886,
+      1.83766,
+      1.49402
+     ]
+    }
+   ]
+  }
+ },
+ "extensionsUsed": [
+  "KHR_texture_basisu",
+  "SPRINGRTS_geometry"
+ ],
+ "extensionsRequired": [
+  "KHR_texture_basisu"
+ ]
+}

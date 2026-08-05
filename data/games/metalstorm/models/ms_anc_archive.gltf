@@ -1,0 +1,426 @@
+{
+ "asset": {
+  "version": "2.0",
+  "generator": "fable-model-forge 1.0 (Claude Fable 5, hand-built glTF)"
+ },
+ "scene": 0,
+ "scenes": [
+  {
+   "nodes": [
+    0
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "name": "MS_ms_anc_archive",
+   "children": [
+    1
+   ]
+  },
+  {
+   "name": "body",
+   "children": [
+    2
+   ],
+   "mesh": 0
+  },
+  {
+   "name": "index",
+   "mesh": 1,
+   "translation": [
+    0.0,
+    11.5,
+    0.0
+   ]
+  }
+ ],
+ "meshes": [
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1,
+      "TEXCOORD_0": 2
+     },
+     "indices": 3,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 4,
+      "NORMAL": 5,
+      "TEXCOORD_0": 6
+     },
+     "indices": 7,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  }
+ ],
+ "accessors": [
+  {
+   "bufferView": 0,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 2276,
+   "type": "VEC3",
+   "min": [
+    -10.10208797454834,
+    -0.3499999940395355,
+    -10.10208797454834
+   ],
+   "max": [
+    10.10208797454834,
+    24.251018524169922,
+    10.10208797454834
+   ]
+  },
+  {
+   "bufferView": 1,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 2276,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 2,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 2276,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 3,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 3468,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 4,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 1008,
+   "type": "VEC3",
+   "min": [
+    -6.460000038146973,
+    -1.9529212713241577,
+    -6.453258514404297
+   ],
+   "max": [
+    6.460000038146973,
+    2.6703763008117676,
+    6.331106662750244
+   ]
+  },
+  {
+   "bufferView": 5,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 1008,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 6,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 1008,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 7,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 1512,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 8,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 5,
+   "type": "SCALAR",
+   "min": [
+    0.0
+   ],
+   "max": [
+    150.0
+   ]
+  },
+  {
+   "bufferView": 9,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 5,
+   "type": "VEC4"
+  }
+ ],
+ "bufferViews": [
+  {
+   "buffer": 0,
+   "byteOffset": 0,
+   "byteLength": 27312,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 27312,
+   "byteLength": 27312,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 54624,
+   "byteLength": 18208,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 72832,
+   "byteLength": 13872,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 86704,
+   "byteLength": 12096,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 98800,
+   "byteLength": 12096,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 110896,
+   "byteLength": 8064,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 118960,
+   "byteLength": 6048,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 125008,
+   "byteLength": 20
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 125028,
+   "byteLength": 80
+  }
+ ],
+ "buffers": [
+  {
+   "byteLength": 125108,
+   "uri": "ms_anc_archive.bin"
+  }
+ ],
+ "samplers": [
+  {}
+ ],
+ "images": [
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_anc_archive_diffuse.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_anc_archive_orm.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_anc_archive_emissive.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_anc_archive_team.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_anc_archive_normals.ktx2"
+  }
+ ],
+ "textures": [
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 0
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 1
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 2
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 3
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 4
+    }
+   }
+  }
+ ],
+ "materials": [
+  {
+   "name": "ms_anc_archive",
+   "pbrMetallicRoughness": {
+    "baseColorTexture": {
+     "index": 0
+    },
+    "metallicFactor": 1.0,
+    "roughnessFactor": 1.0,
+    "metallicRoughnessTexture": {
+     "index": 1
+    }
+   },
+   "occlusionTexture": {
+    "index": 1
+   },
+   "emissiveTexture": {
+    "index": 2
+   },
+   "emissiveFactor": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "extensions": {
+    "SPRINGRTS_team_color": {
+     "maskTexture": {
+      "index": 3
+     }
+    }
+   },
+   "normalTexture": {
+    "index": 4
+   }
+  }
+ ],
+ "extensions": {
+  "SPRINGRTS_geometry": {
+   "configVersion": 8,
+   "height": 24.251,
+   "midpos": [
+    0.0,
+    12.12551,
+    0.0
+   ],
+   "mins": [
+    -10.10209,
+    -0.35,
+    -10.10209
+   ],
+   "maxs": [
+    10.10209,
+    24.25102,
+    10.10209
+   ],
+   "radius": 18.7385,
+   "pieces": [
+    {
+     "name": "body",
+     "parent": -1,
+     "offset": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "mins": [
+      -10.10209,
+      -0.35,
+      -10.10209
+     ],
+     "maxs": [
+      10.10209,
+      24.25102,
+      10.10209
+     ]
+    },
+    {
+     "name": "index",
+     "parent": 0,
+     "offset": [
+      0.0,
+      11.5,
+      0.0
+     ],
+     "mins": [
+      -6.46,
+      -1.95292,
+      -6.45326
+     ],
+     "maxs": [
+      6.46,
+      2.67038,
+      6.33111
+     ]
+    }
+   ]
+  }
+ },
+ "extensionsUsed": [
+  "KHR_texture_basisu",
+  "SPRINGRTS_geometry",
+  "SPRINGRTS_team_color"
+ ],
+ "animations": [
+  {
+   "name": "idle",
+   "samplers": [
+    {
+     "input": 8,
+     "output": 9,
+     "interpolation": "LINEAR"
+    }
+   ],
+   "channels": [
+    {
+     "sampler": 0,
+     "target": {
+      "node": 2,
+      "path": "rotation"
+     }
+    }
+   ]
+  }
+ ],
+ "extensionsRequired": [
+  "KHR_texture_basisu"
+ ]
+}
