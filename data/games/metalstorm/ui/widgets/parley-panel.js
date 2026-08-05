@@ -162,7 +162,13 @@ export default {
       if (kind === 'intel') terms.regionKeys = regions;
       if (kind === 'joint_objective') terms.objectiveId = objectiveId;
 
-      this._send('parley.propose', { kind, toTeam, terms });
+      // Spread, don't nest: parley/wire.lua encodes a FLAT field table and
+      // game_parley.lua's RecvLuaMsg reads `fields.duration` / `fields.amount`
+      // / … directly, rebuilding `terms` itself. A nested object encodes as
+      // "[object Object]" and every term arrives nil — which the gadget then
+      // refuses through KIND_VALIDATORS, silently (Propose returns `nil, err`
+      // and logs nothing). PLAN-endtoend.md D28.
+      this._send('parley.propose', { kind, toTeam, ...terms });
       form.hidden = true;
       form.reset();
     });

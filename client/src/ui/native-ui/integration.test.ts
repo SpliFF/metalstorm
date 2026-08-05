@@ -80,3 +80,82 @@ describe('createSendCommand — spectator gate', () => {
         expect(conn.sendSelectionState).toHaveBeenCalledWith([7]);
     });
 });
+
+/**
+ * PLAN-endtoend.md D28: the ai-command, parley and objectives panels call a
+ * two-argument verb API (`sendCommand('guidance.stance', {value})`) while the
+ * bridge only understood the composer's typed-object form, so every non-
+ * composer HUD action died at `Invalid command - missing type`. The verb names
+ * are not a client invention — `game_ai_guidance.lua` and `game_parley.lua`
+ * dispatch `RecvLuaMsg` on exactly these strings, so the wire command name and
+ * the widget verb are the same token by construction.
+ */
+describe('createSendCommand — the RecvLuaMsg verb form (D28)', () => {
+    it('encodes a guidance verb onto the LuaRules wire', () => {
+        const conn = makeMockConnection();
+        createSendCommand(conn, 'player')('guidance.stance', { value: 'aggressive' });
+        expect(conn.sendLuaRulesMsg).toHaveBeenCalledWith('cmd=guidance.stance&value=aggressive');
+    });
+
+    it('encodes a parley proposal, including its numeric terms', () => {
+        const conn = makeMockConnection();
+        createSendCommand(conn, 'player')('parley.propose', { kind: 'ceasefire', toTeam: 4, duration: 600 });
+        const sent = conn.sendLuaRulesMsg.mock.calls[0][0] as string;
+        expect(sent.startsWith('cmd=parley.propose')).toBe(true);
+        for (const kv of ['kind=ceasefire', 'toTeam=4', 'duration=600']) expect(sent).toContain(kv);
+    });
+
+    it('percent-escapes the four characters the Lua codec escapes', () => {
+        const conn = makeMockConnection();
+        // parley/wire.lua escapes exactly %, &, = and , — a region key carrying
+        // any of them must survive the round trip rather than split the payload.
+        createSendCommand(conn, 'player')('guidance.paint', { regionKey: 'a&b=c,d%e', value: 'forbidden' });
+        const sent = conn.sendLuaRulesMsg.mock.calls[0][0] as string;
+        expect(sent).toContain('regionKey=a%26b%3Dc%2Cd%25e');
+    });
+
+    it('comma-joins array fields and omits null/undefined ones', () => {
+        const conn = makeMockConnection();
+        createSendCommand(conn, 'player')('parley.propose', { corridor: ['west_pass', 'east_pass'], amount: null, payer: undefined });
+        const sent = conn.sendLuaRulesMsg.mock.calls[0][0] as string;
+        expect(sent).toContain('corridor=west_pass,east_pass');
+        expect(sent).not.toContain('amount');
+        expect(sent).not.toContain('payer');
+    });
+
+    it("sends booleans as '1'/'0', which is what the gadget compares against", () => {
+        const conn = makeMockConnection();
+        // game_ai_guidance.lua: `fields.locked == '1'` — tostring(true) reads false.
+        createSendCommand(conn, 'player')('guidance.lock', { groupId: 3, locked: true });
+        expect(conn.sendLuaRulesMsg.mock.calls[0][0]).toContain('locked=1');
+    });
+
+    it('refuses a verb with no gadget behind it rather than looking sent', () => {
+        const conn = makeMockConnection();
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        createSendCommand(conn, 'player')('objectives.createBounty', { def: 'x', stake: 10 });
+        expect(conn.sendLuaRulesMsg).not.toHaveBeenCalled();
+        expect(warn).toHaveBeenCalledWith('[native-ui] no wire target for verb:', 'objectives.createBounty', { def: 'x', stake: 10 });
+        warn.mockRestore();
+    });
+
+    it('drops a verb command for a spectator', () => {
+        const conn = makeMockConnection();
+        createSendCommand(conn, 'spectator')('guidance.stance', { value: 'aggressive' });
+        for (const fn of Object.values(conn)) expect(fn).not.toHaveBeenCalled();
+    });
+
+    it('refuses to silently mangle a nested object field', () => {
+        const conn = makeMockConnection();
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        // The parley panel used to send { kind, toTeam, terms: {...} }; the
+        // gadget reads flat fields, so the nested object arrived as
+        // "[object Object]" and every term read nil.
+        createSendCommand(conn, 'player')('parley.propose', { kind: 'ceasefire', terms: { duration: 600 } });
+        const sent = conn.sendLuaRulesMsg.mock.calls[0][0] as string;
+        expect(sent).not.toContain('object Object');
+        expect(sent).not.toContain('terms');
+        expect(warn).toHaveBeenCalled();
+        warn.mockRestore();
+    });
+});

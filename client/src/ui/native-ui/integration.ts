@@ -130,7 +130,57 @@ export function handleRulesParamUpdate(update: {
 }
 
 /**
+ * Verb prefixes that ride the synced `RecvLuaMsg` wire rather than a typed
+ * FlatBuffer message. `data/games/metalstorm/LuaRules/Gadgets/parley/wire.lua`
+ * defines the encoding and `game_parley.lua` / `game_ai_guidance.lua` dispatch
+ * on exactly these verb strings, so the widget-side verb IS the wire command
+ * name — no mapping table to keep in sync.
+ */
+const WIRE_VERB_PREFIXES = ['guidance.', 'parley.'];
+
+/**
+ * Encode a `cmd=name&key=value&…` payload for `gadget:RecvLuaMsg`.
+ *
+ * Mirrors `parley/wire.lua`'s `escape`/`encode` exactly: the same four
+ * characters are percent-escaped (`%`, `&`, `=`, `,`), array values are
+ * comma-joined, and `null`/`undefined` fields are omitted. Booleans are sent
+ * as `'1'`/`'0'` because the Lua side compares against those strings
+ * (`fields.locked == '1'`); a bare `tostring(true)` would silently read false.
+ */
+export function encodeWireCommand(cmd: string, fields?: Record<string, unknown>): string {
+    const esc = (v: unknown) =>
+        String(v).replace(/[%&=,]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0'));
+    const parts = ['cmd=' + esc(cmd)];
+    for (const [k, v] of Object.entries(fields ?? {})) {
+        if (v === null || v === undefined) continue;
+        if (typeof v === 'object' && !Array.isArray(v)) {
+            // A nested object would encode as "[object Object]" and arrive as a
+            // string the gadget cannot read — and the gadgets refuse silently
+            // (GG.Parley.Propose returns `nil, err` and logs nothing), so this
+            // must not be a quiet coercion. This is exactly how the parley
+            // panel's nested `terms` stayed dead. Skip it and say so.
+            console.warn(`[native-ui] wire field '${k}' is a nested object — flatten it at the call site; dropped:`, v);
+            continue;
+        }
+        const val = Array.isArray(v)
+            ? v.map((item) => esc(item)).join(',')
+            : esc(typeof v === 'boolean' ? (v ? '1' : '0') : v);
+        parts.push(esc(k) + '=' + val);
+    }
+    return parts.join('&');
+}
+
+/**
  * Create the sendCommand function that bridges widget commands to Connection methods.
+ *
+ * Two call shapes, both live (PLAN-endtoend.md D28):
+ * - `send({ type: 'GroupDirective', … })` — the typed-object form used by the
+ *   command composer, switched on below.
+ * - `send('guidance.stance', { value })` — the verb form the ai-command,
+ *   parley and objectives panels are written against. Verbs whose prefix is in
+ *   `WIRE_VERB_PREFIXES` have a synced gadget waiting on the other end and are
+ *   encoded onto the `RecvLuaMsg` wire; anything else warns, because a verb
+ *   with no gadget behind it would otherwise look sent.
  *
  * Supports command types used by Metalstorm widgets:
  * - GroupDirective: strategic directives for unit groups
@@ -138,8 +188,29 @@ export function handleRulesParamUpdate(update: {
  * - LuaRulesMsg: messages to synced Lua
  * - ConsoleCommand: server console commands
  */
-export function createSendCommand(connection: CommandConnection, role: string = ''): (cmd: any) => void {
-    return (cmd: any) => {
+export function createSendCommand(
+    connection: CommandConnection,
+    role: string = '',
+): (cmd: any, fields?: Record<string, unknown>) => void {
+    return (cmd: any, fields?: Record<string, unknown>) => {
+        if (typeof cmd === 'string') {
+            if (role === 'spectator') {
+                console.warn('[native-ui] command dropped — spectators cannot issue orders:', cmd);
+                return;
+            }
+            if (!WIRE_VERB_PREFIXES.some((p) => cmd.startsWith(p))) {
+                // objectives.createBounty and the map-marker verbs land here:
+                // the widgets exist, the gadgets do not (see wire.lua's header).
+                console.warn('[native-ui] no wire target for verb:', cmd, fields);
+                return;
+            }
+            try {
+                connection.sendLuaRulesMsg(encodeWireCommand(cmd, fields));
+            } catch (e) {
+                console.error('[native-ui] Error sending wire command:', e, cmd, fields);
+            }
+            return;
+        }
         // PLAN-metalstorm-onboarding.md §4: spectators render the HUD but
         // issue nothing — this is the single choke-point every widget
         // command funnels through (GroupDirective, OrgGroup, StandingOrder,
@@ -203,12 +274,15 @@ export function createSendCommand(connection: CommandConnection, role: string = 
                     break;
 
                 case 'AIGuidance':
-                    // PLAN-metalstorm-interaction.md §6's guidance store
-                    // doesn't exist yet — a subject="the AI" commit compiles
-                    // correctly (compile-table.ts) but has no sim/store
-                    // target to reach. Logged rather than silently dropped
-                    // so this gap stays visible instead of masquerading as
-                    // a successful send.
+                    // Distinct from the ai-command panel's `guidance.*` verbs,
+                    // which DO have a wire target now (see WIRE_VERB_PREFIXES).
+                    // This is the composer's subject="the AI" path, whose
+                    // payload is a free-form {intent, verb, target, priority} —
+                    // it maps onto none of game_ai_guidance.lua's seven
+                    // stance/paint/lock/delegate/fund/roe/veto commands, and
+                    // still wants PLAN-metalstorm-interaction.md §6's guidance
+                    // store. Logged rather than silently dropped so the gap
+                    // stays visible instead of masquerading as a successful send.
                     console.warn('[native-ui] AIGuidance has no guidance-store target yet (interaction §6 not implemented):', cmd.payload);
                     break;
 
