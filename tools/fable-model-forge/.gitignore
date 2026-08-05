@@ -8,3 +8,6 @@ out/
 
 # Ad-hoc model backups made while debugging (e.g. strip_model.py sources).
 backup/
+
+# Node deps for encode.mjs — machine-specific, recreate with npm ci
+node_modules/
