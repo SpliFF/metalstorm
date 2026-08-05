@@ -22,7 +22,10 @@ local WINDING_DOWN_FRAMES = 300   -- must match the gadget's constant
 --- defaults to a fully staffed 8-team Meridian room + Gaia, because that is
 --- the war as authored; pass a shorter list for a downsized room (D14), which
 --- is the common live case and the one that produced D18.
-local function load(sides, victoryCount, teams)
+--- `unoccupied` is the set of teams the engine MATERIALISED but nobody plays
+--- (leader -1). Seating two sides on teams 0 and 4 allocates 1-3 as filler,
+--- so this is the ordinary live shape, not an edge case.
+local function load(sides, victoryCount, teams, unoccupied)
     local world = {
         frame = 0,
         gameRulesParams = {},
@@ -32,6 +35,7 @@ local function load(sides, victoryCount, teams)
         echoes = {},
         -- Gaia is the last team index, exactly as the engine allocates it.
         teams = teams or { 0, 1, 2, 3, 4, 5, 6, 7, 8 },
+        unoccupied = unoccupied or {},
     }
     world.gaia = world.teams[#world.teams]
 
@@ -56,6 +60,15 @@ local function load(sides, victoryCount, teams)
             return out
         end,
         GetGaiaTeamID = function() return world.gaia + 0.0 end,
+        -- Leader is the 2nd return, a FLOAT like every other id the engine
+        -- hands back. An unoccupied team reports leader -1 — that is how a
+        -- materialised-but-empty filler team is told apart from a played one,
+        -- and it is the only signal that distinguishes them (both are live,
+        -- both are valid allyteams). world.unoccupied lists such teams.
+        GetTeamInfo = function(teamID)
+            local leader = world.unoccupied[teamID] and -1.0 or 0.0
+            return teamID + 0.0, leader, false
+        end,
         -- The real Spring.GameOver validates every id against ValidAllyTeam
         -- and returns how many it accepted (LuaSyncedCtrl.cpp). Model both:
         -- an id belonging to no staffed team is silently dropped, which is
@@ -244,6 +257,33 @@ describe("winner derivation (wars §1: a side is a faction, not one team)", func
         -- Not {0,1,2,3}: 3 exists nowhere and 2 is Gaia.
         assert.are.same({ 0, 1 }, world.gameOverCalls[1])
         assert.are.equal('0,1', world.gameRulesParams['war_winner_ally_teams'])
+    end)
+
+    -- PLAN-endtoend.md D18, the mirror case — the one that got through.
+    -- Post-D19 a room seats the two sides on teams 0 and 4, and the engine
+    -- MATERIALISES 1-3 as unoccupied filler. They are live, they are valid
+    -- allyteams, and Spring.GameOver accepts every one of them, so the
+    -- "teams the room never created" test above cannot see them: they were
+    -- created. Only leader == -1 tells them apart. Measured live at frame
+    -- 18660 (fire 7, room 43): the player won and was told "Ally team 0,
+    -- Ally team 1, Ally team 2 & Ally team 3 share victory."
+    it("ignores materialised-but-unoccupied filler teams", function()
+        local world = load(MERIDIAN_SIDES, nil, { 0, 1, 2, 3, 4, 5 },
+                           { [1] = true, [2] = true, [3] = true })
+        world.complete(VICTORY_OBJ, 0)
+        world.runTo(WINDING_DOWN_FRAMES)
+        assert.are.same({ 0 }, world.gameOverCalls[1])
+        assert.are.equal('0', world.gameRulesParams['war_winner_ally_teams'])
+    end)
+
+    it("still names a real teammate on the same side", function()
+        -- The inverse guard: the leader test must not swallow a side member
+        -- somebody is actually playing.
+        local world = load(MERIDIAN_SIDES, nil, { 0, 1, 2, 3, 4, 5 },
+                           { [2] = true, [3] = true })
+        world.complete(VICTORY_OBJ, 0)
+        world.runTo(WINDING_DOWN_FRAMES)
+        assert.are.same({ 0, 1 }, world.gameOverCalls[1])
     end)
 
     it("never declares Gaia a winner", function()

@@ -653,6 +653,13 @@ int main(int argc, char* argv[])
     std::unordered_map<ClientID, int> clientPlayerNum;
     int nextPlayerNum = 0;
 
+    // D16: account id -> sim playerNum, allocated once per account and reused
+    // for every subsequent connection of that account. See GameServerContext.h.
+    // Note for PLAN-replay T2-a-3: replay spectators draw from a reserved range
+    // (`kSpectatorPlayerNumBase = 200`) and must NOT be seeded into this map —
+    // it only ever holds numbers minted from `nextPlayerNum`.
+    std::unordered_map<int64_t, int> playerNumByAccount;
+
     // PLAN-quickstart.md §3.3: reason carried by a client's PlayerLeaveIntent
     // (sent just before disconnect), consumed once when the disconnect drains.
     std::unordered_map<ClientID, uint8_t> pendingLeaveReason;
@@ -674,7 +681,8 @@ int main(int argc, char* argv[])
         net, rtcServer, sim, db, sessions, rooms, aiPool, luaExecEngine,
         roomId, gameId, mapId, port, logMessages, /*defsCacheKey=*/std::string{},
         requestedPlayers, requestedAIs, playerTeamByUsername,
-        clientPlayerNum, pendingLeaveReason, nextPlayerNum, connectedRosterPlayers,
+        clientPlayerNum, pendingLeaveReason, nextPlayerNum, playerNumByAccount,
+        connectedRosterPlayers,
         rosterPlayersNeeded, handshakedClients,
     };
 

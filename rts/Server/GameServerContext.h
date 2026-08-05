@@ -80,6 +80,18 @@ struct GameServerContext {
     // per-client maps. Absent = default reason 0 (voluntary quit).
     std::unordered_map<ClientID, uint8_t>&    pendingLeaveReason;
     int&                                      nextPlayerNum;
+    // D16 (PLAN-endtoend.md §Defect register): account id -> sim playerNum,
+    // stable for the game server's lifetime. A reconnect (detach/resync, or a
+    // genuine quit + rejoin) MUST come back as the same sim player: every
+    // synced key a client reads is scoped by its playerNum
+    // (`authority_player_<n>`, `authority_granted_<n>`, the AI's spend
+    // identity), so minting a fresh number strands the player's own state
+    // under the retired one and puts a duplicate name on the scoreboard.
+    // Keyed by account id rather than username: the account is the identity
+    // the lobby issued the session token against (see the player-identity
+    // contract — `ctx.identity.playerId` is this playerNum, NOT the account).
+    // AI virtual players have no account and never appear here.
+    std::unordered_map<int64_t, int>&         playerNumByAccount;
     std::unordered_set<std::string>&          connectedRosterPlayers;
     size_t                                    rosterPlayersNeeded = 0;
 
