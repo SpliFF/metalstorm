@@ -32,10 +32,12 @@ kill.
 - Always `source tools/forge/bin/env.sh` → gives `$FORGE`, `$PY`
   (venv python with numpy+pillow — system python will fail), `PYTHONPATH`.
 - Scaffold: `bash $FORGE/bin/new-workspace.sh <dir> <stem> [sample]`.
-- Encode: `bash $FORGE/bin/encode.sh <workspace> <stem>` (expects the PNG
-  set in `<workspace>/out/`).
-- Validate before reporting: `$PY $TOOLKIT/validate.py out/<stem>.gltf
-  <budget> <piece,piece,…>` must print ALL CHECKS PASSED.
+- Build: `bash $FORGE/bin/build.sh <workspace> <stem> <budget>
+  <piece,piece,…> [--no-team]` — ONE call runs gen → paint → validate →
+  encode → impostor bake with a compact summary; must end ALL CHECKS
+  PASSED. Don't run the five steps as separate shell calls.
+- Prefer `prefabs/parts.py` (geometry) and `prefabs/paintlib.py` (painting;
+  `finish()` writes all five maps) over hand-rolling.
 - Deviations from spec or STYLE.md, and mount/socket offsets, go in your
   final report — the integrator needs them for unitdef wiring.
 

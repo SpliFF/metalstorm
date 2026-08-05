@@ -34,6 +34,25 @@ GREY = M.Zone((0, 0, 32, 32), ('x', 'y'), ((-1.0, 1.0), (-1.0, 1.0)))  # Zone (b
 GREYR = (0, 0, 32, 32)                                                  # rect (limb/tube)
 
 
+# ------------------------------------------------------------ generic helpers
+
+def quad_out(p, verts, outward, zone):
+    """Add a quad wound so its normal points along `outward` (a rough
+    direction, not necessarily unit). Every batch-1 generator rewrote this."""
+    a, b, c = (np.asarray(verts[i], dtype=float) for i in range(3))
+    n = np.cross(b - a, c - a)
+    p.add_face(verts if np.dot(n, np.asarray(outward, float)) > 0
+               else verts[::-1], zone=zone)
+
+
+def box6(p, center, size, zone, ch=0.04, skip=()):
+    """chamfer_box with ONE Zone on all six faces — the uniform-box wrapper
+    every generator rewrites. skip=('-y',) for grounded boxes."""
+    chamfer_box(p, center, size, ch,
+                {f: zone for f in ('+x', '-x', '+y', '-y', '+z', '-z')},
+                skip=skip)
+
+
 # ---------------------------------------------------------------- rolling stock
 
 def _ring_solid(p, rings, zone, cap_first=False, cap_last=False, axis='y'):

@@ -7,13 +7,14 @@ unless this page says to — that is what burned tokens in batch 1.
 ## Environment (read-only — never write inside $FORGE except your workspace)
 
     FORGE=/Users/shannon/WarriorHut/Projects/springrts-web/tools/forge
-    ├── toolkit/      meshlib.py gltf_export.py bake_impostors.py validate.py
-    │                 encode.mjs (+node_modules, ready) extras/ (STYLE.md etc.)
     ├── venv/         python numpy+pillow — use $FORGE/venv/bin/python ALWAYS
-    ├── prefabs/      parts.py — reusable assemblies (see PREFABS.md)
+    ├── prefabs/      parts.py (geometry) + paintlib.py (painting) — PREFABS.md
     ├── samples/      21 complete gen/layout/paint triplets from batch 01
     ├── dist/         finished batch outputs (reference only)
-    └── bin/          env.sh new-workspace.sh encode.sh
+    └── bin/          env.sh new-workspace.sh build.sh encode.sh
+    TOOLKIT=$FORGE/../fable-model-forge   (sibling folder, via env.sh)
+    │                 meshlib.py gltf_export.py paint.py weathering.py
+    │                 normals.py bake_impostors.py validate.py encode.mjs
 
 Workspace protocol: create YOUR OWN directory outside $FORGE (session
 scratchpad), put your three generator files there, run from there. Multiple
@@ -27,14 +28,18 @@ agents share $FORGE concurrently — read-only makes that safe.
 1. **Read `$FORGE/docs/DESIGN-GUIDE.md`** (scale table, palette, style rules).
 2. **Pick ONE sample as your pattern** (below) and read ONLY its triplet.
 3. Write `<stem>_layout.py`, `gen_<stem>.py`, `paint_<stem>.py` in your
-   workspace (headers below). Use `prefabs/parts.py` for anything it covers.
-4. `$PY gen_<stem>.py` → out/<stem>{,_png}.gltf + .bin
-5. `$PY paint_<stem>.py` → out/<stem>_{diffuse,orm,emissive,team,normals}.png
-6. `$PY $TOOLKIT/validate.py out/<stem>.gltf <budget> <piece,piece,…>`
-   (add `--no-team` only for never-team-owned map props) — must pass.
-7. `bash $FORGE/bin/encode.sh . <stem>` → KTX2 set (uses shared node_modules).
-8. Bake ONE impostor sheet, read it ONCE, fix what looks wrong, stop:
-   `$PY $TOOLKIT/bake_impostors.py out/<stem>_png.gltf --diffuse out/<stem>_diffuse.png --out bake --cell 256`
+   workspace (headers below). Use `prefabs/parts.py` (geometry) and
+   `prefabs/paintlib.py` (painting) for anything they cover.
+4. **One call builds everything** — gen → paint → validate → encode → bake:
+
+       bash $FORGE/bin/build.sh . <stem> <budget> <piece,piece,…> [--no-team]
+
+   Quiet on success (`ok` per step + summary); on failure it prints that
+   step's full output — fix and re-run the same command. `--no-team` only
+   for never-team-owned map props. Must end `ALL CHECKS PASSED`.
+5. Read the impostor sheet (`bake/<stem>_png_impostor.png`) ONCE, fix what
+   looks wrong, re-run build.sh, stop. Do not iterate image-reads beyond a
+   second look.
 
 ## Sample index — copy the pattern, not the code
 
@@ -92,8 +97,13 @@ repeats the first.
 
 **Wheels on the ground**: axle y = r·cos(π/n) so n-gon flats rest flat.
 
-**Painter** (`paint_<stem>.py`): follow your sample's painter. Outputs the
-five PNGs at the layout's atlas size. Team colour ONLY in the team mask R
+**Painter** (`paint_<stem>.py`): follow your sample's painter, but reach for
+`prefabs/paintlib.py` first — `zone_fns` (u/v closures for any zone),
+`team_panel`, `glass_rect`, `hazard_band`, `headlight/taillight`,
+`wheel_cell/hub_cell`, `panel_patchwork` (scrap register), `roundel_star`,
+`font`, then `standard_weather(...)` + `finish(m, L, stem, wx=wx)` — finish
+writes all five maps including normals, so a paintlib painter needs no
+save/normals boilerplate. Outputs the five PNGs at the layout's atlas size. Team colour ONLY in the team mask R
 channel (never baked into diffuse). Emissive = functional lights only —
 headlights, beacons, windows; emissive CYAN is reserved for ancient tech.
 Weathering: rust streaks under fittings, soot at exhausts, grime at ground
@@ -109,6 +119,14 @@ contact — same painter language as the samples.
 - `export` twice: ktx2 AND png variants (png is the preview/bake source).
 - Run everything with `$FORGE/venv/bin/python` — system python lacks numpy.
 - Never `npm ci`, never create a venv, never `git` anything — it's all here.
+- The impostor BAKER flat-shades each triangle from the diffuse at its UV
+  centroid: bold thin stripes in a cell mapped to large quads flood whole
+  triangles into a checker. That's a baker artifact, not your model — keep
+  large-quad cells low-contrast (tone-on-tone ±15%) and DON'T iterate the
+  bake chasing it.
+- Double-sided non-planar quads: emit explicit triangles with the SAME
+  diagonal on both sides — a reversed quad fan-triangulates the other
+  diagonal and the surfaces cross.
 
 ## Report (structured output)
 
