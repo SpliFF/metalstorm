@@ -1,0 +1,603 @@
+{
+ "asset": {
+  "version": "2.0",
+  "generator": "fable-model-forge 1.0 (Claude Fable 5, hand-built glTF)"
+ },
+ "scene": 0,
+ "scenes": [
+  {
+   "nodes": [
+    0
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "name": "MS_ms_rail_platform",
+   "children": [
+    1
+   ]
+  },
+  {
+   "name": "body",
+   "children": [
+    2,
+    4
+   ],
+   "mesh": 0
+  },
+  {
+   "name": "crane",
+   "children": [
+    3
+   ],
+   "mesh": 1,
+   "translation": [
+    -2.2,
+    1.7,
+    7.6
+   ]
+  },
+  {
+   "name": "hook",
+   "mesh": 2,
+   "translation": [
+    5.0,
+    3.75,
+    0.0
+   ]
+  },
+  {
+   "name": "berth",
+   "translation": [
+    3.0,
+    0.0,
+    -0.5
+   ]
+  }
+ ],
+ "meshes": [
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1,
+      "TEXCOORD_0": 2
+     },
+     "indices": 3,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 4,
+      "NORMAL": 5,
+      "TEXCOORD_0": 6
+     },
+     "indices": 7,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 8,
+      "NORMAL": 9,
+      "TEXCOORD_0": 10
+     },
+     "indices": 11,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  }
+ ],
+ "accessors": [
+  {
+   "bufferView": 0,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 1268,
+   "type": "VEC3",
+   "min": [
+    -6.0,
+    0.0,
+    -12.100000381469727
+   ],
+   "max": [
+    5.849999904632568,
+    5.699999809265137,
+    12.199999809265137
+   ]
+  },
+  {
+   "bufferView": 1,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 1268,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 2,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 1268,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 3,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 1860,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 4,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 328,
+   "type": "VEC3",
+   "min": [
+    -1.899999976158142,
+    -0.05000000074505806,
+    -0.550000011920929
+   ],
+   "max": [
+    5.699999809265137,
+    4.535364627838135,
+    0.550000011920929
+   ]
+  },
+  {
+   "bufferView": 5,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 328,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 6,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 328,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 7,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 474,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 8,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 72,
+   "type": "VEC3",
+   "min": [
+    -0.17000000178813934,
+    -3.067714214324951,
+    -0.10999999940395355
+   ],
+   "max": [
+    0.2614181935787201,
+    0.15000000596046448,
+    0.10999999940395355
+   ]
+  },
+  {
+   "bufferView": 9,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 72,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 10,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 72,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 11,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 108,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 12,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 6,
+   "type": "SCALAR",
+   "min": [
+    0.0
+   ],
+   "max": [
+    12.0
+   ]
+  },
+  {
+   "bufferView": 13,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 6,
+   "type": "VEC4"
+  },
+  {
+   "bufferView": 14,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 6,
+   "type": "SCALAR",
+   "min": [
+    0.0
+   ],
+   "max": [
+    12.0
+   ]
+  },
+  {
+   "bufferView": 15,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 6,
+   "type": "VEC3"
+  }
+ ],
+ "bufferViews": [
+  {
+   "buffer": 0,
+   "byteOffset": 0,
+   "byteLength": 15216,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 15216,
+   "byteLength": 15216,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 30432,
+   "byteLength": 10144,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 40576,
+   "byteLength": 7440,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 48016,
+   "byteLength": 3936,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 51952,
+   "byteLength": 3936,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 55888,
+   "byteLength": 2624,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 58512,
+   "byteLength": 1896,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 60408,
+   "byteLength": 864,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 61272,
+   "byteLength": 864,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 62136,
+   "byteLength": 576,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 62712,
+   "byteLength": 432,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 63144,
+   "byteLength": 24
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 63168,
+   "byteLength": 96
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 63264,
+   "byteLength": 24
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 63288,
+   "byteLength": 72
+  }
+ ],
+ "buffers": [
+  {
+   "byteLength": 63360,
+   "uri": "ms_rail_platform.bin"
+  }
+ ],
+ "samplers": [
+  {}
+ ],
+ "images": [
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_rail_platform_diffuse.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_rail_platform_orm.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_rail_platform_emissive.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_rail_platform_team.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_rail_platform_normals.ktx2"
+  }
+ ],
+ "textures": [
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 0
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 1
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 2
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 3
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 4
+    }
+   }
+  }
+ ],
+ "materials": [
+  {
+   "name": "ms_rail_platform",
+   "pbrMetallicRoughness": {
+    "baseColorTexture": {
+     "index": 0
+    },
+    "metallicFactor": 1.0,
+    "roughnessFactor": 1.0,
+    "metallicRoughnessTexture": {
+     "index": 1
+    }
+   },
+   "occlusionTexture": {
+    "index": 1
+   },
+   "emissiveTexture": {
+    "index": 2
+   },
+   "emissiveFactor": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "extensions": {
+    "SPRINGRTS_team_color": {
+     "maskTexture": {
+      "index": 3
+     }
+    }
+   },
+   "normalTexture": {
+    "index": 4
+   }
+  }
+ ],
+ "extensions": {
+  "SPRINGRTS_geometry": {
+   "configVersion": 8,
+   "height": 6.2354,
+   "midpos": [
+    -0.075,
+    3.11768,
+    0.05
+   ],
+   "mins": [
+    -6.0,
+    0.0,
+    -12.1
+   ],
+   "maxs": [
+    5.85,
+    6.23536,
+    12.2
+   ],
+   "radius": 13.8726,
+   "pieces": [
+    {
+     "name": "body",
+     "parent": -1,
+     "offset": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "mins": [
+      -6.0,
+      0.0,
+      -12.1
+     ],
+     "maxs": [
+      5.85,
+      5.7,
+      12.2
+     ]
+    },
+    {
+     "name": "crane",
+     "parent": 0,
+     "offset": [
+      -2.2,
+      1.7,
+      7.6
+     ],
+     "mins": [
+      -1.9,
+      -0.05,
+      -0.55
+     ],
+     "maxs": [
+      5.7,
+      4.53536,
+      0.55
+     ]
+    },
+    {
+     "name": "hook",
+     "parent": 1,
+     "offset": [
+      5.0,
+      3.75,
+      0.0
+     ],
+     "mins": [
+      -0.17,
+      -3.06771,
+      -0.11
+     ],
+     "maxs": [
+      0.26142,
+      0.15,
+      0.11
+     ]
+    },
+    {
+     "name": "berth",
+     "parent": 0,
+     "offset": [
+      3.0,
+      0.0,
+      -0.5
+     ],
+     "mins": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "maxs": [
+      0.0,
+      0.0,
+      0.0
+     ]
+    }
+   ]
+  }
+ },
+ "extensionsUsed": [
+  "KHR_texture_basisu",
+  "SPRINGRTS_geometry",
+  "SPRINGRTS_team_color"
+ ],
+ "animations": [
+  {
+   "name": "idle",
+   "samplers": [
+    {
+     "input": 12,
+     "output": 13,
+     "interpolation": "LINEAR"
+    },
+    {
+     "input": 14,
+     "output": 15,
+     "interpolation": "LINEAR"
+    }
+   ],
+   "channels": [
+    {
+     "sampler": 0,
+     "target": {
+      "node": 2,
+      "path": "rotation"
+     }
+    },
+    {
+     "sampler": 1,
+     "target": {
+      "node": 3,
+      "path": "translation"
+     }
+    }
+   ]
+  }
+ ],
+ "extensionsRequired": [
+  "KHR_texture_basisu"
+ ]
+}

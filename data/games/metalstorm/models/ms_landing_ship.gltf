@@ -1,0 +1,720 @@
+{
+ "asset": {
+  "version": "2.0",
+  "generator": "fable-model-forge 1.0 (Claude Fable 5, hand-built glTF)"
+ },
+ "scene": 0,
+ "scenes": [
+  {
+   "nodes": [
+    0
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "name": "MS_ms_landing_ship",
+   "children": [
+    1
+   ]
+  },
+  {
+   "name": "body",
+   "children": [
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8
+   ],
+   "mesh": 0
+  },
+  {
+   "name": "ramp",
+   "mesh": 1,
+   "translation": [
+    0.0,
+    1.95,
+    -16.6
+   ]
+  },
+  {
+   "name": "radar",
+   "mesh": 2,
+   "translation": [
+    0.0,
+    6.72,
+    13.9
+   ]
+  },
+  {
+   "name": "link1",
+   "translation": [
+    0.0,
+    2.05,
+    -10.5
+   ]
+  },
+  {
+   "name": "link2",
+   "translation": [
+    0.0,
+    2.05,
+    -4.5
+   ]
+  },
+  {
+   "name": "link3",
+   "translation": [
+    0.0,
+    2.05,
+    1.5
+   ]
+  },
+  {
+   "name": "link4",
+   "translation": [
+    0.0,
+    2.05,
+    7.5
+   ]
+  },
+  {
+   "name": "exhaust",
+   "translation": [
+    2.45,
+    5.95,
+    16.35
+   ]
+  }
+ ],
+ "meshes": [
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1,
+      "TEXCOORD_0": 2
+     },
+     "indices": 3,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 4,
+      "NORMAL": 5,
+      "TEXCOORD_0": 6
+     },
+     "indices": 7,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 8,
+      "NORMAL": 9,
+      "TEXCOORD_0": 10
+     },
+     "indices": 11,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  }
+ ],
+ "accessors": [
+  {
+   "bufferView": 0,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 2394,
+   "type": "VEC3",
+   "min": [
+    -4.300000190734863,
+    0.0,
+    -16.600000381469727
+   ],
+   "max": [
+    4.300000190734863,
+    8.699999809265137,
+    17.299999237060547
+   ]
+  },
+  {
+   "bufferView": 1,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 2394,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 2,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 2394,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 3,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 3450,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 4,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 472,
+   "type": "VEC3",
+   "min": [
+    -2.5,
+    -0.15000000596046448,
+    -0.4399999976158142
+   ],
+   "max": [
+    2.5,
+    3.0999999046325684,
+    0.16500000655651093
+   ]
+  },
+  {
+   "bufferView": 5,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 472,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 6,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 472,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 7,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 648,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 8,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 208,
+   "type": "VEC3",
+   "min": [
+    -0.8500000238418579,
+    -0.3400000035762787,
+    -0.25999999046325684
+   ],
+   "max": [
+    0.8500000238418579,
+    0.27000001072883606,
+    0.17000000178813934
+   ]
+  },
+  {
+   "bufferView": 9,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 208,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 10,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 208,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 11,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 288,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 12,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 5,
+   "type": "SCALAR",
+   "min": [
+    0.0
+   ],
+   "max": [
+    8.0
+   ]
+  },
+  {
+   "bufferView": 13,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 5,
+   "type": "VEC4"
+  },
+  {
+   "bufferView": 14,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 6,
+   "type": "SCALAR",
+   "min": [
+    0.0
+   ],
+   "max": [
+    8.0
+   ]
+  },
+  {
+   "bufferView": 15,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 6,
+   "type": "VEC4"
+  }
+ ],
+ "bufferViews": [
+  {
+   "buffer": 0,
+   "byteOffset": 0,
+   "byteLength": 28728,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 28728,
+   "byteLength": 28728,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 57456,
+   "byteLength": 19152,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 76608,
+   "byteLength": 13800,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 90408,
+   "byteLength": 5664,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 96072,
+   "byteLength": 5664,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 101736,
+   "byteLength": 3776,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 105512,
+   "byteLength": 2592,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 108104,
+   "byteLength": 2496,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 110600,
+   "byteLength": 2496,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 113096,
+   "byteLength": 1664,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 114760,
+   "byteLength": 1152,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 115912,
+   "byteLength": 20
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 115932,
+   "byteLength": 80
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 116012,
+   "byteLength": 24
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 116036,
+   "byteLength": 96
+  }
+ ],
+ "buffers": [
+  {
+   "byteLength": 116132,
+   "uri": "ms_landing_ship.bin"
+  }
+ ],
+ "samplers": [
+  {}
+ ],
+ "images": [
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_landing_ship_diffuse.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_landing_ship_orm.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_landing_ship_emissive.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_landing_ship_team.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_landing_ship_normals.ktx2"
+  }
+ ],
+ "textures": [
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 0
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 1
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 2
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 3
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 4
+    }
+   }
+  }
+ ],
+ "materials": [
+  {
+   "name": "ms_landing_ship",
+   "pbrMetallicRoughness": {
+    "baseColorTexture": {
+     "index": 0
+    },
+    "metallicFactor": 1.0,
+    "roughnessFactor": 1.0,
+    "metallicRoughnessTexture": {
+     "index": 1
+    }
+   },
+   "occlusionTexture": {
+    "index": 1
+   },
+   "emissiveTexture": {
+    "index": 2
+   },
+   "emissiveFactor": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "extensions": {
+    "SPRINGRTS_team_color": {
+     "maskTexture": {
+      "index": 3
+     }
+    }
+   },
+   "normalTexture": {
+    "index": 4
+   }
+  }
+ ],
+ "extensions": {
+  "SPRINGRTS_geometry": {
+   "configVersion": 8,
+   "height": 8.7,
+   "midpos": [
+    0.0,
+    4.35,
+    0.13
+   ],
+   "mins": [
+    -4.3,
+    0.0,
+    -17.04
+   ],
+   "maxs": [
+    4.3,
+    8.7,
+    17.3
+   ],
+   "radius": 18.2269,
+   "pieces": [
+    {
+     "name": "body",
+     "parent": -1,
+     "offset": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "mins": [
+      -4.3,
+      0.0,
+      -16.6
+     ],
+     "maxs": [
+      4.3,
+      8.7,
+      17.3
+     ]
+    },
+    {
+     "name": "ramp",
+     "parent": 0,
+     "offset": [
+      0.0,
+      1.95,
+      -16.6
+     ],
+     "mins": [
+      -2.5,
+      -0.15,
+      -0.44
+     ],
+     "maxs": [
+      2.5,
+      3.1,
+      0.165
+     ]
+    },
+    {
+     "name": "radar",
+     "parent": 0,
+     "offset": [
+      0.0,
+      6.72,
+      13.9
+     ],
+     "mins": [
+      -0.85,
+      -0.34,
+      -0.26
+     ],
+     "maxs": [
+      0.85,
+      0.27,
+      0.17
+     ]
+    },
+    {
+     "name": "link1",
+     "parent": 0,
+     "offset": [
+      0.0,
+      2.05,
+      -10.5
+     ],
+     "mins": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "maxs": [
+      0.0,
+      0.0,
+      0.0
+     ]
+    },
+    {
+     "name": "link2",
+     "parent": 0,
+     "offset": [
+      0.0,
+      2.05,
+      -4.5
+     ],
+     "mins": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "maxs": [
+      0.0,
+      0.0,
+      0.0
+     ]
+    },
+    {
+     "name": "link3",
+     "parent": 0,
+     "offset": [
+      0.0,
+      2.05,
+      1.5
+     ],
+     "mins": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "maxs": [
+      0.0,
+      0.0,
+      0.0
+     ]
+    },
+    {
+     "name": "link4",
+     "parent": 0,
+     "offset": [
+      0.0,
+      2.05,
+      7.5
+     ],
+     "mins": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "maxs": [
+      0.0,
+      0.0,
+      0.0
+     ]
+    },
+    {
+     "name": "exhaust",
+     "parent": 0,
+     "offset": [
+      2.45,
+      5.95,
+      16.35
+     ],
+     "mins": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "maxs": [
+      0.0,
+      0.0,
+      0.0
+     ]
+    }
+   ]
+  }
+ },
+ "extensionsUsed": [
+  "KHR_texture_basisu",
+  "SPRINGRTS_geometry",
+  "SPRINGRTS_team_color"
+ ],
+ "animations": [
+  {
+   "name": "idle",
+   "samplers": [
+    {
+     "input": 12,
+     "output": 13,
+     "interpolation": "LINEAR"
+    }
+   ],
+   "channels": [
+    {
+     "sampler": 0,
+     "target": {
+      "node": 3,
+      "path": "rotation"
+     }
+    }
+   ]
+  },
+  {
+   "name": "unload",
+   "samplers": [
+    {
+     "input": 14,
+     "output": 15,
+     "interpolation": "LINEAR"
+    }
+   ],
+   "channels": [
+    {
+     "sampler": 0,
+     "target": {
+      "node": 2,
+      "path": "rotation"
+     }
+    }
+   ]
+  }
+ ],
+ "extensionsRequired": [
+  "KHR_texture_basisu"
+ ]
+}

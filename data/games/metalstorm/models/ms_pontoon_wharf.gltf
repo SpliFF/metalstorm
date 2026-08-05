@@ -1,0 +1,482 @@
+{
+ "asset": {
+  "version": "2.0",
+  "generator": "fable-model-forge 1.0 (Claude Fable 5, hand-built glTF)"
+ },
+ "scene": 0,
+ "scenes": [
+  {
+   "nodes": [
+    0
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "name": "MS_ms_pontoon_wharf",
+   "children": [
+    1
+   ]
+  },
+  {
+   "name": "body",
+   "children": [
+    2,
+    3,
+    4
+   ],
+   "mesh": 0
+  },
+  {
+   "name": "crane",
+   "mesh": 1,
+   "translation": [
+    2.0,
+    2.7,
+    -8.0
+   ]
+  },
+  {
+   "name": "berth",
+   "translation": [
+    -5.2,
+    0.0,
+    0.0
+   ]
+  },
+  {
+   "name": "shore",
+   "translation": [
+    0.0,
+    2.2,
+    25.0
+   ]
+  }
+ ],
+ "meshes": [
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1,
+      "TEXCOORD_0": 2
+     },
+     "indices": 3,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 4,
+      "NORMAL": 5,
+      "TEXCOORD_0": 6
+     },
+     "indices": 7,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  }
+ ],
+ "accessors": [
+  {
+   "bufferView": 0,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 1962,
+   "type": "VEC3",
+   "min": [
+    -3.7100000381469727,
+    0.0,
+    -14.850000381469727
+   ],
+   "max": [
+    3.7100000381469727,
+    5.150000095367432,
+    25.0
+   ]
+  },
+  {
+   "bufferView": 1,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 1962,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 2,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 1962,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 3,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 2808,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 4,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 376,
+   "type": "VEC3",
+   "min": [
+    -0.8500000238418579,
+    0.0,
+    -6.626261234283447
+   ],
+   "max": [
+    0.8500000238418579,
+    3.3156533241271973,
+    2.0250000953674316
+   ]
+  },
+  {
+   "bufferView": 5,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 376,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 6,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 376,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 7,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 528,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 8,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 9,
+   "type": "SCALAR",
+   "min": [
+    0.0
+   ],
+   "max": [
+    20.0
+   ]
+  },
+  {
+   "bufferView": 9,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 9,
+   "type": "VEC4"
+  }
+ ],
+ "bufferViews": [
+  {
+   "buffer": 0,
+   "byteOffset": 0,
+   "byteLength": 23544,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 23544,
+   "byteLength": 23544,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 47088,
+   "byteLength": 15696,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 62784,
+   "byteLength": 11232,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 74016,
+   "byteLength": 4512,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 78528,
+   "byteLength": 4512,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 83040,
+   "byteLength": 3008,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 86048,
+   "byteLength": 2112,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 88160,
+   "byteLength": 36
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 88196,
+   "byteLength": 144
+  }
+ ],
+ "buffers": [
+  {
+   "byteLength": 88340,
+   "uri": "ms_pontoon_wharf.bin"
+  }
+ ],
+ "samplers": [
+  {}
+ ],
+ "images": [
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_pontoon_wharf_diffuse.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_pontoon_wharf_orm.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_pontoon_wharf_emissive.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_pontoon_wharf_team.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_pontoon_wharf_normals.ktx2"
+  }
+ ],
+ "textures": [
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 0
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 1
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 2
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 3
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 4
+    }
+   }
+  }
+ ],
+ "materials": [
+  {
+   "name": "ms_pontoon_wharf",
+   "pbrMetallicRoughness": {
+    "baseColorTexture": {
+     "index": 0
+    },
+    "metallicFactor": 1.0,
+    "roughnessFactor": 1.0,
+    "metallicRoughnessTexture": {
+     "index": 1
+    }
+   },
+   "occlusionTexture": {
+    "index": 1
+   },
+   "emissiveTexture": {
+    "index": 2
+   },
+   "emissiveFactor": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "extensions": {
+    "SPRINGRTS_team_color": {
+     "maskTexture": {
+      "index": 3
+     }
+    }
+   },
+   "normalTexture": {
+    "index": 4
+   }
+  }
+ ],
+ "extensions": {
+  "SPRINGRTS_geometry": {
+   "configVersion": 8,
+   "height": 6.0157,
+   "midpos": [
+    0.0,
+    3.00783,
+    5.075
+   ],
+   "mins": [
+    -3.71,
+    0.0,
+    -14.85
+   ],
+   "maxs": [
+    3.71,
+    6.01565,
+    25.0
+   ],
+   "radius": 20.4894,
+   "pieces": [
+    {
+     "name": "body",
+     "parent": -1,
+     "offset": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "mins": [
+      -3.71,
+      0.0,
+      -14.85
+     ],
+     "maxs": [
+      3.71,
+      5.15,
+      25.0
+     ]
+    },
+    {
+     "name": "crane",
+     "parent": 0,
+     "offset": [
+      2.0,
+      2.7,
+      -8.0
+     ],
+     "mins": [
+      -0.85,
+      0.0,
+      -6.62626
+     ],
+     "maxs": [
+      0.85,
+      3.31565,
+      2.025
+     ]
+    },
+    {
+     "name": "berth",
+     "parent": 0,
+     "offset": [
+      -5.2,
+      0.0,
+      0.0
+     ],
+     "mins": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "maxs": [
+      0.0,
+      0.0,
+      0.0
+     ]
+    },
+    {
+     "name": "shore",
+     "parent": 0,
+     "offset": [
+      0.0,
+      2.2,
+      25.0
+     ],
+     "mins": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "maxs": [
+      0.0,
+      0.0,
+      0.0
+     ]
+    }
+   ]
+  }
+ },
+ "extensionsUsed": [
+  "KHR_texture_basisu",
+  "SPRINGRTS_geometry",
+  "SPRINGRTS_team_color"
+ ],
+ "animations": [
+  {
+   "name": "idle",
+   "samplers": [
+    {
+     "input": 8,
+     "output": 9,
+     "interpolation": "LINEAR"
+    }
+   ],
+   "channels": [
+    {
+     "sampler": 0,
+     "target": {
+      "node": 2,
+      "path": "rotation"
+     }
+    }
+   ]
+  }
+ ],
+ "extensionsRequired": [
+  "KHR_texture_basisu"
+ ]
+}

@@ -1,0 +1,561 @@
+{
+ "asset": {
+  "version": "2.0",
+  "generator": "fable-model-forge 1.0 (Claude Fable 5, hand-built glTF)"
+ },
+ "scene": 0,
+ "scenes": [
+  {
+   "nodes": [
+    0
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "name": "MS_ms_mooring_mast",
+   "children": [
+    1
+   ]
+  },
+  {
+   "name": "body",
+   "children": [
+    2
+   ],
+   "mesh": 0
+  },
+  {
+   "name": "head",
+   "children": [
+    3,
+    4
+   ],
+   "mesh": 1,
+   "translation": [
+    0.0,
+    17.9,
+    0.0
+   ]
+  },
+  {
+   "name": "beacon",
+   "mesh": 2,
+   "translation": [
+    0.0,
+    1.3,
+    0.0
+   ]
+  },
+  {
+   "name": "dock",
+   "translation": [
+    0.0,
+    0.75,
+    -2.7
+   ]
+  }
+ ],
+ "meshes": [
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1,
+      "TEXCOORD_0": 2
+     },
+     "indices": 3,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 4,
+      "NORMAL": 5,
+      "TEXCOORD_0": 6
+     },
+     "indices": 7,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 8,
+      "NORMAL": 9,
+      "TEXCOORD_0": 10
+     },
+     "indices": 11,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  }
+ ],
+ "accessors": [
+  {
+   "bufferView": 0,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 2284,
+   "type": "VEC3",
+   "min": [
+    -5.400000095367432,
+    0.0,
+    -5.400000095367432
+   ],
+   "max": [
+    5.400000095367432,
+    18.899999618530273,
+    5.400000095367432
+   ]
+  },
+  {
+   "bufferView": 1,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 2284,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 2,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 2284,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 3,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 3414,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 4,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 304,
+   "type": "VEC3",
+   "min": [
+    -0.9700735211372375,
+    -0.22007350623607635,
+    -2.6500000953674316
+   ],
+   "max": [
+    0.9700735211372375,
+    1.7200734615325928,
+    1.899999976158142
+   ]
+  },
+  {
+   "bufferView": 5,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 304,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 6,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 304,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 7,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 426,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 8,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 124,
+   "type": "VEC3",
+   "min": [
+    -0.20999999344348907,
+    0.0,
+    -0.20999999344348907
+   ],
+   "max": [
+    0.20999999344348907,
+    0.800000011920929,
+    0.20999999344348907
+   ]
+  },
+  {
+   "bufferView": 9,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 124,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 10,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 124,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 11,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 168,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 12,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 5,
+   "type": "SCALAR",
+   "min": [
+    0.0
+   ],
+   "max": [
+    40.0
+   ]
+  },
+  {
+   "bufferView": 13,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 5,
+   "type": "VEC4"
+  }
+ ],
+ "bufferViews": [
+  {
+   "buffer": 0,
+   "byteOffset": 0,
+   "byteLength": 27408,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 27408,
+   "byteLength": 27408,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 54816,
+   "byteLength": 18272,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 73088,
+   "byteLength": 13656,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 86744,
+   "byteLength": 3648,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 90392,
+   "byteLength": 3648,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 94040,
+   "byteLength": 2432,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 96472,
+   "byteLength": 1704,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 98176,
+   "byteLength": 1488,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 99664,
+   "byteLength": 1488,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 101152,
+   "byteLength": 992,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 102144,
+   "byteLength": 672,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 102816,
+   "byteLength": 20
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 102836,
+   "byteLength": 80
+  }
+ ],
+ "buffers": [
+  {
+   "byteLength": 102916,
+   "uri": "ms_mooring_mast.bin"
+  }
+ ],
+ "samplers": [
+  {}
+ ],
+ "images": [
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_mooring_mast_diffuse.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_mooring_mast_orm.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_mooring_mast_emissive.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_mooring_mast_team.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_mooring_mast_normals.ktx2"
+  }
+ ],
+ "textures": [
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 0
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 1
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 2
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 3
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 4
+    }
+   }
+  }
+ ],
+ "materials": [
+  {
+   "name": "ms_mooring_mast",
+   "pbrMetallicRoughness": {
+    "baseColorTexture": {
+     "index": 0
+    },
+    "metallicFactor": 1.0,
+    "roughnessFactor": 1.0,
+    "metallicRoughnessTexture": {
+     "index": 1
+    }
+   },
+   "occlusionTexture": {
+    "index": 1
+   },
+   "emissiveTexture": {
+    "index": 2
+   },
+   "emissiveFactor": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "extensions": {
+    "SPRINGRTS_team_color": {
+     "maskTexture": {
+      "index": 3
+     }
+    }
+   },
+   "normalTexture": {
+    "index": 4
+   }
+  }
+ ],
+ "extensions": {
+  "SPRINGRTS_geometry": {
+   "configVersion": 8,
+   "height": 20.0,
+   "midpos": [
+    0.0,
+    10.0,
+    0.0
+   ],
+   "mins": [
+    -5.4,
+    0.0,
+    -5.4
+   ],
+   "maxs": [
+    5.4,
+    20.0,
+    5.4
+   ],
+   "radius": 12.5825,
+   "pieces": [
+    {
+     "name": "body",
+     "parent": -1,
+     "offset": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "mins": [
+      -5.4,
+      0.0,
+      -5.4
+     ],
+     "maxs": [
+      5.4,
+      18.9,
+      5.4
+     ]
+    },
+    {
+     "name": "head",
+     "parent": 0,
+     "offset": [
+      0.0,
+      17.9,
+      0.0
+     ],
+     "mins": [
+      -0.97007,
+      -0.22007,
+      -2.65
+     ],
+     "maxs": [
+      0.97007,
+      1.72007,
+      1.9
+     ]
+    },
+    {
+     "name": "beacon",
+     "parent": 1,
+     "offset": [
+      0.0,
+      1.3,
+      0.0
+     ],
+     "mins": [
+      -0.21,
+      0.0,
+      -0.21
+     ],
+     "maxs": [
+      0.21,
+      0.8,
+      0.21
+     ]
+    },
+    {
+     "name": "dock",
+     "parent": 1,
+     "offset": [
+      0.0,
+      0.75,
+      -2.7
+     ],
+     "mins": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "maxs": [
+      0.0,
+      0.0,
+      0.0
+     ]
+    }
+   ]
+  }
+ },
+ "extensionsUsed": [
+  "KHR_texture_basisu",
+  "SPRINGRTS_geometry",
+  "SPRINGRTS_team_color"
+ ],
+ "animations": [
+  {
+   "name": "idle",
+   "samplers": [
+    {
+     "input": 12,
+     "output": 13,
+     "interpolation": "LINEAR"
+    }
+   ],
+   "channels": [
+    {
+     "sampler": 0,
+     "target": {
+      "node": 2,
+      "path": "rotation"
+     }
+    }
+   ]
+  }
+ ],
+ "extensionsRequired": [
+  "KHR_texture_basisu"
+ ]
+}

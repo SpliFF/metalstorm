@@ -1,0 +1,426 @@
+{
+ "asset": {
+  "version": "2.0",
+  "generator": "fable-model-forge 1.0 (Claude Fable 5, hand-built glTF)"
+ },
+ "scene": 0,
+ "scenes": [
+  {
+   "nodes": [
+    0
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "name": "MS_ms_field_workshop",
+   "children": [
+    1
+   ]
+  },
+  {
+   "name": "body",
+   "children": [
+    2
+   ],
+   "mesh": 0
+  },
+  {
+   "name": "crane",
+   "mesh": 1,
+   "translation": [
+    0.0,
+    4.15,
+    0.0
+   ]
+  }
+ ],
+ "meshes": [
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1,
+      "TEXCOORD_0": 2
+     },
+     "indices": 3,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 4,
+      "NORMAL": 5,
+      "TEXCOORD_0": 6
+     },
+     "indices": 7,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  }
+ ],
+ "accessors": [
+  {
+   "bufferView": 0,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 1536,
+   "type": "VEC3",
+   "min": [
+    -7.400000095367432,
+    0.0,
+    -5.400000095367432
+   ],
+   "max": [
+    7.400000095367432,
+    5.900000095367432,
+    5.400000095367432
+   ]
+  },
+  {
+   "bufferView": 1,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 1536,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 2,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 1536,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 3,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 2262,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 4,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 328,
+   "type": "VEC3",
+   "min": [
+    -0.550000011920929,
+    -1.9450000524520874,
+    -3.6500000953674316
+   ],
+   "max": [
+    0.550000011920929,
+    0.7799999713897705,
+    3.6500000953674316
+   ]
+  },
+  {
+   "bufferView": 5,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 328,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 6,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 328,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 7,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 468,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 8,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 7,
+   "type": "SCALAR",
+   "min": [
+    0.0
+   ],
+   "max": [
+    24.0
+   ]
+  },
+  {
+   "bufferView": 9,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 7,
+   "type": "VEC3"
+  }
+ ],
+ "bufferViews": [
+  {
+   "buffer": 0,
+   "byteOffset": 0,
+   "byteLength": 18432,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 18432,
+   "byteLength": 18432,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 36864,
+   "byteLength": 12288,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 49152,
+   "byteLength": 9048,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 58200,
+   "byteLength": 3936,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 62136,
+   "byteLength": 3936,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 66072,
+   "byteLength": 2624,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 68696,
+   "byteLength": 1872,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 70568,
+   "byteLength": 28
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 70596,
+   "byteLength": 84
+  }
+ ],
+ "buffers": [
+  {
+   "byteLength": 70680,
+   "uri": "ms_field_workshop.bin"
+  }
+ ],
+ "samplers": [
+  {}
+ ],
+ "images": [
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_field_workshop_diffuse.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_field_workshop_orm.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_field_workshop_emissive.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_field_workshop_team.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_field_workshop_normals.ktx2"
+  }
+ ],
+ "textures": [
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 0
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 1
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 2
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 3
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 4
+    }
+   }
+  }
+ ],
+ "materials": [
+  {
+   "name": "ms_field_workshop",
+   "pbrMetallicRoughness": {
+    "baseColorTexture": {
+     "index": 0
+    },
+    "metallicFactor": 1.0,
+    "roughnessFactor": 1.0,
+    "metallicRoughnessTexture": {
+     "index": 1
+    }
+   },
+   "occlusionTexture": {
+    "index": 1
+   },
+   "emissiveTexture": {
+    "index": 2
+   },
+   "emissiveFactor": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "extensions": {
+    "SPRINGRTS_team_color": {
+     "maskTexture": {
+      "index": 3
+     }
+    }
+   },
+   "normalTexture": {
+    "index": 4
+   }
+  }
+ ],
+ "extensions": {
+  "SPRINGRTS_geometry": {
+   "configVersion": 8,
+   "height": 5.9,
+   "midpos": [
+    0.0,
+    2.95,
+    0.0
+   ],
+   "mins": [
+    -7.4,
+    0.0,
+    -5.4
+   ],
+   "maxs": [
+    7.4,
+    5.9,
+    5.4
+   ],
+   "radius": 9.6241,
+   "pieces": [
+    {
+     "name": "body",
+     "parent": -1,
+     "offset": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "mins": [
+      -7.4,
+      0.0,
+      -5.4
+     ],
+     "maxs": [
+      7.4,
+      5.9,
+      5.4
+     ]
+    },
+    {
+     "name": "crane",
+     "parent": 0,
+     "offset": [
+      0.0,
+      4.15,
+      0.0
+     ],
+     "mins": [
+      -0.55,
+      -1.945,
+      -3.65
+     ],
+     "maxs": [
+      0.55,
+      0.78,
+      3.65
+     ]
+    }
+   ]
+  }
+ },
+ "extensionsUsed": [
+  "KHR_texture_basisu",
+  "SPRINGRTS_geometry",
+  "SPRINGRTS_team_color"
+ ],
+ "animations": [
+  {
+   "name": "idle",
+   "samplers": [
+    {
+     "input": 8,
+     "output": 9,
+     "interpolation": "LINEAR"
+    }
+   ],
+   "channels": [
+    {
+     "sampler": 0,
+     "target": {
+      "node": 2,
+      "path": "translation"
+     }
+    }
+   ]
+  }
+ ],
+ "extensionsRequired": [
+  "KHR_texture_basisu"
+ ]
+}

@@ -1,0 +1,48 @@
+ms_dress_order — Order dressing kit: intended mount offsets
+============================================================
+
+Frame: RH, forward = -Z, up = +Y, metres. All kit elements are ROOT
+pieces authored resting on Y=0 with display fan-out root offsets
+(applique -4.2 / staff -1.6 / lightbar +0.9 / stowage +3.4 along X).
+ZERO the root offset when attaching, then use the offsets below.
+
+Reference hull dims (toolkit layout.py / heavy_layout.py):
+  fable_tank : half-width 1.75, hull z -4.40..4.40, deck y 1.86,
+               hull side y 0.15..2.05, turret ring (0, 1.80, 0.30),
+               intake z 2.45, exhausts (±0.80, 1.60, 3.92)
+  fable_heavy: half-width 2.35, hull z -8.10..8.10, deck y 3.02,
+               hull side y 0.25..3.15, turret ring (0, 3.00, -0.60),
+               exhaust z 7.30
+
+applique (plates authored upright facing -Z; plate local centres:
+side plate x=-1.55 c_y=0.50 [2.0x1.0x0.1], glacis x=+0.45 c_y=0.45
+[1.5x0.9x0.1], ID/team panel x=+2.00 c_y=0.45 [1.1x0.9x0.1] — rebase
+each plate to its own centre when mounting):
+  side plate  — rotate 90° about Y, flush on hull side:
+                tank  (±1.81, 1.30, -0.80)
+                heavy (±2.41, 1.90, -1.60)
+  glacis plate— tilt about X to glacis slope (~55° from vertical):
+                tank  (0, 1.35, -3.60)
+                heavy (0, 2.20, -6.90)
+  ID panel    — hull rear, upright:
+                tank  (0, 1.10, 4.46)
+                heavy (0, 1.70, 8.16)
+
+staff (base flange at piece origin; pennant tip reaches +0.98 local X,
+staff top y 2.72):
+  tank  rear-deck corner: (-1.45, 1.86, 3.90)
+  heavy rear-deck corner: (-2.00, 3.02, 7.60)
+
+lightbar (stub feet at y=0; bar centre y 0.62, lenses face -Z):
+  tank  hull deck, behind turret: (0, 1.86, 2.05)
+  heavy hull deck, behind turret: (0, 3.02, 3.40)
+  (avoid tank intake at z 2.45 if raised mounts are added)
+
+stowage (tray underside at y=0; footprint 1.70 x 0.72):
+  tank  engine deck: (0, 1.86, 3.20)  — clears exhausts at z 3.92
+  heavy engine deck: (0, 3.02, 5.60)
+
+Clip: `idle` — pennant (piece `flag`, child of `staff`) waves ±14°
+about the staff axis, 2.4 s seamless loop.
+Team colour: pennant field + ID applique panel (team mask R only).
+Emissive: four amber lenses on the lightbar front face.

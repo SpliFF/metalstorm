@@ -1,0 +1,426 @@
+{
+ "asset": {
+  "version": "2.0",
+  "generator": "fable-model-forge 1.0 (Claude Fable 5, hand-built glTF)"
+ },
+ "scene": 0,
+ "scenes": [
+  {
+   "nodes": [
+    0
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "name": "MS_ms_timber_yard",
+   "children": [
+    1
+   ]
+  },
+  {
+   "name": "body",
+   "children": [
+    2
+   ],
+   "mesh": 0
+  },
+  {
+   "name": "blade",
+   "mesh": 1,
+   "translation": [
+    3.1500000000000004,
+    0.9400000000000001,
+    -0.25
+   ]
+  }
+ ],
+ "meshes": [
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1,
+      "TEXCOORD_0": 2
+     },
+     "indices": 3,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 4,
+      "NORMAL": 5,
+      "TEXCOORD_0": 6
+     },
+     "indices": 7,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  }
+ ],
+ "accessors": [
+  {
+   "bufferView": 0,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 1142,
+   "type": "VEC3",
+   "min": [
+    -5.900000095367432,
+    0.0,
+    -5.900000095367432
+   ],
+   "max": [
+    5.900000095367432,
+    4.642203330993652,
+    5.900000095367432
+   ]
+  },
+  {
+   "bufferView": 1,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 1142,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 2,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 1142,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 3,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 1782,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 4,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 68,
+   "type": "VEC3",
+   "min": [
+    -0.5394319295883179,
+    -0.5394319295883179,
+    -0.09000000357627869
+   ],
+   "max": [
+    0.5394319295883179,
+    0.5394319295883179,
+    0.09000000357627869
+   ]
+  },
+  {
+   "bufferView": 5,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 68,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 6,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 68,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 7,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 144,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 8,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 9,
+   "type": "SCALAR",
+   "min": [
+    0.0
+   ],
+   "max": [
+    0.8999999761581421
+   ]
+  },
+  {
+   "bufferView": 9,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 9,
+   "type": "VEC4"
+  }
+ ],
+ "bufferViews": [
+  {
+   "buffer": 0,
+   "byteOffset": 0,
+   "byteLength": 13704,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 13704,
+   "byteLength": 13704,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 27408,
+   "byteLength": 9136,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 36544,
+   "byteLength": 7128,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 43672,
+   "byteLength": 816,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 44488,
+   "byteLength": 816,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 45304,
+   "byteLength": 544,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 45848,
+   "byteLength": 576,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 46424,
+   "byteLength": 36
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 46460,
+   "byteLength": 144
+  }
+ ],
+ "buffers": [
+  {
+   "byteLength": 46604,
+   "uri": "ms_timber_yard.bin"
+  }
+ ],
+ "samplers": [
+  {}
+ ],
+ "images": [
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_timber_yard_diffuse.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_timber_yard_orm.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_timber_yard_emissive.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_timber_yard_team.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_timber_yard_normals.ktx2"
+  }
+ ],
+ "textures": [
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 0
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 1
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 2
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 3
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 4
+    }
+   }
+  }
+ ],
+ "materials": [
+  {
+   "name": "ms_timber_yard",
+   "pbrMetallicRoughness": {
+    "baseColorTexture": {
+     "index": 0
+    },
+    "metallicFactor": 1.0,
+    "roughnessFactor": 1.0,
+    "metallicRoughnessTexture": {
+     "index": 1
+    }
+   },
+   "occlusionTexture": {
+    "index": 1
+   },
+   "emissiveTexture": {
+    "index": 2
+   },
+   "emissiveFactor": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "extensions": {
+    "SPRINGRTS_team_color": {
+     "maskTexture": {
+      "index": 3
+     }
+    }
+   },
+   "normalTexture": {
+    "index": 4
+   }
+  }
+ ],
+ "extensions": {
+  "SPRINGRTS_geometry": {
+   "configVersion": 8,
+   "height": 4.6422,
+   "midpos": [
+    0.0,
+    2.3211,
+    0.0
+   ],
+   "mins": [
+    -5.9,
+    0.0,
+    -5.9
+   ],
+   "maxs": [
+    5.9,
+    4.6422,
+    5.9
+   ],
+   "radius": 8.6607,
+   "pieces": [
+    {
+     "name": "body",
+     "parent": -1,
+     "offset": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "mins": [
+      -5.9,
+      0.0,
+      -5.9
+     ],
+     "maxs": [
+      5.9,
+      4.6422,
+      5.9
+     ]
+    },
+    {
+     "name": "blade",
+     "parent": 0,
+     "offset": [
+      3.15,
+      0.94,
+      -0.25
+     ],
+     "mins": [
+      -0.53943,
+      -0.53943,
+      -0.09
+     ],
+     "maxs": [
+      0.53943,
+      0.53943,
+      0.09
+     ]
+    }
+   ]
+  }
+ },
+ "extensionsUsed": [
+  "KHR_texture_basisu",
+  "SPRINGRTS_geometry",
+  "SPRINGRTS_team_color"
+ ],
+ "animations": [
+  {
+   "name": "idle",
+   "samplers": [
+    {
+     "input": 8,
+     "output": 9,
+     "interpolation": "LINEAR"
+    }
+   ],
+   "channels": [
+    {
+     "sampler": 0,
+     "target": {
+      "node": 2,
+      "path": "rotation"
+     }
+    }
+   ]
+  }
+ ],
+ "extensionsRequired": [
+  "KHR_texture_basisu"
+ ]
+}

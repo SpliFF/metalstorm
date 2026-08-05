@@ -1,0 +1,31 @@
+ms_dress_anarchic — Anarchic dressing kit (mount offsets)
+
+Kit pieces are authored piece-local, ground Y=0, forward -Z, 1 unit = 1 m.
+Root offsets in this glTF fan the kit out along X for display ONLY —
+zero the root offset when mounting a single element.  Hull dims used
+(from toolkit layout.py / heavy_layout.py):
+  fable_tank : hull z -4.40..4.40, half-width 1.75, side y 0.15..2.05, deck y 1.86
+  fable_heavy: hull z -8.10..8.10, half-width 2.35, side y 0.25..3.15, deck y 3.02
+
+plates  (scrap skirt, 3.9 m x 1.7 m, faces -Z, base y 0)
+  fable_tank side : yaw ±90° about Y, offset (±1.87, 0.10, 0.0)
+  fable_heavy side: yaw ±90° about Y, offset (±2.47, 0.30, ∓2.0) and (±2.47, 0.30, ±1.9)
+                    (two sets fore/aft cover the 16 m hull)
+plates rear: no yaw, offset (0, 0.10, +4.46) tank / (0, 0.30, +8.16) heavy
+prow    (V-ram, apex local z -1.18, wing tails z +0.06)
+  fable_tank glacis : offset (0, 0.15, -3.40)  -> apex at world z -4.58
+  fable_heavy glacis: scale 1.30, offset (0, 0.30, -6.95)
+trophies (rack 1.7 m wide x 2.15 m)
+  deck mount tank  : offset (0, 1.86, +2.6), any yaw
+  deck mount heavy : offset (0, 3.02, +5.5)
+totem   (2.7 m pole; skull top y 2.57)
+  ground prop at any position, or deck: (±0.9, 1.86, +3.4) tank,
+  (±1.3, 3.02, +6.8) heavy
+brazier (fire drum r 0.37, rim y 0.92; child piece `flame` at (0, 0.92, 0),
+  clip `idle` = flicker)  ground prop, or heavy rear deck (0, 3.02, +7.2)
+streamer (1.85 m mast, rag flies +X; team colour via team mask)
+  turret/deck corner: (±1.5, 1.86, +3.9) tank, (±2.1, 3.02, +7.6) heavy;
+  yaw to taste (rag reads best cross-wind)
+
+Engine-radius note: the display fan-out (x -8.2..+8.6) inflates the
+whole-model radius; per-element radii are <= 2.2 m once re-rooted.
