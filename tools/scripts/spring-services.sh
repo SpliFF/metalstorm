@@ -36,9 +36,21 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 # and relative (`./build/debug/...`) invocations are caught. Picking a
 # repo-internal subpath keeps unrelated `vite`/`node` processes
 # (the user's other projects) out of the match.
-PAT_LOBBY="build/debug/spring-lobby"
-PAT_SERVER="build/debug/spring-server"
-PAT_LOGSERVER="build/debug/spring-logserver"
+#
+# Both build dirs, spelled out. These used to name `build/debug/` only, so a
+# service launched from `build/release/` — which is what the lobby spawns game
+# servers from when it exists, and how the stack is often started by hand —
+# was invisible to `stop` and `status`: both reported "nothing to stop" with a
+# live process still holding :8011/:8010/:9100. The next launch then either
+# raced it or silently tested the old binary.
+#
+# The alternation is deliberate; a `.` wildcard here is NOT safe. `build/.*/
+# spring-server` also matches the LOBBY, whose command line carries
+# `--db data/spring-server.db` — `.*` happily spans the gap, so a "kill the
+# game servers" call takes the lobby down with it.
+PAT_LOBBY="build/(debug|release)/spring-lobby"
+PAT_SERVER="build/(debug|release)/spring-server"
+PAT_LOGSERVER="build/(debug|release)/spring-logserver"
 PAT_CLIENT="client/node_modules/.bin/vite"
 
 # Find PIDs whose full command line contains $1. Returns nothing if
