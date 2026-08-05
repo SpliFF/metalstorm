@@ -26,6 +26,40 @@ const _potential = { x: 0, z: 0 };
 const _desired = { x: 0, z: 0 };
 const NO_BIG_UNITS = [];
 
+// --- per-term attribution probe (PLAN-perf M12) ----------------------------
+//
+// Sizes one term of the per-member steering path by REPEATING it k extra times
+// per member and taking the slope of the `entity` phase against k. It is not a
+// toggle, and that is the point: M10 measured the neighbour scan at 5.4 ms by
+// switching it off and it turned out to be ~1.1 ms, because the off-switch also
+// removed the generator and string-key machinery wrapped around it. A repeat
+// leaves every caller, allocation, branch and cache access exactly where it is,
+// so the slope is the term's own marginal cost. Any constant the harness itself
+// adds appears in every arm and cancels.
+//
+// Terms that mutate member state snapshot and restore the few fields they
+// touch, so the k extra evaluations are observationally inert — the real call
+// still runs last, from the same state it would have seen with the probe off.
+//
+// `_pt` is 0 in every shipping frame; each site costs one predicted compare.
+// Set via the SquadManager's `perfProbe` (see squad-manager.js).
+export const PROBE_TERMS = [
+  'off', 'slot', 'nearestPassable', 'isConstrained', 'updateMode',
+  'trailPointAhead', 'arrive', 'separate', 'softLeash', 'potentialField',
+  'bigUnits', 'mix', 'integrate', 'hardLeash', 'trackStuck', 'updateMember',
+];
+let _pt = 0;   // active term index into PROBE_TERMS, 0 = off
+let _pn = 0;   // extra repetitions per member per frame
+
+export function setPerfProbe(term = 'off', repeat = 0) {
+  const i = PROBE_TERMS.indexOf(term);
+  if (i < 0) throw new Error(`unknown probe term: ${term} (have ${PROBE_TERMS.join(', ')})`);
+  _pt = i; _pn = i === 0 ? 0 : Math.max(0, repeat | 0);
+  return { term: PROBE_TERMS[_pt], repeat: _pn };
+}
+
+export function getPerfProbe() { return { term: PROBE_TERMS[_pt], repeat: _pn }; }
+
 export class Squad {
   /**
    * @param {number} id             sim unit id (authoritative)
@@ -649,6 +683,7 @@ export class Squad {
         };
       }
       slotToWorld(localSlot, this.cx, this.cz, this.heading, _slotW);
+      if (_pt === 1) for (let r = _pn; r > 0; r--) slotToWorld(localSlot, this.cx, this.cz, this.heading, _slotW);
 
       if (this.profile.steerer === 'air') {
         this._airStep(m, dt, nowSec, maxSpeed);
@@ -661,13 +696,23 @@ export class Squad {
       // COLUMN mode, mid-turn, or while recovering from being stuck.
       let target = _slotW;
       if (passability && moveClass) {
+        if (_pt === 2) for (let r = _pn; r > 0; r--) passability.nearestPassable(_slotW.x, _slotW.z, moveClass, this.cfg.slotProjectionCap);
         target = passability.nearestPassable(_slotW.x, _slotW.z, moveClass, this.cfg.slotProjectionCap);
+      }
+      if (_pt === 3 && passability && moveClass) {
+        for (let r = _pn; r > 0; r--) this._isConstrained(m, _slotW, target, passability, moveClass);
       }
       const constrained = passability && moveClass
         ? this._isConstrained(m, _slotW, target, passability, moveClass)
         : false;
+      if (_pt === 4) {
+        const sMode = m.mode, sStreak = m._modeStreak;
+        for (let r = _pn; r > 0; r--) this._updateMode(m, constrained);
+        m.mode = sMode; m._modeStreak = sStreak;
+      }
       this._updateMode(m, constrained);
 
+      if (_pt === 5) for (let r = _pn; r > 0; r--) this.trailPointAhead(m);
       const trailPt = this.trailPointAhead(m);
       if (trailPt && (m.mode === 'COLUMN' || m.recoveryLevel >= 1 || inTurn)) {
         target = trailPt;
@@ -688,10 +733,19 @@ export class Squad {
   // --- ground steerer (default) -------------------------------------------
 
   _groundStep(m, dt, target, maxSpeed, softLeashDist, leash, passability, moveClass, neighbourQuery, bigUnits = NO_BIG_UNITS) {
+    if (_pt === 6) for (let r = _pn; r > 0; r--) arrive(m.x, m.z, target.x, target.z, maxSpeed, this.cfg.arrivalRadius, _arr);
     arrive(m.x, m.z, target.x, target.z, maxSpeed, this.cfg.arrivalRadius, _arr);
 
     if (m.recoveryLevel >= 2) { _sep.x = 0; _sep.z = 0; }
     else {
+      if (_pt === 7) for (let r = _pn; r > 0; r--) {
+        const nbP = neighbourQuery(m);
+        const nP = typeof nbP === 'number' ? nbP : undefined;
+        separate(m.x, m.z, m.squadId, nP === undefined ? nbP : neighbourQuery.buf,
+          this.cfg.separationRadius,
+          this.cfg.separationWeightSameSquad, this.cfg.separationWeightOtherSquad,
+          this.cfg.separationDeadband, _sep, nP);
+      }
       const nb = neighbourQuery(m);
       const n = typeof nb === 'number' ? nb : undefined;   // see NEIGHBOUR_QUERY note
       separate(m.x, m.z, m.squadId, n === undefined ? nb : neighbourQuery.buf,
@@ -700,9 +754,13 @@ export class Squad {
         this.cfg.separationDeadband, _sep, n);
     }
 
+    if (_pt === 8) for (let r = _pn; r > 0; r--) softLeashPull(m.x, m.z, this.cx, this.cz, softLeashDist, this.cfg.softLeashGain, _leash);
     softLeashPull(m.x, m.z, this.cx, this.cz, softLeashDist, this.cfg.softLeashGain, _leash);
 
     _potential.x = 0; _potential.z = 0;
+    if (_pt === 9 && passability && moveClass) {
+      for (let r = _pn; r > 0; r--) this._potentialField(m, passability, _potential);
+    }
     if (passability && moveClass) this._potentialField(m, passability, _potential);
 
     // Big-unit threading (PLAN-metalstorm-flow.md §4): hull bow-wave by
@@ -710,6 +768,12 @@ export class Squad {
     // legitimately threading under a hull (underpass-eligible moveClass).
     _big.x = 0; _big.z = 0;
     let underHull = false;
+    if (_pt === 10) for (let r = _pn; r > 0; r--) {
+      for (const bu of bigUnits) {
+        if (isUnderHull(m, bu, moveClass)) patchPush(m, bu, this.cfg, _big);
+        else hullPush(m, bu, this.cfg, _big);
+      }
+    }
     for (const bu of bigUnits) {
       if (isUnderHull(m, bu, moveClass)) {
         underHull = true;
@@ -719,6 +783,15 @@ export class Squad {
       }
     }
 
+    if (_pt === 11) for (let r = _pn; r > 0; r--) {
+      _desired.x = _arr.x * this.cfg.arrivalWeight + _sep.x * this.cfg.separationWeight * maxSpeed
+                 + _leash.x + _potential.x * this.cfg.potentialFieldWeight
+                 + _big.x * this.cfg.bigUnitWeight * maxSpeed;
+      _desired.z = _arr.z * this.cfg.arrivalWeight + _sep.z * this.cfg.separationWeight * maxSpeed
+                 + _leash.z + _potential.z * this.cfg.potentialFieldWeight
+                 + _big.z * this.cfg.bigUnitWeight * maxSpeed;
+      clampLen(_desired, underHull ? maxSpeed * this.cfg.underHullSpeedPenalty : maxSpeed);
+    }
     _desired.x = _arr.x * this.cfg.arrivalWeight + _sep.x * this.cfg.separationWeight * maxSpeed
                + _leash.x + _potential.x * this.cfg.potentialFieldWeight
                + _big.x * this.cfg.bigUnitWeight * maxSpeed;
@@ -729,7 +802,17 @@ export class Squad {
     // traversal cost for underpass classes (flow.md §3).
     clampLen(_desired, underHull ? maxSpeed * this.cfg.underHullSpeedPenalty : maxSpeed);
 
+    if (_pt === 12) {
+      const sx = m.x, sz = m.z, sy = m.y, svx = m.vx, svz = m.vz, sh = m.headingY, sg = m.gait;
+      for (let r = _pn; r > 0; r--) m.integrate(_desired.x, _desired.z, dt, this.backend);
+      m.x = sx; m.z = sz; m.y = sy; m.vx = svx; m.vz = svz; m.headingY = sh; m.gait = sg;
+    }
     m.integrate(_desired.x, _desired.z, dt, this.backend);
+    if (_pt === 13) {
+      const sx = m.x, sz = m.z, sy = m.y;
+      for (let r = _pn; r > 0; r--) this._applyHardLeash(m, leash);
+      m.x = sx; m.z = sz; m.y = sy;
+    }
     this._applyHardLeash(m, leash);
 
     if (bigUnits.length > 0) {
@@ -746,7 +829,15 @@ export class Squad {
       m.y = this.backend.groundHeight(m.x, m.z);
     }
 
+    if (_pt === 14) {
+      const sf = m._stuckFrames, sd = m._lastTargetDistSq, sr = m.recoveryLevel;
+      const sx = m.x, sz = m.z, sy = m.y;
+      for (let r = _pn; r > 0; r--) this._trackStuck(m, target);
+      m._stuckFrames = sf; m._lastTargetDistSq = sd; m.recoveryLevel = sr;
+      m.x = sx; m.z = sz; m.y = sy;
+    }
     this._trackStuck(m, target);
+    if (_pt === 15) for (let r = _pn; r > 0; r--) this.backend.updateMember(m.handle, m.x, m.y, m.z, m.headingY, m.gait);
     this.backend.updateMember(m.handle, m.x, m.y, m.z, m.headingY, m.gait);
   }
 

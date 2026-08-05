@@ -1,7 +1,7 @@
 // squad-manager.js — owns every squad; the integration surface the worker
 // adapter drives. See PLAN-metalstorm-squads.md §7.
 
-import { Squad } from './squad.js';
+import { Squad, setPerfProbe, getPerfProbe, PROBE_TERMS } from './squad.js';
 import { DEFAULT_CONFIG, linearCount } from './config.js';
 import { BigUnitRepulsor } from './big-unit-repulsor.js';
 import { createPatchSet } from './patches.js';
@@ -72,6 +72,15 @@ export class SquadManager {
   /** Install the shared passability grid once the map's heightmap sampler is
    *  available (worker adapter, Stage 7 — see passability.js's createPassability). */
   setPassability(passability) { this.passability = passability; }
+
+  /** Per-term attribution probe (PLAN-perf M12) — see squad.js's PROBE_TERMS.
+   *  `perfProbe('trailPointAhead', 4)` runs that one term four extra times per
+   *  member per frame; the slope of `entity` against the repeat count is the
+   *  term's marginal cost. `perfProbe()` turns it off. Measurement only — `_pt`
+   *  is 0 in every shipping frame. */
+  perfProbe(term, repeat) { return setPerfProbe(term, repeat); }
+  get perfProbeState() { return getPerfProbe(); }
+  get perfProbeTerms() { return PROBE_TERMS; }
 
   // --- building footprints / heightmap deform (pathfinding §7) -----------
 
