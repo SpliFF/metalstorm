@@ -131,6 +131,10 @@ public:
     /// before sending (1 for a fresh report; >1 for a debounced recount of a
     /// crash-looping subsystem — see client-error-telemetry.ts).
     struct ClientErrorRecord {
+        /// Row id + insert time. Set only on the read paths
+        /// (GetClientErrorsByHash); the insert path never binds them.
+        int64_t id = 0;
+        std::string createdAt;
         int64_t userId = 0;
         std::string reason;
         std::string errorClass;
@@ -158,6 +162,50 @@ public:
     /// server-side rate-limit backstop (the client's own per-session cap of
     /// 5/hour is advisory only; PLAN-security-hardening.md §1 "junk floods" row).
     int CountRecentClientErrors(int64_t userId, int windowSeconds);
+
+    /// One stack-hash group for the GM dashboard's crash view
+    /// (PLAN-client-resilience.md task 4). Grouping is by hash and not by
+    /// message because stacks arrive **minified** — there is no source-map
+    /// upload pipeline (task 3's documented residual), so the frames are
+    /// unreadable but the hash is still a stable identity for one crash site.
+    struct ClientErrorGroup {
+        std::string stackHash;
+        /// Class + message of the most recent report in the group.
+        std::string errorClass;
+        std::string message;
+        std::string recoveryRung;
+        /// Rows stored, vs. SUM(count) — occurrences includes the tallies the
+        /// client deduped away before sending, so a crash loop that sent one
+        /// row with count=40 reads as 1 report / 40 occurrences.
+        int reports = 0;
+        int occurrences = 0;
+        /// Distinct accounts affected. `user_id` is 0 for an unattributed
+        /// report, so this can exceed the number of real accounts by one.
+        int users = 0;
+        std::string firstSeen;
+        std::string lastSeen;
+        /// Build range: lexical min/max of the non-empty build stamps seen.
+        std::string firstBuild;
+        std::string lastBuild;
+        /// Comma-joined distinct non-empty game ids this crash was seen in.
+        std::string games;
+    };
+
+    /// Top crashers, most-recently-seen first. `sinceDays <= 0` = no time
+    /// bound. Read-only; never mutates or prunes.
+    std::vector<ClientErrorGroup> GetClientErrorGroups(int limit = 50,
+                                                       int sinceDays = 0);
+
+    /// Every stored report for one stack hash, newest first — the dashboard's
+    /// drill-down and the body of its export-to-JSON.
+    std::vector<ClientErrorRecord> GetClientErrorsByHash(
+        const std::string& stackHash, int limit = 200);
+
+    /// Delete `client_errors` rows older than `retentionDays`
+    /// (PLAN-client-resilience.md §3: "SQLite table with retention (30 days)").
+    /// Returns rows deleted. A non-positive retention keeps everything and
+    /// deletes nothing — retention is opt-out, never accidentally "0 days".
+    int PruneClientErrors(int retentionDays);
 
     /// A saved command-composer preset (PLAN-metalstorm-scripting.md task 6).
     /// `intentJson` is the client's compile-table.ts `CommandIntent`

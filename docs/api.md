@@ -257,9 +257,10 @@ below (`--disable-client-error-reports`).
 **POST /api/client-errors** (requires auth — any valid session token)
 
 See [PLAN-client-resilience.md](../PLAN-client-resilience.md) — the client-side watchdog/context-
-loss/fatal-error detection hooks POST a crash report here for later triage (a grouped dashboard
-view is a follow-up; today this is ingestion-only). Size-capped at 40KB, rate-limited to 20/hour
-per user (the client's own advisory cap is 5/hour per session), 400 on malformed JSON.
+loss/fatal-error detection hooks POST a crash report here for later triage. Size-capped at 40KB,
+rate-limited to 20/hour per user (the client's own advisory cap is 5/hour per session), 400 on
+malformed JSON. Reading the stored reports is the admin-only crash view below; how to interpret
+one is in [debugging.md](debugging.md#client-crash-recovery--error-reports).
 
 ```bash
 curl -X POST http://localhost:8011/api/client-errors \
@@ -273,7 +274,47 @@ curl -X POST http://localhost:8011/api/client-errors \
 **Response:** `{"ok":true,"id":42}`
 
 Disable server-side with `--disable-client-error-reports` (self-hosted deployments only —
-default is enabled).
+default is enabled). Stored reports are pruned after `--client-error-retention-days N`
+(default 30; `0` disables pruning rather than deleting everything).
+
+### Client Crash View (admin)
+
+**POST /api/admin/client-errors** — `client_errors` grouped by stack hash, most-recently-seen
+first. Admin role required (reports carry account ids, stacks and log-ring lines).
+
+Request: `{"sinceDays":7,"limit":100}` — `sinceDays` 0 means all retained; `limit` is clamped to
+1–200.
+
+```json
+{"ok":true,"retention_days":30,
+ "groups":[{"stack_hash":"9f3a11cc","error_class":"TypeError","message":"latest sighting",
+            "recovery_rung":"R3","reports":2,"occurrences":9,"users":1,
+            "first_seen":"2026-08-04 01:01:40","last_seen":"2026-08-04 01:01:40",
+            "first_build":"b100","last_build":"b200","games":"metalstorm,papertanks"}]}
+```
+
+`occurrences` is `SUM(count)` — it includes repeats the client deduped away before sending, so it
+exceeds `reports` for a crash loop. `error_class`/`message`/`recovery_rung` come from the group's
+**newest** report. Empty build stamps and game ids are left out of the range and the list.
+
+**POST /api/admin/client-errors/detail** — every stored report for one stack hash, newest first.
+This response is also the dashboard's export-to-JSON payload, so it carries full stacks and log
+rings.
+
+Request: `{"stack_hash":"9f3a11cc","limit":200}` (`limit` clamped 1–500). 400 if `stack_hash` is
+missing.
+
+```json
+{"ok":true,"stack_hash":"9f3a11cc",
+ "reports":[{"id":2,"created_at":"2026-08-04 01:01:40","user_id":2,"reason":"fatal",
+             "error_class":"TypeError","message":"latest sighting","stack":"...","stack_hash":"9f3a11cc",
+             "recovery_rung":"R3","phase":"render","frame":1800,"entity_count":80,
+             "game_id":"papertanks","map_id":"green_flat","build_stamp":"b200",
+             "gpu_renderer":"ANGLE (Apple M3)","log_ring":"[ERR] again","count":8}]}
+```
+
+Stacks are **minified** — there is no source-map upload pipeline. See
+[debugging.md](debugging.md#reading-the-dashboard-crash-view).
 
 ---
 
