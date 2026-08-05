@@ -185,6 +185,105 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             };
             const bool rosterRequired = !playerTeamByUsername.empty();
 
+            // D16 fix — stable sim identity across reconnects.
+            //
+            // Both auth paths below (token reconnect and password login) used
+            // to do an unconditional `nextPlayerNum++` → `playerHandler.
+            // AddPlayer`, so every detach/resync grew `playerHandler` by one
+            // and handed the client a brand-new playerNum. That is fatal, not
+            // cosmetic: `game_authority.lua` keys a player's pool by playerNum
+            // (`authority_player_<n>`) and grants over the player list at
+            // GameStart, so a resynced client came back with an EMPTY pool
+            // while its real authority sat stranded under the retired number —
+            // measured live 2026-08-05 as an authority bar reading `YOU 0`
+            // with the same human listed twice on the scoreboard, both active.
+            //
+            // So: one playerNum per ACCOUNT, minted on first sight and reused
+            // for the game server's lifetime. `game_authority.lua:688` is
+            // already written against exactly this premise ("reconnects of a
+            // known player fire the same PlayerAdded callin with the same
+            // playerID") — its `authority_granted_<id>` guard is what keeps a
+            // rejoin from minting a second JOIN_GRANT, and that guard only
+            // works if the id is stable. Fixing this Lua-side instead (grant
+            // on rejoin) would turn reconnect-in-a-loop into an authority
+            // printer; the identity has to be stable at the source.
+            //
+            // Returns the account's playerNum and points `clientPlayerNum` at
+            // the new connection.
+            auto bindPlayerNum = [&](int64_t accountId, const std::string& name,
+                                     int team, bool isSpectator) -> int {
+                auto& playerNumByAccount = ctx.playerNumByAccount;
+                auto accIt = playerNumByAccount.find(accountId);
+                const bool reused = (accIt != playerNumByAccount.end());
+                const int pNum = reused ? accIt->second : nextPlayerNum++;
+                if (!reused) playerNumByAccount.emplace(accountId, pNum);
+
+                // Register a Spring CPlayer so Lua can query player info and
+                // receive callins. Spectators ARE players in Spring's
+                // playerHandler (PlayerBase::spectator), just non-commanding
+                // ones. On reuse this refreshes the EXISTING slot in place
+                // (AddPlayer would overwrite it wholesale, discarding the
+                // per-player state a rejoining player is entitled to keep) and
+                // clears the `active = false` a prior PlayerLeft set.
+                if (reused && playerHandler.IsValidPlayer(pNum)) {
+                    CPlayer* p = playerHandler.Player(pNum);
+                    p->name      = name;
+                    p->team      = team;
+                    p->active    = true;
+                    p->spectator = isSpectator;
+                } else {
+                    CPlayer p;
+                    p.name      = name;
+                    p.team      = team;
+                    p.active    = true;
+                    p.playerNum = pNum;
+                    p.spectator = isSpectator;
+                    playerHandler.AddPlayer(p);
+                }
+
+                // Retire the previous connection that held this playerNum.
+                // Two things depend on this:
+                //  - the disconnect drain in server_main.cpp fires
+                //    PlayerRemoved off `clientPlayerNum`/`sessions`, and a
+                //    detach's disconnect can drain AFTER the resync has
+                //    already reconnected (the QUIC max_idle_timeout is 30 s,
+                //    so a parked client is not noticed until then — measured
+                //    live: a >30 s park drains before the resync, a 3 s park
+                //    does not). Without retiring the old client, that late
+                //    drain would mark the *live* player inactive and fire
+                //    PlayerRemoved at them — and PlayerRemoved is what
+                //    game_authority.lua banks a leaver's pool on, so the same
+                //    YOU 0 symptom would return by a different route. (That
+                //    merge is inert today for an unrelated reason — D27 — but
+                //    this must not depend on a broken callin staying broken.)
+                //  - one live connection per account. A second connection for
+                //    the same account is a resync, not a co-driver; leaving
+                //    the old session authenticated would let a stale tab keep
+                //    issuing commands as this player.
+                for (auto it = clientPlayerNum.begin(); it != clientPlayerNum.end(); ) {
+                    if (it->first != msg.clientId && it->second == pNum) {
+                        SLOG(SPRING_LOG_NOTICE,
+                            "retiring stale client %u for playerNum=%d "
+                            "('%s') — superseded by client %u",
+                            it->first, pNum, name.c_str(), msg.clientId);
+                        sessions.RemoveSession(it->first);
+                        ctx.handshakedClients.erase(it->first);
+                        ctx.pendingLeaveReason.erase(it->first);
+                        it = clientPlayerNum.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+                clientPlayerNum[msg.clientId] = pNum;
+
+                SLOG(SPRING_LOG_NOTICE,
+                    "%s playerNum=%d for account id=%lld ('%s') team=%d%s",
+                    reused ? "reusing" : "minted new", pNum,
+                    static_cast<long long>(accountId), name.c_str(), team,
+                    isSpectator ? " spectator" : "");
+                return pNum;
+            };
+
             // One-shots every authenticated session needs — fresh login AND
             // token reconnect (the browser stores its lobby session token, so
             // the reconnect path is the common case). Without sending these on
@@ -275,26 +374,15 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                     const bool isSpectator = rosterRequired && team < 0;
                     const std::string& effectiveRole =
                         isSpectator ? kSpectatorRole : reconnectUser->role;
-                    // Register a Spring CPlayer so Lua can
-                    // query player info and receive callins.
-                    // Spectators ARE players in Spring's playerHandler
-                    // (PlayerBase::spectator), just non-commanding ones.
+                    // Bind (or re-bind) this account's stable sim playerNum and
+                    // register/refresh its CPlayer — see bindPlayerNum above.
                     //
                     // This runs BEFORE BuildAuthResponse because the response
-                    // now carries `player_num` — the client cannot derive it
-                    // (it is a per-server allocation, not the account id), and
-                    // every synced key it reads back is scoped by it.
-                    const int pNum = nextPlayerNum++;
-                    {
-                        CPlayer p;
-                        p.name = reconnectUser->username;
-                        p.team = team;
-                        p.active = true;
-                        p.playerNum = pNum;
-                        p.spectator = isSpectator;
-                        playerHandler.AddPlayer(p);
-                        clientPlayerNum[msg.clientId] = pNum;
-                    }
+                    // carries `player_num` — the client cannot derive it (it is
+                    // a per-server allocation, not the account id), and every
+                    // synced key it reads back is scoped by it.
+                    const int pNum = bindPlayerNum(
+                        userId, reconnectUser->username, team, isSpectator);
                     auto resp = Protocol::BuildAuthResponse(
                         SpringWeb::AuthStatus_OK, auth->token()->str(),
                         static_cast<uint32_t>(userId), "",
@@ -423,25 +511,17 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             std::string token = generateToken();
             db.CreateSession(user->id, token);
 
-            // Register a Spring CPlayer so Lua can query
-            // player info and receive callins. Spectators ARE players in
-            // Spring's playerHandler (PlayerBase::spectator), just
-            // non-commanding ones.
+            // Bind (or re-bind) this account's stable sim playerNum and
+            // register/refresh its CPlayer — see bindPlayerNum above. A
+            // password login is a reconnect too whenever the client dropped
+            // its token (a reload with cleared storage), so it goes through
+            // the same account -> playerNum map as the token path.
             //
             // Ordered ahead of BuildAuthResponse for the same reason as the
             // reconnect path above: the response carries `player_num`, and
             // nothing downstream can reconstruct it.
-            const int pNum = nextPlayerNum++;
-            {
-                CPlayer p;
-                p.name = user->username;
-                p.team = team;
-                p.active = true;
-                p.playerNum = pNum;
-                p.spectator = isSpectator;
-                playerHandler.AddPlayer(p);
-                clientPlayerNum[msg.clientId] = pNum;
-            }
+            const int pNum = bindPlayerNum(
+                user->id, user->username, team, isSpectator);
             auto resp = Protocol::BuildAuthResponse(
                 SpringWeb::AuthStatus_OK, token,
                 static_cast<uint32_t>(user->id), "",
