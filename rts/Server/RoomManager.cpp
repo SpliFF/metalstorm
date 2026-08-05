@@ -977,15 +977,30 @@ std::vector<uint32_t> RoomManager::ReapStaleRooms(int64_t maxIdleSeconds) {
 
     // Cutoff time, computed in SQL so we compare against the same clock
     // (strftime('%s','now')) that stamped rooms.updated_at on write.
+    //
+    // Fail CLOSED on a read error. Every branch below treats a missing value
+    // as "stale, reap it", so a faulted handle used to mean the reaper
+    // deleted every eligible room on its first tick and logged "idle >
+    // 1800s" about rooms created seconds earlier — D33's second symptom.
+    // Losing rooms is irreversible; skipping a reap cycle is not.
     int64_t cutoff = 0;
     {
         sqlite3_stmt* s = nullptr;
+        bool got = false;
         if (sqlite3_prepare_v2(db, "SELECT strftime('%s','now')", -1, &s, nullptr)
                 == SQLITE_OK
             && sqlite3_step(s) == SQLITE_ROW) {
             cutoff = sqlite3_column_int64(s, 0) - maxIdleSeconds;
+            got = true;
         }
         if (s) sqlite3_finalize(s);
+        if (!got) {
+            SLOG(SPRING_LOG_ERROR,
+                "ReapStaleRooms: cannot read the clock (%s) — skipping this "
+                "reap cycle rather than reaping every room as stale",
+                sqlite3_errmsg(db));
+            return reaped;
+        }
     }
 
     // Collect candidates first (don't mutate `rooms` mid-iteration).
@@ -998,14 +1013,30 @@ std::vector<uint32_t> RoomManager::ReapStaleRooms(int64_t maxIdleSeconds) {
         // Read the persisted last-touched time. The in-memory GameRoom
         // doesn't carry updated_at, so source it from the DB.
         int64_t updatedAt = 0;
+        bool readOk = false;
         sqlite3_stmt* s = nullptr;
         if (sqlite3_prepare_v2(db, "SELECT updated_at FROM rooms WHERE id=?",
                 -1, &s, nullptr) == SQLITE_OK) {
             sqlite3_bind_int(s, 1, static_cast<int>(id));
-            if (sqlite3_step(s) == SQLITE_ROW)
+            const int rc = sqlite3_step(s);
+            if (rc == SQLITE_ROW) {
                 updatedAt = sqlite3_column_int64(s, 0);
+                readOk = true;
+            } else if (rc == SQLITE_DONE) {
+                readOk = true;  // genuinely no row — never persisted
+            }
         }
         if (s) sqlite3_finalize(s);
+
+        // A failed read is not evidence of staleness — see the fail-closed
+        // note above. Leave the room alone and say so.
+        if (!readOk) {
+            SLOG(SPRING_LOG_ERROR,
+                "ReapStaleRooms: room %u: updated_at read failed (%s) — "
+                "NOT reaping; treating a DB fault as staleness would delete "
+                "live rooms", id, sqlite3_errmsg(db));
+            continue;
+        }
 
         // No row (never persisted) or stale → reap.
         if (updatedAt == 0 || updatedAt < cutoff)

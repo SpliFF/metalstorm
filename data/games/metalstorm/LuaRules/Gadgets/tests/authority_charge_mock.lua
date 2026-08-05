@@ -61,7 +61,21 @@ function M.new()
     _G.Spring = {
         GetModOptions = function() return world.modOptions end,
         GetGaiaTeamID = function() return 999 end,
-        GetTeamList = function() return {} end,          -- GameStart not exercised here
+        -- Teams the test has actually seeded — a team a player sits on, or one
+        -- with any teamRulesParam (i.e. a pool). This used to return {}, which
+        -- made game_authority's teamExists() false for EVERY team and silently
+        -- turned its team-pool guards into unconditional refusals: Award's team
+        -- branch and Transfer's team source could not be tested here at all.
+        -- Mirrors the engine, per the D21 lesson that a mock diverging from the
+        -- engine hides the bug it should catch.
+        GetTeamList = function()
+            local seen, out = {}, {}
+            for _, teamID in pairs(world.players) do seen[teamID] = true end
+            for teamID in pairs(world.teamRulesParams) do seen[teamID] = true end
+            for teamID in pairs(seen) do out[#out + 1] = teamID end
+            table.sort(out)
+            return out
+        end,
         GetPlayerList = function() return {} end,
         GetPlayerInfo = function(playerID, _)
             local teamID = world.players[playerID]

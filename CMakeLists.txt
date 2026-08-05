@@ -5,22 +5,11 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Build stamp for cache-busting: git short hash + configure timestamp.
-# Changes on every cmake configure (rebuild), so asset URLs with ?v=<stamp>
-# naturally bust browser caches on new deployments.
-execute_process(
-    COMMAND git rev-parse --short HEAD
-    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-    OUTPUT_VARIABLE GIT_SHORT_HASH
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET
-)
-if(NOT GIT_SHORT_HASH)
-    set(GIT_SHORT_HASH "unknown")
-endif()
-string(TIMESTAMP BUILD_TIME "%Y%m%d%H%M%S")
-set(SPRING_BUILD_STAMP "${GIT_SHORT_HASH}-${BUILD_TIME}")
-message(STATUS "Build stamp: ${SPRING_BUILD_STAMP}")
+# Build stamp for cache-busting: git short hash + build timestamp. Regenerated
+# at BUILD time (not configure time) by the generate_build_stamp target below
+# — see that target for why: a plain configure-time stamp goes stale on every
+# ordinary incremental `cmake --build`, naming the last configure instead of
+# the code actually in the binary.
 
 # Server build defines.
 # We previously inherited -DHEADLESS, -DDEDICATED, -DDEDICATED_NOSSE from
@@ -36,7 +25,6 @@ add_definitions(
     -DNOT_USING_CREG
     -DAUTHORITATIVE_SERVER
     -DTHREADPOOL
-    -DSPRING_BUILD_STAMP="${SPRING_BUILD_STAMP}"
 )
 
 # PLAN-security-hardening task 2: production-hardened builds. Compiles OUT
@@ -252,6 +240,23 @@ add_custom_command(
 )
 add_custom_target(generate_flatbuffers DEPENDS ${GENERATED_DIR}/protocol_generated.h)
 
+# === Build stamp header (git short hash + build timestamp) ===
+# Runs the git rev-parse + header write at BUILD time via a custom target
+# with no OUTPUT-based dependency tracking, so it re-runs on every
+# `cmake --build` invocation (not just once per configure) and always names
+# the commit actually being linked. GenerateBuildStamp.cmake only rewrites
+# the header when its content changed, so a rebuild within the same second
+# doesn't force a needless recompile of the handful of TUs that include it.
+add_custom_target(generate_build_stamp ALL
+    COMMAND ${CMAKE_COMMAND}
+        -DOUTPUT_HEADER=${GENERATED_DIR}/BuildStamp.h
+        -DSPRING_SOURCE_DIR=${CMAKE_SOURCE_DIR}
+        -P ${CMAKE_SOURCE_DIR}/cmake/GenerateBuildStamp.cmake
+    BYPRODUCTS ${GENERATED_DIR}/BuildStamp.h
+    COMMENT "Regenerating build stamp"
+    VERBATIM
+)
+
 # === Embed rts/lib/lua/json-lua/json.lua into a generated C header ===
 # LuaParser preloads this into every Lua state so `json.encode` /
 # `json.decode` are available as globals. See rts/Lua/LuaParser.cpp.
@@ -370,7 +375,7 @@ add_executable(spring-server
     ${SERVER_SOURCES}
 )
 
-add_dependencies(spring-server generate_flatbuffers)
+add_dependencies(spring-server generate_flatbuffers generate_build_stamp)
 target_include_directories(spring-server PRIVATE
     ${CMAKE_SOURCE_DIR}/rts
     ${CMAKE_SOURCE_DIR}/rts/lib
@@ -426,7 +431,7 @@ add_executable(spring-lobby
     ${LOBBY_LOG_SOURCES}
     rts/System/SafeCStrings.c
 )
-add_dependencies(spring-lobby generate_flatbuffers modelimporter mapconverter)
+add_dependencies(spring-lobby generate_flatbuffers generate_build_stamp modelimporter mapconverter)
 target_include_directories(spring-lobby PRIVATE
     ${CMAKE_SOURCE_DIR}/rts
     ${CMAKE_SOURCE_DIR}/rts/lib
@@ -509,7 +514,7 @@ if(TEST_SOURCES)
     # includes protocol_generated.h to walk EnumValuesClientPayload(), which is
     # how the synced-input classifier is proved exhaustive against the real wire
     # schema instead of against a copy of it (PLAN-replay task 1).
-    add_dependencies(spring-tests generate_flatbuffers)
+    add_dependencies(spring-tests generate_flatbuffers generate_build_stamp)
     target_link_libraries(spring-tests PRIVATE lua smmalloc ZLIB::ZLIB doctest::doctest springlog nlohmann_json::nlohmann_json openssl_crypto nghttp2_static SQLite3::SQLite3 flatbuffers)
     # Absolute path to the source tree so tests can open checked-in fixtures
     # (e.g. the strategos AI plugin) regardless of the ctest working dir.
@@ -595,7 +600,7 @@ add_executable(spring-logserver
     rts/logserver_main.cpp
     rts/Server/NetworkServer.cpp
 )
-add_dependencies(spring-logserver generate_flatbuffers)
+add_dependencies(spring-logserver generate_flatbuffers generate_build_stamp)
 target_include_directories(spring-logserver PRIVATE
     ${CMAKE_SOURCE_DIR}/rts
     ${GENERATED_DIR}

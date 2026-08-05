@@ -78,6 +78,155 @@ describe("validated writes (§6.2)", function()
     end)
 end)
 
+--=============================================================================
+-- AI funding (§6.2 funding row; decided in PLAN-metalstorm-ai.md §5.2).
+-- Regression gate for endtoend D32: a co-commanded Strategos spent its opening
+-- allocation and the panel's FUNDING control could not revive it, because the
+-- one-shot awarded the TEAM pool that an own_pool_only AI may never spend.
+--=============================================================================
+describe("AI funding — the one-shot gift (§5.2, D32)", function()
+    -- Team 10: one human funder (1) and one AI co-commander (8).
+    local function fundedWorld()
+        local world, gadgetObj = newWorld()
+        world.setAIPlayer(8, 10)
+        world.setPlayerPool(1, 100)
+        world.setTeamPool(10, 600)
+        return world, gadgetObj
+    end
+
+    it("credits the AI's OWN pool, not the team pool", function()
+        local world, gadgetObj = fundedWorld()
+        gadgetObj:RecvLuaMsg(Wire.encode('guidance.fund', { amount = 40 }), 1)
+        -- This is the exact live measurement D32 recorded, with the one number
+        -- that was wrong put right: the human still pays 100 → 60, but the 40
+        -- lands on the AI instead of on authority_pool (which stays at 600).
+        assert.are.equal(60,  world.playerPools[1])
+        assert.are.equal(40,  world.playerPools[8])
+        assert.are.equal(600, world.authorityPools[10])
+    end)
+
+    it("is tagged ai_funding so the ledger classes it as a move, not a mint", function()
+        local world, gadgetObj = fundedWorld()
+        gadgetObj:RecvLuaMsg(Wire.encode('guidance.fund', { amount = 40 }), 1)
+        assert.are.equal(1, #world.transferLog)
+        assert.are.equal('ai_funding', world.transferLog[1].reason)
+        -- Never Award: Award mints, and funding must be net-zero.
+        assert.are.equal(0, #world.awardLog)
+    end)
+
+    it("takes the funder's OWN pool only — no team fallback", function()
+        local world, gadgetObj = fundedWorld()
+        world.setPlayerPool(1, 30)               -- team pool has 600 to spare
+        gadgetObj:RecvLuaMsg(Wire.encode('guidance.fund', { amount = 40 }), 1)
+        -- Routing this through ChargeOrder would have let the human draw 10
+        -- from the team pool and hand it to an own_pool_only AI — rejected
+        -- option (c) via the back door. Nothing moves.
+        assert.are.equal(30,  world.playerPools[1])
+        assert.are.equal(0,   world.playerPools[8] or 0)
+        assert.are.equal(600, world.authorityPools[10])
+    end)
+
+    it("refuses when the team has no AI instead of donating to the team pool", function()
+        local world, gadgetObj = newWorld()       -- no AI on team 10
+        world.setPlayerPool(1, 100)
+        world.setTeamPool(10, 600)
+        gadgetObj:RecvLuaMsg(Wire.encode('guidance.fund', { amount = 40 }), 1)
+        assert.are.equal(100, world.playerPools[1])   -- charged nothing
+        assert.are.equal(600, world.authorityPools[10])
+    end)
+
+    it("splits evenly across several AIs on the team", function()
+        local world, gadgetObj = fundedWorld()
+        world.setAIPlayer(9, 10)                  -- a second co-commander
+        gadgetObj:RecvLuaMsg(Wire.encode('guidance.fund', { amount = 40 }), 1)
+        assert.are.equal(60, world.playerPools[1])
+        assert.are.equal(20, world.playerPools[8])
+        assert.are.equal(20, world.playerPools[9])
+    end)
+
+    it("a split the funder can't cover in full pays NOTHING (no half-success)", function()
+        local world, gadgetObj = fundedWorld()
+        world.setAIPlayer(9, 10)
+        world.setPlayerPool(1, 30)                -- covers AI #1's share, not both
+        gadgetObj:RecvLuaMsg(Wire.encode('guidance.fund', { amount = 40 }), 1)
+        assert.are.equal(30, world.playerPools[1])
+        assert.are.equal(0,  world.playerPools[8] or 0)
+        assert.are.equal(0,  world.playerPools[9] or 0)
+    end)
+
+    it("says so in the log when it refuses (never a silent no-op)", function()
+        local world, gadgetObj = fundedWorld()
+        world.setPlayerPool(1, 5)
+        gadgetObj:RecvLuaMsg(Wire.encode('guidance.fund', { amount = 40 }), 1)
+        assert.are.equal(1, #world.echoes)
+        assert.is_truthy(world.echoes[1]:find('insufficient_authority', 1, true))
+    end)
+
+    it("ignores AI slots on other teams", function()
+        local world, gadgetObj = fundedWorld()
+        world.setAIPlayer(9, 20)                  -- someone else's AI
+        gadgetObj:RecvLuaMsg(Wire.encode('guidance.fund', { amount = 40 }), 1)
+        assert.are.equal(40, world.playerPools[8])
+        assert.are.equal(0,  world.playerPools[9] or 0)
+    end)
+end)
+
+describe("AI funding — the standing allowance drip (§5.2 option d)", function()
+    local function cappedWorld(cap)
+        local world, gadgetObj = newWorld()
+        world.setAIPlayer(8, 10)
+        world.setTeamPool(10, 600)
+        gadgetObj:RecvLuaMsg(Wire.encode('guidance.fund', { rateCap = cap }), 1)
+        return world, gadgetObj
+    end
+
+    it("moves rateCap from the team pool to the AI once a game-minute", function()
+        local world, gadgetObj = cappedWorld(50)
+        gadgetObj:GameFrame(1800)
+        assert.are.equal(50,  world.playerPools[8])
+        assert.are.equal(550, world.authorityPools[10])
+        gadgetObj:GameFrame(3600)
+        assert.are.equal(100, world.playerPools[8])
+        assert.are.equal(500, world.authorityPools[10])
+    end)
+
+    it("does nothing on frames that aren't the period boundary", function()
+        local world, gadgetObj = cappedWorld(50)
+        gadgetObj:GameFrame(1799)
+        gadgetObj:GameFrame(1801)
+        assert.are.equal(0,   world.playerPools[8] or 0)
+        assert.are.equal(600, world.authorityPools[10])
+    end)
+
+    it("is opt-in: no cap set drips nothing", function()
+        local world, gadgetObj = newWorld()
+        world.setAIPlayer(8, 10)
+        world.setTeamPool(10, 600)
+        gadgetObj:GameFrame(1800)
+        assert.are.equal(0,   world.playerPools[8] or 0)
+        assert.are.equal(600, world.authorityPools[10])
+    end)
+
+    it("pays what the team pool has when it can't cover the full cap", function()
+        local world, gadgetObj = cappedWorld(50)
+        world.setTeamPool(10, 20)
+        gadgetObj:GameFrame(1800)
+        -- Partial, deliberately: an allowance that silently stopped when the
+        -- team got poor would starve the AI exactly when it matters most.
+        assert.are.equal(20, world.playerPools[8])
+        assert.are.equal(0,  world.authorityPools[10])
+    end)
+
+    it("splits the allowance across several AIs and tags it ai_allowance", function()
+        local world, gadgetObj = cappedWorld(50)
+        world.setAIPlayer(9, 10)
+        gadgetObj:GameFrame(1800)
+        assert.are.equal(25, world.playerPools[8])
+        assert.are.equal(25, world.playerPools[9])
+        assert.are.equal('ai_allowance', world.transferLog[#world.transferLog].reason)
+    end)
+end)
+
 describe("change feed (§6.2 'who set what')", function()
     it("records field/player/frame for each write", function()
         local world, gadgetObj = newWorld()

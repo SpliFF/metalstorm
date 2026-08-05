@@ -66,6 +66,11 @@ local CHANGE_RING_SIZE  = 8      -- mirrors authority/parley event rings
 -- SAME lock_keys the AI reads (picture.lua assetLocks).
 local TOUCH_LOCK_TTL_FRAMES = 5400   -- 3 min @ 30 Hz (= INTEL_DECAY_FRAMES)
 
+-- Funding rate cap = authority per game-MINUTE (PLAN-metalstorm-ai.md §5.2).
+-- Same period game_authority.lua's team stipend uses, and the unit the
+-- planner's governor clamps in.
+local ALLOWANCE_PERIOD_FRAMES = 1800  -- 1 min @ GAME_SPEED 30
+
 -- Intent report (§6.3 "what my AI is doing"): a short, rolling window of the
 -- AI's most-recent charged directives, published for ai-command-panel.js. Each
 -- entry expires so the panel reflects CURRENT intent, not a growing history.
@@ -295,25 +300,74 @@ local function setDelegate(teamID, playerID, objectiveId, delegated)
     return true
 end
 
---- Funding (§6.2): a rate cap is pure guidance state (consumed directly by
---- the planner's governor, ai/strategos/planner.lua governor()). A one-shot
---- `amount` performs a REAL transfer today, but — flagged, not silently
---- faked — it can only land in the TEAM pool: this backbone has no distinct
---- "AI player" identity/pool anywhere yet (no gadget reserves an AI
---- playerID; ai/strategos/main.lua's co-commander role reads
---- picture.economy.ownPool but nothing publishes a per-AI pool). Until an
---- AI player slot exists, "fund the AI" and "donate to the team pool" are
---- the same operation; this is called out here rather than pretended away.
+--- The team's AI players — the funding recipients. Both funding paths split
+--- evenly across them because guidance is TEAM-scoped and the panel has no
+--- per-AI selector (PLAN-metalstorm-ai.md §5.2; a selector is a panel change,
+--- not a rule change). GG.Teams.AIPlayers filters to PRESENT AI players, so a
+--- departed slot never absorbs a share.
+local function fundingRecipients(teamID)
+    if not (GG.Teams and GG.Teams.AIPlayers) then return {} end
+    return GG.Teams.AIPlayers(teamID) or {}
+end
+
+--- Funding (§6.2, decided in PLAN-metalstorm-ai.md §5.2 — endtoend D32).
+---
+--- Two deliberately different transfers, both net-zero moves via
+--- GG.Authority.Transfer:
+---   * one-shot `amount` — a PERSONAL GIFT. Debited from the funder's OWN pool
+---     only and credited to the AI's own pool. No team fallback, following
+---     GG.Authority.Stake's precedent ("a personal gift, not an order"); routing
+---     this through ChargeOrder instead would let a human draw the TEAM pool via
+---     the ordinary fallback and hand it to an own-pool-only AI, which is the
+---     shared-savings drain §5's invariant exists to forbid, just with extra
+---     clicks.
+---   * `rateCap` — a STANDING TEAM ALLOWANCE, dripped per game-minute from the
+---     team pool by the GameFrame sweep below. It stays guidance state too: the
+---     planner's governor (ai/strategos/planner.lua governor()) clamps its
+---     spend to the same number, so the cap means one thing in both consumers.
+---
+--- WAS (and this is the whole of D32): the one-shot called
+--- `Award({ team = teamID }, ...)` — it charged the human and paid the TEAM
+--- pool, which an `own_pool_only` co-commander may not spend, so the player's
+--- only lever took their authority and delivered nothing. The comment here
+--- justified that with "no gadget reserves an AI playerID", which was true when
+--- written and was made false by AI3: every AI slot is a real virtual player
+--- with a live `authority_player_<id>` pool. Measured live before the fix
+--- (fire 11): human 100 → 60, `authority_pool` 600 → 640, `authority_player_0`
+--- unmoved at 0.0.
+---
+--- A team with NO AI now REFUSES the funding instead of silently converting it
+--- into a team donation.
 local function setFunding(teamID, playerID, amount, rateCap)
     if not requireMember(teamID, playerID) then return false end
     local s = storeFor(teamID)
-    if rateCap ~= nil then s.funding.rateCap = rateCap end
-    if amount and amount > 0 then
-        if not GG.Authority.ChargeOrder(nil, teamID, playerID, amount) then
-            return false, 'insufficient_authority'
-        end
-        GG.Authority.Award({ team = teamID }, amount, 'ai_funding')
+    -- Refusals are ECHOED, not just returned. RecvLuaMsg discards handler return
+    -- values (there is no refusal channel back to the widget yet), so a silent
+    -- `return false` here would look exactly like the D32 bug it replaces:
+    -- press Send, nothing happens, nothing to grep. Same trap D28 hit twice.
+    local function refuse(why)
+        Spring.Echo('[AIGuidance] funding refused (' .. why .. '): team ' ..
+                    tostring(teamID) .. ', player ' .. tostring(playerID) ..
+                    ', amount ' .. tostring(amount))
+        return false, why
     end
+    if amount and amount > 0 then
+        local ais = fundingRecipients(teamID)
+        if #ais == 0 then return refuse('no_ai_on_team') end
+        -- All-or-nothing. Every share leaves the SAME pool, so checking the
+        -- funder can cover the total up front is what stops a multi-AI split
+        -- from half-succeeding (paying AI #1, refusing AI #2, and reporting
+        -- failure while the money is gone).
+        local src = { player = playerID }
+        if (GG.Authority.PoolOf(src) or 0) < amount then
+            return refuse('insufficient_authority')
+        end
+        local share = amount / #ais
+        for _, aiID in ipairs(ais) do
+            GG.Authority.Transfer(src, { player = aiID }, share, 'ai_funding')
+        end
+    end
+    if rateCap ~= nil then s.funding.rateCap = rateCap end
     recordChange(teamID, 'funding', rateCap or amount or 0, playerID)
     publish(teamID)
     return true
@@ -365,7 +419,48 @@ function gadget:RecvLuaMsg(msg, playerID)
     end
 end
 
+--- Standing allowance drip (§6.2 rate cap, PLAN-metalstorm-ai.md §5.2). Once a
+--- game-minute, move up to `rateCap` from the TEAM pool into the team's AI
+--- pools, split evenly. This is what keeps a co-commander playing: it is
+--- `own_pool_only`, so every source of team income — stipend, objective payouts
+--- — is money it may never spend, and without a drip it goes inert the moment
+--- its one-off join grant is gone (endtoend D32, measured: both AIs at 0.0 from
+--- ~frame 4700 while the team pool climbed 500 → 1285).
+---
+--- This is NOT the team fallback §5 forbids, and the difference is the whole
+--- point: the fallback is silent, unbounded and automatic, whereas this is a
+--- number a human typed into the panel, capped per minute, attributed in the
+--- change feed and tagged `ai_allowance` in the ledger. Opt-in — no cap set, or
+--- a cap of 0, drips nothing, so this changes nothing for a team that never
+--- touches the control.
+---
+--- Partial drips are fine (unlike the one-shot's all-or-nothing gift): a team
+--- pool that can only cover part of the allowance pays what it has, because the
+--- alternative is an allowance that silently stops when the team gets poor,
+--- which is exactly when the AI most needs to know it is on rations.
+local function dripAllowances(frame)
+    if frame % ALLOWANCE_PERIOD_FRAMES ~= 0 then return end
+    if not (GG.Authority and GG.Authority.Transfer) then return end
+    for teamID, s in pairs(stores) do
+        local cap = tonumber(s.funding and s.funding.rateCap) or 0
+        if cap > 0 then
+            local ais = fundingRecipients(teamID)
+            if #ais > 0 then
+                local src = { team = teamID }
+                local available = math.min(cap, GG.Authority.PoolOf(src) or 0)
+                if available > 0 then
+                    local share = available / #ais
+                    for _, aiID in ipairs(ais) do
+                        GG.Authority.Transfer(src, { player = aiID }, share, 'ai_allowance')
+                    end
+                end
+            end
+        end
+    end
+end
+
 function gadget:GameFrame(frame)
+    dripAllowances(frame)
     for teamID, s in pairs(stores) do
         local swept = false
         for goalId, expiresAt in pairs(s.veto) do

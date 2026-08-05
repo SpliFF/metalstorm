@@ -133,6 +133,35 @@ describe("budget governor", function()
         assert.are.equal(0, countType(out.directives, 'directive'))
         assert.is_true(countType(out.directives, 'posture') >= 1)
     end)
+
+    -- The guidance funding rate cap (interaction §6.2) is quoted per game-MINUTE
+    -- — that is what the panel's control means and what game_ai_guidance.lua's
+    -- allowance drip actually pays out — while this budget is per strategic
+    -- TICK. PLAN-metalstorm-ai.md §5.2.
+    it("prorates the funding rate cap from per-minute to per-tick", function()
+        local p = economyFixture(1000)
+        p.economy.fundingRateCap = 120            -- 120/min
+        local out = plan(p)
+        -- 150-frame tick = 1/12 of a minute, so 10 per tick. Unscaled (the bug)
+        -- this read 120 — twelve times the income the cap authorises, which is
+        -- why the cap barely bound anything.
+        assert.are.equal(10, out.budget)
+    end)
+
+    it("gives a coarser-LOD AI a proportionally larger slice of the same cap", function()
+        local p = economyFixture(1000)
+        p.economy.fundingRateCap = 120
+        p._role.tickFrames = 600                  -- thinking 4× less often
+        local out = plan(p)
+        assert.are.equal(40, out.budget)          -- same 120/min, four ticks' worth
+    end)
+
+    it("the cap only ever clamps down — a rich cap doesn't raise the budget", function()
+        local p = economyFixture(100)             -- pool 100, reserve 25 → budget 75
+        p.economy.fundingRateCap = 100000
+        local out = plan(p)
+        assert.are.equal(75, out.budget)
+    end)
 end)
 
 --=============================================================================

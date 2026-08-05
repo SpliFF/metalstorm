@@ -16,6 +16,11 @@
 
 local Planner = {}
 
+-- Guidance's funding rate cap is quoted per game-minute; the governor budgets
+-- per strategic tick. GAME_SPEED 30 — the same 1800 game_authority.lua's
+-- stipend and game_ai_guidance.lua's allowance drip use.
+local FRAMES_PER_MINUTE = 1800
+
 --=============================================================================
 -- 1. Force packages.  An org-group is a package; unassigned squads are
 -- grouped into proposed packages. STUB: one package per populated ledger
@@ -56,7 +61,19 @@ local function governor(picture, config, role)
     local reserve = math.ceil(pool * config.RESERVE_FRACTION)   -- keep 25% back
     local budget  = math.max(0, pool - reserve)                 -- spendable/tick
     -- Guidance funding rate cap (interaction §6.2) clamps the governor spend.
-    if econ.fundingRateCap then budget = math.min(budget, econ.fundingRateCap) end
+    -- The cap is authority per game-MINUTE — that is what the panel's control
+    -- means and what game_ai_guidance.lua's allowance drip pays out — but this
+    -- budget is per strategic TICK, so it must be prorated. Left unscaled (as
+    -- it was) a cap of 40 permitted 40 per tick = ~480/min at the LOD-0 cadence
+    -- of 150 frames, twelve times the income it authorises, so the "cap" barely
+    -- bound anything. role.tickFrames is the role's live cadence, so a
+    -- coarser-LOD AI thinking less often correctly gets a proportionally larger
+    -- per-tick slice of the same per-minute allowance.
+    if econ.fundingRateCap then
+        local tickFrames = role.tickFrames or config.STRATEGIC_TICK_FRAMES or 150
+        local perTick = econ.fundingRateCap * (tickFrames / FRAMES_PER_MINUTE)
+        budget = math.min(budget, perTick)
+    end
     return {
         pool         = pool,
         reserve      = reserve,

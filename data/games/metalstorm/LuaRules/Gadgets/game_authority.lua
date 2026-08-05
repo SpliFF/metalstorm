@@ -379,6 +379,66 @@ function GG.Authority.Award(target, amount, reason)
     end
 end
 
+--- Move authority between two existing pools. `src` and `dst` are each
+--- `{ player = playerID }` or `{ team = teamID }`. Strictly net-zero: nothing
+--- is minted, nothing is destroyed, and the debit NEVER falls back to another
+--- pool — if `src` can't cover `amount` in full the whole transfer is refused
+--- (returns false, no partial move). Ledger class is therefore `move`, tagged
+--- via tagCharge like every other pool-to-pool flow (stake_escrow,
+--- leaver_merge, player_fallback).
+---
+--- This is the primitive an AI-funding control needs and Award/ChargeOrder
+--- could not express (PLAN-metalstorm-ai.md §5.2 / endtoend D32). Award MINTS,
+--- so "fund the AI" written as Award would inflate the economy by the funded
+--- amount; ChargeOrder debits with the ordinary TEAM FALLBACK, so a human
+--- funding an AI through it could quietly move team savings into an
+--- own-pool-only AI's pocket — the exact drain §5's invariant forbids. Transfer
+--- does neither: one named pool loses exactly what another gains.
+---
+--- The destination side emits an `award` ring event so the client authority bar
+--- surfaces incoming funding the same way it surfaces a join grant; the source
+--- side does not (a routine debit, and the ring is only 8 slots).
+function GG.Authority.Transfer(src, dst, amount, reason)
+    if not src or not dst or not amount or amount <= 0 then return false end
+
+    local balance = GG.Authority.PoolOf
+    local function credit(ref, delta)
+        if ref.player then
+            setPlayerPool(ref.player, getPlayerPool(ref.player) + delta)
+            return playerTeam(ref.player)
+        end
+        setTeamPool(ref.team, getTeamPool(ref.team) + delta)
+        return ref.team
+    end
+
+    local have = balance(src)
+    if have == nil or have < amount then return false end
+    if balance(dst) == nil then return false end   -- unknown destination team
+
+    credit(src, -amount)
+    local dstTeam = credit(dst, amount)
+    emitEvent('award', amount, reason, dst.player, dstTeam)
+    if dst.player then fireAward(dst.player, dstTeam, amount) end
+    -- Tagged once, against the team the authority ends up on.
+    Ledger.tagCharge(ledgerState, dstTeam, amount, reason)
+    return true
+end
+
+--- Current balance of a pool, `{ player = id }` or `{ team = id }`. nil for an
+--- unknown team (never 0 — callers must be able to tell "empty" from "not a
+--- team", the distinction Award's teamExists guard exists for). Read-only
+--- companion to Transfer: a caller splitting one debit across several
+--- destinations needs to know it can cover the total BEFORE moving any of it.
+function GG.Authority.PoolOf(ref)
+    if not ref then return nil end
+    if ref.player then return getPlayerPool(ref.player) end
+    if ref.team then
+        if not teamExists(ref.team) then return nil end
+        return getTeamPool(ref.team)
+    end
+    return nil
+end
+
 -- Staked-bounty escrow (§2, §6): player→player/objective delegation.
 local escrowState = Escrow.newState()
 

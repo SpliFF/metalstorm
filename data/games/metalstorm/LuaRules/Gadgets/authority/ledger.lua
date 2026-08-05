@@ -41,6 +41,13 @@ local REASON_CLASS = {
     stake_escrow     = 'move',
     leaver_merge     = 'move',
     player_fallback  = 'move',
+    -- AI funding (PLAN-metalstorm-ai.md §5.2): a human's one-shot gift into a
+    -- co-commander's own pool, and the standing per-minute allowance drawn from
+    -- the team pool. Both are GG.Authority.Transfer — pool-to-pool, net zero,
+    -- nothing minted — so both are `move`, NOT `mint`. `ai_funding` predates
+    -- this table and was firing the unmapped warn on every funding attempt.
+    ai_funding       = 'move',
+    ai_allowance     = 'move',
 }
 
 -- endtoend D13. game_objectives.lua's distributeAward does NOT send
