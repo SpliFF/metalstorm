@@ -59,7 +59,7 @@ print(f"engine geometry : {'OK (configVersion %s)' % ver if ok_geo and (ver or 0
 if not ok_geo or (ver or 0) < 8:
     fails.append('SPRINGRTS_geometry')
 
-allowed = {'walk', 'idle', 'death'}
+allowed = {'walk', 'idle', 'death', 'open', 'unload'}
 bad = [a.get('name', '<unnamed>') for a in doc.get('animations', [])
        if a.get('name') not in allowed]
 print(f"clips           : {'OK' if not bad else 'BAD ' + str(bad)}")
