@@ -60,6 +60,36 @@ export function setPerfProbe(term = 'off', repeat = 0) {
 
 export function getPerfProbe() { return { term: PROBE_TERMS[_pt], repeat: _pn }; }
 
+// --- M13 fix switches (PLAN-perf M13) --------------------------------------
+//
+// Each shipped M13 fix keeps its pre-fix code path behind a switch so the win
+// can be A/B'd inside one session at the L-battle and flipped back to prove it
+// is the lever and not drift (the exit gate every fix milestone in this track
+// has had to meet). They ship ON; `off` is the legacy arm and is measurement
+// only. Set via the SquadManager's `perfFix` (see squad-manager.js).
+const _fix = {
+  /** Compute `trailPointAhead` only for the ~5 % of members whose steering
+   *  actually consults it (COLUMN / recovering / mid-turn) plus naval, which
+   *  takes it as a parameter. Off = compute it for 100 % of members. */
+  trailGuard: true,
+  /** Project slots through `passability.nearestPassableInto` into a shared
+   *  scratch object. Off = the allocating `nearestPassable`. */
+  passScratch: true,
+};
+
+export function setPerfFix(name, on) {
+  if (name === undefined) { for (const k of Object.keys(_fix)) _fix[k] = true; return { ..._fix }; }
+  if (!(name in _fix)) throw new Error(`unknown perf fix: ${name} (have ${Object.keys(_fix).join(', ')})`);
+  _fix[name] = !!on;
+  return { ..._fix };
+}
+
+export function getPerfFixes() { return { ..._fix }; }
+
+// Scratch for the slot projection (see _fix.passScratch). Read within the
+// member loop before the next projection overwrites it, exactly like _slotW.
+const _proj = { x: 0, z: 0 };
+
 export class Squad {
   /**
    * @param {number} id             sim unit id (authoritative)
@@ -434,6 +464,10 @@ export class Squad {
       x: victim.x, y: victim.y, z: victim.z,
       dirX: dirX / len, dirZ: dirZ / len,
     });
+    // The instance is gone; drop the handle with it. Dead members are skipped
+    // by every loop that would use it, but the backend now RECYCLES handles
+    // (PLAN-perf M13 fix 2), so a retained one would alias a later member.
+    victim.handle = -1;
     const handle = this.backend.spawnWreck(victim.x, victim.y, victim.z, victim.headingY, victim.visual);
     // Manager-level wreck pool (§9): TTL/fade/global cap live there, keyed
     // off the handle spawnWreck returns.
@@ -668,6 +702,10 @@ export class Squad {
     // the profile-derived one; the vocabularies are identical by design —
     // see movement-profiles.js's header.
     const moveClass = this.def.moveClass ?? this.profile.moveClass;
+    // Loop-invariant: the steerer is a property of the squad's profile. The
+    // naval steerer takes the trail point as a parameter, so it is the one
+    // steerer that still needs it computed unconditionally (M13 fix 1).
+    const navalSteerer = this.profile.steerer === 'naval';
 
     for (const m of this.members) {
       if (!m.alive) continue;
@@ -696,8 +734,14 @@ export class Squad {
       // COLUMN mode, mid-turn, or while recovering from being stuck.
       let target = _slotW;
       if (passability && moveClass) {
-        if (_pt === 2) for (let r = _pn; r > 0; r--) passability.nearestPassable(_slotW.x, _slotW.z, moveClass, this.cfg.slotProjectionCap);
-        target = passability.nearestPassable(_slotW.x, _slotW.z, moveClass, this.cfg.slotProjectionCap);
+        const cap = this.cfg.slotProjectionCap;
+        if (_pt === 2) for (let r = _pn; r > 0; r--) passability.nearestPassable(_slotW.x, _slotW.z, moveClass, cap);
+        // M13 fix 3: project into shared scratch. The returned point never
+        // escapes this iteration (it is consumed by _isConstrained, the
+        // steerer and _trackStuck), so it does not need its own object.
+        target = _fix.passScratch && passability.nearestPassableInto
+          ? passability.nearestPassableInto(_slotW.x, _slotW.z, moveClass, cap, _proj)
+          : passability.nearestPassable(_slotW.x, _slotW.z, moveClass, cap);
       }
       if (_pt === 3 && passability && moveClass) {
         for (let r = _pn; r > 0; r--) this._isConstrained(m, _slotW, target, passability, moveClass);
@@ -713,12 +757,21 @@ export class Squad {
       this._updateMode(m, constrained);
 
       if (_pt === 5) for (let r = _pn; r > 0; r--) this.trailPointAhead(m);
-      const trailPt = this.trailPointAhead(m);
-      if (trailPt && (m.mode === 'COLUMN' || m.recoveryLevel >= 1 || inTurn)) {
+      // M13 fix 1: trailPointAhead is an O(trail length) scan (trailMaxPoints
+      // 64, mean trail 34-36 in a settled fight) that ran for every member and
+      // was consulted by ~5 % of them (M12 measured 360 of 7 204 in COLUMN).
+      // Hoist it behind the same condition that already gated its USE — a pure
+      // deletion of wasted work, with the naval steerer excepted because it
+      // takes the point as a parameter rather than through `target`.
+      const wantsTrail = m.mode === 'COLUMN' || m.recoveryLevel >= 1 || inTurn;
+      const trailPt = (!_fix.trailGuard || wantsTrail || navalSteerer)
+        ? this.trailPointAhead(m)
+        : null;
+      if (trailPt && wantsTrail) {
         target = trailPt;
       }
 
-      if (this.profile.steerer === 'naval') {
+      if (navalSteerer) {
         this._navalStep(m, dt, target, trailPt, maxSpeed, softLeashDist, leash, neighbourQuery);
       } else {
         // Big-unit threading (flow §4) lives inside the ground steerer —

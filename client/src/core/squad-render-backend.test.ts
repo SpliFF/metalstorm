@@ -1,8 +1,10 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import {
     NullEngine, Scene, FreeCamera, Vector3, Color3, Matrix, Mesh, MeshBuilder,
 } from '@babylonjs/core';
-import { SquadRenderBackend, FADE_FRAC, type MemberModel } from './squad-render-backend.js';
+import {
+    SquadRenderBackend, FADE_FRAC, setLegacyBackendPlumbing, type MemberModel,
+} from './squad-render-backend.js';
 import type { ImpostorAtlas } from './impostor-renderer.js';
 
 // Members of defs with an impostor sprite atlas draw as camera-facing billboard
@@ -569,6 +571,104 @@ describe('SquadRenderBackend impostor sprite members', () => {
             expect(perPiece).toHaveLength(3);
             // A body that dissolved piece-by-piece would read as a broken model.
             for (const f of perPiece!) expect(f).toBeCloseTo(fades.model!);
+        });
+    });
+
+    // --- M13 fix 2: the de-plumbed updateMember preamble --------------------
+    //
+    // updateMember runs once per rendered member per frame (7 200/frame at the
+    // L-battle) and M12 attributed 14.2 % of the whole `entity` phase to it,
+    // most of it in the preamble rather than the work. M13 replaced the handle
+    // Map with a dense recycled array, the per-call `fallback` closure with a
+    // flag, and the `${defId}:${team}` sprite-pool key with a cached pool. The
+    // pre-fix path stays reachable so the win can be A/B'd in-session — so both
+    // arms have to agree, and the recycling must not let a stale handle alias a
+    // live member.
+    describe('M13 de-plumbed member lookup', () => {
+        afterEach(() => setLegacyBackendPlumbing(false));
+
+        it('ships with the legacy arm off', () => {
+            expect(setLegacyBackendPlumbing(false)).toBe(false);
+        });
+
+        it('recycles a released handle instead of growing the table forever', () => {
+            const { backend } = makeBackend(new Set([7]));
+            backend.setSquadTeam(1, 0);
+            const first = backend.createMember(1, 0, { defId: 7, variant: 0 });
+            backend.releaseMember(first);
+            const second = backend.createMember(1, 1, { defId: 7, variant: 0 });
+            // An icon<->full LOD flip releases and recreates every member of a
+            // squad, so a monotonic counter would grow without bound.
+            expect(second).toBe(first);
+        });
+
+        it('a recycled handle addresses the NEW member, and the old one is gone', () => {
+            const { backend } = makeBackend(new Set([7]));
+            backend.setSquadTeam(1, 0);
+            const h = backend.createMember(1, 0, { defId: 7, variant: 0 });
+            backend.updateMember(h, 5, 0, 5, 0, 0);
+            backend.releaseMember(h);
+            // Stale writes through the released handle must not resurrect it.
+            backend.updateMember(h, 9, 0, 9, 0, 0);
+            expect(backend.getMemberFades(h)).toEqual({});
+
+            const reused = backend.createMember(1, 1, { defId: 7, variant: 0 });
+            expect(reused).toBe(h);
+            backend.updateMember(reused, 11, 0, 11, 0, 0);
+            expect(backend.getMemberFades(reused).sprite).toBe(1);
+        });
+
+        it('member and wreck handles stay in separate tables even when they collide', () => {
+            const { backend } = makeBackend(new Set([7]));
+            backend.setSquadTeam(1, 0);
+            const member = backend.createMember(1, 0, { defId: 7, variant: 0 });
+            const wreck = backend.spawnWreck(3, 0, 3, 0, {});
+            backend.updateMember(member, 5, 0, 5, 0, 0);
+            // Despawning a wreck whose id happens to equal a live member's must
+            // not touch the member.
+            backend.despawnWreck(wreck);
+            if (wreck === member) backend.despawnWreck(member);
+            expect(backend.getMemberFades(member).sprite).toBe(1);
+        });
+
+        it('places a member identically with the legacy arm on and off', () => {
+            const models = new Map([[7, bodyFactory(7)]]);
+            const read = (legacy: boolean) => {
+                setLegacyBackendPlumbing(legacy);
+                const { backend, scene } = makeBackend(
+                    new Set([7]), { models, impostorDist: 900 });
+                backend.setSquadTeam(1, 0);
+                const near = backend.createMember(1, 0, { defId: 7, variant: 0 });
+                const far = backend.createMember(1, 1, { defId: 7, variant: 0 });
+                backend.updateMember(near, 100, 50, 10, 0.3, 0.5);   // model tier
+                backend.updateMember(far, 100, 50, 2000, 0.3, 0.5);  // sprite tier
+                backend.flush();
+                const sprite = findMesh(scene, 'squadSprite_d7_t0')!;
+                return {
+                    nearFades: backend.getMemberFades(near),
+                    farFades: backend.getMemberFades(far),
+                    spriteMatrices: sprite.thinInstanceGetWorldMatrices()
+                        .map((m) => Array.from(m.toArray())),
+                };
+            };
+            expect(read(false)).toEqual(read(true));
+        });
+
+        it('caches the sprite pool per entry without changing which pool it is', () => {
+            const { backend, scene } = makeBackend(new Set([7]));
+            backend.setSquadTeam(1, 0);
+            backend.setSquadTeam(2, 3);
+            const a = backend.createMember(1, 0, { defId: 7, variant: 0 });
+            const b = backend.createMember(2, 0, { defId: 7, variant: 0 });
+            backend.updateMember(a, 5, 0, 5, 0, 0);
+            backend.updateMember(b, 6, 0, 6, 0, 0);
+            backend.flush();
+            // Different teams must still land in different pools — a cache keyed
+            // on the wrong thing would collapse them into one.
+            expect(findMesh(scene, 'squadSprite_d7_t0')).toBeDefined();
+            expect(findMesh(scene, 'squadSprite_d7_t3')).toBeDefined();
+            expect(backend.getMemberFades(a).sprite).toBe(1);
+            expect(backend.getMemberFades(b).sprite).toBe(1);
         });
     });
 

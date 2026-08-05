@@ -51,7 +51,7 @@ import { LosBitmapStore, type LosBitmap } from './los-bitmap.js';
 // done in main.ts) so unit `.ktx2` textures transcode here.
 import './ktx2-config.js';
 import { EntityRenderer, setModelMaterialPort } from './entity-renderer.js';
-import { SquadRenderBackend } from './squad-render-backend.js';
+import { SquadRenderBackend, setLegacyBackendPlumbing } from './squad-render-backend.js';
 import { ImpostorRenderer, LodTier } from './impostor-renderer.js';
 
 /**
@@ -2225,6 +2225,13 @@ export function gpInit(msg: GpInitToWorker): void {
          *  'off' (no fit at all). Returns the applied mode, or null pre-map. */
         shadowDepthBounds: (mode: ShadowDepthBoundsMode): string | null =>
             gpCtx.sceneLighting?.shadowDepthBounds.setMode(mode) ?? null,
+        /** M13 fix 2: A/B the squad render backend's per-member preamble
+         *  (handle Map lookup, `fallback` closure, `${defId}:${team}` sprite-
+         *  pool key) without a rebuild. `squadBackendLegacy(true)` restores the
+         *  pre-M13 path; `false` is the shipped default. The squad-side M13
+         *  switches live on `__squadSystem.perfFix(name, on)`. */
+        squadBackendLegacy: (on: boolean): boolean =>
+            setLegacyBackendPlumbing(on),
     };
     // PLAN-maps.md M6: map-feature LOD live-tuning + attribution, e.g.
     //   window.__gp('__featureLod.get()')                        // tier counts

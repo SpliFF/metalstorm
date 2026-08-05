@@ -145,6 +145,24 @@ interface MemberEntry {
     model?: MemberSlot[];
     sprite?: MemberSlot;
     capsule?: MemberSlot;
+    /** Resolved sprite pool for (defId, team), cached on first use. Both are
+     *  fixed for an entry's lifetime, so the `${defId}:${team}` template-literal
+     *  key + Map lookup that resolved it was a per-member-per-frame string
+     *  allocation on the hottest path in the client frame (PLAN-perf M13). */
+    spritePool?: InstancePool;
+}
+
+/** M13 fix 2's legacy arm. ON restores the pre-M13 `updateMember` preamble —
+ *  the handle Map lookup, the per-call `fallback` closure and the
+ *  `${defId}:${team}` sprite-pool key — so the win can be A/B'd inside one
+ *  session at the L-battle and flipped back to prove it is the lever and not
+ *  drift. OFF in every shipping frame; measurement only. Reachable from the
+ *  worker as `__perfToggles.squadBackendLegacy(on)`. */
+let LEGACY_BACKEND_PLUMBING = false;
+
+export function setLegacyBackendPlumbing(on: boolean): boolean {
+    LEGACY_BACKEND_PLUMBING = !!on;
+    return LEGACY_BACKEND_PLUMBING;
 }
 
 const MEMBER_HEIGHT = 9;      // elmos — proxy capsule height
@@ -197,7 +215,26 @@ export class SquadRenderBackend {
 
     /** handle → member entry (carries LOD state for per-frame pool migration).
      *  Handles are dense positive ints; -1 means "no instance" (the logic
-     *  treats -1 as released, per render-backend.js). */
+     *  treats -1 as released, per render-backend.js).
+     *
+     *  M13 fix 2: this is a dense ARRAY, not a Map. `updateMember` runs once
+     *  per rendered member per frame (7 200/frame at the L-battle) and M12
+     *  attributed 14.2 % of the whole `entity` phase to it — most of that in
+     *  its preamble, not its work. Handles are ours to hand out, so they are
+     *  array indices. Freed handles are recycled through `freeHandles`, so the
+     *  array is sized by PEAK live members rather than by total ever created —
+     *  which matters because an icon↔full LOD flip releases and recreates
+     *  every member of a squad. Index 0 is never handed out, so a falsy handle
+     *  and -1 both read as "no entry".
+     *
+     *  A member handle and a wreck handle may now collide numerically; they
+     *  never cross paths, because each kind is looked up only in its own table
+     *  by a caller that knows which it holds. */
+    private memberEntries: (MemberEntry | undefined)[] = [undefined];
+    private freeHandles: number[] = [];
+    /** Kept in step with `memberEntries` so the M13 A/B's legacy arm can read
+     *  the Map form in-session. Written only on create/release, never per
+     *  frame — see `LEGACY_BACKEND_PLUMBING`. */
     private memberByHandle = new Map<number, MemberEntry>();
     private wreckByHandle = new Map<number, MemberSlot>();
     private nextHandle = 1;
@@ -241,13 +278,21 @@ export class SquadRenderBackend {
         const entry: MemberEntry = { defId: v.defId, team, atlas, impostorDist };
         // Slots are allocated lazily by the first updateMember once the member's
         // world position (hence its LOD tier + fade) is known.
-        const handle = this.nextHandle++;
+        const handle = this.freeHandles.pop() ?? this.memberEntries.length;
+        this.memberEntries[handle] = entry;
         this.memberByHandle.set(handle, entry);
         return handle;
     }
 
+    /** handle → entry, honouring M13 fix 2's legacy arm. */
+    private entryOf(handle: number): MemberEntry | undefined {
+        return LEGACY_BACKEND_PLUMBING
+            ? this.memberByHandle.get(handle)
+            : this.memberEntries[handle];
+    }
+
     updateMember(handle: number, x: number, y: number, z: number, headingY: number, gait: number): void {
-        const entry = this.memberByHandle.get(handle);
+        const entry = this.entryOf(handle);
         if (!entry) return;
         // Gait 0..1 → a subtle vertical bob so a moving squad reads as walking.
         const bob = Math.sin(gait * Math.PI * 2) * 0.4;
@@ -262,10 +307,17 @@ export class SquadRenderBackend {
         let modelFade: number | undefined;
         let spriteFade: number | undefined;
         let model: MemberModel | undefined;
-        const fallback = () => { if (entry.atlas) spriteFade = 1; };
+        // "Fall back to the sprite tier (if this def has one)". M13 fix 2: this
+        // was a closure allocated per call — it captures two mutable `let`s, so
+        // V8 cannot elide it — i.e. 7 200 allocations/frame at the L-battle. It
+        // is now a flag, applied once after the tier decision.
+        let wantFallback = false;
+        const fallback = LEGACY_BACKEND_PLUMBING
+            ? () => { if (entry.atlas) spriteFade = 1; }
+            : null;
         const D = entry.impostorDist;
         if (D === undefined || !this.host.getMemberModel) {
-            fallback();                                  // no 3D tier for this def
+            if (fallback) fallback(); else wantFallback = true;   // no 3D tier for this def
         } else {
             const cam = this.scene.activeCamera?.position;
             // D === Infinity (atlas-less def) → inner is Infinity too, so every
@@ -275,7 +327,8 @@ export class SquadRenderBackend {
             if (!cam) {
                 // No camera (tests / headless) → prefer the model if it loads.
                 model = this.host.getMemberModel(entry.defId, entry.team);
-                if (model) modelFade = 1; else fallback();
+                if (model) modelFade = 1;
+                else if (fallback) fallback(); else wantFallback = true;
             } else {
                 const dx = cam.x - x, dy = cam.y - y, dz = cam.z - z;
                 const d2 = dx * dx + dy * dy + dz * dz;
@@ -285,7 +338,8 @@ export class SquadRenderBackend {
                     // Within D → the body is needed (may still be loading).
                     model = this.host.getMemberModel(entry.defId, entry.team);
                     if (!model) {
-                        fallback();                      // still loading → sprite/capsule
+                        // still loading → sprite/capsule
+                        if (fallback) fallback(); else wantFallback = true;
                     } else if (d2 <= inner * inner) {
                         modelFade = 1;                   // pure model
                     } else {
@@ -297,6 +351,8 @@ export class SquadRenderBackend {
                 }
             }
         }
+
+        if (wantFallback && entry.atlas) spriteFade = 1;
 
         // Reconcile model occupancy — one pool (and slot) per model piece, all
         // carrying the same fade so a multi-piece body dissolves as one object.
@@ -348,12 +404,14 @@ export class SquadRenderBackend {
     }
 
     releaseMember(handle: number): void {
-        const entry = this.memberByHandle.get(handle);
+        const entry = this.entryOf(handle);
         if (!entry) return;
         this.freeModel(entry);
         this.freeSprite(entry);
         this.freeCapsule(entry);
+        this.memberEntries[handle] = undefined;
         this.memberByHandle.delete(handle);
+        this.freeHandles.push(handle);
     }
 
     // --- per-member slot reconciliation (M5 dual residency) -----------------
@@ -376,7 +434,16 @@ export class SquadRenderBackend {
     }
 
     private ensureSprite(entry: MemberEntry): InstancePool {
-        const pool = this.getSpritePool(entry.defId, entry.team, entry.atlas!);
+        // M13 fix 2: getSpritePool builds a `${defId}:${team}` template-literal
+        // key, i.e. a string allocation + hash + Map lookup, and this runs for
+        // every sprite-tier member every frame (91 % of members at the L-battle
+        // pose). Both components are fixed for an entry's lifetime, so resolve
+        // the pool once and cache it on the entry.
+        let pool = LEGACY_BACKEND_PLUMBING ? undefined : entry.spritePool;
+        if (!pool) {
+            pool = this.getSpritePool(entry.defId, entry.team, entry.atlas!);
+            entry.spritePool = pool;
+        }
         if (!entry.sprite || entry.sprite.pool !== pool) {
             if (entry.sprite) this.freeSlot(entry.sprite.pool, entry.sprite.index);
             entry.sprite = { pool, index: this.allocSlot(pool) };
@@ -465,7 +532,7 @@ export class SquadRenderBackend {
      *  means the member is mid-crossfade across the boundary band. Every model
      *  piece carries the same fade, so the first piece's is the member's. */
     getMemberFades(handle: number): { model?: number; sprite?: number; capsule?: boolean } {
-        const entry = this.memberByHandle.get(handle);
+        const entry = this.entryOf(handle);
         if (!entry) return {};
         return {
             model: entry.model ? entry.model[0].pool.fade![entry.model[0].index] : undefined,
@@ -478,7 +545,7 @@ export class SquadRenderBackend {
      *  per model piece). They should always agree — a multi-piece body must
      *  dissolve as one object, not piece by piece. */
     getModelFades(handle: number): number[] | undefined {
-        const entry = this.memberByHandle.get(handle);
+        const entry = this.entryOf(handle);
         if (!entry?.model) return undefined;
         return entry.model.map((s) => s.pool.fade![s.index]);
     }
@@ -530,6 +597,8 @@ export class SquadRenderBackend {
         this.spritePools.clear();
         this.modelPools.clear();
         this.wreckPool = null;
+        this.memberEntries.length = 1;
+        this.freeHandles.length = 0;
         this.memberByHandle.clear();
         this.wreckByHandle.clear();
         this.squadTeam.clear();

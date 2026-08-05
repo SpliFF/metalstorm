@@ -1,7 +1,7 @@
 // squad-manager.js — owns every squad; the integration surface the worker
 // adapter drives. See PLAN-metalstorm-squads.md §7.
 
-import { Squad, setPerfProbe, getPerfProbe, PROBE_TERMS } from './squad.js';
+import { Squad, setPerfProbe, getPerfProbe, PROBE_TERMS, setPerfFix, getPerfFixes } from './squad.js';
 import { DEFAULT_CONFIG, linearCount } from './config.js';
 import { BigUnitRepulsor } from './big-unit-repulsor.js';
 import { createPatchSet } from './patches.js';
@@ -81,6 +81,14 @@ export class SquadManager {
   perfProbe(term, repeat) { return setPerfProbe(term, repeat); }
   get perfProbeState() { return getPerfProbe(); }
   get perfProbeTerms() { return PROBE_TERMS; }
+
+  /** M13 fix switches (PLAN-perf M13) — see squad.js's `_fix`. Each shipped
+   *  M13 fix keeps its pre-fix path reachable so the win can be A/B'd inside a
+   *  session and flipped back: `perfFix('trailGuard', false)` restores the
+   *  legacy arm, `perfFix()` restores every fix to ON. Measurement only; every
+   *  switch is ON in a shipping frame. */
+  perfFix(name, on) { return setPerfFix(name, on); }
+  get perfFixState() { return getPerfFixes(); }
 
   // --- building footprints / heightmap deform (pathfinding §7) -----------
 
