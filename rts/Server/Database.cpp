@@ -607,3 +607,31 @@ int Database::CleanExpiredSessions(int maxAgeSeconds) {
 
     return sqlite3_changes(db);
 }
+
+/// Shared body for the two append-only-table sweeps below. `table` is a
+/// compile-time literal from this file only — never a caller-supplied string —
+/// because a table name cannot be a bound parameter.
+static int DeleteOlderThan(sqlite3* db, const char* table, int maxAgeSeconds) {
+    if (db == nullptr || maxAgeSeconds <= 0) return 0;
+
+    const std::string sql = std::string("DELETE FROM ") + table +
+        " WHERE created_at <= datetime('now', '-' || ? || ' seconds')";
+    sqlite3_stmt* stmt = nullptr;
+
+    if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK)
+        return 0;
+
+    sqlite3_bind_int(stmt, 1, maxAgeSeconds);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    return sqlite3_changes(db);
+}
+
+int Database::CleanOldAuditEntries(int maxAgeSeconds) {
+    return DeleteOlderThan(db, "admin_audit", maxAgeSeconds);
+}
+
+int Database::CleanOldClientErrors(int maxAgeSeconds) {
+    return DeleteOlderThan(db, "client_errors", maxAgeSeconds);
+}

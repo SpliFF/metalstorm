@@ -1519,6 +1519,18 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                 std::move(conds),
                 req->expires_in_frames(),
                 static_cast<uint32_t>(sim.GetFrameNum()));
+            // PLAN-long-uptime S6: 0 means the team is at its per-team order
+            // cap. Tell the player — a create that silently did nothing is
+            // indistinguishable from an order that stopped working.
+            if (id == 0) {
+                auto err = Protocol::BuildServerError(
+                    429, "Standing-order limit reached for this team");
+                rtcServer.SendReliable(msg.clientId, err.data(), err.size());
+                SLOG(SPRING_LOG_NOTICE,
+                    "standing-order: refused create for team %d — at per-team cap (%zu)",
+                    session->team, standingOrders.GetPerTeamCap());
+                break;
+            }
             SLOG(SPRING_LOG_DEBUG,
                 "standing-order: client %u (%s, team=%d) created order %u type=%u priority=%u",
                 msg.clientId, session->username.c_str(), session->team,

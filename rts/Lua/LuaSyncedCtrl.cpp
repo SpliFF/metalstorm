@@ -7736,7 +7736,14 @@ void PushConditions(lua_State* L, const StandingOrderConditions& c)
  * @tparam table desc { type = "DefendArea" | int, priority = 0..100,
  *                      params = {floats...}, conditions = {...},
  *                      expiresInFrames = 0 }
- * @treturn number|nil orderId on success, nil on bad arguments
+ *
+ * `expiresInFrames = 0` no longer means "never" — it means "use the game's
+ * default standing-order TTL" (modoption `standingorder_default_ttl_frames`,
+ * PLAN-long-uptime S6). Pass a large explicit value for a long-lived order.
+ *
+ * @treturn number|nil orderId on success, nil on bad arguments, **0** when the
+ *                     team is at its per-team order cap
+ *                     (modoption `standingorder_per_team_cap`)
  */
 int LuaSyncedCtrl::CreateStandingOrder(lua_State* L)
 {

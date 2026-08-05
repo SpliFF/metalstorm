@@ -490,6 +490,7 @@ if(TEST_SOURCES)
         ${CMAKE_SOURCE_DIR}/rts/Server/ScenarioDiscovery.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/SoundEventCollector.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/StandingOrders.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/RulesParamKeyDict.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/OrgGroups.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/SyncedInputJournal.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/ReplayFile.cpp

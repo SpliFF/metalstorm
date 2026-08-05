@@ -1422,6 +1422,27 @@ void StateStreamer::BroadcastRulesParams(int) {
     if (rtcServer.GetClientCount() == 0)
         return;  // baselines updated; nothing to send
 
+    // PLAN-long-uptime S1: periodically reclaim interned ids for keys nothing
+    // references any more. Deliberately before the interning block below, so
+    // the ids this tick's messages carry are already the post-compaction ones.
+    // The live set must include this tick's *changed* keys as well as the live
+    // maps: a delta that removes a key names a key the maps no longer hold.
+    if (++keyDictTickCounter >= kKeyDictCompactPeriodTicks) {
+        keyDictTickCounter = 0;
+        std::unordered_set<std::string> liveKeys;
+        liveKeys.reserve(idToKey.size());
+        for (const auto& kv : gameNow) liveKeys.insert(kv.first);
+        for (int t = 0; t < activeTeams; ++t) {
+            const CTeam* team = teamHandler.Team(t);
+            if (team == nullptr) continue;
+            for (const auto& kv : team->modParams) liveKeys.insert(kv.first);
+        }
+        for (const auto& c : gameChanged) liveKeys.insert(c.key);
+        for (int t = 0; t < activeTeams; ++t)
+            for (const auto& c : teamChanged[t]) liveKeys.insert(c.key);
+        CompactKeyDictionary(liveKeys);
+    }
+
     // Returns the losStatus mask a session viewing team `ownerTeam`'s params
     // should use (LuaSyncedRead::GetTeamRulesParams). Spectators / unassigned
     // (team < 0) are all-seeing readers.
@@ -1791,6 +1812,47 @@ uint16_t StateStreamer::InternKey(const std::string& key) {
     idToKey.push_back(key);
     keyDictionaryRev++;  // increment revision when dictionary changes
     return newId;
+}
+
+// PLAN-long-uptime S1: compact the interned-key dictionary.
+//
+// `InternKey` never removes. Metalstorm mints ~10 keys per objective and ~10
+// per parley proposal, and both of those resolve and have their params cleared
+// — but the *key* stays interned for the life of the server. Two costs, and
+// the one that bites first is not the one the row was named for:
+//
+//   1. `SendKeyDictionary` re-sends the WHOLE dictionary to every behind-rev
+//      session on any tick that mints a key, so the resend grows linearly in
+//      total keys ever seen. That arrives in hours on a busy campaign.
+//   2. At 65535 ids `InternKey` returns 0 forever and every param falls back
+//      to a string key on the wire — handled correctly, but a permanent
+//      bandwidth regression with no way back.
+//
+// Compaction rebuilds the id space from the keys that are still live and bumps
+// the revision; the client replaces its whole array on receipt
+// (`connection.ts` handleRulesParamKeyDictionary), so no client change is
+// needed and no stale id can survive the swap. Ordering is what makes that
+// safe: the per-session loop sends the dictionary *before* any update that
+// references an interned id, on the same ordered Control stream.
+bool StateStreamer::CompactKeyDictionary(const std::unordered_set<std::string>& liveKeys) {
+    if (idToKey.size() <= 1) return false;
+
+    const size_t interned = idToKey.size() - 1;  // index 0 is reserved
+    const size_t dead = (interned > liveKeys.size()) ? (interned - liveKeys.size()) : 0;
+
+    if (!RulesParamKeyDict::ShouldCompact(interned, liveKeys.size(),
+                                          kKeyDictCompactMinDead,
+                                          kKeyDictCompactMinDeadPct))
+        return false;
+
+    RulesParamKeyDict::Rebuild(keyToId, idToKey, liveKeys);
+
+    keyDictionaryRev++;
+    SLOG(SPRING_LOG_NOTICE,
+        "rulesParams key dictionary compacted: %zu interned -> %zu live "
+        "(%zu dead ids reclaimed), rev %u",
+        interned, idToKey.size() - 1, dead, keyDictionaryRev);
+    return true;
 }
 
 // W3: Send the key dictionary to a client

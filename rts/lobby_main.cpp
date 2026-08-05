@@ -3636,6 +3636,19 @@ int main(int argc, char *argv[]) {
       const int swept = maintenanceDb.CleanExpiredSessions(86400);
       if (swept > 0)
         SLOG(SPRING_LOG_INFO, "swept %d expired session(s)", swept);
+
+      // PLAN-long-uptime T2a-4: `sessions` was the only one of the three
+      // retention-free tables the S9 sweep covered. `admin_audit` and
+      // `client_errors` are append-only and were never deleted from at all,
+      // so they ride the same cadence and the same connection. Windows differ
+      // by what the row is for: audit is a compliance trail (90 d), a crash
+      // report stops being actionable long before that (30 d — the window
+      // client_errors' own schema comment already promised and never got).
+      const int audit = maintenanceDb.CleanOldAuditEntries(90 * 86400);
+      const int errs = maintenanceDb.CleanOldClientErrors(30 * 86400);
+      if (audit > 0 || errs > 0)
+        SLOG(SPRING_LOG_INFO, "swept %d audit + %d client-error row(s)", audit,
+             errs);
     }
 
     // Periodically reap abandoned rooms (~every 60s at 10 Hz). Catches

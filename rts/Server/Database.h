@@ -99,6 +99,15 @@ public:
     /// Returns the number of sessions deleted.
     int CleanExpiredSessions(int maxAgeSeconds = 86400);
 
+    /// PLAN-long-uptime S8 / T2a-4: retention for the two append-only tables
+    /// the S9 sweep left behind. Both are written on every admin action and
+    /// every client crash report and neither had a DELETE anywhere, so on a
+    /// long-lived lobby they only grow. Deleted by `created_at`, which both
+    /// tables default to CURRENT_TIMESTAMP. Returns rows deleted.
+    /// Call from a maintenance connection, not from `db` — see §8.2.
+    int CleanOldAuditEntries(int maxAgeSeconds = 90 * 86400);
+    int CleanOldClientErrors(int maxAgeSeconds = 30 * 86400);
+
     /// Append an entry to the admin_audit log (PLAN-security-hardening task
     /// 6). Every admin-role action — exec, restart, GM verbs (rollback/
     /// grant), direct-start — goes through this. Append-only: there is no
