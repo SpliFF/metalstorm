@@ -27,6 +27,8 @@ function M.new(gadgetFile)
         playerPools = {},        -- playerID -> pool
         chargeLog = {},
         awardLog = {},
+        transferLog = {},        -- recorded GG.Authority.Transfer calls
+        echoes = {},             -- recorded Spring.Echo lines
         stakes = {},             -- id -> { total, entries = {{playerID, amount}} }
         objectives = {},         -- id -> { state, forTeam, forTeam2 }
         widenCalls = {},
@@ -34,6 +36,7 @@ function M.new(gadgetFile)
     }
 
     function world.setPlayer(playerID, teamID) world.players[playerID] = { team = teamID } end
+    function world.setAIPlayer(playerID, teamID) world.players[playerID] = { team = teamID, isAI = true } end
     function world.setUnit(unitID, teamID, x, z, health, defId)
         world.units[unitID] = { team = teamID, x = x, y = 0, z = z, health = health or 100, defId = defId }
     end
@@ -51,6 +54,11 @@ function M.new(gadgetFile)
     _G.UnitDefs = setmetatable({}, { __index = function() return nil end })
 
     _G.Spring = {
+        Echo = function(...)
+            local parts = {}
+            for i = 1, select('#', ...) do parts[#parts + 1] = tostring((select(i, ...))) end
+            world.echoes[#world.echoes + 1] = table.concat(parts, ' ')
+        end,
         GetGameFrame = function() return world.frame end,
         GetModOptions = function() return {} end,
         GetPlayerInfo = function(playerID)
@@ -176,6 +184,54 @@ function M.new(gadgetFile)
             for _, entry in ipairs(e.entries) do
                 world.playerPools[entry.playerID] = (world.playerPools[entry.playerID] or 0) + entry.amount
             end
+        end,
+        -- PoolOf / Transfer mirror game_authority.lua's real semantics
+        -- deliberately: nil (not 0) for an unknown pool, and a STRICT debit with
+        -- no team fallback that refuses rather than partially moving. Getting
+        -- either wrong here would let the AI-funding path (§5.2 / D32) pass its
+        -- specs while doing the wrong thing live — the same way integer-keyed
+        -- mocks hid D21's float-key bug.
+        PoolOf = function(ref)
+            if not ref then return nil end
+            if ref.player then return world.playerPools[ref.player] or 0 end
+            if ref.team then return world.authorityPools[ref.team] or 0 end
+            return nil
+        end,
+        Transfer = function(src, dst, amount, reason)
+            if not src or not dst or not amount or amount <= 0 then return false end
+            local function bal(ref)
+                if ref.player then return world.playerPools[ref.player] or 0 end
+                if ref.team then return world.authorityPools[ref.team] or 0 end
+                return nil
+            end
+            local function add(ref, delta)
+                if ref.player then
+                    world.playerPools[ref.player] = (world.playerPools[ref.player] or 0) + delta
+                else
+                    world.authorityPools[ref.team] = (world.authorityPools[ref.team] or 0) + delta
+                end
+            end
+            local have = bal(src)
+            if have == nil or have < amount then return false end
+            if bal(dst) == nil then return false end
+            add(src, -amount)
+            add(dst, amount)
+            world.transferLog[#world.transferLog + 1] =
+                { src = src, dst = dst, amount = amount, reason = reason }
+            return true
+        end,
+    }
+
+    -- GG.Teams.AIPlayers — the funding recipient lookup (game_teams.lua owns the
+    -- real one). Tests declare AI slots with world.setAIPlayer.
+    _G.GG.Teams = {
+        AIPlayers = function(teamID)
+            local out = {}
+            for playerID, p in pairs(world.players) do
+                if p.team == teamID and p.isAI then out[#out + 1] = playerID end
+            end
+            table.sort(out)
+            return out
         end,
     }
 
