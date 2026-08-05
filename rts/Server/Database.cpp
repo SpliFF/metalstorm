@@ -74,8 +74,9 @@ void Database::CreateTables() {
         );
 
         -- PLAN-client-resilience.md task 3: client-side crash/fatal reports.
-        -- Retention (30-day purge) and the grouped-by-stack-hash dashboard
-        -- view are task 4 — this table is the ingestion side only.
+        -- Task 4 added the read side: the grouped-by-stack-hash dashboard
+        -- view (GetClientErrorGroups) and the 30-day purge
+        -- (PruneClientErrors, driven from the lobby main loop).
         CREATE TABLE IF NOT EXISTS client_errors (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL DEFAULT 0,
@@ -480,6 +481,152 @@ int Database::CountRecentClientErrors(int64_t userId, int windowSeconds) {
 
     sqlite3_finalize(stmt);
     return count;
+}
+
+// --- PLAN-client-resilience.md task 4: the read + retention side of
+// client_errors. Task 3 built the ingestion half and nothing consumed it;
+// these three are the operator's view of it and its size bound.
+
+/// Column text or "" — client_errors columns are all NOT NULL DEFAULT '',
+/// but the group query's aggregates (MIN/MAX/group_concat over an empty or
+/// all-NULL set) genuinely can be NULL, so never dereference blind.
+static std::string ColText(sqlite3_stmt* stmt, int col) {
+    const unsigned char* t = sqlite3_column_text(stmt, col);
+    return t ? reinterpret_cast<const char*>(t) : "";
+}
+
+std::vector<Database::ClientErrorGroup> Database::GetClientErrorGroups(int limit, int sinceDays) {
+    std::vector<ClientErrorGroup> out;
+    if (limit <= 0)
+        return out;
+
+    // The two correlated subqueries pull class/message/rung from the group's
+    // *newest* row. A bare column alongside an aggregate is only well-defined
+    // in SQLite when there is exactly one min()/max(), and this query has
+    // four — so the ordering is stated explicitly instead of inferred.
+    // NULLIF(...,'') keeps empty stamps/ids out of the build range and the
+    // game list (group_concat skips NULLs).
+    const char* sql =
+        "SELECT e.stack_hash, "
+        "  (SELECT n.error_class FROM client_errors n WHERE n.stack_hash = e.stack_hash "
+        "     ORDER BY n.created_at DESC, n.id DESC LIMIT 1), "
+        "  (SELECT n.message FROM client_errors n WHERE n.stack_hash = e.stack_hash "
+        "     ORDER BY n.created_at DESC, n.id DESC LIMIT 1), "
+        "  (SELECT n.recovery_rung FROM client_errors n WHERE n.stack_hash = e.stack_hash "
+        "     ORDER BY n.created_at DESC, n.id DESC LIMIT 1), "
+        "  COUNT(*), SUM(e.count), COUNT(DISTINCT e.user_id), "
+        "  MIN(e.created_at), MAX(e.created_at), "
+        "  MIN(NULLIF(e.build_stamp,'')), MAX(NULLIF(e.build_stamp,'')), "
+        "  group_concat(DISTINCT NULLIF(e.game_id,'')) "
+        "FROM client_errors e "
+        "WHERE (?1 <= 0 OR e.created_at > datetime('now', '-' || ?1 || ' days')) "
+        "GROUP BY e.stack_hash "
+        "ORDER BY MAX(e.created_at) DESC "
+        "LIMIT ?2";
+    sqlite3_stmt* stmt = nullptr;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        SLOG(SPRING_LOG_ERROR, "GetClientErrorGroups: prepare failed: %s", sqlite3_errmsg(db));
+        return out;
+    }
+
+    sqlite3_bind_int(stmt, 1, sinceDays);
+    sqlite3_bind_int(stmt, 2, limit);
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        ClientErrorGroup g;
+        g.stackHash    = ColText(stmt, 0);
+        g.errorClass   = ColText(stmt, 1);
+        g.message      = ColText(stmt, 2);
+        g.recoveryRung = ColText(stmt, 3);
+        g.reports      = sqlite3_column_int(stmt, 4);
+        g.occurrences  = sqlite3_column_int(stmt, 5);
+        g.users        = sqlite3_column_int(stmt, 6);
+        g.firstSeen    = ColText(stmt, 7);
+        g.lastSeen     = ColText(stmt, 8);
+        g.firstBuild   = ColText(stmt, 9);
+        g.lastBuild    = ColText(stmt, 10);
+        g.games        = ColText(stmt, 11);
+        out.push_back(std::move(g));
+    }
+
+    sqlite3_finalize(stmt);
+    return out;
+}
+
+std::vector<Database::ClientErrorRecord> Database::GetClientErrorsByHash(
+    const std::string& stackHash, int limit) {
+    std::vector<ClientErrorRecord> out;
+    if (limit <= 0)
+        return out;
+
+    const char* sql =
+        "SELECT id, created_at, user_id, reason, error_class, message, stack, stack_hash, "
+        "recovery_rung, phase, frame, entity_count, game_id, map_id, build_stamp, "
+        "gpu_renderer, log_ring, count FROM client_errors "
+        "WHERE stack_hash = ? ORDER BY created_at DESC, id DESC LIMIT ?";
+    sqlite3_stmt* stmt = nullptr;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        SLOG(SPRING_LOG_ERROR, "GetClientErrorsByHash: prepare failed: %s", sqlite3_errmsg(db));
+        return out;
+    }
+
+    sqlite3_bind_text(stmt, 1, stackHash.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 2, limit);
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        ClientErrorRecord r;
+        r.id           = sqlite3_column_int64(stmt, 0);
+        r.createdAt    = ColText(stmt, 1);
+        r.userId       = sqlite3_column_int64(stmt, 2);
+        r.reason       = ColText(stmt, 3);
+        r.errorClass   = ColText(stmt, 4);
+        r.message      = ColText(stmt, 5);
+        r.stack        = ColText(stmt, 6);
+        r.stackHash    = ColText(stmt, 7);
+        r.recoveryRung = ColText(stmt, 8);
+        r.phase        = ColText(stmt, 9);
+        r.frame        = sqlite3_column_int(stmt, 10);
+        r.entityCount  = sqlite3_column_int(stmt, 11);
+        r.gameId       = ColText(stmt, 12);
+        r.mapId        = ColText(stmt, 13);
+        r.buildStamp   = ColText(stmt, 14);
+        r.gpuRenderer  = ColText(stmt, 15);
+        r.logRing      = ColText(stmt, 16);
+        r.count        = sqlite3_column_int(stmt, 17);
+        out.push_back(std::move(r));
+    }
+
+    sqlite3_finalize(stmt);
+    return out;
+}
+
+int Database::PruneClientErrors(int retentionDays) {
+    // Fail closed on a nonsense retention: deleting everything because a
+    // config read produced 0 is worse than an unbounded table.
+    if (retentionDays <= 0)
+        return 0;
+
+    const char* sql =
+        "DELETE FROM client_errors WHERE created_at < datetime('now', '-' || ? || ' days')";
+    sqlite3_stmt* stmt = nullptr;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        SLOG(SPRING_LOG_ERROR, "PruneClientErrors: prepare failed: %s", sqlite3_errmsg(db));
+        return 0;
+    }
+
+    sqlite3_bind_int(stmt, 1, retentionDays);
+
+    int deleted = 0;
+    if (sqlite3_step(stmt) != SQLITE_DONE)
+        SLOG(SPRING_LOG_ERROR, "PruneClientErrors: delete failed: %s", sqlite3_errmsg(db));
+    else
+        deleted = sqlite3_changes(db);
+
+    sqlite3_finalize(stmt);
+    return deleted;
 }
 
 bool Database::SaveCommandPreset(int64_t userId, const std::string& name, const std::string& intentJson) {

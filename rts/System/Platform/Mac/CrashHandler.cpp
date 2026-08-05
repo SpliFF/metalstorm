@@ -10,6 +10,8 @@
 //! Same as Linux, so just include the .cpp
 #include "System/Platform/Linux/CrashHandler.cpp"
 
+#include <deque>
+
 #include <libproc.h>
 #include <limits.h>
 #include <unistd.h>

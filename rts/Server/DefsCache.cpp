@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <unordered_map>
 
 namespace DefsCache {
 

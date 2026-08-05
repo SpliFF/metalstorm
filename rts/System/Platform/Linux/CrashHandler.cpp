@@ -9,6 +9,7 @@
 #include <filesystem>
 
 #include <vector>
+#include <deque>
 #include <new>
 
 #include <csignal>
