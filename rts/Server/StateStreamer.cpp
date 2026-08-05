@@ -136,8 +136,10 @@ void StateStreamer::Tick(int /*frameNum*/) {
     // three frames earlier.
     const bool wasOver = gameOverSent;
     CheckWinCondition(0);
-    if (wasOver)
+    if (wasOver) {
+        ReannounceGameOver();
         return;
+    }
     StreamResources(0);
     StreamCommandQueues(0);
     BroadcastGameInfo(0);
@@ -160,6 +162,42 @@ void StateStreamer::Tick(int /*frameNum*/) {
     BroadcastFeatureLifecycle(0);
     BroadcastUnitCommands(0);
     StreamLosBitmaps(0);
+}
+
+// Re-announce a declared result to everyone still connected, on a slow
+// cadence, for as long as the finished server lives.
+//
+// PLAN-endtoend.md D36. The result used to cross the wire exactly once, in a
+// single broadcast on the tick it was declared, after which this whole pipeline
+// stops — so *any* client that failed to act on that one message was stranded
+// in a match that had already ended, with no second chance and no way for the
+// server to know. That is not hypothetical: measured live 2026-08-05, one
+// throwing inbound handler left a client's control lane permanently deaf, and
+// it played on past its own victory with a frozen HUD until the page was
+// reloaded. The fix for *that* is client-side (transport.ts), but a result
+// worth a whole match should not hinge on one delivery, and the server already
+// retains everything needed — `gameOverRelay` keeps the winners and the
+// declared frame precisely so the post-auth replay can rebuild this message
+// for a late joiner. This is that same retained result on a timer, not a
+// second mechanism: same relay, same `BuildGameInfo`, same declared frame.
+//
+// Clients latch on the first one they see (connection.ts `gameOverSeen`), so
+// the repeats are inert for everyone who already got it.
+void StateStreamer::ReannounceGameOver() {
+    // Tick-based, not frame-based: the frame is frozen after game over, which
+    // is exactly why the rest of Tick() has to be skipped up there.
+    if ((postGameTicks++ % kPostGameResendTicks) != 0)
+        return;
+    auto& rtcServer = ctx.rtcServer;
+    if (rtcServer.GetClientCount() <= 0)
+        return;
+    auto gameOver = Protocol::BuildGameInfo(
+        ctx.mapId, ctx.gameId, gs->speedFactor,
+        static_cast<uint32_t>(gameOverRelay.DeclaredFrame()), gs->paused,
+        0, 0, 0, 0, 0, modInfo.legacyCoordSystem, unitHandler.MaxUnits(),
+        /*gameOver*/ true, gameOverRelay.Winners());
+    rtcServer.BroadcastStream(StreamClass::Control, gameOver.data(), gameOver.size(),
+                              kEventLaneControl);
 }
 
 // Check win condition every ~1s (30 ticks) after frame 30.

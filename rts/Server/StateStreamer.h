@@ -24,6 +24,7 @@ public:
 
 private:
     void CheckWinCondition(int frameNum);
+    void ReannounceGameOver();
     void StreamResources(int frameNum);
     void StreamCommandQueues(int frameNum);
     void BroadcastGameInfo(int frameNum);
@@ -77,6 +78,15 @@ private:
     // winningTeam so the Lua path (which has no single winning *team*) can latch
     // game-over without claiming team 0 won.
     bool gameOverSent = false;
+    // Ticks since the game-over GameInfo first went out, for the post-game
+    // re-broadcast (PLAN-endtoend.md D36 — see StateStreamer::Tick). Counts
+    // ticks, not frames: the frame is frozen after game over, so every
+    // `frame % N` cadence in this file is unusable past that point.
+    int postGameTicks = 0;
+    // Re-announce the retained result about once a second at 1x. Cheap (a
+    // GameInfo is ~100 bytes) and bounded by the post-game observation window,
+    // after which the process exits.
+    static constexpr int kPostGameResendTicks = 30;
 
     // Per-team stats-history send cursor (PLAN-bar Spring.GetTeamStatsHistory).
     std::vector<uint32_t> lastSentStatFinalized;

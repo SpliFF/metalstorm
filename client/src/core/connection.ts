@@ -1274,6 +1274,10 @@ export class Connection {
     private keyDictionary: string[] = [];
     private keyDictionaryRev = 0;
 
+    /** Latch for the repeated post-game result announcement — see the
+     *  `GameInfo` case. Per connection; cleared by `connect()`. */
+    private gameOverSeen = false;
+
     /** Whether the control channel is currently usable. */
     get controlOpen(): boolean { return this.transport?.connected ?? false; }
 
@@ -1308,6 +1312,10 @@ export class Connection {
     connect(url: string, username: string, password: string, token?: string): void {
         if (this.transport) this.disconnect();
 
+        // A fresh connection has not been told the result yet, even on a
+        // resync into a match that ended while this Connection object was
+        // parked — the server replays it at auth (PLAN-endtoend D36).
+        this.gameOverSeen = false;
         if (token) this.sessionToken = token;
 
         this.httpBase = url;
@@ -2181,7 +2189,15 @@ export class Connection {
                 // must not trigger the end-game overlay (the prior `info.paused()`
                 // check did, a latent bug; G2). winning_ally_teams carries the
                 // Spring.GameOver winners (empty = undecided).
-                if (info.gameOver()) {
+                // The server re-announces the result for the whole post-game
+                // observation window (PLAN-endtoend D36), so the *result* is
+                // repeated but the *reaction* must not be: onGameOver drives
+                // the overlay and the widget/gadget GameOver callin, neither of
+                // which is safe to run 180 times. Latched per connection, and
+                // `connect()` clears it — a reconnect into a finished match
+                // gets the auth-time replay and must still act on it.
+                if (info.gameOver() && !this.gameOverSeen) {
+                    this.gameOverSeen = true;
                     const winners: number[] = [];
                     for (let i = 0; i < info.winningAllyTeamsLength(); i++) {
                         winners.push(info.winningAllyTeams(i) ?? 0);
