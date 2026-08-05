@@ -25,6 +25,23 @@ without fighting over the single shared `chrome-profile` lock (the
   authenticate from scratch before connecting to a game (see below).
 - **Multiple games may be running at once** (yours + other sessions').
   You are responsible for not crossing wires.
+- **⚠️ These browsers outlive the session that spawned them, and a forgotten
+  one keeps rendering at full tilt.** An abandoned client page holds the GPU
+  indefinitely — one left on the game client was measured at **80 % GPU / 60 %
+  CPU nine hours later**, and it silently corrupted five consecutive
+  performance-measurement sessions, which blamed the user's browsers. **Sweep
+  for leftovers before any timing work, and close your own browser when you
+  are done:**
+  ```sh
+  # live agent Chromes (one entry per running instance)
+  ps -Ao pid,etime,args | grep -o 'puppeteer_dev_chrome_profile-[A-Za-z0-9]*' | sort | uniq -c
+  # confirm one is stale, not another live session's, before killing:
+  ps -o pid,ppid,etime,args= -p <browser-pid>     # ancestry -> chrome-devtools-mcp -> which claude
+  ioreg -r -d 1 -w 0 -c IOAccelerator | grep -o '"Device Utilization %"=[0-9]*'
+  ```
+  Attribute *reversibly* first — `kill -STOP <pid>`, re-read the GPU counter,
+  `kill -CONT <pid>` — before killing anything. That is what proved the load
+  was ours and not the user's.
 
 **Discipline — track your own game, every time:**
 
