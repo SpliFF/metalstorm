@@ -379,6 +379,10 @@ export class SquadManager {
   update(dt) {
     this._now += dt;
     this._fastNb = this.cfg.fastNeighbours !== false;
+    // cfg.neighbourCap is a live perf knob (M9 A/B'd it in-session), so size
+    // the shared buffer here rather than trusting the constructor's reading.
+    const cap = Math.max(0, this.cfg.neighbourCap | 0);
+    if (this._nbBuf.length < cap) this._nbBuf.length = cap;
     this._tickWreckPool();
     this._rebuildGrid();
     for (const bu of this._bigUnitList) bu.update(dt);
@@ -526,8 +530,7 @@ export class SquadManager {
   _neighboursInto(self) {
     const cap = this.cfg.neighbourCap;
     if (cap <= 0) return 0;
-    const buf = this._nbBuf;
-    if (buf.length < cap) buf.length = cap;
+    const buf = this._nbBuf;              // sized in update()
     const cell = this._cell, grid = this._grid, dense = this.cfg.denseCellOccupancy;
     const cx = Math.floor(self.x / cell), cz = Math.floor(self.z / cell);
     let filled = 0;
