@@ -3,6 +3,7 @@ import {
     NullEngine, Scene, FreeCamera, MeshBuilder, StandardMaterial, Vector3, Mesh,
 } from '@babylonjs/core';
 import { FeatureLodController } from './feature-lod-renderer.js';
+import { FxLightPool, FX_LIGHT_EXCLUDED_LAYER } from './fx-light-pool.js';
 import { FeatureTier, type LodPlacement } from './feature-lod.js';
 import { DEFAULT_ATLAS_LAYOUT } from './impostor-atlas.js';
 
@@ -210,5 +211,29 @@ describe('FeatureLodController', () => {
         ctrl.update(camera, 3000);
         expect(tileMesh(scene, 'feat_stump_near_5:0').isEnabled(false)).toBe(true);
         expect(tileMesh(scene, 'feat_stump_far_5:0').isEnabled(false)).toBe(false);
+    });
+
+    // PLAN-perf M2. What matters is not that we set a bit, but that Babylon's
+    // own `canAffectMesh` honours it — that is the whole mechanism by which the
+    // per-draw light-uniform binds disappear.
+    it('opts tile meshes out of the FX light pool, camera visibility intact', () => {
+        const { scene } = makeHarness([place(100, 100)]);
+        const pool = new FxLightPool(scene, { count: 4 });
+        const light = scene.getLightByName('fxLight0')!;
+        const near = tileMesh(scene, 'feat_tree_near_0:0');
+        const plain = MeshBuilder.CreateBox('unit', { size: 1 }, scene);
+
+        expect(near.layerMask & FX_LIGHT_EXCLUDED_LAYER).toBeTruthy();
+        expect(light.canAffectMesh(near)).toBe(false);
+        expect(light.canAffectMesh(plain)).toBe(true);
+
+        // The tag is additive: a default-masked camera still renders the tile.
+        expect(near.layerMask & 0x0fffffff).toBe(0x0fffffff);
+
+        // The A/B toggle restores the pre-M2 behaviour live, and back.
+        pool.setExcludeTagged(false);
+        expect(light.canAffectMesh(near)).toBe(true);
+        pool.setExcludeTagged(true);
+        expect(light.canAffectMesh(near)).toBe(false);
     });
 });

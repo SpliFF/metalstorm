@@ -13,6 +13,7 @@ import {
 } from '@babylonjs/core';
 import { normaliseSunDir, type MapLighting } from './map-lighting.js';
 import { clientSettings } from './client-settings.js';
+import { ShadowDepthBounds } from './shadow-depth-bounds.js';
 
 /** gfx.shadowFiltering (0/1/2) → Babylon CSM filtering quality. */
 const SHADOW_FILTERING_QUALITY = [
@@ -134,6 +135,8 @@ export interface SceneLighting {
     renderPipeline: DefaultRenderingPipeline;
     /** PLAN-lighting L3 — directional sun shadows via 4-cascade CSM. */
     csm: CascadedShadowGenerator;
+    /** PLAN-perf M8 — analytic replacement for `csm.autoCalcDepthBounds`. */
+    shadowDepthBounds: ShadowDepthBounds;
 }
 
 /**
@@ -182,8 +185,10 @@ export function createSceneLighting(scene: Scene, camera: Camera): SceneLighting
     (globalThis as unknown as { __renderPipeline: unknown }).__renderPipeline = renderPipeline;
 
     const csm = createCsm(sun);
+    const shadowDepthBounds = new ShadowDepthBounds(csm);
+    (globalThis as Record<string, unknown>).__shadowDepthBounds = shadowDepthBounds;
 
-    const lighting: SceneLighting = { ambient, sun, renderPipeline, csm };
+    const lighting: SceneLighting = { ambient, sun, renderPipeline, csm, shadowDepthBounds };
     // Register as the rig setLightingStyle/setAmbientLevel retune, and
     // reset the per-session tuning state (a DevTools ambient override or a
     // previous game's style must not leak into a new session — gp:init
@@ -221,18 +226,25 @@ function createCsm(sun: DirectionalLight): CascadedShadowGenerator {
         csm.filteringQuality = SHADOW_FILTERING_QUALITY[Number(v)]
             ?? ShadowGenerator.QUALITY_MEDIUM;
     });
-    // See PLAN-shadow-zoom-fix.md. Without autoCalcDepthBounds the four
-    // cascades are spread across the full camera.minZ..shadowMaxZ slab
-    // (1..8000) every frame, regardless of where the units actually are.
-    // The RTS camera zooms out to ~6000 elmos, dropping units into the
-    // coarse far cascade (a ~6000-elmo slab in one 2048² map → texels
-    // several elmos across). The fixed normalBias then offsets the
-    // receiver sample far enough along its normal to skip past the
-    // caster's base → the contact band of the shadow detaches
-    // (peter-panning). Fitting the cascades to the visible depth slab
-    // each frame keeps texels tight at every zoom, so a smaller
-    // normalBias both kills the gap and still suppresses acne.
-    csm.autoCalcDepthBounds = true;
+    // Cascade depth-slab fitting. Without ANY fitting the four cascades are
+    // spread across the full camera.minZ..shadowMaxZ slab (1..8000) every
+    // frame, regardless of where the units actually are. The RTS camera zooms
+    // out to ~6000 elmos, dropping units into the coarse far cascade (a
+    // ~6000-elmo slab in one 2048² map → texels several elmos across). The
+    // fixed normalBias then offsets the receiver sample far enough along its
+    // normal to skip past the caster's base → the contact band of the shadow
+    // detaches (peter-panning). Fitting the cascades to the visible depth slab
+    // each frame keeps texels tight at every zoom, so a smaller normalBias both
+    // kills the gap and still suppresses acne.
+    //
+    // Babylon's own fitting (`autoCalcDepthBounds`) *measures* the slab with a
+    // second full-resolution depth pass, a 12-step min/max reduction and a
+    // per-frame GPU→CPU readback — PLAN-perf M4 measured that at 27.7 ms of a
+    // 31.1 ms render phase, almost all of it the readback stalling the
+    // pipeline. `ShadowDepthBounds` derives the same slab analytically from the
+    // camera pose and the map's bounds instead (PLAN-perf M8); the reducer
+    // stays one `setMode('reduce')` away for A/B.
+    csm.autoCalcDepthBounds = false;
     csm.bias = 0.01;
     csm.normalBias = 0.008;
 

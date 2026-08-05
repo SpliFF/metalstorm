@@ -44,13 +44,16 @@ import {
     type MapLighting,
 } from './map-lighting.js';
 import { createSceneLighting, applyMapLighting, setLightingStyle, type SceneLighting } from './scene-lighting.js';
+import type { ShadowDepthBoundsMode } from './shadow-depth-bounds.js';
 import { LosBitmapStore, type LosBitmap } from './los-bitmap.js';
 // GW4-c4: world entity rendering moves into the worker. Side-effect import
 // registers Babylon's KTX2 loader + pins the transcoder URLs (previously only
 // done in main.ts) so unit `.ktx2` textures transcode here.
 import './ktx2-config.js';
 import { EntityRenderer, setModelMaterialPort } from './entity-renderer.js';
-import { SquadRenderBackend } from './squad-render-backend.js';
+import {
+    SquadRenderBackend, setLegacyBackendPlumbing, setLegacyBufferRebind, setBboxRefreshEvery,
+} from './squad-render-backend.js';
 import { ImpostorRenderer, LodTier } from './impostor-renderer.js';
 
 /**
@@ -436,8 +439,14 @@ interface SquadSystemHandle {
     reportImpact(hint: { x: number; z: number; radius?: number; squadId?: number }): void;
     reportThreat(hint: { x: number; z: number; radius?: number; squadId?: number }): void;
     setPassability(p: unknown): void;
+    /// PLAN-perf M20: camera world position for the reduced-detail member
+    /// budget. Optional because data/games/*/client is runtime-served and can
+    /// be older than this bundle; gpTickSquads warns once if it is missing.
+    setViewPos?(x: number, y: number, z: number): void;
     update(dt: number): void;
 }
+/// One-time warn latch for a squad module with no M20 `setViewPos`.
+let gpSquadViewPosWarned = false;
 /// Sim-scaled delta multiplier for VISUAL FX aging — slows / freezes effect
 /// lifetimes with the game speed (paused → 0). Driven by onGameInfo. The
 /// camera + entity ticks keep raw wall dt; only FX lifetimes use it.
@@ -729,6 +738,13 @@ async function gpLoadMap(msg: GpInitToWorker): Promise<void> {
     // arrived yet we fall back to map centre and let onTeamStartInfo snap the
     // camera the moment it does. now pan/zoom/orbit are live off the forwarded
     // input.
+    // PLAN-perf M8: the same bounds feed the analytic CSM depth-slab fit — the
+    // box every shadow caster/receiver lives in is the map itself by its
+    // heightmap range.
+    sceneLighting.shadowDepthBounds.setMapBounds(
+        map.widthElmos, map.heightElmos, map.minHeight, map.maxHeight,
+        { data: map.heightmap, mapx: map.mapx, mapy: map.mapy, squareSize: map.squareSize });
+
     const rtsCam = gpViewCameras.get(0);
     rtsCam?.setMapBounds(map.widthElmos, map.heightElmos);
     if (!gpTryFrameStartCamera()) {
@@ -1943,6 +1959,20 @@ function gpTickSquads(dt: number): void {
         const pose = er?.getEntityPose(id);
         if (pose) gpSquadSystem.syncPose(id, { x: pose.x, y: pose.y, z: pose.z, heading: pose.heading * H });
     }
+    // PLAN-perf M20: the squad system's reduced-detail member budget ranks
+    // squads by distance to the camera, and the camera only exists out here.
+    // Push it every frame (the policy itself re-ranks on its own slow cadence).
+    if (gpCamera) {
+        if (gpSquadSystem.setViewPos) {
+            const p = gpCamera.position;
+            gpSquadSystem.setViewPos(p.x, p.y, p.z);
+        } else if (!gpSquadViewPosWarned) {
+            gpSquadViewPosWarned = true;
+            // FIDELITY-STANDIN: no view feed means the member budget stays
+            // disarmed and every squad is steered — correct, just not bounded.
+            postLog(2, '[gp] squad module has no setViewPos — PLAN-perf M20 member budget disabled');
+        }
+    }
     gpSquadSystem.update(dt);
     gpSquadBackend?.flush();
 }
@@ -2198,6 +2228,11 @@ export function gpInit(msg: GpInitToWorker): void {
          *  scene light list, not just idles them). Returns the new count. */
         lightPool: (n: number): number =>
             gpCtx.fxLightPool?.setPoolCount(n) ?? -1,
+        /** M2: A/B the pooled lights' feature-tile exclusion without a rebuild.
+         *  `fxLightsOnFeatures(true)` restores the pre-M2 behaviour (pool lights
+         *  every vegetation tile); `false` is the shipped default. */
+        fxLightsOnFeatures: (on: boolean): boolean =>
+            !(gpCtx.fxLightPool?.setExcludeTagged(!on) ?? true),
         /** Fill-rate probe: engine hardware scaling ⇒ backing-store resolution.
          *  scale 1.5 ≈ retina-capped baseline; 0.75 halves fill. */
         renderScale: (scale: number): number => {
@@ -2206,6 +2241,37 @@ export function gpInit(msg: GpInitToWorker): void {
         },
         /** Hazard #5: skip the LuaUI render-thread pass. */
         luaUi: (on: boolean): boolean => { gpUiPassEnabled = on; return on; },
+        /** M8: how the CSM cascades get fitted to the visible depth slab —
+         *  'analytic' (shipped, CPU-derived from camera + map bounds),
+         *  'reduce' (Babylon's depth pass + readback, the M4 stall), or
+         *  'off' (no fit at all). Returns the applied mode, or null pre-map. */
+        shadowDepthBounds: (mode: ShadowDepthBoundsMode): string | null =>
+            gpCtx.sceneLighting?.shadowDepthBounds.setMode(mode) ?? null,
+        /** M13 fix 2: A/B the squad render backend's per-member preamble
+         *  (handle Map lookup, `fallback` closure, `${defId}:${team}` sprite-
+         *  pool key) without a rebuild. `squadBackendLegacy(true)` restores the
+         *  pre-M13 path; `false` is the shipped default. The squad-side M13
+         *  switches live on `__squadSystem.perfFix(name, on)`. */
+        squadBackendLegacy: (on: boolean): boolean =>
+            setLegacyBackendPlumbing(on),
+        /** M21: A/B the squad backend's per-frame thin-instance buffer binding.
+         *  `squadRebindBuffers(true)` restores the pre-M21 path — a full
+         *  `thinInstanceSetBuffer` per buffer per pool per frame, which
+         *  disposes and re-creates every GPU buffer each frame; `false` is the
+         *  shipped default (bind once per array identity, then upload in
+         *  place). Takes effect on the next flush, no reload needed. */
+        squadRebindBuffers: (on: boolean): boolean =>
+            setLegacyBufferRebind(on),
+        /** M21: how many flushes a squad pool may skip before its thin-instance
+         *  bounding info is recomputed. `squadBboxEvery(1)` restores the pre-M21
+         *  every-flush refresh (the legacy arm); 15 is the shipped default. */
+        squadBboxEvery: (n: number): number => setBboxRefreshEvery(n),
+        /** M18: A/B the pooled combat-FX shapes. `combatFxPooled(false)`
+         *  restores the pre-M18 path where every tracer / puff / burst
+         *  allocates its own Babylon mesh and its own draw call; `true` is the
+         *  shipped default (one thin-instance pool per shape + material). */
+        combatFxPooled: (on: boolean): boolean =>
+            gpCombatFX?.setPooled(on) ?? false,
     };
     // PLAN-maps.md M6: map-feature LOD live-tuning + attribution, e.g.
     //   window.__gp('__featureLod.get()')                        // tier counts
@@ -2500,6 +2566,12 @@ export function gpInit(msg: GpInitToWorker): void {
         // uniform per feature type plus any live crossfade; the tier pass
         // itself is throttled internally (interval + camera-movement gates).
         gpFeatureLod?.update(camera, now);
+        // PLAN-perf M8: fit the CSM cascades to the visible depth slab from the
+        // camera pose + map bounds, replacing Babylon's autoCalcDepthBounds
+        // (a second depth pass + 12-step reduction + a GPU→CPU readback that
+        // stalls the pipeline). Must run before scene.render() consumes the
+        // shadow generator; it is ~24 segment clips, well inside the noise.
+        gpCtx.sceneLighting?.shadowDepthBounds.update(camera);
         gpMark(3);  // decals+lights
         scene.render();
         gpMark(4);  // render

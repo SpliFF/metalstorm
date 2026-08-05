@@ -26,6 +26,77 @@ const _potential = { x: 0, z: 0 };
 const _desired = { x: 0, z: 0 };
 const NO_BIG_UNITS = [];
 
+// --- per-term attribution probe (PLAN-perf M12) ----------------------------
+//
+// Sizes one term of the per-member steering path by REPEATING it k extra times
+// per member and taking the slope of the `entity` phase against k. It is not a
+// toggle, and that is the point: M10 measured the neighbour scan at 5.4 ms by
+// switching it off and it turned out to be ~1.1 ms, because the off-switch also
+// removed the generator and string-key machinery wrapped around it. A repeat
+// leaves every caller, allocation, branch and cache access exactly where it is,
+// so the slope is the term's own marginal cost. Any constant the harness itself
+// adds appears in every arm and cancels.
+//
+// Terms that mutate member state snapshot and restore the few fields they
+// touch, so the k extra evaluations are observationally inert — the real call
+// still runs last, from the same state it would have seen with the probe off.
+//
+// `_pt` is 0 in every shipping frame; each site costs one predicted compare.
+// Set via the SquadManager's `perfProbe` (see squad-manager.js).
+// Terms 1-15 are the `full` steering path (M12). Terms 16-18 (`c*`) are the
+// REDUCED path, `_updateCentroid` — the floor every member pays in every tier,
+// which M12 could not isolate because nothing drove the LOD tier and every
+// squad sat at `full`. With M20's member budget, `setLodBudget(1)` puts ~100 %
+// of members on the floor path and these three terms decompose it (PLAN-perf
+// M21). Their slopes are per rendered member, exactly like 1-15.
+export const PROBE_TERMS = [
+  'off', 'slot', 'nearestPassable', 'isConstrained', 'updateMode',
+  'trailPointAhead', 'arrive', 'separate', 'softLeash', 'potentialField',
+  'bigUnits', 'mix', 'integrate', 'hardLeash', 'trackStuck', 'updateMember',
+  'cSlot', 'cGround', 'cWrite',
+];
+let _pt = 0;   // active term index into PROBE_TERMS, 0 = off
+let _pn = 0;   // extra repetitions per member per frame
+
+export function setPerfProbe(term = 'off', repeat = 0) {
+  const i = PROBE_TERMS.indexOf(term);
+  if (i < 0) throw new Error(`unknown probe term: ${term} (have ${PROBE_TERMS.join(', ')})`);
+  _pt = i; _pn = i === 0 ? 0 : Math.max(0, repeat | 0);
+  return { term: PROBE_TERMS[_pt], repeat: _pn };
+}
+
+export function getPerfProbe() { return { term: PROBE_TERMS[_pt], repeat: _pn }; }
+
+// --- M13 fix switches (PLAN-perf M13) --------------------------------------
+//
+// Each shipped M13 fix keeps its pre-fix code path behind a switch so the win
+// can be A/B'd inside one session at the L-battle and flipped back to prove it
+// is the lever and not drift (the exit gate every fix milestone in this track
+// has had to meet). They ship ON; `off` is the legacy arm and is measurement
+// only. Set via the SquadManager's `perfFix` (see squad-manager.js).
+const _fix = {
+  /** Compute `trailPointAhead` only for the ~5 % of members whose steering
+   *  actually consults it (COLUMN / recovering / mid-turn) plus naval, which
+   *  takes it as a parameter. Off = compute it for 100 % of members. */
+  trailGuard: true,
+  /** Project slots through `passability.nearestPassableInto` into a shared
+   *  scratch object. Off = the allocating `nearestPassable`. */
+  passScratch: true,
+};
+
+export function setPerfFix(name, on) {
+  if (name === undefined) { for (const k of Object.keys(_fix)) _fix[k] = true; return { ..._fix }; }
+  if (!(name in _fix)) throw new Error(`unknown perf fix: ${name} (have ${Object.keys(_fix).join(', ')})`);
+  _fix[name] = !!on;
+  return { ..._fix };
+}
+
+export function getPerfFixes() { return { ..._fix }; }
+
+// Scratch for the slot projection (see _fix.passScratch). Read within the
+// member loop before the next projection overwrites it, exactly like _slotW.
+const _proj = { x: 0, z: 0 };
+
 export class Squad {
   /**
    * @param {number} id             sim unit id (authoritative)
@@ -77,6 +148,11 @@ export class Squad {
     this._nextStaggerAt = 0;
 
     this._lod = 'full';                 // 'full' | 'centroid' | 'icon' (see setter below)
+    // Ranking key for the manager's member-budget LOD policy (PLAN-perf M20):
+    // squared distance to the camera, refreshed on that policy's own cadence.
+    // Declared here, not bolted on from the manager, so every Squad keeps one
+    // hidden class — this object is the hot one in the entity phase.
+    this._lodD2 = 0;
     this._spawned = false;
 
     // Transport (PLAN-metalstorm-squad-transport.md §2): a client-only
@@ -250,6 +326,12 @@ export class Squad {
     const prev = this._lod;
     this._lod = value;
     if (!this._spawned) return;
+    // Air holds its cruise altitude in `_updateCentroid` by replaying each
+    // member's altitude *relative to the squad centroid*, because there is no
+    // ground to sample it back from. Snapshot it on the way down.
+    if (value === 'centroid' && this.profile.steerer === 'air') {
+      for (const m of this.members) if (m.alive && !m.released) m.centroidDy = m.y - this.cy;
+    }
     if (prev !== 'icon' && value === 'icon') this._releaseInstances();
     else if (prev === 'icon' && value !== 'icon') this._rebuildInstances();
   }
@@ -400,6 +482,10 @@ export class Squad {
       x: victim.x, y: victim.y, z: victim.z,
       dirX: dirX / len, dirZ: dirZ / len,
     });
+    // The instance is gone; drop the handle with it. Dead members are skipped
+    // by every loop that would use it, but the backend now RECYCLES handles
+    // (PLAN-perf M13 fix 2), so a retained one would alias a later member.
+    victim.handle = -1;
     const handle = this.backend.spawnWreck(victim.x, victim.y, victim.z, victim.headingY, victim.visual);
     // Manager-level wreck pool (§9): TTL/fade/global cap live there, keyed
     // off the handle spawnWreck returns.
@@ -598,6 +684,15 @@ export class Squad {
 
   /** Steer + integrate living members. `neighbourQuery` yields nearby members
    *  (this squad + others) for separation; supplied by the manager.
+   *
+   *  NEIGHBOUR_QUERY contract — two accepted shapes, because this is the
+   *  hottest call in the client frame (PLAN-perf M10):
+   *    - **hot path**: `query(m)` fills the reusable array `query.buf` and
+   *      returns how many leading entries are live. No allocation per member.
+   *    - **plain**: `query(m)` returns any iterable of neighbours. Simpler and
+   *      allocating; used by the tests and by the legacy A/B path.
+   *  The steerers accept either — a numeric return selects the buffer form.
+   *
    *  `passability` (optional — the manager may not have one built yet) is
    *  the shared grid from passability.js; ground/naval steerers query it,
    *  air ignores it entirely (pathfinding §6).
@@ -625,6 +720,10 @@ export class Squad {
     // the profile-derived one; the vocabularies are identical by design —
     // see movement-profiles.js's header.
     const moveClass = this.def.moveClass ?? this.profile.moveClass;
+    // Loop-invariant: the steerer is a property of the squad's profile. The
+    // naval steerer takes the trail point as a parameter, so it is the one
+    // steerer that still needs it computed unconditionally (M13 fix 1).
+    const navalSteerer = this.profile.steerer === 'naval';
 
     for (const m of this.members) {
       if (!m.alive) continue;
@@ -640,6 +739,7 @@ export class Squad {
         };
       }
       slotToWorld(localSlot, this.cx, this.cz, this.heading, _slotW);
+      if (_pt === 1) for (let r = _pn; r > 0; r--) slotToWorld(localSlot, this.cx, this.cz, this.heading, _slotW);
 
       if (this.profile.steerer === 'air') {
         this._airStep(m, dt, nowSec, maxSpeed);
@@ -652,19 +752,44 @@ export class Squad {
       // COLUMN mode, mid-turn, or while recovering from being stuck.
       let target = _slotW;
       if (passability && moveClass) {
-        target = passability.nearestPassable(_slotW.x, _slotW.z, moveClass, this.cfg.slotProjectionCap);
+        const cap = this.cfg.slotProjectionCap;
+        if (_pt === 2) for (let r = _pn; r > 0; r--) passability.nearestPassable(_slotW.x, _slotW.z, moveClass, cap);
+        // M13 fix 3: project into shared scratch. The returned point never
+        // escapes this iteration (it is consumed by _isConstrained, the
+        // steerer and _trackStuck), so it does not need its own object.
+        target = _fix.passScratch && passability.nearestPassableInto
+          ? passability.nearestPassableInto(_slotW.x, _slotW.z, moveClass, cap, _proj)
+          : passability.nearestPassable(_slotW.x, _slotW.z, moveClass, cap);
+      }
+      if (_pt === 3 && passability && moveClass) {
+        for (let r = _pn; r > 0; r--) this._isConstrained(m, _slotW, target, passability, moveClass);
       }
       const constrained = passability && moveClass
         ? this._isConstrained(m, _slotW, target, passability, moveClass)
         : false;
+      if (_pt === 4) {
+        const sMode = m.mode, sStreak = m._modeStreak;
+        for (let r = _pn; r > 0; r--) this._updateMode(m, constrained);
+        m.mode = sMode; m._modeStreak = sStreak;
+      }
       this._updateMode(m, constrained);
 
-      const trailPt = this.trailPointAhead(m);
-      if (trailPt && (m.mode === 'COLUMN' || m.recoveryLevel >= 1 || inTurn)) {
+      if (_pt === 5) for (let r = _pn; r > 0; r--) this.trailPointAhead(m);
+      // M13 fix 1: trailPointAhead is an O(trail length) scan (trailMaxPoints
+      // 64, mean trail 34-36 in a settled fight) that ran for every member and
+      // was consulted by ~5 % of them (M12 measured 360 of 7 204 in COLUMN).
+      // Hoist it behind the same condition that already gated its USE — a pure
+      // deletion of wasted work, with the naval steerer excepted because it
+      // takes the point as a parameter rather than through `target`.
+      const wantsTrail = m.mode === 'COLUMN' || m.recoveryLevel >= 1 || inTurn;
+      const trailPt = (!_fix.trailGuard || wantsTrail || navalSteerer)
+        ? this.trailPointAhead(m)
+        : null;
+      if (trailPt && wantsTrail) {
         target = trailPt;
       }
 
-      if (this.profile.steerer === 'naval') {
+      if (navalSteerer) {
         this._navalStep(m, dt, target, trailPt, maxSpeed, softLeashDist, leash, neighbourQuery);
       } else {
         // Big-unit threading (flow §4) lives inside the ground steerer —
@@ -679,18 +804,34 @@ export class Squad {
   // --- ground steerer (default) -------------------------------------------
 
   _groundStep(m, dt, target, maxSpeed, softLeashDist, leash, passability, moveClass, neighbourQuery, bigUnits = NO_BIG_UNITS) {
+    if (_pt === 6) for (let r = _pn; r > 0; r--) arrive(m.x, m.z, target.x, target.z, maxSpeed, this.cfg.arrivalRadius, _arr);
     arrive(m.x, m.z, target.x, target.z, maxSpeed, this.cfg.arrivalRadius, _arr);
 
     if (m.recoveryLevel >= 2) { _sep.x = 0; _sep.z = 0; }
     else {
-      separate(m.x, m.z, m.squadId, neighbourQuery(m), this.cfg.separationRadius,
+      if (_pt === 7) for (let r = _pn; r > 0; r--) {
+        const nbP = neighbourQuery(m);
+        const nP = typeof nbP === 'number' ? nbP : undefined;
+        separate(m.x, m.z, m.squadId, nP === undefined ? nbP : neighbourQuery.buf,
+          this.cfg.separationRadius,
+          this.cfg.separationWeightSameSquad, this.cfg.separationWeightOtherSquad,
+          this.cfg.separationDeadband, _sep, nP);
+      }
+      const nb = neighbourQuery(m);
+      const n = typeof nb === 'number' ? nb : undefined;   // see NEIGHBOUR_QUERY note
+      separate(m.x, m.z, m.squadId, n === undefined ? nb : neighbourQuery.buf,
+        this.cfg.separationRadius,
         this.cfg.separationWeightSameSquad, this.cfg.separationWeightOtherSquad,
-        this.cfg.separationDeadband, _sep);
+        this.cfg.separationDeadband, _sep, n);
     }
 
+    if (_pt === 8) for (let r = _pn; r > 0; r--) softLeashPull(m.x, m.z, this.cx, this.cz, softLeashDist, this.cfg.softLeashGain, _leash);
     softLeashPull(m.x, m.z, this.cx, this.cz, softLeashDist, this.cfg.softLeashGain, _leash);
 
     _potential.x = 0; _potential.z = 0;
+    if (_pt === 9 && passability && moveClass) {
+      for (let r = _pn; r > 0; r--) this._potentialField(m, passability, _potential);
+    }
     if (passability && moveClass) this._potentialField(m, passability, _potential);
 
     // Big-unit threading (PLAN-metalstorm-flow.md §4): hull bow-wave by
@@ -698,6 +839,12 @@ export class Squad {
     // legitimately threading under a hull (underpass-eligible moveClass).
     _big.x = 0; _big.z = 0;
     let underHull = false;
+    if (_pt === 10) for (let r = _pn; r > 0; r--) {
+      for (const bu of bigUnits) {
+        if (isUnderHull(m, bu, moveClass)) patchPush(m, bu, this.cfg, _big);
+        else hullPush(m, bu, this.cfg, _big);
+      }
+    }
     for (const bu of bigUnits) {
       if (isUnderHull(m, bu, moveClass)) {
         underHull = true;
@@ -707,6 +854,15 @@ export class Squad {
       }
     }
 
+    if (_pt === 11) for (let r = _pn; r > 0; r--) {
+      _desired.x = _arr.x * this.cfg.arrivalWeight + _sep.x * this.cfg.separationWeight * maxSpeed
+                 + _leash.x + _potential.x * this.cfg.potentialFieldWeight
+                 + _big.x * this.cfg.bigUnitWeight * maxSpeed;
+      _desired.z = _arr.z * this.cfg.arrivalWeight + _sep.z * this.cfg.separationWeight * maxSpeed
+                 + _leash.z + _potential.z * this.cfg.potentialFieldWeight
+                 + _big.z * this.cfg.bigUnitWeight * maxSpeed;
+      clampLen(_desired, underHull ? maxSpeed * this.cfg.underHullSpeedPenalty : maxSpeed);
+    }
     _desired.x = _arr.x * this.cfg.arrivalWeight + _sep.x * this.cfg.separationWeight * maxSpeed
                + _leash.x + _potential.x * this.cfg.potentialFieldWeight
                + _big.x * this.cfg.bigUnitWeight * maxSpeed;
@@ -717,7 +873,17 @@ export class Squad {
     // traversal cost for underpass classes (flow.md §3).
     clampLen(_desired, underHull ? maxSpeed * this.cfg.underHullSpeedPenalty : maxSpeed);
 
+    if (_pt === 12) {
+      const sx = m.x, sz = m.z, sy = m.y, svx = m.vx, svz = m.vz, sh = m.headingY, sg = m.gait;
+      for (let r = _pn; r > 0; r--) m.integrate(_desired.x, _desired.z, dt, this.backend);
+      m.x = sx; m.z = sz; m.y = sy; m.vx = svx; m.vz = svz; m.headingY = sh; m.gait = sg;
+    }
     m.integrate(_desired.x, _desired.z, dt, this.backend);
+    if (_pt === 13) {
+      const sx = m.x, sz = m.z, sy = m.y;
+      for (let r = _pn; r > 0; r--) this._applyHardLeash(m, leash);
+      m.x = sx; m.z = sz; m.y = sy;
+    }
     this._applyHardLeash(m, leash);
 
     if (bigUnits.length > 0) {
@@ -734,7 +900,15 @@ export class Squad {
       m.y = this.backend.groundHeight(m.x, m.z);
     }
 
+    if (_pt === 14) {
+      const sf = m._stuckFrames, sd = m._lastTargetDistSq, sr = m.recoveryLevel;
+      const sx = m.x, sz = m.z, sy = m.y;
+      for (let r = _pn; r > 0; r--) this._trackStuck(m, target);
+      m._stuckFrames = sf; m._lastTargetDistSq = sd; m.recoveryLevel = sr;
+      m.x = sx; m.z = sz; m.y = sy;
+    }
     this._trackStuck(m, target);
+    if (_pt === 15) for (let r = _pn; r > 0; r--) this.backend.updateMember(m.handle, m.x, m.y, m.z, m.headingY, m.gait);
     this.backend.updateMember(m.handle, m.x, m.y, m.z, m.headingY, m.gait);
   }
 
@@ -748,9 +922,12 @@ export class Squad {
 
     if (m.recoveryLevel >= 2) { _sep.x = 0; _sep.z = 0; }
     else {
-      separate(m.x, m.z, m.squadId, neighbourQuery(m), this.cfg.separationRadius,
+      const nb = neighbourQuery(m);
+      const n = typeof nb === 'number' ? nb : undefined;   // see NEIGHBOUR_QUERY note
+      separate(m.x, m.z, m.squadId, n === undefined ? nb : neighbourQuery.buf,
+        this.cfg.separationRadius,
         this.cfg.separationWeightSameSquad, this.cfg.separationWeightOtherSquad,
-        this.cfg.separationDeadband, _sep);
+        this.cfg.separationDeadband, _sep, n);
     }
     softLeashPull(m.x, m.z, this.cx, this.cz, softLeashDist, this.cfg.softLeashGain, _leash);
 
@@ -868,11 +1045,45 @@ export class Squad {
 
   /** LOD fallback: park living members at the centroid (no steering cost).
    *  Released (icon-tier) members have no instance and are skipped. */
+  /** The reduced tier (§5): hold the formation RIGIDLY on the squad centroid.
+   *  Every member is written to its own slot offset rotated by the squad
+   *  heading, ground-snapped (air replays its snapshotted cruise offset), with
+   *  the walk cycle still advancing off the squad's own ground speed. What
+   *  stops is per-member steering only: separation, leash/arrival, trail
+   *  following, passability projection, stuck recovery, banking, repack glide.
+   *
+   *  ⚠️ Before PLAN-perf M20 this wrote every member to the centroid *point*,
+   *  collapsing the whole squad into one stacked blob. Nothing ever drove the
+   *  tier (M19 Finding 5 — `syncSquad` never supplied a `lod`), so that was
+   *  never on screen; it would have been the moment a producer was wired, and
+   *  M20 wires one. The member budget in squad-manager.js is that producer. */
   _updateCentroid() {
+    const s = Math.sin(this.heading), c = Math.cos(this.heading);
+    const air = this.profile.steerer === 'air';
+    // Squad-level displacement drives the gait for every member: one add each,
+    // no steering. A formation sliding along with frozen legs is the most
+    // visible artifact of this tier, and this is what removes it.
+    const gaitStep = this._prevUpdateCx == null ? 0
+      : Math.hypot(this.cx - this._prevUpdateCx, this.cz - this._prevUpdateCz) * 0.1;
+    this._prevUpdateCx = this.cx; this._prevUpdateCz = this.cz; this._prevUpdateHeading = this.heading;
     for (const m of this.members) {
       if (!m.alive || m.released) continue;
-      m.x = this.cx; m.y = this.cy; m.z = this.cz; m.headingY = this.heading;
-      this.backend.updateMember(m.handle, m.x, m.y, m.z, m.headingY, 0);
+      const slot = this.slots[m.slot];
+      // Probe sites (M21): repeats are observationally inert — `cSlot` and
+      // `cGround` write only into scratch, `cWrite` re-issues the same
+      // transform the real call issues last from identical state.
+      if (_pt === 16) for (let r = _pn; r > 0; r--) {
+        _slotW.x = this.cx + (slot.x * c + slot.z * s);
+        _slotW.z = this.cz + (-slot.x * s + slot.z * c);
+      }
+      m.x = this.cx + (slot.x * c + slot.z * s);
+      m.z = this.cz + (-slot.x * s + slot.z * c);
+      if (_pt === 17 && !air) for (let r = _pn; r > 0; r--) this.backend.groundHeight(m.x, m.z);
+      m.y = air ? this.cy + m.centroidDy : this.backend.groundHeight(m.x, m.z);
+      m.headingY = this.heading;
+      m.gait = (m.gait + gaitStep) % 1;
+      if (_pt === 18) for (let r = _pn; r > 0; r--) this.backend.updateMember(m.handle, m.x, m.y, m.z, m.headingY, m.gait);
+      this.backend.updateMember(m.handle, m.x, m.y, m.z, m.headingY, m.gait);
     }
   }
 

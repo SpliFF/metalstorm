@@ -43,6 +43,14 @@ export const DEFAULT_CONFIG = {
   denseCellOccupancy: 16,
   denseCellRadiusMul: 1.5,        // aggregate radius = cellSize * this
 
+  // Fast neighbour broad-phase (PLAN-perf M10): numeric spatial-hash keys and
+  // a reusable neighbour buffer, instead of "gx:gz" string keys and a
+  // generator. Selects exactly the same neighbours — it is an allocation and
+  // dispatch change, not a behaviour change — so this exists only as the
+  // reversible in-session A/B switch Track P requires. Set false to restore
+  // the original path.
+  fastNeighbours: true,
+
   // Wrecks (§5): brief post-spawn presence in the avoidance hash so members
   // don't visibly clip through debris the instant it lands, then
   // permanently non-colliding (members may walk over old wreckage) — keeps
@@ -88,7 +96,45 @@ export const DEFAULT_CONFIG = {
   // LOD: below this on-screen size (px, supplied by adapter) skip steering and
   // render members at the centroid; far beyond, the adapter drops to an icon
   // (PLAN-macro-map.md tiers).
+  // NOTE (PLAN-perf M20): nothing reads this. It describes the screen-size
+  // policy the tier was designed for; the policy that actually ships is the
+  // member budget below, because M19 Finding 6 measured a pure distance/size
+  // cut recovering only 8 % of the win at a massed-battle pose. Kept as the
+  // record of the intended alternative, not as live config.
   steerMinScreenPx: 8,
+
+  // --- Reduced-detail member budget (PLAN-perf M20) ------------------------
+  // Per-member steering is 45-49 % of the client's `entity` phase at 14 k
+  // rendered members and scales linearly with them (M19 Finding 5), so the
+  // frame is bounded by capping how many members are steered at all rather
+  // than by how far away they are. Every `lodMemberBudgetIntervalSec` the
+  // manager ranks squads by distance to the camera and keeps the nearest at
+  // the `full` tier until their cumulative alive-member count reaches
+  // `lodFullMemberBudget`; the remainder drop to `centroid` (rigid formation,
+  // no steering — squad.js `_updateCentroid`).
+  //
+  // 5 500 is measured, not guessed. At the budget subject (XL900: 900 sim
+  // units, 10 724 rendered members, 1920x1200) M20 bracketed the policy on and
+  // off four times: steering costs 0.448 us per steered member on top of a
+  // 0.697 us/member floor that survives switching it off, so
+  //   p95 ms ~= 5.9 + 0.697 us * (all members) + 0.448 us * (steered members)
+  // and 5 500 puts the subject at p95 16.1-16.7 against the 16.7 ms target,
+  // from 19.5-20.3 unbudgeted. It is a per-machine number in the same sense
+  // `neighbourCap` is: it encodes how many members THIS class of client can
+  // steer inside a 60 Hz frame. Set 0 to disable the policy entirely — every
+  // squad stays `full` and the frame is the pre-M20 frame.
+  lodFullMemberBudget: 5500,
+  // Re-rank cadence. The ranking is a sort of the squad list (~1 k entries at
+  // XL900), not per-member work, so this is cheap; it is slow only to keep the
+  // tier from changing under a squad several times a second.
+  lodMemberBudgetIntervalSec: 0.25,
+  // Boundary hysteresis as a fraction of the budget. The budget is a hard cap,
+  // so the slack goes on the way back UP: a squad already at `full` holds it up
+  // to the budget, one at `centroid` is promoted only inside budget*(1-h). The
+  // steady state therefore sits in [budget*(1-h), budget] depending on which
+  // side it converged from, and never above. Without it the squads straddling
+  // the cap flip tier on every re-rank as the battle shuffles.
+  lodMemberBudgetHysteresis: 0.1,
 
   // Big-unit threading (PLAN-metalstorm-flow.md §4, task 3/4). Weight applied
   // to the accumulated big-unit push term alongside arrival/separation.

@@ -56,6 +56,7 @@ import {
     type LodPlacement,
     type LodModelExtent,
 } from './feature-lod.js';
+import { FX_LIGHT_EXCLUDED_LAYER } from './fx-light-pool.js';
 import { DitherFadePlugin } from './dither-fade-plugin.js';
 import { ImpostorUvPlugin } from './impostor-uv-plugin.js';
 import { selectAtlasCell, atlasCellCount, type AtlasLayout } from './impostor-atlas.js';
@@ -467,6 +468,12 @@ export class FeatureLodController {
         // path needs must stay OFF here.
         mesh.alwaysSelectAsActiveMesh = false;
         mesh.cullingStrategy = AbstractMesh.CULLINGSTRATEGY_BOUNDINGSPHERE_ONLY;
+        // PLAN-perf M2: opt this tile out of the FX light pool. Additive bit,
+        // so camera visibility is unchanged; only `Light.canAffectMesh` reads
+        // it. A tile is hundreds-to-thousands of elmos of forest — a weapon
+        // muzzle flash has no readable effect on it, but the pool would still
+        // cost 4 lights' worth of uniform re-binds on every tile's draw call.
+        mesh.layerMask |= FX_LIGHT_EXCLUDED_LAYER;
         mesh.setEnabled(false);
     }
 

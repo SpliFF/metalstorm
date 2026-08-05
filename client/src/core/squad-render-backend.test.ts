@@ -1,8 +1,11 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import {
     NullEngine, Scene, FreeCamera, Vector3, Color3, Matrix, Mesh, MeshBuilder,
 } from '@babylonjs/core';
-import { SquadRenderBackend, FADE_FRAC, type MemberModel } from './squad-render-backend.js';
+import {
+    SquadRenderBackend, FADE_FRAC, setLegacyBackendPlumbing, setLegacyBufferRebind,
+    setBboxRefreshEvery, type MemberModel,
+} from './squad-render-backend.js';
 import type { ImpostorAtlas } from './impostor-renderer.js';
 
 // Members of defs with an impostor sprite atlas draw as camera-facing billboard
@@ -572,6 +575,104 @@ describe('SquadRenderBackend impostor sprite members', () => {
         });
     });
 
+    // --- M13 fix 2: the de-plumbed updateMember preamble --------------------
+    //
+    // updateMember runs once per rendered member per frame (7 200/frame at the
+    // L-battle) and M12 attributed 14.2 % of the whole `entity` phase to it,
+    // most of it in the preamble rather than the work. M13 replaced the handle
+    // Map with a dense recycled array, the per-call `fallback` closure with a
+    // flag, and the `${defId}:${team}` sprite-pool key with a cached pool. The
+    // pre-fix path stays reachable so the win can be A/B'd in-session — so both
+    // arms have to agree, and the recycling must not let a stale handle alias a
+    // live member.
+    describe('M13 de-plumbed member lookup', () => {
+        afterEach(() => setLegacyBackendPlumbing(false));
+
+        it('ships with the legacy arm off', () => {
+            expect(setLegacyBackendPlumbing(false)).toBe(false);
+        });
+
+        it('recycles a released handle instead of growing the table forever', () => {
+            const { backend } = makeBackend(new Set([7]));
+            backend.setSquadTeam(1, 0);
+            const first = backend.createMember(1, 0, { defId: 7, variant: 0 });
+            backend.releaseMember(first);
+            const second = backend.createMember(1, 1, { defId: 7, variant: 0 });
+            // An icon<->full LOD flip releases and recreates every member of a
+            // squad, so a monotonic counter would grow without bound.
+            expect(second).toBe(first);
+        });
+
+        it('a recycled handle addresses the NEW member, and the old one is gone', () => {
+            const { backend } = makeBackend(new Set([7]));
+            backend.setSquadTeam(1, 0);
+            const h = backend.createMember(1, 0, { defId: 7, variant: 0 });
+            backend.updateMember(h, 5, 0, 5, 0, 0);
+            backend.releaseMember(h);
+            // Stale writes through the released handle must not resurrect it.
+            backend.updateMember(h, 9, 0, 9, 0, 0);
+            expect(backend.getMemberFades(h)).toEqual({});
+
+            const reused = backend.createMember(1, 1, { defId: 7, variant: 0 });
+            expect(reused).toBe(h);
+            backend.updateMember(reused, 11, 0, 11, 0, 0);
+            expect(backend.getMemberFades(reused).sprite).toBe(1);
+        });
+
+        it('member and wreck handles stay in separate tables even when they collide', () => {
+            const { backend } = makeBackend(new Set([7]));
+            backend.setSquadTeam(1, 0);
+            const member = backend.createMember(1, 0, { defId: 7, variant: 0 });
+            const wreck = backend.spawnWreck(3, 0, 3, 0, {});
+            backend.updateMember(member, 5, 0, 5, 0, 0);
+            // Despawning a wreck whose id happens to equal a live member's must
+            // not touch the member.
+            backend.despawnWreck(wreck);
+            if (wreck === member) backend.despawnWreck(member);
+            expect(backend.getMemberFades(member).sprite).toBe(1);
+        });
+
+        it('places a member identically with the legacy arm on and off', () => {
+            const models = new Map([[7, bodyFactory(7)]]);
+            const read = (legacy: boolean) => {
+                setLegacyBackendPlumbing(legacy);
+                const { backend, scene } = makeBackend(
+                    new Set([7]), { models, impostorDist: 900 });
+                backend.setSquadTeam(1, 0);
+                const near = backend.createMember(1, 0, { defId: 7, variant: 0 });
+                const far = backend.createMember(1, 1, { defId: 7, variant: 0 });
+                backend.updateMember(near, 100, 50, 10, 0.3, 0.5);   // model tier
+                backend.updateMember(far, 100, 50, 2000, 0.3, 0.5);  // sprite tier
+                backend.flush();
+                const sprite = findMesh(scene, 'squadSprite_d7_t0')!;
+                return {
+                    nearFades: backend.getMemberFades(near),
+                    farFades: backend.getMemberFades(far),
+                    spriteMatrices: sprite.thinInstanceGetWorldMatrices()
+                        .map((m) => Array.from(m.toArray())),
+                };
+            };
+            expect(read(false)).toEqual(read(true));
+        });
+
+        it('caches the sprite pool per entry without changing which pool it is', () => {
+            const { backend, scene } = makeBackend(new Set([7]));
+            backend.setSquadTeam(1, 0);
+            backend.setSquadTeam(2, 3);
+            const a = backend.createMember(1, 0, { defId: 7, variant: 0 });
+            const b = backend.createMember(2, 0, { defId: 7, variant: 0 });
+            backend.updateMember(a, 5, 0, 5, 0, 0);
+            backend.updateMember(b, 6, 0, 6, 0, 0);
+            backend.flush();
+            // Different teams must still land in different pools — a cache keyed
+            // on the wrong thing would collapse them into one.
+            expect(findMesh(scene, 'squadSprite_d7_t0')).toBeDefined();
+            expect(findMesh(scene, 'squadSprite_d7_t3')).toBeDefined();
+            expect(backend.getMemberFades(a).sprite).toBe(1);
+            expect(backend.getMemberFades(b).sprite).toBe(1);
+        });
+    });
+
     it('a released sprite slot stops rendering and is reusable', () => {
         const { backend, scene } = makeBackend(new Set([7]));
         backend.setSquadTeam(1, 0);
@@ -583,5 +684,158 @@ describe('SquadRenderBackend impostor sprite members', () => {
         // Slot collapsed to zero scale — matrix is all zeros.
         const m = mesh.thinInstanceGetWorldMatrices()[0].toArray();
         expect(Array.from(m).every((v) => v === 0)).toBe(true);
+    });
+
+    // --- per-frame buffer binding (PLAN-perf M21) ---------------------------
+    //
+    // `thinInstanceSetBuffer` disposes and re-creates the GPU buffer on every
+    // call. The pre-M21 flush called it three times per pool per frame, which
+    // measured 54 % of the per-member `entity` floor at the XL-battle. The
+    // steady state must bind once and then upload in place — but a pool that
+    // GREW has brand-new typed arrays and MUST re-bind, or it would render
+    // frozen at its old capacity.
+    describe('thin-instance buffer binding', () => {
+        type SetBufferFn = (...a: unknown[]) => unknown;
+        let restoreRebindCounter: (() => void) | null = null;
+        let restoreBboxCounter: (() => void) | null = null;
+
+        /** Count `thinInstanceSetBuffer` calls across all meshes. Babylon
+         *  assigns it directly onto `Mesh.prototype`, so the patch must be
+         *  restored by re-assigning the original — deleting the key removes
+         *  Babylon's own method. */
+        function countRebinds(): () => number {
+            let n = 0;
+            const proto = Mesh.prototype as unknown as { thinInstanceSetBuffer: SetBufferFn };
+            const orig = proto.thinInstanceSetBuffer;
+            proto.thinInstanceSetBuffer = function (this: Mesh, ...a: unknown[]) {
+                n++;
+                return orig.apply(this, a);
+            };
+            restoreRebindCounter = () => { proto.thinInstanceSetBuffer = orig; };
+            return () => n;
+        }
+
+        afterEach(() => {
+            restoreRebindCounter?.();
+            restoreRebindCounter = null;
+            restoreBboxCounter?.();
+            restoreBboxCounter = null;
+            setLegacyBufferRebind(false);
+            setBboxRefreshEvery(15);
+        });
+
+        it('does not re-bind buffers on a steady-state flush', () => {
+            const { backend } = makeBackend(new Set([7]));
+            backend.setSquadTeam(1, 0);
+            const h = backend.createMember(1, 0, { defId: 7, variant: 0 });
+            backend.updateMember(h, 5, 0, 5, 0, 0);
+            backend.flush();               // first flush binds
+
+            const read = countRebinds();
+            for (let f = 0; f < 10; f++) {
+                backend.updateMember(h, 5 + f, 0, 5, 0, 0);
+                backend.flush();
+            }
+            expect(read()).toBe(0);
+        });
+
+        it('still publishes moved members after the binding flush', () => {
+            const { backend, scene } = makeBackend(new Set([7]));
+            backend.setSquadTeam(1, 0);
+            const h = backend.createMember(1, 0, { defId: 7, variant: 0 });
+            backend.updateMember(h, 5, 0, 5, 0, 0);
+            backend.flush();
+            backend.updateMember(h, 111, 0, 222, 0, 0);
+            backend.flush();
+            const mesh = findMesh(scene, 'squadSprite_d7_t0')!;
+            // The read-back cache must not still hold the first pose.
+            const m = mesh.thinInstanceGetWorldMatrices()[0].toArray();
+            expect(m[12]).toBeCloseTo(111, 3);
+            expect(m[14]).toBeCloseTo(222, 3);
+        });
+
+        it('re-binds after a pool grows, so the new arrays reach the GPU', () => {
+            const { backend, scene } = makeBackend(new Set([7]));
+            backend.setSquadTeam(1, 0);
+            const handles: number[] = [];
+            // Default pool capacity is 64 — cross it so growPool() runs.
+            for (let i = 0; i < 65; i++) {
+                const h = backend.createMember(1, i, { defId: 7, variant: 0 });
+                backend.updateMember(h, i, 0, i * 2, 0, 0);
+                handles.push(h);
+            }
+            backend.flush();
+            const mesh = findMesh(scene, 'squadSprite_d7_t0')!;
+            expect(mesh.thinInstanceCount).toBe(65);
+            // The member past the old capacity must be at its real pose, which
+            // is only true if the grown arrays were re-bound.
+            const m = mesh.thinInstanceGetWorldMatrices()[64].toArray();
+            expect(m[12]).toBeCloseTo(64, 3);
+            expect(m[14]).toBeCloseTo(128, 3);
+        });
+
+        /** Count `thinInstanceRefreshBoundingInfo` calls across all meshes. */
+        function countBboxRefresh(): () => number {
+            let n = 0;
+            const proto = Mesh.prototype as unknown as { thinInstanceRefreshBoundingInfo: SetBufferFn };
+            const orig = proto.thinInstanceRefreshBoundingInfo;
+            proto.thinInstanceRefreshBoundingInfo = function (this: Mesh, ...a: unknown[]) {
+                n++;
+                return orig.apply(this, a);
+            };
+            restoreBboxCounter = () => { proto.thinInstanceRefreshBoundingInfo = orig; };
+            return () => n;
+        }
+
+        it('refreshes bounding info on a cadence, not every flush', () => {
+            setBboxRefreshEvery(5);        // before the binding flush arms it
+            const { backend } = makeBackend(new Set([7]));
+            backend.setSquadTeam(1, 0);
+            const h = backend.createMember(1, 0, { defId: 7, variant: 0 });
+            backend.updateMember(h, 5, 0, 5, 0, 0);
+            backend.flush();               // binds + refreshes, countdown := 5
+
+            const read = countBboxRefresh();
+            for (let f = 0; f < 20; f++) {
+                backend.updateMember(h, 5 + f, 0, 5, 0, 0);
+                backend.flush();
+            }
+            // Period 5 over 20 flushes — 3 refreshes, not 20.
+            expect(read()).toBe(3);
+        });
+
+        it('refreshes immediately when a pool grows, never on a stale box', () => {
+            const { backend } = makeBackend(new Set([7]));
+            backend.setSquadTeam(1, 0);
+            const first = backend.createMember(1, 0, { defId: 7, variant: 0 });
+            backend.updateMember(first, 0, 0, 0, 0, 0);
+            backend.flush();
+
+            setBboxRefreshEvery(1000);     // would otherwise never refresh again
+            const read = countBboxRefresh();
+            // Cross the default capacity of 64 so growPool() runs.
+            for (let i = 1; i < 65; i++) {
+                const h = backend.createMember(1, i, { defId: 7, variant: 0 });
+                backend.updateMember(h, i * 10, 0, 0, 0, 0);
+            }
+            backend.flush();
+            expect(read()).toBe(1);
+        });
+
+        it('the legacy arm restores the per-frame re-bind, for the A/B', () => {
+            const { backend } = makeBackend(new Set([7]));
+            backend.setSquadTeam(1, 0);
+            const h = backend.createMember(1, 0, { defId: 7, variant: 0 });
+            backend.updateMember(h, 5, 0, 5, 0, 0);
+            backend.flush();
+
+            setLegacyBufferRebind(true);
+            const read = countRebinds();
+            backend.updateMember(h, 6, 0, 6, 0, 0);
+            backend.flush();
+            setLegacyBufferRebind(false);
+            // matrix + impostorCell + ditherFade on a sprite pool.
+            expect(read()).toBe(3);
+        });
     });
 });
