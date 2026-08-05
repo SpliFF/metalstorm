@@ -1,0 +1,13 @@
+{
+  "comment": "Replaces skerry_reach_verify_solo.json (retired 2026-08-06, PLAN-metalstorm-wars.md §7.6). skerry_reach is the worst map in the imported set: 19% VEH-passable, and its EIGHT start positions land in EIGHT separate connected components, so nothing that spawns there can reach anything else. techno_lands_final_2.60_wide is the opposite and is the right target for a solo terrain/render check: 100% passable, one component, 4 starts. No scenario — this manifest boots the game_start stub force on purpose, so it stays useful for map/render verification independent of any war content.",
+  "name": "dev:techno-lands-verify-solo",
+  "map": "techno_lands_final_2.60_wide",
+  "game": "metalstorm",
+  "aiSlots": [
+    { "aiId": "null", "team": 1, "startPos": 1 }
+  ],
+  "players": [
+    { "username": "dev-verify", "team": 0, "startPos": 0, "spectator": false }
+  ],
+  "autoStart": true
+}

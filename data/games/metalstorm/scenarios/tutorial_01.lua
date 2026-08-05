@@ -17,7 +17,19 @@ return {
     ephemeral = true,            -- no hibernation / persistence
 
     world = {
-        map     = 'meridian_basin',   -- or a dedicated small training map
+        -- Was 'meridian_basin' until 2026-08-06. That map is unplayable — its
+        -- start positions sit in three disconnected components of the VEH and
+        -- HEAVY passability masks (PLAN-metalstorm-wars.md §7.6), so a
+        -- tutorial teaching a player to move a squad could have taught them a
+        -- squad that cannot get anywhere. scorched_crossing_v2.4 passes
+        -- `regions_from_map.py --verify` for all three movement classes.
+        --
+        -- Nothing else in this stub is coordinate-bound, so this is a genuine
+        -- one-line rebind rather than a port. When the tutorial gets real
+        -- beats, size them against this map's 4x4 / 1792-elmo region graph
+        -- (data/maps/scorched_crossing_v2.4/mapdata/regions.lua) — or against
+        -- a dedicated small training map, which is still the better answer.
+        map     = 'scorched_crossing_v2.4',
         regions = {},                 -- pre-set ownership: { [key] = teamID }
     },
 

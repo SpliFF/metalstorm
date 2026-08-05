@@ -28,6 +28,16 @@ on infantry would reproduce exactly the Meridian failure.
 Usage:
     regions_from_map.py <map-dir> [--class VEH] [--target-regions 20]
                         [--starts "x,z;x,z"] [--verify] [--dry-run]
+
+`--verify` IS READ-ONLY. It used to write `mapdata/regions.lua` + `regions.json`
+like a plain run and merely add an exit code on top, which meant "check whether
+this map is playable" silently *converted the map to the graph provider*. That
+is not hypothetical: `green_flat_x34_v3` and `skerry_reach` deliberately ship no
+`mapdata/regions.lua` so that `game_regions.lua` selects the 2048-elmo GRID
+provider, and `scenario_smoke_test.lua` addresses green_flat by grid key
+("2:2"). One verification sweep across every map gave both of them a 16-region
+named graph and broke those keys. A verifier that mutates what it inspects
+cannot be used to check anything, so `--verify` now implies `--dry-run`.
 """
 
 from __future__ import annotations
@@ -599,9 +609,17 @@ def main(argv=None):
     ap.add_argument("--starts", default=None,
                     help='override start positions, "x,z;x,z"')
     ap.add_argument("--verify", action="store_true",
-                    help="exit non-zero if start positions cannot reach each other")
+                    help="read-only: exit non-zero if start positions cannot "
+                         "reach each other. Writes nothing (implies --dry-run)")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args(argv)
+
+    # See the module docstring: verifying a map must not change it. Without
+    # this, sweeping --verify over every map hands the grid-provider maps a
+    # named graph and silently invalidates every grid region key addressing
+    # them.
+    if args.verify:
+        args.dry_run = True
 
     map_dir = os.path.abspath(args.map_dir.rstrip("/"))
     map_id = os.path.basename(map_dir)
