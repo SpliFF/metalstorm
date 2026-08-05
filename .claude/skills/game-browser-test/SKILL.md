@@ -221,6 +221,26 @@ count in the expected range, not on elapsed time alone. Draw calls are not
 per-frame anywhere obvious — `engine._drawCalls.current` is cumulative, so
 sample it twice against `engine.frameId` and divide.
 
+**⚠️ `mesh.isVisible = false` does not stick if something re-asserts it — use
+`setEnabled(false)`.** Per-frame flush code commonly re-derives visibility, so an
+A/B that hides meshes that way measures **nothing while looking like it worked**.
+`SquadRenderBackend.flushPool` does exactly this
+(`client/src/core/squad-render-backend.ts:823`,
+`pool.mesh.isVisible = pool.highWater > 0`), and PLAN-perf **M11** lost a window
+to it. `setEnabled(false)` is not touched by that path. The tell that caught it
+was **draws/frame going UP** in the window that was supposed to remove geometry —
+so **carry draws/frame as the gate on any "I removed geometry" arm**, and treat a
+draw count that moves the wrong way as proof the lever never engaged, not noise.
+
+**⚠️ A CDP async measurement job only advances while an `evaluate_script` is
+actively awaiting.** Kick a timing window off as a floating promise, then poll it
+by reading a result global, and it reports `state: 'running'` for **minutes**
+after it has actually finished; the identical read taken from a call that first
+`await`s something returns `'done'` immediately. PLAN-perf M11 nearly restarted a
+good capture over this. Poll with an awaited call — e.g.
+`async () => { await window.test.perfDump(500); return window.__winResult; }` —
+or the window looks hung.
+
 **Game choice for UI testing: use `metalstorm`, not `papertanks`.** PaperTanks
 ships no configured LuaUI/minimap/sounds, so UI/HUD tests against it prove
 nothing — widgets simply don't exist there. (This line used to say "use `zk`";
