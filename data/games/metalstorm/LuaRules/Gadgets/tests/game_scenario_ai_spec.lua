@@ -38,6 +38,24 @@ local function newWorld(opts)
         GetModOptions = function() return { scenario = world.name } end,
         GetTeamList = function() return world.teams end,
         GetGaiaTeamID = function() return 99 end,
+        -- The war-health checks that run from GameFrame filter on GetTeamInfo's
+        -- leader (>= 0 means somebody occupies the team; the engine materialises
+        -- unoccupied filler teams with -1). Without this the stipend test below
+        -- errored out of GameFrame before reaching its assertion, so it was
+        -- reporting a mock gap rather than the behaviour it names.
+        GetTeamInfo = function(teamID)
+            for _, t in ipairs(world.teams) do
+                if t == teamID then return nil, 1 end
+            end
+            return nil, -1
+        end,
+        GetTeamUnits = function(teamID)
+            local out = {}
+            for i, u in ipairs(world.createdUnits) do
+                if u.team == teamID then out[#out + 1] = i end
+            end
+            return out
+        end,
         GetGroundHeight = function() return 0 end,
         GetUnitsInCylinder = function() return {} end,
         GetUnitDefID = function() return 1 end,
@@ -64,6 +82,7 @@ local function newWorld(opts)
             world.teamRulesParams[teamID][key] = value
         end,
         SetGameRulesParam = function(key, value) world.gameRulesParams[key] = value end,
+        GetGameRulesParam = function(key) return world.gameRulesParams[key] end,
         Echo = function(msg) world.echoes[#world.echoes + 1] = tostring(msg) end,
     }
 

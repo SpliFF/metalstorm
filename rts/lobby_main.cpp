@@ -22,6 +22,7 @@
 #include "Server/GmDashboardPage.h"
 #include "Server/HttpAuth.h"
 #include "Server/ResourcesParser.h"
+#include "Server/ScenarioDb.h"
 #include "Server/ScenarioDiscovery.h"
 #include "Server/TokenBucket.h"
 #include "System/SpringLog/SpringLog.h"
@@ -137,6 +138,163 @@ static void RunMapConverterPreflight(const std::string &dbPath) {
   } else {
     SLOG(SPRING_LOG_NOTICE, "map preflight: maps up to date");
   }
+}
+
+/// One run of tools/mapgen/scenariogen.py.
+struct ScenarioGenResult {
+  bool ok = false;
+  /// The generated scenario source — the thing that becomes the DB row's
+  /// `lua` column. Empty unless `ok`.
+  std::string lua;
+  /// The `--meta-json` payload, parsed. Carries `id`, `display_name`,
+  /// `map_id`, `seed`, `version` and the echoed `params`.
+  nlohmann::json meta;
+  /// Whatever the generator said on stderr — its human summary on success,
+  /// and on failure the `REJECTED — …` line naming which of its five
+  /// invariants the map violated. Surfaced verbatim to the admin caller:
+  /// "this map cannot host a generated war, and here is which gate said so"
+  /// is the single most useful thing this endpoint can report.
+  std::string diagnostics;
+  int exitCode = -1;
+};
+
+/// True when `s` is safe to interpolate into a shell command line.
+///
+/// Every argument this file passes to the generator goes through here rather
+/// than through quoting alone. `mapId` in particular arrives from an HTTP body
+/// and is concatenated into a popen() string; an allowlist is the only form of
+/// this check that is obviously correct at a glance.
+static bool IsShellSafeToken(const std::string &s) {
+  if (s.empty() || s.size() > 128)
+    return false;
+  for (const char c : s) {
+    const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                    (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
+    if (!ok)
+      return false;
+  }
+  // Leading '-' would be read as an option by the generator's argparse, and
+  // ".." is a traversal even though every character in it passed above.
+  return s.front() != '-' && s.find("..") == std::string::npos;
+}
+
+/// Run tools/mapgen/scenariogen.py for one (map, seed, knobs) and capture both
+/// the scenario source and its metadata.
+///
+/// Shelling out rather than reimplementing: the generator owns the passability
+/// mask, the five gates that refuse to emit an unplayable war, and the id hash.
+/// A C++ port would be a second content pipeline that has to agree with the
+/// first forever. The lobby already shells out to `mapconverter` at startup for
+/// the same reason (RunMapConverterPreflight above).
+///
+/// stderr is redirected to a file rather than merged with 2>&1: under
+/// `--stdout` the generator's stdout carries ONLY the scenario, and merging
+/// would glue its human summary onto the front of the Lua — producing a file
+/// that is not a scenario at all, and, being prose ahead of `return {`, one
+/// ScenarioDiscovery silently drops.
+static ScenarioGenResult
+RunScenarioGen(const std::string &mapsDir, const std::string &mapId,
+               const std::string &gamePath, int64_t seed,
+               const nlohmann::json &knobs) {
+  ScenarioGenResult out;
+
+  if (!IsShellSafeToken(mapId)) {
+    out.diagnostics = "invalid map id";
+    return out;
+  }
+
+  const std::string mapDir = mapsDir + "/" + mapId;
+  std::error_code ec;
+  if (!std::filesystem::is_directory(mapDir, ec)) {
+    out.diagnostics = "no processed map at '" + mapDir +
+                      "' — run the map converter for this map first";
+    return out;
+  }
+
+  // Unique scratch paths. The pid keeps two concurrent admin calls apart even
+  // though HTTP handlers are single-threaded today, and both are removed
+  // before return whatever the outcome.
+  const std::string stem =
+      (std::filesystem::temp_directory_path() /
+       ("scenariogen_" + std::to_string(::getpid()) + "_" + mapId))
+          .string();
+  const std::string metaPath = stem + ".json";
+  const std::string errPath = stem + ".err";
+
+  std::string cmd = "python3 \"" + std::string(SCENARIOGEN_SCRIPT_PATH) +
+                    "\" \"" + mapDir + "\"" +
+                    " --seed " + std::to_string(seed) +
+                    " --game-dir \"" + gamePath + "\"" +
+                    " --stdout --meta-json \"" + metaPath + "\"";
+
+  // Knobs. Integers are range-clamped and strings allowlisted — the generator
+  // validates these too (argparse `choices`), but a bad value must never reach
+  // the shell in the first place.
+  const auto addInt = [&](const char *flag, const char *key, int lo, int hi) {
+    if (!knobs.contains(key) || !knobs[key].is_number_integer())
+      return;
+    const int v = knobs[key].get<int>();
+    if (v < lo || v > hi)
+      return;
+    cmd += std::string(" ") + flag + " " + std::to_string(v);
+  };
+  addInt("--sides", "sides", 2, 8);
+  addInt("--towns", "towns", 0, 32);
+  addInt("--outposts", "outposts", 0, 32);
+  addInt("--bases", "bases", 0, 32);
+  addInt("--mines", "mines", 0, 32);
+  const auto addEnum = [&](const char *flag, const char *key) {
+    if (!knobs.contains(key) || !knobs[key].is_string())
+      return;
+    const std::string v = knobs[key].get<std::string>();
+    if (!IsShellSafeToken(v))
+      return;
+    cmd += std::string(" ") + flag + " " + v;
+  };
+  addEnum("--hostility", "hostility");
+  addEnum("--roster", "roster");
+
+  cmd += " 2>\"" + errPath + "\"";
+
+  FILE *p = popen(cmd.c_str(), "r");
+  if (!p) {
+    out.diagnostics = "failed to launch scenariogen.py";
+    return out;
+  }
+  char buf[4096];
+  size_t n = 0;
+  while ((n = fread(buf, 1, sizeof(buf), p)) > 0)
+    out.lua.append(buf, n);
+  const int rc = pclose(p);
+  out.exitCode = WIFEXITED(rc) ? WEXITSTATUS(rc) : -1;
+
+  {
+    std::ifstream ef(errPath, std::ios::binary);
+    if (ef)
+      out.diagnostics.assign(std::istreambuf_iterator<char>(ef),
+                             std::istreambuf_iterator<char>());
+  }
+
+  if (out.exitCode == 0) {
+    std::ifstream mf(metaPath, std::ios::binary);
+    if (mf) {
+      const std::string metaText((std::istreambuf_iterator<char>(mf)),
+                                 std::istreambuf_iterator<char>());
+      out.meta = nlohmann::json::parse(metaText, nullptr, false);
+    }
+    // A run that exits 0 but produced no usable Lua or no metadata is a
+    // failure here even though the generator thought it succeeded — storing a
+    // row with an empty `lua` would materialise an empty scenario file, which
+    // discovery drops with a warning that blames the content.
+    out.ok = !out.lua.empty() && !out.meta.is_discarded() &&
+             out.meta.is_object() && out.meta.contains("id");
+    if (!out.ok && out.diagnostics.empty())
+      out.diagnostics = "scenariogen.py produced no usable output";
+  }
+
+  std::filesystem::remove(metaPath, ec);
+  std::filesystem::remove(errPath, ec);
+  return out;
 }
 
 // Saved for self-restart via execvp
@@ -633,6 +791,13 @@ int main(int argc, char *argv[]) {
   // RoomManager::EnsureTables / MapMetadataDb::EnsureTable.
   GameServersDb::EnsureTables(mapDb);
 
+  // generated_scenarios — procedurally generated wars (scenariogen.py). The
+  // row is the record of truth; `scenarios/gen_*.lua` is a cache rebuilt from
+  // it below, once per game, before discovery runs. Migrated rather than
+  // dropped on a schema bump: unlike game_servers or maps, a row here is the
+  // only copy of the thing. See ScenarioDb.h.
+  ScenarioDb::EnsureTable(mapDb);
+
   // Helper: persist a game server entry to SQLite
   auto persistGameServer = [&](const GameServerInstance &inst) {
     if (!mapDb)
@@ -738,17 +903,51 @@ int main(int argc, char *argv[]) {
   // is how a lobby-created Metalstorm war ended up with no way to finish.
   std::unordered_map<std::string, std::vector<ScenarioDiscovery::ScenarioInfo>>
       scenariosByGame;
+  /// Rebuild `<game>/scenarios/gen_*.lua` from the `generated_scenarios` rows
+  /// for `gameId`, then re-run discovery over the whole directory.
+  ///
+  /// WHY MATERIALISE-THEN-DISCOVER RATHER THAN MERGE TWO LISTS. A generated
+  /// scenario has to end up in the same list as a shipped one, with the same
+  /// `terminal` flag and the same resolved `sides` — and it has to be loadable
+  /// by the sim, which reaches it only as `VFS.Include('scenarios/<id>.lua')`.
+  /// Writing the file first and then letting `Discover` parse the directory
+  /// satisfies both at once, and does it with ONE implementation of "what does
+  /// this scenario say": the row's denormalised display name can never drift
+  /// from the `name` the sim will actually read, because the lobby never reads
+  /// the row's copy. The alternative — synthesising ScenarioInfo from columns
+  /// — would be a second parser to keep in step with ScenarioDiscovery.cpp.
+  ///
+  /// Also the reason the rebuild-from-DB path is exercised on every single
+  /// lobby start rather than only by its test: if it broke, the lobby would
+  /// stop offering generated wars immediately and visibly.
+  auto refreshScenarios = [&](const std::string &gameId) {
+    auto pathIt = gamePathsById.find(gameId);
+    if (pathIt == gamePathsById.end())
+      return;
+    ScenarioDb::SyncToDisk(mapDb, gameId, pathIt->second);
+    scenariosByGame[gameId] = ScenarioDiscovery::Discover(pathIt->second);
+  };
+
   for (const auto &g : availableGames) {
     gamePathsById[g.id] = g.folderPath;
     gameVersionsById[g.id] = g.version;
     aisByGame[g.id] = AIDiscovery::Discover(enginePath, g.folderPath);
-    scenariosByGame[g.id] = ScenarioDiscovery::Discover(g.folderPath);
+    refreshScenarios(g.id);
   }
 
-  /// Scenarios `gameId` ships, or an empty list for an unknown game.
-  /// Captured by reference everywhere below — `scenariosByGame` is built
-  /// once at startup and never mutated, same lifetime rule as
-  /// `availableGames`.
+  /// Scenarios `gameId` offers — shipped and generated alike, since the
+  /// generated ones are materialised into the same directory before discovery
+  /// reads it. An empty list for an unknown game.
+  ///
+  /// Captured by reference everywhere below. `scenariosByGame` is no longer
+  /// immutable — `refreshScenarios` replaces a game's vector after an admin
+  /// ingest or delete — so the lifetime rule is now: the returned reference is
+  /// valid until the next refresh, and every caller consumes it within one
+  /// HTTP handler. That holds because NetworkServer dispatches every handler on
+  /// its single network thread (NetworkServer.h:177), so no handler can be
+  /// reading the vector while another replaces it. `unordered_map` nodes are
+  /// stable across value assignment, so `kNone` is the only aliasing subtlety
+  /// and it is `static const`.
   auto scenariosFor = [&scenariosByGame](const std::string &gameId)
       -> const std::vector<ScenarioDiscovery::ScenarioInfo> & {
     static const std::vector<ScenarioDiscovery::ScenarioInfo> kNone;
@@ -1787,6 +1986,309 @@ int main(int argc, char *argv[]) {
         out["ok"] = true;
         out["stack_hash"] = stackHash;
         out["reports"] = reports;
+        return HttpAuth::JsonResponse(200, out.dump());
+      });
+
+  // --- Generated scenarios (PLAN-metalstorm-wars.md §7.1, scenariogen.py) ---
+  //
+  // The user-facing flow is "a scenario is created → saved to the DB →
+  // selectable in the lobby", and these three endpoints are the whole of it.
+  // Every one is POST + AdminOnly, which is not a style choice: GET cannot
+  // carry an Authorization header anywhere in this codebase's client, so a
+  // GET admin route is an unauthenticated admin route.
+  //
+  // Ingest is deliberately thin. It shells out to the generator, stores what
+  // came back, materialises the file, and re-discovers — it does not decide
+  // anything about the scenario's content. Every judgement about whether a war
+  // is playable (reachability per movement class, no unit inside a yardmap,
+  // exactly one victory objective, both sides staged) lives in scenariogen.py
+  // and is expressed by refusing to emit. So a rejection here is reported, not
+  // worked around.
+
+  /// Where processed maps live — `<dataDir>/maps`, alongside the DB. Same
+  /// derivation RunMapConverterPreflight uses for its --data-dir.
+  const std::string mapsDir = [&]() -> std::string {
+    const std::filesystem::path p(dbPath);
+    const std::string dir =
+        p.has_parent_path() && !p.parent_path().empty()
+            ? p.parent_path().string()
+            : std::string("data");
+    return dir + "/maps";
+  }();
+
+  /// Serialise one stored scenario for an admin response. Deliberately shows
+  /// the DISCOVERED view (`terminal`, `sides`) next to the stored provenance
+  /// (`seed`, `params`): the two coming from different places is the point —
+  /// if a materialised file ever failed to parse, `terminal` would read false
+  /// and `discovered` would be false, and the admin list would say so instead
+  /// of echoing the row back and looking healthy.
+  auto describeStoredScenario = [&scenariosFor](const ScenarioDb::Record &r) {
+    nlohmann::json j;
+    j["id"] = r.id;
+    j["gameId"] = r.gameId;
+    j["displayName"] = r.displayName;
+    j["map"] = r.mapId;
+    j["seed"] = r.seed;
+    j["generatorVersion"] = r.generatorVersion;
+    j["params"] = nlohmann::json::parse(r.params, nullptr, false);
+    if (j["params"].is_discarded())
+      j["params"] = nlohmann::json::object();
+    j["createdBy"] = r.createdBy;
+    j["createdAt"] = r.createdAt;
+    j["bytes"] = static_cast<uint64_t>(r.lua.size());
+
+    const ScenarioDiscovery::ScenarioInfo *info =
+        ScenarioDiscovery::FindById(scenariosFor(r.gameId), r.id);
+    j["discovered"] = info != nullptr;
+    j["terminal"] = info != nullptr && info->terminal;
+    nlohmann::json sides = nlohmann::json::array();
+    if (info) {
+      for (const auto &s : ScenarioDiscovery::PlayableSides(*info))
+        sides.push_back({{"faction", s.faction},
+                         {"team", s.team},
+                         {"staged", s.staged}});
+    }
+    j["sides"] = std::move(sides);
+    return j;
+  };
+
+  // POST /api/admin/scenarios/generate
+  //   {gameId, mapId, seed?, sides?, towns?, outposts?, bases?, mines?,
+  //    hostility?, roster?}
+  // Generate a war for `mapId`, store it, materialise it, and return the
+  // entry exactly as the Create Game picker will now see it.
+  net.AddHttpPost(
+      "/api/admin/scenarios/generate", RouteAuth::AdminOnly,
+      [&db, &mapDb, requireLobbyAdmin, &gamePathsById, &mapsDir,
+       &refreshScenarios, &describeStoredScenario](
+          const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        int64_t uid;
+        std::string uname;
+        if (auto e = requireLobbyAdmin(headers, uid, uname))
+          return *e;
+
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+        if (j.is_discarded() || !j.is_object())
+          return HttpAuth::JsonResponse(
+              400, R"({"ok":false,"error":"invalid JSON body"})");
+
+        const std::string gameId = j.value("gameId", std::string("metalstorm"));
+        const std::string mapId = j.value("mapId", std::string(""));
+        if (mapId.empty())
+          return HttpAuth::JsonResponse(
+              400, R"({"ok":false,"error":"mapId required"})");
+
+        auto pathIt = gamePathsById.find(gameId);
+        if (pathIt == gamePathsById.end())
+          return HttpAuth::JsonResponse(
+              404, R"({"ok":false,"error":"no such game"})");
+
+        // Default the seed from the map id exactly as scenariogen.py's own
+        // default does (`sum(ord(c) for c in map_id)`), rather than from a
+        // clock. A generated scenario is reproducible from (map, seed,
+        // version) or it is not reproducible at all, and a timestamp seed
+        // would quietly make every re-run a different war with a different id.
+        int64_t seed = 0;
+        if (j.contains("seed") && j["seed"].is_number_integer()) {
+          seed = j["seed"].get<int64_t>();
+        } else {
+          for (const unsigned char c : mapId)
+            seed += c;
+        }
+        if (seed < 0 || seed > 2147483647)
+          return HttpAuth::JsonResponse(
+              400, R"({"ok":false,"error":"seed out of range"})");
+
+        const ScenarioGenResult gen =
+            RunScenarioGen(mapsDir, mapId, pathIt->second, seed, j);
+        if (!gen.ok) {
+          nlohmann::json err;
+          err["ok"] = false;
+          // The generator's own words. A REJECTED line names which invariant
+          // the map failed and, for the reachability gate, which components
+          // the armies were stranded in — strictly more useful than anything
+          // this layer could say about it.
+          err["error"] = gen.diagnostics.empty()
+                             ? std::string("scenario generation failed")
+                             : gen.diagnostics;
+          err["exitCode"] = gen.exitCode;
+          // 422, not 500: a rejection means "this map cannot host a war on
+          // these knobs", which is a property of the request, not a fault.
+          return HttpAuth::JsonResponse(gen.exitCode == 2 ? 422 : 500,
+                                        err.dump());
+        }
+
+        ScenarioDb::Record rec;
+        rec.id = gen.meta.value("id", std::string(""));
+        rec.gameId = gameId;
+        rec.mapId = gen.meta.value("map_id", mapId);
+        rec.seed = gen.meta.value("seed", seed);
+        rec.generatorVersion = gen.meta.value("version", 0);
+        rec.lua = gen.lua;
+        rec.createdBy = uname;
+        if (gen.meta.contains("params"))
+          rec.params = gen.meta["params"].dump();
+
+        if (!ScenarioDb::ValidateId(rec.id))
+          return HttpAuth::JsonResponse(
+              500,
+              R"({"ok":false,"error":"generator returned an unusable id"})");
+
+        // Two different seeds on one map can mint the same title (the
+        // generator indexes its suffix table `seed % len`), and the picker is
+        // a flat option list with nothing else to tell them apart.
+        rec.displayName = ScenarioDb::DisambiguateDisplayName(
+            mapDb, gameId, gen.meta.value("display_name", rec.id), rec.id);
+
+        const bool existed =
+            ScenarioDb::FindById(mapDb, rec.id).has_value();
+        if (!ScenarioDb::Upsert(mapDb, rec))
+          return HttpAuth::JsonResponse(
+              500, R"({"ok":false,"error":"failed to store scenario"})");
+
+        // Materialise + re-discover, so the very next GET
+        // /api/games/<id>/scenarios sees it. No lobby restart: the whole
+        // point of the requirement is that a created scenario is immediately
+        // selectable.
+        refreshScenarios(gameId);
+
+        db.LogAudit(uid, uname, "scenario_generate", rec.id,
+                    "map=" + rec.mapId + " seed=" + std::to_string(rec.seed));
+
+        nlohmann::json out;
+        out["ok"] = true;
+        // An id encodes (map, seed, generator version) and generation is
+        // deterministic, so re-running the same request is an idempotent
+        // replace rather than a conflict. Reported so the caller can tell
+        // "made a new war" from "re-made the one you already had".
+        out["created"] = !existed;
+        auto stored = ScenarioDb::FindById(mapDb, rec.id);
+        out["scenario"] =
+            stored ? describeStoredScenario(*stored) : nlohmann::json::object();
+        out["diagnostics"] = gen.diagnostics;
+        return HttpAuth::JsonResponse(200, out.dump());
+      });
+
+  // POST /api/admin/scenarios/list {gameId?} — stored scenarios, with the
+  // discovered view of each alongside its provenance.
+  net.AddHttpPost(
+      "/api/admin/scenarios/list", RouteAuth::AdminOnly,
+      [&db, &mapDb, requireLobbyAdmin, &describeStoredScenario](
+          const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        int64_t uid;
+        std::string uname;
+        if (auto e = requireLobbyAdmin(headers, uid, uname))
+          return *e;
+        (void)db;
+
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+        const std::string gameId =
+            (j.is_discarded() || !j.is_object())
+                ? std::string("")
+                : j.value("gameId", std::string(""));
+
+        const std::vector<ScenarioDb::Record> rows =
+            gameId.empty() ? ScenarioDb::ListAll(mapDb)
+                           : ScenarioDb::ListForGame(mapDb, gameId);
+        nlohmann::json arr = nlohmann::json::array();
+        for (const auto &r : rows)
+          arr.push_back(describeStoredScenario(r));
+
+        nlohmann::json out;
+        out["ok"] = true;
+        out["scenarios"] = std::move(arr);
+        return HttpAuth::JsonResponse(200, out.dump());
+      });
+
+  // POST /api/admin/scenarios/delete {id} — drop the row AND the file.
+  //
+  // Both, in that order. A deleted row that left its `.lua` behind would keep
+  // being discovered and offered in the picker forever, with nothing left in
+  // the DB to explain where it came from — the orphan case this endpoint and
+  // ScenarioDb::SyncToDisk's sweep exist to prevent.
+  net.AddHttpPost(
+      "/api/admin/scenarios/delete", RouteAuth::AdminOnly,
+      [&db, &mapDb, requireLobbyAdmin, &gamePathsById, &refreshScenarios](
+          const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        int64_t uid;
+        std::string uname;
+        if (auto e = requireLobbyAdmin(headers, uid, uname))
+          return *e;
+
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+        const std::string id =
+            (j.is_discarded() || !j.is_object())
+                ? std::string("")
+                : j.value("id", std::string(""));
+        if (id.empty())
+          return HttpAuth::JsonResponse(400,
+                                        R"({"ok":false,"error":"id required"})");
+
+        auto rec = ScenarioDb::FindById(mapDb, id);
+        if (!rec)
+          return HttpAuth::JsonResponse(
+              404, R"({"ok":false,"error":"no such generated scenario"})");
+        const std::string gameId = rec->gameId;
+
+        if (!ScenarioDb::Delete(mapDb, id))
+          return HttpAuth::JsonResponse(
+              500, R"({"ok":false,"error":"failed to delete scenario"})");
+
+        // The sweep inside refreshScenarios would collect the now-unclaimed
+        // file anyway; removing it explicitly first means the window in which
+        // a concurrent discovery could still offer a deleted war is zero
+        // rather than "until the resync finishes".
+        auto pathIt = gamePathsById.find(gameId);
+        if (pathIt != gamePathsById.end())
+          ScenarioDb::Unmaterialise(id, pathIt->second);
+        refreshScenarios(gameId);
+
+        db.LogAudit(uid, uname, "scenario_delete", id, "game=" + gameId);
+        return HttpAuth::JsonResponse(200, R"({"ok":true})");
+      });
+
+  // POST /api/admin/scenarios/resync {gameId?} — rebuild every generated
+  // `.lua` from its row and sweep orphans, then re-discover.
+  //
+  // The same code path startup runs, exposed so an operator can repair a
+  // `data/` tree by hand (it is gitignored, so "the files are gone" is a
+  // routine state, not a disaster) without bouncing the lobby.
+  net.AddHttpPost(
+      "/api/admin/scenarios/resync", RouteAuth::AdminOnly,
+      [&db, &mapDb, requireLobbyAdmin, &gamePathsById, &refreshScenarios](
+          const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        int64_t uid;
+        std::string uname;
+        if (auto e = requireLobbyAdmin(headers, uid, uname))
+          return *e;
+
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+        const std::string only =
+            (j.is_discarded() || !j.is_object())
+                ? std::string("")
+                : j.value("gameId", std::string(""));
+
+        nlohmann::json games = nlohmann::json::array();
+        for (const auto &kv : gamePathsById) {
+          if (!only.empty() && kv.first != only)
+            continue;
+          const ScenarioDb::SyncResult r =
+              ScenarioDb::SyncToDisk(mapDb, kv.first, kv.second);
+          refreshScenarios(kv.first);
+          games.push_back({{"gameId", kv.first},
+                           {"written", r.written},
+                           {"orphansRemoved", r.orphansRemoved},
+                           {"failed", r.failed}});
+        }
+
+        db.LogAudit(uid, uname, "scenario_resync", only, "");
+        nlohmann::json out;
+        out["ok"] = true;
+        out["games"] = std::move(games);
         return HttpAuth::JsonResponse(200, out.dump());
       });
 
