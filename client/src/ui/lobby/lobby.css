@@ -142,6 +142,18 @@ button.danger:hover { background: #cc3333; }
 
 .empty-state { text-align: center; color: #555; padding: 32px; }
 
+/* A server-side fault must not look like the muted "nothing here" state —
+   that is exactly what made D33 (a dead lobby DB handle) read as "no maps
+   installed" for a whole session. */
+.empty-state.error-state {
+    color: #ffb4b4;
+    background: rgba(120, 30, 30, 0.18);
+    border: 1px solid #7a2b2b;
+    border-radius: 4px;
+    line-height: 1.5;
+}
+.empty-state.error-state small { color: #d79a9a; }
+
 .create-form {
     margin-top: 16px;
     padding-top: 16px;

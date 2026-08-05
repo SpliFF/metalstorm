@@ -240,7 +240,13 @@ static void parseFloats(const char* s, float* out, int n) {
     }
 }
 
-std::vector<MapMetadata> MapMetadataDb::GetAllMaps(sqlite3* db) {
+std::vector<MapMetadata> MapMetadataDb::GetAllMaps(sqlite3* db, bool* ok) {
+    if (ok) *ok = true;
+    if (!db) {
+        if (ok) *ok = false;
+        SLOG(SPRING_LOG_ERROR, "GetAllMaps: no database handle");
+        return {};
+    }
     EnsureTable(db);
     std::vector<MapMetadata> result;
     sqlite3_stmt* stmt = nullptr;
@@ -257,12 +263,14 @@ std::vector<MapMetadata> MapMetadataDb::GetAllMaps(sqlite3* db) {
         "water_surface_alpha,water_damage,void_water,widgets,sound_preset,"
         "legacy_coord_system FROM maps", -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        SLOG(SPRING_LOG_ERROR, "GetAllMaps: SQL prepare failed: %s",
-            sqlite3_errmsg(db));
+        if (ok) *ok = false;
+        SLOG(SPRING_LOG_ERROR, "GetAllMaps: SQL prepare failed (%d): %s",
+            rc, sqlite3_errmsg(db));
         return result;
     }
 
-    while (sqlite3_step(stmt) == SQLITE_ROW) {
+    int stepRc;
+    while ((stepRc = sqlite3_step(stmt)) == SQLITE_ROW) {
         MapMetadata m;
         int i = 0;
         auto maybeStr = [&](int col) -> std::string {
@@ -418,6 +426,16 @@ std::vector<MapMetadata> MapMetadataDb::GetAllMaps(sqlite3* db) {
         }
 
         result.push_back(std::move(m));
+    }
+    // A read that dies partway (or immediately) reports SQLITE_DONE only on
+    // a clean walk. Anything else — SQLITE_NOTADB (26) above all — means the
+    // vector is short or empty for a reason the caller must not read as
+    // "that's all the maps there are".
+    if (stepRc != SQLITE_DONE) {
+        if (ok) *ok = false;
+        SLOG(SPRING_LOG_ERROR, "GetAllMaps: step failed (%d): %s — returning "
+            "%zu partial row(s); this is a DB fault, not an empty map set",
+            stepRc, sqlite3_errmsg(db), result.size());
     }
     sqlite3_finalize(stmt);
     return result;

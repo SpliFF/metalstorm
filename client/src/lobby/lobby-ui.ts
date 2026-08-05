@@ -11,6 +11,7 @@
  */
 
 import * as flatbuffers from 'flatbuffers';
+import { mapListStatus } from './map-list-status';
 import { Connection, type ConnectionState } from '../core/connection.js';
 import { CONFIG, stampUrl } from '../config.js';
 import { ClientPayload } from '../protocol/spring-web/client-payload.js';
@@ -707,11 +708,31 @@ export class LobbyUI {
         this.currentScreen = 'browser';
         this.currentRoom = null;
 
-        // Fetch available maps
-        fetch(stampUrl(`${CONFIG.httpUrl}/api/maps`)).then(r => r.ok ? r.json() : []).then(maps => {
+        // Fetch available maps.
+        //
+        // A failed fetch must NOT collapse into an empty list. The server
+        // answers 503 when it cannot read the map database (D33: the lobby's
+        // SQLite handle can fault mid-session while the file and the maps on
+        // disk stay perfectly healthy). Rendering that as "No maps found in
+        // content/maps/" sent a whole session hunting through the content
+        // directory for a problem that was never there.
+        this.mapLoadError = '';
+        fetch(stampUrl(`${CONFIG.httpUrl}/api/maps`)).then(async r => {
+            if (!r.ok) {
+                let detail = '';
+                try { detail = (await r.json())?.detail ?? ''; } catch { /* non-JSON body */ }
+                throw new Error(detail || `HTTP ${r.status}`);
+            }
+            return r.json();
+        }).then(maps => {
             this.availableMaps = maps;
             this.renderMapOptions();
-        }).catch(() => {});
+        }).catch(err => {
+            this.availableMaps = [];
+            this.mapLoadError = err?.message || 'request failed';
+            console.error('[lobby] /api/maps failed:', this.mapLoadError);
+            this.renderMapOptions();
+        });
 
         // Fetch the game list if we haven't already. Immutable for
         // the lobby's lifetime, so a single request per session is
@@ -881,12 +902,35 @@ export class LobbyUI {
     }
 
     private selectedMapId = '';
+    /// Non-empty when the last /api/maps call failed. Kept distinct from
+    /// "zero maps installed" — see the fetch in showBrowser(). D33.
+    private mapLoadError = '';
 
     private renderMapOptions(): void {
         const el = document.getElementById('map-selector');
         if (!el) return;
 
-        if (this.availableMaps.length === 0) {
+        const status = mapListStatus(this.availableMaps.length, this.mapLoadError);
+
+        if (status.kind === 'error') {
+            // Built via the DOM rather than innerHTML: the detail string is
+            // a server error message, not trusted markup.
+            el.innerHTML = '';
+            const box = document.createElement('div');
+            box.className = 'empty-state error-state';
+            box.textContent =
+                'Could not load the map list — the server could not read its map database.';
+            const note = document.createElement('small');
+            note.textContent =
+                'This is a server fault, not a missing map. Restarting the lobby ' +
+                `usually clears it. (${status.detail})`;
+            box.appendChild(document.createElement('br'));
+            box.appendChild(note);
+            el.appendChild(box);
+            return;
+        }
+
+        if (status.kind === 'empty') {
             el.innerHTML = '<div class="empty-state">No maps found in content/maps/</div>';
             return;
         }

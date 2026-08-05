@@ -13,6 +13,7 @@
 #include "Server/MapMetadata.h"
 #include "Server/NetworkServer.h"
 #include "Server/RoomManager.h"
+#include "Server/SqliteThreading.h"
 
 #include "Server/AI/AIDiscovery.h"
 #include "Server/CacheControl.h"
@@ -418,6 +419,12 @@ int main(int argc, char *argv[]) {
   savedArgc = argc;
   savedArgv = argv;
 
+  // D33: SQLite must be serialized before anything opens a connection —
+  // the lobby shares `mapDb` and `db` between the NetworkServer thread and
+  // main()'s 10 Hz loop. See Server/SqliteThreading.h for the full account.
+  if (!SqliteEnableSerializedMode("spring-lobby"))
+    return 1;
+
   std::signal(SIGINT, signalHandler);
   std::signal(SIGTERM, signalHandler);
   std::signal(SIGHUP, restartHandler);
@@ -585,7 +592,29 @@ int main(int argc, char *argv[]) {
   // Access the raw sqlite3* handle for MapMetadataDb
   // (Database wrapper doesn't expose it, so we open a second connection)
   sqlite3 *mapDb = nullptr;
-  sqlite3_open(dbPath.c_str(), &mapDb);
+  // FULLMUTEX, not plain sqlite3_open: this handle is shared by the network
+  // thread (every HTTP route) and the main thread (the 10 Hz poll/reap
+  // loop). See the SQLITE_CONFIG_SERIALIZED note at the top of main() —
+  // that call already covers this, but stating the flag here keeps the
+  // requirement next to the handle it applies to. D33.
+  if (const int rc = sqlite3_open_v2(dbPath.c_str(), &mapDb,
+                                     SQLITE_OPEN_READWRITE |
+                                         SQLITE_OPEN_CREATE |
+                                         SQLITE_OPEN_FULLMUTEX,
+                                     nullptr);
+      rc != SQLITE_OK) {
+    // Previously unchecked, so a failed open degraded into "the lobby runs
+    // but serves no maps and persists no rooms" — D33's symptom without
+    // D33's cause. Refuse to start instead.
+    SLOG(SPRING_LOG_ERROR, "failed to open %s: %s (%d)", dbPath.c_str(),
+         mapDb ? sqlite3_errmsg(mapDb) : "out of memory", rc);
+    sqlite3_close(mapDb);
+    springlog_shutdown();
+    return 1;
+  }
+  // Wait out a competing writer on the shared backchannel rather than
+  // dropping the write — see kSqliteBusyTimeoutMs.
+  SqliteConfigureSharedHandle(mapDb);
 
   // Attach the lobby's SQLite handle to the RoomManager so every room
   // mutation is write-through. Tables are created (or dropped and
@@ -913,7 +942,27 @@ int main(int argc, char *argv[]) {
       "/api/maps", RouteAuth::Public,
       [mapDb](const std::string &) -> HttpResponse {
         MapMetadataDb db;
-        auto maps = db.GetAllMaps(mapDb);
+        bool ok = true;
+        auto maps = db.GetAllMaps(mapDb, &ok);
+        if (!ok) {
+          // D33: never answer a faulted handle with `200 []`. That is what
+          // turned a dead DB connection into "No maps found in
+          // content/maps/" in the Create Game dialog and cost a whole
+          // session before anyone looked at the lobby log. 503 + an
+          // explicit reason so the client can say what is actually wrong.
+          SLOG(SPRING_LOG_ERROR,
+               "/api/maps: map read FAILED (%s) — serving 503, not an empty "
+               "list. The database handle is faulted; the maps on disk and "
+               "the `maps` table are most likely fine. Restart the lobby.",
+               sqlite3_errmsg(mapDb));
+          nlohmann::json err;
+          err["error"] = "map_database_unavailable";
+          err["detail"] = sqlite3_errmsg(mapDb);
+          std::string body = err.dump();
+          return {.contentType = "application/json",
+                  .body = std::vector<uint8_t>(body.begin(), body.end()),
+                  .status = 503};
+        }
         nlohmann::json arr = nlohmann::json::array();
         for (const auto &m : maps) {
           nlohmann::json mj;

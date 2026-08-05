@@ -188,7 +188,15 @@ struct MapMetadata {
 /// conversion dependencies (Lua, ImageMagick, modelimporter).
 class MapMetadataDb {
 public:
-    std::vector<MapMetadata> GetAllMaps(sqlite3* db);
+    /// `ok` (optional) distinguishes "the maps table is genuinely empty"
+    /// from "the read failed". They are not the same thing, and conflating
+    /// them is what made D33 invisible: a faulted handle returned an empty
+    /// vector, /api/maps answered `200 []`, and the Create Game dialog said
+    /// "No maps found in content/maps/" — pointing every reader at the
+    /// content directory while the real fault was the DB handle. Callers
+    /// that surface maps to a user MUST pass this and report a failed read
+    /// as an error, not as an empty list.
+    std::vector<MapMetadata> GetAllMaps(sqlite3* db, bool* ok = nullptr);
     MapMetadata GetMap(sqlite3* db, const std::string& mapId);
     void StoreMetadata(sqlite3* db, const MapMetadata& meta);
     static void EnsureTable(sqlite3* db);

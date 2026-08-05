@@ -56,6 +56,7 @@
 #include "Lua/LuaRules.h"
 #include "Server/HttpAuth.h"
 #include "Server/CacheControl.h"
+#include "Server/SqliteThreading.h"
 #include "Server/WebTransport/WebTransportServer.h"
 #include "System/SpringLog/SpringLog.h"
 #include "System/SpringLog/SpringLogNet.h"
@@ -134,6 +135,13 @@ int main(int argc, char* argv[])
 {
     savedArgc = argc;
     savedArgv = argv;
+
+    // D33: serialize SQLite before the first connection is opened —
+    // springlog_init's sqlite sink is one, and the sim loop and network
+    // thread later share `mapDb`/`statusDb`. Must precede springlog_init.
+    // See Server/SqliteThreading.h.
+    if (!SqliteEnableSerializedMode("spring-server"))
+        return 1;
 
     // Initialise unified logging as early as possible so every
     // subsequent log call goes through springlog.
@@ -587,7 +595,10 @@ int main(int argc, char* argv[])
     MapMetadata mapMeta;
     {
         sqlite3* mapDb = nullptr;
-        if (sqlite3_open(dbPath.c_str(), &mapDb) == SQLITE_OK) {
+        // FULLMUTEX — shared with the network thread (D33).
+        if (sqlite3_open_v2(dbPath.c_str(), &mapDb, kSqliteSharedOpenFlags,
+                            nullptr) == SQLITE_OK) {
+            SqliteConfigureSharedHandle(mapDb);
             if (!mapPath.empty()) {
                 std::filesystem::path p(mapPath);
                 std::string mapId = p.filename().string();
@@ -1189,8 +1200,12 @@ int main(int argc, char* argv[])
     // game stop on its own once everyone has left, instead of orphaning a process.
     bool roomPersistent = false;
     sqlite3* statusDb = nullptr;
-    if (sqlite3_open(dbPath.c_str(), &statusDb) == SQLITE_OK) {
-        sqlite3_busy_timeout(statusDb, 3000);
+    // FULLMUTEX — shared with the network thread (D33).
+    if (sqlite3_open_v2(dbPath.c_str(), &statusDb, kSqliteSharedOpenFlags,
+                        nullptr) == SQLITE_OK) {
+        // Busy timeout comes from SqliteConfigureSharedHandle — one policy
+        // for every handle on the shared DB (was an ad-hoc 3000 here).
+        SqliteConfigureSharedHandle(statusDb);
         sqlite3_stmt* ps = nullptr;
         if (sqlite3_prepare_v2(statusDb, "SELECT persistent FROM rooms WHERE id=?",
                 -1, &ps, nullptr) == SQLITE_OK) {
