@@ -589,6 +589,19 @@ interface PieceRenderEntry {
     pieceIdx: number;
 }
 
+/** PLAN-perf M22's legacy arm. OFF restores the pre-M22 `getMemberModel` —
+ *  rebuilding the piece list, the key strings and the wrapper object on every
+ *  call, i.e. once per MODEL-tier member per frame. Same A/B contract as
+ *  `squadBackendLegacy` / `squadRebindBuffers`: ships ON, the legacy arm is
+ *  measurement only, reachable from the worker as
+ *  `__perfToggles.squadMemberModelMemo(on)`. */
+let MEMBER_MODEL_MEMO = true;
+
+export function setMemberModelMemo(on: boolean): boolean {
+    MEMBER_MODEL_MEMO = !!on;
+    return MEMBER_MODEL_MEMO;
+}
+
 export class EntityRenderer {
     private scene: Scene;
     private interpolator = new EntityInterpolator();
@@ -685,6 +698,24 @@ export class EntityRenderer {
     // squad backend's thin instances. This map is disposed with the renderer but
     // never touched by render().
     private memberModelMeshes = new Map<string, Mesh>();
+
+    /** Memoised `getMemberModel` results, keyed `defId * 1024 + team`
+     *  (PLAN-perf M22). `getMemberModel` runs once per MODEL-tier member per
+     *  frame from `SquadRenderBackend.updateMember`, and every call rebuilt the
+     *  same answer from scratch: a `pieces.filter`, a `geometry.map`, a
+     *  `member:${defId}:${team}:${i}` key string and a `{mesh, restWorld}`
+     *  object PER PIECE, plus the returned wrapper — ~12 allocations per member
+     *  per frame for a value that cannot change. It cannot change because
+     *  `modelTemplates` is write-once (`ensureModelLoaded` returns early once
+     *  the key exists, incl. the `null` pinned for model-less defs) and the
+     *  meshes are already cached in `memberModelMeshes`.
+     *
+     *  Only successful results are memoised — `undefined` means "still
+     *  loading", which is a one-way transition that must stay re-checkable.
+     *  Cleared wherever `memberModelMeshes` is, since the entries hold those
+     *  meshes. Measured at the XL900 floor: `entity` −0.40 ms of 3.95 (−10 %).
+     *  `__perfToggles.squadMemberModelMemo(false)` restores the pre-M22 path. */
+    private memberModels = new Map<number, MemberModel>();
 
     // Unit materials, SHARED across all pieces that use the same texture set,
     // keyed by "{defId}:{team}:{materialKey}". A unit's pieces almost always
@@ -1720,6 +1751,13 @@ export class EntityRenderer {
      * thin-instance matrix buffer.
      */
     getMemberModel(defId: number, team: number): MemberModel | undefined {
+        // PLAN-perf M22: the whole body below is per-member-per-frame allocation
+        // for a value fixed by a write-once template. See `memberModels`.
+        const memoKey = defId * 1024 + (team & 1023);
+        if (MEMBER_MODEL_MEMO) {
+            const hit = this.memberModels.get(memoKey);
+            if (hit) return hit;
+        }
         this.ensureModelLoaded(defId);
         const tmpl = this.modelTemplates.get(defId);
         if (!tmpl) return undefined;                       // not loaded yet / no model
@@ -1747,7 +1785,9 @@ export class EntityRenderer {
             }
             return { mesh, restWorld: piece.restWorldMatrix };
         });
-        return { pieces, yOffset: tmpl.yOffset, height: tmpl.modelHeight };
+        const built = { pieces, yOffset: tmpl.yOffset, height: tmpl.modelHeight };
+        if (MEMBER_MODEL_MEMO) this.memberModels.set(memoKey, built);
+        return built;
     }
 
     private getFallbackMesh(defId: number, team: number): Mesh {
@@ -3016,6 +3056,9 @@ export class EntityRenderer {
         // NOT dispose them itself.
         for (const mesh of this.memberModelMeshes.values()) mesh.dispose();
         this.memberModelMeshes.clear();
+        // Memoised MemberModels hold those meshes — drop them with the meshes,
+        // or a re-created renderer would hand out disposed geometry (M22).
+        this.memberModels.clear();
         // Shared unit materials are owned here (mesh.dispose() doesn't free
         // them), so dispose them explicitly. NOT their textures — those are
         // the shared template textures, disposed by the template loop below.

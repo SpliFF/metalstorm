@@ -50,7 +50,7 @@ import { LosBitmapStore, type LosBitmap } from './los-bitmap.js';
 // registers Babylon's KTX2 loader + pins the transcoder URLs (previously only
 // done in main.ts) so unit `.ktx2` textures transcode here.
 import './ktx2-config.js';
-import { EntityRenderer, setModelMaterialPort } from './entity-renderer.js';
+import { EntityRenderer, setModelMaterialPort, setMemberModelMemo } from './entity-renderer.js';
 import {
     SquadRenderBackend, setLegacyBackendPlumbing, setLegacyBufferRebind, setBboxRefreshEvery,
 } from './squad-render-backend.js';
@@ -2275,6 +2275,13 @@ export function gpInit(msg: GpInitToWorker): void {
          *  bounding info is recomputed. `squadBboxEvery(1)` restores the pre-M21
          *  every-flush refresh (the legacy arm); 15 is the shipped default. */
         squadBboxEvery: (n: number): number => setBboxRefreshEvery(n),
+        /** M22: A/B the memoised `getMemberModel`. `squadMemberModelMemo(false)`
+         *  restores the pre-M22 path, which rebuilt the piece list, a key string
+         *  per piece and a wrapper object on every call — once per MODEL-tier
+         *  member per frame; `true` is the shipped default. Camera-independent,
+         *  so it pays the same whether or not the view is moving. */
+        squadMemberModelMemo: (on: boolean): boolean =>
+            setMemberModelMemo(on),
         /** M18: A/B the pooled combat-FX shapes. `combatFxPooled(false)`
          *  restores the pre-M18 path where every tracer / puff / burst
          *  allocates its own Babylon mesh and its own draw call; `true` is the
