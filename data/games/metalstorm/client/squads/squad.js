@@ -141,6 +141,11 @@ export class Squad {
     this._nextStaggerAt = 0;
 
     this._lod = 'full';                 // 'full' | 'centroid' | 'icon' (see setter below)
+    // Ranking key for the manager's member-budget LOD policy (PLAN-perf M20):
+    // squared distance to the camera, refreshed on that policy's own cadence.
+    // Declared here, not bolted on from the manager, so every Squad keeps one
+    // hidden class — this object is the hot one in the entity phase.
+    this._lodD2 = 0;
     this._spawned = false;
 
     // Transport (PLAN-metalstorm-squad-transport.md §2): a client-only
@@ -314,6 +319,12 @@ export class Squad {
     const prev = this._lod;
     this._lod = value;
     if (!this._spawned) return;
+    // Air holds its cruise altitude in `_updateCentroid` by replaying each
+    // member's altitude *relative to the squad centroid*, because there is no
+    // ground to sample it back from. Snapshot it on the way down.
+    if (value === 'centroid' && this.profile.steerer === 'air') {
+      for (const m of this.members) if (m.alive && !m.released) m.centroidDy = m.y - this.cy;
+    }
     if (prev !== 'icon' && value === 'icon') this._releaseInstances();
     else if (prev === 'icon' && value !== 'icon') this._rebuildInstances();
   }
@@ -1027,11 +1038,36 @@ export class Squad {
 
   /** LOD fallback: park living members at the centroid (no steering cost).
    *  Released (icon-tier) members have no instance and are skipped. */
+  /** The reduced tier (§5): hold the formation RIGIDLY on the squad centroid.
+   *  Every member is written to its own slot offset rotated by the squad
+   *  heading, ground-snapped (air replays its snapshotted cruise offset), with
+   *  the walk cycle still advancing off the squad's own ground speed. What
+   *  stops is per-member steering only: separation, leash/arrival, trail
+   *  following, passability projection, stuck recovery, banking, repack glide.
+   *
+   *  ⚠️ Before PLAN-perf M20 this wrote every member to the centroid *point*,
+   *  collapsing the whole squad into one stacked blob. Nothing ever drove the
+   *  tier (M19 Finding 5 — `syncSquad` never supplied a `lod`), so that was
+   *  never on screen; it would have been the moment a producer was wired, and
+   *  M20 wires one. The member budget in squad-manager.js is that producer. */
   _updateCentroid() {
+    const s = Math.sin(this.heading), c = Math.cos(this.heading);
+    const air = this.profile.steerer === 'air';
+    // Squad-level displacement drives the gait for every member: one add each,
+    // no steering. A formation sliding along with frozen legs is the most
+    // visible artifact of this tier, and this is what removes it.
+    const gaitStep = this._prevUpdateCx == null ? 0
+      : Math.hypot(this.cx - this._prevUpdateCx, this.cz - this._prevUpdateCz) * 0.1;
+    this._prevUpdateCx = this.cx; this._prevUpdateCz = this.cz; this._prevUpdateHeading = this.heading;
     for (const m of this.members) {
       if (!m.alive || m.released) continue;
-      m.x = this.cx; m.y = this.cy; m.z = this.cz; m.headingY = this.heading;
-      this.backend.updateMember(m.handle, m.x, m.y, m.z, m.headingY, 0);
+      const slot = this.slots[m.slot];
+      m.x = this.cx + (slot.x * c + slot.z * s);
+      m.z = this.cz + (-slot.x * s + slot.z * c);
+      m.y = air ? this.cy + m.centroidDy : this.backend.groundHeight(m.x, m.z);
+      m.headingY = this.heading;
+      m.gait = (m.gait + gaitStep) % 1;
+      this.backend.updateMember(m.handle, m.x, m.y, m.z, m.headingY, m.gait);
     }
   }
 

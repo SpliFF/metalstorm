@@ -11,6 +11,10 @@ import { createPatchSet } from './patches.js';
 // indices any loadable map can produce.
 const KEY_STRIDE = 65536;
 
+// Nearest-first squad ordering for the member-budget LOD policy. Module-level
+// so the per-pass sort doesn't allocate a comparator closure.
+function byLodDistance(a, b) { return a._lodD2 - b._lodD2; }
+
 export class SquadManager {
   constructor(backend, config = {}) {
     this.backend = backend;
@@ -67,6 +71,115 @@ export class SquadManager {
     // queried by plain iteration, no spatial index needed.
     this._bigUnits = new Map();     // sim unit id → BigUnitRepulsor
     this._bigUnitList = [];         // cached array view, rebuilt on mutation
+
+    // Reduced-detail member budget (PLAN-perf M20 — the producer for the LOD
+    // tier squad.js has always implemented and nothing ever drove). The camera
+    // lives on the render side, so `setViewPos` is the only input; until it is
+    // called the policy is inert and every squad stays `full`.
+    this._viewX = 0; this._viewY = 0; this._viewZ = 0;
+    this._viewSet = false;
+    this._lodNextAt = 0;
+    this._lodRank = [];             // reused ranking scratch, never re-allocated
+    this._lodFullSquads = 0;
+    this._lodFullMembers = 0;
+    this._lodCentroidSquads = 0;
+    this._lodCentroidMembers = 0;
+  }
+
+  // --- reduced-detail member budget (PLAN-perf M20) ------------------------
+
+  /** Camera world position, pushed once per frame by the render adapter. The
+   *  only thing that arms the member budget: with no view there is no ranking,
+   *  and the policy leaves every squad at `full`. */
+  setViewPos(x, y, z) {
+    this._viewX = x; this._viewY = y; this._viewZ = z;
+    this._viewSet = true;
+  }
+
+  /** Live A/B knob. `setLodBudget(0)` restores the pre-M20 frame (every squad
+   *  steered) without a reload, so the win can be bracketed and flipped back
+   *  inside one measurement session, exactly like `perfFix`. Returns the
+   *  budget actually in force. */
+  setLodBudget(n) {
+    this.cfg.lodFullMemberBudget = Math.max(0, n | 0);
+    this._lodNextAt = 0;            // re-rank on the next update, not in 250 ms
+    return this.cfg.lodFullMemberBudget;
+  }
+
+  /** What the policy did on its last pass — the measurement read-out, and the
+   *  thing to check before believing an A/B arm ("did it actually demote?"). */
+  get lodStats() {
+    return {
+      budget: this.cfg.lodFullMemberBudget | 0,
+      armed: this._viewSet && (this.cfg.lodFullMemberBudget | 0) > 0,
+      fullSquads: this._lodFullSquads,
+      fullMembers: this._lodFullMembers,
+      centroidSquads: this._lodCentroidSquads,
+      centroidMembers: this._lodCentroidMembers,
+    };
+  }
+
+  /** Rank squads by distance to the camera and keep the nearest at `full`
+   *  until their cumulative alive-member count reaches the budget; demote the
+   *  rest to `centroid`. Runs on `lodMemberBudgetIntervalSec`, and costs one
+   *  sort of the squad list — no per-member work.
+   *
+   *  Why a budget and not a distance cut: M19 Finding 6 measured only 8 % of
+   *  the members beyond 1 500 elmos at the budget subject's own pose, because
+   *  a massed battle is by definition piled into the frame. A budget bounds
+   *  `entity` by construction at any pose; distance only decides *which*
+   *  squads pay, which is what it is good for and all it is used for here.
+   *
+   *  `icon` squads are left alone — that tier is an adapter/minimap decision
+   *  about whether a squad is drawn at all, not a steering-cost decision. */
+  _applyLodBudget() {
+    const budget = this.cfg.lodFullMemberBudget | 0;
+    if (budget <= 0 || !this._viewSet) {
+      // Un-demote anything this policy demoted, so switching the knob off in a
+      // session really does restore the pre-M20 frame rather than freezing
+      // whatever tiers the last pass happened to leave behind.
+      if (this._lodCentroidSquads > 0) {
+        for (const sq of this.squads.values()) if (sq.lod === 'centroid') sq.lod = 'full';
+      }
+      this._lodFullSquads = 0; this._lodFullMembers = 0;
+      this._lodCentroidSquads = 0; this._lodCentroidMembers = 0;
+      return;
+    }
+    if (this._now < this._lodNextAt) return;
+    this._lodNextAt = this._now + (this.cfg.lodMemberBudgetIntervalSec ?? 0.25);
+
+    const rank = this._lodRank;
+    rank.length = 0;
+    const vx = this._viewX, vy = this._viewY, vz = this._viewZ;
+    for (const sq of this.squads.values()) {
+      if (sq.lod === 'icon') continue;
+      const dx = sq.cx - vx, dy = sq.cy - vy, dz = sq.cz - vz;
+      sq._lodD2 = dx * dx + dy * dy + dz * dz;
+      rank.push(sq);
+    }
+    rank.sort(byLodDistance);
+
+    const h = this.cfg.lodMemberBudgetHysteresis ?? 0;
+    const holdLimit = budget * (1 + h);      // already `full`: keep it
+    const promoteLimit = budget * (1 - h);   // currently `centroid`: promote it
+    let used = 0, fullSquads = 0, centroidSquads = 0, centroidMembers = 0;
+    for (const sq of rank) {
+      const n = sq.aliveCount;
+      // Nearer squads have already claimed `used`; a squad that does not fit
+      // is skipped rather than terminating the scan, so a small squad just
+      // behind a large one still gets steered.
+      if (used + n <= (sq.lod === 'full' ? holdLimit : promoteLimit)) {
+        if (sq.lod !== 'full') sq.lod = 'full';
+        used += n; fullSquads++;
+      } else {
+        if (sq.lod !== 'centroid') sq.lod = 'centroid';
+        centroidSquads++; centroidMembers += n;
+      }
+    }
+    this._lodFullSquads = fullSquads;
+    this._lodFullMembers = used;
+    this._lodCentroidSquads = centroidSquads;
+    this._lodCentroidMembers = centroidMembers;
   }
 
   /** Install the shared passability grid once the map's heightmap sampler is
@@ -396,6 +509,10 @@ export class SquadManager {
   update(dt) {
     this._now += dt;
     this._fastNb = this.cfg.fastNeighbours !== false;
+    // Before _rebuildGrid: the grid only holds `full` squads' members, so the
+    // tier assignment has to be settled or the grid and the steerers disagree
+    // about who exists this frame.
+    this._applyLodBudget();
     // cfg.neighbourCap is a live perf knob (M9 A/B'd it in-session), so size
     // the shared buffer here rather than trusting the constructor's reading.
     const cap = Math.max(0, this.cfg.neighbourCap | 0);

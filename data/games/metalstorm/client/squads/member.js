@@ -16,6 +16,10 @@ export class Member {
     this.vx = 0; this.vz = 0;
     this.headingY = 0;
     this.gait = 0;            // 0..1 animation phase (distance-accumulated)
+    // Altitude above the squad centroid, snapshotted when an AIR squad drops
+    // to the `centroid` tier (PLAN-perf M20) — that tier has no ground sample
+    // to rebuild a flyer's cruise height from. Unused by ground/naval.
+    this.centroidDy = 0;
 
     // Assigned formation slot index (stable so a member keeps its place).
     this.slot = id;

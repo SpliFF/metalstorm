@@ -96,7 +96,38 @@ export const DEFAULT_CONFIG = {
   // LOD: below this on-screen size (px, supplied by adapter) skip steering and
   // render members at the centroid; far beyond, the adapter drops to an icon
   // (PLAN-macro-map.md tiers).
+  // NOTE (PLAN-perf M20): nothing reads this. It describes the screen-size
+  // policy the tier was designed for; the policy that actually ships is the
+  // member budget below, because M19 Finding 6 measured a pure distance/size
+  // cut recovering only 8 % of the win at a massed-battle pose. Kept as the
+  // record of the intended alternative, not as live config.
   steerMinScreenPx: 8,
+
+  // --- Reduced-detail member budget (PLAN-perf M20) ------------------------
+  // Per-member steering is 45-49 % of the client's `entity` phase at 14 k
+  // rendered members and scales linearly with them (M19 Finding 5), so the
+  // frame is bounded by capping how many members are steered at all rather
+  // than by how far away they are. Every `lodMemberBudgetIntervalSec` the
+  // manager ranks squads by distance to the camera and keeps the nearest at
+  // the `full` tier until their cumulative alive-member count reaches
+  // `lodFullMemberBudget`; the remainder drop to `centroid` (rigid formation,
+  // no steering — squad.js `_updateCentroid`).
+  //
+  // 6 500 is derived, not tuned: M19's XL ladder fits
+  //   p95 ms ~= 5.9 + 0.637 us * (all members) + 0.533 us * (steered members)
+  // and at the budget subject (XL900, 10 644 members) that puts p95 at ~16.1
+  // against the 16.7 ms target. Set 0 to disable the policy entirely — every
+  // squad stays `full` and the frame is the pre-M20 frame.
+  lodFullMemberBudget: 6500,
+  // Re-rank cadence. The ranking is a sort of the squad list (~1 k entries at
+  // XL900), not per-member work, so this is cheap; it is slow only to keep the
+  // tier from changing under a squad several times a second.
+  lodMemberBudgetIntervalSec: 0.25,
+  // Boundary hysteresis as a fraction of the budget: a squad already at `full`
+  // holds it to budget*(1+h), one at `centroid` is promoted only inside
+  // budget*(1-h). Without it the squads straddling the cap flip tier on every
+  // re-rank as the battle shuffles.
+  lodMemberBudgetHysteresis: 0.1,
 
   // Big-unit threading (PLAN-metalstorm-flow.md §4, task 3/4). Weight applied
   // to the accumulated big-unit push term alongside arrival/separation.

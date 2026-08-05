@@ -437,8 +437,14 @@ interface SquadSystemHandle {
     reportImpact(hint: { x: number; z: number; radius?: number; squadId?: number }): void;
     reportThreat(hint: { x: number; z: number; radius?: number; squadId?: number }): void;
     setPassability(p: unknown): void;
+    /// PLAN-perf M20: camera world position for the reduced-detail member
+    /// budget. Optional because data/games/*/client is runtime-served and can
+    /// be older than this bundle; gpTickSquads warns once if it is missing.
+    setViewPos?(x: number, y: number, z: number): void;
     update(dt: number): void;
 }
+/// One-time warn latch for a squad module with no M20 `setViewPos`.
+let gpSquadViewPosWarned = false;
 /// Sim-scaled delta multiplier for VISUAL FX aging — slows / freezes effect
 /// lifetimes with the game speed (paused → 0). Driven by onGameInfo. The
 /// camera + entity ticks keep raw wall dt; only FX lifetimes use it.
@@ -1950,6 +1956,20 @@ function gpTickSquads(dt: number): void {
     for (const id of gpSquadIds) {
         const pose = er?.getEntityPose(id);
         if (pose) gpSquadSystem.syncPose(id, { x: pose.x, y: pose.y, z: pose.z, heading: pose.heading * H });
+    }
+    // PLAN-perf M20: the squad system's reduced-detail member budget ranks
+    // squads by distance to the camera, and the camera only exists out here.
+    // Push it every frame (the policy itself re-ranks on its own slow cadence).
+    if (gpCamera) {
+        if (gpSquadSystem.setViewPos) {
+            const p = gpCamera.position;
+            gpSquadSystem.setViewPos(p.x, p.y, p.z);
+        } else if (!gpSquadViewPosWarned) {
+            gpSquadViewPosWarned = true;
+            // FIDELITY-STANDIN: no view feed means the member budget stays
+            // disarmed and every squad is steered — correct, just not bounded.
+            postLog(2, '[gp] squad module has no setViewPos — PLAN-perf M20 member budget disabled');
+        }
     }
     gpSquadSystem.update(dt);
     gpSquadBackend?.flush();
