@@ -13,6 +13,8 @@
 #include "Server/PlayerRosterBroadcast.h"
 #include "Server/Database.h"
 #include "Server/GameMetrics.h"
+#include "Server/GrowthCounters.h"
+#include "Lua/LuaHandleSynced.h"   // CSplitLuaHandle::GetGameParams — growth counters
 #include "Server/GmVerbs.h"
 #include "Server/DevBuildGate.h"
 #include "Server/ClientSession.h"
@@ -1746,6 +1748,18 @@ int main(int argc, char* argv[])
     GameMetricsWriter metricsWriter;
     metricsWriter.Init(statusDb, roomId, /*cadenceSec=*/60);
 
+    // PLAN-long-uptime task 3: the growth counters ride the same row's
+    // `extra_json`, which GameMetrics reserved for exactly this. Thresholds
+    // are read once at start-up rather than per sample — an operator changing
+    // a ceiling restarts the game server, and re-reading getenv 30×/s to
+    // support a case nobody has is the wrong trade.
+    const growth::Thresholds growthThresholds = growth::ThresholdsFromEnv();
+    // The last alarm set we logged, so a standing alarm produces one line
+    // rather than one per minute for the life of the campaign. The durable
+    // record is the admin_audit row the lobby writes off the same JSON; this
+    // is the server's own log breadcrumb.
+    std::vector<std::string> lastGrowthAlarmLabels;
+
     const auto serverStartTime = std::chrono::steady_clock::now();
     auto lastClientTime = serverStartTime;   // last instant clientCount > 0 (or launch)
     auto lastStatusWrite = serverStartTime;
@@ -2256,8 +2270,60 @@ int main(int argc, char* argv[])
             const bool simRunning = sim.HasGameStarted() && !g_luaDebugger.IsPaused() &&
                                     !gs->paused && !gameOverRelay.IsDeclared() &&
                                     rtcServer.GetClientCount() > 0;
+
+            // PLAN-long-uptime task 3: gather the growth counters only on the
+            // ticks that will actually write a row. Two of them are O(id
+            // space) and O(teams × params), which is nothing once a minute and
+            // would be a measurable per-frame cost otherwise — hence
+            // DueForWrite rather than gathering unconditionally and letting
+            // MaybeWrite throw the work away.
+            std::string extraJson;
+            if (metricsWriter.DueForWrite()) {
+                growth::Counters gc;
+                gc.rssKb = statsdump::GetRssKb();
+                gc.luaHeapKb = GetSyncedLuaHeapKb();
+                gc.paramKeys = static_cast<int64_t>(streamer.KeyDictionarySize());
+                gc.paramKeysRev = static_cast<int64_t>(streamer.KeyDictionaryRev());
+                gc.rulesParams =
+                    static_cast<int64_t>(CSplitLuaHandle::GetGameParams().size());
+                for (int t = 0; t < teamHandler.ActiveTeams(); ++t) {
+                    if (const CTeam* team = teamHandler.Team(t))
+                        gc.rulesParams += static_cast<int64_t>(team->modParams.size());
+                }
+                gc.unitIdsMax = static_cast<int64_t>(unitHandler.MaxUnitIDs());
+                gc.unitIdsUsed =
+                    gc.unitIdsMax - static_cast<int64_t>(unitHandler.NumFreeUnitIDs());
+                gc.unitSpawns = static_cast<int64_t>(unitHandler.TotalUnitSpawnGens());
+                gc.standingOrders =
+                    static_cast<int64_t>(standingOrders.GetAllOrders().size());
+                gc.players = static_cast<int64_t>(playerHandler.ActivePlayers());
+                gc.playersMax = MAX_PLAYERS;
+
+                const std::vector<growth::Alarm> alarms =
+                    growth::Evaluate(gc, growthThresholds);
+                extraJson = growth::ToJson(gc, alarms);
+
+                // Log only on a *change* of the tripped set. A campaign that
+                // legitimately sits above the id warn for a week should not
+                // write 10 000 identical WARN lines into the very log table
+                // task 2b just put a retention policy on.
+                std::vector<std::string> labels;
+                labels.reserve(alarms.size());
+                for (const growth::Alarm& a : alarms)
+                    labels.push_back(a.label + (a.crit ? "!" : ""));
+                if (labels != lastGrowthAlarmLabels) {
+                    for (const growth::Alarm& a : alarms)
+                        SLOG(a.crit ? SPRING_LOG_WARNING : SPRING_LOG_NOTICE,
+                             "growth alarm [%s]: %s", a.label.c_str(), a.detail.c_str());
+                    if (alarms.empty() && !lastGrowthAlarmLabels.empty())
+                        SLOG(SPRING_LOG_NOTICE, "growth alarms cleared");
+                    lastGrowthAlarmLabels = std::move(labels);
+                }
+            }
+
             metricsWriter.MaybeWrite(snap.frame, snap.clientCount, entityCount,
-                                     snap.simFps, gs->speedFactor, simRunning);
+                                     snap.simFps, gs->speedFactor, simRunning,
+                                     extraJson);
         }
 
         // Periodic status

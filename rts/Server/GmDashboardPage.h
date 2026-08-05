@@ -156,8 +156,34 @@ function renderShell() {
 
 function alarmBadges(g) {
   let h = '';
-  for (const a of (g.alarms || [])) h += `<span class="badge ${a.crit?'crit':''}">${esc(a.label)}</span>`;
+  // title= carries the alarm's reading (PLAN-long-uptime task 3) — the badge
+  // itself has room for a word, and "ids" alone does not tell an operator
+  // whether they have a week or an hour.
+  for (const a of (g.alarms || []))
+    h += `<span class="badge ${a.crit?'crit':''}" title="${esc(a.detail||a.label)}">${esc(a.label)}</span>`;
   return h;
+}
+
+// PLAN-long-uptime task 3: the growth column. One cell, because a fleet table
+// with eleven more columns is unreadable and the counters only matter when one
+// of them is moving — the badge is what draws the eye, this is what you read
+// once it has. Absent for rooms whose engine predates the counters.
+function growthCell(g) {
+  const gr = g.growth;
+  if (!gr) return '<td class="muted">—</td>';
+  const idPct = gr.unit_ids_max > 0
+    ? Math.round(gr.unit_ids_used * 100 / gr.unit_ids_max) + '%' : '—';
+  // Two short lines rather than one long one: laid out inline this cell alone
+  // was wider than the other twelve columns' slack and pushed the fleet table
+  // into a horizontal scrollbar (seen on the first render).
+  const l1 = `ids ${idPct} · keys ${gr.param_keys||0}`;
+  const l2 = `rss ${Math.round((gr.rss_kb||0)/1024)}M · lua ${Math.round((gr.lua_heap_kb||0)/1024)}M`;
+  const tip = `unit ids ${gr.unit_ids_used}/${gr.unit_ids_max} · spawns ${gr.unit_spawns}`
+    + ` · rules params ${gr.rules_params} · key dict ${gr.param_keys} (rev ${gr.param_keys_rev})`
+    + ` · standing orders ${gr.standing_orders} · players ${gr.players}/${gr.players_max}`
+    + ` · rss ${gr.rss_kb}kB · lua heap ${gr.lua_heap_kb}kB`;
+  return `<td title="${esc(tip)}" style="font-size:11px;line-height:1.35">`
+    + `${esc(l1)}<br>${esc(l2)}</td>`;
 }
 
 async function refresh() {
@@ -170,7 +196,7 @@ async function refresh() {
   if (!games.length) { $('#fleet').innerHTML = '<div class="muted">no game servers running</div>'; return; }
   let h = `<table><thead><tr><th>room</th><th>game</th><th>map</th><th>state</th>
     <th>players</th><th>frame</th><th>p95 tick</th><th>behind</th><th>entities</th>
-    <th>fps</th><th>uptime</th><th>db</th></tr></thead><tbody>`;
+    <th>fps</th><th>uptime</th><th>db</th><th>growth</th></tr></thead><tbody>`;
   for (const g of games) {
     const p95 = g.tick_p95_us != null ? (g.tick_p95_us/1000).toFixed(1)+'ms' : '—';
     h += `<tr class="game" data-room="${g.room_id}"><td>#${g.room_id}${alarmBadges(g)}</td>
@@ -179,7 +205,8 @@ async function refresh() {
       <td>${g.client_count ?? '—'}</td><td>${g.frame ?? '—'}</td><td>${p95}</td>
       <td>${g.frames_behind ?? '—'}</td><td>${g.entity_count ?? '—'}</td>
       <td>${g.sim_fps != null ? g.sim_fps.toFixed(1) : '—'}</td>
-      <td>${fmtDur(g.uptime_sec)}</td><td>${fmtBytes(g.db_size_bytes)}</td></tr>`;
+      <td>${fmtDur(g.uptime_sec)}</td><td>${fmtBytes(g.db_size_bytes)}</td>
+      ${growthCell(g)}</tr>`;
   }
   h += '</tbody></table>';
   $('#fleet').innerHTML = h;
@@ -197,6 +224,24 @@ async function openDrill(roomId, g) {
     const v = Math.min(40, (m.tick_p95_us||0)/1000*2);
     return `<i style="height:${Math.max(2,v)}px" title="f${m.frame} ${(m.tick_p95_us/1000).toFixed(1)}ms"></i>`;
   }).join('');
+  // PLAN-long-uptime task 3: a growth series next to the tick series. Scaled
+  // to the window's own max rather than an absolute ceiling — the question
+  // this chart answers is "is it sloped?", not "is it big?", and an absolute
+  // scale flattens the slope that matters into a line at the bottom.
+  const growthSeries = (label, pick, fmt) => {
+    const pts = timeline.slice().reverse().filter(m => m.growth).map(m => pick(m.growth));
+    if (!pts.length) return '';
+    const max = Math.max(...pts, 1);
+    const bars = pts.map(v =>
+      `<i style="height:${Math.max(2, Math.round(v/max*40))}px" title="${esc(fmt(v))}"></i>`).join('');
+    return `<div style="margin-right:18px"><div class="muted">${esc(label)} · peak ${esc(fmt(max))}</div>
+      <div class="spark">${bars}</div></div>`;
+  };
+  const growthSparks =
+    growthSeries('rss', g2 => g2.rss_kb||0, v => Math.round(v/1024)+'MB') +
+    growthSeries('lua heap', g2 => g2.lua_heap_kb||0, v => Math.round(v/1024)+'MB') +
+    growthSeries('param keys', g2 => g2.param_keys||0, v => v+' keys') +
+    growthSeries('unit ids', g2 => g2.unit_ids_used||0, v => v+' ids');
   const d = $('#drill');
   d.innerHTML = `<div class="card"><h2>Room #${roomId} — ${esc(g.game_id||'')} <span class="muted">port ${port}</span>
       <a class="link" style="float:right" id="closed">close ✕</a></h2>
@@ -208,6 +253,8 @@ async function openDrill(roomId, g) {
       <button id="inspectbtn">Inspect</button></div>
     <div class="row" style="margin-top:12px"><div><div class="muted">tick p95 timeline</div>
       <div class="spark">${spark || '<span class="muted">no metrics yet</span>'}</div></div></div>
+    <div class="row" style="margin-top:12px">${growthSparks ||
+      '<span class="muted">no growth counters yet</span>'}</div>
     <div id="inspect" class="row" style="margin-top:10px"></div>
     <h2 style="margin-top:14px;font-size:12px" class="muted">Audit trail (this game)</h2>
     <div class="log" id="audit">${audit.map(a =>

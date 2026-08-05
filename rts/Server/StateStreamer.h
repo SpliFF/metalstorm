@@ -26,6 +26,15 @@ public:
 
     void Tick(int frameNum);
 
+    /// PLAN-long-uptime §3 (S1) growth metrics. Assigned interned ids,
+    /// excluding the reserved id 0. Monotone between compactions, so pairing
+    /// it with the revision below is what distinguishes "the dictionary is
+    /// growing" from "compaction is running and it is still growing".
+    size_t KeyDictionarySize() const {
+        return idToKey.empty() ? 0 : idToKey.size() - 1;
+    }
+    uint32_t KeyDictionaryRev() const { return keyDictionaryRev; }
+
 private:
     void CheckWinCondition(int frameNum);
     void StreamResources(int frameNum);

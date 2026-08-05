@@ -9,6 +9,7 @@
  */
 
 #include "Server/Database.h"
+#include "Server/GrowthCounters.h"
 #include "Server/GameServersDb.h"
 #include "Server/MapMetadata.h"
 #include "Server/NetworkServer.h"
@@ -1485,7 +1486,7 @@ int main(int argc, char *argv[]) {
               "       st.ready, st.client_count, "
               "       m.frame, m.tick_p95_us, m.frames_behind, m.entity_count, "
               "       m.sim_fps, m.uptime_sec, m.db_size_bytes, "
-              "m.snapshot_age_sec "
+              "m.snapshot_age_sec, m.extra_json "
               "FROM game_servers gs "
               "LEFT JOIN game_status st ON st.room_id = gs.room_id "
               "LEFT JOIN (SELECT room_id, MAX(id) AS mid FROM game_metrics "
@@ -1522,19 +1523,44 @@ int main(int argc, char *argv[]) {
               g["uptime_sec"] = colInt(13);
               g["db_size_bytes"] = colInt(14);
               g["snapshot_age_sec"] = colInt(15);
-              // Engine-sourced alarm badges (economy/long-uptime Lua
-              // counters land here once that Stage-7 Lua exists).
+              // Lobby-evaluated badges: these read columns the lobby already
+              // has and need no cooperation from the game server.
               nlohmann::json alarms = nlohmann::json::array();
               const std::string state = colTxt(5);
               if (sqlite3_column_type(s, 10) != SQLITE_NULL &&
                   sqlite3_column_int(s, 10) > 60)
-                alarms.push_back({{"label", "lag"}, {"crit", true}});
+                alarms.push_back(
+                    {{"label", "lag"}, {"crit", true}, {"detail", "frames behind"}});
               if (sqlite3_column_type(s, 14) != SQLITE_NULL &&
                   sqlite3_column_int64(s, 14) > 1024LL * 1024 * 1024)
-                alarms.push_back({{"label", "db"}, {"crit", false}});
+                alarms.push_back(
+                    {{"label", "db"}, {"crit", false}, {"detail", "db over 1 GiB"}});
               if (state == "crashed")
-                alarms.push_back({{"label", "crashed"}, {"crit", true}});
+                alarms.push_back(
+                    {{"label", "crashed"}, {"crit", true}, {"detail", "server exited"}});
+              // PLAN-long-uptime task 3: the growth alarms are evaluated by
+              // the game server (it is the only process that can see a Lua
+              // heap or an id pool) and ride the metric row's extra_json. The
+              // lobby merges rather than re-derives — thresholds live in one
+              // place, next to the counters they apply to.
+              const std::string extraJson = colTxt(16);
+              std::vector<growth::Alarm> growthAlarms;
+              growth::ParseAlarms(extraJson, growthAlarms);
+              for (const auto &a : growthAlarms)
+                alarms.push_back({{"label", a.label},
+                                  {"crit", a.crit},
+                                  {"detail", a.detail}});
               g["alarms"] = alarms;
+              // The raw counters too, so the drill-down can chart growth
+              // without a second round trip. Absent (not zeroed) when the row
+              // predates this or the gather found nothing.
+              if (!extraJson.empty()) {
+                nlohmann::json extra =
+                    nlohmann::json::parse(extraJson, nullptr, false);
+                if (!extra.is_discarded() && extra.is_object() &&
+                    extra.contains("growth"))
+                  g["growth"] = extra["growth"];
+              }
               games.push_back(std::move(g));
             }
           }
@@ -1571,12 +1597,13 @@ int main(int argc, char *argv[]) {
           sqlite3_stmt *s = nullptr;
           const char *sql =
               "SELECT frame, taken_at, resolution, tick_p95_us, frames_behind, "
-              "entity_count, client_count, sim_fps, uptime_sec, db_size_bytes "
+              "entity_count, client_count, sim_fps, uptime_sec, db_size_bytes, "
+              "extra_json "
               "FROM game_metrics WHERE room_id=? ORDER BY id DESC LIMIT 200";
           if (sqlite3_prepare_v2(mapDb, sql, -1, &s, nullptr) == SQLITE_OK) {
             sqlite3_bind_int(s, 1, roomId);
             while (sqlite3_step(s) == SQLITE_ROW) {
-              timeline.push_back({
+              nlohmann::json row = {
                   {"frame", sqlite3_column_int(s, 0)},
                   {"taken_at", sqlite3_column_int64(s, 1)},
                   {"resolution",
@@ -1588,7 +1615,20 @@ int main(int argc, char *argv[]) {
                   {"sim_fps", sqlite3_column_double(s, 7)},
                   {"uptime_sec", sqlite3_column_int64(s, 8)},
                   {"db_size_bytes", sqlite3_column_int64(s, 9)},
-              });
+              };
+              // PLAN-long-uptime task 3: hoist the growth counters to the top
+              // level of the row so the drill-down charts a series rather than
+              // re-parsing a string per point. Rows written before this
+              // existed (and hourly-downsampled rows, which carry the
+              // *promoted* raw row's extra_json) simply have no `growth` key.
+              if (const auto *t = sqlite3_column_text(s, 10)) {
+                const nlohmann::json extra = nlohmann::json::parse(
+                    reinterpret_cast<const char *>(t), nullptr, false);
+                if (!extra.is_discarded() && extra.is_object() &&
+                    extra.contains("growth"))
+                  row["growth"] = extra["growth"];
+              }
+              timeline.push_back(std::move(row));
             }
           }
           if (s)
@@ -3624,8 +3664,62 @@ int main(int argc, char *argv[]) {
   // --- Main loop (10 Hz for lobby — HTTP serving + process management) ---
   int reapTick = 0;
   int sessionSweepTick = 0;
+  // PLAN-long-uptime task 3 (§3): the durable record of a growth alarm.
+  // Per-room, the set of alarm labels this lobby has already written an audit
+  // row for. The fleet view already *shows* live alarms off the same JSON;
+  // this exists so an alarm that trips at 03:00 and clears before anyone looks
+  // still leaves a trace, and so the drill-down's audit trail — which is where
+  // an operator reconstructs what happened to a long game — carries it.
+  //
+  // §3 asks for a `game_events` entry. That table does not exist and §7.3
+  // struck it from S3 for the same reason; `admin_audit` is the table the
+  // dashboard already reads, so the alarm lands there with userId 0 (no human
+  // took this action) and username "system".
+  // (unordered_map, not map: `rts/Map/` shadows the `<map>` header on macOS.)
+  int alarmScanTick = 0;
+  std::unordered_map<int, std::set<std::string>> knownRoomAlarms;
   while (keepRunning.load()) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    // Scan for growth-alarm transitions (~every 60 s at 10 Hz). Matched to the
+    // game server's own metric cadence deliberately: the scan only ever looks
+    // at the *newest* row per room, so any slower cadence silently skips rows
+    // and the audit trail becomes a sample of the transitions rather than a
+    // record of them. Cost is one indexed join over the live rooms per minute.
+    if (haveMaintenanceDb && ++alarmScanTick >= 600) {
+      alarmScanTick = 0;
+      std::set<int> seenRooms;
+      for (const auto &[roomId, extraJson] : maintenanceDb.LatestGameExtraJson()) {
+        seenRooms.insert(roomId);
+        std::vector<growth::Alarm> alarms;
+        growth::ParseAlarms(extraJson, alarms);
+        std::set<std::string> now;
+        for (const auto &a : alarms)
+          now.insert(a.label);
+        auto &known = knownRoomAlarms[roomId];
+        for (const auto &a : alarms) {
+          if (known.count(a.label))
+            continue;
+          maintenanceDb.LogAudit(0, "system",
+                                 a.crit ? "alarm_crit" : "alarm_warn",
+                                 "room=" + std::to_string(roomId), a.detail);
+          SLOG(SPRING_LOG_WARNING, "room %d growth alarm [%s]: %s", roomId,
+               a.label.c_str(), a.detail.c_str());
+        }
+        for (const auto &label : known) {
+          if (!now.count(label))
+            maintenanceDb.LogAudit(0, "system", "alarm_clear",
+                                   "room=" + std::to_string(roomId), label);
+        }
+        known = std::move(now);
+      }
+      // Forget rooms whose game has ended — otherwise this map is itself an
+      // unbounded container in a lobby that stays up for weeks, which would
+      // be a poor look for the plan it implements.
+      for (auto it = knownRoomAlarms.begin(); it != knownRoomAlarms.end();)
+        it = seenRooms.count(it->first) ? std::next(it)
+                                        : knownRoomAlarms.erase(it);
+    }
 
     // Sweep expired sessions (~hourly at 10 Hz). PLAN-long-uptime S9: the
     // sweep existed but ran exactly once, at start-up, so a lobby that stays

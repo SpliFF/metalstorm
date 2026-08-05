@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 struct sqlite3;
@@ -199,6 +200,20 @@ public:
     /// the save route distinguish "update" (always allowed) from "create"
     /// (capped) without an extra round trip.
     bool CommandPresetExists(int64_t userId, const std::string& name);
+
+    /// PLAN-long-uptime task 3: `(room_id, extra_json)` from the newest
+    /// `game_metrics` row of every room with a **live game server**. Rooms
+    /// whose newest row carries an empty `extra_json` are omitted — there is
+    /// nothing to scan — and so are rooms whose server has exited, whose
+    /// metric rows outlive them.
+    ///
+    /// Lives on Database rather than being a raw query in the lobby loop for
+    /// the §8.2 reason: the maintenance thread must not touch the handle the
+    /// route handlers use, and the only handle it legitimately owns is this
+    /// object's. `game_metrics` is created by the *game* server, so a lobby
+    /// that has never hosted a game has no such table; that is not an error
+    /// and yields an empty result.
+    std::vector<std::pair<int, std::string>> LatestGameExtraJson();
 
 private:
     void CreateTables();

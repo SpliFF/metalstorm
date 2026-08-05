@@ -71,6 +71,7 @@ Full CLI flag list (from `rts/server_main.cpp`):
 | `Server/ContentServer.h/.cpp` | Scans content roots, serves assets at `/api/content/assets/*`. |
 | `Server/Database.h/.cpp` | SQLite wrapper (accounts, sessions, `admin_audit`). Ban primitives (`SetBanned`/`SetBannedByUsername`/`RevokeUserSessions`/`GetBannedUsers`, PLAN-gm-tools task 4). |
 | `Server/GameMetrics.h/.cpp` | **PLAN-gm-tools task 1**: `GameMetricsWriter` — per-game sim-health rows (tick p95, frames-behind, entity count, uptime, db size) into the shared `game_metrics` table on a wall-clock cadence; 7-day-raw / hourly-tail downsampling (E5). Driven from `server_main.cpp`'s loop. |
+| `Server/GrowthCounters.h/.cpp` | **PLAN-long-uptime task 3**: the growth-counter set + static alarm thresholds (`Evaluate`/`ToJson`/`ParseAlarms`/`ThresholdsFromEnv`). Pure — no sim, no sqlite — so both binaries link it: `server_main.cpp` gathers the engine-coupled readings (RSS, synced Lua heap, interned key dictionary, unit-id occupancy + spawn generations, standing orders, player rows) on the metric cadence and writes them into `game_metrics.extra_json`; `lobby_main.cpp` parses the same blob back for fleet badges and the drill-down charts, and its maintenance loop turns alarm *transitions* into `admin_audit` rows. Thresholds documented in `docs/gm-tools.md`. |
 | `Server/GmVerbs.h/.cpp` + `GmRollback.cpp` | **PLAN-gm-tools task 2**: the GM verb set — `RegisterGmVerbs` installs `POST /api/gm/{pause,resume,grant,broadcast,inspect,kick,rollback,checkpoint,hibernate,snapshots}` (all `RouteAuth::AdminOnly` + in-handler role recheck + `LogAudit`; compiled into prod, unlike `/api/exec`). Rollback rides the `ISnapshotStore` seam (`NullSnapshotStore` until PLAN-persistence's `GameStateStore` lands → refuses cleanly, audited). The pure `DoRollback` sequence lives in `GmRollback.cpp` (dependency-light, unit-tested). |
 | `Server/GmDashboardPage.h` | **PLAN-gm-tools task 3**: the self-contained GM ops dashboard HTML/JS, served by the lobby at `GET /admin`. |
 | `Server/RoomManager.h/.cpp` | Room lifecycle (create/join/leave/start/end), player rosters. |
@@ -514,8 +515,8 @@ data/
 | `/api/games/data/<gameId>/*` | Preprocessed game assets (unit models, textures) |
 | `/api/processes` | JSON list of game server instances (pid, port, state, map, game) |
 | `GET /admin` | GM operations dashboard (server-rendered HTML; own admin login). PLAN-gm-tools §2. |
-| `POST /api/admin/fleet` | AdminOnly. Every game server + latest `game_metrics` (join `game_servers`⟕`game_status`⟕`game_metrics`) + alarm badges. |
-| `POST /api/admin/game` | AdminOnly. Per-game metric timeline + audit tail (`{roomId}`). |
+| `POST /api/admin/fleet` | AdminOnly. Every game server + latest `game_metrics` (join `game_servers`⟕`game_status`⟕`game_metrics`) + alarm badges (lobby-derived: lag/db/crashed; plus the game server's growth alarms parsed out of `extra_json`) + the raw `growth` counters. |
+| `POST /api/admin/game` | AdminOnly. Per-game metric timeline (each row carrying its `growth` counters when present) + audit tail (`{roomId}`). |
 | `POST /api/admin/ban` / `unban` / `banned` | AdminOnly. Account ban (+ immediate session revoke) / unban / ban list. PLAN-gm-tools task 4. |
 
 ### Game server (`spring-server`)
