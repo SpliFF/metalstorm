@@ -51,7 +51,9 @@ import { LosBitmapStore, type LosBitmap } from './los-bitmap.js';
 // done in main.ts) so unit `.ktx2` textures transcode here.
 import './ktx2-config.js';
 import { EntityRenderer, setModelMaterialPort } from './entity-renderer.js';
-import { SquadRenderBackend, setLegacyBackendPlumbing } from './squad-render-backend.js';
+import {
+    SquadRenderBackend, setLegacyBackendPlumbing, setLegacyBufferRebind, setBboxRefreshEvery,
+} from './squad-render-backend.js';
 import { ImpostorRenderer, LodTier } from './impostor-renderer.js';
 
 /**
@@ -2252,6 +2254,18 @@ export function gpInit(msg: GpInitToWorker): void {
          *  switches live on `__squadSystem.perfFix(name, on)`. */
         squadBackendLegacy: (on: boolean): boolean =>
             setLegacyBackendPlumbing(on),
+        /** M21: A/B the squad backend's per-frame thin-instance buffer binding.
+         *  `squadRebindBuffers(true)` restores the pre-M21 path — a full
+         *  `thinInstanceSetBuffer` per buffer per pool per frame, which
+         *  disposes and re-creates every GPU buffer each frame; `false` is the
+         *  shipped default (bind once per array identity, then upload in
+         *  place). Takes effect on the next flush, no reload needed. */
+        squadRebindBuffers: (on: boolean): boolean =>
+            setLegacyBufferRebind(on),
+        /** M21: how many flushes a squad pool may skip before its thin-instance
+         *  bounding info is recomputed. `squadBboxEvery(1)` restores the pre-M21
+         *  every-flush refresh (the legacy arm); 15 is the shipped default. */
+        squadBboxEvery: (n: number): number => setBboxRefreshEvery(n),
         /** M18: A/B the pooled combat-FX shapes. `combatFxPooled(false)`
          *  restores the pre-M18 path where every tracer / puff / burst
          *  allocates its own Babylon mesh and its own draw call; `true` is the

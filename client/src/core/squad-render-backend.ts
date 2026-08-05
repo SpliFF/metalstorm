@@ -121,6 +121,16 @@ interface InstancePool {
     /** Present on MODEL pools only — the transform data to compose members
      *  against the borrowed body geometry. */
     model?: { restWorld: Matrix; yOffset: number };
+    /** PLAN-perf M21: whether this pool's thin-instance vertex buffers are
+     *  currently bound to its live typed arrays. `thinInstanceSetBuffer`
+     *  DISPOSES and RE-CREATES the GPU buffer (and, for user kinds, re-registers
+     *  the vertex attribute) on every call, so it must run once per array
+     *  identity — at creation and after `growPool` reallocates — not once per
+     *  frame. Steady-state flushes re-upload in place instead. */
+    buffersBound?: boolean;
+    /** PLAN-perf M21: flushes remaining before the next bounding-info refresh.
+     *  0 forces one on the next flush. */
+    bboxCountdown?: number;
 }
 
 interface MemberSlot { pool: InstancePool; index: number; }
@@ -163,6 +173,40 @@ let LEGACY_BACKEND_PLUMBING = false;
 export function setLegacyBackendPlumbing(on: boolean): boolean {
     LEGACY_BACKEND_PLUMBING = !!on;
     return LEGACY_BACKEND_PLUMBING;
+}
+
+/** M21's legacy arm. ON restores the pre-M21 `flushPool` — a full
+ *  `thinInstanceSetBuffer` per buffer per pool per frame, which disposes and
+ *  re-creates every GPU buffer each frame. OFF (shipping) binds each buffer
+ *  once per array identity and re-uploads in place. Same A/B contract as
+ *  `squadBackendLegacy`: measurement only, reachable from the worker as
+ *  `__perfToggles.squadRebindBuffers(on)`. */
+let LEGACY_BUFFER_REBIND = false;
+
+export function setLegacyBufferRebind(on: boolean): boolean {
+    LEGACY_BUFFER_REBIND = !!on;
+    return LEGACY_BUFFER_REBIND;
+}
+
+/** How many flushes a pool may skip before its thin-instance bounding info is
+ *  recomputed (PLAN-perf M21). `thinInstanceRefreshBoundingInfo` transforms 8
+ *  bounding vectors for EVERY slot up to the pool's capacity — at the
+ *  XL-battle's two 8 192-slot sprite pools that measured 2.3 ms/frame, ~95 % of
+ *  what was left of the flush and more than the buffer re-bind it sits next to.
+ *
+ *  Nothing on this renderer's path reads it: every pool mesh sets
+ *  `alwaysSelectAsActiveMesh` (so it is never frustum-culled) and
+ *  `isPickable = false`, and squad member pools are not registered as shadow
+ *  casters. Refreshing on a slow cadence rather than never is deliberate
+ *  insurance against a future consumer — it keeps the box correct to within a
+ *  quarter second, for ~7 % of the cost. A pool that was just bound or grown
+ *  refreshes immediately (see `flushPool`), so a new pool is never wrong.
+ *  1 restores the pre-M21 every-flush behaviour; `__perfToggles.squadBboxEvery`. */
+let BBOX_REFRESH_EVERY = 15;
+
+export function setBboxRefreshEvery(n: number): number {
+    BBOX_REFRESH_EVERY = Math.max(1, n | 0);
+    return BBOX_REFRESH_EVERY;
 }
 
 const MEMBER_HEIGHT = 9;      // elmos — proxy capsule height
@@ -721,7 +765,13 @@ export class SquadRenderBackend {
         mesh.thinInstanceSetBuffer('matrix', matrices, 16, false);
         mesh.thinInstanceCount = 0;
         mesh.isVisible = false;
-        return { mesh, owned, matrices, capacity, highWater: 0, free: [], dirty: false };
+        // `buffersBound` stays false: the caller may still attach `fade`/`sprite`
+        // arrays after this returns (getSpritePool/getModelPool do), and those
+        // kinds must be bound too. The first flushPool binds the full set.
+        return {
+            mesh, owned, matrices, capacity, highWater: 0, free: [], dirty: false,
+            buffersBound: false,
+        };
     }
 
     private allocSlot(pool: InstancePool): number {
@@ -771,6 +821,10 @@ export class SquadRenderBackend {
             cells.set(pool.sprite.cells);
             pool.sprite.cells = cells;
         }
+        // Every array above is a NEW object — the bound GPU buffers still point
+        // at the old ones, so the next flush must re-bind rather than re-upload
+        // (PLAN-perf M21). Missing this renders a frozen, half-length pool.
+        pool.buffersBound = false;
     }
 
     /** Compose scale·yaw·translate into the pool's matrix buffer at `index`.
@@ -805,9 +859,12 @@ export class SquadRenderBackend {
         pool.dirty = true;
     }
 
-    private flushPool(pool: InstancePool): void {
-        if (!pool.dirty) return;
-        pool.dirty = false;
+    /** Bind (or re-bind) this pool's thin-instance buffers to its current typed
+     *  arrays. Expensive — `thinInstanceSetBuffer` disposes the old GPU buffer,
+     *  allocates a new one and, for the user kinds, re-registers the vertex
+     *  attribute. Call only when an array's identity changes: pool creation and
+     *  `growPool`. */
+    private bindPoolBuffers(pool: InstancePool): void {
         pool.mesh.thinInstanceSetBuffer('matrix', pool.matrices, 16, false);
         // Per-member directional cell selector (ImpostorUvPlugin reads it in the
         // vertex shader). Only sprite pools carry it; capsule/wreck pools don't.
@@ -819,10 +876,52 @@ export class SquadRenderBackend {
         if (pool.fade) {
             pool.mesh.thinInstanceSetBuffer('ditherFade', pool.fade, 1, false);
         }
+        pool.buffersBound = true;
+    }
+
+    private flushPool(pool: InstancePool): void {
+        if (!pool.dirty) return;
+        pool.dirty = false;
+        // PLAN-perf M21: the steady state re-uploads into the buffers already
+        // bound rather than re-creating them. The pre-M21 path re-bound all
+        // three every frame for every pool, which at the XL-battle was ~45 GPU
+        // buffer allocations per frame and 54 % of the per-member `entity`
+        // floor. `thinInstancePartialBufferUpdate` also uploads only the live
+        // prefix instead of the whole (power-of-two, up to 2× oversized)
+        // capacity — instances at or past `highWater` are not drawn.
+        const justBound = LEGACY_BUFFER_REBIND || !pool.buffersBound;
+        if (justBound) {
+            this.bindPoolBuffers(pool);
+        } else {
+            if (pool.highWater > 0) {
+                pool.mesh.thinInstancePartialBufferUpdate('matrix', pool.highWater, 0);
+            }
+            // 1 float per instance each — small enough that the whole-array
+            // upload is not worth a second partial-update code path.
+            if (pool.sprite) pool.mesh.thinInstanceBufferUpdated('impostorCell');
+            if (pool.fade) pool.mesh.thinInstanceBufferUpdated('ditherFade');
+            // `thinInstanceSetBuffer` used to null this for us every frame.
+            // It is the lazy read-back cache behind `thinInstanceGetWorldMatrices()`;
+            // nothing on the render path consults it (culling re-reads
+            // `matrixData` directly in `thinInstanceRefreshBoundingInfo`), but
+            // leaving it stale would silently hand debug/test read-backs last
+            // frame's poses. One null per pool per frame.
+            (pool.mesh as unknown as {
+                _thinInstanceDataStorage: { worldMatrices: Matrix[] | null };
+            })._thinInstanceDataStorage.worldMatrices = null;
+        }
         pool.mesh.thinInstanceCount = pool.highWater;
         pool.mesh.isVisible = pool.highWater > 0;
+        // Bounding info on a cadence (see BBOX_REFRESH_EVERY). A pool that just
+        // (re-)bound has new geometry or new arrays, so refresh that flush.
         if (pool.highWater > 0) {
-            pool.mesh.thinInstanceRefreshBoundingInfo(false);
+            const left = justBound ? 0 : (pool.bboxCountdown ?? 0);
+            if (left <= 0) {
+                pool.mesh.thinInstanceRefreshBoundingInfo(false);
+                pool.bboxCountdown = BBOX_REFRESH_EVERY;
+            } else {
+                pool.bboxCountdown = left - 1;
+            }
         }
     }
 }

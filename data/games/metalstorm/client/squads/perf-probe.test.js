@@ -125,6 +125,96 @@ describe('per-term attribution probe (PLAN-perf M12)', () => {
     });
   }
 
+  // --- the reduced ("floor") path, terms 16-18 (PLAN-perf M21) -------------
+  //
+  // `run()` above drives a squad at `full`, so it exercises terms 1-15 and the
+  // `c*` terms never fire there — the bit-identical assertions above pass for
+  // them trivially. These re-run the same contract on the tier that actually
+  // executes them, which is the tier every member sits on once the M20 member
+  // budget demotes it.
+  const FLOOR_TERMS = ['cSlot', 'cGround', 'cWrite'];
+
+  function runFloor(frames, { probeTerm = 'off', probeRepeat = 0 } = {}) {
+    const cfg = makeCfg();
+    const writes = [];
+    const backend = new NullRenderBackend();
+    // A non-trivial height field, so a probe that perturbed m.x/m.z before the
+    // real sample would land on a different height and show up in `writes`.
+    backend.groundHeight = (x, z) => Math.sin(x / 40) * 7 + Math.cos(z / 55) * 5;
+    backend.updateMember = (handle, x, y, z, headingY, gait) =>
+      writes.push([handle, x, y, z, headingY, gait]);
+
+    const squad = new Squad(1, makeDef(), backend, cfg);
+    squad.setPose(200, 0, 300, 0);
+    squad.lod = 'centroid';
+
+    setPerfProbe(probeTerm, probeRepeat);
+    for (let f = 0; f < frames; f++) {
+      squad.setPose(200 + f * 6, 0, 300 + f * 5, f * 0.03);
+      squad.update(1 / 30, f / 30, () => [], makePassability());
+    }
+    setPerfProbe('off', 0);
+
+    return {
+      members: squad.members.map(m => ({
+        x: m.x, y: m.y, z: m.z, headingY: m.headingY, gait: m.gait,
+      })),
+      writes,
+    };
+  }
+
+  for (const term of FLOOR_TERMS) {
+    it(`leaves the reduced tier bit-identical when repeating '${term}'`, () => {
+      const base = runFloor(40);
+      const probed = runFloor(40, { probeTerm: term, probeRepeat: 5 });
+
+      expect(probed.members).toEqual(base.members);
+
+      if (term === 'cWrite') {
+        // Same construction as `updateMember` on the full path: the repeats
+        // are externally visible at the backend and must carry the identical
+        // transform, so the rendered result does not depend on the probe.
+        expect(probed.writes.length).toBe(base.writes.length * 6);
+        const dedup = w => w.filter((_, i) => i % 6 === 0);
+        expect(dedup(probed.writes)).toEqual(base.writes);
+      } else {
+        expect(probed.writes).toEqual(base.writes);
+      }
+    });
+  }
+
+  it('actually re-runs the reduced-tier terms — the guard for cGround/cWrite', () => {
+    // The mirror of the full-path guard below: without this, the three
+    // assertions above would also pass if the `c*` sites never executed.
+    const cfg = makeCfg();
+    let ground = 0, writes = 0;
+    const backend = new NullRenderBackend();
+    backend.groundHeight = (x, z) => { ground++; return 0; };
+    backend.updateMember = () => { writes++; };
+    const squad = new Squad(1, makeDef(), backend, cfg);
+    squad.setPose(200, 0, 300, 0);
+    squad.lod = 'centroid';
+
+    const tick = (f) => {
+      squad.setPose(200 + f * 6, 0, 300 + f * 5, 0);
+      squad.update(1 / 30, f / 30, () => [], makePassability());
+    };
+
+    setPerfProbe('off', 0); ground = 0; writes = 0; tick(1);
+    const groundOff = ground, writesOff = writes;
+
+    setPerfProbe('cGround', 4); ground = 0; writes = 0; tick(2);
+    expect(ground).toBe(groundOff * 5);   // real sample + 4 repeats
+    expect(writes).toBe(writesOff);       // untouched
+
+    setPerfProbe('cWrite', 4); ground = 0; writes = 0; tick(3);
+    expect(writes).toBe(writesOff * 5);
+    expect(ground).toBe(groundOff);
+
+    expect(groundOff).toBeGreaterThan(0);
+    expect(writesOff).toBeGreaterThan(0);
+  });
+
   it('actually re-runs the term — a no-op probe would prove nothing', () => {
     // Guard against the tests above passing because the probe never fired.
     // `updateMember` is the one term whose repeats are externally visible: the

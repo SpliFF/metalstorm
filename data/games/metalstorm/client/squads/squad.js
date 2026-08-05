@@ -43,10 +43,17 @@ const NO_BIG_UNITS = [];
 //
 // `_pt` is 0 in every shipping frame; each site costs one predicted compare.
 // Set via the SquadManager's `perfProbe` (see squad-manager.js).
+// Terms 1-15 are the `full` steering path (M12). Terms 16-18 (`c*`) are the
+// REDUCED path, `_updateCentroid` — the floor every member pays in every tier,
+// which M12 could not isolate because nothing drove the LOD tier and every
+// squad sat at `full`. With M20's member budget, `setLodBudget(1)` puts ~100 %
+// of members on the floor path and these three terms decompose it (PLAN-perf
+// M21). Their slopes are per rendered member, exactly like 1-15.
 export const PROBE_TERMS = [
   'off', 'slot', 'nearestPassable', 'isConstrained', 'updateMode',
   'trailPointAhead', 'arrive', 'separate', 'softLeash', 'potentialField',
   'bigUnits', 'mix', 'integrate', 'hardLeash', 'trackStuck', 'updateMember',
+  'cSlot', 'cGround', 'cWrite',
 ];
 let _pt = 0;   // active term index into PROBE_TERMS, 0 = off
 let _pn = 0;   // extra repetitions per member per frame
@@ -1062,11 +1069,20 @@ export class Squad {
     for (const m of this.members) {
       if (!m.alive || m.released) continue;
       const slot = this.slots[m.slot];
+      // Probe sites (M21): repeats are observationally inert — `cSlot` and
+      // `cGround` write only into scratch, `cWrite` re-issues the same
+      // transform the real call issues last from identical state.
+      if (_pt === 16) for (let r = _pn; r > 0; r--) {
+        _slotW.x = this.cx + (slot.x * c + slot.z * s);
+        _slotW.z = this.cz + (-slot.x * s + slot.z * c);
+      }
       m.x = this.cx + (slot.x * c + slot.z * s);
       m.z = this.cz + (-slot.x * s + slot.z * c);
+      if (_pt === 17 && !air) for (let r = _pn; r > 0; r--) this.backend.groundHeight(m.x, m.z);
       m.y = air ? this.cy + m.centroidDy : this.backend.groundHeight(m.x, m.z);
       m.headingY = this.heading;
       m.gait = (m.gait + gaitStep) % 1;
+      if (_pt === 18) for (let r = _pn; r > 0; r--) this.backend.updateMember(m.handle, m.x, m.y, m.z, m.headingY, m.gait);
       this.backend.updateMember(m.handle, m.x, m.y, m.z, m.headingY, m.gait);
     }
   }
