@@ -785,11 +785,15 @@ void StateStreamer::TickAI(int) {
                     conds.withinCenter = float3(cmd.withinX, 0.0f, cmd.withinZ);
                     conds.withinRadius = cmd.withinRadius;
                 }
+                // Same author plumbing as a human's create (objectives §5.1):
+                // an AI slot is a real virtual player with its own pool, so its
+                // directives attribute to it with no special case.
                 const uint32_t did = directiveManager.Create(
                     cmd.teamId, static_cast<DirectiveType>(cmd.directiveType),
                     cmd.priority, static_cast<OrderShape>(cmd.shape),
                     cmd.directiveParams, conds, groupId, cmd.requestedStrength,
-                    /*phasesJson*/ std::string(), cmd.expiresInFrames, frame);
+                    /*phasesJson*/ std::string(), cmd.expiresInFrames, frame,
+                    cmd.playerId);
                 SLOG(SPRING_LOG_DEBUG,
                     "AI directive: team=%d created directive %u type=%u group=%u "
                     "reqStrength=%u (planner-issued, same path as a human's)",

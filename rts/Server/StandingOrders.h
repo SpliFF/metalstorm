@@ -57,6 +57,12 @@ struct StandingOrderConditions {
 struct StandingOrder {
     uint32_t id = 0;
     int      team = -1;
+    /// The playerNum that created (and was charged for) this order, or -1 when
+    /// unattributed. Handed to GiveCommand at decomposition so game Lua's
+    /// AllowCommand hook can stamp `last_commander` — PLAN-metalstorm-
+    /// objectives.md §5.1 (endtoend D24). A standing order has no roster at
+    /// create time, so this is the only point its author can reach a unit.
+    int      authorPlayerId = -1;
     StandingOrderType type = StandingOrderType::DefendArea;
     uint8_t  priority = 0;
     /// Type-specific params. Schema:
@@ -94,9 +100,12 @@ public:
     /// Create a new standing order owned by `team`. Returns the new
     /// order ID. `currentFrame` is stamped into createdAtFrame and used
     /// to compute expiresAtFrame from `expiresInFrames` (0 = no expiry).
+    /// `authorPlayerId` is the charged player (see StandingOrder::authorPlayerId);
+    /// -1 leaves the order unattributed.
     uint32_t Create(int team, StandingOrderType type, uint8_t priority,
                     std::vector<float> params, StandingOrderConditions cond,
-                    uint32_t expiresInFrames, uint32_t currentFrame);
+                    uint32_t expiresInFrames, uint32_t currentFrame,
+                    int authorPlayerId = -1);
 
     /// Update an existing order. Returns false if the order doesn't
     /// exist or `team` doesn't match the order's owner (cross-team

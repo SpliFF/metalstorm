@@ -60,7 +60,34 @@ function gadget:AllowCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdO
                               cmdTag, playerID, fromSynced, fromLua)
     if not GG.Authority then return true end          -- defensive: not yet Initialized
     if Classify.FREE_CMDS[cmdID] then return true end
-    if not Classify.isChargeable(fromSynced, fromLua) then return true end
+    if not Classify.isChargeable(fromSynced, fromLua) then
+        -- DIRECTIVE / STANDING-ORDER DECOMPOSITION (objectives §5.1, endtoend
+        -- D24). Not chargeable — the directive was charged once at create —
+        -- but it IS attributable. The engine's two decomposition sites
+        -- (OrgGroups.cpp IssueDirectiveCommand, StandingOrders.cpp
+        -- IssueCommandFor) issue on behalf of the directive's author, i.e.
+        -- fromLua with a REAL playerNum; every other fromLua command in the
+        -- engine (the whole Spring.GiveOrderToUnit family, LuaSyncedCtrl.cpp)
+        -- passes -1. So `fromLua and playerID >= 0` is exactly and only "a
+        -- directive is moving this unit on its author's behalf", and §5's
+        -- "free/fromLua commands that are not directive decompositions still
+        -- don't reassign credit" holds unchanged.
+        --
+        -- This is the ONLY point at which a condition/area-scoped directive
+        -- (groupID 0 — everything the composer offers a player who has not
+        -- hand-built an org group) can attach its author to a unit: it has no
+        -- roster at create time, so ChargeDirective's stampCommander cannot
+        -- reach it. Without this a player could command their whole army for a
+        -- whole war and finish with score_<player>_objectives = 0.
+        --
+        -- Deliberately NOT gated on cost > 0 the way the charged branch below
+        -- is: the cost was already paid at create, and a flat 'standing' fee
+        -- can round to a charge this callin never sees.
+        if fromLua and playerID and playerID >= 0 then
+            Spring.SetUnitRulesParam(unitID, 'last_commander', playerID)
+        end
+        return true
+    end
 
     local cost = GG.Authority.OrderCost(unitID, cmdID)
     local allowed = GG.Authority.ChargeOrder(unitID, unitTeam, playerID, cost, cmdID)

@@ -19,11 +19,13 @@ uint32_t StandingOrderManager::Create(int team, StandingOrderType type, uint8_t 
                                       std::vector<float> params,
                                       StandingOrderConditions cond,
                                       uint32_t expiresInFrames,
-                                      uint32_t currentFrame)
+                                      uint32_t currentFrame,
+                                      int authorPlayerId)
 {
     StandingOrder o;
     o.id = nextId++;
     o.team = team;
+    o.authorPlayerId = authorPlayerId;
     o.type = type;
     o.priority = priority;
     o.params = std::move(params);
@@ -159,6 +161,15 @@ static bool ReadVec3(const std::vector<float>& p, size_t offset, float3& out)
 /// count it against `assigned`.
 static bool IssueCommandFor(CUnit* unit, const StandingOrder& order)
 {
+    // Issued ON BEHALF OF the order's author — see the identical helper in
+    // OrgGroups.cpp's IssueDirectiveCommand for the full rationale
+    // (PLAN-metalstorm-objectives.md §5.1, endtoend D24). `fromLua = true`
+    // keeps the decomposed command free of an authority charge; the real
+    // playerNum lets game Lua stamp `last_commander` on what the order moves.
+    const auto issue = [&](const Command& c) {
+        unit->commandAI->GiveCommand(c, order.authorPlayerId, /*fromSynced=*/true, /*fromLua=*/true);
+    };
+
     switch (order.type) {
         case StandingOrderType::DefendArea: {
             // params = [x, y, z, radius]. We issue CMD_FIGHT at the
@@ -170,7 +181,7 @@ static bool IssueCommandFor(CUnit* unit, const StandingOrder& order)
             float3 target;
             if (!ReadVec3(order.params, 0, target)) return false;
             Command cmd(CMD_FIGHT, 0, target);
-            unit->commandAI->GiveCommand(cmd);
+            issue(cmd);
             return true;
         }
         case StandingOrderType::PatrolRoute: {
@@ -181,7 +192,7 @@ static bool IssueCommandFor(CUnit* unit, const StandingOrder& order)
             for (size_t i = 0; i < nPts; i++) {
                 float3 wp(order.params[i*3 + 0], order.params[i*3 + 1], order.params[i*3 + 2]);
                 Command cmd(CMD_PATROL, (i == 0) ? 0 : SHIFT_KEY, wp);
-                unit->commandAI->GiveCommand(cmd);
+                issue(cmd);
             }
             return true;
         }
@@ -194,7 +205,7 @@ static bool IssueCommandFor(CUnit* unit, const StandingOrder& order)
             float3 target;
             if (!ReadVec3(order.params, 0, target)) return false;
             Command cmd(CMD_MOVE, 0, target);
-            unit->commandAI->GiveCommand(cmd);
+            issue(cmd);
             return true;
         }
         case StandingOrderType::Screen:
@@ -207,8 +218,8 @@ static bool IssueCommandFor(CUnit* unit, const StandingOrder& order)
             if (!ReadVec3(order.params, 3, b)) return false;
             Command first(CMD_PATROL, 0, a);
             Command second(CMD_PATROL, SHIFT_KEY, b);
-            unit->commandAI->GiveCommand(first);
-            unit->commandAI->GiveCommand(second);
+            issue(first);
+            issue(second);
             return true;
         }
         case StandingOrderType::BuildBase: {
@@ -222,7 +233,7 @@ static bool IssueCommandFor(CUnit* unit, const StandingOrder& order)
             float3 target;
             if (!ReadVec3(order.params, 0, target)) return false;
             Command cmd(CMD_MOVE, 0, target);
-            unit->commandAI->GiveCommand(cmd);
+            issue(cmd);
             return true;
         }
     }

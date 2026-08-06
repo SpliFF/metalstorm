@@ -1220,8 +1220,8 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             // game_authority_charge.lua debits the issuing player's pool
             // (falling back to the team pool) as a side effect of allowing
             // this callin; a false veto means insufficient authority.
+            int playerID = -1;
             {
-                int playerID = -1;
                 auto pIt = clientPlayerNum.find(msg.clientId);
                 if (pIt != clientPlayerNum.end()) playerID = pIt->second;
                 if (!eventHandler.AllowStandingOrderCreate(session->team, playerID, req->type())) {
@@ -1231,6 +1231,7 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                 }
             }
 
+            // Charged player rides along for attribution — objectives §5.1.
             const uint32_t id = standingOrders.Create(
                 session->team,
                 static_cast<StandingOrderType>(req->type()),
@@ -1238,7 +1239,8 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                 std::move(params),
                 std::move(conds),
                 req->expires_in_frames(),
-                static_cast<uint32_t>(sim.GetFrameNum()));
+                static_cast<uint32_t>(sim.GetFrameNum()),
+                playerID);
             SLOG(SPRING_LOG_DEBUG,
                 "standing-order: client %u (%s, team=%d) created order %u type=%u priority=%u",
                 msg.clientId, session->username.c_str(), session->team,
@@ -1536,8 +1538,8 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                 // directive's decomposed per-squad commands are fromLua
                 // and free (§3.2 charging-rules table), so this is the
                 // only spend a directive ever incurs.
+                int playerID = -1;
                 {
-                    int playerID = -1;
                     auto pIt = clientPlayerNum.find(msg.clientId);
                     if (pIt != clientPlayerNum.end()) playerID = pIt->second;
                     if (!eventHandler.AllowDirectiveCreate(session->team, playerID, groupId,
@@ -1548,13 +1550,18 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                     }
                 }
 
+                // The charged player rides along on the directive so its
+                // decomposed commands can be attributed back to them
+                // (objectives §5.1 / endtoend D24) — the only way a
+                // condition-scoped directive, which has no roster at create
+                // time, ever reaches a unit with its author attached.
                 const uint32_t id = directiveManager.Create(
                     session->team, static_cast<DirectiveType>(req->type()),
                     req->priority(), static_cast<OrderShape>(req->shape()),
                     std::move(params), std::move(conds), groupId,
                     req->requested_strength(), phases,
                     req->expires_in_frames(),
-                    static_cast<uint32_t>(sim.GetFrameNum()));
+                    static_cast<uint32_t>(sim.GetFrameNum()), playerID);
                 SLOG(SPRING_LOG_DEBUG,
                     "directive: client %u (team=%d) created directive %u type=%u group=%u",
                     msg.clientId, session->team, id,
