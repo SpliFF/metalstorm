@@ -92,7 +92,20 @@ from town_templates import (                              # noqa: E402
 
 # Bumped whenever the emitted graph changes for an unchanged (terrain, seed).
 # Consumers that cache a dump keyed by seed need to see this move.
-PLANNER_VERSION = 1
+#
+#   2  (town-planner T2) three changes, each found by staging real buildings
+#      into T1's parcels and looking at the result:
+#      * a grid with no terrain axis to follow now spends its free choice of
+#        heading NEAR A CARDINAL instead of uniformly over the half-circle,
+#        because the engine builds on four facings and a grid at 45 degrees
+#        gives every building in the town a corner to its street
+#      * plaza frontage is stepped at a third of a lot instead of a whole one:
+#        every radial in the archetype joins the ring, and at the coarse phase
+#        60 of 60 candidates landed on a radial and were refused, so the square
+#        had frontage on paper and no lots in fact
+#      * decoration slots are rounded to integral elmos BEFORE the test that
+#        keeps them out of lots, not after
+PLANNER_VERSION = 2
 
 WATER_LEVEL = 0.0          # Spring's default; `passable_mask` uses the same
 
@@ -821,7 +834,29 @@ def _build_grid_quarter(rnd, probe, site, arch, distortion, rules) -> list:
     cleanly out of them.
     """
     cx, cz, R = float(site.x), float(site.z), float(site.radius)
-    theta = site.contour_heading if site.anisotropy > 0.12 else rnd.random() * math.pi
+    # WHERE THE GRID POINTS WHEN THE GROUND DOES NOT SAY.
+    # With a real axis under it the grid follows the contour, and a town laid
+    # out along the lie of the land is the whole point of the archetype. With
+    # no axis (`anisotropy <= 0.12` — flat, open, undirected ground) the first
+    # cut drew a uniform angle over the half-circle, which is defensible right
+    # up until you look at one: a surveyed quarter has no reason to prefer 40
+    # degrees, but the ENGINE does. `Spring.CreateUnit` builds on four cardinal
+    # facings only (see town_stager's header), so on a grid at 45 degrees every
+    # single building in the town presents a CORNER to its street instead of a
+    # face — and because a grid shares one heading pair across all its streets,
+    # that is not a few awkward lots, it is the entire town. Rendered, seed 3
+    # on flat ground came out as buildings loose in the blocks with roads
+    # threading between them; nobody would call it a street.
+    #
+    # So the free choice is spent near a cardinal instead of uniformly. The
+    # offset keeps towns from being identically axis-aligned rectangles, and
+    # at +/-14 degrees a building still reads as facing its street. This is
+    # narrowing an arbitrary choice, not overriding a terrain-driven one — when
+    # the ground HAS an axis the contour still wins, corners and all.
+    if site.anisotropy > 0.12:
+        theta = site.contour_heading
+    else:
+        theta = (math.pi / 2.0) * float(_pick_int(rnd, 0, 1)) + _jitter(rnd, 0.245)
     spacing = _block_pitch(arch)
     shear = math.tan(arch["max_shear"] * distortion) * (1.0 if rnd.random() < 0.5 else -1.0)
     nudge = min(spacing * 0.06, 30.0) * distortion
@@ -1141,6 +1176,27 @@ def _carve_lots(rnd, probe, site, streets, arch, rules) -> list:
         total = s.length()
         if total < fw:
             continue
+        # THE PLAZA IS STEPPED FINELY, AND EVERYTHING ELSE IS NOT.
+        # A lot is a slice of street taken at a fixed interval from an
+        # arbitrary starting phase, which is right for a street — the phase is
+        # invisible and the rhythm is even. It is wrong for the plaza, because
+        # the plaza is the one street with other streets JOINING it: every
+        # radial in the archetype leaves from this ring, and a candidate lot
+        # whose phase drops it on a radial is refused by the carriageway test.
+        #
+        # Measured: across 12 organic towns, 60 of 60 plaza candidates were
+        # refused, every one of them for hitting a radial — the plaza had
+        # frontage on paper and NO lots in fact, which is why an organic town
+        # rendered as a roundabout with buildings a street away from it rather
+        # than as a square with a market on it. The gaps between radials are
+        # wide enough (about 340 elmos of arc against a 190-elmo lot at six
+        # radials); the coarse phase simply never landed in one.
+        #
+        # Stepping at a third of the frontage gives each gap three chances to
+        # be found. It cannot produce overlapping lots — `_lot_fits` still
+        # rejects a candidate that touches one already taken — so the finer
+        # step buys placement, not density.
+        step = fw / 3.0 if s.kind == "plaza" else fw
         d = fw * 0.5
         while d <= total - fw * 0.5:
             px, pz, h = point_at(s.points, d)
@@ -1175,7 +1231,7 @@ def _carve_lots(rnd, probe, site, streets, arch, rules) -> list:
                 lot.height = probe.height(lx, lz)
                 lots.append(lot)
                 lot_bucket.add(lot.x, lot.z, lot)
-            d += fw
+            d += step
     return lots
 
 
@@ -1517,7 +1573,18 @@ def _build_decor(rnd, probe, rules, streets, lots) -> list:
                     continue
                 ang = h + (math.pi / 2.0) * side
                 off = s.width / 2.0 + DECOR["offset"]
-                qx, qz = px + math.cos(ang) * off, pz + math.sin(ang) * off
+                # Round FIRST, then test — the integral point is the one that
+                # will be stored, so it is the one the invariant is about.
+                # `_grow_lots` learned this the same way and says so in its own
+                # comment; this function was written without it and the bug sat
+                # latent until a change upstream shifted the rng stream enough
+                # to land a slot on a lot's edge. It was a real miss, not a
+                # rounding curiosity: the float point sat 105.227 elmos across a
+                # parcel whose half-width is 105.0 — outside, correctly kept —
+                # and rounding pulled it to exactly 105.0, which `_point_in_obb`
+                # counts as inside. A crate in the middle of somebody's house.
+                qx = float(round(px + math.cos(ang) * off))
+                qz = float(round(pz + math.sin(ang) * off))
                 if not probe.buildable(qx, qz, rules.max_street_slope):
                     continue
                 if any(_point_in_obb(qx, qz, l.x, l.z, l.width / 2.0,
@@ -1526,8 +1593,7 @@ def _build_decor(rnd, probe, rules, streets, lots) -> list:
                     continue
                 kind = DECOR["kinds"][_pick_int(rnd, 0, len(DECOR["kinds"]) - 1)]
                 out.append(DecorSlot(f"dec_{len(out):03d}", kind,
-                                     int(round(qx)), int(round(qz)),
-                                     h, s.key))
+                                     int(qx), int(qz), h, s.key))
             d += DECOR["every"]
     return out
 
