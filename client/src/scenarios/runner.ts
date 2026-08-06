@@ -36,9 +36,12 @@
  *
  * Then, on either pipeline:
  *   - Wait for `window.test` to appear, then for the sim to tick.
- *   - Enable cheats + revive every team (dead-team edge case).
- *   - Call `scenario.setup(h)`, optionally `scenario.run(h)`, and stash
- *     results on `window.scenarioResults`.
+ *   - **Gate on the world actually rendering** (see render-sanity.ts). A
+ *     scenario whose viewport is empty is failed here, before `setup`
+ *     runs, so a broken scenario is distinguishable from a slow one
+ *     instead of looking identical to it.
+ *   - Call `scenario.setup(h)`, re-check the render, optionally
+ *     `scenario.run(h)`, and stash results on `window.scenarioResults`.
  *
  * Errors at any step are surfaced both via `console.error` and an entry
  * appended to `window.scenarioResults` so external drivers (MCP, manual
@@ -49,6 +52,7 @@ import { CONFIG } from '../config.js';
 import type { TestHarness } from '../core/test-harness.js';
 import type { LobbyUI } from '../lobby/lobby-ui.js';
 import { getScenario, listScenarios } from './registry.js';
+import { waitForRenderSanity } from './render-sanity.js';
 import type { AssertionResult, Scenario } from './types.js';
 
 const TEST_USER = 'test1';
@@ -179,29 +183,46 @@ export class ScenarioRunner {
             // authenticated before setup() spawns anything.
             await this.waitForGameConnection(h, 30000);
 
-            // Pre-setup: enable cheats + revive every team. Without this,
-            // ZK's game_over.lua (game_over.lua ProcessLastAlly) flags
-            // teams with no units as dead, and Spring.CreateUnit raises
-            // a Lua error rather than returning nil. `cheats on` makes
-            // ZK skip the periodic check; `revive_team all` flips
-            // team.isDead back to false for teams that were killed
-            // before we got here.
-            try {
-                await h.cheats(true);
-                await h.reviveTeam('all');
-                console.log(`[scenario] cheats on + teams revived`);
-            } catch (err: any) {
-                console.warn(`[scenario] pre-setup cheats/revive failed:`, err?.message ?? err);
-            }
+            // The ZK-era pre-setup `cheats on` + `revive_team all` is
+            // gone. It existed for ZK's game_over.lua ProcessLastAlly,
+            // which flagged unit-less teams dead at frame 45 and made
+            // every subsequent spawn a no-op. Metalstorm has no such
+            // gadget: game_gameover.lua only terminates on an objective
+            // declaring `victory = true`, and the engine's hardcoded
+            // last-team-standing fallback is deliberately gated off for
+            // this game (ShouldRunEliminationFallback,
+            // rts/Server/GameOverState.h). So the workaround is inert
+            // here — and running it anyway would silently paper over a
+            // real Metalstorm defect: a team wrongly flagged dead, or
+            // the post-game freeze (PLAN-metalstorm-wars §7.1/§7.2) not
+            // applying, would be reverted before any assertion could see
+            // it. Scenarios that genuinely need cheats enable them
+            // themselves in `setup` (see train-verification).
+
+            // Render gate. Everything above proves the *server* is alive;
+            // none of it proves anything reached the screen. Check that
+            // before handing control to the scenario, so "broken" stops
+            // looking like "slow" and a driver can't sit in a reload loop
+            // against a scenario that cannot possibly work.
+            if (!await this.gateOnRender(h, 'world', 60000)) return;
 
             await s.setup(h);
             console.log(`[scenario] setup complete`);
 
+            // Again after setup: the world rendered, but the scenario may
+            // have torn it down (a bad camera move, a clear() that took
+            // the map with it, a spawn that wedged the worker).
+            if (!await this.gateOnRender(h, 'post-setup', 10000)) return;
+
             if (s.run) {
                 console.log(`[scenario] running assertions…`);
                 const results = await s.run(h);
-                this.report.assertions = results;
-                const failed = results.filter((r) => !r.ok);
+                // Append, never assign: the render gates above already
+                // pushed their own assertions and an overwrite would drop
+                // the one piece of evidence that the scenario ran against
+                // a real world rather than an empty one.
+                this.report.assertions.push(...results);
+                const failed = this.report.assertions.filter((r) => !r.ok);
                 this.report.status = failed.length === 0 ? 'pass' : 'fail';
                 console.log(`[scenario] ${results.length} assertion(s), ${failed.length} failed`);
                 for (const r of results) {
@@ -220,6 +241,42 @@ export class ScenarioRunner {
             this.report.finishedAt = Date.now();
             console.log(`[scenario] === done (${this.report.status}) ===`);
         }
+    }
+
+    // ── Render gate ─────────────────────────────────────────────────
+
+    /**
+     * Assert the viewport is actually drawing a world, and record the
+     * outcome as an assertion either way (an assertion you only ever see
+     * when it fails is an assertion nobody trusts).
+     *
+     * Returns `false` when the scene is empty — the caller must stop.
+     * Deliberately a `fail`, not an `error`: the scenario ran, it just
+     * ran against nothing, and that is a result rather than an exception.
+     */
+    private async gateOnRender(
+        h: TestHarness, phase: string, timeoutMs: number,
+    ): Promise<boolean> {
+        const verdict = await waitForRenderSanity(h, timeoutMs);
+        const name = `render-sanity (${phase})`;
+        this.report.assertions.push({
+            name, ok: verdict.ok,
+            detail: verdict.ok ? verdict.detail : `${verdict.reason}: ${verdict.detail}`,
+        });
+        if (verdict.ok) {
+            console.log(`[scenario] [PASS] ${name} — ${verdict.detail}`);
+            return true;
+        }
+        this.report.status = 'fail';
+        this.report.error = `render sanity failed (${verdict.reason}): ${verdict.detail}`;
+        console.error(
+            `[scenario] ${this.scenario.name} RENDERS NOTHING — ${verdict.reason}: `
+            + `${verdict.detail}\n`
+            + `[scenario] Aborting at the "${phase}" gate. Nothing this scenario `
+            + `asserts would mean anything against an empty viewport, so it is `
+            + `failed here rather than run. Do not re-run this URL until the `
+            + `cause above is fixed — the result will not change.`);
+        return false;
     }
 
     // ── Pipeline steps ──────────────────────────────────────────────

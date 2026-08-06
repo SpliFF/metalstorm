@@ -59,6 +59,8 @@ import { matchWheelPieces } from './wheel-spin-driver.js';
 import { LodTier, type ImpostorRenderer } from './impostor-renderer.js';
 import { DitherFadePlugin } from './dither-fade-plugin.js';
 import type { MemberModel } from './squad-render-backend.js';
+import { AssetLoader, LoadPriority } from './asset-loader.js';
+import { PlaceholderRenderer, type PlaceholderMeshes } from './placeholder-renderer.js';
 
 /** Per-material texture URIs, keyed by material name in the .gltf.
  *  Single-material models (all S3O/DAE content) use just the `materials[0]`
@@ -748,6 +750,13 @@ export class EntityRenderer {
     // --- Fallback shape meshes ---
     private shapeMeshes = new Map<number, Mesh>();
 
+    // --- Loading placeholder (transient wireframe box) ---
+    // Shared AssetLoader by default; game-processor.ts overrides via
+    // setAssetLoader() so unit/feature/projectile loads draw from one
+    // concurrency pool.
+    private assetLoader = new AssetLoader();
+    private placeholderRenderer: PlaceholderRenderer;
+
     // Selection ring (still uses thin instances directly)
     private selectionMesh: Mesh | null = null;
     private selectedIds: number[] = [];
@@ -769,6 +778,7 @@ export class EntityRenderer {
 
     constructor(scene: Scene) {
         this.scene = scene;
+        this.placeholderRenderer = new PlaceholderRenderer(scene);
 
         for (let i = 0; i < TEAM_COLORS.length; i++) {
             const mat = new StandardMaterial(`team${i}Mat`, scene);
@@ -992,18 +1002,53 @@ export class EntityRenderer {
      * Idempotent and cheap: a stale Map lookup per call. Safe to invoke
      * once per visible entity per tick.
      */
-    private ensureModelLoaded(defId: number): void {
+    private ensureModelLoaded(defId: number, priority: LoadPriority = LoadPriority.P2): void {
         if (this.modelTemplates.has(defId)) return;   // already resolved (incl. null)
-        if (this.loadingModels.has(defId)) return;    // already in flight
+        if (this.loadingModels.has(defId)) {
+            // Already queued/in flight — a more urgent caller (e.g. build
+            // placement) can still jump it ahead in the shared pool.
+            this.assetLoader.raisePriority(`model:${defId}`, priority);
+            return;
+        }
         const def = this.defInfos.get(defId);
         if (!def || !def.modelUrl) return;            // no def registered, or no model
 
-        const p = this.loadModel(def).then(tmpl => {
-            this.modelTemplates.set(defId, tmpl);
-            this.loadingModels.delete(defId);
-            return tmpl;
-        });
+        const p = this.assetLoader
+            .schedule(`model:${defId}`, priority, () => this.loadModel(def))
+            .then(tmpl => {
+                this.modelTemplates.set(defId, tmpl);
+                this.loadingModels.delete(defId);
+                return tmpl;
+            });
         this.loadingModels.set(defId, p);
+    }
+
+    /** Priority-aware request for a def's model template. Used by build
+     *  placement to jump the shared AssetLoader queue and learn when the
+     *  real mesh becomes available so it can swap out a box ghost.
+     *  Resolves immediately with the cached template if already loaded. */
+    requestModel(defId: number, priority: LoadPriority): Promise<ModelTemplate | null> {
+        if (this.modelTemplates.has(defId)) {
+            return Promise.resolve(this.modelTemplates.get(defId) ?? null);
+        }
+        this.ensureModelLoaded(defId, priority);
+        return this.loadingModels.get(defId) ?? Promise.resolve(null);
+    }
+
+    /** Inject a shared AssetLoader so unit/feature/projectile model fetches
+     *  draw from one concurrency pool (PLAN-lazy-loading.md) — wired by
+     *  game-processor.ts. Safe to skip in tests/tools that only need a
+     *  private per-instance loader (the default). */
+    setAssetLoader(loader: AssetLoader): void {
+        this.assetLoader = loader;
+    }
+
+    /** Opportunistic pre-warm: kick off `defId`'s model load at the lowest
+     *  priority if it hasn't started yet. Used for the build-menu's listed
+     *  buildables — cheap insurance so picking one doesn't start the fetch
+     *  from scratch. Never raises an already-queued/loaded def's priority. */
+    prewarmModel(defId: number): void {
+        this.ensureModelLoaded(defId, LoadPriority.P4);
     }
 
     private async loadModel(def: UnitDefInfo): Promise<ModelTemplate | null> {
@@ -1718,6 +1763,26 @@ export class EntityRenderer {
         return mesh;
     }
 
+    /** Get (creating on first use) the team-tinted placeholder mesh pair
+     *  and register both under the tick loop's grouping keys so the
+     *  per-frame hide-pass and shadow-caster registration treat them like
+     *  any other render mesh. */
+    private getPlaceholderMeshes(teamIdx: number): PlaceholderMeshes {
+        const wireKey = `placeholder-wire:${teamIdx}`;
+        const fillKey = `placeholder-fill:${teamIdx}`;
+        const cached = this.renderMeshes.get(wireKey);
+        if (cached) {
+            return { wire: cached, fill: this.renderMeshes.get(fillKey)! };
+        }
+        const teamColor = TEAM_COLORS[teamIdx % TEAM_COLORS.length];
+        const { wire, fill } = this.placeholderRenderer.getMeshes(teamIdx, teamColor);
+        this.renderMeshes.set(wireKey, wire);
+        this.renderMeshes.set(fillKey, fill);
+        this.shadowGenerator?.addShadowCaster(wire);
+        this.shadowGenerator?.addShadowCaster(fill);
+        return { wire, fill };
+    }
+
     /**
      * Build the selection-ring template on first use.
      */
@@ -2162,8 +2227,8 @@ export class EntityRenderer {
             // Lazy-load: trigger the glb + texture fetch the first
             // time we see an entity of this def. Until the load
             // completes the entity falls through to the procedural
-            // shape branch below.
-            this.ensureModelLoaded(meta.defId);
+            // shape / placeholder branch below.
+            this.ensureModelLoaded(meta.defId, LoadPriority.P2);
             const tmpl = this.modelTemplates.get(meta.defId);
 
             if (tmpl) {
@@ -2251,19 +2316,10 @@ export class EntityRenderer {
                     group.count++;
                 }
             } else {
-                // Fallback shape
-                const shape = defIdToShape(meta.defId);
-                const teamIdx = meta.team % this.teamMaterials.length;
-                const key = `shape:${shape}:${teamIdx}`;
-                let group = groups.get(key);
-                if (!group) {
-                    const mesh = this.getFallbackMesh(meta.defId, meta.team);
-                    group = { mesh, matrices: [], count: 0 };
-                    groups.set(key, group);
-                }
-
-                // Same terrain re-projection as the modelled path so
-                // procedural-fallback shapes don't float / sink either.
+                // No model yet — either genuinely no model (permanent solid
+                // fallback) or still loading (transient wireframe placeholder,
+                // PLAN-lazy-loading.md). Same terrain-projected transform
+                // either way; only the render target differs.
                 const groundYf = this.sampleHeight(lerped.x, lerped.z);
                 let renderYf = lerped.y;
                 if (!Number.isNaN(groundYf) && lerped.y - groundYf < 8) {
@@ -2277,8 +2333,41 @@ export class EntityRenderer {
                 );
                 const arr = new Float32Array(16);
                 matrix.copyToArray(arr, 0);
-                for (let j = 0; j < 16; j++) group.matrices.push(arr[j]);
-                group.count++;
+
+                if (this.modelTemplates.has(meta.defId)) {
+                    // Resolved to null — this def has no model at all.
+                    const shape = defIdToShape(meta.defId);
+                    const teamIdx = meta.team % this.teamMaterials.length;
+                    const key = `shape:${shape}:${teamIdx}`;
+                    let group = groups.get(key);
+                    if (!group) {
+                        const mesh = this.getFallbackMesh(meta.defId, meta.team);
+                        group = { mesh, matrices: [], count: 0 };
+                        groups.set(key, group);
+                    }
+                    for (let j = 0; j < 16; j++) group.matrices.push(arr[j]);
+                    group.count++;
+                } else {
+                    // Load still in flight.
+                    const teamIdx = meta.team % this.teamMaterials.length;
+                    const wireKey = `placeholder-wire:${teamIdx}`;
+                    const fillKey = `placeholder-fill:${teamIdx}`;
+                    let wireGroup = groups.get(wireKey);
+                    let fillGroup = groups.get(fillKey);
+                    if (!wireGroup || !fillGroup) {
+                        const { wire, fill } = this.getPlaceholderMeshes(teamIdx);
+                        wireGroup = { mesh: wire, matrices: [], count: 0 };
+                        fillGroup = { mesh: fill, matrices: [], count: 0 };
+                        groups.set(wireKey, wireGroup);
+                        groups.set(fillKey, fillGroup);
+                    }
+                    for (let j = 0; j < 16; j++) {
+                        wireGroup.matrices.push(arr[j]);
+                        fillGroup.matrices.push(arr[j]);
+                    }
+                    wireGroup.count++;
+                    fillGroup.count++;
+                }
             }
         }
 
@@ -2928,6 +3017,11 @@ export class EntityRenderer {
     }
 
     dispose(): void {
+        // Disposes the placeholder wire/fill materials — the meshes
+        // themselves are already covered by the renderMeshes loop below
+        // (they're registered there too); a second Mesh.dispose() call is
+        // a safe no-op.
+        this.placeholderRenderer.dispose();
         for (const mesh of this.renderMeshes.values()) mesh.dispose();
         this.renderMeshes.clear();
         // Member-tier meshes (M4) share the unit material cache (freed below)

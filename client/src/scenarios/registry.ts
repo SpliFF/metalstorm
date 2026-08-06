@@ -10,7 +10,6 @@
 import type { Scenario } from './types.js';
 import duelAttack from './bench/duel-attack.js';
 import aimRotation from './bench/aim-rotation.js';
-import aimOriginProbe from './bench/aim-origin-probe.js';
 import movePathing from './bench/move-pathing.js';
 import unitTestLoop from './bench/unit-test-loop.js';
 import weaponFx from './bench/weapon-fx.js';
@@ -23,7 +22,6 @@ import trainVerification from './bench/train-verification.js';
 const SCENARIOS: Scenario[] = [
     duelAttack,
     aimRotation,
-    aimOriginProbe,
     movePathing,
     unitTestLoop,
     weaponFx,

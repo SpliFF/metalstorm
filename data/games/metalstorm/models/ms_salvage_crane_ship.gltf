@@ -1,0 +1,559 @@
+{
+ "asset": {
+  "version": "2.0",
+  "generator": "fable-model-forge 1.0 (Claude Fable 5, hand-built glTF)"
+ },
+ "scene": 0,
+ "scenes": [
+  {
+   "nodes": [
+    0
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "name": "MS_ms_salvage_crane_ship",
+   "children": [
+    1
+   ]
+  },
+  {
+   "name": "body",
+   "children": [
+    2,
+    3,
+    4
+   ],
+   "mesh": 0
+  },
+  {
+   "name": "aframe",
+   "mesh": 1,
+   "translation": [
+    0.0,
+    0.0,
+    11.5
+   ]
+  },
+  {
+   "name": "trolley",
+   "mesh": 2,
+   "translation": [
+    0.0,
+    12.9,
+    24.0
+   ]
+  },
+  {
+   "name": "exhaust",
+   "translation": [
+    1.6,
+    7.2,
+    -20.3
+   ]
+  }
+ ],
+ "meshes": [
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1,
+      "TEXCOORD_0": 2
+     },
+     "indices": 3,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 4,
+      "NORMAL": 5,
+      "TEXCOORD_0": 6
+     },
+     "indices": 7,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 8,
+      "NORMAL": 9,
+      "TEXCOORD_0": 10
+     },
+     "indices": 11,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  }
+ ],
+ "accessors": [
+  {
+   "bufferView": 0,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 2132,
+   "type": "VEC3",
+   "min": [
+    -5.5,
+    -1.600000023841858,
+    -25.0
+   ],
+   "max": [
+    5.5,
+    7.199999809265137,
+    25.0
+   ]
+  },
+  {
+   "bufferView": 1,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 2132,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 2,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 2132,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 3,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 3030,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 4,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 880,
+   "type": "VEC3",
+   "min": [
+    -3.2111401557922363,
+    2.557681083679199,
+    -9.534693717956543
+   ],
+   "max": [
+    3.2111401557922363,
+    14.274999618530273,
+    17.5
+   ]
+  },
+  {
+   "bufferView": 5,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 880,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 6,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 880,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 7,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 1308,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 8,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 328,
+   "type": "VEC3",
+   "min": [
+    -0.949999988079071,
+    -6.585977554321289,
+    -0.6499999761581421
+   ],
+   "max": [
+    0.949999988079071,
+    0.5600000023841858,
+    0.6499999761581421
+   ]
+  },
+  {
+   "bufferView": 9,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 328,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 10,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 328,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 11,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 468,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 12,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 5,
+   "type": "SCALAR",
+   "min": [
+    0.0
+   ],
+   "max": [
+    12.0
+   ]
+  },
+  {
+   "bufferView": 13,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 5,
+   "type": "VEC3"
+  }
+ ],
+ "bufferViews": [
+  {
+   "buffer": 0,
+   "byteOffset": 0,
+   "byteLength": 25584,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 25584,
+   "byteLength": 25584,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 51168,
+   "byteLength": 17056,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 68224,
+   "byteLength": 12120,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 80344,
+   "byteLength": 10560,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 90904,
+   "byteLength": 10560,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 101464,
+   "byteLength": 7040,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 108504,
+   "byteLength": 5232,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 113736,
+   "byteLength": 3936,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 117672,
+   "byteLength": 3936,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 121608,
+   "byteLength": 2624,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 124232,
+   "byteLength": 1872,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 126104,
+   "byteLength": 20
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 126124,
+   "byteLength": 60
+  }
+ ],
+ "buffers": [
+  {
+   "byteLength": 126184,
+   "uri": "ms_salvage_crane_ship.bin"
+  }
+ ],
+ "samplers": [
+  {}
+ ],
+ "images": [
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_salvage_crane_ship_diffuse.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_salvage_crane_ship_orm.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_salvage_crane_ship_emissive.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_salvage_crane_ship_team.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_salvage_crane_ship_normals.ktx2"
+  }
+ ],
+ "textures": [
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 0
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 1
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 2
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 3
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 4
+    }
+   }
+  }
+ ],
+ "materials": [
+  {
+   "name": "ms_salvage_crane_ship",
+   "pbrMetallicRoughness": {
+    "baseColorTexture": {
+     "index": 0
+    },
+    "metallicFactor": 1.0,
+    "roughnessFactor": 1.0,
+    "metallicRoughnessTexture": {
+     "index": 1
+    }
+   },
+   "occlusionTexture": {
+    "index": 1
+   },
+   "emissiveTexture": {
+    "index": 2
+   },
+   "emissiveFactor": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "extensions": {
+    "SPRINGRTS_team_color": {
+     "maskTexture": {
+      "index": 3
+     }
+    }
+   },
+   "normalTexture": {
+    "index": 4
+   }
+  }
+ ],
+ "extensions": {
+  "SPRINGRTS_geometry": {
+   "configVersion": 8,
+   "height": 14.275,
+   "midpos": [
+    0.0,
+    7.1375,
+    2.0
+   ],
+   "mins": [
+    -5.5,
+    -1.6,
+    -25.0
+   ],
+   "maxs": [
+    5.5,
+    14.275,
+    29.0
+   ],
+   "radius": 28.4639,
+   "pieces": [
+    {
+     "name": "body",
+     "parent": -1,
+     "offset": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "mins": [
+      -5.5,
+      -1.6,
+      -25.0
+     ],
+     "maxs": [
+      5.5,
+      7.2,
+      25.0
+     ]
+    },
+    {
+     "name": "aframe",
+     "parent": 0,
+     "offset": [
+      0.0,
+      0.0,
+      11.5
+     ],
+     "mins": [
+      -3.21114,
+      2.55768,
+      -9.53469
+     ],
+     "maxs": [
+      3.21114,
+      14.275,
+      17.5
+     ]
+    },
+    {
+     "name": "trolley",
+     "parent": 0,
+     "offset": [
+      0.0,
+      12.9,
+      24.0
+     ],
+     "mins": [
+      -0.95,
+      -6.58598,
+      -0.65
+     ],
+     "maxs": [
+      0.95,
+      0.56,
+      0.65
+     ]
+    },
+    {
+     "name": "exhaust",
+     "parent": 0,
+     "offset": [
+      1.6,
+      7.2,
+      -20.3
+     ],
+     "mins": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "maxs": [
+      0.0,
+      0.0,
+      0.0
+     ]
+    }
+   ]
+  }
+ },
+ "extensionsUsed": [
+  "KHR_texture_basisu",
+  "SPRINGRTS_geometry",
+  "SPRINGRTS_team_color"
+ ],
+ "animations": [
+  {
+   "name": "idle",
+   "samplers": [
+    {
+     "input": 12,
+     "output": 13,
+     "interpolation": "LINEAR"
+    }
+   ],
+   "channels": [
+    {
+     "sampler": 0,
+     "target": {
+      "node": 3,
+      "path": "translation"
+     }
+    }
+   ]
+  }
+ ],
+ "extensionsRequired": [
+  "KHR_texture_basisu"
+ ]
+}

@@ -1,0 +1,468 @@
+{
+ "asset": {
+  "version": "2.0",
+  "generator": "fable-model-forge 1.0 (Claude Fable 5, hand-built glTF)"
+ },
+ "scene": 0,
+ "scenes": [
+  {
+   "nodes": [
+    0
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "name": "MS_ms_anc_vault_complex",
+   "children": [
+    1
+   ]
+  },
+  {
+   "name": "body",
+   "children": [
+    2
+   ],
+   "mesh": 0
+  },
+  {
+   "name": "door",
+   "mesh": 1,
+   "translation": [
+    -1.0,
+    6.0,
+    -2.2
+   ]
+  }
+ ],
+ "meshes": [
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1,
+      "TEXCOORD_0": 2
+     },
+     "indices": 3,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 4,
+      "NORMAL": 5,
+      "TEXCOORD_0": 6
+     },
+     "indices": 7,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  }
+ ],
+ "accessors": [
+  {
+   "bufferView": 0,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 3078,
+   "type": "VEC3",
+   "min": [
+    -21.424055099487305,
+    -0.03120892308652401,
+    -22.5
+   ],
+   "max": [
+    17.5,
+    17.0,
+    12.600000381469727
+   ]
+  },
+  {
+   "bufferView": 1,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 3078,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 2,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 3078,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 3,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 4272,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 4,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 832,
+   "type": "VEC3",
+   "min": [
+    -4.975923538208008,
+    -4.975923538208008,
+    -0.949999988079071
+   ],
+   "max": [
+    4.975923538208008,
+    4.975923538208008,
+    0.44999998807907104
+   ]
+  },
+  {
+   "bufferView": 5,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 832,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 6,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 832,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 7,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 1152,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 8,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 4,
+   "type": "SCALAR",
+   "min": [
+    0.0
+   ],
+   "max": [
+    10.0
+   ]
+  },
+  {
+   "bufferView": 9,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 4,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 10,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 4,
+   "type": "SCALAR",
+   "min": [
+    0.0
+   ],
+   "max": [
+    10.0
+   ]
+  },
+  {
+   "bufferView": 11,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 4,
+   "type": "VEC4"
+  }
+ ],
+ "bufferViews": [
+  {
+   "buffer": 0,
+   "byteOffset": 0,
+   "byteLength": 36936,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 36936,
+   "byteLength": 36936,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 73872,
+   "byteLength": 24624,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 98496,
+   "byteLength": 17088,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 115584,
+   "byteLength": 9984,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 125568,
+   "byteLength": 9984,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 135552,
+   "byteLength": 6656,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 142208,
+   "byteLength": 4608,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 146816,
+   "byteLength": 16
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 146832,
+   "byteLength": 48
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 146880,
+   "byteLength": 16
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 146896,
+   "byteLength": 64
+  }
+ ],
+ "buffers": [
+  {
+   "byteLength": 146960,
+   "uri": "ms_anc_vault_complex.bin"
+  }
+ ],
+ "samplers": [
+  {}
+ ],
+ "images": [
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_anc_vault_complex_diffuse.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_anc_vault_complex_orm.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_anc_vault_complex_emissive.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_anc_vault_complex_team.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_anc_vault_complex_normals.ktx2"
+  }
+ ],
+ "textures": [
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 0
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 1
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 2
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 3
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 4
+    }
+   }
+  }
+ ],
+ "materials": [
+  {
+   "name": "ms_anc_vault_complex",
+   "pbrMetallicRoughness": {
+    "baseColorTexture": {
+     "index": 0
+    },
+    "metallicFactor": 1.0,
+    "roughnessFactor": 1.0,
+    "metallicRoughnessTexture": {
+     "index": 1
+    }
+   },
+   "occlusionTexture": {
+    "index": 1
+   },
+   "emissiveTexture": {
+    "index": 2
+   },
+   "emissiveFactor": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "extensions": {
+    "SPRINGRTS_team_color": {
+     "maskTexture": {
+      "index": 3
+     }
+    }
+   },
+   "normalTexture": {
+    "index": 4
+   }
+  }
+ ],
+ "extensions": {
+  "SPRINGRTS_geometry": {
+   "configVersion": 8,
+   "height": 17.0,
+   "midpos": [
+    -1.96203,
+    8.5,
+    -4.95
+   ],
+   "mins": [
+    -21.42406,
+    -0.03121,
+    -22.5
+   ],
+   "maxs": [
+    17.5,
+    17.0,
+    12.6
+   ],
+   "radius": 27.5504,
+   "pieces": [
+    {
+     "name": "body",
+     "parent": -1,
+     "offset": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "mins": [
+      -21.42406,
+      -0.03121,
+      -22.5
+     ],
+     "maxs": [
+      17.5,
+      17.0,
+      12.6
+     ]
+    },
+    {
+     "name": "door",
+     "parent": 0,
+     "offset": [
+      -1.0,
+      6.0,
+      -2.2
+     ],
+     "mins": [
+      -4.97592,
+      -4.97592,
+      -0.95
+     ],
+     "maxs": [
+      4.97592,
+      4.97592,
+      0.45
+     ]
+    }
+   ]
+  }
+ },
+ "extensionsUsed": [
+  "KHR_texture_basisu",
+  "SPRINGRTS_geometry",
+  "SPRINGRTS_team_color"
+ ],
+ "animations": [
+  {
+   "name": "open",
+   "samplers": [
+    {
+     "input": 8,
+     "output": 9,
+     "interpolation": "LINEAR"
+    },
+    {
+     "input": 10,
+     "output": 11,
+     "interpolation": "LINEAR"
+    }
+   ],
+   "channels": [
+    {
+     "sampler": 0,
+     "target": {
+      "node": 2,
+      "path": "translation"
+     }
+    },
+    {
+     "sampler": 1,
+     "target": {
+      "node": 2,
+      "path": "rotation"
+     }
+    }
+   ]
+  }
+ ],
+ "extensionsRequired": [
+  "KHR_texture_basisu"
+ ]
+}

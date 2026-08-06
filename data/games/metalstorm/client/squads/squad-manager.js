@@ -1,10 +1,19 @@
 // squad-manager.js — owns every squad; the integration surface the worker
 // adapter drives. See PLAN-metalstorm-squads.md §7.
 
-import { Squad } from './squad.js';
+import { Squad, setPerfProbe, getPerfProbe, PROBE_TERMS, setPerfFix, getPerfFixes } from './squad.js';
 import { DEFAULT_CONFIG, linearCount } from './config.js';
 import { BigUnitRepulsor } from './big-unit-repulsor.js';
 import { createPatchSet } from './patches.js';
+
+// Cell-index packing stride for the numeric spatial-hash key (see _key).
+// Keeps `gx * KEY_STRIDE + gz` inside SMI range and injective for the cell
+// indices any loadable map can produce.
+const KEY_STRIDE = 65536;
+
+// Nearest-first squad ordering for the member-budget LOD policy. Module-level
+// so the per-pass sort doesn't allocate a comparator closure.
+function byLodDistance(a, b) { return a._lodD2 - b._lodD2; }
 
 export class SquadManager {
   constructor(backend, config = {}) {
@@ -26,6 +35,15 @@ export class SquadManager {
     this._cell = Math.max(this.cfg.separationRadius, this.cfg.maxMemberFootprint) * 1.5;
     this._grid = new Map();         // cellKey → (Member | pseudo-member)[]
     this._denseAgg = new Map();     // cellKey → cached aggregate repulsor, rebuilt each frame (§4)
+
+    // PLAN-perf M10 fast neighbour path: numeric cell keys + a reusable
+    // neighbour buffer instead of string keys + a generator. Latched once per
+    // frame in update() so _rebuildGrid's key encoding and the query's can
+    // never disagree mid-frame; `cfg.fastNeighbours = false` restores the
+    // original path for a reversible in-session A/B (and the tests assert the
+    // two select identical neighbour sets).
+    this._fastNb = this.cfg.fastNeighbours !== false;
+    this._nbBuf = new Array(Math.max(0, this.cfg.neighbourCap | 0));
 
     // Dynamic obstacles that aren't squad members (collision §5): single
     // units / super-heavies / scale-4 register as repulsors (upserted by id,
@@ -53,11 +71,146 @@ export class SquadManager {
     // queried by plain iteration, no spatial index needed.
     this._bigUnits = new Map();     // sim unit id → BigUnitRepulsor
     this._bigUnitList = [];         // cached array view, rebuilt on mutation
+
+    // Reduced-detail member budget (PLAN-perf M20 — the producer for the LOD
+    // tier squad.js has always implemented and nothing ever drove). The camera
+    // lives on the render side, so `setViewPos` is the only input; until it is
+    // called the policy is inert and every squad stays `full`.
+    this._viewX = 0; this._viewY = 0; this._viewZ = 0;
+    this._viewSet = false;
+    this._lodNextAt = 0;
+    this._lodRank = [];             // reused ranking scratch, never re-allocated
+    this._lodFullSquads = 0;
+    this._lodFullMembers = 0;
+    this._lodCentroidSquads = 0;
+    this._lodCentroidMembers = 0;
+  }
+
+  // --- reduced-detail member budget (PLAN-perf M20) ------------------------
+
+  /** Camera world position, pushed once per frame by the render adapter. The
+   *  only thing that arms the member budget: with no view there is no ranking,
+   *  and the policy leaves every squad at `full`. */
+  setViewPos(x, y, z) {
+    this._viewX = x; this._viewY = y; this._viewZ = z;
+    this._viewSet = true;
+  }
+
+  /** Live A/B knob. `setLodBudget(0)` restores the pre-M20 frame (every squad
+   *  steered) without a reload, so the win can be bracketed and flipped back
+   *  inside one measurement session, exactly like `perfFix`. Returns the
+   *  budget actually in force. */
+  setLodBudget(n) {
+    this.cfg.lodFullMemberBudget = Math.max(0, n | 0);
+    this._lodNextAt = 0;            // re-rank on the next update, not in 250 ms
+    return this.cfg.lodFullMemberBudget;
+  }
+
+  /** What the policy did on its last pass — the measurement read-out, and the
+   *  thing to check before believing an A/B arm ("did it actually demote?"). */
+  get lodStats() {
+    return {
+      budget: this.cfg.lodFullMemberBudget | 0,
+      armed: this._viewSet && (this.cfg.lodFullMemberBudget | 0) > 0,
+      fullSquads: this._lodFullSquads,
+      fullMembers: this._lodFullMembers,
+      centroidSquads: this._lodCentroidSquads,
+      centroidMembers: this._lodCentroidMembers,
+    };
+  }
+
+  /** Rank squads by distance to the camera and keep the nearest at `full`
+   *  until their cumulative alive-member count reaches the budget; demote the
+   *  rest to `centroid`. Runs on `lodMemberBudgetIntervalSec`, and costs one
+   *  sort of the squad list — no per-member work.
+   *
+   *  Why a budget and not a distance cut: M19 Finding 6 measured only 8 % of
+   *  the members beyond 1 500 elmos at the budget subject's own pose, because
+   *  a massed battle is by definition piled into the frame. A budget bounds
+   *  `entity` by construction at any pose; distance only decides *which*
+   *  squads pay, which is what it is good for and all it is used for here.
+   *
+   *  `icon` squads are left alone — that tier is an adapter/minimap decision
+   *  about whether a squad is drawn at all, not a steering-cost decision. */
+  _applyLodBudget() {
+    const budget = this.cfg.lodFullMemberBudget | 0;
+    if (budget <= 0 || !this._viewSet) {
+      // Un-demote anything this policy demoted, so switching the knob off in a
+      // session really does restore the pre-M20 frame rather than freezing
+      // whatever tiers the last pass happened to leave behind.
+      if (this._lodCentroidSquads > 0) {
+        for (const sq of this.squads.values()) if (sq.lod === 'centroid') sq.lod = 'full';
+      }
+      this._lodFullSquads = 0; this._lodFullMembers = 0;
+      this._lodCentroidSquads = 0; this._lodCentroidMembers = 0;
+      return;
+    }
+    if (this._now < this._lodNextAt) return;
+    this._lodNextAt = this._now + (this.cfg.lodMemberBudgetIntervalSec ?? 0.25);
+
+    const rank = this._lodRank;
+    rank.length = 0;
+    const vx = this._viewX, vy = this._viewY, vz = this._viewZ;
+    for (const sq of this.squads.values()) {
+      if (sq.lod === 'icon') continue;
+      const dx = sq.cx - vx, dy = sq.cy - vy, dz = sq.cz - vz;
+      sq._lodD2 = dx * dx + dy * dy + dz * dz;
+      rank.push(sq);
+    }
+    rank.sort(byLodDistance);
+
+    // The budget is a HARD CAP, so a squad already at `full` holds only up to
+    // the budget itself; hysteresis is spent on the way back UP, where a
+    // demoted squad has to find real slack before it is promoted. That makes
+    // the steady state land somewhere in [budget*(1-h), budget] depending on
+    // which side it converged from — never above it. Putting the slack on the
+    // hold side instead (budget*(1+h)) reads like hysteresis and is not: every
+    // squad starts `full`, so the FIRST pass fills straight to budget*(1+h)
+    // and stays there, quietly making the config value a 10 % understatement
+    // of the real cap. Measured live during M20 before it was fixed.
+    const h = this.cfg.lodMemberBudgetHysteresis ?? 0;
+    const holdLimit = budget;                // already `full`: keep it, up to the cap
+    const promoteLimit = budget * (1 - h);   // currently `centroid`: needs slack to return
+    let used = 0, fullSquads = 0, centroidSquads = 0, centroidMembers = 0;
+    for (const sq of rank) {
+      const n = sq.aliveCount;
+      // Nearer squads have already claimed `used`; a squad that does not fit
+      // is skipped rather than terminating the scan, so a small squad just
+      // behind a large one still gets steered.
+      if (used + n <= (sq.lod === 'full' ? holdLimit : promoteLimit)) {
+        if (sq.lod !== 'full') sq.lod = 'full';
+        used += n; fullSquads++;
+      } else {
+        if (sq.lod !== 'centroid') sq.lod = 'centroid';
+        centroidSquads++; centroidMembers += n;
+      }
+    }
+    this._lodFullSquads = fullSquads;
+    this._lodFullMembers = used;
+    this._lodCentroidSquads = centroidSquads;
+    this._lodCentroidMembers = centroidMembers;
   }
 
   /** Install the shared passability grid once the map's heightmap sampler is
    *  available (worker adapter, Stage 7 — see passability.js's createPassability). */
   setPassability(passability) { this.passability = passability; }
+
+  /** Per-term attribution probe (PLAN-perf M12) — see squad.js's PROBE_TERMS.
+   *  `perfProbe('trailPointAhead', 4)` runs that one term four extra times per
+   *  member per frame; the slope of `entity` against the repeat count is the
+   *  term's marginal cost. `perfProbe()` turns it off. Measurement only — `_pt`
+   *  is 0 in every shipping frame. */
+  perfProbe(term, repeat) { return setPerfProbe(term, repeat); }
+  get perfProbeState() { return getPerfProbe(); }
+  get perfProbeTerms() { return PROBE_TERMS; }
+
+  /** M13 fix switches (PLAN-perf M13) — see squad.js's `_fix`. Each shipped
+   *  M13 fix keeps its pre-fix path reachable so the win can be A/B'd inside a
+   *  session and flipped back: `perfFix('trailGuard', false)` restores the
+   *  legacy arm, `perfFix()` restores every fix to ON. Measurement only; every
+   *  switch is ON in a shipping frame. */
+  perfFix(name, on) { return setPerfFix(name, on); }
+  get perfFixState() { return getPerfFixes(); }
 
   // --- building footprints / heightmap deform (pathfinding §7) -----------
 
@@ -364,10 +517,29 @@ export class SquadManager {
   /** Drive all squads one render step. `dt` seconds. */
   update(dt) {
     this._now += dt;
+    this._fastNb = this.cfg.fastNeighbours !== false;
+    // Before _rebuildGrid: the grid only holds `full` squads' members, so the
+    // tier assignment has to be settled or the grid and the steerers disagree
+    // about who exists this frame.
+    this._applyLodBudget();
+    // cfg.neighbourCap is a live perf knob (M9 A/B'd it in-session), so size
+    // the shared buffer here rather than trusting the constructor's reading.
+    const cap = Math.max(0, this.cfg.neighbourCap | 0);
+    if (this._nbBuf.length < cap) this._nbBuf.length = cap;
     this._tickWreckPool();
     this._rebuildGrid();
     for (const bu of this._bigUnitList) bu.update(dt);
-    const query = (m) => this._neighbours(m);
+    // Both queries fill `query.buf` and return the neighbour count, so the
+    // steerers have one call shape regardless of which path is live.
+    const query = this._fastNb
+      ? (m) => this._neighboursInto(m)
+      : (m) => {
+          const buf = this._nbBuf;
+          let n = 0;
+          for (const nb of this._neighbours(m)) buf[n++] = nb;
+          return n;
+        };
+    query.buf = this._nbBuf;
     for (const sq of this.squads.values()) sq.update(dt, this._now, query, this.passability, this._bigUnitList);
   }
 
@@ -408,8 +580,23 @@ export class SquadManager {
     bucket.push(obj);
   }
 
+  // Cell key. The fast path (PLAN-perf M10) packs the two cell indices into a
+  // single SMI instead of building a `"gx:gz"` string: the grid is rebuilt and
+  // re-queried every frame, so string keys cost one allocation + one string
+  // hash per insert AND per 3x3 probe — ~63k allocations/frame at L-battle
+  // scale (6 984 members x 9 cells), for a Map that only ever needs identity.
+  // Injective for |gz| < 32768, which at a >=21-elmo cell covers any map the
+  // engine can load by a wide margin. Both paths still use Math.floor (see the
+  // negative-coordinate note above); only the encoding differs, so the two
+  // produce identical bucketing and the A/B toggle is behaviour-neutral.
   _key(x, z) {
-    return Math.floor(x / this._cell) + ':' + Math.floor(z / this._cell);
+    return this._cellKey(Math.floor(x / this._cell), Math.floor(z / this._cell));
+  }
+
+  // The single place cell indices become a Map key. Every reader and writer
+  // must go through it, or the two encodings silently miss each other.
+  _cellKey(gx, gz) {
+    return this._fastNb ? gx * KEY_STRIDE + gz : gx + ':' + gz;
   }
 
   // Yields up to `neighbourCap` members/pseudo-members from the 3×3 cell
@@ -439,11 +626,12 @@ export class SquadManager {
     for (let gx = cx - 1; gx <= cx + 1; gx++) {
       for (let gz = cz - 1; gz <= cz + 1; gz++) {
         if (yielded >= cap) return;
-        const bucket = this._grid.get(gx + ':' + gz);
+        const key = this._cellKey(gx, gz);
+        const bucket = this._grid.get(key);
         if (!bucket || bucket.length === 0) continue;
 
         if (bucket.length > this.cfg.denseCellOccupancy) {
-          const agg = this._denseAggregate(gx, gz, bucket);
+          const agg = this._denseAggregate(key, bucket);
           yield agg; yielded++;
           continue;
         }
@@ -466,10 +654,65 @@ export class SquadManager {
     }
   }
 
+  // Fast path (PLAN-perf M10). Exactly the selection rule of `_neighbours`
+  // above — same cell order, same dense-cell collapse, same stride sampling,
+  // same self-exclusion — but it writes into a reusable buffer and returns the
+  // count instead of being a generator.
+  //
+  // Why this is the shape that matters: `separate()` is the only consumer and
+  // it drains the whole sequence immediately, so the generator bought nothing
+  // and cost a generator object per member per frame plus a suspend/resume and
+  // an `{value, done}` result object per neighbour. At L-battle scale that is
+  // ~7 000 generator allocations and ~56 000 resumptions every frame, none of
+  // which survive into the steering result. `separate()` takes the buffer plus
+  // an explicit count so it can run an indexed loop over it.
+  //
+  // The buffer is safe to share because the sequence is consumed synchronously
+  // inside the `separate()` call it was filled for — the queries never nest or
+  // outlive that call.
+  _neighboursInto(self) {
+    const cap = this.cfg.neighbourCap;
+    if (cap <= 0) return 0;
+    const buf = this._nbBuf;              // sized in update()
+    const cell = this._cell, grid = this._grid, dense = this.cfg.denseCellOccupancy;
+    const cx = Math.floor(self.x / cell), cz = Math.floor(self.z / cell);
+    let filled = 0;
+    for (let gx = cx - 1; gx <= cx + 1; gx++) {
+      const base = gx * KEY_STRIDE;
+      for (let gz = cz - 1; gz <= cz + 1; gz++) {
+        if (filled >= cap) return filled;
+        const key = base + gz;
+        const bucket = grid.get(key);
+        if (bucket === undefined || bucket.length === 0) continue;
+
+        if (bucket.length > dense) {
+          buf[filled++] = this._denseAggregate(key, bucket);
+          continue;
+        }
+
+        const remaining = cap - filled;
+        if (bucket.length <= remaining) {
+          for (let i = 0; i < bucket.length; i++) {
+            const m = bucket[i];
+            if (m === self) continue;
+            buf[filled++] = m;
+          }
+        } else {
+          const stride = bucket.length / remaining;
+          for (let i = 0, idx = 0; i < remaining; i++, idx += stride) {
+            const m = bucket[Math.floor(idx)];
+            if (m === self) continue;
+            buf[filled++] = m;
+          }
+        }
+      }
+    }
+    return filled;
+  }
+
   // One aggregate per dense cell per frame (cached — computed at most once
   // per cell regardless of how many members query it, not once per query).
-  _denseAggregate(gx, gz, bucket) {
-    const key = gx + ':' + gz;
+  _denseAggregate(key, bucket) {
     let agg = this._denseAgg.get(key);
     if (agg) return agg;
     let sx = 0, sz = 0;

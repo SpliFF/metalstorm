@@ -57,6 +57,12 @@ import { CommandBuffer, OPT, type CommandNotifier } from "./command-buffer.js";
 import { nearestMetalSpot, type MetalSpot } from "./metal-spots.js";
 import { DRAG_THRESHOLD_PX } from "./selection-core.js";
 import { isTerrainMesh } from "./terrain.js";
+import { LoadPriority } from "./asset-loader.js";
+
+/// Tint applied to a swapped-in mesh ghost when the current placement is
+/// invalid (e.g. a mex hover with no metal spot in range). Mirrors the
+/// inline red used in updateGhost's mex branch.
+const INVALID_EMISSIVE = new Color3(0.5, 0.05, 0.05);
 
 /// Bit 11 of UnitDef.flags marks a factory (see protocol.fbs). Exported —
 /// PLAN-playable.md G4 reuses it in game-processor.ts to find the selected
@@ -365,6 +371,18 @@ export class WorkerBuildPlacement {
       (def?.extractsMetal ?? 0) > 0 || def?.customParams?.ismex === "1";
     const mexSnapRadius = Math.max(96, this.opts.getMetalCellSize() * 4);
 
+    // PLAN-lazy-loading.md P0 trigger: the player needs this silhouette
+    // *now*. If we're stuck on the box fallback because the model
+    // hasn't loaded yet, jump it to the front of the shared AssetLoader
+    // queue and swap the ghost the moment it resolves — but only if
+    // this exact placement (same defId) is still the active one.
+    if (ghostIsBox) {
+      this.entityRenderer
+        .requestModel(defId, LoadPriority.P0)
+        .then(() => this.trySwapGhostMesh(defId))
+        .catch(() => {});
+    }
+
     this.placement = {
       defId,
       ghost,
@@ -483,7 +501,7 @@ export class WorkerBuildPlacement {
         p.ghost.position.set(groundPos.x, groundPos.y + 0.5, groundPos.z);
         p.lastPos = groundPos.clone();
         p.valid = false;
-        this.tintGhost(p.ghost, p.ghostIsBox, new Color3(0.5, 0.05, 0.05));
+        this.tintGhost(p.ghost, p.ghostIsBox, INVALID_EMISSIVE);
       }
       return;
     }
@@ -868,6 +886,37 @@ export class WorkerBuildPlacement {
   }
 
   // ---- Helpers ----
+
+  /** Called once a P0-boosted model load resolves. Swaps a still-box
+   *  placement ghost for the real unit mesh, preserving position and the
+   *  current valid/invalid tint. No-op if placement moved on since the
+   *  request went out — a different defId got armed, the ghost already
+   *  got its mesh some other way, or placement was cancelled entirely. */
+  private trySwapGhostMesh(defId: number): void {
+    const p = this.placement;
+    if (!p || p.defId !== defId || !p.ghostIsBox) return;
+    let meshGhost: TransformNode | null;
+    try {
+      meshGhost = this.entityRenderer.createGhostMesh(
+        defId,
+        `build-ghost-${defId}`,
+      );
+    } catch (err) {
+      console.warn("[build-placement] deferred mesh-ghost swap failed", err);
+      return;
+    }
+    if (!meshGhost) return;
+
+    meshGhost.position.copyFrom(p.ghost.position);
+    this.tintGhost(
+      meshGhost,
+      false,
+      p.valid ? p.defaultEmissive : INVALID_EMISSIVE,
+    );
+    p.ghost.dispose();
+    p.ghost = meshGhost;
+    p.ghostIsBox = false;
+  }
 
   /** Re-tint the ghost emissive. Box ghosts carry their material directly;
    *  mesh ghosts share a single StandardMaterial across all piece clones

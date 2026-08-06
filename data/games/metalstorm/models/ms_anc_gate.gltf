@@ -1,0 +1,426 @@
+{
+ "asset": {
+  "version": "2.0",
+  "generator": "fable-model-forge 1.0 (Claude Fable 5, hand-built glTF)"
+ },
+ "scene": 0,
+ "scenes": [
+  {
+   "nodes": [
+    0
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "name": "MS_ms_anc_gate",
+   "children": [
+    1
+   ]
+  },
+  {
+   "name": "body",
+   "children": [
+    2
+   ],
+   "mesh": 0
+  },
+  {
+   "name": "ring",
+   "mesh": 1,
+   "translation": [
+    0.0,
+    18.6,
+    0.0
+   ]
+  }
+ ],
+ "meshes": [
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1,
+      "TEXCOORD_0": 2
+     },
+     "indices": 3,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 4,
+      "NORMAL": 5,
+      "TEXCOORD_0": 6
+     },
+     "indices": 7,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  }
+ ],
+ "accessors": [
+  {
+   "bufferView": 0,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 2540,
+   "type": "VEC3",
+   "min": [
+    -15.300000190734863,
+    -1.6281497478485107,
+    -11.370809555053711
+   ],
+   "max": [
+    15.300000190734863,
+    30.0,
+    11.370809555053711
+   ]
+  },
+  {
+   "bufferView": 1,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 2540,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 2,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 2540,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 3,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 3642,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 4,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 2304,
+   "type": "VEC3",
+   "min": [
+    -9.350000381469727,
+    -9.350000381469727,
+    -1.350000023841858
+   ],
+   "max": [
+    9.350000381469727,
+    9.350000381469727,
+    1.350000023841858
+   ]
+  },
+  {
+   "bufferView": 5,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 2304,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 6,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 2304,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 7,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 3456,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 8,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 5,
+   "type": "SCALAR",
+   "min": [
+    0.0
+   ],
+   "max": [
+    180.0
+   ]
+  },
+  {
+   "bufferView": 9,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 5,
+   "type": "VEC4"
+  }
+ ],
+ "bufferViews": [
+  {
+   "buffer": 0,
+   "byteOffset": 0,
+   "byteLength": 30480,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 30480,
+   "byteLength": 30480,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 60960,
+   "byteLength": 20320,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 81280,
+   "byteLength": 14568,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 95848,
+   "byteLength": 27648,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 123496,
+   "byteLength": 27648,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 151144,
+   "byteLength": 18432,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 169576,
+   "byteLength": 13824,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 183400,
+   "byteLength": 20
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 183420,
+   "byteLength": 80
+  }
+ ],
+ "buffers": [
+  {
+   "byteLength": 183500,
+   "uri": "ms_anc_gate.bin"
+  }
+ ],
+ "samplers": [
+  {}
+ ],
+ "images": [
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_anc_gate_diffuse.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_anc_gate_orm.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_anc_gate_emissive.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_anc_gate_team.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_anc_gate_normals.ktx2"
+  }
+ ],
+ "textures": [
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 0
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 1
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 2
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 3
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 4
+    }
+   }
+  }
+ ],
+ "materials": [
+  {
+   "name": "ms_anc_gate",
+   "pbrMetallicRoughness": {
+    "baseColorTexture": {
+     "index": 0
+    },
+    "metallicFactor": 1.0,
+    "roughnessFactor": 1.0,
+    "metallicRoughnessTexture": {
+     "index": 1
+    }
+   },
+   "occlusionTexture": {
+    "index": 1
+   },
+   "emissiveTexture": {
+    "index": 2
+   },
+   "emissiveFactor": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "extensions": {
+    "SPRINGRTS_team_color": {
+     "maskTexture": {
+      "index": 3
+     }
+    }
+   },
+   "normalTexture": {
+    "index": 4
+   }
+  }
+ ],
+ "extensions": {
+  "SPRINGRTS_geometry": {
+   "configVersion": 8,
+   "height": 30.0,
+   "midpos": [
+    0.0,
+    15.0,
+    0.0
+   ],
+   "mins": [
+    -15.3,
+    -1.62815,
+    -11.37081
+   ],
+   "maxs": [
+    15.3,
+    30.0,
+    11.37081
+   ],
+   "radius": 24.2567,
+   "pieces": [
+    {
+     "name": "body",
+     "parent": -1,
+     "offset": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "mins": [
+      -15.3,
+      -1.62815,
+      -11.37081
+     ],
+     "maxs": [
+      15.3,
+      30.0,
+      11.37081
+     ]
+    },
+    {
+     "name": "ring",
+     "parent": 0,
+     "offset": [
+      0.0,
+      18.6,
+      0.0
+     ],
+     "mins": [
+      -9.35,
+      -9.35,
+      -1.35
+     ],
+     "maxs": [
+      9.35,
+      9.35,
+      1.35
+     ]
+    }
+   ]
+  }
+ },
+ "extensionsUsed": [
+  "KHR_texture_basisu",
+  "SPRINGRTS_geometry",
+  "SPRINGRTS_team_color"
+ ],
+ "animations": [
+  {
+   "name": "idle",
+   "samplers": [
+    {
+     "input": 8,
+     "output": 9,
+     "interpolation": "LINEAR"
+    }
+   ],
+   "channels": [
+    {
+     "sampler": 0,
+     "target": {
+      "node": 2,
+      "path": "rotation"
+     }
+    }
+   ]
+  }
+ ],
+ "extensionsRequired": [
+  "KHR_texture_basisu"
+ ]
+}

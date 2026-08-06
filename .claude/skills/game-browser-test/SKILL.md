@@ -25,6 +25,23 @@ without fighting over the single shared `chrome-profile` lock (the
   authenticate from scratch before connecting to a game (see below).
 - **Multiple games may be running at once** (yours + other sessions').
   You are responsible for not crossing wires.
+- **⚠️ These browsers outlive the session that spawned them, and a forgotten
+  one keeps rendering at full tilt.** An abandoned client page holds the GPU
+  indefinitely — one left on the game client was measured at **80 % GPU / 60 %
+  CPU nine hours later**, and it silently corrupted five consecutive
+  performance-measurement sessions, which blamed the user's browsers. **Sweep
+  for leftovers before any timing work, and close your own browser when you
+  are done:**
+  ```sh
+  # live agent Chromes (one entry per running instance)
+  ps -Ao pid,etime,args | grep -o 'puppeteer_dev_chrome_profile-[A-Za-z0-9]*' | sort | uniq -c
+  # confirm one is stale, not another live session's, before killing:
+  ps -o pid,ppid,etime,args= -p <browser-pid>     # ancestry -> chrome-devtools-mcp -> which claude
+  ioreg -r -d 1 -w 0 -c IOAccelerator | grep -o '"Device Utilization %"=[0-9]*'
+  ```
+  Attribute *reversibly* first — `kill -STOP <pid>`, re-read the GPU counter,
+  `kill -CONT <pid>` — before killing anything. That is what proved the load
+  was ours and not the user's.
 
 **Discipline — track your own game, every time:**
 
@@ -132,9 +149,103 @@ is a screenshot. Combined with the trap above, that is a good way to conclude
 something false about a page. Dismiss the dialog (`handle_dialog`), or read the
 other client, before drawing conclusions.
 
-**Game choice for UI testing: use `zk`, not `papertanks`.** PaperTanks ships no
-configured LuaUI/minimap/sounds, so UI/HUD tests against it prove nothing —
-widgets simply don't exist there. ZK (and BAR) have full HUDs.
+**⚠️ The camera silently drifts under CDP — anything that needs a fixed view
+must re-verify it.** A CDP-driven session hands the worker `RTSCamera` held keys
+and/or a pointer parked at the canvas corner, and its pan loop
+(`client/src/core/rts-camera.ts:405-434`) then walks the view across the map
+over the next few minutes **with no event, no log line and no visual glitch**.
+`setCameraPose` itself is exact, so a check taken right after setting always
+passes and proves nothing. PLAN-perf **M6** lost five 30 s perf windows to this
+and the numbers looked like a perfectly ordinary warm-up curve (38.0 → 43.6 →
+39.0 → 43.9 → 43.5 ms p95) while the camera travelled from (8192, 620, 7480) to
+(6583, 398, 951). Before pinning:
+
+```js
+const cv = document.querySelector('canvas');
+cv.dispatchEvent(new PointerEvent('pointerleave',
+  {clientX: 640, clientY: 400, bubbles: true, pointerId: 1, pointerType: 'mouse'}));
+window.dispatchEvent(new Event('blur'));   // RTSCamera.blur(): keys + drag + mouseInCanvas
+await window.test.deps.workerCall('setCameraPose', [pose, 0]);
+```
+
+Then re-read `await window.test.cameraPose()` **at the end** of every
+measurement / comparison window and discard the window if it moved. A synthetic
+pointer re-centre alone does **not** fix it — the held keys are the dominant
+term. This bites screenshot A/Bs exactly as hard as it bites perf captures.
+
+**⚠️ Changing the render resolution is one-way — read the buffer back.**
+`window.__gp('__perfToggles.renderScale(s)')` calls
+`Engine.setHardwareScalingLevel(1/s)`, and it does not round-trip: after
+`renderScale(0.5)` then `renderScale(1)`, `getHardwareScalingLevel()` reports 1
+while `getRenderWidth()/getRenderHeight()` still report the *reduced* buffer, and
+`engine.resize(true)` will not fix it — the renderer runs on an OffscreenCanvas
+in the worker, which has no CSS size to re-derive the real backing store from.
+PLAN-perf **M3** captured a window at the wrong buffer this way. So:
+
+```js
+// after ANY resolution change, confirm what you are actually measuring
+await window.__gp(`(()=>{const e=__entityRenderer.scene.getEngine();
+  return [e.getRenderWidth(), e.getRenderHeight()];})()`);
+```
+
+**It is worse than one-way — it compounds.** PLAN-perf **M4** measured
+`setHardwareScalingLevel` scaling the *current* backing store rather than
+re-deriving it from a CSS size, so each call shrinks the buffer again:
+960×600 → `setHardwareScalingLevel(1.333)` → 720×450 → `(1)` → 720×450 → `(1.333)`
+→ 540×337. Asking for the level you want does not get you the buffer you want.
+
+To restore, set the scaling level back to **1** *and* trigger a **real** page
+resize — a genuinely different size, then the one you want. The 1280→1281→1280
+nudge this file previously recommended does **not** work; M4 tried it and the
+buffer stayed at 960×600. What works:
+
+```js
+await window.__gp('__entityRenderer.scene.getEngine().setHardwareScalingLevel(1)');
+// then resize_page 1100×700, wait ~4 s, resize_page 1280×800, wait ~5 s
+// then read the buffer back — only believe getRenderWidth(), never the level
+```
+
+**⚠️ A toggle that recompiles a shader makes the frame look fast — it isn't.**
+Babylon skips drawing any mesh whose effect is not ready, so for several seconds
+after you flip a material plugin, re-enable a mesh, or detach a post pipeline,
+the frame is cheap *because half the scene is missing*. M4 hit this three times;
+the worst case reported a −11.7 ms "win" for disabling post-processing that a
+properly settled window showed to be **0.0 ms**. Two tells, both cheap:
+
+- the distribution goes **bimodal** — `p50` far below `p95` (e.g. p50 9.0 / p95 23.8)
+  where a settled window has p95 ≈ p50 + 2 ms;
+- **draw calls per frame** drop below what the scene should be issuing.
+
+So after any such toggle, settle **12–20 s**, and gate the window on a draw-call
+count in the expected range, not on elapsed time alone. Draw calls are not
+per-frame anywhere obvious — `engine._drawCalls.current` is cumulative, so
+sample it twice against `engine.frameId` and divide.
+
+**⚠️ `mesh.isVisible = false` does not stick if something re-asserts it — use
+`setEnabled(false)`.** Per-frame flush code commonly re-derives visibility, so an
+A/B that hides meshes that way measures **nothing while looking like it worked**.
+`SquadRenderBackend.flushPool` does exactly this
+(`client/src/core/squad-render-backend.ts:823`,
+`pool.mesh.isVisible = pool.highWater > 0`), and PLAN-perf **M11** lost a window
+to it. `setEnabled(false)` is not touched by that path. The tell that caught it
+was **draws/frame going UP** in the window that was supposed to remove geometry —
+so **carry draws/frame as the gate on any "I removed geometry" arm**, and treat a
+draw count that moves the wrong way as proof the lever never engaged, not noise.
+
+**⚠️ A CDP async measurement job only advances while an `evaluate_script` is
+actively awaiting.** Kick a timing window off as a floating promise, then poll it
+by reading a result global, and it reports `state: 'running'` for **minutes**
+after it has actually finished; the identical read taken from a call that first
+`await`s something returns `'done'` immediately. PLAN-perf M11 nearly restarted a
+good capture over this. Poll with an awaited call — e.g.
+`async () => { await window.test.perfDump(500); return window.__winResult; }` —
+or the window looks hung.
+
+**Game choice for UI testing: use `metalstorm`, not `papertanks`.** PaperTanks
+ships no configured LuaUI/minimap/sounds, so UI/HUD tests against it prove
+nothing — widgets simply don't exist there. (This line used to say "use `zk`";
+ZK and BAR were archived 2026-08-02 and are no longer the test vehicle — see
+PLAN.md Code-session contract.)
 
 ## Lobby JS API (`window.lobby`)
 

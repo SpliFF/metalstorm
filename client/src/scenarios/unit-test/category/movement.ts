@@ -45,8 +45,7 @@ export async function runMovement(
     }
 
     const { h, anchorX, anchorZ, team } = ctx;
-    // Spawn ~600 elmos west of the anchor (well clear of mexes which
-    // are clustered around the anchor). Goal is 1200 elmos east —
+    // Spawn ~600 elmos west of the anchor. Goal is 1200 elmos east —
     // a 1800-elmo traversal that comfortably exercises pathing
     // without blowing the wall budget at default sim speed.
     const startX = anchorX - 600;

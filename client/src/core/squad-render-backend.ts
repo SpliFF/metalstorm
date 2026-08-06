@@ -121,6 +121,16 @@ interface InstancePool {
     /** Present on MODEL pools only — the transform data to compose members
      *  against the borrowed body geometry. */
     model?: { restWorld: Matrix; yOffset: number };
+    /** PLAN-perf M21: whether this pool's thin-instance vertex buffers are
+     *  currently bound to its live typed arrays. `thinInstanceSetBuffer`
+     *  DISPOSES and RE-CREATES the GPU buffer (and, for user kinds, re-registers
+     *  the vertex attribute) on every call, so it must run once per array
+     *  identity — at creation and after `growPool` reallocates — not once per
+     *  frame. Steady-state flushes re-upload in place instead. */
+    buffersBound?: boolean;
+    /** PLAN-perf M21: flushes remaining before the next bounding-info refresh.
+     *  0 forces one on the next flush. */
+    bboxCountdown?: number;
 }
 
 interface MemberSlot { pool: InstancePool; index: number; }
@@ -145,6 +155,58 @@ interface MemberEntry {
     model?: MemberSlot[];
     sprite?: MemberSlot;
     capsule?: MemberSlot;
+    /** Resolved sprite pool for (defId, team), cached on first use. Both are
+     *  fixed for an entry's lifetime, so the `${defId}:${team}` template-literal
+     *  key + Map lookup that resolved it was a per-member-per-frame string
+     *  allocation on the hottest path in the client frame (PLAN-perf M13). */
+    spritePool?: InstancePool;
+}
+
+/** M13 fix 2's legacy arm. ON restores the pre-M13 `updateMember` preamble —
+ *  the handle Map lookup, the per-call `fallback` closure and the
+ *  `${defId}:${team}` sprite-pool key — so the win can be A/B'd inside one
+ *  session at the L-battle and flipped back to prove it is the lever and not
+ *  drift. OFF in every shipping frame; measurement only. Reachable from the
+ *  worker as `__perfToggles.squadBackendLegacy(on)`. */
+let LEGACY_BACKEND_PLUMBING = false;
+
+export function setLegacyBackendPlumbing(on: boolean): boolean {
+    LEGACY_BACKEND_PLUMBING = !!on;
+    return LEGACY_BACKEND_PLUMBING;
+}
+
+/** M21's legacy arm. ON restores the pre-M21 `flushPool` — a full
+ *  `thinInstanceSetBuffer` per buffer per pool per frame, which disposes and
+ *  re-creates every GPU buffer each frame. OFF (shipping) binds each buffer
+ *  once per array identity and re-uploads in place. Same A/B contract as
+ *  `squadBackendLegacy`: measurement only, reachable from the worker as
+ *  `__perfToggles.squadRebindBuffers(on)`. */
+let LEGACY_BUFFER_REBIND = false;
+
+export function setLegacyBufferRebind(on: boolean): boolean {
+    LEGACY_BUFFER_REBIND = !!on;
+    return LEGACY_BUFFER_REBIND;
+}
+
+/** How many flushes a pool may skip before its thin-instance bounding info is
+ *  recomputed (PLAN-perf M21). `thinInstanceRefreshBoundingInfo` transforms 8
+ *  bounding vectors for EVERY slot up to the pool's capacity — at the
+ *  XL-battle's two 8 192-slot sprite pools that measured 2.3 ms/frame, ~95 % of
+ *  what was left of the flush and more than the buffer re-bind it sits next to.
+ *
+ *  Nothing on this renderer's path reads it: every pool mesh sets
+ *  `alwaysSelectAsActiveMesh` (so it is never frustum-culled) and
+ *  `isPickable = false`, and squad member pools are not registered as shadow
+ *  casters. Refreshing on a slow cadence rather than never is deliberate
+ *  insurance against a future consumer — it keeps the box correct to within a
+ *  quarter second, for ~7 % of the cost. A pool that was just bound or grown
+ *  refreshes immediately (see `flushPool`), so a new pool is never wrong.
+ *  1 restores the pre-M21 every-flush behaviour; `__perfToggles.squadBboxEvery`. */
+let BBOX_REFRESH_EVERY = 15;
+
+export function setBboxRefreshEvery(n: number): number {
+    BBOX_REFRESH_EVERY = Math.max(1, n | 0);
+    return BBOX_REFRESH_EVERY;
 }
 
 const MEMBER_HEIGHT = 9;      // elmos — proxy capsule height
@@ -197,7 +259,26 @@ export class SquadRenderBackend {
 
     /** handle → member entry (carries LOD state for per-frame pool migration).
      *  Handles are dense positive ints; -1 means "no instance" (the logic
-     *  treats -1 as released, per render-backend.js). */
+     *  treats -1 as released, per render-backend.js).
+     *
+     *  M13 fix 2: this is a dense ARRAY, not a Map. `updateMember` runs once
+     *  per rendered member per frame (7 200/frame at the L-battle) and M12
+     *  attributed 14.2 % of the whole `entity` phase to it — most of that in
+     *  its preamble, not its work. Handles are ours to hand out, so they are
+     *  array indices. Freed handles are recycled through `freeHandles`, so the
+     *  array is sized by PEAK live members rather than by total ever created —
+     *  which matters because an icon↔full LOD flip releases and recreates
+     *  every member of a squad. Index 0 is never handed out, so a falsy handle
+     *  and -1 both read as "no entry".
+     *
+     *  A member handle and a wreck handle may now collide numerically; they
+     *  never cross paths, because each kind is looked up only in its own table
+     *  by a caller that knows which it holds. */
+    private memberEntries: (MemberEntry | undefined)[] = [undefined];
+    private freeHandles: number[] = [];
+    /** Kept in step with `memberEntries` so the M13 A/B's legacy arm can read
+     *  the Map form in-session. Written only on create/release, never per
+     *  frame — see `LEGACY_BACKEND_PLUMBING`. */
     private memberByHandle = new Map<number, MemberEntry>();
     private wreckByHandle = new Map<number, MemberSlot>();
     private nextHandle = 1;
@@ -241,13 +322,21 @@ export class SquadRenderBackend {
         const entry: MemberEntry = { defId: v.defId, team, atlas, impostorDist };
         // Slots are allocated lazily by the first updateMember once the member's
         // world position (hence its LOD tier + fade) is known.
-        const handle = this.nextHandle++;
+        const handle = this.freeHandles.pop() ?? this.memberEntries.length;
+        this.memberEntries[handle] = entry;
         this.memberByHandle.set(handle, entry);
         return handle;
     }
 
+    /** handle → entry, honouring M13 fix 2's legacy arm. */
+    private entryOf(handle: number): MemberEntry | undefined {
+        return LEGACY_BACKEND_PLUMBING
+            ? this.memberByHandle.get(handle)
+            : this.memberEntries[handle];
+    }
+
     updateMember(handle: number, x: number, y: number, z: number, headingY: number, gait: number): void {
-        const entry = this.memberByHandle.get(handle);
+        const entry = this.entryOf(handle);
         if (!entry) return;
         // Gait 0..1 → a subtle vertical bob so a moving squad reads as walking.
         const bob = Math.sin(gait * Math.PI * 2) * 0.4;
@@ -262,10 +351,17 @@ export class SquadRenderBackend {
         let modelFade: number | undefined;
         let spriteFade: number | undefined;
         let model: MemberModel | undefined;
-        const fallback = () => { if (entry.atlas) spriteFade = 1; };
+        // "Fall back to the sprite tier (if this def has one)". M13 fix 2: this
+        // was a closure allocated per call — it captures two mutable `let`s, so
+        // V8 cannot elide it — i.e. 7 200 allocations/frame at the L-battle. It
+        // is now a flag, applied once after the tier decision.
+        let wantFallback = false;
+        const fallback = LEGACY_BACKEND_PLUMBING
+            ? () => { if (entry.atlas) spriteFade = 1; }
+            : null;
         const D = entry.impostorDist;
         if (D === undefined || !this.host.getMemberModel) {
-            fallback();                                  // no 3D tier for this def
+            if (fallback) fallback(); else wantFallback = true;   // no 3D tier for this def
         } else {
             const cam = this.scene.activeCamera?.position;
             // D === Infinity (atlas-less def) → inner is Infinity too, so every
@@ -275,7 +371,8 @@ export class SquadRenderBackend {
             if (!cam) {
                 // No camera (tests / headless) → prefer the model if it loads.
                 model = this.host.getMemberModel(entry.defId, entry.team);
-                if (model) modelFade = 1; else fallback();
+                if (model) modelFade = 1;
+                else if (fallback) fallback(); else wantFallback = true;
             } else {
                 const dx = cam.x - x, dy = cam.y - y, dz = cam.z - z;
                 const d2 = dx * dx + dy * dy + dz * dz;
@@ -285,7 +382,8 @@ export class SquadRenderBackend {
                     // Within D → the body is needed (may still be loading).
                     model = this.host.getMemberModel(entry.defId, entry.team);
                     if (!model) {
-                        fallback();                      // still loading → sprite/capsule
+                        // still loading → sprite/capsule
+                        if (fallback) fallback(); else wantFallback = true;
                     } else if (d2 <= inner * inner) {
                         modelFade = 1;                   // pure model
                     } else {
@@ -297,6 +395,8 @@ export class SquadRenderBackend {
                 }
             }
         }
+
+        if (wantFallback && entry.atlas) spriteFade = 1;
 
         // Reconcile model occupancy — one pool (and slot) per model piece, all
         // carrying the same fade so a multi-piece body dissolves as one object.
@@ -348,12 +448,14 @@ export class SquadRenderBackend {
     }
 
     releaseMember(handle: number): void {
-        const entry = this.memberByHandle.get(handle);
+        const entry = this.entryOf(handle);
         if (!entry) return;
         this.freeModel(entry);
         this.freeSprite(entry);
         this.freeCapsule(entry);
+        this.memberEntries[handle] = undefined;
         this.memberByHandle.delete(handle);
+        this.freeHandles.push(handle);
     }
 
     // --- per-member slot reconciliation (M5 dual residency) -----------------
@@ -376,7 +478,16 @@ export class SquadRenderBackend {
     }
 
     private ensureSprite(entry: MemberEntry): InstancePool {
-        const pool = this.getSpritePool(entry.defId, entry.team, entry.atlas!);
+        // M13 fix 2: getSpritePool builds a `${defId}:${team}` template-literal
+        // key, i.e. a string allocation + hash + Map lookup, and this runs for
+        // every sprite-tier member every frame (91 % of members at the L-battle
+        // pose). Both components are fixed for an entry's lifetime, so resolve
+        // the pool once and cache it on the entry.
+        let pool = LEGACY_BACKEND_PLUMBING ? undefined : entry.spritePool;
+        if (!pool) {
+            pool = this.getSpritePool(entry.defId, entry.team, entry.atlas!);
+            entry.spritePool = pool;
+        }
         if (!entry.sprite || entry.sprite.pool !== pool) {
             if (entry.sprite) this.freeSlot(entry.sprite.pool, entry.sprite.index);
             entry.sprite = { pool, index: this.allocSlot(pool) };
@@ -465,7 +576,7 @@ export class SquadRenderBackend {
      *  means the member is mid-crossfade across the boundary band. Every model
      *  piece carries the same fade, so the first piece's is the member's. */
     getMemberFades(handle: number): { model?: number; sprite?: number; capsule?: boolean } {
-        const entry = this.memberByHandle.get(handle);
+        const entry = this.entryOf(handle);
         if (!entry) return {};
         return {
             model: entry.model ? entry.model[0].pool.fade![entry.model[0].index] : undefined,
@@ -478,7 +589,7 @@ export class SquadRenderBackend {
      *  per model piece). They should always agree — a multi-piece body must
      *  dissolve as one object, not piece by piece. */
     getModelFades(handle: number): number[] | undefined {
-        const entry = this.memberByHandle.get(handle);
+        const entry = this.entryOf(handle);
         if (!entry?.model) return undefined;
         return entry.model.map((s) => s.pool.fade![s.index]);
     }
@@ -530,6 +641,8 @@ export class SquadRenderBackend {
         this.spritePools.clear();
         this.modelPools.clear();
         this.wreckPool = null;
+        this.memberEntries.length = 1;
+        this.freeHandles.length = 0;
         this.memberByHandle.clear();
         this.wreckByHandle.clear();
         this.squadTeam.clear();
@@ -652,7 +765,13 @@ export class SquadRenderBackend {
         mesh.thinInstanceSetBuffer('matrix', matrices, 16, false);
         mesh.thinInstanceCount = 0;
         mesh.isVisible = false;
-        return { mesh, owned, matrices, capacity, highWater: 0, free: [], dirty: false };
+        // `buffersBound` stays false: the caller may still attach `fade`/`sprite`
+        // arrays after this returns (getSpritePool/getModelPool do), and those
+        // kinds must be bound too. The first flushPool binds the full set.
+        return {
+            mesh, owned, matrices, capacity, highWater: 0, free: [], dirty: false,
+            buffersBound: false,
+        };
     }
 
     private allocSlot(pool: InstancePool): number {
@@ -702,6 +821,10 @@ export class SquadRenderBackend {
             cells.set(pool.sprite.cells);
             pool.sprite.cells = cells;
         }
+        // Every array above is a NEW object — the bound GPU buffers still point
+        // at the old ones, so the next flush must re-bind rather than re-upload
+        // (PLAN-perf M21). Missing this renders a frozen, half-length pool.
+        pool.buffersBound = false;
     }
 
     /** Compose scale·yaw·translate into the pool's matrix buffer at `index`.
@@ -736,9 +859,12 @@ export class SquadRenderBackend {
         pool.dirty = true;
     }
 
-    private flushPool(pool: InstancePool): void {
-        if (!pool.dirty) return;
-        pool.dirty = false;
+    /** Bind (or re-bind) this pool's thin-instance buffers to its current typed
+     *  arrays. Expensive — `thinInstanceSetBuffer` disposes the old GPU buffer,
+     *  allocates a new one and, for the user kinds, re-registers the vertex
+     *  attribute. Call only when an array's identity changes: pool creation and
+     *  `growPool`. */
+    private bindPoolBuffers(pool: InstancePool): void {
         pool.mesh.thinInstanceSetBuffer('matrix', pool.matrices, 16, false);
         // Per-member directional cell selector (ImpostorUvPlugin reads it in the
         // vertex shader). Only sprite pools carry it; capsule/wreck pools don't.
@@ -750,10 +876,52 @@ export class SquadRenderBackend {
         if (pool.fade) {
             pool.mesh.thinInstanceSetBuffer('ditherFade', pool.fade, 1, false);
         }
+        pool.buffersBound = true;
+    }
+
+    private flushPool(pool: InstancePool): void {
+        if (!pool.dirty) return;
+        pool.dirty = false;
+        // PLAN-perf M21: the steady state re-uploads into the buffers already
+        // bound rather than re-creating them. The pre-M21 path re-bound all
+        // three every frame for every pool, which at the XL-battle was ~45 GPU
+        // buffer allocations per frame and 54 % of the per-member `entity`
+        // floor. `thinInstancePartialBufferUpdate` also uploads only the live
+        // prefix instead of the whole (power-of-two, up to 2× oversized)
+        // capacity — instances at or past `highWater` are not drawn.
+        const justBound = LEGACY_BUFFER_REBIND || !pool.buffersBound;
+        if (justBound) {
+            this.bindPoolBuffers(pool);
+        } else {
+            if (pool.highWater > 0) {
+                pool.mesh.thinInstancePartialBufferUpdate('matrix', pool.highWater, 0);
+            }
+            // 1 float per instance each — small enough that the whole-array
+            // upload is not worth a second partial-update code path.
+            if (pool.sprite) pool.mesh.thinInstanceBufferUpdated('impostorCell');
+            if (pool.fade) pool.mesh.thinInstanceBufferUpdated('ditherFade');
+            // `thinInstanceSetBuffer` used to null this for us every frame.
+            // It is the lazy read-back cache behind `thinInstanceGetWorldMatrices()`;
+            // nothing on the render path consults it (culling re-reads
+            // `matrixData` directly in `thinInstanceRefreshBoundingInfo`), but
+            // leaving it stale would silently hand debug/test read-backs last
+            // frame's poses. One null per pool per frame.
+            (pool.mesh as unknown as {
+                _thinInstanceDataStorage: { worldMatrices: Matrix[] | null };
+            })._thinInstanceDataStorage.worldMatrices = null;
+        }
         pool.mesh.thinInstanceCount = pool.highWater;
         pool.mesh.isVisible = pool.highWater > 0;
+        // Bounding info on a cadence (see BBOX_REFRESH_EVERY). A pool that just
+        // (re-)bound has new geometry or new arrays, so refresh that flush.
         if (pool.highWater > 0) {
-            pool.mesh.thinInstanceRefreshBoundingInfo(false);
+            const left = justBound ? 0 : (pool.bboxCountdown ?? 0);
+            if (left <= 0) {
+                pool.mesh.thinInstanceRefreshBoundingInfo(false);
+                pool.bboxCountdown = BBOX_REFRESH_EVERY;
+            } else {
+                pool.bboxCountdown = left - 1;
+            }
         }
     }
 }

@@ -210,6 +210,16 @@ local function validate(scn, knownDefs, knownFeatureDefs)
     for i, u in ipairs(scn.units or {}) do
         checkDef(u.def, 'units[' .. i .. ']')
         checkOrders(u.orders, 'units[' .. i .. ']')
+        -- 'neutral' (the Gaia team, see resolveTeam) is the only string a
+        -- `team` may be. Checked hard rather than left to stageUnits' live-team
+        -- guard, because a typo would otherwise be reported as "team 'nuetral'
+        -- which this game does not have" and skipped — indistinguishable from
+        -- the legitimate "the launch seated no NPC slot" case, and silently
+        -- dropping every neutral town in the scenario.
+        if u.team ~= nil and type(u.team) ~= 'number' and u.team ~= 'neutral' then
+            errors[#errors + 1] = 'units[' .. i .. ']: "team" must be a number or ' ..
+                                  '"neutral", got "' .. tostring(u.team) .. '"'
+        end
     end
 
     for i, c in ipairs((scn.civilians or {}).units or {}) do
@@ -404,10 +414,54 @@ local function buildLiveTeams()
     return live
 end
 
+--- Resolve a `units` entry's `team` to a real team id, or nil for "no team".
+---
+--- `team = 'neutral'` means the Gaia team, and it is a STRING for a mechanical
+--- reason rather than a stylistic one: Gaia's id is `playerTeamCount`
+--- (Simulation.cpp's team setup), so it depends on how many slots the launch
+--- seated and is simply not knowable when a scenario file is written. A
+--- generated scenario that hard-coded a number would put its neutral towns on
+--- whichever player team happened to land on that index.
+---
+--- Gaia is the right home for them because it is already the neutral
+--- environment team — its own ally team, no allies, always present regardless
+--- of roster — which is exactly "a town that belongs to nobody and fights
+--- nobody". This mirrors the string handling stageRegions already does for
+--- 'contested'/'neutral'.
+---
+--- Note this is NOT the `civilians` block, deliberately: that routes through
+--- GG.Civilians.Spawn, which registers everything role='ambient', and
+--- civilians/routines.lua then issues a CMD_MOVE at every ambient entry every
+--- tick — which would enroll immobile buildings in a move order they can never
+--- satisfy.
+local function resolveTeam(team)
+    if team == 'neutral' then
+        return Spring.GetGaiaTeamID and Spring.GetGaiaTeamID() or nil
+    end
+    return team
+end
+
 local function stageUnits(units)
     local liveTeams = buildLiveTeams()
     local warned = {}
-    for _, u in ipairs(units or {}) do
+    local skipped = {}
+    local created = 0
+    for _, entry in ipairs(units or {}) do
+        local u = entry
+        if u.team == 'neutral' then
+            local gaia = resolveTeam('neutral')
+            if gaia == nil then
+                Spring.Echo('[game_scenario] WARNING: scenario stages units on ' ..
+                            'team "neutral" but this engine exposes no Gaia team — skipped')
+                goto continue
+            end
+            -- Shallow copy: GG.Scenario.data is published for the war-health
+            -- checks and game_gameover to read back, so rewriting the authored
+            -- table in place would make it disagree with the file on disk.
+            u = { def = entry.def, team = gaia, x = entry.x, z = entry.z,
+                  facing = entry.facing, count = entry.count,
+                  spacing = entry.spacing, orders = entry.orders }
+        end
         if u.team ~= nil and not liveTeams[u.team] then
             if not warned[u.team] then
                 warned[u.team] = true
@@ -421,13 +475,45 @@ local function stageUnits(units)
             local ux, uz = u.x + off[1], u.z + off[2]
             local uy = Spring.GetGroundHeight(ux, uz)
             local unitID = Spring.CreateUnit(u.def, ux, uy, uz, u.facing or 'south', u.team)
-            if unitID and u.orders then
+            if unitID == nil then
+                -- The engine refuses a unit whose ground is already occupied and
+                -- says so ONLY by returning nil — no error, no log line, nothing.
+                -- The staged war is then quietly smaller than the file that
+                -- describes it, which is unfalsifiable from the outside: found
+                -- by counting units in a headless boot of a generated scenario
+                -- and getting 77 where the file said 78.
+                --
+                -- It matters most for generated scenarios, whose placement is
+                -- checked against the heightmap and against other scenario
+                -- entries but cannot model every reservation the engine makes
+                -- (map features, other gadgets' spawns, footprint rounding). So
+                -- the loader reports what it could not place; the position is
+                -- included because that is the only thing that makes it fixable.
+                skipped[#skipped + 1] = string.format('%s at (%d,%d)',
+                                                      tostring(u.def), ux, uz)
+            else
+                created = created + 1
+                if u.orders then
                 for _, o in ipairs(u.orders) do
                     Spring.GiveOrderToUnit(unitID, resolveCmd(o.cmd), o.params or {}, o.options or {})
+                end
                 end
             end
         end
         ::continue::
+    end
+
+    -- The staged count is the one number that makes "the war is smaller than
+    -- the file" checkable at a glance, and it is what a generated scenario's
+    -- boot verification compares against.
+    Spring.Echo('[game_scenario] staged ' .. created .. ' unit(s) from ' ..
+                #(units or {}) .. ' entries')
+
+    if #skipped > 0 then
+        Spring.Echo('[game_scenario] WARNING: the engine refused to create ' ..
+                    #skipped .. ' staged unit(s) — the ground was already ' ..
+                    'occupied, so the war is short of what the scenario ' ..
+                    'declares: ' .. table.concat(skipped, ', '))
     end
 end
 
@@ -885,6 +971,12 @@ end
 --- Staged mobile force per team: { [team] = { n, ordered, speedMin, x, z } }.
 --- Centroid is count-weighted (a `count = 4` entry is four units), matching
 --- how stageUnits actually puts them on the board.
+---
+--- A `team = 'neutral'` entry (Gaia — see resolveTeam) buckets under the string
+--- key, which no live team id can equal, so both §7.5 checks below skip it via
+--- their `live[teamID]` guard. That is the wanted behaviour: a neutral town's
+--- civilians are not an army, and neither "they have no opening orders" nor
+--- "they cannot reach the objective" is a defect in the war.
 local function stagedForceByTeam(scn, speeds)
     local byTeam = {}
     for _, u in ipairs((scn and scn.units) or {}) do

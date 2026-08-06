@@ -1,0 +1,563 @@
+{
+ "asset": {
+  "version": "2.0",
+  "generator": "fable-model-forge 1.0 (Claude Fable 5, hand-built glTF)"
+ },
+ "scene": 0,
+ "scenes": [
+  {
+   "nodes": [
+    0
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "name": "MS_ms_arsenal_barge",
+   "children": [
+    1
+   ]
+  },
+  {
+   "name": "body",
+   "children": [
+    2
+   ],
+   "mesh": 0
+  },
+  {
+   "name": "turret",
+   "children": [
+    3
+   ],
+   "mesh": 1,
+   "translation": [
+    0.0,
+    2.4,
+    -3.0
+   ]
+  },
+  {
+   "name": "barrel",
+   "children": [
+    4
+   ],
+   "mesh": 2,
+   "translation": [
+    0.0,
+    1.3,
+    0.4
+   ]
+  },
+  {
+   "name": "muzzle",
+   "translation": [
+    0.0,
+    0.39,
+    -6.55
+   ]
+  }
+ ],
+ "meshes": [
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1,
+      "TEXCOORD_0": 2
+     },
+     "indices": 3,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 4,
+      "NORMAL": 5,
+      "TEXCOORD_0": 6
+     },
+     "indices": 7,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  },
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 8,
+      "NORMAL": 9,
+      "TEXCOORD_0": 10
+     },
+     "indices": 11,
+     "material": 0,
+     "mode": 4
+    }
+   ]
+  }
+ ],
+ "accessors": [
+  {
+   "bufferView": 0,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 3574,
+   "type": "VEC3",
+   "min": [
+    -6.25,
+    -1.7000000476837158,
+    -27.5
+   ],
+   "max": [
+    6.25,
+    8.399999618530273,
+    27.5
+   ]
+  },
+  {
+   "bufferView": 1,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 3574,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 2,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 3574,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 3,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 4950,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 4,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 224,
+   "type": "VEC3",
+   "min": [
+    -1.339625358581543,
+    0.0,
+    -1.339625358581543
+   ],
+   "max": [
+    1.339625358581543,
+    1.399999976158142,
+    1.339625358581543
+   ]
+  },
+  {
+   "bufferView": 5,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 224,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 6,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 224,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 7,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 318,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 8,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 612,
+   "type": "VEC3",
+   "min": [
+    -1.5700000524520874,
+    -0.5350000262260437,
+    -6.550000190734863
+   ],
+   "max": [
+    1.5700000524520874,
+    1.440000057220459,
+    0.949999988079071
+   ]
+  },
+  {
+   "bufferView": 9,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 612,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 10,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 612,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 11,
+   "byteOffset": 0,
+   "componentType": 5125,
+   "count": 894,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 12,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 5,
+   "type": "SCALAR",
+   "min": [
+    0.0
+   ],
+   "max": [
+    6.0
+   ]
+  },
+  {
+   "bufferView": 13,
+   "byteOffset": 0,
+   "componentType": 5126,
+   "count": 5,
+   "type": "VEC4"
+  }
+ ],
+ "bufferViews": [
+  {
+   "buffer": 0,
+   "byteOffset": 0,
+   "byteLength": 42888,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 42888,
+   "byteLength": 42888,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 85776,
+   "byteLength": 28592,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 114368,
+   "byteLength": 19800,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 134168,
+   "byteLength": 2688,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 136856,
+   "byteLength": 2688,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 139544,
+   "byteLength": 1792,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 141336,
+   "byteLength": 1272,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 142608,
+   "byteLength": 7344,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 149952,
+   "byteLength": 7344,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 157296,
+   "byteLength": 4896,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 162192,
+   "byteLength": 3576,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 165768,
+   "byteLength": 20
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 165788,
+   "byteLength": 80
+  }
+ ],
+ "buffers": [
+  {
+   "byteLength": 165868,
+   "uri": "ms_arsenal_barge.bin"
+  }
+ ],
+ "samplers": [
+  {}
+ ],
+ "images": [
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_arsenal_barge_diffuse.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_arsenal_barge_orm.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_arsenal_barge_emissive.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_arsenal_barge_team.ktx2"
+  },
+  {
+   "mimeType": "image/ktx2",
+   "uri": "ms_arsenal_barge_normals.ktx2"
+  }
+ ],
+ "textures": [
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 0
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 1
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 2
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 3
+    }
+   }
+  },
+  {
+   "sampler": 0,
+   "extensions": {
+    "KHR_texture_basisu": {
+     "source": 4
+    }
+   }
+  }
+ ],
+ "materials": [
+  {
+   "name": "ms_arsenal_barge",
+   "pbrMetallicRoughness": {
+    "baseColorTexture": {
+     "index": 0
+    },
+    "metallicFactor": 1.0,
+    "roughnessFactor": 1.0,
+    "metallicRoughnessTexture": {
+     "index": 1
+    }
+   },
+   "occlusionTexture": {
+    "index": 1
+   },
+   "emissiveTexture": {
+    "index": 2
+   },
+   "emissiveFactor": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "extensions": {
+    "SPRINGRTS_team_color": {
+     "maskTexture": {
+      "index": 3
+     }
+    }
+   },
+   "normalTexture": {
+    "index": 4
+   }
+  }
+ ],
+ "extensions": {
+  "SPRINGRTS_geometry": {
+   "configVersion": 8,
+   "height": 8.4,
+   "midpos": [
+    0.0,
+    4.2,
+    0.0
+   ],
+   "mins": [
+    -6.25,
+    -1.7,
+    -27.5
+   ],
+   "maxs": [
+    6.25,
+    8.4,
+    27.5
+   ],
+   "radius": 28.5123,
+   "pieces": [
+    {
+     "name": "body",
+     "parent": -1,
+     "offset": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "mins": [
+      -6.25,
+      -1.7,
+      -27.5
+     ],
+     "maxs": [
+      6.25,
+      8.4,
+      27.5
+     ]
+    },
+    {
+     "name": "turret",
+     "parent": 0,
+     "offset": [
+      0.0,
+      2.4,
+      -3.0
+     ],
+     "mins": [
+      -1.33963,
+      0.0,
+      -1.33963
+     ],
+     "maxs": [
+      1.33963,
+      1.4,
+      1.33963
+     ]
+    },
+    {
+     "name": "barrel",
+     "parent": 1,
+     "offset": [
+      0.0,
+      1.3,
+      0.4
+     ],
+     "mins": [
+      -1.57,
+      -0.535,
+      -6.55
+     ],
+     "maxs": [
+      1.57,
+      1.44,
+      0.95
+     ]
+    },
+    {
+     "name": "muzzle",
+     "parent": 2,
+     "offset": [
+      0.0,
+      0.39,
+      -6.55
+     ],
+     "mins": [
+      0.0,
+      0.0,
+      0.0
+     ],
+     "maxs": [
+      0.0,
+      0.0,
+      0.0
+     ]
+    }
+   ]
+  }
+ },
+ "extensionsUsed": [
+  "KHR_texture_basisu",
+  "SPRINGRTS_geometry",
+  "SPRINGRTS_team_color"
+ ],
+ "animations": [
+  {
+   "name": "idle",
+   "samplers": [
+    {
+     "input": 12,
+     "output": 13,
+     "interpolation": "LINEAR"
+    }
+   ],
+   "channels": [
+    {
+     "sampler": 0,
+     "target": {
+      "node": 3,
+      "path": "rotation"
+     }
+    }
+   ]
+  }
+ ],
+ "extensionsRequired": [
+  "KHR_texture_basisu"
+ ]
+}

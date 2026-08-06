@@ -2,6 +2,7 @@
 
 #include "Server/ScenarioDiscovery.h"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -549,4 +550,138 @@ TEST_CASE("shipped metalstorm scenarios: meridian_basin is the terminable "
     REQUIRE(def != nullptr);
     CHECK(def->id == "meridian_basin");
     CHECK(def->terminal == true);
+}
+
+// ==========================================================================
+// Generated scenarios (PLAN-metalstorm-scenariogen.md §10)
+// ==========================================================================
+// tools/mapgen/scenariogen.py emits scenario files procedurally. Everything
+// this module reads is therefore now produced by a program rather than typed by
+// a person, and the two failure modes that creates are both silent:
+//
+//   * a file that needs VFS/`Spring.*`/`require` at file scope does not error
+//     here — LoadOne logs once and the scenario simply never appears in the
+//     lobby (ScenarioDiscovery.h:33-37);
+//   * a side the generator declares but stages no `units` for resolves with
+//     `staged == false`, which is a room slot that starts with no army
+//     (endtoend D19) — the AI landed on exactly such a team once already.
+//
+// So the generator's real output is checked in at tests/fixtures/
+// generated_scenario.lua and run through this parser, rather than a hand-typed
+// approximation of it. Regenerate with
+// `python3 tools/mapgen/tests/regen_fixture.py`; the Python suite's golden test
+// fails if the checked-in copy drifts from what the generator emits.
+
+namespace {
+
+/// Copy the checked-in generated scenario into a scratch game folder.
+/// Returns false when the fixture is missing, so the test can skip rather
+/// than fail in a checkout that has not got it.
+bool StageGeneratedFixture(const TempGame& g, const std::string& asName) {
+    const fs::path fixture = fs::path(SPRING_SOURCE_DIR) / "tests" /
+                             "fixtures" / "generated_scenario.lua";
+    std::error_code ec;
+    if (!fs::is_regular_file(fixture, ec))
+        return false;
+    fs::copy_file(fixture, fs::path(g.Path()) / "scenarios" / asName,
+                  fs::copy_options::overwrite_existing, ec);
+    return !ec;
+}
+
+} // namespace
+
+TEST_CASE("generated scenario: parses under the lobby's bare lua_State") {
+    // Invariant 1. The lobby binary has no VFS, no `Spring.*` and no sim
+    // globals to offer, so this is the only place a generated file's purity is
+    // actually proved — the sim would happily load one that the lobby cannot.
+    TempGame g("genparse");
+    if (!StageGeneratedFixture(g, "gen_fixture.lua"))
+        return; // fixture not present in this checkout
+
+    const auto found = SD::Discover(g.Path());
+    REQUIRE(found.size() == 1);
+    CHECK(found[0].id == "gen_fixture");
+    CHECK_FALSE(found[0].displayName.empty());
+    CHECK_FALSE(found[0].mapId.empty());
+    CHECK(found[0].tutorial == false);
+}
+
+TEST_CASE("generated scenario: is terminal, so the war it creates can end") {
+    // Invariant 2. `victory` is the only terminal condition game_gameover.lua
+    // watches; without one the generator would be mass-producing wars that run
+    // forever, and DefaultForMap would refuse every one of them.
+    TempGame g("genterm");
+    if (!StageGeneratedFixture(g, "gen_fixture.lua"))
+        return;
+
+    const auto found = SD::Discover(g.Path());
+    REQUIRE(found.size() == 1);
+    CHECK(found[0].terminal == true);
+
+    const auto* def = SD::DefaultForMap(found, found[0].mapId);
+    REQUIRE(def != nullptr);
+    CHECK(def->id == "gen_fixture");
+}
+
+TEST_CASE("generated scenario: every playable side is staged an army") {
+    // Invariant 3 / endtoend D19, and the reason ScenarioSide exists at all.
+    // A room slot picks a SIDE; a side resolving to a team the scenario stages
+    // no `units` for is a player (or, as it happened, an AI) starting with
+    // nothing on an empty team.
+    TempGame g("genstaged");
+    if (!StageGeneratedFixture(g, "gen_fixture.lua"))
+        return;
+
+    const auto found = SD::Discover(g.Path());
+    REQUIRE(found.size() == 1);
+
+    const auto playable = SD::PlayableSides(found[0]);
+    REQUIRE(playable.size() >= 2);
+    for (const auto& side : playable) {
+        INFO("side '" << side.faction << "' resolves to team "
+                      << static_cast<unsigned>(side.team));
+        CHECK(side.staged == true);
+        CHECK_FALSE(side.npc);
+    }
+
+    // The NPC faction holding the hostile clusters must NOT be offered as a
+    // player slot: it is data-driven off `ai`, so this also proves the
+    // generator's `ai` block lines up with its `sides` block.
+    CHECK(found[0].sides.size() > playable.size());
+    CHECK(found[0].sides.back().npc == true);
+}
+
+TEST_CASE("generated scenario: war_sides encodes cleanly") {
+    // The faction keys land in a modoption split on ',' and ':' downstream, so
+    // a generator that minted a key containing either would have its sides
+    // silently dropped by EncodeWarSides rather than rejected.
+    TempGame g("gensides");
+    if (!StageGeneratedFixture(g, "gen_fixture.lua"))
+        return;
+
+    const auto found = SD::Discover(g.Path());
+    REQUIRE(found.size() == 1);
+
+    const std::string encoded = SD::EncodeWarSides(found[0]);
+    CHECK_FALSE(encoded.empty());
+    // One entry per playable side, none dropped.
+    const auto commas = std::count(encoded.begin(), encoded.end(), ',');
+    CHECK(static_cast<size_t>(commas) + 1 ==
+          SD::PlayableSides(found[0]).size());
+}
+
+TEST_CASE("generated scenario: neutral (Gaia) entries are not counted as a side") {
+    // The generator writes `team = 'neutral'` for Gaia-owned towns, because
+    // Gaia's numeric id is playerTeamCount and so is not knowable at authoring
+    // time. CollectTeams ignores non-numeric `team` values, which is what keeps
+    // those buildings from inventing a phantom playable side — assert it rather
+    // than rely on it.
+    TempGame g("genneutral");
+    if (!StageGeneratedFixture(g, "gen_fixture.lua"))
+        return;
+
+    const auto found = SD::Discover(g.Path());
+    REQUIRE(found.size() == 1);
+    for (const auto& side : found[0].sides)
+        CHECK(side.faction != "neutral");
 }

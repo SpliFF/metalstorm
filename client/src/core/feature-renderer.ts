@@ -39,6 +39,7 @@ import type { DefCache } from './def-cache.js';
 import { FeatureLodController, type FeatureImpostorAtlas } from './feature-lod-renderer.js';
 import { DEFAULT_FEATURE_LOD_CONFIG, type FeatureLodConfig, type LodPlacement } from './feature-lod.js';
 import { DEFAULT_ATLAS_LAYOUT, normalizeAtlasLayout } from './impostor-atlas.js';
+import { AssetLoader, LoadPriority } from './asset-loader.js';
 
 /// Hash a string to a stable RGB tint — used only for placeholder boxes
 /// so each fallback type still gets a distinct colour.
@@ -600,6 +601,11 @@ export class DynamicFeatureRenderer {
      *  lands). Pre-existing buckets are bulk-added when this is set. */
     private shadowGenerator: ShadowGenerator | null = null;
 
+    /** Shared AssetLoader by default; game-processor.ts overrides via
+     *  setAssetLoader() so unit/feature/projectile loads draw from one
+     *  concurrency pool (PLAN-lazy-loading.md). */
+    private assetLoader = new AssetLoader();
+
     constructor(scene: Scene, defCache: DefCache) {
         this.scene = scene;
         this.defCache = defCache;
@@ -608,6 +614,11 @@ export class DynamicFeatureRenderer {
         // front, so this fires once and clears the queue, but the loop
         // handles arbitrary-order arrival without special-casing.
         this.defCache.onFeatureDefs(() => this.drainOrphans());
+    }
+
+    /** Inject a shared AssetLoader — see EntityRenderer.setAssetLoader. */
+    setAssetLoader(loader: AssetLoader): void {
+        this.assetLoader = loader;
     }
 
     /// Apply a per-tick FeatureLifecycleBatch. Spawns whose def isn't
@@ -744,7 +755,13 @@ export class DynamicFeatureRenderer {
         const fileName = def.modelUrl.substring(lastSlash + 1);
 
         // Don't stamp model URLs — see entity-renderer.ts loadModel().
-        SceneLoader.ImportMeshAsync('', baseUrl, fileName, this.scene)
+        // Routed through the shared AssetLoader so a wave of freshly-
+        // revealed feature types shares its concurrency pool with unit
+        // and projectile loads instead of firing everything at once
+        // (PLAN-lazy-loading.md).
+        this.assetLoader
+            .schedule(`feature:${defId}`, LoadPriority.P3,
+                () => SceneLoader.ImportMeshAsync('', baseUrl, fileName, this.scene))
             .then((result) => {
                 if (this.scene.isDisposed) return;
                 const primary = pickPrimaryMesh(result.meshes);

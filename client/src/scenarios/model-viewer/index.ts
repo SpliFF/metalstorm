@@ -6,11 +6,17 @@
  * control. Capture presets turn it into the beta-units / PoC judgment
  * loop.
  *
- *   ?scenario=model-viewer&game=zk&def=cormaw
+ *   ?scenario=model-viewer&def=fable_mech
  *   ?scenario=model-viewer&game=papertanks&def=pt_lighttank
- *   ?scenario=model-viewer&game=zk&def=cormaw&capture=turntable&views=16
+ *   ?scenario=model-viewer&def=fable_mech&capture=turntable&views=16
  *
- * Params: `game` (default: sticky dev game id, else zk), `def` (initial
+ * Pick a def that owns a model in `data/games/metalstorm/models/`. The
+ * roster defs (`ms_mechs_s1` &c.) are squad wrappers whose `objectname`
+ * override does not currently resolve, so they stage the fallback box and
+ * trip the `model-not-fallback` assertion — that is a content gap, not a
+ * viewer fault.
+ *
+ * Params: `game` (default: sticky dev game id, else metalstorm), `def` (initial
  * unit; optional in interactive mode — the panel has a picker), `map`
  * (default green_flat_x34_v3), `capture` = turntable | clips | sun,
  * `views` (turntable headings, default 8), `download=0` (manifest only).
@@ -397,7 +403,11 @@ const scenario: Scenario = {
     description: 'Interactive model/animation harness: one unit centre-stage, derived showcase '
         + 'buttons (F8 panel), orbit camera, sun control, capture presets (PLAN-model-harness).',
     map: param('map') ?? 'green_flat_x34_v3',
-    gameId: param('game') ?? localStorage.getItem('springrts-game-id') ?? 'zk',
+    // `?game=` wins, then whatever game the lobby last had selected, then
+    // Metalstorm. The final fallback was 'zk' until 2026-08-04; ZK is
+    // archived (PLAN.md "The goal"), so an unqualified ?scenario=
+    // model-viewer used to boot a game nobody maintains.
+    gameId: param('game') ?? localStorage.getItem('springrts-game-id') ?? 'metalstorm',
     aiSlots: [{ aiId: 'null', team: 1 }],
     playerTeam: 0,
 

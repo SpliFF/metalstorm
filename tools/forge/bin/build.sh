@@ -33,7 +33,7 @@ step() {  # step <label> <cmd...>
 }
 
 step "gen      " "$PY" "gen_${STEM}.py"
-TRIS=$(grep -Eo '[0-9]+ tris' "$LOG" | tail -1)
+TRIS="$(grep -Eo '[0-9]+ tris|tris[: ]+[0-9]+' "$LOG" | grep -Eo '[0-9]+' | tail -1) tris"
 step "paint    " "$PY" "paint_${STEM}.py"
 if [ "$NOTEAM" = "--no-team" ]; then
     step "validate " "$PY" "$TOOLKIT/validate.py" "out/${STEM}.gltf" "$BUDGET" "$PIECES" --no-team

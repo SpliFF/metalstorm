@@ -46,11 +46,32 @@ describe('spatial hash cell indexing (§1)', () => {
   });
 
   it('matches Math.floor(x/cell) exactly across a symmetric negative/positive sweep — no double-width origin cell', () => {
-    const mgr = new SquadManager(new NullRenderBackend());
-    const cell = mgr._cell;
-    for (let x = -3 * cell; x <= 3 * cell; x += cell / 4) {
-      const gx = Number(mgr._key(x, 0).split(':')[0]);
-      expect(gx).toBe(Math.floor(x / cell));
+    const cell = new SquadManager(new NullRenderBackend())._cell;
+    // Asserted through _cellKey rather than by parsing the key, so this pins
+    // the cell-index maths for BOTH key encodings (PLAN-perf M10) instead of
+    // only the string one.
+    for (const fastNeighbours of [true, false]) {
+      const mgr = new SquadManager(new NullRenderBackend(), { fastNeighbours });
+      for (let x = -3 * cell; x <= 3 * cell; x += cell / 4) {
+        expect(mgr._key(x, 0)).toBe(mgr._cellKey(Math.floor(x / cell), 0));
+      }
+    }
+  });
+
+  it('the numeric and string cell keys agree on identity — same cell same key, different cell different key', () => {
+    const fast = new SquadManager(new NullRenderBackend(), { fastNeighbours: true });
+    const slow = new SquadManager(new NullRenderBackend(), { fastNeighbours: false });
+    const cell = fast._cell;
+    const pts = [];
+    for (let gx = -3; gx <= 3; gx++) for (let gz = -3; gz <= 3; gz++) pts.push([gx, gz]);
+    // Same partition of space: two points share a fast key iff they share a
+    // slow one. That is the whole correctness requirement on the encoding.
+    for (const [ax, az] of pts) {
+      for (const [bx, bz] of pts) {
+        const a = [ax * cell + 1, az * cell + 1], b = [bx * cell + 1, bz * cell + 1];
+        expect(fast._key(...a) === fast._key(...b))
+          .toBe(slow._key(...a) === slow._key(...b));
+      }
     }
   });
 
@@ -137,6 +158,76 @@ describe('neighbour cap + dense-cell aggregation (§4, "crowd -> fluid")', () =>
     // toward the back of the bucket too.
     const ids = neighbours.map((n) => n.id);
     expect(Math.max(...ids)).toBeGreaterThan(4);
+  });
+});
+
+describe('fast neighbour broad-phase (PLAN-perf M10) — an allocation change, not a behaviour change', () => {
+  // The buffer path replaces a generator + string keys in the hottest call in
+  // the client frame. Its licence to ship is that it selects *exactly* the
+  // same neighbours, so that is what is asserted here — on a grid crowded
+  // enough to exercise every branch the selection rule has: dense-cell
+  // collapse, stride sampling, plain drain, self-exclusion and the cap.
+  function populate(mgr, cell) {
+    let id = 0;
+    for (let gx = -2; gx <= 2; gx++) {
+      for (let gz = -2; gz <= 2; gz++) {
+        // Vary occupancy per cell so some buckets go dense, some get
+        // stride-sampled, and some drain whole.
+        const n = 1 + ((gx + 2) * 5 + (gz + 2)) % 22;
+        for (let i = 0; i < n; i++) {
+          const x = gx * cell + 1 + i * 0.01, z = gz * cell + 1 + i * 0.01;
+          mgr._insert(x, z, { id: id++, x, z, squadId: (gx + gz) & 1 ? 1 : 2 });
+        }
+      }
+    }
+  }
+
+  it('selects the identical neighbour sequence as the legacy generator, cell for cell', () => {
+    const fast = new SquadManager(new NullRenderBackend(), { fastNeighbours: true });
+    const slow = new SquadManager(new NullRenderBackend(), { fastNeighbours: false });
+    populate(fast, fast._cell);
+    populate(slow, slow._cell);
+
+    const cell = fast._cell;
+    let comparedNonEmpty = 0;
+    for (let x = -2 * cell; x <= 2 * cell; x += cell / 3) {
+      for (let z = -2 * cell; z <= 2 * cell; z += cell / 3) {
+        const self = { x, z, squadId: 1 };
+        const n = fast._neighboursInto(self);
+        const got = fast._nbBuf.slice(0, n);
+        const want = [...slow._neighbours(self)];
+        // Compare by identity-equivalent shape: real members carry a stable
+        // id, dense aggregates are positional.
+        const shape = (a) => a.map((o) => (o.id !== undefined ? `m${o.id}` : `agg${o.x.toFixed(4)},${o.z.toFixed(4)},${o.radius}`));
+        expect(shape(got)).toEqual(shape(want));
+        if (n > 0) comparedNonEmpty++;
+      }
+    }
+    expect(comparedNonEmpty).toBeGreaterThan(20); // the sweep actually hit populated cells
+  });
+
+  it('never overruns the buffer or exceeds neighbourCap', () => {
+    const mgr = new SquadManager(new NullRenderBackend(), { neighbourCap: 8, denseCellOccupancy: 100 });
+    populate(mgr, mgr._cell);
+    const n = mgr._neighboursInto({ x: 1, z: 1, squadId: 1 });
+    expect(n).toBeLessThanOrEqual(8);
+    expect(mgr._nbBuf.length).toBe(8);
+  });
+
+  it('excludes self, exactly as the generator does', () => {
+    const mgr = new SquadManager(new NullRenderBackend(), { neighbourCap: 8, denseCellOccupancy: 100 });
+    const self = { id: 0, x: 1, z: 1, squadId: 1 };
+    mgr._insert(self.x, self.z, self);
+    mgr._insert(2, 2, { id: 1, x: 2, z: 2, squadId: 1 });
+    const n = mgr._neighboursInto(self);
+    expect(mgr._nbBuf.slice(0, n)).not.toContain(self);
+    expect(n).toBe(1);
+  });
+
+  it('yields nothing when the cap is zero (the M9 A/B arm)', () => {
+    const mgr = new SquadManager(new NullRenderBackend(), { neighbourCap: 0 });
+    populate(mgr, mgr._cell);
+    expect(mgr._neighboursInto({ x: 1, z: 1, squadId: 1 })).toBe(0);
   });
 });
 
