@@ -117,3 +117,8 @@ __pycache__/
 # out of the repo.
 PLAN-archive/
 DECISIONS.md
+
+# Replay files the game server writes at runtime (one per room, plus test
+# fixtures). Runtime output, not content — data/maps/ is already ignored for
+# the same reason.
+/data/replays/
