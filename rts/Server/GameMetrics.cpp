@@ -108,6 +108,14 @@ int64_t GameMetricsWriter::DbSizeBytes() const {
     return pageCount * pageSize;
 }
 
+bool GameMetricsWriter::DueForWrite() const {
+    if (!primed_ || !db_)
+        return false;
+    const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                             std::chrono::steady_clock::now() - lastWriteSteady_).count();
+    return elapsed >= cadenceSec_;
+}
+
 void GameMetricsWriter::MaybeWrite(int frame, int clientCount, int entityCount,
                                    float simFps, float speedFactor, bool simRunning,
                                    const std::string& extraJson) {

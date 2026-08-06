@@ -273,3 +273,50 @@ describe("trust ledger (§2, §3)", function()
         assert.are.equal(GG.Parley.Trust(10, 20), GG.Parley.Trust(20, 10))
     end)
 end)
+
+describe("resolved-proposal archive (PLAN-long-uptime S4)", function()
+    -- `proposals[id]` used to be kept forever: the retention loop cleared the
+    -- rulesParams of a resolved proposal and left the proposal table itself
+    -- referenced for the life of the game. It now moves to a ring-capped
+    -- archive. The cap is not directly observable — eviction is, and eviction
+    -- is the only thing that proves the container is bounded at all.
+
+    -- One propose→expire→age-out cycle. Expiry rather than rejection because
+    -- rejecting puts the (from,to) pair on a 2-minute cooldown.
+    local function resolveAndAge(world, gadgetObj)
+        local id = GG.Parley.Propose(10, 1, 20, 'ceasefire', { duration = 1800 })
+        assert.is_number(id)
+        world.frame = world.frame + 1801        -- past the response deadline
+        gadgetObj:GameFrame(world.frame)
+        assert.are.equal('expired', world.rp('parley_' .. id .. '_state'))
+        world.frame = world.frame + 901         -- past RESOLVE_RETENTION_FRAMES
+        gadgetObj:GameFrame(world.frame)
+        return id
+    end
+
+    it("keeps a just-resolved proposal readable after its params are cleared", function()
+        local world, gadgetObj = newWorld()
+        world.setPlayerPool(1, 100000)
+        local id = resolveAndAge(world, gadgetObj)
+
+        -- Params are gone from the wire...
+        assert.is_nil(world.rp('parley_' .. id .. '_state'))
+        -- ...but the record is still readable from the archive.
+        local p = GG.Parley.Get(id)
+        assert.is_table(p)
+        assert.are.equal('expired', p.state)
+    end)
+
+    it("evicts the oldest resolved proposal once the archive cap is passed", function()
+        local world, gadgetObj = newWorld()
+        world.setPlayerPool(1, 1000000)
+
+        local firstId = resolveAndAge(world, gadgetObj)
+        assert.is_table(GG.Parley.Get(firstId))
+
+        -- ARCHIVE_CAP is 256; push the first one out of the ring.
+        for _ = 1, 256 do resolveAndAge(world, gadgetObj) end
+
+        assert.is_nil(GG.Parley.Get(firstId))
+    end)
+end)

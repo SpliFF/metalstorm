@@ -177,6 +177,40 @@ inline std::vector<uint8_t> BuildPlayerRoster(const std::vector<PlayerRosterRow>
     return BuildServerMessage(fbb, SpringWeb::ServerPayload_PlayerRoster, roster.Union());
 }
 
+/// Fields of a ReplayState (PLAN-replay task 4b). Everything a seek bar needs,
+/// plus the two per-client answers a shared cast needs — who is driving, and
+/// what fog THIS watcher is looking through.
+struct ReplayStateFields {
+    int32_t startFrame   = 0;
+    int32_t endFrame     = 0;
+    int32_t currentFrame = 0;
+    bool    paused       = false;
+    float   speed        = 1.0f;
+    bool    seeking      = false;
+    int32_t seekTarget   = 0;
+    int32_t controllerPlayerNum = -1;
+    std::vector<int32_t> checkpointFrames;
+    bool        truncated = false;
+    std::string gameId;
+    std::string mapId;
+    int32_t     povTeam = -1;
+};
+
+/// Build a ReplayState. Sent ONLY by a server running `--replay`; a client
+/// that never receives one shows no playback UI, which is how the same client
+/// build serves live games and replays without a mode flag.
+inline std::vector<uint8_t> BuildReplayState(const ReplayStateFields& f) {
+    flatbuffers::FlatBufferBuilder fbb(256 + f.checkpointFrames.size() * 4);
+    auto st = SpringWeb::CreateReplayStateDirect(fbb,
+        f.startFrame, f.endFrame, f.currentFrame, f.paused, f.speed,
+        f.seeking, f.seekTarget, f.controllerPlayerNum,
+        &f.checkpointFrames, f.truncated,
+        f.gameId.empty() ? nullptr : f.gameId.c_str(),
+        f.mapId.empty() ? nullptr : f.mapId.c_str(),
+        f.povTeam);
+    return BuildServerMessage(fbb, SpringWeb::ServerPayload_ReplayState, st.Union());
+}
+
 /// Build a ServerError.
 inline std::vector<uint8_t> BuildServerError(uint16_t code, const std::string& msg) {
     flatbuffers::FlatBufferBuilder fbb(256);

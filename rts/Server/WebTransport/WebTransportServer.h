@@ -39,6 +39,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -168,6 +169,28 @@ public:
     /// Stop the network thread and close all sessions.
     void Shutdown();
 
+    /// Mute every outbound send/broadcast (PLAN-replay §2 "seek": fast-forward
+    /// with streaming suppressed). While set, SendStream/BroadcastStream drop
+    /// their payload instead of queueing it.
+    ///
+    /// This is the ONLY safe place to suppress streaming, and the reason is
+    /// worth stating: StateStreamer::Tick does not just broadcast — it also
+    /// evaluates standing orders and macro directives, which ISSUE COMMANDS and
+    /// are therefore part of the synced sim. Skipping the streamer tick to
+    /// "suppress streaming" would change the simulation and make a seek land on
+    /// a different world than a straight playback. Cutting the wire at the
+    /// transport cannot do that: the sim runs identically and only the bytes
+    /// are dropped. A client that was connected across a suppressed window
+    /// re-syncs the normal way — its next full snapshot is a reconnect from its
+    /// own point of view, which is exactly how §2 specifies seek should feel.
+    void SetOutboundSuppressed(bool on) {
+        outboundSuppressed_.store(on, std::memory_order_relaxed);
+    }
+    bool OutboundSuppressed() const {
+        return outboundSuppressed_.load(std::memory_order_relaxed);
+    }
+
 private:
     std::unique_ptr<WebTransportServerImpl> impl_;
+    std::atomic<bool> outboundSuppressed_{false};
 };

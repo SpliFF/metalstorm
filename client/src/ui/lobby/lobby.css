@@ -153,6 +153,44 @@ button.danger:hover { background: #cc3333; }
     line-height: 1.5;
 }
 .empty-state.error-state small { color: #d79a9a; }
+/* ---- Replay browser (PLAN-replay task 4c) ---- */
+
+.replay-panel {
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid #334;
+}
+.replay-panel h3 { margin: 0 0 12px; font-size: 15px; }
+.replay-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 320px;
+    overflow-y: auto;
+}
+.replay-entry {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 4px 12px;
+    padding: 12px 16px;
+    background: #0f1626;
+    border-radius: 8px;
+    align-items: center;
+}
+.replay-main { display: flex; align-items: center; gap: 8px; }
+.replay-title { font-weight: 600; }
+.replay-badge {
+    background: #334;
+    padding: 3px 10px;
+    border-radius: 10px;
+    font-size: 11px;
+    color: #f0a04c;
+    white-space: nowrap;
+}
+.replay-players { grid-column: 1; color: #aaa; font-size: 12px; }
+.replay-detail { grid-column: 1; color: #888; font-size: 12px; }
+.watch-btn { grid-row: 1 / 4; grid-column: 2; }
+.replay-error { color: #ff6b6b; font-size: 12px; padding: 8px 0; }
 
 .create-form {
     margin-top: 16px;

@@ -53,6 +53,9 @@ import { ResourceUpdate } from '../protocol/spring-web/resource-update.js';
 import { MapData } from '../protocol/spring-web/map-data.js';
 import { PlayerLeft } from '../protocol/spring-web/player-left.js';
 import { PlayerRoster } from '../protocol/spring-web/player-roster.js';
+import { ReplayState } from '../protocol/spring-web/replay-state.js';
+import { ReplayControl } from '../protocol/spring-web/replay-control.js';
+import { ReplayControlAction } from '../protocol/spring-web/replay-control-action.js';
 import { PlayerEntry } from '../protocol/spring-web/player-entry.js';
 import { SoundEvent } from '../protocol/spring-web/sound-event.js';
 import { SeismicPing } from '../protocol/spring-web/seismic-ping.js';
@@ -1052,6 +1055,40 @@ export interface RosterPlayerInfo {
     accountId: number;
 }
 
+/** Playback state of a replay server (`ReplayState`, PLAN-replay task 4b).
+ *
+ *  A LIVE game never sends this message. That absence is the mode signal —
+ *  the client shows a playback bar iff it has received one — so the same
+ *  build serves live games and replays with no flag and no guess from the
+ *  lobby (which cannot even list replay files yet; see PLAN-replay T4a-2). */
+export interface ReplayStateInfo {
+    startFrame: number;
+    endFrame: number;
+    currentFrame: number;
+    paused: boolean;
+    /** Playback multiplier in effect (not a sim property — pacing only). */
+    speed: number;
+    /** True while fast-forwarding to `seekTarget`; the wire is muted
+     *  meanwhile, so nothing else updates. */
+    seeking: boolean;
+    seekTarget: number;
+    /** Player number of the spectator holding the controls, or -1 when nobody
+     *  is attached. Compare with your own `playerNum` from AuthResponse. */
+    controllerPlayerNum: number;
+    /** Frames the recording carries a checkpoint at — seek-bar ticks. Empty
+     *  on every file written so far (nothing writes checkpoint blobs until
+     *  PLAN-persistence's sim serializer lands), which is the same fact that
+     *  makes a backward seek refusable. */
+    checkpointFrames: number[];
+    /** E1: the recording ends early because the server died mid-game. */
+    truncated: boolean;
+    gameId: string;
+    mapId: string;
+    /** This client's own POV: -1 = global view, else the team whose fog it is
+     *  watching. Per-client, unlike every field above. */
+    povTeam: number;
+}
+
 export interface ConnectionEvents {
     onStateChange?: (state: ConnectionState) => void;
     /** Fires when the server accepts auth. `defsCacheKey` is the
@@ -1131,6 +1168,9 @@ export interface ConnectionEvents {
      *  and of which sim playerNums exist — including AI virtual players, which
      *  the lobby roster does not carry. */
     onPlayerRoster?: (players: RosterPlayerInfo[]) => void;
+    /** Playback state of a replay server. Never fires on a live game — see
+     *  ReplayStateInfo. */
+    onReplayState?: (state: ReplayStateInfo) => void;
     onMapData?: (map: ParsedMapData) => void;
     /** Per-tick batch of feature lifecycle events. `spawns` is a list of
      *  new features (wrecks, debris, gadget-spawned); `removed` is feature
@@ -1667,6 +1707,27 @@ export class Connection {
         const sel = SelectionState.createSelectionState(
             builder, this.commandSequence, idsOff);
         this.sendClientMessage(builder, ClientPayload.SelectionState, sel);
+    }
+
+    /** Drive a replay server's playback (PLAN-replay task 4b).
+     *
+     *  Deliberately its own verb rather than the `speed`/`pause` console
+     *  commands PLAN-replay §2 originally named: `ConsoleCommand` is
+     *  classified `Synced`, and a replay server refuses every recordable verb
+     *  from a live client — routing playback through it would have meant
+     *  admitting arbitrary Lua to a re-executing sim. `ReplayControl` is
+     *  classified `Ignored`: never journaled, dropped outright by a live
+     *  server. Refusals come back as a `ServerError` with the reason.
+     *
+     *  Fire-and-forget: the authoritative answer is the next `ReplayState`. */
+    sendReplayControl(action: ReplayControlAction,
+                      opts: { speed?: number; frame?: number; povTeam?: number } = {}): void {
+        if (!this.authenticated) return;
+        const builder = new flatbuffers.Builder(64);
+        const rc = ReplayControl.createReplayControl(
+            builder, action,
+            opts.speed ?? 1.0, opts.frame ?? 0, opts.povTeam ?? -1);
+        this.sendClientMessage(builder, ClientPayload.ReplayControl, rc);
     }
 
     /** Send a `Spring.PathRequest` to the server. The server replies
@@ -2385,6 +2446,30 @@ export class Connection {
                     });
                 }
                 this.events.onPlayerRoster?.(players);
+                break;
+            }
+            case ServerPayload.ReplayState: {
+                const rs = msg.payload(new ReplayState()) as ReplayState;
+                const ticks: number[] = [];
+                for (let i = 0; i < rs.checkpointFramesLength(); i++) {
+                    const f = rs.checkpointFrames(i);
+                    if (f !== null) ticks.push(f);
+                }
+                this.events.onReplayState?.({
+                    startFrame: rs.startFrame(),
+                    endFrame: rs.endFrame(),
+                    currentFrame: rs.currentFrame(),
+                    paused: rs.paused(),
+                    speed: rs.speed(),
+                    seeking: rs.seeking(),
+                    seekTarget: rs.seekTarget(),
+                    controllerPlayerNum: rs.controllerPlayerNum(),
+                    checkpointFrames: ticks,
+                    truncated: rs.truncated(),
+                    gameId: rs.gameId() ?? '',
+                    mapId: rs.mapId() ?? '',
+                    povTeam: rs.povTeam(),
+                });
                 break;
             }
             case ServerPayload.PlayerLeft: {

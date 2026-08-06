@@ -104,9 +104,52 @@ enum class InputKind : uint8_t {
     /// input the sim consumes, but the journal must record the discontinuity
     /// or a replay would re-apply the post-restore stream to the wrong state.
     SnapshotRestore = 5,
+    /// The identity a successful AuthRequest resolved to (PLAN-replay T2-a).
+    /// Not an input either — it is the ANSWER the live run got from the
+    /// accounts database, recorded because a re-execution cannot ask the same
+    /// question. See AuthIdentity below.
+    AuthIdentity = 6,
 };
 
 const char* InputKindName(InputKind k);
+
+/// The outcome of one successful AuthRequest (PLAN-replay §7.5 T2-a).
+///
+/// WHY THIS EXISTS
+/// ---------------
+/// Every other record in the stream is an input the server *received*. This
+/// one is an answer the server *looked up*: `AuthRequest` carries a session
+/// token or a password, and turning either into (account id, username, role)
+/// is a query against the accounts database. A replay does not have that
+/// database — a replica need not carry the `sessions` row, and by the time a
+/// campaign game is replayed the token is expired by construction — so
+/// re-running the query is not merely inconvenient, it answers differently.
+///
+/// The decision T2-a records (PLAN-replay §7.10): **for a re-execution the
+/// recorded stream, not the database, is the identity authority.** So the
+/// resolution is recorded next to the message that produced it, and replay
+/// re-enters the session layer from here instead of from `db`.
+///
+/// Only the DB-derived half is authoritative on replay. `team` is derived from
+/// the launch roster, which the replay header reproduces exactly, so it is
+/// recorded as a CROSS-CHECK: a mismatch means the replay is about to
+/// authorise every later PlayerCommand against a different team than the
+/// recording did, and that is caught here rather than as an unexplained hash
+/// divergence minutes later.
+struct AuthIdentity {
+    int64_t     userId    = 0;    ///< accounts.id — DB-derived, authoritative
+    std::string username;         ///< DB-derived: a token reconnect sends none
+    std::string role;             ///< effective role, incl. the spectator override
+    int32_t     team      = -1;   ///< roster-derived; replay re-derives and compares
+    int32_t     playerNum = -1;   ///< allocation order; replay re-derives and compares
+    bool        spectator = false;
+};
+
+/// Encode/decode for AuthIdentity's record payload. Little-endian, fixed-width
+/// or length-prefixed, same dumb framing as ReplayFile — deliberately free of
+/// flatbuffers so the round-trip is doctest-covered without the wire schema.
+std::vector<uint8_t> EncodeAuthIdentity(const AuthIdentity& id);
+bool DecodeAuthIdentity(const std::vector<uint8_t>& payload, AuthIdentity& out);
 
 /// Where a ClientPayload verb sits with respect to the cause stream. Exactly
 /// one class per verb; see ClassifyClientPayload.
@@ -154,6 +197,18 @@ struct Record {
     InputKind kind     = InputKind::ClientMessage;
     uint8_t   subKind  = 0;     ///< ClientPayload tag when kind == ClientMessage
     int32_t   playerId = -1;    ///< -1 = unattributed (server/operator/test AI)
+    /// Transport-level source id for kind == ClientMessage; 0 otherwise.
+    ///
+    /// playerId is NOT sufficient for re-execution: a client's first messages
+    /// (Handshake, AuthRequest, the room/enlist verbs) arrive *before* it owns
+    /// a player number, so they all record playerId == -1 and become
+    /// indistinguishable from each other and from server-side input. The
+    /// session layer that the replay must re-enter is keyed on the connection,
+    /// so the connection id is what has to survive into the record — replay
+    /// re-feeds each message under its recorded clientId and the handler's
+    /// session/handshake/rate-limit state tracks the same identities it did
+    /// live. (PLAN-replay task 2.)
+    uint32_t  clientId = 0;
     std::vector<uint8_t> payload;
 };
 
@@ -206,7 +261,7 @@ struct Counters {
     uint64_t recorded  = 0;   ///< classified as journal-worthy
     uint64_t appended  = 0;   ///< actually handed to an enabled journal
     uint64_t skipped   = 0;   ///< classified Unsynced/Ignored
-    uint64_t byKind[6] = {0}; ///< recorded, indexed by InputKind
+    uint64_t byKind[7] = {0}; ///< recorded, indexed by InputKind
 };
 
 /// The recording funnel. One instance per game server process; the tests
@@ -231,8 +286,11 @@ public:
 
     /// The inbound funnel — ONE call covering every client verb. Returns true
     /// if the message was journal-worthy (whether or not a journal is
-    /// attached), so the caller can log/assert on coverage.
+    /// attached), so the caller can log/assert on coverage. `clientId` is the
+    /// transport connection the bytes arrived on; see Record::clientId for why
+    /// playerId alone cannot stand in for it.
     bool RecordClientMessage(uint8_t payloadType, int32_t playerId,
+                             uint32_t clientId,
                              const uint8_t* data, size_t size);
 
     bool RecordDisconnect(int32_t playerId, uint8_t reason);
@@ -243,10 +301,16 @@ public:
     bool RecordAICommand(int32_t playerId, const uint8_t* data, size_t size);
     bool RecordGameStart(const std::string& setupSummary);
     bool RecordSnapshotRestore(int32_t fromFrame, int32_t toFrame);
+    /// Record what a successful AuthRequest on `clientId` resolved to. Emitted
+    /// immediately after the resolution, so it follows its own AuthRequest
+    /// record in seq order — replay indexes these at LOAD time rather than
+    /// consuming them in stream order, precisely because the answer has to be
+    /// available while the question is being re-asked (see ReplayPlayer).
+    bool RecordAuthIdentity(uint32_t clientId, const AuthIdentity& id);
 
 private:
     bool Emit(InputKind kind, uint8_t subKind, int32_t playerId,
-              const uint8_t* data, size_t size);
+              uint32_t clientId, const uint8_t* data, size_t size);
 
     IJournal* journal  = nullptr;
     int32_t   curFrame = 0;

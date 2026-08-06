@@ -142,8 +142,70 @@ production).
 Each game server writes a `game_metrics` row on a wall-clock cadence (default 60s)
 with sim-health fields, plus a final row on shutdown. Storage stays bounded across
 weeks-long games: raw rows are kept for 7 days, then downsampled to one row per
-hour (PLAN-gm-tools E5 / PLAN-long-uptime S8). Economy velocity/Gini and
-long-uptime heap/id-space counters ride the row's `extra_json` and populate once
-that (Stage-7) game Lua exists; today the fixed columns are the engine-sourced
-metrics. Alarm badges on the fleet view flag lag (frames-behind > 60), oversized
-db (> 1 GB), and crashed servers.
+hour (PLAN-gm-tools E5 / PLAN-long-uptime S8).
+
+Alarm badges on the fleet view flag lag (frames-behind > 60), oversized db
+(> 1 GB), and crashed servers. Those three are evaluated by the *lobby* off
+columns it already has; the growth alarms below come from the game server.
+
+**`db_size_bytes` is the LOGICAL database size** (`PRAGMA page_count ×
+page_size`), not the bytes on disk. In WAL mode the two differ while a game is
+running: PLAN-long-uptime task 4's soak measured a main file sitting at 4 096
+bytes with 2 MB accumulated in the `-wal` sidecar, because the liveness
+heartbeat rewrites a page every 2 wall-seconds and nothing checkpoints until
+SQLite's `wal_autocheckpoint` threshold (1 000 pages, ~4 MB) is crossed. The
+gap is therefore bounded by that threshold rather than unbounded — but an
+operator reading this column is reading the database, not the disk, and a
+clean shutdown checkpoints the WAL away so a post-mortem `ls` will not show it.
+
+### Growth counters (PLAN-long-uptime §3)
+
+The `extra_json` column carries one sample of every container PLAN-long-uptime
+§1 inventories, written by the game server at the same 60 s cadence:
+
+| key | source | why it is watched |
+|---|---|---|
+| `rss_kb` | `getrusage` high-water | process footprint |
+| `lua_heap_kb` | synced `lua_gc` | S4 |
+| `param_keys`, `param_keys_rev` | StateStreamer's interned key dictionary | S1 — a rev that never moves while the count climbs means compaction is not firing |
+| `rules_params` | game-scope + per-team synced params | S1/S2 |
+| `unit_ids_used`, `unit_ids_max` | `SimObjectIDPool` occupancy | S5 runway |
+| `unit_spawns` | sum of per-id spawn generations | S5 recycle pressure — ids alias long before they run out |
+| `standing_orders` | `StandingOrderManager` | S6 |
+| `players`, `players_max` | `playerHandler` vs `MAX_PLAYERS` | S12 |
+
+Rows written before this landed, and rows from a game whose gather found
+nothing, carry an empty `extra_json` — the fleet view shows `—` rather than a
+row of zeroes. Hourly-downsampled rows keep the promoted raw row's blob.
+
+Thresholds are static and, where §3 asks for it, configurable per game server
+via the environment (a game server inherits the lobby's environment, so setting
+these on the lobby applies fleet-wide):
+
+| variable | default | effect |
+|---|---|---|
+| `SPRING_RSS_CEILING_MB` | 4096 | `rss` warns at 75 % of it, crits at it. `0` disables. |
+| `SPRING_LUA_HEAP_CEILING_MB` | 512 | same, for `lua`. `0` disables. |
+| `SPRING_ID_ALARM_PCT` | 50 | `ids` warns at this % of the id space (crit at 75 %, raised to match if you set the warn higher). `0` disables. |
+
+`keys` (interned dictionary ≥ 32767, crit ≥ 58000) and `players` (≥ 80 % of
+`MAX_PLAYERS`, crit ≥ 95 %) are not env-tunable — both are fractions of a hard
+engine limit rather than of an operator's budget.
+
+A tripped alarm shows three ways. The game server logs one `growth alarm
+[label]: reading` line **per change of the tripped set**, not per sample. The
+fleet row grows a badge (hover for the reading) and a growth cell, and the
+drill-down charts rss / lua heap / param keys / unit ids scaled to each
+series' own peak — the question is whether a line is *sloped*, not whether it
+is big. And the lobby's maintenance loop scans the newest metric row per room
+every minute — matched to the writer's cadence, because it only ever reads the
+*newest* row and anything slower would sample the transitions rather than
+record them — and appends an `alarm_warn` / `alarm_crit` / `alarm_clear`
+row to `admin_audit` on a transition, with `username = "system"`, so an alarm
+that trips overnight and clears before anyone looks still leaves a trace in
+the per-game audit trail.
+
+(§3's text says the durable record should be a `game_events` entry. That table
+has never existed — PLAN-long-uptime §7.3 struck it from S3 for the same
+reason — so the record is `admin_audit`, which is the table the drill-down
+already reads.)

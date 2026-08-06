@@ -68,6 +68,25 @@ public:
 		return ((id < spawnGens.size())? spawnGens[id]: uint16_t(0));
 	}
 
+	// PLAN-long-uptime §3 (S5) growth metrics. Occupancy answers "how much of
+	// the id space is spoken for right now"; the generation sum answers "how
+	// many times has a slot been handed to a new unit", which is the recycle
+	// pressure §7.2 identified as the real S5 risk — ids are recycled, so
+	// exhaustion is not the failure mode and aliasing is.
+	//
+	// Both readings come off the pool, NOT off MaxUnits(): the pool is
+	// Expand()ed to MAX_UNITS while MaxUnits() is the mod-limited spawn cap
+	// (31998 on Metalstorm), so mixing the two makes an idle game report -2
+	// ids in use. Observed exactly that on the first live row.
+	unsigned int NumFreeUnitIDs() const { return idPool.GetSize(); }
+	unsigned int MaxUnitIDs() const { return idPool.MaxSize(); }
+	uint64_t TotalUnitSpawnGens() const {
+		uint64_t sum = 0;
+		for (uint16_t g: spawnGens)
+			sum += g;
+		return sum;
+	}
+
 	static CUnit* NewUnit(const UnitDef* ud);
 
 	const std::vector<CUnit*>& GetUnitsToBeRemoved() const { return unitsToBeRemoved; }

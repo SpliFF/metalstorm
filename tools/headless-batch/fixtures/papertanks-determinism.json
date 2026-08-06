@@ -5,6 +5,10 @@
     { "aiId": "basic_ai", "team": 0, "startPos": 0 },
     { "aiId": "basic_ai", "team": 1, "startPos": 1 }
   ],
+  "modOptions": {
+    "startunits": "skirmish",
+    "combatwatch": "0"
+  },
   "headless": {
     "tickMode": "uncapped",
     "stopAt": { "frame": 9000 },

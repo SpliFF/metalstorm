@@ -58,6 +58,7 @@ Full CLI flag list (from `rts/server_main.cpp`):
 | `Server/GameStartCoordinator.h/.cpp` | **WP1**: `PushStandingOrdersTo` / `BuildTeamStartInfoMsg` / `CheckAndFireGameStart` (formerly main()-scope lambdas). Drives the roster-complete → FireGameStart rendezvous. |
 | `Server/ClientMessageHandler.h/.cpp` | **WP1**: the inbound client-message dispatch switch (auth, player commands, viewport, room ops, Lua msgs, console, selection, path requests, standing orders) — one `Handle<Payload>` method per case. `main()`'s loop just calls `HandleMessage` per drained message. |
 | `Server/StateStreamer.h/.cpp` | **WP1**: the per-tick broadcast pipeline. `Tick(frameNum)` runs CheckWinCondition → resources → command queues → game-info → entity/piece state → build activity → standing-orders → AI → combat/deaths/sensors/decals/heightmap/sendToUnsynced/playerTeam/teamStats/luaRulesMsg/unit+feature lifecycle/unit commands → LOS bitmaps, in the exact original order (order is behaviour). |
+| `Server/RulesParamKeyDict.h/.cpp` | The pure half of the rulesParams key-dictionary compaction (PLAN-long-uptime S1): `ShouldCompact` (is enough of the interned id space dead to be worth a full re-broadcast?) and `Rebuild` (re-issue ids from the live key set, in **sorted** key order so the result is a function of the live set and not of insertion history). Split out of `StateStreamer` so it is testable without an RTC server; `StateStreamer::CompactKeyDictionary` owns the impure half. |
 | `Server/GameHttpRoutes.h/.cpp` | **WP1**: `RegisterGameHttpRoutes(ctx, content, …, restartRequested&, keepRunning&)` — heightmap/map-info/maps/metrics/`/api/restart`/`/api/exec`/`/api/wt/info` registrations moved out of `main()`. |
 | `lobby_main.cpp` | Lobby entry. Room management, game/map preprocessing, child process spawning, HTTP routes. |
 | `Server/Simulation.h/.cpp` | Initialises Spring subsystems, ticks physics/units/weapons/features each frame. |
@@ -72,6 +73,8 @@ Full CLI flag list (from `rts/server_main.cpp`):
 | `Server/GameMetrics.h/.cpp` | **PLAN-gm-tools task 1**: `GameMetricsWriter` — per-game sim-health rows (tick p95, frames-behind, entity count, uptime, db size) into the shared `game_metrics` table on a wall-clock cadence; 7-day-raw / hourly-tail downsampling (E5). Driven from `server_main.cpp`'s loop. |
 | `Server/GmVerbs.h/.cpp` + `GmRollback.cpp` | **PLAN-gm-tools task 2**: the GM verb set — `RegisterGmVerbs` installs `POST /api/gm/{pause,resume,grant,broadcast,inspect,kick,rollback,checkpoint,hibernate,snapshots}` (all `RouteAuth::AdminOnly` + in-handler role recheck + `LogAudit`; compiled into prod, unlike `/api/exec`). Rollback rides the `ISnapshotStore` seam, now backed by `GameStateStore` (see below). The pure `DoRollback` sequence lives in `GmRollback.cpp` (dependency-light, unit-tested). |
 | `Server/GameStateStore.h/.cpp` | **PLAN-persistence task 1**: the durable half of game-state snapshots, and the live `ISnapshotStore` implementation. Owns the `game_snapshots` table, a 112-byte self-describing blob frame (magic/version/engineHash/layoutHash/mapDigest/sha256), zlib compression, one-snapshot-per-transaction atomicity, last-K retention, and the two refusal ladders: **E1** hash mismatch (refuse loudly, never half-load — checked before decompression) and **E2** corruption (sha256 per rung, fall back through the retained K, `unresumable` when all fail). Writes are double-buffered: the sim thread only pays for `ISimSerializer::Serialize`, a worker compresses and commits. A restore reports through `syncedinput::Journal().RecordSnapshotRestore()`. **What produces the payload is not built**: creg is a stub in this tree (all `CR_` macros expand to nothing, `-DNOT_USING_CREG`), so `ISimSerializer` has no implementation, `Available()` is false, and the GM verbs refuse with a reason naming the gap — see PLAN-persistence.md §2.1 (Q-P1). **Rows are partitioned by the pair (`game_id`, `room_id`)**, and retention is last-K *per room*: `game_id` is the content id (`--game`), the lobby launches every room's game-server against the same `--db`, and scoping on `game_id` alone let one room prune another's history away and then restore that room's world (E1 cannot catch it — identical stamps). `roomId` stays a per-call argument rather than a `StoreConfig` field so there is only one source of truth for it; see the header's "ROOM SCOPING". Pure w.r.t. the sim (sqlite3 + zlib + libcrypto only), so it is doctested in `tests/test_game_state_store.cpp` against a synthetic serializer. |
+| `Server/GrowthCounters.h/.cpp` | **PLAN-long-uptime task 3**: the growth-counter set + static alarm thresholds (`Evaluate`/`ToJson`/`ParseAlarms`/`ThresholdsFromEnv`). Pure — no sim, no sqlite — so both binaries link it: `server_main.cpp` gathers the engine-coupled readings (RSS, synced Lua heap, interned key dictionary, unit-id occupancy + spawn generations, standing orders, player rows) on the metric cadence and writes them into `game_metrics.extra_json`; `lobby_main.cpp` parses the same blob back for fleet badges and the drill-down charts, and its maintenance loop turns alarm *transitions* into `admin_audit` rows. Thresholds documented in `docs/gm-tools.md`. |
+| `Server/GmVerbs.h/.cpp` + `GmRollback.cpp` | **PLAN-gm-tools task 2**: the GM verb set — `RegisterGmVerbs` installs `POST /api/gm/{pause,resume,grant,broadcast,inspect,kick,rollback,checkpoint,hibernate,snapshots}` (all `RouteAuth::AdminOnly` + in-handler role recheck + `LogAudit`; compiled into prod, unlike `/api/exec`). Rollback rides the `ISnapshotStore` seam (`NullSnapshotStore` until PLAN-persistence's `GameStateStore` lands → refuses cleanly, audited). The pure `DoRollback` sequence lives in `GmRollback.cpp` (dependency-light, unit-tested). |
 | `Server/GmDashboardPage.h` | **PLAN-gm-tools task 3**: the self-contained GM ops dashboard HTML/JS, served by the lobby at `GET /admin`. |
 | `Server/RoomManager.h/.cpp` | Room lifecycle (create/join/leave/start/end), player rosters. |
 | `Server/MapProcessor.h/.cpp` | SMF parsing, heightmap/minimap/feature extraction, model conversion. Only linked by `tools/mapconverter`. |
@@ -211,6 +214,8 @@ Full CLI flag list (from `rts/server_main.cpp`):
 - `0x04` = Projectile state snapshot (custom binary)
 
 **Two player ids, never interchangeable.** `AuthResponse.player_id` is the **DB account id** (stable across games); `AuthResponse.player_num` is Spring's **sim playerNum** (allocated per game server, in connect order, with AI virtual players taking the low numbers). Everything synced keys on `player_num`: rulesParam keys like `authority_player_<id>`, `gadget:PlayerAdded(playerID)`, `Spring.GetPlayerList()`, `UnitCommandEvent.player_id`, `LuaUIMsgRelay.player_id`. The client carries them as `Connection.accountId` / `Connection.playerNum` and hands widgets both as `ctx.identity.accountId` / `ctx.identity.playerId` (the latter being the playerNum). They coincide only by accident on low-id dev accounts — which is why using one for the other went unnoticed for so long; see PLAN-native-ui.md §3.3 and PLAN-endtoend.md D3. **Verify player-scoped behaviour with a fresh, high-id account.**
+
+**A playerNum belongs to an account, not to a connection.** An authenticating username that already has a `CPlayer` reuses that row and that number (`CPlayerHandler::HumanPlayer`); only a first-time account consumes `nextPlayerNum`. So a tab reload resumes the player's score, authority pool, standing orders and org groups instead of orphaning them — everything synced keys on `player_num`, which would otherwise change under the player. `playerHandler.players` is capacity-pinned to `MAX_PLAYERS` (251) and **nothing ever erases from it** (a disconnect only sets `active = false`), so appending per authentication was a hard ceiling reached in reconnects; the reuse makes it a ceiling on *distinct accounts* instead, and that ceiling is still unenforced. A re-auth also releases the previous connection's `clientPlayerNum` mapping, because the old transport is usually not reaped yet. AI virtual players are excluded from the reuse by `isAI`. Replay re-execution derives the number through the same rule, so a recorded reconnect replays as one.
 
 **Key server→client messages:** AuthResponse, PlayerRoster (complete player roster — humans, spectators and AI virtual players, with names, teams and ally teams; sent reliably on auth and re-broadcast in full on every change: join, reconnect, leave, and once after GameStart when ally teams become known. Never a delta. The only source of player *names* on the client — the lobby room roster is not a substitute, it keys by account id and has no AI entries), MapData, GameUnitDefs, GameWeaponDefs, EntityCreate, EntityDestroy, GameEventBatch (CombatEvents, projectile fired/impacts/trajectories, SoundEvents, SeismicPings, MusicEvents), GameInfo, TeamStartInfo (team start positions + ally start boxes; sent on auth + re-broadcast after GameStart → Spring.GetTeamStartPosition/GetAllyTeamStartBox), PlayerTeamEventBatch (reliable per-tick player/team status changes → widget:PlayerChanged/PlayerAdded/PlayerRemoved/TeamDied; pushed from CTeam::Died + CPlayer::StartSpectating/JoinTeam + the disconnect handler), LuaUIMsgRelay (relayed Spring.SendLuaUIMsg → widget:RecvLuaMsg(msg, playerID); server applies the per-receiver audience filter by mode 0=all/'a'=allies/'s'=specs, faithful to Recoil CLuaHandle::HandleLuaMsg; sender gets its own message back), TeamStatsHistoryBatch (reliable per-game-second incremental team stats-history deltas from CTeam::statHistory → Spring.GetTeamStatsHistory; per-team finalised-entry cursor resends the live tail each cadence and rewinds on client join so late joiners get full history), GameModOptions (reliable one-shot on auth — the game's modoptions from CGameSetup::GetModOptions() → worker liveState.modOptions → unsynced Spring.GetModOptions(); values stay strings, faithful to Recoil PushAllOptions; immutable per game server so no re-broadcast), RoomStateUpdate, RoomListUpdate, LogBatch, ConsoleResponse, GameStarted, UnitCommandQueuesUpdate (own + allied team order queues, ~1 Hz), UnitCmdDescsUpdate (selection-scoped command panel data — name/action/texture/tooltip/type/params/hidden per cmd, ~1 Hz).
 
@@ -512,8 +517,8 @@ data/
 | `/api/games/data/<gameId>/*` | Preprocessed game assets (unit models, textures) |
 | `/api/processes` | JSON list of game server instances (pid, port, state, map, game) |
 | `GET /admin` | GM operations dashboard (server-rendered HTML; own admin login). PLAN-gm-tools §2. |
-| `POST /api/admin/fleet` | AdminOnly. Every game server + latest `game_metrics` (join `game_servers`⟕`game_status`⟕`game_metrics`) + alarm badges. |
-| `POST /api/admin/game` | AdminOnly. Per-game metric timeline + audit tail (`{roomId}`). |
+| `POST /api/admin/fleet` | AdminOnly. Every game server + latest `game_metrics` (join `game_servers`⟕`game_status`⟕`game_metrics`) + alarm badges (lobby-derived: lag/db/crashed; plus the game server's growth alarms parsed out of `extra_json`) + the raw `growth` counters. |
+| `POST /api/admin/game` | AdminOnly. Per-game metric timeline (each row carrying its `growth` counters when present) + audit tail (`{roomId}`). |
 | `POST /api/admin/ban` / `unban` / `banned` | AdminOnly. Account ban (+ immediate session revoke) / unban / ban list. PLAN-gm-tools task 4. |
 
 ### Game server (`spring-server`)
@@ -619,8 +624,163 @@ of the synced state.
 
 Storage is pluggable (`IJournal`). The default is `NullJournal` — the funnel still
 classifies and counts, and `GET /api/journal` (loopback) reports the tallies.
-`--journal-audit [N]` attaches a bounded in-memory journal; the durable journal is
-PLAN-persistence's.
+`--journal-audit [N]` attaches a bounded in-memory journal; `--journal-file <path>`
+attaches `replay::Writer`, which is the durable/shareable form. PLAN-persistence's
+journal implements the same `IJournal` seam. The lobby's `--replay-dir <dir>`
+gives every game server it spawns a `--journal-file <dir>/room-<id>-p<port>.msr`,
+so a deployment records whole matches without per-room configuration; it is off
+by default.
+
+### Replay re-execution
+
+`--replay <file>` runs the tick above with the funnel **inverted**: at each of the
+five phases the server asks `replay::Feed()` what was due and re-enters the same
+code paths with the recorded input. `rts/Server/ReplayFile.{h,cpp}` owns the
+container (magic + version + codec byte + JSON header + marker-framed blocks +
+trailer, where the block kinds are records, state-hash points, checkpoint-index
+entries, the embedded start checkpoint and the game's outcome — an unknown marker
+is a named hard error, which is the seam future sections attach to, and the
+outcome block is what that seam is for: adding it left every `.msr` already on
+disk readable, because a reader that knows a marker and does not find it is
+simply looking at an older file); `rts/Server/ReplayPlayer.{h,cpp}`
+owns the cursor, seek state and hash verification, both engine-free and
+doctest-covered. A live recording is always uncompressed so a torn tail stays
+salvageable; `--replay-export` repacks a finished segment through zlib (the
+format reserves a zstd codec value that this tree does not link). The checkpoint
+sections are format-complete but carry no bytes: the blobs are PLAN-persistence's
+`ISimSerializer` output, which is unbuilt. `server_main.cpp` feeds phases 1–3 and the anchor;
+`StateStreamer::TickAI` feeds phase 4 itself, because its position relative to
+standing-order evaluation inside the streamer tick is load-bearing.
+
+Three invariants the implementation depends on, each of which was a real bug first:
+
+- **Feed at the journal's tick stamp, never a fresh `sim.GetFrameNum()`.**
+  `SimFrame()` runs mid-tick, so by the LuaExec and Stream phases the sim's counter
+  has already passed the frame this tick's records were stamped with.
+- **The pre-game prologue is fed where the recording's own GameStart fired**, and
+  only its pre-`SimFrame` phases. With no human roster that is during start-up:
+  the frame counter starts at −1 and the first `SimFrame()` makes it 0, so a
+  recording that started the game during set-up entered its loop one sim-step
+  ahead of a replay that did not. With a roster it is on the first loop tick,
+  because the live run fired GameStart from `CheckAndFireGameStart` once the last
+  human authenticated — which is *after* AI slot resolution. Feeding such a
+  prologue during start-up authenticates the humans before the AI virtual players
+  exist and lands the team leaders on different players.
+- **Streaming suppression (seek) cuts the transport, not the streamer.**
+  `StateStreamer::Tick` issues commands as well as bytes, so muting it would change
+  the simulation.
+
+Replayed wire messages re-enter under their recorded connection id offset into a
+reserved range (`replay::VirtualClientId`) so they cannot collide with a live
+spectator's transport id.
+
+**Identity during a re-execution comes from the stream, not the database.** An
+`AuthRequest` is the one recorded verb whose effect depends on state the replay
+does not have: turning a session token or a password into (account id, username,
+role) is a query against `users`/`sessions`, and a replica DB need not carry
+either — a campaign replayed later is asking about a token that has expired by
+construction. So every successful auth also records an `InputKind::AuthIdentity`
+entry (`syncedinput::AuthIdentity`, keyed on the connection id), and a replayed
+`AuthRequest` reads that instead of touching `db`. `Player::Load` indexes the
+entries up front rather than consuming them in stream order — the answer
+necessarily *follows* the question in the stream but is needed *while* the
+question is re-asked — and feeding one is a documented no-op. The DB-derived half
+(account id, username, role) is authoritative; the launch-spec-derived half (team,
+player number) is re-derived and compared, and a mismatch stops the replay the
+same way the GameStart roster check does. `Handshake` is journaled for the same
+reason: it is the C1 gate that decides whether an `AuthRequest` is admissible at
+all, so a stream without it cannot re-enter its own authentications.
+
+**A live client on a replay server is a spectator, enforced three ways.** The
+inbound gate refuses every recordable verb from a non-virtual client, exempting
+only `Handshake` and `AuthRequest` — without those two nothing could authenticate
+and nothing could watch. On top of that the auth path forces `team = -1` and
+`role = spectator` regardless of the account, ignores the client's `--player`
+roster membership for GameStart (the recorded GameStart record is the only thing
+allowed to start a replayed game), and takes the player number from a reserved
+constant range (`replay::kSpectatorPlayerNumBase`) rather than `nextPlayerNum`,
+which the recorded auths cross-check against. Third and least obvious: a replay
+spectator is **not registered in `playerHandler`**, so it never appears in
+`Spring.GetPlayerList()`. A disjoint player number keeps the replay's own
+bookkeeping consistent but says nothing about synced Lua, and gadgets do not
+agree about spectators — Metalstorm's `game_authority.lua` grants an authority
+pool per player in its GameStart roster loop *without* filtering them, while
+`game_teams.lua` filters. The consequence is that a spectator has no roster row
+and no `clientPlayerNum` entry, so the `LuaUIMsg` relay (which resolves both ends
+through those) drops its messages on a replay server.
+
+**Playback controls are their own wire class, not a console verb.** Pause,
+speed, seek and POV change the *playback* — which frame the recorded feed is
+at, how fast it advances, whose fog is rendered — and none of that is an input
+to the simulation. Routing them through `ConsoleCommand`, which is what "ride
+the existing debug-console verbs" would have meant, was not possible: that verb
+is classified `Synced`, the class the replay gate refuses from live clients by
+construction, and widening the gate would have admitted arbitrary Lua to a
+re-executing sim. So `ClientPayload::ReplayControl` is classified **`Ignored`**
+— never journaled (a recorded "pause" would replay at whoever watched next) and
+dropped outright on a live server — and is handled only while
+`replay::IsReplaying()`. The policy behind it is pure and lives in
+`replay::ControlDeck` (`rts/Server/ReplayControlDeck.h`): **the first spectator
+to attach drives, and control passes to the longest-attached survivor when the
+driver leaves**, so a cast whose host closes their tab does not freeze for
+everyone else. POV is deliberately outside that rule — it is per-client state
+(`ClientSession::spectatorVisibilityMode/Team`, read by `StateStreamer` at five
+sites and, until this landed, written by nothing at all).
+
+Applying an accepted decision is a three-line translation: pause is `gs->paused`
+(the sim-loop gate already skips `SimFrame` on it, and with the frame frozen the
+feed's cursor pops nothing), speed is `gs->wantedSpeedFactor` — a replay in
+`Mode::Play` paces from `computeTickInterval()` rather than the headless run
+config for exactly this reason — and seek is `Feed().SetSeekTarget()`. Neither
+pause nor speed can fork the re-execution: the state hash folds unit digests and
+the RNG, not pacing. **A backward seek is refused, not served**: seek is "load
+the nearest checkpoint ≤ target and fast-forward", nothing writes checkpoint
+blobs until PLAN-persistence's sim serializer lands, and the record cursor is
+monotonic — so there is no way back, and the refusal says so rather than
+no-op'ing. The server broadcasts `ServerPayload::ReplayState` per client (POV
+and controller are per-client answers) on every landed control and on a 1 s
+wall-clock heartbeat; **a live game never sends one, and that absence is the
+client's entire mode signal** — the playback bar mounts on the first one it
+receives.
+
+### Replay browsing
+
+The lobby serves what it recorded. `POST /api/replays/list` returns a row per
+`.msr` in `--replay-dir` and `POST /api/replays/watch {file}` spawns a
+`spring-server --replay` for one; both 404 when the flag is unset. (POSTs for a
+read because `HttpGetHandler` never receives an Authorization header, so
+NetworkServer degrades every non-Public GET to loopback-only.) Listing goes
+through `replay::LoadSummary`, which walks the block framing and **skips**
+payloads rather than materialising every `Record` the way `Load` does, and
+counts blocks itself instead of trusting the trailer — which is what lets it
+report a duration for a *truncated* recording, i.e. for exactly the crashed
+servers an operator most wants to watch. A requested filename is resolved by
+matching it against the directory listing rather than by concatenation, so
+there is no path string to defeat, and an unreadable file is refused before the
+fork (a replay server handed one exits immediately, and the room it left behind
+would read as a crashed game).
+
+**A replay is served as an ordinary room**, and that is the load-bearing
+decision rather than an implementation shortcut: a room is already the only
+thing that carries a `game_server_port` to a browser and the only thing whose
+lifecycle kills a server when the last person leaves. `roomToJson` gains one
+field (`replay_file`); everything else about entering a game is the path a
+player already takes. Three behaviours follow without being written — casting
+is `JoinRoom` (a second caller for a file already being watched joins the
+existing room instead of spawning a rival server, which is how the control
+deck's driver/succession rule became reachable from the lobby), a cast ends on
+the existing `Abandoned` branch, and the health loop **deletes** a replay room
+whose server exited instead of calling `ResetRoomForNextGame` on it, because a
+recording has no next game.
+
+**A start frame is a control, never a launch option.** `--replay-seek` exists
+and the lobby does not use it: with no checkpoints the launch-time seek is an
+uncapped fast-forward from frame 0 during which the server does not service its
+QUIC connections, so a watcher's handshake goes unanswered long enough for the
+transport to time out, and it reconnects as a client the control deck no longer
+recognises as the driver. The `?watch=<file>&frame=N` deep link therefore sends
+an ordinary `ReplayControl::Seek` once attached. The same stall is still
+reachable from the playback bar on a long recording; checkpoints are the fix.
 
 ### Def + Model Loading
 ```

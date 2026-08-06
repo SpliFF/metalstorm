@@ -16,7 +16,10 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
+
+#include "Server/GrowthCounters.h"
 
 namespace statsdump {
 
@@ -78,6 +81,22 @@ struct Snapshot {
     float simFps = 0.0f;
     int64_t rssKb = 0;       // PLAN-long-uptime S4 RSS watermark feed
     int64_t luaHeapKb = 0;   // PLAN-long-uptime S4 Lua-heap watermark feed
+
+    // PLAN-long-uptime task 4: every §1 growth surface, sampled on the same
+    // cadence as the determinism hash so one soak dump answers "does this
+    // leak?" for the whole inventory rather than for RSS alone. `rssKb` /
+    // `luaHeapKb` above predate this and are kept — they are the fields the
+    // determinism harness and its tests already read, and duplicating them
+    // inside `growth` costs two integers against breaking every existing
+    // reader.
+    growth::Counters growth;
+
+    // S8 — on-disk size of the run's SQLite file, in bytes. Sampled here
+    // rather than derived at the end because a retention policy is a *slope*
+    // claim: "the file stops growing" is only visible in a series. 0 means the
+    // path could not be stat'd, never "an empty database".
+    int64_t dbBytes = 0;
+
     std::vector<TeamSnapshot> teams;
     std::vector<WeaponStats> weapons;
 };
@@ -107,6 +126,21 @@ std::string BuildDumpJson(const FinalDump& dump);
 // a multi-hour soak on its very last tick (mirrors HeadlessRun's E3 "never a
 // hang" philosophy applied to "never a crash-on-exit").
 bool WriteDumpFile(const std::string& path, const FinalDump& dump, std::string& err);
+
+// Read back just the determinism track — `(frame, stateHash)` per snapshot —
+// from a dump this module wrote. That series is what `--replay --verify`
+// re-executes against (PLAN-replay §4), and it is the only part of a dump a
+// verifier may compare: wallSeconds/simFps/rssKb are properties of the machine
+// that ran it, not of the synced state, and would fail every honest replay.
+//
+// The hex-string encoding above is the trap this function exists to close:
+// `stateHash` is a STRING in the JSON, and a reader that treats it as a number
+// silently truncates every hash past 2^53 to a value that still compares equal
+// often enough to look like it works. Parsed here with strtoull, base 16.
+// Returns false with `err` set on a missing/unparseable file; never throws.
+bool ReadHashTrack(const std::string& path,
+                   std::vector<std::pair<int64_t, uint64_t>>& out,
+                   std::string& err);
 
 // Process resident-set size in KB (0 if unavailable on this platform).
 // Platform-coupled (getrusage) but engine-independent.

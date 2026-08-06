@@ -50,6 +50,7 @@ import { createHUD, showHUD, updateHUD, updateSpeedHUD } from './ui/hud/hud.js';
 import { showQuitConfirm } from './ui/quit-confirm/quit-confirm.js';
 import { showGameOver } from './ui/game-over/game-over.js';
 import { showSpectatorBanner, hideSpectatorBanner } from './ui/spectator-banner.js';
+import { updateReplayBar, hideReplayBar, showReplayRefusal } from './ui/replay-bar.js';
 import { debugConsole } from './core/debug-console.js';
 import { logIngest } from './core/log-ingest.js';
 import { configureErrorTelemetry, reportClientError } from './core/client-error-telemetry.js';
@@ -399,6 +400,10 @@ function applyCursorMode(name: string | null, css: string): void {
     if (canvas) canvas.style.cursor = name ? css : '';
 }
 let buildMenu: BuildMenu | null = null;
+/// Local sim player number, captured at auth. Only the replay bar reads it
+/// (PLAN-replay task 4b) — everything else takes playerNum from the worker
+/// message it is already handling.
+let myReplayPlayerNum = -1;
 let economyBar: EconomyBar | null = null;
 let factoryQueuePanel: FactoryQueuePanel | null = null;
 let lobbyUI: LobbyUI | null = null;
@@ -530,6 +535,7 @@ function quitToLobby(): void {
     factoryQueuePanel?.dispose();
     factoryQueuePanel = null;
     hideSpectatorBanner();
+    hideReplayBar();
 
     // Dispose native UI
     disposeNativeUI();
@@ -840,6 +846,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     factoryQueuePanel?.dispose();
     factoryQueuePanel = null;
     hideSpectatorBanner();
+    hideReplayBar();
     // The previous session's cursor overlay owns a DOM node + a live rAF
     // loop — without this, a back-to-back startGame() (room-state re-entry
     // that skips quitToLobby) leaks both and stacks a second overlay.
@@ -987,7 +994,14 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                     });
                 } else {
                     hideSpectatorBanner();
+                    hideReplayBar();
                 }
+                // PLAN-replay task 4b: the playback bar needs the local sim
+                // player number to answer "are these controls mine". On a
+                // replay server this is the reserved spectator number the
+                // admission handed out (200+), which is exactly what the
+                // ReplayState's `controller_player_num` is drawn from.
+                myReplayPlayerNum = m.playerNum;
 
                 // Initialize native UI for Metalstorm. Resolve the gameId from
                 // (in priority) the ?game= URL param, localStorage, then the
@@ -1251,6 +1265,27 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 break;
             case 'gp:resynced':
                 console.log('[gameWorker] resynced — reconnecting for a fresh snapshot');
+                break;
+            // PLAN-replay task 4b. A live game never sends ReplayState, so
+            // reaching this case at all IS the "this is a replay" signal —
+            // there is no mode flag to keep in step, and the bar mounts on the
+            // first update. Controls travel back through the worker because
+            // that is where the connection lives.
+            case 'gp:replayState':
+                updateReplayBar(m.state, myReplayPlayerNum, (action, opts) => {
+                    gameWorker?.postMessage({
+                        type: 'gp:replayControl', action,
+                        speed: opts?.speed, frame: opts?.frame,
+                        povTeam: opts?.povTeam,
+                    });
+                });
+                break;
+            // A refused playback control. Shown on the bar, not just logged —
+            // the two refusals that exist (someone else is driving; this
+            // recording cannot rewind) are both answers a watcher is waiting
+            // for, and the console is not where they look.
+            case 'gp:replayRefused':
+                showReplayRefusal(String(m.message ?? ''));
                 break;
             // GW8: reply to a window.widgets.eval() Lua eval (worker evalLua).
             case 'evalResult':

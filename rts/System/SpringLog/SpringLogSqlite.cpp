@@ -8,6 +8,7 @@
 #include "SpringLog.h"
 
 #include <sqlite3.h>
+#include <cstdlib>
 #include <string>
 #include <vector>
 #include <mutex>
@@ -38,6 +39,43 @@ struct SqliteLogEntry {
 
 static std::vector<SqliteLogEntry> g_queue;
 static constexpr size_t BATCH_SIZE = 100;
+
+// PLAN-long-uptime S8: `debug_logs` had no retention of any kind — no DELETE,
+// no cap, no vacuum — while every log line the whole stack emits lands in it.
+// Over the weeks-long uptime this plan set exists for that is a monotonically
+// growing file on the same disk the game DB lives on.
+//
+// The sweep runs on this sink's own flush thread, which already owns `g_db`
+// exclusively, so it needs no extra connection (unlike the lobby's session
+// sweep — see PLAN-long-uptime §8.2, where the shared handle was the problem).
+static constexpr int RETENTION_HOURS_DEFAULT = 168;  // 7 days
+static constexpr int RETENTION_SWEEP_SECONDS = 3600; // hourly
+static int g_retentionHours = RETENTION_HOURS_DEFAULT;
+
+// Delete log rows older than the retention window and hand the freed pages
+// back. `PRAGMA incremental_vacuum` only does anything when the database was
+// created with auto_vacuum=INCREMENTAL (set in init below); on a pre-existing
+// log DB it is a silent no-op and the file stays at its high-water mark until
+// someone VACUUMs it by hand. That is deliberate — a full VACUUM rewrites the
+// whole file and would stall logging for as long as it takes.
+static void SweepOldLogs() {
+    if (!g_db || g_retentionHours <= 0) return;
+
+    const uint64_t nowMs = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    const uint64_t cutoffMs = nowMs - (uint64_t)g_retentionHours * 3600ull * 1000ull;
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(g_db, "DELETE FROM debug_logs WHERE timestamp < ?", -1,
+                           &stmt, nullptr) != SQLITE_OK)
+        return;
+    sqlite3_bind_int64(stmt, 1, (sqlite3_int64)cutoffMs);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    if (sqlite3_changes(g_db) > 0)
+        sqlite3_exec(g_db, "PRAGMA incremental_vacuum(256)", nullptr, nullptr, nullptr);
+}
 
 static void FlushBatch(std::vector<SqliteLogEntry>& batch) {
     if (!g_db || batch.empty()) return;
@@ -70,6 +108,7 @@ static void FlushBatch(std::vector<SqliteLogEntry>& batch) {
 }
 
 static void FlushThread() {
+    auto nextSweep = std::chrono::steady_clock::now();  // sweep once at start-up
     while (g_running.load()) {
         std::vector<SqliteLogEntry> batch;
         {
@@ -80,6 +119,15 @@ static void FlushThread() {
             batch.swap(g_queue);
         }
         FlushBatch(batch);
+
+        // S8 retention. Cadence is wall-clock, not flush count: the flush loop
+        // wakes on log volume, so counting iterations would sweep a chatty
+        // process hourly and a quiet one never.
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= nextSweep) {
+            nextSweep = now + std::chrono::seconds(RETENTION_SWEEP_SECONDS);
+            SweepOldLogs();
+        }
     }
     // Final flush
     std::lock_guard<std::mutex> lock(g_queueMutex);
@@ -107,6 +155,17 @@ int springlog_sqlite_init(const char* dbPath) {
 
     int rc = sqlite3_open(dbPath, &g_db);
     if (rc != SQLITE_OK) return -1;
+
+    // S8: must be set before the first table is created to take effect; on an
+    // existing database it is ignored and only a full VACUUM could change it.
+    sqlite3_exec(g_db, "PRAGMA auto_vacuum=INCREMENTAL", nullptr, nullptr, nullptr);
+
+    // S8: operator override for the retention window. 0 disables the sweep.
+    if (const char* env = std::getenv("SPRING_LOG_RETENTION_HOURS")) {
+        char* end = nullptr;
+        const long v = std::strtol(env, &end, 10);
+        if (end != env && v >= 0 && v <= 24 * 3650) g_retentionHours = (int)v;
+    }
 
     // Create table
     const char* createSql =

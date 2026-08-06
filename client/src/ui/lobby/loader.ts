@@ -21,6 +21,7 @@ import reconnectingHtml from './reconnecting.html?raw';
 import loginHtml from './login/login.html?raw';
 import browserHtml from './browser/browser.html?raw';
 import roomEntryHtml from './browser/room-entry.html?raw';
+import replayEntryHtml from './browser/replay-entry.html?raw';
 import mapCardHtml from './browser/map-card.html?raw';
 import roomHtml from './room/room.html?raw';
 import playerRowHtml from './room/player-row.html?raw';
@@ -34,6 +35,8 @@ export interface LobbyTemplates {
     login: string;
     browser: string;
     browserRoomEntry: string;
+    /// One row of the replay browser (PLAN-replay task 4c).
+    browserReplayEntry: string;
     browserMapCard: string;
     room: string;
     roomPlayerRow: string;
@@ -48,6 +51,7 @@ const TEMPLATE_PATHS: Record<keyof LobbyTemplates, string> = {
     login:           'login/login.html',
     browser:         'browser/browser.html',
     browserRoomEntry: 'browser/room-entry.html',
+    browserReplayEntry: 'browser/replay-entry.html',
     browserMapCard:  'browser/map-card.html',
     room:            'room/room.html',
     roomPlayerRow:   'room/player-row.html',
@@ -59,6 +63,7 @@ const DEFAULT_TEMPLATES: LobbyTemplates = {
     login:           loginHtml,
     browser:         browserHtml,
     browserRoomEntry: roomEntryHtml,
+    browserReplayEntry: replayEntryHtml,
     browserMapCard:  mapCardHtml,
     room:            roomHtml,
     roomPlayerRow:   playerRowHtml,

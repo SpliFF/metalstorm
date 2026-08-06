@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 struct sqlite3;
@@ -98,6 +99,15 @@ public:
     /// Delete all expired sessions (older than maxAgeSeconds).
     /// Returns the number of sessions deleted.
     int CleanExpiredSessions(int maxAgeSeconds = 86400);
+
+    /// PLAN-long-uptime S8 / T2a-4: retention for the two append-only tables
+    /// the S9 sweep left behind. Both are written on every admin action and
+    /// every client crash report and neither had a DELETE anywhere, so on a
+    /// long-lived lobby they only grow. Deleted by `created_at`, which both
+    /// tables default to CURRENT_TIMESTAMP. Returns rows deleted.
+    /// Call from a maintenance connection, not from `db` — see §8.2.
+    int CleanOldAuditEntries(int maxAgeSeconds = 90 * 86400);
+    int CleanOldClientErrors(int maxAgeSeconds = 30 * 86400);
 
     /// Append an entry to the admin_audit log (PLAN-security-hardening task
     /// 6). Every admin-role action — exec, restart, GM verbs (rollback/
@@ -248,6 +258,19 @@ public:
     /// multi-statement transactions, since sharing a handle means sharing the
     /// connection's single transaction scope.
     sqlite3* Handle() const { return db; }
+    /// PLAN-long-uptime task 3: `(room_id, extra_json)` from the newest
+    /// `game_metrics` row of every room with a **live game server**. Rooms
+    /// whose newest row carries an empty `extra_json` are omitted — there is
+    /// nothing to scan — and so are rooms whose server has exited, whose
+    /// metric rows outlive them.
+    ///
+    /// Lives on Database rather than being a raw query in the lobby loop for
+    /// the §8.2 reason: the maintenance thread must not touch the handle the
+    /// route handlers use, and the only handle it legitimately owns is this
+    /// object's. `game_metrics` is created by the *game* server, so a lobby
+    /// that has never hosted a game has no such table; that is not an error
+    /// and yields an empty result.
+    std::vector<std::pair<int, std::string>> LatestGameExtraJson();
 
 private:
     void CreateTables();

@@ -82,8 +82,53 @@ local BOUNTY_CAP_PER_PLAYER = 4         -- spam guard (§3.3)
 local PARTICIPATION_TICK_WEIGHT = 1.0   -- §5 "ordering units... 1.0 per eval tick per squad"
 local PARTICIPATION_PRESENCE_WEIGHT = 2.0   -- §5 "presence at completion... 2.0 per squad"
 
-local objectives = {}      -- id -> objective
+local objectives = {}      -- id -> objective (LIVE only, see the archive below)
 local nextId = 1
+
+-- ============================================================
+-- Resolved-objective archive (PLAN-long-uptime S4).
+--
+-- `objectives[id]` used to be write-once-and-keep: resolveObjective removed
+-- the id from activeList and queued its rulesParams for clearing, but the
+-- objective table itself — participation map, params, phase children, data —
+-- stayed reachable for the life of the game. Over the weeks-long campaign
+-- this game is aimed at, that is the synced Lua heap growing without bound,
+-- and no GC can reclaim it because it is still referenced.
+--
+-- Policy: a resolved objective moves here once its retention window ends, and
+-- this table is ring-capped. Past the cap the oldest resolved objective is
+-- dropped for good. Reads that may legitimately name a resolved objective go
+-- through `lookupObjective`; every hot path iterates `activeList` and never
+-- touches this at all.
+--
+-- The cap is deliberately far larger than any resolve cascade: archiving only
+-- happens RESOLVE_RETENTION_FRAMES (30 s) after resolution, while phase-parent
+-- and linked-partner cascades all complete within the tick that resolves the
+-- child, so an evicted entry is never one another objective is still reasoning
+-- about.
+-- ============================================================
+local ARCHIVE_CAP = 256
+local archive = {}         -- id -> resolved objective, at most ARCHIVE_CAP live
+local archiveRing = {}     -- slot -> id, insertion-ordered
+local archiveSlot = 0
+
+local function archiveObjective(id)
+    local o = objectives[id]
+    if not o then return end
+    objectives[id] = nil
+    archiveSlot = (archiveSlot % ARCHIVE_CAP) + 1
+    local evicted = archiveRing[archiveSlot]
+    if evicted then archive[evicted] = nil end
+    archiveRing[archiveSlot] = id
+    archive[id] = o
+end
+
+--- Objective by id whether it is still live or recently resolved. Returns nil
+--- for an id that was resolved long enough ago to fall out of the archive.
+local function lookupObjective(id)
+    return objectives[id] or archive[id]
+end
+
 -- How many objectives carrying `victory = true` have ever been created.
 -- game_gameover.lua reads this to say out loud whether the war it is
 -- watching has any terminal condition at all (PLAN-endtoend.md D10). A
@@ -375,7 +420,7 @@ local function parentProgress(o)
     if not o.phaseChildren or #o.phaseChildren == 0 then return 0 end
     local done = 0
     for _, cid in ipairs(o.phaseChildren) do
-        local c = objectives[cid]
+        local c = lookupObjective(cid)
         if c and c.state == 'complete' then done = done + 1 end
     end
     return done / #o.phaseChildren
@@ -386,7 +431,7 @@ local resolveObjective
 
 local function onChildResolved(child, ctx)
     if not child.parentId then return end
-    local parent = objectives[child.parentId]
+    local parent = lookupObjective(child.parentId)
     if not parent or parent.state ~= 'active' then return end
 
     if child.state ~= 'complete' then
@@ -401,7 +446,7 @@ local function onChildResolved(child, ctx)
     end
 
     for _, cid in ipairs(parent.phaseChildren) do
-        local c = objectives[cid]
+        local c = lookupObjective(cid)
         if c and c.state == 'active' then return end   -- phase not fully resolved yet
     end
 
@@ -451,7 +496,7 @@ function resolveObjective(o, state, completingTeam, ctx)
 
     -- E4: mutual resolve — a still-active linked partner is mooted out.
     if o.linkedId then
-        local partner = objectives[o.linkedId]
+        local partner = lookupObjective(o.linkedId)
         if partner and partner.state == 'active' then
             resolveObjective(partner, 'expired', nil, ctx)
         end
@@ -602,7 +647,9 @@ end
 
 --- Read-only accessor for scenario scripts/tests. Do not mutate the result.
 function GG.Objectives.Get(id)
-    return objectives[id]
+    -- Falls through to the S4 archive so a resolved objective stays readable
+    -- for as long as the archive holds it (ARCHIVE_CAP resolutions).
+    return lookupObjective(id)
 end
 
 --- How many `victory = true` objectives this war has ever staged
@@ -871,12 +918,18 @@ function gadget:GameFrame(frame)
         Generator.tick(buildWorld(frame, evalTick, ctx), genState)
     end
 
-    -- Resolve-retention: clear rulesParams for objectives past the 30s window.
+    -- Resolve-retention: clear rulesParams for objectives past the 30s window,
+    -- then move the objective itself into the ring-capped archive
+    -- (PLAN-long-uptime S4). Clearing the params was only ever half the job —
+    -- the wire stopped carrying the objective, the heap kept holding it.
     for i = #pendingClear, 1, -1 do
         local id = pendingClear[i]
         local o = objectives[id]
         if not o or (frame - o.resolvedFrame) >= RESOLVE_RETENTION_FRAMES then
-            if o then clearPublished(o) end
+            if o then
+                clearPublished(o)
+                archiveObjective(id)
+            end
             table.remove(pendingClear, i)
         end
     end

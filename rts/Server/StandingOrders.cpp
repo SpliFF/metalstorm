@@ -22,6 +22,12 @@ uint32_t StandingOrderManager::Create(int team, StandingOrderType type, uint8_t 
                                       uint32_t currentFrame,
                                       int authorPlayerId)
 {
+    // S6 cap. Refuse rather than truncate: silently evicting somebody else's
+    // oldest directive would look to the player like an order that stopped
+    // working for no reason, and the caller can report a refusal.
+    if (perTeamCap > 0 && CountTeamOrders(team) >= perTeamCap)
+        return 0;
+
     StandingOrder o;
     o.id = nextId++;
     o.team = team;
@@ -32,7 +38,11 @@ uint32_t StandingOrderManager::Create(int team, StandingOrderType type, uint8_t 
     o.conditions = std::move(cond);
     o.active = true;
     o.createdAtFrame = currentFrame;
-    o.expiresAtFrame = (expiresInFrames > 0) ? (currentFrame + expiresInFrames) : 0;
+    // S6 TTL: an omitted deadline gets the default one. `expiresInFrames > 0`
+    // from the caller always wins, including a caller that wants a *longer*
+    // life than the default.
+    const uint32_t ttl = (expiresInFrames > 0) ? expiresInFrames : defaultTtlFrames;
+    o.expiresAtFrame = (ttl > 0) ? (currentFrame + ttl) : 0;
     orders.push_back(std::move(o));
     NotifyChange(team);
     return orders.back().id;
@@ -71,6 +81,15 @@ bool StandingOrderManager::Remove(uint32_t orderId, int team)
         return true;
     }
     return false;
+}
+
+size_t StandingOrderManager::CountTeamOrders(int team) const
+{
+    size_t n = 0;
+    for (const auto& o : orders) {
+        if (o.team == team) ++n;
+    }
+    return n;
 }
 
 std::vector<const StandingOrder*> StandingOrderManager::GetTeamOrders(int team) const
