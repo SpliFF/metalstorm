@@ -4429,18 +4429,6 @@ int main(int argc, char *argv[]) {
   // --- Main loop (10 Hz for lobby — HTTP serving + process management) ---
   int reapTick = 0;
   int errorPruneTick = 0;
-  while (keepRunning.load()) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-    // Prune expired crash reports ~hourly at 10 Hz. Cheap (one indexed
-    // DELETE on created_at) and idempotent, so a no-op hour costs nothing.
-    if (++errorPruneTick >= 36000) {
-      errorPruneTick = 0;
-      const int pruned = db.PruneClientErrors(clientErrorRetentionDays);
-      if (pruned > 0)
-        SLOG(SPRING_LOG_NOTICE,
-             "pruned %d client error report(s) older than %d days", pruned,
-             clientErrorRetentionDays);
   int sessionSweepTick = 0;
   // PLAN-long-uptime task 3 (§3): the durable record of a growth alarm.
   // Per-room, the set of alarm labels this lobby has already written an audit
@@ -4458,6 +4446,17 @@ int main(int argc, char *argv[]) {
   std::unordered_map<int, std::set<std::string>> knownRoomAlarms;
   while (keepRunning.load()) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    // Prune expired crash reports ~hourly at 10 Hz. Cheap (one indexed
+    // DELETE on created_at) and idempotent, so a no-op hour costs nothing.
+    if (++errorPruneTick >= 36000) {
+      errorPruneTick = 0;
+      const int pruned = db.PruneClientErrors(clientErrorRetentionDays);
+      if (pruned > 0)
+        SLOG(SPRING_LOG_NOTICE,
+             "pruned %d client error report(s) older than %d days", pruned,
+             clientErrorRetentionDays);
+    }
 
     // Scan for growth-alarm transitions (~every 60 s at 10 Hz). Matched to the
     // game server's own metric cadence deliberately: the scan only ever looks
