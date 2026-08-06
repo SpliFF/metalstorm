@@ -3978,9 +3978,24 @@ int main(int argc, char *argv[]) {
           }
         }
 
-        if (!rooms.StartGame(room->id, static_cast<uint32_t>(userId)))
-          return HttpAuth::JsonResponse(400,
-                                        R"({"error":"cannot start game"})");
+        if (!rooms.StartGame(room->id, static_cast<uint32_t>(userId))) {
+          // Say WHY. RoomManager::StartGame folds four distinct refusals
+          // into one bool, and the generic "cannot start game" that used to
+          // be returned here was the whole of the player's feedback — the
+          // client discarded it too, so pressing Start Game with an unready
+          // player in the room did nothing at all and said nothing at all
+          // (PLAN-endtoend.md D41, found fire 19). The commonest case by far
+          // is the host's own Ready: AllReady() counts the host like anyone
+          // else, so a host who adds an AI and presses Start is refused.
+          std::string reason =
+              room->StartRefusalReason(static_cast<uint32_t>(userId));
+          if (reason.empty())
+            reason = "cannot start game";
+          SLOG(SPRING_LOG_INFO, "room %u start refused: %s", room->id,
+               reason.c_str());
+          return HttpAuth::JsonResponse(
+              400, R"({"error":")" + HttpAuth::JsonEscape(reason) + R"("})");
+        }
 
         // Last line of defence before the game server forks: say out loud
         // whether the war we are about to spawn can ever finish

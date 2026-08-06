@@ -11,4 +11,8 @@
     <div class="room-setup">{{setup_html}}</div>
     <div class="player-list">{{players_html}}</div>
     <div class="room-actions">{{actions_html}}</div>
+    <!-- Refusals from /api/rooms/start land here (PLAN-endtoend.md D41).
+         The room screen had no message surface at all, so a rejected Start
+         Game was silent in both directions. -->
+    <div id="room-msg" class="msg"></div>
 </div>

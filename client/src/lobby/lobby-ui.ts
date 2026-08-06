@@ -1721,9 +1721,24 @@ export class LobbyUI {
         return data?.id ? data : null;
     }
 
+    /// Start the room's game. The server's refusal is the ONLY feedback a
+    /// host gets, so it has to reach the screen: this used to discard the
+    /// response entirely, which made a refused Start Game completely silent
+    /// — the commonest cause being the host's own un-pressed Ready, since
+    /// RoomManager::AllReady() counts the host like any other player
+    /// (PLAN-endtoend.md D41, found fire 19).
     async startGame(): Promise<void> {
         if (!this.authToken) return;
-        await this.lobbyPost('/api/rooms/start');
+        const data = await this.lobbyPost('/api/rooms/start');
+        const msgEl = document.getElementById('room-msg');
+        if (!msgEl) return;
+        if (data?.error) {
+            msgEl.textContent = data.error;
+            msgEl.className = 'msg error';
+        } else {
+            msgEl.textContent = '';
+            msgEl.className = 'msg';
+        }
     }
 
     // endGame() and closeRoom() removed — room lifecycle is handled

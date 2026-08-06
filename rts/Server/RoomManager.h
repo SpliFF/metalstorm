@@ -210,6 +210,36 @@ struct GameRoom {
         return !players.empty();
     }
 
+    /// Why RoomManager::StartGame would refuse `requesterId`, as a sentence
+    /// for the player. Empty string means it would not refuse.
+    ///
+    /// StartGame folds four distinct refusals into one bool, and the lobby
+    /// route used to answer all of them with a flat "cannot start game" that
+    /// the client then discarded — so a refused Start Game was silent in both
+    /// directions (PLAN-endtoend.md D41). The commonest case is the host's
+    /// own Ready: AllReady() counts the host like anyone else, so a host who
+    /// seats an AI and presses Start is refused with no explanation.
+    ///
+    /// Kept beside AllReady() rather than in the route so the conditions
+    /// cannot drift apart from the ones StartGame actually tests.
+    std::string StartRefusalReason(uint32_t requesterId) const {
+        if (hostPlayerId != requesterId)
+            return "only the host can start the game";
+        if (state != ERoomState::Filling)
+            return "this room has already started";
+        if (players.empty())
+            return "the room is empty";
+        std::string unready;
+        for (const auto& p : players) {
+            if (p.isSpectator || p.ready) continue;
+            if (!unready.empty()) unready += ", ";
+            unready += p.username;
+        }
+        if (!unready.empty())
+            return "waiting for players to ready up: " + unready;
+        return "";
+    }
+
     int PlayerCount() const { return static_cast<int>(players.size()); }
 };
 
