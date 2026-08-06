@@ -12,25 +12,44 @@
 -- 1 unit = 1 m (matches the wz baseline convention), 1212 tris,
 -- SPRINGRTS_geometry v8, SPRINGRTS_team_color mask on materials[0].
 -- Licensing: see the Generated rows in ../ASSETS.md.
+--
+-- `fable_tank_dressed` is the §M5 dressing-kit probe: the same hull with
+-- `customparams.ms_dress = 'order'`, which the client reads at model load to
+-- append the ms_dress_order accessories (staff+pennant, lightbar, stowage) as
+-- extra pieces parented to `body` (client/src/core/dressing-kits.ts). Cosmetic
+-- only — the server sees an ordinary fable_tank: same model, radius, footprint
+-- and collision volume.
+--   ?scenario=model-viewer&game=metalstorm&def=fable_tank_dressed
+
+local tank = {
+    name = 'FV-9 Vanguard',
+    description = 'Fable railgun MBT — generated-model showcase',
+    objectname = 'fable_tank',
+    category = 'LAND MOBILE TANK',
+    movementclass = 'VEH',
+    maxdamage = 2000, mass = 700,
+    maxvelocity = 2.3, acceleration = 0.24, brakerate = 0.2, turnrate = 680,
+    footprintx = 3, footprintz = 3,
+    sightdistance = 470,
+    canmove = true, canattack = true, canpatrol = true, canstop = true,
+    canguard = true,
+    weapons = { [1] = { name = 'MS_RAILGUN_S2' } },
+    customparams = {
+        ms_class = 'fable_showcase',
+        squad_size = '1',            -- single model: harness frames one unit
+        generator = 'Claude Fable 5 (tools/fable-model-forge)',
+    },
+}
+
+local dressed = {}
+for k, v in pairs(tank) do dressed[k] = v end
+dressed.name = 'FV-9 Vanguard (Order colours)'
+dressed.description = 'Fable railgun MBT — dressing-kit showcase'
+dressed.customparams = {}
+for k, v in pairs(tank.customparams) do dressed.customparams[k] = v end
+dressed.customparams.ms_dress = 'order'
 
 return {
-    fable_tank = {
-        name = 'FV-9 Vanguard',
-        description = 'Fable railgun MBT — generated-model showcase',
-        objectname = 'fable_tank',
-        category = 'LAND MOBILE TANK',
-        movementclass = 'VEH',
-        maxdamage = 2000, mass = 700,
-        maxvelocity = 2.3, acceleration = 0.24, brakerate = 0.2, turnrate = 680,
-        footprintx = 3, footprintz = 3,
-        sightdistance = 470,
-        canmove = true, canattack = true, canpatrol = true, canstop = true,
-        canguard = true,
-        weapons = { [1] = { name = 'MS_RAILGUN_S2' } },
-        customparams = {
-            ms_class = 'fable_showcase',
-            squad_size = '1',            -- single model: harness frames one unit
-            generator = 'Claude Fable 5 (tools/fable-model-forge)',
-        },
-    },
+    fable_tank = tank,
+    fable_tank_dressed = dressed,
 }

@@ -61,6 +61,9 @@ import { DitherFadePlugin } from './dither-fade-plugin.js';
 import type { MemberModel } from './squad-render-backend.js';
 import { AssetLoader, LoadPriority } from './asset-loader.js';
 import { PlaceholderRenderer, type PlaceholderMeshes } from './placeholder-renderer.js';
+import {
+    dressingKit, dressingMounts, mountLocalMatrix, type DressMount,
+} from './dressing-kits.js';
 
 /** Per-material texture URIs, keyed by material name in the .gltf.
  *  Single-material models (all S3O/DAE content) use just the `materials[0]`
@@ -1495,6 +1498,16 @@ export class EntityRenderer {
             }
             const textures = config ? loadCached(config) : null;
 
+            // §M5 dressing kits: append the def's accessory pieces (if any)
+            // to the template. Runs AFTER modelHeight/yOffset so cosmetics
+            // never move the nanoframe plane or the ground seat, and after
+            // the canonical piece alignment so kit pieces occupy indices the
+            // server's piece-state envelope can never name.
+            const dressClips = await this.attachDressingKit(
+                def, baseUrl, orderedPieces, materialTextures,
+            );
+            if (dressClips.length > 0) clips.push(...dressClips);
+
             console.log(
                 `[entity-renderer] ${def.name}: model loaded, ` +
                 `${geometryPieces.length} piece(s) with geometry, ` +
@@ -1526,6 +1539,168 @@ export class EntityRenderer {
                 err,
             );
             return null;
+        }
+    }
+
+    /**
+     * §M5 — attach the def's dressing kit (`customparams.ms_dress`) to a
+     * freshly loaded hull template, in place.
+     *
+     * A mount is nothing more than a piece with a parent index and a local
+     * matrix, so the kit's accessories are APPENDED to `pieces` and the
+     * existing machinery carries them the rest of the way: the thin-instance
+     * loop draws them (one extra pool per kit piece per def/team),
+     * `computePieceWorldMatrices` chains them off their parent (so a mount on
+     * `turret` follows cosmetic aim without a line of new code), and
+     * `getMemberModel` fans them out to squad members in rest pose.
+     *
+     * Returns the kit's retargeted clips (the pennant/flag `idle` sway) for
+     * the caller to merge into the template — kit clips only ever animate
+     * CHILD nodes with rotation/scale channels, so no display fan-out
+     * translation can leak in through an animation.
+     *
+     * Failure is always soft: an unknown kit name, a hull with no mount table,
+     * a missing node or a fetch error leaves the bare hull rendering.
+     */
+    private async attachDressingKit(
+        def: UnitDefInfo,
+        baseUrl: string,
+        pieces: PieceInfo[],
+        materialTextures: Map<string, UnitTextures>,
+    ): Promise<ModelClip[]> {
+        const kit = dressingKit(def.customParams?.ms_dress);
+        if (!kit) {
+            if (def.customParams?.ms_dress) {
+                console.warn(`[entity-renderer] ${def.name}: unknown ms_dress kit `
+                    + `'${def.customParams.ms_dress}'`);
+            }
+            return [];
+        }
+        const hullStem = def.modelUrl
+            .substring(baseUrl.length)
+            .replace(/\.(gltf|glb)$/i, '');
+        const mounts = dressingMounts(kit, hullStem);
+        if (mounts.length === 0) {
+            console.warn(`[entity-renderer] ${def.name}: kit '${kit.model}' has no `
+                + `mount table for hull '${hullStem}'`);
+            return [];
+        }
+
+        const kitUrl = `${baseUrl}${kit.model}.gltf`;
+        try {
+            const result = await SceneLoader.ImportMeshAsync(
+                '', baseUrl, `${kit.model}.gltf`, this.scene,
+            );
+            const nodes = new Map<string, TransformNode>();
+            for (const n of [...result.meshes, ...(result.transformNodes ?? [])]) {
+                if (n.name !== '__root__') nodes.set(n.name, n as TransformNode);
+            }
+            for (const n of nodes.values()) n.computeWorldMatrix(true);
+
+            // Kit clips target nodes; retargeting needs node → final index.
+            const nodeToPiece = new Map<TransformNode, number>();
+
+            /** Detach a kit node's geometry into piece-local space and push it
+             *  as a piece parented to `parentIndex` with `local`. Recurses into
+             *  child nodes (the `flag` under `staff`), which keep their own
+             *  authored local transform. */
+            const localOf = (n: TransformNode): Matrix => Matrix.Compose(
+                n.scaling.clone(),
+                n.rotationQuaternion?.clone() ?? Quaternion.FromEulerVector(n.rotation),
+                n.position.clone(),
+            );
+            const pushPiece = (
+                node: TransformNode, parentIndex: number, local: Matrix,
+            ): void => {
+                // Snapshot the children BEFORE detaching this node's mesh —
+                // the detach zeroes its transform, which would corrupt any
+                // parent-relative maths done afterwards.
+                const children: [TransformNode, Matrix][] = [];
+                for (const child of node.getChildren()) {
+                    if (!(child instanceof TransformNode)) continue;
+                    if (/_primitive\d+$/.test(child.name)) continue;
+                    children.push([child, localOf(child)]);
+                }
+                const isMesh = node instanceof Mesh && node.getTotalVertices() > 0;
+                const parentRest = parentIndex >= 0
+                    ? pieces[parentIndex].restWorldMatrix : Matrix.Identity();
+                const restWorldMatrix = local.multiply(parentRest);
+                const idx = pieces.length;
+                if (isMesh) {
+                    const mesh = node as Mesh;
+                    const materialKey = mesh.material?.name;
+                    mesh.parent = null;
+                    mesh.position.set(0, 0, 0);
+                    mesh.rotationQuaternion = Quaternion.Identity();
+                    mesh.scaling.set(1, 1, 1);
+                    mesh.isPickable = false;
+                    mesh.isVisible = false;
+                    mesh.thinInstanceEnablePicking = false;
+                    mesh.alwaysSelectAsActiveMesh = true;
+                    mesh.renderingGroupId = 2;
+                    pieces.push({
+                        mesh, name: node.name, parentIndex, localMatrix: local,
+                        restWorldMatrix, materialKey,
+                    });
+                } else {
+                    pieces.push({
+                        mesh: null!, name: node.name, parentIndex,
+                        localMatrix: local, restWorldMatrix,
+                    });
+                    node.setEnabled(false);
+                }
+                nodeToPiece.set(node, idx);
+                // Children keep their authored parent-relative transform —
+                // only the mounted ROOT discards the kit's display fan-out.
+                for (const [child, childLocal] of children) {
+                    pushPiece(child, idx, childLocal);
+                }
+            };
+
+            const mounted: string[] = [];
+            for (const mount of mounts as readonly DressMount[]) {
+                const node = nodes.get(mount.piece);
+                if (!node) {
+                    console.warn(`[entity-renderer] ${def.name}: kit '${kit.model}' `
+                        + `has no piece '${mount.piece}'`);
+                    continue;
+                }
+                const parentIndex = pieces.findIndex((p) => p.name === mount.parent);
+                if (parentIndex < 0) {
+                    console.warn(`[entity-renderer] ${def.name}: no hull piece `
+                        + `'${mount.parent}' to mount '${mount.piece}' on`);
+                    continue;
+                }
+                pushPiece(node, parentIndex, mountLocalMatrix(mount));
+                mounted.push(mount.piece);
+            }
+            if (mounted.length === 0) return [];
+
+            // The kit carries its own material + texture set; register it so
+            // resolvePieceMaterial binds it per piece instead of falling back
+            // to the hull's pages.
+            const kitConfig = await fetchModelConfig(kitUrl);
+            if (kitConfig?.materials) {
+                for (const [name, uris] of kitConfig.materials) {
+                    if (materialTextures.has(name)) continue;
+                    const t = loadUnitTextures(uris, kitUrl, this.scene);
+                    if (t) materialTextures.set(name, t);
+                }
+            }
+
+            const kitClips = extractClips(result.animationGroups ?? [], (target) =>
+                nodeToPiece.get(target as TransformNode));
+            for (const g of result.animationGroups ?? []) { g.stop(); g.dispose(); }
+
+            console.log(`[entity-renderer] ${def.name}: dressed with `
+                + `${kit.model} — ${mounted.length} mount(s): ${mounted.join(', ')}`
+                + (kitClips.length ? `, clips: ${kitClips.map((c) => c.name).join(', ')}` : ''));
+            return kitClips;
+        } catch (err) {
+            if (this.scene.isDisposed) return [];
+            console.warn(`[entity-renderer] ${def.name}: failed to load dressing kit `
+                + `${kitUrl}`, err);
+            return [];
         }
     }
 
