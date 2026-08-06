@@ -45,13 +45,32 @@
  *   Optional: nudge an explosion onto a killed member for alignment.
  * @property {(x:number, z:number)=>number} groundHeight
  *   Terrain height sample (client heightmap) for member Y.
- * @property {(x:number, y:number, z:number)=>boolean} [isOnScreen]
+ * @property {(x:number, y:number, z:number, radius?:number)=>boolean} [isOnScreen]
  *   Optional: is this world position currently in the camera's on-screen
  *   frustum? Drives the stuck-recovery teleport gate
  *   (PLAN-metalstorm-squad-pathfinding.md §8) — never teleport a member the
- *   player can see. Backends that omit this are treated as "never on
- *   screen" (Squad._trackStuck), which is the safe default for a backend
+ *   player can see — and the LOD tiering's visibility input
+ *   (PLAN-metalstorm-squad-performance.md §12a, where `radius` pads the test
+ *   so a squad whose centroid is just off-frame isn't demoted while its
+ *   members are still visible). Backends that omit this are treated as "never
+ *   on screen" (Squad._trackStuck), which is the safe default for a backend
  *   that isn't actually rendering anything.
+ *
+ * --- Icon-tier markers (PLAN-metalstorm-squad-performance.md §12b) ---------
+ * At `icon` LOD a squad has ZERO member instances, so without a marker it
+ * would simply disappear from the world view. These two calls are THE seam
+ * PLAN-macro-map.md's strategic renderer takes over at — whatever a backend
+ * draws here today is explicitly a placeholder, and replacing it must not
+ * require touching squad logic.
+ *
+ * @property {(squadId:number, x:number, y:number, z:number, radius:number)=>void} [setIcon]
+ *   Optional: show/move this squad's icon marker at a world centroid. Upsert —
+ *   re-issued every frame while the squad is at icon tier, so it tracks the
+ *   interpolated centroid. `radius` is the squad's formation radius (a size
+ *   hint; the backend decides what it means visually).
+ * @property {(squadId:number)=>void} [clearIcon]
+ *   Optional: the squad left icon tier (or was removed) — drop its marker.
+ *   No-op for an unknown id.
  */
 
 /** No-op backend for headless logic/tests. Reports nothing as on-screen
@@ -68,4 +87,6 @@ export class NullRenderBackend {
   spawnImpactFx() {}
   groundHeight() { return 0; }
   isOnScreen() { return false; }
+  setIcon() {}
+  clearIcon() {}
 }
