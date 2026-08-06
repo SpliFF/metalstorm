@@ -285,6 +285,20 @@ static bool ShapeAnchor(const Directive& d, const CUnit* u, float3& out)
 /// deferred to the game's DecomposeDirective callin (macro-orders §2).
 static bool IssueDirectiveCommand(CUnit* u, const Directive& d)
 {
+    // Decomposed commands are issued ON BEHALF OF the directive's author
+    // (PLAN-metalstorm-objectives.md §5.1, endtoend D24): `fromLua = true`
+    // keeps them free of an authority charge exactly as before, while the real
+    // playerNum lets game Lua's AllowCommand hook stamp `last_commander` on
+    // each unit the directive actually moves. This is the only point at which
+    // a CONDITION-scoped directive (no roster at create time) can be attached
+    // to a unit at all. `fromLua = true` with a playerNum >= 0 is unique to
+    // the two decomposition sites — every Spring.GiveOrderToUnit family call
+    // in LuaSyncedCtrl.cpp passes -1 — so the discriminator cannot collide
+    // with an ordinary gadget-issued order.
+    const auto issue = [&](const Command& c) {
+        u->commandAI->GiveCommand(c, d.authorPlayerId, /*fromSynced=*/true, /*fromLua=*/true);
+    };
+
     float3 anchor;
     switch (d.type) {
         // 0..7 alias the classic standing-order types — reuse their mapping
@@ -298,12 +312,12 @@ static bool IssueDirectiveCommand(CUnit* u, const Directive& d)
             // "defend/assault this area". (Overwatch's fire-arc and Assault's
             // artillery split are game-Lua refinements, not v0 engine.)
             if (!ShapeAnchor(d, u, anchor)) return false;
-            u->commandAI->GiveCommand(Command(CMD_FIGHT, 0, anchor));
+            issue(Command(CMD_FIGHT, 0, anchor));
             return true;
         }
         case DirectiveType::DefendFront: {
             if (!ShapeAnchor(d, u, anchor)) return false;  // nearest front vertex
-            u->commandAI->GiveCommand(Command(CMD_FIGHT, 0, anchor));
+            issue(Command(CMD_FIGHT, 0, anchor));
             return true;
         }
         case DirectiveType::MoveFormation:
@@ -316,7 +330,7 @@ static bool IssueDirectiveCommand(CUnit* u, const Directive& d)
             // cosmetic client-side, PLAN-macro-squads; fight-on-retreat
             // posture for Withdraw folds into GroupPosture, next fire.)
             if (!ShapeAnchor(d, u, anchor)) return false;
-            u->commandAI->GiveCommand(Command(CMD_MOVE, 0, anchor));
+            issue(Command(CMD_MOVE, 0, anchor));
             return true;
         }
         case DirectiveType::PatrolRoute:
@@ -327,7 +341,7 @@ static bool IssueDirectiveCommand(CUnit* u, const Directive& d)
             size_t issued = 0;
             for (size_t off = base; off + 3 <= d.params.size(); off += 3) {
                 float3 wp(d.params[off], d.params[off + 1], d.params[off + 2]);
-                u->commandAI->GiveCommand(Command(CMD_PATROL, (issued == 0) ? 0 : SHIFT_KEY, wp));
+                issue(Command(CMD_PATROL, (issued == 0) ? 0 : SHIFT_KEY, wp));
                 ++issued;
             }
             return issued > 0;
@@ -342,12 +356,12 @@ static bool IssueDirectiveCommand(CUnit* u, const Directive& d)
                 if (target != nullptr && !target->isDead && targetId != u->id) {
                     Command cmd(CMD_GUARD, 0);
                     cmd.PushParam(static_cast<float>(targetId));
-                    u->commandAI->GiveCommand(cmd);
+                    issue(cmd);
                     return true;
                 }
             }
             if (!ShapeAnchor(d, u, anchor)) return false;
-            u->commandAI->GiveCommand(Command(CMD_MOVE, 0, anchor));
+            issue(Command(CMD_MOVE, 0, anchor));
             return true;
         }
     }
@@ -358,12 +372,14 @@ uint32_t DirectiveManager::Create(int team, DirectiveType type, uint8_t priority
                                   OrderShape shape, std::vector<float> params,
                                   StandingOrderConditions cond, uint32_t groupId,
                                   uint32_t requestedStrength, std::string phasesJson,
-                                  uint32_t expiresInFrames, uint32_t currentFrame)
+                                  uint32_t expiresInFrames, uint32_t currentFrame,
+                                  int authorPlayerId)
 {
     Directive d;
     d.id = nextId++;
     d.team = team;
     d.groupId = groupId;
+    d.authorPlayerId = authorPlayerId;
     d.type = type;
     d.priority = priority;
     d.shape = shape;
