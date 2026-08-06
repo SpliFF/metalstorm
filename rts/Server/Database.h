@@ -239,6 +239,16 @@ public:
     /// (capped) without an extra round trip.
     bool CommandPresetExists(int64_t userId, const std::string& name);
 
+    /// Raw handle, for modules that own their own tables and statements
+    /// (GameStateStore's game_snapshots, GameServersDb's game_servers) rather
+    /// than adding a method here per query. Null until Open() succeeds.
+    ///
+    /// Callers using it off the main thread rely on SQLite's default
+    /// serialized threading mode; they must also serialise their own
+    /// multi-statement transactions, since sharing a handle means sharing the
+    /// connection's single transaction scope.
+    sqlite3* Handle() const { return db; }
+
 private:
     void CreateTables();
 

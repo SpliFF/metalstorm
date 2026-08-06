@@ -503,6 +503,7 @@ if(TEST_SOURCES)
         ${CMAKE_SOURCE_DIR}/rts/Server/GameOverState.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GameMetrics.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GmRollback.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/GameStateStore.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GameServersDb.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/HeadlessRun.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/StatsDump.cpp

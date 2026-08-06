@@ -14,6 +14,7 @@
 #include "Server/Database.h"
 #include "Server/GameMetrics.h"
 #include "Server/GmVerbs.h"
+#include "Server/GameStateStore.h"
 #include "Server/DevBuildGate.h"
 #include "Server/ClientSession.h"
 #include "Server/EntityStateSerializer.h"
@@ -707,9 +708,34 @@ int main(int argc, char* argv[])
                            restartRequested, keepRunning);
 
     // PLAN-gm-tools task 2: the GM verb set (POST /api/gm/*). rollback/
-    // checkpoint ride a snapshot store — NullSnapshotStore until PLAN-persistence
-    // lands (they refuse cleanly, audited). Must outlive the server loop.
-    NullSnapshotStore gmSnapshotStore;
+    // checkpoint ride a snapshot store. Must outlive the server loop.
+    //
+    // PLAN-persistence task 1: this is now the real GameStateStore (framing,
+    // integrity, atomic SQLite commits, retention, the E1/E2 ladders) rather
+    // than NullSnapshotStore. It still reports Available()==false until a
+    // sim serializer is attached — creg is stubbed out in this tree, so
+    // nothing can walk the sim yet (PLAN-persistence Q-P1). The difference
+    // from the old null store is that the refusal now names the missing piece
+    // and everything around the walk is built, tested and ready to carry it.
+    //
+    // engineHash: FNV-1a of the build stamp, so a rebuilt binary refuses
+    // snapshots taken by the previous one (E1). mapHash: the processed map id.
+    // §2 also wants a defsHash for PLAN-def-reconciliation; it is deliberately
+    // absent here because defsCacheKey is not computed until later in boot —
+    // see PLAN-persistence.md §2.1.
+    gamestate::StoreConfig snapCfg;
+    snapCfg.gameId  = gameId;
+    snapCfg.mapHash = mapId;
+    {
+        const char* stamp = SPRING_BUILD_STAMP;
+        uint64_t h = 1469598103934665603ull;
+        for (const char* p = stamp; *p; ++p) {
+            h ^= uint64_t(uint8_t(*p));
+            h *= 1099511628211ull;
+        }
+        snapCfg.engineHash = h;
+    }
+    gamestate::GameStateStore gmSnapshotStore(db.Handle(), snapCfg);
     RegisterGmVerbs(ctx, gmSnapshotStore);
 
     // PLAN-replay task 1: attach the in-memory cause-stream journal under
