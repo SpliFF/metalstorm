@@ -84,6 +84,8 @@ export class SquadManager {
     this._lodFullMembers = 0;
     this._lodCentroidSquads = 0;
     this._lodCentroidMembers = 0;
+    this._lodIconSquads = 0;
+    this._lodIconMembers = 0;      // members still DRAWN by the icon squads
   }
 
   // --- reduced-detail member budget (PLAN-perf M20) ------------------------
@@ -106,16 +108,50 @@ export class SquadManager {
     return this.cfg.lodFullMemberBudget;
   }
 
+  /** Live A/B knob for the second threshold (M23), the `icon` companion to
+   *  `setLodBudget`. `setLodDrawnBudget(0)` restores the post-M20/pre-M23 frame
+   *  (every squad drawn in full) without a reload. Returns the budget in
+   *  force. */
+  setLodDrawnBudget(n) {
+    this.cfg.lodDrawnMemberBudget = Math.max(0, n | 0);
+    this._lodNextAt = 0;
+    return this.cfg.lodDrawnMemberBudget;
+  }
+
+  /** Live A/B knob for how many members an `icon` squad keeps (M23). Takes
+   *  effect on the next re-rank for squads that change tier; already-`icon`
+   *  squads re-elect on their next casualty, so bracket this by toggling the
+   *  drawn budget rather than by nudging the count. */
+  setIconMemberCount(n) {
+    this.cfg.iconMemberCount = Math.max(0, n | 0);
+    for (const sq of this.squads.values()) if (sq.lod === 'icon') sq._applyIconVisibility();
+    return this.cfg.iconMemberCount;
+  }
+
   /** What the policy did on its last pass — the measurement read-out, and the
-   *  thing to check before believing an A/B arm ("did it actually demote?"). */
+   *  thing to check before believing an A/B arm ("did it actually demote?").
+   *  `drawnMembers` is the whole point of M23: the number the per-member floor
+   *  is actually paid on, as against `fullMembers + centroidMembers` before. */
   get lodStats() {
+    const budget = this.cfg.lodFullMemberBudget | 0;
+    const drawn = this.cfg.lodDrawnMemberBudget | 0;
     return {
-      budget: this.cfg.lodFullMemberBudget | 0,
-      armed: this._viewSet && (this.cfg.lodFullMemberBudget | 0) > 0,
+      budget,
+      drawnBudget: drawn,
+      iconMemberCount: this.cfg.iconMemberCount | 0,
+      armed: this._viewSet && budget > 0,
+      iconArmed: this._viewSet && budget > 0 && drawn >= budget && drawn > 0,
       fullSquads: this._lodFullSquads,
       fullMembers: this._lodFullMembers,
       centroidSquads: this._lodCentroidSquads,
       centroidMembers: this._lodCentroidMembers,
+      iconSquads: this._lodIconSquads,
+      iconMembers: this._lodIconMembers,
+      // Hard-capped by `drawnBudget`: members drawn at full detail.
+      fullDetailMembers: this._lodFullMembers + this._lodCentroidMembers,
+      // The whole frame's member count — the number `entity` is linear in, and
+      // the one to quote in an A/B. Not capped (the marks are the residue).
+      drawnMembers: this._lodFullMembers + this._lodCentroidMembers + this._lodIconMembers,
     };
   }
 
@@ -130,29 +166,52 @@ export class SquadManager {
    *  `entity` by construction at any pose; distance only decides *which*
    *  squads pay, which is what it is good for and all it is used for here.
    *
-   *  `icon` squads are left alone — that tier is an adapter/minimap decision
-   *  about whether a squad is drawn at all, not a steering-cost decision. */
+   *  A SECOND threshold (`lodDrawnMemberBudget`, PLAN-perf M23) runs off the
+   *  same ranking: past it a squad drops to `icon` and is thinned to
+   *  `cfg.iconMemberCount` drawn members. `full`/`centroid` bounds STEERING
+   *  cost; `full`/`centroid`/`icon` bounds DRAWN member count, which is the
+   *  term the per-member floor is paid on.
+   *
+   *  While that second threshold is off (the default) `icon` squads are left
+   *  alone — the tier is then externally owned, an adapter/minimap decision
+   *  about whether a squad is drawn at all rather than a cost decision. */
   _applyLodBudget() {
     const budget = this.cfg.lodFullMemberBudget | 0;
+    const drawnBudget = this.cfg.lodDrawnMemberBudget | 0;
+    // A drawn budget below the full budget cannot be honoured (the full tier
+    // would blow through it on its own), so treat it as off rather than
+    // silently letting one threshold overrule the other.
+    const iconArmed = drawnBudget > 0 && drawnBudget >= budget;
     if (budget <= 0 || !this._viewSet) {
       // Un-demote anything this policy demoted, so switching the knob off in a
       // session really does restore the pre-M20 frame rather than freezing
       // whatever tiers the last pass happened to leave behind.
-      if (this._lodCentroidSquads > 0) {
-        for (const sq of this.squads.values()) if (sq.lod === 'centroid') sq.lod = 'full';
+      if (this._lodCentroidSquads > 0 || this._lodIconSquads > 0) {
+        for (const sq of this.squads.values()) if (sq.lod !== 'full') sq.lod = 'full';
       }
       this._lodFullSquads = 0; this._lodFullMembers = 0;
       this._lodCentroidSquads = 0; this._lodCentroidMembers = 0;
+      this._lodIconSquads = 0; this._lodIconMembers = 0;
       return;
     }
     if (this._now < this._lodNextAt) return;
     this._lodNextAt = this._now + (this.cfg.lodMemberBudgetIntervalSec ?? 0.25);
 
+    // Turning the second threshold off must really restore the pre-M23 frame.
+    // The gather below skips `icon` squads while the threshold is off (the tier
+    // is externally owned then), so squads THIS policy demoted have to be handed
+    // back first or they stay iconised forever — the same disarm the full budget
+    // needs, one tier down.
+    if (!iconArmed && this._lodIconSquads > 0) {
+      for (const sq of this.squads.values()) if (sq.lod === 'icon') sq.lod = 'centroid';
+      this._lodIconSquads = 0; this._lodIconMembers = 0;
+    }
+
     const rank = this._lodRank;
     rank.length = 0;
     const vx = this._viewX, vy = this._viewY, vz = this._viewZ;
     for (const sq of this.squads.values()) {
-      if (sq.lod === 'icon') continue;
+      if (!iconArmed && sq.lod === 'icon') continue;
       const dx = sq.cx - vx, dy = sq.cy - vy, dz = sq.cz - vz;
       sq._lodD2 = dx * dx + dy * dy + dz * dz;
       rank.push(sq);
@@ -171,7 +230,14 @@ export class SquadManager {
     const h = this.cfg.lodMemberBudgetHysteresis ?? 0;
     const holdLimit = budget;                // already `full`: keep it, up to the cap
     const promoteLimit = budget * (1 - h);   // currently `centroid`: needs slack to return
-    let used = 0, fullSquads = 0, centroidSquads = 0, centroidMembers = 0;
+    // Same hysteresis shape one tier down: a squad already drawn in full holds
+    // the drawn cap, one already at `icon` needs slack before it is restored.
+    const drawnHoldLimit = drawnBudget;
+    const drawnPromoteLimit = drawnBudget * (1 - h);
+    const iconKeep = Math.max(0, this.cfg.iconMemberCount | 0);
+    let used = 0, drawn = 0;
+    let fullSquads = 0, centroidSquads = 0, centroidMembers = 0;
+    let iconSquads = 0, iconMembers = 0;
     for (const sq of rank) {
       const n = sq.aliveCount;
       // Nearer squads have already claimed `used`; a squad that does not fit
@@ -179,16 +245,28 @@ export class SquadManager {
       // behind a large one still gets steered.
       if (used + n <= (sq.lod === 'full' ? holdLimit : promoteLimit)) {
         if (sq.lod !== 'full') sq.lod = 'full';
-        used += n; fullSquads++;
-      } else {
+        used += n; drawn += n; fullSquads++;
+      } else if (!iconArmed
+                 || drawn + n <= (sq.lod === 'icon' ? drawnPromoteLimit : drawnHoldLimit)) {
         if (sq.lod !== 'centroid') sq.lod = 'centroid';
-        centroidSquads++; centroidMembers += n;
+        drawn += n; centroidSquads++; centroidMembers += n;
+      } else {
+        // The mark's own members are NOT charged against `drawn`. There is no
+        // tier below `icon`, so a budget that counted them could not be honoured
+        // once enough squads were iconised (their floor is squads x iconMember-
+        // Count) — it would just stop thinning at an arbitrary point. What
+        // `lodDrawnMemberBudget` bounds hard is FULL-DETAIL members; the marks
+        // are the residue and are reported separately as `iconMembers`.
+        if (sq.lod !== 'icon') sq.lod = 'icon';
+        iconSquads++; iconMembers += Math.min(iconKeep, n);
       }
     }
     this._lodFullSquads = fullSquads;
     this._lodFullMembers = used;
     this._lodCentroidSquads = centroidSquads;
     this._lodCentroidMembers = centroidMembers;
+    this._lodIconSquads = iconSquads;
+    this._lodIconMembers = iconMembers;
   }
 
   /** Install the shared passability grid once the map's heightmap sampler is

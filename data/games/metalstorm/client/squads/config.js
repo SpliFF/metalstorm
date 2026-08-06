@@ -136,6 +136,31 @@ export const DEFAULT_CONFIG = {
   // the cap flip tier on every re-rank as the battle shuffles.
   lodMemberBudgetHysteresis: 0.1,
 
+  // --- Drawn-member budget / the `icon` tier (PLAN-perf M23) ---------------
+  // `lodFullMemberBudget` above caps how many members are STEERED. It does not
+  // cap how many are DRAWN: a `centroid` squad still pays the per-member floor
+  // (slot transform + ground sample + backend write — M21's cSlot/cGround/
+  // cWrite), and that floor is what `entity` is linear in over a 16x range
+  // (M19 Finding 5). This is the second threshold, on the same nearest-first
+  // ranking: once cumulative members pass `lodDrawnMemberBudget` the remaining
+  // squads drop to `icon` and are thinned to `iconMemberCount` members each.
+  //
+  // It caps FULL-DETAIL members (`full` + `centroid`) hard. It is deliberately
+  // NOT a cap on total drawn members: there is no tier below `icon`, so once
+  // enough squads are iconised the floor is squads x iconMemberCount and a
+  // budget that charged the marks against itself would simply stop thinning at
+  // an arbitrary point. The marks are the residue, reported as `iconMembers`.
+  //
+  // Set 0 to disable the second threshold entirely — the frame is then the
+  // post-M20 frame and `icon` goes back to being externally owned (nothing in
+  // the shipping client sets it). Must be >= lodFullMemberBudget to mean
+  // anything; a smaller value is ignored.
+  lodDrawnMemberBudget: 0,
+  // How many members an `icon` squad keeps. 0 is the pre-M23 behaviour (the
+  // squad disappears) and is measurement-only — it is the upper bound on what
+  // the tier can ever buy, not a shippable fidelity.
+  iconMemberCount: 3,
+
   // Big-unit threading (PLAN-metalstorm-flow.md §4, task 3/4). Weight applied
   // to the accumulated big-unit push term alongside arrival/separation.
   bigUnitWeight: 1.6,
