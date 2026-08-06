@@ -28,6 +28,7 @@ should go green unchanged; that is the design, and `test_briefed_roster_wins_
 when_it_is_available` is the tripwire that says so.
 """
 
+import dataclasses
 import json
 import math
 import os
@@ -724,12 +725,21 @@ class TestOutput(unittest.TestCase):
         The two reasons are different problems with different owners — no def
         exists for the role (content), or nothing fit the parcel (geometry) —
         and a staging that reported neither would read as complete.
+
+        Since T3 the middle field is a lot ROLE or a perimeter PART, because
+        `dropped` is "what did not get staged" and a watchtower that would not
+        fit is exactly that. The two vocabularies are disjoint, so a reader can
+        still tell which kind of thing was lost from the entry alone.
         """
+        kinds = tt.ROLE_ORDER + tt.LINE_PARTS + tt.EMPLACEMENT_PARTS
+        self.assertEqual(len(kinds), len(set(kinds)),
+                         "a lot role and a perimeter part share a name; the "
+                         "middle field of `dropped` is now ambiguous")
         saw = 0
         for _k, _a, _s, _town, staged, _p in sweep(seeds=range(1, 9)):
-            for lot, role, why in staged.dropped:
-                self.assertTrue(lot and role and why)
-                self.assertIn(role, tt.ROLE_ORDER)
+            for what, kind, why in staged.dropped:
+                self.assertTrue(what and kind and why)
+                self.assertIn(kind, kinds)
                 self.assertGreater(len(why), 20, f"terse drop reason: {why!r}")
                 saw += 1
         self.assertGreater(saw, 0, "nothing was ever dropped — is the sweep "
@@ -740,6 +750,230 @@ class TestOutput(unittest.TestCase):
         counts = staged.def_counts()
         self.assertEqual(counts, sorted(counts, key=lambda kv: (-kv[1], kv[0])))
         self.assertEqual([t for t, _n in staged.tier_counts()], tt.TIERS)
+
+
+# ==========================================================================
+# Walls and defenses (town-planner T3)
+# ==========================================================================
+# THE WALL KIT DOES NOT EXIST IN THIS CLONE AND IS NOT GOING TO BE FAKED IN
+# PRODUCTION CODE. `ms_barricade_set` is model-integration M2 content behind
+# that lane's manual land gate, and `town_templates.PERIMETER` deliberately
+# gives it no shipped stand-in — a stockade tiled out of gun turrets reads as
+# the fortified tier and would destroy the distinction the whole step exists to
+# draw. So the tests drive the wall channel with an EXPLICIT synthetic roster,
+# exactly as the T2 tests drive the landmark channel with `M3_FEATURES`. When
+# M2 lands, `kit_roster()` stops being needed and these tests keep passing.
+#
+# The kit's real footprint is unknown, so four plausible ones are swept. That
+# is not thoroughness for its own sake: the shape of the kit is what decides how
+# many units a span takes, and the tiling has to be right for all of them.
+
+KIT_SHAPES = [(6, 1), (3, 1), (8, 2), (1, 1)]
+
+
+def kit_roster(fx: int = 6, fz: int = 1):
+    """The shipped roster plus the two M2 perimeter defs, at a given kit size."""
+    r = dict(facts())
+    r["ms_barricade_set"] = ms_defs.UnitFacts(
+        "ms_barricade_set", fx, fz, 0.0, None, True)
+    r["ms_watchtower"] = ms_defs.UnitFacts(
+        "ms_watchtower", 3, 3, 0.0, None, True)
+    return r
+
+
+def walled(kind="flat", seed=3, tier="fortified", roster=None):
+    """One walled town, planned and staged. Returns (town, staged, probe)."""
+    probe = probe_for(kind)
+    c = (probe.W - 1) * probe.elmos / 2.0
+    town = tp.plan_town(seed, probe, c, c, RADIUS, search=RADIUS, defense=tier)
+    return town, ts.stage_town(town, roster or kit_roster(), probe=probe), probe
+
+
+def walled_sweep(roster=None, kinds=("flat", "rolling", "coast")):
+    out = []
+    for kind in kinds:
+        probe = probe_for(kind)
+        c = (probe.W - 1) * probe.elmos / 2.0
+        for seed in range(1, 10):
+            try:
+                town = tp.plan_town(seed, probe, c, c, RADIUS, search=RADIUS)
+            except tp.SiteRejected:
+                continue
+            if not town.walled:
+                continue
+            out.append((kind, seed, town,
+                        ts.stage_town(town, roster or kit_roster(),
+                                      probe=probe), probe))
+    return out
+
+
+class TestStampPitch(unittest.TestCase):
+    """The T2 finding one level up, asserted on the arithmetic that fixes it."""
+
+    def test_boxes_stepped_at_the_pitch_never_overlap(self):
+        """Every angle, every kit shape. The property, not a sample of it.
+
+        A wall is a CHAIN of axis-aligned boxes stepped along a line that runs
+        at whatever angle the town's boundary runs at, and stepping them by
+        their own width overlaps at shallow angles — at 8 degrees a 96-elmo box
+        advances 95 in x and 13 in z, which separates it on neither axis.
+        """
+        for fx, fz in KIT_SHAPES:
+            for facing in ts.FACING_ORDER:
+                hx, hz = ts._extent_of(facing, fx, fz)
+                for deg in range(0, 180, 3):
+                    h = math.radians(deg)
+                    d = ts._stamp_pitch(hx, hz, h)
+                    self.assertLess(d, float("inf"))
+                    a = ts._rect(0.0, 0.0, hx, hz)
+                    b = ts._rect(math.cos(h) * d, math.sin(h) * d, hx, hz)
+                    self.assertFalse(
+                        ts._rects_overlap(a, b),
+                        f"{fx}x{fz} {facing} at {deg} degrees: two boxes "
+                        f"{d:.1f} apart still overlap")
+
+    def test_stepping_by_the_bare_width_is_what_it_is_fixing(self):
+        """The negative control: the obvious spacing really does fail."""
+        hx, hz = ts._extent_of("south", 6, 1)
+        h = math.radians(8)
+        a = ts._rect(0.0, 0.0, hx, hz)
+        b = ts._rect(math.cos(h) * 2 * hx, math.sin(h) * 2 * hx, hx, hz)
+        self.assertTrue(ts._rects_overlap(a, b))
+
+
+class TestStagedDefenses(unittest.TestCase):
+
+    def test_a_walled_town_stages_its_wall(self):
+        for fx, fz in KIT_SHAPES:
+            with self.subTest(kit=f"{fx}x{fz}"):
+                town, staged, _p = walled(roster=kit_roster(fx, fz))
+                wall = staged.of_category("wall")
+                self.assertTrue(wall, f"{len(town.perimeter)} planned pieces "
+                                      f"and nothing staged")
+                self.assertTrue(all(p.defname == "ms_barricade_set"
+                                    for p in wall))
+                self.assertTrue(all(p.channel == "unit" for p in wall))
+                self.assertEqual({p.role for p in wall} - set(tt.LINE_PARTS),
+                                 set())
+
+    def test_the_wall_covers_the_line_it_was_given(self):
+        """Not "some units appeared" — the pieces are actually accounted for.
+
+        A stamp per planned piece at minimum, and a kit narrower than a span
+        must take MORE than one. That ratio is the thing `_tile_arc` exists for
+        and the thing a naive one-unit-per-piece placer gets wrong.
+        """
+        for fx, fz in KIT_SHAPES:
+            with self.subTest(kit=f"{fx}x{fz}"):
+                town, staged, _p = walled(roster=kit_roster(fx, fz))
+                wall = staged.of_category("wall")
+                width = fx * ts.SQUARE_ELMOS
+                if width * 2 <= tt.PERIMETER["span"]:
+                    self.assertGreater(
+                        len(wall), len(town.perimeter),
+                        f"a {width}-elmo kit tiled a {tt.PERIMETER['span']}-"
+                        f"elmo span one unit at a time")
+                staged_line = sum(p.half_x * 2 for p in wall
+                                  if p.facing in ("north", "south"))
+                self.assertGreater(staged_line + len(wall), 0)
+
+    def test_the_placement_spec_is_green_with_a_wall_on_the_ground(self):
+        for fx, fz in KIT_SHAPES:
+            bad = []
+            for kind, seed, town, staged, probe in walled_sweep(
+                    roster=kit_roster(fx, fz)):
+                problems = ts.validate_staging(staged, town, probe)
+                if problems:
+                    bad.append(f"{kind}/{seed}: " + "; ".join(problems[:2]))
+            self.assertEqual([], bad, f"kit {fx}x{fz}")
+
+    def test_no_wall_unit_is_built_through_a_house(self):
+        for kind, seed, town, staged, _probe in walled_sweep():
+            houses = staged.of_category("building")
+            for w in staged.of_category("wall"):
+                for h in houses:
+                    self.assertFalse(
+                        ts._rects_overlap(w.rect(), h.rect()),
+                        f"{kind}/{seed}: {w.key} ({w.role}) at "
+                        f"({w.x},{w.z}) is inside {h.key} ({h.defname})")
+
+    def test_the_gateways_stay_open(self):
+        """You can walk out of a walled town. Check 5 of the placement spec."""
+        seen = 0
+        for kind, seed, town, staged, probe in walled_sweep():
+            if not town.gateways():
+                continue
+            seen += 1
+            problems = [p for p in ts.validate_staging(staged, town, probe)
+                        if "gateway" in p]
+            self.assertEqual([], problems, f"{kind}/{seed}")
+        self.assertTrue(seen)
+
+    def test_a_plugged_gateway_is_caught(self):
+        """The negative control for check 5, and it is not implied by check 4.
+
+        A ring of wall with every gateway blocked satisfies "everything is
+        reachable from a street" perfectly — every street is inside, and so is
+        everything else. The town is sealed anyway.
+        """
+        town, staged, probe = walled()
+        self.assertTrue(town.gateways())
+        self.assertEqual([], ts.validate_staging(staged, town, probe))
+        g = town.gateways()[0]
+        # A slab across the gateway, wide enough that the flood cannot slip
+        # round either end of it inside the opening.
+        plug = ts.Placement(
+            key="plug", channel="unit", category="wall", role="wall",
+            tier="common", defname="ms_barricade_set", x=g.x, z=g.z,
+            facing="south", half_x=g.width, half_z=g.width)
+        blocked = dataclasses.replace(
+            staged, placements=tuple(list(staged.placements) + [plug]))
+        problems = ts.validate_staging(blocked, town, probe)
+        self.assertTrue(any("gateway" in p for p in problems), problems[:3])
+
+    def test_a_fortified_town_stages_real_staticdefense_today(self):
+        """The one part of T3 that is visible with no M2 content at all.
+
+        `tower` and `gun` resolve down the shipped ladder to `ms_watchtower` ->
+        `ms_staticdefense_s1` and to `ms_staticdefense_s2`, so the fortified
+        tier is playable now while the two walled tiers wait for the kit.
+        """
+        town, staged, _p = walled(roster=facts())
+        self.assertEqual("fortified", town.defense)
+        self.assertEqual([], staged.of_category("wall"))
+        guns = staged.of_category("defense")
+        self.assertTrue(guns)
+        self.assertTrue(all(p.defname.startswith("ms_staticdefense")
+                            for p in guns), staged.def_counts())
+        self.assertTrue(any("perimeter parts with no content" in g
+                            for g in staged.gaps), staged.gaps)
+
+    def test_an_open_town_stages_no_defenses_and_no_wall_gap_report(self):
+        town, staged, _p = walled(tier="open")
+        self.assertEqual([], staged.of_category("wall"))
+        self.assertEqual([], staged.of_category("defense"))
+        self.assertFalse(any("perimeter parts" in g for g in staged.gaps))
+
+    def test_every_perimeter_drop_says_which_piece_and_why(self):
+        saw = 0
+        for _k, _s, _t, staged, _p in walled_sweep():
+            for key, part, why in staged.dropped:
+                if part not in tt.LINE_PARTS + tt.EMPLACEMENT_PARTS:
+                    continue
+                saw += 1
+                self.assertTrue(key.startswith(("wall_", "emp_")), key)
+                self.assertGreater(len(why), 20, f"terse drop reason: {why!r}")
+        self.assertGreater(saw, 0, "nothing on any perimeter was ever dropped "
+                                   "— this test proved nothing")
+
+    def test_a_kit_wider_than_its_span_says_so(self):
+        """The one number a human has to change when the real kit lands."""
+        _t, staged, _p = walled(roster=kit_roster(10, 2))
+        self.assertTrue(any("wall fit:" in g for g in staged.gaps),
+                        staged.gaps)
+        _t, staged, _p = walled(roster=kit_roster(3, 1))
+        self.assertFalse(any("wall fit:" in g for g in staged.gaps),
+                         staged.gaps)
 
 
 # ==========================================================================
@@ -754,7 +988,20 @@ class TestCLI(unittest.TestCase):
                "--check"]
         r = subprocess.run(cli, capture_output=True, text=True, timeout=300)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("placement spec: OK", r.stderr)
+        self.assertIn("placement + perimeter specs: OK", r.stderr)
+
+    def test_each_defense_tier_can_be_driven_from_the_command_line(self):
+        for tier in tp.DEFENSE_ORDER:
+            with self.subTest(tier=tier):
+                cli = [sys.executable, os.path.join(MAPGEN, "town_stager.py"),
+                       "--demo", "rolling", "--seed", "7", "--radius",
+                       str(RADIUS), "--defense", tier, "--check", "--out",
+                       os.devnull]
+                r = subprocess.run(cli, capture_output=True, text=True,
+                                   timeout=300)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertIn(tt.DEFENSE_TIERS[tier]["label"], r.stderr)
+                self.assertIn("perimeter specs: OK", r.stderr)
 
     def test_an_impossible_site_exits_non_zero_with_a_reason(self):
         cli = [sys.executable, os.path.join(MAPGEN, "town_stager.py"),

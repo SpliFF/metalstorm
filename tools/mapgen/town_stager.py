@@ -90,12 +90,16 @@ import ms_defs                                              # noqa: E402
 import town_planner as tp                                   # noqa: E402
 from town_templates import (                                # noqa: E402
     DECOR,
+    EMPLACEMENT_PARTS,
     LANDMARK_MAX,
     LANDMARK_ODDS,
+    LINE_PARTS,
     LOT_ROLES,
+    PERIMETER,
     PROPS,
     ROLE_ORDER,
     resolve_landmarks,
+    resolve_perimeter,
     resolve_props,
     role_options,
 )
@@ -103,7 +107,12 @@ from town_templates import (                                # noqa: E402
 # Bumped whenever the emitted staging changes for an unchanged (graph, seed,
 # roster). Separate from `town_planner.PLANNER_VERSION`: a consumer caching a
 # staged town needs to see either move, and the two move for different reasons.
-STAGER_VERSION = 1
+#
+#   2  (town-planner T3) the town's defenses stage. A walled graph now yields
+#      wall/corner/gate/anchor units along its line and tower/gun units behind
+#      it, in two new categories; wall pieces clear each other at zero gap
+#      because a wall that leaves an alley between its own segments is a fence.
+STAGER_VERSION = 2
 
 # Elmos across one build square. `ms_defs.FOOTPRINT_SCALE` (2) converts a def's
 # `footprintx` to Spring's `xsize`, and `xsize * 4` is the half-extent in elmos
@@ -152,6 +161,24 @@ STREET_CLEARANCE = 8
 # 200-elmo parcel clears a road, this module asks whether a building does, and
 # a sample stride comparable to the gap it is checking will step over a corner.
 STREET_STRIDE = 12
+
+# Clearance between two pieces of the SAME WALL. Zero, and the zero is the
+# point: `town_planner` tiles the line arc-for-arc so that consecutive pieces
+# abut exactly, and a wall that holds its own segments TOWN_GAP apart is not a
+# wall, it is a picket fence with a 16-elmo hole every 110 elmos. Touching is
+# legal — `_rects_overlap` treats a shared edge as clear, matching
+# `scenariogen._rects_overlap` — so abutting segments pass the same overlap test
+# everything else does, with no exception carved into the spec for them.
+#
+# It applies to wall-against-anything, not just wall-against-wall: a wall
+# running along the back of a terrace is what a walled town looks like, and the
+# alley TOWN_GAP buys between two houses buys nothing between a house and the
+# boundary. The town's own `PERIMETER["margin"]` (150 elmos from the outermost
+# lot) is what actually keeps them apart, and it is the planner's to set.
+WALL_GAP = 0
+
+# Elmos of slack on the wall's own stamp pitch. See `_stamp_pitch`.
+WALL_STAMP_SLACK = 2.0
 
 # Reachability raster cell, in elmos. Half of TOWN_GAP on purpose: at a cell
 # equal to the gap, the one-cell-wide alley the gap guarantees can fall
@@ -252,8 +279,9 @@ class Placement:
     """
     key: str
     channel: str               # unit | feature
-    category: str              # building | prop | landmark
-    role: str                  # lot role, decoration kind, or landmark siting
+    category: str              # building | wall | defense | prop | landmark
+    role: str                  # lot role, wall part, decoration kind, or
+                               # landmark siting
     tier: str                  # common | uncommon | unique
     defname: str
     x: int
@@ -287,6 +315,11 @@ class StagedTown:
     its market because the def does not exist and a town missing its market
     because every candidate parcel was on a slope are different problems with
     different owners, and a staging that reports neither reads as complete.
+
+    `dropped` is (what, kind, why): `what` is a lot key or a wall-piece key,
+    and `kind` is a lot ROLE (`ROLE_ORDER`) or a perimeter PART (`LINE_PARTS` /
+    `EMPLACEMENT_PARTS`). The two vocabularies are disjoint on purpose, so an
+    entry says which sort of thing was lost without a fourth field.
     """
     key: str
     name: str
@@ -411,18 +444,28 @@ class _Site:
 
     # -- the three hard constraints ---------------------------------------
 
-    def on_buildable_ground(self, x, z, hx, hz) -> bool:
+    def on_buildable_ground(self, x, z, hx, hz, slope=None) -> bool:
         """Corners and centre, on the planner's own buildability grade.
 
-        `max_lot_slope` and not `max_street_slope`: this is where a building
-        stands, and the planner already refused to carve a parcel whose corners
-        failed this test. Re-running it on the BUILDING's corners is the point —
-        the building is not the parcel and on a diagonal street it reaches into
-        ground the parcel never covered.
+        `max_lot_slope` by default and not `max_street_slope`: this is where a
+        building stands, and the planner already refused to carve a parcel whose
+        corners failed this test. Re-running it on the BUILDING's corners is the
+        point — the building is not the parcel and on a diagonal street it
+        reaches into ground the parcel never covered.
+
+        `slope` overrides it for the one thing in a town that is not a building
+        standing on a pad: a WALL, which follows the land the way a road does
+        and which `town_planner._build_perimeter` therefore graded at
+        `max_street_slope`. Re-grading it here at the lot standard would reject
+        wall the planner deliberately kept, and the town would lose the
+        stretches of its boundary that ran over the roughest ground — exactly
+        the stretches a wall is for.
         """
+        if slope is None:
+            slope = self.rules.max_lot_slope
         for px, pz in ((x - hx, z - hz), (x + hx, z - hz), (x + hx, z + hz),
                        (x - hx, z + hz), (x, z)):
-            if not self.probe.buildable(px, pz, self.rules.max_lot_slope):
+            if not self.probe.buildable(px, pz, slope):
                 return False
         return True
 
@@ -448,10 +491,10 @@ class _Site:
                 return False
         return True
 
-    def accepts(self, x, z, hx, hz) -> bool:
-        return (self.on_buildable_ground(x, z, hx, hz)
+    def accepts(self, x, z, hx, hz, gap=TOWN_GAP, slope=None) -> bool:
+        return (self.on_buildable_ground(x, z, hx, hz, slope)
                 and self.off_the_carriageway(x, z, hx, hz)
-                and self.clear_of_placements(x, z, hx, hz))
+                and self.clear_of_placements(x, z, hx, hz, gap))
 
     def add(self, p: Placement) -> None:
         self.placed.append(p)
@@ -646,6 +689,7 @@ def stage_town(town, facts, seed: int | None = None, features=(),
                         f"({', '.join(LOT_ROLES[role]['defs'])}) is available")
 
     _stage_buildings(rnd, town, site, facts, options, placements, dropped)
+    _stage_perimeter(rnd, town, site, facts, placements, gaps, dropped)
     _stage_props(rnd, town, site, facts, placements, gaps)
     _stage_landmarks(rnd, town, site, features, placements, gaps)
 
@@ -774,6 +818,250 @@ def _stage_buildings(rnd, town, site, facts, options, placements, dropped):
             placements.append(p)
             site.add(p)
             used.append(defname)
+
+
+def _wall_facing(town, x: float, z: float, heading: float) -> str:
+    """The cardinal a wall piece at (x, z) lying along `heading` should take.
+
+    A wall piece lies ALONG the line, so the def's FRONTAGE has to run that way
+    — which means it faces ACROSS the line, outward. `_extent_of`'s invariant
+    (footprintx is frontage under every cardinal, footprintz is depth) is what
+    makes that a choice of facing rather than a choice of extents. Outward is
+    decided from the town centre, which is exact for a convex line.
+    """
+    out = heading + math.pi / 2.0
+    if math.cos(out) * (x - town.x) + math.sin(out) * (z - town.z) < 0:
+        out += math.pi
+    return tp._facing_of(out)
+
+
+def _stamp_pitch(hx: float, hz: float, heading: float) -> float:
+    """Least distance ALONG `heading` at which two of these boxes clear.
+
+    THE T2 FINDING, ONE LEVEL UP, AND IT IS WHY A WALL IS NOT A ROW OF UNITS
+    SPACED BY ITS OWN WIDTH. `Spring.CreateUnit` takes a facing, so the ground a
+    wall segment blocks is an AXIS-ALIGNED rectangle (Unit.cpp:224-225) — but
+    the line it is tiling runs at whatever angle the town's boundary runs at.
+    Two axis-aligned boxes stepped `2*hx` apart along a line at 8 degrees
+    advance only `2*hx*cos(8) = 0.99 * 2*hx` in x and `0.14 * 2*hx` in z, so
+    they overlap in BOTH axes and the second one is refused. Measured: a
+    96x16-elmo segment chain lost 101 of its pieces to exactly this.
+
+    Two axis-aligned boxes clear if they are separated on EITHER axis, so the
+    pitch is the smaller of the two distances that achieve it. At 0 degrees that
+    is `2*hx` (edge to edge, the obvious answer); at 8 degrees it is `2*hx/cos`,
+    barely more; near 45 degrees the `2*hz/sin` term takes over and the chain
+    packs much tighter than its own width, which is correct — a diagonal chain
+    of axis-aligned boxes really does interleave.
+
+    `WALL_STAMP_SLACK` is not a fudge for the algebra, which is exact: it is
+    because the stamps are then ROUNDED to integral elmos. At the exact pitch
+    the two boxes touch, `_rects_overlap` calls touching clear — and a stamp
+    that rounds half an elmo the wrong way closes the contact into an overlap.
+    Two elmos is one whole elmo of rounding at each end.
+    """
+    c, s = abs(math.cos(heading)), abs(math.sin(heading))
+    by_x = (2.0 * hx) / c if c > 1e-6 else float("inf")
+    by_z = (2.0 * hz) / s if s > 1e-6 else float("inf")
+    return min(by_x, by_z) + WALL_STAMP_SLACK
+
+
+def _stage_perimeter(rnd, town, site, facts, placements, gaps, dropped):
+    """The town's defenses: the wall line, then the towers and guns behind it.
+
+    Runs AFTER the buildings and before the dressing, and the order is a
+    priority: a town is its buildings, and where the two want the same ground
+    the wall is the one that gives it up. It should almost never come to that —
+    the line stands `PERIMETER["margin"]` outside the outermost lot corner and
+    `town_planner.validate_perimeter` proves no piece is built through a lot —
+    but a building relaxed off its own parcel onto the `inset` rung of
+    `_place_building`'s ladder can reach past the lot the line was measured
+    against, and when it does the house wins and the loss is reported.
+
+    THE ARC IS THE PLANNER'S, THE TILING IS THIS MODULE'S.
+    `town_planner` divides the line into pieces of `PERIMETER["span"]` and says
+    what each one is — wall, the corner at a vertex, the post beside a gateway,
+    the anchor where the ground gives out. It cannot say how many UNITS that
+    takes, because that is a fact about a def, and the planner may not read one.
+    So a piece is an ARC to be covered here, and this module lays as many copies
+    of the kit along it as the def's own frontage needs. A kit half the width of
+    a span gets two; a kit wider than its arc gets one and overflows, which is
+    reported rather than papered over.
+
+    Structural pieces are laid before plain wall, because their positions are
+    the ones that mean something: a corner post belongs at the vertex and a gate
+    post beside the gateway, while a stretch of wall only has to be continuous.
+    When an oversized kit makes the two fight, the wall is what shuffles.
+
+    WHAT THIS STAGES TODAY, AND WHAT IT DOES NOT.
+    `resolve_perimeter` filters to shipped content, and in this clone the line
+    parts resolve to nothing while `tower` and `gun` resolve to real
+    staticdefense — see `town_templates.PERIMETER`'s header for why a stockade
+    gets no stand-in rather than a stand-in made of gun turrets. So a fortified
+    town stages its towers and its gate guns today and its wall the day M2
+    lands, from the same graph, with no change here.
+    """
+    if not town.perimeter and not town.emplacements:
+        return
+    mapping = resolve_perimeter(facts)
+    present = {w.part for w in list(town.perimeter) + list(town.emplacements)}
+    missing = [p for p in LINE_PARTS + EMPLACEMENT_PARTS
+               if p in present and p not in mapping]
+    if missing:
+        gaps.append(
+            "perimeter parts with no content: " + ", ".join(missing)
+            + " — the `" + PERIMETER["defs"][missing[0]][0] + "` kit is not in "
+            "this game and has no honest stand-in; see town_templates.PERIMETER")
+
+    def emit(part, x, z, facing, hx, hz, defname, street, category):
+        p = Placement(
+            key=f"{'def' if category == 'defense' else 'wal'}_"
+                f"{len([q for q in placements if q.category == category]):03d}",
+            channel="unit", category=category, role=part,
+            tier="uncommon" if category == "defense" else "common",
+            defname=defname, x=int(round(x)), z=int(round(z)), facing=facing,
+            half_x=hx, half_z=hz, street=street)
+        placements.append(p)
+        site.add(p)
+
+    # -- the line ---------------------------------------------------------
+    if town.wall_line and "wall" in mapping:
+        ring = tp._Ring(town.wall_line)
+        order = sorted(
+            town.perimeter,
+            key=lambda w: (w.part == "wall", LINE_PARTS.index(w.part), w.s))
+        for w in order:
+            defname = mapping.get(w.part)
+            if not defname:
+                continue
+            f = facts[defname]
+            covered = _tile_arc(town, site, ring, w, defname, f, emit)
+            if covered < w.span * 0.75:
+                dropped.append((
+                    w.key, w.part,
+                    f"{defname} covered {int(covered)} of the {w.span} elmos "
+                    f"of line this piece owns at ({w.x},{w.z}) — the rest "
+                    f"overlapped something already staged, a carriageway, or "
+                    f"ground the kit cannot stand on"))
+        defname = mapping["wall"]
+        wide = facts[defname].footprint_x * SQUARE_ELMOS
+        if wide > PERIMETER["span"]:
+            # ACTIONABLE, not decorative: the tiling above lays one stamp when
+            # the kit will not fit twice, and a kit wider than the arc it was
+            # given overflows into its neighbours, which then shuffle or go
+            # short. The fix is one number in `town_templates` the day the kit's
+            # real footprint is readable, so the number is named here.
+            gaps.append(
+                f"wall fit: {defname} is {int(wide)} elmos across and "
+                f"`PERIMETER['span']` cuts the line into {PERIMETER['span']}-"
+                f"elmo pieces — raise the span to at least the kit's width or "
+                f"the wall will keep overlapping itself at every join")
+
+    # -- the emplacements behind it ---------------------------------------
+    for w in town.emplacements:
+        defname = mapping.get(w.part)
+        if not defname:
+            continue
+        f = facts[defname]
+        # A short ladder along the inward normal, and it is not optional: the
+        # planner sites an emplacement at a fixed inset from a line whose
+        # THICKNESS it assumed, and the kit that actually stages there can be
+        # four times as wide (an `ms_barricade_set` of 6x1 blocks 96 elmos, not
+        # the nominal 24). Without the ladder a fortified town lost 41 of its 88
+        # watchtowers to its own wall. Inward first, because the room is inside.
+        # A TOWER AND A GUN NUDGE IN DIFFERENT DIRECTIONS, because they are
+        # refused by different things.
+        #
+        # A tower is refused by the WALL in front of it or the HOUSE behind it,
+        # and the room is along the line's normal — alternating, because those
+        # two are opposite ways and a ladder that only went one way fixed one of
+        # them and made the other worse.
+        #
+        # A gun is refused by the ROAD it is covering, and the normal is very
+        # nearly the road's own direction: measured, a gun beside a gateway was
+        # refused at all six rungs because every rung walked it further up and
+        # down the carriageway it was standing in. Across the street is the only
+        # direction that helps, and `WallPiece.heading` for a gun is the
+        # street's heading precisely so this can be that.
+        if w.part == "gun":
+            nx, nz = -math.sin(w.heading), math.cos(w.heading)
+            rungs = (0.0, 40.0, -40.0, 80.0, -80.0, 120.0, -120.0)
+        else:
+            nx, nz = _inward(town, w.x, w.z)
+            rungs = (0.0, 32.0, -32.0, 64.0, -64.0, 96.0)
+        placed = False
+        for d in rungs:
+            x, z = w.x + nx * d, w.z + nz * d
+            facing = _wall_facing(town, x, z, w.heading)
+            hx, hz = _extent_of(facing, f.footprint_x, f.footprint_z)
+            if site.accepts(round(x), round(z), hx, hz):
+                emit(w.part, round(x), round(z), facing, hx, hz, defname,
+                     w.street, "defense")
+                placed = True
+                break
+        if not placed:
+            dropped.append((w.key, w.part,
+                            f"{defname} does not fit at ({w.x},{w.z}) or "
+                            f"anywhere on the line's normal through it: it "
+                            f"overlaps something already staged, a "
+                            f"carriageway, or ground it cannot stand on"))
+
+
+def _inward(town, x: float, z: float) -> tuple[float, float]:
+    """Unit vector from (x, z) towards the town centre. Exact for a convex line."""
+    dx, dz = town.x - x, town.z - z
+    m = math.hypot(dx, dz) or 1.0
+    return (dx / m, dz / m)
+
+
+def _tile_arc(town, site, ring, w, defname, f, emit) -> float:
+    """Lay as many copies of `defname` along one piece's arc as it takes.
+
+    Returns how many elmos of the arc were actually covered, so the caller can
+    say a piece went down short rather than reporting a wall as complete.
+
+    Each stamp gets a short slide ladder along the line before it is given up.
+    A wall that shuffles ten elmos along its own boundary is invisible; a wall
+    with a stamp missing is a hole someone can walk through, and the two are not
+    close in cost. The slide is the same idea as `_place_building`'s `shifted`
+    rung, for the same reason: keep the thing on the line it belongs to.
+    """
+    a = w.s - w.span / 2.0
+    facing = _wall_facing(town, w.x, w.z, w.heading)
+    hx, hz = _extent_of(facing, f.footprint_x, f.footprint_z)
+    # ONLY `wall` TILES. A corner, a gate post and a cliff anchor are POSTS —
+    # one thing, at one place that means something. Tiling them was measured and
+    # it was wrong twice over: the pitch is computed from the piece's bisector
+    # heading while the stamps are laid across a bend where the real heading
+    # differs by the corner angle, so they collided; and 98 of 212 corners were
+    # then reported short. A corner is not 80 elmos of wall, it is the post at
+    # the vertex.
+    n = 1
+    if w.part == "wall":
+        n = max(1, int(w.span // _stamp_pitch(hx, hz, w.heading)))
+    step = w.span / n
+    covered = 0.0
+    for j in range(n):
+        s = a + (j + 0.5) * step
+        for slide in (0.0, step * 0.18, -step * 0.18, step * 0.36, -step * 0.36):
+            # A single stamp keeps the piece's OWN heading, which for a corner
+            # is the bisector `town_planner` computed at the vertex and not
+            # either edge's direction; only a piece that takes several stamps
+            # reads the line locally, because only then does it span enough of
+            # it for the local direction to be the truer one.
+            if n == 1 and slide == 0.0:
+                x, z, h = float(w.x), float(w.z), w.heading
+            else:
+                x, z, h = ring.at(s + slide)
+            fac = _wall_facing(town, x, z, h)
+            ex, ez = _extent_of(fac, f.footprint_x, f.footprint_z)
+            if site.accepts(round(x), round(z), ex, ez,
+                            gap=WALL_GAP, slope=site.rules.max_street_slope):
+                emit(w.part, round(x), round(z), fac, ex, ez, defname,
+                     w.street, "wall")
+                covered += step
+                break
+    return covered
 
 
 def _stage_props(rnd, town, site, facts, placements, gaps):
@@ -929,11 +1217,18 @@ def validate_staging(staged: StagedTown, town, probe=None,
     of them, and so the CLI's `--check` can print a census instead of stopping
     at the first. An empty list is the spec passing.
 
-    The four checks are the four promises this module makes:
+    The five checks are the five promises this module makes:
       1. no two things block the same ground
       2. nothing stands on a carriageway
       3. everything stands on ground the planner would call buildable
       4. everything can be reached on foot from a street
+      5. a walled town's gateways are open — you can walk OUT of it
+
+    5 is T3's, and it is not implied by 4. The wall is the first thing this
+    module stages that is deliberately a barrier, and a ring of barriers whose
+    every gateway happened to be plugged would satisfy 4 perfectly: every
+    building inside is reachable from the streets inside, and the town is
+    sealed. So the gateways are probed from the outside, explicitly.
     """
     rules = rules or tp.SiteRules()
     problems: list[str] = []
@@ -982,12 +1277,29 @@ def validate_staging(staged: StagedTown, town, probe=None,
                     f"{rules.max_lot_slope:.0f} degrees, under water or off the "
                     f"map — first at ({int(bad[0][0])},{int(bad[0][1])})")
 
-    # 4. Reachability.
-    problems.extend(_unreachable(staged, town))
+    # 4 and 5. Reachability, and the way out through the gateways.
+    problems.extend(_unreachable(staged, town, _gateway_probes(town)))
     return problems
 
 
-def _unreachable(staged: StagedTown, town) -> list[str]:
+def _gateway_probes(town) -> list[tuple[float, float, str]]:
+    """A stand just OUTSIDE each gateway, which must be walkable from inside.
+
+    Pushed out from the town centre rather than along the line's own normal:
+    the centre is on the graph, the ring is not, and for a convex line the two
+    agree on which side is out.
+    """
+    out = []
+    for g in town.gateways():
+        dx, dz = g.x - town.x, g.z - town.z
+        m = math.hypot(dx, dz) or 1.0
+        reach = PERIMETER["thickness"] + 3 * REACH_CELL
+        out.append((g.x + dx / m * reach, g.z + dz / m * reach,
+                    f"gateway {g.key} ({g.street})"))
+    return out
+
+
+def _unreachable(staged: StagedTown, town, probes=()) -> list[str]:
     """Which placements no one could walk to from a street.
 
     A raster flood fill, not a graph walk. The failure this is looking for is
@@ -1005,7 +1317,7 @@ def _unreachable(staged: StagedTown, town) -> list[str]:
     """
     ps = list(staged.placements)
     if not ps:
-        return []
+        return []                  # nothing staged is nothing to be walled in by
     pad = 260.0
     x0 = min(p.rect()[0] for p in ps) - pad
     z0 = min(p.rect()[1] for p in ps) - pad
@@ -1015,6 +1327,9 @@ def _unreachable(staged: StagedTown, town) -> list[str]:
         for px, pz in s.points:
             x0, z0 = min(x0, px - pad), min(z0, pz - pad)
             x1, z1 = max(x1, px + pad), max(z1, pz + pad)
+    for px, pz, _label in probes:
+        x0, z0 = min(x0, px - pad), min(z0, pz - pad)
+        x1, z1 = max(x1, px + pad), max(z1, pz + pad)
 
     cols = int((x1 - x0) / REACH_CELL) + 1
     rows = int((z1 - z0) / REACH_CELL) + 1
@@ -1080,6 +1395,22 @@ def _unreachable(staged: StagedTown, town) -> list[str]:
             out.append(
                 f"{p.key} ({p.defname} at {p.x},{p.z}) cannot be reached from "
                 f"any street — it is walled in by other placements")
+
+    # The way out. Same flood, asked the opposite question: a town whose
+    # gateways are all plugged is internally perfect and externally sealed.
+    for px, pz, label in probes:
+        cx, cz = cell_of(px, pz)
+        if not (0 <= cx < cols and 0 <= cz < rows):
+            continue
+        i = cz * cols + cx
+        if blocked[i]:
+            out.append(f"{label}: the stand just outside the gateway at "
+                       f"({int(px)},{int(pz)}) is inside a staged footprint — "
+                       f"the gateway is built over")
+        elif not seen[i]:
+            out.append(f"{label}: ({int(px)},{int(pz)}) is outside the wall "
+                       f"and cannot be walked to from any street in town — "
+                       f"the gateway is sealed")
     return out
 
 
@@ -1105,6 +1436,8 @@ def main(argv=None) -> int:
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--radius", type=int, default=tp.DEFAULT_RADIUS)
     ap.add_argument("--archetype", default=None, choices=tp.ARCHETYPES)
+    ap.add_argument("--defense", default=None, choices=tp.DEFENSE_ORDER,
+                    help="pin the defense tier instead of drawing it")
     ap.add_argument("--game-dir", default=None,
                     help="data/games/metalstorm (default: derived, or the "
                          "repo's own when --demo is used)")
@@ -1140,7 +1473,8 @@ def main(argv=None) -> int:
 
     try:
         town = tp.plan_town(args.seed, probe, cx, cz, args.radius,
-                            archetype=args.archetype, search=args.radius)
+                            archetype=args.archetype, defense=args.defense,
+                            search=args.radius)
     except tp.SiteRejected as e:
         print(f"no town: {e}", file=sys.stderr)
         return 2
@@ -1161,23 +1495,29 @@ def main(argv=None) -> int:
 
     if not args.quiet:
         print(f"{staged.name} ({staged.key}) — {staged.archetype}, "
-              f"{len(town.lots)} lots", file=sys.stderr)
+              f"{town.defense_label}, {len(town.lots)} lots", file=sys.stderr)
         print(f"  staged {len(staged.units())} units, "
               f"{len(staged.features())} features, "
               f"dropped {len(staged.dropped)}", file=sys.stderr)
+        if town.walled:
+            print(f"  wall: {len(staged.of_category('wall'))} unit(s) on "
+                  f"{len(town.perimeter)} planned piece(s), "
+                  f"{len(staged.of_category('defense'))} emplacement(s), "
+                  f"{len(town.gateways())} gateway(s)", file=sys.stderr)
         for name, n in staged.def_counts():
             print(f"    {n:3d}  {name}", file=sys.stderr)
         for g in staged.gaps:
             print(f"  gap: {g}", file=sys.stderr)
 
     if args.check:
-        problems = validate_staging(staged, town, probe)
+        problems = (tp.validate_perimeter(town, probe)
+                    + validate_staging(staged, town, probe))
         if problems:
             print(f"PLACEMENT SPEC FAILED ({len(problems)}):", file=sys.stderr)
             for p in problems:
                 print(f"  {p}", file=sys.stderr)
             return 1
-        print("placement spec: OK", file=sys.stderr)
+        print("placement + perimeter specs: OK", file=sys.stderr)
     return 0
 
 

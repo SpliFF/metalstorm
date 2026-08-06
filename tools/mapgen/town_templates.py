@@ -84,7 +84,9 @@ STREET_ARCHETYPES = {
         "wander": 0.10,
         "jitter": 1.5,
         "max_shear": 0.22,          # radians at the town edge, scaled by distortion
-        "walled_odds": 0.45,
+        # A surveyed quarter on open ground is the archetype most likely to have
+        # been laid out behind a line: see DEFENSE_TIERS.
+        "defense_odds": {"open": 0.55, "stockade": 0.30, "fortified": 0.15},
     },
     # A valley floor, a ridge shoulder, a shoreline: one spine following the
     # contour, short lanes hanging off it. The archetype that reads as a road
@@ -101,7 +103,10 @@ STREET_ARCHETYPES = {
         "jitter": 3.0,
         "side_lane_len": (240, 520),   # seeded draw per lane
         "back_lane_odds": 0.55,
-        "walled_odds": 0.30,
+        # A town strung along a road is the hardest shape to wall — the
+        # perimeter is long and thin for the ground it encloses — and mostly
+        # nobody bothered.
+        "defense_odds": {"open": 0.70, "stockade": 0.22, "fortified": 0.08},
     },
     # Broken, rolling or waterlogged ground: no survey survived it. A plaza,
     # radials that wander around what they cannot climb, part-rings that only
@@ -119,7 +124,9 @@ STREET_ARCHETYPES = {
         "plaza_radius": 170,
         "radials": (5, 8),             # seeded draw
         "rings": (1, 2),
-        "walled_odds": 0.60,
+        # Broken ground, a compact footprint and a plaza to defend: the
+        # archetype that most often reads as a holdout.
+        "defense_odds": {"open": 0.40, "stockade": 0.38, "fortified": 0.22},
     },
 }
 
@@ -259,26 +266,187 @@ SCARCE_SHARE = 0.35
 
 
 # --------------------------------------------------------------------------
+# Defense tiers
+# --------------------------------------------------------------------------
+# The brief's ladder, in one table: "open hamlet (none) -> stockaded town
+# (barricade wall/corner segments, gate on the main street) -> fortified
+# compound (+ watchtowers at corners/entries, existing staticdefense at
+# gates)". A town's tier is drawn per-seed from its archetype's `defense_odds`
+# above, then gated on SIZE (`town_planner.choose_defense`) — a seven-lot
+# hamlet is not a fortified compound however the dice fall.
+#
+# The tier decides WHAT is on the perimeter, never WHERE: the wall line, the
+# gates and the terrain skips are pure geometry and identical across the two
+# walled tiers, so the same town at `stockade` and at `fortified` has the same
+# outline and the same gateways, with guns or without. That separation is what
+# makes "three tiers" a content ladder a scenario author can reason about
+# rather than three unrelated towns.
+#
+#   towers     watchtowers at every corner and beside every gateway, plus one
+#              every `tower_every` wall pieces so a long straight run is not
+#              blind. Emplacements, NOT wall pieces — see PERIMETER below.
+#   gate_guns  one existing staticdefense beside each gateway, inside the line.
+#
+# Terrain is deliberately NOT an input to the tier. The archetype already
+# carries the terrain read (organic_cluster is what broken ground chooses), and
+# what the brief asks terrain to change is the wall's GEOMETRY — where it skips
+# and where it anchors — which is `town_planner._build_perimeter`'s job.
+
+DEFENSE_TIERS = {
+    "open": {
+        "label": "Open",
+        "wall": False,
+        "towers": False,
+        "gate_guns": False,
+    },
+    "stockade": {
+        "label": "Stockaded",
+        "wall": True,
+        "towers": False,
+        "gate_guns": False,
+    },
+    "fortified": {
+        "label": "Fortified",
+        "wall": True,
+        "towers": True,
+        "gate_guns": True,
+        "tower_every": 5,      # ...on top of one per corner and per gateway
+    },
+}
+
+# Ordered weakest to strongest, because it is a ladder. Iterated as a list
+# wherever a tier reaches output (RULES OF DETERMINISM, scenariogen.py).
+DEFENSE_ORDER = ["open", "stockade", "fortified"]
+
+# Below this many lots a town is a hamlet and cannot be `fortified` at all;
+# at or above the second it draws the fortified weight at full strength, and
+# in between the weight ramps. Measured over 96 towns on the six demo terrains:
+# lots run 7..24 with a median of 17, so this makes the bottom fifth of the
+# range hamlets and the top half eligible for a compound.
+HAMLET_LOTS = 10
+COMPOUND_LOTS = 16
+
+
+# --------------------------------------------------------------------------
 # Perimeter kit
 # --------------------------------------------------------------------------
 # Walls are carried as segments, corners and gates rather than as individual
 # building slots, because the briefed def is a KIT (`ms_barricade_set`) whose
 # pieces are not yet separable here. A consumer that has the kit stamps a
-# piece per `span`; a consumer that does not can read `segments` as a fence
+# piece per `span`; a consumer that does not can read the pieces as a fence
 # polyline and draw nothing.
+#
+# TWO KINDS OF PIECE, AND THEY ARE NOT INTERCHANGEABLE.
+#   the LINE      wall / corner / gate / anchor. These tile the wall's ring
+#                 arc-for-arc: every elmo of the ring is covered by exactly one
+#                 piece or by exactly one declared gap, which is what
+#                 `town_planner.validate_perimeter` means by continuity.
+#   EMPLACEMENTS  tower / gun. These sit INSIDE the line, on no arc at all, and
+#                 are drawn only by the tiers that ask for them. Keeping them
+#                 out of the line is what lets continuity be an equality rather
+#                 than an "allowing for towers" — a spec with an exception in it
+#                 is a spec nobody reads.
+#
+# THERE IS NO WALL IN THIS GAME TODAY, AND THERE IS NO STAND-IN EITHER.
+# `ms_barricade_set` is model-integration M2 content that has not landed in
+# this clone (verified 2026-08-06, same check as this file's header). Unlike a
+# dwelling, a wall has no honest substitute in the shipped roster: the only
+# things that would tile a line are the staticdefense turrets, and a stockade
+# built out of gun turrets does not read as a stockade, it reads as the
+# fortified tier — which would destroy the exact distinction this table exists
+# to draw. So `wall`, `corner` and `gate` resolve to NOTHING today and say so
+# by name (`StagedTown.gaps`), on the same principle as PROPS below, while
+# `tower` and `gun` resolve to shipped staticdefense and are visible now.
 
 PERIMETER = {
     "span": 110,              # elmos of wall one kit piece covers
+    "thickness": 24,          # how much ground a wall piece takes across the line
     "margin": 150,            # gap between the outermost lot and the wall
-    "tower_every": 4,         # a tower every N spans, plus every corner
-    "gate_width": 150,        # opening where a street leaves town
+    "post_span": 44,          # a gate post / cliff anchor, at a run's end
+    "corner_span": 80,        # a corner post, straddling a vertex of the line
+
+    # How many vertices the wall line may have, drawn per town. The lots' own
+    # convex hull has 7 to 27 of them (measured, 96 towns) and is effectively a
+    # circle, on which "a corner" means nothing and a fortified town would get
+    # twenty watchtowers. `town_planner._simplify_hull` cuts it down to this by
+    # extending edges OUTWARD to meet, so the line still contains every lot.
+    "vertices": (5, 9),
+
+    # Where a street leaves town. The opening is derived from the street it
+    # serves and not fixed, because a fixed one is not wide enough: a gate post
+    # flanking an 88-elmo main street at the old 150-elmo opening stood 75
+    # elmos off the centreline, and `town_stager._Site.off_the_carriageway`
+    # correctly refused it — the post was inside the carriageway's own
+    # clearance. `gate_margin` is the room each post needs beside the road.
+    "gate_width": 150,        # FLOOR on the opening
+    "gate_margin": 72,        # ...plus this much either side of the street
+
+    # WHICH STREETS LEAVE TOWN. A gateway is not put wherever a carriageway
+    # happens to run out: `lane` is a side lane off a spine, `ring` is an
+    # internal circuit and `plaza` is the square itself, and a wall with a hole
+    # in it for each of those is not a wall. `main` and `street` are the through
+    # routes, which is also what makes "a gate on the main street" true by
+    # construction rather than by luck.
+    "gate_kinds": ["main", "street"],
+    # How close a through-street's END may be to the line and still count as a
+    # road leaving town. MEASURED over 26 walled towns: `main` and `street` ends
+    # sit 80 to 250 elmos inside the line at the quartiles, because T1's streets
+    # terminate at the outermost LOTS and the line stands `margin` beyond them —
+    # so a wall built only where a carriageway physically crosses it got no gate
+    # at all in 20 of 34 walled towns. Sealed. `plaza` ends are never closer
+    # than 488, which is the separation this number is set against.
+    "gate_reach": 320,
+    # Derived gateways only (a street that genuinely crosses the line always
+    # gets one, or the road dead-ends into masonry). Four holes is a defended
+    # town; eight is a colonnade.
+    "max_gates": 4,
+
+    "tower_inset": 96,        # a tower stands this far inside the line
+    "gun_inset": 96,          # ...and a gate gun this far inside its gateway
+    "gun_offset": 0.42,       # ...and this fraction of the opening off to one side
+    # Nominal ground an emplacement takes, for the planner's own clearance
+    # arithmetic only: the planner may not read a def, and the stager replaces
+    # this with the real footprint the moment it knows which def it is placing.
+    # 64 elmos is `ms_staticdefense_s2`, the largest thing `defs` below can
+    # resolve a tower or a gun to.
+    "emplacement_span": 64,
+    # Towers, total. See `town_planner._emplacements`: without a cap a 6300-elmo
+    # ring wants 22 of them, which is a fortress and not a town.
+    "max_towers": 8,
+
+    # Arc-length stride for the terrain scan along the line. Fine enough that a
+    # single unbuildable heightmap sample (8 elmos) cannot hide between two
+    # probes, coarse enough that a 6300-elmo ring is a few hundred samples.
+    "probe_step": 8,
+
+    # A surviving stretch of wall shorter than this is not a wall, it is a
+    # stub between two cliffs. Skipped whole and reported as terrain, which is
+    # what "cliff-anchor" means at the small end.
+    "min_run": 200,
+
     "defs": {
         "wall": ["ms_barricade_set"],
         "corner": ["ms_barricade_set"],
         "gate": ["ms_barricade_set"],
+        "anchor": ["ms_barricade_set"],
         "tower": ["ms_watchtower", "ms_staticdefense_s1"],
+        # "existing staticdefense at gates" — the brief's own words, so this
+        # one names shipped defs on purpose and has no briefed head. s2 over s1
+        # because a gate gun should out-rank the town's own watchtowers.
+        "gun": ["ms_staticdefense_s2", "ms_staticdefense_s1"],
     },
 }
+
+# The parts that tile the ring, in the order a reader should think about them,
+# and the parts that do not. Asserted to partition `PERIMETER["defs"]` at
+# import, so adding a part without deciding which kind it is fails loudly here
+# rather than quietly falling out of the continuity spec.
+LINE_PARTS = ["wall", "corner", "gate", "anchor"]
+EMPLACEMENT_PARTS = ["tower", "gun"]
+
+assert sorted(LINE_PARTS + EMPLACEMENT_PARTS) == sorted(PERIMETER["defs"]), (
+    "every PERIMETER part must be declared either a line part or an "
+    "emplacement: " + repr(sorted(PERIMETER["defs"])))
 
 
 # --------------------------------------------------------------------------
@@ -411,7 +579,13 @@ def resolve_roles(available: set[str] | frozenset[str] | dict) -> dict[str, str]
 
 
 def resolve_perimeter(available) -> dict[str, str]:
-    """Same contract as `resolve_roles`, for the wall kit. Keys of PERIMETER['defs']."""
+    """Same contract as `resolve_roles`, for the wall kit. Keys of PERIMETER['defs'].
+
+    A part with no content is LEFT OUT, which today is every line part — see
+    PERIMETER's header for why a stockade gets no stand-in. So in this clone
+    this returns `{'gun': ..., 'tower': ...}` and the caller reports the rest as
+    a gap, rather than tiling a town's boundary with gun turrets.
+    """
     out = {}
     for part in sorted(PERIMETER["defs"]):
         for defname in PERIMETER["defs"][part]:

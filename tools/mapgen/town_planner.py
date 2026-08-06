@@ -80,7 +80,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from regions_from_map import ELMOS_PER_SQUARE, name_for   # noqa: E402
 from town_templates import (                              # noqa: E402
     ARCHETYPES,
+    COMPOUND_LOTS,
     DECOR,
+    DEFENSE_ORDER,
+    DEFENSE_TIERS,
+    EMPLACEMENT_PARTS,
+    HAMLET_LOTS,
+    LINE_PARTS,
     LOT_ROLES,
     PERIMETER,
     ROLE_ORDER,
@@ -105,7 +111,19 @@ from town_templates import (                              # noqa: E402
 #        had frontage on paper and no lots in fact
 #      * decoration slots are rounded to integral elmos BEFORE the test that
 #        keeps them out of lots, not after
-PLANNER_VERSION = 2
+#
+#   3  (town-planner T3) the perimeter became a real defended boundary:
+#      * `walled` (a coin flip) became `defense`, one of three tiers, drawn
+#        from the archetype and gated on the town's size
+#      * the wall follows a SIMPLIFIED hull with 5-9 vertices instead of the
+#        lots' raw 7-27-vertex hull, so a corner is a corner
+#      * the line is scanned against the terrain and skips ground it cannot
+#        stand on, anchoring into the cliff or shore either side
+#      * a gate is an OPENING sized to the street it serves, flanked by posts,
+#        rather than a wall piece wearing a gate's name
+#      * the hull is recomputed AFTER `_grow_lots`, not before it — the T1
+#        order measured the boundary of lots that were about to get bigger
+PLANNER_VERSION = 3
 
 WATER_LEVEL = 0.0          # Spring's default; `passable_mask` uses the same
 
@@ -1457,72 +1475,801 @@ def _grow_lots(lots, probe, rules, streets) -> None:
 # Perimeter and decoration
 # ==========================================================================
 
+# A TOWN'S BOUNDARY IS A RING, AND EVERYTHING BELOW IS EXPRESSED IN ARC LENGTH.
+# The wall, the gateways a street cuts through it, and the stretches the ground
+# refuses to hold are all INTERVALS on one closed parameter `s` running from 0
+# to the line's perimeter. That is the whole reason the continuity invariant is
+# expressible at all: "every elmo of the ring is covered by exactly one piece or
+# exactly one declared gap" is an arithmetic statement about intervals, and it
+# is not a statement anyone can make about a bag of positioned wall segments.
+#
+# The line is NOT the lots' convex hull. It is that hull simplified outward to
+# a handful of vertices (`_simplify_hull`) — see PERIMETER["vertices"].
+
 @dataclass(frozen=True)
 class WallPiece:
+    """One thing on the town's boundary. Two kinds; see town_templates.PERIMETER.
+
+    LINE parts (wall/corner/gate/anchor) tile the ring: `s` is where the piece's
+    centre sits on it and `span` is how much of it the piece covers, so the
+    piece owns the closed arc [s - span/2, s + span/2].
+
+    EMPLACEMENT parts (tower/gun) sit inside the line and own no arc at all:
+    `s` is the arc they were sited FROM, and `span` is a nominal clearance, not
+    a length of wall. They are carried in `TownGraph.emplacements`, never in
+    `TownGraph.perimeter`, precisely so that the continuity spec over the latter
+    can be an equality with no exceptions in it.
+    """
     key: str
-    part: str                  # wall | corner | gate | tower
+    part: str                  # town_templates.LINE_PARTS | EMPLACEMENT_PARTS
     x: int
     z: int
-    heading: float
+    heading: float             # radians ALONG the line; the piece is `span`
+                               # long that way and `thickness` across it
     span: int
+    s: int = 0                 # arc-length position on the line
+    street: str | None = None  # gate/gun: the street this gateway serves
+    why: str = ""              # anchor: what the wall ran into here
+
+    def corners(self):
+        """The oriented box this piece takes. Same shape a `Lot` returns."""
+        return _obb_corners(self.x, self.z, self.span / 2.0,
+                            PERIMETER["thickness"] / 2.0, self.heading)
 
     def to_dict(self) -> dict:
         return {"key": self.key, "part": self.part, "x": self.x, "z": self.z,
-                "heading": round(self.heading, 5), "span": self.span}
+                "heading": round(self.heading, 5), "span": self.span,
+                "s": self.s, "street": self.street, "why": self.why}
 
 
-def _build_perimeter(rnd, site, streets, hull) -> list:
-    """Wall spans, corner posts, towers, and a gate wherever a street leaves.
+@dataclass(frozen=True)
+class WallGap:
+    """A stretch of the line with no wall on it, and the reason there is none.
 
-    Gates are derived, not decorated: the perimeter is cut where a street
-    actually crosses it, so a walled town is never sealed against its own road
-    network. A town whose streets all die inside the hull simply gets no gate,
-    which is the correct answer for a dead-end hamlet.
+    First-class output rather than a diagnostic, for the same reason
+    `StagedTown.dropped` is: a hole in a town's wall because a road goes through
+    it and a hole because the ground fell away are different facts about the
+    town, and a perimeter that reported neither would read as continuous.
     """
-    if len(hull) < 3:
-        return []
-    span = PERIMETER["span"]
+    key: str
+    kind: str                  # gate | terrain
+    s0: int
+    s1: int
+    x: int                     # midpoint of the gap, for a consumer with no ring
+    z: int
+    width: int
+    street: str | None = None
+    why: str = ""
 
-    # Where does each street cross the hull? Sampled along the polyline rather
-    # than solved analytically: the hull is convex, the streets are dense
-    # polylines, and a sampled crossing is accurate to half a sample.
-    exits: list[tuple[float, float]] = []
-    for s in sorted(streets, key=lambda s: s.key):
-        prev_in = None
-        total = s.length()
+    def to_dict(self) -> dict:
+        return {"key": self.key, "kind": self.kind, "s0": self.s0, "s1": self.s1,
+                "x": self.x, "z": self.z, "width": self.width,
+                "street": self.street, "why": self.why}
+
+
+def _line_meet(a, b, c, d):
+    """Where segment ab EXTENDED FORWARD meets segment cd extended BACKWARD.
+
+    None if they are near-parallel, and — the part that matters — None if they
+    meet anywhere else. `_simplify_hull` is replacing the edge between b and c
+    with this point, and the replacement is only a growth of the polygon if the
+    point lies beyond b on the first line AND before c on the second. When the
+    two edges either side of a dropped one turn through more than a right angle
+    between them, the lines cross on the INSIDE instead, and splicing that point
+    in gives a reflex vertex on a polygon everything downstream assumes is
+    convex. Measured, and it was not theoretical: it put a watchtower outside
+    the wall it was defending and lot corners outside the town.
+    """
+    det = (b[0] - a[0]) * (d[1] - c[1]) - (b[1] - a[1]) * (d[0] - c[0])
+    if abs(det) < 1e-7:
+        return None
+    t = ((c[0] - a[0]) * (d[1] - c[1]) - (c[1] - a[1]) * (d[0] - c[0])) / det
+    u = ((c[0] - a[0]) * (b[1] - a[1]) - (c[1] - a[1]) * (b[0] - a[0])) / det
+    if t <= 1.0 or u >= 0.0:
+        return None
+    return (a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]))
+
+
+def _simplify_hull(hull, target: int):
+    """Cut a convex hull down to about `target` vertices, OUTWARD.
+
+    WHY THE WALL DOES NOT FOLLOW THE HULL ITSELF. `plan_town`'s hull is the
+    convex hull of every lot corner, and measured over 96 towns it has 7 to 27
+    vertices — which is to say it is a circle with the numerical noise of where
+    the outermost parcels happened to fall. On a circle "a corner" is not a
+    place, so the T1 perimeter put a corner post every ~450 elmos in an
+    arbitrary spot, and the fortified tier would have put a watchtower on each.
+
+    Each round drops the EDGE whose removal grows the polygon least, by
+    extending its two neighbours until they meet. Two properties matter and both
+    are why it is this operation and not vertex deletion:
+      * the result CONTAINS the input, so every lot the hull enclosed is still
+        inside the wall — vertex deletion cuts corners off and would put houses
+        outside their own town;
+      * the result is still convex, so `_point_in_polygon`, the ring and the
+        gate arithmetic all keep working unchanged.
+
+    Near-parallel neighbours meet a very long way away and would grow a spike
+    out of the town, so a candidate whose new vertex lands further than
+    `reach_cap` from the edge it replaces is refused; if every candidate is
+    refused the polygon is returned as it stands, which is a legitimate answer
+    and not a failure.
+    """
+    poly = [(float(p[0]), float(p[1])) for p in hull]
+    if len(poly) <= max(3, target):
+        return poly
+    perim = sum(_seg_len(poly[i], poly[(i + 1) % len(poly)])
+                for i in range(len(poly)))
+    reach_cap = perim / 6.0
+    while len(poly) > max(3, target):
+        n = len(poly)
+        best = None
+        for i in range(n):
+            prev_a, prev_b = poly[(i - 1) % n], poly[i]
+            next_a, next_b = poly[(i + 1) % n], poly[(i + 2) % n]
+            p = _line_meet(prev_a, prev_b, next_a, next_b)
+            if p is None:
+                continue
+            grow = max(_seg_len(p, poly[i]), _seg_len(p, poly[(i + 1) % n]))
+            if grow > reach_cap:
+                continue
+            # Twice the area of the triangle the polygon gains.
+            area = abs((poly[(i + 1) % n][0] - poly[i][0]) * (p[1] - poly[i][1])
+                       - (poly[(i + 1) % n][1] - poly[i][1]) * (p[0] - poly[i][0]))
+            if best is None or area < best[0]:
+                best = (area, i, p)
+        if best is None:
+            break
+        _area, i, p = best
+        n = len(poly)
+        keep = [poly[k] for k in range(n) if k != i and k != (i + 1) % n]
+        # Splice the new vertex where the two it replaces were. Rebuilding by
+        # index rather than by `_convex_hull` because the hull routine would
+        # re-sort the ring and the caller's winding must survive.
+        at = i if i < (i + 1) % n else 0
+        poly = keep[:at] + [p] + keep[at:]
+    return poly
+
+
+class _Ring:
+    """A closed polyline parameterised by arc length. The wall's own frame.
+
+    Cheap and deliberately dumb: the lines are 5-9 vertices long, so a linear
+    scan per query costs less than the bookkeeping a search tree would need.
+    """
+
+    def __init__(self, poly):
+        self.poly = [(float(p[0]), float(p[1])) for p in poly]
+        self.cuts = [0.0]
+        n = len(self.poly)
+        for i in range(n):
+            self.cuts.append(
+                self.cuts[-1] + _seg_len(self.poly[i], self.poly[(i + 1) % n]))
+        self.total = self.cuts[-1]
+        cx = sum(p[0] for p in self.poly) / n
+        cz = sum(p[1] for p in self.poly) / n
+        self.centre = (cx, cz)
+
+    def at(self, s: float):
+        """(x, z, heading along the line) at arc length `s`, wrapped."""
+        s = s % self.total
+        for i in range(len(self.poly)):
+            if s <= self.cuts[i + 1] or i == len(self.poly) - 1:
+                a = self.poly[i]
+                b = self.poly[(i + 1) % len(self.poly)]
+                seg = (self.cuts[i + 1] - self.cuts[i]) or 1e-9
+                t = (s - self.cuts[i]) / seg
+                return (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t,
+                        math.atan2(b[1] - a[1], b[0] - a[0]))
+        raise AssertionError("unreachable: s was wrapped into the ring")
+
+    def vertex_arcs(self) -> list[float]:
+        return list(self.cuts[:-1])
+
+    def vertex_heading(self, i: int) -> float:
+        """The bisector at vertex `i` — the way a corner post lies.
+
+        Neither incoming edge nor outgoing edge: a corner post square to one of
+        them is square to a wall that is not there any more on the other side.
+        """
+        n = len(self.poly)
+        a, b, c = self.poly[(i - 1) % n], self.poly[i], self.poly[(i + 1) % n]
+        h1 = math.atan2(b[1] - a[1], b[0] - a[0])
+        h2 = math.atan2(c[1] - b[1], c[0] - b[0])
+        return math.atan2(math.sin(h1) + math.sin(h2),
+                          math.cos(h1) + math.cos(h2))
+
+    def inward(self, x: float, z: float, heading: float):
+        """Unit normal to `heading` at (x, z), pointing into the town.
+
+        Takes the heading rather than reading it back off an arc position, and
+        the difference is not cosmetic. At a CORNER the piece's heading is the
+        vertex bisector, while `at(s)` for the same arc returns whichever of the
+        two edges the rounding lands on — and at an acute vertex, stepping the
+        tower inset along one edge's inward normal walks straight out through
+        the other edge. Measured: a watchtower 96 elmos "inside" a spike in the
+        wall stood 7 elmos outside the town. The bisector's normal is the one
+        direction that goes into the corner rather than across it.
+
+        Which of the two normals is inward is decided by the centroid rather
+        than by the winding, because the winding of a hull that has been
+        simplified and re-spliced is not something this class should promise.
+        """
+        nx, nz = -math.sin(heading), math.cos(heading)
+        if (self.centre[0] - x) * nx + (self.centre[1] - z) * nz < 0:
+            return (-nx, -nz)
+        return (nx, nz)
+
+    def contains(self, x: float, z: float) -> bool:
+        return _point_in_polygon(x, z, self.poly)
+
+    def project(self, x: float, z: float) -> tuple[float, float]:
+        """(distance, arc length) of the closest point on the ring to (x, z)."""
+        best = (float("inf"), 0.0)
+        n = len(self.poly)
+        for i in range(n):
+            a, b = self.poly[i], self.poly[(i + 1) % n]
+            dx, dz = b[0] - a[0], b[1] - a[1]
+            l2 = dx * dx + dz * dz
+            t = 0.0 if l2 <= 1e-9 else _clamp(
+                ((x - a[0]) * dx + (z - a[1]) * dz) / l2, 0.0, 1.0)
+            px, pz = a[0] + dx * t, a[1] + dz * t
+            d = math.hypot(x - px, z - pz)
+            if d < best[0]:
+                best = (d, self.cuts[i] + t * (self.cuts[i + 1] - self.cuts[i]))
+        return best
+
+
+def _arc_delta(a: float, b: float, total: float) -> float:
+    """Shortest distance from `a` to `b` around a ring of length `total`."""
+    d = abs(a - b) % total
+    return min(d, total - d)
+
+
+def _cyclic_runs(flags) -> list[tuple[int, int]]:
+    """Maximal cyclic runs of True, as (start index, length)."""
+    n = len(flags)
+    if not any(flags):
+        return []
+    if all(flags):
+        return [(0, n)]
+    start = next(i for i in range(n) if flags[i] and not flags[(i - 1) % n])
+    runs: list[tuple[int, int]] = []
+    i = 0
+    while i < n:
+        if not flags[(start + i) % n]:
+            i += 1
+            continue
+        c = 0
+        while c < n and flags[(start + i + c) % n]:
+            c += 1
+        runs.append(((start + i) % n, c))
+        i += c
+    return runs
+
+
+def _gateways(streets, ring: _Ring) -> list[dict]:
+    """Where each street leaves town, as arcs on the ring. Deduped, ordered.
+
+    GATES ARE DERIVED, NOT DECORATED — the T1 property, kept, and the reason a
+    walled town is never sealed against its own road network. What changed in T3
+    is the shape of the answer: a gateway is now an OPENING sized to the street
+    it serves, not a wall piece wearing a gate's name. A fixed 150-elmo opening
+    was too narrow to flank an 88-elmo main street — see PERIMETER["gate_margin"].
+
+    THE FINDING THAT SHAPED THIS FUNCTION: T1's STREETS DO NOT REACH T1's WALL.
+    A street is walked outward until its lots run out, and the wall stands
+    `PERIMETER["margin"]` beyond the outermost lot corner, so a through-road
+    ends 80 to 250 elmos SHORT of the boundary (measured, 26 walled towns, the
+    two quartiles). Deriving gateways from physical crossings alone therefore
+    gave 20 of 34 walled towns no gate whatsoever — a ring of masonry with every
+    road inside it stopping dead. That is not a hamlet with no gate, which is
+    the legitimate case this function still allows; it is every town.
+
+    So there are two sources, and they are not the same claim:
+      * a CROSSING — a carriageway physically leaves the line. Always a gateway,
+        never dropped, because the alternative is a road into a wall.
+      * a through-street ENDING within `gate_reach` of the line and pointing at
+        it. The road out, projected the last two hundred elmos to the boundary.
+        Only `PERIMETER["gate_kinds"]`, and capped at `max_gates`, because every
+        lane that peters out near the edge is not a gate.
+
+    A town whose streets all die deep inside the line still gets no gateway,
+    which remains the correct answer for a dead-end hamlet.
+    """
+    # Each candidate is (arc, street key, street width, the STREET's heading
+    # where it meets the line). The heading is carried because a gate gun has to
+    # stand clear of the road, and "clear of the road" is a direction the ring
+    # does not know: a street crossing the line at 45 degrees is only 0.7 of an
+    # elmo further from its carriageway for every elmo moved along the wall.
+    forced: list[tuple[float, str, int, float]] = []
+    derived: list[tuple[float, str, int, float]] = []
+    for st in sorted(streets, key=lambda s: s.key):
+        prev = None
+        total = st.length()
         d = 0.0
         while d <= total:
-            px, pz, _h = point_at(s.points, d)
-            inside = _point_in_polygon(px, pz, hull)
-            if prev_in is not None and inside != prev_in:
-                exits.append((px, pz))
-            prev_in = inside
-            d += 20.0
+            px, pz, h = point_at(st.points, d)
+            inside = _point_in_polygon(px, pz, ring.poly)
+            if prev is not None and inside != prev:
+                _dist, s = ring.project(px, pz)
+                forced.append((s, st.key, st.width, h))
+            prev = inside
+            d += 16.0
+        if st.kind not in PERIMETER["gate_kinds"]:
+            continue
+        for at in (0.0, total):
+            ex, ez, h = point_at(st.points, at)
+            if not _point_in_polygon(ex, ez, ring.poly):
+                continue                       # already counted as a crossing
+            dist, s = ring.project(ex, ez)
+            if dist <= PERIMETER["gate_reach"]:
+                derived.append((s, st.key, st.width, h))
 
-    pieces: list = []
+    # Widest street first, so that when two candidates merge the opening is
+    # sized for the bigger of them and the cap keeps the main road over a lane.
+    order = sorted(forced, key=lambda c: (-c[2], c[0], c[1]))
+    order += sorted(derived, key=lambda c: (-c[2], c[0], c[1]))
+    out: list[dict] = []
+    for i, (s, key, width, heading) in enumerate(order):
+        half = max(PERIMETER["gate_width"],
+                   width + 2 * PERIMETER["gate_margin"]) / 2.0
+        if any(_arc_delta(g["s"], s, ring.total) <= max(g["half"], half)
+               for g in out):
+            continue
+        if i >= len(forced) and len(out) >= PERIMETER["max_gates"]:
+            continue
+        out.append({"s": s, "half": half, "street": key, "width": width,
+                    "heading": heading})
+    out.sort(key=lambda g: g["s"])
+    return out
+
+
+def _build_perimeter(rnd, probe, rules, streets, lots, ring: _Ring, tier: str):
+    """The wall line, the holes in it, and the guns behind it.
+
+    Returns (pieces, gaps, emplacements). Four steps, in this order because each
+    needs the one before it:
+
+      1. GATEWAYS. Where the streets cross the line (`_gateways`).
+      2. TERRAIN. The line is walked at `probe_step` and every sample graded
+         with the planner's own buildability test. Ground a carriageway could
+         not climb is ground a wall cannot stand on, so `max_street_slope` is
+         the grade — a wall follows the land the way a road does, unlike a
+         building, which needs a level pad.
+      3. RUNS. What is left after the gateways and the bad ground are cut out.
+         A surviving run under `min_run` is not a wall, it is a stub between two
+         cliffs, so it is given back to the terrain.
+      4. PIECES. Each run is tiled: a post at each end (a GATE post where the
+         run meets a gateway, a cliff ANCHOR where it meets bad ground), a
+         corner post at every vertex of the line inside the run, and wall
+         pieces filling everything between. Nothing straddles a vertex.
+
+    `tier` decides only what comes after: whether there is a wall at all, and
+    whether the towers and gate guns are drawn.
+    """
+    spec = DEFENSE_TIERS[tier]
+    if not spec["wall"] or ring is None or len(ring.poly) < 3:
+        return (), (), ()
+
+    # 1-2. Grade the ring: what is a gateway, what the ground refuses.
+    n = max(16, int(math.ceil(ring.total / PERIMETER["probe_step"])))
+    step = ring.total / n
+    gates = _gateways(streets, ring)
+    kind: list[str | None] = [None] * n
+    for i in range(n):
+        s = (i + 0.5) * step
+        for g in gates:
+            if _arc_delta(s, g["s"], ring.total) <= g["half"]:
+                kind[i] = "gate"
+                break
+        if kind[i] is None:
+            x, z, _h = ring.at(s)
+            if not probe.buildable(x, z, rules.max_street_slope):
+                kind[i] = "terrain"
+
+    # 3. Runs of wall, with the stubs given back.
+    for i0, count in _cyclic_runs([k is None for k in kind]):
+        if count * step >= PERIMETER["min_run"]:
+            continue
+        for j in range(count):
+            kind[(i0 + j) % n] = "terrain"
+    runs = _cyclic_runs([k is None for k in kind])
+
+    # 4. Tile each run.
+    pieces: list[WallPiece] = []
+    for i0, count in runs:
+        pieces.extend(_tile_run(ring, kind, gates, i0, count, n, step,
+                                len(pieces)))
+
+    gaps = _wall_gaps(ring, kind, gates, n, step)
+    emplacements = _emplacements(rnd, probe, rules, lots, streets, ring,
+                                 pieces, gates, spec)
+    return tuple(pieces), tuple(gaps), tuple(emplacements)
+
+
+def _clear_of_carriageways(bucket, x: float, z: float, half: float) -> bool:
+    """No street centreline sample inside an axis-aligned box of `half` plus
+    that street's own clearance.
+
+    Deliberately the same question `town_stager._Site.off_the_carriageway` asks,
+    asked here as well, because the planner emitting an emplacement in the road
+    and the stager quietly refusing it is the worst of both: the graph claims a
+    gun the town does not get, and the reason lives in a drop message. Measured
+    before this existed: 14 of 20 gate guns planned on meridian_basin were
+    refused at staging for standing in the carriageway they were covering.
+    """
+    for px, pz, clear, _key in bucket.near(x, z, half + 240.0):
+        if abs(px - x) <= half + clear and abs(pz - z) <= half + clear:
+            return False
+    return True
+
+
+def _mk_piece(idx: int, part: str, ring: _Ring, s: float, span: float,
+              heading: float | None = None, street=None, why="") -> WallPiece:
+    x, z, h = ring.at(s)
+    return WallPiece(
+        key=f"wall_{idx:03d}", part=part, x=int(round(x)), z=int(round(z)),
+        heading=h if heading is None else heading, span=int(round(span)),
+        s=int(round(s % ring.total)), street=street, why=why)
+
+
+def _tile_run(ring: _Ring, kind, gates, i0: int, count: int, n: int,
+              step: float, idx0: int) -> list[WallPiece]:
+    """Fill one run of standable ring with posts, corners and wall.
+
+    Works in UNWRAPPED arc length: a run that crosses the ring's origin gets
+    `s1 > ring.total`, and `_Ring.at` wraps on read. Doing it the other way —
+    splitting the run at the origin — would put a seam at an arbitrary place and
+    the continuity spec would have to know about it.
+    """
+    post = PERIMETER["post_span"]
+    corner = PERIMETER["corner_span"]
+    s0 = i0 * step
+    s1 = s0 + count * step
+    whole = count >= n
+
+    # Reservations: (start, end, part, street, why). These are the pieces that
+    # must sit exactly where they sit; wall fills what is left.
+    res: list[tuple] = []
+    if not whole and (s1 - s0) >= 2 * post:
+        for at_start in (True, False):
+            edge = kind[(i0 - 1) % n] if at_start else kind[(i0 + count) % n]
+            a = s0 if at_start else s1 - post
+            gate = None
+            if edge == "gate":
+                mid = a + post / 2.0
+                gate = min(gates, key=lambda g: _arc_delta(g["s"], mid,
+                                                           ring.total))
+            res.append((a, a + post, "gate" if edge == "gate" else "anchor",
+                        gate["street"] if gate else None,
+                        "" if edge == "gate" else
+                        "the line runs onto ground a wall cannot stand on"))
+
+    for vi, v in enumerate(ring.vertex_arcs()):
+        vv = v
+        while vv < s0:
+            vv += ring.total
+        if vv >= s1:
+            continue
+        a, b = vv - corner / 2.0, vv + corner / 2.0
+        if a < s0 or b > s1:
+            continue
+        if any(a < r[1] and r[0] < b for r in res):
+            continue
+        res.append((a, b, "corner", None, ""))
+
+    res.sort(key=lambda r: r[0])
+
+    # No wall piece may straddle a vertex of the line, or its heading would be
+    # a lie about which way it lies. Vertices that got no corner post (too near
+    # a run end, or overlapped by a gate post) still split the fill.
+    splits = set()
+    for v in ring.vertex_arcs():
+        vv = v
+        while vv < s0:
+            vv += ring.total
+        if s0 < vv < s1:
+            splits.add(vv)
+
+    out: list[WallPiece] = []
+    idx = idx0
+
+    def fill(u: float, w: float):
+        nonlocal idx
+        bounds = sorted({u, w} | {v for v in splits if u < v < w})
+        for k in range(len(bounds) - 1):
+            lo, hi = bounds[k], bounds[k + 1]
+            length = hi - lo
+            if length < 1.0:
+                continue
+            parts = max(1, int(round(length / PERIMETER["span"])))
+            piece = length / parts
+            for j in range(parts):
+                out.append(_mk_piece(idx, "wall", ring,
+                                     lo + (j + 0.5) * piece, piece))
+                idx += 1
+
+    cursor = s0
+    for a, b, part, street, why in res:
+        fill(cursor, a)
+        heading = None
+        if part == "corner":
+            vi = min(range(len(ring.poly)),
+                     key=lambda i: _arc_delta(ring.cuts[i], (a + b) / 2.0,
+                                              ring.total))
+            heading = ring.vertex_heading(vi)
+        out.append(_mk_piece(idx, part, ring, (a + b) / 2.0, b - a,
+                             heading=heading, street=street, why=why))
+        idx += 1
+        cursor = b
+    fill(cursor, s1)
+    return out
+
+
+def _wall_gaps(ring: _Ring, kind, gates, n: int, step: float) -> list[WallGap]:
+    """Every stretch of the ring with no wall on it, labelled with why.
+
+    Runs of the SAME label, not runs of "open". A gateway that happens to sit
+    beside a cliff would otherwise merge into one gap, and whichever label the
+    merged run took would be a lie about half of it — reported as terrain it
+    hides the fact that a road goes through, reported as a gate it claims the
+    cliff could be walled. They are two gaps because they are two facts.
+    """
+    out: list[WallGap] = []
+    for i0, count in _cyclic_label_runs(kind):
+        s0 = i0 * step
+        s1 = s0 + count * step
+        mid = (s0 + s1) / 2.0
+        x, z, _h = ring.at(mid)
+        label = kind[i0]
+        g = None
+        if label == "gate" and gates:
+            g = min(gates, key=lambda g: _arc_delta(g["s"], mid, ring.total))
+        out.append(WallGap(
+            key=f"gap_{len(out):03d}",
+            kind=label,
+            s0=int(round(s0 % ring.total)), s1=int(round(s1 % ring.total)),
+            x=int(round(x)), z=int(round(z)), width=int(round(s1 - s0)),
+            street=g["street"] if g else None,
+            why=(f"{g['street']} leaves town here" if g else
+                 "the line crosses ground steeper than a carriageway could "
+                 "climb, water, or the map border")))
+    return out
+
+
+def _cyclic_label_runs(labels) -> list[tuple[int, int]]:
+    """Maximal cyclic runs of equal, non-None labels, as (start, length)."""
+    out: list[tuple[int, int]] = []
+    n = len(labels)
+    for i0, count in _cyclic_runs([k is not None for k in labels]):
+        j = 0
+        while j < count:
+            k = 1
+            while (j + k < count
+                   and labels[(i0 + j + k) % n] == labels[(i0 + j) % n]):
+                k += 1
+            out.append(((i0 + j) % n, k))
+            j += k
+    return out
+
+
+def _emplacements(rnd, probe, rules, lots, streets, ring: _Ring, pieces, gates,
+                  spec) -> list[WallPiece]:
+    """Watchtowers and gate guns, inside the line. Only the tiers that ask.
+
+    "Watchtowers at corners/entries, existing staticdefense at gates" — the
+    brief's own words, and the order they are drawn in is the order they are
+    kept in when the cap bites: a gateway is what a town defends, so gateway
+    towers survive a thinning that corner and mid-run towers do not.
+
+    The cap exists because the arithmetic without it is absurd. A 6300-elmo ring
+    with 7 corners, 4 gateways and a tower every 5 wall pieces wants 22
+    watchtowers, which is not a fortified town, it is a fortress no scenario
+    could ask a player to take.
+
+    Emplacements are graded against the ground SEPARATELY from the line, and
+    they have to be: a tower stands 70 elmos inside the wall, on a sample the
+    line's own terrain scan never looked at, and the wall follows the land where
+    a gun emplacement needs to stand on it. `max_lot_slope` is therefore the
+    grade here where the line uses `max_street_slope`.
+    """
+    if not spec.get("towers") and not spec.get("gate_guns"):
+        return []
+    out: list[WallPiece] = []
     idx = 0
-    for i in range(len(hull)):
-        a, b = hull[i], hull[(i + 1) % len(hull)]
-        seg = _seg_len(a, b)
-        heading = math.atan2(b[1] - a[1], b[0] - a[0])
-        n = max(1, int(round(seg / span)))
-        step = seg / n
-        for j in range(n):
-            t = (j + 0.5) * step
-            px = a[0] + (b[0] - a[0]) * (t / seg)
-            pz = a[1] + (b[1] - a[1]) * (t / seg)
-            part = "wall"
-            if any(math.hypot(px - ex, pz - ez) <= PERIMETER["gate_width"]
-                   for ex, ez in exits):
-                part = "gate"
-            elif j == 0:
-                part = "corner"
-            elif (j % PERIMETER["tower_every"]) == 0:
-                part = "tower"
-            pieces.append(WallPiece(f"wall_{idx:03d}", part, int(round(px)),
-                                    int(round(pz)), heading, int(round(step))))
+    # Two emplacements closer than this are one emplacement with a clearance
+    # problem. MEASURED: the gate gun and the gateway's own watchtower were
+    # sited from the same gateway arc, one at the post and one a shoulder's
+    # width along it, both inset the same 96 elmos — 16 elmos apart. Sixteen of
+    # 44 gate guns were then refused by the stager for overlapping the tower
+    # that had just been placed, which is more than a third of the brief's
+    # "existing staticdefense at gates" never reaching the ground.
+    apart = PERIMETER["emplacement_span"] * 1.6
+
+    half = PERIMETER["emplacement_span"] / 2.0
+    roads = _street_bucket(streets)
+
+    def stands(x, z, heading) -> bool:
+        # Three questions, and `contains` is not belt-and-braces on top of
+        # `inward`: a needle-sharp vertex on the line can be narrower than the
+        # inset is long, and then there is no distance along the bisector that
+        # is inside the town at all. An emplacement outside its own wall is
+        # worse than a corner with no watchtower, so the corner goes without.
+        #
+        # The lot test is the one this function was missing. `tower_inset` is
+        # 96 elmos against a `margin` of 150 from the outermost lot CORNER, so
+        # a tower behind a corner of the line reaches the backs of the houses;
+        # measured, it stood inside a 210x190 dwelling parcel. The ladder in
+        # `_sited_at` steps it back out towards the wall rather than dropping it.
+        if not ring.contains(x, z):
+            return False
+        # The corners of the nominal box, not just the centre — the same five
+        # points `town_stager._Site.on_buildable_ground` grades, for the same
+        # reason it grades them. A centre-only test on meridian_basin passed
+        # emplacements whose 64-elmo box had a corner on a slope, and the stager
+        # then refused them: `ground` was the single commonest reason a planned
+        # gun never reached the town.
+        for px, pz in ((x - half, z - half), (x + half, z - half),
+                       (x + half, z + half), (x - half, z + half), (x, z)):
+            if not probe.buildable(px, pz, rules.max_lot_slope):
+                return False
+        if not _clear_of_carriageways(roads, x, z, half):
+            return False
+        box = _obb_corners(x, z, half, half, heading)
+        return not any(_obb_overlap(box, l.corners()) for l in lots)
+
+    def clear(x, z) -> bool:
+        return all(math.hypot(x - e.x, z - e.z) >= apart for e in out)
+
+    def ladder(x0, z0, nx, nz, heading, inset):
+        """The nominal inset, then progressively nearer the wall behind it.
+
+        Only inward-to-outward, and only as far as the line: an emplacement is
+        a thing standing behind a wall, and one that has walked forwards into
+        the town to find room is a turret in somebody's back garden.
+        """
+        for frac in (1.0, 0.72, 0.48, 0.28):
+            x = int(round(x0 + nx * inset * frac))
+            z = int(round(z0 + nz * inset * frac))
+            if stands(x, z, heading) and clear(x, z):
+                return (x, z)
+        return None
+
+    if spec.get("towers"):
+        inset = PERIMETER["tower_inset"]
+        span = PERIMETER["emplacement_span"]
+
+        def sited(p: WallPiece):
+            nonlocal idx
+            nx, nz = ring.inward(p.x, p.z, p.heading)
+            spot = ladder(p.x, p.z, nx, nz, p.heading, inset)
+            if spot is None:
+                return None
+            x, z = spot
+            e = WallPiece(key=f"emp_{idx:03d}", part="tower", x=x, z=z,
+                          heading=p.heading, span=span, s=p.s, street=p.street)
             idx += 1
-    return pieces
+            out.append(e)
+            return e
+
+        # One tower per gateway, not two: a gateway has two posts and a
+        # watchtower on each is a gatehouse, which is a different building.
+        # Gateways go down FIRST and unconditionally — they are the "entries"
+        # the brief names, and the cap and the separation test below must bite
+        # on a corner before they bite on a gate.
+        by_gate: dict[str, WallPiece] = {}
+        for p in pieces:
+            if p.part == "gate":
+                by_gate.setdefault(p.street or p.key, p)
+        entry = [t for t in (sited(by_gate[k]) for k in sorted(by_gate)) if t]
+
+        room = max(0, PERIMETER["max_towers"] - len(entry))
+        candidates = [p for p in pieces if p.part == "corner"]
+        every = spec.get("tower_every", 0)
+        if every:
+            candidates.extend(p for i, p in enumerate(
+                [q for q in pieces if q.part == "wall"]) if i and i % every == 0)
+        # Thinned BEFORE siting, so the cap is spread over the whole ring and
+        # not spent on the first `max_towers` corners the list happens to hold.
+        for p in _thin(candidates, room):
+            sited(p)
+
+    if spec.get("gate_guns"):
+        for g in sorted(gates, key=lambda g: (g["street"], g["s"])):
+            x, z, h = ring.at(g["s"])
+            nx, nz = ring.inward(x, z, h)
+            # BESIDE THE GATEWAY, AND "BESIDE" IS ACROSS THE ROAD, NOT ALONG
+            # THE WALL. The first cut offset the gun along the line by a
+            # fraction of the opening, which is the same direction only when the
+            # street meets the boundary square on. On a real map they rarely do:
+            # measured on meridian_basin/southgate, all three gate guns were
+            # offset 97 elmos along the line, which for streets crossing at
+            # 40-odd degrees left them inside the carriageway's own clearance,
+            # and `town_stager` correctly refused every one.
+            #
+            # Both shoulders are tried and the seed picks only which one goes
+            # first. The second is not a fallback for bad ground alone: this
+            # gateway's own watchtower is already standing on one of them, and
+            # `clear` is what sends the gun to the other side rather than into
+            # it. Then progressively wider, because a gun that has to stand a
+            # whole opening's width off the road is still a gun covering the
+            # road, and no gun at all is not.
+            sh = g["heading"]
+            px, pz = -math.sin(sh), math.cos(sh)
+            first = 1.0 if rnd.random() < 0.5 else -1.0
+            spot = None
+            for side in (first, -first):
+                for mag in (PERIMETER["gun_offset"], 0.62, 0.85):
+                    off = g["half"] * 2.0 * mag * side
+                    spot = ladder(x + px * off, z + pz * off, nx, nz, sh,
+                                  PERIMETER["gun_inset"])
+                    if spot:
+                        break
+                if spot:
+                    break
+            if spot is None:
+                continue
+            # `heading` is the STREET's, not the wall's: a gate gun looks down
+            # the road it is covering, and it is also what tells the stager
+            # which way "across the road" is when it needs to nudge.
+            out.append(WallPiece(
+                key=f"emp_{idx:03d}", part="gun", x=spot[0], z=spot[1],
+                heading=sh, span=PERIMETER["emplacement_span"],
+                s=int(round(g["s"] % ring.total)), street=g["street"]))
+            idx += 1
+    return out
+
+
+def _thin(items: list, keep: int) -> list:
+    """`keep` of `items`, spread evenly through the list rather than truncated.
+
+    Truncating would put every surviving watchtower on one side of the town,
+    because `pieces` is in ring order.
+    """
+    if keep <= 0:
+        return []
+    if len(items) <= keep:
+        return list(items)
+    n = len(items)
+    return [items[int(i * n / keep)] for i in range(keep)]
+
+
+# ==========================================================================
+# Choosing a defense tier
+# ==========================================================================
+
+def defense_weights(archetype: str, n_lots: int) -> list[tuple[str, float]]:
+    """The tier draw for a town of this archetype and this size.
+
+    Two inputs, and the size one is the interesting half. The brief's ladder
+    starts at "open hamlet", and a hamlet is not a design choice a planner makes
+    — it is what a town with seven lots IS. So the fortified weight ramps from
+    zero at `HAMLET_LOTS` to full at `COMPOUND_LOTS`, the stockade weight ramps
+    less steeply, and what a small town loses is handed to `open`.
+
+    No rng and no terrain: the archetype already carries the terrain read (see
+    `archetype_weights`), and returning a pure function of (archetype, size)
+    means a caller can print the odds for a town it is looking at.
+    """
+    base = STREET_ARCHETYPES[archetype].get("defense_odds", {})
+    ramp = _clamp((n_lots - HAMLET_LOTS) / float(COMPOUND_LOTS - HAMLET_LOTS),
+                  0.0, 1.0)
+    out = []
+    for tier in DEFENSE_ORDER:
+        w = float(base.get(tier, 0.0))
+        if tier == "fortified":
+            w *= ramp
+        elif tier == "stockade":
+            w *= 0.45 + 0.55 * ramp
+        else:
+            w += (1.0 - ramp) * 0.35
+        out.append((tier, w))
+    return out
+
+
+def choose_defense(rnd, archetype: str, n_lots: int) -> str:
+    return _pick_weighted(rnd, defense_weights(archetype, n_lots))[0]
 
 
 def _point_in_polygon(px, pz, poly) -> bool:
@@ -1615,11 +2362,36 @@ class TownGraph:
     site: SiteScore
     streets: tuple
     lots: tuple
-    perimeter: tuple
+    perimeter: tuple           # the wall LINE: wall/corner/gate/anchor pieces
     decor: tuple
     walled: bool
     planner_version: int = PLANNER_VERSION
-    hull: tuple = ()
+    hull: tuple = ()           # the lots' own boundary, `PERIMETER['margin']` out
+    # -- T3 -----------------------------------------------------------------
+    defense: str = "open"      # town_templates.DEFENSE_ORDER
+    wall_line: tuple = ()      # the simplified polygon `perimeter` is built on
+    wall_gaps: tuple = ()      # WallGap: every hole in the line, and why
+    emplacements: tuple = ()   # WallPiece: towers and gate guns, inside the line
+    # The line's own perimeter, in elmos. Stored rather than recomputed from
+    # `wall_line` because every `s` on every piece and gap was measured against
+    # THIS number, and re-deriving it from vertices that have since been rounded
+    # to integral elmos would put the continuity spec a few elmos out of step
+    # with the geometry it is checking.
+    wall_length: int = 0
+
+    @property
+    def defense_label(self) -> str:
+        return DEFENSE_TIERS[self.defense]["label"]
+
+    def wall_parts(self) -> list[tuple[str, int]]:
+        """part -> how many, over the line and the emplacements together."""
+        both = list(self.perimeter) + list(self.emplacements)
+        return [(p, sum(1 for w in both if w.part == p))
+                for p in LINE_PARTS + EMPLACEMENT_PARTS]
+
+    def gateways(self) -> list:
+        """The gaps a street leaves town through, in ring order."""
+        return [g for g in self.wall_gaps if g.kind == "gate"]
 
     def role_counts(self) -> list[tuple[str, int]]:
         return [(r, sum(1 for l in self.lots if l.role == r))
@@ -1658,15 +2430,22 @@ class TownGraph:
             "archetype": self.archetype,
             "x": self.x, "z": self.z, "radius": self.radius,
             "walled": self.walled,
+            "defense": self.defense,
             "distortion": round(self.distortion, 4),
             "site": self.site.to_dict(),
             "hull": [[int(round(p[0])), int(round(p[1]))] for p in self.hull],
+            "wall_line": [[int(round(p[0])), int(round(p[1]))]
+                          for p in self.wall_line],
+            "wall_length": self.wall_length,
             "streets": [s.to_dict() for s in self.streets],
             "lots": [l.to_dict() for l in self.lots],
             "perimeter": [w.to_dict() for w in self.perimeter],
+            "wall_gaps": [g.to_dict() for g in self.wall_gaps],
+            "emplacements": [w.to_dict() for w in self.emplacements],
             "decor": [d.to_dict() for d in self.decor],
             "terrain_ops": self.terrain_ops(),
             "role_counts": [[r, n] for r, n in self.role_counts()],
+            "wall_parts": [[p, n] for p, n in self.wall_parts()],
         }
 
     def to_json(self, indent: int = 2) -> str:
@@ -1715,7 +2494,8 @@ def plan_town(seed: int, probe: SiteProbe, x: float, z: float,
               rules: SiteRules | None = None,
               archetype: str | None = None,
               search: float = 0.0,
-              walled: bool | None = None) -> TownGraph:
+              walled: bool | None = None,
+              defense: str | None = None) -> TownGraph:
     """Plan one town centred on (x, z). Raises `SiteRejected` on bad ground.
 
     `search` > 0 lets the centre migrate to the best nearby site (rng-free,
@@ -1727,6 +2507,12 @@ def plan_town(seed: int, probe: SiteProbe, x: float, z: float,
     for a scenario author who wants a specific look; the generator itself
     should not pass it, or the terrain adaptation the brief asks for stops
     being adaptation.
+
+    `defense` likewise pins the tier (`town_templates.DEFENSE_ORDER`). `walled`
+    is the T1 spelling of the same knob and is kept because callers exist:
+    False still means `open`, and True means "some wall", which is resolved to
+    stockade or fortified by the same size-and-archetype draw as an unpinned
+    town. Passing both is a `ValueError` rather than a precedence rule.
     """
     import random
     rnd = random.Random(seed)
@@ -1778,17 +2564,34 @@ def plan_town(seed: int, probe: SiteProbe, x: float, z: float,
             f"town needs — the frontage is mostly on ground steeper than "
             f"{rules.max_lot_slope:.0f} degrees or under water", site)
 
-    hull_pts = []
-    for l in lots:
-        hull_pts.extend(l.corners())
-    hull = _expand_hull(_convex_hull(hull_pts), PERIMETER["margin"])
-
-    _assign_roles(rnd, site, streets, lots, hull or [(site.x, site.z)])
+    _assign_roles(rnd, site, streets, lots,
+                  _hull_of(lots) or [(site.x, site.z)])
     _grow_lots(lots, probe, rules, streets)
 
-    if walled is None:
-        walled = rnd.random() < arch.get("walled_odds", 0.4)
-    perimeter = tuple(_build_perimeter(rnd, site, streets, hull)) if walled else ()
+    # AFTER the growth, not before it. T1 measured the boundary of lots that
+    # were about to get bigger — `_grow_lots` expands a scarce role's parcel to
+    # its template size, and the meeting hall's is 320x280 against a 210x190
+    # dwelling. The margin absorbed it, so nothing was ever observed outside its
+    # own wall; it was still a hull of the wrong town.
+    hull = _expand_hull(_hull_of(lots), PERIMETER["margin"])
+
+    if defense is not None and walled is not None:
+        raise ValueError("pass `defense` or `walled`, not both — see plan_town")
+    if defense is None:
+        defense = choose_defense(rnd, archetype, len(lots))
+        if walled is False:
+            defense = "open"
+        elif walled is True and defense == "open":
+            defense = "stockade"
+    if defense not in DEFENSE_TIERS:
+        raise ValueError(f"unknown defense tier {defense!r}; "
+                         f"known: {', '.join(DEFENSE_ORDER)}")
+
+    ring = None
+    if DEFENSE_TIERS[defense]["wall"] and len(hull) >= 3:
+        ring = _Ring(_simplify_hull(hull, _pick_int(rnd, *PERIMETER["vertices"])))
+    perimeter, wall_gaps, emplacements = _build_perimeter(
+        rnd, probe, rules, streets, lots, ring, defense)
     decor = tuple(_build_decor(rnd, probe, rules, streets, lots))
 
     key, name = name_for(index, seed)
@@ -1796,8 +2599,20 @@ def plan_town(seed: int, probe: SiteProbe, x: float, z: float,
         key=key, name=name, seed=seed, archetype=archetype,
         x=site.x, z=site.z, radius=site.radius, distortion=distortion,
         site=site, streets=tuple(streets), lots=tuple(lots),
-        perimeter=perimeter, decor=decor, walled=bool(walled),
+        perimeter=perimeter, decor=decor,
+        walled=DEFENSE_TIERS[defense]["wall"], defense=defense,
+        wall_line=tuple((int(round(p[0])), int(round(p[1])))
+                        for p in (ring.poly if ring else ())),
+        wall_length=int(round(ring.total)) if ring else 0,
+        wall_gaps=wall_gaps, emplacements=emplacements,
         hull=tuple((int(round(p[0])), int(round(p[1]))) for p in hull))
+
+
+def _hull_of(lots) -> list:
+    pts = []
+    for l in lots:
+        pts.extend(l.corners())
+    return _convex_hull(pts)
 
 
 def _closest_to_passing(scored: list) -> SiteScore | None:
@@ -1849,6 +2664,194 @@ def _expand_hull(hull, margin: float):
         m = math.hypot(dx, dz) or 1.0
         out.append((px + dx / m * margin, pz + dz / m * margin))
     return out
+
+
+# ==========================================================================
+# The perimeter validity spec
+# ==========================================================================
+# Every arc bound that reaches output is a rounded integer, so an interval's
+# two ends can each be half an elmo off where the float geometry put them.
+# Two elmos is that, doubled, and nothing like the size of any real defect —
+# the smallest thing this spec has to catch is a missing wall piece, and the
+# smallest wall piece is `post_span`, 44.
+WALL_ARC_TOLERANCE = 2.0
+
+
+def validate_perimeter(town: TownGraph, probe=None,
+                       rules: SiteRules | None = None) -> list[str]:
+    """Every way a town's defenses can be wrong, as a list of prose problems.
+
+    Returned rather than raised, and an empty list is the spec passing — the
+    same contract as `town_stager.validate_staging`, so a sweep over a hundred
+    towns can report all of them at once.
+
+    The five promises:
+      1. the tier and the geometry agree — an `open` town has no wall at all,
+         a `stockade` has no guns, a `fortified` has them
+      2. CONTINUITY: every elmo of the wall's line is covered by exactly one
+         piece or exactly one declared gap, and the ring closes
+      3. GATES ON STREETS, both directions: every street that leaves the line
+         leaves through a gateway, and every gateway has a street in it
+      4. NO WALL THROUGH A BUILDING: no piece and no emplacement takes ground a
+         lot has already claimed
+      5. the terrain adaptation did its job — nothing stands on ground the
+         planner itself would refuse
+
+    `probe` is optional and only check 5 needs it; a caller without terrain
+    still gets the other four, and this function says nothing about a check it
+    did not run rather than passing it silently.
+    """
+    rules = rules or SiteRules()
+    spec = DEFENSE_TIERS[town.defense]
+    p: list[str] = []
+    tag = f"{town.key} ({town.defense})"
+
+    # 1. Tier and geometry agree.
+    if not spec["wall"]:
+        if town.perimeter or town.wall_gaps or town.emplacements or town.wall_line:
+            p.append(f"{tag}: an open town has "
+                     f"{len(town.perimeter)} wall piece(s), "
+                     f"{len(town.emplacements)} emplacement(s) and "
+                     f"{len(town.wall_gaps)} gap(s) — it should have none")
+        return p
+    if not town.wall_line or town.wall_length <= 0:
+        p.append(f"{tag}: the tier asks for a wall and there is no line to "
+                 f"build it on")
+        return p
+    stray = sorted({w.part for w in town.perimeter} - set(LINE_PARTS))
+    if stray:
+        p.append(f"{tag}: {', '.join(stray)} is on the wall line, but the line "
+                 f"may only carry {', '.join(LINE_PARTS)}")
+    stray = sorted({w.part for w in town.emplacements} - set(EMPLACEMENT_PARTS))
+    if stray:
+        p.append(f"{tag}: {', '.join(stray)} is an emplacement, but only "
+                 f"{', '.join(EMPLACEMENT_PARTS)} may be")
+    for part, want in (("tower", spec.get("towers")),
+                       ("gun", spec.get("gate_guns"))):
+        have = [w for w in town.emplacements if w.part == part]
+        if have and not want:
+            p.append(f"{tag}: {len(have)} {part}(s) on a tier that does not "
+                     f"have them")
+    if not town.perimeter:
+        p.append(f"{tag}: the tier asks for a wall and not one piece of it "
+                 f"was built")
+        return p
+
+    # 2. Continuity. Both ways round: a hole nobody declared, and two things
+    # claiming the same arc. Expressed as one walk because they are one
+    # property — the intervals tile the ring or they do not.
+    total = float(town.wall_length)
+    arcs = [((w.s - w.span / 2.0) % total, float(w.span),
+             f"{w.part} {w.key}") for w in town.perimeter]
+    arcs += [(float(g.s0), float(g.width), f"{g.kind} gap {g.key}")
+             for g in town.wall_gaps]
+    arcs.sort(key=lambda a: a[0])
+    cursor = arcs[0][0]
+    start = cursor
+    for at, length, what in arcs:
+        if at - cursor > WALL_ARC_TOLERANCE:
+            p.append(f"{tag}: {int(at - cursor)} elmos of the line at arc "
+                     f"{int(cursor)} are neither walled nor a declared gap — "
+                     f"the next thing on the ring is {what}")
+        elif cursor - at > WALL_ARC_TOLERANCE:
+            p.append(f"{tag}: {what} starts at arc {int(at)} but the ring is "
+                     f"already claimed out to {int(cursor)} — two things own "
+                     f"the same {int(cursor - at)} elmos")
+        cursor = max(cursor, at + length)
+    if abs((cursor - start) - total) > WALL_ARC_TOLERANCE:
+        p.append(f"{tag}: the line is {int(total)} elmos round and its pieces "
+                 f"and gaps account for {int(cursor - start)} — the ring does "
+                 f"not close")
+
+    # 3. Gates and streets, both directions.
+    line = list(town.wall_line)
+    ring = _Ring(line)
+    gateways = town.gateways()
+    for st in town.streets:
+        d = 0.0
+        prev = None
+        total_len = st.length()
+        while d <= total_len:
+            x, z, _h = point_at(st.points, d)
+            inside = _point_in_polygon(x, z, line)
+            if prev is not None and inside != prev:
+                _dist, s = ring.project(x, z)
+                if not any(_arc_delta(s, (g.s0 + g.width / 2.0) % total,
+                                      total) <= g.width / 2.0
+                           + WALL_ARC_TOLERANCE for g in gateways):
+                    p.append(
+                        f"{tag}: {st.name} ({st.key}) crosses the wall at "
+                        f"({int(x)},{int(z)}), arc {int(s)}, and there is no "
+                        f"gateway there — the road dead-ends into masonry")
+            prev = inside
+            d += 16.0
+    by_key = {s.key: s for s in town.streets}
+    for g in gateways:
+        st = by_key.get(g.street)
+        if st is None:
+            p.append(f"{tag}: gateway {g.key} at ({g.x},{g.z}) names "
+                     f"{g.street!r}, which is not a street of this town")
+            continue
+        # ...and the street it names has to actually get there. Only checking
+        # that the key exists let a gateway be moved anywhere on the ring
+        # without complaint, which is not a hypothetical: most gateways are
+        # DERIVED from a street's end rather than from a crossing (see
+        # `_gateways`), so direction A above — which only ever sees crossings —
+        # says nothing about them at all.
+        #
+        # Measured against the street's ENDS and the stretches of it that leave
+        # the line, not against the whole polyline. Against the whole polyline
+        # the check is vacuous: a street crossing a town passes within a few
+        # hundred elmos of most of its boundary, so a gateway moved to the far
+        # side of the ring still had a street "near" it.
+        near = [st.points[0], st.points[-1]]
+        near += [pt for pt in st.points if not _point_in_polygon(pt[0], pt[1],
+                                                                 line)]
+        reach = min(math.hypot(pt[0] - g.x, pt[1] - g.z) for pt in near)
+        limit = PERIMETER["gate_reach"] + g.width / 2.0
+        if reach > limit:
+            p.append(f"{tag}: gateway {g.key} at ({g.x},{g.z}) is for "
+                     f"{st.name} ({st.key}), and the nearest that street gets "
+                     f"to it — either end of it, or anywhere it leaves the "
+                     f"line — is {int(reach)} elmos, over the {int(limit)} a "
+                     f"road out of town may fall short by")
+
+    # 4. No wall through a building, and none of it in a road. The lots are the
+    # only footprints the planner knows; `town_stager.validate_staging` carries
+    # the same check against the buildings actually staged in them.
+    roads = _street_bucket(town.streets)
+    for w in list(town.perimeter) + list(town.emplacements):
+        wc = w.corners()
+        for lot in town.lots:
+            if _obb_overlap(wc, lot.corners()):
+                p.append(f"{tag}: {w.part} {w.key} at ({w.x},{w.z}) is built "
+                         f"through {lot.key}, a {lot.width}x{lot.depth} "
+                         f"{lot.role} lot at ({lot.x},{lot.z})")
+                break
+        # An emplacement only. A gate POST stands beside a carriageway by
+        # design and `gate_margin` is what buys it the room, so measuring it on
+        # the same box as a turret would fail every gateway in every town; the
+        # width the posts actually get is checked as a gateway property in the
+        # tests instead.
+        if w.part in EMPLACEMENT_PARTS and not _clear_of_carriageways(
+                roads, w.x, w.z, w.span / 2.0):
+            p.append(f"{tag}: {w.part} {w.key} at ({w.x},{w.z}) stands in a "
+                     f"carriageway — a gun in the road it is covering is one "
+                     f"`town_stager` will refuse to place")
+
+    # 5. Terrain adaptation. A piece the scan should have skipped and did not.
+    if probe is not None:
+        for w in town.perimeter:
+            if not probe.buildable(w.x, w.z, rules.max_street_slope):
+                p.append(f"{tag}: {w.part} {w.key} stands at ({w.x},{w.z}) on "
+                         f"ground steeper than {rules.max_street_slope:.0f} "
+                         f"degrees, under water or off the map — the line's "
+                         f"terrain scan should have skipped it")
+        for w in town.emplacements:
+            if not probe.buildable(w.x, w.z, rules.max_lot_slope):
+                p.append(f"{tag}: {w.part} {w.key} stands at ({w.x},{w.z}) on "
+                         f"ground no building could be put on")
+    return p
 
 
 def assign_defs(town: TownGraph, available) -> TownGraph:
@@ -1950,6 +2953,11 @@ def main(argv=None) -> int:
                     help="let the centre migrate up to this many elmos")
     ap.add_argument("--walled", dest="walled", action="store_true", default=None)
     ap.add_argument("--no-walled", dest="walled", action="store_false")
+    ap.add_argument("--defense", choices=DEFENSE_ORDER,
+                    help="pin the defense tier instead of drawing it from the "
+                         "archetype and the town's size")
+    ap.add_argument("--check", action="store_true",
+                    help="run the perimeter validity spec and report")
     ap.add_argument("--lua", action="store_true", help="emit a Lua table, not JSON")
     ap.add_argument("--out", help="write here instead of stdout")
     args = ap.parse_args(argv)
@@ -1995,8 +3003,8 @@ def main(argv=None) -> int:
     try:
         town = plan_town(args.seed, probe, cx, cz, args.radius,
                          archetype=args.archetype, search=args.search,
-                         walled=args.walled)
-    except SiteRejected as exc:
+                         walled=args.walled, defense=args.defense)
+    except (SiteRejected, ValueError) as exc:
         print(f"REJECTED: {exc}", file=sys.stderr)
         return 1
 
@@ -2007,13 +3015,28 @@ def main(argv=None) -> int:
     if args.out:
         with open(args.out, "w", encoding="utf-8") as fh:
             fh.write(text)
-        counts = ", ".join(f"{r}={n}" for r, n in town.role_counts() if n)
-        print(f"{town.name} [{town.archetype}] seed {town.seed}: "
-              f"{len(town.streets)} streets, {len(town.lots)} lots ({counts}), "
-              f"{len(town.perimeter)} wall pieces, {len(town.decor)} decor "
-              f"-> {args.out}", file=sys.stderr)
     else:
         sys.stdout.write(text)
+
+    if args.out or args.check:
+        counts = ", ".join(f"{r}={n}" for r, n in town.role_counts() if n)
+        parts = ", ".join(f"{p}={n}" for p, n in town.wall_parts() if n) or "none"
+        print(f"{town.name} [{town.archetype}] seed {town.seed}: "
+              f"{len(town.streets)} streets, {len(town.lots)} lots ({counts}), "
+              f"{len(town.decor)} decor", file=sys.stderr)
+        print(f"  {town.defense_label}: {parts}; "
+              f"{len(town.gateways())} gateway(s), "
+              f"{len(town.wall_gaps) - len(town.gateways())} terrain skip(s) "
+              f"on {town.wall_length} elmos of line", file=sys.stderr)
+
+    if args.check:
+        problems = validate_perimeter(town, probe)
+        if problems:
+            print(f"PERIMETER SPEC FAILED ({len(problems)}):", file=sys.stderr)
+            for p in problems:
+                print(f"  {p}", file=sys.stderr)
+            return 1
+        print("perimeter spec: OK", file=sys.stderr)
     return 0
 
 

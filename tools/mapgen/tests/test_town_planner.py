@@ -17,6 +17,8 @@ The three things the brief asks this suite to prove are, in order:
 every lot on buildable ground facing its own street, exactly one meeting hall).
 """
 
+import collections
+import dataclasses
 import json
 import math
 import os
@@ -380,7 +382,7 @@ class TestTerrainRejection(unittest.TestCase):
     def test_a_town_too_thin_to_be_a_town_is_refused(self):
         """`min_lots`: a site can pass every disc measurement and still yield
         three parcels once the streets meet the real ground."""
-        import dataclasses
+
         rules = dataclasses.replace(tp.SiteRules(), min_lots=999)
         with self.assertRaises(tp.SiteRejected) as ctx:
             plan("flat", 3, rules=rules)
@@ -523,32 +525,6 @@ class TestGeometry(unittest.TestCase):
                     tp._point_in_polygon(lot.x, lot.z, list(town.hull)),
                     f"{kind}/{seed}: {lot.key} is outside its own wall")
 
-    def test_a_walled_town_is_never_sealed_against_its_own_streets(self):
-        """Every street that leaves the hull must leave through a gate.
-
-        A wall drawn without reference to the street network is how a town ends
-        up with a road that dead-ends into masonry.
-        """
-        for kind, seed, town in self.towns():
-            if not town.walled or not town.perimeter:
-                continue
-            hull = list(town.hull)
-            gates = [w for w in town.perimeter if w.part == "gate"]
-            crossings = 0
-            for s in town.streets:
-                prev = None
-                for d in _walk_lengths(s.length(), 20.0):
-                    px, pz, _h = tp.point_at(s.points, d)
-                    inside = tp._point_in_polygon(px, pz, hull)
-                    if prev is not None and inside != prev:
-                        crossings += 1
-                    prev = inside
-            if crossings:
-                self.assertTrue(
-                    gates,
-                    f"{kind}/{seed}: {crossings} street crossing(s) of the "
-                    f"hull and not one gate")
-
     def test_decoration_never_lands_inside_a_lot(self):
         for kind, seed, town in self.towns():
             for d in town.decor:
@@ -558,6 +534,523 @@ class TestGeometry(unittest.TestCase):
                                          lot.width / 2.0, lot.depth / 2.0,
                                          lot.heading),
                         f"{kind}/{seed}: {d.key} sits inside {lot.key}")
+
+
+# ==========================================================================
+# Walls and defenses (town-planner T3)
+# ==========================================================================
+# The brief asks for three things and this class is those three things:
+# a ladder of defense tiers you can see across seeds, a wall that adapts to
+# the ground it is on, and gates that line up with the roads out. The
+# invariants it leans on are `town_planner.validate_perimeter`'s — and because
+# a spec nobody has watched fail is not a spec, `TestPerimeterSpecCatches`
+# below breaks a good town four ways and requires each one to be caught.
+
+_WALL_SWEEP: dict = {}
+
+
+def wall_sweep(kinds=("flat", "rolling", "coast", "valley", "lake")):
+    """Every town the demo terrains yield, planned once and shared.
+
+    Cached for the reason `test_town_stager` caches its probes: this class asks
+    a dozen questions of the same sample, and re-planning 100 towns per question
+    costs more than every assertion in the file put together.
+    """
+    key = tuple(kinds)
+    if key not in _WALL_SWEEP:
+        out = []
+        for kind in kinds:
+            probe = probe_for(kind)
+            cx, cz = centre_of(probe)
+            for seed in range(24):
+                try:
+                    out.append((kind, seed, probe,
+                                tp.plan_town(seed, probe, cx, cz, RADIUS,
+                                             search=RADIUS)))
+                except tp.SiteRejected:
+                    continue
+        _WALL_SWEEP[key] = out
+    return _WALL_SWEEP[key]
+
+
+def walled_towns():
+    return [row for row in wall_sweep() if row[3].walled]
+
+
+class TestDefenseTiers(unittest.TestCase):
+    """The ladder: open hamlet -> stockaded town -> fortified compound."""
+
+    def test_all_three_tiers_occur_across_seeds(self):
+        """The brief's acceptance, restated: three tiers visible across seeds."""
+        got = collections.Counter(t.defense for _k, _s, _p, t in wall_sweep())
+        for tier in tt.DEFENSE_ORDER:
+            self.assertGreater(got[tier], 0,
+                               f"no {tier} town in {sum(got.values())} planned "
+                               f"across five terrains and 24 seeds: {dict(got)}")
+
+    def test_an_open_town_carries_no_defenses_at_all(self):
+        """Not "an empty wall" — no wall, no line, no gaps, no guns."""
+        seen = 0
+        for kind, seed, _probe, town in wall_sweep():
+            if town.defense != "open":
+                continue
+            seen += 1
+            self.assertEqual((town.perimeter, town.wall_gaps,
+                              town.emplacements, town.wall_line),
+                             ((), (), (), ()), f"{kind}/{seed}")
+            self.assertFalse(town.walled)
+        self.assertTrue(seen)
+
+    def test_a_stockade_has_a_wall_and_nothing_that_shoots(self):
+        seen = 0
+        for kind, seed, _probe, town in wall_sweep():
+            if town.defense != "stockade":
+                continue
+            seen += 1
+            self.assertTrue(town.perimeter, f"{kind}/{seed}")
+            self.assertIn("wall", {w.part for w in town.perimeter})
+            self.assertEqual(
+                [], list(town.emplacements),
+                f"{kind}/{seed}: a stockade drew {len(town.emplacements)} "
+                f"emplacement(s); towers and guns are the fortified tier")
+        self.assertTrue(seen)
+
+    def test_a_fortified_town_has_towers_and_a_gun_on_its_gates(self):
+        seen = 0
+        for kind, seed, _probe, town in wall_sweep():
+            if town.defense != "fortified":
+                continue
+            seen += 1
+            parts = collections.Counter(w.part for w in town.emplacements)
+            self.assertGreater(parts["tower"], 0, f"{kind}/{seed}: no tower")
+            if town.gateways():
+                self.assertGreater(
+                    parts["gun"], 0,
+                    f"{kind}/{seed}: {len(town.gateways())} gateway(s) and no "
+                    f"staticdefense behind any of them")
+            self.assertLessEqual(parts["tower"], tt.PERIMETER["max_towers"],
+                                 f"{kind}/{seed}")
+        self.assertTrue(seen)
+
+    def test_a_hamlet_is_never_a_fortified_compound(self):
+        """The size gate, at both ends, straight off `defense_weights`.
+
+        A seven-lot town coming out a fortified compound is the failure the
+        brief's own word "hamlet" names, and it cannot be caught by sampling —
+        the draw is weighted, so a bad weight shows up as a rare town, not a
+        failing one. The weights are asserted instead.
+        """
+        for archetype in tp.ARCHETYPES:
+            small = dict(tp.defense_weights(archetype, tt.HAMLET_LOTS - 1))
+            self.assertEqual(0.0, small["fortified"], archetype)
+            big = dict(tp.defense_weights(archetype, tt.COMPOUND_LOTS + 8))
+            self.assertGreater(big["fortified"], 0.0, archetype)
+            self.assertGreater(
+                small["open"] / sum(small.values()),
+                big["open"] / sum(big.values()),
+                f"{archetype}: a hamlet must lean more open than a big town")
+        for kind, seed, _probe, town in wall_sweep():
+            if len(town.lots) < tt.HAMLET_LOTS:
+                self.assertNotEqual("fortified", town.defense,
+                                    f"{kind}/{seed}: {len(town.lots)} lots")
+
+    def test_the_tier_can_be_pinned_and_the_geometry_does_not_move(self):
+        """Same town, two tiers: same outline, same gateways, different guns.
+
+        The property `town_templates.DEFENSE_TIERS` promises — a tier decides
+        WHAT is on the perimeter and never WHERE — and the thing that makes the
+        ladder a ladder rather than three unrelated towns.
+        """
+        probe = probe_for("flat")
+        cx, cz = centre_of(probe)
+        a = tp.plan_town(3, probe, cx, cz, RADIUS, search=RADIUS,
+                         defense="stockade")
+        b = tp.plan_town(3, probe, cx, cz, RADIUS, search=RADIUS,
+                         defense="fortified")
+        self.assertEqual(a.wall_line, b.wall_line)
+        self.assertEqual([g.to_dict() for g in a.wall_gaps],
+                         [g.to_dict() for g in b.wall_gaps])
+        self.assertEqual([w.to_dict() for w in a.perimeter],
+                         [w.to_dict() for w in b.perimeter])
+        self.assertEqual((), a.emplacements)
+        self.assertTrue(b.emplacements)
+
+    def test_walled_is_still_the_knob_it_was_in_T1(self):
+        probe = probe_for("flat")
+        cx, cz = centre_of(probe)
+        off = tp.plan_town(3, probe, cx, cz, RADIUS, search=RADIUS, walled=False)
+        on = tp.plan_town(3, probe, cx, cz, RADIUS, search=RADIUS, walled=True)
+        self.assertEqual("open", off.defense)
+        self.assertFalse(off.walled)
+        self.assertNotEqual("open", on.defense)
+        self.assertTrue(on.walled)
+        with self.assertRaises(ValueError):
+            tp.plan_town(3, probe, cx, cz, RADIUS, search=RADIUS,
+                         walled=True, defense="open")
+        with self.assertRaises(ValueError):
+            tp.plan_town(3, probe, cx, cz, RADIUS, search=RADIUS,
+                         defense="palisade")
+
+
+class TestPerimeterInvariants(unittest.TestCase):
+    """Gate-on-street, wall continuity, no wall through a building."""
+
+    def test_the_perimeter_spec_is_green_over_the_whole_sweep(self):
+        bad = []
+        for kind, seed, probe, town in wall_sweep():
+            problems = tp.validate_perimeter(town, probe)
+            if problems:
+                bad.append(f"{kind}/{seed}: " + "; ".join(problems[:2]))
+        self.assertEqual([], bad, f"{len(bad)} of {len(wall_sweep())} towns")
+
+    def test_wall_continuity_the_ring_is_tiled_with_no_slack(self):
+        """Asserted from the arcs directly, not by calling the spec.
+
+        `validate_perimeter` walks the same intervals, so re-running it here
+        would prove the spec agrees with itself. This adds up the pieces and the
+        gaps and requires the total to be the line's own length, which is the
+        property the walk is a stand-in for.
+        """
+        seen = 0
+        for kind, seed, _probe, town in walled_towns():
+            seen += 1
+            covered = (sum(w.span for w in town.perimeter)
+                       + sum(g.width for g in town.wall_gaps))
+            self.assertAlmostEqual(
+                town.wall_length, covered, delta=len(town.perimeter) + 4,
+                msg=f"{kind}/{seed}: {len(town.perimeter)} pieces and "
+                    f"{len(town.wall_gaps)} gap(s) cover {covered} elmos of a "
+                    f"{town.wall_length}-elmo line")
+            self.assertTrue(
+                all(w.span > 0 for w in town.perimeter), f"{kind}/{seed}")
+        self.assertTrue(seen)
+
+    def test_every_gap_in_a_wall_is_a_road_or_a_cliff(self):
+        for kind, seed, probe, town in walled_towns():
+            for g in town.wall_gaps:
+                self.assertIn(g.kind, ("gate", "terrain"), f"{kind}/{seed}")
+                self.assertTrue(g.why, f"{kind}/{seed}: {g.key} has no reason")
+                if g.kind == "gate":
+                    self.assertIn(g.street, {s.key for s in town.streets})
+
+    def test_every_street_that_leaves_town_leaves_through_a_gateway(self):
+        """A wall drawn without reference to the roads dead-ends one of them.
+
+        Both directions, because only one of them was ever the risk in T1: a
+        gate somewhere near a road is easy, and a road with no gate is the town
+        the player cannot drive into.
+        """
+        crossings = 0
+        for kind, seed, _probe, town in walled_towns():
+            line = list(town.wall_line)
+            ring = tp._Ring(line)
+            gateways = town.gateways()
+            for s in town.streets:
+                prev = None
+                for d in _walk_lengths(s.length(), 16.0):
+                    px, pz, _h = tp.point_at(s.points, d)
+                    inside = tp._point_in_polygon(px, pz, line)
+                    if prev is not None and inside != prev:
+                        crossings += 1
+                        _dist, arc = ring.project(px, pz)
+                        near = [g for g in gateways
+                                if tp._arc_delta(
+                                    arc, (g.s0 + g.width / 2.0) % ring.total,
+                                    ring.total) <= g.width / 2.0 + 4]
+                        self.assertTrue(
+                            near,
+                            f"{kind}/{seed}: {s.key} crosses the wall at "
+                            f"({px:.0f},{pz:.0f}) with no gateway there")
+                    prev = inside
+        self.assertGreater(crossings, 0,
+                           "no street crossed a wall anywhere in the sweep — "
+                           "this test proved nothing")
+
+    def test_a_walled_town_always_has_a_way_in(self):
+        """The regression the `gate_reach` measurement exists for.
+
+        Deriving gateways from physical crossings alone sealed 20 of 34 walled
+        towns, because T1's streets stop 80 to 250 elmos short of the line.
+        """
+        sealed = [f"{k}/{s}" for k, s, _p, t in walled_towns()
+                  if not t.gateways()]
+        self.assertEqual([], sealed,
+                         f"{len(sealed)} walled town(s) with no gateway at all")
+
+    def test_a_gateway_is_wide_enough_to_flank_the_street_it_serves(self):
+        """Room for a post either side of the carriageway plus its clearance.
+
+        A fixed 150-elmo opening put a gate post 75 elmos off an 88-elmo main
+        street's centreline, inside the carriageway's own clearance, and the
+        stager refused every one of them.
+        """
+        for _k, _s, _p, town in walled_towns():
+            widths = {s.key: s.width for s in town.streets}
+            # The opening is cut out of the ring's terrain scan, so its measured
+            # width is quantised to the scan's stride; `- probe_step` is that
+            # rounding and nothing else.
+            for g in town.gateways():
+                want = (widths[g.street] + 2 * tt.PERIMETER["gate_margin"]
+                        - tt.PERIMETER["probe_step"])
+                self.assertGreaterEqual(
+                    g.width, want,
+                    f"gateway {g.key} for a {widths[g.street]}-elmo street")
+
+    def test_no_wall_piece_is_built_through_a_lot(self):
+        for kind, seed, _probe, town in walled_towns():
+            for w in list(town.perimeter) + list(town.emplacements):
+                for lot in town.lots:
+                    self.assertFalse(
+                        tp._obb_overlap(w.corners(), lot.corners()),
+                        f"{kind}/{seed}: {w.part} {w.key} at ({w.x},{w.z}) "
+                        f"is built through {lot.key}")
+
+    def test_the_wall_line_still_contains_every_lot(self):
+        """`_simplify_hull` grows the polygon; nothing may fall outside it."""
+        for kind, seed, _probe, town in walled_towns():
+            line = list(town.wall_line)
+            for lot in town.lots:
+                for cx, cz in lot.corners():
+                    self.assertTrue(
+                        _inside_or_on(cx, cz, line),
+                        f"{kind}/{seed}: a corner of {lot.key} is outside "
+                        f"its own wall")
+
+    def test_the_line_has_few_enough_vertices_for_a_corner_to_mean_something(self):
+        """The lots' hull is a 7-to-27-sided circle; the wall must not be."""
+        lo, hi = tt.PERIMETER["vertices"]
+        for kind, seed, _probe, town in walled_towns():
+            self.assertLessEqual(len(town.wall_line), max(hi, len(town.hull)),
+                                 f"{kind}/{seed}")
+            self.assertGreaterEqual(len(town.wall_line), 3, f"{kind}/{seed}")
+            if len(town.hull) > hi:
+                self.assertLess(
+                    len(town.wall_line), len(town.hull),
+                    f"{kind}/{seed}: a {len(town.hull)}-vertex hull was not "
+                    f"simplified at all")
+
+    def test_simplify_hull_only_ever_grows_the_polygon(self):
+        """The property vertex-DELETION would violate, on a shape that shows it.
+
+        Deleting a vertex from a convex polygon cuts the corner off and puts
+        whatever was there outside; extending the two neighbouring edges to meet
+        adds a triangle instead. On a town that is houses outside their own wall
+        versus a slightly roomier wall.
+        """
+        import random as _r
+        rnd = _r.Random(11)
+        for trial in range(20):
+            pts = [(rnd.random() * 2000, rnd.random() * 2000) for _ in range(40)]
+            hull = tp._convex_hull(pts)
+            if len(hull) < 6:
+                continue
+            small = tp._simplify_hull(hull, 5)
+            # Fewer than it started with; not necessarily down to the target,
+            # because a round in which every candidate edge is refused stops the
+            # simplification, and stopping early is a legitimate answer.
+            self.assertLess(len(small), len(hull), f"trial {trial}")
+            self.assertTrue(_is_convex(small), f"trial {trial}: {small}")
+            for px, pz in hull:
+                self.assertTrue(
+                    _inside_or_on(px, pz, small),
+                    f"trial {trial}: ({px:.0f},{pz:.0f}) fell outside the "
+                    f"simplified hull")
+
+    def test_a_tower_is_inside_its_own_wall(self):
+        seen = 0
+        for kind, seed, _probe, town in walled_towns():
+            for w in town.emplacements:
+                seen += 1
+                self.assertTrue(
+                    tp._point_in_polygon(w.x, w.z, list(town.wall_line)),
+                    f"{kind}/{seed}: {w.part} {w.key} stands outside the wall "
+                    f"it is supposed to be defending")
+        self.assertTrue(seen)
+
+
+class TestWallTerrainAdaptation(unittest.TestCase):
+    """The wall follows the ground, and stops where it cannot stand on it."""
+
+    def test_no_wall_piece_stands_on_ground_a_road_could_not_climb(self):
+        for kind, seed, probe, town in walled_towns():
+            for w in town.perimeter:
+                self.assertTrue(
+                    probe.buildable(w.x, w.z, tp.SiteRules().max_street_slope),
+                    f"{kind}/{seed}: {w.part} {w.key} at ({w.x},{w.z}) is on "
+                    f"{probe.slope_deg(w.x, w.z):.1f}-degree ground or water")
+
+    def test_wet_and_broken_terrain_makes_the_wall_skip_and_anchor(self):
+        """The adaptation, on the two demo terrains that have anything to skip.
+
+        A `terrain` gap on flat ground would be a bug; on a coast or a lake the
+        line runs into water and must break rather than march across it.
+        """
+        skips = anchors = 0
+        for _k, _s, _p, town in wall_sweep(("coast", "lake", "cliffs")):
+            if not town.walled:
+                continue
+            skips += sum(1 for g in town.wall_gaps if g.kind == "terrain")
+            anchors += sum(1 for w in town.perimeter if w.part == "anchor")
+        self.assertGreater(skips, 0,
+                           "not one wall on a coast, a lake or a cliff field "
+                           "skipped any ground")
+        self.assertGreater(anchors, 0,
+                           "the wall skipped ground but never anchored into "
+                           "the edge of it")
+
+    def test_a_skipped_stretch_really_is_unstandable(self):
+        """Sampled inside every terrain gap, not just at its ends.
+
+        A gap the scan opened for no reason is a hole in a town's wall that
+        nothing explains, and it would pass the continuity spec — a declared gap
+        is a declared gap whether or not the declaration is true.
+        """
+        rules = tp.SiteRules()
+        checked = 0
+        for kind, seed, probe, town in wall_sweep(("coast", "lake", "cliffs")):
+            if not town.walled:
+                continue
+            ring = tp._Ring(town.wall_line)
+            for g in town.wall_gaps:
+                if g.kind != "terrain":
+                    continue
+                checked += 1
+                bad = 0
+                n = max(2, int(g.width / 16))
+                for i in range(n):
+                    x, z, _h = ring.at(g.s0 + (i + 0.5) * g.width / n)
+                    if not probe.buildable(x, z, rules.max_street_slope):
+                        bad += 1
+                self.assertGreater(
+                    bad, 0,
+                    f"{kind}/{seed}: {g.key} skips {g.width} elmos of line at "
+                    f"({g.x},{g.z}) and every sample in it is standable ground")
+        self.assertGreater(checked, 0)
+
+    def test_the_wall_never_skips_anything_shorter_than_a_wall(self):
+        for kind, seed, _probe, town in walled_towns():
+            runs = [w for w in town.perimeter]
+            self.assertTrue(runs or not town.wall_length, f"{kind}/{seed}")
+
+
+class TestPerimeterSpecCatches(unittest.TestCase):
+    """Break a good town four ways; the spec must name each one.
+
+    A validity spec that has only ever been seen passing is a function that
+    returns an empty list. Each of these is a real defect the T3 rewrite either
+    fixed or could reintroduce.
+    """
+
+    def town(self):
+        probe = probe_for("flat")
+        cx, cz = centre_of(probe)
+        town = tp.plan_town(3, probe, cx, cz, RADIUS, search=RADIUS,
+                            defense="fortified")
+        self.assertEqual([], tp.validate_perimeter(town, probe))
+        return probe, town
+
+    def test_a_hole_nobody_declared_is_caught(self):
+
+        probe, town = self.town()
+        keep = [w for w in town.perimeter if w.part == "wall"][2:]
+        broken = dataclasses.replace(town, perimeter=tuple(
+            [w for w in town.perimeter if w.part != "wall"] + keep))
+        problems = tp.validate_perimeter(broken, probe)
+        self.assertTrue(any("neither walled nor a declared gap" in p
+                            for p in problems), problems[:3])
+
+    def test_two_pieces_claiming_the_same_arc_are_caught(self):
+
+        probe, town = self.town()
+        first = town.perimeter[0]
+        broken = dataclasses.replace(town, perimeter=tuple(
+            [dataclasses.replace(first, span=first.span * 3)]
+            + list(town.perimeter[1:])))
+        problems = tp.validate_perimeter(broken, probe)
+        self.assertTrue(any("own the same" in p for p in problems),
+                        problems[:3])
+
+    def test_a_gateway_no_road_reaches_is_caught(self):
+        """Moved to the emptiest arc of the ring, position and arc together.
+
+        Most gateways are DERIVED from a street's end rather than from a
+        crossing, so the crossing check alone said nothing about them: this
+        mutation passed the spec until the gateway was required to have a street
+        that actually gets to it.
+
+        The emptiest arc and not the antipodal one, which was the first attempt
+        and was not a defect at all: a main street crosses the whole town and
+        leaves it at BOTH ends, so half a ring away from one of its gateways is
+        exactly where its other gateway belongs.
+        """
+        probe, town = self.town()
+        gate = town.gateways()[0]
+        ring = tp._Ring(list(town.wall_line))
+        ends = [p for s in town.streets for p in (s.points[0], s.points[-1])]
+        s = max((i * ring.total / 64 for i in range(64)),
+                key=lambda s: min(math.hypot(ring.at(s)[0] - ex,
+                                             ring.at(s)[1] - ez)
+                                  for ex, ez in ends))
+        x, z, _h = ring.at(s)
+        moved = dataclasses.replace(gate, s0=int(s), x=int(x), z=int(z))
+        broken = dataclasses.replace(town, wall_gaps=tuple(
+            moved if g.key == gate.key else g for g in town.wall_gaps))
+        problems = tp.validate_perimeter(broken, probe)
+        self.assertTrue(
+            any("a road out of town may fall short by" in p or
+                "no gateway there" in p for p in problems), problems[:3])
+
+    def test_a_wall_built_through_a_house_is_caught(self):
+
+        probe, town = self.town()
+        lot = town.lots[0]
+        broken = dataclasses.replace(town, perimeter=tuple(
+            [dataclasses.replace(town.perimeter[0], x=lot.x, z=lot.z)]
+            + list(town.perimeter[1:])))
+        problems = tp.validate_perimeter(broken, probe)
+        self.assertTrue(any("is built through" in p for p in problems),
+                        problems[:3])
+
+    def test_a_gun_on_a_tier_that_has_none_is_caught(self):
+
+        probe, town = self.town()
+        broken = dataclasses.replace(town, defense="stockade")
+        problems = tp.validate_perimeter(broken, probe)
+        self.assertTrue(any("tier that does not have them" in p
+                            for p in problems), problems[:3])
+
+
+def _inside_or_on(px, pz, poly, tol=1.0) -> bool:
+    """Containment, boundary included.
+
+    `tp._point_in_polygon` is a strict ray cast and a point exactly ON an edge
+    falls whichever way the crossing parity happens to land. That is fine for
+    the planner, which asks about lot centres and street samples, and useless
+    here: `_simplify_hull` REUSES vertices of the input hull, so the very points
+    a containment test is about sit exactly on the output's boundary.
+    """
+    if tp._point_in_polygon(px, pz, poly):
+        return True
+    n = len(poly)
+    for i in range(n):
+        ax, az = poly[i]
+        bx, bz = poly[(i + 1) % n]
+        dx, dz = bx - ax, bz - az
+        l2 = dx * dx + dz * dz
+        t = 0.0 if l2 <= 1e-9 else max(0.0, min(1.0, ((px - ax) * dx
+                                                      + (pz - az) * dz) / l2))
+        if math.hypot(px - (ax + dx * t), pz - (az + dz * t)) <= tol:
+            return True
+    return False
+
+
+def _is_convex(poly) -> bool:
+    n = len(poly)
+    cross = [
+        (poly[(i + 1) % n][0] - poly[i][0]) * (poly[(i + 2) % n][1] - poly[(i + 1) % n][1])
+        - (poly[(i + 1) % n][1] - poly[i][1]) * (poly[(i + 2) % n][0] - poly[(i + 1) % n][0])
+        for i in range(n)]
+    return (all(c >= -1e-6 for c in cross) or all(c <= 1e-6 for c in cross))
 
 
 def _walk_lengths(total: float, step: float):
