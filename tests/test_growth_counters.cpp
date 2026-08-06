@@ -195,6 +195,33 @@ TEST_CASE("growth: ToJson carries every counter and the alarms") {
     CHECK(j["alarms"].empty());
 }
 
+// Task 4 rides these counters into the soak dump. The two encoders MUST agree
+// key-for-key, because the whole point of one module serving both surfaces is
+// that a slope fitted offline and a badge rendered live are the same number.
+// A drift here would not fail anything at compile time — it would quietly make
+// the report and the dashboard describe different games.
+TEST_CASE("growth: CountersToJson is exactly ToJson's `growth` object") {
+    const growth::Counters c = HealthyCounters();
+    const auto bare = nlohmann::json::parse(growth::CountersToJson(c), nullptr, false);
+    const auto full = nlohmann::json::parse(growth::ToJson(c, {}), nullptr, false);
+    REQUIRE(!bare.is_discarded());
+    REQUIRE(!full.is_discarded());
+    CHECK(bare == full["growth"]);
+}
+
+TEST_CASE("growth: CountersToJson always writes an object, even for a zero gather") {
+    // Opposite rule to ToJson's, and deliberately so. `extra_json` is a column
+    // whose emptiness means "this build did not gather"; a snapshot's `growth`
+    // field is inside a dump that only a gathering build writes, and the
+    // report distinguishes "absent" (old binary) from "all zero" (a game that
+    // really has nothing) — so the zero case must still be an object.
+    const auto j = nlohmann::json::parse(growth::CountersToJson(growth::Counters()), nullptr, false);
+    REQUIRE(!j.is_discarded());
+    REQUIRE(j.is_object());
+    CHECK(j["rules_params"] == 0);
+    CHECK(j["players_max"] == 0);
+}
+
 TEST_CASE("growth: an empty gather writes an empty column, not a blob of zeroes") {
     // The chart would otherwise draw a floor of zeroes and an operator would
     // read "measured, and flat" off a row that measured nothing.

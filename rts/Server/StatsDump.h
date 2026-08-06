@@ -19,6 +19,8 @@
 #include <utility>
 #include <vector>
 
+#include "Server/GrowthCounters.h"
+
 namespace statsdump {
 
 // Per-team snapshot row. Sourced from CTeam (res/resIncome/resExpense) and
@@ -79,6 +81,22 @@ struct Snapshot {
     float simFps = 0.0f;
     int64_t rssKb = 0;       // PLAN-long-uptime S4 RSS watermark feed
     int64_t luaHeapKb = 0;   // PLAN-long-uptime S4 Lua-heap watermark feed
+
+    // PLAN-long-uptime task 4: every §1 growth surface, sampled on the same
+    // cadence as the determinism hash so one soak dump answers "does this
+    // leak?" for the whole inventory rather than for RSS alone. `rssKb` /
+    // `luaHeapKb` above predate this and are kept — they are the fields the
+    // determinism harness and its tests already read, and duplicating them
+    // inside `growth` costs two integers against breaking every existing
+    // reader.
+    growth::Counters growth;
+
+    // S8 — on-disk size of the run's SQLite file, in bytes. Sampled here
+    // rather than derived at the end because a retention policy is a *slope*
+    // claim: "the file stops growing" is only visible in a series. 0 means the
+    // path could not be stat'd, never "an empty database".
+    int64_t dbBytes = 0;
+
     std::vector<TeamSnapshot> teams;
     std::vector<WeaponStats> weapons;
 };

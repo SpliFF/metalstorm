@@ -106,6 +106,13 @@ nlohmann::json SnapshotToJson(const Snapshot& s) {
         {"simFps", s.simFps},
         {"rssKb", s.rssKb},
         {"luaHeapKb", s.luaHeapKb},
+        // Re-parsed rather than rebuilt so the soak dump and `extra_json`
+        // cannot drift apart: GrowthCounters owns the key names, this file
+        // owns where they sit. A parse of a string this process just produced
+        // cannot fail, but `parse(..., false)` keeps a future change to that
+        // from throwing out of a dump written on a run's last tick.
+        {"growth", nlohmann::json::parse(growth::CountersToJson(s.growth), nullptr, false)},
+        {"dbBytes", s.dbBytes},
         {"teams", teams},
         {"weapons", weapons},
     };

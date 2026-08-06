@@ -141,6 +141,16 @@ Alarm badges on the fleet view flag lag (frames-behind > 60), oversized db
 (> 1 GB), and crashed servers. Those three are evaluated by the *lobby* off
 columns it already has; the growth alarms below come from the game server.
 
+**`db_size_bytes` is the LOGICAL database size** (`PRAGMA page_count ×
+page_size`), not the bytes on disk. In WAL mode the two differ while a game is
+running: PLAN-long-uptime task 4's soak measured a main file sitting at 4 096
+bytes with 2 MB accumulated in the `-wal` sidecar, because the liveness
+heartbeat rewrites a page every 2 wall-seconds and nothing checkpoints until
+SQLite's `wal_autocheckpoint` threshold (1 000 pages, ~4 MB) is crossed. The
+gap is therefore bounded by that threshold rather than unbounded — but an
+operator reading this column is reading the database, not the disk, and a
+clean shutdown checkpoints the WAL away so a post-mortem `ls` will not show it.
+
 ### Growth counters (PLAN-long-uptime §3)
 
 The `extra_json` column carries one sample of every container PLAN-long-uptime

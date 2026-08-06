@@ -14,6 +14,7 @@
 #include "Server/Database.h"
 #include "Server/GameMetrics.h"
 #include "Server/GrowthCounters.h"
+#include <sys/stat.h>              // soak dump's db-size sample (S8)
 #include "Lua/LuaHandleSynced.h"   // CSplitLuaHandle::GetGameParams — growth counters
 #include "Server/GmVerbs.h"
 #include "Server/DevBuildGate.h"
@@ -1789,6 +1790,60 @@ int main(int argc, char* argv[])
     // Unused unless headlessCfg.enabled && headlessCfg.stateHashEvery > 0.
     std::vector<statsdump::Snapshot> headlessSnapshots;
 
+    // PLAN-long-uptime task 4: ONE gather for both growth surfaces. Task 3
+    // wrote these counters inline at the metrics-write site; the soak dump
+    // needs the identical set on the stats-dump cadence, and two copies of an
+    // eleven-field gather would diverge exactly the way §7.3 warns about — the
+    // dashboard and the soak report would then disagree about a game and the
+    // disagreement would be a fact about this file. Two of the reads are O(id
+    // space) and O(teams × params), so callers must gate on their own cadence
+    // (DueForWrite / stateHashEvery), never call this per frame.
+    auto gatherGrowthCounters = [&]() -> growth::Counters {
+        growth::Counters gc;
+        gc.rssKb = statsdump::GetRssKb();
+        gc.luaHeapKb = GetSyncedLuaHeapKb();
+        gc.paramKeys = static_cast<int64_t>(streamer.KeyDictionarySize());
+        gc.paramKeysRev = static_cast<int64_t>(streamer.KeyDictionaryRev());
+        gc.rulesParams = static_cast<int64_t>(CSplitLuaHandle::GetGameParams().size());
+        for (int t = 0; t < teamHandler.ActiveTeams(); ++t) {
+            if (const CTeam* team = teamHandler.Team(t))
+                gc.rulesParams += static_cast<int64_t>(team->modParams.size());
+        }
+        gc.unitIdsMax = static_cast<int64_t>(unitHandler.MaxUnitIDs());
+        gc.unitIdsUsed = gc.unitIdsMax - static_cast<int64_t>(unitHandler.NumFreeUnitIDs());
+        gc.unitSpawns = static_cast<int64_t>(unitHandler.TotalUnitSpawnGens());
+        gc.standingOrders = static_cast<int64_t>(standingOrders.GetAllOrders().size());
+        gc.players = static_cast<int64_t>(playerHandler.ActivePlayers());
+        gc.playersMax = MAX_PLAYERS;
+        return gc;
+    };
+
+    // S8's reading: the disk the run's SQLite database actually occupies.
+    // `stat` rather than a `page_count * page_size` pragma because the
+    // question a retention policy has to answer is about the file on disk — a
+    // DB that deletes rows without vacuuming keeps its size, and §9.5 already
+    // recorded that as the live caveat.
+    //
+    // The `-wal` and `-shm` siblings are summed in, and that is not tidiness.
+    // The first soak this sampler ever ran reported a dead-flat 4096 bytes for
+    // twenty minutes while the sidecar WAL held half a megabyte and climbing:
+    // in WAL mode the main file does not grow until a checkpoint, so stat'ing
+    // it alone measures how recently sqlite checkpointed, not how much this
+    // game is storing. A retention policy verified against that number would
+    // have "passed" on a database with no retention at all.
+    //
+    // A failed stat contributes 0 rather than a guess — and a missing `-wal`
+    // is the normal state of a checkpointed database, not an error.
+    auto sampleDbBytes = [&dbPath]() -> int64_t {
+        int64_t total = 0;
+        for (const char* suffix : {"", "-wal", "-shm"}) {
+            struct stat st {};
+            if (::stat((dbPath + suffix).c_str(), &st) == 0)
+                total += static_cast<int64_t>(st.st_size);
+        }
+        return total;
+    };
+
     // Determinism digest: xor-fold every active unit's id/team/pos/health
     // (stable engine-defined iteration order) plus the synced RNG state.
     // Extracted from the snapshot capture because `--replay --verify` needs the
@@ -1816,6 +1871,8 @@ int main(int argc, char* argv[])
         snap.simFps = perfMetrics.GetSnapshot().simFps;
         snap.rssKb = statsdump::GetRssKb();
         snap.luaHeapKb = GetSyncedLuaHeapKb();
+        snap.growth = gatherGrowthCounters();
+        snap.dbBytes = sampleDbBytes();
 
         snap.stateHash = computeStateHash();
 
@@ -2279,25 +2336,7 @@ int main(int argc, char* argv[])
             // MaybeWrite throw the work away.
             std::string extraJson;
             if (metricsWriter.DueForWrite()) {
-                growth::Counters gc;
-                gc.rssKb = statsdump::GetRssKb();
-                gc.luaHeapKb = GetSyncedLuaHeapKb();
-                gc.paramKeys = static_cast<int64_t>(streamer.KeyDictionarySize());
-                gc.paramKeysRev = static_cast<int64_t>(streamer.KeyDictionaryRev());
-                gc.rulesParams =
-                    static_cast<int64_t>(CSplitLuaHandle::GetGameParams().size());
-                for (int t = 0; t < teamHandler.ActiveTeams(); ++t) {
-                    if (const CTeam* team = teamHandler.Team(t))
-                        gc.rulesParams += static_cast<int64_t>(team->modParams.size());
-                }
-                gc.unitIdsMax = static_cast<int64_t>(unitHandler.MaxUnitIDs());
-                gc.unitIdsUsed =
-                    gc.unitIdsMax - static_cast<int64_t>(unitHandler.NumFreeUnitIDs());
-                gc.unitSpawns = static_cast<int64_t>(unitHandler.TotalUnitSpawnGens());
-                gc.standingOrders =
-                    static_cast<int64_t>(standingOrders.GetAllOrders().size());
-                gc.players = static_cast<int64_t>(playerHandler.ActivePlayers());
-                gc.playersMax = MAX_PLAYERS;
+                const growth::Counters gc = gatherGrowthCounters();
 
                 const std::vector<growth::Alarm> alarms =
                     growth::Evaluate(gc, growthThresholds);

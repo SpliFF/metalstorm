@@ -5,6 +5,6 @@
   "type": "module",
   "description": "Batch driver + determinism pair-run for spring-server --headless-run (PLAN-headless.md)",
   "scripts": {
-    "test": "node test/matrix.test.mjs"
+    "test": "node --test test/*.test.mjs"
   }
 }

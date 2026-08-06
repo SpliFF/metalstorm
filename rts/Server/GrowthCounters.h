@@ -126,6 +126,17 @@ struct Alarm {
 // trips (see Counters).
 std::vector<Alarm> Evaluate(const Counters& c, const Thresholds& t);
 
+// The counter object on its own — the same key names `ToJson` nests under
+// "growth", without the alarms wrapper. PLAN-long-uptime task 4 embeds this in
+// every headless stats-dump snapshot so the offline growth report reads the
+// SAME key set off a soak run that the dashboard reads off a live game. One
+// definition, two surfaces: a soak that fits a slope for `param_keys` and an
+// operator watching `param_keys` are then looking at the same number by
+// construction rather than by two encoders agreeing. Always returns a JSON
+// object (never ""), because a snapshot row with the field missing and a
+// snapshot row of zeroes must stay distinguishable downstream.
+std::string CountersToJson(const Counters& c);
+
 // Serialise to the `extra_json` payload: {"growth":{…},"alarms":[…]}. Returns
 // "" for an all-zero Counters with no alarms, so a game whose gather found
 // nothing writes the same empty column it wrote before this module existed

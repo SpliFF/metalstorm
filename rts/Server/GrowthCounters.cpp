@@ -122,13 +122,9 @@ std::vector<Alarm> Evaluate(const Counters& c, const Thresholds& t) {
     return out;
 }
 
-std::string ToJson(const Counters& c, const std::vector<Alarm>& alarms) {
-    const bool anyCounter = c.rssKb || c.luaHeapKb || c.paramKeys || c.paramKeysRev ||
-                            c.rulesParams || c.unitIdsUsed || c.unitIdsMax ||
-                            c.unitSpawns || c.standingOrders || c.players;
-    if (!anyCounter && alarms.empty())
-        return "";
+namespace {
 
+nlohmann::json CountersObject(const Counters& c) {
     nlohmann::json g;
     g["rss_kb"] = c.rssKb;
     g["lua_heap_kb"] = c.luaHeapKb;
@@ -141,6 +137,23 @@ std::string ToJson(const Counters& c, const std::vector<Alarm>& alarms) {
     g["standing_orders"] = c.standingOrders;
     g["players"] = c.players;
     g["players_max"] = c.playersMax;
+    return g;
+}
+
+}  // namespace
+
+std::string CountersToJson(const Counters& c) {
+    return CountersObject(c).dump();
+}
+
+std::string ToJson(const Counters& c, const std::vector<Alarm>& alarms) {
+    const bool anyCounter = c.rssKb || c.luaHeapKb || c.paramKeys || c.paramKeysRev ||
+                            c.rulesParams || c.unitIdsUsed || c.unitIdsMax ||
+                            c.unitSpawns || c.standingOrders || c.players;
+    if (!anyCounter && alarms.empty())
+        return "";
+
+    nlohmann::json g = CountersObject(c);
 
     nlohmann::json a = nlohmann::json::array();
     for (const Alarm& al : alarms)

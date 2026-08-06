@@ -14,6 +14,7 @@ Part of the [Debugging & Logging Guide](debugging.md) family. This page covers t
   - [`--headless-run` config](#--headless-run-config)
   - [Stats dump + determinism hash](#stats-dump--determinism-hash)
   - [Batch driver (`tools/headless-batch`)](#batch-driver-toolsheadless-batch)
+  - [Soak ladders + growth report](#soak-ladders--growth-report-growth-reportmjs)
   - [Determinism CI hook](#determinism-ci-hook)
   - [Fixture-replay verify CI hook](#fixture-replay-verify-ci-hook)
 - [Replay record / playback](#replay-record--playback)
@@ -283,6 +284,13 @@ The JSON written to `headless.statsDump` at termination (`rts/Server/StatsDump.{
       "frame": 300, "gameSeconds": 10.0, "wallSeconds": 0,
       "stateHash": "a1b2c3d4e5f60708",  // fixed-width hex string, NOT a JSON number
       "simFps": 0.0, "rssKb": 41232, "luaHeapKb": 128,
+      "dbBytes": 1052672,               // main + `-wal` + `-shm`, see below
+      "growth": {                       // every PLAN-long-uptime §1 surface
+        "rss_kb": 41232, "lua_heap_kb": 128,
+        "param_keys": 175, "param_keys_rev": 176, "rules_params": 237,
+        "unit_ids_used": 100, "unit_ids_max": 32000, "unit_spawns": 412,
+        "standing_orders": 0, "players": 2, "players_max": 251
+      },
       "teams": [ { "teamId": 0, "numUnits": 3, "metal": 940.0, "damageDealt": 0.0, "unitsKilled": 0, /* ... */ } ],
       "weapons": [ { "weaponDefId": 4, "volleys": 12, "kills": 1, "damage": 340.5 } ]
     }
@@ -307,6 +315,21 @@ two headless runs diverge on purpose via a seed. The batch driver (below) still
 carries a `seed` matrix axis through to each generated config for bookkeeping/
 reproducibility labelling, but the engine does not yet consume it — noted here per
 the no-silent-deviation rule rather than left to be discovered later.
+
+The `growth` object is written by the same module the live GM dashboard reads
+(`rts/Server/GrowthCounters.{h,cpp}`), so a slope fitted off a soak dump and a
+badge rendered off `game_metrics.extra_json` are the same number by
+construction. Key names are snake_case there and camelCase everywhere else in
+the dump for exactly that reason — they are GrowthCounters' names, not
+StatsDump's. `rssKb`/`luaHeapKb` are duplicated at the top level because the
+determinism harness already reads them there.
+
+**`dbBytes` sums the main SQLite file, its `-wal` and its `-shm`.** Stat'ing
+the main file alone measures how recently sqlite checkpointed, not how much the
+game is storing: in WAL mode it can sit at 4096 bytes for twenty minutes while
+half a megabyte accumulates in the sidecar. The first soak run caught exactly
+that, and a retention policy verified against the un-summed number would have
+"passed" on a database with no retention at all.
 
 ### Batch driver (`tools/headless-batch`)
 
@@ -445,6 +468,76 @@ Live results on the fixed fixture (debug build): 1799 records / 30 hash points
 recorded, `PASS — 30/30 state hashes matched` on both the raw recording and the packed
 copy (178 887 → 9 350 bytes). Negative control: flipping one bit of the frame-4800
 reference reports `FAIL … firstDivergence=4800`, located exactly.
+
+### Soak ladders + growth report (`growth-report.mjs`)
+
+The soak ladder is an ordinary batch run whose template is a long uncapped
+Metalstorm game and whose matrix is the churn knobs
+(PLAN-long-uptime.md §2, task 4):
+
+```bash
+make soak-growth                      # both steps, gated, into build/soak/
+make soak-growth SOAK_WALL_MIN=10     # shorter arms while iterating
+
+# or by hand:
+node tools/headless-batch/batch.mjs \
+  --template tools/headless-batch/fixtures/soak-ladder.json \
+  --matrix   tools/headless-batch/fixtures/soak-matrix.json \
+  --out-dir  build/soak --server-bin build/release/spring-server \
+  --concurrency 4 --max-wall-min 45
+
+node tools/headless-batch/growth-report.mjs --jsonl build/soak/results.jsonl \
+  [--budgets tools/headless-batch/fixtures/soak-budgets.json] \
+  [--emit-budgets new-budgets.json]
+```
+
+`soak-matrix.json` crosses `objective_density` × `build_time_scale`, so the four
+arms run **ladder 1 (baseline) and ladder 2 (churn amplifier) plus the two
+single-knob arms that attribute any slope to one knob or the other**. Use a
+**release** binary: the debug build ticks this content ~30× slower, which is the
+difference between a simulated day costing 11 wall-minutes and costing hours.
+
+`growth-report.mjs` fits `base + slope×days` to every growth surface and rules
+each slope:
+
+| verdict | meaning |
+|---|---|
+| `flat` | slope within 2σ of zero, or under the 1 %-of-base floor, or falling (reclamation) |
+| `explained` | sloping, and a budget entry with a `why` accounts for it |
+| `over-budget` | sloping past its budgeted rate — **fails** |
+| `unexplained` | sloping with no budget entry — **fails**, this is §2's gate |
+| `no-signal` | sampled, and read **0 every time**: the ladder never exercised the surface. Cannot rule. **Not a pass** |
+| `too-short` / `no-samples` | cannot rule. **Not a pass** |
+
+**Which clock a slope is quoted against is part of the reading.** Sim-owned
+surfaces (params, ids, orders, Lua heap) are fitted per **simulated** day — that
+is what an uncapped ladder buys. `db_bytes` is fitted per **wall** day, because
+`GameMetricsWriter::DueForWrite` is `steady_clock`-based (one row per 60 wall
+seconds) and so are task 2b's retention sweeps: on a ladder running ~130
+simulated days per wall day, a per-simulated-day fit would report a database
+growing 130× slower than it will in production. Every report line names its axis
+(`/sim-day`, `/wall-day`).
+
+Four things the ruling does deliberately, each of which was a bug first:
+
+- **A two-sample series is `too-short`, not a clean fit.** Two points always fit
+  a line exactly — `r2` is 1 and the residual error is zero — so a
+  two-snapshot dump would otherwise produce the most confident-looking and
+  least justified line in the report.
+- **A noisy counter does not manufacture a slope.** The synced Lua heap swings
+  4–11 MB on a live Metalstorm game, so a slope is only believed when it clears
+  2σ of its own standard error *and* an absolute floor.
+- **A budget without a `why` explains nothing.** §2's gate is "slope explained
+  by design"; a bare number is merely permission. `--emit-budgets` seeds a
+  skeleton from the observed slopes with every `why` set to `null`, so the file
+  cannot pass the gate until a human has written the reasons in.
+- **A counter that read zero all run is `no-signal`, not clean.** A headless
+  ladder has no client sessions, so `StateStreamer` interns no keys and
+  `param_keys` sits at 0 for the whole run — the flattest line in the report,
+  and no evidence at all about the surface PLAN-long-uptime §1 S1 bounds. Zero
+  forever means unexercised.
+
+`make test-headless-batch` covers the ruling (`lib/growth-fit.mjs` is pure).
 
 ---
 
