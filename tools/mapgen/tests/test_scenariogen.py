@@ -164,6 +164,41 @@ def walled_map(root, name="synth_walled"):
     return write_map(root, name, heights, regions)
 
 
+RIVER_HALF_WIDTH = 12          # samples of channel either side of the centreline
+RIVER_RAMP = 8                 # samples of bank ramp; sets the bank's slope
+RIVER_DROP = 20.0              # metres from bank crest to riverbed
+
+
+def river_map(root, name="synth_river"):
+    """Drivable ground split by ONE crossable river running along Z.
+
+    The bridge fixture. A river is the only terrain a span belongs over (§M3:
+    `floating = true` holds a chain level on water, while over dry ground the
+    engine's unconditional ground clamp steps every segment with the terrain),
+    so a generator that places bridges needs a map with water on it to be tested
+    against at all — and `flat_map` deliberately has none.
+
+    The channel is FORDABLE and its banks are gentle, so the two sides stay in
+    one component and the reachability gate still passes: this fixture tests the
+    bridge finder, not the negative control (`walled_map` is that). Both numbers
+    are graded against MOVE_CLASSES, not guessed —
+
+      * depth: the bed sits 10 m under water, inside HEAVY's 30-elmo limit;
+      * slope: RIVER_DROP over RIVER_RAMP samples is 2.5 m per 8 elmos = 17.4
+        deg, inside HEAVY's 24. A first draft cut the bank at 36.9 deg and the
+        reachability gate correctly refused the whole map — the same gate the
+        bridge exists to serve.
+    """
+    heights = [10.0] * (SAMPLES * SAMPLES)
+    mid = SAMPLES // 2
+    for z in range(SAMPLES):
+        for x in range(mid - RIVER_HALF_WIDTH, mid + RIVER_HALF_WIDTH + 1):
+            t = min(1.0, (RIVER_HALF_WIDTH - abs(x - mid)) / RIVER_RAMP)
+            heights[z * SAMPLES + x] = 10.0 - RIVER_DROP * t
+    return write_map(root, name, heights,
+                     grid_regions(4, 4, {(0, 0), (3, 3)}))
+
+
 class SyntheticMap:
     def __init__(self, builder, name):
         self._tmp = tempfile.TemporaryDirectory()
@@ -589,6 +624,260 @@ def parse_units(lua: str) -> list[dict]:
         e["orders"] = "orders" in rest or "orders" in body[m.end():m.end() + 40]
         out.append(e)
     return out
+
+
+def parse_features(lua: str) -> list[dict]:
+    """The `world.features` entries, back out of the emitted text.
+
+    Same reasoning as `parse_units`: what ships is the file, so the file is what
+    the invariants are asserted against.
+    """
+    if "features = {" not in lua:
+        return []
+    body = lua.split("features = {", 1)[1].split("\n        },", 1)[0]
+    out = []
+    for m in re.finditer(r"\{\s*def\s*=\s*'([^']+)'\s*,\s*x\s*=\s*(-?\d+)\s*,"
+                         r"\s*z\s*=\s*(-?\d+)(?P<rest>[^}]*)", body):
+        rest = m.group("rest")
+        e = {"def": m.group(1), "x": int(m.group(2)), "z": int(m.group(3))}
+        for key, pat in (("y", r"\by\s*=\s*(-?\d+)"),
+                         ("chain", r"\bchain\s*=\s*(\d+)")):
+            hit = re.search(pat, rest)
+            if hit:
+                e[key] = int(hit.group(1))
+        nm = re.search(r"name\s*=\s*'([^']*)'", rest)
+        fc = re.search(r"facing\s*=\s*'([^']*)'", rest)
+        if nm:
+            e["name"] = nm.group(1)
+        if fc:
+            e["facing"] = fc.group(1)
+        out.append(e)
+    return out
+
+
+def landmark_names(lua: str) -> list[str]:
+    """Every ENTRY `name = '...'` in the emitted file, in file order.
+
+    A `name` on a `units` or `world.features` entry is what game_scenario.lua
+    turns into a landmark_<name>_x/_z rulesParam, so this is exactly the set the
+    command language will be able to address. Anchored on the same line as a
+    `def = ` to exclude the scenario's own top-level display name, which is a
+    title and not a place you can send anything to.
+    """
+    return [m.group(1) for ln in code_only(lua).splitlines()
+            if "def =" in ln
+            for m in [re.search(r"name\s*=\s*'([^']*)'", ln)] if m]
+
+
+# ==========================================================================
+# §M4 — named sites, relics, wreck fields and crossings
+# ==========================================================================
+
+class TestNamedSites(unittest.TestCase):
+    """Every generated war ships named, addressable ground."""
+
+    def setUp(self):
+        if not os.path.isdir(GAME_DIR):
+            self.skipTest(f"no game content at {GAME_DIR}")
+
+    def test_sites_are_named_gaia_buildings_from_the_shipped_site_defs(self):
+        from scenario_templates import SITE_TEMPLATES
+        with SyntheticMap(flat_map, "sites") as d:
+            lua, meta = sg.generate(d, seed=5, game_dir=GAME_DIR, sites=3)
+        self.assertEqual(len(meta["sites"]), 3,
+                         "asked for three sites and did not get three")
+        units = parse_units(lua)
+        for defname, key, name in meta["sites"]:
+            self.assertIn(defname, SITE_TEMPLATES)
+            entry = next(u for u in units if u["def"] == defname)
+            # Gaia, not a player team: a site nobody owns is the thing both
+            # sides can take, which is the whole point of placing one.
+            self.assertEqual(entry["team"], "neutral")
+            self.assertIn(name, landmark_names(lua))
+
+    def test_a_site_name_is_its_region_name_so_a_player_can_say_it(self):
+        with SyntheticMap(flat_map, "sitename") as d:
+            lua, meta = sg.generate(d, seed=5, game_dir=GAME_DIR, sites=3)
+            regions = {r["key"]: r["name"] for r in sg.read_region_graph(d)}
+        for _defname, key, name in meta["sites"]:
+            self.assertTrue(
+                name.startswith(regions[key]),
+                f"site name {name!r} does not start with its region's name "
+                f"{regions[key]!r} — the name a player has actually seen")
+
+    def test_landmark_names_are_unique(self):
+        # The name IS the rulesParam key (landmark_<name>_x), so a duplicate
+        # would silently overwrite the other's position and one landmark would
+        # vanish from the client's index. game_scenario.lua rejects the file
+        # outright; the generator must never emit one.
+        with SyntheticMap(flat_map, "lmuniq") as d:
+            lua, meta = sg.generate(d, seed=3, game_dir=GAME_DIR, sites=6,
+                                    relics=3)
+        names = landmark_names(lua)
+        self.assertEqual(sorted(names), sorted(set(names)))
+        self.assertEqual(sorted(names), meta["landmarks"])
+
+    def test_a_landmark_name_never_ends_in_the_coordinate_suffix(self):
+        # `landmark_<name>_x` is parsed with a greedy name capture anchored at
+        # end-of-string, so a name ending in _x or _z splits at the wrong
+        # underscore and loses a coordinate.
+        with SyntheticMap(flat_map, "lmsuffix") as d:
+            lua, _ = sg.generate(d, seed=9, game_dir=GAME_DIR, sites=6)
+        for name in landmark_names(lua):
+            self.assertFalse(name.endswith("_x") or name.endswith("_z"), name)
+
+    def test_relics_are_features_with_a_guardian_band(self):
+        with SyntheticMap(flat_map, "relic") as d:
+            lua, meta = sg.generate(d, seed=5, game_dir=GAME_DIR, relics=1)
+        self.assertEqual(len(meta["relics"]), 1)
+        defname, _key, name, guards = meta["relics"][0]
+        feats = {f["def"]: f for f in parse_features(lua)}
+        self.assertIn(defname, feats, "the relic is not in world.features")
+        self.assertEqual(feats[defname].get("name"), name)
+        self.assertGreater(guards, 0, "an unguarded prize is not a prize")
+
+    def test_a_neutral_war_has_no_guardians_to_be_hostile_with(self):
+        with SyntheticMap(flat_map, "relicneutral") as d:
+            _lua, meta = sg.generate(d, seed=5, game_dir=GAME_DIR, relics=1,
+                                     hostility="neutral")
+        for _def, _key, _name, guards in meta["relics"]:
+            self.assertEqual(guards, 0)
+
+
+class TestWreckField(unittest.TestCase):
+    def setUp(self):
+        if not os.path.isdir(GAME_DIR):
+            self.skipTest(f"no game content at {GAME_DIR}")
+
+    def test_wrecks_land_on_the_contested_region_and_do_not_overlap(self):
+        with SyntheticMap(flat_map, "wrecks") as d:
+            lua, meta = sg.generate(d, seed=5, game_dir=GAME_DIR, wrecks=5)
+        self.assertEqual(len(meta["wrecks"]), 5)
+        fdefs = sg.load_feature_facts(GAME_DIR)
+        placed = [f for f in parse_features(lua) if f["def"] in fdefs
+                  and f["def"].endswith("_wreck")]
+        self.assertEqual(len(placed), 5)
+        for i, a in enumerate(placed):
+            ahx, ahz = sg.feature_half_extent(fdefs, a["def"])
+            for b in placed[i + 1:]:
+                bhx, bhz = sg.feature_half_extent(fdefs, b["def"])
+                self.assertFalse(
+                    abs(a["x"] - b["x"]) < ahx + bhx and
+                    abs(a["z"] - b["z"]) < ahz + bhz,
+                    f"{a} and {b} overlap — a wreck blocks ground, so two "
+                    f"overlapping ones are one wreck and a hole in the map")
+
+    def test_the_blocking_gate_can_actually_fail(self):
+        # A gate never seen to fail is a rubber stamp. Here the mask is stamped
+        # by hand with a wall of "wrecks" straight down the map, which is what
+        # a badly-placed field across a chokepoint amounts to.
+        with SyntheticMap(flat_map, "wreckgate") as d:
+            terrain, _map_id = sg.load_terrain(d, ["VEH"])
+        span = (terrain.W - 1) * 8
+        mid = span // 2
+        wall = [(mid - 40, z, mid + 40, z + 200) for z in range(0, span, 200)]
+        points = [("west", 200, mid), ("east", span - 200, mid)]
+        sg.gate_reachability(terrain, points, "synth")     # passes bare
+        with self.assertRaises(sg.Rejected) as caught:
+            sg.gate_blocking_features_leave_the_war_fightable(
+                terrain, wall, points, "synth")
+        self.assertIn("unfightable", str(caught.exception))
+
+    def test_no_wrecks_requested_means_no_gate_and_no_features(self):
+        with SyntheticMap(flat_map, "nowrecks") as d:
+            _lua, meta = sg.generate(d, seed=5, game_dir=GAME_DIR, wrecks=0,
+                                     relics=0)
+        self.assertEqual(meta["wrecks"], [])
+
+
+class TestCrossings(unittest.TestCase):
+    def setUp(self):
+        if not os.path.isdir(GAME_DIR):
+            self.skipTest(f"no game content at {GAME_DIR}")
+
+    def test_a_river_map_gets_a_chained_span_at_the_waterline(self):
+        with SyntheticMap(river_map, "river") as d:
+            lua, meta = sg.generate(d, seed=5, game_dir=GAME_DIR, bridges=1)
+        self.assertEqual(len(meta["crossings"]), 1,
+                         "a map with a river and no bridge is the whole bug")
+        _key, name, spans, width = meta["crossings"][0]
+        span = next(f for f in parse_features(lua)
+                    if f["def"] == "ms_road_bridge")
+        self.assertEqual(span.get("name"), name)
+        self.assertEqual(span.get("chain"), spans)
+        # y = 0 is the waterline and it is load-bearing: without it the chain
+        # settles into a staircase down the riverbed (§M3 measured
+        # -31/-34.5/-45.9/-57.6 for four spans laid without one).
+        self.assertEqual(span.get("y"), 0)
+        # A deck that covers the gap but overhangs the banks is worse than one
+        # that stops short: `floating` beats gravity only in water, so a dry
+        # segment clamps to the terrain and the chain kinks upward. The deck is
+        # therefore sized by FLOOR over the water and must not exceed it.
+        self.assertLessEqual(spans * 24, width + 24)
+        self.assertGreaterEqual(spans, sg.MIN_BRIDGE_SPANS)
+
+    def test_every_span_of_the_chain_sits_over_water(self):
+        # THE invariant, and the one a live boot had to teach: the first
+        # version sized the deck to reach the drivable banks and produced
+        # spans at y = 0.00 / 15.7 / 97.8 / 203.5 / 230.1 / 250.7 / 252.0 —
+        # a ramp into the sky. Asserted with the loader's own chaining
+        # arithmetic (game_scenario.lua stageFeatures: segment i sits at
+        # (i - (count-1)/2) * pitch from the centre), not with a restatement
+        # of it.
+        with SyntheticMap(river_map, "riverafloat") as d:
+            lua, _meta = sg.generate(d, seed=5, game_dir=GAME_DIR, bridges=1)
+            terrain, _mid = sg.load_terrain(d, ["VEH"])
+        span = next(f for f in parse_features(lua)
+                    if f["def"] == "ms_road_bridge")
+        n = span["chain"]
+        for i in range(n):
+            step = (i - (n - 1) / 2.0) * 24.0
+            # river_map's channel runs along Z, so the chain runs along X.
+            x, z = span["x"] + step, span["z"]
+            self.assertTrue(terrain.is_water(x, z),
+                            f"segment {i} of {n} at ({x:.0f},{z:.0f}) is on "
+                            f"dry ground (h={terrain.height_at(x, z):.1f}) — "
+                            f"it will clamp to the terrain and kink the deck")
+
+    def test_the_span_lies_across_the_river_not_along_it(self):
+        with SyntheticMap(river_map, "riveraxis") as d:
+            lua, _meta = sg.generate(d, seed=5, game_dir=GAME_DIR, bridges=1)
+        span = next(f for f in parse_features(lua)
+                    if f["def"] == "ms_road_bridge")
+        # river_map's channel runs along Z, so the crossing runs along X.
+        # game_scenario.lua's headingToDir maps 'east' to +X.
+        self.assertEqual(span.get("facing"), "east")
+
+    def test_a_map_with_no_water_gets_no_bridge_rather_than_a_bad_one(self):
+        with SyntheticMap(flat_map, "nowater") as d:
+            lua, meta = sg.generate(d, seed=5, game_dir=GAME_DIR, bridges=1)
+        self.assertEqual(meta["crossings"], [])
+        self.assertNotIn("ms_road_bridge",
+                         [f["def"] for f in parse_features(lua)])
+
+
+class TestFeatureDefsAreReal(unittest.TestCase):
+    def setUp(self):
+        if not os.path.isdir(GAME_DIR):
+            self.skipTest(f"no game content at {GAME_DIR}")
+
+    def test_every_featuredef_the_templates_name_is_shipped(self):
+        from scenario_templates import (ANCIENT_SITES, BRIDGE_SPANS,
+                                        WRECK_FIELD)
+        fdefs = sg.load_feature_facts(GAME_DIR)
+        named = sorted(set(ANCIENT_SITES) | {d for d, _w in WRECK_FIELD} |
+                       set(BRIDGE_SPANS.values()))
+        self.assertEqual(sg.verify_feature_defs(fdefs, named, GAME_DIR), [])
+
+    def test_feature_extents_come_from_content_not_from_a_copy(self):
+        # The half-extent must be the engine's own arithmetic on the def's
+        # footprint (xsize = footprint * SPRING_FOOTPRINT_SCALE, 4 elmos per
+        # xsize unit) — the first draft used the models' metre dimensions and
+        # packed five wrecks into 180 elmos.
+        fdefs = sg.load_feature_facts(GAME_DIR)
+        self.assertEqual(fdefs["ms_tank_wreck"], (4, 5))
+        self.assertEqual(sg.feature_half_extent(fdefs, "ms_tank_wreck"),
+                         (32, 40))
 
 
 if __name__ == "__main__":

@@ -4,8 +4,13 @@
 -- room manifest names one (quickstart --direct manifest's top-level
 -- "scenario" field, threaded through as the `scenario` modoption — see
 -- rts/lobby_main.cpp runDirectStart): pre-set units, region ownership,
--- initial objectives, civilian population, NPC faction AI slots. No engine
--- change — everything below is existing Lua surface
+-- initial objectives, civilian population, NPC faction AI slots, and
+-- `world.features` — wrecks, bridge spans and ancient-tech sites placed via
+-- Spring.CreateFeature (PLAN-metalstorm-model-integration §M3; the defs live
+-- in data/games/metalstorm/features/, see that directory's README). A `units`
+-- or `world.features` entry carrying a `name` is additionally published as a
+-- LANDMARK the command language can address (§M4 — see landmarkNameProblem
+-- below). No engine change — everything below is existing Lua surface
 -- (Spring.CreateUnit/GiveOrderToUnit/SetTeamRulesParam, the backbone gadgets'
 -- GG.* APIs).
 --
@@ -51,6 +56,7 @@ end
 local SUPPORTED_VERSION = 1
 local DEFAULT_SPACING = 150        -- elmos between grid-spread squad instances
 local ALLIED_LOS = { allied = true }   -- same visibility as every other team param
+local PUBLIC_LOS = { public = true }   -- geography: the same for every team
 
 -- Scripted-slate kinds the shipped AI plugin implements
 -- (data/games/metalstorm/ai/strategos/scripted.lua's Builders). Kept here as a
@@ -89,6 +95,61 @@ local function buildKnownDefNames()
     return known
 end
 
+--- name -> FeatureDefs entry, for every featuredef the loaded content ships
+--- (data/games/metalstorm/features/*.lua — see features/README.md). Same
+--- shape and same reason as buildKnownDefNames: `FeatureDefs` is ID-indexed.
+--- The def itself is kept, not just `true`, because stageFeatures reads
+--- `customParams.chain_pitch` off it.
+local function buildKnownFeatureDefs()
+    local known = {}
+    for _, def in pairs(FeatureDefs or {}) do
+        known[def.name] = def
+    end
+    return known
+end
+
+-- ============================================================
+-- Landmarks (PLAN-metalstorm-model-integration §M4, worldbuilding directive 2)
+-- ============================================================
+--
+-- Any `units` or `world.features` entry may carry a `name`: the thing a player
+-- would point at and say out loud — "the Weatherall silos", "the drowned
+-- span". A named entry is published as
+--
+--     landmark_<name>_x   landmark_<name>_z
+--
+-- which is a shape the client has parsed since the named-entity index landed
+-- (client/src/ui/native-ui/named-entity-index.ts parseLandmarksFromRulesParams)
+-- and which, until now, NOTHING wrote — the header of entity-index-producer.ts
+-- literally says "no publisher yet". This is that publisher. It is what makes
+-- "defend the grain silo" resolvable by the command language
+-- (PLAN-metalstorm-command-language.md §6.5), and it is why scenariogen's site
+-- layer bothers to mint names at all rather than dropping anonymous buildings.
+--
+-- The NAME IS INSIDE THE KEY (the client's regex is
+-- /^landmark_(.+)_(x|z)$/), so two entries sharing a name would silently
+-- overwrite each other's position and one landmark would simply vanish from the
+-- index. validate() rejects that rather than letting it happen — same reasoning
+-- as the `team = 'nuetral'` typo guard below: a name collision is invisible
+-- from the outside and unfalsifiable in a screenshot.
+local function landmarkNameProblem(name)
+    if type(name) ~= 'string' then
+        return 'must be a string, got ' .. type(name)
+    end
+    if name == '' then
+        return 'must not be empty'
+    end
+    -- The suffix is anchored at end-of-string with a greedy name capture, so a
+    -- name ENDING in _x or _z would be split at the wrong underscore and the
+    -- landmark would parse under a truncated name with a missing coordinate.
+    if name:match('_[xz]$') then
+        return 'must not end in "_x" or "_z" — the client splits ' ..
+               'landmark_<name>_x at the LAST underscore, so this name would ' ..
+               'parse as "' .. name:sub(1, -3) .. '" with a missing coordinate'
+    end
+    return nil
+end
+
 --- A scenario order names a command by its CMD.* constant name (e.g.
 -- "FIGHT", "MOVE", "GUARD") or gives the numeric id directly. Returns nil
 -- for anything else so callers can validate before acting.
@@ -124,8 +185,78 @@ end
 -- Validation (E6) — check everything before spawning anything
 -- ============================================================
 
-local function validate(scn, knownDefs)
+-- Feature placement (PLAN-metalstorm-model-integration §M3). A scenario's
+-- `world.features` is the ONLY thing in Metalstorm that calls
+-- Spring.CreateFeature — wrecks, bridges and ancient-tech sites are placed
+-- history, never spawned by gameplay, so they belong to the world pre-set
+-- next to `world.regions` rather than to any runtime gadget.
+--
+-- Heading is an opaque u16 rotation index; these are the four cardinal labels
+-- from GetHeadingFromFacing (rts/System/SpringMath.inl). Metalstorm is
+-- RH/glTF-native (modinfo.lua `legacyCoordSystem = false`), so heading 0 is
+-- FACING_NORTH and a feature's local forward at heading 0 is -Z.
+local FEATURE_FACING_HEADINGS = {
+    north =      0,
+    east  =  16384,
+    south =  32767,
+    west  = -16384,
+}
+
+--- Unit direction a feature at `heading` points along, in world XZ.
+-- Derived from GetVectorFromHeading (LH: sin/cos) with the RH Z flip that
+-- LuaCoordAdapt applies for non-legacy games — verify against SpringMath.inl's
+-- diagram: heading 0 -> (0, -1) = -Z = FACING_NORTH, heading 16384 -> (1, 0)
+-- = +X = FACING_EAST. Computed here rather than via
+-- Spring.GetVectorFromHeading so the chaining arithmetic is exercised by the
+-- spec instead of by a mock's stand-in for it.
+local function headingToDir(heading)
+    local theta = (heading or 0) * (2 * math.pi / 65536)
+    return math.sin(theta), -math.cos(theta)
+end
+
+--- Resolve a feature entry's rotation to a heading short. Accepts a cardinal
+--- name ('north'/'east'/'south'/'west') or a raw numeric heading; nil = 0.
+local function featureHeading(f)
+    if type(f.heading) == 'number' then return f.heading end
+    if type(f.facing) == 'string' then
+        return FEATURE_FACING_HEADINGS[f.facing:lower()]
+    end
+    if type(f.facing) == 'number' then return f.facing end
+    return 0
+end
+
+--- Segment spacing for a chained feature, in world units. Authoritative source
+--- is the def's own `customParams.chain_pitch` (features/bridges.lua publishes
+--- the measured 24 m tile length there), so a scenario never restates a number
+--- that belongs to the model. A scenario may override per placement.
+local function featureChainPitch(f, fd)
+    if type(f.pitch) == 'number' then return f.pitch end
+    local cp = fd and fd.customParams and fd.customParams.chain_pitch
+    return tonumber(cp) or 0
+end
+
+local function validate(scn, knownDefs, knownFeatureDefs)
     local errors = {}
+
+    -- Landmark names are global across BOTH sections: a site and a bridge that
+    -- both call themselves "Ferry Crossing" collide in the rulesParam key space
+    -- exactly as two sites would.
+    local seenNames = {}
+    local function checkName(name, ctx)
+        if name == nil then return end
+        local problem = landmarkNameProblem(name)
+        if problem then
+            errors[#errors + 1] = ctx .. ': "name" ' .. problem
+            return
+        end
+        if seenNames[name] then
+            errors[#errors + 1] = ctx .. ': duplicate name "' .. name ..
+                '" (already used by ' .. seenNames[name] .. ') — landmark ' ..
+                'names are the rulesParam key, so one would overwrite the other'
+            return
+        end
+        seenNames[name] = ctx
+    end
 
     local function checkDef(def, ctx)
         if type(def) ~= 'string' or not knownDefs[def] then
@@ -144,6 +275,7 @@ local function validate(scn, knownDefs)
     for i, u in ipairs(scn.units or {}) do
         checkDef(u.def, 'units[' .. i .. ']')
         checkOrders(u.orders, 'units[' .. i .. ']')
+        checkName(u.name, 'units[' .. i .. ']')
         -- 'neutral' (the Gaia team, see resolveTeam) is the only string a
         -- `team` may be. Checked hard rather than left to stageUnits' live-team
         -- guard, because a typo would otherwise be reported as "team 'nuetral'
@@ -163,6 +295,37 @@ local function validate(scn, knownDefs)
     for i, r in ipairs((scn.world or {}).regions or {}) do
         if r.key == nil and (r.x == nil or r.z == nil) then
             errors[#errors + 1] = 'world.regions[' .. i .. ']: needs either "key" or "x"/"z"'
+        end
+    end
+
+    -- Features are validated as hard as AI slates and for the same reason:
+    -- Spring.CreateFeature returns nothing for an unknown def and does NOT
+    -- error ("do not error (featureDefs are dynamic)", LuaSyncedCtrl.cpp:4344),
+    -- so a typo'd wreck name would stage a scenario that boots clean and is
+    -- silently missing the terrain the fight was designed around.
+    for i, f in ipairs((scn.world or {}).features or {}) do
+        local ctx = 'world.features[' .. i .. ']'
+        checkName(f.name, ctx)
+        if type(f.def) ~= 'string' or not knownFeatureDefs[f.def] then
+            errors[#errors + 1] = ctx .. ': unknown feature def "' .. tostring(f.def) .. '"'
+        end
+        if type(f.x) ~= 'number' or type(f.z) ~= 'number' then
+            errors[#errors + 1] = ctx .. ': needs numeric "x" and "z"'
+        end
+        if f.facing ~= nil and f.heading == nil and featureHeading(f) == nil then
+            errors[#errors + 1] = ctx .. ': unknown facing "' .. tostring(f.facing) ..
+                '" (expected north/east/south/west or a numeric heading)'
+        end
+        if f.chain ~= nil then
+            if type(f.chain) ~= 'number' or f.chain < 1 or f.chain % 1 ~= 0 then
+                errors[#errors + 1] = ctx .. ': "chain" must be a positive integer'
+            elseif f.chain > 1 and featureChainPitch(f, knownFeatureDefs[f.def]) <= 0 then
+                -- Chaining a def with no pitch would stack every segment on one
+                -- spot — a pile of coincident geometry, i.e. exactly the
+                -- z-fighting §M3 asks us to avoid. Refuse rather than draw it.
+                errors[#errors + 1] = ctx .. ': "chain" > 1 but def "' .. tostring(f.def) ..
+                    '" declares no customParams.chain_pitch and the entry sets no "pitch"'
+            end
         end
     end
 
@@ -235,6 +398,85 @@ local function stageRegions(regions)
     end
 end
 
+--- Place `world.features` (PLAN-metalstorm-model-integration §M3). Returns the
+--- list of created feature IDs so callers (and the smoke spec) can assert on
+--- what actually landed.
+---
+--- Entry shape:
+---   { def = 'ms_tank_wreck', x = , z = ,
+---     y       = <optional>  spawn Y (see below); default = ground height at
+---                           each segment
+---     facing  = <optional>  'north'|'east'|'south'|'west', or heading = <short>
+---     chain   = <optional>  segment count, laid along the facing direction
+---     pitch   = <optional>  metres between segments; default = the def's
+---                           customParams.chain_pitch (bridges publish 24)
+---     team    = <optional>  default -1 = Gaia/neutral, which is what every
+---                           wreck, span and relic wants }
+---
+--- CHAINING is CENTRED on (x, z): a `chain = 4` bridge spans 96 m with its
+--- midpoint at the author's crossing point, which is how someone picks a
+--- crossing (they know where the gap is, not where its upstream end is).
+---
+--- Y IS A SPAWN HEIGHT, NOT A PLACEMENT. Say this out loud because the
+--- opposite is the natural assumption: `Spring.CreateFeature`'s y is where the
+--- feature APPEARS, not where it stays. `CFeature::UpdatePosition` applies
+--- gravity every tick and then clamps to
+--- `max(CGround::GetHeightReal(x, z), pos.y)` (Feature.cpp:565-571), so a
+--- feature settles onto the terrain under it within a second or so.
+---
+--- What that means per family, live-measured on skerry_reach 2026-08-06:
+---   * wrecks / relics — pass no `y`; the ground sample is both the spawn point
+---     and the resting point, so nothing moves. Half-buried models
+---     (ms_vault_door, ms_dig_site, ms_colossus_wreck, ms_train_wreck all have
+---     negative glTF mins.y) get NO lift: their berms and pits are authored
+---     geometry, see features/README.md.
+---   * bridges — pass `y` AND rely on `floating = true` in features/bridges.lua.
+---     Floating zeroes the gravity term in water, so a span spawned at the
+---     waterline stays there and the chain reads level: four road spans at
+---     y = 0 over a channel measured 0.00 / 0.00 / 0.00 / 0.00. Without
+---     floating the same four settled to -31.0 / -34.5 / -45.9 / -57.6.
+---     Over DRY ground the clamp still wins and a chain steps with the terrain
+---     (the rail run measured 26.1 -> 40.8) — a level deck over a dry ravine
+---     needs terrain shaped to carry it, or the deck-height engine work noted
+---     in features/bridges.lua. Passing `y` is still right: it is used verbatim
+---     for every segment rather than resampled per segment, which is what keeps
+---     the water case level.
+local function stageFeatures(features, knownFeatureDefs, landmarks)
+    local created = {}
+    knownFeatureDefs = knownFeatureDefs or buildKnownFeatureDefs()
+    for _, f in ipairs(features or {}) do
+        -- A named span/wreck/relic is a landmark at the CHAIN CENTRE, not at
+        -- its first segment: chaining is centred on (x, z) precisely because
+        -- that is the point an author (or a player) means by "the crossing".
+        if f.name and landmarks then
+            landmarks[#landmarks + 1] = { name = f.name, x = f.x, z = f.z }
+        end
+        local fd = knownFeatureDefs[f.def]
+        local heading = featureHeading(f) or 0
+        local count = f.chain or 1
+        local pitch = featureChainPitch(f, fd)
+        local dirX, dirZ = headingToDir(heading)
+        local team = f.team or -1
+        for i = 0, count - 1 do
+            local step = (i - (count - 1) / 2) * pitch
+            local fx, fz = f.x + dirX * step, f.z + dirZ * step
+            local fy = f.y or Spring.GetGroundHeight(fx, fz)
+            local featureID = Spring.CreateFeature(f.def, fx, fy, fz, heading, team)
+            if featureID then
+                created[#created + 1] = featureID
+            else
+                -- CreateFeature returns nothing rather than erroring; validate()
+                -- already rejected unknown defs, so reaching here means the
+                -- placement itself was refused (out of bounds, bad team).
+                Spring.Echo('[game_scenario] WARNING: could not place feature "' ..
+                            tostring(f.def) .. '" at ' .. math.floor(fx) .. ',' ..
+                            math.floor(fz) .. ' — skipped')
+            end
+        end
+    end
+    return created
+end
+
 --- teamID -> true for every team this game actually has. A scenario may declare
 --- more sides than the launch supplied (an optional NPC faction is the common
 --- case): spawning for a team that doesn't exist is a hard engine error, so
@@ -272,12 +514,13 @@ local function resolveTeam(team)
     return team
 end
 
-local function stageUnits(units)
+local function stageUnits(units, landmarks)
     local liveTeams = buildLiveTeams()
     local warned = {}
     local skipped = {}
     local created = 0
     for _, entry in ipairs(units or {}) do
+        local staged = 0
         local u = entry
         if u.team == 'neutral' then
             local gaia = resolveTeam('neutral')
@@ -324,12 +567,21 @@ local function stageUnits(units)
                                                       tostring(u.def), ux, uz)
             else
                 created = created + 1
+                staged = staged + 1
                 if u.orders then
                 for _, o in ipairs(u.orders) do
                     Spring.GiveOrderToUnit(unitID, resolveCmd(o.cmd), o.params or {}, o.options or {})
                 end
                 end
             end
+        end
+        -- Only a landmark that actually LANDED is published. A name is a
+        -- promise the player can point at something; publishing one for an
+        -- entry the engine refused (occupied ground, missing team) would put a
+        -- silo in the command language's target list that does not exist on the
+        -- map, and the locate-ping would fly to bare terrain.
+        if entry.name and landmarks and staged > 0 then
+            landmarks[#landmarks + 1] = { name = entry.name, x = u.x, z = u.z }
         end
         ::continue::
     end
@@ -345,6 +597,28 @@ local function stageUnits(units)
                     #skipped .. ' staged unit(s) — the ground was already ' ..
                     'occupied, so the war is short of what the scenario ' ..
                     'declares: ' .. table.concat(skipped, ', '))
+    end
+end
+
+--- Publish every collected landmark as `landmark_<name>_x/_z`, PUBLIC.
+---
+--- Public rather than allied because a landmark is geography: the grain silo
+--- is where it is for everyone, and the whole point is that either side can
+--- say "hit the grain silo". Region names (game_regions.lua:229) are published
+--- the same way for the same reason.
+---
+--- Coordinates are the AUTHORED x/z, not a live unit position. That is
+--- deliberate: these entries are buildings, wrecks and relics — they do not
+--- move — and reading positions back would make the publisher depend on unit
+--- ids it would then have to keep watching.
+local function publishLandmarks(landmarks)
+    for _, lm in ipairs(landmarks or {}) do
+        Spring.SetGameRulesParam('landmark_' .. lm.name .. '_x', lm.x, PUBLIC_LOS)
+        Spring.SetGameRulesParam('landmark_' .. lm.name .. '_z', lm.z, PUBLIC_LOS)
+    end
+    if #(landmarks or {}) > 0 then
+        Spring.Echo('[game_scenario] published ' .. #landmarks ..
+                    ' landmark(s) the command language can address')
     end
 end
 
@@ -694,7 +968,8 @@ function gadget:GameStart()
               ' (loader supports ' .. SUPPORTED_VERSION .. ')')
     end
 
-    local errors = validate(scn, buildKnownDefNames())
+    local knownFeatureDefs = buildKnownFeatureDefs()
+    local errors = validate(scn, buildKnownDefNames(), knownFeatureDefs)
     if #errors > 0 then
         error('[game_scenario] scenarios/' .. name .. '.lua failed validation:\n  ' ..
               table.concat(errors, '\n  '))
@@ -709,13 +984,21 @@ function gadget:GameStart()
     end
 
     stageRegions((scn.world or {}).regions)
-    stageUnits(scn.units)
+    -- Before units: features are terrain-that-blocks, so a wreck must own its
+    -- squares before anything is placed near it (CreateUnit onto a square a
+    -- later CreateFeature would claim leaves the unit stuck inside it).
+    local landmarks = {}
+    GG.Scenario.features = stageFeatures((scn.world or {}).features,
+                                         knownFeatureDefs, landmarks)
+    stageUnits(scn.units, landmarks)
     stageCivilians(scn.civilians)
     stageObjectives(scn.objectives)
     stageAI(scn.ai)
+    publishLandmarks(landmarks)
 
     GG.Scenario.name = name
     GG.Scenario.data = scn
+    GG.Scenario.landmarks = landmarks
     Spring.SetGameRulesParam('scenario_name', name)
 
     Spring.Echo('[game_scenario] staged "' .. (scn.name or name) .. '"')

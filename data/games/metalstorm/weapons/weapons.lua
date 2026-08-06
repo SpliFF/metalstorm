@@ -151,6 +151,26 @@ family('MS_BOMB', {
     { name = 'Heavy Bombs',  range = 140, reloadtime = 14.0, dmg = 1800, areaofeffect = 180 },
 })
 
+-- Irregular one-offs — outside the family curves on purpose.
+--
+-- The Anarchic technical's bed gun (units/irregulars.lua). Deliberately NOT
+-- MS_AC_S1: a bolted-on ring mount, so it is shorter-ranged and wilder than
+-- the family's light autocannon, and cycles faster so it still reads as a
+-- raider's weapon rather than a downgrade.
+-- BALLISTIC, unlike the MS_AC family it is named after. The technical is a
+-- SINGLE unit with a visible gun, not a squad abstraction, and the cosmetic
+-- turret-aim controller engages off ProjectileFired events — a `statistical`
+-- volley spawns no projectile (Sim/Weapons/StatisticalCombat.h), so the bed
+-- gun would fire while the turret stared straight ahead. Same reasoning as
+-- fable_tank's MS_RAILGUN_S2. Verified live 2026-08-06: statistical → no aim.
+defs.MS_AC_TECHNICAL = {
+    name = 'Scrap Autocannon', weapontype = 'Cannon', weaponvelocity = 600,
+    turret = true, accuracy = 190, areaofeffect = 20,
+    range = 330, reloadtime = 0.9, damage = { default = 70 },
+    soundstart = 'ac_fire',
+    customparams = { resolution = 'ballistic' },
+}
+
 -- Depth charges — anti-sub.
 family('MS_DEPTHCHARGE', {
     weapontype = 'TorpedoLauncher', weaponvelocity = 150,

@@ -109,8 +109,9 @@ import { TrainPresentation } from './train-presentation.js';
 import { OrbitRig, type OrbitTarget } from './orbit-rig.js';
 import { SunRig } from './sun-rig.js';
 import { ClipPlayer } from './clip-player.js';
-import { ClipAutoPolicy, nominalSpeedFor } from './clip-auto-policy.js';
+import { ClipAutoPolicy, nominalSpeedFor, isStaticFor } from './clip-auto-policy.js';
 import { TurretAimController } from './turret-aim-controller.js';
+import { WheelSpinDriver, wheelRadiusFor } from './wheel-spin-driver.js';
 import { WorkerSelection } from './worker-selection.js';
 import { WorkerBuildPlacement, UNITDEF_FLAG_IS_FACTORY } from './worker-build-placement.js';
 import { WorkerCommandModes } from './worker-command-modes.js';
@@ -475,6 +476,12 @@ let gpClipPolicy: ClipAutoPolicy | null = null;
 /// Fired events (native models with a `turret` piece that the sim isn't
 /// already piece-driving) and ticked from the render loop for smooth slew.
 let gpAimController: TurretAimController | null = null;
+/// PLAN-metalstorm-model-integration §M1: generic axle spin for wheeled
+/// natives (`axle_f`/`wheel1`… — the forge convention). Fed from the same wire
+/// entity-state callback as the clip policy and ticked from the render loop;
+/// writes the same `setWheelPose` channel TrainPresentation uses, which owns
+/// the train cars (excluded here).
+let gpWheelSpin: WheelSpinDriver | null = null;
 
 /// Both are created together on first use: each needs the EntityRenderer (as
 /// pose sink and as clip/def source), which doesn't exist until gpInit runs.
@@ -523,7 +530,40 @@ function gpEnsureClipPlayer(r: EntityRenderer): ClipPlayer {
             const lookAt = gpViewCameras.get(0)?.saveView().lookAt;
             return lookAt ? { x: lookAt.x, z: lookAt.z } : null;
         },
+        // §M2 buildings: immobile units idle on sighting (they can never trip
+        // the movement threshold). A def we have not received yet answers
+        // `false` here — isStaticFor returns false for undefined, and the unit
+        // is re-checked on the next snapshot.
+        isStatic: (id) => {
+            const defId = r.getEntityDefId(id);
+            return isStaticFor(defId === undefined
+                ? undefined : gpDefCache?.getUnitDef(defId));
+        },
     }, player);
+    // §M1 wheel spin. Same lifetime as the clip policy: both hang off the
+    // renderer and both are fed from the wire entity-state callback.
+    gpWheelSpin = new WheelSpinDriver({
+        wheelPieces: (id) => r.getWheelPieces(id),
+        topSpeed: (id) => {
+            const defId = r.getEntityDefId(id);
+            const def = defId === undefined ? undefined : gpDefCache?.getUnitDef(defId);
+            return def?.speed && def.speed > 0 ? def.speed : 0;
+        },
+        wheelRadius: (id) => {
+            const defId = r.getEntityDefId(id);
+            return wheelRadiusFor(defId === undefined
+                ? undefined : gpDefCache?.getUnitDef(defId));
+        },
+        simDrivesPieces: (id) => r.hasPieceStream(id),
+        // Train cars are TrainPresentation's (PLAN-metalstorm-train T6) —
+        // two writers of one pose channel would blank each other's pieces.
+        excluded: (id) => {
+            const defId = r.getEntityDefId(id);
+            const cp = defId === undefined
+                ? undefined : gpDefCache?.getUnitDef(defId)?.customParams;
+            return cp?.train_role !== undefined;
+        },
+    }, r);
     return player;
 }
 /// Long-frame profiler: the render loop stamps per-phase timings every frame
@@ -1134,6 +1174,9 @@ function gpConnect(msg: GpInitToWorker): void {
             if (gpCtx.entityRenderer) {
                 gpEnsureClipPlayer(gpCtx.entityRenderer);
                 gpClipPolicy!.observe(snapshot, isDelta);
+                // §M1: axle spin reads the same wire positions, for the same
+                // reason (the render pose is camera-lerped).
+                gpWheelSpin!.observe(snapshot, isDelta);
             }
             // GW4-c6-1b: also merge into liveState.units + synth the
             // UnitCreated/UnitFinished callins so LuaUI widgets see the world.
@@ -1176,6 +1219,7 @@ function gpConnect(msg: GpInitToWorker): void {
                 // After the recycling guard so a reused ID keeps the new unit's.
                 gpClipPolicy?.remove(entityId);
                 gpAimController?.remove(entityId);
+                gpWheelSpin?.remove(entityId);
                 gpCombatFX?.onCombatEvents([{
                     attackerId: 0, targetId: entityId, weaponDefId: 0,
                     result: 3, damage: 500, x, y, z,
@@ -1283,6 +1327,32 @@ function gpConnect(msg: GpInitToWorker): void {
         // pre-roll warm-up below is worth doing: a weapon's .glb has ~D frames
         // plus the flight time to load before its first bolt is drawn.
         onFireOutcomes: (events) => {
+            // §16c: engage cosmetic turret aim off a Tier-C shot too.
+            // `onProjectileFired` is NOT the only way a shot reaches the
+            // client any more — a weapon the server resolves with
+            // foreknowledge sends a FireOutcome INSTEAD of a Fired event
+            // (StateStreamer.cpp: "Tier-C fire outcomes … which this event
+            // replaces"), and every metalstorm ballistic weapon takes that
+            // path. Without this the aim controller sat dead for every native
+            // in the game, fable_tank's landed showcase included (verified
+            // live 2026-08-06: sim fires, HP drops, zero Fired events).
+            // Engaged at RECEIPT rather than scheduled at `fireFrame`: the
+            // outcome arrives ahead of its own fire frame, which is exactly
+            // the lead time the turret needs to be pointing when the bolt
+            // leaves. The event carries the same fields the controller reads.
+            if (gpCtx.entityRenderer && events.length) {
+                gpEnsureClipPlayer(gpCtx.entityRenderer);
+                const nowFire = performance.now();
+                for (const ev of events) {
+                    gpAimController?.onFired({
+                        ownerId: ev.ownerId,
+                        targetId: ev.targetId,
+                        targetPos: ev.targetPos,
+                        weaponDefId: ev.weaponDefId,
+                        pos: ev.origin,   // muzzle, for multi-turret tie-breaks
+                    }, nowFire);
+                }
+            }
             for (const ev of events) {
                 const impactKind = fireOutcomeImpactKind(ev.outcome);
                 // Minted here rather than inside the spawn so both closures
@@ -2503,6 +2573,9 @@ export function gpInit(msg: GpInitToWorker): void {
         // PLAN-metalstorm-train T6: wheel-spin for train cars (updates piece
         // poses via setAimPose based on ground speed derived from position delta).
         gpTrainPresentation?.tick(dt * 1000); // tick() expects deltaMs
+        // §M1: the same axle pose channel for every OTHER wheeled native
+        // (the driver declines train cars, which the line above owns).
+        gpWheelSpin?.tick(dt * 1000);
         // PLAN-latency L1: fire discrete events (explosions, deaths, impact
         // CEGs, sounds) whose sim frame the cursor has now reached — so they
         // present in lockstep with the units interpolated to the same P, rather
@@ -3438,6 +3511,7 @@ export function gpShutdown(): void {
     gpClipPlayer = null;
     gpClipPolicy = null;
     gpAimController = null;
+    gpWheelSpin = null;
     gpTerrainFog?.dispose();
     gpTerrainFog = null;
     gpTerrain = null;

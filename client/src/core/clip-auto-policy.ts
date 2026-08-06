@@ -2,6 +2,22 @@
  * ClipAutoPolicy — movement-driven walk/idle clip playback for native models
  * (DESIGN-MODEL-BUILDING.md §16b, "task 6b").
  *
+ * `walk` engages on sustained movement and hands back to `idle` at rest. Since
+ * PLAN-metalstorm-model-integration §M1 a model that ships `idle` and NO walk
+ * (most of the M1 vehicle roster — dish sweeps, pennant sway, tether drift)
+ * plays that idle from the same trigger instead: movement engages the only
+ * cycle it has, and it keeps idling once stopped.
+ *
+ * §M2 (buildings) adds the one population that movement can never speak for.
+ * An immobile unit — pumpjack beam, headframe wheel, crane trolley, saw blade,
+ * meeting-hall bell, market awning — has an authored `idle` and no possible way
+ * to trip a speed threshold, so `deps.isStatic` engages its idle directly on
+ * first sighting. That reopens the exact risk the §16b cap exists for (a
+ * resting population filling every slot and starving the walkers), so statics
+ * are admitted LAST and may hold at most `STATIC_SHARE` of the cap; movers can
+ * always claim the rest. A game with no `isStatic` dep behaves exactly as
+ * before: never-moved still means never-animated.
+ *
  * Natives are deliberately script-less: the sim never turns a piece for them,
  * so nothing enters the 0x05 piece-state stream and a walker would glide.
  * This policy closes that gap CLIENT-SIDE — pure cosmetics off the entity
@@ -75,6 +91,13 @@ const NOMINAL_FALLBACK = 30;
  *  Manual/harness playbacks are never counted or evicted. */
 const MAX_AUTO_PLAYBACKS = 64;
 
+/** Fraction of the cap immobile units (§M2 buildings) may hold at once. A base
+ *  is a *permanent* resting population — unlike a stopped walker it never frees
+ *  its slot — so without a sub-cap a dense town would own all 64 forever and no
+ *  walker would ever animate again. Movers are still admitted against the full
+ *  cap, so this only ever costs a building its ambience. */
+const STATIC_SHARE = 0.5;
+
 export interface ResolvedClip {
     clip: ModelClip;
     restLocals: Matrix[];
@@ -119,6 +142,18 @@ export interface ClipAutoPolicyDeps {
     /** Camera focus in world XZ for the nearest-first cap. Omitted / null →
      *  admission falls back to first-come order. */
     cameraXZ?(): { x: number; z: number } | null;
+    /**
+     * Is this unit immobile (a building)? Such a unit can never reach the
+     * movement threshold, so its authored `idle` is engaged on sighting
+     * instead — see the header. Omitted = no unit is static, which is the
+     * pre-§M2 behaviour and what every non-metalstorm game wants.
+     *
+     * Answer `false` while the def is still unknown, not `true`: a wrong
+     * `false` costs one wire tick (the unit is re-checked on the next
+     * snapshot), a wrong `true` would start an idle on a mover and then have
+     * to be walked back.
+     */
+    isStatic?(unitId: number): boolean;
 }
 
 interface Motion {
@@ -138,10 +173,27 @@ interface Motion {
      *  `evaluate` reconciles the two. Both walk and idle hold a slot against
      *  the concurrency cap; walk→idle reuses the same slot. */
     autoClip: 'walk' | 'idle' | null;
-    /** Model loaded and ships no `walk` clip — this unit can never animate,
-     *  so it is retired from evaluation. True for every unit of ZK, BAR and
-     *  the converted wz_* models, which is the case worth not paying for. */
+    /** Model loaded and ships an `idle` cycle but no `walk` — never queue a
+     *  walk start for it again (it would re-resolve to the same idle clip
+     *  every wire tick and restart the playback). */
+    idleOnly: boolean;
+    /** Model loaded and ships NEITHER cycle — this unit can never animate, so
+     *  it is retired from evaluation. True for every unit of ZK, BAR and the
+     *  converted wz_* models, which is the case worth not paying for. */
     ineligible: boolean;
+    /** Immobile (§M2 building): idles on sighting rather than on movement, and
+     *  counts against the STATIC_SHARE sub-cap. Latched once `deps.isStatic`
+     *  says yes — a def does not stop being a building. */
+    staticUnit: boolean;
+}
+
+/** One queued playback start, pending admission against the caps. */
+interface Start {
+    id: number;
+    /** Planar speed to scale a `walk` playback by; 0 (unused) for statics. */
+    speed: number;
+    want: 'walk' | 'idle';
+    isStatic: boolean;
 }
 
 export class ClipAutoPolicy {
@@ -242,7 +294,7 @@ export class ClipAutoPolicy {
             this.motion.set(id, {
                 frame, x, z, speed: 0,
                 aboveTicks: 0, belowSinceFrame: null, autoClip: null,
-                ineligible: false,
+                idleOnly: false, ineligible: false, staticUnit: false,
             });
             return;
         }
@@ -270,7 +322,7 @@ export class ClipAutoPolicy {
     }
 
     private evaluate(): void {
-        const starts: { id: number; speed: number }[] = [];
+        const starts: Start[] = [];
 
         for (const [id, m] of this.motion) {
             if (m.ineligible || this.manual.has(id)) continue;
@@ -280,6 +332,17 @@ export class ClipAutoPolicy {
             // unit disappears, so our slot may already be gone.
             if (m.autoClip !== null && this.player.playingClip(id) !== m.autoClip) {
                 m.autoClip = null;
+            }
+
+            // §M2 buildings: no speed to judge, so the only question is
+            // whether they already hold their idle. Latch once — re-asking
+            // every tick would pay a def lookup for the whole standing base.
+            if (!m.staticUnit && this.deps.isStatic?.(id)) m.staticUnit = true;
+            if (m.staticUnit) {
+                if (m.autoClip === null) {
+                    starts.push({ id, speed: 0, want: 'idle', isStatic: true });
+                }
+                continue;
             }
 
             if (m.autoClip === 'walk') {
@@ -299,7 +362,11 @@ export class ClipAutoPolicy {
             }
 
             m.aboveTicks = speed >= START_SPEED ? m.aboveTicks + 1 : 0;
-            if (m.aboveTicks >= START_TICKS) starts.push({ id, speed });
+            // `idleOnly` units already hold the only cycle they have — see
+            // admit(); re-queueing would restart that playback every tick.
+            if (m.aboveTicks >= START_TICKS && !m.idleOnly) {
+                starts.push({ id, speed, want: 'walk', isStatic: false });
+            }
         }
 
         if (starts.length > 0) this.admit(starts);
@@ -309,36 +376,57 @@ export class ClipAutoPolicy {
      * Start the queued walkers, nearest-to-camera first, up to the cap.
      * Units already animating keep their slot — evicting them would trade a
      * perf win for a visible pop.
+     *
+     * Movers are admitted before statics regardless of camera distance: a
+     * building that misses its slot is a still bell, a walker that misses its
+     * slot is a unit sliding across the ground.
      */
-    private admit(starts: { id: number; speed: number }[]): void {
+    private admit(starts: Start[]): void {
         let free = this.maxAuto - this.countAuto();
+        let freeStatic = Math.floor(this.maxAuto * STATIC_SHARE) - this.countAuto(true);
         if (starts.length > 1) {
             const cam = this.deps.cameraXZ?.();
-            if (cam) starts.sort((a, b) => this.distSq(a.id, cam) - this.distSq(b.id, cam));
+            starts.sort((a, b) => {
+                if (a.isStatic !== b.isStatic) return a.isStatic ? 1 : -1;
+                return cam ? this.distSq(a.id, cam) - this.distSq(b.id, cam) : 0;
+            });
         }
-        for (const { id, speed } of starts) {
+        for (const { id, speed, want, isStatic } of starts) {
             const m = this.motion.get(id);
             if (!m) continue;
             // A unit already holding an idle slot upgrades to walk for free.
             const needsSlot = m.autoClip === null;
             // `continue`, not `break`: a later candidate may already hold a slot.
             if (needsSlot && free <= 0) continue;
-            const resolved = this.deps.getClip(id, 'walk');
+            if (needsSlot && isStatic && freeStatic <= 0) continue;
+            let playing: 'walk' | 'idle' = want;
+            let resolved = this.deps.getClip(id, want);
+            if (!resolved && want === 'walk') {
+                // No walk cycle: an authored idle is still better than a
+                // frozen model, and it is what this unit will play from here
+                // on (`idleOnly` stops the walk probe repeating every tick).
+                resolved = this.deps.getClip(id, 'idle');
+                playing = 'idle';
+                if (resolved && this.deps.clipsLoaded(id)) m.idleOnly = true;
+            }
             if (!resolved) {
                 // Reset the run so a model that finishes loading isn't
                 // started off a stale hysteresis count...
                 m.aboveTicks = 0;
-                // ...but once it HAS loaded and still has no walk clip, retire
-                // it: otherwise every mover in a clipless game re-probes here
-                // for the whole match.
+                // ...but once it HAS loaded and has neither cycle (the walk
+                // start above already tried idle), retire it: otherwise every
+                // mover in a clipless game re-probes here for the whole match.
                 if (this.deps.clipsLoaded(id)) m.ineligible = true;
                 continue;
             }
             this.player.play(id, resolved.clip, resolved.restLocals,
-                { loop: true, speed: this.playbackSpeed(id, speed) });
-            m.autoClip = 'walk';
+                { loop: true, speed: playing === 'walk' ? this.playbackSpeed(id, speed) : 1 });
+            m.autoClip = playing;
             m.belowSinceFrame = null;
-            if (needsSlot) free--;
+            if (needsSlot) {
+                free--;
+                if (isStatic) freeStatic--;
+            }
         }
     }
 
@@ -361,9 +449,12 @@ export class ClipAutoPolicy {
         return Math.min(SPEED_MAX, Math.max(SPEED_MIN, raw));
     }
 
-    private countAuto(): number {
+    /** Live auto playbacks; `staticOnly` narrows to the building sub-cap. */
+    private countAuto(staticOnly = false): number {
         let n = 0;
-        for (const m of this.motion.values()) if (m.autoClip !== null) n++;
+        for (const m of this.motion.values()) {
+            if (m.autoClip !== null && (!staticOnly || m.staticUnit)) n++;
+        }
         return n;
     }
 
@@ -378,19 +469,23 @@ export class ClipAutoPolicy {
     /** Debug view (window.test.clipState / perf accounting). */
     stats(): {
         tracked: number; walking: number; idle: number;
-        manual: number; ineligible: number;
+        manual: number; ineligible: number; staticIdle: number;
     } {
         let walking = 0;
         let idle = 0;
         let ineligible = 0;
+        let staticIdle = 0;
         for (const m of this.motion.values()) {
             if (m.autoClip === 'walk') walking++;
-            else if (m.autoClip === 'idle') idle++;
+            else if (m.autoClip === 'idle') {
+                idle++;
+                if (m.staticUnit) staticIdle++;   // subset of `idle`, not disjoint
+            }
             if (m.ineligible) ineligible++;
         }
         return {
             tracked: this.motion.size, walking, idle,
-            manual: this.manual.size, ineligible,
+            manual: this.manual.size, ineligible, staticIdle,
         };
     }
 }
@@ -410,8 +505,23 @@ export function nominalSpeedFor(
     return def.speed && def.speed > 0 ? def.speed : 0;
 }
 
+/**
+ * Is this def immobile — a building, not a mover (§M2)? `speed` is the def's
+ * top speed in elmos/s, and `units/_builder.lua` is explicit that an immobile
+ * unit MUST carry speed 0 (a nonzero maxvelocity with no moveDef trips
+ * MoveTypeFactory's IsImmobileUnit assertion), so this is the authoritative
+ * signal and not a heuristic. An unknown def is NOT static — see
+ * `ClipAutoPolicyDeps.isStatic` for why the wrong answer must be `false`.
+ */
+export function isStaticFor(
+    def: { speed?: number } | undefined,
+): boolean {
+    return def !== undefined && !(def.speed !== undefined && def.speed > 0);
+}
+
 /** Speed-scaling knobs, exported for the tests + tuning. */
 export const CLIP_AUTO_TUNING = {
     START_SPEED, STOP_SPEED, START_TICKS, STOP_HOLD_SEC,
     SPEED_MIN, SPEED_MAX, POS_DEADBAND, MAX_AUTO_PLAYBACKS, SIM_HZ,
+    STATIC_SHARE,
 } as const;

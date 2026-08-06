@@ -16,6 +16,7 @@ import {
     ClipAutoPolicy,
     CLIP_AUTO_TUNING,
     nominalSpeedFor,
+    isStaticFor,
     type ClipAutoPolicyDeps,
     type ClipPlaybackSink,
     type ResolvedClip,
@@ -98,6 +99,9 @@ interface RigOpts {
     cameraXZ?: () => { x: number; z: number } | null;
     /** false = model still streaming, so a missing clip means "not yet". */
     clipsLoaded?: () => boolean;
+    /** §M2: which unit ids are immobile buildings. Omitted = none, which is
+     *  what every pre-§M2 test above assumes. */
+    statics?: Set<number>;
 }
 
 function makeRig(opts: RigOpts = {}) {
@@ -112,6 +116,7 @@ function makeRig(opts: RigOpts = {}) {
         nominalSpeed: () => opts.nominal ?? 10,
         clipsLoaded: opts.clipsLoaded ?? (() => true),
         cameraXZ: opts.cameraXZ,
+        isStatic: opts.statics ? (id) => opts.statics!.has(id) : undefined,
     };
     const policy = new ClipAutoPolicy(deps, player, opts.maxAuto);
     return { policy, player, probes };
@@ -345,10 +350,27 @@ describe('ClipAutoPolicy — clipless units and other games', () => {
 
     it('retires a clipless unit after ONE probe instead of re-probing forever', () => {
         // The ZK/BAR case: hundreds of movers, none of which can ever animate.
+        // One probe ROUND: walk, then the §M1 idle fallback for a model that
+        // ships an idle cycle and no walk — and then never again.
         const { policy, probes } = makeRig({ clips: {} });
         drive(policy, 1, 40, 6, { frame: 0, x: 0 });
-        expect(probes).toEqual(['1:walk']);
+        expect(probes).toEqual(['1:walk', '1:idle']);
         expect(policy.stats()).toMatchObject({ ineligible: 1 });
+    });
+
+    it('plays the idle cycle for a mover whose model ships no walk (§M1)', () => {
+        // ms_scout_buggy / ms_expedition_rig / ms_command_s2 / ms_landing_ship
+        // / ms_obs_balloon: authored idle, no walk. It engages on movement and
+        // is HELD once the unit stops — there is nothing to hand back to.
+        const { policy, player, probes } = makeRig({ clips: { idle: IDLE } });
+        const at = drive(policy, 1, 40, 2, { frame: 0, x: 0 });
+        expect(player.playingClip(1)).toBe('idle');
+        expect(player.log).toEqual(['play 1 idle']);      // started once
+        idleSilently(policy, 1, 3, at);
+        expect(player.playingClip(1)).toBe('idle');
+        expect(player.log).toEqual(['play 1 idle']);      // and not restarted
+        // Probed one walk/idle round, then left alone.
+        expect(probes).toEqual(['1:walk', '1:idle']);
     });
 
     it('keeps probing while the model is still streaming, then engages', () => {
@@ -483,5 +505,113 @@ describe('ClipAutoPolicy — bookkeeping and the concurrency cap', () => {
         expect(CLIP_AUTO_TUNING.START_TICKS).toBe(2);
         expect(STOP_HOLD_SEC).toBeCloseTo(0.3);
         expect(CLIP_AUTO_TUNING.MAX_AUTO_PLAYBACKS).toBe(64);
+    });
+});
+
+// ── §M2: immobile units (buildings) ──────────────────────────────────────
+//
+// A building can never trip the movement threshold, so the whole
+// speed/hysteresis machinery above says "never animate" for it. These pin the
+// separate entry point that gives a pumpjack beam, a saw blade and a swaying
+// bell their idle — and, just as importantly, pin that it cannot come at the
+// walkers' expense.
+
+describe('immobile units (§M2 buildings)', () => {
+    /** One full snapshot listing the given units at rest. */
+    function sight(policy: ClipAutoPolicy, ids: number[], frame = 0): void {
+        policy.observe(snapshot(frame, new Map(ids.map((id) => [id, { x: id * 100, z: 0 }]))));
+    }
+
+    it('idles a building that has never moved', () => {
+        const { policy, player } = makeRig({ statics: new Set([1]) });
+        sight(policy, [1]);
+        expect(player.playingClip(1)).toBe('idle');
+        expect(player.speeds.get(1)).toBe(1);   // never speed-scaled
+        expect(policy.stats().staticIdle).toBe(1);
+    });
+
+    it('leaves a building alone once it is idling', () => {
+        // The bell must not restart on every wire tick — a re-`play` would
+        // snap it back to frame 0 ten times a second.
+        const { policy, player } = makeRig({ statics: new Set([1]) });
+        for (let f = 0; f <= 90; f += 30) sight(policy, [1], f);
+        expect(player.log).toEqual(['play 1 idle']);
+    });
+
+    it('never animates a building when the game declares no statics', () => {
+        // Pre-§M2 behaviour, unchanged: no isStatic dep, so a resting unit
+        // stays a resting unit.
+        const { policy, player } = makeRig();
+        for (let f = 0; f <= 90; f += 30) sight(policy, [1], f);
+        expect(player.log).toEqual([]);
+    });
+
+    it('retires a building whose model ships no idle clip', () => {
+        const { policy, player, probes } = makeRig({
+            clips: { walk: WALK }, statics: new Set([1]),
+        });
+        sight(policy, [1]);
+        expect(player.log).toEqual([]);
+        expect(policy.stats().ineligible).toBe(1);
+        // Retired for good: no second probe on the next snapshot.
+        const before = probes.length;
+        sight(policy, [1], 30);
+        expect(probes.length).toBe(before);
+    });
+
+    it('re-probes a building whose model is still loading', () => {
+        let loaded = false;
+        const clips: RigOpts['clips'] = {};
+        const { policy, player } = makeRig({
+            clips, statics: new Set([1]), clipsLoaded: () => loaded,
+        });
+        sight(policy, [1]);
+        expect(player.log).toEqual([]);
+        expect(policy.stats().ineligible).toBe(0);   // "not yet", not "never"
+        clips.idle = IDLE;
+        loaded = true;
+        sight(policy, [1], 30);
+        expect(player.playingClip(1)).toBe('idle');
+    });
+
+    it('admits walkers before buildings when the cap is tight', () => {
+        // maxAuto 2: unit 1 walks, units 2 and 3 are buildings sitting right
+        // next to the camera. The walker must still get a slot.
+        const { policy, player } = makeRig({
+            maxAuto: 2,
+            statics: new Set([2, 3]),
+            cameraXZ: () => ({ x: 200, z: 0 }),   // nearest is building 2
+        });
+        // Buildings claim first (they need no run-up)...
+        sight(policy, [2, 3]);
+        expect(policy.stats().staticIdle).toBe(1);   // STATIC_SHARE of 2 = 1
+        // ...and a walker still finds the second slot free.
+        drive(policy, 1, 20, 2, { frame: 30, x: 0 });
+        expect(player.playingClip(1)).toBe('walk');
+    });
+
+    it('caps buildings at STATIC_SHARE of the playback budget', () => {
+        const maxAuto = 8;
+        const ids = [1, 2, 3, 4, 5, 6, 7, 8];
+        const { policy } = makeRig({ maxAuto, statics: new Set(ids) });
+        sight(policy, ids);
+        expect(policy.stats().staticIdle)
+            .toBe(Math.floor(maxAuto * CLIP_AUTO_TUNING.STATIC_SHARE));
+    });
+
+    it('drops a building from the budget when it dies', () => {
+        const { policy } = makeRig({ maxAuto: 4, statics: new Set([1, 2, 3]) });
+        sight(policy, [1, 2, 3]);
+        expect(policy.stats().staticIdle).toBe(2);
+        policy.remove(1);
+        sight(policy, [2, 3], 30);
+        expect(policy.stats().staticIdle).toBe(2);   // 3 takes the freed slot
+    });
+
+    it('classifies defs by top speed, treating an unknown def as mobile', () => {
+        expect(isStaticFor({ speed: 0 })).toBe(true);
+        expect(isStaticFor({})).toBe(true);          // no speed key = immobile
+        expect(isStaticFor({ speed: 2.6 })).toBe(false);
+        expect(isStaticFor(undefined)).toBe(false);  // "not yet", never "yes"
     });
 });

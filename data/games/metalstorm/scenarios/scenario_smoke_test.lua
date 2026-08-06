@@ -36,6 +36,46 @@ return {
             -- '4:4' (map centre) intentionally left uncontrolled — the
             -- control objective below contests it.
         },
+
+        -- Every featuredef Metalstorm ships, exactly once
+        -- (PLAN-metalstorm-model-integration §M3 acceptance: "a test scenario
+        -- spawns every feature via Spring.CreateFeature"). This list is
+        -- ASSERTED COMPLETE by LuaRules/Gadgets/tests/game_features_spec.lua —
+        -- adding a def to features/ without adding it here fails that spec,
+        -- which is the point: the format fixture is only a smoke test if it
+        -- keeps covering the whole roster.
+        --
+        -- Laid out in a row on the empty flat between the two bastions
+        -- (4352,4352 and 13056,13056), clear of the '4:4' centre region the
+        -- control objective contests (8192..10240 on both axes) and clear of
+        -- the staged units' fight/move lines. green_flat is flat and
+        -- featureless, so nothing here contests anything — these exist to be
+        -- spawned, drawn and inspected.
+        features = {
+            -- Wrecks: blocking + reclaimable, spread so each one's footprint
+            -- is visibly its own.
+            { def = 'ms_colossus_wreck', x = 7000, z = 6000, facing = 'east'  },
+            { def = 'ms_tank_wreck',     x = 7400, z = 6000, facing = 'south' },
+            { def = 'ms_train_wreck',    x = 7800, z = 6000, facing = 'north' },
+
+            -- Bridges: chained, which is the §M3 acceptance ("bridge segments
+            -- chain without z-fighting"). Four spans at the def's own
+            -- 24 m chain_pitch, centred on (x, z) — so the road run covers
+            -- 96 m of local Z about 7000,7000.
+            --
+            -- `y = 0` puts the deck at the waterline, which is where a span
+            -- over a water gap belongs. It holds because features/bridges.lua
+            -- sets `floating` — a feature's y is a SPAWN height that gravity
+            -- otherwise settles out of. Read stageFeatures' Y-handling note
+            -- before changing either number.
+            { def = 'ms_road_bridge', x = 7000, z = 7000, facing = 'north', chain = 4, y = 0 },
+            { def = 'ms_rail_bridge', x = 7300, z = 7000, facing = 'north', chain = 4, y = 0 },
+
+            -- Ancient tech: blocking, indestructible, unsalvageable.
+            { def = 'ms_vault_door',     x = 8200, z = 6000, facing = 'south' },
+            { def = 'ms_monolith_spire', x = 8600, z = 6000 },
+            { def = 'ms_dig_site',       x = 9000, z = 6000, facing = 'west'  },
+        },
     },
 
     sides = {                    -- informational only; team/slot assignment

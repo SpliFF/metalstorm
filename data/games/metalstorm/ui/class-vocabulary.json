@@ -1,0 +1,133 @@
+{
+  "_comment": [
+    "Shipped class vocabulary — one source for the NL layer, the local",
+    "closed-vocab parser, typed autocomplete and the command-builder",
+    "(PLAN-metalstorm-command-language.md M0 / §2 'anti-drift fix').",
+    "Keys are customparams.ms_class values in units/*.lua; a class that is",
+    "not listed here cannot be named in a command.",
+    "",
+    "Created by PLAN-metalstorm-model-integration §M1 (2026-08-06) because the",
+    "M1 vehicle roster added eight classes and there was nowhere to declare",
+    "them. It is DATA ONLY so far: the loader (ui/lib/class-vocabulary.ts) and",
+    "the free-text-accelerator.ts IDLE_CLASSES deletion remain command-language",
+    "M0 work, and that lane owns the roles table below as it grows.",
+    "",
+    "§M2 (2026-08-06) added `sites` — the six capturable Gaia resource sites",
+    "(units/buildings_sites.lua). The §M2 support and civilian buildings",
+    "deliberately stay on the existing `buildings` class: naming ONE building",
+    "('the watchtower', 'the meeting hall') is per-DEF addressing, which this",
+    "class-keyed vocabulary cannot express — that is command-language work.",
+    "",
+    "Synonyms are lowercase, matched whole-word; `scales` names a specific",
+    "ms_scale of a class."
+  ],
+  "classes": {
+    "tanks": {
+      "display": "Tank",
+      "plural": "tanks",
+      "synonyms": ["armour", "armor"],
+      "scales": { "3": ["heavy tank", "heavy tanks"], "4": ["dreadnought", "land dreadnought"] }
+    },
+    "mechs": { "display": "Mech", "plural": "mechs", "synonyms": ["walker", "walkers"] },
+    "soldiers": { "display": "Infantry", "plural": "soldiers", "synonyms": ["infantry", "troops", "grunts"] },
+    "engineers": { "display": "Engineer", "plural": "engineers", "synonyms": ["builders", "sappers"] },
+    "artillery": { "display": "Artillery", "plural": "artillery", "synonyms": ["guns", "howitzers"] },
+    "fighters": { "display": "Fighter", "plural": "fighters", "synonyms": ["interceptors", "air cover"] },
+    "bombers": { "display": "Bomber", "plural": "bombers", "synonyms": ["strike aircraft"] },
+    "ships": { "display": "Ship", "plural": "ships", "synonyms": ["navy", "fleet", "warships"] },
+    "subs": { "display": "Submarine", "plural": "subs", "synonyms": ["submarines", "boats"] },
+    "staticdefense": { "display": "Static Defence", "plural": "defences", "synonyms": ["turrets", "emplacements", "statics"] },
+    "radar": { "display": "Sensor Array", "plural": "sensors", "synonyms": ["radar", "sensor arrays"] },
+    "buildings": { "display": "Building", "plural": "buildings", "synonyms": ["structures", "base"] },
+    "civilians": { "display": "Civilian", "plural": "civilians", "synonyms": ["townsfolk", "population"] },
+    "civvehicles": { "display": "Civilian Vehicle", "plural": "civilian vehicles", "synonyms": ["traffic", "convoy"] },
+
+    "technical": {
+      "display": "Technical",
+      "plural": "technicals",
+      "synonyms": ["gun truck", "gun trucks", "technicals"]
+    },
+    "scout": {
+      "display": "Scout Buggy",
+      "plural": "scouts",
+      "synonyms": ["scout", "scouts", "buggy", "buggies", "recon"]
+    },
+    "supply": {
+      "display": "Supply Truck",
+      "plural": "supply trucks",
+      "synonyms": ["supply truck", "supply trucks", "supplies", "trucks", "logistics"]
+    },
+    "tanker": {
+      "display": "Fuel Tanker",
+      "plural": "tankers",
+      "synonyms": ["tanker", "tankers", "fuel truck", "bowser"]
+    },
+    "courier": {
+      "display": "Courier Car",
+      "plural": "couriers",
+      "synonyms": ["courier", "couriers", "courier car", "dispatch", "runner"]
+    },
+    "expedition": {
+      "display": "Expedition Rig",
+      "plural": "expedition rigs",
+      "synonyms": ["expedition rig", "rig", "rigs", "survey rig", "survey truck"]
+    },
+    "command": {
+      "display": "Command Vehicle",
+      "plural": "command vehicles",
+      "synonyms": ["command vehicle", "command vehicles", "mobile hq", "hq vehicle", "command car"]
+    },
+    "landing_ship": {
+      "display": "Landing Ship",
+      "plural": "landing ships",
+      "synonyms": ["landing ship", "landing ships", "landing craft", "lander", "transport ship"]
+    },
+    "balloon": {
+      "display": "Observation Balloon",
+      "plural": "balloons",
+      "synonyms": ["balloon", "balloons", "observation balloon", "aerostat", "blimp"]
+    },
+    "sites": {
+      "display": "Resource Site",
+      "plural": "sites",
+      "synonyms": [
+        "site", "sites", "resource site", "resource sites",
+        "derrick", "derricks", "oil derrick", "wellhead",
+        "silo", "silos", "grain silo",
+        "tank farm", "tank farms", "fuel depot",
+        "timber yard", "timber yards", "sawmill",
+        "mine", "mines", "metal pit", "pit", "headframe",
+        "port crane", "crane", "cranes", "quay"
+      ]
+    }
+  },
+  "roles": {
+    "recon": {
+      "matches": [
+        { "class": "scout" },
+        { "class": "balloon" },
+        { "class": "radar" },
+        { "class": "fighters", "scale": 1 }
+      ]
+    },
+    "logistics": {
+      "matches": [
+        { "class": "supply" },
+        { "class": "tanker" },
+        { "class": "courier" },
+        { "class": "expedition" }
+      ]
+    },
+    "air defense": {
+      "matches": [
+        { "class": "staticdefense", "scaleMin": 2 },
+        { "class": "fighters" }
+      ]
+    },
+    "transport": {
+      "matches": [
+        { "class": "landing_ship" }
+      ]
+    }
+  }
+}
