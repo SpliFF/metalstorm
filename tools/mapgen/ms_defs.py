@@ -245,6 +245,46 @@ def _read_flat_class(path: str) -> dict[str, UnitFacts]:
     return out
 
 
+def _read_customparam(path: str, key: str) -> dict[str, str]:
+    """defname -> the value of `customparams.<key>`, for defs that declare it.
+
+    Used for `site_kind` (units/buildings_sites.lua), which is how a generated
+    scenario's site layer says WHICH resource a placed building is without the
+    generator restating a def→kind table that content already owns.
+
+    Same regex-not-interpreter reasoning as the rest of this module. The lookup
+    is per-entry rather than file-wide so a `site_kind` in one def's comment
+    block cannot be attributed to its neighbour.
+    """
+    with open(path, encoding="utf-8") as fh:
+        text = _strip_comments(fh.read())
+    out = {}
+    for name, body in _split_top_level_entries(text).items():
+        v = _str(body, key)
+        if v is not None:
+            out[name] = v
+    return out
+
+
+# Def families the generator may place, and how each file is shaped.
+#
+# `buildings_sites.lua` / `buildings_support.lua` wrap every entry in a local
+# `site{...}` / `building{...}` helper that sets canmove/maxvelocity OUTSIDE the
+# entry body, so they are read as buildings (footprint literal, speed 0) rather
+# than through _read_flat_class, which would look for a `canmove` the body does
+# not contain and grade them as mobile units with speed 0.
+_BUILDING_FILES = ("buildings_civilian.lua", "buildings_military.lua",
+                   "buildings_support.lua", "buildings_sites.lua")
+_SCALED_FILES = ("staticdefense.lua", "soldiers.lua", "tanks.lua",
+                 "artillery.lua", "engineers.lua", "mechs.lua", "radar.lua")
+# The §M1 one-off vehicles: plain literal defs, same shape as civvehicles.lua.
+# transports.lua is deliberately absent — ms_landing_ship is movementclass SHIP
+# and the generator has no water placement, so offering it would only let a
+# template name a def that can never be sited.
+_FLAT_FILES = ("civilians.lua", "civvehicles.lua", "irregulars.lua",
+               "logistics.lua", "recon_vehicles.lua", "command_vehicles.lua")
+
+
 def load(game_dir: str) -> dict[str, UnitFacts]:
     """Every def the scenario generator may emit, keyed by def name.
 
@@ -254,14 +294,24 @@ def load(game_dir: str) -> dict[str, UnitFacts]:
     """
     units = os.path.join(game_dir, "units")
     facts: dict[str, UnitFacts] = {}
-    facts.update(_read_buildings(os.path.join(units, "buildings_civilian.lua")))
-    facts.update(_read_buildings(os.path.join(units, "buildings_military.lua")))
-    for f in ("staticdefense.lua", "soldiers.lua", "tanks.lua", "artillery.lua",
-              "engineers.lua", "mechs.lua", "radar.lua"):
+    for f in _BUILDING_FILES:
+        facts.update(_read_buildings(os.path.join(units, f)))
+    for f in _SCALED_FILES:
         facts.update(_read_scaled_class(os.path.join(units, f)))
-    facts.update(_read_flat_class(os.path.join(units, "civilians.lua")))
-    facts.update(_read_flat_class(os.path.join(units, "civvehicles.lua")))
+    for f in _FLAT_FILES:
+        facts.update(_read_flat_class(os.path.join(units, f)))
     return facts
+
+
+def site_kinds(game_dir: str) -> dict[str, str]:
+    """defname -> `customparams.site_kind` for units/buildings_sites.lua.
+
+    The site defs carry their own kind ('grain', 'oil', 'timber', …); the
+    generator labels against that rather than against the def name, so renaming
+    a def does not silently unname every site in every generated scenario.
+    """
+    return _read_customparam(
+        os.path.join(game_dir, "units", "buildings_sites.lua"), "site_kind")
 
 
 def verify(facts: dict[str, UnitFacts], required: list[str]) -> list[str]:

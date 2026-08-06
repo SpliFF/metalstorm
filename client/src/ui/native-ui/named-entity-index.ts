@@ -271,7 +271,8 @@ export class NamedEntityIndex {
  * convention), NOT a synthetic colon-delimited contract. See:
  *   - regions:    game_regions.lua      → `region_<key>_name/_x/_z`
  *   - objectives: game_objectives.lua   → `objective_<id>_type/_state/_region/_x/_z` + `objective_count`
- *   - landmarks:  (no publisher yet)    → `landmark_<name>_x/_z` (reserved shape)
+ *   - landmarks:  game_scenario.lua      → `landmark_<name>_x/_z` (any named
+ *                 `units` / `world.features` entry — sites, relics, crossings)
  * Region keys and landmark names can themselves contain underscores
  * (`west_scarp_n`), so every parser anchors the field suffix at end-of-string
  * and lets the greedy `(.+)` capture the full id — never split on the first

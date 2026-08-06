@@ -139,6 +139,15 @@ return {
           orders = { { cmd = 'FIGHT', params = { 8192, 0, 8192 } } } },
         { def = 'ms_engineers_s1', team = 0, x = 6200, z = 1200, facing = 'south', count = 2, spacing = 120 },
         { def = 'ms_radar_s1', team = 0, x = 13184, z = 1200, facing = 'south', count = 1 },
+        -- §M1 wheeled natives. The buggy screens ahead of the armour (FIGHT on
+        -- the same basin centre, so it arrives first and finds the enemy);
+        -- the truck stays home with the engineers, because a supply tail that
+        -- drives into the contested core is a casualty, not a posture.
+        -- Both spin their axles off wire speed (wheel-spin-driver.ts) and
+        -- neither carries a sim-side script — natives are script-less.
+        { def = 'ms_scout_buggy', team = 0, x = 6900, z = 1400, facing = 'south', count = 2, spacing = 130,
+          orders = { { cmd = 'FIGHT', params = { 8192, 0, 8192 } } } },
+        { def = 'ms_supply_truck', team = 0, x = 5900, z = 1400, facing = 'south', count = 1 },
 
         { def = 'ms_tanks_s2', team = 4, x = 6600, z = 15184, facing = 'north', count = 4, spacing = 150,
           orders = { { cmd = 'FIGHT', params = { 8192, 0, 8192 } } } },
@@ -146,6 +155,9 @@ return {
           orders = { { cmd = 'FIGHT', params = { 8192, 0, 8192 } } } },
         { def = 'ms_engineers_s1', team = 4, x = 6200, z = 15184, facing = 'north', count = 2, spacing = 120 },
         { def = 'ms_radar_s1', team = 4, x = 13184, z = 15184, facing = 'north', count = 1 },
+        { def = 'ms_scout_buggy', team = 4, x = 6900, z = 14984, facing = 'north', count = 2, spacing = 130,
+          orders = { { cmd = 'FIGHT', params = { 8192, 0, 8192 } } } },
+        { def = 'ms_supply_truck', team = 4, x = 5900, z = 14984, facing = 'north', count = 1 },
 
         -- Basin Reavers (team 8, NPC — see the `ai` block below). Camped on
         -- the East Pass causeway, centroid of the region's polygon
@@ -156,6 +168,53 @@ return {
         -- stageUnits' live-team check).
         { def = 'ms_soldiers_s1', team = 8, x = 11584, z = 8192, facing = 'north', count = 6, spacing = 110 },
         { def = 'ms_tanks_s1',    team = 8, x = 11800, z = 8400, facing = 'north', count = 3, spacing = 140 },
+        -- The Reavers' gun trucks. ms_technical is the Anarchic archetype's
+        -- signature vehicle (PLAN-metalstorm-worldbuilding §4): scrap-built,
+        -- fast, thin-skinned, a bed-mounted autocannon — a scavenger band
+        -- reads wrong in line armour and right in these. Its turret slews
+        -- cosmetically off fire outcomes (turret-aim-controller.ts) and its
+        -- axles spin off wire speed; no sim-side script either way.
+        { def = 'ms_technical',   team = 8, x = 11400, z = 8420, facing = 'north', count = 3, spacing = 130 },
+
+        -- ====================================================================
+        -- NAMED RESOURCE SITES (§M4, PLAN-metalstorm-worldbuilding decision 1)
+        -- ====================================================================
+        -- Staged here on team 'neutral' (the Gaia team at stage time) rather
+        -- than through the `civilians` block, deliberately: that block
+        -- registers everything role='ambient', and civilians/routines.lua then
+        -- issues a CMD_MOVE at every ambient entry every tick — which would
+        -- enroll immobile buildings in a move order they can never satisfy.
+        --
+        -- Each carries a `name`, which game_scenario.lua publishes as
+        -- landmark_<name>_x/_z. That is the shape the client's named-entity
+        -- index has parsed since it landed and which had NO publisher until
+        -- §M4, and it is what makes "hold the Granary Vale silos" resolvable
+        -- by the command language.
+        --
+        -- They pay NOTHING. Income is Authority (worldbuilding decision 3), so
+        -- a site is worth taking because the region it stands in is already a
+        -- control objective and because it is somewhere the story can point
+        -- at — never because it produces.
+        --
+        -- Sited in the two agrarian vale rows (the silos, which is what a vale
+        -- named for grain and sorghum is FOR) and in the two market districts.
+        -- Every position below was solved against meridian_basin's own
+        -- heightmap for footprint clearance AND against a keep-out list of
+        -- everything this scenario already depends on — both convoy termini
+        -- and their 400-elmo destAreas, both habitats' protect/extract pickup
+        -- areas, both gate garrisons' extractAreas, both radar pickets, and
+        -- the contested basin core. A silo dropped in a convoy's destArea
+        -- would make an escort objective unsatisfiable, and it would do so
+        -- silently: the truck despawns on route completion, so the objective
+        -- would just never fire.
+        { def = 'ms_grain_silo',  team = 'neutral', x = 8000, z = 3900, facing = 'south',
+          name = 'Granary Vale Silos' },
+        { def = 'ms_grain_silo',  team = 'neutral', x = 8000, z = 12484, facing = 'north',
+          name = 'Sorghum Vale Silos' },
+        { def = 'ms_tank_farm',   team = 'neutral', x = 12605, z = 4232, facing = 'south',
+          name = 'North Market Tank Farm' },
+        { def = 'ms_timber_yard', team = 'neutral', x = 12649, z = 11992, facing = 'north',
+          name = 'South Market Timber Yard' },
     },
 
     -- Ambient civilian presence at the two habitat districts (the market

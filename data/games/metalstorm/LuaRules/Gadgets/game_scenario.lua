@@ -7,8 +7,10 @@
 -- initial objectives, civilian population, NPC faction AI slots, and
 -- `world.features` — wrecks, bridge spans and ancient-tech sites placed via
 -- Spring.CreateFeature (PLAN-metalstorm-model-integration §M3; the defs live
--- in data/games/metalstorm/features/, see that directory's README). No engine
--- change — everything below is existing Lua surface
+-- in data/games/metalstorm/features/, see that directory's README). A `units`
+-- or `world.features` entry carrying a `name` is additionally published as a
+-- LANDMARK the command language can address (§M4 — see landmarkNameProblem
+-- below). No engine change — everything below is existing Lua surface
 -- (Spring.CreateUnit/GiveOrderToUnit/SetTeamRulesParam, the backbone gadgets'
 -- GG.* APIs).
 --
@@ -54,6 +56,7 @@ end
 local SUPPORTED_VERSION = 1
 local DEFAULT_SPACING = 150        -- elmos between grid-spread squad instances
 local ALLIED_LOS = { allied = true }   -- same visibility as every other team param
+local PUBLIC_LOS = { public = true }   -- geography: the same for every team
 
 -- Scripted-slate kinds the shipped AI plugin implements
 -- (data/games/metalstorm/ai/strategos/scripted.lua's Builders). Kept here as a
@@ -103,6 +106,48 @@ local function buildKnownFeatureDefs()
         known[def.name] = def
     end
     return known
+end
+
+-- ============================================================
+-- Landmarks (PLAN-metalstorm-model-integration §M4, worldbuilding directive 2)
+-- ============================================================
+--
+-- Any `units` or `world.features` entry may carry a `name`: the thing a player
+-- would point at and say out loud — "the Weatherall silos", "the drowned
+-- span". A named entry is published as
+--
+--     landmark_<name>_x   landmark_<name>_z
+--
+-- which is a shape the client has parsed since the named-entity index landed
+-- (client/src/ui/native-ui/named-entity-index.ts parseLandmarksFromRulesParams)
+-- and which, until now, NOTHING wrote — the header of entity-index-producer.ts
+-- literally says "no publisher yet". This is that publisher. It is what makes
+-- "defend the grain silo" resolvable by the command language
+-- (PLAN-metalstorm-command-language.md §6.5), and it is why scenariogen's site
+-- layer bothers to mint names at all rather than dropping anonymous buildings.
+--
+-- The NAME IS INSIDE THE KEY (the client's regex is
+-- /^landmark_(.+)_(x|z)$/), so two entries sharing a name would silently
+-- overwrite each other's position and one landmark would simply vanish from the
+-- index. validate() rejects that rather than letting it happen — same reasoning
+-- as the `team = 'nuetral'` typo guard below: a name collision is invisible
+-- from the outside and unfalsifiable in a screenshot.
+local function landmarkNameProblem(name)
+    if type(name) ~= 'string' then
+        return 'must be a string, got ' .. type(name)
+    end
+    if name == '' then
+        return 'must not be empty'
+    end
+    -- The suffix is anchored at end-of-string with a greedy name capture, so a
+    -- name ENDING in _x or _z would be split at the wrong underscore and the
+    -- landmark would parse under a truncated name with a missing coordinate.
+    if name:match('_[xz]$') then
+        return 'must not end in "_x" or "_z" — the client splits ' ..
+               'landmark_<name>_x at the LAST underscore, so this name would ' ..
+               'parse as "' .. name:sub(1, -3) .. '" with a missing coordinate'
+    end
+    return nil
 end
 
 --- A scenario order names a command by its CMD.* constant name (e.g.
@@ -193,6 +238,26 @@ end
 local function validate(scn, knownDefs, knownFeatureDefs)
     local errors = {}
 
+    -- Landmark names are global across BOTH sections: a site and a bridge that
+    -- both call themselves "Ferry Crossing" collide in the rulesParam key space
+    -- exactly as two sites would.
+    local seenNames = {}
+    local function checkName(name, ctx)
+        if name == nil then return end
+        local problem = landmarkNameProblem(name)
+        if problem then
+            errors[#errors + 1] = ctx .. ': "name" ' .. problem
+            return
+        end
+        if seenNames[name] then
+            errors[#errors + 1] = ctx .. ': duplicate name "' .. name ..
+                '" (already used by ' .. seenNames[name] .. ') — landmark ' ..
+                'names are the rulesParam key, so one would overwrite the other'
+            return
+        end
+        seenNames[name] = ctx
+    end
+
     local function checkDef(def, ctx)
         if type(def) ~= 'string' or not knownDefs[def] then
             errors[#errors + 1] = ctx .. ': unknown unit def "' .. tostring(def) .. '"'
@@ -210,6 +275,7 @@ local function validate(scn, knownDefs, knownFeatureDefs)
     for i, u in ipairs(scn.units or {}) do
         checkDef(u.def, 'units[' .. i .. ']')
         checkOrders(u.orders, 'units[' .. i .. ']')
+        checkName(u.name, 'units[' .. i .. ']')
         -- 'neutral' (the Gaia team, see resolveTeam) is the only string a
         -- `team` may be. Checked hard rather than left to stageUnits' live-team
         -- guard, because a typo would otherwise be reported as "team 'nuetral'
@@ -239,6 +305,7 @@ local function validate(scn, knownDefs, knownFeatureDefs)
     -- silently missing the terrain the fight was designed around.
     for i, f in ipairs((scn.world or {}).features or {}) do
         local ctx = 'world.features[' .. i .. ']'
+        checkName(f.name, ctx)
         if type(f.def) ~= 'string' or not knownFeatureDefs[f.def] then
             errors[#errors + 1] = ctx .. ': unknown feature def "' .. tostring(f.def) .. '"'
         end
@@ -374,10 +441,16 @@ end
 ---     in features/bridges.lua. Passing `y` is still right: it is used verbatim
 ---     for every segment rather than resampled per segment, which is what keeps
 ---     the water case level.
-local function stageFeatures(features, knownFeatureDefs)
+local function stageFeatures(features, knownFeatureDefs, landmarks)
     local created = {}
     knownFeatureDefs = knownFeatureDefs or buildKnownFeatureDefs()
     for _, f in ipairs(features or {}) do
+        -- A named span/wreck/relic is a landmark at the CHAIN CENTRE, not at
+        -- its first segment: chaining is centred on (x, z) precisely because
+        -- that is the point an author (or a player) means by "the crossing".
+        if f.name and landmarks then
+            landmarks[#landmarks + 1] = { name = f.name, x = f.x, z = f.z }
+        end
         local fd = knownFeatureDefs[f.def]
         local heading = featureHeading(f) or 0
         local count = f.chain or 1
@@ -441,12 +514,13 @@ local function resolveTeam(team)
     return team
 end
 
-local function stageUnits(units)
+local function stageUnits(units, landmarks)
     local liveTeams = buildLiveTeams()
     local warned = {}
     local skipped = {}
     local created = 0
     for _, entry in ipairs(units or {}) do
+        local staged = 0
         local u = entry
         if u.team == 'neutral' then
             local gaia = resolveTeam('neutral')
@@ -493,12 +567,21 @@ local function stageUnits(units)
                                                       tostring(u.def), ux, uz)
             else
                 created = created + 1
+                staged = staged + 1
                 if u.orders then
                 for _, o in ipairs(u.orders) do
                     Spring.GiveOrderToUnit(unitID, resolveCmd(o.cmd), o.params or {}, o.options or {})
                 end
                 end
             end
+        end
+        -- Only a landmark that actually LANDED is published. A name is a
+        -- promise the player can point at something; publishing one for an
+        -- entry the engine refused (occupied ground, missing team) would put a
+        -- silo in the command language's target list that does not exist on the
+        -- map, and the locate-ping would fly to bare terrain.
+        if entry.name and landmarks and staged > 0 then
+            landmarks[#landmarks + 1] = { name = entry.name, x = u.x, z = u.z }
         end
         ::continue::
     end
@@ -514,6 +597,28 @@ local function stageUnits(units)
                     #skipped .. ' staged unit(s) — the ground was already ' ..
                     'occupied, so the war is short of what the scenario ' ..
                     'declares: ' .. table.concat(skipped, ', '))
+    end
+end
+
+--- Publish every collected landmark as `landmark_<name>_x/_z`, PUBLIC.
+---
+--- Public rather than allied because a landmark is geography: the grain silo
+--- is where it is for everyone, and the whole point is that either side can
+--- say "hit the grain silo". Region names (game_regions.lua:229) are published
+--- the same way for the same reason.
+---
+--- Coordinates are the AUTHORED x/z, not a live unit position. That is
+--- deliberate: these entries are buildings, wrecks and relics — they do not
+--- move — and reading positions back would make the publisher depend on unit
+--- ids it would then have to keep watching.
+local function publishLandmarks(landmarks)
+    for _, lm in ipairs(landmarks or {}) do
+        Spring.SetGameRulesParam('landmark_' .. lm.name .. '_x', lm.x, PUBLIC_LOS)
+        Spring.SetGameRulesParam('landmark_' .. lm.name .. '_z', lm.z, PUBLIC_LOS)
+    end
+    if #(landmarks or {}) > 0 then
+        Spring.Echo('[game_scenario] published ' .. #landmarks ..
+                    ' landmark(s) the command language can address')
     end
 end
 
@@ -882,14 +987,18 @@ function gadget:GameStart()
     -- Before units: features are terrain-that-blocks, so a wreck must own its
     -- squares before anything is placed near it (CreateUnit onto a square a
     -- later CreateFeature would claim leaves the unit stuck inside it).
-    GG.Scenario.features = stageFeatures((scn.world or {}).features, knownFeatureDefs)
-    stageUnits(scn.units)
+    local landmarks = {}
+    GG.Scenario.features = stageFeatures((scn.world or {}).features,
+                                         knownFeatureDefs, landmarks)
+    stageUnits(scn.units, landmarks)
     stageCivilians(scn.civilians)
     stageObjectives(scn.objectives)
     stageAI(scn.ai)
+    publishLandmarks(landmarks)
 
     GG.Scenario.name = name
     GG.Scenario.data = scn
+    GG.Scenario.landmarks = landmarks
     Spring.SetGameRulesParam('scenario_name', name)
 
     Spring.Echo('[game_scenario] staged "' .. (scn.name or name) .. '"')

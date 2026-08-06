@@ -25,6 +25,13 @@ if not gadgetHandler:IsSyncedCode() then
     return false
 end
 
+-- Every team that is not Gaia gets this, players and AI alike — so this list
+-- IS the default unit pool an AI opens with, not just the player's opening
+-- hand. The two §M1 wheeled natives are in it for that reason
+-- (PLAN-metalstorm-model-integration §M4): a force with no eyes and no supply
+-- tail is a roster rather than a column, and these two are also the live proof
+-- that the client's wheel spin (wheel-spin-driver.ts) is wired — they are the
+-- only units in a default game whose wheels visibly turn when they move.
 local START_FORCE = {
     { def = 'ms_command_nexus',  dx = 0,    dz = 0    },
     { def = 'ms_engineers_s2',   dx = 260,  dz = 0    },
@@ -32,6 +39,8 @@ local START_FORCE = {
     { def = 'ms_soldiers_s2',    dx = 0,    dz = 280  },
     { def = 'ms_tanks_s2',       dx = 0,    dz = -300 },
     { def = 'ms_radar_s1',       dx = 180,  dz = 180  },
+    { def = 'ms_scout_buggy',    dx = -180, dz = -220 },
+    { def = 'ms_supply_truck',   dx = 300,  dz = 220  },
 }
 
 function gadget:GameStart()

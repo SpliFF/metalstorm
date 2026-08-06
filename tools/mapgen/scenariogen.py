@@ -93,17 +93,31 @@ from regions_from_map import (                            # noqa: E402
     verify_starts,
 )
 from scenario_templates import (                          # noqa: E402
+    ANCIENT_DRAW_ORDER,
+    ANCIENT_GUARDIANS,
+    ANCIENT_SITES,
     ARMY_ROSTERS,
+    BRIDGE_NOUN,
+    BRIDGE_SPANS,
     CLUSTER_TEMPLATES,
     HOSTILE_FACTION,
     HOSTILE_SLATE_KINDS,
+    MAX_BRIDGE_SPANS,
     PLAYABLE_FACTIONS,
     SCENARIO_SUFFIXES,
+    SITE_DRAW_ORDER,
+    SITE_TEMPLATES,
+    WRECK_FIELD,
 )
 
 # Bumped whenever the emitted output changes for an unchanged (map, seed).
 # Part of the scenario id, so a bump cannot silently collide with an older row.
-GENERATOR_VERSION = 1
+#
+# 2 (§M4): named resource sites, ancient-tech relics, wreck fields and bridge
+# spans, plus the two §M1 wheeled natives in the standard roster. Every one of
+# those draws from the seeded stream, so v1 and v2 disagree about every
+# placement on the same (map, seed) — which is exactly what the version is for.
+GENERATOR_VERSION = 2
 
 SCHEMA_VERSION = 1          # game_scenario.lua's SUPPORTED_VERSION
 GAME_SPEED = 30             # sim frames per second
@@ -307,6 +321,83 @@ class Terrain:
         """
         return _nearest_passable_component(
             self.masks[mclass], self.comps[mclass], self.W, self.H, x, z)
+
+    def height_at(self, x: float, z: float) -> float:
+        sx, sz = self.sample_of(x, z)
+        return self.heights[sz * self.W + sx]
+
+    def is_water(self, x: float, z: float) -> bool:
+        """Is (x, z) under water?
+
+        Spring's sea level is 0 and `passable_mask` already grades depth off
+        `h < 0` (regions_from_map.py:176), so this is the same predicate that
+        decides passability, not a second opinion about where the sea is.
+        """
+        return self.height_at(x, z) < 0.0
+
+    def water_run(self, x: float, z: float, axis: str,
+                  limit: int) -> tuple[float, float] | None:
+        """The water span through (x, z) along `axis`, as (start, end) on that axis.
+
+        Walks outward one heightmap sample at a time until dry ground on both
+        sides, giving up past `limit` elmos — an unbounded walk on an ocean map
+        would return the map width and call it a river.
+
+        Returns None if (x, z) is not water, or if either walk ran off the map
+        or past the limit: a "gap" with no far bank is a coastline, and a bridge
+        needs two banks.
+        """
+        if not self.is_water(x, z):
+            return None
+        step = ELMOS_PER_SQUARE
+        ends = []
+        for sign in (-1, 1):
+            d = 0.0
+            while True:
+                d += step
+                if d > limit:
+                    return None
+                p = (x if axis == "z" else x + sign * d)
+                q = (z + sign * d if axis == "z" else z)
+                if not (0 <= p <= (self.W - 1) * ELMOS_PER_SQUARE and
+                        0 <= q <= (self.H - 1) * ELMOS_PER_SQUARE):
+                    return None
+                if not self.is_water(p, q):
+                    ends.append(d)
+                    break
+        lo = (x - ends[0]) if axis == "x" else (z - ends[0])
+        hi = (x + ends[1]) if axis == "x" else (z + ends[1])
+        return lo, hi
+
+    def blocked_copy(self, rects: list[tuple[float, float, float, float]]) -> "Terrain":
+        """This terrain with `rects` (x0, z0, x1, z1) stamped impassable.
+
+        Used to re-grade reachability once BLOCKING features are placed. Spring
+        gives a feature a ground-blocking footprint exactly as it does a
+        building (CFeature::Block, gated on `collidable`), so a wreck field is
+        terrain as far as pathing is concerned, and grading the war on the bare
+        heightmap after dropping one is grading a map that no longer exists.
+
+        Components are recomputed rather than patched: removing samples can
+        SPLIT a component, which is the entire failure being tested for, and a
+        patch that only clears bits would leave the old ids claiming otherwise.
+        """
+        out = Terrain.__new__(Terrain)
+        out.W, out.H = self.W, self.H
+        out.heights = self.heights
+        out.masks, out.comps = {}, {}
+        for c, mask in sorted(self.masks.items()):
+            m = bytearray(mask)
+            for x0, z0, x1, z1 in rects:
+                sx0, sz0 = self.sample_of(x0, z0)
+                sx1, sz1 = self.sample_of(x1, z1)
+                for sz in range(sz0, sz1 + 1):
+                    base = sz * self.W
+                    for sx in range(sx0, sx1 + 1):
+                        m[base + sx] = 0
+            comp, _ = components(m, self.W, self.H)
+            out.masks[c], out.comps[c] = m, comp
+        return out
 
     def footprint_clear(self, x: float, z: float, fx: int, fz: int,
                         mclass: str) -> bool:
@@ -555,6 +646,501 @@ def place_cluster(rnd, terrain: Terrain, facts, region: dict, kind: str,
 
 
 # ==========================================================================
+# Named sites, relics and features (§M4)
+# ==========================================================================
+
+# How far from a candidate berth the port crane will accept water. The crane's
+# jib overhangs its rail deck toward the berth (units/buildings_sites.lua sizes
+# the footprint to the deck alone for exactly this reason), so "on the quay"
+# means water close by, not water underneath.
+PORT_WATER_REACH = 160
+
+# Below this a "gap" is a puddle or a ditch and a 24 m span laid across it looks
+# like litter. Above MAX_BRIDGE_SPANS * pitch it is open water — see the note on
+# that constant.
+MIN_BRIDGE_GAP = 40
+
+
+def site_name(region: dict, noun: str, taken: set[str]) -> str:
+    """`"<region name> <noun>"`, e.g. "Raven Basin Grain Silo".
+
+    The region's own name, not a freshly minted one. Two reasons, and the second
+    is the load-bearing one:
+
+      * register — a generated graph's region names come from
+        `regions_from_map.name_for()`, which is the vocabulary the client
+        overlay and the AI's debug output already use. A site named out of a
+        second table would sit in a different world from the ground it stands on.
+      * ADDRESSABILITY — this string becomes `landmark_<name>_x/_z`, which is
+        how the command language resolves "hold the Raven Basin silos"
+        (PLAN-metalstorm-command-language.md §6.5). A player can only say a name
+        they have seen, and the region name is the one already on their screen.
+
+    `taken` guards the collision the loader would otherwise reject: the name IS
+    the rulesParam key, so two sites sharing one would overwrite each other and
+    one would silently vanish from the index.
+    """
+    base = f"{region['name']} {noun}".strip()
+    if base not in taken:
+        return base
+    for n in range(2, 100):
+        cand = f"{base} {n}"
+        if cand not in taken:
+            return cand
+    return f"{base} {len(taken)}"
+
+
+def _rank_regions(regions: list[dict], barred: set[str], occupied: set[str],
+                  prefers: list[str]) -> list[dict]:
+    """Candidate regions, best first: empty ground before shared, then by tag fit.
+
+    Two tiers, and the second one is the point. A map has a fixed number of
+    regions and the cluster pass gets first refusal on them; on
+    scorched_crossing that leaves exactly two of sixteen free, so a placer that
+    insists on an empty region silently ships two sites where three were asked
+    for and no relic at all. Sharing is also just truer: a township WITH a grain
+    silo is the normal arrangement, not a compromise.
+
+    `barred` is off-limits outright (home regions, the victory prize).
+    `occupied` already holds something, so it sorts second. Ties break on the
+    region key, never on graph order.
+    """
+    out = []
+    for r in regions:
+        if r["key"] in barred:
+            continue
+        tier = 1 if r["key"] in occupied else 0
+        rank = next((i for i, t in enumerate(prefers) if t in r["tags"]),
+                    len(prefers))
+        out.append((tier, rank, -r["value"], r["key"], r))
+    out.sort(key=lambda t: t[:4])
+    return [t[4] for t in out]
+
+
+def place_sites(rnd, terrain: Terrain, facts, regions: list[dict],
+                want_comp: dict[str, int], count: int, barred: set[str],
+                occupied: set[str], placed: list[Building],
+                placed_units: list[tuple[int, int, object]],
+                names: set[str]) -> list[dict]:
+    """`count` named resource sites, one building each.
+
+    A site is not a cluster: it is ONE structure with a name, standing where the
+    map says that industry belongs (the headframe on high ground, the crane on a
+    berth). Placement rules are the cluster placer's, minus the garrison — the
+    yardmap trap is symmetric, so a site must clear every unit already staged
+    just as a town's habitat must.
+
+    Returns entries in `units` shape, on `team = 'neutral'` (Gaia at stage
+    time), each carrying a `name` the loader publishes as a landmark.
+    """
+    out: list[dict] = []
+    claimed: set[str] = set()
+    for defname in SITE_DRAW_ORDER:
+        if len(out) >= count:
+            break
+        tpl = SITE_TEMPLATES[defname]
+        f = facts[defname]
+        for region in _rank_regions(regions, barred | claimed, occupied,
+                                    tpl["prefers"]):
+            anchor = region_anchor(terrain, region, want_comp)
+            if anchor is None:
+                continue
+            spot = _clear_spot(rnd, terrain, region, anchor, defname, f,
+                               placed, placed_units, tpl["needs_water"])
+            if spot is None:
+                continue
+            name = site_name(region, tpl["noun"], names)
+            names.add(name)
+            claimed.add(region["key"])
+            placed.append(spot)
+            out.append({"def": defname, "team": "neutral", "x": spot.x,
+                        "z": spot.z, "facing": "south", "name": name,
+                        "region": region})
+            break
+    return out
+
+
+def _clear_spot(rnd, terrain: Terrain, region: dict, anchor: tuple[int, int],
+                defname: str, f, placed: list[Building],
+                placed_units: list[tuple[int, int, object]],
+                needs_water: bool = False) -> Building | None:
+    """One clear, terrain-appropriate spot inside `region` for a single structure.
+
+    Shared by the site layer and the relic layer, and it has to be: both place
+    exactly one thing into a region that may ALREADY hold a settlement, so both
+    need the ring search rather than the region's anchor. A first version
+    probed the anchor alone for relics, and on scorched_crossing that put every
+    relic candidate on top of a cluster's garrison — the placement was refused
+    every time and the scenario shipped with no relic at all, silently.
+
+    Rings outward from the anchor, 12 seeded angles each. Rejecting and
+    widening beats jittering in place, which packs everything at the centre and
+    then fails every overlap test.
+    """
+    ax, az = anchor
+    xs = [v[0] for v in region["polygon"]]
+    zs = [v[1] for v in region["polygon"]]
+    reach = max(120, int(0.40 * min(max(xs) - min(xs), max(zs) - min(zs))))
+    for ring in range(0, 6):
+        rad = (reach * ring) / 5.0
+        for _ in range(12):
+            ang = rnd.random() * math.tau
+            x = ax + math.cos(ang) * rad
+            z = az + math.sin(ang) * rad
+            if not terrain.footprint_clear(x, z, f.footprint_x, f.footprint_z,
+                                           DEFAULT_CLASS):
+                continue
+            if needs_water and not _water_within(terrain, x, z,
+                                                 PORT_WATER_REACH):
+                continue
+            cand = Building(defname, x, z, "south", f)
+            if any(_rects_overlap(cand.rect(FOOTPRINT_GAP), b.rect())
+                   for b in placed):
+                continue
+            # The yardmap trap is symmetric: a structure dropped ON an
+            # already-staged unit traps that unit inside it for the match.
+            if any(not cand.clears(ux, uz) for ux, uz, _uf in placed_units):
+                continue
+            return cand
+    return None
+
+
+def _water_within(terrain: Terrain, x: float, z: float, reach: float) -> bool:
+    """Is there water within `reach` elmos of (x, z), on either axis?
+
+    Deliberately axis-probed rather than radial: a berth is a shoreline, and a
+    shoreline is what an axis probe finds. A radial scan of the same budget
+    would spend most of its samples inland.
+    """
+    step = ELMOS_PER_SQUARE
+    d = step
+    while d <= reach:
+        for dx, dz in ((d, 0), (-d, 0), (0, d), (0, -d)):
+            if terrain.is_water(x + dx, z + dz):
+                return True
+        d += step
+    return False
+
+
+def place_relics(rnd, terrain: Terrain, facts, fdefs, regions: list[dict],
+                 want_comp: dict[str, int], count: int, barred: set[str],
+                 occupied: set[str], placed: list[Building],
+                 placed_units: list[tuple[int, int, object]],
+                 names: set[str], guardian_team) -> list[dict]:
+    """`count` ancient-tech relics — named FEATURES with an optional guard.
+
+    Each returns `{feature, guards, region, name}`: a `world.features` entry, a
+    list of `units` entries for the band squatting on it, and the region the
+    prize sits in so the caller can hang a tactical objective there.
+
+    The relic itself is placed like a building — it blocks, so it takes ground —
+    but it is never stamped into the reachability mask: relics go in the MIDDLE
+    of a region by construction (region_anchor scans outward from the centroid),
+    where a 20 x 16 m footprint cannot wall anything. Wrecks are the family that
+    gets scattered toward chokepoints, and those ARE re-graded.
+    """
+    out: list[dict] = []
+    claimed: set[str] = set()
+    for defname in ANCIENT_DRAW_ORDER:
+        if len(out) >= count:
+            break
+        noun = ANCIENT_SITES[defname]["noun"]
+        # Relics are prizes, so they want VALUE and quiet ground — no tag
+        # preference at all (`prefers = []` collapses _rank_regions to
+        # empty-first, then value), because "ancient" is not a terrain type and
+        # pretending it prefers highland would just be decoration on a sort key.
+        for region in _rank_regions(regions, barred | claimed, occupied, []):
+            anchor = region_anchor(terrain, region, want_comp)
+            if anchor is None:
+                continue
+            fx, fz = fdefs[defname]
+            # A relic may share a region with a settlement, so it needs the
+            # same ring search a site does — and for the same reason. It also
+            # blocks (features/ancient.lua sets blocking = true), so the
+            # yardmap trap applies to it exactly as to a building: dropping a
+            # 20 x 16 m relic onto a militiaman traps him inside it for the
+            # match.
+            relic_facts = ms_defs.UnitFacts(defname, fx, fz, 0.0, None, True)
+            cand = _clear_spot(rnd, terrain, region, anchor, defname,
+                               relic_facts, placed, placed_units)
+            if cand is None:
+                continue
+            anchor = (cand.x, cand.z)
+            name = site_name(region, noun, names)
+            names.add(name)
+            claimed.add(region["key"])
+            # The relic occupies ground like a building does, so it joins
+            # `placed` before its own guards are sited — otherwise the band it
+            # is guarding spawns inside it and is trapped there, which is the
+            # yardmap trap wearing a different hat.
+            placed.append(cand)
+            guards = _place_guardians(rnd, terrain, facts, anchor, placed,
+                                      placed_units, guardian_team)
+            out.append({
+                "feature": {"def": defname, "x": anchor[0], "z": anchor[1],
+                            "name": name},
+                "guards": guards, "region": region, "name": name,
+            })
+            break
+    return out
+
+
+def _place_guardians(rnd, terrain: Terrain, facts, anchor, placed, placed_units,
+                     team) -> list[dict]:
+    """The band camped on a relic — the Anarchic archetype's NPC form.
+
+    Placed on a ring outside the relic's own clearance, on the same rules as a
+    cluster garrison. Skipped entirely when the scenario declares no hostile
+    team (`--hostility neutral`): a guardian with nobody to be hostile to is a
+    contradiction, and putting one on Gaia would make the prize guarded by
+    people who will not fight for it.
+    """
+    if team is None:
+        return []
+    ax, az = anchor
+    out: list[dict] = []
+    local: list[tuple[int, int, object]] = []
+    for defname, _w, lo, hi in ANCIENT_GUARDIANS:
+        f = facts[defname]
+        mclass = f.movementclass or DEFAULT_CLASS
+        for _ in range(_pick_int(rnd, lo, hi)):
+            spot = None
+            for widen in range(8):
+                rad = 180 + widen * 70
+                for _ in range(10):
+                    ang = rnd.random() * math.tau
+                    x, z = ax + math.cos(ang) * rad, az + math.sin(ang) * rad
+                    if not terrain.passable(x, z, mclass):
+                        continue
+                    if not all(b.clears(x, z) for b in placed):
+                        continue
+                    if _too_close(x, z, f, placed_units + local):
+                        continue
+                    spot = (int(x), int(z))
+                    break
+                if spot:
+                    break
+            if spot:
+                out.append({"def": defname, "team": team, "x": spot[0],
+                            "z": spot[1], "facing": "south",
+                            "orders": [{"cmd": "FIGHT",
+                                        "params": [ax, 0, az]}]})
+                local.append((spot[0], spot[1], f))
+    placed_units.extend(local)
+    return out
+
+
+# The one wreck big enough to be a place rather than a prop. A colossus hulk is
+# 18 x 12 m of dead war machine; people navigate by it. Tank and train wrecks
+# stay anonymous — naming every piece of debris would fill the command
+# language's target list with things nobody would ever say.
+NAMED_WRECK = "ms_colossus_wreck"
+NAMED_WRECK_NOUN = "Hulk"
+
+
+def place_wrecks(rnd, terrain: Terrain, fdefs, region: dict,
+                 anchor: tuple[int, int], count: int, placed: list[Building],
+                 placed_units: list[tuple[int, int, object]],
+                 names: set[str]
+                 ) -> tuple[list[dict], list[tuple[float, float, float, float]]]:
+    """A wreck field on already-fought-over ground.
+
+    Returns the `world.features` entries and the rectangles they block, so the
+    caller can re-grade reachability. Wrecks are pushed OUT from the region's
+    anchor (`rad` starts at 200) rather than dropped on it: the anchor is the
+    point every other placement in that region routes through, and a colossus
+    hull sitting on it is a plug in the middle of the prize.
+    """
+    ax, az = anchor
+    xs = [v[0] for v in region["polygon"]]
+    zs = [v[1] for v in region["polygon"]]
+    span = int(0.45 * min(max(xs) - min(xs), max(zs) - min(zs)))
+    entries: list[dict] = []
+    rects: list[tuple[float, float, float, float]] = []
+    for _ in range(count):
+        defname = _pick_weighted(rnd, WRECK_FIELD)[0]
+        half_x, half_z = feature_half_extent(fdefs, defname)
+        fx, fz = fdefs[defname]
+        for widen in range(6):
+            rad = 200 + widen * max(80, span // 4)
+            spot = None
+            for _ in range(10):
+                ang = rnd.random() * math.tau
+                x, z = ax + math.cos(ang) * rad, az + math.sin(ang) * rad
+                # A wreck on a slope or in the sea is not cover, it is a
+                # floating prop; grade the ground it would sit on exactly as a
+                # building's is graded.
+                if not terrain.footprint_clear(x, z, fx, fz, DEFAULT_CLASS):
+                    continue
+                rect = (x - half_x, z - half_z, x + half_x, z + half_z)
+                if any(_rects_overlap((rect[0] - FOOTPRINT_GAP,
+                                       rect[1] - FOOTPRINT_GAP,
+                                       rect[2] + FOOTPRINT_GAP,
+                                       rect[3] + FOOTPRINT_GAP), b.rect())
+                       for b in placed):
+                    continue
+                if any(_rects_overlap(rect, other) for other in rects):
+                    continue
+                # Same yardmap trap as a building: a wreck dropped onto a
+                # staged unit blocks that unit's squares from under it.
+                near = math.hypot(half_x, half_z) + 48
+                if any(math.hypot(x - ux, z - uz) < near + uf.body_radius
+                       for ux, uz, uf in placed_units):
+                    continue
+                spot = (int(x), int(z), rect)
+                break
+            if spot:
+                entry = {"def": defname, "x": spot[0], "z": spot[1],
+                         "facing": _pick_weighted(
+                             rnd, [("north", 1), ("east", 1),
+                                   ("south", 1), ("west", 1)])[0]}
+                if defname == NAMED_WRECK:
+                    entry["name"] = site_name(region, NAMED_WRECK_NOUN, names)
+                    names.add(entry["name"])
+                entries.append(entry)
+                rects.append(spot[2])
+                break
+    return entries, rects
+
+
+# How far past the waterline the abutment probe will look for drivable ground.
+# A bank is the steepest ground around, so the sample where the water stops is
+# almost never the sample a vehicle can stand on; a few squares of ramp is the
+# difference between "this crossing exists" and "no map has a crossing".
+BANK_SEARCH = 96
+
+# A single 24 m segment is a plank and the gap under it is a ditch.
+MIN_BRIDGE_SPANS = 3
+
+
+def _chain_is_afloat(terrain: Terrain, cx: float, cz: float, axis: str,
+                     spans: int, pitch: float) -> bool:
+    """Is every segment of this chain's centre over water?
+
+    The arithmetic mirrors game_scenario.lua's stageFeatures exactly — chaining
+    is CENTRED on (x, z) and segment i sits at `(i - (count-1)/2) * pitch` along
+    the heading — so this asks the same question the loader will answer with
+    real geometry, rather than trusting the floor() above to have got it right.
+    Cheap, and it is the difference between a level deck and the staircase the
+    first live boot produced.
+    """
+    for i in range(spans):
+        step = (i - (spans - 1) / 2.0) * pitch
+        px = cx + (step if axis == "x" else 0.0)
+        pz = cz + (step if axis == "z" else 0.0)
+        if not terrain.is_water(px, pz):
+            return False
+    return True
+
+
+def _bank(terrain: Terrain, x: float, z: float, axis: str, edge: float,
+          sign: int) -> float | None:
+    """First drivable position outboard of `edge` along `axis`, or None.
+
+    `edge` is the water's edge on that axis; `sign` says which way is outboard.
+    Returns the axis coordinate, so the caller can span abutment to abutment
+    rather than waterline to waterline.
+    """
+    d = 0.0
+    while d <= BANK_SEARCH:
+        pos = edge + sign * d
+        px, pz = (pos, z) if axis == "x" else (x, pos)
+        if terrain.passable(px, pz, DEFAULT_CLASS):
+            return pos
+        d += ELMOS_PER_SQUARE
+    return None
+
+
+def find_crossing(terrain: Terrain, region: dict, pitch: float
+                  ) -> tuple[int, int, str, int, float] | None:
+    """A water gap inside `region` a bridge could actually span.
+
+    Returns `(x, z, facing, spans, width)` — the gap's MIDPOINT, the cardinal
+    the chain lays along, and how many 24 m segments cover it.
+
+    Searched on the heightmap, not on region tags. That is the correction §M4
+    makes to the earlier "ports/bridges cannot ship" finding: the old blocker
+    was that no generated region graph emits a `water` tag, which says nothing
+    about whether the map has a river — and every one of these maps does. Water
+    is `h < 0`, the same predicate `passable_mask` grades depth with.
+
+    The narrowest gap wins, which is what makes the result read as a crossing:
+    a bridge is built where the river is thinnest, and that is also where a road
+    would naturally run. Ties break on the scan order (fixed stride from the
+    region's own bounding box), so no RNG is consumed here at all — two runs on
+    one seed cannot disagree about where a river is.
+    """
+    xs = [v[0] for v in region["polygon"]]
+    zs = [v[1] for v in region["polygon"]]
+    x0, x1, z0, z1 = min(xs), max(xs), min(zs), max(zs)
+    limit = MAX_BRIDGE_SPANS * pitch / 2.0 + ELMOS_PER_SQUARE
+    step = ELMOS_PER_SQUARE * 4
+
+    best = None
+    z = z0
+    while z <= z1:
+        x = x0
+        while x <= x1:
+            if terrain.is_water(x, z):
+                for axis, facing in (("x", "east"), ("z", "north")):
+                    run = terrain.water_run(x, z, axis, limit)
+                    if run is None:
+                        continue
+                    lo, hi = run
+                    width = hi - lo
+                    if width < MIN_BRIDGE_GAP:
+                        continue
+                    # A crossing has to LEAD somewhere: there must be ground a
+                    # vehicle can stand on beyond each bank. The waterline
+                    # sample is never that — a bank is the steepest ground
+                    # around, routinely over the 32-degree VEH limit — so the
+                    # probe walks a few squares out. Measured on
+                    # scorched_crossing, testing the waterline itself rejected
+                    # 105 otherwise-good crossings and accepted none at all.
+                    if (_bank(terrain, x, z, axis, lo, -1) is None or
+                            _bank(terrain, x, z, axis, hi, +1) is None):
+                        continue
+
+                    # EVERY SPAN CENTRE MUST BE OVER WATER. That is the whole
+                    # invariant, and the first live boot is what taught it: a
+                    # deck sized to reach the drivable banks put half its chain
+                    # over rising ground, and a feature's y is a spawn height
+                    # the engine then clamps to the terrain (§M3). `floating`
+                    # defeats gravity only IN WATER, so the wet spans held
+                    # 0.00 while the dry ones climbed to 15.7, 97.8, 203.5,
+                    # 230.1, 250.7 and 252.0 m. That is not a bridge, it is a
+                    # ramp into the sky.
+                    #
+                    # So the deck is sized by FLOOR over the water, never ceil:
+                    # segment i sits at (i - (n-1)/2) * pitch from the midpoint,
+                    # so the outermost centre is (n-1)/2 * pitch out, and
+                    # n = floor(water / pitch) keeps that strictly inside the
+                    # water for every n. The deck ends a few metres short of
+                    # each bank rather than climbing it — which against these
+                    # gorge walls is also what a real crossing looks like.
+                    water = (hi - lo) - 2 * ELMOS_PER_SQUARE
+                    spans = int(water // pitch)
+                    # One 24 m segment alone is a plank, not a crossing, and
+                    # the gap it spans is a ditch.
+                    if spans < MIN_BRIDGE_SPANS or spans > MAX_BRIDGE_SPANS:
+                        continue
+                    mid = (lo + hi) / 2.0
+                    mx, mz = (mid, z) if axis == "x" else (x, mid)
+                    if not _chain_is_afloat(terrain, mx, mz, axis, spans, pitch):
+                        continue
+                    width = water
+                    cand = (width, int(mx), int(mz), facing, spans)
+                    if best is None or cand[:1] + cand[1:3] < best[:1] + best[1:3]:
+                        best = cand
+            x += step
+        z += step
+    if best is None:
+        return None
+    width, mx, mz, facing, spans = best
+    return mx, mz, facing, spans, width
+
+
+# ==========================================================================
 # The gates (§7) — each one refuses to write rather than shipping
 # ==========================================================================
 
@@ -599,6 +1185,38 @@ def gate_reachability(terrain: Terrain, points: list[tuple[str, int, int]],
                 f"meridian_basin unplayable.)")
         want[mclass] = next(iter(groups))
     return want
+
+
+def gate_blocking_features_leave_the_war_fightable(
+        terrain: Terrain, rects: list[tuple[float, float, float, float]],
+        points: list[tuple[str, int, int]], map_id: str) -> None:
+    """Invariant 5, re-checked with the wreck field ON the map.
+
+    `features/wrecks.lua` sets `blocking = true` — that is what makes a wreck
+    cover instead of scenery — and a blocking feature takes ground-blocking
+    squares exactly as a building does (CFeature::Block, Feature.cpp:237). So
+    the reachability the earlier gate proved was proved about a map that no
+    longer exists once a train wreck is lying across the pass.
+
+    This is not hypothetical bookkeeping: ms_train_wreck is 14 x 21 m and
+    wrecks are scattered on the CONTESTED region on purpose, which is the same
+    ground the map's chokepoints are on. A field that severs the only route
+    between two armies is the Meridian defect re-created out of decoration.
+
+    Cheaper than it looks, and deliberately not optimised into a patch: removing
+    samples can SPLIT a component, so the components are recomputed from the
+    stamped mask rather than edited.
+    """
+    if not rects:
+        return
+    try:
+        gate_reachability(terrain.blocked_copy(rects), points, map_id)
+    except Rejected as e:
+        raise Rejected(
+            f"the wreck field makes this war unfightable — {e}\n"
+            f"  {len(rects)} blocking feature(s) were placed on contested "
+            f"ground and at least one of them walls off the route between the "
+            f"armies. Wrecks are decoration; they may not decide the war.")
 
 
 def gate_no_unit_in_a_footprint(unit_points: list[tuple[str, float, float]],
@@ -673,6 +1291,72 @@ def _b36(n: int, width: int = 4) -> str:
     return out
 
 
+def load_feature_facts(game_dir: str) -> dict[str, tuple[int, int]]:
+    """defname -> (footprintx, footprintz) for every shipped featuredef.
+
+    Read out of features/*.lua rather than tabulated here, for exactly the
+    reason ms_defs gives about unit footprints: the number is load-bearing for a
+    correctness gate (a blocking wreck's ground footprint decides whether a
+    wreck field can sever a route), and a stale copy disarms the gate instead of
+    failing it. Resize a wreck in content and this follows.
+
+    Every .lua under features/ is a def file by the springcontent scan contract
+    (features/README.md), so the whole directory is the search space. Comments
+    are stripped first so the `-- 8 x 10 m` annotations beside each footprint
+    cannot be read as another def.
+    """
+    feat_dir = os.path.join(game_dir, "features")
+    out: dict[str, tuple[int, int]] = {}
+    if not os.path.isdir(feat_dir):
+        return out
+    for fn in sorted(os.listdir(feat_dir)):
+        if not fn.endswith(".lua"):
+            continue
+        with open(os.path.join(feat_dir, fn), encoding="utf-8") as fh:
+            text = ms_defs._strip_comments(fh.read())
+        for name, body in ms_defs._split_top_level_entries(text).items():
+            fx = ms_defs._num(body, "footprintx")
+            fz = ms_defs._num(body, "footprintz")
+            if fx is not None and fz is not None:
+                out[name] = (int(fx), int(fz))
+    return out
+
+
+def verify_feature_defs(facts: dict[str, tuple[int, int]],
+                        required: list[str], game_dir: str) -> list[str]:
+    """Problems with `required` featuredefs.
+
+    The engine is silent about this failure, which is why it is worth a gate:
+    `Spring.CreateFeature` returns nothing for an unknown def and deliberately
+    does NOT error ("do not error (featureDefs are dynamic)",
+    LuaSyncedCtrl.cpp:4344), so a typo'd wreck name produces a scenario that
+    boots clean and is quietly missing the terrain the fight was designed
+    around. game_scenario.lua's validate() catches it at GameStart; this catches
+    it before the file is ever written.
+    """
+    if not facts:
+        return [f"{os.path.join(game_dir, 'features')} ships no featuredefs, "
+                f"so no wreck, span or relic can be placed"]
+    return [f'unknown feature def "{n}" — not in '
+            f'{os.path.join(game_dir, "features")}'
+            for n in required if n not in facts]
+
+
+def feature_half_extent(facts: dict[str, tuple[int, int]],
+                        defname: str) -> tuple[float, float]:
+    """Half the ground a feature blocks, in elmos.
+
+    Same arithmetic as ms_defs.UnitFacts.body_radius, and it has to be: the
+    engine derives a feature's ground-blocking rectangle from `footprintx/z`
+    exactly as it does a building's (xsize = footprint * SPRING_FOOTPRINT_SCALE,
+    then 4 elmos per xsize unit). Getting this wrong is not cosmetic — a first
+    pass here treated the defs' `-- 8 x 10 m` comment as the extent and packed
+    five wrecks into 180 elmos, every one of them inside its neighbour.
+    """
+    fx, fz = facts[defname]
+    return (fx * ms_defs.FOOTPRINT_SCALE * 4, fz * ms_defs.FOOTPRINT_SCALE * 4)
+
+
 def scenario_id(map_id: str, seed: int, version: int) -> str:
     """`gen_<map-slug>_<hash>` — a file stem, so also a valid `scenario` modoption.
 
@@ -687,6 +1371,8 @@ def scenario_id(map_id: str, seed: int, version: int) -> str:
 
 def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
              outposts: int = 2, bases: int = 1, mines: int = 1,
+             sites: int = 3, relics: int = 1, wrecks: int = 5,
+             bridges: int = 1,
              hostility: str = "mixed", roster: str = "standard",
              version: int = GENERATOR_VERSION, game_dir: str | None = None):
     """Build one scenario. Returns `(lua_source, meta)`. Raises `Rejected`."""
@@ -704,14 +1390,29 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
     roster_defs = [d for d, _c, _s in ARMY_ROSTERS[roster]]
     cluster_defs = sorted({d for tpl in CLUSTER_TEMPLATES.values()
                            for d, _w, _lo, _hi in tpl["buildings"] + tpl["garrison"]})
-    problems = ms_defs.verify(facts, sorted(set(roster_defs + cluster_defs)))
+    # The §M4 layers name content too, and it is verified the same way: a site
+    # def or a guardian the game does not ship must fail here, at generation
+    # time with a def name in the message, rather than at GameStart with the
+    # loader's "unknown unit def" — or worse, as a scenario that boots one
+    # building short and says nothing.
+    site_defs = sorted(SITE_TEMPLATES)
+    guardian_defs = sorted({d for d, _w, _lo, _hi in ANCIENT_GUARDIANS})
+    problems = ms_defs.verify(facts, sorted(set(
+        roster_defs + cluster_defs + site_defs + guardian_defs)))
     if problems:
         raise Rejected("templates name defs the content does not ship:\n  " +
                        "\n  ".join(problems))
+    fdefs = load_feature_facts(game_dir)
+    problems = verify_feature_defs(fdefs, sorted(
+        set(ANCIENT_SITES) | {d for d, _w in WRECK_FIELD} |
+        set(BRIDGE_SPANS.values())), game_dir)
+    if problems:
+        raise Rejected("templates name featuredefs the content does not "
+                       "ship:\n  " + "\n  ".join(problems))
 
     classes = sorted({facts[d].movementclass for d in roster_defs
                       if facts[d].movementclass} |
-                     {facts[d].movementclass for d in cluster_defs
+                     {facts[d].movementclass for d in cluster_defs + guardian_defs
                       if facts[d].movementclass})
     terrain, map_id = load_terrain(map_dir, classes)
     strict = terrain.strictest()
@@ -864,13 +1565,39 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
                              "buildings": bs, "garrison": gs})
             break
 
+    # --- named sites and ancient-tech relics (§M4) --------------------------
+    # Placed AFTER the clusters and BEFORE the armies, which is the only order
+    # that works: a site must dodge the towns already standing, and the landing
+    # parties must dodge the site. `used` is shared with the cluster pass, so a
+    # region holds either a settlement or a site, never both stacked on one
+    # anchor.
+    hostile_team = sides
+    guardian_team = None if hostility == "neutral" else hostile_team
+    landmark_names: set[str] = set()
+    # Home regions are barred because a site on someone's landing zone is a gift
+    # rather than an objective; the victory region is barred because the whole
+    # design of the victory picker is that the prize starts clear so neither
+    # side inherits it.
+    barred = home_keys | {victory["key"]}
+    site_entries = place_sites(rnd, terrain, facts, regions, want_comp, sites,
+                               barred, used, all_buildings, all_cluster_units,
+                               landmark_names)
+    site_keys = {s["region"]["key"] for s in site_entries}
+
+    relic_entries = place_relics(rnd, terrain, facts, fdefs, regions, want_comp,
+                                 relics, barred | site_keys, used,
+                                 all_buildings, all_cluster_units,
+                                 landmark_names, guardian_team)
+    for r in relic_entries:
+        all_cluster_units.extend((g["x"], g["z"], facts[g["def"]])
+                                 for g in r["guards"])
+
     # --- who owns them ------------------------------------------------------
     # `neutral` resolves to Gaia at stage time (game_scenario.lua stageUnits),
     # which Simulation.cpp configures as "neutral/environment, its own ally
     # team, no allies" and which exists regardless of roster. Hostile clusters
     # go to an ordinary NPC team: every non-Gaia team is its own ally team, so
     # an NPC team is hostile to both players with no extra configuration.
-    hostile_team = sides
     for c in clusters:
         if hostility == "neutral":
             c["owner"] = "neutral"
@@ -969,6 +1696,70 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
         raise Rejected(f"{map_id}: victory timing arithmetic is inconsistent "
                        f"({not_before} + {hold} < {worst:.0f}).")
 
+    # --- features: the wreck field and the crossing (§M4) --------------------
+    # LAST, because both must dodge everything already on the board and neither
+    # is dodged by anything: a wreck is history, and the armies arrived after it.
+    #
+    # The field goes on the ground the war is ABOUT — the victory region — which
+    # is also the ground most likely to be a chokepoint, so the gate below is
+    # not ceremonial.
+    army_points = [(u["x"] + dx, u["z"] + dz, facts[u["def"]])
+                   for u in units
+                   for dx, dz in grid_offsets(u.get("count", 1),
+                                              u.get("spacing", 150))]
+    wreck_entries, wreck_rects = place_wrecks(
+        rnd, terrain, fdefs, victory, victory_anchor, wrecks, all_buildings,
+        all_cluster_units + army_points, landmark_names)
+
+    gate_blocking_features_leave_the_war_fightable(
+        terrain, wreck_rects,
+        [(f"side {i} landing zone ({r['key']})", a[0], a[1])
+         for i, (r, a) in enumerate(zip(side_regions, side_anchors))] +
+        [(f"victory objective ({victory['key']})",
+          victory_anchor[0], victory_anchor[1])],
+        map_id)
+
+    # Bridges. Searched over the victory region first (a crossing IS a
+    # chokepoint, which is why the victory picker prefers one) and then over
+    # every other non-home region, narrowest gap wins. A map with no river gets
+    # no bridge and says so in the summary — silence would read as "there was
+    # nowhere sensible", which is exactly what a missing feature should never
+    # be indistinguishable from.
+    crossings: list[dict] = []
+    if bridges > 0:
+        span_def = BRIDGE_SPANS["road"]
+        pitch = 24.0
+        search = [victory] + [r for r in regions
+                              if r["key"] != victory["key"]
+                              and r["key"] not in home_keys]
+        for region in search:
+            if len(crossings) >= bridges:
+                break
+            found = find_crossing(terrain, region, pitch)
+            if found is None:
+                continue
+            cx, cz, facing, spans, width = found
+            name = site_name(region, BRIDGE_NOUN, landmark_names)
+            landmark_names.add(name)
+            crossings.append({"def": span_def, "x": cx, "z": cz,
+                              "facing": facing, "chain": spans,
+                              # The waterline. §M3 measured a chain laid at
+                              # y = 0 over water staying dead level (0/0/0/0)
+                              # thanks to `floating = true`, where the same
+                              # chain without a y settled into a staircase down
+                              # the seabed (-31/-34.5/-45.9/-57.6).
+                              "y": 0,
+                              "name": name, "region": region, "width": width})
+    # Emitted crossings-first, then relics, then the wreck field — placement
+    # order is not emit order, and the file is read by people. `region` and
+    # `width` are generator bookkeeping and are stripped here rather than in the
+    # emitter, so nothing downstream has to know they were ever there.
+    feature_entries = (
+        [{k: v for k, v in c.items() if k not in ("region", "width")}
+         for c in crossings] +
+        [r["feature"] for r in relic_entries] +
+        wreck_entries)
+
     # --- placement gate (the yardmap trap) ----------------------------------
     spawn_points = []
     for u in units:
@@ -978,6 +1769,10 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
     for c in clusters:
         for g in c["garrison"]:
             spawn_points.append((f"{g['def']} in {c['region']['key']}",
+                                 g["x"], g["z"], facts[g["def"]]))
+    for r in relic_entries:
+        for g in r["guards"]:
+            spawn_points.append((f"{g['def']} guarding {r['name']}",
                                  g["x"], g["z"], facts[g["def"]]))
     gate_no_unit_in_a_footprint([(l, x, z) for l, x, z, _f in spawn_points],
                                 all_buildings)
@@ -1012,8 +1807,21 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
         "worst_frames": worst,
         "not_before": not_before,
         "hold_frames": hold,
+        # §M4. `landmarks` is the list the command language will be able to
+        # address once this scenario is staged — the whole point of naming
+        # anything — so it belongs in the metadata a caller (or a reviewer)
+        # reads back, not only in the file.
+        "sites": [(s["def"], s["region"]["key"], s["name"])
+                  for s in site_entries],
+        "relics": [(r["feature"]["def"], r["region"]["key"], r["name"],
+                    len(r["guards"])) for r in relic_entries],
+        "wrecks": [w["def"] for w in wreck_entries],
+        "crossings": [(c["region"]["key"], c["name"], c["chain"],
+                       round(c["width"])) for c in crossings],
+        "landmarks": sorted(landmark_names),
     }
     return emit_lua(meta, side_regions, side_anchors, victory, units, clusters,
+                    site_entries, relic_entries, feature_entries, crossings,
                     hostile_team, sides, not_before, hold), meta
 
 
@@ -1030,6 +1838,7 @@ def _team_field(owner) -> str:
 
 
 def emit_lua(meta, side_regions, side_anchors, victory, units, clusters,
+             site_entries, relic_entries, feature_entries, crossings,
              hostile_team, sides, not_before, hold) -> str:
     L: list[str] = []
     add = L.append
@@ -1070,6 +1879,57 @@ def emit_lua(meta, side_regions, side_anchors, victory, units, clusters,
     for i, r in enumerate(side_regions):
         add(f"            {{ key = {_lua_str(r['key'])}, team = {i} }},")
     add("        },")
+    if feature_entries:
+        add("")
+        add("        -- PLACED HISTORY (PLAN-metalstorm-model-integration §M3/§M4).")
+        add("        -- Features, not units: the loader calls Spring.CreateFeature for")
+        add("        -- these and stages them BEFORE units, so a wreck owns its squares")
+        add("        -- before anything is put down near it.")
+        add("        --")
+        add("        -- A `name` here is published at GameStart as")
+        add("        -- landmark_<name>_x/_z, which is how the command language")
+        add("        -- addresses it (\"hold the crossing\").")
+        add("        features = {")
+        if crossings:
+            add("            -- THE CROSSING. Chained road spans over the narrowest")
+            add("            -- water gap on the contested ground; `chain` is centred on")
+            add("            -- (x, z) and the 24 m pitch comes from the def's own")
+            add("            -- customParams.chain_pitch, never restated here.")
+            add("            --")
+            add("            -- y = 0 is the waterline, and it is load-bearing:")
+            add("            -- CFeature::UpdatePosition applies gravity then clamps to")
+            add("            -- the ground, so spans over a channel settle into a")
+            add("            -- staircase down the seabed unless they are spawned at the")
+            add("            -- waterline AND float (features/bridges.lua floating=true).")
+            add("            -- EVERY SEGMENT CENTRE IS OVER WATER, which is why the deck")
+            add("            -- stops short of the banks rather than climbing them: a dry")
+            add("            -- segment clamps to the terrain and kinks the deck upward.")
+            for c in crossings:
+                add(f"            -- {c['region']['name']}: a {round(c['width'])}-elmo gap, "
+                    f"{c['chain']} spans")
+                add("            " + _emit_feature(
+                    {k: v for k, v in c.items() if k not in ("region", "width")}))
+        if relic_entries:
+            add("")
+            add("            -- ANCIENT-TECH RELICS. Placed history a faction is squatting")
+            add("            -- on (the guardian bands are in `units` below). They block")
+            add("            -- and they do NOT animate: FeatureRenderer thin-instances one")
+            add("            -- mesh per def, so the spire's authored ring orbit goes")
+            add("            -- unplayed — recorded in the def's static_clip_unplayed.")
+            for r in relic_entries:
+                add("            " + _emit_feature(r["feature"]))
+        wreck_entries = [f for f in feature_entries
+                         if f["def"].endswith("_wreck")]
+        if wreck_entries:
+            add("")
+            add("            -- THE WRECK FIELD, on the ground the war is about. These")
+            add("            -- BLOCK (features/wrecks.lua), so the generator stamps every")
+            add("            -- one into the passability mask and re-runs the reachability")
+            add("            -- gate: a field that walls off the crossing it decorates is")
+            add("            -- the Meridian defect re-created out of scenery.")
+            for f in wreck_entries:
+                add("            " + _emit_feature(f))
+        add("        },")
     add("    },")
     add("")
     add("    -- One team per playable side, numbered consecutively from 0 so the")
@@ -1176,6 +2036,35 @@ def emit_lua(meta, side_regions, side_anchors, victory, units, clusters,
                 entry["orders"] = [{"cmd": "FIGHT",
                                     "params": [c["anchor"][0], 0, c["anchor"][1]]}]
             add("        " + _emit_unit(entry))
+
+    if site_entries:
+        add("")
+        add("        -- NAMED RESOURCE SITES (§M4, worldbuilding decision 1). One")
+        add("        -- capturable structure each, on Gaia, named after the region it")
+        add("        -- stands in — which is the name a player has already seen on the")
+        add("        -- overlay, and the name the loader publishes as")
+        add("        -- landmark_<name>_x/_z for the command language to resolve.")
+        add("        --")
+        add("        -- They pay NOTHING: income in Metalstorm is Authority")
+        add("        -- (worldbuilding decision 3), so a site is worth holding because")
+        add("        -- it anchors an objective and because it is somewhere the story")
+        add("        -- can point at, not because it produces.")
+        for s in site_entries:
+            add(f"        -- {s['name']} ({s['region']['key']})")
+            add("        " + _emit_unit(s))
+
+    if relic_entries:
+        add("")
+        add("        -- ANCIENT-TECH GUARDIANS (§M4, worldbuilding directive 4). The")
+        add("        -- relic itself is a FEATURE (see world.features above); what can")
+        add("        -- be fought is the band squatting on it. Anarchic archetype —")
+        add("        -- gun trucks and militia, not line armour.")
+        for r in relic_entries:
+            if not r["guards"]:
+                continue
+            add(f"        -- guarding {r['name']} ({r['region']['key']})")
+            for g in r["guards"]:
+                add("        " + _emit_unit(g))
     add("    },")
     add("")
     add("    objectives = {")
@@ -1200,25 +2089,68 @@ def emit_lua(meta, side_regions, side_anchors, victory, units, clusters,
     add("          victory = true,")
     add(f"          notBefore = {not_before}, holdFrames = {hold},")
     add("          expiresAtFrame = nil },")
-    if clusters:
+    # ONE tactical control objective per region, richest claim first. A site
+    # may share a region with a town (see _rank_regions), and two `control`
+    # objectives on one region are not two prizes — they are the same ground
+    # scored twice, which reads to a player as a bug and to the objectives
+    # gadget as two independent holds of the same thing.
+    tactical: dict[str, tuple[int, int, str]] = {}
+    for order, (reward, items, label) in enumerate((
+            (200, [(r["region"]["key"], r["name"]) for r in relic_entries],
+             "ancient-tech prize"),
+            (130, [(s["region"]["key"], s["name"]) for s in site_entries],
+             "resource site"),
+            (110, [(c["region"]["key"], CLUSTER_TEMPLATES[c["kind"]]["label"])
+                   for c in clusters], "settlement"))):
+        for key, why in items:
+            if key not in tactical:
+                tactical[key] = (reward, order, why)
+    if tactical:
         add("")
-        add("        -- Tactical prizes on the occupied ground. Open race for the")
+        add("        -- Tactical prizes on the occupied ground: settlements, the named")
+        add("        -- resource sites, and the ancient-tech caches. Open race for the")
         add("        -- same reason as above; no expiry.")
-        for c in clusters:
-            tpl = CLUSTER_TEMPLATES[c["kind"]]
+        add("        --")
+        add("        -- A resource site pays NO income (worldbuilding decision 3), so")
+        add("        -- its objective is the entire mechanical reason to take it — the")
+        add("        -- silo is worth holding because the region it stands in scores.")
+        for key in sorted(tactical):
+            reward, _order, why = tactical[key]
             add(f"        {{ type = 'control', scope = 'tactical', forTeam = nil, "
-                f"region = {_lua_str(c['region']['key'])}, reward = 110, "
-                f"expiresAtFrame = nil }},  -- {tpl['label']}")
+                f"region = {_lua_str(key)}, reward = {reward}, "
+                f"expiresAtFrame = nil }},  -- {why}")
     add("    },")
     add("}")
     add("")
     return "\n".join(L)
 
 
+def _emit_feature(f: dict) -> str:
+    """One `world.features` entry. Keys the loader reads, in a fixed order.
+
+    `region` and `width` are generator bookkeeping and never reach the file —
+    the caller strips them, and this function would emit them verbatim if it
+    did not, producing keys game_scenario.lua's validate() has no opinion about
+    and the lobby's bare lua_State would happily parse into nothing.
+    """
+    parts = [f"def = {_lua_str(f['def'])}", f"x = {f['x']}", f"z = {f['z']}"]
+    if f.get("y") is not None:
+        parts.append(f"y = {f['y']}")
+    if f.get("facing"):
+        parts.append(f"facing = {_lua_str(f['facing'])}")
+    if f.get("chain", 1) != 1:
+        parts.append(f"chain = {f['chain']}")
+    if f.get("name"):
+        parts.append(f"name = {_lua_str(f['name'])}")
+    return "{ " + ", ".join(parts) + " },"
+
+
 def _emit_unit(u: dict) -> str:
     parts = [f"def = {_lua_str(u['def'])}", f"team = {_team_field(u['team'])}",
              f"x = {u['x']}", f"z = {u['z']}",
              f"facing = {_lua_str(u['facing'])}"]
+    if u.get("name"):
+        parts.append(f"name = {_lua_str(u['name'])}")
     if u.get("count", 1) != 1:
         parts.append(f"count = {u['count']}")
         parts.append(f"spacing = {u['spacing']}")
@@ -1245,6 +2177,14 @@ def main(argv=None):
     ap.add_argument("--outposts", type=int, default=2)
     ap.add_argument("--bases", type=int, default=1)
     ap.add_argument("--mines", type=int, default=1)
+    ap.add_argument("--sites", type=int, default=3,
+                    help="named resource sites (silo/derrick/pit/yard/...)")
+    ap.add_argument("--relics", type=int, default=1,
+                    help="ancient-tech prize sites, each with a guardian band")
+    ap.add_argument("--wrecks", type=int, default=5,
+                    help="wrecks scattered on the contested region")
+    ap.add_argument("--bridges", type=int, default=1,
+                    help="chained road spans over water gaps, where one fits")
     ap.add_argument("--hostility", default="mixed",
                     choices=["neutral", "hostile", "mixed"])
     ap.add_argument("--roster", default="standard", choices=sorted(ARMY_ROSTERS))
@@ -1268,6 +2208,8 @@ def main(argv=None):
         lua, meta = generate(
             map_dir, seed, sides=args.sides, towns=args.towns,
             outposts=args.outposts, bases=args.bases, mines=args.mines,
+            sites=args.sites, relics=args.relics, wrecks=args.wrecks,
+            bridges=args.bridges,
             hostility=args.hostility, roster=args.roster,
             game_dir=args.game_dir)
     except Rejected as e:
@@ -1294,6 +2236,26 @@ def main(argv=None):
     for kind, key, owner in meta["clusters"]:
         say(f"    {kind:8s} {key:22s} "
             f"{'neutral (Gaia)' if owner == 'neutral' else f'hostile team {owner}'}")
+    for defname, key, name in meta["sites"]:
+        say(f"    site     {key:22s} {name} ({defname})")
+    for defname, key, name, guards in meta["relics"]:
+        say(f"    relic    {key:22s} {name} ({defname}, {guards} guardian(s))")
+    if meta["wrecks"]:
+        say(f"    wrecks   {len(meta['wrecks'])} on {meta['victory_region']}: "
+            f"{', '.join(sorted(meta['wrecks']))}")
+    # A map with no river gets no bridge, and that is a legitimate outcome — but
+    # it is said out loud, because "no crossing in the file" and "the placer
+    # found nowhere sensible" must not look identical from the outside.
+    if meta["crossings"]:
+        for key, name, spans, width in meta["crossings"]:
+            say(f"    crossing {key:22s} {name} — {spans} spans over a "
+                f"{width}-elmo gap")
+    else:
+        say("    crossing none — no water gap on this map fits a span "
+            "(bridges belong over water; over dry ground the engine's ground "
+            "clamp steps every segment)")
+    say(f"  {len(meta['landmarks'])} landmark(s) the command language can "
+        f"address: {', '.join(meta['landmarks'])}")
 
     # --meta-json is how a PROGRAM ingests this run — specifically the lobby's
     # POST /api/admin/scenarios/generate, which shells out to this script and
@@ -1315,8 +2277,9 @@ def main(argv=None):
         payload["params"] = {
             "sides": args.sides, "towns": args.towns,
             "outposts": args.outposts, "bases": args.bases,
-            "mines": args.mines, "hostility": args.hostility,
-            "roster": args.roster,
+            "mines": args.mines, "sites": args.sites, "relics": args.relics,
+            "wrecks": args.wrecks, "bridges": args.bridges,
+            "hostility": args.hostility, "roster": args.roster,
         }
         with open(args.meta_json, "w", encoding="utf-8") as f:
             json.dump(payload, f, sort_keys=True, indent=2)
