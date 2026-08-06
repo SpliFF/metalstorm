@@ -1,0 +1,16 @@
+{
+  "comment": "Replaces meridian_basin_direct.json (retired 2026-08-06, PLAN-metalstorm-wars.md §7.6). Meridian Basin's start positions sit in three disconnected components of the VEH/HEAVY passability mask, so its armies could never reach each other. Two humans, one per side. The scenario declares exactly two sides on teams 0 and 1, so there are no filler null-AI slots to materialise gap teams and no NPC team that would collide with Gaia's index. A copy of this file must also live in client/public/ — that, not manifests/, is what ?direct= fetches.",
+  "name": "dev:crossing-standoff",
+  "map": "scorched_crossing_v2.4",
+  "game": "metalstorm",
+  "modoptions": {
+    "objective_density": "1"
+  },
+  "scenario": "crossing_standoff",
+  "aiSlots": [],
+  "players": [
+    { "username": "dev-compact", "team": 0, "startPos": 0, "spectator": false },
+    { "username": "dev-union", "team": 1, "startPos": 1, "spectator": false }
+  ],
+  "autoStart": true
+}
