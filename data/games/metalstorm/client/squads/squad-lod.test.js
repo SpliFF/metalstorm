@@ -283,8 +283,10 @@ describe('member budget — the producer M19 found missing', () => {
     expect(mgr.squads.get(3).lod).toBe('centroid');
   });
 
-  it('does not steal the icon tier from whoever owns it', () => {
-    const mgr = makeManager(10, { lodFullMemberBudget: 24, lodMemberBudgetHysteresis: 0 });
+  it('does not steal the icon tier from whoever owns it while the drawn budget is off', () => {
+    const mgr = makeManager(10, {
+      lodFullMemberBudget: 24, lodDrawnMemberBudget: 0, lodMemberBudgetHysteresis: 0,
+    });
     mgr.squads.get(1).lod = 'icon';
     mgr.setViewPos(0, 0, 0);
     mgr.update(1 / 30);
@@ -301,5 +303,226 @@ describe('member budget — the producer M19 found missing', () => {
     let gridMembers = 0;
     for (const bucket of mgr._grid.values()) gridMembers += bucket.length;
     expect(gridMembers).toBe(24);
+  });
+});
+
+// --- the `icon` tier and the drawn-member budget (PLAN-perf M23) ------------
+//
+// M20 capped how many members are STEERED. This caps how many are DRAWN, which
+// is the term the per-member floor is paid on. The tier existed before M23 but
+// released every instance, so the whole point of these tests is that the squad
+// is still ON SCREEN afterwards — a "perf tier" that deletes the units would
+// measure wonderfully and ship nothing.
+
+function drawnMembers(mgr) {
+  let n = 0;
+  for (const sq of mgr.squads.values()) {
+    for (const m of sq.members) if (m.alive && !m.released) n++;
+  }
+  return n;
+}
+
+describe('icon tier — an art tier, not a disappearance', () => {
+  it('keeps iconMemberCount members drawn, not zero', () => {
+    const { backend } = makeBackend();
+    const sq = new Squad(1, makeDef(), backend, makeCfg({ iconMemberCount: 3 }));
+    sq.setPose(500, 0, 500, 0);
+    sq.update(1 / 30, 0, NO_NEIGHBOURS, null);
+    expect(sq.members.filter(m => !m.released).length).toBe(8);
+
+    sq.lod = 'icon';
+    expect(sq.members.filter(m => m.alive && !m.released).length).toBe(3);
+    expect(sq.aliveCount).toBe(8);            // Pitfall #3 — no member was killed
+  });
+
+  it('draws its mark at real slot offsets that track the squad, not a frozen point', () => {
+    const { backend, writes } = makeBackend();
+    const sq = new Squad(1, makeDef(), backend, makeCfg({ iconMemberCount: 3 }));
+    sq.setPose(500, 0, 500, 0);
+    sq.update(1 / 30, 0, NO_NEIGHBOURS, null);
+    sq.lod = 'icon';
+
+    writes.length = 0;
+    sq.setPose(900, 0, 500, 0);
+    sq.update(1 / 30, 0, NO_NEIGHBOURS, null);
+    expect(writes.length).toBe(3);                      // exactly the mark
+    expect(new Set(writes.map(w => `${w.x},${w.z}`)).size).toBe(3);  // not stacked
+    for (const w of writes) {
+      expect(Math.abs(w.x - 900)).toBeLessThanOrEqual(makeDef().formationRadius * 2);
+      expect(w.y).toBeCloseTo(backend.groundHeight(w.x, w.z), 6);    // ground-snapped
+    }
+  });
+
+  it('re-elects the mark when a mark member is killed', () => {
+    const { backend } = makeBackend();
+    const sq = new Squad(1, makeDef(), backend, makeCfg({ iconMemberCount: 3 }));
+    sq.setPose(500, 0, 500, 0);
+    sq.update(1 / 30, 0, NO_NEIGHBOURS, null);
+    sq.lod = 'icon';
+
+    // Kill the mark itself — the case that makes a naive implementation blink
+    // the squad off screen while it is still very much alive.
+    const mark = sq.members.filter(m => m.alive && !m.released);
+    expect(mark.length).toBe(3);
+    for (const m of mark) { m.alive = false; sq.aliveCount--; }
+
+    sq.update(1 / 30, 0, NO_NEIGHBOURS, null);
+    expect(sq.aliveCount).toBe(5);
+    expect(sq.members.filter(m => m.alive && !m.released).length).toBe(3);
+  });
+
+  it('falls back to whatever is left when fewer than iconMemberCount survive', () => {
+    const { backend } = makeBackend();
+    const sq = new Squad(1, makeDef({ squadSize: 2 }), backend, makeCfg({ iconMemberCount: 3 }));
+    sq.setPose(500, 0, 500, 0);
+    sq.update(1 / 30, 0, NO_NEIGHBOURS, null);
+    sq.lod = 'icon';
+    expect(sq.members.filter(m => m.alive && !m.released).length).toBe(2);
+  });
+
+  it('icon → full restores every still-alive member', () => {
+    const { backend } = makeBackend();
+    const sq = new Squad(1, makeDef(), backend, makeCfg({ iconMemberCount: 3 }));
+    sq.setPose(500, 0, 500, 0);
+    sq.update(1 / 30, 0, NO_NEIGHBOURS, null);
+    sq.lod = 'icon';
+    sq.lod = 'full';
+    expect(sq.members.filter(m => m.alive && !m.released).length).toBe(8);
+    for (const m of sq.members) if (m.alive) expect(m.handle).not.toBe(-1);
+  });
+});
+
+describe('drawn-member budget — the second threshold', () => {
+  it('ships armed at the calibrated default, and is inert below it', () => {
+    expect(DEFAULT_CONFIG.lodDrawnMemberBudget).toBe(8000);
+    expect(DEFAULT_CONFIG.lodDrawnMemberBudget)
+      .toBeGreaterThanOrEqual(DEFAULT_CONFIG.lodFullMemberBudget);
+    // 10 x 8 = 80 members is nowhere near the default, so an ordinary battle
+    // never sees the tier at all — it only engages at XL scale.
+    const mgr = makeManager(10, { lodFullMemberBudget: 24, lodMemberBudgetHysteresis: 0 });
+    mgr.setViewPos(0, 0, 0);
+    mgr.update(1 / 30);
+    expect(mgr.lodStats.iconArmed).toBe(true);
+    expect([...mgr.squads.values()].some(sq => sq.lod === 'icon')).toBe(false);
+    expect(drawnMembers(mgr)).toBe(80);
+  });
+
+  it('drops the far squads to icon once cumulative members pass the drawn budget', () => {
+    // 10 x 8 = 80 members. full 24 (3 squads), drawn 48 (3 more at centroid),
+    // the remaining 4 squads go to icon at 3 members each.
+    const mgr = makeManager(10, {
+      lodFullMemberBudget: 24, lodDrawnMemberBudget: 48,
+      lodMemberBudgetHysteresis: 0, iconMemberCount: 3,
+    });
+    mgr.setViewPos(0, 0, 0);
+    mgr.update(1 / 30);
+
+    const tiers = [...mgr.squads.values()].map(sq => sq.lod);
+    expect(tiers.slice(0, 3)).toEqual(['full', 'full', 'full']);
+    expect(tiers.slice(3, 6)).toEqual(['centroid', 'centroid', 'centroid']);
+    expect(tiers.slice(6).every(t => t === 'icon')).toBe(true);
+    expect(mgr.lodStats).toMatchObject({
+      iconArmed: true, fullMembers: 24, centroidMembers: 24,
+      iconSquads: 4, iconMembers: 12, fullDetailMembers: 48, drawnMembers: 60,
+    });
+    expect(drawnMembers(mgr)).toBe(60);     // the stat is not lying about the frame
+  });
+
+  it('a drawn budget below the full budget is ignored, not honoured half-way', () => {
+    const mgr = makeManager(10, {
+      lodFullMemberBudget: 24, lodDrawnMemberBudget: 8, lodMemberBudgetHysteresis: 0,
+    });
+    mgr.setViewPos(0, 0, 0);
+    mgr.update(1 / 30);
+    expect(mgr.lodStats.iconArmed).toBe(false);
+    expect([...mgr.squads.values()].some(sq => sq.lod === 'icon')).toBe(false);
+  });
+
+  it('setLodDrawnBudget(0) restores the pre-M23 frame without a reload', () => {
+    const mgr = makeManager(10, {
+      lodFullMemberBudget: 24, lodDrawnMemberBudget: 48, lodMemberBudgetHysteresis: 0,
+    });
+    mgr.setViewPos(0, 0, 0);
+    mgr.update(1 / 30);
+    expect(mgr.lodStats.iconSquads).toBe(4);
+
+    mgr.setLodDrawnBudget(0);
+    mgr.update(1 / 30);
+    expect([...mgr.squads.values()].some(sq => sq.lod === 'icon')).toBe(false);
+    expect(drawnMembers(mgr)).toBe(80);
+  });
+
+  it('setLodBudget(0) restores the pre-M20 frame even from the icon tier', () => {
+    const mgr = makeManager(10, {
+      lodFullMemberBudget: 24, lodDrawnMemberBudget: 48, lodMemberBudgetHysteresis: 0,
+    });
+    mgr.setViewPos(0, 0, 0);
+    mgr.update(1 / 30);
+    mgr.setLodBudget(0);
+    mgr.update(1 / 30);
+    expect([...mgr.squads.values()].every(sq => sq.lod === 'full')).toBe(true);
+    expect(drawnMembers(mgr)).toBe(80);
+  });
+
+  it('hysteresis keeps the full-detail cap a hard cap from both directions', () => {
+    for (const seed of ['full', 'icon']) {
+      const mgr = makeManager(20, {
+        lodFullMemberBudget: 24, lodDrawnMemberBudget: 80,
+        lodMemberBudgetHysteresis: 0.1, iconMemberCount: 3,
+      });
+      for (const sq of mgr.squads.values()) sq.lod = seed;
+      mgr.setViewPos(0, 0, 0);
+      for (let i = 0; i < 5; i++) { mgr._lodNextAt = 0; mgr.update(1 / 30); }
+      expect(mgr.lodStats.fullDetailMembers).toBeLessThanOrEqual(80);
+      // Steady state lands in [budget*(1-h), budget] depending on which side it
+      // converged from — 72 exactly when it converged up from `icon`.
+      expect(mgr.lodStats.fullDetailMembers).toBeGreaterThanOrEqual(80 * 0.9);
+      // The marks are the residue on top of the cap, and are bounded by
+      // squads x iconMemberCount rather than by the budget.
+      expect(mgr.lodStats.iconMembers).toBe(mgr.lodStats.iconSquads * 3);
+      expect(drawnMembers(mgr)).toBe(mgr.lodStats.drawnMembers);
+    }
+  });
+
+  // Regression: found LIVE at XL900 (8 011 full-detail members against an
+  // 8 000 cap), not by any uniform-size test. A squad that does not fit is
+  // skipped rather than terminating the scan, so `drawn` runs ahead of `used`
+  // — and a later SMALL squad could then pass the `full` test (which only
+  // consults `used`) and push full-detail members past the drawn cap. It only
+  // reproduces when squad sizes differ, because only then is anything skipped.
+  it('holds the drawn cap when a small squad follows a large one', () => {
+    const mgr = new SquadManager(makeBackend().backend, makeCfg({
+      lodFullMemberBudget: 40, lodDrawnMemberBudget: 70,
+      lodMemberBudgetHysteresis: 0, iconMemberCount: 3,
+    }));
+    // Nearest-first, and every step matters:
+    //   30 -> full      (used 30, drawn 30)
+    //   25 -> centroid  (used+25 > 40; drawn 55)      <- skipped, scan continues
+    //   12 -> centroid  (used+12 > 40; drawn 67)      <- skipped again
+    //    8 -> used+8 = 38 <= 40, so it passes the `full` test — and without the
+    //         drawn-cap conjunct it goes full and takes drawn to 75 > 70.
+    const sizes = [30, 25, 12, 8];
+    sizes.forEach((s, i) => mgr.syncSquad(i + 1,
+      { x: 0, y: 0, z: 100 * (i + 1), heading: 0, health: 65535, maxHealth: 65535 },
+      makeDef({ squadSize: s, customParams: { squad_size: s, ms_class: 'soldiers' } })));
+    mgr.setViewPos(0, 0, 0);
+    mgr.update(1 / 30);
+
+    const st = mgr.lodStats;
+    expect(st.centroidSquads).toBeGreaterThan(0);       // the skip really happened
+    expect(st.fullMembers).toBeLessThanOrEqual(40);
+    expect(st.fullDetailMembers).toBeLessThanOrEqual(70);
+    expect(drawnMembers(mgr)).toBe(st.drawnMembers);
+  });
+
+  it('never kills a member: aliveCount across the whole herd is untouched', () => {
+    const mgr = makeManager(10, {
+      lodFullMemberBudget: 24, lodDrawnMemberBudget: 48, lodMemberBudgetHysteresis: 0,
+    });
+    mgr.setViewPos(0, 0, 0);
+    mgr.update(1 / 30);
+    let alive = 0;
+    for (const sq of mgr.squads.values()) alive += sq.aliveCount;
+    expect(alive).toBe(80);
   });
 });

@@ -95,6 +95,13 @@ interface InstancePool {
     highWater: number;        // count uploaded to thinInstanceCount
     free: number[];           // released indices, LIFO
     dirty: boolean;
+    /** PLAN-perf M24: the `MemberSlot` object that currently owns each slot,
+     *  indexed by slot. Every holder of a slot addresses it through one of
+     *  these objects (`MemberEntry.model/sprite/capsule`, `wreckByHandle`), so
+     *  compaction can move a slot down and rewrite `ref.index` in place —
+     *  nothing outside the backend stores a raw pool index. `undefined` for a
+     *  free slot. */
+    refs: (MemberSlot | undefined)[];
     /** Present on MODEL and SPRITE pools (those whose material carries
      *  DitherFadePlugin): per-instance screen-door fade (1 = opaque). Uploaded
      *  each flush as the `ditherFade` thin-instance buffer. Default 1 so a slot not
@@ -207,6 +214,51 @@ let BBOX_REFRESH_EVERY = 15;
 export function setBboxRefreshEvery(n: number): number {
     BBOX_REFRESH_EVERY = Math.max(1, n | 0);
     return BBOX_REFRESH_EVERY;
+}
+
+/** PLAN-perf M24. `freeSlot()` returns an index to the free list but cannot
+ *  lower `highWater`, so a pool that has churned keeps uploading and drawing
+ *  its dead slots: the billboard recompose loops to `highWater`,
+ *  `thinInstancePartialBufferUpdate` re-uploads the whole prefix, and
+ *  `thinInstanceCount = highWater` submits the degenerate instances. At the
+ *  XL-battle with the M23 `icon` tier engaged that measured 4 550 dead slots
+ *  against 10 508 live ones (one sprite pool at 1 074 live / 4 896 drawn).
+ *
+ *  Compaction moves live slots down into the holes and drops `highWater` to
+ *  the live count. It is gated (not every frame): a pool compacts only once
+ *  its dead fraction crosses `COMPACT_MIN_FRACTION` and it holds at least
+ *  `COMPACT_MIN_DEAD` dead slots, which also gives it hysteresis — a compaction
+ *  empties the free list, so the next one cannot fire until that much churn has
+ *  accumulated again. OFF restores the pre-M24 never-shrink behaviour for the
+ *  A/B; `__perfToggles.squadPoolCompact(on)`.
+ *
+ *  ⚠️ **This is not a frame-time optimisation, and M24 measured that
+ *  directly.** Removing 2 198 dead slots (17.3 % of everything the backend
+ *  drew) from the upload and draw path moved `entity` by +0.029 ms, inside a
+ *  same-arm window-to-window drift of 0.35 ms; four brackets straddled zero
+ *  with no relation to how many slots were recovered. A dead slot is a
+ *  zero-scale matrix: the billboard loop skips it on `alive[i]`, it emits no
+ *  fragments, and the extra upload bytes are a memcpy. What a *live* member
+ *  costs (M21: 0.35 µs; M23: 0.26–0.43 µs) is work a dead slot never does.
+ *  What compaction is for is the **high-water ratchet**: `highWater` is a
+ *  session maximum, so without it a pool that peaked can never shrink and
+ *  `growPool` keeps doubling capacity against a flat live count. */
+let POOL_COMPACTION = true;
+let COMPACT_MIN_FRACTION = 0.10;
+let COMPACT_MIN_DEAD = 32;
+
+export function setPoolCompaction(on: boolean): boolean {
+    POOL_COMPACTION = !!on;
+    return POOL_COMPACTION;
+}
+
+/** A/B knob for the gate itself: how dead a pool must be before it compacts. */
+export function setPoolCompactionGate(fraction: number, minDead?: number): {
+    fraction: number; minDead: number;
+} {
+    if (Number.isFinite(fraction)) COMPACT_MIN_FRACTION = Math.max(0, fraction);
+    if (Number.isFinite(minDead as number)) COMPACT_MIN_DEAD = Math.max(1, minDead! | 0);
+    return { fraction: COMPACT_MIN_FRACTION, minDead: COMPACT_MIN_DEAD };
 }
 
 const MEMBER_HEIGHT = 9;      // elmos — proxy capsule height
@@ -471,10 +523,8 @@ export class SquadRenderBackend {
             return;
         }
         this.freeModel(entry);
-        entry.model = model.pieces.map((_, p) => {
-            const pool = this.getModelPool(entry.defId, entry.team, model, p);
-            return { pool, index: this.allocSlot(pool) };
-        });
+        entry.model = model.pieces.map((_, p) =>
+            this.allocRef(this.getModelPool(entry.defId, entry.team, model, p)));
     }
 
     private ensureSprite(entry: MemberEntry): InstancePool {
@@ -490,7 +540,7 @@ export class SquadRenderBackend {
         }
         if (!entry.sprite || entry.sprite.pool !== pool) {
             if (entry.sprite) this.freeSlot(entry.sprite.pool, entry.sprite.index);
-            entry.sprite = { pool, index: this.allocSlot(pool) };
+            entry.sprite = this.allocRef(pool);
         }
         return pool;
     }
@@ -499,7 +549,7 @@ export class SquadRenderBackend {
         const pool = this.getMemberPool(entry.team);
         if (!entry.capsule || entry.capsule.pool !== pool) {
             if (entry.capsule) this.freeSlot(entry.capsule.pool, entry.capsule.index);
-            entry.capsule = { pool, index: this.allocSlot(pool) };
+            entry.capsule = this.allocRef(pool);
         }
         return pool;
     }
@@ -520,10 +570,10 @@ export class SquadRenderBackend {
 
     spawnWreck(x: number, y: number, z: number, headingY: number, _v: unknown): number {
         const pool = this.getWreckPool();
-        const index = this.allocSlot(pool);
-        this.writeMatrix(pool, index, x, y + WRECK_SIZE * 0.15, z, headingY, 1);
+        const slot = this.allocRef(pool);
+        this.writeMatrix(pool, slot.index, x, y + WRECK_SIZE * 0.15, z, headingY, 1);
         const handle = this.nextHandle++;
-        this.wreckByHandle.set(handle, { pool, index });
+        this.wreckByHandle.set(handle, slot);
         return handle;
     }
 
@@ -594,6 +644,33 @@ export class SquadRenderBackend {
         return entry.model.map((s) => s.pool.fade![s.index]);
     }
 
+    /** Test/debug accessor (PLAN-perf M24): what every pool actually uploads
+     *  and draws, against what is live in it. `drawn` is the term the backend
+     *  pays per frame — before M24 it only ever went up. */
+    poolOccupancy(): {
+        pools: number; drawn: number; live: number; dead: number; capacity: number;
+        worst: { key: string; drawn: number; live: number } | null;
+    } {
+        let pools = 0, drawn = 0, live = 0, capacity = 0;
+        let worst: { key: string; drawn: number; live: number } | null = null;
+        const visit = (key: string, pool: InstancePool): void => {
+            pools++;
+            drawn += pool.highWater;
+            capacity += pool.capacity;
+            const l = pool.highWater - pool.free.length;
+            live += l;
+            const waste = pool.highWater - l;
+            if (!worst || waste > worst.drawn - worst.live) {
+                worst = { key, drawn: pool.highWater, live: l };
+            }
+        };
+        for (const [k, p] of this.memberPools) visit(`capsule:${k}`, p);
+        for (const [k, p] of this.spritePools) visit(`sprite:${k}`, p);
+        for (const [k, p] of this.modelPools) visit(`model:${k}`, p);
+        if (this.wreckPool) visit('wreck', this.wreckPool);
+        return { pools, drawn, live, dead: drawn - live, capacity, worst };
+    }
+
     /** Test/debug accessor: the packed atlas cell each live slot of a sprite
      *  pool selected on the last flush (M3 directional select). */
     getSpriteCells(defId: number, team: number): Float32Array | undefined {
@@ -613,6 +690,20 @@ export class SquadRenderBackend {
      *  the card tilts with camera pitch (a property of the pool's atlas
      *  layout) — hence per pool, not once for the frame. */
     flush(): void {
+        if (POOL_COMPACTION) {
+            for (const pool of this.memberPools.values()) {
+                if (this.shouldCompact(pool)) this.compactPool(pool);
+            }
+            for (const pool of this.spritePools.values()) {
+                if (this.shouldCompact(pool)) this.compactPool(pool);
+            }
+            for (const pool of this.modelPools.values()) {
+                if (this.shouldCompact(pool)) this.compactPool(pool);
+            }
+            if (this.wreckPool && this.shouldCompact(this.wreckPool)) {
+                this.compactPool(this.wreckPool);
+            }
+        }
         for (const pool of this.memberPools.values()) this.flushPool(pool);
         const camera = this.scene.activeCamera;
         const cameraPos = camera?.position;
@@ -770,8 +861,18 @@ export class SquadRenderBackend {
         // kinds must be bound too. The first flushPool binds the full set.
         return {
             mesh, owned, matrices, capacity, highWater: 0, free: [], dirty: false,
-            buffersBound: false,
+            refs: [], buffersBound: false,
         };
+    }
+
+    /** Allocate a slot AND the `MemberSlot` its holder will address it through.
+     *  Every allocation goes through here so the pool can always map a slot
+     *  index back to the object that must be rewritten if the slot moves
+     *  (PLAN-perf M24 compaction). */
+    private allocRef(pool: InstancePool): MemberSlot {
+        const slot = { pool, index: this.allocSlot(pool) };
+        pool.refs[slot.index] = slot;
+        return slot;
     }
 
     private allocSlot(pool: InstancePool): number {
@@ -792,8 +893,72 @@ export class SquadRenderBackend {
         pool.matrices.fill(0, base, base + 16);
         if (pool.sprite) pool.sprite.alive[index] = 0;
         if (pool.fade) pool.fade[index] = 1;   // reset for the next occupant
+        pool.refs[index] = undefined;
         pool.free.push(index);
         pool.dirty = true;
+    }
+
+    /** PLAN-perf M24: move the live slots above the live-count line down into
+     *  the holes below it, then drop `highWater` to the live count. Everything
+     *  the pool uploads and draws is a prefix of `highWater`, so this is the
+     *  only way a churned pool stops paying for its dead slots.
+     *
+     *  Slot data moves with the slot (matrix, fade, and the sprite pose/cell
+     *  arrays), and the owning `MemberSlot` is rewritten in place, so no holder
+     *  outside the backend observes the move. Costs one move per hole below the
+     *  line; the gate keeps that rare. */
+    private compactPool(pool: InstancePool): void {
+        const dead = pool.free.length;
+        if (dead === 0) return;
+        const live = pool.highWater - dead;
+        // Fully-drained pool: nothing to move, just reset it.
+        if (live === 0) {
+            pool.free.length = 0;
+            pool.highWater = 0;
+            pool.dirty = true;
+            return;
+        }
+        // Sorted ascending, the free indices BELOW `live` are the holes to fill
+        // (a prefix) and those at or above it are the slots to skip while
+        // scanning down for movers (a suffix). Both counts are the same number,
+        // so the two cursors meet exactly.
+        pool.free.sort((a, b) => a - b);
+        let hole = 0;
+        let tail = dead - 1;
+        for (let src = pool.highWater - 1; src >= live; src--) {
+            if (tail >= 0 && pool.free[tail] === src) { tail--; continue; }
+            this.moveSlot(pool, src, pool.free[hole++]);
+        }
+        pool.free.length = 0;
+        pool.highWater = live;
+        pool.dirty = true;
+        // The occupied range changed shape — do not sit on a stale box for the
+        // rest of the cadence.
+        pool.bboxCountdown = 0;
+    }
+
+    private moveSlot(pool: InstancePool, src: number, dst: number): void {
+        pool.matrices.copyWithin(dst * 16, src * 16, src * 16 + 16);
+        if (pool.fade) pool.fade[dst] = pool.fade[src];
+        const sprite = pool.sprite;
+        if (sprite) {
+            sprite.pos.copyWithin(dst * 3, src * 3, src * 3 + 3);
+            sprite.heading[dst] = sprite.heading[src];
+            sprite.alive[dst] = sprite.alive[src];
+            sprite.cells[dst] = sprite.cells[src];
+        }
+        const ref = pool.refs[src];
+        pool.refs[dst] = ref;
+        pool.refs[src] = undefined;
+        if (ref) ref.index = dst;
+    }
+
+    /** Should this pool compact this frame? Gated on the dead fraction so an
+     *  ordinary frame pays one integer compare per pool. */
+    private shouldCompact(pool: InstancePool): boolean {
+        const dead = pool.free.length;
+        return dead >= COMPACT_MIN_DEAD
+            && dead >= pool.highWater * COMPACT_MIN_FRACTION;
     }
 
     private growPool(pool: InstancePool): void {

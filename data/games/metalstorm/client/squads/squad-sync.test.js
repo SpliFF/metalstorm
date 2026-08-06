@@ -147,13 +147,16 @@ describe('LOD release/rebuild preserves aliveCount (Pitfalls #2, #3)', () => {
     mgr.update(0.2); // > staggerIntervalMaxSec — drains the one queued death
     expect(backend.destroyed.length).toBe(1);
 
-    // full → icon: release the 5 living instances, no death FX, count unchanged.
+    // full → icon: thin to the `iconMemberCount` mark (M23 — before M23 this
+    // released ALL of them and the squad vanished). No death FX either way,
+    // count unchanged.
+    const keep = mgr.cfg.iconMemberCount;
     mgr.syncSquad(11, { x: 0, y: 0, z: 0, heading: 0, health: 80, maxHealth: 100, lod: 'icon' }, undefined);
     expect(sq.lod).toBe('icon');
     expect(sq.aliveCount).toBe(5);
-    expect(backend.released.length).toBe(5);
+    expect(backend.released.length).toBe(5 - keep);
     expect(backend.destroyed.length).toBe(1); // unchanged — releases are not deaths
-    for (const m of sq.members) if (m.alive) expect(m.released).toBe(true);
+    expect(sq.members.filter((m) => m.alive && !m.released).length).toBe(keep);
 
     // A strength drop while at icon LOD still lowers the count with no FX
     // (the member has no live instance to animate).
@@ -162,12 +165,14 @@ describe('LOD release/rebuild preserves aliveCount (Pitfalls #2, #3)', () => {
     expect(backend.destroyed.length).toBe(1); // still just the one real (pre-icon) kill
     expect(backend.wrecks).toBe(1); // ditto — the icon-tier kill drops no wreck
 
-    // icon → full: rebuild exactly the still-alive members (4), dead stay dead.
+    // icon → full: every still-alive member (4) ends up instanced again, dead
+    // stay dead. Only the ones the mark had released need rebuilding, so the
+    // invariant is "all 4 alive and instanced", not a create-call count.
     mgr.syncSquad(11, { x: 0, y: 0, z: 0, heading: 0, health: 60, maxHealth: 100, lod: 'full' }, undefined);
     expect(sq.lod).toBe('full');
     expect(sq.aliveCount).toBe(4);
-    const rebuiltCount = backend.created.length - 6; // instances created after the initial spawn batch
-    expect(rebuiltCount).toBe(4);
+    expect(sq.members.filter((m) => m.alive && !m.released).length).toBe(4);
+    for (const m of sq.members) if (m.alive) expect(m.handle).not.toBe(-1);
     expect(sq.members.filter((m) => m.alive).length).toBe(4);
     expect(sq.members.filter((m) => !m.alive).length).toBe(2);
   });
