@@ -7,6 +7,7 @@
 #pragma once
 
 #include "Database.h"
+#include "FactionData.h"
 #include "NetworkServer.h"
 #include "Crypto.h"
 
@@ -255,7 +256,13 @@ inline int64_t ValidateToken(Database& db, const std::string& authHeader) {
 /// Register auth HTTP endpoints on a NetworkServer.
 /// POST /api/auth/login  — login with username+password, returns token
 /// POST /api/auth/register — register a new account
-inline void RegisterEndpoints(NetworkServer& net, Database& db) {
+/// `factionRegistry` is the flattened key→FactionInfo map built at lobby
+/// startup (see lobby_main.cpp's per-game FactionData::Discover loop) —
+/// registration validates the required `faction` field against it
+/// (PLAN-metalstorm-lobby.md task 0). Held by reference: the registry is
+/// immutable for the lobby process lifetime, same as availableGames.
+inline void RegisterEndpoints(NetworkServer& net, Database& db,
+                              const std::unordered_map<std::string, FactionData::FactionInfo>& factionRegistry) {
     static LoginLimiter loginLimiter;
 #ifdef SPRING_PROD
     static RegistrationLimiter registrationLimiter;
@@ -305,7 +312,7 @@ inline void RegisterEndpoints(NetworkServer& net, Database& db) {
     });
 
     // POST /api/auth/register
-    net.AddHttpPost("/api/auth/register", RouteAuth::Public, [&db](const std::string&, const std::string& body, const HttpRequestHeaders&) -> HttpResponse {
+    net.AddHttpPost("/api/auth/register", RouteAuth::Public, [&db, &factionRegistry](const std::string&, const std::string& body, const HttpRequestHeaders&) -> HttpResponse {
 #ifdef SPRING_PROD
         // G5: registration itself stays self-service (a public beta needs
         // players to be able to sign up) but a script can no longer mass-mint
@@ -316,12 +323,25 @@ inline void RegisterEndpoints(NetworkServer& net, Database& db) {
 #endif
         std::string username = JsonField(body, "username");
         std::string password = JsonField(body, "password");
+        std::string faction = JsonField(body, "faction");
 
         if (username.empty() || password.empty()) {
             return JsonResponse(400, R"({"error":"missing username or password"})");
         }
         if (username.size() < 2 || username.size() > 32) {
             return JsonResponse(400, R"({"error":"username must be 2-32 characters"})");
+        }
+        // PLAN-metalstorm-lobby.md §1b/task 0: faction is a required,
+        // permanent choice made at sign-up — there is no player-facing
+        // change flow, so this is the only place a normal account's
+        // faction_id is ever written. Validated against the game's
+        // declared factions (GET /api/factions/<id>), not accepted as
+        // free text.
+        if (faction.empty()) {
+            return JsonResponse(400, R"({"error":"faction is required"})");
+        }
+        if (factionRegistry.find(faction) == factionRegistry.end()) {
+            return JsonResponse(400, R"({"error":"unknown faction"})");
         }
 
         // Check if user already exists
@@ -335,7 +355,7 @@ inline void RegisterEndpoints(NetworkServer& net, Database& db) {
         if (hashed.empty()) {
             return JsonResponse(500, R"({"error":"registration failed"})");
         }
-        int64_t userId = db.CreateUser(username, hashed);
+        int64_t userId = db.CreateUser(username, hashed, "player", /*isDev=*/false, faction);
         if (userId == 0) {
             return JsonResponse(500, R"({"error":"registration failed"})");
         }
@@ -347,7 +367,8 @@ inline void RegisterEndpoints(NetworkServer& net, Database& db) {
         std::string json = "{\"token\":\"" + token + "\""
             + ",\"user_id\":" + std::to_string(userId)
             + ",\"username\":\"" + JsonEscape(username) + "\""
-            + ",\"role\":\"player\"}";
+            + ",\"role\":\"player\""
+            + ",\"faction\":\"" + JsonEscape(faction) + "\"}";
         return JsonResponse(201, json);
     });
 

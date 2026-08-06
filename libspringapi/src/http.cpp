@@ -384,9 +384,17 @@ AuthResult login(const std::string& serverUrl,
 }
 
 AuthResult registerUser(const std::string& serverUrl,
-                        const std::string& username, const std::string& password) {
+                        const std::string& username, const std::string& password,
+                        const std::string& faction) {
+    // `faction` is passthrough-optional — see the contract note in
+    // springapi.h. Omit the field entirely rather than sending "" so a
+    // server that treats an empty faction as "unset" and one that treats
+    // it as "absent" behave identically.
     std::string body = "{\"username\":\"" + jsonEscape(username)
-        + "\",\"password\":\"" + jsonEscape(password) + "\"}";
+        + "\",\"password\":\"" + jsonEscape(password) + "\"";
+    if (!faction.empty())
+        body += ",\"faction\":\"" + jsonEscape(faction) + "\"";
+    body += "}";
     std::string url = serverUrl + "/api/auth/register";
     std::string resp = httpPost(url, body);
     if (resp.empty()) return {false, "", "connection failed"};

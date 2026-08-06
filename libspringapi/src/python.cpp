@@ -33,8 +33,12 @@ PYBIND11_MODULE(pyspringapi, m) {
     // HTTP API
     m.def("login", &springapi::login, "Login to a server",
           py::arg("server_url"), py::arg("username"), py::arg("password"));
-    m.def("register_user", &springapi::registerUser, "Register a new account",
-          py::arg("server_url"), py::arg("username"), py::arg("password"));
+    m.def("register_user", &springapi::registerUser,
+          "Register a new account. `faction` is optional passthrough — send one "
+          "when the server requires it (Metalstorm lobbies do); valid keys come "
+          "from GET /api/factions/<game_id>.",
+          py::arg("server_url"), py::arg("username"), py::arg("password"),
+          py::arg("faction") = "");
     m.def("exec", &springapi::exec, "Execute a command",
           py::arg("server_url"), py::arg("scope"), py::arg("code"), py::arg("token"));
     m.def("get_logs", &springapi::getLogs, "Query logs",

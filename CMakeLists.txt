@@ -425,6 +425,7 @@ set(LOBBY_SERVER_SOURCES
     # SyncedInputJournal's record type and zlib (already linked).
     rts/Server/ReplayFile.cpp
     rts/Server/SyncedInputJournal.cpp
+    rts/Server/FactionData.cpp
 )
 set(LOBBY_LOG_SOURCES
     rts/System/Log/Backend.cpp
@@ -514,6 +515,7 @@ if(TEST_SOURCES)
         ${CMAKE_SOURCE_DIR}/rts/Server/ReplayPlayer.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/NetworkServer.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/Database.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/FactionData.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GameOverState.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GameMetrics.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GrowthCounters.cpp

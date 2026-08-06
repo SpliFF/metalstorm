@@ -89,6 +89,7 @@ Full CLI flag list (from `rts/server_main.cpp`):
 | `Server/LuaDebugger.h/.cpp` | Lua breakpoints, stack inspection, step/continue, sim pause. |
 | `Server/AI/AIRuntimePool.h/.cpp` | Pool of Lua AI runtimes, one per AI player. |
 | `Server/AI/AIDiscovery.h/.cpp` | Scans `content/engine/ai/` + game ai dirs for plugins. |
+| `Server/FactionData.h/.cpp` | Reads a game's `gamedata/sidedata.lua` into `FactionInfo{key,name,fullName,description,startUnit}`. Bare-`lua_State` reader like `ConfigReader`/`AIDiscovery`, plus a minimal `VFS.Include` shim (BAR's sidedata includes `sides_enum.lua`). `key` is `name` lowercased, matching `SideParser`'s side-key derivation, so it stays in parity with the value stored in `users.faction_id`. Feeds `/api/factions/<gameId>` and the registration/admin faction validation. Missing or broken data yields an empty list, never an error. |
 | `System/SpringLog/SpringLog.h/.cpp` | Unified logging library (libspringlog). C/C++ API, console + file sinks, pluggable custom sinks. |
 | `System/SpringLog/SpringLogNet.h/.cpp` | Optional WS+FlatBuffers network sink for pushing logs to log server. |
 | `System/SpringLog/SpringLogSqlite.h/.cpp` | Optional SQLite persistence sink for local log storage. |
@@ -515,11 +516,13 @@ data/
 | `/api/games` | JSON list of discovered games (`id`, `displayName`, `shortName`, `description`, `version`, `lighting` — from each game's modinfo via GameDiscovery). Drives the lobby dropdown and the worker's `Game` table (modName/modShortName/…) + lighting style. |
 | `/api/vfs/game/<gameId>/*` | Game source files (Lua scripts, images) |
 | `/api/games/data/<gameId>/*` | Preprocessed game assets (unit models, textures) |
+| `/api/factions/<gameId>` | Public. JSON list of the factions a game declares in `gamedata/sidedata.lua` (`key`, `name`, `fullName`, `description`), discovered once at startup via `FactionData::Discover`. Drives the sign-up form's required faction picker. `[]` for a game that declares none; 404 for an unknown game. |
 | `/api/processes` | JSON list of game server instances (pid, port, state, map, game) |
 | `GET /admin` | GM operations dashboard (server-rendered HTML; own admin login). PLAN-gm-tools §2. |
 | `POST /api/admin/fleet` | AdminOnly. Every game server + latest `game_metrics` (join `game_servers`⟕`game_status`⟕`game_metrics`) + alarm badges (lobby-derived: lag/db/crashed; plus the game server's growth alarms parsed out of `extra_json`) + the raw `growth` counters. |
 | `POST /api/admin/game` | AdminOnly. Per-game metric timeline (each row carrying its `growth` counters when present) + audit tail (`{roomId}`). |
 | `POST /api/admin/ban` / `unban` / `banned` | AdminOnly. Account ban (+ immediate session revoke) / unban / ban list. PLAN-gm-tools task 4. |
+| `POST /api/admin/set-faction` | AdminOnly, audited. Override an account's permanent faction (`{username, faction}`). The only writer of `users.faction_id` after sign-up — faction is immutable in the normal flow, so there is deliberately no player-facing equivalent. PLAN-metalstorm-lobby §1b. |
 
 ### Game server (`spring-server`)
 

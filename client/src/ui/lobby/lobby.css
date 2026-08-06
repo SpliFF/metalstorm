@@ -99,6 +99,20 @@ button.danger:hover { background: #cc3333; }
 .msg.error { color: #f07; }
 .hint { font-size: 11px; color: #555; margin: 0; }
 
+.hidden { display: none !important; }
+
+/* ---- Sign-up faction picker (PLAN-metalstorm-lobby.md task 0) ---- */
+.login-faction-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.login-faction-desc {
+    min-height: 28px;
+    line-height: 1.4;
+    color: #789;
+}
+
 .lobby-header {
     display: flex;
     align-items: center;

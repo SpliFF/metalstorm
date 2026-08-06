@@ -20,6 +20,7 @@
 #include "Server/AI/AIDiscovery.h"
 #include "Server/CacheControl.h"
 #include "Server/DevBuildGate.h"
+#include "Server/FactionData.h"
 #include "Server/GameDiscovery.h"
 #include "Server/GmDashboardPage.h"
 #include "Server/HttpAuth.h"
@@ -1036,6 +1037,32 @@ int main(int argc, char *argv[]) {
     auto it = scenariosByGame.find(gameId);
     return (it == scenariosByGame.end()) ? kNone : it->second;
   };
+  // --- Per-game faction discovery (PLAN-metalstorm-lobby.md task 0) ---
+  // gamedata/sidedata.lua factions, keyed by game id for the war-browser-
+  // style /api/games/<id>/factions route. A game with no sidedata.lua (or
+  // an empty one, e.g. papertanks) simply gets an empty vector — valid,
+  // not an error.
+  std::unordered_map<std::string, std::vector<FactionData::FactionInfo>> factionsByGame;
+  for (const auto &g : availableGames)
+    factionsByGame[g.id] = FactionData::Discover(g.folderPath);
+
+  // Registration's faction registry is scoped to Metalstorm specifically,
+  // not a union across every game folder this lobby happens to serve.
+  // accounts.faction_id is Metalstorm's account model (this plan is
+  // PLAN-metalstorm-lobby.md, not a generic multi-game abstraction) — a
+  // leftover BAR/ZK/papertanks sidedata.lua (verified live: ZK ships a real
+  // one, `{key:"robots", ...}`) would otherwise leak an unrelated faction
+  // namespace into Metalstorm registration. Same "Metalstorm needs its own
+  // rule" shape as GameOverState::IsEliminationEligible's `gameId !=
+  // "metalstorm"` carve-out. Revisit if this lobby ever hosts a second game
+  // with its own real faction registration.
+  std::unordered_map<std::string, FactionData::FactionInfo> factionRegistry;
+  {
+    auto it = factionsByGame.find("metalstorm");
+    if (it != factionsByGame.end())
+      for (const auto &f : it->second)
+        factionRegistry.emplace(f.key, f);
+  }
 
   // --- Game server instances ---
   std::unordered_map<uint32_t, GameServerInstance>
@@ -1507,7 +1534,7 @@ int main(int argc, char *argv[]) {
 #endif // !SPRING_PROD
 
   // --- HTTP auth endpoints ---
-  HttpAuth::RegisterEndpoints(net, db);
+  HttpAuth::RegisterEndpoints(net, db, factionRegistry);
 
   // Version endpoint — clients use this to get the build stamp for
   // cache-busting
@@ -1996,6 +2023,48 @@ int main(int argc, char *argv[]) {
           return HttpAuth::JsonResponse(
               404, R"({"ok":false,"error":"no such user"})");
         db.LogAudit(uid, uname, "unban", target, "");
+        return HttpAuth::JsonResponse(200, R"({"ok":true})");
+      });
+
+  // POST /api/admin/set-faction {username, faction} — privileged, audited
+  // override of a user's permanent faction (PLAN-metalstorm-lobby.md §1b:
+  // "exceptional reassignment ... support/admin only ... audited"). There
+  // is deliberately no equivalent player-facing route — faction is
+  // immutable in the normal flow; POST /api/auth/register is the only
+  // other writer, and it only ever sets an unset value on a brand-new
+  // account. `faction` is validated against the same factionRegistry the
+  // registration route uses, so an admin can't type a typo'd key any
+  // more than a new player could.
+  net.AddHttpPost(
+      "/api/admin/set-faction", RouteAuth::AdminOnly,
+      [&db, &factionRegistry,
+       requireLobbyAdmin](const std::string &, const std::string &body,
+                          const HttpRequestHeaders &headers) -> HttpResponse {
+        int64_t uid;
+        std::string uname;
+        if (auto e = requireLobbyAdmin(headers, uid, uname))
+          return *e;
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+        const std::string target =
+            j.is_discarded() ? "" : j.value("username", std::string(""));
+        const std::string faction =
+            j.is_discarded() ? "" : j.value("faction", std::string(""));
+        if (target.empty() || faction.empty())
+          return HttpAuth::JsonResponse(
+              400, R"({"ok":false,"error":"username and faction required"})");
+        if (factionRegistry.find(faction) == factionRegistry.end())
+          return HttpAuth::JsonResponse(
+              400, R"({"ok":false,"error":"unknown faction"})");
+        int64_t targetId = 0;
+        if (!db.SetFactionByUsername(target, faction, targetId))
+          return HttpAuth::JsonResponse(
+              404, R"({"ok":false,"error":"no such user"})");
+        // §1b: an admin faction reassignment "clears the account's
+        // per-war bindings" — no per-war binding store exists yet
+        // (PLAN-metalstorm-lobby §5.1/task 4 is unimplemented), so
+        // there is nothing to clear today. Tracked in that task's scope,
+        // not silently dropped: audit the override now regardless.
+        db.LogAudit(uid, uname, "set_faction", target, "faction=" + faction);
         return HttpAuth::JsonResponse(200, R"({"ok":true})");
       });
 
@@ -3246,6 +3315,41 @@ int main(int argc, char *argv[]) {
                   HttpAuth::JsonEscape(ai.description) + "\"" +
                   ",\"isEngineProvided\":" +
                   (ai.isEngineProvided ? "true" : "false") + "}";
+        }
+        json += "]";
+        return HttpAuth::JsonResponse(200, json);
+      });
+
+  // GET /api/factions/* — list the factions a game declares in
+  // gamedata/sidedata.lua (PLAN-metalstorm-lobby.md task 0), per game id.
+  // The sign-up form fetches /api/factions/metalstorm specifically to
+  // render the required faction picker with lore text; POST
+  // /api/auth/register validates the chosen `faction` key against
+  // factionRegistry, which is scoped to Metalstorm only (see its
+  // declaration above) — not this per-game route's generic game→factions
+  // map, which stays available for any game that ships one.
+  net.AddHttpGet(
+      "/api/factions/*", RouteAuth::Public,
+      [&factionsByGame](const std::string &url) -> HttpResponse {
+        std::string gameId = url.substr(std::string("/api/factions/").size());
+        if (gameId.empty())
+          return HttpAuth::JsonResponse(400, R"({"error":"missing game id"})");
+
+        auto it = factionsByGame.find(gameId);
+        if (it == factionsByGame.end())
+          return HttpAuth::JsonResponse(404, R"({"error":"game not found"})");
+
+        std::string json = "[";
+        bool first = true;
+        for (const auto &f : it->second) {
+          if (!first)
+            json += ",";
+          first = false;
+          json += "{\"key\":\"" + HttpAuth::JsonEscape(f.key) + "\"" +
+                  ",\"name\":\"" + HttpAuth::JsonEscape(f.name) + "\"" +
+                  ",\"fullName\":\"" + HttpAuth::JsonEscape(f.fullName) + "\"" +
+                  ",\"description\":\"" + HttpAuth::JsonEscape(f.description) +
+                  "\"}";
         }
         json += "]";
         return HttpAuth::JsonResponse(200, json);
