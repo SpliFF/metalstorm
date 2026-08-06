@@ -283,8 +283,10 @@ describe('member budget — the producer M19 found missing', () => {
     expect(mgr.squads.get(3).lod).toBe('centroid');
   });
 
-  it('does not steal the icon tier from whoever owns it', () => {
-    const mgr = makeManager(10, { lodFullMemberBudget: 24, lodMemberBudgetHysteresis: 0 });
+  it('does not steal the icon tier from whoever owns it while the drawn budget is off', () => {
+    const mgr = makeManager(10, {
+      lodFullMemberBudget: 24, lodDrawnMemberBudget: 0, lodMemberBudgetHysteresis: 0,
+    });
     mgr.squads.get(1).lod = 'icon';
     mgr.setViewPos(0, 0, 0);
     mgr.update(1 / 30);
@@ -391,11 +393,16 @@ describe('icon tier — an art tier, not a disappearance', () => {
 });
 
 describe('drawn-member budget — the second threshold', () => {
-  it('is off by default, so the shipped frame is the post-M20 frame', () => {
+  it('ships armed at the calibrated default, and is inert below it', () => {
+    expect(DEFAULT_CONFIG.lodDrawnMemberBudget).toBe(8000);
+    expect(DEFAULT_CONFIG.lodDrawnMemberBudget)
+      .toBeGreaterThanOrEqual(DEFAULT_CONFIG.lodFullMemberBudget);
+    // 10 x 8 = 80 members is nowhere near the default, so an ordinary battle
+    // never sees the tier at all — it only engages at XL scale.
     const mgr = makeManager(10, { lodFullMemberBudget: 24, lodMemberBudgetHysteresis: 0 });
     mgr.setViewPos(0, 0, 0);
     mgr.update(1 / 30);
-    expect(mgr.lodStats.iconArmed).toBe(false);
+    expect(mgr.lodStats.iconArmed).toBe(true);
     expect([...mgr.squads.values()].some(sq => sq.lod === 'icon')).toBe(false);
     expect(drawnMembers(mgr)).toBe(80);
   });
@@ -475,6 +482,37 @@ describe('drawn-member budget — the second threshold', () => {
       expect(mgr.lodStats.iconMembers).toBe(mgr.lodStats.iconSquads * 3);
       expect(drawnMembers(mgr)).toBe(mgr.lodStats.drawnMembers);
     }
+  });
+
+  // Regression: found LIVE at XL900 (8 011 full-detail members against an
+  // 8 000 cap), not by any uniform-size test. A squad that does not fit is
+  // skipped rather than terminating the scan, so `drawn` runs ahead of `used`
+  // — and a later SMALL squad could then pass the `full` test (which only
+  // consults `used`) and push full-detail members past the drawn cap. It only
+  // reproduces when squad sizes differ, because only then is anything skipped.
+  it('holds the drawn cap when a small squad follows a large one', () => {
+    const mgr = new SquadManager(makeBackend().backend, makeCfg({
+      lodFullMemberBudget: 40, lodDrawnMemberBudget: 70,
+      lodMemberBudgetHysteresis: 0, iconMemberCount: 3,
+    }));
+    // Nearest-first, and every step matters:
+    //   30 -> full      (used 30, drawn 30)
+    //   25 -> centroid  (used+25 > 40; drawn 55)      <- skipped, scan continues
+    //   12 -> centroid  (used+12 > 40; drawn 67)      <- skipped again
+    //    8 -> used+8 = 38 <= 40, so it passes the `full` test — and without the
+    //         drawn-cap conjunct it goes full and takes drawn to 75 > 70.
+    const sizes = [30, 25, 12, 8];
+    sizes.forEach((s, i) => mgr.syncSquad(i + 1,
+      { x: 0, y: 0, z: 100 * (i + 1), heading: 0, health: 65535, maxHealth: 65535 },
+      makeDef({ squadSize: s, customParams: { squad_size: s, ms_class: 'soldiers' } })));
+    mgr.setViewPos(0, 0, 0);
+    mgr.update(1 / 30);
+
+    const st = mgr.lodStats;
+    expect(st.centroidSquads).toBeGreaterThan(0);       // the skip really happened
+    expect(st.fullMembers).toBeLessThanOrEqual(40);
+    expect(st.fullDetailMembers).toBeLessThanOrEqual(70);
+    expect(drawnMembers(mgr)).toBe(st.drawnMembers);
   });
 
   it('never kills a member: aliveCount across the whole herd is untouched', () => {

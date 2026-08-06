@@ -155,7 +155,23 @@ export const DEFAULT_CONFIG = {
   // post-M20 frame and `icon` goes back to being externally owned (nothing in
   // the shipping client sets it). Must be >= lodFullMemberBudget to mean
   // anything; a smaller value is ignored.
-  lodDrawnMemberBudget: 0,
+  //
+  // 8 000 is measured (M23, XL900, 1920x1200): `entity` is linear in drawn
+  // members at 0.261 us each over 10 850 -> 6 889, so 8 000 buys ~2 000 fewer
+  // members for ~-0.38 ms of `entity` and only bites past ~690 sim units. It is
+  // deliberately NOT the aggressive setting: 5 500 (= the steering budget, the
+  // lowest legal value) buys ~-0.94 ms but iconises 430 of 780 squads, and the
+  // thinning is visible at a zoomed-out pose. The 2 500-member band between the
+  // two budgets is squads that keep their full roster while losing only their
+  // steering — the cheap demotion first, the visible one last.
+  //
+  // ⚠️ This is a per-machine number like `lodFullMemberBudget`, and it is
+  // currently under-valued by the backend: `freeSlot` never lowers a pool's
+  // `highWater`, so releasing a member frees its slot but the pool keeps
+  // uploading and drawing it. That is why a removed member is worth 0.261 us
+  // here and not the ~0.35 us/member floor M21 measured. Raise this once the
+  // pools compact (PLAN-perf M24).
+  lodDrawnMemberBudget: 8000,
   // How many members an `icon` squad keeps. 0 is the pre-M23 behaviour (the
   // squad disappears) and is measurement-only — it is the upper bound on what
   // the tier can ever buy, not a shippable fidelity.

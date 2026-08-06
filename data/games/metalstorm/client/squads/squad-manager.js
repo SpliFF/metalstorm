@@ -243,7 +243,16 @@ export class SquadManager {
       // Nearer squads have already claimed `used`; a squad that does not fit
       // is skipped rather than terminating the scan, so a small squad just
       // behind a large one still gets steered.
-      if (used + n <= (sq.lod === 'full' ? holdLimit : promoteLimit)) {
+      //
+      // ⚠️ The `full` test must ALSO fit the drawn cap. Because a skipped squad
+      // does not terminate the scan, `drawn` can run ahead of `used` (the
+      // skipped squads went to `centroid` and spent drawn budget), and a later
+      // small squad passing the `used` test would then push full-detail members
+      // past the drawn cap. Measured live at XL900: 8 011 against a cap of
+      // 8 000. Invisible to a test whose squads are all the same size, because
+      // then nothing is ever skipped.
+      if (used + n <= (sq.lod === 'full' ? holdLimit : promoteLimit)
+          && (!iconArmed || drawn + n <= drawnHoldLimit)) {
         if (sq.lod !== 'full') sq.lod = 'full';
         used += n; drawn += n; fullSquads++;
       } else if (!iconArmed
