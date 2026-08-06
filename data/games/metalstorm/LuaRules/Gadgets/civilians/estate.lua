@@ -29,6 +29,94 @@ local FLEE_DISTANCE             = 400   -- elmos, straight-line retreat from the
 local DISTRICT_PROTECT_REWARD   = 40    -- matches objectives/generator.lua's districtRule reward
 
 -- ============================================================
+-- The estate's REAL ESTATE (PLAN-metalstorm-model-integration §M2).
+--
+-- The civilian building roster (units/buildings_civilian.lua: habitat, transit
+-- hub, depot, and the §M2 meeting hall / shanty block / market stalls) joins
+-- the population registry the moment it is created, from wherever it came —
+-- map placement (civilians/spawn.lua), a scenario, or the town planner (§T2).
+-- UnitCreated is the one hook all three pass through, which is why this is a
+-- callin and not a def query at read time.
+--
+-- WHY REGISTER AT ALL, given the def already says `civilian = '1'`: the
+-- registry is the source of truth for everything ABOUT a civilian — role,
+-- site, district, venue-ness — and a def can only say what a unit is, never
+-- which town it belongs to or whether it is the one hall the parley happens
+-- in. game_civilians.lua's IsCivilian header states the same rule for people;
+-- this keeps buildings on it.
+-- ============================================================
+
+-- Def customparams read here. `civilian` is set on every member of the family
+-- by buildings_civilian.lua's civbuilding(); `civ_role` is the optional
+-- what-it-is-for tag ('venue' | 'housing' | 'market' | …).
+local CP_CIVILIAN = 'civilian'
+local CP_ROLE     = 'civ_role'
+
+--- Register `unitID` if its def is a civilian building. Returns the registry
+--- entry, or nil when the unit is not civilian estate (the overwhelmingly
+--- common case — this runs on EVERY unit created in the game).
+function estate.registerBuilding(civ, unitID, unitDefID)
+    local def = UnitDefs and UnitDefs[unitDefID]
+    local cp = def and def.customParams
+    if not cp or cp[CP_CIVILIAN] ~= '1' then return nil end
+
+    local entry = {
+        -- NOT 'ambient'. routines.tick() wanders and flees everything marked
+        -- ambient, and threatenedDistricts()/reactToRejectedDemand() sample
+        -- ambient units as district positions to evacuate — a building must
+        -- do neither. 'estate' keeps it in the population (so IsCivilian is
+        -- true and objectives can target it) and out of the movement paths.
+        role    = 'estate',
+        kind    = cp[CP_ROLE] or 'building',
+        defName = def.name,
+    }
+    civ.population[unitID] = entry
+
+    if entry.kind == 'venue' then
+        -- An ARRAY, appended in creation order, not a set keyed by unitID:
+        -- this is SYNCED code and `pairs` order over a hash table is not
+        -- deterministic, so anything a reader derives from venue order would
+        -- desync clients against each other.
+        civ.venues = civ.venues or {}
+        civ.venues[#civ.venues + 1] = unitID
+    end
+    return entry
+end
+
+--- Drop a destroyed building's estate bookkeeping. (game_civilians.lua clears
+--- civ.population itself; this is the venue list, which it does not know about.)
+function estate.forgetBuilding(civ, unitID)
+    if not civ.venues then return end
+    for i = 1, #civ.venues do
+        if civ.venues[i] == unitID then
+            table.remove(civ.venues, i)
+            return
+        end
+    end
+end
+
+--- Every standing parley venue (the meeting halls), in creation order.
+function estate.venues(civ)
+    return civ.venues or {}
+end
+
+--- The venue nearest (x, z), or nil if the estate has none standing.
+--- PLAN-metalstorm-worldbuilding §4: a parley with the civilian estate happens
+--- somewhere, and the meeting hall is that somewhere.
+function estate.nearestVenue(civ, x, z)
+    local best, bestDist
+    for _, unitID in ipairs(civ.venues or {}) do
+        local ux, _, uz = Spring.GetUnitPosition(unitID)
+        if ux then
+            local dx, dz = ux - x, uz - z
+            local d = dx * dx + dz * dz
+            if not bestDist or d < bestDist then best, bestDist = unitID, d end
+        end
+    end
+    return best
+end
+
+-- ============================================================
 -- Wire into the parley board (called from game_civilians.lua once
 -- GG.Parley exists — layer -45 loads before civilians' -40).
 -- ============================================================

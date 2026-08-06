@@ -75,4 +75,81 @@ return {
             { kind = 'foot', x =  60, z = -80, r = 18, gait = { phase = 0.16, duty = 0.66 } },
         },
     },
+
+    -- ====================================================================
+    -- BUILDING profiles (PLAN-metalstorm-model-integration §M2)
+    --
+    -- READ THIS BEFORE TRUSTING THESE FOR BLOCKING. What actually blocks a
+    -- building today is `footprintx/footprintz` (+ `yardmap`), NOT this file:
+    -- CMoveMath::ObjectBlockType returns at its `collidee->immobile` early-out
+    -- (rts/Sim/MoveTypes/MoveMath/MoveMath.cpp:303) BEFORE it reaches the
+    -- footprint-profile branch (:319), so the sim never consults a profile for
+    -- an immobile object. Buildings are solid to every move class, full stop.
+    --
+    -- That is also the RIGHT answer for this roster: every "you should be able
+    -- to move through/under that" case here is already solved correctly by the
+    -- footprint itself — the port crane's jib overhangs its rail-deck footprint
+    -- rather than blocking the berth, and the rail platform opens its track
+    -- columns with a 'u' yardmap. Nothing in §M2 wants a building to be
+    -- selectively permeable, so no profile below declares an `underpass` list
+    -- (per this file's own schema note: buildings omit it and are solid).
+    --
+    -- What these four DO carry is the authored ground-CONTACT geometry — the
+    -- profile's other half, which the client derives its ground-contact patches
+    -- from (see FootprintProfile.h's header). That consumer has not landed
+    -- (nothing under client/src/ reads the profile yet), so these are authored
+    -- reference for it, wired up via `customparams.footprint_profile` so they
+    -- attach the moment either side starts reading them. Contacts are `track`
+    -- strips because a building has no gait: halfWidth is the X half-extent,
+    -- halfLength the Z half-extent, both in elmos (1 authored metre = 8 elmos,
+    -- matching `footprint metres = footprintx * 2` against 16-elmo squares).
+    -- ====================================================================
+
+    -- ms_tank_farm — a 32.4 x 16.8 m concrete pad inside a bund wall. One
+    -- unbroken slab: hull and contact are the same rectangle.
+    tank_farm_pad = {
+        hull      = { x = 256, z = 128 },
+        clearance = 0,
+        contacts  = {
+            { kind = 'track', x = 0, z = 0, halfWidth = 128, halfLength = 64 },
+        },
+    },
+
+    -- ms_rail_platform — two distinct ground surfaces, which is exactly what
+    -- the def's yardmap encodes: the platform slab fills x -6..0 m (blocked)
+    -- and the track ballast fills x 0..6 m (walkable, 'u'). Both are real
+    -- ground contact; only one is solid.
+    rail_platform_deck = {
+        hull      = { x = 96, z = 192 },
+        clearance = 0,
+        contacts  = {
+            { kind = 'track', x = -24, z = 0, halfWidth = 24, halfLength = 96 },  -- platform slab
+            { kind = 'track', x =  24, z = 0, halfWidth = 24, halfLength = 96 },  -- ballast + rails
+        },
+    },
+
+    -- ms_pontoon_wharf — a 7.4 m wide floating deck running 40 m from open
+    -- water (-Z) to the shore ramp (+Z). Clearance is the deck's freeboard
+    -- above the waterline, not ground.
+    pontoon_wharf_deck = {
+        hull      = { x = 64, z = 320 },
+        clearance = 4,
+        contacts  = {
+            { kind = 'track', x = 0, z = 0, halfWidth = 32, halfLength = 160 },
+        },
+    },
+
+    -- ms_port_crane — the ONLY ground contact is the two rails the portal legs
+    -- ride on: 15 m long along X at z = ±3 m, 0.4 m wide
+    -- (ms_port_crane_layout.py RAIL_Z/RAIL_LEN/RAIL_W). Everything else — jib,
+    -- machinery house, cab — is 12+ m in the air, which is why the def's
+    -- footprint is the 16 x 8 m rail deck and not the model's 16 x 18 m bounds.
+    port_crane_rails = {
+        hull      = { x = 128, z = 64 },
+        clearance = 0,
+        contacts  = {
+            { kind = 'track', x = 0, z = -24, halfWidth = 60, halfLength = 2 },
+            { kind = 'track', x = 0, z =  24, halfWidth = 60, halfLength = 2 },
+        },
+    },
 }

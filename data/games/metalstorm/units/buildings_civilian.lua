@@ -41,4 +41,71 @@ return {
         sightdistance = 220,
         buildtime = 360000,
     },
+
+    -- ── §M2 forge models (PLAN-metalstorm-model-integration) ──────────────
+    -- The town roster the town-planner lane (§T2) fills lots from: one unique
+    -- meeting hall per town, shanty blocks in bulk, market stalls as a POI.
+    -- Footprints derive from the shipped glTF bounds under the authored
+    -- `footprint metres = footprintx * 2` convention (DESIGN-MODEL-BUILDING §4).
+    --
+    -- All three carry an authored `idle` clip (bell sway / laundry line /
+    -- awning flap) that plays CLIENT-side — natives are script-less, see
+    -- client/src/core/clip-auto-policy.ts.
+    --
+    -- ESTATE: these register with the civilian estate at creation, not from a
+    -- def flag read at query time — game_civilians.lua's UnitCreated hands any
+    -- unit whose def carries `civilian = '1'` to civilians/estate.lua, whose
+    -- registry stays the source of truth for role/site/venue (the reason
+    -- GG.Civilians.IsCivilian reads the registry and not a customParam).
+
+    -- 18.9 x 13.4 m gabled hall with a porch, noticeboard and bell tower.
+    -- Pieces body + bell; `idle` sways the bell (4.0 s, seamless).
+    -- THE PARLEY VENUE (PLAN-metalstorm-worldbuilding §4): exactly one per
+    -- town, and the estate reports it via GG.Civilians.ParleyVenue().
+    ms_meeting_hall = civbuilding{
+        name = 'Meeting Hall',
+        description = 'Civilian meeting hall — the town parleys here',
+        objectname = 'ms_meeting_hall',
+        maxdamage = 4000, mass = 7000,
+        footprintx = 9, footprintz = 7,
+        sightdistance = 260,
+        buildtime = 240000,
+        customparams = {
+            civ_role = 'venue',
+            generator = 'Claude Fable 5 (tools/forge)',
+        },
+    },
+
+    -- 16 x 16 m stacked corrugated housing with a strung laundry line.
+    -- Pieces body + line; `idle` drifts the line.
+    ms_shanty_block = civbuilding{
+        name = 'Shanty Block',
+        description = 'Stacked civilian housing — corrugated, improvised, lived-in',
+        objectname = 'ms_shanty_block',
+        maxdamage = 2200, mass = 4000,
+        footprintx = 8, footprintz = 8,
+        sightdistance = 180,
+        buildtime = 90000,
+        customparams = {
+            civ_role = 'housing',
+            generator = 'Claude Fable 5 (tools/forge)',
+        },
+    },
+
+    -- 8 x 8 m market plaza: five timber stalls, hanging goods, warm string
+    -- lights (emissive — one of the §M2 night-lighting checks). Pieces body +
+    -- awning; `idle` flaps the five canvases.
+    ms_market_stalls = civbuilding{
+        name = 'Market Stalls',
+        description = 'Civilian market — timber stalls under strung lights',
+        objectname = 'ms_market_stalls',
+        maxdamage = 900, mass = 1200,
+        footprintx = 4, footprintz = 4,
+        sightdistance = 160,
+        buildtime = 40000,
+        customparams = {
+            civ_role = 'market',
+            generator = 'Claude Fable 5 (tools/forge)',
+        },
+    },
 }

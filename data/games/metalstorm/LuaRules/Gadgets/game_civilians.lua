@@ -78,6 +78,18 @@ function GG.Civilians.ThreatenedDistricts()
     return estate.threatenedDistricts(civ)
 end
 
+--- Standing parley venues — the civilian meeting halls
+--- (PLAN-metalstorm-model-integration §M2, worldbuilding §4). Read-only: the
+--- returned table is the live registry array, so callers must not mutate it.
+function GG.Civilians.ParleyVenues()
+    return estate.venues(civ)
+end
+
+--- The venue nearest a point, for siting a parley with the estate.
+function GG.Civilians.NearestVenue(x, z)
+    return estate.nearestVenue(civ, x, z)
+end
+
 function gadget:GameStart()
     spawn.seed(civ)          -- read map-authored placement, seed population
     estate.register(civ)     -- wire into the parley board (game_parley loads first, layer -45)
@@ -89,6 +101,14 @@ function gadget:GameFrame(frame)
     if frame % 300 == 0 then convoy.tick(civ, frame)   end
 end
 
+--- Civilian BUILDINGS join the estate here (§M2). Runs on every unit created
+--- in the game, so estate.registerBuilding early-outs on the def customparam
+--- before it allocates anything.
+function gadget:UnitCreated(unitID, unitDefID)
+    estate.registerBuilding(civ, unitID, unitDefID)
+end
+
 function gadget:UnitDestroyed(unitID)
     civ.population[unitID] = nil
+    estate.forgetBuilding(civ, unitID)
 end

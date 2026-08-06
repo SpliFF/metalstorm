@@ -55,6 +55,7 @@ import {
     type ZKUnitTextures,
 } from './zk-model-material.js';
 import { matchAimSlots, type UnitAimPieces, type AimPiece } from './turret-aim-controller.js';
+import { matchWheelPieces } from './wheel-spin-driver.js';
 import { LodTier, type ImpostorRenderer } from './impostor-renderer.js';
 import { DitherFadePlugin } from './dither-fade-plugin.js';
 import type { MemberModel } from './squad-render-backend.js';
@@ -2685,6 +2686,19 @@ export class EntityRenderer {
                 barrel: m.barrelIdx !== undefined ? offOf(m.barrelIdx) : undefined,
             })),
         };
+    }
+
+    /** Piece indices of a unit model's spinnable wheels (`axle_f`, `wheel1`, …
+     *  — see matchWheelPieces for the convention), for WheelSpinDriver. Same
+     *  three-way answer as getClipNames: null = unknown unit or template still
+     *  loading (poll), [] = model resolved and carries none (retire the unit),
+     *  non-empty = spin these. */
+    getWheelPieces(id: number): number[] | null {
+        const meta = this.entityMeta.get(id);
+        if (!meta) return null;
+        const tmpl = this.modelTemplates.get(meta.defId);
+        if (tmpl === undefined) return null;   // still loading
+        return tmpl ? matchWheelPieces(tmpl.pieces) : [];
     }
 
     removeEntity(id: number): void {

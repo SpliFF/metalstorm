@@ -13,6 +13,8 @@
 
 #include "Sim/MoveTypes/FootprintProfile.h"
 
+#include <fstream>
+#include <iterator>
 #include <string>
 
 using footprint::Contact;
@@ -125,6 +127,59 @@ TEST_SUITE("footprint-profile/parse") {
 		FootprintProfileHandler bad;
 		CHECK_FALSE(bad.LoadFromChunk("return this is not lua"));
 		CHECK(bad.Size() == 0);
+	}
+
+	// The SHIPPED file, not a fixture. gamedata/footprints.lua is authored by
+	// hand and read only by this parser, so a typo in it fails nowhere at boot
+	// — Load() logs a warning and the game runs on with every profile silently
+	// missing. This is where that gets caught. (§M2 added the four building
+	// profiles; the three §1 unit profiles are the file's original contents.)
+	TEST_CASE("the shipped gamedata/footprints.lua parses") {
+		const std::string path = std::string(SPRING_SOURCE_DIR)
+			+ "/data/games/metalstorm/gamedata/footprints.lua";
+		std::ifstream f(path);
+		REQUIRE_MESSAGE(f.good(), "cannot open " << path);
+		const std::string chunk((std::istreambuf_iterator<char>(f)),
+		                         std::istreambuf_iterator<char>());
+
+		FootprintProfileHandler h;
+		REQUIRE(h.LoadFromChunk(chunk));
+
+		for (const char* key : { "quad_walker_l", "heavy_tracks", "dreadnought",
+		                         "tank_farm_pad", "rail_platform_deck",
+		                         "pontoon_wharf_deck", "port_crane_rails" }) {
+			CHECK_MESSAGE(h.Get(key) != nullptr, "missing profile " << key);
+		}
+
+		// §M2 buildings declare NO underpass: the sim never consults a profile
+		// for an immobile object anyway (CMoveMath::ObjectBlockType returns at
+		// its `collidee->immobile` early-out), and nothing in the roster wants
+		// a selectively-permeable building. Blocking comes from footprintx/z +
+		// yardmap. If a building ever DOES declare underpass, that early-out
+		// has to move first — this pins the current contract.
+		for (const char* key : { "tank_farm_pad", "rail_platform_deck",
+		                         "pontoon_wharf_deck", "port_crane_rails" }) {
+			const Profile* p = h.Get(key);
+			REQUIRE(p != nullptr);
+			CHECK_MESSAGE(p->underpass.empty(), key << " declares an underpass list");
+			CHECK_MESSAGE(!p->contacts.empty(), key << " has no ground contacts");
+			for (const Contact& c : p->contacts) {
+				// Buildings have no gait, so every contact is a track strip.
+				CHECK(c.kind == Contact::Kind::Track);
+				CHECK(c.halfWidth > 0.0f);
+				CHECK(c.halfLength > 0.0f);
+			}
+		}
+
+		// The port crane's ground contact is its two rails at z = ±3 m (±24
+		// elmos) — the whole reason its def footprint is the rail deck and not
+		// the model's bounds (the jib overhangs the berth).
+		const Profile* crane = h.Get("port_crane_rails");
+		REQUIRE(crane->contacts.size() == 2);
+		CHECK(crane->contacts[0].z == doctest::Approx(-24.0f));
+		CHECK(crane->contacts[1].z == doctest::Approx(24.0f));
+		CHECK(crane->hullX == 128);   // 16 m = footprintx 8
+		CHECK(crane->hullZ == 64);    //  8 m = footprintz 4
 	}
 }
 
