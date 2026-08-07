@@ -38,11 +38,20 @@ export interface FeatureLodConfig {
     tileSize: number;
     /** Tile distance beyond which the tile swaps to impostor cards. */
     impostorDistance: number;
-    /** Tile distance beyond which NEAR tiles stop CSM shadow-casting. Babylon
-     *  submits every caster to every cascade (no per-cascade culling), so
-     *  vegetation casting is ~4x its main-pass vertex cost — measured 2026-07-27
-     *  on Meridian: full near-tier casting cost ~18 ms/frame at close zoom.
-     *  Shadows only read at close range anyway. */
+    /** Tile distance beyond which NEAR tiles stop CSM shadow-casting; `<= 0`
+     *  disables vegetation casting entirely (a plain distance test cannot —
+     *  see the OFF branch in `runTierPass`). Babylon submits every caster to
+     *  every cascade (no per-cascade culling), so vegetation casting is ~4x
+     *  its main-pass vertex cost — measured 2026-07-27 on Meridian: full
+     *  near-tier casting cost ~18 ms/frame at close zoom.
+     *
+     *  **That was the pre-M8 engine and those milliseconds are gone**
+     *  (PLAN-maps M6b, re-measured 2026-08-08 on the PLAN-perf S-battle): the
+     *  whole `render` phase is 3.0 ms, switching every vegetation caster off
+     *  buys −0.27 ms of it, and every partial setting lands inside the
+     *  same-arm drift. Left at 1200 as a FIDELITY default — casting off is a
+     *  +4.5 % brighter frame — not as a perf knob. Do not lower it for perf
+     *  without a fresh measurement. */
     shadowDistance: number;
     /** Tile distance beyond which the tile draws nothing. */
     cullDistance: number;
