@@ -273,6 +273,46 @@ good capture over this. Poll with an awaited call — e.g.
 `async () => { await window.test.perfDump(500); return window.__winResult; }` —
 or the window looks hung.
 
+**⚠️ No CPU phase timer sees GPU fragment cost — on a fillrate A/B, quote frame
+time, not the `render` phase.** Before M8 the `render` phase contained the CSM
+depth-bounds readback, a GPU sync point that made all backpressure land inside
+that timer; M8 removed the sync, and with it the lane's only accidental view of
+GPU cost. PLAN-maps M7b measured a terrain-splat toggle worth **≈1.8 ms of frame
+time** whose `render`-phase mean moved **0.077 ms** — 4% of the real effect —
+while `ui` (+0.030), `entity` (+0.016) and `decals` (+0.009) moved too. That
+pattern *is* the tell: when a lever moves several unrelated CPU phases by a
+little, you are reading **backpressure**, and the true cost is in frame time.
+A pre-M8 `render`-phase number for anything fillrate-bound is not comparable to
+a post-M8 one — the instrument changed, not the cost.
+
+**⚠️ A vsync cap silently truncates the cheap arm, turning a delta into a lower
+bound.** On this 120 Hz display the splat-off arm returned **exactly 2400 frames
+per 20 s window (120.0 fps) every time** — a clamp, not a measurement, so the
+bracket only proved Δ ≥ 0.93 ms against a real ≈1.8 ms. Exact-integer frame
+counts and an fps pinned to the refresh rate are the tells. To escape it, scale
+the render buffer in the worker until **both** arms sit below the cap:
+
+```js
+await window.__gp(`(()=>{const e=self.__entityRenderer.scene.getEngine();
+  e.setHardwareScalingLevel(LEVEL); return e.getRenderWidth()+'x'+e.getRenderHeight();})()`)
+```
+
+Two traps in that call. It is applied **relative to the current buffer** on the
+worker's OffscreenCanvas (there is no `clientWidth`), so it **compounds** across
+calls — compute `level = currentWidth / targetWidth` and always read
+`getRenderWidth()` back rather than assuming. And Δ is **not** linear in
+megapixels over a wide range (0.79 ms/MP at 4.3 MP vs 0.38 ms/MP at 25.6 MP on
+the same pose), so normalise back to the reference buffer only from the nearest
+uncapped rung, never from the biggest one.
+
+**⚠️ `EXT_disjoint_timer_query_webgl2` is available here and is not trustworthy
+as an absolute.** Bracketing a frame with `TIME_ELAPSED_EXT` reported **13.3 ms
+of "GPU time" inside a 9.29 ms wall-clock frame** on the saturated arm while the
+unsaturated arm read a plausible 6.6 ms — it is charging pipeline wait, not busy
+time, so the ratio between arms is inflated beyond use. Query overhead itself is
+negligible (frame times matched the uninstrumented bracket to 0.09 ms), so it is
+safe to leave installed; just don't quote it.
+
 **Game choice for UI testing: use `metalstorm`, not `papertanks`.** PaperTanks
 ships no configured LuaUI/minimap/sounds, so UI/HUD tests against it prove
 nothing — widgets simply don't exist there. (This line used to say "use `zk`";
