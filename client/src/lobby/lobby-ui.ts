@@ -40,8 +40,8 @@ import {
 import { decideRoomTransition } from './room-transition.js';
 import type { AvailableScenarioInfo } from './scenario-picker.js';
 import {
-    defaultScenarioFor, parseScenarioList, resolveScenarioLabel, scenarioNote,
-    scenarioOptionLabel, scenariosForMap,
+    defaultScenarioFor, noWarNote, noWarReason, parseScenarioList,
+    resolveScenarioLabel, scenarioNote, scenarioOptionLabel, scenariosForMap,
 } from './scenario-picker.js';
 import {
     getDefaultLobbyTemplates,
@@ -1030,12 +1030,33 @@ export class LobbyUI {
 
         const offerable = this.scenariosForSelectedMap();
         if (offerable.length === 0) {
-            row.style.display = 'none';
             // Don't leave a pick from a previous map applied to this one.
             this.selectedScenarioId = null;
+
+            // A game that ships no scenarios at all keeps its create form
+            // unchanged — there is nothing to say about wars to Paper Tanks.
+            // But a scenario-driven game whose selected map has no offerable
+            // war has something to say, and saying nothing is what made
+            // retiring Meridian Basin's war (PLAN-metalstorm-wars.md §7.6)
+            // present as a map card that silently offers no war and no reason.
+            if (this.availableScenarios.length === 0 || !this.selectedMapId) {
+                row.style.display = 'none';
+                return;
+            }
+            row.style.display = 'block';
+            sel.style.display = 'none';
+            sel.innerHTML = '';
+            if (note) {
+                const { className, text } =
+                    noWarNote(noWarReason(this.availableScenarios,
+                                          this.selectedMapId));
+                note.className = className;
+                note.textContent = text;
+            }
             return;
         }
         row.style.display = 'block';
+        sel.style.display = '';
 
         // The default entry carries no value, so the create request omits
         // `scenario` entirely and the server applies the map's default —

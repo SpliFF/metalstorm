@@ -103,6 +103,22 @@ struct ScenarioInfo {
     /// silently hand a player.
     bool tutorial = false;
 
+    /// `retired` field. A retired war is never defaulted to and never
+    /// offered — the lobby treats it as content that exists for fixtures and
+    /// for its objective coverage, not as a war a player may pick.
+    ///
+    /// WHY THIS IS NOT A DELETION (PLAN-metalstorm-wars.md §7.6). The first
+    /// scenario to need it, `meridian_basin.lua`, is authored for a map whose
+    /// start positions sit in three disconnected components of the passability
+    /// mask — its two armies cannot reach each other, so the war ends
+    /// uncontested at a deterministic frame however it is paced (endtoend
+    /// D20). But it is also the only shipped content exercising `escort` and
+    /// `extract` objectives, so the file stays loadable by `game_scenario.lua`
+    /// (the `?direct=` manifest path and the gadget specs still stage it) and
+    /// only leaves the *offer*. Same shape as `tutorial`: a scenario that is
+    /// real and loadable but is not a Create Game choice.
+    bool retired = false;
+
     /// True when any entry in `objectives` carries `victory = true`.
     ///
     /// This is the whole point of the module: `victory` is the ONLY
@@ -148,6 +164,9 @@ std::vector<ScenarioInfo> Discover(const std::string& gamePath);
 ///   1. `world.map` must equal `mapId`.
 ///   2. Tutorials are never candidates — the tutorial has its own boot path
 ///      and is not what a Create Game default should silently hand a player.
+///   2b. Retired wars are never candidates either, for the stronger reason:
+///      the one thing a default must not do is hand a player a war that
+///      cannot be fought (PLAN-metalstorm-wars.md §7.6).
 ///   3. **`terminal` is required, not merely preferred.** The whole purpose
 ///      of this default is "don't create a war that cannot end", and a
 ///      non-terminal scenario does not serve it — auto-applying one would

@@ -3226,11 +3226,23 @@ int main(int argc, char *argv[]) {
         // behind.
         const bool hasScenarioChoice = j.contains("scenario");
         const std::string scenarioChoice = j.value("scenario", "");
-        if (hasScenarioChoice && !scenarioChoice.empty() &&
-            ScenarioDiscovery::FindById(scenariosFor(gameId), scenarioChoice) ==
-                nullptr) {
-          return HttpAuth::JsonResponse(
-              400, R"({"error":"unknown scenario for this game"})");
+        if (hasScenarioChoice && !scenarioChoice.empty()) {
+          const ScenarioDiscovery::ScenarioInfo *picked =
+              ScenarioDiscovery::FindById(scenariosFor(gameId), scenarioChoice);
+          if (picked == nullptr)
+            return HttpAuth::JsonResponse(
+                400, R"({"error":"unknown scenario for this game"})");
+          // A retired war is not a player choice (PLAN-metalstorm-wars.md
+          // §7.6). The picker already omits it, so reaching here means a
+          // hand-made request or a stale client; refusing keeps the rule in
+          // one place the client cannot skip. The `/api/rooms/direct`
+          // manifest path deliberately does NOT check this — retired
+          // scenarios stay stageable for fixtures and for the objective
+          // coverage they are kept for.
+          if (picked->retired)
+            return HttpAuth::JsonResponse(
+                400,
+                R"({"error":"that war is retired and cannot be created"})");
         }
 
         uint32_t roomId = rooms.CreateRoom(
@@ -3405,6 +3417,13 @@ int main(int argc, char *argv[]) {
             sj["displayName"] = s.displayName;
             sj["map"] = s.mapId;
             sj["tutorial"] = s.tutorial;
+            // A retired war is shipped, loadable and not offerable
+            // (PLAN-metalstorm-wars.md §7.6). Reported rather than omitted for
+            // the same reason `tutorial` is: the room screen resolves a room's
+            // `scenario` modoption against this list, and a war staged through
+            // the `?direct=` manifest path must still resolve to its name
+            // instead of showing a raw id.
+            sj["retired"] = s.retired;
             sj["terminal"] = s.terminal;
             // The scenario's playable sides, resolved to one team each
             // (PLAN-metalstorm-wars.md §7.4). NPC sides are omitted — a

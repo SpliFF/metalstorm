@@ -224,6 +224,7 @@ bool LoadOne(const fs::path& file, ScenarioDiscovery::ScenarioInfo& out) {
         if (out.displayName.empty())
             out.displayName = out.id;
         out.tutorial = GetBoolField(L, scn, "tutorial", false);
+        out.retired = GetBoolField(L, scn, "retired", false);
         out.terminal = HasVictoryObjective(L, scn);
         out.sides = ReadSides(L, scn);
 
@@ -277,9 +278,10 @@ std::vector<ScenarioInfo> Discover(const std::string& gamePath) {
         SLOG(SPRING_LOG_INFO, "discovered %zu scenario(s) in '%s'", out.size(),
              dir.string().c_str());
         for (const auto& s : out) {
-            SLOG(SPRING_LOG_INFO, "  - %s (%s) map='%s'%s%s sides='%s'",
+            SLOG(SPRING_LOG_INFO, "  - %s (%s) map='%s'%s%s%s sides='%s'",
                  s.displayName.c_str(), s.id.c_str(), s.mapId.c_str(),
                  s.tutorial ? " tutorial" : "",
+                 s.retired ? " RETIRED-NOT-OFFERED" : "",
                  s.terminal ? " terminal" : " NO-TERMINAL-CONDITION",
                  EncodeWarSides(s).c_str());
             for (const auto& side : s.sides) {
@@ -307,7 +309,7 @@ const ScenarioInfo* DefaultForMap(const std::vector<ScenarioInfo>& scenarios,
 
     const ScenarioInfo* best = nullptr;
     for (const auto& s : scenarios) {
-        if (s.tutorial || !s.terminal || s.mapId != mapId)
+        if (s.tutorial || s.retired || !s.terminal || s.mapId != mapId)
             continue;
         // Lowest id, so the pick is deterministic no matter what order the
         // directory iterator gave us.

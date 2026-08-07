@@ -1,5 +1,27 @@
--- scenarios/meridian_basin.lua — the default beta opening
--- (PLAN-metalstorm-beta-map.md §3 task 5).
+-- scenarios/meridian_basin.lua — RETIRED (PLAN-metalstorm-wars.md §7.6).
+-- Was the default beta opening (PLAN-metalstorm-beta-map.md §3 task 5).
+--
+-- WHY `retired = true`. Meridian Basin is not a map its armies can cross.
+-- `tools/mapgen/regions_from_map.py data/maps/meridian_basin --verify` puts its
+-- 8 start positions in **3 disconnected components** for VEH and HEAVY (largest
+-- component 30.6% of passable ground), and the basin this war is won by holding
+-- is reachable by neither side's armour. No amount of pacing makes the two
+-- armies meet, which is why endtoend D20 ("a normal Meridian Basin match
+-- contains no combat") kept re-opening under different diagnoses: the war ends
+-- uncontested at a deterministic frame no matter what the player does. §7.6
+-- weighed porting this file (rejected — every coordinate and region key is
+-- Meridian-granular) against authoring a replacement and chose the latter, so
+-- the showcase war is now `crossing_standoff` on `scorched_crossing_v2.4`.
+--
+-- WHAT `retired` MEANS, exactly (ScenarioDiscovery::ScenarioInfo::retired):
+-- the lobby never defaults a room to this war and never offers it in the
+-- Create Game picker, and the create route refuses it by id. The file stays
+-- shipped and stays loadable by `game_scenario.lua`, because it is the only
+-- content exercising `escort`/`extract` objectives and `mapdata/civilians.lua`
+-- convoy routes — the `?direct=` manifest path and
+-- `LuaRules/Gadgets/tests/meridian_basin_scenario_spec.lua` still stage it.
+-- Deleting it would drop that integration exercise on the floor; §7.6's
+-- accounting of the cost assumed keeping the coverage where it is cheap.
 --
 -- Scenario file (PLAN-persistence.md §5 format, loaded by game_scenario.lua)
 -- for the purpose-built beta map "Meridian Basin": pre-seeded region
@@ -26,6 +48,7 @@ return {
     version   = 1,
     name      = 'Meridian Basin — Standard War',
     tutorial  = false,
+    retired   = true,            -- see the header: uncrossable map, §7.6
     ephemeral = false,           -- persistent war (hibernates when empty)
 
     world = {

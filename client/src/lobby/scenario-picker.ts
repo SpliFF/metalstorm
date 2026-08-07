@@ -31,6 +31,14 @@ export interface AvailableScenarioInfo {
     /// Tutorial scenarios have their own boot path and are never offered
     /// as a plain create-room choice.
     tutorial: boolean;
+    /// Retired wars are shipped and loadable but are never offered
+    /// (PLAN-metalstorm-wars.md §7.6). `meridian_basin` is the first: its
+    /// map's start positions sit in three disconnected components, so its two
+    /// armies cannot reach each other and the war ends uncontested whatever
+    /// the player does. Kept in the list because the room screen resolves a
+    /// room's `scenario` modoption against it — a war staged through the
+    /// `?direct=` manifest path still has to show its name.
+    retired: boolean;
     /// Whether the scenario declares a `victory = true` objective. False
     /// means the war has no terminal condition and cannot end — surfaced
     /// in the picker rather than discovered 40 minutes in.
@@ -52,6 +60,10 @@ export function parseScenarioList(raw: unknown): AvailableScenarioInfo[] {
                 : (typeof s.id === 'string' ? s.id : ''),
             map: typeof s.map === 'string' ? s.map : '',
             tutorial: !!s.tutorial,
+            // Defaults FALSE on a malformed or older-server entry, which
+            // matches the server's own default and keeps a pre-§7.6 lobby
+            // offering exactly what it offered before.
+            retired: !!s.retired,
             terminal: !!s.terminal,
         }))
         .filter(s => s.id !== '');
@@ -63,11 +75,17 @@ export function parseScenarioList(raw: unknown): AvailableScenarioInfo[] {
 /// scenarios authored for a different map — a scenario's region keys only make
 /// sense against its own map's region graph, so offering a cross-map pairing
 /// would stage a broken war.
+///
+/// Retired wars are excluded too, mirroring ScenarioDiscovery: the create
+/// route refuses one by id, so offering it would only produce a 400 the host
+/// cannot act on. A map whose only war is retired therefore has *no* offerable
+/// war, and `scenarioNote(null)` says so — which is the honest surface for
+/// "this map has nothing to play on it" (PLAN-metalstorm-wars.md §7.6).
 export function scenariosForMap(
     list: readonly AvailableScenarioInfo[], mapId: string,
 ): AvailableScenarioInfo[] {
     if (!mapId) return [];
-    return list.filter(s => !s.tutorial && s.map === mapId);
+    return list.filter(s => !s.tutorial && !s.retired && s.map === mapId);
 }
 
 /// The scenario the SERVER will apply when the create request omits
@@ -87,6 +105,42 @@ export function defaultScenarioFor(
         if (best === null || s.id < best.id) best = s;
     }
     return best;
+}
+
+/// Why `mapId` has no offerable war. Only meaningful when
+/// `scenariosForMap(list, mapId)` is empty.
+///
+/// WHY THE DISTINCTION IS WORTH DRAWING (PLAN-metalstorm-wars.md §7.6). Before
+/// this, a scenario-driven game whose selected map had no offerable war hid the
+/// whole War row — which is right for a game that ships no scenarios at all
+/// (Paper Tanks, ZK) and wrong here: retiring Meridian Basin's war turned its
+/// map into a card that silently offers nothing, with no row, no note and no
+/// reason. `'retired'` means every war authored for this map has been
+/// withdrawn, which is a fact the player can act on ("pick another map");
+/// `'none'` means nothing was ever authored for it.
+export function noWarReason(
+    list: readonly AvailableScenarioInfo[], mapId: string,
+): 'retired' | 'none' {
+    const authored = list.filter(s => !s.tutorial && s.map === mapId);
+    return authored.length > 0 && authored.every(s => s.retired)
+        ? 'retired'
+        : 'none';
+}
+
+/// The note to show in place of the picker when a map has no offerable war.
+/// Same shape as `scenarioNote` so the caller renders one or the other.
+export function noWarNote(
+    reason: 'retired' | 'none',
+): { className: string; text: string } {
+    return {
+        className: 'scenario-note endless',
+        text: reason === 'retired'
+            ? 'This map\'s war has been retired — its armies cannot cross it. '
+                + 'Creating a battle here stages no war and it will have no '
+                + 'ending; pick another map for a real match.'
+            : 'No war is authored for this map, so this battle stages none and '
+                + 'has no ending. Leave by detaching.',
+    };
 }
 
 /// The `<option>` text for one scenario.

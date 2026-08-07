@@ -527,11 +527,20 @@ TEST_CASE("FindById: exact match only") {
     CHECK(SD::FindById(found, "") == nullptr);
 }
 
-TEST_CASE("shipped metalstorm scenarios: meridian_basin is the terminable "
-          "default for the meridian_basin map") {
-    // Reads the real content, not a fixture. This is the assertion that
-    // would have failed before the fix: creating a Metalstorm room on
-    // Meridian Basin now resolves to a war with a victory objective.
+TEST_CASE("shipped metalstorm scenarios: meridian_basin is RETIRED, so its map "
+          "has no default war") {
+    // Reads the real content, not a fixture. This assertion INVERTED on
+    // 2026-08-07 (PLAN-metalstorm-wars.md §7.6): it used to say meridian_basin
+    // was the terminable default for its map, which was true and was the wrong
+    // thing to want. The map's 8 start positions sit in 3 disconnected
+    // components of the VEH/HEAVY passability mask, so the two armies cannot
+    // reach each other and the war ends uncontested at a deterministic frame
+    // whatever the player does — measured twice on the player path in endtoend
+    // fire 21 (two wars, 4 vs 52 player directives, both ending at frame 10560
+    // won by the same team, armies 4 040 elmos apart).
+    //
+    // Terminal is still true and the file is still shipped and loadable: what
+    // `retired` removes is the OFFER, not the content.
     const std::string gamePath =
         std::string(SPRING_SOURCE_DIR) + "/data/games/metalstorm";
     if (!fs::is_directory(fs::path(gamePath) / "scenarios"))
@@ -544,12 +553,74 @@ TEST_CASE("shipped metalstorm scenarios: meridian_basin is the terminable "
     REQUIRE(meridian != nullptr);
     CHECK(meridian->mapId == "meridian_basin");
     CHECK(meridian->tutorial == false);
+    CHECK(meridian->retired == true);
     CHECK(meridian->terminal == true);
 
-    const auto* def = SD::DefaultForMap(found, "meridian_basin");
+    // Never defaulted to…
+    CHECK(SD::DefaultForMap(found, "meridian_basin") == nullptr);
+    // …and never silently dropped either: an id a `?direct=` manifest or a
+    // gadget spec still stages has to resolve, or the room screen would show a
+    // raw id and the create route could not tell "retired" from "typo".
+    CHECK(SD::FindById(found, "meridian_basin") == meridian);
+}
+
+TEST_CASE("shipped metalstorm scenarios: crossing_standoff is the default war "
+          "for scorched_crossing_v2.4") {
+    // The other half of §7.6's move: the showcase war is now authored on a map
+    // whose start positions are all in ONE component
+    // (`tools/mapgen/regions_from_map.py data/maps/scorched_crossing_v2.4
+    // --verify` — 6 starts, one component, largest component 94.5% of
+    // passable). This is the war a player who picks the default now gets.
+    const std::string gamePath =
+        std::string(SPRING_SOURCE_DIR) + "/data/games/metalstorm";
+    if (!fs::is_directory(fs::path(gamePath) / "scenarios"))
+        return; // content not present in this checkout
+
+    const auto found = SD::Discover(gamePath);
+    const auto* def = SD::DefaultForMap(found, "scorched_crossing_v2.4");
     REQUIRE(def != nullptr);
-    CHECK(def->id == "meridian_basin");
+    CHECK(def->id == "crossing_standoff");
     CHECK(def->terminal == true);
+    CHECK(def->retired == false);
+
+    // And it is a war two players can be seated in, one per side.
+    const auto playable = SD::PlayableSides(*def);
+    REQUIRE(playable.size() == 2);
+    CHECK(playable[0].staged == true);
+    CHECK(playable[1].staged == true);
+}
+
+TEST_CASE("retired: parsed, excluded from the default, still findable") {
+    // The unit-level statement of the rule, independent of shipped content.
+    TempGame g("retired");
+    g.Write("old_war.lua", R"(return {
+        name = 'Old War',
+        world = { map = 'basin' },
+        objectives = { { type = 'control', victory = true } },
+        retired = true,
+    })");
+    g.Write("new_war.lua", R"(return {
+        name = 'New War',
+        world = { map = 'crossing' },
+        objectives = { { type = 'control', victory = true } },
+    })");
+
+    const auto found = SD::Discover(g.Path());
+    REQUIRE(found.size() == 2);
+
+    const auto* old = Find(found, "old_war");
+    REQUIRE(old != nullptr);
+    CHECK(old->retired == true);
+    CHECK(old->terminal == true);
+    CHECK(SD::DefaultForMap(found, "basin") == nullptr);
+    CHECK(SD::FindById(found, "old_war") == old);
+
+    // `retired` is not contagious and defaults to false.
+    const auto* fresh = Find(found, "new_war");
+    REQUIRE(fresh != nullptr);
+    CHECK(fresh->retired == false);
+    REQUIRE(SD::DefaultForMap(found, "crossing") != nullptr);
+    CHECK(SD::DefaultForMap(found, "crossing")->id == "new_war");
 }
 
 // ==========================================================================

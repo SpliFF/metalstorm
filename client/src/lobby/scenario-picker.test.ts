@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
-    AvailableScenarioInfo, defaultScenarioFor, parseScenarioList,
-    resolveScenarioLabel, scenarioNote, scenarioOptionLabel, scenariosForMap,
+    AvailableScenarioInfo, defaultScenarioFor, noWarNote, noWarReason,
+    parseScenarioList, resolveScenarioLabel, scenarioNote, scenarioOptionLabel,
+    scenariosForMap,
 } from './scenario-picker.js';
 
 // The Create Game dialog's War row.
@@ -17,12 +18,18 @@ import {
 /// The shape `GET /api/games/metalstorm/scenarios` returns once a scenario has
 /// been generated and stored: one authored war, one generated one, on the same
 /// map. Field-for-field what lobby_main.cpp emits.
+///
+/// `meridian_basin` is here as the RETIRED case (PLAN-metalstorm-wars.md §7.6):
+/// shipped, terminal, still resolvable by the room screen, and never offered —
+/// its map's start positions sit in three disconnected components, so its two
+/// armies cannot reach each other.
 const API_RESPONSE = [
     {
         id: 'meridian_basin',
         displayName: 'Meridian Basin — Standard War',
         map: 'meridian_basin',
         tutorial: false,
+        retired: true,
         terminal: true,
         sides: [{ faction: 'compact', team: 0, staged: true }],
     },
@@ -50,7 +57,7 @@ const API_RESPONSE = [
 function info(over: Partial<AvailableScenarioInfo>): AvailableScenarioInfo {
     return {
         id: 'gen_x_aaaa', displayName: 'A War', map: 'basin',
-        tutorial: false, terminal: true, ...over,
+        tutorial: false, retired: false, terminal: true, ...over,
     };
 }
 
@@ -65,6 +72,7 @@ describe('parseScenarioList', () => {
             displayName: 'Ashen Reach — Standard War',
             map: 'scorched_crossing',
             tutorial: false,
+            retired: false,
             terminal: true,
         });
     });
@@ -98,6 +106,13 @@ describe('parseScenarioList', () => {
         // a false positive promises an ending that is not there.
         expect(parseScenarioList([{ id: 'gen_a_bbbb' }])[0].terminal).toBe(false);
     });
+
+    it('defaults a missing retired flag to false', () => {
+        // Same default as the server's, so a lobby built before §7.6 keeps
+        // offering exactly what it offered before rather than hiding wars.
+        expect(parseScenarioList([{ id: 'gen_a_bbbb' }])[0].retired).toBe(false);
+        expect(parseScenarioList([API_RESPONSE[0]])[0].retired).toBe(true);
+    });
 });
 
 describe('scenariosForMap', () => {
@@ -111,8 +126,8 @@ describe('scenariosForMap', () => {
     it('does not offer it for a different map', () => {
         // A scenario's region keys only make sense against its own map's
         // region graph; a cross-map pairing would stage a broken war.
-        expect(scenariosForMap(list, 'meridian_basin').map(s => s.id))
-            .toEqual(['meridian_basin']);
+        expect(scenariosForMap(list, 'meridian_basin')
+            .some(s => s.id === 'gen_scorched_crossing_9jye')).toBe(false);
     });
 
     it('excludes tutorials even on the matching map', () => {
@@ -120,8 +135,57 @@ describe('scenariosForMap', () => {
             .some(s => s.id === 'tutorial_01')).toBe(false);
     });
 
+    it('excludes a RETIRED war even on its own map', () => {
+        // §7.6: the create route refuses a retired id, so offering it would
+        // only produce a 400 the host cannot act on.
+        expect(scenariosForMap(list, 'meridian_basin')).toEqual([]);
+    });
+
+    it('leaves a map whose only war is retired with no offerable war at all',
+       () => {
+        // And that is the surface the player gets — `scenarioNote(null)`,
+        // "no war will be staged" — rather than a war that cannot be fought.
+        const offerable = scenariosForMap(list, 'meridian_basin');
+        expect(defaultScenarioFor(offerable)).toBeNull();
+        expect(scenarioNote(defaultScenarioFor(offerable)).text)
+            .toContain('No war will be staged');
+    });
+
     it('offers nothing when no map is selected', () => {
         expect(scenariosForMap(list, '')).toEqual([]);
+    });
+});
+
+describe('noWarReason / noWarNote', () => {
+    const list = parseScenarioList(API_RESPONSE);
+
+    it('calls a map whose only war is retired "retired", not "none"', () => {
+        // The whole point: the player is told the war was withdrawn rather
+        // than shown an empty row. Measured live before this — selecting
+        // Meridian Basin in the Create Game dialog hid the War row entirely
+        // (`display: none`, empty note) once its war was retired.
+        expect(noWarReason(list, 'meridian_basin')).toBe('retired');
+        expect(noWarNote('retired').text).toContain('retired');
+        expect(noWarNote('retired').text).toContain('pick another map');
+    });
+
+    it('calls a map nothing was authored for "none"', () => {
+        expect(noWarReason(list, 'green_flat_x34_v3')).toBe('none');
+        expect(noWarNote('none').text).toContain('No war is authored');
+    });
+
+    it('does not let a tutorial make a map look authored-for', () => {
+        // tutorial_01 targets scorched_crossing but is never an offer, so a
+        // map with only a tutorial is "none", not "retired".
+        const onlyTutorial = parseScenarioList([API_RESPONSE[2]]);
+        expect(noWarReason(onlyTutorial, 'scorched_crossing')).toBe('none');
+    });
+
+    it('marks the note endless either way', () => {
+        // A battle with no war has no ending — same class the picker uses for
+        // the endless cases, so it reads the same to the player.
+        expect(noWarNote('retired').className).toContain('endless');
+        expect(noWarNote('none').className).toContain('endless');
     });
 });
 
@@ -218,6 +282,15 @@ describe('resolveScenarioLabel', () => {
     it('resolves a shipped id the same way', () => {
         expect(resolveScenarioLabel(list, 'meridian_basin').label)
             .toBe('Meridian Basin — Standard War');
+    });
+
+    it('still names a RETIRED war a room was staged on', () => {
+        // A retired war leaves the picker but not the list, because the
+        // `?direct=` manifest path can still stage one and the room screen
+        // must show its name instead of a raw id (§7.6).
+        const r = resolveScenarioLabel(list, 'meridian_basin');
+        expect(r.known).toBe(true);
+        expect(r.label).toBe('Meridian Basin — Standard War');
     });
 
     it('reports an unknown id as unknown rather than as endless', () => {
