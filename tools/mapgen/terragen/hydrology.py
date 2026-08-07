@@ -1,4 +1,10 @@
-"""Hydrology: depression filling, D8 flow routing, accumulation, rivers.
+"""Hydrology: depression filling, D8 flow routing, flow accumulation.
+
+Channel extraction lives in `rivers.py`, not here: the bare accumulation
+threshold this module used to expose as `river_network` produced a *dotted*
+network (a low-gradient reach drops under the threshold and the channel
+vanishes), and every caller then had to re-derive the same slope-area seeding
+and downstream closure. Removed 2026-08-08 with the river-ribbon stage.
 
 Everything is vectorized numpy, except `resolve_flats` and `d8_receivers`
 which are numba `@njit` kernels (PLAN-maps.md §2b item 1 — profiling showed
@@ -281,15 +287,6 @@ def flow_accumulation(
     for lvl in reversed(levels[1:]):  # roots have no receiver to push into
         np.add.at(accum, receivers[lvl], accum[lvl])
     return accum
-
-
-def river_network(
-    accum: np.ndarray,
-    shape: tuple[int, int],
-    threshold: float,
-) -> np.ndarray:
-    """Boolean river mask: cells whose accumulation exceeds `threshold`."""
-    return (accum >= threshold).reshape(shape)
 
 
 def flow_path_lengths(

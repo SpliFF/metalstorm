@@ -3,7 +3,8 @@
 Pure-numpy, deterministic from a seed. Stages live in their own modules:
 
   noise      seeded simplex noise, fBm, ridged multifractal, domain warping
-  hydrology  depression filling (priority-flood), D8 flow, accumulation, rivers
+  hydrology  depression filling (priority-flood), D8 flow, accumulation
+  rivers     slope-area channels, meandering centrelines, distance-field carve
   erosion    fluvial (stream-power) + thermal erosion
   biomes     temperature/moisture fields -> biome classification masks
   roads      least-cost road networks between settlements

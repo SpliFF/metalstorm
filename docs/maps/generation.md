@@ -44,7 +44,8 @@ don't depend on `NUMBA_NUM_THREADS` (verified: `terragen/_selftest_numba.py`).
 | Module | Contents |
 |---|---|
 | `noise.py` | Seeded 2D simplex noise, fBm, ridged multifractal (Musgrave weighting), billow, two-channel domain warping — fused `@njit` kernels (PLAN-maps.md §2b item 1: ~70-80× measured on fBm). |
-| `hydrology.py` | Priority-flood depression filling (via `skimage` morphological reconstruction, not ported — see below), D8 steepest-descent receivers and flat resolution (both `@njit`; `resolve_flats` walks an explicit frontier queue instead of re-scanning the whole grid every BFS ring — ~100-700× measured), **level-order** flow-tree processing, flow accumulation, river-network extraction, flow-path lengths. |
+| `hydrology.py` | Priority-flood depression filling (via `skimage` morphological reconstruction, not ported — see below), D8 steepest-descent receivers and flat resolution (both `@njit`; `resolve_flats` walks an explicit frontier queue instead of re-scanning the whole grid every BFS ring — ~100-700× measured), **level-order** flow-tree processing, flow accumulation, flow-path lengths. (Channel extraction moved to `rivers.py` — the old accumulation-threshold `river_network` produced a dotted network.) |
+| `rivers.py` | **River ribbons** (§4b): slope-area channel seeding (`A·S² > C`, C solved as a quantile so a *fraction* of land seeds), downstream closure, monotone water-surface assignment, reach extraction from the flow forest, Douglas-Peucker + Chaikin + noise meandering, `w = k·√A` hydraulic geometry, and a distance-field carve combined with `min`. Returns terrain / `water_z` / `is_water` as three separate fields. |
 | `erosion.py` | Fluvial erosion: the **implicit Braun & Willett (2013) stream-power solver** (`h' = (h + dt·U + F·h_recv') / (1+F)`, `F = K·A^m·dt/dx`), unconditionally stable, plus talus-angle **thermal erosion** (8-neighbour transfers) — both `@njit`. Accepts a per-cell erodibility field (lithology variation). |
 | `biomes.py` | Temperature (latitude gradient + altitude lapse + noise), moisture (noise + water-proximity + directional rain shadow), Whittaker-ish classification into 8 ids (grassland/forest/desert/tundra/snow/rock/wetland/water), soft blend weights. |
 | `roads.py` | Least-cost road planning: 8-connected Dijkstra on a decimated grid with slope² cost, water/bridge penalties and max-grade cutoffs; MST topology over settlements (+ optional loops); Chaikin smoothing; full-res rasterization to mask + distance field; **cut-and-fill grading** of terrain under roads. |
@@ -76,8 +77,9 @@ seed + config (+ optional layout skeleton)
   2. erosion          N iterations of { fill → route → implicit stream-power
                       solve } + thermal talus, on the full grid
   3. contracts        re-enforce gameplay geometry (§4)
-  4. hydrology        final fill/route/accumulate → river network, lakes;
-                      minor stream beds carved by log-discharge
+  4. hydrology        final fill/route/accumulate → river ribbons (§4b):
+                      slope-area channels → centrelines → distance-field
+                      carve; water surface and lakes stay OUT of the heightmap
   5. roads            settlement/waypoint endpoints → least-cost network →
                       rasterize → grade terrain under decks
   6. climate/biomes   temperature + moisture (+ rain shadow) → biome ids
@@ -147,6 +149,85 @@ If the layout changes (`meridian_layout.json`), `mapdata/regions.lua` and
 `mapdata/civilians.lua` must be regenerated with it — meridian2.py deliberately
 does **not** touch them because the current skeleton is unchanged from the
 original generator.
+
+## 4b. River ribbons (`terragen/rivers.py`)
+
+Stage 4 used to be "cells over an accumulation threshold, minus a blurred
+`log1p(accum)`". That is a *raster* carve: the bed inherits every D8 zigzag as
+a staircase, depth grows without width, and a confluence does nothing at all —
+two tributaries meeting produced one channel exactly as deep as the deeper of
+them. The replacement is the PLAN-maps.md §2b item 3 recipe:
+
+1. **Seed by slope-area, not accumulation.** `A·S² > C`, with `C` solved as a
+   quantile so a *fraction* of land cells seed (`channel_fraction`, 1.5–4.5 %
+   on the shipping maps). A raw accumulation number means something different
+   on every map size and every erosion budget; a fraction does not.
+2. **Close the seed set downstream.** The failure mode of any bare threshold is
+   a **dotted** river — one low-gradient reach drops under `C` and the channel
+   vanishes for a hundred metres. Once a cell is a channel, every cell it
+   drains through is one too.
+3. **Assign the water surface before carving**, monotone: `w[i] = max(h[i],
+   w[receiver[i]])` swept root-first. Non-increasing downstream by
+   construction, never underground, and where the terrain dips below it the
+   result is a lake — **which is never baked into the heightmap**. The
+   depression stays in the terrain and the lake exists only as the gap between
+   `terrain` and `water_z`. That is why the stage returns three separate
+   fields and only `terrain` reaches the SMF.
+4. **Cut the flow forest into reaches** (headwater→junction,
+   junction→junction, junction/headwater→outlet). Junctions are the *last*
+   point of every inflowing reach and the *first* of the one flowing out, so
+   ribbons weld rather than abut; every channel edge is covered exactly once.
+5. **Treat each centreline**: Douglas-Peucker (returns *indices*, so per-vertex
+   width and water surface ride through unchanged), Chaikin, then a
+   low-frequency noise meander of amplitude 1–2 channel widths and wavelength
+   ~12, **tapered to zero at both ends** — the taper is what keeps confluences
+   welded when the noise wants to move an endpoint.
+6. **Width from hydraulic geometry**: `w = k·√A`. The form is chosen for its
+   confluence behaviour — drainage areas add, so `w_down² = w₁² + w₂²` (the
+   junction rule) is a *consequence* of the model rather than junction-specific
+   code. Swap in a linear width model and confluences silently stop growing.
+7. **Carve with `min`, never a lerp.** A lerp toward a bed profile *raises*
+   terrain wherever the bed sits above the ground — routine on the outer bank
+   of a meander running across a slope — and at a confluence it blends two beds
+   into a ridge down the middle of the water. `min` is idempotent,
+   order-independent and can only lower ground.
+
+Two implementation notes that are easy to get wrong:
+
+- **Reaches are binned by width and one EDT runs per bin, min-combined.** A
+  single global `distance_transform_edt` assigns every cell to its *nearest*
+  centreline, which at a confluence hands cells well inside a trunk river the
+  shallow bed of the tributary that happens to be a few metres closer — a bump
+  in the middle of the water.
+- **Cells shared by two reaches pick a winner by width, not by write order.**
+  Every junction cell belongs to three reaches; a last-writer-wins raster makes
+  the finished map depend on the order of the reach list, which is not a
+  property of the terrain. (This was a real defect, caught by
+  `test_carve_is_order_independent_and_idempotent`.)
+
+**`protect`** is an optional [0, 1] weight attenuating the finished cut. A
+generator with a gameplay contract needs it: meridian2 pulls ford decks, the
+row-D channel, the slope-band regions and the start pads to specified
+elevations in stage 3, and nothing downstream re-checks them — a tributary
+wandering through a start pad would silently cost that side its buildable core.
+It multiplies a non-negative cut, so it cannot raise ground either.
+
+**`channel_fraction` is not comparable between `--fast` and full res**, and both
+generators carry a separate constant for each. `--fast` is 513² at 32 elmos/cell,
+so the same fraction seeds against 16× fewer and 16× coarser cells, and closure
+then grows the mask much further per seed: meridian reads 6.07 % channel cells at
+`--fast` and 2.88 % at 2049². Do not read a `--fast` percentage as a prediction of
+the shipping one.
+
+Cost (2049², measured 2026-08-08 under 2-way contention): the whole river stage is
+**4–5 s** of a ~5.5-minute generation — free next to erosion (69–78 s) and tile
+clustering. 3 844 reaches on meridian, 8 452 on skerry.
+
+Tests: `tools/mapgen/tests/test_rivers.py` (32 cases). Every metric carries a
+positive control — the closure check is shown failing on the unclosed
+threshold, the monotone check on the raw ground surface, the `min` rule on the
+lerp it replaces, and the junction rule on a linear width model. A guard nobody
+has watched fail is not a guard.
 
 ## 5. Texturing model
 

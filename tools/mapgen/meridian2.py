@@ -40,6 +40,7 @@ from terragen import erosion as ero
 from terragen import hydrology as hyd
 from terragen import noise as tn
 from terragen import package as pkg
+from terragen import rivers as riv
 from terragen import roads as rd
 from terragen import selftest as stest
 
@@ -279,17 +280,42 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
 
     print(f"contracts done {time.time()-t_start:.0f}s")
 
-    # 5. hydrology on the final surface (rivers for texture/wetland only)
+    # 5. hydrology on the final surface -> river ribbons (PLAN-maps §2b item 3)
     filled = hyd.fill_depressions(h)
     routing = hyd.resolve_flats(filled)
     recv = hyd.d8_receivers(routing)
     levels = hyd.topo_levels(recv)
     accum = hyd.flow_accumulation(recv, levels)
-    river_thresh = (2500.0 if fast else 40000.0)
-    rivers = hyd.river_network(accum, h.shape, river_thresh)
-    # carve minor stream beds (visual gullies; stays above water level mostly)
-    carve = np.where(rivers, np.minimum(5.0, 1.2 * np.log1p(accum.reshape(h.shape) / river_thresh)), 0.0)
-    h = h - ndimage.gaussian_filter(carve, sigma=1.0)
+
+    # Everything steps 4a-4d pulled to a specified elevation is off limits to
+    # the tributary system: the ford decks and row-D channel are a passability
+    # contract, the start pads are each side's buildable core, and the
+    # slope-band regions were just iterated into E1 compliance. A river through
+    # any of them is a silent breach that no later stage re-checks. The mask is
+    # feathered so the ribbons taper out rather than ending in a step.
+    protect = np.zeros(h.shape)
+    for r in layout["regions"]:
+        if r["key"] in CHANNEL_TARGET or r["key"] in BAND_TALUS:
+            bb = r["bbox"]
+            protect = np.maximum(protect, box_mask(
+                h.shape, cell, bb["x0"], bb["z0"], bb["x1"], bb["z1"]).astype(float))
+    for sx, sz in starts:
+        protect = np.maximum(protect, box_mask(
+            h.shape, cell, sx - 520, sz - 520, sx + 520, sz + 520).astype(float))
+    protect = np.clip(ndimage.gaussian_filter(
+        protect, sigma=max(1.0, 160.0 / cell)) * 1.35, 0.0, 1.0)
+
+    # minor streams: this map's water feature is the authored row-D channel, so
+    # the generated network is a tributary system feeding it, not a rival to it
+    rp_riv = riv.RiverParams(channel_fraction=(0.03 if fast else 0.015),
+                             width_coef=0.045, width_max=70.0,
+                             depth_max=8.0, bank_width=70.0)
+    net = riv.build(h, recv, levels, accum, cell, 0.0, seed, rp_riv, protect)
+    h = net.terrain
+    rivers = net.is_water
+    print(f"rivers done {time.time()-t_start:.0f}s "
+          f"({len(net.polylines)} reaches, "
+          f"{100.0 * net.channel_mask.mean():.2f}% channel cells)")
 
     # 6. roads: district centres + convoy waypoints + gates
     sites = []

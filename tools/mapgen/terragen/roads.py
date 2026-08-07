@@ -162,14 +162,19 @@ def _walk_predecessors(pred_row: np.ndarray, src: int, dst: int) -> np.ndarray |
 
 
 def chaikin_smooth(pts: np.ndarray, iterations: int = 3) -> np.ndarray:
-    """Chaikin corner cutting; keeps endpoints."""
+    """Chaikin corner cutting; keeps endpoints.
+
+    Works on any (N, K) array, not just (N, 2): rivers.py carries per-vertex
+    width and water-surface elevation as extra columns so they are subdivided
+    by the same weights as the geometry and stay in step with it.
+    """
     p = pts
     for _ in range(iterations):
         if len(p) < 3:
             break
         q = p[:-1] * 0.75 + p[1:] * 0.25
         r = p[:-1] * 0.25 + p[1:] * 0.75
-        mid = np.empty((q.shape[0] * 2, 2))
+        mid = np.empty((q.shape[0] * 2, p.shape[1]))
         mid[0::2] = q
         mid[1::2] = r
         p = np.vstack([p[:1], mid, p[-1:]])

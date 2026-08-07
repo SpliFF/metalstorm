@@ -41,6 +41,7 @@ from terragen import hydrology as hyd       # noqa: E402
 from terragen import noise as tn            # noqa: E402
 from terragen import package as pkg         # noqa: E402
 from terragen import placement as pl        # noqa: E402
+from terragen import rivers as riv          # noqa: E402
 from terragen import roads as rd            # noqa: E402
 from terragen import selftest as stest      # noqa: E402
 from terragen import settle as st           # noqa: E402
@@ -251,15 +252,31 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     print(f"roads done {time.time()-t0:.0f}s ({len(polylines)} segments, "
           f"{len(towns)} town plazas, {len(starts)} starts)")
 
-    # 7. hydrology (small island streams -> gullies + wetland input)
+    # 7. hydrology -> island stream ribbons (PLAN-maps §2b item 3)
     filled = hyd.fill_depressions(h)
     recv = hyd.d8_receivers(hyd.resolve_flats(filled))
-    accum = hyd.flow_accumulation(recv, hyd.topo_levels(recv))
-    thresh = 1500.0 if fast else 24000.0
-    rivers = hyd.river_network(accum, h.shape, thresh)
-    carve = np.where(rivers, np.minimum(4.0, 1.1 * np.log1p(
-        accum.reshape(h.shape) / thresh)), 0.0)
-    h = h - ndimage.gaussian_filter(carve, sigma=1.0)
+    levels = hyd.topo_levels(recv)
+    accum = hyd.flow_accumulation(recv, levels)
+
+    # start pads only — this map has no authored elevation contract beyond
+    # them, so the network is otherwise free to run wherever the terrain sends
+    # it (which is the point of an archipelago: short, steep, radial streams)
+    protect = np.zeros(h.shape)
+    for sx, sz in starts:
+        protect = np.maximum(protect,
+                             (np.hypot(xx - sx, zz - sz) < 520.0).astype(float))
+    protect = np.clip(ndimage.gaussian_filter(
+        protect, sigma=max(1.0, 160.0 / cell)) * 1.35, 0.0, 1.0)
+
+    # islands have tiny catchments: seed generously, keep the channels narrow
+    rp_riv = riv.RiverParams(channel_fraction=(0.045 if fast else 0.025),
+                             width_coef=0.05, width_min=9.0, width_max=48.0,
+                             depth_max=6.0, bank_width=55.0)
+    net = riv.build(h, recv, levels, accum, cell, 0.0, seed, rp_riv, protect)
+    h = net.terrain
+    rivers = net.is_water
+    print(f"rivers done {time.time()-t0:.0f}s ({len(net.polylines)} reaches, "
+          f"{100.0 * net.channel_mask.mean():.2f}% channel cells)")
 
     # 8. final climate + biomes on the settled surface
     slope, temp, moist = fields(h)
