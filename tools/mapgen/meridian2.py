@@ -12,9 +12,13 @@ mountain detail -> stream-power + thermal erosion -> contract re-enforcement
 (ford decks, start pads, river channel) -> roads (districts + convoy spine)
 -> biomes -> full package (SMF/SMT albedo bake, splat textures, mapinfo).
 
+Deterministic: same --seed => byte-identical map, checked by --selftest.
+
 Usage:
     .venv/bin/python meridian2.py [--out DIR] [--fast] [--seed N]
       --fast: quarter-res heightfield (513^2) for iteration; NOT for shipping.
+    .venv/bin/python meridian2.py --selftest [--fast]
+      two cold runs with isolated TMPDIRs, packages compared byte-for-byte.
 """
 from __future__ import annotations
 
@@ -37,6 +41,7 @@ from terragen import hydrology as hyd
 from terragen import noise as tn
 from terragen import package as pkg
 from terragen import roads as rd
+from terragen import selftest as stest
 
 LAYOUT_PATH = os.path.join(HERE, "meridian_layout.json")
 MAP_SIZE = 16384.0
@@ -549,7 +554,26 @@ def main():
                     help="skip the package bake; write preview.png only")
     ap.add_argument("--no-package", action="store_true",
                     help="stop after placement + E1 (fast layer-tuning loop)")
+    ap.add_argument("--selftest", action="store_true",
+                    help="generate twice as independent cold subprocesses "
+                         "(isolated TMPDIR each, so the erosion cache cannot "
+                         "fake it) and assert byte-identical packages; "
+                         "honours --seed/--fast/--with-features")
     args = ap.parse_args()
+
+    if args.selftest:
+        if args.preview_only or args.no_package:
+            ap.error("--selftest needs the full package path; drop "
+                     "--preview-only/--no-package")
+        passthrough = ["--seed", str(args.seed)]
+        if args.fast:
+            passthrough.append("--fast")
+        if args.with_features:
+            passthrough.append("--with-features")
+        sys.exit(stest.run_selftest(
+            os.path.abspath(__file__), passthrough, label="meridian2",
+            cache_globs=("meridian2_eroded_*.npy",)))
+
     generate(args.out, args.seed, fast=args.fast, with_features=args.with_features,
              preview_only=args.preview_only, no_package=args.no_package)
 

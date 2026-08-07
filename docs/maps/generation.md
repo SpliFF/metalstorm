@@ -310,6 +310,37 @@ build/release/tools/mapconverter/mapconverter content/maps/meridian_basin
 The self-check output (`E1 <region> expected=… dominant=…`) must be all-OK
 before processing; the C++ validator rejects the map otherwise.
 
+### Determinism (`--selftest`)
+
+`same inputs ⇒ byte-identical map` is a contract, so every shipping generator
+proves it on demand:
+
+```
+cd tools/mapgen
+.venv/bin/python meridian2.py   --selftest [--fast] [--with-features]
+.venv/bin/python archipelago.py --selftest [--fast] [--seed N --landmass F --islands N]
+```
+
+The flag runs the generator **twice as independent cold subprocesses** and
+hashes every file in both packages (`terragen/selftest.py`). Two details are
+what make the result mean anything, and both are easy to lose:
+
+- **Each run gets its own `TMPDIR`.** Both generators cache the eroded
+  heightmap at `$TMPDIR/<gen>_eroded_<key>.npy`; without isolation, run 2
+  loads run 1's array and the longest, most numerically sensitive stage in
+  the pipeline is never exercised. The check would then pass regardless of
+  how nondeterministic erosion is.
+- **The isolation is itself verified.** If a run writes no matching cache
+  inside its scratch dir, the generator has stopped honouring `TMPDIR` and
+  the harness reports a *failure* rather than the pass it did not earn.
+
+`--fast` is the practical loop (a couple of minutes); the full-res run is the
+shipping gate. `--preview-only`/`--no-package` are rejected — they skip
+packaging, which is most of what there is to compare. `gen_vegetation_models.py
+--selftest` covers the prop models separately (11 species), and
+`terragen/_selftest_numba.py` covers thread-count independence of the `@njit`
+kernels. Harness tests: `tools/mapgen/tests/test_selftest.py`.
+
 ## 8. Adding a new map
 
 Two shipped generator styles to copy from:
@@ -320,8 +351,8 @@ Two shipped generator styles to copy from:
 - **Free-form parameterized** (`archipelago.py` → Skerry Reach): everything
   derived from CLI parameters — `--seed`, `--landmass` (fraction of area
   above the waterline, enforced by quantile calibration before AND after
-  erosion), `--islands`. Same parameters ⇒ byte-identical map (verified:
-  independent cold runs hash equal). Island centres via deterministic
+  erosion), `--islands`. Same parameters ⇒ byte-identical map (verified by
+  `--selftest`, §7). Island centres via deterministic
   dart-throwing; starts round-robin across the largest islands via
   `settle` scoring (its own contract: 8 dry, separated, flattened pads);
   per-island road networks (roads never island-hop); the full placement

@@ -17,6 +17,7 @@ Usage:
     .venv/bin/python archipelago.py --seed 7 --landmass 0.28 --islands 12
     .venv/bin/python archipelago.py --fast --preview-only  # 30 s look
     .venv/bin/python archipelago.py --no-package           # layer tuning
+    .venv/bin/python archipelago.py --selftest [--fast]    # determinism gate
 
 Package the result with gen_vegetation_models.py --out <map dir> (prop
 models) and build/*/tools/mapconverter (processing + validation).
@@ -41,6 +42,7 @@ from terragen import noise as tn            # noqa: E402
 from terragen import package as pkg         # noqa: E402
 from terragen import placement as pl        # noqa: E402
 from terragen import roads as rd            # noqa: E402
+from terragen import selftest as stest      # noqa: E402
 from terragen import settle as st           # noqa: E402
 from terragen import vegetation as veg      # noqa: E402
 from terragen.vegetation import _hash01     # noqa: E402
@@ -465,7 +467,29 @@ def main():
     ap.add_argument("--with-features", action="store_true")
     ap.add_argument("--preview-only", action="store_true")
     ap.add_argument("--no-package", action="store_true")
+    ap.add_argument("--selftest", action="store_true",
+                    help="generate twice as independent cold subprocesses "
+                         "(isolated TMPDIR each, so the erosion cache cannot "
+                         "fake it) and assert byte-identical packages; honours "
+                         "--seed/--landmass/--islands/--fast/--with-features")
     args = ap.parse_args()
+
+    if args.selftest:
+        if args.preview_only or args.no_package:
+            ap.error("--selftest needs the full package path; drop "
+                     "--preview-only/--no-package")
+        passthrough = ["--seed", str(args.seed),
+                       "--landmass", str(args.landmass),
+                       "--islands", str(args.islands),
+                       "--id", args.map_id, "--name", args.display_name]
+        if args.fast:
+            passthrough.append("--fast")
+        if args.with_features:
+            passthrough.append("--with-features")
+        sys.exit(stest.run_selftest(
+            os.path.abspath(__file__), passthrough, label="archipelago",
+            cache_globs=("archipelago_eroded_*.npy",)))
+
     repo = os.path.abspath(os.path.join(HERE, "..", ".."))
     out = args.out or os.path.join(repo, "content", "maps", args.map_id)
     generate(out, args.seed, landmass=args.landmass, islands=args.islands,
