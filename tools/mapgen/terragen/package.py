@@ -79,6 +79,17 @@ def write_package(
     tile_index = assignments.reshape(tiles_z, tiles_x)
     progress(f"  unique tiles: {reps.shape[0]}")
 
+    # The tile dictionary is a lossy stand-in for Spring's exact dedup, so it
+    # reports its own damage on every build rather than shipping silently
+    # (see dxt1.cluster_tiles FIDELITY-STANDIN / PLAN-maps.md M7 item 1).
+    sd = dxt1.seam_discontinuity(tiles, tile_index, reps, seed=cfg.seed)
+    progress(
+        f"  FIDELITY-STANDIN lossy tile dedup: seam jump {sd['jump']:.2f} vs "
+        f"interior gradient {sd['grad']:.2f} (ratio {sd['ratio']:.1f}; the "
+        f"unquantized bake is {sd['true_ratio']:.2f}) — a ratio well above 1 is "
+        f"a visible 32-elmo grid on smooth ground"
+    )
+
     progress("minimap...")
     shade = bk.hillshade(height, cellsize)
     minimap = bk.make_minimap(baker, shade)
