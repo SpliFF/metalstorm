@@ -499,3 +499,62 @@ describe('getPriorityBand', () => {
         expect(PRIORITY_BANDS.urgent).toBe(100);
     });
 });
+
+/**
+ * D56 — the Subject slot used to be discarded at compile time. Every
+ * non-group subject produced `groupId = 0` and no conditions at all, so the
+ * server matched any idle unit on the team; on a scenario-staged army (every
+ * combat unit carries an opening order from frame 0) that is only the units
+ * the scenario deliberately left unordered — engineers and a radar.
+ */
+describe('class subject reaches the wire (D56)', () => {
+    const classIntent = (filterClass: string): CommandIntent => ({
+        verb: 'attack',
+        subject: { type: 'idle-filter', filterClass },
+        target: { shape: 'point', point: { x: 4480, z: 4480 } },
+        priority: 50,
+    });
+
+    it('carries the class and clears idleOnly for an ungrouped directive', () => {
+        const result = compileIntent(classIntent('armour'));
+        expect(result?.type).toBe('GroupDirective');
+        if (result?.type !== 'GroupDirective') return;
+        expect(result.payload.groupId).toBe(0);
+        expect(result.payload.conditions).toEqual({ idleOnly: false, unitClass: 'armour' });
+    });
+
+    it('no longer compiles two different classes to the same message', () => {
+        const armour = compileIntent(classIntent('armour'));
+        const artillery = compileIntent(classIntent('artillery'));
+        expect(armour).not.toEqual(artillery);
+        if (armour?.type !== 'GroupDirective' || artillery?.type !== 'GroupDirective') return;
+        expect(armour.payload.conditions?.unitClass).toBe('armour');
+        expect(artillery.payload.conditions?.unitClass).toBe('artillery');
+    });
+
+    it('sends no conditions for a group-scoped directive', () => {
+        // The group IS the roster and the server derives conditions.org_group
+        // from group_id; its members keep suspend/auto-rejoin (Q-D-d §3).
+        const result = compileIntent({
+            verb: 'attack',
+            subject: { type: 'group', groupId: 4 },
+            target: { shape: 'point', point: { x: 4480, z: 4480 } },
+            priority: 50,
+        });
+        expect(result?.type).toBe('GroupDirective');
+        if (result?.type !== 'GroupDirective') return;
+        expect(result.payload.conditions).toBeUndefined();
+    });
+
+    it('sends no conditions when the subject names no class', () => {
+        const result = compileIntent({
+            verb: 'attack',
+            subject: { type: 'idle-filter' },
+            target: { shape: 'point', point: { x: 4480, z: 4480 } },
+            priority: 50,
+        });
+        expect(result?.type).toBe('GroupDirective');
+        if (result?.type !== 'GroupDirective') return;
+        expect(result.payload.conditions).toBeUndefined();
+    });
+});

@@ -182,6 +182,33 @@ TEST_SUITE("DirectiveManager") {
         CHECK(orgGroups.Get(g)->currentDirectiveId == 0);
     }
 
+    // The evaluator's use of this flag needs a live unitHandler (see the file
+    // header), but Create/Update must at least carry it through unmolested:
+    // `orgGroup` IS deliberately overwritten by the scope group, and an
+    // idleOnly that got the same treatment would silently re-close the hole
+    // D56 opened — a player directive would go back to matching only units
+    // with an empty command queue, which on a scenario-staged army is none of
+    // the combat units.
+    TEST_CASE("idleOnly survives create and update (D56)") {
+        resetManagers();
+        StandingOrderConditions cond;
+        cond.idleOnly = false;
+        cond.squadTypes = {7, 9};
+        const uint32_t d = directiveManager.Create(
+            1, DirectiveType::Assault, 50, OrderShape::Point, {0, 0, 0},
+            cond, 0, 0, "", 0, 0);
+        REQUIRE(d != 0);
+        CHECK(directiveManager.GetAllDirectives()[0].conditions.idleOnly == false);
+        CHECK(directiveManager.GetAllDirectives()[0].conditions.squadTypes.size() == 2);
+
+        StandingOrderConditions cond2;   // default-constructed: idleOnly true
+        CHECK(directiveManager.Update(d, 1, DirectiveType::Assault, 50,
+                                      OrderShape::Point, {0, 0, 0}, cond2, 0, "",
+                                      true) == true);
+        CHECK(directiveManager.GetAllDirectives()[0].conditions.idleOnly == true);
+        CHECK(directiveManager.GetAllDirectives()[0].conditions.squadTypes.empty());
+    }
+
     TEST_CASE("RemoveForGroup drops all of a group's directives") {
         resetManagers();
         const uint32_t g = orgGroups.Create(1, Echelon::Platoon, "g", {}, 0, 0);

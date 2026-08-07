@@ -274,6 +274,11 @@ export interface GpGroupDirectiveUpdateToWorker {
     priority: number;
     requestedStrength: number;
     active: boolean;
+    /** Subject-slot conditions for an ungrouped (condition-scoped) directive.
+     *  `unitClass` is a command-language class name, resolved to the wire's
+     *  `squad_types` inside the worker — the streamed def table it needs lives
+     *  there, not on the UI thread. Absent = unfiltered, the pre-D56 shape. */
+    conditions?: { idleOnly?: boolean; unitClass?: string };
 }
 
 export interface GpGroupDirectiveRemoveToWorker {

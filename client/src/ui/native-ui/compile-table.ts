@@ -68,6 +68,10 @@ const VALID_VERB_SHAPE_COMBINATIONS = new Set(
 
 /**
  * Command subject - who executes
+ *
+ * `idle-filter` is a historical name: the subject names a *unit class*, and
+ * whether the directive may take a unit that is already busy is the separate
+ * `idleOnly` decision below. Both now reach the wire; before D56 neither did.
  */
 export interface CommandSubject {
     type: 'group' | 'idle-filter' | 'ai';
@@ -184,6 +188,24 @@ export type CompiledMessage =
 /**
  * GroupDirective message payload
  */
+/**
+ * The subject slot as the wire sees it — `StandingOrderConditions` minus the
+ * fields the composer has no vocabulary for.
+ *
+ * `unitClass` is a command-language class name, NOT a `squad_types` vector:
+ * the class → unit-def-id mapping needs the streamed def table, which lives in
+ * the game-processor worker, so the worker resolves it on the way out
+ * (game-processor.ts `gp:groupDirectiveUpdate`). Keeping the class name here
+ * means the compile table stays pure and testable without a def table.
+ */
+export interface DirectiveConditions {
+    /** false = an explicit order that overrides what the unit is doing.
+     *  Omitted → the wire default (true), i.e. only unemployed units. */
+    idleOnly?: boolean;
+    /** Command-language class name ("armour", "infantry", …). */
+    unitClass?: string;
+}
+
 export interface GroupDirectivePayload {
     directiveId: number;        // 0 = create new
     groupId: number;            // 0 = condition-scoped
@@ -193,6 +215,9 @@ export interface GroupDirectivePayload {
     params: number[];           // Interpreted per shape
     requestedStrength: number;  // 0 = take what idles
     phasesJson?: string;        // Optional phase gate from when-condition
+    /** Absent for a group-scoped directive — the server derives
+     *  `conditions.org_group` from `group_id` and the roster is the group. */
+    conditions?: DirectiveConditions;
 }
 
 /**
@@ -334,6 +359,17 @@ function compileToGroupDirective(
     // Phase gate from when-condition
     const phasesJson = when ? encodeWhenConditionAsPhase(when) : undefined;
 
+    // A class subject IS the roster for an ungrouped directive, so it has to
+    // travel as conditions or the directive addresses the whole team. And it
+    // travels with `idleOnly: false` — the player picked a force and gave it an
+    // order, which is the definition of overriding what that force is doing.
+    // A group-scoped directive sends none of this: the group is the roster and
+    // its members keep the suspend/auto-rejoin semantics (Q-D-d §3).
+    const conditions: DirectiveConditions | undefined =
+        groupId === 0 && subject.type === 'idle-filter' && subject.filterClass
+            ? { idleOnly: false, unitClass: subject.filterClass }
+            : undefined;
+
     const payload: GroupDirectivePayload = {
         directiveId: 0,         // 0 = create new
         groupId,
@@ -343,6 +379,7 @@ function compileToGroupDirective(
         params,
         requestedStrength: 0,   // 0 = take what idles
         phasesJson,
+        conditions,
     };
 
     return { type: 'GroupDirective', payload };

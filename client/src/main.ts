@@ -96,7 +96,7 @@ const workerCommandConnection: CommandConnection = {
         gameWorker?.postMessage({
             type: 'gp:groupDirectiveUpdate', directiveId, groupId, directiveType: type, shape, params,
             priority: opts.priority ?? 0, requestedStrength: opts.requestedStrength ?? 0,
-            active: opts.active ?? true,
+            active: opts.active ?? true, conditions: opts.conditions,
         }),
     sendGroupDirectiveRemove: (directiveId) =>
         gameWorker?.postMessage({ type: 'gp:groupDirectiveRemove', directiveId }),

@@ -43,10 +43,15 @@ import composerCss from './command-composer.css?raw';
 const AUTHORITY_COST_LIB_URL = '/api/games/data/metalstorm/ui/lib/authority-cost.js';
 const AUTHORITY_COST_SPEC_URL = '/api/games/data/metalstorm/authority_cost.json';
 
-/** Idle-filter subject classes offered by the Subject picker. A closed
+/** Class subject classes offered by the Subject picker. A closed
  *  vocabulary (mirrors free-text-accelerator.ts's IDLE_FILTER_CLASSES) — the
  *  composer builds valid-by-construction intents, so it only offers filter
- *  classes the sim understands rather than a free-text box. */
+ *  classes the sim understands rather than a free-text box.
+ *
+ *  These read "All <class>", not "Idle <class>": a directive from the team's
+ *  commander overrides what the force is already doing. The old label was
+ *  doubly wrong — the class never reached the wire at all, so every one of
+ *  these compiled to the same "any idle unit" message (D56). */
 const IDLE_FILTER_CLASSES = ['armour', 'infantry', 'air', 'artillery'];
 
 /** Entity types the Target picker searches — the "where to act" vocabulary
@@ -461,7 +466,7 @@ function renderSubjectMenu() {
         .join('');
 
     const idleItems = IDLE_FILTER_CLASSES
-        .map((c) => `<div class="nui-menu__item subject-idle-option" data-class="${c}">Idle ${c}</div>`)
+        .map((c) => `<div class="nui-menu__item subject-idle-option" data-class="${c}">All ${c}</div>`)
         .join('');
 
     menu.innerHTML = `
@@ -723,7 +728,7 @@ function formatSubject(subject) {
         const label = `Group ${subject.groupId}`;
         return state.subjectAutoFilled ? `${label} (from selection)` : label;
     } else if (subject.type === 'idle-filter') {
-        return `Idle ${subject.filterClass}`;
+        return `All ${subject.filterClass}`;
     } else if (subject.type === 'ai') {
         return 'the AI';
     }

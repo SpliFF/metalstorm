@@ -79,6 +79,7 @@ const CLIENT_MATERIAL_PORTS = new Set(['zk-939', 'cus-pbr']);
 import { BuildingPlateRenderer } from './building-plate-renderer.js';
 import { DefCache } from './def-cache.js';
 import { fetchAndIngestDefs } from './defs-fetch.js';
+import { resolveUnitClassToDefIds } from './unit-class-filter.js';
 import { PresentationClock } from './presentation-clock.js';
 import { EventScheduler, type ScheduledKind } from './event-scheduler.js';
 import { PendingActionRegistry } from './pending-actions.js';
@@ -4285,8 +4286,27 @@ export function gpHandleGroupPosture(groupId: number, postureJson: string): void
 }
 
 export function gpHandleGroupDirectiveUpdate(msg: GpGroupDirectiveUpdateToWorker): void {
+    // Resolve the subject's class name to the wire's `squad_types` here: the
+    // UI thread has the class vocabulary but not the streamed def table, and
+    // an unresolvable class must send NO filter rather than an empty one —
+    // empty `squad_types` is the wildcard, so a typo would silently widen the
+    // directive to the whole army instead of matching nothing (D56).
+    let conditions: { idleOnly?: boolean; squadTypes?: number[] } | undefined;
+    if (msg.conditions) {
+        conditions = { idleOnly: msg.conditions.idleOnly };
+        const cls = msg.conditions.unitClass;
+        if (cls) {
+            const defIds = resolveUnitClassToDefIds(cls, gpDefCache?.getAllUnitDefs() ?? []);
+            if (defIds.length > 0) {
+                conditions.squadTypes = defIds;
+            } else {
+                postLog(2, `[gp] directive subject class "${cls}" matches no unit def in this ` +
+                           `game — sending the directive unfiltered`);
+            }
+        }
+    }
     gpCtx.connection?.sendGroupDirective(msg.directiveId, msg.groupId, msg.directiveType, msg.shape, msg.params,
-        { priority: msg.priority, requestedStrength: msg.requestedStrength, active: msg.active });
+        { priority: msg.priority, requestedStrength: msg.requestedStrength, active: msg.active, conditions });
 }
 
 export function gpHandleGroupDirectiveRemove(directiveId: number): void {

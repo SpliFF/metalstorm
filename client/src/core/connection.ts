@@ -98,6 +98,7 @@ import { PathResponse } from '../protocol/spring-web/path-response.js';
 import { StandingOrderState } from '../protocol/spring-web/standing-order-state.js';
 import { StandingOrderType } from '../protocol/spring-web/standing-order-type.js';
 import { StandingOrderCreate } from '../protocol/spring-web/standing-order-create.js';
+import { StandingOrderConditions } from '../protocol/spring-web/standing-order-conditions.js';
 import { OrgGroupState } from '../protocol/spring-web/org-group-state.js';
 import { OrgGroupInfo } from '../protocol/spring-web/org-group-info.js';
 import { OrgGroupCreate } from '../protocol/spring-web/org-group-create.js';
@@ -1932,18 +1933,39 @@ export class Connection {
      *  never fills `conditions` itself for a group-scoped directive).
      *  `shape`/`params` follow the `OrderShape` layout (macro-directives §1):
      *  Point [x,y,z] · Circle [x,y,z,radius] · Polygon [x1,y1,z1,...] (ring) ·
-     *  Polyline [frontage,x1,y1,z1,...] (the front line). */
+     *  Polyline [frontage,x1,y1,z1,...] (the front line).
+     *
+     *  `opts.conditions` is the *ungrouped* case's roster: a directive with
+     *  `groupId = 0` and no conditions matches every idle unit on the team,
+     *  which is why the composer's class subjects used to be decorative
+     *  (PLAN-endtoend.md D56). Only the two fields the composer can express
+     *  are written; the rest keep their schema defaults. */
     sendGroupDirective(
         directiveId: number,
         groupId: number,
         type: number,
         shape: number,
         params: number[],
-        opts: { priority?: number; requestedStrength?: number; active?: boolean } = {},
+        opts: {
+            priority?: number; requestedStrength?: number; active?: boolean;
+            conditions?: { idleOnly?: boolean; squadTypes?: number[] };
+        } = {},
     ): void {
         if (!this.authenticated) return;
-        const builder = new flatbuffers.Builder(128 + params.length * 4);
+        const squadTypes = opts.conditions?.squadTypes ?? [];
+        const builder = new flatbuffers.Builder(128 + params.length * 4 + squadTypes.length * 2);
         const paramsOff = GroupDirective.createParamsVector(builder, params);
+        // Nested tables and vectors must be built before the parent starts.
+        let conditionsOff: flatbuffers.Offset | null = null;
+        if (opts.conditions) {
+            const squadTypesOff = squadTypes.length > 0
+                ? StandingOrderConditions.createSquadTypesVector(builder, squadTypes)
+                : null;
+            StandingOrderConditions.startStandingOrderConditions(builder);
+            StandingOrderConditions.addIdleOnly(builder, opts.conditions.idleOnly ?? true);
+            if (squadTypesOff !== null) StandingOrderConditions.addSquadTypes(builder, squadTypesOff);
+            conditionsOff = StandingOrderConditions.endStandingOrderConditions(builder);
+        }
         this.commandSequence++;
         GroupDirective.startGroupDirective(builder);
         GroupDirective.addSequence(builder, this.commandSequence);
@@ -1953,6 +1975,7 @@ export class Connection {
         GroupDirective.addPriority(builder, opts.priority ?? 0);
         GroupDirective.addShape(builder, shape);
         GroupDirective.addParams(builder, paramsOff);
+        if (conditionsOff !== null) GroupDirective.addConditions(builder, conditionsOff);
         GroupDirective.addRequestedStrength(builder, opts.requestedStrength ?? 0);
         GroupDirective.addActive(builder, opts.active ?? true);
         const off = GroupDirective.endGroupDirective(builder);

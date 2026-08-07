@@ -218,9 +218,10 @@ static bool DirIsIdle(const CUnit* u)
     return u->commandAI->commandQue.empty();
 }
 
-/// Non-spatial conditions (idleOnly is handled by the caller so a
-/// group-scoped directive can re-issue only to idle members). Spatial /
-/// type / strength filters mirror StandingOrders' PassesConditions.
+/// Non-spatial conditions (idleOnly is handled by the caller — it decides
+/// both the candidate gate and the release rule, which are inverses of each
+/// other). Spatial / type / strength filters mirror StandingOrders'
+/// PassesConditions.
 static bool DirPassesFilters(const CUnit* u, const StandingOrderConditions& c)
 {
     if (!c.squadTypes.empty()) {
@@ -496,13 +497,26 @@ void DirectiveManager::Evaluate(uint32_t currentFrame)
 
     // Release assignments for dead / direct-commanded units, then recompute
     // the fulfillment strength from live health.
+    //
+    // The release rule is the inverse of the candidate gate, so it has to read
+    // the same `idleOnly` flag. An idle-gated directive only ever assigns units
+    // with an empty queue, so "has a queue again" means something else took the
+    // unit (Q-D-d §3's suspend / auto-rejoin). A directive that is NOT idle-gated
+    // hands the unit its queue itself: applying the same test there would release
+    // every member on the tick after it was assigned, and — because the released
+    // unit is a candidate again immediately — re-issue the same command forever.
     for (auto& d : directives) {
         if (!d.active) { d.assigned.clear(); d.assignedStrength = 0.0f; continue; }
         float strength = 0.0f;
         for (auto it = d.assigned.begin(); it != d.assigned.end(); ) {
             const CUnit* u = unitHandler.GetUnit(*it);
-            if (u == nullptr || u->isDead || !u->commandAI->commandQue.empty()) {
-                it = d.assigned.erase(it);   // died, or direct-commanded → re-pool
+            const bool gone = (u == nullptr || u->isDead);
+            // idle-gated: taken by someone else. Otherwise: our own order is done.
+            const bool done = !gone && (d.conditions.idleOnly
+                ? !u->commandAI->commandQue.empty()
+                :  u->commandAI->commandQue.empty());
+            if (gone || done) {
+                it = d.assigned.erase(it);
             } else {
                 strength += u->health;
                 ++it;
@@ -524,7 +538,14 @@ void DirectiveManager::Evaluate(uint32_t currentFrame)
             if (u == nullptr || u->isDead) return;
             if (u->team != d.team) return;
             if (d.assigned.count(u->id) != 0) return;
-            if (!DirIsIdle(u)) return;                // suspend/auto-rejoin
+            // `idleOnly` is the wire default (true), so every existing caller
+            // keeps the suspend/auto-rejoin behaviour. A directive that clears
+            // it is an explicit order from the team's commander and overrides
+            // what the unit is already doing — without that, a scenario that
+            // stages its army with opening orders (every Metalstorm war does)
+            // leaves a player unable to redirect a single combat unit for the
+            // whole match. See PLAN-endtoend.md D56.
+            if (d.conditions.idleOnly && !DirIsIdle(u)) return;
             if (!DirPassesFilters(u, d.conditions)) return;
             // Demand model: stop once the requested aggregate strength is met.
             if (d.requestedStrength > 0 && d.assignedStrength >= static_cast<float>(d.requestedStrength))

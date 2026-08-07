@@ -18,7 +18,13 @@ import { uiStore } from './ui-store.js';
 export interface CommandConnection {
     sendGroupDirective(
         directiveId: number, groupId: number, type: number, shape: number, params: number[],
-        opts?: { priority?: number; requestedStrength?: number; active?: boolean },
+        opts?: {
+            priority?: number; requestedStrength?: number; active?: boolean;
+            /** Subject-slot conditions for an ungrouped directive (D56). The
+             *  class name is resolved to `squad_types` inside the worker,
+             *  which is where the streamed def table lives. */
+            conditions?: { idleOnly?: boolean; unitClass?: string };
+        },
     ): void;
     sendGroupDirectiveRemove(directiveId: number): void;
     sendStandingOrderCreate(type: number, priority: number, params: number[], expiresInFrames?: number): void;
@@ -247,7 +253,11 @@ export function createSendCommand(
                             p.directiveType ?? 0,
                             p.shape ?? 0,
                             p.params ?? [],
-                            { priority: p.priority, requestedStrength: p.requestedStrength },
+                            {
+                                priority: p.priority,
+                                requestedStrength: p.requestedStrength,
+                                conditions: p.conditions,
+                            },
                         );
                     } else if (cmd.groupId != null) {
                         // Legacy flat shape for any caller that isn't the
