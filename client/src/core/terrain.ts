@@ -40,7 +40,9 @@ import type { LosBitmap } from './los-bitmap.js';
 import { DecalOverlayPlugin, attachDecalOverlay } from './decal-overlay-plugin.js';
 import type { FineWindowState } from './decal-overlay.js';
 import { WaterAbsorptionPlugin, attachWaterAbsorption } from './water-absorption-plugin.js';
-import { TerrainSplatPlugin, attachTerrainSplat } from './terrain-splat-plugin.js';
+import {
+    TerrainSplatPlugin, attachTerrainSplat, attachTerrainDetailPlain,
+} from './terrain-splat-plugin.js';
 import type { MapWaterAbsorption } from './map-lighting.js';
 
 const SQUARE_SIZE = 8;
@@ -1285,11 +1287,19 @@ function findTerrainSplatPlugin(
         : undefined;
 }
 
-/** Re-attach the splat-detail plugin after a material swap (shares textures). */
+/** Re-attach the near-field detail plugin after a material swap (shares
+ *  textures). Carries the mode: a plain-detail map must not come back as a
+ *  splat map with no textures to sample. */
 function reattachTerrainSplat(
     mat: StandardMaterial, prev: TerrainSplatPlugin | undefined,
 ): void {
-    if (prev && prev.distrTexture && prev.detailTexture) {
+    if (!prev) return;
+    if (prev.mode === 'plain') {
+        if (prev.plainDetailTexture)
+            attachTerrainDetailPlain(mat, prev.plainDetailTexture);
+        return;
+    }
+    if (prev.distrTexture && prev.detailTexture) {
         attachTerrainSplat(
             mat, prev.distrTexture, prev.detailTexture,
             prev.texScales, prev.texMults, prev.worldW, prev.worldH);
@@ -1336,6 +1346,56 @@ export function attachTerrainSplatFromDecals(
         }
     }
     return attached;
+}
+
+/** Attach Recoil's plain-detail shading (`resources.detailTex`) — the other,
+ *  mutually exclusive half of `GetDetailTextureColor`
+ *  (PLAN-terrain-detailtex.md §2.3). Callers must try
+ *  `attachTerrainSplatFromDecals` FIRST and only fall back here: the splat pair
+ *  wins where a map declares both, exactly as the shader's `#ifndef` does.
+ *  Idempotent, and survives material swaps via `reattachTerrainSplat` (which
+ *  carries the mode). Returns false when the map ships no `detailTex`. */
+export function attachTerrainDetailPlainFromDecals(
+    scene: Scene,
+    terrain: TerrainMeshGroup,
+    decals: { detailTex: string },
+    mapBaseUrl: string,
+): boolean {
+    if (!decals.detailTex) return false;
+    const url = /^(https?:)?\/\//.test(decals.detailTex) || decals.detailTex.startsWith('/')
+        ? decals.detailTex : `${mapBaseUrl}/${decals.detailTex}`;
+
+    const detail = new Texture(url, scene,
+        false, false /* invertY: KTX2 path ignores, raster stays top-down */);
+    detail.wrapU = Texture.WRAP_ADDRESSMODE;
+    detail.wrapV = Texture.WRAP_ADDRESSMODE;
+    detail.anisotropicFilteringLevel = 4;
+
+    let attached = false;
+    for (const m of terrain.materials) {
+        if (m instanceof StandardMaterial && !findTerrainSplatPlugin(m)) {
+            attachTerrainDetailPlain(m, detail);
+            attached = true;
+        }
+    }
+    return attached;
+}
+
+/** Enable/disable the near-field terrain detail plugin (either mode) on every
+ *  terrain material — the A/B hook the acceptance shots in
+ *  PLAN-terrain-detailtex.md §4 need, since CDP screenshots cannot see the
+ *  WebGL2 canvas. Returns whether any plugin was found + toggled. */
+export function setTerrainDetailPluginEnabled(
+    terrain: TerrainMeshGroup | null, on: boolean,
+): boolean {
+    let found = false;
+    for (const mat of terrain?.materials ?? []) {
+        const plugin = findTerrainSplatPlugin(mat);
+        if (!plugin) continue;
+        plugin.isEnabled = on;
+        found = true;
+    }
+    return found;
 }
 
 /** Attach the underwater terrain-absorption tint (Recoil SMF

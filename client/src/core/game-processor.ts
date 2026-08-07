@@ -34,6 +34,7 @@ import type { EntityStateSnapshot } from './entity-state.js';
 // `globalThis` for this move — PLAN-game-worker.md GW4 Bucket-2).
 import {
     buildTerrainMesh, loadTerrainTextures, attachTerrainSplatFromDecals,
+    attachTerrainDetailPlainFromDecals, setTerrainDetailPluginEnabled,
     TerrainFog, DeformableTerrain, isTerrainMesh, attachTerrainDecalOverlay,
     setTerrainDecalPluginEnabled, attachTerrainWaterAbsorption,
     type MapDimensions, type FogDarkening, type TerrainMeshGroup,
@@ -818,10 +819,13 @@ async function gpLoadMap(msg: GpInitToWorker): Promise<void> {
         });
     }
 
-    // Recoil splat-detail shading (PLAN-maps.md §1.2): near-field signed
-    // detail layers over the baked tile albedo. No-op when the map ships no
-    // splat textures. Attached now (before the async tile-atlas swap lands);
-    // the reattach dance in terrain.ts carries it across material swaps.
+    // Recoil near-field terrain detail (PLAN-maps.md §1.2,
+    // PLAN-terrain-detailtex.md): signed detail layers over the baked tile
+    // albedo. The two paths are mutually exclusive per map, same precedence as
+    // SMFFragProg's `#ifdef SMF_DETAIL_TEXTURE_SPLATTING` / `#ifndef`: splat
+    // pair if declared, else the plain `detailTex`. No-op when the map ships
+    // neither. Attached now (before the async tile-atlas swap lands); the
+    // reattach dance in terrain.ts carries it — and its mode — across swaps.
     if (map.decals?.splatDistrTex && map.decals?.splatDetailTex) {
         try {
             attachTerrainSplatFromDecals(scene, terrain, {
@@ -833,6 +837,14 @@ async function gpLoadMap(msg: GpInitToWorker): Promise<void> {
             postLog(0, '[gp] terrain splat-detail attached');
         } catch (e) {
             postLog(2, `[gp] terrain splat attach failed: ${e}`);
+        }
+    } else if (map.decals?.detailTex) {
+        try {
+            attachTerrainDetailPlainFromDecals(
+                scene, terrain, { detailTex: map.decals.detailTex }, mapBaseUrl);
+            postLog(0, '[gp] terrain detail attached (plain)');
+        } catch (e) {
+            postLog(2, `[gp] terrain detail attach failed: ${e}`);
         }
     }
 
@@ -2323,6 +2335,11 @@ export function gpInit(msg: GpInitToWorker): void {
         /** Hazard #1: the ~10-tap terrain decal-overlay fragment block. */
         terrainPlugin: (on: boolean): boolean =>
             setTerrainDecalPluginEnabled(gpTerrain, on),
+        /** PLAN-terrain-detailtex §4: A/B the near-field terrain detail
+         *  (splat or plain mode, whichever the map attached). The acceptance
+         *  shots need it because CDP screenshots cannot see the canvas. */
+        terrainDetail: (on: boolean): boolean =>
+            setTerrainDetailPluginEnabled(gpTerrain, on),
         /** Hazard #2: the periodic + pan-driven full RTT re-stamp. */
         decalFade: (on: boolean): boolean => {
             if (!gpDecalOverlay) return false;

@@ -5,8 +5,11 @@ import {
     fogTierAlpha255, DEFAULT_FOG_DARKENING,
     planTerrainChunks, buildSurfaceGeometry, computeSurfaceNormals,
     buildTerrainMesh, DeformableTerrain, isTerrainMesh,
+    attachTerrainSplatFromDecals, attachTerrainDetailPlainFromDecals,
+    setTerrainDetailPluginEnabled,
     type AtlasPagePlan, type MapDimensions, type SurfaceGeometry,
 } from './terrain.js';
+import { TerrainSplatPlugin } from './terrain-splat-plugin.js';
 
 const SQUARE_SIZE = 8;
 
@@ -641,5 +644,68 @@ describe('DeformableTerrain (per-chunk patches)', () => {
             x1: 900, z1: 900, x2: 902, z2: 902, heights: new Float32Array(9).fill(7),
         });
         expect(deform.appliedPatches).toBe(0);
+    });
+});
+
+// PLAN-terrain-detailtex.md §2.1/§2.3: a map declares the splat pair or the
+// plain `detailTex`, never both — the shader has one `#ifdef`/`#ifndef` pair,
+// so the client must pick with the same precedence. The guard that enforces it
+// is "one detail plugin per material": whichever attaches first wins.
+describe('terrain near-field detail attach', () => {
+    const BASE = 'http://localhost:1/api/maps/m/data';
+    const pluginOf = (mat: unknown): TerrainSplatPlugin | undefined =>
+        ((mat as { pluginManager?: { _plugins?: unknown[] } }).pluginManager?._plugins
+            ?.find((p): p is TerrainSplatPlugin => p instanceof TerrainSplatPlugin));
+
+    it('attaches plain mode from decals.detailTex, resolved against the map URL', () => {
+        const { scene, group } = makeChunkedTerrain();
+        expect(attachTerrainDetailPlainFromDecals(
+            scene, group, { detailTex: 'detail.ktx2' }, BASE)).toBe(true);
+        for (const mat of group.materials) {
+            const p = pluginOf(mat);
+            expect(p?.mode).toBe('plain');
+            expect(p?.isEnabled).toBe(true);
+            expect(p?.plainDetailTexture?.name).toBe(`${BASE}/detail.ktx2`);
+        }
+    });
+
+    it('is a no-op for a map that ships no detailTex', () => {
+        const { scene, group } = makeChunkedTerrain();
+        expect(attachTerrainDetailPlainFromDecals(
+            scene, group, { detailTex: '' }, BASE)).toBe(false);
+        expect(pluginOf(group.materials[0])).toBeUndefined();
+    });
+
+    it('leaves an absolute detail URL alone', () => {
+        const { scene, group } = makeChunkedTerrain();
+        attachTerrainDetailPlainFromDecals(
+            scene, group, { detailTex: 'https://cdn/x/detail.ktx2' }, BASE);
+        expect(pluginOf(group.materials[0])?.plainDetailTexture?.name)
+            .toBe('https://cdn/x/detail.ktx2');
+    });
+
+    it('gives the splat pair precedence over the plain path', () => {
+        const { scene, group, dims } = makeChunkedTerrain();
+        expect(attachTerrainSplatFromDecals(scene, group, {
+            splatDistrTex: 'splat_distr.ktx2', splatDetailTex: 'splat_detail.ktx2',
+            splatScales: [0.02, 0.02, 0.02, 0.02], splatMults: [1, 1, 1, 1],
+        }, BASE, dims)).toBe(true);
+        // A map declaring both must not end up double-adding signed detail.
+        expect(attachTerrainDetailPlainFromDecals(
+            scene, group, { detailTex: 'detail.ktx2' }, BASE)).toBe(false);
+        for (const mat of group.materials) {
+            expect(pluginOf(mat)?.mode).toBe('splat');
+        }
+    });
+
+    it('toggles either mode through the A/B hook', () => {
+        const { scene, group } = makeChunkedTerrain();
+        expect(setTerrainDetailPluginEnabled(group, false)).toBe(false);
+        attachTerrainDetailPlainFromDecals(
+            scene, group, { detailTex: 'detail.ktx2' }, BASE);
+        expect(setTerrainDetailPluginEnabled(group, false)).toBe(true);
+        expect(pluginOf(group.materials[0])?.isEnabled).toBe(false);
+        expect(setTerrainDetailPluginEnabled(group, true)).toBe(true);
+        expect(pluginOf(group.materials[0])?.isEnabled).toBe(true);
     });
 });

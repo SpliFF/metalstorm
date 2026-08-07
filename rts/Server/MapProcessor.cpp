@@ -698,7 +698,12 @@ bool MapProcessor::ExtractDecalTextures(MapMetadata& meta) {
         if (field.empty()) return;
         std::string src = resolveTexturePath(meta.sourcePath, field);
         if (src.empty()) {
-            SLOG(SPRING_LOG_DEBUG, "decal '%s' missing: %s", baseName, field.c_str());
+            // Declared means the mapper intended it; failing to resolve it is a
+            // content bug, and at DEBUG the whole pipeline reads as wired from
+            // the logs (PLAN-terrain-detailtex.md §1) — that is how the dead
+            // `detailTex` path stayed invisible.
+            SLOG(SPRING_LOG_WARNING, "decal '%s' declared but unresolvable: %s",
+                baseName, field.c_str());
             field.clear();
             return;
         }
@@ -706,8 +711,14 @@ bool MapProcessor::ExtractDecalTextures(MapMetadata& meta) {
         std::string dstName = std::string(baseName) + ".ktx2";
         std::string dstPath = meta.processedDir + "/" + dstName;
 
+        // --mipmaps: Recoil's near-field detail is signed (tex*2-1), so it
+        // self-fades to nothing as the mip chain averages it towards mid-grey.
+        // That chain IS the distance falloff — there is no fade uniform in
+        // SMFFragProg — so a level-1 decal KTX2 aliases at full strength all
+        // the way to the horizon. DDS sources keep whatever chain they ship
+        // (the flag only reaches the RGBA8 encode path).
         std::string cmd = std::string("\"") + TEXTURECONVERTER_BINARY_PATH + "\""
-            " --encoding uastc"
+            " --encoding uastc --mipmaps"
             " \"" + src + "\" \"" + dstPath + "\" 2>&1";
         FILE* p = popen(cmd.c_str(), "r");
         if (!p) { field.clear(); return; }
