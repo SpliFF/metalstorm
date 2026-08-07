@@ -285,6 +285,32 @@ little, you are reading **backpressure**, and the true cost is in frame time.
 A pre-M8 `render`-phase number for anything fillrate-bound is not comparable to
 a post-M8 one — the instrument changed, not the cost.
 
+**⚠️ A GPU cost measured on an idle scene is not that cost under load — measure a
+fillrate lever under the load you are budgeting for.** Load moves the bottleneck:
+an idle frame here is GPU-bound, so fragment work is the critical path, but under
+a real battle the frame is CPU-bound on `entity` and the same fragment work
+overlaps it instead of extending the frame. PLAN-maps **M7c** took the identical
+terrain-splat toggle, pose and buffer that read **≈1.8 ms idle** (M7b) and
+measured it under PLAN-perf's XL900 battle: **0.484 ms at the strategic pose
+(73 % absorbed) and −0.008 ms — nothing — at the gameplay pose**, where 900 units
+early-Z away the ground that was paying for it. A lever priced idle can be worth
+a quarter of its quoted value in the frame you actually ship. **Absorption falls
+as the buffer grows** (the same toggle is still worth 2.269 ms at 4.30 MP under
+the same load), so quote *both* the load and the buffer with any fillrate number.
+The corollary bites on the way in, too: a fillrate optimisation justified on an
+idle profile may buy nothing at all.
+
+**⚠️ `window.test.perfDump(ms)` reads the ring buffer and returns immediately — it
+does not wait `ms`.** `perfReset()` followed straight by `await perfDump(20000)`
+returns a fully-populated table of **zeros** (`frames: 0`, every phase 0.00),
+which reads like a broken profiler rather than a missing sleep, and is a
+different failure from the unawaited-`{}` case above. The caller owns the wait:
+`perfReset()` → `await sleep(ms)` → `await perfDump(ms)`. Relatedly,
+`setHardwareScalingLevel` **does not take effect within the same call** — reading
+`getRenderWidth()` straight back reports the *old* buffer, so restoring a buffer
+looks like it silently failed; re-read after a frame (~1.5 s) and loop until it
+matches the target.
+
 **⚠️ A vsync cap silently truncates the cheap arm, turning a delta into a lower
 bound.** On this 120 Hz display the splat-off arm returned **exactly 2400 frames
 per 20 s window (120.0 fps) every time** — a clamp, not a measurement, so the
