@@ -94,6 +94,15 @@ const state = {
     accelValue: '',         // Current text-field contents
     accelNotice: null,      // string | null
 
+    // Commit/preset outcome readout. Every one of these used to be a native
+    // `alert()` — a modal browser dialog on the game's PRIMARY command verb,
+    // which froze the render loop and had to be dismissed before the next
+    // order could be composed (endtoend fire 26, D54). The message is the
+    // same; it now lands inline next to the Commit button.
+    // `{ text: string, kind: 'ok' | 'error' } | null`
+    status: null,
+    statusTimer: null,      // setTimeout handle auto-clearing an 'ok' status
+
     // Context (set on init)
     ctx: null,
     unsubs: [],             // Unsubscribe functions
@@ -243,6 +252,10 @@ function render() {
         <div class="composer-row composer-controls">
             <div class="composer-echo${state.verb && state.subject && state.target ? ' is-ready' : ''}">${renderEcho()}</div>
             <div class="composer-cost" id="composer-cost"></div>
+            <div class="composer-status${state.status ? ' is-' + state.status.kind : ''}"
+                id="composer-status" role="status" aria-live="polite">${
+                    state.status ? escapeHtml(state.status.text) : ''
+                }</div>
             <button id="accel-toggle-btn" class="nui-btn${state.accelVisible ? ' is-active' : ''}"
                 title="Type a command in plain keywords (optional accelerator — the chips above stay in charge)"
                 aria-pressed="${state.accelVisible}">⌨</button>
@@ -914,18 +927,55 @@ function buildIntent() {
 }
 
 /**
+ * Show a commit/preset outcome inline, next to the Commit button.
+ *
+ * Replaces the native `alert()` this path used to raise. An 'ok' status
+ * auto-clears so a burst of orders doesn't leave stale confirmations behind;
+ * an 'error' stays until the player's next commit or Clear, because it is the
+ * only record of *why* an order did not go out.
+ *
+ * Updates the node in place rather than re-rendering — a full render() during
+ * commit would tear down any open menu and drop the Target-search hook.
+ */
+function setStatus(text, kind) {
+    if (state.statusTimer) {
+        clearTimeout(state.statusTimer);
+        state.statusTimer = null;
+    }
+
+    state.status = text ? { text, kind } : null;
+
+    const el = state.container?.querySelector('#composer-status');
+    if (el) {
+        el.textContent = text || '';
+        el.classList.toggle('is-ok', Boolean(text) && kind === 'ok');
+        el.classList.toggle('is-error', Boolean(text) && kind === 'error');
+    }
+
+    if (text && kind === 'ok') {
+        state.statusTimer = setTimeout(() => {
+            state.statusTimer = null;
+            setStatus(null);
+        }, STATUS_OK_MS);
+    }
+}
+
+/** How long a success readout stays up before clearing itself. */
+const STATUS_OK_MS = 4000;
+
+/**
  * Handle commit button click
  */
 function handleCommit() {
     const intent = buildIntent();
     if (!intent) {
-        alert('Cannot commit: missing required slots');
+        setStatus('Cannot commit: missing required slots', 'error');
         return;
     }
 
     const error = validateIntent(intent);
     if (error) {
-        alert(`Invalid command: ${error}`);
+        setStatus(`Invalid command: ${error}`, 'error');
         return;
     }
 
@@ -935,13 +985,15 @@ function handleCommit() {
     // lets a click through the disabled button's own title tooltip.
     const preview = computeCostPreview();
     if (preview && !preview.affordable) {
-        alert(`Insufficient authority: needs ${preview.cost}, short by ${preview.shortfall}. Order not sent.`);
+        setStatus(
+            `Insufficient authority: needs ${preview.cost}, short by ${preview.shortfall}. Order not sent.`,
+            'error');
         return;
     }
 
     const compiled = compileIntent(intent);
     if (!compiled) {
-        alert('Failed to compile command');
+        setStatus('Failed to compile command', 'error');
         return;
     }
 
@@ -949,13 +1001,14 @@ function handleCommit() {
 
     if (state.ctx && state.ctx.sendCommand) {
         state.ctx.sendCommand(compiled);
-        alert('Command sent!');
+        // Clear first: handleClear() re-renders, which would otherwise wipe
+        // the status node we just wrote.
+        handleClear();
+        setStatus('Command sent', 'ok');
     } else {
-        alert('sendCommand not wired yet (see console for compiled payload)');
+        handleClear();
+        setStatus('sendCommand not wired yet (see console for compiled payload)', 'error');
     }
-
-    // Clear after commit
-    handleClear();
 }
 
 /**
@@ -976,6 +1029,11 @@ function handleClear() {
     state.subjectAutoFilled = false;
     state.staleNotice = null;
     state.accelNotice = null;
+    if (state.statusTimer) {
+        clearTimeout(state.statusTimer);
+        state.statusTimer = null;
+    }
+    state.status = null;
 
     render();
 }
@@ -1001,7 +1059,7 @@ async function refreshPresetsCache() {
 async function handleSavePreset() {
     const intent = buildIntent();
     if (!intent || validateIntent(intent)) {
-        alert('Fill all required slots (verb, subject, target) before saving a preset.');
+        setStatus('Fill all required slots (verb, subject, target) before saving a preset.', 'error');
         return;
     }
 
@@ -1010,11 +1068,12 @@ async function handleSavePreset() {
 
     const error = await saveCommandPreset(name.trim(), intent);
     if (error) {
-        alert(`Could not save preset: ${error}`);
+        setStatus(`Could not save preset: ${error}`, 'error');
         return;
     }
 
     await refreshPresetsCache();
+    setStatus(`Preset "${name.trim()}" saved`, 'ok');
 }
 
 /** Presets button: opens the saved-preset list. Each entry loads on click;

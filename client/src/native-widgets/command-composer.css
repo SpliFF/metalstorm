@@ -98,6 +98,22 @@
 }
 .composer-cost.is-refused { color: var(--nui-bad); font-weight: 600; }
 
+/* Commit/preset outcome (endtoend fire 26, D54) — this readout replaced a
+   native alert() on the game's primary command verb. Empty and zero-width
+   until something has been committed, so it never reserves space in the
+   control row; wraps rather than pushing Commit off the row when a long
+   refusal reason lands. */
+.composer-status {
+    flex: 0 1 auto;
+    min-width: 0;
+    font: var(--nui-font-mono);
+    font-size: 11px;
+    font-weight: 600;
+}
+.composer-status:empty { display: none; }
+.composer-status.is-ok { color: var(--nui-good, #6fcf7f); }
+.composer-status.is-error { color: var(--nui-bad); }
+
 /* Icon-only preset buttons (task 6) — narrow so they don't crowd out the
    echo/Commit/Clear in the 560px control row. */
 #save-preset-btn,
