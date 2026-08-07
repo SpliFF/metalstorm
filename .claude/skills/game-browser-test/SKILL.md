@@ -128,6 +128,38 @@ A black/empty game area in a screenshot does NOT mean nothing rendered. Use
 human-viewed browser, or data-level checks (`window.__gp` mesh/texture counts)
 instead of trusting the pixel capture.
 
+**`highResScreenshot()` does NOT preserve the buffer either — it is
+`screenshot()`, which is a bare `canvas.convertToBlob()` in the worker.**
+(Read it: `test-harness.ts` `highResScreenshot` voids its args and calls
+`screenshot()`; `game-processor.ts`'s `screenshot` case converts the live
+canvas.) So it races the compositor exactly like CDP does, just less often —
+and `test.pause()` does not help, because the buffer is already gone by the time
+the async blob is read. For any **A/B comparison** (toggle a plugin, shoot,
+toggle back, shoot) that race is fatal: one arm silently returns a fully black
+PNG and you "measure" a 100 % effect. Do the render, the capture *and* the pixel
+reduction inside **one** `window.__gp(...)` expression so nothing can present in
+between — `evalJs` awaits promises, so:
+
+```js
+await window.__gp('(async()=>{ const s=self.__entityRenderer.scene; s.render();' +
+  ' const b=await s.getEngine().getRenderingCanvas().convertToBlob({type:"image/png"});' +
+  ' const bmp=await createImageBitmap(b); /* draw to OffscreenCanvas, getImageData, reduce */' +
+  ' return {mean, hf}; })()');
+```
+
+Two useful reductions: *mean luminance* (does the change shift overall
+brightness?) and *hf* = mean |ΔL| between horizontally adjacent pixels (is there
+grain?). Both are objective and survive being quoted in a plan file.
+
+**Corollary, learned the hard way: a black frame is not always the capture.**
+On `scorched_crossing_v2.4` the terrain really does render black once the splat
+detail is removed (PLAN-endtoend **D48**: the tile albedo is empty, so the
+signed splat detail is the only thing painting the ground). The standing "a
+black capture proves nothing" rule cuts both ways — before blaming the harness,
+check `scene.getActiveMeshes().length`, `material.isReady(mesh)`, the effect's
+`getCompilationError()` and `engine.getFps()`; if the loop is healthy and the
+pixels are 0, the pixels are the truth.
+
 **…and the exact converse — `highResScreenshot()` cannot see the DOM.** It
 renders the *canvas*, so no HTML overlay is in it: not the game-over overlay,
 not the quit confirm, not the HUD panels, not a toast. Reaching for it out of
