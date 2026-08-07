@@ -568,6 +568,21 @@ local function stageUnits(units, landmarks)
             else
                 created = created + 1
                 staged = staged + 1
+                -- Gaia set dressing is NEUTRAL, not merely unallied. Gaia is its
+                -- own ally team with no allies, which is this engine's definition
+                -- of hostile: a FIGHT-ordered column auto-acquires a village and
+                -- stops to level it. Measured on `crossing_standoff` (endtoend
+                -- D53): the union army spent frames 2307-4104 destroying the Ash
+                -- Verge settlement 200 elmos off its own approach and reached the
+                -- prize 2700 frames after the compact army, which is most of why
+                -- the same side won every recorded war on that map. Neutrality is
+                -- the engine's own answer — CWeapon::AutoTarget skips a neutral
+                -- unless fireState >= FIRESTATE_FIREATNEUTRAL and MobileCAI will
+                -- not chase one — and it leaves a deliberate attack order working,
+                -- so a town is still burnable, just never by accident.
+                if entry.team == 'neutral' then
+                    Spring.SetUnitNeutral(unitID, true)
+                end
                 if u.orders then
                 for _, o in ipairs(u.orders) do
                     Spring.GiveOrderToUnit(unitID, resolveCmd(o.cmd), o.params or {}, o.options or {})
@@ -745,6 +760,15 @@ end
 local function stageCivilians(civilians)
     for _, c in ipairs((civilians or {}).units or {}) do
         local unitID = GG.Civilians.Spawn(c.def, c.x, c.z, c.facing or 'south')
+        if unitID then
+            -- Same reasoning as the `team = 'neutral'` set dressing in
+            -- stageUnits (endtoend D53): ambient population standing beside a
+            -- settlement is scenery, and an army that walks past must not stop
+            -- to shoot it. Only the SCENARIO's ambient entries are marked here
+            -- — convoy payloads keep spawning hostile-to-the-other-side, which
+            -- is what makes an escort objective a real risk.
+            Spring.SetUnitNeutral(unitID, true)
+        end
         if unitID and c.role then
             GG.Civilians.Register(unitID, c.role)
         end
