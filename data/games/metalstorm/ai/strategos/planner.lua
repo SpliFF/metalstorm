@@ -98,6 +98,29 @@ local STANCE_BIAS = {
     aggressive = { DEFEND = 0.8, SCOUT = 1.1, EXPAND = 1.45, BUILD = 1.0, OBJECTIVE = 1.25, RESERVE = 1.0 },
 }
 
+--- Allocation rank (endtoend Q-E1 / D47 — "what makes the prize contestable?",
+-- answer A: the AI must want the prize).
+--
+-- A `victory = true` objective is not worth its reward, it is worth the war,
+-- and no reward number is allowed to say so. On `crossing_standoff` the
+-- terminal control pays 300 against side controls that pay 110, so the planner
+-- priced the whole war at 2.7 side objectives — and since `score` is
+-- `value·pSuccess − cost` with cost scaling in package strength, an army-scale
+-- assault on defended ground scores BELOW a cheap posture whatever the reward
+-- is. Fire 23 measured the consequence: two independent wars, 14 player
+-- directives against 0, both ended on the identical frame, because neither AI
+-- ever went for the centre and the hold clock decided it.
+--
+-- So the terminal objective does not compete on score at all — it is allocated
+-- FIRST, taking the best package available, and everything else is scored
+-- against what is left. A magnitude weight would have been the same fix tuned
+-- to today's strength scale and silently broken by the next one. Whether the
+-- attack is *viable* stays a judgement, and stays in `goalFloor`.
+local function allocationRank(goal)
+    if goal.meta and goal.meta.victory then return 1 end
+    return 0
+end
+
 --- expectedValue: objective reward | region value, scaled by profile weights
 -- (aggression multiplies enemy-owned region value; §3.4), guidance paint, and
 -- the guidance stance. Region-derived values are lifted onto the authority
@@ -175,6 +198,29 @@ local function regionKind(goal, picture)
     return 'neutral'
 end
 
+--- Per-goal pSuccess floor (§3.3 "don't trickle: mass or skip"). Returns nil
+-- for a goal that is exempt from the floor entirely.
+--
+-- DEFEND is exempt — defending your own valuable ground is always worth it —
+-- and so is the terminal objective when WE are the ones holding it, for the
+-- same reason with the war riding on it.
+--
+-- Contesting a prize an ENEMY holds gets a LOWERED floor rather than an
+-- exemption (Q-E1/D47). Refusing to attack without a 60 % edge is right for a
+-- side objective and fatal for the one that ends the war: the alternative to a
+-- 45 % attack is not "no fight", it is a certain loss on the hold clock. So the
+-- floor drops to VICTORY_PSUCCESS_FLOOR and decays from there to zero as the
+-- holder's clock runs out. It deliberately overrides a cautious profile's own
+-- floor via min() — this is the one goal caution may not sit out.
+local function goalFloor(goal, floor, config)
+    if goal.kind == 'DEFEND' then return nil end
+    local vic = goal.meta and goal.meta.victory and goal.meta.victoryState
+    if not vic then return floor end
+    if vic.mine then return nil end
+    local vf = (config.VICTORY_PSUCCESS_FLOOR or 0.35) * (1 - (vic.progress or 0))
+    return math.min(floor, vf)
+end
+
 local function authorityCost(goal, pkg, kind, gov, config)
     if goal.kind == 'DEFEND' then
         return config.predictPostureCost(pkg, kind, gov.costScale)
@@ -224,6 +270,7 @@ local function assign(goals, packages, ctx)
     -- (Otherwise, since scores are cost-dominated and often negative, cheap
     -- RESERVE could out-rank a costly real objective and steal its package.)
     local cGoal, cPkg, cScore, cPs, cCost, cTie = {}, {}, {}, {}, {}, {}
+    local cRank, cMass = {}, {}   -- allocation tier + package mass (terminal tier)
     local n = 0
 
     for _, goal in ipairs(goals) do
@@ -232,6 +279,7 @@ local function assign(goals, packages, ctx)
             local ev = expectedValue(goal, picture, profile, guidance, config)
             local sw = sourceWeight(goal, role, guidance, profile)
             local kind = regionKind(goal, picture)
+            local rank = allocationRank(goal)
             local c = commitments[goal.id]
 
             for _, pkg in ipairs(packages) do
@@ -251,6 +299,7 @@ local function assign(goals, packages, ctx)
                     end
                     n = n + 1
                     cGoal[n], cPkg[n] = goal, pkg
+                    cRank[n], cMass[n] = rank, pkg.strength or 0
                     cScore[n] = ev * ps * sw - cost - travel + bonus
                     cPs[n], cCost[n] = ps, cost
                     -- Tie-break assigned up front (§10): calling rng.random()
@@ -263,10 +312,22 @@ local function assign(goals, packages, ctx)
         end
     end
 
-    -- Descending score; deterministic tie-break via the pre-assigned value.
+    -- Allocation tier first (the terminal objective picks its package before
+    -- anything else competes — see allocationRank), then descending score, then
+    -- the deterministic pre-assigned tie-break.
     local order = {}
     for i = 1, n do order[i] = i end
     table.sort(order, function(i, j)
+        if cRank[i] ~= cRank[j] then return cRank[i] > cRank[j] end
+        -- Inside the terminal-objective tier MASS picks the package, not score.
+        -- Score would pick the CHEAPEST one for the most important goal in the
+        -- war: cost scales with package strength and pSuccess is a flat prior
+        -- until the prize is actually defended, so `value·p − cost` is maximised
+        -- by the smallest force that can be sent. That is not a hypothetical —
+        -- it is what the live AI did (fire 24): 3 units dispatched at the war
+        -- while 14 sat on a rear DEFEND posture, every tick, until the fragment
+        -- died. §3.3's "mass or skip" applied to the one goal that decides it.
+        if cRank[i] == 1 and cMass[i] ~= cMass[j] then return cMass[i] > cMass[j] end
         if cScore[i] == cScore[j] then return cTie[i] < cTie[j] end
         return cScore[i] > cScore[j]
     end)
@@ -277,15 +338,28 @@ local function assign(goals, packages, ctx)
         local goal, pkg = cGoal[idx], cPkg[idx]
         local gid, pid = goal.id, pkg.id
         if not usedPkg[pid] and not usedGoal[gid] then
-            -- Force floor (§3.3): don't trickle into a losing fight. DEFEND is
-            -- exempt (defending your own valuable ground is always worth it).
-            local exemptFloor = goal.kind == 'DEFEND'
-            if exemptFloor or cPs[idx] >= floor then
+            -- Force floor (§3.3): don't trickle into a losing fight. DEFEND
+            -- and the terminal objective bend it — see goalFloor.
+            local gFloor = goalFloor(goal, floor, config)
+            if gFloor == nil or cPs[idx] >= gFloor then
                 -- Hysteresis: replacing an existing commitment needs to clear
                 -- the reassign bar (§3.3) — prevents thrash.
+                --
+                -- The terminal objective is exempt (fire 24). A package is
+                -- identified by the REGION its units are standing in, so an
+                -- army that marches out of its home region is re-bucketed into
+                -- a new package id and the goal's commitment stays pinned to
+                -- whatever rump was left behind — and the ×1.4 bar then makes
+                -- that pinning permanent, because the score of the big package
+                -- is comparable to, not 1.4× better than, the small one's.
+                -- Measured live: the war's goal held `pkg:home` (3 stragglers)
+                -- for every tick of the march while `pkg:iron_bend` (14 units)
+                -- took a rear DEFEND posture. Thrash is not the risk it would
+                -- be for a normal goal: within this tier the sort is by MASS,
+                -- so the choice is stable as long as the biggest force is.
                 local existing = commitments[gid]
                 local barOK = true
-                if existing and existing.packageId ~= pid then
+                if existing and existing.packageId ~= pid and cRank[idx] ~= 1 then
                     barOK = cScore[idx] > (existing.score or 0) * config.REASSIGN_BAR
                 end
                 if barOK then

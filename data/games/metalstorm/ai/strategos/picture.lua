@@ -108,11 +108,21 @@ local function readRegions(c)
     return staticRegions
 end
 
--- Mirrors game_objectives.lua's PUBLISHED_FIELDS exactly (same list
--- ui/lib/objectives.js's pull() polls) — the public objective contract.
+-- Mirrors game_objectives.lua's PUBLISHED_FIELDS (the same list
+-- ui/lib/objectives.js's pull() polls) — the public objective contract. The
+-- one deliberate omission is `completed_by`: it is only set on a RESOLVED
+-- objective, and nothing in the slate reasons about a finished race.
+--
+-- `victory` was missing here until endtoend Q-E1/D47: game_objectives.lua
+-- publishes it PUBLIC precisely so everyone can see which objective ends the
+-- war, and the AI was the one reader that never looked. Without it the
+-- terminal objective is just a 300-authority control among 110s, so the
+-- planner priced the war itself as ~2.7 tactical objectives and skipped it
+-- whenever the prize was defended.
 local BOARD_FIELDS = {
     'type', 'scope', 'state', 'reward', 'team', 'team2', 'progress',
     'phase', 'stage', 'expire', 'region', 'x', 'z', 'r', 'suggested', 'source',
+    'victory',
 }
 
 --- Objective board: board[id] = { type, scope, state, reward, team, progress,
@@ -162,6 +172,10 @@ local function readBoard(c)
                 -- is fog-honest). slate.lua keys the co-commander ×3 bounty
                 -- weighting off source == 'bounty'.
                 source = o.source,
+                -- Terminal objective (wars §7.1): completing it ENDS THE WAR.
+                -- Carried raw (published as 1, absent otherwise) — slate.lua
+                -- normalises it the same way it normalises `suggested`.
+                victory = o.victory,
             }
         end
     end

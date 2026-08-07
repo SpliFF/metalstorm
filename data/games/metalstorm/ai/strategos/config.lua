@@ -37,6 +37,15 @@ Config.TRAVEL_PENALTY_PER_HOP = 0.15   -- region-graph hops, not elmos
 -- Region value threshold for auto-DEFEND implicit goals (plan §3.1).
 Config.DEFEND_VALUE_MIN    = 1.0
 
+-- Terminal objective (endtoend Q-E1 / D47). Its published reward is an
+-- authority payout, not a statement of what winning is worth, so the planner
+-- does not price it — it ALLOCATES it first (planner.allocationRank) and only
+-- asks whether the attack is viable. This is that viability bar: it replaces
+-- PSUCCESS_FLOOR for a prize an enemy holds, and itself decays to 0 as the
+-- holder's hold clock fills, because the alternative to a bad attack on the
+-- last objective is not "no fight", it is a certain loss.
+Config.VICTORY_PSUCCESS_FLOOR = 0.35
+
 -- Strategic-value scale (plan §3.2 "region value × strategic weights"): the
 -- unit bridge that puts a region's small value (0.5–2) on the same authority
 -- scale as an objective's reward (hundreds), so score = value·pSuccess − cost

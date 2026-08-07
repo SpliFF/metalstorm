@@ -389,6 +389,35 @@ describe("Picture.refresh — co-commander live data (task 4)", function()
         assert.are.equal('bounty', p.board[1].source)
         assert.are.equal(1, p.board[1].suggested)
     end)
+
+    -- endtoend Q-E1 / D47: the terminal objective was published PUBLIC and the
+    -- AI was the one reader that never asked for it, so the war read as a
+    -- 300-authority control among 110s.
+    it("surfaces the terminal objective flag so the planner can price the war", function()
+        local Picture = freshPicture()
+        local ai = makeAI({
+            rulesParams = {
+                ['game:objective_count']     = 2,
+                ['game:objective_1_type']    = 'control',
+                ['game:objective_1_scope']   = 'strategic',
+                ['game:objective_1_state']   = 'active',
+                ['game:objective_1_reward']  = 300,
+                ['game:objective_1_team']    = -1,
+                ['game:objective_1_region']  = 'raven_basin',
+                ['game:objective_1_victory'] = 1,
+                -- id 2: a side objective — `victory` is absent, not 0.
+                ['game:objective_2_type']    = 'control',
+                ['game:objective_2_scope']   = 'tactical',
+                ['game:objective_2_state']   = 'active',
+                ['game:objective_2_reward']  = 110,
+                ['game:objective_2_team']    = -1,
+                ['game:objective_2_region']  = 'marrow_watch',
+            },
+        })
+        local p = refresh(Picture, ai)
+        assert.are.equal(1, p.board[1].victory)
+        assert.is_nil(p.board[2].victory)
+    end)
 end)
 
 --=============================================================================

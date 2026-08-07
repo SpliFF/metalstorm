@@ -593,3 +593,175 @@ describe("suggested_for ×2 weighting (co-commander soft tasking, §5.1)", funct
         assert.is_false(expandWon)
     end)
 end)
+
+--=============================================================================
+-- The terminal objective (endtoend Q-E1 / D47, answer A: the AI must want the
+-- prize). The fixture is fire 23's war in miniature: the enemy stands on the
+-- region whose control objective ENDS THE WAR, our army is its equal (so
+-- pSuccess ≈ 0.5, under the 0.6 floor), and a safe side objective is available.
+-- Before the fix the planner could not see `victory` at all, priced the war at
+-- 300 authority against the side objective's 110, and skipped the prize on the
+-- floor — two wars ran to the same frame with 14 player directives and with 0.
+describe("terminal objective is contested (Q-E1 / D47)", function()
+    -- `victory` is passed through as the board publishes it (1 / absent) so
+    -- the same fixture with the flag removed is the null control.
+    local function warFixture(victory, progress, prizeOwner)
+        local role = fullSideRole()
+        return makePicture({
+            _role = role,
+            regions = {
+                home  = { owner = 0,          value = 1.0, neighbors = { 'raven' } },
+                raven = { owner = prizeOwner, value = 1.0, neighbors = { 'home', 'side' } },
+                side  = { owner = nil,        value = 1.0, neighbors = { 'raven' } },
+            },
+            board = {
+                ['1'] = { type = 'control', scope = 'strategic', state = 'active',
+                          team = -1, region = 'raven', reward = 300,
+                          progress = progress or 0, victory = victory },
+                ['2'] = { type = 'control', scope = 'tactical', state = 'active',
+                          team = -1, region = 'side', reward = 110, progress = 0 },
+            },
+            -- Equal armies: pSuccess = 1000²/(1000²+1000²) = 0.5 < PSUCCESS_FLOOR.
+            intel   = { raven = { strength = 1000, confidence = 1.0, lastSeenFrame = 1000 } },
+            ledger  = { home = { strength = 1000 } },
+            economy = { ownPool = 100000, teamPool = 0, costScale = 1.0 },
+        })
+    end
+
+    local function directiveFor(out, goalId)
+        for _, d in ipairs(out.directives) do
+            if d.goalId == goalId then return d end
+        end
+        return nil
+    end
+
+    it("NULL CONTROL: an unflagged 300-reward control is skipped on the floor", function()
+        local out = plan(warFixture(nil, 0, 1))
+        assert.is_nil(directiveFor(out, 'obj:1'))
+    end)
+
+    it("marches on a defended prize the same fixture otherwise skips", function()
+        local out = plan(warFixture(1, 0, 1))
+        local d = directiveFor(out, 'obj:1')
+        assert.is_truthy(d)
+        assert.are.equal('TAKE_AND_HOLD', d.directive)
+    end)
+
+    it("outranks a side objective for the one available package", function()
+        local out = plan(warFixture(1, 0, 1))
+        assert.is_truthy(directiveFor(out, 'obj:1'))
+        assert.is_nil(directiveFor(out, 'obj:2'))
+    end)
+
+    it("a hopeless attack is still refused while the hold clock is young", function()
+        local p = warFixture(1, 0, 1)
+        -- 5:1 against: pSuccess ≈ 0.04, under even VICTORY_PSUCCESS_FLOOR.
+        p.intel.raven.strength = 5000
+        assert.is_nil(directiveFor(plan(p), 'obj:1'))
+    end)
+
+    it("and is taken anyway once the holder is about to bank the war", function()
+        local p = warFixture(1, 0.9, 1)
+        p.intel.raven.strength = 5000
+        assert.is_truthy(directiveFor(plan(p), 'obj:1'))
+    end)
+
+    it("holds a prize of our own against odds that would rout a side objective", function()
+        local p = warFixture(1, 0.5, 0)      -- we own raven and are banking it
+        p.intel.raven.strength = 5000        -- contested by a much larger force
+        local d = directiveFor(plan(p), 'obj:1')
+        assert.is_truthy(d)
+        assert.are.equal('TAKE_AND_HOLD', d.directive)
+    end)
+end)
+
+--=============================================================================
+-- Mass, not thrift, picks the package for the terminal objective (fire 24).
+-- `score = value·pSuccess − cost` with cost scaling in package strength means
+-- the CHEAPEST package maximises the score for any goal whose pSuccess is the
+-- flat no-intel prior — so the planner sent 3 units at the war and left 14 on
+-- a rear posture. Two packages, one prize, no intel: the big one must go.
+describe("the terminal objective takes the strongest package (fire 24)", function()
+    local function twoPackageFixture(victory)
+        local role = fullSideRole()
+        return makePicture({
+            _role = role,
+            regions = {
+                home  = { owner = 0,   value = 1.0, neighbors = { 'raven' } },
+                bend  = { owner = 0,   value = 1.0, neighbors = { 'raven' } },
+                raven = { owner = nil, value = 1.0, neighbors = { 'home', 'bend' } },
+            },
+            board = {
+                ['1'] = { type = 'control', scope = 'strategic', state = 'active',
+                          team = -1, region = 'raven', reward = 300,
+                          progress = 0, victory = victory },
+            },
+            ledger  = { home = { strength = 3 }, bend = { strength = 14 } },
+            economy = { ownPool = 100000, teamPool = 0, costScale = 1.0 },
+        })
+    end
+
+    local function packageFor(out, goalId)
+        for _, d in ipairs(out.directives) do
+            if d.goalId == goalId then return d.groupId end
+        end
+        return nil
+    end
+
+    it("NULL CONTROL: unflagged, thrift wins and the 3-force fragment is sent", function()
+        assert.are.equal('pkg:home', packageFor(plan(twoPackageFixture(nil)), 'obj:1'))
+    end)
+
+    it("flagged, the 14-force package is sent at the prize", function()
+        assert.are.equal('pkg:bend', packageFor(plan(twoPackageFixture(1)), 'obj:1'))
+    end)
+end)
+
+--=============================================================================
+-- Commitment hysteresis must not pin the war to a rump (fire 24). A package is
+-- identified by the region its units stand in, so a marching army is re-bucketed
+-- under a new id and the goal's commitment stays on whatever was left behind;
+-- the ×1.4 reassign bar then makes that permanent. Reproduced with a commitment
+-- on the 3-force home package while 14 units stand one region on.
+describe("the terminal objective is not pinned to a stale package (fire 24)", function()
+    local function marchedFixture(victory)
+        local role = fullSideRole()
+        return makePicture({
+            _role = role,
+            regions = {
+                home  = { owner = 0,   value = 1.0, neighbors = { 'raven' } },
+                bend  = { owner = 0,   value = 1.0, neighbors = { 'raven' } },
+                raven = { owner = nil, value = 1.0, neighbors = { 'home', 'bend' } },
+            },
+            board = {
+                ['1'] = { type = 'control', scope = 'strategic', state = 'active',
+                          team = -1, region = 'raven', reward = 300,
+                          progress = 0, victory = victory },
+            },
+            ledger  = { home = { strength = 3 }, bend = { strength = 14 } },
+            economy = { ownPool = 100000, teamPool = 0, costScale = 1.0 },
+        })
+    end
+
+    -- The commitment the whole 17-unit army earned before it marched.
+    local function pinnedToHome()
+        return { ['obj:1'] = { packageId = 'pkg:home', sinceFrame = 0, score = 189 } }
+    end
+
+    local function packageFor(out, goalId)
+        for _, d in ipairs(out.directives) do
+            if d.goalId == goalId then return d.groupId end
+        end
+        return nil
+    end
+
+    it("NULL CONTROL: an unflagged goal stays pinned to the 3-force rump", function()
+        assert.are.equal('pkg:home',
+            packageFor(plan(marchedFixture(nil), pinnedToHome()), 'obj:1'))
+    end)
+
+    it("the terminal objective moves to the marched 14-force package", function()
+        assert.are.equal('pkg:bend',
+            packageFor(plan(marchedFixture(1), pinnedToHome()), 'obj:1'))
+    end)
+end)
