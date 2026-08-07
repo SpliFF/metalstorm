@@ -296,6 +296,13 @@ cost real diagnosis time twice:
 
 1. `python3 tools/mapgen/<id>.py` — check the E1 self-check prints all-OK;
    iterate `ELEVATION`/`MARGIN_OVERRIDE` per §2 until it does.
+
+   Regenerating a **shipped** map writes ~20 MB of *tracked* `.smf`/`.smt`
+   into the working tree and takes ~5 minutes. Uncommitted binary content in
+   the main checkout wedges every inplace lane checkout, so a live herd will
+   commit it out from under you — before you have verified anything. Either
+   generate to `/tmp` (`--out`) and move the bytes in as the last act before
+   committing, or pause the herd for the run.
 2. `./build/debug/tools/mapconverter/mapconverter --force content/maps/<id>`
    — confirms the C++ pipeline (including `ExtractRegions`) agrees.
 3. Direct-start it for real: launch an isolated `spring-lobby`
@@ -307,6 +314,18 @@ cost real diagnosis time twice:
    to catch scenario-file bugs (unknown unit defs, bad CMD names, region-key
    typos) — static Lua parsing and the E1 validator don't exercise
    `game_scenario.lua`'s `validate()`/staging path at all.
+
+   The one-URL form does all of that for you:
+   `?direct=/<id>_verify_solo.json`. Two things it will not tell you if you
+   get them wrong. **(a) The path is the document root, not `manifests/`** —
+   `?direct=` fetches its argument verbatim (no name resolution), and vite
+   serves `client/public/`, which is a *mirror* of `manifests/`. A manifest
+   that exists only in `manifests/` SPA-falls-back to `index.html` and the
+   boot dies on `Unexpected token '<'`. Adding a manifest means adding
+   **both** copies. **(b) Use the `_verify_solo` manifest, not `_direct`** —
+   the sim only ticks once every declared player has connected, so a
+   two-player `_direct` manifest driven by one browser sits at `frame=-1`
+   forever and looks like a map failure.
 4. Kill zombie `spring-server` processes on whatever port you used before
    relaunching (`lsof -i :<port>`) — a stale process from an earlier attempt
    silently breaks the next one's WebTransport bind and crashes it.
