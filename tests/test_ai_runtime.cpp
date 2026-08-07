@@ -15,11 +15,13 @@
 #include "Server/AI/AIScriptContext.h"
 #include "Server/AI/AICommandQueue.h"
 #include "Server/AI/AIStateSnapshot.h"
+#include "System/SpringLog/SpringLog.h"
 
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -58,6 +60,17 @@ fs::path WriteSyntheticPlugin() {
     return dir;
 }
 
+// Captured log lines for the AI.log visibility case below. A sink receives
+// borrowed pointers, so copy out what we assert on.
+struct CapturedLine { int level; std::string scope; std::string message; };
+std::vector<CapturedLine> g_captured;
+
+void CaptureSink(const SpringLogRecord* r, void*) {
+    g_captured.push_back({ r->level,
+                           r->scope   ? r->scope   : "",
+                           r->message ? r->message : "" });
+}
+
 } // namespace
 
 TEST_CASE("AI VM: require loader + getRulesParam + getTeamId end to end") {
@@ -92,6 +105,48 @@ TEST_CASE("AI VM: require loader + getRulesParam + getTeamId end to end") {
     CHECK(c.params[3] == doctest::Approx(9));   // getRulesParam('team','sidenum')
     CHECK(c.params[4] == doctest::Approx(1));   // absent key → nil
     CHECK(c.params[5] == doctest::Approx(55));  // require('nested.mod').tag
+
+    fs::remove_all(dir);
+}
+
+TEST_CASE("AI VM: AI.log survives the DEFAULT log threshold (§5.1 observability)") {
+    // A headless AI has no chat wire and no HUD: AI.log is its only channel, and
+    // main.lua routes the boot line, every per-directive announcement, the
+    // per-tick summary and every tick ERROR through it. It used to emit at
+    // SPRING_LOG_INFO while the default threshold is SPRING_LOG_NOTICE, so on an
+    // ordinary run — nobody passing --log-level — the AI was completely silent
+    // and could be shown neither to be working nor to be inert. This case
+    // deliberately does NOT lower the threshold: it asserts the line arrives at
+    // whatever springlog's default is, which is the condition that was broken.
+    const fs::path dir = fs::temp_directory_path() / "strategos_ai_log_plugin";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    { std::ofstream(dir / "main.lua")
+        << "function onUpdate(frame)\n"
+           "  AI.log('[strategos] tick f=' .. tostring(frame))\n"
+           "end\n"; }
+
+    g_captured.clear();
+    const int sinkId = springlog_add_sink(&CaptureSink, nullptr);
+
+    AIScriptContext ctx("strategos", /*teamId*/ 2, /*allyTeamId*/ 2, dir.string());
+    REQUIRE(ctx.Init(ReadFile(dir / "main.lua"), "main.lua"));
+
+    AIStateSnapshot snap;
+    snap.teamId = 2;
+    snap.frame = 4242;
+    ctx.PushSnapshot(std::move(snap));
+    ctx.ProcessSnapshot();
+
+    springlog_remove_sink(sinkId);
+
+    const CapturedLine* line = nullptr;
+    for (const auto& c : g_captured) {
+        if (c.message.find("[strategos] tick f=4242") != std::string::npos) line = &c;
+    }
+    REQUIRE(line != nullptr);              // ← failed before the fix: dropped at INFO
+    CHECK(line->level >= SPRING_LOG_NOTICE);
+    CHECK(line->scope == "strategos");     // scoped to the AI slot's name
 
     fs::remove_all(dir);
 }

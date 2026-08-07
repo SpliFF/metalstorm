@@ -673,10 +673,21 @@ int AIScriptContext::l_getFrame(lua_State* L) {
 // headless server AI has no chat wire or HUD, so this is how a full-side run's
 // boot line, per-directive announcements and tick errors become visible (plan
 // §5.1). Best-effort and non-fatal: a non-string arg is coerced via tostring.
+//
+// NOTICE, not INFO: the default threshold is SPRING_LOG_NOTICE (SpringLog.cpp
+// g_minLevel), so every line this verb ever emitted was dropped before it
+// reached the console, the file sink or the log store. That left the AI's ONLY
+// observability channel silent on every default run — a co-commander could be
+// shown neither to be working nor to be inert, which is exactly where
+// PLAN-endtoend D39 stalled. The narration is the headless equivalent of a
+// gadget's Spring.Echo (also NOTICE), so it belongs at the same level. Volume
+// is one tick summary per strategic tick per AI plus a line per directive; a
+// run that wants it quieter can lower the "ai" section with
+// springlog_set_section_min_level.
 int AIScriptContext::l_log(lua_State* L) {
     auto* ctx = GetAIContext(L);
     const char* msg = lua_tostring(L, 1);
-    SLOG_SCOPED(SPRING_LOG_INFO, ctx->name.c_str(), "%s",
+    SLOG_SCOPED(SPRING_LOG_NOTICE, ctx->name.c_str(), "%s",
         msg != nullptr ? msg : "(nil)");
     return 0;
 }
