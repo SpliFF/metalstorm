@@ -160,8 +160,14 @@ on — see the research record in PLAN-maps.md §1.2:
    from the real-time sun + full-resolution mesh normals + CSM, and an unlit
    bake also clusters far better: `dxt1.cluster_tiles` vector-quantizes the
    262,144 tiles of a 16k map to a ~12k-tile budget (~8 MB SMT instead of
-   ~178 MB). The SMT format *is* a deduplicated megatexture — this uses it
-   as designed.
+   ~178 MB). The SMT format *is* a deduplicated megatexture — but Spring's
+   own compiler dedupes tiles **exactly**, and this quantizer does not, which
+   is a recorded deviation with a measured cost: it flattens tile interiors
+   and dumps the difference onto the 32-elmo grid, so the seam jump reads
+   ~15× the interior gradient where a continuous field reads ~1. Raising the
+   budget does not fix it (error falls as `budget^(-1/9)`); the fix is
+   architectural. `eval_ground_albedo.py` (§7) is how a replacement is
+   argued, and PLAN-maps.md M7 item 1 carries the options.
 
    Two hard-won rules keep the bake artefact-free:
    - **The bake stays low-frequency** (nothing under ~50-elmo wavelength).
@@ -340,6 +346,44 @@ packaging, which is most of what there is to compare. `gen_vegetation_models.py
 --selftest` covers the prop models separately (11 species), and
 `terragen/_selftest_numba.py` covers thread-count independence of the `@njit`
 kernels. Harness tests: `tools/mapgen/tests/test_selftest.py`.
+
+### Ground-albedo delivery (`eval_ground_albedo.py`)
+
+The tile dictionary is *lossy* (see §5 and the `FIDELITY-STANDIN` on
+`dxt1.cluster_tiles`), and every proposed replacement for it has to be argued
+against the unquantized bake rather than against the shipped map. A full
+generator run leaves that ground truth at `$TMPDIR/<map_id>_tiles.npy`
+(805 MB for a 16k map), so the comparison needs no browser:
+
+```
+cd tools/mapgen
+.venv/bin/python eval_ground_albedo.py $TMPDIR/skerry_reach_tiles.npy \
+    --seed 20260730 --crops 432,400,16 --crop-dir /tmp/albedo
+```
+
+It carries both paths all the way to what the GPU samples — the tile
+dictionary (cluster → DXT1 → decode) and a low-resolution map-space albedo
+(box-downsample → DXT1 → decode → bilinear upsample) — and reports, for each,
+the reconstruction error against the source and the seam metric
+`dxt1.seam_discontinuity` uses, on **both** axes rather than x alone.
+
+Two traps it is built around, both of which produced a plausible-looking wrong
+answer first:
+
+- **The codec has to be in the comparison.** The two paths do not have the
+  same number of texels per DXT1 block, so leaving compression out flatters
+  whichever one is coarser.
+- **A crop is evidence, so it must be the same pixels the metrics came from.**
+  Slicing the horizontally-expanded field with low-res column indices renders
+  a different part of the map entirely — and it looks perfectly plausible,
+  because a wrong window of a terrain albedo is still a terrain albedo. Guard:
+  `test_crop_window_matches_the_full_map_reconstruction`. The crops are also
+  written with a 1–99 % contrast stretch, since the defect being judged is a
+  ~3-level checkerboard on a field whose whole range is ~60 levels.
+
+Harness tests: `tools/mapgen/tests/test_ground_albedo_eval.py` (15), each
+metric with a positive control; a nearest-neighbour (blocky) upsample is
+checked to fail them.
 
 ## 8. Adding a new map
 
