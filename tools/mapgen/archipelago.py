@@ -16,6 +16,8 @@ Usage:
     .venv/bin/python archipelago.py                        # shipped defaults
     .venv/bin/python archipelago.py --seed 7 --landmass 0.28 --islands 12
     .venv/bin/python archipelago.py --fast --preview-only  # 30 s look
+    .venv/bin/python archipelago.py --climate arid --id dune_reach \
+        --name "Dune Reach"                                # climate variant
     .venv/bin/python archipelago.py --no-package           # layer tuning
     .venv/bin/python archipelago.py --selftest [--fast]    # determinism gate
 
@@ -131,12 +133,14 @@ def synth_height(seed: int, landmass: float, islands: int,
 def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
              fast: bool = False, with_features: bool = False,
              preview_only: bool = False, no_package: bool = False,
-             map_id: str = "skerry_reach", display_name: str = "Skerry Reach"):
+             map_id: str = "skerry_reach", display_name: str = "Skerry Reach",
+             climate: str = "temperate"):
     t0 = time.time()
     cell = 32.0 if fast else 8.0
     S = int(MAP_SIZE / cell) + 1
     print(f"grid {S}x{S} @ {cell} elmos/cell  "
-          f"(seed={seed} landmass={landmass} islands={islands})")
+          f"(seed={seed} landmass={landmass} islands={islands} "
+          f"climate={climate})")
 
     zz, xx = np.mgrid[0:S, 0:S].astype(np.float64) * cell
 
@@ -190,6 +194,8 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
         cp = bio.ClimateParams(seed=seed, lat_axis="z", lat_hot=0.60,
                                lat_cold=0.42, altitude_lapse=0.55,
                                wind_dir=(1.0, 0.2), base_moisture=0.380)
+        # --climate shifts that baseline; "temperate" is an exact identity
+        cp = bio.apply_climate_preset(cp, climate)
         temp = bio.temperature_field(hh, 0.0, cp, cell)
         moist = bio.moisture_field(hh, 0.0, cp, cell)
         return sl, temp, moist
@@ -199,7 +205,10 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
 
     # 5. start pads: the N largest islands get them first, round-robin, so
     # no start shares an island until every major island has one
-    score = st.settlement_score(h, slope, b, 0.0, cell)
+    # (habitability is climate-relative — an ice map's people live on the ice;
+    # `temperate` gives back the default table, so nothing shipped moves)
+    score_sp = st.SettleParams(biome_score=st.biome_score_for(climate))
+    score = st.settlement_score(h, slope, b, 0.0, cell, score_sp)
     sp = st.SettleParams(min_separation=3600.0, edge_margin=900.0)
     starts: list[tuple[float, float]] = []
     ring = [l for l in big if sizes[l] * cell * cell > 2.5e6] or big
@@ -229,7 +238,7 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     # 6. settlements + per-island road networks (roads never island-hop:
     # each island's sites are planned as their own network)
     slope = np.degrees(np.arctan(np.hypot(*np.gradient(h, cell)[::-1])))
-    score = st.settlement_score(h, slope, b, 0.0, cell)
+    score = st.settlement_score(h, slope, b, 0.0, cell, score_sp)
     pad_excl = np.zeros(h.shape, bool)
     for sx, sz in starts:
         pad_excl |= np.hypot(xx - sx, zz - sz) < 700.0
@@ -286,7 +295,8 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     slope, temp, moist = fields(h)
     water_all = (h <= 0.0) | rivers
     b = bio.classify(h, slope, temp, moist, 0.0, river_mask=water_all)
-    print(f"biomes done {time.time()-t0:.0f}s")
+    print(f"biomes done {time.time()-t0:.0f}s ({climate}, land): "
+          f"{bio.format_biome_mix(b)}")
 
     # 9. placement — same layer set as Meridian (minus its layout regions)
     excl = road_mask.copy() | (h <= 2.0) | rivers
@@ -445,7 +455,8 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
         map_id=map_id,
         display_name=display_name,
         description=(f"Free-form archipelago (seed {seed}, "
-                     f"{landmass:.0%} land, {islands} islands): "
+                     f"{landmass:.0%} land, {islands} islands, "
+                     f"{climate} climate): "
                      "island road nets, coastal towns, ruins."),
         min_height=-120.0, max_height=1200.0,
         tile_budget=(2048 if fast else 12288),
@@ -482,6 +493,14 @@ def main():
                     help="number of island seeds (overlaps merge)")
     ap.add_argument("--id", dest="map_id", default="skerry_reach")
     ap.add_argument("--name", dest="display_name", default="Skerry Reach")
+    ap.add_argument("--climate", default="temperate",
+                    choices=sorted(bio.CLIMATE_PRESETS),
+                    help="climate preset shifted on top of this map's own "
+                         "authored climate; 'temperate' is an exact identity "
+                         "(shipped skerry_reach). Terrain, roads, starts and "
+                         "the landmass contract are unaffected — only the "
+                         "biomes, and what the splat bake and vegetation "
+                         "palettes make of them.")
     ap.add_argument("--fast", action="store_true",
                     help="513 grid iteration mode — preview/tuning only, "
                          "NOT shippable")
@@ -502,7 +521,8 @@ def main():
         passthrough = ["--seed", str(args.seed),
                        "--landmass", str(args.landmass),
                        "--islands", str(args.islands),
-                       "--id", args.map_id, "--name", args.display_name]
+                       "--id", args.map_id, "--name", args.display_name,
+                       "--climate", args.climate]
         if args.fast:
             passthrough.append("--fast")
         if args.with_features:
@@ -516,7 +536,8 @@ def main():
     generate(out, args.seed, landmass=args.landmass, islands=args.islands,
              fast=args.fast, with_features=args.with_features,
              preview_only=args.preview_only, no_package=args.no_package,
-             map_id=args.map_id, display_name=args.display_name)
+             map_id=args.map_id, display_name=args.display_name,
+             climate=args.climate)
 
 
 if __name__ == "__main__":

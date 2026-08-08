@@ -305,9 +305,53 @@ mix has no climate knobs. (A rank transform is invariant to a constant offset,
 so those two columns are identical whatever `base_moisture` says — which is the
 tell: the knob genuinely stops doing anything.)
 
-Tests: `tools/mapgen/tests/test_climate.py` (15 cases). The budget test asserts
+### Climate presets — map variants (`--climate`)
+
+Both shipping generators take `--climate {temperate,arid,arctic,tropical}`. A
+preset is a **shift applied on top of the map's own authored climate**, not a
+replacement for it: `ClimatePreset` carries deltas (`d_temperature`,
+`d_moisture`, `d_altitude_lapse`) and scales (`water_bonus_scale`,
+`rain_shadow_scale`), so a map keeps its wind axis, its seed and its
+`base_moisture` re-basing. `temperate` is all-zero, i.e. an exact identity —
+verified by regenerating both maps' `preview.png` against a pristine HEAD
+worktree and comparing sha256.
+
+Measured land biome mix, `--fast`, archipelago / meridian2:
+
+| preset | archipelago (skerry_reach) | meridian2 (meridian_basin) |
+|---|---|---|
+| `temperate` | forest 63.5 · grassland 15.3 · rock 8.5 · tundra 8.2 | grassland 50.1 · forest 19.4 · rock 17.8 · tundra 7.3 |
+| `arid` | **desert 55.6** · grassland 31.9 · rock 6.0 | **desert 55.6** · grassland 25.7 · rock 14.3 |
+| `arctic` | **snow 58.9** · rock 22.4 · tundra 14.6 | **snow 41.7** · tundra 30.7 · rock 24.3 |
+| `tropical` | **forest 79.5** · grassland 9.7 · rock 6.4 | grassland 42.7 · forest 36.8 · rock 14.7 |
+
+**Move the drivers, not the thresholds — and on a real map the thresholds
+cannot do the job anyway.** DESERT is `hot AND dry`, and under archipelago's
+temperate climate **0.0 %** of the land is hot, so no choice of the dry cut
+point produces any desert at all (0.1 % at dry 0.30; at 0.50, 14.5 % of the
+land is *dry* and still 0.0 % is desert). Loosening `hot` as well tops out at
+**3.8 %** desert at hot 0.40 / dry 0.50 — cells whose mean temperature is
+0.447, i.e. not hot — while every other biome boundary moves with them.
+Moving `lat_hot` gives 55.6 %, all of it genuinely hot. The thresholds are the
+shared vocabulary the splat bake, the vegetation palettes and
+`placement.biome_suitability` all speak; the climate fields are the knob.
+
+**Habitability is climate-relative, and it is not only a town table.**
+`settle.settlement_score` multiplies by a per-biome desirability whose default
+`SNOW: 0.0` means "nobody lives on a mountain cap" — correct when snow is 0.7 %
+of the land, wrong when it is 59 %. archipelago picks its **start pads** off
+the same score, so with the default table the `arctic` preset fits 3 of the 8
+pads it requires and the generator exits. `settle.biome_score_for(climate)`
+supplies the climate's own opinion (`arctic` → snow 0.55, tundra 0.85; `arid` →
+desert 0.60) and returns `None` for `temperate`, which is the default table.
+Consequence worth knowing: because pads move, the *terrain* moves with them
+(pad flattening), so a climate variant is not merely a re-texture — land
+fraction reads 34.5 % temperate vs 34.6 % arctic on the same seed.
+
+Tests: `tools/mapgen/tests/test_climate.py` (27 cases). The budget test asserts
 on *both* models, so it fails loudly if `"ridge"` ever stops being a contrasting
-control rather than silently becoming a tautology.
+control rather than silently becoming a tautology; the preset tests pin the
+identity, the drivers-not-thresholds rule, and the snowfield habitability find.
 
 ## 5. Texturing model
 
@@ -567,7 +611,11 @@ Two shipped generator styles to copy from:
 Recipe:
 1. Copy the closer generator; replace the surface-synthesis section. Pick a
    `bio.ClimateParams` (an ice or desert map is a parameter set: `lat_hot`,
-   `altitude_lapse`, `base_moisture`, `wind_dir`, plus species tables).
+   `altitude_lapse`, `base_moisture`, `wind_dir`, plus species tables) — or,
+   if the terrain you want already exists, skip the copy entirely and take a
+   **climate variant** of an existing generator: `--climate arctic --id
+   frost_reach --name "Frost Reach"` is a whole different-looking map from
+   the same synthesis code (§4c).
 2. Add `mapdata/regions.lua` + the E1 self-check if the game uses the
    region system; free-form maps assert their own generated contracts
    (land fraction, dry starts) instead.

@@ -36,7 +36,7 @@ weights for texture blending. The biome set is intentionally game-oriented
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 from scipy import ndimage
@@ -92,6 +92,128 @@ class ClimateParams:
     # the joint optimum on both shipped maps. NOT used by the "ridge" model,
     # which keeps its own 800 so it stays a bit-exact A/B control.
     rain_blur: float = 100.0
+
+
+# ---------------------------------------------------------------------------
+# Climate presets (PLAN-maps M8n)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class ClimatePreset:
+    """A named climate *shift*, applied on top of a map's own baseline.
+
+    Deltas rather than absolute settings, for two reasons. A map's authored
+    `ClimateParams` carries decisions that are not about climate at all (its
+    wind axis, its `base_moisture` re-basing, its seed), and an absolute
+    preset would silently discard them; and a delta of zero is an exact
+    identity, which is what makes `temperate` a usable bit-for-bit control.
+
+    Every field here moves a *driver* of the climate fields. None of them
+    touches `classify`'s thresholds, and that is deliberate — see
+    `apply_climate_preset`.
+    """
+    name: str
+    d_temperature: float = 0.0     # added to both lat_hot and lat_cold
+    d_altitude_lapse: float = 0.0  # added to altitude_lapse
+    d_moisture: float = 0.0        # added to base_moisture
+    water_bonus_scale: float = 1.0  # multiplies water_bonus
+    rain_shadow_scale: float = 1.0  # multiplies rain_shadow
+    note: str = ""
+
+
+# Tuned against archipelago.py's own terrain at --fast, land cells only, and
+# quoted in PLAN-maps M8n. The headline number for each is the biome it is
+# named for; the mixes are what the splat bake and the vegetation palettes
+# then see. Measured land mixes, archipelago / meridian2 at --fast:
+#   temperate  forest 63.5 / grassland 50.1   (the shipped maps, unchanged)
+#   arid       desert 55.6 / desert 55.6
+#   arctic     snow 58.9 tundra 14.6 / snow 41.7 tundra 30.7
+#   tropical   forest 79.5 / forest 36.8, desert 0.0 / 1.5
+# Meridian is the drier, more continental of the two, which is why the same
+# `tropical` shift buys it half as much forest.
+CLIMATE_PRESETS: dict[str, ClimatePreset] = {
+    "temperate": ClimatePreset(
+        "temperate",
+        note="identity — the map's own authored climate, unmodified"),
+    "arid": ClimatePreset(
+        "arid",
+        d_temperature=0.24,
+        d_altitude_lapse=-0.18,
+        d_moisture=-0.26,
+        water_bonus_scale=0.30,
+        rain_shadow_scale=1.30,
+        note="hot and dry: desert flats, grassland on the windward side"),
+    "arctic": ClimatePreset(
+        "arctic",
+        d_temperature=-0.34,
+        d_altitude_lapse=-0.20,
+        note="frigid: snowfields, with a tundra band on the warm edge"),
+    "tropical": ClimatePreset(
+        "tropical",
+        d_temperature=0.16,
+        d_moisture=0.06,
+        rain_shadow_scale=0.80,
+        note="hot and wet: closed forest, wetland margins, next to no desert"),
+}
+
+
+def apply_climate_preset(params: ClimateParams, name: str) -> ClimateParams:
+    """Return `params` shifted by the named preset (`temperate` = identity).
+
+    **Presets move drivers, never thresholds** — and on a real map the
+    thresholds could not do the job anyway. `classify`'s cut points
+    (hot 0.62 / cold 0.32 / frigid 0.18, dry 0.30 / wet 0.55) are what the
+    words "desert" and "tundra" mean to everything downstream: the splat
+    bake, the vegetation palettes, the settlement score,
+    `placement.biome_suitability`. Measured on archipelago at --fast
+    (PLAN-maps M8n): DESERT is `hot AND dry`, and under the temperate climate
+    **0.0 %** of the land is hot, so *no* choice of the dry cut point makes
+    any desert at all — 0.1 % at dry 0.30 rising to 14.5 % of land merely
+    *dry* at 0.50, and still 0.0 % desert. Loosening `hot` as well tops out at
+    **3.8 %** desert (hot 0.40 / dry 0.50), whose mean temperature is 0.447 —
+    i.e. not hot — while every other biome boundary moves with it. Moving
+    `lat_hot` gives **55.6 %** desert, 100 % of it genuinely hot.
+    `test_climate.py::TestClimatePresets` pins both halves of that.
+    """
+    try:
+        p = CLIMATE_PRESETS[name]
+    except KeyError:
+        raise ValueError(
+            f"unknown climate preset {name!r}; have "
+            f"{sorted(CLIMATE_PRESETS)}") from None
+    return replace(
+        params,
+        lat_hot=_clamp01(params.lat_hot + p.d_temperature),
+        lat_cold=_clamp01(params.lat_cold + p.d_temperature),
+        altitude_lapse=max(0.0, params.altitude_lapse + p.d_altitude_lapse),
+        base_moisture=_clamp01(params.base_moisture + p.d_moisture),
+        water_bonus=params.water_bonus * p.water_bonus_scale,
+        rain_shadow=params.rain_shadow * p.rain_shadow_scale,
+    )
+
+
+def _clamp01(v: float) -> float:
+    return min(1.0, max(0.0, float(v)))
+
+
+def biome_mix(biome_ids: np.ndarray, land_only: bool = True) -> dict[str, float]:
+    """Area fraction per biome name — the number presets are judged on.
+
+    Land-only by default: a map whose water fraction is a hard contract
+    (archipelago's `--landmass`) would otherwise report every climate as
+    two-thirds water and hide the change that matters.
+    """
+    ids = biome_ids[biome_ids != WATER] if land_only else biome_ids.ravel()
+    total = max(int(ids.size), 1)
+    counts = np.bincount(ids.ravel(), minlength=len(BIOME_NAMES))
+    return {BIOME_NAMES[b]: float(counts[b]) / total
+            for b in sorted(BIOME_NAMES) if counts[b]}
+
+
+def format_biome_mix(biome_ids: np.ndarray, land_only: bool = True) -> str:
+    mix = biome_mix(biome_ids, land_only)
+    return "  ".join(f"{k} {100 * v:.1f}%" for k, v in
+                     sorted(mix.items(), key=lambda kv: -kv[1]))
 
 
 def temperature_field(

@@ -50,6 +50,7 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from terragen import biomes as bio  # noqa: E402
+from terragen import settle as st  # noqa: E402
 
 CELL = 8.0
 
@@ -243,6 +244,170 @@ class TestClimateParams(unittest.TestCase):
             contrasts.append(band_mean(m, 40, 74) - band_mean(m, 86, 120))
         self.assertLess(contrasts[0], contrasts[1])
         self.assertLess(contrasts[1], contrasts[2])
+
+
+class TestClimatePresets(unittest.TestCase):
+    """PLAN-maps M8n — the ice/desert map variants.
+
+    A preset is a *shift* on top of a map's own authored climate, so the two
+    things that need pinning are that the identity really is one, and that the
+    named climate is reached by moving drivers rather than by relabelling.
+    """
+
+    def skerry_like(self):
+        """archipelago.py's authored baseline — the map presets are tuned on."""
+        return bio.ClimateParams(seed=20260730, lat_axis="z", lat_hot=0.60,
+                                 lat_cold=0.42, altitude_lapse=0.55,
+                                 wind_dir=(1.0, 0.2), base_moisture=0.380)
+
+    def terrain(self):
+        """One ridge across the wind, with an ocean on the upwind edge.
+
+        The ocean is not decoration: without open water there is no
+        water-proximity bonus, the whole domain sits at moisture 0.25, and
+        even the `tropical` preset makes deserts — a dry world tells you
+        nothing about a wet preset. Rows are the latitude axis.
+        """
+        h = ridge_at([80], shape=(96, 160), base=120.0, peak=900.0, width=10.0)
+        h[:, :24] = -60.0
+        return h, np.degrees(np.arctan(np.hypot(*np.gradient(h, CELL)[::-1])))
+
+    def fields(self, cp):
+        h, slope = self.terrain()
+        t = bio.temperature_field(h, 0.0, cp, CELL)
+        m = bio.moisture_field(h, 0.0, cp, CELL)
+        return h, slope, t, m, bio.classify(h, slope, t, m, 0.0)
+
+    def test_temperate_is_an_exact_identity(self):
+        cp = self.skerry_like()
+        self.assertEqual(bio.apply_climate_preset(cp, "temperate"), cp)
+        a = self.fields(cp)[4]
+        b = self.fields(bio.apply_climate_preset(cp, "temperate"))[4]
+        np.testing.assert_array_equal(a, b)
+
+    def test_presets_move_drivers_and_leave_everything_else_alone(self):
+        """A preset may not quietly re-seed the map or turn the wind."""
+        untouched = ("seed", "lat_axis", "temp_noise", "moisture_noise",
+                     "water_bonus_range", "wind_dir", "orographic",
+                     "raininess", "evaporation", "rain_blur")
+        cp = self.skerry_like()
+        for name in bio.CLIMATE_PRESETS:
+            shifted = bio.apply_climate_preset(cp, name)
+            for f in untouched:
+                self.assertEqual(getattr(shifted, f), getattr(cp, f),
+                                 f"preset {name!r} moved {f}")
+
+    def test_each_preset_moves_the_field_it_is_named_for(self):
+        cp = self.skerry_like()
+        base_t = self.fields(cp)[2].mean()
+        base_m = self.fields(cp)[3].mean()
+        self.assertLess(self.fields(bio.apply_climate_preset(cp, "arctic"))[2].mean(),
+                        base_t - 0.2)
+        self.assertGreater(self.fields(bio.apply_climate_preset(cp, "arid"))[2].mean(),
+                           base_t + 0.1)
+        self.assertLess(self.fields(bio.apply_climate_preset(cp, "arid"))[3].mean(),
+                        base_m - 0.1)
+        self.assertGreater(self.fields(bio.apply_climate_preset(cp, "tropical"))[3].mean(),
+                           base_m)
+
+    def test_a_desert_is_reached_by_moving_lat_hot_not_by_moving_thresholds(self):
+        """The M8n find, as an assertion — and it is stronger than M8k's note.
+
+        DESERT is `hot AND dry`, and under a temperate climate those two
+        conditions do not co-occur anywhere: the hot cells are low and near
+        the water (wet), the dry cells are high and in the lee (cold). So no
+        choice of the `dry` cut point produces a desert at all — measured on
+        archipelago at --fast, the best a threshold move can do is 3.8 % of
+        land at hot 0.40 / dry 0.50, cuts so loose that every other biome
+        boundary moves with them, against 55.6 % from the `arid` preset.
+        """
+        cp = self.skerry_like()
+        h, _, t, m, _ = self.fields(cp)
+        land = h > 0.0
+        self.assertEqual(float((t[land] > 0.62).mean()), 0.0,
+                         "the temperate control is already hot somewhere — "
+                         "this test no longer isolates the thresholds")
+        for dry_cut in (0.30, 0.45, 0.60, 0.75, 0.90):
+            self.assertEqual(float(((t[land] > 0.62) & (m[land] < dry_cut)).mean()), 0.0,
+                             f"dry={dry_cut} invented a desert out of a "
+                             f"climate that has no hot ground")
+
+        arid = self.fields(bio.apply_climate_preset(cp, "arid"))[4]
+        mix = bio.biome_mix(arid)
+        self.assertGreater(mix.get("desert", 0.0), 0.4,
+                           f"the arid preset is not arid: {mix}")
+
+    def test_arctic_is_snow_and_tundra_where_temperate_was_forest(self):
+        cp = self.skerry_like()
+        temperate = bio.biome_mix(self.fields(cp)[4])
+        arctic = bio.biome_mix(self.fields(bio.apply_climate_preset(cp, "arctic"))[4])
+        self.assertGreater(arctic.get("snow", 0.0), 0.3, f"not snowy: {arctic}")
+        self.assertGreater(arctic.get("tundra", 0.0), 0.0,
+                           "no tundra band at all — the preset has gone "
+                           "straight past the transition it is tuned for")
+        self.assertGreater(temperate.get("forest", 0.0), arctic.get("forest", 0.0))
+
+    def test_unknown_preset_is_refused(self):
+        with self.assertRaises(ValueError):
+            bio.apply_climate_preset(self.skerry_like(), "mediterranean")
+
+
+class TestBiomeMix(unittest.TestCase):
+    def test_land_only_excludes_water_and_sums_to_one(self):
+        ids = np.array([[bio.WATER, bio.WATER, bio.FOREST],
+                        [bio.GRASSLAND, bio.FOREST, bio.FOREST]], dtype=np.uint8)
+        mix = bio.biome_mix(ids)
+        self.assertNotIn("water", mix)
+        self.assertAlmostEqual(sum(mix.values()), 1.0, places=12)
+        self.assertAlmostEqual(mix["forest"], 0.75)
+        self.assertIn("water", bio.biome_mix(ids, land_only=False))
+
+    def test_all_water_does_not_divide_by_zero(self):
+        ids = np.full((4, 4), bio.WATER, dtype=np.uint8)
+        self.assertEqual(bio.biome_mix(ids), {})
+
+
+class TestClimateHabitability(unittest.TestCase):
+    """Habitability is climate-relative, and it is not only a town table.
+
+    archipelago.py picks its START PADS off `settlement_score`, so a biome the
+    default table scores at a hard zero costs the map its start positions.
+    With the default table the `arctic` preset fits 3 of the 8 pads
+    archipelago requires and the generator exits (measured, PLAN-maps M8n).
+    """
+
+    def snowfield(self):
+        # wide enough that SettleParams' 600-elmo edge ramp fits inside it
+        h = flat((192, 192), 200.0)
+        b = np.full(h.shape, bio.SNOW, dtype=np.uint8)
+        slope = np.zeros_like(h)
+        return h, slope, b
+
+    def test_default_table_scores_a_snowfield_at_exactly_zero(self):
+        h, slope, b = self.snowfield()
+        score = st.settlement_score(h, slope, b, 0.0, CELL)
+        self.assertEqual(float(score.max()), 0.0)
+
+    def test_the_arctic_table_makes_the_same_snowfield_habitable(self):
+        h, slope, b = self.snowfield()
+        score = st.settlement_score(
+            h, slope, b, 0.0, CELL,
+            st.SettleParams(biome_score=st.biome_score_for("arctic")))
+        self.assertGreater(float(score.max()), 0.0)
+
+    def test_temperate_returns_the_default_table_untouched(self):
+        self.assertIsNone(st.biome_score_for("temperate"))
+        h, slope, b = self.snowfield()
+        b[:, :96] = bio.GRASSLAND
+        a = st.settlement_score(h, slope, b, 0.0, CELL)
+        c = st.settlement_score(
+            h, slope, b, 0.0, CELL,
+            st.SettleParams(biome_score=st.biome_score_for("temperate")))
+        np.testing.assert_array_equal(a, c)
+
+    def test_a_climate_table_only_exists_for_a_known_preset(self):
+        with self.assertRaises(ValueError):
+            st.biome_score_for("mediterranean")
 
 
 if __name__ == "__main__":

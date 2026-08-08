@@ -35,6 +35,36 @@ _DEFAULT_BIOME_SCORE = {
     bio.WATER: 0.0,
 }
 
+# Desirability is RELATIVE to what the world offers, and the default table is
+# a temperate world's opinion: `SNOW: 0.0` means "nobody lives on a mountain
+# cap", which is right when snow is 0.7 % of the land and wrong when it is
+# most of it. It is also not only a town table — archipelago.py picks its
+# START PADS off the same score — so on a climate the table has no opinion
+# about, the map loses its start positions, not just its towns. Measured
+# (PLAN-maps M8n): the `arctic` preset with the default table fits 3 of the 8
+# start pads archipelago requires and the generator exits.
+#
+# A climate that changes what the ground IS therefore has to bring its own
+# habitability opinion. `temperate` returns None -> the default table ->
+# bit-identical to what shipped.
+_CLIMATE_BIOME_SCORE: dict[str, dict[int, float]] = {
+    "arctic": {**_DEFAULT_BIOME_SCORE, bio.SNOW: 0.55, bio.TUNDRA: 0.85},
+    "arid": {**_DEFAULT_BIOME_SCORE, bio.DESERT: 0.60},
+}
+
+
+def biome_score_for(climate: str) -> dict[int, float] | None:
+    """Per-biome desirability for a `biomes.CLIMATE_PRESETS` name.
+
+    None means "the default temperate table", which is what every caller
+    passing no table already gets.
+    """
+    if climate not in bio.CLIMATE_PRESETS:
+        raise ValueError(
+            f"unknown climate preset {climate!r}; have "
+            f"{sorted(bio.CLIMATE_PRESETS)}")
+    return _CLIMATE_BIOME_SCORE.get(climate)
+
 
 def settlement_score(
     height: np.ndarray,

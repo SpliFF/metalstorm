@@ -149,7 +149,7 @@ def blend_toward(h, target, mask, cellsize, feather_elmos):
 
 
 def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
-             no_package=False):
+             no_package=False, climate="temperate"):
     t_start = time.time()
     layout = load_layout()
     cell = 32.0 if fast else 8.0
@@ -351,11 +351,16 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
     cp = bio.ClimateParams(seed=seed, lat_axis="z", lat_hot=0.62, lat_cold=0.45,
                            altitude_lapse=0.52, wind_dir=(1.0, 0.15),
                            base_moisture=0.418)
+    # --climate shifts that baseline; "temperate" is an exact identity. Only
+    # the biomes move: this map's sites, roads and E1 slope bands all come
+    # from meridian_layout.json, not from the climate.
+    cp = bio.apply_climate_preset(cp, climate)
     temp = bio.temperature_field(h, 0.0, cp, cell)
     moist = bio.moisture_field(h, 0.0, cp, cell)
     water_all = (h <= 0.0) | rivers
     b = bio.classify(h, slope, temp, moist, 0.0, river_mask=water_all)
-    print(f"biomes done {time.time()-t_start:.0f}s")
+    print(f"biomes done {time.time()-t_start:.0f}s ({climate}, land): "
+          f"{bio.format_biome_mix(b)}")
 
     # 7b. placement (terragen/placement.py): vegetation + boulder features,
     # scree/sand ground stamps. Stamps always run — the albedo bake and
@@ -586,6 +591,12 @@ def main():
                     help="skip the package bake; write preview.png only")
     ap.add_argument("--no-package", action="store_true",
                     help="stop after placement + E1 (fast layer-tuning loop)")
+    ap.add_argument("--climate", default="temperate",
+                    choices=sorted(bio.CLIMATE_PRESETS),
+                    help="climate preset shifted on top of this map's own "
+                         "authored climate; 'temperate' is an exact identity "
+                         "(shipped meridian_basin). The 24-region layout "
+                         "contract is unaffected — only the biomes.")
     ap.add_argument("--selftest", action="store_true",
                     help="generate twice as independent cold subprocesses "
                          "(isolated TMPDIR each, so the erosion cache cannot "
@@ -597,7 +608,7 @@ def main():
         if args.preview_only or args.no_package:
             ap.error("--selftest needs the full package path; drop "
                      "--preview-only/--no-package")
-        passthrough = ["--seed", str(args.seed)]
+        passthrough = ["--seed", str(args.seed), "--climate", args.climate]
         if args.fast:
             passthrough.append("--fast")
         if args.with_features:
@@ -607,7 +618,8 @@ def main():
             cache_globs=("meridian2_eroded_*.npy",)))
 
     generate(args.out, args.seed, fast=args.fast, with_features=args.with_features,
-             preview_only=args.preview_only, no_package=args.no_package)
+             preview_only=args.preview_only, no_package=args.no_package,
+             climate=args.climate)
 
 
 if __name__ == "__main__":
