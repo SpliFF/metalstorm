@@ -11,6 +11,7 @@ Emits:
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -216,3 +217,72 @@ local mapinfo = {{
 }}
 return mapinfo
 """
+
+
+# ---------------------------------------------------------------------------
+# Feature-def filtering (PLAN-maps M8o)
+# ---------------------------------------------------------------------------
+
+def filter_defs_lua(text: str, names) -> str:
+    """Keep only the `vegetation_defs.lua` blocks for `names`.
+
+    A climate palette references a subset of the shared def file, and a map
+    package should ship defs for the props it actually places: an unused
+    `featureDef` naming a `.gltf` the package does not contain is a broken
+    reference waiting for someone to place it. Filtering also keeps the
+    identity property M8n bought — with every name kept the output is the
+    input, byte for byte, so a regenerated temperate map does not move.
+
+    Comment groups are carried with the blocks that follow them and dropped
+    when all of those blocks are dropped, so a filtered file never ends up
+    with a section heading over nothing.
+    """
+    keep = set(names)
+    lines = text.split("\n")
+    out: list[str] = []
+
+    i = 0
+    while i < len(lines):
+        out.append(lines[i])
+        opened = lines[i].startswith("return lowerkeys({")
+        i += 1
+        if opened:
+            break
+    else:
+        raise ValueError("defs lua has no `return lowerkeys({` line")
+
+    groups: list[tuple[list[str], list[tuple[str, list[str]]]]] = []
+    lead: list[str] = []
+    defs: list[tuple[str, list[str]]] = []
+    while i < len(lines) and lines[i].strip() != "})":
+        m = re.match(r"^\t(\w+) = \{$", lines[i])
+        if m:
+            blk = [lines[i]]
+            i += 1
+            while i < len(lines):
+                blk.append(lines[i])
+                done = lines[i] == "\t},"
+                i += 1
+                if done:
+                    break
+            while i < len(lines) and lines[i].strip() == "":
+                blk.append(lines[i])
+                i += 1
+            defs.append((m.group(1), blk))
+            continue
+        if lines[i].lstrip().startswith("--") and defs:
+            groups.append((lead, defs))     # a comment starts a new group
+            lead, defs = [], []
+        lead.append(lines[i])
+        i += 1
+    groups.append((lead, defs))
+
+    for lead, defs in groups:
+        kept = [blk for name, blk in defs if name in keep]
+        if not kept and defs:
+            continue                        # heading over nothing: drop it
+        out.extend(lead)
+        for blk in kept:
+            out.extend(blk)
+    out.extend(lines[i:])
+    return "\n".join(out)

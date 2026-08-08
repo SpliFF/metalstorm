@@ -21,8 +21,10 @@ Usage:
     .venv/bin/python archipelago.py --no-package           # layer tuning
     .venv/bin/python archipelago.py --selftest [--fast]    # determinism gate
 
-Package the result with gen_vegetation_models.py --out <map dir> (prop
-models) and build/*/tools/mapconverter (processing + validation).
+Package the result with gen_vegetation_models.py --out <map dir> --climate
+<same climate> (prop models — a climate palette references props temperate
+does not, and the flag keeps a package to the ones it places) and
+build/*/tools/mapconverter (processing + validation).
 """
 from __future__ import annotations
 
@@ -323,6 +325,7 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     stamps = stamp_res.stamps
 
     feature_files = None
+    palette = veg.palette_for(climate)
     if with_features:
         def species_layer(sp_):
             return pl.Layer(
@@ -341,9 +344,12 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
                 s = np.maximum(s, scree_fld.astype(np.float32) * 0.9)
             return s
 
+        # deadwood belongs wherever the palette's trees are, which is not
+        # always FOREST — an arctic map has none, and the hard-coded id
+        # starved this layer to 0.0000 % (PLAN-maps M8o)
         def deadwood_suit(c):
-            edge = pl.forest_edge([bio.FOREST])(c) * 0.42
-            interior = pl.biome_suitability({bio.FOREST: 0.09})(c)
+            edge = pl.forest_edge(list(palette.wooded))(c) * 0.42
+            interior = pl.biome_suitability({b: 0.09 for b in palette.wooded})(c)
             return edge + interior
 
         def fence_suit(c):
@@ -369,7 +375,7 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
             return (hi & ground & (c.slope_deg < 24.0)).astype(np.float32)
 
         res = pl.run(ctx, [
-            *(species_layer(sp_) for sp_ in veg.TEMPERATE_SPECIES),
+            *(species_layer(sp_) for sp_ in palette.species),
             pl.Layer("deadwood",
                      pl.FeatureEmit([("fallen_log", 0.55), ("tree_stump", 0.45)],
                                     (0.9, 1.2)),
@@ -415,7 +421,8 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
                          f"rot = \"{heading}\" }},")
         lines += ["  },", "  unitlist = {}, buildinglist = {},", "}"]
         with open(os.path.join(HERE, "vegetation_defs.lua")) as f:
-            defs_lua = f.read()
+            defs_lua = pkg.filter_defs_lua(f.read(),
+                                           veg.feature_names_for(climate))
         feature_files = {
             "mapconfig/featureplacer/config.lua": "\n".join(lines) + "\n",
             "features/vegetation.lua": defs_lua,

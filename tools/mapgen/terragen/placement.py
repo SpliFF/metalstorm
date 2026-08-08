@@ -312,6 +312,13 @@ def _rasterize_stamp(field: np.ndarray, cx: float, cz: float, radius: float,
 # Runner
 # ---------------------------------------------------------------------------
 
+# A layer whose suitability covers less than this fraction of the map is
+# reported as starving. Exported because it is a contract, not a log level:
+# `tests/test_vegetation_palettes.py` holds every climate palette to the same
+# floor, so a palette cannot ship a species the map has no room for.
+STARVE_COVERAGE = 0.001
+
+
 def run(ctx: PlacementContext, layers: list[Layer],
         progress=lambda *_: None) -> PlacementResult:
     """Evaluate all layers. Deterministic for a given (seed, layer set)."""
@@ -320,7 +327,7 @@ def run(ctx: PlacementContext, layers: list[Layer],
         lseed = (ctx.seed * 131 + zlib.crc32(layer.name.encode())) & 0x7FFFFFFF
         suit = np.clip(layer.suitability(ctx), 0.0, 1.0).astype(np.float32)
         cov = float((suit > 0).mean())
-        if cov < 0.001:
+        if cov < STARVE_COVERAGE:
             progress(f"placement[{layer.name}]: WARNING suitability covers "
                      f"{cov:.4%} of the map — layer will starve")
         x, z, rot, scale_t, pick_t = _SAMPLERS[layer.sampler](layer, ctx, suit, lseed)

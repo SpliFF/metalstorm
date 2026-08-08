@@ -399,6 +399,7 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
     stamps = stamp_res.stamps
 
     feature_files = None
+    palette = veg.palette_for(climate)
     if with_features:
         def species_layer(sp):
             return pl.Layer(
@@ -417,10 +418,13 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
                 s = np.maximum(s, scree_fld.astype(np.float32) * 0.9)
             return s
 
-        # deadwood accumulates in the forest-edge band; sparse stumps inside
+        # deadwood accumulates in the wooded-edge band; sparse stumps inside.
+        # "Wooded" is the palette's, not FOREST's: an arctic map's trees are
+        # a tundra treeline and the hard-coded id starved this to 0.0000 %
+        # (PLAN-maps M8o)
         def deadwood_suit(c):
-            edge = pl.forest_edge([bio.FOREST])(c) * 0.42
-            interior = pl.biome_suitability({bio.FOREST: 0.09})(c)
+            edge = pl.forest_edge(list(palette.wooded))(c) * 0.42
+            interior = pl.biome_suitability({b: 0.09 for b in palette.wooded})(c)
             return edge + interior
 
         # broken fence runs flank the roads (dry ground only; the exclusion
@@ -443,7 +447,7 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
             return (hi & ground & (c.slope_deg < 24.0)).astype(np.float32)
 
         res = pl.run(ctx, [
-            *(species_layer(sp) for sp in veg.TEMPERATE_SPECIES),
+            *(species_layer(sp) for sp in palette.species),
             pl.Layer("deadwood",
                      pl.FeatureEmit([("fallen_log", 0.55), ("tree_stump", 0.45)],
                                     (0.9, 1.2)),

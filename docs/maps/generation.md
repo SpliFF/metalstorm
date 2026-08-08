@@ -50,7 +50,7 @@ don't depend on `NUMBA_NUM_THREADS` (verified: `terragen/_selftest_numba.py`).
 | `biomes.py` | Temperature (latitude gradient + altitude lapse + noise), moisture (noise + water-proximity + **orographic rainfall sweep**, §4c), Whittaker-ish classification into 8 ids (grassland/forest/desert/tundra/snow/rock/wetland/water), soft blend weights. |
 | `roads.py` | Least-cost road planning: 8-connected Dijkstra on a decimated grid with slope² cost, water/bridge penalties and max-grade cutoffs; MST topology over settlements (+ optional loops); Chaikin smoothing; full-res rasterization to mask + distance field; **cut-and-fill grading** of terrain under roads. |
 | `settle.py` | Settlement-site scoring (windowed flatness × water proximity × biome desirability × edge falloff) and greedy separated site selection. |
-| `vegetation.py` | Per-species density fields (biome base × moisture bonus × clump noise, minus exclusion zones) and the **stratified-jitter hash engine** — one hashed candidate per grid stratum, accepted with probability = local density. Blue-noise-like, order-independent, deterministic. |
+| `vegetation.py` | Per-species density fields (biome base × moisture bonus × clump noise, minus exclusion zones), the **climate-scoped palettes** (`palette_for(climate)` → species list + `wooded` biome set; `temperate` is `TEMPERATE_SPECIES` itself), and the **stratified-jitter hash engine** — one hashed candidate per grid stratum, accepted with probability = local density. Blue-noise-like, order-independent, deterministic. |
 | `placement.py` | The **prop & ground-stamp placement subsystem** (§6): declarative `Layer`s = suitability field × sampler (`scatter`/`clusters`) × emit target (`FeatureEmit` → featureplacer entries, `StampEmit` → ground fields the bake composites). Composable suitability helpers (`biome_suitability`, `slope_window`, `below_cliffs`). |
 | `dxt1.py` | Vectorized BC1/DXT1 range-fit encoder and **SMT tile clustering**: seeded minibatch k-means over 8×8 downsampled tile features, representatives chosen as *real source tiles* (never averages). |
 | `smf.py` | SMF/SMT container writer (heightmap quantization, tile index, typemap/metalmap, the 9-level minimap DXT1 chain). Layout matches `rts/Server/MapProcessor.cpp` exactly. |
@@ -353,6 +353,49 @@ on *both* models, so it fails loudly if `"ridge"` ever stops being a contrasting
 control rather than silently becoming a tautology; the preset tests pin the
 identity, the drivers-not-thresholds rule, and the snowfield habitability find.
 
+**A climate needs its own vegetation, and the palette is scoped the same way
+the habitability table is.** `vegetation.TEMPERATE_SPECIES` had an opinion
+about FOREST and nothing else, so the generator that scatters 17 798 features
+on a temperate archipelago scattered **1 716** on an arctic one, with
+`tree_broadleaf` and `deadwood` both warning *"suitability covers 0.0000 % of
+the map"*. `vegetation.palette_for(climate)` returns a `ClimatePalette` —
+species list plus the `wooded` biome set that stands in for FOREST in the
+layers keyed off woodland rather than off a species (`deadwood`; on an arctic
+map that is TUNDRA, the treeline). `temperate` returns a palette whose
+`species` **is** `TEMPERATE_SPECIES`, the same identity contract
+`biome_score_for` keeps.
+
+Feature totals before → after, `--fast`, archipelago / meridian2, with the
+share of the same generator's temperate total in brackets:
+
+| preset | before | after | share of temperate |
+|---|---|---|---|
+| `temperate` | 17 798 / 55 662 | unchanged (identity) | 1.00 / 1.00 |
+| `arctic` | 1 716 / 12 678 | **5 284 / 32 290** | 0.30 / 0.58 |
+| `arid` | 4 782 / 18 042 | **7 082 / 31 809** | 0.40 / 0.57 |
+| `tropical` | 21 209 / 73 177 | 20 436 / 73 315 | 1.15 / 1.32 |
+
+The goal is not parity with temperate — a desert and an icecap are *supposed*
+to be sparser — it is that no layer sits at zero and the mix is the climate's
+own. **Density was only half the defect.** The `tropical` row never starved
+and was still wrong: 52 % of meridian's tropical features were ridge conifers,
+because FOREST is FOREST to a single table. It is now 31 338 broadleaf to
+5 387 conifer at a near-identical total.
+
+Four props exist only for these palettes — `dead_snag` (arctic + arid),
+`cactus_column`, `desert_shrub` (arid), `palm` (tropical) — and they are
+built from the **existing** 16-swatch atlas, so no shipped model's UVs move.
+`gen_vegetation_models.py --climate <name>` writes only the props that
+climate's palette references, and `package.filter_defs_lua` trims
+`vegetation_defs.lua` to the same set, so a map never ships a `featureDef`
+pointing at a `.gltf` its package does not contain — and `temperate` is the
+original eleven models in the original order, byte for byte.
+
+Tests: `tools/mapgen/tests/test_vegetation_palettes.py` (17 cases). The
+starvation guard measures every palette against the *measured* land mixes
+above, and its positive control is the old code: `TEMPERATE_SPECIES` on an
+arctic mix must starve, or the guard proves nothing.
+
 ## 5. Texturing model
 
 Two layers, matching what Spring/Recoil (and SupCom/Frostbite/Unity) converge
@@ -442,11 +485,14 @@ fully deterministic, no RNG order dependence. Future placement families
 (wreckage, dwellings, rail lines, bridges) are new layers/targets on this
 model, not new mechanisms.
 
-Meridian's layer set: the four `vegetation.TEMPERATE_SPECIES` scatter layers
-(species density fields become layer suitabilities), `boulder_field` clusters
+Meridian's layer set: the `vegetation.palette_for(climate).species` scatter
+layers (species density fields become layer suitabilities — four on the
+temperate palette, up to seven on `arid`), `boulder_field` clusters
 (`rock_boulder_large` + `rock_boulder` mixed, favouring rocky biomes and the
 scree aprons), `erratic` lone outcrops, `deadwood` (fallen logs + stumps in
-the `forest_edge` band, sparse inside), `road_fences` (broken split-rail
+the `forest_edge` band of the **palette's** `wooded` biomes, sparse inside —
+hard-coding FOREST there starved the layer to zero on an arctic map, whose
+trees are a tundra treeline), `road_fences` (broken split-rail
 segments along the road polylines), `ruin_colonnade` template sites (7-pillar
 ring + 3 wall fragments + optional centre monolith, on flat open ground
 within sight of a road), `ridge_stones` (lone monoliths on high ground),
