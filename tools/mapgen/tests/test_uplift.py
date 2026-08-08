@@ -251,6 +251,123 @@ class TestAuthoringSurface(unittest.TestCase):
         self.assertGreater(np.abs(a - c).mean(), 1e-3)
 
 
+class TestShapedField(unittest.TestCase):
+    """`Phi` assumes a uniform `U/K`; a field that draws a landform is not.
+
+    The whole point of an authoring surface is to aim, so the failure mode
+    that matters is not "the terrain looks wrong" but "the author asked for
+    950 and got 283". Every case here therefore compares a *prediction*
+    against a converged run, and the scalar form is carried alongside as the
+    control it failed as (PLAN-maps M8p).
+    """
+
+    S = 97
+
+    def setUp(self):
+        # one uplifting blob in the middle: the flow path from its summit
+        # leaves the uplifting region long before it reaches base level,
+        # which is exactly the geometry Phi's factorisation assumes away
+        g = np.linspace(-1.0, 1.0, self.S)
+        zz, xx = np.meshgrid(g, g, indexing="ij")
+        self.u = np.exp(-((xx / 0.30) ** 2 + (zz / 0.30) ** 2))
+        self.u[0, :] = self.u[-1, :] = self.u[:, 0] = self.u[:, -1] = 0.0
+        rng = np.random.default_rng(7)
+        self.h0 = 5.0 * rng.random((self.S, self.S))
+        self.K = 0.02
+
+    def _converged(self, uplift, iterations=1600):
+        h = ero.stream_power_erode(self.h0, cellsize=32.0,
+                                   iterations=iterations, dt=1.4,
+                                   k_erode=self.K, m_exp=0.5, uplift=uplift,
+                                   talus_deg=None)
+        return h - h.min()
+
+    def test_psi_reduces_to_phi_when_the_ratio_is_uniform(self):
+        """The new form must contain the old one, not replace it."""
+        dem = tn.fbm(tn.SimplexNoise(13), *np.meshgrid(
+            np.linspace(0, 6, 97), np.linspace(0, 6, 97)), octaves=5) * 200.0
+        recv, levels, accum = _route(dem)
+        phi = up.erosional_distance(recv, levels, accum)
+        u = np.full(dem.shape, 0.5)
+        psi = up.steady_state_relief_field(u, self.K, recv, levels, accum)
+        np.testing.assert_allclose(psi, (0.5 / self.K) * phi, rtol=1e-12)
+
+    def test_psi_is_zero_at_outlets(self):
+        psi = up.steady_state_relief_from_dem(self.h0, self.u, self.K)
+        recv, _, _ = _route(self.h0)
+        roots = up.base_level_mask(recv, self.h0.shape)
+        self.assertTrue(np.all(psi[roots] == 0.0))
+        self.assertGreater(psi.max(), 0.0)
+
+    def test_the_scalar_form_overpredicts_a_shaped_field(self):
+        """The finding, as a test: Phi's aim is out by more than 50 %.
+
+        Not a tolerance to relax — if a later change makes the scalar form
+        accurate here, the geometry it is being fed has changed and the
+        shaped-field case is no longer being exercised.
+        """
+        h = self._converged(self.u * 1.0)
+        achieved = float(np.quantile(h, 0.999))
+        phi, _ = up.erosional_distance_from_dem(h)
+        scalar = (self.u.max() / self.K) * up.relief_scale(phi)
+        psi = up.steady_state_relief_from_dem(h, self.u, self.K)
+        path = float(np.quantile(psi, 0.999))
+        self.assertGreater(scalar / achieved, 1.5)
+        self.assertLess(abs(path / achieved - 1.0), 0.25)
+
+    def test_scale_uplift_for_relief_hits_the_target(self):
+        target = 400.0
+        s = up.scale_uplift_for_relief(self.h0, self.u, self.K, target)
+        h = self._converged(self.u * s)
+        achieved = float(np.quantile(h, 0.999))
+        self.assertLess(abs(achieved / target - 1.0), 0.30)
+
+    def test_scale_uplift_for_relief_is_linear_in_the_target(self):
+        a = up.scale_uplift_for_relief(self.h0, self.u, self.K, 400.0)
+        b = up.scale_uplift_for_relief(self.h0, self.u, self.K, 800.0)
+        self.assertAlmostEqual(b / a, 2.0, places=9)
+
+
+class TestStructuralAnisotropy(unittest.TestCase):
+    """The instrument M8p's verdict rests on, with both controls it needs.
+
+    A metric that only ever fires is worthless, and so is one that never
+    does — the herringbone case and the isotropic case are both asserted
+    here, against the same thresholds the milestone quoted.
+    """
+
+    def setUp(self):
+        # 513 not 257: the reading has a sample-count floor (the same fBm
+        # reads 2.35 / 1.84 / 1.68 at 257 / 513 / 1025), so a small fixture
+        # would need a threshold too loose to catch anything
+        self.N = 513
+        x = np.linspace(0, 8, self.N)
+        self.iso = tn.fbm(tn.SimplexNoise(41), *np.meshgrid(x, x),
+                          octaves=7) * 300.0
+
+    def test_isotropic_noise_reads_low(self):
+        peak, ent = up.structural_anisotropy(self.iso, 8.0, 32.0, 120.0)
+        self.assertLess(peak, 2.0)
+        self.assertGreater(ent, 0.99)
+
+    def test_a_herringbone_reads_high(self):
+        g = np.arange(self.N, dtype=np.float64)
+        zz, xx = np.meshgrid(g, g, indexing="ij")
+        comb = 60.0 * np.sin(2 * np.pi * (xx + zz) / 8.0)
+        peak, ent = up.structural_anisotropy(self.iso + comb, 8.0, 32.0, 120.0)
+        self.assertGreater(peak, 5.0)
+        self.assertLess(ent, 0.96)
+
+    def test_the_band_is_a_band(self):
+        """Structure outside the window must not move the reading."""
+        g = np.arange(self.N, dtype=np.float64)
+        zz, xx = np.meshgrid(g, g, indexing="ij")
+        slow = 400.0 * np.sin(2 * np.pi * (xx - zz) / 200.0)   # 1600 elmos
+        a = up.structural_anisotropy(self.iso, 8.0, 32.0, 120.0)
+        b = up.structural_anisotropy(self.iso + slow, 8.0, 32.0, 120.0)
+        self.assertAlmostEqual(a[0], b[0], delta=0.15)
+
+
 class TestMultires(unittest.TestCase):
     def setUp(self):
         x = np.linspace(0, 8, 129)

@@ -64,6 +64,26 @@ recovers `U/K` to within 1-6 % across U in {0.5, 1, 2}, K in {0.01, 0.02,
 0.04} and 1200-2400 iterations.
 
 
+⚠ `Phi` is only the whole story for a *uniform* ratio
+-----------------------------------------------------
+
+Pulling `U/K` outside the sum is the step that produces `Phi`, and it is
+exact only while the ratio is constant along the flow path. An uplift field
+that draws a landform is not: an island's summit-to-sea path leaves the
+uplifting region within a few cells, and `Phi`'s remaining tail then gets
+multiplied by an uplift that is not there. Measured on the island-arc field
+(M8p), aiming a 950-elmo summit with `(U_max/K)*relief_scale(Phi)` lands at
+283 — 2.4x short, and because the error is a property of the field's shape
+rather than of the solver, no constant corrects it.
+
+For a shaped field, use `steady_state_relief_field` — the same relation with
+the ratio kept inside the sum, `Psi_i = sum_path U_j/(K_j*sqrt(a_j))`, and
+the same single pass over `topo_levels`. `scale_uplift_for_relief` is the
+authoring verb built on it: draw the tectonics at whatever relative
+amplitudes read well, and it returns the factor that puts the highest ground
+where the author said (within ~10 % on the arc).
+
+
 Cordonnier's constant is not a constant here
 --------------------------------------------
 
@@ -209,10 +229,91 @@ def steady_state_relief(
     a guarantee. It is a *steady-state* prediction: a run of 30 iterations is
     nowhere near it (M8m measured the approach), so predict against the
     iteration count you actually intend to run.
+
+    ⚠ "Slowly compared with the drainage network" is a real precondition and
+    a field that *draws a landform* violates it — see
+    `steady_state_relief_field`, which is the same relation with the ratio
+    left inside the path sum. On the island-arc field this form is 2.4x out.
     """
     u = np.asarray(uplift, dtype=np.float64)
     k = np.asarray(k_erode, dtype=np.float64)
     return (u / k) * phi
+
+
+def steady_state_relief_field(
+    uplift: np.ndarray,
+    k_erode: np.ndarray | float,
+    receivers: np.ndarray,
+    levels: list[np.ndarray],
+    accum: np.ndarray,
+) -> np.ndarray:
+    """Steady state for a field that varies *on the drainage's own scale*.
+
+        Psi_i = sum_{path i->outlet} U_j / (K_j * sqrt(a_j))
+
+    `steady_state_relief` above pulls one `U/K` outside the sum and
+    multiplies it by `Phi`. That step is exact only while the ratio is
+    constant along the flow path, and its docstring's "varies slowly
+    compared with the drainage network" is the precondition. An uplift that
+    draws a *landform* — an island, a volcanic centre, a range that ends —
+    breaks it by construction: the path from a summit to the sea leaves the
+    uplifting region within a few cells and the whole remaining tail of
+    `Phi` is multiplied by an uplift that is not there.
+
+    Measured on the island-arc field (PLAN-maps M8p): aiming a 950-elmo
+    summit with `(U_max/K)*relief_scale(Phi)` lands at 283 elmos — 2.4x
+    short, and the error is a property of the field's shape, so no constant
+    corrects it. Aiming the same field with `Psi` lands within 10 %.
+
+    Shape is `receivers`'; reshape to the DEM yourself, or use
+    `steady_state_relief_from_dem`.
+    """
+    n = np.asarray(receivers).size
+    idx = np.arange(n, dtype=np.int64)
+    a = np.maximum(np.asarray(accum, dtype=np.float64).ravel(), 1.0)
+    k = np.broadcast_to(np.asarray(k_erode, dtype=np.float64),
+                        np.asarray(uplift).shape).ravel()
+    step = np.asarray(uplift, dtype=np.float64).ravel() / (k * np.sqrt(a))
+    step[receivers == idx] = 0.0
+    psi = np.zeros(n, dtype=np.float64)
+    for lvl in levels[1:]:
+        psi[lvl] = psi[receivers[lvl]] + step[lvl]
+    return psi
+
+
+def steady_state_relief_from_dem(
+    dem: np.ndarray, uplift: np.ndarray, k_erode: np.ndarray | float
+) -> np.ndarray:
+    """`steady_state_relief_field` routed off `dem`, shaped like `dem`."""
+    filled = hyd.fill_depressions(dem)
+    recv = hyd.d8_receivers(hyd.resolve_flats(filled))
+    levels = hyd.topo_levels(recv)
+    accum = hyd.flow_accumulation(recv, levels)
+    return steady_state_relief_field(
+        uplift, k_erode, recv, levels, accum).reshape(dem.shape)
+
+
+def scale_uplift_for_relief(
+    dem: np.ndarray,
+    uplift: np.ndarray,
+    k_erode: np.ndarray | float,
+    target_relief: float,
+    quantile: float = 0.999,
+) -> float:
+    """The factor that makes `uplift` hold `target_relief` at steady state.
+
+    The authoring verb for a *shaped* field: draw the tectonics with
+    whatever amplitudes read well relative to each other, then ask this what
+    to multiply the whole field by so its highest ground stands where the
+    author said. Aims at a quantile of `Psi` rather than its max for the
+    same reason `relief_scale` does — the max is one remote headwater cell.
+
+    First-order, like `uplift_for_relief`: `Psi` is measured on the terrain
+    in hand and the drainage reorganises as the solver runs. On the island
+    arc that costs ~10 %, against the 2.4x the scalar form costs there.
+    """
+    psi = steady_state_relief_from_dem(dem, uplift, k_erode)
+    return float(target_relief) / max(float(np.quantile(psi, quantile)), 1e-9)
 
 
 def uplift_for_relief(
@@ -249,6 +350,67 @@ def relief_scale(phi: np.ndarray, quantile: float = 0.999) -> float:
     with the drainage network's overall depth instead of with one outlier.
     """
     return float(np.quantile(phi, quantile))
+
+
+def structural_anisotropy(
+    dem: np.ndarray,
+    cellsize: float,
+    lo_elmos: float = 32.0,
+    hi_elmos: float = 120.0,
+    bins: int = 90,
+) -> tuple[float, float]:
+    """Is this landscape's fine structure *oriented*? `(peak/mean, entropy)`.
+
+    The acceptance instrument for solver-authored terrain, and the reason
+    this milestone (M8p) could reach a verdict at all. A dendritic landscape
+    spreads its spectral energy over every orientation; a lattice-born
+    herringbone puts it in two lobes. This bins the 2-D power spectrum of
+    one wavelength band by direction and reports how many times the mean
+    sector the strongest sector holds, plus the normalised angular entropy.
+
+    Measured at 8 elmos/cell over the 32-120 elmo band (M8p): the shipped
+    `skerry_reach` surface reads **1.24 / 0.9989**, and the same map's
+    terrain authored as uplift and run to steady state reads
+    **7.30 / 0.9046** — which is what the hillshades show, straight parallel
+    spurs against dendritic valleys.
+
+    ⚠ Do not judge this with a gradient-*aspect* histogram, which is the
+    obvious instrument and does not work: on the same pair it reads +0.048
+    against +0.059 of lattice-direction excess, i.e. it calls a herringbone
+    and a shipped map the same thing. Aspect asks "do slopes face the eight
+    directions", and a converged D8 landscape can say no while its ridges
+    are still periodic and parallel. M8m's flow-direction entropy (0.975 vs
+    0.978, "no more anisotropic after 3000 iterations") is the same instrument
+    on the router instead of the surface, and its conclusion — that the
+    combing was not a lattice artifact — does not survive this one.
+
+    ⚠ The reading has a sample-count floor, so **only compare surfaces at
+    the same grid size**. One isotropic fBm reads 2.35 / 1.84 / 1.68 at 257 /
+    513 / 1025 cells across, against 1.24 for the 2049-cell shipped map: a
+    coarse preview scores "anisotropic" on nothing but its own bin counts.
+    """
+    h = np.asarray(dem, dtype=np.float64)
+    n = min(h.shape)
+    h = h[:n, :n] - h[:n, :n].mean()
+    w = np.hanning(n)
+    f = np.fft.fftshift(np.fft.fft2(h * w[:, None] * w[None, :]))
+    power = f.real ** 2 + f.imag ** 2
+    freq = np.fft.fftshift(np.fft.fftfreq(n, cellsize))
+    fz, fx = np.meshgrid(freq, freq, indexing="ij")
+    k = np.hypot(fx, fz)
+    band = (k > 1.0 / hi_elmos) & (k < 1.0 / lo_elmos)
+    if not band.any():
+        return 1.0, 1.0
+    ang = (np.degrees(np.arctan2(fz, fx)) % 180.0)[band]
+    hist, _ = np.histogram(ang, bins=bins, range=(0.0, 180.0),
+                           weights=power[band])
+    total = hist.sum()
+    if total <= 0:
+        return 1.0, 1.0
+    p = hist / total
+    nz = p[p > 0]
+    return float(p.max() / p.mean()), float(-(nz * np.log(nz)).sum()
+                                            / np.log(bins))
 
 
 def smooth_uplift(

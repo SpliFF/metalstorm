@@ -396,6 +396,53 @@ starvation guard measures every palette against the *measured* land mixes
 above, and its positive control is the old code: `TEMPERATE_SPECIES` on an
 arctic mix must starve, or the guard proves nothing.
 
+### Terrain authored as tectonics (`--terrain arc`) — built, not shipped
+
+`archipelago.py --terrain arc` replaces the drawn island skeleton with an
+**uplift rate**: en-echelon volcanic centres strung along a bowed arc
+(`arc_uplift`), a trench-floor platform under it (`arc_platform`), and
+`erosion.stream_power_erode_multires` run to steady state (3000 coarse
+iterations at ¼ resolution, then 30 fine) so the *solver* produces the
+landform rather than finishing one. The whole downstream pipeline works on
+it unchanged — 8 dry start pads, roads, rivers, biomes, 17 969 features,
+`mapconverter` 0 failures.
+
+**Aim it with `uplift.scale_uplift_for_relief`, never with `Phi`.** The
+`h = (U/K)·Phi` relation factorises `U/K` out of the path sum, which is
+exact only for a ratio that is constant along the flow path. An uplift that
+draws a landform is not: the summit-to-sea path leaves the uplifting region
+within a few cells. Aiming a 950-elmo summit through `relief_scale(Phi)`
+lands at **283**; aiming the same field through the path integral
+`Psi = sum U_j/(K_j·sqrt(a_j))` lands within **10 %** at preview resolution
+(56 % over at full res — it is a first-order aim, so read the achieved
+relief back).
+
+**No shipped map uses it, and the reason is measured.** A converged D8
+stream-power landscape is *structurally periodic*: over the 32–120 elmo
+band at 8 elmos/cell it concentrates **7.30×** the mean sector energy in one
+orientation (angular entropy 0.9046) against the shipped `skerry_reach`
+surface's **1.24× / 0.9989** — straight parallel spurs where the shipped map
+has dendritic valleys, plainly visible in matched hillshade crops. Nothing
+in reach moves it: coarse iterations 100→3000 (5.07→3.95), fine iterations
+30→300 (3.95→4.04), coarse factor 4→2 (3.95→3.75), single-resolution
+instead of multires (3.39), 120 elmos of isotropic noise on the starting
+platform (3.05), and an arc heading of 18° instead of 45° (4.51) — against
+the shipped arm's 1.47 at that resolution. The shipped generators escape it
+because their fine structure is **authored noise that erosion only
+finishes**; a solver asked to build a network from nothing builds it on the
+lattice. The unblocking item is a multiple-flow-direction router (D∞/MFD)
+in `hydrology.py`, which every generator and both shipped maps depend on.
+
+⚠ **Judge this with `uplift.structural_anisotropy`, not with a gradient-
+aspect histogram.** Aspect reads +0.048 lattice-direction excess for the
+shipped map and +0.059 for the herringbone — it cannot tell them apart.
+Same trap as PLAN-maps M8m's flow-direction entropy (0.975 vs 0.978), which
+is why that milestone recorded the combing as "the LEM's real answer" rather
+than a lattice artifact. And the reading has a sample-count floor (2.35 /
+1.84 / 1.68 at 257 / 513 / 1025 cells for one isotropic fBm), so only
+compare surfaces at the same grid size — which is also why `--fast` is not
+even a *look* at an arc map: its coarse LEM grid is 4× coarser in elmos.
+
 ## 5. Texturing model
 
 Two layers, matching what Spring/Recoil (and SupCom/Frostbite/Unity) converge

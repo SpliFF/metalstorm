@@ -18,6 +18,8 @@ Usage:
     .venv/bin/python archipelago.py --fast --preview-only  # 30 s look
     .venv/bin/python archipelago.py --climate arid --id dune_reach \
         --name "Dune Reach"                                # climate variant
+    .venv/bin/python archipelago.py --terrain arc --landmass 0.26 \
+        --id sundered_arc --name "Sundered Arc"            # tectonic variant
     .venv/bin/python archipelago.py --no-package           # layer tuning
     .venv/bin/python archipelago.py --selftest [--fast]    # determinism gate
 
@@ -49,6 +51,7 @@ from terragen import rivers as riv          # noqa: E402
 from terragen import roads as rd            # noqa: E402
 from terragen import selftest as stest      # noqa: E402
 from terragen import settle as st           # noqa: E402
+from terragen import uplift as up           # noqa: E402
 from terragen import vegetation as veg      # noqa: E402
 from terragen.vegetation import _hash01     # noqa: E402
 
@@ -82,6 +85,89 @@ def island_centres(seed: int, count: int, margin: float, min_sep: float):
             if len(out) == count:
                 break
     return out
+
+
+def arc_centreline(bow: float = 3400.0, samples: int = 2048):
+    """A bowed volcanic-arc trace across the map, SW -> NE.
+
+    Real island arcs are the surface expression of a subducting slab, so
+    they are long, gently curved and *segmented* — which is the shape that
+    makes an archipelago out of one tectonic structure.
+    """
+    t = np.linspace(0.0, 1.0, samples)
+    ax = 1700.0 + t * (MAP_SIZE - 3400.0)
+    az = 2400.0 + t * (MAP_SIZE - 4800.0) - bow * np.sin(np.pi * t)
+    return ax, az
+
+
+def arc_uplift(seed: int, xx: np.ndarray, zz: np.ndarray, cell: float,
+               spacing: float = 2900.0, sig_along: float = 1150.0,
+               sig_across: float = 620.0, floor: float = 0.10,
+               bow: float = 3400.0) -> np.ndarray:
+    """The `--terrain arc` authoring surface: uplift, normalised to [0, 1].
+
+    En-echelon volcanic centres strung along `arc_centreline`, each an
+    ellipse elongated along strike and stepped across it, over a weak
+    submarine ridge (`floor`) that joins them below the waterline. The
+    segmentation is not decoration: a *smooth* uplift belt converges to one
+    continuous wall with regular transverse valleys (measured — PLAN-maps
+    M8p), which is a mountain range, not an archipelago.
+
+    Amplitudes here are relative. `uplift.scale_uplift_for_relief` turns
+    them into a rate that stands the highest ground where the author asked.
+    """
+    ax, az = arc_centreline(bow)
+    s = np.concatenate([[0.0], np.cumsum(np.hypot(np.diff(ax), np.diff(az)))])
+
+    n_c = int(s[-1] // spacing) + 1
+    j = np.arange(n_c, dtype=np.int64)
+    h_off = _hash01(j, j * 7 + 1, seed, 61)      # along-strike jitter
+    h_ech = _hash01(j, j * 7 + 2, seed, 62)      # across-strike step
+    h_amp = _hash01(j, j * 7 + 3, seed, 63)
+    h_len = _hash01(j, j * 7 + 4, seed, 64)
+
+    u = np.zeros(xx.shape)
+    for i in range(n_c):
+        sj = (i + 0.5) * spacing + (h_off[i] - 0.5) * 0.44 * spacing
+        if sj <= 0.0 or sj >= s[-1]:
+            continue
+        k = int(np.clip(np.searchsorted(s, sj), 1, ax.size - 2))
+        tx, tz = ax[k + 1] - ax[k - 1], az[k + 1] - az[k - 1]
+        L = np.hypot(tx, tz)
+        tx, tz = tx / L, tz / L
+        off = (h_ech[i] * 2.0 - 1.0) * sig_across * 1.5
+        cx, cz = ax[k] - tz * off, az[k] + tx * off
+        dx, dz = xx - cx, zz - cz
+        along = (dx * tx + dz * tz) / (sig_along * (0.75 + 0.5 * h_len[i]))
+        across = (-dx * tz + dz * tx) / sig_across
+        u = np.maximum(u, (0.55 + 0.45 * h_amp[i])
+                       * np.exp(-(along ** 2 + across ** 2)))
+
+    d_arc = np.full(xx.shape, np.inf)
+    for k in range(0, ax.size, 8):
+        d_arc = np.minimum(d_arc, np.hypot(xx - ax[k], zz - az[k]))
+    u = np.maximum(u, floor * np.exp(-(d_arc / 2600.0) ** 2))
+
+    # a little lithospheric grain, so the centres are not nine ellipses
+    u *= 0.55 + 0.6 * (0.5 + 0.5 * tn.fbm(
+        tn.SimplexNoise(seed + 3), xx / 1900.0, zz / 1900.0, octaves=3))
+    u = up.smooth_uplift(u, cell, wavelength_elmos=900.0)
+    return u / max(float(u.max()), 1e-9)
+
+
+def arc_platform(seed: int, landmass: float, u: np.ndarray,
+                 xx: np.ndarray, zz: np.ndarray) -> np.ndarray:
+    """The surface the arc grows out of: trench floor + a shallow shelf.
+
+    The LEM has no sea in it — every cell erodes as if subaerial — so the
+    *bathymetry* has to be authored even when the relief is not. Uplift
+    draws the land; this draws the water it stands in, and the landmass
+    quantile puts the waterline where the contract says.
+    """
+    coast = tn.fbm(tn.SimplexNoise(seed + 9), xx / 2400.0, zz / 2400.0,
+                   octaves=5)
+    h = -90.0 + 240.0 * np.clip(u * 1.9, 0.0, 1.0) + 30.0 * coast
+    return h - np.quantile(h, 1.0 - landmass)
 
 
 def synth_height(seed: int, landmass: float, islands: int,
@@ -136,31 +222,59 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
              fast: bool = False, with_features: bool = False,
              preview_only: bool = False, no_package: bool = False,
              map_id: str = "skerry_reach", display_name: str = "Skerry Reach",
-             climate: str = "temperate"):
+             climate: str = "temperate", terrain: str = "mounds",
+             relief_target: float = 950.0):
     t0 = time.time()
     cell = 32.0 if fast else 8.0
     S = int(MAP_SIZE / cell) + 1
     print(f"grid {S}x{S} @ {cell} elmos/cell  "
           f"(seed={seed} landmass={landmass} islands={islands} "
-          f"climate={climate})")
+          f"climate={climate} terrain={terrain})")
 
     zz, xx = np.mgrid[0:S, 0:S].astype(np.float64) * cell
+    hardness = 0.016 + 0.020 * (0.5 + 0.5 * tn.fbm(
+        tn.SimplexNoise(seed + 2), xx / 3400.0, zz / 3400.0, octaves=3))
 
-    # 1. island skeleton + detail (landmass-calibrated)
-    h = synth_height(seed, landmass, islands, xx, zz)
+    # 1. skeleton — drawn (mounds) or authored as a rate (arc)
+    u = None
+    if terrain == "arc":
+        u = arc_uplift(seed, xx, zz, cell)
+        h = arc_platform(seed, landmass, u, xx, zz)
+        # aim with the PATH INTEGRAL, not (U/K)*Phi: this field varies on
+        # the drainage network's own scale, which is exactly the case the
+        # scalar form factorises away (2.4x out — PLAN-maps M8p)
+        u = u * up.scale_uplift_for_relief(h, u, hardness, relief_target)
+        print(f"arc uplift authored {time.time()-t0:.0f}s "
+              f"(aim {relief_target:.0f} elmos, U max {u.max():.4f})")
+    else:
+        h = synth_height(seed, landmass, islands, xx, zz)
     print(f"synth done {time.time()-t0:.0f}s relief {h.min():.0f}..{h.max():.0f}")
 
     # 2. erosion (cached per parameter set — the cache key IS the contract)
     cache = os.path.join(
         os.environ.get("TMPDIR", "/tmp"),
-        f"archipelago_eroded_r{SYNTH_REV}_{seed}_{landmass}_{islands}_"
-        f"{'fast' if fast else 'full'}.npy")
+        f"archipelago_eroded_r{SYNTH_REV}_{terrain}_{seed}_{landmass}_"
+        f"{islands}_{relief_target}_{'fast' if fast else 'full'}.npy")
     if os.path.exists(cache):
         h = np.load(cache)
         print(f"erosion loaded from cache {cache}")
+    elif terrain == "arc":
+        # the landform IS the erosion here, so it has to run to steady state:
+        # ~30 iterations only *adds* the field (M8m). Coarse-first makes that
+        # affordable, and `match_relief` is what keeps the coarse grid aiming
+        # at the fine grid's relief rather than half of it.
+        h = ero.stream_power_erode_multires(
+            h, cellsize=cell, coarse_factor=4,
+            coarse_iterations=(600 if fast else 3000),
+            fine_iterations=(10 if fast else 30),
+            uplift=u, k_erode=hardness, dt=1.4, m_exp=0.5,
+            talus_deg=33.0, thermal_rate=0.35,
+            progress=lambda i, n_: print(
+                f"  erosion {i}/{n_} ({time.time()-t0:.0f}s)")
+            if i % 200 == 0 else None)
+        np.save(cache, h)
+        print(f"erosion done {time.time()-t0:.0f}s (cached -> {cache})")
     else:
-        hardness = 0.016 + 0.020 * (0.5 + 0.5 * tn.fbm(
-            tn.SimplexNoise(seed + 2), xx / 3400.0, zz / 3400.0, octaves=3))
         h = ero.stream_power_erode(
             h, cellsize=cell, iterations=(10 if fast else 26), dt=1.4,
             k_erode=hardness, m_exp=0.5, talus_deg=33.0, thermal_rate=0.35,
@@ -461,10 +575,14 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     cfg = pkg.MapPackageConfig(
         map_id=map_id,
         display_name=display_name,
-        description=(f"Free-form archipelago (seed {seed}, "
-                     f"{landmass:.0%} land, {islands} islands, "
-                     f"{climate} climate): "
-                     "island road nets, coastal towns, ruins."),
+        description=(
+            (f"Volcanic island arc (seed {seed}, {landmass:.0%} land, "
+             f"{climate} climate): tectonic uplift carved to steady state — "
+             "en-echelon centres, straits, island road nets, coastal towns."
+             if terrain == "arc" else
+             f"Free-form archipelago (seed {seed}, {landmass:.0%} land, "
+             f"{islands} islands, {climate} climate): "
+             "island road nets, coastal towns, ruins.")),
         min_height=-120.0, max_height=1200.0,
         tile_budget=(2048 if fast else 12288),
         start_positions=starts,
@@ -508,9 +626,25 @@ def main():
                          "the landmass contract are unaffected — only the "
                          "biomes, and what the splat bake and vegetation "
                          "palettes make of them.")
+    ap.add_argument("--terrain", default="mounds", choices=("mounds", "arc"),
+                    help="'mounds' (default, shipped skerry_reach) draws the "
+                         "islands as summed radial mounds plus noise and runs "
+                         "erosion as a finishing filter. 'arc' authors a "
+                         "volcanic island arc as an uplift RATE and lets a "
+                         "converged stream-power solver carve the landform — "
+                         "--islands is then unused, and generation is ~9 min "
+                         "at full res instead of ~1. See PLAN-maps M8p.")
+    ap.add_argument("--relief-target", dest="relief_target", type=float,
+                    default=950.0,
+                    help="--terrain arc only: elmos of relief the highest "
+                         "ground should stand at, aimed through "
+                         "uplift.scale_uplift_for_relief (~10%% first-order)")
     ap.add_argument("--fast", action="store_true",
                     help="513 grid iteration mode — preview/tuning only, "
-                         "NOT shippable")
+                         "NOT shippable. ⚠ with --terrain arc it is not even "
+                         "a look: the coarse LEM grid is 4x coarser in elmos, "
+                         "so its own cell-scale channel texture upsamples into "
+                         "a diagonal comb the full-res map does not have.")
     ap.add_argument("--with-features", action="store_true")
     ap.add_argument("--preview-only", action="store_true")
     ap.add_argument("--no-package", action="store_true")
@@ -529,7 +663,9 @@ def main():
                        "--landmass", str(args.landmass),
                        "--islands", str(args.islands),
                        "--id", args.map_id, "--name", args.display_name,
-                       "--climate", args.climate]
+                       "--climate", args.climate,
+                       "--terrain", args.terrain,
+                       "--relief-target", str(args.relief_target)]
         if args.fast:
             passthrough.append("--fast")
         if args.with_features:
@@ -544,7 +680,8 @@ def main():
              fast=args.fast, with_features=args.with_features,
              preview_only=args.preview_only, no_package=args.no_package,
              map_id=args.map_id, display_name=args.display_name,
-             climate=args.climate)
+             climate=args.climate, terrain=args.terrain,
+             relief_target=args.relief_target)
 
 
 if __name__ == "__main__":
