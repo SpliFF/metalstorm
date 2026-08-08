@@ -137,6 +137,16 @@ incidentally — the flow-direction distribution is no more anisotropic after
 regular transverse valleys are the LEM's real answer to a smooth linear
 uplift belt.
 
+And the answer to *that* is to stop authoring a smooth linear belt, which is
+where three milestones of texture work ended up (M8t). Segmenting the arc's
+uplift — cross-strike breaks, an en-echelon step, a back-arc high — took the
+300-800 elmo anisotropy excess from **1.62 to 1.19** against the shipped
+map's 0.99 and the null's p95 of 1.32, where an authored surface grain (M8r)
+and a varying erodibility field (M8s) had each moved it by less than the
+choice of null. **The uplift's topology is the lever; its spectrum is not.**
+Judge it with `divide_topology` next to `anisotropy_bands`: the two answer
+different questions and the coarse bands of the second are weak on their own.
+
 
 ⚠ The precondition, which is not optional: pin the base level
 -------------------------------------------------------------
@@ -646,6 +656,19 @@ def anisotropy_bands(
     landform's own strike. A held-out GRF null reads excess 1.00-1.12 with
     a p95 of 1.32 in that band, so 1.62 clears it and 1.49 barely does.
 
+    ⚠ **That last column does not reproduce, and M8t could not recover how it
+    was taken.** `arc_platform(seed, 0.30, arc_uplift(...), xx, zz, 17.0)` on
+    the same crop — the call `generate` makes, before the aim is applied —
+    reads **1.11 / 1.14 / 1.23 / 1.25**, not 2.14 / 1.54 / 1.36 / 1.34, and
+    the seafloor clamp is not the difference (checked, bit-identical either
+    way). The likeliest reconstruction is that the *relief-scaled* uplift was
+    fed in, where `clip(u * 1.9, 0, 1)` saturates the belt into a hard-edged
+    plateau. Either way the conclusion moves **against** M8s FIND 2: on this
+    reading the landform carries 1.25 of the eroded surface's 1.62, so less
+    of the coarse lobe was the authored strike than that milestone credited,
+    which is consistent with M8t removing most of it by segmenting the belt.
+    When you carry a control column, record the exact call that produced it.
+
     The floor is a property of the grid, so — as `structural_anisotropy`
     already warns — compare surfaces only at the same shape.
     """
@@ -658,6 +681,84 @@ def anisotropy_bands(
         out.append(BandReading(float(lo), float(hi), peak, fl,
                                peak / max(fl, 1e-9), lobes))
     return out
+
+
+class DivideReading(NamedTuple):
+    land_frac: float
+    islands: int          # land components over `min_area`
+    ridges: int           # high-ground components over `min_area`
+    ridge_span: float     # the largest one's extent, elmos
+    ridge_share: float    # its share of all high-ground area kept
+    threshold: float      # the elevation the high-ground cut fell at
+
+
+def divide_topology(
+    dem: np.ndarray,
+    cellsize: float,
+    quantile: float = 0.85,
+    min_area: float = 4.0e5,
+) -> DivideReading:
+    """How many independent massifs is this, and how long is the longest?
+
+    The instrument for the defect `anisotropy_bands` cannot see. M8s found
+    the arc's remaining problem was **topological, not textural**: one
+    continuous knife-edge divide corner to corner with regular opposing
+    spurs, which is what a converged stream-power solver must build on a
+    single smooth uplift ridge. Every spectral reading in this module is
+    blind to that — the shipped map and the arc read the *same* 300-800
+    excess while one is nine massifs and the other is one.
+
+    So this counts pieces instead of measuring angles: connected components
+    of land (`dem > 0`), and connected components of the high ground above
+    the `quantile` of *land* elevation, both filtered at `min_area` (m^2, so
+    skerries and single-cell specks do not count as islands). `ridge_span`
+    is the largest high-ground component's bounding extent in elmos —
+    against a 16 384-elmo map, "one divide corner to corner" is a span of
+    ~6 000 with the map's whole relief in one component.
+
+    Quantile-relative on purpose: an arm with 2x the relief of another is
+    still cut at its own 85th percentile, so the reading survives the
+    relief drift that every aim through `scale_uplift_for_relief` carries.
+
+    Measured at 8 elmos/cell, q = 0.85, on 2049^2 surfaces (PLAN-maps M8t):
+
+        surface                            land  islands  ridges  span
+        shipped skerry_reach (mounds)      34 %      8        8    4186
+        arc, un-segmented (M8s)            30 %      1        4    6013
+        arc platform, un-eroded            30 %      1        4    5420
+        arc, segmented, relief-matched     30 %      5        7    5730
+
+    ⚠ Read `islands` and `ridges` together. Breaking a belt into islands is
+    not the same as breaking its divide: the un-eroded platform above has
+    one island and four separate high-ground pieces, i.e. the saddles that
+    join it are below the cut but still above water. And `ridge_span` is the
+    slowest of the three to move — the segmented arm above is five islands
+    with 7 pieces and still carries a 5 730-elmo piece, because its longest
+    *segment* is long. `ridge_share` (45 % -> 37 %) is the better companion.
+    """
+    h = np.asarray(dem, dtype=np.float64)
+    land = h > 0.0
+    cell_area = float(cellsize) ** 2
+    if not land.any():
+        return DivideReading(0.0, 0, 0, 0.0, 0.0, 0.0)
+
+    def _components(mask):
+        lab, _ = ndimage.label(mask)
+        sizes = np.bincount(lab.ravel())
+        sizes[0] = 0
+        keep = np.where(sizes * cell_area > min_area)[0]
+        return lab, sizes, keep
+
+    _, _, isl = _components(land)
+    thr = float(np.quantile(h[land], quantile))
+    lab, sizes, keep = _components(h > thr)
+    if keep.size == 0:
+        return DivideReading(float(land.mean()), int(isl.size), 0, 0.0, 0.0, thr)
+    biggest = int(keep[np.argmax(sizes[keep])])
+    zs, xs = np.nonzero(lab == biggest)
+    span = float(np.hypot(np.ptp(zs), np.ptp(xs)) * cellsize)
+    return DivideReading(float(land.mean()), int(isl.size), int(keep.size),
+                         span, float(sizes[biggest] / sizes[keep].sum()), thr)
 
 
 def smooth_uplift(

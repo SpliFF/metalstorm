@@ -7,7 +7,7 @@ inputs — island placement, elevations, start positions, settlements,
 per-island road networks, biomes, vegetation, ruins. Deterministic:
 
     same (--seed, --landmass, --islands, --terrain, --router, --arc-detail,
-          --hardness-detail)
+          --hardness-detail, --arc-segmentation)
         =>  byte-identical map
 
 The --landmass fraction is a hard contract, enforced by quantile
@@ -86,6 +86,14 @@ HARDNESS_FLOOR = 0.006
 ARC_HARDNESS_DETAIL = 0.0
 HARD_REV = 1
 
+# Tectonic segmentation of the arc: cross-strike breaks + an en-echelon step
+# + a back-arc high, one knob (`arc_uplift`'s `segmentation`). Measured ON —
+# it takes the coarse-band anisotropy the last three milestones chased from
+# 1.62 to 1.19 excess against the shipped map's 0.99, and it is the only
+# thing that has moved it. See `arc_uplift` and PLAN-maps M8t.
+ARC_SEGMENTATION = 1.0
+SEG_REV = 1
+
 
 # ---------------------------------------------------------------------------
 # Island skeleton
@@ -128,18 +136,60 @@ def arc_centreline(bow: float = 3400.0, samples: int = 2048):
 def arc_uplift(seed: int, xx: np.ndarray, zz: np.ndarray, cell: float,
                spacing: float = 2900.0, sig_along: float = 1150.0,
                sig_across: float = 620.0, floor: float = 0.10,
-               bow: float = 3400.0) -> np.ndarray:
+               bow: float = 3400.0,
+               segmentation: float = 0.0,
+               seg_centres: int = 2, break_depth: float = 0.88,
+               break_width: float = 1250.0, echelon_step: float = 1.9,
+               back_arc: float = 0.34, back_arc_offset: float = 3400.0,
+               back_arc_sig: float = 1000.0) -> np.ndarray:
     """The `--terrain arc` authoring surface: uplift, normalised to [0, 1].
 
-    En-echelon volcanic centres strung along `arc_centreline`, each an
-    ellipse elongated along strike and stepped across it, over a weak
-    submarine ridge (`floor`) that joins them below the waterline. The
-    segmentation is not decoration: a *smooth* uplift belt converges to one
-    continuous wall with regular transverse valleys (measured — PLAN-maps
-    M8p), which is a mountain range, not an archipelago.
+    Volcanic centres strung along `arc_centreline`, each an ellipse elongated
+    along strike and stepped across it, over a weak submarine ridge (`floor`)
+    that joins them below the waterline. The along-strike structure is not
+    decoration: a *smooth* uplift belt converges to one continuous wall with
+    regular transverse valleys (measured — PLAN-maps M8p), which is a
+    mountain range, not an archipelago.
+
+    `segmentation` (0-1) is the tectonic-segment knob added by M8t, and it
+    scales three coupled terms at once — the arc-segment idea is one idea,
+    not three:
+
+      * **cross-strike breaks** — a transverse trough at each segment
+        boundary (`break_depth`, `break_width`), multiplied into the belt
+        *including* its submarine ridge, so a break is a strait rather than
+        a saddle;
+      * **en-echelon step** — a per-*segment* across-strike staircase of
+        `echelon_step` * `sig_across`, replacing most of the per-centre
+        jitter, so consecutive segments are laterally offset by more than
+        their own width;
+      * **back-arc high** — a second, weaker belt (`back_arc`) offset
+        `back_arc_offset` to the concave side, i.e. a second divide axis
+        with a basin between it and the arc.
+
+    Measured at 2049^2 / 8 elmos, dinf, `--arc-detail 17`, seed 20260730,
+    landmass 0.30 — `uplift.anisotropy_bands` **excess** on M8r's 1025^2
+    crop, and `uplift.divide_topology` on the whole map (PLAN-maps M8t):
+
+        arm                        16-32  32-120  120-300  300-800  islands  relief
+        seg 0 (M8s)                 2.32   1.35    1.24     1.62       1     1262
+        seg 1                       2.02   1.32    1.17     1.05       3     1650
+        seg 1, relief-matched       1.54   1.51    1.24     1.19       5     1263
+        shipped skerry_reach        1.49   1.48    1.17     0.99       8      553
+
+    The verdict rests on the third row, because segmentation *removes*
+    uplift and the aim hands back a larger rate for the same target: at the
+    same `--relief-target 950` the segmented arm stands 1 650 elmos of
+    relief against 1 262, so its readings are not a like-for-like pair.
+    Aimed at 730 it lands on 1 263 — the baseline's relief to 0.1 % — and
+    three of the four bands then sit within 0.07 of the shipped map's.
+    Read relief on the output, never assume it.
 
     Amplitudes here are relative. `uplift.scale_uplift_for_relief` turns
-    them into a rate that stands the highest ground where the author asked.
+    them into a rate that stands the highest ground where the author asked —
+    and on this field it overshoots by **+65 %** (950 asked, 1 570 stood)
+    against +27 % un-segmented, which is a bigger target for the aim item
+    and not a reason to quietly retune `--relief-target`.
     """
     ax, az = arc_centreline(bow)
     s = np.concatenate([[0.0], np.cumsum(np.hypot(np.diff(ax), np.diff(az)))])
@@ -150,17 +200,30 @@ def arc_uplift(seed: int, xx: np.ndarray, zz: np.ndarray, cell: float,
     h_ech = _hash01(j, j * 7 + 2, seed, 62)      # across-strike step
     h_amp = _hash01(j, j * 7 + 3, seed, 63)
     h_len = _hash01(j, j * 7 + 4, seed, 64)
+    h_brk = _hash01(j, j * 7 + 5, seed, 65)      # break-position jitter
+
+    seg = float(np.clip(segmentation, 0.0, 1.0))
+    sj_all = ((j + 0.5) * spacing + (h_off - 0.5) * 0.44 * spacing)
 
     u = np.zeros(xx.shape)
     for i in range(n_c):
-        sj = (i + 0.5) * spacing + (h_off[i] - 0.5) * 0.44 * spacing
+        sj = sj_all[i]
         if sj <= 0.0 or sj >= s[-1]:
             continue
         k = int(np.clip(np.searchsorted(s, sj), 1, ax.size - 2))
         tx, tz = ax[k + 1] - ax[k - 1], az[k + 1] - az[k - 1]
         L = np.hypot(tx, tz)
         tx, tz = tx / L, tz / L
-        off = (h_ech[i] * 2.0 - 1.0) * sig_across * 1.5
+        # en-echelon: a per-segment staircase across strike, plus what is
+        # left of the per-centre jitter. At seg = 0 this is the shipped
+        # per-centre random offset, bit-for-bit.
+        stair = (((i // max(seg_centres, 1)) % 2) * 2.0 - 1.0)
+        if seg <= 0.0:
+            off = (h_ech[i] * 2.0 - 1.0) * sig_across * 1.5
+        else:
+            off = ((1.0 - seg) * (h_ech[i] * 2.0 - 1.0) * 1.5
+                   + seg * (stair * echelon_step
+                            + (h_ech[i] - 0.5) * 0.5)) * sig_across
         cx, cz = ax[k] - tz * off, az[k] + tx * off
         dx, dz = xx - cx, zz - cz
         along = (dx * tx + dz * tz) / (sig_along * (0.75 + 0.5 * h_len[i]))
@@ -168,14 +231,56 @@ def arc_uplift(seed: int, xx: np.ndarray, zz: np.ndarray, cell: float,
         u = np.maximum(u, (0.55 + 0.45 * h_amp[i])
                        * np.exp(-(along ** 2 + across ** 2)))
 
+    # distance to the arc, and — for the breaks — the along-strike station of
+    # the nearest point on it. Same stride as the shipped d_arc loop.
+    breaking = seg > 0.0 and break_depth > 0.0
     d_arc = np.full(xx.shape, np.inf)
+    s_arc = np.zeros(xx.shape) if breaking else None
     for k in range(0, ax.size, 8):
-        d_arc = np.minimum(d_arc, np.hypot(xx - ax[k], zz - az[k]))
+        if breaking:
+            d = np.hypot(xx - ax[k], zz - az[k])
+            closer = d < d_arc
+            d_arc = np.where(closer, d, d_arc)
+            s_arc = np.where(closer, s[k], s_arc)
+        else:
+            d_arc = np.minimum(d_arc, np.hypot(xx - ax[k], zz - az[k]))
     u = np.maximum(u, floor * np.exp(-(d_arc / 2600.0) ** 2))
+
+    if seg > 0.0 and back_arc > 0.0:
+        # the concave side of a bowed arc is the side its chord is on, and
+        # +off in the loop above is that side (checked: the centreline's
+        # midpoint is 3397 elmos from the chord's, towards -z, and +off
+        # moves +z). One belt, so one extra divide axis, not a mirror.
+        d_bk = np.full(xx.shape, np.inf)
+        for k in range(4, ax.size - 4, 8):
+            tx, tz = ax[k + 4] - ax[k - 4], az[k + 4] - az[k - 4]
+            L = np.hypot(tx, tz)
+            bx = ax[k] - tz / L * back_arc_offset
+            bz = az[k] + tx / L * back_arc_offset
+            d_bk = np.minimum(d_bk, np.hypot(xx - bx, zz - bz))
+        u = np.maximum(u, seg * back_arc
+                       * np.exp(-(d_bk / back_arc_sig) ** 2))
 
     # a little lithospheric grain, so the centres are not nine ellipses
     u *= 0.55 + 0.6 * (0.5 + 0.5 * tn.fbm(
         tn.SimplexNoise(seed + 3), xx / 1900.0, zz / 1900.0, octaves=3))
+
+    if breaking:
+        # breaks go on LAST (before the low-pass) and multiply everything,
+        # submarine ridge and back-arc high included: a transverse fault
+        # zone offsets the whole structure, it does not notch the summits.
+        cut = np.ones(xx.shape)
+        for i in range(n_c - 1):
+            if (i + 1) % max(seg_centres, 1) != 0:
+                continue
+            sb = 0.5 * (sj_all[i] + sj_all[i + 1]) \
+                + (h_brk[i] - 0.5) * 0.3 * spacing
+            if sb <= 0.0 or sb >= s[-1]:
+                continue
+            cut *= 1.0 - (seg * break_depth
+                          * np.exp(-((s_arc - sb) / break_width) ** 2))
+        u *= np.maximum(cut, 0.0)
+
     u = up.smooth_uplift(u, cell, wavelength_elmos=900.0)
     return u / max(float(u.max()), 1e-9)
 
@@ -321,7 +426,8 @@ def synth_height(seed: int, landmass: float, islands: int,
 
 def erosion_cache_path(terrain: str, router: str, seed: int, landmass: float,
                        islands: int, relief_target: float, arc_detail: float,
-                       fast: bool, hardness_detail: float = 0.0) -> str:
+                       fast: bool, hardness_detail: float = 0.0,
+                       segmentation: float = 0.0) -> str:
     """Where a converged surface is cached — and the key IS the contract.
 
     Every input the solver saw has to appear here or a later run silently
@@ -330,16 +436,20 @@ def erosion_cache_path(terrain: str, router: str, seed: int, landmass: float,
     surface under identical parameters. It is left out of the `mounds` key
     so the shipped `skerry_reach` cache stays addressable.
 
-    `hardness_detail` is keyed the same way and only when it is on, so every
-    surface converged before `substrate_hardness` grew its mid-scale term
-    stays addressable at its own key.
+    `hardness_detail` and `segmentation` are keyed the same way and only when
+    they are on, so every surface converged before `substrate_hardness` grew
+    its mid-scale term, or before `arc_uplift` grew its segment breaks, stays
+    addressable at its own key — which is what makes an A/B against an older
+    arm free rather than a 450-second re-run.
     """
     arc_key = f"_a{arc_detail}v{ARC_REV}" if terrain == "arc" else ""
     k_key = f"_k{hardness_detail}v{HARD_REV}" if hardness_detail > 0.0 else ""
+    s_key = (f"_g{segmentation}v{SEG_REV}"
+             if terrain == "arc" and segmentation > 0.0 else "")
     return os.path.join(
         os.environ.get("TMPDIR", "/tmp"),
         f"archipelago_eroded_r{SYNTH_REV}_{terrain}_{router}_{seed}_{landmass}_"
-        f"{islands}_{relief_target}{arc_key}{k_key}_"
+        f"{islands}_{relief_target}{arc_key}{k_key}{s_key}_"
         f"{'fast' if fast else 'full'}.npy")
 
 
@@ -350,7 +460,8 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
              climate: str = "temperate", terrain: str = "mounds",
              router: str = "auto", relief_target: float = 950.0,
              arc_detail: float = ARC_DETAIL_DEFAULT,
-             hardness_detail: "float | None" = None):
+             hardness_detail: "float | None" = None,
+             segmentation: "float | None" = None):
     t0 = time.time()
     cell = 32.0 if fast else 8.0
     S = int(MAP_SIZE / cell) + 1
@@ -364,9 +475,14 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     # non-zero default there would move the skerry_reach package (M8s).
     if hardness_detail is None:
         hardness_detail = ARC_HARDNESS_DETAIL if terrain == "arc" else 0.0
+    # segmentation is meaningless off the arc — there is no belt to break
+    if segmentation is None:
+        segmentation = ARC_SEGMENTATION if terrain == "arc" else 0.0
     print(f"grid {S}x{S} @ {cell} elmos/cell  "
           f"(seed={seed} landmass={landmass} islands={islands} "
-          f"climate={climate} terrain={terrain} router={router})")
+          f"climate={climate} terrain={terrain} router={router}"
+          + (f" segmentation={segmentation}" if terrain == "arc" else "")
+          + ")")
 
     zz, xx = np.mgrid[0:S, 0:S].astype(np.float64) * cell
     hardness = substrate_hardness(seed, xx, zz, detail=hardness_detail)
@@ -377,7 +493,8 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     # 1. skeleton — drawn (mounds) or authored as a rate (arc)
     u = None
     if terrain == "arc":
-        u = arc_uplift(seed, xx, zz, cell)
+        u = arc_uplift(seed, xx, zz, cell,
+                       segmentation=segmentation)
         h = arc_platform(seed, landmass, u, xx, zz, detail=arc_detail)
         # aim with the PATH INTEGRAL, not (U/K)*Phi: this field varies on
         # the drainage network's own scale, which is exactly the case the
@@ -401,7 +518,7 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     # 2. erosion (cached per parameter set — the cache key IS the contract)
     cache = erosion_cache_path(terrain, router, seed, landmass, islands,
                                relief_target, arc_detail, fast,
-                               hardness_detail)
+                               hardness_detail, segmentation)
     if os.path.exists(cache):
         h = np.load(cache)
         print(f"erosion loaded from cache {cache}")
@@ -446,6 +563,13 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     land_frac = float(land.mean())
     print(f"islands: {n_isl} components, {len(big)} major, "
           f"land {land_frac:.1%} (target {landmass:.1%})")
+    # how many independent massifs, and how long is the longest divide — the
+    # reading M8s's spectral instrument is blind to (PLAN-maps M8t). Cheap
+    # (two labelings), and the number every arc arm has to be judged on.
+    _dv = up.divide_topology(h, cell)
+    print(f"divides: {_dv.ridges} high-ground pieces, longest span "
+          f"{_dv.ridge_span:.0f} elmos ({_dv.ridge_share:.0%} of the high "
+          f"ground), relief {h.max()-h.min():.0f}")
 
     # 4. preliminary climate for settlement scoring
     def fields(hh):
@@ -816,6 +940,14 @@ def main():
                          "0 everywhere: it barely moves the band it was "
                          "built for and makes 120-300 worse (PLAN-maps M8s, "
                          "and `substrate_hardness` carries the numbers).")
+    ap.add_argument("--arc-segmentation", dest="segmentation", type=float,
+                    default=None,
+                    help="--terrain arc only, 0-1: tectonic segmentation of "
+                         "the arc — cross-strike breaks, an en-echelon step "
+                         "per segment, and a back-arc high, scaled together. "
+                         "0 restores the M8s belt, which converges to one "
+                         "continuous divide corner to corner (PLAN-maps M8t, "
+                         "and `arc_uplift` carries the numbers).")
     ap.add_argument("--fast", action="store_true",
                     help="513 grid iteration mode — preview/tuning only, "
                          "NOT shippable. ⚠ with --terrain arc it is not even "
@@ -847,6 +979,8 @@ def main():
                        "--arc-detail", str(args.arc_detail)]
         if args.hardness_detail is not None:
             passthrough += ["--hardness-detail", str(args.hardness_detail)]
+        if args.segmentation is not None:
+            passthrough += ["--arc-segmentation", str(args.segmentation)]
         if args.fast:
             passthrough.append("--fast")
         if args.with_features:
@@ -864,7 +998,8 @@ def main():
              climate=args.climate, terrain=args.terrain,
              router=args.router, relief_target=args.relief_target,
              arc_detail=args.arc_detail,
-             hardness_detail=args.hardness_detail)
+             hardness_detail=args.hardness_detail,
+             segmentation=args.segmentation)
 
 
 if __name__ == "__main__":

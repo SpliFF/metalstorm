@@ -467,6 +467,83 @@ class TestAngularLobes(unittest.TestCase):
                                    places=6)
 
 
+class TestDivideTopology(unittest.TestCase):
+    """The instrument for the defect the spectral ones cannot see (M8t).
+
+    M8s's finding was that the arc's problem is *how many* massifs there
+    are, not how their fine structure is oriented — and `structural_
+    anisotropy` reads a nine-island map and a one-ridge map the same. The
+    control here is a pair with the same crest height, the same ridge width
+    and the same strike, differing only in whether that ridge is one long
+    piece or several: the reading has to separate them, and — the negative
+    control — the anisotropy reading must not.
+    """
+
+    CELL = 8.0
+    MIN_AREA = 4.0e3          # this fixture is a 2 km square, not a map
+
+    def _field(self, pieces: int, n: int = 257):
+        """One diagonal ridge, domed along strike, in `pieces` — analytic, so
+        the crest is smooth and a component count is not counting sampling
+        bumps. Each piece has the same crest height, so `pieces` changes the
+        topology and nothing else."""
+        zz, xx = np.mgrid[0:n, 0:n].astype(np.float64) * self.CELL
+        span = self.CELL * (n - 1)
+        along = (xx + zz) / np.sqrt(2.0)
+        across = (xx - zz) / np.sqrt(2.0)
+        length = span * np.sqrt(2.0)
+        sig = 0.33 * length / pieces
+        dome = np.zeros(xx.shape)
+        for i in range(pieces):
+            centre = length * (i + 0.5) / pieces
+            dome = np.maximum(dome, np.exp(-((along - centre) / sig) ** 2))
+        return 260.0 * dome * np.exp(-(across / 45.0) ** 2) - 60.0
+
+    def _read(self, dem, quantile: float = 0.85):
+        return up.divide_topology(dem, self.CELL, quantile=quantile,
+                                  min_area=self.MIN_AREA)
+
+    def setUp(self):
+        self.one = self._field(1)
+        self.many = self._field(4)
+
+    def test_one_ridge_reads_as_one_piece(self):
+        r = self._read(self.one)
+        self.assertEqual(r.islands, 1)
+        self.assertEqual(r.ridges, 1)
+        self.assertEqual(r.ridge_share, 1.0)
+
+    def test_a_broken_ridge_reads_as_several(self):
+        r = self._read(self.many)
+        self.assertGreaterEqual(r.islands, 3)
+        self.assertGreaterEqual(r.ridges, 3)
+        self.assertLess(r.ridge_span, 0.5 * self._read(self.one).ridge_span)
+        self.assertLess(r.ridge_share, 0.4)
+
+    def test_the_spectral_instrument_cannot_tell_them_apart(self):
+        """Why this function exists — the negative control on the old one."""
+        a = up.structural_anisotropy(self.one, self.CELL, 300.0, 800.0)[0]
+        b = up.structural_anisotropy(self.many, self.CELL, 300.0, 800.0)[0]
+        self.assertLess(abs(a - b) / max(a, b), 0.25)
+
+    def test_the_cut_is_relative_so_relief_drift_does_not_move_it(self):
+        """Every arm aimed through `scale_uplift_for_relief` lands at a
+        different relief; the reading has to survive that."""
+        a = self._read(self.many)
+        b = self._read(self.many * 1.6)
+        self.assertEqual((a.islands, a.ridges), (b.islands, b.ridges))
+        self.assertAlmostEqual(a.ridge_span, b.ridge_span, delta=1e-6)
+
+    def test_min_area_filters_specks(self):
+        h = self.many.copy()
+        h[0, 0] = 300.0                       # a one-cell island, 64 m^2
+        self.assertEqual(self._read(h).islands, self._read(self.many).islands)
+
+    def test_an_all_sea_field_reads_empty_rather_than_raising(self):
+        r = self._read(np.full((32, 32), -50.0))
+        self.assertEqual((r.land_frac, r.islands, r.ridges), (0.0, 0, 0))
+
+
 class TestMultires(unittest.TestCase):
     def setUp(self):
         x = np.linspace(0, 8, 129)
