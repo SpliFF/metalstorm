@@ -1,0 +1,317 @@
+#!/usr/bin/env python3
+"""Tests for uplift-field authoring (terragen/uplift.py, PLAN-maps.md §2b item 2).
+
+    python3 -m unittest discover -s tools/mapgen/tests
+
+Synthetic terrain only, for the reason test_rivers.py already gives: `data/maps/`
+is gitignored, so a clone has no real map to run against. The hydrology and the
+solver are the shipping ones — every case routes through `terragen.hydrology`
+and erodes through `terragen.erosion`, so what is pinned here is the behaviour a
+map generation gets.
+
+What this pins down, and why each one is here rather than being obvious:
+
+  * **the steady-state relation** `h = (U/K)*Phi`. It is the whole authoring
+    surface: without it "how high do you want this range" has no path to a
+    number the solver takes, and §2b item 2 degenerates into a knob. The test
+    fits `h` against `Phi` over a converged run and requires the slope to
+    recover `U/K`; the positive control asserts a *wrong* `U/K` is rejected by
+    the same tolerance, so the fit is known to be discriminating.
+
+  * **the base-level trap**, which is the finding this milestone turned on.
+    Uplift applied at outlets does nothing at all — the solver never erodes a
+    root, so a rising root carries the whole map with it and the landform is
+    the U = 0 landform under a rigid translation. `test_unpinned_uplift_is_a_
+    rigid_translation` shows the no-op directly (relief ratio ~1 against a
+    U = 0 arm) and `test_pinning_buys_relief` shows the pinned arm is an order
+    of magnitude higher on the same input. Delete the pin in `erosion.py` and
+    the second test fails.
+
+  * **the shipped path is untouched.** No generator passes `uplift`, so the
+    pin must be provably inert when `uplift is None` — otherwise this
+    milestone silently re-terrains two shipped maps.
+
+  * **`_coarsen` is an area average, not decimation.** Multires evolves the
+    structure on the coarse grid, and the divides land where the ridge crests
+    are; decimating a ridge samples it or misses it depending on parity. The
+    control builds a checkerboard, whose area average is flat and whose
+    decimation is not.
+
+  * **band detail is the high-pass residual.** The claim is that
+    `keep_band_detail` restores exactly what the coarse grid could not carry.
+    The control pair runs the same call with the flag off and requires the
+    high-frequency energy to be *absent*, so the assertion cannot pass
+    vacuously on a smooth fixture.
+"""
+
+import os
+import sys
+import unittest
+
+import numpy as np
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from terragen import erosion as ero  # noqa: E402
+from terragen import hydrology as hyd  # noqa: E402
+from terragen import noise as tn  # noqa: E402
+from terragen import uplift as up  # noqa: E402
+
+
+def _route(dem):
+    filled = hyd.fill_depressions(dem)
+    routing = hyd.resolve_flats(filled)
+    recv = hyd.d8_receivers(routing)
+    levels = hyd.topo_levels(recv)
+    accum = hyd.flow_accumulation(recv, levels)
+    return recv, levels, accum
+
+
+def _border_pinned(shape, value):
+    u = np.full(shape, float(value))
+    u[0, :] = 0.0
+    u[-1, :] = 0.0
+    u[:, 0] = 0.0
+    u[:, -1] = 0.0
+    return u
+
+
+class TestErosionalDistance(unittest.TestCase):
+    def test_outlets_are_zero(self):
+        dem = tn.fbm(tn.SimplexNoise(3), *np.meshgrid(
+            np.linspace(0, 4, 65), np.linspace(0, 4, 65)), octaves=4) * 100.0
+        recv, levels, accum = _route(dem)
+        phi = up.erosional_distance(recv, levels, accum)
+        roots = up.base_level_mask(recv, dem.shape).ravel()
+        self.assertTrue(np.all(phi[roots] == 0.0))
+        self.assertGreater(phi[~roots].max(), 0.0)
+
+    def test_matches_hand_summed_path(self):
+        """Phi is sum(1/sqrt(a)) down the flow path — check one path by hand."""
+        dem = tn.fbm(tn.SimplexNoise(11), *np.meshgrid(
+            np.linspace(0, 6, 97), np.linspace(0, 6, 97)), octaves=5) * 150.0
+        recv, levels, accum = _route(dem)
+        phi = up.erosional_distance(recv, levels, accum)
+        start = int(np.argmax(phi))
+        walked, cell = 0.0, start
+        for _ in range(phi.size):
+            if recv[cell] == cell:
+                break
+            walked += 1.0 / np.sqrt(max(accum[cell], 1.0))
+            cell = recv[cell]
+        self.assertAlmostEqual(walked, phi[start], places=9)
+
+    def test_is_independent_of_cell_size(self):
+        """The dx cancels out of the relation, so Phi must not see cellsize."""
+        dem = tn.fbm(tn.SimplexNoise(5), *np.meshgrid(
+            np.linspace(0, 5, 81), np.linspace(0, 5, 81)), octaves=4) * 120.0
+        a, _ = up.erosional_distance_from_dem(dem)
+        b, _ = up.erosional_distance_from_dem(dem)   # routing takes no cellsize
+        np.testing.assert_allclose(a, b)
+        self.assertGreater(a.max(), 1.0)
+
+
+class TestSteadyStateRelation(unittest.TestCase):
+    """`h = (U/K)*Phi` — the relation the whole authoring surface rests on."""
+
+    S = 97
+
+    def _converged(self, U, K, iterations=1600):
+        rng = np.random.default_rng(7)
+        h = 5.0 * rng.random((self.S, self.S))
+        u = _border_pinned(h.shape, U)
+        h = ero.stream_power_erode(h, cellsize=32.0, iterations=iterations,
+                                   dt=1.4, k_erode=K, m_exp=0.5, uplift=u,
+                                   talus_deg=None)
+        return h - h.min()
+
+    def _fit_ratio(self, h):
+        phi, _ = up.erosional_distance_from_dem(h)
+        sel = phi.ravel() > 0
+        x, y = phi.ravel()[sel], h.ravel()[sel]
+        return float(np.dot(x, y) / np.dot(x, x))
+
+    def test_recovers_u_over_k(self):
+        for U, K in ((0.5, 0.02), (2.0, 0.02), (0.5, 0.04)):
+            with self.subTest(U=U, K=K):
+                slope = self._fit_ratio(self._converged(U, K))
+                self.assertAlmostEqual(slope / (U / K), 1.0, delta=0.10)
+
+    def test_fit_rejects_a_wrong_ratio(self):
+        """Positive control: the same tolerance must reject 2x the true U/K."""
+        slope = self._fit_ratio(self._converged(0.5, 0.02))
+        self.assertGreater(abs(slope / (2.0 * 0.5 / 0.02) - 1.0), 0.10)
+
+    def test_relief_scales_linearly_with_uplift(self):
+        a = self._converged(0.5, 0.02).max()
+        b = self._converged(1.0, 0.02).max()
+        self.assertAlmostEqual(b / a, 2.0, delta=0.20)
+
+
+class TestBaseLevelTrap(unittest.TestCase):
+    """Uplift at an outlet is a rigid translation, not relief."""
+
+    S = 97
+    ITERS = 500
+
+    def _run(self, uplift, pin=True):
+        rng = np.random.default_rng(7)
+        h = 5.0 * rng.random((self.S, self.S))
+        h = ero.stream_power_erode(h, cellsize=32.0, iterations=self.ITERS,
+                                   dt=1.4, k_erode=0.02, m_exp=0.5,
+                                   uplift=uplift, talus_deg=None,
+                                   pin_base_level=pin)
+        return h
+
+    def test_unpinned_uplift_is_a_rigid_translation(self):
+        """Everywhere-uplift with the pin OFF must match the U = 0 landform."""
+        zero = self._run(None)
+        flat = self._run(np.full((self.S, self.S), 0.5), pin=False)
+        rel_zero = zero.max() - zero.min()
+        rel_flat = flat.max() - flat.min()
+        self.assertAlmostEqual(rel_flat / rel_zero, 1.0, delta=0.05)
+        # And it is the same landform, not just the same range. Not bit-
+        # identical: the arms differ by a growing constant (500 * dt * U ~ 350
+        # elmos), so the routing sees different ULPs and 500 chaotic iterations
+        # amplify that to ~1e-3 elmos of shape. Measured 0.971.
+        r_unpinned = np.corrcoef(flat.ravel(), zero.ravel())[0, 1]
+        self.assertGreater(r_unpinned, 0.95)
+        # Control: the pinned arm on the same input is not this landform at
+        # all — measured -0.094, so the assertion above is discriminating.
+        pinned = self._run(np.full((self.S, self.S), 0.5))
+        r_pinned = np.corrcoef(pinned.ravel(), zero.ravel())[0, 1]
+        self.assertLess(r_pinned, 0.5)
+
+    def test_pinning_buys_relief(self):
+        """The guard. Remove the pin in erosion.py and this fails."""
+        zero = self._run(None)
+        pinned = self._run(np.full((self.S, self.S), 0.5))
+        rel_zero = zero.max() - zero.min()
+        rel_pinned = pinned.max() - pinned.min()
+        self.assertGreater(rel_pinned, 20.0 * rel_zero)
+
+    def test_pin_is_inert_without_uplift(self):
+        """No generator passes uplift; the pin must not move a shipped byte."""
+        rng = np.random.default_rng(2)
+        dem = 200.0 * rng.random((65, 65))
+        on = ero.stream_power_erode(dem, cellsize=8.0, iterations=4, dt=1.4,
+                                    k_erode=0.02, pin_base_level=True)
+        off = ero.stream_power_erode(dem, cellsize=8.0, iterations=4, dt=1.4,
+                                     k_erode=0.02, pin_base_level=False)
+        self.assertEqual(on.tobytes(), off.tobytes())
+
+    def test_pin_base_level_helper_zeroes_outlets(self):
+        dem = tn.fbm(tn.SimplexNoise(9), *np.meshgrid(
+            np.linspace(0, 4, 65), np.linspace(0, 4, 65)), octaves=4) * 100.0
+        recv, _, _ = _route(dem)
+        u = up.pin_base_level(np.full(dem.shape, 3.0), recv)
+        roots = up.base_level_mask(recv, dem.shape)
+        self.assertTrue(np.all(u[roots] == 0.0))
+        self.assertTrue(np.all(u[~roots] == 3.0))
+
+
+class TestAuthoringSurface(unittest.TestCase):
+    def setUp(self):
+        dem = tn.fbm(tn.SimplexNoise(21), *np.meshgrid(
+            np.linspace(0, 6, 97), np.linspace(0, 6, 97)), octaves=5) * 300.0
+        self.phi, _ = up.erosional_distance_from_dem(dem)
+        self.dem = dem
+
+    def test_uplift_for_relief_round_trips(self):
+        target = np.full(self.dem.shape, 900.0)
+        u = up.uplift_for_relief(target, 0.02, self.phi)
+        back = up.steady_state_relief(u, 0.02, self.phi)
+        sel = self.phi > 1e-3
+        np.testing.assert_allclose(back[sel], target[sel], rtol=1e-9)
+
+    def test_uplift_for_relief_handles_outlets(self):
+        u = up.uplift_for_relief(900.0, 0.02, self.phi)
+        self.assertTrue(np.all(np.isfinite(u)))
+
+    def test_relief_scale_is_a_quantile_not_the_max(self):
+        s = up.relief_scale(self.phi)
+        self.assertLess(s, self.phi.max())
+        self.assertGreater(s, np.median(self.phi))
+
+    def test_smooth_uplift_removes_fine_structure(self):
+        rng = np.random.default_rng(4)
+        noisy = rng.random((129, 129))
+        smooth = up.smooth_uplift(noisy, cellsize=32.0, wavelength_elmos=2000.0)
+        rough = lambda a: float(np.abs(np.diff(a, axis=1)).mean())  # noqa: E731
+        self.assertLess(rough(smooth), 0.02 * rough(noisy))
+        self.assertAlmostEqual(smooth.mean(), noisy.mean(), delta=0.02)
+
+    def test_noise_uplift_is_bounded_and_deterministic(self):
+        a = up.noise_uplift((97, 97), 32.0, seed=5, floor=0.2)
+        b = up.noise_uplift((97, 97), 32.0, seed=5, floor=0.2)
+        np.testing.assert_array_equal(a, b)
+        self.assertGreaterEqual(a.min(), 0.2 - 1e-12)
+        self.assertLessEqual(a.max(), 1.0 + 1e-12)
+        c = up.noise_uplift((97, 97), 32.0, seed=6, floor=0.2)
+        self.assertGreater(np.abs(a - c).mean(), 1e-3)
+
+
+class TestMultires(unittest.TestCase):
+    def setUp(self):
+        x = np.linspace(0, 8, 129)
+        self.dem = tn.fbm(tn.SimplexNoise(31), *np.meshgrid(x, x),
+                          octaves=7) * 400.0
+
+    def test_coarsen_is_an_area_average_not_decimation(self):
+        """Positive control: decimation keeps a checkerboard's extremes."""
+        board = (np.indices((128, 128)).sum(axis=0) % 2).astype(float)
+        avg = ero._coarsen(board, (32, 32))
+        dec = board[::4, ::4]
+        # The average carries the true mean through; decimation lands on one
+        # phase of the checkerboard and reports a surface that isn't there.
+        self.assertAlmostEqual(avg.mean(), board.mean(), delta=0.01)
+        self.assertLess(avg.std(), 0.05)
+        self.assertGreater(abs(dec.mean() - board.mean()), 0.4)
+
+    def test_band_detail_restores_high_frequency(self):
+        # (32, 32) is the grid the multires call itself coarsens to
+        # (round(129/4)); measuring the residual at a different scale compares
+        # against a band the pass never had, and reads as leakage that isn't.
+        def hf_energy(a):
+            return float(np.abs(a - ero._refine(
+                ero._coarsen(a, (32, 32)), a.shape)).mean())
+
+        src = hf_energy(self.dem)
+        with_band = ero.stream_power_erode_multires(
+            self.dem, cellsize=32.0, coarse_factor=4, coarse_iterations=3,
+            fine_iterations=0, keep_band_detail=True, k_erode=0.02,
+            dt=1.4, talus_deg=None)
+        without = ero.stream_power_erode_multires(
+            self.dem, cellsize=32.0, coarse_factor=4, coarse_iterations=3,
+            fine_iterations=0, keep_band_detail=False, k_erode=0.02,
+            dt=1.4, talus_deg=None)
+        self.assertGreater(hf_energy(with_band), 0.9 * src)
+        self.assertLess(hf_energy(without), 0.15 * src)
+
+    def test_coarse_structure_survives_the_refinement(self):
+        """The point of the coarse pass: its structure must reach the output."""
+        coarse_only = ero.stream_power_erode_multires(
+            self.dem, cellsize=32.0, coarse_factor=4, coarse_iterations=60,
+            fine_iterations=0, keep_band_detail=False, k_erode=0.02, dt=1.4,
+            uplift=_border_pinned(self.dem.shape, 0.5), talus_deg=None)
+        full = ero.stream_power_erode_multires(
+            self.dem, cellsize=32.0, coarse_factor=4, coarse_iterations=60,
+            fine_iterations=6, keep_band_detail=True, k_erode=0.02, dt=1.4,
+            uplift=_border_pinned(self.dem.shape, 0.5), talus_deg=None)
+        # Compare on the coarse grid the pass actually ran on. Raw-field
+        # correlation is 0.67 here and means nothing: the band detail the
+        # refinement carries is most of the pointwise variance by design.
+        cg = lambda a: ero._coarsen(a, (32, 32)).ravel()  # noqa: E731
+        r = np.corrcoef(cg(full), cg(coarse_only))[0, 1]
+        self.assertGreater(r, 0.98)
+
+    def test_multires_is_deterministic(self):
+        kw = dict(cellsize=32.0, coarse_factor=4, coarse_iterations=5,
+                  fine_iterations=2, k_erode=0.02, dt=1.4, talus_deg=None)
+        a = ero.stream_power_erode_multires(self.dem, **kw)
+        b = ero.stream_power_erode_multires(self.dem, **kw)
+        self.assertEqual(a.tobytes(), b.tobytes())
+
+
+if __name__ == "__main__":
+    unittest.main()

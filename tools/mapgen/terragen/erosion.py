@@ -33,6 +33,7 @@ from typing import Callable
 
 import numpy as np
 from numba import njit, prange
+from scipy import ndimage
 
 from . import hydrology as hyd
 from .hydrology import _D8_DR, _D8_DC  # noqa: F401 (numba needs bare globals, not module attrs)
@@ -80,6 +81,7 @@ def stream_power_erode(
     uplift: np.ndarray | None = None,
     talus_deg: float | None = 34.0,
     thermal_rate: float = 0.5,
+    pin_base_level: bool = True,
     progress: "Callable | None" = None,
 ) -> np.ndarray:
     """Run coupled fluvial + thermal erosion on `dem` (modifies a copy).
@@ -87,6 +89,17 @@ def stream_power_erode(
     k_erode may be a scalar or a per-cell array (rock hardness variation —
     feeding lithology noise here produces varied landform character).
     Returns the eroded DEM.
+
+    `uplift` is a per-cell rate; the steady state it drives is
+    `h = (uplift/k_erode) * Phi`, and `terragen.uplift` inverts that so a
+    target relief can be authored directly (PLAN-maps.md §2b item 2).
+
+    `pin_base_level` zeroes the uplift at outlets each iteration, and it must
+    stay on for uplift to mean anything. Outlets are never eroded (`F` is
+    zeroed there), so an outlet that also uplifts rises with everything
+    upstream of it and the whole field reduces to a rigid translation of the
+    U = 0 result — measured at relief 0.28 unpinned vs 180.66 pinned on the
+    same 129^2 control. It is a no-op when `uplift is None`.
     """
     h = dem.astype(np.float64).copy()
     H, W = h.shape
@@ -111,7 +124,10 @@ def stream_power_erode(
 
         newh = hf.copy()
         if u_arr is not None:
-            newh = newh + dt * u_arr
+            u_it = u_arr
+            if pin_base_level:
+                u_it = np.where(recv == idx, 0.0, u_arr)
+            newh = newh + dt * u_it
         sub_levels = levels[1:]
         if sub_levels:
             flat_levels = np.concatenate(sub_levels)
@@ -220,4 +236,111 @@ def thermal_erode(
         scale, removed = _thermal_scale_kernel(h, tan_crit, dists, rate)
         received = _thermal_received_kernel(h, scale, tan_crit, dists)
         h = h - removed + received
+    return h
+
+
+def _coarsen(a: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
+    """Area-average `a` down to `shape` (not decimation — see the note in
+    `stream_power_erode_multires`)."""
+    zoom = (shape[0] / a.shape[0], shape[1] / a.shape[1])
+    return ndimage.zoom(a.astype(np.float64), zoom, order=1, grid_mode=True,
+                        mode="nearest")
+
+
+def _refine(a: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
+    """Cubic upsample of `a` to `shape`."""
+    zoom = (shape[0] / a.shape[0], shape[1] / a.shape[1])
+    return ndimage.zoom(a.astype(np.float64), zoom, order=3, grid_mode=True,
+                        mode="nearest")
+
+
+def stream_power_erode_multires(
+    dem: np.ndarray,
+    cellsize: float,
+    *,
+    coarse_factor: int = 4,
+    coarse_iterations: int = 400,
+    fine_iterations: int = 30,
+    keep_band_detail: bool = True,
+    match_relief: bool = True,
+    uplift: np.ndarray | None = None,
+    k_erode: float | np.ndarray = 0.02,
+    dt: float = 1.0,
+    m_exp: float = 0.5,
+    talus_deg: float | None = 34.0,
+    thermal_rate: float = 0.5,
+    progress: "Callable | None" = None,
+) -> np.ndarray:
+    """Two-level LEM: evolve structure coarse, then refine at full detail.
+
+    PLAN-maps.md §2b item 2's second half. A stream-power landscape needs
+    O(1000) iterations to approach steady state, and at 2049^2 one iteration
+    is ~2.2 s on this machine, so a converged run is hours. But the relation
+    `h_i - h_r = U/(K*sqrt(a))` has **no cell size in it** (see
+    `terragen.uplift`), so the structure a coarse grid converges to is the
+    same structure — the fine grid adds resolution to the channels, not a
+    different landscape. Evolving at 1/`coarse_factor` resolution costs
+    ~`coarse_factor**2` less per iteration, which is what makes convergence
+    affordable at all.
+
+    The sequence is: area-average down (decimation would alias the ridge
+    crests that decide where the divides land), run `coarse_iterations`,
+    cubic upsample, add back the *band detail* — the high-pass residual
+    `dem - refine(coarsen(dem))`, i.e. exactly the component the coarse grid
+    could not represent — then run `fine_iterations` so the fine channels
+    incise into it and the seams heal.
+
+    Set `keep_band_detail=False` to get the smooth coarse structure alone,
+    which is the arm to compare against when judging whether the detail is
+    worth carrying (M8m measured both).
+
+    ⚠ `match_relief` is what makes the coarse pass converge to the *fine*
+    grid's landscape rather than a flatter one, and it is on by default
+    because getting it wrong is silent. The steady-state relation
+    `h = (U/K)*Phi` has no cell size in it, but `Phi` is a sum of `1/sqrt(a)`
+    over the *cells* of a flow path, and a finer grid resolves more headwater
+    cells — where `a` is smallest and each step contributes most. Measured on
+    one fBm surface, `Phi` at the 99.9th percentile runs 7.70 / 10.53 / 13.94
+    / 18.99 / 25.43 at 128 / 256 / 512 / 1024 / 2049 cells across, i.e. about
+    `N**0.43`. So the same uplift field converges to roughly half the relief
+    on a quarter-resolution grid: uncorrected, this driver handed back a
+    Meridian at 231 elmos of relief against a 750-elmo target. The fix is to
+    scale the coarse uplift by `Phi_fine / Phi_coarse`, both measured on the
+    input surface's own drainage.
+    """
+    H, W = dem.shape
+    ch = max(9, int(round(H / coarse_factor)))
+    cw = max(9, int(round(W / coarse_factor)))
+    c_cell = cellsize * (H / ch)
+
+    dem = np.asarray(dem, dtype=np.float64)
+    coarse = _coarsen(dem, (ch, cw))
+    c_k = k_erode if np.isscalar(k_erode) else _coarsen(np.asarray(k_erode), (ch, cw))
+    c_u = None if uplift is None else _coarsen(np.asarray(uplift), (ch, cw))
+
+    if c_u is not None and match_relief:
+        from . import uplift as _up
+
+        phi_f, _ = _up.erosional_distance_from_dem(dem)
+        phi_c, _ = _up.erosional_distance_from_dem(coarse)
+        c_u = c_u * (_up.relief_scale(phi_f) / max(_up.relief_scale(phi_c), 1e-9))
+
+    coarse = stream_power_erode(
+        coarse, cellsize=c_cell, iterations=coarse_iterations, dt=dt,
+        k_erode=c_k, m_exp=m_exp, uplift=c_u, talus_deg=talus_deg,
+        thermal_rate=thermal_rate, progress=progress,
+    )
+
+    h = _refine(coarse, (H, W))
+    if keep_band_detail:
+        band = np.asarray(dem, dtype=np.float64) - _refine(
+            _coarsen(np.asarray(dem, dtype=np.float64), (ch, cw)), (H, W))
+        h = h + band
+
+    if fine_iterations > 0:
+        h = stream_power_erode(
+            h, cellsize=cellsize, iterations=fine_iterations, dt=dt,
+            k_erode=k_erode, m_exp=m_exp, uplift=uplift, talus_deg=talus_deg,
+            thermal_rate=thermal_rate, progress=progress,
+        )
     return h
