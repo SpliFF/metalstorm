@@ -32,6 +32,7 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
+#include "System/FileSystem/DetailTexDc.h"
 #include "System/FileSystem/Ktx2Orientation.h"
 #include "System/SpringLog/SpringLog.h"
 
@@ -136,10 +137,24 @@ static void StampOrientationRd(ktxTexture2* tex) {
         ktx2::kOrientation2D);
 }
 
+/// Per-channel means of the encoder's *input* pixels (level 0) and of the
+/// last level it generates (the 1x1 top mip). Filled only when the caller
+/// asks — see `--signed-dc-report` and DetailTexDc.h for what the numbers
+/// mean and why a detail texture's DC is a permanent, distance-invariant
+/// tint rather than something the mip chain fades away.
+struct DcReport {
+    double baseMean[3] = {0, 0, 0};
+    double topMean[3] = {0, 0, 0};
+    int topWidth = 0;
+    int topHeight = 0;
+    int levels = 0;
+};
+
 // Forward decl — DDS RGBA fallback re-uses the encoder path.
 static bool EncodeRgba8AsKtx2(const uint8_t* rgba, int w, int h,
                               const std::string& dstPath,
-                              Encoding enc, bool genMips, bool zstd);
+                              Encoding enc, bool genMips, bool zstd,
+                              DcReport* dcOut = nullptr);
 
 // Forward decls — used by WrapDdsAsKtx2 for the dual-source `--tex2`
 // alpha overlay path. Definitions live below near the dispatch code so
@@ -587,11 +602,24 @@ static bool WrapRawDxt1AsKtx2(const std::vector<uint8_t>& srcBytes,
 /// UASTC is high-quality and the encoder default.
 static bool EncodeRgba8AsKtx2(const uint8_t* rgba, int w, int h,
                               const std::string& dstPath,
-                              Encoding enc, bool genMips, bool zstd) {
+                              Encoding enc, bool genMips, bool zstd,
+                              DcReport* dcOut) {
     uint32_t levels = 1;
     if (genMips) {
         uint32_t dim = std::max(w, h);
         while (dim > 1) { dim >>= 1; ++levels; }
+    }
+
+    if (dcOut) {
+        double sum[3] = {0, 0, 0};
+        const size_t texels = (size_t)w * h;
+        for (size_t i = 0; i < texels; ++i)
+            for (int c = 0; c < 3; ++c) sum[c] += rgba[i * 4 + c];
+        for (int c = 0; c < 3; ++c)
+            dcOut->baseMean[c] = dcOut->topMean[c] = sum[c] / (double)texels;
+        dcOut->topWidth = w;
+        dcOut->topHeight = h;
+        dcOut->levels = (int)levels;
     }
 
     ktxTexture2* tex = nullptr;
@@ -641,9 +669,30 @@ static bool EncodeRgba8AsKtx2(const uint8_t* rgba, int w, int h,
                         const int s10 = prev[(y0 * cw + x1) * 4 + c];
                         const int s01 = prev[(y1 * cw + x0) * 4 + c];
                         const int s11 = prev[(y1 * cw + x1) * 4 + c];
-                        next[(y * nw + x) * 4 + c] = (uint8_t)((s00 + s10 + s01 + s11) / 4);
+                        // Rounded, not truncated. Integer `/4` loses up to 0.75
+                        // of a level per step and the bias compounds down the
+                        // chain (~-3 levels over 9), which for a *signed*
+                        // detail texture is a distance-growing darkening the
+                        // map author never authored. See DetailTexDc.h.
+                        next[(y * nw + x) * 4 + c] =
+                            detailtex::MipBoxAvg4(s00, s10, s01, s11);
                     }
                 }
+            }
+            if (dcOut) {
+                double sum[3] = {0, 0, 0};
+                const size_t texels = (size_t)nw * nh;
+                for (size_t i = 0; i < texels; ++i)
+                    for (int c = 0; c < 3; ++c) sum[c] += next[i * 4 + c];
+                for (int c = 0; c < 3; ++c)
+                    dcOut->topMean[c] = sum[c] / (double)texels;
+                dcOut->topWidth = nw;
+                dcOut->topHeight = nh;
+                // Per-level trajectory: where a DC drift enters the chain is
+                // the difference between a content bug and a filter bug.
+                SLOG(SPRING_LOG_DEBUG, "mip %u (%dx%d) mean %.4f,%.4f,%.4f",
+                    lvl, nw, nh, dcOut->topMean[0], dcOut->topMean[1],
+                    dcOut->topMean[2]);
             }
             rc = ktxTexture_SetImageFromMemory(
                 ktxTexture(tex), lvl, 0, 0, next.data(), next.size());
@@ -860,7 +909,8 @@ static int ConvertGeneric(const std::string& inputPath,
                           Encoding enc, bool genMips, bool zstd,
                           const std::string& pngFallbackPath,
                           ChannelOp channelOp,
-                          const std::string& tex2Path) {
+                          const std::string& tex2Path,
+                          DcReport* dcOut) {
     if (IsDdsMagic(inputPath)) {
         return WrapDdsAsKtx2(inputPath, outputPath, zstd,
                              pngFallbackPath, channelOp, tex2Path) ? 0 : 1;
@@ -889,9 +939,28 @@ static int ConvertGeneric(const std::string& inputPath,
         }
     }
     const bool ok = EncodeRgba8AsKtx2(pixels, w, h, outputPath,
-                                       enc, genMips, zstd);
+                                       enc, genMips, zstd, dcOut);
     stbi_image_free(pixels);
     return ok ? 0 : 1;
+}
+
+/// Emit the DC measurement as one machine-readable line so a calling
+/// converter can apply its own policy without re-decoding the source.
+/// Only the caller knows whether a texture is sampled signed (`tex*2-1`),
+/// which is what makes a non-neutral mean matter — so this tool measures
+/// and the caller judges. Format, one line, on stdout:
+///
+///   signed-dc: levels=N base=R,G,B top=WxH:R,G,B
+///
+/// where each R,G,B is a 0..255 channel mean, `base` is level 0 and `top`
+/// is the smallest level generated (1x1 with --mipmaps, else level 0).
+static void PrintDcReport(const DcReport& dc) {
+    printf("signed-dc: levels=%d base=%.4f,%.4f,%.4f top=%dx%d:%.4f,%.4f,%.4f\n",
+        dc.levels,
+        dc.baseMean[0], dc.baseMean[1], dc.baseMean[2],
+        dc.topWidth, dc.topHeight,
+        dc.topMean[0], dc.topMean[1], dc.topMean[2]);
+    fflush(stdout);
 }
 
 // ============================================================
@@ -922,6 +991,13 @@ static void PrintUsage(const char* argv0) {
         "  --encoding uastc|etc1s   Encoder for non-DDS sources (default: uastc)\n"
         "  --mipmaps                Generate mip chain for encoded sources\n"
         "  --mip-levels N           Level count for --raw-dxt1 (default: 1)\n"
+        "  --signed-dc-report       Print the source's level-0 and top-mip\n"
+        "                           channel means as one `signed-dc:` line.\n"
+        "                           For textures the shader samples signed\n"
+        "                           (`tex*2-1`, i.e. Recoil's near-field\n"
+        "                           detail): the top mip's mean is a constant\n"
+        "                           the mip chain never fades, so a mean off\n"
+        "                           127.5 tints the map at every distance.\n"
         "  --no-zstd                Disable Zstd supercompression\n"
         "  --png-fallback <path>    Also write a downscaled PNG sidecar at <path>\n"
         "                           (for glTF readers without KHR_texture_basisu)\n"
@@ -965,6 +1041,7 @@ int main(int argc, char* argv[]) {
     std::string pngFallbackPath;
     ChannelOp channelOp = ChannelOp::None;
     std::string tex2Path;
+    bool dcReport = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -975,6 +1052,8 @@ int main(int argc, char* argv[]) {
             if (v == "uastc") enc = Encoding::Uastc;
             else if (v == "etc1s") enc = Encoding::Etc1s;
             else { SLOG(SPRING_LOG_ERROR, "bad --encoding: %s", v.c_str()); return 2; }
+        } else if (a == "--signed-dc-report") {
+            dcReport = true;
         } else if (a == "--mipmaps") {
             genMips = true;
         } else if (a == "--no-zstd") {
@@ -1058,8 +1137,12 @@ int main(int argc, char* argv[]) {
         std::vector<uint8_t> bytes = ReadAllBytes(inputPath);
         rc = WrapRawDxt1AsKtx2(bytes, rawW, rawH, rawMipLevels, outputPath, zstd) ? 0 : 1;
     } else {
+        DcReport dc;
         rc = ConvertGeneric(inputPath, outputPath, enc, genMips, zstd,
-                            pngFallbackPath, channelOp, tex2Path);
+                            pngFallbackPath, channelOp, tex2Path,
+                            dcReport ? &dc : nullptr);
+        if (rc == 0 && dcReport && dc.levels > 0)
+            PrintDcReport(dc);
     }
 
     springlog_shutdown();

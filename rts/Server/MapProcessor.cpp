@@ -9,6 +9,7 @@
 #include "lualib.h"
 #include "lauxlib.h"
 
+#include "System/FileSystem/DetailTexDc.h"
 #include "System/FileSystem/LuaVFSSimple.h"
 #include "System/FileSystem/FileHandler.h"
 
@@ -714,7 +715,33 @@ static std::string resolveTexturePath(const std::string& mapDir, const std::stri
     return {};
 }
 
+/// Pull `textureconverter --signed-dc-report`'s one machine-readable line out
+/// of its captured output. Fills `topMean[3]` (the smallest mip level's
+/// per-channel mean — the constant that survives every viewing distance) and
+/// `baseMean[3]` (level 0 — what the map author actually authored). Returns
+/// false if the tool did not emit the line, which is the normal case for DDS
+/// sources: those are wrapped block-for-block, never decoded, so there is
+/// nothing to measure.
+static bool ParseSignedDcReport(const std::string& out,
+                                double baseMean[3], double topMean[3]) {
+    const size_t at = out.find("signed-dc:");
+    if (at == std::string::npos) return false;
+    int levels = 0, tw = 0, th = 0;
+    const int n = std::sscanf(out.c_str() + at,
+        "signed-dc: levels=%d base=%lf,%lf,%lf top=%dx%d:%lf,%lf,%lf",
+        &levels, &baseMean[0], &baseMean[1], &baseMean[2], &tw, &th,
+        &topMean[0], &topMean[1], &topMean[2]);
+    return n == 9;
+}
+
 bool MapProcessor::ExtractDecalTextures(MapMetadata& meta) {
+    // Filled by the `detailTex` conversion below and judged after every
+    // field is resolved, because whether a non-neutral DC matters at all
+    // depends on which detail branch the map ends up selecting.
+    bool haveDetailDc = false;
+    double detailBaseMean[3] = {0, 0, 0};
+    double detailTopMean[3] = {0, 0, 0};
+
     // For each decal texture: resolve the source, then run textureconverter
     // to produce a `.ktx2` with a stable output name. textureconverter
     // auto-routes DDS-as-blocks vs RGBA-encode internally; we just hand it
@@ -742,8 +769,15 @@ bool MapProcessor::ExtractDecalTextures(MapMetadata& meta) {
         // SMFFragProg — so a level-1 decal KTX2 aliases at full strength all
         // the way to the horizon. DDS sources keep whatever chain they ship
         // (the flag only reaches the RGBA8 encode path).
+        // --signed-dc-report is only asked of `detailTex`: it is the one
+        // decal the shader adds unmodulated (`baseColor += tex*2-1`, no
+        // distribution map in front of it), so its mean is a flat tint on
+        // the whole map. See DetailTexDc.h.
+        const bool wantDc = (std::strcmp(baseName, "detail") == 0);
+
         std::string cmd = std::string("\"") + TEXTURECONVERTER_BINARY_PATH + "\""
             " --encoding uastc --mipmaps"
+            + (wantDc ? " --signed-dc-report" : "") +
             " \"" + src + "\" \"" + dstPath + "\" 2>&1";
         FILE* p = popen(cmd.c_str(), "r");
         if (!p) { field.clear(); return; }
@@ -757,6 +791,8 @@ bool MapProcessor::ExtractDecalTextures(MapMetadata& meta) {
             field.clear();
             return;
         }
+        if (wantDc)
+            haveDetailDc = ParseSignedDcReport(out, detailBaseMean, detailTopMean);
         field = dstName;
     };
 
@@ -769,6 +805,40 @@ bool MapProcessor::ExtractDecalTextures(MapMetadata& meta) {
     convertField(meta.decals.splatDetailNormalTex[1], "splat_normal_1");
     convertField(meta.decals.splatDetailNormalTex[2], "splat_normal_2");
     convertField(meta.decals.splatDetailNormalTex[3], "splat_normal_3");
+
+    // DC-neutrality of the plain `detailTex`, judged only when that branch is
+    // the one the client will actually take. `attachTerrainDetailFromDecals`
+    // (client/src/core/terrain.ts) reproduces SMFFragProg's `#ifdef` nesting:
+    // splat *normals* wrap the whole detail section and suppress
+    // GetDetailTextureColor entirely, and inside it the splat pair wins over
+    // the plain branch. A tint warning about a texture the shader never
+    // samples is noise, so mirror the precedence here.
+    const bool hasSplatNormals =
+        !meta.decals.splatDistrTex.empty() &&
+        (!meta.decals.splatDetailNormalTex[0].empty() ||
+         !meta.decals.splatDetailNormalTex[1].empty() ||
+         !meta.decals.splatDetailNormalTex[2].empty() ||
+         !meta.decals.splatDetailNormalTex[3].empty());
+    const bool hasSplatPair =
+        !meta.decals.splatDetailTex.empty() && !meta.decals.splatDistrTex.empty();
+    const bool plainDetailIsLive =
+        !meta.decals.detailTex.empty() && !hasSplatNormals && !hasSplatPair;
+
+    if (haveDetailDc && plainDetailIsLive) {
+        static const char* CHAN[3] = {"R", "G", "B"};
+        for (int c = 0; c < 3; ++c) {
+            if (detailtex::IsDcNeutral(detailTopMean[c])) continue;
+            const double levels =
+                detailtex::DcInLevels(detailtex::SignedDcFromMean(detailTopMean[c]));
+            SLOG(SPRING_LOG_WARNING,
+                "%s: detailTex %s mean is %.2f (authored %.2f), not the neutral "
+                "%.1f — the shader adds it as tex*2-1 with no fade, so this is a "
+                "permanent %+.1f-level tint on the whole map at every distance. "
+                "Re-author the texture so its mean lands on %.1f.",
+                meta.id.c_str(), CHAN[c], detailTopMean[c], detailBaseMean[c],
+                detailtex::kNeutralMean, levels, detailtex::kNeutralMean);
+        }
+    }
 
     int found = 0;
     if (!meta.decals.detailTex.empty())         found++;

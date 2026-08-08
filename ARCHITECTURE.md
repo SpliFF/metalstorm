@@ -531,6 +531,22 @@ assets, which costs asset investigations their standard tool. `data/games/{bar,z
 still carries the old value; those are archived third-party games and closing
 them needs a full `gameconverter --force` model re-import (PLAN-maps M8f).
 
+**Mip generation must not move a texture's DC.** `textureconverter` builds its
+own 2x2 box chain for encoded (non-DDS) sources, and that filter rounds
+half-to-even (`detailtex::MipBoxAvg4`, `rts/System/FileSystem/DetailTexDc.h`).
+Integer truncation — what it did until PLAN-maps M8i — loses up to 0.75 of a
+level per step and compounds: measured **-3 levels** from level 0 to the 1x1 on
+every shipped map. For ordinary art that is an invisible darkening with
+distance; for a map's **`detailTex` it is not**, because SMFFragProg adds the
+sample *signed* (`baseColor += tex*2-1`) with no fade uniform, so the top mip's
+mean is a flat tint applied at **every** viewing distance. Two rules follow:
+the filter is shared, tested code and stays unbiased; and a plain `detailTex`
+must be authored with its mean on **127.5** (not 128 — `x*2-1` is zero at
+`x=0.5`, which no single texel can hold). `mapconverter` measures the mean via
+`textureconverter --signed-dc-report` and warns past ±2 levels, but only when
+the map's `resources` actually select the plain branch — the splat and
+splat-normal branches suppress it, mirroring `attachTerrainDetailFromDecals`.
+
 **`?direct=` manifests live in two places.** A direct-boot manifest is authored
 in `manifests/` (the tracked source of truth) and **must also be copied to
 `client/public/`** — that, not `manifests/`, is what the browser fetches. The
