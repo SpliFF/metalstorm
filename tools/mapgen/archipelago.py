@@ -183,9 +183,13 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     def fields(hh):
         gy, gx = np.gradient(hh, cell)
         sl = np.degrees(np.arctan(np.hypot(gx, gy)))
+        # base_moisture re-based from the 0.45 default — see the same note in
+        # meridian2.py. The old rain shadow was drying this map by 0.070 (more
+        # than Meridian, because 66% of it is sea and the running-max model
+        # counted every island's peak against everything downwind of it).
         cp = bio.ClimateParams(seed=seed, lat_axis="z", lat_hot=0.60,
                                lat_cold=0.42, altitude_lapse=0.55,
-                               wind_dir=(1.0, 0.2))
+                               wind_dir=(1.0, 0.2), base_moisture=0.380)
         temp = bio.temperature_field(hh, 0.0, cp, cell)
         moist = bio.moisture_field(hh, 0.0, cp, cell)
         return sl, temp, moist

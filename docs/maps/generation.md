@@ -47,7 +47,7 @@ don't depend on `NUMBA_NUM_THREADS` (verified: `terragen/_selftest_numba.py`).
 | `hydrology.py` | Priority-flood depression filling (via `skimage` morphological reconstruction, not ported — see below), D8 steepest-descent receivers and flat resolution (both `@njit`; `resolve_flats` walks an explicit frontier queue instead of re-scanning the whole grid every BFS ring — ~100-700× measured), **level-order** flow-tree processing, flow accumulation, flow-path lengths. (Channel extraction moved to `rivers.py` — the old accumulation-threshold `river_network` produced a dotted network.) |
 | `rivers.py` | **River ribbons** (§4b): slope-area channel seeding (`A·S² > C`, C solved as a quantile so a *fraction* of land seeds), downstream closure, monotone water-surface assignment, reach extraction from the flow forest, Douglas-Peucker + Chaikin + noise meandering, `w = k·√A` hydraulic geometry, and a distance-field carve combined with `min`. Returns terrain / `water_z` / `is_water` as three separate fields. |
 | `erosion.py` | Fluvial erosion: the **implicit Braun & Willett (2013) stream-power solver** (`h' = (h + dt·U + F·h_recv') / (1+F)`, `F = K·A^m·dt/dx`), unconditionally stable, plus talus-angle **thermal erosion** (8-neighbour transfers) — both `@njit`. Accepts a per-cell erodibility field (lithology variation). |
-| `biomes.py` | Temperature (latitude gradient + altitude lapse + noise), moisture (noise + water-proximity + directional rain shadow), Whittaker-ish classification into 8 ids (grassland/forest/desert/tundra/snow/rock/wetland/water), soft blend weights. |
+| `biomes.py` | Temperature (latitude gradient + altitude lapse + noise), moisture (noise + water-proximity + **orographic rainfall sweep**, §4c), Whittaker-ish classification into 8 ids (grassland/forest/desert/tundra/snow/rock/wetland/water), soft blend weights. |
 | `roads.py` | Least-cost road planning: 8-connected Dijkstra on a decimated grid with slope² cost, water/bridge penalties and max-grade cutoffs; MST topology over settlements (+ optional loops); Chaikin smoothing; full-res rasterization to mask + distance field; **cut-and-fill grading** of terrain under roads. |
 | `settle.py` | Settlement-site scoring (windowed flatness × water proximity × biome desirability × edge falloff) and greedy separated site selection. |
 | `vegetation.py` | Per-species density fields (biome base × moisture bonus × clump noise, minus exclusion zones) and the **stratified-jitter hash engine** — one hashed candidate per grid stratum, accepted with probability = local density. Blue-noise-like, order-independent, deterministic. |
@@ -228,6 +228,86 @@ positive control — the closure check is shown failing on the unclosed
 threshold, the monotone check on the raw ground surface, the `min` rule on the
 lerp it replaces, and the junction rule on a linear width model. A guard nobody
 has watched fail is not a guard.
+
+## 4c. Climate (`terragen/biomes.py`)
+
+Biomes hang off two continuous fields, temperature and moisture. Temperature is
+a latitude gradient minus an altitude lapse rate plus low-frequency noise.
+Moisture is rainfall noise + a water-proximity bonus + an **orographic term**,
+and it is that last one this section is about.
+
+`ClimateParams.orographic` selects the model:
+
+| | what it computes | windward−lee contrast, meridian / skerry |
+|---|---|---|
+| `"sweep"` (default) | mapgen4-style downwind advection | **+0.0700 / +0.0935** |
+| `"ridge"` | running maximum along the wind axis | +0.0061 / +0.0162 |
+
+(Mean moisture in a 512-elmo band upwind of each row's peak, minus the same
+band downwind, on the real shipped heightmaps, at matched land-mean moisture.)
+
+**The sweep.** An air parcel crosses the map along the dominant wind axis. It
+tops up over open water at rate `evaporation`, and at every step rains out what
+it cannot hold — capacity is `1 − normalised elevation`, and a rise in the
+ground under it squeezes out more on top (orographic lift). Rain *leaves* the
+parcel. That conservation is the whole point: humidity is a **budget**, so a
+coastal range starves everything behind it in proportion to what it took, and a
+second range behind the first has less left to wring out. On two identical
+ridges in series the sweep's second shadow is **0.008×** the first; the running
+max's is **0.995×**, because it has no budget — it only ever asks how far below
+the highest thing upwind a cell sits, so a distant peak dries a valley as hard
+as a wall does.
+
+**Three things that are not in mapgen4's recipe, each because it was measured:**
+
+- **The parcel enters in equilibrium with the ground, not saturated.** Entering
+  at humidity 1 over a *land* edge is instant excess: on meridian_basin, whose
+  upwind edge is land, column 0 alone took **25.3 %** of the map's entire
+  rainfall budget. Over water it does still start saturated (skerry_reach, whose
+  upwind edge is sea, read 0.0 % either way).
+- **mapgen4's [0.2, 0.6, 0.2] across-wind kernel is dropped.** It exists because
+  mapgen4 sweeps an irregular Voronoi mesh, where "the cell downwind" is a blend
+  of neighbours by construction. On a regular grid swept along an axis it
+  measured at nothing: across-wind roughness moved 0.2 % on meridian and −1.9 %
+  on skerry (the wrong way), contrast <0.5 %, and on a half-width ridge it
+  feathered the shadow edge by 2 rows of 96 that the post-sweep blur covers
+  anyway. Rainfall's across-wind structure comes from the terrain, not from the
+  parcel.
+- **`rain_blur` is 100 elmos, not the 800 the old model used.** The raw rainfall
+  field is streaky across the wind (16× the roughness of a 1600-elmo blur on
+  meridian, 91× on skerry), so some smoothing is needed; past ~200 it smears the
+  shadow back over the ridge that cast it. Measured ladder, meridian contrast:
+  0.0827 (no blur) · 0.0822 (50) · **0.0699 (100)** · 0.0455 (200) · 0.0255 (400)
+  · 0.0176 (800). Skerry peaks at 100 outright.
+
+**The sweep is mean-preserving over land; the running max was not.** Rainfall
+redistributes moisture, it does not destroy it, so `rain_shadow` now sets only
+how much wetter the windward side is than the lee. The old model only ever
+subtracted, which made it a global drying knob as well — it was quietly taking
+0.032 off meridian_basin and 0.070 off skerry_reach on top of whatever
+`base_moisture` said. **Both generators' `base_moisture` were re-based by
+exactly those amounts when this landed** (0.45 → 0.418 and → 0.380), which holds
+land-mean moisture at 0.4908/0.4909 and 0.6646/0.6665 and the biome mix within
+0.4 pp and 2.3 pp. If you retune either model, re-base again or you are changing
+two things at once.
+
+**Quantile normalisation of the climate fields before thresholding (mapgen2's
+approach) is deliberately NOT done.** It makes each biome band a fixed
+*fraction* of the map, which is robust when the fields are raw noise — and
+destructive when they are authored. `classify`'s thresholds are absolute
+(hot > 0.62, cold < 0.32, frigid < 0.18) and `lat_hot`/`lat_cold`/
+`altitude_lapse` are this generator's art-direction surface: meridian_basin's
+temperature spans 0.000–0.635 on purpose, so it has no desert. Rank-transforming
+it puts **11.9 % desert** on a temperate river basin and takes grassland from
+53.2 % to 25.1 %; on skerry_reach it takes forest from 58.9 % to 27.2 % and snow
+from 0.6 % to 11.7 %. A generator whose climate knobs cannot change the biome
+mix has no climate knobs. (A rank transform is invariant to a constant offset,
+so those two columns are identical whatever `base_moisture` says — which is the
+tell: the knob genuinely stops doing anything.)
+
+Tests: `tools/mapgen/tests/test_climate.py` (15 cases). The budget test asserts
+on *both* models, so it fails loudly if `"ridge"` ever stops being a contrasting
+control rather than silently becoming a tautology.
 
 ## 5. Texturing model
 

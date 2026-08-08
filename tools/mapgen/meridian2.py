@@ -343,8 +343,14 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
     # 7. biomes
     gy, gx = np.gradient(h, cell)
     slope = np.degrees(np.arctan(np.hypot(gx, gy)))
+    # base_moisture re-based from the 0.45 default when the orographic model
+    # became mean-preserving (PLAN-maps M8k): the old running-max rain shadow
+    # only ever subtracted, so it was silently drying this map by 0.032 on top
+    # of whatever base_moisture said. Re-basing keeps the authored biome mix
+    # and leaves the model change to be about the shadow's *shape*.
     cp = bio.ClimateParams(seed=seed, lat_axis="z", lat_hot=0.62, lat_cold=0.45,
-                           altitude_lapse=0.52, wind_dir=(1.0, 0.15))
+                           altitude_lapse=0.52, wind_dir=(1.0, 0.15),
+                           base_moisture=0.418)
     temp = bio.temperature_field(h, 0.0, cp, cell)
     moist = bio.moisture_field(h, 0.0, cp, cell)
     water_all = (h <= 0.0) | rivers
