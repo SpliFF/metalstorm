@@ -425,6 +425,26 @@ def structural_anisotropy(
     513 / 1025 cells across, against 1.24 for the 2049-cell shipped map: a
     coarse preview scores "anisotropic" on nothing but its own bin counts.
     """
+    p = _angular_power(dem, cellsize, lo_elmos, hi_elmos, bins)
+    if p is None:
+        return 1.0, 1.0
+    nz = p[p > 0]
+    return float(p.max() / p.mean()), float(-(nz * np.log(nz)).sum()
+                                            / np.log(bins))
+
+
+def _angular_power(
+    dem: np.ndarray,
+    cellsize: float,
+    lo_elmos: float,
+    hi_elmos: float,
+    bins: int,
+) -> "np.ndarray | None":
+    """Normalised angular distribution of one wavelength band's power.
+
+    Shared by `structural_anisotropy` and `angular_lobes` so the two can
+    never drift apart — they are one histogram read two ways.
+    """
     h = np.asarray(dem, dtype=np.float64)
     n = min(h.shape)
     h = h[:n, :n] - h[:n, :n].mean()
@@ -436,17 +456,65 @@ def structural_anisotropy(
     k = np.hypot(fx, fz)
     band = (k > 1.0 / hi_elmos) & (k < 1.0 / lo_elmos)
     if not band.any():
-        return 1.0, 1.0
+        return None
     ang = (np.degrees(np.arctan2(fz, fx)) % 180.0)[band]
     hist, _ = np.histogram(ang, bins=bins, range=(0.0, 180.0),
                            weights=power[band])
     total = hist.sum()
     if total <= 0:
-        return 1.0, 1.0
-    p = hist / total
-    nz = p[p > 0]
-    return float(p.max() / p.mean()), float(-(nz * np.log(nz)).sum()
-                                            / np.log(bins))
+        return None
+    return hist / total
+
+
+def angular_lobes(
+    dem: np.ndarray,
+    cellsize: float,
+    lo_elmos: float = 32.0,
+    hi_elmos: float = 120.0,
+    bins: int = 90,
+    top: int = 3,
+    suppress: int = 2,
+) -> list[tuple[float, float]]:
+    """The top `top` oriented lobes as `[(degrees, x mean), ...]`, strongest
+    first — `structural_anisotropy`'s histogram read past its own peak.
+
+    ⚠ Read this, not peak/mean alone, when judging solver-authored terrain.
+    `structural_anisotropy` is a **single-lobe** detector: peak/mean is
+    maximised by a herringbone (one direction) and sits near 1 for a
+    cross-hatch (two directions 90 deg apart), which is a surface the eye
+    refuses and the scalar passes (PLAN-maps M8q FIND 3). The lobe list
+    separates the three cases the scalar cannot:
+
+    - D8 arc, 2049^2 @ 8 elmos: `[44 x5.27, 136 x2.35, 38 x2.14]` — one
+      dominant diagonal, textbook comb.
+    - the same field over D-infinity: `[48 x1.42, 92 x1.39, 0 x1.34]` — the
+      peak has collapsed but a 45 deg lobe and an axis-aligned one are both
+      still there, at nearly the same height.
+    - shipped `skerry_reach`: `[90 x1.24, 42 x1.20, 54 x1.18]` — a flat
+      list, i.e. no structure rather than balanced structure.
+
+    So the shape of the *list* is the reading: one tall entry is a comb, two
+    comparable entries 45-90 deg apart are a cross-hatch, and a flat list is
+    dendritic. `suppress` blanks that many bins either side of each pick so
+    the second entry is a different lobe and not the shoulder of the first.
+
+    Same sample-count floor as `structural_anisotropy` — only compare
+    surfaces measured at the same grid size.
+    """
+    p = _angular_power(dem, cellsize, lo_elmos, hi_elmos, bins)
+    if p is None:
+        return [(0.0, 1.0)] * top
+    ratio = p / p.mean()
+    width = 180.0 / bins
+    out: list[tuple[float, float]] = []
+    taken = np.zeros(bins, bool)
+    for _ in range(top):
+        masked = np.where(taken, -1.0, ratio)
+        i = int(np.argmax(masked))
+        out.append((float(i * width), float(ratio[i])))
+        for d in range(-suppress, suppress + 1):
+            taken[(i + d) % bins] = True
+    return out
 
 
 def smooth_uplift(

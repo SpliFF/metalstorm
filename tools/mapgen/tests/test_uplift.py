@@ -368,6 +368,105 @@ class TestStructuralAnisotropy(unittest.TestCase):
         self.assertAlmostEqual(a[0], b[0], delta=0.15)
 
 
+class TestAngularLobes(unittest.TestCase):
+    """The lobe list, and the case that made it necessary (M8q FIND 3).
+
+    `structural_anisotropy` is a single-lobe detector, so the cross-hatch
+    below is the test that matters: two combs 90 deg apart are a surface the
+    eye refuses, and peak/mean reads it as almost isotropic. If the lobe
+    list ever collapses back to "the peak and its shoulders", that case
+    stops being distinguishable from dendritic terrain and the acceptance
+    instrument goes blind again.
+    """
+
+    def setUp(self):
+        self.N = 513
+        x = np.linspace(0, 8, self.N)
+        self.iso = tn.fbm(tn.SimplexNoise(41), *np.meshgrid(x, x),
+                          octaves=7) * 300.0
+        g = np.arange(self.N, dtype=np.float64)
+        self.zz, self.xx = np.meshgrid(g, g, indexing="ij")
+
+    def _comb(self, along_x: bool, period_cells: float = 8.0, amp: float = 60.0):
+        c = self.xx + self.zz if along_x else self.xx - self.zz
+        return amp * np.sin(2 * np.pi * c / period_cells)
+
+    def _lobe(self, theta_deg: float, seed: int, amp: float = 10.0,
+              width_deg: float = 6.0, cell: float = 8.0):
+        """Band-limited noise with an *oriented* spectrum — a comb with a
+        real landscape's spectral width, not a pure tone. A monochromatic
+        sine reads 80x here and both cases (one comb, two) stay enormous, so
+        it cannot show what a broad lobe does to the scalar.
+        """
+        rng = np.random.default_rng(seed)
+        w = np.fft.fftshift(np.fft.fft2(rng.standard_normal((self.N, self.N))))
+        f = np.fft.fftshift(np.fft.fftfreq(self.N, cell))
+        fz, fx = np.meshgrid(f, f, indexing="ij")
+        k = np.hypot(fx, fz)
+        band = (k > 1.0 / 120.0) & (k < 1.0 / 32.0)
+        ang = np.degrees(np.arctan2(fz, fx)) % 180.0
+        d = (ang - theta_deg + 90.0) % 180.0 - 90.0
+        w = w * band * np.exp(-(d / width_deg) ** 2)
+        out = np.real(np.fft.ifft2(np.fft.ifftshift(w)))
+        return amp * out / out.std()
+
+    def test_isotropic_noise_gives_a_flat_list(self):
+        lobes = up.angular_lobes(self.iso, 8.0)
+        self.assertLess(lobes[0][1], 2.0)
+        # no lobe stands out from the next one — that is what "no structure"
+        # looks like, as against "balanced structure"
+        self.assertLess(lobes[0][1] - lobes[2][1], 0.5)
+
+    def test_a_herringbone_is_one_tall_lobe(self):
+        lobes = up.angular_lobes(self.iso + self._comb(True), 8.0)
+        self.assertGreater(lobes[0][1], 5.0)
+        self.assertGreater(lobes[0][1], 2.0 * lobes[1][1])
+
+    def test_a_cross_hatch_lowers_the_scalar_and_shows_in_the_list(self):
+        """The reason this function exists, with the single-lobe control.
+
+        Adding a second lobe adds oriented structure and *lowers* peak/mean,
+        because the mean it divides by went up. Judge on the scalar and a
+        cross-hatch scores better than the herringbone it replaced.
+        """
+        one = self.iso + self._lobe(45.0, seed=7)
+        hatch = one + self._lobe(135.0, seed=9)
+        peak_one = up.structural_anisotropy(one, 8.0)[0]
+        peak_hatch = up.structural_anisotropy(hatch, 8.0)[0]
+        self.assertLess(peak_hatch, peak_one)
+
+        l_one, l_hatch = up.angular_lobes(one, 8.0), up.angular_lobes(hatch, 8.0)
+        # one lobe: the runner-up is a shoulder, well down on the peak
+        self.assertLess(l_one[1][1], 0.5 * l_one[0][1])
+        # two lobes: comparable heights, and they are ~90 deg apart
+        self.assertGreater(l_hatch[1][1], 0.7 * l_hatch[0][1])
+        sep = abs(l_hatch[0][0] - l_hatch[1][0])
+        self.assertGreater(min(sep, 180.0 - sep), 60.0)
+
+    def test_suppression_makes_the_second_pick_a_different_lobe(self):
+        """Without it, entry 2 is the peak's own neighbouring bin."""
+        one = self.iso + self._lobe(45.0, seed=7)
+        none = up.angular_lobes(one, 8.0, suppress=0)
+        wide = up.angular_lobes(one, 8.0, suppress=6)
+        width = 180.0 / 90
+        self.assertLessEqual(abs(none[1][0] - none[0][0]), width)
+        self.assertGreater(abs(wide[1][0] - wide[0][0]), 6.0 * width)
+
+    def test_peak_agrees_with_the_scalar(self):
+        """One histogram read two ways — they cannot disagree on the peak."""
+        for dem in (self.iso, self.iso + self._comb(True)):
+            peak, _ = up.structural_anisotropy(dem, 8.0)
+            self.assertAlmostEqual(peak, up.angular_lobes(dem, 8.0)[0][1],
+                                   places=6)
+
+    def test_peak_agrees_with_the_scalar(self):
+        """One histogram read two ways — they cannot disagree on the peak."""
+        for dem in (self.iso, self.iso + self._comb(True)):
+            peak, _ = up.structural_anisotropy(dem, 8.0)
+            self.assertAlmostEqual(peak, up.angular_lobes(dem, 8.0)[0][1],
+                                   places=6)
+
+
 class TestMultires(unittest.TestCase):
     def setUp(self):
         x = np.linspace(0, 8, 129)

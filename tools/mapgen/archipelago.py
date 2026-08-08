@@ -6,7 +6,7 @@ this generator is fully parameterized and derives EVERYTHING from its
 inputs — island placement, elevations, start positions, settlements,
 per-island road networks, biomes, vegetation, ruins. Deterministic:
 
-    same (--seed, --landmass, --islands, --terrain, --router)
+    same (--seed, --landmass, --islands, --terrain, --router, --arc-detail)
         =>  byte-identical map
 
 The --landmass fraction is a hard contract, enforced by quantile
@@ -61,6 +61,18 @@ MAP_SIZE = 16384.0
 SEED_DEFAULT = 20260730
 N_STARTS = 8
 SYNTH_REV = 4          # bump when synth_height changes — keys the erosion cache
+
+# `--terrain arc` only. The fine grain authored into `arc_platform`: an fBm
+# whose coarsest octave is ARC_DETAIL_WAVELENGTH and whose finest is ~2 cells
+# at 8 elmos, i.e. the 15-120 elmo band. ARC_DETAIL_DEFAULT is the amplitude
+# that puts the platform's high-pass residual on the shipped mounds
+# generator's 2.27 elmos — see `arc_platform` and PLAN-maps M8r.
+ARC_DETAIL_WAVELENGTH = 120.0
+ARC_DETAIL_DEFAULT = 17.0
+# bump when anything upstream of the arc's erosion changes shape — it keys
+# the arc's half of the cache the way SYNTH_REV keys the mounds half.
+# v2: the relief aim is taken on the grain-free platform (M8r).
+ARC_REV = 2
 
 
 # ---------------------------------------------------------------------------
@@ -157,17 +169,44 @@ def arc_uplift(seed: int, xx: np.ndarray, zz: np.ndarray, cell: float,
 
 
 def arc_platform(seed: int, landmass: float, u: np.ndarray,
-                 xx: np.ndarray, zz: np.ndarray) -> np.ndarray:
-    """The surface the arc grows out of: trench floor + a shallow shelf.
+                 xx: np.ndarray, zz: np.ndarray,
+                 detail: float = ARC_DETAIL_DEFAULT) -> np.ndarray:
+    """The surface the arc grows out of: trench floor, shelf, and fine grain.
 
     The LEM has no sea in it — every cell erodes as if subaerial — so the
     *bathymetry* has to be authored even when the relief is not. Uplift
     draws the land; this draws the water it stands in, and the landmass
     quantile puts the waterline where the contract says.
+
+    `detail` is the fine grain, and it is not decoration. The multires
+    driver carries the input's *band detail* — the high-pass residual the
+    coarse grid could not represent — across the upsample, and then 30 fine
+    iterations incise into it. A platform of smooth bathymetry has nothing
+    in that band to carry (0.040 elmos of residual std, measured), so every
+    elmo of the arc's fine relief was made by the solver itself, out of its
+    own cell-scale channel initiation — which is what the eye reads as
+    hatching even after the router stops combing it (PLAN-maps M8q FIND 4).
+    The shipped `mounds` generator escapes that by construction: its input
+    carries **2.266** elmos of high-pass residual and erosion only finishes
+    it (output 2.125). This term authors the same amount for the arc —
+    fBm over 15-120 elmos, i.e. the band `structural_anisotropy` reads, at
+    the amplitude that lands the residual on the mounds figure (0.131 elmos
+    of residual per elmo of amplitude, so ~17). Its coarsest octave is
+    representable on the 32-elmo coarse grid and so reaches the coarse solve
+    too; the landform is unaffected either way, because `smooth_uplift`
+    holds that at 900 elmos and up.
+
+    It rides everywhere, seafloor included, because the solver erodes
+    everywhere; below the waterline it is invisible in-game and it is the
+    channel network's seed, not scenery.
     """
     coast = tn.fbm(tn.SimplexNoise(seed + 9), xx / 2400.0, zz / 2400.0,
                    octaves=5)
     h = -90.0 + 240.0 * np.clip(u * 1.9, 0.0, 1.0) + 30.0 * coast
+    if detail > 0.0:
+        h = h + detail * tn.fbm(tn.SimplexNoise(seed + 11),
+                                xx / ARC_DETAIL_WAVELENGTH,
+                                zz / ARC_DETAIL_WAVELENGTH, octaves=4)
     return h - np.quantile(h, 1.0 - landmass)
 
 
@@ -219,12 +258,31 @@ def synth_height(seed: int, landmass: float, islands: int,
 # Generator
 # ---------------------------------------------------------------------------
 
+def erosion_cache_path(terrain: str, router: str, seed: int, landmass: float,
+                       islands: int, relief_target: float, arc_detail: float,
+                       fast: bool) -> str:
+    """Where a converged surface is cached — and the key IS the contract.
+
+    Every input the solver saw has to appear here or a later run silently
+    gets someone else's landscape. `arc_detail` is in it for that reason: a
+    cache written before `arc_platform` grew its grain is a *different*
+    surface under identical parameters. It is left out of the `mounds` key
+    so the shipped `skerry_reach` cache stays addressable.
+    """
+    arc_key = f"_a{arc_detail}v{ARC_REV}" if terrain == "arc" else ""
+    return os.path.join(
+        os.environ.get("TMPDIR", "/tmp"),
+        f"archipelago_eroded_r{SYNTH_REV}_{terrain}_{router}_{seed}_{landmass}_"
+        f"{islands}_{relief_target}{arc_key}_{'fast' if fast else 'full'}.npy")
+
+
 def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
              fast: bool = False, with_features: bool = False,
              preview_only: bool = False, no_package: bool = False,
              map_id: str = "skerry_reach", display_name: str = "Skerry Reach",
              climate: str = "temperate", terrain: str = "mounds",
-             router: str = "auto", relief_target: float = 950.0):
+             router: str = "auto", relief_target: float = 950.0,
+             arc_detail: float = ARC_DETAIL_DEFAULT):
     t0 = time.time()
     cell = 32.0 if fast else 8.0
     S = int(MAP_SIZE / cell) + 1
@@ -246,11 +304,19 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     u = None
     if terrain == "arc":
         u = arc_uplift(seed, xx, zz, cell)
-        h = arc_platform(seed, landmass, u, xx, zz)
+        h = arc_platform(seed, landmass, u, xx, zz, detail=arc_detail)
         # aim with the PATH INTEGRAL, not (U/K)*Phi: this field varies on
         # the drainage network's own scale, which is exactly the case the
-        # scalar form factorises away (2.4x out — PLAN-maps M8p)
-        u = u * up.scale_uplift_for_relief(h, u, hardness, relief_target,
+        # scalar form factorises away (2.4x out — PLAN-maps M8p).
+        # Aim on the LANDFORM, not on the grained surface: `Psi` is a sum
+        # down a flow path, so cell-scale grain shortens it and inflates the
+        # rate it hands back — the same target came out at 2046 elmos of
+        # relief aimed through the grained platform against 1406 through the
+        # smooth one, and the extra relief carries its own fine texture,
+        # which is the effect the grain exists to remove (PLAN-maps M8r).
+        h_aim = (h if arc_detail <= 0.0
+                 else arc_platform(seed, landmass, u, xx, zz, detail=0.0))
+        u = u * up.scale_uplift_for_relief(h_aim, u, hardness, relief_target,
                                            router=router)
         print(f"arc uplift authored {time.time()-t0:.0f}s "
               f"(aim {relief_target:.0f} elmos, U max {u.max():.4f})")
@@ -259,10 +325,8 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     print(f"synth done {time.time()-t0:.0f}s relief {h.min():.0f}..{h.max():.0f}")
 
     # 2. erosion (cached per parameter set — the cache key IS the contract)
-    cache = os.path.join(
-        os.environ.get("TMPDIR", "/tmp"),
-        f"archipelago_eroded_r{SYNTH_REV}_{terrain}_{router}_{seed}_{landmass}_"
-        f"{islands}_{relief_target}_{'fast' if fast else 'full'}.npy")
+    cache = erosion_cache_path(terrain, router, seed, landmass, islands,
+                               relief_target, arc_detail, fast)
     if os.path.exists(cache):
         h = np.load(cache)
         print(f"erosion loaded from cache {cache}")
@@ -662,6 +726,13 @@ def main():
                     help="--terrain arc only: elmos of relief the highest "
                          "ground should stand at, aimed through "
                          "uplift.scale_uplift_for_relief (~10%% first-order)")
+    ap.add_argument("--arc-detail", dest="arc_detail", type=float,
+                    default=ARC_DETAIL_DEFAULT,
+                    help="--terrain arc only: elmos of authored fBm grain in "
+                         "the 15-120 elmo band on the platform the solver "
+                         "erodes, so the fine relief is finished noise rather "
+                         "than solver-made channel texture (PLAN-maps M8r). "
+                         "0 restores the M8q surface.")
     ap.add_argument("--fast", action="store_true",
                     help="513 grid iteration mode — preview/tuning only, "
                          "NOT shippable. ⚠ with --terrain arc it is not even "
@@ -689,7 +760,8 @@ def main():
                        "--climate", args.climate,
                        "--terrain", args.terrain,
                        "--router", args.router,
-                       "--relief-target", str(args.relief_target)]
+                       "--relief-target", str(args.relief_target),
+                       "--arc-detail", str(args.arc_detail)]
         if args.fast:
             passthrough.append("--fast")
         if args.with_features:
@@ -705,7 +777,8 @@ def main():
              preview_only=args.preview_only, no_package=args.no_package,
              map_id=args.map_id, display_name=args.display_name,
              climate=args.climate, terrain=args.terrain,
-             router=args.router, relief_target=args.relief_target)
+             router=args.router, relief_target=args.relief_target,
+             arc_detail=args.arc_detail)
 
 
 if __name__ == "__main__":

@@ -326,6 +326,27 @@ def _refine(a: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
                         mode="nearest")
 
 
+def band_detail(dem: np.ndarray, coarse_factor: int = 4) -> np.ndarray:
+    """The high-pass residual a `coarse_factor` grid cannot represent.
+
+    `dem - refine(coarsen(dem))`, i.e. exactly what
+    `stream_power_erode_multires` carries across the upsample — and, read as
+    a statistic, how much fine relief a surface *has to give* the solver.
+    A smooth authored platform has ~none (0.040 elmos std on the arc's
+    bathymetry) while the shipped mounds generator hands over 2.266, which
+    is the difference between fine structure that erosion finishes and fine
+    structure erosion has to invent (PLAN-maps M8q FIND 4, M8r).
+
+    Measure at the factor the multires call itself uses; a different scale
+    reads against a band the pass never had.
+    """
+    a = np.asarray(dem, dtype=np.float64)
+    H, W = a.shape
+    ch = max(9, int(round(H / coarse_factor)))
+    cw = max(9, int(round(W / coarse_factor)))
+    return a - _refine(_coarsen(a, (ch, cw)), (H, W))
+
+
 def stream_power_erode_multires(
     dem: np.ndarray,
     cellsize: float,
@@ -410,9 +431,7 @@ def stream_power_erode_multires(
 
     h = _refine(coarse, (H, W))
     if keep_band_detail:
-        band = np.asarray(dem, dtype=np.float64) - _refine(
-            _coarsen(np.asarray(dem, dtype=np.float64), (ch, cw)), (H, W))
-        h = h + band
+        h = h + band_detail(dem, coarse_factor)
 
     if fine_iterations > 0:
         h = stream_power_erode(
