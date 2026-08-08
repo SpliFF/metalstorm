@@ -233,6 +233,18 @@ Generated bindings:
 - C++: `rts/protocol_generated.h`
 - TypeScript: `client/src/protocol/spring-web/*.ts`
 
+**⚠ There are TWO copies of `protocol_generated.h` and the include order picks
+between them per translation unit.** CMake regenerates into
+`build/<preset>/generated/`, but `rts/protocol_generated.h` is *also* tracked in
+git, and `-I rts` precedes `-I build/<preset>/generated` — so after a
+`schemas/protocol.fbs` change some files see the new header and some see the
+stale committed one. It surfaces as `no member named 'add_<your_new_field>'` in
+a *subset* of targets while others link clean (spring-lobby built, spring-server
+did not). After editing the schema, refresh the tracked copy —
+`cp build/debug/generated/protocol_generated.h rts/protocol_generated.h` — and
+commit it with the schema. `make generate-protocol` only emits the TypeScript
+side and does not do this.
+
 ### Lua Scripting System
 
 The Lua scripting system is the primary extension point for game logic. Game authors write Lua gadgets that run inside the server's simulation loop and respond to engine events. **All gameplay behavior** — win conditions, unit spawning, player-leave handling, resource rules, etc. — should be defined in Lua, not hardcoded in C++.

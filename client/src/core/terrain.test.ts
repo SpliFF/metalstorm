@@ -6,7 +6,8 @@ import {
     planTerrainChunks, buildSurfaceGeometry, computeSurfaceNormals,
     buildTerrainMesh, DeformableTerrain, isTerrainMesh,
     attachTerrainSplatFromDecals, attachTerrainDetailPlainFromDecals,
-    setTerrainDetailPluginEnabled,
+    attachTerrainSplatNormalFromDecals, attachTerrainDetailFromDecals,
+    applyWebGLTexture, setTerrainDetailPluginEnabled,
     type AtlasPagePlan, type MapDimensions, type SurfaceGeometry,
 } from './terrain.js';
 import { TerrainSplatPlugin } from './terrain-splat-plugin.js';
@@ -696,6 +697,111 @@ describe('terrain near-field detail attach', () => {
         for (const mat of group.materials) {
             expect(pluginOf(mat)?.mode).toBe('splat');
         }
+    });
+
+    // --- endtoend D48: the third branch, and the precedence that hid it ---
+
+    // scorched_crossing_v2.4's actual resources block: all three forms
+    // declared at once. Recoil resolves that to the splat-NORMAL branch and
+    // never samples splatDetailTex — whose alpha on that map is a constant
+    // 1.0, i.e. a flat +0.93 on the ground albedo if it ever is sampled.
+    const SCORCHED = {
+        detailTex: 'detail.ktx2',
+        splatDetailTex: 'splat_detail.ktx2',
+        splatDistrTex: 'splat_distr.ktx2',
+        splatNormal: ['splat_normal_0.ktx2', 'splat_normal_1.ktx2',
+            'splat_normal_2.ktx2', 'splat_normal_3.ktx2'] as
+            [string, string, string, string],
+        splatScales: [0.018, 0.005, 0.02, 0.02] as [number, number, number, number],
+        splatMults: [1, 1, 1, 1] as [number, number, number, number],
+        splatDetailNormalDiffuseAlpha: true,
+    };
+
+    it('gives the splat-normal branch precedence over BOTH other paths', () => {
+        const { scene, group, dims } = makeChunkedTerrain();
+        expect(attachTerrainDetailFromDecals(scene, group, SCORCHED, BASE, dims))
+            .toBe('splatNormal');
+        for (const mat of group.materials) {
+            const p = pluginOf(mat);
+            expect(p?.mode).toBe('splatNormal');
+            expect(p?.diffuseAlpha).toBe(true);
+            // The texture that whitewashed the map must not be loaded at all.
+            expect(p?.detailTexture).toBeNull();
+            expect(p?.plainDetailTexture).toBeNull();
+            expect(p?.normalTextures.map(t => t?.name)).toEqual([
+                `${BASE}/splat_normal_0.ktx2`, `${BASE}/splat_normal_1.ktx2`,
+                `${BASE}/splat_normal_2.ktx2`, `${BASE}/splat_normal_3.ktx2`]);
+        }
+        // ...and nothing may attach a second branch on top.
+        expect(attachTerrainSplatFromDecals(scene, group, SCORCHED, BASE, dims))
+            .toBe(false);
+        expect(attachTerrainDetailPlainFromDecals(scene, group, SCORCHED, BASE))
+            .toBe(false);
+    });
+
+    it('falls through to splat, then plain, as the normal set empties', () => {
+        const noNormals = {
+            ...SCORCHED,
+            splatNormal: ['', '', '', ''] as [string, string, string, string],
+        };
+        {
+            const { scene, group, dims } = makeChunkedTerrain();
+            expect(attachTerrainDetailFromDecals(scene, group, noNormals, BASE, dims))
+                .toBe('splat');
+        }
+        {
+            const { scene, group, dims } = makeChunkedTerrain();
+            expect(attachTerrainDetailFromDecals(scene, group,
+                { ...noNormals, splatDetailTex: '' }, BASE, dims)).toBe('plain');
+        }
+        {
+            const { scene, group, dims } = makeChunkedTerrain();
+            expect(attachTerrainDetailFromDecals(scene, group,
+                { ...noNormals, splatDetailTex: '', detailTex: '' }, BASE, dims))
+                .toBeNull();
+        }
+    });
+
+    it('takes the splat-normal branch on a single declared normal channel', () => {
+        const { scene, group, dims } = makeChunkedTerrain();
+        const oneNormal = {
+            ...SCORCHED,
+            splatNormal: ['', 'splat_normal_1.ktx2', '', ''] as
+                [string, string, string, string],
+        };
+        expect(attachTerrainDetailFromDecals(scene, group, oneNormal, BASE, dims))
+            .toBe('splatNormal');
+        // Absent channels get a neutral mid-grey stand-in, which the shader's
+        // `tex * 2 - 1` turns into exactly zero contribution.
+        const p = pluginOf(group.materials[0])!;
+        expect(p.normalTextures[1]?.name).toBe(`${BASE}/splat_normal_1.ktx2`);
+        for (const i of [0, 2, 3]) expect(p.normalTextures[i]).not.toBeNull();
+        expect(p.normalTextures[0]).toBe(p.normalTextures[2]);
+    });
+
+    it('needs a distribution map before any splat branch can run', () => {
+        const { scene, group, dims } = makeChunkedTerrain();
+        expect(attachTerrainSplatNormalFromDecals(
+            scene, group, { ...SCORCHED, splatDistrTex: '' }, BASE, dims))
+            .toBe(false);
+        expect(attachTerrainDetailFromDecals(
+            scene, group, { ...SCORCHED, splatDistrTex: '' }, BASE, dims))
+            .toBe('plain');
+    });
+
+    it('carries splatNormal mode across a material swap', () => {
+        const { scene, group, dims } = makeChunkedTerrain();
+        attachTerrainDetailFromDecals(scene, group, SCORCHED, BASE, dims);
+        const before = pluginOf(group.materials[0])!;
+        // The atlas load swaps in a fresh terrainTexMat later; the reattach
+        // must carry the mode, or the map comes back on the wrong branch.
+        applyWebGLTexture(scene, group, {} as WebGLTexture, 64, 64, 1);
+        const after = pluginOf(group.materials[0])!;
+        expect(after).not.toBe(before);
+        expect(after.mode).toBe('splatNormal');
+        expect(after.diffuseAlpha).toBe(true);
+        expect(after.normalTextures.map(t => t?.name))
+            .toEqual(before.normalTextures.map(t => t?.name));
     });
 
     it('toggles either mode through the A/B hook', () => {

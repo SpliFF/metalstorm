@@ -33,8 +33,8 @@ import type { EntityStateSnapshot } from './entity-state.js';
 // `window.__*` injections in scene-lighting/client-settings were switched to
 // `globalThis` for this move — PLAN-game-worker.md GW4 Bucket-2).
 import {
-    buildTerrainMesh, loadTerrainTextures, attachTerrainSplatFromDecals,
-    attachTerrainDetailPlainFromDecals, setTerrainDetailPluginEnabled,
+    buildTerrainMesh, loadTerrainTextures, attachTerrainDetailFromDecals,
+    setTerrainDetailPluginEnabled,
     TerrainFog, DeformableTerrain, isTerrainMesh, attachTerrainDecalOverlay,
     setTerrainDecalPluginEnabled, attachTerrainWaterAbsorption,
     type MapDimensions, type FogDarkening, type TerrainMeshGroup,
@@ -821,28 +821,24 @@ async function gpLoadMap(msg: GpInitToWorker): Promise<void> {
 
     // Recoil near-field terrain detail (PLAN-maps.md §1.2,
     // PLAN-terrain-detailtex.md): signed detail layers over the baked tile
-    // albedo. The two paths are mutually exclusive per map, same precedence as
-    // SMFFragProg's `#ifdef SMF_DETAIL_TEXTURE_SPLATTING` / `#ifndef`: splat
-    // pair if declared, else the plain `detailTex`. No-op when the map ships
-    // neither. Attached now (before the async tile-atlas swap lands); the
-    // reattach dance in terrain.ts carries it — and its mode — across swaps.
-    if (map.decals?.splatDistrTex && map.decals?.splatDetailTex) {
+    // albedo. The three paths are mutually exclusive per map and take
+    // SMFFragProg's own precedence — the splat detail-*normal* block
+    // (`SMF_DETAIL_NORMAL_TEXTURE_SPLATTING`) wraps the whole detail section,
+    // so where it applies `GetDetailTextureColor` is never reached; then the
+    // splat pair (`SMF_DETAIL_TEXTURE_SPLATTING`); then the plain
+    // `detailTex`. No-op when the map ships none of them. Attached now
+    // (before the async tile-atlas swap lands); the reattach dance in
+    // terrain.ts carries it — and its mode — across swaps.
+    if (map.decals) {
         try {
-            attachTerrainSplatFromDecals(scene, terrain, {
-                splatDistrTex: map.decals.splatDistrTex,
-                splatDetailTex: map.decals.splatDetailTex,
-                splatScales: map.decals.splatScales,
-                splatMults: map.decals.splatMults,
-            }, mapBaseUrl, mapDims);
-            postLog(0, '[gp] terrain splat-detail attached');
-        } catch (e) {
-            postLog(2, `[gp] terrain splat attach failed: ${e}`);
-        }
-    } else if (map.decals?.detailTex) {
-        try {
-            attachTerrainDetailPlainFromDecals(
-                scene, terrain, { detailTex: map.decals.detailTex }, mapBaseUrl);
-            postLog(0, '[gp] terrain detail attached (plain)');
+            const mode = attachTerrainDetailFromDecals(
+                scene, terrain, map.decals, mapBaseUrl, mapDims);
+            if (mode) {
+                postLog(0, `[gp] terrain near-field detail attached (${mode}` +
+                    (mode === 'splatNormal'
+                        ? `, diffuseAlpha=${map.decals.splatDetailNormalDiffuseAlpha}`
+                        : '') + ')');
+            }
         } catch (e) {
             postLog(2, `[gp] terrain detail attach failed: ${e}`);
         }

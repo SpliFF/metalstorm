@@ -57,7 +57,10 @@ struct sqlite3;
 /// impostors/map-pipeline file scope this fix touched) and moot for every
 /// checkout observed 2026-08-03 (main + every active clone already has a
 /// `.processed-stamp` newer than 98fbd46bda and older than e55f0d9400).
-constexpr int MAP_FORMAT_VERSION = 16;
+/// 17: MapDecalData::splatDetailNormalDiffuseAlpha (D48 — the client needs
+///     Recoil's SMF_DETAIL_NORMAL_DIFFUSE_ALPHA flag to pick the right
+///     branch of GetDetailTextureColor for splat-normal maps).
+constexpr int MAP_FORMAT_VERSION = 17;
 
 struct MapStartPosition {
     float x = 0, z = 0;
@@ -107,6 +110,13 @@ struct MapDecalData {
     std::string detailNormalTex;       // global detail normal map
     float splatScales[4] = {0.02f, 0.02f, 0.02f, 0.02f};
     float splatMults[4]  = {1.0f, 1.0f, 1.0f, 1.0f};
+    /// mapinfo `resources.splatDetailNormalDiffuseAlpha` (or the
+    /// `splatDetailNormalTex` sub-table's `alpha` key). Recoil's
+    /// SMF_DETAIL_NORMAL_DIFFUSE_ALPHA: when set, the alpha channel of the
+    /// blended splat detail *normals* supplies the ground's near-field
+    /// albedo detail; when clear, that branch contributes no albedo at all.
+    /// See CMapInfo::ReadSMF and SMFRenderState.cpp:115.
+    bool splatDetailNormalDiffuseAlpha = false;
 };
 
 /// Water rendering properties. Spring's "water" system is also used for

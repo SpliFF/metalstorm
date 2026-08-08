@@ -1597,6 +1597,7 @@ inline std::vector<uint8_t> BuildMapData(const MapMetadata& m) {
     db.add_detail_normal_tex(detNrmUrl);
     db.add_splat_scales(scalesOff);
     db.add_splat_mults(multsOff);
+    db.add_splat_detail_normal_diffuse_alpha(m.decals.splatDetailNormalDiffuseAlpha);
     auto decalsOff = db.Finish();
 
     // --- Water ---

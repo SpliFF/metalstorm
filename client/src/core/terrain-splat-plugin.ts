@@ -2,11 +2,27 @@
  * TerrainSplatPlugin — Recoil's near-field terrain detail shading, both halves
  * of the SMF texturing model (PLAN-maps.md §1.2, PLAN-terrain-detailtex.md).
  *
- * The source material is one function — `GetDetailTextureColor` in
- * cont/base/springcontent/shaders/GLSL/SMFFragProg.glsl — with two mutually
- * exclusive branches selected per map, so this is one plugin with two modes
- * (`mode`, and the `TERRAIN_SPLAT` / `TERRAIN_DETAIL_PLAIN` defines are never
- * both set).
+ * The source material is `GetDetailTextureColor` in
+ * cont/base/springcontent/shaders/GLSL/SMFFragProg.glsl plus the
+ * `SMF_DETAIL_NORMAL_TEXTURE_SPLATTING` block that *bypasses* it — three
+ * mutually exclusive branches selected per map, so this is one plugin with
+ * three modes (`mode`; the `TERRAIN_SPLAT` / `TERRAIN_DETAIL_PLAIN` /
+ * `TERRAIN_SPLAT_NORMAL` defines are never set together).
+ *
+ * Recoil's precedence, which callers must reproduce (SMFFragProg.glsl:311 —
+ * the splat-normal block is an `#ifdef` around the whole detail section, so
+ * where it applies `GetDetailTextureColor` is never called at all):
+ *
+ *   splatDistrTex + any splatDetailNormalTexN  ->  'splatNormal'
+ *   splatDistrTex + splatDetailTex             ->  'splat'
+ *   detailTex                                  ->  'plain'
+ *
+ * Getting that order wrong is not cosmetic: a map that ships both a
+ * `splatDetailTex` and the normal set (scorched_crossing, pools_of_ilys) has
+ * no reason to keep the former's alpha channel meaningful, and
+ * scorched_crossing's is a constant 1.0 — which through mode 'splat' adds a
+ * flat +0.93 to the ground albedo and renders the whole map as a white void
+ * (endtoend D48).
  *
  * Mode 'splat' — the `SMF_DETAIL_TEXTURE_SPLATTING` branch:
  *
@@ -21,6 +37,24 @@
  *
  *   detailCol  = texture(detailTex, worldXZ * 0.02) * 2.0 - 1.0
  *   fragColor  = (diffuse + detailCol.rgb) * shade
+ *
+ * Mode 'splatNormal' — `GetSplatDetailTextureNormal`, the
+ * `SMF_DETAIL_NORMAL_TEXTURE_SPLATTING` branch. Four `_dnts` textures
+ * (detail-normal + tangent-space) are blended by the same distribution
+ * weights, and the blend does double duty:
+ *
+ *   cofac    = texture(splatDistrTex, mapUV) * splatTexMults
+ *   strength = min(1.0, dot(cofac, vec4(1.0)))
+ *   n        = sum_i (texture(splatNormalTex_i, uv_i) * 2.0 - 1.0) * cofac[i]
+ *   n.y      = max(n.y, 0.01)                -- all-zero cofacs point up
+ *   detail   = clamp(n.a, -1.0, 1.0)         -- only if diffuseAlpha
+ *   normal   = normalize(mix(normal, normalize(stn * n.xyz), strength))
+ *
+ * `diffuseAlpha` is the map's `SMF_DETAIL_NORMAL_DIFFUSE_ALPHA`; with it
+ * clear this branch contributes **no albedo detail at all** (Recoil leaves
+ * `splatDetailStrength.y` at 0) and only perturbs the normal. The STN frame
+ * is derived from the fragment normal alone, exactly as Recoil does it
+ * (SMFFragProg.glsl:276) — no vertex tangents are needed.
  *
  * Both are signed-centred: mid-grey source contributes zero, so average scene
  * brightness is unchanged and the effect self-fades to nothing through the mip
@@ -43,9 +77,9 @@ import type { BaseTexture } from '@babylonjs/core';
  *  the mip chain, not a uniform, is the distance falloff. */
 export const SMF_DETAILTEX_RES = 0.02;
 
-/** Which branch of Recoil's `GetDetailTextureColor` this plugin runs. Mutually
+/** Which branch of Recoil's SMF detail shading this plugin runs. Mutually
  *  exclusive by construction — the shader's `#ifdef`/`#ifndef` structure. */
-export type TerrainDetailMode = 'splat' | 'plain';
+export type TerrainDetailMode = 'splat' | 'plain' | 'splatNormal';
 
 export class TerrainSplatPlugin extends MaterialPluginBase {
     private _enabled = false;
@@ -55,6 +89,12 @@ export class TerrainSplatPlugin extends MaterialPluginBase {
     detailTexture: BaseTexture | null = null;
     /** Mode 'plain' only: the single tiling `detailTex`. */
     plainDetailTexture: BaseTexture | null = null;
+    /** Mode 'splatNormal' only: the four `_dnts` detail-normal textures, in
+     *  mapinfo order (`splatDetailNormalTex1..4`). A null slot contributes
+     *  nothing — Recoil simply has fewer entries in its name vector. */
+    normalTextures: (BaseTexture | null)[] = [null, null, null, null];
+    /** Mode 'splatNormal' only: Recoil `SMF_DETAIL_NORMAL_DIFFUSE_ALPHA`. */
+    diffuseAlpha = false;
     /** Per-channel world-XZ tiling rates (mapinfo splats.texScales). */
     texScales: [number, number, number, number] = [0.02, 0.02, 0.02, 0.02];
     /** Per-channel detail strength (mapinfo splats.texMults). */
@@ -64,8 +104,12 @@ export class TerrainSplatPlugin extends MaterialPluginBase {
     worldH = 1;
 
     constructor(material: Material) {
-        super(material, 'TerrainSplat', 190,
-            { TERRAIN_SPLAT: false, TERRAIN_DETAIL_PLAIN: false });
+        super(material, 'TerrainSplat', 190, {
+            TERRAIN_SPLAT: false,
+            TERRAIN_DETAIL_PLAIN: false,
+            TERRAIN_SPLAT_NORMAL: false,
+            TERRAIN_SPLAT_NORMAL_DIFFUSE_ALPHA: false,
+        });
     }
 
     get isEnabled(): boolean { return this._enabled; }
@@ -87,12 +131,16 @@ export class TerrainSplatPlugin extends MaterialPluginBase {
     prepareDefines(defines: any): void {
         defines.TERRAIN_SPLAT = this._enabled && this._mode === 'splat';
         defines.TERRAIN_DETAIL_PLAIN = this._enabled && this._mode === 'plain';
+        defines.TERRAIN_SPLAT_NORMAL = this._enabled && this._mode === 'splatNormal';
+        defines.TERRAIN_SPLAT_NORMAL_DIFFUSE_ALPHA =
+            defines.TERRAIN_SPLAT_NORMAL && this.diffuseAlpha;
     }
 
     getClassName(): string { return 'TerrainSplatPlugin'; }
 
     getSamplers(samplers: string[]): void {
-        samplers.push('splatDistrTex', 'splatDetailTex', 'plainDetailTex');
+        samplers.push('splatDistrTex', 'splatDetailTex', 'plainDetailTex',
+            'splatNormalTex0', 'splatNormalTex1', 'splatNormalTex2', 'splatNormalTex3');
     }
 
     getUniforms(): { ubo: { name: string; size: number; type: string }[]; fragment: string } {
@@ -102,7 +150,7 @@ export class TerrainSplatPlugin extends MaterialPluginBase {
                 { name: 'splatTexMults', size: 4, type: 'vec4' },
                 { name: 'splatMapInvSize', size: 2, type: 'vec2' },
             ],
-            fragment: `#ifdef TERRAIN_SPLAT
+            fragment: `#if defined(TERRAIN_SPLAT) || defined(TERRAIN_SPLAT_NORMAL)
                 uniform vec4 splatTexScales;
                 uniform vec4 splatTexMults;
                 uniform vec2 splatMapInvSize;
@@ -123,6 +171,13 @@ export class TerrainSplatPlugin extends MaterialPluginBase {
         uniformBuffer.updateFloat4('splatTexMults', ...this.texMults);
         uniformBuffer.updateFloat2('splatMapInvSize', 1 / this.worldW, 1 / this.worldH);
         if (this.distrTexture) uniformBuffer.setTexture('splatDistrTex', this.distrTexture);
+        if (this._mode === 'splatNormal') {
+            for (let i = 0; i < 4; i++) {
+                const tex = this.normalTextures[i];
+                if (tex) uniformBuffer.setTexture(`splatNormalTex${i}`, tex);
+            }
+            return;
+        }
         if (this.detailTexture) uniformBuffer.setTexture('splatDetailTex', this.detailTexture);
     }
 
@@ -135,6 +190,13 @@ export class TerrainSplatPlugin extends MaterialPluginBase {
             #endif
             #ifdef TERRAIN_DETAIL_PLAIN
                 uniform sampler2D plainDetailTex;
+            #endif
+            #ifdef TERRAIN_SPLAT_NORMAL
+                uniform sampler2D splatDistrTex;
+                uniform sampler2D splatNormalTex0;
+                uniform sampler2D splatNormalTex1;
+                uniform sampler2D splatNormalTex2;
+                uniform sampler2D splatNormalTex3;
             #endif`,
             // Runs on baseColor before the light loop; the light loop then
             // multiplies by shade, giving Recoil's (diffuse+detail)*shade.
@@ -156,6 +218,29 @@ export class TerrainSplatPlugin extends MaterialPluginBase {
                     vec2 _pdUV = vPositionW.xz * vec2(${SMF_DETAILTEX_RES});
                     vec3 _pdCol = texture(plainDetailTex, _pdUV).rgb * 2.0 - 1.0;
                     baseColor.rgb += _pdCol;
+                }
+            #endif
+            #ifdef TERRAIN_SPLAT_NORMAL
+                {
+                    vec2 _snWorld = vPositionW.xz;
+                    vec4 _snCofac = texture(splatDistrTex, _snWorld * splatMapInvSize) * splatTexMults;
+                    float _snStrength = min(1.0, dot(_snCofac, vec4(1.0)));
+                    vec4 _snN =
+                        (texture(splatNormalTex0, _snWorld * splatTexScales.x) * 2.0 - 1.0) * _snCofac.x
+                      + (texture(splatNormalTex1, _snWorld * splatTexScales.y) * 2.0 - 1.0) * _snCofac.y
+                      + (texture(splatNormalTex2, _snWorld * splatTexScales.z) * 2.0 - 1.0) * _snCofac.z
+                      + (texture(splatNormalTex3, _snWorld * splatTexScales.w) * 2.0 - 1.0) * _snCofac.w;
+                    _snN.y = max(_snN.y, 0.01);
+                    #ifdef TERRAIN_SPLAT_NORMAL_DIFFUSE_ALPHA
+                        baseColor.rgb += vec3(clamp(_snN.a, -1.0, 1.0));
+                    #endif
+                    // STN frame from the fragment normal alone, exactly as
+                    // SMFFragProg.glsl:276 builds it. For a flat normal this
+                    // gives sTangent = +X and tTangent = +Z.
+                    vec3 _snT = normalize(cross(normalW, vec3(-1.0, 0.0, 0.0)));
+                    vec3 _snS = cross(normalW, _snT);
+                    mat3 _snSTN = mat3(_snS, _snT, normalW);
+                    normalW = normalize(mix(normalW, normalize(_snSTN * _snN.xyz), _snStrength));
                 }
             #endif`,
         };
@@ -181,6 +266,36 @@ export function attachTerrainSplat(
     plugin.worldW = worldW;
     plugin.worldH = worldH;
     plugin.mode = 'splat';
+    plugin.isEnabled = true;
+    return plugin;
+}
+
+/** Attach + configure the splat-detail-*normal* mode
+ *  (`SMF_DETAIL_NORMAL_TEXTURE_SPLATTING`). `normals` is the four
+ *  `splatDetailNormalTex1..4` textures in mapinfo order; a null slot must be
+ *  filled by the caller with a neutral mid-grey so it contributes nothing
+ *  (Recoil leaves the sampler unbound, which reads black and would push the
+ *  channel to −1 — we do not reproduce that). */
+export function attachTerrainSplatNormal(
+    material: Material,
+    distr: BaseTexture,
+    normals: (BaseTexture | null)[],
+    scales: [number, number, number, number],
+    mults: [number, number, number, number],
+    diffuseAlpha: boolean,
+    worldW: number,
+    worldH: number,
+): TerrainSplatPlugin {
+    const plugin = new TerrainSplatPlugin(material);
+    plugin.distrTexture = distr;
+    plugin.normalTextures = [normals[0] ?? null, normals[1] ?? null,
+        normals[2] ?? null, normals[3] ?? null];
+    plugin.texScales = scales;
+    plugin.texMults = mults;
+    plugin.diffuseAlpha = diffuseAlpha;
+    plugin.worldW = worldW;
+    plugin.worldH = worldH;
+    plugin.mode = 'splatNormal';
     plugin.isEnabled = true;
     return plugin;
 }

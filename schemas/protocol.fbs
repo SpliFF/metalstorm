@@ -1798,6 +1798,10 @@ table MapDecals {
     detail_normal_tex: string;        // global detail normal map
     splat_scales: [float];            // 4 floats, UV scale per channel
     splat_mults: [float];             // 4 floats, intensity per channel
+    // Recoil SMF_DETAIL_NORMAL_DIFFUSE_ALPHA (mapinfo
+    // resources.splatDetailNormalDiffuseAlpha). Selects which channel of the
+    // splat-normal branch supplies the ground's near-field albedo detail.
+    splat_detail_normal_diffuse_alpha: bool;
 }
 
 /// Full map data sent by the game server on connect.

@@ -29,6 +29,7 @@ import {
     VertexData,
     StandardMaterial,
     Texture,
+    RawTexture,
     Color3,
     Vector3,
     VertexBuffer,
@@ -42,7 +43,9 @@ import type { FineWindowState } from './decal-overlay.js';
 import { WaterAbsorptionPlugin, attachWaterAbsorption } from './water-absorption-plugin.js';
 import {
     TerrainSplatPlugin, attachTerrainSplat, attachTerrainDetailPlain,
+    attachTerrainSplatNormal,
 } from './terrain-splat-plugin.js';
+import type { TerrainDetailMode } from './terrain-splat-plugin.js';
 import type { MapWaterAbsorption } from './map-lighting.js';
 
 const SQUARE_SIZE = 8;
@@ -1299,6 +1302,15 @@ function reattachTerrainSplat(
             attachTerrainDetailPlain(mat, prev.plainDetailTexture);
         return;
     }
+    if (prev.mode === 'splatNormal') {
+        if (prev.distrTexture) {
+            attachTerrainSplatNormal(
+                mat, prev.distrTexture, prev.normalTextures,
+                prev.texScales, prev.texMults, prev.diffuseAlpha,
+                prev.worldW, prev.worldH);
+        }
+        return;
+    }
     if (prev.distrTexture && prev.detailTexture) {
         attachTerrainSplat(
             mat, prev.distrTexture, prev.detailTexture,
@@ -1306,10 +1318,121 @@ function reattachTerrainSplat(
     }
 }
 
+/** The decals subset the near-field detail attach needs. */
+export interface TerrainDetailDecals {
+    detailTex: string;
+    splatDetailTex: string;
+    splatDistrTex: string;
+    splatNormal: [string, string, string, string];
+    splatScales: [number, number, number, number];
+    splatMults: [number, number, number, number];
+    splatDetailNormalDiffuseAlpha: boolean;
+}
+
+/**
+ * Attach the one near-field detail branch this map's `resources` select, in
+ * SMFFragProg.glsl's own precedence. Returns the mode attached, or null when
+ * the map declares no detail shading at all.
+ *
+ * The order is not a preference — it is the shader's `#ifdef` nesting.
+ * `SMF_DETAIL_NORMAL_TEXTURE_SPLATTING` wraps the *whole* detail section
+ * (SMFFragProg.glsl:311), so on a map that has splat normals,
+ * `GetDetailTextureColor` is never called and neither `splatDetailTex` nor
+ * `detailTex` is ever sampled. Reproducing only the inner two branches is
+ * what caused endtoend **D48**: scorched_crossing declares all three, the
+ * client took the splat pair, and that map's `splatDetailTex` alpha is a
+ * constant 1.0 — a flat +0.93 added to the ground albedo, i.e. a white void.
+ *
+ * Keep this the single decision point. Three `if`s at a call site is exactly
+ * how the branches drifted apart the first time.
+ */
+export function attachTerrainDetailFromDecals(
+    scene: Scene,
+    terrain: TerrainMeshGroup,
+    decals: TerrainDetailDecals,
+    mapBaseUrl: string,
+    dims: MapDimensions,
+): TerrainDetailMode | null {
+    if (attachTerrainSplatNormalFromDecals(scene, terrain, decals, mapBaseUrl, dims))
+        return 'splatNormal';
+    if (attachTerrainSplatFromDecals(scene, terrain, decals, mapBaseUrl, dims))
+        return 'splat';
+    if (attachTerrainDetailPlainFromDecals(scene, terrain, decals, mapBaseUrl))
+        return 'plain';
+    return null;
+}
+
+/** Attach Recoil's splat detail-*normal* shading
+ *  (`SMF_DETAIL_NORMAL_TEXTURE_SPLATTING`) — the branch that WINS over
+ *  `attachTerrainSplatFromDecals` where a map ships both, because in
+ *  SMFFragProg.glsl it wraps the whole detail section and
+ *  `GetDetailTextureColor` is then never called. Callers must try this FIRST
+ *  (see endtoend D48: taking the splat branch on scorched_crossing sampled a
+ *  `splatDetailTex` whose alpha is a constant 1.0 and whitewashed the map).
+ *  Returns false when the map ships no distribution map or no normal set. */
+export function attachTerrainSplatNormalFromDecals(
+    scene: Scene,
+    terrain: TerrainMeshGroup,
+    decals: {
+        splatDistrTex: string;
+        splatNormal: [string, string, string, string];
+        splatScales: [number, number, number, number];
+        splatMults: [number, number, number, number];
+        splatDetailNormalDiffuseAlpha: boolean;
+    },
+    mapBaseUrl: string,
+    dims: MapDimensions,
+): boolean {
+    if (!decals.splatDistrTex) return false;
+    if (!decals.splatNormal.some(u => !!u)) return false;
+    const resolve = (u: string): string =>
+        /^(https?:)?\/\//.test(u) || u.startsWith('/') ? u : `${mapBaseUrl}/${u}`;
+
+    const distr = new Texture(resolve(decals.splatDistrTex), scene,
+        false, false /* invertY: KTX2 path ignores, raster stays top-down */);
+    distr.wrapU = Texture.CLAMP_ADDRESSMODE;
+    distr.wrapV = Texture.CLAMP_ADDRESSMODE;
+    distr.anisotropicFilteringLevel = 4;
+
+    // A channel the map does not declare must contribute nothing. Mid-grey
+    // (128) is the neutral value for the shader's `tex * 2 - 1`, so one
+    // shared 1x1 texel stands in for every absent slot. Recoil leaves the
+    // sampler unbound instead, which reads black and drives the channel to
+    // -1; that is a Recoil bug, not a behaviour to reproduce.
+    let neutral: RawTexture | null = null;
+    const normals = decals.splatNormal.map((u) => {
+        if (!u) {
+            neutral ??= RawTexture.CreateRGBATexture(
+                new Uint8Array([128, 128, 128, 128]), 1, 1, scene, false, false,
+                Texture.NEAREST_SAMPLINGMODE);
+            return neutral;
+        }
+        const t = new Texture(resolve(u), scene, false, false);
+        t.wrapU = Texture.WRAP_ADDRESSMODE;
+        t.wrapV = Texture.WRAP_ADDRESSMODE;
+        t.anisotropicFilteringLevel = 4;
+        return t;
+    });
+
+    const worldW = dims.mapx * SQUARE_SIZE;
+    const worldH = dims.mapy * SQUARE_SIZE;
+    let attached = false;
+    for (const m of terrain.materials) {
+        if (m instanceof StandardMaterial && !findTerrainSplatPlugin(m)) {
+            attachTerrainSplatNormal(m, distr, normals,
+                decals.splatScales, decals.splatMults,
+                decals.splatDetailNormalDiffuseAlpha, worldW, worldH);
+            attached = true;
+        }
+    }
+    return attached;
+}
+
 /** Attach Recoil splat-detail shading (PLAN-maps.md §1.2) to a terrain mesh
  *  from the map's decals metadata. Loads splat_distr + splat_detail textures
  *  and attaches the plugin to every material (single or paged); idempotent,
- *  and survives later material swaps via the reattach calls above. */
+ *  and survives later material swaps via the reattach calls above.
+ *  **Try `attachTerrainSplatNormalFromDecals` first** — see its note. */
 export function attachTerrainSplatFromDecals(
     scene: Scene,
     terrain: TerrainMeshGroup,

@@ -27,7 +27,7 @@ void MapMetadataDb::EnsureTable(sqlite3* db) {
     {
         sqlite3_stmt* stmt = nullptr;
         int rc = sqlite3_prepare_v2(db,
-            "SELECT legacy_coord_system FROM maps LIMIT 1", -1, &stmt, nullptr);
+            "SELECT splat_detail_normal_diffuse_alpha FROM maps LIMIT 1", -1, &stmt, nullptr);
         sqlite3_finalize(stmt);
         if (rc != SQLITE_OK) {
             sqlite3_exec(db, "DROP TABLE IF EXISTS maps", nullptr, nullptr, nullptr);
@@ -56,6 +56,9 @@ void MapMetadataDb::EnsureTable(sqlite3* db) {
             splat_normal_2 TEXT, splat_normal_3 TEXT,
             detail_normal_tex TEXT,
             splat_scales TEXT, splat_mults TEXT,
+            -- Recoil SMF_DETAIL_NORMAL_DIFFUSE_ALPHA: the splat detail
+            -- normals' alpha channel doubles as the ground albedo detail.
+            splat_detail_normal_diffuse_alpha INTEGER,
             -- Features stored as pipe-delimited type list + semi-delimited instance list
             feature_types TEXT, features_blob TEXT,
             -- FeatureDef list, parallel to feature_types. Each record is
@@ -162,12 +165,13 @@ void MapMetadataDb::StoreMetadata(sqlite3* db, const MapMetadata& m) {
          detail_tex,specular_tex,splat_detail_tex,splat_distr_tex,
          splat_normal_0,splat_normal_1,splat_normal_2,splat_normal_3,
          detail_normal_tex,splat_scales,splat_mults,
+         splat_detail_normal_diffuse_alpha,
          feature_types,features_blob,feature_defs,
          water_base_color,water_surface_color,water_min_color,
          water_surface_alpha,water_damage,void_water,
          widgets,sound_preset,legacy_coord_system)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
-                ?,?,?,?,?,?,?,?,?,?,?,?,?,?,
+                ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,
                 ?,?,?,?,?,?,
                 ?,?,?)
     )", -1, &stmt, nullptr);
@@ -210,6 +214,7 @@ void MapMetadataDb::StoreMetadata(sqlite3* db, const MapMetadata& m) {
     sqlite3_bind_text(stmt, i++, m.decals.detailNormalTex.c_str(),  -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, i++, splatScalesStr.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, i++, splatMultsStr.c_str(),  -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, i++, m.decals.splatDetailNormalDiffuseAlpha ? 1 : 0);
     sqlite3_bind_text(stmt, i++, typesStr.c_str(),       -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, i++, featuresStr.c_str(),    -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, i++, defsStr.c_str(),        -1, SQLITE_TRANSIENT);
@@ -258,6 +263,7 @@ std::vector<MapMetadata> MapMetadataDb::GetAllMaps(sqlite3* db, bool* ok) {
         "detail_tex,specular_tex,splat_detail_tex,splat_distr_tex,"
         "splat_normal_0,splat_normal_1,splat_normal_2,splat_normal_3,"
         "detail_normal_tex,splat_scales,splat_mults,"
+        "splat_detail_normal_diffuse_alpha,"
         "feature_types,features_blob,feature_defs,"
         "water_base_color,water_surface_color,water_min_color,"
         "water_surface_alpha,water_damage,void_water,widgets,sound_preset,"
@@ -327,6 +333,7 @@ std::vector<MapMetadata> MapMetadataDb::GetAllMaps(sqlite3* db, bool* ok) {
         m.decals.detailNormalTex = maybeStr(i++);
         parseFloats(maybeStr(i++).c_str(), m.decals.splatScales, 4);
         parseFloats(maybeStr(i++).c_str(), m.decals.splatMults,  4);
+        m.decals.splatDetailNormalDiffuseAlpha = sqlite3_column_int(stmt, i++) != 0;
 
         // Feature types
         std::string typesStr = maybeStr(i++);

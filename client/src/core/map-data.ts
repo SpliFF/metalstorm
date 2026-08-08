@@ -63,6 +63,11 @@ export interface MapDecalsInfo {
     detailNormalTex: string;
     splatScales: [number, number, number, number];
     splatMults: [number, number, number, number];
+    /** Recoil `SMF_DETAIL_NORMAL_DIFFUSE_ALPHA` (mapinfo
+     *  `resources.splatDetailNormalDiffuseAlpha`). Only meaningful on the
+     *  splat-normal branch, where it says the blended detail normals' alpha
+     *  channel carries the ground's near-field albedo detail. */
+    splatDetailNormalDiffuseAlpha: boolean;
 }
 
 export interface MapWaterInfo {
@@ -207,6 +212,7 @@ export async function fetchMapDataHttp(mapId: string): Promise<ParsedMapData> {
             md.splatMults?.[2] ?? 1.0,
             md.splatMults?.[3] ?? 1.0,
         ],
+        splatDetailNormalDiffuseAlpha: !!md.splatDetailNormalDiffuseAlpha,
     };
 
     const mw = meta.water ?? {};
@@ -366,6 +372,8 @@ export function parseMapData(fb: FbMapData): ParsedMapData {
             fbDecals?.splatMults(2) ?? 1.0,
             fbDecals?.splatMults(3) ?? 1.0,
         ],
+        splatDetailNormalDiffuseAlpha:
+            fbDecals?.splatDetailNormalDiffuseAlpha() ?? false,
     };
 
     const mapx = fb.mapx();

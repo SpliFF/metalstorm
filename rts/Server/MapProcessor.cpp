@@ -294,6 +294,31 @@ bool MapProcessor::ReadMapInfo(const std::string& mapDir, MapMetadata& meta) {
                     // Some maps typo "platDetailNormalTex3" (seen in pools_of_ilys)
                     if (meta.decals.splatDetailNormalTex[2].empty())
                         meta.decals.splatDetailNormalTex[2] = getTex("platdetailnormaltex3", "platDetailNormalTex3");
+
+                    // SMF_DETAIL_NORMAL_DIFFUSE_ALPHA. Recoil accepts two
+                    // authoring forms (CMapInfo::ReadSMF): the sub-table
+                    // `splatDetailNormalTex = { alpha = true, [1] = ... }`
+                    // wins where it exists, otherwise the flat
+                    // `splatDetailNormalDiffuseAlpha` key beside the
+                    // `splatDetailNormalTexN` entries. Only the flat form is
+                    // used by any map here, but read both so the precedence
+                    // matches. Lua `1`/`true` both count.
+                    lua_getfield(L, -1, "splatdetailnormaltex");
+                    if (!lua_istable(L, -1)) { lua_pop(L, 1); lua_getfield(L, -1, "splatDetailNormalTex"); }
+                    if (lua_istable(L, -1)) {
+                        lua_getfield(L, -1, "alpha");
+                        meta.decals.splatDetailNormalDiffuseAlpha =
+                            lua_isnumber(L, -1) ? lua_tonumber(L, -1) != 0 : lua_toboolean(L, -1) != 0;
+                        lua_pop(L, 1);
+                        lua_pop(L, 1);
+                    } else {
+                        lua_pop(L, 1);
+                        lua_getfield(L, -1, "splatdetailnormaldiffusealpha");
+                        if (lua_isnil(L, -1)) { lua_pop(L, 1); lua_getfield(L, -1, "splatDetailNormalDiffuseAlpha"); }
+                        meta.decals.splatDetailNormalDiffuseAlpha =
+                            lua_isnumber(L, -1) ? lua_tonumber(L, -1) != 0 : lua_toboolean(L, -1) != 0;
+                        lua_pop(L, 1);
+                    }
                 }
                 lua_pop(L, 1); // pop resources
 

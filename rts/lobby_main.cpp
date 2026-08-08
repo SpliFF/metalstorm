@@ -1430,6 +1430,8 @@ int main(int argc, char *argv[]) {
                   m.decals.splatMults[2],
                   m.decals.splatMults[3],
               };
+              dj["splatDetailNormalDiffuseAlpha"] =
+                  m.decals.splatDetailNormalDiffuseAlpha;
               j["decals"] = std::move(dj);
             }
 

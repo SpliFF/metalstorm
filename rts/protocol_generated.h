@@ -15027,6 +15027,7 @@ struct MapDecalsT : public ::flatbuffers::NativeTable {
   std::string detail_normal_tex{};
   std::vector<float> splat_scales{};
   std::vector<float> splat_mults{};
+  bool splat_detail_normal_diffuse_alpha = false;
 };
 
 /// Splat/decal texture set — Spring's terrain detail texturing system.
@@ -15046,7 +15047,8 @@ struct MapDecals FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_SPLAT_NORMAL_3 = 18,
     VT_DETAIL_NORMAL_TEX = 20,
     VT_SPLAT_SCALES = 22,
-    VT_SPLAT_MULTS = 24
+    VT_SPLAT_MULTS = 24,
+    VT_SPLAT_DETAIL_NORMAL_DIFFUSE_ALPHA = 26
   };
   const ::flatbuffers::String *detail_tex() const {
     return GetPointer<const ::flatbuffers::String *>(VT_DETAIL_TEX);
@@ -15081,6 +15083,9 @@ struct MapDecals FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const ::flatbuffers::Vector<float> *splat_mults() const {
     return GetPointer<const ::flatbuffers::Vector<float> *>(VT_SPLAT_MULTS);
   }
+  bool splat_detail_normal_diffuse_alpha() const {
+    return GetField<uint8_t>(VT_SPLAT_DETAIL_NORMAL_DIFFUSE_ALPHA, 0) != 0;
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyOffset(verifier, VT_DETAIL_TEX) &&
@@ -15105,6 +15110,7 @@ struct MapDecals FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyVector(splat_scales()) &&
            VerifyOffset(verifier, VT_SPLAT_MULTS) &&
            verifier.VerifyVector(splat_mults()) &&
+           VerifyField<uint8_t>(verifier, VT_SPLAT_DETAIL_NORMAL_DIFFUSE_ALPHA, 1) &&
            verifier.EndTable();
   }
   MapDecalsT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -15149,6 +15155,9 @@ struct MapDecalsBuilder {
   void add_splat_mults(::flatbuffers::Offset<::flatbuffers::Vector<float>> splat_mults) {
     fbb_.AddOffset(MapDecals::VT_SPLAT_MULTS, splat_mults);
   }
+  void add_splat_detail_normal_diffuse_alpha(bool splat_detail_normal_diffuse_alpha) {
+    fbb_.AddElement<uint8_t>(MapDecals::VT_SPLAT_DETAIL_NORMAL_DIFFUSE_ALPHA, static_cast<uint8_t>(splat_detail_normal_diffuse_alpha), 0);
+  }
   explicit MapDecalsBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -15172,7 +15181,8 @@ inline ::flatbuffers::Offset<MapDecals> CreateMapDecals(
     ::flatbuffers::Offset<::flatbuffers::String> splat_normal_3 = 0,
     ::flatbuffers::Offset<::flatbuffers::String> detail_normal_tex = 0,
     ::flatbuffers::Offset<::flatbuffers::Vector<float>> splat_scales = 0,
-    ::flatbuffers::Offset<::flatbuffers::Vector<float>> splat_mults = 0) {
+    ::flatbuffers::Offset<::flatbuffers::Vector<float>> splat_mults = 0,
+    bool splat_detail_normal_diffuse_alpha = false) {
   MapDecalsBuilder builder_(_fbb);
   builder_.add_splat_mults(splat_mults);
   builder_.add_splat_scales(splat_scales);
@@ -15185,6 +15195,7 @@ inline ::flatbuffers::Offset<MapDecals> CreateMapDecals(
   builder_.add_splat_detail_tex(splat_detail_tex);
   builder_.add_specular_tex(specular_tex);
   builder_.add_detail_tex(detail_tex);
+  builder_.add_splat_detail_normal_diffuse_alpha(splat_detail_normal_diffuse_alpha);
   return builder_.Finish();
 }
 
@@ -15200,7 +15211,8 @@ inline ::flatbuffers::Offset<MapDecals> CreateMapDecalsDirect(
     const char *splat_normal_3 = nullptr,
     const char *detail_normal_tex = nullptr,
     const std::vector<float> *splat_scales = nullptr,
-    const std::vector<float> *splat_mults = nullptr) {
+    const std::vector<float> *splat_mults = nullptr,
+    bool splat_detail_normal_diffuse_alpha = false) {
   auto detail_tex__ = detail_tex ? _fbb.CreateString(detail_tex) : 0;
   auto specular_tex__ = specular_tex ? _fbb.CreateString(specular_tex) : 0;
   auto splat_detail_tex__ = splat_detail_tex ? _fbb.CreateString(splat_detail_tex) : 0;
@@ -15224,7 +15236,8 @@ inline ::flatbuffers::Offset<MapDecals> CreateMapDecalsDirect(
       splat_normal_3__,
       detail_normal_tex__,
       splat_scales__,
-      splat_mults__);
+      splat_mults__,
+      splat_detail_normal_diffuse_alpha);
 }
 
 ::flatbuffers::Offset<MapDecals> CreateMapDecals(::flatbuffers::FlatBufferBuilder &_fbb, const MapDecalsT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
@@ -23851,6 +23864,7 @@ inline void MapDecals::UnPackTo(MapDecalsT *_o, const ::flatbuffers::resolver_fu
   { auto _e = detail_normal_tex(); if (_e) _o->detail_normal_tex = _e->str(); }
   { auto _e = splat_scales(); if (_e) { _o->splat_scales.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->splat_scales[_i] = _e->Get(_i); } } else { _o->splat_scales.resize(0); } }
   { auto _e = splat_mults(); if (_e) { _o->splat_mults.resize(_e->size()); for (::flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->splat_mults[_i] = _e->Get(_i); } } else { _o->splat_mults.resize(0); } }
+  { auto _e = splat_detail_normal_diffuse_alpha(); _o->splat_detail_normal_diffuse_alpha = _e; }
 }
 
 inline ::flatbuffers::Offset<MapDecals> MapDecals::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const MapDecalsT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
@@ -23872,6 +23886,7 @@ inline ::flatbuffers::Offset<MapDecals> CreateMapDecals(::flatbuffers::FlatBuffe
   auto _detail_normal_tex = _o->detail_normal_tex.empty() ? 0 : _fbb.CreateString(_o->detail_normal_tex);
   auto _splat_scales = _o->splat_scales.size() ? _fbb.CreateVector(_o->splat_scales) : 0;
   auto _splat_mults = _o->splat_mults.size() ? _fbb.CreateVector(_o->splat_mults) : 0;
+  auto _splat_detail_normal_diffuse_alpha = _o->splat_detail_normal_diffuse_alpha;
   return SpringWeb::CreateMapDecals(
       _fbb,
       _detail_tex,
@@ -23884,7 +23899,8 @@ inline ::flatbuffers::Offset<MapDecals> CreateMapDecals(::flatbuffers::FlatBuffe
       _splat_normal_3,
       _detail_normal_tex,
       _splat_scales,
-      _splat_mults);
+      _splat_mults,
+      _splat_detail_normal_diffuse_alpha);
 }
 
 inline MapDataT::MapDataT(const MapDataT &o)
