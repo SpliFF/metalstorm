@@ -338,12 +338,17 @@ def steady_state_relief_from_dem(
     return hyd.path_sum_multi(w, order, step).reshape(dem.shape)
 
 
+#: The statistic every aim in this module is taken at. Read the achieved
+#: relief at the SAME quantile — see `relief_reading`.
+AIM_QUANTILE = 0.999
+
+
 def scale_uplift_for_relief(
     dem: np.ndarray,
     uplift: np.ndarray,
     k_erode: np.ndarray | float,
     target_relief: float,
-    quantile: float = 0.999,
+    quantile: float = AIM_QUANTILE,
     router: str = "d8",
     mfd_p: float = 1.1,
 ) -> float:
@@ -355,13 +360,69 @@ def scale_uplift_for_relief(
     author said. Aims at a quantile of `Psi` rather than its max for the
     same reason `relief_scale` does — the max is one remote headwater cell.
 
+    ⚠ **This aims a quantile, so judge it with `relief_reading`, not with
+    `h.max()`.** The gap between the two is a landscape property, not an aim
+    error: `max / q(0.999)` ran **1.24-1.37 on every full-res surface this
+    generator has cached**, the shipped `mounds` map (1.249) included. Read
+    off the max, a perfectly aimed arc arm reports "+27 % over target"
+    (PLAN-maps M8u).
+
     First-order, like `uplift_for_relief`: `Psi` is measured on the terrain
-    in hand and the drainage reorganises as the solver runs. On the island
-    arc that costs ~10 %, against the 2.4x the scalar form costs there.
+    in hand and the drainage reorganises as the solver runs, so what stands
+    is not what was asked for. On the un-segmented island arc that lands
+    within 0.5 %; **on the segmented one it is +28 %, and no first-order
+    ratio fixes both** (M8u measured four candidates; the one that aims
+    either arm exactly misses the other by 11-28 %, because the residual is
+    set by how the drainage reorganises and a five-island belt reorganises
+    differently from a continuous one). What closes it is iteration, not a
+    better estimator — `archipelago.generate(aim_iterations=2)`.
     """
     psi = steady_state_relief_from_dem(dem, uplift, k_erode, router=router,
                                        mfd_p=mfd_p)
     return float(target_relief) / max(float(np.quantile(psi, quantile)), 1e-9)
+
+
+class ReliefReading(NamedTuple):
+    """What an aimed surface actually stands. See `relief_reading`."""
+    aimed: float
+    stood: float
+    summit: float
+    residual: float
+    quantile: float
+
+
+def relief_reading(
+    dem: np.ndarray,
+    target_relief: float,
+    quantile: float = AIM_QUANTILE,
+    base: float = 0.0,
+) -> ReliefReading:
+    """Did the aim land? The achieved reading at the aim's OWN statistic.
+
+    `scale_uplift_for_relief` puts a *quantile* of the steady-state relief on
+    the target, so the honest acceptance reading is the same quantile of the
+    finished surface — `stood` — and `residual` is `stood/aimed - 1`.
+    `summit`, the single highest cell, is reported alongside because it is
+    the number an author naturally quotes and it is **not** the aimed one.
+
+    ⚠ This function exists because the lane spent M8p-M8t quoting `summit`
+    against a quantile aim and reading the difference as aim error. On the
+    full-res island arc: un-segmented stood 953.8 against a 950 target
+    (+0.4 %) while its summit stood 1 206 (+27 %); segmented stood 1 218
+    (+28 %) with a summit at 1 570 (+65 %). Only the second pair contains an
+    aim error at all (PLAN-maps M8u).
+
+    `base` is the elevation the relief is measured from — 0 for a map whose
+    sea level has already been re-based, and `dem.min()` reproduces the
+    `max-min` reading, which additionally carries the bathymetry.
+    """
+    h = np.asarray(dem, dtype=np.float64)
+    stood = float(np.quantile(h, quantile)) - base
+    aimed = float(target_relief)
+    return ReliefReading(aimed=aimed, stood=stood,
+                         summit=float(h.max()) - base,
+                         residual=stood / max(aimed, 1e-9) - 1.0,
+                         quantile=quantile)
 
 
 def uplift_for_relief(

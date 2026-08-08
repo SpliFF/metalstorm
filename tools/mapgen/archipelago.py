@@ -94,6 +94,17 @@ HARD_REV = 1
 ARC_SEGMENTATION = 1.0
 SEG_REV = 1
 
+# Passes of the closed-loop relief aim (`generate`'s `aim_iterations`).
+# `scale_uplift_for_relief` is first-order — it measures the steady-state
+# relief of the drainage the *platform* has, and the solver then builds a
+# different one — so what stands is not what was asked for: +0.4 % on the
+# un-segmented arc but +28 % on the segmented one, and M8u measured four
+# first-order estimators that each aim one arm and miss the other. A second
+# pass with the uplift scaled by target/stood closes it, and pass 0 is
+# cache-addressable at the pre-M8u key, so the loop costs one extra pass.
+# 1 restores the M8t surface bit-for-bit.
+ARC_AIM_ITERATIONS = 2
+
 
 # ---------------------------------------------------------------------------
 # Island skeleton
@@ -427,7 +438,7 @@ def synth_height(seed: int, landmass: float, islands: int,
 def erosion_cache_path(terrain: str, router: str, seed: int, landmass: float,
                        islands: int, relief_target: float, arc_detail: float,
                        fast: bool, hardness_detail: float = 0.0,
-                       segmentation: float = 0.0) -> str:
+                       segmentation: float = 0.0, aim_pass: int = 0) -> str:
     """Where a converged surface is cached — and the key IS the contract.
 
     Every input the solver saw has to appear here or a later run silently
@@ -441,15 +452,22 @@ def erosion_cache_path(terrain: str, router: str, seed: int, landmass: float,
     its mid-scale term, or before `arc_uplift` grew its segment breaks, stays
     addressable at its own key — which is what makes an A/B against an older
     arm free rather than a 450-second re-run.
+
+    `aim_pass` keys the closed-loop aim's passes (`generate`'s
+    `aim_iterations`). Pass 0 takes no suffix, so it is the same key every
+    arm converged at before M8u and **the first pass of a two-pass run is
+    free on any machine that has one** — which is the whole reason the loop
+    costs one extra pass rather than two.
     """
     arc_key = f"_a{arc_detail}v{ARC_REV}" if terrain == "arc" else ""
     k_key = f"_k{hardness_detail}v{HARD_REV}" if hardness_detail > 0.0 else ""
     s_key = (f"_g{segmentation}v{SEG_REV}"
              if terrain == "arc" and segmentation > 0.0 else "")
+    i_key = f"_i{aim_pass}" if aim_pass > 0 else ""
     return os.path.join(
         os.environ.get("TMPDIR", "/tmp"),
         f"archipelago_eroded_r{SYNTH_REV}_{terrain}_{router}_{seed}_{landmass}_"
-        f"{islands}_{relief_target}{arc_key}{k_key}{s_key}_"
+        f"{islands}_{relief_target}{arc_key}{k_key}{s_key}{i_key}_"
         f"{'fast' if fast else 'full'}.npy")
 
 
@@ -461,7 +479,8 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
              router: str = "auto", relief_target: float = 950.0,
              arc_detail: float = ARC_DETAIL_DEFAULT,
              hardness_detail: "float | None" = None,
-             segmentation: "float | None" = None):
+             segmentation: "float | None" = None,
+             aim_iterations: "int | None" = None):
     t0 = time.time()
     cell = 32.0 if fast else 8.0
     S = int(MAP_SIZE / cell) + 1
@@ -478,6 +497,10 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     # segmentation is meaningless off the arc — there is no belt to break
     if segmentation is None:
         segmentation = ARC_SEGMENTATION if terrain == "arc" else 0.0
+    # only the arc is aimed at all; `mounds` draws its heights directly
+    if aim_iterations is None:
+        aim_iterations = ARC_AIM_ITERATIONS if terrain == "arc" else 1
+    aim_iterations = max(1, int(aim_iterations))
     print(f"grid {S}x{S} @ {cell} elmos/cell  "
           f"(seed={seed} landmass={landmass} islands={islands} "
           f"climate={climate} terrain={terrain} router={router}"
@@ -516,9 +539,12 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     print(f"synth done {time.time()-t0:.0f}s relief {h.min():.0f}..{h.max():.0f}")
 
     # 2. erosion (cached per parameter set — the cache key IS the contract)
-    cache = erosion_cache_path(terrain, router, seed, landmass, islands,
-                               relief_target, arc_detail, fast,
-                               hardness_detail, segmentation)
+    def _cache(aim_pass=0):
+        return erosion_cache_path(terrain, router, seed, landmass, islands,
+                                  relief_target, arc_detail, fast,
+                                  hardness_detail, segmentation, aim_pass)
+
+    cache = _cache(aim_iterations - 1)
     if os.path.exists(cache):
         h = np.load(cache)
         print(f"erosion loaded from cache {cache}")
@@ -527,17 +553,43 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
         # ~30 iterations only *adds* the field (M8m). Coarse-first makes that
         # affordable, and `match_relief` is what keeps the coarse grid aiming
         # at the fine grid's relief rather than half of it.
-        h = ero.stream_power_erode_multires(
-            h, cellsize=cell, coarse_factor=4,
-            coarse_iterations=(600 if fast else 3000),
-            fine_iterations=(10 if fast else 30),
-            uplift=u, k_erode=hardness, dt=1.4, m_exp=0.5,
-            talus_deg=33.0, thermal_rate=0.35, router=router,
-            progress=lambda i, n_: print(
-                f"  erosion {i}/{n_} ({time.time()-t0:.0f}s)")
-            if i % 200 == 0 else None)
-        np.save(cache, h)
-        print(f"erosion done {time.time()-t0:.0f}s (cached -> {cache})")
+        #
+        # CLOSED-LOOP AIM (M8u): `scale_uplift_for_relief` above is
+        # first-order — it reads the steady-state relief of the drainage the
+        # *platform* has, and this solver then builds a different one. Read
+        # at the aim's own statistic that is worth +0.4 % on the
+        # un-segmented arc and +28 % on the segmented one, and it is not a
+        # bad estimator that a better one replaces: the residual is set by
+        # how the drainage reorganises, so no ratio measured before the
+        # solve runs aims both arms (M8u tested four). So measure what stood
+        # and correct it, which is exact to the linearity of relief in U.
+        platform = h
+        for ap in range(aim_iterations):
+            cache = _cache(ap)
+            if os.path.exists(cache):
+                h = np.load(cache)
+                print(f"erosion loaded from cache {cache}")
+            else:
+                h = ero.stream_power_erode_multires(
+                    platform, cellsize=cell, coarse_factor=4,
+                    coarse_iterations=(600 if fast else 3000),
+                    fine_iterations=(10 if fast else 30),
+                    uplift=u, k_erode=hardness, dt=1.4, m_exp=0.5,
+                    talus_deg=33.0, thermal_rate=0.35, router=router,
+                    progress=lambda i, n_: print(
+                        f"  erosion {i}/{n_} ({time.time()-t0:.0f}s)")
+                    if i % 200 == 0 else None)
+                np.save(cache, h)
+                print(f"erosion done {time.time()-t0:.0f}s (cached -> {cache})")
+            rr = up.relief_reading(h - np.quantile(h, 1.0 - landmass),
+                                   relief_target)
+            print(f"aim pass {ap}: stood {rr.stood:.0f} of {rr.aimed:.0f} "
+                  f"asked ({rr.residual:+.1%}) at q{rr.quantile}, "
+                  f"summit {rr.summit:.0f}")
+            if ap + 1 < aim_iterations:
+                corr = relief_target / max(rr.stood, 1e-9)
+                u = u * corr
+                print(f"  closing the loop: uplift x{corr:.4f}")
     else:
         h = ero.stream_power_erode(
             h, cellsize=cell, iterations=(10 if fast else 26), dt=1.4,
@@ -570,6 +622,15 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     print(f"divides: {_dv.ridges} high-ground pieces, longest span "
           f"{_dv.ridge_span:.0f} elmos ({_dv.ridge_share:.0%} of the high "
           f"ground), relief {h.max()-h.min():.0f}")
+    # ...and the same surface read at the statistic the aim is TAKEN at, so
+    # nobody judges a quantile aim by a summit again: `max-min` above runs
+    # 1.24-1.37x this number on every full-res surface this generator has
+    # written, the shipped mounds map included (PLAN-maps M8u).
+    if terrain == "arc":
+        _rr = up.relief_reading(h, relief_target)
+        print(f"aim: stood {_rr.stood:.0f} of {_rr.aimed:.0f} asked "
+              f"({_rr.residual:+.1%}) at q{_rr.quantile}, "
+              f"summit {_rr.summit:.0f} ({_rr.summit / _rr.stood:.2f}x)")
 
     # 4. preliminary climate for settlement scoring
     def fields(hh):
@@ -948,6 +1009,17 @@ def main():
                          "0 restores the M8s belt, which converges to one "
                          "continuous divide corner to corner (PLAN-maps M8t, "
                          "and `arc_uplift` carries the numbers).")
+    ap.add_argument("--aim-iterations", dest="aim_iterations", type=int,
+                    default=None,
+                    help="--terrain arc only: passes of the closed-loop "
+                         "relief aim. The first-order aim reads the relief "
+                         "of the drainage the PLATFORM has and the solver "
+                         "then builds a different one (+28%% on the "
+                         "segmented arc), so pass 2 scales the uplift by "
+                         "target/stood. Default 2; 1 restores the M8t "
+                         "surface. Pass 0 is cache-addressable at the "
+                         "pre-M8u key, so this costs one extra pass "
+                         "(~430 s at full res). See PLAN-maps M8u.")
     ap.add_argument("--fast", action="store_true",
                     help="513 grid iteration mode — preview/tuning only, "
                          "NOT shippable. ⚠ with --terrain arc it is not even "
@@ -981,6 +1053,8 @@ def main():
             passthrough += ["--hardness-detail", str(args.hardness_detail)]
         if args.segmentation is not None:
             passthrough += ["--arc-segmentation", str(args.segmentation)]
+        if args.aim_iterations is not None:
+            passthrough += ["--aim-iterations", str(args.aim_iterations)]
         if args.fast:
             passthrough.append("--fast")
         if args.with_features:
@@ -999,7 +1073,8 @@ def main():
              router=args.router, relief_target=args.relief_target,
              arc_detail=args.arc_detail,
              hardness_detail=args.hardness_detail,
-             segmentation=args.segmentation)
+             segmentation=args.segmentation,
+             aim_iterations=args.aim_iterations)
 
 
 if __name__ == "__main__":

@@ -402,6 +402,20 @@ def stream_power_erode_multires(
     Meridian at 231 elmos of relief against a 750-elmo target. The fix is to
     scale the coarse uplift by `Phi_fine / Phi_coarse`, both measured on the
     input surface's own drainage.
+
+    ⚠ That ratio is a `Phi` ratio, i.e. drainage depth alone, and for a
+    *shaped* uplift the quantity it stands in for is a `Psi` ratio — the
+    same distinction `uplift.steady_state_relief_field` exists for. The two
+    are identical for a uniform `U/K` (the ratio factors straight out of
+    `Psi`), which is the case every number above was measured on, and they
+    are not identical on the island arc: `Phi_f/Phi_c` runs **1.12x** the
+    `Psi` ratio on the un-segmented belt and **1.25x** on the segmented one
+    (M8u, full res). Left as `Phi` deliberately — swapping in `Psi` is the
+    derivable-looking change and it measures *worse*, because the ratio the
+    arc actually needs is neither (1.43 and 1.29 against Phi's 1.44/1.65 and
+    Psi's 1.28/1.33): what the coarse grid converges to depends on how its
+    drainage reorganises, which nothing measured on the input surface knows.
+    `archipelago.generate`'s closed-loop aim absorbs the residual instead.
     """
     H, W = dem.shape
     ch = max(9, int(round(H / coarse_factor)))
