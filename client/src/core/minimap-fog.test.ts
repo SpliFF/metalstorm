@@ -15,6 +15,9 @@ import { configureFogMaterial } from './minimap.js';
 // its own, over a fully-explored-or-not map (measured: overlay alone 227.1
 // with 85.5 % of pixels >= 240).
 //
+// (That 26.8 was itself wrong, by a second and unrelated defect in the backdrop
+// material — see minimap-backdrop.test.ts, PLAN-maps M8e. It reads 69.7 now.)
+//
 // The cause was `emissiveColor = (1,1,1)` chosen as a "neutral" multiplicand
 // for a black bitmap. StandardMaterial's emissive texture is ADDITIVE
 // (`emissiveColor += texture(...).rgb`), so (1,1,1) saturates the output white

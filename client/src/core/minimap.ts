@@ -75,6 +75,40 @@ export function configureFogMaterial(mat: StandardMaterial,
     mat.backFaceCulling = false;
 }
 
+/**
+ * Configure the minimap backdrop material — an unlit quad that must render the
+ * baked map thumbnail **exactly** as the asset holds it.
+ *
+ * ⚠ The texture is bound ONCE, as `diffuseTexture`, and the unlit term comes
+ * from a white `emissiveColor`. Binding it as *both* `diffuseTexture` and
+ * `emissiveTexture` (which is what it used to do) squares it, because the
+ * compiled fragment stage multiplies the emissive term by the diffuse base:
+ *
+ *     vec3 emissiveColor = vEmissiveColor;
+ *     emissiveColor += texture(emissiveSampler, vEmissiveUV + uvOffset).rgb * vEmissiveInfos.y;
+ *     vec3 finalDiffuse = clamp(diffuseBase*diffuseColor + emissiveColor + vAmbientColor, 0.0, 1.0)
+ *                       * baseColor.rgb;
+ *
+ * With `disableLighting` there is no `diffuseBase`, so that reduces to
+ * `texel * texel`. Measured live on `scorched_crossing_v2.4` (200² capture,
+ * fog hidden): **26.76 mean luminance against the asset's 69.94**, bracketed
+ * twice — and x² is close enough in shape to an sRGB decode (x^2.2) that it
+ * was first written up as a missing gamma encode. It is not a colour-space
+ * bug; nothing in this scene converts spaces, and a solid `emissiveColor` of
+ * 0.5 renders as exactly 128. With the texture bound once: **69.74**.
+ *
+ * The same reduction is why every other material in this scene (blips, pings,
+ * metal spots, the selection ring) renders its authored `emissiveColor`
+ * literally: with no `diffuseTexture`, `baseColor.rgb` is (1,1,1).
+ */
+export function configureBackdropMaterial(mat: StandardMaterial,
+                                          backdrop: BaseTexture): void {
+    mat.diffuseTexture = backdrop;
+    mat.emissiveTexture = null;
+    mat.emissiveColor = new Color3(1, 1, 1);
+    mat.disableLighting = true;
+}
+
 /** Summary of one captured minimap frame — see `captureFrameStats`. */
 export interface MinimapFrameStats {
     width: number;
@@ -341,9 +375,7 @@ export class Minimap {
             this.backdropUrl = `${mapBaseUrl}/minimap.ktx2`;
             const tex = new Texture(this.backdropUrl, this.scene);
             const mat = new StandardMaterial('minimapMat', this.scene);
-            mat.diffuseTexture = tex;
-            mat.emissiveTexture = tex;
-            mat.disableLighting = true;
+            configureBackdropMaterial(mat, tex);
             quad.material = mat;
 
             this.terrainQuad = quad;
