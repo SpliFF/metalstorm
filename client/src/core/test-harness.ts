@@ -21,6 +21,8 @@
  * and torn down by `quitToLobby()`.
  */
 
+import type { MinimapFrameStats } from './minimap.js';
+
 /** A minimal subset of the lobby UI needed for `/api/exec` requests. */
 export interface TestLobbyHandle {
     lobbyPost(path: string, body?: Record<string, unknown>): Promise<unknown>;
@@ -42,6 +44,16 @@ export interface TestHarnessDeps {
     getSelection: () => readonly number[];
     /** Latest camera pose from the cached `gp:sceneState` feed (sync). */
     getCameraPose: () => CamPose | null;
+    /** The live main-thread `Minimap`, or null when no game session owns one.
+     *  The minimap is the one rendered surface outside the worker, so it needs
+     *  its own capture route — see `minimapScreenshot`. */
+    getMinimap: () => MinimapCaptureSource | null;
+}
+
+/** The slice of `Minimap` the harness captures through. */
+export interface MinimapCaptureSource {
+    captureFrame(): string;
+    captureFrameStats(): MinimapFrameStats;
 }
 
 export interface ExecResult {
@@ -647,6 +659,26 @@ export class TestHarness {
     async highResScreenshot(width = 1920, height = 1080): Promise<string> {
         void width; void height;
         return this.screenshot();
+    }
+
+    /** Capture the **minimap** as a PNG data-URL. A third capture route,
+     *  distinct from both `screenshot()` (worker canvas) and CDP
+     *  `take_screenshot` (cannot read a WebGL2 canvas): the minimap owns its
+     *  own main-thread Engine + canvas, so nothing else reaches it.
+     *  Synchronous under the hood — see `Minimap.captureFrame`. */
+    minimapScreenshot(): string {
+        const mm = this.deps.getMinimap();
+        if (!mm) throw new Error('[test] no minimap — not in a game session?');
+        return mm.captureFrame();
+    }
+
+    /** Summary statistics for one minimap frame, without the base64 payload.
+     *  Prefer this for assertions and A/Bs; `transparentFraction` near 1.0
+     *  means the capture failed and no other field is meaningful. */
+    minimapStats(): MinimapFrameStats {
+        const mm = this.deps.getMinimap();
+        if (!mm) throw new Error('[test] no minimap — not in a game session?');
+        return mm.captureFrameStats();
     }
 
     // ─── Selection helpers ──────────────────────────────────────────

@@ -23,6 +23,7 @@ import {
     Quaternion,
 } from '@babylonjs/core';
 import { Texture } from '@babylonjs/core';
+import type { BaseTexture } from '@babylonjs/core/Materials/Textures/baseTexture';
 import { DynamicTexture } from '@babylonjs/core/Materials/Textures/dynamicTexture';
 import { EntityRenderer, type EntityMeta } from './entity-renderer.js';
 import type { LosBitmap } from './los-bitmap.js';
@@ -38,6 +39,59 @@ const TEAM_COLORS: [number, number, number][] = [
     [0.27, 0.80, 0.27], // green
     [1.0, 0.80, 0.13],  // yellow
 ];
+
+/**
+ * Configure the fog-of-war overlay material.
+ *
+ * The overlay is a flat BLACK tint whose only per-texel variable is alpha, so
+ * every colour input must be zero and the LOS bitmap enters solely through
+ * `opacityTexture`.
+ *
+ * ⚠ `emissiveColor` used to be (1,1,1) here, and it painted the whole minimap
+ * white (PLAN-endtoend D48, minimap half). It reads like a neutral
+ * multiplicand, but StandardMaterial's emissive texture is **additive**, not
+ * multiplicative — the compiled fragment stage is:
+ *
+ *     vec3 emissiveColor = vEmissiveColor;
+ *     emissiveColor += texture(emissiveSampler, vEmissiveUV + uvOffset).rgb * vEmissiveInfos.y;
+ *
+ * so (1,1,1) is not neutral, it saturates the output white whatever the
+ * texture holds — measured live, an all-0 RGB, an all-255 RGB and a pure-red
+ * bitmap every one rendered 255. Binding the bitmap as `emissiveTexture` at
+ * all was pointless for the same reason: its RGB is a constant 0, which adds
+ * nothing. It is left unbound so the overlay's colour cannot depend on that
+ * contract at all, under either an additive or a multiplicative reading.
+ */
+export function configureFogMaterial(mat: StandardMaterial,
+                                     fogTexture: BaseTexture): void {
+    mat.diffuseColor = new Color3(0, 0, 0);
+    mat.emissiveColor = new Color3(0, 0, 0);
+    mat.emissiveTexture = null;
+    mat.disableLighting = true;
+    mat.useAlphaFromDiffuseTexture = false;
+    // Also what keeps `needAlphaBlending()` true — with no opacity texture the
+    // quad would draw opaque and hide the map instead of tinting it.
+    mat.opacityTexture = fogTexture;
+    mat.backFaceCulling = false;
+}
+
+/** Summary of one captured minimap frame — see `captureFrameStats`. */
+export interface MinimapFrameStats {
+    width: number;
+    height: number;
+    /** Rec.709 luminance, 0–255, averaged over every pixel. */
+    meanLuminance: number;
+    meanAlpha: number;
+    /** Fraction of fully transparent pixels. 1.0 ⇒ the capture missed its
+     *  window and nothing else in this record means anything. */
+    transparentFraction: number;
+    whiteFraction: number;
+    darkFraction: number;
+    /** Whether the backdrop quad exists AND its texture finished loading —
+     *  distinguishes "drew the wrong colour" from "drew no backdrop". */
+    backdropLoaded: boolean;
+    backdropUrl: string | null;
+}
 
 export interface MinimapConfig {
     /** Map width in elmos. */
@@ -145,6 +199,8 @@ export class Minimap {
     // samples it with bilinear filtering across the minimap quad, so
     // the edge of the fog looks smooth rather than chunky despite the
     // low-resolution source. Allocated lazily on the first bitmap.
+    /** URL the backdrop texture was last requested from (capture diagnostics). */
+    private backdropUrl: string | null = null;
     private fogQuad: Mesh | null = null;
     private fogTexture: DynamicTexture | null = null;
     private fogBitmapSize: { w: number; h: number } = { w: 0, h: 0 };
@@ -282,7 +338,8 @@ export class Minimap {
             quad.position.x = this.mapWidth / 2;
             quad.position.z = this.mapHeight / 2;
 
-            const tex = new Texture(`${mapBaseUrl}/minimap.ktx2`, this.scene);
+            this.backdropUrl = `${mapBaseUrl}/minimap.ktx2`;
+            const tex = new Texture(this.backdropUrl, this.scene);
             const mat = new StandardMaterial('minimapMat', this.scene);
             mat.diffuseTexture = tex;
             mat.emissiveTexture = tex;
@@ -538,19 +595,12 @@ export class Minimap {
                 quad.position.y = 2;
                 quad.isPickable = false;
                 const mat = new StandardMaterial('minimapFogMat', this.scene);
-                mat.emissiveTexture = this.fogTexture;
-                mat.diffuseColor = new Color3(0, 0, 0);
-                mat.emissiveColor = new Color3(1, 1, 1);
-                mat.disableLighting = true;
-                mat.useAlphaFromDiffuseTexture = false;
-                mat.opacityTexture = this.fogTexture;
-                mat.backFaceCulling = false;
+                configureFogMaterial(mat, this.fogTexture);
                 quad.material = mat;
                 this.fogQuad = quad;
             } else {
-                const mat = this.fogQuad.material as StandardMaterial;
-                mat.emissiveTexture = this.fogTexture;
-                mat.opacityTexture = this.fogTexture;
+                configureFogMaterial(this.fogQuad.material as StandardMaterial,
+                                     this.fogTexture);
             }
         }
 
@@ -652,6 +702,70 @@ export class Minimap {
         this.updateEntityInstances();
         this.updateEventsLayer();
         this.scene.render();
+    }
+
+    // ─── Capture (verification harness) ──────────────────────────────
+    //
+    // The minimap is a main-thread canvas, so neither of the project's two
+    // existing capture routes reaches it: CDP `take_screenshot` cannot read
+    // a WebGL2 canvas at all, and the `__gp` / `window.test.screenshot()`
+    // trick reads the *worker's* OffscreenCanvas. Reading this one needs a
+    // third route, and the reason it defeated the first attempt is the
+    // engine's `preserveDrawingBuffer: false` (line ~208): the drawing
+    // buffer is only defined until the end of the task that drew it, and a
+    // `toDataURL` from any later turn of the event loop hands back a fully
+    // transparent image — every sample alpha 0, which reads exactly like a
+    // canvas that was never drawn to.
+    //
+    // Both capture entry points therefore render and read back-to-back in
+    // ONE synchronous block, which is the documented-safe window. Do not
+    // split them across an `await`.
+
+    /** Render one frame and read it back as a PNG data-URL. */
+    captureFrame(): string {
+        this.render();
+        return this.canvas.toDataURL('image/png');
+    }
+
+    /**
+     * Render one frame and reduce it to summary statistics, without
+     * shipping a megabyte of base64 over the debug channel.
+     *
+     * `transparentFraction` is the tell for a capture that missed its
+     * window (it reads 1.0); on a real frame the minimap is opaque, so
+     * anything above ~0 means the numbers below it are meaningless.
+     */
+    captureFrameStats(): MinimapFrameStats {
+        this.render();
+        const w = this.canvas.width, h = this.canvas.height;
+        const scratch = document.createElement('canvas');
+        scratch.width = w; scratch.height = h;
+        const ctx = scratch.getContext('2d', { willReadFrequently: true })!;
+        ctx.drawImage(this.canvas, 0, 0);
+        const px = ctx.getImageData(0, 0, w, h).data;
+
+        let lumSum = 0, alphaSum = 0, clear = 0, white = 0, dark = 0;
+        const n = w * h;
+        for (let i = 0; i < px.length; i += 4) {
+            const a = px[i + 3];
+            const lum = 0.2126 * px[i] + 0.7152 * px[i + 1] + 0.0722 * px[i + 2];
+            lumSum += lum; alphaSum += a;
+            if (a === 0) clear++;
+            if (lum >= 240) white++;
+            if (lum <= 8) dark++;
+        }
+        return {
+            width: w, height: h,
+            meanLuminance: lumSum / n,
+            meanAlpha: alphaSum / n,
+            transparentFraction: clear / n,
+            whiteFraction: white / n,
+            darkFraction: dark / n,
+            backdropLoaded: this.terrainQuad !== null
+                && (this.terrainQuad.material as StandardMaterial | null)
+                    ?.diffuseTexture?.isReady() === true,
+            backdropUrl: this.backdropUrl,
+        };
     }
 
     private ensurePingMesh(kind: MinimapPingKind): Mesh {

@@ -1564,6 +1564,9 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
             if (!c) return null;
             return { pos: { x: c.x, y: c.y, z: c.z }, lookAt: { x: c.tx, y: c.ty, z: c.tz } };
         },
+        // Read through the module-level binding, not a captured value: the
+        // minimap is disposed and rebuilt on every startGame()/quitToLobby().
+        getMinimap: () => minimap,
     });
     (window as any).test = testHarness;
 
