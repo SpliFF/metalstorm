@@ -515,6 +515,22 @@ data/
   games/<gameId>/sounds/    Preprocessed: *.webm (Opus, audioconverter output)
 ```
 
+**Everything under `data/` is a derived artifact and gitignored** — the only
+tracked binary content is `content/maps/*/` (source `.smf`/`.smt`) and
+`data/games/metalstorm/models/` (forge output, first-party). Regenerating
+`data/` therefore moves no tracked bytes: `mapconverter --force --all
+content/maps` and `gameconverter --force <game-dir>` are safe to re-run.
+
+**KTX2 orientation metadata.** Every `.ktx2` `textureconverter` writes carries
+`KTXorientation` = `rd` (`rts/System/FileSystem/Ktx2Orientation.h`) — the bare
+per-dimension letters of KTX2 §3.11.4, *not* libktx's KTX1 `KTX_ORIENTATION2_FMT`
+spelling `S=r,T=d`. The KTX1 form compiles and renders fine — neither Babylon's
+KTX2 loader nor `basisu` reads the key — but it makes the file invalid, and the
+Khronos `ktx` CLI (`validate` / `info` / `extract`) then refuses to open our own
+assets, which costs asset investigations their standard tool. `data/games/{bar,zk}/models/`
+still carries the old value; those are archived third-party games and closing
+them needs a full `gameconverter --force` model re-import (PLAN-maps M8f).
+
 ## HTTP Routes
 
 > **Handler gotcha:** `NetworkServer` strips query strings before matching/handing

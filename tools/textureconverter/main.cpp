@@ -32,6 +32,7 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
+#include "System/FileSystem/Ktx2Orientation.h"
 #include "System/SpringLog/SpringLog.h"
 
 #include <ktx.h>
@@ -110,14 +111,29 @@ enum class ChannelOp { None, Diffuse, Team, Emissive, Orm };
 /// (assume `rd` if absent) which happens to be the right answer for us
 /// today; the explicit stamp pins the assumption so a future loader
 /// that flips the default can't silently mirror every model texture.
+///
+/// The value is the bare per-dimension letters (`rd`), NOT libktx's
+/// KTX**1** `KTX_ORIENTATION2_FMT` spelling `S=r,T=d`. KTX2 §3.11.4
+/// requires `/^[rl][du]$/` for a 2D texture, so the KTX1 form makes the
+/// file invalid: `ktx validate` rejects it with error-7108/7109 and
+/// `ktx info`/`ktx extract` refuse to open it. Nothing renders wrong —
+/// neither Babylon's KTX2 loader nor basisu reads the key at all — but
+/// it costs every future investigation the standard tooling, which is
+/// exactly what happened in PLAN-maps M8e (the minimap decode had to go
+/// through `basisu -unpack`). Cross-check: the forge encoder writes
+/// `rd` here, and its output validates clean.
+///
+/// The value and its grammar live in `Ktx2Orientation.h` so the
+/// doctest suite (which does not link libktx) can guard the spelling.
 static void StampOrientationRd(ktxTexture2* tex) {
     if (!tex) return;
-    static constexpr char kOrientationValue[] = "S=r,T=d";
+    static_assert(ktx2::IsValidOrientation(ktx2::kOrientation2D, 2),
+                  "KTXorientation value must match the KTX2 2D grammar");
     ktxHashList_AddKVPair(
         &tex->kvDataHead,
         KTX_ORIENTATION_KEY,
-        static_cast<unsigned int>(sizeof(kOrientationValue)),
-        kOrientationValue);
+        static_cast<unsigned int>(sizeof(ktx2::kOrientation2D)),
+        ktx2::kOrientation2D);
 }
 
 // Forward decl — DDS RGBA fallback re-uses the encoder path.
