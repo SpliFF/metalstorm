@@ -31,6 +31,7 @@ import GameWorker from './core/lua-widget-worker.ts?worker';
 import type { GpInitToWorker, GpMinimapMetalSpots, GpTimingState } from './core/game-worker-protocol.js';
 import { DetachSessionManager, DEFAULT_PARK_TTL_MS } from './core/detach-session.js';
 import { fetchMapDataHttp, type ParsedMapData } from './core/map-data.js';
+import { parseDirectManifest } from './core/direct-manifest.js';
 import { loadMapLighting, type MapLighting } from './core/map-lighting.js';
 import { applyMapLighting, createSceneLighting, type SceneLighting } from './core/scene-lighting.js';
 import { PerfOverlay } from './core/perf-overlay.js';
@@ -1630,7 +1631,10 @@ async function bootDirect(manifestUrl: string, lobby: LobbyUI): Promise<void> {
     const manifestResp = await fetch(manifestUrl);
     if (!manifestResp.ok)
         throw new Error(`?direct: failed to fetch manifest '${manifestUrl}': HTTP ${manifestResp.status}`);
-    const manifest = await manifestResp.json();
+    // Not `.json()`: a manifest missing from client/public/ comes back as the
+    // SPA fallback's index.html at HTTP 200, and the bare parse error names
+    // neither the file nor the cause. See direct-manifest.ts.
+    const manifest = parseDirectManifest(manifestUrl, await manifestResp.text()) as any;
 
     const roomResp = await fetch(`${CONFIG.httpUrl}/api/rooms/direct`, {
         method: 'POST',

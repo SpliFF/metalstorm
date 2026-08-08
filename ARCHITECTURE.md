@@ -531,6 +531,16 @@ assets, which costs asset investigations their standard tool. `data/games/{bar,z
 still carries the old value; those are archived third-party games and closing
 them needs a full `gameconverter --force` model re-import (PLAN-maps M8f).
 
+**`?direct=` manifests live in two places.** A direct-boot manifest is authored
+in `manifests/` (the tracked source of truth) and **must also be copied to
+`client/public/`** — that, not `manifests/`, is what the browser fetches. The
+failure is silent-shaped: an uncopied manifest is not a 404, because the static
+server's SPA history fallback answers any unmatched path with `index.html` at
+HTTP 200, so only the JSON parse fails. `parseDirectManifest`
+(`client/src/core/direct-manifest.ts`) detects the HTML body and says which copy
+is missing; `direct-manifest.test.ts` asserts every `manifests/*.json` has a
+byte-identical served copy.
+
 ## HTTP Routes
 
 > **Handler gotcha:** `NetworkServer` strips query strings before matching/handing
