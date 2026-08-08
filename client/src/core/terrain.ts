@@ -994,6 +994,21 @@ export function compositeAtlasLevel(
     return { page, pageW, pageH, placed, skipped };
 }
 
+/** Empty the GL error queue so a following `getError()` can only report a call
+ *  made after this point. WebGL keeps one error per category, so the queue is
+ *  short and bounded; the guard is only there to keep a broken context (which
+ *  returns CONTEXT_LOST_WEBGL forever) from spinning. Returns what it drained,
+ *  so a caller can report pre-existing damage instead of swallowing it. */
+export function drainGlErrors(gl: WebGL2RenderingContext, limit = 16): number[] {
+    const drained: number[] = [];
+    for (let i = 0; i < limit; i++) {
+        const e = gl.getError();
+        if (e === gl.NO_ERROR) break;
+        drained.push(e);
+    }
+    return drained;
+}
+
 function buildAtlasPage(
     gl: WebGL2RenderingContext,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1018,6 +1033,18 @@ function buildAtlasPage(
     // that would bleed unrelated adjacent tiles into each other.
     const numLevels = Math.min(tilesLevels.length, TILE_MIP_TEXELS.length);
     let placed = 0, skipped = 0;
+    // `getError` reports the OLDEST error queued anywhere in this context since
+    // it was last called, so a single check after the loop attributes an
+    // unrelated upstream failure (feature/decal texture work, LuaUI GL) to the
+    // atlas. Drain first, then check per level, so the warning names the call
+    // that actually failed — pools_of_ilys reported a 0x501 here that survived
+    // an exact-dimension replay of all four uploads (PLAN-maps M8g).
+    const preExisting = drainGlErrors(gl);
+    if (preExisting.length > 0) {
+        console.warn(`[terrain] gl error(s) already queued BEFORE the atlas `
+            + `upload (not caused by it): `
+            + preExisting.map(e => `0x${e.toString(16)}`).join(', '));
+    }
     for (let lvl = 0; lvl < numLevels; lvl++) {
         const r = compositeAtlasLevel(
             dims, tileIndex, tilesLevels[lvl],
@@ -1026,6 +1053,12 @@ function buildAtlasPage(
         gl.compressedTexImage2D(
             gl.TEXTURE_2D, lvl, ext.COMPRESSED_RGB_S3TC_DXT1_EXT,
             r.pageW, r.pageH, 0, r.page);
+        const lvlErr = gl.getError();
+        if (lvlErr !== gl.NO_ERROR) {
+            console.warn(`[terrain] gl error 0x${lvlErr.toString(16)} uploading `
+                + `mip ${lvl} of page @(${tileX0},${tileZ0}): `
+                + `${r.pageW}x${r.pageH}, ${r.page.length} bytes`);
+        }
         if (lvl === 0) { placed = r.placed; skipped = r.skipped; }
     }
 
@@ -1039,7 +1072,8 @@ function buildAtlasPage(
 
     const glErr = gl.getError();
     if (glErr !== gl.NO_ERROR) {
-        console.warn(`[terrain] gl error after page upload: 0x${glErr.toString(16)}`);
+        console.warn(`[terrain] gl error after page sampler state: `
+            + `0x${glErr.toString(16)}`);
     }
     gl.bindTexture(gl.TEXTURE_2D, null);
 

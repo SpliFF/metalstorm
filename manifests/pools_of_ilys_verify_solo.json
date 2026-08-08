@@ -1,0 +1,13 @@
+{
+  "comment": "Map/render verification boot for pools_of_ilys_1.0.0 — the ONLY map in the imported set that exercises the missing-channel splat-normal stand-in (splat_normal_0/1/3 resolve, 2 is absent and gets a neutral mid-grey 1x1, a deliberate commented non-reproduction of Recoil's unbound-sampler-reads-black bug; see PLAN-maps M8c). Two start positions only. No scenario on purpose: this boots the game_start stub force so it stays a pure terrain/minimap check independent of war content. A copy of this file must also live in client/public/ — that, not manifests/, is what ?direct= fetches (M8b finding 4).",
+  "name": "dev:pools-of-ilys-verify-solo",
+  "map": "pools_of_ilys_1.0.0",
+  "game": "metalstorm",
+  "aiSlots": [
+    { "aiId": "null", "team": 1, "startPos": 1 }
+  ],
+  "players": [
+    { "username": "dev-verify", "team": 0, "startPos": 0, "spectator": false }
+  ],
+  "autoStart": true
+}

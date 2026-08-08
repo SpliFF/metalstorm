@@ -7,7 +7,7 @@ import {
     buildTerrainMesh, DeformableTerrain, isTerrainMesh,
     attachTerrainSplatFromDecals, attachTerrainDetailPlainFromDecals,
     attachTerrainSplatNormalFromDecals, attachTerrainDetailFromDecals,
-    applyWebGLTexture, setTerrainDetailPluginEnabled,
+    applyWebGLTexture, setTerrainDetailPluginEnabled, drainGlErrors,
     type AtlasPagePlan, type MapDimensions, type SurfaceGeometry,
 } from './terrain.js';
 import { TerrainSplatPlugin } from './terrain-splat-plugin.js';
@@ -222,6 +222,36 @@ describe('compositeAtlasLevel', () => {
         expect(skipped).toBe(1);
         // Skipped tile's blocks stay zero.
         expect(page.slice(0, 64).every((b) => b === 0)).toBe(true);
+    });
+});
+
+describe('drainGlErrors', () => {
+    /** Minimal stand-in: `getError` pops one queued code per call, then
+     *  reports NO_ERROR, exactly as WebGL does. */
+    const fakeGl = (queued: number[], stuck = false) => {
+        const q = [...queued];
+        return {
+            NO_ERROR: 0,
+            getError: () => (stuck ? 0x9242 : (q.shift() ?? 0)),
+        } as unknown as WebGL2RenderingContext;
+    };
+
+    it('returns an empty list on a clean context', () => {
+        expect(drainGlErrors(fakeGl([]))).toEqual([]);
+    });
+
+    it('drains every queued error and reports them in order', () => {
+        const gl = fakeGl([0x501, 0x502]);
+        expect(drainGlErrors(gl)).toEqual([0x501, 0x502]);
+        // Queue is now empty, so a later check can only see new failures —
+        // this is the whole point of the drain (pools_of_ilys read a 0x501
+        // that predated the atlas upload).
+        expect(drainGlErrors(gl)).toEqual([]);
+    });
+
+    it('gives up after `limit` on a lost context rather than spinning', () => {
+        expect(drainGlErrors(fakeGl([], true), 4))
+            .toEqual([0x9242, 0x9242, 0x9242, 0x9242]);
     });
 });
 
