@@ -6,7 +6,8 @@ this generator is fully parameterized and derives EVERYTHING from its
 inputs — island placement, elevations, start positions, settlements,
 per-island road networks, biomes, vegetation, ruins. Deterministic:
 
-    same (--seed, --landmass, --islands, --terrain, --router, --arc-detail)
+    same (--seed, --landmass, --islands, --terrain, --router, --arc-detail,
+          --hardness-detail)
         =>  byte-identical map
 
 The --landmass fraction is a hard contract, enforced by quantile
@@ -73,6 +74,17 @@ ARC_DETAIL_DEFAULT = 17.0
 # the arc's half of the cache the way SYNTH_REV keys the mounds half.
 # v2: the relief aim is taken on the grain-free platform (M8r).
 ARC_REV = 2
+
+# Substrate erodibility. The coarse field varies at 3400 elmos over 3 octaves,
+# i.e. nothing below 850; HARDNESS_WAVELENGTH/3 octaves puts variation at
+# 800/400/200 elmos, the scale the arc's feathered spurs repeat at.
+# See `substrate_hardness` for why it ships off anyway, and PLAN-maps M8s.
+HARDNESS_WAVELENGTH = 800.0
+HARDNESS_FLOOR = 0.006
+# measured OFF: 0.004/0.008 barely move the band they were built for and
+# make 120-300 worse — see `substrate_hardness` and PLAN-maps M8s.
+ARC_HARDNESS_DETAIL = 0.0
+HARD_REV = 1
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +222,55 @@ def arc_platform(seed: int, landmass: float, u: np.ndarray,
     return h - np.quantile(h, 1.0 - landmass)
 
 
+def substrate_hardness(seed: int, xx: np.ndarray, zz: np.ndarray,
+                       detail: float = 0.0) -> np.ndarray:
+    """The erodibility field `K`: coarse substrate, plus optional mid grain.
+
+    The coarse term is the shipped one — 3400 elmos over 3 octaves, so its
+    finest variation is at 850 elmos. `detail` adds a zero-mean fBm at
+    HARDNESS_WAVELENGTH over 3 octaves (800/400/200), in the same absolute
+    K units, floored at HARDNESS_FLOOR so no cell becomes unerodible.
+
+    ⛔ **`detail` defaults to 0 on every path, because it was measured and
+    it does not do what it was built for** (PLAN-maps M8s). The premise was
+    that the arc's regular feathered spurs are drainage-spacing regularity
+    on a homogeneous substrate, so varying the substrate at the spurs' own
+    scale would break the spacing. Two full 2049^2 arms say otherwise. On
+    `uplift.anisotropy_bands` excess, against the shipped map's 1.06 at
+    300-800: a17 1.62 -> 1.49 (detail 0.004) -> 1.50 (0.008), i.e. the
+    target band barely moves — while **120-300 goes the wrong way**, 1.24 ->
+    1.50 -> 1.74, its lobe swinging onto the arc's own strike, because
+    erodibility contrast at 200-800 elmos organises channels along the
+    contrast bands. Relief also drifts +8 % at 0.008 despite the aim being
+    taken on the coarse field, so even the "free" arm is not free.
+
+    The knob is kept, off, because it is the tested implementation of an
+    idea the lane will otherwise propose again, and this paragraph is the
+    answer. What the same milestone found instead: the 150 deg lobe is
+    largely the *authored landform's* — the un-eroded arc platform reads
+    1.34 excess at 300-800 on the same crop, before any solver runs — and
+    the hillshade's real defect is topological, one continuous smooth
+    divide corner to corner with regular opposing spurs, which is what a
+    converged LEM on a single smooth linear ridge must produce. That is
+    `arc_uplift`'s to fix (segmentation), not this function's.
+
+    ⚠ `detail` must NOT reach the relief aim. `scale_uplift_for_relief` sums
+    `U/(K*sqrt(a))` down a flow path, and `1/K` is convex, so a zero-mean
+    perturbation of `K` *raises* `Psi` and the aim hands back less uplift —
+    the same class of confound M8r found for the surface grain, arriving
+    through a different term. `generate` aims on the coarse field and solves
+    on the full one.
+    """
+    k = 0.016 + 0.020 * (0.5 + 0.5 * tn.fbm(
+        tn.SimplexNoise(seed + 2), xx / 3400.0, zz / 3400.0, octaves=3))
+    if detail > 0.0:
+        k = k + detail * tn.fbm(tn.SimplexNoise(seed + 13),
+                                xx / HARDNESS_WAVELENGTH,
+                                zz / HARDNESS_WAVELENGTH, octaves=3)
+        k = np.maximum(k, HARDNESS_FLOOR)
+    return k
+
+
 def synth_height(seed: int, landmass: float, islands: int,
                  xx: np.ndarray, zz: np.ndarray) -> np.ndarray:
     """Island height skeleton + detail, calibrated so that exactly
@@ -260,7 +321,7 @@ def synth_height(seed: int, landmass: float, islands: int,
 
 def erosion_cache_path(terrain: str, router: str, seed: int, landmass: float,
                        islands: int, relief_target: float, arc_detail: float,
-                       fast: bool) -> str:
+                       fast: bool, hardness_detail: float = 0.0) -> str:
     """Where a converged surface is cached — and the key IS the contract.
 
     Every input the solver saw has to appear here or a later run silently
@@ -268,12 +329,18 @@ def erosion_cache_path(terrain: str, router: str, seed: int, landmass: float,
     cache written before `arc_platform` grew its grain is a *different*
     surface under identical parameters. It is left out of the `mounds` key
     so the shipped `skerry_reach` cache stays addressable.
+
+    `hardness_detail` is keyed the same way and only when it is on, so every
+    surface converged before `substrate_hardness` grew its mid-scale term
+    stays addressable at its own key.
     """
     arc_key = f"_a{arc_detail}v{ARC_REV}" if terrain == "arc" else ""
+    k_key = f"_k{hardness_detail}v{HARD_REV}" if hardness_detail > 0.0 else ""
     return os.path.join(
         os.environ.get("TMPDIR", "/tmp"),
         f"archipelago_eroded_r{SYNTH_REV}_{terrain}_{router}_{seed}_{landmass}_"
-        f"{islands}_{relief_target}{arc_key}_{'fast' if fast else 'full'}.npy")
+        f"{islands}_{relief_target}{arc_key}{k_key}_"
+        f"{'fast' if fast else 'full'}.npy")
 
 
 def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
@@ -282,7 +349,8 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
              map_id: str = "skerry_reach", display_name: str = "Skerry Reach",
              climate: str = "temperate", terrain: str = "mounds",
              router: str = "auto", relief_target: float = 950.0,
-             arc_detail: float = ARC_DETAIL_DEFAULT):
+             arc_detail: float = ARC_DETAIL_DEFAULT,
+             hardness_detail: "float | None" = None):
     t0 = time.time()
     cell = 32.0 if fast else 8.0
     S = int(MAP_SIZE / cell) + 1
@@ -292,13 +360,19 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     # (PLAN-maps M8q).
     if router == "auto":
         router = "dinf" if terrain == "arc" else "d8"
+    # the mid-scale substrate term is an `arc` knob: `mounds` ships, and a
+    # non-zero default there would move the skerry_reach package (M8s).
+    if hardness_detail is None:
+        hardness_detail = ARC_HARDNESS_DETAIL if terrain == "arc" else 0.0
     print(f"grid {S}x{S} @ {cell} elmos/cell  "
           f"(seed={seed} landmass={landmass} islands={islands} "
           f"climate={climate} terrain={terrain} router={router})")
 
     zz, xx = np.mgrid[0:S, 0:S].astype(np.float64) * cell
-    hardness = 0.016 + 0.020 * (0.5 + 0.5 * tn.fbm(
-        tn.SimplexNoise(seed + 2), xx / 3400.0, zz / 3400.0, octaves=3))
+    hardness = substrate_hardness(seed, xx, zz, detail=hardness_detail)
+    # the aim runs on the COARSE substrate — see substrate_hardness's warning
+    hardness_aim = (hardness if hardness_detail <= 0.0
+                    else substrate_hardness(seed, xx, zz, detail=0.0))
 
     # 1. skeleton — drawn (mounds) or authored as a rate (arc)
     u = None
@@ -316,8 +390,8 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
         # which is the effect the grain exists to remove (PLAN-maps M8r).
         h_aim = (h if arc_detail <= 0.0
                  else arc_platform(seed, landmass, u, xx, zz, detail=0.0))
-        u = u * up.scale_uplift_for_relief(h_aim, u, hardness, relief_target,
-                                           router=router)
+        u = u * up.scale_uplift_for_relief(h_aim, u, hardness_aim,
+                                           relief_target, router=router)
         print(f"arc uplift authored {time.time()-t0:.0f}s "
               f"(aim {relief_target:.0f} elmos, U max {u.max():.4f})")
     else:
@@ -326,7 +400,8 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
 
     # 2. erosion (cached per parameter set — the cache key IS the contract)
     cache = erosion_cache_path(terrain, router, seed, landmass, islands,
-                               relief_target, arc_detail, fast)
+                               relief_target, arc_detail, fast,
+                               hardness_detail)
     if os.path.exists(cache):
         h = np.load(cache)
         print(f"erosion loaded from cache {cache}")
@@ -733,6 +808,14 @@ def main():
                          "erodes, so the fine relief is finished noise rather "
                          "than solver-made channel texture (PLAN-maps M8r). "
                          "0 restores the M8q surface.")
+    ap.add_argument("--hardness-detail", dest="hardness_detail", type=float,
+                    default=None,
+                    help="erodibility variation in the 200-800 elmo band, in "
+                         "absolute K units on a coarse field spanning "
+                         "0.016-0.036. ⛔ measured NEGATIVE and defaulted to "
+                         "0 everywhere: it barely moves the band it was "
+                         "built for and makes 120-300 worse (PLAN-maps M8s, "
+                         "and `substrate_hardness` carries the numbers).")
     ap.add_argument("--fast", action="store_true",
                     help="513 grid iteration mode — preview/tuning only, "
                          "NOT shippable. ⚠ with --terrain arc it is not even "
@@ -762,6 +845,8 @@ def main():
                        "--router", args.router,
                        "--relief-target", str(args.relief_target),
                        "--arc-detail", str(args.arc_detail)]
+        if args.hardness_detail is not None:
+            passthrough += ["--hardness-detail", str(args.hardness_detail)]
         if args.fast:
             passthrough.append("--fast")
         if args.with_features:
@@ -778,7 +863,8 @@ def main():
              map_id=args.map_id, display_name=args.display_name,
              climate=args.climate, terrain=args.terrain,
              router=args.router, relief_target=args.relief_target,
-             arc_detail=args.arc_detail)
+             arc_detail=args.arc_detail,
+             hardness_detail=args.hardness_detail)
 
 
 if __name__ == "__main__":

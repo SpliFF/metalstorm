@@ -156,6 +156,8 @@ does the same thing to a field you want to inspect before handing it over.
 """
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import numpy as np
 from scipy import ndimage
 
@@ -424,6 +426,11 @@ def structural_anisotropy(
     the same grid size**. One isotropic fBm reads 2.35 / 1.84 / 1.68 at 257 /
     513 / 1025 cells across, against 1.24 for the 2049-cell shipped map: a
     coarse preview scores "anisotropic" on nothing but its own bin counts.
+
+    ⚠ And the floor rises steeply with the *band*, not just the grid — 1.09
+    at 16-32 against 2.37 at 300-800 on one 1025^2 crop, so a raw reading
+    off a band other than the 32-120 default means very little on its own.
+    Use `anisotropy_bands`, which divides by `anisotropy_floor` (M8s).
     """
     p = _angular_power(dem, cellsize, lo_elmos, hi_elmos, bins)
     if p is None:
@@ -514,6 +521,142 @@ def angular_lobes(
         out.append((float(i * width), float(ratio[i])))
         for d in range(-suppress, suppress + 1):
             taken[(i + d) % bins] = True
+    return out
+
+
+ANISOTROPY_BANDS: tuple[tuple[float, float], ...] = (
+    (16.0, 32.0), (32.0, 120.0), (120.0, 300.0), (300.0, 800.0),
+)
+
+_FLOOR_CACHE: dict = {}
+
+
+def _isotropic_field(shape: tuple[int, int], seed: int,
+                     beta: float = 2.0) -> np.ndarray:
+    """A Gaussian random field that is isotropic *by construction*.
+
+    White noise shaped by a radial power law in the Fourier domain — the
+    filter depends on `|k|` alone, so any orientation the reading finds in
+    this is the reading's own, not the field's.
+
+    Broadband on purpose. Simplex fBm is the obvious alternative and is
+    **not** equivalent: a narrow band of an fBm draws nearly all its power
+    from one octave of one lattice, so it is lumpier in angle and reads a
+    floor up to 1.4x higher at the coarse end — see `anisotropy_floor`.
+    """
+    rng = np.random.default_rng(seed)
+    w = np.fft.fft2(rng.normal(size=shape))
+    kz = np.fft.fftfreq(shape[0])[:, None]
+    kx = np.fft.fftfreq(shape[1])[None, :]
+    k = np.hypot(kz, kx)
+    k[0, 0] = 1.0
+    return np.fft.ifft2(w * k ** (-beta / 2.0)).real
+
+
+def anisotropy_floor(
+    shape: tuple[int, int],
+    cellsize: float,
+    bands: "tuple[tuple[float, float], ...]" = ANISOTROPY_BANDS,
+    bins: int = 90,
+    seeds: int = 8,
+) -> list[float]:
+    """What `structural_anisotropy` reads on a field that HAS no structure.
+
+    The median over `seeds` isotropic fields of exactly this shape, per
+    band. Cached, because it depends only on the grid and the bands.
+
+    This is the control M8p's docstring gestured at ("a sample-count
+    floor") and nobody had ever run per band — and it rises steeply with
+    the band, because the number of spectral samples in a band annulus
+    falls as the band gets coarser. On a 1025^2 crop at 8 elmos, 8 seeds,
+    the floor is 1.09 / 1.19 / 1.68 / 2.37 across the four default bands,
+    i.e. a raw 16-32 reading and a raw 300-800 reading were never on the
+    same axis. Doubling the crop to 2049^2 pulls the coarse end down (the
+    fBm null's 300-800 floor goes 3.39 -> 2.18) but does not remove it, so
+    prefer the largest crop the content allows.
+
+    ⚠ **The null's spectrum matters, and it is the reason the coarse rows
+    can only ever be a weak reading.** Against a simplex-fBm null instead
+    of a GRF the same floor reads 1.31 / 1.47 / 1.85 / **3.39** (16 seeds),
+    because an fBm band draws most of its power from a single octave of one
+    lattice and is lumpier in angle than a broadband field — no consistent
+    lobe direction across seeds either way, so it is variance, not bias.
+    The arc's 300-800 raw 3.84 is therefore 1.62x the GRF floor and only
+    1.13x the fBm one. **Do not settle a question on a coarse band whose
+    verdict flips with the choice of null** (PLAN-maps M8s): take a control
+    made of the thing you are not testing — there, the un-eroded landform,
+    which turned out to hold the disputed lobe on its own.
+
+    Read `excess` from `anisotropy_bands`, never the raw peak.
+    """
+    key = (tuple(shape), float(cellsize), tuple(bands), int(bins), int(seeds))
+    if key not in _FLOOR_CACHE:
+        vals = [[] for _ in bands]
+        for s in range(seeds):
+            f = _isotropic_field((int(shape[0]), int(shape[1])), s)
+            for i, (lo, hi) in enumerate(bands):
+                vals[i].append(structural_anisotropy(f, cellsize, lo, hi,
+                                                     bins)[0])
+        _FLOOR_CACHE[key] = [float(np.median(v)) for v in vals]
+    return list(_FLOOR_CACHE[key])
+
+
+class BandReading(NamedTuple):
+    lo: float
+    hi: float
+    peak: float
+    floor: float
+    excess: float
+    lobes: list
+
+
+def anisotropy_bands(
+    dem: np.ndarray,
+    cellsize: float,
+    bands: "tuple[tuple[float, float], ...]" = ANISOTROPY_BANDS,
+    bins: int = 90,
+    top: int = 3,
+    floor_seeds: int = 8,
+) -> list[BandReading]:
+    """`structural_anisotropy` + `angular_lobes` over a ladder of bands,
+    each divided by the floor an isotropic field of the same shape reads.
+
+    Returns `[BandReading(lo, hi, peak, floor, excess, lobes), ...]`.
+    **`excess` is the reading**; `peak` is what the single-band functions
+    return and is only interpretable next to its own `floor`. Pass
+    `floor_seeds=0` to skip the control, which sets `floor = 1.0` and makes
+    `excess` the raw peak — for when you already hold a matched floor.
+
+    ⚠ **Do not read one band and call it terrain.** This exists because M8r
+    shipped an authored-grain term that took the arc's 32-120 reading to
+    shipped-equivalent (1.60 against 1.58) while the eye still refused the
+    map, and queued its next milestone off the two coarse rows. Excess, on
+    a 1025^2 land-dense crop at 8 elmos (PLAN-maps M8r/M8s):
+
+        band      floor   shipped   a17    +K.004  +K.008   arc landform
+        16-32     1.09     2.56     2.32    1.84    1.68        2.14
+        32-120    1.19     1.32     1.35    1.48    1.15        1.54
+        120-300   1.68     1.01     1.24    1.50    1.74        1.36
+        300-800   2.37     1.06     1.62    1.49    1.50        1.34
+
+    The last column is the control that decided M8s: the **un-eroded**
+    authored arc, no solver at all. It already carries 1.34 at 300-800 with
+    the same 150 deg lobe the eroded surface shows, so most of the coarse
+    directional energy the lane had attributed to solver-made spurs is the
+    landform's own strike. A held-out GRF null reads excess 1.00-1.12 with
+    a p95 of 1.32 in that band, so 1.62 clears it and 1.49 barely does.
+
+    The floor is a property of the grid, so — as `structural_anisotropy`
+    already warns — compare surfaces only at the same shape.
+    """
+    floors = (anisotropy_floor(dem.shape, cellsize, bands, bins, floor_seeds)
+              if floor_seeds > 0 else [1.0] * len(bands))
+    out = []
+    for (lo, hi), fl in zip(bands, floors):
+        peak = structural_anisotropy(dem, cellsize, lo, hi, bins)[0]
+        lobes = angular_lobes(dem, cellsize, lo, hi, bins, top)
+        out.append(BandReading(float(lo), float(hi), peak, fl,
+                               peak / max(fl, 1e-9), lobes))
     return out
 
 
