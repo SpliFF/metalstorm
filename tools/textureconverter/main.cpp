@@ -137,6 +137,33 @@ static void StampOrientationRd(ktxTexture2* tex) {
         ktx2::kOrientation2D);
 }
 
+/// Our identity in the file's `KTXwriter` key, in place of libktx's fallback
+/// `"Unidentified app"`. libktx appends its own ` / libktx v4.0` either way,
+/// so the value on disk reads `springrts-web textureconverter / libktx v4.0`.
+///
+/// This exists because provenance is the first question every KTX2
+/// investigation asks and we had no way to answer it. The tree carries files
+/// from three encoders — this tool, forge's `Basis Universal`, and `toktx` —
+/// and only ours was anonymous, so "which of these 2 475 files did *we* write,
+/// and therefore which carry the defect we just fixed?" had to be inferred
+/// from side channels (the KTXorientation spelling, mtimes) that answer a
+/// different question and go stale. PLAN-maps M8j spent a fire on exactly that
+/// cross-referencing; with this key it is one grep. Bare tool name, no build
+/// or git stamp of our own: the output must stay byte-deterministic for the
+/// hash-equality checks the map pipeline relies on.
+static constexpr char kWriterId[] = "springrts-web textureconverter";
+
+/// libktx fills `KTXwriter` with its own fallback at write time *only* if the
+/// app has not set one, so stamping before the write wins.
+static void StampWriterId(ktxTexture2* tex) {
+    if (!tex) return;
+    ktxHashList_AddKVPair(
+        &tex->kvDataHead,
+        KTX_WRITER_KEY,
+        static_cast<unsigned int>(sizeof(kWriterId)),
+        kWriterId);
+}
+
 /// Per-channel means of the encoder's *input* pixels (level 0) and of the
 /// last level it generates (the 1x1 top mip). Filled only when the caller
 /// asks — see `--signed-dc-report` and DetailTexDc.h for what the numbers
@@ -576,6 +603,7 @@ static bool WrapRawDxt1AsKtx2(const std::vector<uint8_t>& srcBytes,
         ktxTexture2_DeflateZstd(tex, 18);
     }
     StampOrientationRd(tex);
+    StampWriterId(tex);
     rc = ktxTexture_WriteToNamedFile(ktxTexture(tex), dstPath.c_str());
     ktxTexture_Destroy(ktxTexture(tex));
     if (rc != KTX_SUCCESS) {
@@ -725,6 +753,7 @@ static bool EncodeRgba8AsKtx2(const uint8_t* rgba, int w, int h,
         ktxTexture2_DeflateZstd(tex, 18);
     }
     StampOrientationRd(tex);
+    StampWriterId(tex);
     rc = ktxTexture_WriteToNamedFile(ktxTexture(tex), dstPath.c_str());
     ktxTexture_Destroy(ktxTexture(tex));
     if (rc != KTX_SUCCESS) {

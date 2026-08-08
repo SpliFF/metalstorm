@@ -531,6 +531,16 @@ assets, which costs asset investigations their standard tool. `data/games/{bar,z
 still carries the old value; those are archived third-party games and closing
 them needs a full `gameconverter --force` model re-import (PLAN-maps M8f).
 
+**KTX2 provenance metadata.** Three encoders write `.ktx2` into this tree —
+`textureconverter`, forge's `Basis Universal`, and `toktx` — so every one of
+our outputs stamps `KTXwriter` = `springrts-web textureconverter / libktx v4.0`
+(PLAN-maps M8j). Without it libktx's fallback `Unidentified app` made ours the
+only anonymous files, and "which of these did *we* write, and therefore which
+carry the defect we just fixed?" had to be inferred from mtimes and the
+orientation spelling. One census over the key now answers it:
+`data/games/{bar,zk}` are the untouched archived files, everything else on the
+Metalstorm path is forge/`toktx` output or freshly regenerated.
+
 **Mip generation must not move a texture's DC.** `textureconverter` builds its
 own 2x2 box chain for encoded (non-DDS) sources, and that filter rounds
 half-to-even (`detailtex::MipBoxAvg4`, `rts/System/FileSystem/DetailTexDc.h`).
