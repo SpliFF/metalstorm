@@ -183,19 +183,31 @@ def erosional_distance(
     return phi
 
 
-def erosional_distance_from_dem(dem: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def erosional_distance_from_dem(
+    dem: np.ndarray, router: str = "d8", mfd_p: float = 1.1
+) -> tuple[np.ndarray, np.ndarray]:
     """Route `dem` and return `(Phi, accum)`, both shaped like `dem`.
 
     Convenience wrapper — routes exactly the way `stream_power_erode` does
-    (fill -> resolve flats -> D8), so the `Phi` it returns is the one the
-    solver will actually be integrating along.
+    (fill -> resolve flats -> route), so the `Phi` it returns is the one the
+    solver will actually be integrating along. Pass the same `router` you
+    intend to erode with: a dispersive router both shortens the path sum and
+    spreads the area, and aiming with the wrong one silently mis-scales the
+    uplift.
     """
     filled = hyd.fill_depressions(dem)
     routing = hyd.resolve_flats(filled)
-    recv = hyd.d8_receivers(routing)
-    levels = hyd.topo_levels(recv)
-    accum = hyd.flow_accumulation(recv, levels)
-    phi = erosional_distance(recv, levels, accum)
+    if router == "d8":
+        recv = hyd.d8_receivers(routing)
+        levels = hyd.topo_levels(recv)
+        accum = hyd.flow_accumulation(recv, levels)
+        phi = erosional_distance(recv, levels, accum)
+    else:
+        w = hyd.flow_weights(routing, router=router, mfd_p=mfd_p)
+        order = hyd.flow_order(routing)
+        accum = hyd.flow_accumulation_multi(w, order)
+        step = 1.0 / np.sqrt(np.maximum(accum, 1.0))
+        phi = hyd.path_sum_multi(w, order, step)
     return phi.reshape(dem.shape), np.asarray(accum).reshape(dem.shape)
 
 
@@ -282,15 +294,36 @@ def steady_state_relief_field(
 
 
 def steady_state_relief_from_dem(
-    dem: np.ndarray, uplift: np.ndarray, k_erode: np.ndarray | float
+    dem: np.ndarray,
+    uplift: np.ndarray,
+    k_erode: np.ndarray | float,
+    router: str = "d8",
+    mfd_p: float = 1.1,
 ) -> np.ndarray:
-    """`steady_state_relief_field` routed off `dem`, shaped like `dem`."""
+    """`steady_state_relief_field` routed off `dem`, shaped like `dem`.
+
+    `router` must match the one the solve will use — see
+    `erosional_distance_from_dem`. On a multi-receiver graph `Psi` becomes
+    the flow-weighted *expected* path sum (`hydrology.path_sum_multi`), which
+    is the only reading of "the path to the sea" that survives a cell sending
+    water two ways.
+    """
     filled = hyd.fill_depressions(dem)
-    recv = hyd.d8_receivers(hyd.resolve_flats(filled))
-    levels = hyd.topo_levels(recv)
-    accum = hyd.flow_accumulation(recv, levels)
-    return steady_state_relief_field(
-        uplift, k_erode, recv, levels, accum).reshape(dem.shape)
+    routing = hyd.resolve_flats(filled)
+    if router == "d8":
+        recv = hyd.d8_receivers(routing)
+        levels = hyd.topo_levels(recv)
+        accum = hyd.flow_accumulation(recv, levels)
+        return steady_state_relief_field(
+            uplift, k_erode, recv, levels, accum).reshape(dem.shape)
+    w = hyd.flow_weights(routing, router=router, mfd_p=mfd_p)
+    order = hyd.flow_order(routing)
+    accum = hyd.flow_accumulation_multi(w, order)
+    k = np.broadcast_to(np.asarray(k_erode, dtype=np.float64),
+                        np.asarray(uplift).shape).ravel()
+    step = (np.asarray(uplift, dtype=np.float64).ravel()
+            / (k * np.sqrt(np.maximum(accum, 1.0))))
+    return hyd.path_sum_multi(w, order, step).reshape(dem.shape)
 
 
 def scale_uplift_for_relief(
@@ -299,6 +332,8 @@ def scale_uplift_for_relief(
     k_erode: np.ndarray | float,
     target_relief: float,
     quantile: float = 0.999,
+    router: str = "d8",
+    mfd_p: float = 1.1,
 ) -> float:
     """The factor that makes `uplift` hold `target_relief` at steady state.
 
@@ -312,7 +347,8 @@ def scale_uplift_for_relief(
     in hand and the drainage reorganises as the solver runs. On the island
     arc that costs ~10 %, against the 2.4x the scalar form costs there.
     """
-    psi = steady_state_relief_from_dem(dem, uplift, k_erode)
+    psi = steady_state_relief_from_dem(dem, uplift, k_erode, router=router,
+                                       mfd_p=mfd_p)
     return float(target_relief) / max(float(np.quantile(psi, quantile)), 1e-9)
 
 

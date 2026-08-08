@@ -36,7 +36,7 @@ from numba import njit, prange
 from scipy import ndimage
 
 from . import hydrology as hyd
-from .hydrology import _D8_DR, _D8_DC  # noqa: F401 (numba needs bare globals, not module attrs)
+from .hydrology import _D8_DR, _D8_DC, _D8_DIST  # noqa: F401 (numba needs bare globals, not module attrs)
 
 
 @njit(cache=True)
@@ -71,6 +71,49 @@ def _lem_solve_kernel(
             newh[cell] = (newh[cell] + F_cell * newh[r]) / (1.0 + F_cell)
 
 
+@njit(cache=True)
+def _lem_solve_multi_kernel(
+    newh: np.ndarray,
+    G: np.ndarray,
+    w: np.ndarray,
+    order: np.ndarray,
+    W: int,
+    cellsize: float,
+) -> None:
+    """In-place implicit stream-power solve over a *multi*-receiver DAG.
+
+        h_i = (h_i + sum_k F_ik h_k) / (1 + sum_k F_ik),
+        F_ik = w_ik * G_i / (d_k * cellsize),   G_i = K_i * A_i^m * dt
+
+    the direct generalisation of the Braun & Willett single-receiver form
+    above: the donor is still solved after every one of its receivers (which
+    `order` guarantees, ascending routing elevation), and the weights, which
+    sum to 1, partition the incision between them.
+
+    ⚠ Deviation from the D8 path, deliberate: this divides by the *true*
+    neighbour distance `d_k * cellsize`, where `stream_power_erode`'s D8 form
+    divides every link by `cellsize` regardless of whether the link is
+    diagonal. Making a diagonal link 1.41x cheaper than a cardinal one is a
+    lattice bias of precisely the kind this router exists to remove, so the
+    new path does not inherit it; the D8 path is left alone because changing
+    it moves both shipped maps.
+    """
+    for i in range(order.size):
+        cell = order[i]
+        r = cell // W
+        c = cell - r * W
+        num = newh[cell]
+        den = 1.0
+        g = G[cell]
+        for k in range(8):
+            wt = w[r, c, k]
+            if wt > 0.0:
+                f = g * wt / (_D8_DIST[k] * cellsize)
+                num += f * newh[(r + _D8_DR[k]) * W + (c + _D8_DC[k])]
+                den += f
+        newh[cell] = num / den
+
+
 def stream_power_erode(
     dem: np.ndarray,
     cellsize: float,
@@ -82,6 +125,8 @@ def stream_power_erode(
     talus_deg: float | None = 34.0,
     thermal_rate: float = 0.5,
     pin_base_level: bool = True,
+    router: str = "d8",
+    mfd_p: float = 1.1,
     progress: "Callable | None" = None,
 ) -> np.ndarray:
     """Run coupled fluvial + thermal erosion on `dem` (modifies a copy).
@@ -100,7 +145,17 @@ def stream_power_erode(
     upstream of it and the whole field reduces to a rigid translation of the
     U = 0 result — measured at relief 0.28 unpinned vs 180.66 pinned on the
     same 129^2 control. It is a no-op when `uplift is None`.
+
+    `router` selects the flow graph: `"d8"` (default, single steepest
+    receiver, the shipped maps' path, byte-for-byte unchanged), or `"dinf"` /
+    `"mfd"` — see `hydrology.flow_weights`. The multi-receiver routers exist
+    because a converged D8 landscape is *structurally periodic*: PLAN-maps
+    M8p measured 5.27x angular energy concentration against a shipped map's
+    1.24, and nothing on the D8 arm moved it. Judge the result with
+    `uplift.structural_anisotropy`, not with a gradient-aspect histogram.
     """
+    if router not in hyd.ROUTERS:
+        raise ValueError(f"unknown router {router!r}, expected one of {hyd.ROUTERS}")
     h = dem.astype(np.float64).copy()
     H, W = h.shape
     n = H * W
@@ -111,31 +166,48 @@ def stream_power_erode(
     for it in range(iterations):
         filled = hyd.fill_depressions(h)
         routing = hyd.resolve_flats(filled)
-        recv = hyd.d8_receivers(routing)
-        levels = hyd.topo_levels(recv)
-        accum = hyd.flow_accumulation(recv, levels)  # cells
+
+        if router == "d8":
+            recv = hyd.d8_receivers(routing)
+            levels = hyd.topo_levels(recv)
+            accum = hyd.flow_accumulation(recv, levels)  # cells
+        else:
+            w = hyd.flow_weights(routing, router=router, mfd_p=mfd_p)
+            order = hyd.flow_order(routing)
+            accum = hyd.flow_accumulation_multi(w, order)
+            is_root = ~hyd.has_receiver(w)
         area = accum * (cellsize * cellsize)
 
         # Solve on the real surface but route via the filled/resolved
         # elevations so flow crosses depressions instead of stalling in them.
         hf = h.ravel()
-        F = k_arr * np.power(area, m_exp) * dt / cellsize
-        F[recv == idx] = 0.0  # outlets don't erode toward themselves
 
         newh = hf.copy()
         if u_arr is not None:
             u_it = u_arr
             if pin_base_level:
-                u_it = np.where(recv == idx, 0.0, u_arr)
+                u_it = np.where(recv == idx if router == "d8" else is_root,
+                                0.0, u_arr)
             newh = newh + dt * u_it
-        sub_levels = levels[1:]
-        if sub_levels:
-            flat_levels = np.concatenate(sub_levels)
-            sizes = np.array([lvl.size for lvl in sub_levels], dtype=np.int64)
-            offsets = np.empty(len(sub_levels) + 1, dtype=np.int64)
-            offsets[0] = 0
-            offsets[1:] = np.cumsum(sizes)
-            _lem_solve_kernel(newh, F, recv, flat_levels, offsets)
+
+        if router == "d8":
+            F = k_arr * np.power(area, m_exp) * dt / cellsize
+            F[recv == idx] = 0.0  # outlets don't erode toward themselves
+            sub_levels = levels[1:]
+            if sub_levels:
+                flat_levels = np.concatenate(sub_levels)
+                sizes = np.array([lvl.size for lvl in sub_levels], dtype=np.int64)
+                offsets = np.empty(len(sub_levels) + 1, dtype=np.int64)
+                offsets[0] = 0
+                offsets[1:] = np.cumsum(sizes)
+                _lem_solve_kernel(newh, F, recv, flat_levels, offsets)
+        else:
+            # G carries everything but the per-link weight/distance, which
+            # the kernel applies as it walks each cell's receivers. Roots
+            # have no receivers, so the kernel leaves them alone without a
+            # mask (den stays 1, num stays newh).
+            G = k_arr * np.power(area, m_exp) * dt
+            _lem_solve_multi_kernel(newh, G, w, order, W, cellsize)
         h = newh.reshape(H, W)
 
         if talus_deg is not None:
@@ -269,6 +341,8 @@ def stream_power_erode_multires(
     m_exp: float = 0.5,
     talus_deg: float | None = 34.0,
     thermal_rate: float = 0.5,
+    router: str = "d8",
+    mfd_p: float = 1.1,
     progress: "Callable | None" = None,
 ) -> np.ndarray:
     """Two-level LEM: evolve structure coarse, then refine at full detail.
@@ -321,14 +395,17 @@ def stream_power_erode_multires(
     if c_u is not None and match_relief:
         from . import uplift as _up
 
-        phi_f, _ = _up.erosional_distance_from_dem(dem)
-        phi_c, _ = _up.erosional_distance_from_dem(coarse)
+        # Both `Phi` are measured with the router the solve will use, so the
+        # correction is a like-for-like ratio (a dispersive router shortens
+        # `Phi` on both grids, and only the ratio is being asked for).
+        phi_f, _ = _up.erosional_distance_from_dem(dem, router=router, mfd_p=mfd_p)
+        phi_c, _ = _up.erosional_distance_from_dem(coarse, router=router, mfd_p=mfd_p)
         c_u = c_u * (_up.relief_scale(phi_f) / max(_up.relief_scale(phi_c), 1e-9))
 
     coarse = stream_power_erode(
         coarse, cellsize=c_cell, iterations=coarse_iterations, dt=dt,
         k_erode=c_k, m_exp=m_exp, uplift=c_u, talus_deg=talus_deg,
-        thermal_rate=thermal_rate, progress=progress,
+        thermal_rate=thermal_rate, router=router, mfd_p=mfd_p, progress=progress,
     )
 
     h = _refine(coarse, (H, W))
@@ -341,6 +418,7 @@ def stream_power_erode_multires(
         h = stream_power_erode(
             h, cellsize=cellsize, iterations=fine_iterations, dt=dt,
             k_erode=k_erode, m_exp=m_exp, uplift=uplift, talus_deg=talus_deg,
-            thermal_rate=thermal_rate, progress=progress,
+            thermal_rate=thermal_rate, router=router, mfd_p=mfd_p,
+            progress=progress,
         )
     return h

@@ -6,7 +6,8 @@ this generator is fully parameterized and derives EVERYTHING from its
 inputs — island placement, elevations, start positions, settlements,
 per-island road networks, biomes, vegetation, ruins. Deterministic:
 
-    same (--seed, --landmass, --islands)  =>  byte-identical map
+    same (--seed, --landmass, --islands, --terrain, --router)
+        =>  byte-identical map
 
 The --landmass fraction is a hard contract, enforced by quantile
 calibration of the height field both before and after erosion: exactly
@@ -18,7 +19,7 @@ Usage:
     .venv/bin/python archipelago.py --fast --preview-only  # 30 s look
     .venv/bin/python archipelago.py --climate arid --id dune_reach \
         --name "Dune Reach"                                # climate variant
-    .venv/bin/python archipelago.py --terrain arc --landmass 0.26 \
+    .venv/bin/python archipelago.py --terrain arc --landmass 0.30 \
         --id sundered_arc --name "Sundered Arc"            # tectonic variant
     .venv/bin/python archipelago.py --no-package           # layer tuning
     .venv/bin/python archipelago.py --selftest [--fast]    # determinism gate
@@ -223,13 +224,19 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
              preview_only: bool = False, no_package: bool = False,
              map_id: str = "skerry_reach", display_name: str = "Skerry Reach",
              climate: str = "temperate", terrain: str = "mounds",
-             relief_target: float = 950.0):
+             router: str = "auto", relief_target: float = 950.0):
     t0 = time.time()
     cell = 32.0 if fast else 8.0
     S = int(MAP_SIZE / cell) + 1
+    # 'auto' is per-terrain, not global: `mounds` must stay on D8 or the
+    # shipped skerry_reach package moves, while `arc` builds its channel
+    # network from nothing and so inherits whatever lattice it routes over
+    # (PLAN-maps M8q).
+    if router == "auto":
+        router = "dinf" if terrain == "arc" else "d8"
     print(f"grid {S}x{S} @ {cell} elmos/cell  "
           f"(seed={seed} landmass={landmass} islands={islands} "
-          f"climate={climate} terrain={terrain})")
+          f"climate={climate} terrain={terrain} router={router})")
 
     zz, xx = np.mgrid[0:S, 0:S].astype(np.float64) * cell
     hardness = 0.016 + 0.020 * (0.5 + 0.5 * tn.fbm(
@@ -243,7 +250,8 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
         # aim with the PATH INTEGRAL, not (U/K)*Phi: this field varies on
         # the drainage network's own scale, which is exactly the case the
         # scalar form factorises away (2.4x out — PLAN-maps M8p)
-        u = u * up.scale_uplift_for_relief(h, u, hardness, relief_target)
+        u = u * up.scale_uplift_for_relief(h, u, hardness, relief_target,
+                                           router=router)
         print(f"arc uplift authored {time.time()-t0:.0f}s "
               f"(aim {relief_target:.0f} elmos, U max {u.max():.4f})")
     else:
@@ -253,7 +261,7 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     # 2. erosion (cached per parameter set — the cache key IS the contract)
     cache = os.path.join(
         os.environ.get("TMPDIR", "/tmp"),
-        f"archipelago_eroded_r{SYNTH_REV}_{terrain}_{seed}_{landmass}_"
+        f"archipelago_eroded_r{SYNTH_REV}_{terrain}_{router}_{seed}_{landmass}_"
         f"{islands}_{relief_target}_{'fast' if fast else 'full'}.npy")
     if os.path.exists(cache):
         h = np.load(cache)
@@ -268,7 +276,7 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
             coarse_iterations=(600 if fast else 3000),
             fine_iterations=(10 if fast else 30),
             uplift=u, k_erode=hardness, dt=1.4, m_exp=0.5,
-            talus_deg=33.0, thermal_rate=0.35,
+            talus_deg=33.0, thermal_rate=0.35, router=router,
             progress=lambda i, n_: print(
                 f"  erosion {i}/{n_} ({time.time()-t0:.0f}s)")
             if i % 200 == 0 else None)
@@ -278,6 +286,7 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
         h = ero.stream_power_erode(
             h, cellsize=cell, iterations=(10 if fast else 26), dt=1.4,
             k_erode=hardness, m_exp=0.5, talus_deg=33.0, thermal_rate=0.35,
+            router=router,
             progress=lambda i, n_: print(
                 f"  erosion {i}/{n_} ({time.time()-t0:.0f}s)")
             if i % 10 == 0 else None)
@@ -633,7 +642,21 @@ def main():
                          "volcanic island arc as an uplift RATE and lets a "
                          "converged stream-power solver carve the landform — "
                          "--islands is then unused, and generation is ~9 min "
-                         "at full res instead of ~1. See PLAN-maps M8p.")
+                         "at full res instead of ~1. See PLAN-maps M8p, and "
+                         "M8q for why it routes over D-infinity by default. "
+                         "⚠ D-infinity redistributes the flat ground (it has "
+                         "MORE of it than the D8 arm at every slope "
+                         "threshold, just spread differently), so the arc "
+                         "wants --landmass 0.30 to fit 8 separated start "
+                         "pads where the D8 arm fit them at 0.26.")
+    ap.add_argument("--router", default="auto",
+                    choices=("auto", "d8", "dinf", "mfd"),
+                    help="flow router the erosion solver routes over. "
+                         "'auto' (default) = d8 for --terrain mounds (the "
+                         "shipped skerry_reach path, byte-for-byte) and dinf "
+                         "for --terrain arc, where D8's 45-degree lattice is "
+                         "what a from-nothing solver builds its channel "
+                         "network on — see PLAN-maps M8q.")
     ap.add_argument("--relief-target", dest="relief_target", type=float,
                     default=950.0,
                     help="--terrain arc only: elmos of relief the highest "
@@ -665,6 +688,7 @@ def main():
                        "--id", args.map_id, "--name", args.display_name,
                        "--climate", args.climate,
                        "--terrain", args.terrain,
+                       "--router", args.router,
                        "--relief-target", str(args.relief_target)]
         if args.fast:
             passthrough.append("--fast")
@@ -681,7 +705,7 @@ def main():
              preview_only=args.preview_only, no_package=args.no_package,
              map_id=args.map_id, display_name=args.display_name,
              climate=args.climate, terrain=args.terrain,
-             relief_target=args.relief_target)
+             router=args.router, relief_target=args.relief_target)
 
 
 if __name__ == "__main__":
