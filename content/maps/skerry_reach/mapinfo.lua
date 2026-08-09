@@ -2,7 +2,7 @@
 local mapinfo = {
     name = "Skerry Reach",
     shortname = "skerry_reach",
-    description = "Free-form archipelago (seed 20260730, 34% land, 9 islands): island road nets, coastal towns, ruins.",
+    description = "Free-form archipelago (seed 20260730, 34% land, 9 islands, temperate climate): island road nets, coastal towns, ruins.",
     author = "terragen",
     version = "1",
     mapfile = "maps/skerry_reach.smf",

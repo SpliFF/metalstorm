@@ -811,8 +811,12 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     pad_excl = np.zeros(h.shape, bool)
     for sx, sz in starts:
         pad_excl |= np.hypot(xx - sx, zz - sz) < 700.0
+    # no slope override: the M9a cost model blocks on the road's own grade and
+    # prices the hillside it is cut into, so the old `max_slope_deg=26` (a
+    # terrain-slope wall that isolated a town site standing on 29 deg ground)
+    # has no successor here — see PLAN-maps M9a.
     rp = rd.RoadParams(plan_step=(1 if fast else 4), road_width=44.0,
-                       max_slope_deg=26.0, water_penalty=80.0)
+                       water_penalty=80.0)
     polylines: list[np.ndarray] = []
     towns: list[tuple[float, float]] = []
     for l in big:

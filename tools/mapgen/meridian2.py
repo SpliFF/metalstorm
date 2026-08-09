@@ -328,8 +328,10 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
             sites.append((wp["x"], wp["z"]))
     for sx, sz in (starts[1], starts[5]):  # a gate per side joins the network
         sites.append((sx, sz))
+    # see the note at archipelago.py's road step: M9a retired the terrain-slope
+    # wall in favour of a grade block plus a side-hill price
     rp = rd.RoadParams(plan_step=(1 if fast else 4), road_width=44.0,
-                       max_slope_deg=26.0, water_penalty=30.0)
+                       water_penalty=30.0)
     polylines = rd.plan_roads(h, 0.0, cell, sites, rp)
     road_mask, road_dist = rd.rasterize_roads(polylines, h.shape, cell, rp)
     # worn junction plazas where routes meet (district centres + waypoints;

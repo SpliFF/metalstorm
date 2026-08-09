@@ -14,15 +14,35 @@ cells it actually crosses (Bresenham sub-steps), which is what stops a long
 offset from stepping over a cliff or a river that a short one would have to
 pay for. `mask_k = 1` reproduces the old 8-connected graph exactly.
 
-Cost model per sub-step of a mask edge:
-  sub_length * (1 + slope_cost * (slope / slope_ref)^slope_exp)   on land
+Cost model — two slopes, and they are not the same slope (PLAN-maps M9a).
+One belongs to the edge, the other to each sub-step of it:
+
+  * **grade** — the road's *own* longitudinal climb over the whole mask edge:
+    the summed |dh| of its sub-steps over its length, i.e. the mean absolute
+    grade of the run. This is Galin's cost variable and the thing a 48-heading
+    mask exists to let the route choose: a traverse or a switchback holds a
+    gentle grade across a hillside that is itself steep. `_edge_costs` carries
+    the two ways of reading it that are wrong and the map each was wrong on.
+    Only edges with both feet on land have a grade — bridge abutments do not.
+  * **side-hill** — the terrain slope the deck is cut into, which prices the
+    cut-and-fill volume. Steep side-hill is expensive to build on and gets
+    expensive fast; it is not, on its own, impossible.
+
+  sub_length * (1 + grade_cost    * (grade    / grade_ref)^grade_exp
+                  + sidehill_cost * (sidehill / sidehill_ref)^sidehill_exp)
   water crossings replace the whole edge with length * water_penalty
-    (bridge decks are level, so slope does not apply)
+    (bridge decks are level, so neither slope applies)
   the whole edge is multiplied by `road_discount` when every cell it touches
     is already carrying road — this is what grows trunk/branch topology
     instead of parallel spaghetti
-Impassable (inf): slope beyond `max_slope_deg` on any dry sub-step, and
-water further than `max_bridge_cells / 2` from land (see `_deep_water`).
+Impassable (inf): the edge's grade beyond `max_grade_deg`, side-hill beyond
+`max_sidehill_deg` on any dry sub-step, and water further than
+`max_bridge_cells / 2` from land (see `_deep_water`).
+
+Setting `grade_cost = 0`, `max_grade_deg = inf` and the side-hill triple to
+the old slope triple reproduces the pre-M9a model exactly, which is how the
+A/B was measured — `tests/test_roads.py::pre_m9a` is that arm, and every
+test that wants the old behaviour builds it there.
 
 Topology is a per-component minimum spanning forest (every reachable
 settlement joined, disconnected groups given their own network rather than
@@ -48,10 +68,32 @@ class RoadParams:
     # time, and its 9.10 deg length-weighted heading gap is the one that
     # matches the item's stated "9.5 deg" — k=5's is 11.31.
     mask_k: int = 4                 # Galin segment-mask half-width; 1 == 8-connected
-    slope_cost: float = 18.0
-    slope_ref_deg: float = 10.0
-    slope_exp: float = 2.5          # §2b item 5; measured -9 %/-5 % road grade
-    max_slope_deg: float = 28.0
+    # The road's own longitudinal grade. 6 deg is 10.5 %, the grade a built
+    # road holds comfortably; the exponent is M8l's measured 2.5, kept because
+    # it was chosen against a grade reading in the first place. The block is
+    # 15 deg = 27 %, past any sealed road and about where a graded mountain
+    # track gives up — the pre-M9a model's 26 deg block, read as a grade,
+    # would have been 49 %. **The block is the load-bearing half**: with the
+    # side-hill wall relaxed and no grade limit, Meridian Basin's two halves
+    # join over a pitch whose road grade reads p95 21.9 deg / max 41.7 deg
+    # (M9a arm B) — a link no vehicle could use. At 15 they stay apart, which
+    # is the honest answer for that map.
+    grade_cost: float = 18.0
+    grade_ref_deg: float = 6.0
+    grade_exp: float = 2.5
+    max_grade_deg: float = 15.0
+    # Side-hill: the terrain slope the deck is cut into, pricing cut-and-fill
+    # volume. The triple is M8l's calibration unchanged — only what it is
+    # measured on is new — so the shipped price of a hillside did not move.
+    # What moved is the block: 26 deg was standing in for a grade limit and
+    # walled off 39.9 % of the map with it, isolating a Sundered Arc town site
+    # that stands on 29 deg ground. A benched traverse across a 35 deg
+    # hillside is ordinary mountain-road construction; 45 deg is where a bench
+    # becomes a viaduct.
+    sidehill_cost: float = 18.0
+    sidehill_ref_deg: float = 10.0
+    sidehill_exp: float = 2.5
+    max_sidehill_deg: float = 45.0
     water_penalty: float = 25.0     # per planning cell of water crossed
     max_bridge_cells: int = 24      # longest allowed water crossing (plan cells)
     # road_discount is the item's 0.15 reuse multiplier, and it is shipped OFF:
@@ -130,6 +172,11 @@ def _edge_costs(h, water, slope, cellsize, p: RoadParams,
     idx = np.arange(n).reshape(H, W)
     if deep is None:
         deep = np.zeros(water.shape, dtype=bool)
+    # `h` is the decimated planning grid, so one planning cell is plan_step
+    # heightmap cells wide — the run a sub-step's rise is taken over
+    world_step = cellsize * p.plan_step
+    grade_ref = max(p.grade_ref_deg, 1e-6)
+    side_ref = max(p.sidehill_ref_deg, 1e-6)
 
     rows, cols, costs = [], [], []
     for dr, dc in mask_offsets(p.mask_k):
@@ -150,8 +197,37 @@ def _edge_costs(h, water, slope, cellsize, p: RoadParams,
         nsub = len(samples) - 1
         sub_len = length / nsub
 
+        # The grade belongs to the whole EDGE — one straight run of deck — and
+        # it is the rise the road actually walks: the sum of |dh| over the
+        # Bresenham sub-steps, over the edge's length. The two rules it is not
+        # are both wrong, and each was measured wrong on a shipping map:
+        #   * per sub-step forbids the traverse the 48-heading mask exists to
+        #     express (a 2:1 offset across a 29 deg plane holds 13.9 deg while
+        #     one of its sub-steps is a 21 deg diagonal), and left Sundered
+        #     Arc's town split off exactly as the terrain-slope wall had;
+        #   * endpoint-to-endpoint hides everything between the ends — it let
+        #     Meridian Basin's halves join over a pitch that reads p95 21 deg
+        #     and max 40 deg on the delivered road, because the deck climbed
+        #     and dropped back inside a single 128-elmo edge.
+        # Summing |dh| is the mean absolute grade along the run, so a climb
+        # and its matching descent both count. `flatten_under_roads` grades
+        # the ground toward a blurred copy of itself rather than to the deck
+        # line, so the road it delivers follows the terrain: this is the
+        # measure that matches what gets built.
+        rise = np.zeros(src.shape, dtype=np.float64)
+        for i in range(nsub):
+            rise += np.abs(win(h, samples[i + 1]) - win(h, samples[i]))
+        # ...and it is only the road's grade when both ends stand on land. An
+        # edge that begins or ends in water is a bridge abutment, where the
+        # heightmap is seabed and the deck is level: the rise to it is the
+        # bank, not a climb the road makes. Those edges keep the water toll.
+        both_dry = ~win(water, samples[0]) & ~win(water, samples[-1])
+        grade = np.where(both_dry,
+                         np.degrees(np.arctan(rise / (length * world_step))), 0.0)
+        grade_term = p.grade_cost * (grade / grade_ref) ** p.grade_exp
+
         cost = np.zeros(src.shape, dtype=np.float64)
-        blocked = np.zeros(src.shape, dtype=bool)
+        blocked = grade > p.max_grade_deg
         reuse = np.ones(src.shape, dtype=bool) if on_road is not None else None
         for i in range(nsub):
             s = np.maximum(win(slope, samples[i]), win(slope, samples[i + 1]))
@@ -159,11 +235,12 @@ def _edge_costs(h, water, slope, cellsize, p: RoadParams,
             # priced per sub-step, not per edge: a long offset that clips one
             # wet cell must not be billed as a bridge for its whole length,
             # or the cost of a crossing would depend on the mask size
-            dry = sub_len * (1.0 + p.slope_cost
-                             * (s / p.slope_ref_deg) ** p.slope_exp)
+            dry = sub_len * (1.0 + grade_term
+                             + p.sidehill_cost * (s / side_ref) ** p.sidehill_exp)
             cost += np.where(w, sub_len * p.water_penalty, dry)
-            # water cells are never blocked by slope (bridge decks are level)
-            blocked |= (s > p.max_slope_deg) & ~w
+            # water cells are never blocked by the hillside they cross: a
+            # bridge deck is level and spans it
+            blocked |= (s > p.max_sidehill_deg) & ~w
             blocked |= win(deep, samples[i]) | win(deep, samples[i + 1])
             if reuse is not None:
                 reuse &= win(on_road, samples[i]) & win(on_road, samples[i + 1])

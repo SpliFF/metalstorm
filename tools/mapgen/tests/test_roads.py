@@ -28,6 +28,15 @@ What this pins down, and why each one is here rather than being obvious:
     and never referenced, so "bridges only where the crossing is narrow" was
     documentation, not behaviour. The test crosses a narrow strait and fails to
     cross a wide sea in the same fixture, so the guard cannot be vacuous.
+  * **grade and side-hill are two different slopes** (M9a). The fixture for
+    `CostModel` is a constant-slope ramp, the one shape where the distinction
+    is unambiguous: every cell has the same terrain slope, so a model that
+    prices terrain *cannot* tell a contour traverse from a fall-line climb and
+    one that prices grade must. The class also pins the two readings of grade
+    that are wrong — per sub-step (which forbids the traverse the mask exists
+    for) and endpoint-to-endpoint (which hides a climb and its descent inside
+    one edge) — and the units trap, because reading the rise against the
+    full-res cell instead of the planning cell reports a 20 deg ramp as 55.
   * **the reuse discount actually merges branches.** It measures ~nothing on
     either shipped map (their settlements are chains, so there is no trunk to
     share). That is a content fact, and it is only a *content* fact if the
@@ -80,11 +89,34 @@ def rolling(size: int = 96, relief: float = 12.0) -> np.ndarray:
                      + 0.4 * np.sin((xx + yy) / 4.0)) + 500.0
 
 
-def eight_connected_reference(h, water, slope, p):
-    """The cost graph exactly as it was written before segment masks."""
+def pre_m9a(**kw):
+    """The cost model exactly as it shipped before M9a: terrain slope, walled.
+
+    Kept as a constructible arm rather than a comment because it is how the
+    M9a A/B was measured (arc road networks 2 -> 1, and the meridian control
+    that says relaxing the wall on its own buys a 41.7 deg road). Every test
+    that wants "the old behaviour" builds it here, so there is exactly one
+    definition of what the old behaviour was.
+    """
+    d = dict(grade_cost=0.0, max_grade_deg=float("inf"),
+             sidehill_cost=18.0, sidehill_ref_deg=10.0, sidehill_exp=2.5,
+             max_sidehill_deg=26.0)
+    d.update(kw)
+    return rd.RoadParams(**d)
+
+
+def eight_connected_reference(h, water, slope, cellsize, p):
+    """The cost graph written out independently, 8-connected, no masks.
+
+    Independently: this is a second implementation of the shipping cost
+    expression (both slopes, both blocks), not a call into it, so k=1 equality
+    tests the mask machinery against a reading of the model rather than
+    against itself.
+    """
     H, W = h.shape
     n = H * W
     idx = np.arange(n).reshape(H, W)
+    step = cellsize * p.plan_step
     rows, cols, costs = [], [], []
     for dr, dc in [(-1, -1), (-1, 0), (-1, 1), (0, -1),
                    (0, 1), (1, -1), (1, 0), (1, 1)]:
@@ -96,11 +128,15 @@ def eight_connected_reference(h, water, slope, p):
         dst = idx[r0:r1, c0:c1].ravel()
         length = np.hypot(dr, dc)
         s = np.maximum(slope[sr0:sr1, sc0:sc1].ravel(), slope[r0:r1, c0:c1].ravel())
+        dh = np.abs(h[r0:r1, c0:c1].ravel() - h[sr0:sr1, sc0:sc1].ravel())
         w = water[sr0:sr1, sc0:sc1].ravel() | water[r0:r1, c0:c1].ravel()
-        cost = length * (1.0 + p.slope_cost * (s / p.slope_ref_deg) ** 2)
+        grade = np.where(~w, np.degrees(np.arctan(dh / (length * step))), 0.0)
+        cost = length * (1.0
+                         + p.grade_cost * (grade / p.grade_ref_deg) ** p.grade_exp
+                         + p.sidehill_cost * (s / p.sidehill_ref_deg) ** p.sidehill_exp)
         cost = np.where(w, length * p.water_penalty, cost)
-        cost = np.where(s > p.max_slope_deg, np.inf, cost)
-        cost = np.where(w & (s > p.max_slope_deg), length * p.water_penalty, cost)
+        blocked = ((grade > p.max_grade_deg) | (s > p.max_sidehill_deg)) & ~w
+        cost = np.where(blocked, np.inf, cost)
         keep = np.isfinite(cost)
         rows.append(src[keep]); cols.append(dst[keep]); costs.append(cost[keep])
     return coo_matrix((np.concatenate(costs),
@@ -160,33 +196,41 @@ class MaskGeometry(unittest.TestCase):
 
 class CostGraph(unittest.TestCase):
     def test_mask_k1_matches_eight_connected(self):
-        h = ridged(64)
-        p = rd.RoadParams(plan_step=2, mask_k=1, max_bridge_cells=0)
-        hh, water, slope = rd._plan_grid(h, 300.0, CELL, p)
-        want = eight_connected_reference(hh, water, slope, p)
-        got = rd._edge_costs(hh, water, slope, CELL, p)
-        self.assertEqual(want.nnz, got.nnz)
-        self.assertTrue(np.array_equal(want.indptr, got.indptr))
-        self.assertTrue(np.array_equal(want.indices, got.indices))
-        np.testing.assert_array_equal(want.data, got.data)
-        # and the graph is not trivially everything-or-nothing
-        self.assertGreater(want.nnz, 0)
-        self.assertLess(want.nnz, 8 * hh.size)
+        # `rolling`, not `ridged`: on `ridged` almost everything is blocked and
+        # the few edges that survive sit on ridge crests where both slope and
+        # grade are ~0, so the comparison used to hold for any cost expression
+        # at all. The fixture has to admit edges whose cost actually varies —
+        # asserted below, because that is the part nobody watches fail.
+        h = rolling(64)
+        for p in (rd.RoadParams(plan_step=2, mask_k=1, max_bridge_cells=0),
+                  pre_m9a(plan_step=2, mask_k=1, max_bridge_cells=0)):
+            hh, water, slope = rd._plan_grid(h, 495.0, CELL, p)
+            want = eight_connected_reference(hh, water, slope, CELL, p)
+            got = rd._edge_costs(hh, water, slope, CELL, p)
+            self.assertEqual(want.nnz, got.nnz)
+            self.assertTrue(np.array_equal(want.indptr, got.indptr))
+            self.assertTrue(np.array_equal(want.indices, got.indices))
+            np.testing.assert_array_equal(want.data, got.data)
+            # and the graph is neither empty nor a constant
+            self.assertGreater(want.nnz, 0)
+            self.assertGreater(want.data.max() / want.data.min(), 3.0,
+                               "fixture costs are too uniform to compare")
 
     def test_long_edges_cannot_cross_a_wall(self):
         """A one-cell ridge is invisible to an endpoint-only cost rule."""
         size = 48
         h = flat(size, 100.0)
         h[:, size // 2] = 4000.0          # a single impassable column
-        p = rd.RoadParams(plan_step=1, mask_k=4, max_slope_deg=28.0,
-                          max_bridge_cells=0)
+        p = rd.RoadParams(plan_step=1, mask_k=4, max_bridge_cells=0)
         hh, water, slope = rd._plan_grid(h, -1.0, CELL, p)
         H, W = hh.shape
         g = rd._edge_costs(hh, water, slope, CELL, p).tocoo()
         crossings = ((g.row % W < W // 2 - 1) & (g.col % W > W // 2 + 1)).sum()
         self.assertEqual(crossings, 0, "a mask edge stepped over the wall")
 
-        # positive control: cost the same mask on endpoints only and it leaks
+        # positive control: cost the same mask on endpoints only and it leaks.
+        # Both endpoints of a span across the wall are on the flat, so every
+        # term the model has — grade AND side-hill — reads zero there.
         leaked = 0
         for dr, dc in rd.mask_offsets(4):
             for r in range(H):
@@ -195,7 +239,10 @@ class CostGraph(unittest.TestCase):
                     if not (0 <= r2 < H and 0 <= c2 < W):
                         continue
                     s = max(slope[r, c], slope[r2, c2])
-                    if s <= p.max_slope_deg and c < W // 2 - 1 and c2 > W // 2 + 1:
+                    run = np.hypot(dr, dc) * CELL * p.plan_step
+                    grade = math.degrees(math.atan(abs(hh[r2, c2] - hh[r, c]) / run))
+                    if (s <= p.max_sidehill_deg and grade <= p.max_grade_deg
+                            and c < W // 2 - 1 and c2 > W // 2 + 1):
                         leaked += 1
         self.assertGreater(leaked, 0, "control failed to demonstrate the hazard")
 
@@ -210,6 +257,161 @@ class CostGraph(unittest.TestCase):
         self.assertFalse(deep[~water].any(), "land was marked deep water")
         # the guard is a guard: turning it off admits the sea again
         self.assertFalse(rd._deep_water(water, rd.RoadParams(max_bridge_cells=0)).any())
+
+
+class CostModel(unittest.TestCase):
+    """M9a: the road's own grade, and the hillside it is cut into, are two
+    different slopes and the model now says so.
+
+    The fixture for all of these is a constant-slope ramp, which is the one
+    shape where the distinction is unambiguous: every cell has the *same*
+    terrain slope, so a model that prices terrain cannot tell a contour
+    traverse from a fall-line climb, and one that prices grade must.
+    """
+
+    @staticmethod
+    def ramp(size=64, slope_deg=30.0):
+        """Constant-slope hillside falling along +x."""
+        yy, xx = np.mgrid[0:size, 0:size].astype(np.float64)
+        return 2000.0 - xx * CELL * math.tan(math.radians(slope_deg))
+
+    def test_a_traverse_costs_less_than_the_fall_line(self):
+        p = rd.RoadParams(plan_step=1, mask_k=1, max_bridge_cells=0,
+                          max_sidehill_deg=90.0, max_grade_deg=90.0)
+        h = self.ramp(32, 20.0)
+        hh, water, slope = rd._plan_grid(h, -1.0, CELL, p)
+        g = rd._edge_costs(hh, water, slope, CELL, p).tolil()
+        W = hh.shape[1]
+        node = 10 * W + 10
+        along_contour = g[node, node + W]          # same column, next row
+        up_fall_line = g[node, node + 1]           # same row, next column
+        # 4.5x, and the whole difference is the grade term: both edges are the
+        # same length across the same 20 deg hillside, so the side-hill price
+        # they pay is identical
+        self.assertGreater(up_fall_line, along_contour * 4.0,
+                           "the fall line is not paying for its climb")
+        # control: the pre-M9a model prices the hillside, so on a constant
+        # slope the two directions cost *exactly* the same and the road has
+        # no reason to prefer either
+        q = pre_m9a(plan_step=1, mask_k=1, max_bridge_cells=0,
+                    max_sidehill_deg=90.0)
+        g2 = rd._edge_costs(hh, water, slope, CELL, q).tolil()
+        self.assertAlmostEqual(g2[node, node + W], g2[node, node + 1], places=9)
+
+    def test_the_grade_block_refuses_the_climb_and_keeps_the_traverse(self):
+        p = rd.RoadParams(plan_step=1, mask_k=1, max_bridge_cells=0,
+                          max_sidehill_deg=90.0)   # side-hill deliberately open
+        h = self.ramp(32, 30.0)                    # 30 deg: over the 15 deg block
+        hh, water, slope = rd._plan_grid(h, -1.0, CELL, p)
+        g = rd._edge_costs(hh, water, slope, CELL, p)
+        W = hh.shape[1]
+        node = 10 * W + 10
+        self.assertEqual(g[node, node + 1], 0.0, "an over-grade climb survived")
+        self.assertGreater(g[node, node + W], 0.0, "the contour was blocked too")
+        # so a road may cross this hillside, but only along it
+        lines = rd.plan_roads(h, -1.0, CELL, [(80.0, 80.0), (80.0, 200.0)], p)
+        self.assertEqual(len(lines), 1)
+        lines = rd.plan_roads(h, -1.0, CELL, [(80.0, 80.0), (200.0, 80.0)], p)
+        self.assertEqual(len(lines), 0, "a road climbed a 30 deg fall line")
+
+    def test_a_town_on_steep_ground_is_reachable(self):
+        """`sundered_arc`'s defect in miniature.
+
+        A site standing on ground steeper than the old terrain-slope wall was
+        not merely expensive to reach — every edge touching its own cell was
+        infinite, so it was isolated by construction and the map shipped two
+        unconnected road networks. Nothing about that site is unbuildable: it
+        is a shelf on a hillside, and a road reaches it along the contour.
+        """
+        size = 48
+        h = flat(size, 100.0)
+        yy, xx = np.mgrid[0:size, 0:size].astype(np.float64)
+        # a 29 deg hillside occupying the right third, with the town on it
+        band = xx > size * 2 // 3
+        h = np.where(band, 100.0 + (xx - size * 2 // 3) * CELL
+                     * math.tan(math.radians(29.0)), 100.0)
+        town = ((size - 4) * CELL, size * CELL / 2)
+        port = (4 * CELL, size * CELL / 2)
+        self.assertEqual(len(rd.plan_roads(h, -1.0, CELL, [port, town],
+                                           pre_m9a(plan_step=1, mask_k=2,
+                                                   max_bridge_cells=0))), 0,
+                         "control: the old wall was supposed to isolate it")
+        p = rd.RoadParams(plan_step=1, mask_k=2, max_bridge_cells=0)
+        self.assertEqual(len(rd.plan_roads(h, -1.0, CELL, [port, town], p)), 1)
+
+    def test_a_climb_cannot_hide_inside_one_edge(self):
+        """The other wrong reading: endpoints only.
+
+        A mask edge is up to 4 planning cells long, so a rule that reads the
+        rise between its ends alone sees nothing at all in a climb that comes
+        back down inside it. That is not academic — it is how Meridian Basin's
+        two halves joined over a pitch measuring p95 21 deg on the delivered
+        road, and the fix is summing |dh| along the sub-steps so the climb and
+        the descent both count.
+        """
+        size = 24
+        h = flat(size, 100.0)
+        h[:, 1::2] = 106.0                 # +6 elmos every other column
+        p = rd.RoadParams(plan_step=1, mask_k=2, max_bridge_cells=0)
+        hh, water, slope = rd._plan_grid(h, -1.0, CELL, p)
+        W = hh.shape[1]
+        g = rd._edge_costs(hh, water, slope, CELL, p)
+        node = 10 * W + 10
+        # 12 elmos of climbing over a 16-elmo run is 37 deg, well past the block
+        self.assertEqual(g[node, node + 2], 0.0, "a hidden climb was admitted")
+        # control: the endpoints of that edge are level, so an endpoint-only
+        # rule reads zero grade and would wave it through — and the side-hill
+        # term cannot catch it either, because the bumps are gentle
+        self.assertEqual(hh[10, 10], hh[10, 12])
+        self.assertLess(slope[10, 10:13].max(), p.max_sidehill_deg)
+
+    def test_grade_is_a_rise_over_the_run_the_planning_grid_walks(self):
+        """The units trap: `h` is decimated, so the run is plan_step cells.
+
+        Reading the rise against the full-res cell size would report grades
+        `plan_step` times too steep and the block would fire on ground a road
+        walks up comfortably.
+        """
+        h = self.ramp(64, 20.0)
+        costs = {}
+        for step in (1, 2, 4):
+            p = rd.RoadParams(plan_step=step, mask_k=1, max_bridge_cells=0,
+                              max_sidehill_deg=90.0, max_grade_deg=90.0)
+            hh, water, slope = rd._plan_grid(h, -1.0, CELL, p)
+            W = hh.shape[1]
+            node = 4 * W + 4
+            # cost per unit of planning length, so the only thing that can
+            # differ between steps is the grade the model read
+            costs[step] = rd._edge_costs(hh, water, slope, CELL, p)[node, node + 1]
+        self.assertAlmostEqual(costs[1], costs[2], places=6)
+        self.assertAlmostEqual(costs[1], costs[4], places=6)
+        # control: the same reading taken against the full-res cell — i.e. the
+        # bug — scales the tangent by plan_step, so a 20 deg ramp reads 55 deg
+        # at plan_step 4 and the 15 deg block fires on ground a road walks up
+        bad = {}
+        for step in (1, 4):
+            hh = h[::step, ::step]
+            bad[step] = math.degrees(math.atan(abs(hh[4, 5] - hh[4, 4]) / CELL))
+        self.assertAlmostEqual(math.tan(math.radians(bad[4]))
+                               / math.tan(math.radians(bad[1])), 4.0, places=6)
+        self.assertGreater(bad[4], rd.RoadParams().max_grade_deg)
+        self.assertLess(bad[1], rd.RoadParams().max_grade_deg + 6.0)
+
+    def test_water_is_still_level_deck_under_both_slopes(self):
+        """A bridge pays the water toll and neither slope, as before M9a."""
+        size = 32
+        h = flat(size, 100.0)
+        h[:, 12:16] = -50.0                        # a channel with steep banks
+        p = rd.RoadParams(plan_step=1, mask_k=1, max_bridge_cells=12)
+        hh, water, slope = rd._plan_grid(h, 0.0, CELL, p)
+        W = hh.shape[1]
+        g = rd._edge_costs(hh, water, slope, CELL, p).tolil()
+        # the bank cell -> water cell step has a 150-elmo drop over one cell,
+        # far past max_grade_deg, and it must still be crossable
+        self.assertGreater(g[10 * W + 11, 10 * W + 12], 0.0,
+                           "the grade block walled off a bridge abutment")
+        self.assertAlmostEqual(g[10 * W + 12, 10 * W + 13], p.water_penalty,
+                               places=9)
 
 
 class Topology(unittest.TestCase):
@@ -347,20 +549,25 @@ class Contract(unittest.TestCase):
             self.assertLessEqual(b, a + 1e-9, f"{costs}")
         self.assertLess(costs[-1], costs[0], "a k=4 mask bought nothing at all")
 
-    def test_slope_exponent_steepens_the_penalty(self):
-        p2 = rd.RoadParams(plan_step=1, mask_k=1, slope_exp=2.0, max_bridge_cells=0)
-        p25 = rd.RoadParams(plan_step=1, mask_k=1, slope_exp=2.5, max_bridge_cells=0)
-        h = rolling(40)                     # slopes straddle slope_ref_deg
-        hh, water, slope = rd._plan_grid(h, -1.0, CELL, p2)
-        self.assertLess(slope.min(), p2.slope_ref_deg)
-        self.assertGreater(slope.max(), p2.slope_ref_deg)
-        a = rd._edge_costs(hh, water, slope, CELL, p2)
-        b = rd._edge_costs(hh, water, slope, CELL, p25)
-        self.assertEqual(a.nnz, b.nnz, "the exponent must not change what is passable")
-        # above the reference slope the steeper exponent costs more, below less:
-        # 2.5 is a contrast knob, not a global multiplier
-        self.assertGreater(b.data.max(), a.data.max())
-        self.assertLess(b.data.min(), a.data.min())
+    def test_each_exponent_steepens_its_own_penalty(self):
+        h = rolling(40)                     # slopes straddle sidehill_ref_deg
+        for key, ref in (("sidehill_exp", "sidehill_ref_deg"),
+                         ("grade_exp", "grade_ref_deg")):
+            p2 = rd.RoadParams(plan_step=1, mask_k=1, max_bridge_cells=0,
+                               **{key: 2.0})
+            p25 = rd.RoadParams(plan_step=1, mask_k=1, max_bridge_cells=0,
+                                **{key: 2.5})
+            hh, water, slope = rd._plan_grid(h, -1.0, CELL, p2)
+            self.assertLess(slope.min(), getattr(p2, ref))
+            self.assertGreater(slope.max(), getattr(p2, ref))
+            a = rd._edge_costs(hh, water, slope, CELL, p2)
+            b = rd._edge_costs(hh, water, slope, CELL, p25)
+            self.assertEqual(a.nnz, b.nnz,
+                             f"{key} must not change what is passable")
+            # above the reference the steeper exponent costs more, below less:
+            # 2.5 is a contrast knob, not a global multiplier
+            self.assertGreater(b.data.max(), a.data.max(), key)
+            self.assertLess(b.data.min(), a.data.min(), key)
 
 
 if __name__ == "__main__":
