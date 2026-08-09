@@ -782,19 +782,32 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     starts: list[tuple[float, float]] = []
     ring = [l for l in big if sizes[l] * cell * cell > 2.5e6] or big
     per_island = {l: 0 for l in ring}
+    # The separation is GLOBAL, and it used to be per-island: each island's
+    # picks were made on their own masked copy of the score, so the round
+    # robin never saw the pads it had already placed elsewhere. Measured
+    # (PLAN-maps M9b), the shipped skerry_reach put two pads **3 496 elmos**
+    # apart across a strait against a 3 600 constraint, and sundered_arc
+    # 3 558. Carrying one accumulated exclusion field costs one pick per call
+    # instead of re-deriving the island's whole greedy prefix, and is exactly
+    # the old within-island behaviour when there is only one island.
+    taken = np.zeros(h.shape, dtype=bool)
     while len(starts) < N_STARTS and ring:
         l = min(ring, key=lambda l_: per_island[l_])
         s_isl = np.where(labels == l, score, 0.0)
-        got = st.pick_sites(s_isl, cell, per_island[l] + 1, sp)
-        if len(got) <= per_island[l]:
+        got = st.pick_sites(s_isl, cell, 1, sp, forbidden=taken)
+        if not got:
             ring.remove(l)                        # island is full
             continue
-        starts.append(got[per_island[l]])
+        sx, sz = got[0]
+        starts.append(got[0])
         per_island[l] += 1
+        taken |= np.hypot(xx - sx, zz - sz) < sp.min_separation
     if len(starts) < N_STARTS:
         raise SystemExit(
-            f"only {len(starts)} start pads fit — raise --landmass or lower "
-            f"--islands (need {N_STARTS} buildable, separated sites)")
+            f"only {len(starts)} start pads fit on {len(per_island)} island(s) "
+            f"— raise --landmass or lower --islands (need {N_STARTS} sites "
+            f"scoring above zero and {sp.min_separation:.0f} elmos apart; "
+            f"{'; '.join(f'island {l_}: {n}' for l_, n in per_island.items())})")
 
     # flatten the pads (guaranteed dry: pad level >= +18)
     for sx, sz in starts:
@@ -817,6 +830,16 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     # has no successor here — see PLAN-maps M9a.
     rp = rd.RoadParams(plan_step=(1 if fast else 4), road_width=44.0,
                        water_penalty=80.0)
+    # ...and the two now have to AGREE about buildable ground. M9a FIND 1 was
+    # a town site standing where the road cost field could not take a single
+    # step, so the planner handed it its own one-site network and the map
+    # gained a second, unexplained road system. `settlement_score` reads a
+    # 320-elmo disc of full-res slope; the planner reads one decimated
+    # planning cell. This is the planner's own field, so the site placer is
+    # answering the planner's question rather than a similar-looking one.
+    # Pads do not need it: they are levelled over a 420-elmo disc above,
+    # which is ~13 planning cells, so a pad makes its own cell buildable.
+    unbuildable = rd.unbuildable_mask(h, 0.0, cell, rp)
     polylines: list[np.ndarray] = []
     towns: list[tuple[float, float]] = []
     for l in big:
@@ -824,7 +847,8 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
         want = int(np.clip(area / 6.0e6, 1, 4))
         s_isl = np.where((labels == l) & ~pad_excl, score, 0.0)
         sites = st.pick_sites(s_isl, cell, want,
-                              st.SettleParams(min_separation=2000.0))
+                              st.SettleParams(min_separation=2000.0),
+                              forbidden=unbuildable)
         towns += sites
         # connect this island's towns + its start pads into one network
         isl_starts = [p for p in starts
@@ -1144,9 +1168,13 @@ def main():
                          "M8q for why it routes over D-infinity by default. "
                          "⚠ D-infinity redistributes the flat ground (it has "
                          "MORE of it than the D8 arm at every slope "
-                         "threshold, just spread differently), so the arc "
-                         "wants --landmass 0.30 to fit 8 separated start "
-                         "pads where the D8 arm fit them at 0.26.")
+                         "threshold, just spread differently). M8q read that "
+                         "as needing --landmass 0.30 to fit 8 separated start "
+                         "pads where the D8 arm fit them at 0.26; M9b found "
+                         "the real cause was the placer excluding a bounding "
+                         "box rather than a disc, and 0.26 fits 8 now. The "
+                         "shipped sundered_arc stays at 0.30, where every "
+                         "M8t/M8u/M8v arm was ranked.")
     ap.add_argument("--router", default="auto",
                     choices=("auto", "d8", "dinf", "mfd"),
                     help="flow router the erosion solver routes over. "

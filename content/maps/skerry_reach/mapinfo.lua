@@ -69,7 +69,7 @@ local mapinfo = {
         [2] = { startPos = { x = 14184, z = 4264 } },
         [3] = { startPos = { x = 13248, z = 14200 } },
         [4] = { startPos = { x = 1744, z = 13536 } },
-        [5] = { startPos = { x = 3488, z = 9792 } },
+        [5] = { startPos = { x = 3360, z = 9760 } },
         [6] = { startPos = { x = 8848, z = 2784 } },
         [7] = { startPos = { x = 3464, z = 2576 } },
     },

@@ -48,6 +48,8 @@ Every metric carries a positive control: a deliberately-wrong construction that
 the same assertion must reject. A guard nobody has watched fail is not a guard.
 """
 
+import contextlib
+import io
 import math
 import os
 import sys
@@ -488,6 +490,117 @@ class Topology(unittest.TestCase):
         # ...and a demanding lambda rejects it: route 0->3 costs 3, direct 1,
         # so a detour factor above 3 has to leave the loop unbuilt
         self.assertEqual(rd._gabriel_extras(pts, pc, tree, 3.5), [])
+
+
+class Buildable(unittest.TestCase):
+    """`unbuildable_mask`: the placer/planner disagreement, as a field.
+
+    M9a FIND 1 was a Sundered Arc town site standing on a planning cell the
+    cost field could not take one step away from — `settlement_score` called
+    it buildable, the planner called every edge touching it infinite, and
+    nothing checked. The map got a second road network out of it. These pin
+    that the condition is detectable, that it is *narrower* than "the map has
+    two components" (which is legitimate topology), and that the mask lines
+    up cell-for-cell with the node `plan_roads` would actually snap a site to.
+    """
+
+    def steep_knoll(self, size=96, plan_step=4):
+        """Flat ground with one planning cell surrounded by a wall of slope.
+
+        The knoll's own cell is level, so `settlement_score` likes it; every
+        way off it crosses ground past `max_sidehill_deg`.
+        """
+        h = flat(size, 100.0)
+        r = c = size // 2
+        yy, xx = np.mgrid[0:size, 0:size]
+        ring = (np.maximum(np.abs(yy - r), np.abs(xx - c)) <= plan_step * 2)
+        core = (np.maximum(np.abs(yy - r), np.abs(xx - c)) <= 1)
+        h[ring & ~core] = 100.0 + 4000.0
+        return h
+
+    def test_a_cell_the_cost_field_cannot_leave_is_flagged(self):
+        p = rd.RoadParams(plan_step=4, mask_k=4, max_bridge_cells=0)
+        h = self.steep_knoll()
+        bad = rd.unbuildable_mask(h, -1.0, CELL, p)
+        size = h.shape[0]
+        self.assertTrue(bad[size // 2, size // 2],
+                        "the walled knoll must be flagged")
+        # ...and it is not flagging the map: ordinary flat ground is fine
+        self.assertLess(bad.mean(), 0.2)
+        self.assertFalse(bad[4, 4])
+
+        # positive control: without the wall the same cell is buildable
+        self.assertFalse(rd.unbuildable_mask(flat(size, 100.0), -1.0, CELL,
+                                             p)[size // 2, size // 2])
+
+    def test_two_walled_basins_are_topology_not_a_disagreement(self):
+        """The Meridian shape: a real forest, and nothing flagged.
+
+        The mask has to be narrower than "unconnected", or every legitimately
+        split map would start rejecting its own sites.
+        """
+        size = 96
+        h = flat(size, 100.0)
+        h[size // 2 - 1:size // 2 + 2, :] = 6000.0
+        p = rd.RoadParams(plan_step=1, mask_k=2, max_bridge_cells=0)
+        bad = rd.unbuildable_mask(h, -1.0, CELL, p)
+        for pt in [(200.0, 100.0), (600.0, 120.0), (200.0, 660.0), (600.0, 640.0)]:
+            self.assertFalse(bad[int(pt[1] / CELL), int(pt[0] / CELL)],
+                             "a site in an ordinary basin was flagged")
+
+    def test_the_mask_agrees_with_the_node_plan_roads_snaps_to(self):
+        """Upsampling has to use the planner's own rounding, not floor.
+
+        A mask built with floor is off by half a planning cell over most of
+        the grid, so it would forbid one cell and the planner would use its
+        neighbour.
+        """
+        p = rd.RoadParams(plan_step=4, mask_k=4, max_bridge_cells=0)
+        h = self.steep_knoll()
+        size = h.shape[0]
+        bad = rd.unbuildable_mask(h, -1.0, CELL, p)
+        hp, water, slope = rd._plan_grid(h, -1.0, CELL, p)
+        graph = rd._edge_costs(hp, water, slope, CELL, p,
+                               deep=rd._deep_water(water, p))
+        deg = np.asarray(graph.getnnz(axis=1)).reshape(hp.shape)
+        PW = hp.shape[1]
+        rng = np.random.default_rng(5)
+        for _ in range(200):
+            r = int(rng.integers(0, size)); c = int(rng.integers(0, size))
+            x, z = c * CELL, r * CELL
+            node = (int(np.clip(round(z / (CELL * p.plan_step)), 0, hp.shape[0] - 1))
+                    * PW
+                    + int(np.clip(round(x / (CELL * p.plan_step)), 0, PW - 1)))
+            self.assertEqual(bool(bad[r, c]), deg.ravel()[node] == 0,
+                             f"mask and planner disagree at ({r},{c})")
+
+    def test_plan_roads_names_an_isolated_site(self):
+        """The report has to distinguish the two reasons for a forest."""
+        p = rd.RoadParams(plan_step=4, mask_k=4, max_bridge_cells=0)
+        h = self.steep_knoll(size=128)
+        mid = 64 * CELL
+        pts = [(80.0, 80.0), (800.0, 100.0), (mid, mid)]
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rd.plan_roads(h, -1.0, CELL, pts, p)
+        out = buf.getvalue()
+        self.assertIn("unconnected networks", out)
+        self.assertIn("isolated BY CONSTRUCTION", out)
+        self.assertIn(f"#2 at ({mid:.0f},{mid:.0f})", out)
+
+        # positive control: two basins split by a wall are a forest and must
+        # NOT be reported as a disagreement
+        size = 96
+        h2 = flat(size, 100.0)
+        h2[size // 2 - 1:size // 2 + 2, :] = 6000.0
+        p2 = rd.RoadParams(plan_step=1, mask_k=2, max_bridge_cells=0)
+        buf2 = io.StringIO()
+        with contextlib.redirect_stdout(buf2):
+            rd.plan_roads(h2, -1.0, CELL,
+                          [(200.0, 100.0), (600.0, 120.0),
+                           (200.0, 660.0), (600.0, 640.0)], p2)
+        self.assertIn("unconnected networks", buf2.getvalue())
+        self.assertNotIn("isolated BY CONSTRUCTION", buf2.getvalue())
 
 
 class Reuse(unittest.TestCase):

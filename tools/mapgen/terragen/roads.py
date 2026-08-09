@@ -47,7 +47,10 @@ test that wants the old behaviour builds it there.
 Topology is a per-component minimum spanning forest (every reachable
 settlement joined, disconnected groups given their own network rather than
 silently dropped) plus Gabriel-graph shortcuts that beat a detour factor of
-`detour_lambda`.
+`detour_lambda`. A forest is the right answer for two basins a wall apart and
+the wrong one for a site standing on ground the cost field cannot leave —
+`unbuildable_mask` is that condition as a `settle.pick_sites(forbidden=...)`
+field, and `plan_roads` names it when it meets it (PLAN-maps M9a FIND 1).
 """
 from __future__ import annotations
 
@@ -255,6 +258,50 @@ def _edge_costs(h, water, slope, cellsize, p: RoadParams,
     return coo_matrix((costs, (rows, cols)), shape=(n, n)).tocsr()
 
 
+def unbuildable_mask(
+    height: np.ndarray,
+    water_level: float,
+    cellsize: float,
+    params: RoadParams | None = None,
+) -> np.ndarray:
+    """Heightmap-resolution mask of ground the road planner cannot leave.
+
+    A settlement standing here is isolated **by construction**: every mask
+    edge that touches its planning cell is infinite, so the planner cannot
+    reach it from anywhere and hands it its own one-site "network". The map
+    then quietly gains a second road system that no gameplay reading of it
+    will explain.
+
+    That is not hypothetical — it is M9a FIND 1. One Sundered Arc town site
+    stood on a planning cell reading 29.3 deg against a 26 deg side-hill
+    wall, and `settlement_score` (which calls ground under 8 deg buildable,
+    averaged over a 320-elmo disc) and the road planner (which reads the
+    single decimated planning cell) disagreed about whether that was ground
+    you could build on. **Nothing checked.** Feed this to
+    `settle.pick_sites(forbidden=...)` and the disagreement becomes a
+    rejected site instead of a silent second network.
+
+    Deliberately a *necessary* condition only: it says the cost field cannot
+    take a single step off the cell, not that the cell is unreachable from
+    some particular other site. Genuine map topology — two basins a wall
+    apart, two islands — is a real spanning forest and stays one; only
+    isolated-by-construction cells are flagged. `plan_roads` reports the same
+    condition when it meets it, so the two never drift apart.
+    """
+    p = params or RoadParams()
+    h, water, slope = _plan_grid(height, water_level, cellsize, p)
+    graph = _edge_costs(h, water, slope, cellsize, p, deep=_deep_water(water, p))
+    bad = np.asarray(graph.getnnz(axis=1) == 0).reshape(h.shape)
+
+    # upsample by the same rounding `plan_roads.to_node` uses, so a cell this
+    # mask forbids is exactly the cell that planner would snap the site to
+    H, W = height.shape
+    PH, PW = h.shape
+    pr = np.clip(np.rint(np.arange(H) / p.plan_step).astype(np.int64), 0, PH - 1)
+    pc = np.clip(np.rint(np.arange(W) / p.plan_step).astype(np.int64), 0, PW - 1)
+    return bad[pr[:, None], pc[None, :]]
+
+
 def _mst_forest(pair_cost: np.ndarray) -> list[tuple[int, int]]:
     """Minimum spanning *forest* over endpoint pairs (Prim's per component).
 
@@ -395,6 +442,23 @@ def plan_roads(
     if nets > 1:
         print(f"  roads: {k} sites split into {nets} unconnected networks by the "
               f"cost field; each gets its own tree ({len(edges)} links total)")
+        # ...and say WHICH KIND of split it is. A spanning forest is the right
+        # answer for two basins a wall apart; it is the wrong answer for a site
+        # the cost field cannot take one step away from, which is a placer /
+        # planner disagreement about buildable ground and was M9a FIND 1.
+        # `unbuildable_mask` is the same condition offered to `pick_sites` as a
+        # `forbidden` field, so a generator can reject the site instead.
+        out_deg = np.asarray(graph.getnnz(axis=1)).ravel()
+        stranded = [i for i in range(k) if out_deg[nodes[i]] == 0]
+        if stranded:
+            where = ", ".join(f"#{i} at ({endpoints[i][0]:.0f},"
+                              f"{endpoints[i][1]:.0f})" for i in stranded)
+            print(f"  roads: WARNING {len(stranded)} of those sites are "
+                  f"isolated BY CONSTRUCTION — every mask edge touching their "
+                  f"own planning cell is impassable, so no route to them can "
+                  f"exist at any cost: {where}. The site placer and the road "
+                  f"cost field disagree about buildable ground here; see "
+                  f"roads.unbuildable_mask.")
 
     world = cellsize * p.plan_step
 

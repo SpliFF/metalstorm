@@ -67,11 +67,11 @@ local mapinfo = {
         [0] = { startPos = { x = 2352, z = 4088 } },
         [1] = { startPos = { x = 11504, z = 12272 } },
         [2] = { startPos = { x = 9920, z = 5752 } },
-        [3] = { startPos = { x = 1728, z = 480 } },
-        [4] = { startPos = { x = 15160, z = 10192 } },
-        [5] = { startPos = { x = 6008, z = 7200 } },
-        [6] = { startPos = { x = 6192, z = 4136 } },
-        [7] = { startPos = { x = 10368, z = 9360 } },
+        [3] = { startPos = { x = 1728, z = 520 } },
+        [4] = { startPos = { x = 8360, z = 10440 } },
+        [5] = { startPos = { x = 6384, z = 7168 } },
+        [6] = { startPos = { x = 5328, z = 664 } },
+        [7] = { startPos = { x = 15032, z = 10184 } },
     },
 }
 return mapinfo
