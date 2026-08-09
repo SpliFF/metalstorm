@@ -359,7 +359,7 @@ def connect_starts(h: np.ndarray, cell: float, starts,
                    flat_half_width: float = 140.0,
                    taper: float = 300.0,
                    max_lift: float = 250.0,
-                   max_crossings: int = 6,
+                   max_crossings: "int | None" = None,
                    log=None):
     """Carve sills until every start can reach every other, for every class.
 
@@ -369,6 +369,13 @@ def connect_starts(h: np.ndarray, cell: float, starts,
     `sill_depth` defaults to half the shallowest wade depth among `classes`,
     so one ford serves all of them with margin (6 elmos with INFANTRY in the
     set, 10 without).
+
+    `max_crossings` defaults to **what the map asks for**: each carve joins
+    two components, so N components need N-1 sills, and a constant budget is
+    a silent truncation on any map that is more split than the constant. The
+    arc needed 1 of 6; `skerry_reach` is 8 components for armour and needs 7,
+    so the old default of 6 would have left it failing with no error
+    (PLAN-maps M8y). Pass an explicit int to cap the work anyway.
     """
     say = log or (lambda _m: None)
     ref = strictest(classes)
@@ -376,11 +383,18 @@ def connect_starts(h: np.ndarray, cell: float, starts,
         sill_depth = sill_depth_for(classes)
     tan_limit = math.tan(math.radians(ref.max_slope_deg))
     crossings: list[Crossing] = []
+    budget = max_crossings
 
-    for _ in range(max_crossings):
+    while True:
         rise = slope_rise(h, cell)
         r = read_connectivity(h, cell, starts, ref, rise)
         if r.ok or r.stranded:
+            break
+        if budget is None:
+            budget = len(r.groups) - 1
+        if len(crossings) >= budget:
+            say(f"  connect: crossing budget spent ({budget}) with "
+                f"{len(r.groups)} components still split")
             break
         lab, _ = ndimage.label(passable(h, cell, ref, rise), structure=_STRUCT)
 
@@ -411,7 +425,8 @@ def connect_starts(h: np.ndarray, cell: float, starts,
                     break
             if hi is None:
                 say(f"  connect: no route under a {max_lift:.0f}-elmo sill "
-                    f"joins starts {sorted(sa)} and {sorted(sb)}")
+                    f"joins starts {sorted(sa)} and {sorted(sb)} — blocked by "
+                    + _blocker(h, rise, tan_limit, ref, max_lift, src, dst))
                 continue
             for _ in range(16):
                 mid = 0.5 * (lo + hi)
@@ -461,6 +476,26 @@ def _pair_distance(starts, sa, sb) -> float:
             bx, bz = starts[j]
             best = min(best, math.hypot(ax - bx, az - bz))
     return best
+
+
+def _blocker(h, rise, tan_limit, ref, max_lift, src, dst) -> str:
+    """Which half of the search mask a hopeless pair actually failed — and it
+    is worth one extra label pass to know, because the two have opposite
+    fixes and the plain message reads as the wrong one.
+
+    `skerry_reach` is the case that forced this (PLAN-maps M8y): four of its
+    starts report "no route under a 250-elmo sill", which reads as an ocean
+    too deep to fill. The deepest cell on that map is **89.7 elmos** — a
+    250-elmo lift already floods every seabed cell there, and 2 000 joins
+    nothing more. What separates those islands is the **slope** of the
+    submarine flanks, so no sill of any depth can answer it and the lever is
+    a graded route, not a bigger lift.
+    """
+    if _joined(h, rise, float("inf"), ref.max_water_depth, max_lift, src, dst):
+        return (f"seabed SLOPE — a route exists at this depth once the "
+                f"{ref.max_slope_deg:.0f}-degree limit is dropped, so no "
+                f"sill can join this pair")
+    return "water deeper than the lift, all the way along every route"
 
 
 def _joined(h, rise, tan_limit, depth, lift, src, dst) -> bool:

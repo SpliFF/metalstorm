@@ -256,6 +256,70 @@ class TestMoreThanTwoGroups(unittest.TestCase):
         self.assertEqual(sorted(len(v) for v in veh.groups.values()), [1, 2])
 
 
+class TestAHopelessPairSaysWhichHalfOfTheMaskStoppedIt(unittest.TestCase):
+    """Depth and slope have opposite fixes, so the log must not conflate them.
+
+    On `skerry_reach` four starts read "no route under a 250-elmo sill" while
+    the deepest cell on the map is 89.7 elmos — the lift was never the
+    binding constraint, the seabed slope was (PLAN-maps M8y).
+    """
+
+    def test_a_trench_deeper_than_the_lift_is_reported_as_depth(self):
+        h, starts, cell = two_islands(depth=400.0)
+        said = []
+        pa.connect_starts(h, cell, starts, max_lift=40.0, log=said.append)
+        msg = [m for m in said if "no route" in m]
+        self.assertTrue(msg, said)
+        self.assertIn("water deeper than the lift", msg[0])
+
+    def test_a_shallow_but_steep_wall_is_reported_as_slope(self):
+        """26 elmos of water — well inside any lift — behind 65-degree walls."""
+        h = three_plateaus([(400.0, 8.0, 26.0)], n=800)
+        starts = [(100 * CELL, 400 * CELL), (700 * CELL, 400 * CELL)]
+        said = []
+        _, crossings, _ = pa.connect_starts(h, CELL, starts, log=said.append)
+        self.assertEqual(crossings, [])
+        msg = [m for m in said if "no route" in m]
+        self.assertTrue(msg, said)
+        self.assertIn("seabed SLOPE", msg[0])
+
+
+class TestTheCrossingBudgetComesFromTheMap(unittest.TestCase):
+    """Eight plateaus, seven channels — one more than the old constant 6.
+
+    `skerry_reach` is exactly this shape: 8 starts in 8 armour components, so
+    a fixed budget of 6 leaves it split and says nothing about it (PLAN-maps
+    M8y). The budget is now `components - 1`, because each carve joins two.
+    """
+
+    # 110-cell plateaus; the channel walls are ~19 degrees, inside HEAVY's 24,
+    # so again the only thing splitting them is 26 elmos of water against a
+    # 20-elmo wade depth
+    N8 = 900
+    CHANNELS = [(110.0 * i, 48.0, 26.0) for i in range(1, 8)]
+    STARTS = [((110 * i + 55) * CELL, 450 * CELL) for i in range(8)]
+
+    def test_seven_gaps_get_seven_sills(self):
+        h = three_plateaus(self.CHANNELS, n=self.N8)
+        self.assertEqual(
+            len(pa.read_connectivity(h, CELL, self.STARTS, "VEH").groups), 8)
+        out, crossings, after = pa.connect_starts(h, CELL, self.STARTS)
+        self.assertEqual(len(crossings), 7)
+        for r in after:
+            if r.cls in pa.ARMOUR_CLASSES:
+                self.assertTrue(r.ok, r.describe())
+
+    def test_an_explicit_cap_is_still_honoured_and_says_so(self):
+        h = three_plateaus(self.CHANNELS, n=self.N8)
+        said = []
+        out, crossings, after = pa.connect_starts(
+            h, CELL, self.STARTS, max_crossings=2, log=said.append)
+        self.assertEqual(len(crossings), 2)
+        self.assertTrue(any("budget spent" in m for m in said), said)
+        veh = [r for r in after if r.cls == "VEH"][0]
+        self.assertFalse(veh.ok, veh.describe())
+
+
 class TestTheShallowestCrossingIsTheOneChosen(unittest.TestCase):
     def test_the_search_prefers_the_shallow_strait(self):
         """Two ways across: a shallow neck and a deep trench. Take the neck."""
