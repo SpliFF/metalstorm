@@ -1017,7 +1017,10 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
         # question, not an error: `sundered_arc` at --landmass 0.30 puts its
         # stranded group on island 1, which is 14.4 % of the map, and only 5
         # of 8 pads fit on what is left. Say so and ship the split map rather
-        # than refuse to build one (PLAN-maps M9c FIND 3).
+        # than refuse to build one (PLAN-maps M9c FIND 3). And it is not a
+        # property of that landmass: at 0.26 the same map bans 12.5 % on the
+        # other side of the split (islands 144+304) and again fits 5 of 8, on
+        # a map the carve leaves in three realms instead of two (M9d).
         retry = place_pads(banned, strict=False)
         if retry is None:
             print(f"  pad pass {pad_pass}: the ban leaves no other pad set — "
@@ -1279,9 +1282,22 @@ def main():
                          "as needing --landmass 0.30 to fit 8 separated start "
                          "pads where the D8 arm fit them at 0.26; M9b found "
                          "the real cause was the placer excluding a bounding "
-                         "box rather than a disc, and 0.26 fits 8 now. The "
-                         "shipped sundered_arc stays at 0.30, where every "
-                         "M8t/M8u/M8v arm was ranked.")
+                         "box rather than a disc, and 0.26 fits 8 now. "
+                         "⛔ M9d then measured what those 8 pads are worth: "
+                         "at 0.26 the arc is THREE armour realms against the "
+                         "0.30 map's two, and six of the seven pairs the "
+                         "carve is asked to join are refused for seabed "
+                         "SLOPE rather than depth — a lower waterline widens "
+                         "the straits onto steeper flanks, and a sill raises "
+                         "a seabed but cannot grade one (M8y FIND 3). Less "
+                         "land is a WORSE map here, not an escape from the "
+                         "armour-split question. The shipped sundered_arc "
+                         "stays at 0.30, where every M8t/M8u/M8v arm was "
+                         "ranked — though M9d also measured that ranking "
+                         "cost as near zero (summit 1.34x, inside M8u's "
+                         "1.24-1.37; shipped 16-32 anisotropy 1.09 against "
+                         "0.30's 1.11), so landmass is not the tuning "
+                         "tripwire this lane has been treating it as.")
     ap.add_argument("--router", default="auto",
                     choices=("auto", "d8", "dinf", "mfd"),
                     help="flow router the erosion solver routes over. "
