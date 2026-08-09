@@ -793,9 +793,11 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     # closing on `[eroded]` deliberately: the uplift scale is a solver knob and
     # `[eroded]` is the solver's surface, the summit and the max-min relief do
     # not move across the river pass at all (1212 and 1278 on both surfaces —
-    # what falls is a quantile, because a valley-widening pass shaves the high
-    # band), and re-aiming through it would re-ship terrain the arc's open
-    # armour-split question is measured on. Closing on `[shipped]` instead is
+    # what falls is a quantile, because the bank clamp shaves the high band
+    # while leaving the peaks: only 3 % of strict ridge cells are cut at all,
+    # 0.1 % of the cut volume, M9g), and re-aiming through it would re-ship
+    # terrain the arc's open armour-split question is measured on. Closing on
+    # `[shipped]` instead is
     # ~1 extra erosion pass plus ~13 s of placement per pass, NOT the "2x a
     # pass" M8z estimated — the roads half of that estimate is free.
     def aim_probe(hh, label):
@@ -980,6 +982,18 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
             protect, sigma=max(1.0, 160.0 / cell)) * 1.35, 0.0, 1.0)
 
         # islands have tiny catchments: seed generously, keep the channels narrow
+        #
+        # ⚠ `bank_width` is the arc's most consequential terrain knob and the
+        # one nothing here is aimed at (M9g). It is not the channels that are
+        # narrow: at 55 the graded apron is 110 elmos either side of a median
+        # 10-elmo channel, it covers 31.8 % of the land against the bed's
+        # 4.4 %, and because the clamp is deepest at its outer edge and then
+        # terminates, it replaces the erosion fabric with flat pods rimmed by
+        # one-cell steps (mean 17 elmos, max 153). At 20 the same network
+        # reads as drainage etched into intact ridges. Left at 55 on purpose
+        # for now: any change here re-ships the terrain the arc's blocked-on-
+        # user armour-split verdict is measured on, and the fix is a shape
+        # change in `_bin_field`, not this number. PLAN-maps M9g.
         rp_riv = riv.RiverParams(channel_fraction=(0.045 if fast else 0.025),
                                  width_coef=0.05, width_min=9.0, width_max=48.0,
                                  depth_max=6.0, bank_width=55.0)

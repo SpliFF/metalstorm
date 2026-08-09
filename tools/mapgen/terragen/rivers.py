@@ -85,6 +85,31 @@ class RiverParams:
     # roads and the sill carve spend 0.0 each). Widening it costs relief
     # linearly: 55 -> 110 on the arc is -44 elmos of q0.999 and -16 of summit.
     # Pinned in tests/test_rivers.py::BankClampIsAReliefTerm.
+    #
+    # ⚠ AND THE SHAPE IT AUTHORS IS NOT A VALLEY (M9g, the look M9f asked
+    # for). A valley is deepest at its axis; this is deepest at its RIM. On
+    # the shipped arc the mean cut RISES with distance from the water —
+    # 15.1 elmos at 0-10, 20.9 at 20-30, 27.4 at 55-70 — because the clamped
+    # plane rises at `bank_slope` while the ground it replaces rises faster,
+    # so the ribbon hinges at the water line and planes ground it never
+    # floods. Then it STOPS: `_bin_field` goes to `+inf` at
+    # `half + bank_width`, so the ribbon ends in a one-cell step whose height
+    # IS the cut there — mean 17, p95 51, max 153 elmos across one 8-elmo
+    # cell on the shipped arc, a 19-cell wall. In a hillshade the erosion
+    # fabric is replaced by a quilt of flat pods with hard dark rims wherever
+    # the channel network is dense.
+    #
+    # `bank_slope` is NOT the knob for that: 0.35 (19 deg) and 0.65 (the
+    # solver's own talus) are visually indistinguishable and differ by 3.9
+    # elmos of q0.999. `bank_width` is — it is a constant, so a headwater
+    # trickle at the 9-elmo width floor (46 % of the arc's channel vertices)
+    # grades the same 110-elmo apron as the trunk, 12x its own water. At 20
+    # the network reads as a drainage network etched into intact ridges and
+    # 16.3 % of land sits inside the ribbon; at the shipped 55 it is 31.8 %.
+    # The fix is a shape change — taper the cut to zero at the edge, scale
+    # the reach with channel width — not a smaller constant, and it re-ships
+    # every map that has rivers. See PLAN-maps M9g and
+    # tests/test_rivers.py::BankClampIsNotAValleyForm.
     bank_slope: float = 0.35         # rise per world unit beyond the wetted edge
     bank_width: float = 90.0         # how far past the wetted edge the carve reaches
 

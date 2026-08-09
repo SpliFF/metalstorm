@@ -38,6 +38,7 @@ import sys
 import unittest
 
 import numpy as np
+from scipy import ndimage
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -525,6 +526,124 @@ class BankClampIsAReliefTerm(unittest.TestCase):
         # large: at 180 on this dome the drop is the 90 figure to the digit.
         self.assertAlmostEqual(self.drop(bank_width=180.0), drops[3],
                                delta=0.05 * drops[3])
+
+
+class BankClampIsNotAValleyForm(unittest.TestCase):
+    """CHARACTERISATION of the shape the bank clamp authors today, which is
+    not the shape its name implies. These guards pass on the DEFECT; when the
+    ribbon is reshaped (PLAN-maps M9g) they are meant to fail, and the fix is
+    to invert them, not to loosen them.
+
+    M9f established that the clamp, not the bed, spends the arc's relief
+    residual, and left one question behind: is a 19 deg bank the valley form
+    the map wants? M9g looked, and the answer is that `bank_slope` was never
+    the axis:
+
+      * **the cut deepens AWAY from the water.** A valley is deepest at its
+        axis. The clamped plane rises at `bank_slope` from the water line
+        while the ground it replaces rises faster, so the deepest cut is at
+        the ribbon's outer edge — on the shipped arc, mean cut 15.1 elmos at
+        0-10 elmos from the channel against 27.4 at 55-70.
+      * **it then stops dead.** `_bin_field` is `+inf` beyond
+        `half + bank_width`, so the last cell inside the ribbon is a step
+        whose height is its own cut: mean 17, p95 51, max 153 elmos across
+        one 8-elmo cell on the arc. That is the dark rim that turns a
+        hillshade of a dense network into a quilt of pods.
+
+    Both are measured against the natural surface at the same cells, so
+    neither can be satisfied by ground that was already steep, and the second
+    carries the positive control this file's header demands: a ribbon that
+    TAPERS instead of terminating (the same cut field, smoothed) leaves an
+    edge step equal to the terrain's own, and the assertion rejects it.
+
+    Fixture params are the arc's (`bank_width` 55), not the dataclass default
+    of 90, so the numbers here are comparable with the shipped map's.
+    """
+
+    BW = 55.0
+    BANDS = ((0.0, 15.0), (15.0, 40.0), (40.0, 1e9))
+
+    def setUp(self):
+        self.h = hilly()
+        self.recv, self.levels, self.accum = routed(self.h)
+
+    def carve(self, **kw):
+        p = riv.RiverParams(**{"bank_width": self.BW, **kw})
+        net = riv.build(self.h, self.recv, self.levels, self.accum, CELL, 0.0,
+                        seed=3, params=p)
+        return self.h - net.terrain, net.dist
+
+    def bands(self, cut, dist):
+        """Mean cut in each distance-from-channel band, NaN where empty."""
+        hit = cut > 1e-6
+        out = []
+        for lo, hi in self.BANDS:
+            sel = hit & (dist >= lo) & (dist < hi)
+            out.append((int(sel.sum()),
+                        float(cut[sel].mean()) if sel.any() else float("nan")))
+        return out
+
+    @staticmethod
+    def rim_step(h0, h1):
+        """(steps the pass introduced, steps that were already there).
+
+        A cell inside the ribbon with a 4-neighbour outside it is a rim cell;
+        the step is the rise to that neighbour, taken on the carved surface
+        and on the natural one at the SAME cells.
+        """
+        inside = (h0 - h1) > 1e-6
+        after = np.zeros_like(h0)
+        before = np.zeros_like(h0)
+        rim = np.zeros_like(inside)
+        for axis, shift in ((0, 1), (0, -1), (1, 1), (1, -1)):
+            out = inside & ~np.roll(inside, shift, axis=axis)
+            rim |= out
+            after = np.where(out, np.maximum(after, np.roll(h1, shift, axis=axis) - h1), after)
+            before = np.where(out, np.maximum(before, np.roll(h0, shift, axis=axis) - h0), before)
+        return after[rim], before[rim]
+
+    def test_the_cut_deepens_away_from_the_water(self):
+        cut, dist = self.carve()
+        got = self.bands(cut, dist)
+        means = [m for _, m in got]
+        self.assertTrue(all(b > a for a, b in zip(means, means[1:])),
+                        f"cut should deepen outward on the defect: {got}")
+        self.assertGreater(means[-1], 1.5 * means[0],
+                           f"outer band is not the deep one: {got}")
+
+        # the profile is the CLAMP's, not the bed's: with the clamp off there
+        # is no cut beyond the wetted width at all, so nothing to grade.
+        bed_cut, bed_dist = self.carve(bank_width=0.0)
+        bed = self.bands(bed_cut, bed_dist)
+        self.assertEqual([n for n, _ in bed[1:]], [0, 0],
+                         f"the bed alone reaches past 15 elmos: {bed}")
+
+        # and it is not `bank_slope` that decides it — matching the solver's
+        # own 33 deg talus leaves the same shape, which is the whole of M9g's
+        # answer to the look-question M9f raised.
+        talus = self.bands(*self.carve(bank_slope=0.65))
+        tm = [m for _, m in talus]
+        self.assertTrue(all(b > a for a, b in zip(tm, tm[1:])),
+                        f"talus arm should keep the same shape: {talus}")
+        self.assertGreater(tm[-1], 1.4 * tm[0], f"{talus}")
+
+    def test_the_ribbon_ends_in_a_step_the_terrain_did_not_have(self):
+        cut, _ = self.carve()
+        after, before = self.rim_step(self.h, self.h - cut)
+        self.assertGreater(after.mean(), 3.0 * before.mean(),
+                           f"rim step {after.mean():.2f} vs natural "
+                           f"{before.mean():.2f}")
+        self.assertGreater(float(np.quantile(after, 0.95)), 20.0,
+                           "the tall end of the rim is what shows in a hillshade")
+
+        # positive control: the same cut, tapered to nothing at its edge
+        # instead of terminating, leaves the terrain's own step and no more.
+        tapered = ndimage.gaussian_filter(cut, 2.0)
+        t_after, t_before = self.rim_step(self.h, self.h - tapered)
+        self.assertLess(t_after.mean(), 1.3 * t_before.mean(),
+                        f"the guard cannot tell a tapered ribbon from a "
+                        f"terminating one: {t_after.mean():.2f} vs "
+                        f"{t_before.mean():.2f}")
 
 
 class LakesAndSeparation(unittest.TestCase):
