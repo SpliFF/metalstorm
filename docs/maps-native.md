@@ -305,6 +305,27 @@ cost real diagnosis time twice:
    committing, or pause the herd for the run.
 2. `./build/debug/tools/mapconverter/mapconverter --force content/maps/<id>`
    — confirms the C++ pipeline (including `ExtractRegions`) agrees.
+2b. **Can armour actually cross it?**
+   `python3 tools/mapgen/regions_from_map.py data/maps/<id> --class <C>
+   --verify` for `INFANTRY`, `VEH` **and** `HEAVY`. `--verify` is read-only
+   (it implies `--dry-run` — see the module docstring for why). A `FAIL —
+   start positions split across N disconnected components` is a map that
+   class cannot play, and it is the single most common defect a procedural
+   generator ships: erosion carves straits, and a strait is a line a vehicle
+   cannot cross. Every generated map this repo has shipped has failed it at
+   least once — `skerry_reach` splits 8 starts into 8 components for all
+   three classes.
+
+   `archipelago.py` answers it at generation time instead, with
+   `--connect-starts` (default ON for `--terrain arc`): `terragen.passability`
+   grades the same MoveDef test on the live array, finds the crossing whose
+   deepest point is shallowest by a minimax search, and raises a **submarine
+   sill** along it until VEH and HEAVY can ford. It is not a bridge: a Spring
+   unit drives on the heightmap, so a `features/bridges.lua` span is scenery
+   and does not make the water under it passable. The carve only ever raises
+   and never reaches the surface, so land fraction, island inventory, relief
+   and texture readings cannot move. The generator prints the before/after
+   reading; step 2b is the independent confirmation on the packaged bytes.
 3. Direct-start it for real: launch an isolated `spring-lobby`
    (`--dev-direct-start`, a fresh port) + client (`GAME_SERVER_PORT=<port>
    npx vite dev`), POST `manifests/<id>_direct.json` to

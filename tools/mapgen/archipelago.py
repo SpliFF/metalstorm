@@ -7,7 +7,7 @@ inputs — island placement, elevations, start positions, settlements,
 per-island road networks, biomes, vegetation, ruins. Deterministic:
 
     same (--seed, --landmass, --islands, --terrain, --router, --arc-detail,
-          --hardness-detail, --arc-segmentation)
+          --hardness-detail, --arc-segmentation, --connect-starts)
         =>  byte-identical map
 
 The --landmass fraction is a hard contract, enforced by quantile
@@ -48,6 +48,7 @@ from terragen import erosion as ero         # noqa: E402
 from terragen import hydrology as hyd       # noqa: E402
 from terragen import noise as tn            # noqa: E402
 from terragen import package as pkg         # noqa: E402
+from terragen import passability as pas     # noqa: E402
 from terragen import placement as pl        # noqa: E402
 from terragen import rivers as riv          # noqa: E402
 from terragen import roads as rd            # noqa: E402
@@ -108,6 +109,13 @@ ARC_AIM_ITERATIONS = 2
 # The SMF height ceiling this generator has always shipped. `mounds` stands
 # 553 elmos, so it never came near it — see `height_ceiling`.
 HEIGHT_CEILING_FLOOR = 1200.0
+
+# Sill carving, so armour can cross the arc (PLAN-maps M8x). Default ON for
+# `arc` and OFF for `mounds`, for the same reason as every other knob here:
+# the shipped `skerry_reach` package must not move. Turning it on for
+# `mounds` is a real option — skerry_reach splits 8 starts into 8 components
+# for every class — but that is a re-ship, not a default.
+ARC_CONNECT_STARTS = True
 
 
 def height_ceiling(top: float) -> float:
@@ -512,7 +520,8 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
              arc_detail: float = ARC_DETAIL_DEFAULT,
              hardness_detail: "float | None" = None,
              segmentation: "float | None" = None,
-             aim_iterations: "int | None" = None):
+             aim_iterations: "int | None" = None,
+             connect: "bool | None" = None):
     t0 = time.time()
     cell = 32.0 if fast else 8.0
     S = int(MAP_SIZE / cell) + 1
@@ -533,6 +542,10 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     if aim_iterations is None:
         aim_iterations = ARC_AIM_ITERATIONS if terrain == "arc" else 1
     aim_iterations = max(1, int(aim_iterations))
+    # sill carving is post-erosion and submarine, so it is not in the erosion
+    # cache key — it cannot change what the solver converged to
+    if connect is None:
+        connect = ARC_CONNECT_STARTS if terrain == "arc" else False
     print(f"grid {S}x{S} @ {cell} elmos/cell  "
           f"(seed={seed} landmass={landmass} islands={islands} "
           f"climate={climate} terrain={terrain} router={router}"
@@ -786,6 +799,36 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     rivers = net.is_water
     print(f"rivers done {time.time()-t0:.0f}s ({len(net.polylines)} reaches, "
           f"{100.0 * net.channel_mask.mean():.2f}% channel cells)")
+
+    # 7b. make the map playable for armour: raise a submarine sill across the
+    # shallowest strait until every start can reach every other (PLAN-maps
+    # M8x). This runs LAST of the terrain passes, and that placement is the
+    # milestone's find rather than a detail: roads are worth about half the
+    # reading. Measured on the shipped arc, the same grading before roads and
+    # rivers says VEH 11.5 % passable in EIGHT components, and after them
+    # 17.5 % in two — `flatten_under_roads` lays graded corridors across
+    # ground erosion left too steep to drive. Carving against the pre-road
+    # surface would therefore chase eight splits that the road network is
+    # about to close on its own. The verdict `regions_from_map.py --verify`
+    # takes is on the packaged bytes; this has to be the same surface.
+    #
+    # The carve is strictly submarine and only ever raises, so the island
+    # inventory, land fraction, relief aim and anisotropy survey printed
+    # above cannot move, and nothing is placed on it (`excl` below takes
+    # everything under +2 elmos).
+    before = pas.read_all(h, cell, starts)
+    print("passability: " + " | ".join(
+        f"{r.cls} {'PASS' if r.ok else str(len(r.groups)) + ' comps'}"
+        f" {r.passable_frac:.1%}" for r in before))
+    if connect and any(not r.ok for r in before
+                       if r.cls in pas.ARMOUR_CLASSES):
+        h, crossings, after = pas.connect_starts(h, cell, starts, log=print)
+        print(f"connect done {time.time()-t0:.0f}s "
+              f"({len(crossings)} sill(s) carved)")
+        for r in after:
+            print("  " + r.describe())
+        if any(not r.ok for r in after if r.cls in pas.ARMOUR_CLASSES):
+            print("  ⚠ armour STILL cannot cross this map end to end")
 
     # 8. final climate + biomes on the settled surface
     slope, temp, moist = fields(h)
@@ -1076,6 +1119,15 @@ def main():
                          "surface. Pass 0 is cache-addressable at the "
                          "pre-M8u key, so this costs one extra pass "
                          "(~430 s at full res). See PLAN-maps M8u.")
+    ap.add_argument("--connect-starts", dest="connect",
+                    action=argparse.BooleanOptionalAction, default=None,
+                    help="raise a submarine sill across the shallowest "
+                         "strait until every start position can reach every "
+                         "other for VEH and HEAVY — the reading "
+                         "`regions_from_map.py --verify` takes, answered by "
+                         "the generator. Default ON for --terrain arc, OFF "
+                         "for mounds (turning it on there re-ships "
+                         "skerry_reach). See PLAN-maps M8x.")
     ap.add_argument("--fast", action="store_true",
                     help="513 grid iteration mode — preview/tuning only, "
                          "NOT shippable. ⚠ with --terrain arc it is not even "
@@ -1111,6 +1163,9 @@ def main():
             passthrough += ["--arc-segmentation", str(args.segmentation)]
         if args.aim_iterations is not None:
             passthrough += ["--aim-iterations", str(args.aim_iterations)]
+        if args.connect is not None:
+            passthrough.append("--connect-starts" if args.connect
+                               else "--no-connect-starts")
         if args.fast:
             passthrough.append("--fast")
         if args.with_features:
@@ -1130,7 +1185,8 @@ def main():
              arc_detail=args.arc_detail,
              hardness_detail=args.hardness_detail,
              segmentation=args.segmentation,
-             aim_iterations=args.aim_iterations)
+             aim_iterations=args.aim_iterations,
+             connect=args.connect)
 
 
 if __name__ == "__main__":

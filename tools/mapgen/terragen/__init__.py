@@ -10,6 +10,7 @@ Pure-numpy, deterministic from a seed. Stages live in their own modules:
   biomes     temperature/moisture fields -> biome classification masks
   roads      least-cost road networks between settlements
   settle     settlement / town placement scoring
+  passability MoveDef grading + sill carving so armour can cross the map
 
 The top-level generator scripts (e.g. meridian2.py) compose these into a map
 package. Everything here is data-in/data-out on numpy arrays; no file I/O.
