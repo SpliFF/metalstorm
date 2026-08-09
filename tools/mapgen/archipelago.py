@@ -36,6 +36,7 @@ import argparse
 import os
 import shutil
 import time
+from typing import NamedTuple
 
 import numpy as np
 from scipy import ndimage
@@ -235,6 +236,21 @@ def arc_uplift(seed: int, xx: np.ndarray, zz: np.ndarray, cell: float,
     Aimed at 730 it lands on 1 263 — the baseline's relief to 0.1 % — and
     three of the four bands then sit within 0.07 of the shipped map's.
     Read relief on the output, never assume it.
+
+    ⚠ **Every number in that table is the ERODED surface** (and a single
+    crop, which M8v then replaced with the pooled survey). Re-taken on the
+    surface that ships — after roads, rivers and the sill — the verdict
+    holds but the band it holds in *swaps*, so quote M8z's table and not
+    this one when ranking arms (PLAN-maps M8z):
+
+        arm (pooled survey)        16-32  32-120  120-300  300-800  ridges  span
+        seg 0, shipped surface      1.19   1.22    1.17     1.27      3     9288
+        seg 1, shipped surface      1.11   1.18    1.06     1.12      7     5830
+
+    300-800 was M8t's headline at −0.30 eroded; on the shipped surface it is
+    −0.15 against a matched-arm envelope of up to 0.12, i.e. no longer
+    decisive, while 16-32 (−0.08 against 0.01) and the divide topology
+    (3 pieces spanning 9 288 elmos against 7 spanning 5 830) are.
 
     Amplitudes here are relative. `uplift.scale_uplift_for_relief` turns
     them into a rate that stands the highest ground where the author asked —
@@ -511,6 +527,79 @@ def erosion_cache_path(terrain: str, router: str, seed: int, landmass: float,
         f"{'fast' if fast else 'full'}.npy")
 
 
+class SurfaceReport(NamedTuple):
+    """The three readings this lane ranks arc arms by, on ONE named surface."""
+    label: str
+    divides: "up.DivideReading"
+    relief: float                       # max - min, the summit reading
+    aim: "up.ReliefReading | None"      # arc only — the quantile the aim is at
+    texture: "list[up.SurveyReading]"
+
+
+def report_surface(h: np.ndarray, cellsize: float, label: str,
+                   terrain: str = "arc", relief_target: float = 950.0,
+                   log=print) -> SurfaceReport:
+    """Print (and return) the divides / aim / texture readings of `h`.
+
+    **Every line is tagged with the surface it was read on, because they do
+    not agree, and the lane spent M8q-M8t ranking arms on the wrong one**
+    (M8x FIND 5). `generate` calls this twice:
+
+    * `eroded` — step 3, straight off the solver. This is the surface an
+      erosion arm *is*: the only thing between it and the cache is the
+      landmass re-quantile, so it is what an uplift/grain/segmentation knob
+      can be held responsible for.
+    * `shipped` — step 7b, after roads, rivers and the sill carve, which is
+      the surface `regions_from_map.py --verify` reads and the surface the
+      player drives. On the shipped arc, 14 road segments at 44 elmos wide
+      and 5 707 river reaches take the 16-32 elmo band from **1.59 to
+      1.11** — so a fine-band verdict quoted off `eroded` is quoting a map
+      that was never packaged.
+
+    Neither is "the" reading: a solver knob is answerable for `eroded` and
+    the map ships `shipped`. Printing one and calling it both is what the
+    correction is against, so print both, always.
+
+    ~15 s per call on a 2049^2 grid (the survey; the other two are cheap)
+    against a ~430 s solve.
+    """
+    tag = f"[{label}]"
+    # how many independent massifs, and how long is the longest divide — the
+    # reading M8s's spectral instrument is blind to (PLAN-maps M8t). Cheap
+    # (two labelings), and the number every arc arm has to be judged on.
+    dv = up.divide_topology(h, cellsize)
+    relief = float(h.max() - h.min())
+    log(f"divides{tag}: {dv.ridges} high-ground pieces, longest span "
+        f"{dv.ridge_span:.0f} elmos ({dv.ridge_share:.0%} of the high "
+        f"ground), relief {relief:.0f}")
+    # ...and the same surface read at the statistic the aim is TAKEN at, so
+    # nobody judges a quantile aim by a summit again: `max-min` above runs
+    # 1.24-1.37x this number on every full-res surface this generator has
+    # written, the shipped mounds map included (PLAN-maps M8u).
+    rr = None
+    if terrain == "arc":
+        rr = up.relief_reading(h, relief_target)
+        log(f"aim{tag}: stood {rr.stood:.0f} of {rr.aimed:.0f} asked "
+            f"({rr.residual:+.1%}) at q{rr.quantile}, "
+            f"summit {rr.summit:.0f} ({rr.summit / rr.stood:.2f}x)")
+    # ...and the texture, pooled over every land-dense window rather than off
+    # one crop, because one crop of one surface scatters 0.45-0.60 of excess
+    # depending only on where it is taken (PLAN-maps M8v). ~15 s on a 2049^2
+    # grid against a 430 s solve, and it is what makes two arms comparable.
+    an = up.anisotropy_survey(h, cellsize)
+    log(f"texture{tag}: " + "  ".join(
+        f"{r.lo:.0f}-{r.hi:.0f} {r.excess:.2f}@{r.lobes[0][0]:.0f}deg"
+        for r in an)
+        # the envelope quoted here is the POOLED one M8v measured on two
+        # matched arm sets (0.04-0.14 per band). The +-0.15 this line used to
+        # print was the single-crop scatter — i.e. the number that milestone
+        # exists to say is NOT the reading's error bar.
+        + (f"  (pooled over {an[0].tiles} tiles, +-0.04..0.14 per band)"
+           if an[0].tiles > 1 else
+           "  (ONE crop — a sample, not a reading; needs a full-res grid)"))
+    return SurfaceReport(label, dv, relief, rr, an)
+
+
 def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
              fast: bool = False, with_features: bool = False,
              preview_only: bool = False, no_package: bool = False,
@@ -660,37 +749,8 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     land_frac = float(land.mean())
     print(f"islands: {n_isl} components, {len(big)} major, "
           f"land {land_frac:.1%} (target {landmass:.1%})")
-    # how many independent massifs, and how long is the longest divide — the
-    # reading M8s's spectral instrument is blind to (PLAN-maps M8t). Cheap
-    # (two labelings), and the number every arc arm has to be judged on.
-    _dv = up.divide_topology(h, cell)
-    print(f"divides: {_dv.ridges} high-ground pieces, longest span "
-          f"{_dv.ridge_span:.0f} elmos ({_dv.ridge_share:.0%} of the high "
-          f"ground), relief {h.max()-h.min():.0f}")
-    # ...and the same surface read at the statistic the aim is TAKEN at, so
-    # nobody judges a quantile aim by a summit again: `max-min` above runs
-    # 1.24-1.37x this number on every full-res surface this generator has
-    # written, the shipped mounds map included (PLAN-maps M8u).
-    if terrain == "arc":
-        _rr = up.relief_reading(h, relief_target)
-        print(f"aim: stood {_rr.stood:.0f} of {_rr.aimed:.0f} asked "
-              f"({_rr.residual:+.1%}) at q{_rr.quantile}, "
-              f"summit {_rr.summit:.0f} ({_rr.summit / _rr.stood:.2f}x)")
-    # ...and the texture, pooled over every land-dense window rather than off
-    # one crop, because one crop of one surface scatters 0.45-0.60 of excess
-    # depending only on where it is taken (PLAN-maps M8v). ~15 s on a 2049^2
-    # grid against a 430 s solve, and it is what makes two arms comparable.
-    _an = up.anisotropy_survey(h, cell)
-    print("texture: " + "  ".join(
-        f"{r.lo:.0f}-{r.hi:.0f} {r.excess:.2f}@{r.lobes[0][0]:.0f}deg"
-        for r in _an)
-        # the envelope quoted here is the POOLED one M8v measured on two
-        # matched arm sets (0.04-0.14 per band). The +-0.15 this line used to
-        # print was the single-crop scatter — i.e. the number that milestone
-        # exists to say is NOT the reading's error bar.
-        + (f"  (pooled over {_an[0].tiles} tiles, +-0.04..0.14 per band)"
-           if _an[0].tiles > 1 else
-           "  (ONE crop — a sample, not a reading; needs a full-res grid)"))
+    report_surface(h, cell, "eroded", terrain=terrain,
+                   relief_target=relief_target)
 
     # 4. preliminary climate for settlement scoring
     def fields(hh):
@@ -812,10 +872,12 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     # about to close on its own. The verdict `regions_from_map.py --verify`
     # takes is on the packaged bytes; this has to be the same surface.
     #
-    # The carve is strictly submarine and only ever raises, so the island
-    # inventory, land fraction, relief aim and anisotropy survey printed
-    # above cannot move, and nothing is placed on it (`excl` below takes
-    # everything under +2 elmos).
+    # The carve is strictly submarine and only ever raises, so it moves the
+    # land fraction and the relief aim by nothing at all and the texture
+    # survey by at most 0.01 in one band (M8x measured both `.smf`s) — but
+    # roads and rivers, two steps above, move it by 0.48, which is why the
+    # `[shipped]` report below is taken after all three rather than at step 3.
+    # Nothing is placed on the sill either (`excl` takes everything under +2).
     before = pas.read_all(h, cell, starts)
     print("passability: " + " | ".join(
         f"{r.cls} {'PASS' if r.ok else str(len(r.groups)) + ' comps'}"
@@ -829,6 +891,15 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
             print("  " + r.describe())
         if any(not r.ok for r in after if r.cls in pas.ARMOUR_CLASSES):
             print("  ⚠ armour STILL cannot cross this map end to end")
+
+    # 7c. the same three readings again, on the surface that actually ships.
+    # Nothing below here moves the heightmap (placement reads it; packaging
+    # quantizes it), so this IS the packaged map to within 16-bit height
+    # quantization — and it does not agree with the `[eroded]` lines above,
+    # which is the whole point of printing both (M8x FIND 5: roads and rivers
+    # took the shipped arc's 16-32 elmo band from 1.59 to 1.11).
+    report_surface(h, cell, "shipped", terrain=terrain,
+                   relief_target=relief_target)
 
     # 8. final climate + biomes on the settled surface
     slope, temp, moist = fields(h)
