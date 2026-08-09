@@ -105,6 +105,38 @@ SEG_REV = 1
 # 1 restores the M8t surface bit-for-bit.
 ARC_AIM_ITERATIONS = 2
 
+# The SMF height ceiling this generator has always shipped. `mounds` stands
+# 553 elmos, so it never came near it — see `height_ceiling`.
+HEIGHT_CEILING_FLOOR = 1200.0
+
+
+def height_ceiling(top: float) -> float:
+    """`max_height` for a surface whose highest cell is `top` elmos.
+
+    SMF quantises the heightmap by **clipping** it to
+    [`min_height`, `max_height`] (`smf.quantize_heightmap`), so a summit above
+    the ceiling does not overflow and does not fail — it ships as a flat mesa,
+    silently. The fixed 1200 this generator used clears `mounds`' 553 elmos
+    with room to spare, which is why it was never a problem there.
+
+    The arc is the case that breaks it, and not by accident: its relief is
+    *aimed at a quantile*, and the summit runs 1.24-1.37x the relief that was
+    aimed for on every eroded surface this generator has written (PLAN-maps
+    M8u). `--relief-target 950` stands **1212** — so the peak the whole
+    closed-loop aim exists to place is exactly what the ceiling would have
+    sheared off.
+
+    100-elmo steps with 5 % headroom, floored at the shipped 1200 so the
+    `skerry_reach` package cannot move:
+
+    >>> height_ceiling(553.0)      # shipped mounds — unchanged
+    1200.0
+    >>> height_ceiling(1212.0)     # shipped arc
+    1300.0
+    """
+    return max(HEIGHT_CEILING_FLOOR,
+               float(np.ceil(top * 1.05 / 100.0) * 100.0))
+
 
 # ---------------------------------------------------------------------------
 # Island skeleton
@@ -639,7 +671,11 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     print("texture: " + "  ".join(
         f"{r.lo:.0f}-{r.hi:.0f} {r.excess:.2f}@{r.lobes[0][0]:.0f}deg"
         for r in _an)
-        + (f"  (pooled over {_an[0].tiles} tiles, +-0.15)"
+        # the envelope quoted here is the POOLED one M8v measured on two
+        # matched arm sets (0.04-0.14 per band). The +-0.15 this line used to
+        # print was the single-crop scatter — i.e. the number that milestone
+        # exists to say is NOT the reading's error bar.
+        + (f"  (pooled over {_an[0].tiles} tiles, +-0.04..0.14 per band)"
            if _an[0].tiles > 1 else
            "  (ONE crop — a sample, not a reading; needs a full-res grid)"))
 
@@ -916,6 +952,15 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
         print(f"PREVIEW ONLY — total {time.time()-t0:.0f}s")
         return h, b, slope
 
+    top = float(h.max())
+    max_h = height_ceiling(top)
+    if max_h > HEIGHT_CEILING_FLOOR:
+        print(f"height ceiling {max_h:.0f} (surface tops at {top:.0f}; the "
+              f"{HEIGHT_CEILING_FLOOR:.0f} floor would have sheared "
+              f"{int((h > HEIGHT_CEILING_FLOOR).sum())} cells "
+              f"({top - HEIGHT_CEILING_FLOOR:.0f} elmos off the summit) "
+              f"into a flat top)")
+
     cfg = pkg.MapPackageConfig(
         map_id=map_id,
         display_name=display_name,
@@ -927,7 +972,7 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
              f"Free-form archipelago (seed {seed}, {landmass:.0%} land, "
              f"{islands} islands, {climate} climate): "
              "island road nets, coastal towns, ruins.")),
-        min_height=-120.0, max_height=1200.0,
+        min_height=-120.0, max_height=max_h,
         tile_budget=(2048 if fast else 12288),
         start_positions=starts,
         seed=seed,
