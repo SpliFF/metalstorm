@@ -74,6 +74,17 @@ class RiverParams:
     depth_max: float = 14.0
 
     # --- carve shape ------------------------------------------------------
+    # ⚠ THESE TWO ARE A RELIEF TERM, not a river-edge cosmetic (PLAN-maps
+    # M9f). The clamp holds every cell within `bank_width` of a channel at
+    # `water_z + bank_slope * (d - half)`, so on ground steeper than
+    # `bank_slope` (0.35 = 19 deg, against the arc solver's own 33 deg talus)
+    # it shaves the valley shoulders — 9.5 % of the shipped arc at a mean cut
+    # of 21 elmos, max 153. It, and not the bed depth above, is the entire
+    # reason the packaged map stands 1.6-2.7 % under the relief the closed-loop
+    # aim converged to (the bed spends 0.2 of 21.3 elmos at q0.999; pads,
+    # roads and the sill carve spend 0.0 each). Widening it costs relief
+    # linearly: 55 -> 110 on the arc is -44 elmos of q0.999 and -16 of summit.
+    # Pinned in tests/test_rivers.py::BankClampIsAReliefTerm.
     bank_slope: float = 0.35         # rise per world unit beyond the wetted edge
     bank_width: float = 90.0         # how far past the wetted edge the carve reaches
 

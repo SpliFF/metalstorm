@@ -462,6 +462,71 @@ class Carve(unittest.TestCase):
         self.assertGreater(float(allw.max() - allw.min()), 5.0)
 
 
+class BankClampIsAReliefTerm(unittest.TestCase):
+    """The relief a map loses between the solver and the package is THIS.
+
+    PLAN-maps M8z FIND 5 recorded the closed-loop relief aim converging on
+    the eroded surface while the shipped map stood 1.6-2.7 % lower, and read
+    it as "roads and rivers". M9f decomposed it pass by pass on two full-res
+    arc arms: start pads spend **0.0**, roads spend **0.0**, the submarine
+    sill spends **0.0**, and rivers spend **all** of it (930 -> 909 and
+    954 -> 939 elmos at q0.999). Then it split rivers in two, and the halves
+    are not the ones the parameter names suggest:
+
+      * the **bed** — `depth_ratio`/`depth_min`/`depth_max`, the thing called
+        a river's depth — spends **0.2 of 21.3 elmos** on the real map and
+        0.00 here. It only ever cuts inside the wetted width, which is ~1 %
+        of land cells and is nowhere near the top of the distribution.
+      * the **bank clamp** — `bank_slope` out to `bank_width`, which reads
+        like an edge-treatment cosmetic — spends **all** of it, because it
+        clamps every cell within `bank_width` of a channel to
+        `water_z + bank_slope * (d - half)`. On ground steeper than
+        `bank_slope` (0.35 = 19 deg, against the solver's own 33 deg talus)
+        that shaves the valley shoulders, and on the shipped arc it covers
+        **9.5 % of the map at a mean cut of 21 elmos** (max 153).
+
+    So `bank_width` is a relief knob, not a river-edge detail: 55 -> 110 on
+    the shipped arc costs 44 elmos of q0.999 and 16 of summit. A test that
+    only asserted "rivers lower the map" would pass with the bank clamp
+    deleted, which is why both halves are measured separately here.
+    """
+
+    def setUp(self):
+        self.h = hilly()
+        self.recv, self.levels, self.accum = routed(self.h)
+        self.q0 = float(np.quantile(self.h, 0.999))
+
+    def drop(self, **kw):
+        """How far the carve moves q0.999 — the aim's own statistic."""
+        net = riv.build(self.h, self.recv, self.levels, self.accum, CELL, 0.0,
+                        seed=3, params=riv.RiverParams(**kw))
+        return self.q0 - float(np.quantile(net.terrain, 0.999))
+
+    def test_the_bed_spends_nothing_and_the_bank_spends_all_of_it(self):
+        full = self.drop()
+        self.assertGreater(full, 5.0, "the fixture has to lose relief at all")
+        # the bed alone: same network, no clamp outside the wetted width
+        bed = self.drop(bank_width=0.0)
+        self.assertLess(bed, 0.1 * full,
+                        "the bed is not what spends the aim residual")
+        # the clamp alone: same ribbon, no bed cut at all
+        bank = self.drop(depth_min=0.0, depth_max=0.0)
+        self.assertAlmostEqual(bank, full, delta=0.05 * full)
+
+    def test_bank_width_moves_relief_monotonically(self):
+        widths = [0.0, 20.0, 45.0, 90.0]
+        drops = [self.drop(bank_width=w) for w in widths]
+        self.assertTrue(all(b >= a - 1e-9 for a, b in zip(drops, drops[1:])),
+                        f"not monotone in bank_width: {drops}")
+        self.assertGreater(drops[2], 2.0 * drops[1],
+                           f"bank_width is not a relief knob here: {drops}")
+        # ...and it saturates once the ribbon covers the high ground, which is
+        # why the fixture cannot be widened to make the effect arbitrarily
+        # large: at 180 on this dome the drop is the 90 figure to the digit.
+        self.assertAlmostEqual(self.drop(bank_width=180.0), drops[3],
+                               delta=0.05 * drops[3])
+
+
 class LakesAndSeparation(unittest.TestCase):
     def test_a_lake_is_never_baked_into_the_heightmap(self):
         """§2b item 3's hard rule. The basin floor must come out of the stage

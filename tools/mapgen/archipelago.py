@@ -574,6 +574,12 @@ def report_surface(h: np.ndarray, cellsize: float, label: str,
     the map ships `shipped`. Printing one and calling it both is what the
     correction is against, so print both, always.
 
+    The `aim` line is the one place the two are *reconciled* rather than just
+    both printed: M9f attributed its whole 1.6-2.7 % gap to the river pass's
+    bank clamp (pads, roads and the sill carve spend 0.0), and the closed loop
+    is left aiming at `eroded` on purpose — see the `aim_probe` note in
+    `generate`, which prints the per-pass decomposition on every arc run.
+
     ~15 s per call on a 2049^2 grid (the survey; the other two are cheap)
     against a ~430 s solve.
     """
@@ -773,6 +779,33 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     report_surface(h, cell, "eroded", terrain=terrain,
                    relief_target=relief_target)
 
+    # The aim is read here and again at step 7c, and the two disagree by
+    # 1.6-2.7 points on every arm measured (M8z FIND 5) — the closed loop
+    # converges on a surface the map does not ship. This probe says WHICH
+    # terrain pass spends it: one quantile over the grid (~40 ms against a
+    # ~430 s solve) after each pass of the pad loop, tagged like every other
+    # reading here. It is a reading, not a knob — nothing branches on it.
+    #
+    # Measured, two full-res arms (M9f): pads 0.0, roads 0.0, sill carve 0.0,
+    # **rivers all of it** — 930 -> 909 on the shipped arm and 954 -> 939 on
+    # the un-segmented one, and inside rivers it is the bank clamp rather than
+    # the bed (`RiverParams.bank_width` carries the numbers). The aim is left
+    # closing on `[eroded]` deliberately: the uplift scale is a solver knob and
+    # `[eroded]` is the solver's surface, the summit and the max-min relief do
+    # not move across the river pass at all (1212 and 1278 on both surfaces —
+    # what falls is a quantile, because a valley-widening pass shaves the high
+    # band), and re-aiming through it would re-ship terrain the arc's open
+    # armour-split question is measured on. Closing on `[shipped]` instead is
+    # ~1 extra erosion pass plus ~13 s of placement per pass, NOT the "2x a
+    # pass" M8z estimated — the roads half of that estimate is free.
+    def aim_probe(hh, label):
+        if terrain != "arc":
+            return
+        rr = up.relief_reading(hh, relief_target)
+        print(f"  aim[{label}]: stood {rr.stood:.0f} of {rr.aimed:.0f} "
+              f"({rr.residual:+.1%}) at q{rr.quantile}, "
+              f"summit {rr.summit:.0f}")
+
     # 4. preliminary climate for settlement scoring
     def fields(hh):
         gy, gx = np.gradient(hh, cell)
@@ -878,6 +911,7 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
             d = ndimage.distance_transform_edt(~m) * cell
             w = np.clip(1.0 - d / 500.0, 0.0, 1.0) ** 2
             h = h * (1 - w) + pad_h * w
+        aim_probe(h, f"pass {pad_pass}: +pads")
 
         # 6. settlements + per-island road networks (roads never island-hop:
         # each island's sites are planned as their own network)
@@ -927,6 +961,7 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
         h = rd.flatten_under_roads(h, road_dist, cell, rp)
         print(f"roads done {time.time()-t0:.0f}s ({len(polylines)} segments, "
               f"{len(towns)} town plazas, {len(starts)} starts)")
+        aim_probe(h, f"pass {pad_pass}: +roads")
 
         # 7. hydrology -> island stream ribbons (PLAN-maps §2b item 3)
         filled = hyd.fill_depressions(h)
@@ -953,6 +988,7 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
         rivers = net.is_water
         print(f"rivers done {time.time()-t0:.0f}s ({len(net.polylines)} reaches, "
               f"{100.0 * net.channel_mask.mean():.2f}% channel cells)")
+        aim_probe(h, f"pass {pad_pass}: +rivers")
 
         # 7b. make the map playable for armour: raise a submarine sill across the
         # shallowest strait until every start can reach every other (PLAN-maps
@@ -984,6 +1020,7 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
                   f"({len(crossings)} sill(s) carved)")
             for r in after:
                 print("  " + r.describe())
+            aim_probe(h, f"pass {pad_pass}: +carve")
             if any(not r.ok for r in after if r.cls in pas.ARMOUR_CLASSES):
                 print("  ⚠ armour STILL cannot cross this map end to end")
 
@@ -1313,7 +1350,14 @@ def main():
                     default=950.0,
                     help="--terrain arc only: elmos of relief the highest "
                          "ground should stand at, aimed through "
-                         "uplift.scale_uplift_for_relief (~10%% first-order)")
+                         "uplift.scale_uplift_for_relief (~10%% first-order) "
+                         "and then closed to ~0%% by --aim-iterations. ⚠ that "
+                         "loop closes on the ERODED surface: the packaged map "
+                         "stands 1.6-2.7%% lower at q0.999 because the river "
+                         "pass's bank clamp shaves the high band (M9f — pads, "
+                         "roads and the sill carve spend nothing, and the "
+                         "summit does not move at all). Read the "
+                         "`aim[shipped]` line for what the map ships.")
     ap.add_argument("--arc-detail", dest="arc_detail", type=float,
                     default=ARC_DETAIL_DEFAULT,
                     help="--terrain arc only: elmos of authored fBm grain in "
