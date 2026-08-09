@@ -631,6 +631,17 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
         print(f"aim: stood {_rr.stood:.0f} of {_rr.aimed:.0f} asked "
               f"({_rr.residual:+.1%}) at q{_rr.quantile}, "
               f"summit {_rr.summit:.0f} ({_rr.summit / _rr.stood:.2f}x)")
+    # ...and the texture, pooled over every land-dense window rather than off
+    # one crop, because one crop of one surface scatters 0.45-0.60 of excess
+    # depending only on where it is taken (PLAN-maps M8v). ~15 s on a 2049^2
+    # grid against a 430 s solve, and it is what makes two arms comparable.
+    _an = up.anisotropy_survey(h, cell)
+    print("texture: " + "  ".join(
+        f"{r.lo:.0f}-{r.hi:.0f} {r.excess:.2f}@{r.lobes[0][0]:.0f}deg"
+        for r in _an)
+        + (f"  (pooled over {_an[0].tiles} tiles, +-0.15)"
+           if _an[0].tiles > 1 else
+           "  (ONE crop — a sample, not a reading; needs a full-res grid)"))
 
     # 4. preliminary climate for settlement scoring
     def fields(hh):

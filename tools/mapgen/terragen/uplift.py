@@ -523,6 +523,23 @@ def _angular_power(
     Shared by `structural_anisotropy` and `angular_lobes` so the two can
     never drift apart — they are one histogram read two ways.
     """
+    return _angular_power_bands(dem, cellsize, ((lo_elmos, hi_elmos),),
+                                bins)[0]
+
+
+def _angular_power_bands(
+    dem: np.ndarray,
+    cellsize: float,
+    bands: "tuple[tuple[float, float], ...]",
+    bins: int,
+) -> "list[np.ndarray | None]":
+    """`_angular_power` for a whole ladder of bands off **one** transform.
+
+    The single-band entry point is a wrapper over this, so the arithmetic
+    is shared and cannot drift; the reason it exists is that
+    `anisotropy_survey` reads four bands over twenty tiles and would
+    otherwise pay for eighty FFTs where twenty do.
+    """
     h = np.asarray(dem, dtype=np.float64)
     n = min(h.shape)
     h = h[:n, :n] - h[:n, :n].mean()
@@ -532,16 +549,18 @@ def _angular_power(
     freq = np.fft.fftshift(np.fft.fftfreq(n, cellsize))
     fz, fx = np.meshgrid(freq, freq, indexing="ij")
     k = np.hypot(fx, fz)
-    band = (k > 1.0 / hi_elmos) & (k < 1.0 / lo_elmos)
-    if not band.any():
-        return None
-    ang = (np.degrees(np.arctan2(fz, fx)) % 180.0)[band]
-    hist, _ = np.histogram(ang, bins=bins, range=(0.0, 180.0),
-                           weights=power[band])
-    total = hist.sum()
-    if total <= 0:
-        return None
-    return hist / total
+    ang = np.degrees(np.arctan2(fz, fx)) % 180.0
+    out: "list[np.ndarray | None]" = []
+    for lo_elmos, hi_elmos in bands:
+        band = (k > 1.0 / hi_elmos) & (k < 1.0 / lo_elmos)
+        if not band.any():
+            out.append(None)
+            continue
+        hist, _ = np.histogram(ang[band], bins=bins, range=(0.0, 180.0),
+                               weights=power[band])
+        total = hist.sum()
+        out.append(hist / total if total > 0 else None)
+    return out
 
 
 def angular_lobes(
@@ -580,8 +599,15 @@ def angular_lobes(
     surfaces measured at the same grid size.
     """
     p = _angular_power(dem, cellsize, lo_elmos, hi_elmos, bins)
+    return _lobes_of(p, top, suppress)
+
+
+def _lobes_of(p: "np.ndarray | None", top: int,
+              suppress: int) -> list[tuple[float, float]]:
+    """The lobe list of an already-computed angular histogram."""
     if p is None:
         return [(0.0, 1.0)] * top
+    bins = len(p)
     ratio = p / p.mean()
     width = 180.0 / bins
     out: list[tuple[float, float]] = []
@@ -698,6 +724,12 @@ def anisotropy_bands(
     `floor_seeds=0` to skip the control, which sets `floor = 1.0` and makes
     `excess` the raw peak — for when you already hold a matched floor.
 
+    ⚠ **This reads ONE crop, and one crop is a sample, not a reading — use
+    `anisotropy_survey` for any verdict** (M8v). Sliding this exact window
+    over one fixed surface moves excess by 0.45-0.60 per band, which is
+    more than any effect this lane has ranked; every table below is a
+    single draw from that and its differences under ~0.3 are not real.
+
     ⚠ **Do not read one band and call it terrain.** This exists because M8r
     shipped an authored-grain term that took the arc's 32-120 reading to
     shipped-equivalent (1.60 against 1.58) while the eye still refused the
@@ -741,6 +773,199 @@ def anisotropy_bands(
         lobes = angular_lobes(dem, cellsize, lo, hi, bins, top)
         out.append(BandReading(float(lo), float(hi), peak, fl,
                                peak / max(fl, 1e-9), lobes))
+    return out
+
+
+SURVEY_TILE = 1025      # cells; the coarse band needs a big window (M8s)
+SURVEY_STRIDE = 256     # cells between tile origins
+SURVEY_MIN_LAND = 0.25  # skip windows that are mostly sea
+SURVEY_SEEDS = 8        # null replicates
+
+
+class SurveyReading(NamedTuple):
+    lo: float
+    hi: float
+    excess: float         # pooled peak / matched pooled floor — THE reading
+    floor: float
+    tile_lo: float        # spread of the individual tiles, as excess
+    tile_hi: float
+    tiles: int
+    lobes: list
+
+
+def _pooled_angular(
+    field: np.ndarray,
+    cellsize: float,
+    positions: "list[tuple[int, int]]",
+    tile: int,
+    bands: "tuple[tuple[float, float], ...]",
+    bins: int,
+) -> "tuple[list[np.ndarray | None], np.ndarray]":
+    """Sum each band's angular histogram over `positions`.
+
+    Returns `(pooled, per_tile_peaks)`. Each tile's histogram is already
+    normalised to unit total by `_angular_power_bands`, so pooling is an
+    average over tiles and a lobe survives it only if the tiles agree on
+    its direction — which is the question the instrument is asking.
+    """
+    pooled: "list[np.ndarray | None]" = [None] * len(bands)
+    peaks = []
+    for z, x in positions:
+        hs = _angular_power_bands(field[z:z + tile, x:x + tile], cellsize,
+                                  bands, bins)
+        peaks.append([float(h.max() / h.mean()) if h is not None else 1.0
+                      for h in hs])
+        for i, h in enumerate(hs):
+            if h is None:
+                continue
+            pooled[i] = h if pooled[i] is None else pooled[i] + h
+    return pooled, np.array(peaks) if peaks else np.zeros((0, len(bands)))
+
+
+_SURVEY_FLOOR_CACHE: dict = {}
+
+
+def _survey_floor(
+    shape: "tuple[int, int]",
+    cellsize: float,
+    positions: "list[tuple[int, int]]",
+    tile: int,
+    bands: "tuple[tuple[float, float], ...]",
+    bins: int,
+    seeds: int,
+) -> list[float]:
+    """The pooled null: **the whole procedure**, run on structureless fields.
+
+    `anisotropy_floor` nulls one crop. That is not the null for a pooled
+    reading, because pooling `n` histograms lowers the peak/mean an
+    isotropic field reads, and by an amount that depends on how much the
+    tiles overlap. So the null here is an isotropic field of the *whole
+    map's* shape, tiled at *exactly the same positions* and pooled the same
+    way — tile count, tile size and tile overlap are all reproduced rather
+    than assumed away.
+
+    On the arc's 2049^2 grid with 19 tiles the pooled floor is
+    1.05 / 1.13 / 1.44 / 1.82 against the single-crop 1.09 / 1.19 / 1.68 /
+    2.37: most of the coarse band's floor was tile-count, and pooling buys
+    the headroom back. Getting this wrong in the other direction is easy —
+    pooling 32 tiles at stride 128 against a floor built from 32
+    *independent* fields reads 1.70 where the matched null says 1.42,
+    because heavily overlapped tiles are nowhere near 32 samples (M8v).
+
+    The estimate has its own wobble, and it is a *systematic*, not noise:
+    two disjoint 8-replicate null sets on the arc's 19 tiles give
+    1.049/1.127/1.444/1.819 and 1.051/1.137/1.488/1.880 — up to 0.06 on
+    the coarse band, i.e. about 0.04 of excess. Every arm sharing a tile
+    set shares the bias and it cancels in their difference; **arms whose
+    tile sets differ (a different land pattern selects different windows)
+    do not share it, so allow ~0.05 at 300-800 on top of the envelope
+    when comparing those.**
+    """
+    key = (tuple(shape), float(cellsize), tuple(positions), int(tile),
+           tuple(bands), int(bins), int(seeds))
+    if key not in _SURVEY_FLOOR_CACHE:
+        reps = []
+        for r in range(seeds):
+            pooled, _ = _pooled_angular(
+                _isotropic_field((int(shape[0]), int(shape[1])), 7000 + r),
+                cellsize, positions, tile, bands, bins)
+            reps.append([float(p.max() / p.mean()) if p is not None else 1.0
+                         for p in pooled])
+        _SURVEY_FLOOR_CACHE[key] = [
+            float(np.median([r[i] for r in reps])) for i in range(len(bands))]
+    return list(_SURVEY_FLOOR_CACHE[key])
+
+
+def survey_tiles(
+    dem: np.ndarray,
+    tile: int = SURVEY_TILE,
+    stride: int = SURVEY_STRIDE,
+    min_land: float = SURVEY_MIN_LAND,
+) -> "tuple[list[tuple[int, int]], int]":
+    """Which windows the survey reads, and how big they are.
+
+    Every window on the `stride` lattice whose land fraction clears
+    `min_land`, in raster order. Falls back to every window if none clears
+    it, and to the whole grid if the grid is smaller than `tile` — a
+    reading is always returned, and `SurveyReading.tiles` says how thin the
+    sample was.
+    """
+    n = min(int(dem.shape[0]), int(dem.shape[1]))
+    t = min(int(tile), n)
+    every = [(z, x)
+             for z in range(0, n - t + 1, max(1, int(stride)))
+             for x in range(0, n - t + 1, max(1, int(stride)))]
+    if not every:
+        return [(0, 0)], t
+    dense = [(z, x) for z, x in every
+             if float((dem[z:z + t, x:x + t] > 0.0).mean()) >= min_land]
+    return (dense or every), t
+
+
+def anisotropy_survey(
+    dem: np.ndarray,
+    cellsize: float,
+    bands: "tuple[tuple[float, float], ...]" = ANISOTROPY_BANDS,
+    bins: int = 90,
+    tile: int = SURVEY_TILE,
+    stride: int = SURVEY_STRIDE,
+    min_land: float = SURVEY_MIN_LAND,
+    seeds: int = SURVEY_SEEDS,
+    top: int = 3,
+) -> list[SurveyReading]:
+    """`anisotropy_bands` with the crop-choice variance taken out of it.
+
+    **Use this, not `anisotropy_bands`, for any verdict.** The single-crop
+    reading is a *sample*, and M8v measured how big a sample-to-sample
+    move it can produce: on one fixed 2049^2 arc surface, sliding the
+    1025^2 window over the 19 land-dense positions moves excess by
+    **0.45-0.60** (sd 0.12-0.16) in every band — larger than every effect
+    the lane ranked between M8p and M8t, and the whole of the +-0.15
+    "arm-to-arm repeatability" M8u found. The arms were never scattering;
+    one crop of them was.
+
+    This pools the tiles' angular histograms first and reads the peak of
+    the pool against a null pooled the same way (`_survey_floor`), so a
+    lobe counts only if the tiles agree about its direction. Judged on the
+    six M8u arms — two matched sets of the same landscape, {A,E} and
+    {C,D,F} — against the effect segmentation actually moved:
+
+        reading                    envelope (matched arms)   300-800 effect
+        single crop (M8t's)        0.14 0.29 0.27 0.15       0.34  -> 2.2x
+        pooled survey (this)       0.09 0.04 0.14 0.04       0.32  -> 8.0x
+
+    So M8t's verdict survives its own instrument being re-measured — the
+    coarse band moves eight times the envelope — while the sub-0.1
+    movements M8r and M8s were ranked on do not, and neither does M8t's
+    "three of four bands within 0.07 of the shipped surface".
+
+    ⚠ **Quote `excess` with its envelope, and take matched arms if the
+    move you care about is under ~0.15.** `tile_lo`/`tile_hi` are the raw
+    per-tile spread and are *not* an error bar on `excess` — they are much
+    wider (1.2-4.2 on the coarse band) and are there to show how little a
+    single crop was ever worth.
+
+    ⚠ Two failed alternatives, so they are not re-proposed: taking the
+    **median** of the per-tile excesses instead of pooling the histograms
+    keeps the envelope but loses the effect (0.10 at 300-800, i.e. it
+    averages away the very coherence being tested), and dropping to
+    513^2 tiles puts the coarse floor at 3.5-3.7 and the effect at noise.
+    """
+    d = np.asarray(dem, dtype=np.float64)
+    positions, t = survey_tiles(d, tile, stride, min_land)
+    floors = (_survey_floor(d.shape, cellsize, positions, t, bands, bins,
+                            seeds) if seeds > 0 else [1.0] * len(bands))
+    pooled, peaks = _pooled_angular(d, cellsize, positions, t, bands, bins)
+    out = []
+    for i, ((lo, hi), fl) in enumerate(zip(bands, floors)):
+        p = pooled[i]
+        peak = float(p.max() / p.mean()) if p is not None else 1.0
+        col = peaks[:, i] if peaks.size else np.array([peak])
+        out.append(SurveyReading(
+            float(lo), float(hi), peak / max(fl, 1e-9), fl,
+            float(col.min()) / max(fl, 1e-9),
+            float(col.max()) / max(fl, 1e-9),
+            len(positions), _lobes_of(p, top, 2)))
     return out
 
 
