@@ -352,6 +352,46 @@ def _carve_sill(h, cell, path, sill_depth, flat_half_width, taper):
     return out, int((out > h + 1e-6).sum()), float((out - h).max())
 
 
+def strand_mask(h: np.ndarray, cell: float, starts,
+                classes=ARMOUR_CLASSES,
+                reading: "ConnectivityReading | None" = None):
+    """After the carve: which ground is a start pad still unable to reach?
+
+    PLAN-maps M9c. Returns `(mask, kept, stranded)` — the cells belonging to
+    every armour component that is *not* the one holding the most starts, the
+    start indices that survive, and the ones that do not.
+
+    This is the placer's missing input, and it can only be taken **here**.
+    The obvious design — gate each candidate pad at placement time on
+    `read_connectivity` — was built first and is refuted by measurement: at
+    the moment the placer runs, `sundered_arc` grades **2.4 % armour-passable
+    in 27 285 components**, the largest of them 2.9 % of that, because the
+    roads that make the map drivable are planned *from* the pads and have not
+    been laid yet. The same grading reads 17.4 % in 2 components once roads,
+    rivers and the sill are in. A candidate-level gate on the pre-road
+    surface therefore rejects everything (measured: 66 rejections, 1 pad
+    placed), and no cheaper predicate exists — the pads must be placed before
+    the thing that decides whether they were placeable.
+
+    So the oracle is `connect_starts` itself, run once: after it, any split
+    that remains is a split it could not carve (M8y FIND 3's hard limit —
+    a sill raises a seabed and cannot grade one). What is left is a *ban*,
+    and the placer re-runs against it.
+
+    Ties go to the lower component label, so the choice is deterministic.
+    """
+    mc = strictest(classes)
+    r = reading or read_connectivity(h, cell, starts, mc)
+    lab, _ = ndimage.label(passable(h, cell, mc), structure=_STRUCT)
+    if not r.groups:
+        return np.zeros(h.shape, bool), [], sorted(r.stranded)
+    keep = min(r.groups.items(), key=lambda kv: (-len(kv[1]), kv[0]))[0]
+    drop = [c for c in r.groups if c != keep]
+    mask = np.isin(lab, drop) if drop else np.zeros(h.shape, bool)
+    stranded = sorted([i for c in drop for i in r.groups[c]] + r.stranded)
+    return mask, sorted(r.groups[keep]), stranded
+
+
 def connect_starts(h: np.ndarray, cell: float, starts,
                    classes=ARMOUR_CLASSES,
                    report_classes=DEFAULT_CLASSES,

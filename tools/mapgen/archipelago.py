@@ -118,6 +118,19 @@ HEIGHT_CEILING_FLOOR = 1200.0
 # for every class — but that is a re-ship, not a default.
 ARC_CONNECT_STARTS = True
 
+# The placer-side half of the same question (PLAN-maps M9c): a pad the carve
+# turns out not to be able to reach is a pad that should not have been kept.
+# Same default rule — turning it on for `mounds` re-ships skerry_reach, and
+# whether an archipelago is *allowed* to be armour-split is the open call in
+# the lane queue, not this loop's to make.
+ARC_GATE_START_PADS = True
+
+# How many times the pads may be re-picked against what the carve could not
+# reach. Each pass is a full roads + rivers + carve re-derivation (~30 s of a
+# 289 s full-res arc run), and the ban only ever grows, so this is a wall
+# clock cap rather than a convergence one.
+PAD_PASSES = 3
+
 
 def height_ceiling(top: float) -> float:
     """`max_height` for a surface whose highest cell is `top` elmos.
@@ -610,7 +623,8 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
              hardness_detail: "float | None" = None,
              segmentation: "float | None" = None,
              aim_iterations: "int | None" = None,
-             connect: "bool | None" = None):
+             connect: "bool | None" = None,
+             start_connectivity: "bool | None" = None):
     t0 = time.time()
     cell = 32.0 if fast else 8.0
     S = int(MAP_SIZE / cell) + 1
@@ -635,6 +649,11 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     # cache key — it cannot change what the solver converged to
     if connect is None:
         connect = ARC_CONNECT_STARTS if terrain == "arc" else False
+    # the pad gate is placement, not erosion, so it is not in the cache key
+    # either — but unlike the carve it DOES move where the pads land, so it
+    # moves roads, towns and every downstream placement on the map
+    if start_connectivity is None:
+        start_connectivity = ARC_GATE_START_PADS if terrain == "arc" else False
     print(f"grid {S}x{S} @ {cell} elmos/cell  "
           f"(seed={seed} landmass={landmass} islands={islands} "
           f"climate={climate} terrain={terrain} router={router}"
@@ -779,9 +798,6 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     score_sp = st.SettleParams(biome_score=st.biome_score_for(climate))
     score = st.settlement_score(h, slope, b, 0.0, cell, score_sp)
     sp = st.SettleParams(min_separation=3600.0, edge_margin=900.0)
-    starts: list[tuple[float, float]] = []
-    ring = [l for l in big if sizes[l] * cell * cell > 2.5e6] or big
-    per_island = {l: 0 for l in ring}
     # The separation is GLOBAL, and it used to be per-island: each island's
     # picks were made on their own masked copy of the score, so the round
     # robin never saw the pads it had already placed elsewhere. Measured
@@ -790,135 +806,226 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     # 3 558. Carrying one accumulated exclusion field costs one pick per call
     # instead of re-deriving the island's whole greedy prefix, and is exactly
     # the old within-island behaviour when there is only one island.
-    taken = np.zeros(h.shape, dtype=bool)
-    while len(starts) < N_STARTS and ring:
-        l = min(ring, key=lambda l_: per_island[l_])
-        s_isl = np.where(labels == l, score, 0.0)
-        got = st.pick_sites(s_isl, cell, 1, sp, forbidden=taken)
-        if not got:
-            ring.remove(l)                        # island is full
-            continue
-        sx, sz = got[0]
-        starts.append(got[0])
-        per_island[l] += 1
-        taken |= np.hypot(xx - sx, zz - sz) < sp.min_separation
-    if len(starts) < N_STARTS:
-        raise SystemExit(
-            f"only {len(starts)} start pads fit on {len(per_island)} island(s) "
-            f"— raise --landmass or lower --islands (need {N_STARTS} sites "
-            f"scoring above zero and {sp.min_separation:.0f} elmos apart; "
-            f"{'; '.join(f'island {l_}: {n}' for l_, n in per_island.items())})")
+    # ...and the score is not the only thing a pad has to satisfy: `banned`
+    # carries the ground a previous pass proved no sill can reach. It is empty
+    # on the first pass and stays empty forever unless `--start-connectivity`
+    # is on. See the pad-pass loop below for why this is an outer loop and not
+    # a per-candidate test.
+    def place_pads(banned, strict=True):
+        """`strict=False` returns None instead of exiting — a *re*-placement
+        that cannot be made is a map that has to ship split, not a failure."""
+        starts: list[tuple[float, float]] = []
+        ring = [l for l in big if sizes[l] * cell * cell > 2.5e6] or big
+        per_island = {l: 0 for l in ring}
+        taken = banned.copy()
+        while len(starts) < N_STARTS and ring:
+            l = min(ring, key=lambda l_: per_island[l_])
+            s_isl = np.where(labels == l, score, 0.0)
+            got = st.pick_sites(s_isl, cell, 1, sp, forbidden=taken)
+            if not got:
+                ring.remove(l)                    # island is full
+                continue
+            sx, sz = got[0]
+            starts.append(got[0])
+            per_island[l] += 1
+            taken |= np.hypot(xx - sx, zz - sz) < sp.min_separation
+        if len(starts) < N_STARTS:
+            banned_note = ("; the connectivity ban covers "
+                           f"{100.0 * banned.mean():.1f}% of the map"
+                           if banned.any() else "")
+            if not strict:
+                place_pads.why = (
+                    f"only {len(starts)} of {N_STARTS} pads fit once the ban "
+                    f"is applied ("
+                    + "; ".join(f"island {l_}: {n}"
+                                for l_, n in per_island.items()) + ")")
+                return None
+            raise SystemExit(
+                f"only {len(starts)} start pads fit on {len(per_island)} "
+                f"island(s) — raise --landmass or lower --islands (need "
+                f"{N_STARTS} sites scoring above zero and "
+                f"{sp.min_separation:.0f} elmos apart; "
+                + "; ".join(f"island {l_}: {n}"
+                            for l_, n in per_island.items())
+                + f"{banned_note})")
+        return starts
 
-    # flatten the pads (guaranteed dry: pad level >= +18)
-    for sx, sz in starts:
-        m = np.hypot(xx - sx, zz - sz) < 420.0
-        pad_h = max(float(np.median(h[m])), 18.0)
-        d = ndimage.distance_transform_edt(~m) * cell
-        w = np.clip(1.0 - d / 500.0, 0.0, 1.0) ** 2
-        h = h * (1 - w) + pad_h * w
+    # 5b-7b as ONE pad pass, so a pad the map turns out not to be able to
+    # reach can be re-picked and the whole placement re-derived (PLAN-maps
+    # M9c). This has to be an OUTER loop, and that is the milestone's finding
+    # rather than a structural preference: the obvious design — gate each
+    # candidate at pick time on `read_connectivity` — was built first and
+    # starves, because at the moment the placer runs the arc grades 2.4 %
+    # armour-passable in 27 285 components (largest 2.9 % of that) and only
+    # reads 17.4 % in 2 components once roads, rivers and the sill are in.
+    # The roads that make the map drivable are planned FROM the pads, so the
+    # pads must exist before the thing that decides whether they were
+    # placeable. Measured: the pick-time gate rejected 66 sites and placed 1
+    # pad. Each pass costs roads + rivers + carve, ~30 s of a 289 s arc run.
+    h_pre = h
+    banned = np.zeros(h.shape, dtype=bool)
+    starts = place_pads(banned)
+    for pad_pass in range(PAD_PASSES if start_connectivity else 1):
+        h = h_pre.copy()
+        after = None
 
-    # 6. settlements + per-island road networks (roads never island-hop:
-    # each island's sites are planned as their own network)
-    slope = np.degrees(np.arctan(np.hypot(*np.gradient(h, cell)[::-1])))
-    score = st.settlement_score(h, slope, b, 0.0, cell, score_sp)
-    pad_excl = np.zeros(h.shape, bool)
-    for sx, sz in starts:
-        pad_excl |= np.hypot(xx - sx, zz - sz) < 700.0
-    # no slope override: the M9a cost model blocks on the road's own grade and
-    # prices the hillside it is cut into, so the old `max_slope_deg=26` (a
-    # terrain-slope wall that isolated a town site standing on 29 deg ground)
-    # has no successor here — see PLAN-maps M9a.
-    rp = rd.RoadParams(plan_step=(1 if fast else 4), road_width=44.0,
-                       water_penalty=80.0)
-    # ...and the two now have to AGREE about buildable ground. M9a FIND 1 was
-    # a town site standing where the road cost field could not take a single
-    # step, so the planner handed it its own one-site network and the map
-    # gained a second, unexplained road system. `settlement_score` reads a
-    # 320-elmo disc of full-res slope; the planner reads one decimated
-    # planning cell. This is the planner's own field, so the site placer is
-    # answering the planner's question rather than a similar-looking one.
-    # Pads do not need it: they are levelled over a 420-elmo disc above,
-    # which is ~13 planning cells, so a pad makes its own cell buildable.
-    unbuildable = rd.unbuildable_mask(h, 0.0, cell, rp)
-    polylines: list[np.ndarray] = []
-    towns: list[tuple[float, float]] = []
-    for l in big:
-        area = sizes[l] * cell * cell
-        want = int(np.clip(area / 6.0e6, 1, 4))
-        s_isl = np.where((labels == l) & ~pad_excl, score, 0.0)
-        sites = st.pick_sites(s_isl, cell, want,
-                              st.SettleParams(min_separation=2000.0),
-                              forbidden=unbuildable)
-        towns += sites
-        # connect this island's towns + its start pads into one network
-        isl_starts = [p for p in starts
-                      if labels[int(p[1] / cell), int(p[0] / cell)] == l]
-        net = sites + isl_starts
-        if len(net) >= 2:
-            polylines += rd.plan_roads(h, 0.0, cell, net, rp)
-    road_mask, road_dist = rd.rasterize_roads(polylines, h.shape, cell, rp)
-    rd.carve_plazas(road_mask, road_dist, towns, 85.0, cell, rp)
-    h = rd.flatten_under_roads(h, road_dist, cell, rp)
-    print(f"roads done {time.time()-t0:.0f}s ({len(polylines)} segments, "
-          f"{len(towns)} town plazas, {len(starts)} starts)")
+        # flatten the pads (guaranteed dry: pad level >= +18)
+        for sx, sz in starts:
+            m = np.hypot(xx - sx, zz - sz) < 420.0
+            pad_h = max(float(np.median(h[m])), 18.0)
+            d = ndimage.distance_transform_edt(~m) * cell
+            w = np.clip(1.0 - d / 500.0, 0.0, 1.0) ** 2
+            h = h * (1 - w) + pad_h * w
 
-    # 7. hydrology -> island stream ribbons (PLAN-maps §2b item 3)
-    filled = hyd.fill_depressions(h)
-    recv = hyd.d8_receivers(hyd.resolve_flats(filled))
-    levels = hyd.topo_levels(recv)
-    accum = hyd.flow_accumulation(recv, levels)
+        # 6. settlements + per-island road networks (roads never island-hop:
+        # each island's sites are planned as their own network)
+        slope = np.degrees(np.arctan(np.hypot(*np.gradient(h, cell)[::-1])))
+        # a DIFFERENT field from the pad score above: this one is read on the
+        # post-pad surface and only towns use it. `place_pads` closes over the
+        # pre-pad `score`, and re-binding this name would quietly hand pass 2
+        # a score that already has pass 1's pads levelled into it.
+        town_score = st.settlement_score(h, slope, b, 0.0, cell, score_sp)
+        pad_excl = np.zeros(h.shape, bool)
+        for sx, sz in starts:
+            pad_excl |= np.hypot(xx - sx, zz - sz) < 700.0
+        # no slope override: the M9a cost model blocks on the road's own grade and
+        # prices the hillside it is cut into, so the old `max_slope_deg=26` (a
+        # terrain-slope wall that isolated a town site standing on 29 deg ground)
+        # has no successor here — see PLAN-maps M9a.
+        rp = rd.RoadParams(plan_step=(1 if fast else 4), road_width=44.0,
+                           water_penalty=80.0)
+        # ...and the two now have to AGREE about buildable ground. M9a FIND 1 was
+        # a town site standing where the road cost field could not take a single
+        # step, so the planner handed it its own one-site network and the map
+        # gained a second, unexplained road system. `settlement_score` reads a
+        # 320-elmo disc of full-res slope; the planner reads one decimated
+        # planning cell. This is the planner's own field, so the site placer is
+        # answering the planner's question rather than a similar-looking one.
+        # Pads do not need it: they are levelled over a 420-elmo disc above,
+        # which is ~13 planning cells, so a pad makes its own cell buildable.
+        unbuildable = rd.unbuildable_mask(h, 0.0, cell, rp)
+        polylines: list[np.ndarray] = []
+        towns: list[tuple[float, float]] = []
+        for l in big:
+            area = sizes[l] * cell * cell
+            want = int(np.clip(area / 6.0e6, 1, 4))
+            s_isl = np.where((labels == l) & ~pad_excl, town_score, 0.0)
+            sites = st.pick_sites(s_isl, cell, want,
+                                  st.SettleParams(min_separation=2000.0),
+                                  forbidden=unbuildable)
+            towns += sites
+            # connect this island's towns + its start pads into one network
+            isl_starts = [p for p in starts
+                          if labels[int(p[1] / cell), int(p[0] / cell)] == l]
+            net = sites + isl_starts
+            if len(net) >= 2:
+                polylines += rd.plan_roads(h, 0.0, cell, net, rp)
+        road_mask, road_dist = rd.rasterize_roads(polylines, h.shape, cell, rp)
+        rd.carve_plazas(road_mask, road_dist, towns, 85.0, cell, rp)
+        h = rd.flatten_under_roads(h, road_dist, cell, rp)
+        print(f"roads done {time.time()-t0:.0f}s ({len(polylines)} segments, "
+              f"{len(towns)} town plazas, {len(starts)} starts)")
 
-    # start pads only — this map has no authored elevation contract beyond
-    # them, so the network is otherwise free to run wherever the terrain sends
-    # it (which is the point of an archipelago: short, steep, radial streams)
-    protect = np.zeros(h.shape)
-    for sx, sz in starts:
-        protect = np.maximum(protect,
-                             (np.hypot(xx - sx, zz - sz) < 520.0).astype(float))
-    protect = np.clip(ndimage.gaussian_filter(
-        protect, sigma=max(1.0, 160.0 / cell)) * 1.35, 0.0, 1.0)
+        # 7. hydrology -> island stream ribbons (PLAN-maps §2b item 3)
+        filled = hyd.fill_depressions(h)
+        recv = hyd.d8_receivers(hyd.resolve_flats(filled))
+        levels = hyd.topo_levels(recv)
+        accum = hyd.flow_accumulation(recv, levels)
 
-    # islands have tiny catchments: seed generously, keep the channels narrow
-    rp_riv = riv.RiverParams(channel_fraction=(0.045 if fast else 0.025),
-                             width_coef=0.05, width_min=9.0, width_max=48.0,
-                             depth_max=6.0, bank_width=55.0)
-    net = riv.build(h, recv, levels, accum, cell, 0.0, seed, rp_riv, protect)
-    h = net.terrain
-    rivers = net.is_water
-    print(f"rivers done {time.time()-t0:.0f}s ({len(net.polylines)} reaches, "
-          f"{100.0 * net.channel_mask.mean():.2f}% channel cells)")
+        # start pads only — this map has no authored elevation contract beyond
+        # them, so the network is otherwise free to run wherever the terrain sends
+        # it (which is the point of an archipelago: short, steep, radial streams)
+        protect = np.zeros(h.shape)
+        for sx, sz in starts:
+            protect = np.maximum(protect,
+                                 (np.hypot(xx - sx, zz - sz) < 520.0).astype(float))
+        protect = np.clip(ndimage.gaussian_filter(
+            protect, sigma=max(1.0, 160.0 / cell)) * 1.35, 0.0, 1.0)
 
-    # 7b. make the map playable for armour: raise a submarine sill across the
-    # shallowest strait until every start can reach every other (PLAN-maps
-    # M8x). This runs LAST of the terrain passes, and that placement is the
-    # milestone's find rather than a detail: roads are worth about half the
-    # reading. Measured on the shipped arc, the same grading before roads and
-    # rivers says VEH 11.5 % passable in EIGHT components, and after them
-    # 17.5 % in two — `flatten_under_roads` lays graded corridors across
-    # ground erosion left too steep to drive. Carving against the pre-road
-    # surface would therefore chase eight splits that the road network is
-    # about to close on its own. The verdict `regions_from_map.py --verify`
-    # takes is on the packaged bytes; this has to be the same surface.
-    #
-    # The carve is strictly submarine and only ever raises, so it moves the
-    # land fraction and the relief aim by nothing at all and the texture
-    # survey by at most 0.01 in one band (M8x measured both `.smf`s) — but
-    # roads and rivers, two steps above, move it by 0.48, which is why the
-    # `[shipped]` report below is taken after all three rather than at step 3.
-    # Nothing is placed on the sill either (`excl` takes everything under +2).
-    before = pas.read_all(h, cell, starts)
-    print("passability: " + " | ".join(
-        f"{r.cls} {'PASS' if r.ok else str(len(r.groups)) + ' comps'}"
-        f" {r.passable_frac:.1%}" for r in before))
-    if connect and any(not r.ok for r in before
-                       if r.cls in pas.ARMOUR_CLASSES):
-        h, crossings, after = pas.connect_starts(h, cell, starts, log=print)
-        print(f"connect done {time.time()-t0:.0f}s "
-              f"({len(crossings)} sill(s) carved)")
-        for r in after:
-            print("  " + r.describe())
-        if any(not r.ok for r in after if r.cls in pas.ARMOUR_CLASSES):
-            print("  ⚠ armour STILL cannot cross this map end to end")
+        # islands have tiny catchments: seed generously, keep the channels narrow
+        rp_riv = riv.RiverParams(channel_fraction=(0.045 if fast else 0.025),
+                                 width_coef=0.05, width_min=9.0, width_max=48.0,
+                                 depth_max=6.0, bank_width=55.0)
+        net = riv.build(h, recv, levels, accum, cell, 0.0, seed, rp_riv, protect)
+        h = net.terrain
+        rivers = net.is_water
+        print(f"rivers done {time.time()-t0:.0f}s ({len(net.polylines)} reaches, "
+              f"{100.0 * net.channel_mask.mean():.2f}% channel cells)")
+
+        # 7b. make the map playable for armour: raise a submarine sill across the
+        # shallowest strait until every start can reach every other (PLAN-maps
+        # M8x). This runs LAST of the terrain passes, and that placement is the
+        # milestone's find rather than a detail: roads are worth about half the
+        # reading. Measured on the shipped arc, the same grading before roads and
+        # rivers says VEH 11.5 % passable in EIGHT components, and after them
+        # 17.5 % in two — `flatten_under_roads` lays graded corridors across
+        # ground erosion left too steep to drive. Carving against the pre-road
+        # surface would therefore chase eight splits that the road network is
+        # about to close on its own. The verdict `regions_from_map.py --verify`
+        # takes is on the packaged bytes; this has to be the same surface.
+        #
+        # The carve is strictly submarine and only ever raises, so it moves the
+        # land fraction and the relief aim by nothing at all and the texture
+        # survey by at most 0.01 in one band (M8x measured both `.smf`s) — but
+        # roads and rivers, two steps above, move it by 0.48, which is why the
+        # `[shipped]` report below is taken after all three rather than at step 3.
+        # Nothing is placed on the sill either (`excl` takes everything under +2).
+        before = pas.read_all(h, cell, starts)
+        print("passability: " + " | ".join(
+            f"{r.cls} {'PASS' if r.ok else str(len(r.groups)) + ' comps'}"
+            f" {r.passable_frac:.1%}" for r in before))
+        if connect and any(not r.ok for r in before
+                           if r.cls in pas.ARMOUR_CLASSES):
+            h, crossings, after = pas.connect_starts(h, cell, starts, log=print)
+            print(f"connect done {time.time()-t0:.0f}s "
+                  f"({len(crossings)} sill(s) carved)")
+            for r in after:
+                print("  " + r.describe())
+            if any(not r.ok for r in after if r.cls in pas.ARMOUR_CLASSES):
+                print("  ⚠ armour STILL cannot cross this map end to end")
+
+        if not start_connectivity:
+            break
+        arm = [r for r in (after or before) if r.cls in pas.ARMOUR_CLASSES]
+        if all(r.ok for r in arm):
+            break
+        # Whatever is still split after the carve is split for good — a sill
+        # raises a seabed and cannot grade one (M8y FIND 3) — so ban that
+        # ground and re-place. The strictest class decides, because a carve
+        # aimed at it answers every class it covers (`strictest`).
+        worst = max(arm, key=lambda r: (len(r.groups), len(r.stranded)))
+        mask, kept, stranded = pas.strand_mask(h, cell, starts)
+        # ...and the ban has to be at ISLAND granularity, not component. The
+        # component ban was tried first and does not converge: it covers only
+        # the 1.9 % of cells the *armour grading* calls passable inside the
+        # stranded group, so the placer simply re-picks a site a few hundred
+        # elmos away on the same island — which the pad flattening and the
+        # road network then re-attach to the same isolated group. Passes 0 and
+        # 1 both came back [0, 3, 6] that way. An island is the unit the
+        # round-robin already reasons in, and it is the unit a strait splits.
+        isl = {int(labels[int(starts[i][1] / cell), int(starts[i][0] / cell)])
+               for i in stranded}
+        isl.discard(0)
+        banned = banned | (np.isin(labels, list(isl)) if isl else mask)
+        print(f"  pad pass {pad_pass}: {worst.cls} leaves starts {stranded} "
+              f"where no sill reaches starts {kept} — island(s) {sorted(isl)}, "
+              f"{100.0 * banned.mean():.1f}% of the map")
+        if pad_pass + 1 >= PAD_PASSES:
+            print(f"  pad pass {pad_pass}: no passes left — shipping it split")
+            break
+        # A re-placement that cannot be made is the map answering the
+        # question, not an error: `sundered_arc` at --landmass 0.30 puts its
+        # stranded group on island 1, which is 14.4 % of the map, and only 5
+        # of 8 pads fit on what is left. Say so and ship the split map rather
+        # than refuse to build one (PLAN-maps M9c FIND 3).
+        retry = place_pads(banned, strict=False)
+        if retry is None:
+            print(f"  pad pass {pad_pass}: the ban leaves no other pad set — "
+                  f"{place_pads.why}. THIS MAP IS ARMOUR-SPLIT and ships that "
+                  f"way; `regions_from_map.py --verify` will fail it.")
+            break
+        starts = retry
+
 
     # 7c. the same three readings again, on the surface that actually ships.
     # Nothing below here moves the heightmap (placement reads it; packaging
@@ -1231,6 +1338,16 @@ def main():
                          "the generator. Default ON for --terrain arc, OFF "
                          "for mounds (turning it on there re-ships "
                          "skerry_reach). See PLAN-maps M8x.")
+    ap.add_argument("--start-connectivity", dest="start_connectivity",
+                    action=argparse.BooleanOptionalAction, default=None,
+                    help="make the start-pad placer connectivity-aware: if "
+                         "--connect-starts still leaves the map split, ban "
+                         "the ground no sill reached and re-place the pads, "
+                         "up to 3 passes. The placer cannot answer this at "
+                         "pick time — the roads that make the map drivable "
+                         "are planned FROM the pads — so each pass re-derives "
+                         "roads, rivers and the carve (~30 s). Default ON for "
+                         "--terrain arc, OFF for mounds. See PLAN-maps M9c.")
     ap.add_argument("--fast", action="store_true",
                     help="513 grid iteration mode — preview/tuning only, "
                          "NOT shippable. ⚠ with --terrain arc it is not even "
@@ -1269,6 +1386,10 @@ def main():
         if args.connect is not None:
             passthrough.append("--connect-starts" if args.connect
                                else "--no-connect-starts")
+        if args.start_connectivity is not None:
+            passthrough.append("--start-connectivity"
+                               if args.start_connectivity
+                               else "--no-start-connectivity")
         if args.fast:
             passthrough.append("--fast")
         if args.with_features:
@@ -1289,7 +1410,8 @@ def main():
              hardness_detail=args.hardness_detail,
              segmentation=args.segmentation,
              aim_iterations=args.aim_iterations,
-             connect=args.connect)
+             connect=args.connect,
+             start_connectivity=args.start_connectivity)
 
 
 if __name__ == "__main__":

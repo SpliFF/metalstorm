@@ -338,5 +338,92 @@ class TestTheShallowestCrossingIsTheOneChosen(unittest.TestCase):
                 self.assertTrue(r.ok, r.describe())
 
 
+class TestTheStrandMask(unittest.TestCase):
+    """The placer's missing input, and it can only be taken after the carve.
+
+    PLAN-maps M9c. The obvious design — gate each candidate pad at pick time
+    on `read_connectivity` — was built first and is refuted by measurement:
+    at the moment the placer runs, `sundered_arc` grades 2.4 % armour-passable
+    in 27 285 components, because the roads that make it drivable are planned
+    FROM the pads. So the oracle is `connect_starts` itself, run once, and
+    what is left over is a ban.
+
+    Fixture: three plateaus. A and B are split by a wide, gentle 26-elmo
+    channel — deeper than armour wades, so a different component, but a sill
+    joins it. C is behind a narrow 65-degree one, which no sill can answer.
+    """
+
+    JOINABLE = (200.0, 60.0, 26.0)      # centre, half-width, depth
+    HOPELESS = (600.0, 8.0, 26.0)
+    A, B, C = 100, 400, 740
+
+    def setUp(self):
+        self.h = three_plateaus([self.JOINABLE, self.HOPELESS], n=800)
+        self.starts = [self._pad(c) for c in (self.A, self.B, self.C)]
+
+    def _pad(self, col):
+        return (col * CELL, 400 * CELL)
+
+    def test_the_three_plateaus_really_are_three_components(self):
+        r = pa.read_connectivity(self.h, CELL, self.starts,
+                                 pa.strictest(pa.ARMOUR_CLASSES))
+        self.assertEqual(len(r.groups), 3, r.describe())
+
+    def test_the_carve_joins_two_of_them_and_strands_the_third(self):
+        out, crossings, after = pa.connect_starts(self.h, CELL, self.starts)
+        self.assertEqual(len(crossings), 1)
+        self.assertTrue(any(not r.ok for r in after
+                            if r.cls in pa.ARMOUR_CLASSES),
+                        [r.describe() for r in after])
+        _, kept, stranded = pa.strand_mask(out, CELL, self.starts)
+        self.assertEqual(kept, [0, 1])
+        self.assertEqual(stranded, [2])
+
+    def test_the_ban_covers_the_stranded_ground_and_nothing_else(self):
+        out, _, _ = pa.connect_starts(self.h, CELL, self.starts)
+        mask, _, _ = pa.strand_mask(out, CELL, self.starts)
+        self.assertTrue(mask[400, self.C])
+        self.assertTrue(mask[10, self.C])
+        self.assertFalse(mask[400, self.A])
+        self.assertFalse(mask[400, self.B])
+
+    def test_a_map_that_already_passes_bans_nothing(self):
+        h = three_plateaus([(400.0, 60.0, 26.0)], n=800)
+        starts = [self._pad(self.A), self._pad(740)]
+        out, _, after = pa.connect_starts(h, CELL, starts)
+        for r in after:
+            if r.cls in pa.ARMOUR_CLASSES:
+                self.assertTrue(r.ok, r.describe())
+        mask, kept, stranded = pa.strand_mask(out, CELL, starts)
+        self.assertFalse(mask.any())
+        self.assertEqual(stranded, [])
+        self.assertEqual(kept, [0, 1])
+
+    def test_the_majority_group_is_the_one_kept(self):
+        """Two pads on C, one on A: the ban falls on A, not on C."""
+        starts = [self._pad(self.A), self._pad(700), self._pad(780)]
+        out, _, _ = pa.connect_starts(self.h, CELL, starts)
+        mask, kept, stranded = pa.strand_mask(out, CELL, starts)
+        self.assertEqual(kept, [1, 2])
+        self.assertEqual(stranded, [0])
+        self.assertTrue(mask[400, self.A])
+        self.assertFalse(mask[400, 740])
+
+    def test_a_start_on_impassable_ground_counts_as_stranded(self):
+        h = np.full((260, 260), 60.0)
+        h[:, 100:160] = -400.0                          # a wide, deep hole
+        starts = [(20 * CELL, 130 * CELL), (130 * CELL, 130 * CELL)]
+        _, kept, stranded = pa.strand_mask(h, CELL, starts)
+        self.assertEqual(kept, [0])
+        self.assertEqual(stranded, [1])
+
+    def test_it_is_deterministic_when_two_groups_are_the_same_size(self):
+        starts = [self._pad(self.A), self._pad(740)]
+        out, _, _ = pa.connect_starts(self.h, CELL, starts)
+        first = pa.strand_mask(out, CELL, starts)[1:]
+        for _ in range(3):
+            self.assertEqual(pa.strand_mask(out, CELL, starts)[1:], first)
+
+
 if __name__ == "__main__":
     unittest.main()
