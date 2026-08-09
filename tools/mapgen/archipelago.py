@@ -7,7 +7,8 @@ inputs — island placement, elevations, start positions, settlements,
 per-island road networks, biomes, vegetation, ruins. Deterministic:
 
     same (--seed, --landmass, --islands, --terrain, --router, --arc-detail,
-          --hardness-detail, --arc-segmentation, --connect-starts)
+          --hardness-detail, --arc-segmentation, --connect-starts,
+          --carve-raise-penalty)
         =>  byte-identical map
 
 The --landmass fraction is a hard contract, enforced by quantile
@@ -624,7 +625,8 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
              segmentation: "float | None" = None,
              aim_iterations: "int | None" = None,
              connect: "bool | None" = None,
-             start_connectivity: "bool | None" = None):
+             start_connectivity: "bool | None" = None,
+             raise_penalty: int = 1):
     t0 = time.time()
     cell = 32.0 if fast else 8.0
     S = int(MAP_SIZE / cell) + 1
@@ -976,7 +978,8 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
             f" {r.passable_frac:.1%}" for r in before))
         if connect and any(not r.ok for r in before
                            if r.cls in pas.ARMOUR_CLASSES):
-            h, crossings, after = pas.connect_starts(h, cell, starts, log=print)
+            h, crossings, after = pas.connect_starts(
+                h, cell, starts, raise_penalty=raise_penalty, log=print)
             print(f"connect done {time.time()-t0:.0f}s "
                   f"({len(crossings)} sill(s) carved)")
             for r in after:
@@ -1364,6 +1367,14 @@ def main():
                          "are planned FROM the pads — so each pass re-derives "
                          "roads, rivers and the carve (~30 s). Default ON for "
                          "--terrain arc, OFF for mounds. See PLAN-maps M9c.")
+    ap.add_argument("--carve-raise-penalty", dest="raise_penalty", type=int,
+                    default=1, metavar="K",
+                    help="what a sill route pays per cell the carve would have "
+                         "to raise, against 1 for a cell it can walk over — so "
+                         "K>1 buys a longer route to build less causeway. "
+                         "Default 1 (the shortest-hop search this generator "
+                         "has always used); only meaningful with "
+                         "--connect-starts. See PLAN-maps M9e.")
     ap.add_argument("--fast", action="store_true",
                     help="513 grid iteration mode — preview/tuning only, "
                          "NOT shippable. ⚠ with --terrain arc it is not even "
@@ -1406,6 +1417,8 @@ def main():
             passthrough.append("--start-connectivity"
                                if args.start_connectivity
                                else "--no-start-connectivity")
+        if args.raise_penalty != 1:
+            passthrough += ["--carve-raise-penalty", str(args.raise_penalty)]
         if args.fast:
             passthrough.append("--fast")
         if args.with_features:
@@ -1427,7 +1440,8 @@ def main():
              segmentation=args.segmentation,
              aim_iterations=args.aim_iterations,
              connect=args.connect,
-             start_connectivity=args.start_connectivity)
+             start_connectivity=args.start_connectivity,
+             raise_penalty=args.raise_penalty)
 
 
 if __name__ == "__main__":

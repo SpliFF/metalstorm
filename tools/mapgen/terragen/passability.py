@@ -243,6 +243,15 @@ class Crossing:
     centre: tuple[float, float]   # elmo coords
     cells_raised: int
     max_raise: float
+    route_cells: int = 0          # cells on the chosen route
+    causeway_cells: int = 0       # ...of which the carve has to raise (below
+                                  # the sill floor). The rest is ground the
+                                  # route walks over and `np.maximum` leaves
+                                  # alone, so this is the artificial half of
+                                  # the crossing — PLAN-maps M9e.
+    fill_elmos: float = 0.0       # total lift the carve added, cell-elmos: the
+                                  # size of the crossing as built, against
+                                  # `cells_raised`'s count of where it touched
 
 
 def strictest(classes=DEFAULT_CLASSES) -> MoveClass:
@@ -289,39 +298,71 @@ def _search_mask(h, rise, tan_limit, depth, lift):
     return (h >= -(depth + lift)) & (rise <= tan_limit)
 
 
-def _geodesic_path(mask, src, dst, max_steps=6000):
-    """Shortest 4-connected path from `src` to `dst` inside `mask`.
+def _geodesic_path(mask, src, dst, max_steps=6000, weight=None):
+    """Cheapest 4-connected path from `src` to `dst` inside `mask`.
 
     Layered dilation rather than a heap: the frontier is a whole array op, so
     this costs one dilation per step of path length instead of one heap pop
     per cell, which on a 2049^2 grid is the difference between a second and a
     minute.
+
+    `weight` (an integer per-cell cost, entered on arrival) turns the layers
+    into a **dial queue** — one bucket per distance still in flight, indexed
+    modulo the largest weight — which keeps every step an array op even though
+    the search is now a Dijkstra rather than a BFS. It is exact for integer
+    weights, and with `weight is None` (or an all-ones array) it degenerates to
+    the plain layered BFS, bucket for bucket. `max_steps` bounds the path in
+    cells, so the cost budget scales with the heaviest weight — otherwise a
+    penalty would quietly shorten the reach of the search as well as re-aim it.
     """
+    if weight is None:
+        weight = np.ones(mask.shape, np.int32)
+    vals = sorted({int(v) for v in np.unique(weight[mask])}) or [1]
+    wsel = {v: (weight == v) for v in vals}
+    kmax = max(vals)
+    ring: list = [None] * (kmax + 1)            # buckets, indexed d % (kmax+1)
+    budget = max_steps * kmax
+
     dist = np.full(mask.shape, -1, np.int32)
     frontier = src & mask
     if not frontier.any():
         return None
     dist[frontier] = 0
+    ring[0] = frontier
     reached = None
-    for step in range(1, max_steps + 1):
-        nxt = ndimage.binary_dilation(frontier, _STRUCT) & mask & (dist < 0)
-        if not nxt.any():
-            return None
-        dist[nxt] = step
-        hit = nxt & dst
+    for d in range(0, budget + 1):
+        b = d % (kmax + 1)
+        frontier, ring[b] = ring[b], None
+        if frontier is None:
+            if all(x is None for x in ring):
+                return None                     # every bucket dry: no route
+            continue
+        frontier &= (dist == d)                 # drop entries since improved
+        if not frontier.any():
+            continue
+        hit = frontier & dst
         if hit.any():
             zs, xs = np.nonzero(hit)
             reached = (int(zs[0]), int(xs[0]))
             break
-        frontier = nxt
+        cand = ndimage.binary_dilation(frontier, _STRUCT) & mask
+        for v in vals:
+            # a heavy cell can be reached cheaply later, so relax rather than
+            # only claim unvisited ground — the ring is a Dijkstra, not a BFS
+            sel = cand & wsel[v] & ((dist < 0) | (dist > d + v))
+            if not sel.any():
+                continue
+            dist[sel] = d + v
+            nb = (d + v) % (kmax + 1)
+            ring[nb] = sel if ring[nb] is None else (ring[nb] | sel)
     if reached is None:
         return None
-    # walk back down the step numbers
+    # walk back down the distances, each step paying the cell it leaves
     path = [reached]
     z, x = reached
     H, W = mask.shape
     while dist[z, x] > 0:
-        want = dist[z, x] - 1
+        want = dist[z, x] - int(weight[z, x])
         for dz, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
             nz, nx = z + dz, x + dx
             if 0 <= nz < H and 0 <= nx < W and dist[nz, nx] == want:
@@ -331,6 +372,22 @@ def _geodesic_path(mask, src, dst, max_steps=6000):
             break
         path.append((z, x))
     return path[::-1]
+
+
+def _route_weight(h, sill_depth, penalty: int):
+    """What a route pays per cell: `penalty` where the carve has to raise it.
+
+    A sill only ever raises (`_carve_sill` maximums against the surface), so a
+    route cell already at or above the sill floor costs the carve nothing —
+    it is ground the crossing walks over rather than causeway it has to build.
+    Charging the difference is the whole of the `raise_penalty` lever
+    (PLAN-maps M9e, lane queue item 3): at 1 the search is the plain
+    shortest-hop BFS it has always been.
+    """
+    w = np.ones(h.shape, np.int32)
+    if penalty > 1:
+        w[h < -abs(sill_depth)] = int(penalty)
+    return w
 
 
 def _carve_sill(h, cell, path, sill_depth, flat_half_width, taper):
@@ -349,7 +406,8 @@ def _carve_sill(h, cell, path, sill_depth, flat_half_width, taper):
     target = -abs(sill_depth)
     lifted = h * (1.0 - w) + target * w
     out = np.maximum(h, lifted)
-    return out, int((out > h + 1e-6).sum()), float((out - h).max())
+    return (out, int((out > h + 1e-6).sum()), float((out - h).max()),
+            float((out - h).sum()))
 
 
 def strand_mask(h: np.ndarray, cell: float, starts,
@@ -400,6 +458,7 @@ def connect_starts(h: np.ndarray, cell: float, starts,
                    taper: float = 300.0,
                    max_lift: float = 250.0,
                    max_crossings: "int | None" = None,
+                   raise_penalty: int = 1,
                    log=None):
     """Carve sills until every start can reach every other, for every class.
 
@@ -416,6 +475,11 @@ def connect_starts(h: np.ndarray, cell: float, starts,
     arc needed 1 of 6; `skerry_reach` is 8 components for armour and needs 7,
     so the old default of 6 would have left it failing with no error
     (PLAN-maps M8y). Pass an explicit int to cap the work anyway.
+
+    `raise_penalty` is what a route pays per cell the carve would have to raise,
+    against 1 for a cell it can walk over — the "prefer a land corridor to a
+    causeway" lever of PLAN-maps lane queue item 3. **1 is the shipped default
+    and is exactly the old shortest-hop search**; see `_route_weight` and M9e.
     """
     say = log or (lambda _m: None)
     ref = strictest(classes)
@@ -476,7 +540,9 @@ def connect_starts(h: np.ndarray, cell: float, starts,
                 else:
                     lo = mid
             mask = _search_mask(h, rise, tan_limit, ref.max_water_depth, hi)
-            path = _geodesic_path(mask, src, dst)
+            path = _geodesic_path(mask, src, dst,
+                                  weight=_route_weight(h, sill_depth,
+                                                       raise_penalty))
             if path is None:                    # pragma: no cover - defensive
                 say("  connect: bisection found a route but the path walk "
                     "did not")
@@ -491,18 +557,24 @@ def connect_starts(h: np.ndarray, cell: float, starts,
         pz = np.fromiter((p[0] for p in path), int, len(path))
         px = np.fromiter((p[1] for p in path), int, len(path))
         deepest = float(-h[pz, px].min())
-        h, raised, max_raise = _carve_sill(h, cell, path, sill_depth,
-                                           flat_half_width, taper)
+        causeway = int((h[pz, px] < -abs(sill_depth)).sum())
+        h, raised, max_raise, fill = _carve_sill(h, cell, path, sill_depth,
+                                                 flat_half_width, taper)
         cx = Crossing(cls=ref.name, joined=(sorted(sa)[0], sorted(sb)[0]),
                       sill_lift=float(hi), deepest_before=deepest,
                       length_elmos=len(path) * cell,
                       centre=(float(px.mean() * cell), float(pz.mean() * cell)),
-                      cells_raised=raised, max_raise=max_raise)
+                      cells_raised=raised, max_raise=max_raise,
+                      route_cells=len(path), causeway_cells=causeway,
+                      fill_elmos=fill)
         crossings.append(cx)
         say(f"  connect: starts {sorted(sa)} + {sorted(sb)} — sill at "
             f"({cx.centre[0]:.0f},{cx.centre[1]:.0f}), route "
             f"{cx.length_elmos:.0f} elmos, was {deepest:.1f} elmos deep, "
             f"raised {raised} cells by up to {max_raise:.1f}")
+        say(f"    route {len(path)} cells, {causeway} of them causeway "
+            f"({causeway / max(len(path), 1):.0%} below the sill floor), "
+            f"fill {fill:.0f} cell-elmos, at raise_penalty {raise_penalty}")
 
     return h, crossings, read_all(h, cell, starts, report_classes)
 

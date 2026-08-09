@@ -88,6 +88,35 @@ def trench_with_a_neck(deep=120.0, neck=26.0, z0=90, z1=130, blend=30):
     return h, starts, CELL
 
 
+def strait_with_a_shoal(n=220, neck_z=(40, 60)):
+    """A deep strait with two ways over: a short deep neck and a long shoal.
+
+    The "land corridor versus causeway" of PLAN-maps lane queue item 3 in
+    miniature, and it has to be built this way round because the search runs
+    component to component, not start to start: a detour *inside* one side is
+    free already, so the only thing a penalty can buy is a crossing that is
+    longer in cells but shallower in more of them.
+
+    Over most of the map an isolated shoal splits the strait into two 8-cell
+    channels, so a route over it is 36 cells of which 16 need raising. In the
+    neck band the shoal is absent and the strait pinches to 30 cells, all of
+    them 24 elmos deep. Same lift either way — the minimax cannot separate
+    them — and the neck is the shorter hop, so shortest-path takes it.
+    """
+    x = np.arange(n, dtype=np.float64)[None, :]
+    z = np.arange(n, dtype=np.float64)[:, None]
+    neck = (_smoothstep((z - (neck_z[0] - 15)) / 15.0)
+            * _smoothstep(((neck_z[1] + 15) - z) / 15.0))
+    hw = 18.0 - 3.0 * neck                              # strait 36 cells / 30
+    h = 10.0 - 34.0 * (_smoothstep((x - (98.0 - hw - 20.0)) / 20.0)
+                       * _smoothstep(((98.0 + hw + 20.0) - x) / 20.0))
+    shoal = (_smoothstep((x - 80.0) / 8.0)
+             * _smoothstep((116.0 - x) / 8.0)) * (1.0 - neck)
+    h = np.minimum(10.0, h + 14.0 * shoal)              # -24 -> -10 mid-strait
+    starts = [(15 * CELL, 110 * CELL), (205 * CELL, 110 * CELL)]
+    return h, starts, CELL
+
+
 class TestGradingAgreesWithTheVerifier(unittest.TestCase):
     def test_the_move_class_tables_are_the_same(self):
         self.assertEqual(set(pa.MOVE_CLASSES), set(rfm.MOVE_CLASSES))
@@ -336,6 +365,63 @@ class TestTheShallowestCrossingIsTheOneChosen(unittest.TestCase):
         for r in after:
             if r.cls in pa.ARMOUR_CLASSES:
                 self.assertTrue(r.ok, r.describe())
+
+
+class TestPreferringGroundToCauseway(unittest.TestCase):
+    """PLAN-maps M9e, lane queue item 3 — the `raise_penalty` lever.
+
+    A sill only ever raises, so a route cell already at or above the sill
+    floor costs the carve nothing. Charging a penalty for the ones that are
+    not buys a longer crossing that is less of it built.
+    """
+
+    def setUp(self):
+        self.h, self.starts, self.cell = strait_with_a_shoal()
+
+    def _carve(self, k):
+        out, crossings, after = pa.connect_starts(
+            self.h, self.cell, self.starts, raise_penalty=k)
+        self.assertEqual(len(crossings), 1)
+        return out, crossings[0], after
+
+    def test_the_default_is_the_shortest_hop_search_it_has_always_been(self):
+        """K=1 must be the old behaviour cell for cell — the dial queue with
+        one weight is the plain layered BFS, and three shipped packages are
+        the regression test that says so."""
+        a = pa.connect_starts(self.h, self.cell, self.starts)[0]
+        b = pa.connect_starts(self.h, self.cell, self.starts,
+                              raise_penalty=1)[0]
+        self.assertTrue((a == b).all())
+
+    def test_the_short_hop_is_causeway_all_the_way(self):
+        _, c, _ = self._carve(1)
+        self.assertEqual(c.route_cells, c.causeway_cells)
+
+    def test_a_penalty_buys_a_longer_route_that_is_less_of_it_built(self):
+        _, one, _ = self._carve(1)
+        _, eight, _ = self._carve(8)
+        self.assertGreater(eight.route_cells, one.route_cells)
+        self.assertLess(eight.causeway_cells, one.causeway_cells)
+
+    def test_both_arms_still_join_the_starts(self):
+        for k in (1, 8):
+            _, _, after = self._carve(k)
+            for r in after:
+                if r.cls in pa.ARMOUR_CLASSES:
+                    self.assertTrue(r.ok, f"K={k}: {r.describe()}")
+
+    def test_a_penalised_route_is_still_strictly_submarine(self):
+        out, _, _ = self._carve(8)
+        moved = out > self.h + 1e-6
+        self.assertTrue(moved.any())
+        self.assertTrue((out[moved] < 0.0).all())
+
+    def test_the_fill_is_reported_and_is_not_the_cell_count(self):
+        """`cells_raised` says where the carve reached, `fill_elmos` says how
+        much it put there — and M9e's arc reading turns on the difference."""
+        _, c, _ = self._carve(1)
+        self.assertGreater(c.fill_elmos, 0.0)
+        self.assertGreater(c.fill_elmos, c.cells_raised * 0.1)
 
 
 class TestTheStrandMask(unittest.TestCase):
