@@ -33,6 +33,7 @@
 #include "stb_image_write.h"
 
 #include "System/FileSystem/DetailTexDc.h"
+#include "System/FileSystem/Ktx2BytesPlane.h"
 #include "System/FileSystem/Ktx2Orientation.h"
 #include "System/SpringLog/SpringLog.h"
 
@@ -152,6 +153,51 @@ static void StampOrientationRd(ktxTexture2* tex) {
 /// or git stamp of our own: the output must stay byte-deterministic for the
 /// hash-equality checks the map pipeline relies on.
 static constexpr char kWriterId[] = "springrts-web textureconverter";
+
+/// Zstd-supercompress `tex`, then put back the `bytesPlane` field libktx
+/// 4.3.2 zeroes on the way out.
+///
+/// libktx implements KTX2 ≤ 2.0.3, which said a supercompressed file's
+/// `bytesPlane0..7` must read *unsized*; spec 2.0.4 reversed that and
+/// requires the inflated texel block size there, so every file this tool
+/// wrote came out tripping the Khronos validator's `warning-6030`. See
+/// Ktx2BytesPlane.h for the full history and why the header exists.
+///
+/// Save/restore rather than re-derive: the pre-deflate DFD already holds
+/// the right answer for every branch that reaches here (16 for UASTC, 8
+/// for the raw-DXT1 wrap, 4 for the RGBA8 fallback), so copying it back
+/// cannot disagree with the encoder the way a lookup table would. The
+/// only bytes this changes in the output file are the two DFD words.
+static void DeflateZstdKeepingBytesPlanes(ktxTexture2* tex, int level) {
+    uint32_t* bdb = tex->pDfd + 1;
+    const uint32_t plane0 = bdb[ktx2::kBdfdWordBytesPlane0];
+    const uint32_t plane4 = bdb[ktx2::kBdfdWordBytesPlane4];
+    const KTX_error_code rc = ktxTexture2_DeflateZstd(tex, level);
+    if (rc != KTX_SUCCESS) {
+        // Not fatal here — the callers have always treated deflation as
+        // best-effort and go on to write an uncompressed file — but it
+        // must not be silent, and on this path libktx left the DFD alone.
+        SLOG(SPRING_LOG_ERROR, "ktxTexture2_DeflateZstd failed: %s",
+            ktxErrorString(rc));
+        return;
+    }
+    // pDfd is reallocated by nothing in DeflateZstd, but re-read it rather
+    // than reuse the pointer captured above so this stays correct if a
+    // future libktx rebuilds the descriptor during deflation.
+    bdb = tex->pDfd + 1;
+    bdb[ktx2::kBdfdWordBytesPlane0] = plane0;
+    bdb[ktx2::kBdfdWordBytesPlane4] = plane4;
+    if (!ktx2::IsSizedForSupercompression(bdb[ktx2::kBdfdWordBytesPlane0])) {
+        // There was nothing to restore: the encoder handed us an unsized
+        // bytesPlane0 before deflation too, so the file still trips
+        // warning-6030. Say so rather than guess a size the DFD does not
+        // claim — this is the one path where a lookup table would be the
+        // only option, and it is unreachable from any shipped invocation.
+        SLOG(SPRING_LOG_WARNING,
+            "KTX2 bytesPlane0 was already 0 before deflation - output will "
+            "trip warning-6030 (see Ktx2BytesPlane.h)");
+    }
+}
 
 /// libktx fills `KTXwriter` with its own fallback at write time *only* if the
 /// app has not set one, so stamping before the write wins.
@@ -600,7 +646,7 @@ static bool WrapRawDxt1AsKtx2(const std::vector<uint8_t>& srcBytes,
         }
     }
     if (zstd) {
-        ktxTexture2_DeflateZstd(tex, 18);
+        DeflateZstdKeepingBytesPlanes(tex, 18);
     }
     StampOrientationRd(tex);
     StampWriterId(tex);
@@ -750,7 +796,7 @@ static bool EncodeRgba8AsKtx2(const uint8_t* rgba, int w, int h,
         return false;
     }
     if (zstd) {
-        ktxTexture2_DeflateZstd(tex, 18);
+        DeflateZstdKeepingBytesPlanes(tex, 18);
     }
     StampOrientationRd(tex);
     StampWriterId(tex);

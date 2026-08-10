@@ -531,6 +531,23 @@ assets, which costs asset investigations their standard tool. `data/games/{bar,z
 still carries the old value; those are archived third-party games and closing
 them needs a full `gameconverter --force` model re-import (PLAN-maps M8f).
 
+**KTX2 `bytesPlane0` must be sized on supercompressed output.** KTX2 ≤ 2.0.3
+required a supercompressed file's `bytesPlane0..7` to read *unsized* (all
+zero); spec 2.0.4 reversed it, because the DFD describes the **inflated** texel
+block, whose size a reader needs before it has inflated anything. Both encoders
+we control still implement the old rule and must be corrected on the way out:
+`textureconverter` goes through `DeflateZstdKeepingBytesPlanes`, which
+save/restores the two DFD words around libktx 4.3.2's
+`ktxTexture2_DeflateZstd`, and forge's four `encode*.mjs` run their output
+through `fixupEncoded` (`tools/fable-model-forge/ktx2_dfd.mjs`), which derives
+the size from the DFD's own sample descriptions. Offsets and the spec predicate
+live in `rts/System/FileSystem/Ktx2BytesPlane.h` so `spring-tests` — which does
+not link libktx — can pin them. `ktx validate` reports the defect as
+`warning-6030` and still exits 0, so **no gate catches a regression here except
+that test**; the same module also runs as a CLI (`node ktx2_dfd.mjs
+--check|--fix <files>`) to audit or repair files already on disk, one byte per
+file, no pixel data touched (PLAN-maps M9i).
+
 **KTX2 provenance metadata.** Three encoders write `.ktx2` into this tree —
 `textureconverter`, forge's `Basis Universal`, and `toktx` — so every one of
 our outputs stamps `KTXwriter` = `springrts-web textureconverter / libktx v4.0`

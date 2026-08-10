@@ -8,6 +8,7 @@
 // Transfer function matters: diffuse/emissive/impostor colour are sRGB,
 // ORM / team masks / normals are linear.
 import { encodeToKTX2 } from 'babylonpress-ktx2-encoder';
+import { fixupEncoded } from './ktx2_dfd.mjs';
 import { PNG } from 'pngjs';
 import { readFileSync, writeFileSync } from 'fs';
 
@@ -35,5 +36,9 @@ const ktx2 = await encodeToKTX2(new Uint8Array(readFileSync(src)), {
   rdoQualityLevel: 1.0,
   imageDecoder: decode,
 });
-writeFileSync(out, ktx2);
+// `fixupEncoded` sizes the DFD's `bytesPlane0`: the Basis Universal
+// WASM encoder zeroes it on supercompressed output per KTX2 <= 2.0.3,
+// which spec 2.0.4 forbids (`ktx validate` warning-6030). See
+// ktx2_dfd.mjs.
+writeFileSync(out, fixupEncoded(ktx2));
 console.log(`[encode] ${out} ${(ktx2.length / 1024).toFixed(0)} KiB (srgb=${srgb})`);

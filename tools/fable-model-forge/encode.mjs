@@ -5,6 +5,7 @@
 // Encoder: babylonpress-ktx2-encoder (Basis Universal WASM, works in Node
 // where KTX-Software binaries aren't obtainable).
 import { encodeToKTX2 } from 'babylonpress-ktx2-encoder';
+import { fixupEncoded } from './ktx2_dfd.mjs';
 import { PNG } from 'pngjs';
 import { readFileSync, writeFileSync } from 'fs';
 
@@ -30,7 +31,11 @@ async function enc(name, srgb, normal = false) {
     rdoQualityLevel: 1.0,
     imageDecoder: decode,
   });
-  writeFileSync(`out/${name}.ktx2`, out);
+  // `fixupEncoded` sizes the DFD's `bytesPlane0`: the Basis Universal
+  // WASM encoder zeroes it on supercompressed output per KTX2 <= 2.0.3,
+  // which spec 2.0.4 forbids (`ktx validate` warning-6030). See
+  // ktx2_dfd.mjs.
+  writeFileSync(`out/${name}.ktx2`, fixupEncoded(out));
   console.log(`[encode] ${name}.ktx2 ${(out.length / 1024).toFixed(0)} KiB (srgb=${srgb})`);
 }
 
