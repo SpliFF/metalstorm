@@ -4,8 +4,10 @@
 Replaces meridian.py's plateau-blend look with geologically plausible terrain
 while honouring the SAME 24-region gameplay skeleton (meridian_layout.json):
 region bboxes, ford decks, ridge corridors, civilian districts, convoy
-routes, and start rows keep their contracts, so mapdata/regions.lua and
-mapdata/civilians.lua remain valid and are NOT regenerated here.
+routes, and start rows keep their contracts. mapdata/regions.lua and
+mapdata/civilians.lua are emitted from that same layout (meridian.py's and
+civilians_gen.py's emitters) rather than authored here — layout-only, so the
+bytes do not depend on the seed and a `--id` variant is a complete package.
 
 Pipeline: structural surface (region blend, as before) + wildness-masked
 mountain detail -> stream-power + thermal erosion -> contract re-enforcement
@@ -17,6 +19,8 @@ Deterministic: same --seed => byte-identical map, checked by --selftest.
 Usage:
     .venv/bin/python meridian2.py [--out DIR] [--fast] [--seed N]
       --fast: quarter-res heightfield (513^2) for iteration; NOT for shipping.
+    .venv/bin/python meridian2.py --id basin_variant --name "Basin Variant" --seed 7
+      a variant package under content/maps/<id> on the same layout contract.
     .venv/bin/python meridian2.py --selftest [--fast]
       two cold runs with isolated TMPDIRs, packages compared byte-for-byte.
 """
@@ -43,10 +47,29 @@ from terragen import package as pkg
 from terragen import rivers as riv
 from terragen import roads as rd
 from terragen import selftest as stest
+from terragen import smf
+
+import civilians_gen as civ
+import meridian as m1   # the v1 generator, kept for its layout-only emitters
 
 LAYOUT_PATH = os.path.join(HERE, "meridian_layout.json")
 MAP_SIZE = 16384.0
 SEED_DEFAULT = 20260727
+
+# The SMF height ceiling this generator has always shipped, and it is not the
+# comfortable margin it looks like (PLAN-maps M9h, audit of M8w FIND 1).
+# `smf.quantize_heightmap` CLIPS, so a summit above this ships as a flat mesa
+# with no error. The shipped package tops at 1305.4 elmos — but the surface
+# that goes INTO erosion stands 1522.6, i.e. already over the ceiling, and
+# only 30 iterations of stream-power + thermal (x0.898) bring it under. The
+# summit is `west_scarp`'s authored 1230 plus a seed-dependent ridged-noise
+# term of amplitude 620x0.58, so the clearance is a property of the seed and
+# of how much erosion runs, neither of which is pinned. `height_ceiling`
+# therefore derives the ceiling per surface and this value is only its FLOOR,
+# so the shipped `meridian_basin` package cannot move (the derived value for
+# 1305.4 is 1400) while a seed that would have clipped lifts it instead.
+MAX_HEIGHT = 1500.0
+MIN_HEIGHT = -120.0
 
 # Structural targets — copied from meridian.py (the gameplay contract).
 ELEVATION = {
@@ -149,7 +172,8 @@ def blend_toward(h, target, mask, cellsize, feather_elmos):
 
 
 def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
-             no_package=False, climate="temperate"):
+             no_package=False, climate="temperate",
+             map_id="meridian_basin", display_name="Meridian Basin"):
     t_start = time.time()
     layout = load_layout()
     cell = 32.0 if fast else 8.0
@@ -519,18 +543,39 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
         return h, b, slope
 
     scratch = os.environ.get("TMPDIR", "/tmp")
+    top = float(h.max())
+    max_h = smf.height_ceiling(top, floor=MAX_HEIGHT)
+    if max_h > MAX_HEIGHT:
+        print(f"height ceiling {max_h:.0f} (surface tops at {top:.0f}; the "
+              f"{MAX_HEIGHT:.0f} floor would have sheared "
+              f"{int((h > MAX_HEIGHT).sum())} cells "
+              f"({top - MAX_HEIGHT:.0f} elmos off the summit) into a flat top)")
     cfg = pkg.MapPackageConfig(
-        map_id="meridian_basin",
-        display_name="Meridian Basin",
+        map_id=map_id,
+        display_name=display_name,
         description="Two sides of an eroded river basin: ridge corridors, three fords, civilian valleys.",
-        min_height=-120.0, max_height=1500.0,
+        min_height=MIN_HEIGHT, max_height=max_h,
         tile_budget=(2048 if fast else 12288),
         start_positions=starts,
         seed=seed,
     )
+    # The 24-region contract and the civilian data are layout-derived, not
+    # terrain-derived, so they are the same bytes for any seed or id — but a
+    # variant written under a new `--id` got neither until M9h. Absence is
+    # not loud: `mapconverter` copies `mapdata/` through and only validates
+    # it when it is there (it aborts the build on an E1 slope mismatch), so
+    # a variant with no regions.lua converts and installs cleanly and then
+    # `scenariogen.read_regions` rejects it — the fixed 2048-elmo grid, no
+    # named regions. Emitting them here makes the package self-contained;
+    # for `meridian_basin` they reproduce the checked-in files exactly
+    # (pinned in tests/test_meridian2.py).
+    civ_lua, _n_sites, _n_convoys = civ.build_civilians_lua(layout)
+    contract_files = dict(feature_files or {})
+    contract_files["mapdata/civilians.lua"] = civ_lua
     pkg.write_package(
         out_dir, cfg, h, slope, b, moist, road_dist, road_mask, cell,
-        scratch_dir=scratch, feature_files=feature_files, stamps=stamps,
+        scratch_dir=scratch, regions_lua=m1.build_regions_lua(layout),
+        feature_files=contract_files, stamps=stamps,
     )
 
     # quick-look preview (albedo * hillshade) for iteration without the client
@@ -586,8 +631,17 @@ def selfcheck(layout, h, cell):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out", default=os.path.join(REPO_ROOT, "content", "maps", "meridian_basin"))
+    ap.add_argument("--out", default=None,
+                    help="map package dir (default content/maps/<id>)")
     ap.add_argument("--seed", type=int, default=SEED_DEFAULT)
+    ap.add_argument("--id", dest="map_id", default="meridian_basin",
+                    help="package id; anything but the default writes a "
+                         "VARIANT under content/maps/<id>. It carries the "
+                         "same 24-region layout contract (regions.lua + "
+                         "civilians.lua are layout-derived and go in the "
+                         "package), so only its terrain differs — vary "
+                         "--seed/--climate")
+    ap.add_argument("--name", dest="display_name", default="Meridian Basin")
     ap.add_argument("--fast", action="store_true")
     ap.add_argument("--with-features", action="store_true",
                     help="scatter the full vegetation set into "
@@ -607,14 +661,16 @@ def main():
                     help="generate twice as independent cold subprocesses "
                          "(isolated TMPDIR each, so the erosion cache cannot "
                          "fake it) and assert byte-identical packages; "
-                         "honours --seed/--fast/--with-features")
+                         "honours --seed/--id/--name/--climate/--fast/"
+                         "--with-features")
     args = ap.parse_args()
 
     if args.selftest:
         if args.preview_only or args.no_package:
             ap.error("--selftest needs the full package path; drop "
                      "--preview-only/--no-package")
-        passthrough = ["--seed", str(args.seed), "--climate", args.climate]
+        passthrough = ["--seed", str(args.seed), "--climate", args.climate,
+                       "--id", args.map_id, "--name", args.display_name]
         if args.fast:
             passthrough.append("--fast")
         if args.with_features:
@@ -623,9 +679,22 @@ def main():
             os.path.abspath(__file__), passthrough, label="meridian2",
             cache_globs=("meridian2_eroded_*.npy",)))
 
-    generate(args.out, args.seed, fast=args.fast, with_features=args.with_features,
+    out = args.out or os.path.join(REPO_ROOT, "content", "maps", args.map_id)
+    # `mapconverter` names the installed map after the package DIRECTORY, not
+    # after the id inside mapinfo.lua, so `--out .../foo --id bar` installs as
+    # `data/maps/foo` holding `maps/bar.smf` — which loads, and then every
+    # scenario and every lobby row disagrees with it about the map's name. The
+    # default can't produce that; an explicit --out can, so it is said out loud
+    # (a warn, not an error: an --out to scratch for inspection is legitimate).
+    if os.path.basename(os.path.normpath(out)) != args.map_id:
+        print(f"WARNING: --out directory '{os.path.basename(os.path.normpath(out))}' "
+              f"is not the map id '{args.map_id}' — mapconverter installs a map "
+              f"under its directory name, so this package is only safe to "
+              f"inspect, not to convert", file=sys.stderr)
+    generate(out, args.seed, fast=args.fast, with_features=args.with_features,
              preview_only=args.preview_only, no_package=args.no_package,
-             climate=args.climate)
+             climate=args.climate, map_id=args.map_id,
+             display_name=args.display_name)
 
 
 if __name__ == "__main__":

@@ -56,6 +56,7 @@ from terragen import rivers as riv          # noqa: E402
 from terragen import roads as rd            # noqa: E402
 from terragen import selftest as stest      # noqa: E402
 from terragen import settle as st           # noqa: E402
+from terragen import smf                    # noqa: E402
 from terragen import uplift as up           # noqa: E402
 from terragen import vegetation as veg      # noqa: E402
 from terragen.vegetation import _hash01     # noqa: E402
@@ -149,7 +150,9 @@ def height_ceiling(top: float) -> float:
     closed-loop aim exists to place is exactly what the ceiling would have
     sheared off.
 
-    100-elmo steps with 5 % headroom, floored at the shipped 1200 so the
+    100-elmo steps with 5 % headroom (the rule itself lives in
+    `terragen.smf`, next to the clip it guards — `meridian2.py` floors the
+    same rule at its own shipped 1500), floored at the shipped 1200 so the
     `skerry_reach` package cannot move:
 
     >>> height_ceiling(553.0)      # shipped mounds — unchanged
@@ -157,8 +160,7 @@ def height_ceiling(top: float) -> float:
     >>> height_ceiling(1212.0)     # shipped arc
     1300.0
     """
-    return max(HEIGHT_CEILING_FLOOR,
-               float(np.ceil(top * 1.05 / 100.0) * 100.0))
+    return smf.height_ceiling(top, floor=HEIGHT_CEILING_FLOOR)
 
 
 # ---------------------------------------------------------------------------
