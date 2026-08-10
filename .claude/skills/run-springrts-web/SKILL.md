@@ -76,6 +76,13 @@ session — run via `chrome-devtools` `evaluate_script` after navigating to
 const set=(id,v)=>{const el=document.getElementById(id);const d=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value');d.set.call(el,v);el.dispatchEvent(new Event('input',{bubbles:true}));};
 if (document.getElementById('login-user') && lobby.currentScreen==='login') {
   set('login-user','texdebug'); set('login-pass','texdebug123'); set('login-pass2','texdebug123');
+  // Registration REQUIRES a faction (immutable sign-up choice). Leave the
+  // select on its placeholder and the button refuses with "Choose a faction"
+  // and you sit on the login screen — verified 2026-08-10.
+  const f=document.getElementById('login-faction');
+  const d=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value');
+  d.set.call(f,[...f.options].find(o=>o.value).value);
+  f.dispatchEvent(new Event('change',{bubbles:true}));
   document.getElementById('login-btn').click();
 }
 // ...wait for lobby.currentScreen==='browser', then:

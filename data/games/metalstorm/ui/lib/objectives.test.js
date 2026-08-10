@@ -199,3 +199,97 @@ describe('markerPosition', () => {
     expect(idx.markerPosition(idx.get(1))).toBeNull();
   });
 });
+
+describe('takeResolutions (PLAN-endtoend.md D46)', () => {
+  const active = (id, over) => ({
+    [`objective_${id}_type`]: 'escort',
+    [`objective_${id}_state`]: 'active',
+    [`objective_${id}_team`]: 0,
+    [`objective_${id}_reward`]: 100,
+    [`objective_${id}_progress`]: 0.2,
+    ...over,
+  });
+
+  it('reports an active -> failed transition once, with the record it died holding', () => {
+    const idx = createObjectiveIndex();
+    idx.applyParams({ objective_count: 1, ...active(1) });
+    expect(idx.takeResolutions()).toEqual([]);
+
+    idx.applyParams({ objective_1_state: 'failed', objective_1_progress: 0.47 });
+    const [r] = idx.takeResolutions();
+    expect(r).toMatchObject({ id: 1, type: 'escort', state: 'failed', reward: 100, progress: 0.47 });
+    // Drained exactly once — a second render must not re-announce it.
+    expect(idx.takeResolutions()).toEqual([]);
+  });
+
+  it('snapshots, so the retention-window clear cannot erase the outcome', () => {
+    const idx = createObjectiveIndex();
+    idx.applyParams({ objective_count: 1, ...active(1) });
+    idx.applyParams({ objective_1_state: 'failed' });
+    const [r] = idx.takeResolutions();
+    // 30 s later the server clears every per-id field (§1 retention).
+    idx.applyParams({
+      objective_1_type: null, objective_1_state: null,
+      objective_1_reward: null, objective_1_team: null, objective_1_progress: null,
+    });
+    expect(idx.get(1)).toEqual({ id: 1 });
+    expect(r).toMatchObject({ type: 'escort', state: 'failed', reward: 100 });
+  });
+
+  it('queues nothing for an objective first seen already resolved', () => {
+    // A widget mounting mid-retention-window, or a store populated before we
+    // subscribed: history must not replay as notifications.
+    const idx = createObjectiveIndex();
+    idx.applyParams({ objective_count: 1, ...active(1, { objective_1_state: 'failed' }) });
+    expect(idx.takeResolutions()).toEqual([]);
+  });
+
+  it('queues nothing when a still-active objective is merely re-published', () => {
+    const idx = createObjectiveIndex();
+    idx.applyParams({ objective_count: 1, ...active(1) });
+    idx.takeResolutions();
+    idx.applyParams({ objective_1_progress: 0.6 });
+    expect(idx.takeResolutions()).toEqual([]);
+  });
+
+  it('reports complete and expired as well as failed', () => {
+    const idx = createObjectiveIndex();
+    idx.applyParams({ objective_count: 3, ...active(1), ...active(2), ...active(3) });
+    idx.takeResolutions();
+    idx.applyParams({
+      objective_1_state: 'complete', objective_2_state: 'expired', objective_3_state: 'failed',
+    });
+    expect(idx.takeResolutions().map((o) => [o.id, o.state]))
+      .toEqual([[1, 'complete'], [2, 'expired'], [3, 'failed']]);
+  });
+
+  it('carries completed_by, so the loser of an open race can be told', () => {
+    const idx = createObjectiveIndex();
+    idx.applyParams({ objective_count: 1, ...active(1, { objective_1_team: -1 }) });
+    idx.applyParams({ objective_1_state: 'complete', objective_1_completed_by: 3 });
+    expect(idx.takeResolutions()[0].completed_by).toBe(3);
+  });
+
+  it('bounds the queue against a war-end sweep resolving everything at once', () => {
+    const idx = createObjectiveIndex();
+    const batch = { objective_count: 40 };
+    for (let id = 1; id <= 40; id++) Object.assign(batch, active(id));
+    idx.applyParams(batch);
+    idx.takeResolutions();
+    const sweep = {};
+    for (let id = 1; id <= 40; id++) sweep[`objective_${id}_state`] = 'expired';
+    idx.applyParams(sweep);
+    expect(idx.takeResolutions().length).toBe(32);
+  });
+
+  it('sees the same transitions through pull() as through applyParams()', () => {
+    const idx = createObjectiveIndex();
+    const params = { objective_count: 1, ...active(1) };
+    const get = (k) => params[k];
+    idx.pull(get);
+    expect(idx.takeResolutions()).toEqual([]);
+    params.objective_1_state = 'failed';
+    idx.pull(get);
+    expect(idx.takeResolutions().map((o) => o.state)).toEqual(['failed']);
+  });
+});

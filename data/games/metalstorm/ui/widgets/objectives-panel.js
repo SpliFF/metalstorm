@@ -34,13 +34,22 @@
 //     markerPosition() doc) — those markers stay unavailable even once the
 //     hook lands, until that follow-up ships.
 
-import { createObjectiveIndex } from '../lib/objectives.js';
+import { createObjectiveIndex, isResolved, visibleTo } from '../lib/objectives.js';
 
 const TYPE_ICONS = {
   control: '⬢', kill: '✕', escort: '➜', protect: '🛡', extract: '⤴', infra: '⚙',
 };
 
 const STAGE_LABEL = { secure: 'SECURING', evac: 'EVACUATING' };
+
+// PLAN-endtoend.md D46. How many resolutions the outcome log keeps. The
+// server's 30 s retention window is what the *list* can show; this log
+// outlives it, because "you lost a 100-authority reward at 47 %" is the kind
+// of thing a player looks up after the fact, not within half a minute of it
+// happening.
+const OUTCOME_LOG_MAX = 5;
+
+const OUTCOME_LABEL = { complete: 'COMPLETE', failed: 'FAILED', expired: 'EXPIRED' };
 
 const BOUNTY_TYPES = ['kill', 'protect', 'escort', 'extract', 'infra'];
 const BOUNTY_STAKE_MIN = 10;
@@ -86,12 +95,62 @@ function renderItem(o, playerId, delegated) {
   );
 }
 
+/**
+ * One resolved objective, for both the retained-row section of the live list
+ * and the session outcome log (same shape, so an outcome reads identically
+ * whether the server is still publishing it or we are the only record left).
+ *
+ * `teamId` is ours: an open race (`team === -1`) that another team completed
+ * is a LOSS to us, and `completed_by` is the only field that can say so — the
+ * eligibility field publishes -1 to both sides deliberately.
+ */
+function renderOutcome(o, teamId) {
+  const icon = TYPE_ICONS[o.type] ?? '•';
+  const wonByUs = o.completed_by === undefined || o.completed_by === teamId;
+  const state = o.state === 'complete' && !wonByUs ? 'lost-race' : o.state;
+  const reward = Math.round(o.reward ?? 0);
+  const pct = Math.round((o.progress ?? 0) * 100);
+
+  let note;
+  let award;
+  if (state === 'complete') {
+    note = 'complete';
+    award = `<span class="nui-badge nui-badge--gold ms-obj__reward">⬡ +${reward}</span>`;
+  } else if (state === 'lost-race') {
+    note = 'completed by another team';
+    award = `<span class="nui-badge ms-obj__reward">⬡ ${reward} lost</span>`;
+  } else if (o.state === 'failed') {
+    // The progress it died at is the closest thing to a reason the sim
+    // publishes, and it is exactly what D46's player could not see.
+    note = `failed at ${pct}%`;
+    award = `<span class="nui-badge ms-obj__reward">⬡ ${reward} lost</span>`;
+  } else {
+    note = 'expired';
+    award = `<span class="nui-badge ms-obj__reward">⬡ ${reward} lost</span>`;
+  }
+
+  return (
+    `<li class="ms-obj ms-obj--outcome is-${state}" data-id="${o.id}">` +
+    `<div class="ms-obj__line">` +
+    `<span class="ms-obj__icon">${icon}</span>` +
+    `<span class="ms-obj__type">${o.type} <span class="ms-obj-sub">(${note})</span></span>` +
+    award +
+    `</div>` +
+    `<div class="ms-obj__line ms-obj__outcome-tag">${OUTCOME_LABEL[o.state] ?? o.state}</div>` +
+    `</li>`
+  );
+}
+
 export default {
   id: 'objectives-panel',
 
   init(ctx) {
     this.ctx = ctx;
     this.index = createObjectiveIndex();
+    // Newest first, capped at OUTCOME_LOG_MAX. Session-scoped by design —
+    // there is no persistence contract for widget state, and an outcome from
+    // a previous war is not this war's news.
+    this.outcomes = [];
 
     // No <h3> — the loader's panel chrome supplies the header (see
     // metalstorm.ui.json); a widget-drawn heading would double it up.
@@ -99,6 +158,10 @@ export default {
     this.el.className = 'ms-objectives-panel';
     this.el.innerHTML =
       '<ul class="nui-list ms-obj-list"></ul>' +
+      '<div class="nui-group ms-obj-outcomes" hidden>' +
+      '<p class="nui-group__title">Recent outcomes</p>' +
+      '<ul class="nui-list ms-obj-outcome-list"></ul>' +
+      '</div>' +
       '<div class="nui-group ms-obj-bounty">' +
       '<button class="nui-btn nui-btn--block ms-obj-bounty-toggle" type="button">+ Post bounty</button>' +
       '<form class="ms-obj-bounty-form" hidden>' +
@@ -209,15 +272,53 @@ export default {
     this.ctx.sendCommand('objectives.createBounty', { def, stake });
   },
 
+  /**
+   * Fold every objective that has left 'active' since the last render into
+   * the session outcome log (PLAN-endtoend.md D46).
+   *
+   * Team-filtered with the same predicate the list uses: a player is told
+   * about the outcome of exactly the objectives they were shown.
+   */
+  _collectOutcomes(teamId) {
+    for (const o of this.index.takeResolutions()) {
+      if (!visibleTo(o, teamId)) continue;
+      this.outcomes.unshift(o);
+    }
+    if (this.outcomes.length > OUTCOME_LOG_MAX) this.outcomes.length = OUTCOME_LOG_MAX;
+  },
+
   _render() {
     const identity = this.ctx.identity ?? {};
     const delegated = this._delegatedSet();
     const list = this.el.querySelector('.ms-obj-list');
-    const active = this.index.forTeam(identity.teamId, 'active');
-    const items = active.map((o) => renderItem(o, identity.playerId, delegated.has(o.id)));
+    const mine = this.index.forTeam(identity.teamId);
+    const active = mine.filter((o) => o.state === 'active');
+    // Resolved objectives stay in the live list for the server's 30 s
+    // retention window — which game_objectives.lua has always published for
+    // exactly this and nothing ever read. Rendering only `active` is what
+    // made a failure look like a disappearance (D46).
+    const retained = mine.filter(isResolved);
+
+    this._collectOutcomes(identity.teamId);
+
+    const items = active.map((o) => renderItem(o, identity.playerId, delegated.has(o.id)))
+      .concat(retained.map((o) => renderOutcome(o, identity.teamId)));
     list.innerHTML = items.join('') || '<li class="nui-empty">No active objectives</li>';
-    // Header count stays readable while the panel is collapsed.
-    this.ctx.setBadge?.(active.length || null);
+
+    const log = this.el.querySelector('.ms-obj-outcomes');
+    log.hidden = this.outcomes.length === 0;
+    this.el.querySelector('.ms-obj-outcome-list').innerHTML =
+      this.outcomes.map((o) => renderOutcome(o, identity.teamId)).join('');
+
+    // Header count stays readable while the panel is collapsed — and so does
+    // a loss, which is the one thing a collapsed panel must still be able to
+    // report. Self-clearing: the mark rides the retention window rather than
+    // an acknowledgement the widget has no way to observe (collapse state
+    // lives in the loader, not here).
+    const lost = retained.some((o) => o.state !== 'complete'
+      || (o.completed_by !== undefined && o.completed_by !== identity.teamId));
+    const badge = active.length || null;
+    this.ctx.setBadge?.(lost ? `${active.length} ⚠` : badge);
     this._publishMarkers();
   },
 
