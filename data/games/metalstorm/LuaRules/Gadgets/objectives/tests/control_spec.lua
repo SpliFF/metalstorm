@@ -185,6 +185,30 @@ describe("control requires occupation, not just ownership (D57)", function()
         assert.are.equal(5, team)
     end)
 
+    -- The absence that outlives the stickiness. D57's rule 2 says an absence
+    -- PAUSES and only "an opponent arrived and took it" resets — but an absence
+    -- of DECAY_TICKS (60 eval ticks / 9 000 frames) decays the published owner
+    -- to nil all by itself (regions/ownership.lua: empty -> neutral), and
+    -- `check` prunes every team that is not the current owner BEFORE it returns
+    -- on a nil owner. So a long enough absence resets after all, with no
+    -- opponent involved. Documented-vs-implemented gap, filed as D58.
+    it("keeps its bank when the owner decays to neutral after a long absence", function()
+        local o = { params = { regionKey = 'r1', holdFrames = 100 } }
+        control.init(o, fakeCtx(0, nil, true))
+        control.check(o, fakeCtx(0, 5, true))
+        control.check(o, fakeCtx(60, 5, true))                    -- 60 banked
+        control.check(o, fakeCtx(9060, nil, true, {}))            -- empty 9 000 -> neutral
+        control.check(o, fakeCtx(9100, 5, true))                  -- team 5 walks back in
+        -- ...and the 9 000 neutral frames are NOT re-credited on return: still
+        -- the 60 it earned, not 9 060. This is the half that would silently
+        -- undo D57 if the clock were merely left open across the gap.
+        assert.are.equal(0.6, control.progress(o, fakeCtx(9100, 5, true)))
+        assert.is_nil(control.check(o, fakeCtx(9139, 5, true)))
+        local state, team = control.check(o, fakeCtx(9140, 5, true))  -- +40 = 100
+        assert.are.equal('complete', state)
+        assert.are.equal(5, team)
+    end)
+
     it("does not count an enemy garrison as the owner's occupation", function()
         local o = { params = { regionKey = 'r1', holdFrames = 100 } }
         control.init(o, fakeCtx(0, nil, true))

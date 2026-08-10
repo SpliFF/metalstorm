@@ -55,6 +55,20 @@ function control.init(o, ctx)
     return true
 end
 
+--- D58 (endtoend fire 31): a region with NO owner is an absence, not a defeat.
+--- `regions/ownership.lua` decays a sticky owner to neutral once the region has
+--- been empty for `DECAY_TICKS` (60 eval ticks / 9 000 frames), and `contested`
+--- is orthogonal to `owner`, so nil means "nobody has been here for a long
+--- time" — never "an opponent took it". Pausing every clock (rather than
+--- pruning them, which is what a nil owner used to fall into) keeps D57's rule
+--- 2 true at the one timescale where it was not: an absence pauses, and only an
+--- opponent arriving resets. Clearing `lastSeen` is the load-bearing half — a
+--- clock left open across the neutral window would re-credit the whole empty
+--- interval on the owner's return, which is exactly the accrual D57 removed.
+local function pauseAllClocks(d)
+    for team in pairs(d.lastSeen) do d.lastSeen[team] = nil end
+end
+
 --- Region flip resets the losing team's clock (hysteresis lives in
 --- regions/ownership.lua — control just reacts to the published owner).
 local function pruneFlippedTeams(d, owner)
@@ -120,8 +134,11 @@ end
 
 function control.check(o, ctx)
     local owner = ctx.regionOwner(o.params.regionKey)
+    if not owner then                 -- D58: neutral is an absence, not a defeat
+        pauseAllClocks(o.data)
+        return nil
+    end
     pruneFlippedTeams(o.data, owner)
-    if not owner then return nil end
     if not eligible(o, owner) then return nil end   -- not an eligible team
 
     if accrue(o, ctx, owner) >= o.params.holdFrames then
