@@ -19,7 +19,9 @@ import {
     compileIntent,
     validateIntent,
     getPriorityBand,
+    targetMenuOptions,
     getAcceptedTargetShapes,
+    explainShapeMismatch,
     PRIORITY_BANDS,
 } from '../ui/native-ui/compile-table.js';
 import { mapGestureBridge } from '../ui/native-ui/map-gesture.js';
@@ -555,15 +557,21 @@ function renderTargetMenu() {
         return;
     }
 
-    const mapShapes = getAcceptedTargetShapes(state.verb).filter((s) => s !== 'entity');
-    const mapItems = mapShapes
-        .map((s) => `<div class="nui-menu__item target-map-option" data-shape="${s}">${mapShapeLabel(s)}</div>`)
+    // The offer comes from the compile table, not from this file (D51): the
+    // name search used to be listed for every verb, so `patrol Grey Flat`
+    // filled all three chips and then sat on a disabled Commit button. A shape
+    // the verb cannot compile is still shown — carrying the reason — because a
+    // silently missing option is the same dead surface one layer quieter.
+    menu.innerHTML = targetMenuOptions(state.verb)
+        .map((opt) => {
+            if (opt.kind === 'map') {
+                return `<div class="nui-menu__item target-map-option" data-shape="${opt.shape}">${mapShapeLabel(opt.shape)}</div>`;
+            }
+            return opt.enabled
+                ? `<div class="nui-menu__item target-search-option">🔍 Search by name…</div>`
+                : `<div class="nui-menu__item nui-menu__item--disabled">🔍 Search by name — ${escapeHtml(opt.reason)}</div>`;
+        })
         .join('');
-
-    menu.innerHTML = `
-        ${mapItems}
-        <div class="nui-menu__item target-search-option">🔍 Search by name…</div>
-    `;
     openMenu(menu, 'target');
 
     for (const el of menu.querySelectorAll('.target-map-option')) {
@@ -1229,6 +1237,17 @@ function handleAccelFill() {
         : filled.length
         ? `Filled: ${filled.join(', ')}.`
         : 'Nothing recognised — try the chips above instead.';
+
+    // The accelerator resolves a target by NAME whatever the verb is, so it is
+    // the second way into the slot the target menu now guards (D51). A phrase
+    // like "patrol grey flat" resolves both slots and still cannot compile —
+    // say that here, at the fill, rather than leaving the player to read it off
+    // a disabled Commit button. The slots are left filled on purpose: the chips
+    // stay the source of truth and either one is a click from being changed.
+    if (state.verb && state.target
+        && !getAcceptedTargetShapes(state.verb).includes(state.target.shape)) {
+        state.accelNotice += ` ⚠ ${explainShapeMismatch(state.verb, state.target.shape)}.`;
+    }
 
     render();
 }

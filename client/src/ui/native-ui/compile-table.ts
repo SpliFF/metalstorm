@@ -47,16 +47,84 @@ export const TARGET_SHAPES_BY_VERB: Record<CommandVerb, TargetShape[]> = {
     hold: ['area', 'entity'],
     patrol: ['route'],
     screen: ['route'],
-    scout: ['area', 'point'],
+    scout: ['area', 'point', 'entity'],
     escort: ['entity'],
-    withdraw: ['point'],
+    withdraw: ['point', 'entity'],
     reinforce: ['area', 'entity'],
-    build: ['point'],
+    build: ['point', 'entity'],
 };
 
 /** Target shapes `verb` can compile against (§5 compile table). */
 export function getAcceptedTargetShapes(verb: CommandVerb): TargetShape[] {
     return TARGET_SHAPES_BY_VERB[verb] ?? [];
+}
+
+/**
+ * A target shape in the player's words (PLAN-endtoend D51).
+ *
+ * The composer's own vocabulary is `entity` / `area` / `route`; a refusal
+ * spelled in those words names the *type system*, not the thing the player
+ * did. Every string a player can be shown about a shape comes from here so
+ * the menu's offer and the refusal that follows it cannot disagree.
+ */
+export function describeTargetShape(shape: TargetShape): string {
+    switch (shape) {
+        case 'entity': return 'a named place';
+        case 'point':  return 'a point on the map';
+        case 'area':   return 'a painted area';
+        case 'route':  return 'a route drawn on the map';
+        default:       return String(shape);
+    }
+}
+
+/**
+ * Why `verb` cannot take `shape` — names the requirement, not just the
+ * rejection (D51: "the refusal message names a cause that is not the cause").
+ * Shared by `validateIntent` and the target menu's disabled offer.
+ */
+export function explainShapeMismatch(verb: CommandVerb, shape: TargetShape): string {
+    const accepted = getAcceptedTargetShapes(verb).map(describeTargetShape);
+    const needs = accepted.length
+        ? accepted.join(' or ')
+        : 'a target this build cannot compose';
+    return `${verb} cannot take ${describeTargetShape(shape)} — it needs ${needs}`;
+}
+
+/**
+ * One option in the target slot's menu.
+ *
+ * `kind: 'map'` arms a map gesture for `shape`; `kind: 'search'` opens the
+ * named-place search. A disabled option is still *shown*, carrying `reason` —
+ * a verb whose target the player cannot supply has to say so, and silently
+ * dropping the search offer would leave the same dead surface D41 filed.
+ */
+export interface TargetMenuOption {
+    kind: 'map' | 'search';
+    shape?: TargetShape;
+    enabled: boolean;
+    reason?: string;
+}
+
+/**
+ * The target slot's offer for `verb` (D51).
+ *
+ * Derived from the same `TARGET_SHAPES_BY_VERB` the compile table and
+ * `validateIntent` read, so the menu can no longer offer a target the
+ * Commit button will refuse: before this, the name search was offered for
+ * every verb, and `patrol Grey Flat` filled all three chips and then died on
+ * a verb:shape rule the menu knew nothing about.
+ */
+export function targetMenuOptions(verb: CommandVerb): TargetMenuOption[] {
+    const accepted = getAcceptedTargetShapes(verb);
+    const options: TargetMenuOption[] = accepted
+        .filter((shape) => shape !== 'entity')
+        .map((shape) => ({ kind: 'map' as const, shape, enabled: true }));
+
+    options.push(accepted.includes('entity')
+        ? { kind: 'search', enabled: true }
+        : { kind: 'search', enabled: false, reason: explainShapeMismatch(verb, 'entity') });
+
+    return options;
 }
 
 /** Flattened `"verb:shape"` lookup, derived from `TARGET_SHAPES_BY_VERB` —
@@ -306,7 +374,8 @@ export function compileIntent(intent: CommandIntent): CompiledMessage | null {
 
         // Scout → screen/patrol depending on target
         case 'scout:area':
-        case 'scout:point': {
+        case 'scout:point':
+        case 'scout:entity': {
             return compileToGroupDirective(intent, DirectiveType.Screen);
         }
 
@@ -316,7 +385,8 @@ export function compileIntent(intent: CommandIntent): CompiledMessage | null {
         }
 
         // Withdraw
-        case 'withdraw:point': {
+        case 'withdraw:point':
+        case 'withdraw:entity': {
             return compileToGroupDirective(intent, DirectiveType.Withdraw);
         }
 
@@ -331,7 +401,8 @@ export function compileIntent(intent: CommandIntent): CompiledMessage | null {
         }
 
         // Build
-        case 'build:point': {
+        case 'build:point':
+        case 'build:entity': {
             return compileToGroupDirective(intent, DirectiveType.BuildBase);
         }
 
@@ -593,7 +664,8 @@ export function validateIntent(intent: CommandIntent): string | null {
     const key = `${intent.verb}:${intent.target.shape}`;
 
     if (!VALID_VERB_SHAPE_COMBINATIONS.has(key)) {
-        return `Invalid combination: ${intent.verb} cannot target ${intent.target.shape}`;
+        // Names what the verb needs, not just what it refused (D51).
+        return explainShapeMismatch(intent.verb, intent.target.shape);
     }
 
     // Check that target has required data

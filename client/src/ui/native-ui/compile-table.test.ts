@@ -7,10 +7,12 @@ import {
     compileIntent,
     validateIntent,
     getPriorityBand,
+    targetMenuOptions,
     PRIORITY_BANDS,
     DirectiveType,
     StandingOrderType,
     OrderShape,
+    type CommandVerb,
     type CommandIntent,
     type CommandSubject,
     type CommandTarget,
@@ -412,7 +414,10 @@ describe('validateIntent', () => {
 
         const error = validateIntent(intent);
         expect(error).toBeDefined();
-        expect(error).toContain('Invalid combination');
+        // Names the requirement, not the type system (D51) — the old wording
+        // was "Invalid combination: escort cannot target area", which tells a
+        // player nothing about what escort actually wants.
+        expect(error).toBe('escort cannot take a painted area — it needs a named place');
     });
 
     it('should reject incomplete targets', () => {
@@ -556,5 +561,107 @@ describe('class subject reaches the wire (D56)', () => {
         expect(result?.type).toBe('GroupDirective');
         if (result?.type !== 'GroupDirective') return;
         expect(result.payload.conditions).toBeUndefined();
+    });
+});
+
+/**
+ * PLAN-endtoend.md D51 — the target slot offered a target the verb refused.
+ *
+ * Walked live: `patrol / Idle armour / Grey Flat` filled all three chips, the
+ * echo line rendered, and Commit stayed disabled. The cause was not the verb —
+ * it was that the target menu listed "🔍 Search by name…" for **every** verb
+ * while the compile table accepts a named place for only six of the eleven.
+ * Two halves, both here: the menu's offer is now derived from the same table
+ * (`targetMenuOptions`), and the three verbs that *can* honestly take a named
+ * place — scout / withdraw / build, all of which encode an entity as its
+ * centre point, exactly what they already accept as a point — now do.
+ */
+describe('target offer matches the compile table (D51)', () => {
+    const region: NamedEntity = {
+        id: 'grey_flat',
+        type: 'region',
+        name: 'Grey Flat',
+        x: 3200,
+        z: 4100,
+    };
+
+    it('does not offer the name search for a verb that cannot take a place', () => {
+        for (const verb of ['patrol', 'screen'] as CommandVerb[]) {
+            const options = targetMenuOptions(verb);
+            const search = options.find((o) => o.kind === 'search');
+            expect(search).toBeDefined();
+            expect(search?.enabled).toBe(false);
+            // Shown-and-disabled, carrying the reason: a silently absent
+            // option is the same dead surface one layer quieter.
+            expect(search?.reason).toBe(
+                `${verb} cannot take a named place — it needs a route drawn on the map`);
+        }
+    });
+
+    it('offers exactly the map shapes the verb compiles, and never entity-as-gesture', () => {
+        expect(targetMenuOptions('attack')).toEqual([
+            { kind: 'map', shape: 'area', enabled: true },
+            { kind: 'map', shape: 'point', enabled: true },
+            { kind: 'search', enabled: true },
+        ]);
+        // escort takes a named place and nothing else — no map arm at all.
+        expect(targetMenuOptions('escort')).toEqual([{ kind: 'search', enabled: true }]);
+        expect(targetMenuOptions('patrol').filter((o) => o.kind === 'map'))
+            .toEqual([{ kind: 'map', shape: 'route', enabled: true }]);
+    });
+
+    it('every enabled option corresponds to a shape validateIntent accepts', () => {
+        const verbs: CommandVerb[] = [
+            'attack', 'secure', 'defend', 'hold', 'patrol',
+            'screen', 'scout', 'escort', 'withdraw', 'reinforce', 'build',
+        ];
+        for (const verb of verbs) {
+            for (const option of targetMenuOptions(verb)) {
+                if (!option.enabled) continue;
+                const shape = option.kind === 'search' ? 'entity' : option.shape!;
+                const target: CommandTarget =
+                    shape === 'entity' ? { shape, entity: region }
+                    : shape === 'point' ? { shape, point: { x: 1, z: 2 } }
+                    : shape === 'area' ? { shape, area: { x: 1, z: 2, radius: 3 } }
+                    : { shape, route: [{ x: 1, z: 2 }, { x: 3, z: 4 }] };
+
+                expect(validateIntent({
+                    verb, subject: { type: 'group', groupId: 1 }, target, priority: 50,
+                }), `${verb}:${shape}`).toBeNull();
+                expect(compileIntent({
+                    verb, subject: { type: 'group', groupId: 1 }, target, priority: 50,
+                }), `${verb}:${shape}`).not.toBeNull();
+            }
+        }
+    });
+
+    it('compiles scout / withdraw / build against a named place, as its centre point', () => {
+        const expected: Array<[CommandVerb, DirectiveType]> = [
+            ['scout', DirectiveType.Screen],
+            ['withdraw', DirectiveType.Withdraw],
+            ['build', DirectiveType.BuildBase],
+        ];
+        for (const [verb, directiveType] of expected) {
+            const result = compileIntent({
+                verb,
+                subject: { type: 'group', groupId: 7 },
+                target: { shape: 'entity', entity: region },
+                priority: 50,
+            });
+            expect(result?.type, verb).toBe('GroupDirective');
+            if (result?.type !== 'GroupDirective') continue;
+            expect(result.payload.directiveType, verb).toBe(directiveType);
+            expect(result.payload.shape, verb).toBe(OrderShape.Point);
+            expect(result.payload.params, verb).toEqual([3200, 0, 4100]);
+        }
+    });
+
+    it('still refuses a named place for patrol, and says what patrol needs', () => {
+        expect(validateIntent({
+            verb: 'patrol',
+            subject: { type: 'idle-filter', filterClass: 'armour' },
+            target: { shape: 'entity', entity: region },
+            priority: 50,
+        })).toBe('patrol cannot take a named place — it needs a route drawn on the map');
     });
 });

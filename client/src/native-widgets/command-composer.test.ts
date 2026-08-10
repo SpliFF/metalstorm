@@ -102,3 +102,43 @@ describe('command-composer widget', () => {
         expect(typeof widget.id).toBe('string');
     });
 });
+
+/**
+ * PLAN-endtoend.md D51 — the target menu must not invent its own offer.
+ *
+ * The widget used to list "🔍 Search by name…" unconditionally, so five of the
+ * eleven verbs offered a named place the compile table refuses. The fix is that
+ * the offer is *derived* (`targetMenuOptions`), and this guard is at source
+ * level for the same reason as the modal guard above: jsdom is not installed
+ * here, so `renderTargetMenu` cannot be driven — but "the menu is derived, not
+ * hand-written" is exactly the invariant, and the shape logic it delegates to
+ * is unit-tested in compile-table.test.ts.
+ */
+describe('command-composer — the target offer is derived from the compile table (D51)', () => {
+    it('builds the target menu from targetMenuOptions', () => {
+        const src = callableSource('./command-composer.js');
+
+        expect(src).toMatch(/targetMenuOptions\s*\(\s*state\.verb\s*\)/);
+        // The old unconditional listing is gone: every `target-search-option`
+        // in the markup now sits on the enabled branch of that mapping.
+        expect(rawSource('./command-composer.js').match(/target-search-option/g))
+            .toHaveLength(2);   // one emitted, one queried for its click handler
+        expect(rawSource('./command-composer.js')).toMatch(/opt\.enabled\s*$|opt\.enabled\s*\n/m);
+    });
+
+    it('shows the refusal reason instead of hiding an unusable option', () => {
+        const src = rawSource('./command-composer.js');
+
+        expect(src).toMatch(/nui-menu__item--disabled.*Search by name/);
+        expect(src).toMatch(/escapeHtml\(opt\.reason\)/);
+    });
+
+    it('warns at accelerator fill-time when the resolved place cannot compile', () => {
+        // rawSource: the warning is interpolated into a template literal, which
+        // callableSource blanks by design.
+        const src = rawSource('./command-composer.js');
+
+        expect(src).toMatch(/explainShapeMismatch\s*\(\s*state\.verb\s*,\s*state\.target\.shape\s*\)/);
+        expect(src).toMatch(/getAcceptedTargetShapes\s*\(\s*state\.verb\s*\)\s*\.includes/);
+    });
+});
