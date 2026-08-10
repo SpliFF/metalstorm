@@ -118,7 +118,9 @@ describe('command-composer — the target offer is derived from the compile tabl
     it('builds the target menu from targetMenuOptions', () => {
         const src = callableSource('./command-composer.js');
 
-        expect(src).toMatch(/targetMenuOptions\s*\(\s*state\.verb\s*\)/);
+        // Subject-aware since D60 — the subject picks the compile path, so it
+        // picks the offer.
+        expect(src).toMatch(/targetMenuOptions\s*\(\s*state\.verb\s*,\s*state\.subject\s*\)/);
         // The old unconditional listing is gone: every `target-search-option`
         // in the markup now sits on the enabled branch of that mapping.
         expect(rawSource('./command-composer.js').match(/target-search-option/g))
@@ -138,7 +140,41 @@ describe('command-composer — the target offer is derived from the compile tabl
         // callableSource blanks by design.
         const src = rawSource('./command-composer.js');
 
-        expect(src).toMatch(/explainShapeMismatch\s*\(\s*state\.verb\s*,\s*state\.target\.shape\s*\)/);
-        expect(src).toMatch(/getAcceptedTargetShapes\s*\(\s*state\.verb\s*\)\s*\.includes/);
+        expect(src).toMatch(
+            /explainShapeMismatch\s*\(\s*state\.verb\s*,\s*state\.target\.shape\s*,\s*state\.subject\s*\)/);
+        expect(src).toMatch(
+            /getAcceptedTargetShapes\s*\(\s*state\.verb\s*,\s*state\.subject\s*\)\s*\.includes/);
+    });
+});
+
+/**
+ * PLAN-endtoend.md D60 — the widget half.
+ *
+ * The compile-table half (which shapes the AI subject accepts, and why) is
+ * unit-tested in compile-table.test.ts. What can only be asserted here is that
+ * the widget *asks* with the subject, and that changing the subject cannot
+ * leave a target the new path refuses sitting in the chip — the same
+ * valid-by-construction rule the verb picker has always applied, which is now
+ * load-bearing in a second direction (picking "the AI" invalidates a drawn
+ * route). Source-level for the same reason as above: no jsdom in this root.
+ */
+describe('command-composer — the subject decides the target offer (D60)', () => {
+    it('re-checks the target when the subject changes, not only when the verb does', () => {
+        const src = callableSource('./command-composer.js');
+
+        // Inside setSubject, before the menu closes.
+        expect(src).toMatch(
+            /state\.subjectAutoFilled\s*=\s*false;[\s\S]{0,600}?getAcceptedTargetShapes\s*\(\s*state\.verb\s*,\s*state\.subject\s*\)\s*\.includes\s*\(\s*state\.target\.shape\s*\)[\s\S]{0,120}?state\.target\s*=\s*null/);
+    });
+
+    it('clears the target conditionally — a group→group change keeps a painted area', () => {
+        const src = callableSource('./command-composer.js');
+
+        // The verb picker clears unconditionally (any verb change can move the
+        // accepted set); the subject picker must not, or every re-pick of a
+        // group would discard a target that is still perfectly valid.
+        const setSubjectBody = src.slice(src.indexOf('const setSubject'));
+        const guarded = setSubjectBody.slice(0, setSubjectBody.indexOf('menu.hidden'));
+        expect(guarded).toMatch(/if\s*\(\s*state\.verb\s*&&\s*state\.target/);
     });
 });

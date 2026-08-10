@@ -487,6 +487,16 @@ function renderSubjectMenu() {
         state.subject = subject;
         // A manual pick overrides whatever selection sync had set (task 4).
         state.subjectAutoFilled = false;
+        // The subject decides which compile path — and so which target shapes
+        // are accepted (D60): picking "the AI" invalidates a drawn route,
+        // leaving it invalidates a named place for patrol/screen. Same
+        // valid-by-construction rule the verb picker applies, but only when
+        // the shape genuinely stopped being accepted — a group→group change
+        // must not silently discard a painted area.
+        if (state.verb && state.target
+            && !getAcceptedTargetShapes(state.verb, state.subject).includes(state.target.shape)) {
+            state.target = null;
+        }
         menu.hidden = true;
         render();
     };
@@ -562,7 +572,10 @@ function renderTargetMenu() {
     // filled all three chips and then sat on a disabled Commit button. A shape
     // the verb cannot compile is still shown — carrying the reason — because a
     // silently missing option is the same dead surface one layer quieter.
-    menu.innerHTML = targetMenuOptions(state.verb)
+    // Subject-aware (D60): with `subject = the AI` the compile path never
+    // reaches the verb:shape table, so offering from it would refuse a named
+    // place the guidance payload encodes and offer a route it cannot.
+    menu.innerHTML = targetMenuOptions(state.verb, state.subject)
         .map((opt) => {
             if (opt.kind === 'map') {
                 return `<div class="nui-menu__item target-map-option" data-shape="${opt.shape}">${mapShapeLabel(opt.shape)}</div>`;
@@ -1245,8 +1258,9 @@ function handleAccelFill() {
     // a disabled Commit button. The slots are left filled on purpose: the chips
     // stay the source of truth and either one is a click from being changed.
     if (state.verb && state.target
-        && !getAcceptedTargetShapes(state.verb).includes(state.target.shape)) {
-        state.accelNotice += ` ⚠ ${explainShapeMismatch(state.verb, state.target.shape)}.`;
+        && !getAcceptedTargetShapes(state.verb, state.subject).includes(state.target.shape)) {
+        state.accelNotice +=
+            ` ⚠ ${explainShapeMismatch(state.verb, state.target.shape, state.subject)}.`;
     }
 
     render();

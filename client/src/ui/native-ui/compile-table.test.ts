@@ -665,3 +665,114 @@ describe('target offer matches the compile table (D51)', () => {
         })).toBe('patrol cannot take a named place — it needs a route drawn on the map');
     });
 });
+
+/**
+ * PLAN-endtoend.md D60 — the AI subject was refused by a rule its own compile
+ * path never applies.
+ *
+ * `compileIntent` routes `subject.type === 'ai'` to `compileToAIGuidance`
+ * *before* the verb:shape switch, and that payload carries the target as
+ * advice — `targetEntity` / `targetPoint` + an English `intent` string, no
+ * `OrderShape` and no params. So `validateIntent` and the target menu were
+ * both enforcing §5's directive encoding against a message that never encodes
+ * one: "tell the AI to patrol Grey Flat" was refused, while a route — the one
+ * shape guidance genuinely cannot carry — was the only thing offered.
+ *
+ * D51's class, one layer further in: the rule was enforced away from where it
+ * is true. Fix is the same shape too — one subject-aware source that the
+ * offer, the refusal and the compiler all read.
+ */
+describe('the AI subject is judged by the guidance payload, not the verb table (D60)', () => {
+    const region: NamedEntity = {
+        id: 'grey_flat',
+        type: 'region',
+        name: 'Grey Flat',
+        x: 3200,
+        z: 4100,
+    };
+    const ai: CommandSubject = { type: 'ai' };
+
+    it('accepts a named place for every verb, including the five a directive refuses', () => {
+        const verbs: CommandVerb[] = [
+            'attack', 'secure', 'defend', 'hold', 'patrol',
+            'screen', 'scout', 'escort', 'withdraw', 'reinforce', 'build',
+        ];
+        for (const verb of verbs) {
+            const intent: CommandIntent = {
+                verb, subject: ai, target: { shape: 'entity', entity: region }, priority: 50,
+            };
+            expect(validateIntent(intent), verb).toBeNull();
+            const compiled = compileIntent(intent);
+            expect(compiled?.type, verb).toBe('AIGuidance');
+            if (compiled?.type !== 'AIGuidance') continue;
+            // The advice names the place — the whole point of the path.
+            expect(compiled.payload.targetEntity, verb).toEqual({ id: 'grey_flat', type: 'region' });
+            expect(compiled.payload.intent, verb).toContain('Grey Flat');
+        }
+    });
+
+    it('refuses a route, which guidance can carry in neither field', () => {
+        const intent: CommandIntent = {
+            verb: 'patrol',
+            subject: ai,
+            target: { shape: 'route', route: [{ x: 1, z: 2 }, { x: 3, z: 4 }] },
+            priority: 50,
+        };
+        // Blames the guidance payload, not the verb: `patrol` takes a route
+        // perfectly well — it is this subject that cannot.
+        expect(validateIntent(intent)).toBe(
+            'guidance to the AI cannot take a route drawn on the map — '
+            + 'it needs a named place, a point on the map or a painted area');
+        // And the compiler agrees, rather than minting a payload with no target.
+        expect(compileIntent(intent)).toBeNull();
+    });
+
+    it('offers the AI the same three shapes for every verb, and never a route', () => {
+        for (const verb of ['patrol', 'escort', 'attack'] as CommandVerb[]) {
+            expect(targetMenuOptions(verb, ai), verb).toEqual([
+                { kind: 'map', shape: 'point', enabled: true },
+                { kind: 'map', shape: 'area', enabled: true },
+                { kind: 'search', enabled: true },
+            ]);
+        }
+    });
+
+    it('every enabled option compiles, for every verb, on the AI path too', () => {
+        const verbs: CommandVerb[] = [
+            'attack', 'secure', 'defend', 'hold', 'patrol',
+            'screen', 'scout', 'escort', 'withdraw', 'reinforce', 'build',
+        ];
+        for (const verb of verbs) {
+            for (const option of targetMenuOptions(verb, ai)) {
+                expect(option.enabled, `${verb} offer`).toBe(true);
+                const shape = option.kind === 'search' ? 'entity' : option.shape!;
+                const target: CommandTarget =
+                    shape === 'entity' ? { shape, entity: region }
+                    : shape === 'point' ? { shape, point: { x: 1, z: 2 } }
+                    : { shape, area: { x: 1, z: 2, radius: 3 } };
+
+                const intent: CommandIntent = { verb, subject: ai, target, priority: 50 };
+                expect(validateIntent(intent), `${verb}:${shape}`).toBeNull();
+                expect(compileIntent(intent), `${verb}:${shape}`).not.toBeNull();
+            }
+        }
+    });
+
+    it('leaves the directive path rule untouched', () => {
+        // The same sentence with a real force still obeys §5.
+        expect(validateIntent({
+            verb: 'patrol',
+            subject: { type: 'group', groupId: 3 },
+            target: { shape: 'entity', entity: region },
+            priority: 50,
+        })).toBe('patrol cannot take a named place — it needs a route drawn on the map');
+        expect(targetMenuOptions('patrol')).toEqual([
+            { kind: 'map', shape: 'route', enabled: true },
+            {
+                kind: 'search',
+                enabled: false,
+                reason: 'patrol cannot take a named place — it needs a route drawn on the map',
+            },
+        ]);
+    });
+});

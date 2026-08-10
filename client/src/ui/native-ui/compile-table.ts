@@ -54,8 +54,32 @@ export const TARGET_SHAPES_BY_VERB: Record<CommandVerb, TargetShape[]> = {
     build: ['point', 'entity'],
 };
 
-/** Target shapes `verb` can compile against (§5 compile table). */
-export function getAcceptedTargetShapes(verb: CommandVerb): TargetShape[] {
+/**
+ * Target shapes the AI-guidance path can carry (PLAN-endtoend D60).
+ *
+ * `compileIntent` routes `subject.type === 'ai'` to `compileToAIGuidance`
+ * **before** the verb:shape switch, and that payload carries the target as
+ * advice — a `targetEntity`, or a `targetPoint` (an area travels as its
+ * centre). It has no `OrderShape` and no params, so the verb:shape table
+ * describes a wire encoding this path never performs. What it *can* carry is
+ * the same for every verb, and a route is the one shape it cannot: it would
+ * produce neither field, and `generateIntentText` would name no target at all.
+ */
+export const AI_GUIDANCE_TARGET_SHAPES: TargetShape[] = ['entity', 'point', 'area'];
+
+/**
+ * Target shapes this intent can compile against.
+ *
+ * Subject-aware because the compile path is (D60): a directive encodes the
+ * target as an `OrderShape` and reads §5's table; guidance to the AI encodes
+ * it as advice and reads `AI_GUIDANCE_TARGET_SHAPES`. Passing no subject keeps
+ * the directive answer, which is what a half-composed sentence should show.
+ */
+export function getAcceptedTargetShapes(
+    verb: CommandVerb,
+    subject?: CommandSubject,
+): TargetShape[] {
+    if (subject?.type === 'ai') return AI_GUIDANCE_TARGET_SHAPES;
     return TARGET_SHAPES_BY_VERB[verb] ?? [];
 }
 
@@ -77,17 +101,33 @@ export function describeTargetShape(shape: TargetShape): string {
     }
 }
 
+/** "a" · "a or b" · "a, b or c" — so a three-shape offer does not read as
+ *  three `or`s in a row. */
+function joinAlternatives(parts: string[]): string {
+    if (parts.length <= 1) return parts[0] ?? '';
+    return `${parts.slice(0, -1).join(', ')} or ${parts[parts.length - 1]}`;
+}
+
 /**
- * Why `verb` cannot take `shape` — names the requirement, not just the
+ * Why this intent cannot take `shape` — names the requirement, not just the
  * rejection (D51: "the refusal message names a cause that is not the cause").
  * Shared by `validateIntent` and the target menu's disabled offer.
+ *
+ * The refused *thing* is named too (D60): a directive is refused by the verb,
+ * but guidance to the AI is refused by the guidance payload, and blaming the
+ * verb there points the player at a rule that does not apply to their sentence.
  */
-export function explainShapeMismatch(verb: CommandVerb, shape: TargetShape): string {
-    const accepted = getAcceptedTargetShapes(verb).map(describeTargetShape);
+export function explainShapeMismatch(
+    verb: CommandVerb,
+    shape: TargetShape,
+    subject?: CommandSubject,
+): string {
+    const accepted = getAcceptedTargetShapes(verb, subject).map(describeTargetShape);
     const needs = accepted.length
-        ? accepted.join(' or ')
+        ? joinAlternatives(accepted)
         : 'a target this build cannot compose';
-    return `${verb} cannot take ${describeTargetShape(shape)} — it needs ${needs}`;
+    const refusedBy = subject?.type === 'ai' ? 'guidance to the AI' : verb;
+    return `${refusedBy} cannot take ${describeTargetShape(shape)} — it needs ${needs}`;
 }
 
 /**
@@ -113,26 +153,27 @@ export interface TargetMenuOption {
  * Commit button will refuse: before this, the name search was offered for
  * every verb, and `patrol Grey Flat` filled all three chips and then died on
  * a verb:shape rule the menu knew nothing about.
+ *
+ * Subject-aware for the same reason (D60): with `subject = the AI` the verb's
+ * table is not the rule that will be applied, so offering from it refuses
+ * `patrol Grey Flat` — which the guidance payload encodes perfectly well — and
+ * offers a route it cannot encode at all.
  */
-export function targetMenuOptions(verb: CommandVerb): TargetMenuOption[] {
-    const accepted = getAcceptedTargetShapes(verb);
+export function targetMenuOptions(
+    verb: CommandVerb,
+    subject?: CommandSubject,
+): TargetMenuOption[] {
+    const accepted = getAcceptedTargetShapes(verb, subject);
     const options: TargetMenuOption[] = accepted
         .filter((shape) => shape !== 'entity')
         .map((shape) => ({ kind: 'map' as const, shape, enabled: true }));
 
     options.push(accepted.includes('entity')
         ? { kind: 'search', enabled: true }
-        : { kind: 'search', enabled: false, reason: explainShapeMismatch(verb, 'entity') });
+        : { kind: 'search', enabled: false, reason: explainShapeMismatch(verb, 'entity', subject) });
 
     return options;
 }
-
-/** Flattened `"verb:shape"` lookup, derived from `TARGET_SHAPES_BY_VERB` —
- *  `validateIntent`'s single source of truth for the vocabulary check. */
-const VALID_VERB_SHAPE_COMBINATIONS = new Set(
-    (Object.entries(TARGET_SHAPES_BY_VERB) as [CommandVerb, TargetShape[]][])
-        .flatMap(([verb, shapes]) => shapes.map((shape) => `${verb}:${shape}`)),
-);
 
 /**
  * Command subject - who executes
@@ -318,8 +359,16 @@ export interface AIGuidancePayload {
  * Returns null if the intent cannot be compiled (invalid combination).
  */
 export function compileIntent(intent: CommandIntent): CompiledMessage | null {
-    // Subject='ai' → AI guidance (interaction §6)
+    // Subject='ai' → AI guidance (interaction §6). Guarded by the shapes that
+    // path can actually encode, not by §5's table (D60) — and guarded here so
+    // a caller that skipped `validateIntent` cannot mint a guidance payload
+    // carrying neither `targetEntity` nor `targetPoint`.
     if (intent.subject.type === 'ai') {
+        if (!getAcceptedTargetShapes(intent.verb, intent.subject).includes(intent.target.shape)) {
+            console.warn('[compile-table] AI guidance cannot carry target shape:',
+                intent.target.shape);
+            return null;
+        }
         return compileToAIGuidance(intent);
     }
 
@@ -658,14 +707,13 @@ function formatWhenCondition(condition: WhenCondition): string {
  * Returns an error message if invalid, null if valid.
  */
 export function validateIntent(intent: CommandIntent): string | null {
-    // Check verb:shape compatibility (derived from TARGET_SHAPES_BY_VERB —
-    // the same table the map-arm target picker reads, so the two can never
-    // drift apart).
-    const key = `${intent.verb}:${intent.target.shape}`;
-
-    if (!VALID_VERB_SHAPE_COMBINATIONS.has(key)) {
-        // Names what the verb needs, not just what it refused (D51).
-        return explainShapeMismatch(intent.verb, intent.target.shape);
+    // Check shape compatibility against the rule this intent's own compile
+    // path applies — §5's verb table for a directive, the guidance payload's
+    // fields for `subject = the AI` (D60). Same function the map-arm target
+    // picker reads, so the offer and the refusal can never drift apart.
+    if (!getAcceptedTargetShapes(intent.verb, intent.subject).includes(intent.target.shape)) {
+        // Names what is needed, not just what was refused (D51).
+        return explainShapeMismatch(intent.verb, intent.target.shape, intent.subject);
     }
 
     // Check that target has required data
