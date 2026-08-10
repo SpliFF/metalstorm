@@ -28,6 +28,7 @@
 #include "Server/ScenarioDb.h"
 #include "Server/ScenarioDiscovery.h"
 #include "Server/TokenBucket.h"
+#include "Server/WarLifecycle.h"
 #include "System/SpringLog/SpringLog.h"
 #include "System/SpringLog/SpringLogSqlite.h"
 #include <cctype>
@@ -725,6 +726,19 @@ int main(int argc, char *argv[]) {
   // pruning entirely (an operator who wants the whole history), which is why
   // the default is a real number and not a sentinel.
   int clientErrorRetentionDays = 30;
+  // PLAN-metalstorm-lobby.md §5.3, task 3: a persistent war's game server is
+  // deliberately NOT killed when this lobby shuts down — the next lobby's
+  // startup adoption pass re-attaches to the live pid, which is the only
+  // resume that keeps the sim (nothing snapshots the world yet; §5.4). This
+  // flag is the operator's way back to the old behaviour: a developer
+  // restarting the stack in a loop wants the machine back, and a harness that
+  // leaves wars running leaks a process per run. Env
+  // `SPRING_LOBBY_KILL_WARS_ON_EXIT=1` does the same for mprocs-managed runs
+  // that have no argv of their own to edit.
+  bool killWarsOnExit = [] {
+    const char *e = std::getenv("SPRING_LOBBY_KILL_WARS_ON_EXIT");
+    return e && *e && std::string(e) != "0";
+  }();
 
   for (int i = 1; i < argc; i++) {
     std::string arg = argv[i];
@@ -761,6 +775,8 @@ int main(int argc, char *argv[]) {
       clientErrorReportsEnabled = false;
     } else if (arg == "--client-error-retention-days" && i + 1 < argc) {
       clientErrorRetentionDays = std::atoi(argv[++i]);
+    } else if (arg == "--kill-wars-on-exit") {
+      killWarsOnExit = true;
     } else if (arg == "--game" && i + 1 < argc) {
       // Back-compat: `--game <path>` is translated into
       // `--games-dir <parent>` so existing scripts that point
@@ -1080,6 +1096,33 @@ int main(int argc, char *argv[]) {
   std::unordered_map<uint32_t, GameServerInstance>
       gameServers; // roomId → instance
 
+  // A room whose game server is gone. Four callers reach this state (a stale
+  // `game_servers` row at startup, two startup sweeps over Loading/Active
+  // rooms with nothing adopted, and the health-check loop watching a pid
+  // exit), and every one of them used to recycle the room to Filling.
+  // PLAN-metalstorm-lobby.md §5.2/§5.3, task 3: that is right for a skirmish
+  // and wrong for a war — it demotes a running world into a set-up screen its
+  // host has to re-launch, and every player who walked up to it in between
+  // would find one. A war is held as a war and resumed by the next joiner
+  // (see the /api/rooms/join resume path); only its dead port is cleared, so
+  // nobody is offered a rejoin target that answers nothing.
+  auto onOrphanedRoom = [&](uint32_t rid, const char *why) {
+    auto *room = rooms.GetRoom(rid);
+    if (!room)
+      return;
+    if (ActionForOrphanedRoom(room->sessionKind) ==
+        OrphanedRoomAction::HoldForResume) {
+      room->gameServerPort = 0;
+      rooms.PersistRoomGameSession(rid);
+      SLOG(SPRING_LOG_NOTICE,
+           "war room %u: %s — held for resume (state kept; the next join "
+           "brings it back up)",
+           rid, why);
+      return;
+    }
+    rooms.ResetRoomForNextGame(rid);
+  };
+
   // --- Adopt-or-reset live game servers across a lobby restart ---
   //
   // Walk the `game_servers` table. For each row we either:
@@ -1153,10 +1196,10 @@ int main(int argc, char *argv[]) {
                    [&](sqlite3_stmt *s) {
                      sqlite3_bind_int(s, 1, static_cast<int>(rid));
                    });
-      // Room metadata is persistent; if a row in `rooms` matches,
-      // reset it back to Filling so the host can launch again.
-      if (rooms.GetRoom(rid))
-        rooms.ResetRoomForNextGame(rid);
+      // Room metadata is persistent; if a row in `rooms` matches, recycle it
+      // so the host can launch again — unless it is a war, which is held
+      // (onOrphanedRoom).
+      onOrphanedRoom(rid, "its game server process is gone (stale row)");
       SLOG(SPRING_LOG_NOTICE,
            "game_servers row room=%u was stale (pid dead) — cleared", rid);
     }
@@ -1178,10 +1221,9 @@ int main(int argc, char *argv[]) {
     if ((room->state == ERoomState::Loading ||
          room->state == ERoomState::Active) &&
         gameServers.find(room->id) == gameServers.end()) {
-      SLOG(SPRING_LOG_NOTICE,
-           "room %u: %s with no live game server — resetting to Filling",
-           room->id, room->state == ERoomState::Active ? "Active" : "Loading");
-      rooms.ResetRoomForNextGame(room->id);
+      SLOG(SPRING_LOG_NOTICE, "room %u: %s with no live game server", room->id,
+           room->state == ERoomState::Active ? "Active" : "Loading");
+      onOrphanedRoom(room->id, "no live game server at startup");
     }
   }
 
@@ -1228,10 +1270,12 @@ int main(int argc, char *argv[]) {
         continue;
       if (gameServers.count(room->id) > 0)
         continue; // adopted; alive
-      SLOG(SPRING_LOG_NOTICE,
-           "room %u stuck in state=%d with no game-server — resetting",
+      SLOG(SPRING_LOG_NOTICE, "room %u stuck in state=%d with no game-server",
            room->id, st);
-      rooms.ResetRoomForNextGame(room->id);
+      // Routed through the same policy as the sweep above (which this one
+      // duplicates): a held war stays Loading/Active by design, so a second
+      // pass that reset unconditionally would undo the hold a few lines later.
+      onOrphanedRoom(room->id, "stuck in-flight with no game-server");
       reset++;
     }
     if (reset > 0) {
@@ -3656,6 +3700,105 @@ int main(int argc, char *argv[]) {
         };
       });
 
+  // ── Spawning a game server, in one place ──
+  //
+  // Two paths spawn one now: the host pressing Start Game, and a player
+  // joining a persistent war whose server is down (task 3). They must not be
+  // two hand-rolled copies — a fork/exec that skips the fork-bomb brakes, the
+  // start-position assignment or the audit row on one of the two paths is the
+  // shape this lane keeps finding (task 2's `war_sides` decoder, task 1's
+  // session-kind string).
+  //
+  // PLAN-security-hardening task 11 (G10): /api/rooms/start forks+execs a
+  // spring-server. The host-only check (delegated to RoomManager::StartGame)
+  // already scopes *who* may start *which* room, but nothing bounded the
+  // fork/exec rate or the total live process count — an authenticated user
+  // could loop create→start and fork-bomb the host. Two bounds:
+  //   - a global token bucket (burst 10, ~10/min sustained) on spawns, and
+  //   - a hard ceiling on concurrent live game servers.
+  // Both apply in dev and prod (a spawn is expensive regardless of build).
+  static TokenBucket roomSpawnLimiter(/*burst=*/10.0,
+                                      /*perSecond=*/10.0 / 60.0);
+  constexpr size_t kMaxConcurrentGameServers = 64;
+
+  /// Brakes only, evaluated before any state mutation. Returns the refusal to
+  /// send, or nullopt to proceed.
+  auto gameServerSpawnRefusal =
+      [&](uint32_t roomId) -> std::optional<HttpResponse> {
+    size_t aliveServers = 0;
+    for (const auto &[rid, gi] : gameServers)
+      if (gi.pid > 0 && isProcessAlive(gi.pid))
+        ++aliveServers;
+    if (aliveServers >= kMaxConcurrentGameServers) {
+      SLOG(SPRING_LOG_WARNING,
+           "room %u start refused: %zu/%zu game servers already live", roomId,
+           aliveServers, kMaxConcurrentGameServers);
+      return HttpAuth::JsonResponse(
+          503, R"({"error":"server capacity reached — try again shortly"})");
+    }
+    if (!roomSpawnLimiter.TryConsume())
+      return HttpAuth::JsonResponse(
+          429, R"({"error":"game-start rate limit exceeded"})");
+    return std::nullopt;
+  };
+
+  /// Fork the game server for a room whose state has already been moved to
+  /// Loading, and record it (in-memory instance, `game_servers` row, room
+  /// port, audit row). `auditAction` distinguishes the two callers in the
+  /// audit trail: a host starting a match and a war coming back up are not
+  /// the same operator event even though they run the same code.
+  auto spawnServerForRoom = [&](GameRoom &room, int64_t userId,
+                                const char *auditAction) {
+    // Last line of defence before the game server forks: say out loud whether
+    // the war we are about to spawn can ever finish (PLAN-endtoend.md D10).
+    warnIfWarCannotEnd(&room);
+
+    // Give every still-unassigned slot a distinct map start position before
+    // spawning. AutoAssignStartPositions skips slots that already picked one
+    // (via /api/rooms/startpos) and no-ops on maps with no start positions.
+    // Without it every slot stays at startPos=-1, the sim spawns ALL teams at
+    // map centre, and enemy commanders overlap into a premature GameOver.
+    {
+      MapMetadataDb mdb;
+      const size_t spCount = mdb.GetMap(mapDb, room.mapId).startPositions.size();
+      const int8_t maxStartPos =
+          static_cast<int8_t>(spCount > 127 ? 127 : spCount);
+      rooms.AutoAssignStartPositions(room.id, maxStartPos);
+    }
+
+    auto it = gamePathsById.find(room.gameId);
+    if (it == gamePathsById.end())
+      return;
+    const auto vit = gameVersionsById.find(room.gameId);
+    const std::string &gameVer =
+        (vit != gameVersionsById.end()) ? vit->second : std::string();
+    // Skip ports currently held by live spring-server processes. Without this
+    // the new game-server binds via SO_REUSEPORT alongside the old one and
+    // incoming client connections round-robin between the two — see
+    // findFreePort.
+    std::unordered_set<int> busyPorts;
+    for (const auto &[rid, gi] : gameServers)
+      if (gi.pid > 0 && isProcessAlive(gi.pid))
+        busyPorts.insert(gi.port);
+    auto inst = spawnGameServer(room.id, room.gameId, gameVer, room.mapId,
+                                dbPath, room.players, room.aiSlots,
+                                room.modOptions, busyPorts, devBuildAcknowledged,
+                                wtCertPath, wtKeyPath,
+                                /*replayFile=*/"", room.sessionKind);
+    gameServers[room.id] = inst;
+    persistGameServer(inst);
+    room.gameServerPort = inst.port;
+    rooms.PersistRoomGameSession(room.id);
+    // Audit the process spawn (G10 / §3): who started which game/map on what
+    // port. Append-only admin_audit row.
+    auto starter = db.FindUserById(userId);
+    db.LogAudit(userId, starter ? starter->username : std::string("?"),
+                auditAction, room.gameId,
+                "room=" + std::to_string(room.id) + " map=" + room.mapId +
+                    " port=" + std::to_string(inst.port) +
+                    " pid=" + std::to_string(inst.pid));
+  };
+
   // NOTE: /api/rooms/end and /api/rooms/close are removed.
   // Room lifecycle is handled entirely through /api/rooms/leave:
   //   - Last human leaves non-persistent room → room abandoned, game killed
@@ -3689,6 +3832,41 @@ int main(int argc, char *argv[]) {
                             user->username, password, asSpectator,
                             user->factionId.value_or("")))
           return HttpAuth::JsonResponse(403, R"({"error":"cannot join room"})");
+
+        // PLAN-metalstorm-lobby.md §5.2/§5.3, task 3 — resume on join. A war
+        // is not hosted: nobody presses Start Game for it, and after a lobby
+        // restart (or a server that died with nobody watching) the room is
+        // held rather than recycled, so there is no host action left that
+        // could bring it back. The player walking up to it is the trigger.
+        //
+        // ⚠ The sim restarts at frame 0 — nothing snapshots the world yet
+        // (§5.4; PLAN-persistence owns it, creg is stubbed out). The lossless
+        // case is the war whose *process* survived, which is why the lobby no
+        // longer kills one on the way out; this path is the fallback for when
+        // it really is gone.
+        if (auto *joined = rooms.GetRoom(roomId)) {
+          const bool live = [&] {
+            auto gsIt = gameServers.find(roomId);
+            return gsIt != gameServers.end() && gsIt->second.pid > 0 &&
+                   isProcessAlive(gsIt->second.pid);
+          }();
+          const auto decision =
+              DecideWarResume(joined->sessionKind, live, joined->state);
+          if (decision == WarResumeOutcome::Resume) {
+            if (auto refusal = gameServerSpawnRefusal(roomId))
+              return *refusal;
+            rooms.SetRoomState(roomId, ERoomState::Loading);
+            SLOG(SPRING_LOG_NOTICE,
+                 "war room %u: %s for '%s' — the sim restarts at frame 0 (no "
+                 "snapshot yet, §5.4)",
+                 roomId, WarResumeOutcomeToString(decision),
+                 user->username.c_str());
+            spawnServerForRoom(*joined, userId, "war_resume");
+          } else if (joined->sessionKind == SessionKind::PersistentWar) {
+            SLOG(SPRING_LOG_INFO, "war room %u: join by '%s' — %s", roomId,
+                 user->username.c_str(), WarResumeOutcomeToString(decision));
+          }
+        }
 
         broadcastRooms();
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(roomId)));
@@ -4052,18 +4230,6 @@ int main(int argc, char *argv[]) {
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
       });
 
-  // PLAN-security-hardening task 11 (G10): /api/rooms/start forks+execs a
-  // spring-server. The host-only check (delegated to RoomManager::StartGame)
-  // already scopes *who* may start *which* room, but nothing bounded the
-  // fork/exec rate or the total live process count — an authenticated user
-  // could loop create→start and fork-bomb the host. Two bounds:
-  //   - a global token bucket (burst 10, ~10/min sustained) on spawns, and
-  //   - a hard ceiling on concurrent live game servers.
-  // Both apply in dev and prod (a spawn is expensive regardless of build).
-  static TokenBucket roomSpawnLimiter(/*burst=*/10.0,
-                                      /*perSecond=*/10.0 / 60.0);
-  constexpr size_t kMaxConcurrentGameServers = 64;
-
   // POST /api/rooms/start — start the game
   net.AddHttpPost(
       "/api/rooms/start", RouteAuth::TokenRequired,
@@ -4077,23 +4243,8 @@ int main(int argc, char *argv[]) {
         // Fork-bomb brakes (G10), evaluated before any state mutation. Count
         // only genuinely-alive servers so ended/crashed rooms don't wedge the
         // cap.
-        {
-          size_t aliveServers = 0;
-          for (const auto &[rid, gi] : gameServers)
-            if (gi.pid > 0 && isProcessAlive(gi.pid))
-              ++aliveServers;
-          if (aliveServers >= kMaxConcurrentGameServers) {
-            SLOG(SPRING_LOG_WARNING,
-                 "room %u start refused: %zu/%zu game servers already live",
-                 room->id, aliveServers, kMaxConcurrentGameServers);
-            return HttpAuth::JsonResponse(
-                503,
-                R"({"error":"server capacity reached — try again shortly"})");
-          }
-        }
-        if (!roomSpawnLimiter.TryConsume())
-          return HttpAuth::JsonResponse(
-              429, R"({"error":"game-start rate limit exceeded"})");
+        if (auto refusal = gameServerSpawnRefusal(room->id))
+          return *refusal;
 
         // Auto-add a Null AI if every participant ends up on the same
         // team. Without an opposing ally, ZK's game_over.lua trips its
@@ -4152,69 +4303,15 @@ int main(int argc, char *argv[]) {
               400, R"({"error":")" + HttpAuth::JsonEscape(reason) + R"("})");
         }
 
-        // Last line of defence before the game server forks: say out loud
-        // whether the war we are about to spawn can ever finish
-        // (PLAN-endtoend.md D10). Deliberately does NOT back-fill a missing
-        // scenario here — applyRoomScenario at create time is the single
-        // owner of that decision, and silently overturning a host's choice at
-        // start is the same "chosen behind your back" property the design
-        // call rejected. Rooms created before this change (and persistent
-        // rooms restored from the DB) surface here as the warning.
-        warnIfWarCannotEnd(room);
-
-        // Give every still-unassigned slot a distinct map start position
-        // before spawning the game server. AutoAssignStartPositions skips
-        // slots that already picked a position (via /api/rooms/startpos)
-        // and no-ops on maps with no start positions (the sim then falls
-        // back to its map-centre default). This call was written for the
-        // start path but never wired in — without it every slot stays at
-        // startPos=-1, the sim spawns ALL teams at map centre, and enemy
-        // commanders overlap and immediately fight to a premature GameOver.
-        {
-          MapMetadataDb mdb;
-          const size_t spCount =
-              mdb.GetMap(mapDb, room->mapId).startPositions.size();
-          const int8_t maxStartPos =
-              static_cast<int8_t>(spCount > 127 ? 127 : spCount);
-          rooms.AutoAssignStartPositions(room->id, maxStartPos);
-        }
-
-        // Verify game exists before spawning
-        auto it = gamePathsById.find(room->gameId);
-
-        if (it != gamePathsById.end()) {
-          const auto vit = gameVersionsById.find(room->gameId);
-          const std::string &gameVer =
-              (vit != gameVersionsById.end()) ? vit->second : std::string();
-          // Skip ports currently held by live spring-server processes.
-          // Without this, the new game-server binds via SO_REUSEPORT
-          // alongside the old one and incoming client connections
-          // round-robin between the two — see findFreePort comment.
-          std::unordered_set<int> busyPorts;
-          for (const auto &[rid, gi] : gameServers) {
-            if (gi.pid > 0 && isProcessAlive(gi.pid)) {
-              busyPorts.insert(gi.port);
-            }
-          }
-          auto inst = spawnGameServer(
-              room->id, room->gameId, gameVer, room->mapId, dbPath,
-              room->players, room->aiSlots, room->modOptions, busyPorts,
-              devBuildAcknowledged, wtCertPath, wtKeyPath,
-              /*replayFile=*/"", room->sessionKind);
-          gameServers[room->id] = inst;
-          persistGameServer(inst);
-          room->gameServerPort = inst.port;
-          // Audit the process spawn (G10 / §3): who started which game/map on
-          // what port. Append-only admin_audit row.
-          {
-            auto starter = db.FindUserById(userId);
-            db.LogAudit(userId, starter ? starter->username : std::string("?"),
-                        "room_start", room->gameId,
-                        "room=" + std::to_string(room->id) + " map=" +
-                            room->mapId + " port=" + std::to_string(inst.port) +
-                            " pid=" + std::to_string(inst.pid));
-          }
-        }
+        // Everything from here — the can-this-war-end warning, start
+        // positions, the fork itself, the `game_servers` row and the audit
+        // entry — is shared with the war-resume path (task 3), so the two
+        // cannot drift apart. Deliberately does NOT back-fill a missing
+        // scenario: applyRoomScenario at create time is the single owner of
+        // that decision, and silently overturning a host's choice at start is
+        // the same "chosen behind your back" property the design call
+        // rejected.
+        spawnServerForRoom(*room, userId, "room_start");
 
         broadcastRooms();
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
@@ -4736,8 +4833,9 @@ int main(int argc, char *argv[]) {
 
           // Recycle the room: transition back to Filling,
           // clear ready flags, zero gameServerPort, drop
-          // reconnection roster.
-          rooms.ResetRoomForNextGame(roomId);
+          // reconnection roster — unless it is a war, which keeps its state
+          // and is resumed by the next joiner (task 3).
+          onOrphanedRoom(roomId, "its game server exited");
           broadcastRooms();
           continue;
         }
@@ -4800,12 +4898,30 @@ int main(int argc, char *argv[]) {
 
   SLOG(SPRING_LOG_NOTICE, "shutting down...");
 
-  // Kill any running game servers
+  // Kill any running game servers — except the wars (PLAN-metalstorm-lobby.md
+  // §5.3, task 3). A persistent war is *supposed* to outlive the people in it,
+  // and this loop was the one end-on-empty path that killed one: the room
+  // abandon is gated on `persistent` and the server's own idle exit is gated
+  // on the session kind, but "the lobby restarted" tore the war down with the
+  // skirmishes. Leaving the process alive is also the only lossless resume
+  // that exists today — the startup adoption pass re-attaches by pid and the
+  // sim never stopped, whereas a respawn starts the world again at frame 0
+  // (§5.4 / PLAN-persistence owns snapshots; creg is stubbed out).
   for (auto &[roomId, inst] : gameServers) {
-    if (isProcessAlive(inst.pid)) {
-      kill(inst.pid, SIGTERM);
-      SLOG(SPRING_LOG_NOTICE, "killed game server pid %d", inst.pid);
+    if (!isProcessAlive(inst.pid))
+      continue;
+    const auto *room = rooms.GetRoom(roomId);
+    const SessionKind kind = room ? room->sessionKind : SessionKind::Skirmish;
+    if (ActionOnLobbyExit(kind, killWarsOnExit) ==
+        LobbyExitAction::LeaveRunning) {
+      SLOG(SPRING_LOG_NOTICE,
+           "left war room=%u (pid %d, port %d) running — it is adopted on the "
+           "next lobby start",
+           roomId, inst.pid, inst.port);
+      continue;
     }
+    kill(inst.pid, SIGTERM);
+    SLOG(SPRING_LOG_NOTICE, "killed game server pid %d", inst.pid);
   }
 
   net.Stop();
