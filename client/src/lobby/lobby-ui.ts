@@ -35,7 +35,7 @@ import { RoomListUpdate } from '../protocol/spring-web/room-list-update.js';
 import { RoomStateUpdate } from '../protocol/spring-web/room-state-update.js';
 import { renderTemplate } from '../ui/ui.js';
 import {
-    defaultTeamForNewSlot, renderSideOptions, warSidesForRoom,
+    defaultTeamForNewSlot, renderSideOptions, sideForFaction, warSidesForRoom,
 } from './war-sides.js';
 import { decideRoomTransition } from './room-transition.js';
 import type { AvailableScenarioInfo } from './scenario-picker.js';
@@ -190,6 +190,15 @@ export class LobbyUI {
     private onParkedRoomEnded?: () => void;
     private parkedBanner: HTMLElement | null = null;
     private myPlayerId = 0;
+    /// This account's permanent faction, from the `faction` field every auth
+    /// response now carries (login / register / validate — PLAN-endtoend.md
+    /// D40). Empty for an account that has none: a dev or `/api/rooms/direct`
+    /// manifest account, or a pre-faction legacy one.
+    ///
+    /// The server owns the consequence — it seats by faction and refuses a
+    /// cross-faction `POST /api/rooms/team`. The client holds it only so the
+    /// room screen can stop offering the side that would be refused.
+    private myFaction = '';
     private pendingRejoinRoomId = 0;
     private authToken = '';
     private roomEventSource: EventSource | null = null;
@@ -360,7 +369,9 @@ export class LobbyUI {
                 if (data.valid) {
                     this.authToken = token;
                     this.myPlayerId = data.user_id ?? 0;
-                    console.log(`[lobby] auto-login OK: user=${data.username}`);
+                    this.myFaction = data.faction ?? '';
+                    console.log(`[lobby] auto-login OK: user=${data.username}`
+                        + `${this.myFaction ? ` faction=${this.myFaction}` : ''}`);
                     localStorage.setItem('springrts-token', token);
 
                     const savedRoomId = localStorage.getItem('springrts-game-room');
@@ -701,9 +712,13 @@ export class LobbyUI {
 
             this.authToken = data.token;
             this.myPlayerId = data.user_id ?? 0;
+            // Both /login and /register echo the account's faction (D40); the
+            // register-time value used to be dropped on the floor here.
+            this.myFaction = data.faction ?? '';
             localStorage.setItem('springrts-username', user);
             localStorage.setItem('springrts-token', data.token);
-            console.log(`[lobby] login OK: user=${user} id=${this.myPlayerId}`);
+            console.log(`[lobby] login OK: user=${user} id=${this.myPlayerId}`
+                + `${this.myFaction ? ` faction=${this.myFaction}` : ''}`);
             this.startPolling();
             this.showBrowser();
         } catch (err) {
@@ -1414,16 +1429,26 @@ export class LobbyUI {
         // can restyle the row layout. The `{{startpos_html}}` and
         // `{{team_options}}` placeholders receive the start-pos select
         // (possibly empty if the map ships no positions) and the side list.
+        // The side my own faction binds me to in this room, if any (D40). The
+        // server seated me there and refuses any other team, so the dropdown
+        // must not offer one — a control whose every alternative is a 403 is
+        // D41's silent refusal waiting to happen.
+        const myBoundSide = sideForFaction(sides, this.myFaction);
         const playersHtml = r.players.map(p => {
             const canEdit = preGame && (p.playerId === this.myPlayerId || amHost);
             const posSel = renderStartPosSelect(
                 p.startPos, `player:${p.playerId}`, canEdit);
+            const mine = p.playerId === this.myPlayerId;
             return renderTemplate(this.templates.roomPlayerRow, {
                 pid: p.playerId,
                 name: this.esc(p.username),
                 host_icon: p.isHost ? '★' : '●',
                 ready_class: p.ready ? 'ready' : '',
-                select_disabled: p.playerId !== this.myPlayerId ? ' disabled' : '',
+                select_disabled: !mine
+                    ? ' disabled'
+                    : (myBoundSide
+                        ? ` disabled title="You fight for ${this.esc(myBoundSide.label)}"`
+                        : ''),
                 team_options: renderSideOptions(sides, p.team),
                 status: p.isSpectator ? 'Spectator' : (p.ready ? '✓ Ready' : '—'),
                 startpos_html: posSel,

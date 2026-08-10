@@ -140,6 +140,148 @@ TEST_CASE("EnlistSpectator: falls back to the first side when all are taken") {
     CHECK(rooms.GetRoom(roomId)->FindPlayer(2)->team == 0);
 }
 
+// --- faction seating (PLAN-endtoend.md D40) ---------------------------------
+//
+// `war_sides` carries `faction:team` and SlotTeams() threw the names away, so
+// an account's permanent faction — chosen at sign-up, validated, stored — was
+// read by nothing and the balancer seated players against it. Measured live
+// twice: `e2e19south` and `e2e26south` both registered `union` and both landed
+// on team 0, compact.
+
+TEST_CASE("SideTeams: keeps the faction names SlotTeams drops") {
+    RoomManager rooms;
+    const uint32_t roomId = makeRoom(rooms, "compact:0,union:4");
+    const auto sides = rooms.GetRoom(roomId)->SideTeams();
+    REQUIRE(sides.size() == 2);
+    CHECK(sides.at(0) == std::pair<std::string, uint8_t>{"compact", 0});
+    CHECK(sides.at(1) == std::pair<std::string, uint8_t>{"union", 4});
+}
+
+TEST_CASE("SideTeams: a legacy room declares no sides at all") {
+    // SlotTeams() invents {0,1} for a room with no war_sides; SideTeams()
+    // must NOT, or TeamForFaction would match a name nobody declared.
+    RoomManager rooms;
+    const uint32_t roomId = makeRoom(rooms, "");
+    CHECK(rooms.GetRoom(roomId)->SideTeams().empty());
+    CHECK(rooms.GetRoom(roomId)->SlotTeams() == std::vector<uint8_t>{0, 1});
+}
+
+TEST_CASE("TeamForFaction: resolves a declared side, refuses everything else") {
+    RoomManager rooms;
+    const uint32_t roomId = makeRoom(rooms, "compact:0,union:4");
+    const GameRoom *room = rooms.GetRoom(roomId);
+    CHECK(room->TeamForFaction("union") == 4);
+    CHECK(room->TeamForFaction("compact") == 0);
+    CHECK_FALSE(room->TeamForFaction("reavers").has_value());
+    // An account with no faction never matches — that is what keeps dev and
+    // manifest accounts on the old balance path.
+    CHECK_FALSE(room->TeamForFaction("").has_value());
+    // Exact match only: a faction id comes from the same sidedata.lua the
+    // scenario names, so a near-miss is a bug to see, not to guess at.
+    CHECK_FALSE(room->TeamForFaction("Union").has_value());
+}
+
+TEST_CASE("JoinRoom: a union account is seated on union, not on the emptier side") {
+    // The D40 shape, and it fails pre-fix: compact holds the host, union is
+    // empty, so the balancer would have put the union player on... union. To
+    // make the balancer's answer the WRONG one, give union the occupants.
+    RoomManager rooms;
+    const uint32_t roomId = makeRoom(rooms, "compact:0,union:4");
+    REQUIRE(rooms.AddAISlot(roomId, /*hostId=*/1, "strategos", "A", 4));
+    REQUIRE(rooms.AddAISlot(roomId, /*hostId=*/1, "strategos", "B", 4));
+
+    REQUIRE(rooms.JoinRoom(roomId, /*playerId=*/2, /*clientId=*/2, "southerner",
+                           /*password=*/"", /*asSpectator=*/false,
+                           /*factionId=*/"union"));
+    // Balance says compact (1 occupant vs 3). Allegiance says union.
+    CHECK(rooms.GetRoom(roomId)->FindPlayer(2)->team == 4);
+}
+
+TEST_CASE("JoinRoom: two players of the same faction share the side") {
+    // The corollary, stated so it is a decision and not a surprise: faction
+    // seating does not balance, and cannot, because allegiance is permanent.
+    RoomManager rooms;
+    const uint32_t roomId = makeRoom(rooms, "compact:0,union:4");
+    REQUIRE(rooms.JoinRoom(roomId, 2, 2, "a", "", false, "union"));
+    REQUIRE(rooms.JoinRoom(roomId, 3, 3, "b", "", false, "union"));
+    CHECK(rooms.GetRoom(roomId)->FindPlayer(2)->team == 4);
+    CHECK(rooms.GetRoom(roomId)->FindPlayer(3)->team == 4);
+}
+
+TEST_CASE("JoinRoom: a faction the war does not declare falls back to balance") {
+    // Not every scenario stages every faction. The joiner still gets a seat.
+    RoomManager rooms;
+    const uint32_t roomId = makeRoom(rooms, "compact:0,union:4");
+    REQUIRE(rooms.JoinRoom(roomId, 2, 2, "reaver", "", false, "reavers"));
+    CHECK(rooms.GetRoom(roomId)->FindPlayer(2)->team == 4); // least-occupied
+}
+
+TEST_CASE("JoinRoom: no faction is the old balance behaviour, unchanged") {
+    RoomManager rooms;
+    const uint32_t roomId = makeRoom(rooms, "compact:0,union:4");
+    REQUIRE(rooms.JoinRoom(roomId, 2, 2, "devacct", "", false, ""));
+    CHECK(rooms.GetRoom(roomId)->FindPlayer(2)->team == 4);
+}
+
+TEST_CASE("JoinRoom: a legacy room ignores faction entirely") {
+    // Paper Tanks has no sidedata and no war_sides; a faction-carrying account
+    // joining one must not be seated by a name the room never declared.
+    RoomManager rooms;
+    const uint32_t roomId = makeRoom(rooms, "");
+    REQUIRE(rooms.JoinRoom(roomId, 2, 2, "b", "", false, "union"));
+    CHECK(rooms.GetRoom(roomId)->FindPlayer(2)->team == 1);
+}
+
+TEST_CASE("JoinRoom: a spectator's faction seats nobody") {
+    RoomManager rooms;
+    const uint32_t roomId = makeRoom(rooms, "compact:0,union:4");
+    REQUIRE(rooms.JoinRoom(roomId, 2, 2, "watcher", "", /*asSpectator=*/true,
+                           "union"));
+    CHECK(rooms.GetRoom(roomId)->FindPlayer(2)->isSpectator);
+}
+
+TEST_CASE("EnlistSpectator: auto-assign honours the faction captured at join") {
+    // The spectator's faction is remembered on RoomPlayer, so enlisting needs
+    // no second lookup. Union is the more crowded side, so a balance answer
+    // here would be compact.
+    RoomManager rooms;
+    const uint32_t roomId = makeRoom(rooms, "compact:0,union:4");
+    REQUIRE(rooms.AddAISlot(roomId, 1, "strategos", "A", 4));
+    REQUIRE(rooms.JoinRoom(roomId, 2, 2, "watcher", "", /*asSpectator=*/true,
+                           "union"));
+
+    REQUIRE(rooms.EnlistSpectator(roomId, 2, /*team=*/255));
+    CHECK(rooms.GetRoom(roomId)->FindPlayer(2)->team == 4);
+    CHECK_FALSE(rooms.GetRoom(roomId)->FindPlayer(2)->isSpectator);
+}
+
+TEST_CASE("EnlistSpectator: an explicit team still wins over the faction") {
+    // 255 means "choose for me". Anything else is somebody choosing on
+    // purpose, and war_sides is an offer rather than a whitelist (§7.4) — the
+    // direct-start manifests depend on that escape hatch.
+    RoomManager rooms;
+    const uint32_t roomId = makeRoom(rooms, "compact:0,union:4");
+    REQUIRE(rooms.JoinRoom(roomId, 2, 2, "watcher", "", true, "union"));
+    REQUIRE(rooms.EnlistSpectator(roomId, 2, /*team=*/0));
+    CHECK(rooms.GetRoom(roomId)->FindPlayer(2)->team == 0);
+}
+
+TEST_CASE("CreateRoom: the host's faction rides along for later seating") {
+    // CreateRoom cannot seat by faction — the room has no war_sides yet, the
+    // caller applies the scenario afterwards — so it records the faction and
+    // the lobby's seatHostOnSide settles the side once the sides exist.
+    RoomManager rooms;
+    const uint32_t roomId = rooms.CreateRoom(
+        "war room", "meridian_basin", "metalstorm", 4, "", /*hostPlayerId=*/1,
+        /*hostClientId=*/1, "host", /*persistent=*/false,
+        /*hostFactionId=*/"union");
+    const RoomPlayer *host = rooms.GetRoom(roomId)->FindPlayer(1);
+    CHECK(host->factionId == "union");
+    CHECK(host->team == 0); // provisional, as documented
+    rooms.SetModOption(roomId, 1, "war_sides", "compact:0,union:4");
+    CHECK(rooms.GetRoom(roomId)->TeamForFaction(host->factionId) == 4);
+}
+
 TEST_CASE("AddAISlot still accepts a team no side declares") {
     // Deliberate (§7.4): war_sides is what the lobby OFFERS, not a whitelist.
     // The direct-start manifests seat Meridian's reaver NPC on team 8, and

@@ -304,10 +304,18 @@ inline void RegisterEndpoints(NetworkServer& net, Database& db,
         std::string token = GenerateToken();
         db.CreateSession(user->id, token);
 
+        // `faction` is echoed here as well as on register (D40): it is the
+        // account's permanent allegiance, and login is the only place a
+        // returning session can learn it. Omitted rather than sent empty for
+        // an account that has none (dev/manifest accounts), so a client can
+        // tell "no faction" from "faction unknown".
         std::string json = "{\"token\":\"" + token + "\""
             + ",\"user_id\":" + std::to_string(user->id)
             + ",\"username\":\"" + JsonEscape(user->username) + "\""
-            + ",\"role\":\"" + JsonEscape(user->role) + "\"}";
+            + ",\"role\":\"" + JsonEscape(user->role) + "\"";
+        if (user->factionId && !user->factionId->empty())
+            json += ",\"faction\":\"" + JsonEscape(*user->factionId) + "\"";
+        json += "}";
         return JsonResponse(200, json);
     });
 
@@ -382,10 +390,16 @@ inline void RegisterEndpoints(NetworkServer& net, Database& db,
         if (!user) {
             return JsonResponse(401, R"({"valid":false,"error":"user not found"})");
         }
+        // Same `faction` echo as login (D40) — this is the path a returning
+        // browser session actually takes, so omitting it here would leave the
+        // client faction-blind for every visit after the first.
         std::string json = "{\"valid\":true"
             ",\"user_id\":" + std::to_string(user->id) +
             ",\"username\":\"" + JsonEscape(user->username) + "\""
-            ",\"role\":\"" + JsonEscape(user->role) + "\"}";
+            ",\"role\":\"" + JsonEscape(user->role) + "\"";
+        if (user->factionId && !user->factionId->empty())
+            json += ",\"faction\":\"" + JsonEscape(*user->factionId) + "\"";
+        json += "}";
         return JsonResponse(200, json);
     });
 }

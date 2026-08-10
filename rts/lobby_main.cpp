@@ -2651,6 +2651,11 @@ int main(int argc, char *argv[]) {
       pj["is_host"] = p.isHost;
       pj["is_spectator"] = p.isSpectator;
       pj["start_pos"] = p.startPos;
+      // The account's faction, when it has one (D40). Sent so the room screen
+      // can say WHY a player holds the side they hold — a seat chosen by
+      // permanent allegiance is only legible if the allegiance is visible.
+      if (!p.factionId.empty())
+        pj["faction"] = p.factionId;
       j["players"].push_back(std::move(pj));
     }
     j["ai_slots"] = nlohmann::json::array();
@@ -2823,11 +2828,18 @@ int main(int argc, char *argv[]) {
     return def->id;
   };
 
-  // The first side of the room's slot list, i.e. where a host who has
-  // expressed no preference belongs. CreateRoom seats the host on team 0,
-  // which is right for a legacy two-team room and right for Meridian by
-  // coincidence; this makes it right on purpose.
-  auto seatHostOnFirstSide = [&](uint32_t roomId, uint32_t hostId) {
+  // Where a host who has expressed no preference belongs: their own faction's
+  // side if this war declares one, else the first side of the room's slot
+  // list. CreateRoom seats the host on team 0, which is right for a legacy
+  // two-team room and right for Meridian by coincidence; this makes it right
+  // on purpose.
+  //
+  // The faction branch (D40) fires even when the host is already on an offered
+  // side, because "team 0 is a side this room offers" is exactly the state that
+  // seated a union host on compact. The first-side branch keeps its original
+  // "only if the current team isn't offered" guard — it is a repair, not a
+  // preference.
+  auto seatHostOnSide = [&](uint32_t roomId, uint32_t hostId) {
     const GameRoom *room = rooms.GetRoom(roomId);
     if (room == nullptr)
       return;
@@ -2838,6 +2850,15 @@ int main(int argc, char *argv[]) {
         host = &p;
     if (host == nullptr || host->isSpectator)
       return;
+    if (const auto sideTeam = room->TeamForFaction(host->factionId)) {
+      if (host->team != *sideTeam) {
+        rooms.SetTeam(roomId, hostId, *sideTeam);
+        SLOG(SPRING_LOG_NOTICE,
+             "room %u: host seated on team %u — faction '%s'", roomId,
+             static_cast<unsigned>(*sideTeam), host->factionId.c_str());
+      }
+      return;
+    }
     if (std::find(slotTeams.begin(), slotTeams.end(), host->team) !=
         slotTeams.end())
       return; // already on a side the room offers
@@ -3249,14 +3270,15 @@ int main(int argc, char *argv[]) {
 
         uint32_t roomId = rooms.CreateRoom(
             name, mapId, gameId, 8, "", static_cast<uint32_t>(userId),
-            0 /*no WS clientId*/, user->username, persistent);
+            0 /*no WS clientId*/, user->username, persistent,
+            user->factionId.value_or(""));
 
         applyRoomScenario(roomId, static_cast<uint32_t>(userId), gameId, mapId,
                           hasScenarioChoice ? &scenarioChoice : nullptr);
         // Only on this path: the direct-start manifest applies its own
         // explicit host team afterwards, and overruling it here would be the
         // same "chosen behind your back" property §7.3 rejected.
-        seatHostOnFirstSide(roomId, static_cast<uint32_t>(userId));
+        seatHostOnSide(roomId, static_cast<uint32_t>(userId));
 
         auto *room = rooms.GetRoom(roomId);
         broadcastRooms();
@@ -3572,8 +3594,11 @@ int main(int argc, char *argv[]) {
         std::string password = j.value("password", "");
         bool asSpectator = j.value("as_spectator", false);
 
+        // The account's faction decides the side (D40) — RoomManager does the
+        // deciding, this path just supplies the datum it never had.
         if (!rooms.JoinRoom(roomId, static_cast<uint32_t>(userId), 0,
-                            user->username, password, asSpectator))
+                            user->username, password, asSpectator,
+                            user->factionId.value_or("")))
           return HttpAuth::JsonResponse(403, R"({"error":"cannot join room"})");
 
         broadcastRooms();
@@ -3683,6 +3708,26 @@ int main(int argc, char *argv[]) {
             j.contains("team") && j["team"].is_string()
                 ? (uint8_t)std::atoi(j["team"].get<std::string>().c_str())
                 : (uint8_t)j.value("team", 0);
+        // A faction is a permanent allegiance, so it has to hold against the
+        // player's own dropdown too — otherwise D40's seating fix is undone by
+        // the next click and the "permanent" claim is decoration. Refused
+        // here, at the route where a HUMAN chooses, rather than in
+        // RoomManager::SetTeam: that call stays deliberately permissive
+        // because `/api/rooms/direct` manifests seat NPCs (and real accounts)
+        // on teams no side declares, and §7.4's escape hatch is load-bearing
+        // for the test vehicles.
+        const RoomPlayer *self = room->FindPlayer(static_cast<uint32_t>(userId));
+        if (self != nullptr) {
+          if (const auto sideTeam = room->TeamForFaction(self->factionId)) {
+            if (team != *sideTeam)
+              return HttpAuth::JsonResponse(
+                  403, "{\"error\":\"you fight for " +
+                           HttpAuth::JsonEscape(self->factionId) +
+                           "\",\"team\":" +
+                           std::to_string(static_cast<unsigned>(*sideTeam)) +
+                           "}");
+          }
+        }
         rooms.SetTeam(room->id, static_cast<uint32_t>(userId), team);
         broadcastRooms();
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));

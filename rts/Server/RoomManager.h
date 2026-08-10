@@ -11,8 +11,10 @@
 #include <cstdint>
 #include <cstdlib>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 struct sqlite3;
@@ -40,6 +42,21 @@ struct RoomPlayer {
     /// array). -1 means "unassigned" — the lobby auto-fills on
     /// game start if it's still -1 at that point.
     int8_t startPos = -1;
+    /// The account's permanent faction (`users.faction_id`, e.g.
+    /// "compact" / "union"), handed in by the caller at join time —
+    /// RoomManager never touches the database. Empty for accounts that
+    /// have none: dev/test auto-registrations, `/api/rooms/direct`
+    /// manifest accounts, and any pre-faction legacy account.
+    ///
+    /// In-memory only, deliberately: it is a property of the ACCOUNT, not
+    /// of the membership, so persisting a copy in `room_members` would
+    /// create a second version of the truth that could go stale against
+    /// an admin override. A lobby restart restores the seated `team`
+    /// (which is what the room needs) and leaves this empty.
+    ///
+    /// Read by the seating rule — see GameRoom::TeamForFaction
+    /// (PLAN-endtoend.md D40).
+    std::string factionId;
 };
 
 /// An AI player slot in a room. Populated by the host via
@@ -124,26 +141,23 @@ struct GameRoom {
         return (it != originalRoster.end()) ? static_cast<int>(it->second) : -1;
     }
 
-    /// The team indices a slot in this room may be seated on, in the order
-    /// the lobby offers them.
+    /// The sides this room offers, as `(faction, team)` in the order the
+    /// lobby offers them.
     ///
     /// Read out of the `war_sides` modoption
     /// (`"<faction>:<team>[,<faction>:<team>…]"`, written once by the lobby's
     /// applyRoomScenario from the room's scenario — PLAN-metalstorm-wars.md
-    /// §7.4). RoomManager parses only the integers and stays entirely
-    /// scenario-agnostic: as far as it is concerned this is just "which team
-    /// indices does this room use".
+    /// §7.4). RoomManager stays entirely scenario-agnostic: as far as it is
+    /// concerned this is just "which sides does this room use, and on which
+    /// team index does each sit".
     ///
-    /// `{0, 1}` when the modoption is absent or unparseable, which is the
-    /// legacy two-team room every non-scenario game (Paper Tanks, ZK) keeps.
-    ///
-    /// This is what a slot is *offered*, not a whitelist — SetTeam and
-    /// AddAISlot still accept anything, because the direct-start manifests
-    /// legitimately seat an NPC on a team no side declares (Meridian's team-8
-    /// reavers), and that escape hatch is the only reason endtoend D19 was
-    /// findable at all.
-    std::vector<uint8_t> SlotTeams() const {
-        std::vector<uint8_t> out;
+    /// Empty when the modoption is absent or unparseable — see SlotTeams()
+    /// for the legacy two-team fallback, which is deliberately NOT applied
+    /// here: a legacy room's `{0, 1}` has no faction names, and inventing
+    /// some would let the faction seating rule (TeamForFaction) fire on a
+    /// room that never declared a side.
+    std::vector<std::pair<std::string, uint8_t>> SideTeams() const {
+        std::vector<std::pair<std::string, uint8_t>> out;
         const auto it = modOptions.find("war_sides");
         if (it != modOptions.end()) {
             size_t pos = 0;
@@ -167,9 +181,11 @@ struct GameRoom {
                         const int team = std::atoi(num.c_str());
                         if (team >= 0 && team <= 255) {
                             const auto t = static_cast<uint8_t>(team);
-                            if (std::find(out.begin(), out.end(), t) ==
-                                out.end())
-                                out.push_back(t);
+                            const bool seen = std::any_of(
+                                out.begin(), out.end(),
+                                [t](const auto& s) { return s.second == t; });
+                            if (!seen)
+                                out.emplace_back(entry.substr(0, colon), t);
                         }
                     }
                 }
@@ -178,9 +194,46 @@ struct GameRoom {
                 pos = comma + 1;
             }
         }
+        return out;
+    }
+
+    /// The team indices a slot in this room may be seated on, in the order
+    /// the lobby offers them — SideTeams() with the faction names dropped.
+    ///
+    /// `{0, 1}` when the room declares no parseable side, which is the legacy
+    /// two-team room every non-scenario game (Paper Tanks, ZK) keeps.
+    ///
+    /// This is what a slot is *offered*, not a whitelist — SetTeam and
+    /// AddAISlot still accept anything, because the direct-start manifests
+    /// legitimately seat an NPC on a team no side declares (Meridian's team-8
+    /// reavers), and that escape hatch is the only reason endtoend D19 was
+    /// findable at all.
+    std::vector<uint8_t> SlotTeams() const {
+        std::vector<uint8_t> out;
+        for (const auto& [faction, team] : SideTeams())
+            out.push_back(team);
         if (out.empty())
             return {0, 1};
         return out;
+    }
+
+    /// The team a given faction is seated on in this room, or nullopt if this
+    /// war declares no side for it (including every legacy no-scenario room,
+    /// whose sides have no names at all).
+    ///
+    /// This is the read that makes `users.faction_id` mean something: an
+    /// account's faction is a permanent allegiance, so a player must never be
+    /// seated against it by a balancer (PLAN-endtoend.md D40,
+    /// PLAN-metalstorm-lobby.md §2.3). An empty `factionId` — a dev account, a
+    /// `/api/rooms/direct` manifest account, a pre-faction legacy account —
+    /// never matches, which is what keeps those paths on the old behaviour.
+    std::optional<uint8_t> TeamForFaction(const std::string& factionId) const {
+        if (factionId.empty())
+            return std::nullopt;
+        for (const auto& [faction, team] : SideTeams())
+            if (faction == factionId)
+                return team;
+        return std::nullopt;
     }
 
     // --- Helpers ---
@@ -276,12 +329,21 @@ public:
                         const std::string& password,
                         uint32_t hostPlayerId, ClientID hostClientId,
                         const std::string& hostUsername,
-                        bool persistent = false);
+                        bool persistent = false,
+                        const std::string& hostFactionId = "");
 
     /// Join a room. Returns true on success.
+    ///
+    /// `factionId` is the joining account's permanent faction
+    /// (`users.faction_id`); when the room declares a side for it the joiner
+    /// is seated there instead of being auto-balanced (D40). Empty — the
+    /// default — is "this account has no faction", which keeps the pure
+    /// balance behaviour for dev/manifest accounts and legacy rooms. The
+    /// caller supplies it: RoomManager never reads the database.
     bool JoinRoom(uint32_t roomId, uint32_t playerId, ClientID clientId,
                   const std::string& username, const std::string& password,
-                  bool asSpectator = false);
+                  bool asSpectator = false,
+                  const std::string& factionId = "");
 
     /// Leave a room. Returns what happened so the caller can take
     /// appropriate action (e.g. kill game server on Abandoned).
