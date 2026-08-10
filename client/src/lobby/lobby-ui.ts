@@ -13,6 +13,11 @@
 import * as flatbuffers from 'flatbuffers';
 import { mapListStatus } from './map-list-status';
 import { formatJoinPreview, type WarJoinPreview } from './join-preview';
+import {
+    filterWars, fightLabel, formatWarDetail, formatControl, hasRoomForFaction,
+    WAR_FILTER_LABELS,
+    type WarFilter, type WarInfo, type WarRow,
+} from './war-browser';
 import { Connection, type ConnectionState } from '../core/connection.js';
 import { CONFIG, stampUrl } from '../config.js';
 import { ClientPayload } from '../protocol/spring-web/client-payload.js';
@@ -73,6 +78,10 @@ interface RoomInfo {
     /// a skirmish for every row — a war is the only kind that gets a pre-join
     /// preview, because it is the only kind whose seat is not chosen.
     sessionKind?: string;
+    /// The `war` block a persistent-war room carries (§4, task 6): sides,
+    /// seat counts, and — when a server is publishing — live populations,
+    /// spectators and region control. Absent on every skirmish.
+    war?: WarInfo;
 }
 
 interface RoomPlayerInfo {
@@ -219,6 +228,11 @@ export class LobbyUI {
     private roomEventSource: EventSource | null = null;
     /// Per-war pre-join preview for THIS account, keyed by room id (§2.4).
     private warPreviews = new Map<number, WarJoinPreview>();
+    /// Which wars the browser is listing (§4). Defaults to the question §4
+    /// says a player is actually asking — "wars where my faction is
+    /// fighting" — and is remembered for the session, not persisted: it is a
+    /// view, and a player who comes back tomorrow is asking it fresh.
+    private warFilter: WarFilter = 'my-faction';
     /// Tracks the room state at last full render so patchRoom() can
     /// detect when the action buttons need to change (state bracket
     /// shift) and fall back to a full re-render.
@@ -526,6 +540,7 @@ export class LobbyUI {
             hostName: r.players?.find((p: any) => p.is_host)?.username ?? '',
             replayFile: r.replay_file,
             sessionKind: r.session_kind,
+            war: r.war,
         }));
 
         // Pre-join legibility (§2.4, task 5). Refreshed with the list rather
@@ -1320,16 +1335,122 @@ export class LobbyUI {
         return parts.length > 0 ? parts.join(' &middot; ') : '';
     }
 
-    private renderRoomList(): void {
-        const el = document.getElementById('room-list');
-        if (!el) return;
+    /// The war browser (§4, task 6).
+    ///
+    /// Wars are rendered in their own list, above the rooms, because they
+    /// answer a different question: a room browser asks "is there a game?", a
+    /// war browser asks "is there room for ME, on my side". The whole section
+    /// stays hidden on a lobby with no wars, so a skirmish-only lobby is
+    /// untouched by this feature rather than merely unaffected by it.
+    private renderWarList(): void {
+        const section = document.getElementById('war-section');
+        const list = document.getElementById('war-list');
+        const filters = document.getElementById('war-filters');
+        if (!section || !list || !filters) return;
 
-        if (this.rooms.length === 0) {
-            el.innerHTML = '<div class="empty-state">No games available — create one!</div>';
+        const wars: WarRow[] = this.rooms
+            .filter(r => r.sessionKind === 'persistent' && r.war && !r.replayFile)
+            .map(r => {
+                const p = this.warPreviews.get(r.id);
+                return {
+                    id: r.id, name: r.name, mapId: r.mapId, state: r.state,
+                    war: r.war!,
+                    returning: p?.returning ?? false,
+                    watching: p?.watching ?? false,
+                };
+            });
+
+        if (wars.length === 0) { section.style.display = 'none'; return; }
+        section.style.display = '';
+
+        filters.innerHTML = (Object.keys(WAR_FILTER_LABELS) as WarFilter[])
+            .map(f => `<button class="war-filter-chip${f === this.warFilter ? ' active' : ''}"` +
+                      ` data-filter="${f}">${this.esc(WAR_FILTER_LABELS[f])}</button>`)
+            .join('');
+        filters.querySelectorAll('.war-filter-chip').forEach(btn => {
+            (btn as HTMLElement).onclick = () => {
+                this.warFilter = btn.getAttribute('data-filter') as WarFilter;
+                this.renderWarList();
+            };
+        });
+
+        const shown = filterWars(wars, this.warFilter, this.myFaction);
+        if (shown.length === 0) {
+            // Named per filter: "no wars" and "none for your faction" send a
+            // player to two different places, and the second one is the whole
+            // reason the default filter exists.
+            const why = this.warFilter === 'my-faction'
+                ? 'No war is fielding your faction right now.'
+                : this.warFilter === 'my-wars'
+                    ? 'You hold no seat in any war yet.'
+                    : 'No wars are running.';
+            list.innerHTML = `<div class="empty-state">${this.esc(why)}</div>`;
             return;
         }
 
-        el.innerHTML = this.rooms.map(r => {
+        list.innerHTML = shown.map(row => {
+            const preview = this.warPreviews.get(row.id);
+            const previewText = preview ? formatJoinPreview(preview) : '';
+            const previewHtml = previewText
+                ? `<div class="room-preview${preview!.will_fight ? '' : ' room-preview-watch'}">` +
+                  `${this.esc(previewText)}</div>`
+                : '';
+            const liveBadge = row.war.live
+                ? '<span class="war-badge-live">Live</span>'
+                : '<span class="war-badge-idle">Idle</span>';
+            // Disabled only when this account could not take a seat under any
+            // reading — no side for its faction, or no seat left on it. A
+            // returning player is never disabled: their seat is held for them
+            // and bypasses capacity (task 4), which is exactly the case a
+            // naive "is it full" test gets wrong.
+            const canFight = row.returning ||
+                (!!this.myFaction && hasRoomForFaction(row.war, this.myFaction));
+            return renderTemplate(this.templates.browserWarEntry, {
+                id: row.id,
+                name: this.esc(row.name),
+                state: ROOM_STATE_LABELS[row.state] || '?',
+                live_badge: liveBadge,
+                detail: this.esc(formatWarDetail(row)),
+                control: this.esc(formatControl(row.war)),
+                preview_html: previewHtml,
+                fight_label: fightLabel(row),
+                fight_disabled: canFight ? '' : ' disabled',
+            });
+        }).join('');
+
+        // Scoped to `.war-actions` rather than given hook classes of their
+        // own: the two buttons already ARE the two shapes the room browser
+        // uses (`join-btn` / `spectate-btn`), and a class that exists only for
+        // a querySelector is a class the stylesheet will never hear about.
+        list.querySelectorAll('.war-actions .join-btn:not([disabled])').forEach(btn => {
+            (btn as HTMLElement).onclick = () =>
+                this.joinRoom(parseInt(btn.getAttribute('data-id')!), /*asSpectator=*/false);
+        });
+        list.querySelectorAll('.war-actions .spectate-btn').forEach(btn => {
+            (btn as HTMLElement).onclick = () =>
+                this.joinRoom(parseInt(btn.getAttribute('data-id')!), /*asSpectator=*/true);
+        });
+    }
+
+    private renderRoomList(): void {
+        this.renderWarList();
+        const el = document.getElementById('room-list');
+        if (!el) return;
+
+        // Wars have their own list above; a war left in this one would offer
+        // the plain Join that seats by roster and would say "0/8 players" for
+        // a war whose fighters the room row never sees.
+        const rooms = this.rooms.filter(
+            r => !(r.sessionKind === 'persistent' && r.war && !r.replayFile));
+
+        if (rooms.length === 0) {
+            el.innerHTML = this.rooms.length === 0
+                ? '<div class="empty-state">No games available — create one!</div>'
+                : '';
+            return;
+        }
+
+        el.innerHTML = rooms.map(r => {
             const detail = r.replayFile
                 ? `replay · ${this.esc(r.replayFile)} · ` +
                   `${r.playerCount} watching`

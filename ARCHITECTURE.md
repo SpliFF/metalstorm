@@ -92,7 +92,9 @@ Full CLI flag list (from `rts/server_main.cpp`):
 | `Server/FactionData.h/.cpp` | Reads a game's `gamedata/sidedata.lua` into `FactionInfo{key,name,fullName,description,startUnit}`. Bare-`lua_State` reader like `ConfigReader`/`AIDiscovery`, plus a minimal `VFS.Include` shim (BAR's sidedata includes `sides_enum.lua`). `key` is `name` lowercased, matching `SideParser`'s side-key derivation, so it stays in parity with the value stored in `users.faction_id`. Feeds `/api/factions/<gameId>` and the registration/admin faction validation. Missing or broken data yields an empty list, never an error. |
 | `Server/WarPlayerBindings.h/.cpp` | `war_player_bindings`: one row per (war room, account) — the side the account holds, first/last seen, and its per-player war state (authority pool + `score_*` participation credit). Written by the game server, read by the lobby, deleted by the audited faction override and by room deletion (room ids are reused). Pure sqlite, no sim. Migrated additively, never probe-and-dropped: it is the only copy of the state. |
 | `Server/WarRejoinPolicy.h` | Pure decision for a returning player: seat restored / superseded / none, and pool-restore vs onboarding stipend. Two horizons — `WAR_SEAT_HOLD_SEC` (a week, capacity bypass only) and `WAR_BRIEF_ABSENCE_SEC` (5 min, pool staleness). No db, no sim. |
-| `Server/WarStateSim.h/.cpp` | The two directions between the sim and that row: `CaptureWarPlayerState` reads the rules params; the restores call `GG.Authority.RestorePool` / `GG.Teams.RestoreScore` in synced Lua (top-ups, not deposits) through `ExecuteInLuaState`. Never over `RecvLuaMsg` — a client can forge those. |
+| `Server/WarStateSim.h/.cpp` | The two directions between the sim and that row: `CaptureWarPlayerState` reads the rules params; the restores call `GG.Authority.RestorePool` / `GG.Teams.RestoreScore` in synced Lua (top-ups, not deposits) through `ExecuteInLuaState`. Never over `RecvLuaMsg` — a client can forge those. Also holds the two impure gatherers for the war digest (`GatherWarSummaryPlayers`, `GatherWarSummaryRegions` — the latter scans the gameRulesParams map for `region_<key>_team`, so it needs no call into synced Lua on a wall-clock heartbeat). |
+| `Server/WarSummary.h` | The per-war digest the war browser reads, encoder and decoder in one file across a process boundary: `BuildWarSummary` (pure) → `EncodeWarSummary` → `war_summary` row (spring-server is the only writer, on the 2 s `game_status` heartbeat) → `DecodeWarSummary` in the lobby. Carries only what the sim alone knows — per-side connected humans/AIs, spectators, region control, frame, server uptime. A row older than `kWarSummaryStaleSec` (30 s) is treated as absent, because nothing clears it when a server is SIGKILLed. |
+| `Server/RoomWatchIntent.h` | `AccountWantsToWatch(db, roomId, accountId)` — the one reader of `room_members.spectate_only`, the "I came to watch this war" flag the lobby records on join and the game server honours on auth (§3). Defaults false for every uncertain case: missing the intent seats a watcher who can leave, inventing one benches a fighter silently. |
 | `System/SpringLog/SpringLog.h/.cpp` | Unified logging library (libspringlog). C/C++ API, console + file sinks, pluggable custom sinks. |
 | `System/SpringLog/SpringLogNet.h/.cpp` | Optional WS+FlatBuffers network sink for pushing logs to log server. |
 | `System/SpringLog/SpringLogSqlite.h/.cpp` | Optional SQLite persistence sink for local log storage. |
@@ -544,6 +546,8 @@ data/
                             room_ai_slots (lobby-written); game_servers (lobby-written
                             pid/port); game_status (spring-server-written ready/clients
                             heartbeat — the lobby↔game readiness rendezvous);
+                            war_summary (spring-server-written per-war digest for the
+                            war browser — populations/spectators/region control);
                             game_metrics (spring-server-written sim-health rows for the
                             GM dashboard, PLAN-gm-tools); admin_audit (append-only)
   maps/<mapId>/             Preprocessed: heightmap.bin, minimap.dxt1, tiles.dxt1, features/*.glb
@@ -807,6 +811,27 @@ seats with (`Server/JoinPreview.h`), so the promise cannot drift from the rule;
 per-side population comes from `war_player_bindings`, not the room's player list,
 because a war's fighters are seated by the game server and never appear in the
 room roster at all.
+
+**The war browser** (`client/src/lobby/war-browser.ts`, rendered by `renderWarList`
+from `browser/war-entry.html`) lists persistent wars in their own section above the
+room list, filtered by default to *wars my faction fields a side in*. Every field it
+shows is either durable or live, and which is which is load-bearing: seats held
+(`bound`) and seats left (`open`) come from `war_player_bindings` and are therefore
+correct for a war whose server is not running (an offline veteran's seat is not
+free); connected populations, spectator count, region control and uptime come from
+the `war_summary` digest and are simply absent otherwise, with `live` saying which
+half is on screen. The lobby re-broadcasts the room list every ~5 s while any war
+exists — every other broadcast in `lobby_main.cpp` fires on a room mutation, which is
+right for a room and wrong for a war, whose populations and front move without anyone
+touching the row.
+
+**Spectating a war by choice:** a `POST /api/rooms/join` with `as_spectator` on a
+persistent war records `room_members.spectate_only`, and the game server's auth
+`resolveSeat` checks it *before* every seating rule (`Server/RoomWatchIntent.h`) —
+after them is too late, because dynamic join would already have promoted the account
+to its faction's side. Re-joining the other way converts, in either direction, and
+takes effect on the next connect: the seat is taken at auth, and a role change inside
+a running sim would need a protocol message that does not exist.
 
 **Game-server lifetime:** a non-persistent game server self-terminates after
 5 min with zero connected clients (120 s startup grace); persistent rooms run

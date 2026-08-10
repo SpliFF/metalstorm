@@ -31,7 +31,10 @@
 // therefore hand every player a "restore my pool to N" verb.
 #pragma once
 
+#include <vector>
+
 #include "WarPlayerBindings.h"
+#include "WarSummary.h"
 
 /// Read the per-player war state for `playerNum` on `team` out of the live sim.
 /// Returns zeros for an unknown team or a player with no params yet — a player
@@ -54,6 +57,22 @@ bool RestoreWarPlayerPool(int playerNum, double amount);
 /// its economy tunes this with it, and applied as a top-up to that level rather
 /// than a deposit, so a reconnect loop cannot farm it.
 bool GrantWarRejoinStipend(int playerNum);
+
+/// The live seat census the war browser reads (task 6): every player row the
+/// sim holds, spectators included. Separated from BuildWarSummary so the
+/// digest itself stays a pure function of values — this is the one impure
+/// half, and it is three lines against a handler the tests cannot build.
+std::vector<WarSummaryPlayer> GatherWarSummaryPlayers();
+
+/// Region ownership as `game_regions.lua` publishes it: one entry per
+/// `region_<key>_team` gameRulesParam, with the matching `_contested` flag.
+///
+/// Discovered by scanning the param map for the key shape rather than by
+/// asking the gadget for its region list, because the summary is written on a
+/// wall-clock heartbeat from the server loop and must not call into synced
+/// Lua to do it. A map with no regions gadget contributes an empty vector and
+/// the browser simply shows no control line.
+std::vector<WarSummaryRegion> GatherWarSummaryRegions();
 
 /// Restore the participation counters. Lifetime statistics rather than
 /// resources, so they are handed back on every rejoin regardless of how long

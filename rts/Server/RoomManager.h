@@ -96,6 +96,22 @@ struct RoomPlayer {
     /// Read by the seating rule — see GameRoom::TeamForFaction
     /// (PLAN-endtoend.md D40).
     std::string factionId;
+
+    /// This account asked to WATCH this war rather than fight in it
+    /// (PLAN-metalstorm-lobby.md §3, task 6).
+    ///
+    /// Distinct from `isSpectator`, and the distinction is the whole point:
+    /// for a room that is already running, `isSpectator` is set on every new
+    /// arrival because the LOBBY does not seat them — the game server does,
+    /// by faction, on auth (task 2). So `isSpectator` on a war means "not
+    /// seated here", which is true of every fighter in it, and reading it as
+    /// an intent would put the entire war in the stands.
+    ///
+    /// Persisted, unlike `factionId` above, because it IS a property of the
+    /// membership rather than of the account, and because the process that
+    /// has to honour it — the game server — can only reach it through the
+    /// shared db.
+    bool spectateOnly = false;
 };
 
 /// An AI player slot in a room. Populated by the host via
@@ -250,6 +266,12 @@ struct GameRoom {
 
     RoomPlayer* FindPlayer(uint32_t playerId) {
         for (auto& p : players)
+            if (p.playerId == playerId) return &p;
+        return nullptr;
+    }
+
+    const RoomPlayer* FindPlayer(uint32_t playerId) const {
+        for (const auto& p : players)
             if (p.playerId == playerId) return &p;
         return nullptr;
     }

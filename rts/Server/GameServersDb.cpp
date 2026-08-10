@@ -39,4 +39,16 @@ void GameServersDb::EnsureTables(sqlite3* db) {
         "  port INTEGER NOT NULL DEFAULT 0,"
         "  updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))"
         ")", nullptr, nullptr, nullptr);
+    // war_summary — the per-war digest a running war publishes for the war
+    // browser (PLAN-metalstorm-lobby.md §4, task 6). Same rendezvous shape as
+    // game_status: spring-server is the only writer, the lobby only reads.
+    // Created here as well so the browser's SELECT works on a lobby that has
+    // never launched a war — otherwise every room JSON build would log a
+    // prepare failure until the first war starts.
+    sqlite3_exec(db,
+        "CREATE TABLE IF NOT EXISTS war_summary ("
+        "  room_id INTEGER PRIMARY KEY,"
+        "  summary_json TEXT NOT NULL DEFAULT '',"
+        "  updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))"
+        ")", nullptr, nullptr, nullptr);
 }

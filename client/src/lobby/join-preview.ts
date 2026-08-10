@@ -36,6 +36,10 @@ export interface WarJoinPreview {
     authority_source: string;
     /// True when this account already holds this seat.
     returning: boolean;
+    /// True when this account asked to WATCH this war rather than fight in
+    /// it (§3, task 6). Not a seating outcome — it is a choice, and it
+    /// overrides `will_fight` on both sides of the wire.
+    watching?: boolean;
 }
 
 /// Title-case a faction key for display. The keys are lowercased by the
@@ -55,6 +59,12 @@ function num(n: number): string {
 /// The sentence shown on a war's room card. Returns '' when there is nothing
 /// worth saying (a preview for a room that is not a war).
 export function formatJoinPreview(p: WarJoinPreview): string {
+    // A choice outranks a rule. Said in the first person and with the reason
+    // attached, because the alternative wording — one of the refusals below —
+    // would tell a player their faction has no side in a war they are
+    // watching by choice, which is both wrong and unfixable-looking.
+    if (p.watching)
+        return 'You asked to watch this war — Fight to take your side.';
     if (!p.will_fight) {
         // A refusal has to say what would fix it, and the three causes have
         // three different fixes: register a faction, find a war that fields

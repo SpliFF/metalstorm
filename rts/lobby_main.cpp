@@ -17,6 +17,7 @@
 #include "Server/RoomManager.h"
 #include "Server/WarPlayerBindings.h"
 #include "Server/JoinPreview.h"
+#include "Server/WarSummary.h"
 #include "Server/SqliteThreading.h"
 
 #include "Server/AI/AIDiscovery.h"
@@ -2706,8 +2707,40 @@ int main(int argc, char *argv[]) {
     return nullptr;
   };
 
+  // Read the digest a running war publishes into `war_summary`
+  // (PLAN-metalstorm-lobby.md §4, task 6 — written only by spring-server, see
+  // server_main.cpp). A row older than `kWarSummaryStaleSec` is treated as
+  // absent: nothing clears the row when a server is SIGKILLed, and a browser
+  // that keeps showing "4 fighting, 2 watching" for a war whose process died
+  // is worse than one that shows the durable half alone. Missing table, row,
+  // version or a malformed blob all land in the same place for the same
+  // reason.
+  auto warSummaryFor = [&](uint32_t roomId, WarSummary &out) -> bool {
+    if (!mapDb)
+      return false;
+    sqlite3_stmt *s = nullptr;
+    bool ok = false;
+    if (sqlite3_prepare_v2(mapDb,
+                           "SELECT summary_json, updated_at FROM war_summary "
+                           "WHERE room_id=?",
+                           -1, &s, nullptr) == SQLITE_OK) {
+      sqlite3_bind_int(s, 1, static_cast<int>(roomId));
+      if (sqlite3_step(s) == SQLITE_ROW) {
+        const char *json =
+            reinterpret_cast<const char *>(sqlite3_column_text(s, 0));
+        const int64_t updatedAt = sqlite3_column_int64(s, 1);
+        const int64_t age = static_cast<int64_t>(std::time(nullptr)) - updatedAt;
+        if (json && age <= kWarSummaryStaleSec)
+          ok = DecodeWarSummary(json, out);
+      }
+    }
+    if (s)
+      sqlite3_finalize(s);
+    return ok;
+  };
+
   // Helper: JSON-serialize a room for API responses
-  auto roomToJson = [](const GameRoom *room) -> std::string {
+  auto roomToJson = [&](const GameRoom *room) -> std::string {
     if (!room)
       return "null";
     nlohmann::json j;
@@ -2755,6 +2788,70 @@ int main(int argc, char *argv[]) {
     // EVERY row, and an absent field would make "old lobby" and "skirmish"
     // indistinguishable to it.
     j["session_kind"] = SessionKindToString(room->sessionKind);
+    // ── The war row the browser lists (§4, task 6) ───────────────────────
+    //
+    // Two sources, and which fact comes from which is the whole design:
+    //
+    //   * `bound` — humans who hold a seat in this war — comes from
+    //     `war_player_bindings`, the durable half. A war's fighters are
+    //     seated by the GAME server and never appear in `room->players` at
+    //     all (the same trap JoinPreview documents: counting the room reports
+    //     a full war as empty), and a bound player who is offline still holds
+    //     their seat, which is what task 4 made true.
+    //   * `online` / `ais` / `regions` / spectators / control — come from the
+    //     live digest, and are simply absent when there is no running server
+    //     to publish one. A war whose process was killed still lists, with
+    //     its sides and its capacity, because task 3 made that a state a war
+    //     can be in rather than the end of it.
+    //
+    // `open` is derived from the durable number, not the live one: an offline
+    // veteran's seat is not free, and offering it would produce exactly the
+    // promise the game server then breaks.
+    if (room->sessionKind == SessionKind::PersistentWar) {
+      const auto sides = room->SideTeams();
+      WarSummary live;
+      const bool haveLive = warSummaryFor(room->id, live);
+      std::unordered_map<int, unsigned> boundPerTeam;
+      for (const auto &b : WarPlayerBindings::ForRoom(db.Handle(), room->id))
+        boundPerTeam[b.team]++;
+
+      nlohmann::json wj;
+      wj["live"] = haveLive;
+      wj["capacity_per_side"] = WAR_SIDE_CAPACITY_DEFAULT;
+      wj["sides"] = nlohmann::json::array();
+      for (const auto &[faction, team] : sides) {
+        nlohmann::json sj;
+        sj["team"] = static_cast<int>(team);
+        sj["faction"] = faction;
+        const unsigned bound = boundPerTeam.count(static_cast<int>(team))
+                                   ? boundPerTeam[static_cast<int>(team)]
+                                   : 0u;
+        sj["bound"] = bound;
+        sj["open"] = (WAR_SIDE_CAPACITY_DEFAULT > bound)
+                         ? (WAR_SIDE_CAPACITY_DEFAULT - bound)
+                         : 0u;
+        if (haveLive) {
+          for (const auto &ls : live.sides) {
+            if (ls.team != static_cast<int>(team))
+              continue;
+            sj["online"] = ls.humans;
+            sj["ais"] = ls.ais;
+            sj["regions"] = ls.regions;
+            break;
+          }
+        }
+        wj["sides"].push_back(std::move(sj));
+      }
+      if (haveLive) {
+        wj["spectators"] = live.spectators;
+        wj["frame"] = live.frame;
+        wj["uptime_sec"] = live.uptimeSec;
+        wj["control"] = {{"total", live.control.total},
+                         {"contested", live.control.contested},
+                         {"neutral", live.control.neutral}};
+      }
+      j["war"] = std::move(wj);
+    }
     // PLAN-replay task 4c: a replay room reaches the client through exactly the
     // same JSON as a game room — that is the whole reason it IS a room — but
     // the browser must not offer to "join" one as a player, so it says which
@@ -3914,9 +4011,19 @@ int main(int argc, char *argv[]) {
               WAR_SIDE_CAPACITY_DEFAULT, hasBinding, boundTeam, absenceSec,
               savedPool, hasSavedState, joinGrant);
 
+          // §3, task 6: an account that asked to WATCH this war is not going
+          // to fight in it whatever the seating rule would allow, and the
+          // card has to say the thing that will actually happen. Read from
+          // the membership rather than folded into PreviewJoin: the intent is
+          // a fact about this room's roster, not about the seating policy,
+          // and the game server reads it from the same row (RoomWatchIntent).
+          const auto *member = room->FindPlayer(static_cast<uint32_t>(userId));
+          const bool watching = member && member->spectateOnly;
+
           nlohmann::json jp;
           jp["room_id"] = room->id;
-          jp["will_fight"] = p.willFight;
+          jp["watching"] = watching;
+          jp["will_fight"] = p.willFight && !watching;
           jp["reason"] = DynamicJoinOutcomeToString(p.outcome);
           jp["team"] = p.team;
           jp["side"] = p.side;
@@ -4823,6 +4930,9 @@ int main(int argc, char *argv[]) {
   int reapTick = 0;
   int errorPruneTick = 0;
   int sessionSweepTick = 0;
+  /// War-browser refresh cadence (task 6) — see the tick below for why a war
+  /// needs one and a room does not.
+  int warBroadcastTick = 0;
   // PLAN-long-uptime task 3 (§3): the durable record of a growth alarm.
   // Per-room, the set of alarm labels this lobby has already written an audit
   // row for. The fleet view already *shows* live alarms off the same JSON;
@@ -4913,6 +5023,30 @@ int main(int argc, char *argv[]) {
       if (audit > 0 || errs > 0)
         SLOG(SPRING_LOG_INFO, "swept %d audit + %d client-error row(s)", audit,
              errs);
+    }
+
+    // Re-broadcast the room list while a war is running (~every 5s at 10 Hz).
+    //
+    // PLAN-metalstorm-lobby.md §4, task 6. Every other broadcast in this file
+    // fires on a room MUTATION, which is the right rule for a room: nothing
+    // about a lobby room changes unless somebody changes it. A war is the
+    // opposite — its populations, its spectator count and its region control
+    // all move without anyone touching the room row, and the game server
+    // republishes them every 2s. Without this tick the browser would show a
+    // war's opening minute until somebody happened to create a room.
+    //
+    // Gated on a war existing so a lobby serving only skirmishes keeps its
+    // old mutation-only cadence and costs nothing.
+    if (++warBroadcastTick >= 50) {
+      warBroadcastTick = 0;
+      bool anyWar = false;
+      for (const auto *r : rooms.GetAllRooms())
+        if (r && r->sessionKind == SessionKind::PersistentWar) {
+          anyWar = true;
+          break;
+        }
+      if (anyWar)
+        broadcastRooms();
     }
 
     // Periodically reap abandoned rooms (~every 60s at 10 Hz). Catches

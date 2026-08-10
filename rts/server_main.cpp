@@ -1854,6 +1854,17 @@ int main(int argc, char* argv[])
             " port INTEGER NOT NULL DEFAULT 0,"
             " updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')))",
             nullptr, nullptr, nullptr);
+        // war_summary — the per-war digest the war browser reads
+        // (PLAN-metalstorm-lobby.md §4, task 6). Same rendezvous discipline as
+        // game_status above: this process is the only writer, the lobby only
+        // reads, and the row deliberately OUTLIVES the process (task 3's
+        // kill-and-resume) with `updated_at` telling the reader which it has.
+        sqlite3_exec(statusDb,
+            "CREATE TABLE IF NOT EXISTS war_summary ("
+            " room_id INTEGER PRIMARY KEY,"
+            " summary_json TEXT NOT NULL DEFAULT '',"
+            " updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')))",
+            nullptr, nullptr, nullptr);
     }
     // idleExitSeconds <= 0 → never idle-exit (treat like a persistent room).
     // Headless runs have no clients by construction — idle-exit would kill them
@@ -1909,6 +1920,51 @@ int main(int argc, char* argv[])
     /// not frame-based: what it protects against is the process dying, which
     /// is not something the sim frame counter has an opinion about.
     auto lastWarStateSweep = serverStartTime;
+    // ── The war-summary digest (PLAN-metalstorm-lobby.md §4, task 6) ───────
+    // Everything the war browser wants that only the sim knows: who is
+    // actually seated on each side, who is watching, and who is winning. The
+    // lobby owns the durable half (bindings, capacity, the seating promise)
+    // and deliberately does not read it from here — a war whose server is
+    // down still has to list, which is exactly what task 3 made possible.
+    //
+    // Written on the same 2s heartbeat as game_status rather than on a sim
+    // cadence: it is a wall-clock promise to somebody looking at a browser,
+    // and a paused war still has to say who is in it.
+    //
+    // Prepared, not snprintf'd like writeGameStatus above: this row carries
+    // JSON, and the only reason the status row can get away with a formatted
+    // string is that every one of its fields is an integer.
+    auto writeWarSummary = [&]() {
+        if (!statusDb) return;
+        if (sessionKind != SessionKind::PersistentWar) return;
+        // A replay re-executes a recording; its "population" is the cast of a
+        // file, and publishing it would list a recording in the war browser
+        // as a joinable war.
+        if (replay::IsReplaying()) return;
+        const auto& opts = CGameSetup::GetModOptions();
+        const auto wsIt = opts.find("war_sides");
+        const WarSides sides =
+            (wsIt != opts.end()) ? ParseWarSides(wsIt->second) : WarSides{};
+        const int64_t upSec = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - serverStartTime).count();
+        const std::string json = EncodeWarSummary(BuildWarSummary(
+            sides, GatherWarSummaryPlayers(), GatherWarSummaryRegions(),
+            sim.GetFrameNum(), upSec));
+        sqlite3_stmt* st = nullptr;
+        if (sqlite3_prepare_v2(statusDb,
+                "INSERT OR REPLACE INTO war_summary"
+                " (room_id, summary_json, updated_at)"
+                " VALUES (?, ?, strftime('%s','now'))",
+                -1, &st, nullptr) != SQLITE_OK) {
+            sqlite3_finalize(st);
+            return;
+        }
+        sqlite3_bind_int(st, 1, static_cast<int>(roomId));
+        sqlite3_bind_text(st, 2, json.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_step(st);
+        sqlite3_finalize(st);
+    };
+
     /// Playback-bar heartbeat (task 4b). Wall-clock, not frame-based, on
     /// purpose: a PAUSED replay advances no frames at all, and the bar still
     /// has to learn that the controller changed or that a seek finished.
@@ -2138,6 +2194,10 @@ int main(int argc, char* argv[])
             if (wall - lastStatusWrite >= std::chrono::seconds(2)) {
                 lastStatusWrite = wall;
                 writeGameStatus(true, clients);
+                // Same heartbeat, same reason: both are liveness the lobby
+                // reads, and splitting their cadences would let the browser
+                // show a war as up with a population from a minute ago.
+                writeWarSummary();
             }
             // ── War state, on a cadence as well as on disconnect (task 4) ──
             // (PLAN-metalstorm-lobby.md §2.5.) The disconnect capture is the

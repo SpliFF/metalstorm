@@ -11,6 +11,7 @@
 #include "StandingOrders.h"
 #include "OrgGroups.h"
 #include "LuaExecEngine.h"
+#include "RoomWatchIntent.h"
 #include "WarPlayerBindings.h"
 #include "WarRejoinPolicy.h"
 #include "WarStateSim.h"
@@ -333,6 +334,22 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                 const int rosterTeam = resolveTeam(name);
                 if (!rosterRequired || rosterTeam >= 0)
                     return {rosterTeam, rosterRequired && rosterTeam < 0};
+                // ── "I came to watch" (§3, task 6) ──
+                // Checked before the seat rules, not after: every one of them
+                // ends in a seat for an account whose faction fields a side,
+                // so a watcher who is asked "may you fight?" first is told
+                // yes and seated. This is the only input to seating that
+                // comes from the player rather than from their account, and
+                // it can only ever take a seat AWAY, never grant one — the
+                // decline path below is the same spectator fall-through
+                // everything else uses.
+                if (ctx.sessionKind == SessionKind::PersistentWar &&
+                    AccountWantsToWatch(ctx.db.Handle(), ctx.roomId, accountId)) {
+                    SLOG(SPRING_LOG_NOTICE,
+                        "'%s' asked to watch this war — seating as a "
+                        "spectator, not as a player", name.c_str());
+                    return {-1, true};
+                }
                 // A held seat is checked BEFORE capacity, because holding it
                 // against capacity is the entire point: past the hold window
                 // the binding stops bypassing anything and this falls through

@@ -81,6 +81,22 @@ void RoomManager::EnsureTables(sqlite3* db) {
             sqlite3_exec(db, "DROP TABLE IF EXISTS room_mod_options", nullptr, nullptr, nullptr);
         }
     }
+    {
+        // Fourth probe, same pattern: `room_members` grew a `spectate_only`
+        // column (PLAN-metalstorm-lobby.md §3, task 6) — the watch intent the
+        // game server reads on auth. It is the first probe on THIS table, so
+        // no earlier one covers it.
+        sqlite3_stmt* stmt = nullptr;
+        int rc = sqlite3_prepare_v2(db,
+            "SELECT spectate_only FROM room_members LIMIT 1", -1, &stmt, nullptr);
+        sqlite3_finalize(stmt);
+        if (rc != SQLITE_OK) {
+            sqlite3_exec(db, "DROP TABLE IF EXISTS rooms", nullptr, nullptr, nullptr);
+            sqlite3_exec(db, "DROP TABLE IF EXISTS room_members", nullptr, nullptr, nullptr);
+            sqlite3_exec(db, "DROP TABLE IF EXISTS room_ai_slots", nullptr, nullptr, nullptr);
+            sqlite3_exec(db, "DROP TABLE IF EXISTS room_mod_options", nullptr, nullptr, nullptr);
+        }
+    }
     sqlite3_exec(db, R"(
         CREATE TABLE IF NOT EXISTS rooms (
             id INTEGER PRIMARY KEY,
@@ -108,6 +124,7 @@ void RoomManager::EnsureTables(sqlite3* db) {
             ready INTEGER NOT NULL DEFAULT 0,
             is_spectator INTEGER NOT NULL DEFAULT 0,
             is_host INTEGER NOT NULL DEFAULT 0,
+            spectate_only INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (room_id, player_id)
         );
     )", nullptr, nullptr, nullptr);
@@ -193,8 +210,8 @@ void RoomManager::PersistMembersLocked(const GameRoom& room) {
     }
     static const char* kInsert =
         "INSERT INTO room_members (room_id, player_id, username, team, "
-        "start_pos, ready, is_spectator, is_host) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
+        "start_pos, ready, is_spectator, is_host, spectate_only) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
     sqlite3_stmt* s = nullptr;
     if (sqlite3_prepare_v2(db, kInsert, -1, &s, nullptr) == SQLITE_OK) {
         for (const auto& p : room.players) {
@@ -207,6 +224,7 @@ void RoomManager::PersistMembersLocked(const GameRoom& room) {
             sqlite3_bind_int(s, 6, p.ready ? 1 : 0);
             sqlite3_bind_int(s, 7, p.isSpectator ? 1 : 0);
             sqlite3_bind_int(s, 8, p.isHost ? 1 : 0);
+            sqlite3_bind_int(s, 9, p.spectateOnly ? 1 : 0);
             if (sqlite3_step(s) != SQLITE_DONE) {
                 SLOG(SPRING_LOG_WARNING, "PersistMembers step: %s",
                     sqlite3_errmsg(db));
@@ -352,7 +370,7 @@ void RoomManager::LoadFromDatabase() {
     {
         const char* kSql =
             "SELECT room_id, player_id, username, team, start_pos, "
-            "ready, is_spectator, is_host FROM room_members";
+            "ready, is_spectator, is_host, spectate_only FROM room_members";
         sqlite3_stmt* s = nullptr;
         if (sqlite3_prepare_v2(db, kSql, -1, &s, nullptr) == SQLITE_OK) {
             while (sqlite3_step(s) == SQLITE_ROW) {
@@ -369,6 +387,7 @@ void RoomManager::LoadFromDatabase() {
                 p.ready = (sqlite3_column_int(s, 5) != 0);
                 p.isSpectator = (sqlite3_column_int(s, 6) != 0);
                 p.isHost = (sqlite3_column_int(s, 7) != 0);
+                p.spectateOnly = (sqlite3_column_int(s, 8) != 0);
                 it->second.players.push_back(std::move(p));
             }
             sqlite3_finalize(s);
@@ -511,6 +530,20 @@ bool RoomManager::JoinRoom(
     auto* existing = room.FindPlayer(playerId);
     if (existing) {
         existing->clientId = clientId;
+        // A war's watch intent may be changed by re-joining it the other way
+        // — that is §3's "spectator → player conversion" and its reverse, and
+        // it is the ONLY conversion path that exists today: the seat itself
+        // is taken by the game server on auth, so the change lands on the
+        // next connect rather than in the running sim (§3 asks for it without
+        // one, which needs a role-change message the protocol does not have).
+        if (room.sessionKind == SessionKind::PersistentWar &&
+            existing->spectateOnly != asSpectator) {
+            existing->spectateOnly = asSpectator;
+            SLOG(SPRING_LOG_NOTICE,
+                "player '%s' will %s war %u on next connect",
+                username.c_str(), asSpectator ? "WATCH" : "FIGHT in", roomId);
+            PersistMembersLocked(room);
+        }
         SLOG(SPRING_LOG_INFO, "player '%s' reconnected to room %u (updated clientId)",
             username.c_str(), roomId);
         return true;
@@ -521,6 +554,12 @@ bool RoomManager::JoinRoom(
     player.clientId = clientId;
     player.username = username;
     player.factionId = factionId;
+    // The watch intent is a war concept only (§3). On a skirmish `asSpectator`
+    // already means what it says — the lobby seats that room itself — and
+    // recording a second copy of it here would give the game server a flag to
+    // honour that the room row has already honoured.
+    player.spectateOnly =
+        (room.sessionKind == SessionKind::PersistentWar) && asSpectator;
 
     if (isActive) {
         // Check if this player was in the original roster (reconnecting)

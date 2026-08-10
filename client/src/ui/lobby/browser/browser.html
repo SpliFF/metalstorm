@@ -14,6 +14,17 @@
         <span class="lobby-account" id="account-name">{{account_name}}</span>
         <button id="logout-btn" class="secondary">Log out</button>
     </div>
+    <!-- The war browser (PLAN-metalstorm-lobby.md §4). Both elements stay
+         hidden on a lobby with no persistent wars, so a skirmish-only lobby
+         looks exactly as it did — the heading and the filter row would
+         otherwise advertise a mode this lobby is not running. -->
+    <div id="war-section" class="war-section" style="display:none">
+        <div class="war-section-head">
+            <h3>Wars</h3>
+            <div id="war-filters" class="war-filters"></div>
+        </div>
+        <div id="war-list" class="war-list"></div>
+    </div>
     <div id="room-list" class="room-list"></div>
     <div id="replay-panel" class="replay-panel" style="display:none">
         <h3>Replays</h3>

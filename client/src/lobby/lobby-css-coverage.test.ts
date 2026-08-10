@@ -81,6 +81,34 @@ describe('lobby.css covers the controls lobby markup renders', () => {
         }
     });
 
+    it('styles the war card the browser renders (task 6)', () => {
+        // The same seam, one template later. Buttons are excluded on purpose
+        // — lobby.css styles the bare `button` element, so an unstyled button
+        // class is not the D61 defect — but a war card's own layout classes
+        // have no such fallback: with no rule, `.war-actions` is a block of
+        // stacked full-width buttons in the middle of the card.
+        const html = readFileSync(
+            join(LOBBY_SRC, 'browser', 'war-entry.html'), 'utf8');
+        const classes = new Set<string>();
+        for (const m of html.matchAll(/<(\w+)\b[^>]*?\sclass="([^"{]+)"/g)) {
+            if (m[1] === 'button') continue;
+            for (const cls of m[2].trim().split(/\s+/)) classes.add(cls);
+        }
+        expect(classes.has('war-actions')).toBe(true);
+        const unstyled = [...classes]
+            .filter(c => !new RegExp(`\\.${c}\\b`).test(CSS));
+        expect(unstyled).toEqual([]);
+    });
+
+    it('stops the war card inheriting the room card"s join-button placement', () => {
+        // `.join-btn` is pinned `grid-row: 1 / -1` for the room card, where it
+        // is a grid item. In a war card it is a flex child of `.war-actions`,
+        // and the inherited rule stretched it over the whole card — found by
+        // rendering it, not by reading it. The reset is what stops that, so
+        // removing it is a failure here rather than a two-inch-tall button.
+        expect(ruleFor('war-entry .join-btn')).toMatch(/grid-row:\s*auto/);
+    });
+
     it('lets a player row wrap instead of overflowing its card', () => {
         // Found while fixing D61, on the same row: a `<select>`'s min-content
         // width is its widest option, so three dropdowns could not shrink to

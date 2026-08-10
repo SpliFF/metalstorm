@@ -8,6 +8,8 @@
 #include "Lua/LuaRules.h"
 #include "Lua/LuaHandleSynced.h"
 #include "Lua/LuaRulesParams.h"
+#include "Game/Players/Player.h"
+#include "Game/Players/PlayerHandler.h"
 #include "Sim/Misc/Team.h"
 #include "Sim/Misc/TeamHandler.h"
 #include "System/SpringLog/SpringLog.h"
@@ -97,6 +99,51 @@ bool GrantWarRejoinStipend(int playerNum) {
              "GG.Authority.GrantRejoinStipend(%d) end",
              playerNum);
     return CallSynced("war-state rejoin stipend", code);
+}
+
+std::vector<WarSummaryPlayer> GatherWarSummaryPlayers() {
+    std::vector<WarSummaryPlayer> out;
+    for (int i = 0; i < playerHandler.ActivePlayers(); ++i) {
+        const CPlayer* p = playerHandler.Player(i);
+        if (p == nullptr) continue;
+        WarSummaryPlayer row;
+        row.team = p->team;
+        row.spectator = p->spectator;
+        row.isAI = p->isAI;
+        row.active = p->active;
+        out.push_back(row);
+    }
+    return out;
+}
+
+std::vector<WarSummaryRegion> GatherWarSummaryRegions() {
+    // `region_<key>_team` / `region_<key>_contested`, published PUBLIC by
+    // game_regions.lua. The key is whatever the map's partition calls the
+    // region, so the scan matches on the shape, not on a known list.
+    static const std::string kPrefix = "region_";
+    static const std::string kTeamSuffix = "_team";
+
+    const LuaRulesParams::Params& params = CSplitLuaHandle::GetGameParams();
+    std::vector<WarSummaryRegion> out;
+    for (const auto& [key, param] : params) {
+        if (key.size() <= kPrefix.size() + kTeamSuffix.size()) continue;
+        if (key.compare(0, kPrefix.size(), kPrefix) != 0) continue;
+        if (key.compare(key.size() - kTeamSuffix.size(), kTeamSuffix.size(),
+                        kTeamSuffix) != 0)
+            continue;
+        WarSummaryRegion r;
+        // -1 is "nobody holds it"; the param is written as a number, so a
+        // string/bool value reads as 0 via ParamNumber, which would claim
+        // team 0 holds a region it does not. Check the variant instead.
+        if (const float* f = std::get_if<float>(&param.value))
+            r.team = static_cast<int>(*f);
+        else
+            continue;   // not a region-ownership param after all
+        const std::string base = key.substr(0, key.size() - kTeamSuffix.size());
+        r.contested = ParamNumber(params, base + "_contested") != 0.0;
+        out.push_back(r);
+    }
+    return out;
 }
 
 bool RestoreWarPlayerScore(int playerNum, const WarPlayerState& state) {

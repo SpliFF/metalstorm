@@ -175,6 +175,95 @@ button.danger:hover { background: #cc3333; }
    a taller card. Spanning to the last line survives the next row too. */
 .join-btn { grid-row: 1 / -1; grid-column: 2; }
 
+/* ---- War browser (PLAN-metalstorm-lobby.md §4, task 6) ---- */
+
+.war-section { margin-bottom: 16px; }
+.war-section-head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    /* The filter row is a flex sibling of the heading, and a chip's
+       min-content width is its label — without wrap a fourth chip pushes the
+       row past the panel, which is exactly the overflow D61 found in the AI
+       row (a flex item's `min-width: auto` is min-content). */
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+}
+.war-section-head h3 { margin: 0; font-size: 15px; }
+.war-filters { display: flex; gap: 6px; flex-wrap: wrap; }
+.war-filter-chip {
+    background: #1a2338;
+    color: #9aa4b5;
+    border: 1px solid #2a3550;
+    border-radius: 12px;
+    padding: 3px 12px;
+    font-size: 12px;
+    cursor: pointer;
+}
+.war-filter-chip:hover { border-color: #4cc9f0; color: #cfe6f5; }
+.war-filter-chip.active {
+    background: #16304a;
+    color: #4cc9f0;
+    border-color: #4cc9f0;
+}
+
+.war-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 400px;
+    overflow-y: auto;
+}
+
+/* Same grid as .room-entry — a war IS a room, and two card geometries that
+   drift apart is how the join button ends up half a row tall (D61's
+   `grid-row: 1 / 3` against a three-row grid). The buttons live in their own
+   flex cell here because a war offers two of them. */
+.war-entry {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 4px 12px;
+    padding: 12px 16px;
+    background: #0f1626;
+    border-radius: 8px;
+    align-items: center;
+    border-left: 3px solid #2a3550;
+}
+.war-entry .room-detail,
+.war-entry .room-preview,
+.war-entry .war-control { grid-column: 1; }
+.war-control { color: #7a8496; font-size: 12px; }
+.war-control:empty { display: none; }
+.war-actions {
+    grid-row: 1 / -1;
+    grid-column: 2;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+/* Reset the room-browser rule: inside a war card the button is a flex child
+   of .war-actions, not a grid item, and inheriting `grid-row: 1 / -1` would
+   stretch it over the whole card. */
+.war-entry .join-btn { grid-row: auto; grid-column: auto; }
+.war-badge-live {
+    background: #16304a;
+    color: #7fd4a8;
+    border-radius: 10px;
+    padding: 3px 10px;
+    font-size: 11px;
+    white-space: nowrap;
+}
+/* A war whose server is not running is a normal, recoverable state (task 3 —
+   the next join resumes it), so this is muted rather than an alarm colour. */
+.war-badge-idle {
+    background: #232a38;
+    color: #8b93a3;
+    border-radius: 10px;
+    padding: 3px 10px;
+    font-size: 11px;
+    white-space: nowrap;
+}
+
 .empty-state { text-align: center; color: #555; padding: 32px; }
 
 /* A server-side fault must not look like the muted "nothing here" state —
