@@ -190,12 +190,34 @@ describe("AI funding — the standing allowance drip (§5.2 option d)", function
         assert.are.equal(500, world.authorityPools[10])
     end)
 
-    it("does nothing on frames that aren't the period boundary", function()
+    it("does nothing before its first full period has elapsed", function()
         local world, gadgetObj = cappedWorld(50)
+        gadgetObj:GameFrame(1)
+        gadgetObj:GameFrame(900)
         gadgetObj:GameFrame(1799)
-        gadgetObj:GameFrame(1801)
         assert.are.equal(0,   world.playerPools[8] or 0)
         assert.are.equal(600, world.authorityPools[10])
+    end)
+
+    -- D15: this used to assert the opposite — that frame 1801 drips nothing,
+    -- because the gate was `frame % 1800 == 0`. On a server that logs
+    -- `sim fell behind, skipped N ticks` the exact multiple is never delivered,
+    -- so that contract silently rationed the AI below the cap its team was
+    -- paying for. The drip is now owed per elapsed period, not per multiple hit.
+    it("still pays the minute whose boundary frame was skipped", function()
+        local world, gadgetObj = cappedWorld(50)
+        gadgetObj:GameFrame(1801)              -- 1800 never arrived
+        assert.are.equal(50,  world.playerPools[8])
+        assert.are.equal(550, world.authorityPools[10])
+        gadgetObj:GameFrame(1802)              -- and does not pay twice
+        assert.are.equal(50,  world.playerPools[8])
+    end)
+
+    it("pays every minute a long stall stepped over, not just one", function()
+        local world, gadgetObj = cappedWorld(50)
+        gadgetObj:GameFrame(9000)              -- five minutes in one call
+        assert.are.equal(250, world.playerPools[8])
+        assert.are.equal(350, world.authorityPools[10])
     end)
 
     it("is opt-in: no cap set drips nothing", function()

@@ -54,6 +54,7 @@ local Extract      = VFS.Include("LuaRules/Gadgets/objectives/extract.lua")
 local Infra        = VFS.Include("LuaRules/Gadgets/objectives/infra.lua")
 local Generator    = VFS.Include("LuaRules/Gadgets/objectives/generator.lua")
 local Attribution  = VFS.Include("LuaRules/Gadgets/objectives/attribution.lua")
+local Tick         = VFS.Include("LuaRules/Gadgets/tick.lua")
 
 local TYPES = {
     control = Control, kill = Kill, escort = Escort,
@@ -137,6 +138,11 @@ end
 local victoryObjectivesCreated = 0
 local rewardScale = 1.0
 local evalTick = 0
+-- D15: the eval cadence is skip-safe (see tick.lua). Observation policy, so a
+-- multi-period stall still yields one eval — the control clock loses nothing by
+-- it, because D57 made `control.accrue` bank the elapsed interval rather than a
+-- fixed period per tick.
+local evalGate = Tick.new(EVAL_PERIOD)
 local genState = Generator.newState()
 local bountyCountByPlayer = {}
 
@@ -846,7 +852,7 @@ function gadget:GameStart()
 end
 
 function gadget:GameFrame(frame)
-    if frame % EVAL_PERIOD ~= 0 then return end
+    if not Tick.due(evalGate, frame) then return end
     evalTick = evalTick + 1
     local ctx = buildCtx(frame)
 

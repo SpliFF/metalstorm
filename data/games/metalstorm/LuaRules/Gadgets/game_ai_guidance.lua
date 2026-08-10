@@ -51,6 +51,7 @@ if not gadgetHandler:IsSyncedCode() then
 end
 
 local Wire = VFS.Include("LuaRules/Gadgets/parley/wire.lua")
+local Tick = VFS.Include("LuaRules/Gadgets/tick.lua")
 
 GG.AIGuidance = GG.AIGuidance or {}
 
@@ -70,6 +71,10 @@ local TOUCH_LOCK_TTL_FRAMES = 5400   -- 3 min @ 30 Hz (= INTEL_DECAY_FRAMES)
 -- Same period game_authority.lua's team stipend uses, and the unit the
 -- planner's governor clamps in.
 local ALLOWANCE_PERIOD_FRAMES = 1800  -- 1 min @ GAME_SPEED 30
+-- D15: skip-safe, ACCRUAL policy (see tick.lua) — the drip is a per-minute
+-- rate a human typed into the panel, so a stalled server must not quietly
+-- ration the AI below the cap its team is paying for.
+local allowanceGate = Tick.new(ALLOWANCE_PERIOD_FRAMES)
 
 -- Intent report (§6.3 "what my AI is doing"): a short, rolling window of the
 -- AI's most-recent charged directives, published for ai-command-panel.js. Each
@@ -439,10 +444,11 @@ end
 --- alternative is an allowance that silently stops when the team gets poor,
 --- which is exactly when the AI most needs to know it is on rations.
 local function dripAllowances(frame)
-    if frame % ALLOWANCE_PERIOD_FRAMES ~= 0 then return end
+    local periods = Tick.count(allowanceGate, frame)
+    if periods == 0 then return end
     if not (GG.Authority and GG.Authority.Transfer) then return end
     for teamID, s in pairs(stores) do
-        local cap = tonumber(s.funding and s.funding.rateCap) or 0
+        local cap = (tonumber(s.funding and s.funding.rateCap) or 0) * periods
         if cap > 0 then
             local ais = fundingRecipients(teamID)
             if #ais > 0 then

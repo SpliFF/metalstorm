@@ -34,10 +34,18 @@ local Partition = VFS.Include("LuaRules/Gadgets/regions/partition.lua")
 local Control   = VFS.Include("LuaRules/Gadgets/regions/control.lua")
 local Ownership = VFS.Include("LuaRules/Gadgets/regions/ownership.lua")
 local Cost      = VFS.Include("LuaRules/Gadgets/regions/cost.lua")
+local Tick      = VFS.Include("LuaRules/Gadgets/tick.lua")
 
 GG.Regions = GG.Regions or {}
 
 local EVAL_PERIOD = 150            -- frames (5 s)
+-- D15: skip-safe cadence (see tick.lua). Observation policy — ownership is
+-- sampled from where units are standing *now*, so a stall that stepped over
+-- several periods must yield one sample, not several copies of one. The
+-- stickiness counters in regions/ownership.lua count ticks, so under sustained
+-- overload FLIP_TICKS/DECAY_TICKS stretch in frame terms; that is the
+-- conservative direction and is documented in tick.lua's header.
+local evalGate = Tick.new(EVAL_PERIOD)
 
 local provider              -- partition provider in use (grid or graph)
 local providerKind          -- "grid" | "graph" — mirrors client's regions.json provider field
@@ -266,7 +274,7 @@ function GG.Regions.SetControllingTeam(key, teamID)
 end
 
 function gadget:GameFrame(frame)
-    if frame % EVAL_PERIOD ~= 0 then return end
+    if not Tick.due(evalGate, frame) then return end
     local units = gatherUnits()
     local scores = Control.computeScores(units, provider, gaiaTeam)
     local _, changedKeys = Ownership.step(ownershipState, scores)

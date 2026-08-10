@@ -88,6 +88,10 @@ end
 
 local ALLIED_LOS = { allied = true }   -- matches game_authority.lua's team-param visibility (§1)
 local SCOREBOARD_PERIOD_FRAMES = 900   -- 30s @ GAME_SPEED 30 (§6 "slow cadence")
+local Tick = VFS.Include("LuaRules/Gadgets/tick.lua")
+-- D15: skip-safe cadence (see tick.lua). Observation policy — the scoreboard
+-- publishes current standings, so a stall costs one refresh, not a payout.
+local scoreboardGate = Tick.new(SCOREBOARD_PERIOD_FRAMES)
 -- §6 "objectives completed (participation >= threshold at resolve)". The
 -- plan doesn't pin a number; this picks the smallest meaningful credited
 -- unit (matches game_objectives.lua's own PARTICIPATION_TICK_WEIGHT) rather
@@ -432,6 +436,6 @@ function gadget:GameStart()
 end
 
 function gadget:GameFrame(frame)
-    if frame % SCOREBOARD_PERIOD_FRAMES ~= 0 then return end
+    if not Tick.due(scoreboardGate, frame) then return end
     publishScoreboard()
 end

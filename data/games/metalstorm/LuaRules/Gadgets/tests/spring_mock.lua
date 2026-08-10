@@ -139,6 +139,15 @@ function M.new()
         GetGameRulesParam = function(key) return world.gameRulesParams[key] end,
     }
 
+    -- game_teams.lua now pulls the shared skip-safe tick gate (D15) through the
+    -- real gadget loader's VFS, so the mock has to answer that call. Same
+    -- mapping the other gadget mocks use: busted's cwd is LuaRules/Gadgets/.
+    _G.VFS = {
+        Include = function(path)
+            return dofile('./' .. path:gsub('^LuaRules/Gadgets/', ''))
+        end,
+    }
+
     _G.gadgetHandler = { IsSyncedCode = function() return true end }
     _G.gadget = {}
 

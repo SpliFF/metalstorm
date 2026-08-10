@@ -41,6 +41,13 @@ local spawn    = VFS.Include("LuaRules/Gadgets/civilians/spawn.lua")
 local routines = VFS.Include("LuaRules/Gadgets/civilians/routines.lua")
 local convoy   = VFS.Include("LuaRules/Gadgets/civilians/convoy.lua")
 local estate   = VFS.Include("LuaRules/Gadgets/civilians/estate.lua")
+local Tick     = VFS.Include("LuaRules/Gadgets/tick.lua")
+
+-- D15: skip-safe cadences (see tick.lua). Observation policy for both — these
+-- tick the ambient population forward from where it is now, and firing them
+-- once per skipped period would burst-spawn a backlog of civilians.
+local routinesGate = Tick.new(150)
+local convoyGate   = Tick.new(300)
 
 -- Shared context handed to every module (gaia team id, registries, config).
 local civ = {
@@ -97,8 +104,8 @@ end
 
 function gadget:GameFrame(frame)
     -- Low cadence on purpose — civilians are ambience, not sim pressure.
-    if frame % 150 == 0 then routines.tick(civ, frame) end
-    if frame % 300 == 0 then convoy.tick(civ, frame)   end
+    if Tick.due(routinesGate, frame) then routines.tick(civ, frame) end
+    if Tick.due(convoyGate, frame)   then convoy.tick(civ, frame)   end
 end
 
 --- Civilian BUILDINGS join the estate here (§M2). Runs on every unit created

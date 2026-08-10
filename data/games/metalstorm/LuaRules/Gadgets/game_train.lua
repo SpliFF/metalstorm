@@ -155,6 +155,8 @@ local MAX_UNLOAD_SPEED = 0.5        -- max speed (elmo/frame) to allow unload
 -- recomputed on a fixed cadence instead. 15 frames = 0.5 s at GAME_SPEED 30 —
 -- fast enough that a shelled train visibly slows while still alive.
 local HP_RECOMPUTE_INTERVAL = 15
+local Tick = VFS.Include("LuaRules/Gadgets/tick.lua")
+local hpRecomputeGate = Tick.new(HP_RECOMPUTE_INTERVAL)
 
 --------------------------------------------------------------------------------
 -- State
@@ -1235,7 +1237,9 @@ function gadget:GameFrame(frame)
     -- something actually died (2026-07-25 demo re-verify finding). A fixed
     -- cadence also picks up HP *recovery* from repairs, which fires no
     -- damage event at all.
-    if frame % HP_RECOMPUTE_INTERVAL == 0 then
+    -- D15: skip-safe cadence (see tick.lua). Observation policy — the recompute
+    -- reads current HP and is idempotent, so a stall costs one refresh.
+    if Tick.due(hpRecomputeGate, frame) then
         for _, consist in pairs(consists) do
             UpdateConsistHP(consist)
             UpdateConsistParams(consist)

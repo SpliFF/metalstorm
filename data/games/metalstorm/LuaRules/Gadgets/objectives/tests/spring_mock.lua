@@ -139,10 +139,13 @@ function M.new()
     _G.gadget = {}
 
     -- Resolve "LuaRules/Gadgets/objectives/X.lua" against the real files on
-    -- disk (tests run with cwd = LuaRules/Gadgets/objectives).
+    -- disk (tests run with cwd = LuaRules/Gadgets/objectives). The gadget also
+    -- pulls shared modules that live one level up (tick.lua, D15), so a
+    -- Gadgets-rooted path resolves to the parent directory.
     _G.VFS = {
         Include = function(path)
             local rel = path:gsub('^LuaRules/Gadgets/objectives/', './')
+            if rel == path then rel = path:gsub('^LuaRules/Gadgets/', '../') end
             return dofile(rel)
         end,
     }

@@ -46,11 +46,21 @@ local Escrow                       = VFS.Include("LuaRules/Gadgets/authority/esc
 local Ledger                       = VFS.Include("LuaRules/Gadgets/authority/ledger.lua")
 local Metrics                      = VFS.Include("LuaRules/Gadgets/authority/metrics.lua")
 local CostSpec                     = VFS.Include("LuaRules/Configs/authority_cost.lua")
+local Tick                         = VFS.Include("LuaRules/Gadgets/tick.lua")
 
 local STARTING_TEAM_AUTHORITY      = 500
 local EVENT_RING_SIZE              = 8
 local STIPEND_PERIOD_FRAMES        = 1800 -- 1 minute at GAME_SPEED 30
 local LEDGER_PUBLISH_PERIOD_FRAMES = 900 -- 30 s at GAME_SPEED 30 (§1)
+
+-- D15: all three periodic jobs below are skip-safe (see tick.lua). The two that
+-- move authority use the ACCRUAL policy — a stipend and an overflow decay are
+-- earned by the passage of frames, and a modulo gate let a stalled server take
+-- a whole minute's income off every team with nobody noticing. The ledger
+-- publish is an observation and collapses.
+local stipendGate                  = Tick.new(STIPEND_PERIOD_FRAMES)
+local decayGate                    = Tick.new()   -- period comes from CostSpec
+local ledgerPublishGate            = Tick.new(LEDGER_PUBLISH_PERIOD_FRAMES)
 
 local costScale                    = 1.0
 local joinGrant                    = 100
@@ -733,12 +743,21 @@ end
 
 function gadget:GameFrame(frame)
     -- Stipend distribution (§2)
-    if teamStipend > 0 and frame % STIPEND_PERIOD_FRAMES == 0 then
+    -- The gate is stepped unconditionally: short-circuiting it on `teamStipend`
+    -- would leave `last` at 0 for a war with no stipend, so enabling one later
+    -- (a GM knob, a reload) would bank every period since frame 0 as one lump.
+    local stipendPeriods = Tick.count(stipendGate, frame)
+    if stipendPeriods > 0 and teamStipend > 0 then
+        -- One award per elapsed period, so ten minutes of sim always pays ten
+        -- minutes of stipend however badly the machine fell behind. Paid as a
+        -- single ledger entry per team: the ledger records what was awarded,
+        -- and N identical rows would misreport the cadence as well as spam it.
+        local owed = teamStipend * stipendPeriods
         local gaia = Spring.GetGaiaTeamID()
         for _, teamID in ipairs(Spring.GetTeamList()) do
             if teamID ~= gaia then
-                setTeamPool(teamID, getTeamPool(teamID) + teamStipend)
-                Ledger.tagAward(ledgerState, teamID, teamStipend, 'stipend')
+                setTeamPool(teamID, getTeamPool(teamID) + owed)
+                Ledger.tagAward(ledgerState, teamID, owed, 'stipend')
             end
         end
     end
@@ -771,8 +790,11 @@ function gadget:GameFrame(frame)
     -- Overflow decay (§3.1, Lever 1): pools above ceiling decay toward it
     local econ = CostSpec.economy
     if econ and econ.soft_ceiling_C_base and econ.overflow_decay_period then
-        if frame % econ.overflow_decay_period == 0 then
-            local decayFactor = 1 - (econ.overflow_decay_pct / 100)
+        local decayPeriods = Tick.count(decayGate, frame, econ.overflow_decay_period)
+        if decayPeriods > 0 then
+            -- Compounded over the elapsed periods: skipping the decay would
+            -- hand a hoarding team free headroom for being on a busy server.
+            local decayFactor = (1 - (econ.overflow_decay_pct / 100)) ^ decayPeriods
             for _, teamID in ipairs(Spring.GetTeamList()) do
                 if teamID ~= gaia then
                     -- Player pools: decay to team pool first (§3.1: "use it or share it")
@@ -804,7 +826,7 @@ function gadget:GameFrame(frame)
     -- Ledger publish (§1): every LEDGER_PUBLISH_PERIOD_FRAMES, publish all
     -- counters as teamRulesParam econ_<class> (30 s cadence, same as the
     -- planned scoreboard refresh)
-    if frame % LEDGER_PUBLISH_PERIOD_FRAMES == 0 then
+    if Tick.due(ledgerPublishGate, frame) then
         Ledger.publish(ledgerState)
     end
 end

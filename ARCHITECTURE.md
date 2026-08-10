@@ -404,6 +404,35 @@ end
 
 Engine base gadgets live in `cont/base/springcontent/LuaRules/`. Game-specific gadgets live in `content/games/<game>/LuaRules/`. The engine base gadgets load first, providing default behaviors that games can override.
 
+#### Periodic gadget work: never gate on `frame % PERIOD`
+
+**Binding rule for any gadget that does something on a cadence.** When the
+server logs `sim fell behind, skipped N ticks`, `gadget:GameFrame` is *not
+called* for the skipped frames — they do not arrive late, they never arrive. A
+`if frame % PERIOD == 0` gate therefore drops that tick permanently, and this
+was silently unsound across the whole Metalstorm gadget set
+(PLAN-endtoend.md **D15**): a control objective banked zero hold progress over
+40 000 frames at 8× sim, and a diagnostic probe on the same gate emitted 11
+samples in a 24 378-frame war.
+
+Use `data/games/metalstorm/LuaRules/Gadgets/tick.lua` — one shared definition of
+the rule, `VFS.Include`d like any other shared module:
+
+- `Tick.due(gate, frame)` — **observation** policy, at most one fire per call.
+  For anything that samples current state (evaluate objectives, sample region
+  ownership, publish a scoreboard, recompute HP): the world is observable once,
+  so a multi-period stall must not invent duplicate samples.
+- `Tick.count(gate, frame)` — **accrual** policy, one fire per elapsed period.
+  For anything that pays out per period (authority stipend, overflow decay, AI
+  allowance drip): the amount was earned by the passage of frames, so
+  collapsing it lets a team lose income to machine load.
+
+Both preserve the phase grid across a skip, so on an unloaded machine they fire
+on exactly the frames the old modulo gate did. Caveat, documented in the
+module's header: `due()` restores the *tick*, not the samples, so subsystems
+that count ticks to measure duration (`regions/ownership.lua`'s
+FLIP_TICKS/DECAY_TICKS) still stretch in frame terms under sustained overload.
+
 ### Audio System
 
 End-to-end pipeline from server sim emissions to browser playback. Single source of truth: [PLAN-audio.md](PLAN-audio.md).

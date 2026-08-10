@@ -7,6 +7,63 @@ package.path = './?.lua;' .. package.path
 
 local mock = require('tests.spring_mock')
 
+-- D15 regression. The evaluator was gated on `frame % EVAL_PERIOD == 0`, and on
+-- a server that logs `sim fell behind, skipped N ticks` the engine never calls
+-- gadget:GameFrame for the skipped frames — they do not arrive late. Measured at
+-- 8x sim: a control objective accumulated ZERO hold progress over 40 000 frames.
+-- Both cases below deliver only frames that are NOT multiples of 90, which is
+-- what a stalled server does; under the old gate the objective never evaluated
+-- once and the war could not be won.
+describe("the eval tick survives skipped frames (D15)", function()
+    local function heldRegion()
+        local world, gadgetObj = mock.new()
+        world.frame = 0
+        world.regionOwner.r1 = 1
+        world.keyAt = function() return 'r1' end
+        world.setUnit(10, { x = 0, z = 0, team = 1 })
+        local id = GG.Objectives.Create({
+            type = 'control', forTeam = 1, reward = 50,
+            params = { regionKey = 'r1', holdFrames = 180 },
+        })
+        return world, gadgetObj, id
+    end
+
+    it("evaluates and completes when no exact period boundary is ever delivered", function()
+        local world, gadgetObj, id = heldRegion()
+        for _, f in ipairs({ 91, 137, 182, 271, 293 }) do
+            world.frame = f
+            gadgetObj:GameFrame(f)
+        end
+        assert.are.equal('complete', world.rp(id, 'state'))
+        assert.are.equal(1, #world.awards)
+    end)
+
+    it("banks the whole hold across one multi-period stall", function()
+        local world, gadgetObj, id = heldRegion()
+        world.frame = 91
+        gadgetObj:GameFrame(91)                 -- clock starts
+        assert.are.equal('active', world.rp(id, 'state'))
+        -- 3 509 frames in one delivered frame: D57's accrual banks the elapsed
+        -- interval, so the 180-frame hold is long since satisfied.
+        world.frame = 3600
+        gadgetObj:GameFrame(3600)
+        assert.are.equal('complete', world.rp(id, 'state'))
+    end)
+
+    it("does not evaluate more than once per period when frames are dense", function()
+        local world, gadgetObj = heldRegion()
+        local before = world.frame
+        -- 89 consecutive frames inside one period must yield no eval at all,
+        -- which is what keeps this a cadence fix and not a per-frame evaluator.
+        for f = 1, 89 do
+            world.frame = f
+            gadgetObj:GameFrame(f)
+        end
+        assert.are.equal(0, #world.awards)
+        assert.is_number(before)
+    end)
+end)
+
 describe("control objective: full lifecycle to award", function()
     it("completes on sustained hold and awards the team pool (zero participation)", function()
         local world, gadgetObj = mock.new()
