@@ -1676,6 +1676,17 @@ table LobbyGameInfo {
     /// Mirrors the field on GameDiscovery::GameInfo; the HTTP
     /// /api/games endpoint surfaces the same string verbatim.
     lighting: string;
+    /// True when the game is kept on disk but is not playable — its port
+    /// is unmaintained and starting it does not produce a match
+    /// (PLAN-endtoend.md D26). Discovery still lists it: the folder is
+    /// real, `/api/rooms/direct` still stages it for fixtures, and a game
+    /// that silently vanished from the dropdown would read as a bug. The
+    /// picker renders it disabled instead, and `POST /api/rooms` refuses
+    /// it. Read from the game config's `archived` field.
+    archived: bool = false;
+    /// Why it is archived, in one sentence, shown to the player on the
+    /// disabled option. Empty when `archived` is false.
+    archived_reason: string;
 }
 
 /// Reply to GameListRequest. Lists every game the lobby

@@ -45,6 +45,9 @@ import {
     resolveScenarioLabel, scenarioNote, scenarioOptionLabel, scenariosForMap,
 } from './scenario-picker.js';
 import {
+    defaultAIId, defaultGameId, gameOptionLabel, gameOptionState,
+} from './game-picker.js';
+import {
     getDefaultLobbyTemplates,
     type LobbyTemplates,
 } from '../ui/lobby/loader.js';
@@ -126,6 +129,12 @@ interface AvailableGameInfo {
     /// to what a third-party glTF viewer renders. Unknown values fall
     /// back to gameplay on the renderer side.
     lighting: string;
+    /// True when the game is kept on disk but does not run (PLAN-endtoend.md
+    /// D26). Drives the disabled option in the create-room picker; the server
+    /// enforces the same rule on POST /api/rooms.
+    archived: boolean;
+    /// One sentence on why, for the disabled option's tooltip.
+    archivedReason: string;
 }
 
 /// Mirrors ai/strategos/config.lua's Config.PROFILES allow-list. A
@@ -1036,11 +1045,21 @@ export class LobbyUI {
             sel.disabled = true;
             return;
         }
+        // An archived game stays listed and is rendered disabled with its
+        // reason (PLAN-endtoend.md D26). Disabled rather than dropped so a
+        // player looking for a game they know is in the tree finds it and
+        // learns why, instead of doubting the list; and the server refuses
+        // it on POST /api/rooms anyway, so the disable is what makes that
+        // 400 unreachable rather than silent — the shape D40 settled on for
+        // the faction team-select.
         sel.innerHTML = this.availableGames.map(g => {
-            const label = this.esc(g.displayName)
-                + (g.version ? ` (${this.esc(g.version)})` : '');
+            const label = this.esc(gameOptionLabel(g));
             const selAttr = g.id === this.selectedGameId ? ' selected' : '';
-            return `<option value="${this.esc(g.id)}"${selAttr}>${label}</option>`;
+            const state = gameOptionState(g);
+            const disAttr = state.disabled
+                ? ` disabled title="${this.esc(state.title)}"` : '';
+            return `<option value="${this.esc(g.id)}"${selAttr}${disAttr}>`
+                + `${label}</option>`;
         }).join('');
         sel.disabled = false;
         sel.onchange = () => {
@@ -1569,10 +1588,21 @@ export class LobbyUI {
                 addAIHtml =
                     `<div class="ai-add-row"><span class="muted">Loading AI list…</span></div>`;
             } else {
+                // Default to the AI the GAME ships, not option 0.
+                // AIDiscovery lists engine AIs first on purpose (a game AI
+                // sharing an id has to be able to override one), and a
+                // `<select>` with no `selected` takes option 0 — so on
+                // Metalstorm the host's Add AI defaulted to "Null AI
+                // (engine)", an opponent that issues no commands, in the
+                // one click that decides whether the room is a game
+                // (PLAN-endtoend.md D26).
+                const aiDefaultId = defaultAIId(this.availableAIs);
                 const options = this.availableAIs.map(ai => {
                     const label = this.esc(ai.displayName)
                         + (ai.isEngineProvided ? ' (engine)' : '');
-                    return `<option value="${this.esc(ai.id)}">${label}</option>`;
+                    const selAttr = ai.id === aiDefaultId ? ' selected' : '';
+                    return `<option value="${this.esc(ai.id)}"${selAttr}>`
+                        + `${label}</option>`;
                 }).join('');
                 // Default the new slot to a side nobody holds, so "Add AI" on
                 // a fresh room produces an *opponent* rather than a second
@@ -1868,9 +1898,15 @@ export class LobbyUI {
                     id: g.id ?? '', displayName: g.displayName ?? '',
                     description: g.description ?? '', version: g.version ?? '',
                     lighting: g.lighting ?? 'gameplay',
+                    archived: !!g.archived,
+                    archivedReason: g.archivedReason ?? '',
                 }));
+                // First PLAYABLE game, not games[0] — the list is
+                // alphabetical, so games[0] is `bar` on any tree that still
+                // carries the archived ports (PLAN-endtoend.md D26).
                 if (!this.selectedGameId && this.availableGames.length > 0) {
-                    this.selectedGameId = this.availableGames[0].id;
+                    this.selectedGameId =
+                        defaultGameId(this.availableGames) ?? '';
                 }
                 if (this.currentScreen === 'browser') this.renderGameOptions();
             }
@@ -1994,13 +2030,21 @@ export class LobbyUI {
                 description: g.description() ?? '',
                 version: g.version() ?? '',
                 lighting: g.lighting() ?? 'gameplay',
+                // Same field the HTTP path reads. Nothing currently sends
+                // GameListUpdate — the live list comes from
+                // `GET /api/games` — but an ingestion path that cannot see
+                // `archived` would show an archived game as playable the
+                // moment anything did send it (PLAN-endtoend.md D26/D59).
+                archived: g.archived(),
+                archivedReason: g.archivedReason() ?? '',
             });
         }
-        // Auto-select the first game so a user who immediately
-        // clicks "New Game" after login has a valid selection
-        // without having to touch the dropdown.
+        // Auto-select the first PLAYABLE game so a user who immediately
+        // clicks "New Game" after login has a valid selection without
+        // having to touch the dropdown — "valid" meaning one the create
+        // route will accept (PLAN-endtoend.md D26).
         if (!this.selectedGameId && this.availableGames.length > 0) {
-            this.selectedGameId = this.availableGames[0].id;
+            this.selectedGameId = defaultGameId(this.availableGames) ?? '';
         }
         if (this.currentScreen === 'browser') {
             this.renderGameOptions();

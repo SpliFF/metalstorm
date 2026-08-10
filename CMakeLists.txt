@@ -506,6 +506,11 @@ if(TEST_SOURCES)
         ${CMAKE_SOURCE_DIR}/rts/Server/RoomManager.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/ScenarioDiscovery.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/ScenarioDb.cpp
+        # GameDiscovery + its ConfigReader backend: test_game_discovery.cpp
+        # drives the real `archived` parse out of a real game.config.lua
+        # rather than hand-building GameInfo structs (PLAN-endtoend.md D26).
+        ${CMAKE_SOURCE_DIR}/rts/Server/GameDiscovery.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/ConfigReader.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/SoundEventCollector.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/StandingOrders.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/RulesParamKeyDict.cpp

@@ -82,6 +82,14 @@ bool LoadOne(const fs::path& folder, GameDiscovery::GameInfo& out) {
     // in modinfo; the proper fix is for gameconverter to fingerprint the
     // template and emit it at conversion time.
     std::string modelMaterialPort = cfg->GetString("modelMaterialPort", "");
+    // `archived` marks a game that is still on disk but does not run
+    // (PLAN-endtoend.md D26). Data-driven rather than an id list in the
+    // lobby binary, so archiving the next game is one line in its config
+    // and no C++ change. Defaults false: silence means playable, which is
+    // the only safe direction — a parse slip must not make a live game
+    // unpickable.
+    bool archived = cfg->GetBool("archived", false);
+    std::string archivedReason = cfg->GetString("archivedReason", "");
 
     // Fall back to the folder name if the config doesn't declare
     // one. Keeps the game visible even if an author forgot the
@@ -106,6 +114,8 @@ bool LoadOne(const fs::path& folder, GameDiscovery::GameInfo& out) {
     out.version = version;
     out.lighting = lighting;
     out.modelMaterialPort = modelMaterialPort;
+    out.archived = archived;
+    out.archivedReason = archivedReason;
     out.folderPath = folder.string();
     return true;
 }
@@ -142,13 +152,27 @@ std::vector<GameInfo> Discover(const std::string& gamesDir) {
     SLOG(SPRING_LOG_INFO, "discovered %zu game(s) in '%s'",
         out.size(), gamesDir.c_str());
     for (const auto& info : out) {
-        SLOG(SPRING_LOG_INFO, "  - %s (%s)%s%s",
+        SLOG(SPRING_LOG_INFO, "  - %s (%s)%s%s%s",
             info.displayName.c_str(), info.id.c_str(),
             info.version.empty() ? "" : " v",
-            info.version.c_str());
+            info.version.c_str(),
+            info.archived ? " [archived]" : "");
     }
 
     return out;
+}
+
+const GameInfo* FindById(const std::vector<GameInfo>& games,
+                         const std::string& id) {
+    for (const auto& g : games)
+        if (g.id == id) return &g;
+    return nullptr;
+}
+
+const GameInfo* DefaultPlayable(const std::vector<GameInfo>& games) {
+    for (const auto& g : games)
+        if (!g.archived) return &g;
+    return nullptr;
 }
 
 } // namespace GameDiscovery

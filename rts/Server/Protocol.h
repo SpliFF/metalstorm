@@ -1411,7 +1411,16 @@ inline std::vector<uint8_t> BuildAIListUpdate(const std::vector<AIInfoT>& ais) {
 /// caller's GameInfo type so we can pass in either the lobby's
 /// GameDiscovery::GameInfo directly or a thin proxy struct —
 /// anything with `id`, `displayName`, `description`, `version`,
-/// `lighting` string members works.
+/// `lighting` string members plus `archived`/`archivedReason` works.
+///
+/// This carries `archived` (PLAN-endtoend.md D26) even though nothing
+/// currently calls this builder — the live lobby serves its game list
+/// over `GET /api/games` and no caller of BuildGameListUpdate exists.
+/// The client still has a GameListUpdate handler, so leaving the flag
+/// off this path would make the two ingestions disagree the moment
+/// anything sent the message: one would show an archived game as
+/// playable. Two ingestion paths where only one can see a field is
+/// exactly the defect shape D59 was (`applyParams` vs `pull()`).
 template<typename GameInfoT>
 inline std::vector<uint8_t> BuildGameListUpdate(const std::vector<GameInfoT>& games) {
     flatbuffers::FlatBufferBuilder fbb(512);
@@ -1423,8 +1432,10 @@ inline std::vector<uint8_t> BuildGameListUpdate(const std::vector<GameInfoT>& ga
         auto descOff = fbb.CreateString(g.description);
         auto verOff = fbb.CreateString(g.version);
         auto lightOff = fbb.CreateString(g.lighting);
+        auto archReasonOff = fbb.CreateString(g.archivedReason);
         offsets.push_back(SpringWeb::CreateLobbyGameInfo(
-            fbb, idOff, nameOff, descOff, verOff, lightOff));
+            fbb, idOff, nameOff, descOff, verOff, lightOff, g.archived,
+            archReasonOff));
     }
     auto gamesVec = fbb.CreateVector(offsets);
     auto update = SpringWeb::CreateGameListUpdate(fbb, gamesVec);

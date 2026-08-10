@@ -3259,8 +3259,36 @@ int main(int argc, char *argv[]) {
         std::string gameId = j.value("game", "");
         if (name.empty())
           name = "Game";
-        if (gameId.empty() && !availableGames.empty())
-          gameId = availableGames[0].id;
+        // An omitted `game` used to mean `availableGames[0]`, which is
+        // alphabetical — on this tree that is `bar`, an archived game the
+        // check below would then refuse (PLAN-endtoend.md D26). Default to
+        // the first PLAYABLE game instead.
+        if (gameId.empty()) {
+          const GameDiscovery::GameInfo *fallback =
+              GameDiscovery::DefaultPlayable(availableGames);
+          if (fallback == nullptr)
+            return HttpAuth::JsonResponse(
+                500, R"({"error":"no playable game is installed"})");
+          gameId = fallback->id;
+        }
+        // An archived game is on disk but does not run (PLAN.md 2026-08-02:
+        // the BAR and ZK ports are archived, not deferred). The picker
+        // already renders it disabled, so reaching here means a hand-made
+        // request or a stale client; refusing keeps the rule in one place
+        // the client cannot skip. Same shape — and same deliberate
+        // exemption — as the retired-scenario check below: the
+        // `/api/rooms/direct` manifest path does NOT check this, because
+        // archived content is still stageable for fixtures and crash
+        // repros (PLAN-bulk-spawn-crash.md runs on ZK content).
+        {
+          const GameDiscovery::GameInfo *picked =
+              GameDiscovery::FindById(availableGames, gameId);
+          if (picked != nullptr && picked->archived)
+            return HttpAuth::JsonResponse(
+                400, std::string(R"({"error":"that game is archived and )"
+                                 R"(cannot be created","game":")") +
+                         HttpAuth::JsonEscape(gameId) + "\"}");
+        }
         if (mapId.empty())
           return HttpAuth::JsonResponse(400, R"({"error":"map is required"})");
 
@@ -3379,7 +3407,10 @@ int main(int argc, char *argv[]) {
                   "\"" + ",\"version\":\"" + HttpAuth::JsonEscape(g.version) +
                   "\"" + ",\"lighting\":\"" + HttpAuth::JsonEscape(g.lighting) +
                   "\"" + ",\"modelMaterialPort\":\"" +
-                  HttpAuth::JsonEscape(g.modelMaterialPort) + "\"}";
+                  HttpAuth::JsonEscape(g.modelMaterialPort) + "\"" +
+                  ",\"archived\":" + (g.archived ? "true" : "false") +
+                  ",\"archivedReason\":\"" +
+                  HttpAuth::JsonEscape(g.archivedReason) + "\"}";
         }
         json += "]";
         return HttpAuth::JsonResponse(200, json);

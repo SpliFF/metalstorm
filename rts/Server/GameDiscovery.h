@@ -90,6 +90,23 @@ struct GameInfo {
     /// reproduces. Surfaced verbatim in `/api/games`.
     std::string modelMaterialPort;
 
+    /// True when the game is kept on disk but cannot be played
+    /// (PLAN-endtoend.md D26). Read from the game config's `archived`
+    /// field; defaults false, so a game says nothing and stays playable.
+    ///
+    /// Discovery deliberately still RETURNS an archived game. The folder
+    /// is real, `/api/rooms/direct` still stages it from a manifest for
+    /// fixtures and crash repros, and dropping it here would make the
+    /// lobby disagree with the filesystem. What changes is who may pick
+    /// it: `/api/games` surfaces the flag, the create-room picker renders
+    /// the option disabled with `archivedReason`, and `POST /api/rooms`
+    /// refuses it — the same shape as ScenarioDiscovery's `retired`.
+    bool archived = false;
+
+    /// One sentence on why, shown to the player on the disabled option.
+    /// Empty when `archived` is false.
+    std::string archivedReason;
+
     /// Absolute path to the game folder on disk (e.g. "data/games/papertanks").
     /// Used for content loading and AI discovery.
     std::string folderPath;
@@ -101,5 +118,21 @@ struct GameInfo {
 /// vector — the lobby will still run, it just has no games to
 /// offer until one is added.
 std::vector<GameInfo> Discover(const std::string& gamesDir);
+
+/// Look one game up by id. Returns nullptr when it isn't there.
+const GameInfo* FindById(const std::vector<GameInfo>& games,
+                         const std::string& id);
+
+/// The game a create request gets when it names none — the first
+/// PLAYABLE one in discovery order, or nullptr when every discovered
+/// game is archived.
+///
+/// The old rule here was `games[0]`, which is alphabetical and therefore
+/// picked `bar` on this tree: the server's own fallback default was a
+/// game it would now refuse (PLAN-endtoend.md D26). Returning nullptr
+/// rather than falling back to an archived game is deliberate — a
+/// caller that cannot name a playable game should say so, not stage a
+/// room that cannot start.
+const GameInfo* DefaultPlayable(const std::vector<GameInfo>& games);
 
 } // namespace GameDiscovery
