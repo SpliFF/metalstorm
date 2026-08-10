@@ -12,6 +12,7 @@
 
 import * as flatbuffers from 'flatbuffers';
 import { mapListStatus } from './map-list-status';
+import { formatJoinPreview, type WarJoinPreview } from './join-preview';
 import { Connection, type ConnectionState } from '../core/connection.js';
 import { CONFIG, stampUrl } from '../config.js';
 import { ClientPayload } from '../protocol/spring-web/client-payload.js';
@@ -68,6 +69,10 @@ interface RoomInfo {
     /// than a game. Joining one goes through /api/replays/watch, not
     /// /api/rooms/join — the watch route is what knows about the recording.
     replayFile?: string;
+    /// 'skirmish' | 'persistent' (task 1). The browser has to tell a war from
+    /// a skirmish for every row — a war is the only kind that gets a pre-join
+    /// preview, because it is the only kind whose seat is not chosen.
+    sessionKind?: string;
 }
 
 interface RoomPlayerInfo {
@@ -212,6 +217,8 @@ export class LobbyUI {
     private pendingRejoinRoomId = 0;
     private authToken = '';
     private roomEventSource: EventSource | null = null;
+    /// Per-war pre-join preview for THIS account, keyed by room id (§2.4).
+    private warPreviews = new Map<number, WarJoinPreview>();
     /// Tracks the room state at last full render so patchRoom() can
     /// detect when the action buttons need to change (state bracket
     /// shift) and fall back to a full re-render.
@@ -518,7 +525,16 @@ export class LobbyUI {
             state: r.state ?? 0, hasPassword: false,
             hostName: r.players?.find((p: any) => p.is_host)?.username ?? '',
             replayFile: r.replay_file,
+            sessionKind: r.session_kind,
         }));
+
+        // Pre-join legibility (§2.4, task 5). Refreshed with the list rather
+        // than per card: the answer is per-account and changes when anyone
+        // else takes a seat, so it cannot ride the (shared) room broadcast,
+        // but one call per list tick is cheap where N calls per tick is not.
+        // Fire-and-forget — a war row renders without the line if it fails.
+        if (this.rooms.some(r => r.sessionKind === 'persistent'))
+            void this.refreshWarPreviews();
 
         // Check if our current room still exists
         if (this.currentRoom) {
@@ -537,6 +553,22 @@ export class LobbyUI {
         }
 
         if (this.currentScreen === 'browser') this.renderRoomList();
+    }
+
+    /// Ask the lobby what joining each war would do to THIS account, and
+    /// re-render if we are looking at the browser. Never throws outward: a
+    /// preview is an enrichment, and a lobby that cannot answer must still
+    /// list its wars.
+    private async refreshWarPreviews(): Promise<void> {
+        try {
+            const rows = await this.lobbyPost('/api/wars/join-preview');
+            if (!Array.isArray(rows)) return;
+            this.warPreviews.clear();
+            for (const p of rows as WarJoinPreview[]) this.warPreviews.set(p.room_id, p);
+            if (this.currentScreen === 'browser') this.renderRoomList();
+        } catch (e) {
+            console.warn('[lobby] war join-preview failed', e);
+        }
     }
 
     private updateCurrentRoomFromJson(r: any): void {
@@ -1316,11 +1348,23 @@ export class LobbyUI {
             const spectateHtml = (!r.replayFile && r.state < 3 && r.state < 5)
                 ? `<button class="spectate-btn" data-id="${r.id}">Spectate</button>`
                 : '';
+            // §2.4: a war's card says what joining it will DO to you — which
+            // side your faction puts you on, whether the seat is already
+            // yours, and the authority you arrive with. Escaped like every
+            // other interpolation here: the sentence is built from server
+            // numbers, but the faction key inside it is account data.
+            const preview = this.warPreviews.get(r.id);
+            const previewText = preview ? formatJoinPreview(preview) : '';
+            const previewHtml = previewText
+                ? `<div class="room-preview${preview!.will_fight ? '' : ' room-preview-watch'}">` +
+                  `${this.esc(previewText)}</div>`
+                : '';
             return renderTemplate(this.templates.browserRoomEntry, {
                 id: r.id,
                 name: this.esc(r.name),
                 state: ROOM_STATE_LABELS[r.state] || '?',
                 detail,
+                preview_html: previewHtml,
                 join_label: joinLabel,
                 disabled_attr: r.state >= 5 ? ' disabled' : '',
                 spectate_html: spectateHtml,

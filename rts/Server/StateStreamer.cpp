@@ -1428,8 +1428,11 @@ void StateStreamer::BroadcastSendToUnsynced(int) {
 }
 
 // Player/team status changes — PlayerChanged (spec/team change),
-// PlayerRemoved (disconnect), TeamDied. The server fires the matching
-// eventHandler callins into its own synced Lua directly; this batch
+// PlayerAdded (mid-game join), PlayerRemoved (disconnect), TeamDied. The
+// server fires the matching callins into its own synced Lua at the sites
+// that decide them (`FireSyncedPlayerAdded`/`Removed` — NOT through
+// eventHandler, which cannot reach a synced handle for the three player
+// events; see PlayerOnboarding.h); this batch
 // carries them across the network to the unsynced LuaUI worker, which
 // updates its roster and fans out to the widget callins. Reliable,
 // low-frequency, unfiltered (player/team identity + life/death are

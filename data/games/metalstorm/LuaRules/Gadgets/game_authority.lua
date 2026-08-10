@@ -858,16 +858,17 @@ end
 --- TOP-UP, NOT A DEPOSIT, and that is the entire design. Two things make the
 --- obvious `pool = pool + amount` wrong, and they pull in the same direction:
 ---
----  * PlayerRemoved below is supposed to merge a departing player's pool into
----    the TEAM pool, so the saved authority is in the team's hands and may
----    already be spent — adding it back would MINT a second copy.
----  * And in the live build that merge does not actually run (verified
----    2026-08-11: after a real disconnect the ledger shows no `leaver_merge`
----    and the player's pool is untouched — the synced PlayerRemoved callin is
----    not reaching gadgets, which is also why a mid-war joiner never gets a
----    join grant; filed against task 5, whose whole subject is that hook).
----    So a reconnecting player frequently still HOLDS the pool being restored,
----    and a deposit would double it once per reload.
+---  * PlayerRemoved below merges a departing player's pool into the TEAM
+---    pool, so the saved authority is in the team's hands and may already be
+---    spent — adding it back would MINT a second copy.
+---  * And that merge did NOT run at all until task 5 (2026-08-11): the three
+---    player callins are classified unsynced, so the engine refuses to
+---    register a synced gadget for them and `eventHandler.PlayerRemoved`
+---    reached nobody here. The server now delivers PlayerAdded/PlayerRemoved
+---    to the synced state explicitly (rts/Server/PlayerOnboarding.h), but a
+---    war RESUMED from a fresh process still restores a pool the new sim
+---    never held, so a reconnecting player can still be holding the pool
+---    being restored and a deposit would double it.
 ---
 --- Restoring to a REMEMBERED LEVEL is right under both: it makes up the
 --- shortfall and nothing more, so it is idempotent, un-farmable, and a no-op
@@ -909,9 +910,10 @@ end
 --- the server only calls it past the absence window (measured against the
 --- binding's own `last_seen_at`), and it is a TOP-UP like RestorePool above —
 --- it mints only the shortfall to `joinGrant`, so a player who still holds a
---- pool gets nothing. Without that second guard, the live build's missing
---- leaver merge (see RestorePool) would have made a reconnect every five
---- minutes an income stream.
+--- pool gets nothing. Without that second guard, a reconnect every five
+--- minutes would have been an income stream on any war whose leaver merge did
+--- not run — which was EVERY war before task 5 wired the synced PlayerRemoved
+--- delivery, and is still a resumed war's first minute (see RestorePool).
 function GG.Authority.GrantRejoinStipend(playerID)
     if not playerID then return 0 end
     local teamID = playerTeam(playerID)

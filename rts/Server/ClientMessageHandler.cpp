@@ -14,6 +14,8 @@
 #include "WarPlayerBindings.h"
 #include "WarRejoinPolicy.h"
 #include "WarStateSim.h"
+#include "PlayerOnboarding.h"
+#include "PlayerTeamEventCollector.h"
 #include "SyncedInputJournal.h"
 #include "ReplayPlayer.h"
 #include "ReplayControlDeck.h"
@@ -431,6 +433,55 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                 // overwrites in place and the vector does not grow.
                 playerHandler.AddPlayer(p);
                 clientPlayerNum[msg.clientId] = pNum;
+
+                // ── The onboarding hook (task 5, §2.4) ─────────────────────
+                // A player seated after GameStart is a mid-game joiner, and
+                // until now nothing told the game about them: `PlayerAdded` is
+                // an UNSYNCED event that a synced LuaRules handle is refused
+                // registration for (the whole argument is in
+                // PlayerOnboarding.h), so `game_authority.lua`'s join grant
+                // only ever ran from its own GameStart roster loop. A dynamic
+                // joiner (task 2) therefore arrived with no authority pool at
+                // all and could not issue a single order.
+                //
+                // It lives HERE, inside the shared seat installer, rather than
+                // next to `applyWarBinding` in the two live auth paths, and
+                // that placement is the determinism: `bindPlayer` is also the
+                // replay re-execution's seat installer, so a recorded join
+                // grants in the replay exactly where it granted live. The auth
+                // that reaches this point is already journalled
+                // (`RecordAuthIdentity`), so there is no new input to record.
+                //
+                // Ordered BEFORE `applyWarBinding`'s restore on both live
+                // paths, because the two compose in that direction only: the
+                // grant mints a floor and the restore is a TOP-UP to a
+                // remembered level, so grant-then-restore lands on
+                // max(grant, remembered) while restore-then-grant would add a
+                // fresh 100 on top of a fully-restored pool, once per rejoin.
+                const OnboardingHook hook =
+                    DecideOnboardingHook(pNum, team, spectator,
+                                         ctx.sim.HasGameStarted());
+                if (hook == OnboardingHook::Fire) {
+                    SLOG(SPRING_LOG_NOTICE,
+                        "onboarding '%s' (player %d, team %d): mid-game join, "
+                        "firing PlayerAdded into synced Lua",
+                        name.c_str(), pNum, team);
+                    FireSyncedPlayerAdded(pNum);
+                    // The unsynced half, for symmetry with the disconnect
+                    // drain: `eventHandler` for any in-process unsynced client,
+                    // and the collector that carries it over the wire to every
+                    // connected LuaUI worker (widget:PlayerAdded). Nothing had
+                    // ever pushed a PlayerAdded event, so the other players'
+                    // widgets learned about a mid-war arrival only from the
+                    // roster broadcast.
+                    eventHandler.PlayerAdded(pNum);
+                    playerTeamEvents.Push({PlayerTeamEventData::PlayerAdded, 0,
+                                           static_cast<uint32_t>(pNum)});
+                } else {
+                    SLOG(SPRING_LOG_INFO,
+                        "onboarding '%s' (player %d, team %d): skipped — %s",
+                        name.c_str(), pNum, team, OnboardingHookToString(hook));
+                }
             };
 
             // Register the sim-side player for a LIVE auth and return the

@@ -50,6 +50,7 @@
 #include "Server/RoomManager.h"
 #include "Server/WarPlayerBindings.h"
 #include "Server/WarStateSim.h"
+#include "Server/PlayerOnboarding.h"
 #include "Server/MapMetadata.h"
 #include "Server/LuaExecEngine.h"
 #include "Server/LuaDebugger.h"
@@ -1469,6 +1470,11 @@ int main(int argc, char* argv[])
                 if (r.playerId >= 0) {
                     playerHandler.PlayerLeft(r.playerId, r.subKind);
                     eventHandler.PlayerRemoved(r.playerId, r.subKind);
+                    // The synced half, which `eventHandler` does not carry —
+                    // see the live drain below and PlayerOnboarding.h. Without
+                    // this the replay's leaver keeps a pool the recording had
+                    // already merged back into the team.
+                    FireSyncedPlayerRemoved(r.playerId, r.subKind);
                     playerTeamEvents.Push({PlayerTeamEventData::PlayerRemoved, r.subKind,
                                            static_cast<uint32_t>(r.playerId)});
                 }
@@ -2363,6 +2369,15 @@ int main(int argc, char* argv[])
                     syncedinput::Journal().RecordDisconnect(pNum, leaveReason);
                     playerHandler.PlayerLeft(pNum, leaveReason);
                     eventHandler.PlayerRemoved(pNum, leaveReason);
+                    // ...and the SYNCED half, which the line above does NOT
+                    // deliver and never did (task 5). PlayerRemoved is an
+                    // UNSYNCED event, so `CEventHandler::InsertEvent` refuses
+                    // the synced LuaRules handle's registration outright and
+                    // `eventHandler.PlayerRemoved` iterates a list the gadgets
+                    // are not in — which is why the leaver-merge in
+                    // game_authority.lua had never once run. Full argument in
+                    // PlayerOnboarding.h.
+                    FireSyncedPlayerRemoved(pNum, leaveReason);
                     // Forward to the client LuaUI worker (widget:PlayerRemoved).
                     playerTeamEvents.Push({PlayerTeamEventData::PlayerRemoved, leaveReason,
                                            static_cast<uint32_t>(pNum)});

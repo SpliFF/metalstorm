@@ -16,6 +16,7 @@
 #include "Server/ReplayFile.h"
 #include "Server/RoomManager.h"
 #include "Server/WarPlayerBindings.h"
+#include "Server/JoinPreview.h"
 #include "Server/SqliteThreading.h"
 
 #include "Server/AI/AIDiscovery.h"
@@ -3822,6 +3823,112 @@ int main(int argc, char *argv[]) {
   //   - Last human leaves non-persistent room → room abandoned, game killed
   //   - Host leaves with others present → host transferred
   //   - Persistent room → stays alive with 0 humans
+
+  // POST /api/wars/join-preview — what will happen to ME if I join these wars?
+  //
+  // PLAN-metalstorm-lobby.md §2.4, task 5: "the lobby's job is to make this
+  // legible pre-join ('you'll join Side B near the River Line with 100
+  // authority')". A war is the one room kind where the answer is neither
+  // obvious nor chosen — the side comes from an immutable faction the player
+  // cannot change, the seat may already be held from a previous session, and
+  // the authority they arrive with is one of three different things.
+  //
+  // POST rather than GET only because a GET handler in this server cannot see
+  // the Authorization header (`HttpGetHandler` takes the url alone), and this
+  // answer is per-account by construction. Body is optional and ignored.
+  //
+  // All wars in one response, not one call per room: the browser refreshes the
+  // whole list on every SSE tick, and N round-trips per tick is a lot of
+  // traffic for a line of text.
+  net.AddHttpPost(
+      "/api/wars/join-preview", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        auto user = db.FindUserById(userId);
+        if (!user)
+          return HttpAuth::JsonResponse(500, R"({"error":"user not found"})");
+        const std::string faction = user->factionId.value_or("");
+        const int64_t now = static_cast<int64_t>(std::time(nullptr));
+
+        nlohmann::json out = nlohmann::json::array();
+        for (const auto *room : rooms.GetAllRooms()) {
+          if (!room || room->sessionKind != SessionKind::PersistentWar)
+            continue;
+
+          // Population per side comes from the BINDING table, not from the
+          // room's player list: a war's fighters are seated by the game
+          // server on dynamic join and never appear in `room->players` at
+          // all, so counting the room would report a full war as empty. The
+          // caller's own binding is excluded from the count for the same
+          // reason `DecideRejoin` grants `bypassCapacity` — a returning
+          // player must not be counted against the seat they are standing in.
+          const auto sides = room->SideTeams();
+          int factionTeam = -1;
+          if (!faction.empty()) {
+            if (const auto t = TeamForFactionIn(sides, faction))
+              factionTeam = static_cast<int>(*t);
+          }
+          unsigned humansOnSide = 0;
+          bool hasBinding = false;
+          int boundTeam = -1;
+          int64_t absenceSec = 0;
+          double savedPool = 0.0;
+          bool hasSavedState = false;
+          for (const auto &b :
+               WarPlayerBindings::ForRoom(db.Handle(), room->id)) {
+            if (b.accountId == userId) {
+              hasBinding = true;
+              boundTeam = b.team;
+              absenceSec = now - b.lastSeenAt;
+              savedPool = b.state.authorityPool;
+              hasSavedState = b.HasSavedState();
+              continue;
+            }
+            if (factionTeam >= 0 && b.team == factionTeam)
+              humansOnSide++;
+          }
+
+          // The join grant the sim will actually mint. Same modoption
+          // `game_authority.lua` reads, and the same default (100) — a
+          // preview quoting a number the gadget does not use is worse than
+          // no preview at all.
+          double joinGrant = 100.0;
+          if (auto it = room->modOptions.find("authority_join_grant");
+              it != room->modOptions.end()) {
+            try {
+              joinGrant = std::stod(it->second);
+            } catch (...) {
+              // Leave the default: a malformed modoption is the room's
+              // problem and must not 500 the whole browser.
+            }
+          }
+
+          // The lobby never passes `--war-side-capacity`, so every war it
+          // spawns runs on the compiled default and this preview is exact.
+          // When task 7 makes capacity per-side and configurable, it has to
+          // thread the same value into the launch args AND to here, or the
+          // preview starts promising seats the game server refuses.
+          const JoinPreview p = PreviewJoin(
+              room->sessionKind, faction, sides, humansOnSide,
+              WAR_SIDE_CAPACITY_DEFAULT, hasBinding, boundTeam, absenceSec,
+              savedPool, hasSavedState, joinGrant);
+
+          nlohmann::json jp;
+          jp["room_id"] = room->id;
+          jp["will_fight"] = p.willFight;
+          jp["reason"] = DynamicJoinOutcomeToString(p.outcome);
+          jp["team"] = p.team;
+          jp["side"] = p.side;
+          jp["humans_on_side"] = p.humansOnSide;
+          jp["capacity_per_side"] = p.capacityPerSide;
+          jp["authority"] = p.authority;
+          jp["authority_source"] = JoinAuthoritySourceToString(p.authoritySource);
+          jp["returning"] = p.returning;
+          out.push_back(std::move(jp));
+        }
+        return HttpAuth::JsonResponse(200, out.dump());
+      });
 
   // POST /api/rooms/join — join a room
   net.AddHttpPost(

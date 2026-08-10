@@ -341,7 +341,10 @@ Events currently bridged through `LuaScriptContext::HandleEvent()` (ScriptEventD
 
 - `GameFrame`, `GameStart`, `GamePreload`, `GameOver`
 - `UnitCreated`, `UnitFinished`, `UnitDestroyed`, `UnitIdle`, `UnitDamaged`, `UnitMoved`
-- `TeamDied`, `PlayerChanged`, `PlayerAdded`, `PlayerRemoved`
+- `TeamDied`, `PlayerChanged`, `PlayerAdded`, `PlayerRemoved` (⚠ the three
+  player events are `UNSYNCED_BIT`, so this bridge reaches *unsynced* handles
+  only — synced gadgets are served by `Server/PlayerOnboarding.h`'s explicit
+  delivery instead; see the persistent-war section below)
 
 Events **not yet bridged** (Lua still receives these via CLuaHandle's direct CEventHandler registration):
 
@@ -758,9 +761,9 @@ reverse. The POOL is a conserved resource and goes stale in
 gets the onboarding stipend instead.
 
 State moves between the sim and the row through `Server/WarStateSim.h/.cpp`.
-Capture is a plain rules-param read, run on disconnect **before**
-`eventHandler.PlayerRemoved` (the gadget is supposed to merge a leaver's pool
-into the team pool, so capturing after it would record zero for everyone) plus a
+Capture is a plain rules-param read, run on disconnect **before** the
+PlayerRemoved delivery (the gadget merges a leaver's pool into the team pool, so
+capturing after it would record zero for everyone) plus a
 60 s sweep, which is what survives a `kill -9`. Restore is deliberately NOT the
 mirror image: it calls `GG.Authority.RestorePool` / `GG.Teams.RestoreScore` in
 synced Lua, both **top-ups to a remembered level** rather than deposits, so they
@@ -769,6 +772,41 @@ are called directly into the synced state, never over `RecvLuaMsg` — any clien
 can forge one of those, which would hand every player a "restore my pool to N"
 verb. Replays skip the whole path (a replay has no db to ask, and a dynamically
 joined session already cannot replay — its team is not in the recorded roster).
+
+**The three player callins do NOT reach synced gadgets through `eventHandler` —
+the server delivers them by hand.** `PlayerChanged`/`PlayerAdded`/`PlayerRemoved`
+are declared `MANAGED_BIT | UNSYNCED_BIT` in `System/Events.def` (verbatim
+upstream), and `CEventHandler::InsertEvent` refuses the registration outright for
+any client that reports itself synced. So `eventHandler.PlayerRemoved(...)`
+iterates a list the synced LuaRules handle is not and cannot be in — which is why
+`game_authority.lua`'s leaver merge had never once run, and why a mid-war dynamic
+joiner arrived with no authority pool at all. Nothing was forgotten; the event is
+unsynced *by classification*.
+
+`Server/PlayerOnboarding.h/.cpp` is the deliberate, named deviation
+(FIDELITY-STANDIN — allowed by the client-server carve-out, and confined to two
+call sites): `FireSyncedPlayerAdded` / `FireSyncedPlayerRemoved` invoke the
+callin on `luaRules->syncedLuaHandle` directly. Safe here and not upstream
+because this engine is server-authoritative, there is exactly one synced Lua
+state, and the seat change is already in the synced input journal
+(`RecordAuthIdentity` / `RecordDisconnect`) — so a replay re-executes the same
+delivery. `PlayerAdded` fires from `bindPlayer` in ClientMessageHandler (the
+seat installer shared by the token, password and replay paths, which is what
+makes it deterministic) gated by `DecideOnboardingHook`: a seated non-spectator
+human, and only **after** GameStart — before it, `gadget:GameStart`'s own roster
+loop onboards them, and a grant issued earlier would land on team pools
+GameStart is about to reset. `PlayerRemoved` fires from the disconnect drain and
+from the replay feed, in both cases immediately after `eventHandler.PlayerRemoved`
+(which still serves any unsynced client) and after the war-state capture.
+
+**Pre-join legibility:** `POST /api/wars/join-preview` (lobby, authed) answers
+"what happens to ME if I join this war" for every persistent war at once — side,
+seat count, and the authority the player arrives with. It composes
+`DecideDynamicJoin` and `DecideRejoin`, the same pure functions the game server
+seats with (`Server/JoinPreview.h`), so the promise cannot drift from the rule;
+per-side population comes from `war_player_bindings`, not the room's player list,
+because a war's fighters are seated by the game server and never appear in the
+room roster at all.
 
 **Game-server lifetime:** a non-persistent game server self-terminates after
 5 min with zero connected clients (120 s startup grace); persistent rooms run
