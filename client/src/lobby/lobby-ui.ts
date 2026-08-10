@@ -38,6 +38,7 @@ import {
     defaultTeamForNewSlot, renderSideOptions, sideForFaction, warSidesForRoom,
 } from './war-sides.js';
 import { decideRoomTransition } from './room-transition.js';
+import { LOGOUT_CLEARED_KEYS, runLogout } from './logout.js';
 import type { AvailableScenarioInfo } from './scenario-picker.js';
 import {
     defaultScenarioFor, noWarNote, noWarReason, parseScenarioList,
@@ -727,6 +728,51 @@ export class LobbyUI {
         }
     }
 
+    /**
+     * Leave the account entirely (PLAN-endtoend.md D45). The ordering and the
+     * best-effort semantics are `runLogout`'s; this supplies the effects.
+     */
+    async logout(): Promise<void> {
+        const token = this.authToken;
+        await runLogout({
+            hasToken: token !== '',
+            inRoom: this.currentRoom !== null,
+            leaveRoom: () => this.lobbyPost('/api/rooms/leave'),
+            revokeToken: () => fetch(`${CONFIG.httpUrl}/api/auth/logout`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`,
+                },
+                body: '{}',
+            }),
+            clearLocalState: () => {
+                this.stopPolling();
+                this.clearParked();
+                for (const key of LOGOUT_CLEARED_KEYS) localStorage.removeItem(key);
+                this.authToken = '';
+                this.myPlayerId = 0;
+                this.myFaction = '';
+                this.currentRoom = null;
+                this.rooms = [];
+                this.replays = null;
+                this.pendingRejoinRoomId = 0;
+                this.autoLoginAttempts = 0;
+            },
+        });
+        console.log('[lobby] logged out');
+        this.showLogin();
+    }
+
+    /// Wire the header's logout button. Shared by the browser and room
+    /// screens; both ship one, and a game's template override may ship
+    /// neither — hence the null check rather than a `!` assertion.
+    private wireLogoutButton(): void {
+        const btn = document.getElementById('logout-btn') as HTMLButtonElement | null;
+        if (!btn) return;
+        btn.onclick = () => { void this.logout(); };
+    }
+
     /// Land on the most appropriate lobby screen after the game canvas
     /// is hidden (e.g. after the user clicks Quit mid-game). If the
     /// player is still a member of a room, show the room view;
@@ -837,7 +883,14 @@ export class LobbyUI {
             this.refreshGameList();
         }
 
-        this.container.innerHTML = this.templates.browser;
+        // D45: the header carries the signed-in account name so the player
+        // can see *which* account they are about to log out of — the whole
+        // point of the control on a shared machine. Escaped here because
+        // renderTemplate substitutes raw.
+        this.container.innerHTML = renderTemplate(this.templates.browser, {
+            account_name: this.esc(localStorage.getItem('springrts-username') ?? ''),
+        });
+        this.wireLogoutButton();
         document.getElementById('create-room-btn')!.onclick = () => {
             document.getElementById('create-form')!.style.display = 'block';
         };
@@ -1571,6 +1624,7 @@ export class LobbyUI {
         });
 
         document.getElementById('leave-btn')!.onclick = () => this.leave();
+        this.wireLogoutButton();
         document.getElementById('ready-btn')?.addEventListener('click',
             () => this.ready(!myPlayer?.ready));
         document.getElementById('enlist-btn')?.addEventListener('click',

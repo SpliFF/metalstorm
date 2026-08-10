@@ -7,6 +7,12 @@
              empty "Replays" panel would read as a broken feature rather than
              an unconfigured one. -->
         <button id="show-replays-btn" style="display:none">▶ Replays</button>
+        <!-- Account + logout (PLAN-endtoend.md D45). Until this existed the
+             only way off an account was clearing localStorage by hand, so a
+             shared machine could not be handed over. `account_name` is
+             pre-escaped by the caller. -->
+        <span class="lobby-account" id="account-name">{{account_name}}</span>
+        <button id="logout-btn" class="secondary">Log out</button>
     </div>
     <div id="room-list" class="room-list"></div>
     <div id="replay-panel" class="replay-panel" style="display:none">

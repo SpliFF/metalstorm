@@ -256,6 +256,8 @@ inline int64_t ValidateToken(Database& db, const std::string& authHeader) {
 /// Register auth HTTP endpoints on a NetworkServer.
 /// POST /api/auth/login  — login with username+password, returns token
 /// POST /api/auth/register — register a new account
+/// POST /api/auth/validate — check whether a token is still valid
+/// POST /api/auth/logout — revoke the presented token (D45)
 /// `factionRegistry` is the flattened key→FactionInfo map built at lobby
 /// startup (see lobby_main.cpp's per-game FactionData::Discover loop) —
 /// registration validates the required `faction` field against it
@@ -401,6 +403,36 @@ inline void RegisterEndpoints(NetworkServer& net, Database& db,
             json += ",\"faction\":\"" + JsonEscape(*user->factionId) + "\"";
         json += "}";
         return JsonResponse(200, json);
+    });
+
+    // POST /api/auth/logout — revoke the presented session token.
+    //
+    // PLAN-endtoend.md D45: there was no way off an account at all, so a
+    // shared machine could not be handed over and a mistyped registration
+    // could not be abandoned. Clearing the browser's localStorage is not a
+    // logout — the session row lives in the DB until it ages out, so the
+    // token stays valid for 24h in anything that copied it.
+    //
+    // Public rather than TokenRequired, and 200 even when there is nothing to
+    // revoke: a logout must succeed at exactly the moment the token has gone
+    // bad, or the client is stuck on an account it cannot leave. `revoked`
+    // reports which happened. Only the holder of a token can name it, so
+    // there is no authorisation to do beyond parsing the header.
+    net.AddHttpPost("/api/auth/logout", RouteAuth::Public, [&db](const std::string&, const std::string&, const HttpRequestHeaders& headers) -> HttpResponse {
+        const std::string& authHeader = headers.authorization;
+        if (authHeader.rfind("Bearer ", 0) != 0) {
+            // Basic-auth callers hold no session row (ValidateAuth logs them
+            // in per request), so there is nothing to revoke.
+            return JsonResponse(200, R"({"ok":true,"revoked":false})");
+        }
+        std::string token = authHeader.substr(7);
+        if (token.empty()) {
+            return JsonResponse(200, R"({"ok":true,"revoked":false})");
+        }
+        const bool wasValid = db.ValidateSession(token, 86400) > 0;
+        db.RevokeSession(token);
+        return JsonResponse(200, wasValid ? R"({"ok":true,"revoked":true})"
+                                          : R"({"ok":true,"revoked":false})");
     });
 }
 

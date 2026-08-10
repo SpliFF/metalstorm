@@ -3,6 +3,10 @@
         <h2>{{name}}</h2>
         <span class="room-badge">{{state}}</span>
         <button id="leave-btn" class="secondary">Leave</button>
+        <!-- D45: logout is reachable from the room too, not just the browser.
+             `logout()` leaves the room first, so this is not a way to strand
+             a seat — see lobby-ui.ts. -->
+        <button id="logout-btn" class="secondary">Log out</button>
     </div>
     <!-- Map + war line (PLAN-endtoend.md D10). The war a room will stage is
          derived from its map, so it has to be visible before Start — a

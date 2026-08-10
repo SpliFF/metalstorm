@@ -163,6 +163,16 @@ public:
     static HttpResponse SafeInvokeForTest(const std::string& path,
                                            const std::function<HttpResponse()>& fn);
 
+    /// Test hook: the POST handler registered for the exact pattern `pattern`,
+    /// or an empty function if there is none. Lets a unit test drive a real
+    /// registered route's *behaviour* — not just its RouteAuth tag — without a
+    /// live socket, which is the gap test_route_auth.cpp's header note
+    /// describes ("asserts only that this test typed the tag it expected").
+    /// Exact-match only, and it deliberately skips the RouteAuth enforcement
+    /// DispatchPost applies: this is for testing what a handler does once it
+    /// runs, so a caller must reason about auth itself.
+    HttpPostHandler FindPostHandlerForTest(const std::string& pattern) const;
+
 private:
     void NetworkThreadFunc(int port);
 

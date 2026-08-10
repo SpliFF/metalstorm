@@ -638,6 +638,7 @@ byte-identical served copy.
 | `POST /api/admin/ban` / `unban` / `banned` | AdminOnly. Account ban (+ immediate session revoke) / unban / ban list. PLAN-gm-tools task 4. |
 | `POST /api/admin/set-faction` | AdminOnly, audited. Override an account's permanent faction (`{username, faction}`). The only writer of `users.faction_id` after sign-up — faction is immutable in the normal flow, so there is deliberately no player-facing equivalent. PLAN-metalstorm-lobby §1b. |
 | `POST /api/auth/{login,register,validate}` | All three echo the account's `faction` when it has one (omitted, never empty, for dev/manifest accounts) — login and validate are the only ways a returning session can learn it. PLAN-endtoend D40. |
+| `POST /api/auth/logout` | Public. Deletes the session row named by the request's own `Bearer` token, and answers **200 either way** (`{"ok":true,"revoked":<bool>}`). Public rather than TokenRequired on purpose: `DispatchPost` would 401 a dead token before the handler ran, and an expired session you cannot leave is the defect. `revoked:false` for an unknown token, an empty `Bearer`, no header, or Basic auth (which holds no session row at all). Client side, `LobbyUI.logout()` leaves the room *before* revoking — see [Logout](#logout). PLAN-endtoend D45. |
 | `POST /api/rooms/team` | A player's own side choice. **403 `{"error":"you fight for <faction>","team":<n>}`** when the room declares a side for their faction and the request names a different team — the seating rule has to hold against the dropdown too, or it is undone by the next click. Enforced at the route (where a human chooses), not in `RoomManager::SetTeam`, which stays permissive for the manifest paths. |
 
 ### Game server (`spring-server`)
@@ -691,6 +692,22 @@ Client (SSE room-state updates) sees state≥Loading + port>0 → connects:
 forever. The lobby reaps abandoned non-persistent rooms (no live game, idle
 >30 min) and, on startup, resets orphaned Loading/Active rooms (no adopted
 server) back to Filling. See PLAN-lobby-game-connection.md.
+
+### Logout
+```
+Client: header "Log out" (browser + room screens) → LobbyUI.logout()
+  → runLogout() (client/src/lobby/logout.ts) — order is the whole point:
+  1. POST /api/rooms/leave   (only while in a room; needs the live token)
+  2. POST /api/auth/logout   (deletes the session row)
+  3. clear LOGOUT_CLEARED_KEYS + reset LobbyUI state → showLogin()
+```
+Steps 1 and 2 are best-effort and step 3 is unconditional: a player who asked
+to leave an account must not stay signed in to it because the network was
+down. Step 1 comes first because a host who revokes first strands their own
+seat — and their room — until the lobby reaps it. `LOGOUT_CLEARED_KEYS`
+includes `springrts-game-room`/`-game-port`, which are the *rejoin* keys, not
+auth keys: leaving them behind drops the **next** account on that browser into
+the previous account's room. PLAN-endtoend D45.
 
 ### Gameplay Loop
 ```

@@ -121,6 +121,16 @@ button.danger:hover { background: #cc3333; }
 }
 .lobby-header h2 { margin: 0; flex: 1; }
 
+/* Signed-in account label beside the logout button (D45). Collapses to
+   nothing when the name is empty, so a header rendered before the username
+   is known does not reserve a gap. */
+.lobby-account {
+    font-size: 12px;
+    color: #9aa4b2;
+    white-space: nowrap;
+}
+.lobby-account:empty { display: none; }
+
 .room-badge {
     background: #334;
     padding: 3px 10px;

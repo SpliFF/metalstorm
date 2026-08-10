@@ -974,6 +974,13 @@ std::vector<RouteInfo> NetworkServer::GetRegisteredRoutes() const {
     return out;
 }
 
+HttpPostHandler
+NetworkServer::FindPostHandlerForTest(const std::string& pattern) const {
+    for (auto& r : httpPostHandlers)
+        if (r.pattern == pattern) return r.handler;
+    return {};
+}
+
 std::string NetworkServer::CurrentQueryString() {
     return tl_queryString;
 }

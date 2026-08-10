@@ -68,6 +68,32 @@ curl -X POST http://localhost:8011/api/auth/register \
 missing or empty), 400 `{"error":"unknown faction"}` (not a declared faction key), 409
 (username taken)
 
+### POST /api/auth/logout
+
+Revoke the session token in the request's own `Authorization: Bearer` header. Clearing the
+browser's `localStorage` is **not** a logout — the session row lives in SQLite until it ages
+out, so the token stays usable for its full 24 hours in anything that copied it.
+
+```bash
+curl -X POST http://localhost:8011/api/auth/logout \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+**Response (200):**
+```json
+{"ok":true,"revoked":true}
+```
+
+Always 200, never 401 — a logout has to be completable with a token the server no longer
+recognises, or an expired session becomes one you cannot leave. `revoked` reports what
+actually happened: `false` for an unknown or expired token, an empty `Bearer`, a missing
+header, or Basic auth (which mints no session row to revoke). Only the holder of a token can
+name it, so there is nothing further to authorise.
+
+Clients in a room should `POST /api/rooms/leave` **first**, while the token still
+authenticates: a host who revokes first leaves their seat — and their room — occupied until
+the lobby reaps it.
+
 ### Using Authentication
 
 Two methods are supported on all authenticated endpoints:
