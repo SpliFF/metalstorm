@@ -12,6 +12,11 @@ describe("control objective: full lifecycle to award", function()
         local world, gadgetObj = mock.new()
         world.frame = 0
         world.regionOwner.r1 = 1
+        -- D57: the clock accrues only while the owner occupies the region, so
+        -- a garrison is now part of the fixture. No `last_commander` on it —
+        -- that is what makes this the zero-participation case.
+        world.keyAt = function() return 'r1' end
+        world.setUnit(10, { x = 0, z = 0, team = 1 })
         local id = GG.Objectives.Create({
             type = 'control', forTeam = 1, reward = 50,
             params = { regionKey = 'r1', holdFrames = 180 },
@@ -70,6 +75,7 @@ describe("control objective: full lifecycle to award", function()
         world.setUnit(20, { x = 0, z = 0, team = 2 })   -- enemy unit, not team 1
         world.setLastCommander(20, 999)
         world.setPlayer(999, 2, true)
+        world.setUnit(21, { x = 0, z = 0, team = 1 })   -- D57: the owner's own garrison
 
         local id = GG.Objectives.Create({
             type = 'control', forTeam = 1, reward = 40,

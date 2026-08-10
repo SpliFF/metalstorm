@@ -5,13 +5,25 @@ package.path = './?.lua;' .. package.path
 
 local control = require('control')
 
-local function fakeCtx(frame, owner, regionExists)
+-- D57: the clock accrues only while the owner OCCUPIES the region, so a ctx
+-- has to say who is standing in it. Default: the owner is present (one unit),
+-- which is what every pre-D57 case implicitly assumed. Pass `occupantTeams`
+-- (a list of team ids, possibly empty) to model an absent or foreign garrison.
+local function fakeCtx(frame, owner, regionExists, occupantTeams)
+    if occupantTeams == nil then
+        occupantTeams = owner and { owner } or {}
+    end
+    local units, teamOf = {}, {}
+    for i, team in ipairs(occupantTeams) do
+        units[i] = i
+        teamOf[i] = team
+    end
     return {
         frame = frame,
         regionOwner = function(key) return owner end,
         regionExists = function(key) return regionExists ~= false end,
-        unitsInRegion = function(key) return {} end,
-        unitTeam = function(id) return nil end,
+        unitsInRegion = function(key) return units end,
+        unitTeam = function(id) return teamOf[id] end,
     }
 end
 
@@ -144,6 +156,51 @@ describe("control.check", function()
         local state, team = control.check(o, fakeCtx(100, 8, true))
         assert.are.equal('complete', state)
         assert.are.equal(8, team)   -- the WIDENED team, not the original forTeam
+    end)
+end)
+
+-- endtoend D57: ownership is sticky for DECAY_TICKS (9 000 frames) by design,
+-- so reading only the published owner let an absent army win the war.
+describe("control requires occupation, not just ownership (D57)", function()
+    it("does not accrue while the owning team has no unit in the region", function()
+        local o = { params = { regionKey = 'r1', holdFrames = 100 } }
+        control.init(o, fakeCtx(0, nil, true))
+        control.check(o, fakeCtx(0, 5, true))                    -- team 5 walks in
+        for f = 20, 400, 20 do                                   -- ...and walks out
+            assert.is_nil(control.check(o, fakeCtx(f, 5, true, {})))
+        end
+        assert.are.equal(0, control.progress(o, fakeCtx(400, 5, true, {})))
+    end)
+
+    it("pauses rather than resets: an absence keeps what was already banked", function()
+        local o = { params = { regionKey = 'r1', holdFrames = 100 } }
+        control.init(o, fakeCtx(0, nil, true))
+        control.check(o, fakeCtx(0, 5, true))
+        control.check(o, fakeCtx(60, 5, true))                    -- 60 banked
+        control.check(o, fakeCtx(1000, 5, true, {}))              -- away for 940
+        assert.are.equal(0.6, control.progress(o, fakeCtx(1000, 5, true, {})))
+        control.check(o, fakeCtx(1020, 5, true))                  -- back: reopens
+        local state, team = control.check(o, fakeCtx(1060, 5, true))  -- +40 = 100
+        assert.are.equal('complete', state)
+        assert.are.equal(5, team)
+    end)
+
+    it("does not count an enemy garrison as the owner's occupation", function()
+        local o = { params = { regionKey = 'r1', holdFrames = 100 } }
+        control.init(o, fakeCtx(0, nil, true))
+        control.check(o, fakeCtx(0, 5, true))
+        for f = 20, 400, 20 do
+            assert.is_nil(control.check(o, fakeCtx(f, 5, true, { 6, 6 })))
+        end
+    end)
+
+    it("still refuses to accrue an occupied region before notBefore", function()
+        local o = { params = { regionKey = 'r1', holdFrames = 100, notBefore = 1000 } }
+        control.init(o, fakeCtx(0, nil, true))
+        control.check(o, fakeCtx(0, 5, true))
+        assert.is_nil(control.check(o, fakeCtx(900, 5, true)))
+        assert.is_nil(control.check(o, fakeCtx(1000, 5, true)))
+        assert.are.equal('complete', (control.check(o, fakeCtx(1100, 5, true))))
     end)
 end)
 
