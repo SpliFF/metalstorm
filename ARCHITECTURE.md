@@ -708,6 +708,29 @@ API entry points (a war silently downgraded to a skirmish waits forever for a
 roster and logs it exactly like a slow browser) but downgraded-with-a-warning
 on the db load path, where the row already exists and losing it is worse.
 
+**Dynamic join (a war's *join* gate).** The kind also decides who may take a
+*playing* seat. An authenticated account that is not in the game server's
+`--player` launch roster has always been admitted — as a **spectator**, which
+is what the "spectate a running game" flow depends on — so the gap a
+persistent war left was that it could start without its roster and then never
+gain anyone. `DynamicJoin.h` promotes that spectator to a player when, and
+only when, all of: this is a `persistent` war; the account carries a faction
+(`users.faction_id`); the war fields a side for that faction; and that side is
+under capacity. Every decline falls through to the spectator seat — none of
+them refuses the connection — and each names its reason in the operator log.
+
+The seat follows the **faction**, never a balancer (PLAN-metalstorm-lobby.md
+§2.3): a player is never moved off their own side. The faction→team map is the
+`war_sides` modoption the lobby wrote at room-create time, decoded by
+`ParseWarSides` (`WarSides.h`) — the *same* function `GameRoom::SideTeams()`
+uses, because the lobby and the game server are separate processes and two
+hand-rolled parsers is the shape that admits a faction on team 0 in one and
+refuses it in the other. Capacity is `--war-side-capacity` (default 8 humans
+per side, `0` = unlimited), uniform across sides; per-side capacity, war
+seeding and queue-when-full are task 7. The count-then-bind sequence is atomic
+by thread confinement, not by a lock: both halves run inside the single
+`AuthRequest` case on the message-pump thread, and nothing else seats a human.
+
 **Game-server lifetime:** a non-persistent game server self-terminates after
 5 min with zero connected clients (120 s startup grace); persistent rooms run
 forever. The lobby reaps abandoned non-persistent rooms (no live game, idle

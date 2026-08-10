@@ -199,6 +199,11 @@ int main(int argc, char* argv[])
     // human has connected. A persistent war does not wait: the war is the
     // thing that exists, and the players trickle into it.
     SessionKind sessionKind = SessionKind::Skirmish;
+    // Task 2: how many humans a war seats per side before a dynamic joiner is
+    // turned back to spectating. 0 = unlimited. Uniform across sides on
+    // purpose — per-side capacity, war seeding and queue-when-full are task 7;
+    // this exists so the join path ships a capacity check that is real.
+    unsigned warSideCapacity = WAR_SIDE_CAPACITY_DEFAULT;
     // PLAN-security-hardening.md task 5 (G3): prod cert for the QUIC/WebTransport
     // endpoint. Both paths must be given together, or neither — see
     // WebTransportServer::Start(). Empty (the default) runs the endpoint in
@@ -378,6 +383,22 @@ int main(int argc, char* argv[])
                         "(expected 'skirmish' or 'persistent')\n", spec.c_str());
                 return 1;
             }
+        } else if (arg == "--war-side-capacity" && i + 1 < argc) {
+            const std::string spec = argv[++i];
+            // Refused rather than defaulted, for the same reason
+            // --session-kind is: a typo that silently became "unlimited" or
+            // "8" would only show up as players being admitted to, or turned
+            // away from, a war for no visible reason. `0` is a legitimate
+            // value meaning unlimited; a negative or non-numeric one is not.
+            if (spec.empty() ||
+                spec.find_first_not_of("0123456789") != std::string::npos) {
+                fprintf(stderr, "invalid --war-side-capacity '%s' "
+                        "(expected a non-negative integer; 0 = unlimited)\n",
+                        spec.c_str());
+                return 1;
+            }
+            warSideCapacity = static_cast<unsigned>(std::strtoul(
+                spec.c_str(), nullptr, 10));
         } else if (arg == "--wt-cert" && i + 1 < argc) {
             wtCertPath = argv[++i];
         } else if (arg == "--wt-key" && i + 1 < argc) {
@@ -970,7 +991,8 @@ int main(int argc, char* argv[])
         requestedPlayers, requestedAIs, playerTeamByUsername,
         clientPlayerNum, pendingLeaveReason, nextPlayerNum, playerNumByAccount,
         connectedRosterPlayers,
-        rosterPlayersNeeded, waitsForRoster, handshakedClients,
+        rosterPlayersNeeded, waitsForRoster, sessionKind, warSideCapacity,
+        handshakedClients,
     };
 
     GameStartCoordinator gameStart(ctx);

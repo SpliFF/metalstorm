@@ -201,6 +201,107 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             const bool replaySpectator =
                 replay::IsReplaying() && !replay::IsVirtualClient(msg.clientId);
 
+            // ── Dynamic join: a war may promote a non-roster account ────────
+            // (PLAN-metalstorm-lobby.md §2.1/§2.3, task 2.) Task 1 let a
+            // persistent war fire GameStart without waiting for its roster;
+            // without this, that war has no way to gain anyone, because an
+            // account the lobby did not put in `--player` resolves to team -1
+            // and lands on the spectator path below.
+            //
+            // NOTE the spec's premise was stale: §2.1 says auth "rejects any
+            // username not in that roster". It does not — it seats them as a
+            // spectator, which PLAN-metalstorm-onboarding.md §4's spectate
+            // flow depends on. So this is a *promotion*, and every decline
+            // below is a fall-through to that same spectator seat, not a
+            // refusal of the connection.
+            //
+            // The decision is a pure function (DynamicJoin.h); everything
+            // impure is gathered here.
+            auto decideDynamicJoin =
+                [&](const std::string& name,
+                    const std::optional<std::string>& factionId)
+                -> DynamicJoinDecision {
+                // A replay's roster belongs to the recording — nobody joins a
+                // re-execution as a player, whatever their faction.
+                if (replaySpectator)
+                    return {DynamicJoinOutcome::NotAWar, -1};
+                // `war_sides` reaches this process as an ordinary modoption
+                // (the lobby writes it at room-create time), decoded by the
+                // same ParseWarSides the lobby's RoomManager uses.
+                const auto& opts = CGameSetup::GetModOptions();
+                const auto wsIt = opts.find("war_sides");
+                const WarSides sides =
+                    (wsIt != opts.end()) ? ParseWarSides(wsIt->second)
+                                         : WarSides{};
+                const std::string faction = factionId ? *factionId : std::string{};
+                const auto seat = TeamForFactionIn(sides, faction);
+                // Occupancy is counted here rather than inside the decision so
+                // the decision stays a value function, and it is counted
+                // AFTER the seat is known so a war with many sides does not
+                // walk the player list once per side.
+                //
+                // ── The "atomic reserve" §2.3 asks for ──
+                // Counting and binding both happen inside this one
+                // AuthRequest case, which runs on the single message-pump
+                // thread that drains inbound (server_main's DrainInbound
+                // loop). No other code path seats a human, so no lock is
+                // needed and adding one would be cargo: the reserve is atomic
+                // because nothing can interleave between the count below and
+                // the bindPlayer() the caller performs. This comment is the
+                // guard — if a second thread ever seats players, the count
+                // and the bind must move under a mutex together.
+                unsigned humansOnSide = 0;
+                if (seat) {
+                    const int t = static_cast<int>(*seat);
+                    // Exclude AI virtual players (they hold no human slot) and
+                    // this account's own row: a reload whose old transport has
+                    // not been reaped yet is still active, and must not be
+                    // refused the seat it is already sitting in.
+                    for (int i = 0; i < playerHandler.ActivePlayers(); ++i) {
+                        const CPlayer* p = playerHandler.Player(i);
+                        if (!p->active || p->spectator || p->isAI) continue;
+                        if (p->team != t) continue;
+                        if (p->name == name) continue;
+                        ++humansOnSide;
+                    }
+                }
+                return DecideDynamicJoin(ctx.sessionKind, faction, sides,
+                                         humansOnSide, ctx.warSideCapacity);
+            };
+
+            // Resolve the seat one authenticated account gets: its roster team
+            // if the lobby named it, else a dynamic-join promotion if this is
+            // a war it has a side in, else the spectator seat. Shared by the
+            // token and the password path — they had already drifted into two
+            // copies of the roster rule, and this adds a second rule to keep
+            // in step.
+            struct AuthSeat { int team; bool spectator; };
+            auto resolveSeat = [&](const std::string& name,
+                                   const std::optional<std::string>& factionId)
+                -> AuthSeat {
+                if (replaySpectator)
+                    return {-1, true};
+                const int rosterTeam = resolveTeam(name);
+                if (!rosterRequired || rosterTeam >= 0)
+                    return {rosterTeam, rosterRequired && rosterTeam < 0};
+                const DynamicJoinDecision d = decideDynamicJoin(name, factionId);
+                if (d.Admitted()) {
+                    SLOG(SPRING_LOG_NOTICE,
+                        "dynamic join: '%s' is not in the launch roster but its "
+                        "faction '%s' holds side team %d in this war — seating "
+                        "as a player (capacity %u per side)",
+                        name.c_str(),
+                        factionId ? factionId->c_str() : "",
+                        d.team, ctx.warSideCapacity);
+                    return {d.team, false};
+                }
+                SLOG(SPRING_LOG_NOTICE,
+                    "dynamic join declined for '%s' (%s) — seating as a "
+                    "spectator", name.c_str(),
+                    DynamicJoinOutcomeToString(d.outcome));
+                return {-1, true};
+            };
+
             // ── One CPlayer per ACCOUNT, not per authentication ──
             // (PLAN-long-uptime S12.) `playerHandler.players` is a
             // fixed-capacity vector — MAX_PLAYERS = 251, with the header
@@ -524,18 +625,20 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                         rtcServer.SendReliable(msg.clientId, resp.data(), resp.size());
                         break;
                     }
+                    // Roster team if the lobby named this account; else a
+                    // dynamic-join promotion if this is a war its faction has
+                    // a side in (task 2); else a spectator. An authenticated
+                    // user who isn't in the roster is never a *rejected*
+                    // connection — PLAN-metalstorm-onboarding.md §4's
+                    // "spectate a running game" flow depends on that:
+                    // spawnGameServer never puts spectators in --player, so
+                    // every spectator (pre-game or mid-game) lands here.
                     // On a replay server the roster belongs to the recording,
                     // so this account's place in it is irrelevant: team -1.
-                    const int team = replaySpectator
-                        ? -1 : resolveTeam(reconnectUser->username);
-                    // An authenticated user who isn't in the roster the lobby
-                    // handed us is a spectator, not a rejected connection —
-                    // PLAN-metalstorm-onboarding.md §4's "spectate a running
-                    // game" flow depends on this: spawnGameServer never puts
-                    // spectators in --player, so every spectator (pre-game or
-                    // mid-game) lands here with team < 0.
-                    const bool isSpectator =
-                        replaySpectator || (rosterRequired && team < 0);
+                    const auto seat = resolveSeat(reconnectUser->username,
+                                                  reconnectUser->factionId);
+                    const int  team        = seat.team;
+                    const bool isSpectator = seat.spectator;
                     const std::string& effectiveRole =
                         isSpectator ? kSpectatorRole : reconnectUser->role;
                     // Bind (or re-bind) this account's stable sim playerNum and
@@ -672,15 +775,14 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                 break;
             }
 
-            // Roster membership: an authenticated user not in the lobby's
-            // --player roster is a spectator, not a rejected connection —
-            // see the matching comment on the reconnect path above. Dev-mode
-            // (empty roster) skips this and keeps the "command anything"
-            // smoketest escape hatch for team == -1.
-            // Replay servers: see the reconnect path above — team -1 always.
-            const int team = replaySpectator ? -1 : resolveTeam(user->username);
-            const bool isSpectator =
-                replaySpectator || (rosterRequired && team < 0);
+            // Roster membership, dynamic join, then spectator — the same
+            // three-step seat resolution the reconnect path above uses; see
+            // its comment. Dev-mode (empty roster) skips the whole rule and
+            // keeps the "command anything" smoketest escape hatch for
+            // team == -1. Replay servers: team -1 always.
+            const auto seat = resolveSeat(user->username, user->factionId);
+            const int  team        = seat.team;
+            const bool isSpectator = seat.spectator;
             const std::string& effectiveRole = isSpectator ? kSpectatorRole : user->role;
 
             // Create session

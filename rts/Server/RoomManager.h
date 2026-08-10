@@ -17,6 +17,8 @@
 #include <utility>
 #include <vector>
 
+#include "WarSides.h"
+
 struct sqlite3;
 
 using ClientID = uint32_t;
@@ -200,45 +202,14 @@ struct GameRoom {
     /// here: a legacy room's `{0, 1}` has no faction names, and inventing
     /// some would let the faction seating rule (TeamForFaction) fire on a
     /// room that never declared a side.
-    std::vector<std::pair<std::string, uint8_t>> SideTeams() const {
-        std::vector<std::pair<std::string, uint8_t>> out;
+    /// The parse itself lives in WarSides.h so the *game server* — which has
+    /// no room row, only the modoption it was launched with — resolves a
+    /// faction to the same team this does (task 2, dynamic join).
+    WarSides SideTeams() const {
         const auto it = modOptions.find("war_sides");
-        if (it != modOptions.end()) {
-            size_t pos = 0;
-            const std::string& spec = it->second;
-            while (pos < spec.size()) {
-                const size_t comma = spec.find(',', pos);
-                const std::string entry = spec.substr(
-                    pos, comma == std::string::npos ? std::string::npos
-                                                    : comma - pos);
-                // `colon > 0` — an entry with no faction name is not a side,
-                // however parseable its number looks.
-                const size_t colon = entry.find(':');
-                if (colon != std::string::npos && colon > 0 &&
-                    colon + 1 < entry.size()) {
-                    const std::string num = entry.substr(colon + 1);
-                    // Reject anything non-numeric rather than let atoi's 0
-                    // quietly seat two sides on the same team.
-                    if (!num.empty() &&
-                        num.find_first_not_of("0123456789") ==
-                            std::string::npos) {
-                        const int team = std::atoi(num.c_str());
-                        if (team >= 0 && team <= 255) {
-                            const auto t = static_cast<uint8_t>(team);
-                            const bool seen = std::any_of(
-                                out.begin(), out.end(),
-                                [t](const auto& s) { return s.second == t; });
-                            if (!seen)
-                                out.emplace_back(entry.substr(0, colon), t);
-                        }
-                    }
-                }
-                if (comma == std::string::npos)
-                    break;
-                pos = comma + 1;
-            }
-        }
-        return out;
+        if (it == modOptions.end())
+            return {};
+        return ParseWarSides(it->second);
     }
 
     /// The team indices a slot in this room may be seated on, in the order
@@ -272,12 +243,7 @@ struct GameRoom {
     /// `/api/rooms/direct` manifest account, a pre-faction legacy account —
     /// never matches, which is what keeps those paths on the old behaviour.
     std::optional<uint8_t> TeamForFaction(const std::string& factionId) const {
-        if (factionId.empty())
-            return std::nullopt;
-        for (const auto& [faction, team] : SideTeams())
-            if (faction == factionId)
-                return team;
-        return std::nullopt;
+        return TeamForFactionIn(SideTeams(), factionId);
     }
 
     // --- Helpers ---

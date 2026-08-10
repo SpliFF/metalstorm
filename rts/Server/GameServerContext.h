@@ -14,6 +14,7 @@
 // always has.
 
 #include "NetworkServer.h"          // ClientID
+#include "DynamicJoin.h"            // SessionKind, WAR_SIDE_CAPACITY_DEFAULT
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -101,6 +102,17 @@ struct GameServerContext {
     /// an *initial* set rather than a precondition. The roster count itself
     /// stays honest either way — it is what the logs and the team mapping read.
     bool                                      waitsForRoster = true;
+    /// This session's kind, from `--session-kind` (task 1). The auth handler
+    /// needs it in its own right and not merely via `waitsForRoster`: task 2's
+    /// dynamic join is a *war* rule, and reading it off the roster-wait flag
+    /// would hand the same behaviour to a skirmish that happened to launch
+    /// with an empty roster (`SessionStartsGameAtSetup`'s second term).
+    SessionKind                               sessionKind = SessionKind::Skirmish;
+    /// Humans allowed per war side before a dynamic joiner is turned back to
+    /// spectating (`--war-side-capacity`, 0 = unlimited). Uniform across sides
+    /// by design — per-side capacities and queue-when-full are task 7.
+    unsigned                                  warSideCapacity =
+                                                  WAR_SIDE_CAPACITY_DEFAULT;
 
     // C1: clients that have sent a protocol-compatible Handshake. AuthRequest
     // is refused until a matching handshake is recorded, so a client that
