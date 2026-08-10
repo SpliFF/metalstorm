@@ -136,3 +136,64 @@ describe('metalstorm authority-bar widget', () => {
         expect(el.querySelector('.ms-auth-team')!.textContent).toBe('0');
     });
 });
+
+describe('metalstorm authority-bar legibility (D49)', () => {
+    const originalDocument = (globalThis as { document?: unknown }).document;
+
+    beforeEach(() => {
+        (globalThis as { document?: unknown }).document = {
+            createElement: () => makeNode(),
+        };
+    });
+
+    afterEach(() => {
+        (globalThis as { document?: unknown }).document = originalDocument;
+    });
+
+    // The pools are float32 rulesParam reads and were written to the DOM with a
+    // bare String(): measured live as `YOU 202.5500030517578` /
+    // `TEAM 614.5499877929688`. D44 fixed the bar so it painted; it never made
+    // it paint legibly.
+    it('prints both pools to one decimal, not 18 figures', async () => {
+        const widget = await loadWidget();
+        const reads: FakeStoreReads = {
+            team: new Map([
+                ['authority_pool', 614.5499877929688],
+                ['authority_player_1', 202.5500030517578],
+            ]),
+            game: new Map(),
+        };
+        const { ctx } = makeCtx(reads, { fireSubscription: false });
+
+        widget.init(ctx);
+
+        const el = (widget as unknown as { el: FakeNode }).el;
+        expect(el.querySelector('.ms-auth-player')!.textContent).toBe('202.6');
+        expect(el.querySelector('.ms-auth-team')!.textContent).toBe('614.5');
+    });
+
+    it('formats the amount in an award toast off the event ring', async () => {
+        const widget = await loadWidget();
+        const reads: FakeStoreReads = {
+            team: new Map([['authority_pool', 500], ['authority_player_1', 100]]),
+            // seq 1 already seen at init (the bar syncs up rather than replaying
+            // history), so publish seq 2 as the event this player earns.
+            game: new Map<string, number | string>([['authority_event', 1]]),
+        };
+        const { ctx, fire } = makeCtx(reads, { fireSubscription: false });
+        widget.init(ctx);
+
+        reads.game.set('authority_event', 2);
+        reads.game.set('authority_event_2_seq', 2);
+        reads.game.set('authority_event_2_kind', 'award');
+        reads.game.set('authority_event_2_amount', 114.55000305175781);
+        reads.game.set('authority_event_2_reason', 'objective_control');
+        reads.game.set('authority_event_2_player', 1);
+        fire();
+
+        const el = (widget as unknown as { el: FakeNode }).el;
+        const toasts = el.querySelector('.ms-auth-toasts')!;
+        const texts = toasts.children.map((c) => c.textContent);
+        expect(texts).toEqual(['+114.6 authority (objective_control)']);
+    });
+});

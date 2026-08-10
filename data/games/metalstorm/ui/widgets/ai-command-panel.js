@@ -24,6 +24,8 @@
 //     populate, so wiring is a pure no-op-removal once I1 lands, but shows
 //     an honest "no intent data yet" state today rather than fabricating one.
 
+import { formatAuthority } from '../lib/authority-format.js';
+
 const STANCES = ['defensive', 'balanced', 'aggressive'];
 const PAINTS = ['normal', 'priority', 'forbidden'];
 const ROES = ['free', 'observed_only', 'deny_area'];
@@ -181,7 +183,12 @@ export default {
       const spend = get(`intent_${i}_spend`);
       intentItems.push(
         `<li><span class="ms-ai-key">${goal} → ${group}</span>` +
-        `<span class="nui-badge nui-badge--gold">⬡ ${spend}</span>` +
+        // An intent's spend is an authority amount like any other, so it wears
+        // the shared format (D49) — this list is honestly empty until I1 lands,
+        // and the format is what it will publish into when it does. (The change
+        // feed below is deliberately NOT formatted: its `value` is whatever
+        // field changed — a stance string as often as a number.)
+        `<span class="nui-badge nui-badge--gold">⬡ ${formatAuthority(spend)}</span>` +
         `<button type="button" class="nui-btn nui-btn--sm nui-btn--danger ms-ai-intent-veto" data-goal="${goal}">Veto</button></li>`
       );
     }

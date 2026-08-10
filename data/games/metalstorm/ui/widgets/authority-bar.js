@@ -31,13 +31,17 @@
 // the bar has been read against `Spring.GetTeamRulesParam` server truth on the
 // player path in several PLAN-endtoend fires.)
 
+import { formatAuthority } from '../lib/authority-format.js';
+
 const EVENT_RING_SIZE = 8;
 const TOAST_TTL_MS = 4000;
 
+// Every amount here is a float32 rulesParam read, so it goes through
+// formatAuthority — see ui/lib/authority-format.js (PLAN-endtoend.md D49).
 const EVENT_LABEL = {
-  award: (amount, reason) => `+${amount} authority (${reason || 'award'})`,
-  refund: (amount, reason) => `+${amount} authority returned (${reason || 'refund'})`,
-  refusal: (amount) => `Insufficient authority (needed ${amount})`,
+  award: (amount, reason) => `+${formatAuthority(amount)} authority (${reason || 'award'})`,
+  refund: (amount, reason) => `+${formatAuthority(amount)} authority returned (${reason || 'refund'})`,
+  refusal: (amount) => `Insufficient authority (needed ${formatAuthority(amount)})`,
 };
 
 export default {
@@ -87,8 +91,8 @@ export default {
   _paint(ctx) {
     const team = ctx.store.teamRulesParam(ctx.identity.teamId, 'authority_pool');
     const mine = ctx.store.teamRulesParam(ctx.identity.teamId, 'authority_player_' + ctx.identity.playerId);
-    this.el.querySelector('.ms-auth-player').textContent = String(mine ?? 0);
-    this.el.querySelector('.ms-auth-team').textContent = String(team ?? 0);
+    this.el.querySelector('.ms-auth-player').textContent = formatAuthority(mine);
+    this.el.querySelector('.ms-auth-team').textContent = formatAuthority(team);
 
     this._consumeEventRing(ctx);
   },

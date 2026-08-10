@@ -35,6 +35,7 @@
 //     hook lands, until that follow-up ships.
 
 import { createObjectiveIndex, isResolved, visibleTo } from '../lib/objectives.js';
+import { formatAuthority } from '../lib/authority-format.js';
 
 const TYPE_ICONS = {
   control: '⬢', kill: '✕', escort: '➜', protect: '🛡', extract: '⤴', infra: '⚙',
@@ -84,7 +85,7 @@ function renderItem(o, playerId, delegated) {
     `<div class="ms-obj__line">` +
     `<span class="ms-obj__icon">${icon}</span>` +
     `<span class="ms-obj__type">${o.type}${subLabel}</span>` +
-    `<span class="nui-badge nui-badge--gold ms-obj__reward">⬡ ${o.reward ?? 0}</span>` +
+    `<span class="nui-badge nui-badge--gold ms-obj__reward">⬡ ${formatAuthority(o.reward)}</span>` +
     `</div>` +
     `<div class="nui-meter"><div class="nui-meter__fill" style="width:${pct}%"></div></div>` +
     `<div class="ms-obj__line ms-obj__actions">` +
@@ -108,7 +109,9 @@ function renderOutcome(o, teamId) {
   const icon = TYPE_ICONS[o.type] ?? '•';
   const wonByUs = o.completed_by === undefined || o.completed_by === teamId;
   const state = o.state === 'complete' && !wonByUs ? 'lost-race' : o.state;
-  const reward = Math.round(o.reward ?? 0);
+  // Same formatter as the active rows above: an outcome row and the live row
+  // it replaces must not spell the same reward two different ways (D49).
+  const reward = formatAuthority(o.reward);
   const pct = Math.round((o.progress ?? 0) * 100);
 
   let note;

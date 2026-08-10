@@ -217,3 +217,51 @@ describe('metalstorm objectives-panel outcomes (D46)', () => {
         expect(h.outcomeSection().hidden).toBe(true);
     });
 });
+
+describe('metalstorm objectives-panel reward legibility (D49)', () => {
+    const originalDocument = (globalThis as { document?: unknown }).document;
+
+    beforeEach(() => {
+        (globalThis as { document?: unknown }).document = { createElement: () => makeNode() };
+    });
+
+    afterEach(() => {
+        (globalThis as { document?: unknown }).document = originalDocument;
+    });
+
+    // A reward is normalised by 1/velocity in the sim and then crosses the wire
+    // as a float32, so this is the value the panel actually receives — measured
+    // live at `114.55000305175781` on the player path.
+    const NOISY = 114.55000305175781;
+
+    it('prints an active objective reward to one decimal, not 18 figures', async () => {
+        const widget = await loadWidget();
+        const game = new Map<string, unknown>([['objective_count', 8]]);
+        const h = makeCtx(game);
+        widget.init(h.ctx);
+
+        h.publish({ ...activeEscort(8, 0), objective_8_reward: NOISY });
+
+        const list = h.list();
+        expect(list).toContain('⬡ 114.6');
+        expect(list).not.toContain('114.55000305175781');
+    });
+
+    it('spells the same reward the same way once it resolves', async () => {
+        // The outcome row and the live row it replaces used to disagree — the
+        // outcome path rounded (`115`) while the active path printed the raw
+        // float. Same reward, two spellings, in one panel.
+        const widget = await loadWidget();
+        const game = new Map<string, unknown>([['objective_count', 8]]);
+        const h = makeCtx(game);
+        widget.init(h.ctx);
+
+        h.publish({ ...activeEscort(8, 0), objective_8_reward: NOISY });
+        h.publish({ objective_8_state: 'failed', objective_8_progress: 0.47 });
+
+        const list = h.list();
+        expect(list).toContain('114.6 lost');
+        expect(list).not.toContain('115 lost');
+        expect(h.outcomeLog()).toContain('114.6 lost');
+    });
+});
