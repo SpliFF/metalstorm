@@ -321,8 +321,17 @@ button.danger:hover { background: #cc3333; }
     margin-bottom: 16px;
 }
 
+/* Wraps rather than overflows. A `<select>`'s min-content width is its
+ * widest option, so a row with three dropdowns in it could not shrink to
+ * fit the card: the AI row pushed its own status text and remove button
+ * out past the card's right edge, onto the page background (found while
+ * fixing PLAN-endtoend.md D61 — the two defects are on the same row, and
+ * the profile dropdown, whose widest option is "NPC Raider (needs
+ * scenario slate)", is what tips it over). Wrapping keeps every control
+ * inside the card at any width and keeps the full option labels. */
 .player-row {
     display: flex;
+    flex-wrap: wrap;
     gap: 10px;
     padding: 8px 12px;
     background: #0f1626;
@@ -339,14 +348,29 @@ button.danger:hover { background: #cc3333; }
 
 .player-name { flex: 1; font-weight: 500; }
 
-.team-select {
+/* Every dropdown that sits inside a player or AI row, styled as one
+ * control strip. Listed together rather than as four near-identical
+ * rules: `.ai-team-select` and `.ai-profile-select` were each added with
+ * the markup that renders them and neither ever picked up a rule, so an
+ * AI row painted two native white selects between the dark ones
+ * (PLAN-endtoend.md D61). A new dropdown class belongs on this list —
+ * `lobby-css-coverage.test.ts` fails if one is added without it. */
+.team-select,
+.startpos-select,
+.ai-team-select,
+.ai-profile-select {
     padding: 4px 8px;
+    min-width: 0;
     background: #0f1626;
     color: #e0e0e0;
     border: 1px solid #334;
     border-radius: 4px;
     font-size: 12px;
 }
+.team-select:disabled,
+.startpos-select:disabled,
+.ai-team-select:disabled,
+.ai-profile-select:disabled { color: #667; border-color: #223; }
 
 .player-status {
     font-size: 12px;
@@ -377,18 +401,8 @@ button.danger:hover { background: #cc3333; }
     min-width: 60px;
 }
 
-/* Start-position dropdown appears next to the team select in each
- * player and AI row. Uses the same visual treatment as .team-select
- * so the row reads as one coherent control strip. */
-.startpos-select {
-    padding: 4px 8px;
-    background: #0f1626;
-    color: #e0e0e0;
-    border: 1px solid #334;
-    border-radius: 4px;
-    font-size: 12px;
-}
-.startpos-select:disabled { color: #667; border-color: #223; }
+/* (The start-position, side and profile dropdowns that appear in these
+ * rows are styled with .team-select above — one shared control strip.) */
 
 .ai-remove-btn {
     background: transparent;
