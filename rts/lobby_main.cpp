@@ -432,7 +432,14 @@ static GameServerInstance spawnGameServer(
     //
     // Deliberately NO `--replay-seek`: a start frame is a control a watcher
     // sends, never a launch option. See the watch route for the live evidence.
-    const std::string &replayFile = "") {
+    const std::string &replayFile = "",
+    // PLAN-metalstorm-lobby.md task 1: the room's session kind, forwarded as
+    // `--session-kind`. The lobby is the authority on it — the game server
+    // could read `rooms.session_kind` out of the shared db (it already reads
+    // `persistent` there for its idle policy), but the kind decides whether
+    // GameStart waits for the roster, and that decision is made during set-up,
+    // before that read happens. One source, one reader.
+    SessionKind sessionKind = SessionKind::Skirmish) {
   const bool isReplay = !replayFile.empty();
   GameServerInstance inst;
   inst.roomId = roomId;
@@ -577,6 +584,11 @@ static GameServerInstance spawnGameServer(
       argv.push_back("--replay");
       argv.push_back(replayFile.c_str());
     } else {
+      // Not on the replay path: a recording re-executes with the gating its
+      // own stream was produced under, and every argument that describes the
+      // world is withheld there on purpose (see the parameter comment).
+      argv.push_back("--session-kind");
+      argv.push_back(SessionKindToString(sessionKind));
       for (const auto &spec : playerArgStorage) {
         argv.push_back("--player");
         argv.push_back(spec.c_str());
@@ -2675,6 +2687,11 @@ int main(int argc, char *argv[]) {
       j["game_server_port"] = room->gameServerPort;
     if (room->persistent)
       j["persistent"] = true;
+    // Always emitted, unlike `persistent` above: the war browser
+    // (PLAN-metalstorm-lobby.md §4) has to tell a war from a skirmish for
+    // EVERY row, and an absent field would make "old lobby" and "skirmish"
+    // indistinguishable to it.
+    j["session_kind"] = SessionKindToString(room->sessionKind);
     // PLAN-replay task 4c: a replay room reaches the client through exactly the
     // same JSON as a game room — that is the whole reason it IS a room — but
     // the browser must not offer to "join" one as a player, so it says which
@@ -3003,6 +3020,25 @@ int main(int argc, char *argv[]) {
       return result;
     }
 
+    // Session kind (PLAN-metalstorm-lobby.md task 1), same spelling and same
+    // refuse-on-typo rule as POST /api/rooms. Carried here too because this is
+    // the path a harness stages a war from: without it a persistent war could
+    // only ever be created through the browser.
+    SessionKind sessionKind = SessionKind::Skirmish;
+    if (manifest.contains("sessionKind")) {
+      const auto &sv = manifest["sessionKind"];
+      if (!sv.is_string()) {
+        result.error = "sessionKind must be a string";
+        return result;
+      }
+      auto parsed = SessionKindFromString(sv.get<std::string>());
+      if (!parsed) {
+        result.error = "sessionKind must be 'skirmish' or 'persistent'";
+        return result;
+      }
+      sessionKind = *parsed;
+    }
+
     if (!manifest.contains("players") || !manifest["players"].is_array() ||
         manifest["players"].empty()) {
       result.error = "players[] must declare at least one player (the host)";
@@ -3066,7 +3102,8 @@ int main(int argc, char *argv[]) {
     forceLeaveCurrentRoom(host.userId);
 
     uint32_t roomId = rooms.CreateRoom(name, mapId, gameId, 8, "", host.userId,
-                                       0, host.username, /*persistent=*/false);
+                                       0, host.username, /*persistent=*/false,
+                                       /*hostFactionId=*/"", sessionKind);
     result.roomId = roomId;
 
     MapMetadataDb mdb;
@@ -3192,7 +3229,8 @@ int main(int argc, char *argv[]) {
       auto inst =
           spawnGameServer(roomId, gameId, gameVer, mapId, dbPath, room->players,
                           room->aiSlots, room->modOptions, busyPorts,
-                          devBuildAcknowledged, wtCertPath, wtKeyPath);
+                          devBuildAcknowledged, wtCertPath, wtKeyPath,
+                          /*replayFile=*/"", room->sessionKind);
       gameServers[roomId] = inst;
       persistGameServer(inst);
       room->gameServerPort = inst.port;
@@ -3241,6 +3279,26 @@ int main(int argc, char *argv[]) {
           }
         }
 
+        // Session kind (PLAN-metalstorm-lobby.md §1, task 1). Absent means
+        // skirmish — the classic bounded match, and the only thing every
+        // existing caller has ever created. An unrecognised spelling is a
+        // 400 rather than a silent downgrade: a client that asked for a war
+        // and got a skirmish would sit in a ready-check that a war never
+        // reaches.
+        SessionKind sessionKind = SessionKind::Skirmish;
+        if (j.contains("sessionKind")) {
+          const auto &sv = j["sessionKind"];
+          if (!sv.is_string())
+            return HttpAuth::JsonResponse(
+                400, R"({"error":"sessionKind must be a string"})");
+          auto parsed = SessionKindFromString(sv.get<std::string>());
+          if (!parsed)
+            return HttpAuth::JsonResponse(
+                400,
+                R"({"error":"sessionKind must be 'skirmish' or 'persistent'"})");
+          sessionKind = *parsed;
+        }
+
         // `scenario` is optional (PLAN-endtoend.md D10). Absent means "use
         // whatever this map's war is", which is what the Create Game dialog
         // sends when the host leaves the picker on its default. An
@@ -3271,7 +3329,7 @@ int main(int argc, char *argv[]) {
         uint32_t roomId = rooms.CreateRoom(
             name, mapId, gameId, 8, "", static_cast<uint32_t>(userId),
             0 /*no WS clientId*/, user->username, persistent,
-            user->factionId.value_or(""));
+            user->factionId.value_or(""), sessionKind);
 
         applyRoomScenario(roomId, static_cast<uint32_t>(userId), gameId, mapId,
                           hasScenarioChoice ? &scenarioChoice : nullptr);
@@ -4110,7 +4168,8 @@ int main(int argc, char *argv[]) {
           auto inst = spawnGameServer(
               room->id, room->gameId, gameVer, room->mapId, dbPath,
               room->players, room->aiSlots, room->modOptions, busyPorts,
-              devBuildAcknowledged, wtCertPath, wtKeyPath);
+              devBuildAcknowledged, wtCertPath, wtKeyPath,
+              /*replayFile=*/"", room->sessionKind);
           gameServers[room->id] = inst;
           persistGameServer(inst);
           room->gameServerPort = inst.port;

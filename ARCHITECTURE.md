@@ -688,6 +688,26 @@ Client (SSE room-state updates) sees state≥Loading + port>0 → connects:
   All roster players connected → FireGameStart()
     → gadgets spawn starting units (start_unit_setup.lua)
 ```
+**Session kind (skirmish vs persistent war).** A room carries a
+`SessionKind` (`RoomManager.h`), stored in `rooms.session_kind`, offered as
+`sessionKind` on `POST /api/rooms` and `/api/rooms/direct`, echoed as
+`session_kind` on every room JSON, and forwarded to the game server as
+`--session-kind`. It decides **the roster gate above**: a `skirmish` holds
+GameStart until every rostered human has connected (the flow as drawn); a
+`persistent` war fires GameStart during set-up and joins its roster as it
+arrives (PLAN-metalstorm-lobby.md §1/§2.1). The two expressions that decision
+is made from — `SessionWaitsForRoster` / `SessionStartsGameAtSetup` — live in
+`GameStartCoordinator.h` and have four readers, including the replay
+prologue-feed branch, which must agree with the live one exactly.
+
+It is **not** the same field as `GameRoom::persistent`, which is a *reaping*
+policy and is also set on ordinary AI-testing skirmishes. The implication runs
+one way and `CreateRoom` enforces it: a persistent war is always persistent; a
+persistent room is not always a war. An unknown spelling is refused at both
+API entry points (a war silently downgraded to a skirmish waits forever for a
+roster and logs it exactly like a slow browser) but downgraded-with-a-warning
+on the db load path, where the row already exists and losing it is worse.
+
 **Game-server lifetime:** a non-persistent game server self-terminates after
 5 min with zero connected clients (120 s startup grace); persistent rooms run
 forever. The lobby reaps abandoned non-persistent rooms (no live game, idle

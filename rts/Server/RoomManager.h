@@ -30,6 +30,43 @@ enum class ERoomState : uint8_t {
     Ended,
 };
 
+/// What KIND of session a room hosts (PLAN-metalstorm-lobby.md §1, task 1).
+///
+/// Two kinds coexist. `Skirmish` is the classic bounded match this engine was
+/// built around: fill a roster, ready-check, launch, and GameStart waits until
+/// every rostered human has connected. `PersistentWar` is Metalstorm's model:
+/// the war is already running, players trickle in and out, and the session may
+/// outlive any individual player — so it starts with whatever seed exists and
+/// never waits for a roster.
+///
+/// Deliberately NOT the same field as `GameRoom::persistent`, even though a
+/// persistent war is always persistent. `persistent` is a *reaping* policy
+/// ("don't delete this room when the last human leaves"), and it is also used
+/// for AI-testing rooms that are still ordinary skirmishes. Folding the two
+/// together would silently give every such room the no-roster-wait behaviour.
+/// The implication runs one way only and CreateRoom enforces it:
+/// PersistentWar ⇒ persistent.
+enum class SessionKind : uint8_t {
+    Skirmish = 0,
+    PersistentWar,
+};
+
+/// Wire/CLI spelling of a session kind. This exact string crosses three
+/// boundaries — the room JSON, `POST /api/rooms`, and spring-server's
+/// `--session-kind` flag — so it has one encoder and one decoder.
+inline const char* SessionKindToString(SessionKind k) {
+    return k == SessionKind::PersistentWar ? "persistent" : "skirmish";
+}
+
+/// Decode a session-kind spelling. Returns nullopt for anything unrecognised —
+/// callers reject rather than defaulting, because silently downgrading an
+/// unknown kind to Skirmish would make a typo'd war wait forever for a roster.
+inline std::optional<SessionKind> SessionKindFromString(const std::string& s) {
+    if (s == "skirmish") return SessionKind::Skirmish;
+    if (s == "persistent" || s == "persistent_war") return SessionKind::PersistentWar;
+    return std::nullopt;
+}
+
 struct RoomPlayer {
     uint32_t playerId = 0;
     ClientID clientId = 0;
@@ -107,6 +144,13 @@ struct GameRoom {
     /// the persistent host can modify or end the game. Used for
     /// AI testing, persistent worlds, etc.
     bool persistent = false;
+
+    /// Skirmish (default) or persistent war — see SessionKind. Decides
+    /// whether the spawned game server waits for its launch roster before
+    /// firing GameStart, and is handed to spring-server as `--session-kind`.
+    /// A PersistentWar room always has `persistent = true` (CreateRoom
+    /// enforces it); the reverse does not hold.
+    SessionKind sessionKind = SessionKind::Skirmish;
 
     std::vector<RoomPlayer> players;
 
@@ -330,7 +374,8 @@ public:
                         uint32_t hostPlayerId, ClientID hostClientId,
                         const std::string& hostUsername,
                         bool persistent = false,
-                        const std::string& hostFactionId = "");
+                        const std::string& hostFactionId = "",
+                        SessionKind sessionKind = SessionKind::Skirmish);
 
     /// Join a room. Returns true on success.
     ///

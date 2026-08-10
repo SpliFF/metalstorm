@@ -94,6 +94,13 @@ struct GameServerContext {
     std::unordered_map<int64_t, int>&         playerNumByAccount;
     std::unordered_set<std::string>&          connectedRosterPlayers;
     size_t                                    rosterPlayersNeeded = 0;
+    /// Whether GameStart is held until `rosterPlayersNeeded` humans have
+    /// connected. True for a skirmish — the classic "all clients loaded" gate.
+    /// False for a persistent war (PLAN-metalstorm-lobby.md §2.1): the war
+    /// starts with whatever seed exists and players trickle in, so a roster is
+    /// an *initial* set rather than a precondition. The roster count itself
+    /// stays honest either way — it is what the logs and the team mapping read.
+    bool                                      waitsForRoster = true;
 
     // C1: clients that have sent a protocol-compatible Handshake. AuthRequest
     // is refused until a matching handshake is recorded, so a client that

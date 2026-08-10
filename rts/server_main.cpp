@@ -193,6 +193,12 @@ int main(int argc, char* argv[])
     std::string mapId;
     std::string mapsDir = "data/maps";
     std::string dbPath = "data/spring-server.db";
+    // PLAN-metalstorm-lobby.md §1/§2.1 task 1: which kind of session this
+    // process is hosting. Skirmish (the default, and what every launcher that
+    // does not pass --session-kind gets) holds GameStart until every rostered
+    // human has connected. A persistent war does not wait: the war is the
+    // thing that exists, and the players trickle into it.
+    SessionKind sessionKind = SessionKind::Skirmish;
     // PLAN-security-hardening.md task 5 (G3): prod cert for the QUIC/WebTransport
     // endpoint. Both paths must be given together, or neither — see
     // WebTransportServer::Start(). Empty (the default) runs the endpoint in
@@ -358,6 +364,20 @@ int main(int argc, char* argv[])
             mapId = argv[++i];
         } else if (arg == "--db" && i + 1 < argc) {
             dbPath = argv[++i];
+        } else if (arg == "--session-kind" && i + 1 < argc) {
+            const std::string spec = argv[++i];
+            if (auto kind = SessionKindFromString(spec)) {
+                sessionKind = *kind;
+            } else {
+                // Refuse rather than default: a launcher that asked for a war
+                // and silently got a skirmish would hang on a roster wait its
+                // players were never going to satisfy, and the log line for
+                // that is "waiting for N player(s)" — indistinguishable from
+                // a slow browser.
+                fprintf(stderr, "unknown --session-kind '%s' "
+                        "(expected 'skirmish' or 'persistent')\n", spec.c_str());
+                return 1;
+            }
         } else if (arg == "--wt-cert" && i + 1 < argc) {
             wtCertPath = argv[++i];
         } else if (arg == "--wt-key" && i + 1 < argc) {
@@ -924,6 +944,18 @@ int main(int argc, char* argv[])
     std::unordered_set<std::string> connectedRosterPlayers;
     const size_t rosterPlayersNeeded = requestedPlayers.size();
 
+    // ...unless this is a persistent war, which never waits for its roster
+    // (PLAN-metalstorm-lobby.md §2.1). The count above stays the true roster
+    // size — it is what the team mapping and the logs read; only the *gate*
+    // is session-kind dependent, so a war that happens to launch with a seed
+    // roster still reports it honestly.
+    const bool waitsForRoster = SessionWaitsForRoster(sessionKind);
+    // The one expression both GameStart sites branch on: with no roster to
+    // wait for, or no waiting to do, the game starts during set-up rather
+    // than from CheckAndFireGameStart in the loop.
+    const bool startsGameAtSetup =
+        SessionStartsGameAtSetup(sessionKind, rosterPlayersNeeded);
+
     // C1: per-client handshake gate. A client must send a protocol-compatible
     // Handshake before its AuthRequest is honoured.
     std::unordered_set<ClientID> handshakedClients;
@@ -938,7 +970,7 @@ int main(int argc, char* argv[])
         requestedPlayers, requestedAIs, playerTeamByUsername,
         clientPlayerNum, pendingLeaveReason, nextPlayerNum, playerNumByAccount,
         connectedRosterPlayers,
-        rosterPlayersNeeded, handshakedClients,
+        rosterPlayersNeeded, waitsForRoster, handshakedClients,
     };
 
     GameStartCoordinator gameStart(ctx);
@@ -1544,7 +1576,8 @@ int main(int argc, char* argv[])
         }
     }
 
-    // Dev-mode: no roster means no players to wait for.
+    // No roster means no players to wait for (dev mode) — and so does a
+    // persistent war, which has a roster but does not wait for it.
     //
     // A replay never takes this path, in EITHER roster shape. GameStart is an
     // input in its own right (journal chokepoint #5) and its position in the
@@ -1554,8 +1587,8 @@ int main(int argc, char* argv[])
     // the only thing that starts the game — see the feed below.
     //
     // WHERE the prologue is fed depends on the roster shape, and the condition
-    // below is deliberately the SAME `rosterPlayersNeeded == 0` test the live
-    // run branched on (PLAN-replay T2-a). A recording with no human roster
+    // below is deliberately the SAME `startsGameAtSetup` test the live run
+    // branched on (PLAN-replay T2-a). A recording with no human roster
     // fired GameStart right here during set-up, so its prologue belongs here.
     // A recording WITH a roster did not: it fired GameStart from
     // CheckAndFireGameStart in the loop, once the last human authenticated —
@@ -1565,7 +1598,15 @@ int main(int argc, char* argv[])
     // player set and every team leader could land on a different player than
     // the recording had. That is caught by the GameStart record's own roster
     // check, but the fix is to feed at the right place, not to detect it.
-    if (replay::IsReplaying() && rosterPlayersNeeded == 0) {
+    //
+    // `startsGameAtSetup` now has a second input — the session kind — and the
+    // replay header does not carry one, so a replay always evaluates it as a
+    // skirmish. That is only lossy for a recording of a persistent war WITH a
+    // roster, which is the one shape that also depends on T2-a (human-player
+    // replay) and does not replay today for that reason; every shape that
+    // replays now evaluates identically before and after this change. See
+    // PLAN-metalstorm-lobby.md task 1's field notes.
+    if (replay::IsReplaying() && startsGameAtSetup) {
         // Feed the pre-game prologue HERE, at the exact point in start-up where
         // the recording fired its own GameStart — not on the first loop tick.
         //
@@ -1599,8 +1640,15 @@ int main(int argc, char* argv[])
                 "replay: the recorded prologue contained no GameStart anchor — "
                 "the sim will not start until one arrives in the stream");
         }
-    } else if (rosterPlayersNeeded == 0) {
-        SLOG(SPRING_LOG_NOTICE, "no player roster (dev mode), firing GameStart immediately");
+    } else if (startsGameAtSetup) {
+        if (waitsForRoster) {
+            SLOG(SPRING_LOG_NOTICE,
+                "no player roster (dev mode), firing GameStart immediately");
+        } else {
+            SLOG(SPRING_LOG_NOTICE,
+                "persistent war: firing GameStart immediately, %zu roster "
+                "player(s) will be joined as they connect", rosterPlayersNeeded);
+        }
         // The journal's tick window has never been opened at this point (the
         // sim loop below is what calls BeginTick), so without this the
         // GameStart record — the anchor the entire stream is positioned
@@ -1737,7 +1785,13 @@ int main(int argc, char* argv[])
     // clients for kIdleExitSec, with a kStartupGraceSec window after launch so a
     // freshly-spawned server waits for its first client. This is what makes a
     // game stop on its own once everyone has left, instead of orphaning a process.
-    bool roomPersistent = false;
+    // A persistent war is never idle-reaped regardless of what the `rooms`
+    // row says (PLAN-metalstorm-lobby.md §5.3: a war with zero connected
+    // humans keeps running). The lobby sets both, so this only matters for a
+    // server launched by hand or by a harness with no room row to read — but
+    // "the war exited because everyone stepped away" is exactly the failure
+    // the session kind exists to prevent.
+    bool roomPersistent = (sessionKind == SessionKind::PersistentWar);
     sqlite3* statusDb = nullptr;
     // FULLMUTEX — shared with the network thread (D33).
     if (sqlite3_open_v2(dbPath.c_str(), &statusDb, kSqliteSharedOpenFlags,
@@ -1749,8 +1803,10 @@ int main(int argc, char* argv[])
         if (sqlite3_prepare_v2(statusDb, "SELECT persistent FROM rooms WHERE id=?",
                 -1, &ps, nullptr) == SQLITE_OK) {
             sqlite3_bind_int(ps, 1, static_cast<int>(roomId));
+            // |=, not =: the session kind may already have set it, and the
+            // db row must not be able to un-say that.
             if (sqlite3_step(ps) == SQLITE_ROW)
-                roomPersistent = sqlite3_column_int(ps, 0) != 0;
+                roomPersistent |= (sqlite3_column_int(ps, 0) != 0);
         }
         sqlite3_finalize(ps);
         sqlite3_exec(statusDb,

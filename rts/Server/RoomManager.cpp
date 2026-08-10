@@ -64,6 +64,22 @@ void RoomManager::EnsureTables(sqlite3* db) {
             sqlite3_exec(db, "DROP TABLE IF EXISTS room_mod_options", nullptr, nullptr, nullptr);
         }
     }
+    {
+        // Third probe, same pattern: `rooms` grew a `session_kind` column
+        // (PLAN-metalstorm-lobby.md task 1) after the `persistent` probe
+        // above had already shipped, so a tree whose rooms table predates
+        // the session-kind split is not caught by either probe.
+        sqlite3_stmt* stmt = nullptr;
+        int rc = sqlite3_prepare_v2(db,
+            "SELECT session_kind FROM rooms LIMIT 1", -1, &stmt, nullptr);
+        sqlite3_finalize(stmt);
+        if (rc != SQLITE_OK) {
+            sqlite3_exec(db, "DROP TABLE IF EXISTS rooms", nullptr, nullptr, nullptr);
+            sqlite3_exec(db, "DROP TABLE IF EXISTS room_members", nullptr, nullptr, nullptr);
+            sqlite3_exec(db, "DROP TABLE IF EXISTS room_ai_slots", nullptr, nullptr, nullptr);
+            sqlite3_exec(db, "DROP TABLE IF EXISTS room_mod_options", nullptr, nullptr, nullptr);
+        }
+    }
     sqlite3_exec(db, R"(
         CREATE TABLE IF NOT EXISTS rooms (
             id INTEGER PRIMARY KEY,
@@ -76,6 +92,7 @@ void RoomManager::EnsureTables(sqlite3* db) {
             state INTEGER NOT NULL DEFAULT 1,
             game_server_port INTEGER NOT NULL DEFAULT 0,
             persistent INTEGER NOT NULL DEFAULT 0,
+            session_kind TEXT NOT NULL DEFAULT 'skirmish',
             created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
             updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
         );
@@ -125,14 +142,16 @@ void RoomManager::PersistRoomLocked(const GameRoom& room) {
     if (!db) return;
     static const char* kSql =
         "INSERT INTO rooms (id, name, host_player_id, map_id, game_id, "
-        "  max_players, password, state, game_server_port, persistent, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%s','now')) "
+        "  max_players, password, state, game_server_port, persistent, "
+        "  session_kind, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%s','now')) "
         "ON CONFLICT(id) DO UPDATE SET "
         "  name=excluded.name, host_player_id=excluded.host_player_id, "
         "  map_id=excluded.map_id, game_id=excluded.game_id, "
         "  max_players=excluded.max_players, password=excluded.password, "
         "  state=excluded.state, game_server_port=excluded.game_server_port, "
-        "  persistent=excluded.persistent, updated_at=strftime('%s','now')";
+        "  persistent=excluded.persistent, "
+        "  session_kind=excluded.session_kind, updated_at=strftime('%s','now')";
     sqlite3_stmt* s = nullptr;
     if (sqlite3_prepare_v2(db, kSql, -1, &s, nullptr) != SQLITE_OK) {
         SLOG(SPRING_LOG_WARNING, "PersistRoom prepare failed: %s", sqlite3_errmsg(db));
@@ -148,6 +167,7 @@ void RoomManager::PersistRoomLocked(const GameRoom& room) {
     sqlite3_bind_int(s, 8, static_cast<int>(room.state));
     sqlite3_bind_int(s, 9, room.gameServerPort);
     sqlite3_bind_int(s, 10, room.persistent ? 1 : 0);
+    BindText(s, 11, SessionKindToString(room.sessionKind));
     if (sqlite3_step(s) != SQLITE_DONE) {
         SLOG(SPRING_LOG_WARNING, "PersistRoom step failed: %s", sqlite3_errmsg(db));
     }
@@ -280,7 +300,8 @@ void RoomManager::LoadFromDatabase() {
     {
         const char* kSql =
             "SELECT id, name, host_player_id, map_id, game_id, max_players, "
-            "password, state, game_server_port, persistent FROM rooms";
+            "password, state, game_server_port, persistent, session_kind "
+            "FROM rooms";
         sqlite3_stmt* s = nullptr;
         if (sqlite3_prepare_v2(db, kSql, -1, &s, nullptr) == SQLITE_OK) {
             while (sqlite3_step(s) == SQLITE_ROW) {
@@ -299,6 +320,21 @@ void RoomManager::LoadFromDatabase() {
                 r.state = static_cast<ERoomState>(sqlite3_column_int(s, 7));
                 r.gameServerPort = static_cast<uint16_t>(sqlite3_column_int(s, 8));
                 r.persistent = (sqlite3_column_int(s, 9) != 0);
+                const unsigned char* sk = sqlite3_column_text(s, 10);
+                // An unreadable spelling falls back to Skirmish HERE, unlike
+                // the API decoder which rejects: this row is already in the
+                // database and dropping the room would lose it. The kind is
+                // re-logged so an operator sees the downgrade.
+                if (sk) {
+                    const std::string skStr = reinterpret_cast<const char*>(sk);
+                    if (auto kind = SessionKindFromString(skStr)) {
+                        r.sessionKind = *kind;
+                    } else {
+                        SLOG(SPRING_LOG_WARNING,
+                            "room %u: unknown session_kind '%s' in db, "
+                            "loading as skirmish", r.id, skStr.c_str());
+                    }
+                }
                 rooms[r.id] = std::move(r);
             }
             sqlite3_finalize(s);
@@ -404,7 +440,8 @@ uint32_t RoomManager::CreateRoom(
     const std::string& password,
     uint32_t hostPlayerId, ClientID hostClientId,
     const std::string& hostUsername,
-    bool persistent, const std::string& hostFactionId)
+    bool persistent, const std::string& hostFactionId,
+    SessionKind sessionKind)
 {
     std::lock_guard<std::recursive_mutex> lock(mutex);
 
@@ -417,7 +454,13 @@ uint32_t RoomManager::CreateRoom(
     room.maxPlayers = maxPlayers;
     room.password = password;
     room.hostPlayerId = hostPlayerId;
-    room.persistent = persistent;
+    room.sessionKind = sessionKind;
+    // PersistentWar ⇒ persistent, enforced here rather than trusted from the
+    // caller: a war that the reaper can delete when its last human leaves is
+    // not a persistent war, and every entry point would otherwise have to
+    // remember to pass both flags. The implication is one-way — a skirmish may
+    // still be persistent (AI-testing rooms are).
+    room.persistent = persistent || sessionKind == SessionKind::PersistentWar;
     room.state = ERoomState::Filling;
 
     RoomPlayer host;
