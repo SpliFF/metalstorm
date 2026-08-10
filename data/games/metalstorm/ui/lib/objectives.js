@@ -19,7 +19,7 @@
 const FIELD_KEY = /^objective_(\d+)_(\w+)$/;
 
 const NUMERIC_FIELDS = new Set([
-  'reward', 'team', 'progress', 'phase', 'expire', 'x', 'z', 'r', 'suggested', 'completed_by',
+  'reward', 'team', 'team2', 'progress', 'phase', 'expire', 'x', 'z', 'r', 'suggested', 'completed_by',
 ]);
 
 /**
@@ -42,9 +42,30 @@ export function isResolved(o) {
  * player is never told about an outcome they were never shown the objective
  * for. team === -1 (or absent) means "open to anyone", matching the sim's own
  * `o.forTeam or -1` publish convention.
+ *
+ * `team2` is the CO-ELIGIBLE team (PLAN-metalstorm-interaction.md §1
+ * `joint_objective`): game_parley.lua's accept path calls
+ * GG.Objectives.WidenEligibility, which sets `forTeam2` and republishes.
+ * The sim enforces it (objectives/control.lua's eligibility gate is
+ * `forTeam or forTeam2`), so a widened objective is genuinely completable by
+ * that team — omitting it here hid the objective from the only team the
+ * widening exists for (PLAN-endtoend.md D59).
  */
 export function visibleTo(o, teamId) {
-  return o.team === -1 || o.team === undefined || o.team === teamId;
+  return o.team === -1 || o.team === undefined || o.team === teamId
+    || (o.team2 !== undefined && o.team2 === teamId);
+}
+
+/**
+ * True when `o` is a joint objective — two teams are eligible for one reward
+ * that only pays whoever completes it (game_objectives.lua awardObjective
+ * pays `completingTeam`; parley's `terms.split` is published but NOT enforced
+ * by the award path). Both sides need to be told, because to the original
+ * owner the objective silently became a race and to the widened-to team it is
+ * indistinguishable from one of its own.
+ */
+export function isJoint(o) {
+  return o.team2 !== undefined && o.team !== undefined && o.team !== -1;
 }
 
 // Mirrors game_objectives.lua's PUBLISHED_FIELDS exactly — pull() polls this
@@ -57,8 +78,11 @@ export function visibleTo(o, teamId) {
 // team -1 to both sides, so without this key the loser of a race sees only
 // "complete" and cannot tell it was not theirs (see the publish() comment in
 // game_objectives.lua).
+// `team2` is the co-eligible team set by GG.Objectives.WidenEligibility — see
+// visibleTo() and isJoint(). It is published only while a widening is in
+// force, so its absence is the normal case and must not be read as "team -1".
 const PUBLISHED_FIELDS = [
-  'type', 'scope', 'state', 'reward', 'team', 'progress',
+  'type', 'scope', 'state', 'reward', 'team', 'team2', 'progress',
   'phase', 'stage', 'expire', 'region', 'x', 'z', 'r', 'suggested', 'completed_by',
 ];
 

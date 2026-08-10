@@ -34,7 +34,7 @@
 //     markerPosition() doc) — those markers stay unavailable even once the
 //     hook lands, until that follow-up ships.
 
-import { createObjectiveIndex, isResolved, visibleTo } from '../lib/objectives.js';
+import { createObjectiveIndex, isResolved, isJoint, visibleTo } from '../lib/objectives.js';
 import { formatAuthority } from '../lib/authority-format.js';
 
 const TYPE_ICONS = {
@@ -77,6 +77,12 @@ function renderItem(o, playerId, delegated) {
   // guidance_<team>_delegated_keys via game_ai_guidance.lua; the planner
   // scores a delegated goal ×5 (ai/strategos/planner.lua sourceWeight()).
   const delegatedBadge = delegated ? '<span class="nui-badge">AI</span>' : '';
+  // PLAN-endtoend.md D59 / PLAN-metalstorm-interaction.md §1 joint_objective.
+  // A widened objective pays only whoever completes it, so both eligible
+  // teams are in a race they were never told about: without this the widened-
+  // to team sees an ordinary tactical row, and the original owner sees no
+  // change at all at the moment its objective stopped being exclusive.
+  const jointBadge = isJoint(o) ? '<span class="nui-badge nui-badge--accent">joint</span>' : '';
   // Toggle verb only — the panel is 236px wide, so "Unassign from AI" would
   // wrap; the badge above already says which state we're in.
   const assignLabel = delegated ? 'Unassign' : 'Assign AI';
@@ -89,7 +95,7 @@ function renderItem(o, playerId, delegated) {
     `</div>` +
     `<div class="nui-meter"><div class="nui-meter__fill" style="width:${pct}%"></div></div>` +
     `<div class="ms-obj__line ms-obj__actions">` +
-    suggestedBadge + delegatedBadge +
+    suggestedBadge + jointBadge + delegatedBadge +
     `<button type="button" class="nui-btn nui-btn--sm ms-obj-assign-ai" data-id="${o.id}" data-delegated="${delegated ? '1' : '0'}">${assignLabel}</button>` +
     `</div>` +
     `</li>`
@@ -120,7 +126,11 @@ function renderOutcome(o, teamId) {
     note = 'complete';
     award = `<span class="nui-badge nui-badge--gold ms-obj__reward">⬡ +${reward}</span>`;
   } else if (state === 'lost-race') {
-    note = 'completed by another team';
+    // A joint objective (D59) is lost to a named partner, not to "another
+    // team" — the player agreed to share this one, and the reward still went
+    // to whoever finished it (game_objectives.lua pays completingTeam; the
+    // parley's terms.split is published but not enforced).
+    note = isJoint(o) ? 'completed by the joint partner' : 'completed by another team';
     award = `<span class="nui-badge ms-obj__reward">⬡ ${reward} lost</span>`;
   } else if (o.state === 'failed') {
     // The progress it died at is the closest thing to a reason the sim

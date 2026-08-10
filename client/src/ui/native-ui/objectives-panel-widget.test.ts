@@ -265,3 +265,99 @@ describe('metalstorm objectives-panel reward legibility (D49)', () => {
         expect(h.outcomeLog()).toContain('114.6 lost');
     });
 });
+
+/**
+ * PLAN-endtoend.md D59 — a joint objective was invisible to the team it was
+ * widened to. `GG.Objectives.WidenEligibility` (game_parley.lua's accept path)
+ * sets `forTeam2` and publishes `objective_<id>_team2`, and the sim enforces
+ * it (objectives/control.lua's gate is `forTeam or forTeam2`) — but the client
+ * mirror listed neither the field nor the team, so the widened-to team's panel
+ * showed nothing at all for an objective it could actually complete.
+ *
+ * We are team 0 throughout; the objective belongs to team 4 and is widened to
+ * us, which is the exact shape a parley accept produces.
+ */
+describe('metalstorm objectives-panel joint objectives (D59)', () => {
+    const originalDocument = (globalThis as { document?: unknown }).document;
+
+    beforeEach(() => {
+        (globalThis as { document?: unknown }).document = { createElement: () => makeNode() };
+    });
+
+    afterEach(() => {
+        (globalThis as { document?: unknown }).document = originalDocument;
+    });
+
+    it('shows an objective widened to us, and marks it joint', async () => {
+        const widget = await loadWidget();
+        const game = new Map<string, unknown>([['objective_count', 5]]);
+        const h = makeCtx(game);
+        widget.init(h.ctx);
+
+        h.publish(activeEscort(5, 4));                 // team 4's — not ours
+        expect(h.list()).not.toContain('escort');
+
+        h.publish({ objective_5_team2: 0 });           // parley accepted: widened to us
+        const list = h.list();
+        expect(list).toContain('escort');
+        expect(list).toContain('joint');
+    });
+
+    it('marks it joint for the original owner too — its objective became a race', async () => {
+        const widget = await loadWidget();
+        const game = new Map<string, unknown>([['objective_count', 5]]);
+        const h = makeCtx(game);
+        widget.init(h.ctx);
+
+        h.publish(activeEscort(5, 0));                 // ours
+        expect(h.list()).not.toContain('joint');
+
+        h.publish({ objective_5_team2: 4 });
+        expect(h.list()).toContain('joint');
+    });
+
+    it('hides it again if the widening is withdrawn', async () => {
+        const widget = await loadWidget();
+        const game = new Map<string, unknown>([['objective_count', 5]]);
+        const h = makeCtx(game);
+        widget.init(h.ctx);
+
+        h.publish({ ...activeEscort(5, 4), objective_5_team2: 0 });
+        expect(h.list()).toContain('escort');
+
+        h.publish({ objective_5_team2: null });
+        expect(h.list()).not.toContain('escort');
+    });
+
+    it('announces the partner completing it, and names it as the joint partner', async () => {
+        // The award goes to whoever finishes (game_objectives.lua awards
+        // completingTeam; the parley's terms.split is published but not
+        // enforced), so this is a real loss to us — but not to a stranger.
+        const widget = await loadWidget();
+        const game = new Map<string, unknown>([['objective_count', 5]]);
+        const h = makeCtx(game);
+        widget.init(h.ctx);
+
+        h.publish({ ...activeEscort(5, 4), objective_5_team2: 0 });
+        h.publish({ objective_5_state: 'complete', objective_5_completed_by: 4, objective_5_progress: 1 });
+
+        const list = h.list();
+        expect(list).toContain('completed by the joint partner');
+        expect(list).toContain('100 lost');
+        expect(h.outcomeLog()).toContain('completed by the joint partner');
+    });
+
+    it('credits us normally when we are the one who completes it', async () => {
+        const widget = await loadWidget();
+        const game = new Map<string, unknown>([['objective_count', 5]]);
+        const h = makeCtx(game);
+        widget.init(h.ctx);
+
+        h.publish({ ...activeEscort(5, 4), objective_5_team2: 0 });
+        h.publish({ objective_5_state: 'complete', objective_5_completed_by: 0, objective_5_progress: 1 });
+
+        const list = h.list();
+        expect(list).toContain('⬡ +100');
+        expect(list).not.toContain('lost');
+    });
+});

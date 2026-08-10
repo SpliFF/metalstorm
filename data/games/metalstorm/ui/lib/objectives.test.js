@@ -2,7 +2,7 @@
 // Run: cd client && npx vitest run --config ../data/games/metalstorm/ui/vitest.config.js --root ../data/games/metalstorm/ui
 
 import { describe, it, expect } from 'vitest';
-import { createObjectiveIndex } from './objectives.js';
+import { createObjectiveIndex, isJoint } from './objectives.js';
 
 describe('applyParams ingestion', () => {
   it('parses type/scope/state/reward/team/progress off the wire', () => {
@@ -159,6 +159,59 @@ describe('forTeam filtering', () => {
     const forTeam3 = idx.forTeam(3, 'active').map((o) => o.id);
     expect(forTeam3).toEqual([1]);
     expect(idx.forTeam(4, 'active').map((o) => o.id)).toEqual([1, 2]);
+  });
+
+  // PLAN-endtoend.md D59. GG.Objectives.WidenEligibility publishes
+  // `objective_<id>_team2`; the mirror read neither the key nor the team, so
+  // a joint objective was invisible to the only team the widening exists for.
+  it('includes a widened (joint) objective for its co-eligible team', () => {
+    const idx = createObjectiveIndex();
+    idx.applyParams({
+      objective_count: 1,
+      objective_1_type: 'control', objective_1_state: 'active',
+      objective_1_team: 4, objective_1_team2: 0,
+    });
+    expect(idx.get(1).team2).toBe(0);
+    expect(idx.forTeam(4, 'active').map((o) => o.id)).toEqual([1]);   // original owner
+    expect(idx.forTeam(0, 'active').map((o) => o.id)).toEqual([1]);   // widened to
+    expect(idx.forTeam(3, 'active')).toEqual([]);                    // everyone else
+  });
+
+  // Through pull(), not applyParams: pull() polls the fixed PUBLISHED_FIELDS
+  // list, so a field missing from that list is never read at all — and pull()
+  // is the path the widgets actually run (there is no bulk batch read; see
+  // authority-bar.js's store contract). An applyParams-only test of `team2`
+  // passes with and without the fix.
+  it('reads and clears the co-eligible team through pull()', () => {
+    const idx = createObjectiveIndex();
+    const params = {
+      objective_count: 1,
+      objective_1_type: 'control', objective_1_state: 'active',
+      objective_1_team: 4, objective_1_team2: 0,
+    };
+    const get = (k) => params[k];
+    idx.pull(get);
+    expect(idx.get(1).team2).toBe(0);
+    expect(idx.forTeam(0, 'active').map((o) => o.id)).toEqual([1]);
+
+    delete params.objective_1_team2;
+    idx.pull(get);
+    expect(idx.get(1).team2).toBeUndefined();
+    expect(idx.forTeam(0, 'active')).toEqual([]);
+  });
+
+  it('isJoint is false for an unwidened or open-race objective', () => {
+    const idx = createObjectiveIndex();
+    idx.applyParams({
+      objective_count: 3,
+      objective_1_type: 'control', objective_1_state: 'active', objective_1_team: 4,
+      objective_2_type: 'kill', objective_2_state: 'active', objective_2_team: -1,
+      objective_3_type: 'kill', objective_3_state: 'active',
+      objective_3_team: 4, objective_3_team2: 0,
+    });
+    expect(isJoint(idx.get(1))).toBe(false);
+    expect(isJoint(idx.get(2))).toBe(false);
+    expect(isJoint(idx.get(3))).toBe(true);
   });
 
   it('filters by state when given', () => {
