@@ -371,6 +371,28 @@ local function creditObjectiveComplete(o, completingTeam)
     end
 end
 
+--- Rejoin restore of participation credit (PLAN-metalstorm-lobby.md §2.5/§5.1,
+--- task 4). The server calls this when an account returns to a persistent war,
+--- with the counters it captured when they last left.
+---
+--- These are LIFETIME STATISTICS, not resources — nothing is conserved, so
+--- unlike the authority pool they are handed back on every rejoin however long
+--- the absence was. A player who fought all week and comes back next month has
+--- still done the fighting.
+---
+--- MAX, never assignment, and that is the guard that matters: a war resumed
+--- from an empty sim and a war still running are the same call here, and in the
+--- second case the live counters are ahead of the saved ones (the sweep that
+--- wrote them runs once a minute). Assigning would roll a still-playing
+--- player's scoreboard backwards on a reconnect.
+function GG.Teams.RestoreScore(playerID, restoredEarned, restoredSpent, restoredObjectives)
+    if not playerID then return end
+    local pid = math.floor(playerID)
+    earned[pid]         = math.max(earned[pid] or 0, restoredEarned or 0)
+    spent[pid]          = math.max(spent[pid] or 0, restoredSpent or 0)
+    objectivesDone[pid] = math.max(objectivesDone[pid] or 0, restoredObjectives or 0)
+end
+
 local function publishScoreboard()
     for _, playerID in ipairs(Spring.GetPlayerList()) do
         -- Integer-normalised key — the SAME AI3 bugfix publishAIProfiles above

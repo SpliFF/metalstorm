@@ -851,6 +851,79 @@ function gadget:PlayerAdded(playerID)
     Ledger.tagAward(ledgerState, teamID, joinGrant, 'join_grant')
 end
 
+--- Rejoin restore (PLAN-metalstorm-lobby.md §2.5, task 4). The server calls
+--- this when a player comes back to a persistent war inside the brief-absence
+--- window, with the pool it captured on the frame before they left.
+---
+--- TOP-UP, NOT A DEPOSIT, and that is the entire design. Two things make the
+--- obvious `pool = pool + amount` wrong, and they pull in the same direction:
+---
+---  * PlayerRemoved below is supposed to merge a departing player's pool into
+---    the TEAM pool, so the saved authority is in the team's hands and may
+---    already be spent — adding it back would MINT a second copy.
+---  * And in the live build that merge does not actually run (verified
+---    2026-08-11: after a real disconnect the ledger shows no `leaver_merge`
+---    and the player's pool is untouched — the synced PlayerRemoved callin is
+---    not reaching gadgets, which is also why a mid-war joiner never gets a
+---    join grant; filed against task 5, whose whole subject is that hook).
+---    So a reconnecting player frequently still HOLDS the pool being restored,
+---    and a deposit would double it once per reload.
+---
+--- Restoring to a REMEMBERED LEVEL is right under both: it makes up the
+--- shortfall and nothing more, so it is idempotent, un-farmable, and a no-op
+--- when the sim never lost the pool in the first place. It is also conserving
+--- — the shortfall comes out of the team pool and only as far as the team can
+--- fund it, which is the honest answer when the team spent it: a player who
+--- left with 400 and returns to a team that burned it through gets what is
+--- left, not a refund the war cannot afford.
+function GG.Authority.RestorePool(playerID, amount)
+    if not playerID or not amount or amount <= 0 then return 0 end
+    local teamID = playerTeam(playerID)
+    if not teamID then return 0 end
+    local shortfall = amount - getPlayerPool(playerID)
+    if shortfall <= 0 then return 0 end
+    local moved = math.min(shortfall, getTeamPool(teamID))
+    if moved <= 0 then return 0 end
+    setTeamPool(teamID, getTeamPool(teamID) - moved)
+    setPlayerPool(playerID, getPlayerPool(playerID) + moved)
+    -- A 'move' in ledger terms (pool-to-pool, net zero — §1), the exact
+    -- inverse of the leaver_merge PlayerRemoved records — and tagged ONCE,
+    -- like that one: tagCharge IS tagAward (ledger.lua), so tagging both ways
+    -- would double-count the class rather than balance it.
+    Ledger.tagCharge(ledgerState, teamID, moved, 'rejoin_restore')
+    emitEvent('award', moved, 'rejoin_restore', playerID, teamID)
+    return moved
+end
+
+--- The other half of §2.5: past the brief window the saved pool is stale, and
+--- "rejoin re-grants a small onboarding stipend rather than restoring a stale
+--- pool". Minted, like the join grant it reuses the size of — a returning
+--- player must be able to give an order rather than waiting for the next team
+--- payout, and taking it from the team pool would punish the side for having
+--- someone come back.
+---
+--- Deliberately NOT guarded by `authority_granted_<id>`: that guard exists so
+--- the once-per-identity JOIN grant cannot be farmed by reconnecting, and this
+--- is the opposite case — a player who has been away long enough to lose their
+--- pool. Two other things stop it being farmable, and both are needed:
+--- the server only calls it past the absence window (measured against the
+--- binding's own `last_seen_at`), and it is a TOP-UP like RestorePool above —
+--- it mints only the shortfall to `joinGrant`, so a player who still holds a
+--- pool gets nothing. Without that second guard, the live build's missing
+--- leaver merge (see RestorePool) would have made a reconnect every five
+--- minutes an income stream.
+function GG.Authority.GrantRejoinStipend(playerID)
+    if not playerID then return 0 end
+    local teamID = playerTeam(playerID)
+    if not teamID then return 0 end
+    local minted = joinGrant - getPlayerPool(playerID)
+    if minted <= 0 then return 0 end
+    setPlayerPool(playerID, getPlayerPool(playerID) + minted)
+    emitEvent('award', minted, 'rejoin_stipend', playerID, teamID)
+    Ledger.tagAward(ledgerState, teamID, minted, 'rejoin_stipend')
+    return minted
+end
+
 -- Departing players (§6, every leave reason incl. timeouts — no pool
 -- banking through disconnects): pool merges into the team pool, zeroed on
 -- the player. Live stakes are untouched here — they stay in escrow and

@@ -14,6 +14,15 @@
 #include <cstdint>
 #include <atomic>
 
+struct lua_State;
+
+/// Execute `code` in `L` and return the result (or a `syntax error: ` /
+/// `runtime error: ` / `error: ` prefixed string — this reports failure in the
+/// return value, not a status code). Defined in LuaExecEngine.cpp; declared
+/// here because it is no longer only the console's: WarStateSim.cpp calls the
+/// synced state through it so the two paths cannot drift into two bridges.
+std::string ExecuteInLuaState(lua_State* L, const std::string& code);
+
 struct LuaExecRequest {
     uint32_t requestId;
     std::string scope;     // "LuaRules", "LuaGaia", "LuaAI:<name>", "server"

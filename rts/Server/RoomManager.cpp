@@ -1,6 +1,7 @@
 // RoomManager — game room lifecycle management.
 
 #include "RoomManager.h"
+#include "WarPlayerBindings.h"
 #include "System/SpringLog/SpringLog.h"
 
 #define LOG_SECTION "lobby"
@@ -289,6 +290,12 @@ void RoomManager::DeleteRoomFromDb(uint32_t roomId) {
     sqlite3_exec(db, sql, nullptr, nullptr, nullptr);
     snprintf(sql, sizeof(sql), "DELETE FROM room_mod_options WHERE room_id=%u", roomId);
     sqlite3_exec(db, sql, nullptr, nullptr, nullptr);
+    // The war's player bindings go with it (PLAN-metalstorm-lobby task 4).
+    // Room ids are reused across lobby lifetimes — `rooms.id` is assigned from
+    // a counter, not an AUTOINCREMENT — so leaving these behind is worse than
+    // a leak: the next war to be handed this id would inherit a roster of
+    // accounts that never fought in it, complete with their pools.
+    WarPlayerBindings::DeleteForRoom(db, roomId);
 }
 
 void RoomManager::LoadFromDatabase() {

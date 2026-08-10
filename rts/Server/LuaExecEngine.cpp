@@ -90,6 +90,13 @@ std::string LuaValueToString(lua_State* L, int idx, int depth = 0) {
 }
 
 // Execute Lua code in a given lua_State, return result string.
+//
+// Deliberately OUTSIDE the anonymous namespace above (and declared in
+// LuaExecEngine.h): WarStateSim.cpp calls the synced state through this same
+// entry point rather than hand-rolling a second lua_pcall bridge, and an
+// internal-linkage copy would have forced exactly that.
+}  // namespace
+
 std::string ExecuteInLuaState(lua_State* L, const std::string& code) {
     if (!L) return "error: Lua state is null";
 
@@ -138,6 +145,8 @@ std::string ExecuteInLuaState(lua_State* L, const std::string& code) {
     lua_settop(L, top);
     return result;
 }
+
+namespace {
 
 // Execute a built-in server command (not Lua)
 std::string ExecuteServerCommand(const std::string& cmd) {

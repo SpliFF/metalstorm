@@ -406,6 +406,10 @@ set(LOBBY_SERVER_SOURCES
     rts/Server/PerfMetrics.cpp
     rts/Server/RatingSystem.cpp
     rts/Server/RoomManager.cpp
+    # PLAN-metalstorm-lobby.md task 4: the lobby reads the account↔war seat
+    # table (and the faction override deletes from it); the game server writes
+    # it. Pure sqlite, no sim — same shape as GameServersDb below.
+    rts/Server/WarPlayerBindings.cpp
     rts/Server/MapMetadataDb.cpp
     rts/Server/GameServersDb.cpp
     rts/Server/AI/AIDiscovery.cpp
@@ -504,6 +508,7 @@ if(TEST_SOURCES)
         ${CMAKE_SOURCE_DIR}/rts/Server/PlayerTeamEventCollector.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/ProjectileEventCollector.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/RoomManager.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/WarPlayerBindings.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/ScenarioDiscovery.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/ScenarioDb.cpp
         # GameDiscovery + its ConfigReader backend: test_game_discovery.cpp

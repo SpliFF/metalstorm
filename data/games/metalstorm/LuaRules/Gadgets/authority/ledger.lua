@@ -26,6 +26,12 @@ local REASON_CLASS = {
     objective_reward = 'mint',
     stake_refund     = 'mint',   -- from SettleEscrow('expired'/'failed')
     join_grant       = 'mint',
+    -- PLAN-metalstorm-lobby.md §2.5 (task 4): the grant a player gets on
+    -- returning to a war after an absence long enough that their saved pool
+    -- is stale. Minted like join_grant, and separate from it so the two are
+    -- distinguishable in the ledger — a war full of rejoin_stipend and no
+    -- join_grant is a war whose population is churning, not growing.
+    rejoin_stipend   = 'mint',
     stipend          = 'mint',
     admin_grant      = 'mint',   -- GM compensation (PLAN-gm-tools.md)
 
@@ -40,6 +46,11 @@ local REASON_CLASS = {
     -- move (net-zero)
     stake_escrow     = 'move',
     leaver_merge     = 'move',
+    -- The exact inverse of leaver_merge (task 4): authority moved back OUT of
+    -- the team pool into a returning player's own. Net zero by construction —
+    -- GG.Authority.RestorePool hands back at most what the team still holds
+    -- and mints nothing.
+    rejoin_restore   = 'move',
     player_fallback  = 'move',
     -- AI funding (PLAN-metalstorm-ai.md §5.2): a human's one-shot gift into a
     -- co-commander's own pool, and the standing per-minute allowance drawn from

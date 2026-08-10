@@ -90,6 +90,9 @@ Full CLI flag list (from `rts/server_main.cpp`):
 | `Server/AI/AIRuntimePool.h/.cpp` | Pool of Lua AI runtimes, one per AI player. |
 | `Server/AI/AIDiscovery.h/.cpp` | Scans `content/engine/ai/` + game ai dirs for plugins. |
 | `Server/FactionData.h/.cpp` | Reads a game's `gamedata/sidedata.lua` into `FactionInfo{key,name,fullName,description,startUnit}`. Bare-`lua_State` reader like `ConfigReader`/`AIDiscovery`, plus a minimal `VFS.Include` shim (BAR's sidedata includes `sides_enum.lua`). `key` is `name` lowercased, matching `SideParser`'s side-key derivation, so it stays in parity with the value stored in `users.faction_id`. Feeds `/api/factions/<gameId>` and the registration/admin faction validation. Missing or broken data yields an empty list, never an error. |
+| `Server/WarPlayerBindings.h/.cpp` | `war_player_bindings`: one row per (war room, account) — the side the account holds, first/last seen, and its per-player war state (authority pool + `score_*` participation credit). Written by the game server, read by the lobby, deleted by the audited faction override and by room deletion (room ids are reused). Pure sqlite, no sim. Migrated additively, never probe-and-dropped: it is the only copy of the state. |
+| `Server/WarRejoinPolicy.h` | Pure decision for a returning player: seat restored / superseded / none, and pool-restore vs onboarding stipend. Two horizons — `WAR_SEAT_HOLD_SEC` (a week, capacity bypass only) and `WAR_BRIEF_ABSENCE_SEC` (5 min, pool staleness). No db, no sim. |
+| `Server/WarStateSim.h/.cpp` | The two directions between the sim and that row: `CaptureWarPlayerState` reads the rules params; the restores call `GG.Authority.RestorePool` / `GG.Teams.RestoreScore` in synced Lua (top-ups, not deposits) through `ExecuteInLuaState`. Never over `RecvLuaMsg` — a client can forge those. |
 | `System/SpringLog/SpringLog.h/.cpp` | Unified logging library (libspringlog). C/C++ API, console + file sinks, pluggable custom sinks. |
 | `System/SpringLog/SpringLogNet.h/.cpp` | Optional WS+FlatBuffers network sink for pushing logs to log server. |
 | `System/SpringLog/SpringLogSqlite.h/.cpp` | Optional SQLite persistence sink for local log storage. |
@@ -730,6 +733,42 @@ per side, `0` = unlimited), uniform across sides; per-side capacity, war
 seeding and queue-when-full are task 7. The count-then-bind sequence is atomic
 by thread confinement, not by a lock: both halves run inside the single
 `AuthRequest` case on the message-pump thread, and nothing else seats a human.
+
+**Rejoin (a war's memory of a player).** Dynamic join is stateless: it seats a
+joiner by faction every time they connect and cannot tell a veteran of this war
+from a stranger. `war_player_bindings` (`Server/WarPlayerBindings.h/.cpp`) is
+the account↔war record that fixes that — one row per (room, account) holding the
+side they hold, when they first fought here, and their per-player war state
+(authority pool + participation credit). The **game server writes it** (it is
+the process that seats players and the only one that can read the sim); the
+lobby reads it, and the audited faction override deletes from it, because a
+binding records the team the *old* faction sat on. It is the one table in the
+shared db that is **migrated, never probe-and-dropped**: `rooms`/`game_servers`/
+`game_status` are mirrors of live in-memory state, and this is the only copy of
+the thing.
+
+`WarRejoinPolicy.h` is the pure decision, and it carries **two horizons** rather
+than one because the two things being restored have different natures. The SEAT
+is an identity: held for `WAR_SEAT_HOLD_SEC` (a week) against the *capacity*
+check only — so a full side cannot turn away a player who has been holding it
+since Tuesday — while which team they get always follows the immutable faction,
+so a war whose sides are re-authored supersedes the binding rather than the
+reverse. The POOL is a conserved resource and goes stale in
+`WAR_BRIEF_ABSENCE_SEC` (5 min); past that §2.5's rule applies and the player
+gets the onboarding stipend instead.
+
+State moves between the sim and the row through `Server/WarStateSim.h/.cpp`.
+Capture is a plain rules-param read, run on disconnect **before**
+`eventHandler.PlayerRemoved` (the gadget is supposed to merge a leaver's pool
+into the team pool, so capturing after it would record zero for everyone) plus a
+60 s sweep, which is what survives a `kill -9`. Restore is deliberately NOT the
+mirror image: it calls `GG.Authority.RestorePool` / `GG.Teams.RestoreScore` in
+synced Lua, both **top-ups to a remembered level** rather than deposits, so they
+are idempotent, un-farmable and a no-op when the sim never lost the value. They
+are called directly into the synced state, never over `RecvLuaMsg` — any client
+can forge one of those, which would hand every player a "restore my pool to N"
+verb. Replays skip the whole path (a replay has no db to ask, and a dynamically
+joined session already cannot replay — its team is not in the recorded roster).
 
 **Game-server lifetime:** a non-persistent game server self-terminates after
 5 min with zero connected clients (120 s startup grace); persistent rooms run

@@ -48,6 +48,8 @@
 #include "Server/AI/AIDiscovery.h"
 #include "Server/PerfMetrics.h"
 #include "Server/RoomManager.h"
+#include "Server/WarPlayerBindings.h"
+#include "Server/WarStateSim.h"
 #include "Server/MapMetadata.h"
 #include "Server/LuaExecEngine.h"
 #include "Server/LuaDebugger.h"
@@ -875,6 +877,12 @@ int main(int argc, char* argv[])
         springlog_shutdown();
         return 1;
     }
+    // PLAN-metalstorm-lobby.md §2.5/§5.1 (task 4): the account↔war seat table
+    // and its per-player war state. Created from BOTH processes — the game
+    // server is the writer, but a lobby that has never launched a war still
+    // reads it (the faction override clears bindings, task 6's browser counts
+    // them), and neither may depend on the other having started first.
+    WarPlayerBindings::EnsureTable(db.Handle());
 
     // --- Map metadata (from mapconverter processing, stored in SQLite) ---
     MapMetadata mapMeta;
@@ -1891,6 +1899,10 @@ int main(int argc, char* argv[])
     const auto serverStartTime = std::chrono::steady_clock::now();
     auto lastClientTime = serverStartTime;   // last instant clientCount > 0 (or launch)
     auto lastStatusWrite = serverStartTime;
+    /// Last war-state sweep (task 4). Wall-clock like the heartbeat above,
+    /// not frame-based: what it protects against is the process dying, which
+    /// is not something the sim frame counter has an opinion about.
+    auto lastWarStateSweep = serverStartTime;
     /// Playback-bar heartbeat (task 4b). Wall-clock, not frame-based, on
     /// purpose: a PAUSED replay advances no frames at all, and the bar still
     /// has to learn that the controller changed or that a seek finished.
@@ -2121,6 +2133,33 @@ int main(int argc, char* argv[])
                 lastStatusWrite = wall;
                 writeGameStatus(true, clients);
             }
+            // ── War state, on a cadence as well as on disconnect (task 4) ──
+            // (PLAN-metalstorm-lobby.md §2.5.) The disconnect capture is the
+            // accurate one — it runs on the last frame the player owned their
+            // pool. It is also the one that never runs when the process dies
+            // without draining a disconnect, which is precisely task 3's
+            // tested case: `kill -9` on a war's server leaves the room Active
+            // and the next joiner resumes it. Without this sweep, every
+            // connected player's state at that instant would be whatever they
+            // last disconnected with — for a player who has been online since
+            // the war started, nothing at all.
+            //
+            // One UPDATE per seated human per minute; a war with eight players
+            // a side writes sixteen rows a minute, which is below the metrics
+            // writer's own cadence and far below the 2s status heartbeat.
+            if (sessionKind == SessionKind::PersistentWar &&
+                !replay::IsReplaying() &&
+                wall - lastWarStateSweep >= std::chrono::seconds(60)) {
+                lastWarStateSweep = wall;
+                for (const auto& [dcId, pNum] : clientPlayerNum) {
+                    const auto* s = sessions.GetSession(dcId);
+                    if (s == nullptr || s->team < 0) continue;
+                    WarPlayerBindings::SaveState(
+                        db.Handle(), roomId, s->userId,
+                        CaptureWarPlayerState(s->team, pNum),
+                        static_cast<int64_t>(std::time(nullptr)));
+                }
+            }
             // Idle exit: non-persistent rooms shut down once they've had no
             // connected clients for kIdleExitSec (past the startup grace).
             if (!roomPersistent && idleExitEnabled) {
@@ -2286,6 +2325,36 @@ int main(int argc, char* argv[])
                 auto pIt = clientPlayerNum.find(dcId);
                 if (pIt != clientPlayerNum.end()) {
                     int pNum = pIt->second;
+                    // ── Capture this player's war state (task 4) ───────────
+                    // (PLAN-metalstorm-lobby.md §2.5/§5.1.) STRICTLY BEFORE
+                    // eventHandler.PlayerRemoved below, and that ordering is
+                    // the whole correctness of the capture: game_authority's
+                    // PlayerRemoved merges a departing player's pool into the
+                    // TEAM pool and zeroes theirs, for every leave reason.
+                    // Capturing afterwards would faithfully record zero for
+                    // everyone, every time, and the restore path would have
+                    // nothing to give back but still look implemented.
+                    //
+                    // Only a war, and only a seated human: a spectator has no
+                    // binding for the UPDATE to match (SaveState says so and
+                    // returns false rather than inventing one).
+                    if (sessionKind == SessionKind::PersistentWar &&
+                        session->team >= 0 && !replay::IsReplaying()) {
+                        const WarPlayerState st =
+                            CaptureWarPlayerState(session->team, pNum);
+                        if (WarPlayerBindings::SaveState(
+                                db.Handle(), roomId, session->userId, st,
+                                static_cast<int64_t>(std::time(nullptr)))) {
+                            SLOG(SPRING_LOG_NOTICE,
+                                "war state saved for '%s' (account %lld, team "
+                                "%d): pool %.1f, earned %.1f, spent %.1f, "
+                                "%d objective(s)",
+                                session->username.c_str(),
+                                (long long)session->userId, session->team,
+                                st.authorityPool, st.scoreEarned, st.scoreSpent,
+                                st.objectives);
+                        }
+                    }
                     // Journal chokepoint #2 of 5: a disconnect fires
                     // PlayerRemoved into synced Lua, so gadgets can (and in
                     // Metalstorm do) change synced state in response. Only

@@ -11,6 +11,9 @@
 #include "StandingOrders.h"
 #include "OrgGroups.h"
 #include "LuaExecEngine.h"
+#include "WarPlayerBindings.h"
+#include "WarRejoinPolicy.h"
+#include "WarStateSim.h"
 #include "SyncedInputJournal.h"
 #include "ReplayPlayer.h"
 #include "ReplayControlDeck.h"
@@ -38,6 +41,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <ctime>
 #include <string>
 #include <vector>
 
@@ -269,21 +273,80 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                                          humansOnSide, ctx.warSideCapacity);
             };
 
+            // ── Rejoin: an account already bound to this war (task 4) ───────
+            // (PLAN-metalstorm-lobby.md §2.5/§5.1.) Task 2 seats a joiner by
+            // faction *every time they connect*, which is correct and also
+            // forgetful: it cannot tell a veteran of this war from a stranger,
+            // so a returning player could be turned away by a full side while
+            // eight people who joined this afternoon hold seats they were
+            // given ahead of the person who has been fighting since Tuesday.
+            // The binding is the war's memory of them.
+            //
+            // Reads only; the bind and the state restore happen after the seat
+            // is actually taken (`applyWarBinding` below), so a decline leaves
+            // the table exactly as it was.
+            struct WarRejoin {
+                std::optional<WarPlayerBinding> binding;
+                RejoinDecision decision;
+            };
+            auto warRejoinFor = [&](int64_t accountId,
+                                    const std::optional<std::string>& factionId)
+                -> WarRejoin {
+                WarRejoin r;
+                if (ctx.sessionKind != SessionKind::PersistentWar) return r;
+                if (replaySpectator || replay::IsReplaying()) return r;
+                r.binding = WarPlayerBindings::Find(ctx.db.Handle(), ctx.roomId,
+                                                    accountId);
+                const auto& opts = CGameSetup::GetModOptions();
+                const auto wsIt = opts.find("war_sides");
+                const WarSides sides = (wsIt != opts.end())
+                    ? ParseWarSides(wsIt->second) : WarSides{};
+                const std::string faction = factionId ? *factionId : std::string{};
+                const auto factionTeam = TeamForFactionIn(sides, faction);
+                const int64_t now = static_cast<int64_t>(std::time(nullptr));
+                r.decision = DecideRejoin(
+                    r.binding.has_value(),
+                    r.binding ? r.binding->team : -1,
+                    factionTeam ? static_cast<int>(*factionTeam) : -1,
+                    r.binding ? now - r.binding->lastSeenAt : 0,
+                    r.binding ? r.binding->state.authorityPool : 0.0,
+                    r.binding ? r.binding->HasSavedState() : false);
+                return r;
+            };
+
             // Resolve the seat one authenticated account gets: its roster team
-            // if the lobby named it, else a dynamic-join promotion if this is
-            // a war it has a side in, else the spectator seat. Shared by the
+            // if the lobby named it, else the seat it already holds in this
+            // war (task 4), else a dynamic-join promotion if this is a war it
+            // has a side in (task 2), else the spectator seat. Shared by the
             // token and the password path — they had already drifted into two
-            // copies of the roster rule, and this adds a second rule to keep
-            // in step.
+            // copies of the roster rule, and this adds two more to keep in
+            // step.
             struct AuthSeat { int team; bool spectator; };
             auto resolveSeat = [&](const std::string& name,
-                                   const std::optional<std::string>& factionId)
+                                   const std::optional<std::string>& factionId,
+                                   int64_t accountId)
                 -> AuthSeat {
                 if (replaySpectator)
                     return {-1, true};
                 const int rosterTeam = resolveTeam(name);
                 if (!rosterRequired || rosterTeam >= 0)
                     return {rosterTeam, rosterRequired && rosterTeam < 0};
+                // A held seat is checked BEFORE capacity, because holding it
+                // against capacity is the entire point: past the hold window
+                // the binding stops bypassing anything and this falls through
+                // to task 2's rule, which may still admit them if the side has
+                // room.
+                const WarRejoin rj = warRejoinFor(accountId, factionId);
+                if (rj.decision.SeatRestored() && rj.decision.bypassCapacity) {
+                    SLOG(SPRING_LOG_NOTICE,
+                        "rejoin: '%s' already holds team %d in this war "
+                        "(bound %llds ago) — seat restored ahead of the "
+                        "capacity check",
+                        name.c_str(), rj.decision.team,
+                        (long long)(rj.binding
+                            ? std::time(nullptr) - rj.binding->lastSeenAt : 0));
+                    return {rj.decision.team, false};
+                }
                 const DynamicJoinDecision d = decideDynamicJoin(name, factionId);
                 if (d.Admitted()) {
                     SLOG(SPRING_LOG_NOTICE,
@@ -389,6 +452,74 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                 const int pNum = playerNumForUsername(name);
                 bindPlayer(name, team, spectator, pNum);
                 return pNum;
+            };
+
+            // ── The war's memory of this player: write it, then act on it ───
+            // (PLAN-metalstorm-lobby.md §2.5/§5.1, task 4.) Runs after the
+            // seat is taken and the sim-side player row exists, for both live
+            // auth paths.
+            //
+            // Order matters twice over. The rejoin decision is re-derived
+            // BEFORE `BindSeat` stamps `last_seen_at`, or the absence it reads
+            // is always zero and every returning player looks like a brief
+            // disconnect. And the restore runs AFTER `bindPlayer`, because
+            // both halves address the player by their sim playerNum and the
+            // gadgets resolve that to a team through Spring.GetPlayerInfo.
+            //
+            // Spectators are deliberately not bound: a binding is a *seat*,
+            // and §3's spectators explicitly hold none. A war a player only
+            // ever watched must not later hand them a held place in it.
+            auto applyWarBinding = [&](int64_t accountId, const std::string& name,
+                                       const std::optional<std::string>& factionId,
+                                       int team, bool spectator, int pNum) {
+                if (ctx.sessionKind != SessionKind::PersistentWar) return;
+                if (spectator || team < 0 || pNum < 0) return;
+                if (replaySpectator || replay::IsReplaying()) return;
+                const WarRejoin rj = warRejoinFor(accountId, factionId);
+                const int64_t now = static_cast<int64_t>(std::time(nullptr));
+                WarPlayerBindings::BindSeat(ctx.db.Handle(), ctx.roomId, accountId,
+                                            name, factionId ? *factionId
+                                                            : std::string{},
+                                            team, now);
+                if (!rj.binding) {
+                    SLOG(SPRING_LOG_NOTICE,
+                        "war binding: '%s' (account %lld) bound to team %d of "
+                        "war room %u for the first time",
+                        name.c_str(), (long long)accountId, team, ctx.roomId);
+                    return;
+                }
+                // Participation credit is a lifetime statistic, not a
+                // resource: it comes back on every rejoin, however long the
+                // absence, and the gadget never lowers a live counter with it.
+                RestoreWarPlayerScore(pNum, rj.binding->state);
+                switch (rj.decision.state) {
+                    case RejoinState::RestorePool:
+                        SLOG(SPRING_LOG_NOTICE,
+                            "war rejoin: '%s' back on team %d — %s (topped "
+                            "back up to %.1f from the team pool)",
+                            name.c_str(), team,
+                            RejoinStateToString(rj.decision.state),
+                            rj.decision.pool);
+                        RestoreWarPlayerPool(pNum, rj.decision.pool);
+                        break;
+                    case RejoinState::OnboardingStipend:
+                        SLOG(SPRING_LOG_NOTICE,
+                            "war rejoin: '%s' back on team %d — %s (saved pool "
+                            "%.1f is stale after %llds away)",
+                            name.c_str(), team,
+                            RejoinStateToString(rj.decision.state),
+                            rj.binding->state.authorityPool,
+                            (long long)(now - rj.binding->lastSeenAt));
+                        GrantWarRejoinStipend(pNum);
+                        break;
+                    case RejoinState::Nothing:
+                        SLOG(SPRING_LOG_NOTICE,
+                            "war rejoin: '%s' back on team %d — %s (%s)",
+                            name.c_str(), team,
+                            RejoinStateToString(rj.decision.state),
+                            RejoinSeatToString(rj.decision.seat));
+                        break;
+                }
             };
 
             // One-shots every authenticated session needs — fresh login AND
@@ -636,7 +767,8 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                     // On a replay server the roster belongs to the recording,
                     // so this account's place in it is irrelevant: team -1.
                     const auto seat = resolveSeat(reconnectUser->username,
-                                                  reconnectUser->factionId);
+                                                  reconnectUser->factionId,
+                                                  reconnectUser->id);
                     const int  team        = seat.team;
                     const bool isSpectator = seat.spectator;
                     const std::string& effectiveRole =
@@ -650,6 +782,9 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                     // every synced key it reads back is scoped by it.
                     const int pNum = registerLivePlayer(
                         reconnectUser->username, team, isSpectator);
+                    applyWarBinding(reconnectUser->id, reconnectUser->username,
+                                    reconnectUser->factionId, team, isSpectator,
+                                    pNum);
                     auto resp = Protocol::BuildAuthResponse(
                         SpringWeb::AuthStatus_OK, auth->token()->str(),
                         static_cast<uint32_t>(userId), "",
@@ -780,7 +915,7 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             // its comment. Dev-mode (empty roster) skips the whole rule and
             // keeps the "command anything" smoketest escape hatch for
             // team == -1. Replay servers: team -1 always.
-            const auto seat = resolveSeat(user->username, user->factionId);
+            const auto seat = resolveSeat(user->username, user->factionId, user->id);
             const int  team        = seat.team;
             const bool isSpectator = seat.spectator;
             const std::string& effectiveRole = isSpectator ? kSpectatorRole : user->role;
@@ -799,6 +934,8 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             // reconnect path above: the response carries `player_num`, and
             // nothing downstream can reconstruct it.
             const int pNum = registerLivePlayer(user->username, team, isSpectator);
+            applyWarBinding(user->id, user->username, user->factionId, team,
+                            isSpectator, pNum);
             auto resp = Protocol::BuildAuthResponse(
                 SpringWeb::AuthStatus_OK, token,
                 static_cast<uint32_t>(user->id), "",

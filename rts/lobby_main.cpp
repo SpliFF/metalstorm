@@ -15,6 +15,7 @@
 #include "Server/NetworkServer.h"
 #include "Server/ReplayFile.h"
 #include "Server/RoomManager.h"
+#include "Server/WarPlayerBindings.h"
 #include "Server/SqliteThreading.h"
 
 #include "Server/AI/AIDiscovery.h"
@@ -908,6 +909,15 @@ int main(int argc, char *argv[]) {
   // dropped on a schema bump: unlike game_servers or maps, a row here is the
   // only copy of the thing. See ScenarioDb.h.
   ScenarioDb::EnsureTable(mapDb);
+
+  // war_player_bindings — which side an account holds in a persistent war and
+  // the per-player war state that outlives the session (PLAN-metalstorm-lobby
+  // §2.5/§5.1, task 4). The game server is the writer; the lobby reads it, and
+  // the faction override deletes from it. Created here as well because a lobby
+  // that has never launched a war must still be able to serve those paths —
+  // and, like ScenarioDb above, it is migrated rather than dropped on a schema
+  // bump: a row here is the only copy of the thing.
+  WarPlayerBindings::EnsureTable(mapDb);
 
   // Helper: persist a game server entry to SQLite
   auto persistGameServer = [&](const GameServerInstance &inst) {
@@ -2117,12 +2127,20 @@ int main(int argc, char *argv[]) {
         if (!db.SetFactionByUsername(target, faction, targetId))
           return HttpAuth::JsonResponse(
               404, R"({"ok":false,"error":"no such user"})");
-        // §1b: an admin faction reassignment "clears the account's
-        // per-war bindings" — no per-war binding store exists yet
-        // (PLAN-metalstorm-lobby §5.1/task 4 is unimplemented), so
-        // there is nothing to clear today. Tracked in that task's scope,
-        // not silently dropped: audit the override now regardless.
-        db.LogAudit(uid, uname, "set_faction", target, "faction=" + faction);
+        // §1b: an admin faction reassignment "clears the account's per-war
+        // bindings". Task 0 recorded this as a documented no-op because the
+        // binding store did not exist; task 4 built it, so the clause is now
+        // real. It has to be: a binding records the team the OLD faction was
+        // seated on, and leaving it in place would send the account back to
+        // its former side on the next rejoin — the one path in the whole
+        // seating rule that can put a player on a side their faction does not
+        // fight for. The count goes into the audit row, so an override that
+        // ejected somebody from three running wars says so.
+        const int clearedBindings =
+            WarPlayerBindings::DeleteForAccount(db.Handle(), targetId);
+        db.LogAudit(uid, uname, "set_faction", target,
+                    "faction=" + faction + " cleared_bindings=" +
+                        std::to_string(clearedBindings));
         return HttpAuth::JsonResponse(200, R"({"ok":true})");
       });
 
