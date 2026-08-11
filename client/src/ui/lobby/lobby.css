@@ -59,7 +59,8 @@
 }
 
 .lobby-form input,
-.create-form input {
+.create-form input,
+.totp-panel input {
     padding: 10px 14px;
     border: 1px solid #334;
     border-radius: 6px;
@@ -69,7 +70,8 @@
 }
 
 .lobby-form input:focus,
-.create-form input:focus {
+.create-form input:focus,
+.totp-panel input:focus {
     outline: none;
     border-color: #4cc9f0;
 }
@@ -113,12 +115,82 @@ button.danger:hover { background: #cc3333; }
     color: #789;
 }
 
+/* Two-factor (PLAN-metalstorm-lobby.md §7.2, task 8d). The login challenge
+   reuses the form's own input styling — it is one more field in the same
+   column — while the enrolment panel is a settings surface and gets its own
+   card treatment. */
+.login-totp-group {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.totp-panel {
+    background: #12161c;
+    border: 1px solid #253040;
+    border-radius: 6px;
+    padding: 14px 16px;
+    margin-bottom: 16px;
+}
+.totp-panel h3 { margin: 0 0 8px; font-size: 15px; }
+.totp-status { font-size: 13px; color: #9aa4b5; margin: 0 0 10px; }
+.totp-enrol {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 10px;
+}
+/* The secret is read off the screen and typed into a phone, so it wants a
+   monospace face, room to breathe, and to be selectable as one run of text. */
+.totp-secret {
+    display: block;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 15px;
+    letter-spacing: 1px;
+    color: #cfe6f5;
+    background: #0b0e13;
+    border: 1px solid #253040;
+    border-radius: 4px;
+    padding: 8px 10px;
+    user-select: all;
+    word-break: break-all;
+}
+.totp-uri { font-size: 12px; color: #4cc9f0; }
+.totp-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+.totp-row input {
+    flex: 1 1 140px;
+    min-width: 120px;
+}
+.totp-recovery { margin-bottom: 10px; }
+.totp-recovery-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    gap: 4px 12px;
+    list-style: none;
+    margin: 6px 0 0;
+    padding: 0;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 13px;
+    color: #cfe6f5;
+}
+
 .lobby-header {
     display: flex;
     align-items: center;
     gap: 12px;
     margin-bottom: 16px;
+    /* The header grew a fifth control with the 2FA button (task 8d) and a
+       flex item's `min-width: auto` is its min-content — so at 600px the row
+       did not overflow, it squeezed, and "Log out" wrapped to two lines
+       inside its own button. Wrapping the ROW instead, and forbidding a wrap
+       inside a label, is the same fix D61 needed for the AI row. */
+    flex-wrap: wrap;
 }
+.lobby-header button { white-space: nowrap; }
 .lobby-header h2 { margin: 0; flex: 1; }
 
 /* Signed-in account label beside the logout button (D45). Collapses to

@@ -414,6 +414,11 @@ set(LOBBY_SERVER_SOURCES
     # reconnect tokens. The LOBBY mints both and the GAME server validates the
     # war half, so it belongs to the shared server sources, not to either one.
     rts/Server/AuthTokens.cpp
+    # PLAN-metalstorm-lobby.md task 8d: optional TOTP. Linked into the lobby
+    # for the enrolment routes, and into the game server (via the rts/Server
+    # glob) because HttpAuth::ValidateAuth consults the enrolment table on
+    # every Basic-auth request there too.
+    rts/Server/Totp.cpp
     rts/Server/MapMetadataDb.cpp
     rts/Server/GameServersDb.cpp
     rts/Server/AI/AIDiscovery.cpp
@@ -514,6 +519,7 @@ if(TEST_SOURCES)
         ${CMAKE_SOURCE_DIR}/rts/Server/RoomManager.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/WarPlayerBindings.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/AuthTokens.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/Totp.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/ScenarioDiscovery.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/ScenarioDb.cpp
         # GameDiscovery + its ConfigReader backend: test_game_discovery.cpp

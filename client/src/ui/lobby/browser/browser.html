@@ -20,6 +20,54 @@
              the right response to a compromise and the wrong response to
              handing over a shared machine, so the two are different buttons. -->
         <button id="logout-all-btn" class="secondary" title="End every session on every device">Log out everywhere</button>
+        <!-- Two-factor (PLAN-metalstorm-lobby.md §7.2, task 8d). Opens the
+             panel below; the label reflects the current state, so an account
+             that has it on says so without the panel being open. -->
+        <button id="totp-btn" class="secondary" title="Two-factor authentication">2FA</button>
+    </div>
+    <!-- Two-factor enrolment. Hidden until asked for: this is a settings
+         surface on a screen whose job is picking a game, and a permanently
+         visible security panel is the kind of thing players learn to skip
+         past. -->
+    <div id="totp-panel" class="totp-panel" style="display:none">
+        <h3>Two-factor authentication</h3>
+        <p id="totp-status" class="totp-status"></p>
+        <!-- Enrolment. The secret is shown as text AND as an otpauth:// URI:
+             a player either scans or types, and the two forms are not
+             derivable from each other client-side. -->
+        <div id="totp-enrol" class="totp-enrol" style="display:none">
+            <p class="hint">Add this key to your authenticator app, then enter the code it shows.</p>
+            <code id="totp-secret" class="totp-secret"></code>
+            <a id="totp-uri" class="totp-uri" href="#">Open in your authenticator app</a>
+            <div class="totp-row">
+                <input type="text" id="totp-code" inputmode="numeric" autocomplete="one-time-code"
+                       placeholder="6-digit code">
+                <button id="totp-confirm-btn">Turn on</button>
+            </div>
+        </div>
+        <!-- Recovery codes, shown exactly once. -->
+        <div id="totp-recovery" class="totp-recovery" style="display:none">
+            <p class="hint">Save these recovery codes now — they are shown once, and each works once.</p>
+            <ul id="totp-recovery-list" class="totp-recovery-list"></ul>
+        </div>
+        <!-- Turning it off costs the password AND a code: a stolen session
+             must not be able to strip the factor, and neither must a stolen
+             password. Both are real fields rather than prompt() dialogs —
+             a password typed into a browser prompt is unmasked. -->
+        <div id="totp-disable-form" class="totp-enrol" style="display:none">
+            <div class="totp-row">
+                <input type="password" id="totp-disable-pass" placeholder="Your password">
+                <input type="text" id="totp-disable-code" inputmode="numeric"
+                       autocomplete="one-time-code" placeholder="Code or recovery code">
+                <button id="totp-disable-confirm-btn">Turn off</button>
+            </div>
+        </div>
+        <div class="totp-row">
+            <button id="totp-start-btn" style="display:none">Set up two-factor</button>
+            <button id="totp-disable-btn" class="secondary" style="display:none">Turn off</button>
+            <button id="totp-close-btn" class="secondary">Close</button>
+        </div>
+        <p id="totp-msg" class="msg"></p>
     </div>
     <!-- The war browser (PLAN-metalstorm-lobby.md §4). Both elements stay
          hidden on a lobby with no persistent wars, so a skirmish-only lobby

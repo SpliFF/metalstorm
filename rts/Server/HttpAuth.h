@@ -11,6 +11,7 @@
 #include "FactionData.h"
 #include "NetworkServer.h"
 #include "Crypto.h"
+#include "Totp.h"
 
 #include <algorithm>
 #include <chrono>
@@ -292,6 +293,17 @@ inline int64_t ValidateAuth(Database& db, const std::string& authHeader) {
         if (user && !user->isBanned) {
             bool needsRehash = false;
             if (Crypto::VerifyPassword(password, user->passwordHash, needsRehash)) {
+                // Task 8d: an account with a confirmed second factor cannot
+                // authenticate by password alone, and Basic auth is exactly
+                // that — it carries no code and has nowhere to put one. Without
+                // this the whole feature is one header away from bypassed:
+                // /api/auth/login would demand a code while every route that
+                // accepts Basic would take the password on its own. Refusing
+                // (rather than inventing a "password:code" convention) is the
+                // safe direction — Basic is an inline convenience for dev and
+                // manifest accounts, none of which enrol, and the player-facing
+                // path is the Bearer session that /api/auth/login issues.
+                if (Totp::IsEnabled(db.Handle(), user->id)) return 0;
                 if (needsRehash)
                     db.UpdatePasswordHash(user->id, Crypto::HashPassword(password));
                 return user->id;
@@ -335,6 +347,11 @@ inline void RegisterEndpoints(NetworkServer& net, Database& db,
     // registered an HTTP auth route — see the EnsureTables call in
     // server_main's start-up.
     AuthTokens::EnsureTables(db.Handle());
+    // Task 8d: the optional second factor. Created alongside the token tables
+    // for the same reason — ValidateAuth consults `user_totp` on every Basic
+    // request, and the game server reaches that path without having registered
+    // a single TOTP route.
+    Totp::EnsureTables(db.Handle());
 
     // POST /api/auth/login
     net.AddHttpPost("/api/auth/login", RouteAuth::Public, [&db](const std::string&, const std::string& body, const HttpRequestHeaders&) -> HttpResponse {
@@ -364,6 +381,42 @@ inline void RegisterEndpoints(NetworkServer& net, Database& db,
             loginLimiter.RecordFailure(username);
             return JsonResponse(401, R"({"error":"invalid credentials"})");
         }
+
+        // Task 8d — the second factor, checked BEFORE the lockout is cleared
+        // and before any credential is minted.
+        //
+        // The password being right is not a success here: clearing the lockout
+        // on a correct password would hand an attacker who has the password an
+        // unlimited, un-rate-limited channel to guess six digits against. So a
+        // missing or wrong code counts as a login failure exactly like a wrong
+        // password does, and the account locks out the same way.
+        if (auto enrolment = Totp::Load(db.Handle(), user->id);
+            enrolment && enrolment->confirmed) {
+            const std::string code = JsonField(body, "totp_code");
+            if (code.empty()) {
+                loginLimiter.RecordFailure(username);
+                // A distinct, machine-readable answer rather than a generic
+                // 401: the client has to know to ask for a code, and by this
+                // point the caller has already proved they hold the password,
+                // so `totp_required` tells them nothing they did not know.
+                return JsonResponse(401,
+                    R"({"error":"two-factor code required","totp_required":true})");
+            }
+            const int64_t step = Totp::VerifyCode(enrolment->secret, code,
+                                                  NowUnix(), enrolment->lastStep);
+            if (step != 0) {
+                // Spend the step. A code is valid for 30 s of wall clock and
+                // is typed into a form that may be shoulder-surfed or replayed
+                // off the wire; recording the floor is what stops the same six
+                // digits opening a second session inside that window.
+                Totp::RecordStep(db.Handle(), user->id, step);
+            } else if (!Totp::ConsumeRecoveryCode(db.Handle(), user->id, code)) {
+                loginLimiter.RecordFailure(username);
+                return JsonResponse(401,
+                    R"({"error":"invalid two-factor code","totp_required":true})");
+            }
+        }
+
         loginLimiter.RecordSuccess(username);
         // Transparently upgrade legacy plaintext / weaker hashes on success.
         if (needsRehash)
@@ -484,6 +537,13 @@ inline void RegisterEndpoints(NetworkServer& net, Database& db,
             ",\"role\":\"" + JsonEscape(user->role) + "\"";
         if (user->factionId && !user->factionId->empty())
             json += ",\"faction\":\"" + JsonEscape(*user->factionId) + "\"";
+        // Task 8d: whether this account carries a second factor. Reported on
+        // the session-validation path specifically because that is the one a
+        // returning browser always takes — a settings screen that had to ask
+        // separately would render "2FA: off" for a moment on every load of an
+        // account that has it on.
+        json += std::string(",\"totp_enabled\":") +
+                (Totp::IsEnabled(db.Handle(), user->id) ? "true" : "false");
         json += "}";
         return JsonResponse(200, json);
     });
@@ -607,6 +667,143 @@ inline void RegisterEndpoints(NetworkServer& net, Database& db,
         std::string json = "{\"ok\":true,\"sessions_revoked\":" +
             std::to_string(sessions) + ",\"refresh_revoked\":" +
             std::to_string(families) + "}";
+        return JsonResponse(200, json);
+    });
+
+    // ── Task 8d: optional TOTP (§7.2) ──────────────────────────────────────
+    //
+    // Four verbs, all TokenRequired: enrolling, confirming and disabling a
+    // second factor are things only the account holder does, and they are done
+    // from a session they are already holding. There is deliberately no
+    // password-reset-style out-of-band path — the recovery codes ARE that
+    // path, and adding a second one would make the weaker of the two the real
+    // security of the account.
+
+    // POST /api/auth/totp/enroll — mint a pending secret + its enrolment URI.
+    net.AddHttpPost("/api/auth/totp/enroll", RouteAuth::TokenRequired, [&db](const std::string&, const std::string&, const HttpRequestHeaders& headers) -> HttpResponse {
+        const int64_t userId = ValidateAuth(db, headers.authorization);
+        if (userId <= 0) return JsonResponse(401, R"({"error":"unauthorized"})");
+        auto user = db.FindUserById(userId);
+        if (!user) return JsonResponse(401, R"({"error":"unauthorized"})");
+
+        // 409 rather than silently re-enrolling: replacing a live second factor
+        // with an unproven one is how an account ends up protected by a secret
+        // nothing holds. Disabling first is deliberate friction, and it costs a
+        // password.
+        if (Totp::IsEnabled(db.Handle(), userId)) {
+            return JsonResponse(409, R"({"error":"two-factor is already enabled — disable it first"})");
+        }
+        const std::string secret = Totp::GenerateSecret();
+        if (secret.empty() ||
+            !Totp::BeginEnrolment(db.Handle(), userId, secret, NowUnix())) {
+            return JsonResponse(500, R"({"error":"could not start enrolment"})");
+        }
+        // Both forms are returned because a player either scans or types: the
+        // URI is what a QR encodes, the secret is what the manual-entry field
+        // wants. Neither is derivable from the other by the client without
+        // re-implementing the URI format.
+        const std::string uri = Totp::EnrolmentUri("Spring RTS Web",
+                                                    user->username, secret);
+        std::string json = "{\"secret\":\"" + JsonEscape(secret) + "\""
+            ",\"uri\":\"" + JsonEscape(uri) + "\""
+            ",\"digits\":" + std::to_string(Totp::kDigits) +
+            ",\"period\":" + std::to_string(Totp::kStepSeconds) + "}";
+        return JsonResponse(200, json);
+    });
+
+    // POST /api/auth/totp/confirm — prove the authenticator works, turn it on,
+    // and hand back the recovery codes (the only time they exist).
+    net.AddHttpPost("/api/auth/totp/confirm", RouteAuth::TokenRequired, [&db](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+        const int64_t userId = ValidateAuth(db, headers.authorization);
+        if (userId <= 0) return JsonResponse(401, R"({"error":"unauthorized"})");
+
+        auto enrolment = Totp::Load(db.Handle(), userId);
+        if (!enrolment) {
+            return JsonResponse(409, R"({"error":"no pending enrolment"})");
+        }
+        if (enrolment->confirmed) {
+            return JsonResponse(409, R"({"error":"two-factor is already enabled"})");
+        }
+        const std::string code = JsonField(body, "code");
+        if (code.empty()) return JsonResponse(400, R"({"error":"missing code"})");
+
+        const int64_t step = Totp::VerifyCode(enrolment->secret, code, NowUnix(),
+                                              enrolment->lastStep);
+        if (step == 0) {
+            return JsonResponse(401, R"({"error":"invalid code"})");
+        }
+        // The confirming step is recorded as spent in the same call that
+        // enables the factor, so the code the player just typed is not also
+        // their first login code.
+        if (!Totp::Confirm(db.Handle(), userId, step, NowUnix())) {
+            return JsonResponse(409, R"({"error":"no pending enrolment"})");
+        }
+        const auto codes = Totp::IssueRecoveryCodes(db.Handle(), userId,
+                                                    Totp::kRecoveryCodes,
+                                                    NowUnix());
+        std::string json = "{\"ok\":true,\"enabled\":true,\"recovery_codes\":[";
+        for (size_t i = 0; i < codes.size(); ++i) {
+            if (i) json += ",";
+            json += "\"" + JsonEscape(codes[i]) + "\"";
+        }
+        json += "]}";
+        return JsonResponse(200, json);
+    });
+
+    // POST /api/auth/totp/disable — turn it off. Costs the password AND a
+    // current code (or a recovery code).
+    //
+    // Both, not either: a stolen session alone must not be able to strip the
+    // factor (that is the attack 2FA exists to stop), and the password alone is
+    // the thing the second factor assumes is already compromised.
+    net.AddHttpPost("/api/auth/totp/disable", RouteAuth::TokenRequired, [&db](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
+        const int64_t userId = ValidateAuth(db, headers.authorization);
+        if (userId <= 0) return JsonResponse(401, R"({"error":"unauthorized"})");
+        auto user = db.FindUserById(userId);
+        if (!user) return JsonResponse(401, R"({"error":"unauthorized"})");
+
+        auto enrolment = Totp::Load(db.Handle(), userId);
+        if (!enrolment || !enrolment->confirmed) {
+            // A pending, never-confirmed enrolment is not protecting anything,
+            // so abandoning one is free — otherwise a player who mis-scanned a
+            // secret would have to produce a code from it to get rid of it.
+            Totp::Disable(db.Handle(), userId);
+            return JsonResponse(200, R"({"ok":true,"enabled":false})");
+        }
+
+        const std::string password = JsonField(body, "password");
+        bool needsRehash = false;
+        if (password.empty() ||
+            !Crypto::VerifyPassword(password, user->passwordHash, needsRehash)) {
+            return JsonResponse(401, R"({"error":"invalid credentials"})");
+        }
+        const std::string code = JsonField(body, "code");
+        if (code.empty()) return JsonResponse(400, R"({"error":"missing code"})");
+        const int64_t step = Totp::VerifyCode(enrolment->secret, code, NowUnix(),
+                                              enrolment->lastStep);
+        if (step == 0 && !Totp::ConsumeRecoveryCode(db.Handle(), userId, code)) {
+            return JsonResponse(401, R"({"error":"invalid two-factor code"})");
+        }
+        Totp::Disable(db.Handle(), userId);
+        return JsonResponse(200, R"({"ok":true,"enabled":false})");
+    });
+
+    // POST /api/auth/totp/status — is it on, and how much recovery is left.
+    //
+    // POST rather than GET even though it reads nothing: every other route in
+    // this file is a POST and the client's authenticated-fetch helper is built
+    // around that. `recovery_remaining` is here because running out silently is
+    // how a recovery mechanism turns out not to exist on the day it is needed.
+    net.AddHttpPost("/api/auth/totp/status", RouteAuth::TokenRequired, [&db](const std::string&, const std::string&, const HttpRequestHeaders& headers) -> HttpResponse {
+        const int64_t userId = ValidateAuth(db, headers.authorization);
+        if (userId <= 0) return JsonResponse(401, R"({"error":"unauthorized"})");
+        auto enrolment = Totp::Load(db.Handle(), userId);
+        const bool enabled = enrolment && enrolment->confirmed;
+        std::string json = std::string("{\"enabled\":") +
+            (enabled ? "true" : "false") +
+            ",\"pending\":" + ((enrolment && !enrolment->confirmed) ? "true" : "false") +
+            ",\"recovery_remaining\":" +
+            std::to_string(Totp::RemainingRecoveryCodes(db.Handle(), userId)) + "}";
         return JsonResponse(200, json);
     });
 }

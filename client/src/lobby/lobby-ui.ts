@@ -18,6 +18,10 @@ import {
     formatDeploy, WAR_FILTER_LABELS,
     type DeployResult, type WarFilter, type WarInfo, type WarRow,
 } from './war-browser';
+import {
+    classifyLoginResponse, describeStatus, formatSecret, normaliseCode,
+    type TotpStatus,
+} from './totp';
 import { Connection, type ConnectionState } from '../core/connection.js';
 import { CONFIG, stampUrl } from '../config.js';
 import { ClientPayload } from '../protocol/spring-web/client-payload.js';
@@ -797,6 +801,8 @@ export class LobbyUI {
         const pass = (document.getElementById('login-pass') as HTMLInputElement).value;
         const pass2 = (document.getElementById('login-pass2') as HTMLInputElement).value;
         const faction = (document.getElementById('login-faction') as HTMLSelectElement | null)?.value ?? '';
+        const totpEl = document.getElementById('login-totp') as HTMLInputElement | null;
+        const totpGroup = document.getElementById('login-totp-group');
         const msgEl = document.getElementById('login-msg')!;
 
         if (!user) { msgEl.textContent = 'Enter a username'; return; }
@@ -808,25 +814,49 @@ export class LobbyUI {
         msgEl.className = 'msg';
 
         try {
-            // Try login first, then register if login fails
+            // Task 8d: the code rides on the FIRST login attempt when the
+            // player has already been challenged, rather than on a second
+            // round-trip. The password is re-sent with it because the server
+            // authenticates both factors in one call — there is no
+            // half-authenticated state on the server, deliberately, since one
+            // would be a credential in its own right.
+            const code = totpEl ? normaliseCode(totpEl.value) : '';
             let resp = await fetch(`${CONFIG.httpUrl}/api/auth/login`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username: user, password: pass }),
+                body: JSON.stringify(code
+                    ? { username: user, password: pass, totp_code: code }
+                    : { username: user, password: pass }),
             });
 
-            if (!resp.ok && pass2) {
-                // Registration attempt (confirm password was provided)
+            let data = await resp.json().catch(() => ({}));
+            // A two-factor challenge is a failed login that must NOT fall
+            // through to registration — see classifyLoginResponse.
+            let outcome = classifyLoginResponse(resp, data, pass2 !== '');
+            if (outcome.kind === 'totp-required') {
+                totpGroup?.classList.remove('hidden');
+                totpEl?.focus();
+                // The code field is cleared on a rejection so the player is
+                // not editing a stale six digits — a code that was refused for
+                // being replayed looks identical to one refused for being
+                // wrong, and both want a fresh one.
+                if (code && totpEl) totpEl.value = '';
+                msgEl.textContent = code ? outcome.message
+                    : 'Enter the code from your authenticator app';
+                msgEl.className = code ? 'msg error' : 'msg';
+                return;
+            }
+            if (outcome.kind === 'register') {
                 resp = await fetch(`${CONFIG.httpUrl}/api/auth/register`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ username: user, password: pass, faction }),
                 });
+                data = await resp.json().catch(() => ({}));
+                outcome = classifyLoginResponse(resp, data, false);
             }
-
-            const data = await resp.json();
-            if (!resp.ok || !data.token) {
-                msgEl.textContent = data.error || 'Login failed';
+            if (outcome.kind !== 'ok') {
+                msgEl.textContent = outcome.kind === 'failed' ? outcome.message : 'Login failed';
                 msgEl.className = 'msg error';
                 return;
             }
@@ -937,6 +967,170 @@ export class LobbyUI {
         if (btn) btn.onclick = () => { void this.logout(); };
         const allBtn = document.getElementById('logout-all-btn') as HTMLButtonElement | null;
         if (allBtn) allBtn.onclick = () => { void this.logoutEverywhere(); };
+        this.wireTotpPanel();
+    }
+
+    // ===================== TWO-FACTOR (task 8d) =====================
+
+    /**
+     * Wire the 2FA panel. Every element is optional in the same way the
+     * logout controls are: the browser screen ships the panel, the room
+     * screen does not, and a game's template override may ship neither.
+     *
+     * The panel is re-rendered from `/api/auth/totp/status` after every verb
+     * rather than from what the verb returned. A local guess at the new state
+     * is how a UI ends up claiming 2FA is on because the request that turned
+     * it on came back 200 for some other reason.
+     */
+    private wireTotpPanel(): void {
+        const panel = document.getElementById('totp-panel');
+        const openBtn = document.getElementById('totp-btn') as HTMLButtonElement | null;
+        if (!panel || !openBtn) return;
+
+        const el = (id: string) => document.getElementById(id);
+        const close = document.getElementById('totp-close-btn') as HTMLButtonElement | null;
+
+        openBtn.onclick = () => {
+            panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+            if (panel.style.display === 'block') void this.refreshTotpStatus();
+        };
+        if (close) close.onclick = () => { panel.style.display = 'none'; };
+
+        (el('totp-start-btn') as HTMLButtonElement | null)?.addEventListener('click', () => {
+            void this.startTotpEnrolment();
+        });
+        (el('totp-confirm-btn') as HTMLButtonElement | null)?.addEventListener('click', () => {
+            void this.confirmTotpEnrolment();
+        });
+        (el('totp-disable-btn') as HTMLButtonElement | null)?.addEventListener('click', () => {
+            const form = el('totp-disable-form');
+            if (form) form.style.display = 'flex';
+        });
+        (el('totp-disable-confirm-btn') as HTMLButtonElement | null)?.addEventListener('click', () => {
+            void this.disableTotp();
+        });
+
+        // The label carries the state, so an account with 2FA on says so
+        // without the panel having to be opened.
+        void this.refreshTotpStatus(/*quiet=*/true);
+    }
+
+    /// Read the account's 2FA state and render every control from it.
+    private async refreshTotpStatus(quiet = false): Promise<void> {
+        let status: TotpStatus;
+        try {
+            status = await this.lobbyPost('/api/auth/totp/status') as TotpStatus;
+        } catch { return; }
+        if (typeof status?.enabled !== 'boolean') return;
+
+        const btn = document.getElementById('totp-btn');
+        if (btn) btn.textContent = status.enabled ? '2FA ✓' : '2FA';
+        if (quiet) return;
+
+        const statusEl = document.getElementById('totp-status');
+        if (statusEl) statusEl.textContent = describeStatus(status);
+        const show = (id: string, on: boolean, mode = 'block') => {
+            const e = document.getElementById(id);
+            if (e) e.style.display = on ? mode : 'none';
+        };
+        // "Set up" and "Turn off" are mutually exclusive, and the enrolment
+        // block only exists between the two — a panel that offered both at
+        // once would let a player start an enrolment they cannot finish (the
+        // server refuses one over a live factor, by design).
+        show('totp-start-btn', !status.enabled, 'inline-block');
+        show('totp-disable-btn', status.enabled, 'inline-block');
+        show('totp-enrol', false, 'flex');
+        show('totp-disable-form', false, 'flex');
+        show('totp-recovery', false);
+    }
+
+    private async startTotpEnrolment(): Promise<void> {
+        const msg = document.getElementById('totp-msg');
+        try {
+            const data = await this.lobbyPost('/api/auth/totp/enroll');
+            if (!data?.secret) {
+                if (msg) { msg.textContent = data?.error ?? 'Could not start set-up'; msg.className = 'msg error'; }
+                return;
+            }
+            const secretEl = document.getElementById('totp-secret');
+            if (secretEl) secretEl.textContent = formatSecret(data.secret);
+            const uriEl = document.getElementById('totp-uri') as HTMLAnchorElement | null;
+            // The href is the otpauth:// URI itself: on a phone that hands the
+            // enrolment straight to the authenticator app, and on a desktop it
+            // is inert, which is why the secret is shown as text as well.
+            if (uriEl) uriEl.href = data.uri ?? '#';
+            const enrol = document.getElementById('totp-enrol');
+            if (enrol) enrol.style.display = 'flex';
+            if (msg) { msg.textContent = ''; msg.className = 'msg'; }
+        } catch {
+            if (msg) { msg.textContent = 'Could not start set-up'; msg.className = 'msg error'; }
+        }
+    }
+
+    private async confirmTotpEnrolment(): Promise<void> {
+        const msg = document.getElementById('totp-msg');
+        const codeEl = document.getElementById('totp-code') as HTMLInputElement | null;
+        const code = normaliseCode(codeEl?.value ?? '');
+        if (!code) {
+            if (msg) { msg.textContent = 'Enter the code from your app'; msg.className = 'msg error'; }
+            return;
+        }
+        try {
+            const data = await this.lobbyPost('/api/auth/totp/confirm', { code });
+            if (!data?.ok) {
+                if (msg) { msg.textContent = data?.error ?? 'That code did not match'; msg.className = 'msg error'; }
+                if (codeEl) codeEl.value = '';
+                return;
+            }
+            await this.refreshTotpStatus();
+            // Recovery codes are rendered AFTER the status refresh, because
+            // that refresh hides the block — and this is the one and only time
+            // they exist. Nothing re-fetches them; there is no route that
+            // could.
+            const list = document.getElementById('totp-recovery-list');
+            const wrap = document.getElementById('totp-recovery');
+            if (list && wrap && Array.isArray(data.recovery_codes)) {
+                list.innerHTML = '';
+                for (const c of data.recovery_codes as string[]) {
+                    const li = document.createElement('li');
+                    li.textContent = c;
+                    list.appendChild(li);
+                }
+                wrap.style.display = 'block';
+            }
+            if (codeEl) codeEl.value = '';
+            if (msg) { msg.textContent = 'Two-factor authentication is on.'; msg.className = 'msg'; }
+        } catch {
+            if (msg) { msg.textContent = 'Could not turn on two-factor'; msg.className = 'msg error'; }
+        }
+    }
+
+    private async disableTotp(): Promise<void> {
+        const msg = document.getElementById('totp-msg');
+        const passEl = document.getElementById('totp-disable-pass') as HTMLInputElement | null;
+        const codeEl = document.getElementById('totp-disable-code') as HTMLInputElement | null;
+        const password = passEl?.value ?? '';
+        const code = normaliseCode(codeEl?.value ?? '');
+        if (!password || !code) {
+            if (msg) { msg.textContent = 'Password and a current code are both required'; msg.className = 'msg error'; }
+            return;
+        }
+        try {
+            const data = await this.lobbyPost('/api/auth/totp/disable', { password, code });
+            // Both fields are cleared whatever happened: a password left
+            // sitting in a form on a shared machine is the thing this panel is
+            // supposed to be defending.
+            if (passEl) passEl.value = '';
+            if (codeEl) codeEl.value = '';
+            if (!data?.ok) {
+                if (msg) { msg.textContent = data?.error ?? 'Could not turn off two-factor'; msg.className = 'msg error'; }
+                return;
+            }
+            await this.refreshTotpStatus();
+            if (msg) { msg.textContent = 'Two-factor authentication is off.'; msg.className = 'msg'; }
+        } catch {
+            if (msg) { msg.textContent = 'Could not turn off two-factor'; msg.className = 'msg error'; }
+        }
     }
 
     /// Land on the most appropriate lobby screen after the game canvas
