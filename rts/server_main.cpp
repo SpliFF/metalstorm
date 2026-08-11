@@ -19,6 +19,7 @@
 #include "Server/GmVerbs.h"
 #include "Server/GameStateStore.h"
 #include "Server/SimSnapshot.h"
+#include "Server/SnapshotRoundTrip.h"
 #include "Server/DevBuildGate.h"
 #include "Server/ClientSession.h"
 #include "Server/EntityStateSerializer.h"
@@ -251,6 +252,15 @@ int main(int argc, char* argv[])
     int maxWallMin = 60;
     headless::Config headlessCfg;
 
+    // --- Snapshot round-trip mode (PLAN-persistence §8) ---
+    // `--snapshot-roundtrip <frame>[:<ticks>]` checkpoints a populated sim,
+    // runs it on N ticks, restores the checkpoint and runs the same N ticks
+    // again, requiring the two determinism-hash tracks and the two terminal
+    // payloads to be identical. It rides the headless substrate for the same
+    // reason --replay does: no browser client is needed for the sim to tick,
+    // and the comparison is a batch job.
+    snapshotrt::Config roundTripCfg;
+
     // --- Replay record/playback (PLAN-replay task 2) ---
     // `--journal-file <path>` records this game's cause stream to a replay file;
     // `--replay <path>` re-executes one. The two are mutually exclusive: a
@@ -345,6 +355,10 @@ int main(int argc, char* argv[])
     // --wt-cert PATH, --wt-key PATH,
     // --headless-run config.json (PLAN-headless: no-client batch/soak run),
     // --max-wall-min N (headless hard wall-clock ceiling, default 60),
+    // --snapshot-roundtrip <frame>[:<ticks>] (PLAN-persistence §8: checkpoint a
+    //   populated sim, run N ticks, restore, run the same N ticks, and require
+    //   identical state-hash tracks and terminal payloads; nonzero exit on
+    //   divergence. Implies a headless uncapped run),
     // --journal-audit [N] (PLAN-replay: record the synced-input cause stream
     //   in memory, cap N records, expose at GET /api/journal),
     // --journal-file PATH (PLAN-replay task 2: record the cause stream to a
@@ -418,6 +432,12 @@ int main(int argc, char* argv[])
             headlessConfigPath = argv[++i];
         } else if (arg == "--max-wall-min" && i + 1 < argc) {
             maxWallMin = std::atoi(argv[++i]);
+        } else if (arg == "--snapshot-roundtrip" && i + 1 < argc) {
+            std::string sperr;
+            if (!snapshotrt::ParseSpec(argv[++i], roundTripCfg, sperr)) {
+                SLOG(SPRING_LOG_ERROR, "--snapshot-roundtrip: %s", sperr.c_str());
+                return 1;
+            }
         } else if (arg == "--journal-file" && i + 1 < argc) {
             journalFilePath = argv[++i];
         } else if (arg == "--replay" && i + 1 < argc) {
@@ -579,6 +599,24 @@ int main(int argc, char* argv[])
             headlessCfg.stopAt.frame ? (long long)*headlessCfg.stopAt.frame : -1LL,
             headlessCfg.stopAt.gameOver ? 1 : 0,
             headlessCfg.stopAt.luaCondition ? headlessCfg.stopAt.luaCondition->c_str() : "-");
+    }
+
+    // --- Snapshot round-trip: ride the headless substrate (PLAN-persistence §8) ---
+    // Same arrangement --replay uses. Uncapped, because the run is a batch
+    // comparison nobody watches. NO frame stop condition: the controller ends
+    // the run itself once both arms have been walked, and setting one would
+    // stop the process in the middle of arm A. The stop conditions that ARE
+    // set are the two ways the comparison can never complete — the wall
+    // ceiling, and a game that declares over (which freezes the sim, so no
+    // further tick would ever arrive).
+    if (roundTripCfg.enabled) {
+        headlessCfg.enabled = true;
+        headlessCfg.maxWallSec = static_cast<int64_t>(std::max(1, maxWallMin)) * 60;
+        headlessCfg.tickMode = headless::TickMode::Uncapped;
+        headlessCfg.stopAt.gameOver = true;
+        SLOG(SPRING_LOG_NOTICE,
+            "snapshot round-trip: checkpoint at frame %lld, %lld ticks per arm",
+            (long long)roundTripCfg.atFrame, (long long)roundTripCfg.ticks);
     }
 
     // --- Replay export/import (PLAN-replay task 3, the `.msr` packer) ---
@@ -1248,6 +1286,25 @@ int main(int argc, char* argv[])
                  "sim snapshots: serializer attached (layout %016llx)",
                  (unsigned long long)simSerializer.LayoutHash());
         }
+    }
+
+    // The round-trip has nothing to compare unless the walk is complete — and
+    // an incomplete walk is exactly the state in which a run that "passed"
+    // would be most misleading, because a section that captures nothing also
+    // restores nothing and therefore never diverges. Refuse at boot, naming
+    // the same refusal the attach gate just logged.
+    snapshotrt::Controller roundTrip;
+    int roundTripExitCode = 0;
+    if (roundTripCfg.enabled) {
+        if (gmSnapshotStore.Serializer() == nullptr) {
+            SLOG(SPRING_LOG_ERROR,
+                "--snapshot-roundtrip: no sim serializer is attached (see the "
+                "'sim snapshots: DISABLED' line above) — there is nothing to "
+                "round-trip, and an incomplete walk would pass this test by "
+                "capturing nothing");
+            return 1;
+        }
+        roundTrip.Configure(roundTripCfg);
     }
 
     // Standing-order broadcast hook. Fires whenever an order is
@@ -2767,6 +2824,119 @@ int main(int argc, char* argv[])
             }
         }
 
+        // --- Snapshot round-trip: drive the two arms (PLAN-persistence §8) ---
+        //
+        // Deliberately the SAME site as the state-hash block above, and for the
+        // same reason it gives: a determinism hash is only comparable against
+        // another taken at the same point in the tick. Arm A's hashes and arm
+        // B's are taken by this block, one statement apart, so the two arms
+        // cannot drift to different sample points however this loop grows.
+        //
+        // Everything fallible is checked and routed to Fail(), never ignored:
+        // a run that could not take its checkpoint must report that it did not
+        // run, not that it found no divergence.
+        if (roundTrip.Enabled()) {
+            const snapshotrt::Step step = roundTrip.OnFrame(frame);
+            std::vector<uint8_t> payload;
+            std::string rtErr;
+
+            if (step.capture) {
+                if (!simSerializer.Serialize(payload, rtErr)) {
+                    roundTrip.Fail("the serializer refused the checkpoint: " + rtErr);
+                } else {
+                    SLOG(SPRING_LOG_NOTICE,
+                        "snapshot round-trip: checkpoint taken at frame %d (%zu bytes), "
+                        "arm A running to frame %lld",
+                        frame, payload.size(),
+                        (long long)(frame + roundTrip.Cfg().ticks));
+                    roundTrip.SetCheckpoint(std::move(payload));
+                }
+            }
+            if (step.record)
+                roundTrip.RecordHash(computeStateHash());
+            if (step.captureTerminal) {
+                payload.clear();
+                if (!simSerializer.Serialize(payload, rtErr))
+                    roundTrip.Fail("the serializer refused the terminal capture: " + rtErr);
+                else
+                    roundTrip.SetTerminalPayload(std::move(payload));
+            }
+            if (step.restore) {
+                const std::vector<uint8_t>& cp = roundTrip.Checkpoint();
+                if (!simSerializer.Deserialize(cp.data(), cp.size(), rtErr)) {
+                    roundTrip.Fail("the restore failed: " + rtErr);
+                } else {
+                    springlog_set_frame(sim.GetFrameNum());
+                    // Re-capture immediately, before a single further tick:
+                    // capture→apply→capture idempotence is a property of the
+                    // walk on its own, and separating it from the 100 ticks
+                    // that follow is what makes a failure attributable.
+                    std::vector<uint8_t> recap;
+                    std::string cerr2;
+                    if (!simSerializer.Serialize(recap, cerr2)) {
+                        roundTrip.Fail("the re-capture after restore failed: " + cerr2);
+                    } else {
+                        SLOG(SPRING_LOG_NOTICE,
+                            "snapshot round-trip: restored to frame %d (%zu bytes "
+                            "re-captured), arm B running",
+                            sim.GetFrameNum(), recap.size());
+                        // Name the section the re-capture disagrees in. "The
+                        // payloads differ at byte 51 234" is a fact nobody can
+                        // act on; "section 'units', byte 812 of 44 709" is an
+                        // owner.
+                        if (recap != cp) {
+                            size_t at = 0;
+                            const size_t n = std::min(recap.size(), cp.size());
+                            while (at < n && recap[at] == cp[at]) ++at;
+                            SLOG(SPRING_LOG_WARNING,
+                                "snapshot round-trip: the re-capture differs from the "
+                                "checkpoint at %s (capture -> apply -> capture is not "
+                                "idempotent)",
+                                simsnapshot::DescribeOffset(cp.data(), cp.size(), at).c_str());
+                        }
+                        roundTrip.OnRestored(sim.GetFrameNum(), recap);
+                    }
+                }
+            }
+            if (roundTrip.CurrentPhase() == snapshotrt::Phase::Done) {
+                const snapshotrt::Result& rr = roundTrip.Result_();
+                SLOG(rr.pass ? SPRING_LOG_NOTICE : SPRING_LOG_ERROR, "%s",
+                     roundTrip.FormatVerdict().c_str());
+                if (rr.firstDifferentByte >= 0) {
+                    const std::vector<uint8_t>& ta = roundTrip.TerminalA();
+                    SLOG(SPRING_LOG_ERROR,
+                        "snapshot round-trip: the two arms' terminal payloads first "
+                        "differ in %s",
+                        simsnapshot::DescribeOffset(
+                            ta.data(), ta.size(),
+                            static_cast<size_t>(rr.firstDifferentByte)).c_str());
+                    // How WIDE the disagreement is. "Only `globals` differs"
+                    // means every unit, team, feature and gadget table came out
+                    // the same and the arms merely drew from the RNG a
+                    // different number of times; "units differ too" is a
+                    // different investigation entirely.
+                    const auto diffs = simsnapshot::DiffSections(
+                        ta, roundTrip.TerminalB());
+                    std::string names;
+                    for (const auto& d : diffs) names += (names.empty() ? "" : ", ") + d;
+                    SLOG(SPRING_LOG_ERROR,
+                        "snapshot round-trip: sections that disagree at frame %lld: %s",
+                        (long long)rr.endFrame, names.c_str());
+                    for (const auto& d : diffs) {
+                        if (d != "units") continue;
+                        // "units differ" covers a dropped kill and a unit
+                        // standing a millimetre further along its path. Those
+                        // are opposite diagnoses, so say which.
+                        SLOG(SPRING_LOG_ERROR, "snapshot round-trip: units — %s",
+                             simsnapshot::DescribeUnitsDivergence(
+                                 ta, roundTrip.TerminalB()).c_str());
+                    }
+                }
+                if (!rr.pass) roundTripExitCode = 1;
+                keepRunning.store(false);
+            }
+        }
+
         // --- Headless run: stop-condition evaluation (PLAN-headless task 1) ---
         // Only reached under --headless-run, so a normal game never enters this
         // block (regression bar). Evaluated after the tick + streamer, so the
@@ -2865,6 +3035,16 @@ int main(int argc, char* argv[])
     // The trailer is what marks this file as a COMPLETE segment. Detach from
     // the funnel first: anything recorded during the teardown below would land
     // after the trailer and be unreachable to a reader.
+    // A round-trip run that ends any other way than by its own verdict — the
+    // wall ceiling, a game-over, a signal — has NOT passed. Saying so here is
+    // the difference between "compared 100 ticks and they agreed" and "the run
+    // stopped before it compared anything", which a bare exit code cannot tell
+    // apart and a CI job would read as success.
+    if (roundTrip.Enabled() && roundTrip.CurrentPhase() != snapshotrt::Phase::Done) {
+        SLOG(SPRING_LOG_ERROR, "%s", roundTrip.FormatVerdict().c_str());
+        roundTripExitCode = 1;
+    }
+
     int replayExitCode = 0;
     if (replayWriter.Enabled()) {
         syncedinput::Journal().SetJournal(nullptr);
@@ -2994,14 +3174,15 @@ int main(int argc, char* argv[])
     sim.Kill();
     db.Close();
     SLOG(SPRING_LOG_NOTICE, "exited cleanly");
-    if (replayExitCode != 0) {
+    if (replayExitCode != 0 || roundTripExitCode != 0) {
         // Tear down the log sinks before returning non-zero — a verify failure
-        // is a normal, expected outcome of a CI run, not a crash.
+        // (replay divergence, or a snapshot round-trip that did not agree) is
+        // a normal, expected outcome of a CI run, not a crash.
         if (!logServer.empty())
             springlog_net_shutdown();
         springlog_sqlite_shutdown();
         springlog_shutdown();
-        return replayExitCode;
+        return replayExitCode != 0 ? replayExitCode : roundTripExitCode;
     }
 
     // Tear down optional sinks before the core logger

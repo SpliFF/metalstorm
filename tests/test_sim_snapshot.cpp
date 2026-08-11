@@ -1500,3 +1500,105 @@ TEST_CASE("task 1d-b: capture is sorted, and apply REPLACES rather than merges")
 
     CSplitLuaHandle::ClearGameParams();
 }
+
+// ── The payload navigators (PLAN-persistence §8) ──
+//
+// The round-trip harness reports where two payloads disagree. Reporting "byte
+// 51 234" is unactionable; reporting "section 'units'" names an owner. These
+// two functions are what turn one into the other, and both run on payloads
+// that are already known to be odd — so they are written to give up with a
+// description rather than to read past the end.
+
+namespace {
+
+// A payload in the on-the-wire shape: u16 version, u32 section count, then
+// per section u16 id, u16 version, u32 length, body.
+std::vector<uint8_t> framePayload(
+    const std::vector<std::pair<uint16_t, std::vector<uint8_t>>>& sections)
+{
+    std::vector<uint8_t> out;
+    auto u16 = [&out](uint16_t v) { out.push_back(uint8_t(v)); out.push_back(uint8_t(v >> 8)); };
+    auto u32 = [&out](uint32_t v) {
+        for (int i = 0; i < 4; ++i) out.push_back(uint8_t(v >> (8 * i)));
+    };
+    u16(1);
+    u32(static_cast<uint32_t>(sections.size()));
+    for (const auto& [id, body] : sections) {
+        u16(id);
+        u16(1);
+        u32(static_cast<uint32_t>(body.size()));
+        out.insert(out.end(), body.begin(), body.end());
+    }
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("DescribeOffset: names the section a byte offset falls in") {
+    // globals (id 1) with a 21-byte body, then units (id 6) with 10.
+    const auto p = framePayload({{1, std::vector<uint8_t>(21, 0)},
+                                 {6, std::vector<uint8_t>(10, 0)}});
+
+    CHECK(DescribeOffset(p.data(), p.size(), 0).find("envelope") != std::string::npos);
+    // 6 envelope + 8 section header = 14: the first body byte of `globals`.
+    const std::string g = DescribeOffset(p.data(), p.size(), 14 + 4);
+    CHECK(g.find("globals") != std::string::npos);
+    CHECK(g.find("byte 4 of 21") != std::string::npos);
+    // The second section's header, then its body.
+    CHECK(DescribeOffset(p.data(), p.size(), 14 + 21).find("header of section id 6")
+          != std::string::npos);
+    CHECK(DescribeOffset(p.data(), p.size(), 14 + 21 + 8 + 3).find("units")
+          != std::string::npos);
+    // Past the end is described, not read.
+    CHECK(DescribeOffset(p.data(), p.size(), p.size() + 100).find("past the end")
+          != std::string::npos);
+    CHECK(DescribeOffset(nullptr, 0, 0).find("past the end") != std::string::npos);
+}
+
+TEST_CASE("DescribeOffset: a corrupt section length terminates the walk") {
+    // A length field that runs off the end must not loop or read out of
+    // bounds — this function's whole job is to survive a payload the decoder
+    // already refused.
+    auto p = framePayload({{1, std::vector<uint8_t>(8, 0)}});
+    p[6 + 4] = 0xFF; p[6 + 5] = 0xFF; p[6 + 6] = 0xFF; p[6 + 7] = 0x7F;
+    const std::string d = DescribeOffset(p.data(), p.size(), p.size() - 1);
+    CHECK_FALSE(d.empty());
+}
+
+TEST_CASE("DiffSections: names every section that disagrees, not just the first") {
+    // The difference that matters to an investigation: "only globals" means
+    // the two worlds are identical and only the RNG's position moved; "units
+    // too" is a different bug entirely.
+    const auto a = framePayload({{1, std::vector<uint8_t>(21, 0)},
+                                 {5, std::vector<uint8_t>(30, 7)},
+                                 {6, std::vector<uint8_t>(10, 3)}});
+
+    SUBCASE("identical payloads disagree nowhere") {
+        CHECK(DiffSections(a, a).empty());
+    }
+    SUBCASE("one differing byte in two sections names both") {
+        auto b = a;
+        b[14 + 4] = 9;                  // inside globals
+        b[14 + 21 + 8 + 2] = 9;         // inside teams
+        const auto d = DiffSections(a, b);
+        REQUIRE(d.size() == 2);
+        CHECK(d[0] == "globals");
+        CHECK(d[1] == "teams");
+    }
+    SUBCASE("a section of a different length counts as disagreeing") {
+        const auto b = framePayload({{1, std::vector<uint8_t>(21, 0)},
+                                     {5, std::vector<uint8_t>(31, 7)},
+                                     {6, std::vector<uint8_t>(10, 3)}});
+        const auto d = DiffSections(a, b);
+        REQUIRE(d.size() == 1);
+        CHECK(d[0] == "teams");
+    }
+    SUBCASE("a section present on one side only is named as such") {
+        const auto b = framePayload({{1, std::vector<uint8_t>(21, 0)},
+                                     {6, std::vector<uint8_t>(10, 3)}});
+        const auto d = DiffSections(a, b);
+        REQUIRE(d.size() == 1);
+        CHECK(d[0].find("teams") == 0);
+        CHECK(d[0].find("absent") != std::string::npos);
+    }
+}

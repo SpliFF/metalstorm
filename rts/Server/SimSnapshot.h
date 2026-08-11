@@ -95,6 +95,29 @@ const std::vector<SectionSpec>& Sections();
 /// means the walk is complete and the serializer may be attached to the store.
 std::vector<std::string> MissingSections();
 
+/// Which section a byte offset into a payload falls in, as a human-readable
+/// phrase ("section 'units' (id 6 v1), byte 812 of 44709"). Used to turn "two
+/// payloads differ at byte 51 234" — which is unactionable — into the name of
+/// the section whose capture is wrong. Lives here because this module owns the
+/// framing; a second parser elsewhere would be a copy that can rot.
+std::string DescribeOffset(const uint8_t* data, size_t size, size_t offset);
+
+/// Which sections two payloads disagree in, by name, in table order. The first
+/// differing byte says where the disagreement STARTS; this says how wide it is,
+/// which is the difference between "the whole world diverged" and "only the
+/// synced RNG's position did". Sections present in one payload and not the
+/// other are named too.
+std::vector<std::string> DiffSections(const std::vector<uint8_t>& a,
+                                      const std::vector<uint8_t>& b);
+
+/// A human-readable account of HOW two payloads' `units` sections disagree:
+/// how many units differ in transform, in vitals, or are present on one side
+/// only, plus the first offender's numbers. "The units section differs" is
+/// true of a dropped kill and of a unit standing a millimetre further along
+/// its path, and those are opposite diagnoses.
+std::string DescribeUnitsDivergence(const std::vector<uint8_t>& a,
+                                    const std::vector<uint8_t>& b);
+
 /// Synced state that is deliberately NOT in the payload because the sim
 /// rebuilds it, paired with what rebuilds it. Reported at boot alongside
 /// MissingSections() so the two kinds of absence are never confused.

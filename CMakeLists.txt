@@ -552,6 +552,10 @@ if(TEST_SOURCES)
         # globals (gs/gsRNG) and the two order managers, all of which
         # spring-tests already links, so its round-trip is a plain doctest.
         ${CMAKE_SOURCE_DIR}/rts/Server/SimSnapshot.cpp
+        # PLAN-persistence §8: the round-trip driver. Pure (std-lib only) in the
+        # HeadlessRun shape — the engine-coupled half is one block in
+        # server_main.cpp, so the state machine and the verdict test off-engine.
+        ${CMAKE_SOURCE_DIR}/rts/Server/SnapshotRoundTrip.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GameServersDb.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/HeadlessRun.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/StatsDump.cpp

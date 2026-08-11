@@ -27,6 +27,7 @@
 #define LOG_SECTION "snapshot"
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 
 namespace simsnapshot {
@@ -57,6 +58,175 @@ std::vector<std::string> MissingSections()
             missing.emplace_back(s.name);
     }
     return missing;
+}
+
+std::string DescribeOffset(const uint8_t* data, size_t size, size_t offset)
+{
+    // Deliberately independent of Reader: this runs on a payload that is
+    // already known to be odd, so it must not be able to fail the way the
+    // decoder does. Every step is bounds-checked against `size` and gives up
+    // with a description rather than throwing or reading past the end.
+    if (data == nullptr || offset >= size)
+        return "byte " + std::to_string(offset) + " is past the end of a " +
+               std::to_string(size) + "-byte payload";
+
+    constexpr size_t kEnvelope = 2 + 4;   // version + section count
+    if (offset < kEnvelope)
+        return "the envelope header (byte " + std::to_string(offset) + ")";
+
+    auto u16 = [data](size_t at) -> uint16_t {
+        return static_cast<uint16_t>(data[at]) |
+               static_cast<uint16_t>(data[at + 1]) << 8;
+    };
+    auto u32 = [data](size_t at) -> uint32_t {
+        return static_cast<uint32_t>(data[at]) |
+               static_cast<uint32_t>(data[at + 1]) << 8 |
+               static_cast<uint32_t>(data[at + 2]) << 16 |
+               static_cast<uint32_t>(data[at + 3]) << 24;
+    };
+
+    size_t pos = kEnvelope;
+    while (pos + 8 <= size) {
+        const uint16_t id = u16(pos);
+        const uint16_t ver = u16(pos + 2);
+        const uint32_t len = u32(pos + 4);
+        const size_t body = pos + 8;
+        if (offset < body) {
+            return "the header of section id " + std::to_string(id) +
+                   " (byte " + std::to_string(offset - pos) + " of it)";
+        }
+        if (offset < body + len) {
+            const char* name = "?";
+            for (const auto& s : Sections())
+                if (static_cast<uint16_t>(s.id) == id) name = s.name;
+            return std::string("section '") + name + "' (id " +
+                   std::to_string(id) + " v" + std::to_string(ver) +
+                   "), byte " + std::to_string(offset - body) + " of " +
+                   std::to_string(len);
+        }
+        if (len > size) break;      // a corrupt length would loop forever
+        pos = body + len;
+    }
+    return "byte " + std::to_string(offset) + ", outside any section this "
+           "payload frames";
+}
+
+namespace {
+
+// (id, offset, length) of every section a payload frames, in written order.
+// Shared by DescribeOffset and DiffSections; tolerant of malformed input
+// because both run on payloads that are already suspect.
+std::vector<std::array<size_t, 3>> WalkSections(const uint8_t* data, size_t size)
+{
+    std::vector<std::array<size_t, 3>> out;
+    if (data == nullptr) return out;
+    constexpr size_t kEnvelope = 2 + 4;
+    size_t pos = kEnvelope;
+    while (pos + 8 <= size) {
+        const size_t id = static_cast<size_t>(data[pos]) |
+                          static_cast<size_t>(data[pos + 1]) << 8;
+        const size_t len = static_cast<size_t>(data[pos + 4]) |
+                           static_cast<size_t>(data[pos + 5]) << 8 |
+                           static_cast<size_t>(data[pos + 6]) << 16 |
+                           static_cast<size_t>(data[pos + 7]) << 24;
+        const size_t body = pos + 8;
+        if (len > size || body + len > size) break;
+        out.push_back({id, body, len});
+        pos = body + len;
+    }
+    return out;
+}
+
+const char* SectionNameById(size_t id)
+{
+    for (const auto& s : Sections())
+        if (static_cast<size_t>(s.id) == id) return s.name;
+    return "?";
+}
+
+}  // namespace
+
+std::vector<std::string> DiffSections(const std::vector<uint8_t>& a,
+                                      const std::vector<uint8_t>& b)
+{
+    std::vector<std::string> diffs;
+    const auto sa = WalkSections(a.data(), a.size());
+    const auto sb = WalkSections(b.data(), b.size());
+
+    for (const auto& x : sa) {
+        const std::array<size_t, 3>* y = nullptr;
+        for (const auto& c : sb)
+            if (c[0] == x[0]) { y = &c; break; }
+        if (y == nullptr) {
+            diffs.emplace_back(std::string(SectionNameById(x[0])) + " (absent on one side)");
+            continue;
+        }
+        if (x[2] != (*y)[2] ||
+            std::memcmp(a.data() + x[1], b.data() + (*y)[1], x[2]) != 0)
+            diffs.emplace_back(SectionNameById(x[0]));
+    }
+    for (const auto& y : sb) {
+        bool seen = false;
+        for (const auto& c : sa) if (c[0] == y[0]) { seen = true; break; }
+        if (!seen)
+            diffs.emplace_back(std::string(SectionNameById(y[0])) + " (absent on one side)");
+    }
+    return diffs;
+}
+
+std::string DescribeUnitsDivergence(const std::vector<uint8_t>& a,
+                                    const std::vector<uint8_t>& b)
+{
+    const auto find = [](const std::vector<uint8_t>& p,
+                         std::vector<UnitState>& out) -> bool {
+        for (const auto& s : WalkSections(p.data(), p.size())) {
+            if (s[0] != static_cast<size_t>(SectionId::Units)) continue;
+            std::string err;
+            return DecodeUnits(p.data() + s[1], s[2], out, err);
+        }
+        return false;
+    };
+
+    std::vector<UnitState> ua, ub;
+    if (!find(a, ua) || !find(b, ub))
+        return "units sections could not be decoded for comparison";
+
+    std::unordered_map<int32_t, const UnitState*> byId;
+    for (const auto& u : ub) byId[u.id] = &u;
+
+    size_t transform = 0, vitals = 0, onlyA = 0;
+    std::string first;
+    for (const auto& x : ua) {
+        auto it = byId.find(x.id);
+        if (it == byId.end()) { ++onlyA; continue; }
+        const UnitState& y = *it->second;
+        const bool movedT = x.posX != y.posX || x.posY != y.posY || x.posZ != y.posZ ||
+                            x.speedX != y.speedX || x.speedY != y.speedY ||
+                            x.speedZ != y.speedZ || x.heading != y.heading;
+        const bool movedV = x.health != y.health || x.experience != y.experience ||
+                            x.recentDamage != y.recentDamage;
+        if (movedT) ++transform;
+        if (movedV) ++vitals;
+        if ((movedT || movedV) && first.empty()) {
+            char buf[512];
+            snprintf(buf, sizeof(buf),
+                "first: unit %d '%s' pos (%.3f,%.3f,%.3f) vs (%.3f,%.3f,%.3f), "
+                "speed (%.3f,%.3f,%.3f) vs (%.3f,%.3f,%.3f), heading %d vs %d, "
+                "health %.3f vs %.3f",
+                x.id, x.unitDefName.c_str(),
+                x.posX, x.posY, x.posZ, y.posX, y.posY, y.posZ,
+                x.speedX, x.speedY, x.speedZ, y.speedX, y.speedY, y.speedZ,
+                x.heading, y.heading, x.health, y.health);
+            first = buf;
+        }
+    }
+    const size_t onlyB = (ub.size() > ua.size()) ? ub.size() - ua.size() : 0;
+
+    return std::to_string(ua.size()) + " vs " + std::to_string(ub.size()) +
+           " units; " + std::to_string(transform) + " differ in transform, " +
+           std::to_string(vitals) + " in vitals, " + std::to_string(onlyA) +
+           " present only in arm A, " + std::to_string(onlyB) +
+           " only in arm B. " + (first.empty() ? "no per-unit difference" : first);
 }
 
 const std::vector<DerivedOmission>& DerivedNotCaptured()
@@ -2715,7 +2885,7 @@ bool SimSnapshotSerializer::Deserialize(const uint8_t* data, size_t size, std::s
     // ── Commit. Past this point nothing can fail. ──
     gs->frameNum = globals.frameNum;
     gs->paused   = globals.paused;
-    gsRNG.SetGenState(globals.rngState, globals.rngStream);
+    // NOTE: the synced RNG is NOT restored here — see the end of the commit.
     standingOrders.RestoreState(std::move(orders), ordersNextId);
     orgGroups.RestoreState(std::move(groups), groupsNextId);
     directiveManager.RestoreState(std::move(dirs), dirsNextId);
@@ -2740,6 +2910,25 @@ bool SimSnapshotSerializer::Deserialize(const uint8_t* data, size_t size, std::s
     // (game_gameover's GG.WarState) republish on top, which is the one case
     // where the gadget, not the map, is the authority.
     ApplyGameRules(gameRules);
+    // Teams, a SECOND time, and this is not belt-and-braces — the roster
+    // teardown and rebuild between the two calls rewrites team state the first
+    // call had already restored. Every unit deleted bumps `unitsDied` and every
+    // unit created bumps `unitsProduced` in the CURRENT statistics entry, and
+    // creation/destruction move the team's resource storage; all of that is
+    // captured state, so the restored world came back with a match's kill
+    // ledger inflated by the size of its own roster. ApplyTeams is a pure
+    // setter over captured fields, so running it twice is free and the second
+    // run is the one that wins.
+    //
+    // The FIRST call still has to happen where it does: units are created into
+    // their team, and a team that is still marked dead (or holds another
+    // world's resources) at creation time is not a state unit creation is
+    // written to survive.
+    //
+    // Found by the §8 round-trip: the re-capture differed from the checkpoint
+    // it had just applied, at byte 290 of the `teams` section — inside team 0's
+    // statistics history.
+    ApplyTeams(teams);
     // Synced Lua LAST, and the order is load-bearing: tearing down and
     // rebuilding the roster fires UnitDestroyed for every live unit and
     // UnitCreated/UnitFinished for every restored one, so a gadget's own unit
@@ -2747,7 +2936,26 @@ bool SimSnapshotSerializer::Deserialize(const uint8_t* data, size_t size, std::s
     // gadget state before them would hand the events a table to corrupt; after
     // them, the snapshot's version wins - which is what a rollback means.
     std::string luaErr;
-    if (!ApplySyncedLua(syncedLua, luaErr)) {
+    const bool luaOk = ApplySyncedLua(syncedLua, luaErr);
+
+    // ── The synced RNG is restored LAST, and this ordering is the whole
+    // correctness of the resumed sim's random sequence. ──
+    //
+    // Everything above CONSUMES draws: unit creation, the UnitDestroyed /
+    // UnitCreated / UnitFinished storm the roster rebuild fires across every
+    // gadget, and a gadget's own Load. Restoring the generator before that
+    // work — which is where this call used to sit — left it advanced by
+    // however many draws the rebuild happened to make, so a resumed world's
+    // first random decision differed from the one the snapshot was taken on
+    // even though every unit, team and gadget table was byte-identical.
+    //
+    // Found by the §8 round-trip on Meridian Basin: the re-capture taken
+    // immediately after a restore differed from the checkpoint it had just
+    // applied, at byte 4 of the `globals` section — the first byte of the RNG
+    // state — and the hash track diverged on the very first tick after.
+    gsRNG.SetGenState(globals.rngState, globals.rngStream);
+
+    if (!luaOk) {
         // Past the point of no return. The world IS restored; what failed is a
         // gadget's own Load, which no earlier check could have run.
         err = "world restored but synced Lua Load failed: " + luaErr;
