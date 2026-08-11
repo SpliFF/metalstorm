@@ -204,6 +204,19 @@ void OrgGroupManager::Clear()
     nextId = 1;
 }
 
+void OrgGroupManager::RestoreState(std::vector<OrgGroup> newGroups, uint32_t newNextId)
+{
+    std::unordered_set<int> dirtyTeams;
+    for (const auto& g : groups)    dirtyTeams.insert(g.team);
+    for (const auto& g : newGroups) dirtyTeams.insert(g.team);
+
+    groups = std::move(newGroups);
+    nextId = newNextId;
+
+    for (const int team : dirtyTeams)
+        NotifyChange(team);
+}
+
 // ================================================================
 // DirectiveManager
 // ================================================================
@@ -470,6 +483,20 @@ void DirectiveManager::Clear()
 {
     directives.clear();
     nextId = 1;
+}
+
+void DirectiveManager::RestoreState(std::vector<Directive> newDirectives,
+                                    uint32_t newNextId)
+{
+    std::unordered_set<int> dirtyTeams;
+    for (const auto& d : directives)    dirtyTeams.insert(d.team);
+    for (const auto& d : newDirectives) dirtyTeams.insert(d.team);
+
+    directives = std::move(newDirectives);
+    nextId = newNextId;
+
+    for (const int team : dirtyTeams)
+        NotifyChange(team);
 }
 
 void DirectiveManager::Evaluate(uint32_t currentFrame)

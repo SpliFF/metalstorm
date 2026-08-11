@@ -18,6 +18,7 @@
 #include "Lua/LuaHandleSynced.h"   // CSplitLuaHandle::GetGameParams — growth counters
 #include "Server/GmVerbs.h"
 #include "Server/GameStateStore.h"
+#include "Server/SimSnapshot.h"
 #include "Server/DevBuildGate.h"
 #include "Server/ClientSession.h"
 #include "Server/EntityStateSerializer.h"
@@ -1048,6 +1049,38 @@ int main(int argc, char* argv[])
         snapCfg.engineHash = h;
     }
     gamestate::GameStateStore gmSnapshotStore(db.Handle(), snapCfg);
+
+    // PLAN-persistence task 1b: the ISimSerializer walk (Q-P1 option B). It is
+    // attached only when its section table has no declared gap left — an
+    // attached-but-incomplete serializer would flip Available() to true and
+    // tell the GM surface that rollback works while every checkpoint it takes
+    // omits state. Until then the store keeps refusing, and the boot line
+    // below names the exact remaining sections rather than "creg is stubbed".
+    // Tasks 1c/1d flip this on by implementing their sections; no wiring
+    // change is needed here when they do.
+    static simsnapshot::SimSnapshotSerializer simSerializer;
+    {
+        const std::vector<std::string> missing = simsnapshot::MissingSections();
+        if (missing.empty()) {
+            gmSnapshotStore.SetSerializer(&simSerializer);
+            SLOG(SPRING_LOG_NOTICE,
+                 "sim snapshots: serializer attached (layout %016llx)",
+                 (unsigned long long)simSerializer.LayoutHash());
+        } else {
+            std::string names;
+            for (size_t i = 0; i < missing.size(); ++i)
+                names += (i ? ", " : "") + missing[i];
+            // FIDELITY-STANDIN: the snapshot walk is partial. Per the
+            // code-session contract every capability gap gets a one-time
+            // runtime warn naming it, so an operator who wonders why rollback
+            // refuses reads the answer here instead of in a plan file.
+            SLOG(SPRING_LOG_WARNING,
+                 "sim snapshots: DISABLED - the serializer's walk is incomplete "
+                 "(unimplemented sections: %s). Checkpoint/rollback refuse until "
+                 "PLAN-persistence tasks 1c/1d land.", names.c_str());
+        }
+    }
+
     RegisterGmVerbs(ctx, gmSnapshotStore);
 
     // PLAN-replay task 1: attach the in-memory cause-stream journal under

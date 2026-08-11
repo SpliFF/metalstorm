@@ -548,6 +548,10 @@ if(TEST_SOURCES)
         ${CMAKE_SOURCE_DIR}/rts/Server/GrowthCounters.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GmRollback.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GameStateStore.cpp
+        # PLAN-persistence task 1b: the ISimSerializer walk. Needs the sim
+        # globals (gs/gsRNG) and the two order managers, all of which
+        # spring-tests already links, so its round-trip is a plain doctest.
+        ${CMAKE_SOURCE_DIR}/rts/Server/SimSnapshot.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GameServersDb.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/HeadlessRun.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/StatsDump.cpp

@@ -151,6 +151,14 @@ public:
 
     void Clear();
 
+    // ── Snapshot restore (PLAN-persistence task 1b) ──
+    // See StandingOrderManager::RestoreState for why the id counter travels
+    // with the state rather than being recomputed from max(id)+1: a group
+    // disbanded before the snapshot leaves a gap, and recomputing would be
+    // right only until the highest-id group is the one that gets disbanded.
+    uint32_t NextId() const { return nextId; }
+    void RestoreState(std::vector<OrgGroup> newGroups, uint32_t newNextId);
+
 private:
     std::vector<OrgGroup> groups;
     uint32_t nextId = 1;
@@ -239,6 +247,10 @@ public:
     const std::vector<Directive>& GetAllDirectives() const { return directives; }
 
     void Clear();
+
+    // ── Snapshot restore (PLAN-persistence task 1b) ──
+    uint32_t NextId() const { return nextId; }
+    void RestoreState(std::vector<Directive> newDirectives, uint32_t newNextId);
 
 private:
     std::vector<Directive> directives;

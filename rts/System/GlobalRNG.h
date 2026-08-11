@@ -28,6 +28,8 @@ public:
 	res_type bnext(const res_type bound) { return (next() % bound); }
 
 	val_type state() const { return val; }
+	val_type stream() const { return seq; }
+	void set_state(const val_type _val, const val_type _seq) { val = _val; seq = _seq; }
 
 public:
 	static constexpr res_type min_res = 0;
@@ -83,6 +85,17 @@ public:
 	}
 
 	val_type state() const { return val; }
+	val_type stream() const { return seq; }
+
+	// PLAN-persistence task 1b: the inverse of state()/stream(), so a snapshot
+	// can put the generator back exactly where it was. `seq` is the stream
+	// selector (already odd-ified by seed()), `val` the position in it — both
+	// are needed: restoring only `val` puts the sim on a different stream and
+	// every subsequent draw diverges from the one the snapshot recorded.
+	void set_state(const val_type _val, const val_type _seq) {
+		val = _val;
+		seq = _seq;
+	}
 
 public:
 	static constexpr res_type min_res = std::numeric_limits<res_type>::min();
@@ -119,6 +132,20 @@ public:
 	rng_val_type GetInitSeed() const { return initSeed; }
 	rng_val_type GetLastSeed() const { return lastSeed; }
 	rng_val_type GetGenState() const { return (gen.state()); }
+	rng_val_type GetGenStream() const { return (gen.stream()); }
+
+	/// Put the generator back at an exact (position, stream) pair captured by
+	/// GetGenState()/GetGenStream(). PLAN-persistence task 1b: without this,
+	/// GetGenState() is write-only — a resumed sim can only be *re-seeded*,
+	/// so its first random draw diverges from the track the snapshot was taken
+	/// on, and statsdump::ComputeStateHash (which folds gsRNG.GetGenState()
+	/// into the desync hash) reports the divergence as corruption.
+	///
+	/// Not a general-purpose setter: the only legitimate caller is a state
+	/// restore that is reinstating a value this same object produced.
+	void SetGenState(rng_val_type state, rng_val_type stream) {
+		gen.set_state(state, stream);
+	}
 
 	// needed for std::{random_}shuffle
 	rng_res_type operator()(              ) { return (gen. next( )); }
