@@ -556,6 +556,10 @@ if(TEST_SOURCES)
         # HeadlessRun shape — the engine-coupled half is one block in
         # server_main.cpp, so the state machine and the verdict test off-engine.
         ${CMAKE_SOURCE_DIR}/rts/Server/SnapshotRoundTrip.cpp
+        # PLAN-persistence task 3a: the hibernate/resume decisions. Pure
+        # (std-lib only) — the engine-coupled half is the wiring in
+        # server_main.cpp, so both policies test off-engine.
+        ${CMAKE_SOURCE_DIR}/rts/Server/Hibernation.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GameServersDb.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/HeadlessRun.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/StatsDump.cpp

@@ -18,6 +18,7 @@
 #include "Lua/LuaHandleSynced.h"   // CSplitLuaHandle::GetGameParams — growth counters
 #include "Server/GmVerbs.h"
 #include "Server/GameStateStore.h"
+#include "Server/Hibernation.h"
 #include "Server/SimSnapshot.h"
 #include "Server/SnapshotRoundTrip.h"
 #include "Server/DevBuildGate.h"
@@ -241,6 +242,25 @@ int main(int argc, char* argv[])
     int postGameExitSeconds =
         envInt("SPRING_POSTGAME_EXIT_SECONDS", postgame::kDefaultExitSeconds);
 
+    // --- Hibernation (PLAN-persistence task 3a) ---
+    // `--resume`: come up by applying this room's newest valid snapshot
+    // instead of the world staging just built. Bare flag — the partition key
+    // (gameId, roomId) is already `--game` + `--room`; see Hibernation.h for
+    // why §3's `--resume <gameId>` sketch is not what landed.
+    bool resumeRequested = false;
+    // `--no-hibernate`: exit without leaving a resumable world behind. The
+    // escape hatch for a box being torn down for good, and the off switch a
+    // bisect needs.
+    bool hibernationEnabled = envInt("SPRING_HIBERNATE", 1) != 0;
+    // How long a PERSISTENT room may sit with no connected clients before it
+    // checkpoints and exits. **Default 0 = off, deliberately.** A persistent
+    // war exiting when empty is only correct once something respawns it on
+    // join, and that is the lobby's half (task 3b): with 0 the room behaves
+    // exactly as it does today and the exit-checkpoint path below still runs
+    // for signal exits, which is what makes a deploy drain resumable.
+    // Non-persistent rooms are unaffected — they idle-exit as before.
+    int hibernateIdleSeconds = envInt("SPRING_HIBERNATE_IDLE_SECONDS", 0);
+
     // --- Headless run mode (PLAN-headless task 1) ---
     // `--headless-run <config.json>` runs the sim to completion with no browser
     // client: no clients, no idle-exit, run-config-driven pacing (uncapped /
@@ -428,6 +448,12 @@ int main(int argc, char* argv[])
             idleStartupGraceSeconds = std::atoi(argv[++i]);
         } else if (arg == "--postgame-exit-seconds" && i + 1 < argc) {
             postGameExitSeconds = std::atoi(argv[++i]);
+        } else if (arg == "--resume") {
+            resumeRequested = true;
+        } else if (arg == "--no-hibernate") {
+            hibernationEnabled = false;
+        } else if (arg == "--hibernate-idle-seconds" && i + 1 < argc) {
+            hibernateIdleSeconds = std::atoi(argv[++i]);
         } else if (arg == "--headless-run" && i + 1 < argc) {
             headlessConfigPath = argv[++i];
         } else if (arg == "--max-wall-min" && i + 1 < argc) {
@@ -670,6 +696,19 @@ int main(int argc, char* argv[])
     // deliberately re-run a stream against different content — that is a
     // divergence experiment, and the engineHash/defsCacheKey lines logged below
     // are what tell them they ran one.
+    // --resume brings a world up out of the store; a replay re-executes one
+    // from a recorded input stream and the round-trip harness builds its own.
+    // Each combination is a request for two different worlds in one process,
+    // and there is no honest way to pick — refuse rather than let one quietly
+    // overwrite the other (PLAN-persistence task 3a).
+    if (resumeRequested && (!replayFilePath.empty() || roundTripCfg.enabled)) {
+        SLOG(SPRING_LOG_ERROR,
+            "--resume is mutually exclusive with --replay and "
+            "--snapshot-roundtrip: each of them supplies the world, and this "
+            "invocation asks for two");
+        return 1;
+    }
+
     if (!replayFilePath.empty()) {
         if (!journalFilePath.empty()) {
             SLOG(SPRING_LOG_ERROR,
@@ -1834,6 +1873,56 @@ int main(int argc, char* argv[])
         sim.FireGameStart();
     }
 
+    // --- Resume (PLAN-persistence task 3a) ---
+    //
+    // HERE, and not earlier, for two reasons that are both about applying a
+    // world over a world rather than into a vacuum:
+    //
+    //  (a) The snapshot's `syncedLua` section calls each gadget's Load, and
+    //      `units`/`features` tear down and rebuild the roster through
+    //      UnitDestroyed/UnitCreated. Both need the gadget handler up and
+    //      GameStart already fired — the same ordering task 1d found the hard
+    //      way and wrote into ApplySyncedLua's placement.
+    //  (b) Staging runs first and is then REPLACED, which looks wasteful and
+    //      is the point: `game_scenario.lua` builds a complete, legal world
+    //      out of the same defs the snapshot names, so the apply lands on the
+    //      shape it was captured from. This is exactly the path
+    //      --snapshot-roundtrip exercises 100 times a run (restore over a
+    //      live world, byte-identical re-capture), rather than a second,
+    //      untested "restore into an empty sim" path.
+    //
+    // And before the loop, so no client ever sees the staged world: the sim
+    // has not ticked and nothing is being streamed yet.
+    if (resumeRequested) {
+        struct StoreResumeSource : hibernate::IResumeSource {
+            gamestate::GameStateStore* store = nullptr;
+            bool Available() const override { return store->Available(); }
+            int32_t NewestFrame(uint32_t r) override { return store->NewestFrame(r); }
+            bool RestoreNewestValid(uint32_t r, std::string& e, int32_t& f) override {
+                return store->RestoreNewestValid(r, e, f);
+            }
+        } resumeSrc;
+        resumeSrc.store = &gmSnapshotStore;
+
+        hibernate::ResumeRequest rq;
+        rq.requested = true;
+        rq.startsGameAtSetup = startsGameAtSetup;
+        const hibernate::ResumeOutcome ro = hibernate::DoResume(resumeSrc, roomId, rq);
+
+        if (ro.fatal) {
+            // No half-resume, and no quiet fresh start. The lobby respawned
+            // this process to hand rejoining players the world it told them
+            // was frozen at frame N; coming up empty while publishing
+            // game_status.ready replaces their war with a new match and
+            // nothing in the system would ever say so.
+            SLOG(SPRING_LOG_ERROR, "%s", hibernate::FormatResume(ro).c_str());
+            return 1;
+        }
+        springlog_set_frame(sim.GetFrameNum());
+        SLOG(SPRING_LOG_NOTICE, "room %u %s", roomId,
+             hibernate::FormatResume(ro).c_str());
+    }
+
     // --- AI slot resolution ---
     //
     // The lobby passes zero or more `--ai <id>:<team>` pairs on the
@@ -2250,6 +2339,13 @@ int main(int argc, char* argv[])
         headlessSnapshots.push_back(std::move(snap));
     };
 
+    // PLAN-persistence task 3a: why this process is about to stop. Every site
+    // that clears `keepRunning` from inside the loop names its reason here;
+    // the signal handlers cannot (they run on a signal stack and set only the
+    // atomic), so Signal is the default and the residue. The exit-checkpoint
+    // decision below is a pure function of this plus the world's state.
+    hibernate::ExitReason exitReason = hibernate::ExitReason::Signal;
+
     while (keepRunning.load()) {
         // --- Pacing ---
         // Normal games (and headless realtime / xN) sleep to hit the target tick
@@ -2376,6 +2472,29 @@ int main(int argc, char* argv[])
                     SLOG(SPRING_LOG_NOTICE,
                         "no connected clients for %llds — shutting down idle game server",
                         static_cast<long long>(idleFor));
+                    exitReason = hibernate::ExitReason::Idle;
+                    keepRunning.store(false);
+                }
+            }
+            // Hibernation (PLAN-persistence task 3a): the PERSISTENT-room
+            // counterpart. A war that nobody is in costs a whole process and
+            // a port to simulate nothing; §3 turns that into a DB row. The
+            // exit path below checkpoints it, so the world is frozen rather
+            // than lost — but only when the operator has switched the window
+            // on, because a room that exits is unjoinable until the lobby
+            // learns to respawn it with --resume (task 3b). Default 0 = off.
+            if (roomPersistent && hibernationEnabled && hibernateIdleSeconds > 0 &&
+                !headlessCfg.enabled && !replay::IsReplaying()) {
+                const auto sinceStart = std::chrono::duration_cast<std::chrono::seconds>(
+                    wall - serverStartTime).count();
+                const auto idleFor = std::chrono::duration_cast<std::chrono::seconds>(
+                    wall - lastClientTime).count();
+                if (sinceStart > kStartupGraceSec && idleFor > hibernateIdleSeconds) {
+                    SLOG(SPRING_LOG_NOTICE,
+                        "no connected clients for %llds — hibernating persistent "
+                        "room %u at frame %d",
+                        static_cast<long long>(idleFor), roomId, sim.GetFrameNum());
+                    exitReason = hibernate::ExitReason::Idle;
                     keepRunning.store(false);
                 }
             }
@@ -2398,6 +2517,7 @@ int main(int argc, char* argv[])
                         "game over %ds ago — shutting down finished game server "
                         "(frame %d, %d client(s) still connected)",
                         since, sim.GetFrameNum(), clients);
+                    exitReason = hibernate::ExitReason::PostGame;
                     keepRunning.store(false);
                 }
             }
@@ -2933,6 +3053,7 @@ int main(int argc, char* argv[])
                     }
                 }
                 if (!rr.pass) roundTripExitCode = 1;
+                exitReason = hibernate::ExitReason::Harness;
                 keepRunning.store(false);
             }
         }
@@ -2996,6 +3117,7 @@ int main(int argc, char* argv[])
                     "headless run complete: stop=%s frame=%d (%.1fs) wall=%llds",
                     headless::StopReasonName(headlessStopReason), frame,
                     frame / (float)GAME_SPEED, (long long)rs.wallElapsedSec);
+                exitReason = hibernate::ExitReason::HeadlessRun;
                 keepRunning.store(false);
 
                 // Final stats dump (task 2 §1 "JSON at termination"). Always
@@ -3113,6 +3235,56 @@ int main(int argc, char* argv[])
             SLOG(SPRING_LOG_WARNING,
                 "replay: ended with %zu record(s) unfed",
                 replay::Feed().RecordCount() - static_cast<size_t>(replay::Feed().Fed()));
+        }
+    }
+
+    // --- Exit checkpoint (PLAN-persistence task 3a) ---
+    //
+    // The one site where a world becomes resumable, on the sim thread, after
+    // the loop and before anything is torn down. One site rather than one per
+    // exit path deliberately: a SIGTERM from a deploy drain, a hibernating
+    // idle war and an operator's Ctrl-C are the same event as far as the
+    // world is concerned, and the four in-loop stop sites only have to name
+    // their `exitReason` for the policy to sort them.
+    //
+    // Everything fallible is said out loud. A room that could not save itself
+    // is a data-loss event and logs at WARNING with the store's own reason;
+    // the six benign refusals (a replay, an unstarted game, a finished match…)
+    // log at NOTICE, because "no checkpoint taken" is the correct outcome for
+    // each of them and an operator who cannot tell them apart learns to
+    // ignore both.
+    {
+        hibernate::ExitContext ec;
+        ec.reason = restartRequested.load() ? hibernate::ExitReason::Restart : exitReason;
+        ec.hibernationEnabled = hibernationEnabled;
+        ec.serializerAttached = gmSnapshotStore.Available();
+        ec.gameStarted = sim.HasGameStarted();
+        ec.gameOverDeclared = gameOverRelay.IsDeclared();
+        ec.replaying = replay::IsReplaying();
+
+        const hibernate::CheckpointDecision cd = hibernate::DecideExitCheckpoint(ec);
+        if (cd.checkpoint) {
+            std::string cerr;
+            // Synchronous: the process is about to exit, so an async write
+            // would race the destructor. Checkpoint() flushes before it
+            // returns, which is exactly the durability a hibernation needs.
+            const int32_t f = gmSnapshotStore.Checkpoint(roomId, cd.label, cerr);
+            if (f < 0) {
+                SLOG(SPRING_LOG_WARNING,
+                    "hibernate: room %u exiting on %s but the checkpoint FAILED "
+                    "(%s) — this world is lost, not frozen",
+                    roomId, hibernate::Describe(ec.reason),
+                    cerr.empty() ? "no reason given" : cerr.c_str());
+            } else {
+                SLOG(SPRING_LOG_NOTICE,
+                    "hibernate: room %u checkpointed at frame %d (%s) — "
+                    "resumable with --resume",
+                    roomId, f, cd.label.c_str());
+            }
+        } else {
+            SLOG(cd.lossy ? SPRING_LOG_WARNING : SPRING_LOG_NOTICE,
+                 "hibernate: no exit checkpoint (%s) — %s",
+                 hibernate::Describe(ec.reason), cd.reason.c_str());
         }
     }
 
