@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include "AuthTokens.h"
 #include "Database.h"
 #include "FactionData.h"
 #include "NetworkServer.h"
@@ -13,11 +14,36 @@
 
 #include <algorithm>
 #include <chrono>
+#include <ctime>
 #include <mutex>
 #include <string>
 #include <unordered_map>
 
 namespace HttpAuth {
+
+/// How long an access session (a `sessions` row) is honoured for.
+///
+/// **Deliberately unchanged at 24 h by task 8a**, even though §7.2 calls the
+/// access token "short-lived" and rotation now exists to renew it. What the
+/// refresh token buys at this TTL is already the thing the persistent world
+/// needs — a session that survives *days* without re-entering a password, and
+/// one that can be revoked — and none of that depends on the window being
+/// small. Shrinking it is a one-constant change with a blast radius the
+/// constant does not show: `springrts-token` is read straight out of
+/// localStorage by six client call sites (main.ts ×5, viewport.ts, minimap.ts,
+/// connection.ts) which each cache it for the life of an object, so a token
+/// that expires mid-session is not refreshed by any of them — it is simply
+/// stale, and the failure surfaces as a mid-war reconnect asking for a
+/// password. Making those call sites re-read is its own task; doing it blind
+/// in the same fire is how that path breaks silently.
+constexpr int kAccessTtlSeconds = 86400;
+
+/// Wall-clock seconds. The token tables store absolute unix times (the
+/// `sessions` table uses SQLite's `datetime('now')` instead — the two are not
+/// mixed anywhere, and the absolute form is what lets a test drive the clock).
+inline int64_t NowUnix() {
+    return static_cast<int64_t>(std::time(nullptr));
+}
 
 /// PLAN-security-hardening task 3: per-username login lockout. In-memory
 /// (a restart clearing counters is acceptable — this defends against online
@@ -99,6 +125,38 @@ private:
     std::chrono::steady_clock::time_point last_ = std::chrono::steady_clock::now();
 };
 #endif
+
+/// §7.2's "rate-limit … extended to refresh abuse". Global (an attacker holds
+/// a stolen token, not an account name, so there is nothing per-user to key
+/// on) and consumed **only on a failed refresh** — a legitimate client rotates
+/// once per session and never touches this. Sized so that a script probing
+/// token space is stopped while a fleet of real clients whose refresh tokens
+/// all expired at once still gets through.
+///
+/// Unlike RegistrationLimiter this is NOT `#ifdef SPRING_PROD`: refresh is a
+/// pure-machine path with no dev flow that hammers it, so leaving it live in
+/// dev costs nothing and means the limiter is actually exercised by the suite.
+class RefreshFailureLimiter {
+public:
+    static constexpr double kBurst     = 30.0;
+    static constexpr double kPerSecond = 30.0 / 60.0;  // ~30/min sustained
+
+    bool TryConsume(std::chrono::steady_clock::time_point now =
+                        std::chrono::steady_clock::now()) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        double elapsed = std::chrono::duration<double>(now - last_).count();
+        last_ = now;
+        tokens_ = std::min(kBurst, tokens_ + elapsed * kPerSecond);
+        if (tokens_ < 1.0) return false;
+        tokens_ -= 1.0;
+        return true;
+    }
+
+private:
+    std::mutex mutex_;
+    double tokens_ = kBurst;
+    std::chrono::steady_clock::time_point last_ = std::chrono::steady_clock::now();
+};
 
 /// Generate a cryptographically-secure random hex session token (S3).
 /// 16 bytes of CSPRNG output → 32 hex chars (the previous token width).
@@ -224,7 +282,7 @@ inline int64_t ValidateAuth(Database& db, const std::string& authHeader) {
     // Try Bearer token first
     if (authHeader.rfind("Bearer ", 0) == 0) {
         std::string token = authHeader.substr(7);
-        if (!token.empty()) return db.ValidateSession(token, 86400);
+        if (!token.empty()) return db.ValidateSession(token, kAccessTtlSeconds);
     }
 
     // Try Basic auth — validate credentials directly
@@ -266,9 +324,17 @@ inline int64_t ValidateToken(Database& db, const std::string& authHeader) {
 inline void RegisterEndpoints(NetworkServer& net, Database& db,
                               const std::unordered_map<std::string, FactionData::FactionInfo>& factionRegistry) {
     static LoginLimiter loginLimiter;
+    static RefreshFailureLimiter refreshLimiter;
 #ifdef SPRING_PROD
     static RegistrationLimiter registrationLimiter;
 #endif
+
+    // Task 8a: both long-lived credential tables. Created here rather than in
+    // Database::CreateTables because the game server also opens this db and
+    // must find `war_reconnect_tokens` present whether or not it ever
+    // registered an HTTP auth route — see the EnsureTables call in
+    // server_main's start-up.
+    AuthTokens::EnsureTables(db.Handle());
 
     // POST /api/auth/login
     net.AddHttpPost("/api/auth/login", RouteAuth::Public, [&db](const std::string&, const std::string& body, const HttpRequestHeaders&) -> HttpResponse {
@@ -317,6 +383,17 @@ inline void RegisterEndpoints(NetworkServer& net, Database& db,
             + ",\"role\":\"" + JsonEscape(user->role) + "\"";
         if (user->factionId && !user->factionId->empty())
             json += ",\"faction\":\"" + JsonEscape(*user->factionId) + "\"";
+        // Each password authentication opens its OWN refresh family (§7.2), so
+        // revoking a compromised lineage never disturbs the session the player
+        // is opening right now. Omitted rather than sent empty if minting
+        // failed, so a client can tell "this deployment has no refresh" from
+        // "your refresh token is the empty string" — the second would have it
+        // POST /api/auth/refresh forever.
+        if (auto issued = AuthTokens::IssueRefresh(db.Handle(), user->id,
+                                                   AuthTokens::kRefreshTtlSeconds,
+                                                   NowUnix()))
+            json += ",\"refresh_token\":\"" + issued->token + "\""
+                    ",\"expires_in\":" + std::to_string(kAccessTtlSeconds);
         json += "}";
         return JsonResponse(200, json);
     });
@@ -378,7 +455,13 @@ inline void RegisterEndpoints(NetworkServer& net, Database& db,
             + ",\"user_id\":" + std::to_string(userId)
             + ",\"username\":\"" + JsonEscape(username) + "\""
             + ",\"role\":\"player\""
-            + ",\"faction\":\"" + JsonEscape(faction) + "\"}";
+            + ",\"faction\":\"" + JsonEscape(faction) + "\"";
+        if (auto issued = AuthTokens::IssueRefresh(db.Handle(), userId,
+                                                   AuthTokens::kRefreshTtlSeconds,
+                                                   NowUnix()))
+            json += ",\"refresh_token\":\"" + issued->token + "\""
+                    ",\"expires_in\":" + std::to_string(kAccessTtlSeconds);
+        json += "}";
         return JsonResponse(201, json);
     });
 
@@ -418,7 +501,7 @@ inline void RegisterEndpoints(NetworkServer& net, Database& db,
     // bad, or the client is stuck on an account it cannot leave. `revoked`
     // reports which happened. Only the holder of a token can name it, so
     // there is no authorisation to do beyond parsing the header.
-    net.AddHttpPost("/api/auth/logout", RouteAuth::Public, [&db](const std::string&, const std::string&, const HttpRequestHeaders& headers) -> HttpResponse {
+    net.AddHttpPost("/api/auth/logout", RouteAuth::Public, [&db](const std::string&, const std::string& body, const HttpRequestHeaders& headers) -> HttpResponse {
         const std::string& authHeader = headers.authorization;
         if (authHeader.rfind("Bearer ", 0) != 0) {
             // Basic-auth callers hold no session row (ValidateAuth logs them
@@ -429,10 +512,102 @@ inline void RegisterEndpoints(NetworkServer& net, Database& db,
         if (token.empty()) {
             return JsonResponse(200, R"({"ok":true,"revoked":false})");
         }
-        const bool wasValid = db.ValidateSession(token, 86400) > 0;
+        const bool wasValid = db.ValidateSession(token, kAccessTtlSeconds) > 0;
         db.RevokeSession(token);
-        return JsonResponse(200, wasValid ? R"({"ok":true,"revoked":true})"
-                                          : R"({"ok":true,"revoked":false})");
+        // Task 8a: revoking the access session alone is no longer a logout —
+        // the client also holds a 30-day refresh token, and leaving that live
+        // means the next page load silently mints a new session for the
+        // account the player just left. The family (not the single row) goes,
+        // because the rotation lineage is the credential. `refresh_token` is
+        // optional in the body: a caller that has none is still logged out of
+        // the session it named, which is what D45's 200-on-anything promise is
+        // for.
+        const std::string presentedRefresh = JsonField(body, "refresh_token");
+        const int revokedRefresh = presentedRefresh.empty() ? 0
+            : AuthTokens::RevokeFamilyOfToken(db.Handle(), presentedRefresh,
+                                              NowUnix());
+        std::string json = std::string("{\"ok\":true,\"revoked\":") +
+            (wasValid ? "true" : "false") +
+            ",\"refresh_revoked\":" + std::to_string(revokedRefresh) + "}";
+        return JsonResponse(200, json);
+    });
+
+    // POST /api/auth/refresh — rotate a refresh token into a new access
+    // session (§7.2). Public: the whole point is that the caller's access
+    // token has aged out, so requiring one would be circular.
+    //
+    // The response is shaped exactly like /api/auth/login's, so a client has
+    // one code path for "I now hold a session" rather than two that drift.
+    net.AddHttpPost("/api/auth/refresh", RouteAuth::Public, [&db](const std::string&, const std::string& body, const HttpRequestHeaders&) -> HttpResponse {
+        const std::string presented = JsonField(body, "refresh_token");
+        if (presented.empty()) {
+            return JsonResponse(400, R"({"error":"missing refresh_token"})");
+        }
+        auto outcome = AuthTokens::Rotate(db.Handle(), presented,
+                                          AuthTokens::kRefreshTtlSeconds,
+                                          NowUnix());
+        if (outcome.status != AuthTokens::RefreshStatus::OK) {
+            // Every failure is one 401 with one message. The status ladder is
+            // load-bearing on the server (Reused kills the family) and is
+            // deliberately NOT reported: telling a caller "that token was
+            // already used" tells a thief they are holding a live lineage.
+            if (!refreshLimiter.TryConsume()) {
+                return JsonResponse(429, R"({"error":"too many refresh attempts — try again shortly"})");
+            }
+            return JsonResponse(401, R"({"error":"invalid or expired refresh token"})");
+        }
+        auto user = db.FindUserById(outcome.userId);
+        if (!user) {
+            // The account went away under a live lineage (deleted, or a db
+            // restored from before it existed). Kill the family rather than
+            // leave a token that authenticates nobody but still rotates.
+            AuthTokens::RevokeFamily(db.Handle(), outcome.next.familyId, NowUnix());
+            return JsonResponse(401, R"({"error":"invalid or expired refresh token"})");
+        }
+        if (user->isBanned) {
+            // A ban must not be survivable by a credential minted before it.
+            AuthTokens::RevokeAllRefreshForUser(db.Handle(), user->id, NowUnix());
+            return JsonResponse(403, R"({"error":"account banned"})");
+        }
+
+        const std::string token = GenerateToken();
+        db.CreateSession(user->id, token);
+
+        std::string json = "{\"token\":\"" + token + "\""
+            + ",\"refresh_token\":\"" + outcome.next.token + "\""
+            + ",\"expires_in\":" + std::to_string(kAccessTtlSeconds)
+            + ",\"user_id\":" + std::to_string(user->id)
+            + ",\"username\":\"" + JsonEscape(user->username) + "\""
+            + ",\"role\":\"" + JsonEscape(user->role) + "\"";
+        if (user->factionId && !user->factionId->empty())
+            json += ",\"faction\":\"" + JsonEscape(*user->factionId) + "\"";
+        json += "}";
+        return JsonResponse(200, json);
+    });
+
+    // POST /api/auth/logout-all — §7.2's "log out everywhere" verb.
+    //
+    // Kept separate from /api/auth/logout on purpose, and the header's logout
+    // control is deliberately NOT wired to it: one browser signing out should
+    // not evict the player's phone from a war they are standing in. This is
+    // the compromise response, so it takes both halves — every session row AND
+    // every refresh family — because revoking either alone leaves the other as
+    // a live path back into the account.
+    //
+    // TokenRequired rather than Public: unlike a logout, this affects devices
+    // the caller is not holding, so it has to be an authenticated act.
+    net.AddHttpPost("/api/auth/logout-all", RouteAuth::TokenRequired, [&db](const std::string&, const std::string&, const HttpRequestHeaders& headers) -> HttpResponse {
+        const int64_t userId = ValidateAuth(db, headers.authorization);
+        if (userId <= 0) {
+            return JsonResponse(401, R"({"error":"unauthorized"})");
+        }
+        const int sessions = db.RevokeUserSessions(userId);
+        const int families = AuthTokens::RevokeAllRefreshForUser(db.Handle(),
+                                                                 userId, NowUnix());
+        std::string json = "{\"ok\":true,\"sessions_revoked\":" +
+            std::to_string(sessions) + ",\"refresh_revoked\":" +
+            std::to_string(families) + "}";
+        return JsonResponse(200, json);
     });
 }
 

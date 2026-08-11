@@ -57,6 +57,7 @@ import { debugConsole } from './core/debug-console.js';
 import { logIngest } from './core/log-ingest.js';
 import { configureErrorTelemetry, reportClientError } from './core/client-error-telemetry.js';
 import type { ClientErrorReason } from './core/client-error-telemetry.js';
+import { browserTokenStore, gameAuthToken } from './lobby/auth-tokens.js';
 import { HeartbeatWatchdog } from './core/heartbeat-watchdog.js';
 import { RecoveryLadder, type RecoveryTrigger } from './core/recovery-ladder.js';
 import {
@@ -1395,7 +1396,15 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         gameHttpUrl,
         lobbyUrl: lobbyHttpUrl,
         username: localStorage.getItem('springrts-username') ?? '',
-        token: localStorage.getItem('springrts-token') ?? '',
+        // Task 8a: the access session normally, the per-war reconnect token
+        // when there is no access session left. The game server accepts both;
+        // the war token is the only credential that survives a multi-day
+        // absence when the refresh has also failed, and it opens nothing but
+        // this room.
+        token: gameAuthToken(
+            parseInt(localStorage.getItem('springrts-game-room') ?? '0') || 0,
+            browserTokenStore,
+        )?.token ?? '',
         gameId,
         mapId,
         lighting: gameLighting,

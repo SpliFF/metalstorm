@@ -1495,12 +1495,24 @@ export class Connection {
                     return;
                 }
             }
-            // Token rejected — clear it and try password
-            console.log('[connection] token expired or invalid');
-            this.sessionToken = null;
+            // The token did not validate as an ACCOUNT session. That is not
+            // the same as "the token is bad", and task 8a is what makes the
+            // difference matter: a per-war reconnect token (§7.3) authorises
+            // exactly this room and is unknown to /api/auth/validate by
+            // design, so it 401s here and is still the right credential to
+            // present. The game server knows both kinds; it is the authority.
+            //
+            // So the token is kept and handed to AuthRequest rather than
+            // discarded. Before task 8a this line pre-judged a credential it
+            // could not evaluate, and the only visible symptom was a mid-war
+            // reconnect asking for a password.
+            console.log('[connection] token is not an account session — '
+                + 'presenting it to the game server (per-war token?)');
         }
 
-        // Password login
+        // Password login. Reached only when there is no token at all: with one
+        // in hand, the game server's AuthResponse is the verdict.
+        if (this.sessionToken) return;
         if (!password) {
             throw new Error('no valid token and no password');
         }

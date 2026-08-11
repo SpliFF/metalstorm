@@ -69,6 +69,7 @@ Full CLI flag list (from `rts/server_main.cpp`):
 | `Server/ProjectileStateSerializer.h/.cpp` | Serialises synced weapon projectiles to envelope 0x04 binary. |
 | `Server/EntityDeltaCache.h/.cpp` | Per-client delta tracking to reduce bandwidth. |
 | `Server/ContentServer.h/.cpp` | Scans content roots, serves assets at `/api/content/assets/*`. |
+| `Server/AuthTokens.h/.cpp` | **Task 8a**: the two credentials that outlive the 24 h access session — `refresh_tokens` (rotating, single-use, family-scoped revocation on reuse) and `war_reconnect_tokens` (per-(account, war), 7-day). Both store **sha256 of the token, never the token**: a read of the db file is otherwise a month of impersonation. sha256 rather than scrypt because these are 32 bytes of CSPRNG — there is no dictionary — and the cost would land on the validate path the game server hits on every reconnect. `ValidateWarReconnect` takes the roomId as an **argument** so a caller cannot forget to check it. |
 | `Server/Database.h/.cpp` | SQLite wrapper (accounts, sessions, `admin_audit`). Ban primitives (`SetBanned`/`SetBannedByUsername`/`RevokeUserSessions`/`GetBannedUsers`, PLAN-gm-tools task 4). |
 | `Server/GameMetrics.h/.cpp` | **PLAN-gm-tools task 1**: `GameMetricsWriter` — per-game sim-health rows (tick p95, frames-behind, entity count, uptime, db size) into the shared `game_metrics` table on a wall-clock cadence; 7-day-raw / hourly-tail downsampling (E5). Driven from `server_main.cpp`'s loop. |
 | `Server/GmVerbs.h/.cpp` + `GmRollback.cpp` | **PLAN-gm-tools task 2**: the GM verb set — `RegisterGmVerbs` installs `POST /api/gm/{pause,resume,grant,broadcast,inspect,kick,rollback,checkpoint,hibernate,snapshots}` (all `RouteAuth::AdminOnly` + in-handler role recheck + `LogAudit`; compiled into prod, unlike `/api/exec`). Rollback rides the `ISnapshotStore` seam, now backed by `GameStateStore` (see below). The pure `DoRollback` sequence lives in `GmRollback.cpp` (dependency-light, unit-tested). |
@@ -650,6 +651,9 @@ byte-identical served copy.
 | `POST /api/admin/set-faction` | AdminOnly, audited. Override an account's permanent faction (`{username, faction}`). The only writer of `users.faction_id` after sign-up — faction is immutable in the normal flow, so there is deliberately no player-facing equivalent. PLAN-metalstorm-lobby §1b. |
 | `POST /api/auth/{login,register,validate}` | All three echo the account's `faction` when it has one (omitted, never empty, for dev/manifest accounts) — login and validate are the only ways a returning session can learn it. PLAN-endtoend D40. |
 | `POST /api/auth/logout` | Public. Deletes the session row named by the request's own `Bearer` token, and answers **200 either way** (`{"ok":true,"revoked":<bool>}`). Public rather than TokenRequired on purpose: `DispatchPost` would 401 a dead token before the handler ran, and an expired session you cannot leave is the defect. `revoked:false` for an unknown token, an empty `Bearer`, no header, or Basic auth (which holds no session row at all). Client side, `LobbyUI.logout()` leaves the room *before* revoking — see [Logout](#logout). PLAN-endtoend D45. |
+| `POST /api/auth/refresh` | Public (a caller whose access session has aged out cannot present one). Rotates `{refresh_token}` into a fresh access session, returning the **same JSON shape as login** so the client has one code path. Single-use: the presented token is marked spent and a successor is minted in the same **family**. Presenting a spent token is a replay — the whole family is revoked and every failure answers one `401`, because telling a caller *which* failure it was tells a thief they hold a live lineage. A ban revokes every family. Failed refreshes (only) consume a global token bucket. PLAN-metalstorm-lobby §7.2, task 8a. |
+| `POST /api/auth/logout-all` | TokenRequired. §7.2's "log out everywhere": every `sessions` row **and** every refresh family the account holds (`{"ok":true,"sessions_revoked":n,"refresh_revoked":n}`). Deliberately a **separate control** from the header's Log out — one browser signing out must not evict the player's phone from a war they are standing in. Client: `LobbyUI.logoutEverywhere()`, `#logout-all-btn`. |
+| `POST /api/wars/reconnect-token` | TokenRequired. Mints this account's long-TTL (7-day) key back into ONE war (`{room_id}` → `{room_id, token, expires_in}`). The **binding is the authority**, not `room->players` — a war's fighters are seated by the game server and never appear in the room's player list. 404 unknown room / 400 not a persistent war (a skirmish dies with its lobby, so a week-long key into one opens nothing) / 403 no seat held. PLAN-metalstorm-lobby §7.3, task 8a. |
 | `POST /api/rooms/team` | A player's own side choice. **403 `{"error":"you fight for <faction>","team":<n>}`** when the room declares a side for their faction and the request names a different team — the seating rule has to hold against the dropdown too, or it is undone by the next click. Enforced at the route (where a human chooses), not in `RoomManager::SetTeam`, which stays permissive for the manifest paths. |
 
 ### Game server (`spring-server`)
@@ -876,7 +880,8 @@ server) back to Filling. See PLAN-lobby-game-connection.md.
 Client: header "Log out" (browser + room screens) → LobbyUI.logout()
   → runLogout() (client/src/lobby/logout.ts) — order is the whole point:
   1. POST /api/rooms/leave   (only while in a room; needs the live token)
-  2. POST /api/auth/logout   (deletes the session row)
+  2. POST /api/auth/logout   (deletes the session row; carries the refresh
+                              token in its body so the FAMILY dies too)
   3. clear LOGOUT_CLEARED_KEYS + reset LobbyUI state → showLogin()
 ```
 Steps 1 and 2 are best-effort and step 3 is unconditional: a player who asked
@@ -886,6 +891,37 @@ seat — and their room — until the lobby reaps it. `LOGOUT_CLEARED_KEYS`
 includes `springrts-game-room`/`-game-port`, which are the *rejoin* keys, not
 auth keys: leaving them behind drops the **next** account on that browser into
 the previous account's room. PLAN-endtoend D45.
+
+Task 8a added `springrts-refresh-token` to that key list, and it is the worst
+of the three to miss: a 30-day credential left in localStorage rotates itself
+into a fresh session on the next page load, so the logout silently undoes
+itself. Clearing it locally is only half — `/api/auth/logout` is also given
+the token so the server revokes the family, because a copy taken off the
+machine is still live. **`logout-all` is a different verb** (§7.2): it ends
+every session and every family the account holds, which evicts the player's
+other devices, and is therefore its own button rather than a modifier.
+
+### Token lifetimes (task 8a)
+```
+access session  (`sessions`)                24 h   account-wide bearer
+refresh token   (`refresh_tokens`)          30 d   rotating, single-use, hashed
+war reconnect   (`war_reconnect_tokens`)     7 d   ONE room, hashed
+```
+The access TTL is **deliberately still 24 h**. What the refresh token buys is
+already what the persistent world needs — a session that survives days without
+a password, and one that can be revoked — and none of that depends on the
+window being small. Shrinking it is a one-constant change whose blast radius
+the constant does not show: `springrts-token` is read straight out of
+localStorage by six call sites (main.ts ×5, viewport.ts, minimap.ts,
+connection.ts), each caching it for the life of an object, so a token that
+expires mid-session is not refreshed by any of them — the failure surfaces as
+a mid-war reconnect asking for a password. Making those call sites re-read is
+its own task.
+
+The game server tries the access session **first** and the war token second, so
+nothing about the ordinary path changed. When it authenticates via the war
+token it echoes an **empty** token in AuthResponse: the client stores whatever
+comes back as its session token, and a war token would 401 everywhere else.
 
 ### Gameplay Loop
 ```

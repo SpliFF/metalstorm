@@ -13,6 +13,13 @@
              pre-escaped by the caller. -->
         <span class="lobby-account" id="account-name">{{account_name}}</span>
         <button id="logout-btn" class="secondary">Log out</button>
+        <!-- "Log out everywhere" (PLAN-metalstorm-lobby.md §7.2, task 8a).
+             A separate control, not a modifier on Log out: this one ends every
+             session AND every refresh family the account holds, which evicts
+             the player's other devices from wars they are standing in. That is
+             the right response to a compromise and the wrong response to
+             handing over a shared machine, so the two are different buttons. -->
+        <button id="logout-all-btn" class="secondary" title="End every session on every device">Log out everywhere</button>
     </div>
     <!-- The war browser (PLAN-metalstorm-lobby.md §4). Both elements stay
          hidden on a lobby with no persistent wars, so a skirmish-only lobby

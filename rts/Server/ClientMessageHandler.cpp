@@ -12,6 +12,7 @@
 #include "OrgGroups.h"
 #include "LuaExecEngine.h"
 #include "RoomWatchIntent.h"
+#include "AuthTokens.h"
 #include "WarPlayerBindings.h"
 #include "WarRejoinPolicy.h"
 #include "WarStateSim.h"
@@ -834,6 +835,23 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             const bool hasToken = auth->token() && auth->token()->size() > 0;
             if (hasToken) {
                 int64_t userId = db.ValidateSession(auth->token()->str());
+                // Task 8a / §7.3: a war outlives the 24 h account session, so
+                // the returning player may be holding the only credential that
+                // is still good — a per-(account, war) reconnect token. Tried
+                // SECOND, so nothing about the ordinary path changes: an
+                // account-wide session still authenticates account-wide.
+                //
+                // `ctx.roomId` is passed into the validator rather than read
+                // back off the token: a token minted for another war must not
+                // authenticate here, and making the war an argument is the
+                // only shape where forgetting that check is impossible.
+                bool viaWarToken = false;
+                if (userId <= 0 && ctx.roomId != 0) {
+                    userId = AuthTokens::ValidateWarReconnect(
+                        db.Handle(), auth->token()->str(), ctx.roomId,
+                        static_cast<int64_t>(std::time(nullptr)));
+                    viaWarToken = userId > 0;
+                }
                 if (userId > 0) {
                     // Look up the username from the userId so we
                     // can cross-check against the lobby roster.
@@ -874,8 +892,17 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                     applyWarBinding(reconnectUser->id, reconnectUser->username,
                                     reconnectUser->factionId, team, isSpectator,
                                     pNum);
+                    // Echo the session token back so the client can keep using
+                    // it — but NEVER a war reconnect token. The client stores
+                    // whatever comes back here as its session token, and a war
+                    // token is not one: it opens exactly this war and would
+                    // fail against /api/auth/validate, so handing it over would
+                    // quietly replace a working account credential with one
+                    // that 401s everywhere else. Empty means "keep what you
+                    // have".
                     auto resp = Protocol::BuildAuthResponse(
-                        SpringWeb::AuthStatus_OK, auth->token()->str(),
+                        SpringWeb::AuthStatus_OK,
+                        viaWarToken ? "" : auth->token()->str(),
                         static_cast<uint32_t>(userId), "",
                         static_cast<int8_t>(team), effectiveRole,
                         defsCacheKey, static_cast<int32_t>(pNum));
@@ -908,9 +935,10 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                     Protocol::BroadcastPlayerRoster(ctx);
                     SLOG(SPRING_LOG_NOTICE,
                         "client %u reconnected as '%s' (account id=%lld) "
-                        "playerNum=%d team=%d role=%s",
+                        "playerNum=%d team=%d role=%s via=%s",
                         msg.clientId, reconnectUser->username.c_str(),
-                        userId, pNum, team, effectiveRole.c_str());
+                        userId, pNum, team, effectiveRole.c_str(),
+                        viaWarToken ? "war-reconnect-token" : "session");
                     // Track roster connection for GameStart. Never for a replay
                     // spectator: GameStart on a replay is an input in its own
                     // right (journal chokepoint #5) and the recorded record is

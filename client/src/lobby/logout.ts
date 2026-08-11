@@ -21,6 +21,12 @@
 export const LOGOUT_CLEARED_KEYS = [
     'springrts-username',
     'springrts-token',
+    // Task 8a. Without this the 30-day refresh token outlives the logout, and
+    // the very next page load rotates it into a fresh session for the account
+    // the player just left — a logout that undoes itself. Clearing it locally
+    // is only half the job; `revokeToken` also presents it so the server kills
+    // the family, because a copy taken off this machine is still live.
+    'springrts-refresh-token',
     'springrts-game-room',
     'springrts-game-port',
 ] as const;

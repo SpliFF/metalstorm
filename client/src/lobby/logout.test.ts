@@ -63,10 +63,14 @@ describe('runLogout', () => {
 
     it('clears the rejoin keys as well as the auth keys', () => {
         // The two rejoin keys are the ones a "log out = forget the token"
-        // implementation leaves behind.
+        // implementation leaves behind. `springrts-refresh-token` joined them
+        // in task 8a and is the worst of the three to miss: a 30-day
+        // credential left in localStorage rotates itself into a fresh session
+        // on the next page load, so the logout silently undoes itself.
         expect([...LOGOUT_CLEARED_KEYS]).toEqual([
             'springrts-username',
             'springrts-token',
+            'springrts-refresh-token',
             'springrts-game-room',
             'springrts-game-port',
         ]);

@@ -410,6 +410,10 @@ set(LOBBY_SERVER_SOURCES
     # table (and the faction override deletes from it); the game server writes
     # it. Pure sqlite, no sim — same shape as GameServersDb below.
     rts/Server/WarPlayerBindings.cpp
+    # PLAN-metalstorm-lobby.md task 8a: rotating refresh tokens + per-war
+    # reconnect tokens. The LOBBY mints both and the GAME server validates the
+    # war half, so it belongs to the shared server sources, not to either one.
+    rts/Server/AuthTokens.cpp
     rts/Server/MapMetadataDb.cpp
     rts/Server/GameServersDb.cpp
     rts/Server/AI/AIDiscovery.cpp
@@ -509,6 +513,7 @@ if(TEST_SOURCES)
         ${CMAKE_SOURCE_DIR}/rts/Server/ProjectileEventCollector.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/RoomManager.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/WarPlayerBindings.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/AuthTokens.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/ScenarioDiscovery.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/ScenarioDb.cpp
         # GameDiscovery + its ConfigReader backend: test_game_discovery.cpp

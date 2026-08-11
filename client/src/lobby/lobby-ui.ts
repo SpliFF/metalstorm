@@ -45,6 +45,10 @@ import {
 } from './war-sides.js';
 import { decideRoomTransition } from './room-transition.js';
 import { LOGOUT_CLEARED_KEYS, runLogout } from './logout.js';
+import {
+    REFRESH_TOKEN_KEY, browserTokenStore, fetchWarReconnectToken,
+    refreshAccessToken, storeTokens,
+} from './auth-tokens.js';
 import type { AvailableScenarioInfo } from './scenario-picker.js';
 import {
     defaultScenarioFor, noWarNote, noWarReason, parseScenarioList,
@@ -178,6 +182,12 @@ interface CurrentRoom {
     /// this room will stage; the room screen shows it so the coupling
     /// between map and war is visible rather than implicit.
     modOptions: Record<string, string>;
+    /// 'persistent' for a war, 'skirmish' otherwise (task 1's SessionKind, as
+    /// the room JSON reports it). Task 8a reads it to decide whether to mint a
+    /// per-war reconnect token on entry — a skirmish has nothing to come back
+    /// to. Optional because the flatbuffer RoomUpdate does not carry it; that
+    /// path carries the last JSON value forward, exactly like `modOptions`.
+    sessionKind?: string;
 }
 
 export class LobbyUI {
@@ -398,22 +408,38 @@ export class LobbyUI {
             if (resp.ok) {
                 const data = await resp.json();
                 if (data.valid) {
-                    this.authToken = token;
-                    this.myPlayerId = data.user_id ?? 0;
-                    this.myFaction = data.faction ?? '';
-                    console.log(`[lobby] auto-login OK: user=${data.username}`
-                        + `${this.myFaction ? ` faction=${this.myFaction}` : ''}`);
-                    localStorage.setItem('springrts-token', token);
-
-                    const savedRoomId = localStorage.getItem('springrts-game-room');
-                    if (savedRoomId) {
-                        this.pendingRejoinRoomId = parseInt(savedRoomId);
-                        this.joinRoom(this.pendingRejoinRoomId);
-                    }
-                    this.startPolling();
-                    this.showBrowser();
+                    this.adoptSession(token, data);
                     return;
                 }
+            }
+            // Task 8a / §7.2: the access session aged out. Before task 8a this
+            // was the end of the account — the player retyped their password,
+            // which is exactly what "reconnect over days" is not. A rotating
+            // refresh token turns it into a round trip nobody sees.
+            //
+            // Placed on the 401 path rather than on a timer on purpose: an
+            // expiry the client never observes needs no refresh, and a timer
+            // would rotate the credential (and burn a family generation) on
+            // every idle tab.
+            if (resp.status === 401) {
+                const outcome = await refreshAccessToken(
+                    CONFIG.httpUrl, browserTokenStore);
+                if (outcome.kind === 'refreshed') {
+                    console.log('[lobby] access session refreshed silently');
+                    this.autoLoginAttempts = 0;
+                    this.adoptSession(outcome.token, outcome.data);
+                    return;
+                }
+                if (outcome.kind === 'rejected' || outcome.kind === 'none') {
+                    // Nothing left to try. Retrying the same dead access token
+                    // four more times just delays the login form by 4 s.
+                    this.autoLoginAttempts = 0;
+                    localStorage.removeItem('springrts-token');
+                    this.showLogin();
+                    return;
+                }
+                // 'unreachable' — fall through to the retry ladder below, which
+                // is what it is for.
             }
         } catch { /* network error */ }
 
@@ -426,6 +452,31 @@ export class LobbyUI {
             localStorage.removeItem('springrts-token');
             this.showLogin();
         }
+    }
+
+    /// Enter the logged-in state with `token`. Shared by the validate path and
+    /// the refresh path so the two cannot drift — the refresh arm is the one
+    /// nobody exercises by hand, and it is the one that would quietly skip
+    /// e.g. the saved-room rejoin.
+    private adoptSession(token: string, data: {
+        user_id?: number; username?: string; faction?: string;
+        refresh_token?: string;
+    }): void {
+        this.authToken = token;
+        this.myPlayerId = data.user_id ?? 0;
+        this.myFaction = data.faction ?? '';
+        console.log(`[lobby] auto-login OK: user=${data.username}`
+            + `${this.myFaction ? ` faction=${this.myFaction}` : ''}`);
+        storeTokens({ token, refresh_token: data.refresh_token },
+                    browserTokenStore);
+
+        const savedRoomId = localStorage.getItem('springrts-game-room');
+        if (savedRoomId) {
+            this.pendingRejoinRoomId = parseInt(savedRoomId);
+            this.joinRoom(this.pendingRejoinRoomId);
+        }
+        this.startPolling();
+        this.showBrowser();
     }
 
     getConnection(): Connection | null { return this.connection; }
@@ -606,6 +657,7 @@ export class LobbyUI {
             gameServerPort: r.game_server_port ?? 0,
             modOptions: (r.modoptions && typeof r.modoptions === 'object')
                 ? r.modoptions as Record<string, string> : {},
+            sessionKind: r.session_kind,
         };
 
         // Refresh AI list when entering a room with a different game
@@ -639,6 +691,18 @@ export class LobbyUI {
                 this.inGame = true;
                 this.stopPolling();
                 this.hide();
+                // Task 8a / §7.3: mint this account's long-TTL key back into
+                // the war it is about to enter, while the access session that
+                // authorises the mint is still live. Fire-and-forget and
+                // deliberately not awaited — entering the game must not wait
+                // on a credential whose whole purpose is the visit AFTER this
+                // one. Wars only: a skirmish dies with its lobby, so the route
+                // refuses one and there is nothing to cache.
+                if (this.currentRoom.sessionKind === 'persistent') {
+                    void fetchWarReconnectToken(
+                        CONFIG.httpUrl, this.authToken, this.currentRoom.id,
+                        browserTokenStore);
+                }
                 this.onGameStart?.(this.currentRoom.gameServerPort, this.currentRoom.mapId, this.currentRoom.gameId);
                 return;
             case 'refresh-room-game-gone':
@@ -773,7 +837,10 @@ export class LobbyUI {
             // register-time value used to be dropped on the floor here.
             this.myFaction = data.faction ?? '';
             localStorage.setItem('springrts-username', user);
-            localStorage.setItem('springrts-token', data.token);
+            // Task 8a: the access token AND the 30-day rotating refresh token
+            // the response now carries. Written through storeTokens so the
+            // "never clear what the response omitted" rule lives in one place.
+            storeTokens(data, browserTokenStore);
             console.log(`[lobby] login OK: user=${user} id=${this.myPlayerId}`
                 + `${this.myFaction ? ` faction=${this.myFaction}` : ''}`);
             this.startPolling();
@@ -794,13 +861,19 @@ export class LobbyUI {
             hasToken: token !== '',
             inRoom: this.currentRoom !== null,
             leaveRoom: () => this.lobbyPost('/api/rooms/leave'),
+            // Task 8a: the refresh token rides along in the body so the server
+            // revokes the whole rotation family, not just the session row.
+            // Read here rather than inside the closure's `token` because the
+            // two are different credentials under different keys.
             revokeToken: () => fetch(`${CONFIG.httpUrl}/api/auth/logout`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                     'Authorization': `Bearer ${token}`,
                 },
-                body: '{}',
+                body: JSON.stringify({
+                    refresh_token: localStorage.getItem(REFRESH_TOKEN_KEY) ?? '',
+                }),
             }),
             clearLocalState: () => {
                 this.stopPolling();
@@ -820,13 +893,50 @@ export class LobbyUI {
         this.showLogin();
     }
 
+    /**
+     * §7.2's "log out everywhere" verb — the compromise response.
+     *
+     * Deliberately NOT what the header's Logout button does: one browser
+     * signing out must not evict the player's phone from a war they are
+     * standing in. This ends every session and every refresh family the
+     * account holds, then finishes as an ordinary local logout, because the
+     * token this browser is holding is one of the ones it just killed.
+     */
+    async logoutEverywhere(): Promise<void> {
+        const token = this.authToken;
+        if (token) {
+            try {
+                const resp = await fetch(`${CONFIG.httpUrl}/api/auth/logout-all`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${token}`,
+                    },
+                    body: '{}',
+                });
+                const data = await resp.json().catch(() => ({}));
+                console.log('[lobby] logout-all:'
+                    + ` sessions=${data.sessions_revoked ?? '?'}`
+                    + ` refresh=${data.refresh_revoked ?? '?'}`);
+            } catch { /* best effort — the local half still runs */ }
+        }
+        await this.logout();
+    }
+
     /// Wire the header's logout button. Shared by the browser and room
     /// screens; both ship one, and a game's template override may ship
     /// neither — hence the null check rather than a `!` assertion.
+    ///
+    /// `logout-all-btn` is optional in exactly the same way and is a separate
+    /// control rather than a modifier on the first: the two acts differ in
+    /// blast radius, and a shift-click that silently signed the player out of
+    /// their other devices is the kind of thing nobody discovers until it has
+    /// already happened to them.
     private wireLogoutButton(): void {
         const btn = document.getElementById('logout-btn') as HTMLButtonElement | null;
-        if (!btn) return;
-        btn.onclick = () => { void this.logout(); };
+        if (btn) btn.onclick = () => { void this.logout(); };
+        const allBtn = document.getElementById('logout-all-btn') as HTMLButtonElement | null;
+        if (allBtn) allBtn.onclick = () => { void this.logoutEverywhere(); };
     }
 
     /// Land on the most appropriate lobby screen after the game canvas
@@ -2294,15 +2404,21 @@ export class LobbyUI {
         // "War:" label every time a player readies up. A different room id
         // means different modoptions, so those start empty until the JSON
         // path (updateCurrentRoomFromJson) fills them in.
-        const carriedModOptions =
-            this.currentRoom && this.currentRoom.id === u.roomId()
-                ? this.currentRoom.modOptions : {};
+        const sameRoom =
+            this.currentRoom !== null && this.currentRoom.id === u.roomId();
+        const carriedModOptions = sameRoom ? this.currentRoom!.modOptions : {};
+        // Carried for the same reason as the modoptions above: the flatbuffer
+        // RoomUpdate has no session-kind field, and dropping it here would
+        // make every war look like a skirmish the moment a binary update
+        // arrived — which is most of them.
+        const carriedSessionKind = sameRoom ? this.currentRoom!.sessionKind : undefined;
         this.currentRoom = {
             id: u.roomId(), name: u.name() ?? '', mapId: u.mapId() ?? '',
             gameId: newGameId,
             state: u.state(), players, aiSlots,
             gameServerPort: u.gameServerPort(),
             modOptions: carriedModOptions,
+            sessionKind: carriedSessionKind,
         };
 
         // The AI list is per-game (each game has its own ai/ folder

@@ -48,6 +48,7 @@
 #include "Server/AI/AIDiscovery.h"
 #include "Server/PerfMetrics.h"
 #include "Server/RoomManager.h"
+#include "Server/AuthTokens.h"
 #include "Server/WarPlayerBindings.h"
 #include "Server/WarStateSim.h"
 #include "Server/PlayerOnboarding.h"
@@ -884,6 +885,11 @@ int main(int argc, char* argv[])
     // reads it (the faction override clears bindings, task 6's browser counts
     // them), and neither may depend on the other having started first.
     WarPlayerBindings::EnsureTable(db.Handle());
+    // Task 8a, and for the same reason: the game server VALIDATES per-war
+    // reconnect tokens (the lobby mints them), so it must find the table even
+    // on a machine where no lobby has ever run — a scenario/direct boot brings
+    // this process up on its own.
+    AuthTokens::EnsureTables(db.Handle());
 
     // --- Map metadata (from mapconverter processing, stored in SQLite) ---
     MapMetadata mapMeta;

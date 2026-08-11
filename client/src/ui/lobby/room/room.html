@@ -7,6 +7,13 @@
              `logout()` leaves the room first, so this is not a way to strand
              a seat — see lobby-ui.ts. -->
         <button id="logout-btn" class="secondary">Log out</button>
+        <!-- "Log out everywhere" (PLAN-metalstorm-lobby.md §7.2, task 8a).
+             A separate control, not a modifier on Log out: this one ends every
+             session AND every refresh family the account holds, which evicts
+             the player's other devices from wars they are standing in. That is
+             the right response to a compromise and the wrong response to
+             handing over a shared machine, so the two are different buttons. -->
+        <button id="logout-all-btn" class="secondary" title="End every session on every device">Log out everywhere</button>
     </div>
     <!-- Map + war line (PLAN-endtoend.md D10). The war a room will stage is
          derived from its map, so it has to be visible before Start — a

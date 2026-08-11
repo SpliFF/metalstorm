@@ -2142,9 +2142,20 @@ int main(int argc, char *argv[]) {
         // ejected somebody from three running wars says so.
         const int clearedBindings =
             WarPlayerBindings::DeleteForAccount(db.Handle(), targetId);
+        // Task 8a: the reconnect token has to go with the binding it was
+        // minted against. It does NOT by itself put the account back on the
+        // old side — the token only authenticates, and seating still runs
+        // through the faction rule, which now returns the new one. What it
+        // would otherwise leave behind is a week-long credential into a war
+        // that the account, by the route it is minted from, no longer
+        // qualifies to hold a seat in.
+        const int clearedWarTokens = AuthTokens::RevokeWarReconnectForAccount(
+            db.Handle(), targetId, static_cast<int64_t>(std::time(nullptr)));
         db.LogAudit(uid, uname, "set_faction", target,
                     "faction=" + faction + " cleared_bindings=" +
-                        std::to_string(clearedBindings));
+                        std::to_string(clearedBindings) +
+                        " cleared_war_tokens=" +
+                        std::to_string(clearedWarTokens));
         return HttpAuth::JsonResponse(200, R"({"ok":true})");
       });
 
@@ -4115,6 +4126,59 @@ int main(int argc, char *argv[]) {
           jp["returning"] = p.returning;
           out.push_back(std::move(jp));
         }
+        return HttpAuth::JsonResponse(200, out.dump());
+      });
+
+  // POST /api/wars/reconnect-token — mint this account's long-TTL key back
+  // into ONE war.
+  //
+  // PLAN-metalstorm-lobby.md §7.3, task 8a. The game server authenticates a
+  // returning player against the shared `sessions` row, which is an
+  // account-wide bearer credential with a 24 h life; §2.5's promise is that a
+  // player who closed the browser mid-war walks back into their side "later",
+  // and later is measured in days. Rather than stretch the account-wide
+  // credential to cover it, this mints a second one that authorises exactly
+  // one thing — "seat this account in room N" — which is what makes a week-
+  // long TTL defensible.
+  //
+  // The BINDING is the authority, not the room's player list: a war's fighters
+  // are seated by the game server on dynamic join and never appear in
+  // `room->players` (the same reason join-preview counts bindings). So the
+  // account that gets a token is exactly the account that already holds a seat
+  // in this war — a token is never the thing that grants one.
+  net.AddHttpPost(
+      "/api/wars/reconnect-token", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &body,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        const std::string roomIdStr = HttpAuth::JsonField(body, "room_id");
+        uint32_t roomId = 0;
+        try {
+          roomId = static_cast<uint32_t>(std::stoul(roomIdStr));
+        } catch (...) {
+          return HttpAuth::JsonResponse(400, R"({"error":"missing or invalid room_id"})");
+        }
+        const auto *room = rooms.GetRoom(roomId);
+        if (!room)
+          return HttpAuth::JsonResponse(404, R"({"error":"no such room"})");
+        // Skirmishes are excluded rather than silently served: a skirmish dies
+        // with its lobby, so a week-long key into one is a credential that
+        // outlives everything it could open.
+        if (room->sessionKind != SessionKind::PersistentWar)
+          return HttpAuth::JsonResponse(400, R"({"error":"not a persistent war"})");
+        if (!WarPlayerBindings::Find(db.Handle(), roomId, userId))
+          return HttpAuth::JsonResponse(403, R"({"error":"no seat held in this war"})");
+
+        auto token = AuthTokens::IssueWarReconnect(
+            db.Handle(), userId, roomId, AuthTokens::kWarReconnectTtlSeconds,
+            static_cast<int64_t>(std::time(nullptr)));
+        if (!token)
+          return HttpAuth::JsonResponse(500, R"({"error":"could not mint token"})");
+
+        nlohmann::json out;
+        out["room_id"] = roomId;
+        out["token"] = *token;
+        out["expires_in"] = AuthTokens::kWarReconnectTtlSeconds;
         return HttpAuth::JsonResponse(200, out.dump());
       });
 
