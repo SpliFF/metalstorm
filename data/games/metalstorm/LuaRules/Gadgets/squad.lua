@@ -14,6 +14,12 @@ function gadget:GetInfo()
         license = "GPL v2",
         layer   = -60,
         enabled = true,
+        -- PLAN-persistence §7.1d: nothing to snapshot. This gadget holds
+        -- only constants (the FORBIDDEN command set) and answers
+        -- AllowCommand from the def's own customParams — there is no
+        -- mutable file-scope state and UnitCreated is a documented no-op.
+        snapshot    = 'stateless',
+        snapshotWhy = 'pure policy gate over constants; no mutable state',
     }
 end
 

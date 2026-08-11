@@ -4,6 +4,8 @@
 
 #include "Server/OrgGroups.h"
 #include "Server/StandingOrders.h"
+#include "Lua/LuaGaia.h"
+#include "Lua/LuaRules.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/Team.h"
 #include "Sim/Misc/TeamHandler.h"
@@ -39,11 +41,7 @@ const std::vector<SectionSpec>& Sections()
          "task 1e: wrecks and map features (reclaimLeft, resources, health, "
          "position). Declared 2026-08-11 by task 1c - the section table had no "
          "entry for them at all, so MissingSections() could not report the gap"},
-        {SectionId::SyncedLua,      0, "syncedLua",      false,
-         "task 1d: gadget-owned synced Lua state. PLAN-persistence §2's "
-         "premise that SerializeLuaState round-trips the VM wholesale is "
-         "false in this tree - it is a seven-line no-op, so the Lua half "
-         "needs gadget Save/Load callins, not a verification pass"},
+        {SectionId::SyncedLua,      1, "syncedLua",      true,  ""},
     };
     return kSections;
 }
@@ -1032,6 +1030,16 @@ void ApplyRulesParams(const std::vector<RulesParamState>& in, LuaRulesParams::Pa
     }
 }
 
+/// The task 1d census. luasnapshot::Value is an aggregate, so the same
+/// structured-binding tripwire applies: a sixth member (a metatable name, a
+/// light-userdata tag, ...) fails the build until the codec writes it.
+int CensusLuaValue(const luasnapshot::Value& v)
+{
+    const auto& [type, b, num, str, table] = v;
+    (void)type; (void)b; (void)num; (void)str; (void)table;
+    return 5;
+}
+
 const SectionSpec* SpecFor(uint16_t id)
 {
     for (const auto& s : Sections()) {
@@ -1102,6 +1110,120 @@ bool DecodeUnits(const uint8_t* data, size_t size,
     }
     if (r.Remaining() != 0) {
         err = "units section has " + std::to_string(r.Remaining()) +
+              " unread trailing bytes";
+        return false;
+    }
+    return true;
+}
+
+// ───────────── Task 1d: the synced-Lua codec (§7.1d decision 4) ─────────────
+//
+// One recursive value format: type byte, then the payload for that type, and a
+// table is a pair count followed by (key, value) pairs in the order the Value
+// already holds them (canonical — luasnapshot::Capture sorted them, and the
+// decoder does NOT re-sort, so a payload written out of order decodes out of
+// order and the round-trip test sees it).
+
+namespace {
+
+void WriteLuaValue(Writer& w, const luasnapshot::Value& v)
+{
+    w.U8(static_cast<uint8_t>(v.type));
+    switch (v.type) {
+        case luasnapshot::Value::Type::Nil:
+            break;
+        case luasnapshot::Value::Type::Bool:
+            w.Bool(v.b);
+            break;
+        case luasnapshot::Value::Type::Number: {
+            // Doubles, bit-exact: a Lua number is a double, and a frame stamp
+            // or an accumulated resource total past 2^24 would round if this
+            // were the F32 the rest of the walk uses.
+            uint64_t bits = 0;
+            std::memcpy(&bits, &v.num, sizeof(bits));
+            w.U64(bits);
+        } break;
+        case luasnapshot::Value::Type::String:
+            w.Str(v.str);
+            break;
+        case luasnapshot::Value::Type::Table: {
+            w.U32(static_cast<uint32_t>(v.table.size()));
+            for (const auto& kv : v.table) {
+                WriteLuaValue(w, kv.first);
+                WriteLuaValue(w, kv.second);
+            }
+        } break;
+    }
+}
+
+/// Depth-limited on the way IN as well as out: a corrupt payload claiming a
+/// million nested tables must be a decode failure, not a C-stack overflow.
+luasnapshot::Value ReadLuaValue(Reader& r, int depth)
+{
+    luasnapshot::Value v;
+    if (depth >= luasnapshot::kMaxDepth) {
+        r.Fail();
+        return v;
+    }
+
+    const uint8_t type = r.U8();
+    if (type > static_cast<uint8_t>(luasnapshot::Value::Type::Table)) {
+        r.Fail();
+        return v;
+    }
+    v.type = static_cast<luasnapshot::Value::Type>(type);
+
+    switch (v.type) {
+        case luasnapshot::Value::Type::Nil:
+            break;
+        case luasnapshot::Value::Type::Bool:
+            v.b = r.Bool();
+            break;
+        case luasnapshot::Value::Type::Number: {
+            const uint64_t bits = r.U64();
+            std::memcpy(&v.num, &bits, sizeof(v.num));
+        } break;
+        case luasnapshot::Value::Type::String:
+            v.str = r.Str();
+            break;
+        case luasnapshot::Value::Type::Table: {
+            const uint32_t pairs = r.U32();
+            // Cheapest possible pair is two type bytes, so a count that cannot
+            // fit in what remains is a refusal before it is an allocation.
+            if (size_t(pairs) * 2 > r.Remaining()) {
+                r.Fail();
+                return v;
+            }
+            v.table.reserve(pairs);
+            for (uint32_t i = 0; i < pairs && !r.Bad(); ++i) {
+                luasnapshot::Value key = ReadLuaValue(r, depth + 1);
+                luasnapshot::Value val = ReadLuaValue(r, depth + 1);
+                v.table.emplace_back(std::move(key), std::move(val));
+            }
+        } break;
+    }
+    return v;
+}
+
+} // namespace
+
+void EncodeSyncedLua(const luasnapshot::Value& in, std::vector<uint8_t>& out)
+{
+    Writer w(out);
+    WriteLuaValue(w, in);
+}
+
+bool DecodeSyncedLua(const uint8_t* data, size_t size,
+                     luasnapshot::Value& out, std::string& err)
+{
+    Reader r(data, size);
+    out = ReadLuaValue(r, 0);
+    if (r.Bad()) {
+        err = "syncedLua section is truncated or malformed";
+        return false;
+    }
+    if (r.Remaining() != 0) {
+        err = "syncedLua section has " + std::to_string(r.Remaining()) +
               " unread trailing bytes";
         return false;
     }
@@ -1670,6 +1792,122 @@ void ApplyUnits(const std::vector<UnitState>& in, const std::vector<int32_t>& de
     }
 }
 
+// ───────── Task 1d: synced-Lua capture / apply (the Lua-touching half) ─────────
+//
+// TWO handles, not one. luaRules is where the game's gadgets live, but
+// Simulation.cpp also loads luaGaia when the map ships LuaGaia — and a Gaia
+// gadget's state is synced state like any other. Keying the root table by
+// handle keeps them apart and makes the absence of one visible: a payload
+// written with Gaia loaded, restored into a run without it, is a refusal rather
+// than a silently thinner world.
+
+namespace {
+
+/// Every live synced handle, paired with the root key its state travels under.
+std::vector<std::pair<const char*, CSplitLuaHandle*>> SyncedHandles()
+{
+    std::vector<std::pair<const char*, CSplitLuaHandle*>> handles;
+    if (luaRules != nullptr) handles.emplace_back("rules", luaRules);
+    if (luaGaia  != nullptr) handles.emplace_back("gaia",  luaGaia);
+    return handles;
+}
+
+} // namespace
+
+std::vector<std::string> SyncedLuaCoverageGaps(std::string& err)
+{
+    err.clear();
+    std::vector<std::string> gaps;
+
+    for (const auto& [key, handle] : SyncedHandles()) {
+        std::vector<std::string> covered, stateless, handleGaps;
+        std::string one;
+        if (!handle->SnapshotCoverage(covered, stateless, handleGaps, one)) {
+            // Could not ask. NOT reported as "no gaps": the caller decides, and
+            // Serialize() treats an unanswerable question as a refusal.
+            if (!err.empty()) err += "; ";
+            err += std::string(key) + ": " + one;
+            continue;
+        }
+        for (const auto& g : handleGaps)
+            gaps.push_back(std::string(key) + "/" + g);
+    }
+
+    std::sort(gaps.begin(), gaps.end());
+    return gaps;
+}
+
+bool CaptureSyncedLua(luasnapshot::Value& out, std::string& err)
+{
+    out = luasnapshot::Value::Table();
+
+    for (const auto& [key, handle] : SyncedHandles()) {
+        luasnapshot::Value state;
+        if (!handle->SnapshotSave(state, err)) {
+            err = std::string("synced Lua capture failed for ") + key + ": " + err;
+            return false;
+        }
+        out.table.emplace_back(luasnapshot::Value::Str(key), std::move(state));
+    }
+    return true;
+}
+
+bool ApplySyncedLua(const luasnapshot::Value& in, std::string& err)
+{
+    bool ok = true;
+
+    for (const auto& [key, handle] : SyncedHandles()) {
+        const luasnapshot::Value* state = in.Field(key);
+        // An absent handle key still calls Load with an empty table: the
+        // gadgets' live bookkeeping is what a rollback is undoing, so skipping
+        // them would leave the very state the restore was meant to replace.
+        const luasnapshot::Value empty = luasnapshot::Value::Table();
+        std::string one;
+        if (!handle->SnapshotLoad((state != nullptr) ? *state : empty, one)) {
+            // Commit phase: there is nothing left to roll back to, so this is
+            // reported loudly and the restore continues rather than abandoning
+            // a half-rebuilt world.
+            SLOG(SPRING_LOG_ERROR, "snapshot restore: synced Lua (%s): %s",
+                 key, one.c_str());
+            if (!err.empty()) err += "; ";
+            err += std::string(key) + ": " + one;
+            ok = false;
+        }
+    }
+    return ok;
+}
+
+bool ResolveSyncedLua(const luasnapshot::Value& in, std::string& err)
+{
+    if (!in.IsTable()) {
+        err = "syncedLua section is not a table";
+        return false;
+    }
+
+    const auto handles = SyncedHandles();
+    for (const auto& kv : in.table) {
+        if (kv.first.type != luasnapshot::Value::Type::String) {
+            err = "syncedLua section has a non-string handle key";
+            return false;
+        }
+        const bool live = std::any_of(handles.begin(), handles.end(),
+            [&](const auto& h) { return kv.first.str == h.first; });
+        if (!live) {
+            err = "snapshot carries synced Lua state for '" + kv.first.str +
+                  "', which this run has not loaded";
+            return false;
+        }
+    }
+    for (const auto& [key, handle] : handles) {
+        if (in.Field(key) == nullptr) {
+            err = std::string("this run has synced Lua handle '") + key +
+                  "' but the snapshot carries no state for it";
+            return false;
+        }
+    }
+    return true;
+}
+
 // ───────────────────────── The serializer ─────────────────────────
 
 uint64_t SimSnapshotSerializer::LayoutHash() const
@@ -1712,6 +1950,26 @@ bool SimSnapshotSerializer::Serialize(std::vector<uint8_t>& out, std::string& er
             err += (i ? ", " : "") + missing[i];
         return false;
     }
+
+    // The second completeness gate, one level below the section table (§7.1d
+    // decision 3): the syncedLua section can be fully implemented and still
+    // capture nothing for a gadget that implements neither call-in. A table of
+    // gadget names in C++ could not tell - the list has to come from the live
+    // handler, and a gadget it names is state this payload would drop.
+    std::string coverageErr;
+    const std::vector<std::string> gaps = SyncedLuaCoverageGaps(coverageErr);
+    if (!coverageErr.empty()) {
+        err = "cannot establish synced Lua coverage: " + coverageErr;
+        return false;
+    }
+    if (!gaps.empty()) {
+        err = "synced Lua coverage incomplete - gadgets with neither Save/Load "
+              "nor a stateless declaration: ";
+        for (size_t i = 0; i < gaps.size(); ++i)
+            err += (i ? ", " : "") + gaps[i];
+        return false;
+    }
+
     return SerializeImplemented(out, err);
 }
 
@@ -1745,6 +2003,12 @@ bool SimSnapshotSerializer::SerializeImplemented(std::vector<uint8_t>& out, std:
                 std::vector<UnitState> units;
                 CaptureUnits(units);
                 EncodeUnits(units, section);
+            } break;
+            case SectionId::SyncedLua: {
+                luasnapshot::Value state;
+                if (!CaptureSyncedLua(state, err))
+                    return false;
+                EncodeSyncedLua(state, section);
             } break;
             default:
                 // An implemented section with no writer is a programming
@@ -1792,7 +2056,8 @@ bool SimSnapshotSerializer::Deserialize(const uint8_t* data, size_t size, std::s
     // live state: every section decodes into a local, and the swap only
     // happens once the whole payload has been read without a single failure.
     bool haveGlobals = false, haveOrders = false, haveGroups = false, haveDirs = false;
-    bool haveTeams = false, haveUnits = false;
+    bool haveTeams = false, haveUnits = false, haveSyncedLua = false;
+    luasnapshot::Value syncedLua = luasnapshot::Value::Table();
     std::vector<TeamState> teams;
     std::vector<UnitState> units;
     std::vector<int32_t>   unitDefIds;
@@ -1868,6 +2133,12 @@ bool SimSnapshotSerializer::Deserialize(const uint8_t* data, size_t size, std::s
                 sr.Skip(len);
                 haveUnits = true;
                 break;
+            case SectionId::SyncedLua:
+                if (!DecodeSyncedLua(data + r.Pos(), len, syncedLua, err))
+                    return false;
+                sr.Skip(len);
+                haveSyncedLua = true;
+                break;
             default:
                 err = std::string("no reader for section '") + spec->name + "'";
                 return false;
@@ -1892,7 +2163,7 @@ bool SimSnapshotSerializer::Deserialize(const uint8_t* data, size_t size, std::s
         return false;
     }
     if (!haveGlobals || !haveOrders || !haveGroups || !haveDirs ||
-        !haveTeams || !haveUnits) {
+        !haveTeams || !haveUnits || !haveSyncedLua) {
         err = "payload is missing a required section";
         return false;
     }
@@ -1904,6 +2175,8 @@ bool SimSnapshotSerializer::Deserialize(const uint8_t* data, size_t size, std::s
     if (!ResolveTeams(teams, err))
         return false;
     if (!ResolveUnitDefs(units, unitDefIds, err))
+        return false;
+    if (!ResolveSyncedLua(syncedLua, err))
         return false;
 
     // ── Commit. Past this point nothing can fail. ──
@@ -1917,6 +2190,19 @@ bool SimSnapshotSerializer::Deserialize(const uint8_t* data, size_t size, std::s
     // team's (derived, uncaptured) unit count.
     ApplyTeams(teams);
     ApplyUnits(units, unitDefIds);
+    // Synced Lua LAST, and the order is load-bearing: tearing down and
+    // rebuilding the roster fires UnitDestroyed for every live unit and
+    // UnitCreated/UnitFinished for every restored one, so a gadget's own unit
+    // bookkeeping is rewritten by those events during ApplyUnits. Restoring
+    // gadget state before them would hand the events a table to corrupt; after
+    // them, the snapshot's version wins - which is what a rollback means.
+    std::string luaErr;
+    if (!ApplySyncedLua(syncedLua, luaErr)) {
+        // Past the point of no return. The world IS restored; what failed is a
+        // gadget's own Load, which no earlier check could have run.
+        err = "world restored but synced Lua Load failed: " + luaErr;
+        return false;
+    }
     return true;
 }
 
@@ -1936,6 +2222,7 @@ int Cmd(const CommandState& c)                   { return CensusCommandState(c);
 int RulesParam(const RulesParamState& p)         { return CensusRulesParam(p); }
 int Stats(const TeamStatsState& s)               { return CensusStats(s); }
 int Res(const ResPair& r)                        { return CensusResPair(r); }
+int LuaValue(const luasnapshot::Value& v)        { return CensusLuaValue(v); }
 
 } // namespace census
 

@@ -18,6 +18,11 @@ function gadget:GetInfo()
         license = "GPL v2",
         layer   = 0,
         enabled = true,
+        -- PLAN-persistence §7.1d: nothing to snapshot. The whole gadget is
+        -- one GameStart handler over a constant force table; the units it
+        -- creates are sim objects and ride the snapshot's `units` section.
+        snapshot    = 'stateless',
+        snapshotWhy = 'one-shot GameStart spawn; its output is sim state, not gadget state',
     }
 end
 

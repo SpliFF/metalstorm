@@ -186,12 +186,12 @@ TEST_CASE("the declared gaps are the ones this milestone left") {
     // is fine (the test fails, you delete a line); *adding* a new unimplemented
     // section without saying so is not.
     const std::vector<std::string> missing = MissingSections();
-    REQUIRE(missing.size() == 2);
+    REQUIRE(missing.size() == 1);
     // task 1c filled teams + units and DECLARED features, which the table had
     // never mentioned at all - a gap MissingSections() could not report
     // because the section it belongs to did not exist (PLAN-persistence §7.1c).
+    // task 1d filled syncedLua; features is the last one (task 1e).
     CHECK(missing[0] == "features");
-    CHECK(missing[1] == "syncedLua");
 }
 
 TEST_CASE("state that is deliberately not captured says what rebuilds it") {
@@ -230,7 +230,7 @@ TEST_CASE("LayoutHash is stable, non-trivial and folds every implemented section
         fold(s.version);
         ++implemented;
     }
-    CHECK(implemented == 6);
+    CHECK(implemented == 7);
     CHECK(h == expect);
 }
 

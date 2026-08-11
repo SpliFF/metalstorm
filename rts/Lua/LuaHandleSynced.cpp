@@ -31,6 +31,8 @@
 #include "LuaVFS.h"
 #include "LuaZip.h"
 
+#include <algorithm>
+
 #include "Game/WordCompletion.h"
 #include "System/FileSystem/VFSModes.h"
 #include "Sim/Misc/GlobalSynced.h"
@@ -557,6 +559,146 @@ bool CSyncedLuaHandle::Init(std::string code, const std::string& file)
 
 	lua_settop(L, 0);
 	eventHandler.AddClient(this);
+	return true;
+}
+
+
+//
+// Snapshot support (PLAN-persistence task 1d, contract §7.1d)
+//
+
+// FIDELITY-STANDIN: Recoil's savegame hands `gadget:Save(zip)` a
+// LuaZipFileWriter userdatum and `gadget:Load(zip)` a reader. This tree has the
+// zip machinery (LuaZip.cpp/minizip) but it writes to a path on disk, and a
+// snapshot here is one opaque blob committed inside GameStateStore's SQLite
+// transaction — there is no file for a gadget to write into, and inventing one
+// would put half a checkpoint outside the store's atomicity. So the CALL-IN
+// NAMES are Recoil's and the ARGUMENT is a plain table: gadgetHandler hands
+// each gadget its own subtable (keyed by gadget name), captures whatever it
+// wrote, and passes the same subtable back on Load. Deviation recorded in
+// PLAN-persistence §7.1d decision 1; the matching dispatch note is in
+// cont/base/springcontent/LuaGadgets/gadgets.lua.
+bool CSyncedLuaHandle::SnapshotSave(luasnapshot::Value& out, std::string& err)
+{
+	LUA_CALL_IN_CHECK(L, false);
+	luaL_checkstack(L, 4, __func__);
+
+	// The state table goes on the stack FIRST so it outlives the call: lua_pcall
+	// consumes the function and its arguments, so the copy handed to Save is
+	// gone by the time it returns and the surviving one has to be underneath.
+	lua_newtable(L);
+
+	static const LuaHashString cmdStr("Save");
+	if (!cmdStr.GetGlobalFunc(L)) {
+		// No gadget implements Save. That is a legitimate empty state (the
+		// coverage ledger is what decides whether it is *acceptable*), not an
+		// error: refusing here would make a game of stateless gadgets
+		// unsnapshottable.
+		lua_pop(L, 1);
+		out = luasnapshot::Value::Table();
+		return true;
+	}
+
+	lua_pushvalue(L, -2);     // the copy the call consumes
+
+	if (!RunCallIn(L, cmdStr, 1, 0)) {
+		lua_pop(L, 1);        // our copy of the state table
+		err = "the synced Lua Save call-in raised an error";
+		return false;
+	}
+
+	const bool ok = luasnapshot::Capture(L, -1, out, err);
+	lua_pop(L, 1);
+	return ok;
+}
+
+
+bool CSyncedLuaHandle::SnapshotLoad(const luasnapshot::Value& in, std::string& err)
+{
+	LUA_CALL_IN_CHECK(L, false);
+	luaL_checkstack(L, 4, __func__);
+
+	static const LuaHashString cmdStr("Load");
+	if (!cmdStr.GetGlobalFunc(L)) {
+		// Nothing to restore into. Only reachable if the payload was written by
+		// a build whose gadgets had Save without Load, which the coverage gate
+		// refuses at capture time — so say so rather than continuing quietly.
+		if (in.IsTable() && !in.table.empty()) {
+			err = "payload carries synced Lua state but no gadget implements Load";
+			return false;
+		}
+		return true;
+	}
+
+	if (!luasnapshot::Push(L, in, err)) {
+		lua_pop(L, 1);        // the Load function
+		return false;
+	}
+	if (!RunCallIn(L, cmdStr, 1, 0)) {
+		err = "the synced Lua Load call-in raised an error";
+		return false;
+	}
+	return true;
+}
+
+
+bool CSyncedLuaHandle::SnapshotCoverage(std::vector<std::string>& covered,
+                                       std::vector<std::string>& stateless,
+                                       std::vector<std::string>& gaps,
+                                       std::string& err)
+{
+	covered.clear();
+	stateless.clear();
+	gaps.clear();
+
+	LUA_CALL_IN_CHECK(L, false);
+	luaL_checkstack(L, 5, __func__);
+
+	// gadgetHandler is a global table, and SnapshotCoverage is a method on it —
+	// deliberately NOT a new global call-in: the ledger is the handler's own
+	// bookkeeping, and a global would have to be registered, kept out of
+	// CALLIN_LIST, and could be shadowed by a gadget.
+	lua_getglobal(L, "gadgetHandler");
+	if (!lua_istable(L, -1)) {
+		lua_pop(L, 1);
+		err = "no gadgetHandler in the synced state";
+		return false;
+	}
+	lua_pushstring(L, "SnapshotCoverage");
+	lua_rawget(L, -2);
+	if (!lua_isfunction(L, -1)) {
+		lua_pop(L, 2);
+		err = "gadgetHandler has no SnapshotCoverage (stale LuaGadgets/gadgets.lua?)";
+		return false;
+	}
+	lua_pushvalue(L, -2);     // self
+
+	static const LuaHashString cmdStr("SnapshotCoverage");
+	if (!RunCallIn(L, cmdStr, 1, 1)) {
+		lua_pop(L, 1);        // gadgetHandler
+		err = "gadgetHandler:SnapshotCoverage() raised an error";
+		return false;
+	}
+
+	luasnapshot::Value report;
+	const bool captured = luasnapshot::Capture(L, -1, report, err);
+	lua_pop(L, 2);            // result + gadgetHandler
+	if (!captured)
+		return false;
+
+	const auto readList = [&](const char* key, std::vector<std::string>& into) {
+		const luasnapshot::Value* list = report.Field(key);
+		if (list == nullptr || !list->IsTable())
+			return;
+		for (const auto& kv: list->table) {
+			if (kv.second.type == luasnapshot::Value::Type::String)
+				into.push_back(kv.second.str);
+		}
+		std::sort(into.begin(), into.end());
+	};
+	readList("covered",   covered);
+	readList("stateless", stateless);
+	readList("gaps",      gaps);
 	return true;
 }
 

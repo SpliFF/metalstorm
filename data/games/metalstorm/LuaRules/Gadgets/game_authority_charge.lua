@@ -38,6 +38,12 @@ function gadget:GetInfo()
         license = "GPL v2",
         layer   = 100,
         enabled = true,
+        -- PLAN-persistence §7.1d: nothing to snapshot. Every value this
+        -- gate reads or writes lives in game_authority.lua's pools
+        -- (GG.Authority) or on the unit def; it keeps no bookkeeping of
+        -- its own between calls.
+        snapshot    = 'stateless',
+        snapshotWhy = 'charging gate; all state belongs to GG.Authority',
     }
 end
 

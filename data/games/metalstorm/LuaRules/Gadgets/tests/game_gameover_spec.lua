@@ -412,3 +412,104 @@ describe("endless-war check", function()
         assert.are.equal(1, echoesMatching(world, 'NO victory objective'))
     end)
 end)
+
+-- ───────── Snapshot Save/Load (PLAN-persistence task 1d, §7.1d) ─────────
+--
+-- The engine hands `Save` a table and `Load` the table it wrote (gadgetHandler
+-- keys one subtable per gadget). What is being tested here is the *decision*
+-- content of that table: the terminal-condition machine is a latch plus an
+-- absolute frame stamp plus the winner list, and every one of those is authored
+-- rather than derivable, so a restore that recomputes any of them can disagree
+-- with what the players were already shown.
+describe("snapshot Save/Load", function()
+    local function echoesMatching(world, needle)
+        local hits = 0
+        for _, msg in ipairs(world.echoes) do
+            if msg:find(needle, 1, true) then hits = hits + 1 end
+        end
+        return hits
+    end
+
+    it("carries the whole terminal-condition machine across a restore", function()
+        local a = load(MERIDIAN_SIDES)
+        a.complete(VICTORY_OBJ, 4)
+        local state = {}
+        _G.gadget.Save(_G.gadget, state)
+
+        assert.are.equal('winding_down', state.warState)
+        assert.are.equal(4, state.winningTeam)
+        assert.are.equal(WINDING_DOWN_FRAMES, state.resolveAtFrame)
+        assert.are.same({ 4, 5, 6, 7 }, state.winners)
+
+        -- A fresh process: same world, nothing has happened in it yet.
+        local b, g = load(MERIDIAN_SIDES)
+        g:Load(state, true)
+        assert.are.equal('winding_down', b.gameRulesParams['war_state'])
+        assert.are.equal('winding_down', GG.WarState)
+
+        -- ...and the clock still expires on the ORIGINAL frame, which is the
+        -- point of carrying an absolute stamp: the wind-down does not restart
+        -- (the victory clock is restartable if you re-derive it, and a rollback
+        -- that grants a second grace period is a different war).
+        b.runTo(WINDING_DOWN_FRAMES)
+        assert.are.equal(1, #b.gameOverCalls)
+        assert.are.same({ 4, 5, 6, 7 }, b.gameOverCalls[1])
+    end)
+
+    it("restores the winner list rather than recomputing it", function()
+        -- The same win, restored into a room whose roster has since changed:
+        -- teams 6 and 7 are now unoccupied. winnersFor() would answer {4,5}
+        -- here, so a Load that recomputed would quietly shrink a declared win.
+        local a = load(MERIDIAN_SIDES)
+        a.complete(VICTORY_OBJ, 4)
+        local state = {}
+        _G.gadget.Save(_G.gadget, state)
+
+        local b, g = load(MERIDIAN_SIDES, 1, nil, { [6] = true, [7] = true })
+        g:Load(state, true)
+        b.runTo(WINDING_DOWN_FRAMES)
+        assert.are.same({ 4, 5, 6, 7 }, b.gameOverCalls[1])
+    end)
+
+    it("clears the latch when the snapshot predates the win", function()
+        -- A rollback to before the victory. The gadget must NOT keep the live
+        -- process's latch: the objective that won has been rolled back with
+        -- everything else, so a stuck 'winding_down' would resolve a war that
+        -- has not been won, and nothing would ever declare it again.
+        local a = load(MERIDIAN_SIDES)
+        local early = {}
+        _G.gadget.Save(_G.gadget, early)
+        a.complete(VICTORY_OBJ, 4)
+        assert.are.equal('winding_down', a.gameRulesParams['war_state'])
+
+        _G.gadget.Load(_G.gadget, early, true)
+        assert.are.equal('active', a.gameRulesParams['war_state'])
+        assert.are.equal('active', GG.WarState)
+        a.runTo(WINDING_DOWN_FRAMES * 2)
+        assert.are.equal(0, #a.gameOverCalls)
+    end)
+
+    it("does not re-announce the endless warning after a restore", function()
+        -- endlessChecked is a one-shot warn. A restore that resets it tells a
+        -- client that has been playing for an hour that the war cannot end.
+        local a = load(MERIDIAN_SIDES, 0)
+        a.runTo(60)
+        assert.are.equal(1, echoesMatching(a, 'NO victory objective'))
+        local state = {}
+        _G.gadget.Save(_G.gadget, state)
+        assert.is_true(state.endlessChecked)
+
+        local b, g = load(MERIDIAN_SIDES, 0)
+        g:Load(state, true)
+        b.runTo(120)
+        assert.are.equal(0, echoesMatching(b, 'NO victory objective'))
+    end)
+
+    it("declares Save and Load as a pair, so the coverage ledger sees it", function()
+        -- §7.1d decision 3: a Save without a Load is a GAP, not a partial —
+        -- it captures bytes nothing restores while looking covered.
+        load(MERIDIAN_SIDES)
+        assert.are.equal('function', type(_G.gadget.Save))
+        assert.are.equal('function', type(_G.gadget.Load))
+    end)
+end)

@@ -289,6 +289,46 @@ local function checkWarCanEnd()
                 'See PLAN-metalstorm-wars.md §7.1.')
 end
 
+-- ─────────────── Snapshot state (PLAN-persistence task 1d, §7.1d) ───────────────
+--
+-- The whole terminal-condition machine is four values, and every one of them is
+-- authored here rather than derivable: `warState` is a latch (§7's chain is
+-- one-way and the first declaration wins), `resolveAtFrame` is an absolute frame
+-- stamp, and `winners`/`winningTeam` are the *decision* — winnersFor() reads the
+-- staffed roster at the moment of the win, so recomputing it after a restore
+-- could produce a different answer than the one the players were shown.
+--
+-- Why this matters more than its size suggests: a war restored mid-wind-down
+-- with `warState` back at 'active' has silently un-won itself, and the objective
+-- that won it has already resolved — so nothing would ever declare it again.
+--
+-- `endlessChecked` travels too, for the opposite reason: it is a one-shot warn,
+-- and a restore that resets it re-announces "this war has no victory objective"
+-- to a client that has been playing for an hour. (`war_can_end` and the other
+-- rulesParams are C++-side and ride the `teams` section, so they are not here.)
+function gadget:Save(state)
+    state.warState = warState
+    state.resolveAtFrame = resolveAtFrame
+    state.winningTeam = winningTeam
+    state.winners = winners
+    state.endlessChecked = endlessChecked
+end
+
+function gadget:Load(state)
+    -- Defaults spelled out, not inherited from the live values: a rollback to
+    -- before the win must CLEAR the latch, so an absent field means 'active',
+    -- never "keep what this process happens to hold".
+    warState       = state.warState or 'active'
+    resolveAtFrame = state.resolveAtFrame
+    winningTeam    = state.winningTeam
+    winners        = state.winners
+    endlessChecked = state.endlessChecked or false
+    -- Re-publish: the rulesParams a client reads are restored by the snapshot's
+    -- own team/game sections, but GG.WarState is this gadget's live mirror and
+    -- other gadgets (game_objectives) branch on it in the same tick.
+    publishState()
+end
+
 function gadget:GameFrame(frame)
     if not endlessChecked and frame >= ENDLESS_CHECK_FRAME then
         endlessChecked = true

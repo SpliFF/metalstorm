@@ -7,6 +7,7 @@
 
 #include "LuaHandle.h"
 #include "LuaRulesParams.h"
+#include "LuaSnapshotState.h"
 #include "System/UnorderedMap.hpp"
 
 struct lua_State;
@@ -131,6 +132,24 @@ class CSyncedLuaHandle : public CLuaHandle
 
 		bool SyncedActionFallback(const std::string& line, int playerID) override;
 
+	public: // snapshot support — not an engine call-in path
+		// PLAN-persistence task 1d (§7.1d). These drive the Recoil `Save`/`Load`
+		// call-ins with a TABLE where upstream passes a savegame zip handle:
+		// a snapshot here is an opaque blob inside GameStateStore's own SQLite
+		// transaction, so there is no file for a gadget to write into. See the
+		// FIDELITY-STANDIN note at the definitions.
+		bool SnapshotSave(luasnapshot::Value& out, std::string& err);
+		bool SnapshotLoad(const luasnapshot::Value& in, std::string& err);
+
+		/// Ask the live gadget handler which gadgets can be snapshotted.
+		/// `gaps` are the gadgets that implement neither call-in and have not
+		/// declared themselves stateless — the serializer refuses by their
+		/// names, because a constant in C++ cannot know what the game loaded.
+		bool SnapshotCoverage(std::vector<std::string>& covered,
+		                      std::vector<std::string>& stateless,
+		                      std::vector<std::string>& gaps,
+		                      std::string& err);
+
 	protected:
 		CSyncedLuaHandle(CSplitLuaHandle* base, const std::string& name, int order);
 		virtual ~CSyncedLuaHandle();
@@ -200,6 +219,36 @@ class CSplitLuaHandle
 			if (!syncedLuaHandle.IsValid())
 				return false;
 			return syncedLuaHandle.RecvLuaMsg(msg, playerID);
+		}
+
+	public: // snapshot support (PLAN-persistence task 1d)
+		// Forwarders: the synced handle is the only one with gadget state, and
+		// it is protected. A dead synced state (main.lua failed to load) is not
+		// an empty snapshot — it is a refusal, because "no gadgets answered" and
+		// "there are no gadgets" are the two cases a checkpoint must not merge.
+		bool SnapshotSave(luasnapshot::Value& out, std::string& err) {
+			if (!syncedLuaHandle.IsValid()) {
+				err = "synced Lua state is not running";
+				return false;
+			}
+			return syncedLuaHandle.SnapshotSave(out, err);
+		}
+		bool SnapshotLoad(const luasnapshot::Value& in, std::string& err) {
+			if (!syncedLuaHandle.IsValid()) {
+				err = "synced Lua state is not running";
+				return false;
+			}
+			return syncedLuaHandle.SnapshotLoad(in, err);
+		}
+		bool SnapshotCoverage(std::vector<std::string>& covered,
+		                      std::vector<std::string>& stateless,
+		                      std::vector<std::string>& gaps,
+		                      std::string& err) {
+			if (!syncedLuaHandle.IsValid()) {
+				err = "synced Lua state is not running";
+				return false;
+			}
+			return syncedLuaHandle.SnapshotCoverage(covered, stateless, gaps, err);
 		}
 
 	public:

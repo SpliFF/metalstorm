@@ -1051,35 +1051,15 @@ int main(int argc, char* argv[])
     gamestate::GameStateStore gmSnapshotStore(db.Handle(), snapCfg);
 
     // PLAN-persistence task 1b: the ISimSerializer walk (Q-P1 option B). It is
-    // attached only when its section table has no declared gap left — an
-    // attached-but-incomplete serializer would flip Available() to true and
-    // tell the GM surface that rollback works while every checkpoint it takes
-    // omits state. Until then the store keeps refusing, and the boot line
-    // below names the exact remaining sections rather than "creg is stubbed".
-    // Tasks 1c/1d flip this on by implementing their sections; no wiring
-    // change is needed here when they do.
+    // attached only when its section table has no declared gap left AND the
+    // game's own gadgets are all snapshottable — an attached-but-incomplete
+    // serializer would flip Available() to true and tell the GM surface that
+    // rollback works while every checkpoint it takes omits state.
+    //
+    // The decision is NOT taken here: the second half of it needs the synced
+    // Lua state, which sim.Init() has not built yet. See AttachSimSerializer
+    // below, called straight after sim.Init.
     static simsnapshot::SimSnapshotSerializer simSerializer;
-    {
-        const std::vector<std::string> missing = simsnapshot::MissingSections();
-        if (missing.empty()) {
-            gmSnapshotStore.SetSerializer(&simSerializer);
-            SLOG(SPRING_LOG_NOTICE,
-                 "sim snapshots: serializer attached (layout %016llx)",
-                 (unsigned long long)simSerializer.LayoutHash());
-        } else {
-            std::string names;
-            for (size_t i = 0; i < missing.size(); ++i)
-                names += (i ? ", " : "") + missing[i];
-            // FIDELITY-STANDIN: the snapshot walk is partial. Per the
-            // code-session contract every capability gap gets a one-time
-            // runtime warn naming it, so an operator who wonders why rollback
-            // refuses reads the answer here instead of in a plan file.
-            SLOG(SPRING_LOG_WARNING,
-                 "sim snapshots: DISABLED - the serializer's walk is incomplete "
-                 "(unimplemented sections: %s). Checkpoint/rollback refuse until "
-                 "PLAN-persistence tasks 1c/1d land.", names.c_str());
-        }
-    }
 
     RegisterGmVerbs(ctx, gmSnapshotStore);
 
@@ -1206,6 +1186,68 @@ int main(int argc, char* argv[])
         sim.SetMapMetadata(mapMeta);
 
     sim.Init(smfPath);
+
+    // --- Attach the snapshot serializer (PLAN-persistence tasks 1b/1d) ---
+    //
+    // Deliberately after sim.Init: the second gate reads the LIVE gadget
+    // handler. A table of gadget names compiled into the engine could not
+    // answer "does every gadget this game loaded have Save and Load", and that
+    // question is exactly as load-bearing as "is every section implemented" —
+    // a missing gadget is synced state a checkpoint drops without saying so.
+    {
+        const std::vector<std::string> missing = simsnapshot::MissingSections();
+        // Asked unconditionally, and logged even while the walk is incomplete:
+        // the gadget ledger is the list of work task 1d-b has to do, and an
+        // operator (or the next fire) should be able to read it off a boot log
+        // rather than infer it. Also the only place the question is asked on a
+        // real game, since a doctest has no gadget handler.
+        std::string coverageErr;
+        const std::vector<std::string> luaGaps =
+            simsnapshot::SyncedLuaCoverageGaps(coverageErr);
+
+        const auto join = [](const std::vector<std::string>& v) {
+            std::string s;
+            for (size_t i = 0; i < v.size(); ++i) s += (i ? ", " : "") + v[i];
+            return s;
+        };
+
+        if (coverageErr.empty()) {
+            SLOG(SPRING_LOG_NOTICE,
+                 "sim snapshots: synced Lua coverage - %zu gadget(s) with no "
+                 "Save/Load pair%s%s",
+                 luaGaps.size(),
+                 luaGaps.empty() ? "" : ": ",
+                 luaGaps.empty() ? "" : join(luaGaps).c_str());
+        }
+
+        if (!missing.empty()) {
+            // FIDELITY-STANDIN: the snapshot walk is partial. Per the
+            // code-session contract every capability gap gets a one-time
+            // runtime warn naming it, so an operator who wonders why rollback
+            // refuses reads the answer here instead of in a plan file.
+            SLOG(SPRING_LOG_WARNING,
+                 "sim snapshots: DISABLED - the serializer's walk is incomplete "
+                 "(unimplemented sections: %s). Checkpoint/rollback refuse until "
+                 "PLAN-persistence task 1e lands.", join(missing).c_str());
+        } else if (!coverageErr.empty()) {
+            SLOG(SPRING_LOG_WARNING,
+                 "sim snapshots: DISABLED - cannot establish synced Lua "
+                 "coverage (%s). Checkpoint/rollback refuse rather than take a "
+                 "snapshot with unknown gadget coverage.", coverageErr.c_str());
+        } else if (!luaGaps.empty()) {
+            // FIDELITY-STANDIN: gadget state that no Save/Load pair covers.
+            SLOG(SPRING_LOG_WARNING,
+                 "sim snapshots: DISABLED - these gadgets implement neither "
+                 "Save nor Load and do not declare themselves stateless: %s. "
+                 "Their state would vanish on resume (PLAN-persistence §7.1d).",
+                 join(luaGaps).c_str());
+        } else {
+            gmSnapshotStore.SetSerializer(&simSerializer);
+            SLOG(SPRING_LOG_NOTICE,
+                 "sim snapshots: serializer attached (layout %016llx)",
+                 (unsigned long long)simSerializer.LayoutHash());
+        }
+    }
 
     // Standing-order broadcast hook. Fires whenever an order is
     // created / updated / removed / its assigned-count changes. Pushes

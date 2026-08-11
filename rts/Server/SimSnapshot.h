@@ -54,6 +54,7 @@
 #include "Server/GameStateStore.h"   // gamestate::ISimSerializer
 #include "Server/StandingOrders.h"   // StandingOrder(Conditions) (census)
 #include "Server/OrgGroups.h"        // OrgGroup, Directive (census)
+#include "Lua/LuaSnapshotState.h"    // luasnapshot::Value (task 1d)
 
 #include <cstdint>
 #include <string>
@@ -284,6 +285,36 @@ struct UnitState {
     std::vector<RulesParamState> modParams;
 };
 
+// ──────────── Task 1d: the synced-Lua section (§7.1d) ────────────
+//
+// The payload is the table the gadgets write during the `Save` call-in, keyed by
+// gadget name (gadgetHandler builds the subtables — see the FIDELITY-STANDIN
+// note in CSyncedLuaHandle::SnapshotSave). Same split as 1c: the byte codec
+// below sees only a luasnapshot::Value and is covered by plain doctests, while
+// Capture/Apply need a live synced state.
+
+/// Gadgets the live handler reports as implementing neither `Save` nor `Load`
+/// and not declaring themselves stateless. Non-empty means a checkpoint would
+/// silently drop that gadget's state, so Serialize() refuses by these names.
+/// Empty when there is no synced state at all to ask (a headless run with no
+/// game Lua has no gadget state to lose); `err` carries why it could not ask.
+std::vector<std::string> SyncedLuaCoverageGaps(std::string& err);
+
+/// Staging-phase check: the payload names a handle this run does not have, or
+/// this run has a handle the payload never carried. Either way a restore would
+/// silently drop or invent gadget state, and staging is where that is still
+/// recoverable. Public for the same reason ResolveTeams is - it is the half of
+/// the section a test can drive without a synced state.
+bool ResolveSyncedLua(const luasnapshot::Value& in, std::string& err);
+
+/// Run the `Save` call-in and collect what the gadgets wrote.
+bool CaptureSyncedLua(luasnapshot::Value& out, std::string& err);
+
+/// Hand a decoded state back through the `Load` call-in. Called from the commit
+/// phase, so it must not be able to fail for reasons the staging phase could
+/// have caught — everything fallible about the bytes is already done.
+bool ApplySyncedLua(const luasnapshot::Value& in, std::string& err);
+
 // ─────────── Capture / apply: the halves that touch the sim ───────────
 //
 // Split out of the codec so the codec is testable without a sim (see above).
@@ -325,6 +356,10 @@ void EncodeUnits(const std::vector<UnitState>& in, std::vector<uint8_t>& out);
 bool DecodeUnits(const uint8_t* data, size_t size,
                  std::vector<UnitState>& out, std::string& err);
 
+void EncodeSyncedLua(const luasnapshot::Value& in, std::vector<uint8_t>& out);
+bool DecodeSyncedLua(const uint8_t* data, size_t size,
+                     luasnapshot::Value& out, std::string& err);
+
 // ──────────────────── The field-census tripwire ────────────────────
 //
 // Q-P1 constraint 4: "ship a completeness tripwire in the same milestone as
@@ -346,6 +381,7 @@ int Cmd(const CommandState& c);
 int RulesParam(const RulesParamState& p);
 int Stats(const TeamStatsState& s);
 int Res(const ResPair& r);
+int LuaValue(const luasnapshot::Value& v);
 } // namespace census
 
 class SimSnapshotSerializer : public gamestate::ISimSerializer {
