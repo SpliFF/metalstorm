@@ -76,6 +76,17 @@ struct JoinPreview {
     JoinAuthoritySource authoritySource = JoinAuthoritySource::None;
     /// True when this account already holds this seat (a rejoin, not a join).
     bool returning = false;
+    /// What happened to the account's binding, whether or not it survived.
+    ///
+    /// `returning` above is `seat == Restored` and is the SEATING answer; this
+    /// is the ENLISTMENT answer, and the two differ in exactly the case the
+    /// "your games" view exists for (PLAN-persistence task 4c): a binding whose
+    /// team the war's sides no longer seat this faction on is `Superseded` —
+    /// the account still has a history, a saved pool and a frozen world in that
+    /// war, but every reader keying off `returning` alone drops the row and the
+    /// player cannot find their own war in the one list that is meant to hold
+    /// it.
+    RejoinSeat seat = RejoinSeat::NoBinding;
 };
 
 /// Compose the preview.
@@ -129,6 +140,10 @@ inline JoinPreview PreviewJoin(SessionKind kind, const std::string& factionId,
 
     p.outcome = dj.outcome;
     p.returning = rj.SeatRestored();
+    // Set before the early return: a superseded binding is precisely the case
+    // that is NOT admitted as a rejoin and still has to be reported as an
+    // enlistment.
+    p.seat = rj.seat;
     if (!dj.Admitted())
         return p;
 

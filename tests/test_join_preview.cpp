@@ -1,5 +1,7 @@
 #include <doctest/doctest.h>
 
+#include <string>
+
 #include "Server/JoinPreview.h"
 #include "Server/WarRejoinPolicy.h"
 
@@ -164,4 +166,72 @@ TEST_CASE("capacity 0 means unlimited, not closed") {
                     /*humansOnSide=*/99, WAR_SIDE_CAPACITY_UNLIMITED, false, -1,
                     0, 0.0, false, kGrant);
     CHECK(p.willFight);
+}
+
+// ── Enlistment vs seating — PLAN-persistence.md §4, task 4c ────────────────
+//
+// "Your games" lists the wars an account is ENLISTED in. `returning` cannot
+// answer that: it is `seat == Restored`, so it goes false for a binding the
+// war's re-authored sides no longer seat this faction on — an account with a
+// week of history, a saved pool and a frozen world in that war reads exactly
+// like a stranger. `seat` is the fact the view filters on, and it is published
+// on the wire as `RejoinSeatKey`.
+
+TEST_CASE("the preview reports the seat, not only whether it was restored") {
+    SUBCASE("no binding") {
+        const JoinPreview p =
+            PreviewJoin(SessionKind::PersistentWar, "union", TwoSides(), 0, 8,
+                        /*hasBinding=*/false, -1, 0, 0.0, false, kGrant);
+        CHECK(p.seat == RejoinSeat::NoBinding);
+        CHECK(std::string(RejoinSeatKey(p.seat)) == "no_binding");
+    }
+    SUBCASE("restored") {
+        const JoinPreview p =
+            PreviewJoin(SessionKind::PersistentWar, "union", TwoSides(), 0, 8,
+                        /*hasBinding=*/true, /*boundTeam=*/1, 60, 250.0, true,
+                        kGrant);
+        CHECK(p.returning);
+        CHECK(p.seat == RejoinSeat::Restored);
+        CHECK(std::string(RejoinSeatKey(p.seat)) == "restored");
+    }
+    SUBCASE("superseded — the case the whole view exists for") {
+        WarSides reauthored;
+        reauthored.push_back({"compact", 1});
+        reauthored.push_back({"union", 0});
+        const JoinPreview p =
+            PreviewJoin(SessionKind::PersistentWar, "compact", reauthored, 0, 8,
+                        /*hasBinding=*/true, /*boundTeam=*/0, 60, 250.0, true,
+                        kGrant);
+        CHECK_FALSE(p.returning);
+        CHECK(p.seat == RejoinSeat::Superseded);
+        CHECK(std::string(RejoinSeatKey(p.seat)) == "superseded");
+    }
+}
+
+TEST_CASE("the seat is reported even when the join is not admitted") {
+    // The early return in PreviewJoin is on `dj.Admitted()`, and a binding on a
+    // war that does not field this account's faction at all is both unadmitted
+    // AND an enlistment. If `seat` were assigned after that return, the row the
+    // "your games" list most needs would be the one row missing it.
+    WarSides robotsOnly;
+    robotsOnly.push_back({"robots", 0});
+    const JoinPreview p =
+        PreviewJoin(SessionKind::PersistentWar, "compact", robotsOnly, 0, 8,
+                    /*hasBinding=*/true, /*boundTeam=*/0, 60, 250.0, true,
+                    kGrant);
+    CHECK_FALSE(p.willFight);
+    CHECK(p.seat == RejoinSeat::Superseded);
+}
+
+TEST_CASE("RejoinSeatKey is a wire vocabulary, not the log sentence") {
+    // The keys are what `war-browser.ts`'s `WarSeatKey` decodes. They must stay
+    // machine tokens: the prose spelling is `RejoinSeatToString`, and a client
+    // switching on that would be switching on English.
+    for (const RejoinSeat s : {RejoinSeat::NoBinding, RejoinSeat::Superseded,
+                               RejoinSeat::Restored}) {
+        const std::string key = RejoinSeatKey(s);
+        CHECK_FALSE(key.empty());
+        CHECK(key.find(' ') == std::string::npos);
+        CHECK(std::string(RejoinSeatToString(s)) != key);
+    }
 }

@@ -16,7 +16,7 @@ import { formatJoinPreview, type WarJoinPreview } from './join-preview';
 import { formatDigest } from './war-digest';
 import {
     filterWars, fightLabel, formatWarDetail, formatControl, hasRoomForFaction,
-    warStateBadge,
+    warStateBadge, formatYourWar,
     formatDeploy, WAR_FILTER_LABELS,
     type DeployResult, type WarFilter, type WarInfo, type WarRow,
 } from './war-browser';
@@ -1966,6 +1966,14 @@ export class LobbyUI {
                     war: r.war!,
                     returning: p?.returning ?? false,
                     watching: p?.watching ?? false,
+                    // The durable half of "is this war mine" (task 4c). Left
+                    // undefined when the lobby does not publish it, so
+                    // `filterWars` falls back to `returning` rather than
+                    // reading a defaulted `false` as "not enlisted".
+                    enlisted: p?.enlisted,
+                    seat: p?.seat,
+                    awaySec: p?.away_sec,
+                    mySide: p?.side || undefined,
                 };
             });
 
@@ -2040,6 +2048,19 @@ export class LobbyUI {
                   digest.lines.map(l => `<li>${this.esc(l)}</li>`).join('') +
                   `</ul></div>`
                 : '';
+            // What is MINE in this war (task 4c): my side, how long I have been
+            // gone, how much world is frozen waiting. Rendered on every filter,
+            // not just "My wars" — a war a player holds a seat in reads the
+            // same wherever they find it.
+            const yours = formatYourWar(row);
+            // A superseded seat is a loss, not a greeting, and must not wear
+            // the accent colour the other "your side" lines do — the same call
+            // task 4a made for the crashed badge, which deliberately does not
+            // share the muted "nothing here" colour with a clean freeze.
+            const yoursCls = row.seat === 'superseded'
+                ? 'war-yours war-yours-lost' : 'war-yours';
+            const yoursHtml = yours
+                ? `<div class="${yoursCls}">${this.esc(yours)}</div>` : '';
             const badge = warStateBadge(row.war);
             const liveBadge = `<span class="${badge.cls}">${this.esc(badge.label)}</span>`;
             const warStateIsKnown =
@@ -2069,6 +2090,7 @@ export class LobbyUI {
                 detail: this.esc(formatWarDetail(row, nowSec)),
                 detail_title: refusal,
                 control: this.esc(formatControl(row.war)),
+                yours_html: yoursHtml,
                 preview_html: previewHtml,
                 digest_html: digestHtml,
                 fight_label: fightLabel(row),

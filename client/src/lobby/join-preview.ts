@@ -17,6 +17,13 @@
 // game server seats with) and the sentence is the only part worth testing in
 // the browser.
 
+/// `RejoinSeatKey(RejoinSeat)`, verbatim — what happened to this account's
+/// binding in this war. `superseded` is the one that matters to a reader: the
+/// war's sides no longer seat this account's faction on the team its binding
+/// records, so a join is a fresh seat even though the account's history,
+/// saved pool and frozen world are all still in there.
+export type WarSeatKey = 'no_binding' | 'superseded' | 'restored';
+
 /// One row of `POST /api/wars/join-preview`. Field names are the wire's.
 export interface WarJoinPreview {
     room_id: number;
@@ -36,6 +43,12 @@ export interface WarJoinPreview {
     authority_source: string;
     /// True when this account already holds this seat.
     returning: boolean;
+    /// True when this account is ENLISTED here — it holds a binding in this
+    /// war, whether or not a join would seat it back on the same team.
+    /// Absent on a lobby older than PLAN-persistence task 4c.
+    enlisted?: boolean;
+    /// `RejoinSeatKey` — what happened to that binding.
+    seat?: WarSeatKey;
     /// True when this account asked to WATCH this war rather than fight in
     /// it (§3, task 6). Not a seating outcome — it is a choice, and it
     /// overrides `will_fight` on both sides of the wire.

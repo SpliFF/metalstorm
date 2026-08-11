@@ -387,7 +387,24 @@ button.link-button:hover { background: none; color: #7fdcff; }
 .war-entry .room-detail,
 .war-entry .room-preview,
 .war-entry .war-digest,
+.war-entry .war-yours,
 .war-entry .war-control { grid-column: 1; }
+/* "Your games" (PLAN-persistence task 4c) — the one line on the card that is
+   about the PLAYER rather than about the war: their side, their absence, and
+   how much of their world is frozen waiting for them. Given the accent colour
+   and the card's own left border rather than the muted grey of `.war-control`
+   above it, because on a "My wars" list every row is one of these and the
+   player is scanning for which of their worlds needs them. */
+.war-yours {
+    color: #7fd4a8;
+    font-size: 12px;
+}
+.war-yours:empty { display: none; }
+/* The one reading of that line that is bad news: the seat the player remembers
+   is gone (`seat: superseded`). It keeps the row — the history and the frozen
+   world are still theirs — so it must not be painted in the same green as
+   "your side: Union". */
+.war-yours-lost { color: #d9a06a; }
 .war-control { color: #7a8496; font-size: 12px; }
 .war-control:empty { display: none; }
 /* The while-you-were-away digest (PLAN-persistence task 4b). Sits in the

@@ -22,6 +22,8 @@
 // persistent war spends real time in, and it is the state in which a player
 // most wants to see the war and rejoin it.
 
+import type { WarSeatKey } from './join-preview';
+
 /// One side of a war, as the room JSON carries it. Field names are the wire's.
 export interface WarSide {
     team: number;
@@ -100,6 +102,18 @@ export interface WarRow {
     returning?: boolean;
     /// True when this account asked to WATCH this war (§3).
     watching?: boolean;
+    /// True when this account is ENLISTED in this war — it holds a binding,
+    /// whether or not a join would seat it back on the same team. This, not
+    /// `returning`, is what "My wars" means (task 4c). Absent on a lobby
+    /// older than task 4c, and every reader falls back to `returning` there.
+    enlisted?: boolean;
+    /// What happened to that binding (`RejoinSeatKey`).
+    seat?: WarSeatKey;
+    /// Seconds since this account was last seen in this war. Only ever present
+    /// for an enlisted account — the lobby sends it with the digest.
+    awaySec?: number;
+    /// The faction key of the side this account would fight for here.
+    mySide?: string;
 }
 
 /// Which wars the browser is showing. `my-faction` is the default because it
@@ -141,10 +155,101 @@ export function filterWars(wars: WarRow[], filter: WarFilter, faction: string): 
             // hiding it would hide the thing that is happening in the world.
             return wars.filter(w => !!sideForFaction(w.war, faction));
         case 'my-wars':
-            return wars.filter(w => w.returning);
+            // ENLISTMENT, not seating (task 4c). `returning` is the answer to
+            // "would a join put you back on your team", and it goes false when
+            // the war's sides stop seating your faction on the team your
+            // binding records — at which point this list dropped the war a
+            // player has a week of history in. The fallback keeps a client
+            // ahead of its lobby working on the old bit.
+            return sortMyWars(wars.filter(w => w.enlisted ?? w.returning));
         case 'all':
             return wars;
     }
+}
+
+/// Where a war sits in "My wars". Lower sorts first.
+///
+/// The ordering is the whole reason this list is not just a filtered browser:
+/// these are the player's OWN worlds, and the question they answer it with is
+/// "which of mine needs me". A war being played right now outranks one that is
+/// waiting, and a war that is waiting outranks one that never started.
+function myWarRank(row: WarRow): number {
+    switch (row.war.state) {
+        case 'live':        return 0;
+        case 'resuming':    return 1;
+        case 'crashed':     return 2;   // ahead of a clean freeze: it lost frames
+        case 'hibernated':  return 3;
+        case 'unresumable': return 4;
+        case 'fresh':       return 5;
+        default:            return row.war.live ? 0 : 3;
+    }
+}
+
+/// "My wars", ordered. Within a rank, the war whose world was frozen most
+/// recently comes first — that is the one the player was last in — and a war
+/// with no snapshot at all sorts last within its rank rather than first, which
+/// is what reading its absence as "no older than anything" would do. (The `-1`
+/// is the honest spelling of that, not a behavioural difference from `0`: unix
+/// seconds are never negative, so only a sentinel at the TOP of the range —
+/// "never frozen, therefore newest" — actually reorders the list.) Ties break
+/// on id so the list does not reshuffle between ticks.
+export function sortMyWars(wars: WarRow[]): WarRow[] {
+    return [...wars].sort((a, b) => {
+        const r = myWarRank(a) - myWarRank(b);
+        if (r !== 0) return r;
+        const fa = a.war.frozen_at ?? -1;
+        const fb = b.war.frozen_at ?? -1;
+        if (fa !== fb) return fb - fa;
+        return a.id - b.id;
+    });
+}
+
+/// The line that says what is YOURS in this war — the one sentence the war
+/// browser could not say before task 4c.
+///
+/// Three facts, in the order a returning player asks for them: which side is
+/// mine, how long I have been gone, and how much world is waiting. The frame
+/// is quoted as sim time by `formatFrozenFrame` for the same reason the card
+/// does it — a player has no intuition for "frame 226 800".
+///
+/// Returns '' for a war this account is not enlisted in, so it renders on
+/// exactly the rows "My wars" holds and on those rows in every filter.
+export function formatYourWar(row: WarRow): string {
+    if (!(row.enlisted ?? row.returning)) return '';
+    const parts: string[] = [];
+    // A superseded seat is stated first and stated plainly: the account still
+    // has a history here, but the seat it remembers is gone, and a card that
+    // said "Your side: Union" next to a Fight button that seats them somewhere
+    // else would be lying about the one thing this line exists to tell them.
+    if (row.seat === 'superseded') {
+        parts.push('your old seat here no longer exists — the sides were ' +
+                   're-drawn, and a join gives you a new one');
+    } else if (row.mySide) {
+        parts.push(`your side: ${factionLabel(row.mySide)}`);
+    }
+    if (row.awaySec !== undefined && row.awaySec >= 90)
+        parts.push(`away ${formatAway(row.awaySec)}`);
+    // The frozen frame, on a war that is not running. On a LIVE war the card's
+    // own detail line already carries the current frame, and `frozen_frame`
+    // there is the last durable point — quoting it as "waiting for you" would
+    // describe a war that is being played as one that is parked.
+    if (!row.war.live && row.war.frozen_frame !== undefined && row.war.frozen_frame > 0)
+        parts.push(`${formatFrozenFrame(row.war.frozen_frame)} waiting for you`);
+    if (parts.length === 0) return '';
+    return parts.join(' · ');
+}
+
+/// How long "away" was, in the coarsest unit that is still true. The same
+/// wording the digest heading uses (`war-digest.ts`), duplicated in neither
+/// direction: this module owns the card's own line and imports nothing from
+/// the digest, so the two spell one rule once each. Kept in step by a test
+/// that asserts both against the same seconds.
+function formatAway(sec: number): string {
+    const mins = Math.floor(sec / 60);
+    if (mins < 60) return `${mins} minutes`;
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 48) return `${hrs} hours`;
+    return `${Math.floor(hrs / 24)} days`;
 }
 
 /// Title-case a faction key for display. The keys are lowercased by the

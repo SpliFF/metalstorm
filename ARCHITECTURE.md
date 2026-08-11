@@ -889,6 +889,25 @@ records what the world was doing when the process left), and the two badges toge
 read "In game · Hibernated". Note `esc()` does not escape quotes — attribute values use
 `escAttr()`.
 
+**"Your games"** (PLAN-persistence task 4c): the *My wars* filter lists the wars an
+account is **enlisted** in, which is not the same question `returning` answers.
+`returning` is `seat == RejoinSeat::Restored` — a *seating* verdict — so it goes false
+for a binding whose team the war's re-authored sides no longer seat that faction on,
+and a list keyed on it silently drops the war a player has a week of history in. The
+join-preview row therefore carries both: `enlisted` (the account holds a
+`war_player_bindings` row here at all) and `seat` (`RejoinSeatKey` —
+`no_binding` | `superseded` | `restored`, a wire vocabulary kept separate from
+`RejoinSeatToString`'s log prose). `sortMyWars` orders those rows by *which of mine
+needs me* — live, resuming, interrupted, hibernated, unresumable, never-run, then most
+recently frozen first, with a missing `frozen_at` sorting last in its rank and id
+breaking ties so the list does not reshuffle between broadcasts. `formatYourWar` is the
+one line on the card about the player rather than the war (their side, their absence,
+how much world is frozen waiting), and it names a superseded seat instead of a side the
+account no longer holds — painted `.war-yours-lost` amber rather than the accent green,
+for the same reason the crashed badge does not share the muted colour of a clean freeze.
+The frozen frame is suppressed on a live war, where `frozen_frame` is the last durable
+point rather than the world.
+
 **Spectating a war by choice:** a `POST /api/rooms/join` with `as_spectator` on a
 persistent war records `room_members.spectate_only`, and the game server's auth
 `resolveSeat` checks it *before* every seating rule (`Server/RoomWatchIntent.h`) —

@@ -3,9 +3,12 @@ import {
     filterWars, fightLabel, formatControl, formatSide, formatUptime,
     formatDeploy, formatWarDetail, hasRoomForFaction, sideForFaction,
     formatAgo, formatFrozenFrame, formatResumeRefusal, formatWarStatus,
-    warStateBadge,
+    warStateBadge, sortMyWars, formatYourWar,
     type WarInfo, type WarRow,
 } from './war-browser';
+/// The digest's own away-wording, imported only to be held against the card's
+/// (see the last case of `formatYourWar`): two modules, one rule.
+import { formatAway } from './war-digest';
 
 /// A fixed instant, so every "ago" in this file is arithmetic and not a clock.
 const NOW = 1_700_000_000;
@@ -362,5 +365,134 @@ describe('formatDeploy', () => {
     it('tells a factionless account it can still watch', () => {
         expect(formatDeploy({ outcome: 'no_faction', faction: '', underdog_by: 0 }))
             .toContain('watch any war');
+    });
+});
+
+// ── "Your games" — PLAN-persistence.md §4, task 4c ────────────────────────
+//
+// The property under test: "My wars" is a list of the wars this account is
+// ENLISTED in, and enlistment is durable. `returning` is a seating answer —
+// "would a join put you back on your team" — and it goes false the moment the
+// war's sides stop seating your faction on the team your binding records. A
+// list keyed on it drops the war a player has a week of history in, which is
+// the one row that list exists to hold.
+
+describe('filterWars my-wars reads enlistment, not seating', () => {
+    it('keeps a war whose seat was superseded', () => {
+        const superseded = row({ id: 7, returning: false, enlisted: true, seat: 'superseded' });
+        const stranger = row({ id: 8, returning: false, enlisted: false, seat: 'no_binding' });
+        expect(filterWars([superseded, stranger], 'my-wars', 'compact').map(w => w.id))
+            .toEqual([7]);
+    });
+    it('falls back to `returning` against a lobby that publishes no `enlisted`', () => {
+        // A client ahead of its lobby. The old bit is still the best answer
+        // available, and reading a missing field as `false` would empty the
+        // list for every player on that lobby.
+        const old = row({ id: 9, returning: true });
+        expect(filterWars([old], 'my-wars', 'compact').map(w => w.id)).toEqual([9]);
+    });
+    it('does not keep a war I only watch', () => {
+        const watched = row({ id: 10, watching: true, enlisted: false });
+        expect(filterWars([watched], 'my-wars', 'compact')).toHaveLength(0);
+    });
+});
+
+describe('sortMyWars', () => {
+    const at = (id: number, state: WarInfo['state'], frozenAt?: number) =>
+        row({ id, enlisted: true, war: war({ live: state === 'live', state, frozen_at: frozenAt }) });
+
+    it('puts the war being played first and the one that never started last', () => {
+        const rows = [
+            at(1, 'fresh'), at(2, 'hibernated', NOW - 100), at(3, 'live'),
+            at(4, 'crashed', NOW - 100), at(5, 'resuming'),
+        ];
+        expect(sortMyWars(rows).map(w => w.id)).toEqual([3, 5, 4, 2, 1]);
+    });
+    it('within a rank, the most recently frozen world comes first', () => {
+        const rows = [
+            at(1, 'hibernated', NOW - 3600), at(2, 'hibernated', NOW - 60),
+            at(3, 'hibernated', NOW - 600),
+        ];
+        expect(sortMyWars(rows).map(w => w.id)).toEqual([2, 3, 1]);
+    });
+    it('sorts a war with no snapshot last in its rank, not first', () => {
+        // "Never frozen" is not "frozen just now". A sentinel at the top of the
+        // range (`?? Infinity`, the reading that treats an absent snapshot as
+        // the freshest thing on the list) fails this; `?? 0` and `?? -1` are
+        // the same behaviour, since unix seconds are never negative.
+        const rows = [at(1, 'hibernated'), at(2, 'hibernated', NOW - 3600)];
+        expect(sortMyWars(rows).map(w => w.id)).toEqual([2, 1]);
+    });
+    it('is stable across ticks when everything else ties', () => {
+        const rows = [at(3, 'live'), at(1, 'live'), at(2, 'live')];
+        expect(sortMyWars(rows).map(w => w.id)).toEqual([1, 2, 3]);
+        expect(sortMyWars(rows.slice().reverse()).map(w => w.id)).toEqual([1, 2, 3]);
+    });
+    it('does not mutate its input', () => {
+        const rows = [at(2, 'hibernated', NOW), at(1, 'live')];
+        sortMyWars(rows);
+        expect(rows.map(w => w.id)).toEqual([2, 1]);
+    });
+});
+
+describe('formatYourWar', () => {
+    it('says nothing about a war I am not in', () => {
+        expect(formatYourWar(row({ enlisted: false }))).toBe('');
+    });
+    it('names my side, my absence and the world waiting for me', () => {
+        const s = formatYourWar(row({
+            enlisted: true, seat: 'restored', mySide: 'union', awaySec: 3 * 86400,
+            war: war({ live: false, state: 'hibernated', frozen_frame: 226_800 }),
+        }));
+        expect(s).toContain('your side: Union');
+        expect(s).toContain('away 3 days');
+        expect(s).toContain('2h 06m of war waiting for you');
+    });
+    it('names a superseded seat instead of a side it no longer holds', () => {
+        const s = formatYourWar(row({
+            enlisted: true, seat: 'superseded', mySide: '', awaySec: 7200,
+            war: war({ live: false, state: 'hibernated', frozen_frame: 9000 }),
+        }));
+        expect(s).toContain('no longer exists');
+        expect(s).not.toContain('your side');
+        // The history is still theirs — the frozen world is still quoted.
+        expect(s).toContain('waiting for you');
+    });
+    it('does not call a live war "waiting for you"', () => {
+        // `frozen_frame` is published while a war is live too, where it is the
+        // last durable point rather than the current world.
+        const s = formatYourWar(row({
+            enlisted: true, seat: 'restored', mySide: 'compact', awaySec: 600,
+            war: war({ live: true, state: 'live', frozen_frame: 9000 }),
+        }));
+        expect(s).toContain('your side: Compact');
+        expect(s).not.toContain('waiting for you');
+    });
+    it('omits an absence too short to be one', () => {
+        const s = formatYourWar(row({
+            enlisted: true, seat: 'restored', mySide: 'compact', awaySec: 20,
+            war: war({ live: true, state: 'live' }),
+        }));
+        expect(s).toBe('your side: Compact');
+    });
+    it('says the away window in the same words as the digest heading', () => {
+        // Two modules, one rule. If either drifts this fails rather than
+        // shipping a card that says "away 2 hours" over a digest headed
+        // "While you were away (120 minutes)".
+        for (const sec of [3600 * 3, 86400 * 5, 60 * 30]) {
+            const line = formatYourWar(row({
+                enlisted: true, seat: 'restored', mySide: 'compact', awaySec: sec,
+                war: war({ live: true, state: 'live' }),
+            }));
+            expect(line).toContain(`away ${formatAway(sec)}`);
+        }
+    });
+    it('says nothing when enlistment is all it knows', () => {
+        // No side, no absence, no snapshot: an enlisted account in a war that
+        // has never run. An empty line is correct, and `.war-yours:empty`
+        // hides the div rather than leaving a coloured husk.
+        expect(formatYourWar(row({
+            enlisted: true, seat: 'restored', war: war({ live: false, state: 'fresh' }),
+        }))).toBe('');
     });
 });

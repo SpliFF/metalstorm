@@ -4591,6 +4591,18 @@ int main(int argc, char *argv[]) {
           jp["authority_source"] = JoinAuthoritySourceToString(p.authoritySource);
           jp["returning"] = p.returning;
 
+          // ── "Your games" (PLAN-persistence §4, task 4c) ─────────────────
+          // `returning` answers "would a join seat you back where you were",
+          // which is a seating question and goes false the moment the war's
+          // sides stop seating this faction on the bound team. Enlistment is
+          // the durable fact underneath it — this account has a binding, a
+          // saved pool and a frozen world in this war — and it is what the
+          // "My wars" list has to filter on. `seat` says which of the two the
+          // player is looking at, so a superseded seat can be named rather
+          // than silently rendered as a first-time join.
+          jp["enlisted"] = hasBinding;
+          jp["seat"] = RejoinSeatKey(p.seat);
+
           // The while-you-were-away digest (PLAN-persistence §4, task 4b).
           //
           // The cursor is the binding's own `last_seen_at`, not a new column:

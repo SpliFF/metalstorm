@@ -104,6 +104,21 @@ inline const char* RejoinSeatToString(RejoinSeat s) {
     return "unknown";
 }
 
+/// The seat as a WIRE key, kept separate from the prose above on purpose.
+/// `RejoinSeatToString` is a log sentence ("binding superseded by the war's
+/// sides"); a client that switched on it would be switching on English. These
+/// three tokens are the vocabulary `/api/wars/join-preview` publishes and
+/// `war-browser.ts` decodes — the same split `SessionKindToString` and
+/// `warresume::ToString` already use.
+inline const char* RejoinSeatKey(RejoinSeat s) {
+    switch (s) {
+        case RejoinSeat::NoBinding:  return "no_binding";
+        case RejoinSeat::Superseded: return "superseded";
+        case RejoinSeat::Restored:   return "restored";
+    }
+    return "no_binding";
+}
+
 inline const char* RejoinStateToString(RejoinState s) {
     switch (s) {
         case RejoinState::Nothing:           return "no saved state";
