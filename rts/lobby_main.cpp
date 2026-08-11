@@ -1091,17 +1091,16 @@ int main(int argc, char *argv[]) {
   auto removeGameServer = [&](uint32_t roomId) {
     if (!mapDb)
       return;
-    ExecPrepared(mapDb, "DELETE FROM game_servers WHERE room_id=?",
-                 [&](sqlite3_stmt *s) {
-                   sqlite3_bind_int(s, 1, static_cast<int>(roomId));
-                 });
+    // All three rows — the rendezvous row, the readiness flag and the war
+    // digest — now go through GameServersDb::DeleteForRoom, because a room
+    // being DELETED has to drop them too and never comes through here
+    // (PLAN-persistence 4e; RoomManager::DeleteRoomFromDb is the other
+    // caller). The reasons they must go are unchanged:
+    //
     // The game server normally clears its own game_status row on a clean
     // exit, but a SIGKILL/crash can leave it behind — drop it here too so a
     // dead room never looks "ready".
-    ExecPrepared(mapDb, "DELETE FROM game_status WHERE room_id=?",
-                 [&](sqlite3_stmt *s) {
-                   sqlite3_bind_int(s, 1, static_cast<int>(roomId));
-                 });
+    //
     // Same reasoning for the war digest, and it started to matter with
     // PLAN-persistence task 3b: nothing ever deleted this row, so a hibernated
     // war's card carried `live: true` and the population and frame it had a
@@ -1110,10 +1109,7 @@ int main(int argc, char *argv[]) {
     // the numbers on it. `live` means "a running server is publishing a
     // digest"; a room with no process is not that (observed live, room 1
     // reporting frame 301 while frozen at 302).
-    ExecPrepared(mapDb, "DELETE FROM war_summary WHERE room_id=?",
-                 [&](sqlite3_stmt *s) {
-                   sqlite3_bind_int(s, 1, static_cast<int>(roomId));
-                 });
+    GameServersDb::DeleteForRoom(mapDb, roomId);
   };
 
   // Read the readiness flag a running game server publishes into `game_status`
@@ -1448,6 +1444,22 @@ int main(int argc, char *argv[]) {
     if (!reaped.empty())
       SLOG(SPRING_LOG_NOTICE, "startup: reaped %zu abandoned room(s)",
            reaped.size());
+  }
+
+  // --- Rows left by rooms that were deleted before the rule existed ---
+  // PLAN-persistence task 4e. `DeleteRoomFromDb` keeps a war's story from
+  // outliving its room from here on; this collects what earlier lobbies left.
+  // It is not a leak sweep: the id counter re-seeds as MAX(id)+1 over the
+  // survivors and climbs back through those very numbers, so every orphaned
+  // row is on the reissue path (this tree's own database held five orphaned
+  // `game_status` rows — rooms 95, 124, 310, 317 and 330 — against a `rooms`
+  // table containing room 1). After the reap above, so a room reaped in the
+  // same startup is purged in the same pass rather than a restart later.
+  {
+    const int purged = rooms.PurgeOrphanedWarRows();
+    if (purged > 0)
+      SLOG(SPRING_LOG_NOTICE,
+           "startup: purged war rows for %d deleted room(s)", purged);
   }
 
   // --- Prune expired crash reports (PLAN-client-resilience task 4) ---

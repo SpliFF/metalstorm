@@ -1003,6 +1003,28 @@ mine" is answered in the browser (`lobby/war-notice.ts`, off the `enlisted` fiel
 task 4c publishes) and the notice is shown only to an enlisted account. The
 `rooms` event is always sent first, so the browser's lookup finds the new row.
 
+The durable half of "a reused room id inherits nothing" is
+**`RoomManager::DeleteRoomFromDb`** (task **4e**), the one chokepoint both ways a
+room dies pass through — `DeleteRoom` (abandon, replay played out, recycle) and
+`ReapStaleRooms`, which at *startup* runs before the lobby's game-server
+bookkeeping exists, so a cleanup hung off `removeGameServer` covers one and
+misses the other. `rooms.id` comes from a counter re-seeded as `MAX(id)+1` over
+the survivors, so a deleted id is handed back out. It deletes, each through the
+table's own owner: `war_player_bindings` (a roster with pools),
+`game_events` (`GameEventsDb::DeleteForRoom` — someone else's war story, read
+back as the rejoin digest), `game_snapshots`
+(`warresume::DeleteSnapshotsForRoom` — a **world**, since `LatestSnapshot` is
+what decides a war comes back on a stored one; deliberately *not* filtered by
+`game_id`, unlike the read), `war_reconnect_tokens`
+(`AuthTokens::DeleteWarReconnectForRoom` — a **seat**, since
+`ValidateWarReconnect` scopes a token by room and nothing else), and the
+`game_servers`/`game_status`/`war_summary` triple
+(`GameServersDb::DeleteForRoom`, now also the body of the lobby's
+`removeGameServer`). `game_metrics` and `debug_logs` are named in the code as
+deliberate exclusions. The live database at the time of the fix held orphaned
+`game_status` rows for five rooms — 95, 124, 310, 317, 330 — against a `rooms`
+table containing only room 1: five "ready" flags on the reissue path.
+
 Liveness in all of this is by **pid**, never by the room's state: the superseded
 `DecideWarResume` answered "already coming up" whenever the room said `Loading`, and
 because `ActionForOrphanedRoom` HOLDS a war in the state it died in, a war whose server

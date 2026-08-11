@@ -2,6 +2,10 @@
 
 #include "RoomManager.h"
 #include "WarPlayerBindings.h"
+#include "GameEventsDb.h"
+#include "GameServersDb.h"
+#include "AuthTokens.h"
+#include "WarResume.h"
 #include "System/SpringLog/SpringLog.h"
 
 #define LOG_SECTION "lobby"
@@ -297,6 +301,42 @@ void RoomManager::PersistModOptionsLocked(const GameRoom& room) {
     sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr);
 }
 
+int RoomManager::PurgeOrphanedWarRows() {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
+    if (!db) return 0;
+    // Every table `DeleteRoomFromDb` clears, asked the same question: which
+    // room ids do you hold that `rooms` does not have? A room living only in
+    // memory cannot be the answer — persistence is write-through, so a room
+    // that exists has its row before it has anything else.
+    static const char* kTables[] = {
+        "war_player_bindings", "game_events", "game_snapshots",
+        "war_reconnect_tokens", "game_servers", "game_status", "war_summary",
+    };
+    std::set<uint32_t> orphans;
+    for (const char* table : kTables) {
+        char sql[192];
+        snprintf(sql, sizeof(sql),
+                 "SELECT DISTINCT room_id FROM %s"
+                 " WHERE room_id NOT IN (SELECT id FROM rooms)", table);
+        sqlite3_stmt* st = nullptr;
+        if (sqlite3_prepare_v2(db, sql, -1, &st, nullptr) != SQLITE_OK) {
+            // A table this deployment has never created. Nothing to inherit.
+            sqlite3_finalize(st);
+            continue;
+        }
+        while (sqlite3_step(st) == SQLITE_ROW)
+            orphans.insert(static_cast<uint32_t>(sqlite3_column_int(st, 0)));
+        sqlite3_finalize(st);
+    }
+    for (uint32_t roomId : orphans) {
+        SLOG(SPRING_LOG_NOTICE,
+            "room %u: purged war rows left by a deleted room "
+            "(room ids are reused)", roomId);
+        DeleteRoomFromDb(roomId);
+    }
+    return static_cast<int>(orphans.size());
+}
+
 void RoomManager::DeleteRoomFromDb(uint32_t roomId) {
     if (!db) return;
     char sql[160];
@@ -308,12 +348,46 @@ void RoomManager::DeleteRoomFromDb(uint32_t roomId) {
     sqlite3_exec(db, sql, nullptr, nullptr, nullptr);
     snprintf(sql, sizeof(sql), "DELETE FROM room_mod_options WHERE room_id=%u", roomId);
     sqlite3_exec(db, sql, nullptr, nullptr, nullptr);
-    // The war's player bindings go with it (PLAN-metalstorm-lobby task 4).
+    // --- The war's durable story goes with the room (PLAN-persistence 4e) ---
+    //
     // Room ids are reused across lobby lifetimes — `rooms.id` is assigned from
-    // a counter, not an AUTOINCREMENT — so leaving these behind is worse than
-    // a leak: the next war to be handed this id would inherit a roster of
-    // accounts that never fought in it, complete with their pools.
+    // a counter (`nextRoomId = MAX(id)+1` at load, so a deleted top id is
+    // handed straight back out after a restart), not an AUTOINCREMENT — so
+    // leaving a war's rows behind is worse than a leak: the next war on that
+    // number INHERITS them. This is the durable half of the rule
+    // `WarStateEvents`' `Forget`/`Retain` keeps in memory, and each table below
+    // is inherited in a different, individually wrong way.
+    //
+    // One chokepoint, because there are two ways a room dies and only one of
+    // them goes through the lobby's game-server bookkeeping: `DeleteRoom` (an
+    // abandon, a replay playing out, a recycle) and `ReapStaleRooms`, which at
+    // STARTUP runs before any of that bookkeeping exists.
+    //
+    // A roster of accounts that never fought here, complete with their pools
+    // (PLAN-metalstorm-lobby task 4).
     WarPlayerBindings::DeleteForRoom(db, roomId);
+    // A story: the war log the rejoin digest reads back to a player.
+    GameEventsDb::DeleteForRoom(db, roomId);
+    // A WORLD. `warresume::LatestSnapshot` partitions on (game_id, room_id) and
+    // is what decides a war comes back on its stored world — a surviving blob
+    // under a recycled id is a world swap, not a stale row.
+    warresume::DeleteSnapshotsForRoom(db, roomId);
+    // A seat. `ValidateWarReconnect` scopes a token by room and nothing else,
+    // so an un-deleted token seats its holder in the NEXT war on this number.
+    AuthTokens::DeleteWarReconnectForRoom(db, roomId);
+    // A readiness flag and a digest — the three rows keyed on room_id alone.
+    GameServersDb::DeleteForRoom(db, roomId);
+    //
+    // Deliberately NOT deleted here, and named so each is a decision rather
+    // than an omission — these are the rest of the room-keyed census:
+    //   `game_metrics` — per-room tick-time history. Diagnostic, pruned by the
+    //     game server on its own cadence, and the one table whose rows a reused
+    //     id merely MINGLES rather than misrepresents: a perf series is read as
+    //     a time series, not as "this war's". Its writer is not linked into the
+    //     lobby either, so including it would mean a new link dependency or raw
+    //     SQL against a table this file does not own.
+    //   `debug_logs` — a different database file (data/debug.db), which this
+    //     handle cannot reach at all. Same reasoning as game_metrics anyway.
 }
 
 void RoomManager::LoadFromDatabase() {

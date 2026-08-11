@@ -157,6 +157,15 @@ int64_t ValidateWarReconnect(sqlite3* db, const std::string& presented,
 /// on the side it was just moved off). Returns rows affected.
 int RevokeWarReconnectForAccount(sqlite3* db, int64_t accountId, int64_t now);
 
+/// Delete every war token minted for a room, called when the room is deleted.
+/// Room ids are reused, and `ValidateWarReconnect` takes the room as its only
+/// scope — so a token left behind does not merely outlive its war, it seats its
+/// holder in whatever war is handed that number next. A DELETE rather than a
+/// revoke: the war it authorised no longer exists, so there is no history here
+/// worth keeping and a revoked row would still be a row `PruneExpired` waits a
+/// week (plus grace) to collect. Returns rows deleted.
+int DeleteWarReconnectForRoom(sqlite3* db, uint32_t roomId);
+
 /// Drop rows that expired more than `graceSeconds` ago, in both tables.
 /// Returns rows deleted. Nothing else prunes these: unlike `sessions` they are
 /// long-lived by design, so without this they are the one table that grows for

@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include <cstdint>
+
 struct sqlite3;
 
 class GameServersDb {
@@ -20,4 +22,19 @@ public:
     /// prepare for the rest of the process lifetime (logged as "ExecPrepared
     /// prepare failed: table game_servers has no column named map_id").
     static void EnsureTables(sqlite3* db);
+
+    /// Drop a room's rows from all three tables — the rendezvous row, the
+    /// readiness flag and the war digest. Every one of them is keyed on
+    /// `room_id` alone (PRIMARY KEY), so they are inherited wholesale by the
+    /// next war handed that number: a fresh room would read "ready" and carry
+    /// the population and frame of a war that is over.
+    ///
+    /// Two callers, deliberately: the lobby's `removeGameServer` (a server
+    /// exited but the room survives to host another) and
+    /// `RoomManager::DeleteRoomFromDb` (the room itself is gone). The second
+    /// is what makes the STARTUP reap safe — it deletes rooms without going
+    /// near the lobby's game-server bookkeeping.
+    ///
+    /// Returns rows deleted across the three tables (0..3).
+    static int DeleteForRoom(sqlite3* db, uint32_t roomId);
 };

@@ -295,6 +295,15 @@ int RevokeWarReconnectForAccount(sqlite3* db, int64_t accountId, int64_t now) {
     return sqlite3_changes(db);
 }
 
+int DeleteWarReconnectForRoom(sqlite3* db, uint32_t roomId) {
+    if (!db) return 0;
+    Exec(db, "DELETE FROM war_reconnect_tokens WHERE room_id=?",
+         [&](sqlite3_stmt* s) {
+             sqlite3_bind_int64(s, 1, static_cast<int64_t>(roomId));
+         });
+    return sqlite3_changes(db);
+}
+
 int PruneExpired(sqlite3* db, int64_t now, int graceSeconds) {
     if (!db) return 0;
     const int64_t cutoff = now - graceSeconds;

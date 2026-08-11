@@ -101,6 +101,20 @@ SnapshotFacts LatestSnapshot(sqlite3* db, const std::string& gameId, uint32_t ro
 /// that pins the two files' agreement without linking the sim.
 bool IsHibernationLabel(const std::string& label);
 
+/// Drop every stored world for `roomId`, whatever game wrote it. Called when a
+/// room is deleted, because room ids are reused: `LatestSnapshot` above is what
+/// decides a war comes back on a stored world, and it partitions on
+/// (game_id, room_id) — so a surviving blob under a recycled id is not a leak
+/// but a world swap, handed to a brand-new room that never fought in it.
+/// Deliberately NOT filtered by `gameId`: the room is gone, so every partition
+/// under its number is orphaned, and one keyed on a game the caller happens not
+/// to name would outlive the check that would have refused it.
+///
+/// Same tolerance as `LatestSnapshot` — a database no game server has ever
+/// opened has no `game_snapshots` table, and that is nothing to report.
+/// Returns the number of rows deleted (0 when the table is absent).
+int DeleteSnapshotsForRoom(sqlite3* db, uint32_t roomId);
+
 // ───────────── E1 at the lobby: may this binary load that world? ─────────────
 //
 // PLAN-persistence task 3c, and the reason it is a *policy* rather than a side

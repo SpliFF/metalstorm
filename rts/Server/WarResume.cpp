@@ -53,6 +53,21 @@ SnapshotFacts LatestSnapshot(sqlite3* db, const std::string& gameId, uint32_t ro
     return out;
 }
 
+int DeleteSnapshotsForRoom(sqlite3* db, uint32_t roomId) {
+    if (db == nullptr) return 0;
+    sqlite3_stmt* st = nullptr;
+    if (sqlite3_prepare_v2(db, "DELETE FROM game_snapshots WHERE room_id = ?",
+                           -1, &st, nullptr) != SQLITE_OK) {
+        // No table — no game server has ever written here. See the header.
+        if (st != nullptr) sqlite3_finalize(st);
+        return 0;
+    }
+    sqlite3_bind_int(st, 1, static_cast<int>(roomId));
+    sqlite3_step(st);
+    sqlite3_finalize(st);
+    return sqlite3_changes(db);
+}
+
 const char* ToString(ResumeEligibility e) {
     switch (e) {
         case ResumeEligibility::NoHistory:     return "no_history";

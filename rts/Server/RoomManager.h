@@ -536,6 +536,16 @@ public:
     /// Remove a client from any room they're in.
     void RemoveClient(ClientID clientId);
 
+    /// Delete every war-keyed row whose room no longer exists (PLAN-persistence
+    /// task 4e). `DeleteRoomFromDb` keeps the rule from here on; this is the
+    /// retroactive half, for the rows deleted rooms already left behind — and
+    /// they are not a leak but an inheritance, because the id counter climbs
+    /// back through their numbers. Call at lobby startup, after
+    /// `LoadFromDatabase` (the `rooms` table is the authority for what exists,
+    /// so it must be loaded and current) and after every table's `EnsureTable`.
+    /// Returns the number of orphaned room ids purged.
+    int PurgeOrphanedWarRows();
+
 private:
     // --- SQLite write-through helpers (no-op when db is null) ---
     void PersistRoomLocked(const GameRoom& room);
