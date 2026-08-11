@@ -15,6 +15,7 @@ import { mapListStatus } from './map-list-status';
 import { formatJoinPreview, type WarJoinPreview } from './join-preview';
 import {
     filterWars, fightLabel, formatWarDetail, formatControl, hasRoomForFaction,
+    warStateBadge,
     formatDeploy, WAR_FILTER_LABELS,
     type DeployResult, type WarFilter, type WarInfo, type WarRow,
 } from './war-browser';
@@ -2001,6 +2002,9 @@ export class LobbyUI {
             return;
         }
 
+        // One clock read for the whole list, so every "3h ago" on screen is
+        // measured from the same instant.
+        const nowSec = Math.floor(Date.now() / 1000);
         list.innerHTML = shown.map(row => {
             const preview = this.warPreviews.get(row.id);
             const previewText = preview ? formatJoinPreview(preview) : '';
@@ -2008,9 +2012,19 @@ export class LobbyUI {
                 ? `<div class="room-preview${preview!.will_fight ? '' : ' room-preview-watch'}">` +
                   `${this.esc(previewText)}</div>`
                 : '';
-            const liveBadge = row.war.live
-                ? '<span class="war-badge-live">Live</span>'
-                : '<span class="war-badge-idle">Idle</span>';
+            // The badge is the war's STATE, not the one "is a digest being
+            // published" bit (PLAN-persistence task 4): hibernated, crashed
+            // and unresumable all used to read "Idle", and they are three
+            // different things to walk into.
+            const badge = warStateBadge(row.war);
+            const liveBadge = `<span class="${badge.cls}">${this.esc(badge.label)}</span>`;
+            const warStateIsKnown =
+                !!row.war.state && row.war.state !== 'not_a_war';
+            // The operator's own E1 sentence, hashes and all, one hover away
+            // from the player sentence on the card.
+            const refusal = row.war.resume_blocked_reason
+                ? ` title="${this.escAttr(row.war.resume_blocked_reason)}"`
+                : '';
             // Disabled only when this account could not take a seat under any
             // reading — no side for its faction, or no seat left on it. A
             // returning player is never disabled: their seat is held for them
@@ -2021,9 +2035,15 @@ export class LobbyUI {
             return renderTemplate(this.templates.browserWarEntry, {
                 id: row.id,
                 name: this.esc(row.name),
-                state: ROOM_STATE_LABELS[row.state] || '?',
+                // The ROOM state is dropped once the WAR state is known: a
+                // hibernated war keeps `state = InGame` (the room is what the
+                // world was doing when the process left), so the two badges
+                // side by side read "In game · Hibernated". The war word is
+                // the true one, and two badges that disagree is worse than one.
+                state: warStateIsKnown ? '' : (ROOM_STATE_LABELS[row.state] || '?'),
                 live_badge: liveBadge,
-                detail: this.esc(formatWarDetail(row)),
+                detail: this.esc(formatWarDetail(row, nowSec)),
+                detail_title: refusal,
                 control: this.esc(formatControl(row.war)),
                 preview_html: previewHtml,
                 fight_label: fightLabel(row),
@@ -2926,6 +2946,15 @@ export class LobbyUI {
 
     private esc(s: string): string {
         return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    /// `esc` for a value going inside a quoted ATTRIBUTE. `esc` alone leaves
+    /// quotes standing, which is safe between tags and is not safe here — a
+    /// value carrying `"` would close the attribute. Server-authored strings
+    /// (an E1 refusal names a map id) reach attributes now, so the two cases
+    /// get two functions rather than one that is right most of the time.
+    private escAttr(s: string): string {
+        return this.esc(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     }
 
     /**

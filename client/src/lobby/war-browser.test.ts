@@ -2,8 +2,13 @@ import { describe, it, expect } from 'vitest';
 import {
     filterWars, fightLabel, formatControl, formatSide, formatUptime,
     formatDeploy, formatWarDetail, hasRoomForFaction, sideForFaction,
+    formatAgo, formatFrozenFrame, formatResumeRefusal, formatWarStatus,
+    warStateBadge,
     type WarInfo, type WarRow,
 } from './war-browser';
+
+/// A fixed instant, so every "ago" in this file is arithmetic and not a clock.
+const NOW = 1_700_000_000;
 
 // PLAN-metalstorm-lobby.md §4, task 6 — the war browser.
 //
@@ -146,7 +151,7 @@ describe('formatWarDetail', () => {
     it('lists map, both sides, watchers and uptime', () => {
         // Union's seat-holder is away: `1/8 (0 online)`, which is the whole
         // reason the two numbers are printed separately.
-        expect(formatWarDetail(row())).toBe(
+        expect(formatWarDetail(row(), NOW)).toBe(
             'meridian_basin · Compact 2/8 (1 AI) · Union 1/8 (0 online) · ' +
             '3 watching · up 15m');
     });
@@ -154,9 +159,124 @@ describe('formatWarDetail', () => {
         const idle = row({ war: war({
             live: false, spectators: undefined, uptime_sec: undefined,
         }) });
-        expect(formatWarDetail(idle)).toBe(
+        expect(formatWarDetail(idle, NOW)).toBe(
             'meridian_basin · Compact 2/8 · Union 1/8 · ' +
             'no server running — a join restarts it');
+    });
+    it('carries the hibernation clause into the same line', () => {
+        const hib = row({ war: war({
+            live: false, spectators: undefined, uptime_sec: undefined,
+            state: 'hibernated', frozen_frame: 226_800, frozen_at: NOW - 7200,
+        }) });
+        expect(formatWarDetail(hib, NOW)).toBe(
+            'meridian_basin · Compact 2/8 · Union 1/8 · ' +
+            'hibernated with 2h 06m of war (2h ago) — a join brings it back');
+    });
+});
+
+// ── The hibernation datums on the card (PLAN-persistence task 4) ────────────
+//
+// Three fields the lobby has been publishing with no renderer: `war.state`,
+// `frozen_frame`, and the E1 verdict. The property under test is that the
+// three no-process states stay DISTINGUISHABLE: `live` is one bit, and a card
+// built on it says the same thing about a war that saved cleanly, a war that
+// crashed, and a war that is going back to frame 0.
+
+describe('warStateBadge', () => {
+    it('gives the three no-process states three different badges', () => {
+        expect(warStateBadge(war({ state: 'hibernated' })).label).toBe('Hibernated');
+        expect(warStateBadge(war({ state: 'crashed' })).label).toBe('Interrupted');
+        expect(warStateBadge(war({ state: 'unresumable' })).label).toBe('Restarting');
+        // …and the crashed pair does not wear the muted "nothing here" colour.
+        expect(warStateBadge(war({ state: 'crashed' })).cls)
+            .not.toBe(warStateBadge(war({ state: 'hibernated' })).cls);
+    });
+    it('names a resume in flight, which live/idle cannot', () => {
+        expect(warStateBadge(war({ state: 'resuming' })).label).toBe('Resuming');
+        expect(warStateBadge(war({ state: 'live' })).label).toBe('Live');
+        expect(warStateBadge(war({ state: 'fresh' })).label).toBe('Not started');
+    });
+    it('falls back to the live bit on a lobby that publishes no state', () => {
+        expect(warStateBadge(war()).label).toBe('Live');
+        expect(warStateBadge(war({ live: false })).label).toBe('Idle');
+        expect(warStateBadge(war({ live: false, state: 'not_a_war' })).label).toBe('Idle');
+    });
+});
+
+describe('formatFrozenFrame', () => {
+    it('states a frame as the time a player played, not as a frame number', () => {
+        expect(formatFrozenFrame(226_800)).toBe('2h 06m of war');
+        expect(formatFrozenFrame(1800)).toBe('1m of war');
+        expect(formatFrozenFrame(300)).toBe('10s of war');
+    });
+});
+
+describe('formatAgo', () => {
+    it('coarsens with distance', () => {
+        expect(formatAgo(NOW - 30, NOW)).toBe('just now');
+        expect(formatAgo(NOW - 600, NOW)).toBe('10m ago');
+        expect(formatAgo(NOW - 7200, NOW)).toBe('2h ago');
+        expect(formatAgo(NOW - 86_400 * 6, NOW)).toBe('6d ago');
+    });
+    it('never reads as the future when the clocks disagree', () => {
+        expect(formatAgo(NOW + 500, NOW)).toBe('just now');
+    });
+});
+
+describe('formatWarStatus', () => {
+    const frozen = { frozen_frame: 226_800, frozen_at: NOW - 7200 };
+    it('promises the world back when it was checkpointed', () => {
+        expect(formatWarStatus(war({ live: false, state: 'hibernated', ...frozen }), NOW))
+            .toBe('hibernated with 2h 06m of war (2h ago) — a join brings it back');
+    });
+    it('says what a crash costs instead of claiming hibernation', () => {
+        const s = formatWarStatus(
+            war({ live: false, state: 'crashed', ...frozen }), NOW);
+        expect(s).toContain('without saving');
+        expect(s).toContain('2h 06m of war');
+        expect(s).toContain('anything after it is lost');
+        expect(s).not.toContain('hibernated');
+    });
+    it('tells a player their frozen world is going back to frame 0, and why', () => {
+        const s = formatWarStatus(war({
+            live: false, state: 'unresumable', ...frozen,
+            resume_eligibility: 'engine_changed',
+            resume_blocked_reason: 'E1: the frozen world at frame 226800 was taken ' +
+                'by engine aaaa… and this server binary is bbbb…',
+        }), NOW);
+        expect(s).toBe('2h 06m of war (2h ago) is frozen in the store, but the game ' +
+            'has been updated since — this war restarts at the beginning');
+        // The operator's hashes never reach the card's own sentence.
+        expect(s).not.toContain('E1');
+        expect(s).not.toContain('engine aaaa');
+    });
+    it('distinguishes an engine change from a map change', () => {
+        expect(formatResumeRefusal(war({ resume_eligibility: 'map_changed' })))
+            .toContain('the map has changed');
+        expect(formatResumeRefusal(war({ resume_eligibility: 'engine_changed' })))
+            .toContain('the game has been updated');
+        // A refusal with no verdict still says the consequence.
+        expect(formatResumeRefusal(war())).toContain('restarts at the beginning');
+    });
+    it('names a resume in flight so a joiner does not read it as "down"', () => {
+        expect(formatWarStatus(war({ live: false, state: 'resuming', ...frozen }), NOW))
+            .toBe('resuming — bringing back 2h 06m of war (2h ago)');
+    });
+    it('says nothing extra about a live war, and says "never run" about a fresh one', () => {
+        expect(formatWarStatus(war({ state: 'live' }), NOW)).toBe('');
+        expect(formatWarStatus(war({ live: false, state: 'fresh' }), NOW))
+            .toBe('never run — a join starts it');
+    });
+    it('degrades to the old sentence when the lobby publishes no state', () => {
+        expect(formatWarStatus(war({ live: false }), NOW))
+            .toBe('no server running — a join restarts it');
+        expect(formatWarStatus(war(), NOW)).toBe('');
+    });
+    it('reads correctly when a state arrives with no snapshot history', () => {
+        expect(formatWarStatus(war({ live: false, state: 'hibernated' }), NOW))
+            .toBe('hibernated — a join brings it back');
+        expect(formatWarStatus(war({ live: false, state: 'crashed' }), NOW))
+            .toBe('the server stopped without saving — a join restarts the war');
     });
 });
 

@@ -418,6 +418,30 @@ button.link-button:hover { background: none; color: #7fdcff; }
     font-size: 11px;
     white-space: nowrap;
 }
+/* The room-state badge is empty on a war whose own state is published (see
+   renderWarList) — an empty pill would be a floating grey lozenge. */
+.war-entry .room-badge:empty { display: none; }
+/* A resume in flight (PLAN-persistence task 4). Warm rather than green: the
+   war is coming back but is not serving yet, and a joiner waits. */
+.war-badge-resuming {
+    background: #3a3320;
+    color: #e0c67a;
+    border-radius: 10px;
+    padding: 3px 10px;
+    font-size: 11px;
+    white-space: nowrap;
+}
+/* Crashed and unresumable: the two states where the world a player remembers
+   is not all coming back. Not an error colour (nothing is broken, and both are
+   joinable) but not the muted "nothing here" one either. */
+.war-badge-crashed {
+    background: #3a2426;
+    color: #e39b9b;
+    border-radius: 10px;
+    padding: 3px 10px;
+    font-size: 11px;
+    white-space: nowrap;
+}
 
 .empty-state { text-align: center; color: #555; padding: 32px; }
 

@@ -46,6 +46,18 @@ export interface WarSide {
     regions?: number;
 }
 
+/// What a war IS at this instant — `warresume::ToString(WarState)`, verbatim.
+/// Absent on a lobby older than PLAN-persistence task 3b, which is why every
+/// reader here falls back to the `live` flag rather than assuming a word.
+export type WarStateKey =
+    'not_a_war' | 'live' | 'resuming' | 'hibernated' | 'crashed' | 'fresh' |
+    'unresumable';
+
+/// `warresume::ToString(ResumeEligibility)`, verbatim.
+export type ResumeEligibilityKey =
+    'no_history' | 'resumable' | 'engine_changed' | 'map_changed' |
+    'unknown_binary';
+
 /// The `war` block of a room row.
 export interface WarInfo {
     /// True when a running server published a digest in the last 30s.
@@ -56,6 +68,23 @@ export interface WarInfo {
     frame?: number;
     uptime_sec?: number;
     control?: { total: number; contested: number; neutral: number };
+    /// ── The hibernation datums (PLAN-persistence tasks 3b/3c) ──────────────
+    /// `live` above is one bit: is a digest being published. `state` is what
+    /// the war IS, which is a different question with answers `live` cannot
+    /// give — a resume in flight, a checkpointed world, a lost tail.
+    state?: WarStateKey;
+    /// The frame the world would come back at. Published whenever the store
+    /// holds any history, INCLUDING while the war is live (there it is the
+    /// last durable point, not the current frame — `frame` above is that).
+    frozen_frame?: number;
+    /// Unix seconds when that snapshot was written.
+    frozen_at?: number;
+    /// Whether `frozen_frame` is a promise or a loss (E1 pre-flight).
+    resume_eligibility?: ResumeEligibilityKey;
+    /// The operator-facing prose behind a refusal — engine/map hashes and all.
+    /// Shown as a tooltip, never as the card's own sentence: see
+    /// `formatResumeRefusal`.
+    resume_blocked_reason?: string;
 }
 
 /// A room row narrowed to what the war browser needs.
@@ -166,9 +195,115 @@ export function formatControl(war: WarInfo): string {
     return parts.join(' · ');
 }
 
+/// "3h ago" / "just now". `now` is injected rather than read from the clock so
+/// the caller owns the tick and a test owns the answer.
+export function formatAgo(unixSec: number, nowSec: number): string {
+    const d = Math.max(0, Math.floor(nowSec - unixSec));
+    if (d < 60) return 'just now';
+    const mins = Math.floor(d / 60);
+    if (mins < 60) return `${mins}m ago`;
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 48) return `${hrs}h ago`;
+    return `${Math.floor(hrs / 24)}d ago`;
+}
+
+/// How much world a frozen frame is, said as sim time rather than as a frame
+/// number. A player has no intuition for "frame 226 800"; "2h 06m of war" is
+/// the same fact in the units they played it in. GAME_SPEED is 30.
+export function formatFrozenFrame(frame: number): string {
+    const sec = Math.max(0, Math.floor(frame / 30));
+    if (sec < 60) return `${sec}s of war`;
+    const mins = Math.floor(sec / 60);
+    if (mins < 60) return `${mins}m of war`;
+    return `${Math.floor(mins / 60)}h ${String(mins % 60).padStart(2, '0')}m of war`;
+}
+
+/// The badge in the card's header. One word per `WarState`, plus the CSS class
+/// that colours it.
+///
+/// The three no-process states are deliberately NOT one grey "Idle": a
+/// hibernated war is a promise, a crashed one lost its tail, and an
+/// unresumable one is going back to frame 0. Those are three different things
+/// to walk into, and the old badge said the same word for all three.
+export function warStateBadge(war: WarInfo): { label: string; cls: string } {
+    switch (war.state) {
+        case 'live':        return { label: 'Live',        cls: 'war-badge-live' };
+        case 'resuming':    return { label: 'Resuming',    cls: 'war-badge-resuming' };
+        case 'hibernated':  return { label: 'Hibernated',  cls: 'war-badge-idle' };
+        case 'crashed':     return { label: 'Interrupted', cls: 'war-badge-crashed' };
+        case 'unresumable': return { label: 'Restarting',  cls: 'war-badge-crashed' };
+        case 'fresh':       return { label: 'Not started', cls: 'war-badge-idle' };
+        default:
+            // `not_a_war`, or a lobby that publishes no `state` at all. Fall
+            // back to the one bit that has always been there.
+            return war.live
+                ? { label: 'Live', cls: 'war-badge-live' }
+                : { label: 'Idle', cls: 'war-badge-idle' };
+    }
+}
+
+/// What a join would do to this war, in one clause. Empty when the war is
+/// live (the live half of `formatWarDetail` already says what is happening).
+export function formatWarStatus(war: WarInfo, nowSec: number): string {
+    const frozen = war.frozen_frame !== undefined && war.frozen_frame >= 0
+        ? formatFrozenFrame(war.frozen_frame)
+        : '';
+    const when = war.frozen_at ? ` (${formatAgo(war.frozen_at, nowSec)})` : '';
+    switch (war.state) {
+        case 'live':
+            return '';
+        case 'resuming':
+            // The state E5's second joiner waits on. Named, because a card
+            // that said "no server running" here would invite a second spawn.
+            return frozen
+                ? `resuming — bringing back ${frozen}${when}`
+                : 'resuming — the server is starting';
+        case 'hibernated':
+            return frozen
+                ? `hibernated with ${frozen}${when} — a join brings it back`
+                : 'hibernated — a join brings it back';
+        case 'crashed':
+            // Never "hibernated": there was no exit checkpoint, so the newest
+            // snapshot is older than the world was. Saying which frames survive
+            // is the whole point — a player is about to lose the rest.
+            return frozen
+                ? `the server stopped without saving — a join resumes from ` +
+                  `${frozen}${when}, and anything after it is lost`
+                : 'the server stopped without saving — a join restarts the war';
+        case 'unresumable':
+            return frozen
+                ? `${frozen}${when} is frozen in the store, but ${formatResumeRefusal(war)}`
+                : formatResumeRefusal(war);
+        case 'fresh':
+            return 'never run — a join starts it';
+        default:
+            // A lobby with no `state` field, or a room that is not a war.
+            return war.live ? '' : 'no server running — a join restarts it';
+    }
+}
+
+/// The sentence that tells a player their frozen world is going back to frame
+/// 0, and why.
+///
+/// Deliberately NOT `resume_blocked_reason` itself: that string is written for
+/// an operator and names two 16-hex engine stamps, which on a card is noise
+/// wrapped around the one fact that matters. The raw reason is not dropped —
+/// `renderWarList` hangs it on the row's `title`, so the operator sentence is
+/// one hover away and the log line and the card still agree.
+export function formatResumeRefusal(war: WarInfo): string {
+    switch (war.resume_eligibility) {
+        case 'engine_changed':
+            return 'the game has been updated since — this war restarts at the beginning';
+        case 'map_changed':
+            return 'the map has changed since — this war restarts at the beginning';
+        default:
+            return 'it cannot be loaded — this war restarts at the beginning';
+    }
+}
+
 /// The line under a war's name: map, every side's population, spectators,
 /// uptime. Sides always; the rest only when a server is publishing.
-export function formatWarDetail(row: WarRow): string {
+export function formatWarDetail(row: WarRow, nowSec: number): string {
     const parts: string[] = [];
     if (row.mapId) parts.push(row.mapId);
     for (const side of row.war.sides)
@@ -177,12 +312,12 @@ export function formatWarDetail(row: WarRow): string {
         if (row.war.spectators) parts.push(`${row.war.spectators} watching`);
         if (row.war.uptime_sec !== undefined)
             parts.push(formatUptime(row.war.uptime_sec));
-    } else {
-        // Said plainly rather than omitted. A war with no server is a real
-        // state that a join RESUMES (task 3) — a card that just goes quiet
-        // reads as a broken row.
-        parts.push('no server running — a join restarts it');
     }
+    // Said plainly rather than omitted. A war with no server is a real state
+    // that a join RESUMES (task 3) — a card that just goes quiet reads as a
+    // broken row.
+    const status = formatWarStatus(row.war, nowSec);
+    if (status) parts.push(status);
     return parts.join(' · ');
 }
 
