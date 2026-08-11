@@ -941,6 +941,98 @@ function gadget:GameFrame(frame)
     end
 end
 
+-- ─────────────── Snapshot state (PLAN-persistence task 1d-b, §7.1d) ───────────────
+--
+-- The objective board is the game (PLAN-metalstorm), and essentially all of it
+-- is authored: an objective is CREATED by a scenario, a generator rule or a
+-- player bounty, and nothing about the restored world says it should exist.
+--
+-- CAPTURED — `objectives`, `archive`, `archiveRing`, `archiveSlot`, `nextId`.
+-- The archive travels with the live table for a reason its own header spells
+-- out: `lookupObjective` reads across BOTH, so a resolved objective a phase
+-- parent or a linked partner still names is only reachable through the
+-- archive. Dropping it would turn "resolved 20 s ago" into "never existed".
+-- `archiveSlot` and `archiveRing` are the ring's cursor and contents — without
+-- the cursor the next eviction drops the wrong entry.
+--
+-- `nextId` matters for the same reason the manager id counters in task 1b did:
+-- restore a board of 40 objectives with the counter back at 1 and the next
+-- Create() re-issues a LIVE id, so two objectives share a rulesParam prefix.
+--
+-- CAPTURED — `activeList` + `activeIndex`. They are the O(1) index into
+-- `objectives`, and they are derivable in principle (walk the table, keep the
+-- `state == 'active'` ones) — but not in a way that reproduces the ARRAY
+-- ORDER, and the order is observable: the eval walk, and therefore the order
+-- in which a cascade of same-tick resolutions fires, follows it. Recomputing
+-- would hand a resumed war a different resolution order than the one it was
+-- captured mid-way through. `activeIndex` is written alongside so the pair
+-- cannot disagree.
+--
+-- CAPTURED — `pendingClear`. Ids in their 30 s retention window: an id dropped
+-- from here is never archived and never has its params cleared, so it leaks
+-- both a heap entry (the leak PLAN-long-uptime S4 exists to close) and a stale
+-- objective on the client's board, permanently.
+--
+-- CAPTURED — `genState`. The generator's dedup and debounce bookkeeping:
+-- `systemicActive`, `cooldownUntil` (absolute frames), `contestedSince` and
+-- `starvedSince` (tick stamps), `seenConvoys`/`seenInfraHealth` edge-trigger
+-- memories. Dropping it re-fires every edge trigger the war has ever seen and
+-- re-generates objectives that already exist — the exact duplicate-board
+-- failure the dedup key exists to prevent.
+--
+-- CAPTURED — `evalTick` (the generator's clock, and what `contestedSince` /
+-- `starvedSince` are measured in — a reset makes every stored stamp read as
+-- far in the future), `victoryObjectivesCreated` (a high-water mark
+-- game_gameover reads to say whether the war can end at all), and the eval
+-- gate's phase.
+--
+-- RE-DERIVED, not captured — `rewardScale` (a modoption) and `completeHooks`
+-- (re-registered by game_teams' Initialize).
+--
+-- CAPTURED, and it is the one judgement call here — `bountyCountByPlayer`. A
+-- per-player spam guard is arguably the live process's business rather than
+-- the payload's, but the alternative is a rollback that hands every player
+-- their four bounty slots back, which makes the cap a function of how often
+-- the war is restored. Capturing it is the conservative reading.
+--
+-- NOT REPUBLISHED — the `objective_*` game rules params ride the `gameRules`
+-- section, applied immediately before this call. That section is the reason
+-- this gadget needs no republish pass at all: publish() is per-objective and
+-- clearPublished() is the only thing that removes a key, so a republish could
+-- add the restored board's keys but never take away the keys of an objective
+-- that was created after the captured frame.
+function gadget:Save(state)
+    state.objectives = objectives
+    state.nextId = nextId
+    state.archive = archive
+    state.archiveRing = archiveRing
+    state.archiveSlot = archiveSlot
+    state.activeList = activeList
+    state.activeIndex = activeIndex
+    state.pendingClear = pendingClear
+    state.genState = genState
+    state.evalTick = evalTick
+    state.victoryObjectivesCreated = victoryObjectivesCreated
+    state.bountyCountByPlayer = bountyCountByPlayer
+    state.evalGate = Tick.save(evalGate)
+end
+
+function gadget:Load(state)
+    objectives   = state.objectives or {}
+    nextId       = tonumber(state.nextId) or 1
+    archive      = state.archive or {}
+    archiveRing  = state.archiveRing or {}
+    archiveSlot  = tonumber(state.archiveSlot) or 0
+    activeList   = state.activeList or {}
+    activeIndex  = state.activeIndex or {}
+    pendingClear = state.pendingClear or {}
+    genState     = state.genState or Generator.newState()
+    evalTick     = tonumber(state.evalTick) or 0
+    victoryObjectivesCreated = tonumber(state.victoryObjectivesCreated) or 0
+    bountyCountByPlayer = state.bountyCountByPlayer or {}
+    Tick.load(evalGate, state.evalGate)
+end
+
 function gadget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerDefID, attackerTeam)
     local ctx = buildCtx(Spring.GetGameFrame())
 

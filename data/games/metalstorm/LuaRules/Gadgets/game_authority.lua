@@ -741,6 +741,69 @@ function gadget:GameStart()
     end
 end
 
+-- ─────────────── Snapshot state (PLAN-persistence task 1d-b, §7.1d) ───────────────
+--
+-- The POOLS are not here, and that is the point of the split: team and player
+-- pools live in team rulesParams (`authority_pool`, `authority_player_<id>`),
+-- as do the `authority_granted_<id>` re-join guard and the own-pool-only flag,
+-- so the money itself rides the `teams` section and is restored before this
+-- call. What is left in Lua is everything that WATCHES the money.
+--
+-- CAPTURED — `ledgerState`. Reason-tagged cumulative counters. Nothing derives
+-- them: they are the record of awards and charges that have already happened,
+-- and the gm-tools dashboard and the headless economy validation both read them
+-- as a history. A restore that keeps a live ledger against restored pools
+-- reports mint the world no longer contains.
+--
+-- CAPTURED — `metricsState` and `prevLedger`, and they must travel TOGETHER
+-- with the ledger. `prevLedger` is the previous frame's counters and the very
+-- next GameFrame subtracts it from the live ones: restore the ledger without
+-- it and the first frame after a restore books the entire difference between
+-- the two worlds as one frame's velocity, which is the single largest spike
+-- the EMA will ever see. `metricsState` carries that EMA plus each team's
+-- dead-frame total.
+--
+-- CAPTURED — `escrowState`. Staked bounties are money that has already left a
+-- player's pool and has not yet been settled; the pools ride the `teams`
+-- section, so dropping the escrow would debit the stake and refund it to
+-- nobody.
+--
+-- CAPTURED — `eventSeq`. Same reason as the guidance change feed: the ring
+-- slots are rulesParams and are restored, so a reset cursor overwrites the
+-- newest event next and publishes a seq the client has already consumed.
+--
+-- CAPTURED — all three gates. Two of them (stipend, overflow decay) are
+-- ACCRUAL gates, the case tick.lua's snapshot note calls out: `Tick.count`
+-- banks every whole period between `last` and the restored frame, so a stipend
+-- gate left where the live process had it pays every team an unearned lump —
+-- or, restoring forward, compounds the decay a hoarder already paid.
+--
+-- RE-DERIVED, not captured — `costScale` / `joinGrant` / `teamStipend`
+-- (modoptions, re-read in Initialize AND GameStart; the live launch must win
+-- over a fossilised copy) and the hook lists, which are re-registered by the
+-- observing gadgets' own Initialize.
+function gadget:Save(state)
+    state.ledger = ledgerState
+    state.metrics = metricsState
+    state.prevLedger = prevLedger
+    state.escrow = escrowState
+    state.eventSeq = eventSeq
+    state.stipendGate = Tick.save(stipendGate)
+    state.decayGate = Tick.save(decayGate)
+    state.ledgerPublishGate = Tick.save(ledgerPublishGate)
+end
+
+function gadget:Load(state)
+    ledgerState   = state.ledger or Ledger.newState()
+    metricsState  = state.metrics or Metrics.newState()
+    prevLedger    = state.prevLedger or {}
+    escrowState   = state.escrow or Escrow.newState()
+    eventSeq      = tonumber(state.eventSeq) or 0
+    Tick.load(stipendGate, state.stipendGate)
+    Tick.load(decayGate, state.decayGate)
+    Tick.load(ledgerPublishGate, state.ledgerPublishGate)
+end
+
 function gadget:GameFrame(frame)
     -- Stipend distribution (§2)
     -- The gate is stepped unconditionally: short-circuiting it on `teamStipend`

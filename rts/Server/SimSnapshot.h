@@ -74,6 +74,7 @@ enum class SectionId : uint16_t {
     Units          = 6,  ///< unitHandler + command queues — task 1c
     SyncedLua      = 7,  ///< gadget-owned synced Lua state — task 1d
     Features       = 8,  ///< wrecks/map features — task 1e
+    GameRules      = 9,  ///< CSplitLuaHandle::gameParams — task 1d-b
 };
 
 /// One entry per part of the synced state the walk must cover. `implemented`
@@ -446,6 +447,18 @@ bool DecodeFeatures(const uint8_t* data, size_t size,
 void EncodeSyncedLua(const luasnapshot::Value& in, std::vector<uint8_t>& out);
 bool DecodeSyncedLua(const uint8_t* data, size_t size,
                      luasnapshot::Value& out, std::string& err);
+
+void EncodeGameRules(const std::vector<RulesParamState>& in, std::vector<uint8_t>& out);
+bool DecodeGameRules(const uint8_t* data, size_t size,
+                     std::vector<RulesParamState>& out, std::string& err);
+
+/// The `gameRules` section's capture/apply halves (task 1d-b's finding). Game
+/// rules params are a single process-wide map on CSplitLuaHandle, not a member
+/// of any team or unit, so they were the one rulesParam family no section
+/// reached: teams carry `team->modParams` and units carry `u->modParams`, and
+/// `Spring.SetGameRulesParam` writes neither.
+void CaptureGameRules(std::vector<RulesParamState>& out);
+void ApplyGameRules(const std::vector<RulesParamState>& in);
 
 // ──────────────────── The field-census tripwire ────────────────────
 //

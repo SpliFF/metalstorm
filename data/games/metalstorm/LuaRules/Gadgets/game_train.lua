@@ -1230,6 +1230,76 @@ end
 -- Game frame update
 --------------------------------------------------------------------------------
 
+-- ─────────────── Snapshot state (PLAN-persistence task 1d-b, §7.1d) ───────────────
+--
+-- A consist is a relationship between units that exists ONLY here. Nothing on
+-- the units says which train they belong to, what order they are in, or which
+-- one is driving — `couple_links` is a def customParam saying a unit CAN
+-- couple, not that it has. So the registry is authored state end to end.
+--
+-- CAPTURED — `consists`, `consistsByUnit`, `nextConsistID`. Both directions of
+-- the mapping travel together rather than one being rebuilt from the other,
+-- because `consistsByUnit` also holds entries for DEAD cars still in the
+-- consist (T3 keeps them in `units` so the wreck still trails), and a rebuild
+-- from `consists.units` would have to re-derive that distinction from the live
+-- world — which by then no longer has the wreck's death frame. `nextConsistID`
+-- is the same id-reuse hazard as everywhere else in this walk.
+--
+-- CAPTURED, and this is the part that is not obvious — the breadcrumb rings
+-- inside each consist. `breadcrumbs.buffer` is a 512-slot ring of the LEADER'S
+-- PAST PATH with its `writeIdx`/`readIdx` cursors and `totalArcLength`, and it
+-- is what every follower's position is computed from. It cannot be recomputed
+-- from anything: it is history, not geometry. A restored consist with an empty
+-- ring snaps every car onto the engine until the ring refills, i.e. a
+-- ten-car train visibly collapses into a point on resume. `lastLeaderPos` /
+-- `lastLeaderHeading` are the sampling cursor into that same trail, and
+-- `reversing` / `reverseCrawl` are a manoeuvre in progress.
+--
+-- RE-DERIVED, not captured — `trainDefs`. A def-keyed cache built on demand
+-- from `UnitDefs` customParams; content, identical either side of a restore.
+--
+-- REBUILT HERE, not captured, and this is the one thing this gadget must DO on
+-- restore rather than just remember: follower move-ctrl. Every non-leader car
+-- is under `Spring.MoveCtrl`, which is engine state on the unit, and §7.1c
+-- captures no AMoveType/ScriptMoveType state at all — the restored units come
+-- back under normal movement. Re-applying it is not a republish of something
+-- the snapshot already has; without it the cars drive themselves and the train
+-- comes apart. Deliberately NOT via SetupConsistMovement: that helper resets
+-- the breadcrumb trail from the leader's current position, which would throw
+-- away the ring this Save just went to the trouble of capturing.
+function gadget:Save(state)
+    state.consists = consists
+    state.consistsByUnit = consistsByUnit
+    state.nextConsistID = nextConsistID
+    state.hpRecomputeGate = Tick.save(hpRecomputeGate)
+end
+
+function gadget:Load(state)
+    consists = state.consists or {}
+    consistsByUnit = state.consistsByUnit or {}
+    nextConsistID = tonumber(state.nextConsistID) or 1
+    Tick.load(hpRecomputeGate, state.hpRecomputeGate)
+
+    for _, consist in pairs(consists) do
+        if consist.leader then
+            DisableFollowerMoveCtrl(consist.leader)
+            for _, unitID in ipairs(consist.units or {}) do
+                if unitID ~= consist.leader and Spring.ValidUnitID(unitID)
+                        and not Spring.GetUnitIsDead(unitID) then
+                    EnableFollowerMoveCtrl(unitID)
+                end
+            end
+            -- A single-engine consist mid-reverse-crawl has its LEADER under
+            -- move-ctrl too (the crawl is a rigid translation the gadget
+            -- drives), so the blanket Disable above is wrong for exactly that
+            -- case and is undone here.
+            if consist.reverseCrawl then
+                EnableFollowerMoveCtrl(consist.leader)
+            end
+        end
+    end
+end
+
 function gadget:GameFrame(frame)
     -- T3: Periodic damage→speed recompute. Membership-change events alone
     -- (couple/decouple/UnitDestroyed) left train_speed_factor stale while a

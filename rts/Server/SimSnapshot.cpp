@@ -44,6 +44,7 @@ const std::vector<SectionSpec>& Sections()
         {SectionId::Units,          1, "units",          true,  ""},
         {SectionId::Features,       1, "features",       true,  ""},
         {SectionId::SyncedLua,      1, "syncedLua",      true,  ""},
+        {SectionId::GameRules,      1, "gameRules",      true,  ""},
     };
     return kSections;
 }
@@ -538,6 +539,18 @@ void WriteRulesParams(Writer& w, const std::vector<RulesParamState>& ps)
     }
 }
 
+RulesParamState ReadRulesParam(Reader& r)
+{
+    RulesParamState p;
+    p.key  = r.Str();
+    p.los  = r.I32();
+    p.type = r.U8();
+    p.b    = r.Bool();
+    p.f    = r.F32();
+    p.s    = r.Str();
+    return p;
+}
+
 std::vector<RulesParamState> ReadRulesParams(Reader& r)
 {
     const uint32_t n = r.U32();
@@ -546,16 +559,8 @@ std::vector<RulesParamState> ReadRulesParams(Reader& r)
     if (r.Remaining() < size_t(n) * 4) { r.Fail(); return {}; }
     std::vector<RulesParamState> ps;
     ps.reserve(n);
-    for (uint32_t i = 0; i < n && !r.Bad(); ++i) {
-        RulesParamState p;
-        p.key  = r.Str();
-        p.los  = r.I32();
-        p.type = r.U8();
-        p.b    = r.Bool();
-        p.f    = r.F32();
-        p.s    = r.Str();
-        ps.push_back(std::move(p));
-    }
+    for (uint32_t i = 0; i < n && !r.Bad(); ++i)
+        ps.push_back(ReadRulesParam(r));
     return ps;
 }
 
@@ -1280,6 +1285,37 @@ bool DecodeFeatures(const uint8_t* data, size_t size,
     }
     if (r.Remaining() != 0) {
         err = "features section has " + std::to_string(r.Remaining()) +
+              " unread trailing bytes";
+        return false;
+    }
+    return true;
+}
+
+void EncodeGameRules(const std::vector<RulesParamState>& in, std::vector<uint8_t>& out)
+{
+    Writer w(out);
+    WriteRulesParams(w, in);
+}
+
+bool DecodeGameRules(const uint8_t* data, size_t size,
+                     std::vector<RulesParamState>& out, std::string& err)
+{
+    Reader r(data, size);
+    const uint32_t count = r.U32();
+    if (r.Remaining() < size_t(count)) {
+        err = "gameRules section claims " + std::to_string(count) +
+              " params in " + std::to_string(size) + " bytes";
+        return false;
+    }
+    out.clear();
+    out.reserve(count);
+    for (uint32_t i = 0; i < count && !r.Bad(); ++i) out.push_back(ReadRulesParam(r));
+    if (r.Bad()) {
+        err = "gameRules section is truncated";
+        return false;
+    }
+    if (r.Remaining() != 0) {
+        err = "gameRules section has " + std::to_string(r.Remaining()) +
               " unread trailing bytes";
         return false;
     }
@@ -2315,6 +2351,35 @@ bool ApplySyncedLua(const luasnapshot::Value& in, std::string& err)
     return ok;
 }
 
+// ───────────────────────── The gameRules section ─────────────────────────
+//
+// Task 1d-b's finding. Every OTHER rulesParam family hangs off an object the
+// walk already visits — `team->modParams` rides the `teams` section,
+// `u->modParams` rides `units`, `f->modParams` rides `features`. Game rules
+// params hang off nothing: `Spring.SetGameRulesParam` writes one process-wide
+// static on CSplitLuaHandle, so they were the one family no section reached,
+// and MissingSections() could not say so (1c's Finding 2 shape again — the
+// table cannot report a section nobody thought of).
+//
+// They are NOT re-derivable from the gadgets that wrote them. A gadget's Load
+// could republish its own keys, but only the keys it still owns: an objective
+// created after the captured frame leaves `objective_<id>_*` behind, and a
+// rollback that leaves the client reading a resolved objective's params is
+// exactly the half-restored world §2 refuses. So the map is captured whole and
+// applied whole.
+
+void CaptureGameRules(std::vector<RulesParamState>& out)
+{
+    out = CaptureRulesParams(CSplitLuaHandle::GetGameParams());
+}
+
+void ApplyGameRules(const std::vector<RulesParamState>& in)
+{
+    LuaRulesParams::Params params;
+    ApplyRulesParams(in, params);
+    CSplitLuaHandle::SetGameParams(std::move(params));
+}
+
 bool ResolveSyncedLua(const luasnapshot::Value& in, std::string& err)
 {
     if (!in.IsTable()) {
@@ -2453,6 +2518,11 @@ bool SimSnapshotSerializer::SerializeImplemented(std::vector<uint8_t>& out, std:
                     return false;
                 EncodeSyncedLua(state, section);
             } break;
+            case SectionId::GameRules: {
+                std::vector<RulesParamState> params;
+                CaptureGameRules(params);
+                EncodeGameRules(params, section);
+            } break;
             default:
                 // An implemented section with no writer is a programming
                 // error, not a runtime condition - fail the checkpoint rather
@@ -2500,8 +2570,9 @@ bool SimSnapshotSerializer::Deserialize(const uint8_t* data, size_t size, std::s
     // happens once the whole payload has been read without a single failure.
     bool haveGlobals = false, haveOrders = false, haveGroups = false, haveDirs = false;
     bool haveTeams = false, haveUnits = false, haveSyncedLua = false;
-    bool haveFeatures = false;
+    bool haveFeatures = false, haveGameRules = false;
     luasnapshot::Value syncedLua = luasnapshot::Value::Table();
+    std::vector<RulesParamState> gameRules;
     std::vector<TeamState> teams;
     std::vector<UnitState> units;
     std::vector<int32_t>   unitDefIds;
@@ -2592,6 +2663,12 @@ bool SimSnapshotSerializer::Deserialize(const uint8_t* data, size_t size, std::s
                 sr.Skip(len);
                 haveSyncedLua = true;
                 break;
+            case SectionId::GameRules:
+                if (!DecodeGameRules(data + r.Pos(), len, gameRules, err))
+                    return false;
+                sr.Skip(len);
+                haveGameRules = true;
+                break;
             default:
                 err = std::string("no reader for section '") + spec->name + "'";
                 return false;
@@ -2616,7 +2693,8 @@ bool SimSnapshotSerializer::Deserialize(const uint8_t* data, size_t size, std::s
         return false;
     }
     if (!haveGlobals || !haveOrders || !haveGroups || !haveDirs ||
-        !haveTeams || !haveUnits || !haveFeatures || !haveSyncedLua) {
+        !haveTeams || !haveUnits || !haveFeatures || !haveSyncedLua ||
+        !haveGameRules) {
         err = "payload is missing a required section";
         return false;
     }
@@ -2653,6 +2731,15 @@ bool SimSnapshotSerializer::Deserialize(const uint8_t* data, size_t size, std::s
     // wreck is created today - this ordering is what keeps that from being a
     // load-bearing detail of the unit path.
     ApplyFeatures(features, featureDefIds, featureUdefIds);
+    // Game rules params after the roster rebuild and BEFORE the gadgets' own
+    // Load, for the same reason the roster comes before them: the teardown and
+    // rebuild fire UnitDestroyed/UnitCreated across every unit, and a gadget
+    // that publishes on those events writes game params during ApplyUnits.
+    // Applying the captured map here discards those writes; running the
+    // gadgets' Load after it lets a gadget that keeps a live Lua mirror
+    // (game_gameover's GG.WarState) republish on top, which is the one case
+    // where the gadget, not the map, is the authority.
+    ApplyGameRules(gameRules);
     // Synced Lua LAST, and the order is load-bearing: tearing down and
     // rebuilding the roster fires UnitDestroyed for every live unit and
     // UnitCreated/UnitFinished for every restored one, so a gadget's own unit

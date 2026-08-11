@@ -457,6 +457,59 @@ function gadget:GameStart()
     publishAIProfiles()
 end
 
+-- ─────────────── Snapshot state (PLAN-persistence task 1d-b, §7.1d) ───────────────
+--
+-- CAPTURED — the five per-game tables. Every one of them is a running total or
+-- a first-observation stamp that nothing in the world re-derives:
+--   * `joinFrame`  — tenure, and it is the tie-break reassignLeader sorts on,
+--                    so losing it silently re-elects a different leader.
+--   * `teamLeader` — this gadget's OWN bookkeeping (the header is explicit
+--                    that it is never an engine write), so no engine state
+--                    carries it; `team_leader` is only its published mirror.
+--   * `earned` / `spent` / `objectivesDone` — lifetime counters fed by hooks
+--                    off events that have already happened. A rollback must
+--                    take back the credit for the fighting it rolled back;
+--                    RestoreScore's MAX guard is for a REJOIN (a live process
+--                    ahead of the saved numbers) and is deliberately not what
+--                    happens here — a restore is the one case where the saved
+--                    numbers must win outright.
+--
+-- RE-DERIVED, not captured — `caretakerEnabled` (a modoption, re-read in both
+-- Initialize and GameStart; modoptions cannot change within a war, and if a
+-- resumed war were ever launched with a different one the LIVE launch must
+-- win, not a value fossilised in a payload).
+--
+-- NOT CAPTURED, rebuilt within the tick — the co-commander publish
+-- (`team_active_humans`, the per-AI own-pool-only flag). Those are functions of
+-- who is connected RIGHT NOW, which a snapshot cannot speak for: the roster at
+-- restore is the live one, not the captured one.
+--
+-- NOT REPUBLISHED — `score_*` (game rules params, restored wholesale by the
+-- `gameRules` section applied just before this call) and `team_leader` /
+-- `ai_profile_*` / `team_active_humans` (team rules params, restored by the
+-- `teams` section). Publishing here would write the same bytes twice.
+function gadget:Save(state)
+    state.joinFrame = joinFrame
+    state.teamLeader = teamLeader
+    state.earned = earned
+    state.spent = spent
+    state.objectivesDone = objectivesDone
+    state.scoreboardGate = Tick.save(scoreboardGate)
+end
+
+function gadget:Load(state)
+    joinFrame      = state.joinFrame or {}
+    teamLeader     = state.teamLeader or {}
+    earned         = state.earned or {}
+    spent          = state.spent or {}
+    objectivesDone = state.objectivesDone or {}
+    Tick.load(scoreboardGate, state.scoreboardGate)
+    -- Re-derive the half that belongs to the live roster rather than to the
+    -- payload: whoever is connected now decides caretaker/co-commander, and
+    -- ApplyTeams has just rewritten every team rulesParam underneath us.
+    refreshCoCommanders()
+end
+
 function gadget:GameFrame(frame)
     if not Tick.due(scoreboardGate, frame) then return end
     publishScoreboard()

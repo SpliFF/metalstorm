@@ -119,3 +119,48 @@ function gadget:UnitDestroyed(unitID)
     civ.population[unitID] = nil
     estate.forgetBuilding(civ, unitID)
 end
+
+-- ─────────────── Snapshot state (PLAN-persistence task 1d-b, §7.1d) ───────────────
+--
+-- CAPTURED — `civ.population`. It is the SOURCE OF TRUTH for civilian identity
+-- (the header says so out loud: role/site/home live only here, not on the
+-- unitdefs), so nothing in the restored world can rebuild it. Its keys are
+-- unitIDs, which is safe precisely because the `units` section restores ids
+-- exactly — the same property task 1e leaned on for feature ids.
+--
+-- CAPTURED — `civ.venues`. It looks rebuildable, and half of it is: the
+-- restore fires UnitCreated for every restored unit, so estate.registerBuilding
+-- re-registers each venue. But that pass runs during ApplyUnits, i.e. BEFORE
+-- this call, over the *restored* roster in ITS iteration order, and the array
+-- is ordered — GG.Civilians.ParleyVenues() hands it out live and NearestVenue
+-- breaks ties by first-seen. Capturing it makes the order a fact of the
+-- snapshot rather than of the unit handler's iteration.
+--
+-- RE-DERIVED, not captured — `civ.convoyRoutes` (read from map-authored
+-- placement by spawn.seed at GameStart; map content, identical either side of
+-- a restore) and `civ.gaiaTeam`.
+--
+-- CAPTURED — both cadence gates, so an ambient population does not burst-spawn
+-- a backlog after a restore (see tick.lua's snapshot note).
+function gadget:Save(state)
+    state.population = civ.population
+    -- `or {}` is not defensive padding: estate.lua creates `civ.venues` lazily
+    -- on the first venue building, so a war with none captures NIL here and an
+    -- empty table after a restore — a capture that is not byte-identical to a
+    -- re-capture of the state it just restored. The round-trip spec caught it.
+    state.venues = civ.venues or {}
+    state.routinesGate = Tick.save(routinesGate)
+    state.convoyGate = Tick.save(convoyGate)
+end
+
+function gadget:Load(state)
+    -- Total replacement, not a merge: the UnitCreated/UnitDestroyed storm the
+    -- roster rebuild just fired has already written entries into `population`
+    -- for the restored units, and a merge would keep whichever of the two
+    -- disagreed last. The snapshot is the authority — that is what a rollback
+    -- means.
+    civ.population = state.population or {}
+    civ.venues = state.venues or {}
+    Tick.load(routinesGate, state.routinesGate)
+    Tick.load(convoyGate, state.convoyGate)
+end

@@ -1223,6 +1223,61 @@ local function checkWarCanBeContested()
     checkVictoryIsContestable(scn, byTeam, live)
 end
 
+-- ─────────────── Snapshot state (PLAN-persistence task 1d-b, §7.1d) ───────────────
+--
+-- This gadget is mostly a STAGER: it reads a scenario file at GameStart and
+-- turns it into units, features, objectives and team params, all of which are
+-- sim state that rides the units/features/teams sections. What survives past
+-- staging is small, and every piece of it is a schedule or a latch.
+--
+-- CAPTURED — `aiStipends`. Each entry carries `nextFrame`, an ABSOLUTE frame
+-- stamp, and `payStipends` pays whenever `frame >= nextFrame`. The list itself
+-- is re-derivable from the scenario file, but its cursors are not: restore
+-- forward with the staged copy and every NPC is paid on the first frame after
+-- the restore; restore backward and it is paid twice for the same minute.
+-- Captured whole rather than merged, so the pair (schedule, cursor) cannot
+-- disagree.
+--
+-- CAPTURED — `unstagedChecked`. A one-shot latch for the frame-60 "does every
+-- side actually have an army" audit. It is the same shape as game_gameover's
+-- `endlessChecked` and captured for the same reason: a restore that clears it
+-- re-runs the audit and re-announces its warnings against a mid-war board the
+-- check was never written for (it asks whether a side was ever STAGED, and by
+-- frame 20 000 a side may legitimately have lost every unit it had).
+--
+-- CAPTURED — `pendingConvoyObjectives`. Escort objectives waiting on a convoy
+-- that spawns on a staggered 0-60 s timer. They are keyed by route id and
+-- released by NotifyConvoySpawn; dropping them means a scenario-authored
+-- objective silently never appears, with nothing to say it was owed.
+--
+-- NOT CAPTURED — `deferredObjectives`. It is drained at frame 30 and only at
+-- frame 30 (`if frame == 30`), so past that frame it is empty by construction
+-- and a snapshot of it would always be the empty list. Named here rather than
+-- omitted silently: if that drain ever moves off a fixed frame, this becomes a
+-- capture.
+--
+-- RE-DERIVED, not captured — `GG.Scenario.name` / `.data` / `.landmarks` /
+-- `.features`. They are the parsed scenario file, staged from the `scenario`
+-- modoption at GameStart; the file is content and the modoption is the launch's,
+-- so both are identical either side of a restore of the same war, and the LIVE
+-- launch must win if they ever are not.
+--
+-- NOT REPUBLISHED — `war_teams_unstaged` / `war_units_unordered` /
+-- `war_victory_unreachable` / `scenario_name` / `landmark_*` are game rules
+-- params and ride the `gameRules` section; the per-team ai_slate params are
+-- team rules params and ride `teams`.
+function gadget:Save(state)
+    state.aiStipends = aiStipends
+    state.unstagedChecked = unstagedChecked
+    state.pendingConvoyObjectives = pendingConvoyObjectives
+end
+
+function gadget:Load(state)
+    aiStipends = state.aiStipends or {}
+    unstagedChecked = state.unstagedChecked == true
+    pendingConvoyObjectives = state.pendingConvoyObjectives or {}
+end
+
 function gadget:GameFrame(frame)
     if not unstagedChecked and frame >= UNSTAGED_CHECK_FRAME then
         unstagedChecked = true

@@ -89,4 +89,29 @@ function M.due(state, frame, period)
     return M.count(state, frame, period) > 0
 end
 
+-- SNAPSHOT (PLAN-persistence task 1d-b)
+--
+-- A gate's `last` is an absolute frame stamp, so it is authored state, not
+-- derivable: `globals` restores gs->frameNum, and a gate left at the live
+-- process's `last` is then either in the future (count()'s rewind clamp fires
+-- and the gate re-phases onto the restored frame, silently moving a cadence
+-- that D15 went to some trouble to keep on its grid) or far in the past (an
+-- accrual gate banks every period between the two frames and pays a team an
+-- hour of stipend it never earned). Both are wrong in a way nothing warns
+-- about, which is why the six gadgets that hold gates all save theirs.
+--
+-- `period` is deliberately NOT saved: for the fixed-period gates it is a
+-- constant in the gadget, and for the two that take it from a config
+-- (authority's decay gate) the LIVE config must win — a snapshot restoring a
+-- period from a since-edited cost spec would resurrect the old cadence with
+-- nothing to say it had.
+
+function M.save(state)
+    return { last = state.last }
+end
+
+function M.load(state, saved)
+    state.last = (type(saved) == 'table' and tonumber(saved.last)) or 0
+end
+
 return M

@@ -351,6 +351,11 @@ class CSplitLuaHandle
 	public:
 		static void ClearGameParams() { spring::clear_unordered_map(gameParams); }
 		static const LuaRulesParams::Params& GetGameParams() { return gameParams; }
+		/// Snapshot restore (PLAN-persistence task 1d-b): game rules params are
+		/// synced state a gadget authored, so a rollback has to put the whole
+		/// map back — replacing it, never merging, so a key written after the
+		/// captured frame does not survive the restore that undoes it.
+		static void SetGameParams(LuaRulesParams::Params p) { gameParams = std::move(p); }
 
 	private:
 		friend class LuaSyncedCtrl;

@@ -465,6 +465,45 @@ local function dripAllowances(frame)
     end
 end
 
+-- ─────────────── Snapshot state (PLAN-persistence task 1d-b, §7.1d) ───────────────
+--
+-- CAPTURED — `stores`. The whole guidance store is *typed by a human*: stance,
+-- ROE, region paint, explicit asset locks, delegated objectives, the funding
+-- rate cap. None of it is a function of the board, so none of it is derivable.
+-- Two of its members are timed and are captured for the same reason a fuse is
+-- state: `veto[goalId]` and `touchLocks[groupId]` hold ABSOLUTE expiry frames,
+-- and `globals` restores the frame number they are measured against — dropping
+-- them would silently unblock a goal a human vetoed thirty seconds ago, and
+-- silently hand the co-commander a group the human is actively steering.
+-- `intent` carries its own `frame` stamps and is swept the same way.
+--
+-- CAPTURED — `changeSeq`. It is the change feed's monotonic cursor; the ring
+-- entries themselves are team rulesParams (restored by the `teams` section), so
+-- a restored ring with a reset cursor would overwrite the newest slot next and
+-- publish a `_change` value the panel has already seen.
+--
+-- CAPTURED — the allowance gate's phase. This one is an ACCRUAL gate, which is
+-- the case where losing it costs real money: `Tick.count` banks every whole
+-- period between `last` and the current frame, so a gate left at a live
+-- process's `last` after a restore to a much later frame pays the AI pools
+-- every minute in between at once, out of the team pool, tagged
+-- `ai_allowance` — a mint the ledger would faithfully record and nobody
+-- authorised.
+--
+-- NOT REPUBLISHED — every `guidance_*` key is a team rulesParam and rides the
+-- `teams` section.
+function gadget:Save(state)
+    state.stores = stores
+    state.changeSeq = changeSeq
+    state.allowanceGate = Tick.save(allowanceGate)
+end
+
+function gadget:Load(state)
+    stores = state.stores or {}
+    changeSeq = state.changeSeq or {}
+    Tick.load(allowanceGate, state.allowanceGate)
+end
+
 function gadget:GameFrame(frame)
     dripAllowances(frame)
     for teamID, s in pairs(stores) do

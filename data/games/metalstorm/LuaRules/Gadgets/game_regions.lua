@@ -273,6 +273,47 @@ function GG.Regions.SetControllingTeam(key, teamID)
     Spring.SetGameRulesParam('region_' .. key .. '_team', teamID or -1, PUBLIC)
 end
 
+-- ─────────────── Snapshot state (PLAN-persistence task 1d-b, §7.1d) ───────────────
+--
+-- CAPTURED — `ownershipState`. It is the hysteresis machine itself, and every
+-- field of it is authored by ticks that already happened: `owner` (which a
+-- scenario or a GM may also have set outright, so it is not a function of the
+-- current board), the per-team `leadTicks` streaks, `contested`, and
+-- `emptyTicks`. Recomputing it from the restored world would be wrong in the
+-- direction that matters most: a region three ticks into a flip reverts to
+-- zero progress, and a sticky owner 59 ticks into its 60-tick decay is handed
+-- another five minutes of ownership.
+--
+-- CAPTURED — `regionsRev`. It is a generation counter clients diff against;
+-- restoring the world without it lets a client that has seen rev 400 read the
+-- restored rev 12 and conclude nothing has changed since.
+--
+-- CAPTURED — the eval gate's phase (see tick.lua's own snapshot note).
+--
+-- RE-DERIVED, not captured — `provider`/`providerKind` (rebuilt by Initialize
+-- from `mapdata/regions.lua`, which is map content and cannot differ between
+-- capture and restore of the same war) and `gaiaTeam`.
+--
+-- NOT REPUBLISHED — the `region_*` rulesParams. They are game rules params and
+-- ride the snapshot's own `gameRules` section, which is applied immediately
+-- before this call: republishing here could only write the same values, and
+-- publish() is change-driven (it would write nothing at all, since it takes a
+-- changed-key list).
+function gadget:Save(state)
+    state.ownership = ownershipState
+    state.regionsRev = regionsRev
+    state.evalGate = Tick.save(evalGate)
+end
+
+function gadget:Load(state)
+    -- Defaults spelled out rather than "keep what this process has": a restore
+    -- to before a region was ever contested must CLEAR it, and an absent key
+    -- means the empty state machine, never the live one.
+    ownershipState = state.ownership or Ownership.newState()
+    regionsRev = tonumber(state.regionsRev) or 0
+    Tick.load(evalGate, state.evalGate)
+end
+
 function gadget:GameFrame(frame)
     if not Tick.due(evalGate, frame) then return end
     local units = gatherUnits()

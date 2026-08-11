@@ -763,6 +763,83 @@ function gadget:RecvLuaMsg(msg, playerID)
     end
 end
 
+-- ─────────────── Snapshot state (PLAN-persistence task 1d-b, §7.1d) ───────────────
+--
+-- A parley is a promise between two teams, and a promise is authored — nothing
+-- about the restored board says a ceasefire was ever offered, let alone
+-- accepted. The registry mirrors game_objectives' shape and so does this
+-- census; the differences are the interesting part.
+--
+-- CAPTURED — `proposals`, `nextId`, `archive`, `archiveRing`, `archiveSlot`,
+-- `activeList`, `activeIndex`, `pendingClear`. Same reasoning as objectives:
+-- `lookupProposal` reads across live + archive, the ring needs its cursor, a
+-- reset `nextId` re-issues a live id onto a live rulesParam prefix, and an id
+-- dropped from `pendingClear` never has its params cleared and never gets
+-- archived.
+--
+-- CAPTURED — `liveOutgoingCount`. It is E6's per-team cap on PENDING outgoing
+-- proposals, and it is a counter incremented and decremented against
+-- `activeList`, not read off it. Restore the proposals without it and either
+-- the cap reads zero (a team that has hit its limit may spam four more) or a
+-- decrement underflows a team permanently below it.
+--
+-- CAPTURED — `rejectCooldown`. Absolute frame stamps, keyed by team pair: the
+-- 2-minute cooldown after a rejection. Dropping it lets a team re-propose the
+-- instant a rollback lands, which turns a restore into a way to bypass E6.
+--
+-- CAPTURED — `trustLastDecay`. This is a per-pair cursor into a LAZY decay: the
+-- trust values themselves are game rules params (restored by the `gameRules`
+-- section), but `decayTrustTick` computes how many periods to apply from
+-- `frame - lastFrame`. A cursor left where the live process had it applies the
+-- decay between two different worlds' frames in a single tick — and unlike a
+-- Tick gate this one has no rewind clamp, so restoring backwards yields a
+-- negative period count and simply stops decaying that pair.
+--
+-- CAPTURED — `eventSeq`, for the same reason as authority's: the toast ring's
+-- slots are restored rulesParams, so a reset cursor overwrites the newest one.
+--
+-- DROPPED, and it is the one real drop here — `fireFrameOf`. It is keyed by
+-- projectileID, and in-flight projectiles are §7's named deliberate loss (they
+-- are not in the section table and never will be). Keeping the map would leave
+-- entries for projectiles that no longer exist, and ProjectileDestroyed can
+-- never fire for them, so it would leak one entry per in-flight round per
+-- restore forever. Cleared, not preserved — the E2 fire-frame rule can only
+-- speak about projectiles that exist.
+--
+-- RE-DERIVED, not captured — `PROPOSE_FEE` (a modoption, re-read in
+-- Initialize) and `proposeHooks`.
+function gadget:Save(state)
+    state.proposals = proposals
+    state.nextId = nextId
+    state.archive = archive
+    state.archiveRing = archiveRing
+    state.archiveSlot = archiveSlot
+    state.activeList = activeList
+    state.activeIndex = activeIndex
+    state.pendingClear = pendingClear
+    state.rejectCooldown = rejectCooldown
+    state.liveOutgoingCount = liveOutgoingCount
+    state.trustLastDecay = trustLastDecay
+    state.eventSeq = eventSeq
+end
+
+function gadget:Load(state)
+    proposals    = state.proposals or {}
+    nextId       = tonumber(state.nextId) or 1
+    archive      = state.archive or {}
+    archiveRing  = state.archiveRing or {}
+    archiveSlot  = tonumber(state.archiveSlot) or 0
+    activeList   = state.activeList or {}
+    activeIndex  = state.activeIndex or {}
+    pendingClear = state.pendingClear or {}
+    rejectCooldown    = state.rejectCooldown or {}
+    liveOutgoingCount = state.liveOutgoingCount or {}
+    trustLastDecay    = state.trustLastDecay or {}
+    eventSeq     = tonumber(state.eventSeq) or 0
+    -- See the census: the projectiles these ids name are gone by construction.
+    fireFrameOf = {}
+end
+
 function gadget:GameFrame(frame)
     -- Snapshot: resolution mutates activeList mid-iteration.
     local snapshot = {}

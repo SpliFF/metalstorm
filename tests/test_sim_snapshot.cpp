@@ -25,6 +25,7 @@
 #include "Server/StandingOrders.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "System/GlobalRNG.h"
+#include "Lua/LuaHandleSynced.h"   // CSplitLuaHandle::gameParams (task 1d-b)
 
 #include <set>
 #include <string>
@@ -231,7 +232,7 @@ TEST_CASE("LayoutHash is stable, non-trivial and folds every implemented section
         fold(s.version);
         ++implemented;
     }
-    CHECK(implemented == 8);
+    CHECK(implemented == 9);   // + gameRules (task 1d-b)
     CHECK(h == expect);
 }
 
@@ -1346,4 +1347,156 @@ TEST_CASE("task 1e: an empty features section is legal and stays empty") {
     std::string err;
     REQUIRE_MESSAGE(DecodeFeatures(bytes.data(), bytes.size(), out, err), err);
     CHECK(out.empty());
+}
+
+// ───────────────── task 1d-b: the gameRules section ─────────────────
+//
+// The section exists because of what task 1d-b found while writing the nine
+// gadgets' Save/Load: EVERY other rulesParam family hangs off an object the
+// walk already visits (team->modParams, u->modParams, f->modParams), and game
+// rules params hang off a process-wide static on CSplitLuaHandle. They were the
+// one family no section reached, and MissingSections() could not say so — the
+// same shape as 1c's Finding 2, a section nobody had thought of.
+
+namespace {
+
+std::vector<RulesParamState> loudGameRules()
+{
+    // One of each discriminator, plus the two shapes that have bitten this
+    // codec before: an empty string value (must survive as empty, not as a
+    // missing key) and a non-default los mask.
+    RulesParamState b;
+    b.key = "war_can_end"; b.los = 0; b.type = 0; b.b = true;
+    RulesParamState f;
+    f.key = "regions_rev"; f.los = 1; f.type = 1; f.f = 4207.5f;
+    RulesParamState s;
+    s.key = "objective_12_type"; s.los = 3; s.type = 2; s.s = "control";
+    RulesParamState empty;
+    empty.key = "scenario_name"; empty.los = 3; empty.type = 2; empty.s = "";
+    return {b, f, s, empty};
+}
+
+bool sameParam(const RulesParamState& a, const RulesParamState& b)
+{
+    return a.key == b.key && a.los == b.los && a.type == b.type &&
+           a.b == b.b && a.f == b.f && a.s == b.s;
+}
+
+} // namespace
+
+TEST_CASE("task 1d-b: the gameRules section round-trips every field") {
+    const std::vector<RulesParamState> in = loudGameRules();
+    std::vector<uint8_t> bytes;
+    EncodeGameRules(in, bytes);
+    REQUIRE(bytes.size() > 4);
+
+    std::vector<RulesParamState> out;
+    std::string err;
+    REQUIRE_MESSAGE(DecodeGameRules(bytes.data(), bytes.size(), out, err), err);
+    REQUIRE(out.size() == in.size());
+    for (size_t i = 0; i < in.size(); ++i) {
+        INFO("param index " << i << " (" << in[i].key << ")");
+        CHECK(sameParam(in[i], out[i]));
+    }
+    CHECK(out[3].s.empty());
+
+    // Re-encode symmetry: catches a field written but never read.
+    std::vector<uint8_t> again;
+    EncodeGameRules(out, again);
+    CHECK(again == bytes);
+}
+
+TEST_CASE("task 1d-b: a truncated gameRules section is a refusal at every cut point") {
+    // Every byte, not every seventh — 1c's Finding 3.
+    std::vector<uint8_t> bytes;
+    EncodeGameRules(loudGameRules(), bytes);
+    for (size_t cut = 1; cut < bytes.size(); ++cut) {
+        std::vector<RulesParamState> out;
+        std::string err;
+        INFO("gameRules cut at " << cut << " of " << bytes.size());
+        CHECK_FALSE(DecodeGameRules(bytes.data(), cut, out, err));
+        CHECK(!err.empty());
+    }
+}
+
+TEST_CASE("task 1d-b: trailing bytes inside the gameRules section are a refusal") {
+    std::vector<uint8_t> bytes;
+    EncodeGameRules(loudGameRules(), bytes);
+    bytes.push_back(0x5a);
+
+    std::vector<RulesParamState> out;
+    std::string err;
+    CHECK_FALSE(DecodeGameRules(bytes.data(), bytes.size(), out, err));
+    CHECK(err.find("trailing") != std::string::npos);
+}
+
+TEST_CASE("task 1d-b: an absurd gameRules count is refused before it is allocated") {
+    std::vector<uint8_t> bytes = {0xff, 0xff, 0xff, 0xff};
+    std::vector<RulesParamState> out;
+    std::string err;
+    CHECK_FALSE(DecodeGameRules(bytes.data(), bytes.size(), out, err));
+    CHECK(out.empty());
+}
+
+TEST_CASE("task 1d-b: an empty gameRules section is legal and stays empty") {
+    // A war whose gadgets have published nothing yet (pre-GameStart) must
+    // restore to an empty map rather than refuse.
+    std::vector<uint8_t> bytes;
+    EncodeGameRules({}, bytes);
+    std::vector<RulesParamState> out;
+    std::string err;
+    REQUIRE_MESSAGE(DecodeGameRules(bytes.data(), bytes.size(), out, err), err);
+    CHECK(out.empty());
+}
+
+TEST_CASE("task 1d-b: capture is sorted, and apply REPLACES rather than merges") {
+    // The property the whole section exists for. A gadget's Load could
+    // republish its own keys, but only the ones it still owns — an objective
+    // created after the captured frame would leave `objective_<id>_*` behind
+    // forever. Apply has to be a replacement.
+    //
+    // gameParams is a static on CSplitLuaHandle, so this is exercisable
+    // in-process: no sim, no gadget handler, no Lua state needed.
+    LuaRulesParams::Params live;
+    live["zulu"].value  = std::string("last-alphabetically");
+    live["alpha"].value = 1.0f;
+    live["mike"].value  = true;
+    CSplitLuaHandle::SetGameParams(live);
+
+    std::vector<RulesParamState> captured;
+    CaptureGameRules(captured);
+    REQUIRE(captured.size() == 3);
+    // Sorted by key: an unordered_map's iteration order is not a property the
+    // payload may depend on, or two captures of the SAME state differ.
+    CHECK(captured[0].key == "alpha");
+    CHECK(captured[1].key == "mike");
+    CHECK(captured[2].key == "zulu");
+
+    std::vector<uint8_t> bytes;
+    EncodeGameRules(captured, bytes);
+    std::vector<RulesParamState> reCaptured;
+    CaptureGameRules(reCaptured);
+    std::vector<uint8_t> again;
+    EncodeGameRules(reCaptured, again);
+    CHECK(again == bytes);
+
+    // Now the world moves on: a key is added and one is changed, exactly as a
+    // gadget publishing past the captured frame would do.
+    LuaRulesParams::Params later = live;
+    later["objective_99_state"].value = std::string("complete");
+    later["alpha"].value = 2.0f;
+    CSplitLuaHandle::SetGameParams(later);
+    REQUIRE(CSplitLuaHandle::GetGameParams().size() == 4);
+
+    ApplyGameRules(captured);
+    const auto& after = CSplitLuaHandle::GetGameParams();
+    // The key written after the capture is GONE — a merge would have kept it,
+    // and a client would still be reading a resolved objective's params.
+    CHECK(after.size() == 3);
+    CHECK(after.find("objective_99_state") == after.end());
+    const auto alphaIt = after.find("alpha");
+    REQUIRE(alphaIt != after.end());
+    CHECK(std::get<float>(alphaIt->second.value) == doctest::Approx(1.0f));
+
+    CSplitLuaHandle::ClearGameParams();
 }
