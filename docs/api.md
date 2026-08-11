@@ -197,6 +197,65 @@ curl -u admin:<password> -X POST http://localhost:8011/api/admin/set-faction \
 **Errors:** 400 (`username` or `faction` missing), 400 `{"ok":false,"error":"unknown faction"}`,
 401 (no/invalid token), 403 (not an admin), 404 `{"ok":false,"error":"no such user"}`
 
+#### POST /api/admin/drain
+
+**Admin only.** The deploy drain (PLAN-persistence task 3c). SIGTERMs **every** game server
+this lobby owns — wars included, unlike a lobby shutdown, because the binary those processes
+are running is about to be replaced — waits for each to checkpoint and exit, and reports what
+survived. Audited as `deploy_drain`. Synchronous: the lobby's HTTP surface is unresponsive
+until the slowest server has exited, which is accepted because a drain is the last thing done
+before stopping the lobby.
+
+```bash
+curl -X POST http://localhost:8011/api/admin/drain \
+  -H "Authorization: Bearer <token>" -d '{"timeout_ms":10000,"escalate":true}'
+```
+
+`timeout_ms` (default 10000, clamped to [100, 120000]) is how long a server may take to
+checkpoint; `escalate` (default true) SIGKILLs whatever is left after it.
+
+```json
+{"ok":true,"drained":true,"servers":2,"checkpointed":2,"lossy":0,"killed":0,
+ "still_alive":0,"engine_hash":"2d18454847f02919",
+ "summary":"drain: 2 server(s) signalled, 2 checkpointed",
+ "detail":[{"roomId":1,"pid":41895,"kind":"persistent_war","outcome":"checkpointed",
+            "frame":1553,"label":"hibernate:signal","waited_ms":251,"lossy":false,
+            "resume_eligibility":"resumable",
+            "describe":"war room 1: checkpointed at frame 1553 (hibernate:signal) and exited after 251 ms"}]}
+```
+
+**The two fields that decide whether it is safe to upgrade:** `drained` is false while any
+server is still running, and `lossy` counts *resumable worlds that were lost* — a war that
+exited without a fresh exit checkpoint, or was SIGKILLed. A skirmish or a replay server
+exiting with no snapshot is not a loss (`outcome: "exited_without_checkpoint"`,
+`lossy: false`). `outcome` is one of `not_running` / `checkpointed` /
+`exited_without_checkpoint` / `killed_after_timeout` / `still_alive`. `engine_hash` is the
+identity of the binary that was running, i.e. the one these snapshots are bound to.
+
+Room states are **not** changed by this route: the lobby's health loop classifies the exits
+it causes exactly as it classifies an idle hibernation, a fraction of a second later.
+
+**Errors:** 401 (no/invalid token), 403 (not an admin)
+
+#### Resume states on a war's room card
+
+A war's room JSON carries `war.state` — `live` / `resuming` / `hibernated` / `crashed` /
+`fresh` / **`unresumable`** — plus `frozen_frame` and `frozen_at` whenever the store holds
+anything, and (task 3c) `war.resume_eligibility`: `resumable`, `no_history`,
+`engine_changed`, `map_changed` or `unknown_binary`. When the eligibility refuses a resume,
+`war.resume_blocked_reason` carries the sentence a player is shown, e.g.
+
+```json
+{"state":"unresumable","frozen_frame":1793,"resume_eligibility":"engine_changed",
+ "resume_blocked_reason":"E1: the frozen world at frame 1793 was taken by engine 2d18454847f02919 and this server binary is 13c8413facfcb281 — snapshots do not cross a rebuild, so this war restarts at frame 0"}
+```
+
+The frozen frame is published **beside** the refusal, never instead of it: "hibernated at
+1793" and "1793 is gone" are different sentences and the card must not tell the first one.
+Such a war is still joinable — it comes back at frame 0. `unknown_binary` means the lobby
+could not probe `spring-server --print-engine-hash` (a binary older than that flag), in
+which case `--resume` is passed anyway and the game server's own E1 check refuses if it must.
+
 ### Rooms
 
 All room endpoints require authentication.

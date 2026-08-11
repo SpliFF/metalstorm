@@ -430,6 +430,11 @@ set(LOBBY_SERVER_SOURCES
     # SELECT against `game_snapshots` — the lobby decides whether a war comes
     # back on its stored world, and needs no part of the sim to do it.
     rts/Server/WarResume.cpp
+    # PLAN-persistence task 3c: the deploy drain. Pure policy plus one popen to
+    # ask the game-server binary for its own E1 engine hash — the lobby cannot
+    # compute it (separate link target, and it may spawn a binary from another
+    # build tree). No sim, no sqlite of its own.
+    rts/Server/DeployDrain.cpp
     rts/Server/AI/AIDiscovery.cpp
     rts/Server/GameDiscovery.cpp
     rts/Server/ScenarioDiscovery.cpp
@@ -568,6 +573,10 @@ if(TEST_SOURCES)
         # Policy is pure; the one DB read is a plain SELECT (sqlite3 only, no
         # sim), so the whole file tests here against an in-memory database.
         ${CMAKE_SOURCE_DIR}/rts/Server/WarResume.cpp
+        # PLAN-persistence task 3c: the deploy drain's policy half. Pure —
+        # the only impure function (the popen probe) has its parser tested
+        # here and its fork exercised live.
+        ${CMAKE_SOURCE_DIR}/rts/Server/DeployDrain.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GameServersDb.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/HeadlessRun.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/StatsDump.cpp

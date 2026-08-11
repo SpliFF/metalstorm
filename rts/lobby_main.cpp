@@ -34,6 +34,7 @@
 #include "Server/ScenarioDb.h"
 #include "Server/ScenarioDiscovery.h"
 #include "Server/TokenBucket.h"
+#include "Server/DeployDrain.h"
 #include "Server/WarLifecycle.h"
 #include "Server/WarResume.h"
 #include "System/SpringLog/SpringLog.h"
@@ -425,6 +426,71 @@ static std::string gReplayDir;
 /// a case-insensitive filesystem, so it cannot be included here at all.)
 static std::unordered_map<uint32_t, std::string> gReplayRooms;
 
+/// The game-server binary this lobby forks. Release wins when it exists —
+/// which is also task 3b's field note ("a debug-only rebuild is invisible in a
+/// lobby arm") and the reason the engine-hash probe below has to ask THIS file
+/// rather than the lobby's own build stamp.
+static std::string gameServerBinaryPath() {
+  if (std::filesystem::exists("./build/release/spring-server"))
+    return "./build/release/spring-server";
+  return "./build/debug/spring-server";
+}
+
+/// The E1 identity of that binary (PLAN-persistence task 3c), probed by running
+/// it with `--print-engine-hash` and cached on (path, mtime, size).
+///
+/// Cached rather than probed per call because it is consulted on every room
+/// broadcast, once per war — a fork+exec per card would be absurd. Keyed on the
+/// file's own stamp rather than on a lobby-lifetime flag because the case this
+/// exists for is precisely *the binary being replaced*: a deploy that swaps
+/// spring-server under a running lobby must be observed, or the lobby keeps
+/// promising resumes the new binary will refuse.
+///
+/// An empty return means "could not tell" (an older binary with no such flag,
+/// or a probe that failed). Every consumer treats that as "let the game server
+/// decide", i.e. exactly the pre-3c behaviour — see
+/// warresume::ResumeEligibility::UnknownBinary.
+static std::string gameServerEngineHash() {
+  static std::string cachedPath;
+  static std::string cachedHash;
+  static int64_t cachedMtime = 0;
+  static uintmax_t cachedSize = 0;
+  static bool warned = false;
+
+  const std::string bin = gameServerBinaryPath();
+  std::error_code ec;
+  const auto mtime = std::filesystem::last_write_time(bin, ec);
+  const int64_t mt =
+      ec ? 0 : static_cast<int64_t>(mtime.time_since_epoch().count());
+  std::error_code szEc;
+  const uintmax_t sz = std::filesystem::file_size(bin, szEc);
+  if (bin == cachedPath && mt == cachedMtime && sz == cachedSize)
+    return cachedHash;
+
+  std::string err;
+  const std::string hash = deploydrain::ProbeServerEngineHash(bin, err);
+  cachedPath = bin;
+  cachedMtime = mt;
+  cachedSize = sz;
+  cachedHash = hash;
+  if (hash.empty()) {
+    // Once per process: this is a capability gap, not a per-war event, and the
+    // consequence (no pre-flight, the server refuses instead) is the same for
+    // every room.
+    if (!warned) {
+      warned = true;
+      SLOG(SPRING_LOG_WARNING,
+           "snapshot E1 pre-check disabled — %s; a post-upgrade war will be "
+           "refused by the game server instead of by the lobby",
+           err.c_str());
+    }
+  } else {
+    SLOG(SPRING_LOG_NOTICE, "game server %s engine hash %s (snapshot E1)",
+         bin.c_str(), hash.c_str());
+  }
+  return cachedHash;
+}
+
 static GameServerInstance spawnGameServer(
     uint32_t roomId, const std::string &gameId, const std::string &gameVersion,
     const std::string &mapId, const std::string &dbPath,
@@ -481,10 +547,7 @@ static GameServerInstance spawnGameServer(
   inst.gameId = gameId;
 
   // Build the command
-  std::string serverBin = "./build/debug/spring-server";
-  // Check if release build exists
-  if (std::filesystem::exists("./build/release/spring-server"))
-    serverBin = "./build/release/spring-server";
+  const std::string serverBin = gameServerBinaryPath();
 
   // Create log directory
   std::filesystem::create_directories("data/logs");
@@ -1196,8 +1259,16 @@ int main(int argc, char *argv[]) {
       if (f.serverProcessAlive)
         f.serverReady = gameServerReady(room.id);
     }
-    if (room.sessionKind == SessionKind::PersistentWar)
+    if (room.sessionKind == SessionKind::PersistentWar) {
       f.snapshot = warresume::LatestSnapshot(mapDb, room.gameId, room.id);
+      // The E1 pre-flight's other half (PLAN-persistence task 3c): what the
+      // spawn would run. `mapHash` is the room's map id, which is what
+      // server_main stamps into StoreConfig.mapHash, so a room re-pointed at
+      // another map (or a map re-processed under the same id — that one the
+      // stamp cannot see) is caught here rather than by an aborting process.
+      f.binary.engineHash = gameServerEngineHash();
+      f.binary.mapHash = room.mapId;
+    }
     return f;
   };
 
@@ -2162,6 +2233,203 @@ int main(int argc, char *argv[]) {
         return HttpAuth::JsonResponse(200, out.dump());
       });
 
+  // POST /api/admin/drain {timeout_ms, escalate} — the deploy drain
+  // (PLAN-persistence task 3c).
+  //
+  // SIGTERM every game server this lobby owns, wait for each to checkpoint and
+  // exit, and report which worlds survived. This is the operator's step BEFORE
+  // replacing the binary, and the report is what tells them whether it is safe
+  // to: `lossy` counts resumable worlds that were lost, and `drained` is false
+  // while anything is still running.
+  //
+  // Every kind is signalled, wars included — see DeployDrain.h for why this is
+  // deliberately NOT `ActionOnLobbyExit`'s rule (which leaves a war running,
+  // correct for a lobby restart and exactly wrong for a deploy: the binary that
+  // process is executing is about to be replaced under it).
+  //
+  // TWO THINGS THIS HANDLER DELIBERATELY DOES NOT DO:
+  //   * it does not touch room state, `gameServers` or `game_servers`. The
+  //     hibernated/crashed classification and the recycle-or-hold decision are
+  //     the health loop's, and this lane has twice paid for a second copy of a
+  //     policy. The exits it causes are observed there a fraction of a second
+  //     later, exactly as an idle hibernation is.
+  //   * it does not iterate any shared container while it waits. Targets are
+  //     snapshotted into a local vector in one pass and the (up to `timeout_ms`)
+  //     wait polls only local pids — the health loop runs on the main thread and
+  //     erases from `gameServers`, so a handler holding an iterator across a
+  //     ten-second sleep would be a use-after-erase rather than mere contention.
+  //
+  // It IS synchronous, so the lobby's HTTP surface is unresponsive for as long
+  // as the slowest server takes to checkpoint. That is accepted: a drain is the
+  // last thing an operator does before stopping the lobby, and an asynchronous
+  // one would have to publish progress somewhere just to be waited on.
+  net.AddHttpPost(
+      "/api/admin/drain", RouteAuth::AdminOnly,
+      [mapDb, &db, &rooms, &gameServers,
+       requireLobbyAdmin](const std::string &, const std::string &body,
+                          const HttpRequestHeaders &headers) -> HttpResponse {
+        int64_t uid;
+        std::string uname;
+        if (auto e = requireLobbyAdmin(headers, uid, uname))
+          return *e;
+        nlohmann::json j = nlohmann::json::parse(body, nullptr, false);
+        if (j.is_discarded())
+          j = nlohmann::json::object();
+        // 10 s covers a Metalstorm checkpoint with room to spare (task 3a
+        // measured 12–13 kB written in well under a second); the 120 s ceiling
+        // exists so a typo cannot wedge the lobby's HTTP surface for an hour.
+        int timeoutMs = j.value("timeout_ms", 10000);
+        if (timeoutMs < 100) timeoutMs = 100;
+        if (timeoutMs > 120000) timeoutMs = 120000;
+        const bool escalate = j.value("escalate", true);
+
+        // One pass over the shared state, then nothing but local copies.
+        struct Pending {
+          deploydrain::DrainTarget target;
+          warresume::SnapshotFacts before;
+          bool exited = false;
+          bool escalated = false;
+          int64_t waitedMs = 0;
+        };
+        std::vector<Pending> pending;
+        for (const auto &[roomId, inst] : gameServers) {
+          Pending p;
+          p.target.roomId = roomId;
+          p.target.pid = inst.pid;
+          p.target.alive = inst.pid > 0 && isProcessAlive(inst.pid);
+          p.target.isReplay = gReplayRooms.count(roomId) > 0;
+          if (const auto *room = rooms.GetRoom(roomId)) {
+            p.target.kind = room->sessionKind;
+            if (p.target.kind == SessionKind::PersistentWar)
+              p.before = warresume::LatestSnapshot(mapDb, room->gameId, roomId);
+          }
+          pending.push_back(std::move(p));
+        }
+
+        const auto t0 = std::chrono::steady_clock::now();
+        const auto elapsedMs = [&t0]() -> int64_t {
+          return std::chrono::duration_cast<std::chrono::milliseconds>(
+                     std::chrono::steady_clock::now() - t0)
+              .count();
+        };
+
+        int signalled = 0;
+        for (auto &p : pending) {
+          if (deploydrain::DecideDrainAction(p.target) !=
+              deploydrain::DrainAction::Signal)
+            continue;
+          kill(p.target.pid, SIGTERM);
+          ++signalled;
+        }
+        SLOG(SPRING_LOG_NOTICE,
+             "drain requested by '%s': SIGTERM to %d game server(s), waiting up "
+             "to %d ms",
+             uname.c_str(), signalled, timeoutMs);
+
+        // Wait on local pids only.
+        while (elapsedMs() < timeoutMs) {
+          bool anyLeft = false;
+          for (auto &p : pending) {
+            if (p.exited ||
+                deploydrain::DecideDrainAction(p.target) !=
+                    deploydrain::DrainAction::Signal)
+              continue;
+            if (!isProcessAlive(p.target.pid)) {
+              p.exited = true;
+              p.waitedMs = elapsedMs();
+            } else {
+              anyLeft = true;
+            }
+          }
+          if (!anyLeft)
+            break;
+          std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+
+        for (auto &p : pending) {
+          if (p.exited ||
+              deploydrain::DecideDrainAction(p.target) !=
+                  deploydrain::DrainAction::Signal)
+            continue;
+          p.waitedMs = elapsedMs();
+          if (!escalate)
+            continue;
+          kill(p.target.pid, SIGKILL);
+          p.escalated = true;
+          // A SIGKILLed pid goes away promptly, but not instantly, and the
+          // outcome must not depend on how fast this loop got back to it.
+          for (int i = 0; i < 20 && isProcessAlive(p.target.pid); ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+          p.exited = !isProcessAlive(p.target.pid);
+        }
+
+        // The store is read AFTER the exits: a checkpoint is committed by the
+        // dying process, so a read taken any earlier proves nothing.
+        std::vector<deploydrain::DrainResult> results;
+        nlohmann::json detail = nlohmann::json::array();
+        for (auto &p : pending) {
+          warresume::SnapshotFacts after;
+          std::string gameId;
+          if (const auto *room = rooms.GetRoom(p.target.roomId)) {
+            gameId = room->gameId;
+            if (p.target.kind == SessionKind::PersistentWar)
+              after = warresume::LatestSnapshot(mapDb, gameId, p.target.roomId);
+          }
+          auto r = deploydrain::BuildResult(p.target, p.exited, p.escalated,
+                                            p.waitedMs, p.before, after);
+          // "Resumable until the rebuild" — the eligibility under the CURRENT
+          // binary. Nothing here can know the next one's hash; see DeployDrain.h.
+          warresume::BinaryIdentity cur;
+          cur.engineHash = gameServerEngineHash();
+          if (const auto *room = rooms.GetRoom(p.target.roomId))
+            cur.mapHash = room->mapId;
+          r.eligibility =
+              warresume::DecideResumeEligibility(after, cur).eligibility;
+          const std::string line = deploydrain::Describe(r);
+          SLOG(r.lossy ? SPRING_LOG_WARNING : SPRING_LOG_NOTICE, "drain: %s",
+               line.c_str());
+          detail.push_back({
+              {"roomId", r.roomId},
+              {"pid", r.pid},
+              {"kind", r.kind == SessionKind::PersistentWar ? "persistent_war"
+                                                           : "skirmish"},
+              {"outcome", deploydrain::ToString(r.outcome)},
+              {"frame", r.frame},
+              {"label", r.label},
+              {"waited_ms", r.waitedMs},
+              {"lossy", r.lossy},
+              {"resume_eligibility", warresume::ToString(r.eligibility)},
+              {"describe", line},
+          });
+          results.push_back(std::move(r));
+        }
+
+        const auto summary = deploydrain::Summarise(results);
+        const std::string headline = deploydrain::Describe(summary);
+        SLOG(summary.lossy > 0 || !summary.drained ? SPRING_LOG_WARNING
+                                                   : SPRING_LOG_NOTICE,
+             "%s", headline.c_str());
+        db.LogAudit(uid, uname, "deploy_drain", "lobby",
+                    "servers=" + std::to_string(summary.servers) +
+                        " checkpointed=" + std::to_string(summary.checkpointed) +
+                        " lossy=" + std::to_string(summary.lossy) +
+                        " killed=" + std::to_string(summary.killed) +
+                        " drained=" + (summary.drained ? "1" : "0"));
+
+        nlohmann::json out;
+        out["ok"] = true;
+        out["drained"] = summary.drained;
+        out["servers"] = summary.servers;
+        out["checkpointed"] = summary.checkpointed;
+        out["lossy"] = summary.lossy;
+        out["killed"] = summary.killed;
+        out["still_alive"] = summary.stillAlive;
+        out["engine_hash"] = gameServerEngineHash();
+        out["summary"] = headline;
+        out["detail"] = detail;
+        return HttpAuth::JsonResponse(200, out.dump());
+      });
+
   // POST /api/admin/ban {username} — account ban + immediate session revoke.
   net.AddHttpPost(
       "/api/admin/ban", RouteAuth::AdminOnly,
@@ -3003,6 +3271,15 @@ int main(int argc, char *argv[]) {
       if (wfacts.snapshot.has) {
         wj["frozen_frame"] = wfacts.snapshot.frame;
         wj["frozen_at"] = wfacts.snapshot.takenAt;
+        // Whether that frame is a promise or a loss (PLAN-persistence task 3c).
+        // Published beside the frame, never instead of it: a card that dropped
+        // the frame would say "fresh war" about a world somebody played for a
+        // week, and one that dropped the verdict would offer to resume it.
+        const auto elig =
+            warresume::DecideResumeEligibility(wfacts.snapshot, wfacts.binary);
+        wj["resume_eligibility"] = warresume::ToString(elig.eligibility);
+        if (warresume::RefusesResume(elig.eligibility))
+          wj["resume_blocked_reason"] = elig.reason;
       }
       if (haveLive) {
         wj["spectators"] = live.spectators;
@@ -4137,9 +4414,23 @@ int main(int argc, char *argv[]) {
     // `--resume` only when a snapshot row was SEEN: the server treats a missing
     // snapshot as fatal by design (Hibernation.h), so asking to resume a war
     // that has never run would abort the process instead of launching it.
-    const bool resumeFromSnapshot =
-        room.sessionKind == SessionKind::PersistentWar &&
-        warresume::LatestSnapshot(mapDb, room.gameId, room.id).has;
+    //
+    // The decision runs through `warresume::PlanJoin` rather than re-testing
+    // `.has` here (task 3c). The join route already logs that plan, and the two
+    // reads used to be able to disagree about more than a pruned row: a world
+    // this binary may not load (E1) has history and must NOT get the flag, and a
+    // second copy of that rule here is how one of them would eventually not
+    // learn it. `serverProcessAlive` is deliberately false in the facts we build
+    // — we are the spawn, and PlanJoin's live-process branch would otherwise
+    // short-circuit the resume decision the caller already made.
+    warresume::WarFacts spawnFacts = warFactsFor(room);
+    spawnFacts.serverProcessAlive = false;
+    spawnFacts.serverReady = false;
+    const auto spawnPlan = warresume::PlanJoin(room.sessionKind, spawnFacts);
+    const bool resumeFromSnapshot = spawnPlan.withResume;
+    if (!spawnPlan.blockedReason.empty())
+      SLOG(SPRING_LOG_WARNING, "war room %u: %s", room.id,
+           warresume::Describe(spawnPlan).c_str());
     auto inst = spawnGameServer(room.id, room.gameId, gameVer, room.mapId,
                                 dbPath, room.players, room.aiSlots,
                                 room.modOptions, busyPorts, devBuildAcknowledged,
@@ -4480,7 +4771,11 @@ int main(int argc, char *argv[]) {
             // spawnServerForRoom re-reads the store and is what actually
             // happens. They can only differ if a prune lands between the two
             // reads, and the honest outcome then is the spawn's, not the log's.
-            SLOG(SPRING_LOG_NOTICE, "war room %u: %s for '%s'", roomId,
+            // A dropped world is a WARNING, not a notice: the frames are gone
+            // and this line is the only record of which ones (task 3c).
+            SLOG(plan.blockedReason.empty() ? SPRING_LOG_NOTICE
+                                            : SPRING_LOG_WARNING,
+                 "war room %u: %s for '%s'", roomId,
                  warresume::Describe(plan).c_str(), user->username.c_str());
             spawnServerForRoom(*joined, userId, "war_resume");
           } else if (joined->sessionKind == SessionKind::PersistentWar) {

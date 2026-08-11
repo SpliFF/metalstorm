@@ -17,6 +17,7 @@
 #include <sys/stat.h>              // soak dump's db-size sample (S8)
 #include "Lua/LuaHandleSynced.h"   // CSplitLuaHandle::GetGameParams — growth counters
 #include "Server/GmVerbs.h"
+#include "Server/EngineIdentity.h"
 #include "Server/GameStateStore.h"
 #include "Server/Hibernation.h"
 #include "Server/SimSnapshot.h"
@@ -151,6 +152,24 @@ int main(int argc, char* argv[])
 {
     savedArgc = argc;
     savedArgv = argv;
+
+    // `--print-engine-hash`: print this binary's E1 identity and exit, before
+    // logging, SQLite or anything else is touched (PLAN-persistence task 3c).
+    //
+    // It exists because the LOBBY has to apply the §2 post-upgrade policy
+    // before it forks a server, and it cannot compute this value: the lobby is
+    // a separate link target with its own build stamp, and it spawns
+    // `build/release/spring-server` when one exists — possibly from another
+    // build tree entirely. The binary that will read the snapshot is the only
+    // honest source, so it answers for itself. stdout is exactly the 16 hex
+    // digits + newline, which is what `game_snapshots.engine_hash` stores.
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) != "--print-engine-hash")
+            continue;
+        std::printf("%s\n",
+                    engineid::HashHex(engineid::StampHash(SPRING_BUILD_STAMP)).c_str());
+        return 0;
+    }
 
     // D33: serialize SQLite before the first connection is opened —
     // springlog_init's sqlite sink is one, and the sim loop and network
@@ -1116,15 +1135,10 @@ int main(int argc, char* argv[])
     gamestate::StoreConfig snapCfg;
     snapCfg.gameId  = gameId;
     snapCfg.mapHash = mapId;
-    {
-        const char* stamp = SPRING_BUILD_STAMP;
-        uint64_t h = 1469598103934665603ull;
-        for (const char* p = stamp; *p; ++p) {
-            h ^= uint64_t(uint8_t(*p));
-            h *= 1099511628211ull;
-        }
-        snapCfg.engineHash = h;
-    }
+    // One recipe, two readers: the same call answers `--print-engine-hash`
+    // above, which is what the lobby probes to apply the E1 policy before it
+    // forks (PLAN-persistence task 3c / EngineIdentity.h).
+    snapCfg.engineHash = engineid::StampHash(SPRING_BUILD_STAMP);
     gamestate::GameStateStore gmSnapshotStore(db.Handle(), snapCfg);
 
     // PLAN-persistence task 1b: the ISimSerializer walk (Q-P1 option B). It is

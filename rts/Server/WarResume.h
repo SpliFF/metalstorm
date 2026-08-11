@@ -71,6 +71,20 @@ struct SnapshotFacts {
     int32_t  frame   = -1;
     int64_t  takenAt = 0;
     std::string label;
+    /// The E1 stamps, as `game_snapshots` stores them: `engine_hash` is 16
+    /// lowercase hex of the writing binary's build-stamp hash (engineid::
+    /// HashHex) and `map_hash` is the processed-map id. Read here rather than
+    /// left in the blob because the LOBBY has to apply the E1 policy *before*
+    /// it forks a server (PLAN-persistence task 3c) — the blob is only opened
+    /// by the game server, by which point the process is committed.
+    ///
+    /// The blob also carries a `layoutHash` (the serializer's shape) which is
+    /// deliberately NOT a column and is not checked here: any change to the
+    /// walk is a rebuild, and a rebuild moves the build stamp, so the engine
+    /// hash already refuses everything a layout check would. The game server
+    /// still checks all three — this is a pre-flight, never the authority.
+    std::string engineHash;
+    std::string mapHash;
     /// The label is one of Hibernation.h's `hibernate:<reason>` values, i.e.
     /// the world was checkpointed *on the way out* rather than mid-game by a
     /// GM verb. This is the clean/dirty exit discriminator (see the header
@@ -86,6 +100,68 @@ SnapshotFacts LatestSnapshot(sqlite3* db, const std::string& gameId, uint32_t ro
 /// True for the labels `DecideExitCheckpoint` produces. Exposed for the test
 /// that pins the two files' agreement without linking the sim.
 bool IsHibernationLabel(const std::string& label);
+
+// ───────────── E1 at the lobby: may this binary load that world? ─────────────
+//
+// PLAN-persistence task 3c, and the reason it is a *policy* rather than a side
+// effect of the stamp. §2's accepted policy is "engine upgrades end
+// resumability for hibernated games", and until now that ended as follows: the
+// join saw a snapshot row, passed `--resume`, the server's DecodeBlob refused
+// with EngineMismatch, and `DoResume` aborted the process — by design, because
+// coming up empty while publishing `game_status.ready` is worse. The room was
+// then left with a dead pid, and `PlanJoin` gates on a live pid, so the NEXT
+// join planned exactly the same spawn. A post-upgrade war was unjoinable
+// forever, one aborting process per attempt, with nothing in the lobby able to
+// say why.
+//
+// So the lobby now asks the question the blob would have answered, off the
+// row's own stamps, before the fork. It is a PRE-FLIGHT and not the authority:
+// the server still validates every blob it opens (and the layout hash, which
+// is not a column). When the lobby cannot tell — the binary would not report
+// its hash — the old behaviour is what happens: pass `--resume` and let the
+// server decide.
+
+/// What the current binary can do with the world the store holds.
+enum class ResumeEligibility : uint8_t {
+    /// Nothing stored: a war's first launch. Not an error.
+    NoHistory = 0,
+    /// The stamps match, or we could not check them (see UnknownBinary).
+    Resumable,
+    /// E1: the snapshot was taken by a different build. This is the
+    /// post-upgrade case — and, because the build stamp carries a timestamp,
+    /// also every ordinary developer rebuild.
+    EngineChanged,
+    /// E1: the room's map was re-processed (or the room changed map) since the
+    /// snapshot was written. The world's heights are not this map's.
+    MapChanged,
+    /// The lobby has no engine hash for the binary it would spawn, so it
+    /// cannot pre-check. Treated as Resumable by every caller, deliberately.
+    UnknownBinary,
+};
+
+const char* ToString(ResumeEligibility e);
+
+/// True for the two verdicts that mean "do not pass --resume".
+bool RefusesResume(ResumeEligibility e);
+
+/// The identity of the binary+map the resume would run under. An empty
+/// `engineHash` means "not probed" → UnknownBinary.
+struct BinaryIdentity {
+    std::string engineHash;  ///< engineid::HashHex of the server binary's stamp
+    std::string mapHash;     ///< the room's processed-map id (`--map`)
+};
+
+struct ResumeVerdict {
+    ResumeEligibility eligibility = ResumeEligibility::NoHistory;
+    /// Always populated, and written to be read by a player as well as an
+    /// operator — it is what the room card and the log line both say.
+    std::string reason;
+};
+
+/// Pure. Order: no history → nothing to judge; no probed hash → unknown;
+/// engine before map, because an upgraded engine makes the map question moot.
+ResumeVerdict DecideResumeEligibility(const SnapshotFacts& snap,
+                                      const BinaryIdentity& cur);
 
 // ───────────────────────── what the room card shows ─────────────────────────
 
@@ -111,6 +187,12 @@ enum class WarState : uint8_t {
     Crashed,
     /// A war that has never run: no process, no history, never in flight.
     Fresh,
+    /// No process, a frozen world in the store, and this binary may not load
+    /// it (E1 — see `ResumeEligibility`). The war is joinable and will come
+    /// back at frame 0; the frame it froze at is still published, because
+    /// "hibernated at 302" and "302 is gone" are different sentences and the
+    /// card must not tell the first one.
+    Unresumable,
 };
 
 const char* ToString(WarState s);
@@ -125,17 +207,26 @@ struct WarFacts {
     /// when the process vanished?), never about the process.
     ERoomState roomState = ERoomState::Filling;
     SnapshotFacts snapshot;
+    /// What the spawn would run (task 3c). Left empty by callers that have not
+    /// probed the server binary — the E1 pre-flight then abstains rather than
+    /// guessing, and behaviour is exactly what it was before 3c.
+    BinaryIdentity binary;
 };
 
 /// Pure. Order of evaluation is the specification:
 ///   1. not a war                                → NotAWar
 ///   2. a live process                           → Live / Resuming
-///   3. was in flight and left no exit checkpoint→ Crashed
-///   4. any snapshot history                     → Hibernated
-///   5. otherwise                                → Fresh
-/// 3 sits ABOVE 4 on purpose: a war that crashed with an old GM checkpoint on
+///   3. history this binary may not load (E1)    → Unresumable
+///   4. was in flight and left no exit checkpoint→ Crashed
+///   5. any snapshot history                     → Hibernated
+///   6. otherwise                                → Fresh
+/// 4 sits ABOVE 5 on purpose: a war that crashed with an old GM checkpoint on
 /// disk is resumable *and* lost frames, and only one of those two facts is
 /// worth putting on a card unprompted.
+/// 3 sits above BOTH (task 3c): a war that crashed *and* was then upgraded past
+/// its own snapshots has lost the frames since the last checkpoint and the
+/// frames before it, so "crashed" would understate it — the whole world is
+/// going back to frame 0 and that is the fact the next joiner needs.
 WarState Classify(SessionKind kind, const WarFacts& f);
 
 // ────────────────────────────── what a join does ─────────────────────────────
@@ -167,6 +258,16 @@ struct WarJoinPlan {
     int32_t resumeFrame = -1;
     /// What the room is (or is about to be), for the card and the log.
     WarState state = WarState::NotAWar;
+    /// Why a stored world is NOT being resumed, when one exists and E1 refuses
+    /// it (task 3c). Empty otherwise. This is the sentence the player sees —
+    /// the frames are being dropped either way, and the one thing the system
+    /// must not do is drop them silently.
+    ResumeEligibility eligibility = ResumeEligibility::NoHistory;
+    std::string blockedReason;
+    /// The frame the world was frozen at but will NOT come back at, when
+    /// `blockedReason` is set. −1 otherwise. Kept separate from `resumeFrame`
+    /// so no caller can print a promise out of a loss.
+    int32_t lostFrame = -1;
 };
 
 WarJoinPlan PlanJoin(SessionKind kind, const WarFacts& f);
