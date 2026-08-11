@@ -419,6 +419,11 @@ set(LOBBY_SERVER_SOURCES
     # glob) because HttpAuth::ValidateAuth consults the enrolment table on
     # every Basic-auth request there too.
     rts/Server/Totp.cpp
+    # PLAN-metalstorm-lobby.md task 8c: guest/provisional accounts. Shared for
+    # the same reason as AuthTokens — the lobby mints and upgrades them, and
+    # the game server reaches `users.is_provisional` through Database on every
+    # AuthRequest.
+    rts/Server/GuestAccounts.cpp
     rts/Server/MapMetadataDb.cpp
     rts/Server/GameServersDb.cpp
     rts/Server/AI/AIDiscovery.cpp
@@ -520,6 +525,7 @@ if(TEST_SOURCES)
         ${CMAKE_SOURCE_DIR}/rts/Server/WarPlayerBindings.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/AuthTokens.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/Totp.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/GuestAccounts.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/ScenarioDiscovery.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/ScenarioDb.cpp
         # GameDiscovery + its ConfigReader backend: test_game_discovery.cpp

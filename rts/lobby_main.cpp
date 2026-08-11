@@ -11,6 +11,7 @@
 #include "Server/Database.h"
 #include "Server/GrowthCounters.h"
 #include "Server/GameServersDb.h"
+#include "Server/GuestAccounts.h"
 #include "Server/MapMetadata.h"
 #include "Server/NetworkServer.h"
 #include "Server/ReplayFile.h"
@@ -5258,6 +5259,22 @@ int main(int argc, char *argv[]) {
       if (audit > 0 || errs > 0)
         SLOG(SPRING_LOG_INFO, "swept %d audit + %d client-error row(s)", audit,
              errs);
+
+      // PLAN-metalstorm-lobby.md task 8c: abandoned guest accounts, on the
+      // same cadence and the same connection. `POST /api/auth/guest` is the
+      // one route in the app that mints an account with nothing presented, so
+      // without this it is `users` that grows for the life of the deployment
+      // — the exact shape T2a-4 above closed for the other three tables.
+      //
+      // Deletes only a guest who never upgraded, has not been seen for 30
+      // days AND holds no war binding: a guest who took a seat owns durable
+      // per-player state in a world that may still be running, and the row is
+      // the only thing that can give it back to them.
+      const int guests =
+          GuestAccounts::PruneAbandoned(maintenanceDb.Handle(),
+                                        static_cast<int64_t>(std::time(nullptr)));
+      if (guests > 0)
+        SLOG(SPRING_LOG_INFO, "swept %d abandoned guest account(s)", guests);
     }
 
     // Re-broadcast the room list while a war is running (~every 5s at 10 Hz).

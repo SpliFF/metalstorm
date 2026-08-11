@@ -24,4 +24,13 @@
         <p id="login-msg" class="msg"></p>
         <p class="hint">New username? Enter a password twice to register.</p>
     </form>
+    <!-- Guest sign-in (PLAN-metalstorm-lobby.md §7.1, task 8c). Outside the
+         form so it cannot submit it, and below the hint rather than beside the
+         button: it is the third-choice path, not a peer of "Login". A guest
+         account is real — it holds a war seat and everything earned in one —
+         and claiming it later keeps all of that. -->
+    <div class="login-guest">
+        <button type="button" id="login-guest-btn" class="link-button">Play as a guest</button>
+        <p class="hint">No sign-up. You can claim the account later and keep everything.</p>
+    </div>
 </div>

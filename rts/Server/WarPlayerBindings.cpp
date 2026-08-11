@@ -167,6 +167,23 @@ std::vector<WarPlayerBinding> WarPlayerBindings::ForRoom(sqlite3* db, uint32_t r
     return out;
 }
 
+int WarPlayerBindings::RenameAccount(sqlite3* db, int64_t accountId,
+                                     const std::string& username) {
+    if (!db || accountId <= 0 || username.empty()) return 0;
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db,
+            "UPDATE war_player_bindings SET username=? WHERE account_id=?",
+            -1, &stmt, nullptr) != SQLITE_OK) {
+        sqlite3_finalize(stmt);
+        return 0;
+    }
+    sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 2, accountId);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return sqlite3_changes(db);
+}
+
 int WarPlayerBindings::DeleteForAccount(sqlite3* db, int64_t accountId) {
     if (!db) return 0;
     sqlite3_stmt* stmt = nullptr;

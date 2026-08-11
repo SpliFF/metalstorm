@@ -67,10 +67,16 @@ describe('runLogout', () => {
         // in task 8a and is the worst of the three to miss: a 30-day
         // credential left in localStorage rotates itself into a fresh session
         // on the next page load, so the logout silently undoes itself.
+        // `springrts-device-token` (task 8c) is the same failure one
+        // credential along — the guest resume path would re-adopt the account
+        // the player just left. Pinned as an exact list rather than a
+        // superset check on purpose: every new long-lived credential should
+        // have to come here and argue, which is what caught this one.
         expect([...LOGOUT_CLEARED_KEYS]).toEqual([
             'springrts-username',
             'springrts-token',
             'springrts-refresh-token',
+            'springrts-device-token',
             'springrts-game-room',
             'springrts-game-port',
         ]);

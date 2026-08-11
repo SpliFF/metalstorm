@@ -178,6 +178,62 @@ button.danger:hover { background: #cc3333; }
     color: #cfe6f5;
 }
 
+/* Guest sign-in + the upgrade panel (PLAN-metalstorm-lobby.md §7.1, task 8c).
+   The sign-in is a LINK, not a button: it sits directly under a real submit
+   button, and two filled buttons in a column read as two equal choices when
+   one of them is the default and the other is the escape hatch. */
+.login-guest {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    margin-top: 18px;
+    padding-top: 16px;
+    border-top: 1px solid #253040;
+}
+button.link-button {
+    background: none;
+    padding: 0;
+    color: #4cc9f0;
+    font-size: 13px;
+    text-decoration: underline;
+}
+button.link-button:hover { background: none; color: #7fdcff; }
+
+/* The upgrade panel is a settings surface, so it takes the same card
+   treatment as the 2FA one rather than the login form's column. */
+.guest-panel {
+    background: #12161c;
+    border: 1px solid #253040;
+    border-radius: 6px;
+    padding: 14px 16px;
+    margin-bottom: 16px;
+}
+.guest-panel h3 { margin: 0 0 8px; font-size: 15px; }
+.guest-panel input,
+.guest-panel select {
+    padding: 10px 14px;
+    border: 1px solid #334;
+    border-radius: 6px;
+    background: #0f1626;
+    color: #e0e0e0;
+    font-size: 14px;
+}
+.guest-form {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+/* The cost line is the one piece of text in this panel that changes what the
+   player decides, so it does not read as a hint. */
+.guest-cost {
+    font-size: 13px;
+    line-height: 1.4;
+    color: #e8c07d;
+    margin: 2px 0 0;
+    min-height: 34px;
+}
+
 .lobby-header {
     display: flex;
     align-items: center;

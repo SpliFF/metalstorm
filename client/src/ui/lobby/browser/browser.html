@@ -24,6 +24,37 @@
              panel below; the label reflects the current state, so an account
              that has it on says so without the panel being open. -->
         <button id="totp-btn" class="secondary" title="Two-factor authentication">2FA</button>
+        <!-- Guest upgrade (PLAN-metalstorm-lobby.md §7.1, task 8c). Shown only
+             for a provisional account, because for everyone else it is an
+             offer to become what they already are. -->
+        <button id="guest-upgrade-btn" class="primary" style="display:none"
+                title="Set a password and keep this account">Claim account</button>
+    </div>
+    <!-- Claiming the account. Same card treatment as the 2FA panel and hidden
+         the same way: this is a settings surface on a screen whose job is
+         picking a game.
+
+         The faction picker matters more than it looks. A guest's faction is
+         PROVISIONAL, and confirming it here is the moment it becomes
+         permanent (§1a) — so switching it is the audited override's act (§1b)
+         and costs every war seat held on the old side. That is what
+         `guest-cost` says, before the button rather than after. -->
+    <div id="guest-panel" class="guest-panel" style="display:none">
+        <h3>Claim your account</h3>
+        <p class="hint">Your account, your war seats and everything you have earned stay exactly as they are — you are adding a password, not making a new account.</p>
+        <div class="guest-form">
+            <input type="text" id="guest-username" placeholder="Choose a username (optional)">
+            <input type="password" id="guest-password" placeholder="Password (8 characters or more)">
+            <select id="guest-faction" class="game-select">
+                <option value="">Keep my faction</option>
+            </select>
+            <p id="guest-cost" class="guest-cost"></p>
+            <div class="totp-row">
+                <button id="guest-confirm-btn">Claim account</button>
+                <button id="guest-close-btn" class="secondary">Close</button>
+            </div>
+            <p id="guest-msg" class="msg"></p>
+        </div>
     </div>
     <!-- Two-factor enrolment. Hidden until asked for: this is a settings
          surface on a screen whose job is picking a game, and a permanently

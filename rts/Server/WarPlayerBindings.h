@@ -100,6 +100,21 @@ public:
     /// population and the "my wars" filter (task 6) read this.
     static std::vector<WarPlayerBinding> ForRoom(sqlite3* db, uint32_t roomId);
 
+    /// Re-stamp the denormalised `username` on every binding an account
+    /// holds (task 8c).
+    ///
+    /// The column is a copy of `users.username`, kept for operator reads and
+    /// log lines — every functional reader keys on `account_id`, which is why
+    /// this is not a correctness fix today. It exists because until the guest
+    /// upgrade there was no path in the system that renamed an account, so
+    /// the copy could never go stale and nothing had to maintain it. Now one
+    /// does, and a table whose name column silently disagrees with `users`
+    /// is exactly the sort of thing the next reader trusts.
+    ///
+    /// Returns rows updated.
+    static int RenameAccount(sqlite3* db, int64_t accountId,
+                             const std::string& username);
+
     /// Drop every binding an account holds, in every war. The audited faction
     /// override (`POST /api/admin/set-faction`) calls this: §1b says changing
     /// a faction "clears the account's per-war bindings", and task 0 recorded

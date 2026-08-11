@@ -22,6 +22,10 @@ import {
     classifyLoginResponse, describeStatus, formatSecret, normaliseCode,
     type TotpStatus,
 } from './totp';
+import {
+    classifyUpgradeResponse, clearDeviceToken, decideBoot, describeUpgradeCost,
+    displayGuestName, DEVICE_TOKEN_KEY, storeDeviceToken,
+} from './guest';
 import { Connection, type ConnectionState } from '../core/connection.js';
 import { CONFIG, stampUrl } from '../config.js';
 import { ClientPayload } from '../protocol/spring-web/client-payload.js';
@@ -365,10 +369,17 @@ export class LobbyUI {
         console.log(`[lobby] init: savedUser=${savedUser ?? 'null'} savedToken=${savedToken ? savedToken.substring(0,8) + '...' : 'null'} suppressed=${suppressed}`);
         if (this.suppressed) {
             this.hide();
-        } else if (savedUser && savedToken) {
-            this.tryAutoLogin(savedUser, savedToken);
         } else {
-            this.showLogin();
+            // Task 8c: a third boot state — no session, but a guest device
+            // token. The ordering is `decideBoot`'s, and it runs one way only
+            // (session beats device); see guest.ts for why the reverse breaks
+            // every reload after an upgrade.
+            const boot = decideBoot(
+                savedUser && savedToken ? savedToken : null,
+                browserTokenStore.get(DEVICE_TOKEN_KEY));
+            if (boot.kind === 'session') this.tryAutoLogin(savedUser!, savedToken!);
+            else if (boot.kind === 'resume-guest') void this.resumeGuest(boot.deviceToken);
+            else this.showLogin();
         }
     }
 
@@ -764,6 +775,10 @@ export class LobbyUI {
                 descEl.textContent = f ? f.description : '';
             };
         }
+        // Task 8c. Optional in the same way every other control here is: a
+        // game's template override may ship a login screen without it.
+        const guestBtn = document.getElementById('login-guest-btn') as HTMLButtonElement | null;
+        if (guestBtn) guestBtn.onclick = () => { void this.signInAsGuest(); };
         this.fetchFactionsForSignup();
     }
 
@@ -968,6 +983,219 @@ export class LobbyUI {
         const allBtn = document.getElementById('logout-all-btn') as HTMLButtonElement | null;
         if (allBtn) allBtn.onclick = () => { void this.logoutEverywhere(); };
         this.wireTotpPanel();
+        this.wireGuestPanel();
+    }
+
+    // ===================== GUEST ACCOUNTS (task 8c) =====================
+
+    /// True while this session belongs to a provisional account. Held so the
+    /// browser screen can offer the upgrade — and so it can NOT offer it to
+    /// everyone else, for whom it is an invitation to become what they are.
+    private isProvisional = false;
+
+    /**
+     * Sign in with no account at all. The response is a real session on a real
+     * account, so everything downstream — polling, rooms, wars — is the
+     * ordinary path from here; the only difference is the device token, which
+     * is what makes this account survive closing the tab.
+     */
+    private async signInAsGuest(): Promise<void> {
+        const msgEl = document.getElementById('login-msg');
+        if (msgEl) { msgEl.textContent = 'Signing in…'; msgEl.className = 'msg'; }
+        try {
+            // The faction picker on the login form is the sign-up one, and it
+            // is only visible when a confirm-password has been typed. Sent if
+            // the player happened to choose — a guest may hold a provisional
+            // faction, and one that does can fight rather than only watch.
+            const faction = (document.getElementById('login-faction') as HTMLSelectElement | null)?.value ?? '';
+            const resp = await fetch(`${CONFIG.httpUrl}/api/auth/guest`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(faction ? { faction } : {}),
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok || !data?.token) {
+                if (msgEl) {
+                    msgEl.textContent = data?.error ?? 'Guest sign-in failed';
+                    msgEl.className = 'msg error';
+                }
+                return;
+            }
+            storeDeviceToken(data, browserTokenStore);
+            this.adoptGuestSession(data);
+        } catch (err) {
+            if (msgEl) {
+                msgEl.textContent = `Connection failed: ${err}`;
+                msgEl.className = 'msg error';
+            }
+        }
+    }
+
+    /// Come back as the guest this browser already is. Falls back to the login
+    /// screen rather than retrying: unlike an access token, a device token
+    /// that is refused is not going to start working — it has expired, been
+    /// revoked by an upgrade, or the account was swept.
+    private async resumeGuest(deviceToken: string): Promise<void> {
+        try {
+            const resp = await fetch(`${CONFIG.httpUrl}/api/auth/guest/resume`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ device_token: deviceToken }),
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (resp.ok && data?.token) {
+                console.log('[lobby] resumed guest session');
+                this.adoptGuestSession(data);
+                return;
+            }
+            clearDeviceToken(browserTokenStore);
+        } catch { /* network error — the login screen is still the answer */ }
+        this.showLogin();
+    }
+
+    /// Shared tail of both guest entry points. Deliberately does NOT go
+    /// through `adoptSession`: that one writes `springrts-token` via
+    /// storeTokens and looks for a saved room to rejoin, both of which are
+    /// right here — but it also assumes a full account, and the provisional
+    /// flag has to be set before showBrowser() renders the header.
+    private adoptGuestSession(data: {
+        token?: string; user_id?: number; username?: string; faction?: string;
+    }): void {
+        this.authToken = data.token ?? '';
+        this.myPlayerId = data.user_id ?? 0;
+        this.myFaction = data.faction ?? '';
+        this.isProvisional = true;
+        if (data.username) localStorage.setItem('springrts-username', data.username);
+        storeTokens({ token: this.authToken }, browserTokenStore);
+        this.startPolling();
+        this.showBrowser();
+    }
+
+    /**
+     * Wire the "Claim account" panel.
+     *
+     * The cost line is re-rendered on every faction change rather than only on
+     * submit, because the decision it describes is not reversible: switching
+     * faction gives up every war seat held on the old side (§1b, inherited by
+     * the upgrade), and a player who learns that from the result has already
+     * paid it.
+     */
+    private wireGuestPanel(): void {
+        const openBtn = document.getElementById('guest-upgrade-btn') as HTMLButtonElement | null;
+        const panel = document.getElementById('guest-panel');
+        if (!openBtn || !panel) return;
+
+        // Everyone who is not a guest sees nothing at all.
+        openBtn.style.display = this.isProvisional ? 'inline-block' : 'none';
+        if (!this.isProvisional) { panel.style.display = 'none'; return; }
+
+        // Logging out of a guest account ends it: the device token is the only
+        // credential it has, and a logout has to clear it (see logout.ts). The
+        // warning goes on the control rather than into a confirm() dialog, so
+        // it is readable before the click rather than after it.
+        const logoutBtn = document.getElementById('logout-btn') as HTMLButtonElement | null;
+        if (logoutBtn) {
+            logoutBtn.title = 'Logging out ends this guest account — claim it '
+                + 'first to keep your war seats and everything you have earned.';
+        }
+
+        // A guest must not be offered 2FA, and the reason is a one-way door
+        // rather than tidiness: `totp/disable` costs the PASSWORD as well as a
+        // code (task 8d, deliberately — a stolen session must not strip the
+        // factor), and a guest has no password. So a guest who enrolled would
+        // hold a factor they can never remove — one that meanwhile gates
+        // nothing, because their sign-in is `guest/resume`, which presents a
+        // device token and never visits /api/auth/login. Offered again the
+        // moment the account is claimed, which is when it starts working.
+        const totpBtn = document.getElementById('totp-btn') as HTMLButtonElement | null;
+        if (totpBtn) totpBtn.style.display = 'none';
+
+        const select = document.getElementById('guest-faction') as HTMLSelectElement | null;
+        const costEl = document.getElementById('guest-cost');
+        const renderCost = () => {
+            if (costEl) costEl.textContent =
+                describeUpgradeCost(this.myFaction, select?.value || this.myFaction);
+        };
+
+        openBtn.onclick = () => {
+            panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+            if (panel.style.display !== 'block') return;
+            // The picker is filled from the game's declared factions, the same
+            // source the sign-up form uses — a guest confirming a faction is
+            // making the sign-up choice, just later.
+            if (select && select.options.length <= 1) {
+                for (const f of this.availableFactions) {
+                    const opt = document.createElement('option');
+                    opt.value = f.key;
+                    opt.textContent = f.fullName || f.name;
+                    select.appendChild(opt);
+                }
+                if (this.availableFactions.length === 0) void this.fetchFactionsForSignup();
+            }
+            renderCost();
+        };
+        if (select) select.onchange = renderCost;
+        (document.getElementById('guest-close-btn') as HTMLButtonElement | null)
+            ?.addEventListener('click', () => { panel.style.display = 'none'; });
+        (document.getElementById('guest-confirm-btn') as HTMLButtonElement | null)
+            ?.addEventListener('click', () => { void this.upgradeGuest(); });
+    }
+
+    private async upgradeGuest(): Promise<void> {
+        const msgEl = document.getElementById('guest-msg');
+        const username = (document.getElementById('guest-username') as HTMLInputElement | null)?.value.trim() ?? '';
+        const password = (document.getElementById('guest-password') as HTMLInputElement | null)?.value ?? '';
+        const faction = (document.getElementById('guest-faction') as HTMLSelectElement | null)?.value ?? '';
+        const say = (text: string, error = false) => {
+            if (msgEl) { msgEl.textContent = text; msgEl.className = error ? 'msg error' : 'msg'; }
+        };
+        if (!password) { say('Choose a password', true); return; }
+
+        try {
+            const body: Record<string, string> = { password };
+            if (username) body.username = username;
+            // Sent only when the player actually moved the picker. An echo of
+            // the current faction is harmless server-side (it compares before
+            // deciding) but omitting it keeps "kept" and "re-chosen" the same
+            // request, which is what the promise above says they are.
+            if (faction && faction !== this.myFaction) body.faction = faction;
+
+            const resp = await fetch(`${CONFIG.httpUrl}/api/auth/upgrade`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${this.authToken}`,
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(body),
+            });
+            const data = await resp.json().catch(() => ({}));
+            const outcome = classifyUpgradeResponse(resp, data);
+            if (outcome.kind === 'name-in-use') {
+                // Not a dead end: the upgrade itself is fine, it is the rename
+                // that the live roster blocks — so say what to do instead of
+                // what went wrong.
+                say(`${outcome.message}. You can claim the account now and `
+                    + `choose a name afterwards by clearing the name field.`, true);
+                return;
+            }
+            if (outcome.kind !== 'ok') { say(outcome.message, true); return; }
+
+            this.authToken = outcome.data.token ?? this.authToken;
+            this.myFaction = outcome.data.faction ?? this.myFaction;
+            this.isProvisional = false;
+            if (outcome.data.username)
+                localStorage.setItem('springrts-username', outcome.data.username);
+            storeTokens(outcome.data, browserTokenStore);
+            // The server has already revoked it; this drops the copy that
+            // would otherwise sit in a shared browser's localStorage.
+            clearDeviceToken(browserTokenStore);
+            const lost = outcome.data.cleared_bindings ?? 0;
+            console.log(`[lobby] account claimed: user=${outcome.data.username}`
+                + ` faction=${this.myFaction} cleared_bindings=${lost}`);
+            this.showBrowser();
+        } catch (err) {
+            say(`Connection failed: ${err}`, true);
+        }
     }
 
     // ===================== TWO-FACTOR (task 8d) =====================
@@ -1247,8 +1475,13 @@ export class LobbyUI {
         // can see *which* account they are about to log out of — the whole
         // point of the control on a shared machine. Escaped here because
         // renderTemplate substitutes raw.
+        // Task 8c: a generated guest name is 14 characters of hex nobody can
+        // read back, and the header's job is telling the player WHICH account
+        // this is. `displayGuestName` shortens it and leaves a claimed name
+        // exactly as typed.
         this.container.innerHTML = renderTemplate(this.templates.browser, {
-            account_name: this.esc(localStorage.getItem('springrts-username') ?? ''),
+            account_name: this.esc(
+                displayGuestName(localStorage.getItem('springrts-username') ?? '')),
         });
         this.wireLogoutButton();
         document.getElementById('create-room-btn')!.onclick = () => {

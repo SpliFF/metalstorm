@@ -27,6 +27,15 @@ export const LOGOUT_CLEARED_KEYS = [
     // is only half the job; `revokeToken` also presents it so the server kills
     // the family, because a copy taken off this machine is still live.
     'springrts-refresh-token',
+    // Task 8c, same failure one credential along: a device token left behind
+    // resumes the guest on the very next page load, so the logout undoes
+    // itself. Note what this costs and why it is still right — a guest account
+    // has no password, so clearing the device token is the END of that
+    // account, not a sign-out. That is what "log out" has to mean on a shared
+    // machine (the control exists so the next person is not you), so the
+    // button warns instead of the key staying behind; see LobbyUI's
+    // `wireGuestPanel`.
+    'springrts-device-token',
     'springrts-game-room',
     'springrts-game-port',
 ] as const;
