@@ -17,8 +17,13 @@
 //      knows about.** That one killed wars, and it is the one path where the
 //      process would otherwise have survived intact: the startup adoption
 //      pass re-attaches to a live server by pid, so a war whose process is
-//      still running comes back *with its sim*, which is the only lossless
-//      resume that exists before PLAN-persistence lands snapshots.
+//      still running comes back *with its sim*.
+//      (When this was written that was the ONLY lossless resume there was. It
+//      is no longer: PLAN-persistence task 3a/3b give a war an exit checkpoint
+//      and a `--resume` boot, so a war whose process really did die comes back
+//      at the frame it froze at. Leaving a live process alone is still
+//      preferred — it is free and exact — but it is no longer the only option,
+//      and `warresume::PlanJoin` owns the other one.)
 //
 // Everything here is a pure function of values — the same discipline
 // DynamicJoin.h and GameStartCoordinator.h use, so the policy is testable
@@ -75,51 +80,17 @@ inline OrphanedRoomAction ActionForOrphanedRoom(SessionKind kind) {
                                               : OrphanedRoomAction::RecycleToFilling;
 }
 
-/// Why a join did or did not bring a war's game server back up.
-enum class WarResumeOutcome : uint8_t {
-    /// Not a persistent war — a skirmish is started by its host, never by a
-    /// joiner walking in.
-    NotAWar = 0,
-    /// A server is already running for this room; the joiner connects to it.
-    AlreadyLive,
-    /// A spawn is already in flight (the room is Loading and its server has
-    /// not published ready yet). Spawning a second one would bind a second
-    /// port for the same room and split the war between two sims.
-    ComingUp,
-    /// Bring the war back up, then let the joiner in.
-    Resume,
-};
-
-inline const char* WarResumeOutcomeToString(WarResumeOutcome o) {
-    switch (o) {
-        case WarResumeOutcome::NotAWar:     return "not a persistent war";
-        case WarResumeOutcome::AlreadyLive: return "war already live";
-        case WarResumeOutcome::ComingUp:    return "war server already starting";
-        case WarResumeOutcome::Resume:      return "resuming the war";
-    }
-    return "unknown";
-}
-
-/// Decide whether joining this room should relaunch its game server.
-///
-/// @param kind           the room's session kind
-/// @param hasLiveServer  a game server process for this room is alive *now*
-///                       (checked by pid, not by the `game_servers` row —
-///                       a stale row is exactly the case this exists for)
-/// @param state          the room's state
-///
-/// ⚠ A resumed war restarts its **sim** from frame 0: nothing snapshots the
-/// world yet (PLAN-persistence owns that, and creg is stubbed out — see
-/// PLAN-metalstorm-lobby.md §5.4). Resume here means "the war is there when
-/// you walk up to it", not "the war is where you left it". The lossless case
-/// is the one above — a war whose process never died.
-inline WarResumeOutcome DecideWarResume(SessionKind kind, bool hasLiveServer,
-                                        ERoomState state) {
-    if (kind != SessionKind::PersistentWar)
-        return WarResumeOutcome::NotAWar;
-    if (hasLiveServer)
-        return WarResumeOutcome::AlreadyLive;
-    if (state == ERoomState::Loading)
-        return WarResumeOutcome::ComingUp;
-    return WarResumeOutcome::Resume;
-}
+// ─── Resume-on-join moved out (PLAN-persistence task 3b, 2026-08-12) ───
+//
+// `WarResumeOutcome` / `DecideWarResume` used to live here. They are SUPERSEDED
+// by `warresume::PlanJoin` (rts/Server/WarResume.h) and were deleted rather
+// than deprecated in place: a join now has to decide whether to pass `--resume`
+// as well as whether to spawn, and that needs the snapshot store, which this
+// header deliberately cannot see. Two policies for one decision is the failure
+// mode this lane keeps finding.
+//
+// The old `ComingUp` outcome also carried a liveness bug worth remembering
+// here, next to `HoldForResume` which is what made it reachable: it gated on
+// `state == Loading`, and a HELD war keeps the state it died in — so a war
+// whose server died mid-launch read as "already coming up" to every subsequent
+// join, forever, with nothing coming up. `PlanJoin` gates on a live pid.

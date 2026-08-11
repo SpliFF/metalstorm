@@ -426,6 +426,10 @@ set(LOBBY_SERVER_SOURCES
     rts/Server/GuestAccounts.cpp
     rts/Server/MapMetadataDb.cpp
     rts/Server/GameServersDb.cpp
+    # PLAN-persistence task 3b: resume-on-join. Pure policy plus one read-only
+    # SELECT against `game_snapshots` — the lobby decides whether a war comes
+    # back on its stored world, and needs no part of the sim to do it.
+    rts/Server/WarResume.cpp
     rts/Server/AI/AIDiscovery.cpp
     rts/Server/GameDiscovery.cpp
     rts/Server/ScenarioDiscovery.cpp
@@ -560,6 +564,10 @@ if(TEST_SOURCES)
         # (std-lib only) — the engine-coupled half is the wiring in
         # server_main.cpp, so both policies test off-engine.
         ${CMAKE_SOURCE_DIR}/rts/Server/Hibernation.cpp
+        # PLAN-persistence task 3b: the LOBBY's half of the same lifecycle.
+        # Policy is pure; the one DB read is a plain SELECT (sqlite3 only, no
+        # sim), so the whole file tests here against an in-memory database.
+        ${CMAKE_SOURCE_DIR}/rts/Server/WarResume.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GameServersDb.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/HeadlessRun.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/StatsDump.cpp

@@ -35,6 +35,7 @@
 #include "Server/ScenarioDiscovery.h"
 #include "Server/TokenBucket.h"
 #include "Server/WarLifecycle.h"
+#include "Server/WarResume.h"
 #include "System/SpringLog/SpringLog.h"
 #include "System/SpringLog/SpringLogSqlite.h"
 #include <cctype>
@@ -318,7 +319,13 @@ struct GameServerInstance {
   pid_t pid = 0;
   std::string mapId;
   std::string gameId;
-  enum State { Starting, Running, Ended, Crashed } state = Starting;
+  /// `Hibernated` is the one state with no process behind it (PLAN-persistence
+  /// task 3b): a war whose server checkpointed itself and exited keeps its
+  /// `game_servers` row with `pid = 0` so /api/processes, the fleet view and the
+  /// MCP debug tools show a frozen war rather than nothing at all. Every
+  /// liveness check in this file goes through `isProcessAlive`, which returns
+  /// false for pid 0, so a hibernated row can never be mistaken for a server.
+  enum State { Starting, Running, Ended, Crashed, Hibernated } state = Starting;
 };
 
 /// Find a free TCP port by actually trying to bind one. Caller can
@@ -446,7 +453,21 @@ static GameServerInstance spawnGameServer(
     // `persistent` there for its idle policy), but the kind decides whether
     // GameStart waits for the roster, and that decision is made during set-up,
     // before that read happens. One source, one reader.
-    SessionKind sessionKind = SessionKind::Skirmish) {
+    SessionKind sessionKind = SessionKind::Skirmish,
+    // PLAN-persistence task 3b: bring this room's world up out of the snapshot
+    // store instead of staging a fresh one (`--resume`). Only ever true when
+    // the caller has SEEN a snapshot row for (gameId, roomId) — the server
+    // treats a missing snapshot as fatal by design, so an unconditional flag
+    // would abort every war's first launch. `warresume::PlanJoin` owns that
+    // decision; this parameter only carries it.
+    bool resumeFromSnapshot = false,
+    // PLAN-persistence task 3b: the idle window after which a war checkpoints
+    // itself and exits (`--hibernate-idle-seconds`). Passed by the LOBBY, for
+    // the same reason `--session-kind` is: hibernating is only safe for a room
+    // something will respawn on join, and the lobby is the only thing that
+    // can. The server binary keeps its own default of 0 so a bare
+    // `spring-server` still never exits a world nobody can bring back.
+    int hibernateIdleSeconds = 0) {
   const bool isReplay = !replayFile.empty();
   GameServerInstance inst;
   inst.roomId = roomId;
@@ -553,6 +574,7 @@ static GameServerInstance spawnGameServer(
 
     std::string portStr = std::to_string(inst.port);
     std::string roomStr = std::to_string(roomId);
+    std::string hibernateIdleStr = std::to_string(hibernateIdleSeconds);
 
     // Build argv: fixed args first, then one "--player <spec>"
     // pair per human slot, then one "--ai <spec>" pair per AI
@@ -612,6 +634,16 @@ static GameServerInstance spawnGameServer(
         argv.push_back("--journal-file");
         argv.push_back(replayPathStorage.c_str());
       }
+      // Hibernation (PLAN-persistence task 3b). Both flags are war-only: a
+      // skirmish has its own idle exit and no world worth freezing, and
+      // `--resume` on a skirmish would ask the store for a snapshot nobody
+      // ever took.
+      if (resumeFromSnapshot)
+        argv.push_back("--resume");
+      if (hibernateIdleSeconds > 0) {
+        argv.push_back("--hibernate-idle-seconds");
+        argv.push_back(hibernateIdleStr.c_str());
+      }
     }
     if (devBuildAcknowledged)
       argv.push_back(DevBuildGate::kFlag);
@@ -639,8 +671,10 @@ static GameServerInstance spawnGameServer(
     else
       SLOG(SPRING_LOG_NOTICE,
            "spawned game server pid=%d port=%d for room %u "
-           "(%zu players, %zu AI)",
-           pid, inst.port, roomId, playerRoster.size(), aiSlots.size());
+           "(%zu players, %zu AI)%s%s",
+           pid, inst.port, roomId, playerRoster.size(), aiSlots.size(),
+           resumeFromSnapshot ? " --resume" : "",
+           hibernateIdleSeconds > 0 ? " (hibernates when idle)" : "");
   } else {
     SLOG(SPRING_LOG_ERROR, "fork failed");
     inst.state = GameServerInstance::Crashed;
@@ -745,6 +779,24 @@ int main(int argc, char *argv[]) {
     const char *e = std::getenv("SPRING_LOBBY_KILL_WARS_ON_EXIT");
     return e && *e && std::string(e) != "0";
   }();
+  // PLAN-persistence task 3b: how long a war's game server may sit with no
+  // connected clients before it checkpoints itself and exits, freeing a process
+  // and a port (`--hibernate-idle-seconds` on the spawned server). Task 3a
+  // deliberately left the SERVER's default at 0, because a war that exits is
+  // unjoinable until something respawns it — that something is this file, so
+  // the default lives here and is ON.
+  //
+  // Five minutes, not five seconds: the window has to be longer than the gap a
+  // player leaves by reloading their browser (a reload disconnects, and a war
+  // that hibernated in that gap would make every refresh a resume). It also
+  // has to be longer than the server's own startup grace, which it is.
+  // `--war-hibernate-idle-seconds 0` switches hibernation off, which leaves
+  // wars behaving exactly as they did before 3b: the process stays up forever
+  // and the lossless resume is the adopted pid.
+  int warHibernateIdleSeconds = [] {
+    const char *e = std::getenv("SPRING_LOBBY_WAR_HIBERNATE_IDLE_SECONDS");
+    return (e && *e) ? std::atoi(e) : 300;
+  }();
 
   for (int i = 1; i < argc; i++) {
     std::string arg = argv[i];
@@ -783,6 +835,8 @@ int main(int argc, char *argv[]) {
       clientErrorRetentionDays = std::atoi(argv[++i]);
     } else if (arg == "--kill-wars-on-exit") {
       killWarsOnExit = true;
+    } else if (arg == "--war-hibernate-idle-seconds" && i + 1 < argc) {
+      warHibernateIdleSeconds = std::atoi(argv[++i]);
     } else if (arg == "--game" && i + 1 < argc) {
       // Back-compat: `--game <path>` is translated into
       // `--games-dir <parent>` so existing scripts that point
@@ -942,6 +996,9 @@ int main(int argc, char *argv[]) {
     case GameServerInstance::Crashed:
       stateStr = "crashed";
       break;
+    case GameServerInstance::Hibernated:
+      stateStr = "hibernated";
+      break;
     }
     ExecPrepared(
         mapDb,
@@ -969,6 +1026,18 @@ int main(int argc, char *argv[]) {
     // exit, but a SIGKILL/crash can leave it behind — drop it here too so a
     // dead room never looks "ready".
     ExecPrepared(mapDb, "DELETE FROM game_status WHERE room_id=?",
+                 [&](sqlite3_stmt *s) {
+                   sqlite3_bind_int(s, 1, static_cast<int>(roomId));
+                 });
+    // Same reasoning for the war digest, and it started to matter with
+    // PLAN-persistence task 3b: nothing ever deleted this row, so a hibernated
+    // war's card carried `live: true` and the population and frame it had a
+    // minute before it froze, right next to `state: "hibernated"` — two halves
+    // of one card contradicting each other, and the stale half is the one with
+    // the numbers on it. `live` means "a running server is publishing a
+    // digest"; a room with no process is not that (observed live, room 1
+    // reporting frame 301 while frozen at 302).
+    ExecPrepared(mapDb, "DELETE FROM war_summary WHERE room_id=?",
                  [&](sqlite3_stmt *s) {
                    sqlite3_bind_int(s, 1, static_cast<int>(roomId));
                  });
@@ -1111,6 +1180,27 @@ int main(int argc, char *argv[]) {
   std::unordered_map<uint32_t, GameServerInstance>
       gameServers; // roomId → instance
 
+  /// Everything `warresume` needs about one room, gathered in one place so the
+  /// room card, the join route and the health loop cannot disagree about what a
+  /// war is (PLAN-persistence task 3b).
+  ///
+  /// Liveness is by PID, never by the `game_servers` row: a stale row is the
+  /// case the whole hold-for-resume path exists for. Readiness is
+  /// `game_status.ready`, the only honest "is it serving?" signal — the room's
+  /// own Loading→Active flip is driven FROM it by the health loop.
+  auto warFactsFor = [&](const GameRoom &room) -> warresume::WarFacts {
+    warresume::WarFacts f;
+    f.roomState = room.state;
+    if (auto it = gameServers.find(room.id); it != gameServers.end()) {
+      f.serverProcessAlive = isProcessAlive(it->second.pid);
+      if (f.serverProcessAlive)
+        f.serverReady = gameServerReady(room.id);
+    }
+    if (room.sessionKind == SessionKind::PersistentWar)
+      f.snapshot = warresume::LatestSnapshot(mapDb, room.gameId, room.id);
+    return f;
+  };
+
   // A room whose game server is gone. Four callers reach this state (a stale
   // `game_servers` row at startup, two startup sweeps over Loading/Active
   // rooms with nothing adopted, and the health-check loop watching a pid
@@ -1167,6 +1257,30 @@ int main(int argc, char *argv[]) {
       const unsigned char *mid = sqlite3_column_text(stmt, 3);
       const unsigned char *gid = sqlite3_column_text(stmt, 4);
       const unsigned char *st = sqlite3_column_text(stmt, 5);
+      const std::string stateStr =
+          st ? reinterpret_cast<const char *>(st) : "running";
+
+      // A hibernated/crashed war (PLAN-persistence task 3b) is a row with NO
+      // process by construction — pid 0, written by the health loop when the
+      // server checkpointed and exited. It is not stale: deleting it would lose
+      // the "frozen at frame N" the fleet view shows, and the pid test below
+      // would delete it every single lobby start. Checked on the state string
+      // rather than on the pid so a recycled pid can never make it adoptable.
+      if (stateStr == "hibernated" || stateStr == "crashed") {
+        GameServerInstance held;
+        held.roomId = rid;
+        held.port = 0; // the port was handed back; the next resume picks one
+        held.pid = 0;
+        held.mapId = mid ? reinterpret_cast<const char *>(mid) : "";
+        held.gameId = gid ? reinterpret_cast<const char *>(gid) : "";
+        held.state = (stateStr == "hibernated") ? GameServerInstance::Hibernated
+                                                : GameServerInstance::Crashed;
+        gameServers[rid] = held;
+        SLOG(SPRING_LOG_NOTICE,
+             "adopted %s war room=%u (no process — the next join resumes it)",
+             stateStr.c_str(), rid);
+        continue;
+      }
 
       if (!isProcessAlive(pid)) {
         staleRooms.push_back(rid);
@@ -1182,8 +1296,6 @@ int main(int argc, char *argv[]) {
       // We don't know the live process's real state without
       // talking to it. Trust the persisted state for now; the
       // health-check loop downgrades to Ended if the pid dies.
-      const std::string stateStr =
-          st ? reinterpret_cast<const char *>(st) : "running";
       if (stateStr == "starting")
         inst.state = GameServerInstance::Starting;
       else if (stateStr == "ended")
@@ -1587,6 +1699,9 @@ int main(int argc, char *argv[]) {
                        break;
                      case GameServerInstance::Crashed:
                        stateStr = "crashed";
+                       break;
+                     case GameServerInstance::Hibernated:
+                       stateStr = "hibernated";
                        break;
                      }
                      arr.push_back({
@@ -2869,6 +2984,26 @@ int main(int argc, char *argv[]) {
         }
         wj["sides"].push_back(std::move(sj));
       }
+      // ── The hibernation state the card shows (PLAN-persistence task 3b) ──
+      //
+      // `live` above is "is a digest being published"; this is what the war IS,
+      // which is a different question with three answers `live` cannot give:
+      // resuming (a process is up but not serving — the state E5's second
+      // joiner waits on), hibernated (frozen at a frame, brought back by the
+      // next join) and crashed (no exit checkpoint, so frames were lost).
+      //
+      // Costs one indexed SELECT per war per broadcast, the same shape and
+      // cadence as `warSummaryFor` immediately above.
+      const auto wfacts = warFactsFor(*room);
+      const auto wstate = warresume::Classify(room->sessionKind, wfacts);
+      wj["state"] = warresume::ToString(wstate);
+      // The frame the world would come back at. Emitted whenever there is
+      // history — including while the war is live, where it is the last
+      // durable point rather than the current frame (`frame` below is that).
+      if (wfacts.snapshot.has) {
+        wj["frozen_frame"] = wfacts.snapshot.frame;
+        wj["frozen_at"] = wfacts.snapshot.takenAt;
+      }
       if (haveLive) {
         wj["spectators"] = live.spectators;
         wj["frame"] = live.frame;
@@ -3953,6 +4088,13 @@ int main(int argc, char *argv[]) {
   /// port, audit row). `auditAction` distinguishes the two callers in the
   /// audit trail: a host starting a match and a war coming back up are not
   /// the same operator event even though they run the same code.
+  /// A WAR always comes up on its stored world if it has one (PLAN-persistence
+  /// task 3b) — decided here rather than passed in, because there is exactly one
+  /// correct answer and a parameter would invite a caller to get it wrong. The
+  /// caller that gets it wrong silently discards a frozen war and stages a fresh
+  /// one over the top of it, which is the failure this whole task exists to
+  /// prevent; `/api/rooms/start` on a war room in Filling was one keystroke away
+  /// from being that caller.
   auto spawnServerForRoom = [&](GameRoom &room, int64_t userId,
                                 const char *auditAction) {
     // Last line of defence before the game server forks: say out loud whether
@@ -3986,11 +4128,24 @@ int main(int argc, char *argv[]) {
     for (const auto &[rid, gi] : gameServers)
       if (gi.pid > 0 && isProcessAlive(gi.pid))
         busyPorts.insert(gi.port);
+    // Only a war gets an idle-hibernate window: a skirmish already has its own
+    // idle exit, and freezing a bounded match nobody will resume is a snapshot
+    // written for nothing.
+    const int hibernateIdle =
+        (room.sessionKind == SessionKind::PersistentWar) ? warHibernateIdleSeconds
+                                                        : 0;
+    // `--resume` only when a snapshot row was SEEN: the server treats a missing
+    // snapshot as fatal by design (Hibernation.h), so asking to resume a war
+    // that has never run would abort the process instead of launching it.
+    const bool resumeFromSnapshot =
+        room.sessionKind == SessionKind::PersistentWar &&
+        warresume::LatestSnapshot(mapDb, room.gameId, room.id).has;
     auto inst = spawnGameServer(room.id, room.gameId, gameVer, room.mapId,
                                 dbPath, room.players, room.aiSlots,
                                 room.modOptions, busyPorts, devBuildAcknowledged,
                                 wtCertPath, wtKeyPath,
-                                /*replayFile=*/"", room.sessionKind);
+                                /*replayFile=*/"", room.sessionKind,
+                                resumeFromSnapshot, hibernateIdle);
     gameServers[room.id] = inst;
     persistGameServer(inst);
     room.gameServerPort = inst.port;
@@ -4307,32 +4462,30 @@ int main(int argc, char *argv[]) {
         // held rather than recycled, so there is no host action left that
         // could bring it back. The player walking up to it is the trigger.
         //
-        // ⚠ The sim restarts at frame 0 — nothing snapshots the world yet
-        // (§5.4; PLAN-persistence owns it, creg is stubbed out). The lossless
-        // case is the war whose *process* survived, which is why the lobby no
-        // longer kills one on the way out; this path is the fallback for when
-        // it really is gone.
+        // PLAN-persistence task 3b: the respawn now carries the WORLD. If the
+        // store holds a snapshot for this room the server comes up with
+        // `--resume` and the war is where the players left it; without one it
+        // launches from frame 0 exactly as before, and the log says which of
+        // the two happened. `warresume::PlanJoin` owns the choice — including
+        // the E5 case, where a second joiner arriving mid-respawn is told to
+        // wait on the same `resuming` state instead of forking a rival sim.
         if (auto *joined = rooms.GetRoom(roomId)) {
-          const bool live = [&] {
-            auto gsIt = gameServers.find(roomId);
-            return gsIt != gameServers.end() && gsIt->second.pid > 0 &&
-                   isProcessAlive(gsIt->second.pid);
-          }();
-          const auto decision =
-              DecideWarResume(joined->sessionKind, live, joined->state);
-          if (decision == WarResumeOutcome::Resume) {
+          const auto facts = warFactsFor(*joined);
+          const auto plan = warresume::PlanJoin(joined->sessionKind, facts);
+          if (plan.action == warresume::WarJoinAction::Spawn) {
             if (auto refusal = gameServerSpawnRefusal(roomId))
               return *refusal;
             rooms.SetRoomState(roomId, ERoomState::Loading);
-            SLOG(SPRING_LOG_NOTICE,
-                 "war room %u: %s for '%s' — the sim restarts at frame 0 (no "
-                 "snapshot yet, §5.4)",
-                 roomId, WarResumeOutcomeToString(decision),
-                 user->username.c_str());
+            // The plan's `withResume` is what this line REPORTS;
+            // spawnServerForRoom re-reads the store and is what actually
+            // happens. They can only differ if a prune lands between the two
+            // reads, and the honest outcome then is the spawn's, not the log's.
+            SLOG(SPRING_LOG_NOTICE, "war room %u: %s for '%s'", roomId,
+                 warresume::Describe(plan).c_str(), user->username.c_str());
             spawnServerForRoom(*joined, userId, "war_resume");
           } else if (joined->sessionKind == SessionKind::PersistentWar) {
             SLOG(SPRING_LOG_INFO, "war room %u: join by '%s' — %s", roomId,
-                 user->username.c_str(), WarResumeOutcomeToString(decision));
+                 user->username.c_str(), warresume::Describe(plan).c_str());
           }
         }
 
@@ -5340,6 +5493,49 @@ int main(int argc, char *argv[]) {
             rooms.DeleteRoom(roomId);
             broadcastRooms();
             continue;
+          }
+
+          // A war's exit is classified, not just noted (PLAN-persistence task
+          // 3b). Two exits look identical from here — the pid is gone either
+          // way — and they mean opposite things to the next joiner:
+          //
+          //   * it checkpointed on the way out → 'hibernated', frozen at a
+          //     frame, and `--resume` hands the war back intact;
+          //   * it died without one → 'crashed', and whatever it had simulated
+          //     since the last snapshot is gone.
+          //
+          // The store's newest label is the evidence, NOT the exit status: on a
+          // debug build the pre-existing `~DynDamageArray` assert makes every
+          // exit report 134 (task 3a's field note), so a code-based verdict
+          // would call every clean hibernation a crash.
+          if (auto *war = rooms.GetRoom(roomId);
+              war && war->sessionKind == SessionKind::PersistentWar) {
+            const auto snap =
+                warresume::LatestSnapshot(mapDb, war->gameId, roomId);
+            inst.pid = 0;  // no process; keeps every isProcessAlive() honest
+            inst.port = 0; // the port went back to the pool with the process —
+                           // a row still naming it would send a tool at a port
+                           // the next room may already hold
+            inst.state = snap.fromHibernation ? GameServerInstance::Hibernated
+                                              : GameServerInstance::Crashed;
+            // Re-record the row removeGameServer() just dropped, so the fleet
+            // view lists a frozen war instead of losing it. game_status stays
+            // deleted — nothing about this room is ready.
+            persistGameServer(inst);
+            if (snap.fromHibernation)
+              SLOG(SPRING_LOG_NOTICE,
+                   "war room %u hibernated — frozen at frame %d (%s); the next "
+                   "join resumes it",
+                   roomId, snap.frame, snap.label.c_str());
+            else {
+              const std::string fallback =
+                  snap.has ? " (resumable from the older frame " +
+                                 std::to_string(snap.frame) + ")"
+                           : " and has no snapshot history at all";
+              SLOG(SPRING_LOG_WARNING,
+                   "war room %u CRASHED — its server left no exit checkpoint%s",
+                   roomId, fallback.c_str());
+            }
           }
 
           // Recycle the room: transition back to Filling,

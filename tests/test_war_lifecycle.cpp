@@ -15,15 +15,16 @@
 //  1. **A war survives the lobby that spawned it.** The lobby's clean
 //     shutdown SIGTERMs every game server it owns; for a war that is the one
 //     teardown path where the process would otherwise have survived intact,
-//     and adoption-by-pid at the next startup is the only *lossless* resume
-//     that exists before PLAN-persistence lands snapshots.
+//     and adoption-by-pid at the next startup keeps the sim exactly as it was.
+//     (No longer the ONLY lossless resume — task 3a/3b give a dead war an exit
+//     checkpoint and a `--resume` boot — but still the free one.)
 //  2. **A war whose server did die is not demoted to a lobby room.** The
 //     orphan sweep recycles a room to Filling; doing that to a war hands a
 //     running world back to its host as a set-up screen.
 //  3. **A joiner brings the war back up — but only when nothing else is.**
-//     The two decline cases (already live, already starting) are what keeps a
-//     single room from binding two ports and splitting its war across two
-//     sims.
+//     Moved to test_war_resume.cpp with the policy itself (PLAN-persistence
+//     task 3b): the decision now also has to choose whether the respawn carries
+//     the stored world, which needs the snapshot store this header cannot see.
 //
 // Values only, no lobby and no processes: the policy is a pure function, which
 // is the whole reason it lives in a header rather than inside the route.
@@ -53,58 +54,4 @@ TEST_CASE("war lifecycle: an orphaned war is held, an orphaned skirmish recycled
           OrphanedRoomAction::HoldForResume);
     CHECK(ActionForOrphanedRoom(SessionKind::Skirmish) ==
           OrphanedRoomAction::RecycleToFilling);
-}
-
-TEST_CASE("war lifecycle: joining a down war resumes it") {
-    // Both states a held orphan can be sitting in when someone walks up to it:
-    // Active (the lobby died mid-war) and Filling (a war that was recycled by
-    // an older build, or one that has never been started).
-    CHECK(DecideWarResume(SessionKind::PersistentWar, /*hasLiveServer=*/false,
-                          ERoomState::Active) == WarResumeOutcome::Resume);
-    CHECK(DecideWarResume(SessionKind::PersistentWar, /*hasLiveServer=*/false,
-                          ERoomState::Filling) == WarResumeOutcome::Resume);
-    CHECK(DecideWarResume(SessionKind::PersistentWar, /*hasLiveServer=*/false,
-                          ERoomState::Ended) == WarResumeOutcome::Resume);
-}
-
-TEST_CASE("war lifecycle: a live war is joined, not respawned") {
-    CHECK(DecideWarResume(SessionKind::PersistentWar, /*hasLiveServer=*/true,
-                          ERoomState::Active) == WarResumeOutcome::AlreadyLive);
-    // Liveness outranks state: a room the lobby still calls Loading whose
-    // server is up is joined, not restarted.
-    CHECK(DecideWarResume(SessionKind::PersistentWar, /*hasLiveServer=*/true,
-                          ERoomState::Loading) == WarResumeOutcome::AlreadyLive);
-}
-
-TEST_CASE("war lifecycle: a war whose server is still coming up is not respawned") {
-    // The window between fork and the server's first `ready=1` publication.
-    // Two joiners arriving inside it must not produce two servers for one room
-    // — they would bind two ports and split the war across two sims.
-    CHECK(DecideWarResume(SessionKind::PersistentWar, /*hasLiveServer=*/false,
-                          ERoomState::Loading) == WarResumeOutcome::ComingUp);
-}
-
-TEST_CASE("war lifecycle: a skirmish is never started by a joiner") {
-    // Every state, including the one where the room is idle and startable: a
-    // skirmish is started by its host pressing Start Game, and a joiner
-    // walking in is not that.
-    for (const auto st : {ERoomState::Configuring, ERoomState::Filling,
-                          ERoomState::ReadyCheck, ERoomState::Loading,
-                          ERoomState::Active, ERoomState::Ended}) {
-        CHECK(DecideWarResume(SessionKind::Skirmish, /*hasLiveServer=*/false, st) ==
-              WarResumeOutcome::NotAWar);
-    }
-}
-
-TEST_CASE("war lifecycle: every outcome names itself for the operator log") {
-    // Same rule as DynamicJoin's: a lifecycle decision that leaves no line
-    // behind is indistinguishable from the bug it prevents.
-    CHECK(std::string(WarResumeOutcomeToString(WarResumeOutcome::NotAWar)) !=
-          std::string(WarResumeOutcomeToString(WarResumeOutcome::AlreadyLive)));
-    CHECK(std::string(WarResumeOutcomeToString(WarResumeOutcome::ComingUp)) !=
-          std::string(WarResumeOutcomeToString(WarResumeOutcome::Resume)));
-    for (const auto o : {WarResumeOutcome::NotAWar, WarResumeOutcome::AlreadyLive,
-                         WarResumeOutcome::ComingUp, WarResumeOutcome::Resume}) {
-        CHECK(std::string(WarResumeOutcomeToString(o)) != std::string("unknown"));
-    }
 }
