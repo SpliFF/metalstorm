@@ -31,6 +31,16 @@ double ParamNumber(const LuaRulesParams::Params& params, const std::string& key)
     return 0.0;
 }
 
+/// The string half of the same variant. A missing key and a key holding a
+/// number both read as empty: the warlog's display fields are authored by the
+/// emitting gadget and a numeric one is a bug there, not something to render.
+std::string ParamString(const LuaRulesParams::Params& params, const std::string& key) {
+    const auto it = params.find(key);
+    if (it == params.end()) return "";
+    if (const std::string* s = std::get_if<std::string>(&it->second.value)) return *s;
+    return "";
+}
+
 std::string PlayerKey(const char* prefix, int playerNum, const char* suffix = "") {
     char buf[64];
     snprintf(buf, sizeof(buf), "%s%d%s", prefix, playerNum, suffix);
@@ -144,6 +154,28 @@ std::vector<WarSummaryRegion> GatherWarSummaryRegions() {
         out.push_back(r);
     }
     return out;
+}
+
+warlog::DrainResult DrainWarLog(int64_t watermark) {
+    const LuaRulesParams::Params& params = CSplitLuaHandle::GetGameParams();
+    const int64_t head = static_cast<int64_t>(ParamNumber(params, "warlog_seq"));
+    const int ringSize = static_cast<int>(ParamNumber(params, "warlog_ring"));
+
+    return warlog::Drain(head, watermark, ringSize,
+                         [&params](int slot, warlog::Event& out) {
+        char prefix[32];
+        snprintf(prefix, sizeof(prefix), "warlog_%d_", slot);
+        const std::string p = prefix;
+        const auto seqIt = params.find(p + "seq");
+        if (seqIt == params.end()) return false;   // never written — young war
+        out.seq = static_cast<int64_t>(ParamNumber(params, p + "seq"));
+        out.team = static_cast<int>(ParamNumber(params, p + "team"));
+        out.frame = static_cast<int32_t>(ParamNumber(params, p + "frame"));
+        out.kind = ParamString(params, p + "kind");
+        out.subject = ParamString(params, p + "subject");
+        out.detail = ParamString(params, p + "detail");
+        return true;
+    });
 }
 
 bool RestoreWarPlayerScore(int playerNum, const WarPlayerState& state) {

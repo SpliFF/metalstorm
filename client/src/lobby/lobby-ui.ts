@@ -13,6 +13,7 @@
 import * as flatbuffers from 'flatbuffers';
 import { mapListStatus } from './map-list-status';
 import { formatJoinPreview, type WarJoinPreview } from './join-preview';
+import { formatDigest } from './war-digest';
 import {
     filterWars, fightLabel, formatWarDetail, formatControl, hasRoomForFaction,
     warStateBadge,
@@ -2016,6 +2017,29 @@ export class LobbyUI {
             // published" bit (PLAN-persistence task 4): hibernated, crashed
             // and unresumable all used to read "Idle", and they are three
             // different things to walk into.
+            // The while-you-were-away digest (PLAN-persistence task 4b). Only
+            // a returning player has one — the lobby sends it only for an
+            // account that already holds a seat here — so this is empty on
+            // every war a player is meeting for the first time, which is the
+            // correct reading of "what did I miss".
+            const digest = preview
+                ? formatDigest(preview.digest, preview.digest_total, row.war.sides, {
+                      awaySec: preview.away_sec,
+                      myTeam: preview.team,
+                  })
+                : null;
+            const digestHtml = digest
+                ? `<div class="war-digest"><span class="war-digest-head">` +
+                  `${this.esc(digest.heading)}</span><ul>` +
+                  // Above the lines, not below: it counts what was cut off the
+                  // FRONT of the story, and a card with a bounded height put
+                  // it under the fold when it trailed.
+                  (digest.more > 0
+                      ? `<li class="war-digest-more">${digest.more} earlier, not shown</li>`
+                      : '') +
+                  digest.lines.map(l => `<li>${this.esc(l)}</li>`).join('') +
+                  `</ul></div>`
+                : '';
             const badge = warStateBadge(row.war);
             const liveBadge = `<span class="${badge.cls}">${this.esc(badge.label)}</span>`;
             const warStateIsKnown =
@@ -2046,6 +2070,7 @@ export class LobbyUI {
                 detail_title: refusal,
                 control: this.esc(formatControl(row.war)),
                 preview_html: previewHtml,
+                digest_html: digestHtml,
                 fight_label: fightLabel(row),
                 fight_disabled: canFight ? '' : ' disabled',
             });

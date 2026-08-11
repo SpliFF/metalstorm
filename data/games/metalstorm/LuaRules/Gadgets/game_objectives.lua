@@ -496,6 +496,15 @@ function resolveObjective(o, state, completingTeam, ctx)
         GG.Authority.SettleEscrow(o.id, state)   -- 'failed' | 'expired' -> refund stakers
     end
 
+    -- The while-you-were-away digest (PLAN-persistence task 4b). Emitted HERE
+    -- rather than from the `completeHooks` list a scoreboard uses, because a
+    -- digest has to carry the failures too: "the extraction you left running
+    -- expired" is the single most useful line a returning player can be shown,
+    -- and OnComplete fires only for wins by design.
+    if GG.WarLog then
+        GG.WarLog.Emit('objective', o.type, state, o.completedBy or o.forTeam or -1)
+    end
+
     if o.systemicKey then
         Generator.onResolved(genState, o.systemicRule, o.systemicKey)
     end

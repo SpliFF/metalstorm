@@ -40,6 +40,32 @@ export interface WarJoinPreview {
     /// it (§3, task 6). Not a seating outcome — it is a choice, and it
     /// overrides `will_fight` on both sides of the wire.
     watching?: boolean;
+    /// The while-you-were-away digest (PLAN-persistence §4, task 4b) — the
+    /// strategic events this account has not seen, oldest first, capped by the
+    /// server. Present only for an account that already holds a seat here.
+    digest?: WarDigestEvent[];
+    /// How many events there really were. Larger than `digest.length` when the
+    /// server truncated; the difference is what "and N more" counts.
+    digest_total?: number;
+    /// Seconds since this account was last seen in this war.
+    away_sec?: number;
+}
+
+/// One row of the digest. Field names are the wire's, and the wire's are the
+/// emitting gadget's — `subject` is composed in the sim (a region's authored
+/// name, an objective's type) because nothing on this side has access to the
+/// world that knows it.
+export interface WarDigestEvent {
+    seq: number;
+    /// 'region' | 'objective' | 'pact' | 'elided'.
+    kind: string;
+    subject: string;
+    /// The outcome within the kind — 'captured' | 'complete' | 'broken' …
+    /// For `elided` it is the number of events that were lost.
+    detail: string;
+    /// The team the event happened for, or -1.
+    team: number;
+    frame: number;
 }
 
 /// Title-case a faction key for display. The keys are lowercased by the

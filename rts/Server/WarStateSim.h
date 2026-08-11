@@ -31,8 +31,10 @@
 // therefore hand every player a "restore my pool to N" verb.
 #pragma once
 
+#include <cstdint>
 #include <vector>
 
+#include "WarLog.h"
 #include "WarPlayerBindings.h"
 #include "WarSummary.h"
 
@@ -73,6 +75,17 @@ std::vector<WarSummaryPlayer> GatherWarSummaryPlayers();
 /// Lua to do it. A map with no regions gadget contributes an empty vector and
 /// the browser simply shows no control line.
 std::vector<WarSummaryRegion> GatherWarSummaryRegions();
+
+/// Drain `game_warlog.lua`'s strategic event ring — everything after
+/// `watermark`, in order (PLAN-persistence task 4b). The reading half is the
+/// same shape as GatherWarSummaryRegions() and for the same reason: it runs on
+/// the war-summary heartbeat, off the server loop, and must not call into
+/// synced Lua. The arithmetic that decides whether the drain missed anything
+/// is `warlog::Drain`, which is pure and tested; this function is only the
+/// param lookups it needs.
+///
+/// A war with no warlog gadget publishes no head and drains nothing.
+warlog::DrainResult DrainWarLog(int64_t watermark);
 
 /// Restore the participation counters. Lifetime statistics rather than
 /// resources, so they are handed back on every rejoin regardless of how long

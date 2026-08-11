@@ -386,9 +386,38 @@ button.link-button:hover { background: none; color: #7fdcff; }
 }
 .war-entry .room-detail,
 .war-entry .room-preview,
+.war-entry .war-digest,
 .war-entry .war-control { grid-column: 1; }
 .war-control { color: #7a8496; font-size: 12px; }
 .war-control:empty { display: none; }
+/* The while-you-were-away digest (PLAN-persistence task 4b). Sits in the
+   card's left column under the join preview, indented behind its own rule so
+   the war's HISTORY reads as a different kind of statement from the war's
+   current state above it.
+
+   Deliberately NOT height-bounded with a scroll, which is what it was first:
+   a month away is a legitimate amount of news, but capping the box put the
+   "N earlier, not shown" line — the one line whose job is to say the list is
+   incomplete — under a fold with no scrollbar to hint at it. The cap belongs
+   on the LINE COUNT (war-digest.ts), where the leftover can be counted and
+   said out loud. */
+.war-digest {
+    margin-top: 2px;
+    padding-left: 8px;
+    border-left: 2px solid #2a3550;
+    font-size: 12px;
+    color: #9aa4b5;
+}
+.war-digest-head {
+    display: block;
+    color: #7a8496;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    font-size: 10px;
+}
+.war-digest ul { margin: 2px 0 0; padding-left: 14px; }
+.war-digest li { line-height: 1.4; }
+.war-digest-more { color: #7a8496; font-style: italic; }
 .war-actions {
     grid-row: 1 / -1;
     grid-column: 2;

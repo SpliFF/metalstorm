@@ -426,6 +426,12 @@ set(LOBBY_SERVER_SOURCES
     rts/Server/GuestAccounts.cpp
     rts/Server/MapMetadataDb.cpp
     rts/Server/GameServersDb.cpp
+    # PLAN-persistence task 4b: the war's strategic history. Written by the
+    # game server's heartbeat, read by the lobby as the rejoin digest — shared
+    # for the same reason WarPlayerBindings is. WarLog.cpp is the pure drain
+    # arithmetic beside it and has no sim in it either.
+    rts/Server/GameEventsDb.cpp
+    rts/Server/WarLog.cpp
     # PLAN-persistence task 3b: resume-on-join. Pure policy plus one read-only
     # SELECT against `game_snapshots` — the lobby decides whether a war comes
     # back on its stored world, and needs no part of the sim to do it.
@@ -578,6 +584,11 @@ if(TEST_SOURCES)
         # here and its fork exercised live.
         ${CMAKE_SOURCE_DIR}/rts/Server/DeployDrain.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GameServersDb.cpp
+        # PLAN-persistence task 4b: the rejoin digest's store and the pure
+        # ring-drain arithmetic that decides whether it is complete
+        # (test_war_log.cpp).
+        ${CMAKE_SOURCE_DIR}/rts/Server/GameEventsDb.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/WarLog.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/HeadlessRun.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/StatsDump.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/AI/AIScriptContext.cpp

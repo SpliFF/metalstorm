@@ -10,6 +10,7 @@
 
 #include "Server/Database.h"
 #include "Server/GrowthCounters.h"
+#include "Server/GameEventsDb.h"
 #include "Server/GameServersDb.h"
 #include "Server/GuestAccounts.h"
 #include "Server/MapMetadata.h"
@@ -1040,6 +1041,14 @@ int main(int argc, char *argv[]) {
   // and, like ScenarioDb above, it is migrated rather than dropped on a schema
   // bump: a row here is the only copy of the thing.
   WarPlayerBindings::EnsureTable(mapDb);
+
+  // game_events — the war's strategic history, appended by the game server and
+  // read here as the while-you-were-away digest (PLAN-persistence §4, task
+  // 4b). Created from the lobby too, for the same reason and under the same
+  // additive-migration rule as the bindings above: the digest query has to
+  // work on a lobby that has never launched a war, and the alternative is a
+  // failed prepare on every join-preview until one does.
+  GameEventsDb::EnsureTable(mapDb);
 
   // Helper: persist a game server entry to SQLite
   auto persistGameServer = [&](const GameServerInstance &inst) {
@@ -4473,6 +4482,14 @@ int main(int argc, char *argv[]) {
   // All wars in one response, not one call per room: the browser refreshes the
   // whole list on every SSE tick, and N round-trips per tick is a lot of
   // traffic for a line of text.
+  //
+  // It also carries the while-you-were-away digest (PLAN-persistence §4, task
+  // 4b) for the same reason it carries everything else here: this is already
+  // the per-account, per-war answer, and a returning player's "what did I
+  // miss" is exactly that shape. The cap is on the RESPONSE, not on the
+  // history — a war that moved a hundred times while somebody was on holiday
+  // is a war whose card must still fit on a card.
+  constexpr int kDigestMaxEvents = 8;
   net.AddHttpPost(
       "/api/wars/join-preview", RouteAuth::TokenRequired,
       [&](const std::string &, const std::string &,
@@ -4506,6 +4523,7 @@ int main(int argc, char *argv[]) {
           bool hasBinding = false;
           int boundTeam = -1;
           int64_t absenceSec = 0;
+          int64_t digestSince = 0;
           double savedPool = 0.0;
           bool hasSavedState = false;
           for (const auto &b :
@@ -4514,6 +4532,7 @@ int main(int argc, char *argv[]) {
               hasBinding = true;
               boundTeam = b.team;
               absenceSec = now - b.lastSeenAt;
+              digestSince = b.lastSeenAt;
               savedPool = b.state.authorityPool;
               hasSavedState = b.HasSavedState();
               continue;
@@ -4571,6 +4590,41 @@ int main(int argc, char *argv[]) {
           jp["authority"] = p.authority;
           jp["authority_source"] = JoinAuthoritySourceToString(p.authoritySource);
           jp["returning"] = p.returning;
+
+          // The while-you-were-away digest (PLAN-persistence §4, task 4b).
+          //
+          // The cursor is the binding's own `last_seen_at`, not a new column:
+          // the game server already stamps it on every state sweep and on
+          // disconnect, so it IS the instant this account stopped watching
+          // this war. That also makes the digest self-clearing — a player who
+          // is currently connected has it refreshed every minute, so their
+          // "while you were away" window is correctly empty.
+          //
+          // Only for a returning player, and deliberately: a first-time joiner
+          // has not missed anything, they have simply not arrived, and
+          // handing them a war's back-story as if it were news is a different
+          // feature (a war summary) that nothing has asked for.
+          if (hasBinding) {
+            int total = 0;
+            const auto events = GameEventsDb::Since(
+                db.Handle(), room->id, digestSince, kDigestMaxEvents, &total);
+            nlohmann::json jd = nlohmann::json::array();
+            for (const auto &e : events) {
+              nlohmann::json je;
+              je["seq"] = e.seq;
+              je["kind"] = e.kind;
+              je["subject"] = e.subject;
+              je["detail"] = e.detail;
+              je["team"] = e.team;
+              je["frame"] = e.frame;
+              jd.push_back(std::move(je));
+            }
+            jp["digest"] = std::move(jd);
+            // The true count, so the client can say "and 40 more" rather than
+            // let a truncated list read as the whole story.
+            jp["digest_total"] = total;
+            jp["away_sec"] = absenceSec;
+          }
           out.push_back(std::move(jp));
         }
         return HttpAuth::JsonResponse(200, out.dump());

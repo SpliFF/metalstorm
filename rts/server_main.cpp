@@ -53,6 +53,7 @@
 #include "Server/PerfMetrics.h"
 #include "Server/RoomManager.h"
 #include "Server/AuthTokens.h"
+#include "Server/GameEventsDb.h"
 #include "Server/WarPlayerBindings.h"
 #include "Server/WarStateSim.h"
 #include "Server/PlayerOnboarding.h"
@@ -982,6 +983,11 @@ int main(int argc, char* argv[])
     // reads it (the faction override clears bindings, task 6's browser counts
     // them), and neither may depend on the other having started first.
     WarPlayerBindings::EnsureTable(db.Handle());
+    // PLAN-persistence.md §4 (task 4b): the war's strategic history, appended
+    // here and read by the lobby as the while-you-were-away digest. Same
+    // both-processes rule as the bindings table above, and the same durability
+    // rule — it is the only copy of what happened in a war.
+    GameEventsDb::EnsureTable(db.Handle());
     // Task 8a, and for the same reason: the game server VALIDATES per-war
     // reconnect tokens (the lobby mints them), so it must find the table even
     // on a machine where no lobby has ever run — a scenario/direct boot brings
@@ -2207,6 +2213,45 @@ int main(int argc, char* argv[])
         sqlite3_finalize(st);
     };
 
+    // ── The strategic event drain (PLAN-persistence §4, task 4b) ──────────
+    // `game_warlog.lua` keeps the last 32 strategic events in a rulesParam
+    // ring; this moves them into `game_events`, which is the durable record a
+    // returning player's digest is built from.
+    //
+    // The watermark is recovered from the TABLE, not started at zero. The
+    // gadget's seq rides the snapshot, so a war that comes back from
+    // hibernation resumes counting where it left off — a fresh cursor would
+    // re-offer its whole surviving ring as new (the INSERT OR IGNORE would
+    // absorb it, but the elision arithmetic would then be reading a gap that
+    // is not there and would file a loss that never happened).
+    int64_t warLogWatermark = GameEventsDb::HighestSeq(db.Handle(), roomId);
+    auto drainWarLog = [&]() {
+        if (sessionKind != SessionKind::PersistentWar) return;
+        // A replay re-emits the recorded war's events as it re-executes it.
+        // Appending them would write a second copy of a history that is
+        // already in the table under the same room id and the same seqs.
+        if (replay::IsReplaying()) return;
+        const warlog::DrainResult d = DrainWarLog(warLogWatermark);
+        if (d.watermark == warLogWatermark) return;
+        if (!d.events.empty()) {
+            GameEventsDb::Append(db.Handle(), roomId, d.events,
+                                 static_cast<int64_t>(std::time(nullptr)));
+            GameEventsDb::Prune(db.Handle(), roomId);
+        }
+        // Advance only AFTER the write. A drain that read the ring and then
+        // failed to store it must re-offer those events on the next
+        // heartbeat; the table's UNIQUE makes the repeat a no-op when the
+        // write did in fact land.
+        warLogWatermark = d.watermark;
+        if (d.elided > 0) {
+            SLOG(SPRING_LOG_WARNING,
+                "war log: %lld strategic event(s) were overwritten before the "
+                "drain reached them (room %u, ring lapped between heartbeats) "
+                "— the digest records the gap rather than hiding it",
+                static_cast<long long>(d.elided), roomId);
+        }
+    };
+
     /// Playback-bar heartbeat (task 4b). Wall-clock, not frame-based, on
     /// purpose: a PAUSED replay advances no frames at all, and the bar still
     /// has to learn that the controller changed or that a seek finished.
@@ -2447,6 +2492,11 @@ int main(int argc, char* argv[])
                 // reads, and splitting their cadences would let the browser
                 // show a war as up with a population from a minute ago.
                 writeWarSummary();
+                // Same heartbeat again, and it must not be slower: the ring
+                // holds 32 events, so the drain's safety margin is measured
+                // in "how many strategic events can this war produce between
+                // two of these calls".
+                drainWarLog();
             }
             // ── War state, on a cadence as well as on disconnect (task 4) ──
             // (PLAN-metalstorm-lobby.md §2.5.) The disconnect capture is the
@@ -3267,6 +3317,14 @@ int main(int argc, char* argv[])
     // log at NOTICE, because "no checkpoint taken" is the correct outcome for
     // each of them and an operator who cannot tell them apart learns to
     // ignore both.
+    // One last drain before the world is frozen (PLAN-persistence task 4b).
+    // The events between the final heartbeat and the exit are the ones a
+    // returning player most wants — they are the last thing that happened in
+    // the war — and up to two seconds of them would otherwise sit in a ring
+    // that is about to stop being read. Cheap and unconditional: it no-ops on
+    // a skirmish, on a replay, and on a war that emitted nothing.
+    drainWarLog();
+
     {
         hibernate::ExitContext ec;
         ec.reason = restartRequested.load() ? hibernate::ExitReason::Restart : exitReason;

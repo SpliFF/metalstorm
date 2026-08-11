@@ -242,12 +242,36 @@ local function publishRegionStatics()
     end
 end
 
+-- Owner as of the last publish, per key. Only the digest reads it (below):
+-- `changedKeys` is the hysteresis machine's "something about this key moved"
+-- list and includes contest flips, which are not a change of hands and must
+-- not read as one in a week-long war's history.
+local lastLoggedOwner = {}
+
+--- The authored display name of a region, or the raw key on a grid map (which
+--- is synthetic and nameless). Read from the provider rather than from the
+--- published `_name` param so it works before publishRegionStatics has run.
+local function regionLabel(key)
+    local meta = provider.byKey and provider.byKey[key]
+    return (meta and meta.name) or key
+end
+
 local function publish(changedKeys)
     if #changedKeys == 0 then return end
     for _, key in ipairs(changedKeys) do
         local rs = ownershipState[key]
         Spring.SetGameRulesParam('region_' .. key .. '_team', rs.owner or -1, PUBLIC)
         Spring.SetGameRulesParam('region_' .. key .. '_contested', rs.contested and 1 or 0, PUBLIC)
+        -- The while-you-were-away digest (PLAN-persistence task 4b). A region
+        -- changing hands is the coarsest true statement about how a war moved
+        -- while nobody was watching, so it is the digest's backbone.
+        if lastLoggedOwner[key] ~= rs.owner then
+            if GG.WarLog then
+                GG.WarLog.Emit('region', regionLabel(key),
+                               rs.owner and 'captured' or 'lost', rs.owner or -1)
+            end
+            lastLoggedOwner[key] = rs.owner
+        end
     end
     regionsRev = regionsRev + 1
     Spring.SetGameRulesParam('regions_rev', regionsRev, PUBLIC)
@@ -271,6 +295,11 @@ end
 function GG.Regions.SetControllingTeam(key, teamID)
     Ownership.setOwner(ownershipState, key, teamID)
     Spring.SetGameRulesParam('region_' .. key .. '_team', teamID or -1, PUBLIC)
+    -- Deliberately NOT a digest event, and the cursor is moved so the next
+    -- publish() does not report it as one: a scenario preset is the war's
+    -- starting position, not something that happened during it, and a GM
+    -- override is an operator action the audit trail already records.
+    lastLoggedOwner[key] = teamID
 end
 
 -- ─────────────── Snapshot state (PLAN-persistence task 1d-b, §7.1d) ───────────────
@@ -312,6 +341,15 @@ function gadget:Load(state)
     ownershipState = state.ownership or Ownership.newState()
     regionsRev = tonumber(state.regionsRev) or 0
     Tick.load(evalGate, state.evalGate)
+    -- RE-DERIVED, not captured. The digest cursor is a function of the state
+    -- that WAS captured, and re-deriving it is the only reading that is right
+    -- on both paths: nothing changed hands between the checkpoint and the
+    -- resume, so a resumed war must not open by reporting every region it
+    -- already held as freshly captured.
+    lastLoggedOwner = {}
+    for key, rs in pairs(ownershipState) do
+        if type(rs) == 'table' then lastLoggedOwner[key] = rs.owner end
+    end
 end
 
 function gadget:GameFrame(frame)

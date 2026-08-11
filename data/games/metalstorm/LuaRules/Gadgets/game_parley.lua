@@ -209,6 +209,18 @@ local function emitEvent(kind, proposalId, teamA, teamB, attackerTeam)
     Spring.SetGameRulesParam('parley_event', eventSeq)
 end
 
+-- The while-you-were-away digest (PLAN-persistence task 4b) — a SECOND, much
+-- coarser feed, deliberately not folded into the ring above. That one is a
+-- toast buffer a live client drains within a frame or two; this one is drained
+-- by the server every 2 s into a durable table and is read days later, so it
+-- carries the pact's KIND (the thing a returning player needs to know: a
+-- ceasefire lapsing and a tribute lapsing are different news) rather than a
+-- proposal id that will not resolve to anything by then.
+local function emitDigest(p, detail, team)
+    if not GG.WarLog then return end
+    GG.WarLog.Emit('pact', p.kind or 'pact', detail, team or -1)
+end
+
 -- ============================================================
 -- Trust ledger (§2, task 3) — thin Spring-facing shell over parley/trust.lua.
 -- ============================================================
@@ -398,9 +410,15 @@ local function resolveTerminal(p, state, attackerTeam)
     if state == 'fulfilled' then
         adjustTrust(p.fromTeam, p.toTeam, Trust.FULFILLED_DELTA)
         emitEvent('fulfil', p.id, p.fromTeam, p.toTeam, nil)
+        emitDigest(p, 'ended', p.fromTeam)
     elseif state == 'breached' then
         adjustTrust(p.fromTeam, p.toTeam, Trust.BREACHED_DELTA)
         emitEvent('breach', p.id, p.fromTeam, p.toTeam, attackerTeam)
+        -- The breaker is the fact worth keeping: `fromTeam` is whoever
+        -- PROPOSED the pact, which on a breach is as often the victim as the
+        -- culprit, and a digest line that names the wrong side is worse than
+        -- one that names none.
+        emitDigest(p, 'broken', attackerTeam or -1)
     end
     publish(p)
 end
@@ -625,6 +643,9 @@ function GG.Parley.Respond(id, byTeam, byPlayer, decision, extra)
         if not ok then return false, err end
         decLiveOutgoing(p.fromTeam)
         removeFromActive(p.id)
+        -- "Pacts made" for the digest is the ACCEPT, not the proposal: an
+        -- offer nobody took is not something that happened to the war.
+        emitDigest(p, 'made', p.fromTeam)
         if p.state == 'active' then
             addToActive(p.id)   -- stays live for enforcement/GameFrame ticks
         else
