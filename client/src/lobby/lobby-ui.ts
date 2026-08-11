@@ -54,7 +54,8 @@ import { renderTemplate } from '../ui/ui.js';
 import {
     defaultTeamForNewSlot, renderSideOptions, sideForFaction, warSidesForRoom,
 } from './war-sides.js';
-import { decideRoomTransition } from './room-transition.js';
+import { decideRoomTransition, type SessionKind } from './room-transition.js';
+import { resolveRoomSeat, roomSeatStatus, type RoomSeat } from './room-seat.js';
 import { LOGOUT_CLEARED_KEYS, runLogout } from './logout.js';
 import {
     ACCESS_TOKEN_KEY, REFRESH_TOKEN_KEY, browserTokenStore,
@@ -251,6 +252,13 @@ export class LobbyUI {
     /// room screen can stop offering the side that would be refused.
     private myFaction = '';
     private pendingRejoinRoomId = 0;
+
+    /// Q-P3: the room the player has just explicitly asked to (re)join, live
+    /// only for the length of that `joinRoom` call. It is what tells
+    /// `decideRoomTransition` that a live war it has already been in should be
+    /// re-entered — a passive poll mentioning the same war must not, or
+    /// quitting a war to the lobby would be undone by the next broadcast.
+    private rejoinRequestedRoomId: number | null = null;
 
     /// 8a-follow-on: no longer a cached string. LobbyUI was a holder of the
     /// access token that task 8a's "six call sites" note did not even count —
@@ -735,7 +743,12 @@ export class LobbyUI {
 
         const transition = decideRoomTransition(
             this.currentRoom.id, this.currentRoom.state, this.currentRoom.gameServerPort,
-            { gameStartedForRoomId: this.gameStartedForRoomId, inGame: this.inGame, detached: this.detached },
+            {
+                gameStartedForRoomId: this.gameStartedForRoomId, inGame: this.inGame,
+                detached: this.detached,
+                rejoinRequestedRoomId: this.rejoinRequestedRoomId,
+            },
+            this.currentRoom.sessionKind as SessionKind | undefined,
         );
         if (transition !== 'refresh-room-game-gone') {
             // A live game to reconnect to — persist the creds a page refresh
@@ -2288,6 +2301,21 @@ export class LobbyUI {
 
     // ===================== ROOM =====================
 
+    /// Q-P3: resolve one room row to a seat. The war half of the question is
+    /// answered by this account's join preview, which is the only per-account
+    /// seat source the lobby has for a room the game server is seating itself.
+    private seatFor(p: RoomPlayerInfo, running: boolean): RoomSeat {
+        const r = this.currentRoom;
+        const isWar = r?.sessionKind === 'persistent';
+        return resolveRoomSeat({
+            running,
+            isWar,
+            mine: p.playerId === this.myPlayerId,
+            isSpectatorFlag: p.isSpectator,
+            preview: (isWar && r) ? this.warPreviews.get(r.id) : undefined,
+        });
+    }
+
     /// Patch the room DOM in-place without rebuilding innerHTML.
     /// Returns true if the patch succeeded, false if a full re-render
     /// is needed (structural change: player/AI count changed, state
@@ -2320,10 +2348,13 @@ export class LobbyUI {
                 teamSel.value = String(p.team);
             }
 
-            // Ready status
+            // Ready status — same seat source as the full render (Q-P3), or
+            // the patch would put the flag's label back on the next poll.
             const statusEl = row.querySelector('.player-status');
             if (statusEl) {
-                statusEl.textContent = p.isSpectator ? 'Spectator' : (p.ready ? '✓ Ready' : '—');
+                const running = r.state === 3 || r.state === 4;
+                statusEl.textContent =
+                    roomSeatStatus(this.seatFor(p, running), p.ready, running);
             }
 
             // Start pos select
@@ -2447,6 +2478,7 @@ export class LobbyUI {
         // D41's silent refusal waiting to happen.
         const myBoundSide = sideForFaction(sides, this.myFaction);
         const playersHtml = r.players.map(p => {
+            const seat = this.seatFor(p, gameRunning);
             const canEdit = preGame && (p.playerId === this.myPlayerId || amHost);
             const posSel = renderStartPosSelect(
                 p.startPos, `player:${p.playerId}`, canEdit);
@@ -2462,7 +2494,7 @@ export class LobbyUI {
                         ? ` disabled title="You fight for ${this.esc(myBoundSide.label)}"`
                         : ''),
                 team_options: renderSideOptions(sides, p.team),
-                status: p.isSpectator ? 'Spectator' : (p.ready ? '✓ Ready' : '—'),
+                status: roomSeatStatus(seat, p.ready, gameRunning),
                 startpos_html: posSel,
             });
         }).join('');
@@ -2570,17 +2602,21 @@ export class LobbyUI {
         // Spectators (PLAN-metalstorm-onboarding.md §4) aren't part of the
         // ready-check (RoomManager::AllReady already excludes them) — Ready
         // doesn't apply to them; Enlist is their path to a team slot instead.
-        if (preGame && !myPlayer?.isSpectator) {
+        // Q-P3: read the seat, not the flag. On a running war `is_spectator` is
+        // true of every fighter in it, which offered a resumed player **Enlist**
+        // and called the one button that worked "Watch Game".
+        const mySeat = myPlayer ? this.seatFor(myPlayer, gameRunning) : 'unknown';
+        if (preGame && mySeat !== 'spectator') {
             actions.push(`<button id="ready-btn" class="${myPlayer?.ready ? 'secondary' : ''}">${myPlayer?.ready ? 'Unready' : 'Ready'}</button>`);
         }
-        if (myPlayer?.isSpectator) {
+        if (mySeat === 'spectator') {
             actions.push('<button id="enlist-btn" class="primary">Enlist</button>');
         }
         if (preGame && amHost) {
             actions.push('<button id="start-btn" class="primary">Start Game</button>');
         }
         if (gameRunning) {
-            actions.push(`<button id="rejoin-btn" class="primary">${myPlayer?.isSpectator ? 'Watch Game' : 'Rejoin Game'}</button>`);
+            actions.push(`<button id="rejoin-btn" class="primary">${mySeat === 'spectator' ? 'Watch Game' : 'Rejoin Game'}</button>`);
         }
         // No "End Game" or "Close Room" buttons. Room lifecycle is
         // handled via Leave: last human out kills the game and room.
@@ -2736,14 +2772,23 @@ export class LobbyUI {
     async joinRoom(roomId: number, asSpectator: boolean = false): Promise<void> {
         if (!this.authToken) return;
         let data: any = null;
+        // Q-P3: every caller of this method is a button — the war notice's
+        // Rejoin, a war card's Fight/Rejoin, a room-list Join, the saved-room
+        // auto-rejoin at boot. So the request itself is the intent, and it is
+        // set before the await because a poll landing mid-flight is welcome to
+        // consume it: whichever update arrives first enters the game, and the
+        // other one then reads `inGame` and stays put.
+        this.rejoinRequestedRoomId = roomId;
         try {
             data = await this.lobbyPost('/api/rooms/join', { room_id: roomId, as_spectator: asSpectator });
         } catch { /* network / non-JSON error — handled as a failed join below */ }
         if (data?.id) {
             this.updateCurrentRoomFromJson(data);
+            this.rejoinRequestedRoomId = null;
             if (this.currentRoom) this.showRoom();
             return;
         }
+        this.rejoinRequestedRoomId = null;
         // Join failed (room deleted/reset, full, or no longer joinable).
         // Self-heal the auto-reconnect: if this was the saved-room rejoin
         // (tryAutoLogin), clear the stale `springrts-game-room` so we don't

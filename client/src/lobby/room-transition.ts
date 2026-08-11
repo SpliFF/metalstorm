@@ -26,7 +26,20 @@ export interface RoomViewState {
     /// A detached session is parked: the worker is alive, but the player is
     /// deliberately in the lobby. Updates must not drag them back in.
     detached: boolean;
+    /// The room id the player has just explicitly asked to (re)join — the war
+    /// notice's Rejoin, a war card's Fight/Rejoin, a room-list Join. One-shot:
+    /// the caller clears it once the update it belongs to has been decided.
+    ///
+    /// This is the only thing that distinguishes "the player asked to go back
+    /// into this war" from "a poll happened to mention it", and the two need
+    /// opposite answers for a persistent war (see below).
+    rejoinRequestedRoomId?: number | null;
 }
+
+/// `RoomManager::SessionKind` on the wire (PLAN-metalstorm-lobby task 1).
+/// Absent on any room a pre-task-1 lobby describes, which is read as a
+/// skirmish — the behaviour every room had before wars existed.
+export type SessionKind = 'skirmish' | 'persistent';
 
 /// The lobby's room lifecycle, as the server reports it. Named because the
 /// numbers are load-bearing in three places and "state >= 5" read as "the
@@ -62,18 +75,30 @@ export type RoomTransition =
  * Afterwards the same update means "the war this player already played is
  * still winding down", and the correct response is to leave them where they
  * are and let the room view follow the server.
+ *
+ * The exception is a persistent war (PLAN-persistence Q-P3). A skirmish winds
+ * down and is played once, so "already entered this room" really does mean
+ * "this is the tail of the game I just played". A war is a world that outlives
+ * every visit to it: the identical state means "the war I was in an hour ago
+ * is up, and I have just asked to go back". So for a war an EXPLICIT rejoin
+ * request re-enters — and a passive poll update still does not, or quitting a
+ * war to the lobby would be undone by the next broadcast.
  */
 export function decideRoomTransition(
     roomId: number,
     state: number,
     gameServerPort: number,
     view: RoomViewState,
+    sessionKind?: SessionKind,
 ): RoomTransition {
     const running = state === RoomState.Loading || state === RoomState.Active;
     if (running && gameServerPort > 0) {
         if (view.detached) return 'refresh-room';
         if (view.inGame) return 'stay-in-game';
         if (view.gameStartedForRoomId !== roomId) return 'enter-game';
+        // Q-P3: a second visit to a live war, asked for by the player.
+        if (sessionKind === 'persistent' && view.rejoinRequestedRoomId === roomId)
+            return 'enter-game';
         // Already played this room's game and came back to the lobby. The
         // subprocess lives ~180 s past a finish (PostGamePolicy), so this is
         // the normal post-victory state, not a stale read.

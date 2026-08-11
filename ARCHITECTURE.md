@@ -916,6 +916,21 @@ to its faction's side. Re-joining the other way converts, in either direction, a
 takes effect on the next connect: the seat is taken at auth, and a role change inside
 a running sim would need a protocol message that does not exist.
 
+**Two client-side rules a running war inverts** (PLAN-persistence Q-P3). (1) **On a
+running room `is_spectator` means "not seated by the lobby"** — which is true of every
+human the *game server* seated: every dynamic joiner and every restored war seat. The
+room screen must therefore resolve a row through `lobby/room-seat.ts`, whose seat source
+for a live war is this account's `POST /api/wars/join-preview` row (`will_fight`,
+`enlisted`, `watching`); nothing publishes per-player seats for a live war, so another
+player's row is `unknown` and renders as a claimless em dash rather than "Spectator".
+(2) **`decideRoomTransition`'s "already entered this room ⇒ do not re-enter" rule is a
+skirmish rule.** A skirmish is played once and winds down; a war is a world that
+outlives the visit, so a *second* visit in one page session is ordinary. The
+discriminator is intent, not state: `LobbyUI.rejoinRequestedRoomId` is set for the
+length of a `joinRoom` call (every caller is a button) and a war re-enters on it, while
+a passive room/war broadcast still refreshes the room view — otherwise quitting a war to
+the lobby would be undone by the next ~5 s war tick.
+
 **Game-server lifetime:** a non-persistent game server self-terminates after
 5 min with zero connected clients (120 s startup grace). The lobby reaps
 abandoned non-persistent rooms (no live game, idle >30 min) and, on startup,
