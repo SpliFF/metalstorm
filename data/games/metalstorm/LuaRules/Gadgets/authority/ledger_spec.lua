@@ -59,6 +59,28 @@ describe("authority ledger", function()
         assert.is_false(unmapped)
     end)
 
+    -- endtoend D43 census: the two reasons the game emits that the taxonomy did
+    -- not name. Both were found by enumerating the Award/Charge call sites
+    -- rather than by reading a log, which is why they outlived D13 and D43 —
+    -- neither had ever been seen in a warn, because the warn fires once per
+    -- distinct reason per process and 'micro' fires on frame one.
+    it("classifies the order class Classify.orderClass actually emits", function()
+        local Classify = require('classify')   -- sibling, same cwd rule as 'ledger'
+        -- Not a hardcoded 'micro': whatever the default branch returns must map.
+        for _, cmdID in ipairs({ 0, 10, 20, -5 }) do
+            local reason = Classify.orderClass(cmdID)
+            local cls, unmapped = Ledger.classify(reason)
+            assert.is_false(unmapped)
+            assert.are.equal('burn', cls)
+        end
+    end)
+
+    it("classifies a parley tribute payout as move", function()
+        local cls, unmapped = Ledger.classify('tribute')
+        assert.are.equal('move', cls)
+        assert.is_false(unmapped)
+    end)
+
     it("still reports a genuinely unknown reason even near a prefix", function()
         assert.are.equal('unmapped', Ledger.classify('objectiv_control'))
         assert.are.equal('unmapped', Ledger.classify('some_objective_control'))

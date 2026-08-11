@@ -42,6 +42,14 @@ local REASON_CLASS = {
     posture          = 'burn',
     proposal_fee     = 'burn',
     standing         = 'burn',   -- GG.Authority.ChargeStandingOrder
+    -- endtoend D43 census: this is the reason the ORDINARY per-unit order path
+    -- actually emits, and it was unmapped. `GG.Authority.ChargeOrder` tags with
+    -- `Classify.orderClass(cmdID)`, whose default branch returns 'micro' — not
+    -- the 'order' spelled above. So every non-build, non-posture order charge in
+    -- every match filed as unmapped: the single most frequent charge in the
+    -- game. 'order' is kept because it is the documented name and the class is
+    -- identical; see D62 for why the two spellings exist at all.
+    micro            = 'burn',
 
     -- move (net-zero)
     stake_escrow     = 'move',
@@ -52,6 +60,13 @@ local REASON_CLASS = {
     -- and mints nothing.
     rejoin_restore   = 'move',
     player_fallback  = 'move',
+    -- endtoend D43 census: game_parley.lua's tribute payout (three call sites —
+    -- one-shot pre-escrowed, one-shot direct, and the recurring `active` tick).
+    -- `move`, not `mint`, for the same reason as leaver_merge: the payee team
+    -- gains authority that an existing pool lost, so nothing is created. Note
+    -- the payer half of the same transaction does NOT currently balance it —
+    -- it goes through ChargeOrder and files as 'micro'/burn (D62).
+    tribute          = 'move',
     -- AI funding (PLAN-metalstorm-ai.md §5.2): a human's one-shot gift into a
     -- co-commander's own pool, and the standing per-minute allowance drawn from
     -- the team pool. Both are GG.Authority.Transfer — pool-to-pool, net zero,
