@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstdio>
 #include <cstdlib>
 
 namespace snapshotrt {
@@ -155,6 +156,16 @@ void Controller::SetTerminalPayload(std::vector<uint8_t> bytes)
         while (i < n && terminalA_[i] == terminalB_[i]) ++i;
         result_.firstDifferentByte = static_cast<int64_t>(i);
     }
+    // The verdict waits for Finish(): under the default bar it is the roster
+    // and vitals comparison, not the bytes, that decides — and only the caller
+    // can decode a payload into units.
+}
+
+void Controller::Finish(const Divergence& d)
+{
+    if (phase_ == Phase::Done)
+        return;
+    result_.divergence = d;
     Finalise();
 }
 
@@ -208,6 +219,12 @@ void Controller::Finalise()
         }
     }
 
+    result_.strict = cfg_.strict;
+    const Divergence& d = result_.divergence;
+
+    // The bars that hold under BOTH policies come first: they are statements
+    // about the harness and about the restore itself, neither of which the
+    // Q-P2 decision touched.
     if (armA_.size() != armB_.size()) {
         result_.failure = "arm A recorded " + std::to_string(armA_.size()) +
                           " hashes, arm B " + std::to_string(armB_.size());
@@ -215,16 +232,34 @@ void Controller::Finalise()
         result_.failure = "expected " + std::to_string(cfg_.ticks) +
                           " hashes per arm, recorded " +
                           std::to_string(armA_.size());
-    } else if (result_.firstDivergentFrame >= 0) {
-        result_.failure = "state hash diverged at frame " +
-                          std::to_string(result_.firstDivergentFrame);
     } else if (!result_.restoreRecaptureIdentical) {
-        // Every tick agreed and the state the hash does not cover still moved:
-        // capture→apply→capture is not idempotent, which is a capture bug the
-        // 100 ticks are blind to.
+        // capture→apply→capture is not idempotent: a capture bug, and the one
+        // bar that is about the RESTORE rather than about the continuation. It
+        // caught a building being re-snapped to the build grid on every apply.
         result_.failure = "the checkpoint re-captured from the restored world "
                           "differs from the checkpoint that was applied";
-    } else if (!result_.terminalPayloadIdentical) {
+    } else if (!d.measured) {
+        // "The continuation was never measured" must not read as "it agreed".
+        result_.failure = "the two arms' terminal units sections could not be "
+                          "compared (the payloads did not decode)";
+    } else if (d.onlyA != 0 || d.onlyB != 0) {
+        // A unit that exists in one continuation and not the other is a
+        // different world, not a different track: a kill that did not happen,
+        // or a build that did.
+        result_.failure = "the two arms' rosters differ — " +
+                          std::to_string(d.onlyA) + " unit(s) only in arm A, " +
+                          std::to_string(d.onlyB) + " only in arm B";
+    } else if (d.vitals != 0) {
+        // Health/experience/damage are outcomes. Movement may re-derive; who
+        // got hurt may not.
+        result_.failure = std::to_string(d.vitals) +
+                          " unit(s) differ in vitals (health/experience/damage) "
+                          "— a resumed world may re-derive movement, not combat "
+                          "outcomes";
+    } else if (cfg_.strict && result_.firstDivergentFrame >= 0) {
+        result_.failure = "state hash diverged at frame " +
+                          std::to_string(result_.firstDivergentFrame);
+    } else if (cfg_.strict && !result_.terminalPayloadIdentical) {
         result_.failure = "terminal payloads differ at byte " +
                           std::to_string(result_.firstDifferentByte) +
                           " (the hash track agreed — this is state the hash "
@@ -247,6 +282,7 @@ std::string Controller::FormatVerdict() const
 
     std::string out = "snapshot round-trip: ";
     out += result_.pass ? "PASS" : "FAILED";
+    out += std::string(" [") + (result_.strict ? "strict" : "world") + " bar]";
     out += " frames " + std::to_string(result_.startFrame) + ".." +
            std::to_string(result_.endFrame) + " - " +
            std::to_string(result_.hashesCompared) + " state hashes " +
@@ -257,6 +293,25 @@ std::string Controller::FormatVerdict() const
            ", terminal payload (" + std::to_string(result_.terminalBytes) +
            " bytes) " +
            (result_.terminalPayloadIdentical ? "identical" : "DIFFERS");
+
+    // The metric, printed on a PASS as well as on a failure: it is the number
+    // that says how far a resumed world drifts from the one it resumed, and
+    // therefore how much of Q-P2's option A is worth building. A bar that only
+    // reports when it fails leaves nobody able to see the trend.
+    const Divergence& d = result_.divergence;
+    if (d.measured) {
+        char buf[256];
+        snprintf(buf, sizeof(buf),
+                 ". Continuation: %zu/%zu units differ in transform (max pos "
+                 "delta %.3f elmos, max heading delta %.1f deg), %zu in vitals, "
+                 "roster %s",
+                 d.transform, d.unitsA, d.maxPosDelta, d.maxHeadingDelta,
+                 d.vitals,
+                 (d.onlyA == 0 && d.onlyB == 0) ? "identical" : "DIFFERS");
+        out += buf;
+    } else {
+        out += ". Continuation: NOT MEASURED";
+    }
     if (!result_.pass)
         out += " - " + result_.failure;
     return out;

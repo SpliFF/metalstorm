@@ -1602,3 +1602,115 @@ TEST_CASE("DiffSections: names every section that disagrees, not just the first"
         CHECK(d[0].find("absent") != std::string::npos);
     }
 }
+
+// ───────── CompareUnits (PLAN-persistence Q-P2, option D's metric) ─────────
+//
+// The round-trip harness's default bar is no longer "the two continuations are
+// byte-identical" — §7.1c re-derives movement, so they are not — it is "the
+// same units came out with the same outcomes", and the movement drift is
+// MEASURED. These cases pin the measurement, because the bar is only as honest
+// as the numbers it reads: a roster difference counted by SIZE rather than by
+// id would miss two rosters that each hold one unit the other does not, and a
+// heading delta that does not wrap would report one step as most of a circle.
+
+namespace {
+
+std::vector<uint8_t> unitsPayload(const std::vector<UnitState>& units)
+{
+    std::vector<uint8_t> body;
+    EncodeUnits(units, body);
+    return framePayload({{6, body}});
+}
+
+UnitState quietUnit(int32_t id)
+{
+    UnitState s;
+    s.id = id;
+    s.unitDefName = "ms_tank";
+    s.team = 0;
+    s.health = 100.0f;
+    s.maxHealth = 100.0f;
+    return s;
+}
+
+}  // namespace
+
+TEST_CASE("CompareUnits: identical rosters measure zero of everything") {
+    const auto p = unitsPayload({quietUnit(1), quietUnit(2), quietUnit(3)});
+    const UnitsDivergence d = CompareUnits(p, p);
+    CHECK(d.measured);
+    CHECK(d.unitsA == 3);
+    CHECK(d.unitsB == 3);
+    CHECK(d.transform == 0);
+    CHECK(d.vitals == 0);
+    CHECK(d.onlyA == 0);
+    CHECK(d.onlyB == 0);
+    CHECK(d.maxPosDelta == doctest::Approx(0.0));
+    CHECK(d.maxHeadingDelta == doctest::Approx(0.0));
+    CHECK(d.first.empty());
+}
+
+TEST_CASE("CompareUnits: a moved unit is a transform difference with a magnitude") {
+    std::vector<UnitState> a = {quietUnit(1), quietUnit(2)};
+    std::vector<UnitState> b = a;
+    b[1].posX = 3.0f;
+    b[1].posZ = 4.0f;          // 3-4-5 triangle: exactly 5 elmos
+    const UnitsDivergence d = CompareUnits(unitsPayload(a), unitsPayload(b));
+    CHECK(d.transform == 1);
+    CHECK(d.vitals == 0);
+    CHECK(d.maxPosDelta == doctest::Approx(5.0));
+    CHECK(d.maxPosDeltaUnitId == 2);
+    CHECK(d.first.find("unit 2") != std::string::npos);
+}
+
+TEST_CASE("CompareUnits: damage is a vitals difference, not a transform one") {
+    // The distinction the bar rests on: a resumed world may re-derive where a
+    // unit walked, never who shot it.
+    std::vector<UnitState> a = {quietUnit(1)};
+    std::vector<UnitState> b = a;
+    b[0].health = 40.0f;
+    const UnitsDivergence d = CompareUnits(unitsPayload(a), unitsPayload(b));
+    CHECK(d.transform == 0);
+    CHECK(d.vitals == 1);
+    CHECK(d.maxPosDelta == doctest::Approx(0.0));
+}
+
+TEST_CASE("CompareUnits: roster differences are counted by id, not by size") {
+    // Two rosters of the SAME size, each holding one unit the other does not.
+    // Counting "B has more than A" would report both sides clean.
+    const auto a = unitsPayload({quietUnit(1), quietUnit(2)});
+    const auto b = unitsPayload({quietUnit(1), quietUnit(3)});
+    const UnitsDivergence d = CompareUnits(a, b);
+    CHECK(d.unitsA == 2);
+    CHECK(d.unitsB == 2);
+    CHECK(d.onlyA == 1);
+    CHECK(d.onlyB == 1);
+}
+
+TEST_CASE("CompareUnits: heading deltas take the short way round the circle") {
+    std::vector<UnitState> a = {quietUnit(1)};
+    a[0].heading = 32767;
+    std::vector<UnitState> b = a;
+    b[0].heading = -32768;     // one step further, not 359 degrees back
+    const UnitsDivergence d = CompareUnits(unitsPayload(a), unitsPayload(b));
+    CHECK(d.transform == 1);
+    CHECK(d.maxHeadingDelta == doctest::Approx(360.0 / 65536.0));
+
+    std::vector<UnitState> c = a;
+    c[0].heading = 0;          // a quarter turn from 16384
+    std::vector<UnitState> e = a;
+    e[0].heading = 16384;
+    CHECK(CompareUnits(unitsPayload(c), unitsPayload(e)).maxHeadingDelta ==
+          doctest::Approx(90.0));
+}
+
+TEST_CASE("CompareUnits: a payload with no units section is NOT MEASURED") {
+    // "Could not compare" must be distinguishable from "compared and agreed" —
+    // the harness fails on the former.
+    const auto good = unitsPayload({quietUnit(1)});
+    const auto empty = framePayload({{1, std::vector<uint8_t>(21, 0)}});
+    CHECK_FALSE(CompareUnits(good, empty).measured);
+    CHECK_FALSE(CompareUnits(empty, good).measured);
+    CHECK(DescribeUnitsDivergence(good, empty).find("could not be decoded") !=
+          std::string::npos);
+}

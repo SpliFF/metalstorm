@@ -46,13 +46,22 @@ struct Fixture {
     int64_t restoreFrame = -1;   // -1 = "wherever the checkpoint was taken"
     int64_t divergeAtTick = -1;  // 1-based tick index within the arm
     bool inArmB = false;
+    /// What the caller measured of the two continuations. Clean by default:
+    /// same roster, same vitals, no movement drift.
+    Divergence divergence = [] {
+        Divergence d;
+        d.measured = true;
+        d.unitsA = d.unitsB = 100;
+        return d;
+    }();
 
-    explicit Fixture(int64_t atFrame, int64_t ticks)
+    explicit Fixture(int64_t atFrame, int64_t ticks, bool strict = false)
     {
         Config cfg;
         cfg.enabled = true;
         cfg.atFrame = atFrame;
         cfg.ticks = ticks;
+        cfg.strict = strict;
         c.Configure(cfg);
     }
 
@@ -71,6 +80,8 @@ struct Fixture {
         }
         if (s.captureTerminal)
             c.SetTerminalPayload(inArmB ? terminalB : terminalA);
+        if (s.finish && c.CurrentPhase() != Phase::Done)
+            c.Finish(divergence);
         if (s.restore) {
             inArmB = true;
             const int64_t f = (restoreFrame >= 0) ? restoreFrame : c.StartFrame();
@@ -159,6 +170,20 @@ TEST_CASE("a clean round-trip passes and reports both arms") {
     CHECK(r.terminalBytes == 16);
     CHECK(r.checkpointBytes == 8);
     CHECK(f.c.FormatVerdict().find("PASS") != std::string::npos);
+    // The metric rides on a PASS too — a bar that only speaks when it fails
+    // leaves nobody able to watch the drift move.
+    CHECK(r.divergence.measured);
+    CHECK(f.c.FormatVerdict().find("0/100 units differ in transform") !=
+          std::string::npos);
+}
+
+TEST_CASE("ParseSpec leaves the bar at the world default") {
+    // `--roundtrip-strict` is a separate flag: a spec alone must not silently
+    // opt into the identity bar the Q-P2 decision retired.
+    Config cfg;
+    std::string err;
+    REQUIRE(ParseSpec("600:100", cfg, err));
+    CHECK_FALSE(cfg.strict);
 }
 
 TEST_CASE("the checkpoint is taken at the first frame at or past the spec") {
@@ -200,8 +225,8 @@ TEST_CASE("loop passes that do not advance the frame are not ticks") {
 
 // ───────────────────────────── the failure modes ─────────────────────────────
 
-TEST_CASE("a divergent hash FAILS and names the frame it diverged at") {
-    Fixture f(10, 5);
+TEST_CASE("strict: a divergent hash FAILS and names the frame it diverged at") {
+    Fixture f(10, 5, /*strict=*/true);
     f.divergeAtTick = 3;
     f.RunAll(20);
 
@@ -213,14 +238,15 @@ TEST_CASE("a divergent hash FAILS and names the frame it diverged at") {
     CHECK(r.expected != r.actual);
     CHECK(r.failure.find("diverged at frame 13") != std::string::npos);
     CHECK(f.c.FormatVerdict().find("FAILED") != std::string::npos);
+    CHECK(f.c.FormatVerdict().find("[strict bar]") != std::string::npos);
 }
 
-TEST_CASE("terminal payloads that differ FAIL even when every hash agreed") {
+TEST_CASE("strict: terminal payloads that differ FAIL even when every hash agreed") {
     // This is the case the narrow hash exists to be backstopped on: it folds
     // unit id/team/pos/health and the RNG, so a team's resources, a command
     // queue, a stockpile or a gadget's Lua table can all drift with the hash
     // track dead flat.
-    Fixture f(10, 5);
+    Fixture f(10, 5, /*strict=*/true);
     f.terminalB = blob(0xB2, 16);
     f.terminalB[9] = 0xFF;
     f.RunAll(20);
@@ -232,6 +258,99 @@ TEST_CASE("terminal payloads that differ FAIL even when every hash agreed") {
     CHECK_FALSE(r.terminalPayloadIdentical);
     CHECK(r.firstDifferentByte == 9);
     CHECK(r.failure.find("terminal payloads differ") != std::string::npos);
+}
+
+// ────────────────── the world bar (PLAN-persistence Q-P2, option D) ──────────────────
+//
+// What a resume actually promises. §7.1c forces `inCommand` false and captures
+// no `AMoveType` state, so every moving unit re-plans and the two continuations
+// separate — track-identity is not on offer and asserting it makes the harness
+// permanently red, which is a test nobody can act on. What IS promised is that
+// the restore is byte-exact and that the world it continues into holds the same
+// units with the same outcomes; the movement drift is measured instead, and the
+// measurement is what sizes option A.
+
+TEST_CASE("world bar: a diverged hash track and payload PASS, and are reported") {
+    Fixture f(10, 5);
+    f.divergeAtTick = 2;
+    f.terminalB = blob(0xB2, 16);
+    f.terminalB[9] = 0xFF;
+    f.divergence.transform = 64;      // the movement re-derivation
+    f.divergence.maxPosDelta = 68.7;
+    f.divergence.maxHeadingDelta = 84.4;
+    f.RunAll(20);
+
+    REQUIRE(f.c.CurrentPhase() == Phase::Done);
+    const Result& r = f.c.Result_();
+    CHECK(r.ran);
+    CHECK(r.pass);
+    CHECK(r.failure.empty());
+    // Reported, not asserted — both facts are still on the record.
+    CHECK(r.firstDivergentFrame == 12);
+    CHECK_FALSE(r.terminalPayloadIdentical);
+    const std::string v = f.c.FormatVerdict();
+    CHECK(v.find("PASS") != std::string::npos);
+    CHECK(v.find("[world bar]") != std::string::npos);
+    CHECK(v.find("64/100 units differ in transform") != std::string::npos);
+    CHECK(v.find("68.700 elmos") != std::string::npos);
+    CHECK(v.find("84.4 deg") != std::string::npos);
+}
+
+TEST_CASE("world bar: a roster that differs FAILS — that is a different world") {
+    // A unit present in one continuation and not the other is a kill that did
+    // not happen or a build that did. Movement may re-derive; existence may not.
+    Fixture f(10, 5);
+    f.divergence.onlyA = 1;
+    f.RunAll(20);
+
+    const Result& r = f.c.Result_();
+    CHECK(r.ran);
+    CHECK_FALSE(r.pass);
+    CHECK(r.failure.find("rosters differ") != std::string::npos);
+    CHECK(f.c.FormatVerdict().find("roster DIFFERS") != std::string::npos);
+
+    Fixture g(10, 5);
+    g.divergence.onlyB = 3;
+    g.RunAll(20);
+    CHECK_FALSE(g.c.Result_().pass);
+    CHECK(g.c.Result_().failure.find("only in arm B") != std::string::npos);
+}
+
+TEST_CASE("world bar: a vitals difference FAILS — combat outcomes are not re-derived") {
+    Fixture f(10, 5);
+    f.divergence.vitals = 2;
+    f.RunAll(20);
+
+    const Result& r = f.c.Result_();
+    CHECK(r.ran);
+    CHECK_FALSE(r.pass);
+    CHECK(r.failure.find("differ in vitals") != std::string::npos);
+}
+
+TEST_CASE("world bar: an unmeasured continuation FAILS, it does not pass by default") {
+    // The same rule `ran` exists for, one level down: "the payloads did not
+    // decode" must never be indistinguishable from "the payloads agreed".
+    Fixture f(10, 5);
+    f.divergence = Divergence{};        // measured = false
+    f.RunAll(20);
+
+    const Result& r = f.c.Result_();
+    CHECK_FALSE(r.pass);
+    CHECK(r.failure.find("could not be compared") != std::string::npos);
+    CHECK(f.c.FormatVerdict().find("NOT MEASURED") != std::string::npos);
+}
+
+TEST_CASE("both bars: a non-idempotent re-capture outranks the continuation policy") {
+    // The one assertion that is about the RESTORE rather than about the ticks
+    // after it, so the Q-P2 decision does not reach it: it caught a building
+    // being re-snapped to the build grid on every apply.
+    for (const bool strict : {false, true}) {
+        Fixture f(10, 5, strict);
+        f.recapture = blob(0xC3);
+        f.RunAll(20);
+        CHECK_FALSE(f.c.Result_().pass);
+        CHECK(f.c.Result_().failure.find("re-captured") != std::string::npos);
+    }
 }
 
 TEST_CASE("a non-idempotent re-capture FAILS on its own") {

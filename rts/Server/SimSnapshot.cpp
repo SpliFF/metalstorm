@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstring>
 
 namespace simsnapshot {
@@ -174,8 +175,8 @@ std::vector<std::string> DiffSections(const std::vector<uint8_t>& a,
     return diffs;
 }
 
-std::string DescribeUnitsDivergence(const std::vector<uint8_t>& a,
-                                    const std::vector<uint8_t>& b)
+UnitsDivergence CompareUnits(const std::vector<uint8_t>& a,
+                             const std::vector<uint8_t>& b)
 {
     const auto find = [](const std::vector<uint8_t>& p,
                          std::vector<UnitState>& out) -> bool {
@@ -187,27 +188,53 @@ std::string DescribeUnitsDivergence(const std::vector<uint8_t>& a,
         return false;
     };
 
+    UnitsDivergence d;
     std::vector<UnitState> ua, ub;
     if (!find(a, ua) || !find(b, ub))
-        return "units sections could not be decoded for comparison";
+        return d;   // measured stays false: "could not compare" is not "agreed"
+
+    d.measured = true;
+    d.unitsA = ua.size();
+    d.unitsB = ub.size();
 
     std::unordered_map<int32_t, const UnitState*> byId;
     for (const auto& u : ub) byId[u.id] = &u;
 
-    size_t transform = 0, vitals = 0, onlyA = 0;
-    std::string first;
+    std::unordered_set<int32_t> matched;
     for (const auto& x : ua) {
         auto it = byId.find(x.id);
-        if (it == byId.end()) { ++onlyA; continue; }
+        if (it == byId.end()) { ++d.onlyA; continue; }
+        matched.insert(x.id);
         const UnitState& y = *it->second;
         const bool movedT = x.posX != y.posX || x.posY != y.posY || x.posZ != y.posZ ||
                             x.speedX != y.speedX || x.speedY != y.speedY ||
                             x.speedZ != y.speedZ || x.heading != y.heading;
         const bool movedV = x.health != y.health || x.experience != y.experience ||
                             x.recentDamage != y.recentDamage;
-        if (movedT) ++transform;
-        if (movedV) ++vitals;
-        if ((movedT || movedV) && first.empty()) {
+        if (movedT) ++d.transform;
+        if (movedV) ++d.vitals;
+
+        // The magnitudes, over units present on both sides. A count alone
+        // cannot tell "every unit is a millimetre along its path" from "a
+        // truck took the other fork" — and those size option A differently.
+        const double dx = static_cast<double>(x.posX) - y.posX;
+        const double dy = static_cast<double>(x.posY) - y.posY;
+        const double dz = static_cast<double>(x.posZ) - y.posZ;
+        const double dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+        if (dist > d.maxPosDelta) {
+            d.maxPosDelta = dist;
+            d.maxPosDeltaUnitId = x.id;
+        }
+        // Headings are 16-bit angles that wrap: 32767 vs -32768 is one step
+        // apart, not the whole circle.
+        const int32_t raw = static_cast<int32_t>(
+            static_cast<int16_t>(static_cast<int16_t>(x.heading) -
+                                 static_cast<int16_t>(y.heading)));
+        const double deg = std::abs(raw) * (360.0 / 65536.0);
+        if (deg > d.maxHeadingDelta)
+            d.maxHeadingDelta = deg;
+
+        if ((movedT || movedV) && d.first.empty()) {
             char buf[512];
             snprintf(buf, sizeof(buf),
                 "first: unit %d '%s' pos (%.3f,%.3f,%.3f) vs (%.3f,%.3f,%.3f), "
@@ -217,16 +244,35 @@ std::string DescribeUnitsDivergence(const std::vector<uint8_t>& a,
                 x.posX, x.posY, x.posZ, y.posX, y.posY, y.posZ,
                 x.speedX, x.speedY, x.speedZ, y.speedX, y.speedY, y.speedZ,
                 x.heading, y.heading, x.health, y.health);
-            first = buf;
+            d.first = buf;
         }
     }
-    const size_t onlyB = (ub.size() > ua.size()) ? ub.size() - ua.size() : 0;
+    // By id, not by count: two rosters of the same size can still each hold a
+    // unit the other does not.
+    for (const auto& y : ub)
+        if (matched.find(y.id) == matched.end()) ++d.onlyB;
 
-    return std::to_string(ua.size()) + " vs " + std::to_string(ub.size()) +
-           " units; " + std::to_string(transform) + " differ in transform, " +
-           std::to_string(vitals) + " in vitals, " + std::to_string(onlyA) +
-           " present only in arm A, " + std::to_string(onlyB) +
-           " only in arm B. " + (first.empty() ? "no per-unit difference" : first);
+    return d;
+}
+
+std::string DescribeUnitsDivergence(const std::vector<uint8_t>& a,
+                                    const std::vector<uint8_t>& b)
+{
+    const UnitsDivergence d = CompareUnits(a, b);
+    if (!d.measured)
+        return "units sections could not be decoded for comparison";
+
+    char mag[160];
+    snprintf(mag, sizeof(mag),
+             " max pos delta %.3f elmos (unit %d), max heading delta %.1f deg.",
+             d.maxPosDelta, d.maxPosDeltaUnitId, d.maxHeadingDelta);
+
+    return std::to_string(d.unitsA) + " vs " + std::to_string(d.unitsB) +
+           " units; " + std::to_string(d.transform) + " differ in transform, " +
+           std::to_string(d.vitals) + " in vitals, " + std::to_string(d.onlyA) +
+           " present only in arm A, " + std::to_string(d.onlyB) +
+           " only in arm B." + std::string(mag) + " " +
+           (d.first.empty() ? "no per-unit difference" : d.first);
 }
 
 const std::vector<DerivedOmission>& DerivedNotCaptured()
@@ -1955,7 +2001,17 @@ void ApplyUnitState(CUnit* u, const UnitState& s)
     // ForcedMove rather than a raw pos write: it re-registers the unit with the
     // quad field and the ground-blocking map, which a bare assignment leaves
     // pointing at the spawn position.
-    u->ForcedMove(float3(s.posX, s.posY, s.posZ));
+    //
+    // CUnit:: qualified on purpose — CBuilding overrides ForcedMove to snap the
+    // position through Pos2BuildPos and re-run FlattenGround, and a restore must
+    // reproduce the world it captured rather than re-derive where the building
+    // "should" have been built. A building staged off the 16-elmo build grid (a
+    // scenario's authored position, a transport drop) was silently moved up to
+    // half a square on every restore, and the terrain cut was made a second
+    // time — which is also what `params.flattenGround = false` in ApplyUnits
+    // exists to avoid. Everything else the override did is applied explicitly
+    // by the statements below (heading, the three direction vectors, velocity).
+    u->CUnit::ForcedMove(float3(s.posX, s.posY, s.posZ));
     u->SetVelocityAndSpeed(float3(s.speedX, s.speedY, s.speedZ));
     u->heading = static_cast<short>(s.heading);
     u->buildFacing = static_cast<short>(s.buildFacing);

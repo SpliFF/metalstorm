@@ -397,8 +397,12 @@ int main(int argc, char* argv[])
     // --max-wall-min N (headless hard wall-clock ceiling, default 60),
     // --snapshot-roundtrip <frame>[:<ticks>] (PLAN-persistence §8: checkpoint a
     //   populated sim, run N ticks, restore, run the same N ticks, and require
-    //   identical state-hash tracks and terminal payloads; nonzero exit on
-    //   divergence. Implies a headless uncapped run),
+    //   the restore to be byte-exact and the two continuations to hold the same
+    //   roster with the same vitals; movement divergence is measured and
+    //   reported rather than failed (Q-P2 option D). Nonzero exit on a defect.
+    //   Implies a headless uncapped run),
+    // --roundtrip-strict (Q-P2's pre-decision bar: also require the two hash
+    //   tracks and the two terminal payloads to be identical),
     // --journal-audit [N] (PLAN-replay: record the synced-input cause stream
     //   in memory, cap N records, expose at GET /api/journal),
     // --journal-file PATH (PLAN-replay task 2: record the cause stream to a
@@ -484,6 +488,11 @@ int main(int argc, char* argv[])
                 SLOG(SPRING_LOG_ERROR, "--snapshot-roundtrip: %s", sperr.c_str());
                 return 1;
             }
+        } else if (arg == "--roundtrip-strict") {
+            // PLAN-persistence Q-P2: the pre-decision bar, kept because it is
+            // the bar a fixture with nothing under a move order can still hold
+            // — and the one option A would restore for every fixture.
+            roundTripCfg.strict = true;
         } else if (arg == "--journal-file" && i + 1 < argc) {
             journalFilePath = argv[++i];
         } else if (arg == "--replay" && i + 1 < argc) {
@@ -661,8 +670,11 @@ int main(int argc, char* argv[])
         headlessCfg.tickMode = headless::TickMode::Uncapped;
         headlessCfg.stopAt.gameOver = true;
         SLOG(SPRING_LOG_NOTICE,
-            "snapshot round-trip: checkpoint at frame %lld, %lld ticks per arm",
-            (long long)roundTripCfg.atFrame, (long long)roundTripCfg.ticks);
+            "snapshot round-trip: checkpoint at frame %lld, %lld ticks per arm, "
+            "%s bar",
+            (long long)roundTripCfg.atFrame, (long long)roundTripCfg.ticks,
+            roundTripCfg.strict ? "strict (hash + payload identity)"
+                                : "world (roster + vitals, movement measured)");
     }
 
     // --- Replay export/import (PLAN-replay task 3, the `.msr` packer) ---
@@ -3045,6 +3057,24 @@ int main(int argc, char* argv[])
                 else
                     roundTrip.SetTerminalPayload(std::move(payload));
             }
+            if (step.finish && roundTrip.CurrentPhase() != snapshotrt::Phase::Done) {
+                // The controller is pure, so the decode is the caller's job:
+                // measure how the two continuations' rosters differ and hand
+                // back the numbers it judges (PLAN-persistence Q-P2 option D).
+                const simsnapshot::UnitsDivergence u = simsnapshot::CompareUnits(
+                    roundTrip.TerminalA(), roundTrip.TerminalB());
+                snapshotrt::Divergence d;
+                d.measured = u.measured;
+                d.unitsA = u.unitsA;
+                d.unitsB = u.unitsB;
+                d.transform = u.transform;
+                d.vitals = u.vitals;
+                d.onlyA = u.onlyA;
+                d.onlyB = u.onlyB;
+                d.maxPosDelta = u.maxPosDelta;
+                d.maxHeadingDelta = u.maxHeadingDelta;
+                roundTrip.Finish(d);
+            }
             if (step.restore) {
                 const std::vector<uint8_t>& cp = roundTrip.Checkpoint();
                 if (!simSerializer.Deserialize(cp.data(), cp.size(), rtErr)) {
@@ -3077,6 +3107,17 @@ int main(int argc, char* argv[])
                                 "checkpoint at %s (capture -> apply -> capture is not "
                                 "idempotent)",
                                 simsnapshot::DescribeOffset(cp.data(), cp.size(), at).c_str());
+                            // Same reason the terminal comparison says it: "the
+                            // units section differs" is true of a dropped kill
+                            // and of a building landing 8 elmos from where it
+                            // was captured, and only one of those is a restore
+                            // that moved the world.
+                            for (const auto& d : simsnapshot::DiffSections(cp, recap)) {
+                                if (d != "units") continue;
+                                SLOG(SPRING_LOG_WARNING,
+                                    "snapshot round-trip: re-capture units — %s",
+                                    simsnapshot::DescribeUnitsDivergence(cp, recap).c_str());
+                            }
                         }
                         roundTrip.OnRestored(sim.GetFrameNum(), recap);
                     }
@@ -3087,8 +3128,13 @@ int main(int argc, char* argv[])
                 SLOG(rr.pass ? SPRING_LOG_NOTICE : SPRING_LOG_ERROR, "%s",
                      roundTrip.FormatVerdict().c_str());
                 if (rr.firstDifferentByte >= 0) {
+                    // Under the world bar a payload difference is the EXPECTED
+                    // shape of a resume (§7.1c's movement re-derivation), so it
+                    // is reported at the severity of the verdict it belongs to
+                    // rather than always as an error.
+                    const int sev = rr.pass ? SPRING_LOG_NOTICE : SPRING_LOG_ERROR;
                     const std::vector<uint8_t>& ta = roundTrip.TerminalA();
-                    SLOG(SPRING_LOG_ERROR,
+                    SLOG(sev,
                         "snapshot round-trip: the two arms' terminal payloads first "
                         "differ in %s",
                         simsnapshot::DescribeOffset(
@@ -3103,7 +3149,7 @@ int main(int argc, char* argv[])
                         ta, roundTrip.TerminalB());
                     std::string names;
                     for (const auto& d : diffs) names += (names.empty() ? "" : ", ") + d;
-                    SLOG(SPRING_LOG_ERROR,
+                    SLOG(sev,
                         "snapshot round-trip: sections that disagree at frame %lld: %s",
                         (long long)rr.endFrame, names.c_str());
                     for (const auto& d : diffs) {
@@ -3111,7 +3157,7 @@ int main(int argc, char* argv[])
                         // "units differ" covers a dropped kill and a unit
                         // standing a millimetre further along its path. Those
                         // are opposite diagnoses, so say which.
-                        SLOG(SPRING_LOG_ERROR, "snapshot round-trip: units — %s",
+                        SLOG(sev, "snapshot round-trip: units — %s",
                              simsnapshot::DescribeUnitsDivergence(
                                  ta, roundTrip.TerminalB()).c_str());
                     }

@@ -110,6 +110,29 @@ std::string DescribeOffset(const uint8_t* data, size_t size, size_t offset);
 std::vector<std::string> DiffSections(const std::vector<uint8_t>& a,
                                       const std::vector<uint8_t>& b);
 
+/// How two payloads' `units` sections disagree, as numbers rather than prose —
+/// the measurement PLAN-persistence Q-P2 option D turns the resume's fidelity
+/// into: a roster difference and a vitals difference are defects, a transform
+/// difference is the declared `AMoveType` re-derivation, and its MAGNITUDE is
+/// what says whether capturing move state (option A) is worth building.
+struct UnitsDivergence {
+    bool measured = false;      ///< false iff a units section could not be decoded
+    size_t unitsA = 0;
+    size_t unitsB = 0;
+    size_t transform = 0;       ///< units whose pos/speed/heading differ
+    size_t vitals = 0;          ///< units whose health/experience/damage differ
+    size_t onlyA = 0;           ///< present in A, absent from B
+    size_t onlyB = 0;
+    double maxPosDelta = 0.0;       ///< elmos, over units present on both sides
+    double maxHeadingDelta = 0.0;   ///< degrees, shortest way round
+    int32_t maxPosDeltaUnitId = -1;
+    std::string first;          ///< the first offender's numbers, for the log
+};
+
+/// The comparison behind DescribeUnitsDivergence.
+UnitsDivergence CompareUnits(const std::vector<uint8_t>& a,
+                             const std::vector<uint8_t>& b);
+
 /// A human-readable account of HOW two payloads' `units` sections disagree:
 /// how many units differ in transform, in vitals, or are present on one side
 /// only, plus the first offender's numbers. "The units section differs" is

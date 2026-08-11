@@ -24,6 +24,7 @@ Part of the [Debugging & Logging Guide](debugging.md) family. This page covers t
   - [Verifying (`--verify`)](#verifying---verify)
   - [Seeking](#seeking)
   - [What a replay does and does not carry](#what-a-replay-does-and-does-not-carry)
+- [Snapshot round-trip (`--snapshot-roundtrip`)](#snapshot-round-trip---snapshot-roundtrip)
 - [springcli — Command-Line Tool](#springcli--command-line-tool)
   - [Building](#building)
   - [Commands](#commands)
@@ -732,6 +733,58 @@ Two gaps to know about:
 - **A snapshot-restore record ends the segment.** Honouring it needs a mid-stream
   checkpoint restore, which does not exist yet. Per PLAN-replay §6 E2 a rollback
   starts a new segment anyway, so the next segment is a separate replay.
+
+---
+
+## Snapshot round-trip (`--snapshot-roundtrip`)
+
+The populated-fixture assertion for the sim serializer (PLAN-persistence §8). The
+codec tests prove the bytes survive; this proves a world **restored** from them goes
+on behaving the same way, which needs a map, a def handler, real units and live
+gadgets — so it runs on the real binary over real content, on the headless substrate
+(uncapped, no client, like `--replay`).
+
+```bash
+build/debug/spring-server \
+  --headless-run tools/headless-batch/fixtures/soak-ladder.json \
+  --port 19133 --db /tmp/rt.sqlite --max-wall-min 10 \
+  --snapshot-roundtrip 300:100        # checkpoint at frame 300, 100 ticks per arm
+```
+
+It checkpoints at the first frame at or past `<frame>`, runs `<ticks>` ticks recording
+a determinism hash every tick, restores the checkpoint (the frame counter rewinds),
+runs the same ticks again, and compares. `<ticks>` defaults to 100. Frame 0 is refused:
+it is before GameStart, so the comparison would be two empty worlds agreeing.
+
+**What must hold (the default `world` bar):**
+
+- the restore is **byte-exact** — the checkpoint re-captured immediately after being
+  applied is identical to the one applied (capture → apply → capture idempotence);
+- the two continuations hold the **same roster** (no unit appears or vanishes);
+- no unit differs in **vitals** (health / experience / recent damage).
+
+**What is measured rather than asserted:** how far the two continuations' unit
+transforms drift apart. A resumed world is *world*-identical, not *track*-identical —
+`inCommand` is forced false and no `AMoveType` state is captured, so every unit under
+a move order re-plans (PLAN-persistence §7.1c, decision Q-P2 option D). The verdict
+line carries the number on a pass as well as a failure:
+
+```
+snapshot round-trip: PASS [world bar] frames 300..400 - 100 state hashes DIVERGED,
+checkpoint 64659 bytes, re-capture identical, terminal payload (64731 bytes) DIFFERS.
+Continuation: 64/100 units differ in transform (max pos delta 116.119 elmos,
+max heading delta 65.7 deg), 0 in vitals, roster identical
+```
+
+`--roundtrip-strict` adds the pre-decision bar: the two hash tracks and the two
+terminal payloads must be identical as well. Use it on a fixture with nothing under a
+move order (a staging-only scenario), or to measure what capturing move state would
+buy.
+
+Read the **verdict line, not the exit code**: `spring-server` aborts during static
+destruction in any run that exercised weapon defs (PLAN-replay T2-b), so every
+headless run exits 134 whatever the verdict was. The same constraint applies to
+`--verify`.
 
 ---
 

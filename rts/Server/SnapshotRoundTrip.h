@@ -45,6 +45,29 @@ struct Config {
     bool enabled = false;
     int64_t atFrame = 0;    ///< checkpoint here (the first frame >= this)
     int64_t ticks = 100;    ///< compare this many ticks per arm (§8 says 100)
+    /// `--roundtrip-strict`: the original bar — the two hash tracks and the two
+    /// terminal payloads must be IDENTICAL. That is what a resume would promise
+    /// if move state were captured (PLAN-persistence Q-P2 option A), and it is
+    /// still the right bar for a fixture with nothing under a move order. The
+    /// default bar is the one Q-P2 decided (option D): see Result below.
+    bool strict = false;
+};
+
+/// What the two arms' terminal `units` sections say, measured by the caller
+/// (simsnapshot::CompareUnits) and handed back as plain numbers so this module
+/// stays free of the engine. It is the metric Q-P2 option D asks for: the
+/// count and the MAGNITUDE of the movement re-derivation, which is what says
+/// whether capturing `AMoveType` (option A) is worth building.
+struct Divergence {
+    bool measured = false;   ///< false = the caller could not decode the arms
+    size_t unitsA = 0;
+    size_t unitsB = 0;
+    size_t transform = 0;
+    size_t vitals = 0;
+    size_t onlyA = 0;
+    size_t onlyB = 0;
+    double maxPosDelta = 0.0;      ///< elmos
+    double maxHeadingDelta = 0.0;  ///< degrees
 };
 
 /// Parse the CLI spec. Returns false with `err` set on anything malformed —
@@ -93,6 +116,16 @@ struct Result {
     bool terminalPayloadIdentical = false;
     size_t terminalBytes = 0;            ///< arm A's terminal payload size
     int64_t firstDifferentByte = -1;     ///< -1 when identical
+
+    /// The continuation's measured divergence, and the bar it was judged
+    /// against. Under the default bar the hash track and the terminal bytes are
+    /// REPORTED rather than asserted — a resumed world is world-identical, not
+    /// track-identical (PLAN-persistence §7.1c: `inCommand` is forced false and
+    /// no `AMoveType` state is captured, so every moving unit re-plans) — and
+    /// what must hold is that nothing appeared, vanished or took damage
+    /// differently. Under `strict` the old identity bar applies as well.
+    Divergence divergence;
+    bool strict = false;
 };
 
 /// The state machine. One instance per process; inert unless Configure() was
@@ -122,7 +155,14 @@ public:
     /// The hash for the frame the current Step said to record.
     void RecordHash(uint64_t hash);
     /// The arm's terminal payload (arm A's is kept for the byte comparison).
+    /// Arm B's does NOT reach a verdict on its own: the caller still owes the
+    /// units measurement, which only it can take. See Finish().
     void SetTerminalPayload(std::vector<uint8_t> bytes);
+    /// Both arms are in and the caller has measured how their rosters differ:
+    /// reach the verdict. A run whose divergence was never measured FAILS —
+    /// "could not compare" must never read as "found no difference", the same
+    /// rule `Result::ran` exists for.
+    void Finish(const Divergence& d);
     /// Called after the checkpoint has been applied: the sim's frame counter
     /// as it now reads, and the payload re-captured from the restored world.
     void OnRestored(int64_t frameAfterRestore, const std::vector<uint8_t>& recaptured);
