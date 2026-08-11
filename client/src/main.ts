@@ -15,6 +15,7 @@ import { MusicDirector } from './core/music-director.js';
 import { AnimatedCursor } from './core/animated-cursor.js';
 import { BuildMenu } from './core/build-menu.js';
 import { EconomyBar } from './core/economy-bar.js';
+import { hasResourceEconomy } from './core/game-capabilities.js';
 import { FactoryQueuePanel } from './core/factory-queue-panel.js';
 import { DecalOverlay, buildTrackTypeNames } from './core/decal-overlay.js';
 import { LobbyUI } from './lobby/lobby-ui.js';
@@ -896,6 +897,10 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // uses the engine-default model material. Fetched in the same /api/games
     // round-trip as `lighting`.
     let gameModelMaterialPort = '';
+    // PLAN-endtoend.md D9: whether metal/energy mean anything in this game.
+    // Read from the same round-trip; see game-capabilities.ts for why the
+    // fallback is "yes, it has one".
+    let gameHasResourceEconomy = true;
     if (gameId) {
         try {
             const resp = await fetch(`${lobbyHttpUrl}/api/games`);
@@ -904,6 +909,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
                 const g = Array.isArray(games) ? games.find((x: any) => x?.id === gameId) : null;
                 if (g?.lighting) gameLighting = g.lighting;
                 if (g?.modelMaterialPort) gameModelMaterialPort = g.modelMaterialPort;
+                gameHasResourceEconomy = hasResourceEconomy(games, gameId);
             }
         } catch { /* default 'gameplay' / engine-default material */ }
     }
@@ -1498,7 +1504,15 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // dead code in the G3a field notes). `myTeamGuess` is the same best-effort
     // lobby-roster lookup buildMenu uses; corrected to the authoritative value
     // once `gp:authenticated` reports the real team below.
-    economyBar = new EconomyBar({ myTeam: myTeamGuess });
+    // PLAN-endtoend.md D9: only for a game that HAS a metal/energy economy.
+    // Metalstorm declares `resourceEconomy = false`, so the bar is never
+    // constructed there and its `?.update()` callers below no-op — the panel
+    // used to sit at the top of the screen showing two permanently-zero
+    // resources for the whole match. Not a `gameId === 'metalstorm'` test:
+    // the game says this about itself (game-capabilities.ts).
+    if (gameHasResourceEconomy) {
+        economyBar = new EconomyBar({ myTeam: myTeamGuess });
+    }
 
     // PLAN-playable.md G4: native factory-queue panel (DOM, on main). Pure
     // renderer fed via `gp:sceneState.factoryQueue`; row clicks post

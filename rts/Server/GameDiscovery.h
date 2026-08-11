@@ -107,6 +107,22 @@ struct GameInfo {
     /// Empty when `archived` is false.
     std::string archivedReason;
 
+    /// True when the game is played with the engine's metal/energy
+    /// resource economy (PLAN-endtoend.md D9). Read from the game config's
+    /// `resourceEconomy` field; **defaults true**, because every legacy
+    /// Spring game has one and silence must not blank a surface that game
+    /// depends on.
+    ///
+    /// Metalstorm declares it false: authority replaces metal and energy
+    /// there, so the client's `#economy-bar` sat at the top of the screen
+    /// reading `M 0 / 1000k  E 0 / 1000k` for the whole match. The server
+    /// still streams `ResourceUpdate` for every game (the sim has the
+    /// counters either way) — this flag is what tells the client that
+    /// rendering them is meaningless, and it lives in the game's own data
+    /// rather than as a game-id test in the client, the same call
+    /// `archived` above made.
+    bool resourceEconomy = true;
+
     /// Absolute path to the game folder on disk (e.g. "data/games/papertanks").
     /// Used for content loading and AI discovery.
     std::string folderPath;

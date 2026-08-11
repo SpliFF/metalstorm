@@ -3570,7 +3570,9 @@ int main(int argc, char *argv[]) {
                   HttpAuth::JsonEscape(g.modelMaterialPort) + "\"" +
                   ",\"archived\":" + (g.archived ? "true" : "false") +
                   ",\"archivedReason\":\"" +
-                  HttpAuth::JsonEscape(g.archivedReason) + "\"}";
+                  HttpAuth::JsonEscape(g.archivedReason) + "\"" +
+                  ",\"resourceEconomy\":" +
+                  (g.resourceEconomy ? "true" : "false") + "}";
         }
         json += "]";
         return HttpAuth::JsonResponse(200, json);

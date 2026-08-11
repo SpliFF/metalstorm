@@ -638,7 +638,7 @@ byte-identical served copy.
 | `/api/maps/source/<mapId>/*` | Raw map source files (Lua, images) |
 | `/api/maps/data/<mapId>/*` | Preprocessed map assets (heightmap, tiles, feature models) |
 | `/api/maps/thumb/<mapId>` | Map thumbnail (WebP/PNG) |
-| `/api/games` | JSON list of discovered games (`id`, `displayName`, `shortName`, `description`, `version`, `lighting` — from each game's modinfo via GameDiscovery). Drives the lobby dropdown and the worker's `Game` table (modName/modShortName/…) + lighting style. |
+| `/api/games` | JSON list of discovered games (`id`, `displayName`, `shortName`, `description`, `version`, `lighting`, `modelMaterialPort`, `archived`/`archivedReason`, `resourceEconomy` — from each game's modinfo via GameDiscovery). Drives the lobby dropdown and the worker's `Game` table (modName/modShortName/…) + lighting style. Client-side capability gates read this payload, never the game id: `archived` disables the create-room option, `resourceEconomy: false` (Metalstorm) suppresses the metal/energy HUD. Both default to the legacy behaviour when absent. |
 | `/api/vfs/game/<gameId>/*` | Game source files (Lua scripts, images) |
 | `/api/games/data/<gameId>/*` | Preprocessed game assets (unit models, textures) |
 | `/api/factions/<gameId>` | Public. JSON list of the factions a game declares in `gamedata/sidedata.lua` (`key`, `name`, `fullName`, `description`), discovered once at startup via `FactionData::Discover`. Drives the sign-up form's required faction picker. `[]` for a game that declares none; 404 for an unknown game. |

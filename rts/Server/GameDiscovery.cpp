@@ -90,6 +90,12 @@ bool LoadOne(const fs::path& folder, GameDiscovery::GameInfo& out) {
     // unpickable.
     bool archived = cfg->GetBool("archived", false);
     std::string archivedReason = cfg->GetString("archivedReason", "");
+    // `resourceEconomy` says whether metal/energy mean anything in this
+    // game (PLAN-endtoend.md D9). Defaults TRUE — the opposite direction to
+    // `archived`, and for the same reason: silence must not remove a
+    // surface a legacy game needs. Only a game that explicitly says it has
+    // no resource economy (Metalstorm) loses the client's economy bar.
+    bool resourceEconomy = cfg->GetBool("resourceEconomy", true);
 
     // Fall back to the folder name if the config doesn't declare
     // one. Keeps the game visible even if an author forgot the
@@ -116,6 +122,7 @@ bool LoadOne(const fs::path& folder, GameDiscovery::GameInfo& out) {
     out.modelMaterialPort = modelMaterialPort;
     out.archived = archived;
     out.archivedReason = archivedReason;
+    out.resourceEconomy = resourceEconomy;
     out.folderPath = folder.string();
     return true;
 }

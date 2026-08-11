@@ -78,6 +78,36 @@ TEST_CASE("GameDiscovery reads the archived flag and its reason") {
     CHECK(zk->archivedReason == "The Zero-K port is archived.");
 }
 
+// PLAN-endtoend.md D9 — the client's legacy metal/energy bar rendered in
+// Metalstorm, which has no such economy. The flag that turns it off is the
+// game's own, and its default runs the OPPOSITE way to `archived` above:
+// silence means the game HAS a resource economy, because every legacy Spring
+// game does and a parse slip must not blank a surface one of them needs.
+TEST_CASE("GameDiscovery reads resourceEconomy, defaulting to true") {
+    TempGamesDir dir("economy");
+    dir.Write("metalstorm",
+        "  name = 'Metalstorm',\n"
+        "  resourceEconomy = false,");
+    dir.Write("papertanks", "  name = 'Paper Tanks',");
+    dir.Write("zk", "  name = 'Zero-K', resourceEconomy = true,");
+
+    auto games = GD::Discover(dir.Path());
+    REQUIRE(games.size() == 3);
+
+    const GD::GameInfo* ms = GD::FindById(games, "metalstorm");
+    REQUIRE(ms != nullptr);
+    CHECK(ms->resourceEconomy == false);
+
+    // Says nothing → keeps the economy.
+    const GD::GameInfo* pt = GD::FindById(games, "papertanks");
+    REQUIRE(pt != nullptr);
+    CHECK(pt->resourceEconomy == true);
+
+    const GD::GameInfo* zk = GD::FindById(games, "zk");
+    REQUIRE(zk != nullptr);
+    CHECK(zk->resourceEconomy == true);
+}
+
 TEST_CASE("GameDiscovery still lists an archived game") {
     // The rule is "cannot be picked", not "does not exist". /api/rooms/direct
     // stages archived content from a manifest and must keep working.
