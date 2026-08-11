@@ -70,6 +70,7 @@ Full CLI flag list (from `rts/server_main.cpp`):
 | `Server/EntityDeltaCache.h/.cpp` | Per-client delta tracking to reduce bandwidth. |
 | `Server/ContentServer.h/.cpp` | Scans content roots, serves assets at `/api/content/assets/*`. |
 | `Server/AuthTokens.h/.cpp` | **Task 8a**: the two credentials that outlive the 24 h access session — `refresh_tokens` (rotating, single-use, family-scoped revocation on reuse) and `war_reconnect_tokens` (per-(account, war), 7-day). Both store **sha256 of the token, never the token**: a read of the db file is otherwise a month of impersonation. sha256 rather than scrypt because these are 32 bytes of CSPRNG — there is no dictionary — and the cost would land on the validate path the game server hits on every reconnect. `ValidateWarReconnect` takes the roomId as an **argument** so a caller cannot forget to check it. |
+| `Server/Totp.h/.cpp` | **Task 8d**: the optional second factor — RFC 6238 (HMAC-SHA1, 30 s steps, 6 digits, ±1 step of drift) plus `user_totp` / `user_totp_recovery`. **Both the arithmetic and the table live here on purpose**: the replay rule is a comparison in `VerifyCode` and a column (`last_step`), and splitting them would let a caller do the check and forget the write — so `VerifyCode` takes the last accepted step and RETURNS the step it matched, and the caller has something it must store. An enrolment has **three** states: unconfirmed (gates nothing), confirmed (gates login AND Basic auth), absent. Recovery codes are sha256 at rest and spent by the DELETE itself. |
 | `Server/Database.h/.cpp` | SQLite wrapper (accounts, sessions, `admin_audit`). Ban primitives (`SetBanned`/`SetBannedByUsername`/`RevokeUserSessions`/`GetBannedUsers`, PLAN-gm-tools task 4). |
 | `Server/GameMetrics.h/.cpp` | **PLAN-gm-tools task 1**: `GameMetricsWriter` — per-game sim-health rows (tick p95, frames-behind, entity count, uptime, db size) into the shared `game_metrics` table on a wall-clock cadence; 7-day-raw / hourly-tail downsampling (E5). Driven from `server_main.cpp`'s loop. |
 | `Server/GmVerbs.h/.cpp` + `GmRollback.cpp` | **PLAN-gm-tools task 2**: the GM verb set — `RegisterGmVerbs` installs `POST /api/gm/{pause,resume,grant,broadcast,inspect,kick,rollback,checkpoint,hibernate,snapshots}` (all `RouteAuth::AdminOnly` + in-handler role recheck + `LogAudit`; compiled into prod, unlike `/api/exec`). Rollback rides the `ISnapshotStore` seam, now backed by `GameStateStore` (see below). The pure `DoRollback` sequence lives in `GmRollback.cpp` (dependency-light, unit-tested). |
@@ -907,6 +908,14 @@ access session  (`sessions`)                24 h   account-wide bearer
 refresh token   (`refresh_tokens`)          30 d   rotating, single-use, hashed
 war reconnect   (`war_reconnect_tokens`)     7 d   ONE room, hashed
 ```
+Task 8d adds a credential that is not a token and does not appear above: a TOTP
+code, valid for one 30 s step and **once**. It gates `/api/auth/login` — and
+`ValidateAuth`'s **Basic** branch, which is the non-obvious half. Basic auth is
+accepted on every TokenRequired route, carries no code and has nowhere to put
+one, so an enrolled account authenticating by password alone there would make
+the login gate decoration. An enrolled account therefore gets 0 from Basic; the
+Bearer session it already holds is untouched (enrolling is not a logout).
+
 The access TTL is **deliberately still 24 h**. What the refresh token buys is
 already what the persistent world needs — a session that survives days without
 a password, and one that can be revoked — and none of that depends on the
