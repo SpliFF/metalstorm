@@ -38,6 +38,7 @@
 #include "Server/DeployDrain.h"
 #include "Server/WarLifecycle.h"
 #include "Server/WarResume.h"
+#include "Server/WarStateEvents.h"
 #include "System/SpringLog/SpringLog.h"
 #include "System/SpringLog/SpringLogSqlite.h"
 #include <cctype>
@@ -3146,7 +3147,14 @@ int main(int argc, char *argv[]) {
   };
 
   // Helper: JSON-serialize a room for API responses
-  auto roomToJson = [&](const GameRoom *room) -> std::string {
+  // `outState` (PLAN-persistence task 4d): the war state this row was built
+  // with, handed back to the caller that wants the TRANSITION rather than the
+  // datum. An out-param rather than a second computation because `warFactsFor`
+  // is a DB read per war per call, and rather than a member because a
+  // single-room GET must not be able to feed the transition watcher — a card
+  // refresh would then consume the flip and the toast would never be sent.
+  auto roomToJson = [&](const GameRoom *room,
+                        warresume::WarState *outState = nullptr) -> std::string {
     if (!room)
       return "null";
     nlohmann::json j;
@@ -3274,6 +3282,8 @@ int main(int argc, char *argv[]) {
       const auto wfacts = warFactsFor(*room);
       const auto wstate = warresume::Classify(room->sessionKind, wfacts);
       wj["state"] = warresume::ToString(wstate);
+      if (outState != nullptr)
+        *outState = wstate;
       // The frame the world would come back at. Emitted whenever there is
       // history — including while the war is live, where it is the last
       // durable point rather than the current frame (`frame` below is that).
@@ -3314,22 +3324,67 @@ int main(int argc, char *argv[]) {
   if (userId <= 0)                                                             \
     return HttpAuth::JsonResponse(401, R"({"error":"unauthorized"})");
 
+  // PLAN-persistence task 4d: the last war state each room was broadcast in.
+  // Lives beside the broadcast because that is the only place allowed to feed
+  // it (see `roomToJson`'s `outState`). Pruned by `Retain` on every pass, so a
+  // lobby up for weeks does not accumulate a row per room ever created, and a
+  // reused room id starts from first-sight rather than inheriting the previous
+  // war's state.
+  warevents::Watcher warWatcher;
+
   // Broadcast the full room list to all SSE subscribers.
   // Called after every room mutation so clients stay in sync.
   auto broadcastRooms = [&]() {
     auto allRooms = rooms.GetAllRooms();
     std::string json = "[";
     bool first = true;
+    // Collected during the same pass that serialises the list: the war state is
+    // a DB read and this is the one place that has already paid for it.
+    std::vector<std::pair<uint32_t, warresume::WarState>> warStates;
+    std::set<uint32_t> liveRoomIds;
     for (const auto *r : allRooms) {
       if (!r)
         continue;
       if (!first)
         json += ",";
       first = false;
-      json += roomToJson(r);
+      warresume::WarState st = warresume::WarState::NotAWar;
+      json += roomToJson(r, &st);
+      liveRoomIds.insert(r->id);
+      if (st != warresume::WarState::NotAWar)
+        warStates.emplace_back(r->id, st);
     }
     json += "]";
     net.SendSSE(roomStreamChannel, json, "rooms");
+
+    // Then the transitions, as their own named event on the same channel.
+    //
+    // The list goes first deliberately: a browser handling `war-state` looks up
+    // the war it names in the list it holds (for the frame, the name and
+    // whether the account is enlisted), and an event that arrived before the
+    // row it describes would find the OLD state — or, for a war that just
+    // appeared, no row at all.
+    //
+    // Broadcast, not per-account: the SSE layer has no per-connection
+    // identity, and "is this war mine" is a question the browser can already
+    // answer off `enlisted`. Answering it in two places is how the two answers
+    // start disagreeing.
+    warWatcher.Retain(liveRoomIds);
+    for (const auto &[rid, st] : warStates) {
+      const auto kind = warWatcher.Observe(rid, st);
+      if (kind == warevents::Kind::None)
+        continue;
+      nlohmann::json ev;
+      ev["room"] = rid;
+      ev["kind"] = warevents::ToString(kind);
+      ev["state"] = warresume::ToString(st);
+      ev["headline"] = warevents::Headline(kind);
+      const std::string body = ev.dump();
+      SLOG(SPRING_LOG_NOTICE, "war %u: %s (state=%s) — %s", rid,
+           warevents::ToString(kind), warresume::ToString(st),
+           warevents::Headline(kind).c_str());
+      net.SendSSE(roomStreamChannel, body, "war-state");
+    }
   };
 
   // --- PLAN-quickstart.md Part A: direct-start composite ---

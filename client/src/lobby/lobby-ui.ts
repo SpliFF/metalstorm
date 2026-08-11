@@ -14,6 +14,7 @@ import * as flatbuffers from 'flatbuffers';
 import { mapListStatus } from './map-list-status';
 import { formatJoinPreview, type WarJoinPreview } from './join-preview';
 import { formatDigest } from './war-digest';
+import { noticeFor, parseWarStateEvent } from './war-notice';
 import {
     filterWars, fightLabel, formatWarDetail, formatControl, hasRoomForFaction,
     warStateBadge, formatYourWar,
@@ -233,6 +234,12 @@ export class LobbyUI {
     private inGame = false;
     private onParkedRoomEnded?: () => void;
     private parkedBanner: HTMLElement | null = null;
+    /// The war notice on screen (PLAN-persistence task 4d), if any. One at a
+    /// time and the newest wins: two wars moving in the same tick is real (a
+    /// deploy hibernates every war at once), and a stack of toasts would cover
+    /// the war list the player is being told to look at.
+    private warNotice: HTMLElement | null = null;
+    private warNoticeTimer: ReturnType<typeof setTimeout> | null = null;
     private myPlayerId = 0;
     /// This account's permanent faction, from the `faction` field every auth
     /// response now carries (login / register / validate — PLAN-endtoend.md
@@ -612,6 +619,19 @@ export class LobbyUI {
                 const rooms = JSON.parse(e.data);
                 if (Array.isArray(rooms)) this.applyRoomList(rooms);
             } catch { /* ignore parse errors */ }
+        });
+        // A war MOVED (PLAN-persistence task 4d). The list above carries the
+        // state as a datum, which is enough for a badge and not enough for a
+        // player who left a war days ago and is waiting for it to come back:
+        // the badge flips on a tick nobody is watching. This event is the
+        // interruption, and it arrives after the `rooms` event that describes
+        // the same war — the lobby orders them that way so the lookup below
+        // finds the NEW row.
+        es.addEventListener('war-state', (e: MessageEvent) => {
+            const ev = parseWarStateEvent(e.data);
+            if (!ev) return;
+            const notice = noticeFor(ev, this.warRows());
+            if (notice) this.renderWarNotice(notice);
         });
         es.onerror = () => {
             // EventSource auto-reconnects; no manual retry needed
@@ -1460,6 +1480,70 @@ export class LobbyUI {
         this.parkedBanner = el;
     }
 
+    /// The war notice (PLAN-persistence task 4d) — the toast a `war-state`
+    /// event becomes when `noticeFor` says it is this player's business.
+    ///
+    /// Built in the DOM rather than as a template because it is not part of any
+    /// screen: it must survive a re-render of the browser (which is what an
+    /// arriving `rooms` event does, and one always arrives just before this) and
+    /// it must be able to appear over the room screen too. Same reasoning, and
+    /// the same shape, as `renderParkedBanner` above.
+    private renderWarNotice(n: {
+        roomId: number; title: string; detail: string; cls: string; canJoin: boolean;
+    }): void {
+        this.dismissWarNotice();
+        const el = document.createElement('div');
+        el.className = `war-notice ${n.cls}`;
+        el.id = 'war-notice';
+        el.setAttribute('data-room', String(n.roomId));
+        const title = document.createElement('div');
+        title.className = 'war-notice-title';
+        title.textContent = n.title;
+        const detail = document.createElement('div');
+        detail.className = 'war-notice-detail';
+        detail.textContent = n.detail;
+        const actions = document.createElement('div');
+        actions.className = 'war-notice-actions';
+        if (n.canJoin) {
+            const join = document.createElement('button');
+            join.className = 'join-btn';
+            // "Rejoin", not "Join": every notice this button appears on is for
+            // a war the account already holds a seat in — `noticeFor` returns
+            // nothing for any other war — which is the same reading
+            // `fightLabel` gives a returning player's card.
+            join.textContent = 'Rejoin';
+            join.onclick = () => {
+                this.dismissWarNotice();
+                this.joinRoom(n.roomId, /*asSpectator=*/false);
+            };
+            actions.appendChild(join);
+        }
+        const close = document.createElement('button');
+        close.className = 'war-notice-dismiss';
+        close.textContent = 'Dismiss';
+        close.onclick = () => this.dismissWarNotice();
+        actions.appendChild(close);
+        el.append(title, detail, actions);
+        document.body.appendChild(el);
+        this.warNotice = el;
+        // Auto-dismissed, but not quickly: this is news about a world the
+        // player has been away from for days, and it carries an action. 30 s is
+        // long enough to read and act on and short enough that a stale notice
+        // is not still on screen when the war moves again.
+        this.warNoticeTimer = setTimeout(() => this.dismissWarNotice(), 30000);
+    }
+
+    /// Remove the notice, if one is up. Idempotent — called by the dismiss
+    /// button, the timer, the join, and by the next notice replacing it.
+    private dismissWarNotice(): void {
+        if (this.warNoticeTimer !== null) {
+            clearTimeout(this.warNoticeTimer);
+            this.warNoticeTimer = null;
+        }
+        this.warNotice?.remove();
+        this.warNotice = null;
+    }
+
     showBrowser(): void {
         // Suppressed (scenario/direct boot): stay off screen and, crucially,
         // do not null currentRoom — the runner's setCurrentRoomFromJson wiring
@@ -1951,13 +2035,15 @@ export class LobbyUI {
     /// war browser asks "is there room for ME, on my side". The whole section
     /// stays hidden on a lobby with no wars, so a skirmish-only lobby is
     /// untouched by this feature rather than merely unaffected by it.
-    private renderWarList(): void {
-        const section = document.getElementById('war-section');
-        const list = document.getElementById('war-list');
-        const filters = document.getElementById('war-filters');
-        if (!section || !list || !filters) return;
-
-        const wars: WarRow[] = this.rooms
+    /// The war rows, joined to this account's per-war preview.
+    ///
+    /// Extracted from `renderWarList` (PLAN-persistence task 4d) because the
+    /// `war-state` notice needs the same join: whether a transition is worth
+    /// telling this player about is decided off `enlisted`, which lives in the
+    /// preview and not in the room row. Two spellings of the join would be two
+    /// answers to "is this war mine".
+    private warRows(): WarRow[] {
+        return this.rooms
             .filter(r => r.sessionKind === 'persistent' && r.war && !r.replayFile)
             .map(r => {
                 const p = this.warPreviews.get(r.id);
@@ -1976,6 +2062,15 @@ export class LobbyUI {
                     mySide: p?.side || undefined,
                 };
             });
+    }
+
+    private renderWarList(): void {
+        const section = document.getElementById('war-section');
+        const list = document.getElementById('war-list');
+        const filters = document.getElementById('war-filters');
+        if (!section || !list || !filters) return;
+
+        const wars: WarRow[] = this.warRows();
 
         if (wars.length === 0) { section.style.display = 'none'; return; }
         section.style.display = '';

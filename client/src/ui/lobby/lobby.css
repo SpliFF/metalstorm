@@ -755,3 +755,56 @@ button.link-button:hover { background: none; color: #7fdcff; }
     padding: 4px 12px;
     font-size: 12px;
 }
+
+/* ── The war notice (PLAN-persistence task 4d) ─────────────────────────────
+   A war that comes back, goes to sleep or loses its tail says so out loud,
+   rather than flipping a badge on a list tick nobody is watching. Bottom-left
+   so it cannot land on the parked-session banner (bottom-centre) or on the
+   war list's own buttons, and it is dismissible because a player who is mid-
+   click on something else did not ask for it.
+
+   Three colourings, and they are the card's own split: the accent green is for
+   news you can act on, the warm amber for a wait, and the red-brown for the
+   one reading where frames are gone. A "your war is back" toast and a "your
+   war lost its last stretch" toast wearing the same colour would be the same
+   defect task 4a's badge split existed to fix. */
+.war-notice {
+    position: fixed;
+    left: 1.5rem;
+    bottom: 1.5rem;
+    z-index: 140;
+    max-width: 22rem;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px 12px;
+    background: #161a22;
+    border: 1px solid #2a3140;
+    border-left-width: 3px;
+    border-radius: 8px;
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+    color: #e6e8ec;
+    /* Stated, not inherited. The notice is appended to `body`, OUTSIDE the
+       `#lobby` root that carries the lobby's font (and its text colour), so it
+       inherits the page default — which rendered the whole toast in the
+       browser's serif until the harness screenshot showed it. Same reason the
+       parked-session banner sets its own. */
+    font-family: system-ui, sans-serif;
+    font-size: 13px;
+}
+.war-notice-good { border-left-color: #7fd4a8; }
+.war-notice-wait { border-left-color: #e0c67a; }
+.war-notice-bad  { border-left-color: #d9a06a; }
+.war-notice-title { font-weight: 600; }
+.war-notice-detail { color: #b4bccb; font-size: 12px; line-height: 1.35; }
+.war-notice-actions { display: flex; gap: 8px; align-items: center; }
+.war-notice-actions .join-btn { grid-row: auto; grid-column: auto; }
+.war-notice-dismiss {
+    background: none;
+    border: 0;
+    color: #7a8496;
+    cursor: pointer;
+    font-size: 12px;
+    padding: 4px 6px;
+}
+.war-notice-dismiss:hover { color: #e6e8ec; }

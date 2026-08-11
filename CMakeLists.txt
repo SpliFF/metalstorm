@@ -436,6 +436,10 @@ set(LOBBY_SERVER_SOURCES
     # SELECT against `game_snapshots` — the lobby decides whether a war comes
     # back on its stored world, and needs no part of the sim to do it.
     rts/Server/WarResume.cpp
+    # PLAN-persistence task 4d: the transition beside that state. Pure (no
+    # sqlite, no room registry) — it only remembers what the broadcast last
+    # said and decides whether the change is worth telling a player about.
+    rts/Server/WarStateEvents.cpp
     # PLAN-persistence task 3c: the deploy drain. Pure policy plus one popen to
     # ask the game-server binary for its own E1 engine hash — the lobby cannot
     # compute it (separate link target, and it may spawn a binary from another
@@ -579,6 +583,8 @@ if(TEST_SOURCES)
         # Policy is pure; the one DB read is a plain SELECT (sqlite3 only, no
         # sim), so the whole file tests here against an in-memory database.
         ${CMAKE_SOURCE_DIR}/rts/Server/WarResume.cpp
+        # PLAN-persistence task 4d: the transition detector (test_war_state_events.cpp).
+        ${CMAKE_SOURCE_DIR}/rts/Server/WarStateEvents.cpp
         # PLAN-persistence task 3c: the deploy drain's policy half. Pure —
         # the only impure function (the popen probe) has its parser tested
         # here and its fork exercised live.

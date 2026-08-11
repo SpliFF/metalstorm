@@ -985,6 +985,24 @@ It touches no room state: hibernated-vs-crashed, hold-vs-recycle and the re-reco
 `game_servers` row are the health loop's, and a second copy of that classification is the
 failure mode this lane keeps finding.
 
+Those states are a **datum**, and a datum cannot tell anybody that something
+happened: `war.state` rides the `rooms` broadcast, so a war that comes back flips
+its badge on the next list tick — up to 5 s later, on a card nobody is looking
+at. The same channel therefore carries a second named event, **`war-state`**
+(PLAN-persistence task **4d**, `Server/WarStateEvents.h/.cpp`): `{room, kind,
+state, headline}` with `kind` one of `resuming` / `back` / `hibernated` /
+`lost`. Three rules make it usable: **first sight seeds and never fires** (a
+lobby restart re-observes every war, and a burst of toasts about wars that did
+not move is worse than no toast); the classification is by **destination, not
+path** (`hibernated → resuming → live` is routinely sampled as `hibernated →
+live`, because a resume finishes inside one broadcast period, so a detector
+written over adjacent pairs would go quiet on exactly the fast resumes); and the
+watcher **forgets** departed rooms, because room ids are reused. It is a
+**broadcast** — the SSE layer has no per-connection identity — so "is this war
+mine" is answered in the browser (`lobby/war-notice.ts`, off the `enlisted` field
+task 4c publishes) and the notice is shown only to an enlisted account. The
+`rooms` event is always sent first, so the browser's lookup finds the new row.
+
 Liveness in all of this is by **pid**, never by the room's state: the superseded
 `DecideWarResume` answered "already coming up" whenever the room said `Loading`, and
 because `ActionForOrphanedRoom` HOLDS a war in the state it died in, a war whose server
