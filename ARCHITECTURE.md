@@ -903,12 +903,18 @@ machine is still live. **`logout-all` is a different verb** (§7.2): it ends
 every session and every family the account holds, which evicts the player's
 other devices, and is therefore its own button rather than a modifier.
 
-### Token lifetimes (task 8a)
+### Token lifetimes (task 8a, TTL shortened by 8a-follow-on)
 ```
-access session  (`sessions`)                24 h   account-wide bearer
+access session  (`sessions`)                 1 h   account-wide bearer
 refresh token   (`refresh_tokens`)          30 d   rotating, single-use, hashed
 war reconnect   (`war_reconnect_tokens`)     7 d   ONE room, hashed
 ```
+All three constants live in `AuthTokens.h`. The access TTL moved there from
+`HttpAuth.h` because it had **two** definitions and only one of them was named:
+the lobby passed `kAccessTtlSeconds` explicitly, while the game server's
+`AuthRequest` path took `Database::ValidateSession`'s `86400` **default
+argument**. They agreed by coincidence — shortening the named one alone would
+have left every game server honouring a day-old bearer token.
 Task 8d adds a credential that is not a token and does not appear above: a TOTP
 code, valid for one 30 s step and **once**. It gates `/api/auth/login` — and
 `ValidateAuth`'s **Basic** branch, which is the non-obvious half. Basic auth is
@@ -917,16 +923,49 @@ one, so an enrolled account authenticating by password alone there would make
 the login gate decoration. An enrolled account therefore gets 0 from Basic; the
 Bearer session it already holds is untouched (enrolling is not a logout).
 
-The access TTL is **deliberately still 24 h**. What the refresh token buys is
-already what the persistent world needs — a session that survives days without
-a password, and one that can be revoked — and none of that depends on the
-window being small. Shrinking it is a one-constant change whose blast radius
-the constant does not show: `springrts-token` is read straight out of
-localStorage by six call sites (main.ts ×5, viewport.ts, minimap.ts,
-connection.ts), each caching it for the life of an object, so a token that
-expires mid-session is not refreshed by any of them — the failure surfaces as
-a mid-war reconnect asking for a password. Making those call sites re-read is
-its own task.
+#### Who holds the access token, and how it stays live (8a-follow-on)
+
+Task 8a left the TTL at 24 h because every holder of `springrts-token`
+snapshotted it at construction, so a shorter window would have expired it
+mid-session with nobody re-reading. The census found **seven** holders, not the
+six that note listed: four `localStorage.getItem` reads in `main.ts`, the game
+worker's `gp:init` credential, the LuaUI worker's telemetry channel, and
+`LobbyUI.authToken` — a private field read by ~20 methods that no note had
+named. (The `viewport.ts` / `minimap.ts` / `connection.ts` sites the 8a note
+lists do not read the key at all; they are handed a token by their caller.)
+
+`client/src/lobby/auth-tokens.ts` now owns the token's lifetime:
+
+- **An expiry stored next to it** (`springrts-token-expires`), derived from the
+  `expires_in` every auth response already carried and nobody read. The token
+  is opaque, not a JWT, so this record is the only way the client can answer
+  "is it stale?". **Missing means unknown, and unknown means not expired** — a
+  session adopted by an older build degrades to the pre-8a-follow-on world.
+- **`getAccessToken()`, read at use.** Main-thread holders call it; the two
+  Worker realms cannot (no `localStorage` there) and are pushed a `gp:token`
+  message instead. `LobbyUI.authToken` became an accessor over the same store.
+- **`AccessTokenRenewer`**, a timer at half the *remaining* life. Proactive
+  rather than 8a's on-401 path, because the 401 only exists on the lobby's HTTP
+  surface: the **game server authenticates once at `AuthRequest`** over a
+  connection that then lives for the whole match, so a session ageing out
+  mid-match is observed by nothing until the reconnect asks for a password.
+- **A cross-tab lock plus a post-lock re-read of the expiry.** Refresh tokens
+  are single-use with family-wide reuse detection, so two tabs rotating the
+  same token is indistinguishable from a replayed theft and signs the player
+  out everywhere. That race existed on the 401 path; a timer would make it a
+  scheduled event. The re-read is what actually closes it — it checks the
+  outcome, not the intent. Peers learn via the `storage` event; the tab that
+  logged in learns via an `onTokensStored` hook, because `storage` fires only
+  in *other* tabs.
+
+`gameAuthToken()` now skips an **expired** access token rather than presenting
+it. The game server tries the war reconnect token only when the session lookup
+fails, and the client sends exactly one credential — so a stale string in
+localStorage is what *prevents* the 7-day war token ever being offered.
+
+`/api/auth/validate` reports `expires_in` as the session's **remaining** life,
+not the TTL: it is the only auth route reporting on a session it did not mint,
+and it is the reload path.
 
 The game server tries the access session **first** and the war token second, so
 nothing about the ordinary path changed. When it authenticates via the war

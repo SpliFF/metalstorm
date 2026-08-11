@@ -54,8 +54,8 @@ import {
 import { decideRoomTransition } from './room-transition.js';
 import { LOGOUT_CLEARED_KEYS, runLogout } from './logout.js';
 import {
-    REFRESH_TOKEN_KEY, browserTokenStore, fetchWarReconnectToken,
-    refreshAccessToken, storeTokens,
+    ACCESS_TOKEN_KEY, REFRESH_TOKEN_KEY, browserTokenStore,
+    fetchWarReconnectToken, refreshAccessToken, storeTokens,
 } from './auth-tokens.js';
 import type { AvailableScenarioInfo } from './scenario-picker.js';
 import {
@@ -242,7 +242,26 @@ export class LobbyUI {
     /// room screen can stop offering the side that would be refused.
     private myFaction = '';
     private pendingRejoinRoomId = 0;
-    private authToken = '';
+
+    /// 8a-follow-on: no longer a cached string. LobbyUI was a holder of the
+    /// access token that task 8a's "six call sites" note did not even count —
+    /// one `private authToken` read by ~20 methods for the life of the page.
+    /// Every assignment to it already wrote localStorage in the next line or
+    /// two, so the field was a *copy* whose only possible divergence was going
+    /// stale; at a 1 h TTL it goes stale inside one session. Accessors over
+    /// the store, so a renewal in this tab or a peer's is picked up by every
+    /// reader with no plumbing.
+    ///
+    /// Deliberately the RAW stored value, not `getAccessToken` — the lobby's
+    /// HTTP surface observes expiry as a 401 and reacts to it (tryAutoLogin),
+    /// and that path is better than pre-emptively sending no credential at all.
+    private get authToken(): string {
+        return browserTokenStore.get(ACCESS_TOKEN_KEY) ?? '';
+    }
+    private set authToken(v: string) {
+        if (v) browserTokenStore.set(ACCESS_TOKEN_KEY, v);
+        else browserTokenStore.remove(ACCESS_TOKEN_KEY);
+    }
     private roomEventSource: EventSource | null = null;
     /// Per-war pre-join preview for THIS account, keyed by room id (§2.4).
     private warPreviews = new Map<number, WarJoinPreview>();
@@ -475,14 +494,20 @@ export class LobbyUI {
     /// e.g. the saved-room rejoin.
     private adoptSession(token: string, data: {
         user_id?: number; username?: string; faction?: string;
-        refresh_token?: string;
+        refresh_token?: string; expires_in?: number;
     }): void {
         this.authToken = token;
         this.myPlayerId = data.user_id ?? 0;
         this.myFaction = data.faction ?? '';
         console.log(`[lobby] auto-login OK: user=${data.username}`
             + `${this.myFaction ? ` faction=${this.myFaction}` : ''}`);
-        storeTokens({ token, refresh_token: data.refresh_token },
+        // 8a-follow-on: `expires_in` is forwarded, and on THIS path it is the
+        // session's remaining life rather than the full TTL (/api/auth/validate
+        // reports on a session it did not mint). Without it the renewal timer
+        // has nothing to arm against on every visit after the first — which is
+        // every visit.
+        storeTokens({ token, refresh_token: data.refresh_token,
+                      expires_in: data.expires_in },
                     browserTokenStore);
 
         const savedRoomId = localStorage.getItem('springrts-game-room');
@@ -1060,13 +1085,17 @@ export class LobbyUI {
     /// flag has to be set before showBrowser() renders the header.
     private adoptGuestSession(data: {
         token?: string; user_id?: number; username?: string; faction?: string;
+        expires_in?: number;
     }): void {
         this.authToken = data.token ?? '';
         this.myPlayerId = data.user_id ?? 0;
         this.myFaction = data.faction ?? '';
         this.isProvisional = true;
         if (data.username) localStorage.setItem('springrts-username', data.username);
-        storeTokens({ token: this.authToken }, browserTokenStore);
+        // 8a-follow-on: `data`, not a rebuilt `{token}` — the rebuild dropped
+        // `expires_in`, so a guest was the one account kind whose session could
+        // never schedule a renewal.
+        storeTokens(data, browserTokenStore);
         this.startPolling();
         this.showBrowser();
     }

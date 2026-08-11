@@ -28,20 +28,13 @@ namespace HttpAuth {
 
 /// How long an access session (a `sessions` row) is honoured for.
 ///
-/// **Deliberately unchanged at 24 h by task 8a**, even though §7.2 calls the
-/// access token "short-lived" and rotation now exists to renew it. What the
-/// refresh token buys at this TTL is already the thing the persistent world
-/// needs — a session that survives *days* without re-entering a password, and
-/// one that can be revoked — and none of that depends on the window being
-/// small. Shrinking it is a one-constant change with a blast radius the
-/// constant does not show: `springrts-token` is read straight out of
-/// localStorage by six client call sites (main.ts ×5, viewport.ts, minimap.ts,
-/// connection.ts) which each cache it for the life of an object, so a token
-/// that expires mid-session is not refreshed by any of them — it is simply
-/// stale, and the failure surfaces as a mid-war reconnect asking for a
-/// password. Making those call sites re-read is its own task; doing it blind
-/// in the same fire is how that path breaks silently.
-constexpr int kAccessTtlSeconds = 86400;
+/// **Shortened from 24 h to 1 h by 8a-follow-on**, once the client-side holders
+/// of `springrts-token` stopped caching it for the life of an object (task 8a's
+/// blocker). The definition moved to `AuthTokens::kAccessTtlSeconds`, which is
+/// where the reasoning now lives — it had a second, unnamed reader in the game
+/// server and the two had to be one constant before the number could move.
+/// This alias stays so the ~6 `HttpAuth` call sites read unchanged.
+constexpr int kAccessTtlSeconds = AuthTokens::kAccessTtlSeconds;
 
 /// Wall-clock seconds. The token tables store absolute unix times (the
 /// `sessions` table uses SQLite's `datetime('now')` instead — the two are not
@@ -342,7 +335,7 @@ inline bool ParseBasicAuth(const std::string& authHeader,
 }
 
 /// Validate auth from the Authorization header. Supports both:
-///   - "Bearer <token>" — validate session token (24h expiry)
+///   - "Bearer <token>" — validate session token (kAccessTtlSeconds expiry)
 ///   - "Basic <base64(user:pass)>" — inline login, creates a session
 /// Returns user ID or 0 if invalid.
 inline int64_t ValidateAuth(Database& db, const std::string& authHeader) {
@@ -613,6 +606,18 @@ inline void RegisterEndpoints(NetworkServer& net, Database& db,
         // account that has it on.
         json += std::string(",\"totp_enabled\":") +
                 (Totp::IsEnabled(db.Handle(), user->id) ? "true" : "false");
+        // 8a-follow-on: the REMAINING life, not kAccessTtlSeconds. This is the
+        // only auth route that reports on a session it did not mint, and it is
+        // the reload path — the returning client arms its renewal timer off
+        // this number, so answering with the full TTL would schedule a renewal
+        // after the token it is renewing had already died. Bearer only: a
+        // Basic-auth validate has just minted a session inside ValidateAuth,
+        // and the header carries no token to measure.
+        if (headers.authorization.rfind("Bearer ", 0) == 0) {
+            const std::string bearer = headers.authorization.substr(7);
+            json += ",\"expires_in\":" + std::to_string(
+                db.SessionRemainingSeconds(bearer, kAccessTtlSeconds));
+        }
         json += "}";
         return JsonResponse(200, json);
     });
@@ -958,6 +963,11 @@ inline void RegisterEndpoints(NetworkServer& net, Database& db,
             + ",\"username\":\"" + JsonEscape(username) + "\""
             + ",\"role\":\"player\""
             + ",\"provisional\":true"
+            // 8a-follow-on: guest mint and guest/resume were the two
+            // session-minting routes that never reported the lifetime of what
+            // they minted, so a guest was the one account kind whose client
+            // could not arm a renewal timer.
+            + ",\"expires_in\":" + std::to_string(kAccessTtlSeconds)
             + ",\"device_token\":\"" + JsonEscape(*device) + "\"";
         if (!faction.empty())
             json += ",\"faction\":\"" + JsonEscape(faction) + "\"";
@@ -1004,7 +1014,8 @@ inline void RegisterEndpoints(NetworkServer& net, Database& db,
             + ",\"user_id\":" + std::to_string(userId)
             + ",\"username\":\"" + JsonEscape(user->username) + "\""
             + ",\"role\":\"" + JsonEscape(user->role) + "\""
-            + ",\"provisional\":true";
+            + ",\"provisional\":true"
+            + ",\"expires_in\":" + std::to_string(kAccessTtlSeconds);
         if (user->factionId && !user->factionId->empty())
             json += ",\"faction\":\"" + JsonEscape(*user->factionId) + "\"";
         json += "}";

@@ -834,8 +834,14 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             // Try token-based reconnection first
             const bool hasToken = auth->token() && auth->token()->size() > 0;
             if (hasToken) {
-                int64_t userId = db.ValidateSession(auth->token()->str());
-                // Task 8a / §7.3: a war outlives the 24 h account session, so
+                // 8a-follow-on: the TTL is passed explicitly. This call took
+                // `Database.h`'s 86400 default, which was a silent second copy
+                // of the lobby's constant — shortening one and not the other
+                // would leave every game server honouring a day-old bearer
+                // token while the lobby refused it.
+                int64_t userId = db.ValidateSession(auth->token()->str(),
+                                                    AuthTokens::kAccessTtlSeconds);
+                // Task 8a / §7.3: a war outlives the account session, so
                 // the returning player may be holding the only credential that
                 // is still good — a per-(account, war) reconnect token. Tried
                 // SECOND, so nothing about the ordinary path changes: an

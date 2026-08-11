@@ -82,6 +82,13 @@ export class TestHarness {
         this.deps = deps;
     }
 
+    /// 8a-follow-on: the harness outlives the token it was built with. It is
+    /// constructed once per page and `/api/exec` is the vehicle for every
+    /// scripted verification run, several of which are longer than the 1 h
+    /// access TTL — a snapshot taken at construction would 401 partway through
+    /// a soak. main.ts subscribes this to the renewer.
+    setToken(token: string): void { this.deps.token = token; }
+
     // ─── Server scope: structured exec helpers ───────────────────────
     //
     // Exec routing — the lobby's `/api/exec` only handles `sql` and

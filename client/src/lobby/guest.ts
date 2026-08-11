@@ -7,8 +7,8 @@
  * tested without a browser.
  *
  * ── Why the device token is not stored under the access-token key ──────────
- * `springrts-token` is read straight out of localStorage by six call sites
- * that each send it as a Bearer header. A device token is not a Bearer
+ * `springrts-token` is read by every holder as a Bearer header (see
+ * auth-tokens.ts for the census). A device token is not a Bearer
  * credential — it is the input to `/api/auth/guest/resume` and nothing else —
  * and it outlives every session it mints, so sharing a key would both break
  * those call sites and put the guest's only permanent credential on the wire
@@ -28,6 +28,10 @@ export interface TokenStoreLike {
 /// answer in the login response's shape so `storeTokens` works unchanged.
 export interface GuestResponse {
     token?: string;
+    /// 8a-follow-on: the field was already on the wire and missing from this
+    /// interface, so the guest paths type-checked while silently dropping the
+    /// only number the renewal timer can be armed from.
+    expires_in?: number;
     user_id?: number;
     username?: string;
     role?: string;

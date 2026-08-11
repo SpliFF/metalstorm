@@ -382,6 +382,36 @@ int64_t Database::ValidateSession(const std::string& token, int maxAgeSeconds) {
     return userId;
 }
 
+/// 8a-follow-on. Seconds of life left in `token`'s session, 0 if it has none.
+///
+/// The client cannot answer this for itself — the token is opaque, not a JWT —
+/// and it needs the answer to schedule a renewal. Every other auth response
+/// already carries `expires_in`, but they all MINT the session, so the full
+/// TTL is the right answer there. `/api/auth/validate` is the one route that
+/// reports on a session it did not create, which is the reload path: the
+/// remaining life is what the returning client has to arm its timer against,
+/// and the full TTL would be an over-estimate that expires it mid-match.
+int64_t Database::SessionRemainingSeconds(const std::string& token,
+                                          int maxAgeSeconds) {
+    const char* sql =
+        "SELECT ? - (strftime('%s','now') - strftime('%s', created_at)) "
+        "FROM sessions WHERE token = ?";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        SLOG(SPRING_LOG_ERROR, "SessionRemainingSeconds: prepare failed: %s",
+             sqlite3_errmsg(db));
+        return 0;
+    }
+    sqlite3_bind_int(stmt, 1, maxAgeSeconds);
+    sqlite3_bind_text(stmt, 2, token.c_str(), -1, SQLITE_TRANSIENT);
+
+    int64_t remaining = 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+        remaining = sqlite3_column_int64(stmt, 0);
+    sqlite3_finalize(stmt);
+    return remaining > 0 ? remaining : 0;
+}
+
 bool Database::EnsureAdminRole(const std::string& username) {
     const char* sql = "UPDATE users SET role = 'admin' WHERE username = ?";
     sqlite3_stmt* stmt = nullptr;

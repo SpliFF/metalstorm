@@ -54,6 +54,27 @@ namespace AuthTokens {
 constexpr int kRefreshTtlSeconds      = 30 * 24 * 60 * 60;  // 30 days
 constexpr int kWarReconnectTtlSeconds =  7 * 24 * 60 * 60;  // 7 days
 
+/// The access session's lifetime — shortened from 24 h to 1 h by 8a-follow-on.
+///
+/// It lives HERE rather than in HttpAuth.h (where task 8a put it) because it
+/// had two independent readers and only one of them named it: the lobby's
+/// `ValidateSession(token, kAccessTtlSeconds)` calls, and the *game* server's
+/// `db.ValidateSession(token)` in ClientMessageHandler, which took
+/// `Database.h`'s 86400 default argument. Those were the same number by
+/// coincidence, so shrinking the lobby's constant alone would have left every
+/// game server accepting a 24 h-old bearer token — the exact hole the short
+/// TTL exists to close, in the one process that is exposed to the internet on
+/// a per-room port. AuthTokens.h is the header both of them already include.
+///
+/// 1 h rather than the 15 min a pure OAuth reading suggests: the credential is
+/// renewed by a timer in the browser (auth-tokens.ts), and every renewal spends
+/// a rotation of the 30-day refresh family. At 15 min an idle tab left open
+/// overnight burns ~96 generations and four times the reuse-detection surface,
+/// for a window that is already two orders of magnitude below the refresh
+/// token's. The blast radius of a leaked access token is what shrank 24×; the
+/// rotation rate is what we decline to grow 4× further.
+constexpr int kAccessTtlSeconds = 60 * 60;
+
 /// Lowercase hex sha256 of `raw`. Exposed for tests and for the callers that
 /// need to look a token up without holding it (there are none today, but the
 /// alternative is every one of them re-deriving the digest).

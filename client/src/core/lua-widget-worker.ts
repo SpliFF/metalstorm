@@ -18,7 +18,7 @@
 import type { WorkerInbound } from './game-worker-protocol.js';
 import {
     gpInit, gpResize, gpShutdown, gpSetShift, gpTestDispatch,
-    gpDetach, gpResync, gpSoftRecover,
+    gpDetach, gpResync, gpSoftRecover, gpAdoptToken,
     gpHandlePointerMove, gpHandlePointerDown, gpHandlePointerUp,
     gpHandleWheel, gpHandleKeyDown, gpHandleKeyUp, gpHandleBlur, gpHandlePointerLeave,
     gpHandleFocusWorld, gpHandleStartBuildPlacement, gpHandleCancelBuildPlacement,
@@ -289,6 +289,10 @@ self.onmessage = async (e: MessageEvent<WorkerInbound>) => {
             break;
         case 'gp:resync':
             gpResync((msg as { token?: string }).token);
+            break;
+        // 8a-follow-on: main renewed the access session. See gpAdoptToken.
+        case 'gp:token':
+            gpAdoptToken(String((msg as { token?: string }).token ?? ''));
             break;
 
         // PLAN-client-resilience.md task 2 (R1 soft rung): the RecoveryLadder

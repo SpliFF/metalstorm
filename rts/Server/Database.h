@@ -6,6 +6,8 @@
  */
 #pragma once
 
+#include "AuthTokens.h"
+
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -104,7 +106,19 @@ public:
 
     /// Validate a session token. Returns the user ID if valid, 0 if invalid.
     /// Tokens older than maxAgeSeconds are considered expired.
-    int64_t ValidateSession(const std::string& token, int maxAgeSeconds = 86400);
+    ///
+    /// 8a-follow-on: the default is the real constant, not a hard-coded 86400.
+    /// It WAS a literal, and the game server's reconnect path silently took it
+    /// — so the access TTL had two definitions and only one of them was named.
+    int64_t ValidateSession(const std::string& token,
+                            int maxAgeSeconds = AuthTokens::kAccessTtlSeconds);
+
+    /// Seconds left before `token`'s session ages out; 0 if it already has or
+    /// there is no such row. See the definition for why /api/auth/validate
+    /// needs the REMAINING life rather than the TTL.
+    int64_t SessionRemainingSeconds(
+        const std::string& token,
+        int maxAgeSeconds = AuthTokens::kAccessTtlSeconds);
 
     /// Grant the "admin" role to an existing account by username. Used at
     /// startup to provision the operator/admin account (privileged console
@@ -176,7 +190,7 @@ public:
 
     /// Delete all expired sessions (older than maxAgeSeconds).
     /// Returns the number of sessions deleted.
-    int CleanExpiredSessions(int maxAgeSeconds = 86400);
+    int CleanExpiredSessions(int maxAgeSeconds = AuthTokens::kAccessTtlSeconds);
 
     /// PLAN-long-uptime S8 / T2a-4: retention for the two append-only tables
     /// the S9 sweep left behind. Both are written on every admin action and

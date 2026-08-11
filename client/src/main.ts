@@ -57,7 +57,9 @@ import { debugConsole } from './core/debug-console.js';
 import { logIngest } from './core/log-ingest.js';
 import { configureErrorTelemetry, reportClientError } from './core/client-error-telemetry.js';
 import type { ClientErrorReason } from './core/client-error-telemetry.js';
-import { browserTokenStore, gameAuthToken } from './lobby/auth-tokens.js';
+import {
+    AccessTokenRenewer, browserTokenStore, gameAuthToken, getAccessToken,
+} from './lobby/auth-tokens.js';
 import { HeartbeatWatchdog } from './core/heartbeat-watchdog.js';
 import { RecoveryLadder, type RecoveryTrigger } from './core/recovery-ladder.js';
 import {
@@ -428,6 +430,39 @@ let debugTerrainGrid: DebugTerrainGrid | null = null;
 /// (camera/selection/netSim/pause/screenshot) forward to the worker, where the
 /// render loop now lives (the client render-pause is `gpRenderPaused` there).
 let testHarness: TestHarness | null = null;
+
+/**
+ * 8a-follow-on: the one owner of the live access token.
+ *
+ * Task 8a shortened nothing because `springrts-token` had (at least) seven
+ * holders, each of which snapshotted the string at construction and was
+ * therefore right for exactly as long as the token lived — fine at 24 h, wrong
+ * inside one match at 1 h. Two of those holders are Worker realms with no
+ * `localStorage` at all, so "make them re-read" is not a thing that can be
+ * done; the renewer publishes instead, and the main-thread holders take the
+ * same publication rather than a second, subtly different mechanism.
+ *
+ * The renewal timer is the other half: the lobby's HTTP surface observes
+ * expiry as a 401 and reacts (tryAutoLogin), but the game server authenticates
+ * once at `AuthRequest` over a connection that then lives for the whole match,
+ * so there is no 401 there to react to. Nothing else would ever notice.
+ */
+const authRenewer = new AccessTokenRenewer(CONFIG.httpUrl, browserTokenStore);
+(window as any).__authRenewer = authRenewer;
+
+/// Fan a renewed (or cleared) access token out to every holder. Registered
+/// once, at boot; each holder that does not exist yet is simply skipped and
+/// picks the current value up from its own constructor.
+function publishAccessTokenToHolders(token: string | null): void {
+    const t = token ?? '';
+    configureErrorTelemetry({ token: t });
+    configureCommandPresets({ token: t });
+    testHarness?.setToken(t);
+    // Both worker realms authenticate with this; see GpTokenToWorker.
+    if (t) gameWorker?.postMessage({ type: 'gp:token', token: t });
+    // LobbyUI needs nothing — 8a-follow-on turned its `authToken` field into
+    // an accessor over the same store, so it is already reading the new value.
+}
 /// Current sim-speed multiplier for VISUAL FX aging (0 when paused). The
 /// render loop scales its wall-clock dt by this before ticking the FX
 /// systems (CEG particles, dynamic lights, muzzle flares, distortion,
@@ -736,7 +771,11 @@ function resyncReenter(): void {
     detachSession.clear();
     lobbyUI?.clearParked();
     // Refresh the token in case the original aged past the park TTL.
-    const token = localStorage.getItem('springrts-token') ?? undefined;
+    // 8a-follow-on: read through getAccessToken, so a token that expired while
+    // the session was parked is not handed to the worker as if it were live —
+    // the worker would present it, be refused, and the failure would surface
+    // as a re-entry that never completes rather than as an expired session.
+    const token = getAccessToken(browserTokenStore) ?? undefined;
     gameWorker?.postMessage({ type: 'gp:resync', token });
     void audioManager?.resume();
     const canvas = document.getElementById('game-canvas') as HTMLCanvasElement | null;
@@ -923,7 +962,8 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // has its own module instance; see client-error-telemetry.ts's header).
     configureErrorTelemetry({
         endpoint: CONFIG.httpUrl,
-        token: localStorage.getItem('springrts-token') ?? '',
+        // Seeded here and kept current by the authRenewer subscription below.
+        token: getAccessToken(browserTokenStore) ?? '',
         enabled: CONFIG.errorReportingEnabled,
         buildStamp: CONFIG.buildStamp,
     });
@@ -932,7 +972,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     // channel above, just a different route pair.
     configureCommandPresets({
         endpoint: CONFIG.httpUrl,
-        token: localStorage.getItem('springrts-token') ?? '',
+        token: getAccessToken(browserTokenStore) ?? '',
     });
     gameWorker = new GameWorker();
     // PLAN-metalstorm-scripting.md task 4: the map-arm gesture bridge posts
@@ -1580,7 +1620,7 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
     //                      (the spring-debug `evaluate_widget_lua` path).
     testHarness = new TestHarness({
         gameHttpUrl,
-        token: localStorage.getItem('springrts-token') ?? '',
+        token: getAccessToken(browserTokenStore) ?? '',
         workerCall,
         getSelection: () => lastSceneState?.selectedUnitIds ?? [],
         getCameraPose: () => {
@@ -1803,6 +1843,15 @@ document.addEventListener('DOMContentLoaded', async () => {
         enterGame(gameServerPort, mapId, gameId);
     }, getDefaultLobbyTemplates(), lobbySuppressed);
     (window as any).lobby = lobbyUI;
+
+    // 8a-follow-on: start renewing. Placed after LobbyUI's constructor (which
+    // kicks off auto-login) rather than before it, so the first publish sees
+    // whatever a saved session left in the store; `subscribe` hands the
+    // current value over immediately, and the refresh-token round trip that
+    // auto-login may be running concurrently republishes through `storage`
+    // and the renewer's own publish.
+    authRenewer.subscribe(publishAccessTokenToHolders);
+    authRenewer.start();
 
     if (directManifestUrl) {
         // Hide synchronously, before any `await` — the constructor above

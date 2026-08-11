@@ -3477,6 +3477,26 @@ export function gpResync(token?: string): void {
     postToMain({ type: 'gp:resynced' });
 }
 
+/**
+ * 8a-follow-on: adopt an access token renewed on the main thread.
+ *
+ * Updates the credential the worker will present on its NEXT authentication —
+ * `gpResync`, the R1 soft-recovery reconnect, and any `gp:init`-derived
+ * reconnect all read `gpInitMsg.token`. The live connection is deliberately
+ * NOT re-authenticated: the game server validates once at `AuthRequest` and
+ * the session then belongs to the connection, so tearing it down to present a
+ * newer token would drop the player out of the world to fix a problem they do
+ * not yet have.
+ *
+ * The telemetry channel is reconfigured immediately, because that one DOES
+ * present the token per request.
+ */
+export function gpAdoptToken(token: string): void {
+    if (!token) return;
+    if (gpInitMsg) gpInitMsg.token = token;
+    configureErrorTelemetry({ token });
+}
+
 export function gpShutdown(): void {
     if (gpViewportTimer) { clearInterval(gpViewportTimer); gpViewportTimer = null; }
     rmlReset();  // PLAN-rml.md: drop the bridge op queue + runtime ref.

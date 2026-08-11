@@ -834,7 +834,7 @@ int main(int argc, char *argv[]) {
   }
 
   // Clean up expired sessions on startup
-  int cleaned = db.CleanExpiredSessions(86400); // 24h
+  int cleaned = db.CleanExpiredSessions(AuthTokens::kAccessTtlSeconds);
   if (cleaned > 0)
     SLOG(SPRING_LOG_INFO, "cleaned %d expired session(s)", cleaned);
 
@@ -5243,7 +5243,7 @@ int main(int argc, char *argv[]) {
     // `sessions` then grew one row per login for the lifetime of the process.
     if (haveMaintenanceDb && ++sessionSweepTick >= 36000) {
       sessionSweepTick = 0;
-      const int swept = maintenanceDb.CleanExpiredSessions(86400);
+      const int swept = maintenanceDb.CleanExpiredSessions(AuthTokens::kAccessTtlSeconds);
       if (swept > 0)
         SLOG(SPRING_LOG_INFO, "swept %d expired session(s)", swept);
 

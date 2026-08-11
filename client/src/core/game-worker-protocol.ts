@@ -212,6 +212,24 @@ export interface GpResyncToWorker {
 }
 
 /**
+ * 8a-follow-on: the access token was renewed on the main thread — adopt it.
+ *
+ * A worker realm has no `localStorage`, so "make the holders re-read" is not
+ * available here at any price: the worker's credential is whatever was handed
+ * to it at `gp:init`, and at a 1 h access TTL that string dies inside a normal
+ * match. It is used for two things — the game-server `AuthRequest` on every
+ * (re)connect, and the error-telemetry channel — and the reconnect is the one
+ * that matters, because R1/R2 recovery and `gp:resync` both re-authenticate
+ * with it long after boot.
+ *
+ * Idempotent: the sender drops repeats of the same string.
+ */
+export interface GpTokenToWorker {
+    type: 'gp:token';
+    token: string;
+}
+
+/**
  * PLAN-client-resilience.md task 2 (R1 soft rung): main asks the worker for an
  * in-place soft reset — Babylon `wipeCaches` + transient FX-pool flush + a
  * fresh-snapshot resync — instead of a full respawn. The worker replies
@@ -400,6 +418,7 @@ export type GpMessageToWorker =
     | GpPingToWorker
     | GpDetachToWorker
     | GpResyncToWorker
+    | GpTokenToWorker
     | GpRecoverToWorker
     | GpOrgGroupCreateToWorker
     | GpOrgGroupUpdateToWorker
