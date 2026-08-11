@@ -869,6 +869,23 @@ exists — every other broadcast in `lobby_main.cpp` fires on a room mutation, w
 right for a room and wrong for a war, whose populations and front move without anyone
 touching the row.
 
+**What the card says about a frozen war** (PLAN-persistence task 4a): the badge is
+`war.state`, not the `live` bit — Live / Resuming / Hibernated / Interrupted /
+Restarting / Not started — because one bit says the same word about a war that saved
+cleanly, one whose server died with its tail unwritten, and one going back to frame 0.
+`frozen_frame` is rendered as sim time ("2h 06m of war") rather than as a frame number,
+and `frozen_at` as an age. The E1 verdict is deliberately rendered **twice, in two
+registers**: the card's own sentence is derived from `resume_eligibility` ("the game has
+been updated since — this war restarts at the beginning"), while
+`resume_blocked_reason` — operator prose naming two 16-hex engine stamps — rides the
+row's `title`, so the log line and the card agree without the hashes on screen. Every
+formatter falls back to the old `live` reading when `state` is absent, so a client ahead
+of its lobby degrades to the previous card. The **room**-state badge is suppressed
+whenever the war state is known: a hibernated war keeps `state = InGame` (the room
+records what the world was doing when the process left), and the two badges together
+read "In game · Hibernated". Note `esc()` does not escape quotes — attribute values use
+`escAttr()`.
+
 **Spectating a war by choice:** a `POST /api/rooms/join` with `as_spectator` on a
 persistent war records `room_members.spectate_only`, and the game server's auth
 `resolveSeat` checks it *before* every seating rule (`Server/RoomWatchIntent.h`) —
