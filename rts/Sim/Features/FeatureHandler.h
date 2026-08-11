@@ -61,6 +61,19 @@ public:
 	bool AddFeature(CFeature* feature);
 	void DeleteFeature(CFeature* feature);
 
+	/// Destroy every live feature NOW and return every id to the pool, instead
+	/// of on the next Update() pass. Added for the snapshot-restore path
+	/// (PLAN-persistence task 1e): a restored payload claims the ids the live
+	/// features hold, and CanAddFeature refuses an id the pool has not recycled
+	/// yet — the deferred path only frees ids every 32 frames, which is long
+	/// after the rebuild. Same reason CUnitHandler::GarbageCollectUnit exists on
+	/// the unit side. Also drains the pending deletedFeatureIDs list, which is
+	/// why this is one bulk call rather than a per-id one: those ids belong to
+	/// features that are already gone, and leaving them pending while the caller
+	/// re-creates features at arbitrary ids would trip TryFreeFeatureID's
+	/// features[id] == nullptr assert and free a live feature's id twice.
+	void ClearAllFeatures();
+
 	void LoadFeaturesFromMap();
 
 	void SetFeatureUpdateable(CFeature* feature);

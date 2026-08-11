@@ -1187,7 +1187,7 @@ int main(int argc, char* argv[])
 
     sim.Init(smfPath);
 
-    // --- Attach the snapshot serializer (PLAN-persistence tasks 1b/1d) ---
+    // --- Attach the snapshot serializer (PLAN-persistence tasks 1b/1c/1d/1e) ---
     //
     // Deliberately after sim.Init: the second gate reads the LIVE gadget
     // handler. A table of gadget names compiled into the engine could not
@@ -1228,7 +1228,8 @@ int main(int argc, char* argv[])
             SLOG(SPRING_LOG_WARNING,
                  "sim snapshots: DISABLED - the serializer's walk is incomplete "
                  "(unimplemented sections: %s). Checkpoint/rollback refuse until "
-                 "PLAN-persistence task 1e lands.", join(missing).c_str());
+                 "every declared section is written; the section table's own "
+                 "note says which milestone owns each gap.", join(missing).c_str());
         } else if (!coverageErr.empty()) {
             SLOG(SPRING_LOG_WARNING,
                  "sim snapshots: DISABLED - cannot establish synced Lua "

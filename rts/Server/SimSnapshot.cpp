@@ -6,6 +6,11 @@
 #include "Server/StandingOrders.h"
 #include "Lua/LuaGaia.h"
 #include "Lua/LuaRules.h"
+#include "Sim/Features/Feature.h"
+#include "Sim/Features/FeatureDef.h"
+#include "Sim/Features/FeatureDefHandler.h"
+#include "Sim/Features/FeatureHandler.h"
+#include "Sim/Misc/GlobalConstants.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/Team.h"
 #include "Sim/Misc/TeamHandler.h"
@@ -37,10 +42,7 @@ const std::vector<SectionSpec>& Sections()
         {SectionId::Directives,     1, "directives",     true,  ""},
         {SectionId::Teams,          1, "teams",          true,  ""},
         {SectionId::Units,          1, "units",          true,  ""},
-        {SectionId::Features,       0, "features",       false,
-         "task 1e: wrecks and map features (reclaimLeft, resources, health, "
-         "position). Declared 2026-08-11 by task 1c - the section table had no "
-         "entry for them at all, so MissingSections() could not report the gap"},
+        {SectionId::Features,       1, "features",       true,  ""},
         {SectionId::SyncedLua,      1, "syncedLua",      true,  ""},
     };
     return kSections;
@@ -65,6 +67,14 @@ const std::vector<DerivedOmission>& DerivedNotCaptured()
          "CQuadField is repopulated as units are re-inserted"},
         {"path-finder caches and flow fields",
          "recomputed on demand from the command queue"},
+        {"a feature's physicalState (ONGROUND / INWATER / UNDERWATER / "
+         "UNDERGROUND / MOVING / BLOCKING)",
+         "CFeature::UpdateTransformAndPhysState recomputes the terrain bits and "
+         "MOVING, and Block() sets BLOCKING, both during ApplyFeatures. INVOID "
+         "is only ever set on units, so nothing about a feature's physical "
+         "state survives being written by the walk (task 1e)"},
+        {"a feature's solidOnTop (the object standing on a geothermal vent)",
+         "CFeature::EmitGeoSmoke re-picks the nearest solid every 5 frames"},
         {"in-flight projectiles",
          "not rebuilt - deliberately dropped. A projectile's whole lifetime is "
          "well under one snapshot cadence, so carrying them buys a fraction of "
@@ -852,6 +862,89 @@ UnitState ReadUnit(Reader& r)
     return u;
 }
 
+// ──────────── Task 1e codec: features (PLAN-persistence §7.1e) ────────────
+
+void WriteFeature(Writer& w, const FeatureState& f)
+{
+    w.I32(f.id);
+    w.Str(f.featureDefName);
+    w.Str(f.resurrectUnitDefName);
+    w.I32(f.team);
+    w.I32(f.heading);
+    w.I32(f.buildFacing);
+
+    w.F32(f.posX); w.F32(f.posY); w.F32(f.posZ);
+    w.F32(f.speedX); w.F32(f.speedY); w.F32(f.speedZ);
+    w.F32(f.frontX); w.F32(f.frontY); w.F32(f.frontZ);
+    w.F32(f.rightX); w.F32(f.rightY); w.F32(f.rightZ);
+    w.F32(f.upX); w.F32(f.upY); w.F32(f.upZ);
+    w.U32(f.collidableState);
+
+    w.F32(f.radius); w.F32(f.height);
+    w.F32(f.relMidX); w.F32(f.relMidY); w.F32(f.relMidZ);
+    w.F32(f.relAimX); w.F32(f.relAimY); w.F32(f.relAimZ);
+
+    w.F32(f.health); w.F32(f.maxHealth); w.F32(f.mass);
+    w.F32(f.reclaimTime); w.F32(f.reclaimLeft); w.F32(f.resurrectProgress);
+    w.Bool(f.isRepairingBeforeResurrect);
+    w.I32(f.lastReclaimFrame); w.I32(f.fireTime); w.I32(f.smokeTime);
+    WriteRes(w, f.defResources); WriteRes(w, f.resources);
+
+    w.Bool(f.moveCtrlEnabled);
+    w.F32(f.movementMaskX); w.F32(f.movementMaskY); w.F32(f.movementMaskZ);
+    w.F32(f.velocityMaskX); w.F32(f.velocityMaskY); w.F32(f.velocityMaskZ);
+    w.F32(f.impulseMaskX); w.F32(f.impulseMaskY); w.F32(f.impulseMaskZ);
+    w.F32(f.velVectorX); w.F32(f.velVectorY); w.F32(f.velVectorZ);
+    w.F32(f.accVectorX); w.F32(f.accVectorY); w.F32(f.accVectorZ);
+
+    w.Bool(f.crushable); w.Bool(f.blockEnemyPushing); w.Bool(f.blockHeightChanges);
+    w.Bool(f.noSelect); w.Bool(f.alwaysVisible); w.Bool(f.useAirLos);
+
+    WriteRulesParams(w, f.modParams);
+}
+
+FeatureState ReadFeature(Reader& r)
+{
+    FeatureState f;
+    f.id = r.I32();
+    f.featureDefName = r.Str();
+    f.resurrectUnitDefName = r.Str();
+    f.team = r.I32();
+    f.heading = r.I32();
+    f.buildFacing = r.I32();
+
+    f.posX = r.F32(); f.posY = r.F32(); f.posZ = r.F32();
+    f.speedX = r.F32(); f.speedY = r.F32(); f.speedZ = r.F32();
+    f.frontX = r.F32(); f.frontY = r.F32(); f.frontZ = r.F32();
+    f.rightX = r.F32(); f.rightY = r.F32(); f.rightZ = r.F32();
+    f.upX = r.F32(); f.upY = r.F32(); f.upZ = r.F32();
+    f.collidableState = r.U32();
+
+    f.radius = r.F32(); f.height = r.F32();
+    f.relMidX = r.F32(); f.relMidY = r.F32(); f.relMidZ = r.F32();
+    f.relAimX = r.F32(); f.relAimY = r.F32(); f.relAimZ = r.F32();
+
+    f.health = r.F32(); f.maxHealth = r.F32(); f.mass = r.F32();
+    f.reclaimTime = r.F32(); f.reclaimLeft = r.F32(); f.resurrectProgress = r.F32();
+    f.isRepairingBeforeResurrect = r.Bool();
+    f.lastReclaimFrame = r.I32(); f.fireTime = r.I32(); f.smokeTime = r.I32();
+    f.defResources = ReadRes(r); f.resources = ReadRes(r);
+
+    f.moveCtrlEnabled = r.Bool();
+    f.movementMaskX = r.F32(); f.movementMaskY = r.F32(); f.movementMaskZ = r.F32();
+    f.velocityMaskX = r.F32(); f.velocityMaskY = r.F32(); f.velocityMaskZ = r.F32();
+    f.impulseMaskX = r.F32(); f.impulseMaskY = r.F32(); f.impulseMaskZ = r.F32();
+    f.velVectorX = r.F32(); f.velVectorY = r.F32(); f.velVectorZ = r.F32();
+    f.accVectorX = r.F32(); f.accVectorY = r.F32(); f.accVectorZ = r.F32();
+
+    f.crushable = r.Bool(); f.blockEnemyPushing = r.Bool();
+    f.blockHeightChanges = r.Bool();
+    f.noSelect = r.Bool(); f.alwaysVisible = r.Bool(); f.useAirLos = r.Bool();
+
+    f.modParams = ReadRulesParams(r);
+    return f;
+}
+
 // ── The task 1c censuses (the structs above are aggregates, so the same
 //    structured-binding trick as 1b's applies to all six) ──
 
@@ -987,6 +1080,47 @@ int CensusUnitState(const UnitState& u)
     return 113;
 }
 
+int CensusFeatureState(const FeatureState& f)
+{
+    const auto& [id, featureDefName, resurrectUnitDefName, team, heading,
+                 buildFacing,
+                 posX, posY, posZ, speedX, speedY, speedZ,
+                 frontX, frontY, frontZ, rightX, rightY, rightZ, upX, upY, upZ,
+                 collidableState,
+                 radius, height, relMidX, relMidY, relMidZ,
+                 relAimX, relAimY, relAimZ,
+                 health, maxHealth, mass, reclaimTime, reclaimLeft,
+                 resurrectProgress, isRepairingBeforeResurrect,
+                 lastReclaimFrame, fireTime, smokeTime, defResources, resources,
+                 moveCtrlEnabled,
+                 movementMaskX, movementMaskY, movementMaskZ,
+                 velocityMaskX, velocityMaskY, velocityMaskZ,
+                 impulseMaskX, impulseMaskY, impulseMaskZ,
+                 velVectorX, velVectorY, velVectorZ,
+                 accVectorX, accVectorY, accVectorZ,
+                 crushable, blockEnemyPushing, blockHeightChanges,
+                 noSelect, alwaysVisible, useAirLos, modParams] = f;
+    (void)id; (void)featureDefName; (void)resurrectUnitDefName; (void)team;
+    (void)heading; (void)buildFacing;
+    (void)posX; (void)posY; (void)posZ; (void)speedX; (void)speedY; (void)speedZ;
+    (void)frontX; (void)frontY; (void)frontZ; (void)rightX; (void)rightY;
+    (void)rightZ; (void)upX; (void)upY; (void)upZ; (void)collidableState;
+    (void)radius; (void)height; (void)relMidX; (void)relMidY; (void)relMidZ;
+    (void)relAimX; (void)relAimY; (void)relAimZ;
+    (void)health; (void)maxHealth; (void)mass; (void)reclaimTime;
+    (void)reclaimLeft; (void)resurrectProgress; (void)isRepairingBeforeResurrect;
+    (void)lastReclaimFrame; (void)fireTime; (void)smokeTime; (void)defResources;
+    (void)resources; (void)moveCtrlEnabled;
+    (void)movementMaskX; (void)movementMaskY; (void)movementMaskZ;
+    (void)velocityMaskX; (void)velocityMaskY; (void)velocityMaskZ;
+    (void)impulseMaskX; (void)impulseMaskY; (void)impulseMaskZ;
+    (void)velVectorX; (void)velVectorY; (void)velVectorZ;
+    (void)accVectorX; (void)accVectorY; (void)accVectorZ;
+    (void)crushable; (void)blockEnemyPushing; (void)blockHeightChanges;
+    (void)noSelect; (void)alwaysVisible; (void)useAirLos; (void)modParams;
+    return 65;
+}
+
 /// Flatten a LuaRulesParams::Params map into the wire form, SORTED BY KEY: the
 /// map is unordered, and a snapshot whose byte layout depends on hash order is
 /// not comparable against a second snapshot of the same state.
@@ -1110,6 +1244,42 @@ bool DecodeUnits(const uint8_t* data, size_t size,
     }
     if (r.Remaining() != 0) {
         err = "units section has " + std::to_string(r.Remaining()) +
+              " unread trailing bytes";
+        return false;
+    }
+    return true;
+}
+
+// ───────────── Task 1e: the features codec (public, for the tests) ─────────────
+
+void EncodeFeatures(const std::vector<FeatureState>& in, std::vector<uint8_t>& out)
+{
+    Writer w(out);
+    w.U32(static_cast<uint32_t>(in.size()));
+    for (const auto& f : in) WriteFeature(w, f);
+}
+
+bool DecodeFeatures(const uint8_t* data, size_t size,
+                    std::vector<FeatureState>& out, std::string& err)
+{
+    Reader r(data, size);
+    const uint32_t count = r.U32();
+    // A feature costs far more than a byte, but the point of this guard is only
+    // that a corrupt count is a decode failure before it is an allocation.
+    if (r.Remaining() < size_t(count)) {
+        err = "features section claims " + std::to_string(count) +
+              " features in " + std::to_string(size) + " bytes";
+        return false;
+    }
+    out.clear();
+    out.reserve(count);
+    for (uint32_t i = 0; i < count && !r.Bad(); ++i) out.push_back(ReadFeature(r));
+    if (r.Bad()) {
+        err = "features section is truncated";
+        return false;
+    }
+    if (r.Remaining() != 0) {
+        err = "features section has " + std::to_string(r.Remaining()) +
               " unread trailing bytes";
         return false;
     }
@@ -1792,6 +1962,274 @@ void ApplyUnits(const std::vector<UnitState>& in, const std::vector<int32_t>& de
     }
 }
 
+// ───────── Task 1e: features capture / apply (§7.1e) ─────────
+//
+// Same size-assert tripwire as CTeam/CUnit, and the same stated limitation: a
+// member that fits in existing padding does not move sizeof.
+static_assert(sizeof(CFeature) == 1152,
+              "CFeature changed shape - revisit the snapshot fidelity contract "
+              "(PLAN-persistence.md §7.1e) and FeatureState, then update this size");
+
+void CaptureFeatures(std::vector<FeatureState>& out)
+{
+    out.clear();
+
+    // Ascending id: activeFeatureIDs is an unordered_set, so two snapshots of
+    // the same world would otherwise differ by hash order alone.
+    std::vector<int> ids(featureHandler.GetActiveFeatureIDs().begin(),
+                         featureHandler.GetActiveFeatureIDs().end());
+    std::sort(ids.begin(), ids.end());
+
+    out.reserve(ids.size());
+    for (const int id : ids) {
+        const CFeature* f = featureHandler.GetFeature(id);
+        // deleteMe is the feature-side equivalent of CUnit::isDead: it is
+        // already scheduled for removal in this frame's FeatureHandler::Update,
+        // so recreating it on restore would resurrect something the sim is in
+        // the middle of deleting.
+        if (f == nullptr || f->deleteMe || f->def == nullptr)
+            continue;
+
+        FeatureState s;
+        s.id = f->id;
+        s.featureDefName = f->def->name;
+        s.resurrectUnitDefName = (f->udef != nullptr) ? f->udef->name : "";
+        s.team = f->team;
+        s.heading = f->heading;
+        s.buildFacing = f->buildFacing;
+
+        s.posX = f->pos.x; s.posY = f->pos.y; s.posZ = f->pos.z;
+        s.speedX = f->speed.x; s.speedY = f->speed.y; s.speedZ = f->speed.z;
+        s.frontX = f->frontdir.x; s.frontY = f->frontdir.y; s.frontZ = f->frontdir.z;
+        s.rightX = f->rightdir.x; s.rightY = f->rightdir.y; s.rightZ = f->rightdir.z;
+        s.upX = f->updir.x; s.upY = f->updir.y; s.upZ = f->updir.z;
+        s.collidableState = static_cast<uint32_t>(f->collidableState);
+
+        s.radius = f->radius; s.height = f->height;
+        s.relMidX = f->relMidPos.x; s.relMidY = f->relMidPos.y; s.relMidZ = f->relMidPos.z;
+        s.relAimX = f->relAimPos.x; s.relAimY = f->relAimPos.y; s.relAimZ = f->relAimPos.z;
+
+        s.health = f->health;
+        s.maxHealth = f->maxHealth;
+        s.mass = f->mass;
+        s.reclaimTime = f->reclaimTime;
+        s.reclaimLeft = f->reclaimLeft;
+        s.resurrectProgress = f->resurrectProgress;
+        s.isRepairingBeforeResurrect = f->isRepairingBeforeResurrect;
+        s.lastReclaimFrame = f->lastReclaimFrame;
+        s.fireTime = f->fireTime;
+        s.smokeTime = f->smokeTime;
+        const auto pack = [](const SResourcePack& p) {
+            ResPair r; r.metal = p.metal; r.energy = p.energy; return r;
+        };
+        s.defResources = pack(f->defResources);
+        s.resources = pack(f->resources);
+
+        s.moveCtrlEnabled = f->moveCtrl.enabled;
+        s.movementMaskX = f->moveCtrl.movementMask.x;
+        s.movementMaskY = f->moveCtrl.movementMask.y;
+        s.movementMaskZ = f->moveCtrl.movementMask.z;
+        s.velocityMaskX = f->moveCtrl.velocityMask.x;
+        s.velocityMaskY = f->moveCtrl.velocityMask.y;
+        s.velocityMaskZ = f->moveCtrl.velocityMask.z;
+        s.impulseMaskX = f->moveCtrl.impulseMask.x;
+        s.impulseMaskY = f->moveCtrl.impulseMask.y;
+        s.impulseMaskZ = f->moveCtrl.impulseMask.z;
+        s.velVectorX = f->moveCtrl.velVector.x;
+        s.velVectorY = f->moveCtrl.velVector.y;
+        s.velVectorZ = f->moveCtrl.velVector.z;
+        s.accVectorX = f->moveCtrl.accVector.x;
+        s.accVectorY = f->moveCtrl.accVector.y;
+        s.accVectorZ = f->moveCtrl.accVector.z;
+
+        s.crushable = f->crushable;
+        s.blockEnemyPushing = f->blockEnemyPushing;
+        s.blockHeightChanges = f->blockHeightChanges;
+        s.noSelect = f->noSelect;
+        s.alwaysVisible = f->alwaysVisible;
+        s.useAirLos = f->useAirLos;
+
+        s.modParams = CaptureRulesParams(f->modParams);
+        out.push_back(std::move(s));
+    }
+}
+
+bool ResolveFeatureDefs(const std::vector<FeatureState>& in,
+                        std::vector<int32_t>& defIds,
+                        std::vector<int32_t>& udefIds, std::string& err)
+{
+    defIds.clear();
+    udefIds.clear();
+    defIds.reserve(in.size());
+    udefIds.reserve(in.size());
+
+    std::vector<int32_t> seen;
+    seen.reserve(in.size());
+
+    for (const auto& s : in) {
+        // showError=false: a missing def is reported by THIS function, with the
+        // feature id, rather than as an engine-level log line with no context.
+        const FeatureDef* fd = featureDefHandler->GetFeatureDef(s.featureDefName, false);
+        if (fd == nullptr) {
+            err = "snapshot feature " + std::to_string(s.id) + " has featureDef '" +
+                  s.featureDefName + "', which this game does not define";
+            return false;
+        }
+        // The resurrect target is state too: a wreck that resurrects into a def
+        // this build no longer has would silently become unresurrectable, so it
+        // is a staging refusal like the featureDef itself.
+        int32_t udefId = -1;
+        if (!s.resurrectUnitDefName.empty()) {
+            const UnitDef* ud = unitDefHandler->GetUnitDefByName(s.resurrectUnitDefName);
+            if (ud == nullptr) {
+                err = "snapshot feature " + std::to_string(s.id) +
+                      " resurrects into unitDef '" + s.resurrectUnitDefName +
+                      "', which this game does not define";
+                return false;
+            }
+            udefId = ud->id;
+        }
+        if (!teamHandler.IsValidTeam(s.team)) {
+            err = "snapshot feature " + std::to_string(s.id) + " belongs to team " +
+                  std::to_string(s.team) + ", which this game does not have";
+            return false;
+        }
+        if (s.id < 0 || s.id >= MAX_FEATURES) {
+            err = "snapshot feature id " + std::to_string(s.id) +
+                  " is outside this game's feature-id space (max " +
+                  std::to_string(MAX_FEATURES) + ")";
+            return false;
+        }
+        if (std::find(seen.begin(), seen.end(), s.id) != seen.end()) {
+            err = "snapshot has two features with id " + std::to_string(s.id);
+            return false;
+        }
+        seen.push_back(s.id);
+        defIds.push_back(fd->id);
+        udefIds.push_back(udefId);
+    }
+    return true;
+}
+
+namespace {
+
+/// Everything about a restored feature that creating it does not already set.
+void ApplyFeatureState(CFeature* f, const FeatureState& s)
+{
+    // Geometry first: Block() and UpdatePhysicalState below read radius, height
+    // and midPos, so a restore that set them afterwards would block the map
+    // with the def's footprint and then quietly disagree with itself.
+    f->SetRadiusAndHeight(s.radius, s.height);
+    f->SetMidAndAimPos(float3(s.relMidX, s.relMidY, s.relMidZ),
+                       float3(s.relAimX, s.relAimY, s.relAimZ), true);
+
+    f->collidableState = static_cast<CSolidObject::CollidableState>(s.collidableState);
+    f->crushable = s.crushable;
+    f->blockEnemyPushing = s.blockEnemyPushing;
+    f->blockHeightChanges = s.blockHeightChanges;
+    f->noSelect = s.noSelect;
+    f->alwaysVisible = s.alwaysVisible;
+    f->useAirLos = s.useAirLos;
+
+    // Before the velocity, because SetVelocity masks through velocityMask.
+    f->moveCtrl.enabled = s.moveCtrlEnabled;
+    f->moveCtrl.SetMovementMask(float3(s.movementMaskX, s.movementMaskY, s.movementMaskZ));
+    f->moveCtrl.SetVelocityMask(float3(s.velocityMaskX, s.velocityMaskY, s.velocityMaskZ));
+    f->moveCtrl.impulseMask = float3(s.impulseMaskX, s.impulseMaskY, s.impulseMaskZ);
+    f->moveCtrl.velVector = float3(s.velVectorX, s.velVectorY, s.velVectorZ);
+    f->moveCtrl.accVector = float3(s.accVectorX, s.accVectorY, s.accVectorZ);
+
+    f->maxHealth = s.maxHealth;
+    f->health = s.health;
+    f->SetMass(s.mass);
+    f->reclaimTime = s.reclaimTime;
+    f->reclaimLeft = s.reclaimLeft;
+    f->resurrectProgress = s.resurrectProgress;
+    f->isRepairingBeforeResurrect = s.isRepairingBeforeResurrect;
+    f->lastReclaimFrame = s.lastReclaimFrame;
+    f->fireTime = s.fireTime;
+    f->defResources = SResourcePack(s.defResources.metal, s.defResources.energy);
+    f->resources = SResourcePack(s.resources.metal, s.resources.energy);
+
+    // ForcedMove rather than a raw pos write: it re-registers the feature with
+    // the quad field and the ground-blocking map and recomputes the physical
+    // state, which is why physicalState is not in the payload at all.
+    f->ForcedMove(float3(s.posX, s.posY, s.posZ));
+
+    // AFTER ForcedMove, deliberately: it calls UpdateTransformAndPhysState,
+    // which re-derives the three direction vectors from `heading` and the ground
+    // normal. A feature spun by Spring.SetFeatureDirection / SetFeatureRotation
+    // has a basis that derivation cannot reproduce, so the captured one is put
+    // back last and the cached transform matrix refreshed from it.
+    f->frontdir = float3(s.frontX, s.frontY, s.frontZ);
+    f->rightdir = float3(s.rightX, s.rightY, s.rightZ);
+    f->updir    = float3(s.upX, s.upY, s.upZ);
+    f->UpdateMidAndAimPos();
+    f->UpdateTransform(f->pos, true);
+
+    // Last: SetVelocity re-queues the feature for updates when it is moving,
+    // and reads the masks restored above.
+    f->SetVelocity(float3(s.speedX, s.speedY, s.speedZ));
+
+    ApplyRulesParams(s.modParams, f->modParams);
+}
+
+} // namespace
+
+void ApplyFeatures(const std::vector<FeatureState>& in,
+                   const std::vector<int32_t>& defIds,
+                   const std::vector<int32_t>& udefIds)
+{
+    // ── 1. tear the live feature set down ──
+    //
+    // ClearAllFeatures is synchronous and frees every id immediately, which is
+    // required: the payload's features claim those same ids, and
+    // CFeatureHandler::CanAddFeature refuses an id the pool has not recycled.
+    // The deferred path (DeleteFeature + the next Update) would only free them
+    // 32 frames later, i.e. after the rebuild had already failed. It also drains
+    // the ids of features deleted the ordinary way within the last 32 frames,
+    // which are exactly the ids a rollback is most likely to re-claim.
+    featureHandler.ClearAllFeatures();
+
+    // ── 2. rebuild ──
+    for (size_t i = 0; i < in.size(); ++i) {
+        const FeatureState& s = in[i];
+
+        FeatureLoadParams params;
+        params.parentObj = nullptr;
+        params.unitDef = (udefIds[i] >= 0)
+            ? unitDefHandler->GetUnitDefByID(udefIds[i]) : nullptr;
+        params.featureDef = featureDefHandler->GetFeatureDefByID(defIds[i]);
+        params.pos = float3(s.posX, s.posY, s.posZ);
+        params.speed = float3(s.speedX, s.speedY, s.speedZ);
+        params.featureID = s.id;
+        params.teamID = s.team;
+        params.allyTeamID = teamHandler.AllyTeam(s.team);
+        params.heading = static_cast<short>(s.heading);
+        params.facing = static_cast<short>(s.buildFacing);
+        // LoadFeature, not CreateWreckage: the def is the one this feature
+        // already IS, so there is no wreck-chain left to walk (a wreckLevels of
+        // anything but 0 would step it further down the chain and restore the
+        // WRONG def). smokeTime travels as the captured absolute value for the
+        // same reason - CreateWreckage treats it as a multiplier, LoadFeature
+        // does not.
+        params.wreckLevels = 0;
+        params.smokeTime = s.smokeTime;
+
+        CFeature* f = featureHandler.LoadFeature(params);
+        if (f == nullptr) {
+            // Every fallible condition was checked in ResolveFeatureDefs, so
+            // this is a bug rather than a data problem - but it must not be
+            // silent.
+            SLOG(SPRING_LOG_ERROR,
+                 "snapshot restore: could not create feature %d ('%s') for team %d",
+                 s.id, s.featureDefName.c_str(), s.team);
+            continue;
+        }
+        ApplyFeatureState(f, s);
+    }
+}
+
 // ───────── Task 1d: synced-Lua capture / apply (the Lua-touching half) ─────────
 //
 // TWO handles, not one. luaRules is where the game's gadgets live, but
@@ -2004,6 +2442,11 @@ bool SimSnapshotSerializer::SerializeImplemented(std::vector<uint8_t>& out, std:
                 CaptureUnits(units);
                 EncodeUnits(units, section);
             } break;
+            case SectionId::Features: {
+                std::vector<FeatureState> features;
+                CaptureFeatures(features);
+                EncodeFeatures(features, section);
+            } break;
             case SectionId::SyncedLua: {
                 luasnapshot::Value state;
                 if (!CaptureSyncedLua(state, err))
@@ -2057,10 +2500,14 @@ bool SimSnapshotSerializer::Deserialize(const uint8_t* data, size_t size, std::s
     // happens once the whole payload has been read without a single failure.
     bool haveGlobals = false, haveOrders = false, haveGroups = false, haveDirs = false;
     bool haveTeams = false, haveUnits = false, haveSyncedLua = false;
+    bool haveFeatures = false;
     luasnapshot::Value syncedLua = luasnapshot::Value::Table();
     std::vector<TeamState> teams;
     std::vector<UnitState> units;
     std::vector<int32_t>   unitDefIds;
+    std::vector<FeatureState> features;
+    std::vector<int32_t>   featureDefIds;
+    std::vector<int32_t>   featureUdefIds;
     GlobalsState globals;
     std::vector<StandingOrder> orders;
     uint32_t ordersNextId = 1;
@@ -2133,6 +2580,12 @@ bool SimSnapshotSerializer::Deserialize(const uint8_t* data, size_t size, std::s
                 sr.Skip(len);
                 haveUnits = true;
                 break;
+            case SectionId::Features:
+                if (!DecodeFeatures(data + r.Pos(), len, features, err))
+                    return false;
+                sr.Skip(len);
+                haveFeatures = true;
+                break;
             case SectionId::SyncedLua:
                 if (!DecodeSyncedLua(data + r.Pos(), len, syncedLua, err))
                     return false;
@@ -2163,7 +2616,7 @@ bool SimSnapshotSerializer::Deserialize(const uint8_t* data, size_t size, std::s
         return false;
     }
     if (!haveGlobals || !haveOrders || !haveGroups || !haveDirs ||
-        !haveTeams || !haveUnits || !haveSyncedLua) {
+        !haveTeams || !haveUnits || !haveFeatures || !haveSyncedLua) {
         err = "payload is missing a required section";
         return false;
     }
@@ -2175,6 +2628,8 @@ bool SimSnapshotSerializer::Deserialize(const uint8_t* data, size_t size, std::s
     if (!ResolveTeams(teams, err))
         return false;
     if (!ResolveUnitDefs(units, unitDefIds, err))
+        return false;
+    if (!ResolveFeatureDefs(features, featureDefIds, featureUdefIds, err))
         return false;
     if (!ResolveSyncedLua(syncedLua, err))
         return false;
@@ -2190,6 +2645,14 @@ bool SimSnapshotSerializer::Deserialize(const uint8_t* data, size_t size, std::s
     // team's (derived, uncaptured) unit count.
     ApplyTeams(teams);
     ApplyUnits(units, unitDefIds);
+    // Features AFTER units, and the order is load-bearing: the roster teardown
+    // runs a death path for every live unit, and anything that path leaves
+    // behind in the feature set (a wreck, a corpse) has to be discarded rather
+    // than added to the restored world. Rebuilding the features last is what
+    // discards it. ApplyUnits currently deletes with reclaimed = true, so no
+    // wreck is created today - this ordering is what keeps that from being a
+    // load-bearing detail of the unit path.
+    ApplyFeatures(features, featureDefIds, featureUdefIds);
     // Synced Lua LAST, and the order is load-bearing: tearing down and
     // rebuilding the roster fires UnitDestroyed for every live unit and
     // UnitCreated/UnitFinished for every restored one, so a gadget's own unit
@@ -2217,6 +2680,7 @@ int Group(const OrgGroup& g)                     { return CensusOrgGroup(g); }
 int Directive_(const Directive& d)               { return CensusDirective(d); }
 int Team(const TeamState& t)                     { return CensusTeamState(t); }
 int Unit(const UnitState& u)                     { return CensusUnitState(u); }
+int Feature(const FeatureState& f)               { return CensusFeatureState(f); }
 int Weapon(const WeaponState& w)                 { return CensusWeaponState(w); }
 int Cmd(const CommandState& c)                   { return CensusCommandState(c); }
 int RulesParam(const RulesParamState& p)         { return CensusRulesParam(p); }

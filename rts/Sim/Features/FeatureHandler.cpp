@@ -9,6 +9,7 @@
 #include "Map/ReadMap.h"
 #include "Sim/Misc/QuadField.h"
 #include "Sim/Units/CommandAI/BuilderCAI.h"
+#include "System/ContainerUtil.h"
 #include "System/creg/STL_Set.h"
 #include "System/EventHandler.h"
 #include "System/TimeProfiler.h"
@@ -150,6 +151,55 @@ void CFeatureHandler::DeleteFeature(CFeature* feature)
 {
 	SetFeatureUpdateable(feature);
 	feature->deleteMe = true;
+}
+
+
+void CFeatureHandler::ClearAllFeatures()
+{
+	// Sorted copy: activeFeatureIDs is unordered and is mutated below, and the
+	// FeatureDestroyed events a gadget sees must not depend on hash order.
+	std::vector<int> ids(activeFeatureIDs.begin(), activeFeatureIDs.end());
+	std::sort(ids.begin(), ids.end());
+
+	for (const int id: ids) {
+		CFeature* feature = features[id];
+
+		if (feature == nullptr)
+			continue;
+
+		// Same body as UpdateFeature's deleteMe branch, run now. The one
+		// difference is the id: that path defers it through deletedFeatureIDs so
+		// it is only handed back to the pool on a later frame, and the caller
+		// here needs it immediately (see the header).
+		eventHandler.FeatureDestroyed(feature);
+
+		activeFeatureIDs.erase(id);
+		features[id] = nullptr;
+
+		// The update queue holds raw pointers and is NOT cleaned up by the
+		// destructor (UpdateFeature's own comment says it is, but the removal is
+		// really the remove_if in Update()). Leaving the pointer behind would be
+		// a dangling read on the next frame.
+		spring::VectorErase(updateFeatures, feature);
+
+		// ID must match parameter for object commands, just use this
+		CSolidObject::SetDeletingRefID(feature->GetBlockingMapID());
+		featureMemPool.free(feature);
+		CSolidObject::SetDeletingRefID(-1);
+
+		idPool.FreeID(id, true);
+		idPool.RecycleID(id);
+	}
+
+	// Ids whose features were deleted the ordinary way and are still waiting for
+	// the next (frame & 31) == 0 pass to be handed back. See the header: they
+	// have to be returned here, or one of them being re-claimed by the caller
+	// makes the deferred pass free a LIVE feature's id.
+	for (const int id: deletedFeatureIDs) {
+		idPool.FreeID(id, true);
+		idPool.RecycleID(id);
+	}
+	deletedFeatureIDs.clear();
 }
 
 

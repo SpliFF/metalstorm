@@ -285,6 +285,72 @@ struct UnitState {
     std::vector<RulesParamState> modParams;
 };
 
+// ──────────── Task 1e: the features section (§7.1e) ────────────
+//
+// Wrecks, corpses and map features. Same split as 1c (codec / capture) and the
+// same fidelity discipline, applied to CFeature + its CSolidObject half. Two
+// dispositions differ from a unit's and are worth stating here rather than in
+// the plan file alone, because they are what a reader will look for:
+//
+//   * physicalState is NOT captured. Every bit of it that a feature ever sets
+//     is recomputed by CFeature::UpdateTransformAndPhysState (ONGROUND,
+//     INWATER, UNDERWATER, UNDERGROUND, MOVING) or by Block() (BLOCKING) on
+//     the way through the restore; INVOID is only ever set on units. Capturing
+//     it would write a value the restore path immediately overwrites, which is
+//     the "claiming a fidelity it cannot check" case in the coverage contract.
+//     collidableState IS captured — Lua authors it (Spring.SetFeatureBlocking)
+//     and nothing recomputes it.
+//   * radius/height/relMidPos/relAimPos ARE captured, unlike a unit's. The
+//     rule is §7.1c's ("anything a def sets that Lua can then overwrite is
+//     captured"), and Spring.SetFeatureRadiusAndHeight /
+//     Spring.SetFeatureMidAndAimPos are that overwrite. The unit section not
+//     capturing its equivalents is a 1c gap, filed in PLAN-persistence §7.1e.
+struct FeatureState {
+    // ── creation key ──
+    int32_t     id = -1;
+    std::string featureDefName;         ///< by NAME, for the same reason a unit's def is
+    /// The unit this feature resurrects into (CFeature::udef), by name. Empty
+    /// means "not resurrectable", which is a real state and not an absence.
+    std::string resurrectUnitDefName;
+    int32_t     team = 0;               ///< allyteam is re-derived by ChangeTeam
+    int32_t     heading = 0;
+    int32_t     buildFacing = 0;
+
+    // ── transform ──
+    float    posX = 0.0f, posY = 0.0f, posZ = 0.0f;
+    float    speedX = 0.0f, speedY = 0.0f, speedZ = 0.0f;
+    float    frontX = 0.0f, frontY = 0.0f, frontZ = 0.0f;
+    float    rightX = 0.0f, rightY = 0.0f, rightZ = 0.0f;
+    float    upX = 0.0f, upY = 0.0f, upZ = 0.0f;
+    uint32_t collidableState = 0;
+
+    // ── footprint geometry Lua can overwrite ──
+    float radius = 0.0f, height = 0.0f;
+    float relMidX = 0.0f, relMidY = 0.0f, relMidZ = 0.0f;
+    float relAimX = 0.0f, relAimY = 0.0f, relAimZ = 0.0f;
+
+    // ── vitals, reclaim and resurrect ──
+    float   health = 0.0f, maxHealth = 1.0f, mass = 0.0f;
+    float   reclaimTime = 0.0f, reclaimLeft = 1.0f, resurrectProgress = 0.0f;
+    bool    isRepairingBeforeResurrect = false;
+    int32_t lastReclaimFrame = 0, fireTime = 0, smokeTime = 0;
+    ResPair defResources, resources;
+
+    // ── move control (Spring.SetFeatureMoveCtrl) ──
+    bool  moveCtrlEnabled = false;
+    float movementMaskX = 1.0f, movementMaskY = 1.0f, movementMaskZ = 1.0f;
+    float velocityMaskX = 1.0f, velocityMaskY = 1.0f, velocityMaskZ = 1.0f;
+    float impulseMaskX = 1.0f, impulseMaskY = 1.0f, impulseMaskZ = 1.0f;
+    float velVectorX = 0.0f, velVectorY = 0.0f, velVectorZ = 0.0f;
+    float accVectorX = 0.0f, accVectorY = 0.0f, accVectorZ = 0.0f;
+
+    // ── flags ──
+    bool crushable = false, blockEnemyPushing = true, blockHeightChanges = false;
+    bool noSelect = false, alwaysVisible = false, useAirLos = false;
+
+    std::vector<RulesParamState> modParams;
+};
+
 // ──────────── Task 1d: the synced-Lua section (§7.1d) ────────────
 //
 // The payload is the table the gadgets write during the `Save` call-in, keyed by
@@ -343,6 +409,23 @@ bool ResolveUnitDefs(const std::vector<UnitState>& in,
 /// successful ResolveUnitDefs with the same vector.
 void ApplyUnits(const std::vector<UnitState>& in, const std::vector<int32_t>& defIds);
 
+void CaptureFeatures(std::vector<FeatureState>& out);
+
+/// Resolve every featureDefName (and every non-empty resurrectUnitDefName) in
+/// `in` and validate the id set. STAGING, for the same reason as
+/// ResolveUnitDefs: a def that no longer exists must be caught before the live
+/// feature set is destroyed. `defIds[i]` / `udefIds[i]` are the resolved ids for
+/// `in[i]`, the latter -1 where the feature is not resurrectable.
+bool ResolveFeatureDefs(const std::vector<FeatureState>& in,
+                        std::vector<int32_t>& defIds,
+                        std::vector<int32_t>& udefIds, std::string& err);
+
+/// Destroy the live feature set and rebuild it from `in`. Requires a preceding
+/// successful ResolveFeatureDefs with the same vector.
+void ApplyFeatures(const std::vector<FeatureState>& in,
+                   const std::vector<int32_t>& defIds,
+                   const std::vector<int32_t>& udefIds);
+
 // ─────────────────────────── Section codecs ───────────────────────────
 //
 // Exposed for the round-trip tests: the encode/decode pair is the part of this
@@ -355,6 +438,10 @@ bool DecodeTeams(const uint8_t* data, size_t size,
 void EncodeUnits(const std::vector<UnitState>& in, std::vector<uint8_t>& out);
 bool DecodeUnits(const uint8_t* data, size_t size,
                  std::vector<UnitState>& out, std::string& err);
+
+void EncodeFeatures(const std::vector<FeatureState>& in, std::vector<uint8_t>& out);
+bool DecodeFeatures(const uint8_t* data, size_t size,
+                    std::vector<FeatureState>& out, std::string& err);
 
 void EncodeSyncedLua(const luasnapshot::Value& in, std::vector<uint8_t>& out);
 bool DecodeSyncedLua(const uint8_t* data, size_t size,
@@ -376,6 +463,7 @@ int Group(const OrgGroup& g);
 int Directive_(const Directive& d);
 int Team(const TeamState& t);
 int Unit(const UnitState& u);
+int Feature(const FeatureState& f);
 int Weapon(const WeaponState& w);
 int Cmd(const CommandState& c);
 int RulesParam(const RulesParamState& p);

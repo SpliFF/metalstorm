@@ -181,17 +181,18 @@ TEST_CASE("every section is either implemented or declares who owns the gap") {
     }
 }
 
-TEST_CASE("the declared gaps are the ones this milestone left") {
-    // Pinned deliberately: filling one of these in without updating this list
-    // is fine (the test fails, you delete a line); *adding* a new unimplemented
-    // section without saying so is not.
-    const std::vector<std::string> missing = MissingSections();
-    REQUIRE(missing.size() == 1);
-    // task 1c filled teams + units and DECLARED features, which the table had
-    // never mentioned at all - a gap MissingSections() could not report
-    // because the section it belongs to did not exist (PLAN-persistence §7.1c).
-    // task 1d filled syncedLua; features is the last one (task 1e).
-    CHECK(missing[0] == "features");
+TEST_CASE("the section table declares no gaps left") {
+    // Pinned deliberately: *adding* a new unimplemented section without saying
+    // so must fail here. task 1e (features) was the last declared gap — 1c
+    // filled teams + units and DECLARED features, which the table had never
+    // mentioned at all (a gap MissingSections() could not report because the
+    // section did not exist), and 1d filled syncedLua.
+    //
+    // With this empty, the ONLY thing still keeping the serializer detached at
+    // boot is one level below the table: the synced-Lua coverage ledger, i.e.
+    // the nine gadgets task 1d-b has to author. That refusal lives in
+    // Serialize() and in server_main's attach gate, not here.
+    CHECK(MissingSections().empty());
 }
 
 TEST_CASE("state that is deliberately not captured says what rebuilds it") {
@@ -230,27 +231,60 @@ TEST_CASE("LayoutHash is stable, non-trivial and folds every implemented section
         fold(s.version);
         ++implemented;
     }
-    CHECK(implemented == 7);
+    CHECK(implemented == 8);
     CHECK(h == expect);
 }
 
 // ────────────────────── Refusal while incomplete ──────────────────────
 
-TEST_CASE("Serialize refuses by name while a declared section is unimplemented") {
-    // The honest-refusal property: this serializer never hands the store a
-    // payload it knows is missing state. The error must NAME the gaps, because
-    // "checkpoint failed" with no reason is what GameStateStore's own module
-    // header calls out as the thing it exists to avoid.
+TEST_CASE("Serialize's completeness gate passes and the payload carries every section") {
+    // The honest-refusal property, from the other side now that the table is
+    // complete (task 1e): Serialize() must emit EVERY section the table
+    // declares, in table order. This is the test that would catch a section
+    // marked implemented with no writer behind it — SerializeImplemented's
+    // default branch refuses, and the count below would be short.
+    //
+    // In-process there is no gadget handler, so the second gate (synced-Lua
+    // coverage) has nothing to report and Serialize() runs the full walk. On a
+    // real game that gate is what still refuses; it needs a live handler and is
+    // exercised at boot (server_main), not here.
     stageFixture();
+    REQUIRE(MissingSections().empty());
+
     SimSnapshotSerializer ser;
     std::vector<uint8_t> out;
     std::string err;
-    CHECK_FALSE(ser.Serialize(out, err));
-    CHECK(out.empty());
-    for (const auto& name : MissingSections()) {
-        INFO("err: " << err);
-        CHECK(err.find(name) != std::string::npos);
+    REQUIRE_MESSAGE(ser.Serialize(out, err), err);
+
+    // Walk the envelope and collect the section ids actually written.
+    REQUIRE(out.size() > 6);
+    const auto u16 = [&out](size_t at) {
+        return uint16_t(out[at]) | uint16_t(uint16_t(out[at + 1]) << 8);
+    };
+    const auto u32 = [&out](size_t at) {
+        uint32_t v = 0;
+        for (int i = 0; i < 4; ++i) v |= uint32_t(out[at + i]) << (8 * i);
+        return v;
+    };
+    CHECK(u16(0) == kPayloadVersion);
+    const uint32_t count = u32(2);
+
+    std::vector<uint16_t> written;
+    size_t at = 6;
+    for (uint32_t i = 0; i < count; ++i) {
+        REQUIRE(at + 8 <= out.size());
+        written.push_back(u16(at));
+        const uint32_t len = u32(at + 4);
+        at += 8 + len;
     }
+    CHECK(at == out.size());
+
+    std::vector<uint16_t> expect;
+    for (const auto& s : Sections()) {
+        if (s.implemented) expect.push_back(static_cast<uint16_t>(s.id));
+    }
+    CHECK(written == expect);
+    CHECK(count == expect.size());
 }
 
 TEST_CASE("Frame reports the sim frame the next capture would take") {
@@ -1117,5 +1151,199 @@ TEST_CASE("task 1c: an empty section is legal and stays empty") {
     std::vector<UnitState> out;
     std::string err;
     REQUIRE_MESSAGE(DecodeUnits(bytes.data(), bytes.size(), out, err), err);
+    CHECK(out.empty());
+}
+
+// ─────────────── Task 1e: the features section (§7.1e) ───────────────
+
+namespace {
+
+/// Every field of FeatureState set to a distinct non-default value, same
+/// discipline as loudUnit(): a writer/reader pair that swaps two fields of the
+/// same type is only visible if no two fields share a value.
+FeatureState loudFeature()
+{
+    FeatureState f;
+    f.id = 201;
+    f.featureDefName = "loud-featureDefName";
+    f.resurrectUnitDefName = "loud-resurrectUnitDefName";
+    f.team = 204;
+    f.heading = 205;
+    f.buildFacing = 206;
+
+    f.posX = 207.5f; f.posY = 208.5f; f.posZ = 209.5f;
+    f.speedX = 210.5f; f.speedY = 211.5f; f.speedZ = 212.5f;
+    f.frontX = 213.5f; f.frontY = 214.5f; f.frontZ = 215.5f;
+    f.rightX = 216.5f; f.rightY = 217.5f; f.rightZ = 218.5f;
+    f.upX = 219.5f; f.upY = 220.5f; f.upZ = 221.5f;
+    f.collidableState = 222;
+
+    f.radius = 223.5f; f.height = 224.5f;
+    f.relMidX = 225.5f; f.relMidY = 226.5f; f.relMidZ = 227.5f;
+    f.relAimX = 228.5f; f.relAimY = 229.5f; f.relAimZ = 230.5f;
+
+    f.health = 231.5f; f.maxHealth = 232.5f; f.mass = 233.5f;
+    f.reclaimTime = 234.5f; f.reclaimLeft = 235.5f; f.resurrectProgress = 236.5f;
+    f.isRepairingBeforeResurrect = true;
+    f.lastReclaimFrame = 238; f.fireTime = 239; f.smokeTime = 240;
+    f.defResources = resPair(241.25f, 241.75f);
+    f.resources = resPair(242.25f, 242.75f);
+
+    f.moveCtrlEnabled = true;
+    f.movementMaskX = 244.5f; f.movementMaskY = 245.5f; f.movementMaskZ = 246.5f;
+    f.velocityMaskX = 247.5f; f.velocityMaskY = 248.5f; f.velocityMaskZ = 249.5f;
+    f.impulseMaskX = 250.5f; f.impulseMaskY = 251.5f; f.impulseMaskZ = 252.5f;
+    f.velVectorX = 253.5f; f.velVectorY = 254.5f; f.velVectorZ = 255.5f;
+    f.accVectorX = 256.5f; f.accVectorY = 257.5f; f.accVectorZ = 258.5f;
+
+    // The three blocking flags carry the OPPOSITE of their defaults, so a
+    // reader that never writes them is a difference rather than a match.
+    f.crushable = true;
+    f.blockEnemyPushing = false;
+    f.blockHeightChanges = true;
+    f.noSelect = true;
+    f.alwaysVisible = true;
+    f.useAirLos = true;
+
+    f.modParams = loudRulesParams();
+    return f;
+}
+
+bool sameFeature(const FeatureState& a, const FeatureState& b)
+{
+    return a.id == b.id
+        && a.featureDefName == b.featureDefName
+        && a.resurrectUnitDefName == b.resurrectUnitDefName
+        && a.team == b.team
+        && a.heading == b.heading
+        && a.buildFacing == b.buildFacing
+        && a.posX == b.posX && a.posY == b.posY && a.posZ == b.posZ
+        && a.speedX == b.speedX && a.speedY == b.speedY && a.speedZ == b.speedZ
+        && a.frontX == b.frontX && a.frontY == b.frontY && a.frontZ == b.frontZ
+        && a.rightX == b.rightX && a.rightY == b.rightY && a.rightZ == b.rightZ
+        && a.upX == b.upX && a.upY == b.upY && a.upZ == b.upZ
+        && a.collidableState == b.collidableState
+        && a.radius == b.radius && a.height == b.height
+        && a.relMidX == b.relMidX && a.relMidY == b.relMidY && a.relMidZ == b.relMidZ
+        && a.relAimX == b.relAimX && a.relAimY == b.relAimY && a.relAimZ == b.relAimZ
+        && a.health == b.health && a.maxHealth == b.maxHealth && a.mass == b.mass
+        && a.reclaimTime == b.reclaimTime
+        && a.reclaimLeft == b.reclaimLeft
+        && a.resurrectProgress == b.resurrectProgress
+        && a.isRepairingBeforeResurrect == b.isRepairingBeforeResurrect
+        && a.lastReclaimFrame == b.lastReclaimFrame
+        && a.fireTime == b.fireTime
+        && a.smokeTime == b.smokeTime
+        && a.defResources.metal == b.defResources.metal
+        && a.defResources.energy == b.defResources.energy
+        && a.resources.metal == b.resources.metal
+        && a.resources.energy == b.resources.energy
+        && a.moveCtrlEnabled == b.moveCtrlEnabled
+        && a.movementMaskX == b.movementMaskX
+        && a.movementMaskY == b.movementMaskY
+        && a.movementMaskZ == b.movementMaskZ
+        && a.velocityMaskX == b.velocityMaskX
+        && a.velocityMaskY == b.velocityMaskY
+        && a.velocityMaskZ == b.velocityMaskZ
+        && a.impulseMaskX == b.impulseMaskX
+        && a.impulseMaskY == b.impulseMaskY
+        && a.impulseMaskZ == b.impulseMaskZ
+        && a.velVectorX == b.velVectorX
+        && a.velVectorY == b.velVectorY
+        && a.velVectorZ == b.velVectorZ
+        && a.accVectorX == b.accVectorX
+        && a.accVectorY == b.accVectorY
+        && a.accVectorZ == b.accVectorZ
+        && a.crushable == b.crushable
+        && a.blockEnemyPushing == b.blockEnemyPushing
+        && a.blockHeightChanges == b.blockHeightChanges
+        && a.noSelect == b.noSelect
+        && a.alwaysVisible == b.alwaysVisible
+        && a.useAirLos == b.useAirLos
+        && sameRulesParams(a.modParams, b.modParams)
+        ;
+}
+
+} // namespace
+
+TEST_CASE("task 1e: the feature census is armed") {
+    // Same contract as 1b's and 1c's: adding a member to FeatureState without
+    // naming it in the structured binding fails the BUILD, and naming it there
+    // without writing it fails HERE.
+    CHECK(census::Feature(FeatureState{}) == 65);
+}
+
+TEST_CASE("task 1e: the features section round-trips every field") {
+    FeatureState second = loudFeature();
+    second.id = 777;
+    second.featureDefName = "other-wreck";
+    // A feature that resurrects into nothing is the common case (a tree, a
+    // rock): the empty string has to survive as an empty string rather than
+    // becoming a def lookup for "".
+    second.resurrectUnitDefName = "";
+    second.modParams.clear();
+
+    const std::vector<FeatureState> in = {loudFeature(), second, FeatureState{}};
+    std::vector<uint8_t> bytes;
+    EncodeFeatures(in, bytes);
+    REQUIRE(bytes.size() > 4);
+
+    std::vector<FeatureState> out;
+    std::string err;
+    REQUIRE_MESSAGE(DecodeFeatures(bytes.data(), bytes.size(), out, err), err);
+    REQUIRE(out.size() == 3);
+    for (size_t i = 0; i < in.size(); ++i) {
+        INFO("feature index " << i);
+        CHECK(sameFeature(in[i], out[i]));
+    }
+    CHECK(out[1].resurrectUnitDefName.empty());
+
+    // Re-encode symmetry: catches a field written but never read.
+    std::vector<uint8_t> again;
+    EncodeFeatures(out, again);
+    CHECK(again == bytes);
+}
+
+TEST_CASE("task 1e: a truncated features section is a refusal at every cut point") {
+    // Every byte, not every seventh: 1c's Finding 3 was two interior cut points
+    // out of ~250 that decoded as SUCCESS, and a sampling sweep missed both.
+    std::vector<uint8_t> bytes;
+    EncodeFeatures({loudFeature(), loudFeature()}, bytes);
+    for (size_t cut = 1; cut < bytes.size(); ++cut) {
+        std::vector<FeatureState> out;
+        std::string err;
+        INFO("features cut at " << cut << " of " << bytes.size());
+        CHECK_FALSE(DecodeFeatures(bytes.data(), cut, out, err));
+        CHECK(!err.empty());
+    }
+}
+
+TEST_CASE("task 1e: trailing bytes inside the features section are a refusal") {
+    std::vector<uint8_t> bytes;
+    EncodeFeatures({loudFeature()}, bytes);
+    bytes.push_back(0x5a);
+
+    std::vector<FeatureState> out;
+    std::string err;
+    CHECK_FALSE(DecodeFeatures(bytes.data(), bytes.size(), out, err));
+    CHECK(err.find("trailing") != std::string::npos);
+}
+
+TEST_CASE("task 1e: an absurd feature count is refused before it is allocated") {
+    std::vector<uint8_t> bytes = {0xff, 0xff, 0xff, 0xff};
+    std::vector<FeatureState> out;
+    std::string err;
+    CHECK_FALSE(DecodeFeatures(bytes.data(), bytes.size(), out, err));
+    CHECK(out.empty());
+}
+
+TEST_CASE("task 1e: an empty features section is legal and stays empty") {
+    // A map with no features and no wrecks yet must restore to an empty set
+    // rather than refuse.
+    std::vector<uint8_t> bytes;
+    EncodeFeatures({}, bytes);
+    std::vector<FeatureState> out;
+    std::string err;
+    REQUIRE_MESSAGE(DecodeFeatures(bytes.data(), bytes.size(), out, err), err);
     CHECK(out.empty());
 }
