@@ -97,6 +97,13 @@ class CCommandQueue {
 		inline       Command& operator[](size_type i)       { return queue[i]; }
 		inline const Command& operator[](size_type i) const { return queue[i]; }
 
+		/// ADDED (not upstream) for PLAN-persistence task 1c: a snapshot has to
+		/// carry the tag counter, not just the tags. A queue restored with a
+		/// counter below its highest live tag would hand a duplicate tag to the
+		/// next command it is given, and a client removes commands BY TAG.
+		inline int GetTagCounter() const { return tagCounter; }
+		inline void SetTagCounter(int v) { tagCounter = v; }
+
 	private:
 		CCommandQueue() : queueType(CommandQueueType), tagCounter(0) {};
 		CCommandQueue(const CCommandQueue&);
