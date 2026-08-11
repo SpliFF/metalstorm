@@ -207,6 +207,33 @@ button.danger:hover { background: #cc3333; }
     border-color: #4cc9f0;
 }
 
+/* Deploy sits at the far end of the head row, away from the filter chips: it
+   is not a filter, and a primary action styled like a chip beside three chips
+   reads as a fourth view. `margin-left: auto` rather than a spacer element so
+   it still wraps sanely when the chips take the whole row. */
+.deploy-btn {
+    margin-left: auto;
+    background: #16304a;
+    color: #4cc9f0;
+    border: 1px solid #4cc9f0;
+    border-radius: 4px;
+    padding: 5px 16px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+}
+.deploy-btn:hover { background: #1d3f60; }
+.deploy-btn:disabled { opacity: 0.5; cursor: default; }
+.deploy-result {
+    margin-bottom: 8px;
+    padding: 8px 12px;
+    background: #16304a;
+    border-left: 3px solid #4cc9f0;
+    border-radius: 4px;
+    color: #cfe6f5;
+    font-size: 13px;
+}
+
 .war-list {
     display: flex;
     flex-direction: column;

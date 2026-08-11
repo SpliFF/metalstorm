@@ -15,8 +15,8 @@ import { mapListStatus } from './map-list-status';
 import { formatJoinPreview, type WarJoinPreview } from './join-preview';
 import {
     filterWars, fightLabel, formatWarDetail, formatControl, hasRoomForFaction,
-    WAR_FILTER_LABELS,
-    type WarFilter, type WarInfo, type WarRow,
+    formatDeploy, WAR_FILTER_LABELS,
+    type DeployResult, type WarFilter, type WarInfo, type WarRow,
 } from './war-browser';
 import { Connection, type ConnectionState } from '../core/connection.js';
 import { CONFIG, stampUrl } from '../config.js';
@@ -967,6 +967,47 @@ export class LobbyUI {
         this.renderGameOptions();
         this.renderRoomList();
         this.wireReplayPanel();
+        this.wireDeployButton();
+    }
+
+    /// Deploy — §6/task 7's one-click "which war should I fight in".
+    ///
+    /// The server decides; this only carries the answer out. Three of the four
+    /// outcomes end somewhere: a war to join, a war to return to, or the Create
+    /// Game form — because "every side for your faction is taken" is answered
+    /// by seeding a new war, not by a queue (WarDeploy.h). The fourth
+    /// (`no_faction`) has nowhere to send anyone and says so.
+    private wireDeployButton(): void {
+        const btn = document.getElementById('deploy-btn') as HTMLButtonElement | null;
+        if (!btn) return;
+        btn.onclick = async () => {
+            btn.disabled = true;
+            const out = document.getElementById('deploy-result');
+            try {
+                const d = await this.lobbyPost('/api/wars/deploy') as DeployResult;
+                if (out) {
+                    out.textContent = formatDeploy(d);
+                    out.style.display = '';
+                }
+                if ((d.outcome === 'join' || d.outcome === 'return') && d.room_id) {
+                    this.joinRoom(d.room_id, /*asSpectator=*/false);
+                } else if (d.outcome === 'seed') {
+                    // Opened, not created: a war needs a map and a scenario,
+                    // and picking those for somebody is a bigger decision than
+                    // picking which existing war they walk into.
+                    const form = document.getElementById('create-form');
+                    if (form) form.style.display = 'block';
+                }
+            } catch (e) {
+                console.warn('[lobby] deploy failed', e);
+                if (out) {
+                    out.textContent = 'Deploy failed — pick a war from the list.';
+                    out.style.display = '';
+                }
+            } finally {
+                btn.disabled = false;
+            }
+        };
     }
 
     // ===================== REPLAYS (PLAN-replay task 4c) =====================
@@ -1362,6 +1403,12 @@ export class LobbyUI {
 
         if (wars.length === 0) { section.style.display = 'none'; return; }
         section.style.display = '';
+
+        // Deploy needs a faction to deploy: without one the server can only
+        // answer `no_faction`, and a button whose only possible reply is "this
+        // does nothing for you" is worse than no button (D41's lesson).
+        const deployBtn = document.getElementById('deploy-btn');
+        if (deployBtn) deployBtn.style.display = this.myFaction ? '' : 'none';
 
         filters.innerHTML = (Object.keys(WAR_FILTER_LABELS) as WarFilter[])
             .map(f => `<button class="war-filter-chip${f === this.warFilter ? ' active' : ''}"` +

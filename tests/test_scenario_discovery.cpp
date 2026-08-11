@@ -756,3 +756,102 @@ TEST_CASE("generated scenario: neutral (Gaia) entries are not counted as a side"
     for (const auto& side : found[0].sides)
         CHECK(side.faction != "neutral");
 }
+
+// ── Per-side capacity (PLAN-metalstorm-lobby.md §6, task 7) ─────────────────
+//
+// A scenario may state how many humans a side holds. Partial on purpose: the
+// lobby seeds every side from the registered population and lets these
+// override, per side, so an author with a reason for ONE side's size states
+// that one and leaves the rest to a population they have no figures for.
+
+TEST_CASE("sides: a scenario may author a per-side capacity") {
+    TempGame g("sides_capacity");
+    g.Write("war.lua", R"(return {
+        sides = {
+            { faction = 'compact', team = 0, capacity = 4 },
+            { faction = 'union',   team = 4 },
+        },
+        units = { { def = 'tank', team = 0 }, { def = 'tank', team = 4 } },
+    })");
+
+    const auto found = SD::Discover(g.Path());
+    REQUIRE(found.size() == 1);
+    REQUIRE(found[0].sides.size() == 2);
+    CHECK(found[0].sides[0].hasCapacity == true);
+    CHECK(found[0].sides[0].capacity == 4);
+    // Absence is not zero: the unsized side is left to the seeding rule, and a
+    // `capacity == 0` reading here would silently uncap it instead.
+    CHECK(found[0].sides[1].hasCapacity == false);
+
+    const WarSideCapacities caps = SD::AuthoredSideCapacities(found[0]);
+    REQUIRE(caps.size() == 1);
+    CHECK(caps[0].first == "compact");
+    CHECK(caps[0].second == 4);
+}
+
+TEST_CASE("sides: 'unlimited' is a capacity, and a typo is not") {
+    TempGame g("sides_capacity_unlimited");
+    g.Write("war.lua", R"(return {
+        sides = {
+            { faction = 'horde',  team = 0, capacity = 'unlimited' },
+            { faction = 'keep',   team = 1, capacity = -3 },
+            { faction = 'nobody', team = 2, capacity = 'lots' },
+        },
+        units = { { def = 'tank', team = 0 } },
+    })");
+
+    const auto found = SD::Discover(g.Path());
+    REQUIRE(found.size() == 1);
+    REQUIRE(found[0].sides.size() == 3);
+    // Declared unlimited — authored, so it overrides the seeding rule.
+    CHECK(found[0].sides[0].hasCapacity == true);
+    CHECK(found[0].sides[0].capacity == WAR_SIDE_CAPACITY_UNLIMITED);
+    // A negative is a typo, not "unlimited". Reading it as unlimited would
+    // uncap a side by accident, which is the one direction that cannot be
+    // walked back once players are in.
+    CHECK(found[0].sides[1].hasCapacity == false);
+    CHECK(found[0].sides[2].hasCapacity == false);
+
+    const WarSideCapacities caps = SD::AuthoredSideCapacities(found[0]);
+    REQUIRE(caps.size() == 1);
+    CHECK(caps[0].first == "horde");
+}
+
+TEST_CASE("sides: the first declaration of a multi-team side wins") {
+    // A side is one slot pool however many teams it spans, so two entries
+    // saying `capacity = 8` mean a side of 8 — not of 16.
+    TempGame g("sides_capacity_multi");
+    g.Write("war.lua", R"(return {
+        sides = {
+            { faction = 'compact', team = 0, capacity = 8 },
+            { faction = 'compact', team = 1, capacity = 8 },
+        },
+        units = { { def = 'tank', team = 0 } },
+    })");
+
+    const auto found = SD::Discover(g.Path());
+    REQUIRE(found.size() == 1);
+    REQUIRE(found[0].sides.size() == 1);
+    CHECK(found[0].sides[0].capacity == 8);
+}
+
+TEST_CASE("sides: an NPC side authors no capacity anyone can use") {
+    // AuthoredSideCapacities runs over PlayableSides, so a capacity on an NPC
+    // side never reaches the modoption — it would name a faction no account
+    // can hold and no seating rule would ever consult.
+    TempGame g("sides_capacity_npc");
+    g.Write("war.lua", R"(return {
+        sides = {
+            { faction = 'compact', team = 0, capacity = 6 },
+            { faction = 'reavers', team = 8, capacity = 99 },
+        },
+        units = { { def = 'tank', team = 0 } },
+        ai = { { id = 'strategos', team = 8 } },
+    })");
+
+    const auto found = SD::Discover(g.Path());
+    REQUIRE(found.size() == 1);
+    const WarSideCapacities caps = SD::AuthoredSideCapacities(found[0]);
+    REQUIRE(caps.size() == 1);
+    CHECK(caps[0].first == "compact");
+}

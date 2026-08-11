@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -118,6 +119,17 @@ public:
     /// `userId` receives the affected id (0 if not found).
     bool SetFactionByUsername(const std::string& username, const std::string& factionId,
                               int64_t& userId);
+
+    /// Registered accounts per faction — the population §6's war seeding sizes
+    /// a new war's sides against (PLAN-metalstorm-lobby.md §6, task 7).
+    ///
+    /// Counts every account that HAS a faction, banned or not: a side's
+    /// capacity is a ceiling on how many people could want in, and a war seeded
+    /// while an account is suspended must still have room for it when the
+    /// suspension lifts. Accounts with no faction are not counted at all —
+    /// they can never take a side (§2.3), so they are not population for this
+    /// purpose.
+    std::unordered_map<std::string, unsigned> CountAccountsByFaction();
 
     /// Delete every session belonging to a user (immediate logout). Paired
     /// with SetBanned() so a ban ejects a currently-connected player from the

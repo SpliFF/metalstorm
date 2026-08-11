@@ -70,6 +70,108 @@ inline WarSides ParseWarSides(const std::string& spec) {
     return out;
 }
 
+/// `0` means "no capacity limit", which is what a war that never declares one
+/// gets. Chosen so an unset/absent value is permissive: a war that forgot to
+/// size its sides should let players in and be rebalanced by §6's seeding,
+/// not lock everyone out of a running world.
+inline constexpr unsigned WAR_SIDE_CAPACITY_UNLIMITED = 0;
+
+/// Humans per side for a war that declares no per-side capacity, and the
+/// fallback for any single side a war leaves unsized (`--war-side-capacity`).
+inline constexpr unsigned WAR_SIDE_CAPACITY_DEFAULT = 8;
+
+/// A war's per-side human capacities as `(faction, capacity)`.
+///
+/// PLAN-metalstorm-lobby.md §6, task 7. Task 2 shipped ONE number for every
+/// side (`--war-side-capacity`, default 8) and said so: §6's balance is
+/// structural, and a structure in which both sides of a war are the same size
+/// cannot express "this faction has a player surplus, give its side more room".
+using WarSideCapacities = std::vector<std::pair<std::string, unsigned>>;
+
+/// Parse the `war_side_capacities` modoption
+/// (`"<faction>:<capacity>[,<faction>:<capacity>…]"`, e.g. `"compact:8,union:12"`).
+///
+/// ── Why this is a SECOND modoption and not a third field on `war_sides` ──
+/// `war_sides` is parsed by three independent readers (here, the client's
+/// `war-sides.ts`, the room screen), and every one of them rejects an entry
+/// whose team is not purely numeric — `compact:0:12` would be *dropped*, not
+/// mis-read. A browser holding a cached bundle would therefore fall back to the
+/// legacy two-team room for every war a new lobby created, which is exactly the
+/// D19 defect `war_sides` exists to fix. An additive option can only be
+/// ignored by an old reader, and being ignored means "uniform capacity", which
+/// is the behaviour that reader already had.
+///
+/// Deduped by FACTION, not by number — unlike `ParseWarSides`, where a repeated
+/// team is a genuine conflict. Two sides sharing a capacity is the normal case.
+inline WarSideCapacities ParseWarSideCapacities(const std::string& spec) {
+    WarSideCapacities out;
+    size_t pos = 0;
+    while (pos < spec.size()) {
+        const size_t comma = spec.find(',', pos);
+        const std::string entry = spec.substr(
+            pos, comma == std::string::npos ? std::string::npos : comma - pos);
+        const size_t colon = entry.find(':');
+        if (colon != std::string::npos && colon > 0 && colon + 1 < entry.size()) {
+            const std::string num = entry.substr(colon + 1);
+            if (!num.empty() &&
+                num.find_first_not_of("0123456789") == std::string::npos) {
+                const std::string faction = entry.substr(0, colon);
+                const bool seen = std::any_of(
+                    out.begin(), out.end(),
+                    [&faction](const auto& c) { return c.first == faction; });
+                if (!seen)
+                    out.emplace_back(faction,
+                                     static_cast<unsigned>(std::strtoul(
+                                         num.c_str(), nullptr, 10)));
+            }
+        }
+        if (comma == std::string::npos)
+            break;
+        pos = comma + 1;
+    }
+    return out;
+}
+
+/// The human capacity of `factionId`'s side, or `fallback` when this war
+/// declares none for it.
+///
+/// `fallback` is the war's uniform capacity (`--war-side-capacity`), so a war
+/// that authors capacities for some sides and not others is still fully
+/// defined, and a war that authors none behaves exactly as it did before
+/// task 7. An authored `0` is NOT absence — it is `WAR_SIDE_CAPACITY_UNLIMITED`
+/// for that side, deliberately chosen, and overrides a bounded fallback.
+inline unsigned CapacityForSideIn(const WarSideCapacities& caps,
+                                  const std::string& factionId,
+                                  unsigned fallback) {
+    if (factionId.empty())
+        return fallback;
+    for (const auto& [faction, capacity] : caps)
+        if (faction == factionId)
+            return capacity;
+    return fallback;
+}
+
+/// Encode capacities back into the modoption form. One encoder for the one
+/// decoder above (the discipline task 2 set for `war_sides`): the lobby writes
+/// this at war-create time from either the scenario's authored capacities or
+/// the seeding rule, and never assembles the string by hand at a call site.
+inline std::string EncodeWarSideCapacities(const WarSideCapacities& caps) {
+    std::string out;
+    for (const auto& [faction, capacity] : caps) {
+        // A faction key carrying a separator would silently reshape the list
+        // downstream — same rule, same reason, as EncodeWarSides.
+        if (faction.empty() || faction.find(',') != std::string::npos ||
+            faction.find(':') != std::string::npos)
+            continue;
+        if (!out.empty())
+            out += ',';
+        out += faction;
+        out += ':';
+        out += std::to_string(capacity);
+    }
+    return out;
+}
+
 /// The team `factionId` is seated on in `sides`, or nullopt when this war
 /// declares no side for it (including every legacy no-scenario room, whose
 /// sides have no names at all).

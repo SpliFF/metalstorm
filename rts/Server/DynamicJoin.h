@@ -72,18 +72,12 @@ struct DynamicJoinDecision {
     bool Admitted() const { return outcome == DynamicJoinOutcome::Admit; }
 };
 
-/// `0` means "no capacity limit", which is what a war that never declares one
-/// gets. Chosen so an unset/absent value is permissive: a war that forgot to
-/// size its sides should let players in and be rebalanced by §6's seeding,
-/// not lock everyone out of a running world.
-inline constexpr unsigned WAR_SIDE_CAPACITY_UNLIMITED = 0;
-
-/// Default humans per side for a persistent war, used when `--war-side-capacity`
-/// is not passed. Deliberately a single number for every side: per-side
-/// capacities, war seeding and queue-when-full are task 7's, and this exists
-/// so task 2 ships a capacity check that is real rather than one that is
-/// nominally there and always passes.
-inline constexpr unsigned WAR_SIDE_CAPACITY_DEFAULT = 8;
+// `WAR_SIDE_CAPACITY_UNLIMITED` / `WAR_SIDE_CAPACITY_DEFAULT` moved to
+// WarSides.h with task 7: capacity is now a per-side property OF the sides
+// (`war_side_capacities`), read by the browser and the seeding rule as well as
+// by this decision, so it belongs with the sides rather than with the one
+// consumer that happened to need it first. Reachable from here unchanged —
+// WarSides.h is included above.
 
 /// Decide whether a non-roster authenticated account may take a playing seat.
 ///

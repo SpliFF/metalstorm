@@ -735,11 +735,43 @@ The seat follows the **faction**, never a balancer (PLAN-metalstorm-lobby.md
 `ParseWarSides` (`WarSides.h`) — the *same* function `GameRoom::SideTeams()`
 uses, because the lobby and the game server are separate processes and two
 hand-rolled parsers is the shape that admits a faction on team 0 in one and
-refuses it in the other. Capacity is `--war-side-capacity` (default 8 humans
-per side, `0` = unlimited), uniform across sides; per-side capacity, war
-seeding and queue-when-full are task 7. The count-then-bind sequence is atomic
+refuses it in the other. The count-then-bind sequence is atomic
 by thread confinement, not by a lock: both halves run inside the single
 `AuthRequest` case on the message-pump thread, and nothing else seats a human.
+
+**Per-side capacity, seeding and Deploy (structural balance).** A player always
+fights for their own faction, so balance cannot be done by moving anyone onto a
+weaker side — it is decided at the only two moments that remain: when a war is
+*seeded*, and when a player picks *which war* to join (PLAN-metalstorm-lobby.md
+§6). So capacity is per side, not per war: `war_side_capacities`
+(`"compact:6,union:2"`) is a **second, additive modoption** written beside
+`war_sides` at room-create time and decoded by `ParseWarSideCapacities`
+(`WarSides.h`) in both processes. It is a separate option and not a third field
+on `war_sides` because every reader of that string rejects a non-numeric team
+outright, so a cached client bundle would silently fall back to the legacy
+two-team room — the exact D19 defect `war_sides` exists to fix. Any side a war
+leaves unsized falls back to `--war-side-capacity` (default 8, `0` = unlimited),
+which is what every pre-task-7 war has.
+
+The value comes from two places, merged in this order: `WarSeeding.h` sizes each
+side as `clamp(ceil(registered(faction) / (warsFieldingIt + 1)), 2, 32)` from
+`Database::CountAccountsByFaction()`, and the scenario's own per-side
+`capacity` (`ScenarioDiscovery::AuthoredSideCapacities`) overrides it. The `+ 1`
+is self-limiting: a second war for a faction halves the size of every side that
+faction fields, so a surplus faction gets *more wars* rather than one enormous
+one. Only a persistent war gets capacities at all — a skirmish's cast is its
+roster.
+
+`POST /api/wars/deploy` is the one-click "which war should I fight in", decided
+by `WarDeploy.h`: a war this account is already bound to wins outright, else the
+war with a free seat where its side is **most outnumbered** (§6's underdog
+incentive expressed as routing — the only lever that reduces a deficit when
+nobody can change faction), tie-broken on live population then on the lowest
+room id. It never refuses: a faction that is full in every war gets `seed`, and
+§6's queue is deliberately **not built** — a queue is a promise to seat someone
+later, and seeding a new war is an answer now. §6's other named incentive,
+*bonus onboarding authority* for the outnumbered side, is not implemented; see
+the note in `WarDeploy.h`'s header and PLAN-metalstorm-lobby.md task 7.
 
 **Rejoin (a war's memory of a player).** Dynamic join is stateless: it seats a
 joiner by faction every time they connect and cannot tell a veteran of this war

@@ -41,6 +41,8 @@
 #include <string>
 #include <vector>
 
+#include "WarSides.h"   // WarSideCapacities — the shape AuthoredSideCapacities returns
+
 namespace ScenarioDiscovery {
 
 /// One playable (or NPC) side of a scenario — a `faction` from the scenario's
@@ -76,6 +78,16 @@ struct ScenarioSide {
     /// entry, i.e. the side is an NPC and must never be offered as a player
     /// slot. Data-driven so Meridian's `reavers` needs no special case.
     bool npc = false;
+
+    /// Humans this side may hold, from the scenario's `capacity` field
+    /// (PLAN-metalstorm-lobby.md §6, task 7). `0` means the scenario authored
+    /// none, NOT "unlimited": an author who wants a side without a cap says so
+    /// with `capacity = 'unlimited'`, which resolves to `hasCapacity` with a
+    /// value of 0. Without that distinction a scenario could not opt out of the
+    /// seeding rule, because "I said nothing" and "I said no limit" would be
+    /// the same string on the wire.
+    unsigned capacity = 0;
+    bool hasCapacity = false;
 };
 
 } // namespace ScenarioDiscovery
@@ -150,6 +162,18 @@ std::vector<ScenarioSide> PlayableSides(const ScenarioInfo& info);
 /// declares no playable sides, which every consumer reads as "legacy
 /// two-team room" (PLAN-metalstorm-wars.md §7.4).
 std::string EncodeWarSides(const ScenarioInfo& info);
+
+/// The per-side human capacities this scenario AUTHORS, as `(faction,
+/// capacity)` in declaration order — one entry per playable side that declared
+/// a `capacity`, and none for the sides that did not.
+///
+/// Partial on purpose (PLAN-metalstorm-lobby.md §6, task 7): the lobby seeds
+/// every side from the registered population and then lets these override,
+/// per side. So an author who has a reason for one side's size — an asymmetric
+/// scenario, a garrison that is meant to be outnumbered — states that one and
+/// leaves the rest to the population, instead of having to hand-size a war they
+/// have no population figures for.
+WarSideCapacities AuthoredSideCapacities(const ScenarioInfo& info);
 
 /// Scan `<gamePath>/scenarios/` for `*.lua` files and parse each.
 /// A missing `scenarios/` directory returns an empty vector — most games

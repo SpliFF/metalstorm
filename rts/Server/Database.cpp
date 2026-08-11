@@ -799,6 +799,28 @@ int Database::CountCommandPresets(int64_t userId) {
     return count;
 }
 
+std::unordered_map<std::string, unsigned> Database::CountAccountsByFaction() {
+    std::unordered_map<std::string, unsigned> out;
+    // `faction_id != ''` as well as NOT NULL: the column is nullable, and the
+    // admin override path writes a string — an empty one would otherwise count
+    // as a faction nobody can ever be seated on.
+    const char* sql =
+        "SELECT faction_id, COUNT(*) FROM users "
+        "WHERE faction_id IS NOT NULL AND faction_id != '' GROUP BY faction_id";
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK)
+        return out;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const unsigned char* f = sqlite3_column_text(stmt, 0);
+        if (f == nullptr)
+            continue;
+        out[reinterpret_cast<const char*>(f)] =
+            static_cast<unsigned>(sqlite3_column_int(stmt, 1));
+    }
+    sqlite3_finalize(stmt);
+    return out;
+}
+
 bool Database::CommandPresetExists(int64_t userId, const std::string& name) {
     const char* sql = "SELECT 1 FROM command_presets WHERE user_id = ? AND name = ?";
     sqlite3_stmt* stmt = nullptr;

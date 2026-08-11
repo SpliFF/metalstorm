@@ -31,6 +31,15 @@ export interface WarSide {
     bound: number;
     /// Seats left, derived from `bound` — never from `online`.
     open: number;
+    /// This side's own capacity (§6, task 7). Sides are sized independently —
+    /// a war seeded for a faction with a player surplus gives that faction the
+    /// bigger side — so the war-level `capacity_per_side` is only the fallback
+    /// for a side that declares none.
+    capacity?: number;
+    /// True when this side has no cap at all. Stated rather than encoded as a
+    /// number, because `open: 0` is what FULL looks like and an uncapped side
+    /// is the one that can never be full.
+    unlimited?: boolean;
     /// Humans connected right now. Absent when no server is publishing.
     online?: number;
     ais?: number;
@@ -91,7 +100,8 @@ export function sideForFaction(war: WarInfo, faction: string): WarSide | undefin
 /// it answers the coarser question the filter chip asks.
 export function hasRoomForFaction(war: WarInfo, faction: string): boolean {
     const side = sideForFaction(war, faction);
-    return !!side && side.open > 0;
+    if (!side) return false;
+    return side.unlimited === true || side.open > 0;
 }
 
 export function filterWars(wars: WarRow[], filter: WarFilter, faction: string): WarRow[] {
@@ -119,8 +129,12 @@ export function factionLabel(key: string): string {
 /// "Compact 2/8" — and "Compact 2/8 (1 online)" when the war is live and the
 /// two numbers differ, which is the case a player has to be able to see: a
 /// side can be full of people who are not there.
+/// `capacity` is the war-level fallback; a side that states its own wins, and
+/// an unlimited side shows a bare count because there is no denominator to
+/// print (task 7 — sides of one war are no longer the same size).
 export function formatSide(side: WarSide, capacity: number, live: boolean): string {
-    const seats = capacity > 0 ? `${side.bound}/${capacity}` : `${side.bound}`;
+    const cap = side.unlimited ? 0 : (side.capacity ?? capacity);
+    const seats = cap > 0 ? `${side.bound}/${cap}` : `${side.bound}`;
     let s = `${factionLabel(side.faction)} ${seats}`;
     const extras: string[] = [];
     if (live && side.online !== undefined && side.online !== side.bound)
@@ -170,6 +184,45 @@ export function formatWarDetail(row: WarRow): string {
         parts.push('no server running — a join restarts it');
     }
     return parts.join(' · ');
+}
+
+/// The answer from `POST /api/wars/deploy` (§6, task 7). Field names are the
+/// wire's; the outcome vocabulary is `DeployOutcomeToString`'s.
+export interface DeployResult {
+    outcome: 'join' | 'return' | 'seed' | 'no_faction';
+    faction: string;
+    /// How far my side is outnumbered in the war it picked, 0 when it is not.
+    underdog_by: number;
+    room_id?: number;
+    room_name?: string;
+}
+
+/// What Deploy tells the player it did, and why.
+///
+/// The *why* is not decoration. Deploy moves a player into a war they did not
+/// pick, and a recommendation that does not say what it optimised for reads as
+/// a random one — especially when it declines to send them to the busiest war
+/// on the list because their side there is outnumbered by nobody.
+export function formatDeploy(d: DeployResult): string {
+    const where = d.room_name ? `“${d.room_name}”` : 'a war';
+    switch (d.outcome) {
+        case 'return':
+            return `You already hold a seat in ${where} — returning to it.`;
+        case 'join':
+            return d.underdog_by > 0
+                ? `Deploying to ${where}: your side is outnumbered there by ` +
+                  `${d.underdog_by}, and needs you most.`
+                : `Deploying to ${where}.`;
+        case 'seed':
+            // Not a refusal, and it must not read as one: every side for this
+            // faction is taken, so the answer is a new world rather than a
+            // place in a line (WarDeploy.h's no-queue design call).
+            return 'Every war fielding your faction is full — create a new ' +
+                   'war and its sides will be sized for you.';
+        case 'no_faction':
+            return 'Your account has no faction, so no side can be chosen ' +
+                   'for it. You can still watch any war.';
+    }
 }
 
 /// The label on the primary button. A war you already hold a seat in is a

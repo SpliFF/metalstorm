@@ -17,6 +17,8 @@
 #include "Server/RoomManager.h"
 #include "Server/WarPlayerBindings.h"
 #include "Server/JoinPreview.h"
+#include "Server/WarDeploy.h"
+#include "Server/WarSeeding.h"
 #include "Server/WarSummary.h"
 #include "Server/SqliteThreading.h"
 
@@ -2815,6 +2817,12 @@ int main(int argc, char *argv[]) {
       for (const auto &b : WarPlayerBindings::ForRoom(db.Handle(), room->id))
         boundPerTeam[b.team]++;
 
+      // Task 7: capacity is per side. `capacity_per_side` stays on the war for
+      // the sides the war does not size (and for a client reading the old
+      // shape), but every side now states its own — an asymmetric war is the
+      // whole point of §6's seeding, and one number could only ever describe a
+      // symmetric one.
+      const WarSideCapacities caps = room->SideCapacities();
       nlohmann::json wj;
       wj["live"] = haveLive;
       wj["capacity_per_side"] = WAR_SIDE_CAPACITY_DEFAULT;
@@ -2826,10 +2834,17 @@ int main(int argc, char *argv[]) {
         const unsigned bound = boundPerTeam.count(static_cast<int>(team))
                                    ? boundPerTeam[static_cast<int>(team)]
                                    : 0u;
+        const unsigned capacity =
+            CapacityForSideIn(caps, faction, WAR_SIDE_CAPACITY_DEFAULT);
         sj["bound"] = bound;
-        sj["open"] = (WAR_SIDE_CAPACITY_DEFAULT > bound)
-                         ? (WAR_SIDE_CAPACITY_DEFAULT - bound)
-                         : 0u;
+        sj["capacity"] = capacity;
+        sj["open"] = (capacity > bound) ? (capacity - bound) : 0u;
+        // An unlimited side is stated, not encoded as a number. `open` there
+        // is 0 because there is no count to give, and 0 is exactly what "full"
+        // looks like — so the one side that can never be full would read as
+        // the only full one. A named flag cannot be misread that way.
+        if (capacity == WAR_SIDE_CAPACITY_UNLIMITED)
+          sj["unlimited"] = true;
         if (haveLive) {
           for (const auto &ls : live.sides) {
             if (ls.team != static_cast<int>(team))
@@ -2948,6 +2963,67 @@ int main(int argc, char *argv[]) {
     if (!encoded.empty())
       SLOG(SPRING_LOG_NOTICE, "room %u: war sides '%s' (from scenario '%s')",
            roomId, encoded.c_str(), scenarioId.c_str());
+
+    // ── Per-side capacity (PLAN-metalstorm-lobby.md §6, task 7) ────────────
+    //
+    // Written in the same place and at the same moment as the sides
+    // themselves, because it is a property OF those sides and the two must
+    // never be able to describe different wars. Two sources, merged in this
+    // order:
+    //
+    //   1. the seeding rule (WarSeeding.h) sizes every side from the
+    //      registered population of its faction, spread over the wars that
+    //      will field it;
+    //   2. the scenario's own `capacity` overrides that, per side, for an
+    //      author who has a reason for one side's size.
+    //
+    // Only a persistent war gets one. A skirmish's cast is its roster: it was
+    // sized, seated and start-gated on that list (task 1), so a capacity is a
+    // limit on a join that cannot happen, and writing one would put a number
+    // on the room screen that means nothing.
+    std::string capsEncoded;
+    const GameRoom *capRoom = rooms.GetRoom(roomId);
+    if (!encoded.empty() && capRoom != nullptr &&
+        capRoom->sessionKind == SessionKind::PersistentWar) {
+      const WarSides sides = ParseWarSides(encoded);
+      WarSeedPopulation pop;
+      pop.registered = db.CountAccountsByFaction();
+      // Wars ALREADY fielding each faction — this room is not among them (its
+      // sides are being written right now), which is what `SeedSideCapacities`
+      // expects: it adds this war itself.
+      for (const auto *r : rooms.GetAllRooms()) {
+        if (r == nullptr || r->id == roomId ||
+            r->sessionKind != SessionKind::PersistentWar)
+          continue;
+        for (const auto &[faction, team] : r->SideTeams()) {
+          (void)team;
+          pop.warsFielding[faction]++;
+        }
+      }
+      WarSideCapacities caps = SeedSideCapacities(sides, pop);
+      if (!scenarioId.empty()) {
+        const ScenarioDiscovery::ScenarioInfo *info =
+            ScenarioDiscovery::FindById(scenariosFor(gameId), scenarioId);
+        if (info != nullptr) {
+          for (const auto &[faction, capacity] :
+               ScenarioDiscovery::AuthoredSideCapacities(*info)) {
+            auto it = std::find_if(caps.begin(), caps.end(),
+                                   [&f = faction](const auto &c) {
+                                     return c.first == f;
+                                   });
+            if (it != caps.end())
+              it->second = capacity;
+            else
+              caps.emplace_back(faction, capacity);
+          }
+        }
+      }
+      capsEncoded = EncodeWarSideCapacities(caps);
+    }
+    rooms.SetModOption(roomId, hostId, "war_side_capacities", capsEncoded);
+    if (!capsEncoded.empty())
+      SLOG(SPRING_LOG_NOTICE, "room %u: war side capacities '%s'", roomId,
+           capsEncoded.c_str());
   };
 
   // Resolve and apply the room's `scenario` modoption (PLAN-endtoend.md D10,
@@ -4003,15 +4079,18 @@ int main(int argc, char *argv[]) {
             }
           }
 
-          // The lobby never passes `--war-side-capacity`, so every war it
-          // spawns runs on the compiled default and this preview is exact.
-          // When task 7 makes capacity per-side and configurable, it has to
-          // thread the same value into the launch args AND to here, or the
-          // preview starts promising seats the game server refuses.
+          // Capacity comes from the room's own `war_side_capacities` (task 7),
+          // which is the same modoption the game server is launched with and
+          // reads at seating time — so the promise and the seating rule are
+          // reading one value, not two that agree today. The lobby still never
+          // passes `--war-side-capacity`, so `WAR_SIDE_CAPACITY_DEFAULT` is the
+          // fallback here exactly as it is in the game server's `ctx`.
+          const unsigned capacity = CapacityForSideIn(
+              room->SideCapacities(), faction, WAR_SIDE_CAPACITY_DEFAULT);
           const JoinPreview p = PreviewJoin(
-              room->sessionKind, faction, sides, humansOnSide,
-              WAR_SIDE_CAPACITY_DEFAULT, hasBinding, boundTeam, absenceSec,
-              savedPool, hasSavedState, joinGrant);
+              room->sessionKind, faction, sides, humansOnSide, capacity,
+              hasBinding, boundTeam, absenceSec, savedPool, hasSavedState,
+              joinGrant);
 
           // §3, task 6: an account that asked to WATCH this war is not going
           // to fight in it whatever the seating rule would allow, and the
@@ -4037,6 +4116,96 @@ int main(int argc, char *argv[]) {
           out.push_back(std::move(jp));
         }
         return HttpAuth::JsonResponse(200, out.dump());
+      });
+
+  // POST /api/wars/deploy — one click: which war should I fight in?
+  //
+  // PLAN-metalstorm-lobby.md §4/§6, task 7. The browser (task 6) gives a
+  // player every fact about every war; this is the answer for the player who
+  // does not want to read a table, and it is also where §6's balance lever
+  // lives: we cannot move anyone off their faction, but we can decide which
+  // war the next volunteer walks into, and sending them where their side is
+  // most outnumbered is the only choice that reduces a deficit.
+  //
+  // Answers, never refuses: an account whose faction is full in every war gets
+  // `seed` — §6's own alternative to a queue, and the reason no queue is built
+  // (see WarDeploy.h). The lobby does not create the war here; `seed` is a
+  // recommendation the client turns into the ordinary Create Game flow, so a
+  // war is still created by somebody who chose its map and scenario.
+  net.AddHttpPost(
+      "/api/wars/deploy", RouteAuth::TokenRequired,
+      [&](const std::string &, const std::string &,
+          const HttpRequestHeaders &headers) -> HttpResponse {
+        HTTP_ROOM_AUTH();
+        auto user = db.FindUserById(userId);
+        if (!user)
+          return HttpAuth::JsonResponse(500, R"({"error":"user not found"})");
+        const std::string faction = user->factionId.value_or("");
+
+        std::vector<DeployCandidate> candidates;
+        for (const auto *room : rooms.GetAllRooms()) {
+          if (!room || room->sessionKind != SessionKind::PersistentWar)
+            continue;
+          const auto sides = room->SideTeams();
+          const auto team = TeamForFactionIn(sides, faction);
+
+          DeployCandidate c;
+          c.roomId = room->id;
+          c.fieldsMyFaction = team.has_value();
+          c.myCapacity = CapacityForSideIn(room->SideCapacities(), faction,
+                                           WAR_SIDE_CAPACITY_DEFAULT);
+          // Same durable population the browser's card counts, for the same
+          // reason: an offline veteran's seat is not free, so a war that looks
+          // empty right now may have nothing to offer.
+          std::unordered_map<int, unsigned> boundPerTeam;
+          for (const auto &b :
+               WarPlayerBindings::ForRoom(db.Handle(), room->id)) {
+            boundPerTeam[b.team]++;
+            if (b.accountId == static_cast<int64_t>(userId))
+              c.iAmBound = true;
+          }
+          if (team) {
+            const int t = static_cast<int>(*team);
+            c.myBound = boundPerTeam.count(t) ? boundPerTeam[t] : 0u;
+            for (const auto &[faction2, otherTeam] : sides) {
+              (void)faction2;
+              if (static_cast<int>(otherTeam) == t)
+                continue;
+              const unsigned n = boundPerTeam.count(otherTeam)
+                                     ? boundPerTeam[otherTeam]
+                                     : 0u;
+              c.opposingBound = std::max(c.opposingBound, n);
+            }
+          }
+          // Live population is the tie-break only, so its absence costs
+          // nothing — a war with no server still ranks, it just never wins a
+          // tie against one with people in it.
+          WarSummary live;
+          if (warSummaryFor(room->id, live)) {
+            for (const auto &ls : live.sides)
+              c.liveHumans += ls.humans;
+          }
+          candidates.push_back(c);
+        }
+
+        const DeployDecision d = DecideDeploy(faction, candidates);
+        nlohmann::json j;
+        j["outcome"] = DeployOutcomeToString(d.outcome);
+        j["faction"] = faction;
+        j["underdog_by"] = d.underdogBy;
+        if (d.outcome == DeployOutcome::JoinWar ||
+            d.outcome == DeployOutcome::ReturnToMyWar) {
+          j["room_id"] = d.roomId;
+          if (const auto *room = rooms.GetRoom(d.roomId))
+            j["room_name"] = room->name;
+        }
+        SLOG(SPRING_LOG_NOTICE,
+             "deploy: account %lld (faction '%s') → %s (room %u, underdog by "
+             "%u) over %zu war(s)",
+             (long long)userId, faction.c_str(),
+             DeployOutcomeToString(d.outcome), d.roomId, d.underdogBy,
+             candidates.size());
+        return HttpAuth::JsonResponse(200, j.dump());
       });
 
   // POST /api/rooms/join — join a room

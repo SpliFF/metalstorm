@@ -22,7 +22,12 @@
         <div class="war-section-head">
             <h3>Wars</h3>
             <div id="war-filters" class="war-filters"></div>
+            <!-- Deploy (§6, task 7): the one-click answer for a player who
+                 does not want to read the table. Hidden for an account with
+                 no faction — it has no side to be deployed to. -->
+            <button id="deploy-btn" class="deploy-btn" style="display:none">Deploy</button>
         </div>
+        <div id="deploy-result" class="deploy-result" style="display:none"></div>
         <div id="war-list" class="war-list"></div>
     </div>
     <div id="room-list" class="room-list"></div>

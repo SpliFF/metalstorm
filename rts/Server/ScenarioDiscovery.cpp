@@ -159,6 +159,30 @@ std::vector<ScenarioDiscovery::ScenarioSide> ReadSides(lua_State* L, int index) 
                 if (std::find(it->teams.begin(), it->teams.end(), team) ==
                     it->teams.end())
                     it->teams.push_back(team);
+
+                // Per-side capacity (§6, task 7). Declared on any team entry of
+                // the side — a side is one slot pool however many teams it
+                // spans, so the FIRST declaration wins and later ones are
+                // ignored rather than summed: two entries saying `capacity = 8`
+                // mean a side of 8, not of 16.
+                lua_getfield(L, entry, "capacity");
+                if (!it->hasCapacity) {
+                    if (lua_isnumber(L, -1)) {
+                        const lua_Integer cap = lua_tointeger(L, -1);
+                        // A negative capacity is not "unlimited" — it is a typo,
+                        // and reading it as unlimited would silently uncap a
+                        // side. Dropped, so the seeding rule sizes it instead.
+                        if (cap >= 0) {
+                            it->capacity = static_cast<unsigned>(cap);
+                            it->hasCapacity = true;
+                        }
+                    } else if (lua_isstring(L, -1) &&
+                               std::string(lua_tostring(L, -1)) == "unlimited") {
+                        it->capacity = 0;
+                        it->hasCapacity = true;
+                    }
+                }
+                lua_pop(L, 1);
             }
         }
         lua_pop(L, 1);
@@ -348,6 +372,22 @@ std::string EncodeWarSides(const ScenarioInfo& info) {
         out += s.faction;
         out += ':';
         out += std::to_string(static_cast<unsigned>(s.team));
+    }
+    return out;
+}
+
+WarSideCapacities AuthoredSideCapacities(const ScenarioInfo& info) {
+    WarSideCapacities out;
+    for (const auto& s : PlayableSides(info)) {
+        if (!s.hasCapacity)
+            continue;
+        // Same separator rule as EncodeWarSides: a faction key that cannot
+        // survive the modoption's own grammar is dropped rather than emitted as
+        // a string no parser can recover.
+        if (s.faction.find(',') != std::string::npos ||
+            s.faction.find(':') != std::string::npos)
+            continue;
+        out.emplace_back(s.faction, s.capacity);
     }
     return out;
 }

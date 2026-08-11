@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
     filterWars, fightLabel, formatControl, formatSide, formatUptime,
-    formatWarDetail, hasRoomForFaction, sideForFaction,
+    formatDeploy, formatWarDetail, hasRoomForFaction, sideForFaction,
     type WarInfo, type WarRow,
 } from './war-browser';
 
@@ -164,5 +164,83 @@ describe('fightLabel', () => {
     it('offers a rejoin to a player who already holds a seat', () => {
         expect(fightLabel(row({ returning: true }))).toBe('Rejoin');
         expect(fightLabel(row())).toBe('Fight');
+    });
+});
+
+// ── Per-side capacity + Deploy (PLAN-metalstorm-lobby.md §6, task 7) ────────
+//
+// Task 6 rendered one capacity for every side because there WAS one. §6's
+// seeding sizes each side to its own faction's registered population, so the
+// two sides of a war are routinely different sizes and a card that prints the
+// war-level number against both is wrong on at least one of them.
+
+describe('per-side capacity', () => {
+    it('prefers the side\'s own capacity over the war-level fallback', () => {
+        expect(formatSide(
+            { team: 1, faction: 'union', bound: 3, open: 17, capacity: 20 },
+            8, false)).toBe('Union 3/20');
+    });
+    it('falls back to the war-level number for a side that states none', () => {
+        // Every war created before task 7 is this shape, and it must render
+        // exactly as it did.
+        expect(formatSide({ team: 0, faction: 'compact', bound: 2, open: 6 }, 8, false))
+            .toBe('Compact 2/8');
+    });
+    it('prints a bare count for an unlimited side', () => {
+        // There is no denominator, and inventing the fallback as one would
+        // show a cap that does not exist.
+        expect(formatSide(
+            { team: 0, faction: 'compact', bound: 12, open: 0, capacity: 0, unlimited: true },
+            8, false)).toBe('Compact 12');
+    });
+    it('never calls an unlimited side full', () => {
+        // `open: 0` is what FULL looks like, and it is what the server sends
+        // for an uncapped side because there is no count to send. Reading the
+        // number alone locks everyone out of the one side that has no cap.
+        const uncapped = war({ sides: [
+            { team: 0, faction: 'compact', bound: 40, open: 0, capacity: 0, unlimited: true },
+        ] });
+        expect(hasRoomForFaction(uncapped, 'compact')).toBe(true);
+    });
+    it('still calls a full bounded side full', () => {
+        const full = war({ sides: [
+            { team: 0, faction: 'compact', bound: 8, open: 0, capacity: 8 },
+        ] });
+        expect(hasRoomForFaction(full, 'compact')).toBe(false);
+    });
+});
+
+describe('formatDeploy', () => {
+    it('says what it optimised for when it picks a war', () => {
+        // Deploy sends a player somewhere they did not choose. Without the
+        // reason, declining to send them to the busiest war on the list reads
+        // as a random pick.
+        expect(formatDeploy({
+            outcome: 'join', faction: 'compact', underdog_by: 5,
+            room_id: 2, room_name: 'Meridian Basin',
+        })).toBe('Deploying to “Meridian Basin”: your side is outnumbered ' +
+                 'there by 5, and needs you most.');
+    });
+    it('does not claim a deficit that is not there', () => {
+        expect(formatDeploy({
+            outcome: 'join', faction: 'compact', underdog_by: 0,
+            room_id: 2, room_name: 'Meridian Basin',
+        })).toBe('Deploying to “Meridian Basin”.');
+    });
+    it('names a return as a return', () => {
+        expect(formatDeploy({
+            outcome: 'return', faction: 'compact', underdog_by: 0,
+            room_id: 1, room_name: 'The Long Siege',
+        })).toContain('already hold a seat');
+    });
+    it('reads a full faction as a new war, not as a refusal', () => {
+        // §6 offers "queue or seed"; this builds the second, so the wording
+        // has to end somewhere rather than leave the player waiting.
+        expect(formatDeploy({ outcome: 'seed', faction: 'compact', underdog_by: 0 }))
+            .toContain('create a new war');
+    });
+    it('tells a factionless account it can still watch', () => {
+        expect(formatDeploy({ outcome: 'no_faction', faction: '', underdog_by: 0 }))
+            .toContain('watch any war');
     });
 });

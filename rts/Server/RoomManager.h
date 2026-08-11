@@ -228,6 +228,22 @@ struct GameRoom {
         return ParseWarSides(it->second);
     }
 
+    /// The per-side human capacities this room declares, as
+    /// `(faction, capacity)` (PLAN-metalstorm-lobby.md §6, task 7).
+    ///
+    /// Read out of the `war_side_capacities` modoption, written beside
+    /// `war_sides` by the same applyWarSides. Empty when the room declares
+    /// none — every consumer then falls back to the war's uniform capacity,
+    /// which is the behaviour every war had before task 7. Same reason the
+    /// parse lives in WarSides.h: the game server has the modoption and no
+    /// room row, and the two must resolve a side to the same number.
+    WarSideCapacities SideCapacities() const {
+        const auto it = modOptions.find("war_side_capacities");
+        if (it == modOptions.end())
+            return {};
+        return ParseWarSideCapacities(it->second);
+    }
+
     /// The team indices a slot in this room may be seated on, in the order
     /// the lobby offers them — SideTeams() with the faction names dropped.
     ///

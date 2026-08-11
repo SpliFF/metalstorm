@@ -222,6 +222,24 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
             // below is a fall-through to that same spectator seat, not a
             // refusal of the connection.
             //
+            // How many humans this faction's side may hold (§6, task 7).
+            //
+            // `war_side_capacities` is a SECOND additive modoption beside
+            // `war_sides` (see WarSides.h for why it is not a third field on
+            // that one), written by the lobby at war-create time from the
+            // scenario's authored sizes and the seeding rule. Every side the
+            // war does not size falls back to `ctx.warSideCapacity`
+            // (`--war-side-capacity`), so a war that declares none behaves
+            // exactly as it did under task 2's one uniform number.
+            auto warSideCapacityFor = [&](const std::string& faction) -> unsigned {
+                const auto& opts = CGameSetup::GetModOptions();
+                const auto wcIt = opts.find("war_side_capacities");
+                if (wcIt == opts.end())
+                    return ctx.warSideCapacity;
+                return CapacityForSideIn(ParseWarSideCapacities(wcIt->second),
+                                         faction, ctx.warSideCapacity);
+            };
+
             // The decision is a pure function (DynamicJoin.h); everything
             // impure is gathered here.
             auto decideDynamicJoin =
@@ -273,7 +291,8 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                     }
                 }
                 return DecideDynamicJoin(ctx.sessionKind, faction, sides,
-                                         humansOnSide, ctx.warSideCapacity);
+                                         humansOnSide,
+                                         warSideCapacityFor(faction));
             };
 
             // ── Rejoin: an account already bound to this war (task 4) ───────
@@ -371,10 +390,12 @@ void ClientMessageHandler::HandleMessage(InboundMessage& msg) {
                     SLOG(SPRING_LOG_NOTICE,
                         "dynamic join: '%s' is not in the launch roster but its "
                         "faction '%s' holds side team %d in this war — seating "
-                        "as a player (capacity %u per side)",
+                        "as a player (capacity %u on that side)",
                         name.c_str(),
                         factionId ? factionId->c_str() : "",
-                        d.team, ctx.warSideCapacity);
+                        d.team,
+                        warSideCapacityFor(factionId ? *factionId
+                                                     : std::string{}));
                     return {d.team, false};
                 }
                 SLOG(SPRING_LOG_NOTICE,
