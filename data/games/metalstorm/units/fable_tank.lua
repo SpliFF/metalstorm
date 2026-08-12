@@ -41,15 +41,22 @@ local tank = {
     },
 }
 
-local dressed = {}
-for k, v in pairs(tank) do dressed[k] = v end
-dressed.name = 'FV-9 Vanguard (Order colours)'
-dressed.description = 'Fable railgun MBT — dressing-kit showcase'
-dressed.customparams = {}
-for k, v in pairs(tank.customparams) do dressed.customparams[k] = v end
-dressed.customparams.ms_dress = 'order'
+-- Dressing-kit showcase defs: each faction's kit on the tank hull.
+local function dressed_variant(faction, display_name)
+    local def = {}
+    for k, v in pairs(tank) do def[k] = v end
+    def.name = 'FV-9 ' .. display_name
+    def.description = 'Fable railgun MBT — ' .. faction .. ' dressing kit'
+    def.customparams = {}
+    for k, v in pairs(tank.customparams) do def.customparams[k] = v end
+    def.customparams.ms_dress = faction
+    return def
+end
 
 return {
     fable_tank = tank,
-    fable_tank_dressed = dressed,
+    fable_tank_dressed = dressed_variant('order', 'Vanguard (Order colours)'),
+    fable_tank_dynasty = dressed_variant('dynasty', 'Vanguard (Dynasty)'),
+    fable_tank_resistance = dressed_variant('resistance', 'Vanguard (Resistance)'),
+    fable_tank_anarchic = dressed_variant('anarchic', 'Vanguard (Anarchic)'),
 }
