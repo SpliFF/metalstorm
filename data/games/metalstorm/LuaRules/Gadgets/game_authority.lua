@@ -526,10 +526,11 @@ end
 --- pool state during normal play — shared by every charge site
 --- (ChargeOrder for AllowCommand, ChargeDirective/ChargeStandingOrder for
 --- directive/standing-order create) so pool debit + ledger tagging + hooks
---- never diverge between call sites. `class` tags the ledger entry
---- (authority_cost.lua order_class key — a bookkeeping label; `cost` is
---- already computed by the caller).
-local function debitPools(teamID, playerID, cost, class)
+--- never diverge between call sites. `reason` tags the ledger entry (an
+--- authority/ledger.lua REASON_CLASS key — a bookkeeping label; `cost` is
+--- already computed by the caller). For a unit order that key is the
+--- authority_cost.lua order_class name; other charge sites pass their own.
+local function debitPools(teamID, playerID, cost, reason)
     if cost <= 0 then return true end
     local playerPool = playerID and getPlayerPool(playerID) or 0
     local teamPool = getTeamPool(teamID)
@@ -553,16 +554,29 @@ local function debitPools(teamID, playerID, cost, class)
         -- Tag the team→player subsidy as a 'move' (§1: player_fallback)
         Ledger.tagCharge(ledgerState, teamID, spentFromTeam, 'player_fallback')
     end
-    -- Tag the full charge as a burn
+    -- Tag the full charge under the caller's reason (burn for an order, but a
+    -- tribute/fee caller passes its own — D62)
     if totalCharged > 0 then
-        Ledger.tagCharge(ledgerState, teamID, totalCharged, class)
+        Ledger.tagCharge(ledgerState, teamID, totalCharged, reason)
     end
     return true
 end
 
 --- `cmdID` is used to classify the charge reason for ledger tagging.
-function GG.Authority.ChargeOrder(unitID, unitTeam, playerID, cost, cmdID)
-    return debitPools(unitTeam, playerID, cost, Classify.orderClass(cmdID or 0))
+---
+--- `reason` (endtoend D62) overrides that classification for the callers that
+--- are not unit orders at all. This function is also the game's generic
+--- player-then-team pool debit — game_parley.lua draws a tribute and a
+--- proposal fee through it — and without a reason of their own those callers
+--- had to borrow the COST-table key as the ACCOUNTING reason. A tribute is
+--- pool-to-pool (the payee's half is already tagged 'tribute'/move), so filing
+--- the payer's half as an order class made the payer team's `burn` counter
+--- overstate by the tribute total for a transaction that burns nothing.
+--- Defaults to `Classify.orderClass(cmdID)` so the ordinary order path — every
+--- caller through game_authority_charge.lua's AllowCommand hook — is unchanged.
+function GG.Authority.ChargeOrder(unitID, unitTeam, playerID, cost, cmdID, reason)
+    return debitPools(unitTeam, playerID, cost,
+                      reason or Classify.orderClass(cmdID or 0))
 end
 
 --- Σ authority_cost_base over an org group's current roster (mirrors the

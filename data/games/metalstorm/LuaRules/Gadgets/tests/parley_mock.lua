@@ -138,9 +138,13 @@ function M.new(gadgetFile)
     }
 
     _G.GG.Authority = {
-        ChargeOrder = function(unitID, unitTeam, playerID, cost)
+        -- `reason` is the D62 parameter: parley is the caller that proved
+        -- ChargeOrder is a generic pool debit and not only an order charge, so
+        -- the mock records what it was told to file the charge as.
+        ChargeOrder = function(unitID, unitTeam, playerID, cost, cmdID, reason)
             if not cost or cost <= 0 then return true end
-            world.chargeLog[#world.chargeLog + 1] = { unitTeam = unitTeam, playerID = playerID, cost = cost }
+            world.chargeLog[#world.chargeLog + 1] = {
+                unitTeam = unitTeam, playerID = playerID, cost = cost, reason = reason }
             local playerPool = playerID and (world.playerPools[playerID] or 0) or 0
             local teamPool = world.authorityPools[unitTeam] or 0
             if playerPool >= cost then
