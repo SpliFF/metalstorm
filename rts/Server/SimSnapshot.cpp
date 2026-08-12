@@ -45,8 +45,8 @@ const std::vector<SectionSpec>& Sections()
         {SectionId::OrgGroups,      1, "orgGroups",      true,  ""},
         {SectionId::Directives,     1, "directives",     true,  ""},
         {SectionId::Teams,          1, "teams",          true,  ""},
-        // v2: + UnitState::activeIndex (Q-P4).
-        {SectionId::Units,          2, "units",          true,  ""},
+        // v2: + UnitState::activeIndex (Q-P4). v3: + UnitState::move (option A).
+        {SectionId::Units,          3, "units",          true,  ""},
         {SectionId::Features,       1, "features",       true,  ""},
         {SectionId::SyncedLua,      1, "syncedLua",      true,  ""},
         {SectionId::GameRules,      1, "gameRules",      true,  ""},
@@ -925,6 +925,289 @@ WeaponState ReadWeapon(Reader& r)
     return s;
 }
 
+// ──────── Option A codec: the move type (PLAN-persistence §7.1c) ────────
+//
+// Tagged: `kind` first, then the base every move type has, then ONLY the arm
+// that kind names. A CStaticMoveType therefore costs one byte more than it did
+// before option A, which matters — most units in a Metalstorm world are
+// buildings.
+
+void WriteMoveBase(Writer& w, const movetypesnapshot::BaseState& b)
+{
+    w.F32(b.goalX); w.F32(b.goalY); w.F32(b.goalZ);
+    w.F32(b.oldPosX); w.F32(b.oldPosY); w.F32(b.oldPosZ);
+    w.F32(b.oldSlowUpdatePosX); w.F32(b.oldSlowUpdatePosY); w.F32(b.oldSlowUpdatePosZ);
+    w.F32(b.oldCollisionUpdatePosX); w.F32(b.oldCollisionUpdatePosY); w.F32(b.oldCollisionUpdatePosZ);
+    w.I32(b.progressState);
+    w.F32(b.maxSpeed); w.F32(b.maxSpeedDef); w.F32(b.maxWantedSpeed);
+    w.F32(b.maneuverLeash); w.F32(b.waterline);
+    w.Bool(b.useHeading); w.Bool(b.useWantedSpeed0); w.Bool(b.useWantedSpeed1);
+}
+
+movetypesnapshot::BaseState ReadMoveBase(Reader& r)
+{
+    movetypesnapshot::BaseState b;
+    b.goalX = r.F32(); b.goalY = r.F32(); b.goalZ = r.F32();
+    b.oldPosX = r.F32(); b.oldPosY = r.F32(); b.oldPosZ = r.F32();
+    b.oldSlowUpdatePosX = r.F32(); b.oldSlowUpdatePosY = r.F32(); b.oldSlowUpdatePosZ = r.F32();
+    b.oldCollisionUpdatePosX = r.F32(); b.oldCollisionUpdatePosY = r.F32(); b.oldCollisionUpdatePosZ = r.F32();
+    b.progressState = r.I32();
+    b.maxSpeed = r.F32(); b.maxSpeedDef = r.F32(); b.maxWantedSpeed = r.F32();
+    b.maneuverLeash = r.F32(); b.waterline = r.F32();
+    b.useHeading = r.Bool(); b.useWantedSpeed0 = r.Bool(); b.useWantedSpeed1 = r.Bool();
+    return b;
+}
+
+void WriteMoveGround(Writer& w, const movetypesnapshot::GroundState& g)
+{
+    w.F32(g.currWayPointX); w.F32(g.currWayPointY); w.F32(g.currWayPointZ);
+    w.F32(g.nextWayPointX); w.F32(g.nextWayPointY); w.F32(g.nextWayPointZ);
+    w.F32(g.earlyCurrWayPointX); w.F32(g.earlyCurrWayPointY); w.F32(g.earlyCurrWayPointZ);
+    w.F32(g.earlyNextWayPointX); w.F32(g.earlyNextWayPointY); w.F32(g.earlyNextWayPointZ);
+    w.F32(g.waypointDirX); w.F32(g.waypointDirY); w.F32(g.waypointDirZ);
+    w.F32(g.flatFrontDirX); w.F32(g.flatFrontDirY); w.F32(g.flatFrontDirZ);
+    w.F32(g.lastAvoidanceDirX); w.F32(g.lastAvoidanceDirY); w.F32(g.lastAvoidanceDirZ);
+    w.F32(g.mainHeadingPosX); w.F32(g.mainHeadingPosY); w.F32(g.mainHeadingPosZ);
+    w.F32(g.skidRotVectorX); w.F32(g.skidRotVectorY); w.F32(g.skidRotVectorZ);
+    w.F32(g.turnRate); w.F32(g.turnSpeed); w.F32(g.turnAccel);
+    w.F32(g.accRate); w.F32(g.decRate); w.F32(g.myGravity);
+    w.F32(g.maxReverseDist); w.F32(g.minReverseAngle); w.F32(g.maxReverseSpeed);
+    w.F32(g.sqSkidSpeedMult);
+    w.F32(g.wantedSpeed); w.F32(g.currentSpeed); w.F32(g.deltaSpeed);
+    w.F32(g.currWayPointDist); w.F32(g.prevWayPointDist);
+    w.F32(g.goalRadius); w.F32(g.ownerRadius); w.F32(g.extraRadius);
+    w.F32(g.skidRotSpeed); w.F32(g.skidRotAccel);
+    w.F32(g.forceFromMovingCollideesX); w.F32(g.forceFromMovingCollideesY); w.F32(g.forceFromMovingCollideesZ);
+    w.F32(g.forceFromStaticCollideesX); w.F32(g.forceFromStaticCollideesY); w.F32(g.forceFromStaticCollideesZ);
+    w.F32(g.resultantForcesX); w.F32(g.resultantForcesY); w.F32(g.resultantForcesZ);
+    w.U32(g.numIdlingUpdates); w.U32(g.numIdlingSlowUpdates);
+    w.I32(g.wantedHeading); w.I32(g.minScriptChangeHeading);
+    w.I32(g.wantRepathFrame); w.I32(g.lastRepathFrame);
+    w.F32(g.bestLastWaypointDist); w.F32(g.bestReattemptedLastWaypointDist);
+    w.I32(g.setHeading); w.I32(g.setHeadingDir); w.I32(g.limitSpeedForTurning);
+    w.F32(g.oldSpeed); w.F32(g.newSpeed);
+    w.Bool(g.atGoal); w.Bool(g.atEndOfPath); w.Bool(g.wantRepath);
+    w.Bool(g.moveFailed); w.Bool(g.lastWaypoint);
+    w.Bool(g.reversing); w.Bool(g.idling);
+    w.Bool(g.pushResistant); w.Bool(g.pushResistanceBlockActive); w.Bool(g.canReverse);
+    w.Bool(g.useMainHeading); w.Bool(g.useRawMovement);
+    w.Bool(g.pathingFailed); w.Bool(g.pathingArrived); w.Bool(g.positionStuck);
+    w.Bool(g.forceStaticObjectCheck); w.Bool(g.avoidingUnits);
+}
+
+movetypesnapshot::GroundState ReadMoveGround(Reader& r)
+{
+    movetypesnapshot::GroundState g;
+    g.currWayPointX = r.F32(); g.currWayPointY = r.F32(); g.currWayPointZ = r.F32();
+    g.nextWayPointX = r.F32(); g.nextWayPointY = r.F32(); g.nextWayPointZ = r.F32();
+    g.earlyCurrWayPointX = r.F32(); g.earlyCurrWayPointY = r.F32(); g.earlyCurrWayPointZ = r.F32();
+    g.earlyNextWayPointX = r.F32(); g.earlyNextWayPointY = r.F32(); g.earlyNextWayPointZ = r.F32();
+    g.waypointDirX = r.F32(); g.waypointDirY = r.F32(); g.waypointDirZ = r.F32();
+    g.flatFrontDirX = r.F32(); g.flatFrontDirY = r.F32(); g.flatFrontDirZ = r.F32();
+    g.lastAvoidanceDirX = r.F32(); g.lastAvoidanceDirY = r.F32(); g.lastAvoidanceDirZ = r.F32();
+    g.mainHeadingPosX = r.F32(); g.mainHeadingPosY = r.F32(); g.mainHeadingPosZ = r.F32();
+    g.skidRotVectorX = r.F32(); g.skidRotVectorY = r.F32(); g.skidRotVectorZ = r.F32();
+    g.turnRate = r.F32(); g.turnSpeed = r.F32(); g.turnAccel = r.F32();
+    g.accRate = r.F32(); g.decRate = r.F32(); g.myGravity = r.F32();
+    g.maxReverseDist = r.F32(); g.minReverseAngle = r.F32(); g.maxReverseSpeed = r.F32();
+    g.sqSkidSpeedMult = r.F32();
+    g.wantedSpeed = r.F32(); g.currentSpeed = r.F32(); g.deltaSpeed = r.F32();
+    g.currWayPointDist = r.F32(); g.prevWayPointDist = r.F32();
+    g.goalRadius = r.F32(); g.ownerRadius = r.F32(); g.extraRadius = r.F32();
+    g.skidRotSpeed = r.F32(); g.skidRotAccel = r.F32();
+    g.forceFromMovingCollideesX = r.F32(); g.forceFromMovingCollideesY = r.F32(); g.forceFromMovingCollideesZ = r.F32();
+    g.forceFromStaticCollideesX = r.F32(); g.forceFromStaticCollideesY = r.F32(); g.forceFromStaticCollideesZ = r.F32();
+    g.resultantForcesX = r.F32(); g.resultantForcesY = r.F32(); g.resultantForcesZ = r.F32();
+    g.numIdlingUpdates = r.U32(); g.numIdlingSlowUpdates = r.U32();
+    g.wantedHeading = r.I32(); g.minScriptChangeHeading = r.I32();
+    g.wantRepathFrame = r.I32(); g.lastRepathFrame = r.I32();
+    g.bestLastWaypointDist = r.F32(); g.bestReattemptedLastWaypointDist = r.F32();
+    g.setHeading = r.I32(); g.setHeadingDir = r.I32(); g.limitSpeedForTurning = r.I32();
+    g.oldSpeed = r.F32(); g.newSpeed = r.F32();
+    g.atGoal = r.Bool(); g.atEndOfPath = r.Bool(); g.wantRepath = r.Bool();
+    g.moveFailed = r.Bool(); g.lastWaypoint = r.Bool();
+    g.reversing = r.Bool(); g.idling = r.Bool();
+    g.pushResistant = r.Bool(); g.pushResistanceBlockActive = r.Bool(); g.canReverse = r.Bool();
+    g.useMainHeading = r.Bool(); g.useRawMovement = r.Bool();
+    g.pathingFailed = r.Bool(); g.pathingArrived = r.Bool(); g.positionStuck = r.Bool();
+    g.forceStaticObjectCheck = r.Bool(); g.avoidingUnits = r.Bool();
+    return g;
+}
+
+void WriteMoveAir(Writer& w, const movetypesnapshot::AirState& a)
+{
+    w.I32(a.aircraftState); w.I32(a.collisionState);
+    w.F32(a.oldGoalPosX); w.F32(a.oldGoalPosY); w.F32(a.oldGoalPosZ);
+    w.F32(a.reservedLandingPosX); w.F32(a.reservedLandingPosY); w.F32(a.reservedLandingPosZ);
+    w.F32(a.landRadiusSq); w.F32(a.wantedHeight); w.F32(a.orgWantedHeight);
+    w.F32(a.accRate); w.F32(a.decRate); w.F32(a.altitudeRate);
+    w.Bool(a.collide); w.Bool(a.autoLand); w.Bool(a.dontLand);
+    w.Bool(a.useSmoothMesh); w.Bool(a.canSubmerge); w.Bool(a.floatOnWater);
+}
+
+movetypesnapshot::AirState ReadMoveAir(Reader& r)
+{
+    movetypesnapshot::AirState a;
+    a.aircraftState = r.I32(); a.collisionState = r.I32();
+    a.oldGoalPosX = r.F32(); a.oldGoalPosY = r.F32(); a.oldGoalPosZ = r.F32();
+    a.reservedLandingPosX = r.F32(); a.reservedLandingPosY = r.F32(); a.reservedLandingPosZ = r.F32();
+    a.landRadiusSq = r.F32(); a.wantedHeight = r.F32(); a.orgWantedHeight = r.F32();
+    a.accRate = r.F32(); a.decRate = r.F32(); a.altitudeRate = r.F32();
+    a.collide = r.Bool(); a.autoLand = r.Bool(); a.dontLand = r.Bool();
+    a.useSmoothMesh = r.Bool(); a.canSubmerge = r.Bool(); a.floatOnWater = r.Bool();
+    return a;
+}
+
+void WriteMoveHover(Writer& w, const movetypesnapshot::HoverState& h)
+{
+    w.I32(h.flyState);
+    w.Bool(h.bankingAllowed); w.Bool(h.airStrafe); w.Bool(h.wantToStop);
+    w.F32(h.goalDistance); w.F32(h.currentBank); w.F32(h.currentPitch);
+    w.F32(h.turnRate); w.F32(h.maxDrift); w.F32(h.maxTurnAngle);
+    w.F32(h.wantedSpeedX); w.F32(h.wantedSpeedY); w.F32(h.wantedSpeedZ);
+    w.F32(h.deltaSpeedX); w.F32(h.deltaSpeedY); w.F32(h.deltaSpeedZ);
+    w.F32(h.circlingPosX); w.F32(h.circlingPosY); w.F32(h.circlingPosZ);
+    w.F32(h.randomWindX); w.F32(h.randomWindY); w.F32(h.randomWindZ);
+    w.Bool(h.forceHeading);
+    w.I32(h.wantedHeading); w.I32(h.forcedHeading);
+    w.I32(h.waitCounter); w.I32(h.lastMoveRate);
+}
+
+movetypesnapshot::HoverState ReadMoveHover(Reader& r)
+{
+    movetypesnapshot::HoverState h;
+    h.flyState = r.I32();
+    h.bankingAllowed = r.Bool(); h.airStrafe = r.Bool(); h.wantToStop = r.Bool();
+    h.goalDistance = r.F32(); h.currentBank = r.F32(); h.currentPitch = r.F32();
+    h.turnRate = r.F32(); h.maxDrift = r.F32(); h.maxTurnAngle = r.F32();
+    h.wantedSpeedX = r.F32(); h.wantedSpeedY = r.F32(); h.wantedSpeedZ = r.F32();
+    h.deltaSpeedX = r.F32(); h.deltaSpeedY = r.F32(); h.deltaSpeedZ = r.F32();
+    h.circlingPosX = r.F32(); h.circlingPosY = r.F32(); h.circlingPosZ = r.F32();
+    h.randomWindX = r.F32(); h.randomWindY = r.F32(); h.randomWindZ = r.F32();
+    h.forceHeading = r.Bool();
+    h.wantedHeading = r.I32(); h.forcedHeading = r.I32();
+    h.waitCounter = r.I32(); h.lastMoveRate = r.I32();
+    return h;
+}
+
+void WriteMoveStrafe(Writer& w, const movetypesnapshot::StrafeState& f)
+{
+    w.I32(f.maneuverBlockTime); w.I32(f.maneuverState); w.I32(f.maneuverSubState);
+    w.Bool(f.loopbackAttack); w.Bool(f.isFighter);
+    w.F32(f.wingDrag); w.F32(f.wingAngle); w.F32(f.invDrag); w.F32(f.crashDrag);
+    w.F32(f.frontToSpeed); w.F32(f.speedToFront); w.F32(f.myGravity);
+    w.F32(f.maxBank); w.F32(f.maxPitch); w.F32(f.turnRadius);
+    w.F32(f.maxAileron); w.F32(f.maxElevator); w.F32(f.maxRudder);
+    w.F32(f.attackSafetyDistance);
+    w.F32(f.crashAileron); w.F32(f.crashElevator); w.F32(f.crashRudder);
+    w.F32(f.lastRudderPos0); w.F32(f.lastRudderPos1);
+    w.F32(f.lastElevatorPos0); w.F32(f.lastElevatorPos1);
+    w.F32(f.lastAileronPos0); w.F32(f.lastAileronPos1);
+}
+
+movetypesnapshot::StrafeState ReadMoveStrafe(Reader& r)
+{
+    movetypesnapshot::StrafeState f;
+    f.maneuverBlockTime = r.I32(); f.maneuverState = r.I32(); f.maneuverSubState = r.I32();
+    f.loopbackAttack = r.Bool(); f.isFighter = r.Bool();
+    f.wingDrag = r.F32(); f.wingAngle = r.F32(); f.invDrag = r.F32(); f.crashDrag = r.F32();
+    f.frontToSpeed = r.F32(); f.speedToFront = r.F32(); f.myGravity = r.F32();
+    f.maxBank = r.F32(); f.maxPitch = r.F32(); f.turnRadius = r.F32();
+    f.maxAileron = r.F32(); f.maxElevator = r.F32(); f.maxRudder = r.F32();
+    f.attackSafetyDistance = r.F32();
+    f.crashAileron = r.F32(); f.crashElevator = r.F32(); f.crashRudder = r.F32();
+    f.lastRudderPos0 = r.F32(); f.lastRudderPos1 = r.F32();
+    f.lastElevatorPos0 = r.F32(); f.lastElevatorPos1 = r.F32();
+    f.lastAileronPos0 = r.F32(); f.lastAileronPos1 = r.F32();
+    return f;
+}
+
+void WriteMoveScript(Writer& w, const movetypesnapshot::ScriptState& c)
+{
+    w.F32(c.velVecX); w.F32(c.velVecY); w.F32(c.velVecZ);
+    w.F32(c.relVelX); w.F32(c.relVelY); w.F32(c.relVelZ);
+    w.F32(c.rotX); w.F32(c.rotY); w.F32(c.rotZ);
+    w.F32(c.rotVelX); w.F32(c.rotVelY); w.F32(c.rotVelZ);
+    w.F32(c.minsX); w.F32(c.minsY); w.F32(c.minsZ);
+    w.F32(c.maxsX); w.F32(c.maxsY); w.F32(c.maxsZ);
+    w.I32(c.tag);
+    w.F32(c.drag); w.F32(c.groundOffset); w.F32(c.gravityFactor); w.F32(c.windFactor);
+    w.Bool(c.extrapolate); w.Bool(c.useRelVel); w.Bool(c.useRotVel);
+    w.Bool(c.trackSlope); w.Bool(c.trackGround); w.Bool(c.trackLimits);
+    w.Bool(c.noBlocking); w.Bool(c.groundStop); w.Bool(c.limitsStop);
+    w.I32(c.scriptNotify);
+}
+
+movetypesnapshot::ScriptState ReadMoveScript(Reader& r)
+{
+    movetypesnapshot::ScriptState c;
+    c.velVecX = r.F32(); c.velVecY = r.F32(); c.velVecZ = r.F32();
+    c.relVelX = r.F32(); c.relVelY = r.F32(); c.relVelZ = r.F32();
+    c.rotX = r.F32(); c.rotY = r.F32(); c.rotZ = r.F32();
+    c.rotVelX = r.F32(); c.rotVelY = r.F32(); c.rotVelZ = r.F32();
+    c.minsX = r.F32(); c.minsY = r.F32(); c.minsZ = r.F32();
+    c.maxsX = r.F32(); c.maxsY = r.F32(); c.maxsZ = r.F32();
+    c.tag = r.I32();
+    c.drag = r.F32(); c.groundOffset = r.F32(); c.gravityFactor = r.F32(); c.windFactor = r.F32();
+    c.extrapolate = r.Bool(); c.useRelVel = r.Bool(); c.useRotVel = r.Bool();
+    c.trackSlope = r.Bool(); c.trackGround = r.Bool(); c.trackLimits = r.Bool();
+    c.noBlocking = r.Bool(); c.groundStop = r.Bool(); c.limitsStop = r.Bool();
+    c.scriptNotify = r.I32();
+    return c;
+}
+
+void WriteMoveType(Writer& w, const movetypesnapshot::MoveTypeState& m)
+{
+    using movetypesnapshot::Kind;
+
+    w.U8(m.kind);
+    if (m.kind == static_cast<uint8_t>(Kind::None))
+        return;
+
+    WriteMoveBase(w, m.base);
+    switch (static_cast<Kind>(m.kind)) {
+        case Kind::Ground:    WriteMoveGround(w, m.ground); break;
+        case Kind::HoverAir:  WriteMoveAir(w, m.air); WriteMoveHover(w, m.hover); break;
+        case Kind::StrafeAir: WriteMoveAir(w, m.air); WriteMoveStrafe(w, m.strafe); break;
+        default: break;   // Static and Script add nothing beyond the base
+    }
+
+    w.Bool(m.scriptControlled);
+    if (m.scriptControlled) {
+        WriteMoveBase(w, m.scriptBase);
+        WriteMoveScript(w, m.script);
+    }
+}
+
+movetypesnapshot::MoveTypeState ReadMoveType(Reader& r)
+{
+    using movetypesnapshot::Kind;
+
+    movetypesnapshot::MoveTypeState m;
+    m.kind = r.U8();
+    if (m.kind == static_cast<uint8_t>(Kind::None))
+        return m;
+    // An unknown discriminant means the payload was written by a binary whose
+    // move-type set is not this one. There is no way to skip an arm of unknown
+    // length, so the read fails here rather than at a garbled field later.
+    if (m.kind > static_cast<uint8_t>(Kind::Script)) { r.Fail(); return m; }
+
+    m.base = ReadMoveBase(r);
+    switch (static_cast<Kind>(m.kind)) {
+        case Kind::Ground:    m.ground = ReadMoveGround(r); break;
+        case Kind::HoverAir:  m.air = ReadMoveAir(r); m.hover = ReadMoveHover(r); break;
+        case Kind::StrafeAir: m.air = ReadMoveAir(r); m.strafe = ReadMoveStrafe(r); break;
+        default: break;
+    }
+
+    m.scriptControlled = r.Bool();
+    if (m.scriptControlled) {
+        m.scriptBase = ReadMoveBase(r);
+        m.script = ReadMoveScript(r);
+    }
+    return m;
+}
+
 void WriteUnit(Writer& w, const UnitState& u)
 {
     w.I32(u.id);
@@ -1001,6 +1284,7 @@ void WriteUnit(Writer& w, const UnitState& u)
     WriteRulesParams(w, u.modParams);
 
     w.U32(u.activeIndex);
+    WriteMoveType(w, u.move);
 }
 
 UnitState ReadUnit(Reader& r)
@@ -1095,6 +1379,7 @@ UnitState ReadUnit(Reader& r)
     u.modParams = ReadRulesParams(r);
 
     u.activeIndex = r.U32();
+    u.move = ReadMoveType(r);
     return u;
 }
 
@@ -1280,7 +1565,7 @@ int CensusUnitState(const UnitState& u)
                  transporterId, loadingTransportId, unloadingTransportId,
                  transportCapacityUsed, transportMassUsed, transportees,
                  commands, tagCounter, repeatOrders, lastUserCommand,
-                 lastFinishCommand, weapons, modParams, activeIndex] = u;
+                 lastFinishCommand, weapons, modParams, activeIndex, move] = u;
     (void)id; (void)unitDefName; (void)team; (void)buildFacing; (void)beingBuilt;
     (void)posX; (void)posY; (void)posZ; (void)speedX; (void)speedY; (void)speedZ;
     (void)heading; (void)frontX; (void)frontY; (void)frontZ;
@@ -1313,7 +1598,197 @@ int CensusUnitState(const UnitState& u)
     (void)transportCapacityUsed; (void)transportMassUsed; (void)transportees;
     (void)commands; (void)tagCounter; (void)repeatOrders; (void)lastUserCommand;
     (void)lastFinishCommand; (void)weapons; (void)modParams; (void)activeIndex;
-    return 114;
+    (void)move;
+    return 115;
+}
+
+// ── Option A censuses (PLAN-persistence §7.1c) ──
+//
+// One per struct. These DO work as structured bindings — unlike CUnit itself,
+// the move-type state types are plain aggregates with no base class and no
+// private members, which is the whole reason the sim-side classes hand their
+// members over to a struct instead of being walked directly.
+
+int CensusMoveBase(const movetypesnapshot::BaseState& b)
+{
+    const auto& [goalX, goalY, goalZ, oldPosX, oldPosY, oldPosZ,
+                 oldSlowUpdatePosX, oldSlowUpdatePosY, oldSlowUpdatePosZ,
+                 oldCollisionUpdatePosX, oldCollisionUpdatePosY, oldCollisionUpdatePosZ,
+                 progressState, maxSpeed, maxSpeedDef, maxWantedSpeed,
+                 maneuverLeash, waterline,
+                 useHeading, useWantedSpeed0, useWantedSpeed1] = b;
+    (void)goalX; (void)goalY; (void)goalZ;
+    (void)oldPosX; (void)oldPosY; (void)oldPosZ;
+    (void)oldSlowUpdatePosX; (void)oldSlowUpdatePosY; (void)oldSlowUpdatePosZ;
+    (void)oldCollisionUpdatePosX; (void)oldCollisionUpdatePosY; (void)oldCollisionUpdatePosZ;
+    (void)progressState; (void)maxSpeed; (void)maxSpeedDef; (void)maxWantedSpeed;
+    (void)maneuverLeash; (void)waterline;
+    (void)useHeading; (void)useWantedSpeed0; (void)useWantedSpeed1;
+    return 21;
+}
+
+int CensusMoveGround(const movetypesnapshot::GroundState& g)
+{
+    const auto& [currWayPointX, currWayPointY, currWayPointZ,
+                 nextWayPointX, nextWayPointY, nextWayPointZ,
+                 earlyCurrWayPointX, earlyCurrWayPointY, earlyCurrWayPointZ,
+                 earlyNextWayPointX, earlyNextWayPointY, earlyNextWayPointZ,
+                 waypointDirX, waypointDirY, waypointDirZ,
+                 flatFrontDirX, flatFrontDirY, flatFrontDirZ,
+                 lastAvoidanceDirX, lastAvoidanceDirY, lastAvoidanceDirZ,
+                 mainHeadingPosX, mainHeadingPosY, mainHeadingPosZ,
+                 skidRotVectorX, skidRotVectorY, skidRotVectorZ,
+                 turnRate, turnSpeed, turnAccel,
+                 accRate, decRate, myGravity,
+                 maxReverseDist, minReverseAngle, maxReverseSpeed, sqSkidSpeedMult,
+                 wantedSpeed, currentSpeed, deltaSpeed,
+                 currWayPointDist, prevWayPointDist,
+                 goalRadius, ownerRadius, extraRadius,
+                 skidRotSpeed, skidRotAccel,
+                 forceFromMovingCollideesX, forceFromMovingCollideesY, forceFromMovingCollideesZ,
+                 forceFromStaticCollideesX, forceFromStaticCollideesY, forceFromStaticCollideesZ,
+                 resultantForcesX, resultantForcesY, resultantForcesZ,
+                 numIdlingUpdates, numIdlingSlowUpdates,
+                 wantedHeading, minScriptChangeHeading,
+                 wantRepathFrame, lastRepathFrame,
+                 bestLastWaypointDist, bestReattemptedLastWaypointDist,
+                 setHeading, setHeadingDir, limitSpeedForTurning,
+                 oldSpeed, newSpeed,
+                 atGoal, atEndOfPath, wantRepath, moveFailed, lastWaypoint,
+                 reversing, idling, pushResistant, pushResistanceBlockActive,
+                 canReverse, useMainHeading, useRawMovement,
+                 pathingFailed, pathingArrived, positionStuck,
+                 forceStaticObjectCheck, avoidingUnits] = g;
+    (void)currWayPointX; (void)currWayPointY; (void)currWayPointZ;
+    (void)nextWayPointX; (void)nextWayPointY; (void)nextWayPointZ;
+    (void)earlyCurrWayPointX; (void)earlyCurrWayPointY; (void)earlyCurrWayPointZ;
+    (void)earlyNextWayPointX; (void)earlyNextWayPointY; (void)earlyNextWayPointZ;
+    (void)waypointDirX; (void)waypointDirY; (void)waypointDirZ;
+    (void)flatFrontDirX; (void)flatFrontDirY; (void)flatFrontDirZ;
+    (void)lastAvoidanceDirX; (void)lastAvoidanceDirY; (void)lastAvoidanceDirZ;
+    (void)mainHeadingPosX; (void)mainHeadingPosY; (void)mainHeadingPosZ;
+    (void)skidRotVectorX; (void)skidRotVectorY; (void)skidRotVectorZ;
+    (void)turnRate; (void)turnSpeed; (void)turnAccel;
+    (void)accRate; (void)decRate; (void)myGravity;
+    (void)maxReverseDist; (void)minReverseAngle; (void)maxReverseSpeed;
+    (void)sqSkidSpeedMult; (void)wantedSpeed; (void)currentSpeed; (void)deltaSpeed;
+    (void)currWayPointDist; (void)prevWayPointDist;
+    (void)goalRadius; (void)ownerRadius; (void)extraRadius;
+    (void)skidRotSpeed; (void)skidRotAccel;
+    (void)forceFromMovingCollideesX; (void)forceFromMovingCollideesY; (void)forceFromMovingCollideesZ;
+    (void)forceFromStaticCollideesX; (void)forceFromStaticCollideesY; (void)forceFromStaticCollideesZ;
+    (void)resultantForcesX; (void)resultantForcesY; (void)resultantForcesZ;
+    (void)numIdlingUpdates; (void)numIdlingSlowUpdates;
+    (void)wantedHeading; (void)minScriptChangeHeading;
+    (void)wantRepathFrame; (void)lastRepathFrame;
+    (void)bestLastWaypointDist; (void)bestReattemptedLastWaypointDist;
+    (void)setHeading; (void)setHeadingDir; (void)limitSpeedForTurning;
+    (void)oldSpeed; (void)newSpeed;
+    (void)atGoal; (void)atEndOfPath; (void)wantRepath; (void)moveFailed;
+    (void)lastWaypoint; (void)reversing; (void)idling; (void)pushResistant;
+    (void)pushResistanceBlockActive; (void)canReverse; (void)useMainHeading;
+    (void)useRawMovement; (void)pathingFailed; (void)pathingArrived;
+    (void)positionStuck; (void)forceStaticObjectCheck; (void)avoidingUnits;
+    return 86;
+}
+
+int CensusMoveAir(const movetypesnapshot::AirState& a)
+{
+    const auto& [aircraftState, collisionState,
+                 oldGoalPosX, oldGoalPosY, oldGoalPosZ,
+                 reservedLandingPosX, reservedLandingPosY, reservedLandingPosZ,
+                 landRadiusSq, wantedHeight, orgWantedHeight,
+                 accRate, decRate, altitudeRate,
+                 collide, autoLand, dontLand,
+                 useSmoothMesh, canSubmerge, floatOnWater] = a;
+    (void)aircraftState; (void)collisionState;
+    (void)oldGoalPosX; (void)oldGoalPosY; (void)oldGoalPosZ;
+    (void)reservedLandingPosX; (void)reservedLandingPosY; (void)reservedLandingPosZ;
+    (void)landRadiusSq; (void)wantedHeight; (void)orgWantedHeight;
+    (void)accRate; (void)decRate; (void)altitudeRate;
+    (void)collide; (void)autoLand; (void)dontLand;
+    (void)useSmoothMesh; (void)canSubmerge; (void)floatOnWater;
+    return 20;
+}
+
+int CensusMoveHover(const movetypesnapshot::HoverState& h)
+{
+    const auto& [flyState, bankingAllowed, airStrafe, wantToStop,
+                 goalDistance, currentBank, currentPitch,
+                 turnRate, maxDrift, maxTurnAngle,
+                 wantedSpeedX, wantedSpeedY, wantedSpeedZ,
+                 deltaSpeedX, deltaSpeedY, deltaSpeedZ,
+                 circlingPosX, circlingPosY, circlingPosZ,
+                 randomWindX, randomWindY, randomWindZ,
+                 forceHeading, wantedHeading, forcedHeading,
+                 waitCounter, lastMoveRate] = h;
+    (void)flyState; (void)bankingAllowed; (void)airStrafe; (void)wantToStop;
+    (void)goalDistance; (void)currentBank; (void)currentPitch;
+    (void)turnRate; (void)maxDrift; (void)maxTurnAngle;
+    (void)wantedSpeedX; (void)wantedSpeedY; (void)wantedSpeedZ;
+    (void)deltaSpeedX; (void)deltaSpeedY; (void)deltaSpeedZ;
+    (void)circlingPosX; (void)circlingPosY; (void)circlingPosZ;
+    (void)randomWindX; (void)randomWindY; (void)randomWindZ;
+    (void)forceHeading; (void)wantedHeading; (void)forcedHeading;
+    (void)waitCounter; (void)lastMoveRate;
+    return 27;
+}
+
+int CensusMoveStrafe(const movetypesnapshot::StrafeState& f)
+{
+    const auto& [maneuverBlockTime, maneuverState, maneuverSubState,
+                 loopbackAttack, isFighter,
+                 wingDrag, wingAngle, invDrag, crashDrag,
+                 frontToSpeed, speedToFront, myGravity,
+                 maxBank, maxPitch, turnRadius,
+                 maxAileron, maxElevator, maxRudder, attackSafetyDistance,
+                 crashAileron, crashElevator, crashRudder,
+                 lastRudderPos0, lastRudderPos1,
+                 lastElevatorPos0, lastElevatorPos1,
+                 lastAileronPos0, lastAileronPos1] = f;
+    (void)maneuverBlockTime; (void)maneuverState; (void)maneuverSubState;
+    (void)loopbackAttack; (void)isFighter;
+    (void)wingDrag; (void)wingAngle; (void)invDrag; (void)crashDrag;
+    (void)frontToSpeed; (void)speedToFront; (void)myGravity;
+    (void)maxBank; (void)maxPitch; (void)turnRadius;
+    (void)maxAileron; (void)maxElevator; (void)maxRudder;
+    (void)attackSafetyDistance;
+    (void)crashAileron; (void)crashElevator; (void)crashRudder;
+    (void)lastRudderPos0; (void)lastRudderPos1;
+    (void)lastElevatorPos0; (void)lastElevatorPos1;
+    (void)lastAileronPos0; (void)lastAileronPos1;
+    return 28;
+}
+
+int CensusMoveScript(const movetypesnapshot::ScriptState& c)
+{
+    const auto& [velVecX, velVecY, velVecZ, relVelX, relVelY, relVelZ,
+                 rotX, rotY, rotZ, rotVelX, rotVelY, rotVelZ,
+                 minsX, minsY, minsZ, maxsX, maxsY, maxsZ,
+                 tag, drag, groundOffset, gravityFactor, windFactor,
+                 extrapolate, useRelVel, useRotVel,
+                 trackSlope, trackGround, trackLimits,
+                 noBlocking, groundStop, limitsStop, scriptNotify] = c;
+    (void)velVecX; (void)velVecY; (void)velVecZ;
+    (void)relVelX; (void)relVelY; (void)relVelZ;
+    (void)rotX; (void)rotY; (void)rotZ;
+    (void)rotVelX; (void)rotVelY; (void)rotVelZ;
+    (void)minsX; (void)minsY; (void)minsZ;
+    (void)maxsX; (void)maxsY; (void)maxsZ;
+    (void)tag; (void)drag; (void)groundOffset; (void)gravityFactor; (void)windFactor;
+    (void)extrapolate; (void)useRelVel; (void)useRotVel;
+    (void)trackSlope; (void)trackGround; (void)trackLimits;
+    (void)noBlocking; (void)groundStop; (void)limitsStop; (void)scriptNotify;
+    return 33;
+}
+
+int CensusMoveTypeState(const movetypesnapshot::MoveTypeState& m)
+{
+    const auto& [kind, base, ground, air, hover, strafe, script,
+                 scriptControlled, scriptBase] = m;
+    (void)kind; (void)base; (void)ground; (void)air; (void)hover; (void)strafe;
+    (void)script; (void)scriptControlled; (void)scriptBase;
+    return 9;
 }
 
 int CensusFeatureState(const FeatureState& f)
@@ -1972,6 +2447,23 @@ void CaptureUnits(std::vector<UnitState>& out)
         s.modParams = CaptureRulesParams(u->modParams);
         s.activeIndex = activeIndex[u->id];
 
+        // ── the move type (option A) ──
+        //
+        // Under Lua move control the live moveType is a CScriptMoveType and
+        // the real one is parked in prevMoveType; `kind` names the PARKED one,
+        // because that is what the unit goes back to being when the gadget
+        // gives control up, and losing it would strand the unit as a
+        // script-driven object forever.
+        if (u->UsingScriptMoveType()) {
+            s.move.kind = static_cast<uint8_t>(u->prevMoveType->SnapshotKind());
+            u->prevMoveType->SnapshotCapture(s.move);
+            s.move.scriptControlled = true;
+            u->moveType->SnapshotCapture(s.move);   // fills script + scriptBase
+        } else if (u->moveType != nullptr) {
+            s.move.kind = static_cast<uint8_t>(u->moveType->SnapshotKind());
+            u->moveType->SnapshotCapture(s.move);
+        }
+
         out.push_back(std::move(s));
     }
 }
@@ -2019,6 +2511,47 @@ bool ResolveUnitDefs(const std::vector<UnitState>& in,
 namespace {
 
 /// Everything about a restored unit that is not needed to create it.
+// The move type half of a unit's restore (option A). Split out because it is
+// the one part that can DISAGREE with the live object: the payload names a
+// class, and the class a fresh unit gets comes from the def, so a def edit
+// between capture and restore can put a CGroundMoveType where the snapshot
+// recorded a CHoverAirMoveType. Applying an arm to the wrong class would write
+// a plausible-looking wrong world; saying so and leaving the constructor
+// values is the honest failure.
+void ApplyMoveTypeState(CUnit* u, const movetypesnapshot::MoveTypeState& m)
+{
+    using movetypesnapshot::Kind;
+
+    if (m.kind == static_cast<uint8_t>(Kind::None) || u->moveType == nullptr)
+        return;
+
+    // Under Lua move control the payload's `kind` describes the PARKED type,
+    // so the class to compare against is the one the unit has before the
+    // controller is installed.
+    if (u->moveType->SnapshotKind() != static_cast<Kind>(m.kind)) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            SLOG(SPRING_LOG_WARNING,
+                 "snapshot restore: unit %d ('%s') has move type %d, the snapshot "
+                 "recorded %d - move state not applied for it or any later "
+                 "mismatch (the def's movement class moved under the snapshot)",
+                 u->id, u->unitDef->name.c_str(),
+                 int(u->moveType->SnapshotKind()), int(m.kind));
+        }
+        return;
+    }
+
+    u->moveType->SnapshotApply(m);
+
+    if (m.scriptControlled) {
+        // EnableScriptMoveType parks what was just restored and installs a
+        // fresh CScriptMoveType; the controller's own state goes on top.
+        u->EnableScriptMoveType();
+        u->moveType->SnapshotApply(m);
+    }
+}
+
 void ApplyUnitState(CUnit* u, const UnitState& s)
 {
     // ForcedMove rather than a raw pos write: it re-registers the unit with the
@@ -2176,6 +2709,8 @@ void ApplyUnitState(CUnit* u, const UnitState& s)
     }
 
     ApplyRulesParams(s.modParams, u->modParams);
+
+    ApplyMoveTypeState(u, s.move);
 }
 
 } // namespace
@@ -3117,6 +3652,14 @@ int RulesParam(const RulesParamState& p)         { return CensusRulesParam(p); }
 int Stats(const TeamStatsState& s)               { return CensusStats(s); }
 int Res(const ResPair& r)                        { return CensusResPair(r); }
 int LuaValue(const luasnapshot::Value& v)        { return CensusLuaValue(v); }
+
+int MoveBase(const movetypesnapshot::BaseState& b)   { return CensusMoveBase(b); }
+int MoveGround(const movetypesnapshot::GroundState& g) { return CensusMoveGround(g); }
+int MoveAir(const movetypesnapshot::AirState& a)     { return CensusMoveAir(a); }
+int MoveHover(const movetypesnapshot::HoverState& h) { return CensusMoveHover(h); }
+int MoveStrafe(const movetypesnapshot::StrafeState& f) { return CensusMoveStrafe(f); }
+int MoveScript(const movetypesnapshot::ScriptState& c) { return CensusMoveScript(c); }
+int MoveType_(const movetypesnapshot::MoveTypeState& m) { return CensusMoveTypeState(m); }
 
 } // namespace census
 

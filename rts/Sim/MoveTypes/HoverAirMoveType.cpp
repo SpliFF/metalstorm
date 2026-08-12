@@ -1179,3 +1179,57 @@ bool CHoverAirMoveType::SetMemberValue(unsigned int memberHash, void* memberValu
 	return false;
 }
 
+
+// ── snapshot (PLAN-persistence §7.1c option A) ──
+
+void CHoverAirMoveType::SnapshotCapture(movetypesnapshot::MoveTypeState& s) const {
+	SnapshotCaptureBase(s.base);
+	SnapshotCaptureAir(s.air);
+
+	auto& h = s.hover;
+	h.flyState = static_cast<int32_t>(flyState);
+	h.bankingAllowed = bankingAllowed;
+	h.airStrafe = airStrafe;
+	h.wantToStop = wantToStop;
+	h.goalDistance = goalDistance;
+	h.currentBank = currentBank;
+	h.currentPitch = currentPitch;
+	h.turnRate = turnRate;
+	h.maxDrift = maxDrift;
+	h.maxTurnAngle = maxTurnAngle;
+	h.wantedSpeedX = wantedSpeed.x; h.wantedSpeedY = wantedSpeed.y; h.wantedSpeedZ = wantedSpeed.z;
+	h.deltaSpeedX = deltaSpeed.x; h.deltaSpeedY = deltaSpeed.y; h.deltaSpeedZ = deltaSpeed.z;
+	h.circlingPosX = circlingPos.x; h.circlingPosY = circlingPos.y; h.circlingPosZ = circlingPos.z;
+	h.randomWindX = randomWind.x; h.randomWindY = randomWind.y; h.randomWindZ = randomWind.z;
+	h.forceHeading = forceHeading;
+	h.wantedHeading = wantedHeading;
+	h.forcedHeading = forcedHeading;
+	h.waitCounter = waitCounter;
+	h.lastMoveRate = lastMoveRate;
+}
+
+void CHoverAirMoveType::SnapshotApply(const movetypesnapshot::MoveTypeState& s) {
+	SnapshotApplyBase(s.base);
+	SnapshotApplyAir(s.air);
+
+	const auto& h = s.hover;
+	flyState = static_cast<FlyState>(h.flyState);
+	bankingAllowed = h.bankingAllowed;
+	airStrafe = h.airStrafe;
+	wantToStop = h.wantToStop;
+	goalDistance = h.goalDistance;
+	currentBank = h.currentBank;
+	currentPitch = h.currentPitch;
+	turnRate = h.turnRate;
+	maxDrift = h.maxDrift;
+	maxTurnAngle = h.maxTurnAngle;
+	wantedSpeed = float3(h.wantedSpeedX, h.wantedSpeedY, h.wantedSpeedZ);
+	deltaSpeed = float3(h.deltaSpeedX, h.deltaSpeedY, h.deltaSpeedZ);
+	circlingPos = float3(h.circlingPosX, h.circlingPosY, h.circlingPosZ);
+	randomWind = float3(h.randomWindX, h.randomWindY, h.randomWindZ);
+	forceHeading = h.forceHeading;
+	wantedHeading = static_cast<short>(h.wantedHeading);
+	forcedHeading = static_cast<short>(h.forcedHeading);
+	waitCounter = h.waitCounter;
+	lastMoveRate = h.lastMoveRate;
+}

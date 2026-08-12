@@ -51,6 +51,14 @@ class CScriptMoveType : public AMoveType
 		void CheckNotify();
 
 	public:
+		// The controller's own arm is `script` + `scriptBase`; `kind`/`base`
+		// belong to the move type parked in CUnit::prevMoveType, which the
+		// caller captures separately (MoveTypeSnapshot.h).
+		movetypesnapshot::Kind SnapshotKind() const override { return movetypesnapshot::Kind::Script; }
+		void SnapshotCapture(movetypesnapshot::MoveTypeState& s) const override;
+		void SnapshotApply(const movetypesnapshot::MoveTypeState& s) override;
+
+	public:
 		/// velocity vector
 		float3 velVec;
 		/// relative velocity (to current direction)

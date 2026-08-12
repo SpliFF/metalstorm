@@ -84,6 +84,10 @@ public:
 	void InitMemberPtrs(MemberData* memberData);
 	bool SetMemberValue(unsigned int memberHash, void* memberValue) override;
 
+	movetypesnapshot::Kind SnapshotKind() const override { return movetypesnapshot::Kind::Ground; }
+	void SnapshotCapture(movetypesnapshot::MoveTypeState& s) const override;
+	void SnapshotApply(const movetypesnapshot::MoveTypeState& s) override;
+
 	bool OnSlope(float minSlideTolerance);
 	bool IsReversing() const override { return reversing; }
 	bool IsPushResistant() const override { return pushResistant; }

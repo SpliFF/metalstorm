@@ -744,6 +744,547 @@ bool sameTeam(const TeamState& a, const TeamState& b)
         ;
 }
 
+// ──────── Option A fixtures: the move type (PLAN-persistence §7.1c) ────────
+//
+// Every field gets a DISTINCT value (a running counter; bools cycle on a
+// period of 3 so an adjacent-pair swap cannot cancel out), and the comparison
+// is a flattened vector of every field rather than a hand-written operator==,
+// so a field read back into the wrong member fails on the value and a field
+// never read at all fails on the re-encode symmetry check.
+
+/// @p off shifts every field, so the parked move type's base and the script
+/// controller's base can be told apart - two AMoveType halves filled with the
+/// same numbers would let a codec that collapsed them pass.
+movetypesnapshot::BaseState loudBase(int off = 0)
+{
+    movetypesnapshot::BaseState v;
+    v.goalX = 1 + off;
+    v.goalY = 2 + off;
+    v.goalZ = 3 + off;
+    v.oldPosX = 4 + off;
+    v.oldPosY = 5 + off;
+    v.oldPosZ = 6 + off;
+    v.oldSlowUpdatePosX = 7 + off;
+    v.oldSlowUpdatePosY = 8 + off;
+    v.oldSlowUpdatePosZ = 9 + off;
+    v.oldCollisionUpdatePosX = 10 + off;
+    v.oldCollisionUpdatePosY = 11 + off;
+    v.oldCollisionUpdatePosZ = 12 + off;
+    v.progressState = 13 + off;
+    v.maxSpeed = 14 + off;
+    v.maxSpeedDef = 15 + off;
+    v.maxWantedSpeed = 16 + off;
+    v.maneuverLeash = 17 + off;
+    v.waterline = 18 + off;
+    v.useHeading = ((19 + off) % 3) != 0;
+    v.useWantedSpeed0 = ((20 + off) % 3) != 0;
+    v.useWantedSpeed1 = ((21 + off) % 3) != 0;
+    return v;
+}
+
+void flatten(const movetypesnapshot::BaseState& v, std::vector<double>& o)
+{
+    o.push_back(v.goalX);
+    o.push_back(v.goalY);
+    o.push_back(v.goalZ);
+    o.push_back(v.oldPosX);
+    o.push_back(v.oldPosY);
+    o.push_back(v.oldPosZ);
+    o.push_back(v.oldSlowUpdatePosX);
+    o.push_back(v.oldSlowUpdatePosY);
+    o.push_back(v.oldSlowUpdatePosZ);
+    o.push_back(v.oldCollisionUpdatePosX);
+    o.push_back(v.oldCollisionUpdatePosY);
+    o.push_back(v.oldCollisionUpdatePosZ);
+    o.push_back(v.progressState);
+    o.push_back(v.maxSpeed);
+    o.push_back(v.maxSpeedDef);
+    o.push_back(v.maxWantedSpeed);
+    o.push_back(v.maneuverLeash);
+    o.push_back(v.waterline);
+    o.push_back(v.useHeading);
+    o.push_back(v.useWantedSpeed0);
+    o.push_back(v.useWantedSpeed1);
+}
+
+movetypesnapshot::GroundState loudGround()
+{
+    movetypesnapshot::GroundState v;
+    v.currWayPointX = 22;
+    v.currWayPointY = 23;
+    v.currWayPointZ = 24;
+    v.nextWayPointX = 25;
+    v.nextWayPointY = 26;
+    v.nextWayPointZ = 27;
+    v.earlyCurrWayPointX = 28;
+    v.earlyCurrWayPointY = 29;
+    v.earlyCurrWayPointZ = 30;
+    v.earlyNextWayPointX = 31;
+    v.earlyNextWayPointY = 32;
+    v.earlyNextWayPointZ = 33;
+    v.waypointDirX = 34;
+    v.waypointDirY = 35;
+    v.waypointDirZ = 36;
+    v.flatFrontDirX = 37;
+    v.flatFrontDirY = 38;
+    v.flatFrontDirZ = 39;
+    v.lastAvoidanceDirX = 40;
+    v.lastAvoidanceDirY = 41;
+    v.lastAvoidanceDirZ = 42;
+    v.mainHeadingPosX = 43;
+    v.mainHeadingPosY = 44;
+    v.mainHeadingPosZ = 45;
+    v.skidRotVectorX = 46;
+    v.skidRotVectorY = 47;
+    v.skidRotVectorZ = 48;
+    v.turnRate = 49;
+    v.turnSpeed = 50;
+    v.turnAccel = 51;
+    v.accRate = 52;
+    v.decRate = 53;
+    v.myGravity = 54;
+    v.maxReverseDist = 55;
+    v.minReverseAngle = 56;
+    v.maxReverseSpeed = 57;
+    v.sqSkidSpeedMult = 58;
+    v.wantedSpeed = 59;
+    v.currentSpeed = 60;
+    v.deltaSpeed = 61;
+    v.currWayPointDist = 62;
+    v.prevWayPointDist = 63;
+    v.goalRadius = 64;
+    v.ownerRadius = 65;
+    v.extraRadius = 66;
+    v.skidRotSpeed = 67;
+    v.skidRotAccel = 68;
+    v.forceFromMovingCollideesX = 69;
+    v.forceFromMovingCollideesY = 70;
+    v.forceFromMovingCollideesZ = 71;
+    v.forceFromStaticCollideesX = 72;
+    v.forceFromStaticCollideesY = 73;
+    v.forceFromStaticCollideesZ = 74;
+    v.resultantForcesX = 75;
+    v.resultantForcesY = 76;
+    v.resultantForcesZ = 77;
+    v.numIdlingUpdates = 78;
+    v.numIdlingSlowUpdates = 79;
+    v.wantedHeading = 80;
+    v.minScriptChangeHeading = 81;
+    v.wantRepathFrame = 82;
+    v.lastRepathFrame = 83;
+    v.bestLastWaypointDist = 84;
+    v.bestReattemptedLastWaypointDist = 85;
+    v.setHeading = 86;
+    v.setHeadingDir = 87;
+    v.limitSpeedForTurning = 88;
+    v.oldSpeed = 89;
+    v.newSpeed = 90;
+    v.atGoal = true;
+    v.atEndOfPath = true;
+    v.wantRepath = false;
+    v.moveFailed = true;
+    v.lastWaypoint = true;
+    v.reversing = false;
+    v.idling = true;
+    v.pushResistant = true;
+    v.pushResistanceBlockActive = false;
+    v.canReverse = true;
+    v.useMainHeading = true;
+    v.useRawMovement = false;
+    v.pathingFailed = true;
+    v.pathingArrived = true;
+    v.positionStuck = false;
+    v.forceStaticObjectCheck = true;
+    v.avoidingUnits = true;
+    return v;
+}
+
+void flatten(const movetypesnapshot::GroundState& v, std::vector<double>& o)
+{
+    o.push_back(v.currWayPointX);
+    o.push_back(v.currWayPointY);
+    o.push_back(v.currWayPointZ);
+    o.push_back(v.nextWayPointX);
+    o.push_back(v.nextWayPointY);
+    o.push_back(v.nextWayPointZ);
+    o.push_back(v.earlyCurrWayPointX);
+    o.push_back(v.earlyCurrWayPointY);
+    o.push_back(v.earlyCurrWayPointZ);
+    o.push_back(v.earlyNextWayPointX);
+    o.push_back(v.earlyNextWayPointY);
+    o.push_back(v.earlyNextWayPointZ);
+    o.push_back(v.waypointDirX);
+    o.push_back(v.waypointDirY);
+    o.push_back(v.waypointDirZ);
+    o.push_back(v.flatFrontDirX);
+    o.push_back(v.flatFrontDirY);
+    o.push_back(v.flatFrontDirZ);
+    o.push_back(v.lastAvoidanceDirX);
+    o.push_back(v.lastAvoidanceDirY);
+    o.push_back(v.lastAvoidanceDirZ);
+    o.push_back(v.mainHeadingPosX);
+    o.push_back(v.mainHeadingPosY);
+    o.push_back(v.mainHeadingPosZ);
+    o.push_back(v.skidRotVectorX);
+    o.push_back(v.skidRotVectorY);
+    o.push_back(v.skidRotVectorZ);
+    o.push_back(v.turnRate);
+    o.push_back(v.turnSpeed);
+    o.push_back(v.turnAccel);
+    o.push_back(v.accRate);
+    o.push_back(v.decRate);
+    o.push_back(v.myGravity);
+    o.push_back(v.maxReverseDist);
+    o.push_back(v.minReverseAngle);
+    o.push_back(v.maxReverseSpeed);
+    o.push_back(v.sqSkidSpeedMult);
+    o.push_back(v.wantedSpeed);
+    o.push_back(v.currentSpeed);
+    o.push_back(v.deltaSpeed);
+    o.push_back(v.currWayPointDist);
+    o.push_back(v.prevWayPointDist);
+    o.push_back(v.goalRadius);
+    o.push_back(v.ownerRadius);
+    o.push_back(v.extraRadius);
+    o.push_back(v.skidRotSpeed);
+    o.push_back(v.skidRotAccel);
+    o.push_back(v.forceFromMovingCollideesX);
+    o.push_back(v.forceFromMovingCollideesY);
+    o.push_back(v.forceFromMovingCollideesZ);
+    o.push_back(v.forceFromStaticCollideesX);
+    o.push_back(v.forceFromStaticCollideesY);
+    o.push_back(v.forceFromStaticCollideesZ);
+    o.push_back(v.resultantForcesX);
+    o.push_back(v.resultantForcesY);
+    o.push_back(v.resultantForcesZ);
+    o.push_back(v.numIdlingUpdates);
+    o.push_back(v.numIdlingSlowUpdates);
+    o.push_back(v.wantedHeading);
+    o.push_back(v.minScriptChangeHeading);
+    o.push_back(v.wantRepathFrame);
+    o.push_back(v.lastRepathFrame);
+    o.push_back(v.bestLastWaypointDist);
+    o.push_back(v.bestReattemptedLastWaypointDist);
+    o.push_back(v.setHeading);
+    o.push_back(v.setHeadingDir);
+    o.push_back(v.limitSpeedForTurning);
+    o.push_back(v.oldSpeed);
+    o.push_back(v.newSpeed);
+    o.push_back(v.atGoal);
+    o.push_back(v.atEndOfPath);
+    o.push_back(v.wantRepath);
+    o.push_back(v.moveFailed);
+    o.push_back(v.lastWaypoint);
+    o.push_back(v.reversing);
+    o.push_back(v.idling);
+    o.push_back(v.pushResistant);
+    o.push_back(v.pushResistanceBlockActive);
+    o.push_back(v.canReverse);
+    o.push_back(v.useMainHeading);
+    o.push_back(v.useRawMovement);
+    o.push_back(v.pathingFailed);
+    o.push_back(v.pathingArrived);
+    o.push_back(v.positionStuck);
+    o.push_back(v.forceStaticObjectCheck);
+    o.push_back(v.avoidingUnits);
+
+}
+
+movetypesnapshot::AirState loudAir()
+{
+    movetypesnapshot::AirState v;
+    v.aircraftState = 109;
+    v.collisionState = 110;
+    v.oldGoalPosX = 111;
+    v.oldGoalPosY = 112;
+    v.oldGoalPosZ = 113;
+    v.reservedLandingPosX = 114;
+    v.reservedLandingPosY = 115;
+    v.reservedLandingPosZ = 116;
+    v.landRadiusSq = 117;
+    v.wantedHeight = 118;
+    v.orgWantedHeight = 119;
+    v.accRate = 120;
+    v.decRate = 121;
+    v.altitudeRate = 122;
+    v.collide = false;
+    v.autoLand = true;
+    v.dontLand = true;
+    v.useSmoothMesh = false;
+    v.canSubmerge = true;
+    v.floatOnWater = true;
+    return v;
+}
+
+void flatten(const movetypesnapshot::AirState& v, std::vector<double>& o)
+{
+    o.push_back(v.aircraftState);
+    o.push_back(v.collisionState);
+    o.push_back(v.oldGoalPosX);
+    o.push_back(v.oldGoalPosY);
+    o.push_back(v.oldGoalPosZ);
+    o.push_back(v.reservedLandingPosX);
+    o.push_back(v.reservedLandingPosY);
+    o.push_back(v.reservedLandingPosZ);
+    o.push_back(v.landRadiusSq);
+    o.push_back(v.wantedHeight);
+    o.push_back(v.orgWantedHeight);
+    o.push_back(v.accRate);
+    o.push_back(v.decRate);
+    o.push_back(v.altitudeRate);
+    o.push_back(v.collide);
+    o.push_back(v.autoLand);
+    o.push_back(v.dontLand);
+    o.push_back(v.useSmoothMesh);
+    o.push_back(v.canSubmerge);
+    o.push_back(v.floatOnWater);
+}
+
+movetypesnapshot::HoverState loudHover()
+{
+    movetypesnapshot::HoverState v;
+    v.flyState = 129;
+    v.bankingAllowed = true;
+    v.airStrafe = true;
+    v.wantToStop = false;
+    v.goalDistance = 133;
+    v.currentBank = 134;
+    v.currentPitch = 135;
+    v.turnRate = 136;
+    v.maxDrift = 137;
+    v.maxTurnAngle = 138;
+    v.wantedSpeedX = 139;
+    v.wantedSpeedY = 140;
+    v.wantedSpeedZ = 141;
+    v.deltaSpeedX = 142;
+    v.deltaSpeedY = 143;
+    v.deltaSpeedZ = 144;
+    v.circlingPosX = 145;
+    v.circlingPosY = 146;
+    v.circlingPosZ = 147;
+    v.randomWindX = 148;
+    v.randomWindY = 149;
+    v.randomWindZ = 150;
+    v.forceHeading = true;
+    v.wantedHeading = 152;
+    v.forcedHeading = 153;
+    v.waitCounter = 154;
+    v.lastMoveRate = 155;
+    return v;
+}
+
+void flatten(const movetypesnapshot::HoverState& v, std::vector<double>& o)
+{
+    o.push_back(v.flyState);
+    o.push_back(v.bankingAllowed);
+    o.push_back(v.airStrafe);
+    o.push_back(v.wantToStop);
+    o.push_back(v.goalDistance);
+    o.push_back(v.currentBank);
+    o.push_back(v.currentPitch);
+    o.push_back(v.turnRate);
+    o.push_back(v.maxDrift);
+    o.push_back(v.maxTurnAngle);
+    o.push_back(v.wantedSpeedX);
+    o.push_back(v.wantedSpeedY);
+    o.push_back(v.wantedSpeedZ);
+    o.push_back(v.deltaSpeedX);
+    o.push_back(v.deltaSpeedY);
+    o.push_back(v.deltaSpeedZ);
+    o.push_back(v.circlingPosX);
+    o.push_back(v.circlingPosY);
+    o.push_back(v.circlingPosZ);
+    o.push_back(v.randomWindX);
+    o.push_back(v.randomWindY);
+    o.push_back(v.randomWindZ);
+    o.push_back(v.forceHeading);
+    o.push_back(v.wantedHeading);
+    o.push_back(v.forcedHeading);
+    o.push_back(v.waitCounter);
+    o.push_back(v.lastMoveRate);
+}
+
+movetypesnapshot::StrafeState loudStrafe()
+{
+    movetypesnapshot::StrafeState v;
+    v.maneuverBlockTime = 156;
+    v.maneuverState = 157;
+    v.maneuverSubState = 158;
+    v.loopbackAttack = false;
+    v.isFighter = true;
+    v.wingDrag = 161;
+    v.wingAngle = 162;
+    v.invDrag = 163;
+    v.crashDrag = 164;
+    v.frontToSpeed = 165;
+    v.speedToFront = 166;
+    v.myGravity = 167;
+    v.maxBank = 168;
+    v.maxPitch = 169;
+    v.turnRadius = 170;
+    v.maxAileron = 171;
+    v.maxElevator = 172;
+    v.maxRudder = 173;
+    v.attackSafetyDistance = 174;
+    v.crashAileron = 175;
+    v.crashElevator = 176;
+    v.crashRudder = 177;
+    v.lastRudderPos0 = 178;
+    v.lastRudderPos1 = 179;
+    v.lastElevatorPos0 = 180;
+    v.lastElevatorPos1 = 181;
+    v.lastAileronPos0 = 182;
+    v.lastAileronPos1 = 183;
+    return v;
+}
+
+void flatten(const movetypesnapshot::StrafeState& v, std::vector<double>& o)
+{
+    o.push_back(v.maneuverBlockTime);
+    o.push_back(v.maneuverState);
+    o.push_back(v.maneuverSubState);
+    o.push_back(v.loopbackAttack);
+    o.push_back(v.isFighter);
+    o.push_back(v.wingDrag);
+    o.push_back(v.wingAngle);
+    o.push_back(v.invDrag);
+    o.push_back(v.crashDrag);
+    o.push_back(v.frontToSpeed);
+    o.push_back(v.speedToFront);
+    o.push_back(v.myGravity);
+    o.push_back(v.maxBank);
+    o.push_back(v.maxPitch);
+    o.push_back(v.turnRadius);
+    o.push_back(v.maxAileron);
+    o.push_back(v.maxElevator);
+    o.push_back(v.maxRudder);
+    o.push_back(v.attackSafetyDistance);
+    o.push_back(v.crashAileron);
+    o.push_back(v.crashElevator);
+    o.push_back(v.crashRudder);
+    o.push_back(v.lastRudderPos0);
+    o.push_back(v.lastRudderPos1);
+    o.push_back(v.lastElevatorPos0);
+    o.push_back(v.lastElevatorPos1);
+    o.push_back(v.lastAileronPos0);
+    o.push_back(v.lastAileronPos1);
+}
+
+movetypesnapshot::ScriptState loudScript()
+{
+    movetypesnapshot::ScriptState v;
+    v.velVecX = 184;
+    v.velVecY = 185;
+    v.velVecZ = 186;
+    v.relVelX = 187;
+    v.relVelY = 188;
+    v.relVelZ = 189;
+    v.rotX = 190;
+    v.rotY = 191;
+    v.rotZ = 192;
+    v.rotVelX = 193;
+    v.rotVelY = 194;
+    v.rotVelZ = 195;
+    v.minsX = 196;
+    v.minsY = 197;
+    v.minsZ = 198;
+    v.maxsX = 199;
+    v.maxsY = 200;
+    v.maxsZ = 201;
+    v.tag = 202;
+    v.drag = 203;
+    v.groundOffset = 204;
+    v.gravityFactor = 205;
+    v.windFactor = 206;
+    v.extrapolate = false;
+    v.useRelVel = true;
+    v.useRotVel = true;
+    v.trackSlope = false;
+    v.trackGround = true;
+    v.trackLimits = true;
+    v.noBlocking = false;
+    v.groundStop = true;
+    v.limitsStop = true;
+    v.scriptNotify = 216;
+    return v;
+}
+
+void flatten(const movetypesnapshot::ScriptState& v, std::vector<double>& o)
+{
+    o.push_back(v.velVecX);
+    o.push_back(v.velVecY);
+    o.push_back(v.velVecZ);
+    o.push_back(v.relVelX);
+    o.push_back(v.relVelY);
+    o.push_back(v.relVelZ);
+    o.push_back(v.rotX);
+    o.push_back(v.rotY);
+    o.push_back(v.rotZ);
+    o.push_back(v.rotVelX);
+    o.push_back(v.rotVelY);
+    o.push_back(v.rotVelZ);
+    o.push_back(v.minsX);
+    o.push_back(v.minsY);
+    o.push_back(v.minsZ);
+    o.push_back(v.maxsX);
+    o.push_back(v.maxsY);
+    o.push_back(v.maxsZ);
+    o.push_back(v.tag);
+    o.push_back(v.drag);
+    o.push_back(v.groundOffset);
+    o.push_back(v.gravityFactor);
+    o.push_back(v.windFactor);
+    o.push_back(v.extrapolate);
+    o.push_back(v.useRelVel);
+    o.push_back(v.useRotVel);
+    o.push_back(v.trackSlope);
+    o.push_back(v.trackGround);
+    o.push_back(v.trackLimits);
+    o.push_back(v.noBlocking);
+    o.push_back(v.groundStop);
+    o.push_back(v.limitsStop);
+    o.push_back(v.scriptNotify);
+}
+
+movetypesnapshot::MoveTypeState loudMove(movetypesnapshot::Kind kind)
+{
+    movetypesnapshot::MoveTypeState m;
+    m.kind = static_cast<uint8_t>(kind);
+    m.base = loudBase();
+    m.ground = loudGround();
+    m.air = loudAir();
+    m.hover = loudHover();
+    m.strafe = loudStrafe();
+    m.script = loudScript();
+    m.scriptBase = loudBase(1000);
+    return m;
+}
+
+/// Flattens ONLY the arms `kind` says are written. The unwritten arms are
+/// deliberately not compared: the codec does not carry them, so requiring them
+/// to survive would be asserting a fidelity the payload never claimed.
+std::vector<double> flattenMove(const movetypesnapshot::MoveTypeState& m)
+{
+    using movetypesnapshot::Kind;
+    std::vector<double> o;
+    o.push_back(m.kind);
+    if (m.kind == static_cast<uint8_t>(Kind::None))
+        return o;
+    flatten(m.base, o);
+    switch (static_cast<Kind>(m.kind)) {
+        case Kind::Ground:    flatten(m.ground, o); break;
+        case Kind::HoverAir:  flatten(m.air, o); flatten(m.hover, o); break;
+        case Kind::StrafeAir: flatten(m.air, o); flatten(m.strafe, o); break;
+        default: break;
+    }
+    o.push_back(m.scriptControlled);
+    if (m.scriptControlled) {
+        flatten(m.scriptBase, o);
+        flatten(m.script, o);
+    }
+    return o;
+}
+
 UnitState loudUnit()
 {
     UnitState s;
@@ -890,6 +1431,7 @@ UnitState loudUnit()
     s.weapons = {w0, w1};
     s.modParams = loudRulesParams();
     s.activeIndex = 37;
+    s.move = loudMove(movetypesnapshot::Kind::Ground);
     return s;
 }
 
@@ -1026,6 +1568,7 @@ bool sameUnit(const UnitState& a, const UnitState& b)
         && a.lastUserCommand == b.lastUserCommand
         && a.lastFinishCommand == b.lastFinishCommand
         && a.activeIndex == b.activeIndex
+        && flattenMove(a.move) == flattenMove(b.move)
         ;
 }
 
@@ -1041,7 +1584,142 @@ TEST_CASE("task 1c: the field censuses are armed") {
     CHECK(census::Cmd(CommandState{}) == 6);
     CHECK(census::Weapon(WeaponState{}) == 5);
     CHECK(census::Team(TeamState{}) == 26);
-    CHECK(census::Unit(UnitState{}) == 114);
+    CHECK(census::Unit(UnitState{}) == 115);
+
+    // Option A: one count per move-type class, so a member added to (say)
+    // CStrafeAirMoveType names the arm it belongs to instead of moving a
+    // single aggregate number.
+    CHECK(census::MoveBase(movetypesnapshot::BaseState{}) == 21);
+    CHECK(census::MoveGround(movetypesnapshot::GroundState{}) == 86);
+    CHECK(census::MoveAir(movetypesnapshot::AirState{}) == 20);
+    CHECK(census::MoveHover(movetypesnapshot::HoverState{}) == 27);
+    CHECK(census::MoveStrafe(movetypesnapshot::StrafeState{}) == 28);
+    CHECK(census::MoveScript(movetypesnapshot::ScriptState{}) == 33);
+    CHECK(census::MoveType_(movetypesnapshot::MoveTypeState{}) == 9);
+}
+
+TEST_CASE("option A: every move-type class round-trips its own arm") {
+    using movetypesnapshot::Kind;
+
+    for (const Kind kind : {Kind::None, Kind::Static, Kind::Ground,
+                            Kind::HoverAir, Kind::StrafeAir, Kind::Script}) {
+        INFO("kind " << int(kind));
+
+        UnitState u = loudUnit();
+        u.move = loudMove(kind);
+
+        std::vector<uint8_t> bytes;
+        EncodeUnits({u}, bytes);
+
+        std::vector<UnitState> out;
+        std::string err;
+        REQUIRE_MESSAGE(DecodeUnits(bytes.data(), bytes.size(), out, err), err);
+        REQUIRE(out.size() == 1);
+        CHECK(flattenMove(u.move) == flattenMove(out[0].move));
+        CHECK(out[0].move.kind == static_cast<uint8_t>(kind));
+
+        // Catches a field written but never read: re-encoding what came back
+        // has to produce the same bytes.
+        std::vector<uint8_t> again;
+        EncodeUnits(out, again);
+        CHECK(again == bytes);
+    }
+}
+
+TEST_CASE("option A: a unit under Lua move control keeps both halves") {
+    // The live moveType is a CScriptMoveType and the real one is parked in
+    // prevMoveType. `kind` names the PARKED type - a payload that recorded
+    // only the controller would restore a tank as a script-driven object
+    // forever.
+    UnitState u = loudUnit();
+    u.move = loudMove(movetypesnapshot::Kind::Ground);
+    u.move.scriptControlled = true;
+
+    std::vector<uint8_t> bytes;
+    EncodeUnits({u}, bytes);
+
+    std::vector<UnitState> out;
+    std::string err;
+    REQUIRE_MESSAGE(DecodeUnits(bytes.data(), bytes.size(), out, err), err);
+    REQUIRE(out.size() == 1);
+    CHECK(out[0].move.scriptControlled);
+    CHECK(out[0].move.kind == static_cast<uint8_t>(movetypesnapshot::Kind::Ground));
+    CHECK(flattenMove(u.move) == flattenMove(out[0].move));
+
+    // And the two halves are really two: the script arm costs bytes over the
+    // same unit without it.
+    UnitState plain = u;
+    plain.move.scriptControlled = false;
+    std::vector<uint8_t> plainBytes;
+    EncodeUnits({plain}, plainBytes);
+    CHECK(plainBytes.size() < bytes.size());
+}
+
+TEST_CASE("option A: only the arm the discriminant names costs bytes") {
+    // A Metalstorm world is mostly buildings, and a building's move type is a
+    // CStaticMoveType with no members of its own. If the codec wrote every arm
+    // regardless of kind, the payload would carry a CGroundMoveType's 87
+    // fields for each of them.
+    UnitState stat = loudUnit();
+    stat.move = loudMove(movetypesnapshot::Kind::Static);
+    UnitState ground = loudUnit();
+    ground.move = loudMove(movetypesnapshot::Kind::Ground);
+    UnitState none = loudUnit();
+    none.move = loudMove(movetypesnapshot::Kind::None);
+
+    std::vector<uint8_t> statBytes, groundBytes, noneBytes;
+    EncodeUnits({stat}, statBytes);
+    EncodeUnits({ground}, groundBytes);
+    EncodeUnits({none}, noneBytes);
+
+    CHECK(noneBytes.size() < statBytes.size());
+    CHECK(statBytes.size() < groundBytes.size());
+    // The base is 21 fields; the ground arm is 86 more, most of them 4 bytes.
+    CHECK(groundBytes.size() - statBytes.size() > 86 * 1);
+}
+
+TEST_CASE("option A: an unknown move-type discriminant is a refusal") {
+    // There is no way to skip an arm of unknown length, so a payload written
+    // by a binary with a different move-type set has to fail at the tag rather
+    // than at a garbled field several hundred bytes later.
+    UnitState u = loudUnit();
+    u.move = loudMove(movetypesnapshot::Kind::Ground);
+
+    std::vector<uint8_t> bytes;
+    EncodeUnits({u}, bytes);
+
+    std::vector<UnitState> ref;
+    std::string err;
+    REQUIRE_MESSAGE(DecodeUnits(bytes.data(), bytes.size(), ref, err), err);
+
+    // The discriminant is the last byte the unit writes before its move arm;
+    // find it by re-encoding the same unit with a different kind and taking
+    // the first byte that differs.
+    UnitState other = u;
+    other.move.kind = static_cast<uint8_t>(movetypesnapshot::Kind::Static);
+    std::vector<uint8_t> otherBytes;
+    EncodeUnits({other}, otherBytes);
+
+    size_t at = 0;
+    while (at < bytes.size() && at < otherBytes.size() && bytes[at] == otherBytes[at]) ++at;
+    REQUIRE(at < bytes.size());
+    CHECK(bytes[at] == static_cast<uint8_t>(movetypesnapshot::Kind::Ground));
+
+    std::vector<uint8_t> bad = bytes;
+    bad[at] = 99;
+    std::vector<UnitState> out;
+    std::string err2;
+    CHECK_FALSE(DecodeUnits(bad.data(), bad.size(), out, err2));
+
+    // And it has to fail AT THE TAG. Without the tag check the decode still
+    // fails - but only by accident, because the arm it skipped leaves unread
+    // trailing bytes at the end of the section, which is a length coincidence
+    // and not a check: a payload whose arms happened to balance would decode
+    // into a silently wrong world. Checked with the guard removed: the case
+    // above passes either way, this line is the one that does not.
+    INFO("error was: " << err2);
+    CHECK(err2.find("truncated") != std::string::npos);
+    CHECK(err2.find("trailing") == std::string::npos);
 }
 
 TEST_CASE("task 1c: the teams section round-trips every field") {

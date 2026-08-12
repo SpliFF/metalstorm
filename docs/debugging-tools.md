@@ -765,8 +765,10 @@ it is before GameStart, so the comparison would be two empty worlds agreeing.
 
 **What is measured rather than asserted:** how far the two continuations' unit
 transforms drift apart. A resumed world is *world*-identical, not *track*-identical —
-`inCommand` is forced false and no `AMoveType` state is captured, so every unit under
-a move order re-plans (PLAN-persistence §7.1c, decision Q-P2 option D). The verdict
+`inCommand` is forced false, so every unit under a move order re-enters its front
+command and re-plans (PLAN-persistence §7.1c, decision Q-P2 option D). `AMoveType`
+state *is* captured as of option A (2026-08-12) and it made no difference to this
+number: the re-entry is what re-plans, not the lost move state. The verdict
 line carries the number on a pass as well as a failure:
 
 ```

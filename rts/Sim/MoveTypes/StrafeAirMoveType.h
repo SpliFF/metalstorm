@@ -55,6 +55,10 @@ private:
 	bool HandleCollisions(bool checkCollisions);
 
 public:
+	movetypesnapshot::Kind SnapshotKind() const override { return movetypesnapshot::Kind::StrafeAir; }
+	void SnapshotCapture(movetypesnapshot::MoveTypeState& s) const override;
+	void SnapshotApply(const movetypesnapshot::MoveTypeState& s) override;
+
 	int maneuverBlockTime = 0;
 	int maneuverState = MANEUVER_FLY_STRAIGHT;
 	int maneuverSubState = 0;

@@ -55,6 +55,7 @@
 #include "Server/StandingOrders.h"   // StandingOrder(Conditions) (census)
 #include "Server/OrgGroups.h"        // OrgGroup, Directive (census)
 #include "Lua/LuaSnapshotState.h"    // luasnapshot::Value (task 1d)
+#include "Sim/MoveTypes/MoveTypeSnapshot.h"  // movetypesnapshot::MoveTypeState (option A)
 
 #include <cstdint>
 #include <string>
@@ -344,6 +345,14 @@ struct UnitState {
     /// tick after a resume even when not one unit has moved. Recoil captures the
     /// same thing (`CR_MEMBER(activeUnits)`).
     uint32_t activeIndex = 0;
+
+    /// This unit's move type (PLAN-persistence §7.1c option A). §7.1c's
+    /// decision 1 stands — `inCommand` is still forced false and the front
+    /// command still rebuilds the *goal* — but everything between the goal and
+    /// the wheels (current speed, turn speed, the waypoint pair, an aircraft's
+    /// flight state) used to start at its constructor value, so a restored unit
+    /// stood still until its next SlowUpdate and then accelerated from zero.
+    movetypesnapshot::MoveTypeState move;
 };
 
 // ──────────── Task 1e: the features section (§7.1e) ────────────
@@ -549,6 +558,16 @@ int RulesParam(const RulesParamState& p);
 int Stats(const TeamStatsState& s);
 int Res(const ResPair& r);
 int LuaValue(const luasnapshot::Value& v);
+/// Option A's six structs. Split per class rather than one count for the
+/// tagged whole, so a field added to (say) CStrafeAirMoveType names the arm it
+/// belongs to in the failure instead of moving one aggregate number.
+int MoveBase(const movetypesnapshot::BaseState& b);
+int MoveGround(const movetypesnapshot::GroundState& g);
+int MoveAir(const movetypesnapshot::AirState& a);
+int MoveHover(const movetypesnapshot::HoverState& h);
+int MoveStrafe(const movetypesnapshot::StrafeState& f);
+int MoveScript(const movetypesnapshot::ScriptState& c);
+int MoveType_(const movetypesnapshot::MoveTypeState& m);
 } // namespace census
 
 class SimSnapshotSerializer : public gamestate::ISimSerializer {
