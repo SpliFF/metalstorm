@@ -51,6 +51,25 @@ describe('atlasSpecFor', () => {
         expect(layout.pitchBins).toBe(3);
     });
 
+    // `centreY` is the ground-anchor LIFT, and it is the field on this seam
+    // with the quietest failure: drop it and every card falls back to
+    // `height/2`, which hovers the prop instead of erroring. The shipped
+    // vegetation atlases are framed on the model's bounding-SPHERE centre, so
+    // the two differ a lot — bush_scrub declares 10.65 against a height of
+    // 44.61, i.e. `height/2` would float it ~11.7 elmos off the ground.
+    // (`bake_impostors.py --verify` pins the other end: that the sheets really
+    // were baked through the width/height/centreY the manifest declares.)
+    it('carries the manifest’s centreY through as the card lift', () => {
+        expect(specFor({ width: 44.611, height: 44.611, centreY: 10.6539 }).lift)
+            .toBeCloseTo(10.6539, 6);
+    });
+
+    it('leaves the lift undefined when the manifest declares no centreY', () => {
+        // Undefined (not 0) matters: the consumers spell the fallback
+        // `lift ?? height * 0.5`, and a 0 would pin every card at the ground.
+        expect(specFor({ yawBins: 8, pitchBins: 3 }).lift).toBeUndefined();
+    });
+
     it('falls back to the model extents and derives the atlas url from the stem', () => {
         const spec = specFor({});
         expect(spec.width).toBe(40);

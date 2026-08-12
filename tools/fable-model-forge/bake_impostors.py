@@ -27,10 +27,17 @@ manifest `feature-renderer.ts` prefers (one request per models dir instead of
 a HEAD probe + a sidecar fetch per feature type), and the only place a
 per-def `impostorDistance` can be authored.
 
+`--verify DIR` checks a finished package back: that `impostors.json` still
+describes the models it names, and that the baked pixels actually land inside
+the frame it declares. See `verify_manifest()` for why the second half is not
+optional — `centreY` is the ground-anchor lift, and getting it wrong hovers
+every prop without raising anything.
+
 Usage:
     python3 bake_impostors.py out/tree_conifer.gltf [--cell 128] [--out DIR]
                               [--diffuse PATH] [--convention vegetation]
     python3 bake_impostors.py --manifest out/            # fold sidecars
+    python3 bake_impostors.py --verify out/              # check the package
 then encode `<stem>_impostor.png` -> `.ktx2` (encode_sprites.mjs, or
 tools/textureconverter --encoding uastc).
 """
@@ -40,6 +47,9 @@ import argparse
 import glob
 import json
 import os
+import shutil
+import subprocess
+import tempfile
 from dataclasses import replace
 
 import numpy as np
@@ -135,6 +145,33 @@ def _face_colors(pos, nrm, uv, idx, tex: np.ndarray) -> np.ndarray:
     return np.clip(base * (AMBIENT + (1.0 - AMBIENT) * lam)[:, None], 0, 255)
 
 
+def framing(pos):
+    """The square frame every cell of an atlas is rendered through: the model's
+    bounding-box centre, and one half-extent shared by all cells so the quad
+    size is a single constant the renderer can scale by (the bounding sphere,
+    plus 2% breathing room).
+
+    This is the single definition of the framing. `bake()` renders through it
+    and `verify_manifest()` re-derives the manifest from it, so a change here
+    can never leave the two disagreeing about where the ground point sits.
+    Returns (centre xyz, half).
+    """
+    mins, maxs = pos.min(axis=0), pos.max(axis=0)
+    centre = np.array([(mins[0] + maxs[0]) / 2, (mins[1] + maxs[1]) / 2,
+                       (mins[2] + maxs[2]) / 2])
+    return centre, float(np.linalg.norm(maxs - centre)) * 1.02
+
+
+def cell_basis(conv: Convention, col: int, row: int):
+    """Camera basis (right, up, fwd) for one cell. The convention owns which
+    direction the cell is viewed from; the camera looks back down the negative
+    of the instance -> camera direction it hands out."""
+    fwd = -np.asarray(conv.cam_dir(col, row), dtype=float)
+    right = np.cross(fwd, np.array([0.0, 1.0, 0.0]))
+    right /= np.linalg.norm(right)
+    return right, np.cross(right, fwd), fwd
+
+
 def _render_cell(pos, idx, fcol, right, up, fwd, centre, half, res):
     """Orthographic z-buffered render of one cell. `half` is the half-extent
     of the framed square in world units. Returns (rgb uint8, alpha uint8)."""
@@ -204,25 +241,14 @@ def bake(gltf_path: str, diffuse_png: str | None = None,
     tex = np.asarray(Image.open(diffuse_png).convert('RGB'))
     fcol = _face_colors(pos, nrm, uv, idx, tex)
 
-    mins, maxs = pos.min(axis=0), pos.max(axis=0)
-    centre = np.array([(mins[0] + maxs[0]) / 2, (mins[1] + maxs[1]) / 2,
-                       (mins[2] + maxs[2]) / 2])
-    # One framing for every cell so the quad size is a single constant the
-    # renderer can scale by: the bounding sphere, plus 2% breathing room.
-    half = float(np.linalg.norm(maxs - centre)) * 1.02
+    centre, half = framing(pos)
 
     res = cell * SUPERSAMPLE
     atlas = Image.new('RGBA', (conv.yaw_bins * cell, conv.rows * cell),
                       (0, 0, 0, 0))
     for r in range(conv.pitch_bins):
         for c in range(conv.yaw_bins):
-            # The convention owns which direction this cell is viewed from; it
-            # hands back the instance -> camera direction, and the camera looks
-            # back down the negative of it.
-            fwd = -np.asarray(conv.cam_dir(c, r), dtype=float)
-            right = np.cross(fwd, np.array([0.0, 1.0, 0.0]))
-            right /= np.linalg.norm(right)
-            up = np.cross(right, fwd)
+            right, up, fwd = cell_basis(conv, c, r)
             rgb, alpha = _render_cell(pos, idx, fcol, right, up, fwd,
                                       centre, half, res)
             img = Image.fromarray(
@@ -330,6 +356,134 @@ def write_manifest(out_dir: str, stems: list[str] | None = None) -> str:
     return path
 
 
+# ── manifest verification ───────────────────────────────────────────────
+#
+# `centreY` is the card LIFT: the runtime centres a `height`-tall quad that
+# many elmos above the placement point. It is NOT "half the model height" —
+# it only coincides with that when the model's origin sits on its own base,
+# and it is flatly wrong whenever the baker keeps a margin or fits several
+# views to one shared scale. That mistake shipped once on the unit atlases
+# (feet ~18% of a cell above the bottom edge, so `height/2` hovered every
+# sprite ~2 elmos), and it is invisible: nothing errors, the props just float.
+#
+# So the check below refuses to be a formula agreeing with itself. It has two
+# halves, and the second is the one that matters:
+#
+#   A. manifest vs model — re-derive `framing()` and confirm the manifest's
+#      width/height/centreY are the numbers this model actually implies.
+#      Catches a stale manifest, or a field dropped by `write_manifest()`
+#      (which hand-picks fields, and has silently dropped one before).
+#   B. manifest vs PIXELS — project the geometry through each cell's own
+#      basis and confirm the baked alpha lands where that framing says it
+#      must, on every cell. This is what makes A more than a tautology: it
+#      proves the shipped sheet was baked through the framing the manifest
+#      now describes, and it re-checks the convention's cell_origin/cam_dir
+#      at the same time.
+#
+# Observed agreement on the eleven shipped vegetation atlases is within
+# 0.91 px across all 264 cells, so the 2 px tolerance is slack. For scale, a
+# `height/2` lift on the smallest prop would show up as a ~33 px shift.
+
+VERIFY_ALPHA = 102          # the client alpha-tests at ~0.4; below this is the
+                            # LANCZOS/KTX2 bleed skirt, not the drawn shape.
+VERIFY_TOL_PX = 2.0
+
+
+def _decoded_atlas(out_dir: str, stem: str, tmp: str):
+    """The baked sheet as RGBA. Prefers the PNG the baker leaves with
+    `--keep-png`; shipped map dirs carry only the `.ktx2`, so fall back to the
+    KTX-Software CLI. Returns None if neither is available — the caller then
+    SKIPS loudly rather than reporting a pass it did not make."""
+    png = os.path.join(out_dir, f'{stem}_impostor.png')
+    if os.path.exists(png):
+        return np.asarray(Image.open(png).convert('RGBA'))
+    ktx2 = os.path.join(out_dir, f'{stem}_impostor.ktx2')
+    if not os.path.exists(ktx2) or not shutil.which('ktx'):
+        return None
+    dst = os.path.join(tmp, f'{stem}.png')
+    r = subprocess.run(['ktx', 'extract', '--level', '0', ktx2, dst],
+                       capture_output=True)
+    if r.returncode != 0 or not os.path.exists(dst):
+        return None
+    return np.asarray(Image.open(dst).convert('RGBA'))
+
+
+def verify_manifest(out_dir: str, conv: Convention = VEGETATION) -> bool:
+    """Check `impostors.json` against the models it describes and against the
+    baked pixels. Returns True when every atlas passes. Prints one line per
+    atlas; a skipped pixel check is reported as SKIP, never as a pass."""
+    path = os.path.join(out_dir, 'impostors.json')
+    if not os.path.exists(path):
+        print(f'[verify] no impostors.json in {out_dir}')
+        return False
+    with open(path) as f:
+        atlases = json.load(f).get('atlases', {})
+
+    ok = True
+    with tempfile.TemporaryDirectory() as tmp:
+        for stem, entry in sorted(atlases.items()):
+            gltf = os.path.join(out_dir, f'{stem}.gltf')
+            if not os.path.exists(gltf):
+                print(f'[verify] {stem:22} FAIL  no {stem}.gltf to check against')
+                ok = False
+                continue
+            pos = load_model(gltf)[0]
+            centre, half = framing(pos)
+
+            # A. manifest vs model.
+            bad = [f'{k}={entry.get(k)!r} want {want:.6f}'
+                   for k, want in (('width', 2 * half), ('height', 2 * half),
+                                   ('centreY', float(centre[1])))
+                   if not isinstance(entry.get(k), (int, float))
+                   or abs(entry[k] - want) > 1e-6]
+            if bad:
+                print(f'[verify] {stem:22} FAIL  manifest vs model: '
+                      + '; '.join(bad))
+                ok = False
+                continue
+
+            # B. manifest vs pixels, every cell.
+            img = _decoded_atlas(out_dir, stem, tmp)
+            if img is None:
+                print(f'[verify] {stem:22} OK (geometry)  SKIP pixels: no '
+                      f'{stem}_impostor.png and no `ktx` CLI to decode the .ktx2')
+                continue
+            cell = img.shape[0] // conv.rows
+            worst, worst_at = -1e9, ''
+            for r in range(conv.pitch_bins):
+                for c in range(conv.yaw_bins):
+                    x0, y0 = conv.cell_origin(c, r)
+                    mask = img[y0:y0 + cell, x0:x0 + cell, 3] > VERIFY_ALPHA
+                    if not mask.any():
+                        continue
+                    rows = np.nonzero(mask.max(axis=1))[0]
+                    cols = np.nonzero(mask.max(axis=0))[0]
+                    right, up, _ = cell_basis(conv, c, r)
+                    rel = pos - centre
+                    py = (0.5 - ((rel @ up) / half) * 0.5) * cell
+                    px = (((rel @ right) / half) * 0.5 + 0.5) * cell
+                    # Only OVERSHOOT is a failure: baked content outside the
+                    # frame the manifest declares means the two disagree. A
+                    # shortfall is just a thin silhouette fading under the
+                    # alpha test, which is benign.
+                    for over in (py.min() - rows[0], (rows[-1] + 1) - py.max(),
+                                 px.min() - cols[0], (cols[-1] + 1) - px.max()):
+                        if over > worst:
+                            worst, worst_at = over, f'cell c{c} r{r}'
+            if worst > VERIFY_TOL_PX:
+                print(f'[verify] {stem:22} FAIL  pixels sit {worst:.2f} px '
+                      f'outside the declared frame ({worst_at}) — the sheet was '
+                      f'not baked through this width/height/centreY')
+                ok = False
+            else:
+                print(f'[verify] {stem:22} OK    geometry + pixels '
+                      f'(worst overshoot {worst:+.2f} px of {VERIFY_TOL_PX})')
+
+    print(f'[verify] {out_dir}: {"PASS" if ok else "FAIL"} '
+          f'({len(atlases)} atlas(es))')
+    return ok
+
+
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
     ap.add_argument('gltf', nargs='?',
@@ -343,10 +497,16 @@ if __name__ == '__main__':
                     help='atlas arc to bake on (default: %(default)s)')
     ap.add_argument('--manifest', metavar='DIR', default=None,
                     help='fold existing sidecars in DIR into impostors.json')
+    ap.add_argument('--verify', metavar='DIR',
+                    help="check DIR's impostors.json against the models AND "
+                         'the baked pixels; exits nonzero on disagreement')
     a = ap.parse_args()
-    if a.manifest:
+    if a.verify:
+        raise SystemExit(
+            0 if verify_manifest(a.verify, CONVENTIONS[a.convention]) else 1)
+    elif a.manifest:
         write_manifest(a.manifest)
     elif a.gltf:
         bake(a.gltf, a.diffuse, a.out, a.cell, CONVENTIONS[a.convention])
     else:
-        ap.error('give a model to bake, or --manifest DIR')
+        ap.error('give a model to bake, --manifest DIR, or --verify DIR')
