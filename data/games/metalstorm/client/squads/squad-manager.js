@@ -4,6 +4,7 @@
 import { Squad, setPerfProbe, getPerfProbe, PROBE_TERMS, setPerfFix, getPerfFixes } from './squad.js';
 import { DEFAULT_CONFIG, linearCount } from './config.js';
 import { BigUnitRepulsor } from './big-unit-repulsor.js';
+import { createGovernorState, updateGovernor, strideForLevel } from './governor.js';
 import { createPatchSet } from './patches.js';
 
 // Cell-index packing stride for the numeric spatial-hash key (see _key).
@@ -86,6 +87,27 @@ export class SquadManager {
     this._lodCentroidMembers = 0;
     this._lodIconSquads = 0;
     this._lodIconMembers = 0;      // members still DRAWN by the icon squads
+
+    // Frame-time governor (PLAN-metalstorm-squad-performance.md §12c, §14 S2)
+    // — the hardware-adaptive degrade ladder. It composes with the member
+    // budget above rather than competing with it: the budget decides WHICH
+    // TIER each squad is in (and owns every release/rebuild), the governor
+    // decides HOW MUCH WORK a `full`-tier squad gets this frame. Nothing here
+    // ever writes `sq.lod`.
+    //
+    // `_lastFlushMs` is the most recent backend flush cost, reported by the
+    // render adapter through recordFlush() — the other half of the squad
+    // system's real per-frame cost, which update() cannot time itself. Stays 0
+    // if an adapter never reports it, which only makes the sample an
+    // under-estimate (the ladder then reacts to update() cost alone).
+    this._governor = createGovernorState();
+    this._lastFlushMs = 0;
+    // Time-slicing round counter (§12d): `fullIndex % stride === frameNo %
+    // stride` partitions the full squads round-robin. Its own counter rather
+    // than a wall clock, so a fake-clock test partitions identically.
+    this._frameNo = 0;
+    this._stepped = { full: 0, centroid: 0, icon: 0 };
+    this._coasted = { full: 0, centroid: 0, icon: 0 };
   }
 
   // --- reduced-detail member budget (PLAN-perf M20) ------------------------
@@ -601,9 +623,22 @@ export class SquadManager {
 
   // --- per-frame ----------------------------------------------------------
 
-  /** Drive all squads one render step. `dt` seconds. */
+  /** Drive all squads one render step. `dt` seconds.
+   *
+   *  Frame-time governor (§12c, §14 S2): `level` is the ladder DECIDED AT THE
+   *  END OF THE PREVIOUS FRAME (this frame's own cost isn't known yet — the
+   *  same one-frame lag as any measure-then-react controller, absorbed by the
+   *  asymmetric hysteresis). It drives four independent degrades, each gated at
+   *  its own threshold so a mild overload only pays for what it needs: L1/L2/L3
+   *  alter what `_groundStep`/`_navalStep` skip per member, L2 additionally
+   *  skips the grid rebuild itself (nothing would query it), L4-L6 time-slice
+   *  WHICH full squads run their per-member loop this frame vs `coast()` (§12d),
+   *  and L6 additionally forces the farthest third of full squads to a cheap
+   *  centroid step whenever it IS their turn — never touching `lod`, which
+   *  stays the member budget's alone (see _applyLodBudget). */
   update(dt) {
     this._now += dt;
+    const frameStart = performance.now();
     this._fastNb = this.cfg.fastNeighbours !== false;
     // Before _rebuildGrid: the grid only holds `full` squads' members, so the
     // tier assignment has to be settled or the grid and the steerers disagree
@@ -614,7 +649,20 @@ export class SquadManager {
     const cap = Math.max(0, this.cfg.neighbourCap | 0);
     if (this._nbBuf.length < cap) this._nbBuf.length = cap;
     this._tickWreckPool();
-    this._rebuildGrid();
+
+    const level = this._governor.ladderLevel;
+    const skipSeparationEntirely = level >= 2;
+    const stride = strideForLevel(level);
+
+    // Independent of the grid, so wreck expiry must not stall while L2+ is
+    // engaged — otherwise `_wrecks` grows for as long as the overload lasts.
+    this._pruneWrecks();
+    if (skipSeparationEntirely) {
+      this._grid.clear();
+      this._denseAgg.clear();
+    } else {
+      this._rebuildGrid();
+    }
     for (const bu of this._bigUnitList) bu.update(dt);
     // Both queries fill `query.buf` and return the neighbour count, so the
     // steerers have one call shape regardless of which path is live.
@@ -627,7 +675,102 @@ export class SquadManager {
           return n;
         };
     query.buf = this._nbBuf;
-    for (const sq of this.squads.values()) sq.update(dt, this._now, query, this.passability, this._bigUnitList);
+
+    // L6's "demote farthest third" (§12c's ladder table) ranks full squads by
+    // the member budget's own camera distance (`_lodD2`, refreshed on its
+    // re-rank cadence) rather than a second camera pass. With no view fed in,
+    // `_lodD2` is undefined for every squad and there is nothing to rank — the
+    // demotion is then skipped entirely, which is the conservative choice
+    // (never demote what cannot be ordered) and keeps a headless test that
+    // drives update() directly on the honest path.
+    let farthestThird = null;
+    if (level >= 6 && this._viewSet) {
+      const full = [];
+      for (const sq of this.squads.values()) {
+        if (sq.lod === 'full' && typeof sq._lodD2 === 'number') full.push(sq);
+      }
+      // Squad COUNT here, not member count — an O(squads log squads) sort only
+      // at the ladder's top level, dwarfed by the steering it replaces.
+      full.sort((a, b) => b._lodD2 - a._lodD2);   // farthest first
+      farthestThird = new Set();
+      const n = Math.floor(full.length / 3);
+      for (let i = 0; i < n; i++) farthestThird.add(full[i].id);
+    }
+
+    const stepped = this._stepped, coasted = this._coasted;
+    stepped.full = 0; stepped.centroid = 0; stepped.icon = 0;
+    coasted.full = 0; coasted.centroid = 0; coasted.icon = 0;
+    let fullIndex = 0;
+    const frameNo = ++this._frameNo;
+
+    for (const sq of this.squads.values()) {
+      const tier = sq.lod;
+      if (tier !== 'full') {
+        // centroid/icon already cost ~nothing per member — never time-sliced,
+        // always driven through the cheap path.
+        sq.update(dt, this._now, query, this.passability, this._bigUnitList);
+        if (coasted[tier] != null) coasted[tier]++;
+        continue;
+      }
+
+      // Transport (BOARDING/LOADED/UNLOADING) owns its own per-member stepping
+      // inside Squad._updateTransport and is rare + latency-sensitive — it
+      // always gets a real frame, bypassing the schedule.
+      const bypassSlicing = sq.transportState !== 'FREE';
+      const myTurn = bypassSlicing || stride <= 1 || (fullIndex % stride) === (frameNo % stride);
+      fullIndex++;
+
+      if (myTurn) {
+        // Real elapsed time since this squad last actually stepped, so a
+        // half-rate squad integrates double dt and its motion speed is
+        // preserved — only the update granularity drops (§12d).
+        const elapsed = sq._lastSteppedAt == null ? dt : this._now - sq._lastSteppedAt;
+        const forceCentroid = !bypassSlicing && farthestThird !== null && farthestThird.has(sq.id);
+        sq.update(elapsed, this._now, query, this.passability, this._bigUnitList, level, forceCentroid);
+        sq._lastSteppedAt = this._now;
+        stepped.full++;
+      } else {
+        sq.coast(this._now);
+        coasted.full++;
+      }
+    }
+
+    // Governor decision for NEXT frame (§12c): this frame's own update() cost
+    // plus the most recent flush the adapter reported.
+    const sampleMs = (performance.now() - frameStart) + this._lastFlushMs;
+    updateGovernor(this._governor, sampleMs, dt * 1000, this.cfg);
+  }
+
+  /** External timing hook: the render adapter owns the backend flush, so it is
+   *  the only place that can time it. Reported here so the governor's cost
+   *  sample covers the whole squad system and not just update() (§12c). */
+  recordFlush(ms) {
+    this._lastFlushMs = ms;
+  }
+
+  /** Governor read-out (§12c) — what the ladder is doing and why, so a session
+   *  can watch a machine settle ("squadCostMs converges at/under squadBudgetMs,
+   *  ladderLevel stabilises") and an A/B can check the ladder actually moved.
+   *
+   *  NOT the full §14 S0 permanent counter set (membersStepped, tierCounts,
+   *  neighbourChecks, matrixWrites, gridRebuildMs/stepMs/flushMs): that half of
+   *  S0 was lost by the same merge as S2 (`1baa239a5e`) and is filed separately
+   *  in PLAN-metalstorm-squad-performance.md §14 — this dump reports only what
+   *  is actually measured today rather than zero-filling fields nothing
+   *  computes. `lodStats` is the tier read-out in the meantime. */
+  perfDump() {
+    return {
+      ladderLevel: this._governor.ladderLevel,
+      stepped: { ...this._stepped },
+      coasted: { ...this._coasted },
+      stride: strideForLevel(this._governor.ladderLevel),
+      squadCostMs: this._governor.costEma,
+      squadBudgetMs: this._governor.budgetMs,
+      squadCostP95Ms: this._governor.p95CostMs,
+      frameIntervalP50Ms: this._governor.p50FrameIntervalMs,
+      escalateStreak: this._governor.escalateStreak,
+      relaxStreak: this._governor.relaxStreak,
+    };
   }
 
   // --- spatial hash (PLAN-metalstorm-squad-collision.md §1) ---------------
@@ -638,6 +781,13 @@ export class SquadManager {
   // straddling the origin is double-width. See squad-collision.test.js's
   // negative-coordinate case.
 
+  // Inserts every alive+non-released member of every full-LOD squad, whether
+  // that squad is stepping or coasting this frame (§14 S2) — a coasting squad's
+  // members still occupy space and must still repel others; only whether a
+  // squad runs its OWN separation query is time-sliced. Skippable in its
+  // entirety at governor ladder L2+ (§12c: separation is dropped for every full
+  // squad then, so nothing would query the grid) — see update().
+  // Expects `_pruneWrecks` to have run already this frame.
   _rebuildGrid() {
     this._grid.clear();
     this._denseAgg.clear();
@@ -646,16 +796,20 @@ export class SquadManager {
       for (const m of sq.memberPositions()) this._insert(m.x, m.z, m);
     }
     for (const r of this._repulsors.values()) this._insert(r.x, r.z, r);
+    // Wrecks: collision-active only within their post-spawn grace window (§5).
+    for (const w of this._wrecks) this._insert(w.x, w.z, w);
+  }
 
-    // Wrecks: collision-active only within their post-spawn grace window
-    // (§5). Compact the array in place as we go, so an expired wreck is
-    // dropped — not merely skipped — and can never be re-inserted later.
+  // Collision-grace wreck expiry (§5) — split out of _rebuildGrid so it still
+  // runs on every frame the grid rebuild is skipped (governor L2+, §14 S2).
+  // Compacts the array in place, so an expired wreck is dropped — not merely
+  // skipped — and can never be re-inserted later.
+  _pruneWrecks() {
     let keep = 0;
     for (let i = 0; i < this._wrecks.length; i++) {
       const w = this._wrecks[i];
       if (w.until <= this._now) continue;
       this._wrecks[keep++] = w;
-      this._insert(w.x, w.z, w);
     }
     this._wrecks.length = keep;
   }

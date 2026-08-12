@@ -121,6 +121,23 @@ export default defineConfig({
     },
     envDir: resolve(__dirname, '..'),
     test: {
-        include: ['src/**/*.test.ts'],
+        // Two projects, so the ONE gate command (`npx vitest run` from client/)
+        // covers both trees. The native-game JS under data/games/*/client is a
+        // separate ESM module tree with no build step and its own vitest config
+        // — it used to be reachable only by naming that config by hand, which
+        // is how PLAN-metalstorm-squad-performance.md §14 S2's 13 governor tests
+        // sat red and unnoticed for a week after a merge dropped the code they
+        // covered. A suite in no gate is not a gate.
+        projects: [
+            { extends: true, test: { name: 'client', include: ['src/**/*.test.ts'] } },
+            {
+                test: {
+                    name: 'metalstorm-game',
+                    root: resolve(__dirname, '../data/games/metalstorm/client'),
+                    include: ['**/*.test.js'],
+                    environment: 'node',
+                },
+            },
+        ],
     },
 });

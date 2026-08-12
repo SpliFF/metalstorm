@@ -16,6 +16,7 @@ import { SquadManager } from './squad-manager.js';
 import { Squad } from './squad.js';
 import { DEFAULT_CONFIG, linearCount } from './config.js';
 import { NullRenderBackend } from './render-backend.js';
+import { createPassability } from './passability.js';
 
 function makeCfg(overrides = {}) {
   return { ...DEFAULT_CONFIG, countCurve: linearCount, ...overrides };
@@ -294,5 +295,161 @@ describe('SquadManager time-slicing schedule (§12d, §14 S2)', () => {
     expect(dump.ladderLevel).toBe(mgr._governor.ladderLevel);
     expect(typeof dump.squadCostMs).toBe('number');
     expect(typeof dump.squadBudgetMs).toBe('number');
+  });
+
+  it('recordFlush is folded into the governor cost sample, so the ladder measures the whole system', () => {
+    // The adapter owns backend.flush(), so update() cannot time it; a governor
+    // that ignored the report would under-read its own cost and escalate late.
+    // Two managers, identical work, one told the flush cost 50ms/frame.
+    const quiet = managerWithSquads(2);
+    const heavy = managerWithSquads(2);
+    for (let i = 0; i < 40; i++) {
+      quiet.update(1 / 30);
+      heavy.recordFlush(50);
+      heavy.update(1 / 30);
+    }
+    expect(heavy.perfDump().squadCostMs).toBeGreaterThan(quiet.perfDump().squadCostMs + 10);
+    expect(heavy.perfDump().ladderLevel).toBeGreaterThan(0);
+    expect(quiet.perfDump().ladderLevel).toBe(0);
+  });
+});
+
+// --- the ladder's own rungs -------------------------------------------------
+// §12c's degrade table is the whole point of the governor, and it was the half
+// with no coverage at all: the level could move without any level DOING
+// anything. Each case here fails if its rung is a no-op.
+
+describe('SquadManager degrade ladder (§12c table)', () => {
+  // The rungs are probed by BEHAVIOUR, not by spying on `separate`: squad.js
+  // imports it as a direct ESM binding, so a namespace spy would not be the
+  // function the steerer actually calls and the test would pass either way.
+
+  /** Two squads 6 elmos apart — well inside separationRadius (14), so every
+   *  member of one is a live foreign neighbour of the other. */
+  function overlappingPair(overrides = {}) {
+    const mgr = new SquadManager(new NullRenderBackend(), overrides);
+    mgr.syncSquad(0, { x: 0, y: 0, z: 0, heading: 0, health: 100, maxHealth: 100 }, makeDef());
+    mgr.syncSquad(1, { x: 6, y: 0, z: 0, heading: 0, health: 100, maxHealth: 100 }, makeDef());
+    return mgr;
+  }
+
+  /** How far squad 0's members end up from their own slot targets after
+   *  `frames` frames. Arrival alone parks a member exactly on its slot, so any
+   *  standing offset is separation pressure — and with the two squads' slots
+   *  6 elmos apart, foreign pressure is the only thing that can produce it. */
+  function slotOffsetAfter(level, frames = 30) {
+    const mgr = overlappingPair();
+    mgr._governor.ladderLevel = level;
+    for (let f = 0; f < frames; f++) mgr.update(1 / 30);
+    const sq = mgr.squads.get(0);
+    let sum = 0, n = 0;
+    for (const m of sq.members) {
+      if (!m.alive) continue;
+      const slot = sq.slots[m.slot];
+      const c = Math.cos(sq.heading), s = Math.sin(sq.heading);
+      const tx = sq.cx + (slot.x * c + slot.z * s);
+      const tz = sq.cz + (-slot.x * s + slot.z * c);
+      sum += Math.hypot(m.x - tx, m.z - tz); n++;
+    }
+    return sum / n;
+  }
+
+  it('L1 drops inter-squad separation and KEEPS intra-squad; L2 drops both', () => {
+    // One metric, three rungs, so each rung has to be doing its own distinct
+    // thing: 0.75 elmos of standing offset with both terms live, 0.38 with only
+    // the squad's own members repelling, exactly 0 with separation off.
+    const atL0 = slotOffsetAfter(0);
+    const atL1 = slotOffsetAfter(1);
+    const atL2 = slotOffsetAfter(2);
+    expect(atL0).toBeGreaterThan(atL1 * 1.5);   // the foreign push is real and L1 sheds it
+    expect(atL1).toBeGreaterThan(0.05);         // and L1 keeps the squad's own
+    expect(atL2).toBe(0);                       // L2 sheds that too
+  });
+
+  it('L2 also skips the grid rebuild that fed separation', () => {
+    const l1 = overlappingPair();
+    l1._governor.ladderLevel = 1;
+    l1.update(1 / 30);
+    expect(l1._grid.size).toBeGreaterThan(0);   // control: one rung down builds it
+
+    const mgr = overlappingPair();
+    mgr._governor.ladderLevel = 2;
+    mgr.update(1 / 30);
+    expect(mgr._grid.size).toBe(0);             // nothing would have queried it
+  });
+
+  it('a wreck still expires while L2 holds the grid rebuild off', () => {
+    // The grace list is pruned by _pruneWrecks, not by the (skipped) rebuild —
+    // otherwise `_wrecks` grows for as long as the overload lasts.
+    const mgr = overlappingPair();
+    mgr._governor.ladderLevel = 2;
+    mgr._wrecks.push({ x: 0, z: 0, radius: 8, until: mgr._now + 0.01 });
+    mgr.update(1 / 30);
+    expect(mgr._wrecks.length).toBe(0);
+  });
+
+  it('L3 drops the potential field; L2 (which drops separation) still runs it', () => {
+    // The real grid off a flat heightmap, not a mock — `_potentialField` and
+    // `_isConstrained` both consult it and a stub would only prove the stub.
+    const flatGrid = () => createPassability(
+      { bounds: { minX: 0, minZ: 0, maxX: 2000, maxZ: 2000 }, heightAt: () => 10, waterLevel: 0 },
+      DEFAULT_CONFIG);
+    const pfSpy = vi.spyOn(Squad.prototype, '_potentialField');
+
+    const l2 = overlappingPair();
+    l2.setPassability(flatGrid());
+    l2._governor.ladderLevel = 2;
+    l2.update(1 / 30);
+    const atL2 = pfSpy.mock.calls.length;
+
+    pfSpy.mockClear();
+    const l3 = overlappingPair();
+    l3.setPassability(flatGrid());
+    l3._governor.ladderLevel = 3;
+    l3.update(1 / 30);
+    const atL3 = pfSpy.mock.calls.length;
+    pfSpy.mockRestore();
+
+    expect(atL2).toBeGreaterThan(0);
+    expect(atL3).toBe(0);
+  });
+
+  it('L6 demotes the farthest third of full squads to a centroid step without touching lod', () => {
+    // Needs a camera: the ranking is the member budget's own `_lodD2`, so with
+    // no view fed in there is deliberately nothing to rank.
+    const mgr = new SquadManager(new NullRenderBackend(), { lodFullMemberBudget: 10000 });
+    for (let i = 0; i < 6; i++) {
+      mgr.syncSquad(i, { x: i * 1000, y: 0, z: 0, heading: 0, health: 100, maxHealth: 100 }, makeDef());
+    }
+    mgr.setViewPos(0, 0, 0);   // squads 5 and 4 are the farthest third
+    mgr._governor.ladderLevel = 6;
+    const centroidSpy = vi.spyOn(Squad.prototype, '_updateCentroid');
+
+    // Stride 4 at L6, so run four frames to give every squad its turn.
+    const demoted = new Set();
+    for (let f = 0; f < 4; f++) {
+      centroidSpy.mockClear();
+      mgr.update(1 / 30);
+      for (const inst of centroidSpy.mock.instances) demoted.add(inst.id);
+    }
+    centroidSpy.mockRestore();
+
+    expect(demoted).toEqual(new Set([4, 5]));
+    // The tier itself is untouched — release/rebuild churn stays with the
+    // member budget, never with frame-time pressure.
+    for (const sq of mgr.squads.values()) expect(sq.lod).toBe('full');
+  });
+
+  it('no rung of the ladder ever writes sq.lod', () => {
+    for (let level = 0; level <= 6; level++) {
+      const mgr = new SquadManager(new NullRenderBackend(), { lodFullMemberBudget: 10000 });
+      for (let i = 0; i < 6; i++) {
+        mgr.syncSquad(i, { x: i * 1000, y: 0, z: 0, heading: 0, health: 100, maxHealth: 100 }, makeDef());
+      }
+      mgr.setViewPos(0, 0, 0);
+      mgr._governor.ladderLevel = level;
+      for (let f = 0; f < 4; f++) mgr.update(1 / 30);
+      for (const sq of mgr.squads.values()) expect(sq.lod).toBe('full');
+    }
   });
 });

@@ -263,6 +263,33 @@ export const DEFAULT_CONFIG = {
   // with explicit UnitLoaded/UnitUnloaded callins once streamed — fragile by
   // design.
   transportHeuristicRadius: 40,
+
+  // --- Frame-time governor (PLAN-metalstorm-squad-performance.md §12c,
+  // §14 S2) -----------------------------------------------------------------
+  // Hardware-adaptive by construction: both budget inputs are MEASURED on the
+  // running machine (governor.js), never a squad/member count. A 120 Hz
+  // desktop and a 25 fps laptop steady-state at different ladder levels from
+  // the exact same constants below.
+  //
+  // These five keys, and the SquadManager wiring that reads them, were lost by
+  // the landing merge that brought S2 to main (`1baa239a5e`, 2026-08-06 branch
+  // sweep): it resolved config.js / squad-manager.js / squad.js to main's side
+  // while keeping the branch's new files, so `governor.js` and its 13 tests
+  // landed and everything they drive did not. `>= undefined` is permanently
+  // false, so the ladder could never leave level 0. Do not "tidy" an unused-
+  // looking governor key away — grep governor.js first.
+
+  // Policy, not throughput: how much of a frame squads deserve, and the
+  // floor frame time used to size that share (so a machine bursting well
+  // past 60 fps doesn't get handed an unbounded budget).
+  squadFrameShare: 0.35,
+  frameBudgetCapMs: 33.3,
+  // EMA smoothing for the governor's own cost sample.
+  governorCostEmaAlpha: 0.05,
+  // Asymmetric hysteresis (§12c): escalate fast, relax slow, so the ladder
+  // never oscillates at the budget boundary.
+  governorEscalateFrames: 30,
+  governorRelaxFrames: 240,
 };
 
 // THE routing predicate — canonical single home (PLAN-metalstorm-structure.md

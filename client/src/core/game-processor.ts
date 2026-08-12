@@ -475,6 +475,10 @@ interface SquadSystemHandle {
     /// budget. Optional because data/games/*/client is runtime-served and can
     /// be older than this bundle; gpTickSquads warns once if it is missing.
     setViewPos?(x: number, y: number, z: number): void;
+    /// PLAN-metalstorm-squad-performance.md §12c: backend-flush cost for the
+    /// frame-time governor's sample. Optional for the same runtime-served
+    /// reason as setViewPos — an older module just measures a smaller cost.
+    recordFlush?(ms: number): void;
     update(dt: number): void;
 }
 /// One-time warn latch for a squad module with no M20 `setViewPos`.
@@ -2133,7 +2137,15 @@ function gpTickSquads(dt: number): void {
         }
     }
     gpSquadSystem.update(dt);
-    gpSquadBackend?.flush();
+    // PLAN-metalstorm-squad-performance.md §12c: the frame-time governor's cost
+    // sample is update() + the backend flush, and the flush is owned out here —
+    // update() cannot time it. Without this the ladder still works, it just
+    // under-reads its own cost and escalates later than it should.
+    if (gpSquadBackend) {
+        const t0 = performance.now();
+        gpSquadBackend.flush();
+        gpSquadSystem.recordFlush?.(performance.now() - t0);
+    }
 }
 
 /// Build the passability sampler from the client heightmap and install it, so
