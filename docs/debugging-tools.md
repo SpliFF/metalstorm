@@ -372,6 +372,17 @@ parsed `FinalDump` JSON (or `null` if the run failed before writing one — neve
 faked with zeros). Per-run configs/dumps/db files land under `--out-dir` so nothing
 overwrites between rows.
 
+**Every arm's server output is kept**, passing runs included, at
+`<out-dir>/logs/run-<i>.log` (stdout, then a `--- stderr ---` divider). A dump
+records counters, not warnings, and the warnings are where an arm says it staged
+nothing: three of the four soak-fixture defects below (no scenario, AI slots on
+an empty team, a war that ends) announce themselves in the log and in **no
+counter**, and keeping only a *failed* run's `stderrTail` meant the whole ladder
+was green and silent while measuring an empty world. Budget the disk: a
+Metalstorm arm logs ~3 MB per 4 wall-minutes (≈45 MB/wall-hour), dominated by
+`strategos` re-announcing the same directive — 1 686 copies of one
+`Scouting Meridian Basin` line in 2.7 simulated hours.
+
 The matrix-expansion core (`lib/matrix.mjs`) is pure — no `child_process`/`fs` — and
 covered by `node tools/headless-batch/test/matrix.test.mjs` / `make
 test-headless-batch`, which asserts the PLAN-headless.md §6 "meta" requirement
@@ -523,6 +534,22 @@ clean-looking and worthless report first (measured 2026-08-12, task 4):**
   of its wall ceiling in silence — measured at **24 of 25 wall-minutes**, with
   the dump still reporting `status=wall-ceiling` as though the window had been
   the wall's fault.
+
+**And then the war itself has to not end** (task 4b, T4-3). Fixing the four
+items above only revealed that the fixture's whole premise was wrong: a growth
+ladder wants a window bounded by *wall clock*, and `meridian_basin` is a
+showcase war designed to be won inside one session. The template now stages
+**`meridian_basin_soak`** — the same content (same regions, staging, Reavers,
+sites, civilians, convoy schedule; a spec asserts the parity field by field)
+with **no `victory = true` objective**, which `game_gameover.lua` treats as a
+supported shape: it publishes `war_can_end = 0`, warns once at frame 60, and
+never winds the war down. The engine's last-team-standing fallback is already
+gated off for Metalstorm, so the arm does not end even if a side is wiped;
+the convoy respawn schedule, the Reaver raid slate and
+`objectives/generator.lua` keep the churn running with zero clients attached.
+`stopAt.gameOver` stays set — on this scenario it is a **canary**, not a stop
+condition: an arm that reports `status=game-over` means something re-introduced
+a terminal objective, which is exactly the failure the four items above hid.
 
 **Two counters a client-less ladder can never rule**, so they read `no-signal`
 by construction rather than by ladder length: `StateStreamer::BroadcastRulesParams`

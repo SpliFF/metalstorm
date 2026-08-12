@@ -564,6 +564,45 @@ TEST_CASE("shipped metalstorm scenarios: meridian_basin is RETIRED, so its map "
     CHECK(SD::FindById(found, "meridian_basin") == meridian);
 }
 
+TEST_CASE("shipped metalstorm scenarios: meridian_basin_soak is an ENDLESS "
+          "fixture no boot path can default to") {
+    // PLAN-long-uptime.md §11.5 T4-3 / task 4b. The growth ladder needs a war
+    // bounded by wall clock, and every shipped war is deliberately winnable —
+    // meridian_basin at frame 12 180, after which the sim freezes and an arm
+    // spends its remaining wall minutes sampling a stationary world (§11.1).
+    // `meridian_basin_soak` is the same content with no `victory` objective,
+    // which makes it the one shipped scenario that is *intentionally* endless.
+    //
+    // Two independent guards keep it out of a player's hands, and this asserts
+    // both because they fail differently: `terminal == false` is what
+    // DefaultForMap filters on (so a future author cannot un-retire it into a
+    // default), and `retired == true` is what the create route refuses by id.
+    // The Lua-side content parity with meridian_basin is asserted by
+    // LuaRules/Gadgets/tests/meridian_basin_soak_scenario_spec.lua.
+    const std::string gamePath =
+        std::string(SPRING_SOURCE_DIR) + "/data/games/metalstorm";
+    if (!fs::is_directory(fs::path(gamePath) / "scenarios"))
+        return; // content not present in this checkout
+
+    const auto found = SD::Discover(gamePath);
+    REQUIRE(!found.empty());
+
+    const auto* soak = Find(found, "meridian_basin_soak");
+    REQUIRE(soak != nullptr);
+    CHECK(soak->mapId == "meridian_basin");
+    CHECK(soak->terminal == false);
+    CHECK(soak->retired == true);
+    CHECK(soak->tutorial == false);
+
+    // Neither shipped war on this map may be defaulted to: meridian_basin for
+    // being retired (uncrossable, §7.6), the soak fixture for having no end.
+    CHECK(SD::DefaultForMap(found, "meridian_basin") == nullptr);
+    // Still resolvable by id — the `scenario` modoption is how the ladder
+    // stages it, and a fixture that vanished from discovery would stage an
+    // empty world, which is the defect §11.1 was.
+    CHECK(SD::FindById(found, "meridian_basin_soak") == soak);
+}
+
 TEST_CASE("shipped metalstorm scenarios: crossing_standoff is the default war "
           "for scorched_crossing_v2.4") {
     // The other half of §7.6's move: the showcase war is now authored on a map
