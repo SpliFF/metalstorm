@@ -5097,15 +5097,33 @@ int main(int argc, char *argv[]) {
             j.contains("pos") && j["pos"].is_string()
                 ? (int8_t)std::atoi(j["pos"].get<std::string>().c_str())
                 : (int8_t)j.value("pos", 0);
-        // Find the target player — default to self
-        uint32_t target =
-            j.contains("target_player_id") && j["target_player_id"].is_string()
-                ? (uint32_t)std::atoi(
-                      j["target_player_id"].get<std::string>().c_str())
-                : (uint32_t)j.value("target_player_id",
-                                    static_cast<uint32_t>(userId));
-        rooms.SetPlayerStartPos(room->id, static_cast<uint32_t>(userId), target,
-                                pos, 6);
+        // An AI slot is a distinct kind of target, not a player id, so it gets
+        // read first: the client's `startpos-select` for an AI row sends
+        // `target_ai_slot` and no `target_player_id`, and this route used to
+        // parse only the latter. Since `target_player_id` defaults to the
+        // caller, "move AI slot 0" silently became "move my own start
+        // position" — the host's seat jumped and the AI never moved
+        // (PLAN-endtoend D63). `protocol_generated.h`'s RoomSetStartPos has
+        // documented `target_ai_slot >= 0: target that AI slot, host only`
+        // all along; only this HTTP path never honoured it.
+        const int aiSlot =
+            j.contains("target_ai_slot") && j["target_ai_slot"].is_string()
+                ? std::atoi(j["target_ai_slot"].get<std::string>().c_str())
+                : j.value("target_ai_slot", -1);
+        if (aiSlot >= 0) {
+          rooms.SetAIStartPos(room->id, static_cast<uint32_t>(userId),
+                              static_cast<uint8_t>(aiSlot), pos, 6);
+        } else {
+          // Find the target player — default to self
+          uint32_t target =
+              j.contains("target_player_id") && j["target_player_id"].is_string()
+                  ? (uint32_t)std::atoi(
+                        j["target_player_id"].get<std::string>().c_str())
+                  : (uint32_t)j.value("target_player_id",
+                                      static_cast<uint32_t>(userId));
+          rooms.SetPlayerStartPos(room->id, static_cast<uint32_t>(userId),
+                                  target, pos, 6);
+        }
         broadcastRooms();
         return HttpAuth::JsonResponse(200, roomToJson(rooms.GetRoom(room->id)));
       });
