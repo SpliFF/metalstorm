@@ -3,17 +3,46 @@ import { Matrix, Vector3 } from '@babylonjs/core';
 import { dressingKit, dressingMounts, mountLocalMatrix } from './dressing-kits.js';
 
 describe('dressingKit', () => {
-    it('resolves the order kit and ignores unknown/absent names', () => {
+    it('resolves all four faction kits and ignores unknown/absent names', () => {
         expect(dressingKit('order')?.model).toBe('ms_dress_order');
-        expect(dressingKit('dynasty')).toBeNull();   // §M5 prototype scope
+        expect(dressingKit('dynasty')?.model).toBe('ms_dress_dynasty');
+        expect(dressingKit('resistance')?.model).toBe('ms_dress_resistance');
+        expect(dressingKit('anarchic')?.model).toBe('ms_dress_anarchic');
+        expect(dressingKit('unknown')).toBeNull();
         expect(dressingKit(undefined)).toBeNull();
     });
 
-    it('only has mounts for hulls it was authored against', () => {
+    it('order kit has mounts for both tank and heavy', () => {
         const kit = dressingKit('order')!;
         expect(dressingMounts(kit, 'fable_tank').length).toBe(3);
-        expect(dressingMounts(kit, 'fable_heavy')).toEqual([]);
+        expect(dressingMounts(kit, 'fable_heavy').length).toBe(3);
         expect(dressingMounts(kit, 'ms_technical')).toEqual([]);
+    });
+
+    it('dynasty kit has mounts for both hulls with doubled rails on heavy', () => {
+        const kit = dressingKit('dynasty')!;
+        expect(dressingMounts(kit, 'fable_tank').length).toBe(8);
+        expect(dressingMounts(kit, 'fable_heavy').length).toBe(10);  // +2 rails
+    });
+
+    it('resistance kit has mounts for both hulls', () => {
+        const kit = dressingKit('resistance')!;
+        expect(dressingMounts(kit, 'fable_tank').length).toBe(4);    // smoke deferred
+        expect(dressingMounts(kit, 'fable_heavy').length).toBe(4);
+    });
+
+    it('anarchic kit supports multi-mount (plates on 3/5 positions)', () => {
+        const kit = dressingKit('anarchic')!;
+        const tankMounts = dressingMounts(kit, 'fable_tank');
+        const heavyMounts = dressingMounts(kit, 'fable_heavy');
+        // tank: 3 plates (L/R/rear), 1 prow, 1 trophies, 2 totems, 2 streamers = 9
+        expect(tankMounts.length).toBe(9);
+        // heavy: 5 plates (L fore/aft, R fore/aft, rear), 1 prow, 1 trophies,
+        //        2 totems, 1 brazier, 2 streamers = 12
+        expect(heavyMounts.length).toBe(12);
+        // Verify plates appear multiple times
+        expect(tankMounts.filter((m) => m.piece === 'plates').length).toBe(3);
+        expect(heavyMounts.filter((m) => m.piece === 'plates').length).toBe(5);
     });
 
     it('mounts the kit pieces on the deck, not at the display fan-out', () => {

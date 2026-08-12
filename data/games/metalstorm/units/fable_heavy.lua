@@ -16,27 +16,45 @@
 -- SPRINGRTS_geometry v8, SPRINGRTS_team_color mask on materials[0].
 -- Licensing: see the Generated rows in ../ASSETS.md.
 
-return {
-    fable_heavy = {
-        name = 'FV-20 Bastion',
-        description = 'Fable super-heavy twin railgun tank — generated-model showcase',
-        objectname = 'fable_heavy',
-        category = 'LAND MOBILE TANK',
-        movementclass = 'HEAVY',
-        maxdamage = 9000, mass = 2800,
-        maxvelocity = 1.4, acceleration = 0.10, brakerate = 0.12, turnrate = 320,
-        footprintx = 6, footprintz = 6,
-        sightdistance = 520,
-        canmove = true, canattack = true, canpatrol = true, canstop = true,
-        canguard = true,
-        weapons = {
-            [1] = { name = 'MS_RAILGUN_S4' },   -- twin main tubes (muzzle_l/_r)
-            [2] = { name = 'MS_AC_S2' },        -- independent bow turret2
-        },
-        customparams = {
-            ms_class = 'fable_showcase',
-            squad_size = '1',            -- land dreadnought: always a single hull
-            generator = 'Claude Fable 5 (tools/fable-model-forge)',
-        },
+local heavy = {
+    name = 'FV-20 Bastion',
+    description = 'Fable super-heavy twin railgun tank — generated-model showcase',
+    objectname = 'fable_heavy',
+    category = 'LAND MOBILE TANK',
+    movementclass = 'HEAVY',
+    maxdamage = 9000, mass = 2800,
+    maxvelocity = 1.4, acceleration = 0.10, brakerate = 0.12, turnrate = 320,
+    footprintx = 6, footprintz = 6,
+    sightdistance = 520,
+    canmove = true, canattack = true, canpatrol = true, canstop = true,
+    canguard = true,
+    weapons = {
+        [1] = { name = 'MS_RAILGUN_S4' },   -- twin main tubes (muzzle_l/_r)
+        [2] = { name = 'MS_AC_S2' },        -- independent bow turret2
     },
+    customparams = {
+        ms_class = 'fable_showcase',
+        squad_size = '1',            -- land dreadnought: always a single hull
+        generator = 'Claude Fable 5 (tools/fable-model-forge)',
+    },
+}
+
+-- Dressing-kit showcase defs: each faction's kit on the heavy hull.
+local function dressed_variant(faction, display_name)
+    local def = {}
+    for k, v in pairs(heavy) do def[k] = v end
+    def.name = 'FV-20 ' .. display_name
+    def.description = 'Fable super-heavy — ' .. faction .. ' dressing kit'
+    def.customparams = {}
+    for k, v in pairs(heavy.customparams) do def.customparams[k] = v end
+    def.customparams.ms_dress = faction
+    return def
+end
+
+return {
+    fable_heavy = heavy,
+    fable_heavy_order = dressed_variant('order', 'Bastion (Order)'),
+    fable_heavy_dynasty = dressed_variant('dynasty', 'Bastion (Dynasty)'),
+    fable_heavy_resistance = dressed_variant('resistance', 'Bastion (Resistance)'),
+    fable_heavy_anarchic = dressed_variant('anarchic', 'Bastion (Anarchic)'),
 }
