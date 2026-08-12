@@ -52,7 +52,7 @@ test-all: test-cpp test-client
 # checks, the replay-verdict parser (PLAN-replay.md task 5) and the soak
 # growth-slope ruling (PLAN-long-uptime.md task 4).
 test-headless-batch:
-	cd tools/headless-batch && node --test test/matrix.test.mjs test/fixture-checks.test.mjs test/replay-verdict.test.mjs test/growth-fit.test.mjs
+	cd tools/headless-batch && node --test test/matrix.test.mjs test/fixture-checks.test.mjs test/replay-verdict.test.mjs test/growth-fit.test.mjs test/run-paths.test.mjs
 
 # Determinism pair-run CI hook (PLAN-headless.md task 4): builds spring-server,
 # runs the PaperTanks-scale fixture twice, diffs the two stateHash sequences.

@@ -20,5 +20,12 @@ Batch driver + determinism pair-run for `spring-server --headless-run`
   test`).
 - `lib/growth-fit.mjs` — pure OLS fit + slope ruling behind `growth-report`,
   unit tested by `test/growth-fit.test.mjs`.
+- `lib/run-paths.mjs` — where an arm's config/dump/db/log live, and the list
+  `batch.mjs` clears before an arm starts. **A re-run into an existing
+  `--out-dir` must not inherit the previous run's SQLite file** — `db_bytes` is
+  sampled as the size of `main + -wal + -shm`, so a stale database starts the
+  series mid-sawtooth — **nor its dump**, which is read back after the arm
+  exits and would otherwise be reported as this arm's result. Unit tested by
+  `test/run-paths.test.mjs`.
 - `fixtures/` — example templates/matrices, including the CI fixture
   (`papertanks-determinism.json`).
