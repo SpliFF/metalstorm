@@ -173,7 +173,9 @@ describe('planUtterance — refusing out loud', () => {
         expect(outcome.kind).toBe('refused');
         if (outcome.kind !== 'refused') return;
         expect(outcome.reason).toBe('invalid-intent');
-        expect(outcome.text).toContain('patrol cannot target entity');
+        // Wording is owned by main's compile-table.ts (composer-wire lane):
+        // "<verb> cannot take a named place — it needs a route drawn on the map".
+        expect(outcome.text).toContain('patrol cannot take a named place');
         expect(outcome.text).toContain('Nothing sent');
     });
 

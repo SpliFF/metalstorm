@@ -92,11 +92,13 @@ describe('class-vocabulary.json ↔ unit defs', () => {
         expect(missing).toEqual([]);
     });
 
-    it('covers the 14 shipped classes the milestone names', () => {
+    it('covers the shipped roster (M0 named 14; the model-integration M1/M2 roster grew it to 24)', () => {
         expect(Object.keys(data.classes).sort()).toEqual([
-            'artillery', 'bombers', 'buildings', 'civilians', 'civvehicles',
-            'engineers', 'fighters', 'mechs', 'radar', 'ships', 'soldiers',
-            'staticdefense', 'subs', 'tanks',
+            'artillery', 'balloon', 'bombers', 'buildings', 'civilians',
+            'civvehicles', 'command', 'courier', 'engineers', 'expedition',
+            'fighters', 'landing_ship', 'mechs', 'radar', 'scout', 'ships',
+            'sites', 'soldiers', 'staticdefense', 'subs', 'supply', 'tanker',
+            'tanks', 'technical',
         ]);
     });
 

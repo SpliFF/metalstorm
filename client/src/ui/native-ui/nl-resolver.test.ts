@@ -335,9 +335,14 @@ describe('targets', () => {
         expect(found).toMatchObject({ kind: 'ok', value: { shape: 'entity', entity: { name: 'Northgate' } } });
     });
 
-    it('falls back to the point shape for a verb that takes only points', () => {
+    it('resolves an entity target for withdraw (the table accepts entity since composer-wire widened it)', () => {
+        // This used to assert the entity→point downgrade, when the branch's
+        // table said withdraw: ['point']. Main's TARGET_SHAPES_BY_VERB gives
+        // every point-taking verb an entity or area shape too, so that
+        // downgrade is unreachable with real verbs — pickShape's preference
+        // order is still covered by the coordinate-fallback cases below.
         const found = resolver('basin').resolveTarget('withdraw', { type: 'entity-ref', name: 'Randtown' });
-        expect(found).toMatchObject({ kind: 'ok', value: { shape: 'point', entity: { name: 'Randtown' } } });
+        expect(found).toMatchObject({ kind: 'ok', value: { shape: 'entity', entity: { name: 'Randtown' } } });
     });
 
     it('refuses a route verb — a sentence cannot draw a route yet', () => {

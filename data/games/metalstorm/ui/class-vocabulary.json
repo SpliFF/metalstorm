@@ -382,7 +382,6 @@
         "civilian traffic",
         "convoy",
         "convoys",
-        "trucks",
         "buses"
       ]
     },
@@ -402,8 +401,7 @@
         "scout",
         "scouts",
         "buggy",
-        "buggies",
-        "recon"
+        "buggies"
       ]
     },
     "supply": {
@@ -413,8 +411,7 @@
         "supply truck",
         "supply trucks",
         "supplies",
-        "trucks",
-        "logistics"
+        "trucks"
       ]
     },
     "tanker": {
