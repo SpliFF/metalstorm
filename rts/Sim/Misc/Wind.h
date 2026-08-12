@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "Sim/Misc/GlobalConstants.h"
+#include "Sim/Misc/WindSnapshot.h"
 #include "System/float3.h"
 
 class CUnit;
@@ -37,6 +38,17 @@ public:
 
 	const float3& GetCurrentWindVec() const { return curWindVec; }
 	const float3& GetCurrentWindDir() const { return curWindDir; }
+
+	/// Snapshot walk (PLAN-persistence, the wind section). Authored inside the
+	/// class because every member is private and creg is stubbed in this tree,
+	/// exactly as AMoveType::Snapshot{Capture,Apply} are.
+	void SnapshotCapture(envressnapshot::EnvResourceState& s) const;
+	/// REPLACES the whole handler state, including both generator lists. Must
+	/// run AFTER the unit roster is rebuilt: Update() dereferences
+	/// unitHandler.GetUnit(id) with no null check, so a captured id that the
+	/// restored roster does not carry would be a crash rather than a drift, and
+	/// the clamp that drops it needs the roster to be there to ask.
+	void SnapshotApply(const envressnapshot::EnvResourceState& s);
 
 private:
 	// update all generators every 15 seconds

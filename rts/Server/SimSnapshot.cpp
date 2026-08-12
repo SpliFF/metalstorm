@@ -14,6 +14,7 @@
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/Team.h"
 #include "Sim/Misc/TeamHandler.h"
+#include "Sim/Misc/Wind.h"
 #include "Sim/Units/CommandAI/CommandAI.h"
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitDef.h"
@@ -50,6 +51,7 @@ const std::vector<SectionSpec>& Sections()
         {SectionId::Features,       1, "features",       true,  ""},
         {SectionId::SyncedLua,      1, "syncedLua",      true,  ""},
         {SectionId::GameRules,      1, "gameRules",      true,  ""},
+        {SectionId::EnvResources,   1, "envResources",   true,  ""},
     };
     return kSections;
 }
@@ -1791,6 +1793,25 @@ int CensusMoveTypeState(const movetypesnapshot::MoveTypeState& m)
     return 9;
 }
 
+int CensusEnvResourceState(const envressnapshot::EnvResourceState& e)
+{
+    const auto& [curTidalStrength, curWindStrength,
+                 minWindStrength, maxWindStrength,
+                 curWindDirX, curWindDirY, curWindDirZ,
+                 curWindVecX, curWindVecY, curWindVecZ,
+                 newWindVecX, newWindVecY, newWindVecZ,
+                 oldWindVecX, oldWindVecY, oldWindVecZ,
+                 windDirTimer, allGeneratorIDs, newGeneratorIDs] = e;
+    (void)curTidalStrength; (void)curWindStrength;
+    (void)minWindStrength; (void)maxWindStrength;
+    (void)curWindDirX; (void)curWindDirY; (void)curWindDirZ;
+    (void)curWindVecX; (void)curWindVecY; (void)curWindVecZ;
+    (void)newWindVecX; (void)newWindVecY; (void)newWindVecZ;
+    (void)oldWindVecX; (void)oldWindVecY; (void)oldWindVecZ;
+    (void)windDirTimer; (void)allGeneratorIDs; (void)newGeneratorIDs;
+    return 19;
+}
+
 int CensusFeatureState(const FeatureState& f)
 {
     const auto& [id, featureDefName, resurrectUnitDefName, team, heading,
@@ -2026,6 +2047,91 @@ bool DecodeGameRules(const uint8_t* data, size_t size,
         return false;
     }
     return true;
+}
+
+// ───────────── The wind codec (EnvResourceHandler) ─────────────
+//
+// One record, not a count-prefixed list: there is exactly one handler. The two
+// generator id lists are the only variable-length part.
+
+void EncodeEnvResources(const envressnapshot::EnvResourceState& in,
+                        std::vector<uint8_t>& out)
+{
+    Writer w(out);
+    w.F32(in.curTidalStrength);
+    w.F32(in.curWindStrength);
+    w.F32(in.minWindStrength);
+    w.F32(in.maxWindStrength);
+
+    w.F32(in.curWindDirX); w.F32(in.curWindDirY); w.F32(in.curWindDirZ);
+    w.F32(in.curWindVecX); w.F32(in.curWindVecY); w.F32(in.curWindVecZ);
+    w.F32(in.newWindVecX); w.F32(in.newWindVecY); w.F32(in.newWindVecZ);
+    w.F32(in.oldWindVecX); w.F32(in.oldWindVecY); w.F32(in.oldWindVecZ);
+
+    w.I32(in.windDirTimer);
+
+    // Written in list order, NOT sorted: the order allGeneratorIDs is walked in
+    // is the order UpdateWind() is called in, and two snapshots of the same
+    // world always hold the same order because only push_back and erase touch
+    // these vectors.
+    w.U32(static_cast<uint32_t>(in.allGeneratorIDs.size()));
+    for (const int32_t id : in.allGeneratorIDs) w.I32(id);
+    w.U32(static_cast<uint32_t>(in.newGeneratorIDs.size()));
+    for (const int32_t id : in.newGeneratorIDs) w.I32(id);
+}
+
+bool DecodeEnvResources(const uint8_t* data, size_t size,
+                        envressnapshot::EnvResourceState& out, std::string& err)
+{
+    Reader r(data, size);
+    envressnapshot::EnvResourceState e;
+    e.curTidalStrength = r.F32();
+    e.curWindStrength = r.F32();
+    e.minWindStrength = r.F32();
+    e.maxWindStrength = r.F32();
+
+    e.curWindDirX = r.F32(); e.curWindDirY = r.F32(); e.curWindDirZ = r.F32();
+    e.curWindVecX = r.F32(); e.curWindVecY = r.F32(); e.curWindVecZ = r.F32();
+    e.newWindVecX = r.F32(); e.newWindVecY = r.F32(); e.newWindVecZ = r.F32();
+    e.oldWindVecX = r.F32(); e.oldWindVecY = r.F32(); e.oldWindVecZ = r.F32();
+
+    e.windDirTimer = r.I32();
+
+    for (int list = 0; list < 2 && !r.Bad(); ++list) {
+        const uint32_t count = r.U32();
+        // The whole run before the reserve, same discipline as Reader::Floats:
+        // a corrupt count must be a decode failure before it is an allocation.
+        if (r.Remaining() < size_t(count) * 4) {
+            err = "envResources section claims " + std::to_string(count) +
+                  " generator ids in " + std::to_string(size) + " bytes";
+            return false;
+        }
+        auto& dst = (list == 0) ? e.allGeneratorIDs : e.newGeneratorIDs;
+        dst.reserve(count);
+        for (uint32_t i = 0; i < count; ++i) dst.push_back(r.I32());
+    }
+    if (r.Bad()) {
+        err = "envResources section is truncated";
+        return false;
+    }
+    if (r.Remaining() != 0) {
+        err = "envResources section has " + std::to_string(r.Remaining()) +
+              " unread trailing bytes";
+        return false;
+    }
+    out = std::move(e);
+    return true;
+}
+
+void CaptureEnvResources(envressnapshot::EnvResourceState& out)
+{
+    out = envressnapshot::EnvResourceState{};
+    envResHandler.SnapshotCapture(out);
+}
+
+void ApplyEnvResources(const envressnapshot::EnvResourceState& in)
+{
+    envResHandler.SnapshotApply(in);
 }
 
 // ───────────── Task 1d: the synced-Lua codec (§7.1d decision 4) ─────────────
@@ -3359,6 +3465,11 @@ bool SimSnapshotSerializer::SerializeImplemented(std::vector<uint8_t>& out, std:
                 CaptureGameRules(params);
                 EncodeGameRules(params, section);
             } break;
+            case SectionId::EnvResources: {
+                envressnapshot::EnvResourceState env;
+                CaptureEnvResources(env);
+                EncodeEnvResources(env, section);
+            } break;
             default:
                 // An implemented section with no writer is a programming
                 // error, not a runtime condition - fail the checkpoint rather
@@ -3406,7 +3517,8 @@ bool SimSnapshotSerializer::Deserialize(const uint8_t* data, size_t size, std::s
     // happens once the whole payload has been read without a single failure.
     bool haveGlobals = false, haveOrders = false, haveGroups = false, haveDirs = false;
     bool haveTeams = false, haveUnits = false, haveSyncedLua = false;
-    bool haveFeatures = false, haveGameRules = false;
+    bool haveFeatures = false, haveGameRules = false, haveEnvRes = false;
+    envressnapshot::EnvResourceState envRes;
     luasnapshot::Value syncedLua = luasnapshot::Value::Table();
     std::vector<RulesParamState> gameRules;
     std::vector<TeamState> teams;
@@ -3505,6 +3617,12 @@ bool SimSnapshotSerializer::Deserialize(const uint8_t* data, size_t size, std::s
                 sr.Skip(len);
                 haveGameRules = true;
                 break;
+            case SectionId::EnvResources:
+                if (!DecodeEnvResources(data + r.Pos(), len, envRes, err))
+                    return false;
+                sr.Skip(len);
+                haveEnvRes = true;
+                break;
             default:
                 err = std::string("no reader for section '") + spec->name + "'";
                 return false;
@@ -3530,7 +3648,7 @@ bool SimSnapshotSerializer::Deserialize(const uint8_t* data, size_t size, std::s
     }
     if (!haveGlobals || !haveOrders || !haveGroups || !haveDirs ||
         !haveTeams || !haveUnits || !haveFeatures || !haveSyncedLua ||
-        !haveGameRules) {
+        !haveGameRules || !haveEnvRes) {
         err = "payload is missing a required section";
         return false;
     }
@@ -3625,6 +3743,15 @@ bool SimSnapshotSerializer::Deserialize(const uint8_t* data, size_t size, std::s
     // (Q-P4). Ordering only: this consumes no draws.
     unitHandler.SetActiveSlowUpdateUnit(globals.activeSlowUpdateUnit);
 
+    // Also after ApplyUnits, for the same reason and one more: the wind's
+    // generator lists are unit ids, and the clamp that drops an id the restored
+    // world does not carry has to have the roster to ask. It must also come
+    // after the rebuild rather than before it because CUnit::PostInit registers
+    // every restored wind generator as NEW - the state this replaces is state
+    // ApplyUnits wrote. Consumes no draws: the two floats the wind takes are
+    // drawn by Update(), on the frame the restored timer says.
+    ApplyEnvResources(envRes);
+
     if (!luaOk) {
         // Past the point of no return. The world IS restored; what failed is a
         // gadget's own Load, which no earlier check could have run.
@@ -3660,6 +3787,8 @@ int MoveHover(const movetypesnapshot::HoverState& h) { return CensusMoveHover(h)
 int MoveStrafe(const movetypesnapshot::StrafeState& f) { return CensusMoveStrafe(f); }
 int MoveScript(const movetypesnapshot::ScriptState& c) { return CensusMoveScript(c); }
 int MoveType_(const movetypesnapshot::MoveTypeState& m) { return CensusMoveTypeState(m); }
+
+int EnvResource(const envressnapshot::EnvResourceState& e) { return CensusEnvResourceState(e); }
 
 } // namespace census
 

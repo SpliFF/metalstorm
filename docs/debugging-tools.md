@@ -791,6 +791,23 @@ build/debug/spring-server --headless-run tools/headless-batch/fixtures/soak-ladd
   --snapshot-roundtrip 60:20 --roundtrip-strict     # must PASS
 ```
 
+**Pick the window with what you are testing in mind.** Some synced state has a period
+longer than any default window, so a passing `60:20` says nothing about it. The wind
+(`EnvResourceHandler`) is the worked example: its cycle is **450 frames**, and the frame
+where the phase counter wraps draws two floats from the synced RNG. `--snapshot-roundtrip
+440:30` is the window that crosses one, and it is the only run that can see a wind defect:
+
+```bash
+build/debug/spring-server --headless-run tools/headless-batch/fixtures/soak-ladder.json \
+  --port 19133 --db /tmp/rt.sqlite --max-wall-min 8 \
+  --snapshot-roundtrip 440:30     # crosses a wind update; world bar (movement re-derives)
+```
+
+With the wind section applied, both arms hold the same wind at frame 470 and
+`envResources` is absent from the "sections that disagree" line. With the apply removed
+(the matched control), the re-capture DIFFERS, the arms sit 30 frames apart in the cycle,
+and `globals` byte 4 — the RNG position — diverges.
+
 Before Q-P4 (2026-08-12) that run failed on the *first* tick with every unit
 byte-identical, because the restore rebuilt `activeUnits` in ascending-id order rather
 than the captured insertion order and `CWeapon::SlowUpdate` — reached through the

@@ -56,6 +56,7 @@
 #include "Server/OrgGroups.h"        // OrgGroup, Directive (census)
 #include "Lua/LuaSnapshotState.h"    // luasnapshot::Value (task 1d)
 #include "Sim/MoveTypes/MoveTypeSnapshot.h"  // movetypesnapshot::MoveTypeState (option A)
+#include "Sim/Misc/WindSnapshot.h"   // envressnapshot::EnvResourceState (the wind section)
 
 #include <cstdint>
 #include <string>
@@ -76,6 +77,7 @@ enum class SectionId : uint16_t {
     SyncedLua      = 7,  ///< gadget-owned synced Lua state — task 1d
     Features       = 8,  ///< wrecks/map features — task 1e
     GameRules      = 9,  ///< CSplitLuaHandle::gameParams — task 1d-b
+    EnvResources   = 10, ///< EnvResourceHandler: the wind cycle + tidal strength
 };
 
 /// One entry per part of the synced state the walk must cover. `implemented`
@@ -535,6 +537,21 @@ bool DecodeGameRules(const uint8_t* data, size_t size,
 void CaptureGameRules(std::vector<RulesParamState>& out);
 void ApplyGameRules(const std::vector<RulesParamState>& in);
 
+void EncodeEnvResources(const envressnapshot::EnvResourceState& in,
+                        std::vector<uint8_t>& out);
+bool DecodeEnvResources(const uint8_t* data, size_t size,
+                        envressnapshot::EnvResourceState& out, std::string& err);
+
+/// The `envResources` section's capture/apply halves. Thin wrappers over
+/// EnvResourceHandler::Snapshot{Capture,Apply} — the walk itself has to live
+/// inside the handler (every member is private), so what is here is the section
+/// boundary, not the field list.
+///
+/// APPLY ORDERING IS LOAD-BEARING: after ApplyUnits. See
+/// EnvResourceHandler::SnapshotApply.
+void CaptureEnvResources(envressnapshot::EnvResourceState& out);
+void ApplyEnvResources(const envressnapshot::EnvResourceState& in);
+
 // ──────────────────── The field-census tripwire ────────────────────
 //
 // Q-P1 constraint 4: "ship a completeness tripwire in the same milestone as
@@ -568,6 +585,9 @@ int MoveHover(const movetypesnapshot::HoverState& h);
 int MoveStrafe(const movetypesnapshot::StrafeState& f);
 int MoveScript(const movetypesnapshot::ScriptState& c);
 int MoveType_(const movetypesnapshot::MoveTypeState& m);
+/// The wind section. Its field list is EnvResourceHandler's CR_REG_METADATA
+/// list, so this count is also what pins the two together.
+int EnvResource(const envressnapshot::EnvResourceState& e);
 } // namespace census
 
 class SimSnapshotSerializer : public gamestate::ISimSerializer {

@@ -25,9 +25,11 @@
 #include "Server/StandingOrders.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Units/UnitHandler.h"   // the slow-update cursor (Q-P4)
+#include "Sim/Misc/Wind.h"           // envResHandler (the wind section)
 #include "System/GlobalRNG.h"
 #include "Lua/LuaHandleSynced.h"   // CSplitLuaHandle::gameParams (task 1d-b)
 
+#include <algorithm>
 #include <set>
 #include <string>
 
@@ -233,7 +235,7 @@ TEST_CASE("LayoutHash is stable, non-trivial and folds every implemented section
         fold(s.version);
         ++implemented;
     }
-    CHECK(implemented == 9);   // + gameRules (task 1d-b)
+    CHECK(implemented == 10);  // + gameRules (task 1d-b), + envResources (the wind)
     CHECK(h == expect);
 }
 
@@ -1596,6 +1598,11 @@ TEST_CASE("task 1c: the field censuses are armed") {
     CHECK(census::MoveStrafe(movetypesnapshot::StrafeState{}) == 28);
     CHECK(census::MoveScript(movetypesnapshot::ScriptState{}) == 33);
     CHECK(census::MoveType_(movetypesnapshot::MoveTypeState{}) == 9);
+
+    // The wind. This count is also the tie to EnvResourceHandler's own
+    // CR_REG_METADATA list: 11 creg members, four of them float3s the state
+    // struct flattens into three scalars each.
+    CHECK(census::EnvResource(envressnapshot::EnvResourceState{}) == 19);
 }
 
 TEST_CASE("option A: every move-type class round-trips its own arm") {
@@ -2463,4 +2470,222 @@ TEST_CASE("CompareUnits: a payload with no units section is NOT MEASURED") {
     CHECK_FALSE(CompareUnits(empty, good).measured);
     CHECK(DescribeUnitsDivergence(good, empty).find("could not be decoded") !=
           std::string::npos);
+}
+
+// ───────────── The wind (EnvResourceHandler, the envResources section) ─────────────
+//
+// Wind is synced state on a 450-frame cycle: the frame where windDirTimer == 0
+// draws two floats from the synced RNG, the other 449 blend towards what it
+// drew. No section carried any of it, so a restore started the cycle at phase 0
+// and drew its next pair on a different frame than the captured world would
+// have. It never showed in a round-trip measurement because a 20- or 100-tick
+// window does not contain a wind update at all.
+
+namespace {
+
+/// Every field distinct, same discipline as loudUnit(): a writer/reader pair
+/// that swaps two fields of the same type is only visible if no two fields
+/// share a value.
+envressnapshot::EnvResourceState loudWind()
+{
+    envressnapshot::EnvResourceState e;
+    e.curTidalStrength = 1.5f;
+    e.curWindStrength = 2.5f;
+    e.minWindStrength = 3.5f;
+    e.maxWindStrength = 4.5f;
+
+    e.curWindDirX = 5.5f;  e.curWindDirY = 6.5f;  e.curWindDirZ = 7.5f;
+    e.curWindVecX = 8.5f;  e.curWindVecY = 9.5f;  e.curWindVecZ = 10.5f;
+    e.newWindVecX = 11.5f; e.newWindVecY = 12.5f; e.newWindVecZ = 13.5f;
+    e.oldWindVecX = 14.5f; e.oldWindVecY = 15.5f; e.oldWindVecZ = 16.5f;
+
+    e.windDirTimer = 317;
+    e.allGeneratorIDs = {41, 42, 43};
+    e.newGeneratorIDs = {44};
+    return e;
+}
+
+std::vector<uint8_t> windBytes(const envressnapshot::EnvResourceState& e)
+{
+    std::vector<uint8_t> out;
+    EncodeEnvResources(e, out);
+    return out;
+}
+
+} // namespace
+
+TEST_CASE("the wind: the envResources section round-trips every field") {
+    const auto in = loudWind();
+    const auto bytes = windBytes(in);
+
+    envressnapshot::EnvResourceState out;
+    std::string err;
+    REQUIRE(DecodeEnvResources(bytes.data(), bytes.size(), out, err));
+    CHECK(err.empty());
+
+    CHECK(out.curTidalStrength == in.curTidalStrength);
+    CHECK(out.curWindStrength == in.curWindStrength);
+    CHECK(out.minWindStrength == in.minWindStrength);
+    CHECK(out.maxWindStrength == in.maxWindStrength);
+    CHECK(out.curWindDirX == in.curWindDirX);
+    CHECK(out.curWindDirY == in.curWindDirY);
+    CHECK(out.curWindDirZ == in.curWindDirZ);
+    CHECK(out.curWindVecX == in.curWindVecX);
+    CHECK(out.curWindVecY == in.curWindVecY);
+    CHECK(out.curWindVecZ == in.curWindVecZ);
+    CHECK(out.newWindVecX == in.newWindVecX);
+    CHECK(out.newWindVecY == in.newWindVecY);
+    CHECK(out.newWindVecZ == in.newWindVecZ);
+    CHECK(out.oldWindVecX == in.oldWindVecX);
+    CHECK(out.oldWindVecY == in.oldWindVecY);
+    CHECK(out.oldWindVecZ == in.oldWindVecZ);
+    CHECK(out.windDirTimer == in.windDirTimer);
+    // The lists keep their ORDER, not just their membership: the order
+    // allGeneratorIDs is walked in is the order UpdateWind() is called in.
+    CHECK(out.allGeneratorIDs == in.allGeneratorIDs);
+    CHECK(out.newGeneratorIDs == in.newGeneratorIDs);
+    // And the two lists stay distinct — the whole point of capturing both.
+    CHECK(out.allGeneratorIDs.size() == 3);
+    CHECK(out.newGeneratorIDs.size() == 1);
+}
+
+TEST_CASE("the wind: a truncated envResources section is a refusal at every cut point") {
+    const auto full = windBytes(loudWind());
+    for (size_t cut = 0; cut < full.size(); ++cut) {
+        envressnapshot::EnvResourceState out;
+        std::string err;
+        CHECK_FALSE(DecodeEnvResources(full.data(), cut, out, err));
+        CHECK_FALSE(err.empty());
+    }
+}
+
+TEST_CASE("the wind: trailing bytes inside the envResources section are a refusal") {
+    // The one failure the framing exists to catch: writer and reader disagree
+    // about the shape while the version says they agree.
+    auto bytes = windBytes(loudWind());
+    bytes.push_back(0);
+    envressnapshot::EnvResourceState out;
+    std::string err;
+    CHECK_FALSE(DecodeEnvResources(bytes.data(), bytes.size(), out, err));
+    CHECK(err.find("trailing") != std::string::npos);
+}
+
+TEST_CASE("the wind: an absurd generator count is refused before it is allocated") {
+    auto bytes = windBytes(loudWind());
+    // The allGeneratorIDs count sits straight after 16 floats and the timer.
+    const size_t countAt = 17 * 4;
+    REQUIRE(bytes.size() > countAt + 4);
+    for (int i = 0; i < 4; ++i) bytes[countAt + i] = 0xFF;
+
+    envressnapshot::EnvResourceState out;
+    std::string err;
+    CHECK_FALSE(DecodeEnvResources(bytes.data(), bytes.size(), out, err));
+    CHECK(err.find("generator ids") != std::string::npos);
+}
+
+TEST_CASE("the wind: an empty world's wind still round-trips") {
+    const envressnapshot::EnvResourceState in;   // no generators, timer 0
+    const auto bytes = windBytes(in);
+    envressnapshot::EnvResourceState out;
+    std::string err;
+    REQUIRE(DecodeEnvResources(bytes.data(), bytes.size(), out, err));
+    CHECK(out.allGeneratorIDs.empty());
+    CHECK(out.newGeneratorIDs.empty());
+    CHECK(out.windDirTimer == 0);
+}
+
+TEST_CASE("the wind: a captured generator with no unit in the restored roster is dropped") {
+    // Update() calls unitHandler.GetUnit(id)->UpdateWind() with NO null check,
+    // so a captured id the restored world does not carry is a crash up to 450
+    // frames after the restore, not a drift.
+    envressnapshot::EnvResourceState s;
+    s.allGeneratorIDs = {7, 8};
+    s.newGeneratorIDs = {9, -1};
+
+    const auto only8 = envressnapshot::RestoreGenerators(s, [](int id) { return id == 8; });
+    CHECK(only8.allGeneratorIDs == std::vector<int>{8});
+    CHECK(only8.newGeneratorIDs.empty());
+    CHECK(only8.dropped == 3);   // 7, 9 and the negative id
+
+    const auto all = envressnapshot::RestoreGenerators(s, [](int id) { return id >= 0; });
+    CHECK(all.allGeneratorIDs == std::vector<int>{7, 8});
+    CHECK(all.newGeneratorIDs == std::vector<int>{9});
+    CHECK(all.dropped == 1);     // the negative id is never a unit
+}
+
+TEST_CASE("the wind: an id in both captured lists is kept once, in the first") {
+    // DelGenerator relies on "id is never present in both", and a duplicate
+    // would be pushed into allGeneratorIDs again on every wind update — an
+    // unbounded list — as well as telling one unit's script the wind changed
+    // twice per cycle.
+    envressnapshot::EnvResourceState s;
+    s.allGeneratorIDs = {5, 6};
+    s.newGeneratorIDs = {6, 7};
+
+    const auto r = envressnapshot::RestoreGenerators(s, [](int) { return true; });
+    CHECK(r.allGeneratorIDs == std::vector<int>{5, 6});
+    CHECK(r.newGeneratorIDs == std::vector<int>{7});
+    CHECK(r.dropped == 0);       // a de-duplicated id is not a dropped one
+}
+
+TEST_CASE("the wind: apply then capture is the identity, and the phase is clamped") {
+    // The live handler, so this covers the capture/apply PAIRING rather than the
+    // codec: a capture that reads oldWindVec into newWindVec's slot round-trips
+    // through the codec perfectly and still restores the wrong world.
+    envressnapshot::EnvResourceState was;
+    envResHandler.SnapshotCapture(was);
+
+    envressnapshot::EnvResourceState in = loudWind();
+    // The generator lists are cleared by the roster filter here (spring-tests
+    // stands up no units), so identity is asserted over the fields the live
+    // handler can hold in this fixture.
+    in.allGeneratorIDs.clear();
+    in.newGeneratorIDs.clear();
+    envResHandler.SnapshotApply(in);
+
+    envressnapshot::EnvResourceState back;
+    envResHandler.SnapshotCapture(back);
+    CHECK(back.curTidalStrength == in.curTidalStrength);
+    CHECK(back.curWindStrength == in.curWindStrength);
+    CHECK(back.minWindStrength == in.minWindStrength);
+    CHECK(back.maxWindStrength == in.maxWindStrength);
+    CHECK(back.curWindDirX == in.curWindDirX);
+    CHECK(back.curWindDirZ == in.curWindDirZ);
+    CHECK(back.curWindVecY == in.curWindVecY);
+    CHECK(back.newWindVecX == in.newWindVecX);
+    CHECK(back.newWindVecZ == in.newWindVecZ);
+    CHECK(back.oldWindVecX == in.oldWindVecX);
+    CHECK(back.oldWindVecY == in.oldWindVecY);
+    CHECK(back.oldWindVecZ == in.oldWindVecZ);
+    CHECK(back.windDirTimer == 317);
+
+    // The phase is an index into the cycle, stepped modulo WIND_UPDATE_RATE + 1
+    // and divided by WIND_UPDATE_RATE to make a smoothstep argument. A value
+    // from outside that range is not a phase this handler can be in, and it
+    // would be silent rather than loud.
+    envressnapshot::EnvResourceState wild = in;
+    wild.windDirTimer = 999999;
+    envResHandler.SnapshotApply(wild);
+    envressnapshot::EnvResourceState clamped;
+    envResHandler.SnapshotCapture(clamped);
+    CHECK(clamped.windDirTimer == 450);   // 15 * GAME_SPEED
+
+    wild.windDirTimer = -17;
+    envResHandler.SnapshotApply(wild);
+    envResHandler.SnapshotCapture(clamped);
+    CHECK(clamped.windDirTimer == 0);
+
+    envResHandler.SnapshotApply(was);
+}
+
+TEST_CASE("the wind: the envResources section is required, not optional") {
+    // A payload without it restores a world whose wind cycle silently starts
+    // over — the exact class of hole the section table exists to make loud.
+    const auto& secs = Sections();
+    const auto it = std::find_if(secs.begin(), secs.end(), [](const SectionSpec& s) {
+        return s.id == SectionId::EnvResources;
+    });
+    REQUIRE(it != secs.end());
+    CHECK(it->implemented);
+    CHECK(std::string(it->name) == "envResources");
 }
