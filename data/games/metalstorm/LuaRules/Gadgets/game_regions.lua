@@ -256,6 +256,34 @@ function gadget:Initialize()
     publishRegionStatics()
 end
 
+--- Rename a region, and optionally move the centre it publishes.
+---
+--- The one thing that changes a region's STATIC descriptor after
+--- `publishRegionStatics` has run, and it exists for exactly one caller: a
+--- scenario that plants a town in a region (tools/mapgen/town_planner.py, via
+--- game_scenario.lua's `world.regions[].name`). A region is kilometres of
+--- ground; when a settlement is the only part of it a player can point at, the
+--- name and the locate-ping should both be the settlement's.
+---
+--- `x`/`z` are optional and are omitted rather than defaulted, so a rename
+--- alone leaves the polygon centroid `publishRegionStatics` computed in place.
+--- Both go out PUBLIC on the same keys the one-shot publish uses — the client's
+--- named-entity index re-reads `region_<key>_name/_x/_z` off its rulesParams
+--- mirror, so a later write simply wins; there is no separate rename channel to
+--- keep in step.
+---
+--- Note this does NOT touch `region_<key>_team`/`_contested` or bump
+--- `regions_rev`: that counter means "control changed", and a scenario naming
+--- its towns at GameStart has changed no control.
+function GG.Regions.SetName(key, name, x, z)
+    if type(key) ~= 'string' or type(name) ~= 'string' then return end
+    Spring.SetGameRulesParam('region_' .. key .. '_name', name, PUBLIC)
+    if type(x) == 'number' and type(z) == 'number' then
+        Spring.SetGameRulesParam('region_' .. key .. '_x', x, PUBLIC)
+        Spring.SetGameRulesParam('region_' .. key .. '_z', z, PUBLIC)
+    end
+end
+
 --- Explicit ownership override (scenario preset at GameStart, GM tools).
 --- teamID = nil clears to uncontrolled; the periodic evaluator (GameFrame)
 --- may still flip a key on its next EVAL_PERIOD tick once units are present

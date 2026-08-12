@@ -292,6 +292,44 @@ local function validate(scn, knownDefs, knownFeatureDefs)
         checkDef(c.def, 'civilians.units[' .. i .. ']')
     end
 
+    -- Towns (town-planner T4). Validated hard for the same reason the AI slate
+    -- is: every one of these mistakes produces a town that loads cleanly and is
+    -- then quietly not a place. A civilian whose `town` names no declared town
+    -- gets no district, so the estate never counts it and a protect objective
+    -- over that district finds nobody; a hall whose def is misspelt resolves to
+    -- no unit, and the town negotiates exactly as if its hall had been
+    -- destroyed. Neither says anything at load time on its own.
+    local declaredTowns = {}
+    for i, t in ipairs(scn.towns or {}) do
+        local ctx = 'towns[' .. i .. ']'
+        if type(t.key) ~= 'string' or t.key == '' then
+            errors[#errors + 1] = ctx .. ': needs a string "key"'
+        elseif declaredTowns[t.key] then
+            errors[#errors + 1] = ctx .. ': duplicate town key "' .. t.key .. '"'
+        else
+            declaredTowns[t.key] = true
+        end
+        if t.x ~= nil and type(t.x) ~= 'number' then
+            errors[#errors + 1] = ctx .. ': "x" must be a number'
+        end
+        if t.hall ~= nil then
+            if type(t.hall) ~= 'table' then
+                errors[#errors + 1] = ctx .. ': "hall" must be a table'
+            else
+                checkDef(t.hall.def, ctx .. '.hall')
+                if type(t.hall.x) ~= 'number' or type(t.hall.z) ~= 'number' then
+                    errors[#errors + 1] = ctx .. '.hall: needs numeric "x"/"z"'
+                end
+            end
+        end
+    end
+    for i, c in ipairs((scn.civilians or {}).units or {}) do
+        if c.town ~= nil and not declaredTowns[c.town] then
+            errors[#errors + 1] = 'civilians.units[' .. i .. ']: "town" names ' ..
+                '"' .. tostring(c.town) .. '", which no `towns` entry declares'
+        end
+    end
+
     for i, r in ipairs((scn.world or {}).regions or {}) do
         if r.key == nil and (r.x == nil or r.z == nil) then
             errors[#errors + 1] = 'world.regions[' .. i .. ']: needs either "key" or "x"/"z"'
@@ -392,9 +430,26 @@ end
 local function stageRegions(regions)
     for _, r in ipairs(regions or {}) do
         local key = r.key or GG.Regions.KeyAt(r.x, r.z)
-        local team = r.team
-        if team == 'contested' or team == 'neutral' then team = nil end
-        GG.Regions.SetControllingTeam(key, team)
+        -- A NAME-ONLY entry sets no ownership. A generated scenario emits one
+        -- per region it planted a town in (tools/mapgen/scenariogen.py), to
+        -- rename the region after the settlement and move its published centre
+        -- onto it — `region_<key>_name/_x/_z` is the path the client's
+        -- named-entity index reads, so this is what makes a town addressable by
+        -- name in a typed or spoken order.
+        --
+        -- Guarded on `r.team ~= nil` rather than run unconditionally, because
+        -- SetControllingTeam(key, nil) is not a no-op: it CLEARS the region to
+        -- uncontrolled and publishes team = -1. A scenario that named a region
+        -- an earlier entry had already given to a side would silently take it
+        -- back off them.
+        if type(r.name) == 'string' and GG.Regions.SetName then
+            GG.Regions.SetName(key, r.name, r.x, r.z)
+        end
+        if r.team ~= nil or r.name == nil then
+            local team = r.team
+            if team == 'contested' or team == 'neutral' then team = nil end
+            GG.Regions.SetControllingTeam(key, team)
+        end
     end
 end
 
@@ -475,6 +530,31 @@ local function stageFeatures(features, knownFeatureDefs, landmarks)
         end
     end
     return created
+end
+
+--- Hand the scenario's `towns` to the civilian gadget's registry (GG.Towns,
+--- civilians/town.lua). Called BEFORE stageUnits: registration is bookkeeping,
+--- and the hall each town declares is resolved to a live unitID later, by
+--- civilians/town.lua's own GameStart — this gadget is layer -90 and that one
+--- is -40, so the buildings exist by then and not before.
+---
+--- Skipped with one line rather than erroring when GG.Towns is absent: a game
+--- built without the civilians gadget is a game with no estate to negotiate
+--- with, which is a smaller scenario, not a broken one.
+local function stageTowns(towns)
+    if not towns or #towns == 0 then return end
+    if not (GG.Towns and GG.Towns.Register) then
+        Spring.Echo('[game_scenario] WARNING: scenario declares ' .. #towns ..
+                    ' town(s) but GG.Towns is absent (no civilians gadget) — ' ..
+                    'their buildings still stage, but nothing names them, ' ..
+                    'binds their population to a district, or holds a parley ' ..
+                    'at their meeting hall')
+        return
+    end
+    for _, t in ipairs(towns) do
+        GG.Towns.Register(t)
+    end
+    Spring.Echo('[game_scenario] registered ' .. #towns .. ' town(s)')
 end
 
 --- teamID -> true for every team this game actually has. A scenario may declare
@@ -742,12 +822,47 @@ local function payStipends(frame)
     end
 end
 
+--- Spawn the scenario's civilians and bind each one to its district.
+---
+--- `c.town` is the town-planner's addition to this block and it is what makes
+--- the estate's district machinery live: civilians/estate.lua groups the
+--- population by `info.districtId` to answer
+--- game_objectives.lua's civilianDistrictsUnderThreat, and before towns existed
+--- NO spawn path in this game ever set one — so that function has always
+--- returned an empty list from a mechanism that was otherwise complete
+--- (estate.lua's own header says exactly this).
+---
+--- `homePos` is derived here rather than authored, and it is the civilian's OWN
+--- placed position rather than the town's centre. routines.lua both wanders and
+--- flees toward it, so it has to mean "where this person lives" — a whole
+--- district homed on one point would mill about the town square and leave every
+--- street it was carefully placed on empty.
 local function stageCivilians(civilians)
+    local staged, unregistered = 0, 0
     for _, c in ipairs((civilians or {}).units or {}) do
         local unitID = GG.Civilians.Spawn(c.def, c.x, c.z, c.facing or 'south')
-        if unitID and c.role then
-            GG.Civilians.Register(unitID, c.role)
+        if unitID == nil then
+            -- Same silent refusal stageUnits guards: the engine answers "that
+            -- ground is taken" by returning nil and logging nothing, and the
+            -- district is then quietly smaller than the file that describes it.
+            unregistered = unregistered + 1
+        else
+            staged = staged + 1
+            if c.role or c.town then
+                GG.Civilians.Register(unitID, c.role, {
+                    town = c.town,
+                    homePos = { x = c.x, z = c.z },
+                })
+            end
         end
+    end
+    if staged > 0 or unregistered > 0 then
+        Spring.Echo('[game_scenario] staged ' .. staged .. ' civilian(s)')
+    end
+    if unregistered > 0 then
+        Spring.Echo('[game_scenario] WARNING: the engine refused to create ' ..
+                    unregistered .. ' civilian(s) — the ground was already ' ..
+                    'occupied')
     end
 end
 
@@ -990,6 +1105,11 @@ function gadget:GameStart()
     local landmarks = {}
     GG.Scenario.features = stageFeatures((scn.world or {}).features,
                                          knownFeatureDefs, landmarks)
+    -- Towns before units, and units before civilians: a town must be
+    -- registered before its residents ask GG.Towns for their home, and its
+    -- buildings must be on the ground before civilians/town.lua (at its own,
+    -- later GameStart) can resolve a meeting hall to a live unit.
+    stageTowns(scn.towns)
     stageUnits(scn.units, landmarks)
     stageCivilians(scn.civilians)
     stageObjectives(scn.objectives)

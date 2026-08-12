@@ -198,16 +198,16 @@ class TestDeterminism(unittest.TestCase):
 
 class TestPlacementSpec(unittest.TestCase):
 
-    @unittest.expectedFailure
     def test_the_spec_is_green_on_every_archetype_and_terrain(self):
         """The headline. If this fails, a town has a defect a player would see.
 
-        expectedFailure since the 2026-08-06 branch sweep: real wall defs
-        (M2's ms_barricade_set) landed mid-lane and validate_staging now
-        catches a REAL defect — a gateway's clear-stand falls inside a staged
-        footprint ("the gateway is built over") on some archetype/seed
-        combinations. Gate-stand siting vs real gate/wall footprints is
-        town-planner T4-adjacent work; remove this decorator when fixed.
+        Was expectedFailure from the 2026-08-06 branch sweep until T4: with
+        M2's real ms_barricade_set footprints on the line, one town in the
+        sweep reported "the gateway is built over". The defect was in the
+        SPEC's own probe rather than in the staging — `_gateway_probes` pushed
+        its stand radially out from the town centre, which at an oblique
+        stretch of boundary drifts along the wall into the next segment. It
+        now pushes along the line's own outward normal; see that function.
         """
         checked = 0
         for kind, arch, seed, town, staged, probe in sweep(
