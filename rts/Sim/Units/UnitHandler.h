@@ -3,6 +3,7 @@
 #ifndef UNITHANDLER_H
 #define UNITHANDLER_H
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <vector>
@@ -92,6 +93,21 @@ public:
 	const std::vector<CUnit*>& GetUnitsToBeRemoved() const { return unitsToBeRemoved; }
 	const std::vector<CUnit*>& GetActiveUnits() const { return activeUnits; }
 	      std::vector<CUnit*>& GetActiveUnits()       { return activeUnits; }
+
+	/// The staggered SlowUpdate cursor. Synced, cross-frame state: it only
+	/// rewinds to 0 every UNIT_SLOWUPDATE_RATE frames, so on any other frame it
+	/// says which slice of activeUnits SlowUpdateUnits() will visit next. A
+	/// snapshot has to carry it (PLAN-persistence Q-P4) — a world resumed with
+	/// the cursor at 0 slow-updates a different set of units than the world it
+	/// claims to be, and CWeapon::SlowUpdate draws from the synced RNG.
+	/// Recoil serializes the same member (CR_MEMBER(activeSlowUpdateUnit)).
+	size_t GetActiveSlowUpdateUnit() const { return activeSlowUpdateUnit; }
+	void SetActiveSlowUpdateUnit(size_t i) {
+		// A payload from a world with more units than this one would otherwise
+		// leave idxBeg past the end, where `activeUnits.size() - idxBeg`
+		// underflows a size_t and the slice becomes the whole vector.
+		activeSlowUpdateUnit = std::min(i, activeUnits.size());
+	}
 
 	const std::vector<CUnit*>& GetUnitsByTeam      (int teamNum               ) const { return unitsByDefs[teamNum][        0]; }
 	const std::vector<CUnit*>& GetUnitsByTeamAndDef(int teamNum, int unitDefID) const { return unitsByDefs[teamNum][unitDefID]; }

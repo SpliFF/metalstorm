@@ -24,6 +24,7 @@
 #include "Server/OrgGroups.h"
 #include "Server/StandingOrders.h"
 #include "Sim/Misc/GlobalSynced.h"
+#include "Sim/Units/UnitHandler.h"   // the slow-update cursor (Q-P4)
 #include "System/GlobalRNG.h"
 #include "Lua/LuaHandleSynced.h"   // CSplitLuaHandle::gameParams (task 1d-b)
 
@@ -888,6 +889,7 @@ UnitState loudUnit()
                     w1.numStockpiled = 0; w1.numStockpileQued = 7;
     s.weapons = {w0, w1};
     s.modParams = loudRulesParams();
+    s.activeIndex = 37;
     return s;
 }
 
@@ -1023,6 +1025,7 @@ bool sameUnit(const UnitState& a, const UnitState& b)
         && a.repeatOrders == b.repeatOrders
         && a.lastUserCommand == b.lastUserCommand
         && a.lastFinishCommand == b.lastFinishCommand
+        && a.activeIndex == b.activeIndex
         ;
 }
 
@@ -1038,7 +1041,7 @@ TEST_CASE("task 1c: the field censuses are armed") {
     CHECK(census::Cmd(CommandState{}) == 6);
     CHECK(census::Weapon(WeaponState{}) == 5);
     CHECK(census::Team(TeamState{}) == 26);
-    CHECK(census::Unit(UnitState{}) == 113);
+    CHECK(census::Unit(UnitState{}) == 114);
 }
 
 TEST_CASE("task 1c: the teams section round-trips every field") {
@@ -1153,6 +1156,75 @@ TEST_CASE("task 1c: an empty section is legal and stays empty") {
     std::string err;
     REQUIRE_MESSAGE(DecodeUnits(bytes.data(), bytes.size(), out, err), err);
     CHECK(out.empty());
+}
+
+// ─────────── Q-P4: the activeUnits order is state, not presentation ───────────
+//
+// The payload is written in ascending-id order so two captures of the same world
+// are byte-comparable. `CUnitHandler::activeUnits` is in *insertion* order, and
+// `SlowUpdateUnits` walks it in a staggered slice — one 1/UNIT_SLOWUPDATE_RATE
+// window per frame — so which slot a unit sits in decides which frame it is
+// slow-updated on, and `CWeapon::SlowUpdate` draws from the synced RNG. Restoring
+// in id order therefore moved every unit into a different slow-update frame and
+// the resumed world drew a different number of times on its FIRST tick, with
+// every unit byte-identical. Measured on meridian_basin at frame 60 over 20
+// ticks: arm A 39 draws in two consecutive frames, arm B 63 scattered over nine.
+
+namespace {
+
+UnitState atIndex(int32_t id, uint32_t activeIndex)
+{
+    UnitState s;
+    s.id = id;
+    s.activeIndex = activeIndex;
+    return s;
+}
+
+std::vector<int32_t> orderOf(const std::vector<UnitState>& in)
+{
+    return RestoredActiveOrder(in);
+}
+
+} // namespace
+
+TEST_CASE("Q-P4: the restore order is the captured activeUnits order, not id order") {
+    // Exactly the shape the live capture has: ids ascending in the payload,
+    // insertion order a different permutation entirely.
+    const std::vector<UnitState> in = {
+        atIndex(503, 4), atIndex(852, 0), atIndex(872, 3),
+        atIndex(965, 1), atIndex(1070, 2),
+    };
+    CHECK(orderOf(in) == std::vector<int32_t>{852, 965, 1070, 872, 503});
+}
+
+TEST_CASE("Q-P4: an index collision still yields one order, not an unstable one") {
+    // std::sort is not stable, so an activeIndex that is not a clean permutation
+    // — an older payload that carried none, a hand-built fixture, a partial
+    // roster — would otherwise let two restores of the SAME bytes disagree, and
+    // then capturing the order buys nothing. The id is the tie-break.
+    const std::vector<UnitState> allZero = {
+        atIndex(30, 0), atIndex(10, 0), atIndex(20, 0),
+    };
+    CHECK(orderOf(allZero) == std::vector<int32_t>{10, 20, 30});
+
+    const std::vector<UnitState> partial = {
+        atIndex(30, 0), atIndex(10, 7), atIndex(20, 0), atIndex(40, 7),
+    };
+    CHECK(orderOf(partial) == std::vector<int32_t>{20, 30, 10, 40});
+}
+
+TEST_CASE("Q-P4: an empty roster orders to nothing rather than misbehaving") {
+    CHECK(orderOf({}).empty());
+}
+
+TEST_CASE("Q-P4: the slow-update cursor is clamped to the restored roster") {
+    // The cursor is a raw index into activeUnits and SlowUpdateUnits computes
+    // `activeUnits.size() - idxBeg`; a payload from a bigger world would
+    // underflow that size_t and slow-update the whole vector in one frame.
+    const size_t was = unitHandler.GetActiveSlowUpdateUnit();
+    unitHandler.SetActiveSlowUpdateUnit(999999);
+    CHECK(unitHandler.GetActiveSlowUpdateUnit() <= unitHandler.GetActiveUnits().size());
+    unitHandler.SetActiveSlowUpdateUnit(was);
 }
 
 // ─────────────── Task 1e: the features section (§7.1e) ───────────────

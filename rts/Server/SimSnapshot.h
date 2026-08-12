@@ -330,6 +330,20 @@ struct UnitState {
     // ── weapons + rulesParams ──
     std::vector<WeaponState>     weapons;
     std::vector<RulesParamState> modParams;
+
+    /// This unit's position in `CUnitHandler::activeUnits` (PLAN-persistence
+    /// Q-P4). Not a property of the unit — a property of the *collection*, and
+    /// it has to be captured because `SlowUpdateUnits` walks that vector in a
+    /// staggered slice (`activeUnits[i]` for one 1/UNIT_SLOWUPDATE_RATE window
+    /// per frame). The payload is written in ascending-id order so two captures
+    /// of the same world are byte-comparable; `activeUnits` is in *insertion*
+    /// order, which is a different permutation entirely. Restoring the world
+    /// without it puts every unit in a different slow-update slot, so
+    /// `CWeapon::SlowUpdate`'s error-vector draws happen on different frames and
+    /// in different numbers, and the synced RNG stream diverges on the first
+    /// tick after a resume even when not one unit has moved. Recoil captures the
+    /// same thing (`CR_MEMBER(activeUnits)`).
+    uint32_t activeIndex = 0;
 };
 
 // ──────────── Task 1e: the features section (§7.1e) ────────────
@@ -451,6 +465,12 @@ void CaptureUnits(std::vector<UnitState>& out);
 /// `in[i]`.
 bool ResolveUnitDefs(const std::vector<UnitState>& in,
                      std::vector<int32_t>& defIds, std::string& err);
+
+/// The unit ids in the order `CUnitHandler::activeUnits` must be rebuilt into,
+/// from the payload's captured `activeIndex` (PLAN-persistence Q-P4). Pure, so
+/// the ordering rule — ascending activeIndex, id as the tie-break — is pinned
+/// by a doctest rather than only by a live round-trip.
+std::vector<int32_t> RestoredActiveOrder(const std::vector<UnitState>& in);
 
 /// Destroy the live roster and rebuild it from `in`. Requires a preceding
 /// successful ResolveUnitDefs with the same vector.

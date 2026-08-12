@@ -29,6 +29,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <unordered_map>
 #include <cstring>
 
 namespace simsnapshot {
@@ -38,12 +39,14 @@ namespace simsnapshot {
 const std::vector<SectionSpec>& Sections()
 {
     static const std::vector<SectionSpec> kSections = {
-        {SectionId::Globals,        1, "globals",        true,  ""},
+        // v2: + activeSlowUpdateUnit (Q-P4).
+        {SectionId::Globals,        2, "globals",        true,  ""},
         {SectionId::StandingOrders, 1, "standingOrders", true,  ""},
         {SectionId::OrgGroups,      1, "orgGroups",      true,  ""},
         {SectionId::Directives,     1, "directives",     true,  ""},
         {SectionId::Teams,          1, "teams",          true,  ""},
-        {SectionId::Units,          1, "units",          true,  ""},
+        // v2: + UnitState::activeIndex (Q-P4).
+        {SectionId::Units,          2, "units",          true,  ""},
         {SectionId::Features,       1, "features",       true,  ""},
         {SectionId::SyncedLua,      1, "syncedLua",      true,  ""},
         {SectionId::GameRules,      1, "gameRules",      true,  ""},
@@ -572,6 +575,12 @@ void WriteGlobals(Writer& w)
     // while paused that resumed un-paused would start ticking a world nobody
     // asked to run.
     w.Bool(gs->paused);
+    // The staggered SlowUpdate cursor (Q-P4). It is only reset to 0 every
+    // UNIT_SLOWUPDATE_RATE frames, so on 14 frames out of 15 it is live
+    // cross-frame state: which slice of activeUnits gets slow-updated next.
+    // Restoring at 0 makes a resumed world slow-update units the captured one
+    // had already done, and CWeapon::SlowUpdate draws from the synced RNG.
+    w.U32(static_cast<uint32_t>(unitHandler.GetActiveSlowUpdateUnit()));
 }
 
 struct GlobalsState {
@@ -579,6 +588,7 @@ struct GlobalsState {
     uint64_t rngState = 0;
     uint64_t rngStream = 0;
     bool     paused = false;
+    uint32_t activeSlowUpdateUnit = 0;
 };
 
 GlobalsState ReadGlobals(Reader& r)
@@ -588,6 +598,7 @@ GlobalsState ReadGlobals(Reader& r)
     g.rngState  = r.U64();
     g.rngStream = r.U64();
     g.paused    = r.Bool();
+    g.activeSlowUpdateUnit = r.U32();
     return g;
 }
 
@@ -988,6 +999,8 @@ void WriteUnit(Writer& w, const UnitState& u)
     w.U32(static_cast<uint32_t>(u.weapons.size()));
     for (const auto& s : u.weapons) WriteWeapon(w, s);
     WriteRulesParams(w, u.modParams);
+
+    w.U32(u.activeIndex);
 }
 
 UnitState ReadUnit(Reader& r)
@@ -1080,6 +1093,8 @@ UnitState ReadUnit(Reader& r)
         for (uint32_t i = 0; i < n && !r.Bad(); ++i) u.weapons.push_back(ReadWeapon(r));
     }
     u.modParams = ReadRulesParams(r);
+
+    u.activeIndex = r.U32();
     return u;
 }
 
@@ -1265,7 +1280,7 @@ int CensusUnitState(const UnitState& u)
                  transporterId, loadingTransportId, unloadingTransportId,
                  transportCapacityUsed, transportMassUsed, transportees,
                  commands, tagCounter, repeatOrders, lastUserCommand,
-                 lastFinishCommand, weapons, modParams] = u;
+                 lastFinishCommand, weapons, modParams, activeIndex] = u;
     (void)id; (void)unitDefName; (void)team; (void)buildFacing; (void)beingBuilt;
     (void)posX; (void)posY; (void)posZ; (void)speedX; (void)speedY; (void)speedZ;
     (void)heading; (void)frontX; (void)frontY; (void)frontZ;
@@ -1297,8 +1312,8 @@ int CensusUnitState(const UnitState& u)
     (void)transporterId; (void)loadingTransportId; (void)unloadingTransportId;
     (void)transportCapacityUsed; (void)transportMassUsed; (void)transportees;
     (void)commands; (void)tagCounter; (void)repeatOrders; (void)lastUserCommand;
-    (void)lastFinishCommand; (void)weapons; (void)modParams;
-    return 113;
+    (void)lastFinishCommand; (void)weapons; (void)modParams; (void)activeIndex;
+    return 114;
 }
 
 int CensusFeatureState(const FeatureState& f)
@@ -1805,6 +1820,13 @@ void CaptureUnits(std::vector<UnitState>& out)
     out.clear();
     std::vector<CUnit*> live(unitHandler.GetActiveUnits().begin(),
                              unitHandler.GetActiveUnits().end());
+    // The insertion order is state (UnitState::activeIndex, Q-P4), so record
+    // each unit's slot BEFORE the sort discards it.
+    std::unordered_map<int, uint32_t> activeIndex;
+    activeIndex.reserve(live.size());
+    for (size_t i = 0; i < live.size(); ++i)
+        activeIndex[live[i]->id] = static_cast<uint32_t>(i);
+
     // Ascending id, so two snapshots of the same world are byte-comparable
     // (activeUnits is in insertion order, which a kill+rebuild reshuffles).
     std::sort(live.begin(), live.end(),
@@ -1948,6 +1970,7 @@ void CaptureUnits(std::vector<UnitState>& out)
             s.weapons.push_back(ws);
         }
         s.modParams = CaptureRulesParams(u->modParams);
+        s.activeIndex = activeIndex[u->id];
 
         out.push_back(std::move(s));
     }
@@ -2157,6 +2180,30 @@ void ApplyUnitState(CUnit* u, const UnitState& s)
 
 } // namespace
 
+std::vector<int32_t> RestoredActiveOrder(const std::vector<UnitState>& in)
+{
+    std::vector<const UnitState*> p;
+    p.reserve(in.size());
+    for (const auto& s : in) p.push_back(&s);
+
+    // (activeIndex, id). The id is the tie-break, not decoration: a payload
+    // whose indices are not a clean permutation — an older capture that carried
+    // none, a hand-built fixture, a partial roster — must still produce ONE
+    // order, or two restores of the same bytes disagree and the whole point of
+    // capturing the order is lost to std::sort being unstable.
+    std::sort(p.begin(), p.end(),
+              [](const UnitState* a, const UnitState* b) {
+                  if (a->activeIndex != b->activeIndex)
+                      return a->activeIndex < b->activeIndex;
+                  return a->id < b->id;
+              });
+
+    std::vector<int32_t> out;
+    out.reserve(p.size());
+    for (const UnitState* s : p) out.push_back(s->id);
+    return out;
+}
+
 void ApplyUnits(const std::vector<UnitState>& in, const std::vector<int32_t>& defIds)
 {
     // ── 1. tear the live roster down ──
@@ -2222,6 +2269,34 @@ void ApplyUnits(const std::vector<UnitState>& in, const std::vector<int32_t>& de
             transport->AttachUnit(tee, piece, true);
         }
     }
+
+    // ── 4. put activeUnits back in its captured order (Q-P4) ──
+    //
+    // Step 2 creates in payload order, which is ascending id; the world was in
+    // insertion order. That difference is not cosmetic: SlowUpdateUnits walks
+    // this vector in a staggered slice, so a reshuffle moves every unit into a
+    // different slow-update frame, and CWeapon::SlowUpdate draws from the synced
+    // RNG. A restored world therefore drew a different number of times on its
+    // very first tick, with every unit byte-identical — the divergence Q-P4
+    // filed.
+    const std::vector<int32_t> order = RestoredActiveOrder(in);
+    std::unordered_map<int32_t, size_t> rank;
+    rank.reserve(order.size());
+    for (size_t i = 0; i < order.size(); ++i)
+        rank[order[i]] = i;
+
+    std::vector<CUnit*>& active = unitHandler.GetActiveUnits();
+    std::sort(active.begin(), active.end(),
+              [&rank](const CUnit* a, const CUnit* b) {
+                  const auto ia = rank.find(a->id), ib = rank.find(b->id);
+                  // A live unit the payload does not name cannot exist after a
+                  // full rebuild, but if one ever did it goes to the end in id
+                  // order rather than wherever std::sort left it.
+                  const size_t ka = (ia != rank.end()) ? ia->second : SIZE_MAX;
+                  const size_t kb = (ib != rank.end()) ? ib->second : SIZE_MAX;
+                  if (ka != kb) return ka < kb;
+                  return a->id < b->id;
+              });
 }
 
 // ───────── Task 1e: features capture / apply (§7.1e) ─────────
@@ -3010,6 +3085,10 @@ bool SimSnapshotSerializer::Deserialize(const uint8_t* data, size_t size, std::s
     // applied, at byte 4 of the `globals` section — the first byte of the RNG
     // state — and the hash track diverged on the very first tick after.
     gsRNG.SetGenState(globals.rngState, globals.rngStream);
+
+    // After ApplyUnits, because the setter clamps against the rebuilt roster
+    // (Q-P4). Ordering only: this consumes no draws.
+    unitHandler.SetActiveSlowUpdateUnit(globals.activeSlowUpdateUnit);
 
     if (!luaOk) {
         // Past the point of no return. The world IS restored; what failed is a

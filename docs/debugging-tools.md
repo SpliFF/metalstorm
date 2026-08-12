@@ -779,7 +779,23 @@ max heading delta 65.7 deg), 0 in vitals, roster identical
 `--roundtrip-strict` adds the pre-decision bar: the two hash tracks and the two
 terminal payloads must be identical as well. Use it on a fixture with nothing under a
 move order (a staging-only scenario), or to measure what capturing move state would
-buy.
+buy. On `soak-ladder` it **passes at `60:20`** (nothing is moving yet) and fails from
+frame 300 on, where the movement re-derivation starts — that pair is the standing
+regression check for the snapshot walk:
+
+```bash
+build/debug/spring-server --headless-run tools/headless-batch/fixtures/soak-ladder.json \
+  --port 19133 --db /tmp/rt.sqlite --max-wall-min 8 \
+  --snapshot-roundtrip 60:20 --roundtrip-strict     # must PASS
+```
+
+Before Q-P4 (2026-08-12) that run failed on the *first* tick with every unit
+byte-identical, because the restore rebuilt `activeUnits` in ascending-id order rather
+than the captured insertion order and `CWeapon::SlowUpdate` — reached through the
+staggered `SlowUpdateUnits` slice — draws from the synced RNG. If it ever fails that
+way again, the fastest diagnosis is to count synced draws per frame per arm rather
+than to read the sections: a `globals` byte-4 difference is the RNG *position*, which
+means only one thing, that the two arms drew a different number of times.
 
 Read the **verdict line, not the exit code**: `spring-server` aborts during static
 destruction in any run that exercised weapon defs (PLAN-replay T2-b), so every
