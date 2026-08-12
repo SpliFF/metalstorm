@@ -260,6 +260,31 @@ export function classify(metric, fit, budget, ruling = DEFAULT_RULING) {
     if (metric.kind === 'cumulative' && !budget?.why)
         return mk('explained', 'lifetime total; rising is the design. No rate budget declared');
 
+    // A budget carries the window it was fitted over (`basisSpanDays`, written
+    // by `seedBudgets`), and an arm whose own window is a small fraction of it
+    // is not measuring the same thing. This is the seeding rule applied to the
+    // verdict, and it has to be both: without it, the first real ladder's three
+    // short arms — wars that ENDED inside their opening ramp — reported
+    // `rules_params` at up to 45 864/sim-day against a 25/sim-day steady-state
+    // budget and turned the gate red on every run, which is how a gate gets
+    // switched off. `too-short` is not a pass; it says the arm cannot rule.
+    // Some surfaces have a period, and a window shorter than one period cannot
+    // rule them however good the fit looks. `db_bytes` is the measured case:
+    // SQLite's wal_autocheckpoint folds the -wal sidecar back into the main file
+    // roughly every 31 wall-minutes, so a 25-minute arm fits the ramp at
+    // r2 = 1.00 and reports 195 MB/wall-day for a database whose real rate is
+    // 38. An absolute floor is the only thing that catches that: the basis
+    // fraction below is relative, and half of a period is still no periods.
+    // (PLAN-persistence's wind cycle is the same lesson from the other end — a
+    // passing round-trip says nothing about state whose period exceeds the
+    // window.)
+    if (Number.isFinite(budget?.minSpanDays) && fit.span < budget.minSpanDays)
+        return mk('too-short', `window ${fmt(fit.span)} ${clock}-day is under this metric's declared minimum of ${fmt(budget.minSpanDays)} ${clock}-day — shorter than one cycle of whatever drives it`);
+
+    const basis = budget?.basisSpanDays;
+    if (Number.isFinite(basis) && basis > 0 && fit.span < SEED_SPAN_FLOOR_FRACTION * basis)
+        return mk('too-short', `window ${fmt(fit.span)} ${clock}-day is under ${(SEED_SPAN_FLOOR_FRACTION * 100).toFixed(0)}% of the budget's ${fmt(basis)}-${clock}-day basis — the rule that refuses this arm as a seed refuses it as a verdict`);
+
     if (!budget || !budget.why)
         return mk('unexplained', budget ? 'budget entry has no `why`; §2 requires the slope be EXPLAINED, not merely allowed' : 'no budget entry accounts for this slope');
 
@@ -287,4 +312,76 @@ export function fmt(v) {
 export function reportDump(dump, budgets = {}, ruling = DEFAULT_RULING) {
     const series = seriesFromDump(dump);
     return METRICS.map((m) => classify(m, fitLinear(series[m.key]), budgets[m.key], ruling));
+}
+
+/**
+ * How short an arm's window may be, as a fraction of the longest arm's window
+ * for the same metric, before its slope is refused as a budget seed. See
+ * `seedBudgets`.
+ */
+export const SEED_SPAN_FLOOR_FRACTION = 0.25;
+
+/**
+ * Seed a budget skeleton from a ruled report: one entry per FAILING metric,
+ * `why: null` so the file cannot pass the gate until a human writes the reason.
+ *
+ * `arms` is `[{ label, results }]` as growth-report.mjs assembles it.
+ *
+ * Two rules, and the second one was a live defect first.
+ *
+ *   1. **Only metrics that actually failed get an entry.** Seeding a budget for
+ *      a metric already ruled `flat` writes that arm's noise into the file as a
+ *      permanently permitted slope, and the gate would then pass a later run
+ *      that genuinely slopes by that much. A budget is a licence; licences are
+ *      only issued where one was needed.
+ *
+ *   2. **Largest-slope-wins, but only among arms whose window is comparable.**
+ *      The churn arm stresses these surfaces hardest, so a skeleton seeded off
+ *      the baseline arm alone is too tight for the ladder it has to gate —
+ *      hence largest wins. But the first real ladder (task 4) produced four
+ *      arms spanning 0.0033 to 0.265 simulated days, because three of them
+ *      ENDED (Meridian Basin's victory objective is terminal) and their last
+ *      samples sit in the war's opening ramp. Those arms reported
+ *      `rules_params` at 45 864/sim-day against the long arm's 25/sim-day —
+ *      the same surface, a ×1800 disagreement, entirely an artefact of a ×300
+ *      extrapolation off a 5-minute window. Largest-wins across that set
+ *      issues a licence three orders of magnitude looser than the steady state,
+ *      which is the one direction a gate must never fail. So an arm whose
+ *      window is under `SEED_SPAN_FLOOR_FRACTION` of the longest arm's window
+ *      for that metric is not eligible to raise the number, and every arm
+ *      dropped is returned in `dropped` — a seeding rule that silently ignored
+ *      arms would be indistinguishable from one that never saw them.
+ */
+export function seedBudgets(arms, { spanFloorFraction = SEED_SPAN_FLOOR_FRACTION } = {}) {
+    const failing = [];
+    for (const arm of arms)
+        for (const r of arm.results ?? [])
+            if (FAILING.has(r.verdict) && Number.isFinite(r.fit?.slope) && r.fit.slope > 0)
+                failing.push({ label: arm.label, r });
+
+    const longestSpan = {};
+    for (const { r } of failing)
+        longestSpan[r.key] = Math.max(longestSpan[r.key] ?? 0, r.fit.span ?? 0);
+
+    const seed = {};
+    const dropped = [];
+    for (const { label, r } of failing) {
+        const floor = (longestSpan[r.key] ?? 0) * spanFloorFraction;
+        if ((r.fit.span ?? 0) < floor) {
+            dropped.push({ key: r.key, label, span: r.fit.span ?? 0, longestSpan: longestSpan[r.key], slope: r.fit.slope });
+            continue;
+        }
+        if (seed[r.key] && seed[r.key].slopePerDay >= r.fit.slope) continue;
+        seed[r.key] = {
+            slopePerDay: Number(r.fit.slope.toPrecision(4)),
+            tolerance: Number((Math.abs(r.fit.slope) * 0.5).toPrecision(4)),
+            // The window this number was fitted over, carried so a later run
+            // can tell whether its own arm measured the same thing — see
+            // `classify`'s basis check. A budget without it still gates; it
+            // just cannot refuse an incomparable arm.
+            basisSpanDays: Number((r.fit.span ?? 0).toPrecision(3)),
+            why: null,
+        };
+    }
+    return { seed, dropped };
 }

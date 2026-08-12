@@ -493,10 +493,44 @@ node tools/headless-batch/growth-report.mjs --jsonl build/soak/results.jsonl \
 ```
 
 `soak-matrix.json` crosses `objective_density` × `build_time_scale`, so the four
-arms run **ladder 1 (baseline) and ladder 2 (churn amplifier) plus the two
-single-knob arms that attribute any slope to one knob or the other**. Use a
-**release** binary: the debug build ticks this content ~30× slower, which is the
-difference between a simulated day costing 11 wall-minutes and costing hours.
+arms run **ladder 1 (baseline) plus the three knob combinations that attribute
+any slope to one knob or the other**. (§2's *ladder 2*, the churn amplifier, is
+join/leave and parley traffic — neither of which a knob can produce; it needs a
+scripted wire client and is not what this matrix runs. See PLAN-long-uptime §11.)
+Use a **release** binary: the debug build ticks this content ~30× slower, which
+is the difference between a simulated day costing hours and costing days.
+
+**Four things the ladder fixture has to get right, each of which produced a
+clean-looking and worthless report first (measured 2026-08-12, task 4):**
+
+- **`modOptions.scenario` is required.** Without it `game_scenario.lua` stages
+  nothing, so a Metalstorm war is 8 units a side with no economy and no contact:
+  the report's vacuity check fails the arm with `peak damage 0 / deaths 0`, and
+  every slope in it is a slope through an empty world.
+- **The AI slots must sit on the teams the *scenario* stages, not 0 and 1.**
+  `meridian_basin` stages teams **0**, **4** and NPC **8** (its `sides` block
+  declares 0–3 Compact, 4–7 Union, 8 Reavers). A slot on team 1 gets a side with
+  no units — the loader says so (`team(s) 1 are in this war with NO units`) and
+  the war is then one AI shooting civilians.
+- **`stateHashEvery` is the growth sample cadence.** It was 86 400 frames, which
+  on real content is ~20 wall-minutes per sample, so a 25-minute arm produced
+  **one** snapshot and every metric ruled `too-short`. It is 3 600 now (2
+  simulated minutes).
+- **`stopAt.gameOver` must be set.** `meridian_basin`'s victory objective is
+  terminal and its war is winnable at frame **12 180** (~6.8 simulated minutes);
+  after `Spring.GameOver` the sim freezes, so the frame stops advancing, the
+  `frame % stateHashEvery` cadence never fires again and the arm burns the rest
+  of its wall ceiling in silence — measured at **24 of 25 wall-minutes**, with
+  the dump still reporting `status=wall-ceiling` as though the window had been
+  the wall's fault.
+
+**Two counters a client-less ladder can never rule**, so they read `no-signal`
+by construction rather than by ladder length: `StateStreamer::BroadcastRulesParams`
+returns at `rtcServer.GetClientCount() == 0` (StateStreamer.cpp:1552) *before*
+the interning block, so **both** S1's key dictionary and its compaction are
+client-gated (`param_keys` sits at 0); and standing orders arrive from client
+macro-order calls, so `standing_orders` does too. S1/S6 belong to §2's ladder 3
+(the client soak), not to ladders 1–2.
 
 `growth-report.mjs` fits `base + slope×days` to every growth surface and rules
 each slope:
@@ -532,6 +566,21 @@ Four things the ruling does deliberately, each of which was a bug first:
   by design"; a bare number is merely permission. `--emit-budgets` seeds a
   skeleton from the observed slopes with every `why` set to `null`, so the file
   cannot pass the gate until a human has written the reasons in.
+- **A metric with a period declares `minSpanDays`, and a shorter arm cannot rule
+  it.** `db_bytes` sawtooths: the `-wal` sidecar grows 4 kB every 2 wall-seconds
+  (the `game_status` liveness commit) until `wal_autocheckpoint` folds it back,
+  measured at 31 wall-minutes. A 25-minute arm fits the ramp at r2 = 1.00 and
+  reports 195 MB/wall-day; 55 minutes across 1.8 cycles reports **37.8**. Half a
+  period is still no periods, so the floor has to be absolute rather than a
+  fraction of some other arm.
+- **A short arm cannot raise a budget over a long one.** `--emit-budgets` takes
+  the largest observed slope per metric, because the churn arm is the one that
+  stresses these surfaces — but only among arms whose window is at least 25 % of
+  the longest arm's window for *that metric*. The first real ladder had three
+  arms whose wars ended inside the opening ramp and which reported
+  `rules_params` at 45 864/sim-day against the long arm's 25/sim-day; largest-wins
+  across that set would have issued a licence ×1800 looser than the steady state.
+  Every arm refused is printed by name.
 - **A counter that read zero all run is `no-signal`, not clean.** A headless
   ladder has no client sessions, so `StateStreamer` interns no keys and
   `param_keys` sits at 0 for the whole run — the flattest line in the report,

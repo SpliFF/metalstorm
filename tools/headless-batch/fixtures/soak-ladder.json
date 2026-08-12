@@ -3,15 +3,17 @@
   "game": "metalstorm",
   "aiSlots": [
     { "aiId": "strategos", "team": 0, "startPos": 0 },
-    { "aiId": "strategos", "team": 1, "startPos": 1 }
+    { "aiId": "strategos", "team": 4, "startPos": 1 },
+    { "aiId": "strategos", "team": 8, "startPos": 2 }
   ],
   "modOptions": {
+    "scenario": "meridian_basin",
     "objective_density": "normal",
     "build_time_scale": "1.0"
   },
   "headless": {
     "tickMode": "uncapped",
-    "stopAt": { "frame": 2592000 },
-    "stateHashEvery": 86400
+    "stopAt": { "frame": 2592000, "gameOver": true },
+    "stateHashEvery": 3600
   }
 }

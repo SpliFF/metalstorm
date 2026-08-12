@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     METRICS, DEFAULT_RULING, FAILING, INCONCLUSIVE,
-    seriesFromDump, fitLinear, classify, reportDump, SECONDS_PER_DAY,
+    seriesFromDump, fitLinear, classify, reportDump, SECONDS_PER_DAY, seedBudgets,
 } from '../lib/growth-fit.mjs';
 
 const metric = (key) => METRICS.find((m) => m.key === key);
@@ -215,4 +215,103 @@ test('the ruling parameters are actually honoured', () => {
     assert.equal(classify(metric('rules_params'), fitLinear(pts), undefined, DEFAULT_RULING).verdict, 'unexplained');
     // Raise the floor to 5% of base and the same series is flat.
     assert.equal(classify(metric('rules_params'), fitLinear(pts), undefined, { sigmas: 2, minRelSlopePerDay: 0.05 }).verdict, 'flat');
+});
+
+// --- budget seeding -------------------------------------------------------
+// The seed is what turns one soak run into the gate every later run is judged
+// by, so a seeding rule that picks the wrong arm is a silently permanent
+// mis-calibration.
+
+const armOf = (label, entries) => ({
+    label,
+    results: entries.map(([key, slope, span, verdict = 'unexplained']) => ({
+        key, verdict, fit: { slope, span, base: 100, n: 8, stderr: 0, r2: 1, maxAbs: 100 },
+    })),
+});
+
+test('a budget seed is issued only where a metric actually failed', () => {
+    const { seed } = seedBudgets([armOf('a', [
+        ['rules_params', 60, 1],
+        ['lua_heap_kb', 5000, 1, 'flat'],
+        ['unit_spawns', 900, 1, 'explained'],
+    ])]);
+    assert.deepEqual(Object.keys(seed), ['rules_params']);
+    assert.equal(seed.rules_params.why, null);
+});
+
+test('the largest slope wins among arms of comparable window', () => {
+    const { seed, dropped } = seedBudgets([
+        armOf('baseline', [['rules_params', 60, 1]]),
+        armOf('churn', [['rules_params', 150, 0.8]]),
+    ]);
+    assert.equal(seed.rules_params.slopePerDay, 150);
+    assert.deepEqual(dropped, []);
+});
+
+// The first real ladder: three arms ended in the war's opening ramp at ~0.003
+// simulated days and reported rules_params at 45 864/sim-day; the one arm that
+// ran on reported 25/sim-day over 0.265. Largest-wins across that set licenses
+// a slope 1800x the steady state.
+test('a short arm cannot raise the budget over a long one', () => {
+    const { seed, dropped } = seedBudgets([
+        armOf('long', [['rules_params', 25, 0.265]]),
+        armOf('short', [['rules_params', 45864, 0.0033]]),
+    ]);
+    assert.equal(seed.rules_params.slopePerDay, 25);
+    assert.equal(dropped.length, 1);
+    assert.equal(dropped[0].label, 'short');
+    assert.equal(dropped[0].key, 'rules_params');
+});
+
+test('the span floor is per metric, not per arm', () => {
+    // The same arm can be the long one for a wall-clocked metric and the short
+    // one for a sim-clocked metric, because a frozen sim keeps burning wall
+    // time — exactly what a war that ended does.
+    const { seed } = seedBudgets([
+        armOf('ended', [['rules_params', 45864, 0.0033], ['db_bytes', 1e8, 0.017]]),
+        armOf('ran-on', [['rules_params', 25, 0.265], ['db_bytes', 9e7, 0.017]]),
+    ]);
+    assert.equal(seed.rules_params.slopePerDay, 25);
+    assert.equal(seed.db_bytes.slopePerDay, 1e8);
+});
+
+// A budget's `basisSpanDays` is what lets a later run tell "this arm disagrees
+// with the budget" from "this arm never measured the same window".
+test('an arm far shorter than the budget basis cannot be ruled over-budget', () => {
+    const budget = { slopePerDay: 25, tolerance: 12, basisSpanDays: 0.265, why: 'steady state' };
+    const short = [0, 1, 2, 3].map((i) => ({ days: i * 0.001, value: 300 + 45864 * i * 0.001 }));
+    const r = classify(metric('rules_params'), fitLinear(short), budget);
+    assert.equal(r.verdict, 'too-short');
+    assert.ok(INCONCLUSIVE.has(r.verdict));
+    assert.match(r.note, /basis/);
+
+    // A comparable window is still ruled — the check must not swallow the gate.
+    const long = [0, 1, 2, 3].map((i) => ({ days: i * 0.09, value: 300 + 45864 * i * 0.09 }));
+    assert.equal(classify(metric('rules_params'), fitLinear(long), budget).verdict, 'over-budget');
+});
+
+test('a budget with no basis still gates, as before', () => {
+    const budget = { slopePerDay: 25, tolerance: 12, why: 'steady state' };
+    const short = [0, 1, 2, 3].map((i) => ({ days: i * 0.001, value: 300 + 45864 * i * 0.001 }));
+    assert.equal(classify(metric('rules_params'), fitLinear(short), budget).verdict, 'over-budget');
+});
+
+test('the seed records the window it was fitted over', () => {
+    const { seed } = seedBudgets([armOf('long', [['rules_params', 25, 0.265]])]);
+    assert.equal(seed.rules_params.basisSpanDays, 0.265);
+});
+
+// db_bytes measured: the WAL sawtooths on a ~31-wall-minute checkpoint cycle, so
+// a 25-minute arm fits the ramp at r2 = 1.00 and reports five times the real
+// rate. A relative floor cannot catch that; half a period is still no periods.
+test('a window shorter than the metric\'s declared period cannot be ruled', () => {
+    const budget = { slopePerDay: 37.77e6, tolerance: 18.9e6, basisSpanDays: 0.0382, minSpanDays: 0.0215, why: 'sawtooth' };
+    const ramp = [0, 1, 2, 3].map((i) => ({ days: i * 0.005, value: 4.3e5 + 195.7e6 * i * 0.005 }));
+    const r = classify(metric('db_bytes'), fitLinear(ramp), budget);
+    assert.equal(r.verdict, 'too-short');
+    assert.match(r.note, /declared minimum/);
+
+    // Past one cycle the same budget rules normally.
+    const full = [0, 1, 2, 3].map((i) => ({ days: i * 0.013, value: 4.3e5 + 37e6 * i * 0.013 }));
+    assert.equal(classify(metric('db_bytes'), fitLinear(full), budget).verdict, 'explained');
 });
