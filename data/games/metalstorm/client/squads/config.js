@@ -290,6 +290,15 @@ export const DEFAULT_CONFIG = {
   // never oscillates at the budget boundary.
   governorEscalateFrames: 30,
   governorRelaxFrames: 240,
+
+  // --- SoA engine (PLAN-metalstorm-squad-performance.md §10) ---------------
+  // 'oo' (default) keeps every squad on the Squad/Member classes above;
+  // 'soa' routes construction/sync/casualty/LOD through soa-squad.js's
+  // store-backed SquadRec instead (S3 — no stepping kernel yet, S4 adds it;
+  // the default flips at S7). Same SquadManager public API either way.
+  engine: 'oo',
+  // Initial member-array pool capacity (soa-store.js); doubles on overflow.
+  soaInitialMembers: 4096,
 };
 
 // THE routing predicate — canonical single home (PLAN-metalstorm-structure.md

@@ -6,6 +6,8 @@ import { DEFAULT_CONFIG, linearCount } from './config.js';
 import { BigUnitRepulsor } from './big-unit-repulsor.js';
 import { createGovernorState, updateGovernor, strideForLevel } from './governor.js';
 import { createPatchSet } from './patches.js';
+import { createStore } from './soa-store.js';
+import { createSquadRec } from './soa-squad.js';
 
 // Cell-index packing stride for the numeric spatial-hash key (see _key).
 // Keeps `gx * KEY_STRIDE + gz` inside SMI range and injective for the cell
@@ -20,7 +22,17 @@ export class SquadManager {
   constructor(backend, config = {}) {
     this.backend = backend;
     this.cfg = { ...DEFAULT_CONFIG, countCurve: linearCount, ...config };
-    this.squads = new Map();        // sim unit id → Squad
+
+    // SoA engine (PLAN-metalstorm-squad-performance.md §10a): 'oo' (default)
+    // is every squad below unchanged; 'soa' constructs store-backed
+    // SquadRecs instead (soa-squad.js) — see `_activate`, the only branch
+    // point (every other ingest method just calls methods on `sq`).
+    // Milestone S3 has no stepping kernel yet, so `store` sits unused by
+    // per-frame code until S4.
+    this.engine = this.cfg.engine === 'soa' ? 'soa' : 'oo';
+    this.store = this.engine === 'soa' ? createStore(this.cfg.soaInitialMembers) : null;
+
+    this.squads = new Map();        // sim unit id → Squad | SquadRec
     // Last known pose/strength for an id whose def hasn't arrived yet
     // (squad-sync H1: state can arrive before the on-demand def). Flushed by
     // noteDef(); cleared on removeSquad() so a reused id never resurrects a
@@ -610,7 +622,9 @@ export class SquadManager {
     // authoritative for it now; a stale leftover would only matter if this
     // id were later destroyed and reused (H2), so clear it here too.
     this._pendingById.delete(id);
-    const sq = new Squad(id, def, this.backend, this.cfg);
+    const sq = this.engine === 'soa'
+      ? createSquadRec(this.store, id, def, this.backend, this.cfg)
+      : new Squad(id, def, this.backend, this.cfg);
     sq.onWreck = (x, z, extra) => this._registerWreck(x, z, extra);
     this.squads.set(id, sq);
     const strength = state.strength || state;
