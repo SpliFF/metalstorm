@@ -109,22 +109,45 @@ export class FactoryQueuePanel {
             name.textContent = row.humanName || row.name || `def ${row.defId}`;
             el.appendChild(name);
 
+            // PLAN-latency L4.2: `count` spans the merged view, so it can
+            // include orders the server has not echoed yet. Show the
+            // unconfirmed tail separately (`×2 +1`) rather than folding it in —
+            // the whole row is otherwise indistinguishable from an
+            // authoritative one, and only the confirmed part can be cancelled.
             const count = document.createElement('span');
             count.className = 'factory-queue-count';
             count.textContent = `×${row.count}`;
             el.appendChild(count);
+            if (row.pending > 0) {
+                const pend = document.createElement('span');
+                pend.className = 'factory-queue-pending';
+                pend.textContent = `+${row.pending}`;
+                pend.title = `${row.pending} order(s) sent, awaiting the server`;
+                el.appendChild(pend);
+            }
 
+            // A row that is *entirely* unconfirmed has no server tag to
+            // address, so both cancel affordances are inert — disable them
+            // rather than firing a CMD.REMOVE the server would ignore. It
+            // resolves within a round trip.
+            const cancellable = row.tags.length > 0;
             const cancel = document.createElement('button');
             cancel.className = 'factory-queue-cancel';
             cancel.textContent = '✕';
-            cancel.title = `Cancel all ${row.count} queued`;
+            cancel.disabled = !cancellable;
+            cancel.title = cancellable
+                ? `Cancel all ${row.tags.length} confirmed`
+                : 'Awaiting server confirmation';
             cancel.addEventListener('click', (e) => {
                 e.stopPropagation();
+                if (!cancellable) return;
                 this.callbacks.onRemoveAll(row.unitId, row.tags.slice());
             });
             el.appendChild(cancel);
 
-            el.title = `${row.humanName || row.name} ×${row.count}\nClick to cancel one, ${'✕'} to cancel all`;
+            el.title = `${row.humanName || row.name} ×${row.count}`
+                + (row.pending > 0 ? ` (${row.pending} awaiting server)` : '')
+                + `\nClick to cancel one, ${'✕'} to cancel all`;
             el.addEventListener('click', (e) => {
                 e.stopPropagation();
                 const lastTag = row.tags[row.tags.length - 1];
@@ -216,6 +239,15 @@ export class FactoryQueuePanel {
     font: 11px/1.1 ui-monospace, Menlo, monospace;
     pointer-events: none;
 }
+.factory-queue-pending {
+    flex-shrink: 0;
+    padding: 0 3px;
+    border: 1px dashed #79b0ff;
+    border-radius: 6px;
+    color: #b9d5ff;
+    font: 10px/1.2 ui-monospace, Menlo, monospace;
+    pointer-events: none;
+}
 .factory-queue-cancel {
     flex-shrink: 0;
     width: 18px;
@@ -228,8 +260,12 @@ export class FactoryQueuePanel {
     line-height: 18px;
     cursor: pointer;
 }
-.factory-queue-cancel:hover {
+.factory-queue-cancel:hover:not(:disabled) {
     color: #e05050;
+}
+.factory-queue-cancel:disabled {
+    color: #3a3f48;
+    cursor: default;
 }
 #factory-queue-panel::-webkit-scrollbar { width: 6px; }
 #factory-queue-panel::-webkit-scrollbar-track { background: transparent; }

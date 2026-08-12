@@ -84,6 +84,7 @@ import { resolveUnitClassToDefIds } from './unit-class-filter.js';
 import { PresentationClock } from './presentation-clock.js';
 import { EventScheduler, type ScheduledKind } from './event-scheduler.js';
 import { PendingActionRegistry } from './pending-actions.js';
+import { MotionLeanRegistry } from './motion-lean.js';
 import { nextCosmeticProjectileId } from './cosmetic-flight.js';
 // GW4-c5: weapon-FX / projectile / decal / build render modules fold into the
 // worker (audited worker-safe — no DOM/audio; the `window.__*` dev hooks they
@@ -123,7 +124,7 @@ import type { ShapeKind } from './shape-gesture-capture.js';
 import { CMD, OPT } from './command-buffer.js';
 import { groupFactoryQueueRuns } from './factory-queue.js';
 import { findMetalSpots, type MetalSpot } from './metal-spots.js';
-import { resolveSoundRef, pickUnitDefSound,
+import { resolveSoundRef, pickUnitDefSound, SoundCategory,
     type ResolvedSoundEvent } from './sound-events.js';
 import { CommandPathRenderer } from './command-path-renderer.js';
 import { WaypointMarkerRenderer } from './waypoint-marker-renderer.js';
@@ -269,6 +270,28 @@ let gpPendingActions: PendingActionRegistry | null = null;
 /// nothing for a config flag to protect — the control arm exists to measure
 /// against, not to fall back to.
 let gpOptimisticInput = true;
+/// The ~1 Hz `BuildUnitCommandQueues` beat, tallied for the L4 gate's
+/// build-ghost race measurement (bullet 6) — see `snapshotStats`.
+let gpQueueSnapshotCount = 0;
+let gpQueueSnapshotLastMs = 0;
+/// PLAN-latency L4.3 — the bounded positional lean. Separate registry from
+/// `gpPendingActions` on purpose: the overlay's lifecycle is "until the server
+/// confirms", the lean's is "until the server's own motion catches up", and
+/// they are neither the same clock nor the same evidence.
+let gpMotionLean: MotionLeanRegistry | null = null;
+/// A/B switch for the L4.3 measurement (gp:test 'setPositionalLean'), the same
+/// shape as `gpOptimisticInput`: off restores the pre-L4.3 body pose exactly.
+let gpPositionalLean = true;
+/// A/B switch for the L4.4 measurement (gp:test 'setSnapshotRefutation'): off
+/// restores the pre-L4.4 rule that a confirmed entry can only leave via the
+/// flat 3 s cap. Module-scope so it survives a registry rebuild on rejoin.
+let gpSnapshotRefutation = true;
+/// PLAN-latency L4.2 measurement counters for the order-ack bark. `attempts`
+/// counts player commands the sink acked; `played` counts the ones whose def
+/// actually carried an `ok` sound. The gap between them is the real coverage
+/// number — a def with no `ok` sound is silent no matter where the call sits.
+let gpOrderAckAttempts = 0;
+let gpOrderAckPlayed = 0;
 
 /// The overlay view: the last snapshot with outstanding optimistic orders
 /// merged on top. Identical to `gpLastCommandQueues` when nothing is pending.
@@ -1470,6 +1493,11 @@ function gpConnect(msg: GpInitToWorker): void {
         // (Widget forward + the build-pending-ghost reaper land in c5c/c6.)
         onUnitCommandQueues: (queues) => {
             gpLastCommandQueues = queues;
+            // L4 gate bullet 6: the race being tested is "a ghost placed just
+            // before a snapshot". A trial can only aim for that gap if it can
+            // see the ~1 Hz beat, so tally it. (`snapshotStats` probe.)
+            gpQueueSnapshotCount++;
+            gpQueueSnapshotLastMs = performance.now();
             // PLAN-latency L4.1: hand off every optimistic entry this snapshot
             // now carries authoritatively, THEN merge what is still outstanding
             // on top. Order matters — retiring first is what keeps an order
@@ -1482,6 +1510,11 @@ function gpConnect(msg: GpInitToWorker): void {
             // PLAN-playable.md G4: the selected factory's queue may have
             // changed (unit completed, order added/removed) — re-resolve.
             gpRecomputeFactoryQueue();
+            // L4.2: the build-row queue chips read the same queues. Patch the
+            // counts in place rather than rebuilding the tiles — the buildable
+            // *set* cannot change on a queue update, and a full rebuild would
+            // re-ship the whole tile array to main every second.
+            gpRefreshBuildQueueChips();
             // PLAN-playable.md G3b: reap pending build-ghosts whose order has
             // left the queue (construction started / cancelled).
             // L4.1: fed the MERGED view, which fixes a race that predates this
@@ -1840,14 +1873,35 @@ function gpConnect(msg: GpInitToWorker): void {
     // PLAN-latency L4.1: register every command that goes on the wire, in the
     // form it went (post-CommandNotify, so widget rewrites and widget-issued
     // orders are covered — neither passes through a CommandBuffer).
-    conn.setCommandSink((commands) => {
-        for (const c of commands) gpPendingActions?.register(c);
+    conn.setCommandSink((commands, source) => {
+        for (const c of commands) {
+            gpPendingActions?.register(c);
+            // L4.3: the same sink drives the body lean. Two registries, one
+            // subscription — a command that reaches the overlay always reaches
+            // the lean, so they can never disagree about what was ordered.
+            if (gpPositionalLean) gpMotionLean?.onCommandSent(c);
+        }
         // Draw it now. This is the whole point of the phase: the artifact
         // appears on the click, not on the ack and not on the next snapshot.
         const sel = gpCtx.selection?.selection ?? [];
         const merged = gpMergedCommandQueues();
         gpCommandPathRenderer?.update(merged, sel);
         gpWaypointMarkerRenderer?.update(merged, sel);
+        // L4.2: the two production panels read the same merged view, so a
+        // queued item shows up on the click too. The build ghost already did
+        // (L4.1 fed it the merged view); these were the remaining consumers
+        // still waiting on the 1 Hz snapshot.
+        gpRecomputeFactoryQueue();
+        gpRefreshBuildQueueChips();
+        // L4.2: the audible half. Recoil acks a player order with the first
+        // targeted unit's `ok` sound; widget-issued orders are silent.
+        if (source === 'player' && commands.length > 0) {
+            const unitId = commands[0].unitIds[0];
+            if (unitId !== undefined) {
+                gpOrderAckAttempts++;
+                gpCtx.selection?.playOrderAck(unitId);
+            }
+        }
     });
     conn.connect(msg.gameHttpUrl, msg.username, '', msg.token);
 }
@@ -2272,6 +2326,11 @@ export function gpInit(msg: GpInitToWorker): void {
     gpPendingActions = new PendingActionRegistry({
         getRttMs: () => gpCtx.connection?.serverClock.getRtt() ?? 0,
     });
+    gpPendingActions.setSnapshotRefutation(gpSnapshotRefutation);
+    gpMotionLean = new MotionLeanRegistry({
+        getRttMs: () => gpCtx.connection?.serverClock.getRtt() ?? 0,
+        warn: (msg) => postLog(3, msg),
+    });
 
     // PLAN-lazy-loading.md: one AssetLoader shared across unit/feature/
     // projectile model fetches so their concurrency is capped together —
@@ -2283,6 +2342,12 @@ export function gpInit(msg: GpInitToWorker): void {
     const entityRenderer = new EntityRenderer(scene);
     entityRenderer.setAssetLoader(gpAssetLoader);
     entityRenderer.setPresentationClock(gpPresentationClock);
+    // PLAN-latency L4.3: the body starts moving on the click, by a bounded
+    // few elmos, and gives the lead back one-for-one as the server's own
+    // motion arrives. Applied downstream of the L1 reveal gate, so an
+    // un-revealed entity can never be leaned.
+    entityRenderer.setLeanProvider((id, x, z, heading) =>
+        gpPositionalLean ? (gpMotionLean?.offsetFor(id, x, z, heading) ?? null) : null);
     // PLAN-latency L1 (LOS reveal): a unit entering LOS reaches us ~D frames
     // before the sim frame it became visible on. Put the reveal on the
     // presentation timeline so it appears on that frame rather than early,
@@ -2618,6 +2683,10 @@ export function gpInit(msg: GpInitToWorker): void {
         gpAimController?.tick(performance.now());
         gpMark(0);  // camera
 
+        // PLAN-latency L4.3: roll the lean's per-frame memo over and expire
+        // leans whose hold + decay has run out. Must run before the entity
+        // pass, which is what queries it (body and selection ring both).
+        gpMotionLean?.beginFrame();
         // entityRenderer.tick() advances the presentation clock (L0) and
         // interpolates every unit to the presentation cursor before render.
         gpCtx.entityRenderer?.tick();
@@ -2814,6 +2883,8 @@ export function gpInit(msg: GpInitToWorker): void {
             if (req.kind === 'unit') {
                 const def = gpDefCache?.getUnitDef(req.defId);
                 const ref = pickUnitDefSound(def?.sounds, req.category);
+                if (req.category === SoundCategory.OrderAck && ref)
+                    gpOrderAckPlayed++;
                 if (!ref) return;
                 const e: SoundEventInfo = {
                     soundId: ref.id, sourceDefId: req.defId, sourceKind: 0,
@@ -2989,9 +3060,11 @@ function gpRecomputeBuildTiles(): void {
         return a - b;
     });
 
+    const queued = gpBuildQueueCounts();
     const tiles: BuildMenuTile[] = [];
     for (const defId of sorted) {
         const def = dc?.getUnitDef(defId);
+        const q = queued.get(defId);
         tiles.push({
             defId,
             name:       def?.name ?? '',
@@ -3001,6 +3074,8 @@ function gpRecomputeBuildTiles(): void {
             energyCost: def?.energyCost ?? 0,
             buildTime:  def?.buildTime ?? 0,
             tooltip:    def?.tooltip ?? '',
+            queued:        q?.total ?? 0,
+            queuedPending: q?.pending ?? 0,
         });
         // PLAN-lazy-loading.md P4 pre-warm trigger: cheap insurance so a
         // player who actually clicks one of these tiles isn't starting the
@@ -3012,17 +3087,70 @@ function gpRecomputeBuildTiles(): void {
     gpBuildTilesDirty = true;
 }
 
+/// PLAN-latency L4.2 — the build-row queue chip. Count, per unit-def, how many
+/// build orders the current own-team selection has queued, read off the MERGED
+/// command-queue view so an order we have just sent is counted immediately.
+/// `pending` is the still-optimistic subset (synthetic tag <= 0), which is what
+/// makes the chip appear on the click rather than up to a snapshot period
+/// later. Cheap: a few queues of a few orders each, and only ever called from a
+/// selection change, a snapshot, or a click.
+function gpBuildQueueCounts(): Map<number, { total: number; pending: number }> {
+    const out = new Map<number, { total: number; pending: number }>();
+    const sel = gpCtx.selection?.selection ?? [];
+    if (sel.length === 0) return out;
+    const selSet = new Set(sel);
+    for (const q of gpMergedCommandQueues()) {
+        if (!selSet.has(q.unitId)) continue;
+        for (const o of q.orders) {
+            if (o.cmdId >= 0) continue;   // negative cmdId = build command
+            const defId = -o.cmdId;
+            let c = out.get(defId);
+            if (!c) { c = { total: 0, pending: 0 }; out.set(defId, c); }
+            c.total++;
+            if (o.tag <= 0) c.pending++;
+        }
+    }
+    return out;
+}
+
+/// Patch the queue chips on the existing build tiles without re-resolving the
+/// buildable set (which needs cmd-descs and the def cache and does not change
+/// on a queue update). Marks the tiles dirty ONLY when a count actually moved,
+/// so the 1 Hz snapshot does not re-ship the whole tile array every second.
+function gpRefreshBuildQueueChips(): void {
+    if (gpBuildTiles.length === 0) return;
+    const queued = gpBuildQueueCounts();
+    let changed = false;
+    for (const t of gpBuildTiles) {
+        const q = queued.get(t.defId);
+        const total = q?.total ?? 0;
+        const pending = q?.pending ?? 0;
+        if (t.queued === total && t.queuedPending === pending) continue;
+        t.queued = total;
+        t.queuedPending = pending;
+        changed = true;
+    }
+    if (changed) gpBuildTilesDirty = true;
+}
+
 /// PLAN-playable.md G4: recompute the production-queue rows for the native
 /// FactoryQueuePanel. Picks the first own-team factory (UnitDef bit 11) in
 /// the current selection — multi-factory queue merging isn't implemented,
 /// matching the "selected factory" (singular) framing of the ZK Phase D
-/// item this closes. Groups gpLastCommandQueues' build entries (cmdId<0,
+/// item this closes. Groups the merged view's build entries (cmdId<0,
 /// same convention gpRecomputeBuildTiles decodes) into consecutive
 /// same-defId runs, mirroring how Spring's FactoryCAI stacks repeated
 /// identical build commands one slot each. Non-build orders (e.g. a WAIT
 /// a player inserted between batches) are skipped rather than splitting a
 /// run — an acceptable simplification for this native (non-Lua-port) panel.
-/// Called on selection change and on every UnitCommandQueuesUpdate.
+/// Called on selection change, on every UnitCommandQueuesUpdate, and (L4.2)
+/// from the command sink so a queued item shows on the click.
+///
+/// PLAN-latency L4.2: reads `gpMergedCommandQueues()`, not the raw snapshot.
+/// The panel was the last consumer still on the 1 Hz poll after L4.1 wired the
+/// overlays and the build-ghost reaper to the merged view — clicking a factory
+/// build tile left the row blank for up to a snapshot period, which reads as a
+/// dropped click and provokes the double-click that queues two.
 function gpRecomputeFactoryQueue(): void {
     const sel = gpCtx.selection?.selection ?? [];
     const er = gpCtx.entityRenderer;
@@ -3043,7 +3171,8 @@ function gpRecomputeFactoryQueue(): void {
 
     let tiles: FactoryQueueTile[] = [];
     if (factoryId >= 0) {
-        const orders = gpLastCommandQueues.find(q => q.unitId === factoryId)?.orders ?? [];
+        const orders = gpMergedCommandQueues()
+            .find(q => q.unitId === factoryId)?.orders ?? [];
         const runs = groupFactoryQueueRuns(orders);
         tiles = runs.map(r => {
             const def = dc?.getUnitDef(r.defId);
@@ -3053,8 +3182,9 @@ function gpRecomputeFactoryQueue(): void {
                 name: def?.name ?? '',
                 humanName: def?.humanName ?? '',
                 buildPic: def?.buildPic ?? '',
-                count: r.tags.length,
+                count: r.tags.length + r.pending,
                 tags: r.tags.slice(),
+                pending: r.pending,
             };
         });
     }
@@ -3531,6 +3661,8 @@ export function gpShutdown(): void {
     gpLastCommandQueues = [];
     gpPendingActions?.clear();
     gpPendingActions = null;
+    gpMotionLean?.clear();
+    gpMotionLean = null;
     gpShiftHeld = false;
     gpTrackingCamera = false;
     gpCtx.connection?.setCommandSink(null);
@@ -3688,6 +3820,48 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
         case 'setOptimisticInput':
             gpOptimisticInput = args[0] !== false;
             return gpOptimisticInput;
+        // A/B control for the L4.4 measurement (PLAN-latency-impl §L4.4): with
+        // snapshot refutation off, a confirmed entry rides the flat 3 s
+        // RETIRE_MS cap exactly as it did before L4.4, so the two arms share
+        // one binary. `pendingStats.lastRefuteMs` / `refutedTotal` are the
+        // readout — how long an order the server acked and then REFUSED stayed
+        // on screen.
+        case 'setSnapshotRefutation':
+            gpSnapshotRefutation = args[0] !== false;
+            gpPendingActions?.setSnapshotRefutation(gpSnapshotRefutation);
+            return gpSnapshotRefutation;
+        // — bounded positional lean (PLAN-latency L4.3). `leanStats` is the
+        //   correction-budget alarm's readout: `maxOffsetElmos` must stay at
+        //   or under `maxLeanElmos` and `boundExceededTotal` must be 0, while
+        //   `decayedTotal` counts the leans the server never justified (the
+        //   ones a player could see walked back). `setPositionalLean(false)`
+        //   is the A/B control arm — same binary, body pose exactly pre-L4.3. —
+        case 'leanStats':
+            return gpMotionLean?.stats() ?? null;
+        case 'leanReset':
+            gpMotionLean?.resetStats();
+            return null;
+        case 'setPositionalLean':
+            gpPositionalLean = args[0] !== false;
+            if (!gpPositionalLean) gpMotionLean?.clear();
+            return gpPositionalLean;
+        // Probe for the L4.3 measurement: the *drawn* position of a unit,
+        // lean included, against `getEntityPosition` which reads through it.
+        // The gap between the two IS the lean, so one call measures both the
+        // bound and the hand-back.
+        case 'leanOffset': {
+            // Reads through the same per-frame memo the render pass filled, so
+            // for a drawn unit this is the exact offset on screen rather than
+            // a re-evaluation at a different instant.
+            const p = gpCtx.entityRenderer?.getEntityPose(num(0));
+            if (!p) return null;
+            const o = gpMotionLean?.offsetFor(num(0), p.x, p.z, p.heading) ?? null;
+            return {
+                dx: o?.dx ?? 0, dz: o?.dz ?? 0, dHeading: o?.dHeading ?? 0,
+                elmos: o ? Math.hypot(o.dx, o.dz) : 0,
+                authoritativeX: p.x, authoritativeZ: p.z,
+            };
+        }
         // Probes for that measurement: `overlayOrders` counts the orders in
         // the view handed to the overlay renderers for one unit;
         // `markerCount` counts the marker meshes actually in the scene.
@@ -3714,6 +3888,61 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
             gpCtx.connection?.sendPlayerCommand(
                 num(1), obj<number[]>(0, []), obj<number[]>(2, []), num(3), 0);
             return null;
+        // — L4.2 probes (build-placement + queue-chip feedback) —
+        // `clientBuildPick` is the build-tile click as the native BuildMenu
+        // delivers it (gp:startBuildPlacement). With a pure-factory selection
+        // WorkerBuildPlacement queues immediately and never arms a ghost, so
+        // this is the whole factory-build gesture minus the DOM click — the
+        // same relationship `clientOrder` has to a right-click.
+        case 'clientBuildPick':
+            gpBuildPlacement?.startBuildPlacement(
+                num(0), { shift: args[1] === true, ctrl: args[2] === true });
+            return null;
+        // — L4 gate bullet 6 probes (the build-ghost race) —
+        // `clientBuildPlace` is the left-click that commits an armed ghost,
+        // minus the terrain pick; `pendingBuilds` is the only observable of
+        // the reaper's verdict, since reaping is a `dispose()`.
+        case 'clientBuildPlace':
+            return gpBuildPlacement?.placeArmedBuildAt(
+                num(0), num(1), args[2] === true) ?? false;
+        case 'pendingBuilds':
+            return gpBuildPlacement?.pendingBuildList ?? [];
+        // The ~1 Hz command-queue beat. A bullet-6 trial has to place its
+        // ghost *into* the gap before a snapshot, which needs the phase.
+        case 'snapshotStats':
+            return {
+                count: gpQueueSnapshotCount,
+                lastAtMs: gpQueueSnapshotLastMs,
+                sinceMs: gpQueueSnapshotLastMs > 0
+                    ? performance.now() - gpQueueSnapshotLastMs : -1,
+                nowMs: performance.now(),
+            };
+        // What the native FactoryQueuePanel would render right now: one row per
+        // production run, with the confirmed/optimistic split L4.2 added. This
+        // is the worker-side value, so it is free of the sceneState post's
+        // ~10 Hz cadence — the panel is a pure renderer of it.
+        case 'factoryQueue':
+            return gpFactoryQueueTiles.map(t => ({
+                unitId: t.unitId, defId: t.defId, name: t.name,
+                count: t.count, confirmed: t.tags.length, pending: t.pending,
+            }));
+        // The build-row queue chips for the current selection.
+        case 'buildChips':
+            return gpBuildTiles
+                .filter(t => t.queued > 0)
+                .map(t => ({ defId: t.defId, name: t.name,
+                             queued: t.queued, pending: t.queuedPending }));
+        // Selection is normally a pointer gesture; drive it directly so a
+        // measurement can put a factory under the panels without hit-testing.
+        case 'selectUnits':
+            gpCtx.selection?.setSelectionExternal(obj<number[]>(0, []));
+            return gpCtx.selection ? [...gpCtx.selection.selection] : [];
+        // Order-ack bark coverage. Pass `true` to reset.
+        case 'orderAckStats': {
+            const s = { attempts: gpOrderAckAttempts, played: gpOrderAckPlayed };
+            if (args[0] === true) { gpOrderAckAttempts = 0; gpOrderAckPlayed = 0; }
+            return s;
+        }
         // — per-phase frame-time distribution (PLAN-perf P0 attribution) —
         //   arg 0 = window ms (default 30 s); returns structured stats + a
         //   pre-formatted table.

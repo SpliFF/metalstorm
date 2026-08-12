@@ -459,6 +459,15 @@ export interface BuildMenuTile {
     energyCost: number;
     buildTime: number;
     tooltip: string;
+    /** PLAN-latency L4.2 — the build-row queue chip. How many of this def the
+     *  current selection has queued, counted over the *merged* command-queue
+     *  view, so a click puts the chip up on the click rather than on the next
+     *  1 Hz snapshot. 0 ⇒ no chip drawn. */
+    queued: number;
+    /** How many of `queued` are still optimistic (unconfirmed by the server).
+     *  Drives the chip's "unsettled" styling; equals `queued` for the first
+     *  round trip after a click and drops to 0 as the snapshot catches up. */
+    queuedPending: number;
 }
 
 /**
@@ -466,9 +475,9 @@ export interface BuildMenuTile {
  * G4). The worker groups the selected factory's command queue into
  * consecutive same-defId runs (Spring's FactoryCAI stacks repeated identical
  * build commands one-per-slot) and posts these via
- * `gp:sceneState.factoryQueue`. `tags` carries every order tag in the run,
- * oldest→newest, so the panel can pop one (`tags.at(-1)`) or cancel the
- * whole row (`tags`) via `gp:removeFactoryOrder`.
+ * `gp:sceneState.factoryQueue`. `tags` carries every *cancellable* order tag
+ * in the run, oldest→newest, so the panel can pop one (`tags.at(-1)`) or
+ * cancel the whole row (`tags`) via `gp:removeFactoryOrder`.
  */
 export interface FactoryQueueTile {
     /** The factory unit this row belongs to (first own-team factory in the
@@ -478,8 +487,15 @@ export interface FactoryQueueTile {
     name: string;
     humanName: string;
     buildPic: string;
+    /** Total orders in the run — `tags.length + pending`. */
     count: number;
+    /** Server-assigned tags, oldest→newest. Cancellable orders only. */
     tags: number[];
+    /** PLAN-latency L4.2: orders in this run that we have sent but the server
+     *  has not yet echoed in a snapshot. They are drawn (so the row appears on
+     *  the click, not up to a snapshot period later) but are not cancellable —
+     *  their tag is a synthetic placeholder the server would not recognise. */
+    pending: number;
 }
 
 /** Per-selected-unit facts the HTML HUD needs (no Babylon objects cross the wire). */
