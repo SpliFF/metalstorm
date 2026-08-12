@@ -102,10 +102,11 @@ def write_map(root: str, name: str, heights, regions) -> str:
     return d
 
 
-def grid_regions(cols: int, rows: int, home_cells, wall_between=None):
+def grid_regions(cols: int, rows: int, home_cells, wall_between=None,
+                 elmos: int = ELMOS):
     """A `cols` x `rows` lattice of rectangular regions, 4-connected."""
     out = []
-    cw, ch = ELMOS // cols, ELMOS // rows
+    cw, ch = elmos // cols, elmos // rows
     for rz in range(rows):
         for cx in range(cols):
             i = rz * cols + cx
@@ -136,6 +137,25 @@ def flat_map(root, name="synth_flat"):
     heights = [10.0] * (SAMPLES * SAMPLES)
     return write_map(root, name, heights,
                      grid_regions(4, 4, {(0, 0), (3, 3)}))
+
+
+# A town needs roughly 1500 elmos of ground across (`scenariogen.TOWN_RADII`
+# bottoms out at 648, and a town is two radii wide), so `flat_map`'s 1024-elmo
+# square with its 256-elmo cells cannot hold one at any radius — every region
+# refuses with "offmap". That is correct behaviour and it is also why the town
+# path needs a bigger synthetic map of its own: without one the golden fixture
+# carries no `towns` and no `civilians` block, and test_scenario_discovery.cpp —
+# the ONLY place a generated file's Lua purity is actually proved against the
+# lobby's bare lua_State — would never see either.
+WIDE_SAMPLES = 513                 # 512 * 8 = 4096 elmos square
+WIDE_ELMOS = (WIDE_SAMPLES - 1) * 8
+
+
+def wide_flat_map(root, name="synth_wide"):
+    """Four times `flat_map` across: big enough that a region can hold a town."""
+    heights = [10.0] * (WIDE_SAMPLES * WIDE_SAMPLES)
+    return write_map(root, name, heights,
+                     grid_regions(3, 3, {(0, 0), (2, 2)}, elmos=WIDE_ELMOS))
 
 
 def walled_map(root, name="synth_walled"):
@@ -427,6 +447,172 @@ class TestGeneratorOnSyntheticMaps(unittest.TestCase):
         self.assertGreaterEqual(meta["hold_frames"], sg.DEFAULT_VICTORY_HOLD_FRAMES)
 
 
+class TestPlannedTowns(unittest.TestCase):
+    """The `town` cluster kind goes through the town planner (T4).
+
+    Everything here is measured on `wide_flat_map`, because `flat_map`'s
+    1024-elmo square cannot hold a town at any radius — which is itself the
+    first thing asserted, since "the planner quietly did nothing" and "this map
+    has no room" are the same output with different meanings.
+    """
+
+    def setUp(self):
+        if not os.path.isdir(GAME_DIR):
+            self.skipTest(f"no game content at {GAME_DIR}")
+
+    def wide(self, seed=11):
+        with SyntheticMap(wide_flat_map, "synth_wide") as d:
+            return sg.generate(d, seed=seed, game_dir=GAME_DIR)
+
+    def test_a_map_with_room_gets_planned_towns(self):
+        _lua, meta = self.wide()
+        self.assertTrue(meta["towns"], "no town planned on a 4 km flat map")
+        for t in meta["towns"]:
+            self.assertGreaterEqual(t["lots"], 5)
+            self.assertGreaterEqual(t["buildings"], 1)
+            self.assertGreater(t["civilians"], 0)
+
+    def test_a_map_with_no_room_falls_back_and_says_why(self):
+        """The scatter is the FALLBACK, not a failure — but a silent one would
+        be indistinguishable from a broken toolchain."""
+        with SyntheticMap(flat_map, "synth_flat") as d:
+            _lua, meta = sg.generate(d, seed=11, game_dir=GAME_DIR)
+        self.assertEqual([], meta["towns"])
+        self.assertTrue(meta["town_refusals"])
+        for key, why in meta["town_refusals"]:
+            self.assertTrue(key and why)
+        # ...and the map still gets its towns, as scattered clusters.
+        self.assertTrue(any(k == "town" for k, _r, _o in meta["clusters"]))
+
+    def test_a_towns_key_is_its_regions_key(self):
+        """The whole reason a town needs no second namespace."""
+        _lua, meta = self.wide()
+        for t in meta["towns"]:
+            self.assertEqual(t["key"], t["region"])
+        cluster_regions = {r for k, r, _o in meta["clusters"] if k == "town"}
+        for t in meta["towns"]:
+            self.assertIn(t["key"], cluster_regions)
+
+    def test_every_town_has_exactly_one_meeting_hall(self):
+        """`unique` is a contract the parley venue rests on."""
+        _lua, meta = self.wide()
+        for t in meta["towns"]:
+            self.assertIsNotNone(t["hall"], f"{t['key']} has no parley venue")
+        lua = self.wide()[0]
+        self.assertEqual(len(meta["towns"]), lua.count("            hall = {"))
+
+    def test_the_hall_is_a_unit_the_scenario_actually_stages(self):
+        """The gadget resolves the venue by looking for that def at that spot;
+        a hall the `units` block never staged resolves to nothing, and the town
+        then negotiates exactly as if its hall had been destroyed."""
+        lua, meta = self.wide()
+        units = parse_units(lua)
+        for t in meta["towns"]:
+            hall = t["hall"]
+            self.assertTrue(
+                any(u["def"] == hall["def"] and u["x"] == hall["x"]
+                    and u["z"] == hall["z"] for u in units),
+                f"{t['key']}'s hall is not in the units block")
+
+    def test_a_planned_town_is_always_the_estates_however_hostile_the_knob(self):
+        with SyntheticMap(wide_flat_map, "synth_wide") as d:
+            _lua, meta = sg.generate(d, seed=11, hostility="hostile",
+                                     game_dir=GAME_DIR)
+        town_keys = {t["key"] for t in meta["towns"]}
+        self.assertTrue(town_keys)
+        for kind, key, owner in meta["clusters"]:
+            if key in town_keys:
+                self.assertEqual("neutral", owner)
+
+    def test_the_town_region_is_named_after_the_town_and_given_no_team(self):
+        lua, meta = self.wide()
+        for t in meta["towns"]:
+            self.assertIn(
+                f"{{ key = '{t['key']}', name = '{t['name']}', "
+                f"x = {t['x']}, z = {t['z']} }},", lua)
+        # ...and never with a team, which would silently reassign the region.
+        for line in lua.splitlines():
+            if "name = '" in line and "key = '" in line:
+                self.assertNotIn("team =", line)
+
+    def test_civilians_go_on_the_civilians_wire_and_buildings_do_not(self):
+        """Two wires, and swapping either way is a real bug: a building in the
+        civilians block is enrolled in a CMD_MOVE it can never satisfy, and a
+        civilian in `units` is invisible to the registry every objective and the
+        estate read."""
+        lua, meta = self.wide()
+        civ_block = lua.split("civilians = {")[1].split("objectives = {")[0]
+        buildings = {"ms_habitat", "ms_depot", "ms_transit_hub"}
+        for name in buildings:
+            self.assertNotIn(f"def = '{name}'", civ_block)
+        people = {"ms_civilians", "ms_militia", "ms_civtruck", "ms_civbus"}
+        self.assertTrue(any(f"def = '{n}'" in civ_block for n in people))
+
+        # Scoped to the PLANNED towns. `place_cluster`'s own town/mine clusters
+        # legitimately put ms_civilians in `units` — that path predates the
+        # registry and is the metalstorm-scenario lane's, untouched here. What
+        # must not happen is a PLANNED town's residents going down that wire,
+        # where the estate and every objective query are blind to them.
+        #
+        # NEUTRAL entries only, and that qualifier is load-bearing rather than a
+        # loophole. A town's residents are Gaia's — `populate_town` has no other
+        # owner to give them — so "a resident leaked onto the `units` wire" is
+        # always a NEUTRAL civilian def standing in the town. A HOSTILE one is a
+        # different animal with a different owner: §M4 relic guardians are
+        # ms_militia on a hostile team, and `_rank_regions` deliberately lets a
+        # relic share an already-occupied region ("a township WITH a grain silo
+        # is the normal arrangement"), so a guard band squatting in a town's
+        # outskirts is that lane's intended output, not this lane's leak.
+        # Matching on the def name alone cannot tell the two apart — militia
+        # serve both roles — so it is the team that decides.
+        for t in meta["towns"]:
+            for e in parse_units(lua):
+                if e["def"] not in people or e["team"] != "neutral":
+                    continue
+                d = math.hypot(e["x"] - t["x"], e["z"] - t["z"])
+                self.assertGreater(
+                    d, t["radius"],
+                    f"a civilian was staged through `units` inside {t['key']}")
+
+    def test_every_civilian_names_a_declared_town(self):
+        """The loader rejects one that does not; catching it here is cheaper
+        than at GameStart."""
+        lua, meta = self.wide()
+        declared = {t["key"] for t in meta["towns"]}
+        found = 0
+        for m in re.finditer(r"town = '([^']+)' \}", lua):
+            found += 1
+            self.assertIn(m.group(1), declared)
+        self.assertEqual(found, meta["civilians"])
+
+    def test_town_buildings_carry_a_real_facing(self):
+        """A town's buildings FRONT THEIR STREET. All-south would mean the
+        planner's facings were dropped somewhere between the stager and emit —
+        and the engine derives the blocked footprint from the facing, so the
+        clearance gates would then be grading the wrong rectangles."""
+        lua, meta = self.wide()
+        if not meta["towns"]:
+            self.skipTest("no town planned")
+        facings = {u["facing"] for u in parse_units(lua)
+                   if u.get("team") == "neutral"}
+        self.assertGreater(len(facings), 1, facings)
+
+    def test_towns_differ_across_seeds(self):
+        shapes = []
+        for seed in (11, 12, 13):
+            _lua, meta = self.wide(seed)
+            shapes.append(tuple((t["archetype"], t["defense"], t["lots"],
+                                 t["civilians"]) for t in meta["towns"]))
+        self.assertEqual(len(set(shapes)), len(shapes),
+                         "three seeds produced the same towns")
+
+    def test_the_same_seed_reproduces_the_same_towns(self):
+        a, ma = self.wide()
+        b, mb = self.wide()
+        self.assertEqual(a, b)
+        self.assertEqual(ma["towns"], mb["towns"])
+
+
 class TestGoldenFixture(unittest.TestCase):
     """tests/fixtures/generated_scenario.lua must still be what the generator emits.
 
@@ -447,7 +633,7 @@ class TestGoldenFixture(unittest.TestCase):
             self.skipTest(f"no game content at {GAME_DIR}")
 
     def test_fixture_matches_a_fresh_generation(self):
-        with SyntheticMap(flat_map, "synth_flat") as d:
+        with SyntheticMap(wide_flat_map, "synth_wide") as d:
             lua, _ = sg.generate(d, seed=11, game_dir=GAME_DIR)
         with open(self.FIXTURE, encoding="utf-8") as f:
             on_disk = f.read()
@@ -456,6 +642,22 @@ class TestGoldenFixture(unittest.TestCase):
             "tests/fixtures/generated_scenario.lua is stale. Regenerate it:\n"
             "  python3 tools/mapgen/tests/regen_fixture.py\n"
             "and re-check what tests/test_scenario_discovery.cpp asserts about it.")
+
+    def test_the_fixture_carries_a_planned_town(self):
+        """...so the C++ purity test actually sees the blocks a town adds.
+
+        The fixture moved off `flat_map` (1024 elmos, no region big enough for a
+        town) onto `wide_flat_map` for exactly this: `towns` and `civilians` are
+        new syntax, and test_scenario_discovery.cpp running the file through the
+        lobby's bare `lua_State` is the ONLY place their purity is proved. A
+        fixture with no town would leave that unproved and look fine.
+        """
+        with open(self.FIXTURE, encoding="utf-8") as f:
+            on_disk = f.read()
+        self.assertIn("    towns = {", on_disk)
+        self.assertIn("    civilians = {", on_disk)
+        self.assertIn("role = 'ambient'", on_disk)
+        self.assertIn("hall = {", on_disk)
 
 
 class TestEmittedFileIsPureLua(unittest.TestCase):
@@ -617,6 +819,12 @@ def parse_units(lua: str) -> list[dict]:
              "x": int(m.group(3)), "z": int(m.group(4))}
         c = re.search(r"count\s*=\s*(\d+)", rest)
         s = re.search(r"spacing\s*=\s*(\d+)", rest)
+        f = re.search(r"facing\s*=\s*'([a-z]+)'", rest)
+        # A planned town's buildings FRONT THEIR STREET, so `facing` stopped
+        # being the constant 'south' every scattered cluster emits — and the
+        # engine derives the blocked footprint from it (Unit.cpp:224-225), so a
+        # test grading placement has to be able to see it.
+        e["facing"] = f.group(1) if f else None
         if c:
             e["count"] = int(c.group(1))
         if s:

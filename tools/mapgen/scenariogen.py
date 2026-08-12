@@ -23,15 +23,28 @@ this area (Meridian Basin: two armies in different connected components, a war
 that could not be fought) was caused by grading connectivity on the region
 GRAPH instead of on the mask, so the mask is the arbiter here too.
 
-...and it does not lay out STREETS. `place_cluster` below scatters buildings on
-rings around a region anchor, which is the right shape for an outpost or an
-extraction site and the wrong one for a town. `town_planner.py` (same directory,
-lane `town-planner`) plans street-and-lot town graphs off the same terrain —
+TOWNS ARE PLANNED, NOT SCATTERED (generator version 2). `place_cluster` below
+scatters buildings on rings around a region anchor, which is the right shape for
+an outpost or an extraction site and the wrong one for a town. A `town` cluster
+therefore goes through `plan_township`, which chains the town-planner toolchain
+in the same directory:
+
+    town_planner.py    streets, lots with frontage, a wall and its gateways
+    town_stager.py     real buildings standing in those lots
+    town_populace.py   the people, the traffic and the militia on the gates
+
 `town_planner.SiteProbe.from_terrain` takes the `Terrain` built here, so a
-planner run and a scenario run grade identical ground identically. Nothing in
-this file consumes it yet: T1 delivers the graph and its debug dump, and
-staging units from that graph is a later step. Until then the two are
-alternatives, chosen by size — see `town_planner.min_radius_for`.
+planner run and a scenario run grade identical ground identically. The scatter
+remains the FALLBACK, and it is not a degradation: most regions on most maps
+have no kilometre and a half of ground that will take lots, and a ring of four
+sheds is the right answer there. Every refusal is recorded by region and reason
+in `meta['town_refusals']`.
+
+A planned town takes its REGION'S KEY as its own, which is what makes it
+addressable: the region key is what `GG.Regions.KeyAt` returns, what a parley
+proposal's `terms.regionKey` carries, what an objective is scoped to, and what
+`region_<key>_name` publishes to the client's named-entity index. A town with a
+key of its own would need every one of those to learn a second namespace.
 
 FIVE INVARIANTS. A generated scenario that violates any of these is a bug, not
 a variation, and the generator refuses to write the file rather than shipping it:
@@ -90,6 +103,9 @@ from collections import deque
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import ms_defs                                            # noqa: E402
+import town_planner as tp                                 # noqa: E402
+import town_populace as tpop                              # noqa: E402
+import town_stager as tstage                              # noqa: E402
 from regions_from_map import (                            # noqa: E402
     DEFAULT_CLASS,
     ELMOS_PER_SQUARE,
@@ -127,7 +143,10 @@ from scenario_templates import (                          # noqa: E402
 # spans, plus the two §M1 wheeled natives in the standard roster. Every one of
 # those draws from the seeded stream, so v1 and v2 disagree about every
 # placement on the same (map, seed) — which is exactly what the version is for.
-GENERATOR_VERSION = 2
+# 3 (town-planner T4): towns are PLANNED (town_planner/town_stager/
+# town_populace) rather than scattered, and carry a populace, a `towns` block
+# and a `civilians` block. Every generated scenario's output changes.
+GENERATOR_VERSION = 3
 
 SCHEMA_VERSION = 1          # game_scenario.lua's SUPPORTED_VERSION
 GAME_SPEED = 30             # sim frames per second
@@ -152,6 +171,39 @@ FOOTPRINT_GAP = 32
 # and reports it only by returning nil, so an under-spaced pair loses one of the
 # two silently — the staged war is simply one unit short of the file.
 UNIT_SPAWN_GAP = 16
+
+# --- planned towns (town-planner T4) ---------------------------------------
+# A `town` cluster is no longer a ring of scattered buildings: it is a street
+# graph with lots, a wall, buildings that front the streets and a population
+# living on them. `place_cluster` remains the fallback and is untouched — see
+# `plan_township` for the four reasons a region gets the scatter instead.
+#
+# RADIUS. `CLUSTER_TEMPLATES['town']['radius']` is 420, which is BELOW
+# `town_planner.min_radius_for` for every archetype (648-714): a street town
+# needs roughly double a scatter cluster's radius, because one block pitch is
+# two rows of ~190-elmo lots plus a carriageway. T1 flagged this as the scenario
+# layer's call; the call is to plan at the planner's own default and keep
+# `place_cluster` (at its own 420) for the regions that refuse.
+# ...and it is a LADDER, not a number. `plan_town` draws its archetype from the
+# terrain first and only then refuses a radius under that archetype's own
+# minimum (714 / 686 / 648), so a single radius makes the town's size a property
+# of the dice. Walked down until one plans: a big town where the ground allows a
+# big town, a small one where it does not, and a refusal only when even the
+# smallest archetype's minimum has nowhere to sit.
+#
+# MEASURED, and the reason the ladder exists at all: at a fixed 760, three of
+# three candidate regions on scorched_crossing and two of three on wanderlust2
+# refused, and the whole map fell back to scatter — on maps that visibly have
+# room for a town, just not a 1520-elmo-wide one.
+TOWN_RADII = (tp.DEFAULT_RADIUS, 714, 686, 648)
+
+# How far the town centre may migrate from the region anchor while looking for
+# ground that will hold a town. Bounded well inside a region rather than left
+# open, because a town that wanders into the NEXT region breaks the identity the
+# whole `towns` block rests on: one town per region, addressed by the region's
+# own key. Checked afterwards against the polygon regardless — this only keeps
+# the search cheap.
+TOWN_SEARCH = 900.0
 
 
 class Rejected(Exception):
@@ -478,13 +530,54 @@ class Building:
         self.facing, self.facts = facing, facts
 
     def rect(self, pad: float = 0.0):
-        hx = self.facts.footprint_x * ms_defs.FOOTPRINT_SCALE * 4 + pad
-        hz = self.facts.footprint_z * ms_defs.FOOTPRINT_SCALE * 4 + pad
-        return (self.x - hx, self.z - hz, self.x + hx, self.z + hz)
+        """The axis-aligned ground this building blocks, inflated by `pad`.
+
+        THE FACING SWAPS THE SIZES. `Spring.CreateUnit` takes a facing, not a
+        heading, and the engine derives the blocked footprint by SWAPPING x and
+        z on the east/west facings rather than rotating the rectangle
+        (Unit.cpp:224-225) — so a 10x14 transit hub facing east blocks 224 elmos
+        across and 160 deep, the reverse of what it blocks facing south.
+
+        This used to ignore `facing` entirely, which was invisible for as long
+        as `place_cluster` was the only producer of `Building`: a scattered
+        cluster faces every building south, and south is the identity. A PLANNED
+        town faces its buildings at their streets, and the very first map with a
+        west-facing habitat put a civilian 30 elmos inside a footprint the
+        generator's own gate said was clear.
+        """
+        hx, hz = tstage._extent_of(self.facing, self.facts.footprint_x,
+                                   self.facts.footprint_z)
+        return (self.x - hx - pad, self.z - hz - pad,
+                self.x + hx + pad, self.z + hz + pad)
 
     def clears(self, x: float, z: float) -> bool:
         """Is (x, z) outside this building's blocked yardmap at every angle?"""
         return math.hypot(x - self.x, z - self.z) >= self.facts.clear_radius
+
+    def clears_rect(self, x: float, z: float, hx: float, hz: float,
+                    pad: float) -> bool:
+        """The same question asked of the RECTANGLE the engine actually blocks.
+
+        `clears` above is a CIRCLE of the footprint's half-diagonal plus the
+        scatter margin, which is the honest test for `place_cluster` — it
+        scatters buildings on rings and knows nothing about which way any of
+        them faces, so it must clear the worst angle at every angle.
+
+        A planned town knows exactly. The engine derives a building's blocked
+        ground by SWAPPING the footprint sizes rather than rotating them
+        (Unit.cpp:224-225), so that ground is always an axis-aligned rectangle,
+        and this is that rectangle inflated by `pad`.
+
+        The difference is the whole of "civilians in streets". ms_habitat is
+        192 elmos across, so `clear_radius` is 175.8, while a `grid_quarter`
+        lot puts the carriageway CENTRELINE 158 elmos from the building's
+        centre and its near edge 130. Every point on the street outside that
+        house fails the circle and passes the rectangle by 34 elmos — and the
+        rectangle is the one the engine agrees with.
+        """
+        bx0, bz0, bx1, bz1 = self.rect(pad)
+        return (x + hx <= bx0 or x - hx >= bx1
+                or z + hz <= bz0 or z - hz >= bz1)
 
 
 def _too_close(ax: float, az: float, a_facts, others) -> bool:
@@ -1148,6 +1241,157 @@ def find_crossing(terrain: Terrain, region: dict, pitch: float
         return None
     width, mx, mz, facing, spans = best
     return mx, mz, facing, spans, width
+# Planned towns (town-planner T4)
+# ==========================================================================
+# `place_cluster` above scatters buildings on rings, which is the right shape
+# for an outpost and the wrong one for a town. `town_planner.py` plans a street
+# graph on the same terrain (`SiteProbe.from_terrain` takes the `Terrain` built
+# here, so the planner and the generator grade identical ground identically),
+# `town_stager.py` stands buildings in its lots and a wall on its boundary, and
+# `town_populace.py` puts people on its streets. This function is the seam.
+#
+# ONE TOWN PER REGION, KEYED BY THE REGION. `generate`'s cluster loop already
+# gives every cluster its own region (the `used` set), and a town takes that
+# region's key as its own. That is what makes a town ADDRESSABLE: the region key
+# is what `GG.Regions.KeyAt` returns, what a parley proposal's `terms.regionKey`
+# carries, what an objective is scoped to, and what the client's named-entity
+# index reads `region_<key>_name` for. A town with a key of its own would need
+# every one of those to learn a second namespace; a town that IS its region
+# needs none of them to change.
+#
+# THE FALLBACK IS NOT A FAILURE. Most regions on most maps cannot hold a street
+# town — a 760-radius town needs a kilometre and a half of ground that will take
+# lots — and `place_cluster` at 420 is the correct answer there, not a
+# degradation. The refusal is recorded by name in the meta so a run says which
+# regions got which, rather than looking like the planner silently did nothing.
+
+class TownRefused(Exception):
+    """This region cannot hold a planned town. Caller falls back to scatter."""
+
+
+class Township:
+    """A planned town, ready to emit: the graph, the staging, and the people."""
+
+    __slots__ = ("region", "town", "staged", "populace", "buildings", "hall")
+
+    def __init__(self, region, town, staged, populace, buildings, hall):
+        self.region, self.town, self.staged = region, town, staged
+        self.populace, self.buildings, self.hall = populace, buildings, hall
+
+    @property
+    def key(self) -> str:
+        return self.region["key"]
+
+    def meta(self) -> dict:
+        """What the scenario's `towns` block and the run summary both need."""
+        return {
+            "key": self.key,
+            "name": self.town.name,
+            "region": self.key,
+            "x": self.town.x, "z": self.town.z, "radius": self.town.radius,
+            "archetype": self.town.archetype,
+            "defense": self.town.defense,
+            "lots": len(self.town.lots),
+            "buildings": len(self.staged.of_category("building")),
+            "gateways": len(self.town.gateways()),
+            "civilians": self.populace.head_count(),
+            "hall": ({"def": self.hall.defname, "x": self.hall.x,
+                      "z": self.hall.z} if self.hall else None),
+        }
+
+
+def plan_township(rnd, terrain: Terrain, facts, region: dict, seed: int,
+                  anchor: tuple[int, int], placed: list[Building],
+                  placed_units: list[tuple[int, int, object]],
+                  want_comp: dict[str, int] | None = None) -> Township:
+    """Plan, stage and populate one town in `region`. Raises `TownRefused`.
+
+    `rnd` is threaded in for the determinism rules' sake but is deliberately NOT
+    drawn from: a town's own seed is derived from the scenario seed and the
+    region KEY, so adding or removing an earlier cluster cannot re-roll a town
+    in a region it never touched. Same reason `place_cluster`'s draws are
+    ordered by the plan and not by dict iteration.
+    """
+    probe = tp.SiteProbe.from_terrain(terrain)
+    town_seed = (seed ^ _fnv1a(region["key"])) & 0x7FFF_FFFF
+    ax, az = anchor
+
+    town = None
+    why = ""
+    for radius in TOWN_RADII:
+        try:
+            town = tp.plan_town(town_seed, probe, ax, az, radius=radius,
+                                search=TOWN_SEARCH)
+            break
+        except tp.SiteRejected as e:
+            # The FIRST rung's complaint, not the last. The ladder ends at the
+            # smallest archetype's minimum, so the last rung's message is
+            # routinely "648 is too small for a main_street" — true, and a
+            # description of the ladder rather than of the ground.
+            why = why or str(e)
+    if town is None:
+        raise TownRefused(
+            f"no site at any radius in {TOWN_RADII}; at {TOWN_RADII[0]}: {why}")
+
+    # The town must stay in the region whose key it is about to take. The
+    # search above may migrate the centre up to TOWN_SEARCH, and a town that
+    # drifted next door would be addressed by a key that resolves to different
+    # ground for every consumer that calls GG.Regions.KeyAt.
+    if not tp._point_in_polygon(town.x, town.z,
+                                [(v[0], v[1]) for v in region["polygon"]]):
+        raise TownRefused(
+            f"the only usable ground within {int(TOWN_SEARCH)} elmos of the "
+            f"anchor is outside {region['key']}'s own polygon")
+
+    # ...and in the component the war is being fought in. A town in a pocket is
+    # scenery nobody can reach, and its meeting hall is a parley venue no army
+    # can ever stand at.
+    if want_comp is not None and any(
+            terrain.component_at(town.x, town.z, c) != want_comp[c]
+            for c in terrain.classes if c in want_comp):
+        raise TownRefused(
+            f"the site is in a disconnected pocket of the passability mask — "
+            f"no army could reach it")
+
+    try:
+        staged = tstage.stage_town(town, facts, probe=probe)
+    except tstage.StagingRejected as e:
+        raise TownRefused(f"not staged: {e}") from e
+
+    buildings = [Building(p.defname, p.x, p.z, p.facing, facts[p.defname])
+                 for p in staged.units()]
+    if not buildings:
+        raise TownRefused("staged no buildings at all — the roster this game "
+                          "ships expresses none of the town's lot roles")
+
+    # A town must not be dropped onto ground an earlier cluster already took.
+    # Checked here rather than inside the planner because the planner grades
+    # TERRAIN and knows nothing about the scenario being assembled around it.
+    for b in buildings:
+        if any(_rects_overlap(b.rect(FOOTPRINT_GAP), o.rect()) for o in placed):
+            raise TownRefused("overlaps a cluster placed earlier in this run")
+        if any(not b.clears(ux, uz) for ux, uz, _uf in placed_units):
+            raise TownRefused("would trap a unit an earlier cluster placed")
+
+    populace = tpop.populate_town(town, staged, facts, probe=probe)
+
+    # THE TOWN'S OWN SPECS, RUN BEFORE IT CAN REACH A FILE. T1's perimeter
+    # continuity, T2's placement validity and T4's populace validity are all
+    # real checks with real failure modes, and a generated scenario that shipped
+    # a town failing one of them would be exactly the "variation" this
+    # generator's invariants exist to refuse. Falling back to the scatter is
+    # strictly better than emitting a broken town.
+    problems = (tp.validate_perimeter(town, probe)
+                + tstage.validate_staging(staged, town, probe)
+                + tpop.validate_populace(populace, town, staged, probe))
+    if problems:
+        raise TownRefused(
+            f"failed its own spec ({len(problems)} problem(s)): "
+            + "; ".join(problems[:2]))
+
+    hall = next((p for p in staged.of_category("building")
+                 if p.role == "unique"), None)
+    return Township(region, town, staged, populace, buildings, hall)
 
 
 # ==========================================================================
@@ -1251,6 +1495,45 @@ def gate_no_unit_in_a_footprint(unit_points: list[tuple[str, float, float]],
     if bad:
         raise Rejected("units spawned inside a building's yardmap — they would "
                        "be trapped there for the whole match:\n  " +
+                       "\n  ".join(bad))
+
+
+def gate_no_civilian_in_a_town_footprint(
+        points: list[tuple[str, float, float, object]],
+        buildings: list[Building]) -> None:
+    """The rect-based sibling of the gate above, for a planned town's people.
+
+    SAME FAILURE, DIFFERENT TEST, AND THE DIFFERENCE IS THE POINT.
+    `gate_no_unit_in_a_footprint` measures against `clear_radius` — the
+    footprint's half-DIAGONAL plus 40 elmos, as a circle. That is the only
+    honest test available to `place_cluster`, which scatters buildings on rings
+    and records no facing for any of them.
+
+    It is also a test no street town can pass. ms_habitat's clear_radius is
+    175.8 elmos; a `grid_quarter` lot puts the carriageway's near edge 130 from
+    that habitat's centre and its centreline 158. So the circle swallows the
+    road, and "civilians in streets" — the brief's own words — is refused
+    everywhere, while the engine's actual blocked ground stops 96 elmos out.
+
+    A planned town knows every building's facing and therefore its exact
+    axis-aligned blocked rectangle (Unit.cpp:224-225 derives it by swapping the
+    footprint sizes, never by rotating them). This gate uses that rectangle,
+    inflated by the same margin the town's own placer used, so it is strictly
+    more accurate than the circle rather than merely more permissive. The
+    circle still guards every point `place_cluster` produces, unchanged.
+    """
+    bad = []
+    for label, x, z, f in points:
+        hx = f.footprint_x * ms_defs.FOOTPRINT_SCALE * 4.0
+        hz = f.footprint_z * ms_defs.FOOTPRINT_SCALE * 4.0
+        for b in buildings:
+            if not b.clears_rect(x, z, hx, hz, tpop.CIVILIAN_GAP):
+                bad.append(f"{label} at ({int(x)},{int(z)}) is inside the "
+                           f"ground {b.defname} at ({b.x},{b.z}) blocks")
+                break
+    if bad:
+        raise Rejected("town civilians spawned inside a building's yardmap — "
+                       "they would be trapped there for the whole match:\n  " +
                        "\n  ".join(bad))
 
 
@@ -1557,6 +1840,8 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
 
     used: set[str] = set()
     clusters = []
+    townships: list[Township] = []
+    town_refusals: list[tuple[str, str]] = []
     all_buildings: list[Building] = []
     all_cluster_units: list[tuple[int, int, object]] = []
     for kind, _n in plan:
@@ -1564,6 +1849,33 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
             anchor = region_anchor(terrain, r, want_comp)
             if anchor is None:
                 continue
+
+            # A `town` is PLANNED if the ground will take a street town, and
+            # scattered if it will not. Tried first and per-region rather than
+            # decided once for the map, because the answer is a property of the
+            # ground: the same map routinely has a region that holds a
+            # nine-street town and another that holds nothing bigger than a ring
+            # of four sheds.
+            if kind == "town":
+                try:
+                    ship = plan_township(rnd, terrain, facts, r, seed, anchor,
+                                         all_buildings, all_cluster_units,
+                                         want_comp)
+                except TownRefused as e:
+                    town_refusals.append((r["key"], str(e)))
+                else:
+                    used.add(r["key"])
+                    all_buildings.extend(ship.buildings)
+                    all_cluster_units.extend(
+                        (c.x, c.z, facts[c.defname])
+                        for c in ship.populace.residents)
+                    townships.append(ship)
+                    clusters.append({"kind": kind, "region": r,
+                                     "anchor": (ship.town.x, ship.town.z),
+                                     "buildings": ship.buildings,
+                                     "garrison": [], "township": ship})
+                    break
+
             bs, gs = place_cluster(rnd, terrain, facts, r, kind, anchor,
                                    all_buildings, all_cluster_units)
             if not bs:
@@ -1572,7 +1884,8 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
             all_buildings.extend(bs)
             all_cluster_units.extend((g["x"], g["z"], facts[g["def"]]) for g in gs)
             clusters.append({"kind": kind, "region": r, "anchor": anchor,
-                             "buildings": bs, "garrison": gs})
+                             "buildings": bs, "garrison": gs,
+                             "township": None})
             break
 
     # --- named sites and ancient-tech relics (§M4) --------------------------
@@ -1609,7 +1922,19 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
     # go to an ordinary NPC team: every non-Gaia team is its own ally team, so
     # an NPC team is hostile to both players with no extra configuration.
     for c in clusters:
-        if hostility == "neutral":
+        if c.get("township") is not None:
+            # A PLANNED town is always the estate's, whatever `--hostility`
+            # asks for, and that is not the knob being ignored — it is what
+            # "occupied" means in this game. Who holds the ground is a REGION
+            # CONTROL question (game_regions.lua, and the tactical objective
+            # emitted on this very region below); who owns the housing is not.
+            # Handing a town's buildings to the marauders would also take its
+            # meeting hall off the civilian estate, and the hall is the estate's
+            # parley venue — the town would stop being somewhere you can
+            # negotiate with the people who live in it, which is the one thing
+            # a town is for.
+            c["owner"] = "neutral"
+        elif hostility == "neutral":
             c["owner"] = "neutral"
         elif hostility == "hostile":
             c["owner"] = hostile_team
@@ -1786,7 +2111,18 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
                                  g["x"], g["z"], facts[g["def"]]))
     gate_no_unit_in_a_footprint([(l, x, z) for l, x, z, _f in spawn_points],
                                 all_buildings)
-    gate_no_two_units_share_a_spot(spawn_points)
+
+    # A town's own people are graded on the rectangle, not the circle — see
+    # gate_no_civilian_in_a_town_footprint for the measurement that makes the
+    # circle unusable on a street. They join the shared spot-collision gate
+    # below on equal terms, because THAT failure (two units on one patch of
+    # ground, one of them silently never created) does not care how the ground
+    # was chosen.
+    town_points = [(f"{c.defname} in {ship.key} ({c.key})",
+                    c.x, c.z, facts[c.defname])
+                   for ship in townships for c in ship.populace.residents]
+    gate_no_civilian_in_a_town_footprint(town_points, all_buildings)
+    gate_no_two_units_share_a_spot(spawn_points + town_points)
 
     # --- name ---------------------------------------------------------------
     # "<the place being fought over> — <a seeded suffix>", the shape the
@@ -1812,6 +2148,13 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
         "hostile_team": hostile_team,
         "clusters": [(c["kind"], c["region"]["key"], c["owner"])
                      for c in clusters],
+        "towns": [ship.meta() for ship in townships],
+        # Why each region that WANTED a planned town did not get one. Reported
+        # rather than swallowed: "3 towns, 0 planned" with no reason reads as a
+        # broken toolchain, and "every candidate region's flat ground is under
+        # 1500 elmos across" reads as a map.
+        "town_refusals": town_refusals,
+        "civilians": sum(ship.populace.head_count() for ship in townships),
         "buildings": len(all_buildings),
         "classes": terrain.classes,
         "worst_frames": worst,
@@ -1832,7 +2175,7 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
     }
     return emit_lua(meta, side_regions, side_anchors, victory, units, clusters,
                     site_entries, relic_entries, feature_entries, crossings,
-                    hostile_team, sides, not_before, hold), meta
+                    hostile_team, sides, not_before, hold, townships), meta
 
 
 # ==========================================================================
@@ -1849,7 +2192,7 @@ def _team_field(owner) -> str:
 
 def emit_lua(meta, side_regions, side_anchors, victory, units, clusters,
              site_entries, relic_entries, feature_entries, crossings,
-             hostile_team, sides, not_before, hold) -> str:
+             hostile_team, sides, not_before, hold, townships=()) -> str:
     L: list[str] = []
     add = L.append
 
@@ -1888,6 +2231,28 @@ def emit_lua(meta, side_regions, side_anchors, victory, units, clusters,
     add("        regions = {")
     for i, r in enumerate(side_regions):
         add(f"            {{ key = {_lua_str(r['key'])}, team = {i} }},")
+    if townships:
+        add("")
+        add("            -- A region with a town in it is NAMED AFTER THE TOWN, and its")
+        add("            -- published centre moves to the town's centre. `name` is")
+        add("            -- game_regions.lua's `region_<key>_name` rulesParam — the path")
+        add("            -- the client's named-entity index reads to build the command")
+        add("            -- composer's Target picker, so this is what makes a town")
+        add("            -- addressable by name in a typed or spoken order, and what a")
+        add("            -- parley proposal's `terms.regionKey` resolves to.")
+        add("            --")
+        add("            -- One place, one name, one key. A region is kilometres of")
+        add("            -- ground and the town is the only part of it a player can")
+        add("            -- point at: leaving the region's own name in place would give")
+        add("            -- that ground two names, and leaving its centroid in place")
+        add("            -- would send \"attack <town>\" to a spot out in the fields.")
+        add("            -- `team` is deliberately absent — naming a place says nothing")
+        add("            -- about who holds it, and the tactical objective on this same")
+        add("            -- region below is what makes that a question.")
+        for ship in townships:
+            add(f"            {{ key = {_lua_str(ship.key)}, "
+                f"name = {_lua_str(ship.town.name)}, "
+                f"x = {ship.town.x}, z = {ship.town.z} }},")
     add("        },")
     if feature_entries:
         add("")
@@ -1942,6 +2307,49 @@ def emit_lua(meta, side_regions, side_anchors, victory, units, clusters,
         add("        },")
     add("    },")
     add("")
+
+    if townships:
+        add("    -- ======================================================================")
+        add("    -- TOWNS (town-planner T4). Street-and-lot settlements planned on this")
+        add("    -- map's own heightmap rather than scattered on rings: streets, lots")
+        add("    -- with frontage, a wall where the town built one, and the people who")
+        add("    -- live there. A town's buildings are in `units` and its population is")
+        add("    -- in `civilians` — two different wires, on purpose (see both blocks).")
+        add("    --")
+        add("    -- This block is what makes a town a PLACE the rest of the game can")
+        add("    -- reason about: game_scenario.lua hands it to GG.Towns, which")
+        add("    -- publishes each town's statics, binds its civilians into a district")
+        add("    -- the estate can count, and resolves `hall` to the live unit that is")
+        add("    -- this town's PARLEY VENUE. `key` is the region key, so a town needs")
+        add("    -- no second namespace: it is addressed exactly as its region is.")
+        add("    towns = {")
+        for ship in townships:
+            m = ship.meta()
+            add(f"        -- {m['name']}: {m['archetype']}, {m['defense']}, "
+                f"{m['lots']} lot(s), {m['gateways']} gateway(s), "
+                f"{m['civilians']} civilian entr(y/ies)")
+            add("        {")
+            add(f"            key       = {_lua_str(m['key'])},")
+            add(f"            name      = {_lua_str(m['name'])},")
+            add(f"            region    = {_lua_str(m['region'])},")
+            add(f"            x = {m['x']}, z = {m['z']}, radius = {m['radius']},")
+            add(f"            archetype = {_lua_str(m['archetype'])}, "
+                f"defense = {_lua_str(m['defense'])},")
+            if m["hall"]:
+                add("            -- The meeting hall: exactly one per town, and the venue a")
+                add("            -- parley addressed to the civilian estate about this")
+                add("            -- district is held at. GG.Towns resolves it to a live")
+                add("            -- unitID by looking for this def at this position once the")
+                add("            -- units below are staged; destroy it and the estate has")
+                add("            -- nowhere left to negotiate about this town.")
+                add(f"            hall = {{ def = {_lua_str(m['hall']['def'])}, "
+                    f"x = {m['hall']['x']}, z = {m['hall']['z']} }},")
+            else:
+                add("            -- No hall: this game ships no def for the `unique` lot")
+                add("            -- role, so this town has no parley venue.")
+            add("        },")
+        add("    },")
+        add("")
     add("    -- One team per playable side, numbered consecutively from 0 so the")
     add("    -- engine materialises no unoccupied gap teams between them. Every")
     add("    -- side below is staged an army in `units`, which is what makes")
@@ -2020,12 +2428,23 @@ def emit_lua(meta, side_regions, side_anchors, victory, units, clusters,
         tpl = CLUSTER_TEMPLATES[c["kind"]]
         owner = "neutral (Gaia)" if c["owner"] == "neutral" \
             else f"hostile team {c['owner']}"
-        add(f"        -- {tpl['label']}: {c['region']['name']} "
-            f"({c['region']['key']}) — {owner}")
+        ship = c.get("township")
+        if ship is not None:
+            m = ship.meta()
+            add(f"        -- {m['name']} ({m['key']}) — {owner}. A PLANNED town: "
+                f"{m['buildings']} building(s)")
+            add(f"        -- on {len(ship.town.streets)} street(s), "
+                f"{m['defense']} defense. `facing` is load-bearing here and not")
+            add("        -- decoration: a town's buildings FRONT THEIR STREET, which is")
+            add("        -- what makes a row read as a row, and the engine derives the")
+            add("        -- blocked footprint from it by swapping the sizes.")
+        else:
+            add(f"        -- {tpl['label']}: {c['region']['name']} "
+                f"({c['region']['key']}) — {owner}")
         for b in c["buildings"]:
             add(f"        {{ def = {_lua_str(b.defname)}, "
                 f"team = {_team_field(c['owner'])}, x = {b.x}, z = {b.z}, "
-                f"facing = 'south' }},")
+                f"facing = {_lua_str(b.facing)} }},")
         for g in c["garrison"]:
             entry = {"def": g["def"], "team": c["owner"], "x": g["x"],
                      "z": g["z"], "facing": "south"}
@@ -2077,6 +2496,53 @@ def emit_lua(meta, side_regions, side_anchors, victory, units, clusters,
                 add("        " + _emit_unit(g))
     add("    },")
     add("")
+
+    if townships:
+        add("    -- ======================================================================")
+        add("    -- THE POPULATION. A DIFFERENT WIRE FROM `units` ABOVE, DELIBERATELY.")
+        add("    -- These entries route through GG.Civilians.Spawn and land in the")
+        add("    -- civilian REGISTRY, which is the source of truth for who is a")
+        add("    -- civilian and what they are: civilians/routines.lua wanders the")
+        add("    -- `ambient` ones, civilians/estate.lua counts them as their district's")
+        add("    -- population, and game_scenario.lua's own populateCiviliansInArea")
+        add("    -- resolves protect/escort objectives against them. A unit staged")
+        add("    -- through `units` is invisible to all three.")
+        add("    --")
+        add("    -- The reverse is just as load-bearing and is why a town's BUILDINGS")
+        add("    -- are not here: the registry would enroll immobile structures in a")
+        add("    -- per-tick CMD_MOVE they can never satisfy.")
+        add("    --")
+        add("    -- `town` is what binds a civilian to a district. estate.lua groups the")
+        add("    -- population by `info.districtId` and — until this generator emitted")
+        add("    -- one — always found none, because no spawn path had ever set it; its")
+        add("    -- own header says the mechanism was real and saw nothing.")
+        add("    --")
+        add("    -- `role`: `ambient` is the population, `garrison` is the militia on the")
+        add("    -- gates. routines.lua only moves `ambient`, so a garrison holds its")
+        add("    -- post instead of strolling off the gateway it was put on, and the")
+        add("    -- estate does not count armed volunteers as the civilians a protect")
+        add("    -- objective is about.")
+        add("    civilians = {")
+        add("        units = {")
+        for ship in townships:
+            m = ship.meta()
+            counts = ", ".join(f"{n} {k}" for k, n in
+                               ship.populace.kind_counts() if n)
+            add(f"            -- {m['name']} ({m['key']}): {counts or 'nobody'}")
+            for c in ship.populace.residents:
+                add(f"            {{ def = {_lua_str(c.defname)}, "
+                    f"x = {c.x}, z = {c.z}, "
+                    f"facing = {_lua_str(c.facing)}, "
+                    f"role = {_lua_str(c.registry_role)}, "
+                    f"town = {_lua_str(ship.key)} }},")
+            for what, kind, why in ship.populace.dropped:
+                add(f"            -- dropped {what} ({kind}): {why}")
+            for gap in ship.populace.gaps:
+                add(f"            -- gap: {gap}")
+        add("        },")
+        add("    },")
+        add("")
+
     add("    objectives = {")
     add("        -- THE VICTORY OBJECTIVE. `victory = true` is the only terminal")
     add("        -- condition game_gameover.lua watches, and ScenarioDiscovery's")
@@ -2266,6 +2732,16 @@ def main(argv=None):
             "clamp steps every segment)")
     say(f"  {len(meta['landmarks'])} landmark(s) the command language can "
         f"address: {', '.join(meta['landmarks'])}")
+    if meta["towns"]:
+        say(f"  {len(meta['towns'])} planned town(s), "
+            f"{meta['civilians']} civilian entries:")
+        for t in meta["towns"]:
+            say(f"    {t['name']:20s} {t['key']:22s} {t['archetype']:16s} "
+                f"{t['defense']:9s} {t['lots']:2d} lots, "
+                f"{t['buildings']:2d} buildings, {t['civilians']:2d} civilians, "
+                f"hall {'yes' if t['hall'] else 'NO'}")
+    for key, why in meta["town_refusals"]:
+        say(f"    town refused in {key}: {why}")
 
     # --meta-json is how a PROGRAM ingests this run — specifically the lobby's
     # POST /api/admin/scenarios/generate, which shells out to this script and
