@@ -93,6 +93,60 @@
     ]
   },
 
+  "no-census": {
+    "_note": "M3: no census snapshot has arrived (worker gone, or the session just started). Every query must refuse with that reason and no camera follow may start — 'you have no tanks' and 'I can't see your units' are different claims and only one is true.",
+    "noCensus": true,
+    "places": [{ "n": "Northgate", "t": "region", "k": "north_gate_ridge", "x": 2000, "z": 500 }],
+    "groups": [{ "n": "Chimera Squad", "id": 1, "cls": "tanks", "scale": 3, "size": 8, "x": 900, "z": 1100 }]
+  },
+
+  "enemy-out-of-los": {
+    "_note": "THE LOS-honesty board. The enemy HAS three heavy tanks at Slag Forge — that is the fiction this board asserts — and `visible` does not list them, which is exactly how an out-of-LOS enemy appears in the real client: absent from the mirror, not flagged. Nothing the query engine can read knows they are there, so the only honest answer is 'not currently spotted'. Pair with `enemy-in-los`, which differs ONLY in that list.",
+    "places": [
+      { "n": "Northgate", "t": "region", "k": "north_gate_ridge", "x": 2000, "z": 500 },
+      { "n": "Slag Forge", "t": "region", "k": "slag_forge", "x": 3000, "z": 3000 }
+    ],
+    "groups": [{ "n": "Chimera Squad", "id": 1, "cls": "tanks", "scale": 3, "size": 8, "x": 900, "z": 1100 }],
+    "visible": []
+  },
+
+  "enemy-in-los": {
+    "_note": "The same board with the enemy tanks IN the player's filtered stream. Without this half, the out-of-LOS fixture would pass for a query engine that simply never finds anything.",
+    "places": [
+      { "n": "Northgate", "t": "region", "k": "north_gate_ridge", "x": 2000, "z": 500 },
+      { "n": "Slag Forge", "t": "region", "k": "slag_forge", "x": 3000, "z": 3000 }
+    ],
+    "groups": [{ "n": "Chimera Squad", "id": 1, "cls": "tanks", "scale": 3, "size": 8, "x": 900, "z": 1100 }],
+    "visible": [
+      { "cls": "tanks", "scale": 3, "side": "enemy", "x": 2990, "z": 3000 },
+      { "cls": "tanks", "scale": 3, "side": "enemy", "x": 3000, "z": 3010 },
+      { "cls": "tanks", "scale": 3, "side": "enemy", "x": 3010, "z": 2990 }
+    ]
+  },
+
+  "basin-authority": {
+    "_note": "Rules params for the `resources` and `objectives` queries. The authority numbers are the ones the M0 live run actually observed (team pool 720, personal 92 after one 8-point directive). Objective 2 is complete so the answer has something it must NOT list.",
+    "places": [
+      { "n": "Fallow Gate", "t": "region", "k": "fallow_gate", "x": 2500, "z": 1500 },
+      { "n": "Osprey Fen", "t": "region", "k": "osprey_fen", "x": 500, "z": 2500 }
+    ],
+    "objectives": [
+      { "n": "Hold Fallow Gate", "id": 1, "x": 2500, "z": 1500 },
+      { "n": "Secure Osprey Fen", "id": 2, "x": 500, "z": 2500 }
+    ],
+    "groups": [{ "n": "Chimera Squad", "id": 1, "cls": "tanks", "scale": 3, "size": 8, "x": 900, "z": 1100 }],
+    "teamRulesParams": { "authority_pool": 720, "authority_player_0": 92 },
+    "gameRulesParams": {
+      "objective_count": 2,
+      "objective_1_state": "active",
+      "objective_1_type": "control",
+      "objective_1_progress": 0.25,
+      "objective_1_reward": 50,
+      "objective_2_state": "complete",
+      "objective_2_type": "control"
+    }
+  },
+
   "empty": {
     "_note": "Nothing named at all — every place reference must refuse, never fuzzy-match into the void."
   }

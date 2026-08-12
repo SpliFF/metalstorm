@@ -48,6 +48,41 @@ const run = (utterance: string, contextKey = 'basin') => {
     return { ...s, ...result };
 };
 
+/**
+ * The same setup with M3's local patterns AND the camera / registry / query ports
+ * wired — i.e. the live console. Kept separate from `setup()` so the suites above
+ * keep proving the M1 configuration (no ports installed) still behaves.
+ */
+function setupWithPorts(contextKey = 'basin') {
+    const s = setup(contextKey);
+    const registryIds = ['minimap', 'parley-panel', 'objectives-panel', 'scoreboard-panel', 'ai-command-panel'];
+    const panelByName: Record<string, string> = {
+        minimap: 'minimap', 'mini map': 'minimap',
+        diplomacy: 'parley-panel', 'diplomacy panel': 'parley-panel', parley: 'parley-panel',
+        objectives: 'objectives-panel', scoreboard: 'scoreboard-panel',
+    };
+    return {
+        ...s,
+        deps: {
+            ...s.deps,
+            panelIds: registryIds,
+            patterns: {
+                vocabulary,
+                resolvePanel: (name: string) =>
+                    panelByName[name.toLowerCase().replace(/^the\s+/, '')] ?? null,
+            },
+            ports: { ...s.deps.ports, ...s.world.ports },
+        },
+    };
+}
+
+const runWithPorts = (utterance: string, contextKey = 'basin') => {
+    const s = setupWithPorts(contextKey);
+    const result = runLocalUtterance(utterance, s.deps);
+    s.world.cameraPort.dispose();      // a follow must not outlive the test
+    return { ...s, ...result };
+};
+
 describe('the adapter always produces a valid envelope', () => {
     const utterances = [
         'Chimera Squad defend Northgate',
@@ -332,5 +367,74 @@ describe('the rename phrasings', () => {
             const result = validateNLResponse(response, { vocabulary });
             expect(result.ok ? [] : result.errors, utterance).toEqual([]);
         }
+    });
+});
+
+describe('the M3 local patterns, end to end through the local path', () => {
+    it('"zoom to <region>" moves the camera and sends no command', () => {
+        const { sent, lines, world } = runWithPorts('zoom to Northgate');
+        expect(world.cameraCalls).toEqual(['focusOn:2000,500']);
+        expect(sent).toEqual([]);
+        expect(lines.some((l) => l.kind === 'ok' && l.text.includes('camera on Northgate'))).toBe(true);
+    });
+
+    it('"show me the minimap, full screen" reaches the registry as a fullscreen op', () => {
+        const { sent, world } = runWithPorts('show me the minimap, full screen');
+        expect(world.uiCalls).toEqual(['fullscreen:minimap']);
+        expect(sent).toEqual([]);
+    });
+
+    it('"open the diplomacy panel" opens parley by alias', () => {
+        const { world } = runWithPorts('open the diplomacy panel');
+        expect(world.uiCalls).toEqual(['open:parley-panel']);
+    });
+
+    it('"how many tanks do we have" answers with the count from the mirror', () => {
+        const { lines, sent } = runWithPorts('how many tanks do we have');
+        expect(sent).toEqual([]);
+        expect(lines.some((l) => l.text === 'You have 19 tanks.')).toBe(true);
+    });
+
+    it('"locate the enemy tanks" is LOS-honest on the local path too', () => {
+        const { lines, world } = runWithPorts('locate the enemy tanks', 'enemy-out-of-los');
+        expect(lines.some((l) => l.text.includes('not currently spotted'))).toBe(true);
+        expect(world.cameraCalls).toEqual([]);
+    });
+
+    it('"follow <squad>" starts a follow', () => {
+        const s = setupWithPorts('basin');
+        runLocalUtterance('follow Chimera Squad', s.deps);
+        expect(s.world.cameraPort.followingLabel()).toBe('Chimera Squad');
+        s.world.cameraPort.dispose();
+    });
+
+    it('every M3 phrasing still produces an envelope the CONTRACT accepts', () => {
+        // Including `panelIds`, so a pattern emitting a phrasing instead of a
+        // registry id would fail here rather than at the registry.
+        for (const utterance of [
+            'zoom to Northgate', 'show me the whole map', 'zoom in', 'follow Chimera Squad',
+            'show me the minimap, full screen', 'open the diplomacy panel', 'close the scoreboard',
+            'how many tanks do we have', 'how many heavy tanks do we have left?',
+            'where is Chimera Squad', 'locate the enemy tanks',
+            'how much authority do we have', 'what are we supposed to be doing',
+        ]) {
+            const s = setupWithPorts('basin');
+            const { response } = acceleratorToEnvelope(utterance, s.deps);
+            const result = validateNLResponse(response, { vocabulary, panelIds: s.deps.panelIds });
+            expect(result.ok ? [] : result.errors, utterance).toEqual([]);
+            s.world.cameraPort.dispose();
+        }
+    });
+
+    it('an army-moving sentence is untouched by the patterns', () => {
+        const { sent } = runWithPorts('Chimera Squad defend Northgate');
+        expect(sent).toHaveLength(1);
+        expect(sent[0].type).toBe('GroupDirective');
+    });
+
+    it('an unmatched sentence still refuses transparently', () => {
+        const { sent, lines } = runWithPorts('flurgle the wombat sideways');
+        expect(sent).toEqual([]);
+        expect(lines.some((l) => l.kind === 'refused')).toBe(true);
     });
 });

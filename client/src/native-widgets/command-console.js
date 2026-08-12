@@ -41,6 +41,9 @@ import { classVocabulary } from '../ui/native-ui/class-vocabulary.js';
 import { runLocalUtterance } from '../ui/native-ui/nl-client.js';
 import { NLResolver } from '../ui/native-ui/nl-resolver.js';
 import { matchSelectionToGroup } from '../ui/native-ui/cost-preview.js';
+import { cameraPortHolder, createNLCameraPort } from '../ui/native-ui/camera-port.js';
+import { uiActionRegistry, createNLUiActionPort } from '../ui/native-ui/ui-action-registry.js';
+import { QueryEngine, censusCacheHolder } from '../ui/native-ui/query-engine.js';
 import { injectStyle } from '../ui/ui.js';
 import consoleCss from './command-console.css?raw';
 
@@ -86,7 +89,14 @@ function init(ctx) {
     const form = container.querySelector('#cc-form');
     form.addEventListener('submit', (e) => {
         e.preventDefault();
-        submit();
+        // Fire-and-forget: submit() awaits one census round-trip and reports
+        // everything through the transcript, so there is nothing here to await
+        // and nothing a rejection could usefully tell the player — but an
+        // unhandled rejection would still be a console error, so it is caught.
+        void submit().catch((err) => {
+            console.error('[command-console] submit failed:', err);
+            say('refused', 'Something went wrong handling that — nothing sent.');
+        });
     });
 
     // The game binds camera/hotkeys on window keydown; those handlers already
@@ -161,29 +171,134 @@ function groupLabel(groupId) {
 }
 
 /**
- * The resolver for THIS session: the live name index, the shipped vocabulary,
- * the store's own-team org groups, and whatever is selected.
+ * unit id → `{className, scale}` from the LOS-filtered census (M3).
  *
- * Two ports are deliberately absent, and their absence is load-bearing:
- *   - `unitClass` (a unit's `ms_class`) — the widget context exposes the ui-store
- *     but no defs mirror, so which squads are the tank squads is genuinely
- *     unknowable here. A class-count order therefore REFUSES with that reason
- *     instead of grabbing the first N groups. The defs join arrives with the
- *     query engine in M3.
- *   - `groupPosition` — `gp:orgGroups` carries member ids but no centroid, so
- *     nearest-to-target is skipped and ranking falls through to largest-first.
- * Built fresh per utterance so it always sees the current store snapshot.
+ * This is the port `NLResolver` documented as absent through M1/M2 — "which of
+ * your squads are the tank squads" was genuinely unknowable on this thread,
+ * because main holds no defs mirror. The census answers it (the join happens
+ * worker-side, where the def cache is), so `2 tank squads` now resolves instead
+ * of refusing. Returns undefined per-unit when no snapshot has arrived, which is
+ * exactly the state the resolver's honest refusal was written for.
+ */
+function unitClassLookup() {
+    const census = censusCacheHolder.current?.snapshot();
+    if (!census) return undefined;
+    const byId = new Map();
+    for (const u of census.units) {
+        if (u.className) byId.set(u.unitId, { className: u.className, scale: u.scale });
+    }
+    return (unitId) => byId.get(unitId);
+}
+
+/**
+ * Centroid of a group's members from the census — read LIVE, on every call.
+ *
+ * The first build captured the snapshot (and the group list) when the lookup was
+ * created, which was fine for ranking squads inside one sentence and wrong for
+ * `follow`: the camera snapped once and then sat still while the squad drove off,
+ * because the "live centroid" it re-read every 400 ms was a photograph. Both
+ * callers now see whatever the cache holds at the moment they ask.
+ *
+ * Undefined when no snapshot exists or nothing of the group is in the mirror —
+ * never a guessed position (that would rank squads by a coordinate nobody holds,
+ * and point the camera at the map corner).
+ */
+function groupPosition(groupId) {
+    const census = censusCacheHolder.current?.snapshot();
+    if (!census) return undefined;
+    const group = (state.ctx?.store.getOrgGroups() ?? []).find((g) => g.groupId === groupId);
+    if (!group) return undefined;
+    const members = new Set(group.memberIds);
+    let x = 0, z = 0, n = 0;
+    for (const u of census.units) {
+        if (!members.has(u.unitId)) continue;
+        x += u.x; z += u.z; n++;
+    }
+    return n ? { x: x / n, z: z / n } : undefined;
+}
+
+/**
+ * The resolver for THIS session: the live name index, the shipped vocabulary,
+ * the store's own-team org groups, whatever is selected, and (from M3) the
+ * census-backed class + position lookups.
+ *
+ * Built fresh per utterance so it always sees the current store snapshot AND the
+ * census the submit path just refreshed.
  */
 function buildResolver() {
+    const unitClass = unitClassLookup();
     return new NLResolver({
         index: namedEntityIndex,
         vocabulary: classVocabulary.current,
         groups: state.ctx?.store.getOrgGroups() ?? [],
         selectionGroupId: selectedGroupId(),
+        ...(unitClass ? { unitClass } : {}),
+        groupPosition,
     });
 }
 
-function submit() {
+/**
+ * The M3 ports, or nothing.
+ *
+ * Each is omitted when its provider isn't installed, and the executor then
+ * refuses that action kind BY NAME ("camera control isn't wired up yet"). That is
+ * the whole reason the ports are optional: a stubbed camera that swallowed calls
+ * would print "camera on Northgate" for a camera that never moved.
+ */
+function buildLocalPorts(resolver) {
+    const ports = {};
+
+    const camera = cameraPortHolder.current;
+    if (camera) {
+        ports.camera = createNLCameraPort({
+            port: camera,
+            resolver,
+            groupPosition: (groupId) => groupPosition(groupId) ?? null,
+        });
+        // Tell the player when a follow ends, and why. A camera that silently
+        // stops tracking looks broken; one that says "released Hammerfall (you
+        // moved the camera)" is obviously working as designed.
+        camera.setFollowEndHandler((reason, label) => {
+            if (reason === 'camera-action') return;      // superseded — the new action speaks
+            const why = reason === 'user-input' ? 'you moved the camera'
+                : reason === 'target-lost' ? "I can't see them any more"
+                : 'stopped';
+            say('system', `camera released from ${label} — ${why}`);
+        });
+    }
+
+    if (uiActionRegistry.ids().length > 0) {
+        ports.uiActions = createNLUiActionPort(uiActionRegistry);
+    }
+
+    if (censusCacheHolder.current) {
+        ports.queryEngine = new QueryEngine({
+            census: censusCacheHolder.current,
+            index: namedEntityIndex,
+            vocabulary: classVocabulary.current,
+            resolveEntity: (name, opts) => resolver.resolveEntity(name, opts),
+            groups: state.ctx?.store.getOrgGroups() ?? [],
+            directives: state.ctx?.store.getDirectives() ?? [],
+            gameRulesParam: (key) => state.ctx?.store.gameRulesParam(key),
+            teamRulesParam: (key) => state.ctx?.store.teamRulesParam(state.ctx.identity.teamId, key),
+            playerId: state.ctx?.identity.playerId ?? 0,
+            ...(camera ? { focusCamera: (x, z) => camera.focusOn(x, z) } : {}),
+        });
+    }
+
+    return ports;
+}
+
+/**
+ * Async only at this boundary.
+ *
+ * The census is a worker round-trip, and the whole envelope path below is
+ * synchronous by design (see nl-executor.ts). Refreshing HERE, once, before the
+ * sentence runs is what keeps it that way: every query and every class-count
+ * subject in this utterance then reads one snapshot taken moments ago, instead of
+ * each of them awaiting its own and disagreeing about the board.
+ */
+async function submit() {
     const utterance = state.inputEl.value.trim();
     if (!utterance) return;
 
@@ -204,15 +319,24 @@ function submit() {
         return;
     }
 
+    await censusCacheHolder.current?.refresh();
+
+    const resolver = buildResolver();
     runLocalUtterance(utterance, {
         index: namedEntityIndex,
         vocabulary: classVocabulary.current,
         selectionGroupId: selectedGroupId(),
         groupLabel,
+        panelIds: uiActionRegistry.ids(),
+        patterns: {
+            vocabulary: classVocabulary.current,
+            resolvePanel: (name) => uiActionRegistry.get(name)?.id ?? null,
+        },
         ports: {
             sendCommand: state.ctx.sendCommand,
-            resolver: buildResolver(),
+            resolver,
             console: { say: renderLine },
+            ...buildLocalPorts(resolver),
         },
     });
 }
@@ -249,6 +373,16 @@ function showHelp() {
         classes
             ? `Unit classes for an "idle <class>" subject: ${classes}.`
             : 'Unit-class vocabulary is not loaded — "idle <class>" subjects are unavailable.');
+    // The camera / panel / query sentences (M3). Read out of the live registry
+    // rather than listed here, so a game that ships different panels documents
+    // itself — the same rule the class list above follows.
+    say('system',
+        'Camera: "zoom to <place>", "follow <squad>", "show me the whole map", "zoom in/out". ' +
+        'Questions: "how many <class> do we have", "where is <name>", "how much authority", "objectives".');
+    const panels = uiActionRegistry.names();
+    say('system', panels.length
+        ? `Panels you can open, close or toggle: ${panels.join(', ')} — add ", full screen" where it applies.`
+        : 'No panels are registered, so panel commands are unavailable.');
 }
 
 function escapeHtml(s) {

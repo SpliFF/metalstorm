@@ -3692,6 +3692,9 @@ export async function gpTestDispatch(method: string, args: unknown[]): Promise<u
             const d = (gpDefCache?.getAllUnitDefs() ?? []).find((x) => x.name === name);
             return d ? gpCloneSafe(d) : null;
         }
+        // — PLAN-metalstorm-command-language.md §6.4 (M3): the NL query engine's
+        //   census. See gpNlCensus for why this op exists at all. —
+        case 'nlCensus': return gpNlCensus();
         // — Worker game-connection readiness (see gpAuthFailed / gpFirstStateReceived).
         //   Lets the scenario runner gate spawns on a live connection and the
         //   model-viewer report the real cause of a non-streaming entity. —
@@ -3818,6 +3821,66 @@ function gpMakeOrbitTarget(spec: unknown): OrbitTarget | null {
         }
     }
     return null;
+}
+
+/// PLAN-metalstorm-command-language.md §6.4 (M3) — the natural-language query
+/// engine's view of the world, and the ONLY one it gets.
+///
+/// Every entry comes from `liveState.units`: the client's own unit mirror, which
+/// the server already filtered to this player's LOS before sending. It is the
+/// same map `Spring.GetTeamUnitsSorted` and friends answer from, so this op adds
+/// no visibility that Lua widgets don't already have — it exists because the
+/// `ms_class`/`ms_scale` join needs the def cache, which lives HERE (main has no
+/// defs mirror), and because main should not have to build Lua source strings and
+/// parse prose back out of `window.widgets.eval` to ask a question.
+///
+/// `side` is resolved here rather than on main so the ally-team lookup uses
+/// `liveState.teams` — the roster the sim actually seeded — instead of main's
+/// identity guess (`gp:authenticated` reports a team, and myAllyTeam is set equal
+/// to it at auth time, which is only right for 1-team-per-ally games).
+///
+/// NOTHING outside this map is read. There is no "all units" collection on the
+/// client to accidentally reach for, which is what makes LOS honesty a property
+/// of the data path rather than of a filter someone has to remember.
+function gpNlCensus(): {
+    frame: number;
+    myTeam: number;
+    units: Array<{
+        unitId: number; team: number; side: 'own' | 'ally' | 'enemy';
+        className?: string; scale?: number; x: number; z: number;
+    }>;
+} {
+    const myTeam = liveState.identity.myTeam;
+    const myAlly = liveState.teams.get(myTeam)?.allyTeam ?? liveState.identity.myAllyTeam;
+
+    const sideOf = (team: number): 'own' | 'ally' | 'enemy' => {
+        if (team === myTeam) return 'own';
+        const ally = liveState.teams.get(team)?.allyTeam;
+        return ally !== undefined && ally === myAlly ? 'ally' : 'enemy';
+    };
+
+    const units: Array<{
+        unitId: number; team: number; side: 'own' | 'ally' | 'enemy';
+        className?: string; scale?: number; x: number; z: number;
+    }> = [];
+
+    for (const [unitId, u] of liveState.units) {
+        const cp = unitDefMap.get(u.defId)?.customParams;
+        const className = cp?.ms_class;
+        const scaleRaw = cp?.ms_scale;
+        const scale = scaleRaw !== undefined ? Number(scaleRaw) : undefined;
+        units.push({
+            unitId,
+            team: u.team,
+            side: sideOf(u.team),
+            ...(className ? { className } : {}),
+            ...(scale !== undefined && Number.isFinite(scale) ? { scale } : {}),
+            x: u.x,
+            z: u.z,
+        });
+    }
+
+    return { frame: liveState.gameFrame, myTeam, units };
 }
 
 /// Force the worker camera to a fixed height above its look-at target (ports the

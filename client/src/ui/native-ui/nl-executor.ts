@@ -50,26 +50,34 @@ export interface NLConsolePort {
     say(line: NLConsoleLine): void;
 }
 
-/** M3's CameraPort, declared here so an envelope carrying a camera action has a
- *  named thing to be missing. */
+/**
+ * The three M3 ports share one return type: `Resolution<string>` — the same
+ * ok/refuse/clarify triple the resolver speaks.
+ *
+ * They were originally declared here (M1) returning `void`/`boolean`, which was
+ * wrong in the one way this file exists to prevent: `port.focus(ref)` followed by
+ * `return done('camera on ' + ref)` prints a success for a name the port may have
+ * failed to resolve. A port that can fail must be able to SAY so, in its own
+ * words, and a port that needs to ask (two places called "West Scarp") must be
+ * able to ask — the executor's job is to relay that, not to narrate over it.
+ */
+export type PortResult = Resolution<string>;
+
+/** M3's CameraPort (`camera-port.ts` — over the worker camera ops). */
 export interface NLCameraPort {
-    focus(targetRef: string): void;
-    follow(targetRef: string): void;
-    fitMap(): void;
-    zoom(dir: 'in' | 'out'): void;
-    saveView(slot: number): void;
-    loadView(slot: number): void;
+    apply(action: NLCameraAction): PortResult;
 }
 
-/** M3's ui-action-registry. */
+/** M3's ui-action-registry (`ui-action-registry.ts`). */
 export interface NLUiActionPort {
-    apply(action: NLUiAction): boolean;
+    apply(action: NLUiAction): PortResult;
 }
 
-/** M3's LOS-honest query engine. Answers are text because the console renders
- *  them; the engine owns the LOS filtering, never this dispatcher. */
+/** M3's LOS-honest query engine (`query-engine.ts`). Answers are text because
+ *  the console renders them; the engine owns the LOS filtering, never this
+ *  dispatcher — see its header for why that is a data-path property. */
 export interface NLQueryPort {
-    answer(query: NLQuery): string | null;
+    answer(query: NLQuery): PortResult;
 }
 
 export interface ExecutorPorts {
@@ -381,31 +389,26 @@ function runGroup(group: NLGroupAction, ports: ExecutorPorts, report: ExecutionR
 
 // ──────────────────────── camera / ui / query ────────────────────────
 
+/** One port result → one dispatch outcome. The port already chose the words;
+ *  this only lifts them into the console-line shape. */
+function fromPort(result: PortResult): Dispatched {
+    return result.kind === 'ok' ? done(result.value) : result as Dispatched;
+}
+
 function runCamera(camera: NLCameraAction, ports: ExecutorPorts): Dispatched {
     const port = ports.camera;
     if (!port) return no(`Camera control isn't wired up yet — "${camera.op}" not yet supported.`);
-
-    switch (camera.op) {
-        case 'focus': port.focus(camera.targetRef); return done(`camera on ${camera.targetRef}`);
-        case 'follow': port.follow(camera.targetRef); return done(`following ${camera.targetRef}`);
-        case 'fitMap': port.fitMap(); return done('showing the whole map');
-        case 'zoom': port.zoom(camera.dir); return done(`zoomed ${camera.dir}`);
-        case 'saveView': port.saveView(camera.slot); return done(`view saved to slot ${camera.slot}`);
-        case 'loadView': port.loadView(camera.slot); return done(`view ${camera.slot} restored`);
-    }
+    return fromPort(port.apply(camera));
 }
 
 function runUi(ui: NLUiAction, ports: ExecutorPorts): Dispatched {
     const port = ports.uiActions;
     if (!port) return no(`Panel control isn't wired up yet — "${ui.op} ${ui.panelId}" not yet supported.`);
-    if (!port.apply(ui)) return no(`I don't have a panel called "${ui.panelId}".`);
-    return done(`${ui.panelId} ${ui.op === 'fullscreen' ? 'full screen' : ui.op}`);
+    return fromPort(port.apply(ui));
 }
 
 function runQuery(query: NLQuery, ports: ExecutorPorts): Dispatched {
     const port = ports.queryEngine;
     if (!port) return no(`I can't answer questions yet — "${query.op}" not yet supported.`);
-    const answer = port.answer(query);
-    if (answer == null) return no(`I don't have an answer for that.`);
-    return done(answer);
+    return fromPort(port.answer(query));
 }

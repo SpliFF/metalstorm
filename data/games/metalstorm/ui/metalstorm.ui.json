@@ -17,6 +17,7 @@
       "entry": "widgets/objectives-panel.js",
       "mount": "right",
       "title": "Objectives",
+      "nlAliases": ["objectives", "mission", "missions", "objective list"],
       "subscribes": ["gameRulesParams"]
     },
     {
@@ -24,6 +25,7 @@
       "entry": "widgets/scoreboard-panel.js",
       "mount": "right",
       "title": "Scoreboard",
+      "nlAliases": ["scores", "score", "standings"],
       "collapsed": true,
       "subscribes": ["gameRulesParams", "playerRoster"]
     },
@@ -32,6 +34,7 @@
       "entry": "widgets/parley-panel.js",
       "mount": "left",
       "title": "Parley",
+      "nlAliases": ["diplomacy panel", "diplomacy", "negotiation", "negotiations", "talks"],
       "collapsed": true,
       "_chrome": "Collapsed by default and badged with the incoming-proposal count — diplomacy is episodic, so the panel should announce itself rather than occupy the rail permanently.",
       "subscribes": ["gameRulesParams", "teamRulesParams"]
@@ -41,6 +44,7 @@
       "entry": "widgets/ai-command-panel.js",
       "mount": "left",
       "title": "AI Command",
+      "nlAliases": ["ai panel", "ai command panel", "guidance", "ai guidance"],
       "collapsed": true,
       "_chrome": "The tallest panel in the HUD (stance, ROE, region paint, asset locks, funding, intent, change feed) — set-and-forget, so it starts collapsed.",
       "subscribes": ["teamRulesParams"],
@@ -53,6 +57,7 @@
       "_builtin_note": "Mounted from the client bundle (client/src/native-widgets/command-composer.js) via BUILTIN_WIDGETS, not fetched from this dir — it depends on bundled compile-table + named-entity-index modules. The game-dir command-composer.js is a stub kept for reference.",
       "mount": "bottom-center",
       "title": "Compose Command",
+      "nlAliases": ["composer", "command composer", "order builder"],
       "subscribes": ["gameRulesParams", "teamRulesParams"],
       "hideForSpectator": true
     },
@@ -63,6 +68,7 @@
       "_builtin_note": "Mounted from the client bundle (client/src/native-widgets/command-console.js) via BUILTIN_WIDGETS — same reason as the composer: it depends on bundled native-ui modules (console-exchange + free-text-accelerator + class-vocabulary + named-entity-index). There is no game-dir copy.",
       "mount": "bottom-center",
       "title": "Command",
+      "nlAliases": ["console", "command console", "transcript"],
       "_chrome": "PLAN-metalstorm-command-language.md §4 — the natural-language console: a you:/game: transcript plus one text field. Docked bottom-centre under the composer, which it eventually absorbs (the composer's free-text field is the same parser).",
       "subscribes": ["selection", "orgGroups"],
       "hideForSpectator": true

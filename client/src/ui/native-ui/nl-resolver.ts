@@ -471,17 +471,7 @@ export class NLResolver {
     /** The class phrase as a list of OR-ed `RoleMatch` clauses, so a class and a
      *  role are matched by the same code. */
     private classClauses(phrase: string, pinnedScale?: number): RoleMatch[] | null {
-        const match = this.deps.vocabulary.lookup(phrase);
-        if (!match) return null;
-        const clauses: RoleMatch[] = match.kind === 'class'
-            ? [{ class: match.className, ...(match.scale != null ? { scale: match.scale } : {}) }]
-            : match.matches.map((m) => ({ ...m }));
-        // An explicit `scale` on the subject narrows every clause: "2 heavy tank
-        // squads" is tanks AND scale 3, not tanks OR scale 3.
-        if (pinnedScale != null) {
-            return clauses.map((c) => ({ ...c, scale: pinnedScale, scaleMin: undefined, scaleMax: undefined }));
-        }
-        return clauses;
+        return classClausesFor(this.deps.vocabulary, phrase, pinnedScale);
     }
 
     /**
@@ -548,6 +538,39 @@ export class NLResolver {
 }
 
 // ───────────────────────────── helpers ─────────────────────────────
+
+/**
+ * A class-or-role phrase as a list of OR-ed `RoleMatch` clauses, or null when
+ * the vocabulary doesn't know the phrase.
+ *
+ * Exported (with `matchesClassClauses`) because the query engine has to answer
+ * "how many tanks" against the same taxonomy the ORDER path selects squads with.
+ * Two copies of this reduction would let "heavy tanks" mean one thing when you
+ * count them and another when you order them — which is precisely the drift the
+ * shipped vocabulary was introduced to end.
+ */
+export function classClausesFor(
+    vocabulary: ClassVocabulary, phrase: string, pinnedScale?: number,
+): RoleMatch[] | null {
+    const match = vocabulary.lookup(phrase);
+    if (!match) return null;
+    const clauses: RoleMatch[] = match.kind === 'class'
+        ? [{ class: match.className, ...(match.scale != null ? { scale: match.scale } : {}) }]
+        : match.matches.map((m) => ({ ...m }));
+    // An explicit `scale` narrows every clause: "2 heavy tank squads" is tanks
+    // AND scale 3, not tanks OR scale 3.
+    if (pinnedScale != null) {
+        return clauses.map((c) => ({ ...c, scale: pinnedScale, scaleMin: undefined, scaleMax: undefined }));
+    }
+    return clauses;
+}
+
+/** Does a unit's class/scale satisfy any clause? See `clausesMatch`. */
+export function matchesClassClauses(
+    clauses: RoleMatch[], unit: { className: string; scale: number | null },
+): boolean {
+    return clausesMatch(clauses, unit);
+}
 
 /** Does the dominant class satisfy any clause? Fields within a clause AND. */
 function clausesMatch(clauses: RoleMatch[], dominant: { className: string; scale: number | null }): boolean {

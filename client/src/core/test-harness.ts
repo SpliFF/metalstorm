@@ -648,6 +648,33 @@ export class TestHarness {
         return this.deps.getSelection();
     }
 
+    // ─── Org groups ─────────────────────────────────────────────────
+
+    /**
+     * Form an org group with a name and members, through the client's own
+     * `OrgGroup` create path (the one the org panel will post).
+     *
+     * The worker's dispatcher has had this op since the macro-UI work; the
+     * harness simply never bound it, so nothing outside the (not-yet-built) org
+     * panel could form a POPULATED group. That mattered while verifying the
+     * command language's `follow` verb (PLAN-metalstorm-command-language.md
+     * §6.2): a follow needs a group whose members are in the client mirror, and
+     * Metalstorm ships no way to make one — its manifest has no org panel and,
+     * per the M2 field notes, `strategos` never calls `createGroup`. The
+     * gadget-side `Spring.CreateOrgGroup` callout reachable from `test.lua()`
+     * creates the group but attaches no members.
+     *
+     * Pass an empty name to let the server assign the next callsign.
+     */
+    orgGroupCreate(name: string, memberIds: number[]): void {
+        void this.deps.workerCall('orgGroupCreate', [name, memberIds]);
+    }
+
+    /** The client's org-group snapshot (`gp:orgGroups`), as the ui-store sees it. */
+    async orgGroups(): Promise<unknown> {
+        return this.deps.workerCall('orgGroups');
+    }
+
     // ─── Composite helpers ──────────────────────────────────────────
 
     /** Spawn one unit, then focus the camera on it. Returns the unit

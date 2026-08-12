@@ -38,6 +38,7 @@ export const FIXTURE_FILES = [
     'commands.json',
     'guidance.json',
     'groups-ui-query.json',
+    'camera-ui-query.json',
     'clarify-refuse.json',
     'multi-step.json',
 ] as const;

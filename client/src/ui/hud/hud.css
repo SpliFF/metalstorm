@@ -84,6 +84,75 @@
     padding: 4px 8px;
 }
 
+/*
+ * Full-screen minimap (PLAN-metalstorm-command-language.md §6.3 — "show me the
+ * minimap, full screen"; Escape or the same sentence again closes it).
+ *
+ * A size change and nothing else: the canvas keeps its scene, its ortho frustum
+ * and its team-fog overlay, so the expanded map reveals exactly what the corner
+ * one did. `minimap.ts` sizes the canvas to a centred square (the frustum fits
+ * the longer map axis, so a stretched viewport would letterbox it).
+ *
+ * The scrim is the input barrier. #game-canvas owns the pointer listeners for
+ * selection, orders and the camera, so a pointer event that lands on the scrim
+ * is one the game never sees. Keyboard can't be blocked by stacking and is
+ * handled in minimap.ts instead.
+ */
+/*
+ * While the overlay is up the whole HUD layer outranks the native-UI rails
+ * (#ui-root, z-index 100). #game-hud's own z-index of 10 caps everything inside
+ * it, so the shell's z-index alone left the command console and the objectives
+ * rail painted across the expanded map — confirmed live before this rule existed.
+ */
+#game-hud.has-fullscreen-overlay {
+    z-index: 200;
+}
+
+.minimap-fullscreen-scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    pointer-events: auto;
+    background: rgba(4, 6, 10, 0.78);
+    backdrop-filter: blur(2px);
+}
+
+#hud-minimap.is-fullscreen {
+    position: fixed;
+    inset: 0;
+    z-index: 41;
+    display: flex !important;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    background: transparent;
+    padding: 0;
+    /* The panel fills the viewport so nothing outside the map is clickable
+       through it, but only the canvas + button are hit targets. */
+    pointer-events: none;
+}
+
+#hud-minimap.is-fullscreen #minimap-container,
+#hud-minimap.is-fullscreen #detach-minimap-btn {
+    pointer-events: auto;
+}
+
+#hud-minimap.is-fullscreen .minimap-canvas--fullscreen {
+    border: 1px solid #4a5a72;
+    border-radius: 6px;
+    box-shadow: 0 12px 48px rgba(0, 0, 0, 0.6);
+}
+
+#hud-minimap.is-fullscreen::after {
+    content: 'Esc to close';
+    pointer-events: none;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: #8fa3bf;
+}
+
 #hud-help {
     position: absolute;
     bottom: 8px;

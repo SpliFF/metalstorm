@@ -29,6 +29,7 @@
 import { getPriorityBand } from './compile-table.js';
 import { planUtterance, type ExchangeDeps, type ExchangeOutcome } from './console-exchange.js';
 import type { AcceleratorResult } from './free-text-accelerator.js';
+import { matchLocalPattern, type LocalPatternDeps } from './nl-local-patterns.js';
 import {
     validateNLResponse,
     type NLGroupAction, type NLPriority, type NLResponse, type NLSubject, type NLTarget,
@@ -55,6 +56,19 @@ export interface LocalParse {
 }
 
 type NLRename = Extract<NLGroupAction, { op: 'rename' }>;
+
+/**
+ * What the adapter needs beyond the M0 exchange deps.
+ *
+ * `patterns` is OPTIONAL and its absence is meaningful: a caller with no camera,
+ * no registry and no query engine (an envelope-shape test, a headless harness)
+ * gets the M0/M1 behaviour exactly — the camera/panel/query sentences reach the
+ * accelerator and refuse there, rather than producing envelopes for ports that
+ * aren't wired.
+ */
+export interface AdapterDeps extends ExchangeDeps {
+    patterns?: LocalPatternDeps;
+}
 
 /**
  * "Name this group Hammerfall" — matched BEFORE the slot-filler.
@@ -113,7 +127,19 @@ function cleanName(raw: string): string {
  * here would give the player two different answers to the same mistake
  * depending on whether the proxy happened to be up.
  */
-export function acceleratorToEnvelope(utterance: string, deps: ExchangeDeps): LocalParse {
+export function acceleratorToEnvelope(utterance: string, deps: AdapterDeps): LocalParse {
+    // M3's camera / panel / query patterns, tried BEFORE the slot-filler for the
+    // same reason the rename is: none of them is one of the eleven army-moving
+    // verbs, and teaching the slot-filler about panels would make every sentence
+    // mentioning one a candidate order. An unmatched sentence falls straight
+    // through, so this can only ever ADD sentences the local path can execute.
+    if (deps.patterns) {
+        const local = matchLocalPattern(utterance, deps.patterns);
+        if (local) {
+            return { notes: [], response: { say: local.say, actions: [local.action] } };
+        }
+    }
+
     const rename = parseGroupRename(utterance);
     if (rename) {
         return {
@@ -224,9 +250,13 @@ function clampText(text: string): string {
 
 // ─────────────────────────── the local run ───────────────────────────
 
-export interface LocalRunDeps extends ExchangeDeps {
+export interface LocalRunDeps extends AdapterDeps {
     /** Executor ports. `resolver` is required; camera/ui/query are M3. */
     ports: ExecutorPorts;
+    /** Registered panel ids (`uiActionRegistry.ids()`), so a `ui` envelope naming
+     *  a panel that doesn't exist is caught by the CONTRACT rather than by the
+     *  registry three layers down. Omitted ⇒ charset-only checking (§1). */
+    panelIds?: readonly string[];
 }
 
 export interface LocalRunResult {
@@ -250,7 +280,10 @@ export interface LocalRunResult {
  */
 export function runLocalUtterance(utterance: string, deps: LocalRunDeps): LocalRunResult {
     const { response, notes } = acceleratorToEnvelope(utterance, deps);
-    const validation = validateNLResponse(response, { vocabulary: deps.vocabulary });
+    const validation = validateNLResponse(response, {
+        vocabulary: deps.vocabulary,
+        ...(deps.panelIds ? { panelIds: deps.panelIds } : {}),
+    });
 
     if (!validation.ok) {
         // The offline parser built something the contract rejects. Visible, and

@@ -15,14 +15,13 @@
  *    success and never a guess.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import {
     executeNLResponse,
-    type ExecutorPorts, type NLCameraPort, type NLConsoleLine,
-    type NLQueryPort, type NLSentCommand, type NLUiActionPort,
+    type ExecutorPorts, type NLConsoleLine, type NLSentCommand,
 } from './nl-executor.js';
 import type { NLResponse } from './nl-envelope.js';
-import { buildFixtureWorld } from './nl-fixtures/fixture-world.js';
+import { buildFixtureWorld, type FixtureWorld } from './nl-fixtures/fixture-world.js';
 import { loadContexts, loadFixtures, loadVocabulary } from './nl-fixtures/load-fixtures.test-support.js';
 
 const vocabulary = loadVocabulary();
@@ -33,41 +32,43 @@ interface Harness {
     ports: ExecutorPorts;
     sent: NLSentCommand[];
     lines: NLConsoleLine[];
+    world: FixtureWorld;
+    /** Worker-facing camera calls / registry calls, in order. */
     cameraCalls: string[];
     uiCalls: string[];
-    queryCalls: string[];
 }
 
+/**
+ * Worlds built during a test, so a fixture that started a follow doesn't leave a
+ * 400 ms interval running into the next suite.
+ */
+const built: FixtureWorld[] = [];
+afterEach(() => {
+    for (const world of built) world.cameraPort.dispose();
+    built.length = 0;
+});
+
+/**
+ * `opts.ports` injects the M3 camera / registry / query ports — the REAL classes
+ * over this fixture's board (see `fixture-world.ts`), not stand-ins. Without it
+ * the harness reproduces a surface where none of them is installed, which is
+ * still live (a spectator HUD, a headless run) and must refuse by name.
+ */
 function harness(contextKey: string, opts: { ports?: boolean } = {}): Harness {
     const world = buildFixtureWorld(contexts[contextKey], vocabulary);
+    built.push(world);
     const sent: NLSentCommand[] = [];
     const lines: NLConsoleLine[] = [];
-    const cameraCalls: string[] = [];
-    const uiCalls: string[] = [];
-    const queryCalls: string[] = [];
-
-    const camera: NLCameraPort = {
-        focus: (ref) => cameraCalls.push(`focus:${ref}`),
-        follow: (ref) => cameraCalls.push(`follow:${ref}`),
-        fitMap: () => cameraCalls.push('fitMap'),
-        zoom: (dir) => cameraCalls.push(`zoom:${dir}`),
-        saveView: (slot) => cameraCalls.push(`saveView:${slot}`),
-        loadView: (slot) => cameraCalls.push(`loadView:${slot}`),
-    };
-    const uiActions: NLUiActionPort = {
-        apply: (action) => { uiCalls.push(`${action.op}:${action.panelId}`); return action.panelId !== 'nope'; },
-    };
-    const queryEngine: NLQueryPort = {
-        answer: (query) => { queryCalls.push(query.op); return query.op === 'status' ? null : `answer:${query.op}`; },
-    };
 
     return {
-        sent, lines, cameraCalls, uiCalls, queryCalls,
+        sent, lines, world,
+        cameraCalls: world.cameraCalls,
+        uiCalls: world.uiCalls,
         ports: {
             sendCommand: (cmd) => sent.push(cmd as NLSentCommand),
             resolver: world.resolver,
             console: { say: (line) => lines.push(line) },
-            ...(opts.ports ? { camera, uiActions, queryEngine } : {}),
+            ...(opts.ports ? world.ports : {}),
         },
     };
 }
@@ -88,7 +89,7 @@ describe('every fixture dispatches exactly as declared', () => {
         if (!expected) continue;
 
         it(`${fixture.file} · ${fixture.name}`, () => {
-            const h = harness(fixture.context);
+            const h = harness(fixture.context, { ports: fixture.ports === true });
             const report = executeNLResponse(fixture.expected, h.ports);
 
             if (expected.sends) {
@@ -113,6 +114,12 @@ describe('every fixture dispatches exactly as declared', () => {
 
             if (expected.refusals !== undefined) {
                 expect(report.refusals).toHaveLength(expected.refusals);
+            }
+
+            if (expected.camera) expect(h.cameraCalls).toEqual(expected.camera);
+            if (expected.ui) expect(h.uiCalls).toEqual(expected.ui);
+            if (expected.following !== undefined) {
+                expect(h.world.cameraPort.followingLabel()).toBe(expected.following);
             }
 
             for (const fragment of expected.saysLike ?? []) {
@@ -306,8 +313,8 @@ describe('missing ports refuse by name', () => {
     });
 });
 
-describe('ports, once M3 injects them', () => {
-    it('camera ops reach the port', () => {
+describe('the M3 ports, injected', () => {
+    it('camera ops reach the worker channel, resolved to coordinates', () => {
         const h = harness('basin', { ports: true });
         executeNLResponse({
             actions: [
@@ -315,34 +322,62 @@ describe('ports, once M3 injects them', () => {
                 { kind: 'camera', camera: { op: 'zoom', dir: 'in' } },
             ],
         }, h.ports);
-        expect(h.cameraCalls).toEqual(['focus:Northgate', 'zoom:in']);
+        // Names never reach the worker — the port resolves them here, so a
+        // hallucinated name can only ever produce a refusal (pillar 4).
+        expect(h.cameraCalls).toEqual(['focusOn:2000,500', 'orbit:679']);
         expect(h.sent).toEqual([]);           // the camera is not a command
+    });
+
+    it('a camera action cancels an active follow', () => {
+        const h = harness('basin', { ports: true });
+        executeNLResponse({
+            actions: [{ kind: 'camera', camera: { op: 'follow', targetRef: 'Chimera Squad' } }],
+        }, h.ports);
+        expect(h.world.cameraPort.followingLabel()).toBe('Chimera Squad');
+
+        executeNLResponse({
+            actions: [{ kind: 'camera', camera: { op: 'fitMap' } }],
+        }, h.ports);
+        expect(h.world.cameraPort.followingLabel()).toBeNull();
     });
 
     it('ui ops reach the registry, and an unknown panel refuses', () => {
         const h = harness('basin', { ports: true });
         const report = executeNLResponse({
             actions: [
-                { kind: 'ui', ui: { op: 'open', panelId: 'objectives' } },
+                { kind: 'ui', ui: { op: 'open', panelId: 'objectives-panel' } },
                 { kind: 'ui', ui: { op: 'open', panelId: 'nope' } },
             ],
         }, h.ports);
-        expect(h.uiCalls).toEqual(['open:objectives', 'open:nope']);
+        // The miss never reaches a panel — there is nothing to reach.
+        expect(h.uiCalls).toEqual(['open:objectives-panel']);
         expect(report.refusals[0]).toContain('"nope"');
     });
 
-    it('a query answer is printed, and no-answer refuses honestly', () => {
+    it('a query is answered, and an unresolvable subject refuses in the engine\'s own words', () => {
         const h = harness('basin', { ports: true });
         const report = executeNLResponse({
             actions: [
                 { kind: 'query', query: { op: 'count', class: 'tanks', side: 'own' } },
+                { kind: 'query', query: { op: 'status', subjectRef: 'Nobody' } },
+            ],
+        }, h.ports);
+        expect(report.lines.some((l) => l.text === 'You have 19 tanks.')).toBe(true);
+        expect(report.refusals[0]).toContain("I don't know a group called \"Nobody\"");
+        expect(h.sent).toEqual([]);           // asking is never ordering
+    });
+
+    it('a query never sends a command, across every query op', () => {
+        const h = harness('basin-authority', { ports: true });
+        const report = executeNLResponse({
+            actions: [
+                { kind: 'query', query: { op: 'resources' } },
+                { kind: 'query', query: { op: 'objectives' } },
                 { kind: 'query', query: { op: 'status', subjectRef: 'Chimera Squad' } },
             ],
         }, h.ports);
-        expect(h.queryCalls).toEqual(['count', 'status']);
-        expect(report.lines.some((l) => l.text === 'answer:count')).toBe(true);
-        expect(report.refusals[0]).toContain("don't have an answer");
-        expect(h.sent).toEqual([]);           // asking is never ordering
+        expect(h.sent).toEqual([]);
+        expect(report.refusals).toEqual([]);
     });
 });
 
