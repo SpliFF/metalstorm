@@ -342,6 +342,59 @@ TEST_CASE("task 1d: a refusal leaves the Lua stack exactly as it was") {
     CHECK(lua_gettop(lua.L) == top);
 }
 
+TEST_CASE("task 1d: legal nesting deeper than LUA_MINSTACK is walked, not written past") {
+    // D64(a). The walk holds TWO Lua stack slots per open level (the lua_next
+    // key and the value under inspection) but Lua only guarantees LUA_MINSTACK
+    // = 20 free slots to a C function. Without lua_checkstack the walk ran off
+    // the end of the stack array at nesting depth 22 — well inside kMaxDepth,
+    // so on state a gadget is entitled to hand us — and lua_next's write landed
+    // in the heap past it. api_check is compiled out, so nothing raised: it was
+    // a silent out-of-bounds write that corrupted the allocator and killed the
+    // process somewhere else, later, at about 1 run in 3.
+    //
+    // ⚠️ THIS CASE CANNOT FAIL WITHOUT A SANITIZER — pre-fix it passes, because
+    // the overflow is silent and the captured tree is still correct. It pins
+    // the reachable contract (a legal depth is accepted; an illegal one is
+    // refused by path, not by crashing). The instrument that DOES fail pre-fix
+    // is AddressSanitizer, and it is deterministic there; reproduce with:
+    //
+    //   clang++ -std=c++20 -g -O0 -fsanitize=address -I rts -I rts/lib/lua/include \
+    //     <driver>.cpp rts/Lua/LuaSnapshotState.cpp rts/lib/lua/src/*.cpp -o /tmp/d64
+    //
+    // ...capturing a table nested 22+ deep. Baseline: heap-buffer-overflow,
+    // 8-byte WRITE in luaH_next (ltable.cpp:363) via LuaSnapshotState.cpp:157.
+    const int legal = luasnapshot::kMaxDepth - 1;   // 31: deepest accepted level
+
+    LuaFixture lua;
+    const std::string src =
+        "(function() local root = {} local t = root "
+        "for i = 1, " + std::to_string(legal - 1) + " do t.child = {} t = t.child end "
+        "t.leaf = 'end' return root end)()";
+    lua.Eval(src.c_str());
+
+    const int top = lua_gettop(lua.L);
+    Value v;
+    std::string err;
+    REQUIRE(luasnapshot::Capture(lua.L, -1, v, err));
+    CHECK(lua_gettop(lua.L) == top);
+    CHECK(Decoded(Bytes(v)) == v);
+
+    // The tree really is that deep — otherwise this passes by capturing nothing.
+    int measured = 0;
+    for (const Value* n = &v; n->type == Value::Type::Table && !n->table.empty(); ) {
+        ++measured;
+        const Value& child = n->table[0].second;
+        if (child.type != Value::Type::Table) break;
+        n = &child;
+    }
+    CHECK(measured == legal);
+
+    // Push has the same contract, one slot worse (table + key + value per level).
+    REQUIRE(luasnapshot::Push(lua.L, v, err));
+    lua_pop(lua.L, 1);
+    CHECK(lua_gettop(lua.L) == top);
+}
+
 TEST_CASE("task 1d: a nil value is not a pair") {
     // Lua cannot store a nil value, so a nil in the tree would encode a pair
     // that vanishes on restore — the two sides would disagree about the pair

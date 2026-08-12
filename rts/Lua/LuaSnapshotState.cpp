@@ -140,6 +140,20 @@ bool CaptureTable(lua_State* L, int idx, Value& out, int depth,
 		return false;
 	}
 
+	// Lua only guarantees LUA_MINSTACK (20) free slots to a C function, and
+	// this walk occupies TWO of them per level for as long as the level is
+	// open (the lua_next key, and the value under inspection). Without this
+	// the walk runs off the end of the stack array at nesting depth 22 —
+	// inside kMaxDepth, so on state a gadget is allowed to hand us — and
+	// lua_next's write lands in the heap past it. That is a silent
+	// out-of-bounds WRITE, not a Lua error: api_check is compiled out, so it
+	// corrupts the allocator and crashes somewhere else later.
+	if (!lua_checkstack(L, 4)) {
+		ctx.err = "no Lua stack left to walk " +
+		          (path.empty() ? std::string("<root>") : path);
+		return false;
+	}
+
 	const void* self = lua_topointer(L, idx);
 	for (const void* open: ctx.openTables) {
 		if (open == self) {
@@ -291,6 +305,13 @@ bool PushAt(lua_State* L, const Value& v, int depth, std::string& err)
 {
 	if (depth >= kMaxDepth) {
 		err = "decoded state nests deeper than " + std::to_string(kMaxDepth);
+		return false;
+	}
+
+	// Same stack contract as CaptureTable, one slot worse: a table level holds
+	// the table itself plus a transient key and value while it recurses.
+	if (!lua_checkstack(L, 4)) {
+		err = "no Lua stack left to restore decoded state";
 		return false;
 	}
 
