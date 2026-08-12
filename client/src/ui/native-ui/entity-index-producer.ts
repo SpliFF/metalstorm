@@ -19,16 +19,19 @@
  * notification.
  *
  * Entity sources, and why each lives where it does:
- *   - regions    — gameRulesParams `region_<key>_name/_x/_z` (game_regions.lua)
+ *   - regions    — gameRulesParams `region_<key>_name/_x/_z` (game_regions.lua),
+ *                  authored names on a graph map, derived "Sector B9" names on
+ *                  a grid one — the same shape either way, which is why grid
+ *                  maps becoming addressable needed no change here
  *   - objectives — gameRulesParams `objective_<id>_*` + `objective_count`
  *                  (game_objectives.lua); region-hinted objectives borrow the
  *                  parsed region's centroid + name
- *   - landmarks  — gameRulesParams `landmark_<name>_x/_z`, published by
- *                  game_scenario.lua for any `units` / `world.features` entry
- *                  carrying a `name`: the resource sites, ancient-tech relics
- *                  and bridge crossings a scenario places
- *                  (PLAN-metalstorm-model-integration §M4). This shape was
- *                  parsed here with no producer at all until that landed.
+ *   - landmarks  — gameRulesParams `landmark_<name>_x/_z` (+ optional `_name`),
+ *                  published by game_scenario.lua for any `units` /
+ *                  `world.features` entry carrying a `name`: the resource
+ *                  sites, ancient-tech relics and bridge crossings a scenario
+ *                  places (PLAN-metalstorm-model-integration §M4). This shape
+ *                  was parsed here with no producer at all until that landed.
  *   - org groups — the ui-store org-group snapshot (`gp:orgGroups`, own team),
  *                  NOT a rulesParams shape: groups already have a live producer
  *                  (main.ts → uiStore.updateOrgGroups) and are mirrored into the

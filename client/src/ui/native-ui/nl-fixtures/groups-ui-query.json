@@ -1,0 +1,154 @@
+{
+  "_comment": "Golden fixtures: group naming (landed) and the three M3 stubs (PLAN-metalstorm-command-language.md §1, §7). The camera / ui / query kinds validate NOW and refuse NOW — an envelope for a port that doesn't exist yet must produce a visible 'not yet supported', never a silent success. When M3 injects the ports these same fixtures start asserting real calls.",
+
+  "fixtures": [
+    {
+      "name": "rename a group",
+      "utterance": "name Chimera Squad Hammerfall",
+      "context": "basin",
+      "note": "Rides the OrgGroup UPDATE case that has existed on the wire all along (empty add/remove + a name is a pure rename) — no server change, and the index picks the new name up on the next snapshot.",
+      "expected": {
+        "say": "Chimera Squad is now Hammerfall.",
+        "actions": [{ "kind": "group", "group": { "op": "rename", "groupRef": "Chimera Squad", "name": "Hammerfall" } }]
+      },
+      "expect": {
+        "sends": [{ "type": "OrgGroup", "groupId": 1 }],
+        "saysLike": ["is now \"Hammerfall\""]
+      }
+    },
+
+    {
+      "name": "rename what is selected — no groupRef at all",
+      "utterance": "name this group Hammerfall",
+      "context": "basin-selected",
+      "note": "\"This group\" IS the selection, so the envelope omits groupRef entirely (NLGroupAction). The alternative — looking up the selected group's current name and shipping that as the ref — round-trips id → name → id through a fuzzy search to arrive back where it started, with a chance of landing somewhere else on the way.",
+      "expected": {
+        "say": "Kestrel Flight is now Hammerfall.",
+        "actions": [{ "kind": "group", "group": { "op": "rename", "name": "Hammerfall" } }]
+      },
+      "expect": {
+        "sends": [{ "type": "OrgGroup", "groupId": 4 }],
+        "saysLike": ["is now \"Hammerfall\""]
+      }
+    },
+
+    {
+      "name": "renaming with nothing selected refuses, it does not pick one",
+      "utterance": "name this group Hammerfall",
+      "context": "basin",
+      "note": "Same rule the unqualified-order path follows: an absent groupRef means the selection, and no selection means no group — not the first group on the list.",
+      "expected": {
+        "actions": [{ "kind": "group", "group": { "op": "rename", "name": "Hammerfall" } }]
+      },
+      "expect": { "sends": [], "refusals": 1, "saysLike": ["Nothing is selected"] }
+    },
+
+    {
+      "name": "rename resolves the group strictly",
+      "utterance": "call that lot Hammerfall",
+      "context": "ambiguous-forces",
+      "note": "A rename is as destructive as an order — renaming the wrong squad makes every later sentence address the wrong one. Same strict rule, same question.",
+      "expected": {
+        "actions": [{ "kind": "group", "group": { "op": "rename", "groupRef": "Chimera", "name": "Hammerfall" } }]
+      },
+      "expect": { "sends": [], "clarifies": true }
+    },
+
+    {
+      "name": "creating a group from a sentence is refused, not faked",
+      "utterance": "make a new squad called Hammerfall",
+      "context": "basin",
+      "note": "§5: never auto-form. Forming a group costs authority and interacts with AI asset locks, and there is no unit-name index to resolve memberRefs against. Refused with the org-panel workaround named.",
+      "expected": {
+        "actions": [{ "kind": "group", "group": { "op": "create", "name": "Hammerfall" } }]
+      },
+      "expect": { "sends": [], "refusals": 1, "saysLike": ["isn't wired up yet"] }
+    },
+
+    {
+      "name": "camera focus is a valid envelope with no port yet",
+      "utterance": "zoom to Sector B9",
+      "context": "basin",
+      "expected": {
+        "actions": [{ "kind": "camera", "camera": { "op": "focus", "targetRef": "Sector B9" } }]
+      },
+      "expect": { "sends": [], "refusals": 1, "saysLike": ["not yet supported"] }
+    },
+
+    {
+      "name": "camera fitMap",
+      "utterance": "show me the whole map",
+      "context": "basin",
+      "expected": { "actions": [{ "kind": "camera", "camera": { "op": "fitMap" } }] },
+      "expect": { "sends": [], "refusals": 1 }
+    },
+
+    {
+      "name": "camera follow",
+      "utterance": "keep the camera on Chimera Squad",
+      "context": "basin",
+      "expected": {
+        "actions": [{ "kind": "camera", "camera": { "op": "follow", "targetRef": "Chimera Squad" } }]
+      },
+      "expect": { "sends": [], "refusals": 1 }
+    },
+
+    {
+      "name": "ui fullscreen — the minimap panel doesn't exist yet either",
+      "utterance": "show me the minimap, full screen",
+      "context": "basin",
+      "note": "A plan §0 example utterance. Minimap fullscreen is BUILT in M3; until then the envelope is well-formed and the refusal names the missing port.",
+      "expected": {
+        "actions": [{ "kind": "ui", "ui": { "op": "fullscreen", "panelId": "minimap" } }]
+      },
+      "expect": { "sends": [], "refusals": 1, "saysLike": ["not yet supported"] }
+    },
+
+    {
+      "name": "ui toggle a manifest panel",
+      "utterance": "open the diplomacy panel",
+      "context": "basin",
+      "expected": {
+        "actions": [{ "kind": "ui", "ui": { "op": "open", "panelId": "parley-panel" } }]
+      },
+      "expect": { "sends": [], "refusals": 1 }
+    },
+
+    {
+      "name": "count query",
+      "utterance": "how many heavy tanks do we have left?",
+      "context": "basin",
+      "note": "A plan §0 example utterance. The query engine is M3 and is LOS-honest by construction; asking is never an order, so nothing is sent either way.",
+      "expected": {
+        "actions": [{ "kind": "query", "query": { "op": "count", "class": "tanks", "scale": 3, "side": "own" } }]
+      },
+      "expect": { "sends": [], "refusals": 1 }
+    },
+
+    {
+      "name": "locate query",
+      "utterance": "locate the enemy commander",
+      "context": "basin",
+      "expected": {
+        "actions": [{ "kind": "query", "query": { "op": "locate", "targetRef": "enemy commander", "side": "enemy" } }]
+      },
+      "expect": { "sends": [], "refusals": 1 }
+    },
+
+    {
+      "name": "resources query",
+      "utterance": "how are we doing on authority?",
+      "context": "basin",
+      "expected": { "actions": [{ "kind": "query", "query": { "op": "resources" } }] },
+      "expect": { "sends": [], "refusals": 1 }
+    },
+
+    {
+      "name": "objectives query",
+      "utterance": "what are we supposed to be doing?",
+      "context": "basin",
+      "expected": { "actions": [{ "kind": "query", "query": { "op": "objectives" } }] },
+      "expect": { "sends": [], "refusals": 1 }
+    }
+  ]
+}

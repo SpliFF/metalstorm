@@ -1,0 +1,177 @@
+{
+  "_comment": "Golden fixtures: one sentence, several actions (PLAN-metalstorm-command-language.md §1 'actions 0..4; multi-step = ordered list'). Order matters — the executor runs them in sequence, and a clarification raised part-way STOPS the rest rather than half-finishing a plan whose premise is in doubt.",
+
+  "fixtures": [
+    {
+      "name": "an order plus the guidance that backs it",
+      "utterance": "Chimera Squad take Fallow Gate, and make it a priority for the AI",
+      "context": "basin",
+      "expected": {
+        "say": "Chimera Squad is taking Fallow Gate, and the AI will prioritise it.",
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "secure",
+              "subject": { "type": "entity-ref", "name": "Chimera Squad" },
+              "target": { "type": "entity-ref", "name": "Fallow Gate" },
+              "priority": "high"
+            }
+          },
+          {
+            "kind": "guidance",
+            "guidance": { "op": "paint", "value": "priority", "regionRef": "Fallow Gate" }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [
+          { "type": "GroupDirective", "groupId": 1 },
+          { "type": "LuaRulesMsg", "wire": "cmd=guidance.paint&regionKey=fallow_gate&value=priority" }
+        ]
+      }
+    },
+
+    {
+      "name": "two squads, two places",
+      "utterance": "Chimera holds Northgate, Ironback takes Osprey Fen",
+      "context": "basin",
+      "expected": {
+        "actions": [
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "hold",
+              "subject": { "type": "entity-ref", "name": "Chimera Squad" },
+              "target": { "type": "entity-ref", "name": "Northgate" }
+            }
+          },
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "secure",
+              "subject": { "type": "entity-ref", "name": "Ironback Platoon" },
+              "target": { "type": "entity-ref", "name": "Osprey Fen" }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [
+          { "type": "GroupDirective", "groupId": 1 },
+          { "type": "GroupDirective", "groupId": 5 }
+        ]
+      }
+    },
+
+    {
+      "name": "stance, then a rename, then an order",
+      "utterance": "go aggressive, call Chimera Squad Hammerfall, and send them at Slag Forge",
+      "context": "basin",
+      "note": "Three kinds in one envelope. The rename lands before the order, and the order still resolves by the OLD name — the index only learns 'Hammerfall' on the next org-group snapshot, and pretending otherwise would make the third action fail intermittently.",
+      "expected": {
+        "actions": [
+          { "kind": "guidance", "guidance": { "op": "stance", "value": "aggressive" } },
+          { "kind": "group", "group": { "op": "rename", "groupRef": "Chimera Squad", "name": "Hammerfall" } },
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "attack",
+              "subject": { "type": "entity-ref", "name": "Chimera Squad" },
+              "target": { "type": "entity-ref", "name": "Slag Forge" }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [
+          { "type": "LuaRulesMsg", "wire": "cmd=guidance.stance&value=aggressive" },
+          { "type": "OrgGroup", "groupId": 1 },
+          { "type": "GroupDirective", "groupId": 1 }
+        ]
+      }
+    },
+
+    {
+      "name": "a mid-plan ambiguity stops the plan",
+      "utterance": "go defensive, then send Chimera to Northgate",
+      "context": "ambiguous-forces",
+      "note": "Action 1 (stance) lands; action 2 can't resolve 'Chimera' between two squads, so it asks and the run ends there. What already happened is reported; nothing is guessed.",
+      "expected": {
+        "actions": [
+          { "kind": "guidance", "guidance": { "op": "stance", "value": "defensive" } },
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "secure",
+              "subject": { "type": "entity-ref", "name": "Chimera" },
+              "target": { "type": "entity-ref", "name": "Northgate" }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [{ "type": "LuaRulesMsg", "wire": "cmd=guidance.stance&value=defensive" }],
+        "clarifies": true
+      }
+    },
+
+    {
+      "name": "a refusal part-way does NOT stop the plan",
+      "utterance": "prioritise Northgate, patrol Slag Forge, and hold Osprey Fen",
+      "context": "basin",
+      "note": "The mirror of the fixture above. One impossible step (patrol needs a route) shouldn't cancel the two that were fine — a refusal is a per-action fact, an ambiguity is doubt about intent.",
+      "expected": {
+        "actions": [
+          { "kind": "guidance", "guidance": { "op": "paint", "value": "priority", "regionRef": "Northgate" } },
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "patrol",
+              "subject": { "type": "any" },
+              "target": { "type": "entity-ref", "name": "Slag Forge" }
+            }
+          },
+          {
+            "kind": "command",
+            "intent": {
+              "verb": "hold",
+              "subject": { "type": "entity-ref", "name": "Chimera Squad" },
+              "target": { "type": "entity-ref", "name": "Osprey Fen" }
+            }
+          }
+        ]
+      },
+      "expect": {
+        "sends": [
+          { "type": "LuaRulesMsg", "wire": "cmd=guidance.paint&regionKey=north_gate_ridge&value=priority" },
+          { "type": "GroupDirective", "groupId": 1 }
+        ],
+        "refusals": 1
+      }
+    },
+
+    {
+      "name": "the four-action ceiling",
+      "utterance": "lock Chimera, lock Basilisk, cap AI spending at 150, and go defensive",
+      "context": "basin",
+      "note": "MAX_ACTIONS is 4 (plan §1 '0..4'). A longer list is a runaway model, not a plan, and the validator rejects it — so this fixture also pins the boundary as VALID.",
+      "expected": {
+        "actions": [
+          { "kind": "guidance", "guidance": { "op": "lock", "value": "on", "groupRef": "Chimera Squad" } },
+          { "kind": "guidance", "guidance": { "op": "lock", "value": "on", "groupRef": "Basilisk Squad" } },
+          { "kind": "guidance", "guidance": { "op": "fund", "rateCap": 150 } },
+          { "kind": "guidance", "guidance": { "op": "stance", "value": "defensive" } }
+        ]
+      },
+      "expect": {
+        "sends": [
+          { "type": "LuaRulesMsg", "wire": "cmd=guidance.lock&groupId=1&locked=1" },
+          { "type": "LuaRulesMsg", "wire": "cmd=guidance.lock&groupId=2&locked=1" },
+          { "type": "LuaRulesMsg", "wire": "cmd=guidance.fund&rateCap=150" },
+          { "type": "LuaRulesMsg", "wire": "cmd=guidance.stance&value=defensive" }
+        ]
+      }
+    }
+  ]
+}

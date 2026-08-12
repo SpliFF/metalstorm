@@ -28,11 +28,26 @@ function packMods(e: { shiftKey: boolean; ctrlKey: boolean; altKey: boolean; met
     return (e.shiftKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.altKey ? 4 : 0) | (e.metaKey ? 8 : 0);
 }
 
+/**
+ * Key codes the worker camera actually pans on (`rts-camera.ts` tick(): arrow
+ * keys only — Spring/ZK reserve WASD for unit orders). Kept as a set here rather
+ * than "any keydown" so typing a command in the console, or pressing a hotkey,
+ * doesn't count as taking the camera back.
+ */
+const CAMERA_KEY_CODES: ReadonlySet<string> = new Set([
+    'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
+]);
+
 export class CameraInput {
     private readonly canvas: HTMLCanvasElement;
     private readonly worker: Worker;
     private readonly viewId: number;
     private disposed = false;
+    /** PLAN-metalstorm-command-language.md §6.2 — "the player just moved the
+     *  camera" observers (the NL follow loop's cancel signal). This class is
+     *  where that is knowable: it owns the DOM listeners whose events ARE the
+     *  worker camera's only interactive input. */
+    private cameraInputListeners = new Set<() => void>();
 
     constructor(canvas: HTMLCanvasElement, worker: Worker, viewId = 0) {
         this.canvas = canvas;
@@ -54,6 +69,27 @@ export class CameraInput {
         window.addEventListener('keydown', this.onKeyDown);
         window.addEventListener('keyup', this.onKeyUp);
         window.addEventListener('blur', this.onBlur);
+    }
+
+    /**
+     * Subscribe to "the player moved the camera". Fires for the inputs the
+     * worker camera consumes as camera motion — wheel zoom, middle-pan and
+     * right-orbit presses, arrow-key pans — and NOT for left-clicks (selection),
+     * plain pointer motion, or other keys.
+     *
+     * Edge-scroll has no discrete event to hook (the worker pans from a pointer
+     * position it already has, inside its own frame tick), so a consumer that
+     * must be certain also needs a pose check — see `camera-port.ts`.
+     */
+    onCameraInput(listener: () => void): () => void {
+        this.cameraInputListeners.add(listener);
+        return () => { this.cameraInputListeners.delete(listener); };
+    }
+
+    private notifyCameraInput(): void {
+        for (const listener of this.cameraInputListeners) {
+            try { listener(); } catch (e) { console.error('[camera-input] listener failed:', e); }
+        }
     }
 
     /** Post an input message to the worker, tagged with this view's id. */
@@ -81,6 +117,7 @@ export class CameraInput {
         if (e.button === 1 || e.button === 2) {
             e.preventDefault();
             try { this.canvas.setPointerCapture(e.pointerId); } catch { /* pointer already gone */ }
+            this.notifyCameraInput();      // middle-pan / right-orbit
         }
         const { x, y } = this.rel(e);
         this.send({ type: 'gp:pointerdown', x, y, button: e.button, mods: packMods(e) });
@@ -98,6 +135,7 @@ export class CameraInput {
         e.preventDefault();
         const { x, y } = this.rel(e);
         this.send({ type: 'gp:wheel', x, y, delta: e.deltaY, mods: packMods(e) });
+        this.notifyCameraInput();
     };
 
     private onKeyDown = (e: KeyboardEvent): void => {
@@ -105,6 +143,7 @@ export class CameraInput {
         const tag = (e.target as HTMLElement | null)?.tagName;
         if (tag === 'INPUT' || tag === 'TEXTAREA') return;
         this.send({ type: 'gp:keydown', code: e.code, mods: packMods(e) });
+        if (CAMERA_KEY_CODES.has(e.code)) this.notifyCameraInput();
     };
 
     private onKeyUp = (e: KeyboardEvent): void => {
@@ -139,5 +178,6 @@ export class CameraInput {
         window.removeEventListener('keydown', this.onKeyDown);
         window.removeEventListener('keyup', this.onKeyUp);
         window.removeEventListener('blur', this.onBlur);
+        this.cameraInputListeners.clear();
     }
 }

@@ -1,0 +1,153 @@
+{
+  "_comment": "Boards the golden fixtures are said on (PLAN-metalstorm-command-language.md §8). Shape: fixture-world.ts FixtureContext. A context is a SUPERSET of the §2 wire payload the LLM receives — it carries region keys (`k`), group ids, sizes and coordinates because those are what the CLIENT holds and what resolution must produce. No `expected` envelope in any fixture may name them: the envelope is names-only, which is design pillar 4 and is asserted by nl-envelope.test.ts.",
+  "_keys": "`k` is deliberately NOT the slugified display name for every place (see `northgate` vs `north_gate_ridge`) — a resolver that used the display name as the region key would pass if they always agreed.",
+
+  "basin": {
+    "map": { "name": "Meridian Basin" },
+    "places": [
+      { "n": "Randtown", "t": "city", "k": "randtown", "x": 1000, "z": 1000 },
+      { "n": "Randtown East", "t": "city", "k": "randtown_e", "x": 1400, "z": 1000 },
+      { "n": "Northgate", "t": "region", "k": "north_gate_ridge", "x": 2000, "z": 500 },
+      { "n": "Osprey Fen", "t": "region", "k": "osprey_fen", "x": 500, "z": 2500 },
+      { "n": "Slag Forge", "t": "region", "k": "slag_forge", "x": 3000, "z": 3000 },
+      { "n": "Fallow Gate", "t": "region", "k": "fallow_gate", "x": 2500, "z": 1500 },
+      { "n": "Sector B9", "t": "region", "k": "grid_b9", "x": 800, "z": 900 },
+      { "n": "Grain Silo", "t": "landmark", "k": "grain_silo", "x": 1200, "z": 1800 }
+    ],
+    "objectives": [
+      { "n": "Hold Fallow Gate", "id": 1, "x": 2500, "z": 1500 },
+      { "n": "Secure Osprey Fen", "id": 2, "x": 500, "z": 2500 }
+    ],
+    "groups": [
+      { "n": "Chimera Squad", "id": 1, "cls": "tanks", "scale": 3, "size": 8, "x": 900, "z": 1100 },
+      { "n": "Basilisk Squad", "id": 2, "cls": "tanks", "scale": 3, "size": 6, "busy": true, "x": 1000, "z": 1200 },
+      { "n": "Warhound Squad", "id": 3, "cls": "tanks", "scale": 2, "size": 5, "x": 2800, "z": 2800, "attach": { "cls": "engineers", "scale": 2, "n": 2 } },
+      { "n": "Kestrel Flight", "id": 4, "cls": "fighters", "scale": 2, "size": 4, "x": 1500, "z": 1500 },
+      { "n": "Ironback Platoon", "id": 5, "cls": "soldiers", "scale": 2, "size": 12, "echelon": "Platoon", "x": 600, "z": 2400 }
+    ]
+  },
+
+  "basin-selected": {
+    "map": { "name": "Meridian Basin" },
+    "places": [
+      { "n": "Northgate", "t": "region", "k": "north_gate_ridge", "x": 2000, "z": 500 },
+      { "n": "Slag Forge", "t": "region", "k": "slag_forge", "x": 3000, "z": 3000 }
+    ],
+    "groups": [
+      { "n": "Chimera Squad", "id": 1, "cls": "tanks", "scale": 3, "size": 8, "x": 900, "z": 1100 },
+      { "n": "Kestrel Flight", "id": 4, "cls": "fighters", "scale": 2, "size": 4, "x": 1500, "z": 1500 }
+    ],
+    "selection": { "groupId": 4 }
+  },
+
+  "ambiguous-forces": {
+    "_note": "Two squads a partial name fits equally. The strict force rule must ASK, even though 'Chimera Squad' would score identically for both — this is the never-guess-between-armies case.",
+    "places": [{ "n": "Northgate", "t": "region", "k": "north_gate_ridge", "x": 2000, "z": 500 }],
+    "groups": [
+      { "n": "Chimera Squad", "id": 1, "cls": "tanks", "scale": 3, "size": 8, "x": 900, "z": 1100 },
+      { "n": "Chimera Reserve", "id": 6, "cls": "tanks", "scale": 3, "size": 4, "x": 1800, "z": 900 }
+    ]
+  },
+
+  "ambiguous-places": {
+    "_note": "Two cities sharing a prefix. A place resolves on outright score dominance, so 'Rand' ties at the prefix tier and asks; 'Randtown' matches exactly and does not.",
+    "places": [
+      { "n": "Randtown", "t": "city", "k": "randtown", "x": 1000, "z": 1000 },
+      { "n": "Randtown East", "t": "city", "k": "randtown_e", "x": 1400, "z": 1000 }
+    ],
+    "groups": [{ "n": "Chimera Squad", "id": 1, "cls": "tanks", "scale": 3, "size": 8, "x": 900, "z": 1100 }]
+  },
+
+  "one-tank-squad": {
+    "_note": "Fewer candidates than the sentence asked for — the plan's 'I only have one tank squad' clarification.",
+    "places": [{ "n": "Randtown", "t": "city", "k": "randtown", "x": 1000, "z": 1000 }],
+    "groups": [
+      { "n": "Chimera Squad", "id": 1, "cls": "tanks", "scale": 3, "size": 8, "x": 900, "z": 1100 },
+      { "n": "Kestrel Flight", "id": 4, "cls": "fighters", "scale": 2, "size": 4, "x": 1500, "z": 1500 }
+    ]
+  },
+
+  "no-tanks": {
+    "_note": "No candidates at all. Forming a group costs authority and touches AI locks, so this refuses rather than offering to auto-form (§5).",
+    "places": [{ "n": "Randtown", "t": "city", "k": "randtown", "x": 1000, "z": 1000 }],
+    "groups": [{ "n": "Kestrel Flight", "id": 4, "cls": "fighters", "scale": 2, "size": 4, "x": 1500, "z": 1500 }]
+  },
+
+  "no-defs": {
+    "_note": "The client TODAY: the widget context exposes the ui-store but no defs mirror, so there is no way to know which squads are the tank squads. Must refuse with that reason, never fill the first N groups.",
+    "noUnitClass": true,
+    "places": [{ "n": "Randtown", "t": "city", "k": "randtown", "x": 1000, "z": 1000 }],
+    "groups": [
+      { "n": "Chimera Squad", "id": 1, "cls": "tanks", "scale": 3, "size": 8, "x": 900, "z": 1100 },
+      { "n": "Basilisk Squad", "id": 2, "cls": "tanks", "scale": 3, "size": 6, "x": 1000, "z": 1200 }
+    ]
+  },
+
+  "no-positions": {
+    "_note": "`gp:orgGroups` carries no centroid today, so nearest-to-target is unavailable and ranking falls through idle → largest → id. A missing tie-break must never widen the candidate set.",
+    "noGroupPosition": true,
+    "places": [{ "n": "Randtown", "t": "city", "k": "randtown", "x": 1000, "z": 1000 }],
+    "groups": [
+      { "n": "Chimera Squad", "id": 1, "cls": "tanks", "scale": 3, "size": 4, "x": 9000, "z": 9000 },
+      { "n": "Basilisk Squad", "id": 2, "cls": "tanks", "scale": 3, "size": 9, "x": 1000, "z": 1000 }
+    ]
+  },
+
+  "no-census": {
+    "_note": "M3: no census snapshot has arrived (worker gone, or the session just started). Every query must refuse with that reason and no camera follow may start — 'you have no tanks' and 'I can't see your units' are different claims and only one is true.",
+    "noCensus": true,
+    "places": [{ "n": "Northgate", "t": "region", "k": "north_gate_ridge", "x": 2000, "z": 500 }],
+    "groups": [{ "n": "Chimera Squad", "id": 1, "cls": "tanks", "scale": 3, "size": 8, "x": 900, "z": 1100 }]
+  },
+
+  "enemy-out-of-los": {
+    "_note": "THE LOS-honesty board. The enemy HAS three heavy tanks at Slag Forge — that is the fiction this board asserts — and `visible` does not list them, which is exactly how an out-of-LOS enemy appears in the real client: absent from the mirror, not flagged. Nothing the query engine can read knows they are there, so the only honest answer is 'not currently spotted'. Pair with `enemy-in-los`, which differs ONLY in that list.",
+    "places": [
+      { "n": "Northgate", "t": "region", "k": "north_gate_ridge", "x": 2000, "z": 500 },
+      { "n": "Slag Forge", "t": "region", "k": "slag_forge", "x": 3000, "z": 3000 }
+    ],
+    "groups": [{ "n": "Chimera Squad", "id": 1, "cls": "tanks", "scale": 3, "size": 8, "x": 900, "z": 1100 }],
+    "visible": []
+  },
+
+  "enemy-in-los": {
+    "_note": "The same board with the enemy tanks IN the player's filtered stream. Without this half, the out-of-LOS fixture would pass for a query engine that simply never finds anything.",
+    "places": [
+      { "n": "Northgate", "t": "region", "k": "north_gate_ridge", "x": 2000, "z": 500 },
+      { "n": "Slag Forge", "t": "region", "k": "slag_forge", "x": 3000, "z": 3000 }
+    ],
+    "groups": [{ "n": "Chimera Squad", "id": 1, "cls": "tanks", "scale": 3, "size": 8, "x": 900, "z": 1100 }],
+    "visible": [
+      { "cls": "tanks", "scale": 3, "side": "enemy", "x": 2990, "z": 3000 },
+      { "cls": "tanks", "scale": 3, "side": "enemy", "x": 3000, "z": 3010 },
+      { "cls": "tanks", "scale": 3, "side": "enemy", "x": 3010, "z": 2990 }
+    ]
+  },
+
+  "basin-authority": {
+    "_note": "Rules params for the `resources` and `objectives` queries. The authority numbers are the ones the M0 live run actually observed (team pool 720, personal 92 after one 8-point directive). Objective 2 is complete so the answer has something it must NOT list.",
+    "places": [
+      { "n": "Fallow Gate", "t": "region", "k": "fallow_gate", "x": 2500, "z": 1500 },
+      { "n": "Osprey Fen", "t": "region", "k": "osprey_fen", "x": 500, "z": 2500 }
+    ],
+    "objectives": [
+      { "n": "Hold Fallow Gate", "id": 1, "x": 2500, "z": 1500 },
+      { "n": "Secure Osprey Fen", "id": 2, "x": 500, "z": 2500 }
+    ],
+    "groups": [{ "n": "Chimera Squad", "id": 1, "cls": "tanks", "scale": 3, "size": 8, "x": 900, "z": 1100 }],
+    "teamRulesParams": { "authority_pool": 720, "authority_player_0": 92 },
+    "gameRulesParams": {
+      "objective_count": 2,
+      "objective_1_state": "active",
+      "objective_1_type": "control",
+      "objective_1_progress": 0.25,
+      "objective_1_reward": 50,
+      "objective_2_state": "complete",
+      "objective_2_type": "control"
+    }
+  },
+
+  "empty": {
+    "_note": "Nothing named at all — every place reference must refuse, never fuzzy-match into the void."
+  }
+}

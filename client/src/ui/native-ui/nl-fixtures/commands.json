@@ -1,0 +1,425 @@
+{
+  "_comment": "Golden fixtures: symbolic command intents (PLAN-metalstorm-command-language.md §8). `expected` is what a correct model emits for `utterance` on board `context`; `expect` is what the EXECUTOR must then do with it. Every reference is a NAME — no ids, no coordinates the context didn't supply.",
+  "_verbs": "The verb vocabulary is compile-table.ts's eleven, and it has no `move`. 'Move 2 tank squads to Randtown' (a plan §0 example utterance) maps to `secure` — take and hold — which is what a macro-layer 'move there' means and what the compile table already turns into a Defend directive. The LLM prompt (M4) teaches this mapping; these fixtures pin it.",
+
+  "fixtures": [
+    {
+      "name": "named squad, named region",
+      "utterance": "Chimera Squad, defend Northgate",
+      "context": "basin",
+      "expected": {
+        "say": "Chimera Squad is defending Northgate.",
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "defend",
+            "subject": { "type": "entity-ref", "name": "Chimera Squad" },
+            "target": { "type": "entity-ref", "name": "Northgate" }
+          }
+        }]
+      },
+      "expect": { "sends": [{ "type": "GroupDirective", "groupId": 1 }], "saysLike": ["directive issued"] }
+    },
+
+    {
+      "name": "class-count fans out into one directive per squad",
+      "utterance": "move 2 tank squads to Randtown",
+      "context": "basin",
+      "note": "The acceptance case. Candidates are the three tank groups; idle-first drops busy Basilisk behind, then nearest-to-Randtown picks Chimera (900,1100) over Warhound (2800,2800). Two sends, in that order.",
+      "expected": {
+        "say": "Moving 2 tank squads to Randtown.",
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "secure",
+            "subject": { "type": "class-count", "class": "tanks", "count": 2 },
+            "target": { "type": "entity-ref", "name": "Randtown" }
+          }
+        }]
+      },
+      "expect": {
+        "sends": [
+          { "type": "GroupDirective", "groupId": 1 },
+          { "type": "GroupDirective", "groupId": 3 }
+        ]
+      }
+    },
+
+    {
+      "name": "class-count with an explicit ms_scale",
+      "utterance": "two heavy tank squads secure Slag Forge",
+      "context": "basin",
+      "note": "scale 3 excludes Warhound (scale 2), leaving Chimera (idle) then Basilisk (busy) — a busy squad is still a valid candidate, just a worse-ranked one.",
+      "expected": {
+        "say": "Two heavy tank squads are securing Slag Forge.",
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "secure",
+            "subject": { "type": "class-count", "class": "tanks", "count": 2, "scale": 3 },
+            "target": { "type": "entity-ref", "name": "Slag Forge" }
+          }
+        }]
+      },
+      "expect": {
+        "sends": [
+          { "type": "GroupDirective", "groupId": 1 },
+          { "type": "GroupDirective", "groupId": 2 }
+        ]
+      }
+    },
+
+    {
+      "name": "the scale can ride in the class phrase instead",
+      "utterance": "send two heavy tanks to Fallow Gate",
+      "context": "basin",
+      "note": "`class: 'heavy tanks'` and `class: 'tanks', scale: 3` must resolve to the same squads — the vocabulary's scale phrases are alternative spellings, not a second mechanism.",
+      "expected": {
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "secure",
+            "subject": { "type": "class-count", "class": "heavy tanks", "count": 2 },
+            "target": { "type": "entity-ref", "name": "Fallow Gate" }
+          }
+        }]
+      },
+      "expect": {
+        "sends": [
+          { "type": "GroupDirective", "groupId": 1 },
+          { "type": "GroupDirective", "groupId": 2 }
+        ]
+      }
+    },
+
+    {
+      "name": "nearest-to-target unavailable falls through to largest-first",
+      "utterance": "two tank squads secure Randtown",
+      "context": "no-positions",
+      "note": "No group centroids on the wire today. Both squads are idle and equidistant-by-default, so the largest goes first — a missing tie-break degrades the ORDER, never the candidate set.",
+      "expected": {
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "secure",
+            "subject": { "type": "class-count", "class": "tanks", "count": 2 },
+            "target": { "type": "entity-ref", "name": "Randtown" }
+          }
+        }]
+      },
+      "expect": {
+        "sends": [
+          { "type": "GroupDirective", "groupId": 2 },
+          { "type": "GroupDirective", "groupId": 1 }
+        ]
+      }
+    },
+
+    {
+      "name": "unqualified order with nothing selected is team-wide",
+      "utterance": "attack Slag Forge",
+      "context": "basin",
+      "expected": {
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "attack",
+            "subject": { "type": "any" },
+            "target": { "type": "entity-ref", "name": "Slag Forge" }
+          }
+        }]
+      },
+      "expect": {
+        "sends": [{ "type": "GroupDirective", "groupId": 0 }],
+        "saysLike": ["team-wide — no group named"]
+      }
+    },
+
+    {
+      "name": "unqualified order with a selection uses the selection",
+      "utterance": "attack Slag Forge",
+      "context": "basin-selected",
+      "expected": {
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "attack",
+            "subject": { "type": "selection" },
+            "target": { "type": "entity-ref", "name": "Slag Forge" }
+          }
+        }]
+      },
+      "expect": { "sends": [{ "type": "GroupDirective", "groupId": 4 }] }
+    },
+
+    {
+      "name": "hold with no group compiles to a standing order",
+      "utterance": "hold Northgate, high priority",
+      "context": "basin",
+      "note": "compile-table's defend/hold branch: a real group id gets a GroupDirective, groupId 0 gets a StandingOrder. The envelope doesn't choose — the compile table does.",
+      "expected": {
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "hold",
+            "subject": { "type": "any" },
+            "target": { "type": "entity-ref", "name": "Northgate" },
+            "priority": "high"
+          }
+        }]
+      },
+      "expect": { "sends": [{ "type": "StandingOrder" }], "saysLike": ["high priority"] }
+    },
+
+    {
+      "name": "a platoon is as orderable as a squad",
+      "utterance": "Ironback Platoon hold Osprey Fen",
+      "context": "basin",
+      "expected": {
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "hold",
+            "subject": { "type": "entity-ref", "name": "Ironback Platoon" },
+            "target": { "type": "entity-ref", "name": "Osprey Fen" }
+          }
+        }]
+      },
+      "expect": { "sends": [{ "type": "GroupDirective", "groupId": 5 }] }
+    },
+
+    {
+      "name": "scout",
+      "utterance": "Kestrel Flight, scout Slag Forge",
+      "context": "basin",
+      "expected": {
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "scout",
+            "subject": { "type": "entity-ref", "name": "Kestrel Flight" },
+            "target": { "type": "entity-ref", "name": "Slag Forge" }
+          }
+        }]
+      },
+      "expect": { "sends": [{ "type": "GroupDirective", "groupId": 4 }] }
+    },
+
+    {
+      "name": "escort a landmark",
+      "utterance": "Chimera Squad, escort the grain silo",
+      "context": "basin",
+      "expected": {
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "escort",
+            "subject": { "type": "entity-ref", "name": "Chimera Squad" },
+            "target": { "type": "entity-ref", "name": "Grain Silo" }
+          }
+        }]
+      },
+      "expect": { "sends": [{ "type": "GroupDirective", "groupId": 1 }] }
+    },
+
+    {
+      "name": "defend the grain silo — a landmark, from landmark_* rulesParams",
+      "utterance": "defend the grain silo",
+      "context": "basin",
+      "note": "The plan's own example utterance (§ worldbuilding). Nothing publishes landmark_* yet — the scenario-gen lane owns that — so the fixture world synthesizes the rulesParams and runs them through the REAL parseLandmarksFromRulesParams (fixture-world.ts). This fixture is therefore evidence about the WIRE SHAPE, not about a hand-built entity: the day a publisher lands, the resolver already finds what it emits. No subject named and nothing selected ⇒ the team-wide standing order, same as any unqualified order.",
+      "expected": {
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "defend",
+            "subject": { "type": "any" },
+            "target": { "type": "entity-ref", "name": "Grain Silo" }
+          }
+        }]
+      },
+      "expect": { "sends": [{ "type": "StandingOrder" }] }
+    },
+
+    {
+      "name": "withdraw takes only a point, so a named place becomes one",
+      "utterance": "pull Chimera Squad back to Randtown",
+      "context": "basin",
+      "note": "`withdraw` accepts shape 'point' alone (TARGET_SHAPES_BY_VERB). The resolver keeps the entity attached and picks the point shape, rather than refusing an order the compile table can express.",
+      "expected": {
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "withdraw",
+            "subject": { "type": "entity-ref", "name": "Chimera Squad" },
+            "target": { "type": "entity-ref", "name": "Randtown" }
+          }
+        }]
+      },
+      "expect": { "sends": [{ "type": "GroupDirective", "groupId": 1 }] }
+    },
+
+    {
+      "name": "reinforce with no group is a standing order",
+      "utterance": "reinforce Osprey Fen",
+      "context": "basin",
+      "expected": {
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "reinforce",
+            "subject": { "type": "any" },
+            "target": { "type": "entity-ref", "name": "Osprey Fen" }
+          }
+        }]
+      },
+      "expect": { "sends": [{ "type": "StandingOrder" }] }
+    },
+
+    {
+      "name": "build",
+      "utterance": "Warhound Squad, build at Sector B9",
+      "context": "basin",
+      "expected": {
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "build",
+            "subject": { "type": "entity-ref", "name": "Warhound Squad" },
+            "target": { "type": "entity-ref", "name": "Sector B9" }
+          }
+        }]
+      },
+      "expect": { "sends": [{ "type": "GroupDirective", "groupId": 3 }] }
+    },
+
+    {
+      "name": "an idle-class subject says so out loud",
+      "utterance": "idle tanks hold Slag Forge",
+      "context": "basin",
+      "note": "Neither GroupDirectivePayload nor StandingOrderPayload has a slot for filterClass, so this reaches the sim as 'any force'. The echo must admit it — implying a filter that isn't applied is the exact dishonesty this lane keeps closing.",
+      "expected": {
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "hold",
+            "subject": { "type": "idle-filter", "filterClass": "tanks" },
+            "target": { "type": "entity-ref", "name": "Slag Forge" }
+          }
+        }]
+      },
+      "expect": {
+        "sends": [{ "type": "StandingOrder" }],
+        "saysLike": ["the idle-class filter has no wire slot yet"]
+      }
+    },
+
+    {
+      "name": "when: under attack",
+      "utterance": "Chimera Squad defend Northgate when under attack",
+      "context": "basin",
+      "expected": {
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "defend",
+            "subject": { "type": "entity-ref", "name": "Chimera Squad" },
+            "target": { "type": "entity-ref", "name": "Northgate" },
+            "when": { "type": "under-attack" }
+          }
+        }]
+      },
+      "expect": { "sends": [{ "type": "GroupDirective", "groupId": 1 }] }
+    },
+
+    {
+      "name": "when: a region is contested, named not id'd",
+      "utterance": "Chimera Squad attack Slag Forge if Northgate is contested",
+      "context": "basin",
+      "note": "`regionRef` is the display name 'Northgate'; the compiled phase gate carries the KEY 'north_gate_ridge'. The two differ in every fixture context on purpose.",
+      "expected": {
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "attack",
+            "subject": { "type": "entity-ref", "name": "Chimera Squad" },
+            "target": { "type": "entity-ref", "name": "Slag Forge" },
+            "when": { "type": "region-contested", "regionRef": "Northgate" }
+          }
+        }]
+      },
+      "expect": { "sends": [{ "type": "GroupDirective", "groupId": 1 }] }
+    },
+
+    {
+      "name": "when: strength below a threshold",
+      "utterance": "Chimera Squad pull back to Randtown if it drops below 40 percent",
+      "context": "basin",
+      "expected": {
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "withdraw",
+            "subject": { "type": "entity-ref", "name": "Chimera Squad" },
+            "target": { "type": "entity-ref", "name": "Randtown" },
+            "when": { "type": "strength-below", "percent": 40 }
+          }
+        }]
+      },
+      "expect": { "sends": [{ "type": "GroupDirective", "groupId": 1 }] }
+    },
+
+    {
+      "name": "area-around a place",
+      "utterance": "defend the area around Randtown",
+      "context": "basin",
+      "expected": {
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "defend",
+            "subject": { "type": "any" },
+            "target": { "type": "area-around", "name": "Randtown", "radius": 900 }
+          }
+        }]
+      },
+      "expect": { "sends": [{ "type": "StandingOrder" }] }
+    },
+
+    {
+      "name": "names match case-insensitively",
+      "utterance": "chimera squad secure sector b9",
+      "context": "basin",
+      "note": "Exact-match is case-insensitive on BOTH halves, and an exact match short-circuits the fuzzy tier — so a lowercase sentence never becomes an ambiguity question.",
+      "expected": {
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "secure",
+            "subject": { "type": "entity-ref", "name": "chimera squad" },
+            "target": { "type": "entity-ref", "name": "sector b9" }
+          }
+        }]
+      },
+      "expect": { "sends": [{ "type": "GroupDirective", "groupId": 1 }] }
+    },
+
+    {
+      "name": "an order to the AI reaches the guidance store",
+      "utterance": "AI, take Fallow Gate",
+      "context": "basin",
+      "note": "subject 'ai' compiles to AIGuidance (compile-table checks it first, before verb:shape). integration.ts used to warn and drop this; guidance-wire.ts now maps it to a guidance.paint on the region.",
+      "expected": {
+        "actions": [{
+          "kind": "command",
+          "intent": {
+            "verb": "secure",
+            "subject": { "type": "ai" },
+            "target": { "type": "entity-ref", "name": "Fallow Gate" },
+            "priority": "high"
+          }
+        }]
+      },
+      "expect": { "sends": [{ "type": "AIGuidance" }], "saysLike": ["fallow_gate is now priority"] }
+    }
+  ]
+}

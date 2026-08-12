@@ -204,6 +204,17 @@ export class Minimap {
     private geometry: { x: number; y: number; w: number; h: number; visible: boolean } = {
         x: 0, y: 0, w: 0, h: 0, visible: true,
     };
+    /** PLAN-metalstorm-command-language.md §6.3 — "show me the minimap, full
+     *  screen". Null when the overlay is off; otherwise the state needed to put
+     *  the canvas back exactly as it was. */
+    private fullscreenState: {
+        canvasWidth: number;
+        canvasHeight: number;
+        cssWidth: string;
+        cssHeight: string;
+        onKeyDown: (e: KeyboardEvent) => void;
+        scrim: HTMLElement;
+    } | null = null;
     /** Suppresses redundant engine.resize() during a chili drag — Babylon
      *  recreates the default framebuffer on every resize, which adds up
      *  fast when the widget is fed window-mousemove events. */
@@ -392,6 +403,162 @@ export class Minimap {
         this.channel?.postMessage({ type: 'selection', unitIds: ids });
     }
 
+    // ── Full-screen overlay (PLAN-metalstorm-command-language.md §6.3) ──────
+    //
+    // "Show me the minimap, full screen" is one of the plan's own example
+    // utterances and had no implementation anywhere: the minimap was a 256px
+    // corner panel or nothing. This is that mode.
+    //
+    // What it changes: the SIZE of the canvas, and only that. Same scene, same
+    // ortho frustum (fitted to the map, not the canvas), same team-fog overlay
+    // built from the same per-allyteam LOS bitmap. Nothing about what is drawn
+    // depends on the canvas dimensions, so a fullscreen minimap shows the same
+    // fog, the same blips and the same unexplored black as the corner one — at
+    // more pixels. LOS honesty applies to pixels too, and the way to guarantee
+    // it is to not touch the render path at all.
+    //
+    // What it must NOT do is let game input through. The overlay ships with a
+    // full-viewport scrim BENEATH the canvas: `#game-canvas` owns the pointer
+    // listeners that drive selection, orders and the camera, so a click that
+    // lands on the scrim instead of the canvas is a click the game never sees.
+    // Keyboard is separate — `CameraInput` listens on `window`, which DOM
+    // stacking cannot block — so a capture-phase `document` handler swallows the
+    // camera keys (and Escape) while the overlay is up. Capture on `document`
+    // runs before a bubble-phase listener on `window`, which is what makes the
+    // swallow effective rather than a race on registration order.
+
+    /** True while the full-screen overlay is up. */
+    isFullscreen(): boolean {
+        return this.fullscreenState !== null;
+    }
+
+    /**
+     * Turn the overlay on/off (no argument ⇒ toggle). Returns the state it
+     * settled in, so a caller echoing the result to the player can't disagree
+     * with the DOM.
+     *
+     * Refuses (returns false) under 'widget' ownership: a LuaUI widget owns the
+     * canvas position then, and fighting it would leave the minimap somewhere
+     * neither party expects. Metalstorm ships no LuaUI, so this is the
+     * future-proofing case, not today's.
+     */
+    setFullscreen(on?: boolean): boolean {
+        const wanted = on ?? !this.isFullscreen();
+        if (wanted === this.isFullscreen()) return this.isFullscreen();
+
+        if (wanted && this.ownership !== 'default') {
+            console.warn('[minimap] full screen is unavailable while a widget owns the canvas');
+            return false;
+        }
+        if (wanted) this.enterFullscreen();
+        else this.exitFullscreen();
+        return this.isFullscreen();
+    }
+
+    private enterFullscreen(): void {
+        const shell = this.shellElement();
+        if (!shell) {
+            console.warn('[minimap] no #hud-minimap shell to expand');
+            return;
+        }
+
+        // The scrim is a sibling INSERTED BEFORE the shell in the HUD layer, so
+        // it paints under the expanded panel and over the game canvas.
+        const scrim = document.createElement('div');
+        scrim.className = 'minimap-fullscreen-scrim';
+        // Clicking outside the map is the other natural "I'm done" gesture, and
+        // costs nothing to honour.
+        scrim.addEventListener('pointerdown', (e) => { e.stopPropagation(); this.setFullscreen(false); });
+        scrim.addEventListener('wheel', (e) => e.preventDefault(), { passive: false });
+        shell.parentElement?.insertBefore(scrim, shell);
+
+        const onKeyDown = (e: KeyboardEvent): void => {
+            if (e.key === 'Escape') {
+                e.stopPropagation();
+                e.preventDefault();
+                this.setFullscreen(false);
+                return;
+            }
+            // Arrow keys pan the worker camera behind the overlay. Swallow them:
+            // the player is reading the map, not driving.
+            if (e.key.startsWith('Arrow')) {
+                e.stopPropagation();
+                e.preventDefault();
+            }
+        };
+        document.addEventListener('keydown', onKeyDown, true);
+
+        this.fullscreenState = {
+            canvasWidth: this.canvas.width,
+            canvasHeight: this.canvas.height,
+            cssWidth: this.canvas.style.width,
+            cssHeight: this.canvas.style.height,
+            onKeyDown,
+            scrim,
+        };
+
+        shell.classList.add('is-fullscreen');
+        // The minimap lives inside #game-hud (z-index 10) and the native-UI
+        // rails live in #ui-root (z-index 100), so the shell's own z-index —
+        // confined to #game-hud's stacking context — can never lift it above
+        // them. Verified live: the first build put the command console and the
+        // objectives rail squarely across the expanded map. The overlay is modal,
+        // so the whole HUD layer is promoted for its duration.
+        document.getElementById('game-hud')?.classList.add('has-fullscreen-overlay');
+        // A focused text field under an opaque overlay eats keystrokes the player
+        // can't see. Drop focus so typing does nothing rather than something
+        // invisible; Escape closes and the console comes straight back.
+        const focused = document.activeElement as HTMLElement | null;
+        if (focused && focused !== document.body) focused.blur();
+
+        this.canvas.classList.add('minimap-canvas--fullscreen');
+        this.resizeCanvasToShell();
+        this.broadcastState();
+    }
+
+    private exitFullscreen(): void {
+        const state = this.fullscreenState;
+        if (!state) return;
+        this.fullscreenState = null;
+
+        document.removeEventListener('keydown', state.onKeyDown, true);
+        state.scrim.remove();
+
+        this.shellElement()?.classList.remove('is-fullscreen');
+        document.getElementById('game-hud')?.classList.remove('has-fullscreen-overlay');
+        this.canvas.classList.remove('minimap-canvas--fullscreen');
+        this.canvas.style.width = state.cssWidth;
+        this.canvas.style.height = state.cssHeight;
+        this.canvas.width = state.canvasWidth;
+        this.canvas.height = state.canvasHeight;
+        this.engine.resize();
+        this.broadcastState();
+    }
+
+    /**
+     * Match the canvas backing store to the square the CSS gave it.
+     *
+     * Square, not the panel's aspect: `updateOrthoBounds` fits the LONGER map
+     * axis into the frustum, so a non-square canvas would letterbox the map
+     * inside a stretched viewport. A square canvas centred by CSS keeps the
+     * fullscreen view geometrically identical to the corner one.
+     */
+    private resizeCanvasToShell(): void {
+        const side = Math.max(
+            64,
+            Math.floor(Math.min(window.innerWidth, window.innerHeight) * 0.86),
+        );
+        this.canvas.style.width = `${side}px`;
+        this.canvas.style.height = `${side}px`;
+        this.canvas.width = side;
+        this.canvas.height = side;
+        this.engine.resize();
+    }
+
+    private shellElement(): HTMLElement | null {
+        return this.defaultParent.closest('#hud-minimap') as HTMLElement | null;
+    }
+
     /**
      * Hand control of the minimap's on-screen geometry to a LuaUI widget.
      * Reparents the canvas onto `document.body` with absolute positioning
@@ -449,7 +616,11 @@ export class Minimap {
      * gets exactly the old behaviour, one setGeometry call later.
      */
     private setDefaultShellVisible(visible: boolean): void {
-        const shell = this.defaultParent.closest('#hud-minimap') as HTMLElement | null;
+        // A hidden shell can't be full screen — a widget claiming the canvas
+        // mid-overlay would otherwise leave the scrim up over a minimap that has
+        // moved out from under it.
+        if (!visible) this.setFullscreen(false);
+        const shell = this.shellElement();
         if (shell) shell.style.display = visible ? 'block' : 'none';
     }
 
@@ -1131,6 +1302,7 @@ export class Minimap {
         // Put the shell back the way hud.html ships it, so a disposed minimap
         // doesn't leave an empty bordered box with a Detach button on the HUD
         // between games (main.ts disposes and rebuilds one per session).
+        this.setFullscreen(false);      // drops the scrim + the key handler
         this.setDefaultShellVisible(false);
         this.channel?.postMessage({ type: 'gameEnded' });
         if (this.detachedWindow && !this.detachedWindow.closed) {

@@ -34,6 +34,118 @@ describe("grid provider", function()
     end)
 end)
 
+-- Sector naming (PLAN-metalstorm-command-language.md §5). The contract these
+-- guard is "every grid cell has exactly one spoken name, and no two cells share
+-- one" — a duplicate name would leave the NL resolver guessing which sector the
+-- player meant, which is the one thing the named-entity index must never do.
+describe("column labels", function()
+    it("maps the first 26 columns to single letters", function()
+        assert.are.equal('A', Partition.columnLabel(0))
+        assert.are.equal('B', Partition.columnLabel(1))
+        assert.are.equal('Z', Partition.columnLabel(25))
+    end)
+
+    it("rolls into a second letter past Z instead of repeating one", function()
+        assert.are.equal('AA', Partition.columnLabel(26))
+        assert.are.equal('AB', Partition.columnLabel(27))
+        assert.are.equal('AZ', Partition.columnLabel(51))
+        assert.are.equal('BA', Partition.columnLabel(52))
+        assert.are.equal('ZZ', Partition.columnLabel(701))
+        assert.are.equal('AAA', Partition.columnLabel(702))
+    end)
+
+    it("is injective over a range far wider than any real map", function()
+        local seen = {}
+        for ix = 0, 999 do
+            local label = Partition.columnLabel(ix)
+            assert.is_nil(seen[label], 'duplicate column label ' .. tostring(label))
+            seen[label] = ix
+        end
+    end)
+
+    it("rejects non-column inputs rather than inventing a letter", function()
+        assert.is_nil(Partition.columnLabel(-1))
+        assert.is_nil(Partition.columnLabel(nil))
+        assert.is_nil(Partition.columnLabel('3'))
+    end)
+end)
+
+describe("grid sector names", function()
+    it("reads col:row as letter+1-based number", function()
+        assert.are.equal('Sector A1', Partition.gridSectorName('0:0'))
+        assert.are.equal('Sector D6', Partition.gridSectorName('3:5'))
+        assert.are.equal('Sector B9', Partition.gridSectorName('1:8'))
+    end)
+
+    it("handles the column edges", function()
+        assert.are.equal('Sector A1', Partition.gridSectorName('0:0'))     -- col 0
+        assert.are.equal('Sector Z1', Partition.gridSectorName('25:0'))    -- col 25
+        assert.are.equal('Sector AA1', Partition.gridSectorName('26:0'))   -- col 26
+    end)
+
+    it("has no row ceiling", function()
+        assert.are.equal('Sector A100', Partition.gridSectorName('0:99'))
+    end)
+
+    it("leaves authored graph keys alone", function()
+        assert.is_nil(Partition.gridSectorName('west_scarp_n'))
+        assert.is_nil(Partition.gridSectorName('wilds'))
+        assert.is_nil(Partition.gridSectorName('3:'))
+        assert.is_nil(Partition.gridSectorName(nil))
+    end)
+end)
+
+describe("grid provider sectors()", function()
+    it("names every cell the grid can return, uniquely", function()
+        local p = Partition.newGridProvider(8192, 8192, 2048)
+        local sectors = p.sectors()
+        assert.are.equal(#p.keys(), #sectors)
+
+        local byName, byKey = {}, {}
+        for _, s in ipairs(sectors) do
+            assert.is_string(s.name)
+            assert.is_nil(byName[s.name], 'duplicate sector name ' .. tostring(s.name))
+            byName[s.name] = true
+            byKey[s.key] = s
+        end
+        assert.are.equal('Sector A1', byKey['0:0'].name)
+        assert.are.equal('Sector D4', byKey['3:3'].name)
+    end)
+
+    it("puts each centre inside its own cell", function()
+        local p = Partition.newGridProvider(8192, 8192, 2048)
+        for _, s in ipairs(p.sectors()) do
+            assert.are.equal(s.key, p.at(s.x, s.z))
+        end
+    end)
+
+    it("clips the overhanging last row/column back onto the map", function()
+        -- 9000 / 2048 = 4.39 cells: the 5th column runs to 10240, well past the
+        -- map edge. An unclipped centre would be off-map and un-orderable.
+        local p = Partition.newGridProvider(9000, 9000, 2048)
+        for _, s in ipairs(p.sectors()) do
+            assert.is_true(s.x >= 0 and s.x <= 9000, 'x out of map: ' .. tostring(s.x))
+            assert.is_true(s.z >= 0 and s.z <= 9000, 'z out of map: ' .. tostring(s.z))
+        end
+    end)
+
+    it("names a tiny map's clamped 2x2 grid too (E5)", function()
+        local p = Partition.newGridProvider(512, 512, 2048)
+        local sectors = p.sectors()
+        assert.are.equal(4, #sectors)
+        assert.are.equal('Sector A1', sectors[1].name)
+    end)
+
+    it("is not offered by the graph provider — authored names stay primary", function()
+        local regions = {
+            { key = 'north', name = 'Northgate', polygon = square(0, 0, 4096, 4096) },
+            { key = 'south', name = 'Slag Forge', polygon = square(0, 4096, 4096, 8192) },
+        }
+        local p = Partition.newGraphProvider(regions, 8192, 8192)
+        assert.is_nil(p.sectors)
+    end)
+end)
+
 describe("point-in-polygon", function()
     it("detects points inside and outside a square", function()
         local sq = square(0, 0, 100, 100)

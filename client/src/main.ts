@@ -78,6 +78,11 @@ import {
     uiStore,
     mapGestureBridge,
     configureCommandPresets,
+    cameraPortHolder,
+    uiActionRegistry,
+    CensusCache,
+    censusCacheHolder,
+    type Census,
     type CommandConnection,
 } from './ui/native-ui/index.js';
 
@@ -312,6 +317,11 @@ let musicArmed = false;
 /// pointer/wheel/key events on #game-canvas and forwards them to the
 /// game-processor worker, where the interactive camera + scene.pick live.
 let cameraInput: CameraInput | null = null;
+/// PLAN-metalstorm-command-language.md §6.3 — removal handle for the minimap's
+/// ui-action-registry entry (the one engine-HUD element the command language can
+/// name). Manifest panels register themselves from widget-loader.ts; the minimap
+/// has no manifest, so it registers where its instance lives.
+let minimapUiActionUnregister: (() => void) | null = null;
 /// GW4-c5c-3: unsubscribe handle for the gfx.* → worker `gp:config` push.
 /// Set in startGame, cleared on teardown so we don't leak a subscriber (or
 /// post to a terminated worker) across game sessions.
@@ -562,6 +572,8 @@ function quitToLobby(): void {
     // and that container persists across game sessions. Without an
     // explicit dispose the next startGame() would append a second
     // canvas to the container.
+    minimapUiActionUnregister?.();
+    minimapUiActionUnregister = null;
     minimap?.dispose();
     minimap = null;
     pendingMinimapMap = null;
@@ -610,6 +622,12 @@ function quitToLobby(): void {
     gpRecoverPending.clear();
     r2RespawnInFlight = false;
     uninstallCameraWindowApi();
+    // The NL local ports (§6.2/§6.4). Both hold worker-bound closures, and the
+    // camera port also holds a follow interval — a follow that outlived its
+    // worker would re-snap a camera that no longer exists, every 400 ms.
+    cameraPortHolder.clear();
+    censusCacheHolder.clear();
+    uiActionRegistry.clear();
     delete (window as any).test;
     delete (window as any).widgets;
     delete (window as any).__gp;
@@ -1529,6 +1547,26 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         };
         document.getElementById('detach-minimap-btn')
             ?.addEventListener('click', () => minimap?.detach());
+
+        // PLAN-metalstorm-command-language.md §6.3 — "show me the minimap, full
+        // screen". The engine HUD has no manifest, so unlike the native-UI
+        // panels (which self-register from widget-loader.ts) it registers here,
+        // where the Minimap instance and its overlay live. This is the one entry
+        // in the registry that supplies `fullscreen`; every rail panel refuses
+        // that op by name rather than opening at rail width.
+        minimapUiActionUnregister = uiActionRegistry.register({
+            id: 'minimap',
+            label: 'Minimap',
+            aliases: ['mini map', 'map panel', 'tac map', 'tactical map'],
+            open: () => minimap?.setVisible(true),
+            close: () => {
+                minimap?.setFullscreen(false);
+                minimap?.setVisible(false);
+            },
+            toggle: () => minimap?.setVisible(!(minimap?.getGeometry().visible ?? false)),
+            fullscreen: (on) => minimap?.setFullscreen(on) ?? false,
+            isOpen: () => minimap?.getGeometry().visible ?? false,
+        });
     }
 
     // PLAN-playable.md G3a: native build-menu HUD (DOM, on main). The worker owns
@@ -1633,6 +1671,45 @@ async function startGame(gameServerPort: number, mapId: string, gameId: string =
         getMinimap: () => minimap,
     });
     (window as any).test = testHarness;
+
+    // PLAN-metalstorm-command-language.md §6.2/§6.4 (M3) — the two ports the
+    // natural-language console needs from this thread, installed here because
+    // `workerCall` and the cached `gp:sceneState` pose feed both live here.
+    //
+    // These are NOT the test harness. They share its worker ops (the camera has
+    // lived in the worker since GW8 and `gp:test` is the only request channel
+    // main has), but they carry no eval hatch, no server-bound verbs and no
+    // console commands — the player-facing surface is the four framing calls and
+    // one read-only census. Everything a sentence can ORDER still goes through
+    // `createSendCommand`, never through here (design pillar 1).
+    const cameraPort = cameraPortHolder.install({
+        call: (method, args) => {
+            void workerCall(method, args ?? []).catch((e) => {
+                console.warn(`[camera-port] ${method} failed:`, e);
+            });
+        },
+        pose: () => {
+            const c = lastSceneState?.camera;
+            if (!c) return null;
+            return { pos: { x: c.x, y: c.y, z: c.z }, lookAt: { x: c.tx, y: c.ty, z: c.tz } };
+        },
+        // The follow loop's cancel signal. CameraInput owns the DOM listeners
+        // whose events ARE the worker camera's interactive input, so it is the
+        // only honest place to learn that the player took the camera back.
+        onUserInput: (listener) => cameraInput?.onCameraInput(listener) ?? (() => {}),
+        onNote: (note) => console.log(`[camera-port] ${note}`),
+        // A follow tracks the group centroid the census reports, and the census
+        // otherwise only refreshes when a sentence is submitted — so without this
+        // a follow tracks a photograph (found live: the camera snapped once and
+        // then sat still while the squad drove away). Only ticks while following.
+        onFollowTick: () => { void censusCacheHolder.current?.refresh(); },
+    });
+    void cameraPort;
+
+    censusCacheHolder.install(new CensusCache(async () => {
+        const raw = await workerCall('nlCensus');
+        return (raw as Census | null) ?? null;
+    }));
 
     // PLAN-quickstart.md Part B: the drivable detach/re-enter surface (this
     // whole plan is side-lane-M test tooling). The polished lobby "return to

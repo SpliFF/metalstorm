@@ -88,3 +88,16 @@ export {
     deleteCommandPreset,
 } from './command-presets.js';
 export type { CommandPreset } from './command-presets.js';
+
+// Natural-language command language, M3 local verbs
+// (PLAN-metalstorm-command-language.md §6.2-§6.4)
+export { CameraPort, cameraPortHolder, createNLCameraPort } from './camera-port.js';
+export type { CameraPose, CameraPortDeps, FollowTarget, FollowEndReason } from './camera-port.js';
+export {
+    UiActionRegistry, uiActionRegistry, createNLUiActionPort, normalisePanelName,
+} from './ui-action-registry.js';
+export type { UiActionEntry, UiActionOp, UiActionResult } from './ui-action-registry.js';
+export { QueryEngine, CensusCache, censusCacheHolder, NOT_SPOTTED } from './query-engine.js';
+export type { Census, CensusUnit, CensusPort, QueryEngineDeps } from './query-engine.js';
+export { matchLocalPattern } from './nl-local-patterns.js';
+export type { LocalPatternDeps, LocalPatternMatch } from './nl-local-patterns.js';

@@ -216,16 +216,37 @@ end
 -- client-side; without PUBLIC the client's rulesParams mirror never sees them.
 local PUBLIC = { public = true }
 
---- Publish each region's static descriptor — display name + polygon centroid —
+--- Publish each region's static descriptor — display name + centre point —
 --- ONCE at setup. Names and geometry don't change during a game, so this is a
---- one-shot write, not part of the per-change publish() path. Only the graph
---- provider carries authored metadata; grid regions are synthetic and nameless
---- (byKey empty), so a grid map contributes no named *places* to the composer —
---- objectives (which publish their own x/z) still populate the Target picker.
---- The centroid is the vertex average: enough for a locate-ping and an
---- "attack <region>" target, never a point-in-region fill test (regions.js
---- owns the exact partition geometry from the map export).
+--- one-shot write, not part of the per-change publish() path.
+---
+--- BOTH providers publish, through the identical `region_<key>_name/_x/_z`
+--- shape (PLAN-metalstorm-command-language.md §5):
+---
+---   * graph — the AUTHORED name and the polygon's vertex-average centroid.
+---     Enough for a locate-ping and an "attack <region>" target, never a
+---     point-in-region fill test (regions.js owns the exact partition geometry
+---     from the map export).
+---   * grid  — a DERIVED name ("Sector B9", partition.lua) and the clipped
+---     cell centre. Grid cells carry no authored metadata (byKey is empty), so
+---     until this landed a grid map contributed zero named places and "zoom to
+---     sector B9" was impossible on every map without a hand-written
+---     mapdata/regions.lua. Authored names stay primary: a map that ships a
+---     valid graph never reaches the grid branch at all.
+---
+--- The client needs no change for either — entity-index-producer.ts already
+--- parses this shape, so the names reach the command console, the AI and the
+--- authority layer by the path that was already there.
 local function publishRegionStatics()
+    if provider.sectors then
+        for _, s in ipairs(provider.sectors()) do
+            Spring.SetGameRulesParam('region_' .. s.key .. '_name', s.name, PUBLIC)
+            Spring.SetGameRulesParam('region_' .. s.key .. '_x', s.x, PUBLIC)
+            Spring.SetGameRulesParam('region_' .. s.key .. '_z', s.z, PUBLIC)
+        end
+        return
+    end
+
     if not provider.byKey then return end
     for _, key in ipairs(provider.keys and provider.keys() or {}) do
         if key ~= "wilds" then
