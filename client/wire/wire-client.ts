@@ -106,6 +106,16 @@ export class WireClient {
     readonly inboundByEnvelope = new Map<number, number>();
     readonly inboundByPayload = new Map<ServerPayload, number>();
 
+    /** Outbound tally by ClientPayload tag. A gate arm asserting that the
+     *  server refused a verb has to name the verb by the SAME number the
+     *  generated schema gave it, not by a constant copied into the test. */
+    readonly sentByPayload = new Map<ClientPayload, number>();
+
+    private pendingWrites: Array<Promise<void>> = [];
+    /** Every write rejection seen, in order. Non-empty means bytes this harness
+     *  claims to have sent did not leave. */
+    readonly writeErrors: string[] = [];
+
     private authWaiters: Array<(o: AuthOutcome) => void> = [];
     private lastAuth: AuthOutcome | null = null;
 
@@ -227,11 +237,29 @@ export class WireClient {
         ClientMessage.addPayload(b, payload);
         b.finish(ClientMessage.endClientMessage(b));
 
+        this.sentByPayload.set(payloadType, (this.sentByPayload.get(payloadType) ?? 0) + 1);
         const buf = b.asUint8Array();
         const msg = new Uint8Array(1 + buf.length);
         msg[0] = ENVELOPE_FLATBUFFERS;
         msg.set(buf, 1);
-        void this.writer?.write(frameControlMessage(msg));
+        // A rejected write must be SAID. It was voided here until 2026-08-14,
+        // which is a silent send failure: the harness would report "sent" for
+        // bytes that never left, and an arm asserting on the server's answer
+        // would blame the server.
+        this.pendingWrites.push(
+            (this.writer?.write(frameControlMessage(msg)) ?? Promise.resolve())
+                .catch((e: unknown) => {
+                    this.writeErrors.push(String(e));
+                    this.log(`[wire] WRITE FAILED (payload ${payloadType}): ${String(e)}`);
+                }));
+    }
+
+    /** Settle every write issued so far, so a caller can assert the bytes
+     *  actually left before it asserts on what came back. */
+    async flush(): Promise<void> {
+        const pending = this.pendingWrites;
+        this.pendingWrites = [];
+        await Promise.all(pending);
     }
 
     /** Resolve with the server's AuthResponse, or reject on timeout. */

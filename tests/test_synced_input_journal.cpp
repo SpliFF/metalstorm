@@ -9,11 +9,13 @@
 
 #include <doctest/doctest.h>
 
+#include "Server/ClientFrame.h"
 #include "Server/SyncedInputJournal.h"
 #include "protocol_generated.h"
 
 #include <set>
 #include <string>
+#include <vector>
 
 using namespace syncedinput;
 
@@ -388,4 +390,99 @@ TEST_CASE("the identity resolution is recorded against its connection") {
 
     CHECK(std::string(InputKindName(InputKind::AuthIdentity)) == "auth-identity");
     CHECK(FormatAudit(rec.Stats()).find("auth-identity=1") != std::string::npos);
+}
+
+// ────────────── The replay gate's decoder (2026-08-14) ──────────────
+//
+// server_main's replay gate asks two questions of every inbound frame from a
+// live client — "which verb is this?" then "does that verb reach the sim?" —
+// and refuses the pair. The second half (the classifier above) was right all
+// along; the FIRST half was wrong for nine days and made the gate inert: the
+// peek handed the FlatBuffers verifier the frame WITH its envelope byte still
+// attached, so verification failed for every well-formed message and every
+// verb read as NONE, which is `Ignored`. Found live by pointing the scripted
+// wire client at a replay server (PLAN-replay §7.19): a spectator's
+// PlayerCommand was neither refused nor logged — it reached HandleMessage.
+//
+// These cases are over `wireframe::`, the extracted single decoder, and they
+// assert the composition the gate actually performs rather than the parse
+// alone: a decode that silently reads NONE is indistinguishable from a verb
+// that is legitimately ignored.
+
+/// Frame a ClientMessage the way the browser client does: envelope byte, then
+/// the FlatBuffer. Built with the real generated builders, so a schema change
+/// breaks this the way it would break a player.
+static std::vector<uint8_t> FramePlayerCommand() {
+    flatbuffers::FlatBufferBuilder fbb(256);
+    auto squads = fbb.CreateVector<uint32_t>({7u});
+    auto params = fbb.CreateVector<float>({4000.0f, 0.0f, 4000.0f});
+    auto pc = SpringWeb::CreatePlayerCommand(fbb, /*sequence=*/1, /*command_id=*/10,
+                                             squads, params);
+    auto msg = SpringWeb::CreateClientMessage(
+        fbb, SpringWeb::ClientPayload_PlayerCommand, pc.Union());
+    fbb.Finish(msg);
+
+    std::vector<uint8_t> frame;
+    frame.reserve(1 + fbb.GetSize());
+    frame.push_back(wireframe::kEnvelopeFlatBuffers);
+    frame.insert(frame.end(), fbb.GetBufferPointer(),
+                 fbb.GetBufferPointer() + fbb.GetSize());
+    return frame;
+}
+
+TEST_CASE("an enveloped PlayerCommand reads as a verb the replay gate refuses") {
+    const std::vector<uint8_t> frame = FramePlayerCommand();
+
+    const uint8_t tag = wireframe::PeekClientPayloadType(frame.data(), frame.size());
+    CHECK(tag == static_cast<uint8_t>(SpringWeb::ClientPayload_PlayerCommand));
+
+    // The gate's own composition. Pre-fix `tag` was 0 and this was false, which
+    // is why a live client's orders walked into a re-execution.
+    CHECK(ShouldRecordClientPayload(tag));
+    CHECK(ClassifyClientPayload(tag) == WireClass::Synced);
+
+    SUBCASE("dropping the envelope byte is the mistake that made it NONE") {
+        // Exactly what the old peek did: verify from the envelope byte instead
+        // of past it. It must NOT read as a PlayerCommand.
+        CHECK(wireframe::PeekClientPayloadType(frame.data() + 1, frame.size() - 1)
+              != static_cast<uint8_t>(SpringWeb::ClientPayload_PlayerCommand));
+    }
+
+    SUBCASE("a wrong envelope byte is not a ClientMessage at all") {
+        std::vector<uint8_t> wrong = frame;
+        wrong[0] = 0x02;   // entity state — a server->client payload
+        CHECK(wireframe::ParseClientMessage(wrong.data(), wrong.size()) == nullptr);
+        CHECK(wireframe::PeekClientPayloadType(wrong.data(), wrong.size()) == 0);
+    }
+
+    SUBCASE("a truncated frame is refused rather than read past") {
+        CHECK(wireframe::ParseClientMessage(frame.data(), 1) == nullptr);
+        CHECK(wireframe::PeekClientPayloadType(frame.data(), 0) == 0);
+        CHECK(wireframe::PeekClientPayloadType(nullptr, 8) == 0);
+    }
+}
+
+TEST_CASE("the two admission verbs are the only recordable ones a replay lets by") {
+    // The gate exempts Handshake and AuthRequest by tag, so their tags must be
+    // exactly what the peek returns for a real frame of each — and both must
+    // still be recordable, or the exemption is guarding nothing.
+    for (const auto tag : {SpringWeb::ClientPayload_Handshake,
+                           SpringWeb::ClientPayload_AuthRequest}) {
+        CHECK(ShouldRecordClientPayload(static_cast<uint8_t>(tag)));
+        CHECK(ClassifyClientPayload(static_cast<uint8_t>(tag)) == WireClass::Setup);
+    }
+
+    flatbuffers::FlatBufferBuilder fbb(256);
+    auto ver = fbb.CreateString("springweb-wire/1");
+    auto hs = SpringWeb::CreateHandshake(fbb, /*protocol_version=*/1, ver);
+    auto msg = SpringWeb::CreateClientMessage(
+        fbb, SpringWeb::ClientPayload_Handshake, hs.Union());
+    fbb.Finish(msg);
+    std::vector<uint8_t> frame;
+    frame.push_back(wireframe::kEnvelopeFlatBuffers);
+    frame.insert(frame.end(), fbb.GetBufferPointer(),
+                 fbb.GetBufferPointer() + fbb.GetSize());
+
+    CHECK(wireframe::PeekClientPayloadType(frame.data(), frame.size())
+          == static_cast<uint8_t>(SpringWeb::ClientPayload_Handshake));
 }

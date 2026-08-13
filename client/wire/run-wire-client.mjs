@@ -45,7 +45,7 @@ function parseArgs(argv) {
         url: 'http://127.0.0.1:9001', user: '', pass: '', token: '',
         expectAuth: 'ok', expectPlayerNum: null, command: null,
         squads: [], params: [], options: 0, holdMs: 1500, json: false, quiet: false,
-        pinMismatch: false,
+        pinMismatch: false, waitForServerMs: 0,
     };
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i];
@@ -65,6 +65,7 @@ function parseArgs(argv) {
             case '--json': out.json = true; break;
             case '--quiet': out.quiet = true; break;
             case '--pin-mismatch': out.pinMismatch = true; break;
+            case '--wait-for-server': out.waitForServerMs = Number(next()); break;
             default:
                 console.error(`unknown argument: ${a}`);
                 process.exit(2);
@@ -127,6 +128,10 @@ let exitCode = 2;
 try {
     const { WireClient } = await vite.ssrLoadModule('/wire/wire-client.ts');
     const { AuthStatus } = await vite.ssrLoadModule('/src/protocol/spring-web/auth-status.ts');
+    // Reported in the JSON verdict so a CI arm asserting "the server refused
+    // the verb I sent" names it with the number the SCHEMA gave it. A constant
+    // copied into the gate would keep passing after a schema renumber.
+    const { ClientPayload } = await vite.ssrLoadModule('/src/protocol/spring-web/client-payload.ts');
 
     // Discovery runs before the transport is loaded, because the hashes it
     // publishes are what the pinning hook is built from.
@@ -134,7 +139,30 @@ try {
         httpBase: args.url, username: args.user, password: args.pass,
         WebTransportCtor: class { }, log,
     });
-    const info = await probe.discover();
+    // `--wait-for-server` exists for a race a CI arm cannot otherwise win: a
+    // `--replay --verify` server is a BATCH job (uncapped ticks), so the whole
+    // window in which a spectator can attach is the length of the
+    // re-execution. Everything slow about this harness — node, vite, the native
+    // addon — therefore has to happen BEFORE the server is up, and the connect
+    // itself has to be the only thing waiting on it.
+    const deadline = Date.now() + args.waitForServerMs;
+    let info;
+    for (;;) {
+        try {
+            info = await probe.discover();
+            break;
+        } catch (e) {
+            if (Date.now() >= deadline) {
+                if (args.waitForServerMs > 0) {
+                    console.error(`the server did not answer /api/wt/info within `
+                        + `${args.waitForServerMs} ms: ${e?.message ?? e}`);
+                    process.exit(2);
+                }
+                throw e;
+            }
+            await new Promise((r) => setTimeout(r, 50));
+        }
+    }
     log(`[wire] wt/info port=${info.port} certMode=${info.certMode} `
         + `hashes=${info.certHashes.length}`);
 
@@ -169,7 +197,20 @@ try {
     }
 
     await client.connect();
-    const auth = await client.awaitAuth();
+    // A session that opened and then said nothing is the SERVER misbehaving, not
+    // this harness failing to run: exit 1 (an assertion failed), not 2. The
+    // distinction is load-bearing for CI — a gate that reads exit 2 as "check
+    // your node install" will tell a reader to reinstall npm packages when what
+    // actually happened is that the server refused to admit anybody.
+    let auth;
+    try {
+        auth = await client.awaitAuth();
+    } catch (e) {
+        console.error(`FAIL: the session opened but no AuthResponse arrived: ${e?.message ?? e}`);
+        client.close();
+        await vite.close();
+        process.exit(1);
+    }
 
     const failures = [];
     if (args.expectAuth === 'ok' && !auth.ok) {
@@ -187,6 +228,13 @@ try {
             commandId: args.command, squadIds: args.squads,
             params: args.params, options: args.options,
         });
+        // A send is only evidence once the bytes have left. Without this the
+        // harness reports "sent" for a write that may still be queued, and an
+        // arm asserting on the server's answer blames the server.
+        await client.flush();
+        if (client.writeErrors.length) {
+            failures.push(`the command's bytes did not leave: ${client.writeErrors.join('; ')}`);
+        }
     }
 
     // Hold the session open: a command's effect (and any server refusal) arrives
@@ -204,6 +252,9 @@ try {
             auth, verifyCalls: wt.verifyCalls(),
             inboundByEnvelope: Object.fromEntries(client.inboundByEnvelope),
             inboundByPayload: Object.fromEntries(client.inboundByPayload),
+            sentByPayload: Object.fromEntries(client.sentByPayload),
+            commandPayloadType: args.command !== null ? ClientPayload.PlayerCommand : null,
+            writeErrors: client.writeErrors,
             failures,
         }));
     } else {

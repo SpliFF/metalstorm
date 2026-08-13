@@ -10,6 +10,7 @@
 #pragma once
 
 #include "protocol_generated.h"
+#include "ClientFrame.h"
 #include "CombatEventCollector.h"
 #include "DecalEventCollector.h"
 #include "MusicStateTracker.h"
@@ -97,17 +98,16 @@ inline std::vector<uint8_t> BuildServerMessage(
 }
 
 /// Parse a framed ClientMessage. Returns nullptr if invalid.
+///
+/// Delegates to `wireframe::ParseClientMessage` (Server/ClientFrame.h) — the
+/// one decoder. See that header for why there is only one: the replay server's
+/// inbound gate had its own copy and got the envelope byte wrong.
 inline const SpringWeb::ClientMessage* ParseClientMessage(
     const uint8_t* data, size_t len)
 {
-    if (len < 2 || data[0] != ENVELOPE_FLATBUFFERS)
-        return nullptr;
-
-    auto verifier = flatbuffers::Verifier(data + 1, len - 1);
-    if (!SpringWeb::VerifyClientMessageBuffer(verifier))
-        return nullptr;
-
-    return SpringWeb::GetClientMessage(data + 1);
+    static_assert(ENVELOPE_FLATBUFFERS == wireframe::kEnvelopeFlatBuffers,
+                  "the framing constant must have one value");
+    return wireframe::ParseClientMessage(data, len);
 }
 
 /// Build a Pong response.

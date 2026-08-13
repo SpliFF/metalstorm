@@ -1,4 +1,4 @@
-.PHONY: setup build build-release test test-cpp test-client test-all dev-client generate-protocol export-metalstorm-specs clean test-headless-batch test-headless-determinism test-replay-verify
+.PHONY: setup build build-release test test-cpp test-client test-all dev-client generate-protocol export-metalstorm-specs clean test-headless-batch test-headless-determinism test-replay-verify test-replay-spectate
 
 # First-time setup
 setup:
@@ -49,10 +49,11 @@ test-all: test-cpp test-client
 
 # headless-batch pure unit tests (no server build needed): matrix expansion
 # (PLAN-headless.md task 3 §6 "meta" requirement), the fixture non-vacuity
-# checks, the replay-verdict parser (PLAN-replay.md task 5) and the soak
-# growth-slope ruling (PLAN-long-uptime.md task 4).
+# checks, the replay-verdict parser and the spectate-arm rules (PLAN-replay.md
+# task 5 / §7.11 T2-a-1) and the soak growth-slope ruling (PLAN-long-uptime.md
+# task 4).
 test-headless-batch:
-	cd tools/headless-batch && node --test test/matrix.test.mjs test/fixture-checks.test.mjs test/replay-verdict.test.mjs test/growth-fit.test.mjs test/run-paths.test.mjs
+	cd tools/headless-batch && node --test test/matrix.test.mjs test/fixture-checks.test.mjs test/replay-verdict.test.mjs test/replay-spectate.test.mjs test/growth-fit.test.mjs test/run-paths.test.mjs
 
 # Determinism pair-run CI hook (PLAN-headless.md task 4): builds spring-server,
 # runs the PaperTanks-scale fixture twice, diffs the two stateHash sequences.
@@ -73,6 +74,20 @@ test-replay-verify:
 		--server-bin build/debug/spring-server \
 		--out-dir build/replay-verify \
 		--pack
+
+# Replay SPECTATE gate (PLAN-replay.md §7.11 T2-a-1): the same recording
+# re-executed twice — once with a real client attached over the real wire as a
+# spectator, once with nobody watching — and both arms must reproduce the hash
+# track identically. This is the only gate that exercises the live
+# Handshake/AuthRequest admission path on a replay server (a headless run has no
+# clients) and the only one that can observe the sim-affecting-verb refusal,
+# which `--verify` cannot see: on 2026-08-14 that gate was inert and the hash
+# track still passed 30/30. Needs client/'s WebTransport addon (`npm install`).
+test-replay-spectate:
+	cmake --build build/debug --target spring-server
+	node tools/headless-batch/replay-spectate-run.mjs \
+		--server-bin build/debug/spring-server \
+		--out-dir build/replay-spectate
 
 # Soak ladder + growth report (PLAN-long-uptime.md task 4). NOT part of
 # test-all: four arms of one simulated day each cost ~35 wall-minutes. Uses the

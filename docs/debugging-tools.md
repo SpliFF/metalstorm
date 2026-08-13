@@ -484,6 +484,47 @@ recorded, `PASS — 30/30 state hashes matched` on both the raw recording and th
 copy (178 887 → 9 350 bytes). Negative control: flipping one bit of the frame-4800
 reference reports `FAIL … firstDivergence=4800`, located exactly.
 
+### Replay spectate CI hook (a client watching a re-execution)
+
+`replay-verify-run.mjs` proves a recording re-executes with **nobody watching**.
+`tools/headless-batch/replay-spectate-run.mjs` covers the other half: a real
+client, on the real wire, admitted to that same re-execution as a spectator. It
+is the only gate that exercises the live `Handshake`/`AuthRequest` admission path
+on a replay server — a headless run has no clients — and the only one that can
+observe the sim-affecting-verb refusal.
+
+```bash
+make test-replay-spectate                    # ~60 s on a debug build
+# or, spectating a recording you already have:
+node tools/headless-batch/replay-spectate-run.mjs \
+  --server-bin build/debug/spring-server \
+  --replay-file build/replay-verify/run.msr --out-dir build/replay-spectate
+```
+
+Two arms over one recording, both `--replay … --verify`: **spectator** (the
+scripted wire client attached, issuing a MOVE order) and **control** (nobody
+watching). Both must PASS with the *same* `(checked, matched, fed)` triple — the
+pair is what says the spectator was the only difference and made none. The
+spectator arm additionally asserts `role=spectator team=-1`, a player number from
+the reserved 200+ range, the server's own admit/attach lines naming that same
+number, and the refusal of the verb the client sent.
+
+- **Why `--verify` and not playback.** Playback ticks in realtime (300 s for this
+  fixture, against ~10) and checks no hashes. The cost is a race — `--verify` is
+  a batch job, so the attach window is the length of the re-execution — which is
+  why the harness is started FIRST with `--wait-for-server`, paying node + vite +
+  the native addon before the server exists. An arm whose spectator never got in
+  is reported **VACUOUS**, never as a pass.
+- **The refusal is asserted from the log, independently of the verdict, and that
+  is the load-bearing part.** From 2026-08-05 to 2026-08-14 the gate in
+  `server_main.cpp` was inert (its peek handed the FlatBuffers verifier the frame
+  with the envelope byte still attached, so every verb read as `NONE`) — and
+  `--verify` still reported **30/30** with a live client's `PlayerCommand`
+  reaching the re-execution. A hash folds units and the RNG; it cannot see this.
+  Both the fix and the assertion are in `wireframe::` (`rts/Server/ClientFrame.h`).
+- Rules only, no server: `node --test test/replay-spectate.test.mjs`
+  (`make test-headless-batch`).
+
 ### Soak ladders + growth report (`growth-report.mjs`)
 
 The soak ladder is an ordinary batch run whose template is a long uncapped
@@ -666,11 +707,24 @@ npm run wire -- --url http://127.0.0.1:9001 --user wire_probe --quiet --json
 # the harness's own self-test: pin a hash the server cannot present, and the
 # QUIC handshake MUST fail (exit 0 means it was refused)
 npm run wire -- --url http://127.0.0.1:9001 --user wire_probe --pin-mismatch
+
+# wait for a server that is not up yet — for a CI arm racing a batch job, the
+# node/vite/addon start-up is paid BEFORE the server exists
+npm run wire -- --url http://127.0.0.1:19218 --user probe --pass devpass \
+    --wait-for-server 90000 --quiet --json
 ```
 
 Exit status: **0** every assertion held · **1** an assertion failed
-(`--expect-auth`, `--expect-player-num`) · **2** the harness could not run (no
-server, missing addon, bad arguments).
+(`--expect-auth`, `--expect-player-num`, a session that opened and never sent an
+AuthResponse, bytes that did not leave) · **2** the harness could not run (no
+server on the port at all, missing addon, bad arguments). The 1/2 split is what
+tells a CI reader whether to look at the server or at their own environment.
+
+`--json` reports `auth`, the inbound tallies, **`sentByPayload`** and
+**`commandPayloadType`** (tags off the generated `ClientPayload` enum, so a gate
+asserting "the server refused the verb I sent" never hardcodes a number) and
+**`writeErrors`** (non-empty means bytes the harness claims to have sent did not
+leave — they were voided until 2026-08-14, which read as "sent").
 
 Three things about it are worth knowing before changing it:
 
@@ -764,7 +818,9 @@ behaviours differ from a live server, both deliberate and both logged:
 
 - **Sim-affecting verbs from live clients are refused.** A client attached to a
   replay is a spectator by construction. View-state verbs (viewport, selection, path
-  preview) pass through untouched.
+  preview) pass through untouched. (This gate was **inert** from 2026-08-05 to
+  2026-08-14 — one decoder off by the envelope byte — and `--verify` could not
+  see it. `make test-replay-spectate` now observes the refusal itself.)
 - **`/api/exec` is refused**, with a reply rather than silence — injecting Lua into a
   re-execution would fork it.
 

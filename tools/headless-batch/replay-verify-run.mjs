@@ -37,10 +37,9 @@
 import { parseArgs } from 'node:util';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { mkdir, readFile, rm, stat } from 'node:fs/promises';
-import { loadJson, writeJson } from './lib/config.mjs';
-import { runHeadless, runServer } from './lib/run-server.mjs';
-import { checkFixtureNonVacuous, describeFixture } from './lib/fixture-checks.mjs';
+import { stat } from 'node:fs/promises';
+import { runServer } from './lib/run-server.mjs';
+import { recordFixture, RecordingError, tail } from './lib/replay-record.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_REPO_ROOT = path.resolve(HERE, '..', '..');
@@ -51,18 +50,11 @@ const DEFAULT_CONFIG = path.join(HERE, 'fixtures', 'papertanks-determinism.json'
 // never reached the verdict at all would then read as "no FAIL seen".
 const PASS_RE = /replay verify: PASS — (\d+)\/(\d+) state hashes matched, (\d+) records fed/;
 const FAIL_RE = /replay verify: FAIL — .*/;
-const RECORDED_RE = /replay recording closed: \S+ \((\d+) records, (\d+) hash points, end frame (-?\d+)\)/;
 
 function fail(msg, detail) {
     console.error(`REPLAY VERIFY FAIL: ${msg}`);
     if (detail) console.error(detail);
     process.exit(1);
-}
-
-// Last N lines of the combined output — what a CI reader actually needs when
-// something goes wrong, without dumping a whole battle's worth of log.
-function tail(result, n = 40) {
-    return `${result.stdout}\n${result.stderr}`.split('\n').slice(-n).join('\n');
 }
 
 // Reads the engine's verdict out of a replay run's output. Returns
@@ -128,51 +120,21 @@ async function main() {
     const maxWallMin = parseInt(values['max-wall-min'], 10);
     const repoRoot = path.resolve(values['repo-root']);
     const hashEvery = parseInt(values['hash-every'], 10);
-    const config = await loadJson(path.resolve(values.config));
-
-    await rm(outDir, { recursive: true, force: true });
-    await mkdir(outDir, { recursive: true });
-
-    const configPath = path.join(outDir, 'config.json');
-    const dumpPath = path.join(outDir, 'record-dump.json');
-    const replayPath = path.join(outDir, 'run.msr');
-
-    const cfg = structuredClone(config);
-    cfg.headless = cfg.headless ?? {};
-    cfg.headless.statsDump = dumpPath;
-    await writeJson(configPath, cfg);
 
     console.log(`replay-verify: ${values.config} via ${serverBin}`);
 
-    // --- Pass 1: record ---------------------------------------------------
-    const rec = await runHeadless({
-        serverBin, configPath, port, maxWallMin, cwd: repoRoot,
-        dbPath: path.join(outDir, 'db-record.sqlite'),
-        extraArgs: ['--journal-file', replayPath, '--journal-hash-every', String(hashEvery)],
-    });
-    const recOut = `${rec.stdout}\n${rec.stderr}`;
-    const recLine = recOut.match(RECORDED_RE);
-    if (!recLine)
-        fail('the recording pass never closed a replay file (no `replay recording closed:` line)', tail(rec));
-    const [, records, hashPoints, endFrame] = recLine;
-    console.log(`  recorded: ${records} records, ${hashPoints} hash points, end frame ${endFrame}`);
-    if (Number(hashPoints) < 2)
-        fail(`the recording embedded only ${hashPoints} hash point(s) — --journal-hash-every ${hashEvery} is too coarse for this run's length`, recLine[0]);
-    if (recOut.includes('[TRUNCATED SEGMENT]') || recOut.includes('WITH WRITE ERRORS'))
-        fail('the recording pass produced a truncated/incomplete segment', tail(rec));
-
-    // --- The fixture must be worth verifying (T2-c / T3-d) ----------------
-    let dump;
+    // --- Pass 1: record (shared with the spectate gate) -------------------
+    // Includes the non-vacuity check the whole gate rests on (T2-c / T3-d).
+    let replayPath;
     try {
-        dump = JSON.parse(await readFile(dumpPath, 'utf8'));
+        ({ replayPath } = await recordFixture({
+            serverBin, configFile: path.resolve(values.config), outDir,
+            port, maxWallMin, repoRoot, hashEvery,
+        }));
     } catch (e) {
-        fail(`the recording pass wrote no readable stats dump at ${dumpPath}: ${e.message}`, tail(rec));
+        if (e instanceof RecordingError) fail(e.message, e.detail);
+        throw e;
     }
-    const nonVacuous = checkFixtureNonVacuous(dump);
-    console.log(`  fixture content: ${describeFixture(nonVacuous.measured)}`);
-    if (!nonVacuous.ok)
-        fail('the fixture is VACUOUS — a replay gate over it would prove nothing:\n  - ' +
-             nonVacuous.problems.join('\n  - '));
 
     // --- Pass 2: re-execute and verify against the embedded track ---------
     await verifyReplay({

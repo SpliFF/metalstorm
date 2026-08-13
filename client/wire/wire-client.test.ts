@@ -24,6 +24,8 @@ import { AuthStatus } from '../src/protocol/spring-web/auth-status';
  *  present — the harness must not care which it was handed. */
 class FakeSession implements WireSession {
     readonly sent: Uint8Array[] = [];
+    /** Reject every write, the way a closing session does. */
+    failWrites = false;
     ready = Promise.resolve();
     closed = new Promise<unknown>(() => { /* never settles: the session stays up */ });
     closeCalls = 0;
@@ -38,7 +40,10 @@ class FakeSession implements WireSession {
                 },
             }),
             writable: new WritableStream<Uint8Array>({
-                write(chunk) { self.sent.push(chunk.slice()); },
+                write(chunk) {
+                    if (self.failWrites) throw new Error('the stream is broken');
+                    self.sent.push(chunk.slice());
+                },
             }),
         };
     }
@@ -157,6 +162,39 @@ describe('scripted wire client — outbound', () => {
         const pc2 = sent[3].msg.payload(new PlayerCommand()) as PlayerCommand;
         expect(pc2.sequence()).toBe(2);
         expect(pc2.squadIdsLength()).toBe(0);
+    });
+
+    it('tallies what it sent by ClientPayload tag, so a gate need not hardcode one', async () => {
+        // The replay spectate gate (PLAN-replay §7.11 T2-a-1) asserts "the
+        // server refused the verb I sent" and has to name that verb with the
+        // number the generated schema gave it. A constant copied into the gate
+        // would keep passing across a schema renumber.
+        const session = new FakeSession();
+        const client = makeClient(session);
+        await client.connect();
+        client.sendPlayerCommand({ commandId: 10, squadIds: [1] });
+        await client.flush();
+
+        expect(Object.fromEntries(client.sentByPayload)).toEqual({
+            [ClientPayload.Handshake]: 1,
+            [ClientPayload.AuthRequest]: 1,
+            [ClientPayload.PlayerCommand]: 1,
+        });
+        expect(client.writeErrors).toEqual([]);
+    });
+
+    it('reports a rejected write instead of losing it', async () => {
+        // A send whose bytes never left was voided until 2026-08-14, which
+        // reads as "sent": an arm asserting on the server's answer would blame
+        // the server for a message the harness never delivered.
+        const session = new FakeSession();
+        session.failWrites = true;
+        const client = makeClient(session);
+        await client.connect();
+        await client.flush();
+
+        expect(client.writeErrors.length).toBeGreaterThan(0);
+        expect(client.writeErrors[0]).toMatch(/stream is broken/);
     });
 });
 

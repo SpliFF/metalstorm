@@ -1665,11 +1665,14 @@ int main(int argc, char* argv[])
     // being skipped. A short replay that says why is a usable artefact; a
     // complete-looking replay that quietly dropped an input is the failure this
     // whole subsystem exists to make impossible.
+    // The wire frame carries an envelope byte ahead of the FlatBuffer, and this
+    // peek used to verify the buffer WITH it attached — so it read NONE for
+    // every valid message and the replay gate below refused nothing (found
+    // 2026-08-14 by pointing the scripted wire client at a replay server: a
+    // spectator's PlayerCommand reached HandleMessage and was journaled). One
+    // decoder now, `Protocol::PeekClientPayloadType`, shared with the handler.
     auto PeekClientPayloadType = [](const InboundMessage& m) -> uint8_t {
-        flatbuffers::Verifier v(m.data.data(), m.data.size());
-        if (!SpringWeb::VerifyClientMessageBuffer(v)) return 0;
-        const auto* cm = SpringWeb::GetClientMessage(m.data.data());
-        return cm == nullptr ? 0 : static_cast<uint8_t>(cm->payload_type());
+        return wireframe::PeekClientPayloadType(m.data.data(), m.data.size());
     };
 
     auto FeedReplayRecord = [&](const syncedinput::Record& r) {
