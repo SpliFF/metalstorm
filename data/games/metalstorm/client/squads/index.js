@@ -58,6 +58,11 @@ export { MOVEMENT_PROFILES, profileFor } from './movement-profiles.js';
 export { createStore, allocPool, layoutViews, allocRun, freeRun, growStore, isAlive, isReleased, MFLAG_ALIVE, MFLAG_RELEASED, MFLAG_COLUMN } from './soa-store.js';
 export { createGrid, rebuildGrid, queryInto } from './soa-grid.js';
 export { SquadRec, createSquadRec } from './soa-squad.js';
+export {
+  stepMembers, createSchedule, scheduleReset, schedulePush,
+  centroidStep, coastSquad, stepTransport,
+  STEP_FULL, STEP_CENTROID, STEP_COAST,
+} from './soa-kernel.js';
 
 /**
  * Create a squad system.

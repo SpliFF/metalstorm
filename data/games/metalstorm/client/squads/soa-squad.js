@@ -58,6 +58,11 @@ export class SquadRec {
     this.def = def;
     this.profile = profileFor(def?.customParams?.ms_class);
 
+    // Steerer as a small integer (§11a): the kernel switches on this ONCE per
+    // squad so each inner member loop stays monomorphic. Keep in lockstep with
+    // movement-profiles.js's `steerer` strings — this is the only translation.
+    this.steerer = this.profile.steerer === 'naval' ? 1 : this.profile.steerer === 'air' ? 2 : 0;
+
     this.size = Math.max(1, def.squadSize | 0);
     this.base = allocRun(store, this.size);
     const { slotsX, slotsZ } = slotsFor(def.formationType, this.size, def.formationRadius);
@@ -90,6 +95,20 @@ export class SquadRec {
     this.transportHeuristic = false;
 
     this.onWreck = null;                  // installed by SquadManager, same seam as OO Squad
+
+    // --- kernel-facing per-squad state (S4, §11a's per-squad header) --------
+    // Same fields, same meanings, as the OO Squad's `_prevUpdateCx`/
+    // `_centroidSpeed`/`_lastAppliedCx`/`_lastSteppedAt` — public here because
+    // the kernel is a set of free functions over the record, not methods on it.
+    this.prevUpdateCx = null; this.prevUpdateCz = null; this.prevUpdateHeading = 0;
+    this.centroidSpeed = 0;
+    this.headingRate = 0;
+    // "the centroid members are currently positioned consistent with" — the
+    // governor's coast baseline (§14 S2). Advanced by every path that already
+    // rigid-moves or re-places every member, or a following coast() would apply
+    // the same delta twice.
+    this.lastAppliedCx = 0; this.lastAppliedCz = 0;
+    this._lastSteppedAt = null;
   }
 
   get lod() { return this._lod; }
@@ -101,6 +120,17 @@ export class SquadRec {
     const prev = this._lod;
     this._lod = value;
     if (!this.spawned) return;
+    // Air holds its cruise altitude in the reduced tier by replaying each
+    // member's altitude RELATIVE to the centroid — there is no ground to sample
+    // it back from. Snapshot it on the way down, `icon` included (its mark
+    // reaches the same centroid step and would otherwise replay a stale offset).
+    if (value !== 'full' && this.steerer === 2) {
+      const store = this.store;
+      for (let i = this.base; i < this.base + this.size; i++) {
+        if (!isAlive(store, i) || isReleased(store, i)) continue;
+        store.mCentroidDy[i] = store.my[i] - this.cy;
+      }
+    }
     if (value === 'icon') applyIconVisibility(this.store, this, this.backend);
     else if (prev === 'icon') rebuildAllInstances(this.store, this, this.backend);
   }
@@ -129,6 +159,9 @@ export class SquadRec {
       }
       this.trail.length = 0;
       this.trail.push({ x: this.cx, z: this.cz });
+      // The shift above already moved every member to match the new centroid —
+      // advance the coast baseline or a later coast() re-applies the same jump.
+      this.lastAppliedCx = this.cx; this.lastAppliedCz = this.cz;
     } else {
       recordTrail(this);
     }
@@ -184,13 +217,15 @@ export class SquadRec {
 
   // --- per-frame (no kernel yet — S4 replaces the transport/steering body) -
 
-  /** Extra args (neighbourQuery/passability/bigUnits) accepted and ignored —
-   *  SquadManager drives every squad with the same call shape regardless of
-   *  engine (§10a). Only the event-time pieces that don't need real stepping
-   *  run here: the death-stagger drip and the transport state timer. */
+  /** Event-time fallback ONLY — since S4 the per-frame path is
+   *  soa-kernel.js's `stepMembers`, which SquadManager drives for every SoA
+   *  squad (steering, transport stepping and the death drain all live there).
+   *  This remains so a caller holding a bare SquadRec (a test, a tool) still
+   *  gets the death-stagger drip; it deliberately does NOT step members or
+   *  advance transport, rather than running a second, differently-behaved
+   *  driver alongside the kernel's. */
   update(dt, nowSec) {
     drainDeathQueue(this.store, this, this.backend, nowSec);
-    tickTransport(this, dt);
   }
 
   destroy(nowSec) {
@@ -250,6 +285,8 @@ function spawnInitial(store, sq, backend) {
   }
   sq.aliveCount = initialAlive;
   sq.spawned = true;
+  // Members are already positioned consistent with the spawn centroid (§14 S2).
+  sq.lastAppliedCx = sq.cx; sq.lastAppliedCz = sq.cz;
 }
 
 function visualFor(sq, localSlot) {
@@ -318,6 +355,9 @@ function rebuildAllInstances(store, sq, backend) {
     if (!isAlive(store, i) || !isReleased(store, i)) continue;
     rebuildSlot(store, sq, backend, i);
   }
+  // Members now sit at slots around the CURRENT centroid — re-base the coast
+  // baseline (§14 S2) or the next coast double-shifts what this just placed.
+  sq.lastAppliedCx = sq.cx; sq.lastAppliedCz = sq.cz;
 }
 
 // --- casualties (squad-casualties §2-§6) ---------------------------------
@@ -484,28 +524,38 @@ function spawnAtDropPoint(store, sq, backend, airborne) {
     setReleased(store, i, false);
   }
   sq.iconAlive = -1;
+  // Members now match the drop-point centroid — same baseline reasoning as the
+  // teleport-guard shift in setPose (§14 S2).
+  sq.lastAppliedCx = sq.cx; sq.lastAppliedCz = sq.cz;
 }
 
-/** Timer-only transport driver — no real steering exists yet (S4), so
- *  BOARDING can't detect "members arrived at the carrier" the way squad.js
- *  does; it simply waits out `transportBoardTimeSec`, and a paradrop's
- *  descent is skipped (settles on `transportUnloadSettleSec` instead). Both
- *  simplifications are visual-fidelity gaps the S4 kernel port closes, not
- *  correctness gaps in the state machine itself (FREE/BOARDING/LOADED/
- *  UNLOADING transitions and their side effects — release/rebuild/aliveCount
- *  — are exact). */
-function tickTransport(sq, dt) {
-  if (sq.transportState === 'FREE') return;
-  sq.transportElapsed += dt;
-  if (sq.transportState === 'BOARDING') {
-    if (sq.transportElapsed >= sq.cfg.transportBoardTimeSec) {
-      releaseAllInstances(sq.store, sq, sq.backend);
-      sq.transportState = 'LOADED';
-    }
-    return;
-  }
-  if (sq.transportState === 'LOADED') return;
-  if (sq.transportElapsed >= sq.cfg.transportUnloadSettleSec) sq.transportState = 'FREE';
+// S3's timer-only `tickTransport` is GONE, not disabled: S4's kernel
+// (soa-kernel.js `stepTransport`) drives the real thing — BOARDING steers
+// members to the carrier and detects arrival, a paradrop descends — and two
+// drivers for one state machine is exactly the shape that goes silently out of
+// sync. `SquadRec.update` no longer advances transport at all; the manager
+// drives the kernel.
+
+// --- kernel seam (S4) -----------------------------------------------------
+// The stepping kernel is a set of free functions in soa-kernel.js, so the
+// event-time pieces it still has to run are exported here rather than reached
+// through a method. Nothing new is implemented for them.
+
+/** Drip the staggered death queue (event-time; runs on stepped AND coasted
+ *  frames — squad-sync §5 pitfall 3). */
+export function drainDeaths(store, sq, backend, nowSec) {
+  drainDeathQueue(store, sq, backend, nowSec);
+}
+
+/** Release every member's instance (transport LOADED). */
+export function releaseAllMemberInstances(store, sq, backend) {
+  releaseAllInstances(store, sq, backend);
+}
+
+/** `icon` roster maintenance: re-elect the mark when casualties have landed
+ *  since it was chosen (one integer compare per icon squad per frame). */
+export function maintainIconRoster(store, sq, backend) {
+  if (sq.lod === 'icon' && sq.iconAlive !== sq.aliveCount) applyIconVisibility(store, sq, backend);
 }
 
 // --- factory --------------------------------------------------------------

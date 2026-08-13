@@ -6,8 +6,13 @@ import { DEFAULT_CONFIG, linearCount } from './config.js';
 import { BigUnitRepulsor } from './big-unit-repulsor.js';
 import { createGovernorState, updateGovernor, strideForLevel } from './governor.js';
 import { createPatchSet } from './patches.js';
-import { createStore } from './soa-store.js';
+import { createStore, MFLAG_ALIVE, MFLAG_RELEASED } from './soa-store.js';
 import { createSquadRec } from './soa-squad.js';
+import { createGrid, rebuildGrid } from './soa-grid.js';
+import {
+  createSchedule, scheduleReset, schedulePush, stepMembers,
+  STEP_FULL, STEP_CENTROID, STEP_COAST,
+} from './soa-kernel.js';
 
 // Cell-index packing stride for the numeric spatial-hash key (see _key).
 // Keeps `gx * KEY_STRIDE + gz` inside SMI range and injective for the cell
@@ -31,6 +36,26 @@ export class SquadManager {
     // per-frame code until S4.
     this.engine = this.cfg.engine === 'soa' ? 'soa' : 'oo';
     this.store = this.engine === 'soa' ? createStore(this.cfg.soaInitialMembers) : null;
+
+    // SoA per-frame machinery (§11, milestone S4). All of it is reused scratch:
+    // the CSR grid replaces the Map broad-phase, the schedule is the kernel's
+    // work list, and the four gather buffers are grown, never re-allocated per
+    // frame. Null on the OO engine — none of it is touched there.
+    this._soaGrid = this.engine === 'soa' ? createGrid(this.cfg) : null;
+    this._soaSchedule = this.engine === 'soa' ? createSchedule() : null;
+    this._soaSquadList = [];          // dense SquadRec[] the schedule indexes
+    this._soaSlots = new Int32Array(0);
+    this._soaSlotCount = 0;
+    this._soaPseudoX = new Float32Array(0);
+    this._soaPseudoZ = new Float32Array(0);
+    this._soaPseudoR = new Float32Array(0);
+    this._soaPseudoCount = 0;
+    // Grid extent. An adapter with a real map should call setMapBounds();
+    // absent one, the grid sizes itself to the members it is about to hold,
+    // which is correct (cells outside are empty by construction) and keeps a
+    // headless test on the honest path.
+    this._soaBounds = { minX: 0, minZ: 0, maxX: 1, maxZ: 1 };
+    this._mapBounds = null;
 
     this.squads = new Map();        // sim unit id → Squad | SquadRec
     // Last known pose/strength for an id whose def hasn't arrived yet
@@ -158,7 +183,15 @@ export class SquadManager {
    *  drawn budget rather than by nudging the count. */
   setIconMemberCount(n) {
     this.cfg.iconMemberCount = Math.max(0, n | 0);
-    for (const sq of this.squads.values()) if (sq.lod === 'icon') sq._applyIconVisibility();
+    for (const sq of this.squads.values()) {
+      if (sq.lod !== 'icon') continue;
+      // A SquadRec has no `_applyIconVisibility` method (the SoA icon roster is
+      // maintained by the kernel); marking the elected count stale re-elects it
+      // on the squad's next centroid step, which is the same effect one frame
+      // later. Calling the OO method blindly here used to throw on `engine:'soa'`.
+      if (sq._applyIconVisibility) sq._applyIconVisibility();
+      else sq.iconAlive = -1;
+    }
     return this.cfg.iconMemberCount;
   }
 
@@ -671,6 +704,15 @@ export class SquadManager {
     // Independent of the grid, so wreck expiry must not stall while L2+ is
     // engaged — otherwise `_wrecks` grows for as long as the overload lasts.
     this._pruneWrecks();
+
+    if (this.engine === 'soa') {
+      for (const bu of this._bigUnitList) bu.update(dt);
+      this._stepSoaFrame(dt, level, stride, skipSeparationEntirely);
+      const soaSampleMs = (performance.now() - frameStart) + this._lastFlushMs;
+      updateGovernor(this._governor, soaSampleMs, dt * 1000, this.cfg);
+      return;
+    }
+
     if (skipSeparationEntirely) {
       this._grid.clear();
       this._denseAgg.clear();
@@ -697,19 +739,7 @@ export class SquadManager {
     // demotion is then skipped entirely, which is the conservative choice
     // (never demote what cannot be ordered) and keeps a headless test that
     // drives update() directly on the honest path.
-    let farthestThird = null;
-    if (level >= 6 && this._viewSet) {
-      const full = [];
-      for (const sq of this.squads.values()) {
-        if (sq.lod === 'full' && typeof sq._lodD2 === 'number') full.push(sq);
-      }
-      // Squad COUNT here, not member count — an O(squads log squads) sort only
-      // at the ladder's top level, dwarfed by the steering it replaces.
-      full.sort((a, b) => b._lodD2 - a._lodD2);   // farthest first
-      farthestThird = new Set();
-      const n = Math.floor(full.length / 3);
-      for (let i = 0; i < n; i++) farthestThird.add(full[i].id);
-    }
+    const farthestThird = this._farthestThirdSet(level);
 
     const stepped = this._stepped, coasted = this._coasted;
     stepped.full = 0; stepped.centroid = 0; stepped.icon = 0;
@@ -753,6 +783,170 @@ export class SquadManager {
     // plus the most recent flush the adapter reported.
     const sampleMs = (performance.now() - frameStart) + this._lastFlushMs;
     updateGovernor(this._governor, sampleMs, dt * 1000, this.cfg);
+  }
+
+  /** L6's "demote farthest third" (§12c's ladder table) ranks full squads by
+   *  the member budget's own camera distance (`_lodD2`, refreshed on its
+   *  re-rank cadence) rather than a second camera pass. With no view fed in,
+   *  `_lodD2` orders nothing — the demotion is then skipped entirely, which is
+   *  the conservative choice (never demote what cannot be ordered) and keeps a
+   *  headless test that drives update() directly on the honest path. Shared by
+   *  both engines. */
+  _farthestThirdSet(level) {
+    if (level < 6 || !this._viewSet) return null;
+    const full = [];
+    for (const sq of this.squads.values()) {
+      if (sq.lod === 'full' && typeof sq._lodD2 === 'number') full.push(sq);
+    }
+    // Squad COUNT here, not member count — an O(squads log squads) sort only at
+    // the ladder's top level, dwarfed by the steering it replaces.
+    full.sort((a, b) => b._lodD2 - a._lodD2);   // farthest first
+    const set = new Set();
+    const n = Math.floor(full.length / 3);
+    for (let i = 0; i < n; i++) set.add(full[i].id);
+    return set;
+  }
+
+  // --- SoA frame (PLAN-metalstorm-squad-performance.md §11, S4) ------------
+
+  /** The SoA engine's whole per-frame body: rebuild the CSR grid, build the
+   *  kernel's work list under the same tier/time-slicing rules the OO loop
+   *  applies, then one call into `stepMembers`. The rules live here, not in the
+   *  kernel, for the same reason they live in `update()` for the OO engine —
+   *  they are policy (governor + member budget), and the kernel is mechanism. */
+  _stepSoaFrame(dt, level, stride, skipSeparationEntirely) {
+    const store = this.store;
+
+    // The grid holds only `full` squads' members and is skippable in its
+    // entirety at L2+ (nothing would query it) — the same rule, and the same
+    // saving, as the Map grid's.
+    let grid = null;
+    if (!skipSeparationEntirely) {
+      this._gatherSoaGridInput();
+      rebuildGrid(this._soaGrid, store, this._soaSlots, this._soaSlotCount, this._soaBounds,
+        this._soaPseudoX, this._soaPseudoZ, this._soaPseudoR, this._soaPseudoCount);
+      grid = this._soaGrid;
+    }
+
+    const farthestThird = this._farthestThirdSet(level);
+    const stepped = this._stepped, coasted = this._coasted;
+    stepped.full = 0; stepped.centroid = 0; stepped.icon = 0;
+    coasted.full = 0; coasted.centroid = 0; coasted.icon = 0;
+    const frameNo = ++this._frameNo;
+
+    const list = this._soaSquadList;
+    list.length = 0;
+    for (const sq of this.squads.values()) list.push(sq);
+
+    const schedule = scheduleReset(this._soaSchedule, list.length);
+    schedule.level = level;
+    schedule.frameNo = frameNo;
+
+    let fullIndex = 0;
+    for (let i = 0; i < list.length; i++) {
+      const sq = list[i];
+      const tier = sq.lod;
+      if (tier !== 'full') {
+        // centroid/icon already cost ~nothing per member — never time-sliced.
+        schedulePush(schedule, i, STEP_CENTROID, dt);
+        if (coasted[tier] != null) coasted[tier]++;
+        continue;
+      }
+
+      // Transport owns its own per-member stepping and is rare +
+      // latency-sensitive — it always gets a real frame, bypassing the schedule.
+      const bypassSlicing = sq.transportState !== 'FREE';
+      const myTurn = bypassSlicing || stride <= 1 || (fullIndex % stride) === (frameNo % stride);
+      fullIndex++;
+
+      if (myTurn) {
+        // Real elapsed time since this squad last actually stepped, so a
+        // half-rate squad integrates double dt and its motion speed is
+        // preserved — only the update granularity drops (§12d).
+        const elapsed = sq._lastSteppedAt == null ? dt : this._now - sq._lastSteppedAt;
+        const forceCentroid = !bypassSlicing && farthestThird !== null && farthestThird.has(sq.id);
+        schedulePush(schedule, i, forceCentroid ? STEP_CENTROID : STEP_FULL, elapsed);
+        sq._lastSteppedAt = this._now;
+        stepped.full++;
+      } else {
+        schedulePush(schedule, i, STEP_COAST, dt);
+        coasted.full++;
+      }
+    }
+
+    stepMembers(store, list, grid, this.passability, this._bigUnitList, this.backend,
+      dt, this._now, schedule);
+  }
+
+  /** Map extent for the CSR grid. Optional — see `_soaBounds`. */
+  setMapBounds(minX, minZ, maxX, maxZ) {
+    this._mapBounds = { minX, minZ, maxX, maxZ };
+  }
+
+  /** Fill the member-slot list, the pseudo-member arrays (repulsors + in-grace
+   *  wrecks, §11c) and the grid bounds for this frame. Grows its buffers; never
+   *  allocates once they are big enough. Expects `_pruneWrecks` to have run. */
+  _gatherSoaGridInput() {
+    const store = this.store;
+    if (this._soaSlots.length < store.highWater) {
+      this._soaSlots = new Int32Array(Math.max(16, store.highWater));
+    }
+    let n = 0;
+    let minX = Infinity, minZ = Infinity, maxX = -Infinity, maxZ = -Infinity;
+    for (const sq of this.squads.values()) {
+      if (sq.lod !== 'full') continue;
+      const end = sq.base + sq.size;
+      for (let i = sq.base; i < end; i++) {
+        if ((store.mFlags[i] & (MFLAG_ALIVE | MFLAG_RELEASED)) !== MFLAG_ALIVE) continue;
+        this._soaSlots[n++] = i;
+        const x = store.mx[i], z = store.mz[i];
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (z < minZ) minZ = z;
+        if (z > maxZ) maxZ = z;
+      }
+    }
+    this._soaSlotCount = n;
+
+    const pseudoNeeded = this._repulsors.size + this._wrecks.length;
+    if (this._soaPseudoX.length < pseudoNeeded) {
+      const cap = Math.max(16, pseudoNeeded);
+      this._soaPseudoX = new Float32Array(cap);
+      this._soaPseudoZ = new Float32Array(cap);
+      this._soaPseudoR = new Float32Array(cap);
+    }
+    let p = 0;
+    for (const r of this._repulsors.values()) {
+      this._soaPseudoX[p] = r.x; this._soaPseudoZ[p] = r.z; this._soaPseudoR[p] = r.radius;
+      if (r.x < minX) minX = r.x;
+      if (r.x > maxX) maxX = r.x;
+      if (r.z < minZ) minZ = r.z;
+      if (r.z > maxZ) maxZ = r.z;
+      p++;
+    }
+    for (let i = 0; i < this._wrecks.length; i++) {
+      const w = this._wrecks[i];
+      this._soaPseudoX[p] = w.x; this._soaPseudoZ[p] = w.z; this._soaPseudoR[p] = w.radius;
+      if (w.x < minX) minX = w.x;
+      if (w.x > maxX) maxX = w.x;
+      if (w.z < minZ) minZ = w.z;
+      if (w.z > maxZ) maxZ = w.z;
+      p++;
+    }
+    this._soaPseudoCount = p;
+
+    const b = this._soaBounds;
+    if (this._mapBounds) {
+      b.minX = this._mapBounds.minX; b.minZ = this._mapBounds.minZ;
+      b.maxX = this._mapBounds.maxX; b.maxZ = this._mapBounds.maxZ;
+    } else if (n + p === 0) {
+      b.minX = 0; b.minZ = 0; b.maxX = 1; b.maxZ = 1;
+    } else {
+      // One cell of margin so an occupant sitting exactly on the extent still
+      // has its 3x3 neighbourhood inside the grid rather than clamped onto it.
+      const m = this._soaGrid.cell;
+      b.minX = minX - m; b.minZ = minZ - m; b.maxX = maxX + m; b.maxZ = maxZ + m;
+    }
   }
 
   /** External timing hook: the render adapter owns the backend flush, so it is

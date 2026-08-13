@@ -14,7 +14,10 @@
 
 import { capTurnRate } from './steering.js';
 
-export function steerMember(squad, member, dt, ctx) {
+/** Out-param form (PLAN-metalstorm-squad-performance.md §11b) — see
+ *  air-cohesion.js's twin for why: the SoA kernel needs an allocation-free
+ *  call, `steerMember` stays the allocating parity oracle. */
+export function steerMemberInto(squad, member, dt, ctx, out) {
   const { profile, slotWorld, columnTarget, centroidSpeed } = ctx;
   const maxSpeed = squad.def.maxSpeed * (profile.cruiseSpeedMul ?? 1);
   const arrivalRadius = squad.cfg.arrivalRadius * (profile.arrivalRadiusMul ?? 1);
@@ -37,9 +40,12 @@ export function steerMember(squad, member, dt, ctx) {
 
   if (profile.subDepth != null) member.depth = profile.subDepth; // cosmetic; dive/surface trigger is a future hook (needs sim submerge state, not yet streamed)
 
-  return {
-    x: Math.sin(newHeading) * speed,
-    y: 0,
-    z: Math.cos(newHeading) * speed,
-  };
+  out.x = Math.sin(newHeading) * speed;
+  out.y = 0;
+  out.z = Math.cos(newHeading) * speed;
+  return out;
+}
+
+export function steerMember(squad, member, dt, ctx) {
+  return steerMemberInto(squad, member, dt, ctx, { x: 0, y: 0, z: 0 });
 }

@@ -28,6 +28,10 @@ const FIELDS = [
   ['mRepackT', Float32Array],
   ['mStuck', Uint16Array],
   ['mLastDist2', Float32Array],
+  // Altitude above the squad centroid, snapshotted when an AIR squad drops to
+  // the `centroid`/`icon` tier (Member.centroidDy's twin): that tier has no
+  // ground sample to rebuild a flyer's cruise height from. Ground/naval unused.
+  ['mCentroidDy', Float32Array],
   ['mPool', Int32Array], ['mPoolIdx', Int32Array],
 ];
 
