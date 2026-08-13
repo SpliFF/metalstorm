@@ -888,6 +888,9 @@ build/debug/spring-server \
   --snapshot-roundtrip 60:20 --roundtrip-strict     # must PASS
 ```
 
+Run it at `440:30` as well (same command, same fixture): that window crosses a wind
+update and is the one that found Q-P6 — see below. Both windows must PASS.
+
 It is not inert: neutralise Q-P4's `(activeIndex, id)` restore ordering and the same
 run FAILS with that defect's own signature — `globals` (the RNG position) and `units`
 disagree, and the re-capture stops being idempotent. Verified 2026-08-14.
@@ -919,13 +922,16 @@ With the wind section applied, both arms hold the same wind at frame 470 and
 (the matched control), the re-capture DIFFERS, the arms sit 30 frames apart in the cycle,
 and `globals` byte 4 — the RNG position — diverges.
 
-The same window on the **static** fixture is the one that found **Q-P6** (2026-08-14):
-`440:30 --roundtrip-strict` there holds all 30 hashes and every unit identical and
-still fails, on `gameRules` alone — the restored arm re-published its rules params
-under differently spelled keys (`warlog_1_kind` → `warlog_1.0_kind`,
-`objective_3_state` → `objective_3.0_state`), because the synced-Lua walk restores
+The same window on the **static** fixture is the one that found **Q-P6** (2026-08-14),
+and it is now the second standing regression bar — `440:30 --roundtrip-strict` on
+`roundtrip-static` **must PASS**. It found the defect by holding all 30 hashes and every
+unit identical and still failing, on `gameRules` alone: the restored arm re-published its
+rules params under differently spelled keys (`warlog_1_kind` → `warlog_1.0_kind`,
+`objective_3_state` → `objective_3.0_state`), because the synced-Lua walk restored
 every number with `lua_pushnumber` and Lua 5.4 then stringifies an integer-valued
-float as `1.0`. When a rules-params section disagrees, the verdict now names the keys:
+float as `1.0`. Fixed the same day by carrying Lua 5.4's integer subtype through the
+codec (`syncedLua` v2). When a rules-params section disagrees, the verdict names the keys —
+this is the failure it printed:
 
 ```
 snapshot round-trip: gameRules — 63 vs 79 params; 0 differ in value,

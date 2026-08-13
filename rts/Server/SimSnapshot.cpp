@@ -51,7 +51,8 @@ const std::vector<SectionSpec>& Sections()
         // v2: + UnitState::activeIndex (Q-P4). v3: + UnitState::move (option A).
         {SectionId::Units,          3, "units",          true,  ""},
         {SectionId::Features,       1, "features",       true,  ""},
-        {SectionId::SyncedLua,      1, "syncedLua",      true,  ""},
+        // v2: + luasnapshot Value type 5, Lua 5.4's integer subtype (Q-P6).
+        {SectionId::SyncedLua,      2, "syncedLua",      true,  ""},
         {SectionId::GameRules,      1, "gameRules",      true,  ""},
         {SectionId::EnvResources,   1, "envResources",   true,  ""},
         {SectionId::DefNames,       1, "defNames",       true,  ""},
@@ -1971,9 +1972,9 @@ void ApplyRulesParams(const std::vector<RulesParamState>& in, LuaRulesParams::Pa
 /// light-userdata tag, ...) fails the build until the codec writes it.
 int CensusLuaValue(const luasnapshot::Value& v)
 {
-    const auto& [type, b, num, str, table] = v;
-    (void)type; (void)b; (void)num; (void)str; (void)table;
-    return 5;
+    const auto& [type, b, num, i, str, table] = v;
+    (void)type; (void)b; (void)num; (void)i; (void)str; (void)table;
+    return 6;
 }
 
 const SectionSpec* SpecFor(uint16_t id)
@@ -2392,6 +2393,11 @@ void WriteLuaValue(Writer& w, const luasnapshot::Value& v)
             std::memcpy(&bits, &v.num, sizeof(bits));
             w.U64(bits);
         } break;
+        case luasnapshot::Value::Type::Integer:
+            // Two's complement through U64 rather than the double path: an
+            // integer past 2^53 is exactly what the subtype exists to keep.
+            w.U64(static_cast<uint64_t>(v.i));
+            break;
         case luasnapshot::Value::Type::String:
             w.Str(v.str);
             break;
@@ -2416,7 +2422,7 @@ luasnapshot::Value ReadLuaValue(Reader& r, int depth)
     }
 
     const uint8_t type = r.U8();
-    if (type > static_cast<uint8_t>(luasnapshot::Value::Type::Table)) {
+    if (type > static_cast<uint8_t>(luasnapshot::Value::Type::Integer)) {
         r.Fail();
         return v;
     }
@@ -2432,6 +2438,9 @@ luasnapshot::Value ReadLuaValue(Reader& r, int depth)
             const uint64_t bits = r.U64();
             std::memcpy(&v.num, &bits, sizeof(v.num));
         } break;
+        case luasnapshot::Value::Type::Integer:
+            v.i = static_cast<int64_t>(r.U64());
+            break;
         case luasnapshot::Value::Type::String:
             v.str = r.Str();
             break;

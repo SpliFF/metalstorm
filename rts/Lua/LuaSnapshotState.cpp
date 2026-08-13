@@ -49,6 +49,10 @@ bool Value::operator==(const Value& o) const
 		case Type::Number: {
 			return std::memcmp(&num, &o.num, sizeof(num)) == 0;
 		}
+		// A different subtype is a different value: 1 and 1.0 are `==` in Lua
+		// and stringify differently, which is the whole of Q-P6, so the codec's
+		// own equality must not call them the same.
+		case Type::Integer: return i == o.i;
 		case Type::String: return str == o.str;
 		case Type::Table: {
 			if (table.size() != o.table.size())
@@ -73,14 +77,33 @@ bool Value::operator==(const Value& o) const
 // differ byte-for-byte. Sorting is what makes "the same state produces the same
 // bytes" true, which is what lets a test compare payloads at all.
 
+/// Sort class, not the wire discriminator: `Integer` was appended to the enum so
+/// the wire numbers stayed stable, but the two number subtypes are one Lua type
+/// and keys 1 and 1.5 in the same table must still sort 1 < 1.5 — otherwise the
+/// canonical order of a mixed-key table would depend on which subtype a gadget
+/// happened to write, which is exactly the accident Q-P6 is about.
+static int SortClass(Value::Type t)
+{
+	return (t == Value::Type::Integer) ? static_cast<int>(Value::Type::Number)
+	                                   : static_cast<int>(t);
+}
+
 static bool KeyLess(const Value& a, const Value& b)
 {
-	if (a.type != b.type)
-		return static_cast<uint8_t>(a.type) < static_cast<uint8_t>(b.type);
+	if (SortClass(a.type) != SortClass(b.type))
+		return SortClass(a.type) < SortClass(b.type);
+
+	if (a.IsNumeric()) {
+		// Integers and floats interleave by value; an exact tie (3 vs 3.0) puts
+		// the integer first, so the order is total and not a stable-sort
+		// artefact of capture order.
+		if (a.AsDouble() != b.AsDouble())
+			return a.AsDouble() < b.AsDouble();
+		return a.type == Value::Type::Integer && b.type != Value::Type::Integer;
+	}
 
 	switch (a.type) {
 		case Value::Type::Bool:   return (a.b ? 1 : 0) < (b.b ? 1 : 0);
-		case Value::Type::Number: return a.num < b.num;
 		case Value::Type::String: return a.str < b.str;
 		default:                  return false;   // nil/table keys never reach here
 	}
@@ -113,6 +136,11 @@ std::string PathStep(const Value& key)
 					ident = false;
 			}
 			return ident ? ("." + key.str) : ("[\"" + key.str + "\"]");
+		}
+		case Value::Type::Integer: {
+			char buf[40];
+			snprintf(buf, sizeof(buf), "[%lld]", static_cast<long long>(key.i));
+			return buf;
 		}
 		case Value::Type::Number: {
 			char buf[40];
@@ -176,6 +204,14 @@ bool CaptureTable(lua_State* L, int idx, Value& out, int depth,
 			case LUA_TBOOLEAN: key = Value::Boolean(lua_toboolean(L, -2)); break;
 			case LUA_TSTRING:  key = Value::Str(lua_tostring(L, -2));      break;
 			case LUA_TNUMBER: {
+				// An integer key is the common case (every array index) and it
+				// is the one that must not come back as a float: `t[1]` and
+				// `t[1.0]` are the same slot in Lua but not the same string
+				// once a gadget concatenates the key.
+				if (lua_isinteger(L, -2)) {
+					key = Value::Int(lua_tointeger(L, -2));
+					break;
+				}
 				const double n = lua_tonumber(L, -2);
 				if (std::isnan(n)) {
 					// Unreachable in practice (Lua refuses a NaN key on
@@ -246,6 +282,12 @@ bool CaptureAt(lua_State* L, int idx, Value& out, int depth,
 			out = Value::Boolean(lua_toboolean(L, idx));
 			return true;
 		case LUA_TNUMBER: {
+			// Lua 5.4 keeps the subtype; carry it (Q-P6). No NaN check on this
+			// arm: an integer cannot be one.
+			if (lua_isinteger(L, idx)) {
+				out = Value::Int(lua_tointeger(L, idx));
+				return true;
+			}
 			const double n = lua_tonumber(L, idx);
 			if (std::isnan(n)) {
 				// A NaN in synced state is a desync in waiting; the engine
@@ -319,6 +361,7 @@ bool PushAt(lua_State* L, const Value& v, int depth, std::string& err)
 		case Value::Type::Nil:    lua_pushnil(L);                       return true;
 		case Value::Type::Bool:   lua_pushboolean(L, v.b ? 1 : 0);      return true;
 		case Value::Type::Number: lua_pushnumber(L, v.num);             return true;
+		case Value::Type::Integer: lua_pushinteger(L, static_cast<lua_Integer>(v.i)); return true;
 		case Value::Type::String: lua_pushlstring(L, v.str.data(), v.str.size()); return true;
 		case Value::Type::Table:  break;
 	}
@@ -328,7 +371,7 @@ bool PushAt(lua_State* L, const Value& v, int depth, std::string& err)
 	// key types instead of guessing.
 	int narr = 0, nrec = 0;
 	for (const auto& kv: v.table)
-		((kv.first.type == Value::Type::Number) ? narr : nrec)++;
+		(kv.first.IsNumeric() ? narr : nrec)++;
 
 	lua_createtable(L, narr, nrec);
 
@@ -339,7 +382,7 @@ bool PushAt(lua_State* L, const Value& v, int depth, std::string& err)
 			err = "decoded state has a table with a nil or table key";
 			return false;
 		}
-		if (kv.first.type == Value::Type::Number && std::isnan(kv.first.num)) {
+		if (kv.first.type == Value::Type::Number && std::isnan(kv.first.num)) {   // an Integer key cannot be NaN
 			err = "decoded state has a NaN table key";
 			return false;
 		}
