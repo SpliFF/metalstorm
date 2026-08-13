@@ -2474,6 +2474,83 @@ TEST_CASE("CompareUnits: a payload with no units section is NOT MEASURED") {
           std::string::npos);
 }
 
+// ───────── DescribeRulesParamsDivergence (the static fixture's diagnosis) ─────────
+//
+// On `roundtrip_static` there are no moving units to blame, so a strict
+// round-trip failure lands in the gadgets' own state — and "the gameRules
+// section differs" over ~80 keys is not a diagnosis. These cover the three
+// shapes a rules-params disagreement comes in, because they route to different
+// investigations: a changed VALUE is a gadget that computed something else, a
+// key present on one side only is a gadget that published (or lost) an entry.
+
+namespace {
+
+std::vector<uint8_t> gameRulesPayload(const std::vector<RulesParamState>& p)
+{
+    std::vector<uint8_t> body;
+    EncodeGameRules(p, body);
+    return framePayload({{static_cast<uint16_t>(SectionId::GameRules), body}});
+}
+
+RulesParamState numParam(const std::string& key, float v)
+{
+    RulesParamState p;
+    p.key = key; p.los = 0; p.type = 1; p.f = v;
+    return p;
+}
+
+}  // namespace
+
+TEST_CASE("DescribeRulesParamsDivergence: identical param maps disagree in nothing") {
+    const auto p = gameRulesPayload({numParam("warlog_seq", 3.0f)});
+    const std::string d = DescribeRulesParamsDivergence(p, p, SectionId::GameRules);
+    CHECK(d.find("1 vs 1 params") != std::string::npos);
+    CHECK(d.find("0 differ in value") != std::string::npos);
+    CHECK(d.find("0 only in arm A") != std::string::npos);
+    CHECK(d.find("0 only in arm B") != std::string::npos);
+}
+
+TEST_CASE("DescribeRulesParamsDivergence: names the key and both values") {
+    const auto a = gameRulesPayload({numParam("warlog_seq", 3.0f)});
+    const auto b = gameRulesPayload({numParam("warlog_seq", 5.0f)});
+    const std::string d = DescribeRulesParamsDivergence(a, b, SectionId::GameRules);
+    CHECK(d.find("1 differ in value") != std::string::npos);
+    CHECK(d.find("warlog_seq") != std::string::npos);
+    CHECK(d.find("3.000000 vs 5.000000") != std::string::npos);
+}
+
+TEST_CASE("DescribeRulesParamsDivergence: a key is matched by NAME, not by position") {
+    // The live finding this exists for: after a restore the same entries came
+    // back under a differently spelled key (`warlog_1_kind` published as
+    // `warlog_1.0_kind`), so the two maps held the same information and
+    // disagreed on every row. Position-keyed, that reads as "everything
+    // changed"; name-keyed, it reads as what it is — a key one side does not
+    // have. The two maps here are also different SIZES, which a comparison
+    // that walked them in step would run off the end of.
+    const auto a = gameRulesPayload({numParam("warlog_1_kind", 1.0f),
+                                     numParam("warlog_seq", 2.0f)});
+    const auto b = gameRulesPayload({numParam("warlog_1.0_kind", 1.0f),
+                                     numParam("warlog_seq", 2.0f),
+                                     numParam("objective_3.0_state", 1.0f)});
+    const std::string d = DescribeRulesParamsDivergence(a, b, SectionId::GameRules);
+    CHECK(d.find("2 vs 3 params") != std::string::npos);
+    CHECK(d.find("0 differ in value") != std::string::npos);
+    CHECK(d.find("1 only in arm A") != std::string::npos);
+    CHECK(d.find("2 only in arm B") != std::string::npos);
+    CHECK(d.find("only A: warlog_1_kind") != std::string::npos);
+    CHECK(d.find("objective_3.0_state") != std::string::npos);
+}
+
+TEST_CASE("DescribeRulesParamsDivergence: an undecodable side describes nothing") {
+    // Same rule as CompareUnits: "could not compare" must never be spelled the
+    // same way as "compared and agreed", so the caller can stay silent instead
+    // of printing a clean bill of health for a section it never read.
+    const auto good = gameRulesPayload({numParam("warlog_seq", 1.0f)});
+    const auto none = framePayload({{1, std::vector<uint8_t>(21, 0)}});
+    CHECK(DescribeRulesParamsDivergence(good, none, SectionId::GameRules).empty());
+    CHECK(DescribeRulesParamsDivergence(none, good, SectionId::GameRules).empty());
+}
+
 // ───────────── The wind (EnvResourceHandler, the envResources section) ─────────────
 //
 // Wind is synced state on a 450-frame cycle: the frame where windDirTimer == 0

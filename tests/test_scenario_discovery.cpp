@@ -603,6 +603,41 @@ TEST_CASE("shipped metalstorm scenarios: meridian_basin_soak is an ENDLESS "
     CHECK(SD::FindById(found, "meridian_basin_soak") == soak);
 }
 
+TEST_CASE("shipped metalstorm scenarios: roundtrip_static is a STATIC fixture "
+          "no boot path can default to") {
+    // PLAN-persistence.md §8 / Q-P5. `--roundtrip-strict` asserts that a
+    // restored world's next N ticks are bit-for-bit the ticks it replaced, and
+    // that bar is only meaningful where nothing is under a move order: Q-P2
+    // decision D forces `inCommand` false, so a unit executing a command
+    // re-plans and the drift is declared behaviour. docs/debugging-tools.md
+    // asked for a staging-only fixture from the day the flag shipped and none
+    // existed; the standing check ran on `soak-ladder`, whose civilians and
+    // convoys are already moving at frame 2.
+    //
+    // Guarded exactly like meridian_basin_soak, and for the same reason: the
+    // two guards fail differently. `terminal == false` is what DefaultForMap
+    // filters on, `retired == true` is what the create route refuses by id.
+    const std::string gamePath =
+        std::string(SPRING_SOURCE_DIR) + "/data/games/metalstorm";
+    if (!fs::is_directory(fs::path(gamePath) / "scenarios"))
+        return; // content not present in this checkout
+
+    const auto found = SD::Discover(gamePath);
+    REQUIRE(!found.empty());
+
+    const auto* rt = Find(found, "roundtrip_static");
+    REQUIRE(rt != nullptr);
+    CHECK(rt->mapId == "green_flat_x34_v3");
+    CHECK(rt->terminal == false);
+    CHECK(rt->retired == true);
+    CHECK(rt->tutorial == false);
+
+    // Still resolvable by id — the fixture is staged through the `scenario`
+    // modoption, so a fixture that vanished from discovery would stage an
+    // empty world and the round-trip would compare two empty arms and pass.
+    CHECK(SD::FindById(found, "roundtrip_static") == rt);
+}
+
 TEST_CASE("shipped metalstorm scenarios: crossing_standoff is the default war "
           "for scorched_crossing_v2.4") {
     // The other half of §7.6's move: the showcase war is now authored on a map

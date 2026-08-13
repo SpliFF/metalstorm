@@ -283,6 +283,73 @@ std::string DescribeUnitsDivergence(const std::vector<uint8_t>& a,
            (d.first.empty() ? "no per-unit difference" : d.first);
 }
 
+std::string DescribeRulesParamsDivergence(const std::vector<uint8_t>& a,
+                                          const std::vector<uint8_t>& b,
+                                          SectionId section)
+{
+    const auto find = [&](const std::vector<uint8_t>& p,
+                          std::vector<RulesParamState>& out) -> bool {
+        for (const auto& s : WalkSections(p.data(), p.size())) {
+            if (s[0] != static_cast<size_t>(section)) continue;
+            std::string err;
+            return DecodeGameRules(p.data() + s[1], s[2], out, err);
+        }
+        return false;
+    };
+
+    std::vector<RulesParamState> pa, pb;
+    if (!find(a, pa) || !find(b, pb))
+        return {};
+
+    // A rules param's whole identity is its key, so the comparison is keyed by
+    // it: an index-keyed diff of two maps that gained a key in different
+    // places reports every row after it as changed.
+    const auto value = [](const RulesParamState& p) {
+        switch (p.type) {
+            case 0:  return std::string(p.b ? "true" : "false");
+            case 1:  return std::to_string(p.f);
+            default: return "'" + p.s + "'";
+        }
+    };
+    std::unordered_map<std::string, const RulesParamState*> byKey;
+    for (const auto& p : pb) byKey[p.key] = &p;
+
+    std::vector<std::string> changed, onlyA, onlyB;
+    std::unordered_set<std::string> matched;
+    for (const auto& x : pa) {
+        auto it = byKey.find(x.key);
+        if (it == byKey.end()) { onlyA.push_back(x.key); continue; }
+        matched.insert(x.key);
+        const RulesParamState& y = *it->second;
+        if (x.type != y.type || x.los != y.los || x.b != y.b || x.f != y.f || x.s != y.s)
+            changed.push_back(x.key + " " + value(x) + " vs " + value(y));
+    }
+    for (const auto& y : pb)
+        if (matched.find(y.key) == matched.end()) onlyB.push_back(y.key);
+
+    // Bounded: a whole-map disagreement must not push the rest of the verdict
+    // out of a log line. The counts are always exact.
+    const auto list = [](const std::vector<std::string>& v) {
+        std::string s;
+        for (size_t i = 0; i < v.size() && i < 12; ++i)
+            s += (s.empty() ? "" : ", ") + v[i];
+        if (v.size() > 12) s += ", … (" + std::to_string(v.size() - 12) + " more)";
+        return s;
+    };
+
+    std::string out = std::to_string(pa.size()) + " vs " + std::to_string(pb.size()) +
+                      " params; " + std::to_string(changed.size()) + " differ in value, " +
+                      std::to_string(onlyA.size()) + " only in arm A, " +
+                      std::to_string(onlyB.size()) + " only in arm B.";
+    if (!changed.empty()) out += " changed: " + list(changed) + ".";
+    if (!onlyA.empty())   out += " only A: " + list(onlyA) + ".";
+    if (!onlyB.empty())   out += " only B: " + list(onlyB) + ".";
+    if (changed.empty() && onlyA.empty() && onlyB.empty())
+        out += " No key disagrees — the difference is in the section's encoding "
+               "order, not its content.";
+    return out;
+}
+
 const std::vector<DerivedOmission>& DerivedNotCaptured()
 {
     static const std::vector<DerivedOmission> kDerived = {

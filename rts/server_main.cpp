@@ -3168,13 +3168,25 @@ int main(int argc, char* argv[])
                         "snapshot round-trip: sections that disagree at frame %lld: %s",
                         (long long)rr.endFrame, names.c_str());
                     for (const auto& d : diffs) {
-                        if (d != "units") continue;
-                        // "units differ" covers a dropped kill and a unit
-                        // standing a millimetre further along its path. Those
-                        // are opposite diagnoses, so say which.
-                        SLOG(sev, "snapshot round-trip: units — %s",
-                             simsnapshot::DescribeUnitsDivergence(
-                                 ta, roundTrip.TerminalB()).c_str());
+                        if (d == "units") {
+                            // "units differ" covers a dropped kill and a unit
+                            // standing a millimetre further along its path.
+                            // Those are opposite diagnoses, so say which.
+                            SLOG(sev, "snapshot round-trip: units — %s",
+                                 simsnapshot::DescribeUnitsDivergence(
+                                     ta, roundTrip.TerminalB()).c_str());
+                        } else if (d == "gameRules") {
+                            // On a static fixture (roundtrip_static) there are
+                            // no moving units to blame, so a failure lands in
+                            // the gadgets' own state — name the key.
+                            const std::string keys =
+                                simsnapshot::DescribeRulesParamsDivergence(
+                                    ta, roundTrip.TerminalB(),
+                                    simsnapshot::SectionId::GameRules);
+                            if (!keys.empty())
+                                SLOG(sev, "snapshot round-trip: gameRules — %s",
+                                     keys.c_str());
+                        }
                     }
                 }
                 if (!rr.pass) roundTripExitCode = 1;

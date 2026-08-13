@@ -875,17 +875,32 @@ max heading delta 65.7 deg), 0 in vitals, roster identical
 ```
 
 `--roundtrip-strict` adds the pre-decision bar: the two hash tracks and the two
-terminal payloads must be identical as well. Use it on a fixture with nothing under a
-move order (a staging-only scenario), or to measure what capturing move state would
-buy. On `soak-ladder` it **passes at `60:20`** (nothing is moving yet) and fails from
-frame 300 on, where the movement re-derivation starts — that pair is the standing
-regression check for the snapshot walk:
+terminal payloads must be identical as well. That bar is only meaningful on a fixture
+with **nothing under a move order**, and the fixture for it is `roundtrip-static` —
+26 staged units, no orders, no civilians, no convoys, no AI
+(`scenarios/roundtrip_static.lua`). This pair is the standing regression check for
+the snapshot walk:
 
 ```bash
-build/debug/spring-server --headless-run tools/headless-batch/fixtures/soak-ladder.json \
-  --port 19133 --db /tmp/rt.sqlite --max-wall-min 8 \
+build/debug/spring-server \
+  --headless-run tools/headless-batch/fixtures/roundtrip-static.json \
+  --port 19133 --db /tmp/rt.sqlite --max-wall-min 5 \
   --snapshot-roundtrip 60:20 --roundtrip-strict     # must PASS
 ```
+
+It is not inert: neutralise Q-P4's `(activeIndex, id)` restore ordering and the same
+run FAILS with that defect's own signature — `globals` (the RNG position) and `units`
+disagree, and the re-capture stops being idempotent. Verified 2026-08-14.
+
+⚠ **Do not run the strict bar on `soak-ladder`, and do not read an older claim that
+it passes there.** It does not and has not: that war's civilians and convoys are
+already under move orders at frame 2, so the declared re-planning drift (Q-P2
+decision D — `inCommand` is forced false, the front command is re-entered) shows up
+in every window. Measured 2026-08-14 at `60:20`: 30 of 134 units differ in transform,
+max 30.213 elmos, first divergence at frame 61 — and the **2026-08-12 binary produces
+byte-identical numbers**, so nothing regressed; the recipe was recorded against a
+world it could not hold. A moving fixture is what the **default** (`world`) bar is
+for.
 
 **Pick the window with what you are testing in mind.** Some synced state has a period
 longer than any default window, so a passing `60:20` says nothing about it. The wind
@@ -903,6 +918,20 @@ With the wind section applied, both arms hold the same wind at frame 470 and
 `envResources` is absent from the "sections that disagree" line. With the apply removed
 (the matched control), the re-capture DIFFERS, the arms sit 30 frames apart in the cycle,
 and `globals` byte 4 — the RNG position — diverges.
+
+The same window on the **static** fixture is the one that found **Q-P6** (2026-08-14):
+`440:30 --roundtrip-strict` there holds all 30 hashes and every unit identical and
+still fails, on `gameRules` alone — the restored arm re-published its rules params
+under differently spelled keys (`warlog_1_kind` → `warlog_1.0_kind`,
+`objective_3_state` → `objective_3.0_state`), because the synced-Lua walk restores
+every number with `lua_pushnumber` and Lua 5.4 then stringifies an integer-valued
+float as `1.0`. When a rules-params section disagrees, the verdict now names the keys:
+
+```
+snapshot round-trip: gameRules — 63 vs 79 params; 0 differ in value,
+12 only in arm A, 28 only in arm B. only A: warlog_1_detail, … only B:
+objective_3.0_progress, …
+```
 
 Before Q-P4 (2026-08-12) that run failed on the *first* tick with every unit
 byte-identical, because the restore rebuilt `activeUnits` in ascending-id order rather

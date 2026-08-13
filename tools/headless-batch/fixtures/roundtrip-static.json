@@ -1,0 +1,14 @@
+{
+  "map": "green_flat_x34_v3",
+  "game": "metalstorm",
+  "modOptions": {
+    "scenario": "roundtrip_static",
+    "objective_density": "normal",
+    "build_time_scale": "1.0"
+  },
+  "headless": {
+    "tickMode": "uncapped",
+    "stopAt": { "frame": 3600 },
+    "stateHashEvery": 300
+  }
+}

@@ -145,6 +145,16 @@ UnitsDivergence CompareUnits(const std::vector<uint8_t>& a,
 std::string DescribeUnitsDivergence(const std::vector<uint8_t>& a,
                                     const std::vector<uint8_t>& b);
 
+/// The same service for a rules-params section (`gameRules` id 9, `teamRules`,
+/// `unitRules` — anything encoded by EncodeGameRules' layout): which KEYS
+/// disagree, and which side each one is missing from. Gadget state is where a
+/// static-world round-trip failure lands (there are no moving units to blame),
+/// and "the gameRules section differs" over ~200 keys is not a diagnosis —
+/// naming the key is. Returns "" if either side cannot be decoded as one.
+std::string DescribeRulesParamsDivergence(const std::vector<uint8_t>& a,
+                                          const std::vector<uint8_t>& b,
+                                          SectionId section);
+
 /// Synced state that is deliberately NOT in the payload because the sim
 /// rebuilds it, paired with what rebuilds it. Reported at boot alongside
 /// MissingSections() so the two kinds of absence are never confused.
