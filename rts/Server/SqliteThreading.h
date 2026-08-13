@@ -88,3 +88,37 @@ inline void SqliteConfigureSharedHandle(sqlite3* db) {
     if (!db) return;
     sqlite3_busy_timeout(db, kSqliteBusyTimeoutMs);
 }
+
+/// True for the two result codes that mean "someone else has the lock, this
+/// statement did nothing, and running it again may work". Everything else is
+/// a real error and must not be retried.
+///
+/// `SQLITE_BUSY` is a competing *process*; `SQLITE_LOCKED` is a competing
+/// connection inside this one (shared-cache), which we do not use — it is
+/// listed because the two are interchangeable at every call site and leaving
+/// it out is the kind of omission nobody notices until it bites.
+inline bool SqliteIsBusy(int rc) {
+    return rc == SQLITE_BUSY || rc == SQLITE_LOCKED;
+}
+
+/// How many times a write transaction is attempted in total before the write
+/// is reported lost (defect D35's residual, PLAN-endtoend.md).
+///
+/// `kSqliteBusyTimeoutMs` above makes a writer *wait* for the lock; it does
+/// not make the write *happen*. When the timeout expires SQLite returns
+/// SQLITE_BUSY and — before this — every caller in the tree logged a warning
+/// and moved on, so the row simply never reached disk. A timeout is a wait
+/// policy; durability needs a retry policy on top of it.
+///
+/// Worst case is `kSqliteBusyRetries * kSqliteBusyTimeoutMs` plus backoff
+/// (~15 s) on the calling thread. That is a long time to hold an HTTP route
+/// thread, and it is deliberately preferred over the alternative: the lobby
+/// silently forgetting a room's roster. It is only reachable when a competing
+/// writer has held the lock continuously for 5 s, which no real play rate
+/// produces — it took an artificial spawn-every-8s loop to see it once.
+inline constexpr int kSqliteBusyRetries = 3;
+
+/// Backoff before attempt N+1 (1-based `attempt`). Short and linear: the
+/// point is to let the current holder's transaction finish, not to implement
+/// congestion control — the 5 s timeout already did the waiting.
+inline constexpr int SqliteBusyBackoffMs(int attempt) { return 50 * attempt; }

@@ -6,14 +6,17 @@
 #include "GameServersDb.h"
 #include "AuthTokens.h"
 #include "WarResume.h"
+#include "SqliteThreading.h"
 #include "System/SpringLog/SpringLog.h"
 
 #define LOG_SECTION "lobby"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <set>
 #include <sqlite3.h>
+#include <thread>
 
 // ============================================================
 // SQLite schema + write-through persistence
@@ -160,8 +163,61 @@ static void BindText(sqlite3_stmt* s, int idx, const std::string& v) {
     sqlite3_bind_text(s, idx, v.c_str(), -1, SQLITE_TRANSIENT);
 }
 
+bool RoomManager::WriteTransactionLocked(const char* what,
+                                         const std::function<int()>& body) {
+    if (!db) return false;
+    // Already inside somebody else's transaction (PersistRoomLocked calling
+    // one of the Persist*Locked helpers): run inline and let the outermost
+    // call own the commit and the retry.
+    if (!sqlite3_get_autocommit(db)) return body() == SQLITE_OK;
+
+    int rc = SQLITE_OK;
+    for (int attempt = 1; attempt <= kSqliteBusyRetries; ++attempt) {
+        // IMMEDIATE, not deferred: take the write lock up front so the
+        // busy timeout is spent here, once, rather than on whichever
+        // statement inside `body` happens to be the first write.
+        rc = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
+        if (rc == SQLITE_OK) {
+            rc = body();
+            if (rc == SQLITE_OK) {
+                rc = sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr);
+                if (rc == SQLITE_OK) return true;
+            }
+            // Unconditional: after a failed COMMIT the transaction is still
+            // open, and leaving it open poisons every later writer on this
+            // shared handle.
+            sqlite3_exec(db, "ROLLBACK", nullptr, nullptr, nullptr);
+        }
+        if (!SqliteIsBusy(rc)) break;
+        if (attempt < kSqliteBusyRetries) {
+            SLOG(SPRING_LOG_NOTICE, "%s: database busy, retrying (%d/%d)",
+                what, attempt + 1, kSqliteBusyRetries);
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(SqliteBusyBackoffMs(attempt)));
+        }
+    }
+    // Loud, and at ERROR: this is durable state that did not reach disk, and
+    // the whole point of D35 is that it used to disappear into a WARNING.
+    SLOG(SPRING_LOG_ERROR, "%s: write LOST after %d attempt(s) (%d): %s",
+        what, kSqliteBusyRetries, rc, sqlite3_errmsg(db));
+    return false;
+}
+
 void RoomManager::PersistRoomLocked(const GameRoom& room) {
     if (!db) return;
+    // One room = one transaction. The row and the three child tables that
+    // describe it land together or not at all; see WriteTransactionLocked.
+    WriteTransactionLocked("PersistRoom", [&] {
+        const int rc = PersistRoomRowLocked(room);
+        if (rc != SQLITE_OK) return rc;
+        PersistMembersLocked(room);
+        PersistAISlotsLocked(room);
+        PersistModOptionsLocked(room);
+        return SQLITE_OK;
+    });
+}
+
+int RoomManager::PersistRoomRowLocked(const GameRoom& room) {
     static const char* kSql =
         "INSERT INTO rooms (id, name, host_player_id, map_id, game_id, "
         "  max_players, password, state, game_server_port, persistent, "
@@ -177,7 +233,7 @@ void RoomManager::PersistRoomLocked(const GameRoom& room) {
     sqlite3_stmt* s = nullptr;
     if (sqlite3_prepare_v2(db, kSql, -1, &s, nullptr) != SQLITE_OK) {
         SLOG(SPRING_LOG_WARNING, "PersistRoom prepare failed: %s", sqlite3_errmsg(db));
-        return;
+        return sqlite3_errcode(db);
     }
     sqlite3_bind_int(s, 1, static_cast<int>(room.id));
     BindText(s, 2, room.name);
@@ -190,22 +246,25 @@ void RoomManager::PersistRoomLocked(const GameRoom& room) {
     sqlite3_bind_int(s, 9, room.gameServerPort);
     sqlite3_bind_int(s, 10, room.persistent ? 1 : 0);
     BindText(s, 11, SessionKindToString(room.sessionKind));
-    if (sqlite3_step(s) != SQLITE_DONE) {
+    int rc = sqlite3_step(s);
+    if (rc != SQLITE_DONE) {
         SLOG(SPRING_LOG_WARNING, "PersistRoom step failed: %s", sqlite3_errmsg(db));
+    } else {
+        rc = SQLITE_OK;
     }
     sqlite3_finalize(s);
-    PersistMembersLocked(room);
-    PersistAISlotsLocked(room);
-    PersistModOptionsLocked(room);
+    return rc;
 }
 
-void RoomManager::PersistMembersLocked(const GameRoom& room) {
-    if (!db) return;
+int RoomManager::PersistMembersLocked(const GameRoom& room) {
+    if (!db) return SQLITE_OK;
     // Simplest correct strategy: wipe + reinsert. Rosters are small
     // (≤16 players) and this avoids upsert vs. delete bookkeeping per
-    // player. Wrap in a single transaction so a read-mid-write doesn't
-    // see an empty roster.
-    sqlite3_exec(db, "BEGIN", nullptr, nullptr, nullptr);
+    // player. Wrapped in a transaction so a read-mid-write doesn't see an
+    // empty roster — and when PersistRoomLocked is the caller this joins
+    // that transaction rather than opening a second one (D35).
+    return WriteTransactionLocked("PersistMembers", [&]() -> int {
+    int worst = SQLITE_OK;
     {
         char sql[128];
         snprintf(sql, sizeof(sql),
@@ -229,19 +288,23 @@ void RoomManager::PersistMembersLocked(const GameRoom& room) {
             sqlite3_bind_int(s, 7, p.isSpectator ? 1 : 0);
             sqlite3_bind_int(s, 8, p.isHost ? 1 : 0);
             sqlite3_bind_int(s, 9, p.spectateOnly ? 1 : 0);
-            if (sqlite3_step(s) != SQLITE_DONE) {
+            const int rc = sqlite3_step(s);
+            if (rc != SQLITE_DONE) {
                 SLOG(SPRING_LOG_WARNING, "PersistMembers step: %s",
                     sqlite3_errmsg(db));
+                if (worst == SQLITE_OK) worst = rc;
             }
         }
         sqlite3_finalize(s);
     }
-    sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr);
+    return worst;
+    }) ? SQLITE_OK : SQLITE_ERROR;
 }
 
-void RoomManager::PersistAISlotsLocked(const GameRoom& room) {
-    if (!db) return;
-    sqlite3_exec(db, "BEGIN", nullptr, nullptr, nullptr);
+int RoomManager::PersistAISlotsLocked(const GameRoom& room) {
+    if (!db) return SQLITE_OK;
+    return WriteTransactionLocked("PersistAISlots", [&]() -> int {
+    int worst = SQLITE_OK;
     {
         char sql[128];
         snprintf(sql, sizeof(sql),
@@ -263,19 +326,23 @@ void RoomManager::PersistAISlotsLocked(const GameRoom& room) {
             sqlite3_bind_int(s, 5, slot.team);
             sqlite3_bind_int(s, 6, slot.startPos);
             BindText(s, 7, slot.profile);
-            if (sqlite3_step(s) != SQLITE_DONE) {
+            const int rc = sqlite3_step(s);
+            if (rc != SQLITE_DONE) {
                 SLOG(SPRING_LOG_WARNING, "PersistAISlots step: %s",
                     sqlite3_errmsg(db));
+                if (worst == SQLITE_OK) worst = rc;
             }
         }
         sqlite3_finalize(s);
     }
-    sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr);
+    return worst;
+    }) ? SQLITE_OK : SQLITE_ERROR;
 }
 
-void RoomManager::PersistModOptionsLocked(const GameRoom& room) {
-    if (!db) return;
-    sqlite3_exec(db, "BEGIN", nullptr, nullptr, nullptr);
+int RoomManager::PersistModOptionsLocked(const GameRoom& room) {
+    if (!db) return SQLITE_OK;
+    return WriteTransactionLocked("PersistModOptions", [&]() -> int {
+    int worst = SQLITE_OK;
     {
         char sql[128];
         snprintf(sql, sizeof(sql),
@@ -291,14 +358,17 @@ void RoomManager::PersistModOptionsLocked(const GameRoom& room) {
             sqlite3_bind_int(s, 1, static_cast<int>(room.id));
             BindText(s, 2, kv.first);
             BindText(s, 3, kv.second);
-            if (sqlite3_step(s) != SQLITE_DONE) {
+            const int rc = sqlite3_step(s);
+            if (rc != SQLITE_DONE) {
                 SLOG(SPRING_LOG_WARNING, "PersistModOptions step: %s",
                     sqlite3_errmsg(db));
+                if (worst == SQLITE_OK) worst = rc;
             }
         }
         sqlite3_finalize(s);
     }
-    sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr);
+    return worst;
+    }) ? SQLITE_OK : SQLITE_ERROR;
 }
 
 int RoomManager::PurgeOrphanedWarRows() {
