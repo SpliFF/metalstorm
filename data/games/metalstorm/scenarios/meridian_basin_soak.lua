@@ -32,10 +32,16 @@
 --     does not end even if one side is wiped.
 --   * The churn keeps running without a client: `mapdata/civilians.lua`
 --     respawns both convoys every 300 s (civilians/convoy.lua reschedules on
---     every spawn), the Reaver slate keeps raiding the two market termini,
---     and objectives/generator.lua keeps issuing systemic objectives for as
---     long as there is a contested world to scan. Those are the three sources
---     the growth report's slopes are made of.
+--     every spawn) and the Reaver slate keeps raiding the two market termini.
+--     Those are the two sources the growth report's slopes are made of.
+--   * CORRECTION 2026-08-13 (PLAN-long-uptime §12.3, T4-8): this header used to
+--     name objectives/generator.lua as a third churn source. It is not one here.
+--     Four 9-simulated-hour arms issued ZERO systemic objectives, on
+--     objective_density normal AND dense: generator.tick does run, but every
+--     rule it owns is contest-driven, and three Strategos AIs with no player
+--     deadlock — no region changes hands, so the cap the density knob scales is
+--     never approached. Do not read a flat rules_params here as the generator
+--     being bounded; it is the generator being idle.
 --
 -- WHAT IT STILL CANNOT EXERCISE (do not re-derive this): S1 key interning and
 -- S6 standing orders are client-gated — `StateStreamer::BroadcastRulesParams`

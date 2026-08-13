@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
     METRICS, DEFAULT_RULING, FAILING, INCONCLUSIVE,
     seriesFromDump, fitLinear, classify, reportDump, SECONDS_PER_DAY, seedBudgets,
+    saturation,
 } from '../lib/growth-fit.mjs';
 
 const metric = (key) => METRICS.find((m) => m.key === key);
@@ -314,4 +315,68 @@ test('a window shorter than the metric\'s declared period cannot be ruled', () =
     // Past one cycle the same budget rules normally.
     const full = [0, 1, 2, 3].map((i) => ({ days: i * 0.013, value: 4.3e5 + 37e6 * i * 0.013 }));
     assert.equal(classify(metric('db_bytes'), fitLinear(full), budget).verdict, 'explained');
+});
+
+// §12 measured, and all three of the first endless ladder's gate failures were
+// this: a surface that steps during the war's opening ramp and then never moves
+// again is fitted, over the whole window, as though it were still stepping.
+// `rss_kb` rose 34 MB in the first simulated hour and a half and then sat still
+// for seven simulated hours; the line through that says 25 438 kB/sim-day, a
+// number no budget entry can honestly license because halving the window would
+// double it.
+test('a surface that stepped once and stopped is saturated, not unexplained', () => {
+    // 40 samples over 0.4 sim-day. Rises for the first tenth, then flat.
+    const pts = Array.from({ length: 40 }, (_, i) => {
+        const days = i * 0.01;
+        return { days, value: 1_050_000 + Math.min(i, 4) * 8000 };
+    });
+    // Without the series, classify rules exactly as it did before §12.
+    assert.equal(classify(metric('rss_kb'), fitLinear(pts), undefined).verdict, 'unexplained');
+
+    const r = classify(metric('rss_kb'), fitLinear(pts), undefined, DEFAULT_RULING, pts);
+    assert.equal(r.verdict, 'saturated');
+    assert.ok(!FAILING.has(r.verdict) && !INCONCLUSIVE.has(r.verdict), 'saturated is a pass');
+    assert.match(r.note, /bounded STEP, not a rate/);
+    assert.match(r.note, /last rise at 10% of the window/);
+    assert.match(r.note, /no rise at all in raw values/);
+});
+
+test('a surface still rising at the end of the arm still fails', () => {
+    const pts = Array.from({ length: 40 }, (_, i) => ({ days: i * 0.01, value: 1_050_000 + i * 800 }));
+    assert.equal(classify(metric('rss_kb'), fitLinear(pts), undefined, DEFAULT_RULING, pts).verdict, 'unexplained');
+});
+
+// A watermark cannot fall, so one late allocation the process never gives back
+// is a real finding even when the tail's FIT is flat — here a 1 MB step under
+// the 1%-of-base floor, which the floor would otherwise wave through. Raw values
+// decide for a watermark; a live gauge is ruled on its tail slope, because it
+// oscillates by design (§10.2) and a step that small is inside its noise.
+test('a watermark that steps again inside the tail is not saturated', () => {
+    const pts = Array.from({ length: 40 }, (_, i) => {
+        const days = i * 0.01;
+        return { days, value: 1_050_000 + Math.min(i, 4) * 8000 + (i >= 35 ? 1000 : 0) };
+    });
+    assert.equal(classify(metric('rss_kb'), fitLinear(pts), undefined, DEFAULT_RULING, pts).verdict, 'unexplained');
+
+    const live = classify(metric('lua_heap_kb'), fitLinear(pts), undefined, DEFAULT_RULING, pts);
+    assert.equal(live.verdict, 'saturated');
+    assert.doesNotMatch(live.note, /raw values/);
+});
+
+// Saturation may only DOWNGRADE a failure. A licensed surface keeps reporting
+// `explained` with its number, so a step that fits under its own budget is
+// still compared against it rather than quietly re-labelled.
+test('saturation never overrides a budget that already explains the slope', () => {
+    const pts = Array.from({ length: 40 }, (_, i) => ({ days: i * 0.01, value: 500 + Math.min(i, 4) * 2 }));
+    const budget = { slopePerDay: 25, tolerance: 12, why: 'objective params ramp' };
+    assert.equal(classify(metric('rules_params'), fitLinear(pts), budget, DEFAULT_RULING, pts).verdict, 'explained');
+});
+
+test('a tail too small to carry an error bar makes no saturation claim', () => {
+    // 3 samples: the tail half holds 2, which cannot be fitted with an error bar.
+    const pts = [0, 1, 2].map((i) => ({ days: i * 0.1, value: 1000 + Math.min(i, 1) * 300 }));
+    assert.equal(saturation(pts, metric('rss_kb')), null);
+    // So the ruling is whatever it was before §12 — the claim is never invented.
+    assert.equal(classify(metric('rss_kb'), fitLinear(pts), undefined, DEFAULT_RULING, pts).verdict,
+        classify(metric('rss_kb'), fitLinear(pts), undefined).verdict);
 });

@@ -82,15 +82,20 @@ test-replay-verify:
 # a container PLAN-long-uptime §1 claims is bounded fails the run.
 #   SOAK_WALL_MIN=n  per-arm wall ceiling (each arm stops early, dump is still written)
 #   SOAK_OUT=dir     output directory
+#   SOAK_CONCURRENCY=n  arms in flight. Lower it on a contended machine: an arm's
+#     coverage is measured in SIMULATED days, so anything that slows the tick
+#     shortens the fitted span and pushes metrics to `too-short` (PLAN-long-uptime
+#     §11.2 — the one arm that ruled anything was the one run alone).
 SOAK_OUT ?= build/soak
 SOAK_WALL_MIN ?= 45
+SOAK_CONCURRENCY ?= 4
 soak-growth:
 	cmake --build build/release --target spring-server
 	node tools/headless-batch/batch.mjs \
 		--template tools/headless-batch/fixtures/soak-ladder.json \
 		--matrix tools/headless-batch/fixtures/soak-matrix.json \
 		--out-dir $(SOAK_OUT) --server-bin build/release/spring-server \
-		--concurrency 4 --max-wall-min $(SOAK_WALL_MIN) --base-port 19200
+		--concurrency $(SOAK_CONCURRENCY) --max-wall-min $(SOAK_WALL_MIN) --base-port 19200
 	node tools/headless-batch/growth-report.mjs \
 		--jsonl $(SOAK_OUT)/results.jsonl \
 		--budgets tools/headless-batch/fixtures/soak-budgets.json \

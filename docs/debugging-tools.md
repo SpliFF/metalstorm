@@ -490,6 +490,7 @@ Metalstorm game and whose matrix is the churn knobs
 ```bash
 make soak-growth                      # both steps, gated, into build/soak/
 make soak-growth SOAK_WALL_MIN=10     # shorter arms while iterating
+make soak-growth SOAK_CONCURRENCY=1   # one arm at a time on a contended machine
 
 # or by hand:
 node tools/headless-batch/batch.mjs \
@@ -545,8 +546,13 @@ with **no `victory = true` objective**, which `game_gameover.lua` treats as a
 supported shape: it publishes `war_can_end = 0`, warns once at frame 60, and
 never winds the war down. The engine's last-team-standing fallback is already
 gated off for Metalstorm, so the arm does not end even if a side is wiped;
-the convoy respawn schedule, the Reaver raid slate and
-`objectives/generator.lua` keep the churn running with zero clients attached.
+the convoy respawn schedule and the Reaver raid slate keep the churn running with
+zero clients attached — **but `objectives/generator.lua` does not.** Measured over
+four 9-simulated-hour arms (§12): **zero** systemic objectives were issued in any
+of them, on `objective_density` normal *and* dense. Three Strategos AIs with no
+player produce a stalemate, no region changes hands, and the generator's rules
+are all contest-driven, so the density axis of this matrix cannot move a growth
+surface — it scales a cap nothing reaches.
 `stopAt.gameOver` stays set — on this scenario it is a **canary**, not a stop
 condition: an arm that reports `status=game-over` means something re-introduced
 a terminal objective, which is exactly the failure the four items above hid.
@@ -566,6 +572,7 @@ each slope:
 |---|---|
 | `flat` | slope within 2σ of zero, or under the 1 %-of-base floor, or falling (reclamation) |
 | `explained` | sloping, and a budget entry with a `why` accounts for it |
+| `saturated` | the whole-window slope would have failed, but the surface **stopped moving inside the arm**: the last half of the window fits flat (and a watermark did not rise at all there). A bounded step, not a rate. Printed `STEP`; passes |
 | `over-budget` | sloping past its budgeted rate — **fails** |
 | `unexplained` | sloping with no budget entry — **fails**, this is §2's gate |
 | `no-signal` | sampled, and read **0 every time**: the ladder never exercised the surface. Cannot rule. **Not a pass** |
@@ -608,6 +615,19 @@ Four things the ruling does deliberately, each of which was a bug first:
   `rules_params` at 45 864/sim-day against the long arm's 25/sim-day; largest-wins
   across that set would have issued a licence ×1800 looser than the steady state.
   Every arm refused is printed by name.
+- **A step is not a rate, and a long arm makes them look identical.** A surface
+  that grows during the war's opening ramp and then stops — `rss_kb` rose 34 MB
+  and 80 MB in the first ~1.5 simulated hours of the first endless ladder's
+  normal-density arms and then did not move for seven more — fits a line whose
+  slope is the step divided by however long the arm ran. Halve the window and the
+  reported "rate" doubles, so no budget entry can honestly license it. Ruled by
+  asking the same flat test on the **last 50 %** of the window: still rising
+  there → the failure stands; flat there → `saturated`, with the whole-window
+  number still printed. A watermark additionally must not have risen in raw
+  values in the tail, because `ru_maxrss` cannot fall and one late allocation the
+  process never gave back is real (a 2σ test on a mostly-flat tail would absorb
+  it). This only ever DOWNGRADES a failure: a budgeted surface keeps reporting
+  `explained` and keeps being compared to its number.
 - **A counter that read zero all run is `no-signal`, not clean.** A headless
   ladder has no client sessions, so `StateStreamer` interns no keys and
   `param_keys` sits at 0 for the whole run — the flattest line in the report,

@@ -82,11 +82,14 @@ function renderArm(arm) {
         (vac.ok ? '' : `\n  VACUOUS — ${vac.problems.join('; ')}`));
 
     const series = seriesFromDump(d);
-    const results = METRICS.map((m) => classify(m, fitLinear(series[m.key]), arm.budgets?.[m.key], arm.ruling));
+    const results = METRICS.map((m) => classify(m, fitLinear(series[m.key]), arm.budgets?.[m.key], arm.ruling, series[m.key]));
 
     const w = Math.max(...METRICS.map((m) => m.key.length));
     for (const r of results) {
-        const mark = FAILING.has(r.verdict) ? 'FAIL' : INCONCLUSIVE.has(r.verdict) ? '????' : ' ok ';
+        // `saturated` is a pass, but it is not the same fact as `flat` or
+        // `explained` — it says a surface stepped and stopped — so it gets its
+        // own mark rather than disappearing into the ok column.
+        const mark = FAILING.has(r.verdict) ? 'FAIL' : INCONCLUSIVE.has(r.verdict) ? '????' : r.verdict === 'saturated' ? 'STEP' : ' ok ';
         const base = fmt(r.fit.base);
         const slope = fmt(r.fit.slope);
         lines.push(

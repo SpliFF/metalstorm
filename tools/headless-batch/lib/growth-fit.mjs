@@ -178,6 +178,86 @@ export const DEFAULT_RULING = {
 };
 
 /**
+ * How much of a window's TAIL is examined when asking whether a slope is still
+ * happening at the end of the arm. Half: large enough to carry its own error
+ * bar on these sample counts (272-288 samples per arm → ~140 in the tail), and
+ * small enough that a surface which stopped moving in the first quartile is
+ * ruled on ~7 simulated hours of stillness rather than on 30 minutes of it.
+ */
+export const TAIL_FRACTION = 0.5;
+
+/** The `flat` test, extracted so the tail can be ruled by the same rule as the window. */
+function flatness(fit, ruling) {
+    const significant = Number.isFinite(fit.stderr) && fit.stderr > 0
+        ? Math.abs(fit.slope) > ruling.sigmas * fit.stderr
+        : Math.abs(fit.slope) > 0;
+    const scale = Math.abs(fit.base) > 0 ? Math.abs(fit.base) : 1;
+    const clearsFloor = Math.abs(fit.slope) >= ruling.minRelSlopePerDay * scale;
+    const why = !significant
+        ? `|slope| ${fmt(Math.abs(fit.slope))} within ${ruling.sigmas}σ (σ=${fmt(fit.stderr)})`
+        : `|slope| ${fmt(Math.abs(fit.slope))} under the ${(ruling.minRelSlopePerDay * 100).toFixed(1)}%-of-base floor`;
+    return { flat: !significant || !clearsFloor, why };
+}
+
+/** The points in the last `fraction` of a series' own window, by x not by count. */
+export function tailPoints(points, fraction = TAIL_FRACTION) {
+    if (points.length === 0) return [];
+    const xs = points.map((p) => p.days);
+    const lo = Math.min(...xs), hi = Math.max(...xs);
+    const cut = hi - (hi - lo) * fraction;
+    return points.filter((p) => p.days >= cut);
+}
+
+/** x of the last strict increase in a series, or null if it never rose. */
+export function lastRise(points) {
+    for (let i = points.length - 1; i > 0; i--)
+        if (points[i].value > points[i - 1].value) return points[i].days;
+    return null;
+}
+
+/**
+ * Is this series SATURATED — did it grow during the arm's opening ramp and then
+ * stop, rather than grow at the fitted rate throughout?
+ *
+ * This exists because the first endless ladder (§12) failed the gate three
+ * times and every one of the three was this artefact. `rss_kb` on the
+ * normal-density arms rose 34 MB and 80 MB during the first simulated hour and
+ * a half — staging 500 units, the pathfinder's caches, the first convoy cycle —
+ * and then did not move for the remaining SEVEN simulated hours. A single
+ * least-squares line through the whole window turns that into "25 438 kB per
+ * simulated day, forever", which is both wrong and unfixable: no budget entry
+ * can honestly license it, because the number is not a rate at all. It is a
+ * step, divided by however long the arm happened to run — halve the window and
+ * the reported "rate" doubles.
+ *
+ * The test is therefore asked on the TAIL, and only ever as a way to DOWNGRADE
+ * a failure: whole-window numbers stay in the report exactly as fitted, and a
+ * surface still rising at the end of the arm still fails. Returns null when the
+ * tail cannot rule (too few samples, or the sampling is too lopsided to leave a
+ * comparable window), which classify treats as "no saturation claim" and leaves
+ * the failure standing.
+ *
+ * For a `watermark` the tail must additionally not have risen AT ALL, in raw
+ * values: ru_maxrss is monotone, so one late step is a real allocation the
+ * process never gave back and a 2σ test on a mostly-flat tail could absorb it.
+ */
+export function saturation(points, metric, ruling = DEFAULT_RULING, fraction = TAIL_FRACTION) {
+    const tail = tailPoints(points, fraction);
+    if (tail.length < 3) return null;
+    const window = fitLinear(points), tailFit = fitLinear(tail);
+    if (!(window.span > 0) || !(tailFit.span >= 0.8 * fraction * window.span)) return null;
+
+    const { flat, why } = flatness(tailFit, ruling);
+    const rose = tail[tail.length - 1].value > tail[0].value;
+    if (!flat) return null;
+    if (metric.kind === 'watermark' && rose) return null;
+
+    const rise = lastRise(points);
+    const at = rise === null ? null : (rise - (window.span > 0 ? Math.min(...points.map((p) => p.days)) : 0)) / window.span;
+    return { tailFit, tailFraction: fraction, lastRiseDays: rise, lastRiseAtFraction: at, why };
+}
+
+/**
  * Rule on one metric's fit.
  *
  * Verdicts:
@@ -188,6 +268,10 @@ export const DEFAULT_RULING = {
  *   too-short   — fewer than 3 points, or every point at the same x. A slope
  *                 cannot be ruled on; NOT a pass.
  *   flat        — slope indistinguishable from zero (by sigma or by floor).
+ *   saturated   — the whole-window slope would have failed, but the surface
+ *                 stopped moving inside the arm: the last half of the window
+ *                 fits flat (and for a watermark did not rise at all). A
+ *                 bounded step, not a rate. Passes; see `saturation`.
  *   explained   — sloping, and a budget entry accounts for it and is not
  *                 exceeded.
  *   over-budget — sloping, budgeted, and above the budgeted rate + tolerance.
@@ -196,8 +280,13 @@ export const DEFAULT_RULING = {
  * `budget` (optional) is `{ slopePerDay, tolerance?, why }`. `why` is required
  * for a budget to count: §2's gate is "slope explained by design", and a bare
  * number with no reason attached is how a soak gate stops being one.
+ *
+ * `points` (optional) is the same series `fit` was fitted from. Supplying it
+ * enables the `saturated` verdict, which is the only thing it is used for — a
+ * caller that omits it gets the pre-§12 ruling exactly, including the failures
+ * §12 showed were artefacts.
  */
-export function classify(metric, fit, budget, ruling = DEFAULT_RULING) {
+export function classify(metric, fit, budget, ruling = DEFAULT_RULING, points = null) {
     // A slope is quoted per DAY on the metric's own clock, and a ladder that
     // only covered a simulated hour is reporting a 24× extrapolation off a
     // lever arm it never measured. That is legitimate — it is the only way to compare arms of
@@ -231,16 +320,30 @@ export function classify(metric, fit, budget, ruling = DEFAULT_RULING) {
 
     // A zero stderr from n >= 3 is a genuinely perfect fit (a counter stepping
     // by a fixed amount every sample), so the slope is believed on its own.
-    const significant = Number.isFinite(fit.stderr) && fit.stderr > 0
-        ? Math.abs(fit.slope) > ruling.sigmas * fit.stderr
-        : Math.abs(fit.slope) > 0;
-    const scale = Math.abs(fit.base) > 0 ? Math.abs(fit.base) : 1;
-    const clearsFloor = Math.abs(fit.slope) >= ruling.minRelSlopePerDay * scale;
+    const { flat, why } = flatness(fit, ruling);
 
-    if (!significant || !clearsFloor) {
-        const why = !significant
-            ? `|slope| ${fmt(Math.abs(fit.slope))} within ${ruling.sigmas}σ (σ=${fmt(fit.stderr)})`
-            : `|slope| ${fmt(Math.abs(fit.slope))} under the ${(ruling.minRelSlopePerDay * 100).toFixed(1)}%-of-base floor`;
+    // Only ever consulted below, and only to downgrade a FAILING verdict: a
+    // surface that is still moving at the end of the arm fails on its
+    // whole-window slope exactly as before.
+    const sat = points ? saturation(points, metric, ruling) : null;
+    const saturated = () => {
+        const s = sat;
+        // "Last rise" is only a fact about a MONOTONE series. A live gauge
+        // oscillates, so its last sample is up as often as not and the clause
+        // would read "last rise at 100% of the window" on a surface whose whole
+        // second half is flat — the opposite of what the verdict says. Quoted
+        // for a watermark, where it names the frame the growth stopped at.
+        const at = metric.kind === 'watermark'
+            ? (s.lastRiseAtFraction === null ? 'never rose'
+                : `last rise at ${(s.lastRiseAtFraction * 100).toFixed(0)}% of the window (${fmt(s.lastRiseDays)} ${clock}-day)`)
+            : 'the growth is in the opening ramp';
+        return mk('saturated',
+            `whole-window slope ${fmt(fit.slope)}/${clock}-day is a bounded STEP, not a rate: ${at}, ` +
+            `and the last ${(s.tailFraction * 100).toFixed(0)}% of the window fits flat (${s.why}, n=${s.tailFit.n})` +
+            (metric.kind === 'watermark' ? ' with no rise at all in raw values' : ''));
+    };
+
+    if (flat) {
         return mk('flat', metric.kind === 'watermark'
             ? `${why} — but a watermark can only rise, so flat here means "never grew", not "returns memory"`
             : why);
@@ -285,12 +388,19 @@ export function classify(metric, fit, budget, ruling = DEFAULT_RULING) {
     if (Number.isFinite(basis) && basis > 0 && fit.span < SEED_SPAN_FLOOR_FRACTION * basis)
         return mk('too-short', `window ${fmt(fit.span)} ${clock}-day is under ${(SEED_SPAN_FLOOR_FRACTION * 100).toFixed(0)}% of the budget's ${fmt(basis)}-${clock}-day basis — the rule that refuses this arm as a seed refuses it as a verdict`);
 
-    if (!budget || !budget.why)
+    if (!budget || !budget.why) {
+        if (sat) return saturated();
         return mk('unexplained', budget ? 'budget entry has no `why`; §2 requires the slope be EXPLAINED, not merely allowed' : 'no budget entry accounts for this slope');
+    }
 
     const tol = budget.tolerance ?? Math.abs(budget.slopePerDay) * 0.25;
-    if (fit.slope > budget.slopePerDay + tol)
+    if (fit.slope > budget.slopePerDay + tol) {
+        // Checked AFTER the budget, so a licensed surface keeps reporting
+        // `explained` and its number keeps being compared: a step that fits
+        // under its own budget is not news. Only a breach gets the second look.
+        if (sat) return saturated();
         return mk('over-budget', `${fmt(fit.slope)}/day vs budget ${fmt(budget.slopePerDay)} ±${fmt(tol)} — ${budget.why}`);
+    }
     return mk('explained', `${fmt(fit.slope)}/day within budget ${fmt(budget.slopePerDay)} ±${fmt(tol)} — ${budget.why}`);
 }
 
@@ -311,7 +421,7 @@ export function fmt(v) {
 /** Fit + rule every metric of one dump. */
 export function reportDump(dump, budgets = {}, ruling = DEFAULT_RULING) {
     const series = seriesFromDump(dump);
-    return METRICS.map((m) => classify(m, fitLinear(series[m.key]), budgets[m.key], ruling));
+    return METRICS.map((m) => classify(m, fitLinear(series[m.key]), budgets[m.key], ruling, series[m.key]));
 }
 
 /**
