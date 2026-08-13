@@ -952,6 +952,51 @@ destruction in any run that exercised weapon defs (PLAN-replay T2-b), so every
 headless run exits 134 whatever the verdict was. The same constraint applies to
 `--verify`.
 
+### Resuming across a balance patch (`gamedata/migrations.lua`)
+
+A snapshot records the def vocabulary it was taken under (the `defNames` section),
+and the restore path reconciles every def reference in the payload against the live
+def tables before it touches the world (PLAN-def-reconciliation tasks 1-2). Names are
+the identity: a def that kept its name but moved id is **remapped**, a def that is gone
+takes its units, features, build orders and order filters with it, and both are counted
+in one WARNING line on restore:
+
+```
+snapshot restore: reconciling def references - 12 units removed with their def
+(ms_scout_s1, …), 3 units renamed, 2 build orders dropped, 1 orders deactivated
+(def filter emptied)
+```
+
+A game declares its own **renames** so a rename is not a removal. The file is optional
+and its absence is the normal case:
+
+```lua
+-- data/games/<game>/gamedata/migrations.lua
+return {
+    units    = { ms_scout_s1 = "ms_recon_s1" },
+    weapons  = { MS_AUTOCANNON_S1 = "MS_AUTOCANNON_MK2" },
+    features = { wreck_scout = "wreck_recon" },
+}
+```
+
+An alias whose target is ambiguous **refuses the resume** (`E1`): `a = "b"` while the
+game still defines both, or two old names aliased onto one new one. Both are authoring
+bugs with no correct answer, so they are loud rather than silently resolved — the
+refusal happens in the staging phase, so the running world is untouched:
+
+```
+snapshot round-trip: FAILED - the restore failed: gamedata/migrations.lua aliases unit
+def 'ms_artillery_s1' to 'ms_artillery_s2', but this game defines both - a rename whose
+source still exists is ambiguous
+```
+
+Two things a game author should know about the removal side. **An order's def filter is
+a whitelist whose empty state means "any squad"**, so an order that loses every def in
+`squadTypes` is *deactivated* rather than left as a wildcard. And **per-weapon state
+(reload, stockpile) follows the weapon def by name, not by slot number**, so inserting a
+weapon into an existing def is safe: the new slot starts fresh and fully loaded, the old
+slots keep their state.
+
 ---
 
 ## springcli — Command-Line Tool

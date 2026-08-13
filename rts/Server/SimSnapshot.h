@@ -60,6 +60,8 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace simsnapshot {
@@ -264,6 +266,15 @@ struct WeaponState {
     int32_t nextSalvo = 0;
     int32_t numStockpiled = 0;
     int32_t numStockpileQued = 0;
+    /// Which weapon this slot WAS (PLAN-def-reconciliation task 2). A unit's
+    /// weapon array is positional and the slots are created from the live def,
+    /// so without this the only thing relating captured slot i to live slot i
+    /// is the integer i — and a def that gains, loses or reorders a weapon
+    /// makes that relation wrong while leaving it plausible: a full stockpile
+    /// lands on the wrong launcher, a mid-reload nuke comes back ready. This is
+    /// §1's index-shift class at the one place it can actually bite, and
+    /// MatchWeaponSlots is what pairs the two arrays by name instead.
+    std::string weaponDefName;
 };
 
 struct UnitState {
@@ -626,6 +637,147 @@ void CaptureDefNames(DefNameTables& out);
 /// cases that matter are testable without standing up two def loads.
 DefDelta CompareDefNames(const std::vector<DefNameEntry>& captured,
                          const std::vector<DefNameEntry>& live);
+
+// ─────── The remap pass (PLAN-def-reconciliation task 2, §2 steps 1-2) ───────
+//
+// Task 1 made a defs change DETECTABLE. This is the pass that acts on it, and
+// it runs over the DECODED payload, before anything is resolved against a live
+// def and long before the live world is torn down: the whole staging discipline
+// (§2's "refuse loudly, never half-load") depends on the payload being a plain
+// value at this point.
+//
+// Two rules decide everything here:
+//
+//   * A NAME is the identity; an id is a load-order artefact. So every id in
+//     the payload is rewritten through old-id → name → new-id, and every name
+//     is first rewritten through the game's own renames (migrations.lua).
+//   * A reference that cannot be remapped is REMOVED, never left pointing
+//     somewhere. An id that survives a def removal is still a valid id — it
+//     just names a different def now — so "leave it alone" is the one
+//     disposition that produces a plausible wrong world.
+//
+// The second rule has a sharp edge, and it is why this pass counts what it
+// drops: `StandingOrderConditions::squadTypes` is a def-id FILTER whose empty
+// state means "any squad". Dropping its last surviving entry would widen the
+// filter to a wildcard — a recruiting order that wanted three heavy tanks
+// quietly taking anything that idles. Emptying that list therefore deactivates
+// the order instead (see RemapReport::ordersDeactivated).
+
+/// The renames a game declares between two def loads: `old_name = "new_name"`,
+/// per family, from `gamedata/migrations.lua`. The game owns its own renames
+/// (persistence §5's philosophy) — the engine only owns what to do with them.
+struct DefAliases {
+    std::unordered_map<std::string, std::string> units;
+    std::unordered_map<std::string, std::string> weapons;
+    std::unordered_map<std::string, std::string> features;
+
+    bool Empty() const { return units.empty() && weapons.empty() && features.empty(); }
+};
+
+/// Read `gamedata/migrations.lua` through the VFS, if the game ships one. A
+/// missing file is not an error (the common case is a game with no renames);
+/// a malformed one is, and it refuses the resume rather than silently applying
+/// half a rename table. Not doctestable for the same reason CaptureDefNames is
+/// not — it needs the mod VFS.
+bool LoadDefAliases(DefAliases& out, std::string& err);
+
+/// One family's old→new id map. `to` holds only the ids that MOVED (a table
+/// where nothing was renumbered stays empty, which is also the fast path §3
+/// asks for); `gone` holds captured ids whose def is not in this game any more.
+struct DefIdMap {
+    std::unordered_map<int32_t, int32_t> to;
+    std::unordered_set<int32_t>          gone;
+    /// The same removals keyed by their CAPTURED name, which is what the two
+    /// families that travel by name (a unit's def, a feature's def and its
+    /// resurrect target) have to be tested against. Complete, unlike goneNames.
+    std::unordered_set<std::string> goneByName;
+    /// Names, for the log: a count says how bad, a name says what. Capped.
+    std::vector<std::string> goneNames;
+    /// True when the captured vocabulary was not recorded (an empty table on
+    /// either side). NOT the same as "nothing changed": with no vocabulary
+    /// there is nothing to compare, so every reference passes through
+    /// untouched, and treating an unrecorded table as "everything was removed"
+    /// would delete the world on the first pre-task-1 snapshot it met.
+    bool unknown = false;
+
+    bool Identity() const { return to.empty() && gone.empty(); }
+    /// old id → new id, or -1 if the def is gone. Ids not in either table are
+    /// unchanged (and an `unknown` map changes nothing at all).
+    int32_t Map(int32_t oldId) const;
+    /// Is this captured def name absent from the live game? Always false for an
+    /// `unknown` map — see the field.
+    bool Gone(const std::string& capturedName) const {
+        return goneByName.count(capturedName) != 0;
+    }
+};
+
+/// The three families' maps plus what the aliasing did.
+struct DefRemap {
+    DefIdMap units, weapons, features;
+    /// Names rewritten by migrations.lua, per family: captured name → live name.
+    std::unordered_map<std::string, std::string> unitRenames, featureRenames;
+
+    bool Identity() const {
+        return units.Identity() && weapons.Identity() && features.Identity() &&
+               unitRenames.empty() && featureRenames.empty();
+    }
+};
+
+/// Build the three maps. `err` is set (and false returned) only for E1: an
+/// alias whose target is ambiguous — migrations.lua says `a = "b"` while this
+/// game defines BOTH, or two captured names alias onto one live name. Both are
+/// authoring bugs with no correct disposition, and §4 E1 says refuse loudly.
+bool BuildDefRemap(const DefNameTables& captured, const DefNameTables& live,
+                   const DefAliases& aliases, DefRemap& out, std::string& err);
+
+/// What the remap did to a payload. Every field is a count of something that
+/// silently would not have happened before task 2, which is why the log line
+/// this builds is worth as much as the pass itself.
+struct RemapReport {
+    size_t unitsRenamed = 0;        ///< unitDefName rewritten by an alias
+    size_t unitsDropped = 0;        ///< def gone: the unit does not come back (§2 step 2)
+    size_t featuresRenamed = 0;
+    size_t featuresDropped = 0;
+    size_t resurrectCleared = 0;    ///< resurrect target's def gone
+    size_t wreckRemapped = 0;       ///< UnitState::featureDefID renumbered
+    size_t wreckCleared = 0;        ///< ... or gone, so no delayed wreck
+    size_t buildCmdsRemapped = 0;   ///< cmdID = -unitDefID, the build-order encoding
+    size_t buildCmdsDropped = 0;
+    size_t orderDefsRemapped = 0;   ///< BuildBase params + squadTypes filters
+    size_t orderDefsDropped = 0;
+    size_t ordersDeactivated = 0;   ///< a squadTypes filter emptied — see above
+    /// Which unit defs took the world's units with them, capped.
+    std::vector<std::string> droppedUnitNames;
+
+    bool Changed() const;
+    /// One line, or "nothing to remap".
+    std::string Describe() const;
+};
+
+/// Rewrite every def reference in a decoded payload. Pure — no def handler, no
+/// live world — so the whole §6 matrix is a doctest.
+///
+/// `units` and `features` may SHRINK (a def that vanished takes its objects
+/// with it). Anything else that referenced a dropped object by *unit id* is
+/// left alone deliberately: an id reference to a unit that no longer exists is
+/// already a case the restore path and CCommandAI handle (a target that cannot
+/// be found is dropped on the next update), while inventing a substitute
+/// target is not.
+void RemapPayload(const DefRemap& map, std::vector<UnitState>& units,
+                  std::vector<FeatureState>& features,
+                  std::vector<StandingOrder>& orders,
+                  std::vector<Directive>& dirs, RemapReport& out);
+
+/// Which captured weapon slot supplies each LIVE slot's durable state, matched
+/// by weapon def name in occurrence order (two slots can share one def, so the
+/// occurrence index is part of the key). `-1` means "no captured slot" — E4's
+/// weapon added to an existing def, which starts fresh and fully reloaded.
+///
+/// Occurrence order rather than a map because it degrades correctly: a payload
+/// with no names at all (pre-task-2 units section) matches positionally, which
+/// is exactly what the old code did.
+std::vector<int32_t> MatchWeaponSlots(const std::vector<WeaponState>& captured,
+                                      const std::vector<std::string>& liveDefNames);
 
 // ──────────────────── The field-census tripwire ────────────────────
 //

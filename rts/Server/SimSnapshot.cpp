@@ -5,7 +5,9 @@
 #include "Server/OrgGroups.h"
 #include "Server/StandingOrders.h"
 #include "Lua/LuaGaia.h"
+#include "Lua/LuaParser.h"
 #include "Lua/LuaRules.h"
+#include "System/FileSystem/FileHandler.h"
 #include "Sim/Features/Feature.h"
 #include "Sim/Features/FeatureDef.h"
 #include "Sim/Features/FeatureDefHandler.h"
@@ -49,7 +51,8 @@ const std::vector<SectionSpec>& Sections()
         {SectionId::Directives,     1, "directives",     true,  ""},
         {SectionId::Teams,          1, "teams",          true,  ""},
         // v2: + UnitState::activeIndex (Q-P4). v3: + UnitState::move (option A).
-        {SectionId::Units,          3, "units",          true,  ""},
+        // v4: + WeaponState::weaponDefName (def-reconciliation task 2).
+        {SectionId::Units,          4, "units",          true,  ""},
         {SectionId::Features,       1, "features",       true,  ""},
         // v2: + luasnapshot Value type 5, Lua 5.4's integer subtype (Q-P6).
         {SectionId::SyncedLua,      2, "syncedLua",      true,  ""},
@@ -368,6 +371,16 @@ const std::vector<DerivedOmission>& DerivedNotCaptured()
          "state survives being written by the walk (task 1e)"},
         {"a feature's solidOnTop (the object standing on a geothermal vent)",
          "CFeature::EmitGeoSmoke re-picks the nearest solid every 5 frames"},
+        {"the statistical-combat pending-outcome ring (CStatisticalCombat's "
+         "frame-indexed volleys awaiting resolution)",
+         "not rebuilt - deliberately dropped, for the same reason and on the "
+         "same argument as an in-flight projectile below: a scheduled volley "
+         "resolves within a second of being fired, so it is one snapshot "
+         "cadence's worth of fidelity for a section that would have to track "
+         "every weapon type. Named here because PLAN-def-reconciliation E5 asks "
+         "task 2 to remap the ring's weaponDefId and there is no ring in the "
+         "payload to remap - a resumed battle loses the volleys in the air, and "
+         "loses them WITH their def references"},
         {"in-flight projectiles",
          "not rebuilt - deliberately dropped. A projectile's whole lifetime is "
          "well under one snapshot cadence, so carrying them buys a fraction of "
@@ -985,6 +998,7 @@ void WriteWeapon(Writer& w, const WeaponState& s)
     w.I32(s.nextSalvo);
     w.I32(s.numStockpiled);
     w.I32(s.numStockpileQued);
+    w.Str(s.weaponDefName);
 }
 
 WeaponState ReadWeapon(Reader& r)
@@ -995,6 +1009,7 @@ WeaponState ReadWeapon(Reader& r)
     s.nextSalvo        = r.I32();
     s.numStockpiled    = r.I32();
     s.numStockpileQued = r.I32();
+    s.weaponDefName    = r.Str();
     return s;
 }
 
@@ -1601,10 +1616,10 @@ int CensusCommandState(const CommandState& c)
 int CensusWeaponState(const WeaponState& s)
 {
     const auto& [reloadStatus, salvoLeft, nextSalvo, numStockpiled,
-                 numStockpileQued] = s;
+                 numStockpileQued, weaponDefName] = s;
     (void)reloadStatus; (void)salvoLeft; (void)nextSalvo; (void)numStockpiled;
-    (void)numStockpileQued;
-    return 5;
+    (void)numStockpileQued; (void)weaponDefName;
+    return 6;
 }
 
 int CensusUnitState(const UnitState& u)
@@ -2302,6 +2317,60 @@ void CaptureDefNames(DefNameTables& out)
     }
 }
 
+// ───────── The game's own renames (task 2, §2 step 2 / persistence §5) ─────────
+//
+// `gamedata/migrations.lua` is the game's file, not the engine's, and its
+// absence is the normal state: most games never rename a def. It is read
+// through the same mod VFS the def files come from, so a game shipped as a zip
+// needs no special handling.
+//
+//   return {
+//     units    = { old_tank = "new_tank" },
+//     weapons  = { old_gun  = "new_gun"  },
+//     features = { ... },
+//   }
+//
+// A file that exists and does not parse is an error: applying half a rename
+// table would remove exactly the units the author was trying to keep.
+bool LoadDefAliases(DefAliases& out, std::string& err)
+{
+    out = DefAliases{};
+
+    static const char* kPath = "gamedata/migrations.lua";
+    if (!CFileHandler::FileExists(kPath, SPRING_VFS_MOD_BASE))
+        return true;
+
+    LuaParser p(kPath, SPRING_VFS_MOD_BASE, SPRING_VFS_ZIP);
+    if (!p.Execute()) {
+        err = std::string(kPath) + " failed to parse: " + p.GetErrorLog();
+        return false;
+    }
+    const LuaTable root = p.GetRoot();
+    if (!root.IsValid()) {
+        err = std::string(kPath) + " did not return a table";
+        return false;
+    }
+
+    const auto read = [&root](const char* family,
+                              std::unordered_map<std::string, std::string>& into) {
+        const LuaTable t = root.SubTable(family);
+        if (!t.IsValid()) return;
+        std::vector<std::string> keys;
+        t.GetKeys(keys);
+        for (const std::string& k : keys) {
+            const std::string v = t.GetString(k, "");
+            // A rename to nothing is not a removal request - a def that is gone
+            // is gone from the def tables, which is what the removal path reads.
+            // Ignoring it keeps one way to say each thing.
+            if (!v.empty() && v != k) into.emplace(k, v);
+        }
+    };
+    read("units", out.units);
+    read("weapons", out.weapons);
+    read("features", out.features);
+    return true;
+}
+
 std::string DefDelta::Describe() const
 {
     if (!Changed()) return "unchanged";
@@ -2364,6 +2433,402 @@ DefDelta CompareDefNames(const std::vector<DefNameEntry>& captured,
         if (capturedNames.count(e.name) == 0) ++d.added;
 
     return d;
+}
+
+// ───────── The remap pass (PLAN-def-reconciliation task 2, §2 steps 1-2) ─────────
+
+int32_t DefIdMap::Map(int32_t oldId) const
+{
+    if (gone.count(oldId) != 0) return -1;
+    const auto it = to.find(oldId);
+    return (it != to.end()) ? it->second : oldId;
+}
+
+namespace {
+
+/// One family. `renames` collects the aliases that actually fired, so the log
+/// can say which rename moved which object rather than that renames exist.
+bool BuildOneMap(const char* family,
+                 const std::vector<DefNameEntry>& captured,
+                 const std::vector<DefNameEntry>& live,
+                 const std::unordered_map<std::string, std::string>& aliases,
+                 DefIdMap& out,
+                 std::unordered_map<std::string, std::string>* renames,
+                 std::string& err)
+{
+    out = DefIdMap{};
+
+    // An unrecorded vocabulary on EITHER side is "I cannot tell", and the only
+    // safe answer to that is to change nothing. The live side is empty in a
+    // headless run with no def load; the captured side is empty in any snapshot
+    // taken before task 1 shipped the section. Reading either as "every def was
+    // removed" would delete the entire world, so this branch is load-bearing
+    // and is the negative test in the doctests.
+    if (captured.empty() || live.empty()) {
+        out.unknown = true;
+        return true;
+    }
+
+    std::unordered_map<std::string, int32_t> liveByName;
+    liveByName.reserve(live.size());
+    for (const auto& e : live) liveByName.emplace(e.name, e.id);
+
+    // E1, half one: an alias whose target is ambiguous. `a = "b"` while this
+    // game still defines BOTH means the author renamed something that did not
+    // go away, and there is no way to know which def the old objects are. §4
+    // E1 says refuse, loudly, as an authoring bug.
+    for (const auto& [from, to_] : aliases) {
+        if (liveByName.count(from) != 0 && liveByName.count(to_) != 0) {
+            err = std::string("gamedata/migrations.lua aliases ") + family +
+                  " def '" + from + "' to '" + to_ + "', but this game defines " +
+                  "both - a rename whose source still exists is ambiguous";
+            return false;
+        }
+    }
+
+    // E1, half two: two captured names aliased onto one live name. The objects
+    // of both would land on one def and their counts would silently merge.
+    std::unordered_map<std::string, std::string> claimedBy;
+    for (const auto& e : captured) {
+        const auto a = aliases.find(e.name);
+        if (a == aliases.end()) continue;
+        const auto prev = claimedBy.find(a->second);
+        if (prev != claimedBy.end()) {
+            err = std::string("gamedata/migrations.lua aliases two ") + family +
+                  " defs ('" + prev->second + "' and '" + e.name + "') onto '" +
+                  a->second + "'";
+            return false;
+        }
+        claimedBy.emplace(a->second, e.name);
+    }
+
+    for (const auto& e : captured) {
+        // Aliasing happens BEFORE the lookup (§2 step 2: migrations may alias
+        // renames "before removal applies"), so a renamed def is a renumber and
+        // not a removal followed by an addition.
+        std::string name = e.name;
+        const auto a = aliases.find(name);
+        const bool renamed = (a != aliases.end() && liveByName.count(a->second) != 0);
+        if (renamed) name = a->second;
+
+        const auto it = liveByName.find(name);
+        if (it == liveByName.end()) {
+            out.gone.insert(e.id);
+            out.goneByName.insert(e.name);
+            if (out.goneNames.size() < kDefDeltaExamples)
+                out.goneNames.push_back(e.name);
+            continue;
+        }
+        if (renamed && renames != nullptr) (*renames)[e.name] = name;
+        if (it->second != e.id) out.to.emplace(e.id, it->second);
+    }
+    return true;
+}
+
+}  // namespace
+
+bool BuildDefRemap(const DefNameTables& captured, const DefNameTables& live,
+                   const DefAliases& aliases, DefRemap& out, std::string& err)
+{
+    out = DefRemap{};
+    return BuildOneMap("unit", captured.units, live.units, aliases.units,
+                       out.units, &out.unitRenames, err) &&
+           BuildOneMap("weapon", captured.weapons, live.weapons, aliases.weapons,
+                       out.weapons, nullptr, err) &&
+           BuildOneMap("feature", captured.features, live.features,
+                       aliases.features, out.features, &out.featureRenames, err);
+}
+
+bool RemapReport::Changed() const
+{
+    return unitsRenamed || unitsDropped || featuresRenamed || featuresDropped ||
+           resurrectCleared || wreckRemapped || wreckCleared ||
+           buildCmdsRemapped || buildCmdsDropped || orderDefsRemapped ||
+           orderDefsDropped || ordersDeactivated;
+}
+
+std::string RemapReport::Describe() const
+{
+    if (!Changed()) return "nothing to remap";
+
+    std::string s;
+    const auto add = [&s](const std::string& part) {
+        if (!s.empty()) s += ", ";
+        s += part;
+    };
+    const auto count = [&add](size_t n, const char* what) {
+        if (n != 0) add(std::to_string(n) + " " + what);
+    };
+    if (unitsDropped != 0) {
+        std::string names;
+        for (size_t i = 0; i < droppedUnitNames.size(); ++i) {
+            if (i != 0) names += ", ";
+            names += droppedUnitNames[i];
+        }
+        if (droppedUnitNames.size() < unitsDropped) names += "…";
+        add(std::to_string(unitsDropped) + " units removed with their def (" +
+            names + ")");
+    }
+    count(unitsRenamed, "units renamed");
+    count(featuresDropped, "features removed with their def");
+    count(featuresRenamed, "features renamed");
+    count(resurrectCleared, "resurrect targets cleared");
+    count(wreckRemapped, "delayed wrecks remapped");
+    count(wreckCleared, "delayed wrecks cleared");
+    count(buildCmdsRemapped, "build orders remapped");
+    count(buildCmdsDropped, "build orders dropped");
+    count(orderDefsRemapped, "order def refs remapped");
+    count(orderDefsDropped, "order def refs dropped");
+    count(ordersDeactivated, "orders deactivated (def filter emptied)");
+    return s;
+}
+
+namespace {
+
+/// The build-order encoding: a command whose id is the NEGATED unit def id.
+/// Shared by CBuilderCAI and CFactoryCAI, and it is the one place a def id
+/// hides inside a field that does not look like one.
+constexpr bool IsBuildCmd(int32_t cmdID) { return cmdID < 0; }
+
+/// Remap a def-id filter list in place (`squadTypes`). Returns false when the
+/// list HAD entries and lost every one of them — the caller must not leave that
+/// as an empty list, because empty means wildcard.
+bool RemapDefFilter(std::vector<uint16_t>& types, const DefIdMap& map,
+                    RemapReport& rep)
+{
+    if (types.empty()) return true;
+    std::vector<uint16_t> kept;
+    kept.reserve(types.size());
+    for (const uint16_t t : types) {
+        const int32_t mapped = map.Map(int32_t(t));
+        if (mapped < 0) {
+            ++rep.orderDefsDropped;
+            continue;
+        }
+        if (mapped != int32_t(t)) ++rep.orderDefsRemapped;
+        kept.push_back(uint16_t(mapped));
+    }
+    const bool survived = !kept.empty();
+    types.swap(kept);
+    return survived;
+}
+
+/// BuildBase's params are [x, y, z, defId, defId, ...] (StandingOrders.cpp).
+/// The geometry is never a def, so the walk starts at 3.
+void RemapBuildParams(std::vector<float>& params, const DefIdMap& map,
+                      RemapReport& rep)
+{
+    if (params.size() <= 3) return;
+    std::vector<float> kept(params.begin(), params.begin() + 3);
+    for (size_t i = 3; i < params.size(); ++i) {
+        const int32_t mapped = map.Map(int32_t(params[i]));
+        if (mapped < 0) {
+            ++rep.orderDefsDropped;
+            continue;
+        }
+        if (mapped != int32_t(params[i])) ++rep.orderDefsRemapped;
+        kept.push_back(float(mapped));
+    }
+    params.swap(kept);
+}
+
+}  // namespace
+
+std::vector<int32_t> MatchWeaponSlots(const std::vector<WeaponState>& captured,
+                                      const std::vector<std::string>& liveDefNames)
+{
+    std::vector<int32_t> from(liveDefNames.size(), -1);
+
+    // Positional fallback: a payload with no names is a pre-task-2 units
+    // section (or a fixture that never set them), and matching those by name
+    // would pair every unnamed slot with every other one. Detected on the
+    // captured side because that is the side that can be old.
+    bool anyNames = false;
+    for (const auto& w : captured)
+        if (!w.weaponDefName.empty()) { anyNames = true; break; }
+    if (!anyNames) {
+        for (size_t i = 0; i < std::min(from.size(), captured.size()); ++i)
+            from[i] = int32_t(i);
+        return from;
+    }
+
+    // Occurrence order per name: a def with two identical launchers keeps
+    // "first launcher's stockpile stays in the first launcher".
+    std::vector<bool> used(captured.size(), false);
+    for (size_t i = 0; i < liveDefNames.size(); ++i) {
+        if (liveDefNames[i].empty()) continue;
+        for (size_t j = 0; j < captured.size(); ++j) {
+            if (used[j] || captured[j].weaponDefName != liveDefNames[i]) continue;
+            used[j] = true;
+            from[i] = int32_t(j);
+            break;
+        }
+    }
+    return from;
+}
+
+void RemapPayload(const DefRemap& map, std::vector<UnitState>& units,
+                  std::vector<FeatureState>& features,
+                  std::vector<StandingOrder>& orders,
+                  std::vector<Directive>& dirs, RemapReport& out)
+{
+    out = RemapReport{};
+
+    // ── units ──
+    //
+    // A unit whose def is gone does not come back (§2 step 2, "with wreck
+    // substitution off - clean removal"). It is dropped from the payload here,
+    // which is also what keeps ResolveUnitDefs' refusal correct: past this
+    // point a name that does not resolve really is a corrupt payload rather
+    // than a balance patch.
+    {
+        std::vector<UnitState> kept;
+        kept.reserve(units.size());
+        for (auto& u : units) {
+            // The unit's own def travels by NAME, so removal is a name test,
+            // and it has to run before the rename: the captured name is the key
+            // both tables are built on.
+            if (map.units.Gone(u.unitDefName)) {
+                ++out.unitsDropped;
+                if (out.droppedUnitNames.size() < kDefDeltaExamples)
+                    out.droppedUnitNames.push_back(u.unitDefName);
+                continue;
+            }
+            const auto rn = map.unitRenames.find(u.unitDefName);
+            if (rn != map.unitRenames.end()) {
+                u.unitDefName = rn->second;
+                ++out.unitsRenamed;
+            }
+            kept.push_back(std::move(u));
+        }
+        units.swap(kept);
+    }
+
+    // A dropped unit takes its place in every transport graph with it: a
+    // transportee id that names nothing is skipped by ApplyUnits, but a
+    // transport that was itself dropped would leave its cargo listed as
+    // attached to a unit that never gets created.
+    if (out.unitsDropped != 0) {
+        std::unordered_set<int32_t> live;
+        live.reserve(units.size());
+        for (const auto& u : units) live.insert(u.id);
+        for (auto& u : units) {
+            if (u.transporterId >= 0 && live.count(u.transporterId) == 0)
+                u.transporterId = -1;
+            if (u.loadingTransportId >= 0 && live.count(u.loadingTransportId) == 0)
+                u.loadingTransportId = -1;
+            if (u.unloadingTransportId >= 0 && live.count(u.unloadingTransportId) == 0)
+                u.unloadingTransportId = -1;
+            if (u.transportees.empty()) continue;
+            std::vector<std::pair<int32_t, int32_t>> tees;
+            tees.reserve(u.transportees.size());
+            for (const auto& t : u.transportees)
+                if (live.count(t.first) != 0) tees.push_back(t);
+            u.transportees.swap(tees);
+        }
+    }
+
+    for (auto& u : units) {
+        // The delayed wreck: a raw feature def id (CUnit::delayedWreckLevel's
+        // companion), so it remaps through the feature map and clears when the
+        // wreck's def is gone rather than pointing at whatever took its id.
+        if (u.featureDefID >= 0) {
+            const int32_t mapped = map.features.Map(u.featureDefID);
+            if (mapped < 0) {
+                u.featureDefID = -1;
+                ++out.wreckCleared;
+            } else if (mapped != u.featureDefID) {
+                u.featureDefID = mapped;
+                ++out.wreckRemapped;
+            }
+        }
+
+        // Build orders. The queue is rewritten rather than patched in place
+        // because a build order for a def that no longer exists has to LEAVE:
+        // -id is a valid command id for whichever def now holds that id, so
+        // "leave it" builds the wrong thing forever.
+        if (!u.commands.empty()) {
+            std::vector<CommandState> kept;
+            kept.reserve(u.commands.size());
+            for (auto& c : u.commands) {
+                if (!IsBuildCmd(c.cmdID)) {
+                    kept.push_back(std::move(c));
+                    continue;
+                }
+                const int32_t mapped = map.units.Map(-c.cmdID);
+                if (mapped < 0) {
+                    ++out.buildCmdsDropped;
+                    continue;
+                }
+                if (mapped != -c.cmdID) {
+                    c.cmdID = -mapped;
+                    ++out.buildCmdsRemapped;
+                }
+                kept.push_back(std::move(c));
+            }
+            u.commands.swap(kept);
+        }
+
+        // Weapon slots are NOT remapped here: their pairing needs the live
+        // def's weapon list, which only exists at apply time. MatchWeaponSlots
+        // is that half, and the captured names it matches on travel in the
+        // payload for exactly this reason.
+    }
+
+    // ── features ──
+    {
+        std::vector<FeatureState> kept;
+        kept.reserve(features.size());
+        for (auto& f : features) {
+            if (map.features.Gone(f.featureDefName)) {
+                ++out.featuresDropped;
+                continue;
+            }
+            const auto rn = map.featureRenames.find(f.featureDefName);
+            if (rn != map.featureRenames.end()) {
+                f.featureDefName = rn->second;
+                ++out.featuresRenamed;
+            }
+            // A resurrect target that is gone becomes "not resurrectable",
+            // which is a real state (see FeatureState::resurrectUnitDefName)
+            // rather than an invented one.
+            if (!f.resurrectUnitDefName.empty()) {
+                if (map.units.Gone(f.resurrectUnitDefName)) {
+                    f.resurrectUnitDefName.clear();
+                    ++out.resurrectCleared;
+                } else {
+                    const auto ru = map.unitRenames.find(f.resurrectUnitDefName);
+                    if (ru != map.unitRenames.end())
+                        f.resurrectUnitDefName = ru->second;
+                }
+            }
+            kept.push_back(std::move(f));
+        }
+        features.swap(kept);
+    }
+
+    // ── standing orders and directives ──
+    //
+    // Both carry the same two def-id shapes: BuildBase's trailing param list,
+    // and `conditions.squadTypes`, whose empty state is a WILDCARD. Emptying
+    // that filter would widen the order instead of narrowing it, so an order
+    // that loses its whole filter is deactivated and counted.
+    for (auto& o : orders) {
+        if (o.type == StandingOrderType::BuildBase)
+            RemapBuildParams(o.params, map.units, out);
+        if (!RemapDefFilter(o.conditions.squadTypes, map.units, out)) {
+            o.active = false;
+            ++out.ordersDeactivated;
+        }
+    }
+    for (auto& d : dirs) {
+        if (d.type == DirectiveType::BuildBase)
+            RemapBuildParams(d.params, map.units, out);
+        if (!RemapDefFilter(d.conditions.squadTypes, map.units, out)) {
+            d.active = false;
+            ++out.ordersDeactivated;
+        }
+    }
 }
 
 // ───────────── Task 1d: the synced-Lua codec (§7.1d decision 4) ─────────────
@@ -2787,6 +3252,13 @@ void CaptureUnits(std::vector<UnitState>& out)
                 ws.nextSalvo = w->nextSalvo;
                 ws.numStockpiled = w->numStockpiled;
                 ws.numStockpileQued = w->numStockpileQued;
+                // What this slot IS, so the restore can find it again after a
+                // def gains or reorders a weapon (task 2). A weapon with no
+                // def cannot happen (CWeapon's constructor takes one), but the
+                // null check costs nothing and the empty name degrades to the
+                // old positional match.
+                if (w->weaponDef != nullptr)
+                    ws.weaponDefName = w->weaponDef->name;
             }
             s.weapons.push_back(ws);
         }
@@ -3029,29 +3501,48 @@ void ApplyUnitState(CUnit* u, const UnitState& s)
         cai->selfDCountdown = s.selfDCountdown;
     }
 
-    // The def decides how many weapons a unit has, so a count mismatch means
-    // the defs moved under the snapshot (§2.1: there is no defsHash yet).
-    // Apply what lines up and say so rather than dropping the stockpile
-    // silently.
-    if (s.weapons.size() != u->weapons.size()) {
-        static bool warned = false;
-        if (!warned) {
-            warned = true;
-            SLOG(SPRING_LOG_WARNING,
-                 "snapshot restore: unit %d ('%s') has %zu weapons, the snapshot "
-                 "recorded %zu - per-weapon state applied for the first %zu only",
-                 u->id, s.unitDefName.c_str(), u->weapons.size(), s.weapons.size(),
-                 std::min(u->weapons.size(), s.weapons.size()));
+    // The def decides how many weapons a unit has and in what order, so the
+    // pairing between captured slots and live ones is BY NAME, not by position
+    // (task 2 — MatchWeaponSlots, and the WeaponState::weaponDefName comment
+    // for why the positional version was a wrong-but-plausible restore). A
+    // live slot with no captured counterpart is E4's up-gunned fleet and keeps
+    // its constructor state: loaded, no stockpile.
+    {
+        std::vector<std::string> liveNames;
+        liveNames.reserve(u->weapons.size());
+        for (const CWeapon* w : u->weapons)
+            liveNames.emplace_back((w != nullptr && w->weaponDef != nullptr)
+                                       ? w->weaponDef->name : std::string());
+
+        const std::vector<int32_t> from = MatchWeaponSlots(s.weapons, liveNames);
+        size_t paired = 0;
+        for (size_t i = 0; i < u->weapons.size(); ++i) {
+            CWeapon* w = u->weapons[i];
+            if (w == nullptr || from[i] < 0) continue;
+            const WeaponState& ws = s.weapons[size_t(from[i])];
+            w->reloadStatus = ws.reloadStatus;
+            w->salvoLeft = ws.salvoLeft;
+            w->nextSalvo = ws.nextSalvo;
+            w->numStockpiled = ws.numStockpiled;
+            w->numStockpileQued = ws.numStockpileQued;
+            ++paired;
         }
-    }
-    for (size_t i = 0; i < std::min(u->weapons.size(), s.weapons.size()); ++i) {
-        CWeapon* w = u->weapons[i];
-        if (w == nullptr) continue;
-        w->reloadStatus = s.weapons[i].reloadStatus;
-        w->salvoLeft = s.weapons[i].salvoLeft;
-        w->nextSalvo = s.weapons[i].nextSalvo;
-        w->numStockpiled = s.weapons[i].numStockpiled;
-        w->numStockpileQued = s.weapons[i].numStockpileQued;
+        // Both directions are worth a line, and only once: a fleet-wide def
+        // change would otherwise write one per unit.
+        if (paired != s.weapons.size() || paired != u->weapons.size()) {
+            static bool warned = false;
+            if (!warned) {
+                warned = true;
+                SLOG(SPRING_LOG_WARNING,
+                     "snapshot restore: unit %d ('%s') has %zu weapons, the "
+                     "snapshot recorded %zu - %zu slot(s) paired by weapon def "
+                     "name, %zu captured slot(s) had no live weapon, %zu live "
+                     "slot(s) start fresh (E4)",
+                     u->id, s.unitDefName.c_str(), u->weapons.size(),
+                     s.weapons.size(), paired, s.weapons.size() - paired,
+                     u->weapons.size() - paired);
+            }
+        }
     }
 
     ApplyRulesParams(s.modParams, u->modParams);
@@ -3906,31 +4397,54 @@ bool SimSnapshotSerializer::Deserialize(const uint8_t* data, size_t size, std::s
         return false;
     }
 
-    // The def vocabulary is REPORTED, not enforced (PLAN-def-reconciliation
-    // §3: "reconcile is not optional" — a snapshot taken before a balance
-    // patch must reach the restore path, or resuming a campaign across a patch
-    // is impossible). So this is a log line and nothing else, and it is here
-    // rather than in the commit phase because it must not be able to fail the
-    // restore.
+    // ── The def vocabulary: report, then RECONCILE (task 1 + task 2) ──
     //
-    // FIDELITY-STANDIN: task 1 detects and names a def change; it does NOT
-    // remap ids against it. Until task 2 lands, restoring a snapshot whose
-    // delta below is non-empty restores id-for-id — which for a `renumbered`
-    // def means units come back holding another def's index. The line is at
-    // WARNING for exactly that reason.
+    // A defs change is not an error (§3: "reconcile is not optional" — the
+    // snapshot taken before a balance patch is exactly the one that has to
+    // reach the restore path). It is reported, and then every def reference in
+    // the payload is rewritten through name-keyed maps before anything is
+    // resolved against a live def. Still in the staging phase, deliberately:
+    // the pass edits the decoded payload, and the one thing it CAN refuse (E1,
+    // an ambiguous rename) has to refuse while there is still a live world to
+    // fall back on.
     {
         DefNameTables liveDefs;
         CaptureDefNames(liveDefs);
         const DefDelta units_ = CompareDefNames(defNames.units, liveDefs.units);
         const DefDelta weapons_ = CompareDefNames(defNames.weapons, liveDefs.weapons);
         const DefDelta features_ = CompareDefNames(defNames.features, liveDefs.features);
-        if (units_.Changed() || weapons_.Changed() || features_.Changed()) {
-            SLOG(SPRING_LOG_WARNING,
+        const bool moved = units_.Changed() || weapons_.Changed() || features_.Changed();
+        if (moved) {
+            SLOG(SPRING_LOG_INFO,
                  "snapshot restore: defs moved under this snapshot - units: %s | "
-                 "weapons: %s | features: %s. Ids are restored UNREMAPPED "
-                 "(PLAN-def-reconciliation task 2 is the remap)",
+                 "weapons: %s | features: %s",
                  units_.Describe().c_str(), weapons_.Describe().c_str(),
                  features_.Describe().c_str());
+        }
+
+        DefAliases aliases;
+        if (!LoadDefAliases(aliases, err))
+            return false;
+
+        DefRemap remap;
+        if (!BuildDefRemap(defNames, liveDefs, aliases, remap, err))
+            return false;
+
+        // §3's fast path: a tuning-only patch renames and renumbers nothing, so
+        // steps 1-2 have no work and the payload is not touched at all.
+        if (!remap.Identity()) {
+            RemapReport rep;
+            RemapPayload(remap, units, features, orders, dirs, rep);
+            // WARNING rather than INFO: this is the line a returning player's
+            // "where did my army go" question is answered from, and §2 step 6's
+            // digest is built on the same counts.
+            SLOG(SPRING_LOG_WARNING,
+                 "snapshot restore: reconciling def references - %s",
+                 rep.Describe().c_str());
+        } else if (moved) {
+            SLOG(SPRING_LOG_INFO,
+                 "snapshot restore: no def reference needed rewriting (additions "
+                 "and tuning only)");
         }
     }
 

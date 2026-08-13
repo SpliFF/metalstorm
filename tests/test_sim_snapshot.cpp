@@ -1430,8 +1430,10 @@ UnitState loudUnit()
 
     WeaponState w0; w0.reloadStatus = 4000; w0.salvoLeft = 2; w0.nextSalvo = 4010;
                     w0.numStockpiled = 3; w0.numStockpileQued = 1;
+                    w0.weaponDefName = "glaive_cannon";
     WeaponState w1; w1.reloadStatus = 4100; w1.salvoLeft = 0; w1.nextSalvo = 0;
                     w1.numStockpiled = 0; w1.numStockpileQued = 7;
+                    w1.weaponDefName = "raven_rocket";
     s.weapons = {w0, w1};
     s.modParams = loudRulesParams();
     s.activeIndex = 37;
@@ -1457,7 +1459,8 @@ bool sameUnit(const UnitState& a, const UnitState& b)
         const auto& y = b.weapons[i];
         if (x.reloadStatus != y.reloadStatus || x.salvoLeft != y.salvoLeft ||
             x.nextSalvo != y.nextSalvo || x.numStockpiled != y.numStockpiled ||
-            x.numStockpileQued != y.numStockpileQued)
+            x.numStockpileQued != y.numStockpileQued ||
+            x.weaponDefName != y.weaponDefName)
             return false;
     }
     if (!sameRulesParams(a.modParams, b.modParams)) return false;
@@ -1586,7 +1589,7 @@ TEST_CASE("task 1c: the field censuses are armed") {
     CHECK(census::RulesParam(RulesParamState{}) == 6);
     CHECK(census::Stats(TeamStatsState{}) == 20);
     CHECK(census::Cmd(CommandState{}) == 6);
-    CHECK(census::Weapon(WeaponState{}) == 5);
+    CHECK(census::Weapon(WeaponState{}) == 6);
     CHECK(census::Team(TeamState{}) == 26);
     CHECK(census::Unit(UnitState{}) == 115);
 
@@ -2956,4 +2959,378 @@ TEST_CASE("defNames: capture with no def handlers is empty tables, not a crash")
     CHECK(back.units.size() == t.units.size());
     CHECK(back.weapons.size() == t.weapons.size());
     CHECK(back.features.size() == t.features.size());
+}
+
+// ──── The remap pass (PLAN-def-reconciliation task 2, §6's matrix) ────
+//
+// Pure, all of it: BuildDefRemap takes two vocabularies and a rename table,
+// RemapPayload takes decoded structs, MatchWeaponSlots takes two name lists.
+// That is the reason the seam is where it is — the dangerous half of this
+// milestone is which id becomes which, and none of it needs a def load.
+
+namespace {
+
+/// The same vocabulary as sampleDefs(), after a balance patch that inserted a
+/// unit def in the middle (so everything after it renumbers), renamed one,
+/// removed another and added a weapon.
+DefNameTables patchedDefs()
+{
+    DefNameTables t;
+    t.units    = {{1, "glaive"}, {2, "hoplite"}, {3, "raven_mk2"}};
+    t.weapons  = {{0, "nodefweapon"}, {1, "raven_rocket"}, {2, "glaive_cannon"},
+                  {3, "hoplite_spear"}};
+    t.features = {{1, "wreck_glaive"}};
+    return t;
+}
+
+UnitState remapUnit(int32_t id, const std::string& def)
+{
+    UnitState u;
+    u.id = id;
+    u.unitDefName = def;
+    return u;
+}
+
+CommandState buildCmd(int32_t unitDefId)
+{
+    CommandState c;
+    c.cmdID = -unitDefId;   // the build-order encoding
+    return c;
+}
+
+}  // namespace
+
+TEST_CASE("task 2: a tuning-only patch remaps nothing") {
+    // §3's fast path, and the case that must stay free: same names, same ids,
+    // so steps 1-2 have no work and the payload is not touched.
+    DefRemap m;
+    std::string err;
+    REQUIRE(BuildDefRemap(sampleDefs(), sampleDefs(), DefAliases{}, m, err));
+    CHECK(m.Identity());
+    CHECK(m.units.Map(2) == 2);
+
+    std::vector<UnitState> units{remapUnit(7, "raven")};
+    std::vector<FeatureState> features;
+    std::vector<StandingOrder> orders;
+    std::vector<Directive> dirs;
+    RemapReport rep;
+    RemapPayload(m, units, features, orders, dirs, rep);
+    CHECK_FALSE(rep.Changed());
+    CHECK(rep.Describe() == "nothing to remap");
+    REQUIRE(units.size() == 1);
+    CHECK(units[0].unitDefName == "raven");
+}
+
+TEST_CASE("task 2: an unrecorded vocabulary changes nothing (it does NOT read as removal)") {
+    // The load-bearing negative. A snapshot taken before task 1 shipped the
+    // defNames section decodes with empty tables, and reading that as "every
+    // def was removed" would delete the entire world on resume - the one bug in
+    // this pass that is worse than not having the pass.
+    DefRemap m;
+    std::string err;
+    REQUIRE(BuildDefRemap(DefNameTables{}, patchedDefs(), DefAliases{}, m, err));
+    CHECK(m.units.unknown);
+    CHECK(m.Identity());
+    CHECK(m.units.Map(3) == 3);
+    CHECK_FALSE(m.units.Gone("raven"));
+
+    std::vector<UnitState> units{remapUnit(1, "raven"), remapUnit(2, "bastion")};
+    std::vector<FeatureState> features;
+    std::vector<StandingOrder> orders;
+    std::vector<Directive> dirs;
+    RemapReport rep;
+    RemapPayload(m, units, features, orders, dirs, rep);
+    CHECK(units.size() == 2);
+    CHECK(rep.unitsDropped == 0);
+
+    // And the same the other way round: a live table this process has not
+    // parsed yet (a headless run with no game) is equally unknown.
+    DefRemap m2;
+    REQUIRE(BuildDefRemap(sampleDefs(), DefNameTables{}, DefAliases{}, m2, err));
+    CHECK(m2.units.unknown);
+    CHECK(m2.Identity());
+}
+
+TEST_CASE("task 2: a renumbering is remapped, not reported as remove+add") {
+    DefRemap m;
+    std::string err;
+    REQUIRE(BuildDefRemap(sampleDefs(), patchedDefs(), DefAliases{}, m, err));
+
+    // glaive kept id 1; glaive_cannon moved 1 -> 2, raven_rocket 2 -> 1. That
+    // swap is §1's worst class: both ids stay valid and each names the other's
+    // weapon.
+    CHECK(m.weapons.Map(0) == 0);
+    CHECK(m.weapons.Map(1) == 2);
+    CHECK(m.weapons.Map(2) == 1);
+    // raven and bastion are gone (raven_mk2 is a different name - see the alias
+    // case below for the same patch WITH a migrations entry).
+    CHECK(m.units.Gone("raven"));
+    CHECK(m.units.Gone("bastion"));
+    CHECK(m.units.Map(2) == -1);
+    CHECK_FALSE(m.units.Gone("glaive"));
+
+    // A unit's delayed wreck is a raw feature def id and remaps through the
+    // feature map; the units' own defs are names and are handled by removal.
+    std::vector<UnitState> units{remapUnit(4, "glaive")};
+    units[0].featureDefID = 1;
+    units[0].commands = {buildCmd(1), buildCmd(3)};   // glaive, bastion
+    std::vector<FeatureState> features;
+    std::vector<StandingOrder> orders;
+    std::vector<Directive> dirs;
+    RemapReport rep;
+    RemapPayload(m, units, features, orders, dirs, rep);
+
+    REQUIRE(units.size() == 1);
+    CHECK(units[0].featureDefID == 1);        // wreck_glaive kept its id
+    // The build order for a def that is gone LEAVES the queue: -3 is still a
+    // valid command id, it just builds whatever holds id 3 now.
+    REQUIRE(units[0].commands.size() == 1);
+    CHECK(units[0].commands[0].cmdID == -1);
+    CHECK(rep.buildCmdsDropped == 1);
+    CHECK(rep.buildCmdsRemapped == 0);
+}
+
+TEST_CASE("task 2: migrations.lua turns a removal into a rename") {
+    DefAliases a;
+    a.units["raven"] = "raven_mk2";
+    DefRemap m;
+    std::string err;
+    REQUIRE(BuildDefRemap(sampleDefs(), patchedDefs(), a, m, err));
+
+    // raven is no longer gone - it IS raven_mk2, and its id moved 2 -> 3.
+    CHECK_FALSE(m.units.Gone("raven"));
+    CHECK(m.units.Map(2) == 3);
+    REQUIRE(m.unitRenames.count("raven") == 1);
+    CHECK(m.unitRenames.at("raven") == "raven_mk2");
+
+    std::vector<UnitState> units{remapUnit(9, "raven"), remapUnit(10, "bastion")};
+    units[0].commands = {buildCmd(2)};
+    std::vector<FeatureState> features;
+    std::vector<StandingOrder> orders;
+    std::vector<Directive> dirs;
+    RemapReport rep;
+    RemapPayload(m, units, features, orders, dirs, rep);
+
+    // The renamed unit survives with the new name; bastion, which the game did
+    // not alias, does not come back at all.
+    REQUIRE(units.size() == 1);
+    CHECK(units[0].id == 9);
+    CHECK(units[0].unitDefName == "raven_mk2");
+    CHECK(rep.unitsRenamed == 1);
+    CHECK(rep.unitsDropped == 1);
+    REQUIRE(rep.droppedUnitNames.size() == 1);
+    CHECK(rep.droppedUnitNames[0] == "bastion");
+    // Its own build order for a raven follows the rename.
+    REQUIRE(units[0].commands.size() == 1);
+    CHECK(units[0].commands[0].cmdID == -3);
+    CHECK(rep.buildCmdsRemapped == 1);
+}
+
+TEST_CASE("task 2: E1 refuses an ambiguous rename") {
+    std::string err;
+    DefRemap m;
+
+    SUBCASE("the alias source still exists") {
+        // `glaive = "hoplite"` while this game defines both: the author renamed
+        // something that did not go away, so there is no answer to what the old
+        // glaives are now.
+        DefAliases a;
+        a.units["glaive"] = "hoplite";
+        CHECK_FALSE(BuildDefRemap(sampleDefs(), patchedDefs(), a, m, err));
+        CHECK(err.find("both") != std::string::npos);
+        CHECK(err.find("glaive") != std::string::npos);
+    }
+
+    SUBCASE("two defs aliased onto one") {
+        DefAliases a;
+        a.units["raven"] = "hoplite";
+        a.units["bastion"] = "hoplite";
+        CHECK_FALSE(BuildDefRemap(sampleDefs(), patchedDefs(), a, m, err));
+        CHECK(err.find("hoplite") != std::string::npos);
+    }
+
+    SUBCASE("an alias to a def this game does not have is a plain removal") {
+        // Not an authoring bug the engine can prove: the target may have been
+        // dropped from a later patch. The units go, loudly, by the removal path.
+        DefAliases a;
+        a.units["raven"] = "nothing_at_all";
+        REQUIRE(BuildDefRemap(sampleDefs(), patchedDefs(), a, m, err));
+        CHECK(m.units.Gone("raven"));
+    }
+}
+
+TEST_CASE("task 2: a def-id FILTER that empties deactivates its order") {
+    // The sharp edge of "remove what cannot be remapped":
+    // StandingOrderConditions::squadTypes is a whitelist whose EMPTY state means
+    // "any squad". Dropping its last entry would widen a recruiting order to a
+    // wildcard - the opposite of what removing a def should do.
+    DefRemap m;
+    std::string err;
+    REQUIRE(BuildDefRemap(sampleDefs(), patchedDefs(), DefAliases{}, m, err));
+
+    std::vector<UnitState> units;
+    std::vector<FeatureState> features;
+    std::vector<StandingOrder> orders(2);
+    orders[0].type = StandingOrderType::DefendArea;
+    orders[0].conditions.squadTypes = {2, 3};        // raven, bastion: both gone
+    orders[1].type = StandingOrderType::DefendArea;
+    orders[1].conditions.squadTypes = {1, 3};        // glaive survives
+    std::vector<Directive> dirs(1);
+    dirs[0].type = DirectiveType::BuildBase;
+    dirs[0].params = {100.0f, 0.0f, 200.0f, 1.0f, 3.0f};   // x, y, z, glaive, bastion
+    dirs[0].conditions.squadTypes = {1};
+
+    RemapReport rep;
+    RemapPayload(m, units, features, orders, dirs, rep);
+
+    CHECK(orders[0].conditions.squadTypes.empty());
+    CHECK_FALSE(orders[0].active);
+    CHECK(rep.ordersDeactivated == 1);
+
+    REQUIRE(orders[1].conditions.squadTypes.size() == 1);
+    CHECK(orders[1].conditions.squadTypes[0] == 1);
+    CHECK(orders[1].active);
+
+    // BuildBase geometry is never a def; the def list starts at param 3.
+    REQUIRE(dirs[0].params.size() == 4);
+    CHECK(dirs[0].params[0] == doctest::Approx(100.0f));
+    CHECK(dirs[0].params[2] == doctest::Approx(200.0f));
+    CHECK(dirs[0].params[3] == doctest::Approx(1.0f));
+    CHECK(dirs[0].active);
+    // Two filter entries in orders[0], one in orders[1], one BuildBase param.
+    CHECK(rep.orderDefsDropped == 4);
+}
+
+TEST_CASE("task 2: a dropped unit does not stay in a transport graph") {
+    DefRemap m;
+    std::string err;
+    REQUIRE(BuildDefRemap(sampleDefs(), patchedDefs(), DefAliases{}, m, err));
+
+    std::vector<UnitState> units{remapUnit(1, "glaive"), remapUnit(2, "raven")};
+    units[0].transportees = {{2, 0}, {3, 1}};
+    units[1].transporterId = 1;
+    std::vector<UnitState> alsoCarried{remapUnit(3, "glaive")};
+    units.push_back(alsoCarried[0]);
+    units[2].transporterId = 2;   // carried by the unit that is about to vanish
+    std::vector<FeatureState> features;
+    std::vector<StandingOrder> orders;
+    std::vector<Directive> dirs;
+    RemapReport rep;
+    RemapPayload(m, units, features, orders, dirs, rep);
+
+    REQUIRE(units.size() == 2);          // the raven is gone
+    CHECK(rep.unitsDropped == 1);
+    // Its slot in the transport's cargo list goes with it, and the unit IT was
+    // carrying is no longer attached to a unit that will never be created.
+    REQUIRE(units[0].transportees.size() == 1);
+    CHECK(units[0].transportees[0].first == 3);
+    CHECK(units[1].transporterId == -1);
+}
+
+TEST_CASE("task 2: features and resurrect targets follow their defs") {
+    DefAliases a;
+    a.features["wreck_glaive"] = "wreck_glaive_v2";
+    DefNameTables live = patchedDefs();
+    live.features = {{4, "wreck_glaive_v2"}};
+    // The captured vocabulary has to CONTAIN the def a captured object names -
+    // it was read off the same def load. A payload naming a def that its own
+    // vocabulary never had is a corrupt payload, and ResolveFeatureDefs refuses
+    // it; that is not this pass's case.
+    DefNameTables captured = sampleDefs();
+    captured.features.push_back({2, "wreck_of_nothing"});
+
+    DefRemap m;
+    std::string err;
+    REQUIRE(BuildDefRemap(captured, live, a, m, err));
+    CHECK(m.features.Map(1) == 4);
+
+    std::vector<UnitState> units{remapUnit(1, "glaive")};
+    units[0].featureDefID = 1;
+    std::vector<FeatureState> features(2);
+    features[0].id = 100;
+    features[0].featureDefName = "wreck_glaive";
+    features[0].resurrectUnitDefName = "raven";       // a def that is gone
+    features[1].id = 101;
+    features[1].featureDefName = "wreck_of_nothing";  // a def that is gone
+    std::vector<StandingOrder> orders;
+    std::vector<Directive> dirs;
+    RemapReport rep;
+    RemapPayload(m, units, features, orders, dirs, rep);
+
+    CHECK(units[0].featureDefID == 4);
+    CHECK(rep.wreckRemapped == 1);
+    REQUIRE(features.size() == 1);
+    CHECK(features[0].featureDefName == "wreck_glaive_v2");
+    CHECK(rep.featuresRenamed == 1);
+    CHECK(rep.featuresDropped == 1);
+    // "Not resurrectable" is a real state; a resurrect target pointing at a
+    // def that is gone would resurrect whatever holds that id now.
+    CHECK(features[0].resurrectUnitDefName.empty());
+    CHECK(rep.resurrectCleared == 1);
+}
+
+TEST_CASE("task 2: weapon slots pair by name, not by position") {
+    // The reorder case, which is the one a positional match gets wrong while
+    // looking right: a def whose two weapons swapped order would hand the
+    // stockpiled nuke's count to the machine gun.
+    std::vector<WeaponState> captured(2);
+    captured[0].weaponDefName = "machine_gun";
+    captured[0].numStockpiled = 0;
+    captured[1].weaponDefName = "nuke";
+    captured[1].numStockpiled = 4;
+
+    SUBCASE("reordered") {
+        const auto from = MatchWeaponSlots(captured, {"nuke", "machine_gun"});
+        REQUIRE(from.size() == 2);
+        CHECK(from[0] == 1);
+        CHECK(from[1] == 0);
+    }
+
+    SUBCASE("E4: a weapon added to the def starts fresh") {
+        const auto from = MatchWeaponSlots(captured,
+                                           {"machine_gun", "nuke", "laser"});
+        REQUIRE(from.size() == 3);
+        CHECK(from[0] == 0);
+        CHECK(from[1] == 1);
+        CHECK(from[2] == -1);
+    }
+
+    SUBCASE("a weapon removed from the def drops its captured slot") {
+        const auto from = MatchWeaponSlots(captured, {"nuke"});
+        REQUIRE(from.size() == 1);
+        CHECK(from[0] == 1);
+    }
+
+    SUBCASE("two slots sharing one def keep their order") {
+        std::vector<WeaponState> twin(2);
+        twin[0].weaponDefName = "launcher"; twin[0].numStockpiled = 1;
+        twin[1].weaponDefName = "launcher"; twin[1].numStockpiled = 9;
+        const auto from = MatchWeaponSlots(twin, {"launcher", "launcher"});
+        REQUIRE(from.size() == 2);
+        CHECK(from[0] == 0);
+        CHECK(from[1] == 1);
+    }
+
+    SUBCASE("a payload with no names at all matches positionally") {
+        // A pre-task-2 units section, or any fixture that never set a name.
+        // Matching those by name would pair every empty name with every other.
+        std::vector<WeaponState> unnamed(3);
+        const auto from = MatchWeaponSlots(unnamed, {"a", "b"});
+        REQUIRE(from.size() == 2);
+        CHECK(from[0] == 0);
+        CHECK(from[1] == 1);
+    }
+}
+
+TEST_CASE("task 2: the pending-volley ring is declared uncaptured, not remapped") {
+    // §E5 asks task 2 to remap the statistical-combat ring's weaponDefId. There
+    // is no ring in the payload: it is dropped on the same argument as an
+    // in-flight projectile. That is a declared omission rather than a silent
+    // one, and this is the assertion that keeps it declared.
+    const auto& omitted = DerivedNotCaptured();
+    const bool named = std::any_of(omitted.begin(), omitted.end(),
+        [](const DerivedOmission& o) {
+            return std::string(o.what).find("statistical-combat") != std::string::npos;
+        });
+    CHECK(named);
 }
