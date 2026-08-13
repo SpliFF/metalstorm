@@ -22,6 +22,8 @@
 #include "Sim/Units/UnitHandler.h"
 #include "Sim/Units/UnitLoader.h"
 #include "Sim/Weapons/Weapon.h"
+#include "Sim/Weapons/WeaponDef.h"
+#include "Sim/Weapons/WeaponDefHandler.h"
 #include "System/GlobalRNG.h"
 #include "System/SpringLog/SpringLog.h"
 
@@ -52,6 +54,7 @@ const std::vector<SectionSpec>& Sections()
         {SectionId::SyncedLua,      1, "syncedLua",      true,  ""},
         {SectionId::GameRules,      1, "gameRules",      true,  ""},
         {SectionId::EnvResources,   1, "envResources",   true,  ""},
+        {SectionId::DefNames,       1, "defNames",       true,  ""},
     };
     return kSections;
 }
@@ -2134,6 +2137,167 @@ void ApplyEnvResources(const envressnapshot::EnvResourceState& in)
     envResHandler.SnapshotApply(in);
 }
 
+// ───────── The def name tables (PLAN-def-reconciliation task 1) ─────────
+
+namespace {
+
+void EncodeDefTable(Writer& w, const std::vector<DefNameEntry>& t)
+{
+    w.U32(static_cast<uint32_t>(t.size()));
+    for (const auto& e : t) {
+        w.I32(e.id);
+        w.Str(e.name);
+    }
+}
+
+/// `what` names the family in the refusal, so a corrupt count says which of
+/// the three tables it was corrupt in rather than "a def table".
+bool DecodeDefTable(Reader& r, std::vector<DefNameEntry>& t, const char* what,
+                    size_t size, std::string& err)
+{
+    const uint32_t count = r.U32();
+    // The whole run before the reserve, same discipline as Reader::Floats: a
+    // corrupt count must be a decode failure before it is an allocation. Each
+    // entry costs at least 4 (id) + 4 (name length) bytes.
+    if (r.Remaining() < size_t(count) * 8) {
+        err = std::string("defNames section claims ") + std::to_string(count) + " " +
+              what + " in " + std::to_string(size) + " bytes";
+        r.Fail();
+        return false;
+    }
+    t.reserve(count);
+    for (uint32_t i = 0; i < count && !r.Bad(); ++i) {
+        DefNameEntry e;
+        e.id   = r.I32();
+        e.name = r.Str();
+        t.push_back(std::move(e));
+    }
+    return !r.Bad();
+}
+
+}  // namespace
+
+void EncodeDefNames(const DefNameTables& in, std::vector<uint8_t>& out)
+{
+    Writer w(out);
+    EncodeDefTable(w, in.units);
+    EncodeDefTable(w, in.weapons);
+    EncodeDefTable(w, in.features);
+}
+
+bool DecodeDefNames(const uint8_t* data, size_t size, DefNameTables& out, std::string& err)
+{
+    Reader r(data, size);
+    DefNameTables t;
+    if (!DecodeDefTable(r, t.units, "unit defs", size, err) ||
+        !DecodeDefTable(r, t.weapons, "weapon defs", size, err) ||
+        !DecodeDefTable(r, t.features, "feature defs", size, err)) {
+        if (err.empty()) err = "defNames section is truncated";
+        return false;
+    }
+    if (r.Bad()) {
+        err = "defNames section is truncated";
+        return false;
+    }
+    if (r.Remaining() != 0) {
+        err = "defNames section has " + std::to_string(r.Remaining()) +
+              " unread trailing bytes";
+        return false;
+    }
+    out = std::move(t);
+    return true;
+}
+
+void CaptureDefNames(DefNameTables& out)
+{
+    out = DefNameTables{};
+
+    // The three loops do NOT share a start index, and that is the whole reason
+    // this is written out rather than templated: id 0 is a real weapon def
+    // (`nodefweapon`, which every weaponless slot points at) and is not a real
+    // unit or feature def. Dropping it would shift every weapon index by one
+    // on reconcile — the exact corruption class the section exists to detect.
+    if (unitDefHandler != nullptr) {
+        const auto& v = unitDefHandler->GetUnitDefsVec();
+        for (size_t id = 1; id < v.size(); ++id)
+            out.units.push_back({int32_t(id), v[id].name});
+    }
+    if (weaponDefHandler != nullptr) {
+        const auto& v = weaponDefHandler->GetWeaponDefsVec();
+        for (size_t id = 0; id < v.size(); ++id)
+            out.weapons.push_back({int32_t(id), v[id].name});
+    }
+    if (featureDefHandler != nullptr) {
+        const auto& v = featureDefHandler->GetFeatureDefsVec();
+        for (size_t id = 1; id < v.size(); ++id)
+            out.features.push_back({int32_t(id), v[id].name});
+    }
+}
+
+std::string DefDelta::Describe() const
+{
+    if (!Changed()) return "unchanged";
+
+    const auto join = [](const std::vector<std::string>& names, size_t total) {
+        std::string s;
+        for (size_t i = 0; i < names.size(); ++i) {
+            if (i != 0) s += ", ";
+            s += names[i];
+        }
+        if (total > names.size()) s += "…";
+        return s;
+    };
+
+    std::string s;
+    const auto add = [&s](const std::string& part) {
+        if (!s.empty()) s += ", ";
+        s += part;
+    };
+    if (renumbered != 0)
+        add(std::to_string(renumbered) + " renumbered (" +
+            join(renumberedNames, renumbered) + ")");
+    if (removed != 0)
+        add(std::to_string(removed) + " removed (" + join(removedNames, removed) + ")");
+    // Additions carry no names: §3 says a new def needs nothing on reconcile,
+    // so the count is the whole finding.
+    if (added != 0)
+        add(std::to_string(added) + " added");
+    return s;
+}
+
+DefDelta CompareDefNames(const std::vector<DefNameEntry>& captured,
+                         const std::vector<DefNameEntry>& live)
+{
+    DefDelta d;
+    std::unordered_map<std::string, int32_t> liveByName;
+    liveByName.reserve(live.size());
+    for (const auto& e : live) liveByName.emplace(e.name, e.id);
+
+    // Walked in captured order, so the examples in the log line are stable
+    // between two runs over the same pair of def loads.
+    for (const auto& e : captured) {
+        const auto it = liveByName.find(e.name);
+        if (it == liveByName.end()) {
+            ++d.removed;
+            if (d.removedNames.size() < kDefDeltaExamples) d.removedNames.push_back(e.name);
+        } else if (it->second == e.id) {
+            ++d.unchanged;
+        } else {
+            ++d.renumbered;
+            if (d.renumberedNames.size() < kDefDeltaExamples)
+                d.renumberedNames.push_back(e.name);
+        }
+    }
+
+    std::unordered_set<std::string> capturedNames;
+    capturedNames.reserve(captured.size());
+    for (const auto& e : captured) capturedNames.insert(e.name);
+    for (const auto& e : live)
+        if (capturedNames.count(e.name) == 0) ++d.added;
+
+    return d;
+}
+
 // ───────────── Task 1d: the synced-Lua codec (§7.1d decision 4) ─────────────
 //
 // One recursive value format: type byte, then the payload for that type, and a
@@ -3470,6 +3634,11 @@ bool SimSnapshotSerializer::SerializeImplemented(std::vector<uint8_t>& out, std:
                 CaptureEnvResources(env);
                 EncodeEnvResources(env, section);
             } break;
+            case SectionId::DefNames: {
+                DefNameTables defs;
+                CaptureDefNames(defs);
+                EncodeDefNames(defs, section);
+            } break;
             default:
                 // An implemented section with no writer is a programming
                 // error, not a runtime condition - fail the checkpoint rather
@@ -3518,7 +3687,9 @@ bool SimSnapshotSerializer::Deserialize(const uint8_t* data, size_t size, std::s
     bool haveGlobals = false, haveOrders = false, haveGroups = false, haveDirs = false;
     bool haveTeams = false, haveUnits = false, haveSyncedLua = false;
     bool haveFeatures = false, haveGameRules = false, haveEnvRes = false;
+    bool haveDefNames = false;
     envressnapshot::EnvResourceState envRes;
+    DefNameTables defNames;
     luasnapshot::Value syncedLua = luasnapshot::Value::Table();
     std::vector<RulesParamState> gameRules;
     std::vector<TeamState> teams;
@@ -3623,6 +3794,12 @@ bool SimSnapshotSerializer::Deserialize(const uint8_t* data, size_t size, std::s
                 sr.Skip(len);
                 haveEnvRes = true;
                 break;
+            case SectionId::DefNames:
+                if (!DecodeDefNames(data + r.Pos(), len, defNames, err))
+                    return false;
+                sr.Skip(len);
+                haveDefNames = true;
+                break;
             default:
                 err = std::string("no reader for section '") + spec->name + "'";
                 return false;
@@ -3648,9 +3825,37 @@ bool SimSnapshotSerializer::Deserialize(const uint8_t* data, size_t size, std::s
     }
     if (!haveGlobals || !haveOrders || !haveGroups || !haveDirs ||
         !haveTeams || !haveUnits || !haveFeatures || !haveSyncedLua ||
-        !haveGameRules || !haveEnvRes) {
+        !haveGameRules || !haveEnvRes || !haveDefNames) {
         err = "payload is missing a required section";
         return false;
+    }
+
+    // The def vocabulary is REPORTED, not enforced (PLAN-def-reconciliation
+    // §3: "reconcile is not optional" — a snapshot taken before a balance
+    // patch must reach the restore path, or resuming a campaign across a patch
+    // is impossible). So this is a log line and nothing else, and it is here
+    // rather than in the commit phase because it must not be able to fail the
+    // restore.
+    //
+    // FIDELITY-STANDIN: task 1 detects and names a def change; it does NOT
+    // remap ids against it. Until task 2 lands, restoring a snapshot whose
+    // delta below is non-empty restores id-for-id — which for a `renumbered`
+    // def means units come back holding another def's index. The line is at
+    // WARNING for exactly that reason.
+    {
+        DefNameTables liveDefs;
+        CaptureDefNames(liveDefs);
+        const DefDelta units_ = CompareDefNames(defNames.units, liveDefs.units);
+        const DefDelta weapons_ = CompareDefNames(defNames.weapons, liveDefs.weapons);
+        const DefDelta features_ = CompareDefNames(defNames.features, liveDefs.features);
+        if (units_.Changed() || weapons_.Changed() || features_.Changed()) {
+            SLOG(SPRING_LOG_WARNING,
+                 "snapshot restore: defs moved under this snapshot - units: %s | "
+                 "weapons: %s | features: %s. Ids are restored UNREMAPPED "
+                 "(PLAN-def-reconciliation task 2 is the remap)",
+                 units_.Describe().c_str(), weapons_.Describe().c_str(),
+                 features_.Describe().c_str());
+        }
     }
 
     // The last fallible work, and it MUST be here rather than in the commit

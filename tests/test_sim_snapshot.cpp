@@ -235,7 +235,9 @@ TEST_CASE("LayoutHash is stable, non-trivial and folds every implemented section
         fold(s.version);
         ++implemented;
     }
-    CHECK(implemented == 10);  // + gameRules (task 1d-b), + envResources (the wind)
+    // + gameRules (task 1d-b), + envResources (the wind),
+    // + defNames (PLAN-def-reconciliation task 1)
+    CHECK(implemented == 11);
     CHECK(h == expect);
 }
 
@@ -2688,4 +2690,193 @@ TEST_CASE("the wind: the envResources section is required, not optional") {
     REQUIRE(it != secs.end());
     CHECK(it->implemented);
     CHECK(std::string(it->name) == "envResources");
+}
+
+// ──── The def name tables (PLAN-def-reconciliation task 1) ────
+//
+// These are pure: CompareDefNames takes two tables, so the cases that matter —
+// a def removed, a def renamed away, a def that kept its name and changed id —
+// are testable without standing up two different def loads of one game, which
+// no doctest in this tree can do.
+
+namespace {
+
+std::vector<uint8_t> defBytes(const DefNameTables& t)
+{
+    std::vector<uint8_t> out;
+    EncodeDefNames(t, out);
+    return out;
+}
+
+DefNameTables sampleDefs()
+{
+    DefNameTables t;
+    t.units    = {{1, "glaive"}, {2, "raven"}, {3, "bastion"}};
+    t.weapons  = {{0, "nodefweapon"}, {1, "glaive_cannon"}, {2, "raven_rocket"}};
+    t.features = {{1, "wreck_glaive"}};
+    return t;
+}
+
+}  // namespace
+
+TEST_CASE("defNames: the section round-trips all three tables") {
+    const DefNameTables in = sampleDefs();
+    const auto bytes = defBytes(in);
+
+    DefNameTables out;
+    std::string err;
+    REQUIRE(DecodeDefNames(bytes.data(), bytes.size(), out, err));
+    REQUIRE(out.units.size() == 3);
+    REQUIRE(out.weapons.size() == 3);
+    REQUIRE(out.features.size() == 1);
+    CHECK(out.units[0].id == 1);
+    CHECK(out.units[0].name == "glaive");
+    CHECK(out.units[2].name == "bastion");
+    // Weapon id 0 is a real def (CWeaponDefHandler says so, unlike the unit and
+    // feature handlers) — dropping it would shift every weapon index by one,
+    // which is the exact corruption class this table exists to prevent.
+    CHECK(out.weapons[0].id == 0);
+    CHECK(out.weapons[0].name == "nodefweapon");
+    CHECK(out.features[0].name == "wreck_glaive");
+}
+
+TEST_CASE("defNames: an empty def table round-trips as empty, not as absent") {
+    const DefNameTables in;
+    const auto bytes = defBytes(in);
+    DefNameTables out;
+    std::string err;
+    REQUIRE(DecodeDefNames(bytes.data(), bytes.size(), out, err));
+    CHECK(out.units.empty());
+    CHECK(out.weapons.empty());
+    CHECK(out.features.empty());
+}
+
+TEST_CASE("defNames: a truncated section is a refusal at every cut point") {
+    const auto full = defBytes(sampleDefs());
+    for (size_t cut = 0; cut < full.size(); ++cut) {
+        DefNameTables out;
+        std::string err;
+        CHECK_FALSE(DecodeDefNames(full.data(), cut, out, err));
+        CHECK_FALSE(err.empty());
+    }
+}
+
+TEST_CASE("defNames: trailing bytes inside the section are a refusal") {
+    auto bytes = defBytes(sampleDefs());
+    bytes.push_back(0);
+    DefNameTables out;
+    std::string err;
+    CHECK_FALSE(DecodeDefNames(bytes.data(), bytes.size(), out, err));
+    CHECK(err.find("trailing") != std::string::npos);
+}
+
+TEST_CASE("defNames: an absurd def count is refused before it is allocated") {
+    auto bytes = defBytes(sampleDefs());
+    for (int i = 0; i < 4; ++i) bytes[i] = 0xFF;   // the unit table's count
+    DefNameTables out;
+    std::string err;
+    CHECK_FALSE(DecodeDefNames(bytes.data(), bytes.size(), out, err));
+    CHECK(err.find("unit defs") != std::string::npos);
+}
+
+TEST_CASE("CompareDefNames: identical tables are unchanged") {
+    const auto t = sampleDefs();
+    const DefDelta d = CompareDefNames(t.weapons, t.weapons);
+    CHECK_FALSE(d.Changed());
+    CHECK(d.unchanged == 3);
+    CHECK(d.renumbered == 0);
+    CHECK(d.removed == 0);
+    CHECK(d.added == 0);
+    CHECK(d.Describe() == "unchanged");
+}
+
+TEST_CASE("CompareDefNames: a RENUMBERED def is the finding, not a removal plus an add") {
+    // The whole reason the comparison is keyed by name. A def that kept its
+    // name and moved id is what silently retargets a positional weapon index
+    // (§1's "index-shift corruption, the worst class"); an id-keyed diff would
+    // report it as "1 removed, 1 added", which is a different — and
+    // reassuringly symmetrical — diagnosis of a much more dangerous event.
+    const std::vector<DefNameEntry> captured = {
+        {0, "nodefweapon"}, {1, "glaive_cannon"}, {2, "raven_rocket"}};
+    const std::vector<DefNameEntry> live = {
+        {0, "nodefweapon"}, {1, "raven_rocket"}, {2, "glaive_cannon"}};
+
+    const DefDelta d = CompareDefNames(captured, live);
+    CHECK(d.Changed());
+    CHECK(d.renumbered == 2);
+    CHECK(d.unchanged == 1);
+    CHECK(d.removed == 0);
+    CHECK(d.added == 0);
+    CHECK(d.Describe().find("2 renumbered") != std::string::npos);
+    CHECK(d.Describe().find("glaive_cannon") != std::string::npos);
+}
+
+TEST_CASE("CompareDefNames: removals and additions are counted from opposite sides") {
+    const std::vector<DefNameEntry> captured = {
+        {1, "glaive"}, {2, "raven"}, {3, "old_bastion"}};
+    const std::vector<DefNameEntry> live = {
+        {1, "glaive"}, {2, "raven"}, {3, "new_bastion"}, {4, "wyvern"}};
+
+    const DefDelta d = CompareDefNames(captured, live);
+    CHECK(d.unchanged == 2);
+    CHECK(d.removed == 1);
+    // REQUIRE, not CHECK: the index below is what reads it, and a neutralised
+    // build (an id-keyed comparison) leaves this empty — a CHECK there turns a
+    // reported failure into a SIGSEGV, which is a worse report of the same fact.
+    REQUIRE(d.removedNames.size() == 1);
+    CHECK(d.removedNames[0] == "old_bastion");
+    CHECK(d.added == 2);          // new_bastion AND wyvern
+    CHECK(d.renumbered == 0);
+    CHECK(d.Describe().find("1 removed (old_bastion)") != std::string::npos);
+    CHECK(d.Describe().find("2 added") != std::string::npos);
+}
+
+TEST_CASE("CompareDefNames: a large delta names a few examples and says there are more") {
+    std::vector<DefNameEntry> captured, live;
+    for (int i = 1; i <= 40; ++i) {
+        captured.push_back({i, "def_" + std::to_string(i)});
+        live.push_back({41 - i, "def_" + std::to_string(i)});   // every id moved
+    }
+    const DefDelta d = CompareDefNames(captured, live);
+    CHECK(d.renumbered == 40);
+    // Capped, or a balance patch produces a 40-name log line nobody reads.
+    CHECK(d.renumberedNames.size() == 5);
+    CHECK(d.Describe().find("40 renumbered") != std::string::npos);
+    CHECK(d.Describe().find("…") != std::string::npos);
+}
+
+TEST_CASE("defNames: the section is required, not optional") {
+    // A payload without it can still be restored — it just cannot be told
+    // which def vocabulary it was written against, which is the whole input to
+    // PLAN-def-reconciliation's remap.
+    const auto& secs = Sections();
+    const auto it = std::find_if(secs.begin(), secs.end(), [](const SectionSpec& s) {
+        return s.id == SectionId::DefNames;
+    });
+    REQUIRE(it != secs.end());
+    CHECK(it->implemented);
+    CHECK(std::string(it->name) == "defNames");
+}
+
+TEST_CASE("defNames: capture with no def handlers is empty tables, not a crash") {
+    // spring-tests loads no game, so the three handlers are null here. That is
+    // not a contrivance: the store is constructed before boot parses a def, and
+    // a Serialize() in that window must produce a payload, not a segfault.
+    //
+    // ⚠ NAMED GAP: this is also why CaptureDefNames's *contents* are not
+    // covered off-engine. The three loops do not share a start index — weapon
+    // id 0 is a real def and unit/feature id 0 is not — and no doctest in this
+    // tree can stand up a def load to check it. The codec and the comparison
+    // above are fully covered; the capture's start indices are covered only by
+    // a live server (PLAN-def-reconciliation task 1's field note).
+    DefNameTables t;
+    CaptureDefNames(t);
+    std::vector<uint8_t> bytes;
+    EncodeDefNames(t, bytes);
+    DefNameTables back;
+    std::string err;
+    REQUIRE(DecodeDefNames(bytes.data(), bytes.size(), back, err));
+    CHECK(back.units.size() == t.units.size());
+    CHECK(back.weapons.size() == t.weapons.size());
+    CHECK(back.features.size() == t.features.size());
 }

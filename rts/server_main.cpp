@@ -1563,6 +1563,21 @@ int main(int argc, char* argv[])
         }
     }
 
+    // PLAN-def-reconciliation task 1: the snapshot store can only stamp the
+    // defs it is told about, and this is the first moment in boot where that
+    // fact exists — the store was constructed ~400 lines above, before
+    // sim.Init() had parsed a single def. Empty (a failed bake) stamps 0,
+    // "not recorded", which is exactly what it is.
+    gmSnapshotStore.SetDefsHash(defsCacheKey);
+    // Logged, because otherwise the only surface this wiring has is a column
+    // in a row that a headless run never writes: `hibernate: no exit
+    // checkpoint (headless-run)`. A stamp of 0 here is the honest report that
+    // the bake failed and every snapshot this process takes will say
+    // "vocabulary not recorded".
+    SLOG(SPRING_LOG_NOTICE, "snapshots: defs vocabulary key=%s -> defsHash %016llx",
+         defsCacheKey.empty() ? "(none)" : defsCacheKey.c_str(),
+         (unsigned long long)gmSnapshotStore.DefsHash());
+
     // (playerTeamByUsername / clientPlayerNum / nextPlayerNum /
     // connectedRosterPlayers / rosterPlayersNeeded were declared above, ahead
     // of the GameServerContext that binds them; deferred-GameStart logic now

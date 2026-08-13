@@ -78,6 +78,7 @@ enum class SectionId : uint16_t {
     Features       = 8,  ///< wrecks/map features — task 1e
     GameRules      = 9,  ///< CSplitLuaHandle::gameParams — task 1d-b
     EnvResources   = 10, ///< EnvResourceHandler: the wind cycle + tidal strength
+    DefNames       = 11, ///< the def vocabulary this snapshot was taken under
 };
 
 /// One entry per part of the synced state the walk must cover. `implemented`
@@ -551,6 +552,70 @@ bool DecodeEnvResources(const uint8_t* data, size_t size,
 /// EnvResourceHandler::SnapshotApply.
 void CaptureEnvResources(envressnapshot::EnvResourceState& out);
 void ApplyEnvResources(const envressnapshot::EnvResourceState& in);
+
+// ─────── The def name tables (PLAN-def-reconciliation task 1) ───────
+//
+// Every other section stores def *ids*: a unit's weapon slots, a feature's
+// resurrect target, a statistical volley's pending ring. An id is only an
+// identity while the def load that produced it is the one being restored into,
+// and a balance patch that adds, removes or reorders a def rewrites that
+// mapping wholesale — silently, because an id remains a perfectly valid id
+// after it starts naming a different def. That is §1's index-shift corruption,
+// and this section is the input that makes it detectable: what each id MEANT
+// when the snapshot was taken.
+//
+// Task 1 records and reports; it does not remap. Remapping is task 2, and it
+// cannot be written until the thing it remaps against is in the payload.
+
+struct DefNameEntry {
+    int32_t     id = 0;
+    std::string name;
+};
+
+/// The three def families that carry ids into a snapshot. Kept as parallel
+/// tables rather than one namespaced map because the id spaces are separate —
+/// and they do not even start at the same index: weapon id 0 is a real def
+/// (`nodefweapon`), unit and feature id 0 are not.
+struct DefNameTables {
+    std::vector<DefNameEntry> units;
+    std::vector<DefNameEntry> weapons;
+    std::vector<DefNameEntry> features;
+};
+
+/// How a captured def table differs from the live one, keyed BY NAME. The
+/// keying is the whole design: an id-keyed diff reports a renumbering as one
+/// removal plus one addition, which is a reassuringly symmetrical description
+/// of the single most dangerous thing that can happen to a snapshot.
+struct DefDelta {
+    size_t unchanged  = 0;   ///< same name, same id — nothing to do
+    size_t renumbered = 0;   ///< same name, different id — task 2's work
+    size_t removed    = 0;   ///< captured, not live — the units go (§2 step 2)
+    size_t added      = 0;   ///< live, not captured — needs nothing (§3)
+    /// Examples for the log line, capped: a balance patch can move hundreds of
+    /// defs, and a log line nobody reads reports nothing.
+    std::vector<std::string> renumberedNames;
+    std::vector<std::string> removedNames;
+
+    bool Changed() const { return renumbered != 0 || removed != 0 || added != 0; }
+    /// One human-readable line, "unchanged" when nothing moved.
+    std::string Describe() const;
+};
+
+/// Cap on how many names Describe()/the delta keep as examples.
+inline constexpr size_t kDefDeltaExamples = 5;
+
+void EncodeDefNames(const DefNameTables& in, std::vector<uint8_t>& out);
+bool DecodeDefNames(const uint8_t* data, size_t size, DefNameTables& out, std::string& err);
+
+/// Read the three live def handlers. Safe with any of them null (the store is
+/// constructed before boot parses a def), which is also how the doctests see
+/// it — see the named coverage gap in tests/test_sim_snapshot.cpp.
+void CaptureDefNames(DefNameTables& out);
+
+/// Compare one family's captured table against the live one. Pure, so the
+/// cases that matter are testable without standing up two def loads.
+DefDelta CompareDefNames(const std::vector<DefNameEntry>& captured,
+                         const std::vector<DefNameEntry>& live);
 
 // ──────────────────── The field-census tripwire ────────────────────
 //
