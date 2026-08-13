@@ -245,6 +245,20 @@ Full CLI flag list (from `rts/server_main.cpp`):
 - `0x03` = Entity state delta (custom binary)
 - `0x04` = Projectile state snapshot (custom binary)
 
+**There are two clients on this wire, and neither may copy it.** The browser
+(`client/src/core/connection.ts`) and the scripted wire client
+(`client/wire/wire-client.ts` — the CI/soak harness, PLAN-replay §7.18) both send
+`Handshake` → `AuthRequest` on one ordered control stream, framed
+`[u32 LE len][envelope][payload]` by the single implementation in
+`client/src/core/transport.ts`, and both read the generated FlatBuffers under
+`client/src/protocol/spring-web/`. `PROTOCOL_VERSION` and the `0x01` envelope byte
+live in **`client/src/core/protocol-version.ts`** — one client-side definition,
+paired with `Protocol::CURRENT_PROTOCOL_VERSION` (`rts/Server/Protocol.h`). A
+third copy is the drift PLAN-protocol-guard.md is about. The harness's node entry
+point (`client/wire/run-wire-client.mjs`) is where node-only concerns live: node
+has no WebTransport, and the package that supplies one implements cert pinning
+through a global hook rather than `serverCertificateHashes`.
+
 **A unit id names a slot, not a unit.** `SimObjectIDPool` recycles ids, so anything that keeps an id across the recycle — a client's selection, squad membership, clip/aim poses, PREVLOS ghosts — silently transfers to whatever took the slot. Two consumers, two instruments, chosen by how long each holds an id. *Inside* the sim, deferred work holds an id for a few frames and is guarded per-id by `CUnitHandler::GetUnitSpawnGen` (`DamageField`, `StatisticalCombat`). *Outside* it, the remote client holds ids for the whole match and the sim cannot enumerate what it built on them, so the recycle is **announced** instead: `SimObjectIDPool::GetRecycleEpoch()` bumps when an id becomes re-issuable, `EntityState::IdRecycleAnnouncer` raises **bit 15 of the entity-state `field_mask`** (`FLAG_ID_RECYCLED` — a flag, no payload, outside `FIELD_ALL`) and holds it up until a full snapshot of a *later* tick, and `client/src/core/id-recycle-guard.ts` latches on any flagged message but flushes only on a full snapshot. The window discipline is the lane's fault, not paranoia: the entity lane is unreliable and newest-wins, so a single flagged message can be superseded before it is delivered. See PLAN-long-uptime S5.
 
 **Two player ids, never interchangeable.** `AuthResponse.player_id` is the **DB account id** (stable across games); `AuthResponse.player_num` is Spring's **sim playerNum** (allocated per game server, in connect order, with AI virtual players taking the low numbers). Everything synced keys on `player_num`: rulesParam keys like `authority_player_<id>`, `gadget:PlayerAdded(playerID)`, `Spring.GetPlayerList()`, `UnitCommandEvent.player_id`, `LuaUIMsgRelay.player_id`. The client carries them as `Connection.accountId` / `Connection.playerNum` and hands widgets both as `ctx.identity.accountId` / `ctx.identity.playerId` (the latter being the playerNum). They coincide only by accident on low-id dev accounts — which is why using one for the other went unnoticed for so long; see PLAN-native-ui.md §3.3 and PLAN-endtoend.md D3. **Verify player-scoped behaviour with a fresh, high-id account.**
