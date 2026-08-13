@@ -236,8 +236,9 @@ TEST_CASE("LayoutHash is stable, non-trivial and folds every implemented section
         ++implemented;
     }
     // + gameRules (task 1d-b), + envResources (the wind),
-    // + defNames (PLAN-def-reconciliation task 1)
-    CHECK(implemented == 11);
+    // + defNames (PLAN-def-reconciliation task 1),
+    // + defScalars (PLAN-def-reconciliation task 3)
+    CHECK(implemented == 12);
     CHECK(h == expect);
 }
 
@@ -1608,6 +1609,12 @@ TEST_CASE("task 1c: the field censuses are armed") {
     // CR_REG_METADATA list: 11 creg members, four of them float3s the state
     // struct flattens into three scalars each.
     CHECK(census::EnvResource(envressnapshot::EnvResourceState{}) == 19);
+
+    // Task 3's two. These are the def-scalar audit in code: a scalar added to
+    // UnitDefScalars must be captured off the def, encoded, and given a
+    // disposition in ReconcileScalars, and this is where forgetting shows up.
+    CHECK(census::UnitDefScalars_(UnitDefScalars{}) == 26);
+    CHECK(census::FeatureDefScalars_(FeatureDefScalars{}) == 4);
 }
 
 TEST_CASE("option A: every move-type class round-trips its own arm") {
@@ -3320,6 +3327,416 @@ TEST_CASE("task 2: weapon slots pair by name, not by position") {
         CHECK(from[0] == 0);
         CHECK(from[1] == 1);
     }
+}
+
+// ─ The scalar pass (PLAN-def-reconciliation task 3, §2 steps 3-4 + §6) ─
+//
+// Pure for the same reason task 2's is: the dangerous half is which number wins
+// when a def and a gadget disagree, and deciding that needs two scalar tables
+// and a decoded payload, not a def load.
+
+namespace {
+
+/// One unit def's newborn values, as the snapshot recorded them.
+UnitDefScalars bornScalars()
+{
+    UnitDefScalars s;
+    s.maxHealth = 1000.0f;
+    s.power = 100.0f;
+    s.mass = 50.0f;
+    s.buildTime = 300.0f;
+    s.cost = {120.0f, 80.0f};
+    s.armoredMultiple = 0.5f;
+    s.armorType = 3;
+    s.category = 4;
+    s.maxRange = 700.0f;
+    s.losRadius = 600;
+    s.airLosRadius = 600;
+    s.radarRadius = 0;
+    s.decloakDistance = 75.0f;
+    return s;
+}
+
+DefScalarTables bornTables()
+{
+    DefScalarTables t;
+    t.units.emplace("raven", bornScalars());
+    FeatureDefScalars f;
+    f.maxHealth = 400.0f;
+    f.mass = 200.0f;
+    f.reclaimTime = 100.0f;
+    f.defResources = {60.0f, 0.0f};
+    t.features.emplace("wreck_raven", f);
+    return t;
+}
+
+/// A unit of that def, captured with everything at its newborn value and half
+/// its health gone.
+UnitState bornUnit()
+{
+    UnitState u;
+    u.id = 7;
+    u.unitDefName = "raven";
+    const UnitDefScalars s = bornScalars();
+    u.maxHealth = s.maxHealth;
+    u.health = s.maxHealth * 0.5f;
+    u.power = s.power;
+    u.mass = s.mass;
+    u.buildTime = s.buildTime;
+    u.cost = s.cost;
+    u.armoredMultiple = s.armoredMultiple;
+    u.curArmorMultiple = 1.0f;   // not armoredState
+    u.armorType = s.armorType;
+    u.category = s.category;
+    u.maxRange = s.maxRange;
+    u.losRadius = u.realLosRadius = s.losRadius;
+    u.airLosRadius = u.realAirLosRadius = s.airLosRadius;
+    u.decloakDistance = s.decloakDistance;
+    u.reloadSpeed = 1.0f;
+    return u;
+}
+
+}  // namespace
+
+TEST_CASE("task 3: a retuned def re-derives, and health keeps its FRACTION") {
+    DefScalarTables live = bornTables();
+    live.units.at("raven").maxHealth = 500.0f;    // nerfed to half
+    live.units.at("raven").buildTime = 600.0f;
+    live.units.at("raven").maxRange = 900.0f;     // an up-gunned weapon
+
+    std::vector<UnitState> units{bornUnit()};
+    std::vector<FeatureState> features;
+    ScalarReport rep;
+    ReconcileScalars(bornTables(), live, DefRemap{}, units, features, rep);
+
+    CHECK(rep.ran);
+    CHECK(rep.unitDefsRetuned == 1);
+    CHECK(rep.unitsTouched == 1);
+    CHECK(rep.unitFieldsReDerived == 3);
+    CHECK(rep.unitFieldsAuthored == 0);
+    CHECK(rep.unitsHealthScaled == 1);
+    // The whole point of "proportional, not clamp-only" (§3): the unit was at
+    // 50 %, and it still is. A clamp would have left it at 500/500 — healed by
+    // a nerf — and a straight copy at 500/500 too.
+    CHECK(units[0].maxHealth == doctest::Approx(500.0f));
+    CHECK(units[0].health == doctest::Approx(250.0f));
+    CHECK(units[0].buildTime == doctest::Approx(600.0f));
+    CHECK(units[0].maxRange == doctest::Approx(900.0f));
+    CHECK(rep.Describe().find("1 unit health fractions preserved") !=
+          std::string::npos);
+}
+
+TEST_CASE("task 3: a BUFF raises absolute health without healing the unit") {
+    DefScalarTables live = bornTables();
+    live.units.at("raven").maxHealth = 2000.0f;
+
+    std::vector<UnitState> units{bornUnit()};
+    std::vector<FeatureState> features;
+    ScalarReport rep;
+    ReconcileScalars(bornTables(), live, DefRemap{}, units, features, rep);
+
+    CHECK(units[0].maxHealth == doctest::Approx(2000.0f));
+    CHECK(units[0].health == doctest::Approx(1000.0f));
+    // Still exactly as wounded as it was, which is §3's stated interaction with
+    // the no-heal invariant.
+    CHECK(units[0].health / units[0].maxHealth == doctest::Approx(0.5f));
+}
+
+TEST_CASE("task 3: an AUTHORED value survives the patch that would overwrite it") {
+    // The load-bearing negative of this whole pass. Almost every audited field
+    // is both a def cache and a Lua setter's target, so a value that does NOT
+    // match the def it was born from belongs to a gadget and reconciling it
+    // would silently revert Spring.SetUnitMaxHealth.
+    DefScalarTables live = bornTables();
+    live.units.at("raven").maxHealth = 500.0f;
+    live.units.at("raven").cost = {200.0f, 200.0f};
+
+    std::vector<UnitState> units{bornUnit()};
+    units[0].maxHealth = 3000.0f;         // a gadget's boss unit
+    units[0].health = 1500.0f;
+    units[0].cost = {1.0f, 1.0f};         // and a gadget's price
+    std::vector<FeatureState> features;
+    ScalarReport rep;
+    ReconcileScalars(bornTables(), live, DefRemap{}, units, features, rep);
+
+    CHECK(rep.unitFieldsAuthored == 2);
+    CHECK(units[0].maxHealth == doctest::Approx(3000.0f));
+    CHECK(units[0].health == doctest::Approx(1500.0f));   // no fraction to scale
+    CHECK(rep.unitsHealthScaled == 0);
+    CHECK(units[0].cost.metal == doctest::Approx(1.0f));
+}
+
+TEST_CASE("task 3: a VETERAN is not read as authored") {
+    // maxHealth and power are functions of the def AND experience, so comparing
+    // a veteran's values against the raw def value reads every veteran in the
+    // world as authored — and then the units that matter most keep their stale
+    // maxHealth. The expected-newborn value therefore folds the SNAPSHOT's own
+    // experience curve, which is why the curve travels in the section.
+    DefScalarTables born = bornTables();
+    born.expHealthScale = 1.0f;
+    born.expPowerScale = 1.0f;
+    DefScalarTables live = born;
+    live.units.at("raven").maxHealth = 500.0f;
+
+    std::vector<UnitState> units{bornUnit()};
+    units[0].experience = 1.0f;           // limExperience 0.5
+    units[0].maxHealth = 1500.0f;         // 1000 × (1 + 0.5)
+    units[0].health = 750.0f;
+    units[0].power = 150.0f;
+    std::vector<FeatureState> features;
+    ScalarReport rep;
+    ReconcileScalars(born, live, DefRemap{}, units, features, rep);
+
+    CHECK(rep.unitFieldsAuthored == 0);
+    CHECK(units[0].maxHealth == doctest::Approx(750.0f));   // 500 × 1.5
+    CHECK(units[0].health == doctest::Approx(375.0f));      // still 50 %
+    CHECK(rep.unitsHealthScaled == 1);
+}
+
+TEST_CASE("task 3: armorType is re-derived, which is the index no remap could reach") {
+    // Task 2's named gap. armorType is an index into the armor-type list, which
+    // no section carries and no name-keyed map can rewrite — but it also has no
+    // Lua setter and nothing mutates it after PreInit, so the fix is not a
+    // fourth name table: it is not restoring a stale index at all.
+    DefScalarTables live = bornTables();
+    live.units.at("raven").armorType = 9;   // the armor list was reordered
+    live.units.at("raven").category = 12;
+
+    std::vector<UnitState> units{bornUnit()};
+    std::vector<FeatureState> features;
+    ScalarReport rep;
+    ReconcileScalars(bornTables(), live, DefRemap{}, units, features, rep);
+
+    CHECK(units[0].armorType == 9);
+    CHECK(units[0].category == 12u);
+    CHECK(rep.unitFieldsReDerived == 2);
+}
+
+TEST_CASE("task 3: an unrecorded scalar table changes NOTHING") {
+    // The same one-directional guard as task 2's unknown vocabulary, and the
+    // same reason: a pre-task-3 snapshot has no scalars, and reading that as
+    // "every def was retuned to the live numbers" would overwrite every
+    // authored scalar in the world in one pass.
+    DefScalarTables live = bornTables();
+    live.units.at("raven").maxHealth = 500.0f;
+
+    std::vector<UnitState> units{bornUnit()};
+    std::vector<FeatureState> features;
+    ScalarReport rep;
+    ReconcileScalars(DefScalarTables{}, live, DefRemap{}, units, features, rep);
+    CHECK_FALSE(rep.ran);
+    CHECK_FALSE(rep.Changed());
+    CHECK(units[0].maxHealth == doctest::Approx(1000.0f));
+    CHECK(rep.Describe() == "no def scalars recorded in this snapshot");
+
+    // And the other direction: a process that has parsed no def yet.
+    ScalarReport rep2;
+    ReconcileScalars(bornTables(), DefScalarTables{}, DefRemap{}, units, features, rep2);
+    CHECK_FALSE(rep2.ran);
+    CHECK(units[0].maxHealth == doctest::Approx(1000.0f));
+}
+
+TEST_CASE("task 3: a tuning-only patch that tunes nothing touches nothing") {
+    std::vector<UnitState> units{bornUnit()};
+    std::vector<FeatureState> features;
+    ScalarReport rep;
+    ReconcileScalars(bornTables(), bornTables(), DefRemap{}, units, features, rep);
+    CHECK(rep.ran);
+    CHECK_FALSE(rep.Changed());
+    CHECK(rep.Describe() == "no def scalar moved");
+    CHECK(units[0].maxHealth == doctest::Approx(1000.0f));
+    CHECK(rep.unitFieldsReDerived == 0);
+    CHECK(rep.unitFieldsAuthored == 0);
+}
+
+TEST_CASE("task 3: a RENAMED def finds its own captured scalars") {
+    // The pass runs after RemapPayload, so the payload carries live names while
+    // the captured table is keyed by the snapshot's. Without the inverse rename
+    // a renamed def's units would all report unknownDef and keep stale numbers.
+    DefScalarTables live;
+    live.units.emplace("raven_mk2", bornScalars());
+    live.units.at("raven_mk2").maxHealth = 500.0f;
+
+    DefRemap map;
+    map.unitRenames.emplace("raven", "raven_mk2");
+
+    std::vector<UnitState> units{bornUnit()};
+    units[0].unitDefName = "raven_mk2";   // RemapPayload already did this
+    std::vector<FeatureState> features;
+    ScalarReport rep;
+    ReconcileScalars(bornTables(), live, map, units, features, rep);
+
+    CHECK(rep.unitsUnknownDef == 0);
+    CHECK(rep.unitDefsRetuned == 1);
+    CHECK(units[0].maxHealth == doctest::Approx(500.0f));
+    CHECK(units[0].health == doctest::Approx(250.0f));
+}
+
+TEST_CASE("task 3: a def with no recorded scalars is left alone, not refused") {
+    std::vector<UnitState> units{bornUnit()};
+    units[0].unitDefName = "something_else";
+    std::vector<FeatureState> features;
+    ScalarReport rep;
+    ReconcileScalars(bornTables(), bornTables(), DefRemap{}, units, features, rep);
+    CHECK(rep.unitsUnknownDef == 1);
+    CHECK(units[0].maxHealth == doctest::Approx(1000.0f));
+}
+
+TEST_CASE("task 3: mass is skipped where it is not a def cache") {
+    // mass is the audit's one accumulator: it stays at its constructor value
+    // while a unit is beingBuilt (Unit.cpp:268) and a transport ADDS its cargo's
+    // mass into its own (Unit.cpp:2686). Re-deriving either would write a number
+    // the def cannot know.
+    DefScalarTables live = bornTables();
+    live.units.at("raven").mass = 75.0f;
+
+    std::vector<UnitState> units{bornUnit(), bornUnit(), bornUnit()};
+    units[1].beingBuilt = true;
+    units[2].transportees.push_back({99, 0});
+    std::vector<FeatureState> features;
+    ScalarReport rep;
+    ReconcileScalars(bornTables(), live, DefRemap{}, units, features, rep);
+
+    CHECK(units[0].mass == doctest::Approx(75.0f));   // an ordinary unit follows
+    CHECK(units[1].mass == doctest::Approx(50.0f));
+    CHECK(units[2].mass == doctest::Approx(50.0f));
+    CHECK(rep.unitFieldsReDerived == 1);
+}
+
+TEST_CASE("task 3: a re-costed wreck keeps its reclaim FRACTION") {
+    // The feature half of fraction preservation, and it needs its own rule:
+    // `resources` is what is left to reclaim and CFeature caps it at
+    // defResources, using the ratio as the reclaimed fraction. A cheapened def
+    // would otherwise leave a half-reclaimed wreck holding more than the def
+    // says it ever had.
+    DefScalarTables live = bornTables();
+    live.features.at("wreck_raven").defResources = {30.0f, 0.0f};
+    live.features.at("wreck_raven").maxHealth = 200.0f;
+
+    FeatureState f;
+    f.featureDefName = "wreck_raven";
+    f.maxHealth = 400.0f;
+    f.health = 100.0f;            // a quarter
+    f.mass = 200.0f;
+    f.reclaimTime = 100.0f;
+    f.defResources = {60.0f, 0.0f};
+    f.resources = {30.0f, 0.0f};  // half reclaimed
+
+    std::vector<UnitState> units;
+    std::vector<FeatureState> features{f};
+    ScalarReport rep;
+    ReconcileScalars(bornTables(), live, DefRemap{}, units, features, rep);
+
+    CHECK(rep.featureDefsRetuned == 1);
+    CHECK(rep.featuresTouched == 1);
+    CHECK(rep.featuresHealthScaled == 1);
+    CHECK(rep.featuresResourcesScaled == 1);
+    CHECK(features[0].maxHealth == doctest::Approx(200.0f));
+    CHECK(features[0].health == doctest::Approx(50.0f));
+    CHECK(features[0].defResources.metal == doctest::Approx(30.0f));
+    CHECK(features[0].resources.metal == doctest::Approx(15.0f));
+}
+
+TEST_CASE("defScalars: the section round-trips every field of both tables") {
+    DefScalarTables t = bornTables();
+    t.expPowerScale = 0.25f;
+    t.expHealthScale = 0.5f;
+    t.expReloadScale = 0.125f;
+    t.units.emplace("bastion", UnitDefScalars{});
+    UnitDefScalars& b = t.units.at("bastion");
+    b.stealth = true;
+    b.sonarStealth = true;
+    b.sonarJamRadius = 42;
+    b.harvestStorage = {7.0f, 8.0f};
+    b.storage = {9.0f, 10.0f};
+    b.flankingBonusMode = 2;
+    b.flankingBonusMobilityAdd = 1.0f;
+    b.flankingBonusAvgDamage = 1.1f;
+    b.flankingBonusDifDamage = 0.2f;
+    b.seismicSignature = 3.5f;
+    b.seismicRadius = 11;
+
+    std::vector<uint8_t> bytes;
+    EncodeDefScalars(t, bytes);
+    DefScalarTables out;
+    std::string err;
+    REQUIRE(DecodeDefScalars(bytes.data(), bytes.size(), out, err));
+    CHECK(err.empty());
+    CHECK(out.expPowerScale == doctest::Approx(0.25f));
+    CHECK(out.expHealthScale == doctest::Approx(0.5f));
+    CHECK(out.expReloadScale == doctest::Approx(0.125f));
+    REQUIRE(out.units.size() == 2);
+    REQUIRE(out.features.size() == 1);
+    CHECK(out.units.at("raven").armorType == 3);
+    CHECK(out.units.at("raven").maxRange == doctest::Approx(700.0f));
+    CHECK(out.units.at("bastion").stealth);
+    CHECK(out.units.at("bastion").sonarStealth);
+    CHECK(out.units.at("bastion").sonarJamRadius == 42);
+    CHECK(out.units.at("bastion").storage.energy == doctest::Approx(10.0f));
+    CHECK(out.units.at("bastion").harvestStorage.metal == doctest::Approx(7.0f));
+    CHECK(out.units.at("bastion").flankingBonusMobilityAdd == doctest::Approx(1.0f));
+    CHECK(out.units.at("bastion").flankingBonusDifDamage == doctest::Approx(0.2f));
+    CHECK(out.units.at("bastion").seismicSignature == doctest::Approx(3.5f));
+    CHECK(out.features.at("wreck_raven").reclaimTime == doctest::Approx(100.0f));
+    CHECK(out.features.at("wreck_raven").defResources.metal == doctest::Approx(60.0f));
+
+    // Two encodes of the same tables are byte-identical: the section is written
+    // in sorted name order, not in hash-bucket order, or the §8 re-capture bar
+    // would compare a payload against a permutation of itself.
+    std::vector<uint8_t> again;
+    EncodeDefScalars(out, again);
+    CHECK(again == bytes);
+}
+
+TEST_CASE("defScalars: a truncated section is a refusal at every cut point") {
+    std::vector<uint8_t> bytes;
+    EncodeDefScalars(bornTables(), bytes);
+    for (size_t cut = 0; cut < bytes.size(); ++cut) {
+        DefScalarTables out;
+        std::string err;
+        CAPTURE(cut);
+        CHECK_FALSE(DecodeDefScalars(bytes.data(), cut, out, err));
+        CHECK_FALSE(err.empty());
+    }
+}
+
+TEST_CASE("defScalars: trailing bytes inside the section are a refusal") {
+    std::vector<uint8_t> bytes;
+    EncodeDefScalars(bornTables(), bytes);
+    bytes.push_back(0);
+    DefScalarTables out;
+    std::string err;
+    CHECK_FALSE(DecodeDefScalars(bytes.data(), bytes.size(), out, err));
+    CHECK(err.find("trailing") != std::string::npos);
+}
+
+TEST_CASE("defScalars: an absurd def count is refused before it is allocated") {
+    std::vector<uint8_t> bytes(3 * 4, 0);      // the three scales
+    bytes.push_back(0xff); bytes.push_back(0xff);
+    bytes.push_back(0xff); bytes.push_back(0x0f);
+    DefScalarTables out;
+    std::string err;
+    CHECK_FALSE(DecodeDefScalars(bytes.data(), bytes.size(), out, err));
+    CHECK(err.find("claims") != std::string::npos);
+}
+
+TEST_CASE("defScalars: capture with no def handlers is empty tables, not a crash") {
+    // Same shape as defNames': the store is built ~400 lines before the first
+    // def is parsed, so this is a real state rather than a defensive check.
+    DefScalarTables t;
+    CaptureDefScalars(t);
+    CHECK(t.Empty());
+}
+
+TEST_CASE("defScalars: the section is required, not optional") {
+    const auto& secs = Sections();
+    const auto it = std::find_if(secs.begin(), secs.end(), [](const SectionSpec& s) {
+        return s.id == SectionId::DefScalars;
+    });
+    REQUIRE(it != secs.end());
+    CHECK(it->implemented);
+    CHECK(std::string(it->name) == "defScalars");
+    CHECK(it->version == 1);
 }
 
 TEST_CASE("task 2: the pending-volley ring is declared uncaptured, not remapped") {

@@ -81,6 +81,7 @@ enum class SectionId : uint16_t {
     GameRules      = 9,  ///< CSplitLuaHandle::gameParams — task 1d-b
     EnvResources   = 10, ///< EnvResourceHandler: the wind cycle + tidal strength
     DefNames       = 11, ///< the def vocabulary this snapshot was taken under
+    DefScalars     = 12, ///< ... and the NUMBERS that vocabulary held
 };
 
 /// One entry per part of the synced state the walk must cover. `implemented`
@@ -779,6 +780,156 @@ void RemapPayload(const DefRemap& map, std::vector<UnitState>& units,
 std::vector<int32_t> MatchWeaponSlots(const std::vector<WeaponState>& captured,
                                       const std::vector<std::string>& liveDefNames);
 
+// ─── Def-derived scalars (PLAN-def-reconciliation task 3, §2 steps 3-4) ───
+//
+// Task 2 reconciled every def *reference*. This reconciles every def-derived
+// *number*: the balance-patch case §3 calls the common one, where not a single
+// name or id moved and every unit in the payload is carrying a copy of numbers
+// the new defs no longer agree with — a nerfed tank restored at its old max
+// health, an up-gunned one restored with the old weapon range cached on the
+// unit, a re-costed one restored with the old build time.
+//
+// THE ONE THING THE PAYLOAD CANNOT TELL BY ITSELF
+// ----------------------------------------------
+// Almost every one of these fields is BOTH a def cache and a value the game's
+// Lua can author (Spring.SetUnitMaxHealth, SetUnitCosts, SetUnitSensorRadius,
+// SetUnitArmored, SetUnitStealth, SetUnitMaxRange, SetUnitHarvestStorage,
+// SetUnitFlanking — the audit is §5 task 3's, and those setters ARE it). So
+// "the captured value disagrees with the live def" has two causes with opposite
+// dispositions: a stale cache, which must be re-derived, and a gadget's
+// deliberate override, which must survive a resume like any other synced state.
+// Nothing in the object distinguishes them.
+//
+// What distinguishes them is the def the object was BORN from, which is why
+// this section exists: it records, per def, the values a newborn object of that
+// def held when the snapshot was taken. A captured field equal to its newborn
+// value was never authored (nobody had touched it), so it re-derives; a field
+// that differs was authored by somebody, and is kept. The snapshot carries the
+// numbers, not just the names, and that is the whole task.
+//
+// EXPERIENCE IS PART OF "NEWBORN"
+// ------------------------------
+// maxHealth, power and reloadSpeed are functions of the def AND the unit's
+// experience (CUnit::AddExperience re-derives all three off unitDef whenever
+// experience moves), and the three scale factors come from modInfo rather than
+// from any def — so a defsHash that never moved is no evidence they did not.
+// They travel here too, and the expected-newborn value is computed with the
+// SNAPSHOT's curve while the re-derived one uses the live curve. Without that
+// every veteran in the payload reads as authored and keeps its stale maxHealth,
+// i.e. the units the fraction preservation matters most for.
+
+/// What a NEWBORN object of one unit def holds. Deliberately the values a fresh
+/// CUnit would carry — after PreInit's clamps (the sensor radii) and its
+/// derived combinations (the flanking-bonus pair is (max±min)/2, the mobility
+/// build-up is mobilityAdd×1000) — rather than the raw UnitDef fields, so the
+/// comparison in ReconcileScalars is plain field equality and PreInit's
+/// arithmetic lives in exactly one place (CaptureDefScalars, which mirrors it).
+///
+/// Field names match UnitState's on purpose: this struct is the subset of
+/// UnitState that a def owns, and the pairing is read off the two names being
+/// the same.
+struct UnitDefScalars {
+    float maxHealth = 0.0f, power = 0.0f, mass = 0.0f, buildTime = 0.0f;
+    ResPair cost, storage, harvestStorage;
+    float   armoredMultiple = 1.0f;
+    int32_t armorType = 0;
+    uint32_t category = 0;
+    float   maxRange = 0.0f;
+    int32_t losRadius = 0, airLosRadius = 0, radarRadius = 0, sonarRadius = 0;
+    int32_t jammerRadius = 0, sonarJamRadius = 0, seismicRadius = 0;
+    float   seismicSignature = 0.0f, decloakDistance = 0.0f;
+    bool    stealth = false, sonarStealth = false;
+    int32_t flankingBonusMode = 0;
+    float   flankingBonusMobilityAdd = 0.0f;
+    float   flankingBonusAvgDamage = 0.0f, flankingBonusDifDamage = 0.0f;
+};
+
+/// TWO FIELDS THIS STRUCT DELIBERATELY DOES NOT HOLD, because they look like def
+/// caches and are accumulators — both found by the live authored-count tripwire
+/// below rather than by reading CUnit:
+///
+///   * `flankingBonusMobility` is seeded from the def (mobilityAdd × 1000) and
+///     then `+= flankingBonusMobilityAdd` on EVERY SlowUpdate, and resets to 0
+///     each time the bonus direction re-aims. So it equals its newborn value
+///     only on the frame the unit was born, and asking whether it was "authored"
+///     is meaningless. Its rate (`flankingBonusMobilityAdd`) IS a def cache and
+///     is reconciled.
+///   * `mass` stays at its constructor value while a unit is beingBuilt and a
+///     transport ACCUMULATES its cargo's mass into its own, so it is a def cache
+///     only for a finished, untransported, empty unit — which is the carve-out
+///     ReconcileScalars applies rather than a field this struct omits.
+
+/// The same for a feature def. Shorter for a real reason rather than for
+/// brevity: a feature's geometry (radius, height, relMidPos, relAimPos) is
+/// MODEL-derived, not def-scalar-derived, so a model change is not a retune and
+/// this pass has no business re-deriving it. Declared here so the absence is
+/// not read as an oversight.
+struct FeatureDefScalars {
+    float maxHealth = 0.0f, mass = 0.0f, reclaimTime = 1.0f;
+    ResPair defResources;
+};
+
+struct DefScalarTables {
+    std::unordered_map<std::string, UnitDefScalars>    units;
+    std::unordered_map<std::string, FeatureDefScalars> features;
+    /// CUnit's experience curve (modInfo, not a def) — see the header comment.
+    float expPowerScale = 0.0f, expHealthScale = 0.0f, expReloadScale = 0.0f;
+
+    bool Empty() const { return units.empty() && features.empty(); }
+};
+
+/// Read the live def handlers. Safe with any of them null, exactly like
+/// CaptureDefNames, and covered off-engine only for the arithmetic it shares
+/// with CUnit::PreInit (the same named gap as CaptureDefNames' start indices).
+void CaptureDefScalars(DefScalarTables& out);
+
+void EncodeDefScalars(const DefScalarTables& in, std::vector<uint8_t>& out);
+bool DecodeDefScalars(const uint8_t* data, size_t size, DefScalarTables& out,
+                      std::string& err);
+
+/// What the scalar pass did. Split re-derived/authored per family because the
+/// two numbers answer different questions: re-derived is how much of the world
+/// the balance patch reached, authored is how much of it a gadget owns and the
+/// patch therefore could NOT reach — and a surprisingly large `authored` is how
+/// an author finds out their game overrides something they thought it tuned.
+struct ScalarReport {
+    bool   ran = false;             ///< false = no captured scalars (pre-task-3 snapshot)
+    size_t unitDefsRetuned = 0;     ///< unit defs whose newborn values moved
+    size_t featureDefsRetuned = 0;
+    size_t unitsTouched = 0;        ///< units with at least one field re-derived
+    size_t unitFieldsReDerived = 0;
+    size_t unitFieldsAuthored = 0;  ///< kept: the captured value was not the def's
+    size_t unitsHealthScaled = 0;   ///< §2 step 3's fraction preservation
+    size_t unitsUnknownDef = 0;     ///< no captured scalars for this def: left alone
+    size_t featuresTouched = 0;
+    size_t featureFieldsReDerived = 0;
+    size_t featureFieldsAuthored = 0;
+    size_t featuresHealthScaled = 0;
+    size_t featuresResourcesScaled = 0;  ///< a reclaim pool is a fraction of defResources
+    size_t featuresUnknownDef = 0;
+    /// Which defs were retuned, capped like DefDelta's examples.
+    std::vector<std::string> retunedNames;
+
+    bool Changed() const;
+    /// One line, or "no def scalar moved".
+    std::string Describe() const;
+};
+
+/// Rewrite every def-derived scalar in a decoded payload to what the LIVE defs
+/// say, wherever the captured value shows the field was never authored. Pure —
+/// no def handler, no live world — so the whole §6 matrix is a doctest; the
+/// live values arrive as a second DefScalarTables (CaptureDefScalars).
+///
+/// Runs AFTER RemapPayload, so `units`/`features` already carry live def names;
+/// `map`'s rename tables are how a renamed def finds its captured scalars.
+/// An empty captured table means the snapshot predates this section, and then
+/// the pass does nothing at all — the same one-directional guard as task 2's
+/// `unknown` vocabulary, and for the same reason: "no record" must never read
+/// as "everything changed".
+void ReconcileScalars(const DefScalarTables& captured, const DefScalarTables& live,
+                      const DefRemap& map, std::vector<UnitState>& units,
+                      std::vector<FeatureState>& features, ScalarReport& out);
+
 // ──────────────────── The field-census tripwire ────────────────────
 //
 // Q-P1 constraint 4: "ship a completeness tripwire in the same milestone as
@@ -802,6 +953,10 @@ int RulesParam(const RulesParamState& p);
 int Stats(const TeamStatsState& s);
 int Res(const ResPair& r);
 int LuaValue(const luasnapshot::Value& v);
+/// Task 3's two. A def scalar added to UnitDefScalars without being captured,
+/// encoded and reconciled is the failure this counts against.
+int UnitDefScalars_(const UnitDefScalars& s);
+int FeatureDefScalars_(const FeatureDefScalars& s);
 /// Option A's six structs. Split per class rather than one count for the
 /// tagged whole, so a field added to (say) CStrafeAirMoveType names the arm it
 /// belongs to in the failure instead of moving one aggregate number.

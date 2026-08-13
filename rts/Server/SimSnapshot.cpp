@@ -59,6 +59,7 @@ const std::vector<SectionSpec>& Sections()
         {SectionId::GameRules,      1, "gameRules",      true,  ""},
         {SectionId::EnvResources,   1, "envResources",   true,  ""},
         {SectionId::DefNames,       1, "defNames",       true,  ""},
+        {SectionId::DefScalars,     1, "defScalars",     true,  ""},
     };
     return kSections;
 }
@@ -1622,6 +1623,34 @@ int CensusWeaponState(const WeaponState& s)
     return 6;
 }
 
+int CensusUnitDefScalars(const UnitDefScalars& s)
+{
+    const auto& [maxHealth, power, mass, buildTime, cost, storage, harvestStorage,
+                 armoredMultiple, armorType, category, maxRange,
+                 losRadius, airLosRadius, radarRadius, sonarRadius, jammerRadius,
+                 sonarJamRadius, seismicRadius, seismicSignature, decloakDistance,
+                 stealth, sonarStealth, flankingBonusMode,
+                 flankingBonusMobilityAdd, flankingBonusAvgDamage,
+                 flankingBonusDifDamage] = s;
+    (void)maxHealth; (void)power; (void)mass; (void)buildTime; (void)cost;
+    (void)storage; (void)harvestStorage; (void)armoredMultiple; (void)armorType;
+    (void)category; (void)maxRange; (void)losRadius; (void)airLosRadius;
+    (void)radarRadius; (void)sonarRadius; (void)jammerRadius;
+    (void)sonarJamRadius; (void)seismicRadius; (void)seismicSignature;
+    (void)decloakDistance; (void)stealth; (void)sonarStealth;
+    (void)flankingBonusMode;
+    (void)flankingBonusMobilityAdd; (void)flankingBonusAvgDamage;
+    (void)flankingBonusDifDamage;
+    return 26;
+}
+
+int CensusFeatureDefScalars(const FeatureDefScalars& s)
+{
+    const auto& [maxHealth, mass, reclaimTime, defResources] = s;
+    (void)maxHealth; (void)mass; (void)reclaimTime; (void)defResources;
+    return 4;
+}
+
 int CensusUnitState(const UnitState& u)
 {
     const auto& [id, unitDefName, team, buildFacing, beingBuilt,
@@ -2831,6 +2860,569 @@ void RemapPayload(const DefRemap& map, std::vector<UnitState>& units,
     }
 }
 
+// ───── Def-derived scalars (PLAN-def-reconciliation task 3, §2 steps 3-4) ─────
+
+void CaptureDefScalars(DefScalarTables& out)
+{
+    out = DefScalarTables{};
+
+    // The experience curve. Not a def — modInfo — which is exactly why it has
+    // to be recorded: a modinfo edit moves maxHealth, power and reloadSpeed on
+    // every veteran in the world without moving the defsHash by one bit.
+    out.expPowerScale  = CUnit::GetExpPowerScale();
+    out.expHealthScale = CUnit::GetExpHealthScale();
+    out.expReloadScale = CUnit::GetExpReloadScale();
+
+    // This mirrors CUnit::PreInit + CUnit::FinishedBuilding, statement for
+    // statement, and that duplication is the point: the comparison in
+    // ReconcileScalars is plain equality, so PreInit's clamps and derived
+    // combinations have to be applied HERE rather than reimplemented at every
+    // field. A change to PreInit that this loop does not follow shows up as
+    // every unit in every payload reading as "authored" — visible in the
+    // report's authored count, which is why that count is reported.
+    if (unitDefHandler != nullptr) {
+        const auto& v = unitDefHandler->GetUnitDefsVec();
+        for (size_t id = 1; id < v.size(); ++id) {
+            const UnitDef& d = v[id];
+            UnitDefScalars s;
+            s.maxHealth = d.health;
+            s.power = d.power;
+            s.mass = d.mass;
+            s.buildTime = d.buildTime;
+            s.cost = {d.cost.metal, d.cost.energy};
+            s.storage = {d.storage.metal, d.storage.energy};
+            s.harvestStorage = {d.harvestStorage.metal, d.harvestStorage.energy};
+            s.armoredMultiple = d.armoredMultiple;
+            s.armorType = d.armorType;
+            s.category = d.category;
+            // A unit's maxRange is built by WeaponLoader as the max over its
+            // loaded weapons' ranges; UnitDef::maxWeaponRange is the same max
+            // taken over the same weapon defs at def-parse time.
+            s.maxRange = d.maxWeaponRange;
+            s.losRadius = std::clamp(int(d.losRadius), 0, MAX_UNIT_SENSOR_RADIUS);
+            s.airLosRadius = std::clamp(int(d.airLosRadius), 0, MAX_UNIT_SENSOR_RADIUS);
+            s.radarRadius = std::clamp(d.radarRadius, 0, MAX_UNIT_SENSOR_RADIUS);
+            s.sonarRadius = std::clamp(d.sonarRadius, 0, MAX_UNIT_SENSOR_RADIUS);
+            s.jammerRadius = std::clamp(d.jammerRadius, 0, MAX_UNIT_SENSOR_RADIUS);
+            s.sonarJamRadius = std::clamp(d.sonarJamRadius, 0, MAX_UNIT_SENSOR_RADIUS);
+            s.seismicRadius = std::clamp(d.seismicRadius, 0, MAX_UNIT_SENSOR_RADIUS);
+            s.seismicSignature = d.seismicSignature;
+            s.decloakDistance = d.decloakDistance;
+            s.stealth = d.stealth;
+            s.sonarStealth = d.sonarStealth;
+            s.flankingBonusMode = d.flankingBonusMode;
+            s.flankingBonusMobilityAdd = d.flankingBonusMobilityAdd;
+            s.flankingBonusAvgDamage = (d.flankingBonusMax + d.flankingBonusMin) * 0.5f;
+            s.flankingBonusDifDamage = (d.flankingBonusMax - d.flankingBonusMin) * 0.5f;
+            out.units.emplace(d.name, s);
+        }
+    }
+
+    // CFeature::Initialize's four (Feature.cpp: mass, health/maxHealth,
+    // reclaimTime, defResources = def->cost).
+    if (featureDefHandler != nullptr) {
+        const auto& v = featureDefHandler->GetFeatureDefsVec();
+        for (size_t id = 1; id < v.size(); ++id) {
+            const FeatureDef& d = v[id];
+            FeatureDefScalars s;
+            s.maxHealth = d.health;
+            s.mass = d.mass;
+            s.reclaimTime = d.reclaimTime;
+            s.defResources = {d.cost.metal, d.cost.energy};
+            out.features.emplace(d.name, s);
+        }
+    }
+}
+
+namespace {
+
+void WriteUnitDefScalars(Writer& w, const UnitDefScalars& s)
+{
+    w.F32(s.maxHealth); w.F32(s.power); w.F32(s.mass); w.F32(s.buildTime);
+    w.F32(s.cost.metal); w.F32(s.cost.energy);
+    w.F32(s.storage.metal); w.F32(s.storage.energy);
+    w.F32(s.harvestStorage.metal); w.F32(s.harvestStorage.energy);
+    w.F32(s.armoredMultiple);
+    w.I32(s.armorType);
+    w.U32(s.category);
+    w.F32(s.maxRange);
+    w.I32(s.losRadius); w.I32(s.airLosRadius);
+    w.I32(s.radarRadius); w.I32(s.sonarRadius); w.I32(s.jammerRadius);
+    w.I32(s.sonarJamRadius); w.I32(s.seismicRadius);
+    w.F32(s.seismicSignature); w.F32(s.decloakDistance);
+    w.Bool(s.stealth); w.Bool(s.sonarStealth);
+    w.I32(s.flankingBonusMode);
+    w.F32(s.flankingBonusMobilityAdd);
+    w.F32(s.flankingBonusAvgDamage); w.F32(s.flankingBonusDifDamage);
+}
+
+UnitDefScalars ReadUnitDefScalars(Reader& r)
+{
+    UnitDefScalars s;
+    s.maxHealth = r.F32(); s.power = r.F32(); s.mass = r.F32(); s.buildTime = r.F32();
+    s.cost.metal = r.F32(); s.cost.energy = r.F32();
+    s.storage.metal = r.F32(); s.storage.energy = r.F32();
+    s.harvestStorage.metal = r.F32(); s.harvestStorage.energy = r.F32();
+    s.armoredMultiple = r.F32();
+    s.armorType = r.I32();
+    s.category = r.U32();
+    s.maxRange = r.F32();
+    s.losRadius = r.I32(); s.airLosRadius = r.I32();
+    s.radarRadius = r.I32(); s.sonarRadius = r.I32(); s.jammerRadius = r.I32();
+    s.sonarJamRadius = r.I32(); s.seismicRadius = r.I32();
+    s.seismicSignature = r.F32(); s.decloakDistance = r.F32();
+    s.stealth = r.Bool(); s.sonarStealth = r.Bool();
+    s.flankingBonusMode = r.I32();
+    s.flankingBonusMobilityAdd = r.F32();
+    s.flankingBonusAvgDamage = r.F32(); s.flankingBonusDifDamage = r.F32();
+    return s;
+}
+
+void WriteFeatureDefScalars(Writer& w, const FeatureDefScalars& s)
+{
+    w.F32(s.maxHealth); w.F32(s.mass); w.F32(s.reclaimTime);
+    w.F32(s.defResources.metal); w.F32(s.defResources.energy);
+}
+
+FeatureDefScalars ReadFeatureDefScalars(Reader& r)
+{
+    FeatureDefScalars s;
+    s.maxHealth = r.F32(); s.mass = r.F32(); s.reclaimTime = r.F32();
+    s.defResources.metal = r.F32(); s.defResources.energy = r.F32();
+    return s;
+}
+
+}  // namespace
+
+void EncodeDefScalars(const DefScalarTables& in, std::vector<uint8_t>& out)
+{
+    Writer w(out);
+    w.F32(in.expPowerScale); w.F32(in.expHealthScale); w.F32(in.expReloadScale);
+
+    // Sorted by name, not in hash order: two captures of the same def load must
+    // produce the same bytes or the §8 re-capture bar compares a payload against
+    // a permutation of itself.
+    std::vector<const std::string*> names;
+    names.reserve(in.units.size());
+    for (const auto& [name, s] : in.units) names.push_back(&name);
+    std::sort(names.begin(), names.end(),
+              [](const std::string* a, const std::string* b) { return *a < *b; });
+    w.U32(static_cast<uint32_t>(names.size()));
+    for (const std::string* n : names) {
+        w.Str(*n);
+        WriteUnitDefScalars(w, in.units.at(*n));
+    }
+
+    names.clear();
+    names.reserve(in.features.size());
+    for (const auto& [name, s] : in.features) names.push_back(&name);
+    std::sort(names.begin(), names.end(),
+              [](const std::string* a, const std::string* b) { return *a < *b; });
+    w.U32(static_cast<uint32_t>(names.size()));
+    for (const std::string* n : names) {
+        w.Str(*n);
+        WriteFeatureDefScalars(w, in.features.at(*n));
+    }
+}
+
+bool DecodeDefScalars(const uint8_t* data, size_t size, DefScalarTables& out,
+                      std::string& err)
+{
+    Reader r(data, size);
+    DefScalarTables t;
+    t.expPowerScale = r.F32();
+    t.expHealthScale = r.F32();
+    t.expReloadScale = r.F32();
+
+    const uint32_t units = r.U32();
+    // A corrupt count must be a decode failure before it is an allocation
+    // (Reader::Floats' discipline). The smallest unit entry is a 4-byte name
+    // length plus the fixed field block.
+    if (r.Remaining() < size_t(units) * 4) {
+        err = "defScalars section claims " + std::to_string(units) +
+              " unit defs in " + std::to_string(size) + " bytes";
+        return false;
+    }
+    t.units.reserve(units);
+    for (uint32_t i = 0; i < units && !r.Bad(); ++i) {
+        const std::string name = r.Str();
+        t.units.emplace(name, ReadUnitDefScalars(r));
+    }
+    const uint32_t features = r.U32();
+    if (r.Remaining() < size_t(features) * 4) {
+        err = "defScalars section claims " + std::to_string(features) +
+              " feature defs in " + std::to_string(size) + " bytes";
+        return false;
+    }
+    t.features.reserve(features);
+    for (uint32_t i = 0; i < features && !r.Bad(); ++i) {
+        const std::string name = r.Str();
+        t.features.emplace(name, ReadFeatureDefScalars(r));
+    }
+
+    if (r.Bad()) {
+        err = "defScalars section is truncated";
+        return false;
+    }
+    if (r.Remaining() != 0) {
+        err = "defScalars section has " + std::to_string(r.Remaining()) +
+              " unread trailing bytes";
+        return false;
+    }
+    out = std::move(t);
+    return true;
+}
+
+bool ScalarReport::Changed() const
+{
+    return unitDefsRetuned || featureDefsRetuned || unitFieldsReDerived ||
+           unitsHealthScaled || featureFieldsReDerived || featuresHealthScaled ||
+           featuresResourcesScaled || unitsUnknownDef || featuresUnknownDef;
+}
+
+std::string ScalarReport::Describe() const
+{
+    if (!ran) return "no def scalars recorded in this snapshot";
+    if (!Changed()) return "no def scalar moved";
+
+    std::string s;
+    const auto add = [&s](const std::string& part) {
+        if (!s.empty()) s += ", ";
+        s += part;
+    };
+    const auto count = [&add](size_t n, const char* what) {
+        if (n != 0) add(std::to_string(n) + " " + what);
+    };
+    if (unitDefsRetuned != 0 || featureDefsRetuned != 0) {
+        std::string names;
+        for (size_t i = 0; i < retunedNames.size(); ++i) {
+            if (i != 0) names += ", ";
+            names += retunedNames[i];
+        }
+        if (retunedNames.size() < unitDefsRetuned + featureDefsRetuned) names += "…";
+        add(std::to_string(unitDefsRetuned) + " unit + " +
+            std::to_string(featureDefsRetuned) + " feature defs retuned (" + names + ")");
+    }
+    count(unitsTouched, "units adjusted");
+    count(unitFieldsReDerived, "unit fields re-derived");
+    count(unitsHealthScaled, "unit health fractions preserved");
+    count(unitFieldsAuthored, "unit fields kept (authored, not the def's)");
+    count(featuresTouched, "features adjusted");
+    count(featureFieldsReDerived, "feature fields re-derived");
+    count(featuresHealthScaled, "feature health fractions preserved");
+    count(featuresResourcesScaled, "feature reclaim pools rescaled");
+    count(featureFieldsAuthored, "feature fields kept (authored)");
+    count(unitsUnknownDef, "units whose def has no recorded scalars");
+    count(featuresUnknownDef, "features whose def has no recorded scalars");
+    return s;
+}
+
+namespace {
+
+/// "Was this field ever authored?" over floats. Relative, because the audited
+/// values span a build time of 3 and a health pool of 200 000 and a fixed
+/// epsilon cannot serve both; and needed at all because the captured value has
+/// been through a float round-trip, so it is not bit-equal to the def's own
+/// float even when nothing ever touched it.
+bool SameScalar(float a, float b)
+{
+    return std::fabs(a - b) <=
+           1e-5f * std::max(1.0f, std::max(std::fabs(a), std::fabs(b)));
+}
+bool SameScalar(const ResPair& a, const ResPair& b)
+{
+    return SameScalar(a.metal, b.metal) && SameScalar(a.energy, b.energy);
+}
+template <typename T> bool SameScalar(const T& a, const T& b) { return a == b; }
+
+/// Did this def's newborn values move between the two loads? Only the report's
+/// "N defs retuned" count is built on this — every disposition that touches an
+/// object runs field by field below, so a field missing from this list costs a
+/// log line's accuracy and nothing else. The census tripwire is what says the
+/// field list is complete.
+bool SameDefScalars(const UnitDefScalars& a, const UnitDefScalars& b)
+{
+    return SameScalar(a.maxHealth, b.maxHealth) && SameScalar(a.power, b.power) &&
+           SameScalar(a.mass, b.mass) && SameScalar(a.buildTime, b.buildTime) &&
+           SameScalar(a.cost, b.cost) && SameScalar(a.storage, b.storage) &&
+           SameScalar(a.harvestStorage, b.harvestStorage) &&
+           SameScalar(a.armoredMultiple, b.armoredMultiple) &&
+           a.armorType == b.armorType && a.category == b.category &&
+           SameScalar(a.maxRange, b.maxRange) &&
+           a.losRadius == b.losRadius && a.airLosRadius == b.airLosRadius &&
+           a.radarRadius == b.radarRadius && a.sonarRadius == b.sonarRadius &&
+           a.jammerRadius == b.jammerRadius &&
+           a.sonarJamRadius == b.sonarJamRadius &&
+           a.seismicRadius == b.seismicRadius &&
+           SameScalar(a.seismicSignature, b.seismicSignature) &&
+           SameScalar(a.decloakDistance, b.decloakDistance) &&
+           a.stealth == b.stealth && a.sonarStealth == b.sonarStealth &&
+           a.flankingBonusMode == b.flankingBonusMode &&
+           SameScalar(a.flankingBonusMobilityAdd, b.flankingBonusMobilityAdd) &&
+           SameScalar(a.flankingBonusAvgDamage, b.flankingBonusAvgDamage) &&
+           SameScalar(a.flankingBonusDifDamage, b.flankingBonusDifDamage);
+}
+
+bool SameDefScalars(const FeatureDefScalars& a, const FeatureDefScalars& b)
+{
+    return SameScalar(a.maxHealth, b.maxHealth) && SameScalar(a.mass, b.mass) &&
+           SameScalar(a.reclaimTime, b.reclaimTime) &&
+           SameScalar(a.defResources, b.defResources);
+}
+
+/// THE RULE, once: a captured value that still equals what the OLD def gave a
+/// newborn was never authored, so it becomes what the NEW def gives. Anything
+/// else is a deliberate write by the game's Lua (or by gameplay) and survives
+/// the resume untouched — reconciling it would silently revert a gadget.
+template <typename T>
+void ReDerive(T& cur, const T& born, const T& live,
+              size_t& reDerived, size_t& authored, bool& touched)
+{
+    if (!SameScalar(cur, born)) { ++authored; return; }
+    if (SameScalar(born, live)) return;   // nothing moved
+    cur = live;
+    ++reDerived;
+    touched = true;
+}
+
+/// maxHealth / power under the experience curve: CUnit::AddExperience recomputes
+/// both off unitDef whenever experience moves, so a veteran's value is the def's
+/// times a factor and comparing against the raw def value would read every
+/// veteran as authored.
+float ExpScaled(float base, float limExp, float scale, bool clampMin)
+{
+    if (scale <= 0.0f) return base;
+    const float v = base * (1.0f + limExp * scale);
+    return clampMin ? std::max(0.1f, v) : v;
+}
+
+}  // namespace
+
+void ReconcileScalars(const DefScalarTables& captured, const DefScalarTables& live,
+                      const DefRemap& map, std::vector<UnitState>& units,
+                      std::vector<FeatureState>& features, ScalarReport& out)
+{
+    out = ScalarReport{};
+
+    // An empty captured table is a snapshot taken before this section existed.
+    // Treating it as "every def was retuned to the live values" would overwrite
+    // every authored scalar in the world, so it does nothing at all — the same
+    // one-directional guard as task 2's `unknown` vocabulary. The live table
+    // being empty (this process has parsed no def) is likewise nothing to do.
+    if (captured.Empty() || live.Empty()) return;
+    out.ran = true;
+
+    // The captured tables are keyed by the names the SNAPSHOT used; the payload
+    // has already been through RemapPayload, so its objects carry LIVE names.
+    // The rename tables bridge the two, inverted.
+    std::unordered_map<std::string, std::string> liveToCaptured;
+    for (const auto& [from, to] : map.unitRenames) liveToCaptured.emplace(to, from);
+    std::unordered_map<std::string, std::string> liveToCapturedFeature;
+    for (const auto& [from, to] : map.featureRenames)
+        liveToCapturedFeature.emplace(to, from);
+
+    const auto capturedName =
+        [](const std::unordered_map<std::string, std::string>& inv,
+           const std::string& liveName) -> const std::string& {
+            const auto it = inv.find(liveName);
+            return (it != inv.end()) ? it->second : liveName;
+        };
+
+    // Which defs were retuned at all, independent of what the world holds:
+    // reported because "3 defs retuned, 400 units adjusted" and "400 defs
+    // retuned, 400 units adjusted" are a balance tweak and a whole rebalance.
+    const auto renamed = [](const std::unordered_map<std::string, std::string>& fwd,
+                            const std::string& from) -> const std::string& {
+        const auto it = fwd.find(from);
+        return (it != fwd.end()) ? it->second : from;
+    };
+    for (const auto& [name, born] : captured.units) {
+        const std::string& liveName = renamed(map.unitRenames, name);
+        const auto lit = live.units.find(liveName);
+        if (lit == live.units.end()) continue;   // removed: task 2's problem
+        if (SameDefScalars(born, lit->second)) continue;
+        ++out.unitDefsRetuned;
+        if (out.retunedNames.size() < kDefDeltaExamples)
+            out.retunedNames.push_back(liveName);
+    }
+    for (const auto& [name, born] : captured.features) {
+        const std::string& liveName = renamed(map.featureRenames, name);
+        const auto lit = live.features.find(liveName);
+        if (lit == live.features.end()) continue;
+        if (SameDefScalars(born, lit->second)) continue;
+        ++out.featureDefsRetuned;
+        if (out.retunedNames.size() < kDefDeltaExamples)
+            out.retunedNames.push_back(liveName);
+    }
+
+    for (auto& u : units) {
+        const auto cit = captured.units.find(capturedName(liveToCaptured, u.unitDefName));
+        const auto lit = live.units.find(u.unitDefName);
+        if (cit == captured.units.end() || lit == live.units.end()) {
+            // A def with no recorded scalars on either side. Not a refusal: the
+            // payload is internally consistent and the object's values are the
+            // ones it was captured with, which is strictly today's behaviour.
+            ++out.unitsUnknownDef;
+            continue;
+        }
+        UnitDefScalars born = cit->second;
+        UnitDefScalars now  = lit->second;
+
+        // ── the newborn value is not always the def value ──
+        //
+        // Three fields are set at FinishedBuilding rather than PreInit, so a
+        // unit still under construction has never held the def's value and
+        // comparing it against one would read as authored. And `mass` is not a
+        // def cache at all on two paths: it stays at its constructor value while
+        // beingBuilt (Unit.cpp:268) and a transport ACCUMULATES its cargo's mass
+        // into it (Unit.cpp:2686), so a loaded transport's mass is a sum, not a
+        // number any def knows. Both are skipped rather than guessed at.
+        const bool massIsDefs = !u.beingBuilt && u.transportees.empty() &&
+                                u.transporterId < 0;
+        if (u.beingBuilt) {
+            born.storage = ResPair{};
+            now.storage = ResPair{};
+            born.losRadius = born.airLosRadius = 0;
+            now.losRadius = now.airLosRadius = 0;
+        }
+
+        const float limExp = u.experience / (u.experience + 1.0f);
+        born.maxHealth = ExpScaled(born.maxHealth, limExp, captured.expHealthScale, true);
+        now.maxHealth  = ExpScaled(now.maxHealth,  limExp, live.expHealthScale, true);
+        born.power = ExpScaled(born.power, limExp, captured.expPowerScale, false);
+        now.power  = ExpScaled(now.power,  limExp, live.expPowerScale, false);
+
+        bool touched = false;
+        size_t& rd = out.unitFieldsReDerived;
+        size_t& au = out.unitFieldsAuthored;
+        const auto field = [&](auto& cur, const auto& b, const auto& l) {
+            ReDerive(cur, b, l, rd, au, touched);
+        };
+
+        // ── vitals, and §2 step 3's fraction preservation ──
+        //
+        // The order is load-bearing: the fraction is taken against the maxHealth
+        // the snapshot was captured under, so it has to be read before the
+        // re-derive rewrites it. A nerfed def leaves a damaged unit damaged by
+        // the same proportion; a buffed one raises its absolute health, which
+        // §3 accepted explicitly (it is not a heal — the unit is exactly as
+        // wounded as it was).
+        const float capturedMax = u.maxHealth;
+        field(u.maxHealth, born.maxHealth, now.maxHealth);
+        if (!SameScalar(u.maxHealth, capturedMax) && capturedMax > 0.0f) {
+            u.health = std::max(0.0f, u.health / capturedMax) * u.maxHealth;
+            ++out.unitsHealthScaled;
+        }
+        field(u.power, born.power, now.power);
+        if (massIsDefs) field(u.mass, born.mass, now.mass);
+        field(u.buildTime, born.buildTime, now.buildTime);
+        field(u.cost, born.cost, now.cost);
+        field(u.storage, born.storage, now.storage);
+        field(u.harvestStorage, born.harvestStorage, now.harvestStorage);
+
+        // reloadSpeed has no def input at all — it is 1 plus the experience
+        // term, so the curve is the only thing that can move it.
+        const float bornReload = (captured.expReloadScale > 0.0f)
+                                     ? 1.0f + limExp * captured.expReloadScale : 1.0f;
+        const float liveReload = (live.expReloadScale > 0.0f)
+                                     ? 1.0f + limExp * live.expReloadScale : 1.0f;
+        field(u.reloadSpeed, bornReload, liveReload);
+
+        // ── combat ──
+        field(u.armoredMultiple, born.armoredMultiple, now.armoredMultiple);
+        // curArmorMultiple is armoredMultiple-or-1 by armoredState, which is
+        // exactly what Spring.SetUnitArmored maintains.
+        field(u.curArmorMultiple,
+              u.armoredState ? born.armoredMultiple : 1.0f,
+              u.armoredState ? now.armoredMultiple : 1.0f);
+        // armorType and category have NO Lua setter and nothing mutates them
+        // after PreInit, so they are unconditional re-derives — and armorType is
+        // the gap task 2 filed: an index into the armor-type list, which no
+        // section carries and no name-keyed remap could reach. The fix is not a
+        // fourth name table; it is not restoring a stale index at all.
+        field(u.armorType, born.armorType, now.armorType);
+        field(u.category, born.category, now.category);
+        field(u.maxRange, born.maxRange, now.maxRange);
+        field(u.flankingBonusMode, born.flankingBonusMode, now.flankingBonusMode);
+        field(u.flankingBonusMobilityAdd, born.flankingBonusMobilityAdd,
+              now.flankingBonusMobilityAdd);
+        // flankingBonusMobility is NOT here: it is an accumulator, not a cache
+        // (Unit.cpp:699 adds mobilityAdd to it on every SlowUpdate). Found live
+        // by the authored-count line below — every unit in the fixture reported
+        // exactly one authored field, and it was this one.
+        field(u.flankingBonusAvgDamage, born.flankingBonusAvgDamage,
+              now.flankingBonusAvgDamage);
+        field(u.flankingBonusDifDamage, born.flankingBonusDifDamage,
+              now.flankingBonusDifDamage);
+
+        // ── sensors ──
+        field(u.realLosRadius, born.losRadius, now.losRadius);
+        field(u.realAirLosRadius, born.airLosRadius, now.airLosRadius);
+        field(u.losRadius, born.losRadius, now.losRadius);
+        field(u.airLosRadius, born.airLosRadius, now.airLosRadius);
+        field(u.radarRadius, born.radarRadius, now.radarRadius);
+        field(u.sonarRadius, born.sonarRadius, now.sonarRadius);
+        field(u.jammerRadius, born.jammerRadius, now.jammerRadius);
+        field(u.sonarJamRadius, born.sonarJamRadius, now.sonarJamRadius);
+        field(u.seismicRadius, born.seismicRadius, now.seismicRadius);
+        field(u.seismicSignature, born.seismicSignature, now.seismicSignature);
+        field(u.decloakDistance, born.decloakDistance, now.decloakDistance);
+        field(u.stealth, born.stealth, now.stealth);
+        field(u.sonarStealth, born.sonarStealth, now.sonarStealth);
+
+        if (touched) ++out.unitsTouched;
+    }
+
+    for (auto& f : features) {
+        const auto cit =
+            captured.features.find(capturedName(liveToCapturedFeature, f.featureDefName));
+        const auto lit = live.features.find(f.featureDefName);
+        if (cit == captured.features.end() || lit == live.features.end()) {
+            ++out.featuresUnknownDef;
+            continue;
+        }
+        const FeatureDefScalars& born = cit->second;
+        const FeatureDefScalars& now  = lit->second;
+
+        bool touched = false;
+        size_t& rd = out.featureFieldsReDerived;
+        size_t& au = out.featureFieldsAuthored;
+        const auto field = [&](auto& cur, const auto& b, const auto& l) {
+            ReDerive(cur, b, l, rd, au, touched);
+        };
+
+        const float capturedMax = f.maxHealth;
+        field(f.maxHealth, born.maxHealth, now.maxHealth);
+        if (!SameScalar(f.maxHealth, capturedMax) && capturedMax > 0.0f) {
+            f.health = std::max(0.0f, f.health / capturedMax) * f.maxHealth;
+            ++out.featuresHealthScaled;
+        }
+        field(f.mass, born.mass, now.mass);
+        field(f.reclaimTime, born.reclaimTime, now.reclaimTime);
+
+        // `resources` is what is LEFT to reclaim and CFeature keeps it capped at
+        // defResources, using the ratio between them as the reclaim fraction
+        // (Feature.cpp:284, :421). So a re-costed wreck gets the same treatment
+        // health does: preserve the fraction, not the absolute amount, or a
+        // cheapened def leaves half-reclaimed wrecks holding more than they
+        // could ever have held.
+        const ResPair capturedRes = f.defResources;
+        field(f.defResources, born.defResources, now.defResources);
+        if (!SameScalar(f.defResources, capturedRes)) {
+            const auto scale = [](float cur, float from, float to) {
+                return (from > 0.0f) ? std::max(0.0f, cur / from) * to : to;
+            };
+            f.resources.metal = scale(f.resources.metal, capturedRes.metal,
+                                      f.defResources.metal);
+            f.resources.energy = scale(f.resources.energy, capturedRes.energy,
+                                       f.defResources.energy);
+            ++out.featuresResourcesScaled;
+        }
+
+        if (touched) ++out.featuresTouched;
+    }
+}
+
 // ───────────── Task 1d: the synced-Lua codec (§7.1d decision 4) ─────────────
 //
 // One recursive value format: type byte, then the payload for that type, and a
@@ -3401,9 +3993,14 @@ void ApplyUnitState(CUnit* u, const UnitState& s)
     u->captureProgress = s.captureProgress;
     u->buildProgress = s.buildProgress;
     u->experience = s.experience;
-    // limExperience is a pure function of experience (rebuilt, not captured);
-    // AddExperience(0) is the engine's own way of recomputing it.
-    u->AddExperience(0.0f);
+    // limExperience is a pure function of experience (rebuilt, not captured) —
+    // but AddExperience(0) does NOT rebuild it: the engine's first statement is
+    // `if (exp == 0.0f) return`, so the call this line used to make was a no-op
+    // and every restored veteran came back with limExperience 0 until its next
+    // kill. That is not cosmetic: limExperience is CWeapon's accuracy scale
+    // (Weapon.cpp) and a missile's wobble factor, so a restored veteran shot
+    // like a rookie. Recomputed the way AddExperience does it (Unit.cpp:1494).
+    u->limExperience = s.experience / (s.experience + 1.0f);
     u->recentDamage = s.recentDamage;
     u->power = s.power;
     u->SetMass(s.mass);
@@ -3516,11 +4113,27 @@ void ApplyUnitState(CUnit* u, const UnitState& s)
 
         const std::vector<int32_t> from = MatchWeaponSlots(s.weapons, liveNames);
         size_t paired = 0;
+        size_t reloadClamped = 0;
         for (size_t i = 0; i < u->weapons.size(); ++i) {
             CWeapon* w = u->weapons[i];
             if (w == nullptr || from[i] < 0) continue;
             const WeaponState& ws = s.weapons[size_t(from[i])];
             w->reloadStatus = ws.reloadStatus;
+            // §2 step 3's other half: cycle state clamps to the NEW cycle
+            // length. reloadStatus is the frame the weapon may fire again
+            // (Weapon.cpp: frameNum + reloadTime/reloadSpeed) and reloadTime
+            // comes off the live def, so a weapon whose reload was shortened
+            // restores stuck mid-cycle for longer than the new def allows —
+            // and one whose owner is mid-reload of a cycle that no longer
+            // exists never becomes ready at a frame the new cycle would.
+            // Clamped rather than reset: a nerfed (longer) reload keeps its
+            // remaining wait, which is the fraction-preserving disposition.
+            const int cycle = std::max(1, int(w->reloadTime /
+                                              std::max(0.01f, u->reloadSpeed)));
+            if (w->reloadStatus > gs->frameNum + cycle) {
+                w->reloadStatus = gs->frameNum + cycle;
+                ++reloadClamped;
+            }
             w->salvoLeft = ws.salvoLeft;
             w->nextSalvo = ws.nextSalvo;
             w->numStockpiled = ws.numStockpiled;
@@ -3541,6 +4154,17 @@ void ApplyUnitState(CUnit* u, const UnitState& s)
                      u->id, s.unitDefName.c_str(), u->weapons.size(),
                      s.weapons.size(), paired, s.weapons.size() - paired,
                      u->weapons.size() - paired);
+            }
+        }
+        if (reloadClamped != 0) {
+            static bool clampWarned = false;
+            if (!clampWarned) {
+                clampWarned = true;
+                SLOG(SPRING_LOG_WARNING,
+                     "snapshot restore: %zu weapon(s) on unit %d ('%s') were "
+                     "mid-reload past the live def's cycle length and were "
+                     "clamped to it (def-reconciliation task 3, §2 step 3)",
+                     reloadClamped, u->id, s.unitDefName.c_str());
             }
         }
     }
@@ -4206,6 +4830,11 @@ bool SimSnapshotSerializer::SerializeImplemented(std::vector<uint8_t>& out, std:
                 CaptureDefNames(defs);
                 EncodeDefNames(defs, section);
             } break;
+            case SectionId::DefScalars: {
+                DefScalarTables scalars;
+                CaptureDefScalars(scalars);
+                EncodeDefScalars(scalars, section);
+            } break;
             default:
                 // An implemented section with no writer is a programming
                 // error, not a runtime condition - fail the checkpoint rather
@@ -4254,9 +4883,10 @@ bool SimSnapshotSerializer::Deserialize(const uint8_t* data, size_t size, std::s
     bool haveGlobals = false, haveOrders = false, haveGroups = false, haveDirs = false;
     bool haveTeams = false, haveUnits = false, haveSyncedLua = false;
     bool haveFeatures = false, haveGameRules = false, haveEnvRes = false;
-    bool haveDefNames = false;
+    bool haveDefNames = false, haveDefScalars = false;
     envressnapshot::EnvResourceState envRes;
     DefNameTables defNames;
+    DefScalarTables defScalars;
     luasnapshot::Value syncedLua = luasnapshot::Value::Table();
     std::vector<RulesParamState> gameRules;
     std::vector<TeamState> teams;
@@ -4367,6 +4997,12 @@ bool SimSnapshotSerializer::Deserialize(const uint8_t* data, size_t size, std::s
                 sr.Skip(len);
                 haveDefNames = true;
                 break;
+            case SectionId::DefScalars:
+                if (!DecodeDefScalars(data + r.Pos(), len, defScalars, err))
+                    return false;
+                sr.Skip(len);
+                haveDefScalars = true;
+                break;
             default:
                 err = std::string("no reader for section '") + spec->name + "'";
                 return false;
@@ -4392,7 +5028,7 @@ bool SimSnapshotSerializer::Deserialize(const uint8_t* data, size_t size, std::s
     }
     if (!haveGlobals || !haveOrders || !haveGroups || !haveDirs ||
         !haveTeams || !haveUnits || !haveFeatures || !haveSyncedLua ||
-        !haveGameRules || !haveEnvRes || !haveDefNames) {
+        !haveGameRules || !haveEnvRes || !haveDefNames || !haveDefScalars) {
         err = "payload is missing a required section";
         return false;
     }
@@ -4445,6 +5081,37 @@ bool SimSnapshotSerializer::Deserialize(const uint8_t* data, size_t size, std::s
             SLOG(SPRING_LOG_INFO,
                  "snapshot restore: no def reference needed rewriting (additions "
                  "and tuning only)");
+        }
+
+        // §2 steps 3-4, and it runs whether or not step 1-2 had work: a
+        // tuning-only patch is precisely the case where no name and no id moved
+        // and every NUMBER did. The fast path is inside the pass (a def whose
+        // newborn values did not move re-derives nothing).
+        ScalarReport srep;
+        DefScalarTables liveScalars;
+        CaptureDefScalars(liveScalars);
+        ReconcileScalars(defScalars, liveScalars, remap, units, features, srep);
+        if (srep.Changed()) {
+            SLOG(SPRING_LOG_WARNING,
+                 "snapshot restore: reconciling def scalars - %s",
+                 srep.Describe().c_str());
+        } else {
+            // Reported even when nothing moved, and the authored counts are why:
+            // CaptureDefScalars mirrors CUnit::PreInit by hand, and if that
+            // mirror ever drifts, every field of every unit reads as "authored"
+            // and this whole pass silently stops re-deriving anything. A restore
+            // into an UNCHANGED def load should show a small authored count (the
+            // handful of values the game's gadgets really do write) — a number
+            // near units × fields is the mirror being wrong, not the game being
+            // opinionated. It is the only in-production check on the half no
+            // doctest can reach.
+            // NOTICE, not INFO: INFO is below the server's default level, and a
+            // tripwire nobody can see is not a tripwire. One line per restore.
+            SLOG(SPRING_LOG_NOTICE,
+                 "snapshot restore: %s [%zu unit + %zu feature def-derived "
+                 "field(s) authored by the game and kept as captured]",
+                 srep.Describe().c_str(), srep.unitFieldsAuthored,
+                 srep.featureFieldsAuthored);
         }
     }
 
@@ -4574,6 +5241,8 @@ int RulesParam(const RulesParamState& p)         { return CensusRulesParam(p); }
 int Stats(const TeamStatsState& s)               { return CensusStats(s); }
 int Res(const ResPair& r)                        { return CensusResPair(r); }
 int LuaValue(const luasnapshot::Value& v)        { return CensusLuaValue(v); }
+int UnitDefScalars_(const UnitDefScalars& s)     { return CensusUnitDefScalars(s); }
+int FeatureDefScalars_(const FeatureDefScalars& s) { return CensusFeatureDefScalars(s); }
 
 int MoveBase(const movetypesnapshot::BaseState& b)   { return CensusMoveBase(b); }
 int MoveGround(const movetypesnapshot::GroundState& g) { return CensusMoveGround(g); }
