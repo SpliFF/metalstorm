@@ -443,7 +443,10 @@ function playDeathFx(store, sq, backend, slot, dirX, dirZ) {
 
 function staggerInterval(cfg) {
   const { staggerIntervalMinSec: lo, staggerIntervalMaxSec: hi } = cfg;
-  return lo + Math.random() * (hi - lo);
+  // cfg.random, not Math.random — the §10f seam (see config.js). The OO
+  // engine's `Squad._staggerInterval` draws from the same one, which is what
+  // makes the two engines' death-stagger timing comparable under S6.
+  return lo + cfg.random() * (hi - lo);
 }
 
 function enqueueStaggeredDeaths(store, sq, victims, nowSec) {

@@ -299,6 +299,24 @@ export const DEFAULT_CONFIG = {
   engine: 'oo',
   // Initial member-array pool capacity (soa-store.js); doubles on overflow.
   soaInitialMembers: 4096,
+
+  // --- Seedable RNG (§10f) -------------------------------------------------
+  // The ONE randomness seam in the squad modules: the death-stagger interval
+  // draw, in BOTH engines (`squad.js _staggerInterval`, `soa-squad.js
+  // staggerInterval`). Threaded so the OO-vs-SoA parity suite (§14 S6) can
+  // seed both engines identically — swap for a seeded generator in a test,
+  // never call Math.random() directly from squad logic.
+  //
+  // Deliberately a wrapper, not a bare `Math.random` reference: capturing the
+  // reference at module-eval time silently defeats `vi.spyOn(Math, 'random')`,
+  // which squad-casualties.test.js uses to pin the stagger interval.
+  //
+  // Landed twice (S0 `154e62c0d9`, re-fixed by S1 `5dc8f9951c`) and lost both
+  // times to a landing merge resolving config.js/squad.js to the other side —
+  // the same accident, on the same two files, that the governor-key comment
+  // above records for `1baa239a5e`. Restored by S6, which cannot exist without
+  // it. Do not "tidy" it away as unused: grep `cfg.random` in both engines.
+  random: () => Math.random(),
 };
 
 // THE routing predicate — canonical single home (PLAN-metalstorm-structure.md

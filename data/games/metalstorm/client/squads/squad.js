@@ -457,6 +457,14 @@ export class Squad {
       // Seed at its slot so the squad doesn't fan out from a point on spawn.
       slotToWorld(this.slots[i], this.cx, this.cz, this.heading, _slotW);
       m.x = _slotW.x; m.z = _slotW.z;
+      // ...and FACING the squad's heading, not world +z. Member's default
+      // headingY of 0 meant a squad spawned facing east rendered facing north
+      // until something steered it — visible on any freshly-staged scenario
+      // roster, which is stationary by definition. Found by the S6 parity
+      // suite: `soa-squad.js spawnInitial` seeds `mHeading` from `sq.heading`
+      // and this path did not, so the two engines disagreed by the whole
+      // spawn heading (2.1 rad on that fixture).
+      m.headingY = this.heading;
       if (this.profile.steerer === 'air') {
         // Air never ground-snaps (§6) — seed directly at its cruise-altitude
         // band so it doesn't visibly rise from the ground on first spawn.
@@ -592,7 +600,9 @@ export class Squad {
 
   _staggerInterval() {
     const { staggerIntervalMinSec: lo, staggerIntervalMaxSec: hi } = this.cfg;
-    return lo + Math.random() * (hi - lo);
+    // cfg.random, not Math.random — the §10f seam (see config.js), so the S6
+    // parity suite can seed this engine and the SoA one identically.
+    return lo + this.cfg.random() * (hi - lo);
   }
 
   /** Drain the stagger queue at its own pace, independent of reconcile
