@@ -749,6 +749,16 @@ struct RemapReport {
     size_t ordersDeactivated = 0;   ///< a squadTypes filter emptied — see above
     /// Which unit defs took the world's units with them, capped.
     std::vector<std::string> droppedUnitNames;
+    /// The object ids that left the world here — COMPLETE and sorted, unlike
+    /// every other name list on this report, and the difference is not a style
+    /// choice. Those lists are display examples for one log line; these are
+    /// read by the game's own gadgets through DefsReconciled, and a capped list
+    /// of ids is a gadget that cleans up the first five references and keeps
+    /// the sixth. It is also the ONLY way a gadget can learn about these
+    /// objects: they left during a restore, so no UnitDestroyed/FeatureDestroyed
+    /// ever fired for them, and every gadget in the game holds unit ids.
+    std::vector<int32_t> droppedUnitIds;
+    std::vector<int32_t> droppedFeatureIds;
 
     bool Changed() const;
     /// One line, or "nothing to remap".
@@ -909,6 +919,14 @@ struct ScalarReport {
     size_t featuresUnknownDef = 0;
     /// Which defs were retuned, capped like DefDelta's examples.
     std::vector<std::string> retunedNames;
+    /// The same, COMPLETE and sorted, per family — see RemapReport's dropped-id
+    /// lists for why the two are separate: `retunedNames` is five names for a
+    /// human reading one line, these are what a gadget reconciles its own
+    /// def-derived caches against, and a capped list there is a cache that is
+    /// half repaired. Live names (post-rename), because that is what the
+    /// restored world and the game's own UnitDefNames lookup use.
+    std::vector<std::string> retunedUnitDefs;
+    std::vector<std::string> retunedFeatureDefs;
 
     bool Changed() const;
     /// One line, or "no def scalar moved".
@@ -929,6 +947,41 @@ struct ScalarReport {
 void ReconcileScalars(const DefScalarTables& captured, const DefScalarTables& live,
                       const DefRemap& map, std::vector<UnitState>& units,
                       std::vector<FeatureState>& features, ScalarReport& out);
+
+// ─── The game's turn: DefsReconciled (task 4, §2 step 5) ───
+//
+// Tasks 1-3 reconcile everything the ENGINE owns. What they cannot reach is the
+// game's own state, and a Metalstorm war keeps a great deal of it: an objective
+// naming a unit, a train consist's aggregate max HP, a cost spec the clients
+// mirror. §2 step 5 hands the game the change so it can repair its own half.
+//
+// TWO THINGS THIS DELTA IS FOR, AND THE SECOND ONE IS THE LOAD-BEARING ONE
+// -----------------------------------------------------------------------
+//   * the def vocabulary that moved — removed / renamed / retuned defs, so a
+//     gadget can drop or re-derive whatever it keyed on a def.
+//   * the OBJECT IDS THAT LEFT. A unit whose def was removed is dropped from
+//     the payload during staging, which means it never existed in the restored
+//     world and no UnitDestroyed ever fired for it. Every gadget in the game
+//     holds unit ids; without this list none of them can find out, and a
+//     kill objective would wait forever on a target that cannot be killed
+//     because it is not there.
+//
+// The counts are carried too, but only the game's digest reads them: a count
+// answers "how bad", and a gadget repairing state needs "which".
+
+/// Build the table `gadget:DefsReconciled(delta)` receives. Pure — it reads the
+/// three reports and the remap, touches no world and no Lua state, so the whole
+/// shape is a doctest.
+///
+/// Returns Nil (not an empty table) when nothing moved at all: the call-in must
+/// not fire on an ordinary resume, and "did anything change" is one question
+/// with one answer rather than a truth test spread over eleven counters.
+luasnapshot::Value BuildDefsReconciledDelta(const DefDelta& unitDelta,
+                                            const DefDelta& weaponDelta,
+                                            const DefDelta& featureDelta,
+                                            const DefRemap& remap,
+                                            const RemapReport& remapRep,
+                                            const ScalarReport& scalarRep);
 
 // ──────────────────── The field-census tripwire ────────────────────
 //

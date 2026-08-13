@@ -85,3 +85,14 @@ end
 -- customParams (built by units/_builder.lua) and flows to the client via
 -- DefCache untouched — no per-unit sim work needed here. This gadget adds NO
 -- per-frame cost; it is a pure policy gate.
+--
+-- NO DefsReconciled HANDLER, and it is a conclusion rather than an omission
+-- (PLAN-def-reconciliation task 4 names objectives/authority/squads; this is the
+-- squads answer). A balance patch that changes `squad_size` under a live squad is
+-- §4 E2, and every link in that chain is already def-current after a resume:
+-- this gadget caches nothing, the member count is DERIVED by the client from the
+-- live def's squad_size and the unit's strength fraction, task 3 preserves that
+-- fraction across a maxHealth retune, and clients always reconnect fresh after a
+-- resume so the client-side monotonic member clamp (which is per entity-view
+-- lifetime) starts over at the new size. A handler here would have nothing to
+-- repair; the absence is what "the squad illusion is entirely client-side" buys.

@@ -131,6 +131,12 @@ function extract.participants(o, ctx)
     return ctx.unitsInArea(area.x, area.z, area.r * PARTICIPATION_RADIUS_MULT)
 end
 
+--- The units this objective is defined in terms of — see kill.lua's
+--- unitRefs for why the type module answers this (task 4's DefsReconciled).
+function extract.unitRefs(o)
+    return o.params.payloadUnitIDs
+end
+
 function extract.describe(o)
     return (o.data and o.data.phase == 'evac') and 'Extract: evacuating' or 'Extract: securing'
 end

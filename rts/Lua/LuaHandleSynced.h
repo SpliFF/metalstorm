@@ -141,6 +141,12 @@ class CSyncedLuaHandle : public CLuaHandle
 		bool SnapshotSave(luasnapshot::Value& out, std::string& err);
 		bool SnapshotLoad(const luasnapshot::Value& in, std::string& err);
 
+		/// PLAN-def-reconciliation task 4 (§2 step 5): tell the game which defs
+		/// moved under the snapshot it has just been restored from, and which
+		/// objects left the world because of it. Fired AFTER Load, because a
+		/// gadget can only repair state it has already restored.
+		bool DefsReconciled(const luasnapshot::Value& delta, std::string& err);
+
 		/// Ask the live gadget handler which gadgets can be snapshotted.
 		/// `gaps` are the gadgets that implement neither call-in and have not
 		/// declared themselves stateless — the serializer refuses by their
@@ -239,6 +245,13 @@ class CSplitLuaHandle
 				return false;
 			}
 			return syncedLuaHandle.SnapshotLoad(in, err);
+		}
+		bool DefsReconciled(const luasnapshot::Value& delta, std::string& err) {
+			if (!syncedLuaHandle.IsValid()) {
+				err = "synced Lua state is not running";
+				return false;
+			}
+			return syncedLuaHandle.DefsReconciled(delta, err);
 		}
 		bool SnapshotCoverage(std::vector<std::string>& covered,
 		                      std::vector<std::string>& stateless,

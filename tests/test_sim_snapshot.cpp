@@ -3751,3 +3751,287 @@ TEST_CASE("task 2: the pending-volley ring is declared uncaptured, not remapped"
         });
     CHECK(named);
 }
+
+// ───── PLAN-def-reconciliation task 4: the DefsReconciled delta (§2 step 5) ─────
+//
+// The engine's three passes reconcile what the engine owns. This is what the
+// GAME is told so it can repair its own half, and every case below is about one
+// distinction: a count is for a human reading a log line, a LIST is read by
+// synced Lua and has to be complete and ordered.
+
+namespace {
+
+/// Walk the delta table for a string key. The delta is a luasnapshot::Value, so
+/// this is the same lookup a gadget does with `delta.x`.
+const luasnapshot::Value* Sub(const luasnapshot::Value& v, const char* key)
+{
+    return v.Field(key);
+}
+
+int64_t CountOf(const luasnapshot::Value& delta, const char* key)
+{
+    const luasnapshot::Value* counts = Sub(delta, "counts");
+    REQUIRE(counts != nullptr);
+    const luasnapshot::Value* c = counts->Field(key);
+    REQUIRE(c != nullptr);
+    return c->i;
+}
+
+/// A 1..n array as a plain vector, which also asserts the keys really are
+/// 1..n integers — a gadget iterates these with ipairs, and a table keyed
+/// 1.0, 2.0 (Q-P6's float keys) or keyed out of order is not one.
+std::vector<std::string> ArrayStrings(const luasnapshot::Value& v)
+{
+    std::vector<std::string> out;
+    int64_t expect = 0;
+    for (const auto& [k, val] : v.table) {
+        CHECK(k.type == luasnapshot::Value::Type::Integer);
+        CHECK(k.i == ++expect);
+        CHECK(val.type == luasnapshot::Value::Type::String);
+        out.push_back(val.str);
+    }
+    return out;
+}
+
+std::vector<int64_t> ArrayInts(const luasnapshot::Value& v)
+{
+    std::vector<int64_t> out;
+    int64_t expect = 0;
+    for (const auto& [k, val] : v.table) {
+        CHECK(k.type == luasnapshot::Value::Type::Integer);
+        CHECK(k.i == ++expect);
+        CHECK(val.type == luasnapshot::Value::Type::Integer);
+        out.push_back(val.i);
+    }
+    return out;
+}
+
+/// The three reports a real restore would produce for `patchedDefs()` over a
+/// world holding one of each def.
+struct ReconcileFixture {
+    DefRemap     remap;
+    RemapReport  remapRep;
+    ScalarReport scalarRep;
+    DefDelta     units, weapons, features;
+
+    ReconcileFixture()
+    {
+        std::string err;
+        REQUIRE(BuildDefRemap(sampleDefs(), patchedDefs(), DefAliases{}, remap, err));
+        units    = CompareDefNames(sampleDefs().units, patchedDefs().units);
+        weapons  = CompareDefNames(sampleDefs().weapons, patchedDefs().weapons);
+        features = CompareDefNames(sampleDefs().features, patchedDefs().features);
+    }
+};
+
+}  // namespace
+
+TEST_CASE("task 4: nothing moved means NO call-in, not an empty table") {
+    // The ordinary resume. A gadget must never have to work out from eleven
+    // counters that it has nothing to do, and the §8 round-trip's byte-identical
+    // re-capture depends on no gadget being run here.
+    const auto delta = BuildDefsReconciledDelta(DefDelta{}, DefDelta{}, DefDelta{},
+                                                DefRemap{}, RemapReport{}, ScalarReport{});
+    CHECK(delta.IsNil());
+}
+
+TEST_CASE("task 4: a pure def ADDITION still fires") {
+    // §3 says additions need nothing from the ENGINE. They can need something
+    // from the game (a gadget caching what a factory can build), and the engine
+    // cannot know which gadgets those are.
+    DefDelta added;
+    added.added = 1;
+    const auto delta = BuildDefsReconciledDelta(added, DefDelta{}, DefDelta{},
+                                                DefRemap{}, RemapReport{}, ScalarReport{});
+    REQUIRE(delta.IsTable());
+    CHECK(CountOf(delta, "unitDefsAdded") == 1);
+}
+
+TEST_CASE("task 4: the dropped-unit list is COMPLETE, where the log line is capped") {
+    // The finding this milestone turns on. RemapReport::droppedUnitNames is five
+    // examples for one WARNING; the ids are what a gadget cleans up against, and
+    // a capped list of ids is a gadget that repairs the first five references and
+    // leaves the sixth pointing at nothing.
+    ReconcileFixture f;
+    std::vector<UnitState> units;
+    // bastion is the def patchedDefs() removes. Eight of them, so the count is
+    // past kDefDeltaExamples — and in DESCENDING id order, so the sortedness
+    // assertion below is about the builder rather than about the fixture.
+    for (int32_t i = 7; i >= 0; --i) units.push_back(remapUnit(100 + i, "bastion"));
+    units.push_back(remapUnit(200, "glaive"));
+    std::vector<FeatureState> features;
+    std::vector<StandingOrder> orders;
+    std::vector<Directive> dirs;
+    RemapPayload(f.remap, units, features, orders, dirs, f.remapRep);
+
+    REQUIRE(f.remapRep.unitsDropped == 8);
+    CHECK(f.remapRep.droppedUnitNames.size() == kDefDeltaExamples);   // the log's five
+    REQUIRE(f.remapRep.droppedUnitIds.size() == 8);                   // the gadget's eight
+
+    const auto delta = BuildDefsReconciledDelta(f.units, f.weapons, f.features,
+                                                f.remap, f.remapRep, f.scalarRep);
+    REQUIRE(delta.IsTable());
+    const luasnapshot::Value* droppedUnits = Sub(delta, "droppedUnits");
+    REQUIRE(droppedUnits != nullptr);
+    const auto ids = ArrayInts(*droppedUnits);
+    REQUIRE(ids.size() == 8);
+    CHECK(ids.front() == 100);
+    CHECK(ids.back() == 107);
+    // Sorted, because a gadget iterating this is running synced code and the
+    // payload's own order is capture order rather than a promise.
+    CHECK(std::is_sorted(ids.begin(), ids.end()));
+    CHECK(CountOf(delta, "unitsDropped") == 8);
+}
+
+TEST_CASE("task 4: a dropped feature reports its id too") {
+    ReconcileFixture f;
+    // A feature def the patched vocabulary keeps and one it does not: only
+    // wreck_glaive survives patchedDefs(), so invent a removal by aliasing
+    // nothing — use a captured table with an extra feature def.
+    DefNameTables captured = sampleDefs();
+    captured.features.push_back({2, "wreck_bastion"});
+    DefRemap remap;
+    std::string err;
+    REQUIRE(BuildDefRemap(captured, patchedDefs(), DefAliases{}, remap, err));
+
+    std::vector<UnitState> units;
+    std::vector<FeatureState> features(2);
+    features[0].id = 40;
+    features[0].featureDefName = "wreck_bastion";
+    features[1].id = 41;
+    features[1].featureDefName = "wreck_glaive";
+    std::vector<StandingOrder> orders;
+    std::vector<Directive> dirs;
+    RemapReport rep;
+    RemapPayload(remap, units, features, orders, dirs, rep);
+
+    REQUIRE(rep.featuresDropped == 1);
+    const auto delta = BuildDefsReconciledDelta(f.units, f.weapons, f.features,
+                                                remap, rep, ScalarReport{});
+    REQUIRE(delta.IsTable());
+    const auto ids = ArrayInts(*Sub(delta, "droppedFeatures"));
+    REQUIRE(ids.size() == 1);
+    CHECK(ids[0] == 40);
+}
+
+TEST_CASE("task 4: removals, renames and retunes reach the game BY NAME") {
+    ReconcileFixture f;
+    DefAliases aliases;
+    aliases.units["raven"] = "raven_mk2";
+    DefRemap remap;
+    std::string err;
+    REQUIRE(BuildDefRemap(sampleDefs(), patchedDefs(), aliases, remap, err));
+
+    ScalarReport srep;
+    srep.ran = true;
+    srep.unitDefsRetuned = 2;
+    srep.retunedUnitDefs = {"raven_mk2", "glaive"};
+    srep.featureDefsRetuned = 1;
+    srep.retunedFeatureDefs = {"wreck_glaive"};
+
+    const auto delta = BuildDefsReconciledDelta(f.units, f.weapons, f.features,
+                                                remap, RemapReport{}, srep);
+    REQUIRE(delta.IsTable());
+    const luasnapshot::Value* unitTable = Sub(delta, "units");
+    REQUIRE(unitTable != nullptr);
+
+    // bastion is gone; raven is not — the game declared it a rename, so it must
+    // NOT appear as a removal (that is the whole point of migrations.lua).
+    const auto removed = ArrayStrings(*unitTable->Field("removed"));
+    REQUIRE(removed.size() == 1);
+    CHECK(removed[0] == "bastion");
+
+    // The rename map is keyed by the CAPTURED name: a gadget's own saved state
+    // was written with that name and it cannot look the old one up any more.
+    const luasnapshot::Value* renamed = unitTable->Field("renamed");
+    REQUIRE(renamed != nullptr);
+    REQUIRE(renamed->table.size() == 1);
+    CHECK(renamed->table[0].first.str == "raven");
+    CHECK(renamed->table[0].second.str == "raven_mk2");
+
+    // Retunes arrive sorted and complete, in LIVE names — what the restored
+    // world and the game's own UnitDefNames lookup use.
+    const auto retuned = ArrayStrings(*unitTable->Field("retuned"));
+    REQUIRE(retuned.size() == 2);
+    CHECK(retuned[0] == "glaive");
+    CHECK(retuned[1] == "raven_mk2");
+    CHECK(ArrayStrings(*Sub(delta, "features")->Field("retuned")).size() == 1);
+    CHECK(CountOf(delta, "unitDefsRetuned") == 2);
+
+    // Weapons carry removals and NO rename half, structurally: nothing a gadget
+    // saves references a weapon def by name, so there is no pairing to hand over.
+    const luasnapshot::Value* weaponTable = Sub(delta, "weapons");
+    REQUIRE(weaponTable != nullptr);
+    CHECK(weaponTable->Field("renamed") == nullptr);
+    CHECK(weaponTable->Field("removed") != nullptr);
+}
+
+TEST_CASE("task 4: a pre-task-3 snapshot says its retunes are UNKNOWN") {
+    // An empty retune list has two meanings with opposite dispositions: nothing
+    // moved, or nothing was ever recorded. A gadget deciding whether to re-derive
+    // its own def-derived caches needs to tell them apart — the same
+    // one-directional guard the vocabulary and scalar passes apply to themselves.
+    ReconcileFixture f;
+    f.remapRep.unitsDropped = 1;
+    f.remapRep.droppedUnitIds = {5};
+
+    ScalarReport notRun;                  // ran = false: no defScalars section
+    const auto blind = BuildDefsReconciledDelta(f.units, f.weapons, f.features,
+                                                f.remap, f.remapRep, notRun);
+    REQUIRE(blind.IsTable());
+    REQUIRE(blind.Field("retunesKnown") != nullptr);
+    CHECK(blind.Field("retunesKnown")->b == false);
+    CHECK(ArrayStrings(*Sub(blind, "units")->Field("retuned")).empty());
+
+    ScalarReport ran;
+    ran.ran = true;
+    const auto seen = BuildDefsReconciledDelta(f.units, f.weapons, f.features,
+                                               f.remap, f.remapRep, ran);
+    CHECK(seen.Field("retunesKnown")->b == true);
+}
+
+TEST_CASE("task 4: the digest string is the two passes' own wording") {
+    // §2 step 6's digest line, composed once. A second wording of the same
+    // counts in Lua would be a second wording to keep in step.
+    ReconcileFixture f;
+    f.remapRep.unitsDropped = 3;
+    f.remapRep.droppedUnitNames = {"bastion"};
+    f.remapRep.droppedUnitIds = {1, 2, 3};
+    f.scalarRep.ran = true;
+    f.scalarRep.unitDefsRetuned = 1;
+    f.scalarRep.retunedNames = {"glaive"};
+    f.scalarRep.unitsTouched = 4;
+
+    const auto delta = BuildDefsReconciledDelta(f.units, f.weapons, f.features,
+                                                f.remap, f.remapRep, f.scalarRep);
+    REQUIRE(delta.IsTable());
+    const luasnapshot::Value* digest = delta.Field("digest");
+    REQUIRE(digest != nullptr);
+    CHECK(digest->str == f.remapRep.Describe() + " | " + f.scalarRep.Describe());
+    CHECK(digest->str.find("bastion") != std::string::npos);
+    CHECK(digest->str.find("glaive") != std::string::npos);
+}
+
+TEST_CASE("task 4: the delta is pushable into a Lua state") {
+    // The delta is handed to synced Lua through luasnapshot::Push, which refuses
+    // a malformed tree (a nil or NaN key, depth past kMaxDepth). Building it out
+    // of Value::Int keys rather than Number ones is Q-P6's finding one layer up:
+    // a float key spells `1.0` and ipairs never sees it.
+    ReconcileFixture f;
+    f.remapRep.unitsDropped = 1;
+    f.remapRep.droppedUnitIds = {11};
+    const auto delta = BuildDefsReconciledDelta(f.units, f.weapons, f.features,
+                                                f.remap, f.remapRep, f.scalarRep);
+    REQUIRE(delta.IsTable());
+    // Nesting is two deep by construction (delta.units.removed[1]) — well inside
+    // the codec's limit, and asserted so a future field cannot quietly deepen it
+    // past what a gadget's own Save is allowed to hold.
+    const auto depthOf = [](const luasnapshot::Value& v, auto&& self) -> int {
+        int deepest = 0;
+        for (const auto& [k, val] : v.table)
+            if (val.IsTable()) deepest = std::max(deepest, self(val, self));
+        return deepest + 1;
+    };
+    CHECK(depthOf(delta, depthOf) <= 3);
+    CHECK(delta.Nodes() > 0);
+}

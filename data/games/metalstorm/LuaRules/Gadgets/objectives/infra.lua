@@ -99,6 +99,12 @@ function infra.participants(o, ctx)
     return out
 end
 
+--- The units this objective is defined in terms of — see kill.lua's
+--- unitRefs for why the type module answers this (task 4's DefsReconciled).
+function infra.unitRefs(o)
+    return o.params.buildingUnitIDs
+end
+
 function infra.describe(o)
     return o.expiresAtFrame and 'Infrastructure: hold until expiry' or 'Infrastructure: income'
 end

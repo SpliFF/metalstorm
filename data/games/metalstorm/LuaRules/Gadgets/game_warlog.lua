@@ -98,6 +98,61 @@ function GG.WarLog.Emit(kind, subject, detail, team)
     return eventSeq
 end
 
+-- ── The balance-patch digest (PLAN-def-reconciliation §2 step 6, task 4) ──
+--
+-- The one thing a returning player cannot possibly work out for themselves.
+-- Every other digest line reports something that HAPPENED IN THE WAR; this one
+-- reports that the war's own rules moved between two sessions, which is why
+-- their veteran armour has a different health bar and why the objective they
+-- left running is gone. Without it the reconcile pass is invisible to exactly
+-- the person it happened to.
+--
+-- HOW MANY EVENTS, AND THE CAP IS NOT COSMETIC. A patch that removes 50 unit
+-- defs would emit 50 events into a 32-slot ring and lap it, destroying the
+-- strategic history the digest exists for — the patch note would eat the war.
+-- So the per-def lines are capped and a summary always follows, carrying the
+-- true totals; the drain's own elision reporting stays intact because the ring
+-- never laps from this. The cap is stated in the log line, not silent.
+local PATCH_DEF_LINES = 4
+
+function gadget:DefsReconciled(delta)
+    if not delta then return end
+    local counts = delta.counts or {}
+    local removed = (delta.units and delta.units.removed) or {}
+
+    -- Only the removals that actually cost this war something are named: a def
+    -- deleted from the game that this war never fielded is not news to anybody
+    -- who played it. `unitsDropped` is the count that says it cost something.
+    local named = 0
+    if (counts.unitsDropped or 0) > 0 then
+        for _, defName in ipairs(removed) do
+            if named >= PATCH_DEF_LINES then break end
+            GG.WarLog.Emit('patch', defName, 'removed', -1)
+            named = named + 1
+        end
+    end
+
+    -- The summary is emitted unconditionally, INCLUDING when nothing this
+    -- gadget can phrase moved: the engine only fires this call-in when the defs
+    -- really did move, so "a patch landed and touched nothing you can see" is
+    -- still the answer to "why did the game restart on me".
+    local parts = {}
+    local function part(n, one, many)
+        n = tonumber(n) or 0
+        if n > 0 then parts[#parts + 1] = n .. ' ' .. (n == 1 and one or many) end
+    end
+    part(counts.unitsAdjusted, 'unit retuned', 'units retuned')
+    part(counts.unitsDropped, 'unit lost', 'units lost')
+    part(counts.featuresDropped, 'wreck lost', 'wrecks lost')
+    part(counts.ordersDeactivated, 'order stood down', 'orders stood down')
+    local subject = (#parts > 0) and table.concat(parts, ', ') or 'no visible change'
+    GG.WarLog.Emit('patch', subject, 'summary', -1)
+
+    Spring.Log('warlog', LOG.NOTICE, string.format(
+        'defs reconciled: digest carries %d of %d removed unit def(s) plus a '
+        .. 'summary [%s]', named, #removed, tostring(delta.digest)))
+end
+
 --- The ring size, published once so the server-side drain reads the buffer's
 --- real geometry rather than a constant compiled into two places.
 function gadget:Initialize()

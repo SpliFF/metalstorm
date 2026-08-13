@@ -712,7 +712,38 @@ end
 -- Lifecycle
 -- ============================================================
 
+-- ── What the clients mirror, and the one number that says it is stale ──
+--
+-- ui/lib/authority-cost.js evaluates this gadget's cost formula client-side from
+-- the build-exported authority_cost.json, and its header states the fail-safe:
+-- "a `version` mismatch between the JSON and the live game state disables
+-- prediction". Nothing was publishing the live version, so the mismatch was
+-- undetectable — a client holding a cached JSON from before a patch predicted
+-- confidently wrong costs, and a wrong prediction is worse than none (the red
+-- cursor says an order is affordable and the sim refuses it).
+--
+-- Published as a gameRulesParam, so it reaches every client through the ordinary
+-- params stream and rides the snapshot like the rest of them. Re-published on
+-- DefsReconciled below, which is the case a fresh Initialize does NOT cover: a
+-- resumed war's clients reconnect into a process that booted with the NEW spec.
+local function publishCostSpecVersion()
+    Spring.SetGameRulesParam('authority_cost_version', tonumber(CostSpec.version) or 0)
+end
+
+-- PLAN-def-reconciliation task 4 (§2 step 5). This gadget holds no def-derived
+-- state to repair, and that is worth stating rather than leaving as an absence:
+-- every cost it charges is read from the live def AT THE MOMENT OF THE CHARGE
+-- (GG.Authority.OrderCost reads `authority_cost_base` off UnitDefs per call), so
+-- a retune reaches the next order with nothing cached in between. Its ledger and
+-- escrow hold authority amounts, which are money already spent and not a def's
+-- opinion. What the patch DOES invalidate is what the clients believe about the
+-- formula — so the handler's whole job is to tell them.
+function gadget:DefsReconciled(delta)
+    publishCostSpecVersion()
+end
+
 function gadget:Initialize()
+    publishCostSpecVersion()
     -- Read modoptions here too (not just GameStart): Initialize always runs
     -- (cold start + gadget reload), covering test scenes that skip GameStart
     -- — the §6 "authority_cost_scale=0 ... must not even require pools to

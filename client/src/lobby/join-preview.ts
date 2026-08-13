@@ -70,7 +70,7 @@ export interface WarJoinPreview {
 /// world that knows it.
 export interface WarDigestEvent {
     seq: number;
-    /// 'region' | 'objective' | 'pact' | 'elided'.
+    /// 'region' | 'objective' | 'pact' | 'patch' | 'elided'.
     kind: string;
     subject: string;
     /// The outcome within the kind — 'captured' | 'complete' | 'broken' …

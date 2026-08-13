@@ -1042,6 +1042,74 @@ function gadget:Load(state)
     Tick.load(evalGate, state.evalGate)
 end
 
+-- ============================================================
+-- The defs moved under a resumed war (PLAN-def-reconciliation task 4, §2 step 5)
+--
+-- The engine reconciled every def reference IT owns before the world was
+-- rebuilt. What it could not do is decide what an objective MEANS after its
+-- subject stopped existing, and one case here is not repairable by any amount of
+-- remapping: a unit whose def was removed from the game never reached the
+-- restored world at all. No UnitDestroyed fired for it — there was no death,
+-- the object simply was not created — so `delta.droppedUnits` is the only notice
+-- this gadget gets, and without it a kill objective would sit active for the
+-- rest of the war waiting for a target that cannot be killed because it is not
+-- there. Same for protect (its quorum can never be met), escort/extract (a
+-- payload that cannot arrive) and infra (a building that cannot run).
+--
+-- EXPIRED, NOT FAILED, and the difference is authority. `failed` is a verdict on
+-- a team — it is what the war's record shows and what a player reads as their
+-- own doing. Nobody lost these objectives; a balance patch dissolved their
+-- subject between two sessions. Both dispositions refund the staked escrow, so
+-- the only thing choosing `failed` would buy is blaming a player for a content
+-- edit. (`kill.onUnitDestroyed` already reaches for `expired` on exactly the
+-- same reasoning when a target dies with no killer to credit.)
+--
+-- PARTIAL removal expires the objective too: an escort of four payloads with one
+-- def deleted is no longer the objective anybody agreed to, and its quorum was
+-- authored against a roster that no longer exists.
+function gadget:DefsReconciled(delta)
+    local dropped = delta and delta.droppedUnits
+    if not dropped or #dropped == 0 then return end
+
+    local gone = {}
+    for _, unitID in ipairs(dropped) do gone[unitID] = true end
+
+    local ctx = buildCtx(Spring.GetGameFrame())
+    -- Snapshot the list: resolveObjective removes from activeList as it goes,
+    -- and a linked partner or a phase parent can resolve out from under us.
+    local snapshot = {}
+    for i, id in ipairs(activeList) do snapshot[i] = id end
+
+    local expired = 0
+    for _, id in ipairs(snapshot) do
+        local o = objectives[id]
+        -- Phase-chained parents resolve only through their children (§4.7), the
+        -- same exclusion UnitDestroyed makes.
+        if o and o.state == 'active' and not o.phaseDefs then
+            local module = TYPES[o.type]
+            local refs = module and module.unitRefs and module.unitRefs(o)
+            if refs then
+                for _, ref in ipairs(refs) do
+                    if gone[ref] then
+                        -- resolveObjective emits the digest line itself
+                        -- ('objective' / 'expired'), which is the note §6 asks
+                        -- for; a second line here would double-report it.
+                        resolveObjective(o, 'expired', nil, ctx)
+                        expired = expired + 1
+                        break
+                    end
+                end
+            end
+        end
+    end
+
+    if expired > 0 then
+        Spring.Log('objectives', LOG.WARNING, string.format(
+            'defs reconciled: %d objective(s) expired — their subject units left '
+            .. 'the world with their def (%d unit(s) dropped)', expired, #dropped))
+    end
+end
+
 function gadget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerDefID, attackerTeam)
     local ctx = buildCtx(Spring.GetGameFrame())
 

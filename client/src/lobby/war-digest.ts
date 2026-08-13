@@ -91,6 +91,19 @@ export function formatDigestLine(
                 default:
                     return '';
             }
+        case 'patch':
+            // The war's own rules moved between two sessions
+            // (PLAN-def-reconciliation §2 step 6). Never attributed to a team —
+            // nobody did this, and `who` would be a lie here even when the
+            // event carries a team.
+            switch (e.detail) {
+                case 'removed':
+                    return `${e.subject} was withdrawn from the war`;
+                case 'summary':
+                    return `A balance patch reached this war: ${e.subject}`;
+                default:
+                    return '';
+            }
         case 'elided':
             // The server could not recover these — the sim's ring lapped
             // before the drain reached it. Said plainly: a digest that

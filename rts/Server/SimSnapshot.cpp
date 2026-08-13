@@ -2721,6 +2721,11 @@ void RemapPayload(const DefRemap& map, std::vector<UnitState>& units,
                 ++out.unitsDropped;
                 if (out.droppedUnitNames.size() < kDefDeltaExamples)
                     out.droppedUnitNames.push_back(u.unitDefName);
+                // Complete, not capped: this is the list the game's own gadgets
+                // clean up against (task 4's DefsReconciled), and it is the only
+                // notice they get — no UnitDestroyed fires for a unit that never
+                // reached the restored world.
+                out.droppedUnitIds.push_back(u.id);
                 continue;
             }
             const auto rn = map.unitRenames.find(u.unitDefName);
@@ -2811,6 +2816,7 @@ void RemapPayload(const DefRemap& map, std::vector<UnitState>& units,
         for (auto& f : features) {
             if (map.features.Gone(f.featureDefName)) {
                 ++out.featuresDropped;
+                out.droppedFeatureIds.push_back(f.id);
                 continue;
             }
             const auto rn = map.featureRenames.find(f.featureDefName);
@@ -2858,6 +2864,12 @@ void RemapPayload(const DefRemap& map, std::vector<UnitState>& units,
             ++out.ordersDeactivated;
         }
     }
+
+    // Sorted because these two lists reach SYNCED Lua (task 4's call-in), where
+    // the order of a table a gadget iterates is part of the sim's behaviour.
+    // The payload's own order is capture order and not a promise.
+    std::sort(out.droppedUnitIds.begin(), out.droppedUnitIds.end());
+    std::sort(out.droppedFeatureIds.begin(), out.droppedFeatureIds.end());
 }
 
 // ───── Def-derived scalars (PLAN-def-reconciliation task 3, §2 steps 3-4) ─────
@@ -3244,6 +3256,7 @@ void ReconcileScalars(const DefScalarTables& captured, const DefScalarTables& li
         ++out.unitDefsRetuned;
         if (out.retunedNames.size() < kDefDeltaExamples)
             out.retunedNames.push_back(liveName);
+        out.retunedUnitDefs.push_back(liveName);
     }
     for (const auto& [name, born] : captured.features) {
         const std::string& liveName = renamed(map.featureRenames, name);
@@ -3253,7 +3266,16 @@ void ReconcileScalars(const DefScalarTables& captured, const DefScalarTables& li
         ++out.featureDefsRetuned;
         if (out.retunedNames.size() < kDefDeltaExamples)
             out.retunedNames.push_back(liveName);
+        out.retunedFeatureDefs.push_back(liveName);
     }
+
+    // The two retune loops walk unordered_maps, so their order is a hash
+    // artefact — and unlike `retunedNames` (a log line) these lists reach synced
+    // Lua. `retunedNames` is left in map order deliberately: it is five examples
+    // in a WARNING, and sorting it would only make the examples always be the
+    // alphabetically-first five rather than a spread.
+    std::sort(out.retunedUnitDefs.begin(), out.retunedUnitDefs.end());
+    std::sort(out.retunedFeatureDefs.begin(), out.retunedFeatureDefs.end());
 
     for (auto& u : units) {
         const auto cit = captured.units.find(capturedName(liveToCaptured, u.unitDefName));
@@ -3421,6 +3443,147 @@ void ReconcileScalars(const DefScalarTables& captured, const DefScalarTables& li
 
         if (touched) ++out.featuresTouched;
     }
+}
+
+// ───── The game's turn: DefsReconciled (task 4, §2 step 5) ─────
+
+namespace {
+
+using LuaValue = luasnapshot::Value;
+
+/// A Lua 1..n array of strings. Sorted by the caller (or already complete and
+/// sorted on the report) — a gadget iterating this with ipairs is running SYNCED
+/// code, so the order is sim behaviour and not presentation.
+LuaValue StringArray(std::vector<std::string> names)
+{
+    std::sort(names.begin(), names.end());
+    names.erase(std::unique(names.begin(), names.end()), names.end());
+    LuaValue out = LuaValue::Table();
+    int64_t i = 0;
+    for (auto& n : names)
+        out.table.emplace_back(LuaValue::Int(++i), LuaValue::Str(std::move(n)));
+    return out;
+}
+
+LuaValue IntArray(const std::vector<int32_t>& ids)
+{
+    LuaValue out = LuaValue::Table();
+    int64_t i = 0;
+    for (const int32_t id : ids)
+        out.table.emplace_back(LuaValue::Int(++i), LuaValue::Int(id));
+    return out;
+}
+
+/// old name → new name, as a Lua map. Keyed by the CAPTURED name because that is
+/// the name a gadget's own saved state was written with — the whole point of
+/// handing it over is that the gadget cannot look the old name up any more.
+LuaValue RenameMap(const std::unordered_map<std::string, std::string>& renames)
+{
+    std::vector<std::pair<std::string, std::string>> sorted(renames.begin(), renames.end());
+    std::sort(sorted.begin(), sorted.end());
+    LuaValue out = LuaValue::Table();
+    for (auto& [from, to] : sorted)
+        out.table.emplace_back(LuaValue::Str(from), LuaValue::Str(to));
+    return out;
+}
+
+/// Every captured def of one family that this game no longer defines. From
+/// `goneByName`, which the map builds complete precisely because the two
+/// families that travel by name have to be tested against it.
+LuaValue RemovedNames(const DefIdMap& fam)
+{
+    return StringArray(std::vector<std::string>(fam.goneByName.begin(),
+                                                fam.goneByName.end()));
+}
+
+void AddCount(LuaValue& into, const char* key, size_t n)
+{
+    into.table.emplace_back(LuaValue::Str(key), LuaValue::Int(static_cast<int64_t>(n)));
+}
+
+} // namespace
+
+luasnapshot::Value BuildDefsReconciledDelta(const DefDelta& unitDelta,
+                                            const DefDelta& weaponDelta,
+                                            const DefDelta& featureDelta,
+                                            const DefRemap& remap,
+                                            const RemapReport& remapRep,
+                                            const ScalarReport& scalarRep)
+{
+    // Nil rather than an empty table: "nothing moved" is the ordinary resume and
+    // the call-in must not fire on it. A gadget handed an empty delta would have
+    // to re-derive that answer from eleven counters, and one of them would
+    // eventually be forgotten.
+    //
+    // A pure def ADDITION fires this too, even though §3 says additions need
+    // nothing from the engine. They can need something from the GAME: a gadget
+    // that caches "what can this factory build" has to hear about a def that
+    // appeared, and the engine cannot know which gadgets those are.
+    if (!unitDelta.Changed() && !weaponDelta.Changed() && !featureDelta.Changed() &&
+        !remapRep.Changed() && !scalarRep.Changed())
+        return LuaValue::Nil();
+
+    LuaValue units = LuaValue::Table();
+    units.table.emplace_back(LuaValue::Str("removed"), RemovedNames(remap.units));
+    units.table.emplace_back(LuaValue::Str("renamed"), RenameMap(remap.unitRenames));
+    units.table.emplace_back(LuaValue::Str("retuned"), StringArray(scalarRep.retunedUnitDefs));
+
+    LuaValue features = LuaValue::Table();
+    features.table.emplace_back(LuaValue::Str("removed"), RemovedNames(remap.features));
+    features.table.emplace_back(LuaValue::Str("renamed"), RenameMap(remap.featureRenames));
+    features.table.emplace_back(LuaValue::Str("retuned"),
+                                StringArray(scalarRep.retunedFeatureDefs));
+
+    // Weapons carry no `renamed` half and the absence is structural, not an
+    // oversight: DefRemap aliases weapon names inside the ID map (a weapon is
+    // never referenced by name from anything a gadget saves), so there is no
+    // captured→live weapon name pairing to hand over. Removals are still
+    // reported — a gadget keying anything on a weapon def name wants those.
+    LuaValue weapons = LuaValue::Table();
+    weapons.table.emplace_back(LuaValue::Str("removed"), RemovedNames(remap.weapons));
+
+    LuaValue counts = LuaValue::Table();
+    AddCount(counts, "buildOrdersDropped",     remapRep.buildCmdsDropped);
+    AddCount(counts, "featureDefsAdded",       featureDelta.added);
+    AddCount(counts, "featureDefsRenumbered",  featureDelta.renumbered);
+    AddCount(counts, "featureDefsRetuned",     scalarRep.featureDefsRetuned);
+    AddCount(counts, "featuresAdjusted",       scalarRep.featuresTouched);
+    AddCount(counts, "featuresDropped",        remapRep.featuresDropped);
+    AddCount(counts, "featuresHealthScaled",   scalarRep.featuresHealthScaled);
+    AddCount(counts, "ordersDeactivated",      remapRep.ordersDeactivated);
+    AddCount(counts, "unitDefsAdded",          unitDelta.added);
+    AddCount(counts, "unitDefsRenumbered",     unitDelta.renumbered);
+    AddCount(counts, "unitDefsRetuned",        scalarRep.unitDefsRetuned);
+    AddCount(counts, "unitFieldsAuthored",     scalarRep.unitFieldsAuthored);
+    AddCount(counts, "unitFieldsReDerived",    scalarRep.unitFieldsReDerived);
+    AddCount(counts, "unitsAdjusted",          scalarRep.unitsTouched);
+    AddCount(counts, "unitsDropped",           remapRep.unitsDropped);
+    AddCount(counts, "unitsHealthScaled",      scalarRep.unitsHealthScaled);
+    AddCount(counts, "weaponDefsAdded",        weaponDelta.added);
+    AddCount(counts, "weaponDefsRenumbered",   weaponDelta.renumbered);
+
+    LuaValue out = LuaValue::Table();
+    out.table.emplace_back(LuaValue::Str("counts"), std::move(counts));
+    // The digest string §2 step 6 asks for, composed HERE rather than in Lua:
+    // it is the two reports' own Describe() output, and a second wording of the
+    // same counts in Lua is a second wording to keep in step.
+    out.table.emplace_back(LuaValue::Str("digest"),
+                           LuaValue::Str(remapRep.Describe() + " | " +
+                                         scalarRep.Describe()));
+    out.table.emplace_back(LuaValue::Str("droppedFeatures"),
+                           IntArray(remapRep.droppedFeatureIds));
+    out.table.emplace_back(LuaValue::Str("droppedUnits"),
+                           IntArray(remapRep.droppedUnitIds));
+    out.table.emplace_back(LuaValue::Str("features"), std::move(features));
+    // False on a pre-task-3 snapshot: the retune lists are then EMPTY BECAUSE
+    // NOTHING WAS RECORDED, not because nothing moved, and a gadget deciding
+    // whether to re-derive its own def caches needs to tell those apart — the
+    // same one-directional guard the two passes apply to their own vocabularies.
+    out.table.emplace_back(LuaValue::Str("retunesKnown"),
+                           LuaValue::Boolean(scalarRep.ran));
+    out.table.emplace_back(LuaValue::Str("units"), std::move(units));
+    out.table.emplace_back(LuaValue::Str("weapons"), std::move(weapons));
+    return out;
 }
 
 // ───────────── Task 1d: the synced-Lua codec (§7.1d decision 4) ─────────────
@@ -4648,6 +4811,20 @@ bool ApplySyncedLua(const luasnapshot::Value& in, std::string& err)
     return ok;
 }
 
+/// Task 4, §2 step 5. Best-effort by design — see CSyncedLuaHandle::
+/// DefsReconciled for why a raising handler does not fail the restore.
+void NotifyDefsReconciled(const luasnapshot::Value& delta)
+{
+    if (delta.IsNil()) return;   // an ordinary resume: nothing moved
+
+    for (const auto& [key, handle] : SyncedHandles()) {
+        std::string one;
+        if (!handle->DefsReconciled(delta, one))
+            SLOG(SPRING_LOG_ERROR, "snapshot restore: DefsReconciled (%s): %s",
+                 key, one.c_str());
+    }
+}
+
 // ───────────────────────── The gameRules section ─────────────────────────
 //
 // Task 1d-b's finding. Every OTHER rulesParam family hangs off an object the
@@ -5043,6 +5220,11 @@ bool SimSnapshotSerializer::Deserialize(const uint8_t* data, size_t size, std::s
     // the pass edits the decoded payload, and the one thing it CAN refuse (E1,
     // an ambiguous rename) has to refuse while there is still a live world to
     // fall back on.
+    //
+    // Nil unless something moved. Built here, in the staging phase where the
+    // reports exist, and delivered at the very END of the commit phase (task 4,
+    // §2 step 5): a gadget can only repair state it has already restored.
+    luasnapshot::Value reconcileDelta = luasnapshot::Value::Nil();
     {
         DefNameTables liveDefs;
         CaptureDefNames(liveDefs);
@@ -5066,10 +5248,10 @@ bool SimSnapshotSerializer::Deserialize(const uint8_t* data, size_t size, std::s
         if (!BuildDefRemap(defNames, liveDefs, aliases, remap, err))
             return false;
 
+        RemapReport rep;
         // §3's fast path: a tuning-only patch renames and renumbers nothing, so
         // steps 1-2 have no work and the payload is not touched at all.
         if (!remap.Identity()) {
-            RemapReport rep;
             RemapPayload(remap, units, features, orders, dirs, rep);
             // WARNING rather than INFO: this is the line a returning player's
             // "where did my army go" question is answered from, and §2 step 6's
@@ -5113,6 +5295,9 @@ bool SimSnapshotSerializer::Deserialize(const uint8_t* data, size_t size, std::s
                  srep.Describe().c_str(), srep.unitFieldsAuthored,
                  srep.featureFieldsAuthored);
         }
+
+        reconcileDelta = BuildDefsReconciledDelta(units_, weapons_, features_,
+                                                  remap, rep, srep);
     }
 
     // The last fallible work, and it MUST be here rather than in the commit
@@ -5220,6 +5405,17 @@ bool SimSnapshotSerializer::Deserialize(const uint8_t* data, size_t size, std::s
         err = "world restored but synced Lua Load failed: " + luaErr;
         return false;
     }
+
+    // §2 step 5, and it is LAST for three reasons that all point the same way.
+    // After ApplySyncedLua, because a gadget repairs the state it just restored,
+    // not the state this process happened to be holding. After the failure
+    // check above, because a gadget whose Load failed must not then be asked to
+    // reconcile what it did not restore. And after gsRNG.SetGenState, because a
+    // handler that draws (expiring an objective, re-rolling a target) has to
+    // draw from the resumed world's stream — the draws are part of the resumed
+    // war, not of the checkpoint. No-op unless the defs actually moved, which is
+    // what keeps the §8 round-trip's byte-for-byte re-capture intact.
+    NotifyDefsReconciled(reconcileDelta);
     return true;
 }
 
