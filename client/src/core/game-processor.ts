@@ -117,6 +117,7 @@ import { ClipAutoPolicy, nominalSpeedFor, isStaticFor } from './clip-auto-policy
 import { TurretAimController } from './turret-aim-controller.js';
 import { WheelSpinDriver, wheelRadiusFor } from './wheel-spin-driver.js';
 import { WorkerSelection } from './worker-selection.js';
+import { IdRecycleGuard } from './id-recycle-guard.js';
 import { WorkerBuildPlacement, UNITDEF_FLAG_IS_FACTORY } from './worker-build-placement.js';
 import { WorkerCommandModes } from './worker-command-modes.js';
 import { DirectiveShapeCapture, type ArmedDirective } from './directive-shape-capture.js';
@@ -506,6 +507,11 @@ let gpClipPlayer: ClipPlayer | null = null;
 /// gpClipPlayer for every native whose model ships a `walk` clip. Harness
 /// playClip marks a unit manual so the F8 buttons still win.
 let gpClipPolicy: ClipAutoPolicy | null = null;
+/// PLAN-long-uptime S5 task 6: latches the server's unit-id recycle
+/// announcement and fires the id-keyed-state flush on the first full snapshot
+/// after it. Lives for the whole worker — a recycle is a property of the world
+/// stream, not of any one renderer.
+const gpIdRecycleGuard = new IdRecycleGuard();
 /// DESIGN-MODEL-BUILDING §16c: cosmetic turret aim. Engaged off projectile
 /// Fired events (native models with a `turret` piece that the sim isn't
 /// already piece-driving) and ticked from the render loop for smooth slew.
@@ -1222,6 +1228,21 @@ function gpConnect(msg: GpInitToWorker): void {
         },
         onEntityState: (snapshot, isDelta) => {
             gpFirstStateReceived = true;
+            // PLAN-long-uptime S5 task 6: the sim has handed a used unit id
+            // back out, so every association we hold keyed on an id now names
+            // whatever took the slot. Drop them BEFORE applying the snapshot —
+            // this only ever fires on a full snapshot, which repopulates the
+            // world in the same call, so there is no blank frame.
+            if (gpIdRecycleGuard.observe(snapshot.fieldMask, isDelta)) {
+                postLog(1, '[gp] unit-id recycle announced — flushing id-keyed state');
+                gpCtx.entityRenderer?.resetForResync();
+                gpCombatFX?.reset();
+                gpClipPolicy?.reset();
+                gpResetSquads();
+                // The renderer's own mirror is cleared by resetForResync; this
+                // is the authoritative selection, the one that issues orders.
+                gpCtx.selection?.setSelectionExternal([]);
+            }
             gpCtx.entityRenderer?.update(snapshot, isDelta);
             // PLAN-metalstorm-squads.md §6: route squad-def units (squad_size > 1)
             // into the fan-out. Runs after the renderer's update so entityMeta +
@@ -1984,7 +2005,9 @@ export function gpSoftRecover(): boolean {
     gpCtx.entityRenderer?.resetForResync();
     gpCtx.projectileRenderer?.resetForResync();
     gpCombatFX?.reset();
+    gpClipPolicy?.reset();
     gpResetSquads();
+    gpIdRecycleGuard.reset();
     // (3) Reconnect the SAME Connection for a fresh full snapshot (its
     // onAuthenticated re-seeds identity + re-registers the viewport pump). The
     // fresh ClientSession re-pushes defs (DefCache no-ops the dups) and the
@@ -3604,7 +3627,9 @@ export function gpResync(token?: string): void {
     gpCtx.entityRenderer?.resetForResync();
     gpCtx.projectileRenderer?.resetForResync();
     gpCombatFX?.reset();
+    gpClipPolicy?.reset();
     gpResetSquads();
+    gpIdRecycleGuard.reset();
     gpParked = false;
     gpRenderPaused = false;
     gpLastFrameTime = performance.now();

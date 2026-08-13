@@ -427,6 +427,26 @@ void StateStreamer::StreamEntityState(int) {
     if (curFrame >= 0 && (curFrame % 3) == 0 && rtcServer.GetClientCount() > 0) {
         bool isFullSnapshot = (curFrame % 30) == 0;
 
+        // PLAN-long-uptime S5 task 6: has the sim handed a used unit id back
+        // out since we last said so? Read once per tick, before the fan-out —
+        // the epoch is a property of the world, not of a viewer, and every
+        // client holds the same aliasable ids.
+        const bool wasAnnouncing = idRecycleAnnouncer.IsPending();
+        const bool announceIdRecycle =
+            idRecycleAnnouncer.Tick(unitHandler.IdRecycleEpoch(), isFullSnapshot);
+        if (announceIdRecycle && !wasAnnouncing) {
+            // Loud on purpose: this is the one event that invalidates every
+            // client's id-keyed state, and in an ordinary match it should
+            // never fire at all (the pool holds MAX_UNITS ids and only drains
+            // on exhaustion or a snapshot restore). If it turns up in a live
+            // log, the frame it turns up on is the whole diagnosis.
+            LOG("[StateStreamer] unit-id recycle epoch %u at frame %d — "
+                "announcing FLAG_ID_RECYCLED to %d client(s)",
+                unitHandler.IdRecycleEpoch(), curFrame, rtcServer.GetClientCount());
+        }
+        const uint16_t fieldMask = EntityState::FIELD_ALL
+            | (announceIdRecycle ? EntityState::FLAG_ID_RECYCLED : uint16_t(0));
+
         sessions.ForEachSession([&](ClientID clientId, ClientSession& session) {
             // Map session->team to its ally team so the
             // visibility filter can skip enemy units that
@@ -466,7 +486,7 @@ void StateStreamer::StreamEntityState(int) {
             if (isFullSnapshot) {
                 envelope = 0x02;
                 stateData = EntityState::SerializeUnits(
-                    candidates, EntityState::FIELD_ALL, viewerAllyTeam,
+                    candidates, fieldMask, viewerAllyTeam,
                     static_cast<uint32_t>(curFrame));
                 session.deltaCache.Clear();
                 for (CUnit* u : candidates)
@@ -482,7 +502,7 @@ void StateStreamer::StreamEntityState(int) {
 
                 envelope = 0x03;
                 stateData = EntityState::SerializeUnits(
-                    changed, EntityState::FIELD_ALL, viewerAllyTeam,
+                    changed, fieldMask, viewerAllyTeam,
                     static_cast<uint32_t>(curFrame));
             }
 
@@ -495,6 +515,7 @@ void StateStreamer::StreamEntityState(int) {
             // two don't RESET each other before either transmits.
             rtcServer.SendUnreliable(clientId, frame.data(), frame.size(), kStateLaneEntity);
         });
+
     }
 }
 

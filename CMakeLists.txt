@@ -567,6 +567,11 @@ if(TEST_SOURCES)
         ${CMAKE_SOURCE_DIR}/rts/Server/GrowthCounters.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GmRollback.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/GameStateStore.cpp
+        # PLAN-long-uptime S5 task 6: the entity-state header is where the
+        # id-recycle flag rides, so the serializer has to be linked for the
+        # test that checks a flagged mask reaches the header without changing
+        # the payload. Only needs LosHandler + the unit types, already here.
+        ${CMAKE_SOURCE_DIR}/rts/Server/EntityStateSerializer.cpp
         # PLAN-persistence task 1b: the ISimSerializer walk. Needs the sim
         # globals (gs/gsRNG) and the two order managers, all of which
         # spring-tests already links, so its round-trip is a plain doctest.

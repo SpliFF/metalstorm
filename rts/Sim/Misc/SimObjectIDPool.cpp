@@ -11,7 +11,8 @@ CR_BIND(SimObjectIDPool, )
 CR_REG_METADATA(SimObjectIDPool, (
 	CR_MEMBER(poolIDs),
 	CR_MEMBER(freeIDs),
-	CR_MEMBER(tempIDs)
+	CR_MEMBER(tempIDs),
+	CR_MEMBER(recycleEpoch)
 ))
 
 
@@ -117,13 +118,24 @@ bool SimObjectIDPool::RecycleID(unsigned int uid) {
 
 	tempIDs.erase(idx);
 	freeIDs.insert(std::pair<unsigned int, unsigned int>(idx, uid));
+	// This id is re-issuable from here on, so any consumer still holding it
+	// (a remote client's selection, squad membership, ghost pose) is holding a
+	// reference that the next spawn can alias. See GetRecycleEpoch.
+	recycleEpoch++;
 	return true;
 }
 
 void SimObjectIDPool::RecycleIDs() {
 	// throw each ID recycled up until now back into the pool
+	if (tempIDs.empty())
+		return;
+
 	freeIDs.insert(tempIDs.begin(), tempIDs.end());
 	tempIDs.clear();
+	// The whole parked set becomes re-issuable in one step - this is the bulk
+	// aliasing event, and it is why the guard is an event and not a per-object
+	// generation counter. See GetRecycleEpoch.
+	recycleEpoch++;
 }
 
 
