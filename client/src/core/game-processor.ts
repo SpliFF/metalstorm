@@ -54,7 +54,7 @@ import './ktx2-config.js';
 import { EntityRenderer, setModelMaterialPort, setMemberModelMemo } from './entity-renderer.js';
 import {
     SquadRenderBackend, setLegacyBackendPlumbing, setLegacyBufferRebind, setBboxRefreshEvery,
-    setPoolCompaction, setPoolCompactionGate,
+    setPoolCompaction, setPoolCompactionGate, setLegacyFullUpload,
 } from './squad-render-backend.js';
 import { ImpostorRenderer, LodTier } from './impostor-renderer.js';
 import { AssetLoader, LoadPriority } from './asset-loader.js';
@@ -2493,6 +2493,14 @@ export function gpInit(msg: GpInitToWorker): void {
          *  already compacted, so an off-arm has to be re-grown by churn.
          *  `squadPoolCompactGate(fraction, minDead)` moves the trigger;
          *  `__squadBackend.poolOccupancy()` reads drawn/live/dead per pool. */
+        /** S5: A/B the squad backend's dirty-range upload. `squadFullUpload(true)`
+         *  restores the pre-S5 shape — every flush uploads the whole live prefix
+         *  and a sprite pool re-billboards every live slot even with a still
+         *  camera; `false` is the shipped default (upload the tracked range,
+         *  recompose only the slots whose pose moved). Takes effect on the next
+         *  flush. It does not restore the per-member Babylon matrix compose,
+         *  which S5 replaced with §13b's inline write under test. */
+        squadFullUpload: (on: boolean): boolean => setLegacyFullUpload(on),
         squadPoolCompact: (on: boolean): boolean => setPoolCompaction(on),
         squadPoolCompactGate: (fraction: number, minDead?: number) =>
             setPoolCompactionGate(fraction, minDead),

@@ -32,7 +32,13 @@ const FIELDS = [
   // the `centroid`/`icon` tier (Member.centroidDy's twin): that tier has no
   // ground sample to rebuild a flyer's cruise height from. Ground/naval unused.
   ['mCentroidDy', Float32Array],
-  ['mPool', Int32Array], ['mPoolIdx', Int32Array],
+  // `mPool` is the backend HANDLE (createMember's return). The pair below is
+  // S5's direct-write binding (§13a): the pool the member's instance sits in and
+  // the instance index inside it, both -1 when the member is not pinned (either
+  // the backend offers no direct path, or the member's visual tier is re-decided
+  // per frame from the camera and its index therefore cannot be held). Refreshed
+  // from the backend whenever `poolGeneration` moves — see soa-kernel.js.
+  ['mPool', Int32Array], ['mDirectPool', Int32Array], ['mPoolIdx', Int32Array],
 ];
 
 function alignUp(n, align) { return Math.ceil(n / align) * align; }

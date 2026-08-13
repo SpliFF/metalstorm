@@ -81,10 +81,57 @@ export interface MemberModel {
     height: number;
 }
 
+/** The direct-write window onto one pool (PLAN-metalstorm-squad-performance.md
+ *  §13a, milestone S5). Handed to the SoA kernel, which writes a member's 16
+ *  matrix floats (or its sprite pose) in place instead of calling
+ *  `updateMember` — no handle lookup, no tier decision, no Babylon
+ *  Vector3/Quaternion/Matrix compose per member per frame.
+ *
+ *  A view is INVALIDATED by `growPool` (new arrays) and by `compactPool` (slots
+ *  move): both bump `poolGeneration`, and a holder must re-fetch its view and
+ *  re-read its slot index when that number changes. `generation` on the view is
+ *  the value it was built at, so a stale view can also be detected directly.
+ *
+ *  `dirtyLo/dirtyHi` are the pool's OWN dirty range (not a copy) — §13a says
+ *  "written back by markDirty", and `markDirty` is how a writer that holds no
+ *  view reports one; a holder of the view is looking at the same numbers the
+ *  flush reads, so there is nothing to write back. */
+export interface PoolView {
+    poolId: number;
+    /** The live matrix buffer (capacity × 16, row-major, §13b layout). */
+    matrices: Float32Array;
+    /** Sprite pools only: the member ground pose the billboard pass composes
+     *  from. A writer that sees these fields writes the POSE, not a matrix. */
+    spritePos?: Float32Array;
+    spriteHeading?: Float32Array;
+    spriteAlive?: Uint8Array;
+    /** Per-instance screen-door fade, where the pool's material carries it. */
+    fade?: Float32Array;
+    /** Vertical bias from the member's ground point to what this pool draws at:
+     *  the capsule's half-height, a model's `yOffset`, 0 for a sprite (whose
+     *  card lift is applied by the billboard pass). Carried here so a direct
+     *  writer does not need a second copy of the constant. */
+    yBias: number;
+    /** Gait bob amplitude (elmos) — the same `sin(gait·2π)·A` the
+     *  `updateMember` path applies, for the same reason. */
+    bobAmp: number;
+    dirty: boolean;
+    /** Inclusive instance-index range touched since the last flush.
+     *  `dirtyHi < dirtyLo` means nothing. */
+    dirtyLo: number;
+    dirtyHi: number;
+    generation: number;
+}
+
 /** A grow-on-demand thin-instance pool for one visual class (members of a
  *  given team, or wrecks). Freed slots are collapsed to a zero-scale matrix so
  *  they render as nothing until the index is reused. */
 interface InstancePool {
+    /** Dense integer id — what a direct writer names the pool by (§13a). */
+    id: number;
+    /** The pool's persistent PoolView (rebuilt in place on growth). Also the
+     *  pool's dirty state: `view.dirty/dirtyLo/dirtyHi`. */
+    view: PoolView;
     mesh: Mesh;
     /** False for MODEL pools — the mesh is borrowed from EntityRenderer and
      *  must not be disposed here. True for the backend's own capsule/sprite/
@@ -94,7 +141,6 @@ interface InstancePool {
     capacity: number;
     highWater: number;        // count uploaded to thinInstanceCount
     free: number[];           // released indices, LIFO
-    dirty: boolean;
     /** PLAN-perf M24: the `MemberSlot` object that currently owns each slot,
      *  indexed by slot. Every holder of a slot addresses it through one of
      *  these objects (`MemberEntry.model/sprite/capsule`, `wreckByHandle`), so
@@ -124,10 +170,28 @@ interface InstancePool {
         heading: Float32Array;  // capacity, member facing (radians, RH)
         alive: Uint8Array;      // capacity, 1 = slot has a live member
         cells: Float32Array;    // capacity, per-member packed cell index (GPU)
+        /** Camera position + card rotation the pool was last billboarded
+         *  against. Unchanged ⇒ only the slots whose pose moved need
+         *  recomposing (S5 §13c). NaN-initialised so the first flush always
+         *  recomposes everything. */
+        lastCamX: number; lastCamY: number; lastCamZ: number;
+        lastRotX: number; lastRotY: number; lastRotZ: number; lastRotW: number;
     };
     /** Present on MODEL pools only — the transform data to compose members
      *  against the borrowed body geometry. */
-    model?: { restWorld: Matrix; yOffset: number };
+    model?: {
+        restWorld: Matrix; yOffset: number;
+        /** `restWorld.updateFlag` the cache below was taken at. */
+        restFlag?: number;
+        /** Rest pose as plain floats, or null when it is the identity. */
+        restCache?: Float32Array | null;
+    };
+    /** Vertical bias this pool draws its instances at, above the member's
+     *  ground point: the capsule's half-height, a model's `yOffset`, 0 for a
+     *  sprite (its card lift is applied by the billboard pass) and 0 for the
+     *  wreck pool (spawnWreck passes the debris lift itself). Published on the
+     *  view so a direct writer needs no second copy of it. */
+    yBias: number;
     /** PLAN-perf M21: whether this pool's thin-instance vertex buffers are
      *  currently bound to its live typed arrays. `thinInstanceSetBuffer`
      *  DISPOSES and RE-CREATES the GPU buffer (and, for user kinds, re-registers
@@ -162,6 +226,11 @@ interface MemberEntry {
     model?: MemberSlot[];
     sprite?: MemberSlot;
     capsule?: MemberSlot;
+    /** S5: this member's slot is PINNED — its owner (the SoA kernel) writes the
+     *  transform straight into the pool view, so the tier must not be re-decided
+     *  per frame. Only set for a member whose def has exactly ONE reachable
+     *  visual tier and therefore exactly one slot for life (see `acquireSlot`). */
+    direct?: boolean;
     /** Resolved sprite pool for (defId, team), cached on first use. Both are
      *  fixed for an entry's lifetime, so the `${defId}:${team}` template-literal
      *  key + Map lookup that resolved it was a per-member-per-frame string
@@ -193,6 +262,25 @@ let LEGACY_BUFFER_REBIND = false;
 export function setLegacyBufferRebind(on: boolean): boolean {
     LEGACY_BUFFER_REBIND = !!on;
     return LEGACY_BUFFER_REBIND;
+}
+
+/** S5's legacy arm. ON restores the pre-S5 upload shape: every flush uploads the
+ *  whole live prefix, and a sprite pool re-billboards every live slot even when
+ *  neither the camera nor its cards moved. OFF (shipping) uploads only the
+ *  tracked dirty range and recomposes only the slots whose pose changed while the
+ *  camera is still. Same A/B contract as `squadBackendLegacy`/`squadRebindBuffers`
+ *  — measurement only, one session, both arms; `__perfToggles.squadFullUpload(on)`.
+ *
+ *  It does NOT restore the per-member Babylon compose (§13b's inline write) or
+ *  the direct-write path: those are correctness-equivalent rewrites pinned by
+ *  tests against `Matrix.ComposeToRef`, not a policy with two defensible
+ *  settings, and a second matrix-writing code path kept alive for an A/B is the
+ *  shape that drifts. */
+let LEGACY_FULL_UPLOAD = false;
+
+export function setLegacyFullUpload(on: boolean): boolean {
+    LEGACY_FULL_UPLOAD = !!on;
+    return LEGACY_FULL_UPLOAD;
 }
 
 /** How many flushes a pool may skip before its thin-instance bounding info is
@@ -264,12 +352,77 @@ export function setPoolCompactionGate(fraction: number, minDead?: number): {
 const MEMBER_HEIGHT = 9;      // elmos — proxy capsule height
 const MEMBER_RADIUS = 1.6;
 const WRECK_SIZE = 4;         // elmos — flat debris box
+/** Gait bob amplitude (elmos). Published on every PoolView so a direct writer
+ *  applies the same walk cue as `updateMember` without a second constant. */
+const MEMBER_BOB = 0.4;
+/** Empty dirty range: `dirtyHi < dirtyLo` (S5 §13c). */
+const DIRTY_NONE_LO = 0x7fffffff;
+const DIRTY_NONE_HI = -1;
 
 /** Crossfade band width as a fraction of impostorDistance (M5). The member is
  *  drawn in both tiers across `[D·(1−FADE_FRAC), D]`; below that band it is
  *  pure model, at/above D pure sprite. A fraction (not an absolute) keeps the
  *  band proportionate for any def's switch distance. */
 export const FADE_FRAC = 0.15;
+
+/** §13b's layout table, written by hand into `out` at `base`: yaw-only rotation
+ *  (column-vector convention, translation at [12..14]), uniform scale, and a
+ *  CLEAN W-row. Exported so the SoA kernel writes the identical 16 floats
+ *  through the pool view rather than carrying its own copy of the layout. */
+export function writeYawMatrix(
+    out: Float32Array, base: number,
+    x: number, y: number, z: number, headingY: number, scale: number,
+): void {
+    const c = Math.cos(headingY) * scale, s = Math.sin(headingY) * scale;
+    out[base] = c; out[base + 1] = 0; out[base + 2] = -s; out[base + 3] = 0;
+    out[base + 4] = 0; out[base + 5] = scale; out[base + 6] = 0; out[base + 7] = 0;
+    out[base + 8] = s; out[base + 9] = 0; out[base + 10] = c; out[base + 11] = 0;
+    out[base + 12] = x; out[base + 13] = y; out[base + 14] = z; out[base + 15] = 1;
+}
+
+/** `out[base..] = a × b` for two row-major 4×4s, Babylon's `multiplyToRef`
+ *  convention (row-vector: `a` is the local, `b` the parent). */
+function multiply4x4(a: Float32Array, b: Float32Array, out: Float32Array, base: number): void {
+    for (let r = 0; r < 4; r++) {
+        const a0 = a[r * 4], a1 = a[r * 4 + 1], a2 = a[r * 4 + 2], a3 = a[r * 4 + 3];
+        for (let c = 0; c < 4; c++) {
+            out[base + r * 4 + c] =
+                a0 * b[c] + a1 * b[4 + c] + a2 * b[8 + c] + a3 * b[12 + c];
+        }
+    }
+}
+
+/** Scratch for the member half of a MODEL member's composition. Module scope,
+ *  never escapes, so the write path stays allocation-free. */
+const _mem = new Float32Array(16);
+
+const IDENTITY16 = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+
+function isIdentity16(m: Float32Array | ArrayLike<number>): boolean {
+    for (let i = 0; i < 16; i++) if (m[i] !== IDENTITY16[i]) return false;
+    return true;
+}
+
+/** The piece's rest pose as plain floats, or `null` when it is the identity (the
+ *  common single-piece body — then the member matrix IS the answer). Re-read
+ *  whenever the Matrix's `updateFlag` moves, so this caches without pinning a
+ *  stale rest pose. */
+function restFloatsOf(m: {
+    restWorld: Matrix; restFlag?: number; restCache?: Float32Array | null;
+}): Float32Array | null {
+    if (m.restFlag !== m.restWorld.updateFlag) {
+        const src = m.restWorld.m;
+        if (isIdentity16(src)) {
+            m.restCache = null;
+        } else {
+            const cache = m.restCache ?? new Float32Array(16);
+            for (let i = 0; i < 16; i++) cache[i] = src[i];
+            m.restCache = cache;
+        }
+        m.restFlag = m.restWorld.updateFlag;
+    }
+    return m.restCache ?? null;
+}
 
 export interface SquadHost {
     /** Terrain height sample (client heightmap) for member Y. */
@@ -308,6 +461,17 @@ export class SquadRenderBackend {
     private modelPools = new Map<string, InstancePool>();
     /** Single shared wreck pool. */
     private wreckPool: InstancePool | null = null;
+
+    /** S5 §13a: every pool by dense integer id — what a direct writer names a
+     *  pool by, so the kernel holds two ints per member (`mDirectPool`,
+     *  `mPoolIdx`) and never a string key or a Map. */
+    private poolsById: InstancePool[] = [];
+    /** Bumped whenever a pool's arrays are replaced (`growPool`) or its slot
+     *  indices move (`compactPool`). A direct writer re-fetches its view and
+     *  re-reads its slot index when this number changes — it is the ONE thing
+     *  that makes a copied-out slot index safe (PLAN-perf M24's rule was "never
+     *  copy an index out"; a generation is how the copy is invalidated). */
+    poolGeneration = 0;
 
     /** handle → member entry (carries LOD state for per-frame pool migration).
      *  Handles are dense positive ints; -1 means "no instance" (the logic
@@ -394,6 +558,18 @@ export class SquadRenderBackend {
         const bob = Math.sin(gait * Math.PI * 2) * 0.4;
         const my = y + bob;
 
+        // S5: a member whose slot is PINNED (acquireSlot) is written directly by
+        // its owner through the pool view, and its tier must not be re-decided
+        // here — re-deciding could migrate it to another pool and leave the
+        // owner's (poolId, index) pointing at a slot it no longer holds. This
+        // arm exists so a pinned member is still correct if something does call
+        // the interface method (a test, a tool, a second driver): it performs
+        // exactly the write the direct path would.
+        if (entry.direct) {
+            this.writePinned(entry, x, my, z, headingY);
+            return;
+        }
+
         // Decide the model/sprite fades for this member at its current distance.
         // The model tier needs a switch distance AND a loaded body; the body is
         // only fetched when the member is within D (no preloading for far
@@ -477,7 +653,7 @@ export class SquadRenderBackend {
             s.heading[i] = headingY;
             s.alive[i] = 1;
             pool.fade![i] = spriteFade;
-            pool.dirty = true;
+            this.touch(pool, i);
         } else {
             this.freeSprite(entry);
         }
@@ -505,6 +681,7 @@ export class SquadRenderBackend {
         this.freeModel(entry);
         this.freeSprite(entry);
         this.freeCapsule(entry);
+        entry.direct = false;
         this.memberEntries[handle] = undefined;
         this.memberByHandle.delete(handle);
         this.freeHandles.push(handle);
@@ -601,7 +778,7 @@ export class SquadRenderBackend {
         this._t.set(tx, ty, tz);
         Matrix.ComposeToRef(this._s, this._q, this._t, this._m);
         this._m.copyToArray(m, base);
-        slot.pool.dirty = true;
+        this.touch(slot.pool, slot.index);
     }
 
     // NB: the RenderBackend contract names this `groundHeight` (render-backend.js
@@ -671,6 +848,156 @@ export class SquadRenderBackend {
         return { pools, drawn, live, dead: drawn - live, capacity, worst };
     }
 
+    // --- S5 direct-write API (§13a) -----------------------------------------
+
+    /** Pin this member's slot so its owner can write the transform straight into
+     *  the pool buffer, and return the (poolId, index) to write at — or `null`
+     *  when the member is not eligible and must keep using `updateMember`.
+     *
+     *  **Eligibility is "exactly one reachable visual tier, exactly one slot".**
+     *  A direct writer holds a slot index; a member whose tier is re-decided
+     *  every frame from the camera (M4/M5: a def with BOTH a body and an atlas,
+     *  or one whose body has not finished loading) migrates between pools, and
+     *  an index that migrates is an index the writer cannot hold. So:
+     *    - atlas, no model tier  → its sprite pool, for life        ✔
+     *    - no atlas, no body     → its capsule pool, for life       ✔
+     *    - a loaded single-piece body with no atlas (D = Infinity)  ✔
+     *    - anything else (crossfading def, multi-piece body, body still
+     *      streaming)                                              ✘ → null
+     *  This is a scope rule, not a fidelity change: a member that cannot be
+     *  pinned keeps the full per-frame tier path it has today.
+     *
+     *  **DEVIATION from §13a, stated rather than taken silently:** the plan
+     *  writes `acquireSlot(defId, team)`. It takes a HANDLE here, because the
+     *  tier decision (atlas, `impostorDist`, whether the body has loaded) lives
+     *  in the member's own `MemberEntry`, and re-deriving it from (defId, team)
+     *  would be a second copy of that rule — the failure shape this project has
+     *  filed repeatedly. For the same reason there is no `releaseSlot(poolId,
+     *  index)`: the slot is already owned by the entry and freed by
+     *  `releaseMember`/`destroyMember`, and a second raw free path would make
+     *  two owners of one slot. */
+    acquireSlot(handle: number): { poolId: number; index: number } | null {
+        const entry = this.entryOf(handle);
+        if (!entry) return null;
+        let slot: MemberSlot | undefined;
+        const D = entry.impostorDist;
+        if (D === undefined || !this.host.getMemberModel) {
+            // No model tier at all → sprite if the def has an atlas, else capsule.
+            slot = entry.atlas ? (this.ensureSprite(entry), entry.sprite) : (this.ensureCapsule(entry), entry.capsule);
+        } else if (D === Infinity && !entry.atlas) {
+            // Atlas-less def with a body: the model tier holds at every range, so
+            // the only migration left is capsule→model when the body finishes
+            // loading. Pin only once it HAS loaded, only if it is one piece, and
+            // only if that piece's rest pose is the identity — a non-identity
+            // rest pose means the drawn matrix is `restWorld × member`, i.e. per
+            // piece composition data the backend owns, and handing it to an
+            // outside writer would be a second implementation of it.
+            const model = this.host.getMemberModel(entry.defId, entry.team);
+            if (!model || model.pieces.length !== 1) return null;
+            this.ensureModel(entry, model);
+            const ms = entry.model![0];
+            if (restFloatsOf(ms.pool.model!) !== null) return null;
+            ms.pool.fade![ms.index] = 1;
+            slot = ms;
+        } else {
+            return null;    // camera-decided tier — cannot hold an index
+        }
+        if (!slot) return null;
+        entry.direct = true;
+        return { poolId: slot.pool.id, index: slot.index };
+    }
+
+    /** The pool id a pinned member currently sits in, or -1. Int-returning (no
+     *  allocation) because this is what a holder calls for EVERY member it owns
+     *  after a `poolGeneration` bump. */
+    slotPoolId(handle: number): number {
+        const slot = this.pinnedSlotOf(handle);
+        return slot ? slot.pool.id : -1;
+    }
+
+    /** The instance index a pinned member currently sits at, or -1. */
+    slotIndex(handle: number): number {
+        const slot = this.pinnedSlotOf(handle);
+        return slot ? slot.index : -1;
+    }
+
+    private pinnedSlotOf(handle: number): MemberSlot | undefined {
+        const entry = this.entryOf(handle);
+        if (!entry?.direct) return undefined;
+        return entry.sprite ?? entry.capsule ?? entry.model?.[0];
+    }
+
+    /** The live direct-write window onto a pool, or undefined for an unknown id.
+     *  Re-fetch whenever `poolGeneration` changes. */
+    getPoolView(poolId: number): PoolView | undefined {
+        return this.poolsById[poolId]?.view;
+    }
+
+    /** Report that instances `[lo, hi]` of a pool were written by an outside
+     *  holder. A holder of the view can equally widen `view.dirtyLo/dirtyHi`
+     *  itself — they are the same numbers — but a batched call once per squad is
+     *  cheaper than two compares per member and is what the kernel does. */
+    markDirty(poolId: number, lo: number, hi: number): void {
+        const pool = this.poolsById[poolId];
+        if (!pool) return;
+        const v = pool.view;
+        v.dirty = true;
+        if (lo < v.dirtyLo) v.dirtyLo = lo;
+        if (hi > v.dirtyHi) v.dirtyHi = hi;
+    }
+
+    /** Write a PINNED member's transform in the shape its own pool wants. The
+     *  direct writer does this itself through the view; this is the same write
+     *  reached through the `updateMember` interface (see the guard there). */
+    private writePinned(
+        entry: MemberEntry, x: number, my: number, z: number, headingY: number,
+    ): void {
+        if (entry.sprite) {
+            const pool = entry.sprite.pool;
+            const i = entry.sprite.index;
+            const s = pool.sprite!;
+            const base = i * 3;
+            s.pos[base] = x; s.pos[base + 1] = my; s.pos[base + 2] = z;
+            s.heading[i] = headingY;
+            s.alive[i] = 1;
+            this.touch(pool, i);
+        } else if (entry.capsule) {
+            this.writeMatrix(entry.capsule.pool, entry.capsule.index,
+                x, my + entry.capsule.pool.yBias, z, headingY, 1);
+        } else if (entry.model) {
+            const slot = entry.model[0];
+            this.writeModelMatrix(slot.pool, slot.index, x, my, z, headingY);
+        }
+    }
+
+    /** Test/debug scanner for §13b's packing trap: any instance in any pool
+     *  whose W-row is not (0, 0, 0, 1). The failure mode is SHADOW-ONLY — the
+     *  CSM depth shader computes `viewProjection * (world * vec4(pos,1))`
+     *  without reconstructing `w`, so a polluted W-row streaks or collapses the
+     *  caster silhouette while the main pass looks perfect — which is why this
+     *  is asserted rather than eyeballed. Returns the offending slots (bounded,
+     *  so a broken pool does not print 8 192 lines). */
+    auditWRows(limit = 8): { poolId: number; index: number; w: number[] }[] {
+        const bad: { poolId: number; index: number; w: number[] }[] = [];
+        for (const pool of this.poolsById) {
+            const m = pool.matrices;
+            for (let i = 0; i < pool.highWater; i++) {
+                const b = i * 16;
+                // A FREED slot is all zeros by construction (freeSlot collapses
+                // it to zero scale, m[15] included) — that is not a packing bug.
+                if (pool.refs[i] === undefined) continue;
+                if (m[b + 3] !== 0 || m[b + 7] !== 0 || m[b + 11] !== 0 || m[b + 15] !== 1) {
+                    bad.push({
+                        poolId: pool.id, index: i,
+                        w: [m[b + 3], m[b + 7], m[b + 11], m[b + 15]],
+                    });
+                    if (bad.length >= limit) return bad;
+                }
+            }
+        }
+        return bad;
+    }
+
     /** Test/debug accessor: the packed atlas cell each live slot of a sprite
      *  pool selected on the last flush (M3 directional select). */
     getSpriteCells(defId: number, team: number): Float32Array | undefined {
@@ -732,6 +1059,7 @@ export class SquadRenderBackend {
         this.spritePools.clear();
         this.modelPools.clear();
         this.wreckPool = null;
+        this.poolsById.length = 0;
         this.memberEntries.length = 1;
         this.freeHandles.length = 0;
         this.memberByHandle.clear();
@@ -757,6 +1085,8 @@ export class SquadRenderBackend {
         mesh.alwaysSelectAsActiveMesh = true;
         mesh.doNotSyncBoundingInfo = true;
         pool = this.newPool(mesh);
+        pool.yBias = MEMBER_HEIGHT * 0.5;   // capsule is centre-anchored
+        this.refreshView(pool);
         this.memberPools.set(team, pool);
         return pool;
     }
@@ -783,7 +1113,10 @@ export class SquadRenderBackend {
             heading: new Float32Array(pool.capacity),
             alive: new Uint8Array(pool.capacity),
             cells: new Float32Array(pool.capacity),
+            lastCamX: NaN, lastCamY: NaN, lastCamZ: NaN,
+            lastRotX: NaN, lastRotY: NaN, lastRotZ: NaN, lastRotW: NaN,
         };
+        this.refreshView(pool);
         this.spritePools.set(key, pool);
         return pool;
     }
@@ -800,19 +1133,55 @@ export class SquadRenderBackend {
         this._t.set(0, sprite.lift, 0);
         this._t.rotateByQuaternionToRef(cardRot, this._t);
         const upx = this._t.x, upy = this._t.y, upz = this._t.z;
-        this._s.set(1, 1, 1);
-        for (let i = 0; i < pool.highWater; i++) {
+        // S5 §13c: the card rotation is shared by the whole pool, so the 3×3
+        // rotation block is built ONCE here and each slot writes 12 floats plus
+        // its translation — no per-member Matrix.ComposeToRef + copyToArray.
+        // (The quaternion→matrix expansion is Babylon's, taken from the
+        // quaternion it hands us, so the convention still has one owner.)
+        Matrix.FromQuaternionToRef(cardRot, this._m);
+        const r = this._m.m;
+        const r00 = r[0], r01 = r[1], r02 = r[2];
+        const r10 = r[4], r11 = r[5], r12 = r[6];
+        const r20 = r[8], r21 = r[9], r22 = r[10];
+        // The camera decides every card's rotation AND its atlas cell, so when
+        // neither the camera nor the card rotation moved, only the slots whose
+        // POSE changed this frame need recomposing — the dirty range the writer
+        // already reported. An idle camera over a moving battle is the common
+        // case, and the whole-prefix rewrite was the reason a sprite pool could
+        // never have a small dirty range (§13c's "no writes → no upload").
+        const v = pool.view;
+        const camStill = !LEGACY_FULL_UPLOAD
+            && sprite.lastCamX === cameraPos.x && sprite.lastCamY === cameraPos.y
+            && sprite.lastCamZ === cameraPos.z
+            && sprite.lastRotX === cardRot.x && sprite.lastRotY === cardRot.y
+            && sprite.lastRotZ === cardRot.z && sprite.lastRotW === cardRot.w;
+        let lo = 0, hi = pool.highWater - 1;
+        if (camStill) {
+            if (v.dirtyHi < v.dirtyLo) return;      // nothing moved at all
+            lo = v.dirtyLo;
+            hi = Math.min(v.dirtyHi, pool.highWater - 1);
+        }
+        sprite.lastCamX = cameraPos.x; sprite.lastCamY = cameraPos.y; sprite.lastCamZ = cameraPos.z;
+        sprite.lastRotX = cardRot.x; sprite.lastRotY = cardRot.y;
+        sprite.lastRotZ = cardRot.z; sprite.lastRotW = cardRot.w;
+        const mat = pool.matrices;
+        for (let i = lo; i <= hi; i++) {
             if (!sprite.alive[i]) continue;
             const base = i * 3;
             const x = sprite.pos[base], y = sprite.pos[base + 1], z = sprite.pos[base + 2];
-            this._t.set(x + upx, y + upy, z + upz);
-            Matrix.ComposeToRef(this._s, cardRot, this._t, this._m);
-            this._m.copyToArray(pool.matrices, i * 16);
+            const b = i * 16;
+            mat[b] = r00; mat[b + 1] = r01; mat[b + 2] = r02; mat[b + 3] = 0;
+            mat[b + 4] = r10; mat[b + 5] = r11; mat[b + 6] = r12; mat[b + 7] = 0;
+            mat[b + 8] = r20; mat[b + 9] = r21; mat[b + 10] = r22; mat[b + 11] = 0;
+            mat[b + 12] = x + upx; mat[b + 13] = y + upy; mat[b + 14] = z + upz;
+            mat[b + 15] = 1;
             sprite.cells[i] = selectAtlasCell(
                 cameraPos.x - x, cameraPos.y - y, cameraPos.z - z,
                 sprite.heading[i], sprite.layout);
         }
-        pool.dirty = true;
+        v.dirty = true;
+        if (lo < v.dirtyLo) v.dirtyLo = lo;
+        if (hi > v.dirtyHi) v.dirtyHi = hi;
     }
 
     private getWreckPool(): InstancePool {
@@ -828,6 +1197,7 @@ export class SquadRenderBackend {
         mesh.alwaysSelectAsActiveMesh = true;
         mesh.doNotSyncBoundingInfo = true;
         this.wreckPool = this.newPool(mesh);
+        this.refreshView(this.wreckPool);
         return this.wreckPool;
     }
 
@@ -847,6 +1217,7 @@ export class SquadRenderBackend {
         // The member material carries DitherFadePlugin (M5 crossfade) → this
         // pool uploads a `fade` buffer (default 1 = fully opaque body).
         pool.fade = new Float32Array(pool.capacity).fill(1);
+        this.refreshView(pool);
         this.modelPools.set(key, pool);
         return pool;
     }
@@ -856,13 +1227,52 @@ export class SquadRenderBackend {
         mesh.thinInstanceSetBuffer('matrix', matrices, 16, false);
         mesh.thinInstanceCount = 0;
         mesh.isVisible = false;
+        const id = this.poolsById.length;
         // `buffersBound` stays false: the caller may still attach `fade`/`sprite`
         // arrays after this returns (getSpritePool/getModelPool do), and those
         // kinds must be bound too. The first flushPool binds the full set.
-        return {
-            mesh, owned, matrices, capacity, highWater: 0, free: [], dirty: false,
-            refs: [], buffersBound: false,
+        const pool: InstancePool = {
+            id, mesh, owned, matrices, capacity, highWater: 0, free: [],
+            refs: [], buffersBound: false, yBias: 0,
+            view: {
+                poolId: id, matrices, yBias: 0, bobAmp: MEMBER_BOB,
+                dirty: false, dirtyLo: DIRTY_NONE_LO, dirtyHi: DIRTY_NONE_HI,
+                generation: this.poolGeneration,
+            },
         };
+        this.poolsById.push(pool);
+        return pool;
+    }
+
+    /** Rebuild a pool's view against its current arrays. Called after any change
+     *  that a view holder cannot see: `growPool` (every array is a new object)
+     *  and `compactPool` (slot indices moved). Both bump `poolGeneration`, which
+     *  is the holder's signal to re-fetch. */
+    private refreshView(pool: InstancePool): void {
+        const v = pool.view;
+        v.matrices = pool.matrices;
+        v.fade = pool.fade;
+        v.spritePos = pool.sprite?.pos;
+        v.spriteHeading = pool.sprite?.heading;
+        v.spriteAlive = pool.sprite?.alive;
+        v.yBias = pool.model ? pool.model.yOffset : pool.yBias;
+        v.generation = ++this.poolGeneration;
+    }
+
+    /** Record that instance `index` of this pool was written. */
+    private touch(pool: InstancePool, index: number): void {
+        const v = pool.view;
+        v.dirty = true;
+        if (index < v.dirtyLo) v.dirtyLo = index;
+        if (index > v.dirtyHi) v.dirtyHi = index;
+    }
+
+    /** Record that the whole live prefix was written (or reshaped). */
+    private touchAll(pool: InstancePool): void {
+        const v = pool.view;
+        v.dirty = true;
+        v.dirtyLo = 0;
+        v.dirtyHi = pool.highWater - 1;
     }
 
     /** Allocate a slot AND the `MemberSlot` its holder will address it through.
@@ -883,7 +1293,7 @@ export class SquadRenderBackend {
             if (pool.highWater >= pool.capacity) this.growPool(pool);
             index = pool.highWater++;
         }
-        pool.dirty = true;
+        this.touch(pool, index);
         return index;
     }
 
@@ -895,7 +1305,7 @@ export class SquadRenderBackend {
         if (pool.fade) pool.fade[index] = 1;   // reset for the next occupant
         pool.refs[index] = undefined;
         pool.free.push(index);
-        pool.dirty = true;
+        this.touch(pool, index);
     }
 
     /** PLAN-perf M24: move the live slots above the live-count line down into
@@ -915,7 +1325,9 @@ export class SquadRenderBackend {
         if (live === 0) {
             pool.free.length = 0;
             pool.highWater = 0;
-            pool.dirty = true;
+            this.touchAll(pool);
+            // Nothing is drawn, but every index a direct writer held is gone.
+            this.refreshView(pool);
             return;
         }
         // Sorted ascending, the free indices BELOW `live` are the holes to fill
@@ -931,10 +1343,13 @@ export class SquadRenderBackend {
         }
         pool.free.length = 0;
         pool.highWater = live;
-        pool.dirty = true;
+        this.touchAll(pool);
         // The occupied range changed shape — do not sit on a stale box for the
         // rest of the cadence.
         pool.bboxCountdown = 0;
+        // Slots MOVED: every (poolId, index) a direct writer copied out is now
+        // one frame stale. The generation bump is what makes it re-read.
+        this.refreshView(pool);
     }
 
     private moveSlot(pool: InstancePool, src: number, dst: number): void {
@@ -990,38 +1405,55 @@ export class SquadRenderBackend {
         // at the old ones, so the next flush must re-bind rather than re-upload
         // (PLAN-perf M21). Missing this renders a frozen, half-length pool.
         pool.buffersBound = false;
+        // ... and so does every direct writer holding a view onto the old arrays
+        // (S5 §13a). Growth is the case the plan calls out explicitly.
+        this.refreshView(pool);
     }
 
     /** Compose scale·yaw·translate into the pool's matrix buffer at `index`.
-     *  Alloc-free (reuses scratch). */
+     *  Alloc-free, and now Babylon-object-free: this is §13b's layout table
+     *  written by hand, which is the same 16 floats
+     *  `Compose(scale, RotationYawPitchRoll(yaw,0,0), t)` produces (pinned by a
+     *  test against `Matrix.ComposeToRef` — the convention is Babylon's, not
+     *  ours to restate). It replaces a Vector3 set + a quaternion build + a
+     *  4×4 compose + a `copyToArray`, per member per frame.
+     *
+     *  ⚠ The W-row (`m[3]/m[7]/m[11]` = 0, `m[15]` = 1) is not decoration: the
+     *  CSM depth shader does not reconstruct `w`, so anything packed there
+     *  collapses caster silhouettes in the shadow map while the main pass looks
+     *  fine (docs/lighting.md; §13b). `auditWRows()` is the test-only scanner. */
     private writeMatrix(
         pool: InstancePool, index: number,
         x: number, y: number, z: number, headingY: number, scale: number,
     ): void {
-        this._s.set(scale, scale, scale);
-        Quaternion.RotationYawPitchRollToRef(headingY, 0, 0, this._q);
-        this._t.set(x, y, z);
-        Matrix.ComposeToRef(this._s, this._q, this._t, this._m);
-        this._m.copyToArray(pool.matrices, index * 16);
-        pool.dirty = true;
+        writeYawMatrix(pool.matrices, index * 16, x, y, z, headingY, scale);
+        this.touch(pool, index);
     }
 
     /** Compose a MODEL member: `restWorld × (yaw · translate(x, y+yOffset, z))`,
      *  matching EntityRenderer's per-piece placement so a member reads exactly
      *  like a full unit of the same def. Babylon multiplies row-vector local ×
-     *  parent, so member-world is the left operand. Alloc-free. */
+     *  parent, so member-world is the left operand. Alloc-free.
+     *
+     *  The member half is written inline (§13b) and multiplied by the piece's
+     *  rest pose by hand — the rest pose is re-read from the Matrix whenever its
+     *  `updateFlag` moves, so a piece whose rest transform is re-authored is
+     *  still picked up, exactly as re-reading it every frame did. */
     private writeModelMatrix(
         pool: InstancePool, index: number,
         x: number, y: number, z: number, headingY: number,
     ): void {
         const m = pool.model!;
-        this._s.set(1, 1, 1);
-        Quaternion.RotationYawPitchRollToRef(headingY, 0, 0, this._q);
-        this._t.set(x, y + m.yOffset, z);
-        Matrix.ComposeToRef(this._s, this._q, this._t, this._m);   // member world
-        m.restWorld.multiplyToRef(this._m, this._m2);              // restWorld × member
-        this._m2.copyToArray(pool.matrices, index * 16);
-        pool.dirty = true;
+        writeYawMatrix(_mem, 0, x, y + m.yOffset, z, headingY, 1);
+        const rest = restFloatsOf(m);
+        if (rest === null) {
+            // Identity rest pose (the single-piece, feet-at-origin case) — the
+            // multiply is the member matrix itself.
+            pool.matrices.set(_mem, index * 16);
+        } else {
+            multiply4x4(rest, _mem, pool.matrices, index * 16);
+        }
+        this.touch(pool, index);
     }
 
     /** Bind (or re-bind) this pool's thin-instance buffers to its current typed
@@ -1045,8 +1477,17 @@ export class SquadRenderBackend {
     }
 
     private flushPool(pool: InstancePool): void {
-        if (!pool.dirty) return;
-        pool.dirty = false;
+        const v = pool.view;
+        if (!v.dirty) return;
+        v.dirty = false;
+        // The range every writer this frame reported (S5 §13c). Clamped to the
+        // live prefix — a slot freed above `highWater` after a compaction is not
+        // uploaded and not drawn.
+        const lo = v.dirtyLo;
+        const hi = Math.min(v.dirtyHi, pool.highWater - 1);
+        v.dirtyLo = DIRTY_NONE_LO;
+        v.dirtyHi = DIRTY_NONE_HI;
+        const touched = hi >= lo ? hi - lo + 1 : 0;
         // PLAN-perf M21: the steady state re-uploads into the buffers already
         // bound rather than re-creating them. The pre-M21 path re-bound all
         // three every frame for every pool, which at the XL-battle was ~45 GPU
@@ -1058,13 +1499,25 @@ export class SquadRenderBackend {
         if (justBound) {
             this.bindPoolBuffers(pool);
         } else {
-            if (pool.highWater > 0) {
-                pool.mesh.thinInstancePartialBufferUpdate('matrix', pool.highWater, 0);
+            // §13c: upload the tracked range when it is a small part of the live
+            // prefix, else the prefix in one go. The threshold is the plan's
+            // (~⅓) — below it the saved bytes are worth the extra call, above it
+            // one contiguous upload of everything beats a nearly-as-long one.
+            // A pool nothing touched this frame is not reached at all: `dirty`
+            // was false, which is the whole point of tracking the range.
+            if (touched > 0) {
+                const partial = !LEGACY_FULL_UPLOAD && touched * 3 < pool.highWater;
+                const from = partial ? lo : 0;
+                const count = partial ? touched : pool.highWater;
+                pool.mesh.thinInstancePartialBufferUpdate('matrix', count, from);
+                // 1 float per instance each, and the same range applies.
+                if (pool.sprite) {
+                    pool.mesh.thinInstancePartialBufferUpdate('impostorCell', count, from);
+                }
+                if (pool.fade) {
+                    pool.mesh.thinInstancePartialBufferUpdate('ditherFade', count, from);
+                }
             }
-            // 1 float per instance each — small enough that the whole-array
-            // upload is not worth a second partial-update code path.
-            if (pool.sprite) pool.mesh.thinInstanceBufferUpdated('impostorCell');
-            if (pool.fade) pool.mesh.thinInstanceBufferUpdated('ditherFade');
             // `thinInstanceSetBuffer` used to null this for us every frame.
             // It is the lazy read-back cache behind `thinInstanceGetWorldMatrices()`;
             // nothing on the render path consults it (culling re-reads

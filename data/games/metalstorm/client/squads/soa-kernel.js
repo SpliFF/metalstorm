@@ -145,6 +145,11 @@ export function stepMembers(store, squads, grid, passability, bigUnits, backend,
     if (sq === undefined) continue;
     const stepDt = schedule.dt[k];
 
+    // S5: a pool that grew or compacted moved the slots this squad's pinned
+    // members hold. One integer compare per squad per frame; the re-read runs
+    // only when it fires.
+    if (sq.directGen !== backend.poolGeneration) resyncDirect(store, sq, backend);
+
     // Event-time, every frame, stepped or coasted (squad-sync §5 pitfall 3:
     // casualties must land on a coasted frame too).
     drainDeaths(store, sq, backend, nowSec);
@@ -160,6 +165,7 @@ export function stepMembers(store, squads, grid, passability, bigUnits, backend,
     if (mode === STEP_CENTROID) { centroidStep(store, sq, backend); continue; }
     stepSquad(store, sq, grid, passability, bigUnits, backend, stepDt, nowSec, schedule);
   }
+  flushDirtyRanges();
 }
 
 // --- per-squad header (§11a) ------------------------------------------------
@@ -375,7 +381,117 @@ function integrateGround(store, i, desiredVx, desiredVz, dt, backend, blend) {
   }
 }
 
+// --- direct-write path (S5, §13a/§13b) --------------------------------------
+//
+// A member whose slot the backend PINNED (`acquireSlot`, recorded in
+// `mDirectPool`/`mPoolIdx`) has its transform written straight into the pool's
+// typed arrays — no handle lookup, no per-frame tier decision, no Babylon
+// Vector3/Quaternion/Matrix compose. A member that is not pinned keeps
+// `updateMember`; that is a per-member property, not an engine mode, so both
+// live side by side in the same squad without a branch per squad.
+//
+// The pinned index is a COPIED-OUT slot index, which PLAN-perf M24 forbids on
+// its own — a pool compaction moves slots. `backend.poolGeneration` is what
+// makes it safe: it moves on every growth and every compaction, and
+// `resyncDirect` below re-reads the pair for a squad whose recorded generation
+// is behind. Every squad with instances is in the schedule every frame, so no
+// squad can write through a stale index.
+
+const TAU = Math.PI * 2;
+
+// Cached view for the pool the last write went to (a squad's members share one
+// pool: same def, same team, same tier). Invalidated by the generation — and by
+// the BACKEND, which is not optional: this cache is module scope and outlives any
+// one squad system, pool ids are per-backend and dense from 0, and two systems in
+// one realm (a second scene, a model preview, two tests in one file) therefore
+// both have a pool 0. Without the identity compare the second system's members
+// are written into the first one's buffers, which is silent and looks like
+// "members are drawn in the wrong place".
+let _viewBackend = null, _viewPoolId = -1, _view = null, _viewGen = -1;
+
+// Accumulated dirty range, reported once per pool run rather than per member.
+let _dirtyBackend = null, _dirtyPool = -1, _dirtyLo = 0, _dirtyHi = -1;
+
+function viewFor(backend, poolId) {
+  const gen = backend.poolGeneration;
+  if (backend === _viewBackend && poolId === _viewPoolId && gen === _viewGen) return _view;
+  _view = backend.getPoolView ? (backend.getPoolView(poolId) ?? null) : null;
+  _viewBackend = backend;
+  _viewPoolId = poolId;
+  _viewGen = gen;
+  return _view;
+}
+
+/** Report the accumulated range and close the run. Called at the end of every
+ *  kernel entry point, so a caller that drives one exported step function
+ *  directly still gets its writes uploaded. */
+export function flushDirtyRanges() {
+  if (_dirtyBackend !== null && _dirtyHi >= _dirtyLo) {
+    _dirtyBackend.markDirty(_dirtyPool, _dirtyLo, _dirtyHi);
+  }
+  _dirtyBackend = null; _dirtyPool = -1; _dirtyLo = 0; _dirtyHi = -1;
+}
+
+function noteDirty(backend, poolId, idx) {
+  if (poolId !== _dirtyPool) {
+    flushDirtyRanges();
+    _dirtyBackend = backend; _dirtyPool = poolId; _dirtyLo = idx; _dirtyHi = idx;
+    return;
+  }
+  if (idx < _dirtyLo) _dirtyLo = idx;
+  if (idx > _dirtyHi) _dirtyHi = idx;
+}
+
+/** Re-read a squad's pinned (poolId, index) pairs after a pool generation move.
+ *  Runs per squad, not per frame: the generation only changes when a pool grows
+ *  or compacts. */
+function resyncDirect(store, sq, backend) {
+  sq.directGen = backend.poolGeneration;
+  if (backend.slotPoolId === undefined) return;
+  const end = sq.base + sq.size;
+  for (let i = sq.base; i < end; i++) {
+    if (store.mDirectPool[i] < 0) continue;
+    const handle = store.mPool[i];
+    store.mDirectPool[i] = backend.slotPoolId(handle);
+    store.mPoolIdx[i] = backend.slotIndex(handle);
+  }
+}
+
+/** The one transform-write call site for every kernel stage. */
 function writeMember(store, backend, i) {
+  const poolId = store.mDirectPool[i];
+  if (poolId >= 0) {
+    const v = viewFor(backend, poolId);
+    if (v !== null) {
+      const idx = store.mPoolIdx[i];
+      // Same bob and the same vertical bias the `updateMember` path applies —
+      // both published on the view so there is exactly one copy of each.
+      const my = store.my[i] + Math.sin(store.mGait[i] * TAU) * v.bobAmp;
+      if (v.spritePos !== undefined) {
+        // Sprite pool: record the POSE. The card matrix and the directional
+        // atlas cell are camera-dependent and composed in the backend's flush.
+        const b = idx * 3;
+        v.spritePos[b] = store.mx[i];
+        v.spritePos[b + 1] = my;
+        v.spritePos[b + 2] = store.mz[i];
+        v.spriteHeading[idx] = store.mHeading[i];
+        v.spriteAlive[idx] = 1;
+      } else {
+        // §13b's layout, written by hand. The W-row is left clean — nothing is
+        // ever packed into m[3]/m[7]/m[11]/m[15] (shadow-only failure mode).
+        const m = v.matrices, b = idx * 16;
+        const h = store.mHeading[i];
+        const c = Math.cos(h), s = Math.sin(h);
+        m[b] = c; m[b + 1] = 0; m[b + 2] = -s; m[b + 3] = 0;
+        m[b + 4] = 0; m[b + 5] = 1; m[b + 6] = 0; m[b + 7] = 0;
+        m[b + 8] = s; m[b + 9] = 0; m[b + 10] = c; m[b + 11] = 0;
+        m[b + 12] = store.mx[i]; m[b + 13] = my + v.yBias; m[b + 14] = store.mz[i];
+        m[b + 15] = 1;
+      }
+      noteDirty(backend, poolId, idx);
+      return;
+    }
+  }
   backend.updateMember(store.mPool[i], store.mx[i], store.my[i], store.mz[i],
     store.mHeading[i], store.mGait[i]);
 }
@@ -505,7 +621,7 @@ function stepGroundSquad(store, sq, grid, passability, bigUnits, backend, dt, ma
     }
 
     trackStuck(store, sq, i, tx, tz, cfg, backend);
-    backend.updateMember(store.mPool[i], mx[i], my[i], mz[i], mHeading[i], mGait[i]);
+    writeMember(store, backend, i);
   }
 }
 
@@ -665,6 +781,7 @@ export function centroidStep(store, sq, backend) {
     store.mGait[i] = (store.mGait[i] + gaitStep) % 1;
     writeMember(store, backend, i);
   }
+  flushDirtyRanges();
   sq.lastAppliedCx = sq.cx; sq.lastAppliedCz = sq.cz;
 }
 
@@ -685,6 +802,7 @@ export function coastSquad(store, sq, backend) {
     if (!air) store.my[i] = backend.groundHeight(x, z);
     writeMember(store, backend, i);
   }
+  flushDirtyRanges();
 }
 
 // --- transport --------------------------------------------------------------
@@ -712,6 +830,7 @@ export function stepTransport(store, sq, backend, dt) {
       integrateGround(store, i, _arr.x, _arr.z, dt, backend, blend);
       writeMember(store, backend, i);
     }
+    flushDirtyRanges();
     if (allArrived || sq.transportElapsed >= cfg.transportBoardTimeSec) {
       releaseAllMemberInstances(store, sq, backend);
       sq.transportState = 'LOADED';

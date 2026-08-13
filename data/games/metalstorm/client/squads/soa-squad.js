@@ -43,6 +43,17 @@ function slotDist2(sq, localSlot) {
 
 const _slotW = { x: 0, z: 0 };
 
+/** S5 (§13a): ask the backend to PIN this member's instance slot so the kernel
+ *  can write its transform straight into the pool buffer. A backend with no
+ *  direct path, or a member whose visual tier is re-decided every frame from the
+ *  camera, simply keeps the `updateMember` call — that is what -1 means, and it
+ *  is a per-member property, not a mode. */
+function bindDirectSlot(store, backend, slot, handle) {
+  const pinned = handle >= 0 && backend.acquireSlot ? backend.acquireSlot(handle) : null;
+  store.mDirectPool[slot] = pinned ? pinned.poolId : -1;
+  store.mPoolIdx[slot] = pinned ? pinned.index : -1;
+}
+
 /** World position of local formation slot `localSlot` for `sq`'s current pose. */
 function slotWorldFor(sq, localSlot, out) {
   return slotToWorld({ x: sq.slotsX[localSlot], z: sq.slotsZ[localSlot] }, sq.cx, sq.cz, sq.heading, out);
@@ -109,6 +120,12 @@ export class SquadRec {
     // the same delta twice.
     this.lastAppliedCx = 0; this.lastAppliedCz = 0;
     this._lastSteppedAt = null;
+    // S5: the backend `poolGeneration` this squad's pinned (poolId, index) pairs
+    // were read at. Declared here rather than created on first use so the record
+    // keeps one hidden class. -1 forces the first frame to re-read; a backend
+    // with no direct path reports `undefined`, which matches after one attempt
+    // and then costs one compare per squad per frame forever.
+    this.directGen = -1;
   }
 
   get lod() { return this._lod; }
@@ -279,8 +296,10 @@ function spawnInitial(store, sq, backend) {
     setReleased(store, slot, false);
     if (alive) {
       store.mPool[slot] = backend.createMember(sq.id, i, visualFor(sq, i));
+      bindDirectSlot(store, backend, slot, store.mPool[slot]);
     } else {
       store.mPool[slot] = -1;
+      store.mDirectPool[slot] = -1; store.mPoolIdx[slot] = -1;
     }
   }
   sq.aliveCount = initialAlive;
@@ -308,6 +327,7 @@ function recordTrail(sq) {
 function releaseSlot(store, sq, backend, slot) {
   backend.releaseMember(store.mPool[slot]);
   store.mPool[slot] = -1;
+  store.mDirectPool[slot] = -1; store.mPoolIdx[slot] = -1;
   setReleased(store, slot, true);
 }
 
@@ -317,6 +337,7 @@ function rebuildSlot(store, sq, backend, slot) {
   store.mx[slot] = _slotW.x; store.mz[slot] = _slotW.z;
   store.my[slot] = backend.groundHeight(store.mx[slot], store.mz[slot]);
   store.mPool[slot] = backend.createMember(sq.id, localSlot, visualFor(sq, localSlot));
+  bindDirectSlot(store, backend, slot, store.mPool[slot]);
   setReleased(store, slot, false);
 }
 
@@ -412,6 +433,7 @@ function playDeathFx(store, sq, backend, slot, dirX, dirZ) {
     dirX: dirX / len, dirZ: dirZ / len,
   });
   store.mPool[slot] = -1;
+  store.mDirectPool[slot] = -1; store.mPoolIdx[slot] = -1;
   const visual = visualFor(sq, store.mSlot[slot]);
   const handle = sq.backend.spawnWreck(store.mx[slot], store.my[slot], store.mz[slot], store.mHeading[slot], visual);
   sq.onWreck?.(store.mx[slot], store.mz[slot], {
@@ -515,12 +537,14 @@ function spawnAtDropPoint(store, sq, backend, airborne) {
   for (let i = sq.base; i < sq.base + sq.size; i++) {
     if (!isAlive(store, i)) continue;
     if (!isReleased(store, i) && store.mPool[i] !== -1) backend.releaseMember(store.mPool[i]);
+    store.mDirectPool[i] = -1; store.mPoolIdx[i] = -1;
     const localSlot = store.mSlot[i];
     const local = scatterSlot({ x: sq.slotsX[localSlot], z: sq.slotsZ[localSlot] }, sq.cfg.transportSpillMul, i - sq.base);
     slotToWorld(local, sq.cx, sq.cz, sq.heading, _slotW);
     store.mx[i] = _slotW.x; store.mz[i] = _slotW.z;
     store.my[i] = airborne ? sq.cy : backend.groundHeight(store.mx[i], store.mz[i]);
     store.mPool[i] = backend.createMember(sq.id, localSlot, visualFor(sq, localSlot));
+    bindDirectSlot(store, backend, i, store.mPool[i]);
     setReleased(store, i, false);
   }
   sq.iconAlive = -1;

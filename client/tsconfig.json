@@ -26,6 +26,12 @@
      is the same category: a module imported ONLY by tests, which for that reason
      may use the node surface too (see nl-fixtures/load-fixtures.test-support.ts).
      Anything a test-support module shares with the app belongs in a normal
-     module instead — e.g. nl-fixtures/fixture-world.ts, which stays typechecked. */
-  "exclude": ["src/protocol", "src/**/*.test.ts", "src/**/*.test-support.ts"]
+     module instead — e.g. nl-fixtures/fixture-world.ts, which stays typechecked.
+     `*.bench.ts` is the same category one step further out: a vitest benchmark,
+     never bundled, and (like the squad suites) free to import the untyped
+     data/games JS squad tree the app reaches only through an interface. */
+  "exclude": [
+    "src/protocol", "src/**/*.test.ts", "src/**/*.test-support.ts",
+    "src/**/*.bench.ts"
+  ]
 }
