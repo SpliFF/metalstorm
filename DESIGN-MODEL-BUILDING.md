@@ -88,6 +88,10 @@ retired (objects3d/README.md). `ModelConfigLoader::LoadInto` reads:
 - Ground plane at Y = 0.
 - Class-scale table (art/STYLE.md): tanks by length — s1 4.5 m, s2 8.5 m,
   s3 12 m, s4 26 m. Footprint metres = footprintx × 2; overhang is fine.
+  That rule encodes the metre→elmo constant: `SPRING_FOOTPRINT_SCALE = 2` and
+  `SQUARE_SIZE = 8` make one `footprintx` unit **16 elmos**, so 16 elmos = 2 m
+  ⇒ **8 elmos = 1 metre**. See §12 — the constant is measured, but nothing in
+  the import or render path applies it yet.
 
 ### 5. Piece naming — the turret-rotation contract
 
@@ -331,15 +335,35 @@ the mesh generator and the painter:
     Advisory for the code session: applying the bump before half-Lambert
     compression (or widening the sun term) would let subtler bakes read.
 
-### 12. Scale flag for the code session (advisory, unresolved)
+### 12. Scale flag — MEASURED 2026-08-14, decision still open
 
 Models author at 1 unit = 1 m (§4), but no ×8 metre→elmo scale exists
 anywhere in the render path (`entity-renderer.ts` applies none) while the
 sim world is elmos (`ELMOS_TO_METERS = 1/8`). So all metalstorm-native
-models currently render ~8× smaller than their footprints imply. Either a
-render-scale is still pending in Track G / beta-units, or world-units-as-
-metres is intended. **Keep authoring at 1 u = 1 m to match the wz baseline
-either way** — but resolve this before squad rendering lands.
+models currently render ~8× smaller than their footprints imply.
+**Keep authoring at 1 u = 1 m** — that half was never in doubt.
+
+Measured 2026-08-14, and the flag's own "or world-units-as-metres is
+intended" branch is **closed — it is not intended**:
+
+- `ELMOS_TO_METERS` is declared at `Sim/Misc/GlobalConstants.h:45` and
+  referenced **nowhere else in the tree** (whole-repo grep: 1 hit, its own
+  declaration). A conversion constant nothing converts with.
+- The constant is **8 elmos = 1 m**, from §4's footprint rule via
+  `SPRING_FOOTPRINT_SCALE = 2` × `SQUARE_SIZE = 8`. `ms_habitat`'s 12×12
+  footprint is 24 m against a 25.5 m model; at any other constant the
+  buildings stop fitting and the vehicles stop overhanging.
+- The **map feature corpus is already on the engine's scale** (1 unit =
+  1 elmo): `tree_conifer` is 104.62 tall = 13.1 m, `tree_stump` 12.15 =
+  1.5 m. Only the unit/building models are off. A blanket scale applied to
+  every model would break the features.
+- The scale **cannot be render-only**: `ModelConfigLoader.cpp:113` feeds
+  model `radius`/`height` into the def and `Unit.cpp:237` builds the
+  collision and selection volumes from them. It belongs at import.
+
+What remains is the cost decision — 102 models re-imported, plus every
+impostor constant that was measured off pixels on the broken scale. That
+call and its options live in PLAN-world-scale.md §5 (blocked on the owner).
 
 ---
 
