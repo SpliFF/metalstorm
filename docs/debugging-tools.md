@@ -17,6 +17,7 @@ Part of the [Debugging & Logging Guide](debugging.md) family. This page covers t
   - [Soak ladders + growth report](#soak-ladders--growth-report-growth-reportmjs)
   - [Determinism CI hook](#determinism-ci-hook)
   - [Fixture-replay verify CI hook](#fixture-replay-verify-ci-hook)
+- [Scripted wire client (`client/wire`)](#scripted-wire-client-clientwire)
 - [Replay record / playback](#replay-record--playback)
   - [Recording](#recording)
   - [Exporting a shareable `.msr` (`--replay-export`)](#exporting-a-shareable-msr---replay-export)
@@ -637,6 +638,61 @@ Four things the ruling does deliberately, each of which was a bug first:
   forever means unexercised.
 
 `make test-headless-batch` covers the ruling (`lib/growth-fit.mjs` is pure).
+
+---
+
+## Scripted wire client (`client/wire`)
+
+A headless run has **no clients**, so everything on the client side of the wire —
+the `Handshake`/`AuthRequest` admission path, a human's `PlayerCommand`, the
+per-client churn a soak ladder wants — could until now be exercised only by hand
+in a browser. This is a client that speaks the real wire from a script: real
+QUIC/WebTransport, real control framing, and the **same generated FlatBuffers the
+browser client uses** (nothing about the protocol is restated in it, so a schema
+change breaks the harness in the same commit it would break a player).
+
+```bash
+cd client
+# authenticate against a running game server and report what came back
+npm run wire -- --url http://127.0.0.1:9001 --user wire_probe --pass devpass
+
+# issue a command (CMD_MOVE = 10) and hold the session open to see the answer
+npm run wire -- --url http://127.0.0.1:9001 --user wire_probe --pass devpass \
+    --command 10 --squads 7 --params 4000,0,4000 --hold-ms 3000
+
+# machine-readable, for a CI arm
+npm run wire -- --url http://127.0.0.1:9001 --user wire_probe --quiet --json
+
+# the harness's own self-test: pin a hash the server cannot present, and the
+# QUIC handshake MUST fail (exit 0 means it was refused)
+npm run wire -- --url http://127.0.0.1:9001 --user wire_probe --pin-mismatch
+```
+
+Exit status: **0** every assertion held · **1** an assertion failed
+(`--expect-auth`, `--expect-player-num`) · **2** the harness could not run (no
+server, missing addon, bad arguments).
+
+Three things about it are worth knowing before changing it:
+
+- **Node has no WebTransport**, in any release or behind any flag, so the client
+  is `@fails-components/webtransport` (libquiche native addon, a client
+  devDependency). The off-QUIC half of the harness is in the ordinary client
+  vitest gate; the QUIC half needs a server and is run by hand or by CI.
+- **That package does not implement `serverCertificateHashes`.** It verifies a
+  chain through `globalThis.FAILSVerifyProof` and would reject our self-signed
+  rolling cert, so pinning is implemented in `run-wire-client.mjs` by repointing
+  that hook at the hashes `/api/wt/info` publishes — SHA-256 of the leaf DER,
+  the same material and the same check the browser applies. `--pin-mismatch`
+  exists because a hook that returned `true` unconditionally would pass every
+  other arm identically.
+- **The hook must be installed *after* importing the package**, which installs
+  its own at import time. Get that order wrong and the connection fails in the
+  QUIC handshake with a bare `Opening handshake failed.` and no hint of why.
+
+A dev-mode server auto-registers the account named by `--user`, so no sign-up
+step is needed. A session that the server does not seat comes back
+`team=-1 role=player`: authenticated, but holding no team, which is the right
+answer for a server started with no `--player` roster and NOT a defect.
 
 ---
 

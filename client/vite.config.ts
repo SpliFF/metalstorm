@@ -129,7 +129,16 @@ export default defineConfig({
         // sat red and unnoticed for a week after a merge dropped the code they
         // covered. A suite in no gate is not a gate.
         projects: [
-            { extends: true, test: { name: 'client', include: ['src/**/*.test.ts'] } },
+            {
+                extends: true,
+                test: {
+                    name: 'client',
+                    // `wire/` is the scripted wire client (PLAN-replay §7.11
+                    // T2-a-1). Its off-QUIC half belongs in this gate for the
+                    // reason written above: a suite in no gate is not a gate.
+                    include: ['src/**/*.test.ts', 'wire/**/*.test.ts'],
+                },
+            },
             {
                 test: {
                     name: 'metalstorm-game',

@@ -125,8 +125,8 @@ import { parseLosBitmap, type LosBitmap } from './los-bitmap.js';
 import { parseDecals, type DecalSnapshot } from './decal-events.js';
 import { parseHeightmapPatch, type HeightmapPatch } from './heightmap-events.js';
 import { recordInbound, recordOutbound } from './net-inspector.js';
+import { PROTOCOL_VERSION, ENVELOPE_FLATBUFFERS } from './protocol-version.js';
 
-const ENVELOPE_FLATBUFFERS = 0x01;
 const ENVELOPE_ENTITY_STATE_FULL = 0x02;
 const ENVELOPE_ENTITY_STATE_DELTA = 0x03;
 const ENVELOPE_PROJECTILE_STATE = 0x04;
@@ -136,11 +136,8 @@ const ENVELOPE_LOS_BITMAP = 0x07;
 const ENVELOPE_DECALS = 0x08;
 const ENVELOPE_HEIGHTMAP = 0x09;
 
-/** Wire-protocol version sent in the Handshake (C1). The game server rejects a
- *  mismatch with AuthStatus.VersionMismatch — bump this in lockstep with
- *  Protocol::CURRENT_PROTOCOL_VERSION (rts/Server/Protocol.h) on any breaking
- *  schema / envelope change. */
-const PROTOCOL_VERSION = 1;
+// PROTOCOL_VERSION + ENVELOPE_FLATBUFFERS live in protocol-version.ts so the
+// scripted wire client shares them rather than copying them (see that file).
 
 export type ConnectionState = 'disconnected' | 'connecting' | 'handshake' | 'authenticating' | 'connected';
 
