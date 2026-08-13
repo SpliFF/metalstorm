@@ -25,6 +25,8 @@ Part of the [Debugging & Logging Guide](debugging.md) family. This page covers t
   - [Seeking](#seeking)
   - [What a replay does and does not carry](#what-a-replay-does-and-does-not-carry)
 - [Snapshot round-trip (`--snapshot-roundtrip`)](#snapshot-round-trip---snapshot-roundtrip)
+  - [Resuming across a balance patch](#resuming-across-a-balance-patch-gamedatamigrationslua)
+  - [The two-def-load harness](#the-two-def-load-harness-toolsscriptsdef-reconcile-resumesh)
 - [springcli — Command-Line Tool](#springcli--command-line-tool)
   - [Building](#building)
   - [Commands](#commands)
@@ -996,6 +998,47 @@ a whitelist whose empty state means "any squad"**, so an order that loses every 
 (reload, stockpile) follows the weapon def by name, not by slot number**, so inserting a
 weapon into an existing def is safe: the new slot starts fresh and fully loaded, the old
 slots keep their state.
+
+### The two-def-load harness (`tools/scripts/def-reconcile-resume.sh`)
+
+Everything above is exercised **inside one process** by the doctests and by
+`--snapshot-roundtrip`, which cannot reach the case the reconcile pass exists for: a
+world captured under one set of defs and restored under **another**, in a second
+process, with the game's gadgets up. `tools/scripts/def-reconcile-resume.sh` is that
+vehicle (PLAN-def-reconciliation task 5):
+
+```
+tools/scripts/def-reconcile-resume.sh            # all four arms, ~2m20s
+tools/scripts/def-reconcile-resume.sh --arm tuning --keep
+```
+
+It clones `data/games/metalstorm` to a scratch game id, boots a **persistent war**
+headless, ticks it, and stops it with **SIGTERM** — the deploy drain's own exit, and the
+only exit that writes a resumable checkpoint (`--headless-run` reaching its stop
+condition deliberately writes none: "its world is a fixture, not a war"). It then
+patches the scratch tree's unit defs and boots a second server with `--resume` against
+the same DB. Four arms, each asserting the engine's report lines, the `DefsReconciled`
+call-in reaching a gadget, and the durable `game_events` row the game wrote:
+
+| arm | patch | what must happen |
+|---|---|---|
+| `control` | none | indistinguishable from no patch: no reconcile lines, no `patch` events |
+| `tuning` | `baseHp` 1400 → 2100 | scalars reconciled, health **fractions preserved**, war log says *N units retuned* |
+| `rename-alias` | `ms_tanks_*` → `ms_panzers_*` **+ migrations.lua** | references rewritten, units survive, war log says *no visible change* |
+| `rename-drop` | the same rename, no migration | units removed with their def, war log names the lost defs |
+
+Two traps are baked into the script's shape and are worth knowing before editing it.
+**The game id is not just a path:** `GameOverState.h`'s last-team-standing fallback is
+gated off for the literal string `"metalstorm"` and nothing else, so a scratch copy under
+any other id plays a *different* game — the fallback declared a winner at frame 60, and a
+finished match takes no exit checkpoint. The `roundtrip_static` scenario keeps both
+fallback teams alive, which is why it is the fixture. **The content root does not follow
+symlinks:** a symlink farm over the 239 MB tree loads defs and models fine but does not
+find `LuaRules/main.lua`, so synced Lua never comes up and the serializer silently
+refuses to attach. The tree is cloned instead (`cp -Rc`, ~0.2 s on APFS).
+
+Read the arm table the script prints, not the exit code of any single server: every
+headless run exits 134 in the static-destruction abort (PLAN-replay T2-b).
 
 ---
 
