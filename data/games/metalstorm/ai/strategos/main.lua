@@ -24,7 +24,10 @@
 --           AI.getMapData / AI.getDefExport (AI4)
 --   writes: AI.createGroup · AI.issueDirective · AI.setPosture (AI2 — the
 --           directive-shaped write surface; routed through the SAME engine
---           managers + charge callins as a human player's commands).
+--           managers + charge callins as a human player's commands) ·
+--           AI.sendMessage (I1/SG1 — an opaque string delivered to
+--           gadget:RecvLuaMsg with this AI's playerID, the one write into
+--           synced game Lua; the actuator uses it for the `ai.intent` tag).
 --   infra:  AI.log(msg) (server-log channel — a headless AI has no chat/HUD,
 --           §5.1) · AI.nowMs() (monotonic clock for self-timing the §6 tick).
 -- Still assumed-but-absent (each module feature-detects + degrades): squad

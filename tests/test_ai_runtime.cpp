@@ -226,8 +226,10 @@ TEST_CASE("AI VM: require rejects path traversal") {
 TEST_CASE("AI VM: strategos multi-file plugin boots via the loader") {
     // The real strategos AI (data/games/metalstorm/ai/strategos) is a
     // multi-file layout whose main.lua require()s config/picture/slate/
-    // planner/actuators/roles + profiles.default. Init() succeeding proves the
-    // loader resolves that whole graph — the AI0-loader acceptance test.
+    // planner/actuators/roles + profiles.default, and (I1/SG1 task 3)
+    // actuators requires the `wire` codec copy. Init() succeeding proves the
+    // loader resolves that whole graph — the AI0-loader acceptance test, and
+    // the only place the sandboxed require is exercised against the real tree.
     const fs::path plugin = fs::path(SPRING_SOURCE_DIR) /
         "data/games/metalstorm/ai/strategos";
     if (!fs::exists(plugin / "main.lua")) {
