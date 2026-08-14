@@ -28,13 +28,14 @@
 -- it; team-scoped rather than player-scoped because the caretaker takes over
 -- the whole abandoned side and its playerID does not exist yet.
 --
--- KNOWN LIMITATION, stated rather than hidden: a caretaker seated mid-war does
--- not survive hibernate/resume. The war's AI slots are `--ai` arguments the
--- lobby passes at launch, and nothing writes a runtime-spawned AI back into
--- that room record, so a resumed war comes back with the caretaker's virtual
--- player in the restored roster (it is captured synced state) and no runtime
--- behind it. Making it durable is a lobby/RoomManager change — filed in
--- PLAN-metalstorm-ai.md §10 task 4(b), not worked around here.
+-- DURABLE ACROSS HIBERNATE/RESUME, and not by anything this gadget does. The
+-- limitation this header used to state — a resumed war came back with the
+-- caretaker's virtual player in the restored synced state and no runtime behind
+-- it — is closed by `rts/Server/RuntimeAIRoster.h`: the server records the seat
+-- (room, plugin, team, and the sim playerNum it minted) and re-seats it at that
+-- same number on a resume, because every synced key the caretaker owns here
+-- (`authority_player_<n>` and friends) is scoped by it. Nothing on this side
+-- needs to know; declaring the spawn is still the whole job.
 --
 -- LOAD ORDER CONTRACT: layer -94 — after game_teams (-95), which is the only
 -- caller, and after authority (-100) whose pool the seated AI will draw on.
