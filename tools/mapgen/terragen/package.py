@@ -44,20 +44,37 @@ class MapPackageConfig:
     water_base_color: tuple = (0.28, 0.36, 0.43)
     # terrainTypes move-speed multipliers, one per road surface class.
     #
-    # ⚠ These ship at 1.0 — today's real behaviour — and that is deliberate.
-    # Until roads R1 the emitter wrote FLAT `tankspeed = 1.35` keys while
-    # `CMapInfo::ReadTerrainTypes` (rts/Map/MapInfo.cpp) reads a NESTED
-    # `moveSpeeds` subtable with no flat fallback, so the 1.35 every terragen
-    # map has shipped was parsed by nobody and roads have never been faster
-    # than open ground in this port. R1 fixed the STRUCTURE (and pinned it in
-    # tests/test_road_surface.py); it did not turn the multiplier on, because
-    # waking a five-year-dead multiplier is a gameplay change and this lane's
-    # contract proves speed claims with measured transit times — that is R3.
-    # Do NOT read the old 1.35 as a tuned value: it was never observed doing
-    # anything, so it carries no evidence. Tune from a fresh baseline.
-    bitumen_type_speed: float = 1.0
-    dirt_type_speed: float = 1.0
-    mud_type_speed: float = 1.0
+    # R3 (2026-08-15) turned these on, MEASURED. R1 fixed the STRUCTURE (the
+    # emitter used to write FLAT `tankspeed` keys while
+    # `CMapInfo::ReadTerrainTypes` reads a NESTED `moveSpeeds` subtable with no
+    # flat fallback) and left the values at 1.0 pending a transit measurement.
+    # Every number below is one, taken headless on meridian_basin's own deck
+    # with one VEH squad over a 512-elmo gated straight, off-deck control in
+    # the same run (PLAN-maps §2e):
+    #
+    #   class / multiplier   frames   elmos/frame   vs open ground
+    #   open ground   1.00     236       2.170        —
+    #   mud           0.85     204       2.510        (unit LEAVES the deck)
+    #   dirt          1.25     172       2.977        +37 %
+    #   bitumen       1.35     160       3.200        +47 %
+    #   bitumen       1.60     139       3.684        +70 %
+    #
+    # Bitumen ships at 1.60 rather than the legacy 1.35 because routing is what
+    # the directive asks for and only 1.60 delivers it: over six A/B pairs whose
+    # deck route is a measured detour, mean deck adherence went 29.3 % (1.00) →
+    # 45.2 % (1.25) → 43.1 % (1.35) → 58.7 % (1.60) and mean transit −0 % →
+    # −5.4 % → −2.7 % → −14.6 %. Do NOT read the pre-R1 1.35 as a tuned value:
+    # it was parsed by nobody, so it carries no evidence.
+    #
+    # Mud ships at 1.0 (no bonus, no penalty) although 0.85 was measured and
+    # works: at 0.85 the unit steers OFF the muddy deck (25 % on-deck over the
+    # straight), and mud sits in the deck's wet dips — next to water — so a
+    # repelling class pushes convoys off a graded surface toward the lake edge
+    # it was built to cross. "A wet road is no better than open ground" is the
+    # claim the measurement supports without that side effect.
+    bitumen_type_speed: float = 1.60
+    dirt_type_speed: float = 1.25
+    mud_type_speed: float = 1.00
     voidwater: bool = False
     seed: int = 1
 
@@ -124,6 +141,20 @@ def write_package(
     ci = np.clip((np.arange(half_w) * 2 + 1), 0, gw - 1)
     src = road_mask if road_class is None else road_class
     typemap = (src[np.ix_(ri, ci)]).astype(np.uint8)
+
+    # R3: a SUBMERGED deck cell is not road, it is a ford. Two reasons, one of
+    # them a live defect:
+    #   * realism — you do not get a road's speed bonus while driving through
+    #     the water crossing it;
+    #   * Metalstorm's `gamedata/moveinfo.tdf` declares SHIP/SUB with
+    #     `speedmodclass = 1`, which is the engine's KBot slot
+    #     (MoveDefHandler.h SpeedModClass), so a boat reads `kbotSpeed` off
+    #     whatever terrain type is under it. Skerry Reach ships 930 submerged
+    #     deck cells and Sundered Arc 2 162, so without this a boat sailing
+    #     over a ford would take the ROAD multiplier. Fixing the mis-declared
+    #     move classes is a separate gameplay call (PLAN-maps §2e.1); zeroing
+    #     the class here is correct on its own terms either way.
+    typemap[height[np.ix_(ri, ci)] <= cfg.water_level] = 0
 
     metalmap = np.full((half_h, half_w), cfg.metal_value, dtype=np.uint8)
 

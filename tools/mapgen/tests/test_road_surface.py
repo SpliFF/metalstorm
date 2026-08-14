@@ -103,15 +103,40 @@ class MapInfoContract(unittest.TestCase):
         self.assertIn("receiveTracks = true", blocks[rd.SURF_DIRT])
         self.assertIn("receiveTracks = true", blocks[rd.SURF_MUD])
 
-    def test_speeds_ship_at_one_until_R3_measures_them(self):
-        # R1 fixed the STRUCTURE, deliberately not the VALUES: waking the
-        # five-year-dead multiplier is a gameplay change owed a measured
-        # transit time (roads R3). If this fails, R3 has happened — update the
-        # test with the measurement, do not delete it.
+    def test_the_shipped_speeds_are_the_measured_ladder(self):
+        # roads R3 (2026-08-15) woke the multiplier off a measured headless
+        # transit on meridian_basin's own deck: over a 512-elmo gated straight
+        # one VEH squad took 236 frames on open ground, 172 at dirt's 1.25 and
+        # 139 at bitumen's 1.60, with the off-deck control identical in every
+        # arm. These are those values; changing one is a gameplay change owed
+        # its own measurement (PLAN-maps §2e).
         cfg = pkg.MapPackageConfig(map_id="t", display_name="T")
         self.assertEqual(
             (cfg.bitumen_type_speed, cfg.dirt_type_speed, cfg.mud_type_speed),
-            (1.0, 1.0, 1.0))
+            (1.60, 1.25, 1.00))
+
+    def test_the_ladder_is_ordered_and_mud_never_repels(self):
+        # The ORDER is the gameplay claim (sealed beats unsealed beats wet) and
+        # it must hold whatever the numbers are retuned to. Mud is pinned at or
+        # above 1.0 for a measured reason: at 0.85 the unit steers OFF the deck
+        # (25 % on-deck over the same straight), and mud sits in the deck's wet
+        # dips, so a repelling class pushes convoys toward the water the ford
+        # was built to cross.
+        cfg = pkg.MapPackageConfig(map_id="t", display_name="T")
+        self.assertGreater(cfg.bitumen_type_speed, cfg.dirt_type_speed)
+        self.assertGreater(cfg.dirt_type_speed, cfg.mud_type_speed)
+        self.assertGreaterEqual(cfg.mud_type_speed, 1.0)
+
+    def test_the_measured_values_reach_the_nested_table(self):
+        lua = pkg.emit_mapinfo(pkg.MapPackageConfig(map_id="t", display_name="T"))
+        for idx, want in ((1, 1.6), (2, 1.25), (3, 1.0)):
+            block = re.search(r"\[%d\]\s*=\s*\{(.*?)\n        \}" % idx, lua, re.S).group(1)
+            for key in ("tank", "kbot", "hover"):
+                self.assertRegex(block, r"%s\s*=\s*%s\b" % (key, want),
+                                 f"terrain type {idx}")
+            # ship stays 1.0: a boat is never on a road deck (see the submerged
+            # -deck rule in package.write_package).
+            self.assertRegex(block, r"ship\s*=\s*1\.0")
 
     def test_the_typemap_is_what_gates_dynamic_tyre_tracks(self):
         # per-class receiveTracks is only worth writing because the server
@@ -375,6 +400,24 @@ class TypemapAndBake(unittest.TestCase):
                             rd.SURF_NONE).astype(np.uint8)
         muddy = bk.make_splat_distr(*args, size=128, road_class=mud_only)
         self.assertEqual(int(muddy[..., 1].sum()), int(plain[..., 1].sum()))
+
+    def test_a_submerged_deck_cell_is_not_road_but_a_ford(self):
+        # R3: the multiplier is read by whatever move class the typemap value
+        # names, and Metalstorm declares SHIP/SUB in the engine's KBot slot
+        # (gamedata/moveinfo.tdf `speedmodclass = 1`), so a submerged deck cell
+        # would hand a BOAT the road multiplier — skerry_reach ships 930 of
+        # them and sundered_arc 2 162. It is also simply wrong that a ford is
+        # as fast as the road it interrupts.
+        # the trunk runs along z = 500 (half-res rows 30-31); flood one x window
+        # of it so the SAME link is submerged in one place and dry in another
+        self.height[58:70, 80:134] = -5.0
+        typemap = self._typemap_from_write_package(self.raster)
+        wet = typemap[29:33, 42:64]
+        self.assertEqual(set(np.unique(wet).tolist()), {0}, wet)
+        # ...and the rule is narrow: the same deck keeps its class where it is
+        # dry, so this is not "the trunk lost its class".
+        dry = typemap[29:33, 5:35]
+        self.assertIn(rd.SURF_BITUMEN, set(np.unique(dry).tolist()))
 
     def test_a_caller_with_no_class_raster_still_gets_the_old_0_1_typemap(self):
         typemap = self._typemap_from_write_package(None)
