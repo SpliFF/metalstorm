@@ -13807,6 +13807,8 @@ struct LobbyGameInfoT : public ::flatbuffers::NativeTable {
   std::string description{};
   std::string version{};
   std::string lighting{};
+  bool archived = false;
+  std::string archived_reason{};
 };
 
 /// One game plugin discovered under data/games. Shown in the
@@ -13821,7 +13823,9 @@ struct LobbyGameInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_DISPLAY_NAME = 6,
     VT_DESCRIPTION = 8,
     VT_VERSION = 10,
-    VT_LIGHTING = 12
+    VT_LIGHTING = 12,
+    VT_ARCHIVED = 14,
+    VT_ARCHIVED_REASON = 16
   };
   const ::flatbuffers::String *id() const {
     return GetPointer<const ::flatbuffers::String *>(VT_ID);
@@ -13845,6 +13849,21 @@ struct LobbyGameInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   const ::flatbuffers::String *lighting() const {
     return GetPointer<const ::flatbuffers::String *>(VT_LIGHTING);
   }
+  /// True when the game is kept on disk but is not playable — its port
+  /// is unmaintained and starting it does not produce a match
+  /// (PLAN-endtoend.md D26). Discovery still lists it: the folder is
+  /// real, `/api/rooms/direct` still stages it for fixtures, and a game
+  /// that silently vanished from the dropdown would read as a bug. The
+  /// picker renders it disabled instead, and `POST /api/rooms` refuses
+  /// it. Read from the game config's `archived` field.
+  bool archived() const {
+    return GetField<uint8_t>(VT_ARCHIVED, 0) != 0;
+  }
+  /// Why it is archived, in one sentence, shown to the player on the
+  /// disabled option. Empty when `archived` is false.
+  const ::flatbuffers::String *archived_reason() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_ARCHIVED_REASON);
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyOffset(verifier, VT_ID) &&
@@ -13857,6 +13876,9 @@ struct LobbyGameInfo FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            verifier.VerifyString(version()) &&
            VerifyOffset(verifier, VT_LIGHTING) &&
            verifier.VerifyString(lighting()) &&
+           VerifyField<uint8_t>(verifier, VT_ARCHIVED, 1) &&
+           VerifyOffset(verifier, VT_ARCHIVED_REASON) &&
+           verifier.VerifyString(archived_reason()) &&
            verifier.EndTable();
   }
   LobbyGameInfoT *UnPack(const ::flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -13883,6 +13905,12 @@ struct LobbyGameInfoBuilder {
   void add_lighting(::flatbuffers::Offset<::flatbuffers::String> lighting) {
     fbb_.AddOffset(LobbyGameInfo::VT_LIGHTING, lighting);
   }
+  void add_archived(bool archived) {
+    fbb_.AddElement<uint8_t>(LobbyGameInfo::VT_ARCHIVED, static_cast<uint8_t>(archived), 0);
+  }
+  void add_archived_reason(::flatbuffers::Offset<::flatbuffers::String> archived_reason) {
+    fbb_.AddOffset(LobbyGameInfo::VT_ARCHIVED_REASON, archived_reason);
+  }
   explicit LobbyGameInfoBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -13900,13 +13928,17 @@ inline ::flatbuffers::Offset<LobbyGameInfo> CreateLobbyGameInfo(
     ::flatbuffers::Offset<::flatbuffers::String> display_name = 0,
     ::flatbuffers::Offset<::flatbuffers::String> description = 0,
     ::flatbuffers::Offset<::flatbuffers::String> version = 0,
-    ::flatbuffers::Offset<::flatbuffers::String> lighting = 0) {
+    ::flatbuffers::Offset<::flatbuffers::String> lighting = 0,
+    bool archived = false,
+    ::flatbuffers::Offset<::flatbuffers::String> archived_reason = 0) {
   LobbyGameInfoBuilder builder_(_fbb);
+  builder_.add_archived_reason(archived_reason);
   builder_.add_lighting(lighting);
   builder_.add_version(version);
   builder_.add_description(description);
   builder_.add_display_name(display_name);
   builder_.add_id(id);
+  builder_.add_archived(archived);
   return builder_.Finish();
 }
 
@@ -13916,19 +13948,24 @@ inline ::flatbuffers::Offset<LobbyGameInfo> CreateLobbyGameInfoDirect(
     const char *display_name = nullptr,
     const char *description = nullptr,
     const char *version = nullptr,
-    const char *lighting = nullptr) {
+    const char *lighting = nullptr,
+    bool archived = false,
+    const char *archived_reason = nullptr) {
   auto id__ = id ? _fbb.CreateString(id) : 0;
   auto display_name__ = display_name ? _fbb.CreateString(display_name) : 0;
   auto description__ = description ? _fbb.CreateString(description) : 0;
   auto version__ = version ? _fbb.CreateString(version) : 0;
   auto lighting__ = lighting ? _fbb.CreateString(lighting) : 0;
+  auto archived_reason__ = archived_reason ? _fbb.CreateString(archived_reason) : 0;
   return SpringWeb::CreateLobbyGameInfo(
       _fbb,
       id__,
       display_name__,
       description__,
       version__,
-      lighting__);
+      lighting__,
+      archived,
+      archived_reason__);
 }
 
 ::flatbuffers::Offset<LobbyGameInfo> CreateLobbyGameInfo(::flatbuffers::FlatBufferBuilder &_fbb, const LobbyGameInfoT *_o, const ::flatbuffers::rehasher_function_t *_rehasher = nullptr);
@@ -23452,6 +23489,8 @@ inline void LobbyGameInfo::UnPackTo(LobbyGameInfoT *_o, const ::flatbuffers::res
   { auto _e = description(); if (_e) _o->description = _e->str(); }
   { auto _e = version(); if (_e) _o->version = _e->str(); }
   { auto _e = lighting(); if (_e) _o->lighting = _e->str(); }
+  { auto _e = archived(); _o->archived = _e; }
+  { auto _e = archived_reason(); if (_e) _o->archived_reason = _e->str(); }
 }
 
 inline ::flatbuffers::Offset<LobbyGameInfo> LobbyGameInfo::Pack(::flatbuffers::FlatBufferBuilder &_fbb, const LobbyGameInfoT* _o, const ::flatbuffers::rehasher_function_t *_rehasher) {
@@ -23467,13 +23506,17 @@ inline ::flatbuffers::Offset<LobbyGameInfo> CreateLobbyGameInfo(::flatbuffers::F
   auto _description = _o->description.empty() ? 0 : _fbb.CreateString(_o->description);
   auto _version = _o->version.empty() ? 0 : _fbb.CreateString(_o->version);
   auto _lighting = _o->lighting.empty() ? 0 : _fbb.CreateString(_o->lighting);
+  auto _archived = _o->archived;
+  auto _archived_reason = _o->archived_reason.empty() ? 0 : _fbb.CreateString(_o->archived_reason);
   return SpringWeb::CreateLobbyGameInfo(
       _fbb,
       _id,
       _display_name,
       _description,
       _version,
-      _lighting);
+      _lighting,
+      _archived,
+      _archived_reason);
 }
 
 inline GameListUpdateT::GameListUpdateT(const GameListUpdateT &o) {

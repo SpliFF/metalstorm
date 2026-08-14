@@ -24,11 +24,32 @@ gate: 13 squad-governor tests sat red for a week after a landing merge dropped
 the code they covered. `data/games/metalstorm/ui/` is still a third root with its
 own config and is NOT yet in this gate.
 
-Regenerate FlatBuffers bindings after editing `schemas/protocol.fbs`:
+Regenerate everything derived from `schemas/protocol.fbs` with the one script
+that owns it (PLAN-protocol-guard task 1):
 ```
-build/debug/_deps/flatbuffers-build/flatc --ts --gen-object-api -o client/src/protocol/ schemas/protocol.fbs
-build/debug/_deps/flatbuffers-build/flatc --cpp -o rts/ schemas/protocol.fbs
+scripts/regen-protocol.sh
 ```
+It emits the C++ bindings (`rts/protocol_generated.h`), the TypeScript bindings
+(`client/src/protocol/spring-web/`) and a sha256 of the *binary* schema into
+`rts/Server/ProtocolSchemaHash.h` + `client/src/protocol/schema-hash.ts`. All
+outputs are committed; commit them together with the `.fbs` edit.
+
+The two-command recipe this replaces was wrong in two ways, both of which
+shipped. It omitted `--gen-object-api` on the C++ side, so following it produced
+a header without the `*T` native-object types the tree uses; and being a
+command a human remembers to type, it went unrun — the committed
+`rts/protocol_generated.h` sat five days behind an fbs edit that added
+`LobbyGameInfo.archived`. Note the shadowing that hid this: `CMakeLists.txt`
+also generates the header into `build/<cfg>/generated/`, but every target lists
+`rts/` ahead of that directory, so the build reads the **committed** copy and
+the generated one is written and ignored. The stale copy still compiled because
+its only consumer, `Protocol.h`'s `BuildGameListUpdate`, is a template nobody
+instantiates.
+
+The schema hash is taken over `flatc -b --schema` output, so it is insensitive
+to comments and formatting and changes on any wire-visible edit (both measured).
+It does depend on the schema's file *basename*, which is why the script always
+runs flatc on `schemas/protocol.fbs` itself rather than on a renamed copy.
 
 ## Executables
 
