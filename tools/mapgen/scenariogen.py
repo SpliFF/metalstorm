@@ -130,7 +130,9 @@ from scenario_templates import (                          # noqa: E402
     HOSTILE_FACTION,
     HOSTILE_SLATE_KINDS,
     MAX_BRIDGE_SPANS,
+    MAX_PAD_DRESSING,
     MAX_ROAD_FRONTAGE,
+    PAD_DRESSING,
     PLAYABLE_FACTIONS,
     ROAD_FRONTAGE,
     SCENARIO_SUFFIXES,
@@ -159,7 +161,13 @@ from scenario_templates import (                          # noqa: E402
 # them and therefore every seeded draw after them. A map that publishes no pads
 # — which is every shipped map until the packages are regenerated — is
 # unchanged from v4 apart from this number.
-GENERATOR_VERSION = 5
+# 6 (roads R4c): laybys. A pad no yard was built on is now DRESSED — a fence, a
+# stack and a standing lorry behind a clear pull-in — and every prop draws from
+# the seeded stream, so v5 and v6 disagree about every placement after the yards
+# on a map that publishes pads. A map that publishes none (every shipped map,
+# still) is unchanged from v5 apart from this number: the placer is never
+# reached, because there is no pad to leave spare.
+GENERATOR_VERSION = 6
 
 SCHEMA_VERSION = 1          # game_scenario.lua's SUPPORTED_VERSION
 GAME_SPEED = 30             # sim frames per second
@@ -2134,6 +2142,30 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
         all_cluster_units.extend((p["x"], p["z"], facts[p["def"]])
                                  for p in e["parked"])
 
+    # --- laybys (roads R4c) -------------------------------------------------
+    # The pads no yard took. A map plans six and a scenario builds on at most
+    # three, and the surplus is the point — `read_road_yards` calls it a layby —
+    # but an undressed one is bare tarmac, which reads as abandoned preparation
+    # rather than as a stopping place. Staged after the yards for the obvious
+    # reason (a pad a depot took is not a layby) and passed that placer's own
+    # answer rather than re-deriving it.
+    layby_entries, layby_notes = rf.stage_pad_dressing(
+        rnd, terrain, facts, road_links, road_yards, PAD_DRESSING,
+        mclass=DEFAULT_CLASS,
+        occupied_rects=[b.rect() for b in all_buildings],
+        occupied_units=all_cluster_units,
+        footprint_gap=FOOTPRINT_GAP, unit_gap=UNIT_SPAWN_GAP,
+        budget=MAX_PAD_DRESSING,
+        taken={e["pad"] for e in frontage_entries if "pad" in e})
+    for e in layby_entries:
+        for p in e["props"]:
+            f = facts[p["def"]]
+            if f.building:
+                b = Building(p["def"], p["x"], p["z"], p["facing"], f)
+                all_buildings.append(b)
+                frontage_rects.append(b.rect())
+            all_cluster_units.append((p["x"], p["z"], f))
+
     # --- who owns them ------------------------------------------------------
     # `neutral` resolves to Gaia at stage time (game_scenario.lua stageUnits),
     # which Simulation.cpp configures as "neutral/environment, its own ally
@@ -2440,6 +2472,13 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
         "frontage_pads": {e["def"]: e["pad"] for e in frontage_entries
                           if "pad" in e},
         "frontage_refusals": frontage_refusals,
+        # R4c. Which spare pads were dressed and with how many props — the
+        # difference between a layby and a rectangle of bare tarmac, and, like
+        # `frontage_pads`, invisible in the emitted file (the props stage as
+        # ordinary Gaia units among all the others).
+        "laybys": [(e["pad"], e["road_name"], len(e["props"]))
+                   for e in layby_entries],
+        "layby_notes": layby_notes,
         "crossings": [(c["region"]["key"], c["name"], c["chain"],
                        round(c["width"])) for c in crossings],
         "landmarks": sorted(landmark_names),
@@ -2447,7 +2486,7 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
     return emit_lua(meta, side_regions, side_anchors, victory, units, clusters,
                     site_entries, relic_entries, feature_entries, crossings,
                     hostile_team, sides, not_before, hold, townships,
-                    frontage_entries), meta
+                    frontage_entries, layby_entries), meta
 
 
 # ==========================================================================
@@ -2465,7 +2504,7 @@ def _team_field(owner) -> str:
 def emit_lua(meta, side_regions, side_anchors, victory, units, clusters,
              site_entries, relic_entries, feature_entries, crossings,
              hostile_team, sides, not_before, hold, townships=(),
-             frontage_entries=()) -> str:
+             frontage_entries=(), layby_entries=()) -> str:
     L: list[str] = []
     add = L.append
 
@@ -2775,6 +2814,27 @@ def emit_lua(meta, side_regions, side_anchors, victory, units, clusters,
             for pk in e["parked"]:
                 add("        " + _emit_unit(pk))
 
+    if layby_entries:
+        add("")
+        add("        -- LAYBYS (roads R4c). A pad the MAP prepared that no yard")
+        add("        -- was built on: graded, surfaced tarmac beside the road with")
+        add("        -- the half nearest the carriageway left clear to pull into,")
+        add("        -- and dressing standing behind it. Without this a spare pad")
+        add("        -- is bare ground that reads as abandoned preparation rather")
+        add("        -- than as a place a convoy stops.")
+        add("        --")
+        add("        -- Ordinary Gaia units, like a yard's parked lorries and for")
+        add("        -- the same reason: this game ships no street-clutter")
+        add("        -- featuredefs, so a fence is ms_barricade_set and a pile of")
+        add("        -- crates is ms_supply_dump. Kinds with no content at all (a")
+        add("        -- roadside SIGN) are reported by name in the summary and")
+        add("        -- staged as nothing — see scenario_templates.PAD_DRESSING.")
+        for e in layby_entries:
+            add(f"        -- layby {e['pad']} on the {e['road_name']} "
+                f"({len(e['props'])} props)")
+            for p in e["props"]:
+                add("        " + _emit_unit(p))
+
     if relic_entries:
         add("")
         add("        -- ANCIENT-TECH GUARDIANS (§M4, worldbuilding directive 4). The")
@@ -3040,6 +3100,13 @@ def main(argv=None):
         say(f"    yard     {road:22s} {defname} ({parked} parked) on {where}")
     for why in meta["frontage_refusals"]:
         say(f"    yard refused: {why}")
+    # R4c. A dressed pad and an EMPTY one are both legitimate and look the same
+    # from the file, so both are said: the second is the one that means a pad of
+    # tarmac shipped with nothing standing on it.
+    for pad, road, props in meta.get("laybys", []):
+        say(f"    layby    {road:22s} {pad} dressed with {props} prop(s)")
+    for note in meta.get("layby_notes", []):
+        say(f"    layby: {note}")
     say(f"  {len(meta['landmarks'])} landmark(s) the command language can "
         f"address: {', '.join(meta['landmarks'])}")
     if meta["towns"]:

@@ -346,6 +346,56 @@ MAX_ROAD_FRONTAGE = 3
 
 
 # --------------------------------------------------------------------------
+# Layby dressing — what stands on a pad NOTHING was built on (roads R4c)
+# --------------------------------------------------------------------------
+# A map publishes more prepared pads than a scenario has buildings for
+# (terragen.yards.YardParams.max_pads is 6, MAX_ROAD_FRONTAGE above is 3), and
+# that is by design: a pad the placer does not take is a LAYBY. But an empty one
+# is a rectangle of tarmac with nothing on it, which reads as unfinished ground
+# rather than as somewhere a convoy stops — the pad's whole visual claim is that
+# somebody made this place for a reason, and an empty one withdraws it.
+#
+# ORDERED BANDS, ROAD EDGE LAST. The layout rule is the one thing here that is
+# not a taste call: the half of a pad nearest the carriageway is the PULL-IN and
+# stays empty (`road_frontage.PULLIN_FRACTION`), because a layby you cannot pull
+# into is a decorated obstacle. Everything below stands in the back band, and
+# `band` is where in that band it goes: `back` hugs the rear edge, `mid` stands
+# in front of it.
+#
+# `along` is the item's offset ACROSS the pad in units of its own width — the
+# stager multiplies it out — so a kind can be repeated at ±1 without the table
+# knowing how wide the def is.
+#
+# THE HONEST STATE OF THIS TABLE, 2026-08-15 (the same discipline
+# town_templates.PROPS keeps, and the same reason): **this game ships no sign
+# and no standalone drum**, so `sign` resolves to NOTHING, visibly, and is
+# reported by name in the scenario summary rather than being substituted. The
+# three kinds that do resolve are real content doing the job they were modelled
+# for: `ms_barricade_set` is a 25 m scrap-plate run (a fence), `ms_supply_dump`
+# is an open crate/drum/tarpaulin stack 1.6 m tall (the flattest thing in the
+# roster — it dresses without walling), and a parked civilian lorry is what a
+# rest stop looks like when someone is resting at it. A roadside sign is a real
+# ask on the model lane; it is not something this table can invent.
+PAD_DRESSING = [
+    {"kind": "fence", "defs": ["ms_barricade_set"], "band": "back",
+     "along": (0.0,), "odds": 0.75},
+    {"kind": "stack", "defs": ["ms_supply_dump"], "band": "back",
+     "along": (-1.6, 1.6), "odds": 0.6},
+    {"kind": "sign", "defs": [], "band": "mid",
+     "along": (0.0,), "odds": 1.0},
+    {"kind": "standing", "defs": ["ms_civtruck", "ms_fuel_tanker",
+                                  "ms_supply_truck"], "band": "mid",
+     "along": (-1.2, 1.2), "odds": 0.7},
+]
+
+# How many laybys one scenario dresses. Above MAX_ROAD_FRONTAGE because these
+# are cheap — a stack and a lorry, not a building programme — but still bounded:
+# every pad on the map wearing the same three props is a fixture, and the odds
+# above are what keep two dressed laybys from being the same picture.
+MAX_PAD_DRESSING = 4
+
+
+# --------------------------------------------------------------------------
 # Army rosters
 # --------------------------------------------------------------------------
 # One entry per staged `units` row: (def, count, spacing). The loader spreads

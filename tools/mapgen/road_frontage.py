@@ -116,6 +116,21 @@ def _clears_deck(rect, link, extra: float = 0.0) -> bool:
     return True
 
 
+def _clears_every_deck(rect, links: list[dict], extra: float = 0.0) -> bool:
+    """Is `rect` clear of EVERY published carriageway, not just its own link's?
+
+    **Its own link is the one deck it structurally cannot be on** — R4b finding
+    2: a parcel is offset from the link it was planned against by half a width
+    plus the setback plus its own depth, so the only carriageway it can ever
+    reach belongs to a DIFFERENT link. Testing the parcel's own link alone
+    therefore reads as a hard acceptance rule and refuses nothing; the rule only
+    bites at a crossing, which is where a building on the deck actually severs a
+    route. Found by R4c's fabricated-crossing fixture, and it applies to R4's
+    sheds and parked vehicles exactly as it does to R4c's props.
+    """
+    return all(_clears_deck(rect, ln, extra) for ln in links)
+
+
 def _yard_anchor(lot, hx: float, hz: float) -> tuple[float, float, float]:
     """Put the building's FAR face on the parcel's back edge. Returns (x, z, yard).
 
@@ -240,20 +255,35 @@ def parcels_from_pads(pads: list[dict], spec: dict, facts) -> list[tuple[dict, o
     for pad in pads:
         if pad["road_class"] not in spec["classes"]:
             continue
-        depth = 2.0 * pad["half_away"]
-        width = 2.0 * pad["half_along"]
-        if depth < need_depth or width < need_width:
+        if 2.0 * pad["half_away"] < need_depth or \
+                2.0 * pad["half_along"] < need_width:
             continue
-        ax, az = _away_of(pad)
-        away = math.atan2(az, ax)
-        out.append((pad, tp.Lot(
-            key=pad["key"], street=pad["name"],
-            x=int(round(pad["x"])), z=int(round(pad["z"])),
-            width=int(round(width)), depth=int(round(depth)),
-            heading=away - math.pi / 2.0,
-            facing=tp._facing_of(away + math.pi),
-            role="frontage", defname=spec["def"], side=1)))
+        out.append((pad, pad_lot(pad, defname=spec["def"])))
     return out
+
+
+def pad_lot(pad: dict, *, defname: str = "", role: str = "frontage"):
+    """The published pad as a `town_planner.Lot` — the WHOLE pad, in its frame.
+
+    Shared by `parcels_from_pads` (R4b, a building's parcel) and
+    `stage_pad_dressing` (R4c, an unbuilt pad's dressing) so that the two read
+    the pad's frame through one construction. Two reconstructions of the same
+    published rectangle is how R4c's props end up 90 degrees out from the yard
+    R4b would have put there, on the same tarmac, with nothing to report it.
+
+    `side` is 1 and the heading is derived so the lot's away-from-road unit IS
+    the pad's published away normal; see `_away_of`.
+    """
+    ax, az = _away_of(pad)
+    away = math.atan2(az, ax)
+    return tp.Lot(
+        key=pad["key"], street=pad["name"],
+        x=int(round(pad["x"])), z=int(round(pad["z"])),
+        width=int(round(2.0 * pad["half_along"])),
+        depth=int(round(2.0 * pad["half_away"])),
+        heading=away - math.pi / 2.0,
+        facing=tp._facing_of(away + math.pi),
+        role=role, defname=defname, side=1)
 
 
 def _away_of(pad: dict) -> tuple[float, float]:
@@ -406,9 +436,10 @@ def stage_frontage(rnd, terrain, facts, links: list[dict], specs: list[dict],
         candidates = parcels_from_pads(pads or [], spec, facts)
         for pad, lot in candidates:
             try:
-                placed = _try_parcel(terrain, facts, spec, _pad_link(pad, links),
-                                     lot, f, mclass, rects, units,
-                                     footprint_gap, unit_gap)
+                placed = _try_parcel(terrain, facts, spec,
+                                     _pad_link(pad, links), links, lot, f,
+                                     mclass, rects, units, footprint_gap,
+                                     unit_gap)
             except FrontageRefused as e:
                 why = f"{e} (on prepared pad {pad['key']})"
                 continue
@@ -428,8 +459,8 @@ def stage_frontage(rnd, terrain, facts, links: list[dict], specs: list[dict],
             phase = rnd.random()
             for lot in carve_parcels(link, spec, facts, phase=phase):
                 try:
-                    placed = _try_parcel(terrain, facts, spec, link, lot, f,
-                                         mclass, rects, units,
+                    placed = _try_parcel(terrain, facts, spec, link, links,
+                                         lot, f, mclass, rects, units,
                                          footprint_gap, unit_gap)
                 except FrontageRefused as e:
                     why = str(e)
@@ -448,8 +479,8 @@ def stage_frontage(rnd, terrain, facts, links: list[dict], specs: list[dict],
     return entries, refusals
 
 
-def _try_parcel(terrain, facts, spec, link, lot, f, mclass, rects, units,
-                footprint_gap, unit_gap):
+def _try_parcel(terrain, facts, spec, link, links, lot, f, mclass, rects,
+                units, footprint_gap, unit_gap):
     """One parcel, every rule, in the order that makes a refusal legible.
 
     Ordered cheapest-and-most-specific first so the reason a link carries no
@@ -464,7 +495,7 @@ def _try_parcel(terrain, facts, spec, link, lot, f, mclass, rects, units,
     if not terrain.footprint_clear(bx, bz, f.footprint_x, f.footprint_z, mclass):
         raise FrontageRefused("no buildable ground under the shed")
     brect = _rect(bx, bz, hx, hz)
-    if not _clears_deck(brect, link):
+    if not _clears_every_deck(brect, links):
         raise FrontageRefused("the shed would stand on the carriageway")
     if any(_rects_overlap(_rect(bx, bz, hx, hz, footprint_gap), r)
            for r in rects):
@@ -491,7 +522,7 @@ def _try_parcel(terrain, facts, spec, link, lot, f, mclass, rects, units,
         prect = _rect(px, pz, pf.body_radius, pf.body_radius)
         if not terrain.passable(px, pz, mclass):
             continue
-        if not _clears_deck(prect, link):
+        if not _clears_every_deck(prect, links):
             continue
         if _rects_overlap(prect, brect):
             continue
@@ -513,3 +544,218 @@ def _try_parcel(terrain, facts, spec, link, lot, f, mclass, rects, units,
             "road_class": link["road_class"], "road_name": link["name"],
             "yard": [int(round(c)) for c in yard_rect(lot, v_lo, v_hi)],
             "rects": [brect]}
+
+
+# ==========================================================================
+# Laybys — the pad NOTHING was built on (roads R4c)
+# ==========================================================================
+# A map plans more pads than a scenario has buildings for, on purpose
+# (terragen.yards.YardParams.max_pads 6 vs scenario_templates.MAX_ROAD_FRONTAGE
+# 3), and `read_road_yards`' own docstring already says what the surplus is: "a
+# pad it does not use is not wasted, it is a layby". Except that nothing made it
+# one. An undressed pad is a rectangle of graded tarmac with nothing standing on
+# it, which does not read as a stopping place — it reads as ground somebody
+# started preparing and abandoned, which is the opposite of the story the pad is
+# there to tell.
+#
+# WHY THIS IS NOT `stage_frontage` WITH AN EMPTY SPEC. A frontage yard is a
+# BUILDING with an apron in front of it: the geometry is driven by the shed, the
+# acceptance rule is the shed's footprint, and the parked vehicles are what fits
+# in what is left. A layby has no shed. Its geometry is driven by the pull-in —
+# the half of the tarmac nearest the road, which must stay clear, because a
+# layby you cannot pull into is a decorated obstacle — and everything staged is
+# dressing that has to keep out of it. Same pad, same frame (`pad_lot`), the
+# opposite constraint.
+
+# How much of a pad's depth, measured from the frontage line, stays empty. Half:
+# the pad is sized for a fuel stop's whole yard (600 elmos deep by default), so
+# half of it is still 300 elmos of tarmac to pull onto — deeper than a
+# supply-truck convoy is long. Stated as a fraction rather than as elmos because
+# the pad's size is the MAP's to choose and this is a claim about the shape of a
+# layby, not about a distance.
+PULLIN_FRACTION = 0.5
+
+# Elmos the back band keeps off the pad's own rear and side edges. A prop
+# straddling the edge of its tarmac is the visual defect this whole lane exists
+# to remove one layer up: the fence would be half on the pad and half in the
+# grass.
+EDGE_INSET = 24.0
+
+# Elmos between the pull-in and the first thing standing behind it — the
+# manoeuvring room a lorry needs to stop without touching the dressing.
+PULLIN_GAP = 24.0
+
+
+def resolve_dressing(specs: list[dict], facts) -> tuple[list[dict], list[str]]:
+    """(rows whose content ships, kinds with none) — `resolve_props`' contract.
+
+    A kind with nothing available is LEFT OUT rather than substituted, and named
+    in the second return so the scenario summary can say which. Substituting is
+    how a `sign` slot becomes a supply dump on every layby on the map: the pad
+    still gets something, the summary still reads clean, and the thing a player
+    sees is not the thing anybody chose.
+    """
+    rows, gaps = [], []
+    for spec in specs:
+        for defname in spec["defs"]:
+            if defname in facts:
+                rows.append(dict(spec, defname=defname))
+                break
+        else:
+            gaps.append(spec["kind"])
+    return rows, gaps
+
+
+def _band_v(band: str, depth: float, reach_v: float) -> float:
+    """Where in the pad's depth axis this band stands, centre of the item.
+
+    `v` runs from -depth/2 at the frontage line (the road edge) to +depth/2 at
+    the back, the same axis `yard_span` reports an apron in. `back` hugs the rear
+    edge; `mid` stands just behind the pull-in, facing the road across it.
+    """
+    open_v = -depth / 2.0 + PULLIN_FRACTION * depth
+    if band == "back":
+        return depth / 2.0 - EDGE_INSET - reach_v
+    return open_v + PULLIN_GAP + reach_v
+
+
+def _on_pad(lot, u: float, v: float, reach_u: float, reach_v: float) -> bool:
+    """Is the whole item inside the pad's own rectangle?
+
+    In the PARCEL's frame, not the AABB's, for `yard_span`'s reason: a pad on a
+    diagonal road has a bounding box half again its own area, and an item inside
+    THAT box can be standing on grass.
+    """
+    return (abs(u) + reach_u <= lot.width / 2.0 and
+            abs(v) + reach_v <= lot.depth / 2.0)
+
+
+def _clear_of_pullin(v: float, reach_v: float, depth: float) -> bool:
+    """Is the item entirely behind the pull-in band?
+
+    `_band_v` already answers yes for every band on a pad of this generator's
+    default depth, so on generated input this refuses nothing — the same
+    relation the deck rule has to `terragen.yards`' own refusals, and it is kept
+    for the same reason: the pad's depth is published in a file this layer does
+    not own. On a SHALLOW pad the back band's own item is deeper than the space
+    behind the pull-in, and then this is the only rule that keeps the tarmac a
+    lorry stops on clear. `tests/test_pad_props` fabricates that pad.
+    """
+    return v - reach_v >= -depth / 2.0 + PULLIN_FRACTION * depth
+
+
+def stage_pad_dressing(rnd, terrain, facts, links: list[dict],
+                       pads: list[dict], specs: list[dict], *, mclass: str,
+                       occupied_rects: list, occupied_units: list,
+                       footprint_gap: float, unit_gap: float, budget: int,
+                       taken: set | None = None
+                       ) -> tuple[list[dict], list[str]]:
+    """Dress up to `budget` pads that no frontage building took.
+
+    `taken` is the set of pad keys `stage_frontage` built on — passed in rather
+    than re-derived, because "which pad did the depot go on" is that placer's
+    answer and re-deriving it geometrically would put a fence through a shed the
+    first time the two disagreed.
+
+    Returns `(entries, notes)`. An entry carries the props as `props` (each in
+    `scenariogen`'s `units` shape, on `team = 'neutral'`) and the ground they
+    take as `rects`, matching `stage_frontage`'s entries so the war-fightability
+    gate downstream sees a layby's tarmac exactly as it sees a yard's.
+
+    `notes` are collected, never raised, for `stage_frontage`'s reason: a map
+    whose spare pads are all in front of something already staged is an ordinary
+    outcome, and the note is what keeps it distinguishable from a broken placer.
+    """
+    taken = set(taken or ())
+    rows, gaps = resolve_dressing(specs, facts)
+    notes = []
+    if gaps:
+        notes.append("layby dressing kinds with no content: "
+                     + ", ".join(gaps)
+                     + " — see scenario_templates.PAD_DRESSING")
+    if not rows:
+        return [], notes
+
+    entries: list[dict] = []
+    rects = list(occupied_rects)
+    units = list(occupied_units)
+    for pad in pads:
+        if len(entries) >= budget:
+            break
+        if pad["key"] in taken:
+            continue
+        try:
+            link = _pad_link(pad, links)
+        except FrontageRefused as e:
+            notes.append(f"layby {pad['key']}: {e}")
+            continue
+        lot = pad_lot(pad, role="layby")
+        props, rects_here = _dress_one(rnd, terrain, facts, lot, links, rows,
+                                       mclass, rects, units, footprint_gap,
+                                       unit_gap)
+        if not props:
+            notes.append(f"layby {pad['key']} on the {pad['name']} stayed "
+                         f"empty — nothing offered would stand on it")
+            continue
+        entries.append({"pad": pad["key"], "road_name": pad["name"],
+                        "road_class": pad["road_class"], "props": props,
+                        "rects": rects_here})
+        rects.extend(rects_here)
+        units.extend((p["x"], p["z"], facts[p["def"]]) for p in props)
+    return entries, notes
+
+
+def _dress_one(rnd, terrain, facts, lot, links, rows, mclass, rects, units,
+               footprint_gap, unit_gap):
+    """One pad's props, every rule, in the order that makes a refusal legible.
+
+    A prop that fails any rule is DROPPED rather than nudged or refusing the
+    whole pad — unlike a yard, where the shed is the point and a shed that does
+    not fit means the yard does not exist. A layby with two of its three props is
+    still a layby.
+    """
+    placed: list[dict] = []
+    here: list[tuple] = []
+    along_u, away = tstage._lot_frame(lot)
+    for row in rows:
+        # Rolled per ROW rather than per item so a kind is present or absent as
+        # a kind: one of a pair of stacks is a dropped prop, not a design.
+        if rnd.random() > row.get("odds", 1.0):
+            continue
+        f = facts[row["defname"]]
+        hx, hz = tstage._extent_of(lot.facing, f.footprint_x, f.footprint_z)
+        reach_u, reach_v = tstage._lot_projection(lot, hx, hz)
+        v = _band_v(row["band"], float(lot.depth), reach_v)
+        for mult in row["along"]:
+            u = mult * 2.0 * reach_u
+            if not _on_pad(lot, u, v, reach_u, reach_v):
+                continue
+            if not _clear_of_pullin(v, reach_v, float(lot.depth)):
+                continue
+            x = lot.x + along_u[0] * u + away[0] * v
+            z = lot.z + along_u[1] * u + away[1] * v
+            x, z = float(round(x)), float(round(z))
+            rect = _rect(x, z, hx, hz)
+            # The road first: a prop on the carriageway severs the route exactly
+            # as a shed does (`stage_frontage`'s acceptance rule), and a pad
+            # beside a crossing can reach the OTHER road's deck.
+            if not _clears_every_deck(rect, links):
+                continue
+            ok = (terrain.footprint_clear(x, z, f.footprint_x, f.footprint_z,
+                                          mclass) if f.building
+                  else terrain.passable(x, z, mclass))
+            if not ok:
+                continue
+            if any(_rects_overlap(_rect(x, z, hx, hz, footprint_gap), r)
+                   for r in rects + here):
+                continue
+            if any(math.hypot(x - ux, z - uz)
+                   < max(f.clear_radius, uf.body_radius + f.body_radius
+                         + unit_gap)
+                   for ux, uz, uf in units):
+                continue
+            placed.append({"def": row["defname"], "team": "neutral",
+                           "x": int(x), "z": int(z), "facing": lot.facing,
+                           "kind": row["kind"]})
+            here.append(rect)
+    return placed, here
