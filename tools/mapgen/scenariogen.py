@@ -273,6 +273,49 @@ def read_region_graph(map_dir: str) -> list[dict]:
     return out
 
 
+_CROSSING_RE = re.compile(
+    r'\{\s*def\s*=\s*"(?P<def>[^"]+)"\s*,\s*'
+    r'x\s*=\s*(?P<x>-?[0-9.]+)\s*,\s*z\s*=\s*(?P<z>-?[0-9.]+)\s*,\s*'
+    r'heading\s*=\s*(?P<heading>-?[0-9]+)\s*,\s*'
+    r'spans\s*=\s*(?P<spans>[0-9]+)\s*,\s*'
+    r'class\s*=\s*(?P<class>[0-9]+)\s*,\s*'
+    r'width\s*=\s*(?P<width>-?[0-9.]+)\s*,\s*'
+    r'depth\s*=\s*(?P<depth>-?[0-9.]+)\s*\}')
+
+
+def read_road_crossings(map_dir: str) -> list[dict]:
+    """Water crossings the MAP published, from `mapdata/roads.lua` (roads R3b).
+
+    A bridge belongs where a road crosses water, and until R3b nothing here knew
+    where the roads were: `find_crossing` below searches a region's heightmap
+    for the narrowest gap and then ASSUMES the answer ("that is also where a
+    road would naturally run", its own docstring). The generator that planned
+    the roads knows, so it says — including the chain's heading, which is the
+    road's tangent rather than a cardinal snapped to it.
+
+    Same regex-not-interpreter reasoning as `read_region_graph`, and the same
+    empty-vs-absent distinction: a map generated before R3b ships no `crossings`
+    key at all, which returns [] here exactly as a map with no fords does. Both
+    fall back to the blind search, which is the pre-R3b behaviour.
+    """
+    path = os.path.join(map_dir, "mapdata", "roads.lua")
+    if not os.path.exists(path):
+        return []
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+    head = text.find("crossings")
+    if head < 0:
+        return []
+    return [{"def": m.group("def"),
+             "x": int(float(m.group("x"))), "z": int(float(m.group("z"))),
+             "heading": int(m.group("heading")),
+             "spans": int(m.group("spans")),
+             "road_class": int(m.group("class")),
+             "width": float(m.group("width")),
+             "depth": float(m.group("depth"))}
+            for m in _CROSSING_RE.finditer(text[head:])]
+
+
 def region_centre(region: dict) -> tuple[float, float]:
     """The polygon's VERTEX AVERAGE — the exact quantity the sim publishes.
 
@@ -1114,6 +1157,35 @@ BANK_SEARCH = 96
 
 # A single 24 m segment is a plank and the gap under it is a ditch.
 MIN_BRIDGE_SPANS = 3
+
+
+def _heading_dir(heading: int) -> tuple[float, float]:
+    """game_scenario.lua's `headingToDir` — the chain lays along it.
+
+    Kept here (rather than imported from terragen.bridges) because this module
+    reads a heading a MAP wrote and the gadget will consume: the two ends must
+    agree with the gadget, not with each other. terragen/bridges.py carries the
+    same four lines and tests/test_bridges.py pins both against the gadget.
+    """
+    theta = heading * (2.0 * math.pi / 65536.0)
+    return math.sin(theta), -math.cos(theta)
+
+
+def chain_is_afloat_at(terrain: Terrain, cx: float, cz: float, heading: int,
+                       spans: int, pitch: float) -> bool:
+    """`_chain_is_afloat` for an arbitrary heading — a published crossing.
+
+    A map's `mapdata/roads.lua` can be older than the heightmap beside it (the
+    packages are build output and are regenerated independently), and a span
+    chain on dry ground is the §M3 staircase again. So a published crossing is
+    trusted for WHERE, and checked for WET.
+    """
+    dx, dz = _heading_dir(heading)
+    for i in range(spans):
+        step = (i - (spans - 1) / 2.0) * pitch
+        if not terrain.is_water(cx + dx * step, cz + dz * step):
+            return False
+    return True
 
 
 def _chain_is_afloat(terrain: Terrain, cx: float, cz: float, axis: str,
@@ -2060,6 +2132,15 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
     # no bridge and says so in the summary — silence would read as "there was
     # nowhere sensible", which is exactly what a missing feature should never
     # be indistinguishable from.
+    #
+    # ROADS R3b: if the map published its own road crossings
+    # (`mapdata/roads.lua`, terragen/bridges.py) those win, in the same region
+    # order. A published crossing is a place the map's own road goes under
+    # water, carrying the road's tangent as the chain heading — where the blind
+    # search below can only offer a cardinal facing and a gap that may have no
+    # road anywhere near it. The blind search stays as the fallback for maps
+    # with no road graph (hand-authored maps, and every map generated before
+    # R3b).
     crossings: list[dict] = []
     if bridges > 0:
         span_def = BRIDGE_SPANS["road"]
@@ -2067,6 +2148,35 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
         search = [victory] + [r for r in regions
                               if r["key"] != victory["key"]
                               and r["key"] not in home_keys]
+        published = read_road_crossings(map_dir)
+        # The y below is the waterline. §M3 measured a chain laid at y = 0 over
+        # water staying dead level (0/0/0/0) thanks to `floating = true`, where
+        # the same chain without a y settled into a staircase down the seabed
+        # (-31/-34.5/-45.9/-57.6). It is also why the map does not place these
+        # itself: no map feature format carries a y (terragen/bridges.py).
+        # Published crossings first, ACROSS the whole search order — a real ford
+        # in the third region beats a guessed gap in the first, which a
+        # per-region preference would not give (the blind search would fill the
+        # quota before the published crossing was ever reached).
+        for region in search:
+            if len(crossings) >= bridges:
+                break
+            poly = [(v[0], v[1]) for v in region["polygon"]]
+            here = [c for c in published
+                    if tp._point_in_polygon(c["x"], c["z"], poly)
+                    and chain_is_afloat_at(terrain, c["x"], c["z"],
+                                           c["heading"], c["spans"], pitch)]
+            # Widest first: the biggest ford is the crossing a player reads as
+            # THE crossing, and it is also the one that most needs explaining.
+            here.sort(key=lambda c: (-c["width"], c["x"], c["z"]))
+            if here:
+                c = here[0]
+                name = site_name(region, BRIDGE_NOUN, landmark_names)
+                landmark_names.add(name)
+                crossings.append({"def": c["def"], "x": c["x"], "z": c["z"],
+                                  "heading": c["heading"], "chain": c["spans"],
+                                  "y": 0, "name": name, "region": region,
+                                  "width": c["width"]})
         for region in search:
             if len(crossings) >= bridges:
                 break
@@ -2078,11 +2188,6 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
             landmark_names.add(name)
             crossings.append({"def": span_def, "x": cx, "z": cz,
                               "facing": facing, "chain": spans,
-                              # The waterline. §M3 measured a chain laid at
-                              # y = 0 over water staying dead level (0/0/0/0)
-                              # thanks to `floating = true`, where the same
-                              # chain without a y settled into a staircase down
-                              # the seabed (-31/-34.5/-45.9/-57.6).
                               "y": 0,
                               "name": name, "region": region, "width": width})
     # Emitted crossings-first, then relics, then the wreck field — placement
@@ -2614,6 +2719,12 @@ def _emit_feature(f: dict) -> str:
         parts.append(f"y = {f['y']}")
     if f.get("facing"):
         parts.append(f"facing = {_lua_str(f['facing'])}")
+    # A raw heading, for a chain laid along something that is not a cardinal —
+    # a road's own tangent (roads R3b). game_scenario.lua's featureHeading takes
+    # either; this emitter silently DROPPED any key it did not name, so the
+    # first published crossing arrived heading-less and pointed north.
+    if f.get("heading") is not None:
+        parts.append(f"heading = {int(f['heading'])}")
     if f.get("chain", 1) != 1:
         parts.append(f"chain = {f['chain']}")
     if f.get("name"):

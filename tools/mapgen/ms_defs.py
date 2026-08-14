@@ -314,6 +314,39 @@ def site_kinds(game_dir: str) -> dict[str, str]:
         os.path.join(game_dir, "units", "buildings_sites.lua"), "site_kind")
 
 
+def feature_chain_pitch(game_dir: str, kind: str = "bridge") -> float:
+    """Segment spacing for a chained feature family, in elmos.
+
+    `features/bridges.lua` publishes the measured tile length as
+    `customparams.chain_pitch` so nothing downstream restates it —
+    game_scenario.lua's `featureChainPitch` reads it at stage time, and the map
+    generator needs the same number at PLAN time to size a chain of spans
+    (terragen/bridges.py).
+
+    Read off the file rather than per-def, because that is where the value is:
+    both spans get it from the shared `span()` posture helper, which is not
+    inside either def's own table. So this asserts the file speaks with one
+    voice instead of pretending to read one entry — two different pitches in one
+    family would mean a chain sized for the wrong span, which is the failure
+    §M3 spent a live boot on.
+
+    Raises rather than defaulting: a silent 24.0 here would be exactly the
+    hardcoded copy the def exists to prevent.
+    """
+    path = os.path.join(game_dir, "features", f"{kind}s.lua")
+    with open(path, encoding="utf-8") as fh:
+        text = _strip_comments(fh.read())
+    found = {m.group(1) for m in
+             re.finditer(r"chain_pitch\s*=\s*'([^']*)'", text)}
+    if not found:
+        raise ValueError(f"{path} declares no customparams.chain_pitch")
+    if len(found) > 1:
+        raise ValueError(f"{path} declares {len(found)} different chain "
+                         f"pitches ({sorted(found)}) — a chain sized against "
+                         f"one would be wrong for the other")
+    return float(found.pop())
+
+
 def verify(facts: dict[str, UnitFacts], required: list[str]) -> list[str]:
     """Problems with `required` — an unknown def, or one whose facts are unusable.
 

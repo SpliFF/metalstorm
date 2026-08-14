@@ -849,7 +849,8 @@ def parse_features(lua: str) -> list[dict]:
         rest = m.group("rest")
         e = {"def": m.group(1), "x": int(m.group(2)), "z": int(m.group(3))}
         for key, pat in (("y", r"\by\s*=\s*(-?\d+)"),
-                         ("chain", r"\bchain\s*=\s*(\d+)")):
+                         ("chain", r"\bchain\s*=\s*(\d+)"),
+                         ("heading", r"\bheading\s*=\s*(-?\d+)")):
             hit = re.search(pat, rest)
             if hit:
                 e[key] = int(hit.group(1))

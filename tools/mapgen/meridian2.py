@@ -40,6 +40,7 @@ REPO_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 sys.path.insert(0, HERE)
 
 from terragen import biomes as bio
+from terragen import bridges as brg
 from terragen import erosion as ero
 from terragen import hydrology as hyd
 from terragen import noise as tn
@@ -51,7 +52,9 @@ from terragen import smf
 
 import civilians_gen as civ
 import meridian as m1   # the v1 generator, kept for its layout-only emitters
+import ms_defs
 
+GAME_DIR = os.path.join(REPO_ROOT, "data", "games", "metalstorm")
 LAYOUT_PATH = os.path.join(HERE, "meridian_layout.json")
 MAP_SIZE = 16384.0
 SEED_DEFAULT = 20260727
@@ -397,6 +400,18 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
     print(f"roads done {time.time()-t_start:.0f}s "
           f"({len(polylines)} segments, {len(plaza_sites)} plazas, "
           f"{len(net.junctions)} junctions; length by class: {_mix})")
+    # 6a. water crossings (roads R3b) — measured on the DELIVERED surface, so a
+    # ford is graded where the deck now stands and not where the planner drew
+    # it. Published in mapdata/roads.lua; nothing is placed here (terragen/
+    # bridges.py explains why a map-authored span sinks to the seabed).
+    crossings, crossing_refusals = brg.find_crossings(
+        net, h, cell, 0.0,
+        brg.CrossingParams(pitch=ms_defs.feature_chain_pitch(GAME_DIR)))
+    print(f"crossings: {len(crossings)} bridgeable "
+          f"({sum(c.spans for c in crossings)} spans), "
+          f"{len(crossing_refusals)} wet stretches refused")
+    for r in crossing_refusals:
+        print(f"  crossing REFUSED: {r.describe()}")
     # the grade the DELIVERED deck holds, which is not the grade the planner
     # costed — the instrument warns when they disagree (roads R2 finding)
     rd.report_delivered_grades(net, h, cell, rp)
@@ -629,7 +644,7 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
     pkg.write_package(
         out_dir, cfg, h, slope, b, moist, road_dist, road_mask, cell,
         scratch_dir=scratch, regions_lua=m1.build_regions_lua(layout),
-        roads_lua=pkg.emit_roads_lua(net, cell, rp),
+        roads_lua=pkg.emit_roads_lua(net, cell, rp, crossings=crossings),
         feature_files=contract_files, stamps=stamps, road_class=road_class,
     )
 

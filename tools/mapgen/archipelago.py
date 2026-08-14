@@ -46,6 +46,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from terragen import biomes as bio          # noqa: E402
+from terragen import bridges as brg         # noqa: E402
 from terragen import erosion as ero         # noqa: E402
 from terragen import hydrology as hyd       # noqa: E402
 from terragen import noise as tn            # noqa: E402
@@ -60,8 +61,11 @@ from terragen import smf                    # noqa: E402
 from terragen import uplift as up           # noqa: E402
 from terragen import vegetation as veg      # noqa: E402
 from terragen.vegetation import _hash01     # noqa: E402
+import ms_defs                              # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+GAME_DIR = os.path.abspath(os.path.join(HERE, "..", "..", "data", "games",
+                                        "metalstorm"))
 MAP_SIZE = 16384.0
 SEED_DEFAULT = 20260730
 N_STARTS = 8
@@ -987,6 +991,19 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
               f"{len(towns)} town plazas, {len(starts)} starts, "
               f"{len(network.junctions)} junctions; length by class: {_mix})")
         rd.report_delivered_grades(network, h, cell, rp)
+        # Water crossings (roads R3b) — an archipelago plans one network per
+        # island, so every crossing here is an INLAND ford: the sea between two
+        # islands is not something the planner ever routes across. Measured on
+        # the delivered surface, published in mapdata/roads.lua, nothing placed
+        # (see terragen/bridges.py).
+        crossings, crossing_refusals = brg.find_crossings(
+            network, h, cell, 0.0,
+            brg.CrossingParams(pitch=ms_defs.feature_chain_pitch(GAME_DIR)))
+        print(f"crossings: {len(crossings)} bridgeable "
+              f"({sum(c.spans for c in crossings)} spans), "
+              f"{len(crossing_refusals)} wet stretches refused")
+        for r in crossing_refusals:
+            print(f"  crossing REFUSED: {r.describe()}")
         aim_probe(h, f"pass {pad_pass}: +roads")
 
         # 7. hydrology -> island stream ribbons (PLAN-maps §2b item 3)
@@ -1331,7 +1348,7 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     pkg.write_package(
         out_dir, cfg, h, slope, b, moist, road_dist, road_mask, cell,
         scratch_dir=os.environ.get("TMPDIR", "/tmp"),
-        roads_lua=pkg.emit_roads_lua(network, cell, rp),
+        roads_lua=pkg.emit_roads_lua(network, cell, rp, crossings=crossings),
         feature_files=feature_files, stamps=stamps, road_class=road_class,
     )
     baker = bk.AlbedoBaker(h, slope, b, moist, road_dist, 0.0, cell, seed,
