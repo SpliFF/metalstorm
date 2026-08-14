@@ -39,17 +39,40 @@ shipped. It omitted `--gen-object-api` on the C++ side, so following it produced
 a header without the `*T` native-object types the tree uses; and being a
 command a human remembers to type, it went unrun — the committed
 `rts/protocol_generated.h` sat five days behind an fbs edit that added
-`LobbyGameInfo.archived`. Note the shadowing that hid this: `CMakeLists.txt`
-also generates the header into `build/<cfg>/generated/`, but every target lists
-`rts/` ahead of that directory, so the build reads the **committed** copy and
-the generated one is written and ignored. The stale copy still compiled because
-its only consumer, `Protocol.h`'s `BuildGameListUpdate`, is a template nobody
+`LobbyGameInfo.archived`. The stale copy still compiled because its only
+consumer, `Protocol.h`'s `BuildGameListUpdate`, is a template nobody
 instantiates.
 
 The schema hash is taken over `flatc -b --schema` output, so it is insensitive
 to comments and formatting and changes on any wire-visible edit (both measured).
 It does depend on the schema's file *basename*, which is why the script always
 runs flatc on `schemas/protocol.fbs` itself rather than on a renamed copy.
+
+**Forgetting to run the script is now a build failure, not a silent hole**
+(PLAN-protocol-guard task 2). Both build systems recompute the hash and refuse
+to build against stale artefacts:
+
+- Server: the `check_protocol_schema` target (`cmake/CheckProtocolSchemaHash.cmake`),
+  which `spring-server` / `spring-lobby` / `spring-tests` / `spring-logserver`
+  all depend on. It checks *both* hash files — a half-applied regen is drift
+  whichever side it landed on.
+- Client: `client/scripts/check-protocol-schema.mjs`, run from the `prebuild`
+  npm hook *and* from a vite plugin's `buildStart` — mprocs launches
+  `vite dev` directly, where npm lifecycle hooks never fire. With no configured
+  build dir there is no flatc, so it degrades to cross-checking the two
+  committed hash files and says so (`mode: 'cross-check'`).
+
+Both fail with `protocol.fbs changed without regen — run scripts/regen-protocol.sh`.
+
+**There is now exactly ONE `protocol_generated.h`: the committed one.** CMake
+used to generate a second copy into `build/<cfg>/generated/`, but every target
+lists `rts/` ahead of that directory, so `#include "protocol_generated.h"`
+always resolved to the committed copy and the generated one was written and
+ignored (`ninja -t deps` named only the `rts/` path) — the dead-producer trap,
+in the build system, and how the five days of drift above went unnoticed.
+Include order had already elected the committed copy, so the generator was
+removed rather than the include dirs reshuffled (which would have left the
+committed bindings as dead files git still diffs).
 
 ## Executables
 
@@ -331,17 +354,19 @@ Generated bindings:
 - C++: `rts/protocol_generated.h`
 - TypeScript: `client/src/protocol/spring-web/*.ts`
 
-**⚠ There are TWO copies of `protocol_generated.h` and the include order picks
-between them per translation unit.** CMake regenerates into
-`build/<preset>/generated/`, but `rts/protocol_generated.h` is *also* tracked in
-git, and `-I rts` precedes `-I build/<preset>/generated` — so after a
-`schemas/protocol.fbs` change some files see the new header and some see the
-stale committed one. It surfaces as `no member named 'add_<your_new_field>'` in
-a *subset* of targets while others link clean (spring-lobby built, spring-server
-did not). After editing the schema, refresh the tracked copy —
-`cp build/debug/generated/protocol_generated.h rts/protocol_generated.h` — and
-commit it with the schema. `make generate-protocol` only emits the TypeScript
-side and does not do this.
+Both are committed and both come out of `scripts/regen-protocol.sh` — run it
+after every `schemas/protocol.fbs` edit and commit its outputs with the schema.
+The build refuses to proceed if you don't; see the drift guard under
+[Build & test](#build--test) above.
+
+> The warning that stood here — "there are TWO copies of `protocol_generated.h`
+> and include order picks between them per translation unit" — is retired. The
+> second (CMake-generated) copy is gone as of PLAN-protocol-guard task 2, and
+> its advice (`cp build/debug/generated/protocol_generated.h rts/`) would now
+> copy a file that is never written. The failure it described was real, but
+> the diagnosis was half wrong: `-I rts` precedes the generated dir for *every*
+> target, so no TU ever read the generated copy — the subset that failed to
+> compile was the subset that referenced a new field at all.
 
 ### Lua Scripting System
 

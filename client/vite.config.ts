@@ -1,6 +1,9 @@
 import { defineConfig } from 'vite';
 import { resolve } from 'path';
 import { staticDataPlugin } from './vite-static-data-plugin.js';
+// @ts-expect-error — plain .mjs, deliberately untyped: it is shared with the
+// `prebuild` npm hook, which cannot consume TypeScript.
+import { protocolGuardPlugin } from './scripts/check-protocol-schema.mjs';
 
 // The Babylon Inspector (used only by the model-inspector debug page,
 // babylon-inspector.html) lazily `import()`s optional editor packages — the
@@ -61,6 +64,10 @@ const REPO_ROOT = resolve(__dirname, '..');
 
 export default defineConfig({
     plugins: [
+        // Wire-schema drift guard (PLAN-protocol-guard task 2). Runs in
+        // buildStart, so it covers `vite dev` too — mprocs launches vite
+        // directly, where npm's `prebuild` hook never fires.
+        protocolGuardPlugin({ repoRoot: REPO_ROOT }),
         stubBabylonEditors(),
         staticDataPlugin({ repoRoot: REPO_ROOT }),
     ],

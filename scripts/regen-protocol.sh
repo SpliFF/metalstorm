@@ -62,9 +62,11 @@ fi
 echo "regen-protocol: using $flatc ($("$flatc" --version))"
 
 # --- 1. C++ bindings --------------------------------------------------------
-# The flags MUST match CMakeLists.txt's generate_flatbuffers custom command
-# (--cpp --gen-object-api). Two generators writing the same header with
-# different flags is how the object-API types disappear from one copy.
+# This is now the ONLY producer of rts/protocol_generated.h — CMake used to
+# write a second copy into build/<cfg>/generated/ that no target could see
+# (include order elected the committed one), and that dead producer was removed
+# with the drift guard in PLAN-protocol-guard task 2. --gen-object-api is
+# required: the tree uses the *T native-object types.
 "$flatc" --cpp --gen-object-api -o rts/ "$schema"
 echo "regen-protocol: wrote rts/protocol_generated.h"
 

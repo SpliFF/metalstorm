@@ -227,18 +227,50 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(ktx)
 
-# Generate C++ headers from .fbs schemas
 set(SCHEMA_DIR ${CMAKE_SOURCE_DIR}/schemas)
 set(GENERATED_DIR ${CMAKE_BINARY_DIR}/generated)
 file(MAKE_DIRECTORY ${GENERATED_DIR})
 
+# === Wire schema: the committed bindings are authoritative, and a build-time
+# === guard proves they match schemas/protocol.fbs (PLAN-protocol-guard task 2).
+#
+# There used to be a second producer here: an add_custom_command writing
+# protocol_generated.h into ${GENERATED_DIR}, with four targets depending on it.
+# It was dead. Every target lists ${CMAKE_SOURCE_DIR}/rts AHEAD of
+# ${GENERATED_DIR}, so `#include "protocol_generated.h"` always resolved to the
+# committed copy (confirmed from `ninja -t deps`) and the generated one was
+# written and ignored — which is how the committed header sat five days stale
+# behind an fbs edit while every build "regenerated" it. Include order had
+# already elected the committed copy, so that is now the single source; the
+# generator is gone rather than the include order reshuffled, which would have
+# made the committed bindings dead files that git still diffs.
+#
+# scripts/regen-protocol.sh writes all four derived artefacts (C++ bindings, TS
+# bindings, and the two schema-hash files); this guard fails the build if the
+# schema moved without it. flatc is still built — the guard depends on it, and
+# the regen script finds it in any configured build dir.
+file(REMOVE ${GENERATED_DIR}/protocol_generated.h)  # sweep the dead copy out of existing build dirs
 add_custom_command(
-    OUTPUT ${GENERATED_DIR}/protocol_generated.h
-    COMMAND flatc --cpp --gen-object-api -o ${GENERATED_DIR} ${SCHEMA_DIR}/protocol.fbs
-    DEPENDS ${SCHEMA_DIR}/protocol.fbs flatc
-    COMMENT "Generating FlatBuffers C++ headers from protocol.fbs"
+    OUTPUT ${GENERATED_DIR}/protocol-schema-hash.stamp
+    COMMAND ${CMAKE_COMMAND}
+        -DFLATC=$<TARGET_FILE:flatc>
+        -DSCHEMA=${SCHEMA_DIR}/protocol.fbs
+        -DCPP_HEADER=${CMAKE_SOURCE_DIR}/rts/Server/ProtocolSchemaHash.h
+        -DTS_FILE=${CMAKE_SOURCE_DIR}/client/src/protocol/schema-hash.ts
+        -DWORK_DIR=${GENERATED_DIR}
+        -DSTAMP=${GENERATED_DIR}/protocol-schema-hash.stamp
+        -P ${CMAKE_SOURCE_DIR}/cmake/CheckProtocolSchemaHash.cmake
+    BYPRODUCTS ${GENERATED_DIR}/protocol.bfbs
+    DEPENDS
+        ${SCHEMA_DIR}/protocol.fbs
+        ${CMAKE_SOURCE_DIR}/rts/Server/ProtocolSchemaHash.h
+        ${CMAKE_SOURCE_DIR}/client/src/protocol/schema-hash.ts
+        ${CMAKE_SOURCE_DIR}/cmake/CheckProtocolSchemaHash.cmake
+        flatc
+    COMMENT "Checking protocol.fbs against the committed schema hash"
+    VERBATIM
 )
-add_custom_target(generate_flatbuffers DEPENDS ${GENERATED_DIR}/protocol_generated.h)
+add_custom_target(check_protocol_schema DEPENDS ${GENERATED_DIR}/protocol-schema-hash.stamp)
 
 # === Build stamp header (git short hash + build timestamp) ===
 # Runs the git rev-parse + header write at BUILD time via a custom target
@@ -375,7 +407,7 @@ add_executable(spring-server
     ${SERVER_SOURCES}
 )
 
-add_dependencies(spring-server generate_flatbuffers generate_build_stamp)
+add_dependencies(spring-server check_protocol_schema generate_build_stamp)
 target_include_directories(spring-server PRIVATE
     ${CMAKE_SOURCE_DIR}/rts
     ${CMAKE_SOURCE_DIR}/rts/lib
@@ -486,7 +518,7 @@ add_executable(spring-lobby
     ${LOBBY_LOG_SOURCES}
     rts/System/SafeCStrings.c
 )
-add_dependencies(spring-lobby generate_flatbuffers generate_build_stamp modelimporter mapconverter)
+add_dependencies(spring-lobby check_protocol_schema generate_build_stamp modelimporter mapconverter)
 target_include_directories(spring-lobby PRIVATE
     ${CMAKE_SOURCE_DIR}/rts
     ${CMAKE_SOURCE_DIR}/rts/lib
@@ -636,7 +668,7 @@ if(TEST_SOURCES)
     # includes protocol_generated.h to walk EnumValuesClientPayload(), which is
     # how the synced-input classifier is proved exhaustive against the real wire
     # schema instead of against a copy of it (PLAN-replay task 1).
-    add_dependencies(spring-tests generate_flatbuffers generate_build_stamp)
+    add_dependencies(spring-tests check_protocol_schema generate_build_stamp)
     target_link_libraries(spring-tests PRIVATE lua smmalloc ZLIB::ZLIB doctest::doctest springlog nlohmann_json::nlohmann_json openssl_crypto nghttp2_static SQLite3::SQLite3 flatbuffers)
     # Absolute path to the source tree so tests can open checked-in fixtures
     # (e.g. the strategos AI plugin) regardless of the ctest working dir.
@@ -722,7 +754,7 @@ add_executable(spring-logserver
     rts/logserver_main.cpp
     rts/Server/NetworkServer.cpp
 )
-add_dependencies(spring-logserver generate_flatbuffers generate_build_stamp)
+add_dependencies(spring-logserver check_protocol_schema generate_build_stamp)
 target_include_directories(spring-logserver PRIVATE
     ${CMAKE_SOURCE_DIR}/rts
     ${GENERATED_DIR}
