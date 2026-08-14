@@ -184,7 +184,7 @@ TEST_CASE("one record per synced-input class, each landing in its own phase") {
 
     rec.SetPhase(TickPhase::Stream);
     const uint8_t aiBlob[] = {7, 7, 7};
-    rec.RecordAICommand(2, aiBlob, sizeof(aiBlob));
+    rec.RecordAICommand(2, /*kind=*/2, aiBlob, sizeof(aiBlob));
 
     REQUIRE(j.Records().size() == 5);
     CHECK(j.Records()[0].kind == InputKind::GameStart);
@@ -198,6 +198,7 @@ TEST_CASE("one record per synced-input class, each landing in its own phase") {
     CHECK(j.Records()[4].kind == InputKind::AICommand);
     CHECK(j.Records()[4].phase == TickPhase::Stream);
     CHECK(j.Records()[4].playerId == 2);
+    CHECK(j.Records()[4].subKind == 2);           // AICommandKind::IssueDirective
 
     // Every kind except SnapshotRestore exercised; counters agree.
     CHECK(rec.Stats().recorded == 5);

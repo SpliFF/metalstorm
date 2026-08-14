@@ -267,6 +267,15 @@ soak churn arm (PLAN-long-uptime §14) — one process because vite plus the nat
 quiche addon cost seconds per connect, so a process-per-cycle harness would
 measure node's start-up rather than the server's churn capacity.
 
+The harness speaks the guidance verbs too (`sendWireCommand` →
+`ClientPayload::LuaRulesMsg`, `--wire-command` / `--wire-field`), and it builds
+the payload with the app's **own** encoder (`encodeWire` in
+`client/src/ui/native-ui/guidance-wire.ts`) rather than a copy: those bytes are
+what a native-ui panel puts on the wire, and a second codec here would let a
+gate keep passing on a shape no panel produces. It is what closes the AI
+guidance loop end to end in `make test-ai-veto-loop`, where the veto has to come
+from a real seated human rather than through `/api/exec`.
+
 **An admitted client is not a seated one.** `AuthRequest` admits an account with
 no roster entry as a **spectator** — status OK, a real `playerNum`, `team=-1` —
 which is what the spectate-a-running-game flow depends on. Every team-scoped
@@ -1235,6 +1244,15 @@ rally, `StatisticalCombat` retaliation, `WaitCommandsAI`, `LuaSyncedCtrl`
 reproduces them, and recording them would double-apply. AI output *is* recorded:
 the AI VM runs on its own threads and which tick its commands land on is not part
 of the synced state.
+
+Every record carries a `subKind` — the verb *within* the kind, and the only axis
+that makes a cause stream readable: the `ClientPayload` tag for a client message,
+the `PlayerLeft` reason for a disconnect, and the `AICommandKind` for an AI
+command (`/api/journal` spells the last one out as `verb`). AI records carried
+`subKind` 0 until 2026-08-14, which made every AI verb one anonymous
+`ai-command` row and left the strategos' `ai.intent`-before-its-directive
+ordering — the correlation the whole guidance veto loop rests on — unobservable on
+a live run.
 
 Storage is pluggable (`IJournal`). The default is `NullJournal` — the funnel still
 classifies and counts, and `GET /api/journal` (loopback) reports the tallies.

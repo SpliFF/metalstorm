@@ -316,16 +316,22 @@ local function strategicTick(frame)
             computeMs > 2.0 and ' OVER_BUDGET' or '')
     end
     local econ = picture.economy or {}
+    -- The human's vetoes, named — the AI's own report that it consulted them.
+    -- Absent from an ordinary tick, so the line stays the same width it was.
+    local vetoTag = ''
+    if plan.vetoed and #plan.vetoed > 0 then
+        vetoTag = ' vetoed=' .. table.concat(plan.vetoed, ',')
+    end
     self.actuators:chat(string.format(
         "[strategos] tick f=%d role=%s lod=%d%s goals=%d directives=%d "
         .. "regions(own/neu/enemy)=%d/%d/%d obj(active/done)=%d/%d ownStr=%d "
-        .. "pool(own/team)=%d/%d budget=%d spent=%d%s",
+        .. "pool(own/team)=%d/%d budget=%d spent=%d%s%s",
         frame, role.id, self.lodTier,
         picture.script and (' script=' .. table.concat(picture.script.kinds or {}, '+')) or '',
         nGoals, nDir, rOwned, rNeutral, rEnemy, objActive, objDone,
         math.floor(ownStrength), math.floor(econ.ownPool or 0),
         math.floor(econ.teamPool or 0), math.floor(plan.budget or 0),
-        math.floor(plan.spent or 0), budgetTag))
+        math.floor(plan.spent or 0), budgetTag, vetoTag))
 
     -- 5. PARLEY — evaluate proposals addressed to us and respond
     -- (interaction §6.2). The decision is computed unconditionally (pure,

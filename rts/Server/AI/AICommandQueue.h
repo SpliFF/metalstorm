@@ -26,6 +26,21 @@ enum class AICommandKind : uint8_t {
     LuaMsg         = 4,   // opaque game-Lua message → luaRules->RecvLuaMsg (I1/SG1)
 };
 
+/// Name of an AICommandKind, for logs and the `/api/journal` audit rows.
+/// Lives beside the enum so a new kind has one place to be named; an unknown
+/// value reports itself rather than an empty string, because the number it
+/// carries is the only clue an operator would have.
+inline const char* AICommandKindName(AICommandKind k) {
+    switch (k) {
+        case AICommandKind::UnitCommand:    return "unit-command";
+        case AICommandKind::CreateGroup:    return "create-group";
+        case AICommandKind::IssueDirective: return "issue-directive";
+        case AICommandKind::SetPosture:     return "set-posture";
+        case AICommandKind::LuaMsg:         return "lua-msg";
+    }
+    return "unknown";
+}
+
 /// I1/SG1 clamps for the LuaMsg verb. Structural backstops below the planner
 /// (PLAN-ai-synced-write §2.4, the §8 E6 philosophy): a defeated or buggy
 /// planner must not be able to flood the journal or the synced Lua state.

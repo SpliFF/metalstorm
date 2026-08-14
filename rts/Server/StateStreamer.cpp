@@ -709,7 +709,8 @@ void StateStreamer::TickAI(int) {
     for (const auto& cmd : aiCmds) {
         const std::vector<uint8_t> aiBlob = SerializeAICommand(cmd);
         syncedinput::Journal().RecordAICommand(
-            cmd.playerId, aiBlob.data(), aiBlob.size());
+            cmd.playerId, static_cast<uint8_t>(cmd.kind),
+            aiBlob.data(), aiBlob.size());
     }
 
     ApplyAICommands(aiCmds);

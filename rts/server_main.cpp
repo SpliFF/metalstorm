@@ -48,6 +48,7 @@
 #include "Server/ReplayPlayer.h"
 #include "Server/ReplayControlDeck.h"
 #include "Server/ReplayStateBroadcast.h"
+#include "Server/AI/AICommandQueue.h"
 #include "Server/AI/AIRuntimePool.h"
 #include "Server/AI/AIDiscovery.h"
 #include "Server/PerfMetrics.h"
@@ -1229,6 +1230,13 @@ int main(int argc, char* argv[])
                 o["phase"]    = syncedinput::TickPhaseName(r.phase);
                 o["kind"]     = syncedinput::InputKindName(r.kind);
                 o["subKind"]  = r.subKind;
+                // The AI verb, spelled out. `subKind` alone made every AI
+                // record indistinguishable on this route, which is the one
+                // place a live run's cause stream is readable — and the
+                // ai.intent-before-its-directive ordering (SG1 §2.5) is a
+                // property of the stream, not of any single record.
+                if (r.kind == syncedinput::InputKind::AICommand)
+                    o["verb"] = AICommandKindName(static_cast<AICommandKind>(r.subKind));
                 o["playerId"] = r.playerId;
                 o["bytes"]    = r.payload.size();
                 return o;

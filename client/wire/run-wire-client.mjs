@@ -27,6 +27,7 @@
  *   node wire/run-wire-client.mjs --url http://127.0.0.1:9001 --user alice \
  *       [--pass secret] [--expect-auth ok|reject] [--expect-player-num N]
  *       [--command 10 --squads 1,2 --params 100,0,100] [--hold-ms 2000] [--json]
+ *       [--wire-command guidance.veto --wire-field goalId=obj:1]
  *
  * Exit status: 0 = every assertion held, 1 = an assertion failed, 2 = the
  * harness itself could not run (no server, no addon, bad arguments).
@@ -45,7 +46,7 @@ function parseArgs(argv) {
         url: 'http://127.0.0.1:9001', user: '', pass: '', token: '',
         expectAuth: 'ok', expectPlayerNum: null, command: null,
         squads: [], params: [], options: 0, holdMs: 1500, json: false, quiet: false,
-        pinMismatch: false, waitForServerMs: 0,
+        pinMismatch: false, waitForServerMs: 0, wireCommands: [],
     };
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i];
@@ -66,6 +67,30 @@ function parseArgs(argv) {
             case '--quiet': out.quiet = true; break;
             case '--pin-mismatch': out.pinMismatch = true; break;
             case '--wait-for-server': out.waitForServerMs = Number(next()); break;
+            // `--wire-command guidance.veto --wire-field goalId=obj:1` — one
+            // synced-Lua message per `--wire-command`, sent in the order given,
+            // through the app's own codec. Repeatable because the SG1 loop
+            // needs two of them from one seated human (fund, then veto) and the
+            // seat is what the messages are validated against.
+            //
+            // Fields are a separate flag rather than packed into the command
+            // string on purpose: a planner goal id is itself colon- and
+            // comma-shaped ('def:basin_a'), so any in-band separator would have
+            // to be escaped by the caller and would be got wrong exactly once.
+            // Each `--wire-field` attaches to the most recent `--wire-command`.
+            case '--wire-command': out.wireCommands.push({ cmd: next(), fields: {} }); break;
+            case '--wire-field': {
+                const kv = next();
+                const eq = kv.indexOf('=');
+                if (eq < 1) { console.error(`--wire-field wants k=v, got '${kv}'`); process.exit(2); }
+                if (!out.wireCommands.length) {
+                    console.error('--wire-field must follow a --wire-command');
+                    process.exit(2);
+                }
+                out.wireCommands[out.wireCommands.length - 1]
+                    .fields[kv.slice(0, eq)] = kv.slice(eq + 1);
+                break;
+            }
             default:
                 console.error(`unknown argument: ${a}`);
                 process.exit(2);
@@ -242,6 +267,26 @@ try {
         }
     }
 
+    // Synced-Lua messages — the guidance verbs a native-ui panel sends. Sent
+    // only on a seated session: `RecvLuaMsg`'s gadget derives the team from the
+    // sender, so an unseated (team -1) sender is refused by every guidance
+    // writer and the arm would be vacuous rather than failed.
+    const wireSent = [];
+    if (args.wireCommands.length && auth.ok) {
+        if (auth.team < 0) {
+            failures.push(`--wire-command needs a seated session; this one is team `
+                + `${auth.team} (role '${auth.role}') and every guidance writer would refuse it`);
+        } else {
+            for (const { cmd, fields } of args.wireCommands) {
+                wireSent.push({ cmd, wire: client.sendWireCommand(cmd, fields) });
+            }
+            await client.flush();
+            if (client.writeErrors.length) {
+                failures.push(`a wire command's bytes did not leave: ${client.writeErrors.join('; ')}`);
+            }
+        }
+    }
+
     // Hold the session open: a command's effect (and any server refusal) arrives
     // after the send returns, and a harness that exits immediately proves only
     // that the bytes were written.
@@ -265,6 +310,11 @@ try {
             inboundByPayload: Object.fromEntries(client.inboundByPayload),
             sentByPayload: Object.fromEntries(client.sentByPayload),
             commandPayloadType: args.command !== null ? ClientPayload.PlayerCommand : null,
+            // The bytes, verbatim: the SG1 arm asserts the server acted on the
+            // goal id the AI published, and a harness that reported only "sent"
+            // could not tell a right id from a mangled one.
+            wireSent,
+            luaRulesMsgPayloadType: args.wireCommands.length ? ClientPayload.LuaRulesMsg : null,
             writeErrors: client.writeErrors,
             failures,
         }));

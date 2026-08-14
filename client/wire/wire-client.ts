@@ -31,6 +31,8 @@ import { Handshake } from '../src/protocol/spring-web/handshake.js';
 import { AuthRequest } from '../src/protocol/spring-web/auth-request.js';
 import { PlayerCommand } from '../src/protocol/spring-web/player-command.js';
 import { StandingOrderCreate } from '../src/protocol/spring-web/standing-order-create.js';
+import { LuaRulesMsg } from '../src/protocol/spring-web/lua-rules-msg.js';
+import { encodeWire } from '../src/ui/native-ui/guidance-wire.js';
 import { ServerMessage } from '../src/protocol/spring-web/server-message.js';
 import { ServerPayload } from '../src/protocol/spring-web/server-payload.js';
 import { AuthResponse } from '../src/protocol/spring-web/auth-response.js';
@@ -298,6 +300,38 @@ export class WireClient {
         this.log(`[wire] sent StandingOrderCreate seq=${seq} type=${order.type} `
             + `priority=${order.priority ?? 50}`);
         return seq;
+    }
+
+    /**
+     * Send a synced-Lua message — the transport the native-ui panels use for
+     * every guidance verb (`createSendCommand` → `connection.sendLuaRulesMsg`
+     * → `ClientMessageHandler` → `luaRules->RecvLuaMsg(payload, playerNum)`).
+     *
+     * SG1 task 5 needs this because the veto half of the loop is a HUMAN's
+     * message: injecting it through `/api/exec` would call the same gadget
+     * entry point but skip the client's whole path to it — the seat check, the
+     * `LUA_MSG_MAX_BYTES` clamp, the per-session rate budget, and the
+     * playerNum the server (not the caller) attributes it to. The payload is
+     * built by the app's own `encodeWire`, not a copy of it, so a codec change
+     * cannot leave the harness sending a shape no panel produces.
+     */
+    sendLuaRulesMsg(payload: string | Uint8Array): void {
+        const bytes = typeof payload === 'string'
+            ? new TextEncoder().encode(payload) : payload;
+        const b = new flatbuffers.Builder(64 + bytes.length);
+        const data = LuaRulesMsg.createDataVector(b, bytes);
+        const msg = LuaRulesMsg.createLuaRulesMsg(b, data);
+        this.sendClientMessage(b, ClientPayload.LuaRulesMsg, msg);
+        this.log(`[wire] sent LuaRulesMsg bytes=${bytes.length} `
+            + `head='${typeof payload === 'string' ? payload.slice(0, 64) : '(binary)'}'`);
+    }
+
+    /** `sendLuaRulesMsg` over the app's own wire codec — the exact bytes a
+     *  panel's `ctx.sendCommand(cmd, fields)` puts on the wire. */
+    sendWireCommand(cmd: string, fields: Record<string, string | number | boolean> = {}): string {
+        const wire = encodeWire(cmd, fields);
+        this.sendLuaRulesMsg(wire);
+        return wire;
     }
 
     private sendClientMessage(

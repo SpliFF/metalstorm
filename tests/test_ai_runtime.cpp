@@ -16,6 +16,7 @@
 #include "Server/AI/AICommandQueue.h"
 #include "Server/AI/AICommandCodec.h"
 #include "Server/AI/AIStateSnapshot.h"
+#include "Server/SyncedInputJournal.h"
 #include "System/SpringLog/SpringLog.h"
 
 #include <filesystem>
@@ -695,4 +696,65 @@ TEST_CASE("I1/SG1: the LuaMsg kind and its payload survive the journal codec") {
     truncated.resize(truncated.size() - 2);
     AICommand ignored;
     CHECK_FALSE(DeserializeAICommand(truncated, ignored));
+}
+
+// ────────────────────── SG1 task 5(b): push order is observable ─────────────
+// The correlation the whole veto loop rests on is an ORDERING: `ai.intent`
+// must be pushed immediately BEFORE the directive it annotates, because
+// RecordIntent consumes a tag only if it was stamped in the same frame
+// (game_ai_guidance.lua) — a tag that arrives after its directive annotates
+// nothing, and one pushed for a skipped directive is stolen by the next.
+// actuators.lua's `_issueTagged` is what guarantees it; this is the assertion
+// that the guarantee is *checkable on a real run*, which it was not: every AI
+// record went into the journal with subKind 0, so `/api/journal`'s rows —
+// the only view of a live server's cause stream — could not tell a LuaMsg
+// from the directive beside it.
+TEST_CASE("SG1 5(b): the journal names each AI verb, so intent-before-directive is inspectable") {
+    using namespace syncedinput;
+    MemoryJournal j;
+    Recorder rec;
+    rec.SetJournal(&j);
+    rec.BeginTick(600);
+    rec.SetPhase(TickPhase::Stream);
+
+    // One tagged directive, recorded exactly as StateStreamer's drain does it.
+    auto record = [&](const AICommand& c) {
+        const std::vector<uint8_t> blob = SerializeAICommand(c);
+        rec.RecordAICommand(c.playerId, static_cast<uint8_t>(c.kind),
+                            blob.data(), blob.size());
+    };
+    AICommand tag;
+    tag.kind = AICommandKind::LuaMsg;
+    tag.playerId = 4;
+    tag.teamId = 0;
+    tag.text = "cmd=ai.intent&goalId=obj:1&dt=9&region=meridian_basin";
+    AICommand directive;
+    directive.kind = AICommandKind::IssueDirective;
+    directive.playerId = 4;
+    directive.teamId = 0;
+    directive.directiveType = 9;
+    record(tag);
+    record(directive);
+
+    REQUIRE(j.Records().size() == 2);
+    // Push order, and each record naming its own verb.
+    CHECK(j.Records()[0].kind == InputKind::AICommand);
+    CHECK(j.Records()[0].subKind == static_cast<uint8_t>(AICommandKind::LuaMsg));
+    CHECK(j.Records()[1].subKind == static_cast<uint8_t>(AICommandKind::IssueDirective));
+    CHECK(j.Records()[0].seq < j.Records()[1].seq);
+    CHECK(j.Records()[0].frame == 600);
+    CHECK(j.Records()[1].frame == 600);
+    CHECK(j.Records()[0].playerId == 4);
+
+    // The stamped kind and the payload's kind byte are two copies of one fact.
+    // This is the check that keeps them from drifting: the caller passes the
+    // typed enum, the codec writes byte 0, and nothing else ties them.
+    for (const auto& r : j.Records())
+        CHECK(r.payload[0] == r.subKind);
+
+    // And the name is what an operator actually reads on /api/journal.
+    CHECK(std::string(AICommandKindName(
+              static_cast<AICommandKind>(j.Records()[0].subKind))) == "lua-msg");
+    CHECK(std::string(AICommandKindName(
+              static_cast<AICommandKind>(j.Records()[1].subKind))) == "issue-directive");
 }

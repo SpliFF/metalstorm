@@ -232,11 +232,25 @@ end
 -- 4. Guidance gate (interaction §6.2) — BINDING, applied before scoring so
 -- forbidden goals never even compete.
 --=============================================================================
+--- Returns `excluded, reason` — the reason so the caller can report a HUMAN's
+--- veto separately from an authored paint rule.
+---
+--- Why the reason is reported at all: "the AI stopped pursuing the vetoed goal"
+--- is not observable from outside. The top-ranked goal rotates tick to tick as
+--- expansion progresses, so a planner that ignored the veto entirely produces
+--- much the same intent lines — measured 2026-08-14, with this function's veto
+--- clause commented out the live loop gate (`make test-ai-veto-loop`) still
+--- passed. The only thing that separates the two worlds is whether the veto was
+--- consulted, and only the planner can say so. It must be reported as a
+--- BY-PRODUCT of the exclusion, never recomputed beside it: a report derived
+--- from the veto list independently would keep naming the goal for a planner
+--- that no longer acted on it, which is the same gate being inert with extra
+--- confidence.
 local function guidanceExcludes(goal, guidance)
     if goal.region and guidance.regionPaint[goal.region] == 'forbidden' then
-        return true                                  -- hard exclusion
+        return true, 'paint'                         -- hard exclusion
     end
-    if guidance.veto[goal.id] then return true end   -- vetoed this tick window
+    if guidance.veto[goal.id] then return true, 'veto' end   -- vetoed this tick window
     return false
 end
 
@@ -272,9 +286,14 @@ local function assign(goals, packages, ctx)
     local cGoal, cPkg, cScore, cPs, cCost, cTie = {}, {}, {}, {}, {}, {}
     local cRank, cMass = {}, {}   -- allocation tier + package mass (terminal tier)
     local n = 0
+    local vetoed = {}             -- goals a human's veto removed, this tick
 
     for _, goal in ipairs(goals) do
-        if not guidanceExcludes(goal, guidance) and goal.kind ~= 'RESERVE' then
+        local excluded, why = guidanceExcludes(goal, guidance)
+        if excluded and why == 'veto' and goal.kind ~= 'RESERVE' then
+            vetoed[#vetoed + 1] = goal.id
+        end
+        if not excluded and goal.kind ~= 'RESERVE' then
             -- Package-independent terms: once per goal, not once per pair.
             local ev = expectedValue(goal, picture, profile, guidance, config)
             local sw = sourceWeight(goal, role, guidance, profile)
@@ -375,7 +394,7 @@ local function assign(goals, packages, ctx)
             end
         end
     end
-    return assignments, usedPkg
+    return assignments, usedPkg, vetoed
 end
 
 --=============================================================================
@@ -438,6 +457,9 @@ local function emit(assignments, packages, usedPkg, ctx)
         directives = directives, intent = intent, reserved = reserved,
         posturesOnly = gov.posturesOnly, reserve = gov.reserve,
         budget = gov.budget, spent = spent,
+        -- What `assign` actually excluded on a human's veto — its own record,
+        -- not a recomputation (see guidanceExcludes' header).
+        vetoed = ctx._vetoed or {},
     }
 end
 
@@ -479,7 +501,10 @@ function Planner.plan(ctx)
     local gov = governor(picture, config, ctx.role)
     ctx.gov = gov
 
-    local assignments, usedPkg = assign(ctx.slate, packages, ctx)
+    local assignments, usedPkg, vetoed = assign(ctx.slate, packages, ctx)
+    -- Carried on ctx rather than through emit's signature: emit already takes
+    -- four arguments and this is a report, not an input to the emission.
+    ctx._vetoed = vetoed
     return emit(assignments, packages, usedPkg, ctx)
 end
 

@@ -357,9 +357,10 @@ bool Recorder::RecordLuaExec(int32_t playerId, const std::string& scope,
                 reinterpret_cast<const uint8_t*>(blob.data()), blob.size());
 }
 
-bool Recorder::RecordAICommand(int32_t playerId, const uint8_t* data, size_t size) {
+bool Recorder::RecordAICommand(int32_t playerId, uint8_t kind,
+                               const uint8_t* data, size_t size) {
     ++counters.seen;
-    return Emit(InputKind::AICommand, 0, playerId, 0, data, size);
+    return Emit(InputKind::AICommand, kind, playerId, 0, data, size);
 }
 
 bool Recorder::RecordGameStart(const std::string& setupSummary) {

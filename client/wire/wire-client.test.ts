@@ -9,6 +9,7 @@ import { Handshake } from '../src/protocol/spring-web/handshake';
 import { AuthRequest } from '../src/protocol/spring-web/auth-request';
 import { PlayerCommand } from '../src/protocol/spring-web/player-command';
 import { StandingOrderCreate } from '../src/protocol/spring-web/standing-order-create';
+import { LuaRulesMsg } from '../src/protocol/spring-web/lua-rules-msg';
 import { ServerError } from '../src/protocol/spring-web/server-error';
 import { ServerMessage } from '../src/protocol/spring-web/server-message';
 import { ServerPayload } from '../src/protocol/spring-web/server-payload';
@@ -242,6 +243,41 @@ describe('scripted wire client — outbound', () => {
         // Conditions are absent, not empty — the server reads them through
         // ReadStandingOrderConditions, which handles a null table.
         expect(so.conditions()).toBe(null);
+    });
+
+    it('encodes a guidance verb as a LuaRulesMsg through the app\'s own codec', async () => {
+        // SG1 task 5: the veto half of the loop is a human's message, and the
+        // panel sends it as a LuaRulesMsg carrying `encodeWire`'s bytes. The
+        // point of routing through the app's encoder rather than a copy is that
+        // a planner goal id is not URL-shaped — ':' must survive unescaped
+        // (only %, &, = and ',' are escaped), because the gadget compares the
+        // id against the string the planner published.
+        const session = new FakeSession();
+        const client = makeClient(session);
+        await client.connect();
+        const wire = client.sendWireCommand('guidance.veto', { goalId: 'def:basin_a' });
+        expect(wire).toBe('cmd=guidance.veto&goalId=def:basin_a');
+        await client.flush();
+
+        const sent = decodeSent(session);
+        expect(sent[2].type).toBe(ClientPayload.LuaRulesMsg);
+        const lrm = sent[2].msg.payload(new LuaRulesMsg()) as LuaRulesMsg;
+        const bytes = new Uint8Array(lrm.dataLength());
+        for (let i = 0; i < bytes.length; i++) bytes[i] = lrm.data(i)!;
+        expect(new TextDecoder().decode(bytes)).toBe('cmd=guidance.veto&goalId=def:basin_a');
+        // Bytes, not a string field: an embedded NUL or a '%' escape must reach
+        // the gadget verbatim.
+        expect(client.sentByPayload.get(ClientPayload.LuaRulesMsg)).toBe(1);
+    });
+
+    it('escapes a wire field the codec has to escape, and only those', async () => {
+        const session = new FakeSession();
+        const client = makeClient(session);
+        await client.connect();
+        // '&' and '=' would end the field / the pair; ':' and '/' must not move.
+        expect(client.sendWireCommand('guidance.paint',
+            { regionKey: 'a&b=c,d:e', value: 'deny' }))
+            .toBe('cmd=guidance.paint&regionKey=a%26b%3Dc%2Cd:e&value=deny');
     });
 
     it('reports a rejected write instead of losing it', async () => {

@@ -1,4 +1,4 @@
-.PHONY: setup build build-release test test-cpp test-client test-all dev-client generate-protocol export-metalstorm-specs clean test-headless-batch test-headless-determinism test-replay-verify test-replay-spectate soak-growth soak-churn
+.PHONY: setup build build-release test test-cpp test-client test-all dev-client generate-protocol export-metalstorm-specs clean test-headless-batch test-headless-determinism test-replay-verify test-replay-spectate test-ai-veto-loop soak-growth soak-churn
 
 # First-time setup
 setup:
@@ -51,9 +51,10 @@ test-all: test-cpp test-client
 # (PLAN-headless.md task 3 §6 "meta" requirement), the fixture non-vacuity
 # checks, the replay-verdict parser and the spectate-arm rules (PLAN-replay.md
 # task 5 / §7.11 T2-a-1), the soak growth-slope ruling (PLAN-long-uptime.md
-# task 4) and the churn-arm verdict (PLAN-long-uptime.md T4-1).
+# task 4), the churn-arm verdict (PLAN-long-uptime.md T4-1) and the AI
+# veto-loop verdict (PLAN-ai-synced-write.md task 5).
 test-headless-batch:
-	cd tools/headless-batch && node --test test/matrix.test.mjs test/fixture-checks.test.mjs test/replay-verdict.test.mjs test/replay-spectate.test.mjs test/growth-fit.test.mjs test/run-paths.test.mjs test/churn-checks.test.mjs test/key-census.test.mjs
+	cd tools/headless-batch && node --test test/matrix.test.mjs test/fixture-checks.test.mjs test/replay-verdict.test.mjs test/replay-spectate.test.mjs test/growth-fit.test.mjs test/run-paths.test.mjs test/churn-checks.test.mjs test/key-census.test.mjs test/ai-veto-checks.test.mjs
 
 # Determinism pair-run CI hook (PLAN-headless.md task 4): builds spring-server,
 # runs the PaperTanks-scale fixture twice, diffs the two stateHash sequences.
@@ -88,6 +89,21 @@ test-replay-spectate:
 	node tools/headless-batch/replay-spectate-run.mjs \
 		--server-bin build/debug/spring-server \
 		--out-dir build/replay-spectate
+
+# AI guidance veto loop (PLAN-ai-synced-write.md task 5 — SG1's exit test): a
+# live sim in which the strategos publishes its planner goal ids into synced
+# state, a real human on its team vetoes one over the real wire, and the planner
+# must drop that goal while still working. The one gate that closes the whole
+# AI→human→AI loop end to end; every hop below it is unit-tested and the loop
+# itself was unobserved until 2026-08-14. Needs client/'s WebTransport addon
+# (`npm install`). Debug binary is fine — nothing here is a perf claim — and the
+# fixture is deliberately PACED (x8, not uncapped) because the arm interleaves
+# two client sessions and HTTP polls with the sim.
+test-ai-veto-loop:
+	cmake --build build/debug --target spring-server
+	node tools/headless-batch/ai-veto-loop-run.mjs \
+		--server-bin build/debug/spring-server \
+		--out-dir build/ai-veto-loop
 
 # Soak ladder + growth report (PLAN-long-uptime.md task 4). NOT part of
 # test-all: four arms of one simulated day each cost ~35 wall-minutes. Uses the
