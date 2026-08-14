@@ -60,6 +60,7 @@ from terragen import settle as st           # noqa: E402
 from terragen import smf                    # noqa: E402
 from terragen import uplift as up           # noqa: E402
 from terragen import vegetation as veg      # noqa: E402
+from terragen import yards as yd            # noqa: E402
 from terragen.vegetation import _hash01     # noqa: E402
 import ms_defs                              # noqa: E402
 
@@ -982,14 +983,30 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
         road_mask, road_dist = raster.mask, raster.dist
         rd.carve_plazas(road_mask, road_dist, towns, 85.0, cell, rp)
         rd.carve_junction_aprons(raster, network.junctions, cell, rp)
+        # Roadside yard PADS (roads R4b) — prepared ground beside a link for the
+        # scenario layer's depots. Carved as ordinary deck and BEFORE the flatten,
+        # because a pad the grader never sees is a pad nothing levels; see
+        # terragen/yards.py. Assigned on every pad pass like `crossings` below,
+        # so the last pass's pads are the ones that ship.
+        yard_pads, yard_refusals = yd.plan_yard_pads(network, h, raster, cell,
+                                                     0.0)
+        yd.carve_yard_pads(raster, yard_pads, cell, rp)
         # ONE flatten pass over the combined field — see roads.flatten_network
         h = rd.flatten_network(h, raster, cell, rp)
+        # ...and the pads are PLATEAUED after it, not by it: the grader blends
+        # toward a blur, which does nothing to a uniform slope (terragen/yards.py
+        # measured 31.2 of 31.5 elmos surviving). A yard is cut into graded
+        # ground, in that order.
+        h = yd.level_yard_pads(h, yard_pads, cell)
         _mix = ", ".join(f"{rd.ROAD_CLASS_NAMES[k]} {v:.0f}"
                          for k, v in sorted(network.length_by_class().items())
                          if v > 0)
         print(f"roads done {time.time()-t0:.0f}s ({len(polylines)} segments, "
               f"{len(towns)} town plazas, {len(starts)} starts, "
               f"{len(network.junctions)} junctions; length by class: {_mix})")
+        print(f"yard pads: {len(yard_pads)} prepared, "
+              f"{len(yard_refusals)} station(s) refused")
+        yd.report_pad_relief(h, yard_pads, cell)
         rd.report_delivered_grades(network, h, cell, rp)
         # Water crossings (roads R3b) — an archipelago plans one network per
         # island, so every crossing here is an INLAND ford: the sea between two
@@ -1152,6 +1169,10 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     road_class = _surf_raster.surf
     rd.carve_plaza_classes(road_class, towns, 85.0, cell)
     rd.carve_junction_aprons(_surf_raster, network.junctions, cell, rp)
+    # Both rasters get every carve (the apron note's reason): a pad that is deck
+    # in one and not the other is a hole in the typemap where the tarmac is.
+    yd.carve_yard_pads(_surf_raster, yard_pads, cell, rp)
+    yd.carve_yard_pad_classes(road_class, yard_pads, cell, rp)
     _deck = max(1, int((road_class != rd.SURF_NONE).sum()))
     print("road surfaces (%d deck cells): %s" % (_deck, ", ".join(
         "%s %.1f%%" % (rd.SURFACE_NAMES[k], 100.0 * int((road_class == k).sum()) / _deck)
@@ -1348,7 +1369,8 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     pkg.write_package(
         out_dir, cfg, h, slope, b, moist, road_dist, road_mask, cell,
         scratch_dir=os.environ.get("TMPDIR", "/tmp"),
-        roads_lua=pkg.emit_roads_lua(network, cell, rp, crossings=crossings),
+        roads_lua=pkg.emit_roads_lua(network, cell, rp, crossings=crossings,
+                                     yards=yard_pads),
         feature_files=feature_files, stamps=stamps, road_class=road_class,
     )
     baker = bk.AlbedoBaker(h, slope, b, moist, road_dist, 0.0, cell, seed,

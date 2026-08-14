@@ -49,6 +49,7 @@ from terragen import rivers as riv
 from terragen import roads as rd
 from terragen import selftest as stest
 from terragen import smf
+from terragen import yards as yd
 
 import civilians_gen as civ
 import meridian as m1   # the v1 generator, kept for its layout-only emitters
@@ -392,14 +393,28 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
     # different place from a plaza: a plaza is authored at a site, a junction is
     # wherever the planner found the cheapest point on the trunk.
     rd.carve_junction_aprons(raster, net.junctions, cell, rp)
+    # 6b. roadside yard PADS (roads R4b): prepared ground beside a link for the
+    # scenario layer to stand a depot on. Carved as ordinary deck, and BEFORE the
+    # flatten, because a pad that is not in the raster when the grader runs is a
+    # pad nothing ever levels — see terragen/yards.py.
+    yard_pads, yard_refusals = yd.plan_yard_pads(net, h, raster, cell, 0.0)
+    yd.carve_yard_pads(raster, yard_pads, cell, rp)
     # ONE flatten pass over the combined field. Per-class passes would grade the
     # crossing twice — see roads.flatten_network.
     h = rd.flatten_network(h, raster, cell, rp)
+    # ...and the pads are PLATEAUED after it, not by it: the grader blends toward
+    # a blur, which does nothing to a uniform slope, so a pad it "graded" comes
+    # off a ramp still on the ramp (terragen/yards.py measured 31.2 of 31.5
+    # elmos). A yard is cut into graded ground, in that order.
+    h = yd.level_yard_pads(h, yard_pads, cell)
     _mix = ", ".join(f"{rd.ROAD_CLASS_NAMES[k]} {v:.0f}"
                      for k, v in sorted(net.length_by_class().items()) if v > 0)
     print(f"roads done {time.time()-t_start:.0f}s "
           f"({len(polylines)} segments, {len(plaza_sites)} plazas, "
           f"{len(net.junctions)} junctions; length by class: {_mix})")
+    print(f"yard pads: {len(yard_pads)} prepared, "
+          f"{len(yard_refusals)} station(s) refused")
+    yd.report_pad_relief(h, yard_pads, cell)
     # 6a. water crossings (roads R3b) — measured on the DELIVERED surface, so a
     # ford is graded where the deck now stands and not where the planner drew
     # it. Published in mapdata/roads.lua; nothing is placed here (terragen/
@@ -451,6 +466,11 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
     road_class = _surf_raster.surf
     rd.carve_plaza_classes(road_class, plaza_sites, 85.0, cell)
     rd.carve_junction_aprons(_surf_raster, net.junctions, cell, rp)
+    # The pads again, on the class raster this time: both rasters get every
+    # carve, for the reason the apron note gives — a pad that is deck in one and
+    # not in the other is a hole in the typemap exactly where the tarmac is.
+    yd.carve_yard_pads(_surf_raster, yard_pads, cell, rp)
+    yd.carve_yard_pad_classes(road_class, yard_pads, cell, rp)
     _deck = max(1, int((road_class != rd.SURF_NONE).sum()))
     _surf_mix = ", ".join(
         f"{rd.SURFACE_NAMES[k]} {100.0 * int((road_class == k).sum()) / _deck:.1f}%"
@@ -644,7 +664,8 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
     pkg.write_package(
         out_dir, cfg, h, slope, b, moist, road_dist, road_mask, cell,
         scratch_dir=scratch, regions_lua=m1.build_regions_lua(layout),
-        roads_lua=pkg.emit_roads_lua(net, cell, rp, crossings=crossings),
+        roads_lua=pkg.emit_roads_lua(net, cell, rp, crossings=crossings,
+                                     yards=yard_pads),
         feature_files=contract_files, stamps=stamps, road_class=road_class,
     )
 

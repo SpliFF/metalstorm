@@ -154,7 +154,12 @@ from scenario_templates import (                          # noqa: E402
 # vehicles parked on their aprons, and every one of them draws from the seeded
 # stream — so v3 and v4 disagree about every placement after the relics on such
 # a map, and agree exactly on a map with no mapdata/roads.lua.
-GENERATOR_VERSION = 4
+# 5 (roads R4b): prepared yard pads. A map that publishes `yards` places its
+# frontage buildings on those pads in preference to a carved parcel, which moves
+# them and therefore every seeded draw after them. A map that publishes no pads
+# — which is every shipped map until the packages are regenerated — is
+# unchanged from v4 apart from this number.
+GENERATOR_VERSION = 5
 
 SCHEMA_VERSION = 1          # game_scenario.lua's SUPPORTED_VERSION
 GAME_SPEED = 30             # sim frames per second
@@ -303,6 +308,16 @@ _LINK_RE = re.compile(
     r'points\s*=\s*\{(?P<points>.*?\})\s*\}')
 _POINT_RE = re.compile(r'\{\s*(-?[0-9.]+)\s*,\s*(-?[0-9.]+)\s*\}')
 
+_YARD_RE = re.compile(
+    r'\{\s*key\s*=\s*"(?P<key>[^"]+)"\s*,\s*'
+    r'class\s*=\s*(?P<class>[0-9]+)\s*,\s*'
+    r'name\s*=\s*"(?P<name>[^"]+)"\s*,\s*'
+    r'x\s*=\s*(?P<x>-?[0-9.]+)\s*,\s*z\s*=\s*(?P<z>-?[0-9.]+)\s*,\s*'
+    r'heading\s*=\s*(?P<heading>-?[0-9]+)\s*,\s*'
+    r'half_along\s*=\s*(?P<half_along>-?[0-9.]+)\s*,\s*'
+    r'half_away\s*=\s*(?P<half_away>-?[0-9.]+)\s*,\s*'
+    r'link\s*=\s*(?P<link>-?[0-9]+)\s*\}')
+
 
 def read_road_links(map_dir: str) -> list[dict]:
     """The road network the MAP published, from `mapdata/roads.lua` (roads R2).
@@ -341,6 +356,45 @@ def read_road_links(map_dir: str) -> list[dict]:
                     "width": float(m.group("width")), "a": int(m.group("a")),
                     "b": int(m.group("b")), "points": pts})
     return out
+
+
+def read_road_yards(map_dir: str) -> list[dict]:
+    """Yard pads the MAP prepared, from `mapdata/roads.lua` (roads R4b).
+
+    The third reader of the same file and the last of R4's open halves. R4's
+    placer carves its own parcel out of whatever is beside a link, so a depot
+    stands on a road but on unprepared ground: the tarmac, the driveway markings
+    and the typemap under a yard are all baked before `scenariogen` opens a map,
+    so only the generator can lay them. When it has, this is how the placer finds
+    out — and a pad it does not use is not wasted, it is a layby.
+
+    Bounded at the `crossings` block for the reason `read_road_links` is bounded
+    at `junctions`: three lists of braced rows in one file, and a regex let loose
+    over all of them will read a row of one kind as a malformed row of another.
+
+    Same empty-vs-absent rule as its two siblings: a map generated before R4b
+    ships no `yards` key at all, which returns [] here exactly as a map whose
+    roads had nowhere for a pad does. The caller falls back to R4's blind
+    parcel carve, which is the pre-R4b behaviour.
+    """
+    path = os.path.join(map_dir, "mapdata", "roads.lua")
+    if not os.path.exists(path):
+        return []
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+    head = text.find("yards")
+    if head < 0:
+        return []
+    tail = text.find("crossings", head)
+    block = text[head:tail if tail > 0 else len(text)]
+    return [{"key": m.group("key"), "road_class": int(m.group("class")),
+             "name": m.group("name"),
+             "x": float(m.group("x")), "z": float(m.group("z")),
+             "heading": int(m.group("heading")),
+             "half_along": float(m.group("half_along")),
+             "half_away": float(m.group("half_away")),
+             "link": int(m.group("link"))}
+            for m in _YARD_RE.finditer(block)]
 
 
 def read_road_crossings(map_dir: str) -> list[dict]:
@@ -2055,14 +2109,19 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
     # anchored to the ROAD GRAPH rather than to a region — see road_frontage.py
     # — so a map that publishes no `mapdata/roads.lua` gets no yards and says so
     # rather than falling back to a scatter that would put a depot in a field.
+    # R4b: the map may also have PREPARED ground — pads it graded flat and
+    # surfaced when it baked the splat and the typemap, which a scenario-time
+    # placer cannot do for itself. Those are preferred over a carved parcel, and
+    # a map that publishes none simply carves as R4 did.
     road_links = read_road_links(map_dir)
+    road_yards = read_road_yards(map_dir)
     frontage_entries, frontage_refusals = rf.stage_frontage(
         rnd, terrain, facts, road_links, ROAD_FRONTAGE,
         mclass=DEFAULT_CLASS,
         occupied_rects=[b.rect() for b in all_buildings],
         occupied_units=all_cluster_units,
         footprint_gap=FOOTPRINT_GAP, unit_gap=UNIT_SPAWN_GAP,
-        budget=MAX_ROAD_FRONTAGE)
+        budget=MAX_ROAD_FRONTAGE, pads=road_yards)
     if not road_links:
         frontage_refusals = ["this map publishes no road graph "
                              "(mapdata/roads.lua), so it can carry no yards"]
@@ -2374,6 +2433,12 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
         # nothing could be parked on.
         "frontage": [(e["def"], e["road_name"], len(e["parked"]))
                      for e in frontage_entries],
+        # R4b, reported separately so R4's three-tuple keeps its shape: which
+        # yards stood on ground the MAP prepared. A yard absent from here is on a
+        # carved parcel, i.e. on grass, which is the difference R4b exists to
+        # make and is otherwise invisible in the emitted file.
+        "frontage_pads": {e["def"]: e["pad"] for e in frontage_entries
+                          if "pad" in e},
         "frontage_refusals": frontage_refusals,
         "crossings": [(c["region"]["key"], c["name"], c["chain"],
                        round(c["width"])) for c in crossings],
@@ -2968,7 +3033,11 @@ def main(argv=None):
     # yard is a legitimate outcome, and the refusal says which rule refused so
     # "this map has no highway" cannot read as "the placer is broken".
     for defname, road, parked in meta["frontage"]:
-        say(f"    yard     {road:22s} {defname} ({parked} parked)")
+        # R4b: on a prepared pad, or on grass beside the road. Said on the same
+        # line because "the depot got placed" was never the question.
+        pad = meta.get("frontage_pads", {}).get(defname)
+        where = f"prepared pad {pad}" if pad else "a carved parcel (no tarmac)"
+        say(f"    yard     {road:22s} {defname} ({parked} parked) on {where}")
     for why in meta["frontage_refusals"]:
         say(f"    yard refused: {why}")
     say(f"  {len(meta['landmarks'])} landmark(s) the command language can "

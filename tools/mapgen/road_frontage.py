@@ -175,6 +175,99 @@ def carve_parcels(link: dict, spec: dict, facts, pitch: float = STATION_PITCH,
     return out
 
 
+# How far a published pad's centre may sit from where its own link says it
+# should, before the pad is refused rather than used. The pad publishes the index
+# of the link it was planned against, and that index is only stable because
+# `emit_roads_lua` emits one row per `net.links` entry and `read_road_links`
+# drops none of them. Checking it turns a silent index shift — a depot built
+# against the wrong road's polyline, which is R4's "legal building facing away
+# from its road" one file further out — into a refusal that says so.
+PAD_LINK_TOLERANCE = 48.0
+
+
+def _pad_link(pad: dict, links: list[dict]) -> dict:
+    """The published link a pad was planned against, verified against geometry."""
+    i = pad["link"]
+    if not (0 <= i < len(links)):
+        raise FrontageRefused(
+            f"pad {pad['key']} names link {i} of {len(links)} published")
+    link = links[i]
+    d = min(tp._point_seg_dist(pad["x"], pad["z"], a, b)
+            for a, b in zip(link["points"][:-1], link["points"][1:]))
+    want = link["width"] / 2.0 + pad["half_away"]
+    # The pad's near edge is `setback` off the carriageway edge (terragen's
+    # YardParams.setback), so the centre stands off by half a width + setback +
+    # half a depth. The setback is the map's to choose and is not published, so
+    # the tolerance is one-sided: closer than `want` means the pad overlaps the
+    # deck, much further means this is not that pad's road.
+    if d < want - PAD_LINK_TOLERANCE or d > want + 4.0 * PAD_LINK_TOLERANCE:
+        raise FrontageRefused(
+            f"pad {pad['key']} stands {d:.0f} from link {i}, not ~{want:.0f} — "
+            f"the published link index and the pad disagree")
+    return link
+
+
+def parcels_from_pads(pads: list[dict], spec: dict, facts) -> list[tuple[dict, object]]:
+    """(link-bearing pad, parcel) for every published pad `spec` fits on.
+
+    The R4b path, and the difference from `carve_parcels` is what owns the
+    geometry. `carve_parcels` invents a parcel beside a link and the ground under
+    it is whatever the generator happened to leave there — grass, most of the
+    time, because a scenario-time placer cannot mark its own tarmac
+    (terragen/yards.py's header). A pad IS marked: graded flat, surfaced with the
+    road's own class, in the typemap and in the albedo. So when a map publishes
+    pads this is the parcel list, and `carve_parcels` is the fallback for maps
+    generated before R4b.
+
+    The parcel is the WHOLE pad rather than a spec-sized rectangle inside it. A
+    yard is the tarmac, so a shed on a pad belongs at the back of the tarmac with
+    the apron in front of it — which is what `_yard_anchor` does with a parcel
+    this deep, and it is why `park_vehicles` fills from the road edge. The spec's
+    own `yard_depth` and `frontage` become a FIT test: a pad too small for this
+    building's yard is refused by name rather than half-used.
+
+    `side` is 1 and the heading is derived so that the lot's away-from-road unit
+    is the pad's published away normal. A pad publishes the normal precisely so
+    that this reconstruction cannot pick the wrong side of the road — one
+    convention, checked by `tests/test_yards.py`'s round trip.
+    """
+    f = facts[spec["def"]]
+    hx, hz = tstage._extent_of("south", f.footprint_x, f.footprint_z)
+    reach = 2.0 * 0.7072 * (hx + hz)
+    need_depth = spec["yard_depth"] + reach
+    need_width = max(spec.get("frontage", 0.0), reach)
+    out = []
+    for pad in pads:
+        if pad["road_class"] not in spec["classes"]:
+            continue
+        depth = 2.0 * pad["half_away"]
+        width = 2.0 * pad["half_along"]
+        if depth < need_depth or width < need_width:
+            continue
+        ax, az = _away_of(pad)
+        away = math.atan2(az, ax)
+        out.append((pad, tp.Lot(
+            key=pad["key"], street=pad["name"],
+            x=int(round(pad["x"])), z=int(round(pad["z"])),
+            width=int(round(width)), depth=int(round(depth)),
+            heading=away - math.pi / 2.0,
+            facing=tp._facing_of(away + math.pi),
+            role="frontage", defname=spec["def"], side=1)))
+    return out
+
+
+def _away_of(pad: dict) -> tuple[float, float]:
+    """The pad's away-from-road unit, from the heading the map published.
+
+    `terragen.bridges.heading_dir` in two lines rather than an import, because
+    the scenario layer must not depend on the generator's package — the same
+    reason `read_road_crossings` re-derives nothing else from it. The convention
+    is pinned on both sides by `tests/test_yards.py`.
+    """
+    theta = pad["heading"] * (2.0 * math.pi / 65536.0)
+    return (math.sin(theta), -math.cos(theta))
+
+
 def yard_span(lot, bx: float, bz: float, hx: float, hz: float
               ) -> tuple[float, float]:
     """The apron, as a (v_lo, v_hi) band in the PARCEL's own depth axis.
@@ -260,8 +353,19 @@ def _rect(x: float, z: float, hx: float, hz: float, pad: float = 0.0):
 def stage_frontage(rnd, terrain, facts, links: list[dict], specs: list[dict],
                    *, mclass: str, occupied_rects: list, occupied_units: list,
                    footprint_gap: float, unit_gap: float,
-                   budget: int) -> tuple[list[dict], list[str]]:
+                   budget: int, pads: list[dict] | None = None
+                   ) -> tuple[list[dict], list[str]]:
     """Up to `budget` roadside yards, each on a link its spec will accept.
+
+    **A PUBLISHED PAD IS PREFERRED OVER A CARVED PARCEL, per spec** (roads R4b):
+    if the map prepared ground this building fits on, the building goes there,
+    because that ground is the only ground with tarmac under it. `carve_parcels`
+    is the fallback, and it is the whole behaviour for a map generated before
+    R4b — which every shipped map still is (`data/maps/*/mapdata/` carries no
+    `roads.lua` at all until the packages are regenerated). Per spec rather than
+    per scenario: a fuel stop wants a highway pad and may find none while a
+    workshop finds a track pad, and refusing the workshop because the fuel stop's
+    pad did not exist would be one placer's failure standing in for the other's.
 
     Returns `(entries, refusals)`. An entry is in `scenariogen`'s `units`
     shape — the same dict `place_sites` returns, on `team = 'neutral'` — with
@@ -299,7 +403,28 @@ def stage_frontage(rnd, terrain, facts, links: list[dict], specs: list[dict],
         # ignore it — whether every candidate was under water or every one was
         # already built on is the difference between a map fact and a bug.
         why = "no parcel was tried at all"
+        candidates = parcels_from_pads(pads or [], spec, facts)
+        for pad, lot in candidates:
+            try:
+                placed = _try_parcel(terrain, facts, spec, _pad_link(pad, links),
+                                     lot, f, mclass, rects, units,
+                                     footprint_gap, unit_gap)
+            except FrontageRefused as e:
+                why = f"{e} (on prepared pad {pad['key']})"
+                continue
+            placed["pad"] = pad["key"]
+            break
+        if placed is None and pads:
+            # Said out loud: the map graded tarmac and this building is standing
+            # on grass anyway. Why — too small, too steep, already built on, or
+            # no pad of the right class — is a fact about the PADS, and it is
+            # invisible from the staged scenario that results.
+            refusals.append(
+                f"{spec['def']}: none of {len(candidates)} prepared pad(s) took "
+                f"it — last: {why}; falling back to a carved parcel")
         for link in usable:
+            if placed is not None:
+                break
             phase = rnd.random()
             for lot in carve_parcels(link, spec, facts, phase=phase):
                 try:
@@ -309,8 +434,6 @@ def stage_frontage(rnd, terrain, facts, links: list[dict], specs: list[dict],
                 except FrontageRefused as e:
                     why = str(e)
                     continue
-                break
-            if placed is not None:
                 break
         if placed is None:
             refusals.append(f"{spec['def']}: no parcel on any of "
