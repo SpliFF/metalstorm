@@ -608,6 +608,12 @@ if(TEST_SOURCES)
         # so its round-trip (kind byte + text payload) is a plain doctest —
         # StateStreamer.cpp itself is not linkable here.
         ${CMAKE_SOURCE_DIR}/rts/Server/AI/AICommandCodec.cpp
+        # task 4(b): the mid-game AI spawn hook's decidable half — the relay,
+        # the spawn policy and the plugin resolver (test_ai_spawn.cpp). The
+        # half that needs playerHandler/teamHandler lives in AISpawnService.cpp
+        # and is deliberately NOT here; it is verified on the running stack.
+        ${CMAKE_SOURCE_DIR}/rts/Server/AI/AISpawn.cpp
+        ${CMAKE_SOURCE_DIR}/rts/Server/AI/AIDiscovery.cpp
     )
     target_include_directories(spring-tests PRIVATE
         ${CMAKE_SOURCE_DIR}/rts

@@ -51,6 +51,7 @@
 #include "Server/AI/AICommandQueue.h"
 #include "Server/AI/AIRuntimePool.h"
 #include "Server/AI/AIDiscovery.h"
+#include "Server/AI/AISpawn.h"
 #include "Server/PerfMetrics.h"
 #include "Server/RoomManager.h"
 #include "Server/AuthTokens.h"
@@ -1995,19 +1996,29 @@ int main(int argc, char* argv[])
     // A failed resolution is a soft error: log it, move on. One bad
     // AI entry shouldn't stop the game from starting for the rest
     // of the roster.
-    if (!requestedAIs.empty()) {
-        const std::string enginePath = "content/engine";
-        const auto discovered = AIDiscovery::Discover(enginePath, gamePath);
+    // The roots BOTH staging paths read: this block, and the mid-game
+    // caretaker spawn (task 4(b), AISpawn.h). Filled unconditionally — a game
+    // that starts with no AI slot at all is exactly the game the caretaker
+    // hook exists for, so the env must not be gated on `requestedAIs`.
+    ctx.aiSpawnEnv.enginePath = "content/engine";
+    ctx.aiSpawnEnv.gamePath   = gamePath;
+    ctx.aiSpawnEnv.mapDataDir = mapPath;
+    ctx.aiSpawnEnv.defExportDir = defsCacheKey.empty()
+        ? std::string()
+        : DefsCache::CacheDir(gameId, defsCacheKey);
 
+    if (!requestedAIs.empty()) {
         for (const auto& rq : requestedAIs) {
-            const AIDiscovery::AIInfo* match = nullptr;
-            for (const auto& ai : discovered) {
-                if (ai.id == rq.id) { match = &ai; break; }
-            }
-            if (!match) {
-                SLOG(SPRING_LOG_WARNING,
-                    "--ai %s:%d: no matching plugin found, skipping",
-                    rq.id.c_str(), rq.team);
+            // Same resolver the runtime spawn uses (AISpawn.h): one set of
+            // rules for "which plugin is this id", so an AI the lobby can seat
+            // at frame 0 is an AI the caretaker hook can seat at frame N.
+            ResolvedAIPlugin plugin;
+            std::string resolveErr;
+            if (!ResolveAIPlugin(ctx.aiSpawnEnv.enginePath,
+                                 ctx.aiSpawnEnv.gamePath, rq.id, plugin,
+                                 resolveErr)) {
+                SLOG(SPRING_LOG_WARNING, "--ai %s:%d: %s, skipping",
+                    rq.id.c_str(), rq.team, resolveErr.c_str());
                 continue;
             }
 
@@ -2017,22 +2028,14 @@ int main(int argc, char* argv[])
             // `Spring.GetTeamLuaAI(teamId)`. The roster entry pushed
             // earlier already populates that map, so there's nothing
             // for AIRuntimePool to do.
-            if (match->isLuaAI) {
+            if (plugin.isLuaAI) {
                 SLOG(SPRING_LOG_NOTICE,
                     "registered LuaAI '%s' on team %d (handled by game gadgets)",
-                    match->displayName.c_str(), rq.team);
+                    plugin.displayName.c_str(), rq.team);
                 continue;
             }
 
-            std::ifstream mainFile(match->entryPath);
-            if (!mainFile.is_open()) {
-                SLOG(SPRING_LOG_ERROR,
-                    "--ai %s:%d: failed to open entry '%s'",
-                    rq.id.c_str(), rq.team, match->entryPath.c_str());
-                continue;
-            }
-            const std::string code((std::istreambuf_iterator<char>(mainFile)),
-                                    std::istreambuf_iterator<char>());
+            const std::string& code = plugin.code;
 
             // allyTeam defaults to the team id until we grow a real
             // alliance concept — teams are their own ally for now.
@@ -2049,18 +2052,16 @@ int main(int argc, char* argv[])
             //
             // rq.playerNum was allocated by the AI virtual-player block above
             // (AI3): strategos keys its authority charge identity by this id.
-            const std::string aiDefExportDir = defsCacheKey.empty()
-                ? std::string()
-                : DefsCache::CacheDir(gameId, defsCacheKey);
-            if (aiPool.AddAI(match->id, rq.team, allyTeam, code, match->folderPath,
-                             mapPath, aiDefExportDir, rq.playerNum)) {
+            if (aiPool.AddAI(plugin.id, rq.team, allyTeam, code,
+                             plugin.folderPath, ctx.aiSpawnEnv.mapDataDir,
+                             ctx.aiSpawnEnv.defExportDir, rq.playerNum)) {
                 SLOG(SPRING_LOG_NOTICE,
                     "loaded AI '%s' (%s) on team %d",
-                    match->displayName.c_str(), match->id.c_str(), rq.team);
+                    plugin.displayName.c_str(), plugin.id.c_str(), rq.team);
             } else {
                 SLOG(SPRING_LOG_ERROR,
                     "failed to init AI '%s' on team %d",
-                    match->id.c_str(), rq.team);
+                    plugin.id.c_str(), rq.team);
             }
         }
     } else {

@@ -28,6 +28,7 @@
 #include "ReplayPlayer.h"
 #include "AI/AIRuntimePool.h"
 #include "AI/AICommandCodec.h"
+#include "AI/AISpawnService.h"
 #include "WebTransport/WebTransportServer.h"
 #include "Lua/LuaRules.h"
 #include "Lua/LuaHandleSynced.h"
@@ -644,6 +645,14 @@ void StateStreamer::EvaluateStandingOrders(int) {
 void StateStreamer::TickAI(int) {
     auto& aiPool = ctx.aiPool;
     auto& sim = ctx.sim;
+
+    // Mid-game arrivals first (PLAN-metalstorm-ai.md §10 task 4(b)): a
+    // caretaker declared by synced Lua on the frame a side emptied is seated
+    // here, so it takes part in THIS tick's snapshot rather than idling for
+    // one. Both halves run on the sim thread; this is the single, fixed drain
+    // point that makes the seating deterministic under replay.
+    ServiceAISpawns(ctx);
+
     aiPool.Tick(sim.GetFrameNum());
 
     auto aiCmds = aiPool.DrainCommands();

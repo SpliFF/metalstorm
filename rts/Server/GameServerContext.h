@@ -15,6 +15,7 @@
 
 #include "NetworkServer.h"          // ClientID
 #include "DynamicJoin.h"            // SessionKind, WAR_SIDE_CAPACITY_DEFAULT
+#include "AI/AISpawn.h"             // AISpawnEnv
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -119,4 +120,10 @@ struct GameServerContext {
     // skips the handshake (or sent an incompatible version) can't get a
     // session. Cleared on disconnect alongside the other per-client maps.
     std::unordered_set<ClientID>&             handshakedClients;
+
+    /// Roots a mid-game AI spawn resolves against (PLAN-metalstorm-ai.md §10
+    /// task 4(b), AISpawn.h). Filled in server_main from the same values the
+    /// start-up `--ai` staging block uses, so the caretaker seated at frame
+    /// 40 000 loads from exactly the paths a lobby-added AI loads from.
+    AISpawnEnv                                aiSpawnEnv;
 };
