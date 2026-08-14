@@ -81,8 +81,8 @@ function Actuators._detect()
         log            = has('log'),               -- server-log channel (headless)
         marker         = has('marker') or has('setMarker'),
         stakeBounty    = has('stakeBounty'),      -- authority stake from AI
-        respond        = has('respondProposal'),  -- interaction I1
-        propose        = has('propose'),          -- interaction I1
+        respond        = has('respondProposal'),  -- interaction §6.2 (not on the surface)
+        propose        = has('propose'),          -- interaction §6.2 (not on the surface)
         sendMessage    = has('sendMessage'),      -- I1/SG1 (AI → synced RecvLuaMsg)
     }
 end
@@ -142,7 +142,7 @@ function Actuators:stakeBounty(objectiveDef, amount)
     if self.caps.stakeBounty then
         return _G.AI.stakeBounty(objectiveDef, amount)
     end
-    return false   -- needs the AI-side authority stake path (I1-adjacent)
+    return false   -- needs the AI-side authority stake verb (no engine ask blocks it)
 end
 
 --- Narrate via chat (plan §5.1 — spend is socially visible). Best-effort.
@@ -170,7 +170,11 @@ function Actuators:marker(pos, txt)
     return false
 end
 
---- Respond to / originate a parley proposal (interaction §6.2, engine ask I1).
+--- Respond to / originate a parley proposal (interaction §6.2). NOT gated on an
+--- engine ask any more: I1 landed (`AI.sendMessage`, see :112), so parley could
+--- be spoken over the same wire commands a human's panel sends — these two verbs
+--- are simply unimplemented on the runtime surface, and building them on the
+--- message funnel is PLAN-metalstorm-ai task 4(a) work, not this lane's.
 function Actuators:respondProposal(id, decision) -- decision: accept|reject|counterTerms
     if self.caps.respond then return _G.AI.respondProposal(id, decision) end
     return false
@@ -309,8 +313,9 @@ function Actuators:apply(plan, picture)
     end
 
     -- Intent report (interaction §6.3): publish the assignment table so the
-    -- co-commander is legible + vetoable. Transport is the guidance blob (I1);
-    -- until then we keep it locally and narrate a one-line summary.
+    -- co-commander is legible + vetoable. The published transport is the synced
+    -- charge path (see _publishIntent); the local copy is what the AI itself
+    -- reasons over, plus the one-line narration.
     self.lastIntent = plan.intent
     self:_publishIntent(plan.intent)
 end
@@ -359,7 +364,7 @@ function Actuators:_suggestDirective(d, picture)
         tostring(d.directive), where, cost)
     self:chat(suggestion)
 
-    -- TODO(onboarding §3 / integration I1): when the suggested_for hint verb
+    -- TODO(onboarding §3): when the suggested_for hint verb
     -- exists (game_ai_guidance.lua writing a suggestion rulesParam that the
     -- native-UI objective card reads), emit it here:
     --   AI.setSuggestedObjective(goalId, groupId)  -- lights the card

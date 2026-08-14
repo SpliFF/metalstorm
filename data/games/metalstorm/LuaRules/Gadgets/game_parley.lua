@@ -28,10 +28,11 @@
 -- the proof) — exactly where the ROE order-veto (§2) needs to run: after
 -- squad.lua's own vetoes, strictly before any authority charge.
 --
--- Engine ask I1 (AI-side sendGameMessage) is NOT needed for this gadget
--- itself — humans call the same GG.Parley API via RecvLuaMsg that this file
--- parses below; I1 only gates the AI VM's own ability to originate the same
--- calls (interaction §7/§9), tracked in ai/strategos/actuators.lua.
+-- Engine ask I1 was never needed for this gadget itself — humans call the same
+-- GG.Parley API via RecvLuaMsg that this file parses below — and it has since
+-- landed (`AI.sendMessage`, 2026-08-14), so an AI can now reach these very
+-- handlers on the same channel. What is still missing is the plugin's own
+-- parley verbs (interaction §7/§9), tracked in ai/strategos/actuators.lua.
 
 function gadget:GetInfo()
     return {

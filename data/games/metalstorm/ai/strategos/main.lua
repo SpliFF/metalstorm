@@ -31,7 +31,8 @@
 --   infra:  AI.log(msg) (server-log channel — a headless AI has no chat/HUD,
 --           §5.1) · AI.nowMs() (monotonic clock for self-timing the §6 tick).
 -- Still assumed-but-absent (each module feature-detects + degrades): squad
--- views, LOD, chat/stake/parley (I1). See README "Engine asks".
+-- views, LOD, chat/stake/parley verbs — none of them blocked on an engine ask now
+-- that I1 has landed, just not on the surface. See README "Engine asks".
 
 --=============================================================================
 -- Module loading.  See README "Engine ask AI0-loader".
@@ -328,9 +329,10 @@ local function strategicTick(frame)
 
     -- 5. PARLEY — evaluate proposals addressed to us and respond
     -- (interaction §6.2). The decision is computed unconditionally (pure,
-    -- testable now); only the actual respond CALL is gated on engine ask I1
-    -- (Actuators:respondProposal degrades to a no-op false until then, same
-    -- as every other AI2-class verb in actuators.lua).
+    -- testable now); only the actual respond CALL is missing a runtime verb
+    -- (Actuators:respondProposal degrades to a no-op false, same as every other
+    -- AI2-class verb in actuators.lua — see its comment: I1 has landed, so this
+    -- is unimplemented, not blocked).
     for _, r in ipairs(Planner.evaluateProposals(picture, self.profile, role)) do
         self.actuators:respondProposal(r.id, r.decision)
     end

@@ -155,5 +155,5 @@ fallback, instant escalation vs. per-tier dwell on the way down, the role
 clamp, and deferral to `AI.getLODLevel()` when the engine ever ships it.
 
 This is the plan's §11 test surface; expand it as the remaining stubs
-(AI3 own-pool edge cases, `compositionGap`, I1 writes) fill in.
+(AI3 own-pool edge cases, `compositionGap`, the parley/stake verbs) fill in.
 ```

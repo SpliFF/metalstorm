@@ -488,7 +488,8 @@ end
 -- proposal evaluation: expected value of terms vs alternatives ... weighted
 -- by the trust ledger and, for demands, by credibility"). PURE — takes the
 -- Picture + profile/role, returns a plain decision list; the caller
--- (main.lua) applies it via Actuators:respondProposal (engine ask I1). No
+-- (main.lua) applies it via Actuators:respondProposal (an unimplemented runtime
+-- verb — no longer an engine ask, see actuators.lua:173). No
 -- Spring/GG/AI access here, same discipline as Planner.plan.
 --=============================================================================
 local TRUST_VALUE_WEIGHT       = 5    -- authority-equivalent value per trust point

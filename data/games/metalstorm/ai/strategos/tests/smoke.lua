@@ -17,7 +17,7 @@ _G.AI = {
         return { { id = 2, x = 4000, z = 4000, health = 300 } }
     end,
     issueCommand      = function() end,
-    -- deliberately absent: getRulesParam (AI1), getTeamId, chat (I1),
+    -- deliberately absent: getRulesParam (AI1), getTeamId, chat,
     -- createGroup/issueDirective/setPosture (AI2) — everything must degrade.
 }
 
