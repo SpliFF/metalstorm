@@ -291,6 +291,61 @@ MAX_BRIDGE_SPANS = 24
 
 
 # --------------------------------------------------------------------------
+# Roadside yards (roads R4)
+# --------------------------------------------------------------------------
+# What `road_frontage.stage_frontage` may stand on a published road link. One
+# entry is one yard: a building set back from the carriageway with an apron in
+# front of it and vehicles parked on the apron.
+#
+# `classes` IS THE BRIEF'S "required frontage class" and it is the whole of the
+# content decision here. R2 planned a hierarchy — highway 0, road 1, track 2
+# (terragen/roads.ROAD_CLASS_NAMES) — precisely so a consumer could ask for a
+# road of a given standard, and a fuel depot on a mountain track is the defect
+# that asking prevents. Ordered specs, first-fit: the placer walks this list in
+# order and drops what does not fit, so the entry a map is most likely to be
+# able to carry goes first.
+#
+# `parked` DRAWS FROM THE SHIPPED ROSTER ONLY (units/civvehicles.lua,
+# units/logistics.lua), the same discipline town_templates.resolve_roles keeps:
+# a spec naming a def this game does not ship is refused by name in the
+# scenario summary rather than silently producing an empty yard.
+#
+# The sizes are the footprints', not a designer's: ms_depot is 10x10 build
+# squares = 160 elmos across (town_stager.SQUARE_ELMOS), so a `frontage` under
+# ~400 leaves a parking row nowhere to go, and `yard_depth` is stated in the
+# units a lorry occupies — two rows of ~105 elmos plus the gate.
+ROAD_FRONTAGE = [
+    {
+        "def": "ms_depot", "label": "Supply Depot",
+        "classes": (0, 1),                 # highway or road: convoys come here
+        "yard_depth": 240, "frontage": 460,
+        "parked": ["ms_civtruck", "ms_supply_truck", "ms_civbus"],
+        "rows": 2, "per_row": 3, "min_parked": 2,
+    },
+    {
+        "def": "ms_field_workshop", "label": "Roadside Workshop",
+        "classes": (1, 2),                 # a workshop serves the back roads
+        "yard_depth": 200, "frontage": 400,
+        "parked": ["ms_civtruck", "ms_courier_car"],
+        "rows": 2, "per_row": 2, "min_parked": 1,
+    },
+    {
+        "def": "ms_tank_farm", "label": "Fuel Stop",
+        "classes": (0,),                   # highway only: this is a rest stop
+        "yard_depth": 260, "frontage": 480,
+        "parked": ["ms_fuel_tanker", "ms_civtruck"],
+        "rows": 2, "per_row": 2, "min_parked": 1,
+    },
+]
+
+# How many roadside yards one scenario may carry. Low on purpose: these are
+# landmarks on a road, and a yard every 300 elmos is a ribbon development, not
+# a frontier highway. Also a cost ceiling — every yard is a blocking building
+# the war-fightability gate must then clear.
+MAX_ROAD_FRONTAGE = 3
+
+
+# --------------------------------------------------------------------------
 # Army rosters
 # --------------------------------------------------------------------------
 # One entry per staged `units` row: (def, count, spacing). The loader spreads

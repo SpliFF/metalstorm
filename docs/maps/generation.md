@@ -496,6 +496,58 @@ Tests: `tools/mapgen/tests/test_bridges.py` (25 cases). The heading convention
 is pinned against `game_scenario.lua` itself, and the pitch against
 `features/bridges.lua`'s `customparams.chain_pitch`.
 
+## 4e. Roadside yards (`tools/mapgen/road_frontage.py`, roads R4)
+
+The other half of the published road graph. R2's `links` block exists so a
+later stage can plug into a real road instead of guessing where one is; R3b
+spent the `crossings` half of that file, and this spends the `links` half.
+
+**A yard is a relation to a ROAD, and nothing else in the scenario layer has
+one.** Every other placer in `scenariogen` is anchored to a REGION — a ring
+search outward from the region anchor, terrain-checked, dodging what is already
+there — and that relation puts a supply depot in the middle of a field. R4 adds
+one placer whose anchor is a link: a building set back from the carriageway,
+its apron between it and the road, and vehicles parked on the apron.
+
+* **The parcel is a `town_planner.Lot`**, carved off the link the way
+  `_carve_lots` slices a street. That keeps ONE frontage convention in the
+  tree — the frame, the box projection and the cardinal all come from
+  `town_stager`, not from a second derivation of the same geometry.
+* **`_yard_anchor` is `town_stager._anchor_for` with the sign flipped.** A town
+  house fronts the street and its yard falls behind it; a depot's yard is
+  between it and the road, because that is where the lorries stand. Nothing but
+  a measurement distinguishes the two, so `tests/test_road_frontage.py`
+  measures it on both sides of the road.
+* **`classes` is the requirement, and it refuses rather than relaxes.** R2
+  planned a hierarchy (highway 0 / road 1 / track 2) precisely so a consumer
+  could ask for a road of a given standard; a fuel stop asks for a highway and
+  is ABSENT, by name, from a map that has none.
+* **Nothing is built on the deck.** A building blocks, so a yard on the
+  carriageway severs the route the road exists to provide and does it silently.
+  `_clears_deck` gates the shed and every parked vehicle against the published
+  polyline (not against the parcel's local frame — a link bends), and the yards
+  then go through `gate_blocking_features_leave_the_war_fightable` alongside
+  the wreck field, because "off the deck" is local and "the armies can still
+  reach each other" is global.
+* **The parked vehicles are ordinary Gaia units.** `ms_civtruck`/`ms_civbus`
+  carry `customparams.civilian = '1'`, so `estate.registerBuilding` files them
+  at `UnitCreated` with role **`estate`** — which is what keeps them parked:
+  `routines.tick()` wanders and flees only the `ambient` ones.
+
+**What is NOT here, and why it is not a missing feature.** The brief also asks
+for driveway/parking splat markings and a standalone lot with no building. Both
+are baked-at-generation-time work and this is a scenario-time placer: the splat
+distribution, the albedo and the typemap are all final before `scenariogen`
+ever reads the map, which is the same seam `emit_roads_lua`'s header describes
+(a town discovered afterwards cannot move a road). A lot with no building also
+has no footprint to anchor or to own its clearance. Both want a terragen-side
+layer that plans yards at generation time from the same link graph.
+
+Tests: `tools/mapgen/tests/test_road_frontage.py` (13 cases), including the
+`mapdata/roads.lua` `links` round trip — the reader dropped the final vertex of
+every polyline on its first cut, which read as a map whose roads were simply
+not there.
+
 ## 5. Texturing model
 
 Two layers, matching what Spring/Recoil (and SupCom/Frostbite/Unity) converge

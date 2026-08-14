@@ -103,6 +103,7 @@ from collections import deque
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import ms_defs                                            # noqa: E402
+import road_frontage as rf                                # noqa: E402
 import town_planner as tp                                 # noqa: E402
 import town_populace as tpop                              # noqa: E402
 import town_stager as tstage                              # noqa: E402
@@ -129,7 +130,9 @@ from scenario_templates import (                          # noqa: E402
     HOSTILE_FACTION,
     HOSTILE_SLATE_KINDS,
     MAX_BRIDGE_SPANS,
+    MAX_ROAD_FRONTAGE,
     PLAYABLE_FACTIONS,
+    ROAD_FRONTAGE,
     SCENARIO_SUFFIXES,
     SITE_DRAW_ORDER,
     SITE_TEMPLATES,
@@ -146,7 +149,12 @@ from scenario_templates import (                          # noqa: E402
 # 3 (town-planner T4): towns are PLANNED (town_planner/town_stager/
 # town_populace) rather than scattered, and carry a populace, a `towns` block
 # and a `civilians` block. Every generated scenario's output changes.
-GENERATOR_VERSION = 3
+# 4 (roads R4): roadside yards. A scenario generated on a map that publishes a
+# road graph now carries depots/workshops/fuel stops standing on its links with
+# vehicles parked on their aprons, and every one of them draws from the seeded
+# stream — so v3 and v4 disagree about every placement after the relics on such
+# a map, and agree exactly on a map with no mapdata/roads.lua.
+GENERATOR_VERSION = 4
 
 SCHEMA_VERSION = 1          # game_scenario.lua's SUPPORTED_VERSION
 GAME_SPEED = 30             # sim frames per second
@@ -281,6 +289,58 @@ _CROSSING_RE = re.compile(
     r'class\s*=\s*(?P<class>[0-9]+)\s*,\s*'
     r'width\s*=\s*(?P<width>-?[0-9.]+)\s*,\s*'
     r'depth\s*=\s*(?P<depth>-?[0-9.]+)\s*\}')
+
+
+_LINK_RE = re.compile(
+    r'\{\s*class\s*=\s*(?P<class>[0-9]+)\s*,\s*'
+    r'name\s*=\s*"(?P<name>[^"]+)"\s*,\s*'
+    r'width\s*=\s*(?P<width>-?[0-9.]+)\s*,\s*'
+    r'a\s*=\s*(?P<a>-?[0-9]+)\s*,\s*b\s*=\s*(?P<b>-?[0-9]+)\s*,\s*'
+    # The point list's LAST brace belongs to the point, not to the row. A
+    # `(?P<points>.*?)\}\s*\}` reads `{ {1,2}, {3,4} }` as `{1,2}, {3` and drops
+    # the final vertex of every link silently — a legal-looking polyline one
+    # segment short, which for a two-point link is no link at all.
+    r'points\s*=\s*\{(?P<points>.*?\})\s*\}')
+_POINT_RE = re.compile(r'\{\s*(-?[0-9.]+)\s*,\s*(-?[0-9.]+)\s*\}')
+
+
+def read_road_links(map_dir: str) -> list[dict]:
+    """The road network the MAP published, from `mapdata/roads.lua` (roads R2).
+
+    The sibling of `read_road_crossings`, and here for the same reason: R4 wants
+    to stand a depot's yard ON a road, and until this reader existed nothing in
+    the scenario layer knew where a road was — `place_sites` rings outward from
+    a region anchor and puts industry in the middle of a field.
+
+    Reads only the `links` block, and stops at `junctions`: the file's three
+    blocks are all lists of braced rows and a regex let loose over the whole
+    text would happily read a crossing as a malformed link.
+
+    Same regex-not-interpreter reasoning and the same empty-vs-absent
+    distinction as the crossings reader — a map generated before R2 carries no
+    `mapdata/roads.lua` at all, which returns [] here exactly as a map whose
+    generator planned no roads does, and every caller must treat "no roads" as
+    an ordinary map rather than an error.
+    """
+    path = os.path.join(map_dir, "mapdata", "roads.lua")
+    if not os.path.exists(path):
+        return []
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+    head = text.find("links")
+    if head < 0:
+        return []
+    tail = text.find("junctions", head)
+    block = text[head:tail if tail > 0 else len(text)]
+    out = []
+    for m in _LINK_RE.finditer(block):
+        pts = [(float(x), float(z)) for x, z in _POINT_RE.findall(m.group("points"))]
+        if len(pts) < 2:
+            continue
+        out.append({"road_class": int(m.group("class")), "name": m.group("name"),
+                    "width": float(m.group("width")), "a": int(m.group("a")),
+                    "b": int(m.group("b")), "points": pts})
+    return out
 
 
 def read_road_crossings(map_dir: str) -> list[dict]:
@@ -1515,7 +1575,8 @@ def gate_reachability(terrain: Terrain, points: list[tuple[str, int, int]],
 
 def gate_blocking_features_leave_the_war_fightable(
         terrain: Terrain, rects: list[tuple[float, float, float, float]],
-        points: list[tuple[str, int, int]], map_id: str) -> None:
+        points: list[tuple[str, int, int]], map_id: str,
+        what: str = "the wreck field") -> None:
     """Invariant 5, re-checked with the wreck field ON the map.
 
     `features/wrecks.lua` sets `blocking = true` — that is what makes a wreck
@@ -1539,10 +1600,10 @@ def gate_blocking_features_leave_the_war_fightable(
         gate_reachability(terrain.blocked_copy(rects), points, map_id)
     except Rejected as e:
         raise Rejected(
-            f"the wreck field makes this war unfightable — {e}\n"
-            f"  {len(rects)} blocking feature(s) were placed on contested "
+            f"{what} makes this war unfightable — {e}\n"
+            f"  {len(rects)} blocking rectangle(s) were placed on contested "
             f"ground and at least one of them walls off the route between the "
-            f"armies. Wrecks are decoration; they may not decide the war.")
+            f"armies. This layer is decoration; it may not decide the war.")
 
 
 def gate_no_unit_in_a_footprint(unit_points: list[tuple[str, float, float]],
@@ -1987,6 +2048,33 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
         all_cluster_units.extend((g["x"], g["z"], facts[g["def"]])
                                  for g in r["guards"])
 
+    # --- roadside yards (roads R4) ------------------------------------------
+    # Placed here for the same reason the sites are: after the settlements, so a
+    # depot cannot land on a town, and before the armies, so a landing party
+    # cannot spawn inside one. Unlike everything above it, this layer is
+    # anchored to the ROAD GRAPH rather than to a region — see road_frontage.py
+    # — so a map that publishes no `mapdata/roads.lua` gets no yards and says so
+    # rather than falling back to a scatter that would put a depot in a field.
+    road_links = read_road_links(map_dir)
+    frontage_entries, frontage_refusals = rf.stage_frontage(
+        rnd, terrain, facts, road_links, ROAD_FRONTAGE,
+        mclass=DEFAULT_CLASS,
+        occupied_rects=[b.rect() for b in all_buildings],
+        occupied_units=all_cluster_units,
+        footprint_gap=FOOTPRINT_GAP, unit_gap=UNIT_SPAWN_GAP,
+        budget=MAX_ROAD_FRONTAGE)
+    if not road_links:
+        frontage_refusals = ["this map publishes no road graph "
+                             "(mapdata/roads.lua), so it can carry no yards"]
+    frontage_rects: list[tuple] = []
+    for e in frontage_entries:
+        b = Building(e["def"], e["x"], e["z"], e["facing"], facts[e["def"]])
+        all_buildings.append(b)
+        frontage_rects.append(b.rect())
+        all_cluster_units.append((e["x"], e["z"], facts[e["def"]]))
+        all_cluster_units.extend((p["x"], p["z"], facts[p["def"]])
+                                 for p in e["parked"])
+
     # --- who owns them ------------------------------------------------------
     # `neutral` resolves to Gaia at stage time (game_scenario.lua stageUnits),
     # which Simulation.cpp configures as "neutral/environment, its own ally
@@ -2118,13 +2206,19 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
         rnd, terrain, fdefs, victory, victory_anchor, wrecks, all_buildings,
         all_cluster_units + army_points, landmark_names)
 
+    # R4: the roadside yards go through the same gate and in the same call. A
+    # depot IS a blocking rectangle, and it is a blocking rectangle standing
+    # ON a route by construction — `road_frontage._clears_deck` keeps it off
+    # the carriageway, but "off the deck" is a local test and "the armies can
+    # still reach each other" is a global one, and only this gate asks the
+    # second question.
     gate_blocking_features_leave_the_war_fightable(
-        terrain, wreck_rects,
+        terrain, wreck_rects + frontage_rects,
         [(f"side {i} landing zone ({r['key']})", a[0], a[1])
          for i, (r, a) in enumerate(zip(side_regions, side_anchors))] +
         [(f"victory objective ({victory['key']})",
           victory_anchor[0], victory_anchor[1])],
-        map_id)
+        map_id, what="the wreck field and the roadside yards")
 
     # Bridges. Searched over the victory region first (a crossing IS a
     # chokepoint, which is why the victory picker prefers one) and then over
@@ -2274,13 +2368,21 @@ def generate(map_dir: str, seed: int, sides: int = 2, towns: int = 3,
         "relics": [(r["feature"]["def"], r["region"]["key"], r["name"],
                     len(r["guards"])) for r in relic_entries],
         "wrecks": [w["def"] for w in wreck_entries],
+        # R4. Reported as (def, road class name, parked count) because those are
+        # the three things that can be wrong about a yard and are invisible in
+        # the file: the wrong building, the wrong standard of road, or an apron
+        # nothing could be parked on.
+        "frontage": [(e["def"], e["road_name"], len(e["parked"]))
+                     for e in frontage_entries],
+        "frontage_refusals": frontage_refusals,
         "crossings": [(c["region"]["key"], c["name"], c["chain"],
                        round(c["width"])) for c in crossings],
         "landmarks": sorted(landmark_names),
     }
     return emit_lua(meta, side_regions, side_anchors, victory, units, clusters,
                     site_entries, relic_entries, feature_entries, crossings,
-                    hostile_team, sides, not_before, hold, townships), meta
+                    hostile_team, sides, not_before, hold, townships,
+                    frontage_entries), meta
 
 
 # ==========================================================================
@@ -2297,7 +2399,8 @@ def _team_field(owner) -> str:
 
 def emit_lua(meta, side_regions, side_anchors, victory, units, clusters,
              site_entries, relic_entries, feature_entries, crossings,
-             hostile_team, sides, not_before, hold, townships=()) -> str:
+             hostile_team, sides, not_before, hold, townships=(),
+             frontage_entries=()) -> str:
     L: list[str] = []
     add = L.append
 
@@ -2587,6 +2690,26 @@ def emit_lua(meta, side_regions, side_anchors, victory, units, clusters,
             add(f"        -- {s['name']} ({s['region']['key']})")
             add("        " + _emit_unit(s))
 
+    if frontage_entries:
+        add("")
+        add("        -- ROADSIDE YARDS (roads R4). A depot, workshop or fuel stop set")
+        add("        -- back from a road the MAP planned (mapdata/roads.lua links), with")
+        add("        -- its apron between it and the carriageway and the yard's vehicles")
+        add("        -- parked on that apron. The building faces the road: `facing` here")
+        add("        -- is the road's own tangent snapped to the nearest cardinal, which")
+        add("        -- is all Spring.CreateUnit accepts (four facings, not a heading).")
+        add("        --")
+        add("        -- The parked vehicles are ordinary Gaia units, not decoration:")
+        add("        -- nothing in this game can park a wreck that is still driveable,")
+        add("        -- and a civilian lorry standing in a yard is what a yard looks")
+        add("        -- like. They carry no orders, so they stay where they are staged.")
+        for e in frontage_entries:
+            add(f"        -- {e['def']} on the {e['road_name']} "
+                f"({len(e['parked'])} parked)")
+            add("        " + _emit_unit(e))
+            for pk in e["parked"]:
+                add("        " + _emit_unit(pk))
+
     if relic_entries:
         add("")
         add("        -- ANCIENT-TECH GUARDIANS (§M4, worldbuilding directive 4). The")
@@ -2841,6 +2964,13 @@ def main(argv=None):
         say("    crossing none — no water gap on this map fits a span "
             "(bridges belong over water; over dry ground the engine's ground "
             "clamp steps every segment)")
+    # R4. Same rule as the crossing above: a map whose roads cannot carry a
+    # yard is a legitimate outcome, and the refusal says which rule refused so
+    # "this map has no highway" cannot read as "the placer is broken".
+    for defname, road, parked in meta["frontage"]:
+        say(f"    yard     {road:22s} {defname} ({parked} parked)")
+    for why in meta["frontage_refusals"]:
+        say(f"    yard refused: {why}")
     say(f"  {len(meta['landmarks'])} landmark(s) the command language can "
         f"address: {', '.join(meta['landmarks'])}")
     if meta["towns"]:
