@@ -944,7 +944,15 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
         # Pads do not need it: they are levelled over a 420-elmo disc above,
         # which is ~13 planning cells, so a pad makes its own cell buildable.
         unbuildable = rd.unbuildable_mask(h, 0.0, cell, rp)
-        polylines: list[np.ndarray] = []
+        # roads R2 — each island gets its own HIERARCHY, not just its own
+        # network. The role reading for an archipelago: a start pad is a portal
+        # (the trunk has to reach it), the island's best town is the highway's
+        # other end, and the remaining towns — `pick_sites` returns them in
+        # descending score order — are villages that join the trunk wherever it
+        # passes them. Giving every town portal status instead would make every
+        # road on the island a highway, which is the one answer a hierarchy is
+        # supposed to rule out.
+        network = rd.RoadNetwork()
         towns: list[tuple[float, float]] = []
         for l in big:
             area = sizes[l] * cell * cell
@@ -957,14 +965,28 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
             # connect this island's towns + its start pads into one network
             isl_starts = [p for p in starts
                           if labels[int(p[1] / cell), int(p[0] / cell)] == l]
-            net = sites + isl_starts
-            if len(net) >= 2:
-                polylines += rd.plan_roads(h, 0.0, cell, net, rp)
-        road_mask, road_dist = rd.rasterize_roads(polylines, h.shape, cell, rp)
+            eps = list(sites) + isl_starts
+            roles = ([rd.NODE_TOWN] + [rd.NODE_MINOR] * (len(sites) - 1)
+                     + [rd.NODE_EDGE] * len(isl_starts)) if sites else \
+                    [rd.NODE_EDGE] * len(isl_starts)
+            if len(eps) >= 2:
+                sub = rd.plan_network(h, 0.0, cell, eps, roles, rp)
+                network.links += sub.links
+                network.junctions += sub.junctions
+        polylines = network.polylines
+        raster = rd.rasterize_network(network, h.shape, cell, rp)
+        road_mask, road_dist = raster.mask, raster.dist
         rd.carve_plazas(road_mask, road_dist, towns, 85.0, cell, rp)
-        h = rd.flatten_under_roads(h, road_dist, cell, rp)
+        rd.carve_junction_aprons(raster, network.junctions, cell, rp)
+        # ONE flatten pass over the combined field — see roads.flatten_network
+        h = rd.flatten_network(h, raster, cell, rp)
+        _mix = ", ".join(f"{rd.ROAD_CLASS_NAMES[k]} {v:.0f}"
+                         for k, v in sorted(network.length_by_class().items())
+                         if v > 0)
         print(f"roads done {time.time()-t0:.0f}s ({len(polylines)} segments, "
-              f"{len(towns)} town plazas, {len(starts)} starts)")
+              f"{len(towns)} town plazas, {len(starts)} starts, "
+              f"{len(network.junctions)} junctions; length by class: {_mix})")
+        rd.report_delivered_grades(network, h, cell, rp)
         aim_probe(h, f"pass {pad_pass}: +roads")
 
         # 7. hydrology -> island stream ribbons (PLAN-maps §2b item 3)
@@ -1103,11 +1125,16 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
           f"{bio.format_biome_mix(b)}")
 
     # 8a. road surface classes (roads R1) — needs moisture, so it runs after
-    # the biome step; `polylines`/`towns`/`rp` survive the pad-pass loop above.
-    road_cls = rd.classify_roads(polylines, moist, h, 0.0, cell)
-    _m, _d, road_class = rd.rasterize_roads_classified(
-        polylines, road_cls, h.shape, cell, rp)
+    # the biome step; `network`/`polylines`/`towns`/`rp` survive the pad-pass
+    # loop above.
+    # R2: sealing follows the hierarchy, so R1's length budget is not consulted
+    road_cls = rd.classify_roads(polylines, moist, h, 0.0, cell,
+                                 road_classes=network.road_classes)
+    _surf_raster = rd.rasterize_network(network, h.shape, cell, rp,
+                                        surfaces=road_cls)
+    road_class = _surf_raster.surf
     rd.carve_plaza_classes(road_class, towns, 85.0, cell)
+    rd.carve_junction_aprons(_surf_raster, network.junctions, cell, rp)
     _deck = max(1, int((road_class != rd.SURF_NONE).sum()))
     print("road surfaces (%d deck cells): %s" % (_deck, ", ".join(
         "%s %.1f%%" % (rd.SURFACE_NAMES[k], 100.0 * int((road_class == k).sum()) / _deck)
@@ -1304,6 +1331,7 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     pkg.write_package(
         out_dir, cfg, h, slope, b, moist, road_dist, road_mask, cell,
         scratch_dir=os.environ.get("TMPDIR", "/tmp"),
+        roads_lua=pkg.emit_roads_lua(network, cell, rp),
         feature_files=feature_files, stamps=stamps, road_class=road_class,
     )
     baker = bk.AlbedoBaker(h, slope, b, moist, road_dist, 0.0, cell, seed,

@@ -341,30 +341,65 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
           f"({len(net.polylines)} reaches, "
           f"{100.0 * net.channel_mask.mean():.2f}% channel cells)")
 
-    # 6. roads: district centres + convoy waypoints + gates
+    # 6. roads: district centres + convoy waypoints + gates.
+    #
+    # roads R2 — the endpoints now carry ROLES, and the roles are what build the
+    # hierarchy (roads.plan_network). The reading of this map's own layout:
+    #   * a MARKET district is a major town — a highway destination. The
+    #     habitats are not: making every civilian district a trunk node was the
+    #     first reading and it produced a network that is 90 % highway by length
+    #     and 95 % bitumen by area, i.e. a hierarchy that classifies everything
+    #     into its top tier and therefore says nothing. Four district centres
+    #     plus two gates is six trunk nodes and an MST over six nodes is five
+    #     links — the whole map;
+    #   * a habitat district and a convoy waypoint are villages on the way,
+    #     joined by an ordinary road to wherever the trunk passes them;
+    #   * the two gates are the network's PORTALS. They sit on start pads rather
+    #     than on the map border, and that is the right reading anyway: what a
+    #     portal means to the planner is "the trunk has to reach here", and on a
+    #     two-base map the bases are exactly that. Nothing on this map is a POI
+    #     yet, so there is no track tier — see PLAN-maps §2c.
     sites = []
+    roles = []
     for d in layout["civilian_districts"]:
         r = next(r for r in layout["regions"] if r["key"] == d)
         b = r["bbox"]
         sites.append(((b["x0"] + b["x1"]) / 2.0, (b["z0"] + b["z1"]) / 2.0))
+        roles.append(rd.NODE_TOWN if d.endswith("_market") else rd.NODE_MINOR)
     for route in layout["convoy_routes"]:
         for wp in route["waypoints"]:
             sites.append((wp["x"], wp["z"]))
+            roles.append(rd.NODE_MINOR)
     for sx, sz in (starts[1], starts[5]):  # a gate per side joins the network
         sites.append((sx, sz))
+        roles.append(rd.NODE_EDGE)
     # see the note at archipelago.py's road step: M9a retired the terrain-slope
     # wall in favour of a grade block plus a side-hill price
     rp = rd.RoadParams(plan_step=(1 if fast else 4), road_width=44.0,
                        water_penalty=30.0)
-    polylines = rd.plan_roads(h, 0.0, cell, sites, rp)
-    road_mask, road_dist = rd.rasterize_roads(polylines, h.shape, cell, rp)
+    net = rd.plan_network(h, 0.0, cell, sites, roles, rp)
+    polylines = net.polylines
+    raster = rd.rasterize_network(net, h.shape, cell, rp)
+    road_mask, road_dist = raster.mask, raster.dist
     # worn junction plazas where routes meet (district centres + waypoints;
     # the trailing 2 gate sites sit on start pads — no plaza there)
     plaza_sites = sites[:-2]
     rd.carve_plazas(road_mask, road_dist, plaza_sites, 85.0, cell, rp)
-    h = rd.flatten_under_roads(h, road_dist, cell, rp)
+    # ...and an apron where a lesser way meets the deck it joins, which is a
+    # different place from a plaza: a plaza is authored at a site, a junction is
+    # wherever the planner found the cheapest point on the trunk.
+    rd.carve_junction_aprons(raster, net.junctions, cell, rp)
+    # ONE flatten pass over the combined field. Per-class passes would grade the
+    # crossing twice — see roads.flatten_network.
+    h = rd.flatten_network(h, raster, cell, rp)
+    _mix = ", ".join(f"{rd.ROAD_CLASS_NAMES[k]} {v:.0f}"
+                     for k, v in sorted(net.length_by_class().items()) if v > 0)
     print(f"roads done {time.time()-t_start:.0f}s "
-          f"({len(polylines)} segments, {len(plaza_sites)} plazas)")
+          f"({len(polylines)} segments, {len(plaza_sites)} plazas, "
+          f"{len(net.junctions)} junctions; length by class: {_mix})")
+    # the grade the DELIVERED deck holds, which is not the grade the planner
+    # costed — the instrument warns when they disagree (roads R2 finding)
+    rd.report_delivered_grades(net, h, cell, rp)
 
     # 7. biomes
     gy, gx = np.gradient(h, cell)
@@ -392,10 +427,15 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
     # runs here rather than in step 6 — the polylines and the graded height are
     # both final by now, and the class raster is grown by the same distance
     # transform that produced road_dist, so it cannot disagree with road_mask.
-    road_cls = rd.classify_roads(polylines, moist, h, 0.0, cell)
-    _m, _d, road_class = rd.rasterize_roads_classified(
-        polylines, road_cls, h.shape, cell, rp)
+    # R2: sealing now follows the HIERARCHY (a highway is bitumen because it is
+    # a highway), so R1's longest-40 %-by-length budget — which was a proxy for
+    # exactly this — is not consulted.
+    road_cls = rd.classify_roads(polylines, moist, h, 0.0, cell,
+                                 road_classes=net.road_classes)
+    _surf_raster = rd.rasterize_network(net, h.shape, cell, rp, surfaces=road_cls)
+    road_class = _surf_raster.surf
     rd.carve_plaza_classes(road_class, plaza_sites, 85.0, cell)
+    rd.carve_junction_aprons(_surf_raster, net.junctions, cell, rp)
     _deck = max(1, int((road_class != rd.SURF_NONE).sum()))
     _surf_mix = ", ".join(
         f"{rd.SURFACE_NAMES[k]} {100.0 * int((road_class == k).sum()) / _deck:.1f}%"
@@ -589,6 +629,7 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
     pkg.write_package(
         out_dir, cfg, h, slope, b, moist, road_dist, road_mask, cell,
         scratch_dir=scratch, regions_lua=m1.build_regions_lua(layout),
+        roads_lua=pkg.emit_roads_lua(net, cell, rp),
         feature_files=contract_files, stamps=stamps, road_class=road_class,
     )
 
