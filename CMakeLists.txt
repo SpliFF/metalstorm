@@ -604,6 +604,10 @@ if(TEST_SOURCES)
         ${CMAKE_SOURCE_DIR}/rts/Server/StatsDump.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/AI/AIScriptContext.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/AI/AICommandQueue.cpp
+        # I1/SG1: the AI-command journal codec, split out of StateStreamer.cpp
+        # so its round-trip (kind byte + text payload) is a plain doctest —
+        # StateStreamer.cpp itself is not linkable here.
+        ${CMAKE_SOURCE_DIR}/rts/Server/AI/AICommandCodec.cpp
     )
     target_include_directories(spring-tests PRIVATE
         ${CMAKE_SOURCE_DIR}/rts
