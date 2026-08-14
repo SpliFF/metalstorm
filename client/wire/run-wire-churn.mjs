@@ -172,8 +172,30 @@ try {
     const totals = {
         cyclesStarted: 0, cyclesAuthed: 0, cyclesFailed: 0,
         sentByPayload: {}, serverErrorsByCode: {}, writeErrors: [],
-        seats: [], failures: [],
+        seats: [], failures: [], keyDictionaryCycles: [],
     };
+
+    // S1's census (PLAN-long-uptime T4-1e). Every session is sent the WHOLE key
+    // dictionary at join, so the per-cycle DELTA against everything seen so far
+    // is what the window minted — recorded uncapped, because a sampled key list
+    // would answer "which keys" with whichever ones happened to be sampled.
+    // Ids are deliberately not recorded: a compaction inside the window
+    // renumbers them, and `rev` is what makes that visible.
+    const keysSeen = new Set();
+    let dictCycle = 0;
+    function tallyKeyDictionary(client) {
+        const dict = client.latestKeyDictionary();
+        if (!dict) return;
+        const newKeys = [];
+        for (const k of dict.keys) {
+            if (keysSeen.has(k)) continue;
+            keysSeen.add(k);
+            newKeys.push(k);
+        }
+        totals.keyDictionaryCycles.push({
+            cycle: dictCycle++, rev: dict.rev, size: dict.keys.length, newKeys,
+        });
+    }
 
     function tallySent(client) {
         for (const [tag, n] of client.sentByPayload) {
@@ -228,6 +250,10 @@ try {
                 totals.failures.push(`${user}: ${e?.message ?? e}`);
             } finally {
                 tallySent(client);
+                // After the hold, so the dictionary counted is the one the
+                // session held at the END of its cycle — a rev bump arriving
+                // during the hold is this cycle's, not the next one's.
+                tallyKeyDictionary(client);
                 client.close();
             }
             if (Date.now() < windowEnd) await sleep(args.gapMs);
@@ -252,6 +278,10 @@ try {
         failures,
     };
     if (args.json) await emit(JSON.stringify(verdict));
+    const dictSamples = totals.keyDictionaryCycles;
+    log(`[churn] key dictionary: ${dictSamples.length} sample(s), `
+        + `${keysSeen.size} distinct key(s), final size `
+        + `${dictSamples.length ? dictSamples[dictSamples.length - 1].size : 0}`);
     log(`[churn] cycles ${totals.cyclesAuthed} authed / ${totals.cyclesStarted} started, `
         + `${totals.cyclesFailed} failed; server errors `
         + `${JSON.stringify(totals.serverErrorsByCode)}`);

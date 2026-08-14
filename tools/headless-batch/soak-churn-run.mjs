@@ -46,6 +46,7 @@ import {
     checkChurnWindow, checkClientSurfaces, compareChurnToControl, surfaceReading,
     CLIENT_SURFACES,
 } from './lib/churn-checks.mjs';
+import { censusChurn, formatCensus } from './lib/key-census.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_REPO_ROOT = path.resolve(HERE, '..', '..');
@@ -245,6 +246,16 @@ async function main() {
         console.log(`  ${s.row} ${s.key}: peak=${r.peak} final=${r.final} over ${r.samples} sample(s)`);
     }
     if (!surfaces.ok) fail('the client-driven surfaces did not move:\n  - ' + surfaces.problems.join('\n  - '));
+
+    // --- Part 2b: WHICH keys did it mint? (T4-1e) --------------------------
+    // Reported, never gated. The census answers a question about the SHAPE of
+    // S1's population; whether that population is bounded is T4-1a's ruling on
+    // the peak envelope, and a window this short observes at most one
+    // reclamation (§15's `one-cycle`). Gating here would gate on the same coin.
+    const census = censusChurn(dr.json.keyDictionaryCycles ?? []);
+    await writeJson(path.join(outDir, 'key-census.json'), census);
+    console.log('  S1 key census (T4-1e):');
+    console.log(formatCensus(census));
 
     // --- Part 3: the matched control --------------------------------------
     if (values['skip-control']) {

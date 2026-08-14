@@ -14,6 +14,7 @@ import { ServerMessage } from '../src/protocol/spring-web/server-message';
 import { ServerPayload } from '../src/protocol/spring-web/server-payload';
 import { AuthResponse } from '../src/protocol/spring-web/auth-response';
 import { AuthStatus } from '../src/protocol/spring-web/auth-status';
+import { RulesParamKeyDictionary } from '../src/protocol/spring-web/rules-param-key-dictionary';
 
 // These tests cover everything about the scripted wire client that does not
 // need QUIC: what it puts on the control stream, in what order, and what it
@@ -101,6 +102,24 @@ function serverErrorMessage(code: number, text: string): Uint8Array {
     ServerMessage.startServerMessage(b);
     ServerMessage.addPayloadType(b, ServerPayload.ServerError);
     ServerMessage.addPayload(b, se);
+    b.finish(ServerMessage.endServerMessage(b));
+    const buf = b.asUint8Array();
+    const out = new Uint8Array(1 + buf.length);
+    out[0] = ENVELOPE_FLATBUFFERS;
+    out.set(buf, 1);
+    return out;
+}
+
+/** One `RulesParamKeyDictionary` off the wire — the whole dictionary, which is
+ *  what the server actually sends on every rev bump. */
+function keyDictionaryMessage(rev: number, keys: string[]): Uint8Array {
+    const b = new flatbuffers.Builder(256);
+    const keyOffsets = keys.map((k) => b.createString(k));
+    const vec = RulesParamKeyDictionary.createKeysVector(b, keyOffsets);
+    const kd = RulesParamKeyDictionary.createRulesParamKeyDictionary(b, vec, rev);
+    ServerMessage.startServerMessage(b);
+    ServerMessage.addPayloadType(b, ServerPayload.RulesParamKeyDictionary);
+    ServerMessage.addPayload(b, kd);
     b.finish(ServerMessage.endServerMessage(b));
     const buf = b.asUint8Array();
     const out = new Uint8Array(1 + buf.length);
@@ -303,6 +322,26 @@ describe('scripted wire client — inbound', () => {
         await client.waitFor(() => client.serverErrors.length === 1, 2_000, 5);
         expect(client.serverErrors[0]).toEqual({ code: 401, message: 'Not authenticated' });
         expect(client.inboundByPayload.get(ServerPayload.ServerError)).toBe(1);
+    });
+
+    it('keeps every key dictionary it is sent, in order, whole', async () => {
+        // S1's census (PLAN-long-uptime T4-1e) asks WHICH keys a session mints,
+        // and a client is the only thing the server ever tells. Each dictionary
+        // is complete rather than a delta, and a later one can be SMALLER than
+        // an earlier one — that is a compaction, and the census must be able to
+        // see it rather than merging the two into a monotonic set.
+        const session = new FakeSession();
+        const client = makeClient(session);
+        await client.connect();
+        expect(client.latestKeyDictionary()).toBeNull();
+        session.deliver(keyDictionaryMessage(3, ['war_state', 'objective_1_state']));
+        await client.waitFor(() => client.keyDictionaries.length === 1, 2_000, 5);
+        session.deliver(keyDictionaryMessage(4, ['war_state']));
+        await client.waitFor(() => client.keyDictionaries.length === 2, 2_000, 5);
+        expect(client.keyDictionaries[0]).toEqual(
+            { rev: 3, keys: ['war_state', 'objective_1_state'] });
+        expect(client.latestKeyDictionary()).toEqual({ rev: 4, keys: ['war_state'] });
+        expect(client.inboundByPayload.get(ServerPayload.RulesParamKeyDictionary)).toBe(2);
     });
 
     it('times out rather than hanging when no AuthResponse arrives', async () => {

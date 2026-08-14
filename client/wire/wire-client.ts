@@ -36,6 +36,7 @@ import { ServerPayload } from '../src/protocol/spring-web/server-payload.js';
 import { AuthResponse } from '../src/protocol/spring-web/auth-response.js';
 import { AuthStatus } from '../src/protocol/spring-web/auth-status.js';
 import { ServerError } from '../src/protocol/spring-web/server-error.js';
+import { RulesParamKeyDictionary } from '../src/protocol/spring-web/rules-param-key-dictionary.js';
 
 /** The subset of the WebTransport API the harness uses. Structural, so both the
  *  browser type and the node package satisfy it without either being imported
@@ -105,6 +106,24 @@ export interface ServerErrorReport {
     message: string;
 }
 
+/**
+ * One `RulesParamKeyDictionary` the server sent — the whole dictionary, not a
+ * delta (`StateStreamer::SendKeyDictionary` re-sends every key on any rev bump,
+ * which is cost 1 of the two PLAN-long-uptime S1 exists to bound).
+ *
+ * This is the ONE game-state-adjacent thing this harness reads, and the header's
+ * "does not interpret game state" rule survives it: the keys are transported
+ * verbatim, nothing is parsed out of them and no value is decoded. It is here
+ * because S1's census (PLAN-long-uptime **T4-1e**) needs to know *which* keys a
+ * session mints, and a client is the only thing the server ever tells.
+ */
+export interface KeyDictionarySnapshot {
+    /** `dictionary_rev` — bumped on every mint and on compaction. */
+    rev: number;
+    /** Every interned key, in id order starting at id 1 (0 is reserved). */
+    keys: string[];
+}
+
 export class WireClient {
     private readonly opts: WireClientOptions;
     private readonly fetchImpl: typeof fetch;
@@ -131,6 +150,10 @@ export class WireClient {
 
     /** Every ServerError received, in order. */
     readonly serverErrors: ServerErrorReport[] = [];
+
+    /** Every key dictionary received, in order. A session normally gets exactly
+     *  one (the join resync) and then one more per rev bump it is behind for. */
+    readonly keyDictionaries: KeyDictionarySnapshot[] = [];
 
     private authWaiters: Array<(o: AuthOutcome) => void> = [];
     private lastAuth: AuthOutcome | null = null;
@@ -381,7 +404,23 @@ export class WireClient {
             const report = { code: se.code(), message: se.message() ?? '' };
             this.serverErrors.push(report);
             this.log(`[wire] ServerError ${report.code}: ${report.message}`);
+        } else if (type === ServerPayload.RulesParamKeyDictionary) {
+            const kd = sm.payload(new RulesParamKeyDictionary()) as RulesParamKeyDictionary | null;
+            if (!kd) return;
+            const keys: string[] = [];
+            for (let i = 0; i < kd.keysLength(); i++) keys.push(kd.keys(i) ?? '');
+            this.keyDictionaries.push({ rev: kd.dictionaryRev(), keys });
+            this.log(`[wire] RulesParamKeyDictionary rev=${kd.dictionaryRev()} keys=${keys.length}`);
         }
+    }
+
+    /** The most recent dictionary this session was told about, or null if it was
+     *  never told one (which is itself a reading — see T4-2's client-count gate:
+     *  a server that interns nothing sends nothing). */
+    latestKeyDictionary(): KeyDictionarySnapshot | null {
+        return this.keyDictionaries.length
+            ? this.keyDictionaries[this.keyDictionaries.length - 1]
+            : null;
     }
 
     close(): void {
