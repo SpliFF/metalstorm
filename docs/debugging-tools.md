@@ -606,8 +606,8 @@ by construction rather than by ladder length: `StateStreamer::BroadcastRulesPara
 returns at `rtcServer.GetClientCount() == 0` (StateStreamer.cpp:1552) *before*
 the interning block, so **both** S1's key dictionary and its compaction are
 client-gated (`param_keys` sits at 0); and standing orders arrive from client
-macro-order calls, so `standing_orders` does too. S1/S6 belong to §2's ladder 3
-(the client soak), not to ladders 1–2.
+macro-order calls, so `standing_orders` does too. Those two are what
+[`make soak-churn`](#churn-arm-ladder-2-soak-churn-runmjs) below exists for.
 
 `growth-report.mjs` fits `base + slope×days` to every growth surface and rules
 each slope:
@@ -680,6 +680,85 @@ Four things the ruling does deliberately, each of which was a bug first:
 
 `make test-headless-batch` covers the ruling (`lib/growth-fit.mjs` is pure).
 
+### Churn arm — ladder 2 (`soak-churn-run.mjs`)
+
+The ladder above measures a world with **no clients**, and two of §1's rows are
+unreachable that way (see the `no-signal` note above). This is the arm that
+reaches them: N scripted wire sessions connecting, issuing a move order and a
+standing order, disconnecting, and doing it again for the length of the window.
+
+```bash
+make soak-churn                                   # 2 sessions, 3-minute arms
+make soak-churn CHURN_WINDOW_MIN=6 CHURN_SESSIONS=3
+node tools/headless-batch/soak-churn-run.mjs \
+  --server-bin build/release/spring-server --out-dir build/soak-churn \
+  --window-min 3 --sessions 2 [--skip-control]
+```
+
+It runs the **same fixture twice** — once with the churn driver, once with
+nobody connecting — and the pair is the evidence: the churn arm alone would show
+two counters with numbers in them and could not say the clients put them there.
+A control that moves on its own **fails** the gate.
+
+First live pair (2026-08-14, release binary, `churn-ladder.json`, 3-wall-minute
+arms, 66 cycles over 2 seated accounts):
+
+| surface | control | churn |
+|---|---|---|
+| `param_keys` (S1) | 0 over 211 samples | **0 → 695** |
+| `standing_orders` (S6) | 0 over 211 samples | **0 → 60 peak, 50 final** |
+
+Four things it has to get right, three of which are the reason the arm did not
+exist earlier:
+
+- **The sessions must be SEATED, not merely authenticated.** A standing order is
+  refused with a **401** when `session->team < 0` (ClientMessageHandler.cpp), and
+  a server with no `--player` roster admits every client as a spectator — which
+  authenticates perfectly. The runner passes `--player <user>:<team>:<pos>` and
+  the verdict asserts on the *team* in each cycle's AuthResponse, never on the
+  auth status alone.
+- **Both arms run `--session-kind persistent`.** A skirmish with a `--player`
+  roster holds GameStart until every rostered human connects
+  (`GameStartCoordinator.h`), which the control arm never does; the two arms
+  would then not be the same run and the control would measure a server sitting
+  in set-up.
+- **The churn accounts sit beside the AI, not on top of it.** `churn-ladder.json`
+  puts the two Strategos on teams 0 and 4 and the churn accounts on **1 and 5** —
+  the second seat of each faction's team block in `meridian_basin_soak`.
+- **Refusals only ever arrive as a `ServerError`** (401 unseated, 402 no
+  authority, 429 rate limit or per-team cap), so the driver counts them by code.
+  A harness that counted only what it *sent* would report a window in which every
+  order was refused as healthy.
+- **The driver `await`s its own last write.** `console.log` + `process.exit()`
+  truncates on a pipe: the verdict carries a seat record per cycle, and at 142
+  cycles the caller got exactly 8 192 bytes of JSON **and a zero exit status**
+  while the 66-cycle arm fitted and passed. Both wire entry points now wait for
+  the write to leave.
+
+**Window length changed the S1 answer, so read this before believing a short
+arm.** At 3 minutes `param_keys` looked like a bounded step — but the driver
+stops 25 s before the server by design, so a short arm always ends with a quiet
+tail. At **6 minutes** (2.2 simulated hours, 144 cycles) the dictionary climbs at
+**8.1 assigned ids per churn cycle** while live `rules_params` moves only 292 →
+533 — each session mints keys that die with it — and then **S1's compaction fires
+for the first time on record**: `rulesParams key dictionary compacted: 1050
+interned -> 512 live (538 dead ids reclaimed), rev 1052`, on the 512-dead
+absolute floor. S1 is bounded by that compaction, not by the vocabulary, and the
+`param_keys` / `param_keys_rev` pair is what makes it visible (falling keys,
+climbing rev).
+
+**`standing_orders` is the shape the S6 fix predicts:** it climbs ~1 per churn cycle, peaks, and then **falls** as the
+default TTL (`defaultTtlFrames` = 108 000 = one simulated hour) retires the
+earliest orders — 60 at simulated minute 66, 50 by minute 79. The live count is
+therefore ≈ *churn rate × TTL*, well under the per-team cap of 64, and a
+disconnect does **not** retire a departed player's orders; the deadline does.
+⚠ Consequently `growth-report.mjs` rules **both** client surfaces `unexplained`
+on these windows (S6 897–1 189 orders/sim-day; S1 1 938 keys/sim-day at r² 0.14,
+a line through a sawtooth). Neither is a steady state — one decays on the TTL,
+the other is reclaimed by the compaction — and the `saturated` rule's last-50 %
+test straddles both turning points. **Quote the series, not the slope**
+(PLAN-long-uptime T4-1a). The gate itself rules by peak-vs-control, not by slope.
+
 ---
 
 ## Scripted wire client (`client/wire`)
@@ -747,6 +826,13 @@ A dev-mode server auto-registers the account named by `--user`, so no sign-up
 step is needed. A session that the server does not seat comes back
 `team=-1 role=player`: authenticated, but holding no team, which is the right
 answer for a server started with no `--player` roster and NOT a defect.
+
+`wire/run-wire-churn.mjs` is the **many-sessions** entry point (the soak churn
+arm above drives it). It holds every session in ONE node process deliberately:
+spawning `run-wire-client.mjs` per cycle would pay vite plus the native addon on
+every connect, and the measured churn rate would be node's start-up cost rather
+than the server's. It shares the cert-pinning hook and its install-order trap
+verbatim, and adds `sendStandingOrderCreate` — the verb S6 counts.
 
 ---
 

@@ -107,6 +107,11 @@ async function loadWebTransport(pinnedHashes, log) {
 const args = parseArgs(process.argv.slice(2));
 const log = args.quiet ? () => {} : (m) => console.log(m);
 
+/** Write one line to stdout and wait for it to leave — see the call site. */
+function emitJson(line) {
+    return new Promise((resolve) => { process.stdout.write(`${line}\n`, resolve); });
+}
+
 // The node client reports a refused handshake by THROWING from a UDP socket
 // callback, outside any promise chain — so a `try`/`catch` around connect() does
 // not see it and the process dies with a stack trace instead of a verdict. Under
@@ -248,7 +253,13 @@ try {
         .map(([k, v]) => `${k}:${v}`).join(' ');
 
     if (args.json) {
-        console.log(JSON.stringify({
+        // `await`ed, not console.log'd: stdout to a pipe is asynchronous and
+        // `process.exit()` below discards whatever is still buffered. This
+        // verdict is small enough to have always fitted, but the churn driver's
+        // is not — measured truncated at exactly 8 192 bytes with a zero exit
+        // status (run-wire-churn.mjs's `emit`), and one buffer is not a
+        // guarantee worth relying on in either harness.
+        await emitJson(JSON.stringify({
             auth, verifyCalls: wt.verifyCalls(),
             inboundByEnvelope: Object.fromEntries(client.inboundByEnvelope),
             inboundByPayload: Object.fromEntries(client.inboundByPayload),

@@ -261,7 +261,21 @@ has no WebTransport, and the package that supplies one implements cert pinning
 through a global hook rather than `serverCertificateHashes`. Server-side the frame
 has one decoder, `wireframe::` in `rts/Server/ClientFrame.h`; a caller that needs
 only the payload tag asks it rather than re-deriving the framing (PLAN-replay
-§7.19 is what a second copy cost).
+§7.19 is what a second copy cost). The harness has a **second** node entry point,
+`client/wire/run-wire-churn.mjs`, which holds N sessions in one process for the
+soak churn arm (PLAN-long-uptime §14) — one process because vite plus the native
+quiche addon cost seconds per connect, so a process-per-cycle harness would
+measure node's start-up rather than the server's churn capacity.
+
+**An admitted client is not a seated one.** `AuthRequest` admits an account with
+no roster entry as a **spectator** — status OK, a real `playerNum`, `team=-1` —
+which is what the spectate-a-running-game flow depends on. Every team-scoped
+verb tests the seat rather than the auth (`StandingOrderCreate` refuses
+`session->team < 0` with a 401), so a harness or gate that reads "authenticated"
+as "playing" asserts on a path the server never took. `--player user:team:pos`
+is what seats one, and on a **skirmish** it also makes GameStart wait for that
+roster (`GameStartCoordinator.h`) — a headless arm that must not wait passes
+`--session-kind persistent`.
 
 **A unit id names a slot, not a unit.** `SimObjectIDPool` recycles ids, so anything that keeps an id across the recycle — a client's selection, squad membership, clip/aim poses, PREVLOS ghosts — silently transfers to whatever took the slot. Two consumers, two instruments, chosen by how long each holds an id. *Inside* the sim, deferred work holds an id for a few frames and is guarded per-id by `CUnitHandler::GetUnitSpawnGen` (`DamageField`, `StatisticalCombat`). *Outside* it, the remote client holds ids for the whole match and the sim cannot enumerate what it built on them, so the recycle is **announced** instead: `SimObjectIDPool::GetRecycleEpoch()` bumps when an id becomes re-issuable, `EntityState::IdRecycleAnnouncer` raises **bit 15 of the entity-state `field_mask`** (`FLAG_ID_RECYCLED` — a flag, no payload, outside `FIELD_ALL`) and holds it up until a full snapshot of a *later* tick, and `client/src/core/id-recycle-guard.ts` latches on any flagged message but flushes only on a full snapshot. The window discipline is the lane's fault, not paranoia: the entity lane is unreliable and newest-wins, so a single flagged message can be superseded before it is delivered. See PLAN-long-uptime S5.
 

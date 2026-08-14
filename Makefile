@@ -1,4 +1,4 @@
-.PHONY: setup build build-release test test-cpp test-client test-all dev-client generate-protocol export-metalstorm-specs clean test-headless-batch test-headless-determinism test-replay-verify test-replay-spectate
+.PHONY: setup build build-release test test-cpp test-client test-all dev-client generate-protocol export-metalstorm-specs clean test-headless-batch test-headless-determinism test-replay-verify test-replay-spectate soak-growth soak-churn
 
 # First-time setup
 setup:
@@ -50,10 +50,10 @@ test-all: test-cpp test-client
 # headless-batch pure unit tests (no server build needed): matrix expansion
 # (PLAN-headless.md task 3 §6 "meta" requirement), the fixture non-vacuity
 # checks, the replay-verdict parser and the spectate-arm rules (PLAN-replay.md
-# task 5 / §7.11 T2-a-1) and the soak growth-slope ruling (PLAN-long-uptime.md
-# task 4).
+# task 5 / §7.11 T2-a-1), the soak growth-slope ruling (PLAN-long-uptime.md
+# task 4) and the churn-arm verdict (PLAN-long-uptime.md T4-1).
 test-headless-batch:
-	cd tools/headless-batch && node --test test/matrix.test.mjs test/fixture-checks.test.mjs test/replay-verdict.test.mjs test/replay-spectate.test.mjs test/growth-fit.test.mjs test/run-paths.test.mjs
+	cd tools/headless-batch && node --test test/matrix.test.mjs test/fixture-checks.test.mjs test/replay-verdict.test.mjs test/replay-spectate.test.mjs test/growth-fit.test.mjs test/run-paths.test.mjs test/churn-checks.test.mjs
 
 # Determinism pair-run CI hook (PLAN-headless.md task 4): builds spring-server,
 # runs the PaperTanks-scale fixture twice, diffs the two stateHash sequences.
@@ -115,6 +115,26 @@ soak-growth:
 		--jsonl $(SOAK_OUT)/results.jsonl \
 		--budgets tools/headless-batch/fixtures/soak-budgets.json \
 		--json $(SOAK_OUT)/growth-report.json
+
+# Churn arm — "ladder 2" (PLAN-long-uptime.md T4-1). Two arms of the SAME
+# fixture: one with N scripted wire sessions connecting / ordering /
+# disconnecting for the window, one with nobody connecting. It is the only
+# ladder that can rule S1 (`param_keys`) or S6 (`standing_orders`) at all —
+# both read 0 at every sample of every client-less soak, because the streamer
+# skips interning at zero clients and a standing order is refused without a
+# seat. NOT part of test-all: two wall-window arms, and it needs client/'s
+# WebTransport addon (`npm install`).
+#   CHURN_WINDOW_MIN=n  per-arm wall window (default 3)
+#   CHURN_SESSIONS=n    concurrent churn accounts (default 2)
+CHURN_OUT ?= build/soak-churn
+CHURN_WINDOW_MIN ?= 3
+CHURN_SESSIONS ?= 2
+soak-churn:
+	cmake --build build/release --target spring-server
+	node tools/headless-batch/soak-churn-run.mjs \
+		--server-bin build/release/spring-server \
+		--out-dir $(CHURN_OUT) --window-min $(CHURN_WINDOW_MIN) \
+		--sessions $(CHURN_SESSIONS)
 
 # Development
 dev-client:

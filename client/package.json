@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "wire": "node wire/run-wire-client.mjs"
+    "wire": "node wire/run-wire-client.mjs",
+    "wire:churn": "node wire/run-wire-churn.mjs"
   },
   "devDependencies": {
     "@babylonjs/addons": "^9.1.0",

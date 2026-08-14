@@ -30,10 +30,12 @@ import { ClientPayload } from '../src/protocol/spring-web/client-payload.js';
 import { Handshake } from '../src/protocol/spring-web/handshake.js';
 import { AuthRequest } from '../src/protocol/spring-web/auth-request.js';
 import { PlayerCommand } from '../src/protocol/spring-web/player-command.js';
+import { StandingOrderCreate } from '../src/protocol/spring-web/standing-order-create.js';
 import { ServerMessage } from '../src/protocol/spring-web/server-message.js';
 import { ServerPayload } from '../src/protocol/spring-web/server-payload.js';
 import { AuthResponse } from '../src/protocol/spring-web/auth-response.js';
 import { AuthStatus } from '../src/protocol/spring-web/auth-status.js';
+import { ServerError } from '../src/protocol/spring-web/server-error.js';
 
 /** The subset of the WebTransport API the harness uses. Structural, so both the
  *  browser type and the node package satisfy it without either being imported
@@ -92,6 +94,17 @@ export interface AuthOutcome {
     role: string;
 }
 
+/** One `ServerError` the server sent back. The churn arm (PLAN-long-uptime
+ *  T4-1) exists to make S6 non-zero, and every way that fails — 401 unseated,
+ *  402 out of authority, 429 rate-limited or at the per-team cap — arrives as
+ *  one of these and as nothing else. A harness that counted only what it SENT
+ *  would report a churn window as healthy while the server refused every
+ *  order in it. */
+export interface ServerErrorReport {
+    code: number;
+    message: string;
+}
+
 export class WireClient {
     private readonly opts: WireClientOptions;
     private readonly fetchImpl: typeof fetch;
@@ -115,6 +128,9 @@ export class WireClient {
     /** Every write rejection seen, in order. Non-empty means bytes this harness
      *  claims to have sent did not leave. */
     readonly writeErrors: string[] = [];
+
+    /** Every ServerError received, in order. */
+    readonly serverErrors: ServerErrorReport[] = [];
 
     private authWaiters: Array<(o: AuthOutcome) => void> = [];
     private lastAuth: AuthOutcome | null = null;
@@ -229,6 +245,38 @@ export class WireClient {
         return seq;
     }
 
+    /**
+     * Create a standing order — the verb PLAN-long-uptime **S6** counts, and
+     * the reason a churn arm needs a SEATED session: the server refuses this
+     * with a 401 when `session->team < 0` (ClientMessageHandler.cpp), which is
+     * every client on a headless run with no `--player` roster. `conditions`
+     * are omitted deliberately (offset 0 = the field is absent): the server
+     * reads them through `ReadStandingOrderConditions`, which handles a null
+     * table, and a harness that invented conditions would be asserting on its
+     * own guesses rather than on the container's growth.
+     */
+    sendStandingOrderCreate(order: {
+        type: number;
+        priority?: number;
+        params?: number[];
+        expiresInFrames?: number;
+    }): number {
+        const b = new flatbuffers.Builder(256);
+        const params = StandingOrderCreate.createParamsVector(b, order.params ?? []);
+        const seq = ++this.sequence;
+        StandingOrderCreate.startStandingOrderCreate(b);
+        StandingOrderCreate.addSequence(b, seq);
+        StandingOrderCreate.addType(b, order.type);
+        StandingOrderCreate.addPriority(b, order.priority ?? 50);
+        StandingOrderCreate.addParams(b, params);
+        StandingOrderCreate.addExpiresInFrames(b, order.expiresInFrames ?? 0);
+        const so = StandingOrderCreate.endStandingOrderCreate(b);
+        this.sendClientMessage(b, ClientPayload.StandingOrderCreate, so);
+        this.log(`[wire] sent StandingOrderCreate seq=${seq} type=${order.type} `
+            + `priority=${order.priority ?? 50}`);
+        return seq;
+    }
+
     private sendClientMessage(
         b: flatbuffers.Builder, payloadType: ClientPayload, payload: number,
     ): void {
@@ -327,6 +375,12 @@ export class WireClient {
             const waiters = this.authWaiters;
             this.authWaiters = [];
             for (const w of waiters) w(outcome);
+        } else if (type === ServerPayload.ServerError) {
+            const se = sm.payload(new ServerError()) as ServerError | null;
+            if (!se) return;
+            const report = { code: se.code(), message: se.message() ?? '' };
+            this.serverErrors.push(report);
+            this.log(`[wire] ServerError ${report.code}: ${report.message}`);
         }
     }
 

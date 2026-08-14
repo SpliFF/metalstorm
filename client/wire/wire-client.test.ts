@@ -8,6 +8,8 @@ import { ClientPayload } from '../src/protocol/spring-web/client-payload';
 import { Handshake } from '../src/protocol/spring-web/handshake';
 import { AuthRequest } from '../src/protocol/spring-web/auth-request';
 import { PlayerCommand } from '../src/protocol/spring-web/player-command';
+import { StandingOrderCreate } from '../src/protocol/spring-web/standing-order-create';
+import { ServerError } from '../src/protocol/spring-web/server-error';
 import { ServerMessage } from '../src/protocol/spring-web/server-message';
 import { ServerPayload } from '../src/protocol/spring-web/server-payload';
 import { AuthResponse } from '../src/protocol/spring-web/auth-response';
@@ -90,6 +92,21 @@ function authResponseMessage(fields: {
     msg[0] = ENVELOPE_FLATBUFFERS;
     msg.set(buf, 1);
     return msg;
+}
+
+function serverErrorMessage(code: number, text: string): Uint8Array {
+    const b = new flatbuffers.Builder(128);
+    const msg = b.createString(text);
+    const se = ServerError.createServerError(b, code, msg);
+    ServerMessage.startServerMessage(b);
+    ServerMessage.addPayloadType(b, ServerPayload.ServerError);
+    ServerMessage.addPayload(b, se);
+    b.finish(ServerMessage.endServerMessage(b));
+    const buf = b.asUint8Array();
+    const out = new Uint8Array(1 + buf.length);
+    out[0] = ENVELOPE_FLATBUFFERS;
+    out.set(buf, 1);
+    return out;
 }
 
 function makeClient(session: FakeSession, overrides: Record<string, unknown> = {}) {
@@ -183,6 +200,31 @@ describe('scripted wire client — outbound', () => {
         expect(client.writeErrors).toEqual([]);
     });
 
+    it('encodes a StandingOrderCreate on the same sequence counter as a command', async () => {
+        // The sequence is shared deliberately: the server keeps ONE
+        // `lastCommandSeq` per session and refuses anything at or below it as
+        // stale, so a standing order numbered from its own counter would be
+        // dropped as a replay of a command the harness already sent.
+        const session = new FakeSession();
+        const client = makeClient(session);
+        await client.connect();
+        expect(client.sendPlayerCommand({ commandId: 10 })).toBe(1);
+        expect(client.sendStandingOrderCreate({ type: 0, priority: 50, params: [4000, 0, 4000, 600] }))
+            .toBe(2);
+        await client.flush();
+
+        const sent = decodeSent(session);
+        expect(sent[3].type).toBe(ClientPayload.StandingOrderCreate);
+        const so = sent[3].msg.payload(new StandingOrderCreate()) as StandingOrderCreate;
+        expect(so.sequence()).toBe(2);
+        expect(so.type()).toBe(0);
+        expect(so.priority()).toBe(50);
+        expect(so.paramsLength()).toBe(4);
+        // Conditions are absent, not empty — the server reads them through
+        // ReadStandingOrderConditions, which handles a null table.
+        expect(so.conditions()).toBe(null);
+    });
+
     it('reports a rejected write instead of losing it', async () => {
         // A send whose bytes never left was voided until 2026-08-14, which
         // reads as "sent": an arm asserting on the server's answer would blame
@@ -247,6 +289,20 @@ describe('scripted wire client — inbound', () => {
         await client.waitFor(() => client.inboundByEnvelope.get(0x02) === 1, 2_000, 5);
         expect(client.inboundByEnvelope.get(ENVELOPE_FLATBUFFERS)).toBe(1);
         expect(client.inboundByPayload.get(ServerPayload.AuthResponse)).toBe(1);
+    });
+
+    it('records a ServerError, because that is the only form a refusal takes', async () => {
+        // A churn window (PLAN-long-uptime T4-1) exists to make S6 non-zero, and
+        // every way that fails — 401 unseated, 402 no authority, 429 rate limit
+        // or per-team cap — comes back as a ServerError and as nothing else. A
+        // harness counting only what it SENT would report such a window healthy.
+        const session = new FakeSession();
+        const client = makeClient(session);
+        await client.connect();
+        session.deliver(serverErrorMessage(401, 'Not authenticated'));
+        await client.waitFor(() => client.serverErrors.length === 1, 2_000, 5);
+        expect(client.serverErrors[0]).toEqual({ code: 401, message: 'Not authenticated' });
+        expect(client.inboundByPayload.get(ServerPayload.ServerError)).toBe(1);
     });
 
     it('times out rather than hanging when no AuthResponse arrives', async () => {
