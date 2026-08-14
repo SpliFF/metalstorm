@@ -17,6 +17,7 @@
 #include "Server/NetworkServer.h"
 #include "Server/ReplayFile.h"
 #include "Server/RoomManager.h"
+#include "Server/RuntimeAIRoster.h"
 #include "Server/WarPlayerBindings.h"
 #include "Server/JoinPreview.h"
 #include "Server/WarDeploy.h"
@@ -1050,6 +1051,16 @@ int main(int argc, char *argv[]) {
   // work on a lobby that has never launched a war, and the alternative is a
   // failed prepare on every join-preview until one does.
   GameEventsDb::EnsureTable(mapDb);
+
+  // room_runtime_ai — the AI seats a war acquires while it is RUNNING (a
+  // caretaker seated on a side whose last human left: PLAN-metalstorm-ai task
+  // 4(b), RuntimeAIRoster.h). The game server is both writer and reader — the
+  // row carries the sim playerNum the AI holds, which only that process can
+  // mint and only that process can honour on resume. The lobby's whole stake in
+  // it is the DELETE that goes with the room (room ids are reused), and this
+  // create is what makes that delete work on a lobby that has never launched a
+  // war.
+  RuntimeAIRoster::EnsureTable(mapDb);
 
   // Helper: persist a game server entry to SQLite
   auto persistGameServer = [&](const GameServerInstance &inst) {

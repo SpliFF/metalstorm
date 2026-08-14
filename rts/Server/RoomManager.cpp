@@ -5,6 +5,7 @@
 #include "GameEventsDb.h"
 #include "GameServersDb.h"
 #include "AuthTokens.h"
+#include "RuntimeAIRoster.h"
 #include "WarResume.h"
 #include "SqliteThreading.h"
 #include "System/SpringLog/SpringLog.h"
@@ -442,6 +443,12 @@ void RoomManager::DeleteRoomFromDb(uint32_t roomId) {
     // is what decides a war comes back on its stored world — a surviving blob
     // under a recycled id is a world swap, not a stale row.
     warresume::DeleteSnapshotsForRoom(db, roomId);
+    // A BRAIN, and its synced identity. `room_runtime_ai` holds the sim
+    // playerNum of every AI this war seated at runtime, so the next war on this
+    // number would resume with a caretaker nobody added — seated at a playerNum
+    // that war's own state means something else by (PLAN-metalstorm-ai task
+    // 4(b), RuntimeAIRoster.h).
+    RuntimeAIRoster::DeleteForRoom(db, roomId);
     // A seat. `ValidateWarReconnect` scopes a token by room and nothing else,
     // so an un-deleted token seats its holder in the NEXT war on this number.
     AuthTokens::DeleteWarReconnectForRoom(db, roomId);

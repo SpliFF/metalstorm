@@ -52,10 +52,12 @@
 #include "Server/AI/AIRuntimePool.h"
 #include "Server/AI/AIDiscovery.h"
 #include "Server/AI/AISpawn.h"
+#include "Server/AI/AISpawnService.h"
 #include "Server/PerfMetrics.h"
 #include "Server/RoomManager.h"
 #include "Server/AuthTokens.h"
 #include "Server/GameEventsDb.h"
+#include "Server/RuntimeAIRoster.h"
 #include "Server/WarPlayerBindings.h"
 #include "Server/WarStateSim.h"
 #include "Server/PlayerOnboarding.h"
@@ -270,6 +272,11 @@ int main(int argc, char* argv[])
     // (gameId, roomId) is already `--game` + `--room`; see Hibernation.h for
     // why §3's `--resume <gameId>` sketch is not what landed.
     bool resumeRequested = false;
+    /// Set once a resume has actually APPLIED a stored world, which is a
+    /// stricter fact than `resumeRequested` and the only one the runtime-AI
+    /// restore may act on: re-seating a caretaker over a freshly staged world
+    /// would put a brain on a side whose pool and orders were never restored.
+    bool resumedWorld = false;
     // `--no-hibernate`: exit without leaving a resumable world behind. The
     // escape hatch for a box being torn down for good, and the off switch a
     // bisect needs.
@@ -1002,6 +1009,13 @@ int main(int argc, char* argv[])
     // both-processes rule as the bindings table above, and the same durability
     // rule — it is the only copy of what happened in a war.
     GameEventsDb::EnsureTable(db.Handle());
+    // room_runtime_ai — the AI seats this war takes on WHILE running (task
+    // 4(b)'s open thread, RuntimeAIRoster.h). Written and read here; the lobby
+    // only deletes it with the room. Created unconditionally for the same
+    // reason as the two above: a scenario/direct boot may be the first process
+    // to touch this database, and the seat happens mid-war, long after any
+    // point where a failed prepare could still be noticed.
+    RuntimeAIRoster::EnsureTable(db.Handle());
     // Task 8a, and for the same reason: the game server VALIDATES per-war
     // reconnect tokens (the lobby mints them), so it must find the table even
     // on a machine where no lobby has ever run — a scenario/direct boot brings
@@ -1980,6 +1994,9 @@ int main(int argc, char* argv[])
         springlog_set_frame(sim.GetFrameNum());
         SLOG(SPRING_LOG_NOTICE, "room %u %s", roomId,
              hibernate::FormatResume(ro).c_str());
+        // The world is back. Its AI seats are not — see the restore call below,
+        // which has to wait for ctx.aiSpawnEnv (the plugin roots) to be filled.
+        resumedWorld = true;
     }
 
     // --- AI slot resolution ---
@@ -2006,6 +2023,15 @@ int main(int argc, char* argv[])
     ctx.aiSpawnEnv.defExportDir = defsCacheKey.empty()
         ? std::string()
         : DefsCache::CacheDir(gameId, defsCacheKey);
+
+    // A resumed war brings back the AI seats it acquired while it was running
+    // (RuntimeAIRoster.h, PLAN-metalstorm-ai task 4(b)'s open thread). Here and
+    // not in the resume block above: the restore resolves plugins through the
+    // same roots the two other staging paths use, and those roots are the four
+    // lines directly above. Before the `--ai` loop so the operator log reads in
+    // seating order — the pre-freeze seats, then this launch's slots.
+    if (resumedWorld)
+        RestoreRuntimeAISeats(ctx);
 
     if (!requestedAIs.empty()) {
         for (const auto& rq : requestedAIs) {

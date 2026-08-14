@@ -432,6 +432,11 @@ set(LOBBY_SERVER_SOURCES
     # arithmetic beside it and has no sim in it either.
     rts/Server/GameEventsDb.cpp
     rts/Server/WarLog.cpp
+    # PLAN-metalstorm-ai task 4(b): the AI seats a war takes on while RUNNING.
+    # The game server writes and restores them; the lobby is in this list only
+    # because RoomManager's delete chokepoint drops them with the room (room
+    # ids are reused).
+    rts/Server/RuntimeAIRoster.cpp
     # PLAN-persistence task 3b: resume-on-join. Pure policy plus one read-only
     # SELECT against `game_snapshots` — the lobby decides whether a war comes
     # back on its stored world, and needs no part of the sim to do it.
@@ -600,6 +605,10 @@ if(TEST_SOURCES)
         # (test_war_log.cpp).
         ${CMAKE_SOURCE_DIR}/rts/Server/GameEventsDb.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/WarLog.cpp
+        # PLAN-metalstorm-ai task 4(b)'s durability half: the table plus the
+        # pure restore policy (test_runtime_ai_roster.cpp). The two halves that
+        # need a sim live in AISpawnService.cpp, which does not link here.
+        ${CMAKE_SOURCE_DIR}/rts/Server/RuntimeAIRoster.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/HeadlessRun.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/StatsDump.cpp
         ${CMAKE_SOURCE_DIR}/rts/Server/AI/AIScriptContext.cpp

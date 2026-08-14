@@ -14,3 +14,14 @@ struct GameServerContext;
 /// of the pool tick, so an AI seated this frame plans on this frame's
 /// snapshot rather than waiting a tick for its first one.
 void ServiceAISpawns(GameServerContext& ctx);
+
+/// Re-seat every AI this war acquired at runtime before it was frozen
+/// (RuntimeAIRoster.h). Called once, from the resume path in server_main, after
+/// hibernate::DoResume has applied the world and before the `--ai` slots load
+/// their runtimes — so a restored caretaker's virtual player exists at the
+/// number the restored synced state is keyed by, and its brain comes up beside
+/// the launch AIs rather than a tick later.
+///
+/// A no-op when the room has no stored seats, which is every war that never
+/// emptied a side.
+void RestoreRuntimeAISeats(GameServerContext& ctx);
