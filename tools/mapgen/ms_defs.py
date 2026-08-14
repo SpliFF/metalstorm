@@ -347,6 +347,33 @@ def feature_chain_pitch(game_dir: str, kind: str = "bridge") -> float:
     return float(found.pop())
 
 
+def feature_deck_top(game_dir: str, defname: str, kind: str = "bridge") -> float:
+    """How far a chained span's trafficable surface sits above its own y = 0.
+
+    The number that decides roads R3c (PLAN-maps.md §2j), read from the def
+    rather than from the forge layout script that authored the mesh: a feature's
+    y is clamped UP to the ground every tick (`CFeature::UpdatePosition`,
+    Feature.cpp:570) and can never be pushed down, so a unit driving on the
+    terrain under a span is exactly this far below the deck — and an earthwork
+    raises the span with the ground, leaving the gap unchanged.
+
+    Read PER DEF, unlike `feature_chain_pitch`: the pitch is a family fact set
+    in the shared `span()` posture (and one family cannot hold two), while the
+    deck heights genuinely differ — road 1.5, rail 3.8. A file-wide read here
+    would either raise on a correct file or attribute one span's deck to the
+    other.
+
+    Raises rather than defaulting, for the same reason the pitch does: a silent
+    constant here is the hardcoded copy the def exists to prevent.
+    """
+    path = os.path.join(game_dir, "features", f"{kind}s.lua")
+    tops = _read_customparam(path, "deck_top")
+    if defname not in tops:
+        raise ValueError(f"{path} declares no customparams.deck_top for "
+                         f"{defname} (declared for: {sorted(tops) or 'nothing'})")
+    return float(tops[defname])
+
+
 def verify(facts: dict[str, UnitFacts], required: list[str]) -> list[str]:
     """Problems with `required` — an unknown def, or one whose facts are unusable.
 

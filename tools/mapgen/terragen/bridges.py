@@ -37,6 +37,18 @@ drive ON the deck — they wade the ford UNDER it, which is why
 crossing this module publishes is one the map's own vehicles can already cross.
 When the `deckHeight` engine ask lands (.tasks/notes/model-integration.md), the
 crossings published here are already the right places to raise.
+
+⛔ **AND A MAP CANNOT CLOSE THAT GAP BY SHAPING GROUND** (roads R3c, measured
+2026-08-15 — PLAN-maps.md §2j). The obvious terrain answer, "raise a causeway
+whose top IS the deck", is arithmetically impossible, not merely expensive:
+`CFeature::UpdatePosition` clamps a feature's y UP to `CGround::GetHeightReal`
+every tick and never down (Feature.cpp:570), so a span standing on ground `g`
+puts its deck at `g + deck_top` (1.5 for `ms_road_bridge`, measured off the
+shipped mesh, published as `customparams.deck_top`). Raise the ground under the
+crossing by `d` and BOTH the road surface and the deck rise by `d`: the gap is
+invariant under every earthwork this module could ever plan. The map's terrain
+levers here are real but they are about the ROUTE — how deep the ford is, how
+wide, whether the road should be there at all — never about the deck.
 """
 from __future__ import annotations
 

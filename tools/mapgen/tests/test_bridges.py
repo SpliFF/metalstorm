@@ -368,5 +368,104 @@ class PublishedCrossingsWin(unittest.TestCase):
                          "a dry published crossing must fall back to the search")
 
 
+def _mesh_positions(defname: str) -> list[tuple[float, float, float]]:
+    """Every POSITION vertex of a shipped span, straight out of the glTF+bin.
+
+    Read rather than trusted: `deck_top` is the number roads R3c turns on, and
+    the only other place it exists is the forge layout script that authored the
+    mesh — which is not what the game loads.
+    """
+    import json
+    import struct
+    models = os.path.join(GAME_DIR, "models")
+    g = json.load(open(os.path.join(models, f"{defname}.gltf"), encoding="utf-8"))
+    with open(os.path.join(models, f"{defname}.bin"), "rb") as fh:
+        blob = fh.read()
+    out = []
+    for mesh in g["meshes"]:
+        for prim in mesh["primitives"]:
+            acc = g["accessors"][prim["attributes"]["POSITION"]]
+            bv = g["bufferViews"][acc["bufferView"]]
+            off = bv.get("byteOffset", 0) + acc.get("byteOffset", 0)
+            stride = bv.get("byteStride") or 12
+            out += [struct.unpack_from("<3f", blob, off + i * stride)
+                    for i in range(acc["count"])]
+    return out
+
+
+class DeckTopIsTheDefs(unittest.TestCase):
+    """The deck gap is a MODEL constant and the map has to be able to read it.
+
+    `CFeature::UpdatePosition` clamps a feature's y up to the ground and never
+    down (Feature.cpp:570), so a span standing on ground `g` decks at
+    `g + deck_top` and an earthwork raises both by the same amount — the gap
+    survives every terrain lever a generator has (PLAN-maps.md §2j). These pin
+    the two halves that could drift apart silently: what the def SAYS, and what
+    the shipped mesh IS.
+    """
+
+    def test_reads_the_shipped_deck_tops(self):
+        self.assertEqual(ms_defs.feature_deck_top(GAME_DIR, "ms_road_bridge"), 1.5)
+        self.assertEqual(ms_defs.feature_deck_top(GAME_DIR, "ms_rail_bridge"), 3.8)
+
+    def test_the_two_spans_disagree(self):
+        """Why this is per-def and not a shared `span()` posture like the pitch:
+        one number would be 2.3 elmos wrong for one of them, silently."""
+        self.assertNotEqual(ms_defs.feature_deck_top(GAME_DIR, "ms_road_bridge"),
+                            ms_defs.feature_deck_top(GAME_DIR, "ms_rail_bridge"))
+
+    def test_an_undeclared_def_raises(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "features"))
+            with open(os.path.join(d, "features", "bridges.lua"), "w") as fh:
+                fh.write("return { ms_road_bridge = { customparams = "
+                         "{ chain_pitch = '24' } } }\n")
+            with self.assertRaises(ValueError):
+                ms_defs.feature_deck_top(d, "ms_road_bridge")
+
+    def test_one_spans_deck_cannot_be_attributed_to_the_other(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "features"))
+            with open(os.path.join(d, "features", "bridges.lua"), "w") as fh:
+                # Four-space entries: `_split_top_level_entries` anchors on
+                # `^\s{4}`, so a def indented any other way is invisible to
+                # every reader in ms_defs. Every shipped def file obeys it.
+                fh.write("return {\n"
+                         "    a = { customparams = { deck_top = '1.5' } },\n"
+                         "    b = { customparams = { deck_top = '3.8' } },\n"
+                         "}\n")
+            self.assertEqual(ms_defs.feature_deck_top(d, "a"), 1.5)
+            self.assertEqual(ms_defs.feature_deck_top(d, "b"), 3.8)
+
+    def test_the_origin_is_the_pier_base(self):
+        """The premise `deck_top` is an OFFSET from.
+
+        If a span is ever re-authored with its origin AT the deck — which is
+        one of the two ways §2j can be closed — this fails, and it should:
+        every consumer of `deck_top` is then reading a number about a mesh that
+        no longer exists.
+        """
+        for defname in ("ms_road_bridge", "ms_rail_bridge"):
+            ys = [p[1] for p in _mesh_positions(defname)]
+            self.assertAlmostEqual(min(ys), 0.0, places=3, msg=defname)
+
+    def test_the_declared_deck_is_a_real_surface_in_the_mesh(self):
+        """Not just a plausible number: a full-width run of vertices at that y.
+
+        What this CANNOT tell you: which full-width surface is the deck. The
+        rail span's rail-head level (4.15) is 4.0 wide and would pass just as
+        well as its deck (3.8) — that choice is a judgement recorded in the def,
+        and this only catches a number that is nowhere in the mesh at all.
+        """
+        for defname, width in (("ms_road_bridge", 8.0), ("ms_rail_bridge", 3.5)):
+            top = ms_defs.feature_deck_top(GAME_DIR, defname)
+            at = [p for p in _mesh_positions(defname) if abs(p[1] - top) < 1e-3]
+            self.assertTrue(at, f"{defname} has no vertex at y = {top}")
+            xs = [p[0] for p in at]
+            self.assertGreaterEqual(
+                max(xs) - min(xs), width,
+                f"{defname}'s y = {top} is not a full-width deck surface")
+
+
 if __name__ == "__main__":
     unittest.main()
