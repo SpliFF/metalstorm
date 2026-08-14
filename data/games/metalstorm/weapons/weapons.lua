@@ -11,7 +11,14 @@
 --   stat_base_accuracy, stat_accuracy_falloff, stat_move_penalty,
 --   stat_height_bonus, min_volley_damage (E6 damage floor),
 --   skip_fire_strength (E6 hold-fire below this strength fraction; 0 = off),
---   targeting_cadence.
+--   targeting_cadence,
+--   stat_min_fire_chance (hold-fire floor, default 0.05 — a volley whose
+--     computed hit chance is below this is NOT fired at all: no sound, no
+--     tracer/FX, no reload cycle, no resource spend, target and aim kept, fire
+--     resumes by itself once the chance climbs back. Kills the max-range
+--     plinking stalemate. Set 0 to disable the gate for a weapon, e.g. if it
+--     is ever meant to lay deliberate suppression fire.
+--     PLAN-metalstorm-combat-fixes.md §A).
 -- STUB QUALITY: placeholder numbers, not balance.
 
 local defs = {

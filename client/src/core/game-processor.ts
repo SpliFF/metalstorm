@@ -1500,6 +1500,19 @@ function gpConnect(msg: GpInitToWorker): void {
         onVolleyOutcomes: (events) => {
             gpCombatFX?.onVolleyOutcome(events,
                 (id) => gpCtx.entityRenderer?.getEntityPosition(id) ?? null);
+            // §B (PLAN-metalstorm-combat-fixes): statistical weapons spawn no
+            // projectile, so VolleyOutcome is the only per-shot event that
+            // can engage cosmetic turret aim for them — mirrors the
+            // onProjectileFired engage call above (§16c). NOTE this is a
+            // different family from onFireOutcomes' engage: that one is
+            // Tier-C foreknowledge for BALLISTIC weapons, which do spawn a
+            // projectile. Both are "outcome" events; only this one is
+            // statistical, and only this one reaches MS MGs/ACs/mortars.
+            if (gpCtx.entityRenderer && events.length) {
+                gpEnsureClipPlayer(gpCtx.entityRenderer);
+                const now = performance.now();
+                for (const e of events) gpAimController?.onVolley(e, now);
+            }
             for (const e of events) {
                 if (e.revealAttacker)
                     postToMain({ type: 'gp:counterbatteryPing', x: e.revealX, z: e.revealZ });
