@@ -1102,6 +1102,17 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     print(f"biomes done {time.time()-t0:.0f}s ({climate}, land): "
           f"{bio.format_biome_mix(b)}")
 
+    # 8a. road surface classes (roads R1) — needs moisture, so it runs after
+    # the biome step; `polylines`/`towns`/`rp` survive the pad-pass loop above.
+    road_cls = rd.classify_roads(polylines, moist, h, 0.0, cell)
+    _m, _d, road_class = rd.rasterize_roads_classified(
+        polylines, road_cls, h.shape, cell, rp)
+    rd.carve_plaza_classes(road_class, towns, 85.0, cell)
+    _deck = max(1, int((road_class != rd.SURF_NONE).sum()))
+    print("road surfaces (%d deck cells): %s" % (_deck, ", ".join(
+        "%s %.1f%%" % (rd.SURFACE_NAMES[k], 100.0 * int((road_class == k).sum()) / _deck)
+        for k in (rd.SURF_BITUMEN, rd.SURF_DIRT, rd.SURF_MUD))))
+
     # 9. placement — same layer set as Meridian (minus its layout regions)
     excl = road_mask.copy() | (h <= 2.0) | rivers
     excl = ndimage.binary_dilation(excl, iterations=2)
@@ -1254,7 +1265,7 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     if preview_only:
         os.makedirs(out_dir, exist_ok=True)
         baker = bk.AlbedoBaker(h, slope, b, moist, road_dist, 0.0, cell, seed,
-                               stamps=stamps)
+                               stamps=stamps, road_class=road_class)
         Image.fromarray(bk.make_minimap(baker, bk.hillshade(h, cell))).save(
             os.path.join(out_dir, "preview.png"))
         print(f"PREVIEW ONLY — total {time.time()-t0:.0f}s")
@@ -1293,10 +1304,10 @@ def generate(out_dir: str, seed: int, landmass: float = 0.34, islands: int = 9,
     pkg.write_package(
         out_dir, cfg, h, slope, b, moist, road_dist, road_mask, cell,
         scratch_dir=os.environ.get("TMPDIR", "/tmp"),
-        feature_files=feature_files, stamps=stamps,
+        feature_files=feature_files, stamps=stamps, road_class=road_class,
     )
     baker = bk.AlbedoBaker(h, slope, b, moist, road_dist, 0.0, cell, seed,
-                           stamps=stamps)
+                           stamps=stamps, road_class=road_class)
     Image.fromarray(bk.make_minimap(baker, bk.hillshade(h, cell))).save(
         os.path.join(out_dir, "preview.png"))
     print(f"TOTAL {time.time()-t0:.0f}s")

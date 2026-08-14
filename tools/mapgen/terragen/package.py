@@ -41,7 +41,22 @@ class MapPackageConfig:
     water_surface_color: tuple = (0.35, 0.42, 0.50)
     water_surface_alpha: float = 0.45
     water_base_color: tuple = (0.28, 0.36, 0.43)
-    road_type_speed: float = 1.35     # terrainTypes speed multiplier on roads
+    # terrainTypes move-speed multipliers, one per road surface class.
+    #
+    # ⚠ These ship at 1.0 — today's real behaviour — and that is deliberate.
+    # Until roads R1 the emitter wrote FLAT `tankspeed = 1.35` keys while
+    # `CMapInfo::ReadTerrainTypes` (rts/Map/MapInfo.cpp) reads a NESTED
+    # `moveSpeeds` subtable with no flat fallback, so the 1.35 every terragen
+    # map has shipped was parsed by nobody and roads have never been faster
+    # than open ground in this port. R1 fixed the STRUCTURE (and pinned it in
+    # tests/test_road_surface.py); it did not turn the multiplier on, because
+    # waking a five-year-dead multiplier is a gameplay change and this lane's
+    # contract proves speed claims with measured transit times — that is R3.
+    # Do NOT read the old 1.35 as a tuned value: it was never observed doing
+    # anything, so it carries no evidence. Tune from a fresh baseline.
+    bitumen_type_speed: float = 1.0
+    dirt_type_speed: float = 1.0
+    mud_type_speed: float = 1.0
     voidwater: bool = False
     seed: int = 1
 
@@ -60,6 +75,7 @@ def write_package(
     regions_lua: str | None = None,
     feature_files: dict[str, str] | None = None,  # relpath -> content
     stamps: dict[str, np.ndarray] | None = None,  # placement.py ground stamps
+    road_class: np.ndarray | None = None,         # roads.rasterize_roads_classified
     progress=print,
 ) -> None:
     maps_dir = os.path.join(out_dir, "maps")
@@ -68,6 +84,7 @@ def write_package(
     baker = bk.AlbedoBaker(
         height, slope_deg, biome_ids, moisture, road_dist,
         cfg.water_level, cellsize, cfg.seed, stamps=stamps,
+        road_class=road_class,
     )
 
     progress("baking albedo tiles (1 texel/elmo)...")
@@ -95,12 +112,16 @@ def write_package(
     shade = bk.hillshade(height, cellsize)
     minimap = bk.make_minimap(baker, shade)
 
-    # typemap: 0 = default, 1 = road (speed bonus via terrainTypes)
+    # typemap: 0 = default, 1/2/3 = bitumen/dirt/mud (terragen.roads.SURF_*).
+    # A caller with no class raster still gets the pre-R1 0/1 map, whose
+    # entry [1] is now named "bitumen" rather than "road" — same value, same
+    # hardness class, so an old package's typemap keeps meaning what it meant.
     gh, gw = height.shape
     half_w, half_h = (gw - 1) // 2, (gh - 1) // 2
     ri = np.clip((np.arange(half_h) * 2 + 1), 0, gh - 1)
     ci = np.clip((np.arange(half_w) * 2 + 1), 0, gw - 1)
-    typemap = (road_mask[np.ix_(ri, ci)]).astype(np.uint8)
+    src = road_mask if road_class is None else road_class
+    typemap = (src[np.ix_(ri, ci)]).astype(np.uint8)
 
     metalmap = np.full((half_h, half_w), cfg.metal_value, dtype=np.uint8)
 
@@ -115,7 +136,7 @@ def write_package(
 
     progress("splat textures...")
     Image.fromarray(bk.make_splat_distr(biome_ids, slope_deg, height, cfg.water_level,
-                                        stamps=stamps)).save(
+                                        stamps=stamps, road_class=road_class)).save(
         os.path.join(maps_dir, "splat_distr.png")
     )
     Image.fromarray(bk.make_splat_detail(cfg.seed)).save(
@@ -196,18 +217,38 @@ local mapinfo = {{
         texmults = {{ {m[0]}, {m[1]}, {m[2]}, {m[3]} }},
     }},
 
-    -- typemap value 1 = road surface
+    -- typemap values are terragen.roads.SURF_*: 1 bitumen, 2 dirt, 3 mud.
+    -- movespeeds is a NESTED subtable because that is where
+    -- CMapInfo::ReadTerrainTypes looks, and it has no flat fallback.
+    -- receivetracks turns the engine's dynamic tyre-track decals on per
+    -- surface: soft ground records a passing unit, sealed bitumen does not.
     terraintypes = {{
         [0] = {{
             name = "default",
             hardness = 1.0,
-            tankspeed = 1.0, kbotspeed = 1.0, hoverspeed = 1.0, shipspeed = 1.0,
+            receiveTracks = true,
+            moveSpeeds = {{ tank = 1.0, kbot = 1.0, hover = 1.0, ship = 1.0 }},
         }},
         [1] = {{
-            name = "road",
+            name = "bitumen",
+            hardness = 1.4,
+            receiveTracks = false,
+            moveSpeeds = {{ tank = {cfg.bitumen_type_speed}, kbot = {cfg.bitumen_type_speed},
+                            hover = {cfg.bitumen_type_speed}, ship = 1.0 }},
+        }},
+        [2] = {{
+            name = "dirt",
             hardness = 1.2,
-            tankspeed = {cfg.road_type_speed}, kbotspeed = {cfg.road_type_speed},
-            hoverspeed = {cfg.road_type_speed}, shipspeed = 1.0,
+            receiveTracks = true,
+            moveSpeeds = {{ tank = {cfg.dirt_type_speed}, kbot = {cfg.dirt_type_speed},
+                            hover = {cfg.dirt_type_speed}, ship = 1.0 }},
+        }},
+        [3] = {{
+            name = "mud",
+            hardness = 0.8,
+            receiveTracks = true,
+            moveSpeeds = {{ tank = {cfg.mud_type_speed}, kbot = {cfg.mud_type_speed},
+                            hover = {cfg.mud_type_speed}, ship = 1.0 }},
         }},
     }},
 

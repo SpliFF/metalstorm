@@ -563,6 +563,7 @@ def carve_plazas(
     radius: float,
     cellsize: float,
     params: RoadParams | None = None,
+    road_class: np.ndarray | None = None,
 ) -> None:
     """Merge circular worn plazas into the road fields in-place.
 
@@ -570,6 +571,11 @@ def carve_plazas(
     is lowered so `road_dist < road_width/2` holds across the disc, which
     makes flatten_under_roads grade it level and the albedo bake paint it as
     deck with the same sharp edge + worn shoulder as the ways that meet it.
+
+    When a class raster is supplied it is carved too, and the plaza takes the
+    class the roads arriving at it already carry (the commonest inside the
+    disc, dirt if none arrive) — a plaza left at SURF_NONE would be a hole in
+    the typemap exactly where the traffic is.
     """
     p = params or RoadParams()
     H, W = road_mask.shape
@@ -587,6 +593,41 @@ def carve_plazas(
         np.minimum(road_dist[r0:r1, c0:c1], plaza_dist,
                    out=road_dist[r0:r1, c0:c1])
         road_mask[r0:r1, c0:c1] |= d <= radius
+
+    if road_class is not None:
+        carve_plaza_classes(road_class, sites, radius, cellsize)
+
+
+def carve_plaza_classes(
+    road_class: np.ndarray,
+    sites: list[tuple[float, float]],
+    radius: float,
+    cellsize: float,
+) -> None:
+    """In-place: give each plaza disc the surface the roads arriving at it
+    already carry (the commonest class inside the disc; dirt if none arrive).
+
+    Split out of `carve_plazas` because a generator that needs moisture to
+    classify only has it after the biome step, i.e. after the plazas are
+    already carved into the mask — see meridian2.py step 7b.
+    """
+    H, W = road_class.shape
+    rc = int(np.ceil(radius / cellsize)) + 2
+    for (sx, sz) in sites:
+        c = sx / cellsize; r = sz / cellsize
+        c0 = max(0, int(c) - rc); c1 = min(W, int(c) + rc + 1)
+        r0 = max(0, int(r) - rc); r1 = min(H, int(r) + rc + 1)
+        if c0 >= c1 or r0 >= r1:
+            continue
+        zz, xx = np.mgrid[r0:r1, c0:c1]
+        disc = np.hypot(xx - c, zz - r) * cellsize <= radius
+        window = road_class[r0:r1, c0:c1]
+        arriving = window[disc & (window != SURF_NONE)]
+        if arriving.size:
+            plaza_cls = np.uint8(int(np.bincount(arriving, minlength=SURF_MUD + 1).argmax()))
+        else:
+            plaza_cls = np.uint8(SURF_DIRT)
+        window[disc] = plaza_cls
 
 
 def flatten_under_roads(
@@ -609,3 +650,203 @@ def flatten_under_roads(
     t = np.clip((road_dist - half) / max(p.flatten_blend, 1e-3), 0.0, 1.0)
     w = 1.0 - t * t * (3 - 2 * t)  # smoothstep down from deck to shoulder end
     return height * (1.0 - w) + graded * w
+
+
+# ---------------------------------------------------------------------------
+# Road surface classes (roads lane R1)
+# ---------------------------------------------------------------------------
+#
+# A network is not one material. The class is what drives the albedo recipe
+# (bake.py), the baked wheel ruts, and the SMF typemap value — which is what
+# gives the engine a per-surface `receiveTracks` and per-move-class speed
+# (mapinfo `terrainTypes`, read by rts/Map/MapInfo.cpp::ReadTerrainTypes).
+#
+# The classes are ordinal on purpose: 1..3 runs sealed -> unsealed -> soft, so
+# a typemap value orders the same way the surface does.
+
+SURF_NONE = 0
+SURF_BITUMEN = 1        # sealed trunk road: broken bitumen, patches, potholes
+SURF_DIRT = 2           # graded unsealed road: gravel/earth, wheel ruts
+SURF_MUD = 3            # soft wet ground: deep ruts, standing water
+
+SURFACE_NAMES = {
+    SURF_BITUMEN: "bitumen",
+    SURF_DIRT: "dirt",
+    SURF_MUD: "mud",
+}
+
+
+@dataclass
+class SurfaceParams:
+    """How a planned network is split into surface classes.
+
+    The rules are deliberately terrain-driven rather than authored, so a
+    generator gets a plausible network for free and a map that moves its
+    towns moves its surfaces with them.
+    """
+    # The sealed network is the longest links until they account for this much
+    # of the network's total LENGTH — a length budget rather than a count or a
+    # median, because the two are wildly different answers: on Meridian Basin
+    # a median-length split seals half the links and 94 % of the deck AREA,
+    # since the links it seals are by construction the long ones. A budget
+    # says what it means ("the trunk is 40 % of the network") and holds that
+    # meaning on a map whose link lengths are distributed differently.
+    sealed_length_fraction: float = 0.40
+    # Unsealed road through wet ground is mud. Both tests are ORed: standing
+    # moisture, or freeboard so low the water table is at the surface.
+    mud_moisture: float = 0.62
+    mud_freeboard: float = 3.0     # world units above water_level
+    # A sealed road is *built*, so it stays sealed across a wet dip — the fill
+    # and the drain are part of the road. Only unsealed links go muddy.
+    seal_survives_wet: bool = True
+    # Runs shorter than this collapse into their neighbours: a two-vertex mud
+    # fleck in the middle of a dirt road is a texture artefact, not a bog.
+    min_run_len: float = 260.0     # world units
+
+
+def classify_roads(
+    polylines: list[np.ndarray],
+    moisture: np.ndarray,
+    height: np.ndarray,
+    water_level: float,
+    cellsize: float,
+    surface: SurfaceParams | None = None,
+) -> list[np.ndarray]:
+    """Assign a surface class to every vertex of every polyline.
+
+    Returns one uint8 array per polyline (same length as the polyline), with
+    values from the SURF_* set. Deterministic: no RNG, only the fields.
+    """
+    s = surface or SurfaceParams()
+    if not polylines:
+        return []
+
+    gh, gw = height.shape
+    lengths = np.array([_polyline_length(pl) for pl in polylines], dtype=np.float64)
+    sealed = _sealed_set(lengths, s.sealed_length_fraction)
+
+    out = []
+    for idx, (pl, length) in enumerate(zip(polylines, lengths)):
+        base = SURF_BITUMEN if idx in sealed else SURF_DIRT
+        cls = np.full(len(pl), base, dtype=np.uint8)
+
+        if not (s.seal_survives_wet and base == SURF_BITUMEN):
+            cc = np.clip((pl[:, 0] / cellsize).astype(np.int64), 0, gw - 1)
+            rr = np.clip((pl[:, 1] / cellsize).astype(np.int64), 0, gh - 1)
+            wet = (moisture[rr, cc] >= s.mud_moisture) | (
+                (height[rr, cc] - water_level) <= s.mud_freeboard
+            )
+            cls[wet] = SURF_MUD
+
+        _collapse_short_runs(cls, pl, s.min_run_len)
+        out.append(cls)
+    return out
+
+
+def _sealed_set(lengths: np.ndarray, fraction: float) -> set:
+    """Indices of the longest links whose lengths sum to `fraction` of the
+    network. Always at least one link (a lone road is its own trunk) and never
+    every link unless the fraction asks for it."""
+    if lengths.size == 0:
+        return set()
+    total = float(lengths.sum())
+    if total <= 0.0 or fraction <= 0.0:
+        return {int(np.argmax(lengths))}
+    order = np.argsort(-lengths, kind="stable")
+    budget = total * min(fraction, 1.0)
+    taken, acc = set(), 0.0
+    for i in order:
+        taken.add(int(i))
+        acc += float(lengths[i])
+        if acc >= budget:
+            break
+    return taken
+
+
+def _polyline_length(pl: np.ndarray) -> float:
+    if len(pl) < 2:
+        return 0.0
+    return float(np.hypot(*(pl[1:] - pl[:-1]).T).sum())
+
+
+def _collapse_short_runs(cls: np.ndarray, pl: np.ndarray, min_len: float) -> None:
+    """In-place: any run of one class shorter than `min_len` takes the class of
+    its longer neighbour (or its only neighbour at an end)."""
+    if len(cls) < 2 or min_len <= 0.0:
+        return
+    step = np.hypot(*(pl[1:] - pl[:-1]).T)
+    # length attributed to a vertex: half of each adjoining segment
+    vlen = np.zeros(len(cls))
+    vlen[:-1] += step * 0.5
+    vlen[1:] += step * 0.5
+
+    changed = True
+    while changed:
+        changed = False
+        bounds = np.flatnonzero(np.diff(cls.astype(np.int16))) + 1
+        starts = np.concatenate([[0], bounds])
+        ends = np.concatenate([bounds, [len(cls)]])
+        if starts.size < 2:
+            return
+        runs = [(a, b, float(vlen[a:b].sum())) for a, b in zip(starts, ends)]
+        for i, (a, b, ln) in enumerate(runs):
+            if ln >= min_len:
+                continue
+            prev_len = runs[i - 1][2] if i > 0 else -1.0
+            next_len = runs[i + 1][2] if i + 1 < len(runs) else -1.0
+            take = runs[i - 1] if prev_len >= next_len else runs[i + 1]
+            cls[a:b] = cls[take[0]]
+            changed = True
+            break
+
+
+def rasterize_roads_classified(
+    polylines: list[np.ndarray],
+    classes: list[np.ndarray] | None,
+    shape: tuple[int, int],
+    cellsize: float,
+    params: RoadParams | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """`rasterize_roads` plus a full-res surface-class raster.
+
+    The class raster is grown from the centreline by the SAME distance
+    transform that produces `road_dist`, so a texel's class is the class of
+    the centreline texel nearest to it and mask/class can never disagree.
+    Cells off the deck are SURF_NONE.
+    """
+    p = params or RoadParams()
+    H, W = shape
+    hit = np.zeros(shape, dtype=bool)
+    seed = np.zeros(shape, dtype=np.uint8)
+
+    for idx, line in enumerate(polylines):
+        line_cls = None
+        if classes is not None:
+            line_cls = np.asarray(classes[idx], dtype=np.uint8)
+        for i, (a, b) in enumerate(zip(line[:-1], line[1:])):
+            seg = b - a
+            length = float(np.hypot(*seg))
+            steps = max(2, int(length / (cellsize * 0.5)))
+            ts = np.linspace(0.0, 1.0, steps)
+            xs = a[0] + seg[0] * ts
+            zs = a[1] + seg[1] * ts
+            cc = np.clip((xs / cellsize).astype(np.int64), 0, W - 1)
+            rr = np.clip((zs / cellsize).astype(np.int64), 0, H - 1)
+            hit[rr, cc] = True
+            if line_cls is not None:
+                # a sample belongs to the vertex it started from; the last
+                # segment's far end takes the final vertex's class
+                seed[rr, cc] = line_cls[i]
+                if i == len(line) - 2:
+                    seed[rr[-1], cc[-1]] = line_cls[-1]
+
+    if classes is None:
+        dist = ndimage.distance_transform_edt(~hit) * cellsize
+        mask = dist <= (p.road_width * 0.5)
+        return mask, dist, np.where(mask, np.uint8(SURF_DIRT), np.uint8(SURF_NONE))
+
+    dist_cells, idxs = ndimage.distance_transform_edt(~hit, return_indices=True)
+    dist = dist_cells * cellsize
+    mask = dist <= (p.road_width * 0.5)
+    cls = np.where(mask, seed[idxs[0], idxs[1]], np.uint8(SURF_NONE)).astype(np.uint8)
+    return mask, dist, cls

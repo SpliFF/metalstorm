@@ -388,6 +388,20 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
     print(f"biomes done {time.time()-t_start:.0f}s ({climate}, land): "
           f"{bio.format_biome_mix(b)}")
 
+    # 7a. road surface classes (roads R1). Classification needs moisture, so it
+    # runs here rather than in step 6 — the polylines and the graded height are
+    # both final by now, and the class raster is grown by the same distance
+    # transform that produced road_dist, so it cannot disagree with road_mask.
+    road_cls = rd.classify_roads(polylines, moist, h, 0.0, cell)
+    _m, _d, road_class = rd.rasterize_roads_classified(
+        polylines, road_cls, h.shape, cell, rp)
+    rd.carve_plaza_classes(road_class, plaza_sites, 85.0, cell)
+    _deck = max(1, int((road_class != rd.SURF_NONE).sum()))
+    _surf_mix = ", ".join(
+        f"{rd.SURFACE_NAMES[k]} {100.0 * int((road_class == k).sum()) / _deck:.1f}%"
+        for k in (rd.SURF_BITUMEN, rd.SURF_DIRT, rd.SURF_MUD))
+    print(f"road surfaces ({_deck} deck cells): {_surf_mix}")
+
     # 7b. placement (terragen/placement.py): vegetation + boulder features,
     # scree/sand ground stamps. Stamps always run — the albedo bake and
     # splat-distr composite them (baked decals). Feature emission stays behind
@@ -535,7 +549,7 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
         from terragen import bake as bk
         os.makedirs(out_dir, exist_ok=True)
         baker = bk.AlbedoBaker(h, slope, b, moist, road_dist, 0.0, cell, seed,
-                               stamps=stamps)
+                               stamps=stamps, road_class=road_class)
         shade = bk.hillshade(h, cell)
         Image.fromarray(bk.make_minimap(baker, shade)).save(
             os.path.join(out_dir, "preview.png"))
@@ -575,14 +589,14 @@ def generate(out_dir, seed, fast=False, with_features=False, preview_only=False,
     pkg.write_package(
         out_dir, cfg, h, slope, b, moist, road_dist, road_mask, cell,
         scratch_dir=scratch, regions_lua=m1.build_regions_lua(layout),
-        feature_files=contract_files, stamps=stamps,
+        feature_files=contract_files, stamps=stamps, road_class=road_class,
     )
 
     # quick-look preview (albedo * hillshade) for iteration without the client
     from PIL import Image
     from terragen import bake as bk
     baker = bk.AlbedoBaker(h, slope, b, moist, road_dist, 0.0, cell, seed,
-                           stamps=stamps)
+                           stamps=stamps, road_class=road_class)
     shade = bk.hillshade(h, cell)
     Image.fromarray(bk.make_minimap(baker, shade)).save(os.path.join(out_dir, "preview.png"))
 
