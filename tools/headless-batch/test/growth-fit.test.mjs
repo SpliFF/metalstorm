@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
     METRICS, DEFAULT_RULING, FAILING, INCONCLUSIVE,
     seriesFromDump, fitLinear, classify, reportDump, SECONDS_PER_DAY, seedBudgets,
-    saturation,
+    saturation, reclaimCycles, reclamation,
 } from '../lib/growth-fit.mjs';
 
 const metric = (key) => METRICS.find((m) => m.key === key);
@@ -379,4 +379,123 @@ test('a tail too small to carry an error bar makes no saturation claim', () => {
     // So the ruling is whatever it was before §12 — the claim is never invented.
     assert.equal(classify(metric('rss_kb'), fitLinear(pts), undefined, DEFAULT_RULING, pts).verdict,
         classify(metric('rss_kb'), fitLinear(pts), undefined).verdict);
+});
+
+// --- §14.1 T4-1a: the two CLIENT surfaces are sawtooths, not lines ---------
+//
+// S6 (standing_orders) ramps ~1 order per churn cycle and the TTL retires the
+// oldest; S1 (param_keys) interns until 512 ids are dead and then compacts.
+// Both fit as growth over any window and neither is growing. The rule is that
+// such a series is bounded iff its PEAK ENVELOPE is.
+
+/**
+ * `cycles` run-ups from `low` to `peak`, each peak `peakStep` higher than the
+ * last. The first run-up starts at 0 so the whole-window fit slopes (otherwise
+ * `flat` rules before any shape test is reached, which is its own pass).
+ */
+function sawtooth({ cycles = 3, per = 12, low = 40, peak = 80, peakStep = 0, dayStep = 0.004 } = {}) {
+    const pts = [];
+    let d = 0;
+    for (let c = 0; c < cycles; c++) {
+        const top = peak + c * peakStep;
+        const from = c === 0 ? 0 : low + c * peakStep;
+        for (let i = 0; i < per; i++, d += dayStep)
+            pts.push({ days: d, value: from + (top - from) * (i / (per - 1)) });
+    }
+    return pts;
+}
+
+test('reclaimCycles splits on drawdowns and ignores wobble under the floor', () => {
+    const { peaks, drops } = reclaimCycles(sawtooth({ cycles: 3 }));
+    assert.equal(drops.length, 2);
+    assert.deepEqual(peaks.map((p) => p.value), [80, 80, 80]);
+    assert.deepEqual(drops.map((d) => [d.from, d.to]), [[80, 40], [80, 40]]);
+
+    // The 6-minute churn arm's S6 wobbles ±2 on ~80 as single deadlines pass.
+    const wobble = Array.from({ length: 30 }, (_, i) => ({ days: i * 0.004, value: 80 - (i % 2 ? 2 : 0) }));
+    assert.equal(reclaimCycles(wobble).drops.length, 0);
+});
+
+test('a sawtooth whose peaks are flat is reclaimed, not unexplained', () => {
+    const pts = sawtooth({ cycles: 3 });
+    // Without the series, classify rules exactly as it did before §14.
+    assert.equal(classify(metric('standing_orders'), fitLinear(pts), undefined).verdict, 'unexplained');
+
+    const r = classify(metric('standing_orders'), fitLinear(pts), undefined, DEFAULT_RULING, pts);
+    assert.equal(r.verdict, 'reclaimed');
+    assert.ok(!FAILING.has(r.verdict) && !INCONCLUSIVE.has(r.verdict), 'reclaimed is a pass');
+    assert.match(r.note, /SAWTOOTH under the standing-order TTL/);
+    assert.match(r.note, /2 reclamation\(s\)/);
+});
+
+// A leak with a collector in front of it. The reclaimer fires on schedule and
+// the surface is higher after every cycle — the failure must stand.
+test('a sawtooth whose peaks climb still fails, with the envelope quoted', () => {
+    const pts = sawtooth({ cycles: 4, peakStep: 25 });
+    const r = classify(metric('standing_orders'), fitLinear(pts), undefined, DEFAULT_RULING, pts);
+    assert.equal(r.verdict, 'unexplained');
+    assert.match(r.note, /peak envelope still rises/);
+    assert.equal(reclamation(pts, metric('standing_orders')).shape, 'peaks-rising');
+});
+
+// Measured on both real churn arms: the reclaimer is seen exactly once (S6
+// 82->72 on the TTL, S1 1049->512 on the compaction floor). Two peaks fit a
+// line exactly — the same trap `too-short` exists for — so the arm cannot rule.
+test('one observed reclamation cannot rule the envelope', () => {
+    const pts = sawtooth({ cycles: 2 });
+    const r = classify(metric('param_keys'), fitLinear(pts), undefined, DEFAULT_RULING, pts);
+    assert.equal(r.verdict, 'one-cycle');
+    assert.ok(INCONCLUSIVE.has(r.verdict), 'one-cycle is not a pass');
+    assert.ok(!FAILING.has(r.verdict), 'and not a failure either — it is a fact about the arm');
+    assert.match(r.note, /kKeyDictCompactMinDead/);
+    assert.match(r.note, /a second cycle is what would rule this/);
+
+    // The TTL's period is quoted where the mechanism has one; the compaction
+    // floor is a dead-id COUNT and has none, so nothing is invented for it.
+    assert.doesNotMatch(r.note, /period/);
+    assert.match(classify(metric('standing_orders'), fitLinear(pts), undefined, DEFAULT_RULING, pts).note,
+        /the mechanism's period is 0\.0417 sim-day/);
+});
+
+// The guard that keeps this from becoming a blind spot: "it fell once" is also
+// what a leak behind a GC looks like. Only a surface whose reclaimer is written
+// down in METRICS is eligible, and the Lua heap's oscillation is not one.
+test('a surface with no declared reclaimer is never read as a sawtooth', () => {
+    const pts = sawtooth({ cycles: 3 });
+    assert.equal(reclamation(pts, metric('lua_heap_kb')), null);
+    // The same series, one metric declared and one not: only the declared one
+    // is described by its mechanism. (The Lua heap's tail happens to fit flat
+    // here, so it rules `saturated` — a weaker claim about a shorter window,
+    // which is exactly the point: nothing was inferred about a reclaimer.)
+    const r = classify(metric('lua_heap_kb'), fitLinear(pts), undefined, DEFAULT_RULING, pts);
+    assert.notEqual(r.verdict, 'reclaimed');
+    assert.doesNotMatch(r.note, /SAWTOOTH|reclaimer/);
+});
+
+// Reclamation may only DOWNGRADE a failure, exactly as saturation may.
+test('reclamation never overrides a budget that already explains the slope', () => {
+    const pts = sawtooth({ cycles: 3 });
+    const budget = { slopePerDay: 5000, tolerance: 2000, why: 'churn ramp' };
+    assert.equal(classify(metric('standing_orders'), fitLinear(pts), budget, DEFAULT_RULING, pts).verdict, 'explained');
+});
+
+// A surface that stepped and STOPPED is better described as a step, so
+// saturation is asked first — `param_keys` on a short arm is exactly that.
+test('a step that also dipped once is still reported as a step', () => {
+    const pts = Array.from({ length: 40 }, (_, i) => ({
+        days: i * 0.01, value: i < 4 ? i * 200 : (i === 20 ? 600 : 700),
+    }));
+    assert.equal(classify(metric('param_keys'), fitLinear(pts), undefined, DEFAULT_RULING, pts).verdict, 'saturated');
+});
+
+// A ruling assembled field-by-field (growth-report.mjs did exactly this) omits
+// every knob without a CLI flag, and a comparison against `undefined` is false
+// rather than an error — so the omitted rule goes inert instead of failing.
+// Measured: the sawtooth rule did not apply through the CLI while every test
+// here passed, because the tests hand over a complete DEFAULT_RULING.
+test('a partial ruling does not silently disable the rules it omits', () => {
+    const pts = sawtooth({ cycles: 3 });
+    const partial = { sigmas: 2, minRelSlopePerDay: 0.01 };
+    assert.equal(classify(metric('standing_orders'), fitLinear(pts), undefined, partial, pts).verdict, 'reclaimed');
+    assert.equal(reclaimCycles(pts, partial).drops.length, 2);
 });

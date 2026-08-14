@@ -45,6 +45,14 @@ export const SECONDS_PER_DAY = 86400;
 // `unit` is display-only. `row` names the PLAN-long-uptime §1 row so a failing
 // line points at the argument it falsifies.
 //
+// `reclaim` declares that a surface has a RECLAIMER — a mechanism in the server
+// that periodically gives the container back — and names it. It is a
+// declaration, never an inference: a live gauge that happens to fall (the Lua
+// heap between collections) must not be read as bounded, because "it went down
+// once" is what a leak with a GC in front of it looks like too. Only a surface
+// whose reclaimer is written down here is eligible for the `reclaimed` verdict,
+// and even then it is the trend of its PEAKS that rules — see `reclamation`.
+//
 // `clock` says which axis a surface actually grows along, and it is not a
 // formatting detail — it decides whether the fitted number means anything.
 // Everything the SIM owns (params, ids, orders, the Lua heap) advances per sim
@@ -61,11 +69,13 @@ export const SECONDS_PER_DAY = 86400;
 export const METRICS = [
     { key: 'rss_kb',           path: ['growth', 'rss_kb'],           kind: 'watermark',  unit: 'kB',    row: 'S4' },
     { key: 'lua_heap_kb',      path: ['growth', 'lua_heap_kb'],      kind: 'live',       unit: 'kB',    row: 'S4' },
-    { key: 'param_keys',       path: ['growth', 'param_keys'],       kind: 'live',       unit: 'keys',  row: 'S1' },
+    { key: 'param_keys',       path: ['growth', 'param_keys'],       kind: 'live',       unit: 'keys',  row: 'S1',
+      reclaim: { by: 'the key-dictionary compaction (task 2b), which fires on the kKeyDictCompactMinDead = 512 dead-id floor — a COUNT, not a clock' } },
     { key: 'rules_params',     path: ['growth', 'rules_params'],     kind: 'live',       unit: 'params',row: 'S1/S2' },
     { key: 'unit_ids_used',    path: ['growth', 'unit_ids_used'],    kind: 'live',       unit: 'ids',   row: 'S5' },
     { key: 'unit_spawns',      path: ['growth', 'unit_spawns'],      kind: 'cumulative', unit: 'spawns',row: 'S5' },
-    { key: 'standing_orders',  path: ['growth', 'standing_orders'],  kind: 'live',       unit: 'orders',row: 'S6' },
+    { key: 'standing_orders',  path: ['growth', 'standing_orders'],  kind: 'live',       unit: 'orders',row: 'S6',
+      reclaim: { by: 'the standing-order TTL (task 2b), defaultTtlFrames = 108 000 = one SIMULATED hour', periodDays: 1 / 24 } },
     { key: 'players',          path: ['growth', 'players'],          kind: 'live',       unit: 'rows',  row: 'S12' },
     { key: 'db_bytes',         path: ['dbBytes'],                    kind: 'live',       unit: 'B',     row: 'S8', clock: 'wall' },
 ];
@@ -175,7 +185,30 @@ export const DEFAULT_RULING = {
     // counter drifting 0.1% per simulated day is not the leak this gate is
     // hunting, and a soak long enough to resolve it does not exist.
     minRelSlopePerDay: 0.01,
+    // How far a `reclaim` surface must fall below its running peak before the
+    // fall is read as its reclaimer firing rather than as ordinary movement.
+    // Measured: the 6-minute churn arm's `standing_orders` wobbles ±2 orders on
+    // an ~80-order series (2-3%) as individual deadlines pass, and its real
+    // TTL drawdown is 82 -> 70 (15%); `param_keys` compacts 1 049 -> 538 (51%).
+    // 10% sits between the two by a wide margin in both directions. A floor too
+    // low turns every sample into a "cycle" and the peak series into the raw
+    // series; too high and a slow reclaimer never registers at all.
+    reclaimDrawdownFraction: 0.1,
 };
+
+/**
+ * Fill in every ruling parameter a caller did not supply.
+ *
+ * Callers legitimately pass partial rulings (a CLI that exposes two of the
+ * knobs as flags, a test that varies one). Reading a missing knob then yields
+ * `undefined`, and an arithmetic comparison against `undefined` is `false`
+ * rather than an error — so the affected rule does not fail, it silently stops
+ * applying. Measured: growth-report.mjs assembled its ruling field-by-field and
+ * `reclaimDrawdownFraction` was undefined there, which made the sawtooth rule
+ * inert through the CLI while every unit test (which passes DEFAULT_RULING)
+ * passed.
+ */
+export const withRulingDefaults = (ruling) => ({ ...DEFAULT_RULING, ...(ruling ?? {}) });
 
 /**
  * How much of a window's TAIL is examined when asking whether a slope is still
@@ -242,6 +275,7 @@ export function lastRise(points) {
  * process never gave back and a 2σ test on a mostly-flat tail could absorb it.
  */
 export function saturation(points, metric, ruling = DEFAULT_RULING, fraction = TAIL_FRACTION) {
+    ruling = withRulingDefaults(ruling);
     const tail = tailPoints(points, fraction);
     if (tail.length < 3) return null;
     const window = fitLinear(points), tailFit = fitLinear(tail);
@@ -255,6 +289,79 @@ export function saturation(points, metric, ruling = DEFAULT_RULING, fraction = T
     const rise = lastRise(points);
     const at = rise === null ? null : (rise - (window.span > 0 ? Math.min(...points.map((p) => p.days)) : 0)) / window.span;
     return { tailFit, tailFraction: fraction, lastRiseDays: rise, lastRiseAtFraction: at, why };
+}
+
+/**
+ * Split a series into RECLAMATION CYCLES: the peak of each run-up, and the
+ * drawdowns between them.
+ *
+ * A cycle ends at the first sample that has fallen `reclaimDrawdownFraction`
+ * below the running peak since the last end; that peak is the cycle's peak, and
+ * the next cycle starts from the falling sample. The last (possibly incomplete)
+ * segment always contributes its own peak, so a series with one drawdown yields
+ * two peaks — which is exactly the case the ruling below refuses to rule on.
+ *
+ * `drops` carries `{days, from, to}` per drawdown so a verdict can quote the
+ * reclaimer being seen to fire rather than merely asserting it exists.
+ */
+export function reclaimCycles(points, ruling = DEFAULT_RULING) {
+    ruling = withRulingDefaults(ruling);
+    const peaks = [], drops = [];
+    if (points.length === 0) return { peaks, drops };
+    let peak = points[0];
+    for (const p of points) {
+        if (p.value > peak.value) { peak = p; continue; }
+        if (peak.value > 0 && p.value <= peak.value * (1 - ruling.reclaimDrawdownFraction)) {
+            peaks.push(peak);
+            drops.push({ days: p.days, from: peak.value, to: p.value });
+            peak = p;
+        }
+    }
+    peaks.push(peak);
+    return { peaks, drops };
+}
+
+/**
+ * Is this series a SAWTOOTH held down by its own reclaimer, rather than growth?
+ *
+ * `saturation` above answers "did it stop?"; this answers the other shape §14
+ * put in front of the gate, which is a surface that never stops and is bounded
+ * anyway. S6 ramps ~1 order per churn cycle and the TTL retires the oldest, so
+ * the live count settles at ≈ churn-rate × TTL; S1 interns keys until 512 are
+ * dead and then compacts. Both fit as growth over any window and neither is.
+ *
+ * **The rule is that a sawtooth is bounded if and only if its PEAKS are.** The
+ * fitted line through the raw series is a property of where in the cycle the
+ * window started and ended; the peak envelope is not. So the peaks become the
+ * series and the same flatness test rules them.
+ *
+ * Three outcomes, and the middle one is the honest answer to most real arms:
+ *
+ *   reclaimed    — ≥2 drawdowns (≥3 peaks) and the peak envelope fits flat or
+ *                  falling. The reclaimer is keeping up. A pass.
+ *   one-cycle    — the reclaimer was seen to fire, but once. Two peaks always
+ *                  fit a line exactly (the same trap `too-short` exists for),
+ *                  and one cycle cannot say whether the next peak comes back
+ *                  higher. NOT a pass, and NOT a failure: the arm is too short,
+ *                  which is a fact about the arm.
+ *   peaks-rising — the reclaimer fires and the peaks climb through it anyway.
+ *                  That is a leak with a collector in front of it, and the
+ *                  failure stands with the envelope quoted.
+ *
+ * Returns null for a metric that declares no reclaimer, or one whose reclaimer
+ * was never observed to fire inside the window — in both cases there is no
+ * claim to make and the caller's existing ruling stands untouched.
+ */
+export function reclamation(points, metric, ruling = DEFAULT_RULING) {
+    ruling = withRulingDefaults(ruling);
+    if (!metric?.reclaim || !points || points.length < 3) return null;
+    const { peaks, drops } = reclaimCycles(points, ruling);
+    if (drops.length === 0) return null;
+    if (peaks.length < 3) return { shape: 'one-cycle', peaks, drops, peakFit: null, why: null };
+    const peakFit = fitLinear(peaks);
+    const { flat, why } = flatness(peakFit, ruling);
+    if (flat || peakFit.slope < 0) return { shape: 'reclaimed', peaks, drops, peakFit, why };
+    return { shape: 'peaks-rising', peaks, drops, peakFit, why };
 }
 
 /**
@@ -272,6 +379,12 @@ export function saturation(points, metric, ruling = DEFAULT_RULING, fraction = T
  *                 stopped moving inside the arm: the last half of the window
  *                 fits flat (and for a watermark did not rise at all). A
  *                 bounded step, not a rate. Passes; see `saturation`.
+ *   reclaimed   — the whole-window slope would have failed, but the surface is
+ *                 a sawtooth under a declared reclaimer and its PEAK ENVELOPE
+ *                 is flat or falling over ≥2 cycles. Passes; see `reclamation`.
+ *   one-cycle   — the declared reclaimer was observed to fire exactly once, so
+ *                 the peak envelope is two points and cannot be ruled on. NOT
+ *                 a pass; the arm needs a longer window.
  *   explained   — sloping, and a budget entry accounts for it and is not
  *                 exceeded.
  *   over-budget — sloping, budgeted, and above the budgeted rate + tolerance.
@@ -287,6 +400,7 @@ export function saturation(points, metric, ruling = DEFAULT_RULING, fraction = T
  * §12 showed were artefacts.
  */
 export function classify(metric, fit, budget, ruling = DEFAULT_RULING, points = null) {
+    ruling = withRulingDefaults(ruling);
     // A slope is quoted per DAY on the metric's own clock, and a ladder that
     // only covered a simulated hour is reporting a 24× extrapolation off a
     // lever arm it never measured. That is legitimate — it is the only way to compare arms of
@@ -343,6 +457,48 @@ export function classify(metric, fit, budget, ruling = DEFAULT_RULING, points = 
             (metric.kind === 'watermark' ? ' with no rise at all in raw values' : ''));
     };
 
+    // The second shape §14 put in front of the gate: a surface that never
+    // stops and is bounded anyway. Consulted at the same two sites as `sat`,
+    // after it — a surface that stepped and stopped is better described as a
+    // step, and `param_keys` on a short arm is exactly that.
+    const rec = points ? reclamation(points, metric, ruling) : null;
+    const drops = () => rec.drops.map((d) => `${fmt(d.from)}->${fmt(d.to)}`).join(', ');
+    const reclaimed = () => mk('reclaimed',
+        `whole-window slope ${fmt(fit.slope)}/${clock}-day is a SAWTOOTH under ${metric.reclaim.by}: ` +
+        `${rec.drops.length} reclamation(s) (${drops()}) and the peak envelope over ${rec.peaks.length} cycles ` +
+        `is flat or falling (${rec.why}, n=${rec.peakFit.n}) — the reclaimer is keeping up`);
+    const oneCycle = () => mk('one-cycle',
+        `${metric.reclaim.by} fired ONCE inside this window (${drops()}), so the peak envelope is ` +
+        `${rec.peaks.length} points and any line through it is exact by construction — a second cycle is ` +
+        `what would rule this${Number.isFinite(metric.reclaim.periodDays)
+            ? `; the mechanism's period is ${fmt(metric.reclaim.periodDays)} ${clock}-day against this arm's ${fmt(fit.span)}`
+            : ''}`);
+    // A reclaimer that fires while the peaks climb through it is a leak with a
+    // collector in front of it. The failure stands; the envelope is quoted so
+    // the next reader does not have to re-derive it.
+    const risingNote = () => ` — its declared reclaimer (${metric.reclaim.by}) fired ${rec.drops.length}×, ` +
+        `and the peak envelope still rises at ${fmt(rec.peakFit.slope)}/${clock}-day across ${rec.peaks.length} cycles`;
+    /**
+     * The shape verdicts, in the order they may downgrade a failure — and the
+     * order is load-bearing in both places:
+     *
+     *  - `reclaimed` outranks `saturated` because a ruled sawtooth's tail
+     *    often DOES fit flat (it ends wherever the last cycle left it), and
+     *    `saturated`'s explanation — "the growth is in the opening ramp" — is
+     *    then simply false. The more specific claim, with the mechanism named
+     *    and its cycles counted, is the one worth reporting.
+     *  - `saturated` outranks `one-cycle`, because a surface that stopped
+     *    moving is a bounded step whatever happened before it stopped, and
+     *    downgrading that to "cannot rule" over one dip would lose a pass the
+     *    gate already had.
+     */
+    const shaped = () => {
+        if (rec?.shape === 'reclaimed') return reclaimed();
+        if (sat) return saturated();
+        if (rec?.shape === 'one-cycle') return oneCycle();
+        return null;
+    };
+
     if (flat) {
         return mk('flat', metric.kind === 'watermark'
             ? `${why} — but a watermark can only rise, so flat here means "never grew", not "returns memory"`
@@ -389,8 +545,11 @@ export function classify(metric, fit, budget, ruling = DEFAULT_RULING, points = 
         return mk('too-short', `window ${fmt(fit.span)} ${clock}-day is under ${(SEED_SPAN_FLOOR_FRACTION * 100).toFixed(0)}% of the budget's ${fmt(basis)}-${clock}-day basis — the rule that refuses this arm as a seed refuses it as a verdict`);
 
     if (!budget || !budget.why) {
-        if (sat) return saturated();
-        return mk('unexplained', budget ? 'budget entry has no `why`; §2 requires the slope be EXPLAINED, not merely allowed' : 'no budget entry accounts for this slope');
+        const shape = shaped();
+        if (shape) return shape;
+        return mk('unexplained',
+            (budget ? 'budget entry has no `why`; §2 requires the slope be EXPLAINED, not merely allowed' : 'no budget entry accounts for this slope')
+            + (rec?.shape === 'peaks-rising' ? risingNote() : ''));
     }
 
     const tol = budget.tolerance ?? Math.abs(budget.slopePerDay) * 0.25;
@@ -398,8 +557,10 @@ export function classify(metric, fit, budget, ruling = DEFAULT_RULING, points = 
         // Checked AFTER the budget, so a licensed surface keeps reporting
         // `explained` and its number keeps being compared: a step that fits
         // under its own budget is not news. Only a breach gets the second look.
-        if (sat) return saturated();
-        return mk('over-budget', `${fmt(fit.slope)}/day vs budget ${fmt(budget.slopePerDay)} ±${fmt(tol)} — ${budget.why}`);
+        const shape = shaped();
+        if (shape) return shape;
+        return mk('over-budget', `${fmt(fit.slope)}/day vs budget ${fmt(budget.slopePerDay)} ±${fmt(tol)} — ${budget.why}`
+            + (rec?.shape === 'peaks-rising' ? risingNote() : ''));
     }
     return mk('explained', `${fmt(fit.slope)}/day within budget ${fmt(budget.slopePerDay)} ±${fmt(tol)} — ${budget.why}`);
 }
@@ -407,7 +568,7 @@ export function classify(metric, fit, budget, ruling = DEFAULT_RULING, points = 
 /** Verdicts that fail the soak gate. */
 export const FAILING = new Set(['unexplained', 'over-budget']);
 /** Verdicts that mean the run could not rule — reported, but not a pass. */
-export const INCONCLUSIVE = new Set(['no-samples', 'no-signal', 'too-short']);
+export const INCONCLUSIVE = new Set(['no-samples', 'no-signal', 'too-short', 'one-cycle']);
 
 export function fmt(v) {
     if (!Number.isFinite(v)) return 'n/a';

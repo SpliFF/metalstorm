@@ -86,10 +86,15 @@ function renderArm(arm) {
 
     const w = Math.max(...METRICS.map((m) => m.key.length));
     for (const r of results) {
-        // `saturated` is a pass, but it is not the same fact as `flat` or
-        // `explained` — it says a surface stepped and stopped — so it gets its
-        // own mark rather than disappearing into the ok column.
-        const mark = FAILING.has(r.verdict) ? 'FAIL' : INCONCLUSIVE.has(r.verdict) ? '????' : r.verdict === 'saturated' ? 'STEP' : ' ok ';
+        // `saturated` and `reclaimed` are passes, but neither is the same fact
+        // as `flat` or `explained` — one says a surface stepped and stopped,
+        // the other that it never stops and its reclaimer keeps up — so each
+        // gets its own mark rather than disappearing into the ok column.
+        const mark = FAILING.has(r.verdict) ? 'FAIL'
+            : INCONCLUSIVE.has(r.verdict) ? '????'
+            : r.verdict === 'saturated' ? 'STEP'
+            : r.verdict === 'reclaimed' ? 'SAW '
+            : ' ok ';
         const base = fmt(r.fit.base);
         const slope = fmt(r.fit.slope);
         lines.push(
@@ -118,9 +123,16 @@ async function main() {
         process.exit(2);
     }
 
+    // Spread the defaults rather than listing the two flags have: a ruling
+    // assembled field-by-field silently drops every parameter that has no CLI
+    // flag, and the reader sees a ruling that ran with `undefined` where a
+    // default was meant to be. That is not hypothetical — `reclaimDrawdownFraction`
+    // arrived that way and the sawtooth rule was inert through this entry point
+    // (and only this one) while its unit tests passed.
     const ruling = {
-        sigmas: values.sigmas ? Number(values.sigmas) : DEFAULT_RULING.sigmas,
-        minRelSlopePerDay: values['min-rel-slope'] ? Number(values['min-rel-slope']) : DEFAULT_RULING.minRelSlopePerDay,
+        ...DEFAULT_RULING,
+        ...(values.sigmas ? { sigmas: Number(values.sigmas) } : {}),
+        ...(values['min-rel-slope'] ? { minRelSlopePerDay: Number(values['min-rel-slope']) } : {}),
     };
     const budgets = values.budgets ? JSON.parse(await readFile(path.resolve(values.budgets), 'utf8')) : {};
 
